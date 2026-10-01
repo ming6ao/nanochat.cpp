@@ -1,0 +1,129 @@
+# Execution sandbox and resource governance
+
+Every long-running or agent-launched process — training, eval, GPU tests,
+dev-kernel tests, benchmarks — runs through `tools/sandbox.sh`, which applies a
+named resource **profile** using cgroup v2. This is an execution concern, not a
+compute concern: it never appears in `kernels.h`, `tensor.h`, `config.h`, or
+`model.h`, and nothing in `src/` links against it.
+
+## Mechanism (WSL2, unprivileged)
+
+- **Primary:** `systemd-run --user --scope -p <props> --`.
+  Gives `MemoryHigh`/`MemoryMax`/`MemorySwapMax`, `CPUQuota`, `TasksMax`, and
+  `RuntimeMaxSec`, with correct exit-code and signal propagation. No root, no
+  container runtime, no new dependency.
+- **CPU pinning:** `taskset` (`sched_setaffinity`). The `cpuset` controller is
+  **not** delegated to the user manager on this WSL image, so `AllowedCPUs=` is
+  silently ignored and must not be relied on.
+- **Hard backstops:** `prlimit --core=0` and an optional `RuntimeMaxSec`.
+  `RLIMIT_NPROC` is deliberately left alone — it is per-UID host-wide and would
+  break unrelated agent processes; `TasksMax` is the per-cgroup fork-bomb
+  guard instead.
+- **Optional isolation:** `unshare --user --map-root-user --mount --pid --net
+  --mount-proc` for untrusted runs. Verified working unprivileged. GPU profiles
+  that use it must bind `/dev/nvidia*` into the mount namespace; GPUs need no
+  network, so `--net` is safe there.
+
+## Budget model
+
+The host is 12 vCPU / 7.7 GiB under WSL2. The sandbox budget reserves headroom
+for WSL itself, systemd, the Bazel server, and the agent shells: **≤ 8 CPUs and
+≤ 6 GiB for all nanochat work combined.**
+
+Two tiers of limit:
+
+1. **Per-job profile** — one cgroup per launch, from `tools/sandbox/profiles.conf`.
+2. **Aggregate slice** — `~/.config/systemd/user/nanochat.slice` with its own
+   `MemoryMax`/`CPUQuota`, so several concurrent T0 jobs cannot add up past the
+   host budget even if each is individually small.
+
+`MemoryHigh` (reclaim) sits below `MemoryMax` (OOM), and `MemorySwapMax=0` keeps
+OOM deterministic instead of a slow swap death.
+
+## Install
+
+```bash
+mkdir -p ~/.config/systemd/user
+cp tools/sandbox/nanochat.slice ~/.config/systemd/user/
+systemctl --user daemon-reload
+```
+
+If the slice is not installed, launches still work but only get per-profile
+limits, with no aggregate ceiling.
+
+## Profiles
+
+| Profile | CPUQuota | Mem high/max | pids | affinity | notes |
+|---|---|---|---|---|---|
+| `t0-cpu` | 200% | 1.5G / 2G | 128 | 0-1 | default CPU tests, oracle-on-CPU |
+| `t1-gpu` | 200% | 2G / 3G | 128 | 0-1 | tiny kernel tests, `B=2,T=8` |
+| `t2-parity` | 800% | 5G / 6G | 256 | 0-7 | exclusive, GPU broker held |
+| `t3-bench` | 1000% | 5G / 6G | 256 | 0-11 | exclusive, native Linux for Nsight |
+| `train` | 800% | 5G / 6G | 512 | 0-7 | `RuntimeMaxSec` optional |
+| `eval` | 400% | 3G / 4G | 128 | 0-3 | forward only |
+
+The profile also exports thread-count env (`OMP_NUM_THREADS`,
+`NANOCHAT_NUM_THREADS`) matching `CPUQuota`, because cuBLAS and the OpenMP CPU
+backend otherwise spawn 12 workers and thrash. The cgroup is the ceiling; the
+env is the polite hint. The defaults assume the 12 vCPU / 7.7 GiB host; edit
+`tools/sandbox/profiles.conf` for other machines.
+
+## Invocation contract
+
+```
+tools/sandbox.sh [--profile NAME] [--no-slice] [--] <command...>
+```
+
+`tools/gpu.sh` is a thin wrapper: it acquires the exclusive GPU lock and runs
+the `nvidia-smi` gate, then calls `sandbox.sh` with a GPU profile. The broker's
+lock serializes **all** heavy jobs, not only GPU ones, because RAM and CPU are
+also single-host resources.
+
+```bash
+# CPU test / oracle on CPU (default profile).
+tools/sandbox.sh -- ./bazel-bin/.../rms_norm_test
+
+# Explicit profile, custom command after --.
+tools/sandbox.sh --profile=train -- ./bazel-bin/train/train_main --config d8
+
+# GPU work: broker acquires the lock, then applies a GPU profile.
+tools/gpu.sh --profile=t1-gpu -- ./bazel-bin/.../rms_norm_dev
+
+# Escape the aggregate slice (benchmarks that want the whole host).
+tools/sandbox.sh --no-slice --profile=t3-bench -- ./bench
+```
+
+## Bazel
+
+Test processes are children of the long-lived Bazel server, so wrapping the
+`bazel` client does not cap them. Two supported approaches:
+
+- **GPU / `manual` targets** already run with `--spawn_strategy=local
+  --no-sandbox --local_test_jobs=1`, so the test process can reach the user
+  manager directly:
+  `bazel test //... --test_tag_filters=gpu --run_under='tools/sandbox.sh --profile=t1-gpu --'`.
+- **Hermetic CPU tests:** start the Bazel server inside a scope, using a
+  separate output root, so every test process inherits the cgroup:
+  `systemd-run --user --scope -p MemoryMax=6G --slice=nanochat.slice -- bazel --output_user_root=/tmp/nanochat-bazel test //... -gpu`.
+
+## WSL2 caveats
+
+- `systemd-run` as **root** fails ("Interactive authentication required"); only
+  `--user` works. Do not design for system-level cgroups here.
+- **cpuset is not delegated** to the user manager in this WSL image, so
+  `AllowedCPUs=` is silently ignored. Use `taskset`.
+- `MemorySwapMax=0` matters: the 2 GiB swap otherwise turns an OOM into a long
+  stall.
+- `RLIMIT_NPROC` is intentionally not set: it is per-UID host-wide and would
+  break unrelated agent processes. `TasksMax` is the per-cgroup guard.
+- The outermost guard is `.wslconfig` (`[wsl2] memory=8GB`, `processors=10`),
+  which caps the whole distro independent of any script.
+- GPU VRAM is not a cgroup resource. A CUDA OOM still takes the card; VRAM
+  budgeting stays with the broker's single-job rule and tiny-shape convention.
+- Profile on native Linux: CUPTI is unavailable under WSL2.
+
+## Deliberately not used
+
+No Docker/Podman/bwrap/firejail. The kernel already provides cgroup v2 and user
+namespaces, and a container runtime would be a new third-party dependency and
+an image to maintain for no isolation we actually need.

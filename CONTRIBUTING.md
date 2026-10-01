@@ -1,0 +1,50 @@
+# Contributing
+
+This is a from-scratch, small-surface codebase. The goal is that the mainline
+stays readable enough to audit in one sitting, so changes should keep it that
+way. For how multiple agents share the single host, see [AGENTS.md](AGENTS.md);
+this file covers code conventions and the definition of done for a human
+contributor.
+
+## Style
+
+- Project: `nanochat.cpp`. Namespace: `nanochat`.
+- C++20. Host code in `.cc`/`.h`; CUDA in `.cu`; device helpers in `.cuh`.
+- **Google C++ Style Guide**, enforced with `clang-format --style=Google`
+  (80 columns, 2-space indent). CUDA follows the same conventions.
+
+| Element | Convention | Example |
+|---|---|---|
+| Files | `lower_snake.cc/.h` | `rms_norm.cu`, `model.h` |
+| Namespace | `lower_snake` | `nanochat`, `nanochat::kernels`, `nanochat::cuda` |
+| Types | `PascalCase` | `class Model`, `struct Config`, `enum class DType` |
+| Functions | `PascalCase` | `TrainStep()`, `RmsNormForward()` |
+| Accessors | `snake_case` | `seq_len()`, `set_lr()` |
+| Variables | `snake_case` | `batch_size`, `num_layers` |
+| Members | `snake_case_` | `num_layers_`, `workspace_` |
+| Constants | `kPascalCase` | `kSoftcap`, `kRopeBase` |
+| Enum values | `kPascalCase` | `DType::kFp32` |
+| Device kernels | `PascalCaseKernel` | `__global__ void RmsNormKernel(...)` |
+| Macros | `NANOCHAT_*` | `NANOCHAT_CUDA_CHECK(x)`, `NANOCHAT_CHECK(cond)` |
+| Guards | `NANOCHAT_PATH_FILE_H_` (or `#pragma once`) | `NANOCHAT_KERNELS_H_` |
+| Errors | no exceptions; fail fast | `NANOCHAT_CHECK(cond) << "msg"` |
+
+CUDA builds use `-fno-exceptions`. Prefer `std::span`, `constexpr`,
+`[[nodiscard]]`, `std::unique_ptr`. No third-party header-only libraries unless
+they ship with the CUDA toolkit.
+
+## Definition of done
+
+The canonical checklist — build, CPU tests, small-shape GPU correctness,
+finite-difference checks, oracle parity, and formatting — is in
+[docs/testing.md](docs/testing.md). GPU runs must go through the sandbox
+gateway; see [docs/sandbox.md](docs/sandbox.md).
+
+## Where to change what
+
+- The backend seam is [docs/kernels.md](docs/kernels.md). Adding hardware means
+  a new `backends/<x>/`; see [docs/backends.md](docs/backends.md).
+- The public model API and the four graphs are [docs/model.md](docs/model.md).
+- Design decisions and the invariants that constrain them live in
+  [DESIGN.md](DESIGN.md). Keep frozen headers `nanochat/{kernels,tensor,config,
+  model}.h` architect-owned, and prefer additive changes.

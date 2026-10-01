@@ -1,0 +1,14 @@
+[Unit]
+Description=nanochat aggregate resource budget
+
+[Slice]
+# Aggregate ceiling for all concurrent nanochat jobs. Individual launches get a
+# per-profile budget (profiles.conf); this is the hard sum. Install with:
+#   mkdir -p ~/.config/systemd/user
+#   cp tools/sandbox/nanochat.slice ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+MemoryHigh=5G
+MemoryMax=6G
+MemorySwapMax=0
+CPUQuota=1000%
+TasksMax=1024
