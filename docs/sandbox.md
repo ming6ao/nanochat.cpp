@@ -68,43 +68,76 @@ backend otherwise spawn 12 workers and thrash. The cgroup is the ceiling; the
 env is the polite hint. The defaults assume the 12 vCPU / 7.7 GiB host; edit
 `tools/sandbox/profiles.conf` for other machines.
 
-## Invocation contract
+## Entry point
 
-```
-tools/sandbox.sh [--profile NAME] [--no-slice] [--] <command...>
-```
-
-`tools/gpu.sh` is a thin wrapper: it acquires the exclusive GPU lock and runs
-the `nvidia-smi` gate, then calls `sandbox.sh` with a GPU profile. The broker's
-lock serializes **all** heavy jobs, not only GPU ones, because RAM and CPU are
-also single-host resources.
+Use `tools/nanochat` for every run. It chooses the profile, applies the
+sandbox, acquires the GPU broker, and wires the Bazel test wrapper.
 
 ```bash
-# CPU test / oracle on CPU (default profile).
-tools/sandbox.sh -- ./bazel-bin/.../rms_norm_test
+tools/nanochat build                  # bazel build //...
+tools/nanochat test                   # all non-GPU tests, each sandboxed
+tools/nanochat test --gpu <target>    # GPU tests, broker held for the suite
+tools/nanochat check                  # build, then CPU tests
+tools/nanochat train -- <binary> ...  # profile=train
+tools/nanochat eval  -- <binary> ...  # profile=eval
+tools/nanochat bench -- <binary> ...  # profile=t3-bench
+tools/nanochat verify -- <binary> ... # profile=t2-parity
+tools/nanochat run <profile> -- <cmd> # any profile
+```
 
-# Explicit profile, custom command after --.
+`tools/nanochat help` lists the commands.
+
+### Lower-level scripts
+
+These are the pieces the entry point uses; call them directly only when you
+need to. `tools/gpu.sh` takes the exclusive GPU lock and runs the `nvidia-smi`
+gate; `tools/sandbox.sh` applies the cgroup budget. The broker's lock serializes
+all heavy jobs, not only GPU ones, because RAM and CPU are also single-host
+resources.
+
+```bash
+# A single binary under a profile.
 tools/sandbox.sh --profile=train -- ./bazel-bin/train/train_main --config d8
 
-# GPU work: broker acquires the lock, then applies a GPU profile.
+# GPU binary: broker acquires the lock, then applies a GPU profile.
 tools/gpu.sh --profile=t1-gpu -- ./bazel-bin/.../rms_norm_dev
 
 # Escape the aggregate slice (benchmarks that want the whole host).
 tools/sandbox.sh --no-slice --profile=t3-bench -- ./bench
 ```
 
+## Runtime guard
+
+`tools/sandbox.sh` exports `NANOCHAT_SANDBOX=<profile>`. Executables call
+`nanochat::RequireSandboxOrDie(<task>)` at startup; if the sentinel is absent
+and `NANOCHAT_ALLOW_UNSANDBOXED` is not set, they print the corrective command
+and exit non-zero. This is the guarantee: a binary launched outside the entry
+point fails instead of running unbounded. The guard is declared in
+`include/nanochat/sandbox.h`.
+
+## Verification
+
+Before running the command, `tools/sandbox/verify.sh` reads `memory.max`,
+`cpu.max`, `pids.max`, and the CPU affinity back from the process cgroup and
+exits non-zero if they do not match the requested profile. A budget that was
+silently not applied is treated as a failure, not as a sandboxed run. Each
+launch is logged to `/tmp/nanochat-sandbox.log`.
+
 ## Bazel
 
 Test processes are children of the long-lived Bazel server, so wrapping the
-`bazel` client does not cap them. Two supported approaches:
+`bazel` client does not cap them. `tools/nanochat test` handles this by passing
+`--run_under='tools/sandbox.sh --profile=… --'`, which sandboxes each test
+action, together with `--spawn_strategy=local`, which is required so the
+wrapper can reach the systemd user manager and `/sys/fs/cgroup`.
 
-- **GPU / `manual` targets** already run with `--spawn_strategy=local
-  --no-sandbox --local_test_jobs=1`, so the test process can reach the user
-  manager directly:
-  `bazel test //... --test_tag_filters=gpu --run_under='tools/sandbox.sh --profile=t1-gpu --'`.
-- **Hermetic CPU tests:** start the Bazel server inside a scope, using a
-  separate output root, so every test process inherits the cgroup:
-  `systemd-run --user --scope -p MemoryMax=6G --slice=nanochat.slice -- bazel --output_user_root=/tmp/nanochat-bazel test //... -gpu`.
+```bash
+tools/nanochat test                 # --test_tag_filters=-gpu, per-test sandbox
+tools/nanochat test --gpu <target>  # broker lock held, per-test sandbox
+```
+
+Bazel's own filesystem sandbox is disabled for these runs, so the resource
+sandbox and the test's own hermeticity are what bound a run.
 
 ## WSL2 caveats
 

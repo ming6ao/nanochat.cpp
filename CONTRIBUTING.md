@@ -35,10 +35,12 @@ they ship with the CUDA toolkit.
 
 ## Definition of done
 
-The canonical checklist — build, CPU tests, small-shape GPU correctness,
-finite-difference checks, oracle parity, and formatting — is in
-[docs/testing.md](docs/testing.md). GPU runs must go through the sandbox
-gateway; see [docs/sandbox.md](docs/sandbox.md).
+Run `tools/nanochat check` (build plus CPU tests), and `tools/nanochat test
+--gpu <target>` for small-shape GPU correctness. The full checklist, including
+finite-difference checks, oracle parity, and formatting, is in
+[docs/testing.md](docs/testing.md). Never call `bazel test` or a test binary
+directly; the entry point is what applies the sandbox. See
+[docs/sandbox.md](docs/sandbox.md).
 
 ## Where to change what
 

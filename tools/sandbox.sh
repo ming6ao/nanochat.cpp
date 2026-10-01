@@ -5,8 +5,8 @@
 #
 # Applies a cgroup v2 budget (RAM, CPU, pids, wall clock) through the
 # unprivileged systemd user manager, plus CPU affinity and hard rlimits. No
-# root and no container runtime are involved. See tools/sandbox/README.md and
-# DESIGN.md section 15.
+# root and no container runtime are involved. The limits are read back and
+# verified before the command runs. See tools/nanochat and docs/sandbox.md.
 set -euo pipefail
 
 here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -49,6 +49,21 @@ done
 
 sandbox_profile "$profile"
 
+# Make sure the aggregate ceiling exists so several concurrent jobs cannot add
+# up past the host budget. Idempotent; a missing slice is a warning, not fatal.
+if (( use_slice )); then
+  slice_src="$here/sandbox/nanochat.slice"
+  slice_dst="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/nanochat.slice"
+  if [[ ! -e "$slice_dst" && -f "$slice_src" ]]; then
+    mkdir -p "$(dirname "$slice_dst")"
+    if cp "$slice_src" "$slice_dst" && systemctl --user daemon-reload >/dev/null 2>&1; then
+      echo "sandbox: installed aggregate slice at $slice_dst" >&2
+    else
+      echo "sandbox: warning: could not install $slice_dst; no aggregate ceiling" >&2
+    fi
+  fi
+fi
+
 props=(
   -p "MemoryHigh=$SB_MEM_HIGH"
   -p "MemoryMax=$SB_MEM_MAX"
@@ -79,6 +94,8 @@ done
 (( nthreads > 0 )) || nthreads=1
 export OMP_NUM_THREADS=$nthreads
 export NANOCHAT_NUM_THREADS=$nthreads
+# Sentinel read by RequireSandboxOrDie(); see include/nanochat/sandbox.h.
+export NANOCHAT_SANDBOX="$profile"
 
 # RLIMIT_NPROC is deliberately not set: it is per-UID across the whole host, so
 # a small value would break unrelated agent processes. TasksMax (per-cgroup) is
@@ -86,4 +103,5 @@ export NANOCHAT_NUM_THREADS=$nthreads
 exec systemd-run --user --scope --quiet --same-dir "${props[@]}" -- \
   taskset -c "$SB_CPUS" \
   prlimit --core=0 -- \
+  "$here/sandbox/verify.sh" "$SB_MEM_MAX" "$SB_QUOTA" "$SB_CPUS" "$SB_PIDS" -- \
   "$@"

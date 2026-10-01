@@ -18,15 +18,26 @@ tested on CPU. All tiers run under a resource profile; see
 
 Every workstream must pass, in order:
 
-1. `bazel build //...` — no warnings.
-2. `bazel test //... --test_tag_filters=-gpu` — CPU tests (fast, hermetic).
-3. `bazel test //<family>:<family>_gpu_test` — small-shape GPU correctness.
+1. `tools/nanochat build` — no warnings.
+2. `tools/nanochat test` — CPU tests.
+3. `tools/nanochat test --gpu <target>` — small-shape GPU correctness.
 4. Finite-difference gradient check (kernel families with a backward).
 5. Oracle fixture match within the backend tolerance.
 6. `clang-format` clean.
 
 A workstream is not done until 1–6 pass on the **CPU** backend and at least
 small-shape GPU correctness passes.
+
+## How tests are sandboxed
+
+`tools/nanochat test` runs Bazel with
+`--run_under='tools/sandbox.sh --profile=… --'`, so every test action gets its
+own cgroup, and forces `--spawn_strategy=local` so the wrapper can reach the
+systemd user manager. GPU suites hold the broker lock for the whole invocation
+with `tools/gpu.sh --lock-only`. Sandboxing per test action means the result
+does not depend on whether a Bazel server is already running. The trade-off is
+that Bazel's own filesystem sandbox is disabled for these runs; the resource
+sandbox is the priority. See [sandbox.md](sandbox.md).
 
 ## Oracle fixtures
 

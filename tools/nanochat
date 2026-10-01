@@ -1,0 +1,139 @@
+#!/usr/bin/env bash
+# nanochat — the single execution entry point.
+#
+# usage: tools/nanochat <command> [args...]
+#
+# Every test, training, eval, benchmark, and verification run goes through here
+# so the resource sandbox, the GPU broker, and the Bazel test wiring are chosen
+# once and cannot be assembled incorrectly. Run `tools/nanochat help` for the
+# command list. See docs/sandbox.md and docs/testing.md.
+set -euo pipefail
+
+here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+root=$(cd -- "$here/.." && pwd)
+sandbox="$here/sandbox.sh"
+broker="$here/gpu.sh"
+
+usage() {
+  cat <<'EOF'
+tools/nanochat <command> [args...]
+
+  build                      bazel build //... (not sandboxed; see docs)
+  test [--gpu] [targets...]  run tests; every test is sandboxed per action
+  check [--gpu]              build, then CPU tests (and GPU tests with --gpu)
+  run <profile> -- <cmd...>  run a command under a sandbox profile
+  train -- <cmd...>          alias for: run train -- <cmd...>
+  eval  -- <cmd...>          alias for: run eval  -- <cmd...>
+  bench -- <cmd...>          alias for: run t3-bench -- <cmd...>
+  verify -- <cmd...>         alias for: run t2-parity -- <cmd...>
+  gpu [--profile P] -- <cmd> acquire the GPU broker, then run
+  help                       this message
+
+Profiles: t0-cpu t1-gpu t2-parity t3-bench train eval
+Profile budgets: tools/sandbox/profiles.conf
+EOF
+}
+
+die() {
+  echo "nanochat: $*" >&2
+  exit 2
+}
+
+run_profile() { # profile [--] cmd...
+  local profile=$1
+  shift
+  [[ ${1:-} == "--" ]] && shift
+  (( $# )) || die "no command given; use: tools/nanochat run $profile -- <cmd...>"
+  exec "$sandbox" --profile "$profile" -- "$@"
+}
+
+(( $# )) || {
+  usage
+  exit 2
+}
+command=$1
+shift
+
+case "$command" in
+  help | -h | --help)
+    usage
+    ;;
+
+  build)
+    # Builds are bounded by Bazel's own resource flags, and the long-lived
+    # Bazel server does not belong in a per-invocation cgroup.
+    exec bazel build //... "$@"
+    ;;
+
+  test)
+    gpu=0
+    targets=()
+    while (( $# )); do
+      case "$1" in
+        --gpu)
+          gpu=1
+          shift
+          ;;
+        *)
+          targets+=("$1")
+          shift
+          ;;
+      esac
+    done
+    (( ${#targets[@]} )) || targets=(//...)
+    if (( gpu )); then
+      profile=t1-gpu
+      tag_filter=gpu
+    else
+      profile=t0-cpu
+      tag_filter=-gpu
+    fi
+    # --run_under sandboxes each test action; --spawn_strategy=local is required
+    # so the wrapper can reach the systemd user manager and /sys/fs/cgroup.
+    bazel_args=(
+      "${targets[@]}"
+      "--test_tag_filters=$tag_filter"
+      "--run_under=$sandbox --profile=$profile --"
+      --spawn_strategy=local
+    )
+    if (( gpu )); then
+      # Hold the single-GPU lock for the whole suite.
+      exec "$broker" --lock-only --profile "$profile" -- bazel test "${bazel_args[@]}"
+    else
+      exec bazel test "${bazel_args[@]}"
+    fi
+    ;;
+
+  check)
+    gpu=0
+    [[ ${1:-} == "--gpu" ]] && {
+      gpu=1
+      shift
+    }
+    "$0" build
+    "$0" test
+    if (( gpu )); then
+      "$0" test --gpu
+    fi
+    ;;
+
+  run)
+    (( $# )) || die "run needs a profile"
+    profile=$1
+    shift
+    run_profile "$profile" "$@"
+    ;;
+
+  train) run_profile train "$@" ;;
+  eval) run_profile eval "$@" ;;
+  bench) run_profile t3-bench "$@" ;;
+  verify) run_profile t2-parity "$@" ;;
+
+  gpu)
+    exec "$broker" "$@"
+    ;;
+
+  *)
+    die "unknown command '$command' (try: tools/nanochat help)"
+    ;;
+esac

@@ -29,18 +29,22 @@ Status: design. Nothing built yet.
 
 ```bash
 # Build everything.
-bazel build //...
+tools/nanochat build
 
-# CPU tests: fast and hermetic.
-bazel test //... --test_tag_filters=-gpu
+# All CPU tests. Every test runs under the resource sandbox.
+tools/nanochat check
 
-# One GPU correctness test, through the sandbox gateway.
-tools/gpu.sh --profile=t1-gpu -- ./bazel-bin/.../rms_norm_dev
+# One GPU correctness test; the broker serializes access to the card.
+tools/nanochat test --gpu //dev/kernels:rms_norm_gpu_test
+
+# Training and eval also go through the entry point.
+tools/nanochat train -- ./bazel-bin/src/train_main --config d8
 ```
 
-See [docs/build.md](docs/build.md) for toolchains and flags, and
-[docs/sandbox.md](docs/sandbox.md) for the host resource limits every job runs
-under.
+`tools/nanochat help` lists all commands. See [docs/build.md](docs/build.md) for
+toolchains and flags, [docs/testing.md](docs/testing.md) for the test tiers and
+Definition of Done, and [docs/sandbox.md](docs/sandbox.md) for the resource
+budgets every job runs under.
 
 ## Repository layout
 

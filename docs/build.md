@@ -9,7 +9,7 @@ nanochat.cpp/
   README.md  DESIGN.md  AGENTS.md  CONTRIBUTING.md
   docs/                        # reference and how-to
   include/nanochat/
-    config.h  tensor.h  kernels.h  model.h  optim.h  data.h
+    config.h  tensor.h  kernels.h  model.h  optim.h  data.h  sandbox.h
     tokenizer.h  dataloader.h  rand.h  sampler.h  scheduler.h  logger.h  mfu.h
   src/
     ops.cc  model.cc  generate.cc  optim.cc  train.cc  data.cc  eval.cc
@@ -23,8 +23,10 @@ nanochat.cpp/
   dev/kernels/                 # standalone test+benchmark per kernel
   tests/oracle_test.cc  tests/debug_state.bin
   tools/
+    nanochat                   # the single execution entry point
     gpu.sh  sandbox.sh         # broker + sandboxed launcher
     sandbox/profiles.conf      # per-profile cgroup budgets
+    sandbox/verify.sh          # read-back check of the applied limits
     sandbox/nanochat.slice     # aggregate user-slice budget (drop-in)
     sandbox/README.md
   data/*.bin
@@ -39,12 +41,9 @@ settings select backend/precision/arch; `select()` handles linking.
 - `.bazelrc` sets `--@rules_cuda//cuda:archs=sm_61` (or `sm_75`).
 - `CUDA_HOME=/usr` on this machine (no `/usr/local/cuda`).
 - GPU tests are tagged `gpu` + `manual` and run outside the Bazel sandbox.
-- Test actions inherit resource limits in one of two ways (see
-  [sandbox.md](sandbox.md)): GPU and `manual` targets already run with
-  `--spawn_strategy=local --no-sandbox --local_test_jobs=1`, so
-  `--run_under='tools/sandbox.sh --profile=t1-gpu --'` reaches the user manager
-  directly; for hermetic CPU tests, start the Bazel server inside a sandbox
-  scope so every test process inherits the same cgroup.
+- Run tests through `tools/nanochat test`; it adds `--run_under` so each test
+  action is sandboxed, and forces `--spawn_strategy=local` so the wrapper can
+  reach the systemd user manager. See [sandbox.md](sandbox.md).
 
 ## Makefile fallback
 
