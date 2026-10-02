@@ -3,9 +3,9 @@
 Per-workstream state for `nanochat.cpp`. Maintained by the architect/integrator.
 States: `todo`, `wip`, `cpu-green`, `gpu-green`, `done`.
 
-Campaign `nanochat-cpp`, feature branch `nanochat-cpp`. Waves 0-6 are integrated;
-wave 6.5 (CUDA model bring-up) is in progress and blocks wave 7. Live resume
-state is in `.sliceme/RESUME.md`.
+Campaign `nanochat-cpp`, feature branch `nanochat-cpp`. Waves 0-6 and the CUDA
+model bring-up are integrated; wave 7 (CUDA oracle parity) is in progress. Live
+resume state is in `.sliceme/RESUME.md`.
 
 | Phase | Workstream | Owner (directory) | State | Notes |
 |---|---|---|---|---|
@@ -22,8 +22,8 @@ state is in `.sliceme/RESUME.md`.
 | P2 | Optimizer grouping and schedules | `w2-src-optim` (`src`) | done | Landed; `//src:optim_test` green. |
 | P2 | Training harness | `w2-src-harness` (`src`) | done | Landed; data/train/eval/CLI, 9 CPU tests green. |
 | — | Backend link selection (`--config=cuda`) | architect (`BUILD.bazel`, `.bazelrc`, `src/BUILD.bazel`, `backends/cuda/BUILD.bazel`, `tools/nanochat`) | done | Landed; `//src:model` selects CPU or CUDA at link time. |
-| P2.5 | CUDA model bring-up (host/device correctness) | `w3-cuda-model-bringup` (`src`) | wip | Prerequisite for wave 7; `src/**` still dereferences device memory on the host. |
-| P3 | Oracle parity (CUDA) | `w3-oracle-parity` (`tests`) | todo | Wave 7; blocked on the bring-up node. |
+| P2.5 | CUDA model bring-up (host/device correctness) | `w3-cuda-model-bringup` (`src`) | done | Landed; `//src:model_oracle_gpu_test` forward `4.66e-09`, backward `5.96e-08`. |
+| P3 | Oracle parity (CUDA) | `w3-oracle-parity` (`tests`) | wip | Wave 7; forward/backward/optimizer-trajectory parity. |
 | P3 | Turing port (sm_75, fp16) | `w3-turing-port` (`backends/cuda`) | todo | Wave 8. |
 | P3 | Fusion/tuning | `w3-fusion-tuning` (`dev/kernels`) | todo | Wave 8. |
 
