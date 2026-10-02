@@ -52,7 +52,8 @@ void RunCase(const AttentionParams& p, const char* name) {
   nanochat::kernels::Synchronize();
 
   std::vector<float> ref_stats;
-  const std::vector<float> ref_out = AttentionForward(p, q0, k0, v0, &ref_stats);
+  const std::vector<float> ref_out =
+      AttentionForward(p, q0, k0, v0, &ref_stats);
   CheckVectorClose(FromStorage(out.Download()), ref_out, 1e-4,
                    (std::string(name) + " fwd out").c_str());
   CheckVectorClose(stats.Download(), ref_stats, 1e-4,

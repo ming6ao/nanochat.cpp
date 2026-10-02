@@ -93,9 +93,8 @@ void BenchShape(const QkPrepParams& p, int iters) {
   DevBuf<ComputeType> grad_k(k_count);
   const double decomp_bwd = TimeIt("bwd decomposed", iters, [&] {
     nanochat::dev::QkPrepDecomposedBackward(
-        p, dcos.ptr, dsin.ptr, dq.ptr, dk.ptr, q_pre.ptr, k_pre.ptr,
-        q_rstd.ptr, k_rstd.ptr, scratch_q.ptr, scratch_k.ptr, grad_q.ptr,
-        grad_k.ptr);
+        p, dcos.ptr, dsin.ptr, dq.ptr, dk.ptr, q_pre.ptr, k_pre.ptr, q_rstd.ptr,
+        k_rstd.ptr, scratch_q.ptr, scratch_k.ptr, grad_q.ptr, grad_k.ptr);
   });
   const double seam_bwd = TimeIt("bwd seam fused", iters, [&] {
     nanochat::kernels::QkPrepBackward(p, dcos.ptr, dsin.ptr, dq.ptr, dk.ptr,

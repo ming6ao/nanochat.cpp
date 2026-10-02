@@ -92,9 +92,9 @@ void Gemm(GemmMode mode, const GemmParams& params, const ComputeType* a,
       params.stride_b != 0
           ? params.stride_b
           : static_cast<std::int64_t>(tb ? params.n : params.k) * ldb;
-  const std::int64_t stride_c =
-      params.stride_c != 0 ? params.stride_c
-                           : static_cast<std::int64_t>(params.m) * ldc;
+  const std::int64_t stride_c = params.stride_c != 0
+                                    ? params.stride_c
+                                    : static_cast<std::int64_t>(params.m) * ldc;
 
   // Row-major C = op(A) * op(B) is, after transposing the whole product,
   // C^T = op(B)^T * op(A)^T. cuBLAS computes a column-major product, so pass

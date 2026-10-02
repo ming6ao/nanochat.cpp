@@ -146,8 +146,8 @@ void ValueResidualBackward(std::int64_t rows, int hidden, int num_kv_heads,
 
 void MlpForward(const ComputeType* h, const ComputeType* c_fc,
                 const ComputeType* c_proj, std::int64_t rows,
-                std::int64_t hidden, std::int64_t mlp_dim,
-                ComputeType* pre_act, ComputeType* act, ComputeType* scratch,
+                std::int64_t hidden, std::int64_t mlp_dim, ComputeType* pre_act,
+                ComputeType* act, ComputeType* scratch,
                 const ComputeType* x_mid, ComputeType* out);
 
 void MlpBackward(const ComputeType* h, const ComputeType* c_fc,
@@ -200,8 +200,8 @@ struct BlockShape {
   float qk_scale = kQkScale;
   int window_left = -1;
   int window_right = 0;
-  int kv_len = 0;          // 0 => self-attention over `seq`
-  float attn_scale = 0.0f; // <= 0 => 1/sqrt(head_dim)
+  int kv_len = 0;           // 0 => self-attention over `seq`
+  float attn_scale = 0.0f;  // <= 0 => 1/sqrt(head_dim)
   bool causal = true;
 };
 
@@ -224,8 +224,8 @@ struct BlockActivations {
   ComputeType* xr = nullptr;
   ComputeType* h = nullptr;
   float* rstd1 = nullptr;
-  ComputeType* q_pre = nullptr;   // saved pre-QkPrep query (backward only)
-  ComputeType* k_pre = nullptr;   // saved pre-QkPrep key (backward only)
+  ComputeType* q_pre = nullptr;  // saved pre-QkPrep query (backward only)
+  ComputeType* k_pre = nullptr;  // saved pre-QkPrep key (backward only)
   ComputeType* q_final = nullptr;
   ComputeType* k_final = nullptr;
   ComputeType* ve_values = nullptr;

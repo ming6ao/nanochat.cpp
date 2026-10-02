@@ -63,10 +63,10 @@ void BenchQkPrep(Rng* rng, int batch, int seq, int heads, int dim, int iters) {
   p.eps = 1e-6f;
   p.scale = 1.2f;
   const int half = dim / 2;
-  DevBuf<float> cos(std::vector<float>(static_cast<std::size_t>(seq) * half,
-                                       0.5f));
-  DevBuf<float> sin(std::vector<float>(static_cast<std::size_t>(seq) * half,
-                                       0.5f));
+  DevBuf<float> cos(
+      std::vector<float>(static_cast<std::size_t>(seq) * half, 0.5f));
+  DevBuf<float> sin(
+      std::vector<float>(static_cast<std::size_t>(seq) * half, 0.5f));
   const int n = batch * seq * heads * dim;
   DevBuf<ComputeType> q(ToStorage(RandomVec(n, rng)));
   DevBuf<ComputeType> k(ToStorage(RandomVec(n, rng)));
@@ -96,9 +96,8 @@ void BenchGlobalNorm(Rng* rng, int n, int iters) {
   char label[64];
   std::snprintf(label, sizeof(label), "globalnorm n=%d", n);
   // A tiny clip keeps the scale pass exercised every iteration.
-  TimeIt(label, iters, [&] {
-    nanochat::kernels::GlobalNorm(n, 1e-3f, g.ptr, norm.ptr);
-  });
+  TimeIt(label, iters,
+         [&] { nanochat::kernels::GlobalNorm(n, 1e-3f, g.ptr, norm.ptr); });
 }
 
 }  // namespace

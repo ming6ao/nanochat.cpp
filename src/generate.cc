@@ -29,7 +29,8 @@ namespace {
 
 // Copies a (possibly device) buffer to a host vector. Used by the inference
 // graph for the small per-row reads the seam exposes no kernel for.
-std::vector<ComputeType> StageToHost(const ComputeType* src, std::int64_t count) {
+std::vector<ComputeType> StageToHost(const ComputeType* src,
+                                     std::int64_t count) {
   std::vector<ComputeType> host(static_cast<std::size_t>(count));
   if (count > 0) {
     kernels::Memcpy(host.data(), src,
@@ -70,21 +71,18 @@ class KvCacheImpl final : public KvCache {
     const int kv_dim = config_.kv_dim();
     const std::size_t rows =
         static_cast<std::size_t>(max_seq_) * static_cast<std::size_t>(kv_dim);
-    keys_ = static_cast<ComputeType*>(
-        kernels::Alloc(static_cast<std::size_t>(layers) * rows *
-                       sizeof(ComputeType)));
-    values_ = static_cast<ComputeType*>(
-        kernels::Alloc(static_cast<std::size_t>(layers) * rows *
-                       sizeof(ComputeType)));
+    keys_ = static_cast<ComputeType*>(kernels::Alloc(
+        static_cast<std::size_t>(layers) * rows * sizeof(ComputeType)));
+    values_ = static_cast<ComputeType*>(kernels::Alloc(
+        static_cast<std::size_t>(layers) * rows * sizeof(ComputeType)));
     prev_ = static_cast<ComputeType*>(
-        kernels::Alloc(static_cast<std::size_t>(hidden) *
-                       sizeof(ComputeType)));
-    kernels::Memset(keys_, 0,
-                    static_cast<std::size_t>(layers) * rows *
-                        sizeof(ComputeType));
-    kernels::Memset(values_, 0,
-                    static_cast<std::size_t>(layers) * rows *
-                        sizeof(ComputeType));
+        kernels::Alloc(static_cast<std::size_t>(hidden) * sizeof(ComputeType)));
+    kernels::Memset(
+        keys_, 0,
+        static_cast<std::size_t>(layers) * rows * sizeof(ComputeType));
+    kernels::Memset(
+        values_, 0,
+        static_cast<std::size_t>(layers) * rows * sizeof(ComputeType));
     kernels::Memset(prev_, 0,
                     static_cast<std::size_t>(hidden) * sizeof(ComputeType));
     BuildWorkspace();
@@ -124,8 +122,7 @@ class KvCacheImpl final : public KvCache {
     const int padded = config_.padded_vocab_size;
 
     const std::int64_t rows = max_seq_;
-    const std::int64_t stats =
-        static_cast<std::int64_t>(heads) * max_seq_ * 2;
+    const std::int64_t stats = static_cast<std::int64_t>(heads) * max_seq_ * 2;
 
     struct CSlot {
       ComputeType** dest;
@@ -190,12 +187,11 @@ class KvCacheImpl final : public KvCache {
     ws.arena.Reserve(bytes);
     ws.arena.Reset();
     for (const CSlot& slot : compute_slots) {
-      *slot.dest = ws.arena.Alloc<ComputeType>(
-          static_cast<std::size_t>(slot.count));
+      *slot.dest =
+          ws.arena.Alloc<ComputeType>(static_cast<std::size_t>(slot.count));
     }
     for (const FSlot& slot : float_slots) {
-      *slot.dest =
-          ws.arena.Alloc<float>(static_cast<std::size_t>(slot.count));
+      *slot.dest = ws.arena.Alloc<float>(static_cast<std::size_t>(slot.count));
     }
 
     // The block writes its output back into the residual stream buffer.
@@ -262,8 +258,8 @@ void RunInference(TrainModel* model, const int* tokens, int num_tokens,
     const ComputeType* prev = kv->prev();
     std::vector<ComputeType> eh = StageToHost(emb_norm, hidden);
     std::vector<ComputeType> ph = StageToHost(prev, hidden);
-    std::vector<ComputeType> wh = StageToHost(model->smear_gate(),
-                                              kSmearChannels);
+    std::vector<ComputeType> wh =
+        StageToHost(model->smear_gate(), kSmearChannels);
     std::vector<ComputeType> xh(static_cast<std::size_t>(hidden));
     float pre = 0.0f;
     for (int j = 0; j < kSmearChannels; ++j) {
@@ -285,10 +281,10 @@ void RunInference(TrainModel* model, const int* tokens, int num_tokens,
                     static_cast<std::size_t>(hidden) * sizeof(ComputeType),
                     CopyDir::kHostToDevice);
   } else {
-    kernels::Memcpy(ws.x0, emb_norm,
-                    static_cast<std::size_t>(rows * hidden) *
-                        sizeof(ComputeType),
-                    CopyDir::kDeviceToDevice);
+    kernels::Memcpy(
+        ws.x0, emb_norm,
+        static_cast<std::size_t>(rows * hidden) * sizeof(ComputeType),
+        CopyDir::kDeviceToDevice);
     kernels::Memcpy(kv->prev(), emb_norm,
                     static_cast<std::size_t>(hidden) * sizeof(ComputeType),
                     CopyDir::kDeviceToDevice);
@@ -313,10 +309,8 @@ void RunInference(TrainModel* model, const int* tokens, int num_tokens,
   shape.attn_scale = 0.0f;
   shape.causal = true;
 
-  const float* cos =
-      model->cos_table() + static_cast<std::size_t>(t0) * half;
-  const float* sin =
-      model->sin_table() + static_cast<std::size_t>(t0) * half;
+  const float* cos = model->cos_table() + static_cast<std::size_t>(t0) * half;
+  const float* sin = model->sin_table() + static_cast<std::size_t>(t0) * half;
 
   ops::BlockActivations& a = ws.block;
   const ComputeType* x = ws.x0;
@@ -330,10 +324,10 @@ void RunInference(TrainModel* model, const int* tokens, int num_tokens,
     ops::BlockForward(shape, model->layer_weights(i), a, tokens, cos, sin, x,
                       ws.x0, model->resid(i), model->x0_lambda(i));
     if (i == layers / 2) {
-      kernels::Memcpy(ws.x_backout, a.x_out,
-                      static_cast<std::size_t>(rows * hidden) *
-                          sizeof(ComputeType),
-                      CopyDir::kDeviceToDevice);
+      kernels::Memcpy(
+          ws.x_backout, a.x_out,
+          static_cast<std::size_t>(rows * hidden) * sizeof(ComputeType),
+          CopyDir::kDeviceToDevice);
     }
     x = a.x_out;
   }
@@ -354,9 +348,9 @@ void RunInference(TrainModel* model, const int* tokens, int num_tokens,
   const ComputeType* last = ws.raw_logits + (rows - 1) * padded;
   std::vector<ComputeType> last_host = StageToHost(last, vocab);
   for (int v = 0; v < vocab; ++v) {
-    logits_out[v] = kLogitSoftcap *
-                    std::tanh(AsF(last_host[static_cast<std::size_t>(v)]) /
-                              kLogitSoftcap);
+    logits_out[v] =
+        kLogitSoftcap *
+        std::tanh(AsF(last_host[static_cast<std::size_t>(v)]) / kLogitSoftcap);
   }
 }
 
@@ -376,7 +370,8 @@ int Decode(Model* model, int token, KvCache* kv, const SampleParams& params) {
   if (model == nullptr || kv == nullptr) return -1;
   auto* impl = static_cast<TrainModel*>(model);
   auto* cache = static_cast<KvCacheImpl*>(kv);
-  std::vector<float> logits(static_cast<std::size_t>(impl->config().vocab_size));
+  std::vector<float> logits(
+      static_cast<std::size_t>(impl->config().vocab_size));
   RunInference(impl, &token, 1, cache, logits.data());
   return SampleToken(logits.data(), impl->config().vocab_size, params, nullptr);
 }

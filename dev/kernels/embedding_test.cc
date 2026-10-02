@@ -52,10 +52,9 @@ void RunCase(int vocab, int dim, const std::vector<int>& ids,
   nanochat::kernels::EmbeddingBackward(tokens, dim, ids.data(), dout.ptr,
                                        dtable.ptr);
   nanochat::kernels::Synchronize();
-  CheckVectorClose(
-      FromStorage(dtable.Download()),
-      EmbeddingBackward(tokens, dim, ids, dout0, dtable_init), 1e-4,
-      (std::string(name) + " bwd persistent").c_str());
+  CheckVectorClose(FromStorage(dtable.Download()),
+                   EmbeddingBackward(tokens, dim, ids, dout0, dtable_init),
+                   1e-4, (std::string(name) + " bwd persistent").c_str());
 
 #if !defined(NANOCHAT_PRECISION_FP16)
   // Finite-difference the gather with a zero-initialised gradient buffer so the

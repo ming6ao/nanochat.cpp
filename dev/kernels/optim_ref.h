@@ -36,9 +36,9 @@ constexpr float kPolarCoeffs[5][3] = {
 
 // Applies one AdamW step in place. `p`, `m`, and `v` are updated; `g` is
 // read-only.
-inline void AdamWUpdate(int n, const AdamWParams& params,
-                        std::vector<float>* p, const std::vector<float>& g,
-                        std::vector<float>* m, std::vector<float>* v) {
+inline void AdamWUpdate(int n, const AdamWParams& params, std::vector<float>* p,
+                        const std::vector<float>& g, std::vector<float>* m,
+                        std::vector<float>* v) {
   if (n <= 0) return;
   const float bias1 =
       1.0f - std::pow(params.beta1, static_cast<float>(params.step));
@@ -87,8 +87,8 @@ inline void MuonUpdate(const MuonParams& params,
     const float* grad = stacked_grads.data() + off;
     float* param = stacked_params->data() + off;
     float* momentum_buf = buf1->data() + off;
-    float* second_buf =
-        buf2->data() + static_cast<std::size_t>(m) * (reduce_cols ? rows : cols);
+    float* second_buf = buf2->data() + static_cast<std::size_t>(m) *
+                                           (reduce_cols ? rows : cols);
 
     // Nesterov momentum: update the first moment, then the accelerated
     // gradient.

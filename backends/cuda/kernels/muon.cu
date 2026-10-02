@@ -12,7 +12,8 @@
 // Layout notes for the tall (rows > cols) and wide (rows <= cols) cases:
 //   * tall:  A = X^T X  (cols x cols), prod = X B
 //   * wide:  A = X X^T  (rows x rows), prod = B X
-// A, A^2, and B therefore occupy [num_params, min(rows, cols), min(rows, cols)].
+// A, A^2, and B therefore occupy [num_params, min(rows, cols), min(rows,
+// cols)].
 //
 // See docs/kernels.md and docs/optimizer.md.
 
@@ -54,10 +55,9 @@ __global__ void MuonMomentumKernel(long long total, float momentum,
                                    const ComputeType* __restrict__ grads,
                                    float* __restrict__ buf1,
                                    ComputeType* __restrict__ x) {
-  const long long stride =
-      static_cast<long long>(gridDim.x) * blockDim.x;
-  for (long long i = static_cast<long long>(blockIdx.x) * blockDim.x +
-                     threadIdx.x;
+  const long long stride = static_cast<long long>(gridDim.x) * blockDim.x;
+  for (long long i =
+           static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x;
        i < total; i += stride) {
     const float gr = AsFloatDev(grads[i]);
     const float b = buf1[i] + (1.0f - momentum) * (gr - buf1[i]);
@@ -119,10 +119,9 @@ __global__ void MuonBKernel(long long count, float cb, float cc,
                             const ComputeType* __restrict__ a,
                             const ComputeType* __restrict__ a2,
                             ComputeType* __restrict__ b) {
-  const long long stride =
-      static_cast<long long>(gridDim.x) * blockDim.x;
-  for (long long i = static_cast<long long>(blockIdx.x) * blockDim.x +
-                     threadIdx.x;
+  const long long stride = static_cast<long long>(gridDim.x) * blockDim.x;
+  for (long long i =
+           static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x;
        i < count; i += stride) {
     b[i] = ToComputeDev(cb * AsFloatDev(a[i]) + cc * AsFloatDev(a2[i]));
   }
@@ -132,10 +131,9 @@ __global__ void MuonBKernel(long long count, float cb, float cc,
 __global__ void MuonAxpbyKernel(long long count, float ca,
                                 ComputeType* __restrict__ x,
                                 const ComputeType* __restrict__ prod) {
-  const long long stride =
-      static_cast<long long>(gridDim.x) * blockDim.x;
-  for (long long i = static_cast<long long>(blockIdx.x) * blockDim.x +
-                     threadIdx.x;
+  const long long stride = static_cast<long long>(gridDim.x) * blockDim.x;
+  for (long long i =
+           static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x;
        i < count; i += stride) {
     x[i] = ToComputeDev(ca * AsFloatDev(x[i]) + AsFloatDev(prod[i]));
   }
@@ -156,8 +154,7 @@ __global__ void MuonRenormKernel(int rows, int cols,
     local += v * v;
   }
   const float frob = BlockReduceSum(local);
-  const float target =
-      sqrtf(static_cast<float>(rows < cols ? rows : cols));
+  const float target = sqrtf(static_cast<float>(rows < cols ? rows : cols));
   const float scale = target / fmaxf(sqrtf(frob), 1e-6f);
   for (long long i = tid; i < mat; i += blockDim.x) {
     xm[i] = ToComputeDev(AsFloatDev(xm[i]) * scale);
@@ -247,17 +244,15 @@ __global__ void MuonNorMuonKernel(int rows, int cols, bool reduce_cols,
 __global__ void MuonApplyKernel(long long total, float lr, float weight_decay,
                                 ComputeType* __restrict__ params,
                                 const ComputeType* __restrict__ x) {
-  const long long stride =
-      static_cast<long long>(gridDim.x) * blockDim.x;
-  for (long long i = static_cast<long long>(blockIdx.x) * blockDim.x +
-                     threadIdx.x;
+  const long long stride = static_cast<long long>(gridDim.x) * blockDim.x;
+  for (long long i =
+           static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x;
        i < total; i += stride) {
     const float pv = AsFloatDev(params[i]);
     const float gv = AsFloatDev(x[i]);
     // Cautious decay: only shrink a parameter that agrees in sign with the
     // update direction.
-    const float decay =
-        (gv * pv >= 0.0f) ? lr * weight_decay * pv : 0.0f;
+    const float decay = (gv * pv >= 0.0f) ? lr * weight_decay * pv : 0.0f;
     params[i] = ToComputeDev(pv - lr * gv - decay);
   }
 }
@@ -313,8 +308,8 @@ void MuonUpdate(const MuonParams& params, const ComputeType* stacked_grads,
   cuda_backend::Launch(MuonMomentumKernel, dim3(elem_grid), dim3(kThreads), 0,
                        total, params.momentum, params.nesterov, stacked_grads,
                        buf1, x);
-  cuda_backend::Launch(MuonEquilibrateKernel, dim3(num_params),
-                       dim3(kThreads), 0, rows, cols, x);
+  cuda_backend::Launch(MuonEquilibrateKernel, dim3(num_params), dim3(kThreads),
+                       0, rows, cols, x);
 
   for (int it = 0; it < ns_steps; ++it) {
     const float ca = kPolarCoeffs[it][0];
@@ -403,8 +398,7 @@ void MuonUpdate(const MuonParams& params, const ComputeType* stacked_grads,
   cuda_backend::Launch(MuonRenormKernel, dim3(num_params), dim3(kThreads), 0,
                        rows, cols, x);
   cuda_backend::Launch(MuonNorMuonKernel, dim3(num_params), dim3(kThreads), 0,
-                       rows, cols, reduce_cols, params.beta2, x, buf2,
-                       scratch);
+                       rows, cols, reduce_cols, params.beta2, x, buf2, scratch);
   cuda_backend::Launch(MuonApplyKernel, dim3(elem_grid), dim3(kThreads), 0,
                        total, params.lr, params.weight_decay, stacked_params,
                        x);

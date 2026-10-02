@@ -60,8 +60,7 @@ inline std::vector<float> RmsNormBackward(const RmsNormParams& p,
     for (int d = 0; d < dim; ++d) {
       dot += static_cast<double>(x[base + d]) * dy[base + d];
     }
-    const float coeff =
-        rr * rr * rr * static_cast<float>(dot) * inv_dim;
+    const float coeff = rr * rr * rr * static_cast<float>(dot) * inv_dim;
     for (int d = 0; d < dim; ++d) {
       dx[base + d] = rr * dy[base + d] - coeff * x[base + d];
     }
@@ -131,8 +130,8 @@ inline void QkPrepApply(const QkPrepParams& p, const std::vector<float>& cos,
 }
 
 inline void QkPrepForward(const QkPrepParams& p, const std::vector<float>& cos,
-                          const std::vector<float>& sin,
-                          std::vector<float>* q, std::vector<float>* k) {
+                          const std::vector<float>& sin, std::vector<float>* q,
+                          std::vector<float>* k) {
   QkPrepApply(p, cos, sin, p.num_heads, q);
   QkPrepApply(p, cos, sin, p.num_kv_heads, k);
 }
@@ -186,8 +185,8 @@ inline void QkPrepApplyBackward(const QkPrepParams& p,
 inline void QkPrepBackward(const QkPrepParams& p, const std::vector<float>& cos,
                            const std::vector<float>& sin,
                            const std::vector<float>& dq,
-                           const std::vector<float>& dk,
-                           std::vector<float>* q, std::vector<float>* k) {
+                           const std::vector<float>& dk, std::vector<float>* q,
+                           std::vector<float>* k) {
   QkPrepApplyBackward(p, cos, sin, dq, p.num_heads, q);
   QkPrepApplyBackward(p, cos, sin, dk, p.num_kv_heads, k);
 }

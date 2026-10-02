@@ -66,8 +66,8 @@ void WriteU64(std::ofstream& out, std::uint64_t value) {
 }
 
 // Writes a shard with the given token stream. `width` is 2 or 4.
-std::string WriteShard(const std::string& name,
-                       const std::vector<int>& tokens, int width) {
+std::string WriteShard(const std::string& name, const std::vector<int>& tokens,
+                       int width) {
   const std::string path = TempPath(name);
   std::ofstream out(path, std::ios::binary | std::ios::trunc);
   WriteU32(out, nanochat::kTokenShardMagic);
@@ -116,8 +116,7 @@ void TestTokenShardRoundTrip() {
       Fail("shard partial read mismatch");
     }
     std::vector<int> tail(8, -1);
-    if (shard->Read(8, 8, tail.data()) != 2 || tail[0] != 13 ||
-        tail[1] != 14) {
+    if (shard->Read(8, 8, tail.data()) != 2 || tail[0] != 13 || tail[1] != 14) {
       Fail("shard clamped tail read mismatch");
     }
   }
@@ -250,8 +249,8 @@ void TestCheckpoint() {
   if (weight == nullptr) {
     Fail("checkpoint is missing 'weight'");
   } else {
-    if (weight->dtype != DType::kFp32 || weight->shape !=
-                                               std::vector<std::int64_t>({2, 3})) {
+    if (weight->dtype != DType::kFp32 ||
+        weight->shape != std::vector<std::int64_t>({2, 3})) {
       Fail("checkpoint 'weight' metadata mismatch");
     }
     const float expected[6] = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f};

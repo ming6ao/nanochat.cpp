@@ -81,11 +81,13 @@ bool RunCase(GemmMode mode, bool ta, bool tb, int m, int n, int k, int batch,
   std::vector<float> ref_c(total_c);
 
   for (std::size_t i = 0; i < total_a; ++i) {
-    host_a[i] = FromFloat(0.25f * static_cast<float>(static_cast<int>(i % 9) - 4));
+    host_a[i] =
+        FromFloat(0.25f * static_cast<float>(static_cast<int>(i % 9) - 4));
     ref_a[i] = ToFloat(host_a[i]);
   }
   for (std::size_t i = 0; i < total_b; ++i) {
-    host_b[i] = FromFloat(0.2f * static_cast<float>(static_cast<int>(i % 7) - 3));
+    host_b[i] =
+        FromFloat(0.2f * static_cast<float>(static_cast<int>(i % 7) - 3));
     ref_b[i] = ToFloat(host_b[i]);
   }
   for (std::size_t i = 0; i < total_c; ++i) {

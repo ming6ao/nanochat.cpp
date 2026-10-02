@@ -43,8 +43,8 @@ int main() {
 
   constexpr float kAlpha = 0.5f;
   constexpr float kBeta = 0.25f;
-  const int status = nanochat::dev::SpikeScaleAddHost(
-      host_a, host_b, kAlpha, kBeta, host_out, kCount);
+  const int status = nanochat::dev::SpikeScaleAddHost(host_a, host_b, kAlpha,
+                                                      kBeta, host_out, kCount);
   if (status != 0) {
     std::fprintf(stderr, "pascal_spike: kernel failed with CUDA error %d\n",
                  status);
@@ -54,9 +54,8 @@ int main() {
   for (int i = 0; i < kCount; ++i) {
     const float expected = kAlpha * host_a[i] + kBeta * host_b[i];
     if (std::fabs(host_out[i] - expected) > 1e-5f) {
-      std::fprintf(stderr,
-                   "pascal_spike: mismatch at %d: got %f expected %f\n", i,
-                   host_out[i], expected);
+      std::fprintf(stderr, "pascal_spike: mismatch at %d: got %f expected %f\n",
+                   i, host_out[i], expected);
       return 1;
     }
   }

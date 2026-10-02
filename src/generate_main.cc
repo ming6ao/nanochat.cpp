@@ -103,7 +103,8 @@ int main(int argc, char** argv) {
     } else if (flag == "--prompt-file") {
       prompt_file = value;
     } else if (flag == "--max-tokens") {
-      max_tokens = nanochat::cli::ParseInt(value, &parsed_int) ? parsed_int : -1;
+      max_tokens =
+          nanochat::cli::ParseInt(value, &parsed_int) ? parsed_int : -1;
     } else if (flag == "--top-k") {
       top_k = nanochat::cli::ParseInt(value, &parsed_int) ? parsed_int : 0;
     } else if (flag == "--temperature") {
@@ -154,8 +155,7 @@ int main(int argc, char** argv) {
     model->InitWeights(seed);
   }
 
-  const int capacity =
-      static_cast<int>(prompt.size()) + max_tokens + 2;
+  const int capacity = static_cast<int>(prompt.size()) + max_tokens + 2;
   std::unique_ptr<nanochat::KvCache> kv =
       nanochat::CreateKvCache(model_config, capacity);
 

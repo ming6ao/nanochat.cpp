@@ -100,11 +100,12 @@ __global__ void DecodeQkPrepKernel(const QkPrepParams params,
   }
 }
 
-__global__ void DecodeAttentionKernel(
-    const AttentionParams params, float scale,
-    const ComputeType* __restrict__ q, const ComputeType* __restrict__ k,
-    const ComputeType* __restrict__ v, ComputeType* __restrict__ out,
-    float* __restrict__ stats) {
+__global__ void DecodeAttentionKernel(const AttentionParams params, float scale,
+                                      const ComputeType* __restrict__ q,
+                                      const ComputeType* __restrict__ k,
+                                      const ComputeType* __restrict__ v,
+                                      ComputeType* __restrict__ out,
+                                      float* __restrict__ stats) {
   const int row = blockIdx.x;
   const int t = row % params.seq;
   const int h = (row / params.seq) % params.num_heads;
@@ -217,8 +218,8 @@ void DecodeAttentionFwd(cudaStream_t stream, const AttentionParams& params,
                           : 1.0f / sqrtf(static_cast<float>(params.head_dim));
   const int rows = params.batch * params.num_heads * params.seq;
   const int block = BlockSizeForDim(params.head_dim);
-  DecodeAttentionKernel<<<rows, block, 0, stream>>>(params, scale, q, k, v,
-                                                    out, stats);
+  DecodeAttentionKernel<<<rows, block, 0, stream>>>(params, scale, q, k, v, out,
+                                                    stats);
 }
 
 void DecodePointwiseFwd(cudaStream_t stream, PointwiseOp op, int n,

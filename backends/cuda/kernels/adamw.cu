@@ -32,10 +32,9 @@ __global__ void AdamWUpdateKernel(long long n, float lr, float beta1,
                                   const ComputeType* __restrict__ g,
                                   float* __restrict__ m,
                                   float* __restrict__ v) {
-  const long long stride =
-      static_cast<long long>(gridDim.x) * blockDim.x;
-  for (long long i = static_cast<long long>(blockIdx.x) * blockDim.x +
-                     threadIdx.x;
+  const long long stride = static_cast<long long>(gridDim.x) * blockDim.x;
+  for (long long i =
+           static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x;
        i < n; i += stride) {
     const float grad = AsFloatDev(g[i]);
     // Decoupled weight decay, applied to the parameter before the update.
@@ -57,20 +56,21 @@ void AdamWUpdate(int n, const AdamWParams& params, ComputeType* p,
   if (n <= 0) return;
   // Bias correction is computed once on the host in fp32, matching the CPU
   // reference (1 - beta^step). `step` is 1-based.
-  const float bias1 = 1.0f - powf(params.beta1, static_cast<float>(params.step));
-  const float bias2 = 1.0f - powf(params.beta2, static_cast<float>(params.step));
+  const float bias1 =
+      1.0f - powf(params.beta1, static_cast<float>(params.step));
+  const float bias2 =
+      1.0f - powf(params.beta2, static_cast<float>(params.step));
   const float step_size = params.lr / bias1;
 
   constexpr int kThreads = 256;
   constexpr int kMaxBlocks = 512;
   const long long blocks =
       (static_cast<long long>(n) + kThreads - 1) / kThreads;
-  const int grid =
-      blocks < kMaxBlocks ? static_cast<int>(blocks) : kMaxBlocks;
+  const int grid = blocks < kMaxBlocks ? static_cast<int>(blocks) : kMaxBlocks;
   cuda_backend::Launch(AdamWUpdateKernel, dim3(grid), dim3(kThreads), 0,
                        static_cast<long long>(n), params.lr, params.beta1,
-                       params.beta2, params.eps, params.weight_decay,
-                       step_size, bias2, p, g, m, v);
+                       params.beta2, params.eps, params.weight_decay, step_size,
+                       bias2, p, g, m, v);
 }
 
 }  // namespace kernels

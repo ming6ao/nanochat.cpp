@@ -33,7 +33,8 @@ struct DeviceTargets {
   int* ptr = nullptr;
   DeviceTargets(const int* host, int count) {
     if (count > 0 && host != nullptr) {
-      ptr = static_cast<int*>(Alloc(sizeof(int) * static_cast<std::size_t>(count)));
+      ptr = static_cast<int*>(
+          Alloc(sizeof(int) * static_cast<std::size_t>(count)));
       Memcpy(ptr, host, sizeof(int) * static_cast<std::size_t>(count),
              CopyDir::kHostToDevice);
     }
@@ -64,8 +65,7 @@ __global__ void ClassifierForwardKernel(const ClassifierParams params,
     return;
   }
   const int padded = PaddedVocab(params);
-  const ComputeType* lrow =
-      logits + static_cast<long long>(row) * padded;
+  const ComputeType* lrow = logits + static_cast<long long>(row) * padded;
   float row_max = 0.0f;
   float sum_exp = 0.0f;
   RowLogSumExp(lrow, params.vocab_size, params.softcap, &row_max, &sum_exp);

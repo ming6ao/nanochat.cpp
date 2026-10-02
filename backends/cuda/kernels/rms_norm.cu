@@ -59,12 +59,10 @@ __global__ void RmsNormBackwardKernel(const RmsNormParams params,
 
   const float dot = RowReduceDot(xr, dyr, params.dim);
   const float r = rstd[row];
-  const float coeff =
-      r * r * r * dot / static_cast<float>(params.dim);
+  const float coeff = r * r * r * dot / static_cast<float>(params.dim);
 
   for (int d = threadIdx.x; d < params.dim; d += blockDim.x) {
-    dxr[d] =
-        ToComputeDev(r * AsFloatDev(dyr[d]) - coeff * AsFloatDev(xr[d]));
+    dxr[d] = ToComputeDev(r * AsFloatDev(dyr[d]) - coeff * AsFloatDev(xr[d]));
   }
 }
 
@@ -110,8 +108,7 @@ __global__ void RmsNormFusedResidualBackwardKernel(
 
   const float dot = RowReduceDot(sr, dyr, params.dim);
   const float r = rstd[row];
-  const float coeff =
-      r * r * r * dot / static_cast<float>(params.dim);
+  const float coeff = r * r * r * dot / static_cast<float>(params.dim);
 
   for (int d = threadIdx.x; d < params.dim; d += blockDim.x) {
     const float s = AsFloatDev(sr[d]);

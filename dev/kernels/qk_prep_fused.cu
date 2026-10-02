@@ -123,11 +123,13 @@ __global__ void QkPrepFusedForwardKernel(const QkPrepParams params,
   }
 }
 
-__global__ void QkPrepFusedBackwardKernel(
-    const QkPrepParams params, const float* __restrict__ cos,
-    const float* __restrict__ sin, const ComputeType* __restrict__ dq,
-    const ComputeType* __restrict__ dk, ComputeType* __restrict__ q,
-    ComputeType* __restrict__ k) {
+__global__ void QkPrepFusedBackwardKernel(const QkPrepParams params,
+                                          const float* __restrict__ cos,
+                                          const float* __restrict__ sin,
+                                          const ComputeType* __restrict__ dq,
+                                          const ComputeType* __restrict__ dk,
+                                          ComputeType* __restrict__ q,
+                                          ComputeType* __restrict__ k) {
   const int q_rows = params.batch * params.seq * params.num_heads;
   const int row = blockIdx.x;
   if (row < q_rows) {
@@ -244,8 +246,7 @@ void QkPrepDecomposedForward(const QkPrepParams& params, const float* cos,
                              const float* sin, const ComputeType* q_in,
                              const ComputeType* k_in, ComputeType* q_normed,
                              ComputeType* k_normed, ComputeType* q_out,
-                             ComputeType* k_out, float* q_rstd,
-                             float* k_rstd) {
+                             ComputeType* k_out, float* q_rstd, float* k_rstd) {
   const int q_rows = params.batch * params.seq * params.num_heads;
   const int k_rows = params.batch * params.seq * params.num_kv_heads;
   if (q_rows > 0 && params.head_dim > 0) {
@@ -268,12 +269,13 @@ void QkPrepDecomposedForward(const QkPrepParams& params, const float* cos,
   }
 }
 
-void QkPrepDecomposedBackward(
-    const QkPrepParams& params, const float* cos, const float* sin,
-    const ComputeType* dq, const ComputeType* dk, const ComputeType* q_in,
-    const ComputeType* k_in, const float* q_rstd, const float* k_rstd,
-    ComputeType* dq_normed, ComputeType* dk_normed, ComputeType* q_grad,
-    ComputeType* k_grad) {
+void QkPrepDecomposedBackward(const QkPrepParams& params, const float* cos,
+                              const float* sin, const ComputeType* dq,
+                              const ComputeType* dk, const ComputeType* q_in,
+                              const ComputeType* k_in, const float* q_rstd,
+                              const float* k_rstd, ComputeType* dq_normed,
+                              ComputeType* dk_normed, ComputeType* q_grad,
+                              ComputeType* k_grad) {
   const int q_rows = params.batch * params.seq * params.num_heads;
   const int k_rows = params.batch * params.seq * params.num_kv_heads;
   if (q_rows > 0 && params.head_dim > 0) {

@@ -75,7 +75,8 @@ int main(int argc, char** argv) {
     } else if (flag == "--val-shard") {
       nanochat::cli::AppendCsv(value, &config.val_shards);
     } else if (flag == "--batch") {
-      config.batch = nanochat::cli::ParseInt(value, &parsed_int) ? parsed_int : 0;
+      config.batch =
+          nanochat::cli::ParseInt(value, &parsed_int) ? parsed_int : 0;
     } else if (flag == "--num-iterations") {
       config.num_iterations =
           nanochat::cli::ParseInt(value, &parsed_int) ? parsed_int : 0;
@@ -92,7 +93,8 @@ int main(int argc, char** argv) {
       config.eval_steps =
           nanochat::cli::ParseInt(value, &parsed_int) ? parsed_int : 0;
     } else if (flag == "--seed") {
-      config.seed = nanochat::cli::ParseU64(value, &parsed_u64) ? parsed_u64 : 0;
+      config.seed =
+          nanochat::cli::ParseU64(value, &parsed_u64) ? parsed_u64 : 0;
     } else if (flag == "--checkpoint") {
       config.checkpoint_path = value;
     } else if (flag == "--resume") {
@@ -109,17 +111,19 @@ int main(int argc, char** argv) {
   }
 
   if (config.train_shards.empty()) {
-    std::fprintf(stderr, "train_main: at least one --train-shard is required\n");
+    std::fprintf(stderr,
+                 "train_main: at least one --train-shard is required\n");
     return 2;
   }
   if (config.num_iterations <= 0 || config.batch <= 0) {
-    std::fprintf(stderr, "train_main: --num-iterations and --batch must be > 0\n");
+    std::fprintf(stderr,
+                 "train_main: --num-iterations and --batch must be > 0\n");
     return 2;
   }
 
   nanochat::TrainLoop loop(std::move(config));
   const float loss = loop.Run();
-  std::printf("train_main: final loss %.6f at step %d\n", static_cast<double>(loss),
-              loop.last_step());
+  std::printf("train_main: final loss %.6f at step %d\n",
+              static_cast<double>(loss), loop.last_step());
   return 0;
 }

@@ -31,7 +31,8 @@ struct DeviceIds {
   int* ptr = nullptr;
   DeviceIds(const int* host, int count) {
     if (count > 0 && host != nullptr) {
-      ptr = static_cast<int*>(Alloc(sizeof(int) * static_cast<std::size_t>(count)));
+      ptr = static_cast<int*>(
+          Alloc(sizeof(int) * static_cast<std::size_t>(count)));
       Memcpy(ptr, host, sizeof(int) * static_cast<std::size_t>(count),
              CopyDir::kHostToDevice);
     }
@@ -52,8 +53,8 @@ __global__ void EmbeddingForwardKernel(int tokens, int dim,
                                        ComputeType* __restrict__ out) {
   const long long n = static_cast<long long>(tokens) * dim;
   const long long stride = static_cast<long long>(gridDim.x) * blockDim.x;
-  for (long long idx = static_cast<long long>(blockIdx.x) * blockDim.x +
-                       threadIdx.x;
+  for (long long idx =
+           static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x;
        idx < n; idx += stride) {
     const long long token = idx / dim;
     const int d = static_cast<int>(idx - token * dim);
@@ -66,8 +67,7 @@ __global__ void EmbeddingForwardKernel(int tokens, int dim,
 __global__ void EmbeddingZeroRowsKernel(int dim, const int* __restrict__ ids,
                                         ComputeType* __restrict__ dtable) {
   const int token = blockIdx.x;
-  ComputeType* row =
-      dtable + static_cast<long long>(ids[token]) * dim;
+  ComputeType* row = dtable + static_cast<long long>(ids[token]) * dim;
   for (int d = threadIdx.x; d < dim; d += blockDim.x) {
     row[d] = ToComputeDev(0.0f);
   }
@@ -80,8 +80,7 @@ __global__ void EmbeddingScatterAddKernel(int dim, const int* __restrict__ ids,
                                           ComputeType* __restrict__ dtable) {
   const int token = blockIdx.x;
   ComputeType* row = dtable + static_cast<long long>(ids[token]) * dim;
-  const ComputeType* value =
-      dout + static_cast<long long>(token) * dim;
+  const ComputeType* value = dout + static_cast<long long>(token) * dim;
   ScatterAddRow(row, dim, value);
 }
 
@@ -93,8 +92,7 @@ void EmbeddingForward(int tokens, int dim, const int* ids,
   const DeviceIds device_ids(ids, tokens);
   constexpr int kThreads = 256;
   const long long n = static_cast<long long>(tokens) * dim;
-  const int blocks =
-      static_cast<int>((n + kThreads - 1) / kThreads);
+  const int blocks = static_cast<int>((n + kThreads - 1) / kThreads);
   cuda_backend::Launch(EmbeddingForwardKernel, dim3(blocks), dim3(kThreads), 0,
                        tokens, dim, device_ids.ptr, table, out);
 }

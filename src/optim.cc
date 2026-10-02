@@ -135,11 +135,11 @@ class NanochatOptimizer final : public Optimizer {
         params.eps = group.eps;
         params.weight_decay = group.weight_decay;
         params.step = step;
-        kernels::AdamWUpdate(
-            static_cast<int>(group.params[i].count), params,
-            group.params[i].value, flat_ + group.grad_offsets[i],
-            group.m + group.moment_offsets[i],
-            group.v + group.moment_offsets[i]);
+        kernels::AdamWUpdate(static_cast<int>(group.params[i].count), params,
+                             group.params[i].value,
+                             flat_ + group.grad_offsets[i],
+                             group.m + group.moment_offsets[i],
+                             group.v + group.moment_offsets[i]);
       }
     }
 
@@ -276,11 +276,9 @@ class NanochatOptimizer final : public Optimizer {
       group.red_dim = reduce_cols ? -1 : -2;
       group.buf2_len = static_cast<std::int64_t>(group.num_params) *
                        (reduce_cols ? group.rows : group.cols);
-      group.lr =
-          config_.matrix_lr *
-          std::sqrt(std::max(1.0f,
-                             static_cast<float>(group.rows) /
-                                 static_cast<float>(group.cols)));
+      group.lr = config_.matrix_lr *
+                 std::sqrt(std::max(1.0f, static_cast<float>(group.rows) /
+                                              static_cast<float>(group.cols)));
       muon_groups_.push_back(std::move(group));
     }
 
@@ -305,19 +303,17 @@ class NanochatOptimizer final : public Optimizer {
     norm_dev_ = static_cast<float*>(kernels::Alloc(sizeof(float)));
 
     for (AdamWGroup& group : adamw_groups_) {
-      group.m = static_cast<float*>(
-          kernels::Alloc(static_cast<std::size_t>(group.moment_count) *
-                         sizeof(float)));
-      group.v = static_cast<float*>(
-          kernels::Alloc(static_cast<std::size_t>(group.moment_count) *
-                         sizeof(float)));
+      group.m = static_cast<float*>(kernels::Alloc(
+          static_cast<std::size_t>(group.moment_count) * sizeof(float)));
+      group.v = static_cast<float*>(kernels::Alloc(
+          static_cast<std::size_t>(group.moment_count) * sizeof(float)));
       if (group.moment_count > 0) {
-        kernels::Memset(group.m, 0,
-                        static_cast<std::size_t>(group.moment_count) *
-                            sizeof(float));
-        kernels::Memset(group.v, 0,
-                        static_cast<std::size_t>(group.moment_count) *
-                            sizeof(float));
+        kernels::Memset(
+            group.m, 0,
+            static_cast<std::size_t>(group.moment_count) * sizeof(float));
+        kernels::Memset(
+            group.v, 0,
+            static_cast<std::size_t>(group.moment_count) * sizeof(float));
       }
     }
 
@@ -328,17 +324,16 @@ class NanochatOptimizer final : public Optimizer {
           static_cast<ComputeType*>(kernels::Alloc(ElementBytes(mat_total)));
       group.buf1 = static_cast<float*>(
           kernels::Alloc(static_cast<std::size_t>(mat_total) * sizeof(float)));
-      group.buf2 = static_cast<float*>(
-          kernels::Alloc(static_cast<std::size_t>(group.buf2_len) *
-                         sizeof(float)));
+      group.buf2 = static_cast<float*>(kernels::Alloc(
+          static_cast<std::size_t>(group.buf2_len) * sizeof(float)));
       if (mat_total > 0) {
         kernels::Memset(group.buf1, 0,
                         static_cast<std::size_t>(mat_total) * sizeof(float));
       }
       if (group.buf2_len > 0) {
-        kernels::Memset(group.buf2, 0,
-                        static_cast<std::size_t>(group.buf2_len) *
-                            sizeof(float));
+        kernels::Memset(
+            group.buf2, 0,
+            static_cast<std::size_t>(group.buf2_len) * sizeof(float));
       }
     }
   }

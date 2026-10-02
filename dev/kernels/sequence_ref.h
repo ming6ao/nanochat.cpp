@@ -55,8 +55,7 @@ inline std::vector<float> AttentionForward(const AttentionParams& params,
                           : 1.0f / std::sqrt(static_cast<float>(dim));
   std::vector<float> out(static_cast<std::size_t>(batch) * seq * heads * dim,
                          0.0f);
-  stats->assign(
-      static_cast<std::size_t>(batch) * heads * seq * 2, 0.0f);
+  stats->assign(static_cast<std::size_t>(batch) * heads * seq * 2, 0.0f);
   std::vector<float> acc(dim, 0.0f);
 
   for (int b = 0; b < batch; ++b) {
@@ -119,14 +118,11 @@ inline std::vector<float> AttentionForward(const AttentionParams& params,
   return out;
 }
 
-inline void AttentionBackward(const AttentionParams& params,
-                              const std::vector<float>& q,
-                              const std::vector<float>& k,
-                              const std::vector<float>& v,
-                              const std::vector<float>& stats,
-                              const std::vector<float>& dout,
-                              std::vector<float>* dq, std::vector<float>* dk,
-                              std::vector<float>* dv) {
+inline void AttentionBackward(
+    const AttentionParams& params, const std::vector<float>& q,
+    const std::vector<float>& k, const std::vector<float>& v,
+    const std::vector<float>& stats, const std::vector<float>& dout,
+    std::vector<float>* dq, std::vector<float>* dk, std::vector<float>* dv) {
   const int batch = params.batch;
   const int seq = params.seq;
   const int heads = params.num_heads;
@@ -170,8 +166,8 @@ inline void AttentionBackward(const AttentionParams& params,
             dot += static_cast<double>(q[qbase + d]) *
                    static_cast<double>(k[kbase + d]);
           }
-          const float p = std::exp(scale * static_cast<float>(dot) - row_max) *
-                          inv;
+          const float p =
+              std::exp(scale * static_cast<float>(dot) - row_max) * inv;
           probs[j] = p;
           double dpd = 0.0;
           for (int d = 0; d < dim; ++d) {
@@ -229,8 +225,7 @@ inline std::vector<float> ClassifierForward(const ClassifierParams& params,
       sum_exp += std::exp(static_cast<double>(z - row_max));
     }
     const float z_target = cap * std::tanh(logits[base + target] / cap);
-    losses[r] =
-        static_cast<float>(std::log(sum_exp)) + row_max - z_target;
+    losses[r] = static_cast<float>(std::log(sum_exp)) + row_max - z_target;
   }
   return losses;
 }
@@ -287,10 +282,9 @@ inline std::vector<float> EmbeddingForward(int tokens, int dim,
 
 // Mirrors the CPU contract: zero only the touched rows, then add. `dtable_init`
 // is the incoming (persistent) gradient buffer.
-inline std::vector<float> EmbeddingBackward(int tokens, int dim,
-                                            const std::vector<int>& ids,
-                                            const std::vector<float>& dout,
-                                            const std::vector<float>& dtable_init) {
+inline std::vector<float> EmbeddingBackward(
+    int tokens, int dim, const std::vector<int>& ids,
+    const std::vector<float>& dout, const std::vector<float>& dtable_init) {
   std::vector<float> dtable = dtable_init;
   for (int i = 0; i < tokens; ++i) {
     float* row = dtable.data() + static_cast<std::size_t>(ids[i]) * dim;

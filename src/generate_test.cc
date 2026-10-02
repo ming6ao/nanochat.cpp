@@ -60,9 +60,8 @@ Config TinyConfig() {
 double MaxDiff(const std::vector<float>& got, const std::vector<float>& want) {
   double worst = 0.0;
   for (std::size_t i = 0; i < got.size(); ++i) {
-    worst = std::max(
-        worst,
-        std::fabs(static_cast<double>(got[i]) - static_cast<double>(want[i])));
+    worst = std::max(worst, std::fabs(static_cast<double>(got[i]) -
+                                      static_cast<double>(want[i])));
   }
   return worst;
 }
@@ -137,8 +136,8 @@ void Run() {
               prefill_error);
 
   std::vector<float> decode_logits(static_cast<std::size_t>(vocab));
-  nanochat::DecodeLogits(model.get(), tokens[static_cast<std::size_t>(
-                                          prefill_len)],
+  nanochat::DecodeLogits(model.get(),
+                         tokens[static_cast<std::size_t>(prefill_len)],
                          kv.get(), decode_logits.data());
   if (kv->pos() != prefill_len + 1) {
     Fail("decode position: got " + std::to_string(kv->pos()) + " want " +
@@ -159,8 +158,8 @@ void Run() {
 
   SampleParams greedy;
   greedy.temperature = 0.0f;
-  const int greedy_id = nanochat::Decode(model.get(), tokens[prefill_len],
-                                         kv2.get(), greedy);
+  const int greedy_id =
+      nanochat::Decode(model.get(), tokens[prefill_len], kv2.get(), greedy);
   // The greedy id must be the argmax of the reference logits.
   int argmax = 0;
   for (int v = 1; v < vocab; ++v) {

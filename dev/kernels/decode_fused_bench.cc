@@ -262,9 +262,8 @@ nanochat::AttentionParams AttentionParamsFor(const Config& c, int kv_len) {
 
 // Shared step body, parameterised on how a GEMM is issued and whether the
 // non-GEMM ops are the seam kernels or the local capture-safe mirrors.
-template <typename GemmFn, typename NormFn, typename QkPrepFn,
-          typename AttnFn, typename PointFn, typename EmbedFn,
-          typename CopyFn>
+template <typename GemmFn, typename NormFn, typename QkPrepFn, typename AttnFn,
+          typename PointFn, typename EmbedFn, typename CopyFn>
 void RunDecodeStep(DecodeModel* m, const GemmFn& gemm, const NormFn& norm,
                    const QkPrepFn& qkprep, const AttnFn& attn,
                    const PointFn& point, const EmbedFn& embed,
@@ -289,13 +288,12 @@ void RunDecodeStep(DecodeModel* m, const GemmFn& gemm, const NormFn& norm,
     attn(pos + 1, q, ck, cv, m->attn.ptr);
     gemm(RowGemm(c.d_model, m->qdim), m->attn.ptr, m->LayerWo(l),
          m->attnout.ptr);
-    point(nanochat::PointwiseOp::kScaleAdd, c.d_model, m->x.ptr,
-          m->attnout.ptr, 1.0f, 1.0f, m->x.ptr);
+    point(nanochat::PointwiseOp::kScaleAdd, c.d_model, m->x.ptr, m->attnout.ptr,
+          1.0f, 1.0f, m->x.ptr);
 
     // MLP block.
     norm(m->x.ptr, m->xn.ptr);
-    gemm(RowGemm(m->mlp_dim, c.d_model), m->xn.ptr, m->LayerWfc(l),
-         m->pre.ptr);
+    gemm(RowGemm(m->mlp_dim, c.d_model), m->xn.ptr, m->LayerWfc(l), m->pre.ptr);
     point(nanochat::PointwiseOp::kReluSquare, m->mlp_dim, m->pre.ptr, nullptr,
           0.0f, 0.0f, m->act.ptr);
     gemm(RowGemm(c.d_model, m->mlp_dim), m->act.ptr, m->LayerWproj(l),
@@ -360,9 +358,8 @@ void RunGraphPath(DecodeModel* m, cublasHandle_t handle, cudaStream_t stream,
   const Config& c = m->cfg;
 
   auto gemm = [&](const GemmParams& p, const ComputeType* a,
-                  const ComputeType* b, ComputeType* out) {
-    DevGemm(handle, p, a, b, out);
-  };
+                  const ComputeType* b,
+                  ComputeType* out) { DevGemm(handle, p, a, b, out); };
   auto norm = [&](const ComputeType* x, ComputeType* out) {
     nanochat::dev::DecodeRmsNormFwd(stream, 1, c.d_model, 1e-6f, x, out,
                                     m->rstd.ptr);
@@ -513,8 +510,8 @@ int main() {
 
   std::printf("  eager seam      : %.4f ms/token  %.1f token/s\n", eager_ms,
               eager_tok_s);
-  std::printf("  cuBLAS+graphs   : %.4f ms/token  %.1f token/s\n",
-              graph_ms_per, graph_tok_s);
+  std::printf("  cuBLAS+graphs   : %.4f ms/token  %.1f token/s\n", graph_ms_per,
+              graph_tok_s);
   std::printf("  graph speedup   : %.2fx\n", eager_ms / graph_ms_per);
   std::printf(
       "  note: persistent/MMA decode megakernel is sm_75+ only; this host is "

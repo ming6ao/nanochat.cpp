@@ -91,8 +91,8 @@ void CheckClassifier(const Fixture& fixture) {
 
   const std::int32_t* targets = targets_t.i32();
 
-  DevBuf<ComputeType> logits_dev(ToStorage(
-      std::vector<float>(raw.f32(), raw.f32() + raw.numel())));
+  DevBuf<ComputeType> logits_dev(
+      ToStorage(std::vector<float>(raw.f32(), raw.f32() + raw.numel())));
   DevBuf<ComputeType> losses_dev(rows);
   nanochat::kernels::ClassifierForward(p, logits_dev.ptr, targets,
                                        losses_dev.ptr);
@@ -151,11 +151,11 @@ void CheckEmbedding(const Fixture& fixture) {
   nanochat::kernels::EmbeddingForward(tokens_count, dim, ids, table_dev.ptr,
                                       out_dev.ptr);
   nanochat::kernels::Synchronize();
-  CheckVectorClose(FromStorage(out_dev.Download()),
-                   EmbeddingForward(tokens_count, dim,
-                                    std::vector<int>(ids, ids + tokens_count),
-                                    table),
-                   1e-6, "oracle embedding fwd");
+  CheckVectorClose(
+      FromStorage(out_dev.Download()),
+      EmbeddingForward(tokens_count, dim,
+                       std::vector<int>(ids, ids + tokens_count), table),
+      1e-6, "oracle embedding fwd");
 
   // Scatter-add backward on the same oracle data, against the host reference.
   Rng rng;
@@ -166,12 +166,11 @@ void CheckEmbedding(const Fixture& fixture) {
   nanochat::kernels::EmbeddingBackward(tokens_count, dim, ids, dout_dev.ptr,
                                        dtable_dev.ptr);
   nanochat::kernels::Synchronize();
-  CheckVectorClose(
-      FromStorage(dtable_dev.Download()),
-      EmbeddingBackward(tokens_count, dim,
-                        std::vector<int>(ids, ids + tokens_count), dout0,
-                        dtable_init),
-      1e-6, "oracle embedding bwd");
+  CheckVectorClose(FromStorage(dtable_dev.Download()),
+                   EmbeddingBackward(tokens_count, dim,
+                                     std::vector<int>(ids, ids + tokens_count),
+                                     dout0, dtable_init),
+                   1e-6, "oracle embedding bwd");
 }
 
 void CheckAttention(const Fixture& fixture) {

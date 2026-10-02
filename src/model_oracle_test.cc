@@ -108,13 +108,15 @@ std::string LocateFixture(int argc, char** argv) {
 
 Config ConfigFromFixture(const Fixture& fixture) {
   Config config;
-  config.num_layers = static_cast<int>(fixture.Get("config/layers").scalar_int());
+  config.num_layers =
+      static_cast<int>(fixture.Get("config/layers").scalar_int());
   config.num_heads = static_cast<int>(fixture.Get("config/heads").scalar_int());
   config.num_kv_heads =
       static_cast<int>(fixture.Get("config/kv_heads").scalar_int());
   config.hidden_dim = static_cast<int>(fixture.Get("config/embd").scalar_int());
   config.seq_len = static_cast<int>(fixture.Get("config/seq").scalar_int());
-  config.vocab_size = static_cast<int>(fixture.Get("config/vocab").scalar_int());
+  config.vocab_size =
+      static_cast<int>(fixture.Get("config/vocab").scalar_int());
   config.padded_vocab_size =
       static_cast<int>(fixture.Get("config/padded_vocab").scalar_int());
   config.rope_base = 100000.0f;
@@ -205,14 +207,13 @@ void RunChecks(const Fixture& fixture) {
   const float want_loss = fixture.Get("forward/loss").scalar_f32();
   if (std::fabs(static_cast<double>(loss) - static_cast<double>(want_loss)) >
       kForwardTolerance) {
-    Fail(Format("loss: got %.9g want %.9g (|diff|=%.3g)", loss, want_loss,
-                std::fabs(static_cast<double>(loss) -
-                          static_cast<double>(want_loss))));
+    Fail(Format(
+        "loss: got %.9g want %.9g (|diff|=%.3g)", loss, want_loss,
+        std::fabs(static_cast<double>(loss) - static_cast<double>(want_loss))));
   }
-  g_max_forward_error =
-      std::max(g_max_forward_error,
-               std::fabs(static_cast<double>(loss) -
-                         static_cast<double>(want_loss)));
+  g_max_forward_error = std::max(
+      g_max_forward_error,
+      std::fabs(static_cast<double>(loss) - static_cast<double>(want_loss)));
 
   // Raw logits: model [rows, padded], fixture [batch, seq, vocab]. Stage the
   // whole device buffer once.
@@ -252,11 +253,11 @@ void RunChecks(const Fixture& fixture) {
     double max_error = 0.0;
     for (std::int64_t i = 0; i < rows * vocab; ++i) {
       const float got =
-          kSoftcap * std::tanh(raw_flat[static_cast<std::size_t>(i)] / kSoftcap);
+          kSoftcap *
+          std::tanh(raw_flat[static_cast<std::size_t>(i)] / kSoftcap);
       max_error = std::max(
-          max_error,
-          std::fabs(static_cast<double>(got) -
-                    static_cast<double>(want_logits.f32()[i])));
+          max_error, std::fabs(static_cast<double>(got) -
+                               static_cast<double>(want_logits.f32()[i])));
     }
     g_max_forward_error = std::max(g_max_forward_error, max_error);
     if (max_error > kForwardTolerance) {
@@ -325,8 +326,9 @@ int main(int argc, char** argv) {
               fixture.size());
   RunChecks(fixture);
 
-  std::printf("model_oracle_test: max forward error %.3g, max backward error %.3g\n",
-              g_max_forward_error, g_max_backward_error);
+  std::printf(
+      "model_oracle_test: max forward error %.3g, max backward error %.3g\n",
+      g_max_forward_error, g_max_backward_error);
   if (g_failures != 0) {
     std::fprintf(stderr, "model_oracle_test: %d check(s) failed\n", g_failures);
     return 1;

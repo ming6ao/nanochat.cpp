@@ -130,8 +130,7 @@ double NumMatmulParams(const Config& config) {
 std::string ToLower(const std::string& value) {
   std::string result = value;
   for (char& c : result) {
-    c = static_cast<char>(
-        std::tolower(static_cast<unsigned char>(c)));
+    c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
   }
   return result;
 }
@@ -161,9 +160,8 @@ double EstimatePrefillFlops(const Config& config, int num_tokens) {
     const int window = left < 0 ? num_tokens : std::min(left, num_tokens);
     if (window <= 0) continue;
     // Ramp up to the window, then attend a flat `window` per new token.
-    const double attended =
-        static_cast<double>(window) * (window + 1) / 2.0 +
-        static_cast<double>(num_tokens - window) * window;
+    const double attended = static_cast<double>(window) * (window + 1) / 2.0 +
+                            static_cast<double>(num_tokens - window) * window;
     attention += 4.0 * heads * head_dim * attended;
   }
   return 2.0 * NumMatmulParams(config) * num_tokens + attention;
@@ -331,8 +329,7 @@ TrainLoop::TrainLoop(TrainConfig config) : config_(std::move(config)) {
   }
   config_.scheduler = scheduler_config;
   scheduler_ = std::make_unique<Scheduler>(scheduler_config);
-  optimizer_ =
-      CreateOptimizer(model_.get(), config_.optimizer, *scheduler_);
+  optimizer_ = CreateOptimizer(model_.get(), config_.optimizer, *scheduler_);
   logger_ = std::make_unique<Logger>(config_.log_path);
 
   train_loader_ = std::make_unique<DataLoader>(
@@ -365,8 +362,7 @@ void TrainLoop::Save(int step) {
 float TrainLoop::Run() {
   const int seq = config_.effective_seq();
   const int batch = config_.batch;
-  const std::int64_t tokens_per_step =
-      static_cast<std::int64_t>(batch) * seq;
+  const std::int64_t tokens_per_step = static_cast<std::int64_t>(batch) * seq;
   logger_->Info("training for " + std::to_string(config_.num_iterations) +
                 " steps, batch " + std::to_string(batch) + " x " +
                 std::to_string(seq));

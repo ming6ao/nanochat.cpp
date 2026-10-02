@@ -170,8 +170,9 @@ int Run() {
       for (std::int64_t i = 0; i < count; ++i) {
         const float value = rng.Uniform();
         dir[k][static_cast<std::size_t>(i)] = value;
-        expected += static_cast<double>(analytic[k][static_cast<std::size_t>(i)]) *
-                    static_cast<double>(value);
+        expected +=
+            static_cast<double>(analytic[k][static_cast<std::size_t>(i)]) *
+            static_cast<double>(value);
       }
     }
 
@@ -183,8 +184,8 @@ int Run() {
                        h * dir[k][static_cast<std::size_t>(i)]);
       }
     }
-    const float loss_plus = model->ForwardLoss(tokens.data(), targets.data(),
-                                               batch, seq);
+    const float loss_plus =
+        model->ForwardLoss(tokens.data(), targets.data(), batch, seq);
 
     // p - h*d
     for (std::size_t k = 0; k < views.size(); ++k) {
@@ -194,8 +195,8 @@ int Run() {
                        h * dir[k][static_cast<std::size_t>(i)]);
       }
     }
-    const float loss_minus = model->ForwardLoss(tokens.data(), targets.data(),
-                                                batch, seq);
+    const float loss_minus =
+        model->ForwardLoss(tokens.data(), targets.data(), batch, seq);
 
     // Restore exactly.
     for (std::size_t k = 0; k < views.size(); ++k) {
@@ -213,8 +214,8 @@ int Run() {
         "|diff| %.3g\n",
         direction, expected, numeric, error);
     if (error > tolerance * (1.0 + std::fabs(numeric))) {
-      Fail(Format("direction %d mismatch: analytic %.6g numeric %.6g", direction,
-                  expected, numeric));
+      Fail(Format("direction %d mismatch: analytic %.6g numeric %.6g",
+                  direction, expected, numeric));
     }
   }
   return g_failures == 0 ? 0 : 1;

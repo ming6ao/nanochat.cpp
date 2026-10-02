@@ -1,7 +1,8 @@
 // `eval_main` — forward-only bits-per-byte evaluation. Reads pre-tokenized
 // shards, builds the model, optionally loads a checkpoint, and prints the bpb.
 //
-//   tools/nanochat eval -- <eval_main> --val-shard data/val.bin --model model.ckpt
+//   tools/nanochat eval -- <eval_main> --val-shard data/val.bin --model
+//   model.ckpt
 
 #include <cstdio>
 #include <memory>

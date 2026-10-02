@@ -28,8 +28,7 @@ using namespace nanochat::dev::optimref;
 
 // Returns the per-matrix size of buf2 for the CPU reference's `red_dim` rule.
 int RedIndex(int rows, int cols, int red_dim) {
-  const bool reduce_cols =
-      red_dim == -1 || (red_dim != -2 && rows >= cols);
+  const bool reduce_cols = red_dim == -1 || (red_dim != -2 && rows >= cols);
   return reduce_cols ? rows : cols;
 }
 

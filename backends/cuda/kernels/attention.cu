@@ -31,10 +31,13 @@ using cuda_kernels::KvHeadDev;
 using cuda_kernels::OnlineSoftmaxTile;
 using cuda_kernels::SoftmaxGradTile;
 
-__global__ void AttentionForwardKernel(
-    const AttentionParams params, float scale, const ComputeType* __restrict__ q,
-    const ComputeType* __restrict__ k, const ComputeType* __restrict__ v,
-    ComputeType* __restrict__ out, float* __restrict__ stats) {
+__global__ void AttentionForwardKernel(const AttentionParams params,
+                                       float scale,
+                                       const ComputeType* __restrict__ q,
+                                       const ComputeType* __restrict__ k,
+                                       const ComputeType* __restrict__ v,
+                                       ComputeType* __restrict__ out,
+                                       float* __restrict__ stats) {
   const int row = blockIdx.x;
   const int t = row % params.seq;
   const int h = (row / params.seq) % params.num_heads;
@@ -58,11 +61,11 @@ __global__ void AttentionForwardKernel(
 }
 
 __global__ void AttentionBackwardKernel(
-    const AttentionParams params, float scale, const ComputeType* __restrict__ q,
-    const ComputeType* __restrict__ k, const ComputeType* __restrict__ v,
-    const float* __restrict__ stats, const ComputeType* __restrict__ dout,
-    ComputeType* __restrict__ dq, ComputeType* __restrict__ dk,
-    ComputeType* __restrict__ dv) {
+    const AttentionParams params, float scale,
+    const ComputeType* __restrict__ q, const ComputeType* __restrict__ k,
+    const ComputeType* __restrict__ v, const float* __restrict__ stats,
+    const ComputeType* __restrict__ dout, ComputeType* __restrict__ dq,
+    ComputeType* __restrict__ dk, ComputeType* __restrict__ dv) {
   const int row = blockIdx.x;
   const int t = row % params.seq;
   const int h = (row / params.seq) % params.num_heads;

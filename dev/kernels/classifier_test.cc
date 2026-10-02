@@ -63,8 +63,7 @@ void RunCase(int rows, int vocab, int padded, bool use_ignore,
                                         dlogits.ptr);
   nanochat::kernels::Synchronize();
 
-  const std::vector<float> ref_dlogits =
-      ClassifierBackward(p, logits, targets);
+  const std::vector<float> ref_dlogits = ClassifierBackward(p, logits, targets);
   CheckVectorClose(FromStorage(dlogits.Download()), ref_dlogits, 1e-4,
                    (std::string(name) + " bwd").c_str());
 

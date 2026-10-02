@@ -35,8 +35,8 @@ void RunCase(const QkPrepParams& p) {
   std::vector<float> sin(static_cast<std::size_t>(p.seq) * half, 0.0f);
   for (int t = 0; t < p.seq; ++t) {
     for (int d = 0; d < half; ++d) {
-      const float theta = 0.1f * static_cast<float>(t + 1) *
-                          static_cast<float>(d + 1);
+      const float theta =
+          0.1f * static_cast<float>(t + 1) * static_cast<float>(d + 1);
       cos[static_cast<std::size_t>(t) * half + d] = std::cos(theta);
       sin[static_cast<std::size_t>(t) * half + d] = std::sin(theta);
     }

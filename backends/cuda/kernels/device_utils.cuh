@@ -150,8 +150,8 @@ __device__ __forceinline__ float RsqrtScale(float sum_sq, int dim, float eps) {
 
 // In-place RoPE rotation of one (x1, x2) pair. The sign convention matches the
 // CPU reference: (x1*c + x2*s, -x1*s + x2*c).
-__device__ __forceinline__ void RotatePairInPlace(float& x1, float& x2,
-                                                  float c, float s) {
+__device__ __forceinline__ void RotatePairInPlace(float& x1, float& x2, float c,
+                                                  float s) {
   const float t1 = x1 * c + x2 * s;
   const float t2 = -x1 * s + x2 * c;
   x1 = t1;
@@ -288,7 +288,8 @@ __device__ __forceinline__ void SoftmaxGradTile(
         k + (static_cast<long long>(j) * kv_heads + kvh) * dim;
     const ComputeType* v_row =
         v + (static_cast<long long>(j) * kv_heads + kvh) * dim;
-    const float pj = expf(scale * AttentionDot(q_row, k_row, dim) - row_max) * inv;
+    const float pj =
+        expf(scale * AttentionDot(q_row, k_row, dim) - row_max) * inv;
     float dp = 0.0f;
     for (int d = 0; d < dim; ++d) {
       dp += AsFloatDev(dout_row[d]) * AsFloatDev(v_row[d]);

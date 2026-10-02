@@ -10,7 +10,8 @@
 // no compute logic here and no vendor dependency, so it is safe to include from
 // any entry point.
 //
-// tools/nanochat sets NANOCHAT_SANDBOX to the profile name; see docs/sandbox.md.
+// tools/nanochat sets NANOCHAT_SANDBOX to the profile name; see
+// docs/sandbox.md.
 
 namespace nanochat {
 

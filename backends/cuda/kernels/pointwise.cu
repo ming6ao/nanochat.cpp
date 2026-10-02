@@ -55,11 +55,13 @@ __global__ void PointwiseForwardKernel(const PointwiseOp op, int n,
   out[i] = ToComputeDev(result);
 }
 
-__global__ void PointwiseBackwardKernel(
-    const PointwiseOp op, int n, const ComputeType* __restrict__ a,
-    const ComputeType* __restrict__ b, const ComputeType* __restrict__ dy,
-    float alpha, float beta, ComputeType* __restrict__ da,
-    ComputeType* __restrict__ db) {
+__global__ void PointwiseBackwardKernel(const PointwiseOp op, int n,
+                                        const ComputeType* __restrict__ a,
+                                        const ComputeType* __restrict__ b,
+                                        const ComputeType* __restrict__ dy,
+                                        float alpha, float beta,
+                                        ComputeType* __restrict__ da,
+                                        ComputeType* __restrict__ db) {
   const int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= n) return;
   const float av = AsFloatDev(a[i]);

@@ -131,9 +131,9 @@ TrainModel::TrainModel(const Config& config) : Model(config) {
     lm_head_grad_ = p.grad;
   }
   {
-    const Param& p = AddParam(
-        "transformer.wte.weight",
-        static_cast<std::int64_t>(padded_vocab) * hidden, padded_vocab, hidden);
+    const Param& p = AddParam("transformer.wte.weight",
+                              static_cast<std::int64_t>(padded_vocab) * hidden,
+                              padded_vocab, hidden);
     wte_ = p.value;
     wte_grad_ = p.grad;
   }
@@ -141,9 +141,9 @@ TrainModel::TrainModel(const Config& config) : Model(config) {
     if (!config_.has_value_embedding(i)) continue;
     char name[64];
     std::snprintf(name, sizeof(name), "value_embeds.%d.weight", i);
-    const Param& p = AddParam(
-        name, static_cast<std::int64_t>(padded_vocab) * kv_dim, padded_vocab,
-        kv_dim);
+    const Param& p =
+        AddParam(name, static_cast<std::int64_t>(padded_vocab) * kv_dim,
+                 padded_vocab, kv_dim);
     lweights_[i].value_embeds = p.value;
     lgrads_[i].value_embeds_grad = p.grad;
     lweights_[i].has_ve = true;
@@ -159,8 +159,8 @@ TrainModel::TrainModel(const Config& config) : Model(config) {
     x0_lambda_grad_ = p.grad;
   }
   {
-    const Param& p = AddParam("smear_gate.weight", kSmearChannels, 1,
-                              kSmearChannels);
+    const Param& p =
+        AddParam("smear_gate.weight", kSmearChannels, 1, kSmearChannels);
     smear_gate_ = p.value;
     smear_gate_grad_ = p.grad;
   }
@@ -181,23 +181,23 @@ TrainModel::TrainModel(const Config& config) : Model(config) {
     char name[64];
     std::snprintf(name, sizeof(name), "transformer.h.%d.attn.c_q.weight", i);
     {
-      const Param& p = AddParam(name,
-                                static_cast<std::int64_t>(query_dim) * hidden,
-                                query_dim, hidden);
+      const Param& p =
+          AddParam(name, static_cast<std::int64_t>(query_dim) * hidden,
+                   query_dim, hidden);
       w.c_q = p.value;
       g.c_q_grad = p.grad;
     }
     std::snprintf(name, sizeof(name), "transformer.h.%d.attn.c_k.weight", i);
     {
-      const Param& p = AddParam(name, static_cast<std::int64_t>(kv_dim) * hidden,
-                                kv_dim, hidden);
+      const Param& p = AddParam(
+          name, static_cast<std::int64_t>(kv_dim) * hidden, kv_dim, hidden);
       w.c_k = p.value;
       g.c_k_grad = p.grad;
     }
     std::snprintf(name, sizeof(name), "transformer.h.%d.attn.c_v.weight", i);
     {
-      const Param& p = AddParam(name, static_cast<std::int64_t>(kv_dim) * hidden,
-                                kv_dim, hidden);
+      const Param& p = AddParam(
+          name, static_cast<std::int64_t>(kv_dim) * hidden, kv_dim, hidden);
       w.c_v = p.value;
       g.c_v_grad = p.grad;
     }
@@ -211,24 +211,22 @@ TrainModel::TrainModel(const Config& config) : Model(config) {
     if (config_.has_value_embedding(i)) {
       std::snprintf(name, sizeof(name), "transformer.h.%d.attn.ve_gate.weight",
                     i);
-      const Param& p = AddParam(name, kVeGateChannels * kv_heads, kv_heads,
-                                kVeGateChannels);
+      const Param& p =
+          AddParam(name, kVeGateChannels * kv_heads, kv_heads, kVeGateChannels);
       w.ve_gate = p.value;
       g.ve_gate_grad = p.grad;
     }
     std::snprintf(name, sizeof(name), "transformer.h.%d.mlp.c_fc.weight", i);
     {
-      const Param& p = AddParam(name,
-                                static_cast<std::int64_t>(mlp_dim) * hidden,
-                                mlp_dim, hidden);
+      const Param& p = AddParam(
+          name, static_cast<std::int64_t>(mlp_dim) * hidden, mlp_dim, hidden);
       w.c_fc = p.value;
       g.c_fc_grad = p.grad;
     }
     std::snprintf(name, sizeof(name), "transformer.h.%d.mlp.c_proj.weight", i);
     {
-      const Param& p = AddParam(name,
-                                static_cast<std::int64_t>(hidden) * mlp_dim,
-                                hidden, mlp_dim);
+      const Param& p = AddParam(
+          name, static_cast<std::int64_t>(hidden) * mlp_dim, hidden, mlp_dim);
       w.c_proj_mlp = p.value;
       g.c_proj_mlp_grad = p.grad;
     }
@@ -280,7 +278,8 @@ void TrainModel::InitWeights(std::uint64_t seed) {
 
   Rng rng(seed);
 
-  FillNormal(wte_, static_cast<std::int64_t>(padded_vocab) * hidden, 0.8f, &rng);
+  FillNormal(wte_, static_cast<std::int64_t>(padded_vocab) * hidden, 0.8f,
+             &rng);
   FillNormal(lm_head_, static_cast<std::int64_t>(padded_vocab) * hidden, 0.001f,
              &rng);
 
@@ -300,8 +299,7 @@ void TrainModel::InitWeights(std::uint64_t seed) {
                   resid_host.size() * sizeof(ComputeType),
                   CopyDir::kHostToDevice);
   kernels::Memcpy(x0_lambda_, x0_host.data(),
-                  x0_host.size() * sizeof(ComputeType),
-                  CopyDir::kHostToDevice);
+                  x0_host.size() * sizeof(ComputeType), CopyDir::kHostToDevice);
   const ComputeType smear_lambda_host = ToC(0.0f);
   const ComputeType backout_lambda_host = ToC(0.2f);
   kernels::Memcpy(smear_lambda_, &smear_lambda_host, sizeof(ComputeType),
@@ -322,8 +320,8 @@ void TrainModel::InitWeights(std::uint64_t seed) {
     FillZero(const_cast<ComputeType*>(w.c_proj_attn),
              static_cast<std::int64_t>(hidden) * hidden);
     FillUniform(const_cast<ComputeType*>(w.c_fc),
-                static_cast<std::int64_t>(mlp_dim) * hidden, -0.4f * s, 0.4f * s,
-                &rng);
+                static_cast<std::int64_t>(mlp_dim) * hidden, -0.4f * s,
+                0.4f * s, &rng);
     FillZero(const_cast<ComputeType*>(w.c_proj_mlp),
              static_cast<std::int64_t>(hidden) * mlp_dim);
     if (w.has_ve) {
@@ -391,8 +389,7 @@ void TrainModel::BuildWorkspace(int batch, int seq) {
   const int padded_vocab = config_.padded_vocab_size;
 
   const std::int64_t rows = static_cast<std::int64_t>(batch) * seq;
-  const std::int64_t stats =
-      static_cast<std::int64_t>(batch) * heads * seq * 2;
+  const std::int64_t stats = static_cast<std::int64_t>(batch) * heads * seq * 2;
 
   struct CSlot {
     ComputeType** dest;
@@ -481,8 +478,8 @@ void TrainModel::BuildWorkspace(int batch, int seq) {
   workspace_.Reserve(bytes);
   workspace_.Reset();
   for (const CSlot& slot : compute_slots) {
-    *slot.dest = workspace_.Alloc<ComputeType>(
-        static_cast<std::size_t>(slot.count));
+    *slot.dest =
+        workspace_.Alloc<ComputeType>(static_cast<std::size_t>(slot.count));
   }
   for (const FSlot& slot : float_slots) {
     *slot.dest = workspace_.Alloc<float>(static_cast<std::size_t>(slot.count));
@@ -523,8 +520,8 @@ float TrainModel::ForwardLoss(const int* tokens, const int* targets, int batch,
   const std::int64_t rows = static_cast<std::int64_t>(batch) * seq;
 
   // Embedding -> norm -> smear.
-  kernels::EmbeddingForward(static_cast<int>(rows), hidden, tokens_.data(), wte_,
-                            emb_raw_);
+  kernels::EmbeddingForward(static_cast<int>(rows), hidden, tokens_.data(),
+                            wte_, emb_raw_);
   ops::RmsNormForward(rows, hidden, kRmsEps, emb_raw_, emb_norm_, rstd_emb_);
   ops::SmearForward(batch, seq, hidden, emb_norm_, smear_gate_,
                     ReadHost(smear_lambda_), x0_, smear_sig_);
@@ -547,13 +544,13 @@ float TrainModel::ForwardLoss(const int* tokens, const int* targets, int batch,
   for (int i = 0; i < layers; ++i) {
     shape.window_left = config_.window_left(i);
     ops::BlockForward(shape, lweights_[i], lacts_[i], tokens_.data(),
-                      cos_table(), sin_table(), x, x0_,
-                      ReadHost(resid_ + i), ReadHost(x0_lambda_ + i));
+                      cos_table(), sin_table(), x, x0_, ReadHost(resid_ + i),
+                      ReadHost(x0_lambda_ + i));
     if (i == backout_layer_) {
-      kernels::Memcpy(x_backout_, lacts_[i].x_out,
-                      static_cast<std::size_t>(rows * hidden) *
-                          sizeof(ComputeType),
-                      CopyDir::kDeviceToDevice);
+      kernels::Memcpy(
+          x_backout_, lacts_[i].x_out,
+          static_cast<std::size_t>(rows * hidden) * sizeof(ComputeType),
+          CopyDir::kDeviceToDevice);
     }
     x = lacts_[i].x_out;
   }
@@ -580,7 +577,8 @@ float TrainModel::ForwardLoss(const int* tokens, const int* targets, int batch,
                   CopyDir::kDeviceToHost);
   double total = 0.0;
   for (std::int64_t m = 0; m < rows; ++m) {
-    total += static_cast<double>(AsF(losses_host_[static_cast<std::size_t>(m)]));
+    total +=
+        static_cast<double>(AsF(losses_host_[static_cast<std::size_t>(m)]));
   }
   return static_cast<float>(total / static_cast<double>(rows));
 }
@@ -613,10 +611,9 @@ void TrainModel::Backward() {
   classifier.ignore_index = -1;
   kernels::ClassifierBackward(classifier, raw_logits_, targets_.data(),
                               dlogits_);
-  kernels::PointwiseForward(PointwiseOp::kScale,
-                            static_cast<int>(rows * padded_vocab), dlogits_,
-                            nullptr, 1.0f / static_cast<float>(rows), 0.0f,
-                            dlogits_);
+  kernels::PointwiseForward(
+      PointwiseOp::kScale, static_cast<int>(rows * padded_vocab), dlogits_,
+      nullptr, 1.0f / static_cast<float>(rows), 0.0f, dlogits_);
 
   ops::LinearWgrad(x_final_norm_, dlogits_, lm_head_grad_, rows, hidden,
                    padded_vocab);
@@ -649,22 +646,21 @@ void TrainModel::Backward() {
   ComputeType* dcur = g_a_;
   ComputeType* dnext = g_b_;
   kernels::Memcpy(dcur, dx_final_pre_,
-                  static_cast<std::size_t>(rows * hidden) *
-                      sizeof(ComputeType),
+                  static_cast<std::size_t>(rows * hidden) * sizeof(ComputeType),
                   CopyDir::kDeviceToDevice);
   for (int i = layers - 1; i >= 0; --i) {
     if (i == backout_layer_) {
-      kernels::PointwiseForward(
-          PointwiseOp::kScaleAdd, static_cast<int>(rows * hidden), dcur,
-          dbackout_, 1.0f, 1.0f, dcur);
+      kernels::PointwiseForward(PointwiseOp::kScaleAdd,
+                                static_cast<int>(rows * hidden), dcur,
+                                dbackout_, 1.0f, 1.0f, dcur);
     }
     shape.window_left = config_.window_left(i);
     const ComputeType* x_in = (i == 0) ? x0_ : lacts_[i - 1].x_out;
     ops::BlockBackward(shape, lweights_[i], lacts_[i], lgrads_[i],
-                       block_scratch_, tokens_.data(), cos_table(),
-                       sin_table(), ReadHost(resid_ + i),
-                       ReadHost(x0_lambda_ + i), x_in, x0_, dcur, dnext,
-                       x0_acc_, resid_grad_ + i, x0_lambda_grad_ + i);
+                       block_scratch_, tokens_.data(), cos_table(), sin_table(),
+                       ReadHost(resid_ + i), ReadHost(x0_lambda_ + i), x_in,
+                       x0_, dcur, dnext, x0_acc_, resid_grad_ + i,
+                       x0_lambda_grad_ + i);
     std::swap(dcur, dnext);
   }
 
@@ -764,7 +760,8 @@ void TrainModel::Load(const std::string& path) {
           std::min<std::int64_t>(p.count, static_cast<std::int64_t>(elements));
       std::vector<ComputeType> raw(static_cast<std::size_t>(limit));
       for (std::int64_t i = 0; i < limit; ++i) {
-        raw[static_cast<std::size_t>(i)] = ToC(buffer[static_cast<std::size_t>(i)]);
+        raw[static_cast<std::size_t>(i)] =
+            ToC(buffer[static_cast<std::size_t>(i)]);
       }
       kernels::Memcpy(p.value, raw.data(),
                       static_cast<std::size_t>(limit) * sizeof(ComputeType),
@@ -786,8 +783,6 @@ float TrainModel::x0_lambda(int layer) const {
 
 float TrainModel::smear_lambda() const { return ReadHost(smear_lambda_); }
 
-float TrainModel::backout_lambda() const {
-  return ReadHost(backout_lambda_);
-}
+float TrainModel::backout_lambda() const { return ReadHost(backout_lambda_); }
 
 }  // namespace nanochat

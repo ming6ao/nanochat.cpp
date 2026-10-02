@@ -31,6 +31,8 @@ namespace {
 using nanochat::AttentionParams;
 using nanochat::ComputeType;
 using nanochat::CopyDir;
+using nanochat::PointwiseOp;
+using nanochat::RmsNormParams;
 using nanochat::kernels::Alloc;
 using nanochat::kernels::AttentionBackward;
 using nanochat::kernels::AttentionForward;
@@ -41,8 +43,6 @@ using nanochat::kernels::Memcpy;
 using nanochat::kernels::PointwiseForward;
 using nanochat::kernels::RmsNormForward;
 using nanochat::kernels::Synchronize;
-using nanochat::PointwiseOp;
-using nanochat::RmsNormParams;
 
 #if defined(NANOCHAT_PRECISION_FP16)
 ComputeType C(float v) { return nanochat::Fp16FromFloat(v); }
@@ -332,9 +332,9 @@ void TestAttention() {
         float row_max = -INFINITY;
         for (int j = 0; j < p.kv_len; ++j) {
           if (!KeyAllowed(p, qpos, j)) continue;
-          const float* krow = kf.data() + kvbase +
-                              (static_cast<long long>(j) * kv_heads + kvh) *
-                                  p.head_dim;
+          const float* krow =
+              kf.data() + kvbase +
+              (static_cast<long long>(j) * kv_heads + kvh) * p.head_dim;
           const float* qrow = qf.data() + qbase;
           float dot = 0.0f;
           for (int d = 0; d < p.head_dim; ++d) dot += qrow[d] * krow[d];
@@ -344,9 +344,9 @@ void TestAttention() {
         float sum_exp = 0.0f;
         for (int j = 0; j < p.kv_len; ++j) {
           if (!KeyAllowed(p, qpos, j)) continue;
-          const float* krow = kf.data() + kvbase +
-                              (static_cast<long long>(j) * kv_heads + kvh) *
-                                  p.head_dim;
+          const float* krow =
+              kf.data() + kvbase +
+              (static_cast<long long>(j) * kv_heads + kvh) * p.head_dim;
           const float* qrow = qf.data() + qbase;
           float dot = 0.0f;
           for (int d = 0; d < p.head_dim; ++d) dot += qrow[d] * krow[d];
@@ -356,12 +356,12 @@ void TestAttention() {
           float acc = 0.0f;
           for (int j = 0; j < p.kv_len; ++j) {
             if (!KeyAllowed(p, qpos, j)) continue;
-            const float* krow = kf.data() + kvbase +
-                                (static_cast<long long>(j) * kv_heads + kvh) *
-                                    p.head_dim;
-            const float* vrow = vf.data() + kvbase +
-                                (static_cast<long long>(j) * kv_heads + kvh) *
-                                    p.head_dim;
+            const float* krow =
+                kf.data() + kvbase +
+                (static_cast<long long>(j) * kv_heads + kvh) * p.head_dim;
+            const float* vrow =
+                vf.data() + kvbase +
+                (static_cast<long long>(j) * kv_heads + kvh) * p.head_dim;
             const float* qrow = qf.data() + qbase;
             float dot = 0.0f;
             for (int dd = 0; dd < p.head_dim; ++dd) dot += qrow[dd] * krow[dd];
@@ -412,12 +412,12 @@ void TestAttention() {
         float weighted_dp = 0.0f;
         for (int j = 0; j < p.kv_len; ++j) {
           if (!KeyAllowed(p, qpos, j)) continue;
-          const float* krow = kf.data() + kvbase +
-                              (static_cast<long long>(j) * kv_heads + kvh) *
-                                  p.head_dim;
-          const float* vrow = vf.data() + kvbase +
-                              (static_cast<long long>(j) * kv_heads + kvh) *
-                                  p.head_dim;
+          const float* krow =
+              kf.data() + kvbase +
+              (static_cast<long long>(j) * kv_heads + kvh) * p.head_dim;
+          const float* vrow =
+              vf.data() + kvbase +
+              (static_cast<long long>(j) * kv_heads + kvh) * p.head_dim;
           const float* qrow = qf.data() + qbase;
           const float* drow = doutf.data() + qbase;
           float dot = 0.0f;
@@ -431,12 +431,12 @@ void TestAttention() {
         }
         for (int j = 0; j < p.kv_len; ++j) {
           if (!KeyAllowed(p, qpos, j)) continue;
-          const float* krow = kf.data() + kvbase +
-                              (static_cast<long long>(j) * kv_heads + kvh) *
-                                  p.head_dim;
-          const float* vrow = vf.data() + kvbase +
-                              (static_cast<long long>(j) * kv_heads + kvh) *
-                                  p.head_dim;
+          const float* krow =
+              kf.data() + kvbase +
+              (static_cast<long long>(j) * kv_heads + kvh) * p.head_dim;
+          const float* vrow =
+              vf.data() + kvbase +
+              (static_cast<long long>(j) * kv_heads + kvh) * p.head_dim;
           const float* qrow = qf.data() + qbase;
           const float* drow = doutf.data() + qbase;
           float dot = 0.0f;
@@ -448,8 +448,8 @@ void TestAttention() {
           const float pj = std::exp(scale * dot - row_max) * inv;
           const float dscale = pj * (dp - weighted_dp) * scale;
           const long long kvoff =
-              kvbase + (static_cast<long long>(j) * kv_heads + kvh) *
-                           p.head_dim;
+              kvbase +
+              (static_cast<long long>(j) * kv_heads + kvh) * p.head_dim;
           for (int d = 0; d < p.head_dim; ++d) {
             ref_dq[qbase + d] += dscale * krow[d];
             ref_dk[kvoff + d] += dscale * qrow[d];

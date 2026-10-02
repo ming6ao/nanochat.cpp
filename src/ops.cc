@@ -18,7 +18,8 @@ namespace {
 // Host staging helpers for the ops that have no device kernel: a device buffer
 // is copied to a host vector, the (unchanged) host math runs, and the result is
 // copied back. Correctness first; these are fusion candidates later.
-std::vector<ComputeType> StageToHost(const ComputeType* src, std::int64_t count) {
+std::vector<ComputeType> StageToHost(const ComputeType* src,
+                                     std::int64_t count) {
   std::vector<ComputeType> host(static_cast<std::size_t>(count));
   if (count > 0) {
     kernels::Memcpy(host.data(), src,
@@ -275,9 +276,9 @@ void ValueResidualBackward(std::int64_t rows, int hidden, int num_kv_heads,
         wgh[static_cast<std::size_t>(kh * kVeGateChannels + j)] =
             ToC(AsF(wgh[static_cast<std::size_t>(kh * kVeGateChannels + j)]) +
                 dpre * AsF(hrow[j]));
-        dhh[static_cast<std::size_t>(m * hidden + j)] =
-            ToC(AsF(dhh[static_cast<std::size_t>(m * hidden + j)]) +
-                dpre * AsF(wh[static_cast<std::size_t>(kh * kVeGateChannels + j)]));
+        dhh[static_cast<std::size_t>(m * hidden + j)] = ToC(
+            AsF(dhh[static_cast<std::size_t>(m * hidden + j)]) +
+            dpre * AsF(wh[static_cast<std::size_t>(kh * kVeGateChannels + j)]));
       }
     }
   }
@@ -292,8 +293,8 @@ void ValueResidualBackward(std::int64_t rows, int hidden, int num_kv_heads,
 
 void MlpForward(const ComputeType* h, const ComputeType* c_fc,
                 const ComputeType* c_proj, std::int64_t rows,
-                std::int64_t hidden, std::int64_t mlp_dim,
-                ComputeType* pre_act, ComputeType* act, ComputeType* scratch,
+                std::int64_t hidden, std::int64_t mlp_dim, ComputeType* pre_act,
+                ComputeType* act, ComputeType* scratch,
                 const ComputeType* x_mid, ComputeType* out) {
   if (rows <= 0 || hidden <= 0 || mlp_dim <= 0) return;
   LinearForward(h, c_fc, pre_act, rows, hidden, mlp_dim);
@@ -378,7 +379,8 @@ void SmearBackward(std::int64_t batch, std::int64_t seq, std::int64_t hidden,
   std::vector<ComputeType> ee = StageToHost(emb_norm, count);
   std::vector<ComputeType> wh = StageToHost(gate_w, kSmearChannels);
   std::vector<float> sh(static_cast<std::size_t>(rows));
-  kernels::Memcpy(sh.data(), sig, static_cast<std::size_t>(rows) * sizeof(float),
+  kernels::Memcpy(sh.data(), sig,
+                  static_cast<std::size_t>(rows) * sizeof(float),
                   CopyDir::kDeviceToHost);
   std::vector<ComputeType> dxh = StageToHost(d_x0, count);
   // Identity path: x0[t] contains emb_norm[t] directly.
@@ -395,8 +397,9 @@ void SmearBackward(std::int64_t batch, std::int64_t seq, std::int64_t hidden,
 
       double dgate = 0.0;
       for (std::int64_t j = 0; j < hidden; ++j) {
-        dgate += static_cast<double>(AsF(dxh[static_cast<std::size_t>(m + j)])) *
-                 static_cast<double>(AsF(ee[static_cast<std::size_t>(prev + j)]));
+        dgate +=
+            static_cast<double>(AsF(dxh[static_cast<std::size_t>(m + j)])) *
+            static_cast<double>(AsF(ee[static_cast<std::size_t>(prev + j)]));
       }
       const float dgate_f = static_cast<float>(dgate);
       // x0[t] = e[t] + gate[t] * e[t-1], so the gradient w.r.t. the previous
@@ -465,8 +468,7 @@ void BlockForward(const BlockShape& shape, const BlockWeights& weights,
                   const BlockActivations& acts, const int* tokens,
                   const float* cos, const float* sin, const ComputeType* x,
                   const ComputeType* x0, float resid, float x0_lambda) {
-  const std::int64_t rows =
-      static_cast<std::int64_t>(shape.batch) * shape.seq;
+  const std::int64_t rows = static_cast<std::int64_t>(shape.batch) * shape.seq;
   const int hidden = shape.hidden;
   const int heads = shape.num_heads;
   const int kv_heads = shape.num_kv_heads;
@@ -484,17 +486,17 @@ void BlockForward(const BlockShape& shape, const BlockWeights& weights,
 
   LinearForward(acts.h, weights.c_q, acts.q_final, rows, hidden, query_dim);
   if (acts.q_pre != nullptr && acts.q_pre != acts.q_final) {
-    kernels::Memcpy(acts.q_pre, acts.q_final,
-                    static_cast<std::size_t>(rows * query_dim) *
-                        sizeof(ComputeType),
-                    CopyDir::kDeviceToDevice);
+    kernels::Memcpy(
+        acts.q_pre, acts.q_final,
+        static_cast<std::size_t>(rows * query_dim) * sizeof(ComputeType),
+        CopyDir::kDeviceToDevice);
   }
   LinearForward(acts.h, weights.c_k, acts.k_final, rows, hidden, kv_dim);
   if (acts.k_pre != nullptr && acts.k_pre != acts.k_final) {
-    kernels::Memcpy(acts.k_pre, acts.k_final,
-                    static_cast<std::size_t>(rows * kv_dim) *
-                        sizeof(ComputeType),
-                    CopyDir::kDeviceToDevice);
+    kernels::Memcpy(
+        acts.k_pre, acts.k_final,
+        static_cast<std::size_t>(rows * kv_dim) * sizeof(ComputeType),
+        CopyDir::kDeviceToDevice);
   }
 
   LinearForward(acts.h, weights.c_v, acts.v_final, rows, hidden, kv_dim);
@@ -538,8 +540,10 @@ void BlockForward(const BlockShape& shape, const BlockWeights& weights,
   attn.window_right = shape.window_right;
   attn.kv_len = shape.kv_len;
   attn.scale = shape.attn_scale;
-  const ComputeType* attn_k = acts.attn_k != nullptr ? acts.attn_k : acts.k_final;
-  const ComputeType* attn_v = acts.attn_v != nullptr ? acts.attn_v : acts.v_final;
+  const ComputeType* attn_k =
+      acts.attn_k != nullptr ? acts.attn_k : acts.k_final;
+  const ComputeType* attn_v =
+      acts.attn_v != nullptr ? acts.attn_v : acts.v_final;
   AttentionForward(attn, acts.q_final, attn_k, attn_v, acts.attn_out,
                    acts.attn_stats);
 
@@ -562,8 +566,7 @@ void BlockBackward(const BlockShape& shape, const BlockWeights& weights,
                    const ComputeType* x0, const ComputeType* dout,
                    ComputeType* dx_in, ComputeType* x0_acc,
                    ComputeType* resid_grad, ComputeType* x0_lambda_grad) {
-  const std::int64_t rows =
-      static_cast<std::int64_t>(shape.batch) * shape.seq;
+  const std::int64_t rows = static_cast<std::int64_t>(shape.batch) * shape.seq;
   const int hidden = shape.hidden;
   const int heads = shape.num_heads;
   const int kv_heads = shape.num_kv_heads;
@@ -574,8 +577,8 @@ void BlockBackward(const BlockShape& shape, const BlockWeights& weights,
   if (rows <= 0 || hidden <= 0 || heads <= 0 || head_dim <= 0) return;
 
   // --- MLP: x_out = x_mid + c_proj(relu^2(c_fc(h2))). ---
-  MlpBackward(acts.h2, weights.c_fc, weights.c_proj_mlp, acts.pre_act,
-              acts.act, dout, rows, hidden, mlp_dim, grads.c_fc_grad,
+  MlpBackward(acts.h2, weights.c_fc, weights.c_proj_mlp, acts.pre_act, acts.act,
+              dout, rows, hidden, mlp_dim, grads.c_fc_grad,
               grads.c_proj_mlp_grad, scratch.dh2, scratch.dact, scratch.dpre);
   RmsNormBackward(rows, hidden, shape.rms_eps, acts.x_mid, scratch.dh2,
                   acts.rstd2, scratch.dx_mid);
@@ -627,8 +630,8 @@ void BlockBackward(const BlockShape& shape, const BlockWeights& weights,
   LinearDgrad(acts.k_pre, weights.c_k, scratch.dh, rows, hidden, kv_dim, true);
 
   // Pre-attention norm, then the residual blend xr = resid*x + x0_lambda*x0.
-  RmsNormBackward(rows, hidden, shape.rms_eps, acts.xr, scratch.dh,
-                  acts.rstd1, scratch.dxr);
+  RmsNormBackward(rows, hidden, shape.rms_eps, acts.xr, scratch.dh, acts.rstd1,
+                  scratch.dxr);
   kernels::PointwiseForward(PointwiseOp::kScaleAdd,
                             static_cast<int>(rows * hidden), scratch.dx_mid,
                             scratch.dxr, 1.0f, 1.0f, scratch.dxr);

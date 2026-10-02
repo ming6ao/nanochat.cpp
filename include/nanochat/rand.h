@@ -43,9 +43,7 @@ class Rand {
   }
 
   // Uniform in [0, 1).
-  float NextFloat() {
-    return static_cast<float>(NextU64() >> 40) * 0x1p-24f;
-  }
+  float NextFloat() { return static_cast<float>(NextU64() >> 40) * 0x1p-24f; }
 
   // Uniform in [low, high).
   float NextFloat(float low, float high) {

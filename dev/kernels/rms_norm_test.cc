@@ -17,10 +17,10 @@ namespace {
 
 using nanochat::ComputeType;
 using nanochat::RmsNormParams;
+using nanochat::dev::C;
 using nanochat::dev::CheckClose;
 using nanochat::dev::CheckFiniteDifference;
 using nanochat::dev::CheckVectorClose;
-using nanochat::dev::C;
 using nanochat::dev::DevBuf;
 using nanochat::dev::Failures;
 using nanochat::dev::FromStorage;
@@ -60,8 +60,7 @@ void TestForwardBackward() {
     nanochat::kernels::RmsNormBackward(p, x.ptr, dy.ptr, rstd.ptr, dx.ptr);
     nanochat::kernels::Synchronize();
 
-    const std::vector<float> ref_dx =
-        RmsNormBackward(p, x0, dy0, ref_rstd);
+    const std::vector<float> ref_dx = RmsNormBackward(p, x0, dy0, ref_rstd);
     CheckVectorClose(FromStorage(dx.Download()), ref_dx, 1e-4, "rms bwd dx");
 
 #if !defined(NANOCHAT_PRECISION_FP16)

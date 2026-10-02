@@ -48,12 +48,13 @@ void QkPrepDecomposedForward(const QkPrepParams& params, const float* cos,
 // RMSNorm backward. `dq`/`dk` are the upstream gradients, `q_in`/`k_in` the
 // saved pre-norm projections, and `q_rstd`/`k_rstd` the saved statistics.
 // `dq_normed`/`dk_normed` are scratch; `q_grad`/`k_grad` receive the result.
-void QkPrepDecomposedBackward(
-    const QkPrepParams& params, const float* cos, const float* sin,
-    const ComputeType* dq, const ComputeType* dk, const ComputeType* q_in,
-    const ComputeType* k_in, const float* q_rstd, const float* k_rstd,
-    ComputeType* dq_normed, ComputeType* dk_normed, ComputeType* q_grad,
-    ComputeType* k_grad);
+void QkPrepDecomposedBackward(const QkPrepParams& params, const float* cos,
+                              const float* sin, const ComputeType* dq,
+                              const ComputeType* dk, const ComputeType* q_in,
+                              const ComputeType* k_in, const float* q_rstd,
+                              const float* k_rstd, ComputeType* dq_normed,
+                              ComputeType* dk_normed, ComputeType* q_grad,
+                              ComputeType* k_grad);
 
 }  // namespace dev
 }  // namespace nanochat

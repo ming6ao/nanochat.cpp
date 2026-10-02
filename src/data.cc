@@ -95,8 +95,7 @@ bool ReadI64(std::istream& in, std::int64_t* value) {
   return true;
 }
 
-constexpr char kCheckpointMagic[8] = {'N', 'C', 'H', 'K',
-                                      'P', 'T', '0', '1'};
+constexpr char kCheckpointMagic[8] = {'N', 'C', 'H', 'K', 'P', 'T', '0', '1'};
 
 }  // namespace
 
@@ -162,8 +161,7 @@ std::unique_ptr<TokenShard> TokenShard::Open(const std::string& path,
   const std::uint64_t expected =
       static_cast<std::uint64_t>(24) +
       header.num_tokens * static_cast<std::uint64_t>(header.token_width);
-  if (file_size < 0 ||
-      static_cast<std::uint64_t>(file_size) < expected) {
+  if (file_size < 0 || static_cast<std::uint64_t>(file_size) < expected) {
     return fail("token shard is shorter than its header claims: " + path);
   }
   in.seekg(24, std::ios::beg);
@@ -193,8 +191,7 @@ std::int64_t TokenShard::Read(std::uint64_t offset, std::int64_t count,
            std::ios::beg);
   if (!in) return 0;
 
-  const std::size_t bytes =
-      static_cast<std::size_t>(count) * impl_->width;
+  const std::size_t bytes = static_cast<std::size_t>(count) * impl_->width;
   std::vector<unsigned char> buffer(bytes);
   in.read(reinterpret_cast<char*>(buffer.data()),
           static_cast<std::streamsize>(bytes));
@@ -296,10 +293,10 @@ bool Checkpoint::Save(const std::string& path) const {
   for (const TensorRecord& record : tensors_) {
     const std::size_t name_len = record.name.size();
     WriteU16(out, static_cast<std::uint16_t>(
-                       std::min<std::size_t>(name_len, 0xffffu)));
-    out.write(record.name.data(),
-              static_cast<std::streamsize>(std::min<std::size_t>(name_len,
-                                                                0xffffu)));
+                      std::min<std::size_t>(name_len, 0xffffu)));
+    out.write(
+        record.name.data(),
+        static_cast<std::streamsize>(std::min<std::size_t>(name_len, 0xffffu)));
     WriteU32(out, static_cast<std::uint32_t>(record.dtype));
     WriteU32(out, static_cast<std::uint32_t>(record.shape.size()));
     for (std::int64_t dim : record.shape) WriteI64(out, dim);
@@ -402,8 +399,8 @@ DataLoader::DataLoader(std::vector<std::string> shards, int batch, int seq,
     impl_->shards.push_back(std::move(shard));
   }
   if (batch_ > 0 && seq_ > 0) {
-    impl_->rows = static_cast<std::uint64_t>(batch_) *
-                  static_cast<std::uint64_t>(seq_);
+    impl_->rows =
+        static_cast<std::uint64_t>(batch_) * static_cast<std::uint64_t>(seq_);
     if (impl_->rows > 0) {
       const std::uint64_t need = impl_->rows + 1;
       if (impl_->total >= need) impl_->max_batches = impl_->total / impl_->rows;
@@ -419,8 +416,8 @@ DataLoader::~DataLoader() = default;
 bool DataLoader::Next(int* tokens, int* targets) {
   if (tokens == nullptr || targets == nullptr || impl_ == nullptr) return false;
   if (batch_ <= 0 || seq_ <= 0) return false;
-  const std::uint64_t rows = static_cast<std::uint64_t>(batch_) *
-                             static_cast<std::uint64_t>(seq_);
+  const std::uint64_t rows =
+      static_cast<std::uint64_t>(batch_) * static_cast<std::uint64_t>(seq_);
   const std::uint64_t need = rows + 1;
   if (impl_->total < need) return false;
 

@@ -612,8 +612,8 @@ void RunModelParity(const Fixture& fixture) {
     double max_diff = 0.0;
     for (std::int64_t r = 0; r < rows; ++r) {
       for (int v = 0; v < vocab; ++v) {
-        const double got = static_cast<double>(AsFloat32(
-            raw_host[static_cast<std::size_t>(r) * padded + v]));
+        const double got = static_cast<double>(
+            AsFloat32(raw_host[static_cast<std::size_t>(r) * padded + v]));
         const double expected = static_cast<double>(
             want.f32()[static_cast<std::size_t>(r) * vocab + v]);
         max_diff = std::max(max_diff, std::fabs(got - expected));
@@ -668,7 +668,8 @@ void RunModelParity(const Fixture& fixture) {
   if (fixture.Has("config/opt/adam_eps")) {
     opt.adam_eps = fixture.Get("config/opt/adam_eps").scalar_f32();
   }
-  // `muon_ns_steps` and `muon_beta2` keep the setup_optimizer defaults (5, 0.9).
+  // `muon_ns_steps` and `muon_beta2` keep the setup_optimizer defaults (5,
+  // 0.9).
 
   // The fixture's trajectory calls `optimizer.step()` directly with the
   // setup_optimizer defaults, so its schedules are constant: learning-rate
@@ -761,8 +762,7 @@ void RunModelParity(const Fixture& fixture) {
         std::max(g_max_trajectory_loss_error, loss_diff);
     if (loss_diff > kTrajectoryLossTolerance) {
       Fail(Format("%s: got %.9g want %.9g (|diff|=%.3g)", loss_record.c_str(),
-                  step_loss, fixture.Get(loss_record).scalar_f32(),
-                  loss_diff));
+                  step_loss, fixture.Get(loss_record).scalar_f32(), loss_diff));
     }
     for (const nanochat::ParamView& view : model->params()) {
       const std::string record =

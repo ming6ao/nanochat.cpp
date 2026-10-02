@@ -54,9 +54,9 @@ inline constexpr float kDefaultLogitSoftcap = 15.0f;
 inline constexpr float kDefaultQkScale = 1.2f;
 
 struct GemmParams {
-  int m = 0;          // rows of C
-  int n = 0;          // columns of C
-  int k = 0;          // reduction extent
+  int m = 0;  // rows of C
+  int n = 0;  // columns of C
+  int k = 0;  // reduction extent
   int batch_count = 1;
   float alpha = 1.0f;
   float beta = 0.0f;
@@ -95,12 +95,12 @@ struct AttentionParams {
   int num_kv_heads = 0;
   int head_dim = 0;
   bool causal = true;
-  int window_left = -1;   // -1 = full context
-  int window_right = 0;   // 0 for causal decoding
+  int window_left = -1;  // -1 = full context
+  int window_right = 0;  // 0 for causal decoding
   // Additive fields (API freeze): key/value rows, which differ from `seq` when
   // decoding against a KV cache; and the softmax scale, where <= 0 means
   // `1 / sqrt(head_dim)`.
-  int kv_len = 0;       // 0 => seq (self-attention)
+  int kv_len = 0;  // 0 => seq (self-attention)
   float scale = 0.0f;
 };
 
@@ -169,8 +169,7 @@ void RmsNormForward(const RmsNormParams& params, const ComputeType* x,
                     ComputeType* out, float* rstd);
 
 void RmsNormBackward(const RmsNormParams& params, const ComputeType* x,
-                     const ComputeType* dy, const float* rstd,
-                     ComputeType* dx);
+                     const ComputeType* dy, const float* rstd, ComputeType* dx);
 
 // Fused RMSNorm(q/k) -> RoPE -> scale, in place on the projection outputs.
 // `cos` and `sin` are fp32 rotary tables of shape `[seq, head_dim / 2]`.
@@ -198,9 +197,8 @@ void PointwiseForward(PointwiseOp op, int n, const ComputeType* a,
                       ComputeType* out);
 
 void PointwiseBackward(PointwiseOp op, int n, const ComputeType* a,
-                       const ComputeType* b, const ComputeType* dy,
-                       float alpha, float beta, ComputeType* da,
-                       ComputeType* db);
+                       const ComputeType* b, const ComputeType* dy, float alpha,
+                       float beta, ComputeType* da, ComputeType* db);
 
 void ClassifierForward(const ClassifierParams& params,
                        const ComputeType* logits, const int* targets,

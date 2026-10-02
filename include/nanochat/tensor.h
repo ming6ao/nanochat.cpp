@@ -221,9 +221,9 @@ struct Caps {
   int compute_minor = 0;
   std::size_t total_memory_bytes = 0;
 
-  bool is_device = false;        // false for the CPU reference backend
-  bool has_cublas = false;       // a batched GEMM library is available
-  bool has_tensor_cores = false; // fp16/bf16 MMA units
+  bool is_device = false;         // false for the CPU reference backend
+  bool has_cublas = false;        // a batched GEMM library is available
+  bool has_tensor_cores = false;  // fp16/bf16 MMA units
   bool supports_fp32 = true;
   bool supports_fp16 = false;
 

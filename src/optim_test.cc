@@ -171,7 +171,7 @@ void TestSchedules() {
     int step;
     float momentum;
   } kMomentum[] = {
-      {1, 0.85f}, {2, 0.88f}, {3, 0.91f}, {4, 0.94f},
+      {1, 0.85f}, {2, 0.88f},  {3, 0.91f},  {4, 0.94f},
       {5, 0.97f}, {7, 0.956f}, {11, 0.90f},
   };
   for (const auto& tc : kMomentum) {
@@ -183,7 +183,9 @@ void TestSchedules() {
     int step;
     float weight_decay;
   } kWeightDecay[] = {
-      {1, 0.02f}, {6, 0.01f}, {11, 0.0f},
+      {1, 0.02f},
+      {6, 0.01f},
+      {11, 0.0f},
   };
   for (const auto& tc : kWeightDecay) {
     ExpectNear(scheduler.WeightDecay(tc.step), tc.weight_decay, 1e-6f,
@@ -207,11 +209,10 @@ struct GroupSpec {
 };
 
 [[maybe_unused]] GroupSpec SpecFor(const std::string& name,
-                                  const Config& config,
-                                  const OptimizerConfig& oc, int rows,
-                                  int cols) {
-  const float scale =
-      std::sqrt(768.0f / static_cast<float>(config.hidden_dim));
+                                   const Config& config,
+                                   const OptimizerConfig& oc, int rows,
+                                   int cols) {
+  const float scale = std::sqrt(768.0f / static_cast<float>(config.hidden_dim));
   if (name == "lm_head.weight") {
     return {0, oc.unembedding_lr * scale, 0.8f, 0.96f, 0.01f};
   }
@@ -233,9 +234,8 @@ struct GroupSpec {
     return {0, 0.2f, 0.8f, 0.95f, 0.0f};
   }
   const float lr =
-      oc.matrix_lr *
-      std::sqrt(std::max(1.0f, static_cast<float>(rows) /
-                                   static_cast<float>(cols)));
+      oc.matrix_lr * std::sqrt(std::max(1.0f, static_cast<float>(rows) /
+                                                  static_cast<float>(cols)));
   return {1, lr, 0.0f, 0.0f, 0.0f};
 }
 
@@ -302,8 +302,7 @@ struct ParamState {
         float p = AsF32(state.ref_value[i]);
         p *= (1.0f - lr * state.spec.weight_decay);
         state.m[i] += (1.0f - state.spec.beta1) * (g - state.m[i]);
-        state.v[i] +=
-            (1.0f - state.spec.beta2) * (g * g - state.v[i]);
+        state.v[i] += (1.0f - state.spec.beta2) * (g * g - state.v[i]);
         const float denom = std::sqrt(state.v[i] / bias2) + oc.adam_eps;
         p -= step_size * (state.m[i] / denom);
         StoreFloat(&state.ref_value[i], p);
@@ -399,8 +398,8 @@ void RunStepsTest(float clip) {
         const float got = AsF32(state.view->value[i]);
         const float want = AsF32(state.ref_value[i]);
         if (std::fabs(got - want) > kTolerance) {
-          Fail(Format("%s[%zu] step %d: got %.8g want %.8g",
-                      state.view->name, i, step, got, want));
+          Fail(Format("%s[%zu] step %d: got %.8g want %.8g", state.view->name,
+                      i, step, got, want));
           reported = true;
           break;
         }
@@ -437,9 +436,9 @@ void RunZeroGradTest() {
     for (std::int64_t i = 0; i < views[k].count; ++i) {
       initial[k][static_cast<std::size_t>(i)] = AsF32(views[k].value[i]);
     }
-    nanochat::kernels::Memset(views[k].grad, 0,
-                              static_cast<std::size_t>(views[k].count) *
-                                  sizeof(ComputeType));
+    nanochat::kernels::Memset(
+        views[k].grad, 0,
+        static_cast<std::size_t>(views[k].count) * sizeof(ComputeType));
   }
 
   optimizer->Step(1);
@@ -498,9 +497,8 @@ void RunTrainStepTest() {
     before[k] = AsF32(views[k].value[0]);
   }
 
-  const float loss =
-      model->TrainStep(tokens.data(), targets.data(), batch, seq,
-                       optimizer.get());
+  const float loss = model->TrainStep(tokens.data(), targets.data(), batch, seq,
+                                      optimizer.get());
   if (!std::isfinite(loss)) Fail("TrainStep returned a non-finite loss");
 
   double change = 0.0;

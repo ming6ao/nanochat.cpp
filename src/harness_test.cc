@@ -38,8 +38,8 @@ using nanochat::Checkpointer;
 using nanochat::ComputeType;
 using nanochat::Config;
 using nanochat::DataLoader;
-using nanochat::LogRecord;
 using nanochat::Logger;
+using nanochat::LogRecord;
 using nanochat::Model;
 using nanochat::Optimizer;
 using nanochat::OptimizerConfig;
@@ -137,11 +137,9 @@ void TestMfu() {
              "PeakFlops H100 NVL");
   ExpectNear(nanochat::PeakFlopsForDevice("unknown device"), 0.0, 1e-9,
              "PeakFlops unknown");
-  ExpectNear(nanochat::PeakFlopsForDevice(""), 0.0, 1e-9,
-             "PeakFlops empty");
+  ExpectNear(nanochat::PeakFlopsForDevice(""), 0.0, 1e-9, "PeakFlops empty");
 
-  const double expected_mfu =
-      1000.0 * 147744.0 / 11.34e12;
+  const double expected_mfu = 1000.0 * 147744.0 / 11.34e12;
   ExpectNear(nanochat::ComputeMfu(config, 1000.0, 11.34e12), expected_mfu,
              1e-12, "ComputeMfu");
   ExpectNear(nanochat::ComputeMfu(config, 1000.0, 0.0), 0.0, 1e-12,
@@ -181,8 +179,7 @@ void TestTrainLoopMatchesHandRun() {
   const int total = 32;
   std::vector<int> stream(static_cast<std::size_t>(total));
   for (int i = 0; i < total; ++i) {
-    stream[static_cast<std::size_t>(i)] =
-        (i * 7 + 3) % config.vocab_size;
+    stream[static_cast<std::size_t>(i)] = (i * 7 + 3) % config.vocab_size;
   }
   const std::string shard = WriteShard("harness.bin", stream);
 
@@ -239,8 +236,9 @@ void TestTrainLoopMatchesHandRun() {
     for (std::size_t i = 0; i < a.size(); ++i) {
       for (std::int64_t j = 0; j < a[i].count; ++j) {
         worst = std::max(
-            worst, std::fabs(static_cast<double>(nanochat::AsF(a[i].value[j])) -
-                             static_cast<double>(nanochat::AsF(b[i].value[j]))));
+            worst,
+            std::fabs(static_cast<double>(nanochat::AsF(a[i].value[j])) -
+                      static_cast<double>(nanochat::AsF(b[i].value[j]))));
       }
     }
     if (worst > 0.0) Fail("Checkpointer round-trip changed a parameter");
