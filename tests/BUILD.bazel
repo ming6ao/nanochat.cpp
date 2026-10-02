@@ -4,7 +4,7 @@
 # backend or the model skeleton can reuse. See docs/testing.md.
 
 load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
-load("//:nanochat.bzl", "nanochat_copts")
+load("//:nanochat.bzl", "nanochat_copts", "precision_defines")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -16,18 +16,46 @@ cc_library(
 )
 
 # CPU oracle: checks the reference softcap, cross-entropy, classifier
-# gradients, parameter gradients, and the first optimizer step. It is
-# deliberately self-contained so it builds and runs before `src/model.cc`
-# exists; the parity node extends it with the model comparison.
+# gradients, parameter gradients, and the first optimizer step, then builds the
+# C++ model from the same fixture and checks forward, backward, and the
+# optimizer trajectory (the Wave-boundary parity gate).
 cc_test(
     name = "oracle_test",
     srcs = ["oracle_test.cc"],
     copts = nanochat_copts(),
+    defines = precision_defines(),
     data = ["data/debug_state.bin"],
     args = ["$(rootpath data/debug_state.bin)"],
-    deps = [":oracle_fixture"],
+    deps = [
+        ":oracle_fixture",
+        "//include/nanochat:nanochat",
+        "//src:model",
+    ],
     size = "small",
 )
 
+# CUDA flavor of the same parity gate: same source and fixture, linked against
+# the CUDA backend under `--config=cuda` (which `tools/nanochat test --gpu`
+# selects). The `gpu` tag keeps it out of the default CPU test loop;
+# `//tests:oracle_test` remains the CPU proof.
+cc_test(
+    name = "oracle_cuda_test",
+    srcs = ["oracle_test.cc"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    data = ["data/debug_state.bin"],
+    args = ["$(rootpath data/debug_state.bin)"],
+    deps = [
+        ":oracle_fixture",
+        "//include/nanochat:nanochat",
+        "//src:model",
+    ],
+    size = "small",
+    tags = ["gpu"],
+)
+
 # Aggregation point consumed by //:all_tests.
-test_suite(name = "all", tests = [":oracle_test"])
+test_suite(name = "all", tests = [
+    ":oracle_test",
+    ":oracle_cuda_test",
+])
