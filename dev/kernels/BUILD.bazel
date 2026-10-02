@@ -6,6 +6,7 @@
 load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library", "cc_test")
 load(
     "//:nanochat.bzl",
+    "cuda_binary",
     "cuda_library",
     "nanochat_copts",
     "nanochat_cuda_copts",
@@ -86,6 +87,38 @@ cc_library(
     deps = ["//include/nanochat:nanochat"],
 )
 
+# QkPrep fusion prototype (RMSNorm + RoPE + scale on q and k): the combined
+# fused kernel and the explicit decomposed baseline used by the benchmark.
+# dev-only; the CUDA backend is unchanged.
+cuda_library(
+    name = "qk_prep_fused",
+    srcs = ["qk_prep_fused.cu"],
+    hdrs = ["qk_prep_fused.h"],
+    copts = nanochat_cuda_copts(),
+    defines = precision_defines(),
+    deps = [
+        "//backends/cuda:device",
+        "//backends/cuda/kernels:device_utils",
+        "//backends/cuda/kernels:rms_norm",
+        "//include/nanochat:nanochat",
+    ],
+    alwayslink = True,
+)
+
+# Capture-safe local decode kernels for the cuBLAS + CUDA Graphs baseline.
+cuda_library(
+    name = "decode_kernels",
+    srcs = ["decode_kernels.cu"],
+    hdrs = ["decode_kernels.h"],
+    copts = nanochat_cuda_copts(),
+    defines = precision_defines(),
+    deps = [
+        "//backends/cuda/kernels:device_utils",
+        "//include/nanochat:nanochat",
+    ],
+    alwayslink = True,
+)
+
 # T1 GPU correctness + finite-difference tests, one per row/elementwise family.
 cc_test(
     name = "rms_norm_gpu_test",
@@ -108,6 +141,21 @@ cc_test(
     copts = nanochat_copts(),
     defines = precision_defines(),
     deps = [
+        ":row_test_utils",
+        "//backends/cuda/kernels:row_kernels",
+        "//include/nanochat:nanochat",
+    ],
+    size = "small",
+    tags = ["gpu"],
+)
+
+cc_test(
+    name = "qk_prep_fused_gpu_test",
+    srcs = ["qk_prep_fused_test.cc"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    deps = [
+        ":qk_prep_fused",
         ":row_test_utils",
         "//backends/cuda/kernels:row_kernels",
         "//include/nanochat:nanochat",
@@ -248,6 +296,42 @@ cc_binary(
     ],
 )
 
+# QkPrep decomposition vs fusion micro-benchmark.
+cc_binary(
+    name = "qk_prep_bench",
+    srcs = ["qk_prep_bench.cc"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    deps = [
+        ":qk_prep_fused",
+        ":row_test_utils",
+        "//backends/cuda/kernels:row_kernels",
+        "//include/nanochat:nanochat",
+    ],
+)
+
+# Batch-1 decode baseline: eager seam vs cuBLAS + CUDA Graphs. The host file
+# uses the CUDA runtime and cuBLAS directly, so it is compiled as a cuda_binary.
+cuda_binary(
+    name = "decode_fused_bench",
+    srcs = [
+        "decode_fused_bench.cc",
+        "decode_kernels.cu",
+    ],
+    hdrs = ["decode_kernels.h"],
+    copts = nanochat_cuda_copts(),
+    host_copts = nanochat_copts(),
+    defines = precision_defines(),
+    host_defines = precision_defines(),
+    deps = [
+        ":row_test_utils",
+        "//backends/cuda:all_kernels",
+        "//backends/cuda/kernels:device_utils",
+        "//include/nanochat:nanochat",
+        "@cuda//:cublas",
+    ],
+)
+
 # Aggregation point consumed by //:all_tests.
 test_suite(
     name = "all",
@@ -261,6 +345,7 @@ test_suite(
         ":muon_gpu_test",
         ":pascal_spike_gpu_test",
         ":pointwise_gpu_test",
+        ":qk_prep_fused_gpu_test",
         ":qk_prep_gpu_test",
         ":rms_norm_gpu_test",
         ":sequence_oracle_gpu_test",
