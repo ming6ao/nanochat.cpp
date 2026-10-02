@@ -1,0 +1,30 @@
+# nanochat.cpp — Bazel module graph. See docs/build.md.
+#
+# The build is Bazel-first: fine-grained targets map to kernel families and the
+# action cache keeps parallel work from rebuilding the world. This module wires
+# the CUDA rule set and config settings; the per-directory BUILD files supply
+# the targets and load their shared options from //:nanochat.bzl.
+
+module(
+    name = "nanochat_cpp",
+    version = "0.0.1",
+)
+
+# rules_cc is declared directly because the packaging targets load its rules
+# rather than relying on Bazel's native cc_* autoloads.
+bazel_dep(name = "rules_cc", version = "0.2.14")
+
+# CUDA kernel rules (cuda_library / cuda_binary / cuda_test) plus the
+# local-toolkit toolchain. The Debian/Ubuntu toolkit is detected in place, so
+# the empty toolkit_path is intentional; CUDA_HOME does not have to point at an
+# NVIDIA installer layout.
+bazel_dep(name = "rules_cuda", version = "0.3.0")
+
+cuda = use_extension("@rules_cuda//cuda:extensions.bzl", "toolchain")
+cuda.toolkit(
+    name = "cuda",
+    toolkit_path = "",
+)
+use_repo(cuda, "cuda")
+
+register_toolchains("@cuda//toolchain:nvcc-local-toolchain")

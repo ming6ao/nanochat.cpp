@@ -1,0 +1,45 @@
+# Root package for nanochat.cpp.
+#
+# This file is the aggregation point for the per-directory BUILD files: the
+# precision config_settings that every select() consumes live here, and
+# :all_tests rolls up each package's `test_suite(name = "all")`. The canonical
+# recursive target is `bazel build //...` / `bazel test //...`; :all_tests is
+# the explicit alias for it. Per-directory packages load their CUDA rules and
+# common options from //:nanochat.bzl. See docs/build.md.
+
+package(default_visibility = ["//visibility:public"])
+
+# Precision selection (docs/precision.md). `--config=fp32` is the default and
+# `--config=fp16` selects the half-precision build; see .bazelrc.
+config_setting(
+    name = "fp32",
+    define_values = {"precision": "fp32"},
+)
+
+config_setting(
+    name = "fp16",
+    define_values = {"precision": "fp16"},
+)
+
+# Aggregation point: each package publishes `test_suite(name = "all")`; new
+# packages add their label here. Kept in sync with `bazel test //...`.
+test_suite(
+    name = "all_tests",
+    tests = [
+        "//backends/cpu:all",
+        "//backends/cuda:all",
+        "//backends/cuda/kernels:all",
+        "//dev/kernels:all",
+        "//src:all",
+        "//tests:all",
+        "//tools:all",
+    ],
+)
+
+exports_files([
+    "MODULE.bazel",
+    ".bazelrc",
+    ".clang-format",
+    "Makefile",
+    "STATUS.md",
+])

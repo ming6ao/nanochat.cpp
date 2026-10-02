@@ -1,0 +1,7 @@
+# tools/ — the execution entry point and the host tooling (the oracle dump
+# script, the GPU broker, and the resource sandbox). Targets land here in P0.
+
+package(default_visibility = ["//visibility:public"])
+
+# Aggregation point consumed by //:all_tests.
+test_suite(name = "all")

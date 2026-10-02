@@ -1,0 +1,7 @@
+# backends/cuda/ — the CUDA device runtime and the cuBLAS GEMM entry point.
+# Targets land here in P1. See docs/backends.md.
+
+package(default_visibility = ["//visibility:public"])
+
+# Aggregation point consumed by //:all_tests.
+test_suite(name = "all")

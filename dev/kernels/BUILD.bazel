@@ -1,0 +1,54 @@
+# dev/kernels — standalone per-kernel tests and benchmarks, llm.c dev/cuda
+# style. This package currently holds the P0 CUDA/Pascal toolchain spike; the
+# real kernel families land alongside it in P1. See docs/testing.md.
+
+load("@rules_cc//cc:defs.bzl", "cc_test")
+load(
+    "//:nanochat.bzl",
+    "cuda_library",
+    "nanochat_copts",
+    "nanochat_cuda_copts",
+    "precision_defines",
+)
+
+package(default_visibility = ["//visibility:public"])
+
+# One kernel, compiled for the default sm_61 (and sm_75 via --config=sm_75).
+cuda_library(
+    name = "pascal_spike",
+    srcs = ["pascal_spike.cu"],
+    hdrs = ["pascal_spike.h"],
+    copts = nanochat_cuda_copts(),
+    defines = precision_defines(),
+    alwayslink = True,
+)
+
+# gpu + small: a gate, not an iteration tool. Not tagged `manual` so that
+# `tools/nanochat test --gpu //...` discovers it; the CPU loop excludes it with
+# `--test_tag_filters=-gpu`.
+cc_test(
+    name = "pascal_spike_gpu_test",
+    srcs = ["pascal_spike_test.cc"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    deps = [
+        ":pascal_spike",
+        "//include/nanochat:nanochat",
+    ],
+    size = "small",
+    tags = ["gpu"],
+)
+
+# CPU smoke test: keeps the default (non-GPU) test loop non-empty and checks
+# that the precision config and the sandbox guard are wired.
+cc_test(
+    name = "build_config_test",
+    srcs = ["build_config_test.cc"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    deps = ["//include/nanochat:nanochat"],
+    size = "small",
+)
+
+# Aggregation point consumed by //:all_tests.
+test_suite(name = "all")

@@ -1,0 +1,7 @@
+# backends/cuda/kernels/ — one translation unit per kernel family plus the
+# shared device_utils.cuh helpers. Targets land here in P1. See docs/kernels.md.
+
+package(default_visibility = ["//visibility:public"])
+
+# Aggregation point consumed by //:all_tests.
+test_suite(name = "all")

@@ -1,0 +1,7 @@
+# tests/ — the oracle fixture and the end-to-end oracle harness. Targets land
+# here in P0 (CPU oracle) and P3 (parity). See docs/testing.md.
+
+package(default_visibility = ["//visibility:public"])
+
+# Aggregation point consumed by //:all_tests.
+test_suite(name = "all")

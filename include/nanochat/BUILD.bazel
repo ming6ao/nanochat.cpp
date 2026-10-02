@@ -1,0 +1,16 @@
+# Public headers: the frozen backend seam and the host utilities. One target so
+# every package includes them the same way, as "nanochat/<name>.h". The header
+# set is globbed so the API freeze (p0-headers) can add files without touching
+# every dependent.
+
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+package(default_visibility = ["//visibility:public"])
+
+cc_library(
+    name = "nanochat",
+    hdrs = glob(["*.h"]),
+    # `include/` goes on the compile line; headers resolve as
+    # "nanochat/<name>.h" from any package.
+    includes = [".."],
+)

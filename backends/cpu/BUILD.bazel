@@ -1,0 +1,8 @@
+# backends/cpu/ — the reference implementation of every kernel, used as the
+# oracle-on-CPU path and as the correctness baseline. Targets land here in P0.
+# See docs/backends.md.
+
+package(default_visibility = ["//visibility:public"])
+
+# Aggregation point consumed by //:all_tests.
+test_suite(name = "all")

@@ -1,0 +1,7 @@
+# src/ — backend-agnostic workflow, model, optimizer, CLI. Targets land here in
+# P0 (model skeleton) and P2 (workflow, optimizer, harness). See docs/build.md.
+
+package(default_visibility = ["//visibility:public"])
+
+# Aggregation point consumed by //:all_tests.
+test_suite(name = "all")
