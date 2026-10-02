@@ -1,7 +1,70 @@
 # backends/cuda/ — the CUDA device runtime and the cuBLAS GEMM entry point.
-# Targets land here in P1. See docs/backends.md.
+# This package implements the device/memory and GEMM halves of the frozen seam
+# (nanochat/kernels.h); the per-family compute kernels live in
+# backends/cuda/kernels/. See docs/backends.md and docs/kernels.md.
+
+load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
+load(
+    "//:nanochat.bzl",
+    "cuda_library",
+    "nanochat_copts",
+    "nanochat_cuda_copts",
+    "precision_defines",
+)
 
 package(default_visibility = ["//visibility:public"])
+
+# Alloc/Free/Memcpy/Memset/Synchronize/GetCaps plus the backend-internal
+# stream/launch helpers. cuda_library adds the CUDA runtime implicitly.
+cuda_library(
+    name = "device",
+    srcs = ["device.cu"],
+    hdrs = ["device.h"],
+    copts = nanochat_cuda_copts(),
+    defines = precision_defines(),
+    deps = ["//include/nanochat:nanochat"],
+    alwayslink = True,
+)
+
+# The GEMM entry point: cuBLAS for fp32 and for the sm_75 fp16 build config.
+cuda_library(
+    name = "gemm",
+    srcs = ["gemm.cu"],
+    copts = nanochat_cuda_copts(),
+    defines = precision_defines(),
+    deps = [
+        ":device",
+        "//include/nanochat:nanochat",
+        "@cuda//:cublas",
+    ],
+    alwayslink = True,
+)
+
+# Convenience aggregate for the host graph and the per-family kernel libraries.
+# They depend on this target (or on :device) rather than reaching into the
+# individual translation units.
+cc_library(
+    name = "cuda",
+    deps = [
+        ":device",
+        ":gemm",
+    ],
+)
+
+# T1 GPU correctness for the runtime and the GEMM. Small shapes only; host code
+# is vendor-free and exercises the sealed kernels.h API.
+cc_test(
+    name = "cuda_runtime_gpu_test",
+    srcs = ["cuda_runtime_test.cc"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    deps = [
+        ":cuda",
+        "//include/nanochat:nanochat",
+    ],
+    size = "small",
+    tags = ["gpu"],
+)
 
 # Aggregation point consumed by //:all_tests.
 test_suite(name = "all")
