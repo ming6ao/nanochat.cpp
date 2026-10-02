@@ -1,27 +1,34 @@
-# src/ — backend-agnostic workflow, model, optimizer, CLI. Targets land here in
-# P0 (model skeleton) and P2 (workflow, optimizer, harness). See docs/build.md.
+# src/ — backend-agnostic workflow, model, optimizer, harness, CLI. Targets
+# land here in P0 (model skeleton) and P2 (workflow, optimizer, harness). See
+# docs/build.md.
 
-load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
+load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library", "cc_test")
 load("//:nanochat.bzl", "nanochat_copts", "precision_defines")
 
 package(default_visibility = ["//visibility:public"])
 
 # The backend-agnostic workflow: runtime tensor plumbing (`tensor.cc`,
 # `workspace.h`), the reusable graph pieces (`ops.cc`), the fixed train graph
-# (`model.cc`), and the two inference graphs (`generate.cc`). It is a
-# kernel-sequence graph, not an autograd engine (DESIGN.md section 6).
+# (`model.cc`), the two inference graphs (`generate.cc`), and the harness
+# (`data.cc`, `eval.cc`, `train.cc`). It is a kernel-sequence graph, not an
+# autograd engine (DESIGN.md section 6).
 cc_library(
     name = "model",
     srcs = [
+        "data.cc",
+        "eval.cc",
         "generate.cc",
         "model.cc",
         "ops.cc",
         "optim.cc",
         "tensor.cc",
+        "train.cc",
     ],
     hdrs = [
+        "cli.h",
         "model_impl.h",
         "ops.h",
+        "train.h",
         "workspace.h",
     ],
     copts = nanochat_copts(),
@@ -94,10 +101,75 @@ cc_test(
     size = "small",
 )
 
+# Data containers: token-shard round-trip, the DataLoader batch shape and
+# targets shift, the Checkpoint container, and the LoadTokenizer contract.
+cc_test(
+    name = "data_test",
+    srcs = ["data_test.cc"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    deps = [
+        ":model",
+        "//include/nanochat:nanochat",
+    ],
+    size = "small",
+)
+
+# Harness: Logger, the mfu.h numbers, the Checkpointer round-trip, and one
+# TrainLoop step against a hand-run TrainStep.
+cc_test(
+    name = "harness_test",
+    srcs = ["harness_test.cc"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    deps = [
+        ":model",
+        "//include/nanochat:nanochat",
+    ],
+    size = "small",
+)
+
+# CLI entry points. Each calls `nanochat::RequireSandboxOrDie` at the top of
+# main, so they refuse to run outside `tools/nanochat`. CPU only.
+cc_binary(
+    name = "train_main",
+    srcs = ["train_main.cc"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    deps = [
+        ":model",
+        "//include/nanochat:nanochat",
+    ],
+)
+
+cc_binary(
+    name = "eval_main",
+    srcs = ["eval_main.cc"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    deps = [
+        ":model",
+        "//include/nanochat:nanochat",
+    ],
+)
+
+cc_binary(
+    name = "generate_main",
+    srcs = ["generate_main.cc"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    deps = [
+        ":model",
+        "//include/nanochat:nanochat",
+    ],
+)
+
 # Aggregation point consumed by //:all_tests.
 test_suite(name = "all", tests = [
     ":model_oracle_test",
     ":model_gradient_test",
     ":generate_test",
     ":optim_test",
+    ":data_test",
+    ":harness_test",
 ])
