@@ -95,6 +95,11 @@ template <typename T>
 __device__ __forceinline__ T BlockReduceSum(T val) {
   __shared__ T shared[kMaxBlockThreads];
   const int tid = threadIdx.x;
+  // The array is reused by every call in the kernel. Barrier before writing so
+  // a second reduction cannot overwrite `shared[0]` before every thread has
+  // consumed the previous result (a real, nondeterministic race observed in
+  // QkPrep backward, which reduces `sum_sq` and then `dot`).
+  __syncthreads();
   shared[tid] = val;
   __syncthreads();
   for (int offset = blockDim.x >> 1; offset > 0; offset >>= 1) {
@@ -111,6 +116,8 @@ template <typename T>
 __device__ __forceinline__ T BlockReduceMax(T val) {
   __shared__ T shared[kMaxBlockThreads];
   const int tid = threadIdx.x;
+  // See BlockReduceSum: guard the reuse of the shared array across calls.
+  __syncthreads();
   shared[tid] = val;
   __syncthreads();
   for (int offset = blockDim.x >> 1; offset > 0; offset >>= 1) {
