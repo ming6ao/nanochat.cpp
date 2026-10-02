@@ -46,6 +46,14 @@ sandbox is the priority. See [sandbox.md](sandbox.md).
 gradients, then runs a few optimizer steps and matches losses. Tolerances are
 per backend: fp32 CUDA ~1e-5; fp16 Turing looser.
 
+The multi-step trajectory is a strict gate (loss `1e-5`, parameter `1e-4`).
+`tools/dump_oracle.py` records the AdamW `eps` it used as
+`config/opt/adam_eps` (currently `1e-4`) and the C++ test matches it: several
+fixture parameters have a true gradient of exactly zero at this initialization,
+so at nanochat's default `eps=1e-10` their fp32 roundoff would be amplified
+into unreproducible updates. Regenerate the fixture with
+`python tools/dump_oracle.py --adam-eps 1e-4`.
+
 Fixtures are data, so GPU tests never need torch at runtime. Use fixed seeds.
 
 ## Finite-difference checks

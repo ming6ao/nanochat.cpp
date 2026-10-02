@@ -22,7 +22,7 @@ integrated. Live resume state is in `.sliceme/RESUME.md`.
 | P2 | Training harness | `w2-src-harness` (`src`) | done | Landed; data/train/eval/CLI, 9 CPU tests green. |
 | — | Backend link selection (`--config=cuda`) | architect (`BUILD.bazel`, `.bazelrc`, `src/BUILD.bazel`, `backends/cuda/BUILD.bazel`, `tools/nanochat`) | done | Landed; `//src:model` selects CPU or CUDA at link time. |
 | P2.5 | CUDA model bring-up (host/device correctness) | `w3-cuda-model-bringup` (`src`) | done | Landed; `//src:model_oracle_gpu_test` forward `4.66e-09`, backward `5.96e-08`. |
-| P3 | Oracle parity (CUDA) | `w3-oracle-parity` (`tests`) | done | Landed; forward `4.66e-09`, backward `5.96e-08`, optimizer step-1 `2.38e-07`; multi-step trajectory behavioral only (fixture ill-conditioned at `eps=1e-10`). |
+| P3 | Oracle parity (CUDA) | `w3-oracle-parity` (`tests`) | done | Landed; forward `4.66e-09`, backward `5.96e-08`, optimizer step-1 `2.38e-07`, trajectory loss `2.4e-07`, trajectory param `5.5e-05` (strict). |
 | P3 | Turing port (sm_75, fp16) | `w3-turing-port` (`backends/cuda`) | done | Landed; fp16 runs on sm_61 (GEMM tol 1e-2, kernels 2e-3); sm_75 compile-only (no Turing device). Fixed Pascal fp16 atomics and fp16 cuBLAS compute type. |
 | P3 | Fusion/tuning | `w3-fusion-tuning` (`dev/kernels`) | done | Landed; fused QkPrep legal, wins on launch-bound tiny shapes (fwd 2.8x), ties on medium backward; decode graph baseline 1.10x. Backend promotion is a follow-up. |
 
@@ -38,3 +38,8 @@ integrated. Live resume state is in `.sliceme/RESUME.md`.
 - Backend selection is a link-time config: default `--define=backend=cpu`,
   `--config=cuda` for CUDA. `tools/nanochat test --gpu` adds `--config=cuda` so
   GPU-tagged workflow tests exercise the CUDA backend.
+- The oracle trajectory gate is strict (loss `1e-5`, param `1e-4`); the fixture
+  records AdamW `config/opt/adam_eps = 1e-4` because several scalar gradients
+  are exactly zero at initialization. The smear backward's previous-position
+  input gradient is elementwise `dx0 * gate`; the model finite-difference test
+  now sets `smear_lambda` nonzero so it covers that path.

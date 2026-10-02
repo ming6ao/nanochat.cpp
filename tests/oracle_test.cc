@@ -66,13 +66,14 @@ constexpr double kBackwardTolerance = 1e-5;
 // A single optimizer step driven by the fixture's recorded gradients isolates
 // the optimizer from backward roundoff and must match to fp32 roundoff.
 constexpr double kOptimizerTolerance = 1e-5;
-// The full `TrainStep` loop cannot be tight for every parameter: the fixture's
-// scalar gradients sit at the AdamW `eps` scale (see RunModelParity), so the
-// recorded trajectory is not reproducible bit-for-bit. The loss stays close;
-// the parameter bound is deliberately loose and the measured maximum is
-// printed.
-constexpr double kTrajectoryLossTolerance = 1e-1;
-constexpr double kTrajectoryParamTolerance = 5.0;
+// The full `TrainStep` loop is a strict gate. The fixture records an AdamW
+// `eps` of 1e-4 (`config/opt/adam_eps`): several fixture parameters have a true
+// gradient of exactly zero at this initialization, so at nanochat's default
+// `eps=1e-10` their fp32 backward roundoff is amplified into large spurious
+// updates. The larger `eps` freezes those directions and the trajectory
+// becomes reproducible to fp32 roundoff. The measured maximum is printed.
+constexpr double kTrajectoryLossTolerance = 1e-5;
+constexpr double kTrajectoryParamTolerance = 1e-4;
 constexpr float kSoftcap = 15.0f;
 
 int g_failures = 0;
@@ -523,7 +524,9 @@ void RunChecks(const Fixture& fixture) {
   const double embedding_lr =
       fixture.Get("config/opt/embedding_lr").scalar_f32();
   const double scalar_lr = fixture.Get("config/opt/scalar_lr").scalar_f32();
-  const double eps = 1e-10;
+  const double eps = fixture.Has("config/opt/adam_eps")
+                         ? fixture.Get("config/opt/adam_eps").scalar_f32()
+                         : 1e-10;
   // lm_head: AdamW, betas (0.8, 0.96), weight_decay 0.01.
   CheckAdamWStep1(fixture, "lm_head.weight", unembedding_lr * scale, 0.8, 0.96,
                   eps, 0.01);
@@ -557,15 +560,15 @@ void RunChecks(const Fixture& fixture) {
 //   * the full `TrainStep` loop, compared against `step/<k>/loss` and
 //     `step/<k>/param/<name>`.
 //
-// The full loop cannot be tight for every parameter. nanochat's AdamW uses
-// `eps = 1e-10`, and several fixture gradients sit at that scale:
-// `grad/x0_lambdas`, `grad/resid_lambdas`, and `grad/backout_lambda` are
-// ~1e-10, and `grad/smear_gate.weight` is exactly zero. For those parameters
-// the update `lr * g / (|g| + eps)` is a discontinuous function of the last bit
-// of `g`, so the recorded trajectory is not reproducible across float32
-// implementations; the divergence then feeds back through the forward into the
-// rest of the parameters. The tight single-step check above is the meaningful
-// optimizer proof; the loop is a behavioral check with a looser bound.
+// The full loop is reproducible because the fixture raises AdamW's `eps` to
+// `config/opt/adam_eps` (1e-4). The true gradients of `x0_lambdas`,
+// `resid_lambdas`, and `backout_lambda` are exactly zero at this
+// initialization (the zero-initialized output projections plus RMSNorm scale
+// invariance), so their fp32 backward is pure roundoff at the ~1e-10 scale.
+// nanochat's default `eps=1e-10` turns that roundoff into a large spurious
+// update; 1e-4 freezes those directions while leaving the smallest real
+// gradient (`mlp.c_proj`, ~1.7e-4) essentially intact. The tight single-step
+// check above still isolates the optimizer from the backward.
 void RunModelParity(const Fixture& fixture) {
   const int batch = static_cast<int>(fixture.Get("config/batch").scalar_int());
   const int seq = static_cast<int>(fixture.Get("config/seq").scalar_int());
@@ -662,8 +665,10 @@ void RunModelParity(const Fixture& fixture) {
   opt.scalar_lr = fixture.Get("config/opt/scalar_lr").scalar_f32();
   opt.weight_decay = fixture.Get("config/opt/weight_decay").scalar_f32();
   opt.clip = fixture.Get("config/opt/clip").scalar_f32();
-  // `muon_ns_steps`, `muon_beta2`, and `adam_eps` keep the setup_optimizer
-  // defaults (5, 0.9, 1e-10), which is what the fixture records.
+  if (fixture.Has("config/opt/adam_eps")) {
+    opt.adam_eps = fixture.Get("config/opt/adam_eps").scalar_f32();
+  }
+  // `muon_ns_steps` and `muon_beta2` keep the setup_optimizer defaults (5, 0.9).
 
   // The fixture's trajectory calls `optimizer.step()` directly with the
   // setup_optimizer defaults, so its schedules are constant: learning-rate

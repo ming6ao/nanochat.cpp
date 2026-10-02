@@ -24,8 +24,13 @@ For one fixed seed and one tiny configuration:
 * ``step/<k>/param/<name>`` every parameter after ``k`` optimizer steps.
 
 The optimizer trajectory uses nanochat's canonical ``setup_optimizer``
-grouping and defaults, with *no* gradient clipping and a constant learning
-rate, so a C++ optimizer can reproduce it exactly.
+grouping, with *no* gradient clipping and a constant learning rate, so a C++
+optimizer can reproduce it exactly. It overrides the AdamW ``eps`` (default
+``1e-4`` instead of nanochat's ``1e-10``): several fixture parameters have a
+true gradient of exactly zero at this initialization, so their fp32 backward
+is pure roundoff at the ``1e-10`` scale, which ``eps=1e-10`` amplifies into
+unreproducible updates. The chosen ``eps`` is recorded as
+``config/opt/adam_eps`` so the C++ test can match it.
 
 Binary format (little-endian)
 -----------------------------
@@ -239,6 +244,7 @@ def generate(args: argparse.Namespace) -> Path:
     writer.add("config/opt/scalar_lr", _scalar(0.5))
     writer.add("config/opt/weight_decay", _scalar(0.0))
     writer.add("config/opt/clip", _scalar(0.0))
+    writer.add("config/opt/adam_eps", _scalar(args.adam_eps))
 
     # --- inputs ------------------------------------------------------------
     writer.add("input/tokens", _as_i32(tokens))
@@ -264,6 +270,16 @@ def generate(args: argparse.Namespace) -> Path:
         writer.add(f"step/0/param/{name}", _as_f32(parameter))
 
     optimizer = model.setup_optimizer()
+    # `setup_optimizer` hardcodes eps=1e-10. Several fixture parameters have a
+    # true gradient of exactly zero at this initialization (the zero-initialized
+    # output projections plus RMSNorm scale invariance), so their fp32 backward
+    # is pure roundoff at the ~1e-10 scale. At eps=1e-10 AdamW amplifies that
+    # roundoff into large spurious updates and the trajectory is not
+    # reproducible. A larger eps freezes those directions while leaving the
+    # smallest real gradient (mlp.c_proj, ~1.7e-4) essentially intact.
+    for group in optimizer.param_groups:
+        if group.get("kind") == "adamw":
+            group["eps"] = args.adam_eps
     for step in range(1, args.steps + 1):
         optimizer.step()
         model.zero_grad(set_to_none=True)
@@ -292,6 +308,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--steps", type=int, default=DEFAULT_STEPS)
     parser.add_argument("--window", default=DEFAULT_WINDOW)
     parser.add_argument("--pad-to", type=int, default=DEFAULT_PAD_TO)
+    parser.add_argument("--adam-eps", type=float, default=1e-4)
     return parser.parse_args(argv)
 
 
