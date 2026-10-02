@@ -210,21 +210,30 @@ __device__ __forceinline__ float AttentionDot(const ComputeType* q_row,
 // computed by the calling block. `k`/`v` point at the batch's key/value base.
 // The row max and sum_exp are reduced across the block and written to
 // `stats_row`; each thread owns output dimensions `tid, tid + blockDim, ...`.
+//
+// The scaled query-key score is computed once per key and cached in the
+// caller-provided `scratch` buffer (at least `kv_len` floats of dynamic shared
+// memory), then its exponential is cached back into the same buffer. This
+// removes the former `O(head_dim)` redundancy where pass 3 recomputed the full
+// dot product for every owned output dimension. The arithmetic and the
+// per-thread accumulation order are unchanged from the recompute form.
 __device__ __forceinline__ void OnlineSoftmaxTile(
     const AttentionParams& p, const ComputeType* q_row, const ComputeType* k,
     const ComputeType* v, int kv_len, int kvh, long long qpos, float scale,
-    ComputeType* out_row, float* stats_row) {
+    ComputeType* out_row, float* stats_row, float* scratch) {
   const int dim = p.head_dim;
   const int kv_heads = KvHeadCountDev(p);
   const int tid = threadIdx.x;
 
-  // Pass 1: the stabilizing row maximum.
+  // Pass 1: compute the score once per key, cache it, and reduce the maximum.
   float local_max = -CUDART_INF_F;
   for (int j = tid; j < kv_len; j += blockDim.x) {
     if (!KeyAllowedDev(p, qpos, j)) continue;
     const ComputeType* k_row =
         k + (static_cast<long long>(j) * kv_heads + kvh) * dim;
-    local_max = fmaxf(local_max, scale * AttentionDot(q_row, k_row, dim));
+    const float score = scale * AttentionDot(q_row, k_row, dim);
+    scratch[j] = score;
+    local_max = fmaxf(local_max, score);
   }
   const float row_max = BlockReduceMax(local_max);
   if (row_max == -CUDART_INF_F) {
@@ -240,28 +249,26 @@ __device__ __forceinline__ void OnlineSoftmaxTile(
     return;
   }
 
-  // Pass 2: the sum of exponentials (for the saved statistic).
+  // Pass 2: exponentiate the cached scores in place and sum them.
   float local_sum = 0.0f;
   for (int j = tid; j < kv_len; j += blockDim.x) {
     if (!KeyAllowedDev(p, qpos, j)) continue;
-    const ComputeType* k_row =
-        k + (static_cast<long long>(j) * kv_heads + kvh) * dim;
-    local_sum += expf(scale * AttentionDot(q_row, k_row, dim) - row_max);
+    const float weight = expf(scratch[j] - row_max);
+    scratch[j] = weight;
+    local_sum += weight;
   }
   const float sum_exp = BlockReduceSum(local_sum);
   const float inv = 1.0f / sum_exp;
 
-  // Pass 3: the unnormalised output, per owned dimension.
+  // Pass 3: the unnormalised output, per owned dimension, reading the cached
+  // exponentials. No dot product is recomputed.
   for (int d = tid; d < dim; d += blockDim.x) {
     float acc = 0.0f;
     for (int j = 0; j < kv_len; ++j) {
       if (!KeyAllowedDev(p, qpos, j)) continue;
-      const ComputeType* k_row =
-          k + (static_cast<long long>(j) * kv_heads + kvh) * dim;
       const ComputeType* v_row =
           v + (static_cast<long long>(j) * kv_heads + kvh) * dim;
-      acc += expf(scale * AttentionDot(q_row, k_row, dim) - row_max) *
-             AsFloatDev(v_row[d]);
+      acc += scratch[j] * AsFloatDev(v_row[d]);
     }
     out_row[d] = ToComputeDev(acc * inv);
   }
@@ -271,23 +278,36 @@ __device__ __forceinline__ void OnlineSoftmaxTile(
   }
 }
 
-// Softmax gradient tile: the backward pass for one query row. It recomputes
-// the probabilities from the saved statistics and applies the
-// `p * (dp - sum(p * dp))` softmax Jacobian, matching the CPU reference. The
-// key/value gradients are atomic because GQA groups share them; `dk`/`dv`
-// point at the batch's base (already zeroed by the entry point).
+// Softmax gradient tile: the backward pass for one query row. It forms the
+// probabilities from the saved statistics and applies the
+// `p * (dp - sum(p * dp))` softmax Jacobian, matching the CPU reference.
+//
+// The probability `p_j` and the value-weighted `dp_j = dout . v_j` are
+// computed once per key and cached in the caller-provided `scratch` buffer (at
+// least `2 * kv_len` floats of dynamic shared memory, laid out as `kv_len`
+// probabilities followed by `kv_len` dp values). Pass 2 reads them instead of
+// recomputing the dot product and `dout . v` for every owned dimension, which
+// removes the former `O(head_dim)` redundancy. The arithmetic and the
+// per-thread accumulation order are unchanged from the recompute form.
+//
+// The key/value gradients are atomic because grouped-query attention shares
+// them across query heads; `dk`/`dv` point at the batch's base (already zeroed
+// by the entry point).
 __device__ __forceinline__ void SoftmaxGradTile(
     const AttentionParams& p, const ComputeType* q_row, const ComputeType* k,
     const ComputeType* v, int kv_len, int kvh, long long qpos, float scale,
     float row_max, float sum_exp, const ComputeType* dout_row,
-    ComputeType* dq_row, ComputeType* dk, ComputeType* dv) {
+    ComputeType* dq_row, ComputeType* dk, ComputeType* dv, float* scratch) {
   const int dim = p.head_dim;
   const int kv_heads = KvHeadCountDev(p);
   const int tid = threadIdx.x;
   if (sum_exp <= 0.0f) return;  // no visible key; dq/dk/dv stay zero
   const float inv = 1.0f / sum_exp;
+  float* p_scratch = scratch;
+  float* dp_scratch = scratch + kv_len;
 
-  // Pass 1: sum_j p_j * dp_j.
+  // Pass 1: compute `p_j` and `dp_j` once per key, cache both, and accumulate
+  // the probability-weighted `dp`.
   float local_wdp = 0.0f;
   for (int j = tid; j < kv_len; j += blockDim.x) {
     if (!KeyAllowedDev(p, qpos, j)) continue;
@@ -301,28 +321,25 @@ __device__ __forceinline__ void SoftmaxGradTile(
     for (int d = 0; d < dim; ++d) {
       dp += AsFloatDev(dout_row[d]) * AsFloatDev(v_row[d]);
     }
+    p_scratch[j] = pj;
+    dp_scratch[j] = dp;
     local_wdp += pj * dp;
   }
   const float weighted_dp = BlockReduceSum(local_wdp);
 
-  // Pass 2: accumulate the query, key, and value gradients. Each thread owns
-  // dimensions `tid, tid + blockDim, ...` and scans every key, so `dq_row[d]`
-  // is private to its owning thread while the key/value gradients use atomics
-  // (the GQA group shares them across blocks).
+  // Pass 2: accumulate the query, key, and value gradients from the cached
+  // values. Each thread owns dimensions `tid, tid + blockDim, ...` and scans
+  // every key, so `dq_row[d]` is private to its owning thread while the
+  // key/value gradients use atomics (the grouped-query group shares them
+  // across blocks).
   for (int d = tid; d < dim; d += blockDim.x) {
     float dq_acc = 0.0f;
     for (int j = 0; j < kv_len; ++j) {
       if (!KeyAllowedDev(p, qpos, j)) continue;
       const ComputeType* k_row =
           k + (static_cast<long long>(j) * kv_heads + kvh) * dim;
-      const ComputeType* v_row =
-          v + (static_cast<long long>(j) * kv_heads + kvh) * dim;
-      const float pj =
-          expf(scale * AttentionDot(q_row, k_row, dim) - row_max) * inv;
-      float dp = 0.0f;
-      for (int dd = 0; dd < dim; ++dd) {
-        dp += AsFloatDev(dout_row[dd]) * AsFloatDev(v_row[dd]);
-      }
+      const float pj = p_scratch[j];
+      const float dp = dp_scratch[j];
       const float dscale = pj * (dp - weighted_dp) * scale;
       ComputeType* dk_row =
           dk + (static_cast<long long>(j) * kv_heads + kvh) * dim;

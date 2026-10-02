@@ -38,6 +38,7 @@ __global__ void AttentionForwardKernel(const AttentionParams params,
                                        const ComputeType* __restrict__ v,
                                        ComputeType* __restrict__ out,
                                        float* __restrict__ stats) {
+  extern __shared__ float scratch[];
   const int row = blockIdx.x;
   const int t = row % params.seq;
   const int h = (row / params.seq) % params.num_heads;
@@ -57,7 +58,7 @@ __global__ void AttentionForwardKernel(const AttentionParams params,
       ((static_cast<long long>(b) * params.num_heads + h) * params.seq + t) * 2;
 
   OnlineSoftmaxTile(params, q + qbase, k + kvbase, v + kvbase, kv_len, kvh,
-                    qpos, scale, out + qbase, stats_row);
+                    qpos, scale, out + qbase, stats_row, scratch);
 }
 
 __global__ void AttentionBackwardKernel(
@@ -66,6 +67,7 @@ __global__ void AttentionBackwardKernel(
     const ComputeType* __restrict__ v, const float* __restrict__ stats,
     const ComputeType* __restrict__ dout, ComputeType* __restrict__ dq,
     ComputeType* __restrict__ dk, ComputeType* __restrict__ dv) {
+  extern __shared__ float scratch[];
   const int row = blockIdx.x;
   const int t = row % params.seq;
   const int h = (row / params.seq) % params.num_heads;
@@ -86,7 +88,7 @@ __global__ void AttentionBackwardKernel(
 
   SoftmaxGradTile(params, q + qbase, k + kvbase, v + kvbase, kv_len, kvh, qpos,
                   scale, stats_row[0], stats_row[1], dout + qbase, dq + qbase,
-                  dk + kvbase, dv + kvbase);
+                  dk + kvbase, dv + kvbase, scratch);
 }
 
 }  // namespace
@@ -105,7 +107,8 @@ void AttentionForward(const AttentionParams& params, const ComputeType* q,
                           : 1.0f / sqrtf(static_cast<float>(params.head_dim));
   const int rows = params.batch * params.num_heads * params.seq;
   const int block = cuda_kernels::BlockSizeForDim(params.head_dim);
-  cuda_backend::Launch(AttentionForwardKernel, dim3(rows), dim3(block), 0,
+  const std::size_t shared = sizeof(float) * static_cast<std::size_t>(kv_len);
+  cuda_backend::Launch(AttentionForwardKernel, dim3(rows), dim3(block), shared,
                        params, scale, q, k, v, out, stats);
 }
 
@@ -138,7 +141,9 @@ void AttentionBackward(const AttentionParams& params, const ComputeType* q,
 
   const int rows = params.batch * params.num_heads * params.seq;
   const int block = cuda_kernels::BlockSizeForDim(params.head_dim);
-  cuda_backend::Launch(AttentionBackwardKernel, dim3(rows), dim3(block), 0,
+  const std::size_t shared =
+      2 * sizeof(float) * static_cast<std::size_t>(kv_len);
+  cuda_backend::Launch(AttentionBackwardKernel, dim3(rows), dim3(block), shared,
                        params, scale, q, k, v, stats, dout, dq, dk, dv);
 }
 

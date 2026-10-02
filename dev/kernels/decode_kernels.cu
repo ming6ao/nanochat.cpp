@@ -106,6 +106,7 @@ __global__ void DecodeAttentionKernel(const AttentionParams params, float scale,
                                       const ComputeType* __restrict__ v,
                                       ComputeType* __restrict__ out,
                                       float* __restrict__ stats) {
+  extern __shared__ float scratch[];
   const int row = blockIdx.x;
   const int t = row % params.seq;
   const int h = (row / params.seq) % params.num_heads;
@@ -125,7 +126,7 @@ __global__ void DecodeAttentionKernel(const AttentionParams params, float scale,
       ((static_cast<long long>(b) * params.num_heads + h) * params.seq + t) * 2;
 
   OnlineSoftmaxTile(params, q + qbase, k + kvbase, v + kvbase, kv_len, kvh,
-                    qpos, scale, out + qbase, stats_row);
+                    qpos, scale, out + qbase, stats_row, scratch);
 }
 
 __device__ __forceinline__ float DecodeSigmoid(float x) {
@@ -218,8 +219,9 @@ void DecodeAttentionFwd(cudaStream_t stream, const AttentionParams& params,
                           : 1.0f / sqrtf(static_cast<float>(params.head_dim));
   const int rows = params.batch * params.num_heads * params.seq;
   const int block = BlockSizeForDim(params.head_dim);
-  DecodeAttentionKernel<<<rows, block, 0, stream>>>(params, scale, q, k, v, out,
-                                                    stats);
+  const std::size_t shared = sizeof(float) * static_cast<std::size_t>(kv_len);
+  DecodeAttentionKernel<<<rows, block, shared, stream>>>(params, scale, q, k, v,
+                                                         out, stats);
 }
 
 void DecodePointwiseFwd(cudaStream_t stream, PointwiseOp op, int n,
