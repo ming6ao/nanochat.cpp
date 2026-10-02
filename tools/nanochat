@@ -119,6 +119,11 @@ case "$command" in
       --spawn_strategy=local
     )
     if (( gpu )); then
+      # A GPU run selects the CUDA backend so the shared workflow (//src:model)
+      # links the kernels under test instead of the CPU reference.
+      bazel_args+=(--config=cuda)
+    fi
+    if (( gpu )); then
       # Hold the single-GPU lock for the whole suite, and the build lock while
       # the suite's targets compile.
       with_build_lock "$broker" --lock-only --profile "$profile" -- \
