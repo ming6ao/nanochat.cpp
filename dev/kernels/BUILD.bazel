@@ -75,6 +75,17 @@ cc_library(
     deps = ["//include/nanochat:nanochat"],
 )
 
+# Host-only scaffolding shared by the optimizer GPU tests: the reference port
+# of AdamW and Muon plus the same device-buffer helpers.
+cc_library(
+    name = "optim_test_utils",
+    hdrs = [
+        "gpu_test_utils.h",
+        "optim_ref.h",
+    ],
+    deps = ["//include/nanochat:nanochat"],
+)
+
 # T1 GPU correctness + finite-difference tests, one per row/elementwise family.
 cc_test(
     name = "rms_norm_gpu_test",
@@ -194,6 +205,36 @@ cc_test(
     tags = ["gpu"],
 )
 
+# Optimizer families: AdamW and Muon device-vs-reference comparison across
+# sequential steps, both reduction axes, and the tall/wide GEMM branches.
+cc_test(
+    name = "adamw_gpu_test",
+    srcs = ["adamw_test.cc"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    deps = [
+        ":optim_test_utils",
+        "//backends/cuda/kernels:optimizer_kernels",
+        "//include/nanochat:nanochat",
+    ],
+    size = "small",
+    tags = ["gpu"],
+)
+
+cc_test(
+    name = "muon_gpu_test",
+    srcs = ["muon_test.cc"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    deps = [
+        ":optim_test_utils",
+        "//backends/cuda/kernels:optimizer_kernels",
+        "//include/nanochat:nanochat",
+    ],
+    size = "small",
+    tags = ["gpu"],
+)
+
 # Standalone micro-benchmark; run it through the broker, not the test loop.
 cc_binary(
     name = "row_bench",
@@ -211,11 +252,13 @@ cc_binary(
 test_suite(
     name = "all",
     tests = [
+        ":adamw_gpu_test",
         ":attention_gpu_test",
         ":build_config_test",
         ":classifier_gpu_test",
         ":embedding_gpu_test",
         ":global_norm_gpu_test",
+        ":muon_gpu_test",
         ":pascal_spike_gpu_test",
         ":pointwise_gpu_test",
         ":qk_prep_gpu_test",
