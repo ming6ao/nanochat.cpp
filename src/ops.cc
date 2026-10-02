@@ -4,12 +4,37 @@
 
 #include "ops.h"
 
+#include <cstdint>
 #include <cstring>
+#include <vector>
 
 #include "nanochat/kernels.h"
 
 namespace nanochat {
 namespace ops {
+
+namespace {
+
+// Host staging helpers for the ops that have no device kernel: a device buffer
+// is copied to a host vector, the (unchanged) host math runs, and the result is
+// copied back. Correctness first; these are fusion candidates later.
+std::vector<ComputeType> StageToHost(const ComputeType* src, std::int64_t count) {
+  std::vector<ComputeType> host(static_cast<std::size_t>(count));
+  if (count > 0) {
+    kernels::Memcpy(host.data(), src,
+                    static_cast<std::size_t>(count) * sizeof(ComputeType),
+                    CopyDir::kDeviceToHost);
+  }
+  return host;
+}
+
+void StageToDevice(ComputeType* dst, const std::vector<ComputeType>& host) {
+  if (host.empty()) return;
+  kernels::Memcpy(dst, host.data(), host.size() * sizeof(ComputeType),
+                  CopyDir::kHostToDevice);
+}
+
+}  // namespace
 
 // ---------------------------------------------------------------------------
 // Linear
@@ -176,23 +201,35 @@ void ValueResidualForward(std::int64_t rows, int hidden, int num_kv_heads,
     return;
   }
   const int kv_dim = num_kv_heads * head_dim;
+  const std::int64_t hcount = rows * hidden;
+  const std::int64_t vcount = rows * kv_dim;
+  const std::int64_t gcount = rows * num_kv_heads;
+  const std::int64_t wcount =
+      static_cast<std::int64_t>(num_kv_heads) * kVeGateChannels;
+  std::vector<ComputeType> hh = StageToHost(h, hcount);
+  std::vector<ComputeType> veh = StageToHost(ve, vcount);
+  std::vector<ComputeType> wh = StageToHost(gate_w, wcount);
+  std::vector<ComputeType> vh = StageToHost(v, vcount);
+  std::vector<ComputeType> gh(static_cast<std::size_t>(gcount));
   for (std::int64_t m = 0; m < rows; ++m) {
-    const ComputeType* hrow = h + m * hidden;
+    const ComputeType* hrow = hh.data() + m * hidden;
     for (int kh = 0; kh < num_kv_heads; ++kh) {
-      const ComputeType* wrow = gate_w + kh * kVeGateChannels;
+      const ComputeType* wrow = wh.data() + kh * kVeGateChannels;
       float pre = 0.0f;
       for (int j = 0; j < kVeGateChannels; ++j) {
         pre += AsF(hrow[j]) * AsF(wrow[j]);
       }
       const float gate = 3.0f * Sigmoid(pre);
-      gate_out[m * num_kv_heads + kh] = ToC(gate);
-      ComputeType* vrow = v + m * kv_dim + kh * head_dim;
-      const ComputeType* verow = ve + m * kv_dim + kh * head_dim;
+      gh[static_cast<std::size_t>(m * num_kv_heads + kh)] = ToC(gate);
+      ComputeType* vrow = vh.data() + m * kv_dim + kh * head_dim;
+      const ComputeType* verow = veh.data() + m * kv_dim + kh * head_dim;
       for (int d = 0; d < head_dim; ++d) {
         vrow[d] = ToC(AsF(vrow[d]) + gate * AsF(verow[d]));
       }
     }
   }
+  StageToDevice(v, vh);
+  StageToDevice(gate_out, gh);
 }
 
 void ValueResidualBackward(std::int64_t rows, int hidden, int num_kv_heads,
@@ -206,13 +243,26 @@ void ValueResidualBackward(std::int64_t rows, int hidden, int num_kv_heads,
     return;
   }
   const int kv_dim = num_kv_heads * head_dim;
+  const std::int64_t hcount = rows * hidden;
+  const std::int64_t vcount = rows * kv_dim;
+  const std::int64_t gcount = rows * num_kv_heads;
+  const std::int64_t wcount =
+      static_cast<std::int64_t>(num_kv_heads) * kVeGateChannels;
+  std::vector<ComputeType> hh = StageToHost(h, hcount);
+  std::vector<ComputeType> veh = StageToHost(ve, vcount);
+  std::vector<ComputeType> wh = StageToHost(gate_w, wcount);
+  std::vector<ComputeType> gh = StageToHost(gate, gcount);
+  std::vector<ComputeType> dvh = StageToHost(dv, vcount);
+  std::vector<ComputeType> dhh = StageToHost(dh, hcount);
+  std::vector<ComputeType> wgh = StageToHost(gate_w_grad, wcount);
+  std::vector<ComputeType> dveh(static_cast<std::size_t>(vcount));
   for (std::int64_t m = 0; m < rows; ++m) {
-    const ComputeType* hrow = h + m * hidden;
+    const ComputeType* hrow = hh.data() + m * hidden;
     for (int kh = 0; kh < num_kv_heads; ++kh) {
-      const float g = AsF(gate[m * num_kv_heads + kh]);
-      const ComputeType* dvrow = dv + m * kv_dim + kh * head_dim;
-      const ComputeType* verow = ve + m * kv_dim + kh * head_dim;
-      ComputeType* dverow = dve + m * kv_dim + kh * head_dim;
+      const float g = AsF(gh[static_cast<std::size_t>(m * num_kv_heads + kh)]);
+      const ComputeType* dvrow = dvh.data() + m * kv_dim + kh * head_dim;
+      const ComputeType* verow = veh.data() + m * kv_dim + kh * head_dim;
+      ComputeType* dverow = dveh.data() + m * kv_dim + kh * head_dim;
       double dgate = 0.0;
       for (int d = 0; d < head_dim; ++d) {
         const float dv_d = AsF(dvrow[d]);
@@ -222,15 +272,18 @@ void ValueResidualBackward(std::int64_t rows, int hidden, int num_kv_heads,
       // gate = 3*sigmoid(pre) => d(gate)/d(pre) = gate*(1 - gate/3).
       const float dpre = static_cast<float>(dgate) * g * (1.0f - g / 3.0f);
       for (int j = 0; j < kVeGateChannels; ++j) {
-        gate_w_grad[kh * kVeGateChannels + j] =
-            ToC(AsF(gate_w_grad[kh * kVeGateChannels + j]) +
+        wgh[static_cast<std::size_t>(kh * kVeGateChannels + j)] =
+            ToC(AsF(wgh[static_cast<std::size_t>(kh * kVeGateChannels + j)]) +
                 dpre * AsF(hrow[j]));
-        dh[m * hidden + j] =
-            ToC(AsF(dh[m * hidden + j]) +
-                dpre * AsF(gate_w[kh * kVeGateChannels + j]));
+        dhh[static_cast<std::size_t>(m * hidden + j)] =
+            ToC(AsF(dhh[static_cast<std::size_t>(m * hidden + j)]) +
+                dpre * AsF(wh[static_cast<std::size_t>(kh * kVeGateChannels + j)]));
       }
     }
   }
+  StageToDevice(gate_w_grad, wgh);
+  StageToDevice(dh, dhh);
+  StageToDevice(dve, dveh);
 }
 
 // ---------------------------------------------------------------------------
@@ -277,28 +330,41 @@ void SmearForward(std::int64_t batch, std::int64_t seq, std::int64_t hidden,
                   const ComputeType* emb_norm, const ComputeType* gate_w,
                   float lambda, ComputeType* x0, float* sig) {
   if (batch <= 0 || seq <= 0 || hidden <= 0) return;
+  const std::int64_t rows = batch * seq;
+  const std::int64_t count = rows * hidden;
+  std::vector<ComputeType> ee = StageToHost(emb_norm, count);
+  std::vector<ComputeType> wh = StageToHost(gate_w, kSmearChannels);
+  std::vector<ComputeType> xh(static_cast<std::size_t>(count));
+  std::vector<float> sh(static_cast<std::size_t>(rows), 0.0f);
   for (std::int64_t b = 0; b < batch; ++b) {
     for (std::int64_t t = 0; t < seq; ++t) {
       const std::int64_t dst = (b * seq + t) * hidden;
       if (t == 0) {
-        std::memcpy(x0 + dst, emb_norm + dst,
+        std::memcpy(xh.data() + dst, ee.data() + dst,
                     static_cast<std::size_t>(hidden) * sizeof(ComputeType));
-        sig[b * seq + t] = 0.0f;
+        sh[static_cast<std::size_t>(b * seq + t)] = 0.0f;
         continue;
       }
       const std::int64_t src = (b * seq + t - 1) * hidden;
       float pre = 0.0f;
       for (int j = 0; j < kSmearChannels; ++j) {
-        pre += AsF(emb_norm[dst + j]) * AsF(gate_w[j]);
+        pre += AsF(ee[static_cast<std::size_t>(dst + j)]) *
+               AsF(wh[static_cast<std::size_t>(j)]);
       }
       const float s = Sigmoid(pre);
-      sig[b * seq + t] = s;
+      sh[static_cast<std::size_t>(b * seq + t)] = s;
       const float gate = lambda * s;
       for (std::int64_t j = 0; j < hidden; ++j) {
-        x0[dst + j] = ToC(AsF(emb_norm[dst + j]) + gate * AsF(emb_norm[src + j]));
+        xh[static_cast<std::size_t>(dst + j)] =
+            ToC(AsF(ee[static_cast<std::size_t>(dst + j)]) +
+                gate * AsF(ee[static_cast<std::size_t>(src + j)]));
       }
     }
   }
+  StageToDevice(x0, xh);
+  kernels::Memcpy(sig, sh.data(),
+                  static_cast<std::size_t>(rows) * sizeof(float),
+                  CopyDir::kHostToDevice);
 }
 
 void SmearBackward(std::int64_t batch, std::int64_t seq, std::int64_t hidden,
@@ -307,37 +373,52 @@ void SmearBackward(std::int64_t batch, std::int64_t seq, std::int64_t hidden,
                    ComputeType* gate_w_grad, ComputeType* lambda_grad,
                    ComputeType* de) {
   if (batch <= 0 || seq <= 0 || hidden <= 0) return;
+  const std::int64_t rows = batch * seq;
+  const std::int64_t count = rows * hidden;
+  std::vector<ComputeType> ee = StageToHost(emb_norm, count);
+  std::vector<ComputeType> wh = StageToHost(gate_w, kSmearChannels);
+  std::vector<float> sh(static_cast<std::size_t>(rows));
+  kernels::Memcpy(sh.data(), sig, static_cast<std::size_t>(rows) * sizeof(float),
+                  CopyDir::kDeviceToHost);
+  std::vector<ComputeType> dxh = StageToHost(d_x0, count);
   // Identity path: x0[t] contains emb_norm[t] directly.
-  std::memcpy(de, d_x0,
-              static_cast<std::size_t>(batch * seq * hidden) *
-                  sizeof(ComputeType));
+  std::vector<ComputeType> deh = dxh;
+  std::vector<ComputeType> wgh = StageToHost(gate_w_grad, kSmearChannels);
+  std::vector<ComputeType> lgh = StageToHost(lambda_grad, 1);
   double dlambda = 0.0;
   for (std::int64_t b = 0; b < batch; ++b) {
     for (std::int64_t t = 1; t < seq; ++t) {
       const std::int64_t m = (b * seq + t) * hidden;
       const std::int64_t prev = (b * seq + t - 1) * hidden;
-      const float s = sig[b * seq + t];
+      const float s = sh[static_cast<std::size_t>(b * seq + t)];
       const float gate = lambda * s;
 
       double dgate = 0.0;
       for (std::int64_t j = 0; j < hidden; ++j) {
-        dgate += static_cast<double>(AsF(d_x0[m + j])) *
-                 static_cast<double>(AsF(emb_norm[prev + j]));
+        dgate += static_cast<double>(AsF(dxh[static_cast<std::size_t>(m + j)])) *
+                 static_cast<double>(AsF(ee[static_cast<std::size_t>(prev + j)]));
       }
       const float dgate_f = static_cast<float>(dgate);
       for (std::int64_t j = 0; j < hidden; ++j) {
-        de[prev + j] = ToC(AsF(de[prev + j]) + dgate_f * gate);
+        deh[static_cast<std::size_t>(prev + j)] =
+            ToC(AsF(deh[static_cast<std::size_t>(prev + j)]) + dgate_f * gate);
       }
       dlambda += static_cast<double>(dgate_f) * s;
       const float dpre = dgate_f * lambda * s * (1.0f - s);
       for (int j = 0; j < kSmearChannels; ++j) {
-        gate_w_grad[j] =
-            ToC(AsF(gate_w_grad[j]) + dpre * AsF(emb_norm[m + j]));
-        de[m + j] = ToC(AsF(de[m + j]) + dpre * AsF(gate_w[j]));
+        wgh[static_cast<std::size_t>(j)] =
+            ToC(AsF(wgh[static_cast<std::size_t>(j)]) +
+                dpre * AsF(ee[static_cast<std::size_t>(m + j)]));
+        deh[static_cast<std::size_t>(m + j)] =
+            ToC(AsF(deh[static_cast<std::size_t>(m + j)]) +
+                dpre * AsF(wh[static_cast<std::size_t>(j)]));
       }
     }
   }
-  lambda_grad[0] = ToC(AsF(lambda_grad[0]) + static_cast<float>(dlambda));
+  lgh[0] = ToC(AsF(lgh[0]) + static_cast<float>(dlambda));
+  StageToDevice(de, deh);
+  StageToDevice(gate_w_grad, wgh);
+  StageToDevice(lambda_grad, lgh);
 }
 
 // ---------------------------------------------------------------------------
@@ -355,13 +436,20 @@ void BackoutBackward(const ComputeType* d_pre, const ComputeType* x_backout,
                      float lambda, ComputeType* dbackout,
                      ComputeType* lambda_grad, std::int64_t n) {
   if (n <= 0) return;
+  // The elementwise scale is a device op; only the scalar dot product needs
+  // host staging.
+  kernels::PointwiseForward(PointwiseOp::kScale, static_cast<int>(n), d_pre,
+                            nullptr, -lambda, 0.0f, dbackout);
+  std::vector<ComputeType> dph = StageToHost(d_pre, n);
+  std::vector<ComputeType> xbh = StageToHost(x_backout, n);
+  std::vector<ComputeType> lgh = StageToHost(lambda_grad, 1);
   double dlambda = 0.0;
   for (std::int64_t j = 0; j < n; ++j) {
-    const float d = AsF(d_pre[j]);
-    dlambda += static_cast<double>(d) * static_cast<double>(AsF(x_backout[j]));
-    dbackout[j] = ToC(-lambda * d);
+    dlambda += static_cast<double>(AsF(dph[static_cast<std::size_t>(j)])) *
+               static_cast<double>(AsF(xbh[static_cast<std::size_t>(j)]));
   }
-  lambda_grad[0] = ToC(AsF(lambda_grad[0]) - static_cast<float>(dlambda));
+  lgh[0] = ToC(AsF(lgh[0]) - static_cast<float>(dlambda));
+  StageToDevice(lambda_grad, lgh);
 }
 
 // ---------------------------------------------------------------------------
@@ -391,14 +479,17 @@ void BlockForward(const BlockShape& shape, const BlockWeights& weights,
 
   LinearForward(acts.h, weights.c_q, acts.q_final, rows, hidden, query_dim);
   if (acts.q_pre != nullptr && acts.q_pre != acts.q_final) {
-    std::memcpy(acts.q_pre, acts.q_final,
-                static_cast<std::size_t>(rows * query_dim) *
-                    sizeof(ComputeType));
+    kernels::Memcpy(acts.q_pre, acts.q_final,
+                    static_cast<std::size_t>(rows * query_dim) *
+                        sizeof(ComputeType),
+                    CopyDir::kDeviceToDevice);
   }
   LinearForward(acts.h, weights.c_k, acts.k_final, rows, hidden, kv_dim);
   if (acts.k_pre != nullptr && acts.k_pre != acts.k_final) {
-    std::memcpy(acts.k_pre, acts.k_final,
-                static_cast<std::size_t>(rows * kv_dim) * sizeof(ComputeType));
+    kernels::Memcpy(acts.k_pre, acts.k_final,
+                    static_cast<std::size_t>(rows * kv_dim) *
+                        sizeof(ComputeType),
+                    CopyDir::kDeviceToDevice);
   }
 
   LinearForward(acts.h, weights.c_v, acts.v_final, rows, hidden, kv_dim);
@@ -417,14 +508,18 @@ void BlockForward(const BlockShape& shape, const BlockWeights& weights,
   // Inference: append the current key/value rows to the KV cache before
   // attention reads the cache back.
   if (acts.cache_k != nullptr) {
-    std::memcpy(acts.cache_k + static_cast<std::int64_t>(acts.cache_offset) * kv_dim,
-                acts.k_final,
-                static_cast<std::size_t>(rows * kv_dim) * sizeof(ComputeType));
+    kernels::Memcpy(
+        acts.cache_k + static_cast<std::int64_t>(acts.cache_offset) * kv_dim,
+        acts.k_final,
+        static_cast<std::size_t>(rows * kv_dim) * sizeof(ComputeType),
+        CopyDir::kDeviceToDevice);
   }
   if (acts.cache_v != nullptr) {
-    std::memcpy(acts.cache_v + static_cast<std::int64_t>(acts.cache_offset) * kv_dim,
-                acts.v_final,
-                static_cast<std::size_t>(rows * kv_dim) * sizeof(ComputeType));
+    kernels::Memcpy(
+        acts.cache_v + static_cast<std::int64_t>(acts.cache_offset) * kv_dim,
+        acts.v_final,
+        static_cast<std::size_t>(rows * kv_dim) * sizeof(ComputeType),
+        CopyDir::kDeviceToDevice);
   }
 
   AttentionShape attn;
@@ -533,18 +628,34 @@ void BlockBackward(const BlockShape& shape, const BlockWeights& weights,
                             static_cast<int>(rows * hidden), scratch.dx_mid,
                             scratch.dxr, 1.0f, 1.0f, scratch.dxr);
 
+  // dx_in = resid * dxr; x0_acc += x0_lambda * dxr. Both are elementwise and
+  // run on the device. The two scalar dot products need host staging because
+  // the seam has no reduction kernel.
+  kernels::PointwiseForward(PointwiseOp::kScale,
+                            static_cast<int>(rows * hidden), scratch.dxr,
+                            nullptr, resid, 0.0f, dx_in);
+  kernels::PointwiseForward(PointwiseOp::kScaleAdd,
+                            static_cast<int>(rows * hidden), x0_acc,
+                            scratch.dxr, 1.0f, x0_lambda, x0_acc);
+
+  std::vector<ComputeType> dxrh = StageToHost(scratch.dxr, rows * hidden);
+  std::vector<ComputeType> xinh = StageToHost(x_in, rows * hidden);
+  std::vector<ComputeType> x0h = StageToHost(x0, rows * hidden);
+  std::vector<ComputeType> rgh = StageToHost(resid_grad, 1);
+  std::vector<ComputeType> xlgh = StageToHost(x0_lambda_grad, 1);
   double dresid = 0.0;
   double dx0lambda = 0.0;
   for (std::int64_t j = 0; j < rows * hidden; ++j) {
-    const float d = AsF(scratch.dxr[j]);
-    dresid += static_cast<double>(d) * static_cast<double>(AsF(x_in[j]));
-    dx0lambda += static_cast<double>(d) * static_cast<double>(AsF(x0[j]));
-    dx_in[j] = ToC(resid * d);
-    x0_acc[j] = ToC(AsF(x0_acc[j]) + x0_lambda * d);
+    const float d = AsF(dxrh[static_cast<std::size_t>(j)]);
+    dresid += static_cast<double>(d) *
+              static_cast<double>(AsF(xinh[static_cast<std::size_t>(j)]));
+    dx0lambda += static_cast<double>(d) *
+                 static_cast<double>(AsF(x0h[static_cast<std::size_t>(j)]));
   }
-  resid_grad[0] = ToC(AsF(resid_grad[0]) + static_cast<float>(dresid));
-  x0_lambda_grad[0] =
-      ToC(AsF(x0_lambda_grad[0]) + static_cast<float>(dx0lambda));
+  rgh[0] = ToC(AsF(rgh[0]) + static_cast<float>(dresid));
+  xlgh[0] = ToC(AsF(xlgh[0]) + static_cast<float>(dx0lambda));
+  StageToDevice(resid_grad, rgh);
+  StageToDevice(x0_lambda_grad, xlgh);
 }
 
 }  // namespace ops

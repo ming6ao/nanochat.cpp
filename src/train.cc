@@ -29,6 +29,7 @@
 
 #include "nanochat/data.h"
 #include "nanochat/dataloader.h"
+#include "nanochat/kernels.h"
 #include "nanochat/logger.h"
 #include "nanochat/mfu.h"
 #include "nanochat/model.h"
@@ -271,7 +272,8 @@ bool Checkpointer::SaveModel(const Model& model, const std::string& path) {
     const std::size_t bytes =
         static_cast<std::size_t>(view.count) * kComputeTypeSize;
     record.data.resize(bytes);
-    std::memcpy(record.data.data(), view.value, bytes);
+    kernels::Memcpy(record.data.data(), view.value, bytes,
+                    CopyDir::kDeviceToHost);
     checkpoint.Add(std::move(record));
   }
   return checkpoint.Save(path);
@@ -290,7 +292,8 @@ bool Checkpointer::LoadModel(Model* model, const std::string& path) {
         static_cast<std::size_t>(view.count) * kComputeTypeSize;
     const std::size_t bytes = std::min(wanted, record->data.size());
     if (bytes == 0) continue;
-    std::memcpy(view.value, record->data.data(), bytes);
+    kernels::Memcpy(view.value, record->data.data(), bytes,
+                    CopyDir::kHostToDevice);
   }
   return true;
 }

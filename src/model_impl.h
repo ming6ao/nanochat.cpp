@@ -52,12 +52,12 @@ class TrainModel final : public Model {
   const ops::BlockWeights& layer_weights(int layer) const {
     return lweights_[static_cast<std::size_t>(layer)];
   }
-  float resid(int layer) const { return AsF(resid_[layer]); }
-  float x0_lambda(int layer) const { return AsF(x0_lambda_[layer]); }
-  float smear_lambda() const { return AsF(smear_lambda_[0]); }
-  float backout_lambda() const { return AsF(backout_lambda_[0]); }
-  const float* cos_table() const { return cos_table_.data(); }
-  const float* sin_table() const { return sin_table_.data(); }
+  float resid(int layer) const;
+  float x0_lambda(int layer) const;
+  float smear_lambda() const;
+  float backout_lambda() const;
+  const float* cos_table() const { return cos_table_dev_; }
+  const float* sin_table() const { return sin_table_dev_; }
   // Inference may run past the last training sequence length, so grow the
   // rotary table on demand before reading it.
   void EnsureRopeCapacity(int seq);
@@ -124,8 +124,18 @@ class TrainModel final : public Model {
 
   ops::BlockScratch block_scratch_;
 
+  // Host staging buffers for the rotary tables; the device copies are what the
+  // kernels read (`cos_table()`/`sin_table()`). The host vectors exist only so
+  // `BuildRope` can compute the tables cheaply and upload them once.
   std::vector<float> cos_table_;
   std::vector<float> sin_table_;
+  float* cos_table_dev_ = nullptr;
+  float* sin_table_dev_ = nullptr;
+  std::size_t rope_capacity_ = 0;
+
+  // Host staging for the per-token losses so `ForwardLoss` can sum them
+  // without dereferencing device memory.
+  std::vector<ComputeType> losses_host_;
 
   // Host copy of the current batch, so Backward() (which takes no arguments)
   // sees exactly the ids ForwardLoss() ran with.

@@ -61,6 +61,26 @@ cc_test(
     size = "small",
 )
 
+# CUDA flavor of the oracle-parity test: same source and fixture, but linked
+# against the CUDA backend under `--config=cuda` (which `tools/nanochat test
+# --gpu` selects). The `gpu` tag keeps it out of the default CPU test loop;
+# `//src:model_oracle_test` above remains the CPU proof.
+cc_test(
+    name = "model_oracle_gpu_test",
+    srcs = ["model_oracle_test.cc"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    data = ["//tests:data/debug_state.bin"],
+    args = ["$(rootpath //tests:data/debug_state.bin)"],
+    deps = [
+        ":model",
+        "//include/nanochat:nanochat",
+        "//tests:oracle_fixture",
+    ],
+    size = "small",
+    tags = ["gpu"],
+)
+
 # Supplementary finite-difference check: the fixture zero-initializes the two
 # projections, so the oracle test cannot exercise the attention/QkPrep/MLP
 # backward. This test makes them nonzero and checks the analytic gradient along
