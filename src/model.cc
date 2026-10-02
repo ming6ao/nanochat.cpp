@@ -587,7 +587,18 @@ float TrainModel::ForwardLoss(const int* tokens, const int* targets, int batch,
 // Backward
 // ---------------------------------------------------------------------------
 
+void TrainModel::ZeroGrad() {
+  for (Param& p : params_) {
+    FillZero(p.grad, p.count);
+  }
+}
+
 void TrainModel::Backward() {
+  ZeroGrad();
+  BackwardAccumulate(1.0f);
+}
+
+void TrainModel::BackwardAccumulate(float scale) {
   const int layers = config_.num_layers;
   const int hidden = config_.hidden_dim;
   const int padded_vocab = config_.padded_vocab_size;
@@ -595,10 +606,9 @@ void TrainModel::Backward() {
   const std::int64_t rows = rows_;
   if (rows == 0) return;
 
-  // Every parameter gradient accumulates over the reverse pass.
-  for (Param& p : params_) {
-    FillZero(p.grad, p.count);
-  }
+  // `x0_acc_` is per-backward workspace, not a parameter gradient, so it is
+  // reset here. The parameter gradients are *not* reset: repeated calls sum,
+  // which is what gradient accumulation needs.
   FillZero(x0_acc_, rows * hidden);
 
   // Classifier backward yields the per-row (sum-reduction) gradient; the loss
@@ -613,7 +623,7 @@ void TrainModel::Backward() {
                               dlogits_);
   kernels::PointwiseForward(
       PointwiseOp::kScale, static_cast<int>(rows * padded_vocab), dlogits_,
-      nullptr, 1.0f / static_cast<float>(rows), 0.0f, dlogits_);
+      nullptr, scale / static_cast<float>(rows), 0.0f, dlogits_);
 
   ops::LinearWgrad(x_final_norm_, dlogits_, lm_head_grad_, rows, hidden,
                    padded_vocab);

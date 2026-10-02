@@ -252,6 +252,61 @@ void TestTrainLoopMatchesHandRun() {
   }
 }
 
+void TestGradientAccumulation() {
+  const Config config = TinyConfig();
+  const int micro_batch = 2;
+  const int seq = 8;
+  const int rows = micro_batch * seq;
+  std::vector<int> tokens_a(static_cast<std::size_t>(rows));
+  std::vector<int> targets_a(static_cast<std::size_t>(rows));
+  std::vector<int> tokens_b(static_cast<std::size_t>(rows));
+  std::vector<int> targets_b(static_cast<std::size_t>(rows));
+  for (int i = 0; i < rows; ++i) {
+    tokens_a[static_cast<std::size_t>(i)] = (i * 7 + 3) % config.vocab_size;
+    targets_a[static_cast<std::size_t>(i)] = (i * 11 + 5) % config.vocab_size;
+    tokens_b[static_cast<std::size_t>(i)] = (i * 13 + 1) % config.vocab_size;
+    targets_b[static_cast<std::size_t>(i)] = (i * 17 + 2) % config.vocab_size;
+  }
+
+  // Reference: one backward over the concatenated batch.
+  std::unique_ptr<Model> reference = Model::Create(config);
+  reference->InitWeights(kSeed);
+  std::vector<int> tokens(tokens_a);
+  tokens.insert(tokens.end(), tokens_b.begin(), tokens_b.end());
+  std::vector<int> targets(targets_a);
+  targets.insert(targets.end(), targets_b.begin(), targets_b.end());
+  reference->ForwardLoss(tokens.data(), targets.data(), 2 * micro_batch, seq);
+  reference->Backward();
+
+  // Accumulated: two micro-batches, each scaled by 1/2, summed.
+  std::unique_ptr<Model> accumulated = Model::Create(config);
+  accumulated->InitWeights(kSeed);
+  accumulated->ZeroGrad();
+  accumulated->ForwardLoss(tokens_a.data(), targets_a.data(), micro_batch, seq);
+  accumulated->BackwardAccumulate(0.5f);
+  accumulated->ForwardLoss(tokens_b.data(), targets_b.data(), micro_batch, seq);
+  accumulated->BackwardAccumulate(0.5f);
+
+  const std::vector<nanochat::ParamView> ra = reference->params();
+  const std::vector<nanochat::ParamView> aa = accumulated->params();
+  if (ra.size() != aa.size()) {
+    Fail("gradient accumulation: parameter count mismatch");
+    return;
+  }
+  double worst = 0.0;
+  for (std::size_t i = 0; i < ra.size(); ++i) {
+    for (std::int64_t j = 0; j < ra[i].count; ++j) {
+      worst = std::max(
+          worst, std::fabs(static_cast<double>(nanochat::AsF(ra[i].grad[j])) -
+                           static_cast<double>(nanochat::AsF(aa[i].grad[j]))));
+    }
+  }
+  if (worst > 1e-4) {
+    Fail("gradient accumulation gradient mismatch: worst = " +
+         std::to_string(worst));
+  }
+}
+
 void TestModelFlagParsing() {
   Config config;
   if (!nanochat::cli::ApplyModelFlag("--layers", "3", &config) ||
@@ -278,6 +333,7 @@ int main() {
   TestLogger();
   TestModelFlagParsing();
   TestTrainLoopMatchesHandRun();
+  TestGradientAccumulation();
   if (g_failures != 0) {
     std::fprintf(stderr, "harness_test: %d failure(s)\n", g_failures);
     return 1;

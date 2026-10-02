@@ -368,14 +368,27 @@ float TrainLoop::Run() {
                 std::to_string(seq));
 
   for (int step = 1; step <= config_.num_iterations; ++step) {
-    if (!train_loader_->Next(tokens_.data(), targets_.data())) {
-      train_loader_->Reset();
-      if (!train_loader_->Next(tokens_.data(), targets_.data())) break;
-    }
-
     const auto start = std::chrono::steady_clock::now();
-    const float loss = model_->TrainStep(tokens_.data(), targets_.data(), batch,
-                                         seq, optimizer_.get());
+
+    // Gradient accumulation: sum `grad_accum` micro-batch gradients (each
+    // scaled by 1/grad_accum) before one optimizer step. Mirrors nanochat's
+    // `loss = loss / grad_accum_steps` before each backward.
+    const int accum = config_.grad_accum > 0 ? config_.grad_accum : 1;
+    const float inv_accum = 1.0f / static_cast<float>(accum);
+    optimizer_->ZeroGrad();
+    float loss_sum = 0.0f;
+    for (int micro = 0; micro < accum; ++micro) {
+      if (!train_loader_->Next(tokens_.data(), targets_.data())) {
+        train_loader_->Reset();
+        if (!train_loader_->Next(tokens_.data(), targets_.data())) break;
+      }
+      loss_sum +=
+          model_->ForwardLoss(tokens_.data(), targets_.data(), batch, seq);
+      model_->BackwardAccumulate(inv_accum);
+    }
+    optimizer_->Step(step);
+    const float loss = loss_sum * inv_accum;
+
     const auto finish = std::chrono::steady_clock::now();
     const double elapsed =
         std::chrono::duration<double>(finish - start).count();

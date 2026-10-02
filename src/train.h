@@ -32,7 +32,8 @@ struct TrainConfig {
   SchedulerConfig scheduler;
 
   int batch = 8;
-  int seq = 0;  // 0 selects `model.seq_len`
+  int grad_accum = 1;  // micro-batches summed before each optimizer step
+  int seq = 0;         // 0 selects `model.seq_len`
   int num_iterations = 100;
   int log_every = 1;
   int eval_every = 0;  // 0 disables evaluation

@@ -29,6 +29,8 @@ class TrainModel final : public Model {
   float ForwardLoss(const int* tokens, const int* targets, int batch,
                     int seq) override;
   void Backward() override;
+  void ZeroGrad() override;
+  void BackwardAccumulate(float scale) override;
   float TrainStep(const int* tokens, const int* targets, int batch, int seq,
                   Optimizer* optimizer) override;
   std::vector<ParamView> params() const override;

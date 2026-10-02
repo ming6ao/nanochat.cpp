@@ -59,6 +59,16 @@ class Model {
   // Runs the hand-written backward pass over the saved activations.
   virtual void Backward() = 0;
 
+  // Zeroes every parameter gradient. Call before a sequence of
+  // `BackwardAccumulate` passes so the passes sum into an empty gradient.
+  virtual void ZeroGrad() = 0;
+
+  // Runs the backward pass and *accumulates* into the parameter gradients
+  // without zeroing them first. `scale` multiplies the loss gradient; use
+  // `1 / micro_batches` for gradient accumulation. `Backward()` is equivalent
+  // to `ZeroGrad()` followed by `BackwardAccumulate(1.0f)`.
+  virtual void BackwardAccumulate(float scale) = 0;
+
   // Forward + backward + one optimizer step. Returns the batch-mean loss.
   virtual float TrainStep(const int* tokens, const int* targets, int batch,
                           int seq, Optimizer* optimizer) = 0;
