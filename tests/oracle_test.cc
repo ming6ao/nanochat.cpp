@@ -12,10 +12,18 @@
 //   6. the first optimizer step matches the canonical AdamW update for each
 //      AdamW group, and the recorded loss curve descends.
 //
-// The comparison against the *model's* forward/backward is added when the
-// model skeleton lands (`src/model.cc`) and extended to the CUDA backend by the
-// parity node; this test is deliberately self-contained so it builds and runs
-// before the model exists.
+// It then builds the C++ model from the same fixture and checks the full parity
+// sequence (the Wave-boundary gate):
+//
+//   7. the model's forward raw logits, post-softcap logits, and loss;
+//   8. every parameter gradient from the model's backward pass;
+//   9. a short optimizer loop reproducing the recorded loss curve and parameter
+//      trajectory (`step/<k>/loss`, `step/<k>/param/<name>`).
+//
+// The model parity runs on the CPU backend by default and on the CUDA backend
+// when the target is built under `--config=cuda` (`//tests:oracle_cuda_test`).
+// Every device<->host transfer goes through `kernels::Memcpy`, so the same
+// source works on both backends.
 
 #include <algorithm>
 #include <cmath>
@@ -24,18 +32,55 @@
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
+#include <memory>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 #include <vector>
 
+#include "nanochat/kernels.h"
+#include "nanochat/model.h"
+#include "nanochat/optim.h"
+#include "nanochat/scheduler.h"
+#include "src/model_impl.h"
 #include "tests/oracle_fixture.h"
 
 namespace {
 
+using nanochat::ComputeType;
+using nanochat::Config;
+using nanochat::Model;
+using nanochat::Optimizer;
+using nanochat::OptimizerConfig;
+using nanochat::Scheduler;
+using nanochat::SchedulerConfig;
+using nanochat::TrainModel;
 using nanochat::oracle::Fixture;
 using nanochat::oracle::Tensor;
 
+// Tolerances. Both the CPU and the fp32 CUDA backend are expected to agree with
+// the PyTorch fixture to single-precision roundoff for the forward and the
+// backward.
+constexpr double kForwardTolerance = 1e-5;
+constexpr double kBackwardTolerance = 1e-5;
+// A single optimizer step driven by the fixture's recorded gradients isolates
+// the optimizer from backward roundoff and must match to fp32 roundoff.
+constexpr double kOptimizerTolerance = 1e-5;
+// The full `TrainStep` loop cannot be tight for every parameter: the fixture's
+// scalar gradients sit at the AdamW `eps` scale (see RunModelParity), so the
+// recorded trajectory is not reproducible bit-for-bit. The loss stays close;
+// the parameter bound is deliberately loose and the measured maximum is
+// printed.
+constexpr double kTrajectoryLossTolerance = 1e-1;
+constexpr double kTrajectoryParamTolerance = 5.0;
+constexpr float kSoftcap = 15.0f;
+
 int g_failures = 0;
+double g_max_forward_error = 0.0;
+double g_max_backward_error = 0.0;
+double g_max_optimizer_error = 0.0;
+double g_max_trajectory_loss_error = 0.0;
+double g_max_trajectory_param_error = 0.0;
 
 void Fail(const std::string& message) {
   std::fprintf(stderr, "FAIL: %s\n", message.c_str());
@@ -155,6 +200,141 @@ void CheckAdamWStep1(const Fixture& fixture, const std::string& name, double lr,
   ExpectTrue(max_diff < 1e-6,
              Format("AdamW step-1 mismatch for %s: max |diff| = %.3g",
                     name.c_str(), max_diff));
+}
+
+// ---------------------------------------------------------------------------
+// Model parity helpers
+// ---------------------------------------------------------------------------
+//
+// The same source links the reference CPU backend by default and the CUDA
+// backend under `--config=cuda`, so every device<->host transfer goes through
+// `kernels::Memcpy` and every read of a parameter/logit goes through a host
+// staging buffer.
+
+template <typename T = ComputeType>
+float AsFloat32(T value) {
+  if constexpr (std::is_same_v<T, float>) {
+    return value;
+  } else {
+    return nanochat::Fp16ToFloat(value);
+  }
+}
+
+template <typename T = ComputeType>
+void StoreFloat(T* dst, float value) {
+  if constexpr (std::is_same_v<T, float>) {
+    *dst = value;
+  } else {
+    *dst = nanochat::Fp16FromFloat(value);
+  }
+}
+
+void CopyCompute(const ComputeType* src, std::int64_t count,
+                 std::vector<float>* out) {
+  std::vector<ComputeType> host(static_cast<std::size_t>(count));
+  if (count > 0) {
+    nanochat::kernels::Memcpy(
+        host.data(), src, static_cast<std::size_t>(count) * sizeof(ComputeType),
+        nanochat::CopyDir::kDeviceToHost);
+  }
+  out->resize(static_cast<std::size_t>(count));
+  for (std::int64_t i = 0; i < count; ++i) {
+    (*out)[static_cast<std::size_t>(i)] =
+        AsFloat32(host[static_cast<std::size_t>(i)]);
+  }
+}
+
+Config ConfigFromFixture(const Fixture& fixture) {
+  Config config;
+  config.num_layers =
+      static_cast<int>(fixture.Get("config/layers").scalar_int());
+  config.num_heads = static_cast<int>(fixture.Get("config/heads").scalar_int());
+  config.num_kv_heads =
+      static_cast<int>(fixture.Get("config/kv_heads").scalar_int());
+  config.hidden_dim = static_cast<int>(fixture.Get("config/embd").scalar_int());
+  config.seq_len = static_cast<int>(fixture.Get("config/seq").scalar_int());
+  config.vocab_size =
+      static_cast<int>(fixture.Get("config/vocab").scalar_int());
+  config.padded_vocab_size =
+      static_cast<int>(fixture.Get("config/padded_vocab").scalar_int());
+  config.rope_base = 100000.0f;
+
+  const Tensor& pattern = fixture.Get("config/window_pattern");
+  std::string window(pattern.data, pattern.data + pattern.numel());
+  config.window_pattern = window;
+  return config;
+}
+
+void LoadParameters(const Fixture& fixture, Model* model) {
+  std::vector<nanochat::ParamView> views = model->params();
+  for (const nanochat::ParamView& view : views) {
+    const std::string record = std::string("param/") + view.name;
+    if (!fixture.Has(record)) {
+      Fail("fixture is missing parameter record '" + record + "'");
+      continue;
+    }
+    const Tensor& source = fixture.Get(record);
+    if (source.numel() != view.count) {
+      Fail(Format("parameter '%s' count mismatch: model %lld fixture %lld",
+                  view.name, static_cast<long long>(view.count),
+                  static_cast<long long>(source.numel())));
+      continue;
+    }
+    if (source.dtype != nanochat::oracle::DType::kFp32) {
+      Fail("parameter '" + record + "' is not fp32 in the fixture");
+      continue;
+    }
+    const float* src = source.f32();
+    std::vector<ComputeType> host(static_cast<std::size_t>(view.count));
+    for (std::int64_t i = 0; i < view.count; ++i) {
+      StoreFloat(host.data() + i, src[i]);
+    }
+    nanochat::kernels::Memcpy(
+        view.value, host.data(),
+        static_cast<std::size_t>(view.count) * sizeof(ComputeType),
+        nanochat::CopyDir::kHostToDevice);
+  }
+}
+
+// Compares one device buffer against a fixture record and folds the maximum
+// absolute difference into `*max_error`.
+void CompareToFixture(const ComputeType* got_dev, std::int64_t count,
+                      const Tensor& want, const std::string& what,
+                      double tolerance, double* max_error) {
+  if (want.dtype != nanochat::oracle::DType::kFp32) {
+    Fail(what + ": fixture record is not fp32");
+    return;
+  }
+  if (want.numel() != count) {
+    Fail(Format("%s: count mismatch (model %lld, fixture %lld)", what.c_str(),
+                static_cast<long long>(count),
+                static_cast<long long>(want.numel())));
+    return;
+  }
+  std::vector<float> got;
+  CopyCompute(got_dev, count, &got);
+  double max_diff = 0.0;
+  std::int64_t worst = -1;
+  for (std::int64_t i = 0; i < count; ++i) {
+    const double diff =
+        std::fabs(static_cast<double>(got[static_cast<std::size_t>(i)]) -
+                  static_cast<double>(want.f32()[i]));
+    if (diff > max_diff) {
+      max_diff = diff;
+      worst = i;
+    }
+  }
+  *max_error = std::max(*max_error, max_diff);
+  if (max_diff > tolerance) {
+    const double got_worst =
+        worst >= 0 ? static_cast<double>(got[static_cast<std::size_t>(worst)])
+                   : 0.0;
+    const double want_worst =
+        worst >= 0 ? static_cast<double>(want.f32()[worst]) : 0.0;
+    Fail(Format("%s: max |diff| = %.3g at %lld (got %.9g want %.9g)",
+                what.c_str(), max_diff, static_cast<long long>(worst),
+                got_worst, want_worst));
+  }
 }
 
 void RunChecks(const Fixture& fixture) {
@@ -365,6 +545,234 @@ void RunChecks(const Fixture& fixture) {
   CheckAdamWStep1(fixture, "backout_lambda", 0.2, 0.8, 0.95, eps, 0.0);
 }
 
+// The model-parity gate: builds the C++ model from the fixture config, loads
+// every parameter, and checks the forward, the backward, and a short optimizer
+// trajectory against the recorded reference.
+//
+// The optimizer is validated two ways:
+//
+//   * a tight single step driven by the fixture's own recorded gradients
+//     (`grad/<name>`), which isolates the optimizer from backward roundoff and
+//     must reproduce `step/1/param`; and
+//   * the full `TrainStep` loop, compared against `step/<k>/loss` and
+//     `step/<k>/param/<name>`.
+//
+// The full loop cannot be tight for every parameter. nanochat's AdamW uses
+// `eps = 1e-10`, and several fixture gradients sit at that scale:
+// `grad/x0_lambdas`, `grad/resid_lambdas`, and `grad/backout_lambda` are
+// ~1e-10, and `grad/smear_gate.weight` is exactly zero. For those parameters
+// the update `lr * g / (|g| + eps)` is a discontinuous function of the last bit
+// of `g`, so the recorded trajectory is not reproducible across float32
+// implementations; the divergence then feeds back through the forward into the
+// rest of the parameters. The tight single-step check above is the meaningful
+// optimizer proof; the loop is a behavioral check with a looser bound.
+void RunModelParity(const Fixture& fixture) {
+  const int batch = static_cast<int>(fixture.Get("config/batch").scalar_int());
+  const int seq = static_cast<int>(fixture.Get("config/seq").scalar_int());
+  const int vocab = static_cast<int>(fixture.Get("config/vocab").scalar_int());
+  const int padded =
+      static_cast<int>(fixture.Get("config/padded_vocab").scalar_int());
+  const int steps = static_cast<int>(fixture.Get("config/steps").scalar_int());
+  const std::int64_t rows = static_cast<std::int64_t>(batch) * seq;
+
+  const Config config = ConfigFromFixture(fixture);
+  std::unique_ptr<Model> model = Model::Create(config);
+  auto* impl = static_cast<TrainModel*>(model.get());
+  LoadParameters(fixture, model.get());
+
+  const Tensor& tokens = fixture.Get("input/tokens");
+  const Tensor& targets = fixture.Get("input/targets");
+  const int* token_data = reinterpret_cast<const int*>(tokens.i32());
+  const int* target_data = reinterpret_cast<const int*>(targets.i32());
+
+  // --- 1. forward: loss, raw logits, post-softcap logits --------------------
+  const float loss = model->ForwardLoss(token_data, target_data, batch, seq);
+  {
+    const Tensor& want = fixture.Get("forward/loss");
+    const double diff = std::fabs(static_cast<double>(loss) -
+                                  static_cast<double>(want.scalar_f32()));
+    g_max_forward_error = std::max(g_max_forward_error, diff);
+    if (diff > kForwardTolerance) {
+      Fail(Format("forward/loss: got %.9g want %.9g (|diff|=%.3g)", loss,
+                  want.scalar_f32(), diff));
+    }
+  }
+
+  std::vector<ComputeType> raw_host(static_cast<std::size_t>(rows) * padded);
+  nanochat::kernels::Memcpy(
+      raw_host.data(), impl->raw_logits(),
+      static_cast<std::size_t>(rows) * padded * sizeof(ComputeType),
+      nanochat::CopyDir::kDeviceToHost);
+
+  {
+    const Tensor& want = fixture.Get("forward/raw_logits");
+    double max_diff = 0.0;
+    for (std::int64_t r = 0; r < rows; ++r) {
+      for (int v = 0; v < vocab; ++v) {
+        const double got = static_cast<double>(AsFloat32(
+            raw_host[static_cast<std::size_t>(r) * padded + v]));
+        const double expected = static_cast<double>(
+            want.f32()[static_cast<std::size_t>(r) * vocab + v]);
+        max_diff = std::max(max_diff, std::fabs(got - expected));
+      }
+    }
+    g_max_forward_error = std::max(g_max_forward_error, max_diff);
+    if (max_diff > kForwardTolerance) {
+      Fail(Format("forward/raw_logits: max |diff| = %.3g", max_diff));
+    }
+  }
+
+  {
+    const Tensor& want = fixture.Get("forward/logits");
+    double max_diff = 0.0;
+    for (std::int64_t r = 0; r < rows; ++r) {
+      for (int v = 0; v < vocab; ++v) {
+        const float raw =
+            AsFloat32(raw_host[static_cast<std::size_t>(r) * padded + v]);
+        const double got =
+            static_cast<double>(kSoftcap * std::tanh(raw / kSoftcap));
+        const double expected = static_cast<double>(
+            want.f32()[static_cast<std::size_t>(r) * vocab + v]);
+        max_diff = std::max(max_diff, std::fabs(got - expected));
+      }
+    }
+    g_max_forward_error = std::max(g_max_forward_error, max_diff);
+    if (max_diff > kForwardTolerance) {
+      Fail(Format("forward/logits: max |diff| = %.3g", max_diff));
+    }
+  }
+
+  // --- 2. backward: every parameter gradient --------------------------------
+  model->Backward();
+  for (const nanochat::ParamView& view : model->params()) {
+    const std::string record = std::string("grad/") + view.name;
+    if (!fixture.Has(record)) {
+      Fail("fixture is missing gradient record '" + record + "'");
+      continue;
+    }
+    CompareToFixture(view.grad, view.count, fixture.Get(record), record,
+                     kBackwardTolerance, &g_max_backward_error);
+  }
+
+  // --- 3. optimizer trajectory ---------------------------------------------
+  OptimizerConfig opt;
+  opt.unembedding_lr = fixture.Get("config/opt/unembedding_lr").scalar_f32();
+  opt.embedding_lr = fixture.Get("config/opt/embedding_lr").scalar_f32();
+  opt.matrix_lr = fixture.Get("config/opt/matrix_lr").scalar_f32();
+  opt.scalar_lr = fixture.Get("config/opt/scalar_lr").scalar_f32();
+  opt.weight_decay = fixture.Get("config/opt/weight_decay").scalar_f32();
+  opt.clip = fixture.Get("config/opt/clip").scalar_f32();
+  // `muon_ns_steps`, `muon_beta2`, and `adam_eps` keep the setup_optimizer
+  // defaults (5, 0.9, 1e-10), which is what the fixture records.
+
+  // The fixture's trajectory calls `optimizer.step()` directly with the
+  // setup_optimizer defaults, so its schedules are constant: learning-rate
+  // multiplier 1, Muon momentum 0.95, and zero weight decay. `num_iterations =
+  // 0` collapses the schedules to those constants (see src/optim.cc); the
+  // momentum limits are all 0.95 so the schedule is pinned regardless of step.
+  SchedulerConfig sched;
+  sched.num_iterations = 0;
+  sched.warmup_steps = 0;
+  sched.warmdown_ratio = 0.0f;
+  sched.final_lr_frac = 0.0f;
+  sched.weight_decay_base = 0.0f;
+  sched.muon_momentum_warmup_steps = 0.0f;
+  sched.muon_momentum_start = 0.95f;
+  sched.muon_momentum_peak = 0.95f;
+  sched.muon_momentum_final = 0.95f;
+  const Scheduler scheduler(sched);
+
+  auto make_model = [&]() -> std::unique_ptr<Model> {
+    std::unique_ptr<Model> fresh = Model::Create(config);
+    LoadParameters(fixture, fresh.get());
+    return fresh;
+  };
+
+  // 3a. Tight single-step parity, driven by the fixture's own gradients: load
+  // `grad/<name>` into the model's gradient buffers, apply one 1-based
+  // optimizer step, and compare every parameter to `step/1/param`. Because the
+  // inputs are the recorded reference gradients, this isolates the optimizer
+  // grouping, schedules, AdamW, and Muon from the backward's fp32 roundoff.
+  {
+    for (const nanochat::ParamView& view : model->params()) {
+      const std::string record = std::string("grad/") + view.name;
+      if (!fixture.Has(record)) continue;
+      const Tensor& source = fixture.Get(record);
+      const std::int64_t count =
+          std::min<std::int64_t>(view.count, source.numel());
+      std::vector<ComputeType> host(static_cast<std::size_t>(count));
+      for (std::int64_t i = 0; i < count; ++i) {
+        StoreFloat(host.data() + i, source.f32()[i]);
+      }
+      nanochat::kernels::Memcpy(
+          view.grad, host.data(),
+          static_cast<std::size_t>(count) * sizeof(ComputeType),
+          nanochat::CopyDir::kHostToDevice);
+    }
+    std::unique_ptr<Optimizer> step1 =
+        nanochat::CreateOptimizer(model.get(), opt, scheduler);
+    step1->Step(1);
+    for (const nanochat::ParamView& view : model->params()) {
+      const std::string record = std::string("step/1/param/") + view.name;
+      if (!fixture.Has(record)) {
+        Fail("fixture is missing trajectory record '" + record + "'");
+        continue;
+      }
+      CompareToFixture(view.value, view.count, fixture.Get(record),
+                       "optimizer step/1 " + std::string(view.name),
+                       kOptimizerTolerance, &g_max_optimizer_error);
+    }
+  }
+
+  // 3b. The full `TrainStep` loop on a fresh model. `TrainStep` zeroes the
+  // gradient, runs forward/backward, then applies the 1-based optimizer step,
+  // matching the fixture's `optimizer.step()` order.
+  model = make_model();
+  std::unique_ptr<Optimizer> optimizer =
+      nanochat::CreateOptimizer(model.get(), opt, scheduler);
+
+  // step/0 is the initial parameter set (recorded before any optimizer step).
+  for (const nanochat::ParamView& view : model->params()) {
+    const std::string record = std::string("step/0/param/") + view.name;
+    if (!fixture.Has(record)) {
+      Fail("fixture is missing trajectory record '" + record + "'");
+      continue;
+    }
+    CompareToFixture(view.value, view.count, fixture.Get(record), record,
+                     kOptimizerTolerance, &g_max_trajectory_param_error);
+  }
+
+  for (int k = 1; k <= steps; ++k) {
+    model->TrainStep(token_data, target_data, batch, seq, optimizer.get());
+    // The fixture records the loss *after* the step, so recompute it on the
+    // updated parameters to compare `step/<k>/loss` directly.
+    const float step_loss =
+        model->ForwardLoss(token_data, target_data, batch, seq);
+    const std::string loss_record = "step/" + std::to_string(k) + "/loss";
+    const double loss_diff =
+        std::fabs(static_cast<double>(step_loss) -
+                  static_cast<double>(fixture.Get(loss_record).scalar_f32()));
+    g_max_trajectory_loss_error =
+        std::max(g_max_trajectory_loss_error, loss_diff);
+    if (loss_diff > kTrajectoryLossTolerance) {
+      Fail(Format("%s: got %.9g want %.9g (|diff|=%.3g)", loss_record.c_str(),
+                  step_loss, fixture.Get(loss_record).scalar_f32(),
+                  loss_diff));
+    }
+    for (const nanochat::ParamView& view : model->params()) {
+      const std::string record =
+          "step/" + std::to_string(k) + "/param/" + view.name;
+      if (!fixture.Has(record)) {
+        Fail("fixture is missing trajectory record '" + record + "'");
+        continue;
+      }
+      CompareToFixture(view.value, view.count, fixture.Get(record), record,
+                       kTrajectoryParamTolerance,
+                       &g_max_trajectory_param_error);
+    }
+  }
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -387,6 +795,14 @@ int main(int argc, char** argv) {
   std::printf("oracle_test: loaded %s (%zu records)\n", path.c_str(),
               fixture.size());
   RunChecks(fixture);
+  RunModelParity(fixture);
+
+  std::printf(
+      "oracle_test: max forward error %.3g, max backward error %.3g, "
+      "max optimizer-step-1 error %.3g, max trajectory loss error %.3g, "
+      "max trajectory parameter error %.3g\n",
+      g_max_forward_error, g_max_backward_error, g_max_optimizer_error,
+      g_max_trajectory_loss_error, g_max_trajectory_param_error);
 
   if (g_failures != 0) {
     std::fprintf(stderr, "oracle_test: %d check(s) failed\n", g_failures);
