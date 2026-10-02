@@ -56,6 +56,37 @@ into unreproducible updates. Regenerate the fixture with
 
 Fixtures are data, so GPU tests never need torch at runtime. Use fixed seeds.
 
+## Training-parity harness
+
+`tools/dump_train_fixture.py` records a multi-step *training trajectory* from
+nanochat's PyTorch `gpt.py`: the initial parameters, the exact token/target
+batch at every step, and, after every step, the loss, the global gradient norm,
+and the L2 norm of every parameter (and optionally the final parameter tensors).
+`tests/train_parity_test.cc` drives `nanochat.cpp`'s `TrainStep` from the same
+initial parameters over the same batches with the same optimizer and
+learning-rate schedule, and compares the loss, gradient, and parameter
+trajectories. This is the scaled-up version of the oracle trajectory gate: it
+is what catches a bug that only appears after the first update, when the
+zero-initialized output projections activate the attention and MLP backward.
+
+The committed fixture `tests/data/train_parity.bin` is the compact CPU case
+(`--nonzero-projections` so the whole graph is active at step 0) and runs as
+`//tests:train_parity_test` (CPU) and `//tests:train_parity_cuda_test` (GPU).
+The same source builds as the standalone `//tests:train_parity` binary for an
+arbitrary production fixture:
+
+```bash
+python3 tools/dump_train_fixture.py --out /tmp/train_parity_d8_s512_50.bin \
+    --layers 8 --heads 4 --kv-heads 4 --embd 512 --vocab 32768 --pad-to 32768 \
+    --seq 512 --batch 8 --steps 50 --window L --adam-eps 1e-4
+tools/nanochat gpu --profile t2-parity -- \
+    ./bazel-bin/tests/train_parity /tmp/train_parity_d8_s512_50.bin
+```
+
+`TRAIN_PARITY_STOP=1` stops at the first divergent step, which is useful for
+bisecting a shape- or schedule-dependent bug. Like the oracle, the fixture is
+generated on the CPU with torch and the runtime tests never import torch.
+
 ## Finite-difference checks
 
 Kernel families with a backward are checked with a finite-difference gradient

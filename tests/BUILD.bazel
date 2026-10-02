@@ -3,7 +3,7 @@
 # `tools/dump_oracle.py`; `oracle_fixture.h` is a torch-free reader that any
 # backend or the model skeleton can reuse. See docs/testing.md.
 
-load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
+load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library", "cc_test")
 load("//:nanochat.bzl", "nanochat_copts", "precision_defines")
 
 package(default_visibility = ["//visibility:public"])
@@ -54,8 +54,62 @@ cc_test(
     tags = ["gpu"],
 )
 
+# Multi-step training parity: drives the C++ model over a recorded training
+# trajectory (initial parameters, exact batches, per-step loss, gradient norm,
+# and parameter L2) produced by `tools/dump_train_fixture.py`. The committed
+# fixture is the compact CPU case; the same source also builds as the
+# `train_parity` binary for a production fixture run under the sandbox.
+cc_test(
+    name = "train_parity_test",
+    srcs = ["train_parity_test.cc"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    data = ["data/train_parity.bin"],
+    args = ["$(rootpath data/train_parity.bin)"],
+    deps = [
+        ":oracle_fixture",
+        "//include/nanochat:nanochat",
+        "//src:model",
+    ],
+    size = "small",
+)
+
+# Same gate on the CUDA backend. Kept out of the default CPU loop by the `gpu`
+# tag; `tools/nanochat test --gpu //tests:train_parity_cuda_test` runs it.
+cc_test(
+    name = "train_parity_cuda_test",
+    srcs = ["train_parity_test.cc"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    data = ["data/train_parity.bin"],
+    args = ["$(rootpath data/train_parity.bin)"],
+    deps = [
+        ":oracle_fixture",
+        "//include/nanochat:nanochat",
+        "//src:model",
+    ],
+    size = "small",
+    tags = ["gpu"],
+)
+
+# Standalone runner for arbitrary (for example production, d8_s512) fixtures.
+# Built under the selected backend; run it through `tools/nanochat`.
+cc_binary(
+    name = "train_parity",
+    srcs = ["train_parity_test.cc"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    deps = [
+        ":oracle_fixture",
+        "//include/nanochat:nanochat",
+        "//src:model",
+    ],
+)
+
 # Aggregation point consumed by //:all_tests.
 test_suite(name = "all", tests = [
     ":oracle_test",
     ":oracle_cuda_test",
+    ":train_parity_test",
+    ":train_parity_cuda_test",
 ])

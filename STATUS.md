@@ -43,3 +43,14 @@ integrated. Live resume state is in `.sliceme/RESUME.md`.
   are exactly zero at initialization. The smear backward's previous-position
   input gradient is elementwise `dx0 * gate`; the model finite-difference test
   now sets `smear_lambda` nonzero so it covers that path.
+- A shared-memory race in the CUDA block reductions (`BlockReduceSum` /
+  `BlockReduceMax`) is fixed: the shared array is reused across calls in one
+  kernel, so a second reduction could overwrite `shared[0]` before every thread
+  consumed the first result. It surfaced as nondeterministic `QkPrep` backward
+  failures only at `head_dim = 128`, and is now guarded with a barrier before
+  the write (`backends/cuda/kernels/device_utils.cuh`).
+- The training-parity harness (`tools/dump_train_fixture.py`,
+  `//tests:train_parity`) compares a full training trajectory against PyTorch
+  from shared initial parameters and batches. It passes 50 steps at the
+  `d8_s512` configuration (loss `6e-6`, parameter L2 `1.7e-3`, gradient L2
+  `4.3e-5`); see [docs/testing.md](docs/testing.md).

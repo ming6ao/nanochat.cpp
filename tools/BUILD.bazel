@@ -12,6 +12,7 @@ package(default_visibility = ["//visibility:public"])
 
 exports_files([
     "dump_oracle.py",
+    "dump_train_fixture.py",
     "nanochat",
     "gpu.sh",
     "sandbox.sh",
@@ -21,6 +22,11 @@ exports_files([
 filegroup(
     name = "dump_oracle",
     srcs = ["dump_oracle.py"],
+)
+
+filegroup(
+    name = "dump_train_fixture",
+    srcs = ["dump_train_fixture.py"],
 )
 
 # T0 test for the output-base reaper. Hermetic and CPU-only: it builds a
