@@ -9,7 +9,10 @@
 //
 // The tiny architecture matches the gradient test (2 layers, 8 query heads,
 // 2 key/value heads, hidden 32, seq 8, vocab 64, window "SL"), so the whole
-// graph is exercised cheaply on the CPU reference backend.
+// graph is exercised cheaply. The same source builds against the CPU reference
+// backend (`//src:generate_test`) and, under `--config=cuda`, the CUDA backend
+// (`//src:generate_gpu_test`); the raw logits are staged through the seam so it
+// does not matter whether they live in host or device memory.
 
 #include <algorithm>
 #include <cmath>
@@ -65,21 +68,26 @@ double MaxDiff(const std::vector<float>& got, const std::vector<float>& want) {
 }
 
 // The training forward's soft-capped logits for one position, read from the
-// saved raw logits.
+// saved raw logits. `raw_logits()` is host memory on the CPU backend and device
+// memory on CUDA, so stage the whole `[total, padded]` buffer through the seam
+// rather than dereferencing the pointer on the host.
 std::vector<float> ReferenceLogits(TrainModel* impl, const Config& config,
                                    int position, int total) {
   const int vocab = config.vocab_size;
   const int padded = config.padded_vocab_size;
-  const ComputeType* raw = impl->raw_logits();
+  const std::int64_t count = static_cast<std::int64_t>(total) * padded;
+  std::vector<ComputeType> raw(static_cast<std::size_t>(count));
+  nanochat::kernels::Memcpy(
+      raw.data(), impl->raw_logits(),
+      static_cast<std::size_t>(count) * sizeof(ComputeType),
+      nanochat::CopyDir::kDeviceToHost);
   std::vector<float> out(static_cast<std::size_t>(vocab));
   for (int v = 0; v < vocab; ++v) {
-    const float z = nanochat::AsF(raw[static_cast<std::int64_t>(position) *
-                                          padded +
-                                      v]);
+    const float z =
+        nanochat::AsF(raw[static_cast<std::int64_t>(position) * padded + v]);
     out[static_cast<std::size_t>(v)] =
         nanochat::kLogitSoftcap * std::tanh(z / nanochat::kLogitSoftcap);
   }
-  (void)total;
   return out;
 }
 

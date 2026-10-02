@@ -112,6 +112,26 @@ cc_test(
     size = "small",
 )
 
+# CUDA flavor of the prefill/decode consistency test: same source, but linked
+# against the CUDA backend under `--config=cuda` (which `tools/nanochat test
+# --gpu` selects). This covers the inference-only wiring that the train-graph
+# oracle does not touch: the KV-cache append, the cache-offset attention, the
+# rotary-table offset, and the decode prev-embedding smear. The `gpu` tag keeps
+# it out of the default CPU test loop; `//src:generate_test` above remains the
+# CPU proof.
+cc_test(
+    name = "generate_gpu_test",
+    srcs = ["generate_test.cc"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    deps = [
+        ":model",
+        "//include/nanochat:nanochat",
+    ],
+    size = "small",
+    tags = ["gpu"],
+)
+
 # Optimizer grouping and schedules: the setup_optimizer AdamW/Muon parameter
 # groups, the moments, the global gradient clip, and the learning-rate /
 # momentum / weight-decay schedules. See docs/optimizer.md.
