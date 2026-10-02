@@ -399,9 +399,14 @@ void SmearBackward(std::int64_t batch, std::int64_t seq, std::int64_t hidden,
                  static_cast<double>(AsF(ee[static_cast<std::size_t>(prev + j)]));
       }
       const float dgate_f = static_cast<float>(dgate);
+      // x0[t] = e[t] + gate[t] * e[t-1], so the gradient w.r.t. the previous
+      // position is elementwise `dx0[t, j] * gate[t]`, not the scalar
+      // `dgate * gate` (which is the gate's own gradient, used below for
+      // lambda and the gate weights).
       for (std::int64_t j = 0; j < hidden; ++j) {
         deh[static_cast<std::size_t>(prev + j)] =
-            ToC(AsF(deh[static_cast<std::size_t>(prev + j)]) + dgate_f * gate);
+            ToC(AsF(deh[static_cast<std::size_t>(prev + j)]) +
+                AsF(dxh[static_cast<std::size_t>(m + j)]) * gate);
       }
       dlambda += static_cast<double>(dgate_f) * s;
       const float dpre = dgate_f * lambda * s * (1.0f - s);

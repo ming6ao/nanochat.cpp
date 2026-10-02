@@ -4,13 +4,16 @@
 // (gpt.py does), which makes the loss independent of the attention and MLP
 // sub-graphs; every gradient behind those projections is therefore exactly
 // zero in the fixture, and the oracle test cannot exercise their backward.
+// It also zero-initializes `smear_lambda`, which disables the smear gate and
+// hides SmearBackward's input gradient.
 //
-// This test closes that gap: it builds the same tiny architecture, gives the
-// projections small nonzero weights so the whole graph participates, and
-// verifies the analytic backward against a central finite difference of the
-// loss along several random directions over every parameter. A directional
-// derivative covers all gradient entries at once, which keeps the check cheap
-// on the tiny configuration. See docs/testing.md, "Finite-difference checks".
+// This test closes those gaps: it builds the same tiny architecture, gives the
+// projections small nonzero weights and `smear_lambda` a nonzero value so the
+// whole graph participates, and verifies the analytic backward against a
+// central finite difference of the loss along several random directions over
+// every parameter. A directional derivative covers all gradient entries at
+// once, which keeps the check cheap on the tiny configuration. See
+// docs/testing.md, "Finite-difference checks".
 
 #include <cmath>
 #include <cstdarg>
@@ -116,6 +119,14 @@ int Run() {
         StoreFloat(view.value + i, 0.05f * rng.Uniform());
       }
     }
+    // `smear_lambda` is initialized to zero (gate disabled). Set it nonzero so
+    // the smear gate participates and the finite difference covers
+    // SmearBackward's elementwise input gradient.
+    for (const ParamView& view : views) {
+      if (std::string(view.name) == "smear_lambda") {
+        StoreFloat(view.value, 0.7f);
+      }
+    }
   }
 
   std::vector<int> tokens(static_cast<std::size_t>(rows));
@@ -144,7 +155,11 @@ int Run() {
   }
 
   const float h = 1e-2f;
-  const double tolerance = 1e-2;
+  // Tight enough that a wrong elementwise contribution to the smear input
+  // gradient (the previous `dgate * gate` bug) fails the check, while leaving
+  // room for the central-difference truncation error. The measured errors are
+  // ~1.6e-3 with the correct backward and ~3.9e-3 with the bug.
+  const double tolerance = 2e-3;
   const int directions = 4;
   for (int direction = 0; direction < directions; ++direction) {
     std::vector<std::vector<float>> dir(views.size());

@@ -82,9 +82,10 @@ cc_test(
 )
 
 # Supplementary finite-difference check: the fixture zero-initializes the two
-# projections, so the oracle test cannot exercise the attention/QkPrep/MLP
-# backward. This test makes them nonzero and checks the analytic gradient along
-# random directions over every parameter.
+# projections, and zero-initializes `smear_lambda`, so the oracle test cannot
+# exercise the attention/QkPrep/MLP backward or the smear input gradient. This
+# test makes them nonzero and checks the analytic gradient along random
+# directions over every parameter.
 cc_test(
     name = "model_gradient_test",
     srcs = ["model_gradient_test.cc"],
