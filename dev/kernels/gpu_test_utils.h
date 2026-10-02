@@ -152,6 +152,15 @@ void CheckFiniteDifference(const std::vector<float>& x0,
   }
   std::printf("  finite-diff %-14s max abs error %.3g\n", what, worst);
 }
+#else
+// fp16 storage cannot resolve the finite-difference perturbation, so the check
+// is skipped (docs/testing.md). Provide the symbol so the family tests that
+// import it still compile under `--config=fp16`.
+template <typename LossFn>
+void CheckFiniteDifference(const std::vector<float>&, const std::vector<float>&,
+                           LossFn, double, const char* what) {
+  std::printf("  finite-diff %-14s skipped (fp16 build)\n", what);
+}
 #endif
 
 }  // namespace dev
