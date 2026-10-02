@@ -16,6 +16,7 @@ cc_library(
         "generate.cc",
         "model.cc",
         "ops.cc",
+        "optim.cc",
         "tensor.cc",
     ],
     hdrs = [
@@ -78,9 +79,25 @@ cc_test(
     size = "small",
 )
 
+# Optimizer grouping and schedules: the setup_optimizer AdamW/Muon parameter
+# groups, the moments, the global gradient clip, and the learning-rate /
+# momentum / weight-decay schedules. See docs/optimizer.md.
+cc_test(
+    name = "optim_test",
+    srcs = ["optim_test.cc"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    deps = [
+        ":model",
+        "//include/nanochat:nanochat",
+    ],
+    size = "small",
+)
+
 # Aggregation point consumed by //:all_tests.
 test_suite(name = "all", tests = [
     ":model_oracle_test",
     ":model_gradient_test",
     ":generate_test",
+    ":optim_test",
 ])
