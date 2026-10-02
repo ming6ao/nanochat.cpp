@@ -51,6 +51,19 @@ cc_library(
     ],
 )
 
+# The whole CUDA backend behind one label: the device runtime, GEMM, and every
+# kernel family. This is what `src/**` links when `--config=cuda` selects the
+# backend (docs/backends.md), mirroring `//backends/cpu`.
+cc_library(
+    name = "all_kernels",
+    deps = [
+        ":cuda",
+        "//backends/cuda/kernels:optimizer_kernels",
+        "//backends/cuda/kernels:row_kernels",
+        "//backends/cuda/kernels:sequence_kernels",
+    ],
+)
+
 # T1 GPU correctness for the runtime and the GEMM. Small shapes only; host code
 # is vendor-free and exercises the sealed kernels.h API.
 cc_test(

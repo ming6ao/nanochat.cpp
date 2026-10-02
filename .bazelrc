@@ -38,6 +38,15 @@ build:sm_75 --@rules_cuda//cuda:archs=sm_75
 build --define=precision=fp32
 build:fp16 --define=precision=fp16
 
+# --- Backend ----------------------------------------------------------------
+#
+# `src/**` links the reference CPU backend by default; `--config=cuda` links
+# the CUDA backend for GPU oracle parity and the sm_75 port. The selection is a
+# build/link decision only -- the workflow sources are compiled once. See
+# docs/backends.md.
+build --define=backend=cpu
+build:cuda --define=backend=cuda
+
 # --- Resources --------------------------------------------------------------
 #
 # Several agents and verifiers share one small host (8 GiB, ~7.7 GiB visible

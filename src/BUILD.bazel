@@ -33,8 +33,13 @@ cc_library(
     ],
     copts = nanochat_copts(),
     defines = precision_defines(),
-    deps = [
-        "//backends/cpu",
+    # Backend selection is a build/link choice (docs/backends.md): the same
+    # workflow sources link the reference CPU backend by default or the CUDA
+    # backend under `--config=cuda`.
+    deps = select({
+        "//:backend_cuda": ["//backends/cuda:all_kernels"],
+        "//:backend_cpu": ["//backends/cpu"],
+    }) + [
         "//include/nanochat:nanochat",
     ],
 )

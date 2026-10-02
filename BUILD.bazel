@@ -21,6 +21,19 @@ config_setting(
     define_values = {"precision": "fp16"},
 )
 
+# Backend selection (docs/backends.md). `--backend=cpu` links the reference
+# backend; `--backend=cuda` links the CUDA backend. `src/**` selects between
+# them, so the shared workflow compiles once and links against either.
+config_setting(
+    name = "backend_cpu",
+    define_values = {"backend": "cpu"},
+)
+
+config_setting(
+    name = "backend_cuda",
+    define_values = {"backend": "cuda"},
+)
+
 # Aggregation point: each package publishes `test_suite(name = "all")`; new
 # packages add their label here. Kept in sync with `bazel test //...`.
 test_suite(
