@@ -1,7 +1,67 @@
 # src/ — backend-agnostic workflow, model, optimizer, CLI. Targets land here in
 # P0 (model skeleton) and P2 (workflow, optimizer, harness). See docs/build.md.
 
+load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
+load("//:nanochat.bzl", "nanochat_copts", "precision_defines")
+
 package(default_visibility = ["//visibility:public"])
 
+# The training graph: runtime tensor plumbing (`tensor.cc`, `workspace.h`) plus
+# the fixed forward/backward train graph (`model.cc`). It is a kernel-sequence
+# graph, not an autograd engine (DESIGN.md section 6).
+cc_library(
+    name = "model",
+    srcs = [
+        "model.cc",
+        "tensor.cc",
+    ],
+    hdrs = [
+        "model_impl.h",
+        "workspace.h",
+    ],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    deps = [
+        "//backends/cpu",
+        "//include/nanochat:nanochat",
+    ],
+)
+
+# Model oracle parity: loads the committed CPU fixture and compares the model's
+# forward logits, loss, and every parameter gradient. See docs/testing.md.
+cc_test(
+    name = "model_oracle_test",
+    srcs = ["model_oracle_test.cc"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    data = ["//tests:data/debug_state.bin"],
+    args = ["$(rootpath //tests:data/debug_state.bin)"],
+    deps = [
+        ":model",
+        "//include/nanochat:nanochat",
+        "//tests:oracle_fixture",
+    ],
+    size = "small",
+)
+
+# Supplementary finite-difference check: the fixture zero-initializes the two
+# projections, so the oracle test cannot exercise the attention/QkPrep/MLP
+# backward. This test makes them nonzero and checks the analytic gradient along
+# random directions over every parameter.
+cc_test(
+    name = "model_gradient_test",
+    srcs = ["model_gradient_test.cc"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    deps = [
+        ":model",
+        "//include/nanochat:nanochat",
+    ],
+    size = "small",
+)
+
 # Aggregation point consumed by //:all_tests.
-test_suite(name = "all")
+test_suite(name = "all", tests = [
+    ":model_oracle_test",
+    ":model_gradient_test",
+])
