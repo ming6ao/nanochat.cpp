@@ -124,6 +124,38 @@ cuda_library(
     alwayslink = True,
 )
 
+# AdamW: the stateful pointwise update for the embedding, head, and scalar
+# parameters.
+cuda_library(
+    name = "adamw",
+    srcs = ["adamw.cu"],
+    copts = nanochat_cuda_copts(),
+    defines = precision_defines(),
+    deps = [
+        ":device_utils",
+        "//backends/cuda:device",
+        "//include/nanochat:nanochat",
+    ],
+    alwayslink = True,
+)
+
+# Muon: Nesterov momentum, MuonEq equilibration, Polar Express through batched
+# cuBLAS GEMMs, NorMuon, and the cautious update for the stacked matrix
+# parameters.
+cuda_library(
+    name = "muon",
+    srcs = ["muon.cu"],
+    copts = nanochat_cuda_copts(),
+    defines = precision_defines(),
+    deps = [
+        ":device_utils",
+        "//backends/cuda:device",
+        "//backends/cuda:gemm",
+        "//include/nanochat:nanochat",
+    ],
+    alwayslink = True,
+)
+
 # Convenience aggregate the host graph and the dev/kernels tests link.
 cc_library(
     name = "row_kernels",
@@ -142,6 +174,17 @@ cc_library(
         ":attention",
         ":classifier",
         ":embedding",
+    ],
+)
+
+# Aggregate for the optimizer families: AdamW, Muon, and the gradient-clipping
+# GlobalNorm. The dev/kernels optimizer tests link this target.
+cc_library(
+    name = "optimizer_kernels",
+    deps = [
+        ":adamw",
+        ":global_norm",
+        ":muon",
     ],
 )
 
