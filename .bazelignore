@@ -1,0 +1,8 @@
+# Bazel must not descend into the Sliceme campaign plane.
+#
+# Sliceme keeps one git worktree per DAG node under .sliceme/worktrees/<node>/,
+# and each worktree is a full nested copy of this project with its own BUILD
+# files and MODULE.bazel. Bazel does not read .gitignore, so without this file
+# `bazel build //...` treats every nested copy as a package of this workspace
+# and compiles it (failing on nested-relative includes). Ignore the plane.
+.sliceme

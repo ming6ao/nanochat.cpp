@@ -18,9 +18,10 @@ usage() {
   cat <<'EOF'
 tools/nanochat <command> [args...]
 
-  build                      bazel build //... (not sandboxed; see docs)
+  build                      bazel build //... (serialized; see docs)
   test [--gpu] [targets...]  run tests; every test is sandboxed per action
   check [--gpu]              build, then CPU tests (and GPU tests with --gpu)
+  shutdown                   stop this workspace's Bazel server now
   run <profile> -- <cmd...>  run a command under a sandbox profile
   train -- <cmd...>          alias for: run train -- <cmd...>
   eval  -- <cmd...>          alias for: run eval  -- <cmd...>
@@ -37,6 +38,21 @@ EOF
 die() {
   echo "nanochat: $*" >&2
   exit 2
+}
+
+# Serialize builds across worktrees. Every worktree and verifier gets its own
+# Bazel output base, hence its own persistent server with its own action pool;
+# running several at once multiplies the per-server memory budget and has
+# exhausted the shared host. The lock lives on this shell's descriptor 9 and is
+# closed on the child (9>&-) so the detached Bazel server cannot inherit it --
+# that inheritance is what deadlocked the GPU broker before. Idle servers are
+# reaped by `startup --max_idle_secs` in .bazelrc; `tools/nanochat shutdown`
+# reaps one immediately. Set NANOCHAT_BUILD_LOCK to override the path.
+build_lock=${NANOCHAT_BUILD_LOCK:-/tmp/nanochat-build.lock}
+with_build_lock() {
+  exec 9>"$build_lock"
+  flock 9
+  "$@" 9>&-
 }
 
 run_profile() { # profile [--] cmd...
@@ -60,9 +76,15 @@ case "$command" in
     ;;
 
   build)
-    # Builds are bounded by Bazel's own resource flags, and the long-lived
-    # Bazel server does not belong in a per-invocation cgroup.
-    exec bazel build //... "$@"
+    # Bounded by the resource flags in .bazelrc; serialized so concurrent
+    # worktrees do not each run their own action pool at full width.
+    with_build_lock bazel build //... "$@"
+    ;;
+
+  shutdown)
+    # Release this workspace's Bazel server memory now instead of waiting for
+    # the idle timeout. Safe: it only stops the server, not the action cache.
+    exec bazel shutdown
     ;;
 
   test)
@@ -97,10 +119,12 @@ case "$command" in
       --spawn_strategy=local
     )
     if (( gpu )); then
-      # Hold the single-GPU lock for the whole suite.
-      exec "$broker" --lock-only --profile "$profile" -- bazel test "${bazel_args[@]}"
+      # Hold the single-GPU lock for the whole suite, and the build lock while
+      # the suite's targets compile.
+      with_build_lock "$broker" --lock-only --profile "$profile" -- \
+        bazel test "${bazel_args[@]}"
     else
-      exec bazel test "${bazel_args[@]}"
+      with_build_lock bazel test "${bazel_args[@]}"
     fi
     ;;
 

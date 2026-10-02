@@ -139,6 +139,25 @@ tools/nanochat test --gpu <target>  # broker lock held, per-test sandbox
 Bazel's own filesystem sandbox is disabled for these runs, so the resource
 sandbox and the test's own hermeticity are what bound a run.
 
+### Builds
+
+Builds themselves are deliberately not sandboxed: the long-lived server does
+not belong in a per-invocation cgroup, and each worktree runs its own server.
+They are instead bounded from inside and serialized from outside:
+
+- `.bazelrc` caps the server heap (`--host_jvm_args=-Xmx1500m`), lets an idle
+  server exit (`--max_idle_secs=600`), lets the kernel stop it under memory
+  pressure (`--shutdown_on_low_sys_mem`), and bounds the local action pool
+  (`--jobs=4`, `--local_ram_resources=3072`).
+- `tools/nanochat build` and the build phase of `tools/nanochat test` take an
+  exclusive lock, so concurrent worktrees queue instead of each running a full
+  action pool. The lock descriptor is closed on the Bazel client so the
+  detached server cannot inherit it and hold the lock forever.
+- `tools/nanochat shutdown` reaps the current workspace's server immediately.
+
+Together these hold the Bazel footprint to roughly one active action pool plus
+idle-server heaps, which fits the headroom the budget leaves.
+
 ## WSL2 caveats
 
 - `systemd-run` as **root** fails ("Interactive authentication required"); only

@@ -183,6 +183,11 @@ cc_test(
 - **Sandbox everything that runs longer than a few seconds.** Training, eval,
   GPU tests, and benchmarks go through `tools/nanochat`; the aggregate
   `nanochat.slice` is the only thing preventing cross-agent out-of-memory.
+- **Builds are bounded and serialized.** Each worktree starts its own Bazel
+  server; `.bazelrc` caps its heap and idle lifetime and `tools/nanochat` holds
+  one build lock, so concurrent worktrees queue instead of multiplying the
+  budget. Run `tools/nanochat shutdown` when a worktree is finished. See
+  [docs/sandbox.md](docs/sandbox.md).
 - **Never bypass the entry point.** Executables call
   `nanochat::RequireSandboxOrDie` at startup and exit with the corrective
   command when launched outside `tools/nanochat`.

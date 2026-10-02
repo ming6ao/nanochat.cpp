@@ -63,7 +63,14 @@ fi
 echo "acquired GPU ($profile): $*" | tee -a /tmp/nanochat-gpu.log
 export CUDA_VISIBLE_DEVICES=0
 
+# Hold the lock in this shell, not in the command. Bazel forks a detached
+# server; if it inherited the lock descriptor it would hold the GPU lock
+# forever and deadlock every later suite (observed 2026-10-01). Close
+# descriptor 9 on the child and keep this shell alive for the run so the lock
+# is still exclusive for its duration.
 if (( lock_only )); then
-  exec "$@"
+  "$@" 9>&-
+else
+  "$here/sandbox.sh" --profile "$profile" -- "$@" 9>&-
 fi
-exec "$here/sandbox.sh" --profile "$profile" -- "$@"
+exit $?

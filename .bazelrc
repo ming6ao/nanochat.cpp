@@ -3,7 +3,9 @@
 # Layering:
 #   * toolchain: pin the CUDA host compiler and C++ standard;
 #   * arch:      Pascal sm_61 is the default, Turing sm_75 is --config=sm_75;
-#   * precision: fp32 is the default, fp16 is --config=fp16.
+#   * precision: fp32 is the default, fp16 is --config=fp16;
+#   * resources: cap the Bazel server and per-server action fan-out so several
+#                agent worktrees cannot exhaust the small shared host.
 # Named configs are additive: `--config=sm_75 --config=fp16` builds the Turing
 # half-precision variant.
 
@@ -35,6 +37,26 @@ build:sm_75 --@rules_cuda//cuda:archs=sm_75
 # files. See docs/precision.md.
 build --define=precision=fp32
 build:fp16 --define=precision=fp16
+
+# --- Resources --------------------------------------------------------------
+#
+# Several agents and verifiers share one small host (8 GiB, ~7.7 GiB visible
+# under WSL2), and every git worktree gets its own Bazel output base, hence its
+# own long-lived server. Left unbounded, those servers accumulate (the default
+# idle timeout is three hours) and each server sizes its own action pool to the
+# whole machine, so N worktrees multiply the memory budget by N. That is what
+# exhausted host memory on 2026-10-01. Cap the server heap, let it exit when
+# idle, let the kernel stop it under pressure, and bound each server's action
+# fan-out. `tools/nanochat build`/`test` additionally serialize builds under
+# one lock, so only one server compiles at a time. See docs/sandbox.md.
+startup --host_jvm_args=-Xmx1500m
+startup --max_idle_secs=600
+startup --shutdown_on_low_sys_mem
+
+# Bound one server's local action pool. HOST_CPUS/HOST_RAM defaults would let
+# each concurrent server use most of the machine.
+build --jobs=4
+build --local_ram_resources=3072
 
 # --- Tests ------------------------------------------------------------------
 test --test_output=errors

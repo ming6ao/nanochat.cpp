@@ -45,6 +45,25 @@ settings select backend/precision/arch; `select()` handles linking.
   action is sandboxed, and forces `--spawn_strategy=local` so the wrapper can
   reach the systemd user manager. See [sandbox.md](sandbox.md).
 
+### Resource bounds
+
+Every worktree and verifier is its own Bazel workspace, so it starts its own
+persistent server. On a small shared host that adds up, so `.bazelrc` bounds
+each server and `tools/nanochat` serializes builds:
+
+- `startup --host_jvm_args=-Xmx1500m` caps the server heap.
+- `startup --max_idle_secs=600` and `startup --shutdown_on_low_sys_mem` let an
+  idle server exit instead of lingering for the three-hour default.
+- `build --jobs=4 --local_ram_resources=3072` bounds one server's local action
+  pool.
+- `tools/nanochat build` and `tools/nanochat test` take an exclusive lock
+  (`/tmp/nanochat-build.lock`) so at most one worktree compiles at a time. The
+  lock descriptor is closed on the Bazel client so the detached server cannot
+  inherit it.
+- `tools/nanochat shutdown` stops the current workspace's server immediately.
+
+See [sandbox.md](sandbox.md) for the host budget this protects.
+
 ## Makefile fallback
 
 A single Makefile mirrors llm.c's autodetection (nvcc presence, arch via
