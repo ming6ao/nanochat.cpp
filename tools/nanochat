@@ -29,6 +29,8 @@ tools/nanochat <command> [args...]
   train -- <cmd...>          alias for: run train -- <cmd...>
   eval  -- <cmd...>          alias for: run eval  -- <cmd...>
   bench -- <cmd...>          alias for: run t3-bench -- <cmd...>
+  profile [opts]             build + run the attention benchmark under the GPU broker
+  doctor                     print environment, device, sandbox, and lock state
   verify -- <cmd...>         alias for: run t2-parity -- <cmd...>
   gpu [--profile P] -- <cmd> acquire the GPU broker, then run
   help                       this message
@@ -183,6 +185,64 @@ case "$command" in
   train) run_profile train "$@" ;;
   eval) run_profile eval "$@" ;;
   bench) run_profile t3-bench "$@" ;;
+
+  profile)
+    # Standard performance battery: build the attention benchmark, then run it
+    # under the exclusive benchmark profile with the GPU broker held. Extra
+    # arguments pass through to the binary (--json, --out PATH, --iters N,
+    # --rounds N). Use this instead of `bench` when timing must be exclusive.
+    with_build_lock "$bazel_bin" build //dev/kernels:attention_bench
+    exec 9>&-
+    exec "$broker" --profile t3-bench -- \
+      "$root/bazel-bin/dev/kernels/attention_bench" "$@"
+    ;;
+
+  doctor)
+    # Read-only diagnostics so an agent can distinguish slow code from a busy
+    # or misconfigured host before spending time measuring. See
+    # docs/performance.md.
+    echo "nanochat.cpp doctor"
+    echo "===================="
+    echo "repo:      $root"
+    if git -C "$root" rev-parse --short HEAD >/dev/null 2>&1; then
+      echo "revision:  $(git -C "$root" rev-parse --short HEAD) ($(git -C "$root" branch --show-current 2>/dev/null || echo detached))"
+    fi
+    if command -v nvcc >/dev/null 2>&1; then
+      echo "nvcc:      $(nvcc --version 2>/dev/null | grep -o 'release [0-9.]*' | head -1)"
+    else
+      echo "nvcc:      NOT FOUND"
+    fi
+    if command -v bazelisk >/dev/null 2>&1; then
+      echo "bazel:     $(bazelisk version 2>/dev/null | head -1)"
+    fi
+    if command -v nvidia-smi >/dev/null 2>&1; then
+      echo "gpu:       $(nvidia-smi --query-gpu=name,driver_version,memory.total,memory.used,utilization.gpu --format=csv,noheader 2>/dev/null | head -1)"
+      echo "gpu procs: $(nvidia-smi --query-compute-apps=pid,process_name --format=csv,noheader 2>/dev/null | paste -sd'; ' - || true)"
+    else
+      echo "gpu:       nvidia-smi NOT FOUND"
+    fi
+    slice=$(systemctl --user show nanochat.slice -p MemoryCurrent -p MemoryMax -p CPUQuotaPerSecUSec 2>/dev/null || true)
+    if [[ -n $slice ]]; then
+      echo "sandbox:   $(echo "$slice" | paste -sd' ' -)"
+    fi
+    if [[ -e /tmp/nanochat-gpu.lock ]]; then
+      if flock -n /tmp/nanochat-gpu.lock -c true 2>/dev/null; then
+        echo "gpu lock:  free"
+      else
+        echo "gpu lock:  HELD (another job is running)"
+      fi
+    fi
+    for log in /tmp/nanochat-gpu.log /tmp/nanochat-sandbox.log; do
+      [[ -f $log ]] || continue
+      echo "--- tail $log ---"
+      tail -n 5 "$log"
+    done
+    for binary in "$root/bazel-bin/src/train_main" \
+                  "$root/bazel-bin/dev/kernels/attention_bench"; do
+      [[ -e $binary ]] || continue
+      echo "built:     $binary ($(date -r "$binary" '+%Y-%m-%d %H:%M'))"
+    done
+    ;;
   verify) run_profile t2-parity "$@" ;;
 
   gpu)

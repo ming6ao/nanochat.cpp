@@ -15,6 +15,7 @@ detailed reference that the design points at.
 | [data.md](data.md) | Token shards, checkpoints, the oracle fixture |
 | [python-bridge.md](python-bridge.md) | nanochat-compatible Python entry points |
 | [testing.md](testing.md) | Test tiers, oracle harness, finite-difference checks |
+| [performance.md](performance.md) | Performance measurement protocol, debugging interface, benchmarks |
 | [sandbox.md](sandbox.md) | Execution sandbox and host resource governance |
 
 New here? Start with [../README.md](../README.md) for the quickstart, then

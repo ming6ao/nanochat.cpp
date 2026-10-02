@@ -238,6 +238,10 @@ This keeps GPU time bounded and predictable.
   Definition of Done, the exact test command. Agents should not need to read the whole repo.
 - `dev/kernels/README.md`: the convention for standalone per-kernel tests and
   benchmarks (llm.c `dev/cuda` style).
+- `docs/performance.md`: the performance measurement protocol, the debugging
+  interface (`tools/nanochat doctor` / `profile`), and the benchmark battery.
+  Read it before investigating a slowdown. `tools/nanochat doctor` is the
+  first command to run when a timing looks wrong.
 
 ---
 

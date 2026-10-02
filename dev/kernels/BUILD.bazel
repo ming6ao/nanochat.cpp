@@ -332,6 +332,25 @@ cuda_binary(
     ],
 )
 
+# Attention-family benchmark: device-event timing of the shipped forward and
+# backward at the d8_s512 training shape plus a head-dimension sweep that
+# exposes the per-owned-dimension redundancy in OnlineSoftmaxTile. A benchmark,
+# not a test: run it through the broker with `tools/nanochat profile`.
+cuda_binary(
+    name = "attention_bench",
+    srcs = ["attention_bench.cc"],
+    hdrs = ["bench_utils.h"],
+    copts = nanochat_cuda_copts(),
+    host_copts = nanochat_copts(),
+    defines = precision_defines(),
+    host_defines = precision_defines(),
+    deps = [
+        ":sequence_test_utils",
+        "//backends/cuda/kernels:sequence_kernels",
+        "//include/nanochat:nanochat",
+    ],
+)
+
 # Aggregation point consumed by //:all_tests.
 test_suite(
     name = "all",

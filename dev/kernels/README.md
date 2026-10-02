@@ -22,6 +22,7 @@ tools/nanochat bench -- <row_bench>      # T3-style micro-benchmark under the br
 | `row_ref.h` | Host reference for the row/elementwise families, ported line-for-line from `backends/cpu/kernels.cc`. |
 | `sequence_ref.h` | Host reference for the Attention/Classifier/Embedding families, ported line-for-line from `backends/cpu/kernels.cc`. |
 | `gpu_test_utils.h` | Storage conversion, deterministic RNG, `DevBuf`, tolerance checks, central finite-difference helper. |
+| `bench_utils.h` | CUDA-event timer and the `nanochat.bench.v1` JSON report used by benchmarks. |
 | `rms_norm_test.cc` | RmsNorm forward/backward correctness and finite differences, plus the fused residual variant. |
 | `qk_prep_test.cc` | QkPrep forward/backward correctness and finite differences, including a grouped-query case. |
 | `pointwise_test.cc` | All five pointwise op codes, forward/backward, plus finite differences. |
@@ -31,6 +32,7 @@ tools/nanochat bench -- <row_bench>      # T3-style micro-benchmark under the br
 | `embedding_test.cc` | Embedding gather forward and scatter-add backward over a persistent buffer, including duplicate ids. |
 | `sequence_oracle_test.cc` | Classifier and Embedding against `tests/data/debug_state.bin`, plus a config-driven Attention check. |
 | `row_bench.cc` | Micro-benchmark for every family on tiny and medium shapes. |
+| `attention_bench.cc` | Attention forward/backward device-event timing at the `d8_s512` shape, with a head-dimension sweep that exposes the per-owned-dimension redundancy. |
 | `qk_prep_fused.h`, `qk_prep_fused.cu` | Combined fused QkPrep prototype (one launch over q and k) plus the explicit decomposed baseline (`RmsNormForward` + standalone RoPE/scale). |
 | `qk_prep_fused_test.cc` | Fusion prototype correctness against `row_ref.h`, cross-check against the seam `QkPrep`, and finite differences for the fused backward. |
 | `qk_prep_bench.cc` | Decomposed vs seam-fused vs combined-fused QkPrep, tiny and medium shapes. |
@@ -51,6 +53,11 @@ tools/nanochat bench -- <row_bench>      # T3-style micro-benchmark under the br
   `2e-3`). Finite differences run in fp32 only; fp16 storage cannot resolve
   the perturbation.
 - **Fixed seeds.** `Rng` is a deterministic xorshift, so failures reproduce.
+- **Benchmarks report machine-readable output.** Use `bench_utils.h`:
+  `EventTimer` for device-event timing and `BenchReport` for the table and the
+  `nanochat.bench.v1` JSON. Benchmarks are `cuda_binary` targets and are never
+  added to the `all` test suite. Run them with `tools/nanochat profile` or
+  `tools/nanochat bench`; see [docs/performance.md](../../docs/performance.md).
 - **Tag GPU tests `gpu`.** `tools/nanochat test` filters them out with
   `--test_tag_filters=-gpu`; `tools/nanochat test --gpu //...` runs only them.
   Do **not** add the `manual` tag to a test that the `--gpu //...` acceptance
