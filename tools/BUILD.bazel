@@ -13,6 +13,7 @@ exports_files([
     "nanochat",
     "gpu.sh",
     "sandbox.sh",
+    "prune_bazel_output_bases",
 ])
 
 filegroup(

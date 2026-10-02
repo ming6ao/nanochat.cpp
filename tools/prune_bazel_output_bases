@@ -1,0 +1,210 @@
+#!/usr/bin/env bash
+# Reap orphaned Bazel output bases. Prefer `tools/nanochat prune`; this is the
+# mechanism it wraps. See docs/sandbox.md, "Reaping Bazel output bases".
+#
+# usage: tools/prune_bazel_output_bases [--worktree DIR] [--apply] [--json]
+#                                       [--sizes] [--output-root DIR]
+#
+# Bazel names each output base `md5(workspace_path)` under the output user root
+# (`~/.cache/bazel/_bazel_$USER` by default). Every git worktree is a distinct
+# workspace, so it gets its own output base that survives the worktree. This
+# script finds the bases whose recorded workspace (`execroot/DO_NOT_BUILD_HERE`)
+# no longer exists -- or, with --worktree, that are at or under a given
+# directory -- and removes them.
+#
+# Default is a dry run. `--apply` performs the removals. A base held by a live
+# Bazel server is never removed: if its workspace still exists the server is
+# shut down first, otherwise it is reported and skipped so the idle timeout can
+# reap it.
+set -euo pipefail
+
+output_root=${NANOCHAT_BAZEL_OUTPUT_ROOT:-"$HOME/.cache/bazel/_bazel_$(id -un)"}
+worktree=""
+apply=0
+json=0
+sizes=0
+
+usage() {
+  cat >&2 <<'EOF'
+usage: tools/prune_bazel_output_bases [--worktree DIR] [--apply] [--json]
+                                     [--sizes] [--output-root DIR]
+
+  --worktree DIR    only consider output bases whose workspace is DIR or under
+                    it (the teardown case). Without it, only bases whose
+                    workspace no longer exists are considered.
+  --apply           remove the bases (default: dry run, removes nothing)
+  --json            emit a JSON array instead of human-readable lines
+  --sizes           report size per base (implies reading every file; slower)
+  --output-root DIR override the Bazel output user root
+                    (default $HOME/.cache/bazel/_bazel_$USER, or
+                    $NANOCHAT_BAZEL_OUTPUT_ROOT)
+EOF
+}
+
+while (( $# )); do
+  case "$1" in
+    --worktree)
+      worktree=${2:?--worktree needs a directory}
+      shift 2
+      ;;
+    --worktree=*)
+      worktree=${1#--worktree=}
+      shift
+      ;;
+    --output-root)
+      output_root=${2:?--output-root needs a directory}
+      shift 2
+      ;;
+    --output-root=*)
+      output_root=${1#--output-root=}
+      shift
+      ;;
+    --apply)
+      apply=1
+      shift
+      ;;
+    --json)
+      json=1
+      shift
+      ;;
+    --sizes)
+      sizes=1
+      shift
+      ;;
+    -h | --help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "prune: unknown argument '$1'" >&2
+      usage
+      exit 2
+      ;;
+  esac
+done
+
+[[ -d "$output_root" ]] || {
+  echo "prune: no output user root at $output_root" >&2
+  exit 2
+}
+
+# A workspace passed to --worktree is compared canonically. It need not exist:
+# `realpath -m` normalises without touching the filesystem.
+if [[ -n "$worktree" ]]; then
+  worktree=$(realpath -m -- "$worktree")
+fi
+
+json_escape() {
+  local s=$1
+  s=${s//\\/\\\\}
+  s=${s//\"/\\\"}
+  printf '%s' "$s"
+}
+
+# True if a live Bazel server currently holds this output base. The server's
+# command line carries `--output_base=<abs path>`; compare the whole token. Only
+# processes whose executable name is `java` are considered, so a shell whose
+# command line merely mentions the path cannot be mistaken for a server.
+server_holds() {
+  local want=$1 pid arg
+  while IFS= read -r pid; do
+    [[ "$(cat "/proc/$pid/comm" 2>/dev/null)" == java ]] || continue
+    while IFS= read -r -d '' arg; do
+      [[ "$arg" == "--output_base=$want" ]] && return 0
+    done <"/proc/$pid/cmdline" || true
+  done < <(pgrep -f A-server.jar 2>/dev/null || true)
+  return 1
+}
+
+# Only hash-named workspace bases match: `install/` and the shared `cache/`
+# have no `execroot/DO_NOT_BUILD_HERE` marker and are skipped by construction.
+targets=()
+declare -A target_ws=()
+
+for dir in "$output_root"/*/; do
+  base=${dir%/}
+  marker="$base/execroot/DO_NOT_BUILD_HERE"
+  ws=""
+  [[ -f "$marker" ]] && ws=$(cat "$marker")
+  [[ -z "$ws" ]] && continue
+  ws=$(realpath -m -- "$ws")
+  if [[ -n "$worktree" ]]; then
+    case "$ws" in
+      "$worktree" | "$worktree"/*) : ;;
+      *) continue ;;
+    esac
+  else
+    [[ -d "$ws" ]] && continue
+  fi
+  targets+=("$base")
+  target_ws["$base"]=$ws
+done
+
+if (( !${#targets[@]} )); then
+  (( json )) && echo '[]'
+  exit 0
+fi
+
+records=()
+removed=0
+skipped=0
+total_kb=0
+
+for base in "${targets[@]}"; do
+  ws=${target_ws[$base]}
+  status=target
+  if server_holds "$base"; then
+    # A server owns it. Stop it through its own workspace when that still
+    # exists; otherwise leave it for the idle timeout. Re-check either way.
+    if (( apply )) && [[ -d "$ws" ]]; then
+      (cd "$ws" && bazel shutdown >/dev/null 2>&1) || true
+    fi
+    if server_holds "$base"; then
+      status=live
+    fi
+  fi
+
+  if [[ "$status" == live ]]; then
+    skipped=$((skipped + 1))
+    (( json )) || printf 'skip (live server) %s <- %s\n' "$base" "$ws"
+    records+=("$(printf '  {"path": "%s", "workspace": "%s", "status": "live", "bytes": null}' \
+      "$(json_escape "$base")" "$(json_escape "$ws")")")
+    continue
+  fi
+
+  kb=0
+  if (( apply || sizes )); then
+    kb=$(du -sk -- "$base" 2>/dev/null | cut -f1) || kb=0
+    kb=${kb:-0}
+    total_kb=$((total_kb + kb))
+  fi
+  mb=$(awk -v k="$kb" 'BEGIN{printf "%.1f", k/1024}')
+
+  if (( apply )); then
+    rm -rf -- "$base"
+    removed=$((removed + 1))
+    (( json )) || printf 'removed %s <- %s (%s MB)\n' "$base" "$ws" "$mb"
+  elif (( sizes )); then
+    (( json )) || printf 'would remove %s <- %s (%s MB)\n' "$base" "$ws" "$mb"
+  else
+    (( json )) || printf 'would remove %s <- %s\n' "$base" "$ws"
+  fi
+  records+=("$(printf '  {"path": "%s", "workspace": "%s", "status": "target", "bytes": %s}' \
+    "$(json_escape "$base")" "$(json_escape "$ws")" "$kb")")
+done
+
+total_mb=$(awk -v k="$total_kb" 'BEGIN{printf "%.1f", k/1024}')
+if (( json )); then
+  printf '[\n'
+  printf '%s' "${records[0]}"
+  for (( i = 1; i < ${#records[@]}; i++ )); do
+    printf ',\n%s' "${records[$i]}"
+  done
+  printf '\n]\n'
+elif (( apply )); then
+  printf 'prune: removed %d base(s), %d skipped (live), %s MB reclaimed\n' \
+    "$removed" "$skipped" "$total_mb"
+else
+  printf 'prune: %d base(s) would be removed, %d skipped (live). Re-run with --apply.\n' \
+    "${#targets[@]}" "$skipped"
+fi

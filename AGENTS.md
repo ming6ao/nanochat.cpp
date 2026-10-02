@@ -186,8 +186,9 @@ cc_test(
 - **Builds are bounded and serialized.** Each worktree starts its own Bazel
   server; `.bazelrc` caps its heap and idle lifetime and `tools/nanochat` holds
   one build lock, so concurrent worktrees queue instead of multiplying the
-  budget. Run `tools/nanochat shutdown` when a worktree is finished. See
-  [docs/sandbox.md](docs/sandbox.md).
+  budget. Run `tools/nanochat shutdown` when a worktree is finished, then
+  `tools/nanochat prune --worktree <root> --apply`: the output base outlives the
+  worktree and piles up (see [docs/sandbox.md](docs/sandbox.md)).
 - **Never bypass the entry point.** Executables call
   `nanochat::RequireSandboxOrDie` at startup and exit with the corrective
   command when launched outside `tools/nanochat`.

@@ -22,6 +22,9 @@ tools/nanochat <command> [args...]
   test [--gpu] [targets...]  run tests; every test is sandboxed per action
   check [--gpu]              build, then CPU tests (and GPU tests with --gpu)
   shutdown                   stop this workspace's Bazel server now
+  prune [--apply] [--worktree DIR]
+                             reap orphaned Bazel output bases (dry run by
+                             default); see docs/sandbox.md
   run <profile> -- <cmd...>  run a command under a sandbox profile
   train -- <cmd...>          alias for: run train -- <cmd...>
   eval  -- <cmd...>          alias for: run eval  -- <cmd...>
@@ -85,6 +88,14 @@ case "$command" in
     # Release this workspace's Bazel server memory now instead of waiting for
     # the idle timeout. Safe: it only stops the server, not the action cache.
     exec bazel shutdown
+    ;;
+
+  prune)
+    # Reap output bases left behind by removed worktrees. Each worktree is a
+    # distinct workspace, so Bazel gives it a persistent output base keyed by
+    # the workspace path. Dry run by default; pass --apply to remove. See
+    # docs/sandbox.md, "Reaping Bazel output bases".
+    exec "$here/prune_bazel_output_bases" "$@"
     ;;
 
   test)

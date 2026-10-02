@@ -158,6 +158,34 @@ They are instead bounded from inside and serialized from outside:
 Together these hold the Bazel footprint to roughly one active action pool plus
 idle-server heaps, which fits the headroom the budget leaves.
 
+### Reaping Bazel output bases
+
+Bazel names each output base `md5(workspace_path)` under
+`~/.cache/bazel/_bazel_$USER`. Every worktree is a distinct workspace, so it
+gets its own output base (roughly 150-310 MB) that survives the worktree and
+accumulates one per node: dozens of dead trees, several GB, all of it streaming
+through the page cache and inflating the WSL2 `Vmmem` reading. `tools/nanochat
+shutdown` stops a server but does not delete its output base.
+
+The coordinator reaps them with one command. It is a dry run by default and only
+removes bases whose recorded workspace (`execroot/DO_NOT_BUILD_HERE`) no longer
+exists; a base a live server holds is never removed.
+
+```bash
+# After a node is landed or closed and its worktree directory is removed:
+tools/nanochat prune --worktree <removed-worktree-root> --apply
+
+# After each wave, or whenever memory looks high:
+tools/nanochat prune            # review
+# tools/nanochat prune --apply  # reap
+```
+
+Steady state is an empty `tools/nanochat prune`: if it lists anything, a worktree
+was removed without reaping its base. Use `--worktree DIR` to restrict the reap
+to bases at or under a just-removed directory, `--sizes` to report bytes, and
+`--json` for machine-readable output. The mechanism is
+`tools/prune_bazel_output_bases`; the command wraps it.
+
 ## WSL2 caveats
 
 - `systemd-run` as **root** fails ("Interactive authentication required"); only
