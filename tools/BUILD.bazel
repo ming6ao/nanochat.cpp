@@ -1,7 +1,24 @@
 # tools/ — the execution entry point and the host tooling (the oracle dump
-# script, the GPU broker, and the resource sandbox). Targets land here in P0.
+# script, the GPU broker, and the resource sandbox).
+#
+# `dump_oracle.py` is the offline fixture generator. It needs torch, so it is
+# not a Bazel build/test target: it runs on the host (CPU only) and its output
+# is committed as data under tests/data/. It is exported here so it is visible
+# from the repository root and reproducible.
 
 package(default_visibility = ["//visibility:public"])
+
+exports_files([
+    "dump_oracle.py",
+    "nanochat",
+    "gpu.sh",
+    "sandbox.sh",
+])
+
+filegroup(
+    name = "dump_oracle",
+    srcs = ["dump_oracle.py"],
+)
 
 # Aggregation point consumed by //:all_tests.
 test_suite(name = "all")

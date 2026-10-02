@@ -1,7 +1,33 @@
-# tests/ — the oracle fixture and the end-to-end oracle harness. Targets land
-# here in P0 (CPU oracle) and P3 (parity). See docs/testing.md.
+# tests/ — the oracle fixture and the end-to-end oracle harness. The fixture
+# itself is data (`data/debug_state.bin`), produced offline by
+# `tools/dump_oracle.py`; `oracle_fixture.h` is a torch-free reader that any
+# backend or the model skeleton can reuse. See docs/testing.md.
+
+load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
+load("//:nanochat.bzl", "nanochat_copts")
 
 package(default_visibility = ["//visibility:public"])
 
+# Header-only reader for the binary oracle fixture. Kept separate from the test
+# so `//src` (and the CUDA parity tests) can parse the same reference tensors.
+cc_library(
+    name = "oracle_fixture",
+    hdrs = ["oracle_fixture.h"],
+)
+
+# CPU oracle: checks the reference softcap, cross-entropy, classifier
+# gradients, parameter gradients, and the first optimizer step. It is
+# deliberately self-contained so it builds and runs before `src/model.cc`
+# exists; the parity node extends it with the model comparison.
+cc_test(
+    name = "oracle_test",
+    srcs = ["oracle_test.cc"],
+    copts = nanochat_copts(),
+    data = ["data/debug_state.bin"],
+    args = ["$(rootpath data/debug_state.bin)"],
+    deps = [":oracle_fixture"],
+    size = "small",
+)
+
 # Aggregation point consumed by //:all_tests.
-test_suite(name = "all")
+test_suite(name = "all", tests = [":oracle_test"])
