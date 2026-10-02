@@ -42,10 +42,17 @@ ComputeType FromFloat(float value) {
 }
 
 #if defined(NANOCHAT_PRECISION_FP16)
-constexpr float kTolerance = 5e-2f;
+// Recorded fp16 GEMM tolerance. cuBLAS on Pascal (sm_61) has no fp32-compute
+// half path and runs native HGEMM (fp16 accumulation), so the sum over k
+// rounds per term; Volta+ uses the fp32-accumulating tensor-op path. The
+// reference itself accumulates in fp32, and the observed worst case over
+// these tiny shapes is well inside 1e-2.
+constexpr float kTolerance = 1e-2f;
 #else
 constexpr float kTolerance = 1e-3f;
 #endif
+
+double g_worst_error = 0.0;
 
 // Stores A and B in the layout the transpose flags imply, computes the host
 // reference for C = alpha * op(A) * op(B) + beta * C, runs the device GEMM, and
@@ -135,7 +142,9 @@ bool RunCase(GemmMode mode, bool ta, bool tb, int m, int n, int k, int batch,
 
   for (std::size_t i = 0; i < total_c; ++i) {
     const float got = ToFloat(host_c[i]);
-    if (std::fabs(got - ref_c[i]) > kTolerance) {
+    const double diff = std::fabs(got - ref_c[i]);
+    if (diff > g_worst_error) g_worst_error = diff;
+    if (diff > kTolerance) {
       std::fprintf(stderr,
                    "gemm mismatch (mode=%d ta=%d tb=%d m=%d n=%d k=%d "
                    "batch=%d at %zu): got %f expected %f\n",
@@ -210,7 +219,9 @@ int main() {
     }
   }
 
-  std::printf("cuda_runtime: ok, %zu gemm cases verified\n",
+  std::printf("cuda_runtime: ok, %zu gemm cases verified",
               sizeof(cases) / sizeof(cases[0]));
+  std::printf(" (max abs error %.3g, tolerance %.3g)\n", g_worst_error,
+              kTolerance);
   return 0;
 }

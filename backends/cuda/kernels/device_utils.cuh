@@ -18,6 +18,7 @@
 #include <math_constants.h>
 
 #include <cstddef>
+#include <cstdint>
 
 #include "nanochat/kernels.h"
 #include "nanochat/tensor.h"
@@ -51,13 +52,37 @@ __device__ __forceinline__ float AsFloatDev(ComputeType v) { return v; }
 __device__ __forceinline__ ComputeType ToComputeDev(float v) { return v; }
 #endif
 
-// Atomic add of a float into ComputeType storage. fp32 uses the native atomic;
-// fp16 reinterpret_casts to __half, whose atomicAdd exists on sm_60+. The
-// attention backward needs this because grouped-query attention lets several
-// query heads accumulate into the same key/value gradient row.
+// Atomic add of a float into ComputeType storage. fp32 uses the native atomic.
+// fp16 uses the native scalar __half atomic on sm_70+, where the compiler
+// exposes one. Pascal (sm_60/sm_61) has neither a scalar __half atomicAdd nor
+// a 16-bit atomicCAS, so the fallback packs the target half into its aligned
+// 32-bit word and CASes the word. Only the target 16 bits change; the
+// neighbouring half is written back unchanged, which keeps the operation safe
+// even when the pair straddles a workspace slot boundary.
+//
+// The attention backward needs this because grouped-query attention lets
+// several query heads accumulate into the same key/value gradient row.
 __device__ __forceinline__ void AtomicAddDev(ComputeType* addr, float value) {
 #if defined(NANOCHAT_PRECISION_FP16)
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 700)
   atomicAdd(reinterpret_cast<__half*>(addr), __float2half_rn(value));
+#else
+  const std::uintptr_t address = reinterpret_cast<std::uintptr_t>(addr);
+  unsigned int* word = reinterpret_cast<unsigned int*>(
+      address & ~static_cast<std::uintptr_t>(3));
+  const unsigned int shift = (address & 2u) != 0 ? 16u : 0u;
+  const unsigned int mask = 0xffffu << shift;
+  unsigned int assumed;
+  unsigned int old = *word;
+  do {
+    assumed = old;
+    const __half current = __ushort_as_half(
+        static_cast<unsigned short>((assumed >> shift) & 0xffffu));
+    const unsigned int updated = static_cast<unsigned int>(
+        __half_as_ushort(__float2half_rn(__half2float(current) + value)));
+    old = atomicCAS(word, assumed, (assumed & ~mask) | (updated << shift));
+  } while (assumed != old);
+#endif
 #else
   atomicAdd(addr, value);
 #endif

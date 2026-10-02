@@ -40,8 +40,8 @@ constexpr cudaDataType_t kDataType = CUDA_R_32F;
 
 void CheckCublas(cublasStatus_t status, const char* what) {
   if (status == CUBLAS_STATUS_SUCCESS) return;
-  std::fprintf(stderr, "fatal: cuBLAS error in %s: code %d\n", what,
-               static_cast<int>(status));
+  std::fprintf(stderr, "fatal: cuBLAS error in %s: code %d (%s)\n", what,
+               static_cast<int>(status), cublasGetStatusString(status));
   std::exit(1);
 }
 
@@ -52,6 +52,16 @@ cublasHandle_t Handle() {
   }
   return handle;
 }
+
+// Whether the active device exposes fp16 tensor cores (sm_70+). Cached because
+// Gemm consults it on every call and cudaGetDeviceProperties is expensive. Only
+// the fp16 build branches on it.
+#if defined(NANOCHAT_PRECISION_FP16)
+bool HasTensorCores() {
+  static const bool has_tensor_cores = GetCaps().has_tensor_cores;
+  return has_tensor_cores;
+}
+#endif
 
 }  // namespace
 
@@ -94,24 +104,46 @@ void Gemm(GemmMode mode, const GemmParams& params, const ComputeType* a,
   const cublasOperation_t transa = tb ? CUBLAS_OP_T : CUBLAS_OP_N;
   const cublasOperation_t transb = ta ? CUBLAS_OP_T : CUBLAS_OP_N;
 
+  // fp16 needs a different cuBLAS compute type per architecture. Volta and
+  // later run the fp16 tensor-op path with fp32 accumulation
+  // (CUBLAS_COMPUTE_32F). Pascal (sm_60/sm_61) has no tensor cores and its
+  // cuBLAS cannot launch the pseudo-fp16 combination (half storage with
+  // CUBLAS_COMPUTE_32F): it returns CUBLAS_STATUS_EXECUTION_FAILED. There the
+  // only working path is native HGEMM with CUBLAS_COMPUTE_16F, whose alpha and
+  // beta are __half. Both are approximate modes; the host graph and the
+  // optimizer state stay fp32 wherever the seam requires it.
+  // See docs/precision.md.
+  cublasComputeType_t compute_type = CUBLAS_COMPUTE_32F;
   cublasGemmAlgo_t algo = CUBLAS_GEMM_DEFAULT;
 #if defined(NANOCHAT_PRECISION_FP16)
-  // Tensor cores (sm_70+) make the fp16 path worthwhile; without them cuBLAS
-  // falls back to a plain fp32-compute kernel.
-  if (GetCaps().has_tensor_cores) algo = CUBLAS_GEMM_DEFAULT_TENSOR_OP;
+  if (HasTensorCores()) {
+    algo = CUBLAS_GEMM_DEFAULT_TENSOR_OP;
+  } else {
+    compute_type = CUBLAS_COMPUTE_16F;
+  }
 #endif
 
-  const float alpha = params.alpha;
-  const float beta = params.beta;
+  const float alpha_f = params.alpha;
+  const float beta_f = params.beta;
+  const void* alpha = &alpha_f;
+  const void* beta = &beta_f;
+#if defined(NANOCHAT_PRECISION_FP16)
+  const __half alpha_h = __float2half_rn(alpha_f);
+  const __half beta_h = __float2half_rn(beta_f);
+  if (compute_type == CUBLAS_COMPUTE_16F) {
+    alpha = &alpha_h;
+    beta = &beta_h;
+  }
+#endif
   const void* blas_a = reinterpret_cast<const void*>(b);
   const void* blas_b = reinterpret_cast<const void*>(a);
   void* blas_c = reinterpret_cast<void*>(c);
 
   CheckCublas(cublasGemmStridedBatchedEx(
                   Handle(), transa, transb, /*m=*/params.n, /*n=*/params.m,
-                  /*k=*/params.k, &alpha, blas_a, kDataType, ldb, stride_b,
-                  blas_b, kDataType, lda, stride_a, &beta, blas_c, kDataType,
-                  ldc, stride_c, params.batch_count, CUBLAS_COMPUTE_32F, algo),
+                  /*k=*/params.k, alpha, blas_a, kDataType, ldb, stride_b,
+                  blas_b, kDataType, lda, stride_a, beta, blas_c, kDataType,
+                  ldc, stride_c, params.batch_count, compute_type, algo),
               "cublasGemmStridedBatchedEx");
 }
 
