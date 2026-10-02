@@ -1,7 +1,8 @@
 # backends/cuda/kernels/ — one translation unit per kernel family plus the
-# shared device_utils.cuh helpers. This package currently holds the row and
-# elementwise families (RmsNorm, QkPrep, Pointwise, GlobalNorm); attention and
-# optimizer targets land alongside them. See docs/kernels.md.
+# shared device_utils.cuh helpers. This package holds the row and elementwise
+# families (RmsNorm, QkPrep, Pointwise, GlobalNorm) and the sequence families
+# (Attention, Classifier, Embedding); the optimizer targets land alongside
+# them. See docs/kernels.md.
 
 load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
 load(
@@ -81,6 +82,48 @@ cuda_library(
     alwayslink = True,
 )
 
+# Attention: causal / sliding-window / grouped-query, forward and backward.
+cuda_library(
+    name = "attention",
+    srcs = ["attention.cu"],
+    copts = nanochat_cuda_copts(),
+    defines = precision_defines(),
+    deps = [
+        ":device_utils",
+        "//backends/cuda:device",
+        "//include/nanochat:nanochat",
+    ],
+    alwayslink = True,
+)
+
+# Classifier: logit softcap + cross-entropy over the vocab slice.
+cuda_library(
+    name = "classifier",
+    srcs = ["classifier.cu"],
+    copts = nanochat_cuda_copts(),
+    defines = precision_defines(),
+    deps = [
+        ":device_utils",
+        "//backends/cuda:device",
+        "//include/nanochat:nanochat",
+    ],
+    alwayslink = True,
+)
+
+# Embedding: indexed gather forward and scatter-add backward.
+cuda_library(
+    name = "embedding",
+    srcs = ["embedding.cu"],
+    copts = nanochat_cuda_copts(),
+    defines = precision_defines(),
+    deps = [
+        ":device_utils",
+        "//backends/cuda:device",
+        "//include/nanochat:nanochat",
+    ],
+    alwayslink = True,
+)
+
 # Convenience aggregate the host graph and the dev/kernels tests link.
 cc_library(
     name = "row_kernels",
@@ -89,6 +132,16 @@ cc_library(
         ":pointwise",
         ":qk_prep",
         ":rms_norm",
+    ],
+)
+
+# Aggregate for the sequence families (Attention, Classifier, Embedding).
+cc_library(
+    name = "sequence_kernels",
+    deps = [
+        ":attention",
+        ":classifier",
+        ":embedding",
     ],
 )
 

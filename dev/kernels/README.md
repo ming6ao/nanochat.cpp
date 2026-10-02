@@ -20,11 +20,16 @@ tools/nanochat bench -- <row_bench>      # T3-style micro-benchmark under the br
 | File | What |
 |---|---|
 | `row_ref.h` | Host reference for the row/elementwise families, ported line-for-line from `backends/cpu/kernels.cc`. |
+| `sequence_ref.h` | Host reference for the Attention/Classifier/Embedding families, ported line-for-line from `backends/cpu/kernels.cc`. |
 | `gpu_test_utils.h` | Storage conversion, deterministic RNG, `DevBuf`, tolerance checks, central finite-difference helper. |
 | `rms_norm_test.cc` | RmsNorm forward/backward correctness and finite differences, plus the fused residual variant. |
 | `qk_prep_test.cc` | QkPrep forward/backward correctness and finite differences, including a grouped-query case. |
 | `pointwise_test.cc` | All five pointwise op codes, forward/backward, plus finite differences. |
 | `global_norm_test.cc` | GlobalNorm norm/clip correctness, including a multi-block reduction. |
+| `attention_test.cc` | Attention forward/backward correctness and finite differences: MHA, GQA, sliding window, non-causal, and a KV-cache offset. |
+| `classifier_test.cc` | Classifier softcap cross-entropy forward/backward, padded tail, and ignore index. |
+| `embedding_test.cc` | Embedding gather forward and scatter-add backward over a persistent buffer, including duplicate ids. |
+| `sequence_oracle_test.cc` | Classifier and Embedding against `tests/data/debug_state.bin`, plus a config-driven Attention check. |
 | `row_bench.cc` | Micro-benchmark for every family on tiny and medium shapes. |
 | `pascal_spike.cu`, `pascal_spike_test.cc` | The P0 toolchain spike. |
 

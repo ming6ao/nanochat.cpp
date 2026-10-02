@@ -63,6 +63,18 @@ cc_library(
     deps = ["//include/nanochat:nanochat"],
 )
 
+# Host-only scaffolding shared by the sequence GPU tests: the reference port of
+# the Attention/Classifier/Embedding kernels plus the same device-buffer and
+# finite-difference helpers.
+cc_library(
+    name = "sequence_test_utils",
+    hdrs = [
+        "gpu_test_utils.h",
+        "sequence_ref.h",
+    ],
+    deps = ["//include/nanochat:nanochat"],
+)
+
 # T1 GPU correctness + finite-difference tests, one per row/elementwise family.
 cc_test(
     name = "rms_norm_gpu_test",
@@ -121,6 +133,67 @@ cc_test(
     tags = ["gpu"],
 )
 
+# Sequence families: tiny-shape correctness, finite-difference backward checks,
+# and the oracle fixture comparison.
+cc_test(
+    name = "attention_gpu_test",
+    srcs = ["attention_test.cc"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    deps = [
+        ":sequence_test_utils",
+        "//backends/cuda/kernels:sequence_kernels",
+        "//include/nanochat:nanochat",
+    ],
+    size = "small",
+    tags = ["gpu"],
+)
+
+cc_test(
+    name = "classifier_gpu_test",
+    srcs = ["classifier_test.cc"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    deps = [
+        ":sequence_test_utils",
+        "//backends/cuda/kernels:sequence_kernels",
+        "//include/nanochat:nanochat",
+    ],
+    size = "small",
+    tags = ["gpu"],
+)
+
+cc_test(
+    name = "embedding_gpu_test",
+    srcs = ["embedding_test.cc"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    deps = [
+        ":sequence_test_utils",
+        "//backends/cuda/kernels:sequence_kernels",
+        "//include/nanochat:nanochat",
+    ],
+    size = "small",
+    tags = ["gpu"],
+)
+
+cc_test(
+    name = "sequence_oracle_gpu_test",
+    srcs = ["sequence_oracle_test.cc"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    data = ["//tests:data/debug_state.bin"],
+    args = ["$(rootpath //tests:data/debug_state.bin)"],
+    deps = [
+        ":sequence_test_utils",
+        "//backends/cuda/kernels:sequence_kernels",
+        "//include/nanochat:nanochat",
+        "//tests:oracle_fixture",
+    ],
+    size = "small",
+    tags = ["gpu"],
+)
+
 # Standalone micro-benchmark; run it through the broker, not the test loop.
 cc_binary(
     name = "row_bench",
@@ -138,11 +211,15 @@ cc_binary(
 test_suite(
     name = "all",
     tests = [
+        ":attention_gpu_test",
         ":build_config_test",
+        ":classifier_gpu_test",
+        ":embedding_gpu_test",
         ":global_norm_gpu_test",
         ":pascal_spike_gpu_test",
         ":pointwise_gpu_test",
         ":qk_prep_gpu_test",
         ":rms_norm_gpu_test",
+        ":sequence_oracle_gpu_test",
     ],
 )
