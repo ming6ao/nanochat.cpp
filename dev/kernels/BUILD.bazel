@@ -1,8 +1,9 @@
 # dev/kernels — standalone per-kernel tests and benchmarks, llm.c dev/cuda
-# style. This package currently holds the P0 CUDA/Pascal toolchain spike; the
-# real kernel families land alongside it in P1. See docs/testing.md.
+# style. This package holds the P0 CUDA/Pascal toolchain spike plus the
+# per-family tests for the row/elementwise kernels (RmsNorm, QkPrep,
+# Pointwise, GlobalNorm). See dev/kernels/README.md and docs/testing.md.
 
-load("@rules_cc//cc:defs.bzl", "cc_test")
+load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library", "cc_test")
 load(
     "//:nanochat.bzl",
     "cuda_library",
@@ -50,5 +51,98 @@ cc_test(
     size = "small",
 )
 
+# Host-only scaffolding shared by the row/elementwise GPU tests: the reference
+# port of backends/cpu/kernels.cc plus the device-buffer and finite-difference
+# helpers.
+cc_library(
+    name = "row_test_utils",
+    hdrs = [
+        "gpu_test_utils.h",
+        "row_ref.h",
+    ],
+    deps = ["//include/nanochat:nanochat"],
+)
+
+# T1 GPU correctness + finite-difference tests, one per row/elementwise family.
+cc_test(
+    name = "rms_norm_gpu_test",
+    srcs = ["rms_norm_test.cc"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    deps = [
+        ":row_test_utils",
+        "//backends/cuda/kernels:rms_norm",
+        "//backends/cuda/kernels:row_kernels",
+        "//include/nanochat:nanochat",
+    ],
+    size = "small",
+    tags = ["gpu"],
+)
+
+cc_test(
+    name = "qk_prep_gpu_test",
+    srcs = ["qk_prep_test.cc"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    deps = [
+        ":row_test_utils",
+        "//backends/cuda/kernels:row_kernels",
+        "//include/nanochat:nanochat",
+    ],
+    size = "small",
+    tags = ["gpu"],
+)
+
+cc_test(
+    name = "pointwise_gpu_test",
+    srcs = ["pointwise_test.cc"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    deps = [
+        ":row_test_utils",
+        "//backends/cuda/kernels:row_kernels",
+        "//include/nanochat:nanochat",
+    ],
+    size = "small",
+    tags = ["gpu"],
+)
+
+cc_test(
+    name = "global_norm_gpu_test",
+    srcs = ["global_norm_test.cc"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    deps = [
+        ":row_test_utils",
+        "//backends/cuda/kernels:row_kernels",
+        "//include/nanochat:nanochat",
+    ],
+    size = "small",
+    tags = ["gpu"],
+)
+
+# Standalone micro-benchmark; run it through the broker, not the test loop.
+cc_binary(
+    name = "row_bench",
+    srcs = ["row_bench.cc"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    deps = [
+        ":row_test_utils",
+        "//backends/cuda/kernels:row_kernels",
+        "//include/nanochat:nanochat",
+    ],
+)
+
 # Aggregation point consumed by //:all_tests.
-test_suite(name = "all")
+test_suite(
+    name = "all",
+    tests = [
+        ":build_config_test",
+        ":global_norm_gpu_test",
+        ":pascal_spike_gpu_test",
+        ":pointwise_gpu_test",
+        ":qk_prep_gpu_test",
+        ":rms_norm_gpu_test",
+    ],
+)
