@@ -14,6 +14,10 @@ module(
 # rather than relying on Bazel's native cc_* autoloads.
 bazel_dep(name = "rules_cc", version = "0.2.14")
 
+# Shell rules for the tools/ host tests. Bazel 8 removed the native sh_* rules,
+# so declare the rule set directly, as with rules_cc.
+bazel_dep(name = "rules_shell", version = "0.2.0")
+
 # CUDA kernel rules (cuda_library / cuda_binary / cuda_test) plus the
 # local-toolkit toolchain. The Debian/Ubuntu toolkit is detected in place, so
 # the empty toolkit_path is intentional; CUDA_HOME does not have to point at an
