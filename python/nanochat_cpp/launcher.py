@@ -23,18 +23,24 @@ def binary_path(repo_root: Path, name: str = "train_main") -> Path:
     return repo_root / "bazel-bin" / "src" / name
 
 
-def ensure_built(repo_root: Path, cuda: bool, name: str = "train_main") -> Path:
+def ensure_built(repo_root: Path, cuda: bool, name: str = "train_main",
+                 build: bool = True) -> Path:
+    """Build ``//src:<name>`` for the requested backend and return its path.
+
+    Bazel's output symlink reflects the most recent configuration, so a binary
+    left by a CPU build is not reused for a CUDA run. Building the single
+    target is a cache hit when the requested config is already current.
+    """
     binary = binary_path(repo_root, name)
-    if binary.is_file():
-        return binary
-    command = [str(nanochat_entry(repo_root)), "build"]
-    if cuda:
-        command.append("--config=cuda")
-    print(f"[nanochat_cpp] building {name} ({'cuda' if cuda else 'cpu'})...",
-          file=sys.stderr)
-    subprocess.run(command, check=True)
+    if build:
+        command = [str(nanochat_entry(repo_root)), "build", f"//src:{name}"]
+        if cuda:
+            command.append("--config=cuda")
+        print(f"[nanochat_cpp] building //src:{name} "
+              f"({'cuda' if cuda else 'cpu'})...", file=sys.stderr)
+        subprocess.run(command, check=True)
     if not binary.is_file():
-        raise SystemExit(f"build finished but {binary} is missing")
+        raise SystemExit(f"{binary} is missing; build //src:{name} first")
     return binary
 
 

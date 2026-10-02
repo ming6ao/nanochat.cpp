@@ -82,6 +82,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help="sandbox profile for the C++ launch")
     parser.add_argument("--binary", type=str, default=None,
                         help="explicit train_main path")
+    parser.add_argument("--no-build", action="store_true",
+                        help="skip the Bazel build and use the current binary")
     parser.add_argument("--force-data", action="store_true",
                         help="re-tokenize even if a cached shard exists")
     parser.add_argument("--dry-run", action="store_true",
@@ -204,7 +206,7 @@ def main(argv: list[str] | None = None) -> int:
 
     repo_root = reference.repository_root()
     binary = Path(args.binary) if args.binary else launcher.ensure_built(
-        repo_root, cuda)
+        repo_root, cuda, build=not args.no_build)
     print(f"[nanochat_cpp] launching {binary} ({backend})")
     sys.stdout.flush()
     return launcher.launch(repo_root, binary, cpp_args, cuda, args.profile)

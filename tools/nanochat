@@ -18,7 +18,7 @@ usage() {
   cat <<'EOF'
 tools/nanochat <command> [args...]
 
-  build                      bazel build //... (serialized; see docs)
+  build [targets...]         bazel build (default //...; serialized)
   test [--gpu] [targets...]  run tests; every test is sandboxed per action
   check [--gpu]              build, then CPU tests (and GPU tests with --gpu)
   shutdown                   stop this workspace's Bazel server now
@@ -90,8 +90,14 @@ case "$command" in
 
   build)
     # Bounded by the resource flags in .bazelrc; serialized so concurrent
-    # worktrees do not each run their own action pool at full width.
-    with_build_lock "$bazel_bin" build //... "$@"
+    # worktrees do not each run their own action pool at full width. With no
+    # arguments build the whole tree; otherwise build the named targets (so a
+    # caller can build just //src:train_main).
+    if (( $# )); then
+      with_build_lock "$bazel_bin" build "$@"
+    else
+      with_build_lock "$bazel_bin" build //...
+    fi
     ;;
 
   shutdown)
