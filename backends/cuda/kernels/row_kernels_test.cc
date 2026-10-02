@@ -25,9 +25,16 @@ using nanochat::kernels::Synchronize;
 #if defined(NANOCHAT_PRECISION_FP16)
 ComputeType C(float v) { return nanochat::Fp16FromFloat(v); }
 float U(ComputeType v) { return nanochat::Fp16ToFloat(v); }
+// Recorded fp16 tolerance for a value that has passed through one or two
+// half-rounded elementwise steps. The half ulp near 1.0 is 2^-10 ~= 9.8e-4,
+// so 2e-3 (relative, through CheckClose's (1 + |want|) factor) leaves room for
+// a couple of roundings without hiding a wrong result. The fp32 build keeps
+// the tight 1e-4.
+constexpr double kOutTol = 2e-3;
 #else
 ComputeType C(float v) { return v; }
 float U(ComputeType v) { return v; }
+constexpr double kOutTol = 1e-4;
 #endif
 
 int g_failures = 0;
@@ -76,8 +83,8 @@ int main() {
     const std::vector<ComputeType> o = out.Download();
     const std::vector<float> rs = rstd.Download();
     CheckClose(rs[0], r, 1e-4, "rms rstd");
-    CheckClose(U(o[0]), 3.0f * r, 1e-4, "rms out0");
-    CheckClose(U(o[1]), 4.0f * r, 1e-4, "rms out1");
+    CheckClose(U(o[0]), 3.0f * r, kOutTol, "rms out0");
+    CheckClose(U(o[1]), 4.0f * r, kOutTol, "rms out1");
   }
 
   // QkPrep forward with an identity rotation: normed row scaled by 1.2.
@@ -98,8 +105,8 @@ int main() {
     Synchronize();
     const float r = 1.0f / std::sqrt(12.5f) * 1.2f;
     const std::vector<ComputeType> qh = q.Download();
-    CheckClose(U(qh[0]), 3.0f * r, 1e-4, "qkprep q0");
-    CheckClose(U(qh[1]), 4.0f * r, 1e-4, "qkprep q1");
+    CheckClose(U(qh[0]), 3.0f * r, kOutTol, "qkprep q0");
+    CheckClose(U(qh[1]), 4.0f * r, kOutTol, "qkprep q1");
   }
 
   // Pointwise scale-add.
@@ -112,8 +119,8 @@ int main() {
                                         a.ptr, b.ptr, 0.5f, 0.25f, out.ptr);
     Synchronize();
     const std::vector<ComputeType> o = out.Download();
-    CheckClose(U(o[0]), 0.5f * 1.0f + 0.25f * 2.0f, 1e-4, "pointwise 0");
-    CheckClose(U(o[1]), 0.5f * -2.0f + 0.25f * 3.0f, 1e-4, "pointwise 1");
+    CheckClose(U(o[0]), 0.5f * 1.0f + 0.25f * 2.0f, kOutTol, "pointwise 0");
+    CheckClose(U(o[1]), 0.5f * -2.0f + 0.25f * 3.0f, kOutTol, "pointwise 1");
   }
 
   // GlobalNorm: {3, 4} has norm 5, clipped to 2.5 -> {1.5, 2}.
@@ -125,8 +132,8 @@ int main() {
     const std::vector<ComputeType> gh = g.Download();
     const std::vector<float> nh = norm.Download();
     CheckClose(nh[0], 5.0, 1e-4, "globalnorm pre-clip");
-    CheckClose(U(gh[0]), 1.5, 1e-4, "globalnorm clipped 0");
-    CheckClose(U(gh[1]), 2.0, 1e-4, "globalnorm clipped 1");
+    CheckClose(U(gh[0]), 1.5, kOutTol, "globalnorm clipped 0");
+    CheckClose(U(gh[1]), 2.0, kOutTol, "globalnorm clipped 1");
   }
 
   // Fused residual add + norm: out = rmsnorm(x + residual).
@@ -144,11 +151,11 @@ int main() {
     Synchronize();
     const std::vector<ComputeType> rh = res.Download();
     const std::vector<ComputeType> oh = out.Download();
-    CheckClose(U(rh[0]), 3.0, 1e-4, "fused residual 0");
-    CheckClose(U(rh[1]), 4.0, 1e-4, "fused residual 1");
+    CheckClose(U(rh[0]), 3.0, kOutTol, "fused residual 0");
+    CheckClose(U(rh[1]), 4.0, kOutTol, "fused residual 1");
     const float r = 1.0f / std::sqrt(12.5f);
-    CheckClose(U(oh[0]), 3.0f * r, 1e-4, "fused out0");
-    CheckClose(U(oh[1]), 4.0f * r, 1e-4, "fused out1");
+    CheckClose(U(oh[0]), 3.0f * r, kOutTol, "fused out0");
+    CheckClose(U(oh[1]), 4.0f * r, kOutTol, "fused out1");
   }
 
   if (g_failures != 0) {

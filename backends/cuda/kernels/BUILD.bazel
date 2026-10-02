@@ -203,5 +203,25 @@ cc_test(
     tags = ["gpu"],
 )
 
+# T1 GPU correctness with a float reference for the elementwise/norm and
+# attention families, run in both the fp32 and fp16 builds. The fp16 half is
+# what pins the recorded tolerance and the Pascal atomics on sm_61.
+cc_test(
+    name = "precision_gpu_test",
+    srcs = ["precision_test.cc"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    deps = [
+        ":row_kernels",
+        ":sequence_kernels",
+        "//include/nanochat:nanochat",
+    ],
+    size = "small",
+    tags = ["gpu"],
+)
+
 # Aggregation point consumed by //:all_tests.
-test_suite(name = "all", tests = [":row_kernels_gpu_test"])
+test_suite(name = "all", tests = [
+    ":precision_gpu_test",
+    ":row_kernels_gpu_test",
+])
