@@ -15,6 +15,7 @@
 
 #include "model_impl.h"
 #include "nanochat/dataloader.h"
+#include "nanochat/kernels.h"
 #include "nanochat/tensor.h"
 #include "ops.h"
 
@@ -46,6 +47,12 @@ float EvalBpb(Model* model, DataLoader* loader, int steps) {
     auto* impl = static_cast<TrainModel*>(model);
     const ComputeType* losses = impl->losses();
     if (losses == nullptr) break;
+    // Stage the per-token losses once; the CUDA backend keeps them in device
+    // memory.
+    std::vector<ComputeType> losses_host(static_cast<std::size_t>(rows));
+    kernels::Memcpy(losses_host.data(), losses,
+                    static_cast<std::size_t>(rows) * sizeof(ComputeType),
+                    CopyDir::kDeviceToHost);
     for (std::int64_t i = 0; i < rows; ++i) {
       const int target = targets[static_cast<std::size_t>(i)];
       if (target < 0) continue;  // ignore index
@@ -54,7 +61,8 @@ float EvalBpb(Model* model, DataLoader* loader, int steps) {
         bytes = target < byte_vocab ? byte_table[target] : 0;
       }
       if (bytes <= 0) continue;
-      total_nats += static_cast<double>(AsF(losses[i]));
+      total_nats +=
+          static_cast<double>(AsF(losses_host[static_cast<std::size_t>(i)]));
       total_bytes += bytes;
     }
   }

@@ -62,21 +62,40 @@ class Rng {
 };
 
 void FillNormal(ComputeType* data, std::int64_t count, float stddev, Rng* rng) {
+  if (count <= 0) return;
+  std::vector<ComputeType> host(static_cast<std::size_t>(count));
   for (std::int64_t i = 0; i < count; ++i) {
-    data[i] = ToC(stddev * rng->Normal());
+    host[static_cast<std::size_t>(i)] = ToC(stddev * rng->Normal());
   }
+  kernels::Memcpy(data, host.data(),
+                  static_cast<std::size_t>(count) * sizeof(ComputeType),
+                  CopyDir::kHostToDevice);
 }
 
 void FillUniform(ComputeType* data, std::int64_t count, float lo, float hi,
                  Rng* rng) {
+  if (count <= 0) return;
+  std::vector<ComputeType> host(static_cast<std::size_t>(count));
   for (std::int64_t i = 0; i < count; ++i) {
-    data[i] = ToC(rng->Uniform(lo, hi));
+    host[static_cast<std::size_t>(i)] = ToC(rng->Uniform(lo, hi));
   }
+  kernels::Memcpy(data, host.data(),
+                  static_cast<std::size_t>(count) * sizeof(ComputeType),
+                  CopyDir::kHostToDevice);
 }
 
 void FillZero(ComputeType* data, std::int64_t count) {
   kernels::Memset(data, 0,
                   static_cast<std::size_t>(count) * sizeof(ComputeType));
+}
+
+// Reads a single `ComputeType` that may live in device memory (CUDA backend)
+// or host memory (CPU backend). Used for the scalar parameters `resid_`,
+// `x0_lambda_`, `smear_lambda_`, and `backout_lambda_`.
+float ReadHost(const ComputeType* p) {
+  ComputeType raw = ToC(0.0f);
+  kernels::Memcpy(&raw, p, sizeof(ComputeType), CopyDir::kDeviceToHost);
+  return AsF(raw);
 }
 
 }  // namespace
@@ -221,6 +240,8 @@ TrainModel::~TrainModel() {
     if (p.value != nullptr) kernels::Free(p.value);
     if (p.grad != nullptr) kernels::Free(p.grad);
   }
+  if (cos_table_dev_ != nullptr) kernels::Free(cos_table_dev_);
+  if (sin_table_dev_ != nullptr) kernels::Free(sin_table_dev_);
 }
 
 TrainModel::Param& TrainModel::AddParam(const std::string& name,
@@ -265,12 +286,28 @@ void TrainModel::InitWeights(std::uint64_t seed) {
 
   const float s = std::sqrt(3.0f) / std::sqrt(static_cast<float>(hidden));
   const float denom = static_cast<float>(std::max(layers - 1, 1));
+  // Scalar parameters: build on the host, then upload to the (possibly
+  // device) parameter buffers.
+  std::vector<ComputeType> resid_host(static_cast<std::size_t>(layers));
+  std::vector<ComputeType> x0_host(static_cast<std::size_t>(layers));
   for (int i = 0; i < layers; ++i) {
-    resid_[i] = ToC(1.15f - 0.10f * static_cast<float>(i) / denom);
-    x0_lambda_[i] = ToC(0.20f - 0.15f * static_cast<float>(i) / denom);
+    resid_host[static_cast<std::size_t>(i)] =
+        ToC(1.15f - 0.10f * static_cast<float>(i) / denom);
+    x0_host[static_cast<std::size_t>(i)] =
+        ToC(0.20f - 0.15f * static_cast<float>(i) / denom);
   }
-  smear_lambda_[0] = ToC(0.0f);
-  backout_lambda_[0] = ToC(0.2f);
+  kernels::Memcpy(resid_, resid_host.data(),
+                  resid_host.size() * sizeof(ComputeType),
+                  CopyDir::kHostToDevice);
+  kernels::Memcpy(x0_lambda_, x0_host.data(),
+                  x0_host.size() * sizeof(ComputeType),
+                  CopyDir::kHostToDevice);
+  const ComputeType smear_lambda_host = ToC(0.0f);
+  const ComputeType backout_lambda_host = ToC(0.2f);
+  kernels::Memcpy(smear_lambda_, &smear_lambda_host, sizeof(ComputeType),
+                  CopyDir::kHostToDevice);
+  kernels::Memcpy(backout_lambda_, &backout_lambda_host, sizeof(ComputeType),
+                  CopyDir::kHostToDevice);
   FillUniform(smear_gate_, kSmearChannels, 0.0f, 0.02f, &rng);
 
   for (int i = 0; i < layers; ++i) {
@@ -306,8 +343,9 @@ void TrainModel::InitWeights(std::uint64_t seed) {
 void TrainModel::BuildRope(int seq) {
   const int head_dim = config_.head_dim();
   const int half = head_dim / 2;
-  cos_table_.assign(static_cast<std::size_t>(seq) * half, 0.0f);
-  sin_table_.assign(static_cast<std::size_t>(seq) * half, 0.0f);
+  const std::size_t needed = static_cast<std::size_t>(seq) * half;
+  cos_table_.assign(needed, 0.0f);
+  sin_table_.assign(needed, 0.0f);
   for (int t = 0; t < seq; ++t) {
     for (int d = 0; d < half; ++d) {
       const float exponent =
@@ -318,12 +356,26 @@ void TrainModel::BuildRope(int seq) {
       sin_table_[static_cast<std::size_t>(t) * half + d] = std::sin(angle);
     }
   }
+  // The kernels read the tables from device memory, so keep a device copy.
+  if (needed > rope_capacity_) {
+    if (cos_table_dev_ != nullptr) kernels::Free(cos_table_dev_);
+    if (sin_table_dev_ != nullptr) kernels::Free(sin_table_dev_);
+    cos_table_dev_ =
+        static_cast<float*>(kernels::Alloc(needed * sizeof(float)));
+    sin_table_dev_ =
+        static_cast<float*>(kernels::Alloc(needed * sizeof(float)));
+    rope_capacity_ = needed;
+  }
+  kernels::Memcpy(cos_table_dev_, cos_table_.data(), needed * sizeof(float),
+                  CopyDir::kHostToDevice);
+  kernels::Memcpy(sin_table_dev_, sin_table_.data(), needed * sizeof(float),
+                  CopyDir::kHostToDevice);
 }
 
 void TrainModel::EnsureRopeCapacity(int seq) {
   const int half = config_.head_dim() / 2;
   const std::size_t needed = static_cast<std::size_t>(seq) * half;
-  if (cos_table_.size() >= needed) return;
+  if (needed <= rope_capacity_) return;
   BuildRope(seq);
 }
 
@@ -475,7 +527,7 @@ float TrainModel::ForwardLoss(const int* tokens, const int* targets, int batch,
                             emb_raw_);
   ops::RmsNormForward(rows, hidden, kRmsEps, emb_raw_, emb_norm_, rstd_emb_);
   ops::SmearForward(batch, seq, hidden, emb_norm_, smear_gate_,
-                    AsF(smear_lambda_[0]), x0_, smear_sig_);
+                    ReadHost(smear_lambda_), x0_, smear_sig_);
 
   ops::BlockShape shape;
   shape.batch = batch;
@@ -495,18 +547,19 @@ float TrainModel::ForwardLoss(const int* tokens, const int* targets, int batch,
   for (int i = 0; i < layers; ++i) {
     shape.window_left = config_.window_left(i);
     ops::BlockForward(shape, lweights_[i], lacts_[i], tokens_.data(),
-                      cos_table_.data(), sin_table_.data(), x, x0_,
-                      AsF(resid_[i]), AsF(x0_lambda_[i]));
+                      cos_table(), sin_table(), x, x0_,
+                      ReadHost(resid_ + i), ReadHost(x0_lambda_ + i));
     if (i == backout_layer_) {
-      std::memcpy(x_backout_, lacts_[i].x_out,
-                  static_cast<std::size_t>(rows * hidden) *
-                      sizeof(ComputeType));
+      kernels::Memcpy(x_backout_, lacts_[i].x_out,
+                      static_cast<std::size_t>(rows * hidden) *
+                          sizeof(ComputeType),
+                      CopyDir::kDeviceToDevice);
     }
     x = lacts_[i].x_out;
   }
 
   // Mid-layer backout, final norm, classifier, softcap, cross-entropy.
-  ops::BackoutForward(x, x_backout_, AsF(backout_lambda_[0]), x_final_pre_,
+  ops::BackoutForward(x, x_backout_, ReadHost(backout_lambda_), x_final_pre_,
                       rows * hidden);
   ops::RmsNormForward(rows, hidden, kRmsEps, x_final_pre_, x_final_norm_,
                       rstd_final_);
@@ -521,9 +574,13 @@ float TrainModel::ForwardLoss(const int* tokens, const int* targets, int batch,
   classifier.ignore_index = -1;
   kernels::ClassifierForward(classifier, raw_logits_, targets_.data(), losses_);
 
+  losses_host_.resize(static_cast<std::size_t>(rows));
+  kernels::Memcpy(losses_host_.data(), losses_,
+                  static_cast<std::size_t>(rows) * sizeof(ComputeType),
+                  CopyDir::kDeviceToHost);
   double total = 0.0;
   for (std::int64_t m = 0; m < rows; ++m) {
-    total += static_cast<double>(AsF(losses_[m]));
+    total += static_cast<double>(AsF(losses_host_[static_cast<std::size_t>(m)]));
   }
   return static_cast<float>(total / static_cast<double>(rows));
 }
@@ -569,7 +626,7 @@ void TrainModel::Backward() {
                        rstd_final_, dx_final_pre_);
 
   // Backout: x_final_pre = x_{L-1} - backout * x_backout.
-  ops::BackoutBackward(dx_final_pre_, x_backout_, AsF(backout_lambda_[0]),
+  ops::BackoutBackward(dx_final_pre_, x_backout_, ReadHost(backout_lambda_),
                        dbackout_, backout_lambda_grad_, rows * hidden);
 
   // Reverse the blocks. g_a_/g_b_ ping-pong: dcur is the gradient w.r.t. the
@@ -591,31 +648,33 @@ void TrainModel::Backward() {
 
   ComputeType* dcur = g_a_;
   ComputeType* dnext = g_b_;
-  std::memcpy(dcur, dx_final_pre_,
-              static_cast<std::size_t>(rows * hidden) * sizeof(ComputeType));
+  kernels::Memcpy(dcur, dx_final_pre_,
+                  static_cast<std::size_t>(rows * hidden) *
+                      sizeof(ComputeType),
+                  CopyDir::kDeviceToDevice);
   for (int i = layers - 1; i >= 0; --i) {
     if (i == backout_layer_) {
-      for (std::int64_t j = 0; j < rows * hidden; ++j) {
-        dcur[j] = ToC(AsF(dcur[j]) + AsF(dbackout_[j]));
-      }
+      kernels::PointwiseForward(
+          PointwiseOp::kScaleAdd, static_cast<int>(rows * hidden), dcur,
+          dbackout_, 1.0f, 1.0f, dcur);
     }
     shape.window_left = config_.window_left(i);
     const ComputeType* x_in = (i == 0) ? x0_ : lacts_[i - 1].x_out;
     ops::BlockBackward(shape, lweights_[i], lacts_[i], lgrads_[i],
-                       block_scratch_, tokens_.data(), cos_table_.data(),
-                       sin_table_.data(), AsF(resid_[i]),
-                       AsF(x0_lambda_[i]), x_in, x0_, dcur, dnext, x0_acc_,
-                       resid_grad_ + i, x0_lambda_grad_ + i);
+                       block_scratch_, tokens_.data(), cos_table(),
+                       sin_table(), ReadHost(resid_ + i),
+                       ReadHost(x0_lambda_ + i), x_in, x0_, dcur, dnext,
+                       x0_acc_, resid_grad_ + i, x0_lambda_grad_ + i);
     std::swap(dcur, dnext);
   }
 
   // `dcur` is the gradient w.r.t. the post-smear embedding x0. The per-layer
   // x0_lambdas terms were accumulated separately in x0_acc_.
-  for (std::int64_t j = 0; j < rows * hidden; ++j) {
-    dcur[j] = ToC(AsF(dcur[j]) + AsF(x0_acc_[j]));
-  }
+  kernels::PointwiseForward(PointwiseOp::kScaleAdd,
+                            static_cast<int>(rows * hidden), dcur, x0_acc_,
+                            1.0f, 1.0f, dcur);
   ops::SmearBackward(batch_, seq_, hidden, emb_norm_, smear_gate_, smear_sig_,
-                     AsF(smear_lambda_[0]), dcur, smear_gate_grad_,
+                     ReadHost(smear_lambda_), dcur, smear_gate_grad_,
                      smear_lambda_grad_, de_);
   ops::RmsNormBackward(rows, hidden, kRmsEps, emb_raw_, de_, rstd_emb_, demb_);
   kernels::EmbeddingBackward(static_cast<int>(rows), hidden, tokens_.data(),
@@ -666,8 +725,15 @@ void TrainModel::Save(const std::string& path) const {
     out.write(p.name.data(), name_len);
     const std::uint64_t elements = static_cast<std::uint64_t>(p.count);
     out.write(reinterpret_cast<const char*>(&elements), sizeof(elements));
+    std::vector<ComputeType> raw(static_cast<std::size_t>(p.count));
+    kernels::Memcpy(raw.data(), p.value,
+                    static_cast<std::size_t>(p.count) * sizeof(ComputeType),
+                    CopyDir::kDeviceToHost);
     std::vector<float> buffer(static_cast<std::size_t>(p.count));
-    for (std::int64_t i = 0; i < p.count; ++i) buffer[i] = AsF(p.value[i]);
+    for (std::int64_t i = 0; i < p.count; ++i) {
+      buffer[static_cast<std::size_t>(i)] =
+          AsF(raw[static_cast<std::size_t>(i)]);
+    }
     out.write(reinterpret_cast<const char*>(buffer.data()),
               static_cast<std::streamsize>(buffer.size() * sizeof(float)));
   }
@@ -696,10 +762,32 @@ void TrainModel::Load(const std::string& path) {
       if (p.name != name) continue;
       const std::int64_t limit =
           std::min<std::int64_t>(p.count, static_cast<std::int64_t>(elements));
-      for (std::int64_t i = 0; i < limit; ++i) p.value[i] = ToC(buffer[i]);
+      std::vector<ComputeType> raw(static_cast<std::size_t>(limit));
+      for (std::int64_t i = 0; i < limit; ++i) {
+        raw[static_cast<std::size_t>(i)] = ToC(buffer[static_cast<std::size_t>(i)]);
+      }
+      kernels::Memcpy(p.value, raw.data(),
+                      static_cast<std::size_t>(limit) * sizeof(ComputeType),
+                      CopyDir::kHostToDevice);
       break;
     }
   }
+}
+
+// ---------------------------------------------------------------------------
+// Scalar accessors (device-aware)
+// ---------------------------------------------------------------------------
+
+float TrainModel::resid(int layer) const { return ReadHost(resid_ + layer); }
+
+float TrainModel::x0_lambda(int layer) const {
+  return ReadHost(x0_lambda_ + layer);
+}
+
+float TrainModel::smear_lambda() const { return ReadHost(smear_lambda_); }
+
+float TrainModel::backout_lambda() const {
+  return ReadHost(backout_lambda_);
 }
 
 }  // namespace nanochat

@@ -27,6 +27,18 @@
 namespace nanochat {
 namespace {
 
+// Copies a (possibly device) buffer to a host vector. Used by the inference
+// graph for the small per-row reads the seam exposes no kernel for.
+std::vector<ComputeType> StageToHost(const ComputeType* src, std::int64_t count) {
+  std::vector<ComputeType> host(static_cast<std::size_t>(count));
+  if (count > 0) {
+    kernels::Memcpy(host.data(), src,
+                    static_cast<std::size_t>(count) * sizeof(ComputeType),
+                    CopyDir::kDeviceToHost);
+  }
+  return host;
+}
+
 // Activation slots for one inference pass, sized once for `max_seq` rows and
 // reused by every prefill/decode call. The block slots are a single set because
 // layers run sequentially.
@@ -58,24 +70,44 @@ class KvCacheImpl final : public KvCache {
     const int kv_dim = config_.kv_dim();
     const std::size_t rows =
         static_cast<std::size_t>(max_seq_) * static_cast<std::size_t>(kv_dim);
-    keys_.assign(static_cast<std::size_t>(layers) * rows, ToC(0.0f));
-    values_.assign(static_cast<std::size_t>(layers) * rows, ToC(0.0f));
-    prev_.assign(static_cast<std::size_t>(hidden), ToC(0.0f));
+    keys_ = static_cast<ComputeType*>(
+        kernels::Alloc(static_cast<std::size_t>(layers) * rows *
+                       sizeof(ComputeType)));
+    values_ = static_cast<ComputeType*>(
+        kernels::Alloc(static_cast<std::size_t>(layers) * rows *
+                       sizeof(ComputeType)));
+    prev_ = static_cast<ComputeType*>(
+        kernels::Alloc(static_cast<std::size_t>(hidden) *
+                       sizeof(ComputeType)));
+    kernels::Memset(keys_, 0,
+                    static_cast<std::size_t>(layers) * rows *
+                        sizeof(ComputeType));
+    kernels::Memset(values_, 0,
+                    static_cast<std::size_t>(layers) * rows *
+                        sizeof(ComputeType));
+    kernels::Memset(prev_, 0,
+                    static_cast<std::size_t>(hidden) * sizeof(ComputeType));
     BuildWorkspace();
+  }
+
+  ~KvCacheImpl() override {
+    if (keys_ != nullptr) kernels::Free(keys_);
+    if (values_ != nullptr) kernels::Free(values_);
+    if (prev_ != nullptr) kernels::Free(prev_);
   }
 
   int pos() const override { return pos_; }
   int capacity() const override { return max_seq_; }
 
   ComputeType* layer_keys(int layer) {
-    return keys_.data() +
+    return keys_ +
            static_cast<std::size_t>(layer) * max_seq_ * config_.kv_dim();
   }
   ComputeType* layer_values(int layer) {
-    return values_.data() +
+    return values_ +
            static_cast<std::size_t>(layer) * max_seq_ * config_.kv_dim();
   }
-  ComputeType* prev() { return prev_.data(); }
+  ComputeType* prev() { return prev_; }
   bool has_prev() const { return has_prev_; }
   void set_has_prev(bool value) { has_prev_ = value; }
   void set_pos(int value) { pos_ = value; }
@@ -174,9 +206,9 @@ class KvCacheImpl final : public KvCache {
   int max_seq_ = 0;
   int pos_ = 0;
   bool has_prev_ = false;
-  std::vector<ComputeType> keys_;
-  std::vector<ComputeType> values_;
-  std::vector<ComputeType> prev_;
+  ComputeType* keys_ = nullptr;
+  ComputeType* values_ = nullptr;
+  ComputeType* prev_ = nullptr;
   InferenceWorkspace workspace_;
 };
 
@@ -221,27 +253,45 @@ void RunInference(TrainModel* model, const int* tokens, int num_tokens,
   if (t > 1) {
     ops::SmearForward(1, t, hidden, emb_norm, model->smear_gate(),
                       model->smear_lambda(), ws.x0, ws.smear_sig);
-    std::memcpy(kv->prev(), emb_norm + (rows - 1) * hidden,
-                static_cast<std::size_t>(hidden) * sizeof(ComputeType));
+    kernels::Memcpy(kv->prev(), emb_norm + (rows - 1) * hidden,
+                    static_cast<std::size_t>(hidden) * sizeof(ComputeType),
+                    CopyDir::kDeviceToDevice);
   } else if (kv->has_prev()) {
+    // Decode against the cached previous embedding. This per-row gate and mix
+    // has no device kernel; stage the small buffers through the host.
     const ComputeType* prev = kv->prev();
+    std::vector<ComputeType> eh = StageToHost(emb_norm, hidden);
+    std::vector<ComputeType> ph = StageToHost(prev, hidden);
+    std::vector<ComputeType> wh = StageToHost(model->smear_gate(),
+                                              kSmearChannels);
+    std::vector<ComputeType> xh(static_cast<std::size_t>(hidden));
     float pre = 0.0f;
     for (int j = 0; j < kSmearChannels; ++j) {
-      pre += AsF(emb_norm[j]) * AsF(model->smear_gate()[j]);
+      pre += AsF(eh[static_cast<std::size_t>(j)]) *
+             AsF(wh[static_cast<std::size_t>(j)]);
     }
     const float s = Sigmoid(pre);
     const float gate = model->smear_lambda() * s;
     for (int j = 0; j < hidden; ++j) {
-      ws.x0[j] = ToC(AsF(emb_norm[j]) + gate * AsF(prev[j]));
+      xh[static_cast<std::size_t>(j)] =
+          ToC(AsF(eh[static_cast<std::size_t>(j)]) +
+              gate * AsF(ph[static_cast<std::size_t>(j)]));
     }
-    ws.smear_sig[0] = s;
-    std::memcpy(kv->prev(), emb_norm,
-                static_cast<std::size_t>(hidden) * sizeof(ComputeType));
+    kernels::Memcpy(ws.x0, xh.data(),
+                    static_cast<std::size_t>(hidden) * sizeof(ComputeType),
+                    CopyDir::kHostToDevice);
+    kernels::Memcpy(ws.smear_sig, &s, sizeof(float), CopyDir::kHostToDevice);
+    kernels::Memcpy(kv->prev(), eh.data(),
+                    static_cast<std::size_t>(hidden) * sizeof(ComputeType),
+                    CopyDir::kHostToDevice);
   } else {
-    std::memcpy(ws.x0, emb_norm,
-                static_cast<std::size_t>(rows * hidden) * sizeof(ComputeType));
-    std::memcpy(kv->prev(), emb_norm,
-                static_cast<std::size_t>(hidden) * sizeof(ComputeType));
+    kernels::Memcpy(ws.x0, emb_norm,
+                    static_cast<std::size_t>(rows * hidden) *
+                        sizeof(ComputeType),
+                    CopyDir::kDeviceToDevice);
+    kernels::Memcpy(kv->prev(), emb_norm,
+                    static_cast<std::size_t>(hidden) * sizeof(ComputeType),
+                    CopyDir::kDeviceToDevice);
   }
   kv->set_has_prev(true);
 
@@ -280,9 +330,10 @@ void RunInference(TrainModel* model, const int* tokens, int num_tokens,
     ops::BlockForward(shape, model->layer_weights(i), a, tokens, cos, sin, x,
                       ws.x0, model->resid(i), model->x0_lambda(i));
     if (i == layers / 2) {
-      std::memcpy(ws.x_backout, a.x_out,
-                  static_cast<std::size_t>(rows * hidden) *
-                      sizeof(ComputeType));
+      kernels::Memcpy(ws.x_backout, a.x_out,
+                      static_cast<std::size_t>(rows * hidden) *
+                          sizeof(ComputeType),
+                      CopyDir::kDeviceToDevice);
     }
     x = a.x_out;
   }
@@ -298,10 +349,14 @@ void RunInference(TrainModel* model, const int* tokens, int num_tokens,
   kv->set_pos(t0 + t);
 
   if (logits_out == nullptr) return;
-  // Soft-cap and slice the last position to the real vocabulary.
+  // Soft-cap and slice the last position to the real vocabulary. `logits_out`
+  // is host memory, so stage the last row of device logits once.
   const ComputeType* last = ws.raw_logits + (rows - 1) * padded;
+  std::vector<ComputeType> last_host = StageToHost(last, vocab);
   for (int v = 0; v < vocab; ++v) {
-    logits_out[v] = kLogitSoftcap * std::tanh(AsF(last[v]) / kLogitSoftcap);
+    logits_out[v] = kLogitSoftcap *
+                    std::tanh(AsF(last_host[static_cast<std::size_t>(v)]) /
+                              kLogitSoftcap);
   }
 }
 

@@ -26,6 +26,7 @@
 #include <vector>
 
 #include "model_impl.h"
+#include "nanochat/kernels.h"
 #include "nanochat/model.h"
 #include "tests/oracle_fixture.h"
 
@@ -153,17 +154,31 @@ void LoadParameters(const Fixture& fixture, Model* model) {
       continue;
     }
     const float* src = source.f32();
+    // Stage the fixture values on the host, then upload in one copy so the same
+    // helper works whether `view.value` is host (CPU) or device (CUDA).
+    std::vector<ComputeType> host(static_cast<std::size_t>(view.count));
     for (std::int64_t i = 0; i < view.count; ++i) {
-      StoreFloat(view.value + i, src[i]);
+      StoreFloat(host.data() + i, src[i]);
     }
+    nanochat::kernels::Memcpy(
+        view.value, host.data(),
+        static_cast<std::size_t>(view.count) * sizeof(ComputeType),
+        nanochat::CopyDir::kHostToDevice);
   }
 }
 
 void CopyCompute(const ComputeType* src, std::int64_t count,
                  std::vector<float>* out) {
+  std::vector<ComputeType> host(static_cast<std::size_t>(count));
+  if (count > 0) {
+    nanochat::kernels::Memcpy(
+        host.data(), src, static_cast<std::size_t>(count) * sizeof(ComputeType),
+        nanochat::CopyDir::kDeviceToHost);
+  }
   out->resize(static_cast<std::size_t>(count));
   for (std::int64_t i = 0; i < count; ++i) {
-    (*out)[static_cast<std::size_t>(i)] = AsFloat32(src[i]);
+    (*out)[static_cast<std::size_t>(i)] =
+        AsFloat32(host[static_cast<std::size_t>(i)]);
   }
 }
 
@@ -199,15 +214,21 @@ void RunChecks(const Fixture& fixture) {
                std::fabs(static_cast<double>(loss) -
                          static_cast<double>(want_loss)));
 
-  // Raw logits: model [rows, padded], fixture [batch, seq, vocab].
+  // Raw logits: model [rows, padded], fixture [batch, seq, vocab]. Stage the
+  // whole device buffer once.
   const ComputeType* raw = impl->raw_logits();
   const Tensor& want_raw = fixture.Get("forward/raw_logits");
+  std::vector<ComputeType> raw_host(static_cast<std::size_t>(rows) * padded);
+  nanochat::kernels::Memcpy(
+      raw_host.data(), raw,
+      static_cast<std::size_t>(rows) * padded * sizeof(ComputeType),
+      nanochat::CopyDir::kDeviceToHost);
   std::vector<float> raw_flat;
   raw_flat.resize(static_cast<std::size_t>(rows) * vocab);
   for (std::int64_t r = 0; r < rows; ++r) {
     for (int v = 0; v < vocab; ++v) {
       raw_flat[static_cast<std::size_t>(r) * vocab + v] =
-          AsFloat32(raw[r * padded + v]);
+          AsFloat32(raw_host[static_cast<std::size_t>(r) * padded + v]);
     }
   }
   // Track the raw-logit error too.
