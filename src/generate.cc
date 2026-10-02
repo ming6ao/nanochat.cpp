@@ -399,19 +399,4 @@ int SampleToken(const float* logits, int vocab, const SampleParams& params,
   return vocab - 1;
 }
 
-float EvalBpb(Model* model, DataLoader* loader, int steps) {
-  // The harness workstream owns the `DataLoader` batch stream and the per-token
-  // byte table; neither exists in the tree yet. Fail loudly instead of
-  // returning a fabricated number.
-  (void)model;
-  (void)loader;
-  (void)steps;
-  std::fprintf(stderr,
-               "nanochat: EvalBpb is not implemented yet: the DataLoader/"
-               "harness workstream owns the batch stream and the per-token "
-               "byte table. Refusing to return a fabricated value.\n");
-  std::abort();
-  return 0.0f;
-}
-
 }  // namespace nanochat

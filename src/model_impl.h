@@ -37,6 +37,9 @@ class TrainModel final : public Model {
 
   // --- test/debug accessors (not part of the public Model API) ---
   const ComputeType* raw_logits() const { return raw_logits_; }
+  // Per-row cross-entropy (nats) saved by the most recent ForwardLoss; length
+  // `last_batch() * last_seq()`. `EvalBpb` sums these before dividing by bytes.
+  const ComputeType* losses() const { return losses_; }
   int last_batch() const { return batch_; }
   int last_seq() const { return seq_; }
 
