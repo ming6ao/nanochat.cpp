@@ -134,6 +134,9 @@ class TrainModel final : public Model {
   int seq_ = 0;
   std::int64_t rows_ = 0;
   int backout_layer_ = 0;
+  // 1-based count of TrainStep() optimizer updates, so the schedules see the
+  // same step numbering as an explicit training loop.
+  int optimizer_step_ = 0;
 };
 
 // Internal inference entry points used by `src/generate_test.cc`. The public

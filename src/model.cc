@@ -23,6 +23,7 @@
 #include <vector>
 
 #include "nanochat/kernels.h"
+#include "nanochat/optim.h"
 #include "ops.h"
 
 namespace nanochat {
@@ -627,15 +628,11 @@ void TrainModel::Backward() {
 
 float TrainModel::TrainStep(const int* tokens, const int* targets, int batch,
                             int seq, Optimizer* optimizer) {
-  (void)optimizer;  // The optimizer wiring lands in the optimizer workstream.
+  if (optimizer != nullptr) optimizer->ZeroGrad();
   const float loss = ForwardLoss(tokens, targets, batch, seq);
   Backward();
-  // Minimal, deterministic descent so the graph is a real training step.
-  const float lr = 0.02f;
-  for (Param& p : params_) {
-    for (std::int64_t i = 0; i < p.count; ++i) {
-      p.value[i] = ToC(AsF(p.value[i]) - lr * AsF(p.grad[i]));
-    }
+  if (optimizer != nullptr) {
+    optimizer->Step(++optimizer_step_);
   }
   return loss;
 }
