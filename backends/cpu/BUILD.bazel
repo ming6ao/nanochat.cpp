@@ -1,8 +1,36 @@
 # backends/cpu/ — the reference implementation of every kernel, used as the
-# oracle-on-CPU path and as the correctness baseline. Targets land here in P0.
-# See docs/backends.md.
+# oracle-on-CPU path and as the correctness baseline. See docs/backends.md.
+
+load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
+load("//:nanochat.bzl", "nanochat_copts", "precision_defines")
 
 package(default_visibility = ["//visibility:public"])
+
+# The CPU backend: every symbol in nanochat/kernels.h as a naive loop. The
+# precision (fp32 / fp16) is a build-time define, so the library is built once
+# per `--config` and vendored into whichever executable links it.
+cc_library(
+    name = "cpu",
+    srcs = ["kernels.cc"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    deps = ["//include/nanochat:nanochat"],
+)
+
+# Self-check for the reference kernels: analytic identities plus a
+# finite-difference gradient check for every family with a backward. The oracle
+# parity test lives in //tests.
+cc_test(
+    name = "cpu_kernels_test",
+    srcs = ["cpu_kernels_test.cc"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    deps = [
+        ":cpu",
+        "//include/nanochat:nanochat",
+    ],
+    size = "small",
+)
 
 # Aggregation point consumed by //:all_tests.
 test_suite(name = "all")
