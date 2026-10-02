@@ -6,17 +6,21 @@ load("//:nanochat.bzl", "nanochat_copts", "precision_defines")
 
 package(default_visibility = ["//visibility:public"])
 
-# The training graph: runtime tensor plumbing (`tensor.cc`, `workspace.h`) plus
-# the fixed forward/backward train graph (`model.cc`). It is a kernel-sequence
-# graph, not an autograd engine (DESIGN.md section 6).
+# The backend-agnostic workflow: runtime tensor plumbing (`tensor.cc`,
+# `workspace.h`), the reusable graph pieces (`ops.cc`), the fixed train graph
+# (`model.cc`), and the two inference graphs (`generate.cc`). It is a
+# kernel-sequence graph, not an autograd engine (DESIGN.md section 6).
 cc_library(
     name = "model",
     srcs = [
+        "generate.cc",
         "model.cc",
+        "ops.cc",
         "tensor.cc",
     ],
     hdrs = [
         "model_impl.h",
+        "ops.h",
         "workspace.h",
     ],
     copts = nanochat_copts(),
@@ -60,8 +64,23 @@ cc_test(
     size = "small",
 )
 
+# Prefill/decode consistency: proves the inference graphs agree with the train
+# forward at the same positions, and that decode samples a valid token.
+cc_test(
+    name = "generate_test",
+    srcs = ["generate_test.cc"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    deps = [
+        ":model",
+        "//include/nanochat:nanochat",
+    ],
+    size = "small",
+)
+
 # Aggregation point consumed by //:all_tests.
 test_suite(name = "all", tests = [
     ":model_oracle_test",
     ":model_gradient_test",
+    ":generate_test",
 ])
