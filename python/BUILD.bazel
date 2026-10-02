@@ -1,0 +1,10 @@
+# python/ — the nanochat-compatible Python entry points. They orchestrate the
+# C++ binaries (data materialization + sandbox launch); nothing here is a
+# runtime dependency of the C++ code. See docs/python-bridge.md.
+
+package(default_visibility = ["//visibility:public"])
+
+filegroup(
+    name = "package",
+    srcs = glob(["nanochat_cpp/*.py"]),
+)

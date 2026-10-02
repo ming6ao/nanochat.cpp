@@ -14,6 +14,7 @@ exports_files([
     "dump_oracle.py",
     "dump_train_fixture.py",
     "nanochat",
+    "nanochat_cpp",
     "gpu.sh",
     "sandbox.sh",
     "prune_bazel_output_bases",
@@ -39,8 +40,19 @@ sh_test(
     data = ["prune_bazel_output_bases"],
 )
 
+# T0 test for the Python bridge's torch-free logic. See docs/python-bridge.md.
+sh_test(
+    name = "nanochat_cpp_selftest",
+    srcs = ["nanochat_cpp_selftest.sh"],
+    data = ["//python:package"],
+    size = "small",
+)
+
 # Aggregation point consumed by //:all_tests.
 test_suite(
     name = "all",
-    tests = [":prune_test"],
+    tests = [
+        ":prune_test",
+        ":nanochat_cpp_selftest",
+    ],
 )

@@ -13,6 +13,7 @@ detailed reference that the design points at.
 | [backends.md](backends.md) | Backend selection and how to add one |
 | [build.md](build.md) | File layout, Bazel, Makefile fallback |
 | [data.md](data.md) | Token shards, checkpoints, the oracle fixture |
+| [python-bridge.md](python-bridge.md) | nanochat-compatible Python entry points |
 | [testing.md](testing.md) | Test tiers, oracle harness, finite-difference checks |
 | [sandbox.md](sandbox.md) | Execution sandbox and host resource governance |
 
