@@ -65,7 +65,7 @@ startup --shutdown_on_low_sys_mem
 # Bound one server's local action pool. HOST_CPUS/HOST_RAM defaults would let
 # each concurrent server use most of the machine.
 build --jobs=4
-build --local_ram_resources=3072
+build --local_resources=memory=3072
 
 # --- Tests ------------------------------------------------------------------
 test --test_output=errors

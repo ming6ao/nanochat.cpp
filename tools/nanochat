@@ -43,6 +43,16 @@ die() {
   exit 2
 }
 
+# Bazel itself does not read .bazelversion; Bazelisk does. Prefer Bazelisk so
+# the version pinned in .bazelversion is honored, and fall back to a system
+# `bazel` otherwise. See docs/build.md.
+if command -v bazelisk >/dev/null 2>&1; then
+  bazel_bin=$(command -v bazelisk)
+else
+  bazel_bin=$(command -v bazel || true)
+fi
+[[ -n $bazel_bin ]] || die "neither bazelisk nor bazel found on PATH"
+
 # Serialize builds across worktrees. Every worktree and verifier gets its own
 # Bazel output base, hence its own persistent server with its own action pool;
 # running several at once multiplies the per-server memory budget and has
@@ -81,13 +91,13 @@ case "$command" in
   build)
     # Bounded by the resource flags in .bazelrc; serialized so concurrent
     # worktrees do not each run their own action pool at full width.
-    with_build_lock bazel build //... "$@"
+    with_build_lock "$bazel_bin" build //... "$@"
     ;;
 
   shutdown)
     # Release this workspace's Bazel server memory now instead of waiting for
     # the idle timeout. Safe: it only stops the server, not the action cache.
-    exec bazel shutdown
+    exec "$bazel_bin" shutdown
     ;;
 
   prune)
@@ -138,9 +148,9 @@ case "$command" in
       # Hold the single-GPU lock for the whole suite, and the build lock while
       # the suite's targets compile.
       with_build_lock "$broker" --lock-only --profile "$profile" -- \
-        bazel test "${bazel_args[@]}"
+        "$bazel_bin" test "${bazel_args[@]}"
     else
-      with_build_lock bazel test "${bazel_args[@]}"
+      with_build_lock "$bazel_bin" test "${bazel_args[@]}"
     fi
     ;;
 

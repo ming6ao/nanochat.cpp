@@ -12,7 +12,8 @@ See `DESIGN.md` for the architecture. This file is about process.
 > and [docs/testing.md](docs/testing.md). Executables refuse to start outside it.
 
 The host: one **GTX 1080 Ti (sm_61, 11 GB)** under **WSL2**, driver 536.99,
-CUDA 12.0, Bazel 8.1.1, no cmake/ninja/clang. CUPTI is **not** available under
+CUDA 12.0, Bazel 9.2.0 (pinned in `.bazelversion`, run via Bazelisk), no
+cmake/ninja/clang. CUPTI is **not** available under
 WSL2, so Nsight/perf profiling must happen on native Linux.
 
 ---

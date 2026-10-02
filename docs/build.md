@@ -38,6 +38,11 @@ nanochat.cpp/
 and the action cache keeps parallel work from rebuilding the world. Config
 settings select backend/precision/arch; `select()` handles linking.
 
+The tree pins **Bazel 9.2.0** in `.bazelversion`. Bazel does not read that file
+itself, so `tools/nanochat` runs Bazelisk when it is on `PATH` and falls back to
+a system `bazel` otherwise. Install Bazelisk once per host; see
+[sandbox.md](sandbox.md).
+
 - `.bazelrc` sets `--@rules_cuda//cuda:archs=sm_61` (or `sm_75`).
 - `CUDA_HOME=/usr` on this machine (no `/usr/local/cuda`).
 - GPU tests are tagged `gpu` + `manual` and run outside the Bazel sandbox.
@@ -54,8 +59,8 @@ each server and `tools/nanochat` serializes builds:
 - `startup --host_jvm_args=-Xmx1500m` caps the server heap.
 - `startup --max_idle_secs=600` and `startup --shutdown_on_low_sys_mem` let an
   idle server exit instead of lingering for the three-hour default.
-- `build --jobs=4 --local_ram_resources=3072` bounds one server's local action
-  pool.
+- `build --jobs=4 --local_resources=memory=3072` bounds one server's local
+  action pool.
 - `tools/nanochat build` and `tools/nanochat test` take an exclusive lock
   (`/tmp/nanochat-build.lock`) so at most one worktree compiles at a time. The
   lock descriptor is closed on the Bazel client so the detached server cannot

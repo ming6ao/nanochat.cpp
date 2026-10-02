@@ -10,13 +10,15 @@ module(
     version = "0.0.1",
 )
 
-# rules_cc is declared directly because the packaging targets load its rules
-# rather than relying on Bazel's native cc_* autoloads.
-bazel_dep(name = "rules_cc", version = "0.2.14")
+# rules_cc is declared directly because Bazel 9 removed the native cc_*
+# autoloads; the version matches the minimum Bazel 9 resolves transitively
+# (protobuf 33.4 pulls rules_cc 0.2.17).
+bazel_dep(name = "rules_cc", version = "0.2.17")
 
-# Shell rules for the tools/ host tests. Bazel 8 removed the native sh_* rules,
-# so declare the rule set directly, as with rules_cc.
-bazel_dep(name = "rules_shell", version = "0.2.0")
+# Shell rules for the tools/ host tests. Bazel 8 removed the native sh_* rules
+# and Bazel 9 removed the remaining autoloads, so declare the rule set directly,
+# as with rules_cc.
+bazel_dep(name = "rules_shell", version = "0.6.1")
 
 # CUDA kernel rules (cuda_library / cuda_binary / cuda_test) plus the
 # local-toolkit toolchain. The Debian/Ubuntu toolkit is detected in place, so

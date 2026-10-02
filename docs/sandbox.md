@@ -51,6 +51,10 @@ systemctl --user daemon-reload
 If the slice is not installed, launches still work but only get per-profile
 limits, with no aggregate ceiling.
 
+Install [Bazelisk](https://github.com/bazelbuild/bazelisk) so the Bazel version
+pinned in the tree's `.bazelversion` is honored. `tools/nanochat` prefers it and
+falls back to a system `bazel`.
+
 ## Profiles
 
 | Profile | CPUQuota | Mem high/max | pids | affinity | notes |
@@ -148,7 +152,7 @@ They are instead bounded from inside and serialized from outside:
 - `.bazelrc` caps the server heap (`--host_jvm_args=-Xmx1500m`), lets an idle
   server exit (`--max_idle_secs=600`), lets the kernel stop it under memory
   pressure (`--shutdown_on_low_sys_mem`), and bounds the local action pool
-  (`--jobs=4`, `--local_ram_resources=3072`).
+  (`--jobs=4`, `--local_resources=memory=3072`).
 - `tools/nanochat build` and the build phase of `tools/nanochat test` take an
   exclusive lock, so concurrent worktrees queue instead of each running a full
   action pool. The lock descriptor is closed on the Bazel client so the
