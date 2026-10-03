@@ -29,6 +29,10 @@ Status values:
 | D6 | `out-of-scope` | scaling | no distributed data parallel training |
 | D7 | `out-of-scope` | runtime | no `torch.compile`; disabled on Pascal anyway |
 | D8 | `equivalent` | harness | no batch prefetch overlap during backward |
+| E1 | `open` | evaluation | sampled modes use the C++ RNG, not torch; greedy is bit-identical |
+| E3 | `equivalent` | evaluation | reference checkpoints converted torch -> NCHKPT01 |
+| E4 | `equivalent` | evaluation | CORE and chat scoring use the C++ forward with reference task logic |
+| E5 | `out-of-scope` | evaluation | no distributed evaluation |
 
 ## How parity is verified
 
@@ -100,6 +104,35 @@ does not need to change. The header comment in
 implementation did a contiguous window; it now states the actual behavior, and
 this entry is the tracker for closing the gap.
 
+### E1 — Sampled evaluation RNG
+
+**Status:** `open`. Evaluation runs its generative modes through the C++
+`GenerateBatch` primitive ([eval.md](eval.md) §4.2, §5.2), so they draw from the
+xorshift64\* source tracked in D4 rather than from the PyTorch global RNG the
+reference uses. Greedy decoding is bit-identical: it is an argmax with no random
+draw, and the generation parity fixture (`tests/data/generate_parity.bin`,
+`//tests:generate_parity_test`) pins it on the CPU and CUDA backends. The
+sampled paths are:
+
+- `base_eval.py --eval sample`: the unconditioned prompts at temperature 1.0
+  with `num_samples = 8` (the conditioned prompts stay greedy).
+- `chat_eval.py` generative tasks (GSM8K, HumanEval): the configured
+  temperature, top-k, and sample count.
+
+**Impact:** the sampled text differs from the reference, so GSM8K and HumanEval
+pass rates and sample outputs are not run-for-run comparable. The deterministic
+metrics (bpb, CORE, categorical chat) are unaffected.
+
+**Evidence:** the generation parity fixture covers greedy decoding only; the
+sampled outputs depend on the torch RNG state, so there is no committed fixture
+for them. The T2 chat evaluation gate compares per-task accuracy on a fixed
+subset, not the sampled text.
+
+**Fix direction:** none required for parity of the deterministic metrics.
+Reproducing the reference sampled text exactly would mean reimplementing the
+PyTorch RNG and its state layout, which is not worth it. Treat sampled metrics
+as nanochat.cpp's own seeded distribution.
+
 ## Equivalent differences
 
 ### D2 — QK-norm and RoPE order
@@ -150,6 +183,32 @@ The reference prefetches the next batch while the GPU runs the backward pass
 loads the next batch at the top of the next step. This is a throughput
 difference only; the sequence of batches presented to the model is the same.
 
+### E3 — Reference checkpoint conversion
+
+The reference saves checkpoints as torch `.pt` state dictionaries; the C++
+runtime loads only the NCHKPT01 container. `tools/convert_checkpoint.py` and
+`python/nanochat_cpp/checkpoint.py` remap the reference parameter names and
+apply the dtype policy so a released base or SFT checkpoint can be loaded by
+`EvalBpb` and `score_main`. The conversion re-lays the reference weight values
+into the container without recomputing them, so the model being evaluated is the
+reference model; the only arithmetic difference is the forward-pass rounding
+already tracked in D2 and D3. See [eval.md](eval.md) §6. A converted `d8`
+checkpoint reproduces the reference bits-per-byte within the T2 tolerance.
+
+### E4 — CORE and chat scoring
+
+The reference computes CORE (`nanochat.core_eval`) and categorical chat scoring
+with the torch forward and keeps every task decision in Python. nanochat.cpp
+runs one `ForwardLoss` over a padded batch in `score_main` (`ScoreBatch`) and
+returns per-position NLL, argmax, and focused logits; the bridge reproduces the
+reference task logic unchanged: the `random.Random(1337)` and
+`random.Random(1234 + idx)` few-shot sampling, the jinja rendering and candidate
+spans, the lowest-mean-NLL argmin and exact-argmax match, the
+`(accuracy - 0.01 * baseline) / (1 - 0.01 * baseline)` centering, and the
+ChatCORE mean. Only the forward arithmetic differs, in the same
+floating-point-order sense as D2 and D3; each decision is the same function of
+the logits. See [eval.md](eval.md) §4.3 and §5.
+
 ## Out of scope
 
 ### D6 — Distributed data parallel training
@@ -164,6 +223,14 @@ The reference compiles the model and the fused optimizer steps. On Pascal this
 is disabled (`TORCH_COMPILE_DISABLE=1`; Triton needs SM 70+), so it has no
 effect on the current host and is not a parity item here. On newer hardware it
 would fuse elementwise work and change host dispatch cost, not the mathematics.
+
+### E5 — Distributed evaluation
+
+The reference shards evaluation across ranks (each rank scores a slice of the
+token shard or the task set) and reduces the metric. nanochat.cpp evaluates in a
+single process, so the evaluated token count and the task count are bounded by
+one device. This is the evaluation-side counterpart of D6 and is out of scope
+for the single-GPU target.
 
 ## Adding a difference
 
