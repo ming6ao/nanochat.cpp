@@ -151,10 +151,15 @@ void CheckBatchMatchesNaive(Model* model, const Config& config,
         break;
       }
     }
+    // The terminal id must never be appended to the generated span: stopping
+    // happens before the id is written. It may legitimately appear in the
+    // effective prompt, which is input rather than output, so only the masked
+    // (sampled) positions are inspected; a prompt occurrence is not an
+    // emission and must not be counted as one.
     const int stop = stops[r];
     if (stop >= 0) {
-      for (int id : rows[r].tokens) {
-        if (id == stop) {
+      for (std::size_t i = 0; i < rows[r].tokens.size(); ++i) {
+        if (rows[r].mask[i] == 1 && rows[r].tokens[i] == stop) {
           Fail(label + ": row " + std::to_string(r) +
                " emitted its terminal id");
           break;
