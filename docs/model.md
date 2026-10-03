@@ -1,4 +1,4 @@
-# Model and the four graphs
+# Model and the graphs
 
 ## Fixed graphs
 
@@ -7,9 +7,54 @@
 2. **Prefill** — same trunk, no loss, fills the KV cache.
 3. **Decode** — one token, KV-cache append + attend.
 4. **Eval** — forward-only bits-per-byte.
+5. **Generate** — prefill once, clone the KV cache per sample, decode in
+   lockstep, stop each row independently.
 
 The topology lives in exactly two files: `model.cc` (train forward + backward)
-and `generate.cc` (prefill + decode). No other file knows the architecture.
+and `generate.cc` (prefill + decode + generate). No other file knows the
+architecture.
+
+## Batched generation
+
+`GenerateBatch` is the shared sampling primitive for evaluation samples,
+generative chat evaluation, and RL rollouts ([eval.md](eval.md),
+[post-training.md](post-training.md)).
+
+```cpp
+struct GenerateParams {
+  int num_samples = 1;
+  int max_tokens = 256;
+  float temperature = 1.0f;
+  int top_k = 0;
+  std::uint64_t seed = 42;
+  int stop_id = -1;  // e.g. <|assistant_end|>
+  int bos_id = -1;   // e.g. <|bos|>
+};
+
+struct GeneratedSequence {
+  std::vector<int> tokens;         // prompt + generated, no terminal token
+  std::vector<std::uint8_t> mask;  // 1 sampled, 0 prompt/forced
+};
+
+void GenerateBatch(Model* model, const int* prompt, int prompt_len,
+                   const GenerateParams& params,
+                   std::vector<GeneratedSequence>* out);
+```
+
+Design points:
+
+- **One prefill, many samples.** The prompt is prefilled once (batch 1); the
+  resulting cache is cloned into `num_samples` rows, as the reference
+  `KVCache.prefill` does. The decode graph then runs all rows in lockstep.
+- **Per-row stop.** A row stops when it emits `stop_id` or `bos_id` or reaches
+  `max_tokens`; other rows keep decoding. Terminal tokens are not included in
+  the returned sequence.
+- **Masks.** The mask records provenance, not correctness: `0` for the prompt
+  and any forced token, `1` for sampled tokens. Post-training uses it to decide
+  which positions receive loss.
+- **Tokenizer-agnostic.** The engine never decodes text, so the terminal ids are
+  passed in. The calculator tool (which needs to decode a python expression)
+  therefore cannot live here; see [post-training.md](post-training.md).
 
 ## Workspace and memory
 
@@ -58,6 +103,9 @@ class Model {
 class KvCache;
 void Prefill(Model* model, const int* tokens, int num_tokens, KvCache* kv);
 int  Decode(Model* model, int token, KvCache* kv, const SampleParams& params);
+void GenerateBatch(Model* model, const int* prompt, int prompt_len,
+                   const GenerateParams& params,
+                   std::vector<GeneratedSequence>* out);
 float EvalBpb(Model* model, DataLoader* loader, int steps);
 
 }  // namespace nanochat
