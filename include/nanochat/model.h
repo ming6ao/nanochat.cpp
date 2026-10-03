@@ -12,8 +12,9 @@
 #include "nanochat/tensor.h"
 
 // The public model API: the training graph, the two inference graphs, and the
-// evaluation entry point (docs/model.md). This header is frozen; treat it as
-// stable by default and prefer additive changes (DESIGN.md section 7).
+// evaluation entry point and compute primitives (docs/model.md, docs/eval.md).
+// This header is frozen; treat it as stable by default and prefer additive
+// changes (DESIGN.md section 7).
 //
 // The topology lives in model.cc (train forward + backward) and generate.cc
 // (prefill + decode). No other translation unit knows the architecture.
@@ -113,6 +114,92 @@ int Decode(Model* model, int token, KvCache* kv, const SampleParams& params);
 // Forward-only bits-per-byte over `steps` batches from `loader` (mirrors
 // nanochat's `evaluate_bpb`).
 float EvalBpb(Model* model, DataLoader* loader, int steps);
+
+// ---------------------------------------------------------------------------
+// Evaluation compute primitives (docs/eval.md section 3). Both are
+// forward-only, host-orchestrated entry points over the training graph; they
+// never step an optimizer. They stay tokenizer-agnostic: ids in, ids and
+// logits out.
+// ---------------------------------------------------------------------------
+
+// One sequence's optional focus request for ScoreBatch: read the logits that
+// the model produces at prediction position `position` (those logits predict
+// the token at `position + 1`) for the `count` token ids in `ids`, in order.
+// `position < 0` or `count <= 0` disables the focus for this sequence.
+struct ScoreFocus {
+  int position = -1;
+  const int* ids = nullptr;
+  int count = 0;
+};
+
+// Per-sequence result of ScoreBatch, staged to the host. `nll` and `argmax`
+// hold one entry per prediction position in `[0, seq)`.
+struct ScoreResult {
+  // Negative log-likelihood in nats of the target token at each prediction
+  // position. Masked positions (padding and each row's final position) carry a
+  // zero and must be skipped by the caller.
+  std::vector<float> nll;
+  // Argmax token id of the raw (pre-softcap) logits at each prediction
+  // position, restricted to `[0, vocab_size)`. Masked positions repeat the
+  // ignore index (-1).
+  std::vector<int> argmax;
+  // Raw (pre-softcap) logits at the focus position for each focus id, in the
+  // request order; empty when the sequence carries no focus. The softcap is
+  // monotonic, so an argmax over these equals an argmax over the soft-capped
+  // logits.
+  std::vector<float> focus_logits;
+};
+
+// Forward-only scoring over `batch` independent sequences of length `seq`,
+// using the same shifted-target convention as `ForwardLoss`: the logits at
+// position `i` predict the token at `i + 1`. `tokens` is a row-major
+// `batch * seq` host buffer; `lengths` gives the number of valid ids per row,
+// and every position at or past a row's length is masked with the ignore index
+// (-1) so it contributes no loss. `lengths` may be null to treat every row as
+// full length. `focus` may be null for no focused logits. `out` is resized to
+// `batch` entries. Runs one forward; never touches gradients.
+void ScoreBatch(Model* model, const int* tokens, int batch, int seq,
+                const int* lengths, const ScoreFocus* focus,
+                std::vector<ScoreResult>* out);
+
+// Parameters for batched, tokenizer-agnostic generation.
+struct GenerateParams {
+  // Number of rows to sample from the prefilled prompt.
+  int num_samples = 1;
+  // Maximum new tokens per row.
+  int max_tokens = 256;
+  // Temperature; <= 0 selects greedy (argmax) decoding.
+  float temperature = 1.0f;
+  // Keep only the `top_k` highest logits; 0 disables the filter.
+  int top_k = 0;
+  // Seed for the internal generator of the sampled rows.
+  std::uint64_t seed = 42;
+  // Terminal token id for every row; -1 disables stopping on a token.
+  int stop_id = -1;
+  // Prepended to the prompt when >= 0 (for example <|bos|>).
+  int bos_id = -1;
+  // Optional per-row terminal ids (length `num_samples`) that override
+  // `stop_id`. A negative entry disables stopping for that row.
+  const int* stop_ids = nullptr;
+};
+
+// One generated row. `tokens` is the effective prompt (including a prepended
+// `bos_id` when set) followed by the generated ids, and excludes the terminal
+// token when one was hit; `mask` is aligned with it and holds 1 for a sampled
+// id and 0 for a prompt (or prepended) id.
+struct GeneratedSequence {
+  std::vector<int> tokens;
+  std::vector<std::uint8_t> mask;
+};
+
+// Batched sampling: prefills `prompt` once, clones the cache per row, decodes
+// the rows in lockstep, and stops each row on its own terminal id (or after
+// `params.max_tokens`). Writes `params.num_samples` rows to `out`, resized as
+// needed. Greedy decoding is deterministic; sampled decoding uses
+// `params.seed`. The prompt is not modified, and the call is forward-only.
+void GenerateBatch(Model* model, const int* prompt, int prompt_len,
+                   const GenerateParams& params,
+                   std::vector<GeneratedSequence>* out);
 
 }  // namespace nanochat
 
