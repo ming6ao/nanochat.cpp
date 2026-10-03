@@ -11,4 +11,5 @@ Nothing here is a runtime dependency of the C++ binary; it is orchestration
 around it. See ``python/nanochat_cpp/base_train.py`` and docs/testing.md.
 """
 
-__all__ = ["checkpoint", "config", "data", "eval_fixture", "launcher", "reference"]
+__all__ = ["base_eval", "checkpoint", "config", "data", "eval_fixture",
+           "launcher", "reference"]
