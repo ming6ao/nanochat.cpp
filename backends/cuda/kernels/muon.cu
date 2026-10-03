@@ -68,46 +68,56 @@ __global__ void MuonMomentumKernel(long long total, float momentum,
 
 // --- MuonEq equilibration + Frobenius normalisation ------------------------
 
-// One block per matrix: rescale every row to the mean row norm, then divide
-// the whole matrix by 1.01 * ||X||_F + 1e-6.
-__global__ void MuonEquilibrateKernel(int rows, int cols,
-                                      ComputeType* __restrict__ x) {
-  const long long mat = static_cast<long long>(rows) * cols;
-  ComputeType* xm = x + static_cast<long long>(blockIdx.x) * mat;
-  const int tid = threadIdx.x;
-
+// Sum of squares of one matrix, reduced across the calling block.
+__device__ __forceinline__ float MatrixSumSq(const ComputeType* xm,
+                                             long long mat) {
   float local = 0.0f;
-  for (long long i = tid; i < mat; i += blockDim.x) {
+  for (long long i = threadIdx.x; i < mat; i += blockDim.x) {
     const float v = AsFloatDev(xm[i]);
     local += v * v;
   }
-  const float frob = BlockReduceSum(local);
-  const float target = sqrtf(frob) / sqrtf(static_cast<float>(rows));
+  return BlockReduceSum(local);
+}
 
-  for (int r = 0; r < rows; ++r) {
-    ComputeType* row = xm + static_cast<long long>(r) * cols;
-    float row_local = 0.0f;
-    for (int c = tid; c < cols; c += blockDim.x) {
-      const float v = AsFloatDev(row[c]);
-      row_local += v * v;
-    }
-    const float row_sq = BlockReduceSum(row_local);
-    const float row_norm = fmaxf(sqrtf(row_sq), 1e-6f);
-    const float s = target / row_norm;
-    for (int c = tid; c < cols; c += blockDim.x) {
-      row[c] = ToComputeDev(AsFloatDev(row[c]) * s);
-    }
-    __syncthreads();
-  }
+// Frobenius norm of each matrix (one block per matrix), written to `frob`.
+__global__ void MuonFrobKernel(int rows, int cols,
+                               const ComputeType* __restrict__ x,
+                               float* __restrict__ frob) {
+  const long long mat = static_cast<long long>(rows) * cols;
+  const ComputeType* xm = x + static_cast<long long>(blockIdx.x) * mat;
+  const float sum = MatrixSumSq(xm, mat);
+  if (threadIdx.x == 0) frob[blockIdx.x] = sqrtf(sum);
+}
 
-  float local2 = 0.0f;
-  for (long long i = tid; i < mat; i += blockDim.x) {
-    const float v = AsFloatDev(xm[i]);
-    local2 += v * v;
+// Rescale each row to the mean row norm (one block per (matrix, row)).
+__global__ void MuonEquilibrateRowKernel(int rows, int cols,
+                                         ComputeType* __restrict__ x,
+                                         const float* __restrict__ frob) {
+  const int p = blockIdx.y;
+  const int r = blockIdx.x;
+  const long long mat = static_cast<long long>(rows) * cols;
+  ComputeType* row =
+      x + static_cast<long long>(p) * mat + static_cast<long long>(r) * cols;
+  float local = 0.0f;
+  for (int c = threadIdx.x; c < cols; c += blockDim.x) {
+    const float v = AsFloatDev(row[c]);
+    local += v * v;
   }
-  const float frob2 = BlockReduceSum(local2);
-  const float div = sqrtf(frob2) * 1.01f + 1e-6f;
-  for (long long i = tid; i < mat; i += blockDim.x) {
+  const float row_norm = fmaxf(sqrtf(BlockReduceSum(local)), 1e-6f);
+  const float target = frob[p] / sqrtf(static_cast<float>(rows));
+  const float s = target / row_norm;
+  for (int c = threadIdx.x; c < cols; c += blockDim.x) {
+    row[c] = ToComputeDev(AsFloatDev(row[c]) * s);
+  }
+}
+
+// Divide each matrix by 1.01 * ||X||_F + 1e-6 (one block per matrix).
+__global__ void MuonEquilibrateDivKernel(int rows, int cols,
+                                         ComputeType* __restrict__ x) {
+  const long long mat = static_cast<long long>(rows) * cols;
+  ComputeType* xm = x + static_cast<long long>(blockIdx.x) * mat;
+  const float div = sqrtf(MatrixSumSq(xm, mat)) * 1.01f + 1e-6f;
+  for (long long i = threadIdx.x; i < mat; i += blockDim.x) {
     xm[i] = ToComputeDev(AsFloatDev(xm[i]) / div);
   }
 }
@@ -263,6 +273,28 @@ int GridSize(long long count, int threads) {
   return static_cast<int>(blocks < kMaxBlocks ? blocks : kMaxBlocks);
 }
 
+// Cached working buffers for MuonUpdate. cudaMalloc/cudaFree synchronize the
+// device and dominate the update when they run once per group per step, so the
+// buffers are allocated once at the largest size any group needs and reused.
+ComputeType* g_muon_workspace = nullptr;
+std::size_t g_muon_workspace_capacity = 0;
+float* g_muon_scratch = nullptr;
+std::size_t g_muon_scratch_capacity = 0;
+
+void EnsureMuonWorkspace(std::size_t elements, std::size_t scratch_floats) {
+  if (elements > g_muon_workspace_capacity) {
+    if (g_muon_workspace != nullptr) Free(g_muon_workspace);
+    g_muon_workspace =
+        static_cast<ComputeType*>(Alloc(elements * sizeof(ComputeType)));
+    g_muon_workspace_capacity = elements;
+  }
+  if (scratch_floats > g_muon_scratch_capacity) {
+    if (g_muon_scratch != nullptr) Free(g_muon_scratch);
+    g_muon_scratch = static_cast<float*>(Alloc(scratch_floats * sizeof(float)));
+    g_muon_scratch_capacity = scratch_floats;
+  }
+}
+
 }  // namespace
 
 void MuonUpdate(const MuonParams& params, const ComputeType* stacked_grads,
@@ -287,19 +319,16 @@ void MuonUpdate(const MuonParams& params, const ComputeType* stacked_grads,
 
   // Working matrix (momentum output, orthonormalised in place) and the
   // per-matrix GEMM operands. All stay ComputeType so they can feed cuBLAS.
-  ComputeType* x =
-      static_cast<ComputeType*>(Alloc(sizeof(ComputeType) * total));
-  ComputeType* a =
-      static_cast<ComputeType*>(Alloc(sizeof(ComputeType) * min_total));
-  ComputeType* a2 =
-      static_cast<ComputeType*>(Alloc(sizeof(ComputeType) * min_total));
-  ComputeType* b =
-      static_cast<ComputeType*>(Alloc(sizeof(ComputeType) * min_total));
-  ComputeType* prod =
-      static_cast<ComputeType*>(Alloc(sizeof(ComputeType) * total));
+  // The layout is [x | prod | a | a2 | b], from one cached allocation.
   const int red_index = reduce_cols ? rows : cols;
-  float* scratch = static_cast<float*>(
-      Alloc(sizeof(float) * static_cast<long long>(num_params) * red_index));
+  EnsureMuonWorkspace(static_cast<std::size_t>(2 * total + 3 * min_total),
+                      static_cast<std::size_t>(num_params) * red_index);
+  ComputeType* x = g_muon_workspace;
+  ComputeType* prod = x + total;
+  ComputeType* a = prod + total;
+  ComputeType* a2 = a + min_total;
+  ComputeType* b = a2 + min_total;
+  float* scratch = g_muon_scratch;
 
   const int kThreads = 256;
   const int elem_grid = GridSize(total, kThreads);
@@ -308,8 +337,12 @@ void MuonUpdate(const MuonParams& params, const ComputeType* stacked_grads,
   cuda_backend::Launch(MuonMomentumKernel, dim3(elem_grid), dim3(kThreads), 0,
                        total, params.momentum, params.nesterov, stacked_grads,
                        buf1, x);
-  cuda_backend::Launch(MuonEquilibrateKernel, dim3(num_params), dim3(kThreads),
-                       0, rows, cols, x);
+  cuda_backend::Launch(MuonFrobKernel, dim3(num_params), dim3(kThreads), 0,
+                       rows, cols, x, scratch);
+  cuda_backend::Launch(MuonEquilibrateRowKernel, dim3(rows, num_params),
+                       dim3(kThreads), 0, rows, cols, x, scratch);
+  cuda_backend::Launch(MuonEquilibrateDivKernel, dim3(num_params),
+                       dim3(kThreads), 0, rows, cols, x);
 
   for (int it = 0; it < ns_steps; ++it) {
     const float ca = kPolarCoeffs[it][0];
@@ -402,13 +435,6 @@ void MuonUpdate(const MuonParams& params, const ComputeType* stacked_grads,
   cuda_backend::Launch(MuonApplyKernel, dim3(elem_grid), dim3(kThreads), 0,
                        total, params.lr, params.weight_decay, stacked_params,
                        x);
-
-  Free(x);
-  Free(a);
-  Free(a2);
-  Free(b);
-  Free(prod);
-  Free(scratch);
 }
 
 }  // namespace kernels
