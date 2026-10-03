@@ -31,6 +31,10 @@ float EvalBpb(Model* model, DataLoader* loader, int steps) {
     return std::numeric_limits<float>::infinity();
   }
 
+  // Forward-only path (docs/grad-mode.md): this mirrors the reference
+  // `@torch.no_grad()`. The guard restores the previous grad mode on return.
+  NoGradGuard guard(model);
+
   const std::int64_t rows =
       static_cast<std::int64_t>(batch) * static_cast<std::int64_t>(seq);
   std::vector<int> tokens(static_cast<std::size_t>(rows));

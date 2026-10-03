@@ -139,6 +139,25 @@ void Gemm(GemmMode mode, const GemmParams& params, const ComputeType* a,
   const void* blas_b = reinterpret_cast<const void*>(a);
   void* blas_c = reinterpret_cast<void*>(c);
 
+#if !defined(NANOCHAT_PRECISION_FP16)
+  // A single GEMM runs faster through the classic API than through the
+  // strided-batched API with `CUBLAS_GEMM_DEFAULT`. At the language-model head
+  // shape (M=16384, N=32768, K=768) `cublasSgemm` reaches about 8.8 TFLOP/s
+  // and `cublasGemmStridedBatchedEx` about 3.6 TFLOP/s on Pascal. The two
+  // calls take the same operands and flags, so the result is unchanged. The
+  // fp16 build keeps the batched path, which carries its own tensor-core
+  // branch. See docs/performance.md.
+  if (params.batch_count == 1) {
+    CheckCublas(cublasSgemm(Handle(), transa, transb, /*m=*/params.n,
+                            /*n=*/params.m, /*k=*/params.k, &alpha_f,
+                            static_cast<const float*>(blas_a), ldb,
+                            static_cast<const float*>(blas_b), lda, &beta_f,
+                            static_cast<float*>(blas_c), ldc),
+                "cublasSgemm");
+    return;
+  }
+#endif
+
   CheckCublas(cublasGemmStridedBatchedEx(
                   Handle(), transa, transb, /*m=*/params.n, /*n=*/params.m,
                   /*k=*/params.k, alpha, blas_a, kDataType, ldb, stride_b,

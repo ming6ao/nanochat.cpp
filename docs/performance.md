@@ -1,100 +1,82 @@
 # Performance measurement and debugging
 
-How to investigate a performance gap in `nanochat.cpp`, and what the project
-provides to make that investigation cheap. The general, project-independent
-method is also captured in the `performance-investigation` skill; this document
-is the `nanochat.cpp`-specific interface and protocol.
+This document describes how to measure a performance gap in `nanochat.cpp`. The
+general method is in the `performance-investigation` skill. This document covers
+the project tools.
 
-The host is a single GTX 1080 Ti (sm_61) under WSL2 with no CUDA Profiling Tools
-Interface, so kernel-counter profiling is unavailable here. Device-event timing
-through this project's benchmarks is the primary instrument. Kernel-level
-counters require native Linux.
-
----
+The host is one GTX 1080 Ti (sm_61) under WSL2. CUPTI is not available. Kernel
+counters do not work here. Device-event timing through the project benchmarks is
+the primary instrument. Kernel counters need native Linux.
 
 ## 1. Measure through the entry point
 
-Every timing run goes through `tools/nanochat` so the sandbox and the single-GPU
-broker are applied. Do not run a benchmark binary directly.
+Run every timing through `tools/nanochat`. The entry point applies the sandbox
+and the single-GPU broker. Do not run a benchmark binary directly.
 
-- `tools/nanochat doctor` — read-only diagnostics before measuring. It reports
-  the revision, toolchain, device, sandbox limits, whether the GPU broker lock
-  is free, and the tail of the broker and sandbox logs. Use it to tell slow code
-  from a busy or misconfigured host.
-- `tools/nanochat profile [opts]` — builds and runs the attention benchmark
-  under the `t3-bench` profile with the GPU broker held. Options pass through:
-  `--json`, `--out PATH`, `--warmup N`, `--iters N`, `--rounds N`.
-- `tools/nanochat bench -- <binary> ...` — run any other benchmark under the
-  `t3-bench` resource profile (no broker; use `profile` or
-  `tools/nanochat gpu --profile t3-bench -- <binary>` when exclusivity matters).
+- `tools/nanochat doctor` reports the revision, the toolchain, the device, the
+  sandbox limits, and the broker state. Use it before a measurement.
+- `tools/nanochat profile [opts]` builds and runs the attention benchmark under
+  the `t3-bench` profile. The GPU broker stays held. The options are `--json`,
+  `--out PATH`, `--warmup N`, `--iters N`, and `--rounds N`.
+- `tools/nanochat bench -- <binary> ...` runs another benchmark under the
+  `t3-bench` profile.
 
-Record the revision, build configuration (`--config=cuda` or `--config=sm_75`,
-precision), and device with every number. `tools/nanochat doctor` prints most
-of it.
+Record the revision, the build configuration, the precision, and the device
+with each number. `tools/nanochat doctor` prints most of them.
 
 ## 2. The measurement protocol
 
 1. Confirm the device is idle (`tools/nanochat doctor`).
-2. Warm up, then time a batch with one synchronization at the end, or use
-   device events (the event benchmark does this).
-3. Report the best of several rounds for throughput and the median across runs
-   for latency; say which.
-4. Never set `CUDA_LAUNCH_BLOCKING` for timing.
-5. Keep the before and after numbers together with their configuration.
+2. Warm up. Then time a batch with one synchronization at the end.
+3. Report the best of several rounds for throughput. Report the median across
+   runs for latency. State which statistic you report.
+4. Do not set `CUDA_LAUNCH_BLOCKING` for timing.
+5. Keep the before and after numbers with their configuration.
 
 ## 3. The debugging interface
 
 ### 3.1 The attention benchmark
 
-`dev/kernels/attention_bench.cc` times the shipped `AttentionForward` and
-`AttentionBackward` with CUDA events at:
+`dev/kernels/attention_bench.cc` times `AttentionForward` and
+`AttentionBackward` with CUDA events. The shapes are the `d8_s512` training
+shape, a sliding-window variant, a grouped-query variant, and a head-dimension
+sweep.
 
-- the `d8_s512` training shape (batch 8, sequence 512, 4 heads, head dimension
-  128, full context);
-- a sliding-window variant;
-- a grouped-query variant;
-- a head-dimension sweep over 32, 64, 128, and 256.
+The head-dimension sweep shows the redundancy in `OnlineSoftmaxTile` and
+`SoftmaxGradTile`. The tile recomputes the query-key dot product for each owned
+output dimension. The issued work grows with the square of the head dimension.
+The necessary work grows with the head dimension.
 
-The head-dimension sweep is the diagnostic for the known redundancy in
-`OnlineSoftmaxTile` and `SoftmaxGradTile`
-(`backends/cuda/kernels/device_utils.cuh`): the tile recomputes the query-key
-dot product once per owned output dimension, so the issued work grows about
-quadratically with the head dimension while the necessary work grows linearly.
-If the measured time across the sweep grows at a steeper exponent than the
-necessary operation count, the redundancy is confirmed; if a fixed variant
-removes the exponent, the fix is validated. See the `roofline` reference in the
-skill.
+A steeper exponent in the sweep confirms the redundancy. A flatter exponent
+after a change confirms the fix. See the `roofline` reference in the skill. The
+benchmark reports the rate against the necessary operation count. A correct
+implementation approaches the device ceiling.
 
-The benchmark reports the achieved rate against the *necessary* floating-point
-operations, so a correct implementation should approach the device ceiling and
-the current implementation should sit far below it.
+### 3.2 Validate a candidate fix
 
-### 3.1.1 Validating a candidate fix locally
+Do not edit the shipped tile first. Build the candidate under `dev/kernels` with
+the same seam signatures. Check it against `dev/kernels/sequence_ref.h`. Time it
+with `bench_utils.h` at the same shapes. Promote it into `device_utils.cuh`
+after the correctness check passes and the sweep exponent flattens. The
+`summarize_times.py` script and the exponent snippet in the skill produce the
+numbers.
 
-Do not edit the shipped tile first. Build the candidate as a local mirror under
-`dev/kernels` with the same seam signatures, check it against the host reference
-in `dev/kernels/sequence_ref.h`, and time it with `bench_utils.h` at the same
-shapes. Promote it into `device_utils.cuh` only after the correctness check
-passes and the head-dimension exponent from the sweep has flattened relative to
-the shipped tile. The `summarize_times.py` script and the exponent snippet in
-the `performance-investigation` skill produce both.
-
-### 3.2 Adding a benchmark
+### 3.3 Add a benchmark
 
 Follow `dev/kernels/README.md`. Use `dev/kernels/bench_utils.h`:
 
-- `BenchOptions` sets warm-up, iterations, rounds, and JSON output.
-- `EventTimer::Time(callable, options)` returns the best mean milliseconds per
-  call, measured with device events on the default stream.
-- `BenchReport::Add(name, shape, ms, gflops)` collects rows.
-- `BenchReport::Print(options)` prints a human table, and writes JSON to
-  `options.out` when set.
+- `BenchOptions` sets the warm-up, the iterations, the rounds, and the JSON
+  output.
+- `EventTimer::Time` returns the best mean milliseconds per call. It uses
+  device events on the default stream.
+- `BenchReport::Add` collects a row.
+- `BenchReport::Print` prints a table. It writes JSON to `options.out` when
+  set.
 
-Build the target as a `cuda_binary` (it uses the CUDA runtime through
-`bench_utils.h`) and add it next to the other benchmark binaries in
-`dev/kernels/BUILD.bazel`. Do not add a benchmark to the `all` test suite.
+Build the target as a `cuda_binary` and add it to `dev/kernels/BUILD.bazel`. Do
+not add a benchmark to the `all` test suite.
 
-### 3.3 Machine-readable output
+### 3.4 Machine-readable output
 
 `BenchReport` emits the `nanochat.bench.v1` schema:
 
@@ -107,41 +89,69 @@ Build the target as a `cuda_binary` (it uses the CUDA runtime through
 }
 ```
 
-`gflops` is the achieved rate in GFLOP/s against the necessary operation count.
-Feed the file to the skill's `summarize_times.py` for a per-feature budget.
+`gflops` is the rate against the necessary operation count. Feed the file to
+the skill's `summarize_times.py`.
 
-## 4. Root-cause checklist for this project
+## 4. Root-cause checklist
 
-When the full step is slower than expected, split it before choosing a fix:
+Split the step before you choose a fix:
 
-- Attention forward and backward (`dev/kernels/attention_bench.cc`). Known
-  per-owned-dimension redundancy; see section 3.1.
+- Attention forward and backward (`dev/kernels/attention_bench.cc`).
 - Memory access in the attention tile: uncoalesced key/value loads, a serial
-  single-accumulator dot product, and no key/value reuse across query rows.
+  dot product, and no key/value reuse across query rows.
 - Backward key/value atomics, especially grouped-query attention and the fp16
   compare-and-swap fallback on Pascal.
-- GEMM (cuBLAS) — expected near peak on Pascal; confirm rather than assume.
-- QkPrep (RMSNorm plus RoPE plus scale), Pointwise, Classifier, Embedding.
-- Optimizer (AdamW and Muon) and global-norm clipping.
+- GEMM (cuBLAS). Confirm the rate. Do not assume it.
+- QkPrep, Pointwise, Classifier, and Embedding.
+- The optimizer and the global-norm clip.
 - Launch overhead and the backward `Memset` of the query/key/value gradients.
-- Host-side gaps: data loading, logging, checkpointing, evaluation.
+- Host-side gaps: data loading, logging, checkpointing, and evaluation.
 
-Existing benchmarks to reach for: `row_bench`, `qk_prep_bench`,
-`decode_fused_bench`, and now `attention_bench`.
+Benchmarks to use: `row_bench`, `qk_prep_bench`, `decode_fused_bench`,
+`attention_bench`, and `eval_bench`.
 
-## 5. Profiling limitations
+## 5. Profiling limits
 
-CUPTI cannot initialize under WSL2, so `torch.profiler`, Nsight Systems, and
-Nsight Compute cannot attribute device time on this host, and the PyTorch
-profile report (`profiles/d8_s512/PROFILE_REPORT.md` in the reference checkout)
-contains host operator time only. To attribute device time here, use the CUDA
-event benchmarks. For streaming-multiprocessor occupancy, achieved bandwidth,
-and warp stall reasons, profile on native Linux (T3), and record the revision.
+CUPTI does not initialize under WSL2. `torch.profiler`, Nsight Systems, and
+Nsight Compute cannot attribute device time on this host. The reference profile
+report (`profiles/d8_s512/PROFILE_REPORT.md`) contains host operator time only.
 
-## 6. Baselines
+Use the CUDA event benchmarks for device time. Profile on native Linux for
+occupancy, bandwidth, and warp stall reasons. Record the revision.
+
+## 6. Eval GEMM attribution
+
+A measured eval gap shows one dominant cause. The workload is d12, `B=16`,
+`T=1024`, and fp32. The reference is PyTorch nanochat.
+
+| Part | PyTorch | nanochat.cpp | Delta |
+|---|---|---|---|
+| lm_head GEMM | 92.9 ms | 229.1 ms | +136.2 ms |
+| Classifier softcap and cross-entropy | 61.2 ms | 18.5 ms | -42.7 ms |
+| Full forward | 686.6 ms | 882.7 ms | +196.1 ms |
+
+The language-model head GEMM was the cause. The shape is `M=16384`, `N=32768`,
+and `K=768`.
+
+`cublasGemmStridedBatchedEx` with `CUBLAS_GEMM_DEFAULT` reached 3.6 TFLOP/s.
+`cublasSgemm` reached 8.8 TFLOP/s. The two calls take the same operands and the
+same flags.
+
+`backends/cuda/gemm.cu` now uses `cublasSgemm` for a single fp32 GEMM. The full
+forward dropped to 679 ms. The reference is 687 ms. Reproduce the numbers with
+`eval_bench`:
+
+```bash
+tools/nanochat build --config=cuda //src:eval_bench
+tools/nanochat bench -- bazel-bin/src/eval_bench --batch 16 --seq 1024 \
+  --layers 12 --heads 6 --kv-heads 6 --hidden 768 \
+  --vocab 32768 --padded-vocab 32768
+```
+
+## 7. Baselines
 
 Keep a committed baseline of the `nanochat.bench.v1` output for the production
-shape so a regression is visible without re-deriving it. Update the baseline
-only with the revision and configuration that produced it. The merge-gate
-benchmark is a single `tools/nanochat profile --json` run at a wave boundary,
-not per commit.
+shape. Then a regression is visible without a new measurement. Update the
+baseline only with the revision and the configuration that produced it. The
+merge-gate benchmark is one `tools/nanochat profile --json` run at a wave
+boundary.

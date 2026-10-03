@@ -74,6 +74,16 @@ class Model {
   virtual float TrainStep(const int* tokens, const int* targets, int batch,
                           int seq, Optimizer* optimizer) = 0;
 
+  // Grad mode (docs/grad-mode.md), the analogue of `torch.set_grad_enabled()`.
+  // The default state is on. When the caller turns it off, `ForwardLoss` runs
+  // the forward-only path: it builds a smaller workspace, reuses one block's
+  // activations across layers, and does not save anything `Backward()` reads.
+  // `Backward`, `BackwardAccumulate`, and `TrainStep` then stop with an error.
+  // The defaults keep the methods additive: an implementation that does not
+  // support grad mode stays in the always-on state.
+  virtual void SetGradEnabled(bool /*enabled*/) {}
+  virtual bool grad_enabled() const { return true; }
+
   // Parameter views in the optimizer's grouping order.
   virtual std::vector<ParamView> params() const = 0;
 
@@ -85,6 +95,24 @@ class Model {
   explicit Model(Config config) : config_(std::move(config)) {}
 
   Config config_;
+};
+
+// RAII guard for the grad-mode state (docs/grad-mode.md). It is the analogue of
+// `torch.no_grad()`: the constructor turns grad mode off, and the destructor
+// restores the previous state. The model must outlive the guard.
+class NoGradGuard {
+ public:
+  explicit NoGradGuard(Model* model)
+      : model_(model), previous_(model->grad_enabled()) {
+    model_->SetGradEnabled(false);
+  }
+  ~NoGradGuard() { model_->SetGradEnabled(previous_); }
+  NoGradGuard(const NoGradGuard&) = delete;
+  NoGradGuard& operator=(const NoGradGuard&) = delete;
+
+ private:
+  Model* model_;
+  bool previous_;
 };
 
 // Host-side key/value cache for the inference graphs. The concrete storage

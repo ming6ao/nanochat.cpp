@@ -15,6 +15,7 @@ detailed reference that the design points at.
 | [data.md](data.md) | Token shards, checkpoints, the oracle fixture |
 | [python-bridge.md](python-bridge.md) | nanochat-compatible Python entry points |
 | [eval.md](eval.md) | Design: base and chat evaluation (forward-only) |
+| [grad-mode.md](grad-mode.md) | Design: forward-only evaluation path and workspace |
 | [post-training.md](post-training.md) | Design: SFT and reinforcement learning |
 | [plan-eval-rl.md](plan-eval-rl.md) | Implementation plan for eval.md and post-training.md |
 | [parity.md](parity.md) | Known differences from the PyTorch reference, with status |

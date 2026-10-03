@@ -1,6 +1,7 @@
 #ifndef NANOCHAT_SRC_MODEL_IMPL_H_
 #define NANOCHAT_SRC_MODEL_IMPL_H_
 
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -33,6 +34,8 @@ class TrainModel final : public Model {
   void BackwardAccumulate(float scale) override;
   float TrainStep(const int* tokens, const int* targets, int batch, int seq,
                   Optimizer* optimizer) override;
+  void SetGradEnabled(bool enabled) override { grad_enabled_ = enabled; }
+  bool grad_enabled() const override { return grad_enabled_; }
   std::vector<ParamView> params() const override;
   void Save(const std::string& path) const override;
   void Load(const std::string& path) override;
@@ -41,9 +44,21 @@ class TrainModel final : public Model {
   const ComputeType* raw_logits() const { return raw_logits_; }
   // Per-row cross-entropy (nats) saved by the most recent ForwardLoss; length
   // `last_batch() * last_seq()`. `EvalBpb` sums these before dividing by bytes.
-  const ComputeType* losses() const { return losses_; }
+  // The grad-mode forward writes the eval-mode buffer instead.
+  const ComputeType* losses() const { return ActiveLosses(); }
   int last_batch() const { return batch_; }
   int last_seq() const { return seq_; }
+  // Bytes reserved by the arena the active grad mode uses (docs/grad-mode.md).
+  // The test compares the training and evaluation arenas through this accessor.
+  std::size_t workspace_bytes() const {
+    return grad_enabled_ ? workspace_.bytes_reserved()
+                         : eval_workspace_.bytes_reserved();
+  }
+  // Test accessor: shrink the eval classifier chunk to exercise the tiling
+  // path. The production budget is 512 MiB.
+  void SetEvalLogitsBudgetForTest(std::int64_t bytes) {
+    eval_logits_budget_ = bytes;
+  }
 
   // --- inference accessors (generate.cc) -------------------------------------
   // The prefill/decode topology lives in generate.cc; these expose only the
@@ -76,7 +91,19 @@ class TrainModel final : public Model {
 
   Param& AddParam(const std::string& name, std::int64_t count, int rows,
                   int cols);
-  void BuildWorkspace(int batch, int seq);
+  void BuildTrainWorkspace(int batch, int seq);
+  void BuildEvalWorkspace(int batch, int seq);
+  // The shared forward topology for both grad modes (docs/grad-mode.md). When
+  // `save_for_backward` is true, it writes every layer's activations to
+  // `lacts_[i]` and the full classifier logits to `raw_logits_`. When false, it
+  // reuses one block set and tiles the classifier.
+  void RunForward(const int* tokens, const int* targets, int batch, int seq,
+                  bool save_for_backward);
+  // Aborts when the most recent forward did not save activations for Backward.
+  void RequireGradActivations(const char* caller) const;
+  const ComputeType* ActiveLosses() const {
+    return grad_enabled_ ? losses_ : eval_losses_;
+  }
   void BuildRope(int seq);
 
   // Parameters, in the optimizer's grouping order (docs/optimizer.md).
@@ -125,6 +152,31 @@ class TrainModel final : public Model {
   ComputeType* scratch_b_ = nullptr;
 
   ops::BlockScratch block_scratch_;
+
+  // Grad-mode state and the evaluation workspace (docs/grad-mode.md). The
+  // evaluation arena is separate from `workspace_` so an online validation
+  // call does not reallocate the training arena. The eval block set is reused
+  // by every layer because the eval path saves nothing for a backward pass.
+  bool grad_enabled_ = true;
+  bool have_grad_activations_ = false;
+  Workspace eval_workspace_;
+  ComputeType* eval_emb_raw_ = nullptr;
+  ComputeType* eval_emb_norm_ = nullptr;
+  ComputeType* eval_x0_ = nullptr;
+  ComputeType* eval_x_ = nullptr;
+  ComputeType* eval_x_backout_ = nullptr;
+  ComputeType* eval_x_final_pre_ = nullptr;
+  ComputeType* eval_x_final_norm_ = nullptr;
+  ComputeType* eval_logits_ = nullptr;
+  ComputeType* eval_losses_ = nullptr;
+  float* eval_rstd_emb_ = nullptr;
+  float* eval_rstd_final_ = nullptr;
+  float* eval_smear_sig_ = nullptr;
+  ops::BlockActivations eval_block_;
+  int eval_batch_ = 0;
+  int eval_seq_ = 0;
+  std::int64_t eval_chunk_rows_ = 0;
+  std::int64_t eval_logits_budget_ = static_cast<std::int64_t>(512) << 20;
 
   // Host staging buffers for the rotary tables; the device copies are what the
   // kernels read (`cos_table()`/`sin_table()`). The host vectors exist only so

@@ -377,7 +377,7 @@ void TrainModel::EnsureRopeCapacity(int seq) {
   BuildRope(seq);
 }
 
-void TrainModel::BuildWorkspace(int batch, int seq) {
+void TrainModel::BuildTrainWorkspace(int batch, int seq) {
   const int layers = config_.num_layers;
   const int hidden = config_.hidden_dim;
   const int heads = config_.num_heads;
@@ -497,6 +497,116 @@ void TrainModel::BuildWorkspace(int batch, int seq) {
   BuildRope(seq);
 }
 
+void TrainModel::BuildEvalWorkspace(int batch, int seq) {
+  const int hidden = config_.hidden_dim;
+  const int heads = config_.num_heads;
+  const int kv_heads = config_.num_kv_heads;
+  const int head_dim = config_.head_dim();
+  const int query_dim = heads * head_dim;
+  const int kv_dim = kv_heads * head_dim;
+  const int mlp_dim = config_.mlp_dim();
+  const int padded_vocab = config_.padded_vocab_size;
+
+  const std::int64_t rows = static_cast<std::int64_t>(batch) * seq;
+  const std::int64_t stats = static_cast<std::int64_t>(batch) * heads * seq * 2;
+
+  // Keep the classifier logits chunk small so the eval arena fits a large
+  // batch (docs/grad-mode.md section 6). The cross-entropy term is per row, so
+  // the chunk boundary does not change the result.
+  const std::int64_t budget = eval_logits_budget_;
+  const std::int64_t per_row =
+      static_cast<std::int64_t>(padded_vocab) * sizeof(ComputeType);
+  std::int64_t chunk = per_row > 0 ? budget / per_row : rows;
+  if (chunk < 1) chunk = 1;
+  if (chunk > rows) chunk = rows;
+  eval_chunk_rows_ = chunk;
+
+  struct CSlot {
+    ComputeType** dest;
+    std::int64_t count;
+  };
+  struct FSlot {
+    float** dest;
+    std::int64_t count;
+  };
+  std::vector<CSlot> compute_slots;
+  std::vector<FSlot> float_slots;
+  auto c = [&](ComputeType** dest, std::int64_t count) {
+    compute_slots.push_back({dest, count});
+  };
+  auto f = [&](float** dest, std::int64_t count) {
+    float_slots.push_back({dest, count});
+  };
+
+  c(&eval_emb_raw_, rows * hidden);
+  c(&eval_emb_norm_, rows * hidden);
+  c(&eval_x0_, rows * hidden);
+  c(&eval_x_, rows * hidden);
+  c(&eval_x_backout_, rows * hidden);
+  c(&eval_x_final_pre_, rows * hidden);
+  c(&eval_x_final_norm_, rows * hidden);
+  c(&eval_logits_, chunk * padded_vocab);
+  c(&eval_losses_, rows);
+  f(&eval_rstd_emb_, rows);
+  f(&eval_rstd_final_, rows);
+  f(&eval_smear_sig_, rows);
+
+  // One block set, reused by every layer. Forward-only callers leave the
+  // pre-QkPrep saves null and read no KV cache.
+  ops::BlockActivations& a = eval_block_;
+  c(&a.xr, rows * hidden);
+  c(&a.h, rows * hidden);
+  f(&a.rstd1, rows);
+  c(&a.q_final, rows * query_dim);
+  c(&a.k_final, rows * kv_dim);
+  c(&a.ve_values, rows * kv_dim);
+  c(&a.ve_gate, rows * kv_heads);
+  c(&a.v_final, rows * kv_dim);
+  f(&a.attn_stats, stats);
+  c(&a.attn_out, rows * hidden);
+  c(&a.x_mid, rows * hidden);
+  c(&a.h2, rows * hidden);
+  f(&a.rstd2, rows);
+  c(&a.pre_act, rows * mlp_dim);
+  c(&a.act, rows * mlp_dim);
+  c(&a.scratch_a, rows * hidden);
+  c(&a.scratch_b, rows * hidden);
+  a.q_pre = nullptr;
+  a.k_pre = nullptr;
+
+  std::size_t bytes = 0;
+  for (const CSlot& slot : compute_slots) {
+    bytes += static_cast<std::size_t>(slot.count) * sizeof(ComputeType);
+  }
+  for (const FSlot& slot : float_slots) {
+    bytes += static_cast<std::size_t>(slot.count) * sizeof(float);
+  }
+  bytes += 256;  // alignment slack
+
+  eval_workspace_.Reserve(bytes);
+  eval_workspace_.Reset();
+  for (const CSlot& slot : compute_slots) {
+    *slot.dest = eval_workspace_.Alloc<ComputeType>(
+        static_cast<std::size_t>(slot.count));
+  }
+  for (const FSlot& slot : float_slots) {
+    *slot.dest =
+        eval_workspace_.Alloc<float>(static_cast<std::size_t>(slot.count));
+  }
+
+  // The block writes its output back into the single residual-stream buffer.
+  // `BlockForward` consumes its input into `xr` before it writes `x_out`, so
+  // the input and the output can share the buffer.
+  a.attn_k = nullptr;
+  a.attn_v = nullptr;
+  a.cache_k = nullptr;
+  a.cache_v = nullptr;
+  a.cache_offset = 0;
+  a.x_out = eval_x_;
+
+  BuildRope(seq);
+}
+
 // ---------------------------------------------------------------------------
 // Forward
 // ---------------------------------------------------------------------------
@@ -504,27 +614,68 @@ void TrainModel::BuildWorkspace(int batch, int seq) {
 float TrainModel::ForwardLoss(const int* tokens, const int* targets, int batch,
                               int seq) {
   if (batch <= 0 || seq <= 0) return 0.0f;
-  if (batch != batch_ || seq != seq_ || workspace_.bytes_reserved() == 0) {
-    batch_ = batch;
-    seq_ = seq;
-    BuildWorkspace(batch, seq);
+  const bool save_for_backward = grad_enabled_;
+  if (save_for_backward) {
+    if (batch != batch_ || seq != seq_ || workspace_.bytes_reserved() == 0) {
+      batch_ = batch;
+      seq_ = seq;
+      BuildTrainWorkspace(batch, seq);
+    }
+    tokens_.assign(tokens, tokens + static_cast<std::size_t>(batch) * seq);
+    targets_.assign(targets, targets + static_cast<std::size_t>(batch) * seq);
+    rows_ = static_cast<std::int64_t>(batch) * seq;
+    have_grad_activations_ = true;
+  } else if (batch != eval_batch_ || seq != eval_seq_ ||
+             eval_workspace_.bytes_reserved() == 0) {
+    eval_batch_ = batch;
+    eval_seq_ = seq;
+    BuildEvalWorkspace(batch, seq);
   }
-  tokens_.assign(tokens, tokens + static_cast<std::size_t>(batch) * seq);
-  targets_.assign(targets, targets + static_cast<std::size_t>(batch) * seq);
-  rows_ = static_cast<std::int64_t>(batch) * seq;
 
+  RunForward(tokens, targets, batch, seq, save_for_backward);
+
+  const std::int64_t rows = static_cast<std::int64_t>(batch) * seq;
+  const ComputeType* losses = ActiveLosses();
+  losses_host_.resize(static_cast<std::size_t>(rows));
+  kernels::Memcpy(losses_host_.data(), losses,
+                  static_cast<std::size_t>(rows) * sizeof(ComputeType),
+                  CopyDir::kDeviceToHost);
+  double total = 0.0;
+  for (std::int64_t m = 0; m < rows; ++m) {
+    total +=
+        static_cast<double>(AsF(losses_host_[static_cast<std::size_t>(m)]));
+  }
+  return static_cast<float>(total / static_cast<double>(rows));
+}
+
+void TrainModel::RunForward(const int* tokens, const int* targets, int batch,
+                            int seq, bool save_for_backward) {
   const int layers = config_.num_layers;
   const int hidden = config_.hidden_dim;
   const int padded_vocab = config_.padded_vocab_size;
   const int vocab = config_.vocab_size;
   const std::int64_t rows = static_cast<std::int64_t>(batch) * seq;
 
+  // Select the arena set. The training set saves every layer for Backward; the
+  // evaluation set reuses one block.
+  ComputeType* emb_raw = save_for_backward ? emb_raw_ : eval_emb_raw_;
+  ComputeType* emb_norm = save_for_backward ? emb_norm_ : eval_emb_norm_;
+  ComputeType* x0 = save_for_backward ? x0_ : eval_x0_;
+  ComputeType* x_backout = save_for_backward ? x_backout_ : eval_x_backout_;
+  ComputeType* x_final_pre =
+      save_for_backward ? x_final_pre_ : eval_x_final_pre_;
+  ComputeType* x_final_norm =
+      save_for_backward ? x_final_norm_ : eval_x_final_norm_;
+  float* rstd_emb = save_for_backward ? rstd_emb_ : eval_rstd_emb_;
+  float* rstd_final = save_for_backward ? rstd_final_ : eval_rstd_final_;
+  float* smear_sig = save_for_backward ? smear_sig_ : eval_smear_sig_;
+
   // Embedding -> norm -> smear.
-  kernels::EmbeddingForward(static_cast<int>(rows), hidden, tokens_.data(),
-                            wte_, emb_raw_);
-  ops::RmsNormForward(rows, hidden, kRmsEps, emb_raw_, emb_norm_, rstd_emb_);
-  ops::SmearForward(batch, seq, hidden, emb_norm_, smear_gate_,
-                    ReadHost(smear_lambda_), x0_, smear_sig_);
+  kernels::EmbeddingForward(static_cast<int>(rows), hidden, tokens, wte_,
+                            emb_raw);
+  ops::RmsNormForward(rows, hidden, kRmsEps, emb_raw, emb_norm, rstd_emb);
+  ops::SmearForward(batch, seq, hidden, emb_norm, smear_gate_,
+                    ReadHost(smear_lambda_), x0, smear_sig);
 
   ops::BlockShape shape;
   shape.batch = batch;
@@ -540,47 +691,67 @@ float TrainModel::ForwardLoss(const int* tokens, const int* targets, int batch,
   shape.attn_scale = 0.0f;
   shape.causal = true;
 
-  const ComputeType* x = x0_;
+  const ComputeType* x = x0;
   for (int i = 0; i < layers; ++i) {
     shape.window_left = config_.window_left(i);
-    ops::BlockForward(shape, lweights_[i], lacts_[i], tokens_.data(),
-                      cos_table(), sin_table(), x, x0_, ReadHost(resid_ + i),
-                      ReadHost(x0_lambda_ + i));
-    if (i == backout_layer_) {
+    ops::BlockActivations& acts =
+        save_for_backward ? lacts_[static_cast<std::size_t>(i)] : eval_block_;
+    ops::BlockForward(shape, lweights_[static_cast<std::size_t>(i)], acts,
+                      tokens, cos_table(), sin_table(), x, x0,
+                      ReadHost(resid_ + i), ReadHost(x0_lambda_ + i));
+    if (save_for_backward && i == backout_layer_) {
       kernels::Memcpy(
-          x_backout_, lacts_[i].x_out,
+          x_backout, acts.x_out,
           static_cast<std::size_t>(rows * hidden) * sizeof(ComputeType),
           CopyDir::kDeviceToDevice);
     }
-    x = lacts_[i].x_out;
+    x = acts.x_out;
   }
 
   // Mid-layer backout, final norm, classifier, softcap, cross-entropy.
-  ops::BackoutForward(x, x_backout_, ReadHost(backout_lambda_), x_final_pre_,
+  ops::BackoutForward(x, x_backout, ReadHost(backout_lambda_), x_final_pre,
                       rows * hidden);
-  ops::RmsNormForward(rows, hidden, kRmsEps, x_final_pre_, x_final_norm_,
-                      rstd_final_);
-  ops::LinearForward(x_final_norm_, lm_head_, raw_logits_, rows, hidden,
-                     padded_vocab);
+  ops::RmsNormForward(rows, hidden, kRmsEps, x_final_pre, x_final_norm,
+                      rstd_final);
 
   ClassifierParams classifier;
-  classifier.rows = static_cast<int>(rows);
   classifier.vocab_size = vocab;
   classifier.padded_vocab_size = padded_vocab;
   classifier.softcap = kLogitSoftcap;
   classifier.ignore_index = -1;
-  kernels::ClassifierForward(classifier, raw_logits_, targets_.data(), losses_);
-
-  losses_host_.resize(static_cast<std::size_t>(rows));
-  kernels::Memcpy(losses_host_.data(), losses_,
-                  static_cast<std::size_t>(rows) * sizeof(ComputeType),
-                  CopyDir::kDeviceToHost);
-  double total = 0.0;
-  for (std::int64_t m = 0; m < rows; ++m) {
-    total +=
-        static_cast<double>(AsF(losses_host_[static_cast<std::size_t>(m)]));
+  if (save_for_backward) {
+    classifier.rows = static_cast<int>(rows);
+    ops::LinearForward(x_final_norm, lm_head_, raw_logits_, rows, hidden,
+                       padded_vocab);
+    kernels::ClassifierForward(classifier, raw_logits_, targets, losses_);
+  } else {
+    // Tile the classifier over row chunks so the logits buffer stays small.
+    for (std::int64_t off = 0; off < rows; off += eval_chunk_rows_) {
+      std::int64_t chunk = rows - off;
+      if (chunk > eval_chunk_rows_) chunk = eval_chunk_rows_;
+      classifier.rows = static_cast<int>(chunk);
+      ops::LinearForward(x_final_norm + off * hidden, lm_head_, eval_logits_,
+                         chunk, hidden, padded_vocab);
+      kernels::ClassifierForward(classifier, eval_logits_, targets + off,
+                                 eval_losses_ + off);
+    }
   }
-  return static_cast<float>(total / static_cast<double>(rows));
+}
+
+void TrainModel::RequireGradActivations(const char* caller) const {
+  if (!grad_enabled_) {
+    std::fprintf(stderr,
+                 "nanochat: %s called with grad mode disabled; the forward "
+                 "did not save activations. Enable grad mode before the "
+                 "forward.\n",
+                 caller);
+    std::abort();
+  }
+  if (!have_grad_activations_) {
+    std::fprintf(stderr,
+                 "nanochat: %s called before a training forward.\n", caller);
+    std::abort();
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -594,11 +765,13 @@ void TrainModel::ZeroGrad() {
 }
 
 void TrainModel::Backward() {
+  RequireGradActivations("Backward()");
   ZeroGrad();
   BackwardAccumulate(1.0f);
 }
 
 void TrainModel::BackwardAccumulate(float scale) {
+  RequireGradActivations("BackwardAccumulate()");
   const int layers = config_.num_layers;
   const int hidden = config_.hidden_dim;
   const int padded_vocab = config_.padded_vocab_size;
@@ -693,6 +866,11 @@ void TrainModel::BackwardAccumulate(float scale) {
 
 float TrainModel::TrainStep(const int* tokens, const int* targets, int batch,
                             int seq, Optimizer* optimizer) {
+  if (!grad_enabled_) {
+    std::fprintf(stderr,
+                 "nanochat: TrainStep() called with grad mode disabled.\n");
+    std::abort();
+  }
   if (optimizer != nullptr) optimizer->ZeroGrad();
   const float loss = ForwardLoss(tokens, targets, batch, seq);
   Backward();
