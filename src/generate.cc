@@ -109,6 +109,30 @@ class KvCacheImpl final : public KvCache {
   bool has_prev() const { return has_prev_; }
   void set_has_prev(bool value) { has_prev_ = value; }
   void set_pos(int value) { pos_ = value; }
+
+  // Copies the mutable cache state (keys, values, the previous-embedding slot,
+  // position, and the "has previous" flag) from a prefilled source with the
+  // same shape. The destination works on its own storage, so several clones can
+  // decode in lockstep without writing over each other. The scratch workspace
+  // is not copied; it is overwritten by the next forward pass.
+  void CopyStateFrom(const KvCacheImpl& src) {
+    const int kv_dim = config_.kv_dim();
+    const std::size_t layer_bytes = static_cast<std::size_t>(src.max_seq_) *
+                                    static_cast<std::size_t>(kv_dim) *
+                                    sizeof(ComputeType);
+    const std::size_t total_bytes =
+        static_cast<std::size_t>(config_.num_layers) * layer_bytes;
+    kernels::Memcpy(keys_, src.keys_, total_bytes, CopyDir::kDeviceToDevice);
+    kernels::Memcpy(values_, src.values_, total_bytes,
+                    CopyDir::kDeviceToDevice);
+    kernels::Memcpy(prev_, src.prev_,
+                    static_cast<std::size_t>(config_.hidden_dim) *
+                        sizeof(ComputeType),
+                    CopyDir::kDeviceToDevice);
+    pos_ = src.pos_;
+    has_prev_ = src.has_prev_;
+  }
+
   InferenceWorkspace& workspace() { return workspace_; }
 
  private:
@@ -390,6 +414,100 @@ void DecodeLogits(Model* model, int token, KvCache* kv, float* logits_out) {
   if (model == nullptr || kv == nullptr || logits_out == nullptr) return;
   RunInference(static_cast<TrainModel*>(model), &token, 1,
                static_cast<KvCacheImpl*>(kv), logits_out);
+}
+
+void GenerateBatch(Model* model, const int* prompt, int prompt_len,
+                   const GenerateParams& params,
+                   std::vector<GeneratedSequence>* out) {
+  if (out == nullptr) return;
+  out->clear();
+  if (model == nullptr || prompt == nullptr || prompt_len < 0) return;
+
+  const int num_samples = params.num_samples > 0 ? params.num_samples : 0;
+  if (num_samples == 0) return;
+  out->resize(static_cast<std::size_t>(num_samples));
+
+  const Config& config = model->config();
+
+  // The effective prompt is an optional prepended beginning-of-sequence id
+  // followed by the caller's ids. Every row shares it, so the whole batch can
+  // prefill once and then branch by cloning the cache.
+  std::vector<int> effective;
+  effective.reserve(static_cast<std::size_t>(prompt_len) + 1);
+  if (params.bos_id >= 0) effective.push_back(params.bos_id);
+  for (int i = 0; i < prompt_len; ++i) effective.push_back(prompt[i]);
+  if (effective.empty()) return;
+
+  const int max_new = params.max_tokens > 0 ? params.max_tokens : 0;
+  const int capacity = static_cast<int>(effective.size()) + max_new + 1;
+
+  // Prefill once. As in the single-row path, the last prompt token is held back
+  // and fed as the first decode input so it is not counted twice in the cache.
+  std::unique_ptr<KvCacheImpl> base =
+      std::make_unique<KvCacheImpl>(config, capacity);
+  const int prefill_len = static_cast<int>(effective.size()) - 1;
+  if (prefill_len > 0) {
+    RunInference(static_cast<TrainModel*>(model), effective.data(), prefill_len,
+                 base.get(), nullptr);
+  }
+
+  // One independent cache per row; the clones inherit the prefilled state and
+  // then diverge as each row's own tokens are appended.
+  std::vector<std::unique_ptr<KvCacheImpl>> caches(
+      static_cast<std::size_t>(num_samples));
+  for (int r = 0; r < num_samples; ++r) {
+    auto cache = std::make_unique<KvCacheImpl>(config, capacity);
+    cache->CopyStateFrom(*base);
+    caches[static_cast<std::size_t>(r)] = std::move(cache);
+  }
+
+  // Each row starts as the effective prompt (masked as prompt ids) and feeds
+  // its own last token to the next step.
+  std::vector<int> next(static_cast<std::size_t>(num_samples),
+                        effective.back());
+  std::vector<char> active(static_cast<std::size_t>(num_samples), 1);
+  for (int r = 0; r < num_samples; ++r) {
+    GeneratedSequence& row = (*out)[static_cast<std::size_t>(r)];
+    row.tokens = effective;
+    row.mask.assign(effective.size(), 0);
+  }
+
+  SampleParams sample;
+  sample.temperature = params.temperature;
+  sample.top_k = params.top_k;
+  sample.seed = params.seed;
+
+  // Decode the rows in lockstep. A row stops when it samples its terminal id,
+  // when sampling fails, or after `max_new` steps; the terminal id is not
+  // appended. Each row keeps its own cache and calls the single-row `Decode`
+  // path, so a batched run is exactly `num_samples` independent single-row
+  // runs: greedy decoding is deterministic and sampled decoding re-seeds from
+  // `params.seed` on every call, both reproducible and row-independent.
+  for (int step = 0; step < max_new; ++step) {
+    bool any_active = false;
+    for (int r = 0; r < num_samples; ++r) {
+      if (active[static_cast<std::size_t>(r)] == 0) continue;
+      any_active = true;
+      GeneratedSequence& row = (*out)[static_cast<std::size_t>(r)];
+      const int token = Decode(model, next[static_cast<std::size_t>(r)],
+                               caches[static_cast<std::size_t>(r)].get(),
+                               sample);
+      if (token < 0) {
+        active[static_cast<std::size_t>(r)] = 0;
+        continue;
+      }
+      const int stop =
+          params.stop_ids != nullptr ? params.stop_ids[r] : params.stop_id;
+      if (stop >= 0 && token == stop) {
+        active[static_cast<std::size_t>(r)] = 0;
+        continue;
+      }
+      row.tokens.push_back(token);
+      row.mask.push_back(1);
+      next[static_cast<std::size_t>(r)] = token;
+    }
+    if (!any_active) break;
+  }
 }
 
 int SampleToken(const float* logits, int vocab, const SampleParams& params,

@@ -29,9 +29,13 @@ void Usage() {
                "  --tokens a,b,c         prompt token ids\n"
                "  --prompt-file PATH     read prompt token ids from a file\n"
                "  --max-tokens N         number of tokens to generate\n"
+               "  --num-samples N        number of rows to sample (default 1)\n"
                "  --temperature F        sampling temperature (0 = greedy)\n"
                "  --top-k N              top-k filter (0 disables)\n"
+               "  --stop-id N            terminal token id (-1 disables)\n"
+               "  --bos-id N             prepended prompt token (-1 disables)\n"
                "  --seed N               weight init and sampling seed\n"
+               "  --out PATH             write tokens and mask per sample\n"
                "  [model flags: --layers --heads --kv-heads --hidden --seq\n"
                "   --vocab --padded-vocab --window-pattern --rope-base]\n");
 }
@@ -69,9 +73,13 @@ int main(int argc, char** argv) {
   std::string prompt_text;
   std::string prompt_file;
   int max_tokens = 16;
+  int num_samples = 1;
+  int stop_id = -1;
+  int bos_id = -1;
   int top_k = 0;
   float temperature = 1.0f;
   std::uint64_t seed = 42;
+  std::string out_path;
 
   for (int i = 1; i < argc; ++i) {
     const std::string flag = argv[i];
@@ -105,6 +113,13 @@ int main(int argc, char** argv) {
     } else if (flag == "--max-tokens") {
       max_tokens =
           nanochat::cli::ParseInt(value, &parsed_int) ? parsed_int : -1;
+    } else if (flag == "--num-samples") {
+      num_samples =
+          nanochat::cli::ParseInt(value, &parsed_int) ? parsed_int : 0;
+    } else if (flag == "--stop-id") {
+      stop_id = nanochat::cli::ParseInt(value, &parsed_int) ? parsed_int : -1;
+    } else if (flag == "--bos-id") {
+      bos_id = nanochat::cli::ParseInt(value, &parsed_int) ? parsed_int : -1;
     } else if (flag == "--top-k") {
       top_k = nanochat::cli::ParseInt(value, &parsed_int) ? parsed_int : 0;
     } else if (flag == "--temperature") {
@@ -112,6 +127,8 @@ int main(int argc, char** argv) {
           nanochat::cli::ParseFloat(value, &parsed_float) ? parsed_float : 0.0f;
     } else if (flag == "--seed") {
       seed = nanochat::cli::ParseU64(value, &parsed_u64) ? parsed_u64 : 0;
+    } else if (flag == "--out") {
+      out_path = value;
     } else {
       std::fprintf(stderr, "generate_main: unknown flag %s\n", flag.c_str());
       Usage();
@@ -142,6 +159,10 @@ int main(int argc, char** argv) {
     std::fprintf(stderr, "generate_main: --max-tokens must be > 0\n");
     return 2;
   }
+  if (num_samples <= 0) {
+    std::fprintf(stderr, "generate_main: --num-samples must be > 0\n");
+    return 2;
+  }
 
   std::unique_ptr<nanochat::Model> model =
       nanochat::Model::Create(model_config);
@@ -155,32 +176,47 @@ int main(int argc, char** argv) {
     model->InitWeights(seed);
   }
 
-  const int capacity = static_cast<int>(prompt.size()) + max_tokens + 2;
-  std::unique_ptr<nanochat::KvCache> kv =
-      nanochat::CreateKvCache(model_config, capacity);
+  nanochat::GenerateParams gen;
+  gen.num_samples = num_samples;
+  gen.max_tokens = max_tokens;
+  gen.temperature = temperature;
+  gen.top_k = top_k;
+  gen.seed = seed;
+  gen.stop_id = stop_id;
+  gen.bos_id = bos_id;
 
-  const int prefill_len = static_cast<int>(prompt.size()) - 1;
-  if (prefill_len > 0) {
-    nanochat::Prefill(model.get(), prompt.data(), prefill_len, kv.get());
-  }
-
-  nanochat::SampleParams params;
-  params.temperature = temperature;
-  params.top_k = top_k;
-  params.seed = seed;
-
-  std::vector<int> generated;
-  int next = prompt.back();
-  for (int i = 0; i < max_tokens; ++i) {
-    next = nanochat::Decode(model.get(), next, kv.get(), params);
-    if (next < 0) break;
-    generated.push_back(next);
-  }
+  std::vector<nanochat::GeneratedSequence> rows;
+  nanochat::GenerateBatch(model.get(), prompt.data(),
+                          static_cast<int>(prompt.size()), gen, &rows);
 
   std::printf("generate_main: prompt");
   for (int id : prompt) std::printf(" %d", id);
-  std::printf("\ngenerate_main: output");
-  for (int id : generated) std::printf(" %d", id);
   std::printf("\n");
+  for (std::size_t r = 0; r < rows.size(); ++r) {
+    std::printf("generate_main: sample %zu tokens", r);
+    for (int id : rows[r].tokens) std::printf(" %d", id);
+    std::printf("\n");
+  }
+
+  if (!out_path.empty()) {
+    std::ofstream out(out_path);
+    if (!out) {
+      std::fprintf(stderr, "generate_main: cannot write %s\n",
+                   out_path.c_str());
+      return 1;
+    }
+    for (const nanochat::GeneratedSequence& row : rows) {
+      for (std::size_t i = 0; i < row.tokens.size(); ++i) {
+        if (i != 0) out << ' ';
+        out << row.tokens[i];
+      }
+      out << " |";
+      for (std::uint8_t bit : row.mask) {
+        out << ' ' << static_cast<int>(bit);
+      }
+      out << '\n';
+    }
+  }
+
   return 0;
 }

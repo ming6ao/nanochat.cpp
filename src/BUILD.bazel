@@ -98,8 +98,11 @@ cc_test(
     size = "small",
 )
 
-# Prefill/decode consistency: proves the inference graphs agree with the train
-# forward at the same positions, and that decode samples a valid token.
+# Prefill/decode consistency and batched generation: proves the inference
+# graphs agree with the train forward at the same positions, that decode samples
+# a valid token, and that `GenerateBatch` (prefill once, clone the cache per
+# row, decode in lockstep) matches a naive single-row loop for greedy and
+# sampled decoding, including per-row terminal ids and the 1/0 mask.
 cc_test(
     name = "generate_test",
     srcs = ["generate_test.cc"],

@@ -4,8 +4,11 @@
 // forward in model.cc. The logits for the last prefill position and the logits
 // for a decode at that same position must match the full training forward,
 // because both attend to the same key/value rows with the same rotary
-// positions. The test also checks that the KV cache position advances and that
-// decode samples a valid token id.
+// positions. The test also checks that the KV cache position advances, that
+// decode samples a valid token id, and that batched generation
+// (`GenerateBatch`) reproduces a naive single-row loop (prefill one cache, then
+// decode it token by token) for greedy and sampled decoding, including the
+// per-row terminal id and the returned 1/0 mask.
 //
 // The tiny architecture matches the gradient test (2 layers, 8 query heads,
 // 2 key/value heads, hidden 32, seq 8, vocab 64, window "SL"), so the whole
@@ -64,6 +67,103 @@ double MaxDiff(const std::vector<float>& got, const std::vector<float>& want) {
                                       static_cast<double>(want[i])));
   }
   return worst;
+}
+
+// A single row produced without the batched engine: prefill one cache and
+// decode it one token at a time. This is the reference the batched loop must
+// reproduce exactly for greedy decoding and, because `Decode` re-seeds itself
+// from `params.seed` on every call, for sampled decoding as well.
+struct NaiveRow {
+  std::vector<int> tokens;
+  std::vector<std::uint8_t> mask;
+};
+
+NaiveRow NaiveGenerate(Model* model, const Config& config, const int* prompt,
+                       int prompt_len, const nanochat::GenerateParams& params,
+                       int stop_id) {
+  NaiveRow row;
+  std::vector<int> effective;
+  if (params.bos_id >= 0) effective.push_back(params.bos_id);
+  for (int i = 0; i < prompt_len; ++i) effective.push_back(prompt[i]);
+  if (effective.empty()) return row;
+
+  const int max_new = params.max_tokens > 0 ? params.max_tokens : 0;
+  const int capacity = static_cast<int>(effective.size()) + max_new + 1;
+  std::unique_ptr<KvCache> kv = nanochat::CreateKvCache(config, capacity);
+  const int prefill_len = static_cast<int>(effective.size()) - 1;
+  if (prefill_len > 0) {
+    nanochat::Prefill(model, effective.data(), prefill_len, kv.get());
+  }
+  row.tokens = effective;
+  row.mask.assign(effective.size(), 0);
+
+  SampleParams sample;
+  sample.temperature = params.temperature;
+  sample.top_k = params.top_k;
+  sample.seed = params.seed;
+
+  int next = effective.back();
+  for (int step = 0; step < max_new; ++step) {
+    const int token = nanochat::Decode(model, next, kv.get(), sample);
+    if (token < 0) break;
+    if (stop_id >= 0 && token == stop_id) break;
+    row.tokens.push_back(token);
+    row.mask.push_back(1);
+    next = token;
+  }
+  return row;
+}
+
+// Runs one batched generation and checks every row against the naive loop,
+// including the 1/0 mask (0 for prompt ids, 1 for sampled ids) and the
+// invariant that a terminal id is never emitted.
+void CheckBatchMatchesNaive(Model* model, const Config& config,
+                            const int* prompt, int prompt_len,
+                            const nanochat::GenerateParams& params,
+                            const std::vector<int>& stops,
+                            const std::string& label) {
+  std::vector<nanochat::GeneratedSequence> rows;
+  nanochat::GenerateBatch(model, prompt, prompt_len, params, &rows);
+  if (rows.size() != stops.size()) {
+    Fail(label + ": row count " + std::to_string(rows.size()) + " want " +
+         std::to_string(stops.size()));
+    return;
+  }
+  for (std::size_t r = 0; r < rows.size(); ++r) {
+    const NaiveRow want =
+        NaiveGenerate(model, config, prompt, prompt_len, params, stops[r]);
+    if (rows[r].tokens != want.tokens) {
+      Fail(label + ": row " + std::to_string(r) +
+           " tokens differ from the naive loop");
+    }
+    if (rows[r].mask != want.mask) {
+      Fail(label + ": row " + std::to_string(r) +
+           " mask differs from the naive loop");
+    }
+    if (rows[r].mask.size() != rows[r].tokens.size()) {
+      Fail(label + ": row " + std::to_string(r) +
+           " mask and tokens are not aligned");
+    }
+    for (std::size_t i = 0; i < rows[r].mask.size(); ++i) {
+      if (rows[r].mask[i] != 0 && rows[r].mask[i] != 1) {
+        Fail(label + ": row " + std::to_string(r) + " mask entry " +
+             std::to_string(i) + " is not 0 or 1");
+        break;
+      }
+    }
+    const int stop = stops[r];
+    if (stop >= 0) {
+      for (int id : rows[r].tokens) {
+        if (id == stop) {
+          Fail(label + ": row " + std::to_string(r) +
+               " emitted its terminal id");
+          break;
+        }
+      }
+    }
+  }
+  std::printf("generate_test: %s matched the naive single-row loop\n",
+              label.c_str());
 }
 
 // The training forward's soft-capped logits for one position, read from the
@@ -189,6 +289,94 @@ void Run() {
   }
   std::printf("generate_test: sampled decode id %d (vocab %d)\n", sampled_id,
               vocab);
+
+  // --- Batched generation matches a naive single-row loop. ---
+  const int batched_prompt_len = 4;
+  std::vector<int> batched_prompt(tokens.begin(),
+                                  tokens.begin() + batched_prompt_len);
+
+  // Probe the deterministic greedy continuation once so the terminal ids below
+  // are guaranteed to be sampled; this exercises the early-stop path instead of
+  // only the maximum-token path.
+  nanochat::GenerateParams greedy_probe;
+  greedy_probe.num_samples = 1;
+  greedy_probe.max_tokens = 6;
+  greedy_probe.temperature = 0.0f;
+  greedy_probe.seed = 4242;
+  greedy_probe.bos_id = 1;
+  const NaiveRow probe_row =
+      NaiveGenerate(model.get(), config, batched_prompt.data(),
+                    batched_prompt_len, greedy_probe, -1);
+  const std::size_t probe_prefix =
+      static_cast<std::size_t>(batched_prompt_len) +
+      (greedy_probe.bos_id >= 0 ? 1 : 0);
+  if (probe_row.tokens.size() < probe_prefix + 4) {
+    Fail("greedy probe did not produce enough tokens");
+  } else {
+    // Greedy with a prepended beginning-of-sequence id and a different terminal
+    // id per row, so the rows stop at different lengths.
+    const std::vector<int> greedy_stops = {
+        probe_row.tokens[probe_prefix + 1],
+        probe_row.tokens[probe_prefix + 2],
+        probe_row.tokens[probe_prefix + 3]};
+    nanochat::GenerateParams greedy_batch;
+    greedy_batch.num_samples = 3;
+    greedy_batch.max_tokens = 6;
+    greedy_batch.temperature = 0.0f;
+    greedy_batch.top_k = 0;
+    greedy_batch.seed = 4242;
+    greedy_batch.bos_id = 1;
+    greedy_batch.stop_ids = greedy_stops.data();
+    CheckBatchMatchesNaive(model.get(), config, batched_prompt.data(),
+                           batched_prompt_len, greedy_batch, greedy_stops,
+                           "greedy batch");
+
+    // Greedy with one shared terminal id, exercising the `stop_id` path.
+    nanochat::GenerateParams global_stop;
+    global_stop.num_samples = 2;
+    global_stop.max_tokens = 6;
+    global_stop.temperature = 0.0f;
+    global_stop.top_k = 0;
+    global_stop.seed = 4242;
+    global_stop.bos_id = 1;
+    global_stop.stop_id = probe_row.tokens[probe_prefix + 2];
+    CheckBatchMatchesNaive(model.get(), config, batched_prompt.data(),
+                           batched_prompt_len, global_stop,
+                           std::vector<int>(2, global_stop.stop_id),
+                           "global stop batch");
+  }
+
+  // Sampled decoding under a fixed seed; each row must still match the naive
+  // loop, and two identical calls must produce identical rows.
+  nanochat::GenerateParams sampled_batch;
+  sampled_batch.num_samples = 2;
+  sampled_batch.max_tokens = 4;
+  sampled_batch.temperature = 1.0f;
+  sampled_batch.top_k = 4;
+  sampled_batch.seed = 99;
+  sampled_batch.stop_id = 7;
+  const std::vector<int> sampled_stops = {7, 7};
+  sampled_batch.stop_ids = sampled_stops.data();
+  CheckBatchMatchesNaive(model.get(), config, batched_prompt.data(),
+                         batched_prompt_len, sampled_batch, sampled_stops,
+                         "sampled batch");
+
+  std::vector<nanochat::GeneratedSequence> sampled_a;
+  std::vector<nanochat::GeneratedSequence> sampled_b;
+  nanochat::GenerateBatch(model.get(), batched_prompt.data(),
+                          batched_prompt_len, sampled_batch, &sampled_a);
+  nanochat::GenerateBatch(model.get(), batched_prompt.data(),
+                          batched_prompt_len, sampled_batch, &sampled_b);
+  if (sampled_a.size() != sampled_b.size()) {
+    Fail("sampled batch is not reproducible: row count changed");
+  } else {
+    for (std::size_t r = 0; r < sampled_a.size(); ++r) {
+      if (sampled_a[r].tokens != sampled_b[r].tokens ||
+          sampled_a[r].mask != sampled_b[r].mask) {
+        Fail("sampled batch is not reproducible at row " + std::to_string(r));
+      }
+    }
+  }
 }
 
 }  // namespace
