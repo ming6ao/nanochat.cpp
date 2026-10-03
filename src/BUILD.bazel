@@ -164,6 +164,23 @@ cc_test(
     size = "small",
 )
 
+# ScoreBatch (docs/eval.md section 3.2): the NLL/argmax shape contract, the
+# masking of a row's final position and its padding, agreement with a hand-built
+# ForwardLoss over the same shifted targets, and the focused-logit extraction at
+# a requested position and token-id set. CPU only; the fixture accessors stage
+# through the kernel seam so the same source could build against CUDA.
+cc_test(
+    name = "eval_test",
+    srcs = ["eval_test.cc"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    deps = [
+        ":model",
+        "//include/nanochat:nanochat",
+    ],
+    size = "small",
+)
+
 # Harness: Logger, the mfu.h numbers, the Checkpointer round-trip, and one
 # TrainLoop step against a hand-run TrainStep.
 cc_test(
@@ -202,6 +219,21 @@ cc_binary(
     ],
 )
 
+# Stateless scorer over an evaluation fixture: reads a `NANOEVL1` file, runs one
+# `ScoreBatch`, and writes the per-position NLL, argmax, and focused logits as a
+# result fixture. The wire format is owned by `python/nanochat_cpp/
+# eval_fixture.py` (docs/eval.md section 3.2).
+cc_binary(
+    name = "score_main",
+    srcs = ["score_main.cc"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    deps = [
+        ":model",
+        "//include/nanochat:nanochat",
+    ],
+)
+
 cc_binary(
     name = "generate_main",
     srcs = ["generate_main.cc"],
@@ -218,6 +250,7 @@ test_suite(name = "all", tests = [
     ":model_oracle_test",
     ":model_gradient_test",
     ":generate_test",
+    ":eval_test",
     ":optim_test",
     ":data_test",
     ":harness_test",
