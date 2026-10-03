@@ -94,10 +94,11 @@ accepted for compatibility and ignored.
 ## Known difference
 
 nanochat packs BOS-aligned best-fit batches in Python; the C++ `DataLoader`
-does its own packing over the flat token stream. The two are close but not
-bit-identical, so a loss curve from the bridge will not match
-`scripts.base_train` step for step. The training-parity harness
-(`tools/dump_train_fixture.py`, `//tests:train_parity`) is the exact gate; the
+reads a contiguous random window over the flat token stream. The two are close
+but not bit-identical, so a loss curve from the bridge will not match
+`scripts.base_train` step for step. This is tracked as entry D1 in
+[parity.md](parity.md). The training-parity harness (`tools/dump_train_fixture.py`,
+`//tests:train_parity`) is the exact gate for the model and optimizer; the
 bridge is for training.
 
 ## Tests

@@ -266,7 +266,10 @@ bool Checkpointer::SaveModel(const Model& model, const std::string& path) {
     TensorRecord record;
     record.name = view.name != nullptr ? view.name : "";
     record.dtype = kComputeDType;
-    record.shape = {view.count};
+    // `assign` rather than an initializer-list assignment: GCC's -O2
+    // -Warray-bounds analysis mis-handles the `std::vector` initializer-list
+    // path for a one-element `std::int64_t` shape.
+    record.shape.assign(1, view.count);
     const std::size_t bytes =
         static_cast<std::size_t>(view.count) * kComputeTypeSize;
     record.data.resize(bytes);

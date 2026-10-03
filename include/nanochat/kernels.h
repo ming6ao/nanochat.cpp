@@ -229,6 +229,31 @@ void MuonUpdate(const MuonParams& params, const ComputeType* stacked_grads,
 // writes the pre-clip norm to `out_norm`.
 void GlobalNorm(int n, float clip, ComputeType* grads, float* out_norm);
 
+// Reduces `dot(a, b)` over `n` elements into the single-element buffer `out`:
+// `out = scale * dot(a, b)`, or `out += scale * dot(a, b)` when `accumulate`.
+// This is the device-side replacement for the host round trip that the scalar
+// parameter gradients (resid, x0_lambda, backout_lambda) used to need.
+void ScalarDot(const ComputeType* a, const ComputeType* b, int n,
+               ComputeType* out, float scale, bool accumulate);
+
+// ResFormer value gate. For each row and key/value head,
+//   gate = 3 * sigmoid(dot(h[row, :12], gate_w[kvh, :]))
+//   v[row, kvh, :] += gate * ve[row, kvh, :]
+// `gate_out` is `[rows, num_kv_heads]` and saves the gate for the backward.
+// `hidden` is the row width of `h`; only the first 12 channels feed the gate.
+void ValueGateForward(int rows, int hidden, int num_kv_heads, int head_dim,
+                      const ComputeType* h, const ComputeType* ve,
+                      const ComputeType* gate_w, ComputeType* v,
+                      ComputeType* gate_out);
+
+// Backward of ValueGateForward. `gate_w_grad` and `dh` accumulate; `dve` is
+// written. `dv` is the incoming gradient w.r.t. the gated value.
+void ValueGateBackward(int rows, int hidden, int num_kv_heads, int head_dim,
+                       const ComputeType* h, const ComputeType* ve,
+                       const ComputeType* gate_w, const ComputeType* gate,
+                       const ComputeType* dv, ComputeType* gate_w_grad,
+                       ComputeType* dh, ComputeType* dve);
+
 }  // namespace kernels
 }  // namespace nanochat
 

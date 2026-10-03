@@ -1055,5 +1055,84 @@ void GlobalNorm(int n, float clip, ComputeType* grads, float* out_norm) {
   }
 }
 
+void ScalarDot(const ComputeType* a, const ComputeType* b, int n,
+               ComputeType* out, float scale, bool accumulate) {
+  if (n <= 0) return;
+  double dot = 0.0;
+  for (int i = 0; i < n; ++i) {
+    dot +=
+        static_cast<double>(AsFloat(a[i])) * static_cast<double>(AsFloat(b[i]));
+  }
+  const float value = scale * static_cast<float>(dot);
+  out[0] = ToCompute(accumulate ? AsFloat(out[0]) + value : value);
+}
+
+void ValueGateForward(int rows, int hidden, int num_kv_heads, int head_dim,
+                      const ComputeType* h, const ComputeType* ve,
+                      const ComputeType* gate_w, ComputeType* v,
+                      ComputeType* gate_out) {
+  constexpr int kChannels = 12;
+  if (rows <= 0 || hidden < kChannels || num_kv_heads <= 0 || head_dim <= 0) {
+    return;
+  }
+  const int kv_dim = num_kv_heads * head_dim;
+  for (int m = 0; m < rows; ++m) {
+    const ComputeType* hrow = h + static_cast<std::int64_t>(m) * hidden;
+    for (int kh = 0; kh < num_kv_heads; ++kh) {
+      const ComputeType* wrow = gate_w + kh * kChannels;
+      float pre = 0.0f;
+      for (int j = 0; j < kChannels; ++j) {
+        pre += AsFloat(hrow[j]) * AsFloat(wrow[j]);
+      }
+      const float gate = 3.0f / (1.0f + std::exp(-pre));
+      gate_out[static_cast<std::int64_t>(m) * num_kv_heads + kh] =
+          ToCompute(gate);
+      ComputeType* vrow = v + static_cast<std::int64_t>(m) * kv_dim +
+                          static_cast<std::int64_t>(kh) * head_dim;
+      const ComputeType* verow = ve + static_cast<std::int64_t>(m) * kv_dim +
+                                 static_cast<std::int64_t>(kh) * head_dim;
+      for (int d = 0; d < head_dim; ++d) {
+        vrow[d] = ToCompute(AsFloat(vrow[d]) + gate * AsFloat(verow[d]));
+      }
+    }
+  }
+}
+
+void ValueGateBackward(int rows, int hidden, int num_kv_heads, int head_dim,
+                       const ComputeType* h, const ComputeType* ve,
+                       const ComputeType* gate_w, const ComputeType* gate,
+                       const ComputeType* dv, ComputeType* gate_w_grad,
+                       ComputeType* dh, ComputeType* dve) {
+  constexpr int kChannels = 12;
+  if (rows <= 0 || hidden < kChannels || num_kv_heads <= 0 || head_dim <= 0) {
+    return;
+  }
+  const int kv_dim = num_kv_heads * head_dim;
+  for (int m = 0; m < rows; ++m) {
+    const ComputeType* hrow = h + static_cast<std::int64_t>(m) * hidden;
+    ComputeType* dhrow = dh + static_cast<std::int64_t>(m) * hidden;
+    for (int kh = 0; kh < num_kv_heads; ++kh) {
+      const std::int64_t off = static_cast<std::int64_t>(m) * kv_dim +
+                               static_cast<std::int64_t>(kh) * head_dim;
+      const float g =
+          AsFloat(gate[static_cast<std::int64_t>(m) * num_kv_heads + kh]);
+      double dgate = 0.0;
+      for (int d = 0; d < head_dim; ++d) {
+        const float dvd = AsFloat(dv[off + d]);
+        dgate += static_cast<double>(dvd) *
+                 static_cast<double>(AsFloat(ve[off + d]));
+        dve[off + d] = ToCompute(g * dvd);
+      }
+      const float dpre = static_cast<float>(dgate) * g * (1.0f - g / 3.0f);
+      for (int j = 0; j < kChannels; ++j) {
+        gate_w_grad[kh * kChannels + j] = ToCompute(
+            AsFloat(gate_w_grad[kh * kChannels + j]) + dpre * AsFloat(hrow[j]));
+        dhrow[j] = ToCompute(AsFloat(dhrow[j]) +
+                             dpre * AsFloat(gate_w[kh * kChannels + j]));
+      }
+    }
+  }
+}
+
 }  // namespace kernels
 }  // namespace nanochat

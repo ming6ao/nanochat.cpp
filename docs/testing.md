@@ -72,6 +72,9 @@ zero-initialized output projections activate the attention and MLP backward.
 The committed fixture `tests/data/train_parity.bin` is the compact CPU case
 (`--nonzero-projections` so the whole graph is active at step 0) and runs as
 `//tests:train_parity_test` (CPU) and `//tests:train_parity_cuda_test` (GPU).
+Because the fixture shares the exact batches, this gate covers the model,
+backward pass, optimizer, and schedules but **not** the data pipeline; the
+loader difference is tracked as entry D1 in [parity.md](parity.md).
 The same source builds as the standalone `//tests:train_parity` binary for an
 arbitrary production fixture:
 

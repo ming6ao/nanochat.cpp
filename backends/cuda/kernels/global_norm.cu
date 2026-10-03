@@ -31,6 +31,10 @@ using cuda_kernels::ToComputeDev;
 __device__ double g_global_norm_sum = 0.0;
 __device__ float g_global_norm_scale = 1.0f;
 
+// Accumulator for ScalarDot. A separate `__device__` global, reset by its own
+// finalize kernel, so the two reductions cannot interfere.
+__device__ double g_scalar_dot_sum = 0.0;
+
 __global__ void GlobalNormPartialKernel(int n,
                                         const ComputeType* __restrict__ grads) {
   double local = 0.0;
@@ -60,6 +64,29 @@ __global__ void GlobalNormScaleKernel(int n, ComputeType* __restrict__ grads) {
   }
 }
 
+// Dot product of two equal-length buffers, accumulated in double across the
+// grid, then folded into the single-element `out` by the finalize kernel.
+__global__ void ScalarDotPartialKernel(int n, const ComputeType* __restrict__ a,
+                                       const ComputeType* __restrict__ b) {
+  double local = 0.0;
+  const int stride = gridDim.x * blockDim.x;
+  for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < n; i += stride) {
+    local += static_cast<double>(AsFloatDev(a[i])) *
+             static_cast<double>(AsFloatDev(b[i]));
+  }
+  const double block_sum = cuda_kernels::BlockReduceSum(local);
+  if (threadIdx.x == 0) atomicAdd(&g_scalar_dot_sum, block_sum);
+}
+
+__global__ void ScalarDotFinalizeKernel(ComputeType* __restrict__ out,
+                                        float scale, bool accumulate) {
+  if (threadIdx.x != 0 || blockIdx.x != 0) return;
+  const float value = scale * static_cast<float>(g_scalar_dot_sum);
+  out[0] = ToComputeDev(accumulate ? AsFloatDev(out[0]) + value : value);
+  // Reset for the next invocation; the stream ordering makes this safe.
+  g_scalar_dot_sum = 0.0;
+}
+
 }  // namespace
 
 void GlobalNorm(int n, float clip, ComputeType* grads, float* out_norm) {
@@ -75,6 +102,20 @@ void GlobalNorm(int n, float clip, ComputeType* grads, float* out_norm) {
                        out_norm);
   cuda_backend::Launch(GlobalNormScaleKernel, dim3(grid), dim3(kThreads), 0, n,
                        grads);
+}
+
+void ScalarDot(const ComputeType* a, const ComputeType* b, int n,
+               ComputeType* out, float scale, bool accumulate) {
+  if (n <= 0) return;
+  constexpr int kThreads = 256;
+  constexpr int kMaxBlocks = 512;
+  const int blocks = (n + kThreads - 1) / kThreads;
+  const int grid = blocks < kMaxBlocks ? blocks : kMaxBlocks;
+
+  cuda_backend::Launch(ScalarDotPartialKernel, dim3(grid), dim3(kThreads), 0, n,
+                       a, b);
+  cuda_backend::Launch(ScalarDotFinalizeKernel, dim3(1), dim3(1), 0, out, scale,
+                       accumulate);
 }
 
 }  // namespace kernels

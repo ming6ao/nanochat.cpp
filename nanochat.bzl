@@ -22,14 +22,24 @@ cuda_test = _cuda_test
 # Warnings every target builds with. The Definition of Done requires a clean
 # build; -Werror is enabled by the integrator at the merge gate rather than in
 # the inner development loop.
+#
+# `-O2` is explicit: Bazel's default `fastbuild` mode adds no optimization
+# flag, so without it the host code (the whole workflow, the data loader, and
+# the host-side reductions) is compiled at `-O0`. The Makefile fallback already
+# uses `-O2`; this keeps the Bazel path equivalent. See docs/performance.md.
 NANOCHAT_COPTS = [
+    "-O2",
     "-Wall",
     "-Wextra",
 ]
 
 # Device-side options. Host warning flags must be forwarded with -Xcompiler,
-# because nvcc does not recognise them directly.
+# because nvcc does not recognise them directly. `-O2` optimises the device
+# code; `-Xcompiler -O2` optimises the host pass of each .cu translation unit.
 NANOCHAT_CUDA_COPTS = [
+    "-O2",
+    "-Xcompiler",
+    "-O2",
     "-Xcompiler",
     "-Wall",
     "-Xcompiler",

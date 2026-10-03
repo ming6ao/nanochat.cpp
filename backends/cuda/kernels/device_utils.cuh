@@ -171,8 +171,9 @@ __device__ __forceinline__ void RotatePairInPlace(float& x1, float& x2, float c,
 
 // Contiguous-grouping GQA head mapping, matching the CPU reference: each
 // key/value head serves `num_heads / num_kv_heads` consecutive query heads.
-__device__ __forceinline__ int KvHeadDev(int h, int num_heads,
-                                         int num_kv_heads) {
+// Host-visible so the host GEMM wrappers can share the exact mapping.
+__host__ __device__ __forceinline__ int KvHeadDev(int h, int num_heads,
+                                                  int num_kv_heads) {
   if (num_kv_heads <= 0 || num_kv_heads >= num_heads) return h;
   const int group = num_heads / num_kv_heads;
   const int kv = h / (group > 0 ? group : 1);
@@ -181,7 +182,8 @@ __device__ __forceinline__ int KvHeadDev(int h, int num_heads,
 
 // Effective key/value head count: `num_kv_heads == 0` means multi-head (no
 // grouping), the same default the CPU reference uses.
-__device__ __forceinline__ int KvHeadCountDev(const AttentionParams& p) {
+__host__ __device__ __forceinline__ int KvHeadCountDev(
+    const AttentionParams& p) {
   return p.num_kv_heads > 0 ? p.num_kv_heads : p.num_heads;
 }
 

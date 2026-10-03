@@ -6,10 +6,11 @@
 #include <string>
 #include <vector>
 
-// Batched token loader over pre-tokenized shards. Rows are packed BOS-aligned
-// (each row starts with BOS; documents are best-fit packed to keep utilization
-// at 100%), so `targets` are `tokens` shifted one position to the left
-// (docs/data.md).
+// Batched token loader over pre-tokenized shards. Each batch is a contiguous
+// window of `batch * seq + 1` tokens from the flat, BOS-separated stream, split
+// into `tokens` and the one-position-shifted `targets`. It does not do the
+// reference's BOS-aligned best-fit document packing; see docs/parity.md, entry
+// D1, for the difference and its status.
 
 namespace nanochat {
 
