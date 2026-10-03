@@ -2,18 +2,20 @@
 
 Run with ``tools/nanochat_cpp selftest`` (or
 ``PYTHONPATH=python python3 -m nanochat_cpp.selftest``). It checks the
-configuration math, the token-count estimate, the NANO shard round-trip, and
-the reference-checkpoint name/dtype/container/path logic without importing
-torch or the reference package, so it runs anywhere.
+configuration math, the token-count estimate, the NANO shard round-trip, the
+reference-checkpoint name/dtype/container/path logic, and the evaluation
+fixture wire format, all without importing torch or the reference package, so
+it runs anywhere.
 """
 
 from __future__ import annotations
 
+import struct
 import sys
 import tempfile
 from pathlib import Path
 
-from . import checkpoint, config, data
+from . import checkpoint, config, data, eval_fixture
 
 
 def _check(condition: bool, message: str) -> int:
@@ -277,6 +279,132 @@ def _check_path_resolution() -> int:
     return failures
 
 
+def _check_eval_fixture() -> int:
+    failures = 0
+
+    cases = [
+        eval_fixture.EvalCase(tokens=(1, 2, 3, 4), start=2, end=4,
+                              focus_position=3, focus_ids=(7, 8)),
+        eval_fixture.EvalCase(tokens=(5, 6, 7), start=1, end=3),
+        eval_fixture.EvalCase(tokens=(8,), start=1, end=1),
+    ]
+    results = [
+        eval_fixture.EvalResult(nll=(0.5, 1.5, 2.5, 0.0),
+                                argmax=(2, 3, 4, -1),
+                                focus_logits=(0.25, -0.25)),
+        eval_fixture.EvalResult(nll=(0.125, 0.25, 0.0, 0.0),
+                                argmax=(6, 7, -1, -1)),
+        eval_fixture.EvalResult(nll=(0.0, 0.0, 0.0, 0.0),
+                                argmax=(-1, -1, -1, -1)),
+    ]
+
+    # The documented container: magic, header, and the semantic records.
+    raw = eval_fixture.serialize(
+        eval_fixture.fixture_to_records(cases, results))
+    failures += _check(raw[:8] == eval_fixture.MAGIC, "eval fixture magic")
+    failures += _check(
+        raw[8:16] == struct.pack("<II", eval_fixture.VERSION, 14),
+        "eval fixture header (version, record count)")
+
+    parsed = eval_fixture.records_to_fixture(eval_fixture.parse(raw))
+    failures += _check(parsed.batch == 3 and parsed.seq == 4,
+                       "eval fixture config round-trip")
+    failures += _check(parsed.cases == cases, "eval fixture cases round-trip")
+    failures += _check(parsed.results == results,
+                       "eval fixture results round-trip")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "eval.bin"
+        eval_fixture.write_fixture(path, cases, results, pad_id=99)
+        loaded = eval_fixture.read_fixture(path)
+        failures += _check(loaded.pad_id == 99, "eval fixture pad id")
+        failures += _check(loaded.cases == cases and loaded.results == results,
+                           "eval fixture file round-trip")
+        failures += _check(loaded.cases[1].tokens == (5, 6, 7),
+                           "eval fixture strips padding")
+        failures += _check(loaded.cases[2].length == 1,
+                           "eval fixture length is derived from tokens")
+
+        case_path = Path(tmp) / "cases.bin"
+        eval_fixture.write_cases(case_path, cases)
+        failures += _check(eval_fixture.read_cases(case_path) == cases,
+                           "eval cases-only round-trip")
+
+        result_path = Path(tmp) / "results.bin"
+        eval_fixture.write_results(result_path, results)
+        failures += _check(eval_fixture.read_results(result_path) == results,
+                           "eval results-only round-trip")
+        failures += _check_raises(
+            eval_fixture.EvalFixtureError,
+            lambda: eval_fixture.read_cases(result_path),
+            "eval results-only fixture has no cases")
+
+    # A case may not score the first token (no context) or name a focus
+    # position without any focus ids.
+    failures += _check_raises(
+        eval_fixture.EvalFixtureError,
+        lambda: eval_fixture.EvalCase(tokens=(1, 2), start=0, end=1),
+        "eval fixture rejects a span without context")
+    failures += _check_raises(
+        eval_fixture.EvalFixtureError,
+        lambda: eval_fixture.EvalCase(tokens=(1, 2), start=1, end=2,
+                                      focus_position=1),
+        "eval fixture rejects focus without ids")
+
+    # Cases and results must agree on the row count and the focus widths.
+    bad_results = [
+        eval_fixture.EvalResult(nll=(0.5, 1.5, 2.5, 0.0),
+                                argmax=(2, 3, 4, -1),
+                                focus_logits=(0.25,)),
+        results[1],
+        results[2],
+    ]
+    failures += _check_raises(
+        eval_fixture.EvalFixtureError,
+        lambda: eval_fixture.fixture_to_records(cases, bad_results),
+        "eval fixture rejects mismatched focus counts")
+
+    # The padded width can exceed the longest real sequence; the results fix
+    # it and the reader strips the padding back off.
+    padded_cases = [eval_fixture.EvalCase(tokens=(1, 2, 3), start=1, end=3)]
+    padded_results = [eval_fixture.EvalResult(nll=(0.0,) * 5,
+                                              argmax=(-1,) * 5)]
+    padded = eval_fixture.records_to_fixture(eval_fixture.parse(
+        eval_fixture.serialize(
+            eval_fixture.fixture_to_records(padded_cases, padded_results))))
+    failures += _check(padded.seq == 5,
+                       "eval fixture padded width comes from results")
+    failures += _check(padded.cases[0].tokens == (1, 2, 3),
+                       "eval fixture strips width padding")
+
+    # Container-level corruption is rejected, not guessed at.
+    failures += _check_raises(
+        eval_fixture.EvalFixtureError,
+        lambda: eval_fixture.parse(b"NOPE" + raw[4:]),
+        "eval fixture rejects bad magic")
+    failures += _check_raises(
+        eval_fixture.EvalFixtureError,
+        lambda: eval_fixture.parse(raw + b"\x00"),
+        "eval fixture rejects trailing bytes")
+    duplicate = eval_fixture.serialize([
+        eval_fixture.Record("dup", eval_fixture.DTYPE_INT32, (1,),
+                            struct.pack("<i", 1)),
+        eval_fixture.Record("dup", eval_fixture.DTYPE_INT32, (1,),
+                            struct.pack("<i", 2)),
+    ])
+    failures += _check_raises(
+        eval_fixture.EvalFixtureError,
+        lambda: eval_fixture.parse(duplicate),
+        "eval fixture rejects a duplicate record name")
+    failures += _check_raises(
+        eval_fixture.EvalFixtureError,
+        lambda: eval_fixture.serialize([
+            eval_fixture.Record("short", eval_fixture.DTYPE_FP32, (3,),
+                                bytes(8))]),
+        "eval fixture rejects a short payload")
+    return failures
+
+
 def main() -> int:
     failures = 0
     failures += _check_config_math()
@@ -286,6 +414,7 @@ def main() -> int:
     failures += _check_dtype_policy()
     failures += _check_container()
     failures += _check_path_resolution()
+    failures += _check_eval_fixture()
 
     if failures:
         print(f"selftest: {failures} failure(s)", file=sys.stderr)
