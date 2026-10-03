@@ -16,10 +16,13 @@
 // torch dependency and no dependency on the model: any test (CPU, CUDA, or the
 // model skeleton) can parse the same reference tensors.
 //
-// The container is a flat list of named, self-describing little-endian
-// records. See the module docstring in tools/dump_oracle.py for the exact
-// layout. This header is header-only on purpose: it can be included directly,
-// or linked through the `//tests:oracle_fixture` library.
+// The same little-endian record encoding backs the evaluation fixture
+// (`NANOEVL1`, written by `python/nanochat_cpp/eval_fixture.py` and
+// `tools/dump_eval_fixture.py`); `Parse` accepts either magic so the score
+// parity test can reuse this reader. See the module docstring in
+// tools/dump_oracle.py for the exact layout. This header is header-only on
+// purpose: it can be included directly, or linked through the
+// `//tests:oracle_fixture` library.
 
 namespace nanochat {
 namespace oracle {
@@ -134,8 +137,10 @@ class Fixture {
   static Fixture Parse(std::vector<std::uint8_t> bytes) {
     Fixture fixture;
     if (bytes.size() < 16) throw std::runtime_error("oracle: truncated header");
-    if (std::memcmp(bytes.data(), "NANOORC1", 8) != 0) {
-      throw std::runtime_error("oracle: bad magic (expected NANOORC1)");
+    if (std::memcmp(bytes.data(), "NANOORC1", 8) != 0 &&
+        std::memcmp(bytes.data(), "NANOEVL1", 8) != 0) {
+      throw std::runtime_error(
+          "oracle: bad magic (expected NANOORC1 or NANOEVL1)");
     }
     const std::uint32_t version = detail::ReadU32(bytes.data() + 8);
     if (version != 1) throw std::runtime_error("oracle: unsupported version");

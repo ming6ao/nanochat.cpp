@@ -146,6 +146,31 @@ cc_test(
     tags = ["gpu"],
 )
 
+# Score parity: runs the real `score_main` on the synthetic CORE fixture from
+# `tools/dump_eval_fixture.py` and compares its per-position NLL, argmax, and
+# focused logits against the recorded PyTorch reference. The fixture carries
+# the model parameters, so the test rebuilds the reference model and writes the
+# checkpoint `score_main` loads; the runfiles also carry the `score_main`
+# binary, which the test launches as a subprocess. The fixture is hermetic: no
+# network, no `eval_bundle.zip`, no tokenizer. See docs/eval.md section 4.3.
+cc_test(
+    name = "score_parity_test",
+    srcs = ["score_parity_test.cc"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    data = [
+        "data/core_eval.bin",
+        "//src:score_main",
+    ],
+    args = ["$(rootpath data/core_eval.bin)"],
+    deps = [
+        ":oracle_fixture",
+        "//include/nanochat:nanochat",
+        "//src:model",
+    ],
+    size = "small",
+)
+
 # Aggregation point consumed by //:all_tests.
 test_suite(name = "all", tests = [
     ":oracle_test",
@@ -154,4 +179,5 @@ test_suite(name = "all", tests = [
     ":train_parity_cuda_test",
     ":generate_parity_test",
     ":generate_parity_cuda_test",
+    ":score_parity_test",
 ])
