@@ -106,10 +106,52 @@ cc_binary(
     ],
 )
 
+# Generation parity: drives `GenerateBatch` in greedy mode from the parameters
+# and prompt recorded by `tools/dump_generate_fixture.py`, and compares the
+# generated token ids and the per-position 1/0 mask against the PyTorch
+# reference exactly. The fixture's parameters are trained briefly so the
+# classifier is peaked and the argmax is stable against roundoff. The committed
+# fixture is the compact CPU case; the same source also builds against the CUDA
+# backend for the `generate_parity_cuda_test` target below.
+cc_test(
+    name = "generate_parity_test",
+    srcs = ["generate_parity_test.cc"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    data = ["data/generate_parity.bin"],
+    args = ["$(rootpath data/generate_parity.bin)"],
+    deps = [
+        ":oracle_fixture",
+        "//include/nanochat:nanochat",
+        "//src:model",
+    ],
+    size = "small",
+)
+
+# Same gate on the CUDA backend. Kept out of the default CPU loop by the `gpu`
+# tag; `tools/nanochat test --gpu //tests:generate_parity_cuda_test` runs it.
+cc_test(
+    name = "generate_parity_cuda_test",
+    srcs = ["generate_parity_test.cc"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    data = ["data/generate_parity.bin"],
+    args = ["$(rootpath data/generate_parity.bin)"],
+    deps = [
+        ":oracle_fixture",
+        "//include/nanochat:nanochat",
+        "//src:model",
+    ],
+    size = "small",
+    tags = ["gpu"],
+)
+
 # Aggregation point consumed by //:all_tests.
 test_suite(name = "all", tests = [
     ":oracle_test",
     ":oracle_cuda_test",
     ":train_parity_test",
     ":train_parity_cuda_test",
+    ":generate_parity_test",
+    ":generate_parity_cuda_test",
 ])

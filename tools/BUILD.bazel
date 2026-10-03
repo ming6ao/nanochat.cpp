@@ -1,13 +1,13 @@
 # tools/ — the execution entry point and the host tooling (the oracle dump
 # script, the GPU broker, the resource sandbox, and the output-base reaper).
 #
-# `dump_oracle.py` and `dump_train_fixture.py` are the offline fixture
-# generators, and `convert_checkpoint.py` is the reference-checkpoint
-# converter. All three need torch, so they are not Bazel build/test targets:
-# they run on the host (CPU only) and are exported here so they are visible from
-# the repository root and reproducible. The converter's torch-free logic lives
-# in `//python:package` (`nanochat_cpp.checkpoint`) and is covered by the
-# selftest.
+# `dump_oracle.py`, `dump_train_fixture.py`, and `dump_generate_fixture.py` are
+# the offline fixture generators, and `convert_checkpoint.py` is the
+# reference-checkpoint converter. All of them need torch, so they are not Bazel
+# build/test targets: they run on the host (CPU only) and are exported here so
+# they are visible from the repository root and reproducible. The converter's
+# torch-free logic lives in `//python:package` (`nanochat_cpp.checkpoint`) and
+# is covered by the selftest.
 
 load("@rules_shell//shell:sh_test.bzl", "sh_test")
 
@@ -17,6 +17,7 @@ exports_files([
     "convert_checkpoint.py",
     "dump_oracle.py",
     "dump_train_fixture.py",
+    "dump_generate_fixture.py",
     "nanochat",
     "nanochat_cpp",
     "gpu.sh",
@@ -32,6 +33,11 @@ filegroup(
 filegroup(
     name = "dump_train_fixture",
     srcs = ["dump_train_fixture.py"],
+)
+
+filegroup(
+    name = "dump_generate_fixture",
+    srcs = ["dump_generate_fixture.py"],
 )
 
 # The reference-checkpoint converter. It needs torch, so it is data, not a
