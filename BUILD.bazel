@@ -36,6 +36,16 @@ config_setting(
 
 # Aggregation point: each package publishes `test_suite(name = "all")`; new
 # packages add their label here. Kept in sync with `bazel test //...`.
+#
+# Evaluation additions ride the existing package suites rather than adding new
+# labels here: the sequence scorer lands as `//src:score_main` with its T0 unit
+# test `//src:eval_test`, the batched generator extends `//src:generate_main` and
+# `//src:generate_test`, and the parity fixtures land as
+# `//tests:score_parity_test` and `//tests:generate_parity_test`. All of those
+# are wired into `//src:all` and `//tests:all` by their owning packages, so they
+# are aggregated here without the root graph referencing a target that does not
+# exist yet. A genuinely new package (a new directory with its own BUILD file)
+# is the only case that would add a label to this list.
 test_suite(
     name = "all_tests",
     tests = [
@@ -49,8 +59,12 @@ test_suite(
     ],
 )
 
+# Reproducibility surface for the module graph: the lock file is exported
+# beside the module declaration so a reviewer can pin the resolved repository
+# set from the root package.
 exports_files([
     "MODULE.bazel",
+    "MODULE.bazel.lock",
     ".bazelrc",
     ".clang-format",
     "Makefile",
