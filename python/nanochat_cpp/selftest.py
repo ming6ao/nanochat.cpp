@@ -3,9 +3,9 @@
 Run with ``tools/nanochat_cpp selftest`` (or
 ``PYTHONPATH=python python3 -m nanochat_cpp.selftest``). It checks the
 configuration math, the token-count estimate, the NANO shard round-trip, the
-reference-checkpoint name/dtype/container/path logic, and the evaluation
-fixture wire format, all without importing torch or the reference package, so
-it runs anywhere.
+reference-checkpoint name/dtype/container/path logic, the evaluation
+fixture wire format, and the chat task prompt/extraction logic, all without
+importing torch or the reference package, so it runs anywhere.
 """
 
 from __future__ import annotations
@@ -15,7 +15,8 @@ import sys
 import tempfile
 from pathlib import Path
 
-from . import checkpoint, config, data, eval_fixture
+from . import checkpoint, config, data, eval_fixture, tasks
+from . import chat_eval
 
 
 def _check(condition: bool, message: str) -> int:
@@ -405,6 +406,83 @@ def _check_eval_fixture() -> int:
     return failures
 
 
+def _check_chat_tasks() -> int:
+    failures = 0
+
+    # The multiple-choice prompt is whitespace-exact: the letter follows the
+    # choice with no space, matching the bare-letter assistant answer.
+    prompt = tasks.render_mc("What?", ["A", "B"], ["first", "second"])
+    failures += _check(prompt == (
+        "Multiple Choice question: What?\n"
+        "- first=A\n"
+        "- second=B\n"
+        "\nRespond only with the letter of the correct answer."),
+        "render_mc layout")
+
+    # GSM8K extracts the number after ####, normalizing commas and signs.
+    failures += _check(
+        tasks.extract_answer("steps #### 1,234") == "1234",
+        "extract_answer comma")
+    failures += _check(tasks.extract_answer("#### -3.5") == "-3.5",
+                       "extract_answer negative")
+    failures += _check(tasks.extract_answer("no marker") is None,
+                       "extract_answer missing")
+
+    # HumanEval prefers the first fenced block, otherwise the whole text.
+    failures += _check(
+        tasks.extract_program("```python\nprint(1)\n```\nafter") == "print(1)",
+        "extract_program python fence")
+    failures += _check(tasks.extract_program("```\nprint(2)\n```") == "print(2)",
+                       "extract_program bare fence")
+    failures += _check(tasks.extract_program("print(3)") == "print(3)",
+                       "extract_program plain text")
+    failures += _check(
+        tasks.extract_imports("import math\nfrom os import path\nx = 1")
+        == "import math\nfrom os import path",
+        "extract_imports")
+
+    # The lightweight slicing view matches the reference Task.__len__/__getitem__.
+    class _Stub(tasks.Task):
+        def num_examples(self):
+            return 10
+
+        def get_example(self, index):
+            return index
+
+    sliced = _Stub(start=2, stop=8, step=2)
+    failures += _check(len(sliced) == 3, "Task slice length")
+    failures += _check([sliced[i] for i in range(len(sliced))] == [2, 4, 6],
+                       "Task slice indices")
+
+    # Task names split on both the reference separator and a comma.
+    failures += _check(chat_eval._parse_task_names("ARC-Easy|GSM8K")
+                       == ["ARC-Easy", "GSM8K"], "task name pipe split")
+    failures += _check(chat_eval._parse_task_names("ARC-Easy,GSM8K")
+                       == ["ARC-Easy", "GSM8K"], "task name comma split")
+    failures += _check(chat_eval._parse_task_names(None)
+                       == list(chat_eval.ALL_TASKS), "task name default")
+
+    # The padded-token budget bounds every emitted categorical batch.
+    problems = [(eval_fixture.EvalCase(tokens=(0,) * length, start=1,
+                                       end=1), None, None)
+                for length in (10, 10, 10, 10, 10)]
+    batches = list(chat_eval._chunk_problems(problems, 8, 25))
+    failures += _check(all(len(batch) * max(item[0].length for item in batch)
+                           <= 25 for batch in batches),
+                       "categorical batch token budget")
+    failures += _check(sum(len(batch) for batch in batches) == 5,
+                       "categorical batches keep every problem")
+
+    # Centering uses the shared baselines: a random ARC score is zero.
+    results = {"ARC-Easy": 0.25, "GSM8K": 0.0, "MMLU": 1.0}
+    failures += _check(
+        chat_eval._centered_mean(results, ["ARC-Easy", "GSM8K"]) == 0.0,
+        "ChatCORE centering")
+    failures += _check(chat_eval._centered_mean(results, ["MMLU"]) == 1.0,
+                       "ChatCORE perfect score")
+    return failures
+
+
 def main() -> int:
     failures = 0
     failures += _check_config_math()
@@ -415,6 +493,7 @@ def main() -> int:
     failures += _check_container()
     failures += _check_path_resolution()
     failures += _check_eval_fixture()
+    failures += _check_chat_tasks()
 
     if failures:
         print(f"selftest: {failures} failure(s)", file=sys.stderr)
