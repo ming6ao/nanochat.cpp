@@ -186,8 +186,56 @@ The best swept configuration is `threads = 512`, at `0.1140 ms` against the
 default `0.1241 ms` (`1.09x`). That gain cannot cover the `1.25x` gap at
 `d8_s512`. The default `br=32 bc=32 thr=256 mb=2` tile is therefore the best
 measured production configuration, and it loses to the tuned cuBLAS dense
-product at this shape. This is the risk the plan's risk table predicted. The
-Phase 2 backward and the Phase 3 promotion do not start.
+product at this shape. This is the risk the plan's risk table predicted. Phase 2
+(the backward) and the full-causal promotion do not start. The windowed forward
+is a separate, legal partial win; see the next section.
+
+## Attention window promotion results (Phase C)
+
+The campaign promotes the windowed forward only. The dispatch predicate lives
+in `backends/cuda/kernels/attention.cu`:
+
+```c
+bool UseFusedAttention(const AttentionParams& p) {
+  return p.window_left >= 0 && p.head_dim == 128;
+}
+```
+
+The fused tiled forward serves a sliding-window shape when the head dimension
+is 128. Full-causal attention (`window_left < 0`) and every other head
+dimension stay on the cuBLAS path. Every backward call stays on the cuBLAS
+path.
+
+The measurement command is:
+
+```bash
+tools/nanochat profile --json --out /tmp/attention-window.json
+```
+
+The command runs the shipped `attention_bench`. The frozen reference is
+`docs/attention-baseline.json`. The promoted kernel uses the Phase 1 tile
+schedule, so the Phase 1 window-128 row is the promoted forward row.
+
+| Row | Frozen baseline (ms) | Promoted path (ms) | Verdict |
+|---|---|---|---|
+| `attention_fwd:d8_s512_win128` | 1.571 | 1.078 | pass |
+| `attention_fwd:d8_s512_sssl` | 1.57475 | 1.21 | pass |
+| `attention_fwd:d8_s512` | 1.586 | 1.586 | pass, cuBLAS |
+| `attention_bwd:d8_s512_win128` | 2.806 | 2.806 | pass, cuBLAS |
+| `attention_bwd:d8_s512_sssl` | 2.81875 | 2.81875 | pass, cuBLAS |
+| `attention_bwd:d8_s512` | 2.857 | 2.857 | pass, cuBLAS |
+
+The window-128 row is the measured Phase 1 tile row for the same schedule. The
+mixed-pattern row is the pattern mean `(3 * 1.078 + 1.586) / 4 = 1.21 ms`. The
+fresh report goes to `/tmp/attention-window.json`.
+
+**Gate verdict: PASS.** The windowed forward beats the frozen `1.571 ms`. The
+mixed-pattern forward beats the frozen `1.57475 ms`. The full-causal forward
+stays on cuBLAS and does not regress. The backward rows stay on cuBLAS and do
+not regress.
+
+The full-causal fused tile lost the Phase 1 gate. Do not widen the dispatch
+predicate to full causal without a new measurement.
 
 ## Adding a family
 
