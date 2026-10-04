@@ -351,12 +351,59 @@ cuda_binary(
     ],
 )
 
+# Attention-tile-v3 prototype: the tiled attention experiment. This wave ships
+# the build surface only; the tile kernels land in a later wave. dev-only; the
+# CUDA backend is unchanged.
+cuda_library(
+    name = "attention_tile_v3",
+    srcs = ["attention_tile_v3.cu"],
+    hdrs = ["attention_tile_v3.h"],
+    copts = nanochat_cuda_copts(),
+    defines = precision_defines(),
+    deps = [
+        "//backends/cuda/kernels:device_utils",
+        "//include/nanochat:nanochat",
+    ],
+    alwayslink = True,
+)
+
+# T1 GPU smoke test for the prototype: proves the target compiles, links, and
+# enters both entry points. Not tagged `manual` so that
+# `tools/nanochat test --gpu //...` discovers it.
+cc_test(
+    name = "attention_tile_v3_gpu_test",
+    srcs = ["attention_tile_v3_test.cc"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    deps = [
+        ":attention_tile_v3",
+        "//include/nanochat:nanochat",
+    ],
+    size = "small",
+    tags = ["gpu"],
+)
+
+# Prototype micro-benchmark; run it through the broker, not the test loop.
+cuda_binary(
+    name = "attention_tile_v3_bench",
+    srcs = ["attention_tile_v3_bench.cc"],
+    copts = nanochat_cuda_copts(),
+    host_copts = nanochat_copts(),
+    defines = precision_defines(),
+    host_defines = precision_defines(),
+    deps = [
+        ":attention_tile_v3",
+        "//include/nanochat:nanochat",
+    ],
+)
+
 # Aggregation point consumed by //:all_tests.
 test_suite(
     name = "all",
     tests = [
         ":adamw_gpu_test",
         ":attention_gpu_test",
+        ":attention_tile_v3_gpu_test",
         ":build_config_test",
         ":classifier_gpu_test",
         ":embedding_gpu_test",
