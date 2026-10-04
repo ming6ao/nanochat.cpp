@@ -21,6 +21,7 @@ tools/nanochat <command> [args...]
   build [targets...]         bazel build (default //...; serialized)
   test [--gpu] [targets...]  run tests; every test is sandboxed per action
   check [--gpu]              build, then CPU tests (and GPU tests with --gpu)
+  lint [file...]             style gate: clang-format + the text checks
   shutdown                   stop this workspace's Bazel server now
   prune [--apply] [--worktree DIR]
                              reap orphaned Bazel output bases (dry run by
@@ -180,6 +181,13 @@ case "$command" in
     profile=$1
     shift
     run_profile "$profile" "$@"
+    ;;
+
+  lint)
+    # Style gate for the Google C++ Style Guide. Fast and CPU-only: it runs
+    # clang-format in check mode plus the cheap text checks. See
+    # CONTRIBUTING.md and docs/testing.md.
+    exec "$here/lint.sh" "$@"
     ;;
 
   train) run_profile train "$@" ;;

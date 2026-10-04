@@ -23,6 +23,7 @@ exports_files([
     "nanochat_cpp",
     "gpu.sh",
     "sandbox.sh",
+    "lint.sh",
     "prune_bazel_output_bases",
 ])
 

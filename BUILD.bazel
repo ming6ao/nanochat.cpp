@@ -68,5 +68,4 @@ exports_files([
     ".bazelrc",
     ".clang-format",
     "Makefile",
-    "STATUS.md",
 ])

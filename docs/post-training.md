@@ -248,4 +248,4 @@ Not implemented. To build, in order:
 
 Gates: the weighted-backward finite-difference test and the RL parity fixture at
 T0/T2; generation parity at T1; an RL smoke run at T2. See
-[testing.md](testing.md) and [plan-eval-rl.md](plan-eval-rl.md).
+[testing.md](testing.md).

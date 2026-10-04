@@ -17,7 +17,6 @@ detailed reference that the design points at.
 | [eval.md](eval.md) | Design: base and chat evaluation (forward-only) |
 | [grad-mode.md](grad-mode.md) | Design: forward-only evaluation path and workspace |
 | [post-training.md](post-training.md) | Design: SFT and reinforcement learning |
-| [plan-eval-rl.md](plan-eval-rl.md) | Implementation plan for eval.md and post-training.md |
 | [parity.md](parity.md) | Known differences from the PyTorch reference, with status |
 | [testing.md](testing.md) | Test tiers, oracle harness, finite-difference checks |
 | [performance.md](performance.md) | Performance measurement protocol, debugging interface, benchmarks |

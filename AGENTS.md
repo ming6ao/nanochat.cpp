@@ -125,6 +125,7 @@ Bazel test command. Use it for every run:
 tools/nanochat build                 # bazel build //...
 tools/nanochat test                  # all non-GPU tests, each sandboxed
 tools/nanochat test --gpu <target>   # GPU tests, broker held for the suite
+tools/nanochat lint                  # Google C++ Style gate (clang-format + checks)
 tools/nanochat train -- <binary> ...  # profile=train
 tools/nanochat eval  -- <binary> ...  # profile=eval
 tools/nanochat verify -- <binary> ... # profile=t2-parity
@@ -208,6 +209,7 @@ cc_test(
 
 The integrator runs, per merge:
 
+- `tools/nanochat lint` (the Google C++ Style gate).
 - `bazel test //... --test_tag_filters=-gpu` (all CPU tests, under `t0-cpu`).
 - A single T1 GPU smoke test covering the changed family (`t1-gpu`).
 - T2 parity only at Wave boundaries, not per commit (`t2-parity`).
@@ -233,8 +235,6 @@ This keeps GPU time bounded and predictable.
 
 ## 7. Communication artifacts
 
-- `STATUS.md` (architect-owned): a table of workstreams and their state
-  (`todo | wip | cpu-green | gpu-green | done`).
 - Per-workstream brief: the frozen header(s), the owned directory, the
   Definition of Done, the exact test command. Agents should not need to read the whole repo.
 - `backends/cuda/kernels/README.md`: the convention for the per-kernel tests

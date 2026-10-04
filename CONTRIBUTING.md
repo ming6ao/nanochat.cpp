@@ -33,11 +33,17 @@ CUDA builds use `-fno-exceptions`. Prefer `std::span`, `constexpr`,
 `[[nodiscard]]`, `std::unique_ptr`. No third-party header-only libraries unless
 they ship with the CUDA toolkit.
 
+Run `tools/nanochat lint` before a commit. It runs `clang-format` in check mode
+plus the text checks: no using-directive, project-relative includes, no C-style
+cast, and ASCII only. The project skill `.agents/skills/google-cpp-style/`
+carries the same rules.
+
 ## Definition of done
 
-Run `tools/nanochat check` (build plus CPU tests), and `tools/nanochat test
---gpu <target>` for small-shape GPU correctness. The full checklist, including
-finite-difference checks, oracle parity, and formatting, is in
+Run `tools/nanochat check` (build plus CPU tests), `tools/nanochat lint` (the
+style gate), and `tools/nanochat test --gpu <target>` for small-shape GPU
+correctness. The full checklist, including finite-difference checks, oracle
+parity, and formatting, is in
 [docs/testing.md](docs/testing.md). Never call `bazel test` or a test binary
 directly; the entry point is what applies the sandbox. See
 [docs/sandbox.md](docs/sandbox.md).

@@ -225,5 +225,4 @@ for the single-GPU target. No evaluation item remains on the roadmap.
 
 Gates: a synthetic CORE fixture at T0; a converted-checkpoint bpb match and a
 100-example CORE match at T2; a generation parity fixture at T1. See
-[testing.md](testing.md) and [plan-eval-rl.md](plan-eval-rl.md) for the work
-breakdown.
+[testing.md](testing.md) for the test tiers.
