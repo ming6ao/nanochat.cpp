@@ -20,6 +20,12 @@
 //   9. a short optimizer loop reproducing the recorded loss curve and parameter
 //      trajectory (`step/<k>/loss`, `step/<k>/param/<name>`).
 //
+// The committed fixture uses `head_dim` 4, so it never reaches the promoted
+// fused windowed forward. A closing section therefore checks the production
+// `SSSL` dispatch (`head_dim` 128) and compares the shipped attention forward
+// and backward at `head_dim` 128 with a real sliding window against the host
+// reference.
+//
 // The model parity runs on the CPU backend by default and on the CUDA backend
 // when the target is built under `--config=cuda` (`//tests:oracle_cuda_test`).
 // Every device<->host transfer goes through `kernels::Memcpy`, so the same
@@ -38,12 +44,27 @@
 #include <type_traits>
 #include <vector>
 
+#include "dev/kernels/gpu_test_utils.h"
 #include "nanochat/kernels.h"
 #include "nanochat/model.h"
 #include "nanochat/optim.h"
 #include "nanochat/scheduler.h"
+#include "dev/kernels/sequence_ref.h"
 #include "src/model_impl.h"
 #include "tests/oracle_fixture.h"
+
+// The promoted fused windowed forward is selected by a backend-internal
+// predicate, `UseFusedAttention(window_left >= 0 && head_dim == 128)`. That
+// symbol is not part of the frozen `nanochat/kernels.h` seam, so the CUDA build
+// declares it here instead of editing the seam. The CPU build never references
+// it; `NANOCHAT_BACKEND_CUDA` comes from `tests/BUILD.bazel`.
+#if defined(NANOCHAT_BACKEND_CUDA)
+namespace nanochat {
+namespace kernels {
+bool UseFusedAttention(const ::nanochat::AttentionParams& params);
+}  // namespace kernels
+}  // namespace nanochat
+#endif
 
 namespace {
 
@@ -778,6 +799,185 @@ void RunModelParity(const Fixture& fixture) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Promoted fused-path coverage (`head_dim` 128, sliding window)
+// ---------------------------------------------------------------------------
+//
+// The fixture-driven checks above run at `head_dim` 4 and never reach the
+// promoted fused forward. These checks close that gap:
+//
+//   1. the production `SSSL` dispatch: three of four layers are windowed and
+//      take the fused branch, and the final full-context layer stays on cuBLAS;
+//   2. a real sliding window at `head_dim` 128. The shipped forward and the
+//      cuBLAS backward are compared with the host reference `sequence_ref.h`.
+
+// Whether layer `layer` of `config` reaches the promoted fused forward. The
+// CUDA build asks the backend predicate; the CPU build applies the same
+// documented rule, because the predicate is CUDA-only.
+bool LayerUsesFusedAttention(const Config& config, int layer) {
+  nanochat::AttentionParams params;
+  params.head_dim = config.head_dim();
+  params.window_left = config.window_left(layer);
+#if defined(NANOCHAT_BACKEND_CUDA)
+  return nanochat::kernels::UseFusedAttention(params);
+#else
+  return params.window_left >= 0 && params.head_dim == 128;
+#endif
+}
+
+// Compares a device result against the host reference with an absolute plus a
+// relative bound. Reports the maximum absolute difference when the bound is
+// exceeded.
+void CompareHostVectors(const std::vector<float>& got,
+                        const std::vector<float>& want, double atol,
+                        double rtol, const std::string& what) {
+  if (got.size() != want.size()) {
+    Fail(Format("%s: size mismatch (%zu vs %zu)", what.c_str(), got.size(),
+                want.size()));
+    return;
+  }
+  double max_diff = 0.0;
+  std::size_t worst = 0;
+  bool exceeded = false;
+  for (std::size_t i = 0; i < got.size(); ++i) {
+    const double diff =
+        std::fabs(static_cast<double>(got[i]) - static_cast<double>(want[i]));
+    if (diff > max_diff) {
+      max_diff = diff;
+      worst = i;
+    }
+    const double bound = atol + rtol * std::fabs(static_cast<double>(want[i]));
+    if (diff > bound) exceeded = true;
+  }
+  if (exceeded) {
+    Fail(Format("%s: max |diff| = %.3g at %zu (got %.9g want %.9g)",
+                what.c_str(), max_diff, worst, got[worst], want[worst]));
+    return;
+  }
+  std::printf("  %-52s max |diff| %.3g\n", what.c_str(), max_diff);
+}
+
+// The four-layer production pattern `SSSL` at `head_dim` 128: the first three
+// layers are windowed and reach the fused forward, and the last layer has full
+// context and stays on cuBLAS. The model also runs end to end on this config so
+// the fused path executes in the CUDA build.
+void CheckSsslFusedPath() {
+  Config config;
+  config.num_layers = 4;
+  config.num_heads = 2;
+  config.num_kv_heads = 2;
+  config.hidden_dim = 256;  // head_dim 128: the fused tile's only shape
+  config.seq_len = 512;     // short_window() = 128
+  config.vocab_size = 64;
+  config.padded_vocab_size = 64;
+  config.window_pattern = "SSSL";
+
+  ExpectTrue(config.head_dim() == 128,
+             "the SSSL fused-path case must use head_dim 128");
+  int fused_layers = 0;
+  for (int layer = 0; layer < config.num_layers; ++layer) {
+    if (LayerUsesFusedAttention(config, layer)) ++fused_layers;
+  }
+  ExpectTrue(LayerUsesFusedAttention(config, 0), "SSSL layer 0 is windowed");
+  ExpectTrue(LayerUsesFusedAttention(config, 1), "SSSL layer 1 is windowed");
+  ExpectTrue(LayerUsesFusedAttention(config, 2), "SSSL layer 2 is windowed");
+  ExpectTrue(!LayerUsesFusedAttention(config, 3),
+             "the final SSSL layer stays on cuBLAS");
+  ExpectTrue(
+      fused_layers == 3,
+      Format("SSSL dispatch: expected 3 fused layers, got %d", fused_layers));
+
+  // Run the model end to end on the fused path. seq exceeds the 128-token
+  // window, so the masked-tile skip also runs. The loss only has to be finite
+  // here; the numerical parity of the fused kernels is the check below.
+  const int batch = 1;
+  const int seq = 192;
+  std::vector<int> tokens(static_cast<std::size_t>(batch) * seq);
+  std::vector<int> targets(static_cast<std::size_t>(batch) * seq);
+  for (std::size_t i = 0; i < tokens.size(); ++i) {
+    tokens[i] = static_cast<int>((i * 7 + 3) % 64);
+    targets[i] = static_cast<int>((i * 11 + 5) % 64);
+  }
+  std::unique_ptr<Model> model = Model::Create(config);
+  model->InitWeights(20241003);
+  const float loss =
+      model->ForwardLoss(tokens.data(), targets.data(), batch, seq);
+  ExpectTrue(std::isfinite(loss),
+             "SSSL head_dim 128 windowed forward produced a finite loss");
+  std::printf("fused-path: SSSL loss %.6g\n", loss);
+}
+
+// The shipped forward (the fused tiled kernel on CUDA) and the cuBLAS backward
+// at `head_dim` 128 with a real sliding window, against the host reference.
+void CheckFusedAttentionParity() {
+  nanochat::AttentionParams params;
+  params.batch = 1;
+  params.seq = 192;  // > window 128, so the masked-tile skip runs
+  params.num_heads = 2;
+  params.num_kv_heads = 2;
+  params.head_dim = 128;
+  params.causal = true;
+  params.window_left = 128;  // a real window: seq exceeds the window
+  params.window_right = 0;
+  params.kv_len = 0;
+  params.scale = 0.0f;
+
+  const int dim = params.head_dim;
+  const int heads = params.num_heads;
+  const int kv_heads = params.num_kv_heads;
+  const int kv_len = params.kv_len > 0 ? params.kv_len : params.seq;
+  const int q_count = params.batch * params.seq * heads * dim;
+  const int kv_count = params.batch * kv_len * kv_heads * dim;
+  const int stats_count = nanochat::AttentionStatsCount(params);
+
+  nanochat::dev::Rng rng;
+  const std::vector<float> q0 = nanochat::dev::RandomVec(q_count, &rng);
+  const std::vector<float> k0 = nanochat::dev::RandomVec(kv_count, &rng);
+  const std::vector<float> v0 = nanochat::dev::RandomVec(kv_count, &rng);
+  const std::vector<float> w0 = nanochat::dev::RandomVec(q_count, &rng);
+
+  nanochat::dev::DevBuf<ComputeType> q(nanochat::dev::ToStorage(q0));
+  nanochat::dev::DevBuf<ComputeType> k(nanochat::dev::ToStorage(k0));
+  nanochat::dev::DevBuf<ComputeType> v(nanochat::dev::ToStorage(v0));
+  nanochat::dev::DevBuf<ComputeType> out(q_count);
+  nanochat::dev::DevBuf<float> stats(stats_count);
+
+  nanochat::kernels::AttentionForward(params, q.ptr, k.ptr, v.ptr, out.ptr,
+                                      stats.ptr);
+  nanochat::kernels::Synchronize();
+
+  std::vector<float> ref_stats;
+  const std::vector<float> ref_out =
+      nanochat::dev::seqref::AttentionForward(params, q0, k0, v0, &ref_stats);
+  CompareHostVectors(nanochat::dev::FromStorage(out.Download()), ref_out, 1e-4,
+                     1e-3, "fused forward out (head_dim 128 window 128)");
+  CompareHostVectors(stats.Download(), ref_stats, 1e-4, 1e-3,
+                     "fused forward stats (head_dim 128 window 128)");
+
+  // Feed the reference statistics to the device backward so the comparison
+  // isolates the backward from the forward's roundoff.
+  stats.Upload(ref_stats);
+  nanochat::dev::DevBuf<ComputeType> dout(nanochat::dev::ToStorage(w0));
+  nanochat::dev::DevBuf<ComputeType> dq(q_count);
+  nanochat::dev::DevBuf<ComputeType> dk(kv_count);
+  nanochat::dev::DevBuf<ComputeType> dv(kv_count);
+  nanochat::kernels::AttentionBackward(params, q.ptr, k.ptr, v.ptr, stats.ptr,
+                                       dout.ptr, dq.ptr, dk.ptr, dv.ptr);
+  nanochat::kernels::Synchronize();
+
+  std::vector<float> ref_dq;
+  std::vector<float> ref_dk;
+  std::vector<float> ref_dv;
+  nanochat::dev::seqref::AttentionBackward(params, q0, k0, v0, ref_stats, w0,
+                                           &ref_dq, &ref_dk, &ref_dv);
+  CompareHostVectors(nanochat::dev::FromStorage(dq.Download()), ref_dq, 1e-4,
+                     1e-3, "cuBLAS backward dq (head_dim 128 window 128)");
+  CompareHostVectors(nanochat::dev::FromStorage(dk.Download()), ref_dk, 1e-4,
+                     1e-3, "cuBLAS backward dk (head_dim 128 window 128)");
+  CompareHostVectors(nanochat::dev::FromStorage(dv.Download()), ref_dv, 1e-4,
+                     1e-3, "cuBLAS backward dv (head_dim 128 window 128)");
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -801,6 +1001,8 @@ int main(int argc, char** argv) {
               fixture.size());
   RunChecks(fixture);
   RunModelParity(fixture);
+  CheckSsslFusedPath();
+  CheckFusedAttentionParity();
 
   std::printf(
       "oracle_test: max forward error %.3g, max backward error %.3g, "

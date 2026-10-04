@@ -8,6 +8,17 @@ load("//:nanochat.bzl", "nanochat_copts", "precision_defines")
 
 package(default_visibility = ["//visibility:public"])
 
+# Backend marker for the oracle source. Under `--config=cuda` (which sets
+# `--define=backend=cuda`, see .bazelrc) the source declares and calls the
+# backend-internal fused-attention dispatch predicate. The CPU backend does not
+# define that symbol, so the marker keeps the CPU build honest. A `select`
+# concatenated with a list is the same pattern `//src:model` uses for its
+# backend dependency.
+_BACKEND_COPTS = select({
+    "//:backend_cuda": ["-DNANOCHAT_BACKEND_CUDA"],
+    "//:backend_cpu": [],
+})
+
 # Header-only reader for the binary oracle fixture. Kept separate from the test
 # so `//src` (and the CUDA parity tests) can parse the same reference tensors.
 cc_library(
@@ -22,12 +33,13 @@ cc_library(
 cc_test(
     name = "oracle_test",
     srcs = ["oracle_test.cc"],
-    copts = nanochat_copts(),
+    copts = _BACKEND_COPTS + nanochat_copts(),
     defines = precision_defines(),
     data = ["data/debug_state.bin"],
     args = ["$(rootpath data/debug_state.bin)"],
     deps = [
         ":oracle_fixture",
+        "//dev/kernels:sequence_test_utils",
         "//include/nanochat:nanochat",
         "//src:model",
     ],
@@ -41,12 +53,13 @@ cc_test(
 cc_test(
     name = "oracle_cuda_test",
     srcs = ["oracle_test.cc"],
-    copts = nanochat_copts(),
+    copts = _BACKEND_COPTS + nanochat_copts(),
     defines = precision_defines(),
     data = ["data/debug_state.bin"],
     args = ["$(rootpath data/debug_state.bin)"],
     deps = [
         ":oracle_fixture",
+        "//dev/kernels:sequence_test_utils",
         "//include/nanochat:nanochat",
         "//src:model",
     ],
