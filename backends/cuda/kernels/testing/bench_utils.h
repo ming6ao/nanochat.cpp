@@ -1,10 +1,10 @@
 #ifndef NANOCHAT_DEV_KERNELS_BENCH_UTILS_H_
 #define NANOCHAT_DEV_KERNELS_BENCH_UTILS_H_
 
-// Host-side benchmarking helpers for the kernel benchmarks. CUDA-event timing with
-// warm-up and best-of-rounds, plus a small JSON report that agents and scripts
-// can consume. This header uses the CUDA runtime, so it is only included by
-// targets built as `cuda_binary` (the host pass of nvcc). See
+// Host-side benchmarking helpers for the kernel benchmarks. CUDA-event timing
+// with warm-up and best-of-rounds, plus a small JSON report that agents and
+// scripts can consume. This header uses the CUDA runtime, so it is only
+// included by targets built as `cuda_binary` (the host pass of nvcc). See
 // docs/performance.md and the `performance-investigation` skill.
 //
 // The events are recorded on the legacy default stream, the same stream the
@@ -108,8 +108,8 @@ class BenchReport {
       shape_width = std::max(shape_width, row.shape.size());
     }
     std::printf("%-*s  %-*s  %10s  %10s  %10s\n", static_cast<int>(name_width),
-                "name", static_cast<int>(shape_width), "shape", "ms",
-                "GFLOP/s", "issue/need");
+                "name", static_cast<int>(shape_width), "shape", "ms", "GFLOP/s",
+                "issue/need");
     for (const BenchRow& row : rows_) {
       char ratio[16];
       if (row.work_ratio > 0.0) {

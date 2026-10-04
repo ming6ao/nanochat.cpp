@@ -23,8 +23,8 @@
 #include <type_traits>
 #include <vector>
 
-#include "model_impl.h"
 #include "nanochat/model.h"
+#include "src/model_impl.h"
 
 namespace {
 

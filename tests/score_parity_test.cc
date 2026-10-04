@@ -1,4 +1,4 @@
-// tests/score_parity_test.cc — the CORE scoring-parity gate.
+// tests/score_parity_test.cc -- the CORE scoring-parity gate.
 //
 // Reads the synthetic CORE fixture produced by
 // `tools/dump_eval_fixture.py` and runs the real `score_main` binary on it,
@@ -20,6 +20,7 @@
 // `score_main` is launched as a subprocess from the runfiles tree, so this test
 // exercises the binary's fixture input/output, not just `ScoreBatch`.
 
+#include <sys/wait.h>
 #include <cmath>
 #include <cstdarg>
 #include <cstdint>
@@ -29,7 +30,6 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
-#include <sys/wait.h>
 #include <type_traits>
 #include <vector>
 
@@ -254,8 +254,7 @@ void CheckSpanShapes(const Fixture& fixture, int batch) {
   }
   // schema: a shared suffix, so the candidate spans have equal length while
   // the contexts (and therefore the ends) differ.
-  if (!((spans[2].end - spans[2].start) ==
-            (spans[3].end - spans[3].start) &&
+  if (!((spans[2].end - spans[2].start) == (spans[3].end - spans[3].start) &&
         spans[2].end != spans[3].end)) {
     Fail("rows 2-3 do not have the schema shape");
   }
@@ -275,9 +274,7 @@ void CheckSpanShapes(const Fixture& fixture, int batch) {
 
 // `score_main` returns raw pre-softcap logits; the reference stores the
 // post-softcap values the model produces, so reapply the monotonic softcap.
-float ApplySoftcap(float raw, float cap) {
-  return cap * std::tanh(raw / cap);
-}
+float ApplySoftcap(float raw, float cap) { return cap * std::tanh(raw / cap); }
 
 void CompareResults(const Fixture& reference, const Fixture& actual,
                     float softcap, int batch, int seq) {
@@ -333,8 +330,7 @@ void Run(const std::string& fixture_path) {
   const Fixture fixture = Fixture::Load(fixture_path);
   const int batch = static_cast<int>(fixture.Get("config/batch").scalar_int());
   const int seq = static_cast<int>(fixture.Get("config/seq").scalar_int());
-  const float softcap =
-      fixture.Get("config/softcap").scalar_f32();
+  const float softcap = fixture.Get("config/softcap").scalar_f32();
   if (fixture.Get("config/version").scalar_int() != 1) {
     throw std::runtime_error("unsupported score-parity fixture version");
   }
@@ -358,23 +354,21 @@ void Run(const std::string& fixture_path) {
 
   const std::string out_path = TempDir() + "/core_eval_result.bin";
   const std::string binary = LocateScoreMain();
-  std::string command = ShellQuote(binary) +
-                        " --fixture " + ShellQuote(fixture_path) +
-                        " --out " + ShellQuote(out_path) +
-                        " --model " + ShellQuote(checkpoint) +
-                        " --layers " + std::to_string(config.num_layers) +
-                        " --heads " + std::to_string(config.num_heads) +
-                        " --kv-heads " + std::to_string(config.num_kv_heads) +
-                        " --hidden " + std::to_string(config.hidden_dim) +
-                        " --seq " + std::to_string(config.seq_len) +
-                        " --vocab " + std::to_string(config.vocab_size) +
-                        " --padded-vocab " +
-                        std::to_string(config.padded_vocab_size) +
-                        " --window-pattern " + ShellQuote(config.window_pattern);
+  std::string command =
+      ShellQuote(binary) + " --fixture " + ShellQuote(fixture_path) +
+      " --out " + ShellQuote(out_path) + " --model " + ShellQuote(checkpoint) +
+      " --layers " + std::to_string(config.num_layers) + " --heads " +
+      std::to_string(config.num_heads) + " --kv-heads " +
+      std::to_string(config.num_kv_heads) + " --hidden " +
+      std::to_string(config.hidden_dim) + " --seq " +
+      std::to_string(config.seq_len) + " --vocab " +
+      std::to_string(config.vocab_size) + " --padded-vocab " +
+      std::to_string(config.padded_vocab_size) + " --window-pattern " +
+      ShellQuote(config.window_pattern);
   const int status = std::system(command.c_str());
   if (status == -1 || !WIFEXITED(status) || WEXITSTATUS(status) != 0) {
-    Fail("score_main did not run successfully (exit " +
-         std::to_string(status) + ")");
+    Fail("score_main did not run successfully (exit " + std::to_string(status) +
+         ")");
     return;
   }
 

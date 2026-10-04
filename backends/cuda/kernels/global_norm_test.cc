@@ -6,9 +6,9 @@
 #include <vector>
 
 #include "backends/cuda/kernels/testing/gpu_test_utils.h"
+#include "backends/cuda/kernels/testing/row_ref.h"
 #include "nanochat/kernels.h"
 #include "nanochat/sandbox.h"
-#include "backends/cuda/kernels/testing/row_ref.h"
 
 namespace {
 
@@ -21,7 +21,7 @@ using nanochat::dev::FromStorage;
 using nanochat::dev::RandomVec;
 using nanochat::dev::Rng;
 using nanochat::dev::ToStorage;
-using namespace nanochat::dev::rowref;
+using nanochat::dev::rowref::GlobalNorm;
 
 void RunCase(const std::vector<float>& g0, float clip, const char* name) {
   const int n = static_cast<int>(g0.size());

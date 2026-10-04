@@ -11,11 +11,11 @@
 #include <string>
 #include <vector>
 
-#include "dev/kernels/qk_prep_fused.h"
 #include "backends/cuda/kernels/testing/gpu_test_utils.h"
+#include "backends/cuda/kernels/testing/row_ref.h"
+#include "dev/kernels/qk_prep_fused.h"
 #include "nanochat/kernels.h"
 #include "nanochat/sandbox.h"
-#include "backends/cuda/kernels/testing/row_ref.h"
 
 namespace {
 
@@ -29,7 +29,8 @@ using nanochat::dev::FromStorage;
 using nanochat::dev::RandomVec;
 using nanochat::dev::Rng;
 using nanochat::dev::ToStorage;
-using namespace nanochat::dev::rowref;
+using nanochat::dev::rowref::QkPrepBackward;
+using nanochat::dev::rowref::QkPrepForward;
 
 void MakeRopeTables(const QkPrepParams& p, std::vector<float>* cos,
                     std::vector<float>* sin) {

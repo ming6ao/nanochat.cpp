@@ -8,9 +8,9 @@
 #include <vector>
 
 #include "backends/cuda/kernels/testing/gpu_test_utils.h"
+#include "backends/cuda/kernels/testing/sequence_ref.h"
 #include "nanochat/kernels.h"
 #include "nanochat/sandbox.h"
-#include "backends/cuda/kernels/testing/sequence_ref.h"
 
 namespace {
 
@@ -24,7 +24,8 @@ using nanochat::dev::FromStorage;
 using nanochat::dev::RandomVec;
 using nanochat::dev::Rng;
 using nanochat::dev::ToStorage;
-using namespace nanochat::dev::seqref;
+using nanochat::dev::seqref::ClassifierBackward;
+using nanochat::dev::seqref::ClassifierForward;
 
 void RunCase(int rows, int vocab, int padded, bool use_ignore,
              const char* name) {

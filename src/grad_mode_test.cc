@@ -16,11 +16,11 @@
 #include <string>
 #include <vector>
 
-#include "model_impl.h"
 #include "nanochat/kernels.h"
 #include "nanochat/model.h"
 #include "nanochat/tensor.h"
-#include "ops.h"
+#include "src/model_impl.h"
+#include "src/ops.h"
 
 namespace {
 
@@ -59,7 +59,8 @@ std::vector<ComputeType> StageLosses(Model* model, int rows) {
   const ComputeType* losses = impl->losses();
   if (losses != nullptr) {
     nanochat::kernels::Memcpy(
-        host.data(), losses, static_cast<std::size_t>(rows) * sizeof(ComputeType),
+        host.data(), losses,
+        static_cast<std::size_t>(rows) * sizeof(ComputeType),
         CopyDir::kDeviceToHost);
   }
   return host;
@@ -76,14 +77,14 @@ std::vector<int> MakeTokens(int batch, int seq, int vocab) {
 std::vector<int> MakeTargets(int batch, int seq, int vocab) {
   std::vector<int> targets(static_cast<std::size_t>(batch) * seq);
   for (std::size_t i = 0; i < targets.size(); ++i) {
-    targets[i] = static_cast<int>((i * 11 + 5) % static_cast<std::size_t>(vocab));
+    targets[i] =
+        static_cast<int>((i * 11 + 5) % static_cast<std::size_t>(vocab));
   }
   return targets;
 }
 
 void CompareRows(const std::vector<ComputeType>& want,
-                 const std::vector<ComputeType>& got,
-                 const std::string& what) {
+                 const std::vector<ComputeType>& got, const std::string& what) {
   if (want.size() != got.size()) {
     Fail(what + ": row count mismatch");
     return;
@@ -92,8 +93,8 @@ void CompareRows(const std::vector<ComputeType>& want,
     const double a = nanochat::AsF(want[i]);
     const double b = nanochat::AsF(got[i]);
     if (std::fabs(a - b) > kLossTolerance * (1.0 + std::fabs(a))) {
-      Fail(what + ": row " + std::to_string(i) + " got " +
-           std::to_string(b) + " want " + std::to_string(a));
+      Fail(what + ": row " + std::to_string(i) + " got " + std::to_string(b) +
+           " want " + std::to_string(a));
       return;
     }
   }
@@ -124,8 +125,7 @@ void CheckEvalParity() {
   }
 
   if (std::fabs(static_cast<double>(train_loss) -
-                static_cast<double>(eval_loss)) >
-      kLossTolerance) {
+                static_cast<double>(eval_loss)) > kLossTolerance) {
     Fail("mean loss differs: got " + std::to_string(eval_loss) + " want " +
          std::to_string(train_loss));
   }
@@ -194,9 +194,8 @@ void CheckEvalWorkspaceSmaller() {
     return;
   }
   if (eval_bytes * 5 > train_bytes) {
-    Fail("eval arena is not much smaller: eval " +
-         std::to_string(eval_bytes) + " bytes, train " +
-         std::to_string(train_bytes) + " bytes");
+    Fail("eval arena is not much smaller: eval " + std::to_string(eval_bytes) +
+         " bytes, train " + std::to_string(train_bytes) + " bytes");
   }
 }
 

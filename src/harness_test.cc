@@ -1,4 +1,4 @@
-// src/harness_test.cc — the training harness utilities and driver.
+// src/harness_test.cc -- the training harness utilities and driver.
 //
 // Uses the same tiny architecture as `src/generate_test.cc` and
 // `src/optim_test.cc` and checks, in order:
@@ -20,7 +20,6 @@
 #include <utility>
 #include <vector>
 
-#include "cli.h"
 #include "nanochat/data.h"
 #include "nanochat/dataloader.h"
 #include "nanochat/logger.h"
@@ -29,8 +28,9 @@
 #include "nanochat/optim.h"
 #include "nanochat/scheduler.h"
 #include "nanochat/tensor.h"
-#include "ops.h"
-#include "train.h"
+#include "src/cli.h"
+#include "src/ops.h"
+#include "src/train.h"
 
 namespace {
 

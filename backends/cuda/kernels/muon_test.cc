@@ -9,9 +9,9 @@
 #include <vector>
 
 #include "backends/cuda/kernels/testing/gpu_test_utils.h"
+#include "backends/cuda/kernels/testing/optim_ref.h"
 #include "nanochat/kernels.h"
 #include "nanochat/sandbox.h"
-#include "backends/cuda/kernels/testing/optim_ref.h"
 
 namespace {
 
@@ -24,7 +24,7 @@ using nanochat::dev::FromStorage;
 using nanochat::dev::RandomVec;
 using nanochat::dev::Rng;
 using nanochat::dev::ToStorage;
-using namespace nanochat::dev::optimref;
+using nanochat::dev::optimref::MuonUpdate;
 
 // Returns the per-matrix size of buf2 for the CPU reference's `red_dim` rule.
 int RedIndex(int rows, int cols, int red_dim) {

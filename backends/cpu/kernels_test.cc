@@ -1,4 +1,4 @@
-// backends/cpu/cpu_kernels_test.cc — the reference backend's self-check.
+// backends/cpu/kernels_test.cc -- the reference backend's self-check.
 //
 // CPU-only T0 test (docs/testing.md): analytic identities where the answer is
 // known, plus a central finite-difference gradient check for every family that
@@ -16,7 +16,22 @@
 
 namespace {
 
+using nanochat::AdamWParams;
+using nanochat::AttentionParams;
+using nanochat::AttentionStatsCount;
+using nanochat::Caps;
+using nanochat::ClassifierParams;
 using nanochat::ComputeType;
+using nanochat::CopyDir;
+using nanochat::GemmMode;
+using nanochat::GemmParams;
+using nanochat::kComputeDType;
+using nanochat::MuonParams;
+using nanochat::PointwiseOp;
+using nanochat::QkPrepParams;
+using nanochat::RmsNormParams;
+
+namespace kernels = nanochat::kernels;
 
 #if defined(NANOCHAT_PRECISION_FP16)
 ComputeType C(float v) { return nanochat::Fp16FromFloat(v); }
@@ -96,7 +111,6 @@ void CheckFiniteDifference(const std::vector<float>& x0,
 #endif
 
 void TestGemm() {
-  using namespace nanochat;
   // 2x2 * 2x2 = [[19,22],[43,50]].
   float a[4] = {1, 2, 3, 4};
   float b[4] = {5, 6, 7, 8};
@@ -162,7 +176,6 @@ void TestGemm() {
 }
 
 void TestRmsNorm() {
-  using namespace nanochat;
   RmsNormParams p;
   p.rows = 1;
   p.dim = 2;
@@ -206,7 +219,6 @@ void TestRmsNorm() {
 }
 
 void TestQkPrep() {
-  using namespace nanochat;
   QkPrepParams p;
   p.batch = 1;
   p.seq = 1;
@@ -271,7 +283,6 @@ void TestQkPrep() {
 }
 
 void TestAttention() {
-  using namespace nanochat;
   AttentionParams p;
   p.batch = 1;
   p.seq = 3;
@@ -337,7 +348,6 @@ void TestAttention() {
 
 void TestAttentionWindow() {
 #if !defined(NANOCHAT_PRECISION_FP16)
-  using namespace nanochat;
   AttentionParams p;
   p.batch = 1;
   p.seq = 4;
@@ -399,7 +409,6 @@ void TestAttentionWindow() {
 }
 
 void TestPointwise() {
-  using namespace nanochat;
   Rng rng;
   const int n = 5;
   std::vector<float> a0 = RandomVec(n, &rng);
@@ -442,7 +451,6 @@ void TestPointwise() {
 }
 
 void TestClassifier() {
-  using namespace nanochat;
   ClassifierParams p;
   p.rows = 3;
   p.vocab_size = 4;
@@ -478,7 +486,6 @@ void TestClassifier() {
 }
 
 void TestEmbedding() {
-  using namespace nanochat;
   Rng rng;
   const int tokens = 4;
   const int dim = 3;
@@ -510,7 +517,6 @@ void TestEmbedding() {
 }
 
 void TestAdamW() {
-  using namespace nanochat;
   AdamWParams p;
   p.lr = 0.1f;
   p.beta1 = 0.9f;
@@ -529,7 +535,6 @@ void TestAdamW() {
 }
 
 void TestMuon() {
-  using namespace nanochat;
   MuonParams p;
   p.num_params = 1;
   p.rows = 3;
@@ -558,7 +563,6 @@ void TestMuon() {
 }
 
 void TestGlobalNorm() {
-  using namespace nanochat;
   std::vector<ComputeType> g = ToStorage({3.0f, 4.0f});
   float norm = 0.0f;
   kernels::GlobalNorm(2, 2.5f, g.data(), &norm);
@@ -572,7 +576,6 @@ void TestGlobalNorm() {
 }
 
 void TestDeviceUtilities() {
-  using namespace nanochat;
   void* p = kernels::Alloc(64);
   Check(p != nullptr, "alloc");
   kernels::Memset(p, 0, 64);

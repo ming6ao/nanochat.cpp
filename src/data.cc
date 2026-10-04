@@ -166,6 +166,8 @@ std::unique_ptr<TokenShard> TokenShard::Open(const std::string& path,
   }
   in.seekg(24, std::ios::beg);
 
+  // `TokenShard` has a private constructor, so std::make_unique cannot
+  // reach it from this static factory. Wrap the raw allocation directly.
   auto shard = std::unique_ptr<TokenShard>(new TokenShard());
   shard->header_ = header;
   shard->impl_ = std::make_unique<Impl>();

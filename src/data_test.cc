@@ -1,4 +1,4 @@
-// src/data_test.cc — the `src/data.cc` containers.
+// src/data_test.cc -- the `src/data.cc` containers.
 //
 // Round-trips a temporary token shard (both uint16 and uint32 widths), checks
 // the `DataLoader` batch shape and the one-token targets shift, verifies the

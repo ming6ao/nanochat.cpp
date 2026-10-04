@@ -1,4 +1,4 @@
-// `generate_main` — a small prefill/decode CLI. Because the BPE tokenizer is
+// `generate_main` -- a small prefill/decode CLI. Because the BPE tokenizer is
 // out of scope in this tree, the prompt is given as token ids (inline or in a
 // file). Weights come from a `Checkpoint` container written by `train_main`.
 //
@@ -14,11 +14,11 @@
 #include <utility>
 #include <vector>
 
-#include "cli.h"
 #include "nanochat/model.h"
 #include "nanochat/sampler.h"
 #include "nanochat/sandbox.h"
-#include "train.h"
+#include "src/cli.h"
+#include "src/train.h"
 
 namespace {
 

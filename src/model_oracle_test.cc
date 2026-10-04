@@ -25,9 +25,9 @@
 #include <unordered_map>
 #include <vector>
 
-#include "model_impl.h"
 #include "nanochat/kernels.h"
 #include "nanochat/model.h"
+#include "src/model_impl.h"
 #include "tests/oracle_fixture.h"
 
 namespace {

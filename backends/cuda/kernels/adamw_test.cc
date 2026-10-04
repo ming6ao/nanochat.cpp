@@ -8,9 +8,9 @@
 #include <vector>
 
 #include "backends/cuda/kernels/testing/gpu_test_utils.h"
+#include "backends/cuda/kernels/testing/optim_ref.h"
 #include "nanochat/kernels.h"
 #include "nanochat/sandbox.h"
-#include "backends/cuda/kernels/testing/optim_ref.h"
 
 namespace {
 
@@ -23,7 +23,7 @@ using nanochat::dev::FromStorage;
 using nanochat::dev::RandomVec;
 using nanochat::dev::Rng;
 using nanochat::dev::ToStorage;
-using namespace nanochat::dev::optimref;
+using nanochat::dev::optimref::AdamWUpdate;
 
 // Runs `steps` AdamW steps on device and host, keeping both in lockstep, and
 // compares the parameter and the two moments after every step.

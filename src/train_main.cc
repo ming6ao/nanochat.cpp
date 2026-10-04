@@ -1,5 +1,5 @@
-// `train_main` — the training CLI. A hand-written parser keeps the tree free of
-// a third-party argument library. The actual loop lives in `src/train.cc`.
+// `train_main` -- the training CLI. A hand-written parser keeps the tree free
+// of a third-party argument library. The actual loop lives in `src/train.cc`.
 //
 //   tools/nanochat train -- <train_main> --train-shard data/train.bin ...
 //
@@ -11,9 +11,9 @@
 #include <utility>
 #include <vector>
 
-#include "cli.h"
 #include "nanochat/sandbox.h"
-#include "train.h"
+#include "src/cli.h"
+#include "src/train.h"
 
 namespace {
 

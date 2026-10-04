@@ -19,9 +19,10 @@
 // collide in a single batched call.
 //
 // The softmax kernels mirror `backends/cpu/kernels.cc` and
-// `backends/cuda/kernels/testing/sequence_ref.h` exactly: the row maximum over the *visible*
-// keys, the causal plus sliding-window mask, the `(0, 0)` statistics for an
-// empty window, and the `p * (dp - sum(p * dp))` softmax Jacobian.
+// `backends/cuda/kernels/testing/sequence_ref.h` exactly: the row maximum over
+// the *visible* keys, the causal plus sliding-window mask, the `(0, 0)`
+// statistics for an empty window, and the `p * (dp - sum(p * dp))` softmax
+// Jacobian.
 //
 // A windowed forward at `head_dim` 128 takes a fused tiled kernel instead of
 // the cuBLAS decomposition. The kernel keeps the online-softmax state and the

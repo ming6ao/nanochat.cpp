@@ -12,7 +12,7 @@
 // in ops.cc; this file only wires them into the training graph and its
 // reverse-order backward.
 
-#include "model_impl.h"
+#include "src/model_impl.h"
 
 #include <algorithm>
 #include <cmath>
@@ -24,7 +24,7 @@
 
 #include "nanochat/kernels.h"
 #include "nanochat/optim.h"
-#include "ops.h"
+#include "src/ops.h"
 
 namespace nanochat {
 namespace {
@@ -748,8 +748,8 @@ void TrainModel::RequireGradActivations(const char* caller) const {
     std::abort();
   }
   if (!have_grad_activations_) {
-    std::fprintf(stderr,
-                 "nanochat: %s called before a training forward.\n", caller);
+    std::fprintf(stderr, "nanochat: %s called before a training forward.\n",
+                 caller);
     std::abort();
   }
 }

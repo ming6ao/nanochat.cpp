@@ -1,4 +1,4 @@
-// tests/generate_parity_test.cc — the generation-parity gate.
+// tests/generate_parity_test.cc -- the generation-parity gate.
 //
 // Reads a fixture produced by `tools/dump_generate_fixture.py` and drives
 // `nanochat.cpp`'s `GenerateBatch` in greedy mode from the recorded parameters

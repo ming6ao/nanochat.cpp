@@ -5,8 +5,8 @@
 #include <cmath>
 #include <cstdio>
 
+#include "dev/kernels/pascal_spike.h"
 #include "nanochat/sandbox.h"
-#include "pascal_spike.h"
 
 #if defined(NANOCHAT_PRECISION_FP16) && defined(NANOCHAT_PRECISION_FP32)
 #error "exactly one precision must be selected"

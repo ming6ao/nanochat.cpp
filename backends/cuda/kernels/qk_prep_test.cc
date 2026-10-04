@@ -7,9 +7,9 @@
 #include <vector>
 
 #include "backends/cuda/kernels/testing/gpu_test_utils.h"
+#include "backends/cuda/kernels/testing/row_ref.h"
 #include "nanochat/kernels.h"
 #include "nanochat/sandbox.h"
-#include "backends/cuda/kernels/testing/row_ref.h"
 
 namespace {
 
@@ -23,7 +23,8 @@ using nanochat::dev::FromStorage;
 using nanochat::dev::RandomVec;
 using nanochat::dev::Rng;
 using nanochat::dev::ToStorage;
-using namespace nanochat::dev::rowref;
+using nanochat::dev::rowref::QkPrepBackward;
+using nanochat::dev::rowref::QkPrepForward;
 
 void RunCase(const QkPrepParams& p) {
   const int half = p.head_dim / 2;

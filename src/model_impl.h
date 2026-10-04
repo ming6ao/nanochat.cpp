@@ -7,8 +7,8 @@
 #include <vector>
 
 #include "nanochat/model.h"
-#include "ops.h"
-#include "workspace.h"
+#include "src/ops.h"
+#include "src/workspace.h"
 
 // Concrete training model: the fixed train graph (forward, backward, optimizer
 // step) from docs/model.md. The topology is a plain hand-written sequence of

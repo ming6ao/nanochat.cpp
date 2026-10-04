@@ -1,9 +1,10 @@
 // Batch-1 decode baseline: a small nanochat-style transformer decode step built
 // from the seam GEMM (cuBLAS) and kernel families, measured twice:
 //
-//   1. eager seam path  — `kernels::Gemm` and the seam kernels on the legacy
+//   1. eager seam path  -- `kernels::Gemm` and the seam kernels on the legacy
 //      default stream, which is the current model behaviour; and
-//   2. cuBLAS + CUDA Graphs — the same step captured on a private stream, using
+//   2. cuBLAS + CUDA Graphs -- the same step captured on a private stream,
+//   using
 //      direct cuBLAS on that stream and the capture-safe local kernel mirrors
 //      in decode_kernels.cu.
 //
@@ -32,8 +33,8 @@
 #include <cstdio>
 #include <vector>
 
-#include "dev/kernels/decode_kernels.h"
 #include "backends/cuda/kernels/testing/gpu_test_utils.h"
+#include "dev/kernels/decode_kernels.h"
 #include "nanochat/kernels.h"
 #include "nanochat/sandbox.h"
 

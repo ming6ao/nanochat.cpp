@@ -21,8 +21,8 @@ cc_library(
 # finite-difference gradient check for every family with a backward. The oracle
 # parity test lives in //tests.
 cc_test(
-    name = "cpu_kernels_test",
-    srcs = ["cpu_kernels_test.cc"],
+    name = "kernels_test",
+    srcs = ["kernels_test.cc"],
     copts = nanochat_copts(),
     defines = precision_defines(),
     deps = [

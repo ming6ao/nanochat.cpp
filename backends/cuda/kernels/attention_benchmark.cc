@@ -182,11 +182,12 @@ void BenchPattern(BenchReport* report, Rng* rng, const BenchOptions& opt,
   }
 
   const double ratio = necessary > 0.0 ? issued / necessary : 0.0;
-  const int kv_heads = base.num_kv_heads > 0 ? base.num_kv_heads : base.num_heads;
+  const int kv_heads =
+      base.num_kv_heads > 0 ? base.num_kv_heads : base.num_heads;
   char shape[160];
-  std::snprintf(shape, sizeof(shape),
-                "B=%d T=%d H=%d KV=%d D=%d pattern=%s", base.batch, base.seq,
-                base.num_heads, kv_heads, base.head_dim, pattern.c_str());
+  std::snprintf(shape, sizeof(shape), "B=%d T=%d H=%d KV=%d D=%d pattern=%s",
+                base.batch, base.seq, base.num_heads, kv_heads, base.head_dim,
+                pattern.c_str());
   char name[96];
   std::snprintf(name, sizeof(name), "attention_fwd:%s", label);
   report->Add(name, shape, fwd_ms, fwd_gflop / (fwd_ms / 1e3), ratio);

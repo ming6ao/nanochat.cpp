@@ -105,7 +105,8 @@ struct DevBuf {
   explicit DevBuf(int n) : count(n) {
     ptr = static_cast<T*>(nanochat::kernels::Alloc(sizeof(T) * n));
   }
-  explicit DevBuf(const std::vector<T>& host) : count((int)host.size()) {
+  explicit DevBuf(const std::vector<T>& host)
+      : count(static_cast<int>(host.size())) {
     ptr = static_cast<T*>(nanochat::kernels::Alloc(sizeof(T) * host.size()));
     nanochat::kernels::Memcpy(ptr, host.data(), sizeof(T) * host.size(),
                               nanochat::CopyDir::kHostToDevice);

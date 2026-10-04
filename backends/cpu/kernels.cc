@@ -1,4 +1,4 @@
-// backends/cpu/kernels.cc — the reference implementation of every symbol in
+// backends/cpu/kernels.cc -- the reference implementation of every symbol in
 // nanochat/kernels.h (docs/backends.md). It is the correctness baseline, the
 // oracle-on-CPU path, and the fallback when no accelerator is present.
 //

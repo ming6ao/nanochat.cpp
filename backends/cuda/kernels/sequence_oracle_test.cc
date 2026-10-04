@@ -24,9 +24,9 @@
 #include <vector>
 
 #include "backends/cuda/kernels/testing/gpu_test_utils.h"
+#include "backends/cuda/kernels/testing/sequence_ref.h"
 #include "nanochat/kernels.h"
 #include "nanochat/sandbox.h"
-#include "backends/cuda/kernels/testing/sequence_ref.h"
 #include "tests/oracle_fixture.h"
 
 namespace {
@@ -44,7 +44,12 @@ using nanochat::dev::FromStorage;
 using nanochat::dev::RandomVec;
 using nanochat::dev::Rng;
 using nanochat::dev::ToStorage;
-using namespace nanochat::dev::seqref;
+using nanochat::dev::seqref::AttentionBackward;
+using nanochat::dev::seqref::AttentionForward;
+using nanochat::dev::seqref::ClassifierBackward;
+using nanochat::dev::seqref::ClassifierForward;
+using nanochat::dev::seqref::EmbeddingBackward;
+using nanochat::dev::seqref::EmbeddingForward;
 
 std::string LocateFixture(int argc, char** argv) {
   std::vector<std::string> candidates;

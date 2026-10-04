@@ -1,4 +1,4 @@
-// `eval_bench` — a small end-to-end benchmark for the forward-only evaluation
+// `eval_bench` -- a small end-to-end benchmark for the forward-only evaluation
 // path (docs/grad-mode.md).
 //
 // It builds a model, runs `ForwardLoss` under `NoGradGuard` on random tokens,
@@ -25,25 +25,24 @@
 #include <string>
 #include <vector>
 
-#include "cli.h"
-#include "model_impl.h"
 #include "nanochat/kernels.h"
 #include "nanochat/model.h"
 #include "nanochat/sandbox.h"
+#include "src/cli.h"
+#include "src/model_impl.h"
 
 namespace {
 
 void Usage() {
-  std::fprintf(
-      stderr,
-      "usage: eval_bench [options]\n"
-      "  --batch N              batch size (default 32)\n"
-      "  --iters N              timed forwards (default 10)\n"
-      "  --warmup N             warm-up forwards (default 3)\n"
-      "  --seed N               token/weight seed (default 42)\n"
-      "  --json                 write a nanochat.bench.v1 JSON row\n"
-      "  [model flags: --layers --heads --kv-heads --hidden --seq\n"
-      "   --vocab --padded-vocab --window-pattern --rope-base]\n");
+  std::fprintf(stderr,
+               "usage: eval_bench [options]\n"
+               "  --batch N              batch size (default 32)\n"
+               "  --iters N              timed forwards (default 10)\n"
+               "  --warmup N             warm-up forwards (default 3)\n"
+               "  --seed N               token/weight seed (default 42)\n"
+               "  --json                 write a nanochat.bench.v1 JSON row\n"
+               "  [model flags: --layers --heads --kv-heads --hidden --seq\n"
+               "   --vocab --padded-vocab --window-pattern --rope-base]\n");
 }
 
 // Deterministic xorshift64* so a run reproduces on any backend.
@@ -130,7 +129,8 @@ int main(int argc, char** argv) {
     return 2;
   }
 
-  std::unique_ptr<nanochat::Model> model = nanochat::Model::Create(model_config);
+  std::unique_ptr<nanochat::Model> model =
+      nanochat::Model::Create(model_config);
   model->InitWeights(seed);
 
   const std::int64_t rows =
@@ -166,12 +166,11 @@ int main(int argc, char** argv) {
     const std::size_t arena_bytes = impl->workspace_bytes();
 
     char shape[160];
-    std::snprintf(shape, sizeof(shape),
-                  "B=%d T=%d L=%d H=%d KV=%d C=%d V=%d W=%s", batch, seq,
-                  model_config.num_layers, model_config.num_heads,
-                  model_config.num_kv_heads, model_config.hidden_dim,
-                  model_config.padded_vocab_size,
-                  model_config.window_pattern.c_str());
+    std::snprintf(
+        shape, sizeof(shape), "B=%d T=%d L=%d H=%d KV=%d C=%d V=%d W=%s", batch,
+        seq, model_config.num_layers, model_config.num_heads,
+        model_config.num_kv_heads, model_config.hidden_dim,
+        model_config.padded_vocab_size, model_config.window_pattern.c_str());
 
     if (json) {
       std::printf(
@@ -194,9 +193,9 @@ int main(int argc, char** argv) {
                   kBaselineTokensPerSecond, kBaselineForwardMs);
       std::printf("  speedup     : %.4fx vs baseline\n",
                   tokens_per_second / kBaselineTokensPerSecond);
-      std::printf("  mean loss   : %.6f\n",
-                  static_cast<double>(sink /
-                                      static_cast<float>(warmup + iters)));
+      std::printf(
+          "  mean loss   : %.6f\n",
+          static_cast<double>(sink / static_cast<float>(warmup + iters)));
     }
   }
 

@@ -20,7 +20,7 @@
 #include <cstdio>
 #include <cstdlib>
 
-#include "device.h"
+#include "backends/cuda/device.h"
 
 namespace nanochat {
 namespace kernels {

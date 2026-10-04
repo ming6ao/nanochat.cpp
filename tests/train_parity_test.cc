@@ -1,4 +1,4 @@
-// tests/train_parity_test.cc — the multi-step training-parity gate.
+// tests/train_parity_test.cc -- the multi-step training-parity gate.
 //
 // Reads a fixture produced by `tools/dump_train_fixture.py` and drives
 // `nanochat.cpp`'s `Model::TrainStep` over the recorded batches from the

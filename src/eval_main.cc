@@ -1,4 +1,4 @@
-// `eval_main` — forward-only bits-per-byte evaluation. Reads pre-tokenized
+// `eval_main` -- forward-only bits-per-byte evaluation. Reads pre-tokenized
 // shards, builds the model, optionally loads a checkpoint, and prints the bpb
 // for the train and/or validation split.
 //
@@ -17,28 +17,29 @@
 #include <utility>
 #include <vector>
 
-#include "cli.h"
 #include "nanochat/dataloader.h"
 #include "nanochat/model.h"
 #include "nanochat/sandbox.h"
-#include "train.h"
+#include "src/cli.h"
+#include "src/train.h"
 
 namespace {
 
 void Usage() {
-  std::fprintf(stderr,
-               "usage: eval_main [options]\n"
-               "  --train-shard PATH     training shard (repeatable, csv)\n"
-               "  --val-shard PATH       validation shard (repeatable, csv)\n"
-               "  --steps N              number of batches to evaluate\n"
-               "  --split-tokens N       tokens per split; overrides --steps with\n"
-               "                         N / (batch * seq_len) batches\n"
-               "  --batch N              batch size\n"
-               "  --seq N                sequence length (model flag below)\n"
-               "  --model PATH           checkpoint to load\n"
-               "  --seed N               weight init seed when no checkpoint\n"
-               "  [model flags: --layers --heads --kv-heads --hidden --seq\n"
-               "   --vocab --padded-vocab --window-pattern --rope-base]\n");
+  std::fprintf(
+      stderr,
+      "usage: eval_main [options]\n"
+      "  --train-shard PATH     training shard (repeatable, csv)\n"
+      "  --val-shard PATH       validation shard (repeatable, csv)\n"
+      "  --steps N              number of batches to evaluate\n"
+      "  --split-tokens N       tokens per split; overrides --steps with\n"
+      "                         N / (batch * seq_len) batches\n"
+      "  --batch N              batch size\n"
+      "  --seq N                sequence length (model flag below)\n"
+      "  --model PATH           checkpoint to load\n"
+      "  --seed N               weight init seed when no checkpoint\n"
+      "  [model flags: --layers --heads --kv-heads --hidden --seq\n"
+      "   --vocab --padded-vocab --window-pattern --rope-base]\n");
 }
 
 // Evaluates one split (a non-empty shard list) and prints its bpb. Returns the

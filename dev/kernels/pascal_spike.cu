@@ -3,7 +3,7 @@
 // CUDA toolkit builds, links, and runs from Bazel on Pascal; the real kernel
 // families land in P1 under backends/cuda/kernels.
 
-#include "pascal_spike.h"
+#include "dev/kernels/pascal_spike.h"
 
 #include <cuda_runtime.h>
 

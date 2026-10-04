@@ -1,4 +1,4 @@
-// src/optim_test.cc — the optimizer grouping, schedules, and update rules.
+// src/optim_test.cc -- the optimizer grouping, schedules, and update rules.
 //
 // The test builds a tiny model and verifies, in order:
 //   1. the Scheduler values (learning-rate multiplier, Muon momentum, and

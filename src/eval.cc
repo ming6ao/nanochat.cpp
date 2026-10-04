@@ -13,11 +13,11 @@
 #include <limits>
 #include <vector>
 
-#include "model_impl.h"
 #include "nanochat/dataloader.h"
 #include "nanochat/kernels.h"
 #include "nanochat/tensor.h"
-#include "ops.h"
+#include "src/model_impl.h"
+#include "src/ops.h"
 
 namespace nanochat {
 
@@ -135,8 +135,7 @@ void ScoreBatch(Model* model, const int* tokens, int batch, int seq,
   const ComputeType* logits = impl->raw_logits();
   if (logits != nullptr) {
     kernels::Memcpy(logits_host.data(), logits,
-                    static_cast<std::size_t>(logit_count) *
-                        sizeof(ComputeType),
+                    static_cast<std::size_t>(logit_count) * sizeof(ComputeType),
                     CopyDir::kDeviceToHost);
   }
 
@@ -154,8 +153,8 @@ void ScoreBatch(Model* model, const int* tokens, int batch, int seq,
       result.nll[static_cast<std::size_t>(p)] =
           AsF(losses_host[static_cast<std::size_t>(row)]);
       const ComputeType* lrow =
-          logits_host.data() +
-          static_cast<std::size_t>(row) * static_cast<std::size_t>(padded_vocab);
+          logits_host.data() + static_cast<std::size_t>(row) *
+                                   static_cast<std::size_t>(padded_vocab);
       int best = 0;
       float best_value = AsF(lrow[0]);
       for (int j = 1; j < vocab; ++j) {
@@ -182,13 +181,12 @@ void ScoreBatch(Model* model, const int* tokens, int batch, int seq,
       const std::int64_t row =
           static_cast<std::int64_t>(b) * seq + request.position;
       const ComputeType* lrow =
-          logits_host.data() +
-          static_cast<std::size_t>(row) * static_cast<std::size_t>(padded_vocab);
+          logits_host.data() + static_cast<std::size_t>(row) *
+                                   static_cast<std::size_t>(padded_vocab);
       result.focus_logits.reserve(static_cast<std::size_t>(request.count));
       for (int k = 0; k < request.count; ++k) {
         const int id = request.ids[k];
-        const float value =
-            (id >= 0 && id < vocab) ? AsF(lrow[id]) : 0.0f;
+        const float value = (id >= 0 && id < vocab) ? AsF(lrow[id]) : 0.0f;
         result.focus_logits.push_back(value);
       }
     }

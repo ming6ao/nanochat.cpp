@@ -16,11 +16,11 @@
 #include <string>
 #include <vector>
 
-#include "model_impl.h"
 #include "nanochat/kernels.h"
 #include "nanochat/model.h"
 #include "nanochat/tensor.h"
-#include "ops.h"
+#include "src/model_impl.h"
+#include "src/ops.h"
 
 namespace {
 
@@ -175,14 +175,13 @@ void CheckShapeMaskingAndFocus() {
       const std::size_t index =
           static_cast<std::size_t>(b) * seq + static_cast<std::size_t>(p);
       if (valid) {
-        CheckClosed(result.nll[static_cast<std::size_t>(p)],
-                    nanochat::AsF(reference.losses[index]),
-                    "nll row " + std::to_string(b) + " position " +
-                        std::to_string(p));
+        CheckClosed(
+            result.nll[static_cast<std::size_t>(p)],
+            nanochat::AsF(reference.losses[index]),
+            "nll row " + std::to_string(b) + " position " + std::to_string(p));
         const ComputeType* lrow =
             reference.logits.data() + index * static_cast<std::size_t>(padded);
-        if (result.argmax[static_cast<std::size_t>(p)] !=
-            Argmax(lrow, vocab)) {
+        if (result.argmax[static_cast<std::size_t>(p)] != Argmax(lrow, vocab)) {
           Fail("argmax row " + std::to_string(b) + " position " +
                std::to_string(p) + " disagrees with the raw logits");
         }
@@ -199,22 +198,21 @@ void CheckShapeMaskingAndFocus() {
   // Row 0 focus at prediction position 2.
   for (std::size_t k = 0; k < focus0.size(); ++k) {
     const std::size_t base = static_cast<std::size_t>(2) * padded;
-    CheckClosed(results[0].focus_logits[k],
-                nanochat::AsF(reference.logits[base +
-                                                static_cast<std::size_t>(
-                                                    focus0[k])]),
-                "row 0 focus " + std::to_string(k));
+    CheckClosed(
+        results[0].focus_logits[k],
+        nanochat::AsF(
+            reference.logits[base + static_cast<std::size_t>(focus0[k])]),
+        "row 0 focus " + std::to_string(k));
   }
   // Row 1 focus at the masked final position (index 2).
   {
-    const std::size_t base =
-        static_cast<std::size_t>(1) * seq * padded +
-        static_cast<std::size_t>(2) * padded;
-    CheckClosed(results[1].focus_logits[0],
-                nanochat::AsF(reference.logits[base +
-                                                static_cast<std::size_t>(
-                                                    focus1[0])]),
-                "row 1 focus");
+    const std::size_t base = static_cast<std::size_t>(1) * seq * padded +
+                             static_cast<std::size_t>(2) * padded;
+    CheckClosed(
+        results[1].focus_logits[0],
+        nanochat::AsF(
+            reference.logits[base + static_cast<std::size_t>(focus1[0])]),
+        "row 1 focus");
   }
 }
 
@@ -261,8 +259,7 @@ void CheckFullLengthNoFocus() {
         }
       } else {
         CheckClosed(result.nll[static_cast<std::size_t>(p)],
-                    nanochat::AsF(reference.losses[index]),
-                    "full-length nll");
+                    nanochat::AsF(reference.losses[index]), "full-length nll");
       }
     }
   }

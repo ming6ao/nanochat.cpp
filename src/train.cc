@@ -1,18 +1,18 @@
 // Host utilities and the training driver (docs/model.md, harness workstream):
 //
-//   * `Logger` — one structured `LogRecord` per step to stdout and an optional
+//   * `Logger` -- one structured `LogRecord` per step to stdout and an optional
 //     run file;
-//   * the `mfu.h` FLOP accounting — the same `estimate_flops` /
+//   * the `mfu.h` FLOP accounting -- the same `estimate_flops` /
 //     `get_peak_flops` contract as nanochat;
-//   * `Checkpointer` — save/load through the self-describing `Checkpoint`
+//   * `Checkpointer` -- save/load through the self-describing `Checkpoint`
 //     container;
-//   * `TrainLoop` — the `ForwardLoss` -> `Backward` -> `Optimizer::Step` loop
+//   * `TrainLoop` -- the `ForwardLoss` -> `Backward` -> `Optimizer::Step` loop
 //     with evaluation and checkpointing.
 //
 // This translation unit is CPU-safe: no vendor headers, no CUDA calls. The
 // compute itself stays behind `Model`/`Optimizer`.
 
-#include "train.h"
+#include "src/train.h"
 
 #include <algorithm>
 #include <cctype>
@@ -36,7 +36,7 @@
 #include "nanochat/optim.h"
 #include "nanochat/scheduler.h"
 #include "nanochat/tensor.h"
-#include "ops.h"
+#include "src/ops.h"
 
 namespace nanochat {
 

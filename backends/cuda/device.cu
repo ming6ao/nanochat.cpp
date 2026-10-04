@@ -3,7 +3,7 @@
 // implements the device/memory half of nanochat/kernels.h and knows nothing
 // about the model. See docs/backends.md and docs/kernels.md.
 
-#include "device.h"
+#include "backends/cuda/device.h"
 
 #include <cuda_runtime.h>
 

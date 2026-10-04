@@ -9,9 +9,9 @@
 
 #include "backends/cuda/kernels/rms_norm.h"
 #include "backends/cuda/kernels/testing/gpu_test_utils.h"
+#include "backends/cuda/kernels/testing/row_ref.h"
 #include "nanochat/kernels.h"
 #include "nanochat/sandbox.h"
-#include "backends/cuda/kernels/testing/row_ref.h"
 
 namespace {
 
@@ -28,7 +28,10 @@ using nanochat::dev::RandomVec;
 using nanochat::dev::Rng;
 using nanochat::dev::ToStorage;
 using nanochat::dev::U;
-using namespace nanochat::dev::rowref;
+using nanochat::dev::rowref::FusedResidualBackward;
+using nanochat::dev::rowref::FusedResidualForward;
+using nanochat::dev::rowref::RmsNormBackward;
+using nanochat::dev::rowref::RmsNormForward;
 
 void TestForwardBackward() {
   Rng rng;

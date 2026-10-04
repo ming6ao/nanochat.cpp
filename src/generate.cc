@@ -6,7 +6,7 @@
 // The public `KvCache` type hides the concrete layout, so callers only create a
 // cache, hand it to Prefill/Decode, and read its position.
 
-#include "model_impl.h"
+#include "src/model_impl.h"
 
 #include <algorithm>
 #include <cmath>
@@ -21,8 +21,8 @@
 #include "nanochat/kernels.h"
 #include "nanochat/rand.h"
 #include "nanochat/sampler.h"
-#include "ops.h"
-#include "workspace.h"
+#include "src/ops.h"
+#include "src/workspace.h"
 
 namespace nanochat {
 namespace {
@@ -125,10 +125,10 @@ class KvCacheImpl final : public KvCache {
     kernels::Memcpy(keys_, src.keys_, total_bytes, CopyDir::kDeviceToDevice);
     kernels::Memcpy(values_, src.values_, total_bytes,
                     CopyDir::kDeviceToDevice);
-    kernels::Memcpy(prev_, src.prev_,
-                    static_cast<std::size_t>(config_.hidden_dim) *
-                        sizeof(ComputeType),
-                    CopyDir::kDeviceToDevice);
+    kernels::Memcpy(
+        prev_, src.prev_,
+        static_cast<std::size_t>(config_.hidden_dim) * sizeof(ComputeType),
+        CopyDir::kDeviceToDevice);
     pos_ = src.pos_;
     has_prev_ = src.has_prev_;
   }
@@ -489,9 +489,9 @@ void GenerateBatch(Model* model, const int* prompt, int prompt_len,
       if (active[static_cast<std::size_t>(r)] == 0) continue;
       any_active = true;
       GeneratedSequence& row = (*out)[static_cast<std::size_t>(r)];
-      const int token = Decode(model, next[static_cast<std::size_t>(r)],
-                               caches[static_cast<std::size_t>(r)].get(),
-                               sample);
+      const int token =
+          Decode(model, next[static_cast<std::size_t>(r)],
+                 caches[static_cast<std::size_t>(r)].get(), sample);
       if (token < 0) {
         active[static_cast<std::size_t>(r)] = 0;
         continue;

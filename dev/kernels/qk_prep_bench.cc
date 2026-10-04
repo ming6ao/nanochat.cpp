@@ -11,8 +11,8 @@
 #include <cstdio>
 #include <vector>
 
-#include "dev/kernels/qk_prep_fused.h"
 #include "backends/cuda/kernels/testing/gpu_test_utils.h"
+#include "dev/kernels/qk_prep_fused.h"
 #include "nanochat/kernels.h"
 #include "nanochat/sandbox.h"
 

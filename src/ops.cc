@@ -2,7 +2,7 @@
 // Every function here is a named composition of the frozen kernel seam; the
 // topology lives in model.cc and generate.cc. See ops.h and docs/model.md.
 
-#include "ops.h"
+#include "src/ops.h"
 
 #include <cstdint>
 #include <cstring>

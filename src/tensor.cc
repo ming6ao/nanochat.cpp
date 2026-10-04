@@ -3,7 +3,7 @@
 // (`kernels::Alloc`), so the same code works for the CPU reference backend and
 // the CUDA backend.
 
-#include "workspace.h"
+#include "src/workspace.h"
 
 #include <cstdint>
 #include <cstdio>

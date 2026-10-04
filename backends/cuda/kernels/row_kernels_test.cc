@@ -51,7 +51,8 @@ template <typename T>
 struct DevBuf {
   T* ptr = nullptr;
   int count = 0;
-  explicit DevBuf(const std::vector<T>& host) : count((int)host.size()) {
+  explicit DevBuf(const std::vector<T>& host)
+      : count(static_cast<int>(host.size())) {
     ptr = static_cast<T*>(Alloc(sizeof(T) * host.size()));
     Memcpy(ptr, host.data(), sizeof(T) * host.size(), CopyDir::kHostToDevice);
   }

@@ -25,9 +25,9 @@
 #include <string>
 #include <vector>
 
-#include "model_impl.h"
 #include "nanochat/model.h"
 #include "nanochat/sampler.h"
+#include "src/model_impl.h"
 
 namespace {
 
@@ -320,10 +320,9 @@ void Run() {
   } else {
     // Greedy with a prepended beginning-of-sequence id and a different terminal
     // id per row, so the rows stop at different lengths.
-    const std::vector<int> greedy_stops = {
-        probe_row.tokens[probe_prefix + 1],
-        probe_row.tokens[probe_prefix + 2],
-        probe_row.tokens[probe_prefix + 3]};
+    const std::vector<int> greedy_stops = {probe_row.tokens[probe_prefix + 1],
+                                           probe_row.tokens[probe_prefix + 2],
+                                           probe_row.tokens[probe_prefix + 3]};
     nanochat::GenerateParams greedy_batch;
     greedy_batch.num_samples = 3;
     greedy_batch.max_tokens = 6;

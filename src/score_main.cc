@@ -1,11 +1,11 @@
-// `score_main` — stateless scorer over an evaluation fixture.
+// `score_main` -- stateless scorer over an evaluation fixture.
 //
 // It reads a `NANOEVL1` fixture of padded token sequences (plus per-row valid
 // lengths and an optional focus set), runs one `ScoreBatch`, and writes a
-// result fixture with the per-position negative log-likelihood, the per-position
-// argmax, and the focused logits. It performs no reduction: whether a candidate
-// is correct is decided by the Python bridge, next to the reference task logic
-// (docs/eval.md section 3.2).
+// result fixture with the per-position negative log-likelihood, the
+// per-position argmax, and the focused logits. It performs no reduction:
+// whether a candidate is correct is decided by the Python bridge, next to the
+// reference task logic (docs/eval.md section 3.2).
 //
 // The fixture wire format is owned by `python/nanochat_cpp/eval_fixture.py` and
 // mirrored here and by the test dumper. The C++ side is tokenizer-agnostic: ids
@@ -25,10 +25,10 @@
 #include <utility>
 #include <vector>
 
-#include "cli.h"
 #include "nanochat/model.h"
 #include "nanochat/sandbox.h"
-#include "train.h"
+#include "src/cli.h"
+#include "src/train.h"
 
 namespace {
 
@@ -122,9 +122,8 @@ bool LoadRecords(const std::string& path, std::vector<Record>* records,
     *error = "cannot open fixture " + path;
     return false;
   }
-  std::vector<std::uint8_t> bytes(
-      (std::istreambuf_iterator<char>(file)),
-      std::istreambuf_iterator<char>());
+  std::vector<std::uint8_t> bytes((std::istreambuf_iterator<char>(file)),
+                                  std::istreambuf_iterator<char>());
   if (bytes.size() < 16 ||
       std::memcmp(bytes.data(), kMagic, sizeof(kMagic)) != 0) {
     *error = "bad fixture magic in " + path;
@@ -144,9 +143,8 @@ bool LoadRecords(const std::string& path, std::vector<Record>* records,
     Record record;
     const std::uint16_t name_len = reader.Read<std::uint16_t>();
     if (!reader.Need(name_len)) break;
-    record.name.assign(reinterpret_cast<const char*>(bytes.data() +
-                                                      reader.offset),
-                       name_len);
+    record.name.assign(
+        reinterpret_cast<const char*>(bytes.data() + reader.offset), name_len);
     reader.offset += name_len;
     record.dtype = reader.Read<std::uint8_t>();
     const std::uint8_t ndim = reader.Read<std::uint8_t>();
@@ -164,8 +162,7 @@ bool LoadRecords(const std::string& path, std::vector<Record>* records,
       *error = "negative record extent";
       return false;
     }
-    const std::size_t payload =
-        static_cast<std::size_t>(numel) * elem;
+    const std::size_t payload = static_cast<std::size_t>(numel) * elem;
     if (!reader.Need(payload)) break;
     record.data.assign(bytes.begin() + reader.offset,
                        bytes.begin() + reader.offset + payload);
@@ -186,8 +183,7 @@ bool SaveRecords(const std::string& path, const std::vector<Record>& records,
   AppendU32(&bytes, kVersion);
   AppendU32(&bytes, static_cast<std::uint32_t>(records.size()));
   for (const Record& record : records) {
-    if (record.name.size() > 0xffff ||
-        record.shape.size() > 16) {
+    if (record.name.size() > 0xffff || record.shape.size() > 16) {
       *error = "record too large to serialise";
       return false;
     }
@@ -277,20 +273,22 @@ bool ReadInt32Vector(const Record* record, std::int64_t expected,
   }
   out->resize(static_cast<std::size_t>(expected));
   for (std::int64_t i = 0; i < expected; ++i) {
-    (*out)[static_cast<std::size_t>(i)] = IntAt(*record, static_cast<std::size_t>(i));
+    (*out)[static_cast<std::size_t>(i)] =
+        IntAt(*record, static_cast<std::size_t>(i));
   }
   return true;
 }
 
 void Usage() {
-  std::fprintf(stderr,
-               "usage: score_main [options]\n"
-               "  --fixture PATH         input eval fixture with input cases\n"
-               "  --out PATH             output eval fixture with result records\n"
-               "  --model PATH           checkpoint to load\n"
-               "  --seed N               weight init seed when no checkpoint\n"
-               "  [model flags: --layers --heads --kv-heads --hidden --seq\n"
-               "   --vocab --padded-vocab --window-pattern --rope-base]\n");
+  std::fprintf(
+      stderr,
+      "usage: score_main [options]\n"
+      "  --fixture PATH         input eval fixture with input cases\n"
+      "  --out PATH             output eval fixture with result records\n"
+      "  --model PATH           checkpoint to load\n"
+      "  --seed N               weight init seed when no checkpoint\n"
+      "  [model flags: --layers --heads --kv-heads --hidden --seq\n"
+      "   --vocab --padded-vocab --window-pattern --rope-base]\n");
 }
 
 }  // namespace
@@ -372,8 +370,9 @@ int main(int argc, char** argv) {
                : 0;
   }();
   if (batch <= 0 || seq <= 0) {
-    std::fprintf(stderr, "score_main: fixture has no usable config/batch or "
-                         "config/seq\n");
+    std::fprintf(stderr,
+                 "score_main: fixture has no usable config/batch or "
+                 "config/seq\n");
     return 1;
   }
 
@@ -478,14 +477,13 @@ int main(int argc, char** argv) {
 
   std::vector<std::int32_t> argmax_out;
   std::vector<float> nll_values;
-  std::vector<std::int32_t> focus_offsets_out(static_cast<std::size_t>(batch) + 1,
-                                              0);
+  std::vector<std::int32_t> focus_offsets_out(
+      static_cast<std::size_t>(batch) + 1, 0);
   std::vector<float> focus_logits_out;
   nll_values.reserve(static_cast<std::size_t>(rows));
   argmax_out.reserve(static_cast<std::size_t>(rows));
   for (int b = 0; b < batch; ++b) {
-    const nanochat::ScoreResult& result =
-        results[static_cast<std::size_t>(b)];
+    const nanochat::ScoreResult& result = results[static_cast<std::size_t>(b)];
     for (int p = 0; p < seq; ++p) {
       nll_values.push_back(result.nll[static_cast<std::size_t>(p)]);
       argmax_out.push_back(result.argmax[static_cast<std::size_t>(p)]);
@@ -496,26 +494,25 @@ int main(int argc, char** argv) {
   }
 
   std::vector<Record> output;
-  output.push_back(MakeInt32("config/version", {1},
-                             {static_cast<std::int32_t>(kVersion)}));
+  output.push_back(
+      MakeInt32("config/version", {1}, {static_cast<std::int32_t>(kVersion)}));
   output.push_back(MakeInt32("config/batch", {1}, {batch}));
   output.push_back(MakeInt32("config/seq", {1}, {seq}));
   output.push_back(MakeInt32("config/pad_id", {1}, {pad_id}));
   output.push_back(MakeFloat32(
-      "result/nll", {static_cast<std::uint64_t>(batch),
-                     static_cast<std::uint64_t>(seq)},
+      "result/nll",
+      {static_cast<std::uint64_t>(batch), static_cast<std::uint64_t>(seq)},
       nll_values));
   output.push_back(MakeInt32(
-      "result/argmax", {static_cast<std::uint64_t>(batch),
-                        static_cast<std::uint64_t>(seq)},
+      "result/argmax",
+      {static_cast<std::uint64_t>(batch), static_cast<std::uint64_t>(seq)},
       argmax_out));
-  output.push_back(MakeInt32(
-      "result/focus_offsets",
-      {static_cast<std::uint64_t>(batch) + 1}, focus_offsets_out));
-  output.push_back(MakeFloat32("result/focus_logits",
-                               {static_cast<std::uint64_t>(
-                                   focus_logits_out.size())},
-                               focus_logits_out));
+  output.push_back(MakeInt32("result/focus_offsets",
+                             {static_cast<std::uint64_t>(batch) + 1},
+                             focus_offsets_out));
+  output.push_back(MakeFloat32(
+      "result/focus_logits",
+      {static_cast<std::uint64_t>(focus_logits_out.size())}, focus_logits_out));
 
   if (!SaveRecords(out_path, output, &error)) {
     std::fprintf(stderr, "score_main: %s\n", error.c_str());
