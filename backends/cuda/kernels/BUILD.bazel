@@ -83,6 +83,10 @@ cuda_library(
 )
 
 # Attention: causal / sliding-window / grouped-query, forward and backward.
+# The promoted fused windowed forward (`window_left >= 0`, `head_dim == 128`)
+# compiles into this translation unit. It reuses device_utils, the device
+# runtime, the cuBLAS gemm seam, and the frozen interface, so the dependency
+# set below is unchanged and stays minimal.
 cuda_library(
     name = "attention",
     srcs = ["attention.cu"],
@@ -183,7 +187,9 @@ cc_library(
 )
 
 # Aggregate for the sequence families (Attention, Classifier, Embedding,
-# value gate).
+# value gate). The promoted fused windowed attention forward is part of
+# `:attention`, so this aggregate keeps the same four family libraries and
+# adds no package.
 cc_library(
     name = "sequence_kernels",
     deps = [
