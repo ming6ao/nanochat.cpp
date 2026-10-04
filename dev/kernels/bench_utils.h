@@ -42,6 +42,9 @@ struct BenchRow {
   std::string shape;
   double ms = 0.0;
   double gflops = 0.0;  // achieved GFLOP/s using the necessary operation count
+  // Issued work over necessary work, when the benchmark accounts for both.
+  // Zero means the benchmark does not report the ratio.
+  double work_ratio = 0.0;
 };
 
 // Device-event timer. Non-copyable because it owns two CUDA events.
@@ -86,8 +89,8 @@ class EventTimer {
 class BenchReport {
  public:
   void Add(const std::string& name, const std::string& shape, double ms,
-           double gflops = 0.0) {
-    rows_.push_back(BenchRow{name, shape, ms, gflops});
+           double gflops = 0.0, double work_ratio = 0.0) {
+    rows_.push_back(BenchRow{name, shape, ms, gflops, work_ratio});
   }
 
   // Print to stdout, and write the JSON report to `opt.out` when set.
@@ -104,13 +107,20 @@ class BenchReport {
       name_width = std::max(name_width, row.name.size());
       shape_width = std::max(shape_width, row.shape.size());
     }
-    std::printf("%-*s  %-*s  %10s  %10s\n", static_cast<int>(name_width),
+    std::printf("%-*s  %-*s  %10s  %10s  %10s\n", static_cast<int>(name_width),
                 "name", static_cast<int>(shape_width), "shape", "ms",
-                "GFLOP/s");
+                "GFLOP/s", "issue/need");
     for (const BenchRow& row : rows_) {
-      std::printf("%-*s  %-*s  %10.4f  %10.1f\n", static_cast<int>(name_width),
-                  row.name.c_str(), static_cast<int>(shape_width),
-                  row.shape.c_str(), row.ms, row.gflops);
+      char ratio[16];
+      if (row.work_ratio > 0.0) {
+        std::snprintf(ratio, sizeof(ratio), "%.3f", row.work_ratio);
+      } else {
+        std::snprintf(ratio, sizeof(ratio), "-");
+      }
+      std::printf("%-*s  %-*s  %10.4f  %10.1f  %10s\n",
+                  static_cast<int>(name_width), row.name.c_str(),
+                  static_cast<int>(shape_width), row.shape.c_str(), row.ms,
+                  row.gflops, ratio);
     }
   }
 
@@ -122,9 +132,10 @@ class BenchReport {
       char buffer[640];
       std::snprintf(buffer, sizeof(buffer),
                     "%s{\"name\":\"%s\",\"shape\":\"%s\",\"ms\":%.6f,"
-                    "\"gflops\":%.6f}",
+                    "\"gflops\":%.6f,\"work_ratio\":%.6f}",
                     i == 0 ? "" : ",", Escape(row.name).c_str(),
-                    Escape(row.shape).c_str(), row.ms, row.gflops);
+                    Escape(row.shape).c_str(), row.ms, row.gflops,
+                    row.work_ratio);
       text += buffer;
     }
     text += "]}";

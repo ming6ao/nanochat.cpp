@@ -1,7 +1,13 @@
 // Standalone attention-family benchmark. It measures the shipped
 // `AttentionForward` and `AttentionBackward` with device events at the
 // `d8_s512` training shape, a sliding-window variant, a grouped-query variant,
-// and a head-dimension sweep.
+// the production `SSSL` mixed-window pattern, and a head-dimension sweep.
+//
+// Every row carries an "issue/need" column: the work the shipped path issues
+// over the work the visible (causal or windowed) query-key pairs need. The
+// shipped path runs dense cuBLAS GEMMs and masks afterwards, so a windowed
+// layer costs the same as a full layer and the ratio shows the mask waste. See
+// docs/attention-baseline.md for the frozen Phase 0 numbers.
 //
 // The head-dimension sweep is the diagnostic that matters for the known
 // redundancy in `OnlineSoftmaxTile` (backends/cuda/kernels/device_utils.cuh):
@@ -17,8 +23,10 @@
 // See docs/performance.md.
 
 #include <cmath>
+#include <cstddef>
 #include <cstdio>
 #include <cstdlib>
+#include <map>
 #include <string>
 
 #include "bench_utils.h"
@@ -56,8 +64,21 @@ long long VisiblePairs(const AttentionParams& p) {
   return pairs;
 }
 
-void BenchShape(BenchReport* report, Rng* rng, const BenchOptions& opt,
-                const AttentionParams& p, const char* label) {
+// Measured cost of one attention call plus the work accounting.
+struct ShapeResult {
+  double fwd_ms = 0.0;
+  double bwd_ms = 0.0;
+  double fwd_gflop = 0.0;  // total necessary forward GFLOP
+  double bwd_gflop = 0.0;  // total necessary backward GFLOP
+  double issued_pairs = 0.0;
+  double necessary_pairs = 0.0;
+};
+
+// Time one attention shape. `issued_pairs` counts the dense query-key pairs
+// the shipped GEMMs touch; `necessary_pairs` counts only the visible pairs.
+// Their ratio is the mask waste the fused kernel must remove.
+ShapeResult MeasureShape(Rng* rng, const BenchOptions& opt,
+                         const AttentionParams& p) {
   const int dim = p.head_dim;
   const int heads = p.num_heads;
   const int kv_heads = p.num_kv_heads > 0 ? p.num_kv_heads : heads;
@@ -77,37 +98,100 @@ void BenchShape(BenchReport* report, Rng* rng, const BenchOptions& opt,
   DevBuf<ComputeType> dv(kv_count);
 
   EventTimer timer;
-  const double fwd_ms = timer.Time(
+  ShapeResult r;
+  r.fwd_ms = timer.Time(
       [&] {
         nanochat::kernels::AttentionForward(p, q.ptr, k.ptr, v.ptr, out.ptr,
                                             stats.ptr);
       },
       opt);
-  const double bwd_ms = timer.Time(
+  r.bwd_ms = timer.Time(
       [&] {
         nanochat::kernels::AttentionBackward(p, q.ptr, k.ptr, v.ptr, stats.ptr,
                                              dout.ptr, dq.ptr, dk.ptr, dv.ptr);
       },
       opt);
 
-  const double pairs = static_cast<double>(p.batch) * heads *
-                       static_cast<double>(VisiblePairs(p));
+  r.necessary_pairs = static_cast<double>(p.batch) * heads *
+                      static_cast<double>(VisiblePairs(p));
+  r.issued_pairs = static_cast<double>(p.batch) * heads *
+                   static_cast<double>(p.seq) * static_cast<double>(kv_len);
   // Necessary floating-point operations per query-key pair: one dot product
   // (2*dim) plus one value accumulation (2*dim) = 4*dim for the forward. The
   // backward adds about twice that, matching the reference 12 = 4 + 8
   // accounting. Reporting efficiency against the necessary count makes the
   // redundancy visible: a correct tile should approach the device ceiling.
-  const double fwd_gflop = 4.0 * pairs * dim / 1e9;
-  const double bwd_gflop = 8.0 * pairs * dim / 1e9;
+  r.fwd_gflop = 4.0 * r.necessary_pairs * dim / 1e9;
+  r.bwd_gflop = 8.0 * r.necessary_pairs * dim / 1e9;
+  return r;
+}
+
+void BenchShape(BenchReport* report, Rng* rng, const BenchOptions& opt,
+                const AttentionParams& p, const char* label) {
+  const ShapeResult r = MeasureShape(rng, opt, p);
+  const double ratio =
+      r.necessary_pairs > 0.0 ? r.issued_pairs / r.necessary_pairs : 0.0;
+  const int kv_heads = p.num_kv_heads > 0 ? p.num_kv_heads : p.num_heads;
 
   char shape[128];
   std::snprintf(shape, sizeof(shape), "B=%d T=%d H=%d KV=%d D=%d wl=%d",
-                p.batch, p.seq, heads, kv_heads, dim, p.window_left);
+                p.batch, p.seq, p.num_heads, kv_heads, p.head_dim,
+                p.window_left);
   char name[96];
   std::snprintf(name, sizeof(name), "attention_fwd:%s", label);
-  report->Add(name, shape, fwd_ms, fwd_gflop / (fwd_ms / 1e3));
+  report->Add(name, shape, r.fwd_ms, r.fwd_gflop / (r.fwd_ms / 1e3), ratio);
   std::snprintf(name, sizeof(name), "attention_bwd:%s", label);
-  report->Add(name, shape, bwd_ms, bwd_gflop / (bwd_ms / 1e3));
+  report->Add(name, shape, r.bwd_ms, r.bwd_gflop / (r.bwd_ms / 1e3), ratio);
+}
+
+// Average per-layer cost over a mixed window pattern such as the production
+// `SSSL`. The shipped path is dense, so every layer costs the same; the pattern
+// changes only the necessary work. The row reports the mean over one pattern
+// cycle, which is the per-layer cost the model pays. `S` maps to the short
+// window (a quarter of the context, rounded up to a tile) and every other
+// letter maps to full context; the final entry is always full, matching
+// `Config::window_left`.
+void BenchPattern(BenchReport* report, Rng* rng, const BenchOptions& opt,
+                  const AttentionParams& base, const std::string& pattern,
+                  const char* label) {
+  const int short_window = ((base.seq / 4 + 127) / 128) * 128;
+  std::map<int, int> counts;
+  for (std::size_t i = 0; i < pattern.size(); ++i) {
+    const bool full = (i + 1 == pattern.size()) || pattern[i] != 'S';
+    counts[full ? -1 : short_window] += 1;
+  }
+
+  const double n = static_cast<double>(pattern.size());
+  double fwd_ms = 0.0;
+  double bwd_ms = 0.0;
+  double fwd_gflop = 0.0;
+  double bwd_gflop = 0.0;
+  double issued = 0.0;
+  double necessary = 0.0;
+  for (const auto& entry : counts) {
+    AttentionParams p = base;
+    p.window_left = entry.first;
+    const ShapeResult r = MeasureShape(rng, opt, p);
+    const double weight = static_cast<double>(entry.second) / n;
+    fwd_ms += weight * r.fwd_ms;
+    bwd_ms += weight * r.bwd_ms;
+    fwd_gflop += weight * r.fwd_gflop;
+    bwd_gflop += weight * r.bwd_gflop;
+    issued += weight * r.issued_pairs;
+    necessary += weight * r.necessary_pairs;
+  }
+
+  const double ratio = necessary > 0.0 ? issued / necessary : 0.0;
+  const int kv_heads = base.num_kv_heads > 0 ? base.num_kv_heads : base.num_heads;
+  char shape[160];
+  std::snprintf(shape, sizeof(shape),
+                "B=%d T=%d H=%d KV=%d D=%d pattern=%s", base.batch, base.seq,
+                base.num_heads, kv_heads, base.head_dim, pattern.c_str());
+  char name[96];
+  std::snprintf(name, sizeof(name), "attention_fwd:%s", label);
+  report->Add(name, shape, fwd_ms, fwd_gflop / (fwd_ms / 1e3), ratio);
+  std::snprintf(name, sizeof(name), "attention_bwd:%s", label);
+  report->Add(name, shape, bwd_ms, bwd_gflop / (bwd_ms / 1e3), ratio);
 }
 
 }  // namespace
@@ -169,6 +253,11 @@ int main(int argc, char** argv) {
   gqa.num_heads = 8;
   gqa.num_kv_heads = 2;
   BenchShape(&report, &rng, opt, gqa, "gqa_b2_t512_h8_kv2");
+
+  // Production mixed pattern: three sliding-window layers to one full layer.
+  // The shipped path is dense, so the time matches a single layer while the
+  // necessary work drops; the row is the mean over one `SSSL` cycle.
+  BenchPattern(&report, &rng, opt, base, "SSSL", "d8_s512_sssl");
 
   // Head-dimension sweep. Small batch and sequence length keep the sweep
   // quick; the point is the exponent, not the absolute time.

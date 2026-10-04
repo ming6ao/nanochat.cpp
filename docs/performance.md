@@ -39,8 +39,8 @@ with each number. `tools/nanochat doctor` prints most of them.
 
 `dev/kernels/attention_bench.cc` times `AttentionForward` and
 `AttentionBackward` with CUDA events. The shapes are the `d8_s512` training
-shape, a sliding-window variant, a grouped-query variant, and a head-dimension
-sweep.
+shape, a sliding-window variant, a grouped-query variant, the production `SSSL`
+mixed-window pattern, and a head-dimension sweep.
 
 The head-dimension sweep shows the redundancy in `OnlineSoftmaxTile` and
 `SoftmaxGradTile`. The tile recomputes the query-key dot product for each owned
@@ -84,13 +84,14 @@ not add a benchmark to the `all` test suite.
 {
   "schema": "nanochat.bench.v1",
   "rows": [
-    {"name": "attention_fwd:d8_s512", "shape": "B=8 T=512 H=4 KV=4 D=128 wl=-1", "ms": 12.3, "gflops": 45.6}
+    {"name": "attention_fwd:d8_s512", "shape": "B=8 T=512 H=4 KV=4 D=128 wl=-1", "ms": 12.3, "gflops": 45.6, "work_ratio": 2.0}
   ]
 }
 ```
 
-`gflops` is the rate against the necessary operation count. Feed the file to
-the skill's `summarize_times.py`.
+`gflops` is the rate against the necessary operation count. `work_ratio` is the
+issued work over the necessary work. Feed the file to the skill's
+`summarize_times.py`.
 
 ## 4. Root-cause checklist
 

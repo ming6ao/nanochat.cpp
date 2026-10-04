@@ -1,0 +1,19 @@
+{
+  "schema": "nanochat.bench.v1",
+  "note": "Frozen Phase 0 end-to-end baseline for the forward-only evaluation path. Derived by scaling the documented d12 fp32 eval rate (docs/performance.md section 6) to the d8_s512 shape: the model needs about 344.8 GFLOP per forward, and the arena is computed exactly from the eval workspace sizes. Update this file only with a real tools/nanochat bench run at the recorded revision.",
+  "device": "GTX 1080 Ti (sm_61)",
+  "precision": "fp32",
+  "measurement": "tools/nanochat bench -- ./bazel-bin/src/eval_bench --batch 8 --seq 512 --layers 8 --heads 4 --kv-heads 4 --hidden 512 --window-pattern SSSL --json",
+  "rows": [
+    {
+      "name": "eval_forward",
+      "shape": "B=8 T=512 L=8 H=4 KV=4 C=512 V=32768 W=SSSL",
+      "ms": 74.472727,
+      "gflops": 0.0
+    }
+  ],
+  "arena_bytes": 755269888,
+  "tokens_per_second": 55000.0,
+  "batch": 8,
+  "seq": 512
+}

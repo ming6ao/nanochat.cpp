@@ -1,0 +1,93 @@
+{
+  "schema": "nanochat.bench.v1",
+  "note": "Frozen Phase 0 baseline of the shipped attention path. The d8_s512, window-128, and grouped-query rows are the measured values in docs/flash-attention-pascal.md section 4 (GTX 1080 Ti, sm_61, fp32). The d8_s512_sssl row is the mean over one SSSL cycle: (3 * window-128 + 1 * full) / 4. The head-dimension sweep is forward-only here, matching the plan table. work_ratio is issued work over necessary work.",
+  "device": "GTX 1080 Ti (sm_61)",
+  "precision": "fp32",
+  "measurement": "tools/nanochat profile --json --out docs/attention-baseline.json",
+  "rows": [
+    {
+      "name": "attention_fwd:d8_s512",
+      "shape": "B=8 T=512 H=4 KV=4 D=128 wl=-1",
+      "ms": 1.586000,
+      "gflops": 1356.669579,
+      "work_ratio": 1.996101
+    },
+    {
+      "name": "attention_bwd:d8_s512",
+      "shape": "B=8 T=512 H=4 KV=4 D=128 wl=-1",
+      "ms": 2.857000,
+      "gflops": 1506.249879,
+      "work_ratio": 1.996101
+    },
+    {
+      "name": "attention_fwd:d8_s512_win128",
+      "shape": "B=8 T=512 H=4 KV=4 D=128 wl=128",
+      "ms": 1.571000,
+      "gflops": 602.714276,
+      "work_ratio": 4.535991
+    },
+    {
+      "name": "attention_bwd:d8_s512_win128",
+      "shape": "B=8 T=512 H=4 KV=4 D=128 wl=128",
+      "ms": 2.806000,
+      "gflops": 674.885337,
+      "work_ratio": 4.535991
+    },
+    {
+      "name": "attention_fwd:gqa_b2_t512_h8_kv2",
+      "shape": "B=2 T=512 H=8 KV=2 D=128 wl=-1",
+      "ms": 1.312000,
+      "gflops": 819.999220,
+      "work_ratio": 1.996101
+    },
+    {
+      "name": "attention_bwd:gqa_b2_t512_h8_kv2",
+      "shape": "B=2 T=512 H=8 KV=2 D=128 wl=-1",
+      "ms": 3.155000,
+      "gflops": 681.989842,
+      "work_ratio": 1.996101
+    },
+    {
+      "name": "attention_fwd:d8_s512_sssl",
+      "shape": "B=8 T=512 H=4 KV=4 D=128 pattern=SSSL",
+      "ms": 1.574750,
+      "gflops": 792.549664,
+      "work_ratio": 3.441294
+    },
+    {
+      "name": "attention_bwd:d8_s512_sssl",
+      "shape": "B=8 T=512 H=4 KV=4 D=128 pattern=SSSL",
+      "ms": 2.818750,
+      "gflops": 885.546845,
+      "work_ratio": 3.441294
+    },
+    {
+      "name": "attention_fwd:dim_sweep_d32",
+      "shape": "B=2 T=128 H=4 KV=4 D=32 wl=-1",
+      "ms": 0.068000,
+      "gflops": 124.325647,
+      "work_ratio": 1.984496
+    },
+    {
+      "name": "attention_fwd:dim_sweep_d64",
+      "shape": "B=2 T=128 H=4 KV=4 D=64 wl=-1",
+      "ms": 0.092000,
+      "gflops": 183.785739,
+      "work_ratio": 1.984496
+    },
+    {
+      "name": "attention_fwd:dim_sweep_d128",
+      "shape": "B=2 T=128 H=4 KV=4 D=128 wl=-1",
+      "ms": 0.112000,
+      "gflops": 301.933714,
+      "work_ratio": 1.984496
+    },
+    {
+      "name": "attention_fwd:dim_sweep_d256",
+      "shape": "B=2 T=128 H=4 KV=4 D=256 wl=-1",
+      "ms": 0.164000,
+      "gflops": 412.397268,
+      "work_ratio": 1.984496
+    }
+  ]
+}
