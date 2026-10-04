@@ -141,6 +141,54 @@ change (follow-up). The whole-model persistent megakernel is explicitly a
 Turing+ (`sm_75`) experiment: this host is Pascal `sm_61` with no `mma`/`wmma`,
 so only the baseline is reported here.
 
+## Attention tile results (Phase 1 kill gate)
+
+The Phase 1 prototype is `attention_tile_v3.cu`. The kill gate has two
+conditions at `B=8 T=512 H=4 KV=4 D=128`, from
+[docs/flash-attention-pascal.md](../../docs/flash-attention-pascal.md) section 6:
+
+- The full-causal forward must beat the shipped `1.586 ms`.
+- The window-128 forward must be at least `1.6x` faster than the full-causal
+  forward.
+
+The measurement is `tools/nanochat bench --
+./bazel-bin/dev/kernels/attention_tile_v3_bench --json` on the GTX 1080 Ti
+(`sm_61`, fp32). Each timing is the best of three device-event rounds. The
+shipped reference is `docs/attention-baseline.json`.
+
+| Case | Tile configuration | Tile (ms) | Shipped (ms) | Speedup | Tile GFLOP/s |
+|---|---|---|---|---|---|
+| full causal | br=32 bc=32 thr=256 mb=2 | 1.980 | 1.586 | 0.80x | 1,087 |
+| window 128 | br=32 bc=32 thr=256 mb=2 | 1.078 | 1.571 | 1.46x | 878 |
+| grouped query | br=32 bc=32 thr=256 mb=2 | 1.059 | 1.312 | 1.24x | 1,016 |
+
+**Gate verdict: FAIL. Stop the effort.**
+
+- Full causal: `1.980 ms` against `1.586 ms`. The tile is `1.25x` slower, so
+  this condition fails.
+- Window 128: `1.980 / 1.078 = 1.84x`. This condition passes.
+- The window case saves work correctly, but the full-causal kernel cannot reach
+  the cuBLAS forward.
+
+The tile space does not close the gap. At `head_dim = 128`, the 48 KB Pascal
+shared-memory cap admits only `bc = 32`: that tile uses 37,120 bytes, while
+`bc = 64` needs 74,240 bytes and does not fit. The Br, threads, and launch-bound
+axes were swept on a representative shape `B=2 T=256 H=4 KV=4 D=64`:
+
+| Axis | Configuration | ms |
+|---|---|---|
+| Br | 16 / 32 / 64 | 0.1389 / 0.1241 / 0.2385 |
+| Bc | 32 / 64 | 0.1249 / 0.1222 |
+| threads | 128 / 256 / 512 | 0.1618 / 0.1249 / 0.1140 |
+| min blocks | 1 / 2 / 3 | 0.1242 / 0.1235 / 0.1594 |
+
+The best swept configuration is `threads = 512`, at `0.1140 ms` against the
+default `0.1241 ms` (`1.09x`). That gain cannot cover the `1.25x` gap at
+`d8_s512`. The default `br=32 bc=32 thr=256 mb=2` tile is therefore the best
+measured production configuration, and it loses to the tuned cuBLAS dense
+product at this shape. This is the risk the plan's risk table predicted. The
+Phase 2 backward and the Phase 3 promotion do not start.
+
 ## Adding a family
 
 1. Add the CUDA translation unit under `backends/cuda/kernels/` and its
