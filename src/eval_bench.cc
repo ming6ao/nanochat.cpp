@@ -65,6 +65,12 @@ class Rng {
   std::uint64_t state_;
 };
 
+// Frozen Phase 0 end-to-end baseline for the production SSSL shape. The
+// benchmark records the measured rate next to this constant, so one JSON report
+// shows the gate result. The numbers live in docs/attention-baseline-e2e.json.
+constexpr double kBaselineTokensPerSecond = 55000.0;
+constexpr double kBaselineForwardMs = 74.472727;
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -171,15 +177,23 @@ int main(int argc, char** argv) {
       std::printf(
           "{\"schema\":\"nanochat.bench.v1\",\"rows\":[{\"name\":"
           "\"eval_forward\",\"shape\":\"%s\",\"ms\":%.6f,\"gflops\":0.0}],"
-          "\"arena_bytes\":%zu,\"tokens_per_second\":%.1f,\"batch\":%d,"
-          "\"seq\":%d}\n",
-          shape, ms_per_forward, arena_bytes, tokens_per_second, batch, seq);
+          "\"arena_bytes\":%zu,\"tokens_per_second\":%.1f,"
+          "\"forward_ms\":%.6f,\"baseline_tokens_per_second\":%.1f,"
+          "\"baseline_forward_ms\":%.6f,\"speedup_vs_baseline\":%.4f,"
+          "\"batch\":%d,\"seq\":%d}\n",
+          shape, ms_per_forward, arena_bytes, tokens_per_second, ms_per_forward,
+          kBaselineTokensPerSecond, kBaselineForwardMs,
+          tokens_per_second / kBaselineTokensPerSecond, batch, seq);
     } else {
       std::printf("eval_bench: %s\n", shape);
       std::printf("  arena       : %zu bytes (%.1f MiB)\n", arena_bytes,
                   static_cast<double>(arena_bytes) / (1024.0 * 1024.0));
       std::printf("  ms/forward  : %.3f\n", ms_per_forward);
       std::printf("  tokens/s    : %.0f\n", tokens_per_second);
+      std::printf("  baseline    : %.0f tokens/s (%.3f ms/forward)\n",
+                  kBaselineTokensPerSecond, kBaselineForwardMs);
+      std::printf("  speedup     : %.4fx vs baseline\n",
+                  tokens_per_second / kBaselineTokensPerSecond);
       std::printf("  mean loss   : %.6f\n",
                   static_cast<double>(sink /
                                       static_cast<float>(warmup + iters)));
