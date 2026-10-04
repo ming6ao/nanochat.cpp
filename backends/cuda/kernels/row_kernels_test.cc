@@ -1,7 +1,7 @@
 // T1 GPU smoke test for the row/elementwise families. Tiny shapes, host code
 // only, exercising the sealed nanochat/kernels.h API plus the backend-internal
 // fused residual helper. The exhaustive correctness and finite-difference
-// tests live under dev/kernels; this target proves the package builds, links,
+// tests sit next to the kernels; this target proves the package builds, links,
 // and runs on the device. See docs/testing.md.
 
 #include <cmath>

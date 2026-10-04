@@ -29,8 +29,8 @@
 #include <map>
 #include <string>
 
-#include "bench_utils.h"
-#include "gpu_test_utils.h"
+#include "backends/cuda/kernels/testing/bench_utils.h"
+#include "backends/cuda/kernels/testing/gpu_test_utils.h"
 #include "nanochat/kernels.h"
 #include "nanochat/sandbox.h"
 

@@ -23,10 +23,10 @@
 #include <string>
 #include <vector>
 
-#include "gpu_test_utils.h"
+#include "backends/cuda/kernels/testing/gpu_test_utils.h"
 #include "nanochat/kernels.h"
 #include "nanochat/sandbox.h"
-#include "sequence_ref.h"
+#include "backends/cuda/kernels/testing/sequence_ref.h"
 #include "tests/oracle_fixture.h"
 
 namespace {

@@ -1,7 +1,7 @@
 #ifndef NANOCHAT_DEV_KERNELS_BENCH_UTILS_H_
 #define NANOCHAT_DEV_KERNELS_BENCH_UTILS_H_
 
-// Host-side benchmarking helpers for dev/kernels. CUDA-event timing with
+// Host-side benchmarking helpers for the kernel benchmarks. CUDA-event timing with
 // warm-up and best-of-rounds, plus a small JSON report that agents and scripts
 // can consume. This header uses the CUDA runtime, so it is only included by
 // targets built as `cuda_binary` (the host pass of nvcc). See

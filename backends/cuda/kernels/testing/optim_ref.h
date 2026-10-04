@@ -5,7 +5,7 @@
 // backends/cpu/kernels.cc. AdamW and Muon are deterministic update rules with
 // no backward pass, so the GPU tests compare the device result against these
 // functions rather than differentiating a forward. Header-only so every
-// dev/kernels optimizer test shares one copy.
+// optimizer test shares one copy.
 //
 // The Muon reference is the authoritative description of the five stages:
 // Nesterov momentum, MuonEq row equilibration, Polar Express

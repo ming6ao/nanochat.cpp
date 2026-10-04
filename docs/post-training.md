@@ -75,7 +75,7 @@ class Model {
 ```
 
 `ClassifierParams` gains `const float* row_scale = nullptr;` on both backends
-(null is the current behavior). A `dev/kernels` finite-difference test covers
+(null is the current behavior). A `backends/cuda/kernels` finite-difference test covers
 the weighted path, and the RL parity fixture covers the composed step.
 
 ## 3. The chat data model

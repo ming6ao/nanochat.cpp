@@ -39,7 +39,7 @@ cc_test(
     args = ["$(rootpath data/debug_state.bin)"],
     deps = [
         ":oracle_fixture",
-        "//dev/kernels:sequence_test_utils",
+        "//backends/cuda/kernels/testing:sequence_test_utils",
         "//include/nanochat:nanochat",
         "//src:model",
     ],
@@ -59,7 +59,7 @@ cc_test(
     args = ["$(rootpath data/debug_state.bin)"],
     deps = [
         ":oracle_fixture",
-        "//dev/kernels:sequence_test_utils",
+        "//backends/cuda/kernels/testing:sequence_test_utils",
         "//include/nanochat:nanochat",
         "//src:model",
     ],

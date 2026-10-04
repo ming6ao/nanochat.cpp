@@ -5,8 +5,10 @@ implemented in `nanochat.cpp` for the Pascal host, and would it be faster than
 the current attention path?** It records the investigation, the measured
 baseline, the feasibility judgment, and a staged plan with go/no-go gates.
 
-Status: research and plan. No code is proposed for promotion until the Phase 1
-and Phase 2 prototype gates pass.
+Status: delivered for the windowed forward. The fused windowed forward runs in
+`backends/cuda/kernels/attention.cu` behind `UseFusedAttention`. Full-causal
+attention and every backward stay on cuBLAS. The project removed the Phase 1
+prototype after promotion.
 
 Related: [performance.md](performance.md) (measurement protocol, the attention
 benchmark), [kernels.md](kernels.md) (the `Attention` family), [DESIGN.md](../DESIGN.md)
@@ -122,7 +124,7 @@ as the PyTorch math backend. Its costs are structural:
 ## 4. Measured baseline and roofline
 
 Reproduced with `tools/nanochat profile --json` (the shipped
-`attention_bench`), GTX 1080 Ti, fp32, sm_61, `-O2`, at `d8_s512`
+`attention_benchmark`), GTX 1080 Ti, fp32, sm_61, `-O2`, at `d8_s512`
 (`batch 8, seq 512, heads 4, kv-heads 4, head_dim 128`). "Necessary" is the
 operation count over only the visible key/value pairs, which is the honest
 denominator for a fused kernel.
@@ -244,7 +246,7 @@ under the appropriate tier. See [performance.md](performance.md) and
 
 ### Phase 0 — bound the opportunity (0.5 session)
 
-- Extend `attention_bench` with a "necessary versus issued work" column so the
+- Extend `attention_benchmark` with a "necessary versus issued work" column so the
   mask waste is visible in the report, and add the `SSSL` mixed-pattern shape.
 - Record a committed baseline JSON of the current numbers.
 - Deliverable: the baseline file plus a one-page roofline note.
@@ -252,9 +254,9 @@ under the appropriate tier. See [performance.md](performance.md) and
 
 ### Phase 1 — fused fp32 forward prototype (1-2 sessions, the critical gate)
 
-- New `dev/kernels/attention_tile_v3.cu` (+ header) implementing the tiled
+- A `dev/kernels` prototype implementing the tiled
   forward: causal, left/right window, MHA and GQA, empty-window contract.
-- Correctness first: compare against `dev/kernels/sequence_ref.h` at
+- Correctness first: compare against `backends/cuda/kernels/testing/sequence_ref.h` at
   `B=2, T=8, head_dim=4` (tiny) and against the shipped path at `d8_s512`;
   finite-difference is not needed for the forward.
 - Then a tile-size sweep (`Br`, `Bc`, block size, `__launch_bounds__`) using
@@ -265,9 +267,23 @@ under the appropriate tier. See [performance.md](performance.md) and
   tile cannot beat cuBLAS, stop: report the negative result and keep the
   shipped path. This is the kill criterion for the whole effort.
 
+**Phase 1 result.** The prototype passed the window condition and failed the
+full-causal condition. The project removed the prototype after it promoted the
+windowed forward.
+
+| Case | Tile (ms) | cuBLAS (ms) | Speedup |
+|---|---|---|---|
+| full causal | 1.980 | 1.586 | 0.80x |
+| window 128 | 1.078 | 1.571 | 1.46x |
+| grouped query | 1.059 | 1.312 | 1.24x |
+
+At `head_dim = 128` the 48 KB shared-memory cap admits only `Bc = 32`. A sweep
+found no axis that closes the gap. The project kept the default tile and did
+not promote the full-causal case.
+
 ### Phase 2 — fused fp32 backward prototype (2-2.5 sessions)
 
-- `attention_tile_v3.cu` backward using the recompute scheme, with atomic
+- The prototype backward using the recompute scheme, with atomic
   key/value gradient accumulation for GQA (the existing `AtomicAddDev` handles
   the sm_61 fp16 case; fp32 uses the native atomic).
 - Correctness: the existing `attention_test.cc` shapes plus finite differences
@@ -285,7 +301,7 @@ under the appropriate tier. See [performance.md](performance.md) and
   short sequences where the batched GEMM is already launch-bound).
 - Keep the seam byte-for-byte; no header edit.
 - **Gates (all must pass):**
-  - `tools/nanochat test --gpu //dev/kernels:attention_gpu_test`
+  - `tools/nanochat test --gpu //backends/cuda/kernels:attention_gpu_test`
   - `tools/nanochat test --gpu //tests:oracle_cuda_test //tests:train_parity_cuda_test`
     (strict: trajectory loss 1e-5, parameters 1e-4)
   - `tools/nanochat test` (full CPU suite) and the default CUDA build
@@ -348,6 +364,6 @@ under the appropriate tier. See [performance.md](performance.md) and
   `backends/cuda/kernels/attention.cu`; shared helpers:
   `backends/cuda/kernels/device_utils.cuh`.
 - Benchmarks and references:
-  `dev/kernels/attention_bench.cc`, `dev/kernels/attention_test.cc`,
-  `dev/kernels/sequence_ref.h`.
+  `backends/cuda/kernels/attention_benchmark.cc`, `backends/cuda/kernels/attention_test.cc`,
+  `backends/cuda/kernels/testing/sequence_ref.h`.
 - Measurement protocol: [performance.md](performance.md).

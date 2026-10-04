@@ -7,10 +7,10 @@
 #include <cstdio>
 #include <vector>
 
-#include "gpu_test_utils.h"
+#include "backends/cuda/kernels/testing/gpu_test_utils.h"
 #include "nanochat/kernels.h"
 #include "nanochat/sandbox.h"
-#include "optim_ref.h"
+#include "backends/cuda/kernels/testing/optim_ref.h"
 
 namespace {
 

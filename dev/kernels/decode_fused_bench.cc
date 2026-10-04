@@ -33,7 +33,7 @@
 #include <vector>
 
 #include "dev/kernels/decode_kernels.h"
-#include "gpu_test_utils.h"
+#include "backends/cuda/kernels/testing/gpu_test_utils.h"
 #include "nanochat/kernels.h"
 #include "nanochat/sandbox.h"
 

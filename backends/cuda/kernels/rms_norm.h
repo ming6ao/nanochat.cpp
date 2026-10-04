@@ -4,7 +4,7 @@
 // Backend-internal, host-callable entry points for the fused residual RMSNorm
 // variant. The frozen seam (nanochat/kernels.h) has only the plain
 // RmsNormForward/RmsNormBackward pair; the residual fusion is a private helper
-// the dev/kernels tests exercise, so its declarations live here rather than in
+// the family tests exercise, so its declarations live here rather than in
 // the frozen header. See docs/kernels.md.
 
 #include "nanochat/kernels.h"

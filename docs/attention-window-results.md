@@ -58,7 +58,7 @@ case compares the fused forward against the cuBLAS forward.
 
 The measurement command is
 `tools/nanochat profile --json --out /tmp/attention-window.json`. The command
-runs the shipped `attention_bench`. Table 2 compares the promoted path against
+runs the shipped `attention_benchmark`. Table 2 compares the promoted path against
 the frozen `docs/attention-baseline.json`.
 
 | Row | Frozen baseline (ms) | Promoted path (ms) | Speedup | Verdict |

@@ -191,10 +191,10 @@ case "$command" in
     # under the exclusive benchmark profile with the GPU broker held. Extra
     # arguments pass through to the binary (--json, --out PATH, --iters N,
     # --rounds N). Use this instead of `bench` when timing must be exclusive.
-    with_build_lock "$bazel_bin" build //dev/kernels:attention_bench
+    with_build_lock "$bazel_bin" build //backends/cuda/kernels:attention_benchmark
     exec 9>&-
     exec "$broker" --profile t3-bench -- \
-      "$root/bazel-bin/dev/kernels/attention_bench" "$@"
+      "$root/bazel-bin/backends/cuda/kernels/attention_benchmark" "$@"
     ;;
 
   doctor)
@@ -238,7 +238,7 @@ case "$command" in
       tail -n 5 "$log"
     done
     for binary in "$root/bazel-bin/src/train_main" \
-                  "$root/bazel-bin/dev/kernels/attention_bench"; do
+                  "$root/bazel-bin/backends/cuda/kernels/attention_benchmark"; do
       [[ -e $binary ]] || continue
       echo "built:     $binary ($(date -r "$binary" '+%Y-%m-%d %H:%M'))"
     done

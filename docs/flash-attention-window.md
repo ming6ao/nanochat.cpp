@@ -49,7 +49,7 @@ Out of scope:
 
 ### Phase A — promotion and dispatch
 
-Move the validated forward from `dev/kernels/attention_tile_v3.cu` into
+Move the validated forward from the `dev/kernels` prototype into
 `backends/cuda/kernels/attention.cu`. Add the dispatch predicate. Keep the
 cuBLAS path for the uncovered shapes. Update
 `backends/cuda/kernels/BUILD.bazel` only when the dependency set changes.

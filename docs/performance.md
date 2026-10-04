@@ -37,7 +37,7 @@ with each number. `tools/nanochat doctor` prints most of them.
 
 ### 3.1 The attention benchmark
 
-`dev/kernels/attention_bench.cc` times `AttentionForward` and
+`backends/cuda/kernels/attention_benchmark.cc` times `AttentionForward` and
 `AttentionBackward` with CUDA events. The shapes are the `d8_s512` training
 shape, a sliding-window variant, a grouped-query variant, the production `SSSL`
 mixed-window pattern, and a head-dimension sweep.
@@ -55,15 +55,17 @@ implementation approaches the device ceiling.
 ### 3.2 Validate a candidate fix
 
 Do not edit the shipped tile first. Build the candidate under `dev/kernels` with
-the same seam signatures. Check it against `dev/kernels/sequence_ref.h`. Time it
-with `bench_utils.h` at the same shapes. Promote it into `device_utils.cuh`
-after the correctness check passes and the sweep exponent flattens. The
-`summarize_times.py` script and the exponent snippet in the skill produce the
-numbers.
+the same seam signatures. Check it against
+`backends/cuda/kernels/testing/sequence_ref.h`. Time it with
+`backends/cuda/kernels/testing/bench_utils.h` at the same shapes. Promote it
+into `device_utils.cuh` after the correctness check passes and the sweep
+exponent flattens. The `summarize_times.py` script and the exponent snippet in
+the skill produce the numbers.
 
 ### 3.3 Add a benchmark
 
-Follow `dev/kernels/README.md`. Use `dev/kernels/bench_utils.h`:
+Follow `backends/cuda/kernels/README.md`. Use
+`backends/cuda/kernels/testing/bench_utils.h`:
 
 - `BenchOptions` sets the warm-up, the iterations, the rounds, and the JSON
   output.
@@ -73,8 +75,8 @@ Follow `dev/kernels/README.md`. Use `dev/kernels/bench_utils.h`:
 - `BenchReport::Print` prints a table. It writes JSON to `options.out` when
   set.
 
-Build the target as a `cuda_binary` and add it to `dev/kernels/BUILD.bazel`. Do
-not add a benchmark to the `all` test suite.
+Build the target as a `cuda_binary` next to the code it measures. Do not add a
+benchmark to the `all` test suite.
 
 ### 3.4 Machine-readable output
 
@@ -97,7 +99,8 @@ issued work over the necessary work. Feed the file to the skill's
 
 Split the step before you choose a fix:
 
-- Attention forward and backward (`dev/kernels/attention_bench.cc`).
+- Attention forward and backward
+  (`backends/cuda/kernels/attention_benchmark.cc`).
 - Memory access in the attention tile: uncoalesced key/value loads, a serial
   dot product, and no key/value reuse across query rows.
 - Backward key/value atomics, especially grouped-query attention and the fp16
@@ -108,8 +111,8 @@ Split the step before you choose a fix:
 - Launch overhead and the backward `Memset` of the query/key/value gradients.
 - Host-side gaps: data loading, logging, checkpointing, and evaluation.
 
-Benchmarks to use: `row_bench`, `qk_prep_bench`, `decode_fused_bench`,
-`attention_bench`, and `eval_bench`.
+Benchmarks to use: `row_benchmark`, `qk_prep_bench`, `decode_fused_bench`,
+`attention_benchmark`, and `eval_bench`.
 
 ## 5. Profiling limits
 

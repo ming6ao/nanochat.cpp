@@ -93,21 +93,24 @@ generated on the CPU with torch and the runtime tests never import torch.
 ## Finite-difference checks
 
 Kernel families with a backward are checked with a finite-difference gradient
-test in `dev/kernels/`. The fused backward is derived and tested as a unit; see
-[DESIGN.md §5](../DESIGN.md). `dev/kernels/README.md` describes the standalone
-per-kernel test and benchmark convention.
+test next to the kernel in `backends/cuda/kernels/`. The fused backward is
+derived and tested as a unit; see [DESIGN.md §5](../DESIGN.md).
+`backends/cuda/kernels/README.md` describes the per-kernel test and benchmark
+convention.
 
 ## Bazel tagging
 
 ```python
 cc_test(
     name = "rms_norm_gpu_test",
-    srcs = ["rms_norm_test.cu"],
-    tags = ["gpu", "manual"],   # excluded from default runs
+    srcs = ["rms_norm_test.cc"],
+    tags = ["gpu"],   # excluded from the default CPU loop
     ...
 )
 ```
 
 - `-gpu` filter for the fast default test loop.
 - `--local_test_jobs=1` for GPU runs.
-- `manual` keeps GPU targets out of `bazel test //...` churn.
+- `tools/nanochat test --gpu //...` discovers every `gpu`-tagged test. Do not
+  add the `manual` tag to a test that this command must discover, because Bazel
+  excludes `manual` targets from wildcard expansion.

@@ -8,7 +8,7 @@ The baseline has three files:
 
 | File | Content |
 |---|---|
-| [attention-baseline.json](attention-baseline.json) | The `nanochat.bench.v1` report of `attention_bench`. |
+| [attention-baseline.json](attention-baseline.json) | The `nanochat.bench.v1` report of `attention_benchmark`. |
 | [attention-baseline-e2e.json](attention-baseline-e2e.json) | The forward-only eval report at `d8_s512` with the `SSSL` pattern. |
 | `docs/attention-baseline.md` | This note. |
 

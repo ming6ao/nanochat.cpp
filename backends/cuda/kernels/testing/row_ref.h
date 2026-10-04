@@ -4,7 +4,7 @@
 // Host reference for the row/elementwise kernel families, ported line-for-line
 // from backends/cpu/kernels.cc. The GPU tests compare device results against
 // these functions, and the finite-difference checks differentiate the
-// reference forward. Header-only so every dev/kernels test shares one copy.
+// reference forward. Header-only so every kernel test shares one copy.
 //
 // See docs/testing.md.
 

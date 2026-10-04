@@ -19,7 +19,7 @@
 // collide in a single batched call.
 //
 // The softmax kernels mirror `backends/cpu/kernels.cc` and
-// `dev/kernels/sequence_ref.h` exactly: the row maximum over the *visible*
+// `backends/cuda/kernels/testing/sequence_ref.h` exactly: the row maximum over the *visible*
 // keys, the causal plus sliding-window mask, the `(0, 0)` statistics for an
 // empty window, and the `p * (dp - sum(p * dp))` softmax Jacobian.
 //
@@ -337,7 +337,7 @@ bool UseBatchedPath(const AttentionParams& p) {
 // per tile, 256 threads, two resident blocks per streaming multiprocessor. At
 // `head_dim` 128 the key/value stage and the probability tile use 37,120 bytes,
 // below the 48 KB Pascal block cap. See `docs/flash-attention-pascal.md`
-// section 6 and `dev/kernels/README.md`.
+// section 6 and `backends/cuda/kernels/README.md`.
 constexpr int kFusedThreads = 256;
 constexpr int kFusedBr = 32;
 constexpr int kFusedBc = 32;
@@ -373,8 +373,7 @@ __device__ __forceinline__ float WarpSum(float value) {
 //
 // The running row maximum, the running denominator, and the output accumulator
 // live in registers, so a fully masked key tile is skipped without touching
-// them. This is the same schedule as `dev/kernels/attention_tile_v3.cu`. The
-// exponentials use `expf` to match the CPU reference.
+// them. The exponentials use `expf` to match the CPU reference.
 __global__ void __launch_bounds__(kFusedThreads, kFusedMinBlocks)
     FusedAttentionForwardKernel(const AttentionParams params,
                                 const ComputeType* __restrict__ q,

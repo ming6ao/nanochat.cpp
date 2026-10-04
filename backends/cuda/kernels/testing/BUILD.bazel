@@ -1,0 +1,53 @@
+# backends/cuda/kernels/testing — host-only scaffolding shared by the CUDA
+# kernel tests and benchmarks. The reference headers are line-for-line ports of
+# backends/cpu/kernels.cc; the two helper headers add the device buffer, the
+# finite-difference check, the deterministic random source, and the benchmark
+# report. Test-only: no production target depends on this package.
+#
+# See docs/testing.md and backends/cuda/kernels/README.md.
+
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+package(default_visibility = ["//visibility:public"])
+
+# Host-only scaffolding shared by the row/elementwise GPU tests: the reference
+# port of the row families plus the device-buffer and finite-difference
+# helpers.
+cc_library(
+    name = "row_test_utils",
+    hdrs = [
+        "gpu_test_utils.h",
+        "row_ref.h",
+    ],
+    deps = ["//include/nanochat:nanochat"],
+)
+
+# Host-only scaffolding shared by the sequence GPU tests: the reference port of
+# the Attention/Classifier/Embedding families plus the same helpers.
+cc_library(
+    name = "sequence_test_utils",
+    hdrs = [
+        "gpu_test_utils.h",
+        "sequence_ref.h",
+    ],
+    deps = ["//include/nanochat:nanochat"],
+)
+
+# Host-only scaffolding shared by the optimizer GPU tests: the reference port
+# of AdamW and Muon plus the same helpers.
+cc_library(
+    name = "optim_test_utils",
+    hdrs = [
+        "gpu_test_utils.h",
+        "optim_ref.h",
+    ],
+    deps = ["//include/nanochat:nanochat"],
+)
+
+# CUDA-event timer and the `nanochat.bench.v1` report used by the benchmarks.
+# Header-only: every benchmark compiles it into its own translation unit.
+cc_library(
+    name = "bench_utils",
+    hdrs = ["bench_utils.h"],
+    deps = ["//include/nanochat:nanochat"],
+)

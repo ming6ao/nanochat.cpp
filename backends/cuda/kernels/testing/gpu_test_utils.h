@@ -1,7 +1,7 @@
 #ifndef NANOCHAT_DEV_KERNELS_GPU_TEST_UTILS_H_
 #define NANOCHAT_DEV_KERNELS_GPU_TEST_UTILS_H_
 
-// Shared host-side scaffolding for the dev/kernels GPU tests: storage
+// Shared host-side scaffolding for the kernel GPU tests: storage
 // conversion, a deterministic RNG, a device buffer, tolerance checks, and the
 // central finite-difference gradient helper. Header-only; every test binary
 // gets its own copy. See docs/testing.md.

@@ -184,7 +184,7 @@ reverse-mode template metaprogramming.
 - **Macros/templates only for trivial pointwise fwd/bwd pairs.** Do not
   generalize beyond pointwise.
 - **Validation:** a finite-difference gradient check per kernel in
-  `dev/kernels/`, plus the torch oracle in `tests/`. See
+  `backends/cuda/kernels/`, plus the torch oracle in `tests/`. See
   [docs/testing.md](docs/testing.md).
 
 ---

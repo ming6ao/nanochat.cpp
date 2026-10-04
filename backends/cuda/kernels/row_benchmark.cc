@@ -1,17 +1,17 @@
 // Standalone micro-benchmark for the row/elementwise families, llm.c dev/cuda
-// style. It mirrors the dev/kernels tests' shapes: a tiny attention shape and
+// style. It mirrors the family tests' shapes: a tiny attention shape and
 // a medium training shape. Wall-clock timing with a synchronize per batch;
 // this is a smoke benchmark, not a tuned T3 profile. Run it through the broker:
 //
-//   tools/nanochat bench -- <row_bench binary>
+//   tools/nanochat bench -- <row_benchmark binary>
 //
-// See dev/kernels/README.md and docs/testing.md.
+// See backends/cuda/kernels/README.md and docs/testing.md.
 
 #include <chrono>
 #include <cstdio>
 #include <vector>
 
-#include "gpu_test_utils.h"
+#include "backends/cuda/kernels/testing/gpu_test_utils.h"
 #include "nanochat/kernels.h"
 #include "nanochat/sandbox.h"
 

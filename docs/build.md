@@ -15,13 +15,15 @@ nanochat.cpp/
     ops.cc  model.cc  generate.cc  optim.cc  train.cc  data.cc  eval.cc
     *_main.cc
   backends/
-    cpu/kernels.cc
-    cuda/device.cu  cuda/gemm.cu
+    cpu/kernels.cc  cpu/kernels_test.cc
+    cuda/device.cu  cuda/gemm.cu  cuda/cuda_runtime_test.cc
     cuda/kernels/{rms_norm,qk_prep,attention,pointwise,classifier,
                   embedding,adamw,muon,global_norm}.cu
+    cuda/kernels/<family>_test.cc + <family>_benchmark.cc next to each kernel
     cuda/kernels/device_utils.cuh
-  dev/kernels/                 # standalone test+benchmark per kernel
-  tests/oracle_test.cc  tests/debug_state.bin
+    cuda/kernels/testing/        # host reference headers and test helpers
+  dev/kernels/                   # unpromoted prototypes and the toolchain spike
+  tests/oracle_test.cc  tests/data/debug_state.bin
   tools/
     nanochat                   # the single execution entry point
     gpu.sh  sandbox.sh         # broker + sandboxed launcher

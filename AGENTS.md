@@ -29,7 +29,8 @@ happen through the integrator.
 | **Architect / Integrator** | `include/nanochat/*.h`, `MODULE.bazel`, `.bazelrc`, top-level `BUILD` files, `README.md`, `DESIGN.md`, `AGENTS.md`, `CONTRIBUTING.md`, `docs/**` | — |
 | **Runtime** | `include/nanochat/tensor.h`, `src/tensor.cc`, `backends/cpu/` | frozen `kernels.h` |
 | **Oracle** | `tools/dump_oracle.py`, `tests/`, `tests/data/*.bin` | frozen `tensor.h` |
-| **Kernel agents** (one per family) | `backends/cuda/kernels/<family>.cu` + `dev/kernels/<family>.cu` | frozen `kernels.h` |
+| **Kernel agents** (one per family) | `backends/cuda/kernels/<family>.cu` + `<family>_test.cc` + `<family>_benchmark.cc` in the same directory | frozen `kernels.h` |
+| **Kernel agents** (shared) | `backends/cuda/kernels/testing/**` (host test scaffolding), `dev/kernels/**` (unpromoted prototypes) | — |
 | **Workflow** | `src/ops.cc`, `src/model.cc`, `src/generate.cc` | `kernels.h`, CPU backend |
 | **Optimizer** | `src/optim.cc` | `kernels.h` |
 | **Harness** | `src/train.cc`, `src/data.cc`, `src/eval.cc`, `src/*_main.cc`, `include/nanochat/{data,scheduler,logger,mfu}.h` | Model API |
@@ -74,8 +75,8 @@ Parallelism is gated on interface readiness, not on agent availability.
 4. `tools/dump_oracle.py` + `tests/data/debug_state.bin` fixtures.
 5. `Model` skeleton on the CPU backend (forward + backward end to end).
 
-**Wave 1 (parallel).** Kernel agents each own one family: implementation +
-`dev/kernels/` finite-difference test + oracle fixture test.
+**Wave 1 (parallel).** Kernel agents each own one family: the implementation,
+its finite-difference test in the same directory, and the oracle fixture test.
 
 **Wave 2 (parallel).** Workflow, optimizer, harness — unblocked because the CPU
 backend from Wave 0 already runs the full graph.
@@ -236,8 +237,10 @@ This keeps GPU time bounded and predictable.
   (`todo | wip | cpu-green | gpu-green | done`).
 - Per-workstream brief: the frozen header(s), the owned directory, the
   Definition of Done, the exact test command. Agents should not need to read the whole repo.
-- `dev/kernels/README.md`: the convention for standalone per-kernel tests and
-  benchmarks (llm.c `dev/cuda` style).
+- `backends/cuda/kernels/README.md`: the convention for the per-kernel tests
+  and benchmarks that sit next to each kernel.
+- `dev/kernels/README.md`: the convention for the unpromoted prototypes and the
+  toolchain spike.
 - `docs/performance.md`: the performance measurement protocol, the debugging
   interface (`tools/nanochat doctor` / `profile`), and the benchmark battery.
   Read it before investigating a slowdown. `tools/nanochat doctor` is the

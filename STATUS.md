@@ -14,9 +14,9 @@ integrated. Live resume state is in `.sliceme/RESUME.md`.
 | P0 | Oracle fixture and CPU oracle test | `p0-oracle-fixture` (`tests`, `tools`) | done | Landed; `tests/data/debug_state.bin` committed. |
 | P0 | Model skeleton on the CPU backend | `p0-model-skeleton` (`src`) | done | Landed; forward `2.79e-09`, backward `2.98e-08` vs oracle. |
 | P1 | CUDA device runtime and cuBLAS GEMM | `w1-cuda-runtime` (`backends/cuda`) | done | Landed; fixed an unsigned-wraparound bug in its test. |
-| P1 | CUDA row/elementwise kernels | `w1-cuda-kernels-row` (`backends/cuda/kernels`, `dev/kernels`) | done | Landed; rms_norm, qk_prep, pointwise, global_norm. |
-| P1 | CUDA attention kernels | `w1-cuda-kernels-attn` (`backends/cuda/kernels`, `dev/kernels`) | done | Landed; attention, classifier, embedding. |
-| P1 | CUDA optimizer kernels | `w1-cuda-kernels-optim` (`backends/cuda/kernels`, `dev/kernels`) | done | Landed; AdamW 1.49e-08, Muon 4.25e-07 device-vs-reference. |
+| P1 | CUDA row/elementwise kernels | `w1-cuda-kernels-row` (`backends/cuda/kernels`) | done | Landed; rms_norm, qk_prep, pointwise, global_norm. |
+| P1 | CUDA attention kernels | `w1-cuda-kernels-attn` (`backends/cuda/kernels`) | done | Landed; attention, classifier, embedding. |
+| P1 | CUDA optimizer kernels | `w1-cuda-kernels-optim` (`backends/cuda/kernels`) | done | Landed; AdamW 1.49e-08, Muon 4.25e-07 device-vs-reference. |
 | P2 | Workflow (ops, model, generate) | `w2-src-workflow` (`src`) | done | Landed; prefill/decode consistency bit-identical. |
 | P2 | Optimizer grouping and schedules | `w2-src-optim` (`src`) | done | Landed; `//src:optim_test` green. |
 | P2 | Training harness | `w2-src-harness` (`src`) | done | Landed; data/train/eval/CLI, 9 CPU tests green. |

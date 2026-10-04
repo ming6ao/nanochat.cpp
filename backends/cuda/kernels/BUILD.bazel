@@ -4,9 +4,10 @@
 # (Attention, Classifier, Embedding); the optimizer targets land alongside
 # them. See docs/kernels.md.
 
-load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
+load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library", "cc_test")
 load(
     "//:nanochat.bzl",
+    "cuda_binary",
     "cuda_library",
     "nanochat_copts",
     "nanochat_cuda_copts",
@@ -175,7 +176,7 @@ cuda_library(
     alwayslink = True,
 )
 
-# Convenience aggregate the host graph and the dev/kernels tests link.
+# Convenience aggregate the host graph and the family tests link.
 cc_library(
     name = "row_kernels",
     deps = [
@@ -201,7 +202,7 @@ cc_library(
 )
 
 # Aggregate for the optimizer families: AdamW, Muon, and the gradient-clipping
-# GlobalNorm. The dev/kernels optimizer tests link this target.
+# GlobalNorm. The optimizer tests link this target.
 cc_library(
     name = "optimizer_kernels",
     deps = [
@@ -243,8 +244,205 @@ cc_test(
     tags = ["gpu"],
 )
 
+# ---------------------------------------------------------------------------
+# Family correctness and finite-difference tests. These live next to the
+# kernels they cover, so `foo.cu` and `foo_test.cc` share a directory
+# (Google C++ Style Guide, "Names and Order of Includes"). Each test uses
+# tiny shapes and the host reference in //backends/cuda/kernels/testing.
+# Checked by `tools/nanochat test --gpu //...`.
+# ---------------------------------------------------------------------------
+
+cc_test(
+    name = "rms_norm_gpu_test",
+    srcs = ["rms_norm_test.cc"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    deps = [
+        ":rms_norm",
+        ":row_kernels",
+        "//backends/cuda/kernels/testing:row_test_utils",
+        "//include/nanochat:nanochat",
+    ],
+    size = "small",
+    tags = ["gpu"],
+)
+
+cc_test(
+    name = "qk_prep_gpu_test",
+    srcs = ["qk_prep_test.cc"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    deps = [
+        ":row_kernels",
+        "//backends/cuda/kernels/testing:row_test_utils",
+        "//include/nanochat:nanochat",
+    ],
+    size = "small",
+    tags = ["gpu"],
+)
+
+cc_test(
+    name = "pointwise_gpu_test",
+    srcs = ["pointwise_test.cc"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    deps = [
+        ":row_kernels",
+        "//backends/cuda/kernels/testing:row_test_utils",
+        "//include/nanochat:nanochat",
+    ],
+    size = "small",
+    tags = ["gpu"],
+)
+
+cc_test(
+    name = "global_norm_gpu_test",
+    srcs = ["global_norm_test.cc"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    deps = [
+        ":row_kernels",
+        "//backends/cuda/kernels/testing:row_test_utils",
+        "//include/nanochat:nanochat",
+    ],
+    size = "small",
+    tags = ["gpu"],
+)
+
+cc_test(
+    name = "attention_gpu_test",
+    srcs = ["attention_test.cc"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    deps = [
+        ":sequence_kernels",
+        "//backends/cuda/kernels/testing:sequence_test_utils",
+        "//include/nanochat:nanochat",
+    ],
+    size = "small",
+    tags = ["gpu"],
+)
+
+cc_test(
+    name = "classifier_gpu_test",
+    srcs = ["classifier_test.cc"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    deps = [
+        ":sequence_kernels",
+        "//backends/cuda/kernels/testing:sequence_test_utils",
+        "//include/nanochat:nanochat",
+    ],
+    size = "small",
+    tags = ["gpu"],
+)
+
+cc_test(
+    name = "embedding_gpu_test",
+    srcs = ["embedding_test.cc"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    deps = [
+        ":sequence_kernels",
+        "//backends/cuda/kernels/testing:sequence_test_utils",
+        "//include/nanochat:nanochat",
+    ],
+    size = "small",
+    tags = ["gpu"],
+)
+
+cc_test(
+    name = "sequence_oracle_gpu_test",
+    srcs = ["sequence_oracle_test.cc"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    data = ["//tests:data/debug_state.bin"],
+    args = ["$(rootpath //tests:data/debug_state.bin)"],
+    deps = [
+        ":sequence_kernels",
+        "//backends/cuda/kernels/testing:sequence_test_utils",
+        "//include/nanochat:nanochat",
+        "//tests:oracle_fixture",
+    ],
+    size = "small",
+    tags = ["gpu"],
+)
+
+cc_test(
+    name = "adamw_gpu_test",
+    srcs = ["adamw_test.cc"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    deps = [
+        ":optimizer_kernels",
+        "//backends/cuda/kernels/testing:optim_test_utils",
+        "//include/nanochat:nanochat",
+    ],
+    size = "small",
+    tags = ["gpu"],
+)
+
+cc_test(
+    name = "muon_gpu_test",
+    srcs = ["muon_test.cc"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    deps = [
+        ":optimizer_kernels",
+        "//backends/cuda/kernels/testing:optim_test_utils",
+        "//include/nanochat:nanochat",
+    ],
+    size = "small",
+    tags = ["gpu"],
+)
+
+# ---------------------------------------------------------------------------
+# Micro-benchmarks. Not tests: run them through the broker with
+# `tools/nanochat bench` / `tools/nanochat profile`.
+# ---------------------------------------------------------------------------
+
+# Row/elementwise families on tiny and medium shapes.
+cc_binary(
+    name = "row_benchmark",
+    srcs = ["row_benchmark.cc"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    deps = [
+        ":row_kernels",
+        "//backends/cuda/kernels/testing:row_test_utils",
+        "//include/nanochat:nanochat",
+    ],
+)
+
+# Attention forward/backward device-event timing at `d8_s512`, with a
+# head-dimension sweep. The acceptance binary of `tools/nanochat profile`.
+cuda_binary(
+    name = "attention_benchmark",
+    srcs = ["attention_benchmark.cc"],
+    copts = nanochat_cuda_copts(),
+    host_copts = nanochat_copts(),
+    defines = precision_defines(),
+    host_defines = precision_defines(),
+    deps = [
+        ":sequence_kernels",
+        "//backends/cuda/kernels/testing:bench_utils",
+        "//backends/cuda/kernels/testing:sequence_test_utils",
+        "//include/nanochat:nanochat",
+    ],
+)
+
 # Aggregation point consumed by //:all_tests.
 test_suite(name = "all", tests = [
+    ":adamw_gpu_test",
+    ":attention_gpu_test",
+    ":classifier_gpu_test",
+    ":embedding_gpu_test",
+    ":global_norm_gpu_test",
+    ":muon_gpu_test",
+    ":pointwise_gpu_test",
     ":precision_gpu_test",
+    ":qk_prep_gpu_test",
+    ":rms_norm_gpu_test",
     ":row_kernels_gpu_test",
+    ":sequence_oracle_gpu_test",
 ])

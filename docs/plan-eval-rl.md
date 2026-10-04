@@ -232,7 +232,7 @@ void GenerateBatch(Model* model, const int* prompt, int prompt_len,
 
 `ClassifierParams` gains `const float* row_scale = nullptr;`. Both backends
 apply it per row in `ClassifierBackward`; null is the current behavior. A
-`dev/kernels` finite-difference test covers the weighted path.
+`backends/cuda/kernels` finite-difference test covers the weighted path.
 
 ### 5.3 New C++ binaries (`src/`, harness-owned)
 
@@ -268,7 +268,7 @@ apply it per row in `ClassifierBackward`; null is the current behavior. A
 |---|---|---|---|
 | E0 | Checkpoint converter and loader path | `tools/convert_checkpoint.py`, bridge `checkpoint.py` | — |
 | E1 | Batched generation engine | `src/generate.cc`, `include/nanochat/model.h` (with architect), `src/generate_main.cc` | — |
-| E2 | Weighted backward and row-scale kernel | `src/model.cc`, `backends/*/kernels/classifier.*`, `dev/kernels` | architect header change |
+| E2 | Weighted backward and row-scale kernel | `src/model.cc`, `backends/*/kernels/classifier.*` | architect header change |
 | E3 | Sequence scorer | `src/score_main.cc`, `src/eval.cc` | — |
 | E4 | Base eval bridge | `python/nanochat_cpp/base_eval.py`, `config.py` | E0, E1, E3 |
 | E5 | Chat eval bridge | `python/nanochat_cpp/chat_eval.py`, `tasks.py` | E1, E3 |

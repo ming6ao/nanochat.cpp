@@ -8,10 +8,10 @@
 #include <vector>
 
 #include "backends/cuda/kernels/rms_norm.h"
-#include "gpu_test_utils.h"
+#include "backends/cuda/kernels/testing/gpu_test_utils.h"
 #include "nanochat/kernels.h"
 #include "nanochat/sandbox.h"
-#include "row_ref.h"
+#include "backends/cuda/kernels/testing/row_ref.h"
 
 namespace {
 

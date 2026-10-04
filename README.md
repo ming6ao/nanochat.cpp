@@ -35,7 +35,7 @@ tools/nanochat build
 tools/nanochat check
 
 # One GPU correctness test; the broker serializes access to the card.
-tools/nanochat test --gpu //dev/kernels:rms_norm_gpu_test
+tools/nanochat test --gpu //backends/cuda/kernels:rms_norm_gpu_test
 
 # Training and eval also go through the entry point.
 tools/nanochat train -- ./bazel-bin/src/train_main --config d8
@@ -53,7 +53,8 @@ include/nanochat/   public headers; the frozen backend seam
 src/                backend-agnostic workflow, model, optimizer, CLI
 backends/cpu/       reference implementation of every kernel
 backends/cuda/      CUDA implementation; cuBLAS for GEMM
-dev/kernels/        standalone per-kernel test + benchmark
+backends/cuda/kernels/  kernels, per-family tests, benchmarks, test scaffolding
+dev/kernels/        unpromoted prototypes and the toolchain spike
 tests/              oracle fixture tests
 tools/              GPU broker and resource sandbox
 docs/               reference and how-to

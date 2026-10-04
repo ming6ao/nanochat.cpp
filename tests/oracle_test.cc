@@ -44,12 +44,12 @@
 #include <type_traits>
 #include <vector>
 
-#include "dev/kernels/gpu_test_utils.h"
+#include "backends/cuda/kernels/testing/gpu_test_utils.h"
 #include "nanochat/kernels.h"
 #include "nanochat/model.h"
 #include "nanochat/optim.h"
 #include "nanochat/scheduler.h"
-#include "dev/kernels/sequence_ref.h"
+#include "backends/cuda/kernels/testing/sequence_ref.h"
 #include "src/model_impl.h"
 #include "tests/oracle_fixture.h"
 
