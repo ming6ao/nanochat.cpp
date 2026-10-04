@@ -6,6 +6,12 @@
 // output accumulator in registers and skips fully masked key tiles. It is
 // dev-only; the CUDA backend is unchanged. See attention_tile_v3.h and
 // dev/kernels/README.md.
+//
+// The kernel is a template over the tile shape and the launch bounds so the
+// Phase 1 tile-size sweep can select a compiled configuration at run time. The
+// default configuration is the candidate tile from docs/flash-attention-pascal.md
+// section 5.2: Br=32 query rows, Bc=32 key/value rows, 256 threads, two blocks
+// per streaming multiprocessor.
 
 #include "attention_tile_v3.h"
 
@@ -28,18 +34,9 @@ using cuda_kernels::KvHeadCountDev;
 using cuda_kernels::KvHeadDev;
 using cuda_kernels::ToComputeDev;
 
-// Candidate tile (docs/flash-attention-pascal.md section 5.2): one block of 256
-// threads owns 32 query rows and walks the key/value sequence in tiles of 32
-// rows. The key tile, the value tile, and the per-tile probability tile live in
-// shared memory; the running maximum, the running denominator, and the output
-// accumulator live in registers. The shared budget stays under the Pascal 48 KB
-// limit, so two blocks stay resident per streaming multiprocessor.
-constexpr int kThreads = 256;
-constexpr int kWarps = kThreads / 32;       // 8 warps per block
-constexpr int kBr = 32;                     // query rows per block
-constexpr int kBc = 32;                     // key/value rows per tile
-constexpr int kRowsPerWarp = kBr / kWarps;  // 4 query rows per warp
-constexpr int kDimsPerLane = 4;             // owned output dims, head_dim <= 128
+// Owned output dimensions per lane. Together with the 32 warp lanes this caps
+// `head_dim` at 128, which is the only shape the model uses.
+constexpr int kDimsPerLane = 4;
 
 // Warp-wide maximum over the 32 lanes. Every lane in the warp must reach the
 // call; the result is broadcast back to every lane.
@@ -62,14 +59,26 @@ __device__ __forceinline__ float WarpSum(float value) {
 
 // One thread block owns `kBr` query rows for one `(batch, head)` pair. The warp
 // `w` owns rows `t0 + w * kRowsPerWarp ..`; within a warp, lane `l` scores the
-// key `j0 + l` and owns output dimensions `l, l + 32, ...`.
-__global__ void __launch_bounds__(kThreads, 2)
+// key `j0 + sub*32 + l` for each 32-key sub-tile `sub` and owns output
+// dimensions `l, l + 32, ...`.
+//
+// `kBc` is the number of key/value rows staged in shared memory per tile. The
+// online-softmax update runs one 32-key sub-tile at a time so the register
+// block never changes size; `kBc` only controls how many keys are staged at
+// once. `kMinBlocks` is the `__launch_bounds__` residency hint the sweep
+// varies.
+template <int kThreads, int kBr, int kBc, int kMinBlocks>
+__global__ void __launch_bounds__(kThreads, kMinBlocks)
 AttentionTileV3ForwardKernel(const AttentionParams params,
                              const ComputeType* __restrict__ q,
                              const ComputeType* __restrict__ k,
                              const ComputeType* __restrict__ v,
                              ComputeType* __restrict__ out,
                              float* __restrict__ stats) {
+  constexpr int kWarps = kThreads / 32;       // warps per block
+  constexpr int kRowsPerWarp = kBr / kWarps;  // query rows per warp
+  constexpr int kSubTiles = kBc / 32;         // 32-key sub-tiles per tile
+
   const int dim = params.head_dim;
   const int seq = params.seq;
   const int heads = params.num_heads;
@@ -152,118 +161,126 @@ AttentionTileV3ForwardKernel(const AttentionParams params,
     }
     __syncthreads();
 
-    // QK^T and the causal/window mask. Each lane scores its own key for the
-    // rows the warp owns; the head-dimension dot product stays inside the lane
-    // and needs no cross-lane reduction. The key element is loaded once and
-    // reused across the four rows.
-    float s_reg[kRowsPerWarp];
-    float tile_max[kRowsPerWarp];
-    {
-      const ComputeType* qrows[kRowsPerWarp];
-      bool valid[kRowsPerWarp];
+    // Process the tile one 32-key sub-tile at a time so the online-softmax
+    // state and the register block stay fixed for every `kBc`.
+#pragma unroll
+    for (int sub = 0; sub < kSubTiles; ++sub) {
+      const int jsub = j0 + sub * 32;
+
+      // QK^T and the causal/window mask. Each lane scores its own key for the
+      // rows the warp owns; the head-dimension dot product stays inside the
+      // lane and needs no cross-lane reduction. The key element is loaded once
+      // and reused across the rows.
+      float s_reg[kRowsPerWarp];
+      float tile_max[kRowsPerWarp];
+      {
+        const ComputeType* qrows[kRowsPerWarp];
+        bool valid[kRowsPerWarp];
+#pragma unroll
+        for (int i = 0; i < kRowsPerWarp; ++i) {
+          const int r = warp * kRowsPerWarp + i;
+          const int tq = t0 + r;
+          valid[i] = tq < seq;
+          // An invalid row points at the base so the dot stays in bounds; its
+          // score is discarded below.
+          qrows[i] = valid[i] ? q + ((static_cast<std::size_t>(b) * seq + tq) *
+                                         heads +
+                                     h) *
+                                        dim
+                              : q;
+        }
+        float dot[kRowsPerWarp];
+#pragma unroll
+        for (int i = 0; i < kRowsPerWarp; ++i) dot[i] = 0.0f;
+        const long long jabs = jsub + lane;
+        if (jabs < kv_len) {
+          const ComputeType* krow = ks + (sub * 32 + lane) * kv_stride;
+#pragma unroll 4
+          for (int d = 0; d < dim; ++d) {
+            const float key_value = AsFloatDev(krow[d]);
+#pragma unroll
+            for (int i = 0; i < kRowsPerWarp; ++i) {
+              dot[i] += AsFloatDev(qrows[i][d]) * key_value;
+            }
+          }
+        }
+#pragma unroll
+        for (int i = 0; i < kRowsPerWarp; ++i) {
+          const int tq = t0 + warp * kRowsPerWarp + i;
+          const long long qpos = static_cast<long long>(kv_len) - seq + tq;
+          float score = -CUDART_INF_F;
+          if (valid[i] && jabs < kv_len && KeyAllowedDev(params, qpos, jabs)) {
+            score = scale * dot[i];
+          }
+          s_reg[i] = score;
+          tile_max[i] = WarpMax(score);
+        }
+      }
+
+      // Online-softmax update. `alpha` rescales the running denominator and
+      // the output accumulator onto the new maximum. A row with no visible key
+      // in this sub-tile keeps its state: alpha is one and the new sum is zero.
+      float alpha[kRowsPerWarp];
 #pragma unroll
       for (int i = 0; i < kRowsPerWarp; ++i) {
-        const int r = warp * kRowsPerWarp + i;
-        const int tq = t0 + r;
-        valid[i] = tq < seq;
-        // An invalid row points at the base so the dot stays in bounds; its
-        // score is discarded below.
-        qrows[i] =
-            valid[i]
-                ? q + ((static_cast<std::size_t>(b) * seq + tq) * heads + h) * dim
-                : q;
+        const float previous = row_max[i];
+        const float tile = tile_max[i];
+        if (tile == -CUDART_INF_F) {
+          alpha[i] = 1.0f;
+        } else {
+          const float updated = fmaxf(previous, tile);
+          row_max[i] = updated;
+          alpha[i] =
+              (previous == -CUDART_INF_F) ? 0.0f : expf(previous - updated);
+        }
       }
-      float dot[kRowsPerWarp];
+
+      // P = exp(S - row_max). The warp sum over the lanes is the sub-tile sum,
+      // which the running denominator absorbs with the same rescale.
+      float p_reg[kRowsPerWarp];
 #pragma unroll
-      for (int i = 0; i < kRowsPerWarp; ++i) dot[i] = 0.0f;
-      const long long jabs = j0 + lane;
-      if (jabs < kv_len) {
-        const ComputeType* krow = ks + lane * kv_stride;
+      for (int i = 0; i < kRowsPerWarp; ++i) {
+        float p = 0.0f;
+        if (tile_max[i] != -CUDART_INF_F) {
+          p = expf(s_reg[i] - row_max[i]);
+        }
+        p_reg[i] = p;
+        row_sum[i] = alpha[i] * row_sum[i] + WarpSum(p);
+      }
+
+      // Publish P and rescale the output accumulator.
+#pragma unroll
+      for (int i = 0; i < kRowsPerWarp; ++i) {
+#pragma unroll
+        for (int c = 0; c < kDimsPerLane; ++c) o_acc[i][c] *= alpha[i];
+        ps[(warp * kRowsPerWarp + i) * kBc + sub * 32 + lane] = p_reg[i];
+      }
+      __syncthreads();
+
+      // O += P V for this sub-tile. Every lane reads every key through the
+      // shared probability tile, so each owned output dimension is a private
+      // accumulation and needs no cross-lane reduction. The value element is
+      // loaded once and reused across the rows.
 #pragma unroll 4
-        for (int d = 0; d < dim; ++d) {
-          const float key_value = AsFloatDev(krow[d]);
+      for (int jr = sub * 32; jr < sub * 32 + 32; ++jr) {
+        const ComputeType* vrow = vs + jr * kv_stride;
+        float value_value[kDimsPerLane];
 #pragma unroll
-          for (int i = 0; i < kRowsPerWarp; ++i) {
-            dot[i] += AsFloatDev(qrows[i][d]) * key_value;
+        for (int c = 0; c < kDimsPerLane; ++c) {
+          const int d = lane + 32 * c;
+          value_value[c] = (d < dim) ? AsFloatDev(vrow[d]) : 0.0f;
+        }
+#pragma unroll
+        for (int i = 0; i < kRowsPerWarp; ++i) {
+          const float p = ps[(warp * kRowsPerWarp + i) * kBc + jr];
+#pragma unroll
+          for (int c = 0; c < kDimsPerLane; ++c) {
+            o_acc[i][c] += p * value_value[c];
           }
         }
       }
-#pragma unroll
-      for (int i = 0; i < kRowsPerWarp; ++i) {
-        const int tq = t0 + warp * kRowsPerWarp + i;
-        const long long qpos = static_cast<long long>(kv_len) - seq + tq;
-        float score = -CUDART_INF_F;
-        if (valid[i] && jabs < kv_len && KeyAllowedDev(params, qpos, jabs)) {
-          score = scale * dot[i];
-        }
-        s_reg[i] = score;
-        tile_max[i] = WarpMax(score);
-      }
+      __syncthreads();
     }
-
-    // Online-softmax update. `alpha` rescales the running denominator and the
-    // output accumulator onto the new maximum. A row with no visible key in
-    // this tile keeps its state: alpha is one and the new tile sum is zero.
-    float alpha[kRowsPerWarp];
-#pragma unroll
-    for (int i = 0; i < kRowsPerWarp; ++i) {
-      const float previous = row_max[i];
-      const float tile = tile_max[i];
-      if (tile == -CUDART_INF_F) {
-        alpha[i] = 1.0f;
-      } else {
-        const float updated = fmaxf(previous, tile);
-        row_max[i] = updated;
-        alpha[i] =
-            (previous == -CUDART_INF_F) ? 0.0f : expf(previous - updated);
-      }
-    }
-
-    // P = exp(S - row_max). The warp sum over the lanes is the tile sum, which
-    // the running denominator absorbs with the same rescale.
-    float p_reg[kRowsPerWarp];
-#pragma unroll
-    for (int i = 0; i < kRowsPerWarp; ++i) {
-      float p = 0.0f;
-      if (tile_max[i] != -CUDART_INF_F) {
-        p = expf(s_reg[i] - row_max[i]);
-      }
-      p_reg[i] = p;
-      row_sum[i] = alpha[i] * row_sum[i] + WarpSum(p);
-    }
-
-    // Publish P and rescale the output accumulator.
-#pragma unroll
-    for (int i = 0; i < kRowsPerWarp; ++i) {
-#pragma unroll
-      for (int c = 0; c < kDimsPerLane; ++c) o_acc[i][c] *= alpha[i];
-      ps[(warp * kRowsPerWarp + i) * kBc + lane] = p_reg[i];
-    }
-    __syncthreads();
-
-    // O += P V for this tile. Every lane reads every key through the shared
-    // probability tile, so each owned output dimension is a private
-    // accumulation and needs no cross-lane reduction. The value element is
-    // loaded once and reused across the four rows.
-#pragma unroll 4
-    for (int jr = 0; jr < kBc; ++jr) {
-      const ComputeType* vrow = vs + jr * kv_stride;
-      float value_value[kDimsPerLane];
-#pragma unroll
-      for (int c = 0; c < kDimsPerLane; ++c) {
-        const int d = lane + 32 * c;
-        value_value[c] = (d < dim) ? AsFloatDev(vrow[d]) : 0.0f;
-      }
-#pragma unroll
-      for (int i = 0; i < kRowsPerWarp; ++i) {
-        const float p = ps[(warp * kRowsPerWarp + i) * kBc + jr];
-#pragma unroll
-        for (int c = 0; c < kDimsPerLane; ++c) {
-          o_acc[i][c] += p * value_value[c];
-        }
-      }
-    }
-    __syncthreads();
   }
 
   // Normalize the online accumulator, then write the output and the saved
@@ -303,11 +320,65 @@ AttentionTileV3ForwardKernel(const AttentionParams params,
   }
 }
 
+// Launches one compiled tile configuration after validating the shared-memory
+// budget for the requested `head_dim`. Returns a nonzero CUDA status when the
+// query tile does not cover the warp count or the shared memory does not fit.
+template <int kThreads, int kBr, int kBc, int kMinBlocks>
+int LaunchForward(const AttentionParams& params, const ComputeType* q,
+                  const ComputeType* k, const ComputeType* v,
+                  ComputeType* out, float* stats) {
+  const int dim = params.head_dim;
+  // The register block assumes an integer number of query rows per warp.
+  if (kBr < kThreads / 32 || kBr % (kThreads / 32) != 0) {
+    return static_cast<int>(cudaErrorInvalidValue);
+  }
+  // The scoring lane owns one key per 32-key sub-tile.
+  if (kBc % 32 != 0) return static_cast<int>(cudaErrorInvalidValue);
+
+  const std::size_t kv_stride = static_cast<std::size_t>(dim) + 1;
+  const std::size_t shared_bytes =
+      (2 * kBc * kv_stride) * sizeof(ComputeType) +
+      (kBr * kBc) * sizeof(float);
+  // Pascal caps a block at 48 KB of shared memory; the default tile uses 37 KB
+  // at head_dim 128 and stays under the limit.
+  if (shared_bytes > 48 * 1024) {
+    return static_cast<int>(cudaErrorInvalidValue);
+  }
+
+  const int query_tiles = (params.seq + kBr - 1) / kBr;
+  const dim3 grid(query_tiles, params.num_heads, params.batch);
+  const dim3 block(kThreads);
+  cuda_backend::Launch(
+      AttentionTileV3ForwardKernel<kThreads, kBr, kBc, kMinBlocks>, grid, block,
+      shared_bytes, params, q, k, v, out, stats);
+  return static_cast<int>(cudaGetLastError());
+}
+
+// The compiled tile configurations. The first entry is the default candidate
+// tile; the others are the axes of the Phase 1 tile-size sweep. Every entry is
+// instantiated once by the dispatch below.
+bool IsSupportedConfig(int br, int bc, int threads, int min_blocks) {
+  return (br == 32 && bc == 32 && threads == 256 && min_blocks == 2) ||
+         (br == 16 && bc == 32 && threads == 256 && min_blocks == 2) ||
+         (br == 64 && bc == 32 && threads == 256 && min_blocks == 2) ||
+         (br == 32 && bc == 64 && threads == 256 && min_blocks == 2) ||
+         (br == 32 && bc == 32 && threads == 128 && min_blocks == 2) ||
+         (br == 32 && bc == 32 && threads == 512 && min_blocks == 2) ||
+         (br == 32 && bc == 32 && threads == 256 && min_blocks == 1) ||
+         (br == 32 && bc == 32 && threads == 256 && min_blocks == 3);
+}
+
 }  // namespace
+
+bool AttentionTileV3Supported(const AttentionTileV3Config& config) {
+  return IsSupportedConfig(config.br, config.bc, config.threads,
+                           config.min_blocks);
+}
 
 int AttentionTileV3Forward(const AttentionParams& params, const ComputeType* q,
                            const ComputeType* k, const ComputeType* v,
-                           ComputeType* out, float* stats) {
+                           ComputeType* out, float* stats,
+                           const AttentionTileV3Config& config) {
   const int dim = params.head_dim;
   if (params.batch <= 0 || params.seq <= 0 || params.num_heads <= 0 ||
       dim <= 0 || q == nullptr || k == nullptr || v == nullptr ||
@@ -316,28 +387,43 @@ int AttentionTileV3Forward(const AttentionParams& params, const ComputeType* q,
   }
   const int kv_len = params.kv_len > 0 ? params.kv_len : params.seq;
   if (kv_len <= 0) return 0;
-  // The candidate tile keeps `kDimsPerLane` output dimensions per lane, and 32
-  // lanes cover the query row, so head_dim must fit in that register slice.
+  // The tile keeps `kDimsPerLane` output dimensions per lane, and 32 lanes
+  // cover the query row, so head_dim must fit in that register slice.
   if (dim > kDimsPerLane * 32) {
     return static_cast<int>(cudaErrorInvalidValue);
   }
 
-  const std::size_t kv_stride = static_cast<std::size_t>(dim) + 1;
-  const std::size_t shared_bytes =
-      (2 * kBc * kv_stride) * sizeof(ComputeType) +
-      (kBr * kBc) * sizeof(float);
-  // Pascal caps a block at 48 KB of shared memory; the candidate tile uses
-  // 37 KB at head_dim 128 and stays under the limit.
-  if (shared_bytes > 48 * 1024) {
-    return static_cast<int>(cudaErrorInvalidValue);
+  const int br = config.br;
+  const int bc = config.bc;
+  const int threads = config.threads;
+  const int min_blocks = config.min_blocks;
+
+#define NANOCHAT_TILE_LAUNCH(THREADS, BR, BC, MINBLOCKS)                     \
+  if (threads == (THREADS) && br == (BR) && bc == (BC) &&                    \
+      min_blocks == (MINBLOCKS)) {                                           \
+    return LaunchForward<THREADS, BR, BC, MINBLOCKS>(params, q, k, v, out,   \
+                                                     stats);                 \
   }
 
-  const int query_tiles = (params.seq + kBr - 1) / kBr;
-  const dim3 grid(query_tiles, params.num_heads, params.batch);
-  const dim3 block(kThreads);
-  cuda_backend::Launch(AttentionTileV3ForwardKernel, grid, block, shared_bytes,
-                       params, q, k, v, out, stats);
-  return static_cast<int>(cudaGetLastError());
+  NANOCHAT_TILE_LAUNCH(256, 32, 32, 2)
+  NANOCHAT_TILE_LAUNCH(256, 16, 32, 2)
+  NANOCHAT_TILE_LAUNCH(256, 64, 32, 2)
+  NANOCHAT_TILE_LAUNCH(256, 32, 64, 2)
+  NANOCHAT_TILE_LAUNCH(128, 32, 32, 2)
+  NANOCHAT_TILE_LAUNCH(512, 32, 32, 2)
+  NANOCHAT_TILE_LAUNCH(256, 32, 32, 1)
+  NANOCHAT_TILE_LAUNCH(256, 32, 32, 3)
+
+#undef NANOCHAT_TILE_LAUNCH
+
+  return static_cast<int>(cudaErrorInvalidValue);
+}
+
+int AttentionTileV3Forward(const AttentionParams& params, const ComputeType* q,
+                           const ComputeType* k, const ComputeType* v,
+                           ComputeType* out, float* stats) {
+  const AttentionTileV3Config config{};
+  return AttentionTileV3Forward(params, q, k, v, out, stats, config);
 }
 
 int AttentionTileV3Backward(const AttentionParams& params,

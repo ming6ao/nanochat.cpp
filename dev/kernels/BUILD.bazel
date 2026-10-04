@@ -352,8 +352,9 @@ cuda_binary(
 )
 
 # Attention-tile-v3 prototype: the Pascal-native tiled attention experiment.
-# The forward tile is implemented here; the backward tile and the correctness
-# sweep land in later waves. dev-only; the CUDA backend is unchanged.
+# The forward tile, its correctness gate, and the tile-space benchmark are
+# implemented here; the backward tile lands in a later wave. dev-only; the CUDA
+# backend is unchanged.
 cuda_library(
     name = "attention_tile_v3",
     srcs = ["attention_tile_v3.cu"],
@@ -369,9 +370,10 @@ cuda_library(
 )
 
 # T1 GPU correctness test for the prototype: compares the device tiled forward
-# against sequence_ref.h at tiny and shallow multi-tile shapes, and enters the
-# backward stub. Not tagged `manual` so that `tools/nanochat test --gpu //...`
-# discovers it.
+# against sequence_ref.h at the tiny gate, sweeps the Br/Bc/block-size/
+# launch-bounds configurations against the reference, and compares the device
+# tile against the shipped `kernels::AttentionForward` at d8_s512. Not tagged
+# `manual` so that `tools/nanochat test --gpu //...` discovers it.
 cc_test(
     name = "attention_tile_v3_gpu_test",
     srcs = ["attention_tile_v3_test.cc"],
@@ -381,22 +383,27 @@ cc_test(
         ":attention_tile_v3",
         ":sequence_test_utils",
         "//backends/cuda:device",
+        "//backends/cuda/kernels:sequence_kernels",
         "//include/nanochat:nanochat",
     ],
     size = "small",
     tags = ["gpu"],
 )
 
-# Prototype micro-benchmark; run it through the broker, not the test loop.
+# Prototype micro-benchmark: the d8_s512 training rows plus the Br, Bc,
+# block-size, and launch-bounds tile space and the head-dimension sweep. Run it
+# through the broker, not the test loop.
 cuda_binary(
     name = "attention_tile_v3_bench",
     srcs = ["attention_tile_v3_bench.cc"],
+    hdrs = ["bench_utils.h"],
     copts = nanochat_cuda_copts(),
     host_copts = nanochat_copts(),
     defines = precision_defines(),
     host_defines = precision_defines(),
     deps = [
         ":attention_tile_v3",
+        ":sequence_test_utils",
         "//backends/cuda:device",
         "//include/nanochat:nanochat",
     ],

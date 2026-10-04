@@ -33,6 +33,9 @@ tools/nanochat bench -- <row_bench>      # T3-style micro-benchmark under the br
 | `sequence_oracle_test.cc` | Classifier and Embedding against `tests/data/debug_state.bin`, plus a config-driven Attention check. |
 | `row_bench.cc` | Micro-benchmark for every family on tiny and medium shapes. |
 | `attention_bench.cc` | Attention forward/backward device-event timing at the `d8_s512` shape, with a head-dimension sweep that exposes the per-owned-dimension redundancy. |
+| `attention_tile_v3.h`, `attention_tile_v3.cu` | Fused fp32 tiled (flash) forward prototype with a compile-time tile configuration for the Phase 1 tile-size sweep. |
+| `attention_tile_v3_test.cc` | The forward tile against `sequence_ref.h` at the tiny gate, the swept configurations against the reference, and the device tile against the shipped `kernels::AttentionForward` at `d8_s512`. |
+| `attention_tile_v3_bench.cc` | The `d8_s512` forward rows plus the Br, Bc, block-size, and launch-bounds tile space and the head-dimension sweep. |
 | `qk_prep_fused.h`, `qk_prep_fused.cu` | Combined fused QkPrep prototype (one launch over q and k) plus the explicit decomposed baseline (`RmsNormForward` + standalone RoPE/scale). |
 | `qk_prep_fused_test.cc` | Fusion prototype correctness against `row_ref.h`, cross-check against the seam `QkPrep`, and finite differences for the fused backward. |
 | `qk_prep_bench.cc` | Decomposed vs seam-fused vs combined-fused QkPrep, tiny and medium shapes. |
