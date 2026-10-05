@@ -16,6 +16,7 @@ detailed reference that the design points at.
 | [attention.md](attention.md) | Attention baseline, Pascal feasibility, the fused window, results |
 | [optimizations.md](optimizations.md) | Planned recompute, fused-classifier, and row-kernel work |
 | [eval.md](eval.md) | Base and chat evaluation, and the forward-only workspace |
+| [tokenizer.md](tokenizer.md) | Design: the native BPE tokenizer, training, and on-the-fly decode |
 | [post-training.md](post-training.md) | Design: SFT and reinforcement learning |
 | [python-bridge.md](python-bridge.md) | nanochat-compatible Python entry points |
 | [sandbox.md](sandbox.md) | Execution sandbox and host resource governance |
