@@ -1,11 +1,13 @@
 // Data containers (docs/model.md): the pre-tokenized token shard, the
-// self-describing checkpoint container, the batched `DataLoader`, and the
-// out-of-scope `LoadTokenizer` stub.
+// self-describing checkpoint container, and the batched `DataLoader`.
 //
 // Everything here is host-side and vendor-free; it only reads and writes
 // little-endian bytes. The shard header is a fixed 24 bytes; the checkpoint is
 // a simple tabular container (name, dtype, shape, raw payload) that round-trips
 // every `TensorRecord`. It is deliberately not a framework `state_dict`.
+//
+// `LoadTokenizer` lives in the `tokenizer` library (src/tokenizer.cc); this
+// file does not define it.
 
 #include "nanochat/data.h"
 
@@ -20,7 +22,6 @@
 
 #include "nanochat/dataloader.h"
 #include "nanochat/rand.h"
-#include "nanochat/tokenizer.h"
 
 namespace nanochat {
 namespace {
@@ -467,14 +468,9 @@ const std::uint8_t* DataLoader::token_bytes(int* vocab_size) const {
 // Tokenizer
 // ---------------------------------------------------------------------------
 
-std::unique_ptr<Tokenizer> LoadTokenizer(const std::string& path) {
-  // The BPE tokenizer artifact and trainer are out of scope for the harness
-  // node: the training and evaluation paths read pre-tokenized shards, so no
-  // tokenizer is required at runtime. The repository ships no tokenizer
-  // artifact, so this deliberately returns null rather than inventing a large
-  // one; a future tokenizer node can implement it without touching callers.
-  (void)path;
-  return nullptr;
-}
+// The native tokenizer loader is implemented once, in the `src:tokenizer`
+// library (src/tokenizer.cc). A target that calls `LoadTokenizer` links that
+// library. The earlier null stub would shadow the real loader at link time, so
+// this file deliberately defines no loader.
 
 }  // namespace nanochat

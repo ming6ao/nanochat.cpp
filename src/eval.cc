@@ -16,6 +16,8 @@
 #include "nanochat/dataloader.h"
 #include "nanochat/kernels.h"
 #include "nanochat/tensor.h"
+#include "nanochat/tokenizer.h"
+#include "src/eval.h"
 #include "src/model_impl.h"
 #include "src/ops.h"
 
@@ -190,6 +192,31 @@ void ScoreBatch(Model* model, const int* tokens, int batch, int seq,
         result.focus_logits.push_back(value);
       }
     }
+  }
+}
+
+std::string DecodeGeneratedRow(const Tokenizer& tokenizer,
+                               const GeneratedSequence& row) {
+  TokenStreamDecoder decoder(tokenizer);
+  std::string text;
+  // The prompt ids carry mask 0; the sampled ids carry mask 1. Skip the
+  // prompt so the caller sees the new text only.
+  std::size_t start = 0;
+  while (start < row.mask.size() && row.mask[start] == 0) ++start;
+  for (std::size_t i = start; i < row.tokens.size(); ++i) {
+    decoder.Push(row.tokens[i], &text);
+  }
+  decoder.Flush(&text);
+  return text;
+}
+
+void DecodeGeneratedRows(const Tokenizer& tokenizer,
+                         const std::vector<GeneratedSequence>& rows,
+                         std::vector<std::string>* out) {
+  if (out == nullptr) return;
+  out->resize(rows.size());
+  for (std::size_t i = 0; i < rows.size(); ++i) {
+    (*out)[i] = DecodeGeneratedRow(tokenizer, rows[i]);
   }
 }
 
