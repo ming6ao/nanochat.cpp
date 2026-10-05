@@ -1,24 +1,24 @@
 # nanochat.cpp — Bazel configuration. See docs/build.md.
 #
 # Layering:
-#   * toolchain: pin the CUDA host compiler and C++ standard;
-#   * arch:      Pascal sm_61 is the default, Turing sm_75 is --config=sm_75;
+#   * toolchain: the C++ standard here; the host compiler is host-local;
+#   * arch:      Pascal sm_61 is the default; --config=sm_75 and --config=t4
+#                select Turing (T4);
 #   * precision: fp32 is the default, fp16 is --config=fp16;
 #   * resources: cap the Bazel server and per-server action fan-out so several
 #                agent worktrees cannot exhaust the small shared host.
 # Named configs are additive: `--config=sm_75 --config=fp16` builds the Turing
-# half-precision variant.
+# half-precision variant. `--config=t4` is the complete Turing CUDA target.
 
 # --- Toolchain --------------------------------------------------------------
 #
 # The host CUDA toolkit is the Debian/Ubuntu package: nvcc lives in /usr/bin
 # (a wrapper around /usr/lib/nvidia-cuda-toolkit), headers in /usr/include, and
 # libraries in /usr/lib/x86_64-linux-gnu. CUDA 12.0's host_config rejects the
-# distribution default gcc 13, so the host compiler is pinned to gcc-12. The
-# CUDA 12.0 and glibc combination also rejects gcc 13 even with
-# --allow-unsupported-compiler, so pinning is the supported path here.
-build --repo_env=CC=/usr/bin/gcc-12
-build --repo_env=CXX=/usr/bin/g++-12
+# distribution default gcc 13, so the workstation pins gcc-12. That pin is
+# host-specific and lives in `.bazelrc.local` (see `.bazelrc.wsl`). The tracked
+# file sets no compiler, so a host with a supported default builds unchanged.
+# See docs/host-portability.md.
 
 # C++20 everywhere (CONTRIBUTING.md). rules_cuda forwards the C++ fragment's
 # options to the nvcc host pass.
@@ -47,6 +47,18 @@ build:fp16 --define=precision=fp16
 build --define=backend=cpu
 build:cuda --define=backend=cuda
 
+# --- Host targets -----------------------------------------------------------
+#
+# A complete named target for one host. `t4` is the Turing half-precision CUDA
+# build for a Kaggle Notebook (sm_75). `t4-fp32` is the same card at fp32, for
+# the correctness gate. See docs/turing-t4.md and docs/kaggle.md.
+build:t4 --@rules_cuda//cuda:archs=sm_75
+build:t4 --define=precision=fp16
+build:t4 --define=backend=cuda
+build:t4-fp32 --@rules_cuda//cuda:archs=sm_75
+build:t4-fp32 --define=precision=fp32
+build:t4-fp32 --define=backend=cuda
+
 # --- Resources --------------------------------------------------------------
 #
 # Several agents and verifiers share one small host (8 GiB, ~7.7 GiB visible
@@ -70,9 +82,19 @@ build --local_resources=memory=3072
 # --- Tests ------------------------------------------------------------------
 test --test_output=errors
 
-# tools/sandbox.sh runs every test action under the systemd user manager, which
-# needs the client's session environment. Bazel's default test environment is
-# minimal, so forward these explicitly.
+# tools/sandbox.sh wraps every test action. The systemd backend needs the
+# client's session environment; the none backend needs none of it. Bazel's
+# default test environment is minimal, so forward these explicitly.
 test --test_env=HOME
 test --test_env=XDG_RUNTIME_DIR
 test --test_env=DBUS_SESSION_BUS_ADDRESS
+# The sandbox backend choice and the GPU device set must reach the test wrapper
+# and the test process. See docs/host-portability.md.
+test --test_env=NANOCHAT_SANDBOX_BACKEND
+test --test_env=NANOCHAT_GPU_DEVICES
+
+# --- Host-local overrides ---------------------------------------------------
+#
+# A host puts its compiler, arch, and resource budget here. The file is not
+# tracked. `try-import` ignores a missing file, so a fresh checkout works.
+try-import %workspace%/.bazelrc.local

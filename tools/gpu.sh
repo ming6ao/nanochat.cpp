@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Exclusive GPU broker for nanochat.
 #
-# usage: tools/gpu.sh [--profile t1-gpu|t2-parity|t3-bench] [--lock-only] [--] <command...>
+# usage: tools/gpu.sh [--profile t1-gpu|t2-parity|t3-bench] [--device N]
+#                     [--lock-only] [--] <command...>
 #
 # Takes the single-GPU lock, refuses to run if a foreign process owns the
 # device, then hands off to tools/sandbox.sh with a GPU profile. With
@@ -14,6 +15,7 @@ here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 
 profile=t1-gpu
 lock_only=0
+devices=${NANOCHAT_GPU_DEVICES:-0}
 while (( $# )); do
   case "$1" in
     --profile)
@@ -22,6 +24,14 @@ while (( $# )); do
       ;;
     --profile=*)
       profile=${1#--profile=}
+      shift
+      ;;
+    --device)
+      devices=${2:?--device needs an index or list}
+      shift 2
+      ;;
+    --device=*)
+      devices=${1#--device=}
       shift
       ;;
     --lock-only)
@@ -49,19 +59,23 @@ case "$profile" in
     ;;
 esac
 
-# The lock fd is held for the lifetime of the process, so the broker serializes
-# GPU access even though the job itself runs under systemd.
-LOCK=/tmp/nanochat-gpu.lock
+# The lock is held for the lifetime of the process, so the broker serializes
+# GPU access even though the job itself runs under systemd. One lock per device
+# set lets two independent jobs use two cards at the same time.
+LOCK="/tmp/nanochat-gpu-${devices//,/_}.lock"
 exec 9>"$LOCK"
-flock 9 # exclusive; blocks until the previous GPU job finishes
+flock 9 # exclusive; blocks until the previous job on this device set finishes
 
-if nvidia-smi --query-compute-apps=pid --format=csv,noheader | grep -q .; then
-  echo "GPU busy with an unrelated process" >&2
-  exit 1
+if command -v nvidia-smi >/dev/null 2>&1; then
+  if nvidia-smi --id="$devices" --query-compute-apps=pid --format=csv,noheader \
+       2>/dev/null | grep -q .; then
+    echo "GPU $devices is busy with an unrelated process" >&2
+    exit 1
+  fi
 fi
 
-echo "acquired GPU ($profile): $*" | tee -a /tmp/nanochat-gpu.log
-export CUDA_VISIBLE_DEVICES=0
+echo "acquired GPU $devices ($profile): $*" | tee -a /tmp/nanochat-gpu.log
+export CUDA_VISIBLE_DEVICES="$devices"
 
 # Hold the lock in this shell, not in the command. Bazel forks a detached
 # server; if it inherited the lock descriptor it would hold the GPU lock

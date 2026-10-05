@@ -19,7 +19,8 @@ usage() {
 tools/nanochat <command> [args...]
 
   build [targets...]         bazel build (default //...; serialized)
-  test [--gpu] [targets...]  run tests; every test is sandboxed per action
+  test [--gpu] [--config NAME] [targets...]
+                             run tests; every test is sandboxed per action
   check [--gpu]              build, then CPU tests (and GPU tests with --gpu)
   lint [file...]             style gate: clang-format + the text checks
   shutdown                   stop this workspace's Bazel server now
@@ -120,10 +121,19 @@ case "$command" in
   test)
     gpu=0
     targets=()
+    configs=()
     while (( $# )); do
       case "$1" in
         --gpu)
           gpu=1
+          shift
+          ;;
+        --config)
+          configs+=(--config "${2:?--config needs a name}")
+          shift 2
+          ;;
+        --config=*)
+          configs+=("--config=${1#--config=}")
           shift
           ;;
         *)
@@ -147,6 +157,7 @@ case "$command" in
       "--test_tag_filters=$tag_filter"
       "--run_under=$sandbox --profile=$profile --"
       --spawn_strategy=local
+      "${configs[@]}"
     )
     if (( gpu )); then
       # A GPU run selects the CUDA backend so the shared workflow (//src:model)
@@ -233,7 +244,14 @@ case "$command" in
     if [[ -n $slice ]]; then
       echo "sandbox:   $(echo "$slice" | paste -sd' ' -)"
     fi
-    if [[ -e /tmp/nanochat-gpu.lock ]]; then
+    if [[ -n ${NANOCHAT_SANDBOX_BACKEND:-} ]]; then
+      echo "sandbox backend: $NANOCHAT_SANDBOX_BACKEND"
+    elif systemd-run --user --scope --quiet true >/dev/null 2>&1; then
+      echo "sandbox backend: systemd"
+    else
+      echo "sandbox backend: none (systemd unavailable)"
+    fi
+    if [[ -e /tmp/nanochat-gpu-0.lock ]]; then
       if flock -n /tmp/nanochat-gpu.lock -c true 2>/dev/null; then
         echo "gpu lock:  free"
       else

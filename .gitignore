@@ -2,3 +2,7 @@
 /bazel-*
 # Makefile fallback build directory.
 /build/
+# Per-host Bazel options (compiler, arch, resource budget).
+/.bazelrc.local
+# Kaggle session scratch.
+/.nanochat.env

@@ -54,6 +54,15 @@ filegroup(
     srcs = ["convert_checkpoint.py"],
 )
 
+# Kaggle Notebook host tooling. See docs/kaggle.md and docs/host-portability.md.
+filegroup(
+    name = "kaggle_scripts",
+    srcs = [
+        "kaggle/bootstrap.sh",
+        "kaggle/github-setup.sh",
+    ],
+)
+
 # T0 test for the output-base reaper. Hermetic and CPU-only: it builds a
 # synthetic Bazel output user root under TEST_TMPDIR and never touches the real
 # cache. See tools/prune_test.sh.
@@ -72,11 +81,28 @@ sh_test(
     size = "small",
 )
 
+# T0 syntax test for the Kaggle host scripts. Hermetic and CPU-only: it runs
+# `bash -n` on each script and never touches the network.
+sh_test(
+    name = "kaggle_scripts_test",
+    srcs = ["kaggle/scripts_test.sh"],
+    args = [
+        "$(location kaggle/bootstrap.sh)",
+        "$(location kaggle/github-setup.sh)",
+    ],
+    data = [
+        "kaggle/bootstrap.sh",
+        "kaggle/github-setup.sh",
+    ],
+    size = "small",
+)
+
 # Aggregation point consumed by //:all_tests.
 test_suite(
     name = "all",
     tests = [
         ":prune_test",
         ":nanochat_cpp_selftest",
+        ":kaggle_scripts_test",
     ],
 )

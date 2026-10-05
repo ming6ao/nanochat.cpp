@@ -10,6 +10,7 @@ detailed reference that the design points at.
 | [model.md](model.md) | Model API, workspace/memory, the graphs, batched generation |
 | [optimizer.md](optimizer.md) | AdamW/Muon parameter grouping and schedules |
 | [precision.md](precision.md) | FP32/FP16 selection and capability reporting |
+| [turing-t4.md](turing-t4.md) | Design: the Turing (T4, sm_75) target |
 | [backends.md](backends.md) | Backend selection and how to add one |
 | [build.md](build.md) | File layout, Bazel, Makefile fallback |
 | [data.md](data.md) | Token shards, checkpoints, the oracle fixture |
@@ -22,6 +23,8 @@ detailed reference that the design points at.
 | [performance.md](performance.md) | Performance measurement protocol, debugging interface, benchmarks |
 | [flash-attention-pascal.md](flash-attention-pascal.md) | Flash attention on Pascal: feasibility, baseline, and staged plan |
 | [sandbox.md](sandbox.md) | Execution sandbox and host resource governance |
+| [host-portability.md](host-portability.md) | Design: toolchain, optional sandbox, and device selection across hosts |
+| [kaggle.md](kaggle.md) | Design: `nanochat.cpp` and `pi` on Kaggle Notebooks |
 
 New here? Start with [../README.md](../README.md) for the quickstart, then
 [../DESIGN.md](../DESIGN.md) for the shape of the system.

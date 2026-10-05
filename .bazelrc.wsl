@@ -1,0 +1,10 @@
+# Host file for the WSL2 workstation. Copy it to the untracked local file:
+#
+#   cp .bazelrc.wsl .bazelrc.local
+#
+# `.bazelrc` imports `.bazelrc.local` with try-import. See the file header.
+#
+# CUDA 12.0 rejects the distribution default gcc 13. Pin gcc-12, the supported
+# host compiler for this toolkit. See docs/host-portability.md.
+build --repo_env=CC=/usr/bin/gcc-12
+build --repo_env=CXX=/usr/bin/g++-12

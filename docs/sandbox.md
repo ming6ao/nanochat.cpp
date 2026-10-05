@@ -6,6 +6,11 @@ named resource **profile** using cgroup v2. This is an execution concern, not a
 compute concern: it never appears in `kernels.h`, `tensor.h`, `config.h`, or
 `model.h`, and nothing in `src/` links against it.
 
+The sandbox is optional. Set `NANOCHAT_SANDBOX_BACKEND=none` on a host without
+cgroup v2, such as a Kaggle Notebook. The entry point then runs the command
+directly and keeps the entry-point guard. See
+[host-portability.md](host-portability.md) and [kaggle.md](kaggle.md).
+
 ## Mechanism (WSL2, unprivileged)
 
 - **Primary:** `systemd-run --user --scope -p <props> --`.

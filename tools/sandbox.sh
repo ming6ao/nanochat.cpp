@@ -1,12 +1,18 @@
 #!/usr/bin/env bash
 # Resource-limited launcher for every nanochat job.
 #
-# usage: tools/sandbox.sh [--profile NAME] [--no-slice] [--] <command...>
+# usage: tools/sandbox.sh [--profile NAME] [--backend systemd|none|auto]
+#                         [--no-slice] [--] <command...>
 #
 # Applies a cgroup v2 budget (RAM, CPU, pids, wall clock) through the
 # unprivileged systemd user manager, plus CPU affinity and hard rlimits. No
 # root and no container runtime are involved. The limits are read back and
-# verified before the command runs. See tools/nanochat and docs/sandbox.md.
+# verified before the command runs.
+#
+# With --backend=none (or NANOCHAT_SANDBOX_BACKEND=none) the script does not
+# sandbox. It sets the entry-point sentinel and execs the command. A host
+# without cgroup v2, such as a Kaggle Notebook, needs this mode. See
+# tools/nanochat, docs/sandbox.md, and docs/host-portability.md.
 set -euo pipefail
 
 here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -15,6 +21,7 @@ here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 
 profile=t0-cpu
 use_slice=1
+backend=${NANOCHAT_SANDBOX_BACKEND:-auto}
 while (( $# )); do
   case "$1" in
     --profile)
@@ -23,6 +30,14 @@ while (( $# )); do
       ;;
     --profile=*)
       profile=${1#--profile=}
+      shift
+      ;;
+    --backend)
+      backend=${2:?--backend needs a value}
+      shift 2
+      ;;
+    --backend=*)
+      backend=${1#--backend=}
       shift
       ;;
     --no-slice)
@@ -49,6 +64,45 @@ done
 
 sandbox_profile "$profile"
 
+# Resolve `auto` to a concrete backend. The systemd user manager is present on
+# the workstation and absent in a container. The probe is cheap and reliable.
+if [[ $backend == auto ]]; then
+  if systemd-run --user --scope --quiet true >/dev/null 2>&1; then
+    backend=systemd
+  else
+    backend=none
+  fi
+fi
+case "$backend" in
+  systemd | none) ;;
+  *)
+    echo "sandbox: backend must be systemd, none, or auto" >&2
+    exit 2
+    ;;
+esac
+
+export NANOCHAT_SANDBOX_BACKEND="$backend"
+
+if [[ $backend == none ]]; then
+  # No cgroup, no affinity, no rlimits. The container quota and the entry-point
+  # guard are the only controls. Set the sentinel so RequireSandboxOrDie()
+  # passes; `off` marks a deliberate unsandboxed run.
+  export NANOCHAT_SANDBOX="off"
+  export NANOCHAT_SANDBOX_PROFILE="$profile"
+  # Match library thread pools to the visible CPUs. taskset is unavailable in
+  # this mode, so the process count is the only oversubscription control.
+  nthreads=$(nproc 2>/dev/null || echo 1)
+  export OMP_NUM_THREADS=$nthreads
+  export NANOCHAT_NUM_THREADS=$nthreads
+  printf 'sandbox: backend=none profile=%s (not sandboxed)\n' "$profile" \
+    >>/tmp/nanochat-sandbox.log
+  [[ ${NANOCHAT_SANDBOX_QUIET:-0} == 1 ]] || \
+    printf 'sandbox: backend=none profile=%s (not sandboxed)\n' "$profile" >&2
+  exec "$@"
+fi
+
+# --- systemd backend --------------------------------------------------------
+#
 # Make sure the aggregate ceiling exists so several concurrent jobs cannot add
 # up past the host budget. Idempotent; a missing slice is a warning, not fatal.
 if (( use_slice )); then
