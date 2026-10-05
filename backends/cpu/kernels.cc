@@ -27,6 +27,10 @@
 
 #include "nanochat/kernels.h"
 
+#if defined(_OPENMP)
+#include <omp.h>
+#endif
+
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
@@ -142,6 +146,31 @@ Caps GetCaps() {
 // control the operand layout; `lda`/`ldb`/`ldc` are leading dimensions, where 0
 // infers a dense row-major operand. `GemmMode` is advisory: the host supplies
 // the already-selected operands, so all three modes compute the same product.
+namespace {
+
+// Parse a positive integer from the environment. A missing, malformed, or
+// non-positive value returns 0, which the caller reads as "no hint".
+int EnvPositiveInt(const char* name) {
+  const char* value = std::getenv(name);
+  if (value == nullptr) return 0;
+  char* end = nullptr;
+  const long parsed = std::strtol(value, &end, 10);
+  if (end == value || parsed <= 0) return 0;
+  return static_cast<int>(parsed);
+}
+
+// The worker count for Gemm, taken from the environment. The sandbox gateway
+// exports both variables for every profile (docs/sandbox.md), so honor the
+// library hint first and the OpenMP hint second. A return of 0 lets OpenMP
+// choose its own default. Never hardcode a count and never create a pool here.
+int GemmThreadCount() {
+  const int nanochat_threads = EnvPositiveInt("NANOCHAT_NUM_THREADS");
+  if (nanochat_threads > 0) return nanochat_threads;
+  return EnvPositiveInt("OMP_NUM_THREADS");
+}
+
+}  // namespace
+
 void Gemm(GemmMode mode, const GemmParams& params, const ComputeType* a,
           const ComputeType* b, ComputeType* c) {
   (void)mode;
@@ -170,28 +199,81 @@ void Gemm(GemmMode mode, const GemmParams& params, const ComputeType* a,
                                     : static_cast<std::int64_t>(m) * ldc;
   const int batch = params.batch_count > 0 ? params.batch_count : 1;
 
+  // One accumulator row per worker, held in double to keep the summation
+  // precision of the shipped code. `firstprivate` gives each OpenMP thread its
+  // own row, so no allocation happens inside the row loop.
+  const int threads = GemmThreadCount();
+  (void)threads;  // Read by the OpenMP clause below.
+  std::vector<double> acc(n, 0.0);
+
   for (int bi = 0; bi < batch; ++bi) {
     const ComputeType* ab = a + bi * stride_a;
     const ComputeType* bb = b + bi * stride_b;
     ComputeType* cb = c + bi * stride_c;
+    // The loop order depends on the stored layout of `b`, so the reduction
+    // always walks `b` along its fastest axis (the Phase 1 reorder):
+    //   * `transpose_b = false` -- `b` is [k, n]. Broadcast each `a` value and
+    //     accumulate the contiguous `b` row into a vector accumulator.
+    //   * `transpose_b = true` -- `b` is [n, k]. For each output column, walk
+    //     `b[j, :]` and `a[i, :]` together in a dot product.
+    // Both forms keep the `double` accumulator of the shipped code.
+#if defined(_OPENMP)
+#pragma omp parallel for firstprivate(acc) schedule(static) \
+    num_threads(threads > 0 ? threads : omp_get_max_threads())
+#endif
     for (int i = 0; i < m; ++i) {
-      for (int j = 0; j < n; ++j) {
-        double acc = 0.0;
+      ComputeType* crow = cb + static_cast<std::int64_t>(i) * ldc;
+      if (params.transpose_b) {
+        // b is stored [n, k]: element b[j, l], contiguous in `l`.
+        if (params.transpose_a) {
+          // a is stored [k, m]: element a[l, i], strided in `l`.
+          for (int j = 0; j < n; ++j) {
+            const ComputeType* brow = bb + static_cast<std::int64_t>(j) * ldb;
+            double sum = 0.0;
+            for (int l = 0; l < k; ++l) {
+              const float av =
+                  AsFloat(ab[static_cast<std::int64_t>(l) * lda + i]);
+              sum += static_cast<double>(av) *
+                     static_cast<double>(AsFloat(brow[l]));
+            }
+            const float prior = (params.beta != 0.0f) ? AsFloat(crow[j]) : 0.0f;
+            crow[j] = ToCompute(params.alpha * static_cast<float>(sum) +
+                                params.beta * prior);
+          }
+        } else {
+          // a is stored [m, k]: element a[i, l], contiguous in `l`.
+          const ComputeType* arow = ab + static_cast<std::int64_t>(i) * lda;
+          for (int j = 0; j < n; ++j) {
+            const ComputeType* brow = bb + static_cast<std::int64_t>(j) * ldb;
+            double sum = 0.0;
+            for (int l = 0; l < k; ++l) {
+              sum += static_cast<double>(AsFloat(arow[l])) *
+                     static_cast<double>(AsFloat(brow[l]));
+            }
+            const float prior = (params.beta != 0.0f) ? AsFloat(crow[j]) : 0.0f;
+            crow[j] = ToCompute(params.alpha * static_cast<float>(sum) +
+                                params.beta * prior);
+          }
+        }
+      } else {
+        std::fill(acc.begin(), acc.end(), 0.0);
         for (int l = 0; l < k; ++l) {
           const float av =
               params.transpose_a
                   ? AsFloat(ab[static_cast<std::int64_t>(l) * lda + i])
                   : AsFloat(ab[static_cast<std::int64_t>(i) * lda + l]);
-          const float bv =
-              params.transpose_b
-                  ? AsFloat(bb[static_cast<std::int64_t>(j) * ldb + l])
-                  : AsFloat(bb[static_cast<std::int64_t>(l) * ldb + j]);
-          acc += static_cast<double>(av) * static_cast<double>(bv);
+          // b is stored [k, n]: element b[l, j], contiguous in `j`.
+          const ComputeType* brow = bb + static_cast<std::int64_t>(l) * ldb;
+          for (int j = 0; j < n; ++j) {
+            const float bv = AsFloat(brow[j]);
+            acc[j] += static_cast<double>(av) * static_cast<double>(bv);
+          }
         }
-        const std::int64_t ci = static_cast<std::int64_t>(i) * ldc + j;
-        const float prior = (params.beta != 0.0f) ? AsFloat(cb[ci]) : 0.0f;
-        cb[ci] = ToCompute(params.alpha * static_cast<float>(acc) +
-                           params.beta * prior);
+        for (int j = 0; j < n; ++j) {
+          const float prior = (params.beta != 0.0f) ? AsFloat(crow[j]) : 0.0f;
+          crow[j] = ToCompute(params.alpha * static_cast<float>(acc[j]) +
+                              params.beta * prior);
+        }
       }
     }
   }
