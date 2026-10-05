@@ -82,6 +82,23 @@ inline void ZeroFill(ComputeType* ptr, std::size_t count) {
   std::fill(ptr, ptr + count, ToCompute(0.0f));
 }
 
+// Honour the NANOCHAT_NUM_THREADS contract. The sandbox sets it together with
+// OMP_NUM_THREADS, but a library thread pool reads NANOCHAT_NUM_THREADS. Apply
+// it once, before the first parallel region.
+inline void ConfigureThreads() {
+#if defined(_OPENMP)
+  static const bool configured = [] {
+    const char* env = std::getenv("NANOCHAT_NUM_THREADS");
+    if (env != nullptr) {
+      const int n = std::atoi(env);
+      if (n > 0) omp_set_num_threads(n);
+    }
+    return true;
+  }();
+  (void)configured;
+#endif
+}
+
 // Polar Express coefficients (num_iters=5), from nanochat/optim.py / the
 // Polar Express paper (arXiv:2505.16932).
 constexpr float kPolarCoeffs[5][3] = {
@@ -614,6 +631,7 @@ inline bool KeyAllowed(const AttentionParams& p, std::int64_t qpos,
 void AttentionForward(const AttentionParams& params, const ComputeType* q,
                       const ComputeType* k, const ComputeType* v,
                       ComputeType* out, float* stats) {
+  ConfigureThreads();
   const int batch = params.batch;
   const int seq = params.seq;
   const int heads = params.num_heads;
@@ -626,68 +644,76 @@ void AttentionForward(const AttentionParams& params, const ComputeType* q,
   const float scale = params.scale > 0.0f
                           ? params.scale
                           : 1.0f / std::sqrt(static_cast<float>(dim));
-  std::vector<float> acc(dim);
-
-  for (int b = 0; b < batch; ++b) {
-    for (int h = 0; h < heads; ++h) {
+  const std::int64_t total_rows =
+      static_cast<std::int64_t>(batch) * heads * seq;
+#if defined(_OPENMP)
+#pragma omp parallel
+#endif
+  {
+    std::vector<float> acc(dim);
+    // Cache the scaled score of every allowed key. The softmax pass then reads
+    // the cached value instead of recomputing the query-key dot product. Each
+    // score is the same float the shipped code compares and exponentiates.
+    std::vector<float> scores(kv_len);
+#if defined(_OPENMP)
+#pragma omp for schedule(guided)
+#endif
+    for (std::int64_t row = 0; row < total_rows; ++row) {
+      const int t = static_cast<int>(row % seq);
+      const int h = static_cast<int>((row / seq) % heads);
+      const int b = static_cast<int>(row / (seq * heads));
       const int kvh = KvHead(h, heads, kv_heads);
-      for (int t = 0; t < seq; ++t) {
-        const std::int64_t qpos = kv_len - seq + t;
-        const std::int64_t qbase =
-            ((static_cast<std::int64_t>(b) * seq + t) * heads + h) * dim;
-        // Pass 1: max score over the visible window.
-        float row_max = -std::numeric_limits<float>::infinity();
-        bool any = false;
-        for (std::int64_t j = 0; j < kv_len; ++j) {
-          if (!KeyAllowed(params, qpos, j)) continue;
-          const std::int64_t kbase =
-              ((static_cast<std::int64_t>(b) * kv_len + j) * kv_heads + kvh) *
-              dim;
-          double dot = 0.0;
-          for (int d = 0; d < dim; ++d) {
-            dot += static_cast<double>(AsFloat(q[qbase + d])) *
-                   static_cast<double>(AsFloat(k[kbase + d]));
-          }
-          const float score = scale * static_cast<float>(dot);
-          if (score > row_max) row_max = score;
-          any = true;
-        }
-        const std::int64_t stat_base =
-            ((static_cast<std::int64_t>(b) * heads + h) * seq + t) * 2;
-        if (!any) {
-          for (int d = 0; d < dim; ++d) out[qbase + d] = ToCompute(0.0f);
-          stats[stat_base] = 0.0f;
-          stats[stat_base + 1] = 0.0f;
-          continue;
-        }
-        // Pass 2: sum of exponentials and unnormalised output.
-        double sum_exp = 0.0;
-        for (int d = 0; d < dim; ++d) acc[d] = 0.0f;
-        for (std::int64_t j = 0; j < kv_len; ++j) {
-          if (!KeyAllowed(params, qpos, j)) continue;
-          const std::int64_t kbase =
-              ((static_cast<std::int64_t>(b) * kv_len + j) * kv_heads + kvh) *
-              dim;
-          const std::int64_t vbase = kbase;
-          double dot = 0.0;
-          for (int d = 0; d < dim; ++d) {
-            dot += static_cast<double>(AsFloat(q[qbase + d])) *
-                   static_cast<double>(AsFloat(k[kbase + d]));
-          }
-          const double weight = std::exp(
-              static_cast<double>(scale * static_cast<float>(dot) - row_max));
-          sum_exp += weight;
-          for (int d = 0; d < dim; ++d) {
-            acc[d] += static_cast<float>(weight * AsFloat(v[vbase + d]));
-          }
-        }
-        const float inv = static_cast<float>(1.0 / sum_exp);
+      const std::int64_t qpos = kv_len - seq + t;
+      const std::int64_t qbase =
+          ((static_cast<std::int64_t>(b) * seq + t) * heads + h) * dim;
+      // Pass 1: max score over the visible window.
+      float row_max = -std::numeric_limits<float>::infinity();
+      bool any = false;
+      for (std::int64_t j = 0; j < kv_len; ++j) {
+        if (!KeyAllowed(params, qpos, j)) continue;
+        const std::int64_t kbase =
+            ((static_cast<std::int64_t>(b) * kv_len + j) * kv_heads + kvh) *
+            dim;
+        double dot = 0.0;
         for (int d = 0; d < dim; ++d) {
-          out[qbase + d] = ToCompute(acc[d] * inv);
+          dot += static_cast<double>(AsFloat(q[qbase + d])) *
+                 static_cast<double>(AsFloat(k[kbase + d]));
         }
-        stats[stat_base] = row_max;
-        stats[stat_base + 1] = static_cast<float>(sum_exp);
+        const float score = scale * static_cast<float>(dot);
+        scores[j] = score;
+        if (score > row_max) row_max = score;
+        any = true;
       }
+      const std::int64_t stat_base =
+          ((static_cast<std::int64_t>(b) * heads + h) * seq + t) * 2;
+      if (!any) {
+        for (int d = 0; d < dim; ++d) out[qbase + d] = ToCompute(0.0f);
+        stats[stat_base] = 0.0f;
+        stats[stat_base + 1] = 0.0f;
+        continue;
+      }
+      // Pass 2: sum of exponentials and unnormalised output.
+      double sum_exp = 0.0;
+      for (int d = 0; d < dim; ++d) acc[d] = 0.0f;
+      for (std::int64_t j = 0; j < kv_len; ++j) {
+        if (!KeyAllowed(params, qpos, j)) continue;
+        const std::int64_t kbase =
+            ((static_cast<std::int64_t>(b) * kv_len + j) * kv_heads + kvh) *
+            dim;
+        const std::int64_t vbase = kbase;
+        const double weight =
+            std::exp(static_cast<double>(scores[j] - row_max));
+        sum_exp += weight;
+        for (int d = 0; d < dim; ++d) {
+          acc[d] += static_cast<float>(weight * AsFloat(v[vbase + d]));
+        }
+      }
+      const float inv = static_cast<float>(1.0 / sum_exp);
+      for (int d = 0; d < dim; ++d) {
+        out[qbase + d] = ToCompute(acc[d] * inv);
+      }
+      stats[stat_base] = row_max;
+      stats[stat_base + 1] = static_cast<float>(sum_exp);
     }
   }
 }
@@ -696,6 +722,7 @@ void AttentionBackward(const AttentionParams& params, const ComputeType* q,
                        const ComputeType* k, const ComputeType* v,
                        const float* stats, const ComputeType* dout,
                        ComputeType* dq, ComputeType* dk, ComputeType* dv) {
+  ConfigureThreads();
   const int batch = params.batch;
   const int seq = params.seq;
   const int heads = params.num_heads;
@@ -717,62 +744,120 @@ void AttentionBackward(const AttentionParams& params, const ComputeType* q,
   ZeroFill(dk, kv_count);
   ZeroFill(dv, kv_count);
 
-  std::vector<float> probs(kv_len, 0.0f);
-  std::vector<float> dp(kv_len, 0.0f);
+  const std::int64_t total_rows =
+      static_cast<std::int64_t>(batch) * heads * seq;
+  // `probs[row, j]` is the softmax probability and `ds[row, j]` is the
+  // softmax-gradient term. Phase 1 fills both while it accumulates dq. Phase 2
+  // reduces them into dk and dv. Both phases keep the shipped summation order.
+  const std::size_t red_size = static_cast<std::size_t>(total_rows) * kv_len;
+  std::vector<float> probs(red_size, 0.0f);
+  std::vector<float> ds(red_size, 0.0f);
 
-  for (int b = 0; b < batch; ++b) {
-    for (int h = 0; h < heads; ++h) {
+#if defined(_OPENMP)
+#pragma omp parallel
+#endif
+  {
+    std::vector<float> dp(kv_len);
+#if defined(_OPENMP)
+#pragma omp for schedule(guided)
+#endif
+    for (std::int64_t row = 0; row < total_rows; ++row) {
+      const int t = static_cast<int>(row % seq);
+      const int h = static_cast<int>((row / seq) % heads);
+      const int b = static_cast<int>(row / (seq * heads));
       const int kvh = KvHead(h, heads, kv_heads);
+      const std::int64_t qpos = kv_len - seq + t;
+      const std::int64_t qbase =
+          ((static_cast<std::int64_t>(b) * seq + t) * heads + h) * dim;
+      const std::int64_t stat_base =
+          ((static_cast<std::int64_t>(b) * heads + h) * seq + t) * 2;
+      const float row_max = stats[stat_base];
+      const float sum_exp = stats[stat_base + 1];
+      if (sum_exp <= 0.0f) continue;
+      const float inv = 1.0f / sum_exp;
+      const std::size_t idx0 = static_cast<std::size_t>(row) * kv_len;
+      float weighted_dp = 0.0f;
+      for (std::int64_t j = 0; j < kv_len; ++j) {
+        dp[j] = 0.0f;
+        if (!KeyAllowed(params, qpos, j)) continue;
+        const std::int64_t kbase =
+            ((static_cast<std::int64_t>(b) * kv_len + j) * kv_heads + kvh) *
+            dim;
+        double dot = 0.0;
+        for (int d = 0; d < dim; ++d) {
+          dot += static_cast<double>(AsFloat(q[qbase + d])) *
+                 static_cast<double>(AsFloat(k[kbase + d]));
+        }
+        const float p =
+            std::exp(scale * static_cast<float>(dot) - row_max) * inv;
+        probs[idx0 + static_cast<std::size_t>(j)] = p;
+        double dpd = 0.0;
+        for (int d = 0; d < dim; ++d) {
+          dpd += static_cast<double>(AsFloat(dout[qbase + d])) *
+                 static_cast<double>(AsFloat(v[kbase + d]));
+        }
+        dp[j] = static_cast<float>(dpd);
+        weighted_dp += p * dp[j];
+      }
+      for (std::int64_t j = 0; j < kv_len; ++j) {
+        if (!KeyAllowed(params, qpos, j)) continue;
+        const std::int64_t kbase =
+            ((static_cast<std::int64_t>(b) * kv_len + j) * kv_heads + kvh) *
+            dim;
+        const float p = probs[idx0 + static_cast<std::size_t>(j)];
+        const float dsj = p * (dp[j] - weighted_dp);
+        ds[idx0 + static_cast<std::size_t>(j)] = dsj;
+        const float dp_scale = dsj * scale;
+        for (int d = 0; d < dim; ++d) {
+          const float kv = AsFloat(k[kbase + d]);
+          dq[qbase + d] = ToCompute(AsFloat(dq[qbase + d]) + dp_scale * kv);
+        }
+      }
+    }
+  }
+
+  // Phase 2: accumulate dk and dv. A key/value row is owned by one worker, so
+  // no atomics are needed. The inner order (query head, then query row) matches
+  // the shipped accumulation order.
+  const int group = (kv_heads > 0 && kv_heads < heads) ? heads / kv_heads : 1;
+  const std::int64_t total_keys =
+      static_cast<std::int64_t>(batch) * kv_heads * kv_len;
+#if defined(_OPENMP)
+#pragma omp parallel for schedule(guided)
+#endif
+  for (std::int64_t key = 0; key < total_keys; ++key) {
+    const int j = static_cast<int>(key % kv_len);
+    const int kvh = static_cast<int>((key / kv_len) % kv_heads);
+    const int b = static_cast<int>(key / (kv_len * kv_heads));
+    int h_start;
+    int h_end;
+    if (kv_heads > 0 && kv_heads < heads) {
+      h_start = kvh * group;
+      h_end = std::min(heads, h_start + group);
+    } else {
+      h_start = kvh;
+      h_end = std::min(heads, kvh + 1);
+    }
+    if (h_start >= h_end) continue;
+    const std::int64_t kbase =
+        ((static_cast<std::int64_t>(b) * kv_len + j) * kv_heads + kvh) * dim;
+    for (int h = h_start; h < h_end; ++h) {
       for (int t = 0; t < seq; ++t) {
         const std::int64_t qpos = kv_len - seq + t;
+        if (!KeyAllowed(params, qpos, j)) continue;
         const std::int64_t qbase =
             ((static_cast<std::int64_t>(b) * seq + t) * heads + h) * dim;
-        const std::int64_t stat_base =
-            ((static_cast<std::int64_t>(b) * heads + h) * seq + t) * 2;
-        const float row_max = stats[stat_base];
-        const float sum_exp = stats[stat_base + 1];
-        if (sum_exp <= 0.0f) continue;
-        const float inv = 1.0f / sum_exp;
-        float weighted_dp = 0.0f;
-        for (std::int64_t j = 0; j < kv_len; ++j) {
-          probs[j] = 0.0f;
-          dp[j] = 0.0f;
-          if (!KeyAllowed(params, qpos, j)) continue;
-          const std::int64_t kbase =
-              ((static_cast<std::int64_t>(b) * kv_len + j) * kv_heads + kvh) *
-              dim;
-          double dot = 0.0;
-          for (int d = 0; d < dim; ++d) {
-            dot += static_cast<double>(AsFloat(q[qbase + d])) *
-                   static_cast<double>(AsFloat(k[kbase + d]));
-          }
-          const float p =
-              std::exp(scale * static_cast<float>(dot) - row_max) * inv;
-          probs[j] = p;
-          double dpd = 0.0;
-          for (int d = 0; d < dim; ++d) {
-            dpd += static_cast<double>(AsFloat(dout[qbase + d])) *
-                   static_cast<double>(AsFloat(v[kbase + d]));
-          }
-          dp[j] = static_cast<float>(dpd);
-          weighted_dp += p * dp[j];
-        }
-        for (std::int64_t j = 0; j < kv_len; ++j) {
-          if (!KeyAllowed(params, qpos, j)) continue;
-          const std::int64_t kbase =
-              ((static_cast<std::int64_t>(b) * kv_len + j) * kv_heads + kvh) *
-              dim;
-          const float ds = probs[j] * (dp[j] - weighted_dp);
-          const float dp_scale = ds * scale;
-          const float p = probs[j];
-          for (int d = 0; d < dim; ++d) {
-            const float qv = AsFloat(q[qbase + d]);
-            const float kv = AsFloat(k[kbase + d]);
-            const float dov = AsFloat(dout[qbase + d]);
-            dq[qbase + d] = ToCompute(AsFloat(dq[qbase + d]) + dp_scale * kv);
-            dk[kbase + d] = ToCompute(AsFloat(dk[kbase + d]) + dp_scale * qv);
-            dv[kbase + d] = ToCompute(AsFloat(dv[kbase + d]) + p * dov);
-          }
+        const std::int64_t row =
+            (static_cast<std::int64_t>(b) * heads + h) * seq + t;
+        const std::size_t idx = static_cast<std::size_t>(row) * kv_len +
+                                static_cast<std::size_t>(j);
+        const float p = probs[idx];
+        const float dp_scale = ds[idx] * scale;
+        for (int d = 0; d < dim; ++d) {
+          const float qv = AsFloat(q[qbase + d]);
+          const float dov = AsFloat(dout[qbase + d]);
+          dk[kbase + d] = ToCompute(AsFloat(dk[kbase + d]) + dp_scale * qv);
+          dv[kbase + d] = ToCompute(AsFloat(dv[kbase + d]) + p * dov);
         }
       }
     }
@@ -859,76 +944,99 @@ void PointwiseBackward(PointwiseOp op, int n, const ComputeType* a,
 void ClassifierForward(const ClassifierParams& params,
                        const ComputeType* logits, const int* targets,
                        ComputeType* losses) {
+  ConfigureThreads();
   const int rows = params.rows;
   const int vocab = params.vocab_size;
   const int padded =
       params.padded_vocab_size > 0 ? params.padded_vocab_size : vocab;
   if (rows <= 0 || vocab <= 0) return;
   const float cap = params.softcap;
-  for (int r = 0; r < rows; ++r) {
-    const int target = targets[r];
-    if (target == params.ignore_index) {
-      losses[r] = ToCompute(0.0f);
-      continue;
+#if defined(_OPENMP)
+#pragma omp parallel
+#endif
+  {
+    // The softcap is computed once per element, then the max and the sum walk
+    // the cached values. The arithmetic is the shipped arithmetic.
+    std::vector<float> z(vocab);
+#if defined(_OPENMP)
+#pragma omp for schedule(static)
+#endif
+    for (int r = 0; r < rows; ++r) {
+      const int target = targets[r];
+      if (target == params.ignore_index) {
+        losses[r] = ToCompute(0.0f);
+        continue;
+      }
+      const std::int64_t base = static_cast<std::int64_t>(r) * padded;
+      // Softcap only the real vocabulary; the padded tail is never read.
+      float row_max = -std::numeric_limits<float>::infinity();
+      for (int j = 0; j < vocab; ++j) {
+        const float zj = cap * std::tanh(AsFloat(logits[base + j]) / cap);
+        z[j] = zj;
+        if (zj > row_max) row_max = zj;
+      }
+      double sum_exp = 0.0;
+      for (int j = 0; j < vocab; ++j) {
+        sum_exp += std::exp(static_cast<double>(z[j] - row_max));
+      }
+      const float loss =
+          static_cast<float>(std::log(sum_exp)) + row_max - z[target];
+      losses[r] = ToCompute(loss);
     }
-    const std::int64_t base = static_cast<std::int64_t>(r) * padded;
-    // Softcap only the real vocabulary; the padded tail is never read.
-    float row_max = -std::numeric_limits<float>::infinity();
-    for (int j = 0; j < vocab; ++j) {
-      const float z = cap * std::tanh(AsFloat(logits[base + j]) / cap);
-      if (z > row_max) row_max = z;
-    }
-    double sum_exp = 0.0;
-    for (int j = 0; j < vocab; ++j) {
-      const float z = cap * std::tanh(AsFloat(logits[base + j]) / cap);
-      sum_exp += std::exp(static_cast<double>(z - row_max));
-    }
-    const float z_target =
-        cap * std::tanh(AsFloat(logits[base + target]) / cap);
-    const float loss =
-        static_cast<float>(std::log(sum_exp)) + row_max - z_target;
-    losses[r] = ToCompute(loss);
   }
 }
 
 void ClassifierBackward(const ClassifierParams& params,
                         const ComputeType* logits, const int* targets,
                         ComputeType* dlogits) {
+  ConfigureThreads();
   const int rows = params.rows;
   const int vocab = params.vocab_size;
   const int padded =
       params.padded_vocab_size > 0 ? params.padded_vocab_size : vocab;
   if (rows <= 0 || vocab <= 0) return;
   const float cap = params.softcap;
-  std::vector<float> probs(vocab, 0.0f);
-  std::vector<float> sech2(vocab, 0.0f);
-  for (int r = 0; r < rows; ++r) {
-    const std::int64_t base = static_cast<std::int64_t>(r) * padded;
-    const int target = targets[r];
-    if (target == params.ignore_index) {
-      for (int j = 0; j < padded; ++j) dlogits[base + j] = ToCompute(0.0f);
-      continue;
+#if defined(_OPENMP)
+#pragma omp parallel
+#endif
+  {
+    // `probs` holds the softcapped logit and `sech2` holds 1 - tanh^2, so each
+    // element needs one tanh. The two exponentials of the shipped code stay
+    // separate: the sum uses the double overload and the output uses the
+    // float overload, exactly as the shipped code does.
+    std::vector<float> probs(vocab);
+    std::vector<float> sech2(vocab);
+#if defined(_OPENMP)
+#pragma omp for schedule(static)
+#endif
+    for (int r = 0; r < rows; ++r) {
+      const std::int64_t base = static_cast<std::int64_t>(r) * padded;
+      const int target = targets[r];
+      if (target == params.ignore_index) {
+        for (int j = 0; j < padded; ++j) dlogits[base + j] = ToCompute(0.0f);
+        continue;
+      }
+      float row_max = -std::numeric_limits<float>::infinity();
+      for (int j = 0; j < vocab; ++j) {
+        const float t = std::tanh(AsFloat(logits[base + j]) / cap);
+        sech2[j] = 1.0f - t * t;
+        const float z = cap * t;
+        probs[j] = z;
+        if (z > row_max) row_max = z;
+      }
+      double sum_exp = 0.0;
+      for (int j = 0; j < vocab; ++j) {
+        sum_exp += std::exp(static_cast<double>(probs[j] - row_max));
+      }
+      const float inv = static_cast<float>(1.0 / sum_exp);
+      for (int j = 0; j < vocab; ++j) {
+        const float p = std::exp(probs[j] - row_max) * inv;
+        const float onehot = (j == target) ? 1.0f : 0.0f;
+        // dL/d(raw logit) = (softmax - onehot) * d(softcap)/d(raw).
+        dlogits[base + j] = ToCompute((p - onehot) * sech2[j]);
+      }
+      for (int j = vocab; j < padded; ++j) dlogits[base + j] = ToCompute(0.0f);
     }
-    float row_max = -std::numeric_limits<float>::infinity();
-    for (int j = 0; j < vocab; ++j) {
-      const float z = cap * std::tanh(AsFloat(logits[base + j]) / cap);
-      probs[j] = z;
-      if (z > row_max) row_max = z;
-    }
-    double sum_exp = 0.0;
-    for (int j = 0; j < vocab; ++j) {
-      sum_exp += std::exp(static_cast<double>(probs[j] - row_max));
-    }
-    const float inv = static_cast<float>(1.0 / sum_exp);
-    for (int j = 0; j < vocab; ++j) {
-      const float t = std::tanh(AsFloat(logits[base + j]) / cap);
-      sech2[j] = 1.0f - t * t;
-      const float p = std::exp(probs[j] - row_max) * inv;
-      const float onehot = (j == target) ? 1.0f : 0.0f;
-      // dL/d(raw logit) = (softmax - onehot) * d(softcap)/d(raw).
-      dlogits[base + j] = ToCompute((p - onehot) * sech2[j]);
-    }
-    for (int j = vocab; j < padded; ++j) dlogits[base + j] = ToCompute(0.0f);
   }
 }
 
@@ -995,8 +1103,45 @@ void AdamWUpdate(int n, const AdamWParams& params, ComputeType* p,
 // Muon (momentum -> Polar Express -> variance reduction -> cautious update)
 // ---------------------------------------------------------------------------
 
+namespace {
+
+// Float matrix multiply used by MuonUpdate. The Muon working state is always
+// float, so the tuned `Gemm` (whose operands are ComputeType) is only callable
+// when ComputeType is float. The fp32 build forwards to `Gemm` and keeps its
+// double accumulator; the fp16 build keeps a portable double-accumulator
+// fallback.
+void MuonMatmul(int m, int n, int k, const float* a, const float* b, float* c,
+                bool transpose_a, bool transpose_b) {
+#if defined(NANOCHAT_PRECISION_FP16)
+  for (int i = 0; i < m; ++i) {
+    for (int j = 0; j < n; ++j) {
+      double sum = 0.0;
+      for (int l = 0; l < k; ++l) {
+        const float av = transpose_a ? a[l * m + i] : a[i * k + l];
+        const float bv = transpose_b ? b[j * k + l] : b[l * n + j];
+        sum += static_cast<double>(av) * static_cast<double>(bv);
+      }
+      c[i * n + j] = static_cast<float>(sum);
+    }
+  }
+#else
+  GemmParams params;
+  params.m = m;
+  params.n = n;
+  params.k = k;
+  params.alpha = 1.0f;
+  params.beta = 0.0f;
+  params.transpose_a = transpose_a;
+  params.transpose_b = transpose_b;
+  Gemm(GemmMode::kForward, params, a, b, c);
+#endif
+}
+
+}  // namespace
+
 void MuonUpdate(const MuonParams& params, const ComputeType* stacked_grads,
                 ComputeType* stacked_params, float* buf1, float* buf2) {
+  ConfigureThreads();
   const int num_params = params.num_params > 0 ? params.num_params : 1;
   const int rows = params.rows;
   const int cols = params.cols;
@@ -1005,6 +1150,7 @@ void MuonUpdate(const MuonParams& params, const ComputeType* stacked_grads,
   const int ns_steps = std::min(std::max(params.ns_steps, 0), 5);
   const bool reduce_cols =
       params.red_dim == -1 || (params.red_dim != -2 && rows >= cols);
+  const bool tall = rows > cols;
 
   const int k_extent = std::min(rows, cols);
   std::vector<float> x(mat, 0.0f);
@@ -1024,6 +1170,9 @@ void MuonUpdate(const MuonParams& params, const ComputeType* stacked_grads,
 
     // Nesterov momentum: update the first moment, then the accelerated
     // gradient.
+#if defined(_OPENMP)
+#pragma omp parallel for schedule(static)
+#endif
     for (std::size_t i = 0; i < mat; ++i) {
       const float gr = AsFloat(grad[i]);
       momentum_buf[i] =
@@ -1036,11 +1185,17 @@ void MuonUpdate(const MuonParams& params, const ComputeType* stacked_grads,
     // MuonEq row equilibration: rescale each row to the mean row norm.
     {
       double frob_sq = 0.0;
+#if defined(_OPENMP)
+#pragma omp parallel for schedule(static) reduction(+ : frob_sq)
+#endif
       for (std::size_t i = 0; i < mat; ++i) {
         frob_sq += static_cast<double>(x[i]) * x[i];
       }
       const float target = static_cast<float>(std::sqrt(frob_sq)) /
                            std::sqrt(static_cast<float>(rows));
+#if defined(_OPENMP)
+#pragma omp parallel for schedule(static)
+#endif
       for (int r = 0; r < rows; ++r) {
         double row_sq = 0.0;
         for (int c = 0; c < cols; ++c) {
@@ -1059,108 +1214,53 @@ void MuonUpdate(const MuonParams& params, const ComputeType* stacked_grads,
     // Normalise the Frobenius norm before the polar iterations.
     {
       double frob_sq = 0.0;
+#if defined(_OPENMP)
+#pragma omp parallel for schedule(static) reduction(+ : frob_sq)
+#endif
       for (std::size_t i = 0; i < mat; ++i) {
         frob_sq += static_cast<double>(x[i]) * x[i];
       }
       const float div = static_cast<float>(std::sqrt(frob_sq)) * 1.01f + 1e-6f;
+#if defined(_OPENMP)
+#pragma omp parallel for schedule(static)
+#endif
       for (std::size_t i = 0; i < mat; ++i) x[i] /= div;
     }
 
     // Polar Express orthogonalisation.
-    const bool tall = rows > cols;
     for (int it = 0; it < ns_steps; ++it) {
       const float ca = kPolarCoeffs[it][0];
       const float cb = kPolarCoeffs[it][1];
       const float cc = kPolarCoeffs[it][2];
       if (tall) {
         // A = X^T X  (cols x cols)
-        for (int i = 0; i < cols; ++i) {
-          for (int j = 0; j < cols; ++j) {
-            double s = 0.0;
-            for (int r = 0; r < rows; ++r) {
-              s += static_cast<double>(
-                       x[static_cast<std::size_t>(r) * cols + i]) *
-                   x[static_cast<std::size_t>(r) * cols + j];
-            }
-            a_mat[static_cast<std::size_t>(i) * cols + j] =
-                static_cast<float>(s);
-          }
-        }
-        for (int i = 0; i < cols; ++i) {
-          for (int j = 0; j < cols; ++j) {
-            double s = 0.0;
-            for (int l = 0; l < cols; ++l) {
-              s += static_cast<double>(
-                       a_mat[static_cast<std::size_t>(i) * cols + l]) *
-                   a_mat[static_cast<std::size_t>(l) * cols + j];
-            }
-            a2_mat[static_cast<std::size_t>(i) * cols + j] =
-                static_cast<float>(s);
-          }
-        }
+        MuonMatmul(cols, cols, rows, x.data(), x.data(), a_mat.data(), true,
+                   false);
+        MuonMatmul(cols, cols, cols, a_mat.data(), a_mat.data(), a2_mat.data(),
+                   false, false);
         for (int i = 0; i < cols; ++i) {
           for (int j = 0; j < cols; ++j) {
             const std::size_t ij = static_cast<std::size_t>(i) * cols + j;
             b_mat[ij] = cb * a_mat[ij] + cc * a2_mat[ij];
           }
         }
-        for (int r = 0; r < rows; ++r) {
-          for (int j = 0; j < cols; ++j) {
-            double s = 0.0;
-            for (int i = 0; i < cols; ++i) {
-              s += static_cast<double>(
-                       x[static_cast<std::size_t>(r) * cols + i]) *
-                   b_mat[static_cast<std::size_t>(i) * cols + j];
-            }
-            prod[static_cast<std::size_t>(r) * cols + j] =
-                static_cast<float>(s);
-          }
-        }
+        MuonMatmul(rows, cols, cols, x.data(), b_mat.data(), prod.data(), false,
+                   false);
         for (std::size_t i = 0; i < mat; ++i) x[i] = ca * x[i] + prod[i];
       } else {
         // A = X X^T  (rows x rows)
-        for (int i = 0; i < rows; ++i) {
-          for (int j = 0; j < rows; ++j) {
-            double s = 0.0;
-            for (int c = 0; c < cols; ++c) {
-              s += static_cast<double>(
-                       x[static_cast<std::size_t>(i) * cols + c]) *
-                   x[static_cast<std::size_t>(j) * cols + c];
-            }
-            a_mat[static_cast<std::size_t>(i) * rows + j] =
-                static_cast<float>(s);
-          }
-        }
-        for (int i = 0; i < rows; ++i) {
-          for (int j = 0; j < rows; ++j) {
-            double s = 0.0;
-            for (int l = 0; l < rows; ++l) {
-              s += static_cast<double>(
-                       a_mat[static_cast<std::size_t>(i) * rows + l]) *
-                   a_mat[static_cast<std::size_t>(l) * rows + j];
-            }
-            a2_mat[static_cast<std::size_t>(i) * rows + j] =
-                static_cast<float>(s);
-          }
-        }
+        MuonMatmul(rows, rows, cols, x.data(), x.data(), a_mat.data(), false,
+                   true);
+        MuonMatmul(rows, rows, rows, a_mat.data(), a_mat.data(), a2_mat.data(),
+                   false, false);
         for (int i = 0; i < rows; ++i) {
           for (int j = 0; j < rows; ++j) {
             const std::size_t ij = static_cast<std::size_t>(i) * rows + j;
             b_mat[ij] = cb * a_mat[ij] + cc * a2_mat[ij];
           }
         }
-        for (int r = 0; r < rows; ++r) {
-          for (int c = 0; c < cols; ++c) {
-            double s = 0.0;
-            for (int i = 0; i < rows; ++i) {
-              s += static_cast<double>(
-                       b_mat[static_cast<std::size_t>(r) * rows + i]) *
-                   x[static_cast<std::size_t>(i) * cols + c];
-            }
-            prod[static_cast<std::size_t>(r) * cols + c] =
-                static_cast<float>(s);
-          }
-        }
+        MuonMatmul(rows, cols, rows, b_mat.data(), x.data(), prod.data(), false,
+                   false);
         for (std::size_t i = 0; i < mat; ++i) x[i] = ca * x[i] + prod[i];
       }
     }
@@ -1168,6 +1268,9 @@ void MuonUpdate(const MuonParams& params, const ComputeType* stacked_grads,
     // Muon+ renormalisation: snap the Frobenius norm to sqrt(min(rows, cols)).
     {
       double frob_sq = 0.0;
+#if defined(_OPENMP)
+#pragma omp parallel for schedule(static) reduction(+ : frob_sq)
+#endif
       for (std::size_t i = 0; i < mat; ++i) {
         frob_sq += static_cast<double>(x[i]) * x[i];
       }
@@ -1175,6 +1278,9 @@ void MuonUpdate(const MuonParams& params, const ComputeType* stacked_grads,
           std::sqrt(static_cast<float>(std::min(rows, cols)));
       const float scale =
           target_norm / std::max(static_cast<float>(std::sqrt(frob_sq)), 1e-6f);
+#if defined(_OPENMP)
+#pragma omp parallel for schedule(static)
+#endif
       for (std::size_t i = 0; i < mat; ++i) x[i] *= scale;
     }
 
@@ -1183,6 +1289,9 @@ void MuonUpdate(const MuonParams& params, const ComputeType* stacked_grads,
       const std::size_t red_size = static_cast<std::size_t>(cols);
       std::vector<float> v_mean(rows, 0.0f);
       double sum_vmean = 0.0;
+#if defined(_OPENMP)
+#pragma omp parallel for schedule(static) reduction(+ : sum_vmean)
+#endif
       for (int r = 0; r < rows; ++r) {
         double s = 0.0;
         for (int c = 0; c < cols; ++c) {
@@ -1195,12 +1304,18 @@ void MuonUpdate(const MuonParams& params, const ComputeType* stacked_grads,
       const float v_norm = std::sqrt(static_cast<float>(sum_vmean) *
                                      static_cast<float>(red_size));
       std::vector<float> step_size(rows, 0.0f);
+#if defined(_OPENMP)
+#pragma omp parallel for schedule(static)
+#endif
       for (int r = 0; r < rows; ++r) {
         second_buf[r] =
             second_buf[r] + (1.0f - params.beta2) * (v_mean[r] - second_buf[r]);
         step_size[r] = 1.0f / std::sqrt(std::max(second_buf[r], 1e-10f));
       }
       double sum_scaled = 0.0;
+#if defined(_OPENMP)
+#pragma omp parallel for schedule(static) reduction(+ : sum_scaled)
+#endif
       for (int r = 0; r < rows; ++r) {
         sum_scaled +=
             static_cast<double>(v_mean[r] * static_cast<float>(red_size)) *
@@ -1208,6 +1323,9 @@ void MuonUpdate(const MuonParams& params, const ComputeType* stacked_grads,
       }
       const float v_norm_new = std::sqrt(static_cast<float>(sum_scaled));
       const float denom = std::max(v_norm_new, 1e-10f);
+#if defined(_OPENMP)
+#pragma omp parallel for schedule(static)
+#endif
       for (int r = 0; r < rows; ++r) {
         const float final_scale = step_size[r] * (v_norm / denom);
         for (int c = 0; c < cols; ++c) {
@@ -1218,6 +1336,9 @@ void MuonUpdate(const MuonParams& params, const ComputeType* stacked_grads,
       const std::size_t red_size = static_cast<std::size_t>(rows);
       std::vector<float> v_mean(cols, 0.0f);
       double sum_vmean = 0.0;
+#if defined(_OPENMP)
+#pragma omp parallel for schedule(static) reduction(+ : sum_vmean)
+#endif
       for (int c = 0; c < cols; ++c) {
         double s = 0.0;
         for (int r = 0; r < rows; ++r) {
@@ -1230,12 +1351,18 @@ void MuonUpdate(const MuonParams& params, const ComputeType* stacked_grads,
       const float v_norm = std::sqrt(static_cast<float>(sum_vmean) *
                                      static_cast<float>(red_size));
       std::vector<float> step_size(cols, 0.0f);
+#if defined(_OPENMP)
+#pragma omp parallel for schedule(static)
+#endif
       for (int c = 0; c < cols; ++c) {
         second_buf[c] =
             second_buf[c] + (1.0f - params.beta2) * (v_mean[c] - second_buf[c]);
         step_size[c] = 1.0f / std::sqrt(std::max(second_buf[c], 1e-10f));
       }
       double sum_scaled = 0.0;
+#if defined(_OPENMP)
+#pragma omp parallel for schedule(static) reduction(+ : sum_scaled)
+#endif
       for (int c = 0; c < cols; ++c) {
         sum_scaled +=
             static_cast<double>(v_mean[c] * static_cast<float>(red_size)) *
@@ -1243,6 +1370,9 @@ void MuonUpdate(const MuonParams& params, const ComputeType* stacked_grads,
       }
       const float v_norm_new = std::sqrt(static_cast<float>(sum_scaled));
       const float denom = std::max(v_norm_new, 1e-10f);
+#if defined(_OPENMP)
+#pragma omp parallel for schedule(static)
+#endif
       for (int r = 0; r < rows; ++r) {
         for (int c = 0; c < cols; ++c) {
           x[static_cast<std::size_t>(r) * cols + c] *=
@@ -1252,6 +1382,9 @@ void MuonUpdate(const MuonParams& params, const ComputeType* stacked_grads,
     }
 
     // Cautious weight decay + parameter update.
+#if defined(_OPENMP)
+#pragma omp parallel for schedule(static)
+#endif
     for (std::size_t i = 0; i < mat; ++i) {
       const float pv = AsFloat(param[i]);
       const float gv = x[i];
