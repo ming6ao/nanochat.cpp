@@ -43,7 +43,7 @@ std::vector<std::pair<std::uint32_t, std::uint32_t>> TinyMerges() {
       {'l', 'l'},    // rank 257: "ll"
       {256, 257},    // rank 258: "hell"
       {258, 'o'},    // rank 259: "hello"
-      {0xE2, 0x80},  // rank 260: a partial UTF-8 sequence
+      {0xE2, 0x82},  // rank 260: the first two bytes of the euro sign
   };
 }
 
@@ -156,8 +156,9 @@ void TestStreamDecoder(const nanochat::Tokenizer& tokenizer) {
   if (out != "\xE2\x82\xAC") {
     Fail("stream decoder did not repair the partial sequence");
   }
-  decoder.Flush(&out);
-  if (!out.empty()) {
+  std::string flushed;
+  decoder.Flush(&flushed);
+  if (!flushed.empty()) {
     Fail("stream decoder flush after a repair is not empty");
   }
 
@@ -180,6 +181,30 @@ void TestStreamDecoder(const nanochat::Tokenizer& tokenizer) {
   if (streamed_text !=
       tokenizer.Decode(row.data(), static_cast<int>(row.size()))) {
     Fail("streamed row differs from Decode");
+  }
+}
+
+void TestLossyDecode(const nanochat::Tokenizer& tokenizer) {
+  const std::string replacement = "\xEF\xBF\xBD";
+  const std::vector<int> invalid_lead = {0x80};
+  if (tokenizer.Decode(invalid_lead.data(), 1) != replacement) {
+    Fail("Decode did not replace an invalid lead byte");
+  }
+  const std::vector<int> out_of_range = {0xF5};
+  if (tokenizer.Decode(out_of_range.data(), 1) != replacement) {
+    Fail("Decode did not replace an out-of-range lead byte");
+  }
+  const std::vector<int> bad_second = {0xE2, 0x41};
+  if (tokenizer.Decode(bad_second.data(), 2) != replacement + "A") {
+    Fail("Decode did not replace an invalid continuation byte");
+  }
+  const std::vector<int> overlong = {0xC0, 0x80};
+  if (tokenizer.Decode(overlong.data(), 2) != replacement + replacement) {
+    Fail("Decode did not replace an overlong sequence");
+  }
+  const std::vector<int> incomplete = {0xE2, 0x82};
+  if (tokenizer.Decode(incomplete.data(), 2) != replacement) {
+    Fail("Decode did not replace an incomplete sequence");
   }
 }
 
@@ -236,6 +261,7 @@ int main() {
   if (tokenizer != nullptr) {
     TestMetadata(*tokenizer);
     TestEncodeDecode(*tokenizer);
+    TestLossyDecode(*tokenizer);
     TestStreamDecoder(*tokenizer);
   }
   TestBadFiles();

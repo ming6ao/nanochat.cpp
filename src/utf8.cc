@@ -62,8 +62,9 @@ Utf8Sequence ReadUtf8(std::string_view text, std::size_t start) {
     result.value = first;
     return result;
   }
-  if (first < 0xC2) {
-    return result;  // Invalid lead byte. Consume one byte.
+  if (first < 0xC2 || first > 0xF4) {
+    result.length = 1;  // Invalid lead byte. Consume one byte.
+    return result;
   }
   const std::size_t expected = ExpectedLength(first);
   const std::size_t available = text.size() - start;
@@ -79,7 +80,8 @@ Utf8Sequence ReadUtf8(std::string_view text, std::size_t start) {
   }
   const std::uint8_t second = ByteAt(text, start + 1);
   if (second < low || second > high) {
-    return result;  // Invalid second byte. Consume the lead byte only.
+    result.length = 1;  // Invalid second byte. Consume the lead byte only.
+    return result;
   }
   for (std::size_t index = 2; index < expected; ++index) {
     if (available <= index) {
