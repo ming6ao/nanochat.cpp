@@ -251,8 +251,12 @@ case "$command" in
     else
       echo "sandbox backend: none (systemd unavailable)"
     fi
-    if [[ -e /tmp/nanochat-gpu-0.lock ]]; then
-      if flock -n /tmp/nanochat-gpu.lock -c true 2>/dev/null; then
+    # The broker keeps one lock per device set, so probe the same path that
+    # tools/gpu.sh locks. See docs/host-portability.md section 5.
+    gpu_devices=${NANOCHAT_GPU_DEVICES:-0}
+    gpu_lock="/tmp/nanochat-gpu-${gpu_devices//,/_}.lock"
+    if [[ -e $gpu_lock ]]; then
+      if flock -n "$gpu_lock" -c true 2>/dev/null; then
         echo "gpu lock:  free"
       else
         echo "gpu lock:  HELD (another job is running)"
