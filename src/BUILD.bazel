@@ -295,6 +295,71 @@ cc_binary(
     ],
 )
 
+# The native tokenizer (docs/tokenizer.md): the fixed-pattern splitter, the
+# Unicode 16.0.0 tables, and the `NCTOKEN1` artifact loader. It is a host
+# utility with no kernel dependency. OpenMP serves the trainer's split-and-count
+# step, which shares the scanner.
+cc_library(
+    name = "tokenizer",
+    srcs = [
+        "split_pattern.cc",
+        "tokenizer.cc",
+        "utf8.cc",
+    ],
+    hdrs = [
+        "split_pattern.h",
+        "tokenizer_internal.h",
+        "utf8.h",
+    ],
+    textual_hdrs = ["unicode_tables.inc"],
+    copts = nanochat_copts() + ["-fopenmp"],
+    linkopts = ["-fopenmp"],
+    deps = ["//include/nanochat:nanochat"],
+)
+
+# The tokenizer round trip: a tiny artifact, the special ids, the token bytes,
+# the encoder, the lossy decoder, the stream decoder, and the bad-file contract.
+cc_test(
+    name = "tokenizer_test",
+    srcs = ["tokenizer_test.cc"],
+    copts = nanochat_copts(),
+    deps = [
+        ":tokenizer",
+        "//include/nanochat:nanochat",
+    ],
+    size = "small",
+)
+
+# The splitter: the curated cases, the possessive and lookahead edge cases, the
+# Unicode table boundaries, and a deterministic random corpus.
+cc_test(
+    name = "split_pattern_test",
+    srcs = ["split_pattern_test.cc"],
+    copts = nanochat_copts(),
+    deps = [
+        ":tokenizer",
+        "//include/nanochat:nanochat",
+    ],
+    size = "small",
+)
+
+# Reference parity: builds an `NCTOKEN1` artifact from
+# `tests/data/tokenizer_fixture.bin` and compares the merges, the token bytes,
+# the split cases, the encode cases, the decode cases, and the stream decoder.
+cc_test(
+    name = "tokenizer_parity_test",
+    srcs = ["tokenizer_parity_test.cc"],
+    copts = nanochat_copts(),
+    data = ["//tests:data/tokenizer_fixture.bin"],
+    args = ["$(rootpath //tests:data/tokenizer_fixture.bin)"],
+    deps = [
+        ":tokenizer",
+        "//include/nanochat:nanochat",
+        "//tests:oracle_fixture",
+    ],
+    size = "small",
+)
+
 # Aggregation point consumed by //:all_tests.
 test_suite(name = "all", tests = [
     ":model_oracle_test",
@@ -305,4 +370,7 @@ test_suite(name = "all", tests = [
     ":optim_test",
     ":data_test",
     ":harness_test",
+    ":tokenizer_test",
+    ":split_pattern_test",
+    ":tokenizer_parity_test",
 ])
