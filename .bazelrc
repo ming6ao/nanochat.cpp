@@ -92,6 +92,13 @@ test --test_env=DBUS_SESSION_BUS_ADDRESS
 # and the test process. See docs/host-portability.md.
 test --test_env=NANOCHAT_SANDBOX_BACKEND
 test --test_env=NANOCHAT_GPU_DEVICES
+# The CUDA driver (libcuda.so.1) lives in the driver mount, not the toolkit, and
+# Bazel vendors only libcudart/libcublas into the test runfiles. Without the
+# client's LD_LIBRARY_PATH the test action cannot dlopen libcuda, so the
+# runtime reports CUDA_ERROR_INSUFFICIENT_DRIVER ("CUDA driver version is
+# insufficient for CUDA runtime version") even though the driver is new enough.
+# See docs/host-portability.md.
+test --test_env=LD_LIBRARY_PATH
 
 # --- Host-local overrides ---------------------------------------------------
 #

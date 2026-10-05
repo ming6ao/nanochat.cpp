@@ -135,7 +135,15 @@ Bazel gives a test action a small environment. Add the following lines to
 ```
 test --test_env=NANOCHAT_SANDBOX_BACKEND
 test --test_env=NANOCHAT_GPU_DEVICES
+test --test_env=LD_LIBRARY_PATH
 ```
+
+The last line forwards the CUDA driver directory. Bazel vendors the toolkit's
+`libcudart`/`libcublas` into the runfiles but not the driver's `libcuda.so.1`,
+which lives under the driver mount (for example `/usr/local/nvidia/lib64`).
+The runfiles are put on the test's `LD_LIBRARY_PATH`; without the client value
+`libcuda` is unresolvable and `cudaMalloc` fails with
+`CUDA_ERROR_INSUFFICIENT_DRIVER`.
 
 ## 5. GPU broker and device selection
 
