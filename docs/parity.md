@@ -33,6 +33,9 @@ Status values:
 | E3 | `equivalent` | evaluation | reference checkpoints converted torch -> NCHKPT01 |
 | E4 | `equivalent` | evaluation | CORE and chat scoring use the C++ forward with reference task logic |
 | E5 | `out-of-scope` | evaluation | no distributed evaluation |
+| T1 | `equivalent` | tokenizer | native byte pair encoding trainer and encoder vs `rustbpe` + `tiktoken` |
+| T2 | `equivalent` | tokenizer | portable `NCTOKEN1` artifact and `int64` pair counts vs the reference pickle and `int32` |
+| T3 | `open` | tokenizer | stream decode buffers an incomplete UTF-8 suffix instead of one U+FFFD per token |
 
 ## How parity is verified
 
@@ -52,6 +55,15 @@ graph, and it also means D1 is *not* covered by these gates.
 ```bash
 tools/nanochat test //tests:oracle_test //tests:train_parity_test
 tools/nanochat test --gpu //tests:oracle_cuda_test //tests:train_parity_cuda_test
+```
+
+A third fixture pins the tokenizer. `tests/data/tokenizer_fixture.bin` records
+the reference merges, token bytes, split cases, encode cases, and decode cases
+from `tools/dump_tokenizer_fixture.py`. The two C++ tests match it on the CPU and
+never import Python:
+
+```bash
+tools/nanochat test //src:tokenizer_parity_test //src:bpe_trainer_test
 ```
 
 ## Open differences
@@ -133,6 +145,34 @@ Reproducing the reference sampled text exactly would mean reimplementing the
 PyTorch RNG and its state layout, which is not worth it. Treat sampled metrics
 as nanochat.cpp's own seeded distribution.
 
+### T3 — Stream decode of an incomplete UTF-8 sequence
+
+**Status:** `open`. `tiktoken` decodes each token by itself. A token that holds
+a partial UTF-8 sequence becomes one replacement character, U+FFFD, and the next
+token cannot repair it. nanochat.cpp's `Tokenizer::Decode` copies that behavior
+exactly, so a per-token consumer is bit-identical.
+
+The generation path uses `TokenStreamDecoder` instead. `Push` holds an
+incomplete UTF-8 suffix until the next token completes it. `Flush` emits the
+held bytes with replacement at the end of a row. The 32768 vocabulary has 74
+merges with this property, for example the two bytes `\xe2\x80`.
+
+**Impact:** the streamed text of a sampled row can differ from the reference text
+when a row ends in the middle of a UTF-8 sequence. The deterministic metrics are
+unaffected: bits-per-byte tokenizes the bytes, and CORE and categorical chat
+scoring use token ids and logits. The sampled text is not a committed metric,
+the same position as E1.
+
+**Evidence:** `//src:tokenizer_parity_test` covers both modes. It checks `Decode`
+per token against the reference and checks that `Push` repairs a split sequence.
+The generate parity fixture is greedy and token-level, so it does not compare
+decoded text.
+
+**Fix direction:** none required. Exact stream parity would mean re-emitting the
+stray U+FFFD for every partial token. The buffer is the documented local choice
+(`docs/tokenizer.md` section 8.3). A consumer that needs exact reference text
+calls `Decode` per token.
+
 ## Equivalent differences
 
 ### D2 — QK-norm and RoPE order
@@ -208,6 +248,38 @@ spans, the lowest-mean-NLL argmin and exact-argmax match, the
 ChatCORE mean. Only the forward arithmetic differs, in the same
 floating-point-order sense as D2 and D3; each decision is the same function of
 the logits. See [eval.md](eval.md) §4.3 and §5.
+
+### T1 — Native tokenizer reimplementation
+
+The reference trains the vocabulary with `rustbpe`. It encodes and decodes with
+`tiktoken`. nanochat.cpp reimplements both in C++ (`src/bpe_trainer.cc`,
+`src/split_pattern.cc`, `src/tokenizer.cc`). The two implementations are the same
+function.
+
+The trainer pops the same pair: the largest count first, the smallest pair on a
+tie, and the left id before the right id. The merge index gives the same token
+id. The encoder merges the lowest-rank pair. The Unicode tables use Unicode
+16.0.0, the version inside `tiktoken`.
+
+The reference fixture pins the merges rank by rank, the token bytes, the split
+cases, the encode cases, and the decode cases. The CPU tests
+`//src:tokenizer_parity_test` and `//src:bpe_trainer_test` match the fixture. The
+port is equivalent, not merely close.
+
+### T2 — Portable artifact and wider pair counts
+
+The reference saves the tokenizer as a `pickle` plus a `torch` byte-length
+tensor. nanochat.cpp defines the little-endian `NCTOKEN1` container
+([tokenizer.md](tokenizer.md) section 5). The artifact needs neither `tiktoken`
+nor `torch` to load.
+
+The byte content is the same. The loader derives the token bytes from the ordered
+merge pairs. `tools/convert_tokenizer.py` recovers one pair per rank from the
+reference token-bytes-to-rank map.
+
+The trainer counts pairs with `int64` instead of the reference `int32`. The wider
+type changes no result below the `int32` limit. The fixture-scale corpora stay
+far below it. This is a container and integer-width difference only.
 
 ## Out of scope
 

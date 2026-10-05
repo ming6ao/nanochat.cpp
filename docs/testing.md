@@ -93,6 +93,45 @@ A 50-step run at `d8_s512` matches the reference: loss `6e-6`, parameter L2
 bisecting a shape- or schedule-dependent bug. Like the oracle, the fixture is
 generated on the CPU with torch and the runtime tests never import torch.
 
+## Tokenizer tests
+
+The tokenizer, the trainer, the parquet reader, and the shard writer are host
+utilities. Every test is tier T0. The tests need no GPU and no broker. The exact
+commands are:
+
+```bash
+# The tokenizer library: round trip, splitter, reference parity, trainer, reader.
+tools/nanochat test //src:tokenizer_test //src:split_pattern_test \
+    //src:tokenizer_parity_test //src:bpe_trainer_test //src:parquet_reader_test
+
+# The `LoadTokenizer` contract and the `DataLoader` shift.
+tools/nanochat test //src:data_test
+
+# The bridge `NCTOKEN1` reader and merge reconstruction, torch-free.
+tools/nanochat test //tools:nanochat_cpp_selftest
+
+# The whole CPU suite and the style gate.
+tools/nanochat test
+tools/nanochat lint
+```
+
+`//src:tokenizer_parity_test` and `//src:bpe_trainer_test` read the committed
+fixture `tests/data/tokenizer_fixture.bin`, so they never import Python. The
+native command lines build and run through the sandbox:
+
+```bash
+tools/nanochat build //src:tok_train_main //src:tok_shard_main
+tools/nanochat run t0-cpu -- <tok_train_main> --text corpus.txt \
+    --vocab-size 512 --out /tmp/tokenizer.nctoken
+tools/nanochat run t0-cpu -- <tok_shard_main> \
+    --tokenizer /tmp/tokenizer.nctoken --parquet 'data/*.parquet' \
+    --out /tmp/train.bin
+```
+
+The bridge self-test needs the system `python3` only. A full bridge run needs
+the reference virtual environment (torch, pyarrow) and the parquet dataset; see
+[python-bridge.md](python-bridge.md).
+
 ## Finite-difference checks
 
 Kernel families with a backward are checked with a finite-difference gradient

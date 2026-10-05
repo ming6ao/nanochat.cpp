@@ -420,5 +420,43 @@ reference twice, and it checks that the two merge hashes agree.
 
 ## 15. Status
 
-Planned. The reference behavior and the artifact format do not change. No code
-exists yet.
+Shipped. The native tokenizer, the byte pair encoding trainer, the parquet
+reader, and the shard writer are in the tree. Every test is tier T0. The
+reference behavior and the artifact format did not change during the port.
+
+The table lists the landed files.
+
+| File | Contents |
+|---|---|
+| `include/nanochat/tokenizer.h` | The `Tokenizer` interface, `TokenStreamDecoder`, and `LoadTokenizer` (additive changes). |
+| `include/nanochat/bpe_trainer.h` | The `BpeTrainer` interface. |
+| `src/tokenizer.cc` | Load, save, encode, decode, special tokens, stream decoder. |
+| `src/tokenizer_internal.h` | The internal `NCTOKEN1` writer and merge recovery. |
+| `src/split_pattern.{h,cc}` | The fixed-pattern scanner. |
+| `src/utf8.{h,cc}` | UTF-8 validation and the lossy replace conversion. |
+| `src/unicode_tables.inc` | The generated range tables (Unicode 16.0.0). |
+| `src/bpe_trainer.cc` | The chunk counts and the merge loop. |
+| `src/parquet_reader.{h,cc}` | The DuckDB C++ parquet reader. |
+| `src/duckdb_static_loader.cc` | The no-op static-extension loader shim. |
+| `src/shard_writer.{h,cc}` | The `NANO` shard and the `<shard>.bytes` writer. |
+| `src/tok_train_main.cc` | The training command line. |
+| `src/tok_shard_main.cc` | The parquet-to-shard command line. |
+| `src/tokenizer_test.cc` | Round trip, special ids, token bytes, bad-file error. |
+| `src/split_pattern_test.cc` | The split cases, plus a random Unicode corpus. |
+| `src/tokenizer_parity_test.cc` | The fixture: merges, encode, decode, token bytes. |
+| `src/bpe_trainer_test.cc` | The reference merge list, rank by rank. |
+| `src/parquet_reader_test.cc` | The reader order and the text column. |
+| `tests/data/tokenizer_fixture.bin` | The reference fixture. |
+| `tools/dump_tokenizer_fixture.py` | The reference fixture generator. |
+| `tools/gen_unicode_tables.py` | The table generator. |
+| `tools/convert_tokenizer.py` | The reference-to-`NCTOKEN1` converter. |
+| `python/nanochat_cpp/data.py` | The bridge reads `NCTOKEN1` and builds a `tiktoken` encoding. |
+| `python/nanochat_cpp/selftest.py` | The torch-free `NCTOKEN1` reader check. |
+
+Integration changes:
+
+- `src/generate_main.cc` streams a text prompt and the decoded output.
+- `src/eval.cc` and `src/eval.h` decode the generated rows.
+- `src/data.cc` and `src/data_test.cc` carry the new `LoadTokenizer` contract.
+- `src/BUILD.bazel` and `tests/BUILD.bazel` hold the targets.
+- `MODULE.bazel` and `duckdb.BUILD` hold the DuckDB dependency.
