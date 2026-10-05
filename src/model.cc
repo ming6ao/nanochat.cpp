@@ -511,7 +511,7 @@ void TrainModel::BuildEvalWorkspace(int batch, int seq) {
   const std::int64_t stats = static_cast<std::int64_t>(batch) * heads * seq * 2;
 
   // Keep the classifier logits chunk small so the eval arena fits a large
-  // batch (docs/grad-mode.md section 6). The cross-entropy term is per row, so
+  // batch (docs/eval.md section 10.6). The cross-entropy term is per row, so
   // the chunk boundary does not change the result.
   const std::int64_t budget = eval_logits_budget_;
   const std::int64_t per_row =

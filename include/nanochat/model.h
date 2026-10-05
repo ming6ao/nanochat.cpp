@@ -74,7 +74,7 @@ class Model {
   virtual float TrainStep(const int* tokens, const int* targets, int batch,
                           int seq, Optimizer* optimizer) = 0;
 
-  // Grad mode (docs/grad-mode.md), the analogue of `torch.set_grad_enabled()`.
+  // Grad mode (docs/eval.md), the analogue of `torch.set_grad_enabled()`.
   // The default state is on. When the caller turns it off, `ForwardLoss` runs
   // the forward-only path: it builds a smaller workspace, reuses one block's
   // activations across layers, and does not save anything `Backward()` reads.
@@ -87,7 +87,7 @@ class Model {
   // Parameter views in the optimizer's grouping order.
   virtual std::vector<ParamView> params() const = 0;
 
-  // Self-describing checkpoint container (docs/data.md).
+  // Self-describing checkpoint container (docs/model.md).
   virtual void Save(const std::string& path) const = 0;
   virtual void Load(const std::string& path) = 0;
 
@@ -97,7 +97,7 @@ class Model {
   Config config_;
 };
 
-// RAII guard for the grad-mode state (docs/grad-mode.md). It is the analogue of
+// RAII guard for the grad-mode state (docs/eval.md). It is the analogue of
 // `torch.no_grad()`: the constructor turns grad mode off, and the destructor
 // restores the previous state. The model must outlive the guard.
 class NoGradGuard {

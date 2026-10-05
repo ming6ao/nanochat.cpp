@@ -10,12 +10,12 @@
 // dtype tags, a lightweight tensor descriptor, and the backend capability
 // report. This header is vendor-free on purpose (DESIGN.md section 2.1): no
 // CUDA/HIP header is ever reachable from it, so a backend can be replaced as a
-// build/link decision. See docs/precision.md and docs/backends.md.
+// build/link decision. See docs/build.md.
 
 namespace nanochat {
 
 // ---------------------------------------------------------------------------
-// Precision (docs/precision.md)
+// Precision (docs/build.md)
 // ---------------------------------------------------------------------------
 //
 // Selected at build time by the toolchain (`--config=fp32` / `--config=fp16`,
@@ -214,7 +214,7 @@ struct Tensor {
 
 // A vendor-free description of the active device. `kernels::GetCaps()` returns
 // one of these; the host fails fast at startup when the build's precision is
-// not in the supported set (docs/precision.md).
+// not in the supported set (docs/build.md).
 struct Caps {
   int device_index = 0;
   int compute_major = 0;

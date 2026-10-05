@@ -52,7 +52,7 @@ struct TrainConfig {
 };
 
 // Saves and loads a model's parameter set through the self-describing
-// `Checkpoint` container (docs/data.md). This is the harness's checkpoint
+// `Checkpoint` container (docs/model.md). This is the harness's checkpoint
 // format; `Model::Save`/`Load` remain available with their own simpler format.
 class Checkpointer {
  public:

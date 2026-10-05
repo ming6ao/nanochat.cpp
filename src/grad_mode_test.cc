@@ -1,4 +1,4 @@
-// T0 test for grad mode (docs/grad-mode.md).
+// T0 test for grad mode (docs/eval.md).
 //
 // It proves two things. First, the grad-mode forward reproduces the training
 // forward row for row. It uses the full classifier, and then a forced small

@@ -1,7 +1,7 @@
 # backends/cuda/ — the CUDA device runtime and the cuBLAS GEMM entry point.
 # This package implements the device/memory and GEMM halves of the frozen seam
 # (nanochat/kernels.h); the per-family compute kernels live in
-# backends/cuda/kernels/. See docs/backends.md and docs/kernels.md.
+# backends/cuda/kernels/. See docs/build.md and docs/kernels.md.
 
 load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
 load(
@@ -53,7 +53,7 @@ cc_library(
 
 # The whole CUDA backend behind one label: the device runtime, GEMM, and every
 # kernel family. This is what `src/**` links when `--config=cuda` selects the
-# backend (docs/backends.md), mirroring `//backends/cpu`.
+# backend (docs/build.md), mirroring `//backends/cpu`.
 cc_library(
     name = "all_kernels",
     deps = [

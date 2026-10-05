@@ -25,7 +25,7 @@
     "mlp_dim": 1024
   },
   "reference_rates_gflops": {
-    "note": "The section 2 rates in docs/cpu-gap.md. The benchmark must reproduce each rate within 10 percent.",
+    "note": "The Part 2, section 2 rates in docs/cpu-performance.md. The benchmark must reproduce each rate within 10 percent.",
     "forward": 0.98,
     "wgrad": 0.75,
     "dgrad": 0.24

@@ -7,7 +7,7 @@
 # owner/nanochat.cpp. Sets the git identity from GIT_AUTHOR_NAME and
 # GIT_AUTHOR_EMAIL, runs `gh auth setup-git` so git uses the token, and clones
 # the repository into /kaggle/working. A second run fetches instead of cloning.
-# See docs/kaggle.md.
+# See docs/host-portability.md.
 set -euo pipefail
 
 GH_VERSION=${NANOCHAT_KAGGLE_GH_VERSION:-2.63.2}

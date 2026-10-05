@@ -10,7 +10,7 @@
 # A Kaggle container has no systemd and no cgroup v2 user manager, so the
 # resource sandbox stays off. tools/sandbox.sh resolves to backend=none by
 # itself; this script also exports NANOCHAT_SANDBOX_BACKEND=none for the
-# session. See docs/kaggle.md and docs/host-portability.md.
+# session. See docs/host-portability.md.
 set -euo pipefail
 
 here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -118,7 +118,7 @@ write_bazelrc_local() {
   log "write $file for the Kaggle T4 host"
   cat >"$file" <<'EOF'
 # Kaggle host file, written by tools/kaggle/bootstrap.sh.
-# sm_75 for the T4, and a budget for a small container. See docs/kaggle.md.
+# sm_75 for the T4, and a budget for a small container. See docs/host-portability.md.
 build --@rules_cuda//cuda:archs=sm_75
 build --jobs=2
 build --local_resources=memory=2048

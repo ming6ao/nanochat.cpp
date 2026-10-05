@@ -48,7 +48,7 @@ class TrainModel final : public Model {
   const ComputeType* losses() const { return ActiveLosses(); }
   int last_batch() const { return batch_; }
   int last_seq() const { return seq_; }
-  // Bytes reserved by the arena the active grad mode uses (docs/grad-mode.md).
+  // Bytes reserved by the arena the active grad mode uses (docs/eval.md).
   // The test compares the training and evaluation arenas through this accessor.
   std::size_t workspace_bytes() const {
     return grad_enabled_ ? workspace_.bytes_reserved()
@@ -93,7 +93,7 @@ class TrainModel final : public Model {
                   int cols);
   void BuildTrainWorkspace(int batch, int seq);
   void BuildEvalWorkspace(int batch, int seq);
-  // The shared forward topology for both grad modes (docs/grad-mode.md). When
+  // The shared forward topology for both grad modes (docs/eval.md). When
   // `save_for_backward` is true, it writes every layer's activations to
   // `lacts_[i]` and the full classifier logits to `raw_logits_`. When false, it
   // reuses one block set and tiles the classifier.
@@ -106,7 +106,7 @@ class TrainModel final : public Model {
   }
   void BuildRope(int seq);
 
-  // Parameters, in the optimizer's grouping order (docs/optimizer.md).
+  // Parameters, in the optimizer's grouping order (docs/model.md).
   std::vector<Param> params_;
   std::vector<ops::BlockWeights> lweights_;
   std::vector<ops::BlockGrads> lgrads_;
@@ -153,7 +153,7 @@ class TrainModel final : public Model {
 
   ops::BlockScratch block_scratch_;
 
-  // Grad-mode state and the evaluation workspace (docs/grad-mode.md). The
+  // Grad-mode state and the evaluation workspace (docs/eval.md). The
   // evaluation arena is separate from `workspace_` so an online validation
   // call does not reallocate the training arena. The eval block set is reused
   // by every layer because the eval path saves nothing for a backward pass.

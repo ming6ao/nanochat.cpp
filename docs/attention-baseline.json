@@ -1,6 +1,6 @@
 {
   "schema": "nanochat.bench.v1",
-  "note": "Frozen Phase 0 baseline of the shipped attention path. The d8_s512, window-128, and grouped-query rows are the measured values in docs/flash-attention-pascal.md section 4 (GTX 1080 Ti, sm_61, fp32). The d8_s512_sssl row is the mean over one SSSL cycle: (3 * window-128 + 1 * full) / 4. The head-dimension sweep is forward-only here, matching the plan table. work_ratio is issued work over necessary work.",
+  "note": "Frozen Phase 0 baseline of the shipped attention path. The d8_s512, window-128, and grouped-query rows are the measured values in docs/attention.md Part 2, section 4 (GTX 1080 Ti, sm_61, fp32). The d8_s512_sssl row is the mean over one SSSL cycle: (3 * window-128 + 1 * full) / 4. The head-dimension sweep is forward-only here, matching the plan table. work_ratio is issued work over necessary work.",
   "device": "GTX 1080 Ti (sm_61)",
   "precision": "fp32",
   "measurement": "tools/nanochat profile --json --out docs/attention-baseline.json",

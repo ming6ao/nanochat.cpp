@@ -1,6 +1,6 @@
 // dev/kernels/cpu_gemm_bench.cc -- CPU reference GEMM micro-benchmark.
 //
-// Times the four dominant GEMM shapes from docs/cpu-gap.md section 2, plus
+// Times the four dominant GEMM shapes from docs/cpu-performance.md Part 2, section 2, plus
 // the model forward layout:
 //   * gemm_forward -- language-model head forward, M=1024 N=32768 K=256.
 //   * gemm_forward_tb1 -- the same head forward with transpose_b, the layout
@@ -21,7 +21,7 @@
 //   tools/nanochat build //dev/kernels:cpu_gemm_bench
 //   tools/nanochat bench -- ./bazel-bin/dev/kernels/cpu_gemm_bench
 //
-// See dev/kernels/README.md and docs/cpu-gap.md.
+// See dev/kernels/README.md and docs/cpu-performance.md.
 
 #include <chrono>
 #include <cstddef>
@@ -73,7 +73,7 @@ struct Shape {
   bool transpose_b;
 };
 
-// The four dominant shapes from docs/cpu-gap.md section 2, plus the model
+// The four dominant shapes from docs/cpu-performance.md Part 2, section 2, plus the model
 // forward layout (`transpose_b = true`). The model config is depth 4, hidden
 // 256, MLP 1024, vocab 32768, and 1024 token rows.
 const Shape kShapes[] = {
@@ -101,7 +101,7 @@ struct Result {
 // The number of threads the GEMM uses. This target compiles with `-fopenmp`
 // (`dev/kernels/BUILD.bazel`), so `_OPENMP` is defined and this reports the
 // OpenMP pool. The pool reads `NANOCHAT_NUM_THREADS` or `OMP_NUM_THREADS` from
-// the sandbox profile (docs/cpu-gap.md section 4.2).
+// the sandbox profile (docs/cpu-performance.md Part 2, section 4.2).
 int ActiveThreadCount() {
 #if defined(_OPENMP)
   return omp_get_max_threads();

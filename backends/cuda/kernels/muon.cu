@@ -15,7 +15,7 @@
 // A, A^2, and B therefore occupy [num_params, min(rows, cols), min(rows,
 // cols)].
 //
-// See docs/kernels.md and docs/optimizer.md.
+// See docs/kernels.md and docs/model.md.
 
 #include <algorithm>
 #include <cmath>

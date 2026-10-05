@@ -6,25 +6,20 @@ detailed reference that the design points at.
 
 | Document | Contents |
 |---|---|
+| [build.md](build.md) | File layout, Bazel, Makefile fallback, backends, precision, Turing |
 | [kernels.md](kernels.md) | The backend seam: kernel inventory, API, device helpers |
-| [model.md](model.md) | Model API, workspace/memory, the graphs, batched generation |
-| [optimizer.md](optimizer.md) | AdamW/Muon parameter grouping and schedules |
-| [precision.md](precision.md) | FP32/FP16 selection and capability reporting |
-| [turing-t4.md](turing-t4.md) | Design: the Turing (T4, sm_75) target |
-| [backends.md](backends.md) | Backend selection and how to add one |
-| [build.md](build.md) | File layout, Bazel, Makefile fallback |
-| [data.md](data.md) | Token shards, checkpoints, the oracle fixture |
-| [python-bridge.md](python-bridge.md) | nanochat-compatible Python entry points |
-| [eval.md](eval.md) | Design: base and chat evaluation (forward-only) |
-| [grad-mode.md](grad-mode.md) | Design: forward-only evaluation path and workspace |
-| [post-training.md](post-training.md) | Design: SFT and reinforcement learning |
-| [parity.md](parity.md) | Known differences from the PyTorch reference, with status |
+| [model.md](model.md) | Model API, graphs, optimizer, data and checkpoints, workspace |
 | [testing.md](testing.md) | Test tiers, oracle harness, finite-difference checks |
-| [performance.md](performance.md) | Performance measurement protocol, debugging interface, benchmarks |
-| [flash-attention-pascal.md](flash-attention-pascal.md) | Flash attention on Pascal: feasibility, baseline, and staged plan |
+| [parity.md](parity.md) | Known differences from the PyTorch reference, with status |
+| [performance.md](performance.md) | Performance measurement protocol and the debugging interface |
+| [cpu-performance.md](cpu-performance.md) | CPU backend baseline, cause, design, and phase results |
+| [attention.md](attention.md) | Attention baseline, Pascal feasibility, the fused window, results |
+| [optimizations.md](optimizations.md) | Planned recompute, fused-classifier, and row-kernel work |
+| [eval.md](eval.md) | Base and chat evaluation, and the forward-only workspace |
+| [post-training.md](post-training.md) | Design: SFT and reinforcement learning |
+| [python-bridge.md](python-bridge.md) | nanochat-compatible Python entry points |
 | [sandbox.md](sandbox.md) | Execution sandbox and host resource governance |
-| [host-portability.md](host-portability.md) | Design: toolchain, optional sandbox, and device selection across hosts |
-| [kaggle.md](kaggle.md) | Design: `nanochat.cpp` and `pi` on Kaggle Notebooks |
+| [host-portability.md](host-portability.md) | Toolchain, optional sandbox, devices, and Kaggle |
 
 New here? Start with [../README.md](../README.md) for the quickstart, then
 [../DESIGN.md](../DESIGN.md) for the shape of the system.

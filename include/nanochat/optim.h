@@ -7,7 +7,7 @@
 #include "nanochat/scheduler.h"
 #include "nanochat/tensor.h"
 
-// Combined AdamW + Muon optimizer (docs/optimizer.md). The grouping mirrors
+// Combined AdamW + Muon optimizer (docs/model.md). The grouping mirrors
 // nanochat's `setup_optimizer`: AdamW owns embeddings, the unembedding, value
 // embeddings, and scalars; Muon owns the stacked matrix parameters. The state
 // lives in the optimizer, not the model.

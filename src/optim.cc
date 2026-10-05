@@ -1,4 +1,4 @@
-// The nanochat optimizer (docs/optimizer.md).
+// The nanochat optimizer (docs/model.md).
 //
 // This translation unit owns the parameter grouping and the schedules; every
 // numerical update rule lives behind the kernel seam (`nanochat/kernels.h`).

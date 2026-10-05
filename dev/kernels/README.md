@@ -2,7 +2,7 @@
 
 This directory holds work that is not part of the shipped backend. The
 per-family correctness tests and the micro-benchmarks moved next to the kernels
-in [backends/cuda/kernels](../backends/cuda/kernels/README.md). This directory
+in [backends/cuda/kernels](../../backends/cuda/kernels/README.md). This directory
 keeps the combined QkPrep fusion prototype, the decode-path CUDA-graph baseline,
 and the P0 toolchain spike.
 
@@ -33,7 +33,7 @@ tools/nanochat bench -- <benchmark>       # T3-style micro-benchmark under the b
 ## Conventions
 
 The shared conventions live in
-[backends/cuda/kernels/README.md](../backends/cuda/kernels/README.md): tiny
+[backends/cuda/kernels/README.md](../../backends/cuda/kernels/README.md): tiny
 shapes, a host reference, finite differences, fixed seeds, the `gpu` tag, and
 the benchmark report.
 
@@ -43,7 +43,7 @@ directory.
 ## CPU GEMM micro-benchmark (Phase 0)
 
 `cpu_gemm_bench.cc` times the four dominant GEMM shapes from
-[docs/cpu-gap.md](../../docs/cpu-gap.md) section 2. The rows are
+Part 2, section 2 of [docs/cpu-performance.md](../../docs/cpu-performance.md). The rows are
 `gemm_forward`, `gemm_wgrad`, `gemm_dgrad`, and `mlp_gemm`. The benchmark warms
 up, then keeps the best of N rounds. It calls `kernels::Gemm` directly and
 prints the `nanochat.bench.v1` schema on standard output. The shipped CPU GEMM
@@ -78,7 +78,7 @@ contiguous.
 The probe now confirms that the two layouts agree. The model `lm_head` forward
 reaches 19.35 GFLOP/s and the benchmark layout reaches 19.55 GFLOP/s (12
 threads). The Phase 1 gate passes at 22.3 seconds per step. See
-[docs/cpu-gap-results.md](../../docs/cpu-gap-results.md).
+[docs/cpu-performance.md](../../docs/cpu-performance.md).
 
 ```bash
 tools/nanochat build //dev/kernels:cpu_linear_layout_probe
@@ -209,5 +209,5 @@ predicate to full causal without a new measurement.
 
 ## Adding a family
 
-See [backends/cuda/kernels/README.md](../backends/cuda/kernels/README.md). The
+See [backends/cuda/kernels/README.md](../../backends/cuda/kernels/README.md). The
 per-family tests and benchmarks live next to the kernel, not here.

@@ -212,7 +212,7 @@ architect-owned and local to the seam (`AGENTS.md` §1). The rules below cover
 the common cases.
 
 - **Add hardware**: new `backends/<x>/` implementing `kernels.h`. Nothing above
-  needs to change. See [docs/backends.md](docs/backends.md).
+  needs to change. See [docs/build.md](docs/build.md).
 - **Fuse more**: only if the §3 rule holds and the fused backward is derivable.
   Develop in `dev/kernels/`, prove with a benchmark, then promote.
 - **Add a graph variant** (SFT/RL head): add to `model.cc`; topology stays in one

@@ -28,7 +28,7 @@
     "flops_per_token": 71958960
   },
   "promoted_measurement": {
-    "protocol": "docs/cpu-gap.md section 9",
+    "protocol": "docs/cpu-performance.md Part 2, section 9",
     "command": "tools/nanochat_cpp base_train --backend cpu --depth=4 --max-seq-len=512 --window-pattern=L --device-batch-size=2 --total-batch-size=1024 --num-iterations=10 --warmup-steps=1 --eval-every=-1 --core-metric-every=-1 --sample-every=-1 --save-every=-1 --model-tag=cpu_bench_p4b",
     "rule": "one warmup run, then the best mean tokens/s over steps 2 to 10 of three measured runs",
     "threads": 8,
@@ -47,7 +47,7 @@
     },
     "step_time_gate_seconds": 5.0,
     "step_time_gate_result": "pass",
-    "correctness_gate": "docs/cpu-gap.md section 8",
+    "correctness_gate": "docs/cpu-performance.md Part 2, section 8",
     "correctness_gate_result": "pass"
   },
   "runs": [

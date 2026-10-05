@@ -7,7 +7,7 @@
 // with op(X) = X^T when the corresponding transpose flag is set. cuBLAS is
 // column-major, so the call swaps the operands and uses the standard
 // row-major-to-column-major trick; see the block comment inside Gemm.
-// See docs/backends.md and docs/kernels.md.
+// See docs/build.md and docs/kernels.md.
 
 #include "nanochat/kernels.h"
 #include "nanochat/tensor.h"
@@ -112,7 +112,7 @@ void Gemm(GemmMode mode, const GemmParams& params, const ComputeType* a,
   // only working path is native HGEMM with CUBLAS_COMPUTE_16F, whose alpha and
   // beta are __half. Both are approximate modes; the host graph and the
   // optimizer state stay fp32 wherever the seam requires it.
-  // See docs/precision.md.
+  // See docs/build.md.
   cublasComputeType_t compute_type = CUBLAS_COMPUTE_32F;
   cublasGemmAlgo_t algo = CUBLAS_GEMM_DEFAULT;
 #if defined(NANOCHAT_PRECISION_FP16)

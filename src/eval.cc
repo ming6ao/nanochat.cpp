@@ -31,7 +31,7 @@ float EvalBpb(Model* model, DataLoader* loader, int steps) {
     return std::numeric_limits<float>::infinity();
   }
 
-  // Forward-only path (docs/grad-mode.md): this mirrors the reference
+  // Forward-only path (docs/eval.md): this mirrors the reference
   // `@torch.no_grad()`. The guard restores the previous grad mode on return.
   NoGradGuard guard(model);
 

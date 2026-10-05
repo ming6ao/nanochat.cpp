@@ -51,7 +51,7 @@ directly; the entry point is what applies the sandbox. See
 ## Where to change what
 
 - The backend seam is [docs/kernels.md](docs/kernels.md). Adding hardware means
-  a new `backends/<x>/`; see [docs/backends.md](docs/backends.md).
+  a new `backends/<x>/`; see [docs/build.md](docs/build.md).
 - The public model API and the four graphs are [docs/model.md](docs/model.md).
 - Design decisions and the invariants that constrain them live in
   [DESIGN.md](DESIGN.md). Keep frozen headers `nanochat/{kernels,tensor,config,

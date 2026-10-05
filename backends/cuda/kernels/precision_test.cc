@@ -15,7 +15,7 @@
 //
 // Host code only: it includes no CUDA header and drives the sealed
 // nanochat/kernels.h API, so it stays vendor-free. See docs/testing.md and
-// docs/precision.md.
+// docs/build.md.
 
 #include <cmath>
 #include <cstdint>

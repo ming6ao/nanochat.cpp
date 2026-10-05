@@ -108,7 +108,7 @@ best-fit. Unlike pretraining's best-fit packer, SFT **pads** the remainder of a
 row instead of cropping, and masks the padding targets to `-1`. Validation uses
 the matching test splits.
 
-The packer is a Python data-pipeline concern ([data.md](data.md)). If the shard
+The packer is a Python data-pipeline concern ([model.md](model.md)). If the shard
 is materialized for the C++ loader, the bridge writes the rendered ids and the
 `-1`-masked targets; the C++ `DataLoader` does not need to know about chat.
 

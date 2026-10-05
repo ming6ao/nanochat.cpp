@@ -142,7 +142,7 @@ cc_binary(
 # `transpose_b = true` (weights `[out, in]`), but the original Phase 1
 # benchmark timed only `transpose_b = false`. This probe times the same logical
 # shapes under both layouts and confirms that the model-layout fix makes them
-# agree. See docs/cpu-gap-results.md.
+# agree. See docs/cpu-performance.md.
 cc_binary(
     name = "cpu_linear_layout_probe",
     srcs = ["cpu_linear_layout_probe.cc"],

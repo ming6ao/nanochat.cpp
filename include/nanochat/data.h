@@ -11,7 +11,7 @@
 #include "nanochat/tensor.h"
 
 // Data formats: the pre-tokenized token shards and the self-describing
-// checkpoint container (docs/data.md). No tokenizer, parquet, pyarrow, or
+// checkpoint container (docs/model.md). No tokenizer, parquet, pyarrow, or
 // numpy is needed at runtime; the training loop reads raw little-endian bytes.
 
 namespace nanochat {

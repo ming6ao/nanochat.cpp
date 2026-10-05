@@ -1,5 +1,5 @@
 // `eval_bench` -- a small end-to-end benchmark for the forward-only evaluation
-// path (docs/grad-mode.md).
+// path (docs/eval.md).
 //
 // It builds a model, runs `ForwardLoss` under `NoGradGuard` on random tokens,
 // and reports the per-forward time, the token rate, and the bytes the eval

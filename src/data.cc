@@ -1,4 +1,4 @@
-// Data containers (docs/data.md): the pre-tokenized token shard, the
+// Data containers (docs/model.md): the pre-tokenized token shard, the
 // self-describing checkpoint container, the batched `DataLoader`, and the
 // out-of-scope `LoadTokenizer` stub.
 //

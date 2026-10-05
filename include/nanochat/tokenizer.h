@@ -9,7 +9,7 @@
 
 // Host BPE tokenizer: encode/decode for the CLI and evaluation, plus the
 // per-token byte lengths that `EvalBpb` needs. Training and evaluation read
-// pre-tokenized shards, so this is not on the training hot path (docs/data.md).
+// pre-tokenized shards, so this is not on the training hot path (docs/model.md).
 
 namespace nanochat {
 

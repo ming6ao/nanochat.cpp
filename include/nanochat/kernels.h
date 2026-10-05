@@ -15,7 +15,7 @@
 //   * Every tensor is dense row-major unless a parameter says otherwise.
 //   * Token ids and targets are `int` (one per row) and live on the host.
 //   * Norm statistics (`rstd`), optimizer moments, and master weights are
-//     `float` even in an fp16 build (docs/precision.md).
+//     `float` even in an fp16 build (docs/build.md).
 
 namespace nanochat {
 

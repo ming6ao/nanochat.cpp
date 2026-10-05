@@ -7,7 +7,7 @@ when every symbol resolves and passes the oracle.
 The rules that keep this seam vendor-free are in
 [DESIGN.md §2](../DESIGN.md); the fusion rule that constrains what may be one
 kernel is in [DESIGN.md §3](../DESIGN.md). A backend supplies this header; see
-[backends.md](backends.md).
+[build.md](build.md).
 
 ## Kernel inventory
 

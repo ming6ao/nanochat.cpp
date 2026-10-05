@@ -9,7 +9,7 @@ compute concern: it never appears in `kernels.h`, `tensor.h`, `config.h`, or
 The sandbox is optional. Set `NANOCHAT_SANDBOX_BACKEND=none` on a host without
 cgroup v2, such as a Kaggle Notebook. The entry point then runs the command
 directly and keeps the entry-point guard. See
-[host-portability.md](host-portability.md) and [kaggle.md](kaggle.md).
+[host-portability.md](host-portability.md) and [host-portability.md](host-portability.md).
 
 ## Mechanism (WSL2, unprivileged)
 

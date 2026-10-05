@@ -1,4 +1,128 @@
-# Flash attention on Pascal (sm_61): feasibility and plan
+# Attention: baseline, Pascal feasibility, and the fused window
+
+Attention is the largest CUDA kernel family. This document records the shipped
+baseline, the Pascal feasibility study, the fused windowed-forward promotion,
+and the measured results. Full-causal attention and every backward stay on
+cuBLAS. The fused windowed forward lives in
+`backends/cuda/kernels/attention.cu` behind `UseFusedAttention`.
+
+Read [performance.md](performance.md) for the measurement protocol and
+[kernels.md](kernels.md) for the `Attention` family.
+
+This document replaces the former `attention-baseline.md`,
+`flash-attention-pascal.md`, `flash-attention-window.md`, and
+`attention-window-results.md`. The frozen reports stay at
+[attention-baseline.json](attention-baseline.json) and
+[attention-baseline-e2e.json](attention-baseline-e2e.json).
+
+## Part 1. Phase 0 baseline
+
+This document freezes the Phase 0 baseline for the shipped attention path. Use
+it as the reference for the gates in Part 2.
+
+The baseline has three files:
+
+| File | Content |
+|---|---|
+| [attention-baseline.json](attention-baseline.json) | The `nanochat.bench.v1` report of `attention_benchmark`. |
+| [attention-baseline-e2e.json](attention-baseline-e2e.json) | The forward-only eval report at `d8_s512` with the `SSSL` pattern. |
+| Part 1 of this document | This note. |
+
+### Measurement
+
+- Device: GTX 1080 Ti, `sm_61`.
+- Precision: fp32.
+- Command: `tools/nanochat profile --json --out docs/attention-baseline.json`.
+- Source: the measured table in
+  Part 2, section 4.
+
+### Issued work against necessary work
+
+The shipped path runs dense cuBLAS GEMMs and masks the result afterwards. Thus
+every query-key pair costs time, even a masked pair. "Issued work" counts all
+dense pairs. "Necessary work" counts only the visible pairs. The ratio of the
+two shows the mask waste.
+
+| Case | Issued pairs | Necessary pairs | Issued / necessary |
+|---|---|---|---|
+| `d8_s512` full causal | 8,388,608 | 4,202,496 | 1.996 |
+| `d8_s512` window 128 | 8,388,608 | 1,849,344 | 4.536 |
+| GQA `B=2 T=512 H=8 KV=2` | 4,194,304 | 2,101,248 | 1.996 |
+| `d8_s512` `SSSL` mean | 8,388,608 | 2,437,632 | 3.441 |
+| head-dim sweep `d32` to `d256` | 131,072 | 66,048 | 1.984 |
+
+Two readings:
+
+- The window 128 layer needs 44% of the full-causal work, but it issues 4.54
+  times its necessary work. The measured time is the same as the full layer
+  (1.571 ms against 1.586 ms). This is the clearest defect.
+- The `SSSL` pattern issues 3.44 times its necessary work. The pattern is three
+  window layers to one full layer. The mean necessary work is 0.29 of the dense
+  work.
+
+### Forward overhead and the GEMM floor
+
+At `d8_s512` full causal, the forward takes **1.586 ms** and the backward takes
+**2.857 ms**.
+
+The forward issues 4.29 GFLOP of dense GEMM work: 2.147 GFLOP for the query-key
+product and 2.147 GFLOP for the probability-value product.
+
+The measured product rates in commit `d253ef3` are 6,991 GFLOP/s for query-key
+and 5,843 GFLOP/s for probability-value. Thus the two GEMMs take about 0.674 ms.
+The remaining **0.91 ms** is transposes, softmax, and launches. The overhead is
+57% of the forward.
+
+The necessary forward work is 2.15 GFLOP.
+
+At 4 TFLOP/s that is 0.54 ms. At 2.5 TFLOP/s that is 0.86 ms.
+
+Both values beat 1.586 ms. The device has headroom.
+
+### End-to-end baseline
+
+`attention-baseline-e2e.json` records the forward-only eval at `d8_s512` with
+the `SSSL` pattern. The shape is `B=8 T=512 L=8 H=4 KV=4 C=512 V=32768 W=SSSL`.
+
+| Metric | Value |
+|---|---|
+| Forward time | 74.47 ms |
+| Tokens per second | 55,000 |
+| Eval arena | 755,269,888 bytes |
+
+The Phase 3 gate in Part 2 compares the new eval
+rate against the `tokens_per_second` value.
+
+**Note.** The end-to-end value is an estimate. It scales the documented d12 fp32
+eval rate in [performance.md](performance.md) section 6 to the `d8_s512` shape.
+The arena size is exact. Replace the estimate with a real
+`tools/nanochat bench` run at the first opportunity.
+
+### Reproduction
+
+Run the attention benchmark through the project entry point:
+
+```bash
+tools/nanochat profile --json --out /tmp/attention_p0.json
+```
+
+Run the end-to-end eval benchmark:
+
+```bash
+tools/nanochat build --config=cuda //src:eval_bench
+tools/nanochat bench -- ./bazel-bin/src/eval_bench --batch 8 --seq 512 \
+  --layers 8 --heads 4 --kv-heads 4 --hidden 512 \
+  --window-pattern SSSL --json
+```
+
+### Limits
+
+- The numbers are from one host and one precision. Do not compare across
+  devices.
+- The baseline is a snapshot. Update it only with the revision and the
+  configuration that produced the new numbers.
+
+## Part 2. Pascal feasibility and plan
 
 This document answers a single question: **can a flash-attention-style kernel be
 implemented in `nanochat.cpp` for the Pascal host, and would it be faster than
@@ -17,7 +141,7 @@ attention parity).
 
 ---
 
-## 1. Summary
+### 1. Summary
 
 1. **The upstream `flash-attention` kernels cannot run on Pascal.** Every
    compiled kernel in the checkout is `*_sm80.cu`; `setup.py` only emits
@@ -58,7 +182,7 @@ attention parity).
 
 ---
 
-## 2. Why the upstream flash-attention cannot run on Pascal
+### 2. Why the upstream flash-attention cannot run on Pascal
 
 The reference Python `nanochat` (`/home/egrader/repos/nanochat`) imports
 `nanochat.flash_attention`, which tries to load FlashAttention-3 and otherwise
@@ -90,7 +214,7 @@ has to be compute-bound (or rely on occupancy) to win.
 
 ---
 
-## 3. What the current CUDA attention actually does
+### 3. What the current CUDA attention actually does
 
 `backends/cuda/kernels/attention.cu`, at commit `d253ef3`.
 
@@ -121,7 +245,7 @@ as the PyTorch math backend. Its costs are structural:
 
 ---
 
-## 4. Measured baseline and roofline
+### 4. Measured baseline and roofline
 
 Reproduced with `tools/nanochat profile --json` (the shipped
 `attention_benchmark`), GTX 1080 Ti, fp32, sm_61, `-O2`, at `d8_s512`
@@ -164,9 +288,9 @@ because attention itself grows quadratically.
 
 ---
 
-## 5. What a Pascal-native flash attention would look like
+### 5. What a Pascal-native flash attention would look like
 
-### 5.1 The algorithm to port
+#### 5.1 The algorithm to port
 
 This is the FlashAttention-2 algorithm with the MMA replaced by fp32 CUDA-core
 outer products:
@@ -195,7 +319,7 @@ outer products:
   side of the roofline. This is the same trade the current path does *not*
   make.
 
-### 5.2 Pascal constraints that shape the tile
+#### 5.2 Pascal constraints that shape the tile
 
 - No `cp.async`: global→shared copies cannot overlap the math without
   double-buffering, which doubles shared memory. The kernel should be
@@ -212,7 +336,7 @@ outer products:
 - No `ldmatrix`: register blocking must be built from plain shared-memory
   loads, so the microkernel is the low-level risk.
 
-### 5.3 Why the naive version fails
+#### 5.3 Why the naive version fails
 
 The stale `attention_variant_bench` binary in the Bazel output base is a
 reminder. It benchmarked the shipped block-per-query-row tile
@@ -232,7 +356,7 @@ batch-1 decode and not for training.
 
 ---
 
-## 6. Plan
+### 6. Plan
 
 Work proceeds in `dev/kernels` (the `llm.c` `dev/cuda` convention) and is only
 promoted into `backends/cuda/kernels/attention.cu` after each gate passes.
@@ -244,7 +368,7 @@ Every phase runs through `tools/nanochat`; benchmarks under the broker, tests
 under the appropriate tier. See [performance.md](performance.md) and
 [testing.md](testing.md).
 
-### Phase 0 — bound the opportunity (0.5 session)
+#### Phase 0 — bound the opportunity (0.5 session)
 
 - Extend `attention_benchmark` with a "necessary versus issued work" column so the
   mask waste is visible in the report, and add the `SSSL` mixed-pattern shape.
@@ -252,7 +376,7 @@ under the appropriate tier. See [performance.md](performance.md) and
 - Deliverable: the baseline file plus a one-page roofline note.
 - **Gate:** none. This is measurement.
 
-### Phase 1 — fused fp32 forward prototype (1-2 sessions, the critical gate)
+#### Phase 1 — fused fp32 forward prototype (1-2 sessions, the critical gate)
 
 - A `dev/kernels` prototype implementing the tiled
   forward: causal, left/right window, MHA and GQA, empty-window contract.
@@ -281,7 +405,7 @@ At `head_dim = 128` the 48 KB shared-memory cap admits only `Bc = 32`. A sweep
 found no axis that closes the gap. The project kept the default tile and did
 not promote the full-causal case.
 
-### Phase 2 — fused fp32 backward prototype (2-2.5 sessions)
+#### Phase 2 — fused fp32 backward prototype (2-2.5 sessions)
 
 - The prototype backward using the recompute scheme, with atomic
   key/value gradient accumulation for GQA (the existing `AtomicAddDev` handles
@@ -293,7 +417,7 @@ not promote the full-causal case.
   forward wins, consider promoting the forward alone (a partial win) before
   deciding on the backward.
 
-### Phase 3 — promotion, dispatch, and end-to-end (1-2 sessions)
+#### Phase 3 — promotion, dispatch, and end-to-end (1-2 sessions)
 
 - Move the validated kernels into `backends/cuda/kernels/attention.cu` behind a
   `UseFusedAttention(params)` predicate, keeping the cuBLAS path for shapes the
@@ -311,7 +435,7 @@ not promote the full-causal case.
 - **Gate:** the end-to-end step must improve; a kernel win that does not move
   tokens/s is not a win.
 
-### Phase 4 — optional, separate (Turing)
+#### Phase 4 — optional, separate (Turing)
 
 - On sm_75 a real fp16 tensor-core flash attention (adapted from the upstream
   sm_75 forks) is possible, but there is no Turing device on this host, so it is
@@ -320,7 +444,7 @@ not promote the full-causal case.
 
 ---
 
-## 7. Risks and mitigations
+### 7. Risks and mitigations
 
 | Risk | Why it matters | Mitigation |
 |---|---|---|
@@ -333,7 +457,7 @@ not promote the full-causal case.
 
 ---
 
-## 8. Alternatives considered and rejected
+### 8. Alternatives considered and rejected
 
 - **Use the upstream kernels unchanged.** Impossible on sm_61 (section 2).
 - **Port an FA1-era sm_75 path.** Also tensor-core based; there is no CUDA-core
@@ -351,7 +475,7 @@ not promote the full-causal case.
 
 ---
 
-## 9. References
+### 9. References
 
 - Upstream implementation: `/home/egrader/repos/flash-attention`
   (`csrc/flash_attn/src/*_sm80.cu`, `setup.py` arch list).
@@ -367,3 +491,211 @@ not promote the full-causal case.
   `backends/cuda/kernels/attention_benchmark.cc`, `backends/cuda/kernels/attention_test.cc`,
   `backends/cuda/kernels/testing/sequence_ref.h`.
 - Measurement protocol: [performance.md](performance.md).
+
+## Part 3. Windowed-forward promotion
+
+Status: promoted. Owner: architect/integrator.
+
+Promotion results: Part 4.
+
+### 1. Why reopen
+
+The Phase 1 kill gate failed for the full-causal forward. The fused tile
+measured 1.98 ms at `d8_s512` full causal against the shipped 1.586 ms. The
+tile space cannot close the gap. At `head_dim` 128, the 48 KB shared-memory
+cap admits only `Bc=32`.
+
+The same prototype won on the windowed shape. At window 128 it measured
+1.078 ms against the shipped 1.571 ms. That is a 1.46x win.
+
+The production model uses the `SSSL` pattern. Three of every four layers use a
+window. The window path is worth promoting on its own.
+
+This part scopes the reopened effort. The technical background, the
+baseline, and the prototype are in Part 1 and Part 2.
+
+### 2. Goal
+
+Promote the fused fp32 tiled forward for windowed attention shapes. Keep the
+cuBLAS path for full-causal attention and for every shape the fused kernel
+does not cover. Show an end-to-end tokens per second win on the `SSSL` model.
+
+### 3. Scope
+
+In scope:
+
+- Promote the fused forward into `backends/cuda/kernels/attention.cu`.
+- Add a `UseFusedAttention(params)` predicate. Select the fused kernel only
+  for `window_left >= 0` and `head_dim == 128`.
+- Keep the kernel seam byte for byte. Do not edit `include/nanochat/kernels.h`.
+- Keep the cuBLAS forward for full-causal attention and for all other shapes.
+- Measure the production `SSSL` shape, not only window 128.
+
+Out of scope:
+
+- The fused backward. The prototype has no backward. The cuBLAS backward
+  stays.
+- A full-causal improvement. That needs a different tile, for example a split
+  `head_dim`. It is a separate effort.
+
+### 4. Phases
+
+#### Phase A — promotion and dispatch
+
+Move the validated forward from the `dev/kernels` prototype into
+`backends/cuda/kernels/attention.cu`. Add the dispatch predicate. Keep the
+cuBLAS path for the uncovered shapes. Update
+`backends/cuda/kernels/BUILD.bazel` only when the dependency set changes.
+
+Gate: the CUDA build succeeds and the existing attention tests stay green.
+
+#### Phase B — correctness and parity
+
+Run the oracle and the training trajectory on the promoted path.
+
+Gate: `tests:oracle_cuda_test` and `tests:train_parity_cuda_test` pass with
+the strict tolerances. The CPU parity tests stay green.
+
+#### Phase C — window performance
+
+Re-run the shipped attention benchmark at the production `SSSL` shape and at
+window 128.
+
+Gate: the windowed forward row beats the Phase 0 baseline. The full-causal
+row stays on the cuBLAS path and must not regress.
+
+#### Phase D — end-to-end
+
+Measure the end-to-end effect on the `SSSL` eval benchmark.
+
+Gate: the eval tokens per second beats `docs/attention-baseline-e2e.json`.
+
+### 5. Risks
+
+| Risk | Why it matters | Mitigation |
+|---|---|---|
+| The window win shrinks at the production window | The window-128 win may not hold at window 512 | Measure the production shape in Phase C |
+| Attention is a small part of the step | A window win moves end-to-end tokens per second little | Set the gate on tokens per second, not the kernel |
+| A wrong dispatch predicate | The fused kernel can be selected for a losing shape | Keep the predicate narrow and test the full-causal path |
+| Numerics drift | The task has a strict parity gate | Promote only after the parity gate passes |
+
+## Part 4. Promotion results
+
+This note records the promotion verdict for the fused windowed attention
+forward. The campaign is `flash-attn-window`.
+
+- Design: Part 3
+- Frozen reference: [attention-baseline.json](attention-baseline.json)
+- Frozen end-to-end reference: [attention-baseline-e2e.json](attention-baseline-e2e.json)
+
+### Verdict
+
+The windowed forward passes every gate. The campaign promotes it. Full-causal
+attention stays on cuBLAS. Every backward stays on cuBLAS.
+
+### Dispatch predicate
+
+The predicate lives in `backends/cuda/kernels/attention.cu`:
+
+```c
+bool UseFusedAttention(const AttentionParams& p) {
+  return p.window_left >= 0 && p.head_dim == 128;
+}
+```
+
+The fused tile covers two conditions. The first condition is
+`window_left >= 0`, which is a sliding-window shape. The second condition is
+`head_dim == 128`. Full-causal attention has `window_left < 0`, so it stays on
+cuBLAS. Every other head dimension stays on cuBLAS. Every backward call stays
+on cuBLAS.
+
+The kernel seam does not change. `include/nanochat/kernels.h` stays byte for
+byte.
+
+### Phase B — parity
+
+The strict parity gates pass. Table 1 gives the measured error against the
+recorded fixture.
+
+| Test | Metric | Measured | Tolerance | Verdict |
+|---|---|---|---|---|
+| `tests:oracle_cuda_test` | Maximum forward error | 3.73e-09 | 1e-5 | pass |
+| `tests:oracle_cuda_test` | Maximum backward error | 5.96e-08 | 1e-5 | pass |
+| `tests:oracle_cuda_test` | Maximum optimizer step 1 error | 2.38e-07 | 1e-5 | pass |
+| `tests:oracle_cuda_test` | Maximum trajectory loss error | 2.38e-07 | 1e-5 | pass |
+| `tests:oracle_cuda_test` | Maximum trajectory parameter error | 4.84e-05 | 1e-4 | pass |
+
+**Table 1.** Strict oracle parity on the promoted path.
+
+The training-trajectory test also passes. Its measured errors are: loss
+`4.77e-07`, parameter L2 `1.39e-04`, gradient L2 `5.39e-07`, and gradient norm
+`1.19e-07`. The full CPU suite passes 16 of 16 tests.
+
+The `SSSL` dispatch check confirms the coverage. Three of the four layers take
+the fused branch. The last layer stays on cuBLAS. A `head_dim` 128 windowed
+case compares the fused forward against the cuBLAS forward.
+
+### Phase C — window performance
+
+The measurement command is
+`tools/nanochat profile --json --out /tmp/attention-window.json`. The command
+runs the shipped `attention_benchmark`. Table 2 compares the promoted path against
+the frozen `docs/attention-baseline.json`.
+
+| Row | Frozen baseline (ms) | Promoted path (ms) | Speedup | Verdict |
+|---|---|---|---|---|
+| `attention_fwd:d8_s512_win128` | 1.571 | 1.087488 | 1.44x | pass |
+| `attention_fwd:d8_s512_sssl` | 1.57475 | 1.208891 | 1.30x | pass |
+| `attention_fwd:d8_s512` | 1.586 | 1.577643 | 1.01x | pass, cuBLAS |
+| `attention_bwd:d8_s512_win128` | 2.806 | 2.808224 | 1.00x | pass, cuBLAS |
+| `attention_bwd:d8_s512_sssl` | 2.81875 | 2.815197 | 1.00x | pass, cuBLAS |
+| `attention_bwd:d8_s512` | 2.857 | 2.836267 | 1.01x | pass, cuBLAS |
+
+**Table 2.** Windowed, mixed-pattern, and full-causal rows.
+
+The windowed forward row beats the frozen `1.571 ms`. The mixed-pattern forward
+row beats the frozen `1.57475 ms`. The full-causal forward row stays on cuBLAS
+and does not regress. The backward rows stay on cuBLAS and do not regress.
+
+### Phase D — end-to-end
+
+The measurement command is:
+
+```bash
+tools/nanochat bench -- ./bazel-bin/src/eval_bench --batch 8 --seq 512 \
+  --layers 8 --heads 4 --kv-heads 4 --hidden 512 --window-pattern SSSL --json
+```
+
+The report goes to `/tmp/eval-window.json`. Table 3 compares the result against
+the frozen `docs/attention-baseline-e2e.json`.
+
+| Metric | Frozen baseline | Promoted path | Change |
+|---|---|---|---|
+| Tokens per second | 55000 | 57908.3 | +5.3% |
+| Forward time (ms) | 74.472727 | 70.732475 | -5.0% |
+
+**Table 3.** End-to-end `SSSL` evaluation at `B=8 T=512 L=8`.
+
+The tokens per second value beats the frozen baseline. The end-to-end win is
+small, because attention is a small part of the step.
+
+### Limits
+
+- The frozen end-to-end baseline is an estimate, not a measured run. The
+  reported margin of 5.3% is therefore not exact.
+- The fused tile covers only `head_dim == 128` and `window_left >= 0`.
+- The full-causal fused tile lost the Phase 1 kill gate. Do not widen the
+  dispatch predicate without a new measurement.
+- The numbers come from one host and one precision. Do not compare them across
+  devices.
+
+### Reproduction
+
+Run the two measurements through the project entry point:
+
+```bash
+tools/nanochat profile --json --out /tmp/attention-window.json
+tools/nanochat bench -- ./bazel-bin/src/eval_bench --batch 8 --seq 512 \
+  --layers 8 --heads 4 --kv-heads 4 --hidden 512 --window-pattern SSSL --json \
+  > /tmp/eval-window.json
+```

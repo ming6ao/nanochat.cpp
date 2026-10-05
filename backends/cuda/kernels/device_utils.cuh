@@ -12,7 +12,7 @@
 // reduction runs in float. The CPU reference accumulates in double; the device
 // uses float, which is well inside the fp32 oracle tolerance (docs/testing.md).
 //
-// See docs/kernels.md ("Shared device helpers") and docs/backends.md.
+// See docs/kernels.md ("Shared device helpers") and docs/build.md.
 
 #include <cuda_runtime.h>
 #include <math_constants.h>

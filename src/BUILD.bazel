@@ -33,7 +33,7 @@ cc_library(
     ],
     copts = nanochat_copts(),
     defines = precision_defines(),
-    # Backend selection is a build/link choice (docs/backends.md): the same
+    # Backend selection is a build/link choice (docs/build.md): the same
     # workflow sources link the reference CPU backend by default or the CUDA
     # backend under `--config=cuda`.
     deps = select({
@@ -137,7 +137,7 @@ cc_test(
 
 # Optimizer grouping and schedules: the setup_optimizer AdamW/Muon parameter
 # groups, the moments, the global gradient clip, and the learning-rate /
-# momentum / weight-decay schedules. See docs/optimizer.md.
+# momentum / weight-decay schedules. See docs/model.md.
 cc_test(
     name = "optim_test",
     srcs = ["optim_test.cc"],
@@ -181,7 +181,7 @@ cc_test(
     size = "small",
 )
 
-# Grad mode (docs/grad-mode.md): the forward-only path reproduces the training
+# Grad mode (docs/eval.md): the forward-only path reproduces the training
 # forward row for row, the classifier tiling path agrees, and the evaluation
 # arena is much smaller than the training arena. CPU only.
 cc_test(
@@ -252,7 +252,7 @@ cc_binary(
     ],
 )
 
-# Forward-only evaluation benchmark (docs/grad-mode.md, docs/performance.md). It
+# Forward-only evaluation benchmark (docs/eval.md, docs/performance.md). It
 # times the grad-mode `ForwardLoss` on random tokens and reports the eval arena
 # size, so the C++ column of the eval comparison reproduces on demand. Not a
 # test; run it with `tools/nanochat bench`. Built as a plain `cc_binary`, so the

@@ -1,5 +1,5 @@
 # backends/cpu/ — the reference implementation of every kernel, used as the
-# oracle-on-CPU path and as the correctness baseline. See docs/backends.md.
+# oracle-on-CPU path and as the correctness baseline. See docs/build.md.
 
 load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
 load("//:nanochat.bzl", "nanochat_copts", "precision_defines")
@@ -9,7 +9,7 @@ package(default_visibility = ["//visibility:public"])
 # The CPU backend: every symbol in nanochat/kernels.h as a naive loop. The
 # precision (fp32 / fp16) is a build-time define, so the library is built once
 # per `--config` and vendored into whichever executable links it.
-# OpenMP parallelises the reference loops on the host. docs/backends.md allows
+# OpenMP parallelises the reference loops on the host. docs/build.md allows
 # OpenMP as a CPU dependency. The flag must appear in both `copts` and
 # `linkopts`: the compiler needs it to parse the pragmas, and the linker needs
 # it to resolve the runtime (`libgomp`). No extra Bazel dependency is required.

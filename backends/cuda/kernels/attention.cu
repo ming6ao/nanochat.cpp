@@ -29,8 +29,7 @@
 // output accumulator in registers and skips fully masked key tiles, which is
 // what turns the sliding window into saved work. The cuBLAS forward stays for
 // full-causal attention and for every other shape. The cuBLAS backward stays
-// for every shape. See `docs/flash-attention-pascal.md` section 5 and
-// `docs/flash-attention-window.md`.
+// for every shape. See `docs/attention.md` Part 2, section 5.
 
 #include <cstddef>
 
@@ -337,7 +336,7 @@ bool UseBatchedPath(const AttentionParams& p) {
 // The validated Phase 1 tile: `Br=32` query rows, `Bc=32` key/value rows staged
 // per tile, 256 threads, two resident blocks per streaming multiprocessor. At
 // `head_dim` 128 the key/value stage and the probability tile use 37,120 bytes,
-// below the 48 KB Pascal block cap. See `docs/flash-attention-pascal.md`
+// below the 48 KB Pascal block cap. See `docs/attention.md` Part 2.
 // section 6 and `backends/cuda/kernels/README.md`.
 constexpr int kFusedThreads = 256;
 constexpr int kFusedBr = 32;

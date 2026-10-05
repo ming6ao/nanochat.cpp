@@ -1,5 +1,5 @@
 // backends/cpu/kernels.cc -- the reference implementation of every symbol in
-// nanochat/kernels.h (docs/backends.md). It is the correctness baseline, the
+// nanochat/kernels.h (docs/build.md). It is the correctness baseline, the
 // oracle-on-CPU path, and the fallback when no accelerator is present.
 //
 // Most entry points here are naive loops, written for clarity rather than
@@ -49,7 +49,7 @@ namespace kernels {
 namespace {
 
 // Storage <-> float boundary. In an fp16 build the optimizer state and the
-// reductions still run in float (docs/precision.md). The conversion helpers are
+// reductions still run in float (docs/build.md). The conversion helpers are
 // templated on the storage type so that `if constexpr` discards the unused
 // branch instead of requiring both to compile.
 template <typename T>

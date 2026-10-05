@@ -1,7 +1,7 @@
 """Reference-checkpoint conversion into the ``NCHKPT01`` container.
 
 The C++ runtime reads only its own self-describing container
-(``docs/data.md``): a magic header and a flat list of
+(``docs/model.md``): a magic header and a flat list of
 ``(name, dtype, shape, raw little-endian payload)`` records. A released
 nanochat checkpoint is a PyTorch ``state_dict`` saved with ``torch.save``. This
 module bridges the two:

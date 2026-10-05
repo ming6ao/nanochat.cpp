@@ -54,7 +54,7 @@ filegroup(
     srcs = ["convert_checkpoint.py"],
 )
 
-# Kaggle Notebook host tooling. See docs/kaggle.md and docs/host-portability.md.
+# Kaggle Notebook host tooling. See docs/host-portability.md.
 filegroup(
     name = "kaggle_scripts",
     srcs = [

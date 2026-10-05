@@ -7,7 +7,7 @@
 // over the work the visible (causal or windowed) query-key pairs need. The
 // shipped path runs dense cuBLAS GEMMs and masks afterwards, so a windowed
 // layer costs the same as a full layer and the ratio shows the mask waste. See
-// docs/attention-baseline.md for the frozen Phase 0 numbers.
+// docs/attention.md for the frozen Phase 0 numbers.
 //
 // The head-dimension sweep is the diagnostic that matters for the known
 // redundancy in `OnlineSoftmaxTile` (backends/cuda/kernels/device_utils.cuh):

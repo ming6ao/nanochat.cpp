@@ -42,7 +42,7 @@ sandbox is the priority. See [sandbox.md](sandbox.md).
 ## Oracle fixtures
 
 `tests/debug_state.bin` is produced offline by nanochat's `gpt.py` (see
-[data.md](data.md)). `tests/oracle_test.cc` compares logits, loss, and
+[model.md](model.md)). `tests/oracle_test.cc` compares logits, loss, and
 gradients, then runs a few optimizer steps and matches losses. Tolerances are
 per backend: fp32 CUDA ~1e-5; fp16 Turing looser.
 

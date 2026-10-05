@@ -12,7 +12,7 @@
 // orthogonalisation, Muon+ renormalisation, and NorMuon variance reduction,
 // followed by the cautious decoupled weight decay.
 //
-// See docs/testing.md and docs/optimizer.md.
+// See docs/testing.md and docs/model.md.
 
 #include <algorithm>
 #include <cmath>

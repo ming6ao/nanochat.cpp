@@ -7,7 +7,7 @@
 //
 // One grid-stride kernel keeps the whole update in a single pass, so the
 // moments and the parameter are read and written once. See docs/kernels.md and
-// docs/optimizer.md.
+// docs/model.md.
 
 #include <cmath>
 

@@ -113,3 +113,32 @@ float EvalBpb(Model* model, DataLoader* loader, int steps);
 
 `Config` and `Model` are frozen headers; treat them as stable by default and
 prefer additive changes. See [DESIGN.md §7](../DESIGN.md).
+
+## Optimizer
+
+`Optimizer` holds the exact parameter grouping of nanochat's `setup_optimizer`:
+
+- **AdamW groups**: lm_head, token embedding, value embeddings, resid/x0/smear/
+  backout scalars.
+- **Muon groups**: matrix parameters, grouped by shape and stacked.
+
+Schedules (LR multiplier, Muon momentum, weight decay) live in `Scheduler`.
+`AdamWUpdate` and `MuonUpdate` are the kernels; Muon's Polar Express iterations
+use batched cuBLAS GEMMs.
+
+The kernels themselves are declared in [kernels.md](kernels.md).
+
+## Data, checkpoints, and the oracle
+
+- **Data**: pre-tokenized `.bin` shards — header (magic, version, `ntok`) plus a
+  `uint16`/`uint32` token stream. The training loop does a `read()`. No
+  tokenizer, parquet, pyarrow, or numpy at runtime.
+- **Checkpoint**: a self-describing tensor container (name, shape, dtype). Not a
+  framework `state_dict`.
+- **Oracle**: `debug_state.bin`, produced offline by nanochat's `gpt.py`.
+  `tests/oracle_test.cc` compares logits, loss, and gradients, then runs a few
+  optimizer steps and matches losses. Per-backend tolerances (fp32 CUDA ~1e-5;
+  fp16 Turing looser).
+
+The oracle fixture is consumed by the test harness described in
+[testing.md](testing.md).

@@ -1,7 +1,7 @@
 # Python bridge
 
 The C++ runtime reads only pre-tokenized `NANO` shards and has no tokenizer or
-parquet dependency (docs/data.md). The Python bridge supplies the missing
+parquet dependency (docs/model.md). The Python bridge supplies the missing
 pieces — tokenization, dataset access, and the training-horizon math — and
 drives the C++ binaries, so the command line can match the PyTorch nanochat
 scripts.

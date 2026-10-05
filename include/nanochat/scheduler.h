@@ -1,7 +1,7 @@
 #ifndef NANOCHAT_SCHEDULER_H_
 #define NANOCHAT_SCHEDULER_H_
 
-// Learning-rate, Muon-momentum, and weight-decay schedules (docs/optimizer.md).
+// Learning-rate, Muon-momentum, and weight-decay schedules (docs/model.md).
 // The schedule is split out from the optimizer so the training loop and the
 // optimizer agree on exactly one source of truth. Vendor-free.
 
