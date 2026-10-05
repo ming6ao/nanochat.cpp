@@ -140,19 +140,20 @@ D2 pins one Unicode version. The splitter needs three predicates: letter
 
 The tokenizer is a host utility. It uses the C++ standard library and OpenMP.
 It does not include `nanochat/kernels.h`. Every test runs on the CPU (tier T0).
+The implementation lives in its own package, `src/tokenizer/`.
 
 | File | Contents |
 |---|---|
 | `include/nanochat/tokenizer.h` | The `Tokenizer` interface, the stream decoder, load and save. |
 | `include/nanochat/bpe_trainer.h` | The `BpeTrainer` interface. |
-| `src/tokenizer.cc` | Load, save, encode, decode, special tokens. |
-| `src/split_pattern.{h,cc}` | The fixed-pattern scanner. |
-| `src/unicode_tables.inc` | The generated range tables. |
-| `src/bpe_trainer.cc` | The chunk counts and the merge loop. |
-| `src/tok_train_main.cc` | The training command line. |
-| `src/parquet_reader.{h,cc}` | The DuckDB C++ parquet reader. |
-| `src/shard_writer.{h,cc}` | The `NANO` shard writer. |
-| `src/tok_shard_main.cc` | The parquet-to-shard command line. |
+| `src/tokenizer/tokenizer.cc` | Load, save, encode, decode, special tokens. |
+| `src/tokenizer/split_pattern.{h,cc}` | The fixed-pattern scanner. |
+| `src/tokenizer/unicode_tables.inc` | The generated range tables. |
+| `src/tokenizer/bpe_trainer.cc` | The chunk counts and the merge loop. |
+| `src/tokenizer/tok_train_main.cc` | The training command line. |
+| `src/tokenizer/parquet_reader.{h,cc}` | The DuckDB C++ parquet reader. |
+| `src/tokenizer/shard_writer.{h,cc}` | The `NANO` shard writer. |
+| `src/tokenizer/tok_shard_main.cc` | The parquet-to-shard command line. |
 | `tools/gen_unicode_tables.py` | The table generator. |
 | `tools/dump_tokenizer_fixture.py` | The reference fixture generator. |
 | `tools/convert_tokenizer.py` | The reference-to-`NCTOKEN1` converter. |
@@ -180,7 +181,7 @@ bytes.
 
 ## 6. The splitter
 
-`src/split_pattern.cc` implements the pattern as a scanner over UTF-8
+`src/tokenizer/split_pattern.cc` implements the pattern as a scanner over UTF-8
 codepoints. The scanner holds one start position. At each start it tries the
 seven alternatives in order, and it takes the first match. It then advances the
 start past the match.
@@ -320,10 +321,10 @@ The pair counter uses `int64`. The reference uses `int32`, and a real corpus can
 come close to the `int32` limit. The wider type changes no result below the
 limit.
 
-`src/tok_train_main.cc` reads one document per line with `--text`, or a parquet
-dataset with `--parquet`. It takes `--vocab-size`, `--doc-cap` (default 10000),
-`--max-chars`, and `--out`. It writes `NCTOKEN1`. Section 10 gives the parquet
-reader.
+`src/tokenizer/tok_train_main.cc` reads one document per line with `--text`, or
+a parquet dataset with `--parquet`. It takes `--vocab-size`, `--doc-cap`
+(default 10000), `--max-chars`, and `--out`. It writes `NCTOKEN1`. Section 10
+gives the parquet reader.
 
 ## 10. Parquet input and shard materialization
 
@@ -331,23 +332,24 @@ The reference dataset is a set of parquet files with a `text` column. The native
 path reads that column with the DuckDB C++ API, so tokenization needs no
 `pyarrow` and no Python.
 
-`src/parquet_reader.cc` wraps one DuckDB connection. `Open` takes a file glob
-or a file list. `Next` streams one bounded batch of documents. The reader
-selects the text column, orders the rows by file name and row number, and
+`src/tokenizer/parquet_reader.cc` wraps one DuckDB connection. `Open` takes a
+file glob or a file list. `Next` streams one bounded batch of documents. The
+reader selects the text column, orders the rows by file name and row number, and
 preserves the dataset order. A small batch size bounds memory.
 
-`src/tok_train_main.cc` accepts `--parquet <glob>` and `--text-column <name>`
-(default `text`). It reads documents from the reader and calls
-`BpeTrainer::AddDocument`. The `--text <file>` mode stays for one document per
-line.
+`src/tokenizer/tok_train_main.cc` accepts `--parquet <glob>` and
+`--text-column <name>` (default `text`). It reads documents from the reader and
+calls `BpeTrainer::AddDocument`. The `--text <file>` mode stays for one document
+per line.
 
-`src/tok_shard_main.cc` tokenizes a parquet dataset into a `NANO` shard plus
-the `<shard>.bytes` sidecar. It uses `src/shard_writer.{h,cc}` and the `Encode`
-method. This tool is the native replacement for `python/nanochat_cpp/data.py`.
+`src/tokenizer/tok_shard_main.cc` tokenizes a parquet dataset into a `NANO` shard
+plus the `<shard>.bytes` sidecar. It uses `src/tokenizer/shard_writer.{h,cc}`
+and the `Encode` method. This tool is the native replacement for
+`python/nanochat_cpp/data.py`.
 
 The DuckDB C++ library is a host dependency. `MODULE.bazel` declares it, and
-`src/BUILD.bazel` links it into `tok_train_main` and `tok_shard_main` only. The
-model and the kernels do not link it.
+`src/tokenizer/BUILD.bazel` links it into `tok_train_main` and `tok_shard_main`
+only. The model, the kernels, and the training runtime do not link it.
 
 The build uses the prebuilt DuckDB release archive for the host platform. An
 `http_archive` in `MODULE.bazel` unpacks `duckdb.hpp` and
@@ -375,11 +377,11 @@ Every test is tier T0. The tests need no GPU and no broker.
 
 | Test | Purpose |
 |---|---|
-| `src/tokenizer_test.cc` | Round trip, special ids, token bytes, bad-file error. |
-| `src/split_pattern_test.cc` | The split cases, plus a random Unicode corpus. |
-| `src/bpe_trainer_test.cc` | The reference merge list, rank by rank. |
-| `src/tokenizer_parity_test.cc` | The fixture: merges, encode, decode, token bytes. |
-| `src/parquet_reader_test.cc` | The reader order and the text column on a tiny fixture. |
+| `src/tokenizer/tokenizer_test.cc` | Round trip, special ids, token bytes, bad-file error. |
+| `src/tokenizer/split_pattern_test.cc` | The split cases, plus a random Unicode corpus. |
+| `src/tokenizer/bpe_trainer_test.cc` | The reference merge list, rank by rank. |
+| `src/tokenizer/tokenizer_parity_test.cc` | The fixture: merges, encode, decode, token bytes. |
+| `src/tokenizer/parquet_reader_test.cc` | The reader order and the text column on a tiny fixture. |
 
 The fixture comes from `tools/dump_tokenizer_fixture.py`. The script trains a
 small reference tokenizer on a fixed corpus, and it records:
@@ -413,8 +415,8 @@ reference twice, and it checks that the two merge hashes agree.
   agree before the fixture enters the repository.
 - The frozen header. `include/nanochat/tokenizer.h` is architect-owned. The
   changes are additive.
-- Shared files. `src/data.cc`, `src/data_test.cc`, and `src/BUILD.bazel` have
-  other owners.
+- Shared files. `src/data.cc` and `src/data_test.cc` have other owners. The
+  tokenizer package owns `src/tokenizer/BUILD.bazel`.
 - DuckDB weight. The DuckDB C++ library is large and slow to build. It enters
   the host tools only, so the training runtime stays small.
 
@@ -430,22 +432,22 @@ The table lists the landed files.
 |---|---|
 | `include/nanochat/tokenizer.h` | The `Tokenizer` interface, `TokenStreamDecoder`, and `LoadTokenizer` (additive changes). |
 | `include/nanochat/bpe_trainer.h` | The `BpeTrainer` interface. |
-| `src/tokenizer.cc` | Load, save, encode, decode, special tokens, stream decoder. |
-| `src/tokenizer_internal.h` | The internal `NCTOKEN1` writer and merge recovery. |
-| `src/split_pattern.{h,cc}` | The fixed-pattern scanner. |
-| `src/utf8.{h,cc}` | UTF-8 validation and the lossy replace conversion. |
-| `src/unicode_tables.inc` | The generated range tables (Unicode 16.0.0). |
-| `src/bpe_trainer.cc` | The chunk counts and the merge loop. |
-| `src/parquet_reader.{h,cc}` | The DuckDB C++ parquet reader. |
-| `src/duckdb_static_loader.cc` | The no-op static-extension loader shim. |
-| `src/shard_writer.{h,cc}` | The `NANO` shard and the `<shard>.bytes` writer. |
-| `src/tok_train_main.cc` | The training command line. |
-| `src/tok_shard_main.cc` | The parquet-to-shard command line. |
-| `src/tokenizer_test.cc` | Round trip, special ids, token bytes, bad-file error. |
-| `src/split_pattern_test.cc` | The split cases, plus a random Unicode corpus. |
-| `src/tokenizer_parity_test.cc` | The fixture: merges, encode, decode, token bytes. |
-| `src/bpe_trainer_test.cc` | The reference merge list, rank by rank. |
-| `src/parquet_reader_test.cc` | The reader order and the text column. |
+| `src/tokenizer/tokenizer.cc` | Load, save, encode, decode, special tokens, stream decoder. |
+| `src/tokenizer/tokenizer_internal.h` | The internal `NCTOKEN1` writer and merge recovery. |
+| `src/tokenizer/split_pattern.{h,cc}` | The fixed-pattern scanner. |
+| `src/tokenizer/utf8.{h,cc}` | UTF-8 validation and the lossy replace conversion. |
+| `src/tokenizer/unicode_tables.inc` | The generated range tables (Unicode 16.0.0). |
+| `src/tokenizer/bpe_trainer.cc` | The chunk counts and the merge loop. |
+| `src/tokenizer/parquet_reader.{h,cc}` | The DuckDB C++ parquet reader. |
+| `src/tokenizer/duckdb_static_loader.cc` | The no-op static-extension loader shim. |
+| `src/tokenizer/shard_writer.{h,cc}` | The `NANO` shard and the `<shard>.bytes` writer. |
+| `src/tokenizer/tok_train_main.cc` | The training command line. |
+| `src/tokenizer/tok_shard_main.cc` | The parquet-to-shard command line. |
+| `src/tokenizer/tokenizer_test.cc` | Round trip, special ids, token bytes, bad-file error. |
+| `src/tokenizer/split_pattern_test.cc` | The split cases, plus a random Unicode corpus. |
+| `src/tokenizer/tokenizer_parity_test.cc` | The fixture: merges, encode, decode, token bytes. |
+| `src/tokenizer/bpe_trainer_test.cc` | The reference merge list, rank by rank. |
+| `src/tokenizer/parquet_reader_test.cc` | The reader order and the text column. |
 | `tests/data/tokenizer_fixture.bin` | The reference fixture. |
 | `tools/dump_tokenizer_fixture.py` | The reference fixture generator. |
 | `tools/gen_unicode_tables.py` | The table generator. |
@@ -458,5 +460,5 @@ Integration changes:
 - `src/generate_main.cc` streams a text prompt and the decoded output.
 - `src/eval.cc` and `src/eval.h` decode the generated rows.
 - `src/data.cc` and `src/data_test.cc` carry the new `LoadTokenizer` contract.
-- `src/BUILD.bazel` and `tests/BUILD.bazel` hold the targets.
+- `src/tokenizer/BUILD.bazel` and `tests/BUILD.bazel` hold the targets.
 - `MODULE.bazel` and `duckdb.BUILD` hold the DuckDB dependency.

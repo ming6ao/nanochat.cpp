@@ -1,4 +1,4 @@
-#include "src/split_pattern.h"
+#include "src/tokenizer/split_pattern.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -6,8 +6,8 @@
 #include <string_view>
 #include <vector>
 
-#include "src/unicode_tables.inc"
-#include "src/utf8.h"
+#include "src/tokenizer/unicode_tables.inc"
+#include "src/tokenizer/utf8.h"
 
 namespace nanochat {
 namespace {

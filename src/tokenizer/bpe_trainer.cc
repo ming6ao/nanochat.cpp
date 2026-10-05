@@ -19,8 +19,8 @@
 
 #include <omp.h>
 
-#include "src/split_pattern.h"
-#include "src/tokenizer_internal.h"
+#include "src/tokenizer/split_pattern.h"
+#include "src/tokenizer/tokenizer_internal.h"
 
 namespace nanochat {
 namespace {

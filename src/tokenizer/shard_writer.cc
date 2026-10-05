@@ -2,7 +2,7 @@
 // (docs/tokenizer.md section 10). The format matches `TokenShard::Open` and
 // `DataLoader::Impl::LoadTokenBytes` in `src/data.cc`.
 
-#include "src/shard_writer.h"
+#include "src/tokenizer/shard_writer.h"
 
 #include <cstddef>
 #include <cstdint>

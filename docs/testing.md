@@ -100,9 +100,9 @@ utilities. Every test is tier T0. The tests need no GPU and no broker. The exact
 commands are:
 
 ```bash
-# The tokenizer library: round trip, splitter, reference parity, trainer, reader.
-tools/nanochat test //src:tokenizer_test //src:split_pattern_test \
-    //src:tokenizer_parity_test //src:bpe_trainer_test //src:parquet_reader_test
+# The tokenizer package: round trip, splitter, reference parity, trainer,
+# reader. The suite label runs all five targets.
+tools/nanochat test //src/tokenizer:all
 
 # The `LoadTokenizer` contract and the `DataLoader` shift.
 tools/nanochat test //src:data_test
@@ -115,12 +115,12 @@ tools/nanochat test
 tools/nanochat lint
 ```
 
-`//src:tokenizer_parity_test` and `//src:bpe_trainer_test` read the committed
-fixture `tests/data/tokenizer_fixture.bin`, so they never import Python. The
-native command lines build and run through the sandbox:
+`//src/tokenizer:tokenizer_parity_test` and `//src/tokenizer:bpe_trainer_test`
+read the committed fixture `tests/data/tokenizer_fixture.bin`, so they never
+import Python. The native command lines build and run through the sandbox:
 
 ```bash
-tools/nanochat build //src:tok_train_main //src:tok_shard_main
+tools/nanochat build //src/tokenizer:tok_train_main //src/tokenizer:tok_shard_main
 tools/nanochat run t0-cpu -- <tok_train_main> --text corpus.txt \
     --vocab-size 512 --out /tmp/tokenizer.nctoken
 tools/nanochat run t0-cpu -- <tok_shard_main> \

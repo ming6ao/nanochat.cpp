@@ -6,7 +6,7 @@
 // a simple tabular container (name, dtype, shape, raw payload) that round-trips
 // every `TensorRecord`. It is deliberately not a framework `state_dict`.
 //
-// `LoadTokenizer` lives in the `tokenizer` library (src/tokenizer.cc); this
+// `LoadTokenizer` lives in the `tokenizer` library (src/tokenizer/tokenizer.cc); this
 // file does not define it.
 
 #include "nanochat/data.h"
@@ -469,7 +469,7 @@ const std::uint8_t* DataLoader::token_bytes(int* vocab_size) const {
 // ---------------------------------------------------------------------------
 
 // The native tokenizer loader is implemented once, in the `src:tokenizer`
-// library (src/tokenizer.cc). A target that calls `LoadTokenizer` links that
+// library (src/tokenizer/tokenizer.cc). A target that calls `LoadTokenizer` links that
 // library. The earlier null stub would shadow the real loader at link time, so
 // this file deliberately defines no loader.
 

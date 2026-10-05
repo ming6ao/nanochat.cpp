@@ -1,4 +1,4 @@
-// src/tokenizer_test.cc -- the native BPE tokenizer.
+// src/tokenizer/tokenizer_test.cc -- the native BPE tokenizer.
 //
 // Round-trips a tiny `NCTOKEN1` artifact, checks the special ids, the token
 // bytes, the encoder, the lossy decoder, the stream decoder, and the
@@ -15,8 +15,8 @@
 #include <vector>
 
 #include "nanochat/tokenizer.h"
-#include "src/split_pattern.h"
-#include "src/tokenizer_internal.h"
+#include "src/tokenizer/split_pattern.h"
+#include "src/tokenizer/tokenizer_internal.h"
 
 namespace {
 

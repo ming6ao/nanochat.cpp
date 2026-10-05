@@ -63,7 +63,8 @@ from `tools/dump_tokenizer_fixture.py`. The two C++ tests match it on the CPU an
 never import Python:
 
 ```bash
-tools/nanochat test //src:tokenizer_parity_test //src:bpe_trainer_test
+tools/nanochat test //src/tokenizer:tokenizer_parity_test \
+    //src/tokenizer:bpe_trainer_test
 ```
 
 ## Open differences
@@ -163,7 +164,7 @@ unaffected: bits-per-byte tokenizes the bytes, and CORE and categorical chat
 scoring use token ids and logits. The sampled text is not a committed metric,
 the same position as E1.
 
-**Evidence:** `//src:tokenizer_parity_test` covers both modes. It checks `Decode`
+**Evidence:** `//src/tokenizer:tokenizer_parity_test` covers both modes. It checks `Decode`
 per token against the reference and checks that `Push` repairs a split sequence.
 The generate parity fixture is greedy and token-level, so it does not compare
 decoded text.
@@ -252,9 +253,9 @@ the logits. See [eval.md](eval.md) §4.3 and §5.
 ### T1 — Native tokenizer reimplementation
 
 The reference trains the vocabulary with `rustbpe`. It encodes and decodes with
-`tiktoken`. nanochat.cpp reimplements both in C++ (`src/bpe_trainer.cc`,
-`src/split_pattern.cc`, `src/tokenizer.cc`). The two implementations are the same
-function.
+`tiktoken`. nanochat.cpp reimplements both in C++: `src/tokenizer/bpe_trainer.cc`,
+`src/tokenizer/split_pattern.cc`, and `src/tokenizer/tokenizer.cc`. The two
+implementations are the same function.
 
 The trainer pops the same pair: the largest count first, the smallest pair on a
 tie, and the left id before the right id. The merge index gives the same token
@@ -263,8 +264,8 @@ id. The encoder merges the lowest-rank pair. The Unicode tables use Unicode
 
 The reference fixture pins the merges rank by rank, the token bytes, the split
 cases, the encode cases, and the decode cases. The CPU tests
-`//src:tokenizer_parity_test` and `//src:bpe_trainer_test` match the fixture. The
-port is equivalent, not merely close.
+`//src/tokenizer:tokenizer_parity_test` and `//src/tokenizer:bpe_trainer_test`
+match the fixture. The port is equivalent, not merely close.
 
 ### T2 — Portable artifact and wider pair counts
 

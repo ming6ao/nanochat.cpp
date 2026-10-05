@@ -1,4 +1,4 @@
-// src/split_pattern_test.cc -- the fixed nanochat splitter.
+// src/tokenizer/split_pattern_test.cc -- the fixed nanochat splitter.
 //
 // Checks the curated split cases from docs/tokenizer.md section 6, the
 // possessive and lookahead edge cases, the Unicode table boundaries, and a
@@ -11,8 +11,8 @@
 #include <string_view>
 #include <vector>
 
-#include "src/split_pattern.h"
-#include "src/unicode_tables.inc"
+#include "src/tokenizer/split_pattern.h"
+#include "src/tokenizer/unicode_tables.inc"
 
 namespace {
 

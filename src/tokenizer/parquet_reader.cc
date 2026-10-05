@@ -7,7 +7,7 @@
 // code, so every DuckDB call sits in a `try` block that turns the error into a
 // string result.
 
-#include "src/parquet_reader.h"
+#include "src/tokenizer/parquet_reader.h"
 
 #include <cstddef>
 #include <memory>

@@ -21,8 +21,8 @@
 #include "nanochat/bpe_trainer.h"
 #include "nanochat/sandbox.h"
 #include "src/cli.h"
-#include "src/parquet_reader.h"
-#include "src/tokenizer_internal.h"
+#include "src/tokenizer/parquet_reader.h"
+#include "src/tokenizer/tokenizer_internal.h"
 
 namespace {
 

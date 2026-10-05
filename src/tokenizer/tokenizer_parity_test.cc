@@ -1,4 +1,4 @@
-// src/tokenizer_parity_test.cc -- the reference tokenizer fixture.
+// src/tokenizer/tokenizer_parity_test.cc -- the reference tokenizer fixture.
 //
 // Builds an `NCTOKEN1` artifact from `tests/data/tokenizer_fixture.bin`, loads
 // it, and compares the merges, the token bytes, the split cases, the encode
@@ -17,8 +17,8 @@
 #include <vector>
 
 #include "nanochat/tokenizer.h"
-#include "src/split_pattern.h"
-#include "src/tokenizer_internal.h"
+#include "src/tokenizer/split_pattern.h"
+#include "src/tokenizer/tokenizer_internal.h"
 #include "tests/oracle_fixture.h"
 
 namespace {

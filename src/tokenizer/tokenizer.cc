@@ -14,9 +14,9 @@
 #include <utility>
 #include <vector>
 
-#include "src/split_pattern.h"
-#include "src/tokenizer_internal.h"
-#include "src/utf8.h"
+#include "src/tokenizer/split_pattern.h"
+#include "src/tokenizer/tokenizer_internal.h"
+#include "src/tokenizer/utf8.h"
 
 namespace nanochat {
 namespace {

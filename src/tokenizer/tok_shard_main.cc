@@ -18,8 +18,8 @@
 #include "nanochat/sandbox.h"
 #include "nanochat/tokenizer.h"
 #include "src/cli.h"
-#include "src/parquet_reader.h"
-#include "src/shard_writer.h"
+#include "src/tokenizer/parquet_reader.h"
+#include "src/tokenizer/shard_writer.h"
 
 namespace {
 

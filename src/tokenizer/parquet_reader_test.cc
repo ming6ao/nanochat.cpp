@@ -1,4 +1,4 @@
-// src/parquet_reader_test.cc -- the DuckDB parquet reader.
+// src/tokenizer/parquet_reader_test.cc -- the DuckDB parquet reader.
 //
 // Writes two tiny parquet files with DuckDB, then checks that the reader
 // returns the text column in dataset order (file name, then row number),
@@ -14,7 +14,7 @@
 #include <vector>
 
 #include <duckdb.hpp>
-#include "src/parquet_reader.h"
+#include "src/tokenizer/parquet_reader.h"
 
 namespace {
 

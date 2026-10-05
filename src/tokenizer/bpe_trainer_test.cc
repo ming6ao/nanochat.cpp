@@ -1,4 +1,4 @@
-// src/bpe_trainer_test.cc -- the reference merge list.
+// src/tokenizer/bpe_trainer_test.cc -- the reference merge list.
 //
 // Trains the native trainer on the fixed reference corpus and compares the
 // ordered merge list against `tests/data/tokenizer_fixture.bin` rank by rank.
@@ -20,7 +20,7 @@
 #include <vector>
 
 #include "nanochat/bpe_trainer.h"
-#include "src/tokenizer_internal.h"
+#include "src/tokenizer/tokenizer_internal.h"
 #include "tests/oracle_fixture.h"
 
 namespace {
