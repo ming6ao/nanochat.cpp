@@ -119,6 +119,42 @@ cc_binary(
     ],
 )
 
+# CPU GEMM micro-benchmark: the reference backend's C = A * B over a few
+# shapes. CPU-only, so it runs under the `t0-cpu` profile.
+#
+# `-fopenmp` in `copts` defines `_OPENMP` in the benchmark translation unit, so
+# `ActiveThreadCount()` reports the real OpenMP pool instead of the scalar
+# fallback. The linked `//backends/cpu:cpu` library already carries OpenMP, so
+# the flag changes only the reported thread count, not the GEMM math.
+cc_binary(
+    name = "cpu_gemm_bench",
+    srcs = ["cpu_gemm_bench.cc"],
+    copts = nanochat_copts() + ["-fopenmp"],
+    linkopts = ["-fopenmp"],
+    defines = precision_defines(),
+    deps = [
+        "//backends/cpu:cpu",
+        "//include/nanochat:nanochat",
+    ],
+)
+
+# CPU operand-layout probe. The model's `ops::LinearForward` uses
+# `transpose_b = true` (weights `[out, in]`), but the original Phase 1
+# benchmark timed only `transpose_b = false`. This probe times the same logical
+# shapes under both layouts and confirms that the model-layout fix makes them
+# agree. See docs/cpu-gap-results.md.
+cc_binary(
+    name = "cpu_linear_layout_probe",
+    srcs = ["cpu_linear_layout_probe.cc"],
+    copts = nanochat_copts() + ["-fopenmp"],
+    linkopts = ["-fopenmp"],
+    defines = precision_defines(),
+    deps = [
+        "//backends/cpu:cpu",
+        "//include/nanochat:nanochat",
+    ],
+)
+
 # Batch-1 decode baseline: eager seam vs cuBLAS + CUDA Graphs. The host file
 # uses the CUDA runtime and cuBLAS directly, so it is compiled as a cuda_binary.
 cuda_binary(

@@ -27,6 +27,8 @@ tools/nanochat bench -- <benchmark>       # T3-style micro-benchmark under the b
 | `decode_fused_bench.cc` | Batch-1 decode baseline: eager seam path vs `cuBLAS + CUDA Graphs`. |
 | `pascal_spike.cu`, `pascal_spike_test.cc` | The P0 CUDA/Pascal toolchain spike. |
 | `build_config_test.cc` | CPU smoke test for the precision config and the sandbox guard. |
+| `cpu_gemm_bench.cc` | CPU reference GEMM micro-benchmark over the four dominant training shapes plus the model-layout forward shapes; emits `nanochat.bench.v1`. |
+| `cpu_linear_layout_probe.cc` | CPU GEMM probe over the model operand layouts (`transpose_b` true and false); emits `nanochat.bench.v1`. |
 
 ## Conventions
 
@@ -37,6 +39,52 @@ the benchmark report.
 
 These prototypes are dev-only. The CUDA backend does not depend on this
 directory.
+
+## CPU GEMM micro-benchmark (Phase 0)
+
+`cpu_gemm_bench.cc` times the four dominant GEMM shapes from
+[docs/cpu-gap.md](../../docs/cpu-gap.md) section 2. The rows are
+`gemm_forward`, `gemm_wgrad`, `gemm_dgrad`, and `mlp_gemm`. The benchmark warms
+up, then keeps the best of N rounds. It calls `kernels::Gemm` directly and
+prints the `nanochat.bench.v1` schema on standard output. The shipped CPU GEMM
+is scalar, so the run is single-threaded until Phase 1 adds OpenMP.
+
+```bash
+tools/nanochat build //dev/kernels:cpu_gemm_bench
+tools/nanochat bench -- ./bazel-bin/dev/kernels/cpu_gemm_bench
+tools/nanochat bench -- ./bazel-bin/dev/kernels/cpu_gemm_bench \
+  --json --out /tmp/cpu-gemm.json
+```
+
+The `--json` flag suppresses the human-readable table and emits the report on
+standard output. The `--out PATH` flag also writes the report to `PATH`.
+
+The `gemm_dgrad` shape is the slowest at roughly 70 seconds per call, so a
+small `--rounds` keeps a full run short. The benchmark reports the active GEMM
+thread count in the `threads` field and on standard error. Phase 0 is scalar,
+so the value is 1.
+
+## CPU operand-layout probe (Phase 1)
+
+`cpu_linear_layout_probe.cc` times the same logical GEMM under
+`transpose_b = false` and `transpose_b = true`. The model uses
+`transpose_b = true`: `ops::LinearForward` stores weights as `[out, in]`.
+
+Phase 1 first read `b` contiguously only when `transpose_b` is false. That run
+failed the end-to-end gate at 44.1 seconds per step. The model-layout fix
+rewrites the `transpose_b = true` branch as a dot product, so both reads are
+contiguous.
+
+The probe now confirms that the two layouts agree. The model `lm_head` forward
+reaches 19.35 GFLOP/s and the benchmark layout reaches 19.55 GFLOP/s (12
+threads). The Phase 1 gate passes at 22.3 seconds per step. See
+[docs/cpu-gap-results.md](../../docs/cpu-gap-results.md).
+
+```bash
+tools/nanochat build //dev/kernels:cpu_linear_layout_probe
+tools/nanochat bench -- ./bazel-bin/dev/kernels/cpu_linear_layout_probe \
+  --rounds 5 --warmup 2 --json --out /tmp/cpu-gap-p1-layout.json
+```
 
 ## Fusion results (Wave 8, commit `62706c0`)
 
