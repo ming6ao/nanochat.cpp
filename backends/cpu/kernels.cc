@@ -2,9 +2,12 @@
 // nanochat/kernels.h (docs/backends.md). It is the correctness baseline, the
 // oracle-on-CPU path, and the fallback when no accelerator is present.
 //
-// Everything here is a naive loop, written for clarity rather than speed:
-// double-width accumulators for reductions, float working state, and no
-// vectorisation. The build selects ComputeType (fp32 or fp16) at compile time;
+// Most entry points here are naive loops, written for clarity rather than
+// speed: double-width accumulators for reductions, float working state, and no
+// vectorisation. `Gemm` is the exception: it blocks the output rows and
+// columns into register tiles and packs the `b` operand, because the language
+// model spends most of its time there. The build selects ComputeType (fp32 or
+// fp16) at compile time;
 // the arithmetic below is always performed in float and converted at the
 // storage boundary through AsFloat / ToCompute.
 //
@@ -26,6 +29,10 @@
 // normalization statistics".
 
 #include "nanochat/kernels.h"
+
+#if defined(_OPENMP)
+#include <omp.h>
+#endif
 
 #include <algorithm>
 #include <cmath>
@@ -73,6 +80,23 @@ inline float Sigmoid(float x) { return 1.0f / (1.0f + std::exp(-x)); }
 // fp16 build (Fp16 is a non-trivial struct).
 inline void ZeroFill(ComputeType* ptr, std::size_t count) {
   std::fill(ptr, ptr + count, ToCompute(0.0f));
+}
+
+// Honour the NANOCHAT_NUM_THREADS contract. The sandbox sets it together with
+// OMP_NUM_THREADS, but a library thread pool reads NANOCHAT_NUM_THREADS. Apply
+// it once, before the first parallel region.
+inline void ConfigureThreads() {
+#if defined(_OPENMP)
+  static const bool configured = [] {
+    const char* env = std::getenv("NANOCHAT_NUM_THREADS");
+    if (env != nullptr) {
+      const int n = std::atoi(env);
+      if (n > 0) omp_set_num_threads(n);
+    }
+    return true;
+  }();
+  (void)configured;
+#endif
 }
 
 // Polar Express coefficients (num_iters=5), from nanochat/optim.py / the
@@ -142,6 +166,166 @@ Caps GetCaps() {
 // control the operand layout; `lda`/`ldb`/`ldc` are leading dimensions, where 0
 // infers a dense row-major operand. `GemmMode` is advisory: the host supplies
 // the already-selected operands, so all three modes compute the same product.
+//
+// The body packs the `b` panel for one column block into a contiguous buffer.
+// It then walks the output rows in `kGemmMr`-row blocks. Each block packs its
+// `a` rows and runs a `kGemmMr` by `kGemmNr` register kernel over the whole
+// reduction. The reduction stays in `double`, exactly as the shipped loop.
+namespace {
+
+// The Gemm register tile: `kGemmMr` output rows by `kGemmNr` output columns
+// held in `double` accumulators. The packed `b` panel is `kGemmNc` columns
+// wide. The whole reduction stays in one `double` sum, so the rounding matches
+// the shipped scalar code.
+constexpr int kGemmMr = 4;
+constexpr int kGemmNr = 16;
+constexpr int kGemmNc = 128;
+
+// One register tile: acc[MR][NR] += A[MR x k] * B[k x NR]. `ap` is the packed
+// A row block (`ap[i * ap_stride + l]`); `bp` is the packed B panel
+// (`bp[l * bp_stride + j]`). The unroll pragmas keep every accumulator in a
+// vector register.
+inline void GemmMicroBody(int k, const float* __restrict ap, int ap_stride,
+                          const float* __restrict bp, int bp_stride,
+                          double acc[kGemmMr][kGemmNr]) {
+  for (int l = 0; l < k; ++l) {
+    double av[kGemmMr];
+#pragma GCC unroll 4
+    for (int i = 0; i < kGemmMr; ++i) {
+      av[i] = static_cast<double>(ap[i * ap_stride + l]);
+    }
+    const float* b = bp + static_cast<std::int64_t>(l) * bp_stride;
+    double bv[kGemmNr];
+#pragma GCC unroll 8
+    for (int j = 0; j < kGemmNr; ++j) bv[j] = static_cast<double>(b[j]);
+#pragma GCC unroll 4
+    for (int i = 0; i < kGemmMr; ++i) {
+#pragma GCC unroll 8
+      for (int j = 0; j < kGemmNr; ++j) acc[i][j] += av[i] * bv[j];
+    }
+  }
+}
+
+void GemmMicroBase(int k, const float* __restrict ap, int ap_stride,
+                   const float* __restrict bp, int bp_stride,
+                   double acc[kGemmMr][kGemmNr]) {
+  GemmMicroBody(k, ap, ap_stride, bp, bp_stride, acc);
+}
+
+#if defined(__x86_64__) || defined(__i386__)
+// The same kernel compiled for AVX2 with fused multiply-add. Gemm dispatches to
+// it only when the running CPU reports both features, so the baseline binary
+// stays portable.
+__attribute__((target("avx2,fma"))) void GemmMicroAvx2(
+    int k, const float* __restrict ap, int ap_stride,
+    const float* __restrict bp, int bp_stride, double acc[kGemmMr][kGemmNr]) {
+  GemmMicroBody(k, ap, ap_stride, bp, bp_stride, acc);
+}
+#endif
+
+using GemmMicroFn = void (*)(int, const float*, int, const float*, int,
+                             double (*)[kGemmNr]);
+
+// Resolve the widest micro-kernel the running CPU supports. The answer is
+// cached because the feature test reads the CPU identification registers.
+GemmMicroFn ResolveGemmMicro() {
+#if defined(__x86_64__) || defined(__i386__)
+  static const bool avx2_fma =
+      __builtin_cpu_supports("avx2") && __builtin_cpu_supports("fma");
+  if (avx2_fma) return &GemmMicroAvx2;
+#endif
+  return &GemmMicroBase;
+}
+
+// Pack the `mr` rows of A that start at row `ic` into a contiguous row-major
+// block `apack[i * k + l]`. `transpose_a` selects the stored operand layout.
+template <typename T>
+void PackGemmA(const T* a, int lda, int ic, int mr, int k, bool transpose_a,
+               float* apack) {
+  if (transpose_a) {
+    // a is stored [k, m]: element a[l, ic + i]. Walk l in the outer loop so the
+    // rows of each reduction step come from one contiguous line.
+    for (int l = 0; l < k; ++l) {
+      const T* src = a + static_cast<std::int64_t>(l) * lda + ic;
+      for (int i = 0; i < mr; ++i) {
+        apack[static_cast<std::int64_t>(i) * k + l] = AsFloatT(src[i]);
+      }
+    }
+  } else {
+    // a is stored [m, k]: element a[ic + i, l].
+    for (int i = 0; i < mr; ++i) {
+      const T* src = a + static_cast<std::int64_t>(ic + i) * lda;
+      float* dst = apack + static_cast<std::int64_t>(i) * k;
+      for (int l = 0; l < k; ++l) dst[l] = AsFloatT(src[l]);
+    }
+  }
+}
+
+// Pack `groups` full register-width column groups of B into the shared panel.
+// Group `g` holds the columns `[g * kGemmNr, (g + 1) * kGemmNr)` with
+// `bpanel[g * group_stride + l * kGemmNr + j]`. The register-width inner axis
+// is contiguous, so the micro-kernel walks the panel forward. `transpose_b`
+// selects the stored operand layout.
+template <typename T>
+void PackGemmB(const T* b, int ldb, int jc, int groups, int k, int group_stride,
+               bool transpose_b, float* bpanel) {
+  if (transpose_b) {
+    // b is stored [n, k]: element b[jc + g * kGemmNr + j, l].
+    for (int g = 0; g < groups; ++g) {
+      float* out = bpanel + static_cast<std::int64_t>(g) * group_stride;
+      for (int j = 0; j < kGemmNr; ++j) {
+        const T* src =
+            b + static_cast<std::int64_t>(jc + g * kGemmNr + j) * ldb;
+        for (int l = 0; l < k; ++l) {
+          out[static_cast<std::int64_t>(l) * kGemmNr + j] = AsFloatT(src[l]);
+        }
+      }
+    }
+  } else {
+    // b is stored [k, n]: element b[l, jc + g * kGemmNr + j].
+    for (int l = 0; l < k; ++l) {
+      const T* src = b + static_cast<std::int64_t>(l) * ldb + jc;
+      for (int g = 0; g < groups; ++g) {
+        float* out = bpanel + static_cast<std::int64_t>(g) * group_stride +
+                     static_cast<std::int64_t>(l) * kGemmNr;
+        for (int j = 0; j < kGemmNr; ++j) {
+          out[j] = AsFloatT(src[g * kGemmNr + j]);
+        }
+      }
+    }
+  }
+}
+
+// Reduce one output element with the stored layouts. The partial tiles at the
+// right and bottom edges use it, where the register tile does not fit.
+template <typename T>
+float GemmDotProduct(const T* a, const T* b, int lda, int ldb, int i, int j,
+                     int k, bool transpose_a, bool transpose_b) {
+  double sum = 0.0;
+  for (int l = 0; l < k; ++l) {
+    const float av =
+        AsFloatT(transpose_a ? a[static_cast<std::int64_t>(l) * lda + i]
+                             : a[static_cast<std::int64_t>(i) * lda + l]);
+    const float bv =
+        AsFloatT(transpose_b ? b[static_cast<std::int64_t>(j) * ldb + l]
+                             : b[static_cast<std::int64_t>(l) * ldb + j]);
+    sum += static_cast<double>(av) * static_cast<double>(bv);
+  }
+  return static_cast<float>(sum);
+}
+
+// Write one output element. A zero `beta` never reads the previous value, which
+// matches the shipped contract.
+inline ComputeType GemmStore(ComputeType* dst, float partial, float alpha,
+                             float beta) {
+  if (beta != 0.0f) {
+    return ToCompute(alpha * partial + beta * AsFloat(*dst));
+  }
+  return ToCompute(alpha * partial);
+}
+
+}  // namespace
+
 void Gemm(GemmMode mode, const GemmParams& params, const ComputeType* a,
           const ComputeType* b, ComputeType* c) {
   (void)mode;
@@ -170,28 +354,88 @@ void Gemm(GemmMode mode, const GemmParams& params, const ComputeType* a,
                                     : static_cast<std::int64_t>(m) * ldc;
   const int batch = params.batch_count > 0 ? params.batch_count : 1;
 
+  const float alpha = params.alpha;
+  const float beta = params.beta;
+  const bool transpose_a = params.transpose_a;
+  const bool transpose_b = params.transpose_b;
+  const int panel_groups = (std::min(kGemmNc, n) + kGemmNr - 1) / kGemmNr;
+  const int group_stride = k * kGemmNr;
+  const GemmMicroFn micro = ResolveGemmMicro();
+
   for (int bi = 0; bi < batch; ++bi) {
     const ComputeType* ab = a + bi * stride_a;
     const ComputeType* bb = b + bi * stride_b;
     ComputeType* cb = c + bi * stride_c;
-    for (int i = 0; i < m; ++i) {
-      for (int j = 0; j < n; ++j) {
-        double acc = 0.0;
-        for (int l = 0; l < k; ++l) {
-          const float av =
-              params.transpose_a
-                  ? AsFloat(ab[static_cast<std::int64_t>(l) * lda + i])
-                  : AsFloat(ab[static_cast<std::int64_t>(i) * lda + l]);
-          const float bv =
-              params.transpose_b
-                  ? AsFloat(bb[static_cast<std::int64_t>(j) * ldb + l])
-                  : AsFloat(bb[static_cast<std::int64_t>(l) * ldb + j]);
-          acc += static_cast<double>(av) * static_cast<double>(bv);
+
+    // The packed `b` panel is shared by every worker and rewritten for each
+    // column block. The packed `a` block is private to a worker.
+    std::vector<float> bpanel(static_cast<std::size_t>(group_stride) *
+                              panel_groups);
+
+#if defined(_OPENMP)
+#pragma omp parallel
+#endif
+    {
+      std::vector<float> apack(static_cast<std::size_t>(kGemmMr) * k);
+      for (int jc = 0; jc < n; jc += kGemmNc) {
+        const int nc = std::min(kGemmNc, n - jc);
+#if defined(_OPENMP)
+#pragma omp single
+#endif
+        {
+          PackGemmB(bb, ldb, jc, nc / kGemmNr, k, group_stride, transpose_b,
+                    bpanel.data());
         }
-        const std::int64_t ci = static_cast<std::int64_t>(i) * ldc + j;
-        const float prior = (params.beta != 0.0f) ? AsFloat(cb[ci]) : 0.0f;
-        cb[ci] = ToCompute(params.alpha * static_cast<float>(acc) +
-                           params.beta * prior);
+        // The `single` construct above has an implicit barrier, so every worker
+        // sees the finished panel.
+#if defined(_OPENMP)
+#pragma omp for schedule(static)
+#endif
+        for (int ic = 0; ic < m; ic += kGemmMr) {
+          const int mr = std::min(kGemmMr, m - ic);
+          if (mr == kGemmMr) {
+            PackGemmA(ab, lda, ic, mr, k, transpose_a, apack.data());
+            const int groups = nc / kGemmNr;
+            for (int g = 0; g < groups; ++g) {
+              double acc[kGemmMr][kGemmNr] = {};
+              const float* bp =
+                  bpanel.data() + static_cast<std::int64_t>(g) * group_stride;
+              micro(k, apack.data(), k, bp, kGemmNr, acc);
+              for (int i = 0; i < kGemmMr; ++i) {
+                ComputeType* crow = cb +
+                                    static_cast<std::int64_t>(ic + i) * ldc +
+                                    jc + g * kGemmNr;
+                for (int j = 0; j < kGemmNr; ++j) {
+                  crow[j] = GemmStore(crow + j, static_cast<float>(acc[i][j]),
+                                      alpha, beta);
+                }
+              }
+            }
+            // Partial column tile at the right edge.
+            for (int j = groups * kGemmNr; j < nc; ++j) {
+              for (int i = 0; i < kGemmMr; ++i) {
+                ComputeType* crow =
+                    cb + static_cast<std::int64_t>(ic + i) * ldc + jc + j;
+                const float partial =
+                    GemmDotProduct(ab, bb, lda, ldb, ic + i, jc + j, k,
+                                   transpose_a, transpose_b);
+                crow[0] = GemmStore(crow, partial, alpha, beta);
+              }
+            }
+          } else {
+            // Partial row tile at the bottom edge.
+            for (int i = 0; i < mr; ++i) {
+              ComputeType* crow =
+                  cb + static_cast<std::int64_t>(ic + i) * ldc + jc;
+              for (int j = 0; j < nc; ++j) {
+                const float partial =
+                    GemmDotProduct(ab, bb, lda, ldb, ic + i, jc + j, k,
+                                   transpose_a, transpose_b);
+                crow[j] = GemmStore(crow + j, partial, alpha, beta);
+              }
+            }
+          }
+        }
       }
     }
   }
@@ -387,6 +631,7 @@ inline bool KeyAllowed(const AttentionParams& p, std::int64_t qpos,
 void AttentionForward(const AttentionParams& params, const ComputeType* q,
                       const ComputeType* k, const ComputeType* v,
                       ComputeType* out, float* stats) {
+  ConfigureThreads();
   const int batch = params.batch;
   const int seq = params.seq;
   const int heads = params.num_heads;
@@ -399,68 +644,76 @@ void AttentionForward(const AttentionParams& params, const ComputeType* q,
   const float scale = params.scale > 0.0f
                           ? params.scale
                           : 1.0f / std::sqrt(static_cast<float>(dim));
-  std::vector<float> acc(dim);
-
-  for (int b = 0; b < batch; ++b) {
-    for (int h = 0; h < heads; ++h) {
+  const std::int64_t total_rows =
+      static_cast<std::int64_t>(batch) * heads * seq;
+#if defined(_OPENMP)
+#pragma omp parallel
+#endif
+  {
+    std::vector<float> acc(dim);
+    // Cache the scaled score of every allowed key. The softmax pass then reads
+    // the cached value instead of recomputing the query-key dot product. Each
+    // score is the same float the shipped code compares and exponentiates.
+    std::vector<float> scores(kv_len);
+#if defined(_OPENMP)
+#pragma omp for schedule(guided)
+#endif
+    for (std::int64_t row = 0; row < total_rows; ++row) {
+      const int t = static_cast<int>(row % seq);
+      const int h = static_cast<int>((row / seq) % heads);
+      const int b = static_cast<int>(row / (seq * heads));
       const int kvh = KvHead(h, heads, kv_heads);
-      for (int t = 0; t < seq; ++t) {
-        const std::int64_t qpos = kv_len - seq + t;
-        const std::int64_t qbase =
-            ((static_cast<std::int64_t>(b) * seq + t) * heads + h) * dim;
-        // Pass 1: max score over the visible window.
-        float row_max = -std::numeric_limits<float>::infinity();
-        bool any = false;
-        for (std::int64_t j = 0; j < kv_len; ++j) {
-          if (!KeyAllowed(params, qpos, j)) continue;
-          const std::int64_t kbase =
-              ((static_cast<std::int64_t>(b) * kv_len + j) * kv_heads + kvh) *
-              dim;
-          double dot = 0.0;
-          for (int d = 0; d < dim; ++d) {
-            dot += static_cast<double>(AsFloat(q[qbase + d])) *
-                   static_cast<double>(AsFloat(k[kbase + d]));
-          }
-          const float score = scale * static_cast<float>(dot);
-          if (score > row_max) row_max = score;
-          any = true;
-        }
-        const std::int64_t stat_base =
-            ((static_cast<std::int64_t>(b) * heads + h) * seq + t) * 2;
-        if (!any) {
-          for (int d = 0; d < dim; ++d) out[qbase + d] = ToCompute(0.0f);
-          stats[stat_base] = 0.0f;
-          stats[stat_base + 1] = 0.0f;
-          continue;
-        }
-        // Pass 2: sum of exponentials and unnormalised output.
-        double sum_exp = 0.0;
-        for (int d = 0; d < dim; ++d) acc[d] = 0.0f;
-        for (std::int64_t j = 0; j < kv_len; ++j) {
-          if (!KeyAllowed(params, qpos, j)) continue;
-          const std::int64_t kbase =
-              ((static_cast<std::int64_t>(b) * kv_len + j) * kv_heads + kvh) *
-              dim;
-          const std::int64_t vbase = kbase;
-          double dot = 0.0;
-          for (int d = 0; d < dim; ++d) {
-            dot += static_cast<double>(AsFloat(q[qbase + d])) *
-                   static_cast<double>(AsFloat(k[kbase + d]));
-          }
-          const double weight = std::exp(
-              static_cast<double>(scale * static_cast<float>(dot) - row_max));
-          sum_exp += weight;
-          for (int d = 0; d < dim; ++d) {
-            acc[d] += static_cast<float>(weight * AsFloat(v[vbase + d]));
-          }
-        }
-        const float inv = static_cast<float>(1.0 / sum_exp);
+      const std::int64_t qpos = kv_len - seq + t;
+      const std::int64_t qbase =
+          ((static_cast<std::int64_t>(b) * seq + t) * heads + h) * dim;
+      // Pass 1: max score over the visible window.
+      float row_max = -std::numeric_limits<float>::infinity();
+      bool any = false;
+      for (std::int64_t j = 0; j < kv_len; ++j) {
+        if (!KeyAllowed(params, qpos, j)) continue;
+        const std::int64_t kbase =
+            ((static_cast<std::int64_t>(b) * kv_len + j) * kv_heads + kvh) *
+            dim;
+        double dot = 0.0;
         for (int d = 0; d < dim; ++d) {
-          out[qbase + d] = ToCompute(acc[d] * inv);
+          dot += static_cast<double>(AsFloat(q[qbase + d])) *
+                 static_cast<double>(AsFloat(k[kbase + d]));
         }
-        stats[stat_base] = row_max;
-        stats[stat_base + 1] = static_cast<float>(sum_exp);
+        const float score = scale * static_cast<float>(dot);
+        scores[j] = score;
+        if (score > row_max) row_max = score;
+        any = true;
       }
+      const std::int64_t stat_base =
+          ((static_cast<std::int64_t>(b) * heads + h) * seq + t) * 2;
+      if (!any) {
+        for (int d = 0; d < dim; ++d) out[qbase + d] = ToCompute(0.0f);
+        stats[stat_base] = 0.0f;
+        stats[stat_base + 1] = 0.0f;
+        continue;
+      }
+      // Pass 2: sum of exponentials and unnormalised output.
+      double sum_exp = 0.0;
+      for (int d = 0; d < dim; ++d) acc[d] = 0.0f;
+      for (std::int64_t j = 0; j < kv_len; ++j) {
+        if (!KeyAllowed(params, qpos, j)) continue;
+        const std::int64_t kbase =
+            ((static_cast<std::int64_t>(b) * kv_len + j) * kv_heads + kvh) *
+            dim;
+        const std::int64_t vbase = kbase;
+        const double weight =
+            std::exp(static_cast<double>(scores[j] - row_max));
+        sum_exp += weight;
+        for (int d = 0; d < dim; ++d) {
+          acc[d] += static_cast<float>(weight * AsFloat(v[vbase + d]));
+        }
+      }
+      const float inv = static_cast<float>(1.0 / sum_exp);
+      for (int d = 0; d < dim; ++d) {
+        out[qbase + d] = ToCompute(acc[d] * inv);
+      }
+      stats[stat_base] = row_max;
+      stats[stat_base + 1] = static_cast<float>(sum_exp);
     }
   }
 }
@@ -469,6 +722,7 @@ void AttentionBackward(const AttentionParams& params, const ComputeType* q,
                        const ComputeType* k, const ComputeType* v,
                        const float* stats, const ComputeType* dout,
                        ComputeType* dq, ComputeType* dk, ComputeType* dv) {
+  ConfigureThreads();
   const int batch = params.batch;
   const int seq = params.seq;
   const int heads = params.num_heads;
@@ -490,62 +744,120 @@ void AttentionBackward(const AttentionParams& params, const ComputeType* q,
   ZeroFill(dk, kv_count);
   ZeroFill(dv, kv_count);
 
-  std::vector<float> probs(kv_len, 0.0f);
-  std::vector<float> dp(kv_len, 0.0f);
+  const std::int64_t total_rows =
+      static_cast<std::int64_t>(batch) * heads * seq;
+  // `probs[row, j]` is the softmax probability and `ds[row, j]` is the
+  // softmax-gradient term. Phase 1 fills both while it accumulates dq. Phase 2
+  // reduces them into dk and dv. Both phases keep the shipped summation order.
+  const std::size_t red_size = static_cast<std::size_t>(total_rows) * kv_len;
+  std::vector<float> probs(red_size, 0.0f);
+  std::vector<float> ds(red_size, 0.0f);
 
-  for (int b = 0; b < batch; ++b) {
-    for (int h = 0; h < heads; ++h) {
+#if defined(_OPENMP)
+#pragma omp parallel
+#endif
+  {
+    std::vector<float> dp(kv_len);
+#if defined(_OPENMP)
+#pragma omp for schedule(guided)
+#endif
+    for (std::int64_t row = 0; row < total_rows; ++row) {
+      const int t = static_cast<int>(row % seq);
+      const int h = static_cast<int>((row / seq) % heads);
+      const int b = static_cast<int>(row / (seq * heads));
       const int kvh = KvHead(h, heads, kv_heads);
+      const std::int64_t qpos = kv_len - seq + t;
+      const std::int64_t qbase =
+          ((static_cast<std::int64_t>(b) * seq + t) * heads + h) * dim;
+      const std::int64_t stat_base =
+          ((static_cast<std::int64_t>(b) * heads + h) * seq + t) * 2;
+      const float row_max = stats[stat_base];
+      const float sum_exp = stats[stat_base + 1];
+      if (sum_exp <= 0.0f) continue;
+      const float inv = 1.0f / sum_exp;
+      const std::size_t idx0 = static_cast<std::size_t>(row) * kv_len;
+      float weighted_dp = 0.0f;
+      for (std::int64_t j = 0; j < kv_len; ++j) {
+        dp[j] = 0.0f;
+        if (!KeyAllowed(params, qpos, j)) continue;
+        const std::int64_t kbase =
+            ((static_cast<std::int64_t>(b) * kv_len + j) * kv_heads + kvh) *
+            dim;
+        double dot = 0.0;
+        for (int d = 0; d < dim; ++d) {
+          dot += static_cast<double>(AsFloat(q[qbase + d])) *
+                 static_cast<double>(AsFloat(k[kbase + d]));
+        }
+        const float p =
+            std::exp(scale * static_cast<float>(dot) - row_max) * inv;
+        probs[idx0 + static_cast<std::size_t>(j)] = p;
+        double dpd = 0.0;
+        for (int d = 0; d < dim; ++d) {
+          dpd += static_cast<double>(AsFloat(dout[qbase + d])) *
+                 static_cast<double>(AsFloat(v[kbase + d]));
+        }
+        dp[j] = static_cast<float>(dpd);
+        weighted_dp += p * dp[j];
+      }
+      for (std::int64_t j = 0; j < kv_len; ++j) {
+        if (!KeyAllowed(params, qpos, j)) continue;
+        const std::int64_t kbase =
+            ((static_cast<std::int64_t>(b) * kv_len + j) * kv_heads + kvh) *
+            dim;
+        const float p = probs[idx0 + static_cast<std::size_t>(j)];
+        const float dsj = p * (dp[j] - weighted_dp);
+        ds[idx0 + static_cast<std::size_t>(j)] = dsj;
+        const float dp_scale = dsj * scale;
+        for (int d = 0; d < dim; ++d) {
+          const float kv = AsFloat(k[kbase + d]);
+          dq[qbase + d] = ToCompute(AsFloat(dq[qbase + d]) + dp_scale * kv);
+        }
+      }
+    }
+  }
+
+  // Phase 2: accumulate dk and dv. A key/value row is owned by one worker, so
+  // no atomics are needed. The inner order (query head, then query row) matches
+  // the shipped accumulation order.
+  const int group = (kv_heads > 0 && kv_heads < heads) ? heads / kv_heads : 1;
+  const std::int64_t total_keys =
+      static_cast<std::int64_t>(batch) * kv_heads * kv_len;
+#if defined(_OPENMP)
+#pragma omp parallel for schedule(guided)
+#endif
+  for (std::int64_t key = 0; key < total_keys; ++key) {
+    const int j = static_cast<int>(key % kv_len);
+    const int kvh = static_cast<int>((key / kv_len) % kv_heads);
+    const int b = static_cast<int>(key / (kv_len * kv_heads));
+    int h_start;
+    int h_end;
+    if (kv_heads > 0 && kv_heads < heads) {
+      h_start = kvh * group;
+      h_end = std::min(heads, h_start + group);
+    } else {
+      h_start = kvh;
+      h_end = std::min(heads, kvh + 1);
+    }
+    if (h_start >= h_end) continue;
+    const std::int64_t kbase =
+        ((static_cast<std::int64_t>(b) * kv_len + j) * kv_heads + kvh) * dim;
+    for (int h = h_start; h < h_end; ++h) {
       for (int t = 0; t < seq; ++t) {
         const std::int64_t qpos = kv_len - seq + t;
+        if (!KeyAllowed(params, qpos, j)) continue;
         const std::int64_t qbase =
             ((static_cast<std::int64_t>(b) * seq + t) * heads + h) * dim;
-        const std::int64_t stat_base =
-            ((static_cast<std::int64_t>(b) * heads + h) * seq + t) * 2;
-        const float row_max = stats[stat_base];
-        const float sum_exp = stats[stat_base + 1];
-        if (sum_exp <= 0.0f) continue;
-        const float inv = 1.0f / sum_exp;
-        float weighted_dp = 0.0f;
-        for (std::int64_t j = 0; j < kv_len; ++j) {
-          probs[j] = 0.0f;
-          dp[j] = 0.0f;
-          if (!KeyAllowed(params, qpos, j)) continue;
-          const std::int64_t kbase =
-              ((static_cast<std::int64_t>(b) * kv_len + j) * kv_heads + kvh) *
-              dim;
-          double dot = 0.0;
-          for (int d = 0; d < dim; ++d) {
-            dot += static_cast<double>(AsFloat(q[qbase + d])) *
-                   static_cast<double>(AsFloat(k[kbase + d]));
-          }
-          const float p =
-              std::exp(scale * static_cast<float>(dot) - row_max) * inv;
-          probs[j] = p;
-          double dpd = 0.0;
-          for (int d = 0; d < dim; ++d) {
-            dpd += static_cast<double>(AsFloat(dout[qbase + d])) *
-                   static_cast<double>(AsFloat(v[kbase + d]));
-          }
-          dp[j] = static_cast<float>(dpd);
-          weighted_dp += p * dp[j];
-        }
-        for (std::int64_t j = 0; j < kv_len; ++j) {
-          if (!KeyAllowed(params, qpos, j)) continue;
-          const std::int64_t kbase =
-              ((static_cast<std::int64_t>(b) * kv_len + j) * kv_heads + kvh) *
-              dim;
-          const float ds = probs[j] * (dp[j] - weighted_dp);
-          const float dp_scale = ds * scale;
-          const float p = probs[j];
-          for (int d = 0; d < dim; ++d) {
-            const float qv = AsFloat(q[qbase + d]);
-            const float kv = AsFloat(k[kbase + d]);
-            const float dov = AsFloat(dout[qbase + d]);
-            dq[qbase + d] = ToCompute(AsFloat(dq[qbase + d]) + dp_scale * kv);
-            dk[kbase + d] = ToCompute(AsFloat(dk[kbase + d]) + dp_scale * qv);
-            dv[kbase + d] = ToCompute(AsFloat(dv[kbase + d]) + p * dov);
-          }
+        const std::int64_t row =
+            (static_cast<std::int64_t>(b) * heads + h) * seq + t;
+        const std::size_t idx = static_cast<std::size_t>(row) * kv_len +
+                                static_cast<std::size_t>(j);
+        const float p = probs[idx];
+        const float dp_scale = ds[idx] * scale;
+        for (int d = 0; d < dim; ++d) {
+          const float qv = AsFloat(q[qbase + d]);
+          const float dov = AsFloat(dout[qbase + d]);
+          dk[kbase + d] = ToCompute(AsFloat(dk[kbase + d]) + dp_scale * qv);
+          dv[kbase + d] = ToCompute(AsFloat(dv[kbase + d]) + p * dov);
         }
       }
     }
@@ -632,76 +944,99 @@ void PointwiseBackward(PointwiseOp op, int n, const ComputeType* a,
 void ClassifierForward(const ClassifierParams& params,
                        const ComputeType* logits, const int* targets,
                        ComputeType* losses) {
+  ConfigureThreads();
   const int rows = params.rows;
   const int vocab = params.vocab_size;
   const int padded =
       params.padded_vocab_size > 0 ? params.padded_vocab_size : vocab;
   if (rows <= 0 || vocab <= 0) return;
   const float cap = params.softcap;
-  for (int r = 0; r < rows; ++r) {
-    const int target = targets[r];
-    if (target == params.ignore_index) {
-      losses[r] = ToCompute(0.0f);
-      continue;
+#if defined(_OPENMP)
+#pragma omp parallel
+#endif
+  {
+    // The softcap is computed once per element, then the max and the sum walk
+    // the cached values. The arithmetic is the shipped arithmetic.
+    std::vector<float> z(vocab);
+#if defined(_OPENMP)
+#pragma omp for schedule(static)
+#endif
+    for (int r = 0; r < rows; ++r) {
+      const int target = targets[r];
+      if (target == params.ignore_index) {
+        losses[r] = ToCompute(0.0f);
+        continue;
+      }
+      const std::int64_t base = static_cast<std::int64_t>(r) * padded;
+      // Softcap only the real vocabulary; the padded tail is never read.
+      float row_max = -std::numeric_limits<float>::infinity();
+      for (int j = 0; j < vocab; ++j) {
+        const float zj = cap * std::tanh(AsFloat(logits[base + j]) / cap);
+        z[j] = zj;
+        if (zj > row_max) row_max = zj;
+      }
+      double sum_exp = 0.0;
+      for (int j = 0; j < vocab; ++j) {
+        sum_exp += std::exp(static_cast<double>(z[j] - row_max));
+      }
+      const float loss =
+          static_cast<float>(std::log(sum_exp)) + row_max - z[target];
+      losses[r] = ToCompute(loss);
     }
-    const std::int64_t base = static_cast<std::int64_t>(r) * padded;
-    // Softcap only the real vocabulary; the padded tail is never read.
-    float row_max = -std::numeric_limits<float>::infinity();
-    for (int j = 0; j < vocab; ++j) {
-      const float z = cap * std::tanh(AsFloat(logits[base + j]) / cap);
-      if (z > row_max) row_max = z;
-    }
-    double sum_exp = 0.0;
-    for (int j = 0; j < vocab; ++j) {
-      const float z = cap * std::tanh(AsFloat(logits[base + j]) / cap);
-      sum_exp += std::exp(static_cast<double>(z - row_max));
-    }
-    const float z_target =
-        cap * std::tanh(AsFloat(logits[base + target]) / cap);
-    const float loss =
-        static_cast<float>(std::log(sum_exp)) + row_max - z_target;
-    losses[r] = ToCompute(loss);
   }
 }
 
 void ClassifierBackward(const ClassifierParams& params,
                         const ComputeType* logits, const int* targets,
                         ComputeType* dlogits) {
+  ConfigureThreads();
   const int rows = params.rows;
   const int vocab = params.vocab_size;
   const int padded =
       params.padded_vocab_size > 0 ? params.padded_vocab_size : vocab;
   if (rows <= 0 || vocab <= 0) return;
   const float cap = params.softcap;
-  std::vector<float> probs(vocab, 0.0f);
-  std::vector<float> sech2(vocab, 0.0f);
-  for (int r = 0; r < rows; ++r) {
-    const std::int64_t base = static_cast<std::int64_t>(r) * padded;
-    const int target = targets[r];
-    if (target == params.ignore_index) {
-      for (int j = 0; j < padded; ++j) dlogits[base + j] = ToCompute(0.0f);
-      continue;
+#if defined(_OPENMP)
+#pragma omp parallel
+#endif
+  {
+    // `probs` holds the softcapped logit and `sech2` holds 1 - tanh^2, so each
+    // element needs one tanh. The two exponentials of the shipped code stay
+    // separate: the sum uses the double overload and the output uses the
+    // float overload, exactly as the shipped code does.
+    std::vector<float> probs(vocab);
+    std::vector<float> sech2(vocab);
+#if defined(_OPENMP)
+#pragma omp for schedule(static)
+#endif
+    for (int r = 0; r < rows; ++r) {
+      const std::int64_t base = static_cast<std::int64_t>(r) * padded;
+      const int target = targets[r];
+      if (target == params.ignore_index) {
+        for (int j = 0; j < padded; ++j) dlogits[base + j] = ToCompute(0.0f);
+        continue;
+      }
+      float row_max = -std::numeric_limits<float>::infinity();
+      for (int j = 0; j < vocab; ++j) {
+        const float t = std::tanh(AsFloat(logits[base + j]) / cap);
+        sech2[j] = 1.0f - t * t;
+        const float z = cap * t;
+        probs[j] = z;
+        if (z > row_max) row_max = z;
+      }
+      double sum_exp = 0.0;
+      for (int j = 0; j < vocab; ++j) {
+        sum_exp += std::exp(static_cast<double>(probs[j] - row_max));
+      }
+      const float inv = static_cast<float>(1.0 / sum_exp);
+      for (int j = 0; j < vocab; ++j) {
+        const float p = std::exp(probs[j] - row_max) * inv;
+        const float onehot = (j == target) ? 1.0f : 0.0f;
+        // dL/d(raw logit) = (softmax - onehot) * d(softcap)/d(raw).
+        dlogits[base + j] = ToCompute((p - onehot) * sech2[j]);
+      }
+      for (int j = vocab; j < padded; ++j) dlogits[base + j] = ToCompute(0.0f);
     }
-    float row_max = -std::numeric_limits<float>::infinity();
-    for (int j = 0; j < vocab; ++j) {
-      const float z = cap * std::tanh(AsFloat(logits[base + j]) / cap);
-      probs[j] = z;
-      if (z > row_max) row_max = z;
-    }
-    double sum_exp = 0.0;
-    for (int j = 0; j < vocab; ++j) {
-      sum_exp += std::exp(static_cast<double>(probs[j] - row_max));
-    }
-    const float inv = static_cast<float>(1.0 / sum_exp);
-    for (int j = 0; j < vocab; ++j) {
-      const float t = std::tanh(AsFloat(logits[base + j]) / cap);
-      sech2[j] = 1.0f - t * t;
-      const float p = std::exp(probs[j] - row_max) * inv;
-      const float onehot = (j == target) ? 1.0f : 0.0f;
-      // dL/d(raw logit) = (softmax - onehot) * d(softcap)/d(raw).
-      dlogits[base + j] = ToCompute((p - onehot) * sech2[j]);
-    }
-    for (int j = vocab; j < padded; ++j) dlogits[base + j] = ToCompute(0.0f);
   }
 }
 
@@ -768,8 +1103,45 @@ void AdamWUpdate(int n, const AdamWParams& params, ComputeType* p,
 // Muon (momentum -> Polar Express -> variance reduction -> cautious update)
 // ---------------------------------------------------------------------------
 
+namespace {
+
+// Float matrix multiply used by MuonUpdate. The Muon working state is always
+// float, so the tuned `Gemm` (whose operands are ComputeType) is only callable
+// when ComputeType is float. The fp32 build forwards to `Gemm` and keeps its
+// double accumulator; the fp16 build keeps a portable double-accumulator
+// fallback.
+void MuonMatmul(int m, int n, int k, const float* a, const float* b, float* c,
+                bool transpose_a, bool transpose_b) {
+#if defined(NANOCHAT_PRECISION_FP16)
+  for (int i = 0; i < m; ++i) {
+    for (int j = 0; j < n; ++j) {
+      double sum = 0.0;
+      for (int l = 0; l < k; ++l) {
+        const float av = transpose_a ? a[l * m + i] : a[i * k + l];
+        const float bv = transpose_b ? b[j * k + l] : b[l * n + j];
+        sum += static_cast<double>(av) * static_cast<double>(bv);
+      }
+      c[i * n + j] = static_cast<float>(sum);
+    }
+  }
+#else
+  GemmParams params;
+  params.m = m;
+  params.n = n;
+  params.k = k;
+  params.alpha = 1.0f;
+  params.beta = 0.0f;
+  params.transpose_a = transpose_a;
+  params.transpose_b = transpose_b;
+  Gemm(GemmMode::kForward, params, a, b, c);
+#endif
+}
+
+}  // namespace
+
 void MuonUpdate(const MuonParams& params, const ComputeType* stacked_grads,
                 ComputeType* stacked_params, float* buf1, float* buf2) {
+  ConfigureThreads();
   const int num_params = params.num_params > 0 ? params.num_params : 1;
   const int rows = params.rows;
   const int cols = params.cols;
@@ -778,6 +1150,7 @@ void MuonUpdate(const MuonParams& params, const ComputeType* stacked_grads,
   const int ns_steps = std::min(std::max(params.ns_steps, 0), 5);
   const bool reduce_cols =
       params.red_dim == -1 || (params.red_dim != -2 && rows >= cols);
+  const bool tall = rows > cols;
 
   const int k_extent = std::min(rows, cols);
   std::vector<float> x(mat, 0.0f);
@@ -797,6 +1170,9 @@ void MuonUpdate(const MuonParams& params, const ComputeType* stacked_grads,
 
     // Nesterov momentum: update the first moment, then the accelerated
     // gradient.
+#if defined(_OPENMP)
+#pragma omp parallel for schedule(static)
+#endif
     for (std::size_t i = 0; i < mat; ++i) {
       const float gr = AsFloat(grad[i]);
       momentum_buf[i] =
@@ -809,11 +1185,17 @@ void MuonUpdate(const MuonParams& params, const ComputeType* stacked_grads,
     // MuonEq row equilibration: rescale each row to the mean row norm.
     {
       double frob_sq = 0.0;
+#if defined(_OPENMP)
+#pragma omp parallel for schedule(static) reduction(+ : frob_sq)
+#endif
       for (std::size_t i = 0; i < mat; ++i) {
         frob_sq += static_cast<double>(x[i]) * x[i];
       }
       const float target = static_cast<float>(std::sqrt(frob_sq)) /
                            std::sqrt(static_cast<float>(rows));
+#if defined(_OPENMP)
+#pragma omp parallel for schedule(static)
+#endif
       for (int r = 0; r < rows; ++r) {
         double row_sq = 0.0;
         for (int c = 0; c < cols; ++c) {
@@ -832,108 +1214,53 @@ void MuonUpdate(const MuonParams& params, const ComputeType* stacked_grads,
     // Normalise the Frobenius norm before the polar iterations.
     {
       double frob_sq = 0.0;
+#if defined(_OPENMP)
+#pragma omp parallel for schedule(static) reduction(+ : frob_sq)
+#endif
       for (std::size_t i = 0; i < mat; ++i) {
         frob_sq += static_cast<double>(x[i]) * x[i];
       }
       const float div = static_cast<float>(std::sqrt(frob_sq)) * 1.01f + 1e-6f;
+#if defined(_OPENMP)
+#pragma omp parallel for schedule(static)
+#endif
       for (std::size_t i = 0; i < mat; ++i) x[i] /= div;
     }
 
     // Polar Express orthogonalisation.
-    const bool tall = rows > cols;
     for (int it = 0; it < ns_steps; ++it) {
       const float ca = kPolarCoeffs[it][0];
       const float cb = kPolarCoeffs[it][1];
       const float cc = kPolarCoeffs[it][2];
       if (tall) {
         // A = X^T X  (cols x cols)
-        for (int i = 0; i < cols; ++i) {
-          for (int j = 0; j < cols; ++j) {
-            double s = 0.0;
-            for (int r = 0; r < rows; ++r) {
-              s += static_cast<double>(
-                       x[static_cast<std::size_t>(r) * cols + i]) *
-                   x[static_cast<std::size_t>(r) * cols + j];
-            }
-            a_mat[static_cast<std::size_t>(i) * cols + j] =
-                static_cast<float>(s);
-          }
-        }
-        for (int i = 0; i < cols; ++i) {
-          for (int j = 0; j < cols; ++j) {
-            double s = 0.0;
-            for (int l = 0; l < cols; ++l) {
-              s += static_cast<double>(
-                       a_mat[static_cast<std::size_t>(i) * cols + l]) *
-                   a_mat[static_cast<std::size_t>(l) * cols + j];
-            }
-            a2_mat[static_cast<std::size_t>(i) * cols + j] =
-                static_cast<float>(s);
-          }
-        }
+        MuonMatmul(cols, cols, rows, x.data(), x.data(), a_mat.data(), true,
+                   false);
+        MuonMatmul(cols, cols, cols, a_mat.data(), a_mat.data(), a2_mat.data(),
+                   false, false);
         for (int i = 0; i < cols; ++i) {
           for (int j = 0; j < cols; ++j) {
             const std::size_t ij = static_cast<std::size_t>(i) * cols + j;
             b_mat[ij] = cb * a_mat[ij] + cc * a2_mat[ij];
           }
         }
-        for (int r = 0; r < rows; ++r) {
-          for (int j = 0; j < cols; ++j) {
-            double s = 0.0;
-            for (int i = 0; i < cols; ++i) {
-              s += static_cast<double>(
-                       x[static_cast<std::size_t>(r) * cols + i]) *
-                   b_mat[static_cast<std::size_t>(i) * cols + j];
-            }
-            prod[static_cast<std::size_t>(r) * cols + j] =
-                static_cast<float>(s);
-          }
-        }
+        MuonMatmul(rows, cols, cols, x.data(), b_mat.data(), prod.data(), false,
+                   false);
         for (std::size_t i = 0; i < mat; ++i) x[i] = ca * x[i] + prod[i];
       } else {
         // A = X X^T  (rows x rows)
-        for (int i = 0; i < rows; ++i) {
-          for (int j = 0; j < rows; ++j) {
-            double s = 0.0;
-            for (int c = 0; c < cols; ++c) {
-              s += static_cast<double>(
-                       x[static_cast<std::size_t>(i) * cols + c]) *
-                   x[static_cast<std::size_t>(j) * cols + c];
-            }
-            a_mat[static_cast<std::size_t>(i) * rows + j] =
-                static_cast<float>(s);
-          }
-        }
-        for (int i = 0; i < rows; ++i) {
-          for (int j = 0; j < rows; ++j) {
-            double s = 0.0;
-            for (int l = 0; l < rows; ++l) {
-              s += static_cast<double>(
-                       a_mat[static_cast<std::size_t>(i) * rows + l]) *
-                   a_mat[static_cast<std::size_t>(l) * rows + j];
-            }
-            a2_mat[static_cast<std::size_t>(i) * rows + j] =
-                static_cast<float>(s);
-          }
-        }
+        MuonMatmul(rows, rows, cols, x.data(), x.data(), a_mat.data(), false,
+                   true);
+        MuonMatmul(rows, rows, rows, a_mat.data(), a_mat.data(), a2_mat.data(),
+                   false, false);
         for (int i = 0; i < rows; ++i) {
           for (int j = 0; j < rows; ++j) {
             const std::size_t ij = static_cast<std::size_t>(i) * rows + j;
             b_mat[ij] = cb * a_mat[ij] + cc * a2_mat[ij];
           }
         }
-        for (int r = 0; r < rows; ++r) {
-          for (int c = 0; c < cols; ++c) {
-            double s = 0.0;
-            for (int i = 0; i < rows; ++i) {
-              s += static_cast<double>(
-                       b_mat[static_cast<std::size_t>(r) * rows + i]) *
-                   x[static_cast<std::size_t>(i) * cols + c];
-            }
-            prod[static_cast<std::size_t>(r) * cols + c] =
-                static_cast<float>(s);
-          }
-        }
+        MuonMatmul(rows, cols, rows, b_mat.data(), x.data(), prod.data(), false,
+                   false);
         for (std::size_t i = 0; i < mat; ++i) x[i] = ca * x[i] + prod[i];
       }
     }
@@ -941,6 +1268,9 @@ void MuonUpdate(const MuonParams& params, const ComputeType* stacked_grads,
     // Muon+ renormalisation: snap the Frobenius norm to sqrt(min(rows, cols)).
     {
       double frob_sq = 0.0;
+#if defined(_OPENMP)
+#pragma omp parallel for schedule(static) reduction(+ : frob_sq)
+#endif
       for (std::size_t i = 0; i < mat; ++i) {
         frob_sq += static_cast<double>(x[i]) * x[i];
       }
@@ -948,6 +1278,9 @@ void MuonUpdate(const MuonParams& params, const ComputeType* stacked_grads,
           std::sqrt(static_cast<float>(std::min(rows, cols)));
       const float scale =
           target_norm / std::max(static_cast<float>(std::sqrt(frob_sq)), 1e-6f);
+#if defined(_OPENMP)
+#pragma omp parallel for schedule(static)
+#endif
       for (std::size_t i = 0; i < mat; ++i) x[i] *= scale;
     }
 
@@ -956,6 +1289,9 @@ void MuonUpdate(const MuonParams& params, const ComputeType* stacked_grads,
       const std::size_t red_size = static_cast<std::size_t>(cols);
       std::vector<float> v_mean(rows, 0.0f);
       double sum_vmean = 0.0;
+#if defined(_OPENMP)
+#pragma omp parallel for schedule(static) reduction(+ : sum_vmean)
+#endif
       for (int r = 0; r < rows; ++r) {
         double s = 0.0;
         for (int c = 0; c < cols; ++c) {
@@ -968,12 +1304,18 @@ void MuonUpdate(const MuonParams& params, const ComputeType* stacked_grads,
       const float v_norm = std::sqrt(static_cast<float>(sum_vmean) *
                                      static_cast<float>(red_size));
       std::vector<float> step_size(rows, 0.0f);
+#if defined(_OPENMP)
+#pragma omp parallel for schedule(static)
+#endif
       for (int r = 0; r < rows; ++r) {
         second_buf[r] =
             second_buf[r] + (1.0f - params.beta2) * (v_mean[r] - second_buf[r]);
         step_size[r] = 1.0f / std::sqrt(std::max(second_buf[r], 1e-10f));
       }
       double sum_scaled = 0.0;
+#if defined(_OPENMP)
+#pragma omp parallel for schedule(static) reduction(+ : sum_scaled)
+#endif
       for (int r = 0; r < rows; ++r) {
         sum_scaled +=
             static_cast<double>(v_mean[r] * static_cast<float>(red_size)) *
@@ -981,6 +1323,9 @@ void MuonUpdate(const MuonParams& params, const ComputeType* stacked_grads,
       }
       const float v_norm_new = std::sqrt(static_cast<float>(sum_scaled));
       const float denom = std::max(v_norm_new, 1e-10f);
+#if defined(_OPENMP)
+#pragma omp parallel for schedule(static)
+#endif
       for (int r = 0; r < rows; ++r) {
         const float final_scale = step_size[r] * (v_norm / denom);
         for (int c = 0; c < cols; ++c) {
@@ -991,6 +1336,9 @@ void MuonUpdate(const MuonParams& params, const ComputeType* stacked_grads,
       const std::size_t red_size = static_cast<std::size_t>(rows);
       std::vector<float> v_mean(cols, 0.0f);
       double sum_vmean = 0.0;
+#if defined(_OPENMP)
+#pragma omp parallel for schedule(static) reduction(+ : sum_vmean)
+#endif
       for (int c = 0; c < cols; ++c) {
         double s = 0.0;
         for (int r = 0; r < rows; ++r) {
@@ -1003,12 +1351,18 @@ void MuonUpdate(const MuonParams& params, const ComputeType* stacked_grads,
       const float v_norm = std::sqrt(static_cast<float>(sum_vmean) *
                                      static_cast<float>(red_size));
       std::vector<float> step_size(cols, 0.0f);
+#if defined(_OPENMP)
+#pragma omp parallel for schedule(static)
+#endif
       for (int c = 0; c < cols; ++c) {
         second_buf[c] =
             second_buf[c] + (1.0f - params.beta2) * (v_mean[c] - second_buf[c]);
         step_size[c] = 1.0f / std::sqrt(std::max(second_buf[c], 1e-10f));
       }
       double sum_scaled = 0.0;
+#if defined(_OPENMP)
+#pragma omp parallel for schedule(static) reduction(+ : sum_scaled)
+#endif
       for (int c = 0; c < cols; ++c) {
         sum_scaled +=
             static_cast<double>(v_mean[c] * static_cast<float>(red_size)) *
@@ -1016,6 +1370,9 @@ void MuonUpdate(const MuonParams& params, const ComputeType* stacked_grads,
       }
       const float v_norm_new = std::sqrt(static_cast<float>(sum_scaled));
       const float denom = std::max(v_norm_new, 1e-10f);
+#if defined(_OPENMP)
+#pragma omp parallel for schedule(static)
+#endif
       for (int r = 0; r < rows; ++r) {
         for (int c = 0; c < cols; ++c) {
           x[static_cast<std::size_t>(r) * cols + c] *=
@@ -1025,6 +1382,9 @@ void MuonUpdate(const MuonParams& params, const ComputeType* stacked_grads,
     }
 
     // Cautious weight decay + parameter update.
+#if defined(_OPENMP)
+#pragma omp parallel for schedule(static)
+#endif
     for (std::size_t i = 0; i < mat; ++i) {
       const float pv = AsFloat(param[i]);
       const float gv = x[i];

@@ -1,0 +1,63 @@
+{
+  "schema": "nanochat.bench.v1",
+  "note": "Frozen Phase 0 baseline of the shipped CPU GEMM. The rows are the measured nanochat.bench.v1 report of dev/kernels/cpu_gemm_bench. The shipped kernels::Gemm is a scalar triple loop with a double accumulator, so the run is single-threaded. Compare a later phase against these numbers with the same configuration.",
+  "date": "2026-10-03",
+  "revision": "4133998",
+  "branch": "sliceme/agent-cpu-backend",
+  "threads": 1,
+  "device": "CPU (GTX 1080 Ti present but not used)",
+  "precision": "fp32",
+  "sandbox_profile": "t3-bench",
+  "measurement": "tools/nanochat bench -- ./bazel-bin/dev/kernels/cpu_gemm_bench --rounds 3 --warmup 1 --json --out /tmp/cpu-gap-p0.json",
+  "config": {
+    "depth": 4,
+    "model_dim": 256,
+    "heads": 2,
+    "kv_heads": 2,
+    "head_dim": 128,
+    "context": 512,
+    "window_pattern": "L",
+    "device_batch": 2,
+    "total_batch": 1024,
+    "grad_accum": 1,
+    "tokens_per_step": 1024,
+    "vocab": 32768,
+    "mlp_dim": 1024
+  },
+  "reference_rates_gflops": {
+    "note": "The section 2 rates in docs/cpu-gap.md. The benchmark must reproduce each rate within 10 percent.",
+    "forward": 0.98,
+    "wgrad": 0.75,
+    "dgrad": 0.24
+  },
+  "rows": [
+    {
+      "name": "gemm_forward",
+      "shape": "M=1024 N=32768 K=256 ta=0",
+      "ms": 17366.477736,
+      "gflops": 0.989255,
+      "work_ratio": 1.0
+    },
+    {
+      "name": "gemm_wgrad",
+      "shape": "M=32768 N=256 K=1024 ta=1",
+      "ms": 23625.108755,
+      "gflops": 0.727187,
+      "work_ratio": 1.0
+    },
+    {
+      "name": "gemm_dgrad",
+      "shape": "M=1024 N=256 K=32768 ta=0",
+      "ms": 71650.412284,
+      "gflops": 0.239773,
+      "work_ratio": 1.0
+    },
+    {
+      "name": "mlp_gemm",
+      "shape": "M=1024 N=1024 K=256 ta=0",
+      "ms": 443.081883,
+      "gflops": 1.211674,
+      "work_ratio": 1.0
+    }
+  ]
+}

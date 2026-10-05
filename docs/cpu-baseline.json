@@ -1,0 +1,93 @@
+{
+  "schema": "nanochat.cpu_baseline.v1",
+  "date": "2026-10-04",
+  "nanochat_cpp_revision": "124ceb0",
+  "branch": "sliceme/agent-cpu-backend",
+  "host": {
+    "vcpus": 12,
+    "ram_gib": 7.8,
+    "platform": "WSL2",
+    "gpu": "GTX 1080 Ti (not used)"
+  },
+  "sandbox_profile": "train",
+  "config": {
+    "depth": 4,
+    "model_dim": 256,
+    "heads": 2,
+    "kv_heads": 2,
+    "head_dim": 128,
+    "context": 512,
+    "window_pattern": "L",
+    "device_batch": 2,
+    "total_batch": 1024,
+    "grad_accum": 1,
+    "steps": 10,
+    "warmup_steps": 1,
+    "training_tokens": 10240,
+    "parameters": 36700242,
+    "flops_per_token": 71958960
+  },
+  "promoted_measurement": {
+    "protocol": "docs/cpu-gap.md section 9",
+    "command": "tools/nanochat_cpp base_train --backend cpu --depth=4 --max-seq-len=512 --window-pattern=L --device-batch-size=2 --total-batch-size=1024 --num-iterations=10 --warmup-steps=1 --eval-every=-1 --core-metric-every=-1 --sample-every=-1 --save-every=-1 --model-tag=cpu_bench_p4b",
+    "rule": "one warmup run, then the best mean tokens/s over steps 2 to 10 of three measured runs",
+    "threads": 8,
+    "warmup_runs": 1,
+    "measured_runs": 3,
+    "best_run": "run 2",
+    "tokens_per_sec": 591.13,
+    "gflops": 42.54,
+    "seconds_per_10k_tokens": 16.92,
+    "seconds_per_step": 1.7323,
+    "runs_tokens_per_sec": {
+      "warmup": 588.28,
+      "run1": 582.30,
+      "run2": 591.13,
+      "run3": 585.39
+    },
+    "step_time_gate_seconds": 5.0,
+    "step_time_gate_result": "pass",
+    "correctness_gate": "docs/cpu-gap.md section 8",
+    "correctness_gate_result": "pass"
+  },
+  "runs": [
+    {
+      "name": "pytorch_cpu_8threads",
+      "threads": 8,
+      "tokens_per_sec": 1299.3,
+      "gflops": 93.49,
+      "seconds_per_10k_tokens": 7.7
+    },
+    {
+      "name": "pytorch_cpu_1thread",
+      "threads": 1,
+      "tokens_per_sec": 453.9,
+      "gflops": 32.66,
+      "seconds_per_10k_tokens": 22.0
+    },
+    {
+      "name": "nanochat_cpp_cpu_scalar",
+      "revision": "759083e",
+      "threads": 1,
+      "tokens_per_sec": 7.2,
+      "gflops": 0.51,
+      "seconds_per_10k_tokens": 1398
+    },
+    {
+      "name": "nanochat_cpp_cpu",
+      "revision": "124ceb0",
+      "threads": 8,
+      "tokens_per_sec": 591.13,
+      "gflops": 42.54,
+      "seconds_per_10k_tokens": 16.92,
+      "seconds_per_step": 1.7323
+    }
+  ],
+  "end_to_end": {
+    "revision": "124ceb0",
+    "threads": 8,
+    "tokens_per_sec": 591.13,
+    "seconds_per_step": 1.7323,
+    "speedup_vs_scalar_7_2_tokens_per_sec": 82.1
+  }
+}
