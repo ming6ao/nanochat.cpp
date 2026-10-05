@@ -14,7 +14,7 @@ nanochat.cpp/
   src/
     ops.cc  model.cc  generate.cc  optim.cc  train.cc  data.cc  eval.cc
     *_main.cc
-    tokenizer/                 # the tokenizer host package
+    tokenizer/                 # the tokenizer host package (see src/tokenizer/)
       tokenizer.cc  split_pattern.{h,cc}  utf8.{h,cc}  unicode_tables.inc
       bpe_trainer.cc  parquet_reader.{h,cc}  shard_writer.{h,cc}
       tok_train_main.cc  tok_shard_main.cc
