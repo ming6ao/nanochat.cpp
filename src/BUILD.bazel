@@ -302,6 +302,7 @@ cc_binary(
 cc_library(
     name = "tokenizer",
     srcs = [
+        "bpe_trainer.cc",
         "split_pattern.cc",
         "tokenizer.cc",
         "utf8.cc",
@@ -360,6 +361,112 @@ cc_test(
     size = "small",
 )
 
+# The trainer merge list, rank by rank, against the reference fixture. The
+# trainer source lives in the `tokenizer` library because it shares the
+# splitter and the OpenMP flags.
+cc_test(
+    name = "bpe_trainer_test",
+    srcs = ["bpe_trainer_test.cc"],
+    copts = nanochat_copts(),
+    data = ["//tests:data/tokenizer_fixture.bin"],
+    args = ["$(rootpath //tests:data/tokenizer_fixture.bin)"],
+    deps = [
+        ":tokenizer",
+        "//include/nanochat:nanochat",
+        "//tests:oracle_fixture",
+    ],
+    size = "small",
+)
+
+# The DuckDB C++ parquet reader (docs/tokenizer.md section 10). It is a host
+# library; the model and the kernels do not link DuckDB. The release static
+# archive omits the generated static-extension loader, so
+# `duckdb_static_loader.cc` supplies the documented no-op.
+cc_library(
+    name = "parquet_reader",
+    srcs = [
+        "duckdb_static_loader.cc",
+        "parquet_reader.cc",
+    ],
+    hdrs = ["parquet_reader.h"],
+    # The DuckDB headers live in the external `@duckdb` repository root, whose
+    # `cc_import` adds them to the quote-include path only. Add the same
+    # directory to the angle-include path so `#include <duckdb.hpp>` resolves.
+    includes = ["../external/+http_archive+duckdb"],
+    # The loader shim defines a symbol that `libduckdb_static.a` references but
+    # does not define, so force every object of this library into the link.
+    alwayslink = 1,
+    copts = nanochat_copts(),
+    linkopts = [
+        "-ldl",
+        "-lpthread",
+    ],
+    deps = [
+        "@duckdb//:duckdb",
+        "//include/nanochat:nanochat",
+    ],
+)
+
+# The parquet reader: the dataset order and the text column on a tiny fixture
+# that the test writes at run time with DuckDB.
+cc_test(
+    name = "parquet_reader_test",
+    srcs = ["parquet_reader_test.cc"],
+    copts = nanochat_copts(),
+    deps = [
+        ":parquet_reader",
+        "//include/nanochat:nanochat",
+    ],
+    size = "small",
+)
+
+# The `NANO` shard writer and the `<shard>.bytes` sidecar writer (docs/model.md,
+# docs/tokenizer.md section 10).
+cc_library(
+    name = "shard_writer",
+    srcs = ["shard_writer.cc"],
+    hdrs = ["shard_writer.h"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    deps = ["//include/nanochat:nanochat"],
+)
+
+# The tiny CLI flag helpers shared by the entry points (docs/build.md).
+cc_library(
+    name = "cli",
+    hdrs = ["cli.h"],
+    deps = ["//include/nanochat:nanochat"],
+)
+
+# The native trainer command line. DuckDB enters through `parquet_reader`.
+cc_binary(
+    name = "tok_train_main",
+    srcs = ["tok_train_main.cc"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    deps = [
+        ":cli",
+        ":parquet_reader",
+        ":tokenizer",
+        "//include/nanochat:nanochat",
+    ],
+)
+
+# The parquet-to-shard command line. DuckDB enters through `parquet_reader`.
+cc_binary(
+    name = "tok_shard_main",
+    srcs = ["tok_shard_main.cc"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    deps = [
+        ":cli",
+        ":parquet_reader",
+        ":shard_writer",
+        ":tokenizer",
+        "//include/nanochat:nanochat",
+    ],
+)
+
 # Aggregation point consumed by //:all_tests.
 test_suite(name = "all", tests = [
     ":model_oracle_test",
@@ -373,4 +480,6 @@ test_suite(name = "all", tests = [
     ":tokenizer_test",
     ":split_pattern_test",
     ":tokenizer_parity_test",
+    ":bpe_trainer_test",
+    ":parquet_reader_test",
 ])

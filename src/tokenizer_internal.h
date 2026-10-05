@@ -21,6 +21,14 @@ bool SaveTokenizer(
     const std::vector<std::pair<std::uint32_t, std::uint32_t>>& merge_pairs,
     const std::vector<std::pair<std::string, std::uint32_t>>& special_tokens);
 
+// Recovers one `(left, right)` merge pair for every merge in a trained list.
+// `merges` holds the token bytes and the rank of each merge, in rank order.
+// The method picks the smallest left rank and then the smallest right rank,
+// the same rule as `tools/convert_tokenizer.py`. A pair is `(0, 0)` when no
+// split reconstructs the token.
+std::vector<std::pair<std::uint32_t, std::uint32_t>> RecoverMergePairs(
+    const std::vector<std::pair<std::vector<std::uint8_t>, int>>& merges);
+
 }  // namespace nanochat
 
 #endif  // NANOCHAT_SRC_TOKENIZER_INTERNAL_H_
