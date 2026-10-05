@@ -2,9 +2,12 @@
 // nanochat/kernels.h (docs/backends.md). It is the correctness baseline, the
 // oracle-on-CPU path, and the fallback when no accelerator is present.
 //
-// Everything here is a naive loop, written for clarity rather than speed:
-// double-width accumulators for reductions, float working state, and no
-// vectorisation. The build selects ComputeType (fp32 or fp16) at compile time;
+// Most entry points here are naive loops, written for clarity rather than
+// speed: double-width accumulators for reductions, float working state, and no
+// vectorisation. `Gemm` is the exception: it blocks the output rows and
+// columns into register tiles and packs the `b` operand, because the language
+// model spends most of its time there. The build selects ComputeType (fp32 or
+// fp16) at compile time;
 // the arithmetic below is always performed in float and converted at the
 // storage boundary through AsFloat / ToCompute.
 //
@@ -146,27 +149,162 @@ Caps GetCaps() {
 // control the operand layout; `lda`/`ldb`/`ldc` are leading dimensions, where 0
 // infers a dense row-major operand. `GemmMode` is advisory: the host supplies
 // the already-selected operands, so all three modes compute the same product.
+//
+// The body packs the `b` panel for one column block into a contiguous buffer.
+// It then walks the output rows in `kGemmMr`-row blocks. Each block packs its
+// `a` rows and runs a `kGemmMr` by `kGemmNr` register kernel over the whole
+// reduction. The reduction stays in `double`, exactly as the shipped loop.
 namespace {
 
-// Parse a positive integer from the environment. A missing, malformed, or
-// non-positive value returns 0, which the caller reads as "no hint".
-int EnvPositiveInt(const char* name) {
-  const char* value = std::getenv(name);
-  if (value == nullptr) return 0;
-  char* end = nullptr;
-  const long parsed = std::strtol(value, &end, 10);
-  if (end == value || parsed <= 0) return 0;
-  return static_cast<int>(parsed);
+// The Gemm register tile: `kGemmMr` output rows by `kGemmNr` output columns
+// held in `double` accumulators. The packed `b` panel is `kGemmNc` columns
+// wide. The whole reduction stays in one `double` sum, so the rounding matches
+// the shipped scalar code.
+constexpr int kGemmMr = 4;
+constexpr int kGemmNr = 16;
+constexpr int kGemmNc = 128;
+
+// One register tile: acc[MR][NR] += A[MR x k] * B[k x NR]. `ap` is the packed
+// A row block (`ap[i * ap_stride + l]`); `bp` is the packed B panel
+// (`bp[l * bp_stride + j]`). The unroll pragmas keep every accumulator in a
+// vector register.
+inline void GemmMicroBody(int k, const float* __restrict ap, int ap_stride,
+                          const float* __restrict bp, int bp_stride,
+                          double acc[kGemmMr][kGemmNr]) {
+  for (int l = 0; l < k; ++l) {
+    double av[kGemmMr];
+#pragma GCC unroll 4
+    for (int i = 0; i < kGemmMr; ++i) {
+      av[i] = static_cast<double>(ap[i * ap_stride + l]);
+    }
+    const float* b = bp + static_cast<std::int64_t>(l) * bp_stride;
+    double bv[kGemmNr];
+#pragma GCC unroll 8
+    for (int j = 0; j < kGemmNr; ++j) bv[j] = static_cast<double>(b[j]);
+#pragma GCC unroll 4
+    for (int i = 0; i < kGemmMr; ++i) {
+#pragma GCC unroll 8
+      for (int j = 0; j < kGemmNr; ++j) acc[i][j] += av[i] * bv[j];
+    }
+  }
 }
 
-// The worker count for Gemm, taken from the environment. The sandbox gateway
-// exports both variables for every profile (docs/sandbox.md), so honor the
-// library hint first and the OpenMP hint second. A return of 0 lets OpenMP
-// choose its own default. Never hardcode a count and never create a pool here.
-int GemmThreadCount() {
-  const int nanochat_threads = EnvPositiveInt("NANOCHAT_NUM_THREADS");
-  if (nanochat_threads > 0) return nanochat_threads;
-  return EnvPositiveInt("OMP_NUM_THREADS");
+void GemmMicroBase(int k, const float* __restrict ap, int ap_stride,
+                   const float* __restrict bp, int bp_stride,
+                   double acc[kGemmMr][kGemmNr]) {
+  GemmMicroBody(k, ap, ap_stride, bp, bp_stride, acc);
+}
+
+#if defined(__x86_64__) || defined(__i386__)
+// The same kernel compiled for AVX2 with fused multiply-add. Gemm dispatches to
+// it only when the running CPU reports both features, so the baseline binary
+// stays portable.
+__attribute__((target("avx2,fma"))) void GemmMicroAvx2(
+    int k, const float* __restrict ap, int ap_stride,
+    const float* __restrict bp, int bp_stride, double acc[kGemmMr][kGemmNr]) {
+  GemmMicroBody(k, ap, ap_stride, bp, bp_stride, acc);
+}
+#endif
+
+using GemmMicroFn = void (*)(int, const float*, int, const float*, int,
+                             double (*)[kGemmNr]);
+
+// Resolve the widest micro-kernel the running CPU supports. The answer is
+// cached because the feature test reads the CPU identification registers.
+GemmMicroFn ResolveGemmMicro() {
+#if defined(__x86_64__) || defined(__i386__)
+  static const bool avx2_fma =
+      __builtin_cpu_supports("avx2") && __builtin_cpu_supports("fma");
+  if (avx2_fma) return &GemmMicroAvx2;
+#endif
+  return &GemmMicroBase;
+}
+
+// Pack the `mr` rows of A that start at row `ic` into a contiguous row-major
+// block `apack[i * k + l]`. `transpose_a` selects the stored operand layout.
+template <typename T>
+void PackGemmA(const T* a, int lda, int ic, int mr, int k, bool transpose_a,
+               float* apack) {
+  if (transpose_a) {
+    // a is stored [k, m]: element a[l, ic + i]. Walk l in the outer loop so the
+    // rows of each reduction step come from one contiguous line.
+    for (int l = 0; l < k; ++l) {
+      const T* src = a + static_cast<std::int64_t>(l) * lda + ic;
+      for (int i = 0; i < mr; ++i) {
+        apack[static_cast<std::int64_t>(i) * k + l] = AsFloatT(src[i]);
+      }
+    }
+  } else {
+    // a is stored [m, k]: element a[ic + i, l].
+    for (int i = 0; i < mr; ++i) {
+      const T* src = a + static_cast<std::int64_t>(ic + i) * lda;
+      float* dst = apack + static_cast<std::int64_t>(i) * k;
+      for (int l = 0; l < k; ++l) dst[l] = AsFloatT(src[l]);
+    }
+  }
+}
+
+// Pack `groups` full register-width column groups of B into the shared panel.
+// Group `g` holds the columns `[g * kGemmNr, (g + 1) * kGemmNr)` with
+// `bpanel[g * group_stride + l * kGemmNr + j]`. The register-width inner axis
+// is contiguous, so the micro-kernel walks the panel forward. `transpose_b`
+// selects the stored operand layout.
+template <typename T>
+void PackGemmB(const T* b, int ldb, int jc, int groups, int k, int group_stride,
+               bool transpose_b, float* bpanel) {
+  if (transpose_b) {
+    // b is stored [n, k]: element b[jc + g * kGemmNr + j, l].
+    for (int g = 0; g < groups; ++g) {
+      float* out = bpanel + static_cast<std::int64_t>(g) * group_stride;
+      for (int j = 0; j < kGemmNr; ++j) {
+        const T* src =
+            b + static_cast<std::int64_t>(jc + g * kGemmNr + j) * ldb;
+        for (int l = 0; l < k; ++l) {
+          out[static_cast<std::int64_t>(l) * kGemmNr + j] = AsFloatT(src[l]);
+        }
+      }
+    }
+  } else {
+    // b is stored [k, n]: element b[l, jc + g * kGemmNr + j].
+    for (int l = 0; l < k; ++l) {
+      const T* src = b + static_cast<std::int64_t>(l) * ldb + jc;
+      for (int g = 0; g < groups; ++g) {
+        float* out = bpanel + static_cast<std::int64_t>(g) * group_stride +
+                     static_cast<std::int64_t>(l) * kGemmNr;
+        for (int j = 0; j < kGemmNr; ++j) {
+          out[j] = AsFloatT(src[g * kGemmNr + j]);
+        }
+      }
+    }
+  }
+}
+
+// Reduce one output element with the stored layouts. The partial tiles at the
+// right and bottom edges use it, where the register tile does not fit.
+template <typename T>
+float GemmDotProduct(const T* a, const T* b, int lda, int ldb, int i, int j,
+                     int k, bool transpose_a, bool transpose_b) {
+  double sum = 0.0;
+  for (int l = 0; l < k; ++l) {
+    const float av =
+        AsFloatT(transpose_a ? a[static_cast<std::int64_t>(l) * lda + i]
+                             : a[static_cast<std::int64_t>(i) * lda + l]);
+    const float bv =
+        AsFloatT(transpose_b ? b[static_cast<std::int64_t>(j) * ldb + l]
+                             : b[static_cast<std::int64_t>(l) * ldb + j]);
+    sum += static_cast<double>(av) * static_cast<double>(bv);
+  }
+  return static_cast<float>(sum);
+}
+
+// Write one output element. A zero `beta` never reads the previous value, which
+// matches the shipped contract.
+inline ComputeType GemmStore(ComputeType* dst, float partial, float alpha,
+                             float beta) {
+  if (beta != 0.0f) {
+    return ToCompute(alpha * partial + beta * AsFloat(*dst));
+  }
+  return ToCompute(alpha * partial);
 }
 
 }  // namespace
@@ -199,80 +337,87 @@ void Gemm(GemmMode mode, const GemmParams& params, const ComputeType* a,
                                     : static_cast<std::int64_t>(m) * ldc;
   const int batch = params.batch_count > 0 ? params.batch_count : 1;
 
-  // One accumulator row per worker, held in double to keep the summation
-  // precision of the shipped code. `firstprivate` gives each OpenMP thread its
-  // own row, so no allocation happens inside the row loop.
-  const int threads = GemmThreadCount();
-  (void)threads;  // Read by the OpenMP clause below.
-  std::vector<double> acc(n, 0.0);
+  const float alpha = params.alpha;
+  const float beta = params.beta;
+  const bool transpose_a = params.transpose_a;
+  const bool transpose_b = params.transpose_b;
+  const int panel_groups = (std::min(kGemmNc, n) + kGemmNr - 1) / kGemmNr;
+  const int group_stride = k * kGemmNr;
+  const GemmMicroFn micro = ResolveGemmMicro();
 
   for (int bi = 0; bi < batch; ++bi) {
     const ComputeType* ab = a + bi * stride_a;
     const ComputeType* bb = b + bi * stride_b;
     ComputeType* cb = c + bi * stride_c;
-    // The loop order depends on the stored layout of `b`, so the reduction
-    // always walks `b` along its fastest axis (the Phase 1 reorder):
-    //   * `transpose_b = false` -- `b` is [k, n]. Broadcast each `a` value and
-    //     accumulate the contiguous `b` row into a vector accumulator.
-    //   * `transpose_b = true` -- `b` is [n, k]. For each output column, walk
-    //     `b[j, :]` and `a[i, :]` together in a dot product.
-    // Both forms keep the `double` accumulator of the shipped code.
+
+    // The packed `b` panel is shared by every worker and rewritten for each
+    // column block. The packed `a` block is private to a worker.
+    std::vector<float> bpanel(static_cast<std::size_t>(group_stride) *
+                              panel_groups);
+
 #if defined(_OPENMP)
-#pragma omp parallel for firstprivate(acc) schedule(static) \
-    num_threads(threads > 0 ? threads : omp_get_max_threads())
+#pragma omp parallel
 #endif
-    for (int i = 0; i < m; ++i) {
-      ComputeType* crow = cb + static_cast<std::int64_t>(i) * ldc;
-      if (params.transpose_b) {
-        // b is stored [n, k]: element b[j, l], contiguous in `l`.
-        if (params.transpose_a) {
-          // a is stored [k, m]: element a[l, i], strided in `l`.
-          for (int j = 0; j < n; ++j) {
-            const ComputeType* brow = bb + static_cast<std::int64_t>(j) * ldb;
-            double sum = 0.0;
-            for (int l = 0; l < k; ++l) {
-              const float av =
-                  AsFloat(ab[static_cast<std::int64_t>(l) * lda + i]);
-              sum += static_cast<double>(av) *
-                     static_cast<double>(AsFloat(brow[l]));
-            }
-            const float prior = (params.beta != 0.0f) ? AsFloat(crow[j]) : 0.0f;
-            crow[j] = ToCompute(params.alpha * static_cast<float>(sum) +
-                                params.beta * prior);
-          }
-        } else {
-          // a is stored [m, k]: element a[i, l], contiguous in `l`.
-          const ComputeType* arow = ab + static_cast<std::int64_t>(i) * lda;
-          for (int j = 0; j < n; ++j) {
-            const ComputeType* brow = bb + static_cast<std::int64_t>(j) * ldb;
-            double sum = 0.0;
-            for (int l = 0; l < k; ++l) {
-              sum += static_cast<double>(AsFloat(arow[l])) *
-                     static_cast<double>(AsFloat(brow[l]));
-            }
-            const float prior = (params.beta != 0.0f) ? AsFloat(crow[j]) : 0.0f;
-            crow[j] = ToCompute(params.alpha * static_cast<float>(sum) +
-                                params.beta * prior);
-          }
+    {
+      std::vector<float> apack(static_cast<std::size_t>(kGemmMr) * k);
+      for (int jc = 0; jc < n; jc += kGemmNc) {
+        const int nc = std::min(kGemmNc, n - jc);
+#if defined(_OPENMP)
+#pragma omp single
+#endif
+        {
+          PackGemmB(bb, ldb, jc, nc / kGemmNr, k, group_stride, transpose_b,
+                    bpanel.data());
         }
-      } else {
-        std::fill(acc.begin(), acc.end(), 0.0);
-        for (int l = 0; l < k; ++l) {
-          const float av =
-              params.transpose_a
-                  ? AsFloat(ab[static_cast<std::int64_t>(l) * lda + i])
-                  : AsFloat(ab[static_cast<std::int64_t>(i) * lda + l]);
-          // b is stored [k, n]: element b[l, j], contiguous in `j`.
-          const ComputeType* brow = bb + static_cast<std::int64_t>(l) * ldb;
-          for (int j = 0; j < n; ++j) {
-            const float bv = AsFloat(brow[j]);
-            acc[j] += static_cast<double>(av) * static_cast<double>(bv);
+        // The `single` construct above has an implicit barrier, so every worker
+        // sees the finished panel.
+#if defined(_OPENMP)
+#pragma omp for schedule(static)
+#endif
+        for (int ic = 0; ic < m; ic += kGemmMr) {
+          const int mr = std::min(kGemmMr, m - ic);
+          if (mr == kGemmMr) {
+            PackGemmA(ab, lda, ic, mr, k, transpose_a, apack.data());
+            const int groups = nc / kGemmNr;
+            for (int g = 0; g < groups; ++g) {
+              double acc[kGemmMr][kGemmNr] = {};
+              const float* bp =
+                  bpanel.data() + static_cast<std::int64_t>(g) * group_stride;
+              micro(k, apack.data(), k, bp, kGemmNr, acc);
+              for (int i = 0; i < kGemmMr; ++i) {
+                ComputeType* crow = cb +
+                                    static_cast<std::int64_t>(ic + i) * ldc +
+                                    jc + g * kGemmNr;
+                for (int j = 0; j < kGemmNr; ++j) {
+                  crow[j] = GemmStore(crow + j, static_cast<float>(acc[i][j]),
+                                      alpha, beta);
+                }
+              }
+            }
+            // Partial column tile at the right edge.
+            for (int j = groups * kGemmNr; j < nc; ++j) {
+              for (int i = 0; i < kGemmMr; ++i) {
+                ComputeType* crow =
+                    cb + static_cast<std::int64_t>(ic + i) * ldc + jc + j;
+                const float partial =
+                    GemmDotProduct(ab, bb, lda, ldb, ic + i, jc + j, k,
+                                   transpose_a, transpose_b);
+                crow[0] = GemmStore(crow, partial, alpha, beta);
+              }
+            }
+          } else {
+            // Partial row tile at the bottom edge.
+            for (int i = 0; i < mr; ++i) {
+              ComputeType* crow =
+                  cb + static_cast<std::int64_t>(ic + i) * ldc + jc;
+              for (int j = 0; j < nc; ++j) {
+                const float partial =
+                    GemmDotProduct(ab, bb, lda, ldb, ic + i, jc + j, k,
+                                   transpose_a, transpose_b);
+                crow[j] = GemmStore(crow + j, partial, alpha, beta);
+              }
+            }
           }
-        }
-        for (int j = 0; j < n; ++j) {
-          const float prior = (params.beta != 0.0f) ? AsFloat(crow[j]) : 0.0f;
-          crow[j] = ToCompute(params.alpha * static_cast<float>(acc[j]) +
-                              params.beta * prior);
         }
       }
     }
