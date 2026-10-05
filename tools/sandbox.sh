@@ -83,6 +83,15 @@ esac
 
 export NANOCHAT_SANDBOX_BACKEND="$backend"
 
+# The GPU broker selects a device by exporting CUDA_VISIBLE_DEVICES, but a
+# Bazel test action does not inherit the broker's shell environment.
+# tools/nanochat forwards NANOCHAT_GPU_DEVICES into the action instead, so
+# translate it here unless the caller already chose a device. See
+# docs/host-portability.md section 5.
+if [[ -z ${CUDA_VISIBLE_DEVICES:-} && -n ${NANOCHAT_GPU_DEVICES:-} ]]; then
+  export CUDA_VISIBLE_DEVICES="$NANOCHAT_GPU_DEVICES"
+fi
+
 if [[ $backend == none ]]; then
   # No cgroup, no affinity, no rlimits. The container quota and the entry-point
   # guard are the only controls. Set the sentinel so RequireSandboxOrDie()

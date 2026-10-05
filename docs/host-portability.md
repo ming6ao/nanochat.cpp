@@ -145,6 +145,12 @@ The runfiles are put on the test's `LD_LIBRARY_PATH`; without the client value
 `libcuda` is unresolvable and `cudaMalloc` fails with
 `CUDA_ERROR_INSUFFICIENT_DRIVER`.
 
+A test action does not inherit the broker's shell, so `CUDA_VISIBLE_DEVICES`
+never reaches it on its own. The test wrapper (`tools/sandbox.sh`) therefore
+sets `CUDA_VISIBLE_DEVICES` from the forwarded `NANOCHAT_GPU_DEVICES`. Without
+that step a GPU suite runs on the default device even when the broker locked a
+different one.
+
 ## 5. GPU broker and device selection
 
 The broker serializes heavy GPU jobs. Keep the flock lock and the `nvidia-smi`
@@ -152,7 +158,8 @@ gate on every host. Add device selection:
 
 - `tools/gpu.sh --device N` sets `CUDA_VISIBLE_DEVICES=N`.
 - Keep one lock per device, at `/tmp/nanochat-gpu-<N>.lock`.
-- `NANOCHAT_GPU_DEVICES` sets the default device set.
+- `NANOCHAT_GPU_DEVICES` sets the default device set. The test wrapper turns
+  it into `CUDA_VISIBLE_DEVICES` for the test action (section 4.6).
 - Two independent jobs can use two devices at the same time.
 
 The `none` backend does not enforce the aggregate RAM and CPU budget. The host
