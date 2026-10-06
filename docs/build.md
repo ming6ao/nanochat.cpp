@@ -14,6 +14,11 @@ nanochat.cpp/
   src/
     ops.cc  model.cc  generate.cc  optim.cc  train.cc  data.cc  eval.cc
     *_main.cc
+    tokenizer/                 # the tokenizer host package (see src/tokenizer/)
+      tokenizer.cc  split_pattern.{h,cc}  utf8.{h,cc}  unicode_tables.inc
+      bpe_trainer.cc  parquet_reader.{h,cc}  shard_writer.{h,cc}
+      tok_train_main.cc  tok_shard_main.cc
+      *_test.cc
   backends/
     cpu/kernels.cc  cpu/kernels_test.cc
     cuda/device.cu  cuda/gemm.cu  cuda/cuda_runtime_test.cc

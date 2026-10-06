@@ -3,9 +3,10 @@
 Run with ``tools/nanochat_cpp selftest`` (or
 ``PYTHONPATH=python python3 -m nanochat_cpp.selftest``). It checks the
 configuration math, the token-count estimate, the NANO shard round-trip, the
-reference-checkpoint name/dtype/container/path logic, the evaluation
-fixture wire format, and the chat task prompt/extraction logic, all without
-importing torch or the reference package, so it runs anywhere.
+``NCTOKEN1`` artifact reader, the reference-checkpoint
+name/dtype/container/path logic, the evaluation fixture wire format, and the
+chat task prompt/extraction logic, all without importing torch or the
+reference package, so it runs anywhere.
 """
 
 from __future__ import annotations
@@ -77,6 +78,70 @@ def _check_shards() -> int:
             failures += _check(count == len(tokens), f"shard{width} count")
             failures += _check(got_width == width, f"shard{width} width")
             failures += _check(got == tokens, f"shard{width} tokens")
+    return failures
+
+
+def _nctoken1_bytes(pattern: str, merges, specials) -> bytes:
+    """Serialize a tiny NCTOKEN1 artifact for the reader check."""
+    payload = bytearray(data.NCTOKEN1_MAGIC)
+    payload += struct.pack("<I", data.NCTOKEN1_VERSION)
+    encoded = pattern.encode("utf-8")
+    payload += struct.pack("<I", len(encoded)) + encoded
+    payload += struct.pack("<I", len(merges))
+    for left, right in merges:
+        payload += struct.pack("<II", left, right)
+    payload += struct.pack("<I", len(specials))
+    for name, token_id in specials:
+        name_bytes = name.encode("utf-8")
+        payload += struct.pack("<I", len(name_bytes)) + name_bytes
+        payload += struct.pack("<I", token_id)
+    return bytes(payload)
+
+
+def _check_nctoken1() -> int:
+    failures = 0
+    pattern = "a+"
+    merges = [(97, 98), (256, 99)]  # b"ab", then b"abc"
+    specials = [("<|bos|>", 258), ("<|user_start|>", 259)]
+    raw = _nctoken1_bytes(pattern, merges, specials)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / data.NCTOKEN1_NAME
+        path.write_bytes(raw)
+        artifact = data.read_nctoken1(path)
+        failures += _check(artifact.pattern == pattern, "nctoken1 pattern")
+        failures += _check(artifact.merge_pairs == tuple(merges),
+                           "nctoken1 merge pairs")
+        failures += _check(artifact.special_tokens == tuple(specials),
+                           "nctoken1 special tokens")
+
+        ranks = data.mergeable_ranks(artifact)
+        failures += _check(ranks[b"\x00"] == 0, "nctoken1 byte rank")
+        failures += _check(ranks[b"ab"] == 256, "nctoken1 merge rank")
+        failures += _check(ranks[b"abc"] == 257, "nctoken1 nested merge rank")
+
+        lengths = data.token_byte_lengths(artifact)
+        failures += _check(lengths[256] == 2 and lengths[257] == 3,
+                           "nctoken1 token byte lengths")
+        failures += _check(lengths[258] == 0 and lengths[259] == 0,
+                           "nctoken1 special token byte lengths")
+
+        # Corruption is rejected, not guessed at.
+        bad = Path(tmp) / "bad.nctoken"
+        bad.write_bytes(b"NOTOKEN1" + raw[8:])
+        failures += _check_raises(data.Nctoken1Error,
+                                  lambda: data.read_nctoken1(bad),
+                                  "nctoken1 rejects bad magic")
+        bad.write_bytes(raw[:-1])
+        failures += _check_raises(data.Nctoken1Error,
+                                  lambda: data.read_nctoken1(bad),
+                                  "nctoken1 rejects truncation")
+
+    # A merge that names a later rank cannot reconstruct its token bytes.
+    forward = data.Nctoken1Artifact("a+", ((257, 0),), ())
+    failures += _check_raises(data.Nctoken1Error,
+                              lambda: data.mergeable_ranks(forward),
+                              "nctoken1 rejects a forward merge")
     return failures
 
 
@@ -487,6 +552,7 @@ def main() -> int:
     failures = 0
     failures += _check_config_math()
     failures += _check_shards()
+    failures += _check_nctoken1()
     failures += _check_name_remap()
     failures += _check_order_key()
     failures += _check_dtype_policy()

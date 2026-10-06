@@ -1,10 +1,15 @@
-// `generate_main` -- a small prefill/decode CLI. Because the BPE tokenizer is
-// out of scope in this tree, the prompt is given as token ids (inline or in a
-// file). Weights come from a `Checkpoint` container written by `train_main`.
+// `generate_main` -- a small prefill/decode CLI. A text prompt is encoded with
+// the native tokenizer (docs/tokenizer.md) and the generated rows are streamed
+// back to text. The token-id prompt stays available because the Python bridge
+// passes ids, not text. Weights come from a `Checkpoint` container written by
+// `train_main`.
 //
+//   tools/nanochat gpu -- <generate_main> --model model.ckpt \
+//       --tokenizer tok.nctoken --prompt "hello" --max-tokens 16
 //   tools/nanochat gpu -- <generate_main> --model model.ckpt --tokens 1,2,3
 
 #include <cctype>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
@@ -17,7 +22,9 @@
 #include "nanochat/model.h"
 #include "nanochat/sampler.h"
 #include "nanochat/sandbox.h"
+#include "nanochat/tokenizer.h"
 #include "src/cli.h"
+#include "src/eval.h"
 #include "src/train.h"
 
 namespace {
@@ -26,6 +33,9 @@ void Usage() {
   std::fprintf(stderr,
                "usage: generate_main [options]\n"
                "  --model PATH           checkpoint to load\n"
+               "  --tokenizer PATH       NCTOKEN1 artifact (for text prompts)\n"
+               "  --prompt TEXT          text prompt (needs --tokenizer)\n"
+               "  --text-file PATH       read the text prompt from a file\n"
                "  --tokens a,b,c         prompt token ids\n"
                "  --prompt-file PATH     read prompt token ids from a file\n"
                "  --max-tokens N         number of tokens to generate\n"
@@ -63,6 +73,15 @@ std::vector<int> ParseTokenIds(const std::string& text) {
   return ids;
 }
 
+bool ReadFile(const std::string& path, std::string* out) {
+  std::ifstream in(path, std::ios::binary);
+  if (!in) return false;
+  std::ostringstream contents;
+  contents << in.rdbuf();
+  *out = contents.str();
+  return true;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -70,11 +89,15 @@ int main(int argc, char** argv) {
 
   nanochat::Config model_config;
   std::string model_path;
+  std::string tokenizer_path;
   std::string prompt_text;
   std::string prompt_file;
+  std::string text_file;
+  bool has_text_prompt = false;
   int max_tokens = 16;
   int num_samples = 1;
   int stop_id = -1;
+  bool has_stop_id = false;
   int bos_id = -1;
   int top_k = 0;
   float temperature = 1.0f;
@@ -106,6 +129,13 @@ int main(int argc, char** argv) {
     std::uint64_t parsed_u64 = 0;
     if (flag == "--model") {
       model_path = value;
+    } else if (flag == "--tokenizer") {
+      tokenizer_path = value;
+    } else if (flag == "--prompt") {
+      prompt_text = value;
+      has_text_prompt = true;
+    } else if (flag == "--text-file") {
+      text_file = value;
     } else if (flag == "--tokens") {
       prompt_text = value;
     } else if (flag == "--prompt-file") {
@@ -118,6 +148,7 @@ int main(int argc, char** argv) {
           nanochat::cli::ParseInt(value, &parsed_int) ? parsed_int : 0;
     } else if (flag == "--stop-id") {
       stop_id = nanochat::cli::ParseInt(value, &parsed_int) ? parsed_int : -1;
+      has_stop_id = true;
     } else if (flag == "--bos-id") {
       bos_id = nanochat::cli::ParseInt(value, &parsed_int) ? parsed_int : -1;
     } else if (flag == "--top-k") {
@@ -136,23 +167,57 @@ int main(int argc, char** argv) {
     }
   }
 
-  if (!prompt_file.empty()) {
-    std::ifstream in(prompt_file);
-    if (!in) {
-      std::fprintf(stderr, "generate_main: cannot read %s\n",
-                   prompt_file.c_str());
+  std::unique_ptr<nanochat::Tokenizer> tokenizer;
+  if (!tokenizer_path.empty()) {
+    tokenizer = nanochat::LoadTokenizer(tokenizer_path);
+    if (tokenizer == nullptr) {
+      std::fprintf(stderr, "generate_main: cannot load tokenizer %s\n",
+                   tokenizer_path.c_str());
       return 1;
     }
-    std::ostringstream contents;
-    contents << in.rdbuf();
-    prompt_text = contents.str();
+  }
+  // Stop a text row on the tokenizer's assistant-end token unless the caller
+  // named a terminal id. A missing special leaves the id at -1.
+  if (!has_stop_id && tokenizer != nullptr) {
+    stop_id = tokenizer->SpecialId("<|assistant_end|>");
   }
 
-  const std::vector<int> prompt = ParseTokenIds(prompt_text);
+  // A text prompt encodes to ids with a leading beginning-of-sequence id. The
+  // BOS sits in the prompt, so `GenerateBatch` must not add a second one.
+  std::vector<int> prompt;
+  if (!text_file.empty()) {
+    if (!ReadFile(text_file, &prompt_text)) {
+      std::fprintf(stderr, "generate_main: cannot read %s\n",
+                   text_file.c_str());
+      return 1;
+    }
+    has_text_prompt = true;
+  }
+  if (has_text_prompt) {
+    if (tokenizer == nullptr) {
+      std::fprintf(stderr,
+                   "generate_main: --prompt and --text-file need "
+                   "--tokenizer\n");
+      return 2;
+    }
+    const int prepend = bos_id >= 0 ? bos_id : tokenizer->bos_id();
+    prompt = tokenizer->Encode(prompt_text, prepend);
+    bos_id = -1;
+  } else {
+    if (!prompt_file.empty()) {
+      if (!ReadFile(prompt_file, &prompt_text)) {
+        std::fprintf(stderr, "generate_main: cannot read %s\n",
+                     prompt_file.c_str());
+        return 1;
+      }
+    }
+    prompt = ParseTokenIds(prompt_text);
+  }
+
   if (prompt.empty()) {
     std::fprintf(stderr,
-                 "generate_main: provide a prompt with --tokens or "
-                 "--prompt-file\n");
+                 "generate_main: provide a prompt with --prompt, --text-file, "
+                 "--tokens, or --prompt-file\n");
     return 2;
   }
   if (max_tokens <= 0) {
@@ -189,6 +254,14 @@ int main(int argc, char** argv) {
   nanochat::GenerateBatch(model.get(), prompt.data(),
                           static_cast<int>(prompt.size()), gen, &rows);
 
+  // Decode the generated rows through `TokenStreamDecoder`; a token can end
+  // in the middle of a UTF-8 sequence, and the stream decoder holds the
+  // incomplete suffix for the next token.
+  std::vector<std::string> texts;
+  if (tokenizer != nullptr) {
+    nanochat::DecodeGeneratedRows(*tokenizer, rows, &texts);
+  }
+
   std::printf("generate_main: prompt");
   for (int id : prompt) std::printf(" %d", id);
   std::printf("\n");
@@ -196,6 +269,11 @@ int main(int argc, char** argv) {
     std::printf("generate_main: sample %zu tokens", r);
     for (int id : rows[r].tokens) std::printf(" %d", id);
     std::printf("\n");
+    if (r < texts.size()) {
+      std::printf("generate_main: sample %zu text: ", r);
+      std::fwrite(texts[r].data(), 1, texts[r].size(), stdout);
+      std::printf("\n");
+    }
   }
 
   if (!out_path.empty()) {
