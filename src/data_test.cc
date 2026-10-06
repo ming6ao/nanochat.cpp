@@ -28,8 +28,6 @@ using nanochat::Checkpoint;
 using nanochat::DataLoader;
 using nanochat::DType;
 using nanochat::TensorRecord;
-using nanochat::TokenShard;
-using nanochat::TokenWidth;
 
 int g_failures = 0;
 
@@ -41,176 +39,6 @@ void Fail(const std::string& message) {
 std::string TempPath(const std::string& name) {
   const char* dir = std::getenv("TEST_TMPDIR");
   return std::string(dir != nullptr ? dir : "/tmp") + "/" + name;
-}
-
-void WriteU16(std::ofstream& out, std::uint16_t value) {
-  const unsigned char bytes[2] = {
-      static_cast<unsigned char>(value & 0xffu),
-      static_cast<unsigned char>((value >> 8) & 0xffu)};
-  out.write(reinterpret_cast<const char*>(bytes), 2);
-}
-
-void WriteU32(std::ofstream& out, std::uint32_t value) {
-  const unsigned char bytes[4] = {
-      static_cast<unsigned char>(value & 0xffu),
-      static_cast<unsigned char>((value >> 8) & 0xffu),
-      static_cast<unsigned char>((value >> 16) & 0xffu),
-      static_cast<unsigned char>((value >> 24) & 0xffu)};
-  out.write(reinterpret_cast<const char*>(bytes), 4);
-}
-
-void WriteU64(std::ofstream& out, std::uint64_t value) {
-  for (int i = 0; i < 8; ++i) {
-    const unsigned char byte =
-        static_cast<unsigned char>((value >> (8 * i)) & 0xffu);
-    out.write(reinterpret_cast<const char*>(&byte), 1);
-  }
-}
-
-// Writes a shard with the given token stream. `width` is 2 or 4.
-std::string WriteShard(const std::string& name, const std::vector<int>& tokens,
-                       int width) {
-  const std::string path = TempPath(name);
-  std::ofstream out(path, std::ios::binary | std::ios::trunc);
-  WriteU32(out, nanochat::kTokenShardMagic);
-  WriteU32(out, nanochat::kTokenShardVersion);
-  WriteU64(out, static_cast<std::uint64_t>(tokens.size()));
-  WriteU32(out, static_cast<std::uint32_t>(width));
-  WriteU32(out, 0);
-  for (int token : tokens) {
-    if (width == 2) {
-      WriteU16(out, static_cast<std::uint16_t>(token));
-    } else {
-      WriteU32(out, static_cast<std::uint32_t>(token));
-    }
-  }
-  return path;
-}
-
-void TestTokenShardRoundTrip() {
-  const std::vector<int> tokens = {5, 6, 7, 8, 9, 10, 11, 12, 13, 14};
-  for (int width : {2, 4}) {
-    const std::string path =
-        WriteShard(width == 2 ? "shard16.bin" : "shard32.bin", tokens, width);
-    std::string error;
-    std::unique_ptr<TokenShard> shard = TokenShard::Open(path, &error);
-    if (shard == nullptr) {
-      Fail("TokenShard::Open failed: " + error);
-      continue;
-    }
-    if (shard->header().magic != nanochat::kTokenShardMagic) {
-      Fail("shard magic mismatch");
-    }
-    if (shard->header().token_width != static_cast<std::uint32_t>(width)) {
-      Fail("shard width mismatch");
-    }
-    if (shard->num_tokens() != tokens.size()) {
-      Fail("shard token count mismatch");
-    }
-    std::vector<int> got(tokens.size(), -1);
-    const std::int64_t read = shard->Read(0, 10, got.data());
-    if (read != 10 || got != tokens) {
-      Fail("shard full read mismatch");
-    }
-    std::vector<int> partial(4, -1);
-    if (shard->Read(3, 4, partial.data()) != 4 ||
-        partial != std::vector<int>({8, 9, 10, 11})) {
-      Fail("shard partial read mismatch");
-    }
-    std::vector<int> tail(8, -1);
-    if (shard->Read(8, 8, tail.data()) != 2 || tail[0] != 13 || tail[1] != 14) {
-      Fail("shard clamped tail read mismatch");
-    }
-  }
-
-  // Bad magic must be rejected.
-  const std::string bad = TempPath("shard_bad.bin");
-  {
-    std::ofstream out(bad, std::ios::binary | std::ios::trunc);
-    const char junk[24] = {0};
-    out.write(junk, 24);
-  }
-  std::string error;
-  if (TokenShard::Open(bad, &error) != nullptr) {
-    Fail("TokenShard accepted a bad magic");
-  }
-}
-
-void TestDataLoader() {
-  std::vector<int> tokens(32);
-  for (std::size_t i = 0; i < tokens.size(); ++i) {
-    tokens[i] = static_cast<int>(i * 3 + 1);
-  }
-  const std::string path = WriteShard("loader.bin", tokens, 2);
-
-  DataLoader loader({path}, 2, 4, 7, false);
-  if (loader.batch() != 2 || loader.seq() != 4) Fail("loader shape mismatch");
-
-  std::vector<int> batch(8);
-  std::vector<int> targets(8);
-  if (!loader.Next(batch.data(), targets.data())) Fail("first batch missing");
-  for (int i = 0; i < 8; ++i) {
-    if (batch[static_cast<std::size_t>(i)] != tokens[i]) {
-      Fail("loader token mismatch at index " + std::to_string(i));
-    }
-    if (targets[static_cast<std::size_t>(i)] != tokens[i + 1]) {
-      Fail("loader target shift mismatch at index " + std::to_string(i));
-    }
-  }
-
-  // Second batch starts at offset 8.
-  if (!loader.Next(batch.data(), targets.data())) Fail("second batch missing");
-  if (batch[0] != tokens[8]) Fail("second batch offset mismatch");
-
-  // Exhaustion: batches start at 0, 8, 16; a fourth window starting at 24
-  // would need 33 tokens, so the stream is exhausted after three batches.
-  if (!loader.Next(batch.data(), targets.data())) Fail("third batch missing");
-  if (loader.Next(batch.data(), targets.data())) Fail("loader did not exhaust");
-
-  // Reset rewinds to the first batch.
-  loader.Reset();
-  std::vector<int> again(8);
-  std::vector<int> again_targets(8);
-  if (!loader.Next(again.data(), again_targets.data()) ||
-      again != std::vector<int>(tokens.begin(), tokens.begin() + 8)) {
-    Fail("Reset did not rewind the loader");
-  }
-
-  // Shuffle with a fixed seed is deterministic, and Reset reproduces it.
-  DataLoader shuffled({path}, 2, 4, 123, true);
-  std::vector<int> first(8);
-  std::vector<int> first_targets(8);
-  if (!shuffled.Next(first.data(), first_targets.data())) {
-    Fail("shuffled loader produced no batch");
-  }
-  shuffled.Reset();
-  std::vector<int> second(8);
-  std::vector<int> second_targets(8);
-  if (!shuffled.Next(second.data(), second_targets.data()) || first != second) {
-    Fail("shuffled loader is not reproducible");
-  }
-
-  // The optional byte table.
-  const std::string bytes_path = path + ".bytes";
-  {
-    std::ofstream out(bytes_path, std::ios::binary | std::ios::trunc);
-    WriteU32(out, 4);
-    const unsigned char table[4] = {0, 1, 2, 3};
-    out.write(reinterpret_cast<const char*>(table), 4);
-  }
-  DataLoader with_bytes({path}, 2, 4, 7, false);
-  int vocab = 0;
-  const std::uint8_t* table = with_bytes.token_bytes(&vocab);
-  if (table == nullptr || vocab != 4 || table[0] != 0 || table[3] != 3) {
-    Fail("token_bytes sidecar did not load");
-  }
-  std::remove(bytes_path.c_str());
-
-  DataLoader without_bytes({path}, 2, 4, 7, false);
-  vocab = 123;
-  if (without_bytes.token_bytes(&vocab) != nullptr || vocab != 0) {
-    Fail("token_bytes without a sidecar should be null");
-  }
 }
 
 void TestCheckpoint() {
@@ -305,13 +133,93 @@ void TestTokenizer() {
   }
 }
 
+// A fixed document source for the loader test: it yields each document once.
+class VectorSource : public nanochat::DocumentSource {
+ public:
+  explicit VectorSource(std::vector<std::string> documents)
+      : documents_(std::move(documents)) {}
+
+  bool Next(std::vector<std::string>* documents, std::string* error) override {
+    (void)error;
+    if (index_ >= documents_.size()) return false;
+    documents->clear();
+    documents->push_back(documents_[index_++]);
+    return true;
+  }
+
+ private:
+  std::vector<std::string> documents_;
+  std::size_t index_ = 0;
+};
+
+void TestDocumentLoader() {
+  // A tokenizer with no merges: every byte is its own token, BOS id 256.
+  const std::string tokenizer_path = TempPath("data_doc_tokenizer.nctoken");
+  const std::vector<std::pair<std::string, std::uint32_t>> specials = {
+      {"<|bos|>", 256}};
+  if (!nanochat::SaveTokenizer(tokenizer_path, nanochat::NanochatSplitPattern(),
+                               {}, specials)) {
+    Fail("document loader: SaveTokenizer failed");
+    return;
+  }
+  std::unique_ptr<nanochat::Tokenizer> tokenizer =
+      nanochat::LoadTokenizer(tokenizer_path);
+  if (tokenizer == nullptr) {
+    Fail("document loader: LoadTokenizer failed");
+    return;
+  }
+
+  auto documents = std::make_shared<std::vector<std::string>>(
+      std::vector<std::string>{"a", "b", "cc", "dd", "ee", "ff"});
+  nanochat::DocumentSourceFactory factory =
+      [documents](
+          std::string* error) -> std::unique_ptr<nanochat::DocumentSource> {
+    (void)error;
+    return std::make_unique<VectorSource>(*documents);
+  };
+
+  const int batch = 2;
+  const int seq = 4;
+  DataLoader loader(factory, tokenizer.get(), batch, seq, /*seed=*/7,
+                    /*tokenizer_threads=*/1, /*document_buffer=*/16);
+  std::vector<int> tokens(static_cast<std::size_t>(batch * seq));
+  std::vector<int> targets(static_cast<std::size_t>(batch * seq));
+  if (!loader.Next(tokens.data(), targets.data())) {
+    Fail("document loader: Next returned false");
+    return;
+  }
+  const int bos = tokenizer->bos_id();
+  for (int r = 0; r < batch; ++r) {
+    if (tokens[static_cast<std::size_t>(r * seq)] != bos) {
+      Fail("document loader: row does not start with BOS");
+    }
+    for (int j = 0; j + 1 < seq; ++j) {
+      if (targets[static_cast<std::size_t>(r * seq + j)] !=
+          tokens[static_cast<std::size_t>(r * seq + j + 1)]) {
+        Fail("document loader: targets are not the tokens shifted by one");
+      }
+    }
+  }
+
+  int vocab = 0;
+  if (loader.token_bytes(&vocab) == nullptr ||
+      vocab != tokenizer->vocab_size()) {
+    Fail("document loader: token_bytes did not come from the tokenizer");
+  }
+
+  // Reset re-opens the source, so a fresh batch is available again.
+  loader.Reset();
+  if (!loader.Next(tokens.data(), targets.data())) {
+    Fail("document loader: Next after Reset returned false");
+  }
+}
+
 }  // namespace
 
 int main() {
-  TestTokenShardRoundTrip();
-  TestDataLoader();
   TestCheckpoint();
   TestTokenizer();
+  TestDocumentLoader();
   if (g_failures != 0) {
     std::fprintf(stderr, "data_test: %d failure(s)\n", g_failures);
     return 1;

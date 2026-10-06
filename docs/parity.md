@@ -21,7 +21,7 @@ Status values:
 
 | ID | Status | Area | Difference |
 |---|---|---|---|
-| D1 | `open` | data pipeline | contiguous random window instead of BOS-aligned best-fit packing |
+| D1 | `closed` | data pipeline | BOS-aligned best-fit packing matches the reference |
 | D2 | `equivalent` | attention | fused RMSNorm→RoPE order vs RoPE→RMSNorm |
 | D3 | `equivalent` | attention | cuBLAS GEMM + softmax kernels vs SDPA math backend |
 | D4 | `equivalent` | initialization | custom xorshift RNG vs the PyTorch RNG |
@@ -71,9 +71,9 @@ tools/nanochat test //src/tokenizer:tokenizer_parity_test \
 
 ### D1 — Data loader packing and ordering
 
-**Status:** `open`. This is the only difference that changes the training data
-distribution, so it is the reason a bridge loss curve does not match
-`scripts.base_train` step for step.
+**Status:** `closed`. The document-mode `DataLoader` in `src/data.cc`
+implements the reference packing. `//tests:loader_parity_test` pins the C++
+rows against the reference rows on a fixed corpus.
 
 **Reference** (`nanochat/dataloader.py`,
 `tokenizing_distributed_data_loader_with_state_bos_bestfit`):
@@ -82,40 +82,27 @@ distribution, so it is the reason a bridge loss curve does not match
   largest-first; when nothing fits, the shortest buffered document is cropped
   to fill the row exactly. Row capacity is `T + 1`, so `inputs = row[:-1]` and
   `targets = row[1:]` are independent per row.
-- Documents are iterated **sequentially** over parquet row groups, sharded
-  across ranks and cycling epochs.
+- Documents are iterated sequentially over parquet row groups, sharded across
+  ranks and cycling epochs.
 - Roughly 35% of tokens are discarded to cropping at `T = 2048` (higher at
   shorter `T`), which means more unique documents are consumed per step.
 
-**nanochat.cpp** (`src/data.cc`, `DataLoader::Next`;
-`python/nanochat_cpp/data.py` builds the stream):
+**nanochat.cpp** (`src/data.cc`, `DataLoader`):
 
-- The tokenizer writes a flat, BOS-separated document stream.
-- `DataLoader::Next` reads a **random contiguous window** of `B*T + 1` tokens
-  (`start = rng % span`) and forms `tokens = buffer[0..N)` and
-  `targets = buffer[1..N]`. There is no BOS alignment, no document packing, and
-  no cropping.
-- The flat shift couples adjacent rows: the last target of row `r` is the first
-  token of row `r + 1`, whereas the reference packs each row independently.
-- Rows are sampled with replacement over `total / rows` windows and the loader
-  resets when exhausted, rather than scanning documents in order.
+- `DataLoader` reads raw documents from a `DocumentSource` and tokenizes them
+  with the reference encoder ([parquet-native.md](parquet-native.md)).
+- A producer thread refills a document buffer to `document_buffer`, the
+  consumer picks the largest document that fits, and crops the shortest
+  document when none fits. Row capacity is `T + 1`.
+- Documents are iterated sequentially over parquet row groups. `Reset` re-opens
+  the source, so a training run cycles epochs.
 
-**Impact:** different token grouping and coverage; rows can begin mid-document;
-BOS appears at arbitrary positions rather than at every row start. The model
-and optimizer math are unaffected, but the loss curve and any metric computed
-through the same loader (for example `EvalBpb`) are not directly comparable.
+**Impact:** none. The packing is the reference packing.
 
-**Evidence:** `docs/python-bridge.md` already records the mismatch as a "Known
-difference". The parity harness (above) shares batches, so it does not exercise
-the loader.
-
-**Fix direction:** port the best-fit packer into `src/data.cc` over the existing
-BOS-separated stream. `python/nanochat_cpp/data.py` already emits documents in
-order with a leading BOS, so only the row packer is missing; the tokenizer side
-does not need to change. The header comment in
-`include/nanochat/dataloader.h` used to claim best-fit packing while the
-implementation did a contiguous window; it now states the actual behavior, and
-this entry is the tracker for closing the gap.
+**Evidence:** `//tests:loader_parity_test` compares the C++ rows to a fixture
+that `tools/dump_loader_fixture.py` produced from the reference loader. The
+fixture shares the documents, the tokenizer, the buffer size, and the source
+batch size with the C++ side.
 
 ### E1 — Sampled evaluation RNG
 

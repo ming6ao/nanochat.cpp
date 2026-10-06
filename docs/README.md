@@ -17,6 +17,7 @@ detailed reference that the design points at.
 | [optimizations.md](optimizations.md) | Planned recompute, fused-classifier, and row-kernel work |
 | [eval.md](eval.md) | Base and chat evaluation, and the forward-only workspace |
 | [tokenizer.md](tokenizer.md) | The native BPE tokenizer: design, artifacts, training, and status |
+| [parquet-native.md](parquet-native.md) | The native parquet reader and on-the-fly tokenization plan |
 | [post-training.md](post-training.md) | Design: SFT and reinforcement learning |
 | [python-bridge.md](python-bridge.md) | nanochat-compatible Python entry points |
 | [sandbox.md](sandbox.md) | Execution sandbox and host resource governance |

@@ -21,7 +21,7 @@
 #include "nanochat/bpe_trainer.h"
 #include "nanochat/sandbox.h"
 #include "src/cli.h"
-#include "src/tokenizer/parquet_reader.h"
+#include "src/parquet/reader.h"
 #include "src/tokenizer/tokenizer_internal.h"
 
 namespace {
@@ -189,11 +189,16 @@ int main(int argc, char** argv) {
       trainer.MergeableRanks();
   const std::vector<std::pair<std::uint32_t, std::uint32_t>> pairs =
       nanochat::RecoverMergePairs(merges);
+  // The trainer stops early when the corpus has no more pairs, so the actual
+  // base vocabulary can be smaller than the requested one. The special ids
+  // follow the real merge count, so the artifact stays self-consistent and
+  // `LoadTokenizer` accepts it.
+  const int actual_base = 256 + static_cast<int>(merges.size());
   std::vector<std::pair<std::string, std::uint32_t>> specials;
   specials.reserve(static_cast<std::size_t>(special_count));
   for (int index = 0; index < special_count; ++index) {
     specials.emplace_back(kSpecialTokens[index],
-                          static_cast<std::uint32_t>(base_vocab_size + index));
+                          static_cast<std::uint32_t>(actual_base + index));
   }
   if (!nanochat::SaveTokenizer(out_path, trainer.pattern(), pairs, specials)) {
     std::fprintf(stderr, "tok_train_main: cannot write %s\n", out_path.c_str());
@@ -203,6 +208,6 @@ int main(int argc, char** argv) {
   std::printf(
       "tok_train_main: wrote %s (documents %llu, merges %zu, vocab %d)\n",
       out_path.c_str(), static_cast<unsigned long long>(documents),
-      merges.size(), vocab_size);
+      merges.size(), actual_base + special_count);
   return 0;
 }

@@ -130,9 +130,9 @@ The kernels themselves are declared in [kernels.md](kernels.md).
 
 ## Data, checkpoints, and the oracle
 
-- **Data**: pre-tokenized `.bin` shards — header (magic, version, `ntok`) plus a
-  `uint16`/`uint32` token stream. The training loop does a `read()`. No
-  tokenizer, parquet, pyarrow, or numpy at runtime.
+- **Data**: parquet documents, tokenized during the run by the native reader
+  (`--train-parquet` and `--tokenizer`; [parquet-native.md](parquet-native.md)).
+  No `pyarrow` and no Python at runtime.
 - **Checkpoint**: a self-describing tensor container (name, shape, dtype). Not a
   framework `state_dict`.
 - **Oracle**: `debug_state.bin`, produced offline by nanochat's `gpt.py`.

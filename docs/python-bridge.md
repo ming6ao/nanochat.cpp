@@ -1,10 +1,10 @@
 # Python bridge
 
-The C++ runtime reads only pre-tokenized `NANO` shards and has no tokenizer or
-parquet dependency (docs/model.md). The Python bridge supplies the missing
-pieces — tokenization, dataset access, and the training-horizon math — and
-drives the C++ binaries, so the command line can match the PyTorch nanochat
-scripts.
+The C++ runtime reads parquet directly and tokenizes during the run
+([parquet-native.md](parquet-native.md)). The Python bridge supplies the
+remaining pieces — the `NCTOKEN1` artifact, the dataset paths, and the
+training-horizon math — and drives the C++ binaries, so the command line can
+match the PyTorch nanochat scripts.
 
 ## Why entry points, not bindings
 
@@ -15,8 +15,8 @@ The bridge launches the C++ binary as a subprocess. It does not use pybind11.
   cgroup; in-process bindings would bypass the gate.
 - pybind11 is a third-party build dependency the design avoids, and it would
   duplicate the CLI.
-- The clean seam is the process boundary: Python does data preparation (which
-  needs torch and pyarrow), the binary does compute.
+- The clean seam is the process boundary: Python does the orchestration, the
+  binary does compute.
 
 ## Commands
 
@@ -55,14 +55,11 @@ Useful bridge flags: `--backend cpu|cuda`, `--profile <sandbox profile>`,
    `sqrt(B / B_ref)` learning-rate scale, and the scaled weight decay. The
    parameter counts come from the reference `GPT.num_scaling_params()`, so they
    match exactly.
-2. **Just-in-time data.** `nanochat_cpp/data.py` tokenizes only the tokens the
-   run needs (`total_batch_size * num_iterations`), reading the parquet dataset
-   in small `pyarrow` record batches so a short run touches only the first few.
-   It writes a `NANO` shard plus the `<shard>.bytes` sidecar that
-   `DataLoader` reads for bits-per-byte, and caches the result under
-   `~/.cache/nanochat_cpp/shards` keyed by dataset and tokenizer fingerprints.
-   The tokenizer comes from the portable `NCTOKEN1` artifact when present,
-   otherwise from the reference pickle; see the next section.
+2. **Data paths.** `nanochat_cpp/data.py` lists the parquet files for a split
+   (`train` is all but the last file, `val` is the last file) and resolves the
+   `NCTOKEN1` artifact. It passes both to `train_main`/`eval_main`, which read
+   the parquet documents and tokenize during the run
+   ([parquet-native.md](parquet-native.md)). No shard is written.
 3. **Launch.** `nanochat_cpp/launcher.py` finds (and builds if needed) the
    binary and runs it under the sandbox. A CUDA run goes through
    `tools/nanochat gpu --profile t2-parity`, which holds the GPU broker; a CPU
@@ -77,23 +74,14 @@ The bridge prefers the portable `NCTOKEN1` artifact over the reference pickle.
 section 5). `mergeable_ranks` rebuilds the token-bytes-to-rank map from the
 ordered merge pairs, and `build_tiktoken_encoding` builds a `tiktoken.Encoding`
 from the pattern and the map. `Nctoken1Tokenizer` supplies `get_vocab_size`,
-`get_bos_token_id`, and `encode`. `token_byte_lengths` derives the
-`<shard>.bytes` sidecar from the same merges, so the portable path needs no
-`torch`.
+`get_bos_token_id`, and `encode`. The same object drives the reference
+dataloader in the loader-parity fixture, so the portable path needs no `torch`.
 
 The bridge looks for the artifact at
-`$NANOCHAT_BASE_DIR/tokenizer/tokenizer.nctoken` (`NCTOKEN1_NAME`). When the file
-is present it wins; otherwise `_load_bridge_tokenizer` falls back to
-`nanochat.tokenizer.get_tokenizer()` in the reference checkout. `tiktoken` is
-imported lazily, so the torch-free self-test can import the module.
-
-The shard cache key (`_fingerprint`) is a 16-character SHA-256 prefix. It hashes
-the run shape (`split`, `max_tokens`, `width`) and, for every parquet file and
-every tokenizer file, the name, the size, and the time of the last change. The
-three tokenizer files are `tokenizer.pkl`, `token_bytes.pt`, and
-`tokenizer.nctoken`.
-A new or changed artifact therefore invalidates the cached shard. The full key is
-part of the shard file name: `<split>_<max_tokens>_<width>_<key>.bin`.
+`$NANOCHAT_BASE_DIR/tokenizer/tokenizer.nctoken` (`NCTOKEN1_NAME`). Training and
+bit-per-byte evaluation require it; the bridge stops with a message when it is
+absent. `tiktoken` is imported lazily, so the torch-free self-test can import
+the module.
 
 Create the artifact with `tools/convert_tokenizer.py` inside the reference
 environment, or with the native trainer `tok_train_main`:
@@ -140,6 +128,6 @@ bridge is for training.
 ## Tests
 
 `tools/nanochat test //tools:nanochat_cpp_selftest` runs the torch-free logic
-(configuration math, token-count estimate, shard round-trip) with the system
+(configuration math, the token-count estimate, and the `NCTOKEN1` reader) with the system
 `python3`. A full run needs the reference virtual environment (torch, pyarrow)
 and the parquet dataset.

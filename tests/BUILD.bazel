@@ -34,6 +34,31 @@ filegroup(
     srcs = ["data/tokenizer_fixture.bin"],
 )
 
+# The document-mode loader parity gate (docs/parquet-native.md phase 8). The
+# C++ rows must match the reference
+# `tokenizing_distributed_data_loader_bos_bestfit` for a fixed corpus and
+# tokenizer. `tools/dump_loader_fixture.py` writes both files.
+cc_test(
+    name = "loader_parity_test",
+    srcs = ["loader_parity_test.cc"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    data = [
+        "data/loader_parity.bin",
+        "data/loader_tokenizer.nctoken",
+    ],
+    args = [
+        "$(rootpath data/loader_parity.bin)",
+        "$(rootpath data/loader_tokenizer.nctoken)",
+    ],
+    deps = [
+        "//include/nanochat:nanochat",
+        "//src:model",
+        "//src/tokenizer:tokenizer",
+    ],
+    size = "small",
+)
+
 # CPU oracle: checks the reference softcap, cross-entropy, classifier
 # gradients, parameter gradients, and the first optimizer step, then builds the
 # C++ model from the same fixture and checks forward, backward, and the
@@ -201,4 +226,5 @@ test_suite(name = "all", tests = [
     ":generate_parity_test",
     ":generate_parity_cuda_test",
     ":score_parity_test",
+    ":loader_parity_test",
 ])

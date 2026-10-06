@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "nanochat/config.h"
+#include "nanochat/dataloader.h"
 #include "nanochat/optim.h"
 #include "nanochat/scheduler.h"
 
@@ -25,6 +26,7 @@ class DataLoader;
 class Logger;
 class Model;
 class Optimizer;
+class Tokenizer;
 
 struct TrainConfig {
   Config model;
@@ -40,13 +42,23 @@ struct TrainConfig {
   int save_every = 0;  // 0 disables periodic checkpoints
   int eval_steps = 8;
   std::uint64_t seed = 42;
-  bool shuffle = true;
   std::string device_name;      // fed to `PeakFlopsForDevice` for MFU
   std::string checkpoint_path;  // final checkpoint written here
   std::string log_path;         // empty logs to stdout only
   std::string resume_path;      // optional checkpoint to resume from
-  std::vector<std::string> train_shards;
-  std::vector<std::string> val_shards;
+
+  // Data (docs/parquet-native.md): read parquet and tokenize during the run.
+  std::vector<std::string> train_parquet;
+  std::vector<std::string> val_parquet;
+  std::string tokenizer_path;  // the NCTOKEN1 artifact
+  std::string text_column = "text";
+  int tokenizer_threads = 4;
+  int document_buffer = 1000;
+
+  // Optional in-memory sources. A test sets them to bypass the parquet reader;
+  // `train_main` leaves them empty and reads the `train_parquet` globs.
+  DocumentSourceFactory train_source;
+  DocumentSourceFactory val_source;
 
   int effective_seq() const { return seq > 0 ? seq : model.seq_len; }
 };
@@ -90,6 +102,7 @@ class TrainLoop {
   std::unique_ptr<Optimizer> optimizer_;
   std::unique_ptr<Scheduler> scheduler_;
   std::unique_ptr<Logger> logger_;
+  std::unique_ptr<Tokenizer> tokenizer_;
   std::unique_ptr<DataLoader> train_loader_;
   std::unique_ptr<DataLoader> val_loader_;
   std::vector<int> tokens_;

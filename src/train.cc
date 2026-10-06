@@ -36,7 +36,9 @@
 #include "nanochat/optim.h"
 #include "nanochat/scheduler.h"
 #include "nanochat/tensor.h"
+#include "nanochat/tokenizer.h"
 #include "src/ops.h"
+#include "src/parquet/reader.h"
 
 namespace nanochat {
 
@@ -303,6 +305,20 @@ bool Checkpointer::LoadModel(Model* model, const std::string& path) {
 // TrainLoop
 // ---------------------------------------------------------------------------
 
+namespace {
+
+// Builds the document-mode loader factory. Each call opens the parquet dataset
+// again, so `DataLoader::Reset` can cycle epochs (docs/parquet-native.md).
+DocumentSourceFactory MakeParquetFactory(std::vector<std::string> files,
+                                         std::string column) {
+  return [files = std::move(files), column = std::move(column)](
+             std::string* error) -> std::unique_ptr<DocumentSource> {
+    return OpenParquetSource(files, column, 256, error);
+  };
+}
+
+}  // namespace
+
 TrainLoop::TrainLoop(TrainConfig config) : config_(std::move(config)) {
   if (config_.seq > 0) {
     config_.model.seq_len = config_.seq;
@@ -335,13 +351,26 @@ TrainLoop::TrainLoop(TrainConfig config) : config_(std::move(config)) {
   optimizer_ = CreateOptimizer(model_.get(), config_.optimizer, *scheduler_);
   logger_ = std::make_unique<Logger>(config_.log_path);
 
-  train_loader_ = std::make_unique<DataLoader>(
-      config_.train_shards, config_.batch, config_.effective_seq(),
-      config_.seed, config_.shuffle);
-  if (!config_.val_shards.empty()) {
-    val_loader_ = std::make_unique<DataLoader>(
-        config_.val_shards, config_.batch, config_.effective_seq(),
-        config_.seed + 1, false);
+  tokenizer_ = LoadTokenizer(config_.tokenizer_path);
+  if (tokenizer_ == nullptr) {
+    logger_->Info("cannot load tokenizer: " + config_.tokenizer_path);
+  } else {
+    DocumentSourceFactory train_source =
+        config_.train_source
+            ? config_.train_source
+            : MakeParquetFactory(config_.train_parquet, config_.text_column);
+    DocumentSourceFactory val_source =
+        config_.val_source
+            ? config_.val_source
+            : MakeParquetFactory(config_.val_parquet, config_.text_column);
+    train_loader_ = std::make_unique<DataLoader>(
+        train_source, tokenizer_.get(), config_.batch, seq, config_.seed,
+        config_.tokenizer_threads, config_.document_buffer);
+    if (config_.val_source || !config_.val_parquet.empty()) {
+      val_loader_ = std::make_unique<DataLoader>(
+          val_source, tokenizer_.get(), config_.batch, seq, config_.seed + 1,
+          config_.tokenizer_threads, config_.document_buffer);
+    }
   }
 
   tokens_.assign(static_cast<std::size_t>(config_.batch) *

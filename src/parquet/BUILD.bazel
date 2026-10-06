@@ -1,0 +1,90 @@
+# src/parquet/ -- the native parquet host package (docs/parquet-native.md). It
+# reads the corpus without DuckDB: a Thrift compact decoder, the parquet
+# metadata structs, the RLE and bit-packed level decoder, and the file reader.
+#
+# This is the one host package that may include the ZSTD header. The model, the
+# kernels, and the training runtime link this library but never DuckDB
+# (DESIGN.md section 2.1, invariant 1).
+
+load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
+load("//:nanochat.bzl", "nanochat_copts")
+
+package(default_visibility = ["//visibility:public"])
+
+# The native parquet reader. It supports the exact shape that the corpus writer
+# emits: one OPTIONAL BYTE_ARRAY column, ZSTD, DATA_PAGE v1, PLAIN values, and
+# RLE definition levels. Every other feature is rejected (docs/parquet-native.md).
+cc_library(
+    name = "parquet",
+    srcs = [
+        "format.cc",
+        "levels.cc",
+        "reader.cc",
+        "thrift.cc",
+    ],
+    hdrs = [
+        "format.h",
+        "levels.h",
+        "reader.h",
+        "thrift.h",
+    ],
+    copts = nanochat_copts(),
+    deps = [
+        "@zstd//:zstd",
+        "//include/nanochat:nanochat",
+    ],
+)
+
+# The Thrift compact decoder: fields, deltas, lists, maps, nested structs, and
+# the truncation contract.
+cc_test(
+    name = "thrift_test",
+    srcs = ["thrift_test.cc"],
+    copts = nanochat_copts(),
+    deps = [":parquet"],
+    size = "small",
+)
+
+# The RLE and bit-packed hybrid decoder for the definition levels.
+cc_test(
+    name = "levels_test",
+    srcs = ["levels_test.cc"],
+    copts = nanochat_copts(),
+    deps = [":parquet"],
+    size = "small",
+)
+
+# The reader on a committed fixture: document order, batching, the glob path,
+# and the missing-column error.
+cc_test(
+    name = "reader_test",
+    srcs = ["reader_test.cc"],
+    copts = nanochat_copts(),
+    data = ["testdata/text.parquet"],
+    args = ["$(rootpath testdata/text.parquet)"],
+    deps = [":parquet"],
+    size = "small",
+)
+
+# The reader rejections: a bad magic, a bad footer length, a truncated file,
+# and a bad schema. Each case returns an error instead of a crash.
+cc_test(
+    name = "reader_reject_test",
+    srcs = ["reader_reject_test.cc"],
+    copts = nanochat_copts(),
+    data = ["testdata/text.parquet"],
+    args = ["$(rootpath testdata/text.parquet)"],
+    deps = [":parquet"],
+    size = "small",
+)
+
+# Aggregation point consumed by //src:all and //:all_tests.
+test_suite(
+    name = "all",
+    tests = [
+        ":thrift_test",
+        ":levels_test",
+        ":reader_test",
+        ":reader_reject_test",
+    ],
+)

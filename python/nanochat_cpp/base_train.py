@@ -1,9 +1,10 @@
 """``python -m nanochat_cpp.base_train``: a nanochat-compatible training CLI.
 
 Accepts the same flags and defaults as ``scripts/base_train.py``, derives the
-same model configuration and horizon, materializes the training shard from the
-parquet dataset just in time, and runs the C++ ``train_main`` under the
-sandbox and GPU broker.
+same model configuration and horizon, passes the parquet dataset and the
+``NCTOKEN1`` artifact to the C++ ``train_main`` (which tokenizes during the
+run; docs/parquet-native.md), and launches it under the sandbox and GPU
+broker.
 
     python -m nanochat_cpp.base_train --depth=8 --window-pattern=L \\
         --max-seq-len=512 --device-batch-size=8 --total-batch-size=4096 \\
@@ -178,27 +179,28 @@ def main(argv: list[str] | None = None) -> int:
     if args.resume_from_step != -1:
         core_args += ["--resume", str(checkpoint)]
 
+    artifact = data.nctoken1_path()
+    if artifact is None:
+        raise SystemExit(
+            "training needs the NCTOKEN1 artifact; run "
+            "tools/convert_tokenizer.py first")
     if args.dry_run:
-        preview = ["<train-shard>"] + core_args
+        preview = ["--train-parquet", "<train-parquet>",
+                   "--tokenizer", str(artifact)] + core_args
         if eval_steps > 0:
-            preview.insert(1, "<val-shard>")
-            preview.insert(1, "--val-shard")
+            preview[2:2] = ["--val-parquet", "<val-parquet>"]
         print("[nanochat_cpp] dry run; train_main arguments:")
         print("  " + " ".join(preview))
         return 0
 
-    train_tokens = data.tokens_for_run(plan.total_batch_size,
-                                       plan.num_iterations, plan.seq_len)
-    print(f"[nanochat_cpp] tokenizing {train_tokens:,} train tokens "
-          f"(just in time)...")
-    train_shard = data.materialize("train", train_tokens, force=args.force_data)
-    cpp_args = ["--train-shard", str(train_shard)] + core_args
-
+    # The C++ runtime reads parquet and tokenizes on the fly
+    # (docs/parquet-native.md). No shard is materialized.
+    train_parquet = ",".join(data.parquet_files("train"))
+    cpp_args = ["--train-parquet", train_parquet,
+                "--tokenizer", str(artifact)] + core_args
     if eval_steps > 0:
-        val_tokens = eval_steps * plan.device_batch_size * plan.seq_len + 2048
-        print(f"[nanochat_cpp] tokenizing {val_tokens:,} validation tokens...")
-        val_shard = data.materialize("val", val_tokens, force=args.force_data)
-        cpp_args[1:1] = ["--val-shard", str(val_shard)]
+        val_parquet = ",".join(data.parquet_files("val"))
+        cpp_args[2:2] = ["--val-parquet", val_parquet]
 
     device = launcher.gpu_name() if cuda else ""
     if device:
