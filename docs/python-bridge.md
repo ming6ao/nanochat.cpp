@@ -1,11 +1,17 @@
 # Python bridge
 
-The C++ runtime reads parquet directly and tokenizes during the run
-([parquet-native.md](parquet-native.md)). The Python bridge supplies the
-remaining pieces: the `NCTOKEN1` artifact, the dataset paths, and the
-training-horizon math. It drives the C++ binaries, so the command line can
-match the PyTorch nanochat scripts. The in-process API for notebooks is in
-[python-api.md](python-api.md).
+The `python/nanochat_cpp` package has two entry points to the C++ runtime:
+
+1. **The process bridge** (this document). It launches the C++ binaries as
+   subprocesses, so the command line can match the PyTorch nanochat scripts. It
+   supplies the `NCTOKEN1` artifact, the dataset paths, and the
+   training-horizon math.
+2. **The in-process Python API** ([python-api.md](python-api.md)). It loads the
+   shared library with `ctypes` and trains, evaluates, and generates inside one
+   Python process. The notebook uses this entry point.
+
+Both entry points read the parquet documents and tokenize during the run
+([parquet-native.md](parquet-native.md)).
 
 ## Why entry points, not bindings
 

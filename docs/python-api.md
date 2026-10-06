@@ -1,14 +1,44 @@
 # Python API
 
-Status: design. The process bridge in [python-bridge.md](python-bridge.md)
-exists. This document specifies the in-process API, the build from Python, and
-the Kaggle delivery.
+Status: shipped. The in-process API, the C shim, the on-demand builder, and
+the `py_test` coverage landed. This document specifies the in-process API, the
+build from Python, and the Kaggle delivery. The process bridge in
+[python-bridge.md](python-bridge.md) stays the sandbox-first entry point.
 
 The Python API lets a notebook train and evaluate `nanochat.cpp` without a
 shell. A notebook holds a model, reads a live loss, and passes arrays. The API
 uses a C application binary interface (ABI) and the Python `ctypes` module. It
 does not use `pybind11` and it does not use a wheel. The package can also build
 the shared library from the C++ sources on demand.
+
+## Delivered surface
+
+The implementation landed at these paths:
+
+| Path | Contents |
+|---|---|
+| `include/nanochat/capi.h` | The C surface. Architect-owned. |
+| `bindings/nanochat_capi.cc` | The C shim over `Model`, `Optimizer`, and `DataLoader`. |
+| `bindings/nanochat_capi_test.cc` | The drift test. It calls every C function. |
+| `bindings/BUILD.bazel` | `//bindings:nanochat_capi`, `//bindings:nanochat_shared`, and `//bindings:nanochat_capi_test`. |
+| `python/nanochat_cpp/__init__.py` | The package exports. |
+| `python/nanochat_cpp/_core.py` | The `ctypes` declarations and the status-to-exception map. |
+| `python/nanochat_cpp/_lib.py` | The library search order and the cached load. |
+| `python/nanochat_cpp/_build.py` | The on-demand builder and the build key. |
+| `python/nanochat_cpp/api.py` | `Config`, `Tokenizer`, `Model`, `Optimizer`, `TokenData`, `Trainer`, `Evaluator`, `no_grad`, and `build`. |
+| `python/tests/core_test.py` | The ctypes forward and backward test. |
+| `python/tests/build_test.py` | The hermetic builder-key and search-order test. |
+| `python/tests/api_test.py` | The `Trainer` and `Evaluator` fixture-parity test. |
+| `python/BUILD.bazel` | `//python:nanochat_cpp` and the three `py_test` targets. |
+| `tests/data/api_fixture.bin` | The committed `NANOEVL1` reference fixture. |
+| `tools/dump_api_fixture.py` | The fixture generator. |
+| `MODULE.bazel`, `.bazelrc` | `rules_python` 1.7.0, the local `python3` toolchain, and `--config=cpu`. |
+
+Three differences from the design text follow. First, the header landed at
+`include/nanochat/capi.h`, not at `bindings/nanochat_c.h` (sections 4 and 14).
+Second, the `dist` surface in section 10 is not in the shipped build. Third,
+the `py_test` targets replace the `sh_test` wrapper of section 11, because the
+tree now declares `rules_python`.
 
 ## 1. Goals and non-goals
 
