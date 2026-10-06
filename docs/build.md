@@ -9,7 +9,7 @@ nanochat.cpp/
   README.md  DESIGN.md  AGENTS.md  CONTRIBUTING.md
   docs/                        # reference and how-to
   include/nanochat/
-    config.h  tensor.h  kernels.h  model.h  optim.h  data.h  sandbox.h
+    capi.h  config.h  tensor.h  kernels.h  model.h  optim.h  data.h  sandbox.h
     tokenizer.h  dataloader.h  rand.h  sampler.h  scheduler.h  logger.h  mfu.h
   src/
     ops.cc  model.cc  generate.cc  optim.cc  train.cc  data.cc  eval.cc
@@ -31,6 +31,14 @@ nanochat.cpp/
     cuda/kernels/device_utils.cuh
     cuda/kernels/testing/        # host reference headers and test helpers
   dev/kernels/                   # unpromoted prototypes and the toolchain spike
+  bindings/                      # the C ABI for the in-process Python API
+    nanochat_capi.cc  nanochat_capi_test.cc  BUILD.bazel
+  python/
+    nanochat_cpp/                # the API package and the process bridge
+      __init__.py  _core.py  _lib.py  _build.py  api.py
+      base_train.py  base_eval.py  config.py  data.py  launcher.py
+    tests/{core,build,api}_test.py
+    BUILD.bazel
   tests/oracle_test.cc  tests/data/debug_state.bin
   tools/
     nanochat                   # the single execution entry point
@@ -78,6 +86,28 @@ each server and `tools/nanochat` serializes builds:
 - `tools/nanochat shutdown` stops the current workspace's server immediately.
 
 See [sandbox.md](sandbox.md) for the host budget this protects.
+
+### Python targets
+
+The in-process Python API (docs/python-api.md) adds two packages.
+
+- `//bindings` holds the C shim over the C++ graph:
+  - `//bindings:nanochat_capi` — the shim as a `cc_library`, for the drift test.
+  - `//bindings:nanochat_shared` — the shim as a `linkshared` `cc_binary`.
+    This target builds `libnanochat_shared.so`, the library `ctypes` loads.
+  - `//bindings:nanochat_capi_test` — the C surface drift test.
+- `//python` holds the `ctypes` package and the `py_test` coverage:
+  - `//python:nanochat_cpp` — the `py_library`.
+  - `//python:core_test`, `//python:build_test`, and `//python:api_test` — the
+    three T0 `py_test` targets.
+
+`MODULE.bazel` declares `rules_python` 1.7.0 directly. The package imports
+only the Python standard library, so the root module registers the local
+`python3` toolchain through `local_runtime_repo` and
+`local_runtime_toolchains_repo`. The flag `dev_dependency = True` keeps the
+local toolchain out of a downstream module. Build the shared library with
+`tools/nanochat build //bindings:nanochat_shared --config=cpu`; the config
+selects the CPU backend and fp32.
 
 ## Makefile fallback
 

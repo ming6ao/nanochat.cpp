@@ -1,16 +1,62 @@
 """Python bridge for nanochat.cpp.
 
-This package provides entry points that mirror the PyTorch nanochat scripts
-(``python -m scripts.base_train``) while running the C++ implementation. It
-locates the reference nanochat checkout for the tokenizer and configuration
-math, passes the parquet dataset and the ``NCTOKEN1`` artifact to the C++
-binaries (which tokenize during the run; docs/parquet-native.md), and launches
-them under ``tools/nanochat`` so the resource sandbox and the GPU broker still
-apply.
+This package provides two entry points to the C++ implementation:
 
-Nothing here is a runtime dependency of the C++ binary; it is orchestration
-around it. See ``python/nanochat_cpp/base_train.py`` and docs/testing.md.
+* the process bridge, which locates the reference nanochat checkout for the
+  tokenizer and configuration math and launches the C++ binaries through
+  ``tools/nanochat`` (``base_train``, ``base_eval``, ``data``, ``config``);
+* the in-process API, which loads the shared library with ``ctypes`` and
+  trains, evaluates, and generates inside one Python process
+  (``nanochat_cpp.api``, docs/python-api.md).
+
+Neither entry point is a runtime dependency of the C++ binary. Both import
+only the Python standard library; the in-process API never imports ``torch``.
 """
 
-__all__ = ["base_eval", "checkpoint", "config", "data", "eval_fixture",
-           "launcher", "reference"]
+from . import _build, _core, _lib, api
+from ._build import BuildError
+from ._core import NanochatError
+from .api import (
+    Config,
+    EvalReport,
+    Evaluator,
+    GeneratedRow,
+    Model,
+    Optimizer,
+    ParamView,
+    ScoreReport,
+    TensorView,
+    TokenData,
+    Tokenizer,
+    Trainer,
+    build,
+    evaluate,
+    no_grad,
+)
+
+__all__ = [
+    "BuildError",
+    "Config",
+    "EvalReport",
+    "Evaluator",
+    "GeneratedRow",
+    "Model",
+    "NanochatError",
+    "Optimizer",
+    "ParamView",
+    "ScoreReport",
+    "TensorView",
+    "TokenData",
+    "Tokenizer",
+    "Trainer",
+    "build",
+    "evaluate",
+    "no_grad",
+    "base_eval",
+    "checkpoint",
+    "config",
+    "data",
+    "eval_fixture",
+    "launcher",
+    "reference",
+]
