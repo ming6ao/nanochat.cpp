@@ -3,7 +3,7 @@
 The test is hermetic: it never compiles. It checks the build key is stable,
 that ``NANOCHAT_CPP_CACHE`` selects the cache, that an explicit
 ``NANOCHAT_CPP_LIB`` wins, and that ``NANOCHAT_CPP_PREBUILT`` forbids a build.
-See docs/python-api.md sections 5.1 and 5.5.
+See docs/python.md sections 5.1 and 5.5.
 """
 
 from __future__ import annotations

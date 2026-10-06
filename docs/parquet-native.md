@@ -216,7 +216,7 @@ is a `DocumentSource`.
 | 3 Document source | done | `DocumentSource` in `nanochat/dataloader.h` |
 | 4 Tokenizing loader | done | `DataLoader` document mode: best-fit packing |
 | 5 Harness wiring | done | `--train-parquet`, `--val-parquet`, `--tokenizer` |
-| 6 Bridge | done | `base_train.py` passes parquet when `NCTOKEN1` exists |
+| 6 Bridge | done | The Python layer passes parquet when `NCTOKEN1` exists |
 | 7 Shard removal | done | `TokenShard`, the shard flags, and the Python writer removed |
 | 8 Parity gate | done | `//tests:loader_parity_test` |
 

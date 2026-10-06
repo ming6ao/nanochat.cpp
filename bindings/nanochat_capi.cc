@@ -1,5 +1,5 @@
 // The C application binary interface for the in-process Python API
-// (docs/python-api.md section 4). This translation unit is the whole C
+// (docs/python.md section 4). This translation unit is the whole C
 // surface: every function in `nanochat/capi.h` is defined here in C++.
 //
 // Three rules shape the code:
@@ -34,6 +34,7 @@
 #include "nanochat/config.h"
 #include "nanochat/dataloader.h"
 #include "nanochat/kernels.h"
+#include "nanochat/mfu.h"
 #include "nanochat/model.h"
 #include "nanochat/optim.h"
 #include "nanochat/sandbox.h"
@@ -44,7 +45,7 @@
 namespace {
 
 // The C ABI version. Bump this string on every change to the surface or to a
-// mirrored struct; docs/python-api.md section 13 names that rule.
+// mirrored struct; docs/python.md section 13 names that rule.
 constexpr char kNanochatVersion[] = "0.2.0";
 
 // The message for the current thread. A `thread_local` string keeps the
@@ -86,7 +87,7 @@ void GuardVoid(const char* function, F&& body) {
 }
 
 // True when the environment satisfies the sandbox rule of
-// docs/python-api.md section 2.1: a defined `NANOCHAT_SANDBOX`, a
+// docs/python.md section 2.1: a defined `NANOCHAT_SANDBOX`, a
 // `NANOCHAT_SANDBOX_BACKEND` of `none`, or a true `NANOCHAT_ALLOW_UNSANDBOXED`.
 bool SandboxAllowed() {
   if (*nanochat::SandboxProfile() != '\0') return true;
@@ -96,7 +97,7 @@ bool SandboxAllowed() {
 }
 
 // Converts the flat C config to `nanochat::Config`. This is the one place the
-// conversion happens (docs/python-api.md section 4.3).
+// conversion happens (docs/python.md section 4.3).
 nanochat::Config ToConfig(const nanochat_config& source) {
   nanochat::Config config;
   config.num_layers = source.num_layers;
@@ -138,7 +139,7 @@ void ValidateConfig(const nanochat::Config& config) {
 
 // Converts the flat C optimizer config to the `OptimizerConfig` and
 // `SchedulerConfig` pair. The `nanochat_optim_config` struct holds both groups
-// in that order (docs/python-api.md section 4).
+// in that order (docs/python.md section 4).
 void ToOptimizerConfig(const nanochat_optim_config& source,
                        nanochat::OptimizerConfig* optimizer,
                        nanochat::SchedulerConfig* scheduler) {
@@ -203,7 +204,7 @@ nanochat_status nanochat_init(void) {
           "nanochat_init",
           "the library must run inside the sandbox; set "
           "NANOCHAT_SANDBOX_BACKEND=none, or NANOCHAT_SANDBOX=<profile>, or "
-          "NANOCHAT_ALLOW_UNSANDBOXED=1 (docs/python-api.md section 2.1)");
+          "NANOCHAT_ALLOW_UNSANDBOXED=1 (docs/python.md section 2.1)");
       return NANOCHAT_STATUS_ERROR;
     }
     // The build fixes the precision. Fail fast when the device cannot run it,
@@ -246,6 +247,28 @@ void nanochat_device_info(nanochat_device* out) {
         static_cast<std::int64_t>(caps.total_memory_bytes);
     out->device_name = caps.device_name;
   });
+}
+
+nanochat_status nanochat_params_get(const nanochat_config* config,
+                                    nanochat_params* out) {
+  return Guard(
+      "nanochat_params_get", NANOCHAT_STATUS_ERROR, [&]() -> nanochat_status {
+        if (config == nullptr || out == nullptr) {
+          throw std::invalid_argument(
+              "config and out must not be "
+              "null");
+        }
+        const nanochat::Config cpp_config = ToConfig(*config);
+        const nanochat::ParamBreakdown counts =
+            nanochat::CountParams(cpp_config);
+        out->total = counts.total;
+        out->transformer_matrices = counts.transformer_matrices;
+        out->lm_head = counts.lm_head;
+        out->embeddings = counts.embeddings;
+        out->scalars = counts.scalars;
+        out->flops_per_token = nanochat::EstimateFlopsPerToken(cpp_config);
+        return NANOCHAT_STATUS_OK;
+      });
 }
 
 nanochat_model* nanochat_model_create(const nanochat_config* config,

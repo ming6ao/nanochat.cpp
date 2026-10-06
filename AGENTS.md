@@ -54,7 +54,6 @@ stay architect-owned, and additive changes are preferred.
   No agent commits to `main`.
 - `main` is integrated by the architect only, from the merge queue.
 - Rebase on `main` before requesting a merge; the integrator resolves the rest.
-- One logical change per branch. Keep branches short-lived.
 
 ```bash
 git worktree add ../nanochat.cpp.<ws> -b agent/<ws>

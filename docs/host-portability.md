@@ -441,7 +441,7 @@ needs only the device selection from section 5.
 
 Option B: data-parallel training. One process owns each card. The processes
 all-reduce their gradients with NCCL, then each process steps its optimizer.
-The design is in [python-api.md](python-api.md) section 10. Start it only after
+The design is in [python.md](python.md) section 10. Start it only after
 the single-card path is fast.
 
 ### 9. Limits and risks

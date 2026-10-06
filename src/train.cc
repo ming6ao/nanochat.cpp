@@ -139,6 +139,47 @@ std::string ToLower(const std::string& value) {
 
 }  // namespace
 
+ParamBreakdown CountParams(const Config& config) {
+  const int64_t hidden = config.hidden_dim;
+  const int64_t padded_vocab = config.padded_vocab_size;
+  const int64_t query_dim = config.query_dim();
+  const int64_t kv_dim = config.kv_dim();
+  const int64_t mlp_dim = config.mlp_dim();
+
+  int64_t matrices = 0;
+  // transformer.wte.weight is a lookup, so it belongs to embeddings.
+  int64_t embeddings = padded_vocab * hidden;
+  for (int i = 0; i < config.num_layers; ++i) {
+    matrices += query_dim * hidden;  // attn.c_q.weight
+    matrices += kv_dim * hidden;     // attn.c_k.weight
+    matrices += kv_dim * hidden;     // attn.c_v.weight
+    matrices += hidden * hidden;     // attn.c_proj.weight
+    if (config.has_value_embedding(i)) {
+      // attn.ve_gate.weight sits inside transformer.h, so it counts as a
+      // matrix, not as a scalar.
+      matrices += static_cast<int64_t>(config.num_kv_heads) * kVeGateChannels;
+      embeddings += padded_vocab * kv_dim;  // value_embeds.i.weight
+    }
+    matrices += mlp_dim * hidden;  // mlp.c_fc.weight
+    matrices += hidden * mlp_dim;  // mlp.c_proj.weight
+  }
+
+  const int64_t lm_head = padded_vocab * hidden;
+  // resid_lambdas and x0_lambdas hold one value per layer. The top-level
+  // smear_gate is a Linear, but `num_scaling_params` groups it with the
+  // scalars, so CountParams does too.
+  const int64_t scalars =
+      2 * static_cast<int64_t>(config.num_layers) + kSmearChannels + 1 + 1;
+
+  ParamBreakdown counts{};
+  counts.transformer_matrices = matrices;
+  counts.lm_head = lm_head;
+  counts.embeddings = embeddings;
+  counts.scalars = scalars;
+  counts.total = matrices + lm_head + embeddings + scalars;
+  return counts;
+}
+
 double EstimateFlopsPerToken(const Config& config) {
   const int heads = config.num_heads;
   const int head_dim = config.head_dim();

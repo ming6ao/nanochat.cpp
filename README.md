@@ -41,17 +41,18 @@ tools/nanochat check
 # One GPU correctness test; the broker serializes access to the card.
 tools/nanochat test --gpu //backends/cuda/kernels:rms_norm_gpu_test
 
-# Train on the CPU. The bridge tokenizes the data, then runs train_main.
-tools/nanochat_cpp base_train --backend cpu --depth=4 --max-seq-len=512 \
-    --window-pattern=L --device-batch-size=2 --total-batch-size=1024 \
-    --num-iterations=10 --warmup-steps=1 --eval-every=-1 --save-every=-1 \
-    --model-tag=quickstart
+# Derive a training plan in Python and read the two model-derived numbers.
+PYTHONPATH=python python3 -c "import nanochat_cpp as nc; \
+    print(nc.plan.compute_plan(depth=4, seq_len=512, vocab_size=32768, \
+    device_batch_size=2, window_pattern='L', num_iterations=10))"
 ```
 
 `tools/nanochat help` lists all commands. Training, evaluation, generation, and
 scoring each have a binary: `//src:train_main`, `//src:eval_main`,
-`//src:generate_main`, and `//src:score_main`. The Python bridge
-(`tools/nanochat_cpp`) drives them with nanochat-compatible flags.
+`//src:generate_main`, and `//src:score_main`. The Python packages
+`nanochat_cpp.api`, `nanochat_cpp.plan`, `nanochat_cpp.chat`, and
+`nanochat_cpp.toolchain` drive them in one process
+([docs/python.md](docs/python.md)).
 
 - [docs/build.md](docs/build.md) — toolchains and flags.
 - [docs/testing.md](docs/testing.md) — the test tiers and Definition of Done.
@@ -82,7 +83,7 @@ docs/               reference and how-to
   [sandbox.md](docs/sandbox.md).
 - [docs/parity.md](docs/parity.md) — known differences from the PyTorch
   reference.
-- [docs/python-bridge.md](docs/python-bridge.md) — the nanochat-compatible
+- [docs/python.md](docs/python.md) — the nanochat-compatible
   Python entry points.
 - [docs/host-portability.md](docs/host-portability.md) — the second host,
   including the Kaggle procedure.

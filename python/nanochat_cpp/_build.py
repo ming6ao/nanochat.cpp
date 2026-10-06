@@ -1,6 +1,6 @@
 """Compile the nanochat shared library on demand.
 
-The function ``ensure_library`` follows the order in docs/python-api.md
+The function ``ensure_library`` follows the order in docs/python.md
 section 5.1:
 
 1. use the path in ``NANOCHAT_CPP_LIB`` when the file exists;
@@ -273,7 +273,7 @@ def ensure_library(root: Path | None = None,
                    backend_name: str | None = None) -> Path:
     """Return a usable library path, or raise ``BuildError``.
 
-    The order is the one in docs/python-api.md section 5.1: the cache, then a
+    The order is the one in docs/python.md section 5.1: the cache, then a
     build. ``nanochat_cpp._lib`` performs the runfiles and development-tree
     search before it calls this function.
     """

@@ -457,8 +457,8 @@ The table lists the landed files.
 | `tools/dump_tokenizer_fixture.py` | The reference fixture generator. |
 | `tools/gen_unicode_tables.py` | The table generator. |
 | `tools/check_tokenizer_parity.py` | The full-vocabulary parity gate. |
-| `python/nanochat_cpp/data.py` | The bridge reads `NCTOKEN1` and builds a `tiktoken` encoding. |
-| `python/nanochat_cpp/selftest.py` | The torch-free `NCTOKEN1` reader check. |
+| `python/nanochat_cpp/data.py` | The Python layer reads `NCTOKEN1` and builds a `tiktoken` encoding. |
+| `python/tests/data_test.py` | The torch-free `NCTOKEN1` reader check. |
 
 Integration changes:
 

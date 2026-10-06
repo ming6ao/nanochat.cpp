@@ -1,13 +1,14 @@
 # tools/ — the execution entry point and the host tooling (the oracle dump
 # script, the GPU broker, the resource sandbox, and the output-base reaper).
 #
-# `dump_oracle.py`, `dump_train_fixture.py`, `dump_generate_fixture.py`, and
-# `dump_eval_fixture.py` are the offline fixture generators, and
-# `convert_checkpoint.py` is the reference-checkpoint converter. All of them
-# need torch, so they are not Bazel build/test targets: they run on the host
-# (CPU only) and are exported here so they are visible from the repository root
-# and reproducible. The converter's torch-free logic lives in `//python:package`
-# (`nanochat_cpp.checkpoint`) and is covered by the selftest.
+# `dump_oracle.py`, `dump_train_fixture.py`, `dump_generate_fixture.py`,
+# `dump_eval_fixture.py`, `dump_plan_fixture.py`, and `dump_chat_fixture.py` are
+# the offline fixture generators, and `convert_checkpoint.py` is the
+# reference-checkpoint converter. All of them need torch, so they are not Bazel
+# build/test targets: they run on the host (CPU only) and are exported here so
+# they are visible from the repository root and reproducible. The converter's
+# torch-free logic lives in `nanochat_cpp.checkpoint` and is covered by
+# `//python:checkpoint_test`.
 #
 # `dump_tokenizer_fixture.py`, `check_tokenizer_parity.py`, and
 # `gen_unicode_tables.py` are the native-tokenizer host tools. The first needs
@@ -47,7 +48,7 @@ filegroup(
     srcs = ["dump_train_fixture.py"],
 )
 
-# The Python-API fixture generator (docs/python-api.md section 11). It runs the
+# The Python-API fixture generator (docs/python.md section 11). It runs the
 # committed CPU binaries through `tools/nanochat` and writes
 # `tests/data/api_fixture.bin`; it needs no third-party package.
 filegroup(
@@ -107,14 +108,6 @@ sh_test(
     data = ["prune_bazel_output_bases"],
 )
 
-# T0 test for the Python bridge's torch-free logic. See docs/python-bridge.md.
-sh_test(
-    name = "nanochat_cpp_selftest",
-    srcs = ["nanochat_cpp_selftest.sh"],
-    data = ["//python:package"],
-    size = "small",
-)
-
 # T0 syntax test for the Kaggle host scripts. Hermetic and CPU-only: it runs
 # `bash -n` on each script and never touches the network.
 sh_test(
@@ -136,7 +129,6 @@ test_suite(
     name = "all",
     tests = [
         ":prune_test",
-        ":nanochat_cpp_selftest",
         ":kaggle_scripts_test",
     ],
 )

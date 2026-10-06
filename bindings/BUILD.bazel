@@ -1,5 +1,5 @@
 # bindings/ -- the C application binary interface for the in-process Python API
-# (docs/python-api.md). The shim is a thin, exception-safe layer over the
+# (docs/python.md). The shim is a thin, exception-safe layer over the
 # existing C++ graph: it converts the flat C structs once, catches every C++
 # exception, and returns owned opaque handles. It links the workflow and the
 # public headers only; the backend (CPU or CUDA) comes from the

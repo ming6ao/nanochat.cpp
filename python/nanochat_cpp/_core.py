@@ -3,7 +3,7 @@
 This module declares every C struct and function in
 ``include/nanochat/capi.h`` with the standard ``ctypes`` module, then turns a
 nonzero ``nanochat_status`` value into a Python exception that carries the
-message from ``nanochat_last_error`` (docs/python-api.md section 4.2).
+message from ``nanochat_last_error`` (docs/python.md section 4.2).
 
 The module imports only the Python standard library. ``declare`` sets the
 argument and result types on one loaded shared library; ``load`` itself lives
@@ -22,6 +22,7 @@ __all__ = [
     "Config",
     "Device",
     "Param",
+    "Params",
     "Focus",
     "ScoreResult",
     "GenerateParams",
@@ -90,6 +91,24 @@ class Config(ctypes.Structure):
         ("padded_vocab_size", ctypes.c_int),
         ("rope_base", ctypes.c_float),
         ("window_pattern", ctypes.c_char_p),
+    ]
+
+
+class Params(ctypes.Structure):
+    """A mirror of ``nanochat::ParamBreakdown`` (``nanochat_params``).
+
+    ``total`` counts every allocated parameter. ``transformer_matrices`` and
+    ``lm_head`` mirror the reference ``GPT.num_scaling_params``; their sum is
+    the scaling-parameter count that sets the training horizon.
+    """
+
+    _fields_ = [
+        ("total", ctypes.c_int64),
+        ("transformer_matrices", ctypes.c_int64),
+        ("lm_head", ctypes.c_int64),
+        ("embeddings", ctypes.c_int64),
+        ("scalars", ctypes.c_int64),
+        ("flops_per_token", ctypes.c_double),
     ]
 
 
@@ -215,6 +234,8 @@ _SIGNATURES = (
     ("nanochat_backend", (), ctypes.c_char_p),
     ("nanochat_compute_type_size", (), ctypes.c_int),
     ("nanochat_device_info", (ctypes.POINTER(Device),), None),
+    ("nanochat_params_get",
+     (ctypes.POINTER(Config), ctypes.POINTER(Params)), ctypes.c_int),
     ("nanochat_model_create",
      (ctypes.POINTER(Config), ctypes.c_uint64), ModelHandle),
     ("nanochat_model_free", (ModelHandle,), None),

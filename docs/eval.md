@@ -4,10 +4,11 @@ How `nanochat.cpp` measures a trained model. Evaluation is forward-only: it
 reads a checkpoint, runs the inference graphs, and reduces the result to a
 metric. It never computes gradients, never steps an optimizer, and never writes
 a checkpoint. The base and chat evaluation scripts (`scripts/base_eval.py`,
-`scripts/chat_eval.py`) are reproduced through the Python bridge.
+`scripts/chat_eval.py`) are reproduced through the Python API
+([python.md](python.md)).
 
 This is a design document. The interface inventory is in
-[model.md](model.md); the process seam is in [python-bridge.md](python-bridge.md);
+[model.md](model.md); the process seam is in [python.md](python.md);
 known divergences are in [parity.md](parity.md).
 
 ## 1. Scope
@@ -96,7 +97,8 @@ deterministic metrics and a fixed seed for samples.
 
 ## 4. Base evaluation
 
-`base_eval.py` runs up to three modes (`--eval core,bpb,sample`).
+`nanochat_cpp.api.evaluate` and `//src:eval_main` cover up to three modes
+(`--eval core,bpb,sample`).
 
 ### 4.1 Bits per byte
 
@@ -143,22 +145,25 @@ network or the real bundle.
 
 ## 5. Chat evaluation
 
-`chat_eval.py` runs five tasks and reports per-task accuracy and ChatCORE.
+`nanochat_cpp.chat.ChatEvaluator` runs five tasks and reports per-task accuracy
+and ChatCORE. The C side owns the forward pass; the Python side owns the task
+datasets, the prompt rendering, the answer extraction, and the metric rules
+([python.md](python.md) section 5).
 
 ### 5.1 Categorical (ARC-Easy, ARC-Challenge, MMLU)
 
-The bridge renders the multiple-choice prompt (`render_mc`), tokenizes, and
-finds the answer position (the last prompt token) and the token id of each
-answer letter. It batches problems, calls `ScoreBatch` with the focus set, and
-argmaxes the focused logits. `ScoreBatch` returns logits only at the requested
-position and token ids, so the bridge never moves full `(B, T, V)` tensors.
+`ChatEvaluator` renders the multiple-choice prompt (`render_mc`), tokenizes,
+and finds the answer position (the last prompt token) and the token id of each
+answer letter. It calls `Evaluator.score` with the focus set and argmaxes the
+focused logits. `ScoreBatch` returns logits only at the requested position and
+token ids, so the caller never moves full `(B, T, V)` tensors.
 
 The letter token ids are cached; each letter is asserted to be a single token,
 as in the reference.
 
 ### 5.2 Generative (GSM8K, HumanEval)
 
-The bridge renders the completion prompt, calls `GenerateBatch` with the
+`ChatEvaluator` renders the completion prompt, calls `Model.generate` with the
 configured temperature, top-k, sample count, and `max_new_tokens`, then decodes
 and evaluates:
 
@@ -213,8 +218,8 @@ All of the evaluation workstream described in this document is implemented:
 1. `checkpoint.py` converter so a reference checkpoint can be loaded.
 2. `ScoreBatch` + `score_main` + the fixture format.
 3. `GenerateBatch` ([model.md](model.md)).
-4. `base_eval.py` (bpb, sample, CORE).
-5. `chat_eval.py` (categorical, generative, ChatCORE).
+4. `nanochat_cpp.api.evaluate` (bpb) and `//src:eval_main` (bpb, sample, CORE).
+5. `nanochat_cpp.chat.ChatEvaluator` (categorical, generative, ChatCORE).
 
 The differences that remain are tracked in [parity.md](parity.md): E3
 (reference checkpoints converted torch -> NCHKPT01) and E4 (CORE and chat

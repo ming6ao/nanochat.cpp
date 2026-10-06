@@ -1,7 +1,7 @@
-# python/ — the nanochat-compatible Python entry points. The process bridge
-# orchestrates the C++ binaries; the in-process API loads the shared library
-# with ctypes (docs/python-api.md). Nothing here is a runtime dependency of the
-# C++ code.
+# python/ — the single Python surface: the compute layer (`api`), the
+# planning layer (`plan`), the chat evaluation (`chat`), and the orchestration
+# layer (`toolchain`). See docs/python.md. Nothing here is a runtime dependency
+# of the C++ code.
 #
 # The package imports only the Python standard library, so the tests run on the
 # registered local `python3` toolchain and need no third-party wheel.
@@ -9,13 +9,6 @@
 load("@rules_python//python:defs.bzl", "py_library", "py_test")
 
 package(default_visibility = ["//visibility:public"])
-
-# The bridge modules consumed by the host self-test. It stays a filegroup so
-# the existing `sh_test` can place the package on `PYTHONPATH`.
-filegroup(
-    name = "package",
-    srcs = glob(["nanochat_cpp/*.py"]),
-)
 
 # The in-process Python API and the process bridge. `imports = ["."]` puts
 # `python/` on the import path of every dependent, so `import nanochat_cpp`
@@ -60,6 +53,66 @@ py_test(
     size = "small",
 )
 
+# T0: the NCTOKEN1 reader. Hermetic: standard library only.
+py_test(
+    name = "data_test",
+    srcs = ["tests/data_test.py"],
+    deps = [":nanochat_cpp"],
+    size = "small",
+)
+
+# T0: the reference-checkpoint name, dtype, container, and path logic.
+# Hermetic: standard library only.
+py_test(
+    name = "checkpoint_test",
+    srcs = ["tests/checkpoint_test.py"],
+    deps = [":nanochat_cpp"],
+    size = "small",
+)
+
+# T0: the evaluation fixture wire format. Hermetic: standard library only.
+py_test(
+    name = "eval_fixture_test",
+    srcs = ["tests/eval_fixture_test.py"],
+    deps = [":nanochat_cpp"],
+    size = "small",
+)
+
+# T0: the planning layer matches the reference plan fixture. It needs the
+# shared library for `nanochat_params_get` and the committed fixture.
+py_test(
+    name = "plan_test",
+    srcs = ["tests/plan_test.py"],
+    data = [
+        "//bindings:nanochat_shared",
+        "//tests:plan_fixture",
+    ],
+    deps = [":nanochat_cpp"],
+    size = "small",
+)
+
+# T0: the chat prompt renderer and the per-task isolation. It needs the
+# shared library, the fixture tokenizer, and the committed chat fixture.
+py_test(
+    name = "chat_test",
+    srcs = ["tests/chat_test.py"],
+    data = [
+        "//bindings:nanochat_shared",
+        "//tests:chat_fixture",
+        "//tests:data/loader_tokenizer.nctoken",
+    ],
+    deps = [":nanochat_cpp"],
+    size = "small",
+)
+
+# T0: the orchestration layer argv. Hermetic: no library, no Bazel, no GPU.
+py_test(
+    name = "toolchain_test",
+    srcs = ["tests/toolchain_test.py"],
+    deps = [":nanochat_cpp"],
+    size = "small",
+)
+
 # T1: the CUDA flavor of the fixture-parity test. The same source and data as
 # `api_test`, but linked against the CUDA library under `--config=cuda`.
 py_test(
@@ -93,6 +146,21 @@ py_test(
     tags = ["gpu", "manual"],
 )
 
+# T1: the chat evaluation paths on the CUDA backend. `tools/nanochat test
+# --gpu` builds it under `--config=cuda` and selects it by the `gpu` tag. The
+# same source stays out of the CPU loop.
+py_test(
+    name = "chat_gpu_test",
+    srcs = ["tests/chat_gpu_test.py"],
+    data = [
+        "//bindings:nanochat_shared",
+        "//tests:data/loader_tokenizer.nctoken",
+    ],
+    deps = [":nanochat_cpp"],
+    size = "small",
+    tags = ["gpu", "manual"],
+)
+
 # Aggregation point consumed by //:all_tests.
 test_suite(
     name = "all",
@@ -100,5 +168,11 @@ test_suite(
         ":core_test",
         ":build_test",
         ":api_test",
+        ":data_test",
+        ":checkpoint_test",
+        ":eval_fixture_test",
+        ":plan_test",
+        ":chat_test",
+        ":toolchain_test",
     ],
 )

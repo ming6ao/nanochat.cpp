@@ -34,10 +34,11 @@ nanochat.cpp/
   bindings/                      # the C ABI for the in-process Python API
     nanochat_capi.cc  nanochat_capi_test.cc  BUILD.bazel
   python/
-    nanochat_cpp/                # the API package and the process bridge
+    nanochat_cpp/                # the single Python surface
       __init__.py  _core.py  _lib.py  _build.py  api.py
-      base_train.py  base_eval.py  config.py  data.py  launcher.py
-    tests/{core,build,api}_test.py
+      plan.py  chat.py  toolchain.py  _entry.py  checkpoint.py
+      data.py  tasks.py  eval_fixture.py  reference.py
+    tests/{core,build,api,plan,chat,toolchain,data,checkpoint,eval_fixture}_test.py
     BUILD.bazel
   tests/oracle_test.cc  tests/data/debug_state.bin
   tools/
@@ -89,7 +90,7 @@ See [sandbox.md](sandbox.md) for the host budget this protects.
 
 ### Python targets
 
-The in-process Python API (docs/python-api.md) adds two packages.
+The in-process Python API (docs/python.md) adds two packages.
 
 - `//bindings` holds the C shim over the C++ graph:
   - `//bindings:nanochat_capi` — the shim as a `cc_library`, for the drift test.

@@ -5,7 +5,7 @@ The C++ runtime reads only its own self-describing container and never imports
 PyTorch, so a released base or SFT checkpoint has to be remapped once on the
 host. The logic lives in ``python/nanochat_cpp/checkpoint.py``; this script only
 puts ``python/`` on the path and forwards to its command line, so the same code
-is importable (and testable without torch). See ``docs/python-bridge.md``.
+is importable (and testable without torch). See ``docs/python.md``.
 
 A released checkpoint keeps the parameters under the same names the C++ model
 registers (``src/model.cc``), so the remap is mostly normalising the

@@ -4,7 +4,7 @@ The fixture ``//tests:api_fixture`` records the per-step loss of a tiny
 ``train_main`` run and the bits-per-byte result of ``eval_main``. The test
 drives ``Trainer`` and ``Evaluator`` through the same parquet document set and
 the same ``NCTOKEN1`` artifact, then compares the results. See
-docs/python-api.md section 11.
+docs/python.md section 11.
 """
 
 from __future__ import annotations

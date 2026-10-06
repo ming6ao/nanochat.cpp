@@ -107,8 +107,8 @@ tools/nanochat test //src/tokenizer:all
 # The `LoadTokenizer` contract and the `DataLoader` shift.
 tools/nanochat test //src:data_test
 
-# The bridge `NCTOKEN1` reader and merge reconstruction, torch-free.
-tools/nanochat test //tools:nanochat_cpp_selftest
+# The `NCTOKEN1` reader and merge reconstruction, torch-free.
+tools/nanochat test //python:data_test
 
 # The whole CPU suite and the style gate.
 tools/nanochat test
@@ -127,14 +127,14 @@ tools/nanochat run t0-cpu -- <tok_train_main> --parquet 'data/*.parquet' \
     --vocab-size 512 --max-chars 2000000 --out /tmp/tokenizer.nctoken
 ```
 
-The bridge self-test needs the system `python3` only. A full bridge run needs
-the reference virtual environment (torch, pyarrow) and the parquet dataset; see
-[python-bridge.md](python-bridge.md).
+The Python tests need the system `python3` only. A full run needs the reference
+virtual environment (torch, pyarrow) and the parquet dataset; see
+[python.md](python.md).
 
 ## Python API tests
 
-The in-process API (docs/python-api.md) has three `py_test` targets and one C
-surface test. Every target is tier T0. The commands are:
+The Python surface ([python.md](python.md)) has one `py_test` per module and one
+C surface test. Every target is tier T0. The commands are:
 
 ```bash
 # The C surface: every function in `nanochat/capi.h`, the sandbox rule, and
@@ -151,14 +151,22 @@ tools/nanochat test //python:build_test
 # The `Trainer` loss curve and the `Evaluator` bits-per-byte result match the
 # committed `//tests:api_fixture`.
 tools/nanochat test //python:api_test
+
+# The planning layer against `//tests:plan_fixture`, the chat prompt renderer
+# and the per-task isolation, the orchestration argv, the checkpoint logic, the
+# evaluation fixture, and the `NCTOKEN1` reader.
+tools/nanochat test //python:plan_test //python:chat_test \
+    //python:toolchain_test //python:checkpoint_test \
+    //python:eval_fixture_test //python:data_test
 ```
 
-`//python:all` runs the three Python targets. `//bindings:all` runs the C
-surface test. Both ride `//:all_tests` and the default `tools/nanochat test`.
+`//python:all` runs every Python target. `//bindings:all` runs the C surface
+test. Both ride `//:all_tests` and the default `tools/nanochat test`.
 
 The Python targets use the local `python3` toolchain from `rules_python`, so
-they need no third-party wheel. `tools/dump_api_fixture.py` produces the
-committed `//tests:api_fixture` offline.
+they need no third-party wheel. `tools/dump_api_fixture.py`,
+`tools/dump_plan_fixture.py`, and `tools/dump_chat_fixture.py` produce the
+committed fixtures offline.
 
 ## Finite-difference checks
 

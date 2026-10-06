@@ -3,10 +3,10 @@
 How `nanochat.cpp` adapts a pretrained base model to the chat distribution and
 then improves it with reward. Post-training reproduces `scripts/chat_sft.py`
 (supervised fine-tuning) and `scripts/chat_rl.py` (reinforcement learning on
-GSM8K) through the Python bridge.
+GSM8K) through the Python API ([python.md](python.md)).
 
 This is a design document. Evaluation is a separate, forward-only concern
-([eval.md](eval.md)); the process seam is [python-bridge.md](python-bridge.md);
+([eval.md](eval.md)); the process seam is [python.md](python.md);
 known divergences are [parity.md](parity.md).
 
 ## 1. Scope
@@ -124,8 +124,8 @@ is materialized for the C++ loader, the bridge writes the rendered ids and the
 - Periodic val bpb and ChatCORE evaluation (reusing [eval.md](eval.md)).
 - Save to `chatsft_checkpoints/<tag>` with optimizer state.
 
-SFT is a one-shot subprocess from the bridge, exactly like `base_train`: the
-loop does not depend on fresh model output.
+SFT is a one-shot subprocess from the Python layer, exactly like the base
+training driver: the loop does not depend on fresh model output.
 
 ## 5. RL
 
@@ -203,7 +203,7 @@ tokenizer-agnostic; terminal token ids are passed in.
 
 - **SFT** is a one-shot run: the bridge materializes the packed shard, then
   launches the C++ training binary under `tools/nanochat train`, exactly like
-  `base_train`.
+  base training.
 - **RL** is on-policy: generation and training interleave, and optimizer moments
   persist. The target is a persistent worker holding the model and optimizer,
   exchanging rollout and advantage messages with the bridge over pipes. For

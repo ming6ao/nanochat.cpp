@@ -1,19 +1,19 @@
-"""Python bridge for nanochat.cpp.
+"""The Python API for nanochat.cpp (docs/python.md).
 
-This package provides two entry points to the C++ implementation:
+One Python surface with three layers:
 
-* the process bridge, which locates the reference nanochat checkout for the
-  tokenizer and configuration math and launches the C++ binaries through
-  ``tools/nanochat`` (``base_train``, ``base_eval``, ``data``, ``config``);
-* the in-process API, which loads the shared library with ``ctypes`` and
-  trains, evaluates, and generates inside one Python process
-  (``nanochat_cpp.api``, docs/python-api.md).
+* the compute layer (``nanochat_cpp.api``) trains, evaluates, and generates in
+  one process through the shared library and ``ctypes``;
+* the planning layer (``nanochat_cpp.plan``) derives the model shape, the
+  horizon, the batch size, and the rates;
+* the orchestration layer (``nanochat_cpp.toolchain``) calls ``tools/nanochat``
+  for build, test, lint, and doctor.
 
-Neither entry point is a runtime dependency of the C++ binary. Both import
-only the Python standard library; the in-process API never imports ``torch``.
+The package imports only the Python standard library. The compute layer never
+imports ``torch``. ``chat`` owns the chat evaluation front end.
 """
 
-from . import _build, _core, _lib, api
+from . import _build, _core, _lib, api, chat, plan, toolchain
 from ._build import BuildError
 from ._core import NanochatError
 from .api import (
@@ -52,11 +52,8 @@ __all__ = [
     "build",
     "evaluate",
     "no_grad",
-    "base_eval",
-    "checkpoint",
-    "config",
-    "data",
-    "eval_fixture",
-    "launcher",
-    "reference",
+    "api",
+    "chat",
+    "plan",
+    "toolchain",
 ]

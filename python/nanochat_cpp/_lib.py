@@ -3,7 +3,7 @@
 ``load`` finds the library, declares the ctypes function table, applies the
 ``nanochat_init`` sandbox check, and caches the loaded library for the process.
 
-The search order follows docs/python-api.md sections 5.1 and 8.3:
+The search order follows docs/python.md sections 5.1 and 8.3:
 
 1. the path in ``NANOCHAT_CPP_LIB``;
 2. the Bazel runfiles tree (a ``py_test`` or a ``bazel run``);

@@ -44,6 +44,24 @@ filegroup(
     srcs = ["data/api_fixture.bin"],
 )
 
+# The planning reference fixture, `NANOPLAN`, produced by
+# `tools/dump_plan_fixture.py`. The Python plan test reads it as data and
+# compares the C parameter counts and the reference base_train.py plan
+# arithmetic. See docs/python.md sections 4.3 and 11.
+filegroup(
+    name = "plan_fixture",
+    srcs = ["data/plan_fixture.bin"],
+)
+
+# The chat prompt fixture, `NANCHAT1`, produced by
+# `tools/dump_chat_fixture.py`. The Python chat test reads it as data and
+# compares the prompt renderer to the reference tokenizer. See docs/python.md
+# sections 5 and 11.
+filegroup(
+    name = "chat_fixture",
+    srcs = ["data/chat_fixture.bin"],
+)
+
 # The document-mode loader parity gate (docs/parquet-native.md phase 8). The
 # C++ rows must match the reference
 # `tokenizing_distributed_data_loader_bos_bestfit` for a fixed corpus and

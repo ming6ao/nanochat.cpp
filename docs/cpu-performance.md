@@ -60,16 +60,19 @@ families. The scalar baseline and the promoted baseline are both below.
        --sample-every=-1 --save-every=-1 --run=dummy --model-tag=cpu_bench_torch'
    ```
 
-4. Run the `nanochat.cpp` CPU backend. The Python bridge tokenizes the data,
-   builds `//src:train_main`, and runs the binary under the sandbox.
+4. Run the `nanochat.cpp` CPU backend. Build `//src:train_main` and run the
+   binary under the sandbox. Derive the model shape and the horizon with
+   `nanochat_cpp.plan` ([python.md](python.md) section 4).
 
    ```bash
    cd ~/repos/nanochat.cpp
-   tools/nanochat_cpp base_train --backend cpu \
-     --depth=4 --max-seq-len=512 --window-pattern=L \
-     --device-batch-size=2 --total-batch-size=1024 --num-iterations=10 \
-     --warmup-steps=1 --eval-every=-1 --core-metric-every=-1 \
-     --sample-every=-1 --save-every=-1 --model-tag=cpu_bench_cpp
+   tools/nanochat build //src:train_main
+   tools/nanochat run train -- bazel-bin/src/train_main \
+     --train-parquet <train-parquet> --tokenizer <tokenizer.nctoken> \
+     --layers 4 --heads 4 --kv-heads 4 --hidden 512 --seq 512 --vocab <vocab> \
+     --window-pattern L --batch 2 --grad-accum 1 --num-iterations 10 \
+     --warmup-steps 1 --eval-every -1 --save-every -1 \
+     --checkpoint <checkpoint-dir>/model.ckpt --log <checkpoint-dir>/train.log
    ```
 
 ### Results
@@ -578,11 +581,12 @@ The header `include/nanochat/kernels.h` is unchanged. The read-only check
 Command (the bridge in Part 1, step 4):
 
 ```bash
-tools/nanochat_cpp base_train --backend cpu \
-  --depth=4 --max-seq-len=512 --window-pattern=L \
-  --device-batch-size=2 --total-batch-size=1024 --num-iterations=10 \
-  --warmup-steps=1 --eval-every=-1 --core-metric-every=-1 \
-  --sample-every=-1 --save-every=-1 --model-tag=cpu_bench_cpp
+tools/nanochat run train -- bazel-bin/src/train_main \
+  --train-parquet <train-parquet> --tokenizer <tokenizer.nctoken> \
+  --layers 4 --heads 4 --kv-heads 4 --hidden 512 --seq 512 --vocab <vocab> \
+  --window-pattern L --batch 2 --grad-accum 1 --num-iterations 10 \
+  --warmup-steps 1 --eval-every -1 --save-every -1 \
+  --checkpoint <checkpoint-dir>/model.ckpt --log <checkpoint-dir>/train.log
 ```
 
 The bridge runs under the `train` profile (8 cores). The mean rate over steps 2
@@ -737,11 +741,12 @@ threads and vectorizes `MuonUpdate`, `ClassifierForward`,
 Command (the bridge in Part 1, step 4):
 
 ```bash
-tools/nanochat_cpp base_train --backend cpu \
-  --depth=4 --max-seq-len=512 --window-pattern=L \
-  --device-batch-size=2 --total-batch-size=1024 --num-iterations=10 \
-  --warmup-steps=1 --eval-every=-1 --core-metric-every=-1 \
-  --sample-every=-1 --save-every=-1 --model-tag=cpu_bench_cpp
+tools/nanochat run train -- bazel-bin/src/train_main \
+  --train-parquet <train-parquet> --tokenizer <tokenizer.nctoken> \
+  --layers 4 --heads 4 --kv-heads 4 --hidden 512 --seq 512 --vocab <vocab> \
+  --window-pattern L --batch 2 --grad-accum 1 --num-iterations 10 \
+  --warmup-steps 1 --eval-every -1 --save-every -1 \
+  --checkpoint <checkpoint-dir>/model.ckpt --log <checkpoint-dir>/train.log
 ```
 
 The bridge runs under the `train` profile. The profile gives 8 CPU threads

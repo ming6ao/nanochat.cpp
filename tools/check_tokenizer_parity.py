@@ -7,9 +7,9 @@ same ordered merge list for the same corpus and vocabulary. The fixture test in
 proves it at the full vocabulary size, where the native trainer reaches the same
 32503 merges as the reference and the base token bytes match one for one.
 
-Run it with the reference environment, from the repository root:
+Run it with the reference environment, from the repository root (see
+``docs/python.md`` for the Python surface):
 
-    tools/nanochat_cpp ...  # not this
     python3 tools/check_tokenizer_parity.py --max-chars 40000000
 
 The script builds a one-document-per-line corpus from the parquet shards,

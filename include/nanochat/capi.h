@@ -5,7 +5,7 @@
 #include <stdint.h>
 
 // The C application binary interface for the in-process Python API
-// (docs/python-api.md section 4). A Python binding loads the shared library
+// (docs/python.md section 4). A Python binding loads the shared library
 // with the standard `ctypes` module and calls these functions.
 //
 // Every type here is a C type. No C++ type crosses the boundary. Opaque handles
@@ -40,6 +40,20 @@ typedef struct {
   float rope_base;
   const char* window_pattern;
 } nanochat_config;
+
+// Model-derived planning inputs (docs/python.md section 4.1). `total` counts
+// every allocated parameter, including the token and value embeddings.
+// `transformer_matrices` and `lm_head` mirror the reference
+// `GPT.num_scaling_params()`. The shim fills this from `CountParams` and
+// `EstimateFlopsPerToken`.
+typedef struct {
+  int64_t total;
+  int64_t transformer_matrices;
+  int64_t lm_head;
+  int64_t embeddings;
+  int64_t scalars;
+  double flops_per_token;
+} nanochat_params;
 
 // A vendor-free description of the active device, a partial mirror of
 // nanochat::Caps. The backend itself comes from nanochat_backend: `cpu` or
@@ -146,6 +160,10 @@ int nanochat_compute_type_size(void);
 
 // Fills `out` with a description of the active device.
 void nanochat_device_info(nanochat_device* out);
+
+// Fills `out` from `config`. Allocates no model. Returns a status.
+nanochat_status nanochat_params_get(const nanochat_config* config,
+                                    nanochat_params* out);
 
 // Model. `nanochat_model_create` returns an owned handle and null on failure.
 nanochat_model* nanochat_model_create(const nanochat_config* config,

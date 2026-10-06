@@ -2,7 +2,7 @@
 
 The test uses the same tiny shape as the committed C++ fixtures: two layers,
 eight query heads, two key/value heads, hidden width 32, sequence length 8,
-and a vocabulary of 64. See docs/python-api.md section 11.
+and a vocabulary of 64. See docs/python.md section 11.
 """
 
 from __future__ import annotations

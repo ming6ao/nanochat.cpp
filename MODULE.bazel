@@ -20,7 +20,7 @@ bazel_dep(name = "rules_cc", version = "0.2.17")
 # as with rules_cc.
 bazel_dep(name = "rules_shell", version = "0.6.1")
 
-# Python rules for the py_test coverage of the Python API (docs/python-api.md).
+# Python rules for the py_test coverage of the Python API (docs/python.md).
 # The module is already in the graph transitively through rules_cuda/protobuf;
 # it is declared directly so the root module can register a toolchain.
 bazel_dep(name = "rules_python", version = "1.7.0")

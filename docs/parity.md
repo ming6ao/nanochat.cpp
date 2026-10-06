@@ -6,7 +6,7 @@ reference (`scripts/base_train.py`, `nanochat/gpt.py`, `nanochat/optim.py`,
 the two so that a divergence in a loss curve, a metric, or a parameter can be
 attributed quickly. It is the companion to
 [testing.md](testing.md) (how parity is gated) and
-[python-bridge.md](python-bridge.md) (how the reference is driven).
+[python.md](python.md) (how the reference is driven).
 
 Status values:
 
@@ -114,9 +114,9 @@ draw, and the generation parity fixture (`tests/data/generate_parity.bin`,
 `//tests:generate_parity_test`) pins it on the CPU and CUDA backends. The
 sampled paths are:
 
-- `base_eval.py --eval sample`: the unconditioned prompts at temperature 1.0
-  with `num_samples = 8` (the conditioned prompts stay greedy).
-- `chat_eval.py` generative tasks (GSM8K, HumanEval): the configured
+- The base-eval sample mode: the unconditioned prompts at temperature 1.0 with
+  `num_samples = 8` (the conditioned prompts stay greedy).
+- The `ChatEvaluator` generative tasks (GSM8K, HumanEval): the configured
   temperature, top-k, and sample count.
 
 **Impact:** the sampled text differs from the reference, so GSM8K and HumanEval

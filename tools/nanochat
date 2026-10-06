@@ -219,59 +219,106 @@ case "$command" in
   doctor)
     # Read-only diagnostics so an agent can distinguish slow code from a busy
     # or misconfigured host before spending time measuring. See
-    # docs/performance.md.
-    echo "nanochat.cpp doctor"
-    echo "===================="
-    echo "repo:      $root"
+    # docs/performance.md. `--json` emits one JSON object that the Python
+    # orchestration layer parses (docs/python.md section 6).
+    doctor_json=0
+    if [[ ${1:-} == "--json" ]]; then
+      doctor_json=1
+      shift
+    fi
+    d_repo=$root
+    d_revision=""
+    d_branch=""
     if git -C "$root" rev-parse --short HEAD >/dev/null 2>&1; then
-      echo "revision:  $(git -C "$root" rev-parse --short HEAD) ($(git -C "$root" branch --show-current 2>/dev/null || echo detached))"
+      d_revision=$(git -C "$root" rev-parse --short HEAD)
+      d_branch=$(git -C "$root" branch --show-current 2>/dev/null || true)
     fi
     if command -v nvcc >/dev/null 2>&1; then
-      echo "nvcc:      $(nvcc --version 2>/dev/null | grep -o 'release [0-9.]*' | head -1)"
+      d_nvcc=$(nvcc --version 2>/dev/null | grep -o 'release [0-9.]*' \
+        | head -1 || true)
     else
-      echo "nvcc:      NOT FOUND"
+      d_nvcc="NOT FOUND"
     fi
     if command -v bazelisk >/dev/null 2>&1; then
-      echo "bazel:     $(bazelisk version 2>/dev/null | head -1)"
+      d_bazel=$(bazelisk version 2>/dev/null | head -1 || true)
+    else
+      d_bazel=""
     fi
     if command -v nvidia-smi >/dev/null 2>&1; then
-      echo "gpu:       $(nvidia-smi --query-gpu=name,driver_version,memory.total,memory.used,utilization.gpu --format=csv,noheader 2>/dev/null | head -1)"
-      echo "gpu procs: $(nvidia-smi --query-compute-apps=pid,process_name --format=csv,noheader 2>/dev/null | paste -sd'; ' - || true)"
+      d_gpu=$(nvidia-smi --query-gpu=name,driver_version,memory.total,memory.used,utilization.gpu --format=csv,noheader 2>/dev/null | head -1 || true)
+      d_gpu_procs=$(nvidia-smi --query-compute-apps=pid,process_name --format=csv,noheader 2>/dev/null | paste -sd'; ' - || true)
     else
-      echo "gpu:       nvidia-smi NOT FOUND"
+      d_gpu="nvidia-smi NOT FOUND"
+      d_gpu_procs=""
     fi
+    d_sandbox=""
     slice=$(systemctl --user show nanochat.slice -p MemoryCurrent -p MemoryMax -p CPUQuotaPerSecUSec 2>/dev/null || true)
     if [[ -n $slice ]]; then
-      echo "sandbox:   $(echo "$slice" | paste -sd' ' -)"
+      d_sandbox=$(echo "$slice" | paste -sd' ' -)
     fi
     if [[ -n ${NANOCHAT_SANDBOX_BACKEND:-} ]]; then
-      echo "sandbox backend: $NANOCHAT_SANDBOX_BACKEND"
+      d_sandbox_backend=$NANOCHAT_SANDBOX_BACKEND
     elif systemd-run --user --scope --quiet true >/dev/null 2>&1; then
-      echo "sandbox backend: systemd"
+      d_sandbox_backend=systemd
     else
-      echo "sandbox backend: none (systemd unavailable)"
+      d_sandbox_backend="none (systemd unavailable)"
     fi
     # The broker keeps one lock per device set, so probe the same path that
     # tools/gpu.sh locks. See docs/host-portability.md section 5.
     gpu_devices=${NANOCHAT_GPU_DEVICES:-0}
     gpu_lock="/tmp/nanochat-gpu-${gpu_devices//,/_}.lock"
+    d_gpu_lock=""
     if [[ -e $gpu_lock ]]; then
       if flock -n "$gpu_lock" -c true 2>/dev/null; then
-        echo "gpu lock:  free"
+        d_gpu_lock=free
       else
-        echo "gpu lock:  HELD (another job is running)"
+        d_gpu_lock="HELD (another job is running)"
       fi
     fi
-    for log in /tmp/nanochat-gpu.log /tmp/nanochat-sandbox.log; do
-      [[ -f $log ]] || continue
-      echo "--- tail $log ---"
-      tail -n 5 "$log"
-    done
-    for binary in "$root/bazel-bin/src/train_main" \
-                  "$root/bazel-bin/backends/cuda/kernels/attention_benchmark"; do
-      [[ -e $binary ]] || continue
-      echo "built:     $binary ($(date -r "$binary" '+%Y-%m-%d %H:%M'))"
-    done
+
+    if (( doctor_json )); then
+      NANOCHAT_DOCTOR_repo="$d_repo" \
+      NANOCHAT_DOCTOR_revision="$d_revision" \
+      NANOCHAT_DOCTOR_branch="$d_branch" \
+      NANOCHAT_DOCTOR_nvcc="$d_nvcc" \
+      NANOCHAT_DOCTOR_bazel="$d_bazel" \
+      NANOCHAT_DOCTOR_gpu="$d_gpu" \
+      NANOCHAT_DOCTOR_gpu_procs="$d_gpu_procs" \
+      NANOCHAT_DOCTOR_sandbox="$d_sandbox" \
+      NANOCHAT_DOCTOR_sandbox_backend="$d_sandbox_backend" \
+      NANOCHAT_DOCTOR_gpu_lock="$d_gpu_lock" \
+      python3 - <<'PY'
+import json, os
+keys = ("repo", "revision", "branch", "nvcc", "bazel", "gpu", "gpu_procs",
+        "sandbox", "sandbox_backend", "gpu_lock")
+print(json.dumps({key: os.environ.get("NANOCHAT_DOCTOR_" + key, "")
+                  for key in keys}))
+PY
+    else
+      echo "nanochat.cpp doctor"
+      echo "===================="
+      echo "repo:      $d_repo"
+      if [[ -n $d_revision ]]; then
+        echo "revision:  $d_revision (${d_branch:-detached})"
+      fi
+      echo "nvcc:      $d_nvcc"
+      [[ -n $d_bazel ]] && echo "bazel:     $d_bazel"
+      echo "gpu:       $d_gpu"
+      [[ -n $d_gpu_procs ]] && echo "gpu procs: $d_gpu_procs"
+      [[ -n $d_sandbox ]] && echo "sandbox:   $d_sandbox"
+      echo "sandbox backend: $d_sandbox_backend"
+      [[ -n $d_gpu_lock ]] && echo "gpu lock:  $d_gpu_lock"
+      for log in /tmp/nanochat-gpu.log /tmp/nanochat-sandbox.log; do
+        [[ -f $log ]] || continue
+        echo "--- tail $log ---"
+        tail -n 5 "$log"
+      done
+      for binary in "$root/bazel-bin/src/train_main" \
+                    "$root/bazel-bin/backends/cuda/kernels/attention_benchmark"; do
+        [[ -e $binary ]] || continue
+        echo "built:     $binary ($(date -r "$binary" '+%Y-%m-%d %H:%M'))"
+      done
+    fi
     ;;
   verify) run_profile t2-parity "$@" ;;
 

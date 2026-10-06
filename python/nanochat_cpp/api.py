@@ -1,6 +1,6 @@
 """The in-process Python API for nanochat.cpp.
 
-The module follows docs/python-api.md section 6. It builds a thin, Pythonic
+The module follows docs/python.md section 6. It builds a thin, Pythonic
 layer over the ctypes surface in ``nanochat_cpp._core``; every owned C handle
 is released in ``__del__``.
 
@@ -294,10 +294,12 @@ class Config:
 class Tokenizer:
     """The native ``NCTOKEN1`` tokenizer."""
 
-    def __init__(self, handle, vocab_size: int | None = None) -> None:
+    def __init__(self, handle, vocab_size: int | None = None,
+                 special_tokens: dict | None = None) -> None:
         self._lib = _lib.load()
         self._handle = handle
         self.vocab_size = vocab_size
+        self.special_tokens = dict(special_tokens) if special_tokens else {}
 
     @classmethod
     def load(cls, path) -> "Tokenizer":
@@ -307,14 +309,24 @@ class Tokenizer:
             library, library.nanochat_tokenizer_load(encoded),
             "nanochat_tokenizer_load")
         vocab_size = None
+        special_tokens: dict[str, int] = {}
         try:
             from .data import BASE_VOCAB_SIZE, read_nctoken1
             artifact = read_nctoken1(path)
             vocab_size = (BASE_VOCAB_SIZE + len(artifact.merge_pairs)
                           + len(artifact.special_tokens))
-        except Exception:  # noqa: BLE001 - the size is optional metadata
+            special_tokens = dict(artifact.special_tokens)
+        except Exception:  # noqa: BLE001 - the metadata is optional
             vocab_size = None
-        return cls(handle, vocab_size)
+        return cls(handle, vocab_size, special_tokens)
+
+    def encode_special(self, name: str) -> int:
+        """The id of a special token, or ``-1`` when the tokenizer lacks it."""
+        return int(self.special_tokens.get(name, -1))
+
+    def get_bos_token_id(self) -> int:
+        """The id of ``<|bos|>``, or ``-1`` when the tokenizer lacks it."""
+        return self.encode_special("<|bos|>")
 
     def encode(self, text):
         """Encode ``text``. A string gives a list of ids; a list gives a list of lists."""
@@ -837,7 +849,7 @@ class _NoGrad:
 
 
 def no_grad(model: Model | None = None) -> _NoGrad:
-    """A context manager that suspends gradient tracking (docs/python-api.md).
+    """A context manager that suspends gradient tracking (docs/python.md).
 
     The current C surface exposes no grad-mode setter, so the manager is a
     no-op until ``nanochat_set_grad_enabled`` is added. The entry point keeps

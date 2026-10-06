@@ -1,4 +1,4 @@
-// The C application binary interface test (docs/python-api.md section 11,
+// The C application binary interface test (docs/python.md section 11,
 // phase 1). It calls every function in `nanochat/capi.h` and checks the
 // contract: the sandbox rule, the one owned handle per create, the flat struct
 // copies, the thread-local error, and the round trip of the tokenizer, the
@@ -7,7 +7,7 @@
 // The static assertions below compare each flat C mirror struct to the C++
 // struct in `nanochat/model.h` that it copies. A type change in the C++ struct
 // stops this test at compile time, so an ABI drift cannot pass silently
-// (docs/python-api.md section 13).
+// (docs/python.md section 13).
 
 #include <cmath>
 #include <cstdint>
@@ -129,7 +129,7 @@ void ClearSandboxEnv() {
   unsetenv("NANOCHAT_ALLOW_UNSANDBOXED");
 }
 
-// The sandbox rule of docs/python-api.md section 2.1, in each branch.
+// The sandbox rule of docs/python.md section 2.1, in each branch.
 void CheckSandboxRule() {
   ClearSandboxEnv();
   Check("sandbox: rejects an unsandboxed process",
@@ -175,6 +175,32 @@ nanochat_config TinyConfig() {
   config.rope_base = 10000.0f;
   config.window_pattern = "S";
   return config;
+}
+
+// The plan inputs of docs/python.md section 4.1. The expected counts below
+// are hand-derived from the reference `GPT.num_scaling_params` grouping for
+// `TinyConfig`: query/key/value/proj and MLP per layer, the value gate on the
+// odd layer, `lm_head`, the token and value embeddings, and the scalars.
+void CheckParams() {
+  const nanochat_config config = TinyConfig();
+  nanochat_params counts;
+  std::memset(&counts, 0, sizeof(counts));
+  Check("params: get returns ok",
+        nanochat_params_get(&config, &counts) == NANOCHAT_STATUS_OK);
+  Check("params: total is the group sum",
+        counts.total == counts.transformer_matrices + counts.lm_head +
+                            counts.embeddings + counts.scalars);
+  Check("params: transformer_matrices", counts.transformer_matrices == 22540);
+  Check("params: lm_head", counts.lm_head == 16384);
+  Check("params: embeddings", counts.embeddings == 24576);
+  Check("params: scalars", counts.scalars == 30);
+  Check("params: total", counts.total == 63530);
+  Check("params: flops_per_token is positive", counts.flops_per_token > 0.0);
+
+  Check("params: a null config fails",
+        nanochat_params_get(nullptr, &counts) != NANOCHAT_STATUS_OK);
+  Check("params: a null out fails",
+        nanochat_params_get(&config, nullptr) != NANOCHAT_STATUS_OK);
 }
 
 std::vector<int> MakeTokens(int batch, int seq, int vocab) {
@@ -419,6 +445,7 @@ int main(int argc, char** argv) {
   }
 
   CheckSandboxRule();
+  CheckParams();
 
   nanochat_model* model = CheckModel();
   if (model != nullptr) {
