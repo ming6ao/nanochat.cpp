@@ -528,16 +528,33 @@ class TokenData:
         if not files:
             raise ValueError(f"no parquet files match {parquet!r}")
         self._files = files
-        c_files = (ctypes.c_char_p * len(files))(
+        self._c_files = (ctypes.c_char_p * len(files))(
             *[name.encode("utf-8") for name in files])
-        self._c_files = c_files
+        self._handle = self._open()
+
+    def _open(self):
+        """Open one owned C loader handle from the stored inputs."""
         handle = self._lib.nanochat_loader_create(
-            c_files, len(files), text_column.encode("utf-8"),
-            tokenizer._handle, self._batch, self._seq,
-            ctypes.c_uint64(self._seed), self._threads,
-            self._document_buffer)
-        self._handle = _core.check_handle(self._lib, handle,
-                                          "nanochat_loader_create")
+            self._c_files, len(self._files),
+            self._text_column.encode("utf-8"), self.tokenizer._handle,
+            self._batch, self._seq, ctypes.c_uint64(self._seed),
+            self._threads, self._document_buffer)
+        return _core.check_handle(self._lib, handle,
+                                  "nanochat_loader_create")
+
+    def reset(self) -> None:
+        """Restart the document stream from the first batch.
+
+        The C application binary interface has no reset entry point. The
+        wrapper releases the loader and opens a fresh one instead. The loader
+        is deterministic, so a fresh loader yields the same batches as the C++
+        ``DataLoader::Reset``.
+        """
+        handle = getattr(self, "_handle", None)
+        if handle:
+            self._lib.nanochat_loader_free(handle)
+            self._handle = None
+        self._handle = self._open()
 
     def rebatch(self, batch: int) -> "TokenData":
         """A fresh loader with the same inputs and a different batch size."""
@@ -632,9 +649,14 @@ class Trainer:
         step = self._step + 1
         batch = self.data.next()
         if batch is None:
+            # Cycle the epoch the same way the C++ TrainLoop does: reset the
+            # document stream once and read the first batch again. The loader
+            # provides fewer batches than the committed fixture has steps.
+            self.data.reset()
+            batch = self.data.next()
+        if batch is None:
             raise RuntimeError(
-                "the document loader is exhausted; the C interface has no "
-                "reset entry point")
+                "the document loader is exhausted after a reset")
         tokens, targets = batch
         self.model.zero_grad()
         loss = self.model.forward_loss(tokens, targets, batch=self.batch,
