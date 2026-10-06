@@ -44,8 +44,15 @@ build:fp16 --define=precision=fp16
 # the CUDA backend for GPU oracle parity and the sm_75 port. The selection is a
 # build/link decision only -- the workflow sources are compiled once. See
 # docs/backends.md.
+#
+# `--config=cpu` states that default backend and precision together. It is the
+# configuration the Python API documents for the host-only shared library:
+# tools/nanochat build //bindings:nanochat_shared --config=cpu. See
+# docs/python-api.md.
 build --define=backend=cpu
 build:cuda --define=backend=cuda
+build:cpu --define=backend=cpu
+build:cpu --define=precision=fp32
 
 # --- Host targets -----------------------------------------------------------
 #
