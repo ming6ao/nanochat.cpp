@@ -9,7 +9,8 @@
 
 // Host BPE tokenizer: encode/decode for the CLI and evaluation, plus the
 // per-token byte lengths that `EvalBpb` needs. Training and evaluation read
-// pre-tokenized shards, so this is not on the training hot path (docs/model.md).
+// pre-tokenized shards, so this is not on the training hot path
+// (docs/model.md).
 
 namespace nanochat {
 
@@ -28,11 +29,46 @@ class Tokenizer {
   virtual std::vector<int> Encode(std::string_view text, int prepend = -1,
                                   int append = -1) const = 0;
 
+  // Decodes token ids to text. The method concatenates the bytes of every
+  // token, then converts the result to UTF-8 with the `replace` error mode.
+  // The conversion is lossy: a token that holds a partial UTF-8 sequence
+  // becomes one replacement character, U+FFFD. A special token contributes
+  // the bytes of its name, for example the seven bytes `<|bos|>`.
   virtual std::string Decode(const int* ids, int count) const = 0;
+
+  // Appends the raw bytes of one token to *out. Returns false for a bad id.
+  // A special token contributes its name bytes, the same rule as `Decode`.
+  virtual bool AppendTokenBytes(int id, std::string* out) const = 0;
+
+  // True when the id names a special token. The stream decoder and a chat
+  // consumer use this to hide or to highlight a special token.
+  virtual bool IsSpecial(int id) const = 0;
 
   // Number of source bytes each token id represents, length `vocab_size`;
   // special tokens and masked ids are 0. Mirrors nanochat's `get_token_bytes`.
   virtual const std::uint8_t* TokenBytes() const = 0;
+};
+
+// Decodes tokens one at a time during generation. A single token can end in
+// the middle of a UTF-8 sequence. `Push` holds that incomplete suffix for the
+// next call, so the reader does not see a stray replacement character.
+//
+// The stream decoder is a local choice, not reference behavior. A consumer
+// that needs exact parity calls `Tokenizer::Decode` per token instead.
+class TokenStreamDecoder {
+ public:
+  explicit TokenStreamDecoder(const Tokenizer& tokenizer);
+
+  // Decodes the next token. Appends complete text to *out. Holds an
+  // incomplete UTF-8 suffix for the next call.
+  void Push(int id, std::string* out);
+
+  // Appends the held bytes with replacement, then clears the buffer.
+  void Flush(std::string* out);
+
+ private:
+  const Tokenizer& tokenizer_;
+  std::string pending_;
 };
 
 // Loads a saved tokenizer artifact. Returns null when the file is missing or

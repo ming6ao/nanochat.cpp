@@ -1,0 +1,3 @@
+# Python bytecode from the host tooling scripts.
+__pycache__/
+*.pyc

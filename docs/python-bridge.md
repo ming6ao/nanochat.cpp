@@ -61,12 +61,48 @@ Useful bridge flags: `--backend cpu|cuda`, `--profile <sandbox profile>`,
    It writes a `NANO` shard plus the `<shard>.bytes` sidecar that
    `DataLoader` reads for bits-per-byte, and caches the result under
    `~/.cache/nanochat_cpp/shards` keyed by dataset and tokenizer fingerprints.
+   The tokenizer comes from the portable `NCTOKEN1` artifact when present,
+   otherwise from the reference pickle; see the next section.
 3. **Launch.** `nanochat_cpp/launcher.py` finds (and builds if needed) the
    binary and runs it under the sandbox. A CUDA run goes through
    `tools/nanochat gpu --profile t2-parity`, which holds the GPU broker; a CPU
    run uses the `train` profile. When the bridge is already inside a sandbox
    (for example `tools/nanochat gpu -- python -m nanochat_cpp.base_train`), the
    binary is exec'd directly so the existing cgroup covers the whole tree.
+
+## The `NCTOKEN1` artifact and the cache key
+
+The bridge prefers the portable `NCTOKEN1` artifact over the reference pickle.
+`read_nctoken1` parses the little-endian container ([tokenizer.md](tokenizer.md)
+section 5). `mergeable_ranks` rebuilds the token-bytes-to-rank map from the
+ordered merge pairs, and `build_tiktoken_encoding` builds a `tiktoken.Encoding`
+from the pattern and the map. `Nctoken1Tokenizer` supplies `get_vocab_size`,
+`get_bos_token_id`, and `encode`. `token_byte_lengths` derives the
+`<shard>.bytes` sidecar from the same merges, so the portable path needs no
+`torch`.
+
+The bridge looks for the artifact at
+`$NANOCHAT_BASE_DIR/tokenizer/tokenizer.nctoken` (`NCTOKEN1_NAME`). When the file
+is present it wins; otherwise `_load_bridge_tokenizer` falls back to
+`nanochat.tokenizer.get_tokenizer()` in the reference checkout. `tiktoken` is
+imported lazily, so the torch-free self-test can import the module.
+
+The shard cache key (`_fingerprint`) is a 16-character SHA-256 prefix. It hashes
+the run shape (`split`, `max_tokens`, `width`) and, for every parquet file and
+every tokenizer file, the name, the size, and the time of the last change. The
+three tokenizer files are `tokenizer.pkl`, `token_bytes.pt`, and
+`tokenizer.nctoken`.
+A new or changed artifact therefore invalidates the cached shard. The full key is
+part of the shard file name: `<split>_<max_tokens>_<width>_<key>.bin`.
+
+Create the artifact with `tools/convert_tokenizer.py` inside the reference
+environment, or with the native trainer `tok_train_main`:
+
+```bash
+python3 tools/convert_tokenizer.py --tokenizer <dir> --out tokenizer.nctoken
+tools/nanochat run t0-cpu -- <tok_train_main> --parquet 'data/*.parquet' \
+    --vocab-size 32768 --out tokenizer.nctoken
+```
 
 ## Flag mapping
 

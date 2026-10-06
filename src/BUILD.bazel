@@ -26,6 +26,7 @@ cc_library(
     ],
     hdrs = [
         "cli.h",
+        "eval.h",
         "model_impl.h",
         "ops.h",
         "train.h",
@@ -40,6 +41,9 @@ cc_library(
         "//:backend_cuda": ["//backends/cuda:all_kernels"],
         "//:backend_cpu": ["//backends/cpu"],
     }) + [
+        # `eval.cc` decodes the generated rows through the tokenizer stream
+        # decoder, so the workflow library links the host tokenizer.
+        "//src/tokenizer:tokenizer",
         "//include/nanochat:nanochat",
     ],
 )
@@ -159,6 +163,7 @@ cc_test(
     defines = precision_defines(),
     deps = [
         ":model",
+        "//src/tokenizer:tokenizer",
         "//include/nanochat:nanochat",
     ],
     size = "small",
@@ -291,8 +296,16 @@ cc_binary(
     defines = precision_defines(),
     deps = [
         ":model",
+        "//src/tokenizer:tokenizer",
         "//include/nanochat:nanochat",
     ],
+)
+
+# The tiny CLI flag helpers shared by the entry points (docs/build.md).
+cc_library(
+    name = "cli",
+    hdrs = ["cli.h"],
+    deps = ["//include/nanochat:nanochat"],
 )
 
 # Aggregation point consumed by //:all_tests.
@@ -305,4 +318,6 @@ test_suite(name = "all", tests = [
     ":optim_test",
     ":data_test",
     ":harness_test",
+    # The tokenizer host package owns its own test suite.
+    "//src/tokenizer:all",
 ])

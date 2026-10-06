@@ -26,6 +26,14 @@ cc_library(
     hdrs = ["oracle_fixture.h"],
 )
 
+# The reference tokenizer fixture, `NANOTOK1`, produced by
+# `tools/dump_tokenizer_fixture.py`. The tokenizer parity test in `//src` reads
+# it with `//tests:oracle_fixture`. See docs/tokenizer.md section 12.
+filegroup(
+    name = "tokenizer_fixture",
+    srcs = ["data/tokenizer_fixture.bin"],
+)
+
 # CPU oracle: checks the reference softcap, cross-entropy, classifier
 # gradients, parameter gradients, and the first optimizer step, then builds the
 # C++ model from the same fixture and checks forward, backward, and the

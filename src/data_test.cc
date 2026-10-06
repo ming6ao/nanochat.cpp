@@ -3,7 +3,7 @@
 // Round-trips a temporary token shard (both uint16 and uint32 widths), checks
 // the `DataLoader` batch shape and the one-token targets shift, verifies the
 // `Checkpoint` container round-trips name/dtype/shape/payload, and checks the
-// out-of-scope `LoadTokenizer` contract (null, no artifact).
+// `LoadTokenizer` contract (a valid artifact loads, a bad file returns null).
 
 #include <cstdint>
 #include <cstdio>
@@ -19,6 +19,8 @@
 #include "nanochat/dataloader.h"
 #include "nanochat/tensor.h"
 #include "nanochat/tokenizer.h"
+#include "src/tokenizer/split_pattern.h"
+#include "src/tokenizer/tokenizer_internal.h"
 
 namespace {
 
@@ -273,10 +275,33 @@ void TestCheckpoint() {
 }
 
 void TestTokenizer() {
+  // A valid `NCTOKEN1` artifact loads; a malformed file returns null.
+  const std::vector<std::pair<std::uint32_t, std::uint32_t>> merges = {
+      {'h', 'e'}, {'l', 'l'}, {256, 257}, {258, 'o'}};
+  const std::vector<std::pair<std::string, std::uint32_t>> specials = {
+      {"<|bos|>", 260}};
+  const std::string valid = TempPath("data_tokenizer.nctoken");
+  if (!nanochat::SaveTokenizer(valid, nanochat::NanochatSplitPattern(), merges,
+                               specials)) {
+    Fail("SaveTokenizer could not write the valid artifact");
+    return;
+  }
   std::unique_ptr<nanochat::Tokenizer> tokenizer =
-      nanochat::LoadTokenizer(TempPath("tokenizer.bin"));
-  if (tokenizer != nullptr) {
-    Fail("LoadTokenizer should return null (no artifact in tree)");
+      nanochat::LoadTokenizer(valid);
+  if (tokenizer == nullptr) {
+    Fail("LoadTokenizer returned null for a valid artifact");
+  } else if (tokenizer->vocab_size() != 261 || tokenizer->bos_id() != 260) {
+    Fail("LoadTokenizer returned the wrong metadata");
+  }
+
+  const std::string bad = TempPath("data_tokenizer_bad.nctoken");
+  {
+    std::ofstream out(bad, std::ios::binary | std::ios::trunc);
+    const char junk[16] = {0};
+    out.write(junk, sizeof(junk));
+  }
+  if (nanochat::LoadTokenizer(bad) != nullptr) {
+    Fail("LoadTokenizer accepted a bad file");
   }
 }
 

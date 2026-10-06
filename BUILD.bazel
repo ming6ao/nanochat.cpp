@@ -68,4 +68,5 @@ exports_files([
     ".bazelrc",
     ".clang-format",
     "Makefile",
+    "duckdb.BUILD",
 ])

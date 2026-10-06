@@ -1,7 +1,7 @@
 // dev/kernels/cpu_gemm_bench.cc -- CPU reference GEMM micro-benchmark.
 //
-// Times the four dominant GEMM shapes from docs/cpu-performance.md Part 2, section 2, plus
-// the model forward layout:
+// Times the four dominant GEMM shapes from docs/cpu-performance.md Part 2,
+// section 2, plus the model forward layout:
 //   * gemm_forward -- language-model head forward, M=1024 N=32768 K=256.
 //   * gemm_forward_tb1 -- the same head forward with transpose_b, the layout
 //                     that src/ops.cc stores the weights in.
@@ -73,9 +73,9 @@ struct Shape {
   bool transpose_b;
 };
 
-// The four dominant shapes from docs/cpu-performance.md Part 2, section 2, plus the model
-// forward layout (`transpose_b = true`). The model config is depth 4, hidden
-// 256, MLP 1024, vocab 32768, and 1024 token rows.
+// The four dominant shapes from docs/cpu-performance.md Part 2, section 2, plus
+// the model forward layout (`transpose_b = true`). The model config is depth 4,
+// hidden 256, MLP 1024, vocab 32768, and 1024 token rows.
 const Shape kShapes[] = {
     {"gemm_forward", GemmMode::kForward, 1024, 32768, 256, false, false},
     {"gemm_forward_tb1", GemmMode::kForward, 1024, 32768, 256, false, true},
