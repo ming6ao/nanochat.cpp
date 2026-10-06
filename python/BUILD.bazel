@@ -1,10 +1,104 @@
-# python/ — the nanochat-compatible Python entry points. They orchestrate the
-# C++ binaries (data materialization + sandbox launch); nothing here is a
-# runtime dependency of the C++ code. See docs/python-bridge.md.
+# python/ — the nanochat-compatible Python entry points. The process bridge
+# orchestrates the C++ binaries; the in-process API loads the shared library
+# with ctypes (docs/python-api.md). Nothing here is a runtime dependency of the
+# C++ code.
+#
+# The package imports only the Python standard library, so the tests run on the
+# registered local `python3` toolchain and need no third-party wheel.
+
+load("@rules_python//python:defs.bzl", "py_library", "py_test")
 
 package(default_visibility = ["//visibility:public"])
 
+# The bridge modules consumed by the host self-test. It stays a filegroup so
+# the existing `sh_test` can place the package on `PYTHONPATH`.
 filegroup(
     name = "package",
     srcs = glob(["nanochat_cpp/*.py"]),
+)
+
+# The in-process Python API and the process bridge. `imports = ["."]` puts
+# `python/` on the import path of every dependent, so `import nanochat_cpp`
+# resolves.
+py_library(
+    name = "nanochat_cpp",
+    srcs = glob(["nanochat_cpp/*.py"]),
+    imports = ["."],
+)
+
+# T0: the ctypes core loads the CPU library and runs one forward/backward step.
+py_test(
+    name = "core_test",
+    srcs = ["tests/core_test.py"],
+    data = ["//bindings:nanochat_shared"],
+    deps = [":nanochat_cpp"],
+    size = "small",
+)
+
+# T0: the on-demand builder key and the library search order. Hermetic: it
+# never compiles and needs no library.
+py_test(
+    name = "build_test",
+    srcs = ["tests/build_test.py"],
+    deps = [":nanochat_cpp"],
+    size = "small",
+)
+
+# T0: the API drives a tiny training run and an evaluation that match the
+# committed C++ fixture. The runfiles carry the fixture, the shared library,
+# the parquet document set, and the NCTOKEN1 artifact.
+py_test(
+    name = "api_test",
+    srcs = ["tests/api_test.py"],
+    data = [
+        "//bindings:nanochat_shared",
+        "//src/parquet:testdata/text.parquet",
+        "//tests:api_fixture",
+        "//tests:data/loader_tokenizer.nctoken",
+    ],
+    deps = [":nanochat_cpp"],
+    size = "small",
+)
+
+# T1: the CUDA flavor of the fixture-parity test. The same source and data as
+# `api_test`, but linked against the CUDA library under `--config=cuda`.
+py_test(
+    name = "api_gpu_test",
+    srcs = ["tests/api_test.py"],
+    main = "tests/api_test.py",
+    data = [
+        "//bindings:nanochat_shared",
+        "//src/parquet:testdata/text.parquet",
+        "//tests:api_fixture",
+        "//tests:data/loader_tokenizer.nctoken",
+    ],
+    deps = [":nanochat_cpp"],
+    size = "small",
+    tags = ["gpu", "manual"],
+)
+
+# T1: the in-process API on the CUDA backend. `tools/nanochat test --gpu`
+# builds it under `--config=cuda` and selects it by the `gpu` tag. The same
+# source stays out of the CPU loop.
+py_test(
+    name = "gpu_test",
+    srcs = ["tests/gpu_test.py"],
+    data = [
+        "//bindings:nanochat_shared",
+        "//src/parquet:testdata/text.parquet",
+        "//tests:data/loader_tokenizer.nctoken",
+    ],
+    deps = [":nanochat_cpp"],
+    size = "small",
+    tags = ["gpu", "manual"],
+)
+
+# Aggregation point consumed by //:all_tests.
+test_suite(
+    name = "all",
+    tests = [
+        ":core_test",
+        ":build_test",
+        ":api_test",
+    ],
 )

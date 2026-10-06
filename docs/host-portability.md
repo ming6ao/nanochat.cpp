@@ -141,8 +141,8 @@ test --test_env=LD_LIBRARY_PATH
 The last line forwards the CUDA driver directory. Bazel vendors the toolkit's
 `libcudart`/`libcublas` into the runfiles but not the driver's `libcuda.so.1`,
 which lives under the driver mount (for example `/usr/local/nvidia/lib64`).
-The runfiles are put on the test's `LD_LIBRARY_PATH`; without the client value
-`libcuda` is unresolvable and `cudaMalloc` fails with
+Bazel puts the runfiles on the test's `LD_LIBRARY_PATH`. Without the client
+value, `libcuda` is unresolvable and `cudaMalloc` fails with
 `CUDA_ERROR_INSUFFICIENT_DRIVER`.
 
 A test action does not inherit the broker's shell, so `CUDA_VISIBLE_DEVICES`
@@ -439,10 +439,10 @@ Option A: two independent jobs. Run one job on device 0 and one on device 1.
 Each job takes its own broker lock with `tools/gpu.sh --device N`. This option
 needs only the device selection from section 5.
 
-Option B: data-parallel training. Two processes exchange gradients with a
-collective. This option needs NCCL, a rank argument, and a new parity test.
-Treat it as a separate project. Start it only after the single-card path is
-fast.
+Option B: data-parallel training. One process owns each card. The processes
+all-reduce their gradients with NCCL, then each process steps its optimizer.
+The design is in [python-api.md](python-api.md) section 10. Start it only after
+the single-card path is fast.
 
 ### 9. Limits and risks
 

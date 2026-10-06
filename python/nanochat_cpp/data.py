@@ -189,6 +189,12 @@ class Nctoken1Tokenizer:
     def get_bos_token_id(self) -> int:
         return self._bos_id
 
+    def encode_special(self, name: str) -> int:
+        return self.encoding.encode_single_token(name)
+
+    def decode(self, ids) -> str:
+        return self.encoding.decode(ids)
+
     def encode(self, text, prepend=None, append=None, num_threads=1):
         if isinstance(text, str):
             ids = self.encoding.encode_ordinary(text)

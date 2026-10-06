@@ -122,4 +122,29 @@ std::string Utf8Replaced(std::string_view text) {
   return out;
 }
 
+std::size_t Utf8CodePoints(std::string_view text) {
+  std::size_t position = 0;
+  std::size_t count = 0;
+  while (position < text.size()) {
+    const Utf8Sequence sequence = ReadUtf8(text, position);
+    if (sequence.length == 0) break;
+    position += sequence.length;
+    ++count;
+  }
+  return count;
+}
+
+std::string_view Utf8Prefix(std::string_view text,
+                            std::size_t max_code_points) {
+  std::size_t position = 0;
+  std::size_t count = 0;
+  while (position < text.size() && count < max_code_points) {
+    const Utf8Sequence sequence = ReadUtf8(text, position);
+    if (sequence.length == 0) break;
+    position += sequence.length;
+    ++count;
+  }
+  return text.substr(0, position);
+}
+
 }  // namespace nanochat

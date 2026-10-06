@@ -35,6 +35,14 @@ void AppendUtf8Replaced(std::string_view text, std::string* out);
 // Returns the text with the lossy `replace` mode.
 std::string Utf8Replaced(std::string_view text);
 
+// Number of Unicode code points in `text`. An ill-formed or incomplete
+// sequence counts as one code point. Mirrors Python's `len(str)`.
+std::size_t Utf8CodePoints(std::string_view text);
+
+// The longest prefix of `text` that holds at most `max_code_points` code
+// points. Keeps whole code points. Mirrors Python's `text[:max_code_points]`.
+std::string_view Utf8Prefix(std::string_view text, std::size_t max_code_points);
+
 }  // namespace nanochat
 
 #endif  // NANOCHAT_SRC_UTF8_H_

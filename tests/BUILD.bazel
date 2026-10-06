@@ -34,6 +34,16 @@ filegroup(
     srcs = ["data/tokenizer_fixture.bin"],
 )
 
+# The Python-API reference fixture, `NANOEVL1`, produced by
+# `tools/dump_api_fixture.py`. The in-process Python tests read it as data and
+# compare the `Trainer` loss curve and the `Evaluator` bits-per-byte result
+# against the committed C++ run. The parameter trajectory stays in
+# `tests/data/train_parity.bin`; the `api/data/train_parity` record names it.
+filegroup(
+    name = "api_fixture",
+    srcs = ["data/api_fixture.bin"],
+)
+
 # The document-mode loader parity gate (docs/parquet-native.md phase 8). The
 # C++ rows must match the reference
 # `tokenizing_distributed_data_loader_bos_bestfit` for a fixed corpus and

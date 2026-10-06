@@ -409,10 +409,13 @@ def resolve_model(args: argparse.Namespace) -> ModelSpec:
 
 
 def load_tokenizer():
-    """Import and return the reference BPE tokenizer (torch stays here)."""
-    reference.ensure_reference_on_path()
-    from nanochat.tokenizer import get_tokenizer
-    return get_tokenizer()
+    """Return the container-backed tokenizer for evaluation."""
+    artifact = data.nctoken1_path()
+    if artifact is None:
+        raise SystemExit(
+            "evaluation needs the NCTOKEN1 container; run tok_train_main first "
+            "(see docs/tokenizer.md)")
+    return data.load_nctoken1(artifact)
 
 
 def _download_locked(url: str, target: Path, timeout: float = 3600.0) -> None:
@@ -494,8 +497,8 @@ def run_bpb(runners: Runners, spec: ModelSpec, args: argparse.Namespace) -> dict
     artifact = data.nctoken1_path()
     if artifact is None:
         raise SystemExit(
-            "bpb evaluation needs the NCTOKEN1 artifact; run "
-            "tools/convert_tokenizer.py first")
+            "bpb evaluation needs the NCTOKEN1 container; run tok_train_main "
+            "first (see docs/tokenizer.md)")
     train_parquet = ",".join(data.parquet_files("train"))
     val_parquet = ",".join(data.parquet_files("val"))
     if args.dry_run:

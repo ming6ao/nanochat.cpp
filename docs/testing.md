@@ -124,12 +124,41 @@ tools/nanochat build //src/tokenizer:tok_train_main
 tools/nanochat run t0-cpu -- <tok_train_main> --text corpus.txt \
     --vocab-size 512 --out /tmp/tokenizer.nctoken
 tools/nanochat run t0-cpu -- <tok_train_main> --parquet 'data/*.parquet' \
-    --vocab-size 512 --doc-cap 2000 --out /tmp/tokenizer.nctoken
+    --vocab-size 512 --max-chars 2000000 --out /tmp/tokenizer.nctoken
 ```
 
 The bridge self-test needs the system `python3` only. A full bridge run needs
 the reference virtual environment (torch, pyarrow) and the parquet dataset; see
 [python-bridge.md](python-bridge.md).
+
+## Python API tests
+
+The in-process API (docs/python-api.md) has three `py_test` targets and one C
+surface test. Every target is tier T0. The commands are:
+
+```bash
+# The C surface: every function in `nanochat/capi.h`, the sandbox rule, and
+# the owned handles.
+tools/nanochat test //bindings:nanochat_capi_test
+
+# The ctypes core loads the CPU library and runs one forward/backward step.
+tools/nanochat test //python:core_test
+
+# The on-demand builder key and the library search order. Hermetic: it never
+# compiles.
+tools/nanochat test //python:build_test
+
+# The `Trainer` loss curve and the `Evaluator` bits-per-byte result match the
+# committed `//tests:api_fixture`.
+tools/nanochat test //python:api_test
+```
+
+`//python:all` runs the three Python targets. `//bindings:all` runs the C
+surface test. Both ride `//:all_tests` and the default `tools/nanochat test`.
+
+The Python targets use the local `python3` toolchain from `rules_python`, so
+they need no third-party wheel. `tools/dump_api_fixture.py` produces the
+committed `//tests:api_fixture` offline.
 
 ## Finite-difference checks
 

@@ -60,6 +60,19 @@ cc_test(
     size = "small",
 )
 
+# The UTF-8 code-point helpers that the trainer crop uses. They mirror Python's
+# `len(str)` and `str[:n]`, so the native `--doc-cap` matches the reference.
+cc_test(
+    name = "utf8_test",
+    srcs = ["utf8_test.cc"],
+    copts = nanochat_copts(),
+    deps = [
+        ":tokenizer",
+        "//include/nanochat:nanochat",
+    ],
+    size = "small",
+)
+
 # Reference parity: builds an `NCTOKEN1` artifact from
 # `tests/data/tokenizer_fixture.bin` and compares the merges, the token bytes,
 # the split cases, the encode cases, the decode cases, and the stream decoder.
@@ -115,6 +128,7 @@ test_suite(
     tests = [
         ":tokenizer_test",
         ":split_pattern_test",
+        ":utf8_test",
         ":tokenizer_parity_test",
         ":bpe_trainer_test",
     ],

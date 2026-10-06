@@ -67,11 +67,46 @@ import regex
 import rustbpe
 import tiktoken
 
-# Reuse the merge-pair recovery rule of the artifact converter.
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-import convert_tokenizer  # noqa: E402
-
 # --- reference constants ---------------------------------------------------
+
+MERGE_BASE_VOCAB_SIZE = 256
+
+
+def recover_merge_pairs(
+    mergeable_ranks: dict[bytes, int],
+) -> list[tuple[int, int]]:
+    """Recover the ordered merge pairs from a token-bytes-to-rank map.
+
+    Rank ``i`` is the token id. The first 256 ranks are the single byte tokens.
+    The function returns one ``(left, right)`` pair for every rank at or above
+    256, in rank order.
+    """
+    ranks = dict(mergeable_ranks)
+    inverse: dict[int, bytes] = {}
+    for token, rank in ranks.items():
+        if rank in inverse:
+            raise ValueError(f"duplicate rank {rank}")
+        inverse[rank] = bytes(token)
+    if sorted(inverse) != list(range(len(ranks))):
+        raise ValueError("ranks must be contiguous and start at zero")
+
+    pairs: list[tuple[int, int]] = []
+    for rank in range(MERGE_BASE_VOCAB_SIZE, len(ranks)):
+        token = inverse[rank]
+        candidates: list[tuple[int, int]] = []
+        for split in range(1, len(token)):
+            left = ranks.get(token[:split])
+            right = ranks.get(token[split:])
+            if left is None or right is None:
+                continue
+            if left < rank and right < rank:
+                candidates.append((left, right))
+        if not candidates:
+            raise ValueError(f"no merge pair reconstructs rank {rank}")
+        candidates.sort()
+        pairs.append(candidates[0])
+    return pairs
+
 
 #: The nine special tokens, in the reference order (docs/tokenizer.md 2.4).
 SPECIAL_TOKENS = [
@@ -341,7 +376,7 @@ def build_fixture(args: argparse.Namespace) -> tuple[Path, str]:
     }
     base_vocab_size = len(first)
     mergeable = {bytes(token): rank for token, rank in first}
-    merge_pairs = convert_tokenizer.recover_merge_pairs(mergeable)
+    merge_pairs = recover_merge_pairs(mergeable)
     if len(merge_pairs) != base_vocab_size - 256:
         raise AssertionError("merge pair count does not match the vocabulary")
 

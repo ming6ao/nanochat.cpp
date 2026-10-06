@@ -262,8 +262,7 @@ tensor. nanochat.cpp defines the little-endian `NCTOKEN1` container
 nor `torch` to load.
 
 The byte content is the same. The loader derives the token bytes from the ordered
-merge pairs. `tools/convert_tokenizer.py` recovers one pair per rank from the
-reference token-bytes-to-rank map.
+merge pairs. The native trainer writes the pairs in the reference rank order.
 
 The trainer counts pairs with `int64` instead of the reference `int32`. The wider
 type changes no result below the `int32` limit. The fixture-scale corpora stay

@@ -20,6 +20,7 @@ detailed reference that the design points at.
 | [parquet-native.md](parquet-native.md) | The native parquet reader and on-the-fly tokenization plan |
 | [post-training.md](post-training.md) | Design: SFT and reinforcement learning |
 | [python-bridge.md](python-bridge.md) | nanochat-compatible Python entry points |
+| [python-api.md](python-api.md) | In-process Python API, the C interface, and the Kaggle delivery |
 | [sandbox.md](sandbox.md) | Execution sandbox and host resource governance |
 | [host-portability.md](host-portability.md) | Toolchain, optional sandbox, devices, and Kaggle |
 

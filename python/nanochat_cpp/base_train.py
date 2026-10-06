@@ -115,8 +115,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.data_dir:
         os.environ["NANOCHAT_BASE_DIR"] = str(Path(args.data_dir).resolve().parent)
 
-    from nanochat.tokenizer import get_tokenizer
-    tokenizer = get_tokenizer()
+    artifact = data.nctoken1_path()
+    if artifact is None:
+        raise SystemExit(
+            "training needs the NCTOKEN1 container; run tok_train_main first "
+            "(see docs/tokenizer.md)")
+    tokenizer = data.load_nctoken1(artifact)
     vocab_size = tokenizer.get_vocab_size()
 
     plan = config.compute_plan(args, vocab_size)
@@ -179,11 +183,6 @@ def main(argv: list[str] | None = None) -> int:
     if args.resume_from_step != -1:
         core_args += ["--resume", str(checkpoint)]
 
-    artifact = data.nctoken1_path()
-    if artifact is None:
-        raise SystemExit(
-            "training needs the NCTOKEN1 artifact; run "
-            "tools/convert_tokenizer.py first")
     if args.dry_run:
         preview = ["--train-parquet", "<train-parquet>",
                    "--tokenizer", str(artifact)] + core_args

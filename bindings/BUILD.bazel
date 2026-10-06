@@ -1,0 +1,92 @@
+# bindings/ -- the C application binary interface for the in-process Python API
+# (docs/python-api.md). The shim is a thin, exception-safe layer over the
+# existing C++ graph: it converts the flat C structs once, catches every C++
+# exception, and returns owned opaque handles. It links the workflow and the
+# public headers only; the backend (CPU or CUDA) comes from the
+# configuration of `//src:model`, so this file adds no CUDA dependency.
+
+load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library", "cc_test")
+load("//:nanochat.bzl", "nanochat_copts", "precision_defines")
+
+package(default_visibility = ["//visibility:public"])
+
+# The C shim as a library, for a C++ consumer such as the drift test below.
+cc_library(
+    name = "nanochat_capi",
+    srcs = ["nanochat_capi.cc"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    deps = [
+        "//include/nanochat",
+        "//src:model",
+    ],
+)
+
+# The shared library `ctypes` loads at run time. `linkshared` builds a
+# `.so` and requires no `main`.
+cc_binary(
+    name = "nanochat_shared",
+    srcs = ["nanochat_capi.cc"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    linkshared = True,
+    deps = [
+        "//include/nanochat",
+        "//src:model",
+    ],
+)
+
+# The C surface test. It calls every function in `nanochat/capi.h` and checks
+# the sandbox rule, the owned handles, the flat struct copies, and the
+# thread-local error. The fixture paths are the committed parquet document set
+# and the committed tokenizer artifact.
+cc_test(
+    name = "nanochat_capi_test",
+    srcs = ["nanochat_capi_test.cc"],
+    args = [
+        "$(rootpath //src/parquet:testdata/text.parquet)",
+        "$(rootpath //tests:data/loader_tokenizer.nctoken)",
+    ],
+    copts = nanochat_copts(),
+    data = [
+        "//src/parquet:testdata/text.parquet",
+        "//tests:data/loader_tokenizer.nctoken",
+    ],
+    defines = precision_defines(),
+    deps = [
+        ":nanochat_capi",
+        "//include/nanochat",
+    ],
+    size = "small",
+)
+
+# CUDA flavor of the C-surface drift test. The same source and fixture, but
+# linked against the CUDA backend under `--config=cuda` (which `tools/nanochat
+# test --gpu` selects). It proves the host-safe parameter copy on a device
+# backend, where `param.value` points into device memory.
+cc_test(
+    name = "nanochat_capi_gpu_test",
+    srcs = ["nanochat_capi_test.cc"],
+    args = [
+        "$(rootpath //src/parquet:testdata/text.parquet)",
+        "$(rootpath //tests:data/loader_tokenizer.nctoken)",
+    ],
+    copts = nanochat_copts(),
+    data = [
+        "//src/parquet:testdata/text.parquet",
+        "//tests:data/loader_tokenizer.nctoken",
+    ],
+    defines = precision_defines(),
+    deps = [
+        ":nanochat_capi",
+        "//include/nanochat",
+    ],
+    size = "small",
+    tags = ["gpu", "manual"],
+)
+
+# Aggregation point consumed by the wave verifier and the executor.
+test_suite(
+    name = "all",
+    tests = [":nanochat_capi_test"],
+)
