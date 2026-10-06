@@ -1,41 +1,26 @@
-"""Just-in-time parquet -> NANO shard materialization.
+"""The portable ``NCTOKEN1`` tokenizer for the C++ runtime.
 
-The C++ runtime reads only pre-tokenized ``NANO`` shards (see
-``include/nanochat/data.h``). This module tokenizes exactly the tokens a run
-needs from the reference parquet dataset, writes a shard in that format plus
-the ``<shard>.bytes`` sidecar that ``DataLoader`` reads for bits-per-byte, and
-caches the result so repeated runs reuse it.
+The C++ runtime reads parquet documents and tokenizes during the run
+(``docs/parquet-native.md``), so the bridge no longer materializes ``NANO``
+shards. This module supplies the two things the runtime still needs:
 
-The token stream is BOS-separated documents in dataset order. nanochat packs
-batches with BOS-aligned best-fit; the C++ ``DataLoader`` does its own packing,
-so the two are close but not bit-identical. The training-parity harness is the
-exact gate; this path is for training.
+- ``parquet_files`` -- the parquet paths for a split, in dataset order.
+- ``nctoken1_path`` -- the portable ``NCTOKEN1`` artifact.
 
-The tokenizer comes from the reference pickle when the reference directory
-holds one. The bridge also reads the portable ``NCTOKEN1`` artifact and builds
-a ``tiktoken`` encoding from its merge list (docs/tokenizer.md section 5), so a
-run can use the portable file alone. ``tiktoken`` is imported lazily, so the
-torch-free self-test can import this module.
+It also reads that artifact and builds a ``tiktoken`` encoding from its merge
+list (docs/tokenizer.md section 5), so the fixture generator and the self-test
+can share the tokenizer with the C++ side. ``tiktoken`` is imported lazily, so
+the torch-free self-test can import this module.
 """
 
 from __future__ import annotations
 
-import hashlib
 import os
 import struct
-import sys
-from array import array
 from dataclasses import dataclass
 from pathlib import Path
 
 # From include/nanochat/data.h.
-MAGIC = 0x4F4E414E  # "NANO"
-VERSION = 1
-_U16 = "H"
-_U32 = "I"
-
-# From docs/tokenizer.md section 5 and tools/convert_tokenizer.py. The bridge
-# reads this portable artifact when the reference directory holds one.
 NCTOKEN1_MAGIC = b"NCTOKEN1"
 NCTOKEN1_VERSION = 1
 NCTOKEN1_NAME = "tokenizer.nctoken"
@@ -43,50 +28,28 @@ NCTOKEN1_NAME = "tokenizer.nctoken"
 BASE_VOCAB_SIZE = 256
 
 
-def cache_root() -> Path:
-    root = os.environ.get("NANOCHAT_CPP_CACHE")
-    if root:
-        return Path(root)
-    base = os.environ.get("XDG_CACHE_HOME", str(Path.home() / ".cache"))
-    return Path(base) / "nanochat_cpp" / "shards"
-
-
-def _fingerprint(parquet_paths: list[Path], tokenizer_dir: Path, max_tokens: int,
-                 width: int, split: str) -> str:
-    digest = hashlib.sha256()
-    digest.update(f"split={split};max={max_tokens};width={width};".encode())
-    for path in parquet_paths:
-        try:
-            stat = path.stat()
-            digest.update(f"{path.name}:{stat.st_size}:{int(stat.st_mtime)};"
-                          .encode())
-        except OSError:
-            digest.update(f"{path.name}:missing;".encode())
-    for name in ("tokenizer.pkl", "token_bytes.pt", NCTOKEN1_NAME):
-        path = tokenizer_dir / name
-        if path.is_file():
-            stat = path.stat()
-            digest.update(f"{name}:{stat.st_size}:{int(stat.st_mtime)};".encode())
-    return digest.hexdigest()[:16]
-
-
-def _write_header(handle, num_tokens: int, width: int) -> None:
-    handle.seek(0)
-    handle.write(struct.pack("<IIQII", MAGIC, VERSION, num_tokens, width, 0))
-
-
-def _as_bytes(values: list[int], width: int) -> bytes:
-    code = _U16 if width == 2 else _U32
-    buf = array(code, values)
-    if sys.byteorder != "little":
-        buf.byteswap()
-    return buf.tobytes()
-
-
 def _tokenizer_dir() -> Path:
     base = os.environ.get("NANOCHAT_BASE_DIR", str(Path.home() / ".cache" /
                                                      "nanochat"))
     return Path(base) / "tokenizer"
+
+
+def parquet_files(split: str) -> list[str]:
+    """The parquet paths for a split. Train is all but the last file, and val
+    is the last file, matching the reference dataloader. The C++ reader expands
+    and orders them (docs/parquet-native.md)."""
+    assert split in ("train", "val"), "split must be 'train' or 'val'"
+    from nanochat.dataset import list_parquet_files
+    paths = [str(p) for p in list_parquet_files()]
+    return paths[:-1] if split == "train" else paths[-1:]
+
+
+def nctoken1_path() -> Path | None:
+    """The portable ``NCTOKEN1`` artifact, or None when it is absent. When it
+    is present the C++ runtime tokenizes parquet directly, so no shard is
+    written (docs/parquet-native.md)."""
+    path = _tokenizer_dir() / NCTOKEN1_NAME
+    return path if path.is_file() else None
 
 
 class Nctoken1Error(ValueError):
@@ -210,9 +173,9 @@ def build_tiktoken_encoding(artifact: Nctoken1Artifact):
 class Nctoken1Tokenizer:
     """The reference tokenizer interface, backed by the portable artifact.
 
-    ``materialize`` needs only ``get_vocab_size``, ``get_bos_token_id``, and
-    ``encode``. ``token_byte_lengths`` also lets the shard sidecar skip the
-    ``torch`` tensor.
+    ``get_vocab_size``, ``get_bos_token_id``, and ``encode`` match the
+    reference ``nanochat.tokenizer`` interface, so the same object drives the
+    reference dataloader in the loader-parity fixture.
     """
 
     def __init__(self, artifact: Nctoken1Artifact) -> None:
@@ -251,161 +214,3 @@ class Nctoken1Tokenizer:
 def load_nctoken1(path) -> Nctoken1Tokenizer:
     """Read an ``NCTOKEN1`` artifact and wrap its ``tiktoken`` encoding."""
     return Nctoken1Tokenizer(read_nctoken1(path))
-
-
-def _load_bridge_tokenizer():
-    """Return the tokenizer the bridge tokenizes with.
-
-    The portable ``NCTOKEN1`` artifact wins when the reference directory holds
-    one. Otherwise the reference pickle supplies the tokenizer, which needs the
-    reference environment.
-    """
-    artifact_path = _tokenizer_dir() / NCTOKEN1_NAME
-    if artifact_path.is_file():
-        return load_nctoken1(artifact_path)
-    from nanochat.tokenizer import get_tokenizer
-    return get_tokenizer()
-
-
-class ShardWriter:
-    """Streaming writer for the NANO shard format (header + token stream)."""
-
-    def __init__(self, path, width: int = 2) -> None:
-        self.path = Path(path)
-        self.width = width
-        self.count = 0
-        self._tmp = str(self.path) + ".tmp"
-        self._handle = open(self._tmp, "wb")
-        _write_header(self._handle, 0, width)
-
-    def write(self, ids: list[int]) -> None:
-        if not ids:
-            return
-        self._handle.write(_as_bytes(ids, self.width))
-        self.count += len(ids)
-
-    def close(self) -> Path:
-        _write_header(self._handle, self.count, self.width)
-        self._handle.close()
-        os.replace(self._tmp, self.path)
-        return self.path
-
-    def __enter__(self) -> "ShardWriter":
-        return self
-
-    def __exit__(self, *exc) -> None:
-        self.close()
-
-
-def read_shard(path) -> tuple[int, int, list[int]]:
-    """Parse a NANO shard; returns ``(num_tokens, width, tokens)``."""
-    with open(path, "rb") as handle:
-        header = handle.read(24)
-        magic, version, num_tokens, width, _reserved = struct.unpack(
-            "<IIQII", header)
-        if magic != MAGIC or version != VERSION:
-            raise ValueError(f"bad shard header: {path}")
-        code = _U16 if width == 2 else _U32
-        raw = handle.read(num_tokens * width)
-    tokens = array(code)
-    tokens.frombytes(raw)
-    if sys.byteorder != "little":
-        tokens.byteswap()
-    return num_tokens, width, tokens.tolist()
-
-
-def materialize(split: str, max_tokens: int, width: int = 2, force: bool = False):
-    """Tokenize ``max_tokens`` tokens of ``split`` into a cached NANO shard.
-
-    Returns the shard path. ``split`` is ``"train"`` or ``"val"`` (the last
-    parquet file, matching nanochat). The tokenizer comes from the portable
-    ``NCTOKEN1`` artifact when present, otherwise from the reference checkout.
-    The parquet reader comes from the reference checkout, which must already be
-    importable.
-
-    Documents are read in small pyarrow record batches and tokenized in small
-    chunks, so a short run only touches the first few batches of the dataset
-    instead of a whole parquet row group.
-    """
-    import pyarrow.parquet as pq
-
-    from nanochat.dataset import list_parquet_files
-
-    tokenizer = _load_bridge_tokenizer()
-    bos = tokenizer.get_bos_token_id()
-    vocab_size = tokenizer.get_vocab_size()
-
-    parquet_paths = [Path(p) for p in list_parquet_files()]
-    if split == "train":
-        parquet_paths = parquet_paths[:-1]
-    else:
-        parquet_paths = parquet_paths[-1:]
-
-    out_dir = cache_root()
-    out_dir.mkdir(parents=True, exist_ok=True)
-    key = _fingerprint(parquet_paths, _tokenizer_dir(), max_tokens, width, split)
-    out_path = out_dir / f"{split}_{max_tokens}_{width}_{key}.bin"
-    if out_path.is_file() and not force:
-        return out_path
-
-    tmp_path = out_path.with_suffix(".bin.tmp")
-    writer = ShardWriter(tmp_path, width)
-    try:
-        done = False
-        for path in parquet_paths:
-            parquet = pq.ParquetFile(path)
-            for batch in parquet.iter_batches(batch_size=256, columns=["text"]):
-                documents = batch.column("text").to_pylist()
-                token_lists = tokenizer.encode(documents, prepend=bos,
-                                               num_threads=1)
-                for ids in token_lists:
-                    take = min(len(ids), max_tokens - writer.count)
-                    if take <= 0:
-                        done = True
-                        break
-                    writer.write(ids[:take])
-                    if writer.count >= max_tokens:
-                        done = True
-                        break
-                if done:
-                    break
-            if done:
-                break
-    finally:
-        writer.close()
-    os.replace(tmp_path, out_path)
-
-    byte_lengths = None
-    if isinstance(tokenizer, Nctoken1Tokenizer):
-        byte_lengths = tokenizer.token_byte_lengths()
-    _write_token_bytes(out_path, vocab_size, byte_lengths)
-    return out_path
-
-
-def _write_token_bytes(shard_path: Path, vocab_size: int,
-                       byte_lengths: list[int] | None = None) -> None:
-    """Write the ``<shard>.bytes`` sidecar (u32 vocab + one byte per token).
-
-    ``byte_lengths`` comes from a portable ``NCTOKEN1`` artifact. When it is
-    absent, the reference ``token_bytes.pt`` tensor supplies the table, which
-    needs ``torch``.
-    """
-    if byte_lengths is None:
-        try:
-            from nanochat.tokenizer import get_token_bytes
-            byte_lengths = get_token_bytes(device="cpu").to("cpu").tolist()
-        except Exception:  # noqa: BLE001 - bpb is optional; fall back
-            return
-    table = byte_lengths
-    if len(table) < vocab_size:
-        return
-    payload = struct.pack("<I", vocab_size)
-    payload += bytes(int(min(max(v, 0), 255)) for v in table[:vocab_size])
-    with open(str(shard_path) + ".bytes", "wb") as handle:
-        handle.write(payload)
-
-
-def tokens_for_run(total_batch_size: int, num_iterations: int, seq_len: int,
-                   margin: int = 2048) -> int:
-    """Tokens to tokenize for a run (one extra sequence for the target shift)."""
-    return total_batch_size * num_iterations + seq_len + margin

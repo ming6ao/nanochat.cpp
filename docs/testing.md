@@ -95,7 +95,7 @@ generated on the CPU with torch and the runtime tests never import torch.
 
 ## Tokenizer tests
 
-The tokenizer, the trainer, the parquet reader, and the shard writer are host
+The tokenizer, the trainer, and the parquet reader are host
 utilities. Every test is tier T0. The tests need no GPU and no broker. The exact
 commands are:
 
@@ -120,12 +120,11 @@ read the committed fixture `tests/data/tokenizer_fixture.bin`, so they never
 import Python. The native command lines build and run through the sandbox:
 
 ```bash
-tools/nanochat build //src/tokenizer:tok_train_main //src/tokenizer:tok_shard_main
+tools/nanochat build //src/tokenizer:tok_train_main
 tools/nanochat run t0-cpu -- <tok_train_main> --text corpus.txt \
     --vocab-size 512 --out /tmp/tokenizer.nctoken
-tools/nanochat run t0-cpu -- <tok_shard_main> \
-    --tokenizer /tmp/tokenizer.nctoken --parquet 'data/*.parquet' \
-    --out /tmp/train.bin
+tools/nanochat run t0-cpu -- <tok_train_main> --parquet 'data/*.parquet' \
+    --vocab-size 512 --doc-cap 2000 --out /tmp/tokenizer.nctoken
 ```
 
 The bridge self-test needs the system `python3` only. A full bridge run needs

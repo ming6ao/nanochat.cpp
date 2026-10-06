@@ -16,7 +16,7 @@ Three families of measurement:
 
 | Family | Reference | Metric |
 |---|---|---|
-| Bits per byte | `nanochat.loss_eval.evaluate_bpb` | tokenization-invariant cross-entropy on train/val shards |
+| Bits per byte | `nanochat.loss_eval.evaluate_bpb` | tokenization-invariant cross-entropy on the train/val parquet splits |
 | CORE | `nanochat.core_eval` + `eval_bundle.zip` | mean centered ICL accuracy over 22 tasks |
 | Chat accuracy | `scripts/chat_eval.py` | ARC/MMLU categorical; GSM8K/HumanEval generative; ChatCORE |
 | Samples | `scripts/base_eval.py --eval sample` | qualitative text |
@@ -37,7 +37,7 @@ Evaluation splits along the existing process seam:
 
 | Primitive | Shape of the work | Drives |
 |---|---|---|
-| `EvalBpb` (exists) | forward cross-entropy over token shards, sum nats / sum bytes | bpb |
+| `EvalBpb` (exists) | forward cross-entropy over token batches, sum nats / sum bytes | bpb |
 | `ScoreBatch` (new) | forward over a padded token batch; emit per-position NLL and argmax | CORE, categorical chat |
 | `GenerateBatch` (new) | prefill + batched decode with per-row stop and masks | samples, generative chat |
 

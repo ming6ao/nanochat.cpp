@@ -28,8 +28,11 @@
 #include "nanochat/optim.h"
 #include "nanochat/scheduler.h"
 #include "nanochat/tensor.h"
+#include "nanochat/tokenizer.h"
 #include "src/cli.h"
 #include "src/ops.h"
+#include "src/tokenizer/split_pattern.h"
+#include "src/tokenizer/tokenizer_internal.h"
 #include "src/train.h"
 
 namespace {
@@ -81,43 +84,6 @@ Config TinyConfig() {
   config.padded_vocab_size = 64;
   config.window_pattern = "SL";
   return config;
-}
-
-void WriteU16(std::ofstream& out, std::uint16_t value) {
-  const unsigned char bytes[2] = {
-      static_cast<unsigned char>(value & 0xffu),
-      static_cast<unsigned char>((value >> 8) & 0xffu)};
-  out.write(reinterpret_cast<const char*>(bytes), 2);
-}
-
-void WriteU32(std::ofstream& out, std::uint32_t value) {
-  const unsigned char bytes[4] = {
-      static_cast<unsigned char>(value & 0xffu),
-      static_cast<unsigned char>((value >> 8) & 0xffu),
-      static_cast<unsigned char>((value >> 16) & 0xffu),
-      static_cast<unsigned char>((value >> 24) & 0xffu)};
-  out.write(reinterpret_cast<const char*>(bytes), 4);
-}
-
-void WriteU64(std::ofstream& out, std::uint64_t value) {
-  for (int i = 0; i < 8; ++i) {
-    const unsigned char byte =
-        static_cast<unsigned char>((value >> (8 * i)) & 0xffu);
-    out.write(reinterpret_cast<const char*>(&byte), 1);
-  }
-}
-
-std::string WriteShard(const std::string& name,
-                       const std::vector<int>& tokens) {
-  const std::string path = TempPath(name);
-  std::ofstream out(path, std::ios::binary | std::ios::trunc);
-  WriteU32(out, nanochat::kTokenShardMagic);
-  WriteU32(out, nanochat::kTokenShardVersion);
-  WriteU64(out, static_cast<std::uint64_t>(tokens.size()));
-  WriteU32(out, 2);
-  WriteU32(out, 0);
-  for (int token : tokens) WriteU16(out, static_cast<std::uint16_t>(token));
-  return path;
 }
 
 void TestMfu() {
@@ -172,16 +138,71 @@ void TestLogger() {
   }
 }
 
+// A fixed in-memory document source for the harness test: it yields each
+// document once, `source_batch` at a time.
+class VectorSource : public nanochat::DocumentSource {
+ public:
+  VectorSource(std::vector<std::string> documents, std::size_t source_batch)
+      : documents_(std::move(documents)), source_batch_(source_batch) {}
+
+  bool Next(std::vector<std::string>* documents, std::string* error) override {
+    (void)error;
+    if (index_ >= documents_.size()) return false;
+    documents->clear();
+    const std::size_t end = index_ + source_batch_;
+    for (; index_ < end && index_ < documents_.size(); ++index_) {
+      documents->push_back(documents_[index_]);
+    }
+    return true;
+  }
+
+ private:
+  std::vector<std::string> documents_;
+  std::size_t source_batch_ = 1;
+  std::size_t index_ = 0;
+};
+
 void TestTrainLoopMatchesHandRun() {
-  const Config config = TinyConfig();
+  Config config = TinyConfig();
+  // The native tokenizer starts at 256 byte tokens, so the model vocab must be
+  // larger than the tiny default (docs/tokenizer.md section 2).
+  config.vocab_size = 512;
+  config.padded_vocab_size = 512;
   const int batch = 2;
   const int seq = 8;
-  const int total = 32;
-  std::vector<int> stream(static_cast<std::size_t>(total));
-  for (int i = 0; i < total; ++i) {
-    stream[static_cast<std::size_t>(i)] = (i * 7 + 3) % config.vocab_size;
+
+  const std::string tokenizer_path = TempPath("harness.nctoken");
+  if (!nanochat::SaveTokenizer(tokenizer_path, nanochat::NanochatSplitPattern(),
+                               {}, {{"<|bos|>", 256}})) {
+    Fail("harness: SaveTokenizer failed");
+    return;
   }
-  const std::string shard = WriteShard("harness.bin", stream);
+  std::unique_ptr<nanochat::Tokenizer> tokenizer =
+      nanochat::LoadTokenizer(tokenizer_path);
+  if (tokenizer == nullptr) {
+    Fail("harness: LoadTokenizer failed");
+    return;
+  }
+  auto documents = std::make_shared<std::vector<std::string>>(
+      std::vector<std::string>{"alpha", "beta", "gamma", "delta", "epsilon",
+                               "zeta", "eta", "theta", "iota", "kappa"});
+  nanochat::DocumentSourceFactory factory =
+      [documents](
+          std::string* error) -> std::unique_ptr<nanochat::DocumentSource> {
+    (void)error;
+    return std::make_unique<VectorSource>(*documents, 4);
+  };
+
+  // The probe loader produces the hand-run input with the same settings as
+  // `TrainLoop`: same documents, tokenizer, threads, and buffer.
+  nanochat::DataLoader probe(factory, tokenizer.get(), batch, seq, kSeed, 1,
+                             16);
+  std::vector<int> tokens(static_cast<std::size_t>(batch) * seq);
+  std::vector<int> targets(static_cast<std::size_t>(batch) * seq);
+  if (!probe.Next(tokens.data(), targets.data())) {
+    Fail("harness: the probe loader produced no batch");
+    return;
+  }
 
   // Hand-run: one TrainStep with the same weights and the same first batch.
   std::unique_ptr<Model> hand = Model::Create(config);
@@ -192,13 +213,6 @@ void TestTrainLoopMatchesHandRun() {
   OptimizerConfig optimizer_config;
   std::unique_ptr<Optimizer> optimizer =
       nanochat::CreateOptimizer(hand.get(), optimizer_config, scheduler);
-  std::vector<int> tokens(static_cast<std::size_t>(batch) * seq);
-  std::vector<int> targets(static_cast<std::size_t>(batch) * seq);
-  for (int i = 0; i < batch * seq; ++i) {
-    tokens[static_cast<std::size_t>(i)] = stream[static_cast<std::size_t>(i)];
-    targets[static_cast<std::size_t>(i)] =
-        stream[static_cast<std::size_t>(i + 1)];
-  }
   const float expected = hand->TrainStep(tokens.data(), targets.data(), batch,
                                          seq, optimizer.get());
 
@@ -210,8 +224,10 @@ void TestTrainLoopMatchesHandRun() {
   train_config.num_iterations = 1;
   train_config.log_every = 0;
   train_config.seed = kSeed;
-  train_config.shuffle = false;
-  train_config.train_shards = {shard};
+  train_config.tokenizer_path = tokenizer_path;
+  train_config.train_source = factory;
+  train_config.tokenizer_threads = 1;
+  train_config.document_buffer = 16;
   TrainLoop loop(std::move(train_config));
   const float got = loop.Run();
   ExpectNear(static_cast<double>(got), static_cast<double>(expected), 1e-5,
@@ -245,7 +261,8 @@ void TestTrainLoopMatchesHandRun() {
   }
 
   // EvalBpb on the validation loader.
-  DataLoader loader({shard}, batch, seq, kSeed, false);
+  nanochat::DataLoader loader(factory, tokenizer.get(), batch, seq, kSeed, 1,
+                              16);
   const float bpb = nanochat::EvalBpb(reloaded.get(), &loader, 1);
   if (!std::isfinite(bpb) || bpb <= 0.0f) {
     Fail("EvalBpb did not return a finite positive value");

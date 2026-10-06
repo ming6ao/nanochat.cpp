@@ -66,9 +66,10 @@ specified in [docs/kernels.md](docs/kernels.md).
 ### 2.1 Dependency invariants (enforced by the build graph)
 
 1. `src/**` includes only `nanochat/**`. **No vendor headers outside `backends/`,
-   with one exception: `src/tokenizer/` is the one host package that may include
-   the host-only DuckDB header.** The model, the kernels, and the training
-   runtime never link DuckDB.
+   with one exception: `src/parquet/` is the one host package that may include
+   the host-only ZSTD header.** The model, the kernels, and the training runtime
+   never link DuckDB. Parquet input uses the native reader
+   ([parquet-native.md](docs/parquet-native.md)).
 2. `backends/**` includes only `nanochat/kernels.h` and `nanochat/tensor.h`.
    **A kernel knows nothing about GPT.**
 3. `kernels.h` contains no vendor types: pointers are `ComputeType*`, streams are

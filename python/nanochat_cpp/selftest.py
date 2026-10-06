@@ -59,25 +59,6 @@ def _check_config_math() -> int:
                        "padded_vocab(32769)")
     failures += _check(config.padded_vocab(1) == 64, "padded_vocab(1)")
 
-    failures += _check(
-        data.tokens_for_run(4096, 50, 512) == 4096 * 50 + 512 + 2048,
-        "tokens_for_run")
-    return failures
-
-
-def _check_shards() -> int:
-    failures = 0
-    with tempfile.TemporaryDirectory() as tmp:
-        for width, limit in ((2, 65535), (4, 1 << 20)):
-            path = Path(tmp) / f"shard{width}.bin"
-            tokens = [i % limit for i in range(1000)]
-            with data.ShardWriter(path, width) as writer:
-                writer.write(tokens[:400])
-                writer.write(tokens[400:])
-            count, got_width, got = data.read_shard(path)
-            failures += _check(count == len(tokens), f"shard{width} count")
-            failures += _check(got_width == width, f"shard{width} width")
-            failures += _check(got == tokens, f"shard{width} tokens")
     return failures
 
 
@@ -551,7 +532,6 @@ def _check_chat_tasks() -> int:
 def main() -> int:
     failures = 0
     failures += _check_config_math()
-    failures += _check_shards()
     failures += _check_nctoken1()
     failures += _check_name_remap()
     failures += _check_order_key()

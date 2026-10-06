@@ -9,7 +9,7 @@ jinja never leave this module.
 
 Three modes, comma-separated in ``--eval`` (default all three):
 
-* ``bpb``    -- materialize train/val shards and run ``eval_main``
+* ``bpb``    -- run ``eval_main`` over the train/val parquet splits
                 (``nanochat::EvalBpb``), mapping the reference ``--split-tokens``
                 to a step count.
 * ``sample`` -- tokenize the fixed reference prompt list and run
@@ -488,14 +488,21 @@ def run_bpb(runners: Runners, spec: ModelSpec, args: argparse.Namespace) -> dict
     if steps <= 0:
         steps = 1
     adjusted = steps * tokens_per_step
-    need = adjusted + seq + 2048
 
     print(f"[nanochat_cpp] bpb: batch={batch} seq={seq} steps={steps} "
           f"tokens={adjusted:,}", file=sys.stderr)
+    artifact = data.nctoken1_path()
+    if artifact is None:
+        raise SystemExit(
+            "bpb evaluation needs the NCTOKEN1 artifact; run "
+            "tools/convert_tokenizer.py first")
+    train_parquet = ",".join(data.parquet_files("train"))
+    val_parquet = ",".join(data.parquet_files("val"))
     if args.dry_run:
         arguments = [
-            "--train-shard", "<train-shard>",
-            "--val-shard", "<val-shard>",
+            "--train-parquet", "<train-parquet>",
+            "--val-parquet", "<val-parquet>",
+            "--tokenizer", str(artifact),
             "--batch", str(batch),
             "--steps", str(steps),
             "--seed", str(args.seed),
@@ -505,13 +512,10 @@ def run_bpb(runners: Runners, spec: ModelSpec, args: argparse.Namespace) -> dict
         print("  " + " ".join(arguments))
         return {}
 
-    shards = {}
-    for split in ("train", "val"):
-        shards[split] = data.materialize(split, need, force=args.force_data)
-
     arguments = [
-        "--train-shard", str(shards["train"]),
-        "--val-shard", str(shards["val"]),
+        "--train-parquet", train_parquet,
+        "--val-parquet", val_parquet,
+        "--tokenizer", str(artifact),
         "--batch", str(batch),
         "--steps", str(steps),
         "--seed", str(args.seed),

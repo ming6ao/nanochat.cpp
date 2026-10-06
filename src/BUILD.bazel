@@ -44,6 +44,9 @@ cc_library(
         # `eval.cc` decodes the generated rows through the tokenizer stream
         # decoder, so the workflow library links the host tokenizer.
         "//src/tokenizer:tokenizer",
+        # `train.cc` builds a document-mode loader from the native parquet
+        # reader (docs/parquet-native.md), so the workflow links it too.
+        "//src/parquet:parquet",
         "//include/nanochat:nanochat",
     ],
 )
@@ -228,6 +231,7 @@ cc_test(
     defines = precision_defines(),
     deps = [
         ":model",
+        "//src/tokenizer:tokenizer",
         "//include/nanochat:nanochat",
     ],
     size = "small",
@@ -242,6 +246,7 @@ cc_binary(
     defines = precision_defines(),
     deps = [
         ":model",
+        "//src/parquet:parquet",
         "//include/nanochat:nanochat",
     ],
 )
@@ -253,6 +258,7 @@ cc_binary(
     defines = precision_defines(),
     deps = [
         ":model",
+        "//src/parquet:parquet",
         "//include/nanochat:nanochat",
     ],
 )

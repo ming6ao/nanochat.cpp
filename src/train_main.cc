@@ -1,7 +1,8 @@
 // `train_main` -- the training CLI. A hand-written parser keeps the tree free
 // of a third-party argument library. The actual loop lives in `src/train.cc`.
 //
-//   tools/nanochat train -- <train_main> --train-shard data/train.bin ...
+//   tools/nanochat train -- <train_main> --train-parquet 'data/*.parquet'
+//       --tokenizer tokenizer.nctoken ...
 //
 // Every run must go through `tools/nanochat`; see docs/sandbox.md. The entry
 // point refuses to start outside the sandbox (`RequireSandboxOrDie`).
@@ -21,8 +22,12 @@ void Usage() {
   std::fprintf(
       stderr,
       "usage: train_main [options]\n"
-      "  --train-shard PATH     training shard (repeatable, csv)\n"
-      "  --val-shard PATH       validation shard (repeatable, csv)\n"
+      "  --train-parquet GLOB   training parquet (repeatable, csv)\n"
+      "  --val-parquet GLOB     validation parquet (repeatable, csv)\n"
+      "  --tokenizer PATH       NCTOKEN1 artifact (document mode)\n"
+      "  --text-column NAME     parquet text column (default text)\n"
+      "  --tokenizer-threads N  encode workers (default 4)\n"
+      "  --buffer-docs N        encoded documents in memory (default 1000)\n"
       "  --batch N              batch size\n"
       "  --grad-accum N         micro-batches per optimizer step\n"
       "  --num-iterations N     optimizer steps\n"
@@ -35,7 +40,6 @@ void Usage() {
       "  --resume PATH          resume weights from here\n"
       "  --log PATH             also write the run log here\n"
       "  --device NAME          device name for MFU\n"
-      "  --no-shuffle           read shards in file order\n"
       "  [optimizer flags: --embedding-lr --unembedding-lr --matrix-lr\n"
       "   --scalar-lr --weight-decay --weight-decay-base --clip\n"
       "   --adam-eps --muon-ns-steps --muon-beta2]\n"
@@ -58,10 +62,6 @@ int main(int argc, char** argv) {
       Usage();
       return 0;
     }
-    if (flag == "--no-shuffle") {
-      config.shuffle = false;
-      continue;
-    }
     if (nanochat::cli::IsModelFlag(flag)) {
       if (i + 1 >= argc ||
           !nanochat::cli::ApplyModelFlag(flag, argv[i + 1], &config.model)) {
@@ -79,10 +79,20 @@ int main(int argc, char** argv) {
     int parsed_int = 0;
     std::uint64_t parsed_u64 = 0;
     float parsed_float = 0.0f;
-    if (flag == "--train-shard") {
-      nanochat::cli::AppendCsv(value, &config.train_shards);
-    } else if (flag == "--val-shard") {
-      nanochat::cli::AppendCsv(value, &config.val_shards);
+    if (flag == "--train-parquet") {
+      nanochat::cli::AppendCsv(value, &config.train_parquet);
+    } else if (flag == "--val-parquet") {
+      nanochat::cli::AppendCsv(value, &config.val_parquet);
+    } else if (flag == "--tokenizer") {
+      config.tokenizer_path = value;
+    } else if (flag == "--text-column") {
+      config.text_column = value;
+    } else if (flag == "--tokenizer-threads") {
+      config.tokenizer_threads =
+          nanochat::cli::ParseInt(value, &parsed_int) ? parsed_int : 4;
+    } else if (flag == "--buffer-docs") {
+      config.document_buffer =
+          nanochat::cli::ParseInt(value, &parsed_int) ? parsed_int : 1000;
     } else if (flag == "--batch") {
       config.batch =
           nanochat::cli::ParseInt(value, &parsed_int) ? parsed_int : 0;
@@ -173,9 +183,12 @@ int main(int argc, char** argv) {
     }
   }
 
-  if (config.train_shards.empty()) {
-    std::fprintf(stderr,
-                 "train_main: at least one --train-shard is required\n");
+  if (config.train_parquet.empty()) {
+    std::fprintf(stderr, "train_main: --train-parquet is required\n");
+    return 2;
+  }
+  if (config.tokenizer_path.empty()) {
+    std::fprintf(stderr, "train_main: --tokenizer is required\n");
     return 2;
   }
   if (config.num_iterations <= 0 || config.batch <= 0 ||

@@ -14,10 +14,13 @@ nanochat.cpp/
   src/
     ops.cc  model.cc  generate.cc  optim.cc  train.cc  data.cc  eval.cc
     *_main.cc
+    parquet/                   # the native parquet reader (docs/parquet-native.md)
+      thrift.{h,cc}  format.{h,cc}  levels.{h,cc}  reader.{h,cc}
+      *_test.cc  testdata/text.parquet
     tokenizer/                 # the tokenizer host package (see src/tokenizer/)
       tokenizer.cc  split_pattern.{h,cc}  utf8.{h,cc}  unicode_tables.inc
-      bpe_trainer.cc  parquet_reader.{h,cc}  shard_writer.{h,cc}
-      tok_train_main.cc  tok_shard_main.cc
+      bpe_trainer.cc
+      tok_train_main.cc
       *_test.cc
   backends/
     cpu/kernels.cc  cpu/kernels_test.cc
@@ -36,7 +39,7 @@ nanochat.cpp/
     sandbox/verify.sh          # read-back check of the applied limits
     sandbox/nanochat.slice     # aggregate user-slice budget (drop-in)
     sandbox/README.md
-  data/*.bin
+  data/*.parquet
 ```
 
 ## Bazel

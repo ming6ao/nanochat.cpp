@@ -278,7 +278,7 @@ forwards the named config to Bazel. This is how the fp16 gate runs on the T4.
 The repository lives under `/kaggle/working/nanochat.cpp`. The directory is
 writable. It does not persist between sessions unless the notebook saves it.
 
-- Put the token shards and the checkpoints under `/kaggle/working`.
+- Put the parquet dataset and the checkpoints under `/kaggle/working`.
 - Put read-only data in a Kaggle dataset, and mount it at `/kaggle/input`.
 - The repository holds the oracle fixtures in `tests/data/`. They need no download.
 - Commit the notebook to save the output. The session stops when the time
