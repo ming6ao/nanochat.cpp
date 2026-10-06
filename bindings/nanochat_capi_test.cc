@@ -60,6 +60,13 @@ static_assert(sizeof(nanochat_param::rows) == sizeof(nanochat::ParamView::rows),
 static_assert(sizeof(nanochat_param::cols) == sizeof(nanochat::ParamView::cols),
               "nanochat_param.cols drifted from nanochat::ParamView");
 
+static_assert(sizeof(nanochat_device::total_memory_bytes) ==
+                  sizeof(nanochat::Caps::total_memory_bytes),
+              "nanochat_device.total_memory_bytes drifted from nanochat::Caps");
+static_assert(std::is_same<decltype(nanochat_device::device_name),
+                           decltype(nanochat::Caps::device_name)>::value,
+              "nanochat_device.device_name drifted from nanochat::Caps");
+
 static_assert(std::is_same<decltype(nanochat_focus::position),
                            decltype(nanochat::ScoreFocus::position)>::value,
               "nanochat_focus.position drifted from nanochat::ScoreFocus");
@@ -157,7 +164,9 @@ nanochat_config TinyConfig() {
   config.num_layers = 2;
   config.num_heads = 2;
   config.num_kv_heads = 1;
-  config.hidden_dim = 8;
+  // The value gate reads the first 12 channels, so the width must cover them;
+  // a narrower model would skip the gate (ops::ValueResidualForward).
+  config.hidden_dim = 32;
   config.seq_len = 8;
   // The loader fixture tokenizer has a vocabulary of 487 (ids up to 486), so
   // the model must cover it for `nanochat_eval_bpb` to index safely.
@@ -212,6 +221,13 @@ nanochat_optim_config TinyOptimizerConfig() {
 // Model, parameter views, the forward/backward graph, the score and generate
 // copies, and the checkpoint round trip.
 nanochat_model* CheckModel() {
+  // A width below the gate channels is rejected instead of reading out of
+  // bounds in the smear and value gates.
+  nanochat_config narrow = TinyConfig();
+  narrow.hidden_dim = 8;
+  Check("model: a narrow hidden_dim is rejected",
+        nanochat_model_create(&narrow, /*seed=*/0) == nullptr);
+
   const nanochat_config config = TinyConfig();
   nanochat_model* model = nanochat_model_create(&config, /*seed=*/2024);
   Check("model: create returns a handle", model != nullptr);
@@ -230,6 +246,47 @@ nanochat_model* CheckModel() {
   Check("model: param_info gives a value pointer", param.value != nullptr);
   Check("model: param_info rejects a bad index",
         nanochat_param_info(model, count, &param) != 0);
+
+  // The backend and device description. The backend names the linked kernels,
+  // and a CUDA backend must report a device.
+  const char* backend = nanochat_backend();
+  Check("device: backend is cpu or cuda",
+        std::strcmp(backend, "cpu") == 0 || std::strcmp(backend, "cuda") == 0);
+  const int element_size = nanochat_compute_type_size();
+  Check("device: compute type size is 2 or 4",
+        element_size == 2 || element_size == 4);
+  nanochat_device device;
+  std::memset(&device, 0, sizeof(device));
+  nanochat_device_info(&device);
+  Check("device: name is set",
+        device.device_name != nullptr && device.device_name[0] != '\0');
+  Check("device: cuda names a device",
+        std::strcmp(backend, "cuda") != 0 ||
+            std::strcmp(device.device_name, "cpu") != 0);
+
+  // The host-safe parameter copy. It is the only correct way to read or write
+  // a parameter buffer on a device backend, because `param.value` points into
+  // device memory there.
+  const std::int64_t param_count = param.count;
+  const std::size_t param_bytes = static_cast<std::size_t>(param_count) *
+                                  static_cast<std::size_t>(element_size);
+  std::vector<unsigned char> value(param_bytes);
+  std::vector<unsigned char> value_copy(param_bytes);
+  Check("param: read returns the element count",
+        nanochat_param_read(model, 0, /*grad=*/0, 0, param_count,
+                            value.data()) == param_count);
+  Check("param: write returns the element count",
+        nanochat_param_write(model, 0, /*grad=*/0, 0, param_count,
+                             value.data()) == param_count);
+  Check("param: read back returns the element count",
+        nanochat_param_read(model, 0, /*grad=*/0, 0, param_count,
+                            value_copy.data()) == param_count);
+  Check("param: the copy round trip preserves the bytes", value == value_copy);
+  Check("param: read rejects a bad range",
+        nanochat_param_read(model, 0, /*grad=*/0, 0, param_count + 1,
+                            value.data()) < 0);
+  Check("param: read rejects a bad index",
+        nanochat_param_read(model, count, /*grad=*/0, 0, 1, value.data()) < 0);
 
   const int batch = 2;
   const int seq = 4;

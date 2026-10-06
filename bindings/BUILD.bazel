@@ -60,6 +60,31 @@ cc_test(
     size = "small",
 )
 
+# CUDA flavor of the C-surface drift test. The same source and fixture, but
+# linked against the CUDA backend under `--config=cuda` (which `tools/nanochat
+# test --gpu` selects). It proves the host-safe parameter copy on a device
+# backend, where `param.value` points into device memory.
+cc_test(
+    name = "nanochat_capi_gpu_test",
+    srcs = ["nanochat_capi_test.cc"],
+    args = [
+        "$(rootpath //src/parquet:testdata/text.parquet)",
+        "$(rootpath //tests:data/loader_tokenizer.nctoken)",
+    ],
+    copts = nanochat_copts(),
+    data = [
+        "//src/parquet:testdata/text.parquet",
+        "//tests:data/loader_tokenizer.nctoken",
+    ],
+    defines = precision_defines(),
+    deps = [
+        ":nanochat_capi",
+        "//include/nanochat",
+    ],
+    size = "small",
+    tags = ["gpu", "manual"],
+)
+
 # Aggregation point consumed by the wave verifier and the executor.
 test_suite(
     name = "all",

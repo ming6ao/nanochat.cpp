@@ -20,6 +20,7 @@ __all__ = [
     "NANOCHAT_STATUS_OK",
     "NANOCHAT_STATUS_ERROR",
     "Config",
+    "Device",
     "Param",
     "Focus",
     "ScoreResult",
@@ -31,6 +32,9 @@ __all__ = [
     "LoaderHandle",
     "TokenizerHandle",
     "declare",
+    "backend_name",
+    "compute_type_size",
+    "device_info",
     "last_error",
     "check_status",
     "check_handle",
@@ -53,13 +57,18 @@ class NanochatError(RuntimeError):
     """A nonzero ``nanochat_status`` from the C library.
 
     ``function`` names the entry point that failed and ``message`` is the
-    thread-local text from ``nanochat_last_error``.
+    thread-local text from ``nanochat_last_error``. The C layer already
+    prefixes that text with the function name, so the constructor adds the
+    name only for a message that does not carry it.
     """
 
     def __init__(self, function: str, message: str) -> None:
         self.function = function
         self.message = message
-        text = f"{function}: {message}" if function else message
+        if message and function and not message.startswith(function + ":"):
+            text = f"{function}: {message}"
+        else:
+            text = message or function
         super().__init__(text)
 
 
@@ -94,6 +103,22 @@ class Param(ctypes.Structure):
         ("count", ctypes.c_int64),
         ("rows", ctypes.c_int),
         ("cols", ctypes.c_int),
+    ]
+
+
+class Device(ctypes.Structure):
+    """A partial mirror of ``nanochat::Caps`` (``nanochat_device``).
+
+    The backend itself comes from ``nanochat_backend``; this struct carries
+    the device index and diagnostics.
+    """
+
+    _fields_ = [
+        ("device_index", ctypes.c_int),
+        ("compute_major", ctypes.c_int),
+        ("compute_minor", ctypes.c_int),
+        ("total_memory_bytes", ctypes.c_int64),
+        ("device_name", ctypes.c_char_p),
     ]
 
 
@@ -187,6 +212,9 @@ _SIGNATURES = (
     ("nanochat_init", (), ctypes.c_int),
     ("nanochat_last_error", (), ctypes.c_char_p),
     ("nanochat_version", (), ctypes.c_char_p),
+    ("nanochat_backend", (), ctypes.c_char_p),
+    ("nanochat_compute_type_size", (), ctypes.c_int),
+    ("nanochat_device_info", (ctypes.POINTER(Device),), None),
     ("nanochat_model_create",
      (ctypes.POINTER(Config), ctypes.c_uint64), ModelHandle),
     ("nanochat_model_free", (ModelHandle,), None),
@@ -199,6 +227,12 @@ _SIGNATURES = (
     ("nanochat_param_count", (ModelHandle,), ctypes.c_int),
     ("nanochat_param_info",
      (ModelHandle, ctypes.c_int, ctypes.POINTER(Param)), ctypes.c_int),
+    ("nanochat_param_read",
+     (ModelHandle, ctypes.c_int, ctypes.c_int, ctypes.c_int64,
+      ctypes.c_int64, ctypes.c_void_p), ctypes.c_int64),
+    ("nanochat_param_write",
+     (ModelHandle, ctypes.c_int, ctypes.c_int, ctypes.c_int64,
+      ctypes.c_int64, ctypes.c_void_p), ctypes.c_int64),
     ("nanochat_save", (ModelHandle, ctypes.c_char_p), None),
     ("nanochat_load", (ModelHandle, ctypes.c_char_p), None),
     ("nanochat_optim_create",
@@ -266,6 +300,24 @@ def last_error(library) -> str:
     if not value:
         return ""
     return value.decode("utf-8", "replace")
+
+
+def backend_name(library) -> str:
+    """The active backend: ``"cpu"`` or ``"cuda"``."""
+    value = library.nanochat_backend()
+    return value.decode("utf-8", "replace") if value else ""
+
+
+def compute_type_size(library) -> int:
+    """The parameter element size in bytes: four for fp32, two for fp16."""
+    return int(library.nanochat_compute_type_size())
+
+
+def device_info(library) -> "Device":
+    """The active device description."""
+    info = Device()
+    library.nanochat_device_info(ctypes.byref(info))
+    return info
 
 
 def check_status(library, status: int, function: str) -> int:

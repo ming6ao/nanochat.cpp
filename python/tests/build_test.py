@@ -13,7 +13,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from nanochat_cpp import _build
+from nanochat_cpp import _build, _lib
 
 
 class BuildKeyTest(unittest.TestCase):
@@ -91,6 +91,34 @@ class SearchOrderTest(unittest.TestCase):
                     _build.ensure_library()
         finally:
             self._restore(previous)
+
+
+class BackendTest(unittest.TestCase):
+    def test_build_key_changes_with_the_backend(self) -> None:
+        self.assertNotEqual(_build.build_key(backend_name="cpu"),
+                            _build.build_key(backend_name="cuda"))
+
+    def test_default_backend_is_the_environment(self) -> None:
+        previous = os.environ.get("NANOCHAT_CPP_BACKEND")
+        try:
+            os.environ.pop("NANOCHAT_CPP_BACKEND", None)
+            self.assertIsNone(_lib._wanted_backend(None))
+            os.environ["NANOCHAT_CPP_BACKEND"] = "cuda"
+            self.assertEqual(_lib._wanted_backend(None), "cuda")
+        finally:
+            if previous is None:
+                os.environ.pop("NANOCHAT_CPP_BACKEND", None)
+            else:
+                os.environ["NANOCHAT_CPP_BACKEND"] = previous
+
+    def test_device_requests_map_to_a_backend(self) -> None:
+        self.assertEqual(_lib._wanted_backend("cpu"), "cpu")
+        self.assertEqual(_lib._wanted_backend("cuda"), "cuda")
+        self.assertEqual(_lib._wanted_backend("cuda:1"), "cuda")
+        self.assertEqual(_lib._wanted_backend(2), "cuda")
+        self.assertEqual(_lib._wanted_backend("0"), "cuda")
+        with self.assertRaises(ValueError):
+            _lib._wanted_backend("metal")
 
 
 if __name__ == "__main__":

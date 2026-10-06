@@ -92,8 +92,14 @@ def precision() -> str:
     return os.environ.get("NANOCHAT_CPP_PRECISION", "fp32").strip().lower()
 
 
-def backend() -> str:
-    """The requested backend, ``cpu`` by default."""
+def backend(override: str | None = None) -> str:
+    """The requested backend: ``"cpu"`` by default, or ``"cuda"``.
+
+    ``override`` names the backend directly, so a caller such as ``Model``
+    can select the CUDA library without changing the process environment.
+    """
+    if override is not None:
+        return str(override).strip().lower()
     return os.environ.get("NANOCHAT_CPP_BACKEND", "cpu").strip().lower()
 
 
@@ -171,14 +177,15 @@ def compiler_version() -> str:
     return Path(compiler).name
 
 
-def build_key(root: Path | None = None) -> str:
+def build_key(root: Path | None = None,
+              backend_name: str | None = None) -> str:
     """A short key that changes when any build input changes."""
     material = "\n".join((
         source_hash(root),
         compiler_version(),
         architecture(),
         precision(),
-        backend(),
+        backend(backend_name),
     ))
     return hashlib.sha256(material.encode("utf-8")).hexdigest()[:16]
 
@@ -201,9 +208,9 @@ def cached_library(key: str | None = None,
     return directory / f"libnanochat_shared_{key}.so"
 
 
-def _config_flag() -> str:
+def _config_flag(backend_name: str | None = None) -> str:
     """The named Bazel configuration for the requested backend and precision."""
-    if backend() == "cpu":
+    if backend(backend_name) == "cpu":
         return "--config=cpu"
     if precision() == "fp16":
         return "--config=t4"
@@ -220,7 +227,8 @@ def _no_library_message(cache: Path) -> str:
     )
 
 
-def build(key: str | None = None, root: Path | None = None) -> Path:
+def build(key: str | None = None, root: Path | None = None,
+          backend_name: str | None = None) -> Path:
     """Build the shared library and copy it into the cache.
 
     Returns the cached path. Raises ``BuildError`` when the entry point is
@@ -232,7 +240,7 @@ def build(key: str | None = None, root: Path | None = None) -> Path:
         raise BuildError(
             f"cannot build the shared library: {entry} is missing; set "
             f"NANOCHAT_CPP_LIB to a prebuilt {LIBRARY_NAME}")
-    command = [str(entry), "build", SHARED_TARGET, _config_flag()]
+    command = [str(entry), "build", SHARED_TARGET, _config_flag(backend_name)]
     try:
         result = subprocess.run(command, cwd=str(root), capture_output=True,
                                 text=True)
@@ -247,19 +255,27 @@ def build(key: str | None = None, root: Path | None = None) -> Path:
     if not built.is_file():
         raise BuildError(
             f"the build reported success but {built} is missing")
+    if backend(backend_name) == "cuda":
+        # The CUDA shared library carries a runpath into the Bazel solib tree
+        # next to `bazel-bin`. A copy in the cache would lose that runpath and
+        # fail to find libcudart and libcublas, so return the built path.
+        return built
     directory = cache_dir()
     directory.mkdir(parents=True, exist_ok=True)
     if key is None:
-        key = build_key(root)
+        key = build_key(root, backend_name)
     destination = cached_library(key, directory)
     shutil.copy2(built, destination)
     return destination
 
 
-def ensure_library(root: Path | None = None) -> Path:
+def ensure_library(root: Path | None = None,
+                   backend_name: str | None = None) -> Path:
     """Return a usable library path, or raise ``BuildError``.
 
-    The order is the one in docs/python-api.md section 5.1.
+    The order is the one in docs/python-api.md section 5.1: the cache, then a
+    build. ``nanochat_cpp._lib`` performs the runfiles and development-tree
+    search before it calls this function.
     """
     root = Path(root) if root is not None else repo_root()
 
@@ -267,10 +283,10 @@ def ensure_library(root: Path | None = None) -> Path:
     if explicit is not None:
         return explicit
 
-    key = build_key(root)
+    key = build_key(root, backend_name)
     directory = cache_dir()
     cached = cached_library(key, directory)
-    if cached.is_file():
+    if cached.is_file() and backend(backend_name) != "cuda":
         return cached
 
     if prebuilt_only():
@@ -282,4 +298,4 @@ def ensure_library(root: Path | None = None) -> Path:
     if find_compiler() is None:
         raise BuildError(_no_library_message(directory))
 
-    return build(key, root)
+    return build(key, root, backend_name)

@@ -33,6 +33,7 @@
 
 #include "nanochat/config.h"
 #include "nanochat/dataloader.h"
+#include "nanochat/kernels.h"
 #include "nanochat/model.h"
 #include "nanochat/optim.h"
 #include "nanochat/sandbox.h"
@@ -44,7 +45,7 @@ namespace {
 
 // The C ABI version. Bump this string on every change to the surface or to a
 // mirrored struct; docs/python-api.md section 13 names that rule.
-constexpr char kNanochatVersion[] = "0.1.0";
+constexpr char kNanochatVersion[] = "0.2.0";
 
 // The message for the current thread. A `thread_local` string keeps the
 // pointer from `nanochat_last_error` valid until the next failure on this
@@ -119,6 +120,14 @@ void ValidateConfig(const nanochat::Config& config) {
       config.padded_vocab_size <= 0) {
     throw std::invalid_argument("config fields must be positive");
   }
+  // The ResFormer smear and value gates read the first 24 and 12 channels of a
+  // hidden row (ops::kSmearChannels and ops::kVeGateChannels). A narrower row
+  // would read out of bounds, so reject it instead of computing NaN.
+  if (config.hidden_dim < 24) {
+    throw std::invalid_argument(
+        "hidden_dim must be at least 24 for the "
+        "smear and value gates");
+  }
   if (config.hidden_dim % config.num_heads != 0) {
     throw std::invalid_argument("hidden_dim must be divisible by num_heads");
   }
@@ -189,19 +198,55 @@ extern "C" {
 
 nanochat_status nanochat_init(void) {
   return Guard("nanochat_init", NANOCHAT_STATUS_ERROR, []() -> nanochat_status {
-    if (SandboxAllowed()) return NANOCHAT_STATUS_OK;
-    SetLastError(
-        "nanochat_init",
-        "the library must run inside the sandbox; set "
-        "NANOCHAT_SANDBOX_BACKEND=none, or NANOCHAT_SANDBOX=<profile>, or "
-        "NANOCHAT_ALLOW_UNSANDBOXED=1 (docs/python-api.md section 2.1)");
-    return NANOCHAT_STATUS_ERROR;
+    if (!SandboxAllowed()) {
+      SetLastError(
+          "nanochat_init",
+          "the library must run inside the sandbox; set "
+          "NANOCHAT_SANDBOX_BACKEND=none, or NANOCHAT_SANDBOX=<profile>, or "
+          "NANOCHAT_ALLOW_UNSANDBOXED=1 (docs/python-api.md section 2.1)");
+      return NANOCHAT_STATUS_ERROR;
+    }
+    // The build fixes the precision. Fail fast when the device cannot run it,
+    // instead of failing inside the first kernel launch (docs/build.md).
+    const nanochat::Caps caps = nanochat::kernels::GetCaps();
+    if (!caps.Supports(nanochat::kComputeDType)) {
+      const char* precision =
+          nanochat::kComputeDType == nanochat::DType::kFp16 ? "fp16" : "fp32";
+      SetLastError(
+          "nanochat_init",
+          std::string("the device does not support the build ") +
+              "precision (" + precision + "): " +
+              (caps.device_name != nullptr ? caps.device_name : "unknown"));
+      return NANOCHAT_STATUS_ERROR;
+    }
+    return NANOCHAT_STATUS_OK;
   });
 }
 
 const char* nanochat_last_error(void) { return g_last_error.c_str(); }
 
 const char* nanochat_version(void) { return kNanochatVersion; }
+
+const char* nanochat_backend(void) {
+  return nanochat::kernels::GetCaps().is_device ? "cuda" : "cpu";
+}
+
+int nanochat_compute_type_size(void) {
+  return static_cast<int>(sizeof(nanochat::ComputeType));
+}
+
+void nanochat_device_info(nanochat_device* out) {
+  GuardVoid("nanochat_device_info", [&]() {
+    if (out == nullptr) throw std::invalid_argument("out is null");
+    const nanochat::Caps caps = nanochat::kernels::GetCaps();
+    out->device_index = caps.device_index;
+    out->compute_major = caps.compute_major;
+    out->compute_minor = caps.compute_minor;
+    out->total_memory_bytes =
+        static_cast<std::int64_t>(caps.total_memory_bytes);
+    out->device_name = caps.device_name;
+  });
+}
 
 nanochat_model* nanochat_model_create(const nanochat_config* config,
                                       std::uint64_t seed) {
@@ -275,6 +320,61 @@ int nanochat_param_info(nanochat_model* model, int index, nanochat_param* out) {
     out->cols = view.cols;
     return 0;
   });
+}
+
+// Resolves one parameter buffer and validates the requested element range.
+// `grad` selects the gradient when nonzero. The returned pointer addresses
+// the model buffer, which is host memory on the CPU backend and device memory
+// on the CUDA backend. `host` is the caller buffer; it may be null only for an
+// empty range.
+nanochat::ComputeType* ResolveParamRange(nanochat_model* model, int index,
+                                         int grad, int64_t offset,
+                                         int64_t count, const void* host) {
+  if (model == nullptr) throw std::invalid_argument("model is null");
+  const std::vector<nanochat::ParamView> params = model->model->params();
+  if (index < 0 || index >= static_cast<int>(params.size())) {
+    throw std::out_of_range("parameter index out of range");
+  }
+  const nanochat::ParamView& view = params[static_cast<std::size_t>(index)];
+  nanochat::ComputeType* buffer = grad != 0 ? view.grad : view.value;
+  if (buffer == nullptr) throw std::runtime_error("parameter buffer is null");
+  if (host == nullptr && count > 0) {
+    throw std::invalid_argument("data is null");
+  }
+  if (offset < 0 || count < 0 || offset + count > view.count) {
+    throw std::out_of_range("parameter range out of bounds");
+  }
+  return buffer + offset;
+}
+
+int64_t nanochat_param_read(nanochat_model* model, int index, int grad,
+                            int64_t offset, int64_t count, void* data) {
+  return Guard("nanochat_param_read", static_cast<std::int64_t>(-1),
+               [&]() -> std::int64_t {
+                 nanochat::ComputeType* source =
+                     ResolveParamRange(model, index, grad, offset, count, data);
+                 if (count == 0) return 0;
+                 nanochat::kernels::Memcpy(data, source,
+                                           static_cast<std::size_t>(count) *
+                                               sizeof(nanochat::ComputeType),
+                                           nanochat::CopyDir::kDeviceToHost);
+                 return count;
+               });
+}
+
+int64_t nanochat_param_write(nanochat_model* model, int index, int grad,
+                             int64_t offset, int64_t count, const void* data) {
+  return Guard("nanochat_param_write", static_cast<std::int64_t>(-1),
+               [&]() -> std::int64_t {
+                 nanochat::ComputeType* target =
+                     ResolveParamRange(model, index, grad, offset, count, data);
+                 if (count == 0) return 0;
+                 nanochat::kernels::Memcpy(target, data,
+                                           static_cast<std::size_t>(count) *
+                                               sizeof(nanochat::ComputeType),
+                                           nanochat::CopyDir::kHostToDevice);
+                 return count;
+               });
 }
 
 void nanochat_save(nanochat_model* model, const char* path) {

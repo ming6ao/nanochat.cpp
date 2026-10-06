@@ -41,6 +41,17 @@ typedef struct {
   const char* window_pattern;
 } nanochat_config;
 
+// A vendor-free description of the active device, a partial mirror of
+// nanochat::Caps. The backend itself comes from nanochat_backend: `cpu` or
+// `cuda`. `device_name` is a static string that the caller must not free.
+typedef struct {
+  int device_index;
+  int compute_major;
+  int compute_minor;
+  int64_t total_memory_bytes;
+  const char* device_name;
+} nanochat_device;
+
 // One parameter view, a mirror of nanochat::ParamView. `value` and `grad`
 // point to the build compute type, float32 or float16. `count` is the number
 // of elements. `rows` and `cols` are the matrix extents for Muon; a zero
@@ -126,6 +137,16 @@ nanochat_status nanochat_init(void);
 const char* nanochat_last_error(void);
 const char* nanochat_version(void);
 
+// The active backend: "cpu" for the reference backend, or "cuda" when the
+// library links the CUDA kernels. The string is static. Call after
+// nanochat_init. `nanochat_compute_type_size` reports the parameter element
+// size in bytes, four for fp32 and two for fp16.
+const char* nanochat_backend(void);
+int nanochat_compute_type_size(void);
+
+// Fills `out` with a description of the active device.
+void nanochat_device_info(nanochat_device* out);
+
 // Model. `nanochat_model_create` returns an owned handle and null on failure.
 nanochat_model* nanochat_model_create(const nanochat_config* config,
                                       uint64_t seed);
@@ -136,6 +157,18 @@ void nanochat_backward(nanochat_model* model);
 void nanochat_zero_grad(nanochat_model* model);
 int nanochat_param_count(nanochat_model* model);
 int nanochat_param_info(nanochat_model* model, int index, nanochat_param* out);
+
+// Copies `count` elements at `offset` of parameter `index` between the model
+// buffer and the host buffer `data`. `grad` selects the gradient when nonzero
+// and the value otherwise. Each function returns the number of elements
+// copied, or a negative value on error. Use these instead of dereferencing the
+// `nanochat_param` pointers, because a device backend keeps the buffers in
+// device memory. The host buffer holds the build compute type: four-byte
+// float32, or two-byte float16 under a half-precision build.
+int64_t nanochat_param_read(nanochat_model* model, int index, int grad,
+                            int64_t offset, int64_t count, void* data);
+int64_t nanochat_param_write(nanochat_model* model, int index, int grad,
+                             int64_t offset, int64_t count, const void* data);
 void nanochat_save(nanochat_model* model, const char* path);
 void nanochat_load(nanochat_model* model, const char* path);
 

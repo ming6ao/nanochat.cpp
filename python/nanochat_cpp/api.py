@@ -101,35 +101,90 @@ def _void(library, name: str, *arguments) -> None:
 
 
 class TensorView:
-    """A typed, non-owning view over one model parameter buffer.
+    """A host-safe view over one model parameter buffer.
 
-    The view keeps the model alive so the buffer stays valid. The dtype is
-    ``float32``, the precision of the reference CPU build.
+    The view copies each access through the C surface, so it is safe on the CPU
+    backend and on the CUDA backend where the buffer lives in device memory.
+    The view keeps the model alive so the buffer stays valid. The dtype is the
+    build compute type; the Python view supports the four-byte float32 build.
     """
 
-    def __init__(self, address: int, count: int, owner) -> None:
+    def __init__(self, model,
+                 index: int, grad: bool, count: int) -> None:
         self.count = int(count)
-        self._owner = owner
-        array_type = ctypes.c_float * self.count
-        self._buffer = array_type.from_address(int(address))
+        self._model = model
+        self._index = int(index)
+        self._grad = 1 if grad else 0
+        self._library = model._lib
+        self._element_size = _core.compute_type_size(self._library)
+        if self._element_size != ctypes.sizeof(ctypes.c_float):
+            raise NanochatError(
+                "TensorView",
+                "the Python view supports a four-byte float32 build; this "
+                f"build uses {self._element_size} bytes per element")
+
+    def _buffer(self, count: int):
+        return (ctypes.c_float * int(count))()
+
+    def _read(self, offset: int, count: int) -> list[float]:
+        count = int(count)
+        if count <= 0:
+            return []
+        buffer = self._buffer(count)
+        copied = self._library.nanochat_param_read(
+            self._model._handle, self._index, self._grad, int(offset), count,
+            ctypes.cast(buffer, ctypes.c_void_p))
+        if copied != count:
+            raise NanochatError("nanochat_param_read",
+                                _core.last_error(self._library))
+        return [float(value) for value in buffer]
 
     def __len__(self) -> int:
         return self.count
 
     def __getitem__(self, index: int) -> float:
-        return float(self._buffer[index])
+        if index < 0:
+            index += self.count
+        if index < 0 or index >= self.count:
+            raise IndexError(index)
+        return self._read(index, 1)[0]
 
     def __setitem__(self, index: int, value: float) -> None:
-        self._buffer[index] = float(value)
+        if index < 0:
+            index += self.count
+        if index < 0 or index >= self.count:
+            raise IndexError(index)
+        buffer = self._buffer(1)
+        buffer[0] = float(value)
+        copied = self._library.nanochat_param_write(
+            self._model._handle, self._index, self._grad, index, 1,
+            ctypes.cast(buffer, ctypes.c_void_p))
+        if copied != 1:
+            raise NanochatError("nanochat_param_write",
+                                _core.last_error(self._library))
 
     def tolist(self) -> list[float]:
-        return [float(value) for value in self._buffer]
+        return self._read(0, self.count)
 
 
-def _tensor_view(address, count, owner):
-    if not address or count <= 0:
+def _tensor_view(model, index: int, grad: bool, count: int):
+    if count <= 0:
         return None
-    return TensorView(address, count, owner)
+    return TensorView(model, index, grad, count)
+
+
+def _parse_device_index(device):
+    """The device index in a Python device request, or None."""
+    if device is None:
+        return None
+    if isinstance(device, int):
+        return int(device)
+    text = str(device).strip().lower()
+    if text.isdigit():
+        return int(text)
+    if text.startswith("cuda:") and text[5:].isdigit():
+        return int(text[5:])
+    return None
 
 
 @dataclasses.dataclass
@@ -319,13 +374,24 @@ class Tokenizer:
 class Model:
     """A nanochat model on the reference or the CUDA backend."""
 
-    def __init__(self, config: Config, device: str = "cpu",
+    def __init__(self, config: Config, device=None,
                  seed: int | None = None) -> None:
         if not isinstance(config, Config):
             raise TypeError("config must be a nanochat_cpp.Config")
-        self._lib = _lib.load()
+        self._lib = _lib.load(device=device)
         self.config = config
-        self.device = device
+        if _core.backend_name(self._lib) == "cuda":
+            info = _core.device_info(self._lib)
+            requested = _parse_device_index(device)
+            if requested is not None and requested != int(info.device_index):
+                raise NanochatError(
+                    "device",
+                    f"device index {requested} is not selected; the CUDA "
+                    f"library runs on device {info.device_index}, and device "
+                    "selection is not yet in the C surface")
+            self.device = f"cuda:{int(info.device_index)}"
+        else:
+            self.device = "cpu"
         self.seed = int(seed) if seed is not None else 0
         self._c_config = config._to_c()
         handle = self._lib.nanochat_model_create(
@@ -378,8 +444,10 @@ class Model:
                 count=int(param.count),
                 rows=int(param.rows),
                 cols=int(param.cols),
-                value=_tensor_view(param.value, param.count, self),
-                grad=_tensor_view(param.grad, param.count, self),
+                value=_tensor_view(self, index, False, param.count)
+                if param.value else None,
+                grad=_tensor_view(self, index, True, param.count)
+                if param.grad else None,
             ))
         return views
 

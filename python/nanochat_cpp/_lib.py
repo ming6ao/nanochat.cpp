@@ -29,6 +29,7 @@ __all__ = [
     "find_in_runfiles",
     "find_development_library",
     "find_bundled_library",
+    "library_backend",
     "library_path",
     "load",
     "reset",
@@ -40,6 +41,35 @@ RUNFILES_RELATIVE = f"bindings/{_build.LIBRARY_NAME}"
 _lock = threading.Lock()
 _library = None
 _library_path: Path | None = None
+_library_backend: str | None = None
+
+
+def _wanted_backend(device) -> str | None:
+    """Map a Python device request to ``"cpu"``, ``"cuda"``, or None.
+
+    ``None`` means no constraint: use whatever backend the loaded library
+    provides. A string of ``"cpu"``, ``"cuda"``, ``"cuda:N"``, or a bare
+    index selects that backend. When ``device`` is None, an explicit
+    ``NANOCHAT_CPP_BACKEND`` value selects the backend; the unset default
+    leaves the choice to the found library.
+    """
+    if device is None:
+        device = os.environ.get("NANOCHAT_CPP_BACKEND")
+        if device is None or not str(device).strip():
+            return None
+    if isinstance(device, int):
+        return "cuda"
+    text = str(device).strip().lower()
+    if text in ("", "auto"):
+        return None
+    if text == "cpu":
+        return "cpu"
+    if text == "cuda" or text.startswith("cuda:"):
+        return "cuda"
+    if text.isdigit():
+        return "cuda"
+    raise ValueError(
+        f"unknown device {device!r}; use 'cpu', 'cuda', 'cuda:N', or an index")
 
 
 def _runfiles_roots() -> list[Path]:
@@ -122,8 +152,13 @@ def find_bundled_library() -> Path | None:
     return candidate if candidate.is_file() else None
 
 
-def ensure_library() -> Path:
-    """Return a usable library path without loading it."""
+def ensure_library(device=None) -> Path:
+    """Return a usable library path without loading it.
+
+    ``device`` constrains the backend. An explicit backend request prefers the
+    Bazel runfiles library and then an on-demand build, because the
+    development tree under ``bazel-bin`` may hold the other backend.
+    """
     explicit = _build.explicit_library()
     if explicit is not None:
         return explicit
@@ -131,6 +166,15 @@ def ensure_library() -> Path:
     runfiles = find_in_runfiles(RUNFILES_RELATIVE)
     if runfiles is not None:
         return runfiles
+
+    want = _wanted_backend(device)
+    if want is not None:
+        try:
+            return _build.ensure_library(backend_name=want)
+        except _build.BuildError:
+            # No build is possible; fall through to the search path and let
+            # ``load`` verify the backend.
+            pass
 
     development = find_development_library()
     if development is not None:
@@ -140,25 +184,41 @@ def ensure_library() -> Path:
     if bundled is not None:
         return bundled
 
-    return _build.ensure_library()
+    return _build.ensure_library(backend_name=want)
 
 
-def load():
+def load(device=None):
     """Load the shared library once and return the declared handle.
 
     The first call applies ``nanochat_init``. A nonzero status becomes a
-    ``NanochatError`` with the ``nanochat_last_error`` message.
+    ``NanochatError`` with the ``nanochat_last_error`` message. ``device``
+    selects the backend on the first call and is checked on every later call,
+    so a CPU process cannot silently create a CUDA model.
     """
-    global _library, _library_path
+    global _library, _library_path, _library_backend
+    want = _wanted_backend(device)
     with _lock:
         if _library is None:
-            path = ensure_library()
+            path = ensure_library(device)
             library = ctypes.CDLL(str(path))
             _core.declare(library)
             _core.check_status(library, library.nanochat_init(),
                                "nanochat_init")
+            actual = _core.backend_name(library)
+            if want is not None and actual and actual != want:
+                raise _core.NanochatError(
+                    "nanochat_init",
+                    f"the loaded library uses the {actual or 'unknown'} "
+                    f"backend, but device {device!r} asks for {want}; build or "
+                    f"point NANOCHAT_CPP_LIB at the {want} library")
             _library = library
             _library_path = path
+            _library_backend = actual
+        elif want is not None and _library_backend and _library_backend != want:
+            raise _core.NanochatError(
+                "nanochat_init",
+                f"the process already loaded the {_library_backend} backend; "
+                f"one process cannot use both backends")
     return _library
 
 
@@ -169,9 +229,17 @@ def library_path() -> Path:
     return _library_path
 
 
+def library_backend() -> str:
+    """The backend of the loaded library: ``"cpu"`` or ``"cuda"``."""
+    if _library is None:
+        load()
+    return _library_backend or ""
+
+
 def reset() -> None:
     """Forget the cached library. Use only in a test that reloads it."""
-    global _library, _library_path
+    global _library, _library_path, _library_backend
     with _lock:
         _library = None
         _library_path = None
+        _library_backend = None

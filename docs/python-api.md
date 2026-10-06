@@ -29,7 +29,8 @@ The implementation landed at these paths:
 | `python/tests/core_test.py` | The ctypes forward and backward test. |
 | `python/tests/build_test.py` | The hermetic builder-key and search-order test. |
 | `python/tests/api_test.py` | The `Trainer` and `Evaluator` fixture-parity test. |
-| `python/BUILD.bazel` | `//python:nanochat_cpp` and the three `py_test` targets. |
+| `python/tests/gpu_test.py` | The CUDA-backend test: device selection, `TensorView`, a train step, and generation. |
+| `python/BUILD.bazel` | `//python:nanochat_cpp` and the `py_test` targets, including the `gpu`-tagged `api_gpu_test` and `gpu_test`. |
 | `tests/data/api_fixture.bin` | The committed `NANOEVL1` reference fixture. |
 | `tools/dump_api_fixture.py` | The fixture generator. |
 | `MODULE.bazel`, `.bazelrc` | `rules_python` 1.7.0, the local `python3` toolchain, and `--config=cpu`. |
@@ -96,6 +97,11 @@ The library stops with a corrective message when all three tests fail. A Kaggle
 Notebook uses the `none` backend. A workstation run goes through
 `tools/nanochat`.
 
+`nanochat_init` also checks the build precision against the device. The build
+fixes the precision at compile time. The device may not support it. A mismatch
+stops the load with a clear message instead of failing inside the first kernel
+launch (docs/build.md).
+
 ## 3. Layers
 
 ```text
@@ -149,6 +155,9 @@ C++ type crosses the boundary.
 nanochat_status nanochat_init(void);
 const char*     nanochat_last_error(void);
 const char*     nanochat_version(void);
+const char*     nanochat_backend(void);
+int             nanochat_compute_type_size(void);
+void            nanochat_device_info(nanochat_device* out);
 
 typedef struct {
   int num_layers, num_heads, num_kv_heads, hidden_dim;
@@ -156,6 +165,12 @@ typedef struct {
   float rope_base;
   const char* window_pattern;
 } nanochat_config;
+
+typedef struct {
+  int device_index, compute_major, compute_minor;
+  int64_t total_memory_bytes;
+  const char* device_name;
+} nanochat_device;
 
 nanochat_model* nanochat_model_create(const nanochat_config*, uint64_t seed);
 void            nanochat_model_free(nanochat_model*);
@@ -166,6 +181,11 @@ void            nanochat_zero_grad(nanochat_model*);
 int             nanochat_param_count(nanochat_model*);
 int             nanochat_param_info(nanochat_model*, int index,
                                     nanochat_param* out);
+int64_t         nanochat_param_read(nanochat_model*, int index, int grad,
+                                    int64_t offset, int64_t count, void* data);
+int64_t         nanochat_param_write(nanochat_model*, int index, int grad,
+                                     int64_t offset, int64_t count,
+                                     const void* data);
 void            nanochat_save(nanochat_model*, const char* path);
 void            nanochat_load(nanochat_model*, const char* path);
 
@@ -209,6 +229,19 @@ Each `create` function returns an owned handle. The Python wrapper releases the
 handle in `__del__`. Each function that returns an array fills a caller buffer,
 or returns an owned result with a matching `free` function.
 
+### 4.1.1 Device and parameter access
+
+`nanochat_backend` reports `cpu` or `cuda`. `nanochat_device_info` fills a
+`nanochat_device` with the device index, the compute capability, the memory
+size, and the device name. `nanochat_compute_type_size` gives the parameter
+element size: four bytes for fp32 and two bytes for fp16.
+
+On a device backend the `nanochat_param` pointers address device memory, so a
+plain host read faults. `nanochat_param_read` and `nanochat_param_write` copy
+elements between the model buffer and a host buffer. The Python `TensorView`
+uses them, so `Model.params()` is safe on both backends. `grad` selects the
+gradient when it is nonzero and the value otherwise.
+
 ### 4.2 Errors
 
 Each function returns `nanochat_status`. The value `0` means success. A nonzero
@@ -240,31 +273,33 @@ A build key is a hash of the source contents, the compiler version, the CUDA
 architecture, the precision, and the backend. A change in one input gives a new
 key.
 
-### 5.2 Two builders
+### 5.2 The builder
 
-| Builder | Command | Use |
-|---|---|---|
-| `bazel` | `tools/nanochat build //bindings:nanochat_shared --config=<cfg>` | The canonical path. The flags match the tree. The default in a source checkout. |
-| `cc` | `nvcc` and `g++` with a flag manifest | A tree without Bazel. For a small Kaggle dataset. |
+The builder runs the canonical Bazel command through the entry point:
 
-The `bazel` builder keeps one source of truth for the flags. The `cc` builder
-reads `bindings/flags.json` and needs a parity test, because it can drift.
+```bash
+tools/nanochat build //bindings:nanochat_shared --config=cpu    # reference
+tools/nanochat build //bindings:nanochat_shared --config=cuda   # CUDA
+```
 
-### 5.3 Architecture and precision
+The tree supplies the flags, so the build cannot drift from the C++ build. A
+`cc` builder is not in the shipped surface.
 
-The builder selects the target from the host:
+### 5.3 Backend, architecture, and precision
 
-- `NANOCHAT_CUDA_ARCH=sm_75` sets the architecture by hand.
-- Otherwise the builder reads `nvidia-smi --query-gpu=compute_cap` and maps the
-  result.
-- A CPU request selects the reference backend and no architecture.
-
-The precision comes from the configuration, in the same way as
+The backend comes from `NANOCHAT_CPP_BACKEND` (`cpu` by default) or from the
+`device` argument of `Model`. A CUDA request builds with `--config=cuda`; the
+default architecture is `sm_61` (Pascal). `NANOCHAT_CUDA_ARCH` overrides it.
+The precision comes from `NANOCHAT_CPP_PRECISION`, in the same way as
 `tools/nanochat`.
+
+The CUDA shared library carries a runpath into the Bazel solib tree next to
+`bazel-bin`. The builder returns that built path, not a cache copy. A copy
+would lose the runpath and fail to find `libcudart` and `libcublas`.
 
 ### 5.4 Cache
 
-The builder writes the library under `NANOCHAT_CPP_CACHE`, then
+The builder writes a CPU library under `NANOCHAT_CPP_CACHE`, then
 `~/.cache/nanochat_cpp`. On Kaggle, set
 `NANOCHAT_CPP_CACHE=/kaggle/working/.nanochat_cpp`. The library then survives
 the session. A second run in the same session reuses the library.
@@ -559,17 +594,26 @@ NCCL for speed.
 
 | Tier | Test | Gate |
 |---|---|---|
-| T0 | A `sh_test` loads the CPU library and runs one forward step. | The loss matches `train_main` for a fixed seed. |
-| T0 | A build from Python with the `cc` builder. | The result matches the Bazel build for one fixed-seed step. |
-| T0 | A `sh_test` drives `Trainer` and `Evaluator` on a tiny document set. | The API matches the T1 fixture. |
-| T1 | A tiny-shape CUDA run through `_core`. | Same result as the CPU reference. |
-| T2 | A full train-parity run through the API. | The loss curve matches `//tests:train_parity`. |
-| T0 | A two-process host-staged all-reduce on the CPU backend. | The averaged gradient matches a single-process run. |
-| T2 | Two T4 cards with NCCL through `dist`. | The first step matches a single-card run. |
+| T0 | `//python:core_test` loads the CPU library and runs one forward and backward step. | The loss is finite and the C structs have no field-order drift. |
+| T0 | `//python:build_test` checks the builder key and the library search order. | The key changes on every input. |
+| T0 | `//python:api_test` drives `Trainer` and `Evaluator` on the tiny document set. | The loss curve matches the committed CPU fixture. |
+| T0 | `//bindings:nanochat_capi_test` calls every C function. | The handles, the flat structs, and the parameter copy round trip hold. |
+| T1 | `//python:gpu_test` runs the API on the CUDA backend. | The backend is `cuda`, `Model(device="cuda")` selects it, and a train step and generation run. |
+| T1 | `//python:api_gpu_test` is the CUDA flavor of the fixture-parity test. | The loss curve matches the CPU fixture. |
+| T1 | `//bindings:nanochat_capi_gpu_test` is the CUDA flavor of the C drift test. | The host-safe parameter copy works on a device backend. |
 
-Use a `sh_test` wrapper for the Python tests. The tree does not declare
-`rules_python`, and the existing `nanochat_cpp_selftest` target shows the
-pattern.
+Run the two tiers through the entry point:
+
+```bash
+tools/nanochat test                 # the T0 CPU suite
+tools/nanochat test --gpu //python:gpu_test //python:api_gpu_test \
+    //bindings:nanochat_capi_gpu_test   # the T1 CUDA suite
+```
+
+The GPU command builds the shared library under `--config=cuda` and holds the
+single-GPU broker for the suite. The `--config=cuda` default architecture is
+`sm_61` (Pascal). `Model(device="cuda")` rejects a CPU library instead of
+silently using it.
 
 ## 12. Phases
 

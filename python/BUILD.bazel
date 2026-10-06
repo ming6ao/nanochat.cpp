@@ -60,6 +60,39 @@ py_test(
     size = "small",
 )
 
+# T1: the CUDA flavor of the fixture-parity test. The same source and data as
+# `api_test`, but linked against the CUDA library under `--config=cuda`.
+py_test(
+    name = "api_gpu_test",
+    srcs = ["tests/api_test.py"],
+    main = "tests/api_test.py",
+    data = [
+        "//bindings:nanochat_shared",
+        "//src/parquet:testdata/text.parquet",
+        "//tests:api_fixture",
+        "//tests:data/loader_tokenizer.nctoken",
+    ],
+    deps = [":nanochat_cpp"],
+    size = "small",
+    tags = ["gpu", "manual"],
+)
+
+# T1: the in-process API on the CUDA backend. `tools/nanochat test --gpu`
+# builds it under `--config=cuda` and selects it by the `gpu` tag. The same
+# source stays out of the CPU loop.
+py_test(
+    name = "gpu_test",
+    srcs = ["tests/gpu_test.py"],
+    data = [
+        "//bindings:nanochat_shared",
+        "//src/parquet:testdata/text.parquet",
+        "//tests:data/loader_tokenizer.nctoken",
+    ],
+    deps = [":nanochat_cpp"],
+    size = "small",
+    tags = ["gpu", "manual"],
+)
+
 # Aggregation point consumed by //:all_tests.
 test_suite(
     name = "all",
