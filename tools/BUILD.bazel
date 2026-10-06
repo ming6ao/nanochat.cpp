@@ -9,18 +9,19 @@
 # and reproducible. The converter's torch-free logic lives in `//python:package`
 # (`nanochat_cpp.checkpoint`) and is covered by the selftest.
 #
-# `dump_tokenizer_fixture.py`, `convert_tokenizer.py`, and `gen_unicode_tables.py`
-# are the native-tokenizer host tools. The first needs rustbpe, tiktoken, and
-# regex; the second needs tiktoken; the third is dependency-free. They are
-# exported for the same reason. See docs/tokenizer.md.
+# `dump_tokenizer_fixture.py`, `check_tokenizer_parity.py`, and
+# `gen_unicode_tables.py` are the native-tokenizer host tools. The first needs
+# rustbpe, tiktoken, and regex; the second needs rustbpe, tiktoken, and pyarrow;
+# the third is dependency-free. They are exported for the same reason. See
+# docs/tokenizer.md.
 
 load("@rules_shell//shell:sh_test.bzl", "sh_test")
 
 package(default_visibility = ["//visibility:public"])
 
 exports_files([
+    "check_tokenizer_parity.py",
     "convert_checkpoint.py",
-    "convert_tokenizer.py",
     "dump_oracle.py",
     "dump_train_fixture.py",
     "dump_generate_fixture.py",
@@ -69,8 +70,8 @@ filegroup(
 )
 
 filegroup(
-    name = "convert_tokenizer",
-    srcs = ["convert_tokenizer.py"],
+    name = "check_tokenizer_parity",
+    srcs = ["check_tokenizer_parity.py"],
 )
 
 filegroup(

@@ -24,7 +24,7 @@ bool SaveTokenizer(
 // Recovers one `(left, right)` merge pair for every merge in a trained list.
 // `merges` holds the token bytes and the rank of each merge, in rank order.
 // The method picks the smallest left rank and then the smallest right rank,
-// the same rule as `tools/convert_tokenizer.py`. A pair is `(0, 0)` when no
+// the same rule as the native trainer writer. A pair is `(0, 0)` when no
 // split reconstructs the token.
 std::vector<std::pair<std::uint32_t, std::uint32_t>> RecoverMergePairs(
     const std::vector<std::pair<std::vector<std::uint8_t>, int>>& merges);

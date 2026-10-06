@@ -15,6 +15,7 @@
 #include <fstream>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -23,6 +24,7 @@
 #include "src/cli.h"
 #include "src/parquet/reader.h"
 #include "src/tokenizer/tokenizer_internal.h"
+#include "src/tokenizer/utf8.h"
 
 namespace {
 
@@ -43,8 +45,10 @@ void Usage() {
       "  --parquet PATH         a parquet file or glob (repeatable, csv)\n"
       "  --text-column NAME     parquet text column (default text)\n"
       "  --vocab-size N         full vocab size, including specials\n"
-      "  --doc-cap N            stop after N documents (default 10000)\n"
-      "  --max-chars N          stop after N source characters (0 = all)\n"
+      "  --doc-cap N            crop each document to N characters (default "
+      "10000)\n"
+      "  --max-chars N          stop after N source characters (default "
+      "2000000000)\n"
       "  --out PATH             write the NCTOKEN1 artifact here\n");
 }
 
@@ -59,7 +63,7 @@ int main(int argc, char** argv) {
   std::string out_path;
   int vocab_size = 32768;
   int doc_cap = 10000;
-  std::uint64_t max_chars = 0;
+  std::uint64_t max_chars = 2000000000ULL;
 
   for (int i = 1; i < argc; ++i) {
     const std::string flag = argv[i];
@@ -87,7 +91,7 @@ int main(int argc, char** argv) {
       }
       vocab_size = parsed_int;
     } else if (flag == "--doc-cap") {
-      if (!nanochat::cli::ParseInt(value, &parsed_int)) {
+      if (!nanochat::cli::ParseInt(value, &parsed_int) || parsed_int < 0) {
         std::fprintf(stderr, "tok_train_main: bad --doc-cap\n");
         return 2;
       }
@@ -143,13 +147,11 @@ int main(int argc, char** argv) {
     }
     std::string line;
     while (!done && std::getline(in, line)) {
-      if (doc_cap > 0 && documents >= static_cast<std::uint64_t>(doc_cap)) {
-        break;
-      }
-      if (max_chars > 0 && characters >= max_chars) break;
-      trainer.AddDocument(line);
+      const std::string_view document = nanochat::Utf8Prefix(line, doc_cap);
+      trainer.AddDocument(document);
       ++documents;
-      characters += line.size();
+      characters += nanochat::Utf8CodePoints(document);
+      if (characters > max_chars) done = true;
     }
   } else {
     nanochat::ParquetReader::Options options;
@@ -165,17 +167,15 @@ int main(int argc, char** argv) {
     std::vector<std::string> batch;
     while (!done && reader->Next(&batch, &error)) {
       for (const std::string& document : batch) {
-        if (doc_cap > 0 && documents >= static_cast<std::uint64_t>(doc_cap)) {
-          done = true;
-          break;
-        }
-        if (max_chars > 0 && characters >= max_chars) {
-          done = true;
-          break;
-        }
-        trainer.AddDocument(document);
+        const std::string_view cropped =
+            nanochat::Utf8Prefix(document, doc_cap);
+        trainer.AddDocument(cropped);
         ++documents;
-        characters += document.size();
+        characters += nanochat::Utf8CodePoints(cropped);
+        if (characters > max_chars) {
+          done = true;
+          break;
+        }
       }
     }
     if (!error.empty()) {

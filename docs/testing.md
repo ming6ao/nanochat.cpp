@@ -124,7 +124,7 @@ tools/nanochat build //src/tokenizer:tok_train_main
 tools/nanochat run t0-cpu -- <tok_train_main> --text corpus.txt \
     --vocab-size 512 --out /tmp/tokenizer.nctoken
 tools/nanochat run t0-cpu -- <tok_train_main> --parquet 'data/*.parquet' \
-    --vocab-size 512 --doc-cap 2000 --out /tmp/tokenizer.nctoken
+    --vocab-size 512 --max-chars 2000000 --out /tmp/tokenizer.nctoken
 ```
 
 The bridge self-test needs the system `python3` only. A full bridge run needs

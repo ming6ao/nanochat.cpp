@@ -155,9 +155,12 @@ The implementation lives in its own package, `src/tokenizer/`.
 | `src/parquet/reader.{h,cc}` | The native parquet reader (docs/parquet-native.md). |
 | `tools/gen_unicode_tables.py` | The table generator. |
 | `tools/dump_tokenizer_fixture.py` | The reference fixture generator. |
-| `tools/convert_tokenizer.py` | The reference-to-`NCTOKEN1` converter. |
+| `tools/check_tokenizer_parity.py` | The full-vocabulary parity gate. |
 
 ## 5. Artifact format
+
+The container is the only runtime tokenizer artifact. The native trainer
+`tok_train_main` is the only producer. The runtime never reads a Python pickle.
 
 The artifact is little-endian. The loader checks the magic and the version. It
 returns an error for a bad file, and `LoadTokenizer` returns `null`.
@@ -321,8 +324,9 @@ come close to the `int32` limit. The wider type changes no result below the
 limit.
 
 `src/tokenizer/tok_train_main.cc` reads one document per line with `--text`, or
-a parquet dataset with `--parquet`. It takes `--vocab-size`, `--doc-cap`
-(default 10000), `--max-chars`, and `--out`. It writes `NCTOKEN1`. Section 10
+a parquet dataset with `--parquet`. It takes `--vocab-size`, `--doc-cap` (the
+per-document character cap, default 10000), `--max-chars` (the total character
+budget, default 2000000000), and `--out`. It writes `NCTOKEN1`. Section 10
 gives the parquet reader.
 
 ## 10. Parquet input
@@ -392,6 +396,12 @@ small reference tokenizer on a fixed corpus, and it records:
 The fixture is data, so the C++ test never imports Python. The script runs the
 reference twice, and it checks that the two merge hashes agree.
 
+`tools/check_tokenizer_parity.py` is the full-vocabulary gate. It builds a
+corpus from the parquet shards, trains the reference `rustbpe`, runs the native
+`tok_train_main` on the same corpus, and compares every base token. On a
+40M-character ClimbMix corpus at `vocab_size` 32768, both reach 32503 merges and
+all 32759 base tokens match.
+
 ## 13. Roadmap
 
 | Phase | Work | Gate |
@@ -446,7 +456,7 @@ The table lists the landed files.
 | `tests/data/tokenizer_fixture.bin` | The reference fixture. |
 | `tools/dump_tokenizer_fixture.py` | The reference fixture generator. |
 | `tools/gen_unicode_tables.py` | The table generator. |
-| `tools/convert_tokenizer.py` | The reference-to-`NCTOKEN1` converter. |
+| `tools/check_tokenizer_parity.py` | The full-vocabulary parity gate. |
 | `python/nanochat_cpp/data.py` | The bridge reads `NCTOKEN1` and builds a `tiktoken` encoding. |
 | `python/nanochat_cpp/selftest.py` | The torch-free `NCTOKEN1` reader check. |
 

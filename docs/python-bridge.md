@@ -2,9 +2,10 @@
 
 The C++ runtime reads parquet directly and tokenizes during the run
 ([parquet-native.md](parquet-native.md)). The Python bridge supplies the
-remaining pieces — the `NCTOKEN1` artifact, the dataset paths, and the
-training-horizon math — and drives the C++ binaries, so the command line can
-match the PyTorch nanochat scripts.
+remaining pieces: the `NCTOKEN1` artifact, the dataset paths, and the
+training-horizon math. It drives the C++ binaries, so the command line can
+match the PyTorch nanochat scripts. The in-process API for notebooks is in
+[python-api.md](python-api.md).
 
 ## Why entry points, not bindings
 
@@ -50,16 +51,16 @@ Useful bridge flags: `--backend cpu|cuda`, `--profile <sandbox profile>`,
 
 1. **Configuration and horizon.** `nanochat_cpp/config.py` reproduces
    `scripts/base_train.py`: `model_dim = ceil(depth * aspect_ratio / head_dim) *
-   head_dim`, `num_heads = model_dim / head_dim`, `n_kv_head = num_heads`, the
-   padded vocabulary, the optimal token horizon, the auto batch size, the
-   `sqrt(B / B_ref)` learning-rate scale, and the scaled weight decay. The
-   parameter counts come from the reference `GPT.num_scaling_params()`, so they
-   match exactly.
+   head_dim`, `num_heads = model_dim / head_dim`, and `n_kv_head = num_heads`.
+   It also computes the padded vocabulary, the optimal token horizon, the auto
+   batch size, the `sqrt(B / B_ref)` learning-rate scale, and the scaled weight
+   decay. The parameter counts come from the reference
+   `GPT.num_scaling_params()`, so they match exactly.
 2. **Data paths.** `nanochat_cpp/data.py` lists the parquet files for a split
    (`train` is all but the last file, `val` is the last file) and resolves the
    `NCTOKEN1` artifact. It passes both to `train_main`/`eval_main`, which read
    the parquet documents and tokenize during the run
-   ([parquet-native.md](parquet-native.md)). No shard is written.
+   ([parquet-native.md](parquet-native.md)). The bridge writes no shard.
 3. **Launch.** `nanochat_cpp/launcher.py` finds (and builds if needed) the
    binary and runs it under the sandbox. A CUDA run goes through
    `tools/nanochat gpu --profile t2-parity`, which holds the GPU broker; a CPU
@@ -80,14 +81,12 @@ dataloader in the loader-parity fixture, so the portable path needs no `torch`.
 The bridge looks for the artifact at
 `$NANOCHAT_BASE_DIR/tokenizer/tokenizer.nctoken` (`NCTOKEN1_NAME`). Training and
 bit-per-byte evaluation require it; the bridge stops with a message when it is
-absent. `tiktoken` is imported lazily, so the torch-free self-test can import
-the module.
+absent. The bridge imports `tiktoken` only on use, so the torch-free self-test
+can import the module.
 
-Create the artifact with `tools/convert_tokenizer.py` inside the reference
-environment, or with the native trainer `tok_train_main`:
+Create the artifact with the native trainer `tok_train_main`:
 
 ```bash
-python3 tools/convert_tokenizer.py --tokenizer <dir> --out tokenizer.nctoken
 tools/nanochat run t0-cpu -- <tok_train_main> --parquet 'data/*.parquet' \
     --vocab-size 32768 --out tokenizer.nctoken
 ```
@@ -115,15 +114,13 @@ The bridge passes the derived values to `train_main`:
 clipping. `--core-metric-*`, `--sample-every`, `--fp8`, and `--run` are
 accepted for compatibility and ignored.
 
-## Known difference
+## Parity
 
-nanochat packs BOS-aligned best-fit batches in Python; the C++ `DataLoader`
-reads a contiguous random window over the flat token stream. The two are close
-but not bit-identical, so a loss curve from the bridge will not match
-`scripts.base_train` step for step. This is tracked as entry D1 in
-[parity.md](parity.md). The training-parity harness (`tools/dump_train_fixture.py`,
-`//tests:train_parity`) is the exact gate for the model and optimizer; the
-bridge is for training.
+The C++ `DataLoader` uses the reference BOS-aligned best-fit packing
+([dataloader.h](../include/nanochat/dataloader.h)). This packing closes entry D1
+in [parity.md](parity.md). The training-parity harness
+(`tools/dump_train_fixture.py`, `//tests:train_parity`) is the exact gate for
+the model and optimizer.
 
 ## Tests
 
