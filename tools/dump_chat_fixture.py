@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import struct
 import sys
 from pathlib import Path
@@ -85,20 +84,6 @@ CASES = [
 ]
 
 
-def _find_reference_repo() -> Path:
-    candidates = []
-    if os.environ.get("NANOCHAT_REPO"):
-        candidates.append(Path(os.environ["NANOCHAT_REPO"]))
-    repo_root = Path(__file__).resolve().parents[1]
-    candidates.append(repo_root.parent / "nanochat")
-    candidates.append(Path.home() / "repos" / "nanochat")
-    for candidate in candidates:
-        if (candidate / "nanochat" / "tokenizer.py").is_file():
-            return candidate.resolve()
-    raise SystemExit(
-        "cannot find the reference nanochat checkout; set NANOCHAT_REPO")
-
-
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out", default="tests/data/chat_fixture.bin")
@@ -107,11 +92,12 @@ def main(argv: list[str] | None = None) -> int:
 
     repo_root = Path(__file__).resolve().parents[1]
     sys.path.insert(0, str(repo_root / "python"))
-    reference = _find_reference_repo()
-    sys.path.insert(0, str(reference))
 
-    from nanochat.tokenizer import RustBPETokenizer  # noqa: E402
     from nanochat_cpp import data  # noqa: E402
+    from nanochat_cpp.reference import find_reference_repo  # noqa: E402
+
+    sys.path.insert(0, str(find_reference_repo()))
+    from nanochat.tokenizer import RustBPETokenizer  # noqa: E402
 
     artifact = data.read_nctoken1(repo_root / args.tokenizer)
     encoding = data.build_tiktoken_encoding(artifact)

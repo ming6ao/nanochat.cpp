@@ -104,21 +104,6 @@ RATES = {
 }
 
 
-def _find_reference_repo() -> Path:
-    """Locate the PyTorch nanochat checkout that holds ``nanochat``."""
-    candidates = []
-    if os.environ.get("NANOCHAT_REPO"):
-        candidates.append(Path(os.environ["NANOCHAT_REPO"]))
-    repo_root = Path(__file__).resolve().parents[1]
-    candidates.append(repo_root.parent / "nanochat")
-    candidates.append(Path.home() / "repos" / "nanochat")
-    for candidate in candidates:
-        if (candidate / "nanochat" / "gpt.py").is_file():
-            return candidate.resolve()
-    raise SystemExit(
-        "cannot find the reference nanochat checkout; set NANOCHAT_REPO")
-
-
 def _reference_model(depth: int, aspect_ratio: int, head_dim: int,
                      seq_len: int, vocab_size: int, window_pattern: str):
     """A reference ``GPT`` on the meta device for the requested config."""
@@ -221,9 +206,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--out", default="tests/data/plan_fixture.bin")
     args = parser.parse_args(argv)
 
-    reference = _find_reference_repo()
-    if str(reference) not in sys.path:
-        sys.path.insert(0, str(reference))
+    repo_root = Path(__file__).resolve().parents[1]
+    sys.path.insert(0, str(repo_root / "python"))
+    from nanochat_cpp.reference import find_reference_repo  # noqa: E402
+
+    reference = find_reference_repo()
+    sys.path.insert(0, str(reference))
     global GPT, GPTConfig
     from nanochat.gpt import GPT, GPTConfig  # noqa: E402
 
