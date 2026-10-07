@@ -705,7 +705,8 @@ void TestAnvilSteps() {
 }
 
 // The AdamW cadence: with `adam_step_period` of 2 the AdamW groups update on
-// odd steps only, and the bias correction reads the dedicated `adam_step_`
+// the 1-based even steps only (the reference's 0-based odd iterations), and the
+// bias correction reads the Adam-update ordinal derived from the 0-based
 // counter, not the global step.
 void TestAdamCadence() {
 #if defined(NANOCHAT_PRECISION_FP16)
@@ -750,29 +751,35 @@ void TestAdamCadence() {
   for (std::size_t i = 0; i < count; ++i) initial[i] = AsF32(target->value[i]);
 
   optimizer->Step(1);
-  std::vector<float> after_one(count);
-  for (std::size_t i = 0; i < count; ++i)
-    after_one[i] = AsF32(target->value[i]);
-
-  optimizer->Step(2);
-  bool even_changed = false;
-  for (std::size_t i = 0; i < count; ++i) {
-    if (std::fabs(AsF32(target->value[i]) - after_one[i]) > 1e-7f) {
-      even_changed = true;
-    }
-  }
-  if (even_changed) Fail("Adam cadence: AdamW ran on an even step");
-
-  optimizer->Step(3);
   bool odd_changed = false;
   for (std::size_t i = 0; i < count; ++i) {
-    if (std::fabs(AsF32(target->value[i]) - after_one[i]) > 1e-9f) {
+    if (std::fabs(AsF32(target->value[i]) - initial[i]) > 1e-9f) {
       odd_changed = true;
     }
   }
-  if (!odd_changed) Fail("Adam cadence: AdamW did not run on an odd step");
+  if (odd_changed) Fail("Adam cadence: AdamW ran on an odd step");
 
-  // The two AdamW executions (global steps 1 and 3) must match a canonical
+  optimizer->Step(2);
+  std::vector<float> after_two(count);
+  bool even_changed = false;
+  for (std::size_t i = 0; i < count; ++i) {
+    after_two[i] = AsF32(target->value[i]);
+    if (std::fabs(after_two[i] - initial[i]) > 1e-7f) even_changed = true;
+  }
+  if (!even_changed) Fail("Adam cadence: AdamW did not run on an even step");
+
+  optimizer->Step(3);
+  bool odd_again_changed = false;
+  for (std::size_t i = 0; i < count; ++i) {
+    if (std::fabs(AsF32(target->value[i]) - after_two[i]) > 1e-9f) {
+      odd_again_changed = true;
+    }
+  }
+  if (odd_again_changed) Fail("Adam cadence: AdamW ran on an odd step");
+
+  optimizer->Step(4);
+
+  // The two AdamW executions (global steps 2 and 4) must match a canonical
   // AdamW with `step` 1 and 2, not 1 and 3.
   const float scale = std::sqrt(768.0f / static_cast<float>(config.hidden_dim));
   const float group_lr = oc.unembedding_lr * scale;
@@ -782,7 +789,7 @@ void TestAdamCadence() {
   std::vector<float> want = initial;
   std::vector<float> m(count, 0.0f);
   std::vector<float> v(count, 0.0f);
-  const int global_steps[2] = {1, 3};
+  const int global_steps[2] = {2, 4};
   for (int t = 1; t <= 2; ++t) {
     const float lr = group_lr * scheduler.LrMultiplier(global_steps[t - 1]);
     const float bias1 = 1.0f - std::pow(beta1, static_cast<float>(t));

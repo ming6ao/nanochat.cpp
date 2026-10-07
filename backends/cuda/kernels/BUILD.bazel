@@ -219,8 +219,8 @@ cc_library(
     ],
 )
 
-# Aggregate for the optimizer families: AdamW, Muon, and the gradient-clipping
-# GlobalNorm. The optimizer tests link this target.
+# Aggregate for the optimizer families: AdamW, Muon, ANVIL, and the
+# gradient-clipping GlobalNorm. The optimizer tests link this target.
 cc_library(
     name = "optimizer_kernels",
     deps = [

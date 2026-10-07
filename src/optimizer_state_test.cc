@@ -284,8 +284,10 @@ void TestParameterOnlyStaysLoadable() {
 // The ANVIL optimizer state (the twin-rail velocity and the lane energy)
 // round-trips through NCHKPT01: a run that saves at step K and resumes from the
 // file reproduces the reference final records byte for byte, and the records
-// carry the ANVIL names rather than the Muon buffers.
-void TestAnvilStateRoundTrip() {
+// carry the ANVIL names rather than the Muon buffers. `adam_step_period` is
+// exercised at 1 and 2 so the AdamW bias correction stays consistent across a
+// resume when the cadence skips steps.
+void TestAnvilStateRoundTrip(int adam_step_period) {
   const Config config = TinyConfig();
   const int batch = 2;
   const int seq = 8;
@@ -307,10 +309,15 @@ void TestAnvilStateRoundTrip() {
   Scheduler scheduler(scheduler_config);
   OptimizerConfig optimizer_config;
   optimizer_config.matrix_optimizer = 1;
+  optimizer_config.adam_step_period = adam_step_period;
 
-  const std::string resume_path = TempPath("anvil_state_resume.ckpt");
-  const std::string reference_path = TempPath("anvil_state_reference.ckpt");
-  const std::string resumed_path = TempPath("anvil_state_resumed.ckpt");
+  const std::string tag = "_p" + std::to_string(adam_step_period);
+  const std::string resume_path =
+      TempPath("anvil_state_resume" + tag + ".ckpt");
+  const std::string reference_path =
+      TempPath("anvil_state_reference" + tag + ".ckpt");
+  const std::string resumed_path =
+      TempPath("anvil_state_resumed" + tag + ".ckpt");
   {
     std::unique_ptr<Model> model = Model::Create(config);
     model->InitWeights(kSeed);
@@ -380,7 +387,8 @@ void TestAnvilStateRoundTrip() {
 int main() {
   TestResumeContinuesRun();
   TestParameterOnlyStaysLoadable();
-  TestAnvilStateRoundTrip();
+  TestAnvilStateRoundTrip(1);
+  TestAnvilStateRoundTrip(2);
   if (g_failures != 0) {
     std::fprintf(stderr, "optimizer_state_test: %d failure(s)\n", g_failures);
     return 1;

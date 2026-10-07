@@ -194,6 +194,7 @@ int main(int argc, char** argv) {
       if (!nanochat::cli::ParseFloat(value, &parsed_float)) parsed_float = 0.0f;
       config.optimizer.anvil_weight_decay = parsed_float;
     } else if (flag == "--anvil-momentum") {
+      // Accepted but unused: the rail-beta schedule sets the kernel momentum.
       if (!nanochat::cli::ParseFloat(value, &parsed_float)) parsed_float = 0.0f;
       config.optimizer.anvil_momentum = parsed_float;
     } else if (flag == "--anvil-beta2") {
@@ -210,7 +211,7 @@ int main(int argc, char** argv) {
       config.optimizer.anvil_fast_weight = parsed_float;
     } else if (flag == "--anvil-engage-step") {
       config.optimizer.anvil_engage_step =
-          nanochat::cli::ParseInt(value, &parsed_int) ? parsed_int : 0;
+          nanochat::cli::ParseInt(value, &parsed_int) ? parsed_int : 514;
     } else if (flag == "--anvil-num-maps") {
       config.optimizer.anvil_num_maps =
           nanochat::cli::ParseInt(value, &parsed_int) ? parsed_int : 6;

@@ -846,10 +846,11 @@ def _anvil_records(state: Mapping[Any, Any],
                    params: Sequence[Any]) -> list[TensorRecord]:
     """Build the two stacked ANVIL-state records for one shape group.
 
-    The reference ``AnvilAndAdam`` stores each ANVIL parameter's twin-rail
-    velocity as ``[2, *chunk_shape]`` and its lane energy as the reduced lane
-    shape. The C++ optimizer keeps both as flat fp32 buffers per shape group,
-    so the converter concatenates the per-parameter tensors in group order.
+    The reference ``AnvilAndAdam`` stores the group's twin-rail velocity as
+    ``[2, num_params, rows, cols]`` and its lane energy as the reduced lane
+    shape, with one bank per parameter. The C++ optimizer keeps both as flat
+    fp32 buffers per shape group, so the converter reads the first parameter's
+    already group-stacked tensors, exactly like :func:`_muon_records`.
     """
     if not params:
         return []

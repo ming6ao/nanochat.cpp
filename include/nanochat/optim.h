@@ -34,6 +34,8 @@ struct OptimizerConfig {
   int adam_step_period = 1;
   float anvil_lr = 0.023f;
   float anvil_weight_decay = 2.25f;
+  // Kept for the capi field order; unused: the rail-beta schedule overwrites
+  // the kernel momentum (docs/optimizer-anvil-design.md section 5).
   float anvil_momentum = 0.95f;
   float anvil_beta2 = 0.9f;
   float anvil_fast_beta = 0.85f;

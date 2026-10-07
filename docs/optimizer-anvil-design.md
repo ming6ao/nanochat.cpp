@@ -88,7 +88,7 @@ params.lr           = anvil_lr * sqrt(max(1, rows/cols)) * lr_multiplier
 params.weight_decay = anvil_weight_decay * anvil_lr * lr_multiplier
 ```
 
-The product is then `wd * (shape_mult * anvil_lr * lrm)^2`, exactly the
+The product is then `wd * shape_mult * (anvil_lr * lrm)^2`, exactly the
 reference's `lr^2` decay. The shape multiplier appears once, through `lr`.
 
 ## 4. Rail schedule
@@ -102,18 +102,24 @@ schedule in this tree, evaluates at the 0-based loop counter `it = step - 1`:
 - linear cooldown back to `rail_beta_min` over the last
   `rail_beta_cooldown_steps`.
 
+The cooldown fraction is clamped to `[0, 1]`, so a run shorter than
+`rail_beta_cooldown_steps` (reachable with the CAPI default `num_iterations`
+of `0`) holds `rail_beta_min` instead of decaying past it; the reference never
+reaches that regime.
+
 Before `anvil_engage_step` the kernel sees `fast_beta = RailBeta(step)` and
 `fast_weight = 1`; at and after it, `anvil_fast_beta` and
 `anvil_fast_weight`. `momentum` is always `RailBeta(step)`.
 
 ## 5. Configuration
 
-`OptimizerConfig` gains (additive, defaults match the reference):
+`OptimizerConfig` gains (additive; the ANVIL numeric defaults match the
+reference, while the two selectors stay off so the Muon path is unchanged):
 
 | Field | Default | Meaning |
 |---|---|---|
 | `matrix_optimizer` | `0` | `0` = Muon, `1` = ANVIL |
-| `adam_step_period` | `1` | `1` = AdamW every step, `2` = odd steps |
+| `adam_step_period` | `1` | `1` = AdamW every step, `2` = the reference cadence |
 | `anvil_lr` | `0.023` | nominal matrix rate |
 | `anvil_weight_decay` | `2.25` | base decay; `lr` carries the outer factor |
 | `anvil_momentum` | `0.95` | unused: the rail beta overwrites it |
@@ -127,6 +133,12 @@ Before `anvil_engage_step` the kernel sees `fast_beta = RailBeta(step)` and
 `SchedulerConfig` gains `rail_beta_warmup_steps` (`240`),
 `rail_beta_cooldown_steps` (`50`), `rail_beta_min` (`0.85`), and
 `rail_beta_max` (`0.93`).
+
+The default `adam_step_period` of `1` keeps the Muon path bit-identical. A
+faithful ANVIL run needs `--adam-step-period 2`: the reference steps AdamW on
+its 0-based odd iterations only, which this tree's 1-based `step` sees as the
+even steps. The struct default stays `1` because changing it would move the
+Muon path's AdamW cadence.
 
 ## 6. Grouping and state
 
@@ -144,12 +156,13 @@ Each ANVIL group owns:
 Both float buffers are allocated with `kernels::Alloc`, zeroed once, and freed
 in the destructor.
 
-The AdamW cadence guard is
-`adam_step_period <= 1 || (step % adam_step_period) == 1`. With the default
-period of 1 the bias correction reads the global step, so a resumed run and the
-Muon path are bit-identical. With a period above 1 it reads a dedicated
-`adam_step_` counter that increments only when the AdamW loop runs, so the
-moments never see a skipped global step.
+The AdamW cadence guard evaluates at the 0-based counter,
+`adam_step_period <= 1 || ((step - 1) % adam_step_period) == 1`, so the
+reference's `is_adam_step` (0-based odd) is the 1-based even `step` here. With
+the default period of 1 the bias correction reads the global step, so the Muon
+path is bit-identical. With a period above 1 it reads the Adam-update ordinal
+`(step - 1) / adam_step_period + 1`, which is a pure function of the global
+step, so a resumed run re-derives it exactly.
 
 ## 7. Checkpoints
 
@@ -186,6 +199,12 @@ square matrices, both `red_dim` values, `num_maps` 0 and 3, both rail states,
 Nesterov on and off, and the `rows <= 0` no-op. In fp32 it holds a 1e-5
 tolerance; the fp16 build records a looser tolerance because the working matrix
 is stored as half. Both builds pass.
+
+The reference casts the working matrix to bfloat16 before the first Gram and
+re-rounds it at every cascade map. The fp32 build here deliberately keeps the
+whole cascade in fp32 (only the fp16 build rounds through half), so an fp32
+curve comparison against `anvil.py` shows small systematic differences that are
+not defects.
 
 ## 9. Deferred
 

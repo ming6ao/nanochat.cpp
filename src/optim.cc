@@ -181,17 +181,21 @@ class NanochatOptimizer final : public Optimizer {
 
     const float lrm = scheduler_.LrMultiplier(step);
 
-    // AdamW cadence (docs/optimizer-anvil-design.md): with `adam_step_period`
-    // of 2 the AdamW groups update on odd steps only, while the matrix groups
-    // update every step. With a period above 1 the bias correction reads a
-    // dedicated `adam_step_` counter, so the moments never see a skipped
-    // global step; with the default period of 1 the counter is the global step
-    // itself, which keeps a resumed run (and the Muon path) bit-identical.
+    // AdamW cadence (docs/optimizer-anvil-design.md): the reference steps AdamW
+    // on the 0-based odd iterations (`training.is_adam_step`), which are the
+    // 1-based even `step`s here, so with `adam_step_period` of 2 the AdamW
+    // groups update on even steps only while the matrix groups update every
+    // step. The bias correction reads the Adam-update ordinal derived from the
+    // 0-based counter, so a resumed run re-derives it exactly; with the default
+    // period of 1 the ordinal is the global step, which keeps the Muon path
+    // bit-identical.
+    const int it = step - 1;
     const bool run_adam =
-        config_.adam_step_period <= 1 || (step % config_.adam_step_period) == 1;
+        config_.adam_step_period <= 1 || (it % config_.adam_step_period) == 1;
     if (run_adam) {
-      if (config_.adam_step_period > 1) ++adam_step_;
-      const int adam_step = config_.adam_step_period > 1 ? adam_step_ : step;
+      const int adam_step = config_.adam_step_period > 1
+                                ? it / config_.adam_step_period + 1
+                                : step;
       for (AdamWGroup& group : adamw_groups_) {
         for (std::size_t i = 0; i < group.params.size(); ++i) {
           AdamWParams params;
@@ -669,10 +673,6 @@ class NanochatOptimizer final : public Optimizer {
   float* norm_dev_ = nullptr;
   std::int64_t total_count_ = 0;
   float grad_norm_ = 0.0f;
-  // 1-based count of the AdamW updates that have run when `adam_step_period`
-  // is above 1, so the bias correction does not see the global step when the
-  // cadence skips one.
-  int adam_step_ = 0;
 };
 
 }  // namespace
@@ -747,7 +747,10 @@ float Scheduler::RailBeta(int step) const {
   }
   const float cd_start = static_cast<float>(config_.num_iterations) - cooldown;
   if (cooldown > 0.0f && static_cast<float>(it) > cd_start) {
-    const float frac = (static_cast<float>(it) - cd_start) / cooldown;
+    // Clamp to [0, 1]: a run shorter than the cooldown would otherwise drive
+    // the fraction past 1 and the beta below `rail_beta_min`.
+    const float raw = (static_cast<float>(it) - cd_start) / cooldown;
+    const float frac = std::min(1.0f, std::max(0.0f, raw));
     return beta_max - frac * (beta_max - beta_min);
   }
   return beta_max;
