@@ -18,7 +18,7 @@ detailed reference that the design points at.
 | [eval.md](eval.md) | Base and chat evaluation, and the forward-only workspace |
 | [tokenizer.md](tokenizer.md) | The native BPE tokenizer: design, artifacts, training, and status |
 | [parquet-native.md](parquet-native.md) | The native parquet reader and on-the-fly tokenization plan |
-| [post-training.md](post-training.md) | Design: SFT and reinforcement learning |
+| [post-training.md](post-training.md) | Design and status: supervised fine-tuning and reinforcement learning |
 | [python.md](python.md) | The single Python surface: in-process compute API, planning, chat evaluation, and the `tools/nanochat` toolchain |
 | [sandbox.md](sandbox.md) | Execution sandbox and host resource governance |
 | [host-portability.md](host-portability.md) | Toolchain, optional sandbox, devices, and Kaggle |
