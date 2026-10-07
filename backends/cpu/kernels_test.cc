@@ -552,16 +552,30 @@ void TestEmbedding() {
   }
   std::vector<float> dout0 = RandomVec(tokens * dim, &rng);
   std::vector<ComputeType> dout = ToStorage(dout0);
+  // The backward accumulates onto the persistent gradient buffer. The caller
+  // clears it once, so the test starts at a nonzero value to prove the add.
   std::vector<ComputeType> dtable(vocab * dim, C(7.0f));
   kernels::EmbeddingBackward(tokens, dim, ids, dout.data(), dtable.data());
   for (int d = 0; d < dim; ++d) {
-    CheckClose(U(dtable[0 * dim + d]), dout0[1 * dim + d], 1e-5,
+    CheckClose(U(dtable[0 * dim + d]), 7.0 + dout0[1 * dim + d], 1e-5,
                "embedding grad row0");
-    CheckClose(U(dtable[1 * dim + d]), dout0[0 * dim + d] + dout0[2 * dim + d],
-               1e-5, "embedding grad row1 (duplicate)");
-    CheckClose(U(dtable[2 * dim + d]), dout0[3 * dim + d], 1e-5,
+    CheckClose(U(dtable[1 * dim + d]),
+               7.0 + dout0[0 * dim + d] + dout0[2 * dim + d], 1e-5,
+               "embedding grad row1 (duplicate)");
+    CheckClose(U(dtable[2 * dim + d]), 7.0 + dout0[3 * dim + d], 1e-5,
                "embedding grad row2");
     CheckClose(U(dtable[3 * dim + d]), 7.0, 1e-6, "embedding untouched row");
+  }
+  // A second call on the same buffer sums, because the caller owns the one
+  // zeroing pass. Id 1 appears in both calls, so its row holds the sum of four
+  // contributions (two per call).
+  kernels::EmbeddingBackward(tokens, dim, ids, dout.data(), dtable.data());
+  for (int d = 0; d < dim; ++d) {
+    CheckClose(U(dtable[1 * dim + d]),
+               7.0 + 2.0 * (dout0[0 * dim + d] + dout0[2 * dim + d]), 1e-5,
+               "embedding grad accumulated duplicate");
+    CheckClose(U(dtable[3 * dim + d]), 7.0, 1e-6,
+               "embedding grad accumulated untouched row");
   }
 }
 

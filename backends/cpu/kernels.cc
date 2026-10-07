@@ -1072,13 +1072,10 @@ void EmbeddingForward(int tokens, int dim, const int* ids,
 void EmbeddingBackward(int tokens, int dim, const int* ids,
                        const ComputeType* dout, ComputeType* dtable) {
   if (tokens <= 0 || dim <= 0) return;
-  // Zero only the rows this batch touches (docs/model.md). Doing this in a
-  // first pass makes duplicate ids safe: every touched row is zeroed before any
-  // contribution is added.
-  for (int i = 0; i < tokens; ++i) {
-    ComputeType* row = dtable + static_cast<std::int64_t>(ids[i]) * dim;
-    ZeroFill(row, static_cast<std::size_t>(dim));
-  }
+  // Add every token row to the dense gradient buffer. The caller clears the
+  // buffer once with ZeroGrad, so repeated backward calls sum. A duplicate id
+  // adds every occurrence. The scatter-add needs no zeroing pass
+  // (docs/model.md).
   for (int i = 0; i < tokens; ++i) {
     ComputeType* row = dtable + static_cast<std::int64_t>(ids[i]) * dim;
     const std::int64_t src = static_cast<std::int64_t>(i) * dim;

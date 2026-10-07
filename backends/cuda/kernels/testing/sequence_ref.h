@@ -282,16 +282,13 @@ inline std::vector<float> EmbeddingForward(int tokens, int dim,
   return out;
 }
 
-// Mirrors the CPU contract: zero only the touched rows, then add. `dtable_init`
-// is the incoming (persistent) gradient buffer.
+// Mirrors the CPU contract: add each token row to `dtable_init`, the incoming
+// (persistent) gradient buffer. The caller clears the buffer once, so repeated
+// calls sum.
 inline std::vector<float> EmbeddingBackward(
     int tokens, int dim, const std::vector<int>& ids,
     const std::vector<float>& dout, const std::vector<float>& dtable_init) {
   std::vector<float> dtable = dtable_init;
-  for (int i = 0; i < tokens; ++i) {
-    float* row = dtable.data() + static_cast<std::size_t>(ids[i]) * dim;
-    for (int d = 0; d < dim; ++d) row[d] = 0.0f;
-  }
   for (int i = 0; i < tokens; ++i) {
     float* row = dtable.data() + static_cast<std::size_t>(ids[i]) * dim;
     const std::size_t src = static_cast<std::size_t>(i) * dim;
