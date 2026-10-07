@@ -65,8 +65,8 @@ void ExpectNear(double got, double want, double tolerance,
                 const std::string& what) {
   const double diff = std::fabs(got - want);
   if (!(diff <= tolerance)) {
-    Fail(Format("%s: got %.9g want %.9g (|diff|=%.3g > tol=%.3g)",
-                what.c_str(), got, want, diff, tolerance));
+    Fail(Format("%s: got %.9g want %.9g (|diff|=%.3g > tol=%.3g)", what.c_str(),
+                got, want, diff, tolerance));
   }
 }
 
@@ -75,8 +75,7 @@ std::vector<float> ReadCompute(const ComputeType* src, std::int64_t count) {
   std::vector<ComputeType> host(static_cast<std::size_t>(count));
   if (count > 0) {
     nanochat::kernels::Memcpy(
-        host.data(), src,
-        static_cast<std::size_t>(count) * sizeof(ComputeType),
+        host.data(), src, static_cast<std::size_t>(count) * sizeof(ComputeType),
         CopyDir::kDeviceToHost);
   }
   std::vector<float> out(static_cast<std::size_t>(count));
@@ -113,8 +112,8 @@ constexpr std::uint64_t kSeed = 20240607;
 std::vector<double> ReferenceRowLosses(const TrainModel* impl,
                                        const std::vector<int>& targets,
                                        int rows, int vocab, int padded) {
-  const std::vector<float> raw = ReadCompute(
-      impl->raw_logits(), static_cast<std::int64_t>(rows) * padded);
+  const std::vector<float> raw =
+      ReadCompute(impl->raw_logits(), static_cast<std::int64_t>(rows) * padded);
   std::vector<double> out(static_cast<std::size_t>(rows), 0.0);
   const double cap = static_cast<double>(nanochat::kLogitSoftcap);
   for (int r = 0; r < rows; ++r) {
@@ -173,9 +172,9 @@ bool CompareGradients(Model* a, Model* b, double atol, double rtol,
           atol + rtol * std::max({std::fabs(da), std::fabs(db)});
       const double diff = std::fabs(da - db);
       if (std::fabs(da) > 0.0 || std::fabs(db) > 0.0) {
-        max_relative = std::max(
-            max_relative,
-            diff / std::max({std::fabs(da), std::fabs(db), 1e-12}));
+        max_relative =
+            std::max(max_relative,
+                     diff / std::max({std::fabs(da), std::fabs(db), 1e-12}));
       }
       if (diff > limit) {
         Fail(Format("%s: grad/%s[%zu] %.9g vs %.9g (|diff|=%.3g)", what.c_str(),
