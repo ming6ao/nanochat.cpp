@@ -104,15 +104,21 @@ struct AttentionParams {
   float scale = 0.0f;
 };
 
-// Logit softcap + cross-entropy + unpadded-vocab slice (docs/kernels.md).
-// `logits` is `rows x padded_vocab_size`; only the first `vocab_size` columns
-// are read, and the backward zeroes the padded tail.
+// Logit softcap + cross-entropy + unpadded-vocab slice (docs/kernels.md and
+// docs/post-training.md section 2.2). `logits` is `rows x padded_vocab_size`;
+// only the first `vocab_size` columns are read, and the backward zeroes the
+// padded tail.
 struct ClassifierParams {
   int rows = 0;
   int vocab_size = 0;
   int padded_vocab_size = 0;
   float softcap = kDefaultLogitSoftcap;
   int ignore_index = -1;
+  // Optional per-row weights of length `rows` for the backward. A null pointer
+  // keeps the current behavior. When the pointer is not null, the backward
+  // multiplies row `r` by `row_scale[r]` after the softcap chain rule. The
+  // backward still zeroes every ignored row and the padded vocabulary tail.
+  const float* row_scale = nullptr;
 };
 
 struct AdamWParams {
