@@ -145,8 +145,8 @@ void RunWeightedCase(int rows, int vocab, int padded, bool use_ignore,
     for (int j = 0; j < padded; ++j) {
       const float value = got[static_cast<std::size_t>(r) * padded + j];
       if ((ignored || j >= vocab) && value != 0.0f) {
-        std::printf("FAIL: %s row %d col %d must be zero, got %g\n", name, r,
-                    j, value);
+        std::printf("FAIL: %s row %d col %d must be zero, got %g\n", name, r, j,
+                    value);
         ++Failures();
       }
     }
