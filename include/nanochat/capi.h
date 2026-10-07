@@ -176,8 +176,8 @@ void nanochat_backward(nanochat_model* model);
 // `row_weights` holds one weight per row, that is `batch * seq` entries. A null
 // model or a null weight buffer is an error. The call accumulates into the
 // parameter gradients, so call nanochat_zero_grad first for a fresh gradient.
-void nanochat_backward_weighted(nanochat_model* model,
-                                const float* row_weights, float scale);
+void nanochat_backward_weighted(nanochat_model* model, const float* row_weights,
+                                float scale);
 void nanochat_zero_grad(nanochat_model* model);
 int nanochat_param_count(nanochat_model* model);
 int nanochat_param_info(nanochat_model* model, int index, nanochat_param* out);
