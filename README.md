@@ -69,7 +69,9 @@ backends/cuda/      CUDA implementation; cuBLAS for GEMM
 backends/cuda/kernels/  kernels, per-family tests, benchmarks, test scaffolding
 dev/kernels/        unpromoted prototypes and the toolchain spike
 tests/              oracle fixtures and parity tests
-python/             tokenization, dataset access, and the train/eval bridge
+bindings/           the C ABI for the in-process Python API
+python/             the single Python surface: compute, planning, orchestration
+notebooks/          the Kaggle Notebook (two T4 cards)
 tools/              entry point, GPU broker, resource sandbox, fixtures
 tools/kaggle/       Kaggle Notebook bootstrap
 docs/               reference and how-to

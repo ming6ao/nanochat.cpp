@@ -28,12 +28,15 @@ happen through the integrator.
 |---|---|---|
 | **Architect / Integrator** | `include/nanochat/*.h`, `MODULE.bazel`, `.bazelrc`, top-level `BUILD` files, `README.md`, `DESIGN.md`, `AGENTS.md`, `CONTRIBUTING.md`, `docs/**` | — |
 | **Runtime** | `include/nanochat/tensor.h`, `src/tensor.cc`, `backends/cpu/` | frozen `kernels.h` |
-| **Oracle** | `tools/dump_oracle.py`, `tests/`, `tests/data/*.bin` | frozen `tensor.h` |
+| **Oracle** | `tools/dump_*.py`, `tests/`, `tests/data/*.bin` | frozen `tensor.h` |
 | **Kernel agents** (one per family) | `backends/cuda/kernels/<family>.cu` + `<family>_test.cc` + `<family>_benchmark.cc` in the same directory | frozen `kernels.h` |
 | **Kernel agents** (shared) | `backends/cuda/kernels/testing/**` (host test scaffolding), `dev/kernels/**` (unpromoted prototypes) | — |
 | **Workflow** | `src/ops.cc`, `src/model.cc`, `src/generate.cc` | `kernels.h`, CPU backend |
 | **Optimizer** | `src/optim.cc` | `kernels.h` |
 | **Harness** | `src/train.cc`, `src/data.cc`, `src/eval.cc`, `src/*_main.cc`, `include/nanochat/{data,scheduler,logger,mfu}.h` | Model API |
+| **Python surface** | `python/**`, `bindings/**` | C ABI `capi.h`, Model API |
+| **Data pipeline** | `src/tokenizer/**`, `src/parquet/**`, `include/nanochat/{tokenizer,bpe_trainer}.h` | frozen `data.h` |
+| **Notebooks** | `notebooks/**`, `tools/kaggle/**` | `docs/host-portability.md` |
 | **Build** | `MODULE.bazel`, `.bazelrc`, `BUILD.bazel` (setup only) | Architect |
 
 **Frozen interfaces** (architect-owned; coordinate before editing):
@@ -42,6 +45,7 @@ happen through the integrator.
 - `include/nanochat/tensor.h` — `Tensor`, `ComputeType`, `DType`, `Caps`.
 - `include/nanochat/config.h` — `Config`.
 - `include/nanochat/model.h` — the public Model API.
+- `include/nanochat/capi.h` — the C ABI for the in-process Python API.
 
 A frozen header may still gain symbols during Wave 0. After the freeze, edits
 stay architect-owned, and additive changes are preferred.

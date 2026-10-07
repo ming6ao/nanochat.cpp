@@ -5,7 +5,10 @@ nanochat architecture, in the spirit of [llm.c](https://github.com/karpathy/llm.
 and [llama.cpp](https://github.com/ggml-org/llama.cpp). No PyTorch, no autograd
 engine, no graph compiler. One model definition, swappable hardware backends.
 
-Status: design. Nothing built yet.
+Status: implemented and in use. The CPU reference backend and the CUDA backend
+(Pascal sm_61 and Turing sm_75) run the full training and inference graph. The
+Python surface, the native tokenizer, and the native parquet reader are in the
+tree. This document stays the design rationale.
 
 This document is the design rationale: goals, invariants, and the reasoning
 behind the decisions. Interface reference and how-to material lives under
@@ -201,7 +204,8 @@ reverse-mode template metaprogramming.
 - Dynamic shapes; runtime dtype switching; runtime recompute.
 - TPU / systolic backends; ROCm/Metal (future backend packages).
 - Whole-block megakernels and persistent direct-MMA kernels for training.
-- Third-party runtime libraries beyond CUDA and cuBLAS.
+- Third-party runtime libraries beyond CUDA, cuBLAS, and the parquet
+decompressor (ZSTD, restricted to `src/parquet/`; see §2.1).
 - Container runtimes and sandboxing daemons (Docker, Podman, bubblewrap,
   firejail). Isolation is host cgroup v2 plus user namespaces, applied by
   `tools/sandbox.sh`; no image, no daemon, no new dependency.
