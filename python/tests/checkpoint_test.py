@@ -9,6 +9,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from nanochat_cpp import checkpoint
 
@@ -181,6 +182,143 @@ class PathResolutionTest(unittest.TestCase):
 
             with self.assertRaises(checkpoint.CheckpointError):
                 checkpoint.resolve("bogus", base_dir=base)
+
+
+class _FakeTensor:
+    """A stdlib stand-in for one reference optimizer tensor."""
+
+    def __init__(self, shape, payload):
+        self.shape = tuple(shape)
+        self.payload = payload
+
+
+class OptimizerStateTest(unittest.TestCase):
+    """The reference optimizer shard becomes C++ optimizer-state records."""
+
+    def optimizer_state(self):
+        state = {
+            0: {
+                "step": 3,
+                "exp_avg": _FakeTensor((2, 2), b"A" * 16),
+                "exp_avg_sq": _FakeTensor((2, 2), b"B" * 16),
+            },
+            7: {
+                "step": 3,
+                "exp_avg": _FakeTensor((1,), b"C" * 4),
+                "exp_avg_sq": _FakeTensor((1,), b"D" * 4),
+            },
+            9: {
+                "momentum_buffer": _FakeTensor((2, 3, 4), b"M" * 96),
+                "second_momentum_buffer": _FakeTensor((2, 3, 1), b"V" * 24),
+            },
+        }
+        groups = [
+            {"kind": "adamw", "params": [0, 7]},
+            {"kind": "muon", "params": [9, 10]},
+        ]
+        return {"state": state, "param_groups": groups}
+
+    def build(self):
+        with mock.patch.object(checkpoint, "_optimizer_payload",
+                               lambda tensor: tensor.payload):
+            return checkpoint.build_optimizer_records(self.optimizer_state())
+
+    def test_adamw_groups_are_concatenated(self):
+        records = {record.name: record for record in self.build()}
+        self.assertEqual(
+            set(records),
+            {"adamw.lm_head.m", "adamw.lm_head.v",
+             "muon.3x4.buf1", "muon.3x4.buf2"})
+        self.assertEqual(records["adamw.lm_head.m"].data, b"A" * 16 + b"C" * 4)
+        self.assertEqual(records["adamw.lm_head.v"].data, b"B" * 16 + b"D" * 4)
+        self.assertEqual(records["adamw.lm_head.m"].shape, (5,))
+        self.assertEqual(records["adamw.lm_head.m"].dtype,
+                         checkpoint.DTYPE_FP32)
+        self.assertEqual(records["muon.3x4.buf1"].data, b"M" * 96)
+        self.assertEqual(records["muon.3x4.buf2"].data, b"V" * 24)
+        self.assertEqual(records["muon.3x4.buf1"].shape, (24,))
+
+    def test_adamw_group_order_names_each_kind(self):
+        state = {
+            i: {"exp_avg": _FakeTensor((1,), b"x" * 4),
+                "exp_avg_sq": _FakeTensor((1,), b"y" * 4)}
+            for i in range(6)
+        }
+        groups = [{"kind": "adamw", "params": [i]} for i in range(6)]
+        with mock.patch.object(checkpoint, "_optimizer_payload",
+                               lambda tensor: tensor.payload):
+            records = checkpoint.build_optimizer_records(
+                {"state": state, "param_groups": groups})
+        self.assertEqual([record.name for record in records], [
+            "adamw.lm_head.m", "adamw.lm_head.v",
+            "adamw.embedding.m", "adamw.embedding.v",
+            "adamw.value_embedding.m", "adamw.value_embedding.v",
+            "adamw.resid.m", "adamw.resid.v",
+            "adamw.x0.m", "adamw.x0.v",
+            "adamw.smear.m", "adamw.smear.v",
+        ])
+
+    def test_group_without_saved_state_is_skipped(self):
+        with mock.patch.object(checkpoint, "_optimizer_payload",
+                               lambda tensor: tensor.payload):
+            records = checkpoint.build_optimizer_records(
+                {"state": {}, "param_groups": [
+                    {"kind": "adamw", "params": [0]},
+                    {"kind": "muon", "params": [1]},
+                ]})
+        self.assertEqual(records, [])
+
+    def test_optimizer_order_key_matches_the_cxx_save_order(self):
+        names = [
+            "adamw.lm_head.m", "adamw.lm_head.v",
+            "adamw.embedding.m", "adamw.embedding.v",
+            "muon.4x8.buf2", "muon.4x8.buf1", "muon.2x2.buf1",
+        ]
+        self.assertEqual(sorted(names, key=checkpoint.optimizer_order_key), [
+            "adamw.lm_head.m", "adamw.lm_head.v",
+            "adamw.embedding.m", "adamw.embedding.v",
+            "muon.2x2.buf1", "muon.4x8.buf1", "muon.4x8.buf2",
+        ])
+
+
+class OptimizerContainerTest(unittest.TestCase):
+    def records(self):
+        return [
+            checkpoint.TensorRecord("lm_head.weight", checkpoint.DTYPE_FP32,
+                                    (2, 3), bytes(24)),
+        ]
+
+    def optimizer_records(self):
+        return [
+            checkpoint.TensorRecord("adamw.lm_head.m", checkpoint.DTYPE_FP32,
+                                    (6,), bytes(24)),
+            checkpoint.TensorRecord("muon.4x4.buf1", checkpoint.DTYPE_FP32,
+                                    (16,), bytes(64)),
+        ]
+
+    def test_file_round_trip_with_optimizer_state(self):
+        params = self.records()
+        state = self.optimizer_records()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "model.nchkpt01"
+            checkpoint.write_checkpoint(path, params, state)
+            self.assertEqual(checkpoint.read_checkpoint(path), params)
+            self.assertEqual(checkpoint.read_optimizer_state(path), state)
+            self.assertEqual(checkpoint.read_checkpoint_full(path),
+                             (params, state))
+
+    def test_parameter_only_file_has_an_empty_optimizer_section(self):
+        params = self.records()
+        payload = checkpoint.serialize(params)
+        got_params, got_state = checkpoint.parse_checkpoint(payload)
+        self.assertEqual(got_params, params)
+        self.assertEqual(got_state, [])
+
+    def test_truncated_optimizer_section_is_rejected(self):
+        payload = checkpoint.serialize(self.records(),
+                                       self.optimizer_records())
+        with self.assertRaises(checkpoint.CheckpointError):
+            checkpoint.parse_checkpoint(payload[:-6])
 
 
 if __name__ == "__main__":

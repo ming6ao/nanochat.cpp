@@ -29,10 +29,12 @@
 #include <utility>
 #include <vector>
 
+#include "nanochat/data.h"
 #include "nanochat/kernels.h"
 #include "nanochat/model.h"
 #include "nanochat/scheduler.h"
 #include "nanochat/tensor.h"
+#include "src/optim_state.h"
 
 namespace nanochat {
 namespace {
@@ -58,6 +60,41 @@ enum class AdamWKind {
   kX0,
   kSmear,
 };
+
+// Stable record-name token for one AdamW group (docs/post-training.md section
+// 7). The token must not change once a checkpoint exists.
+const char* KindName(AdamWKind kind) {
+  switch (kind) {
+    case AdamWKind::kLmHead:
+      return "lm_head";
+    case AdamWKind::kEmbedding:
+      return "embedding";
+    case AdamWKind::kValueEmbedding:
+      return "value_embedding";
+    case AdamWKind::kResid:
+      return "resid";
+    case AdamWKind::kX0:
+      return "x0";
+    case AdamWKind::kSmear:
+      return "smear";
+  }
+  return "unknown";
+}
+
+// Records one optimizer-state buffer as a float32 tensor record. The kernel
+// seam stages a device buffer to the host.
+void AddOptimizerStateRecord(Checkpoint* checkpoint, const std::string& name,
+                             const float* data, std::int64_t count) {
+  if (checkpoint == nullptr || data == nullptr || count <= 0) return;
+  TensorRecord record;
+  record.name = name;
+  record.dtype = DType::kFp32;
+  record.shape.assign(1, count);
+  const std::size_t bytes = static_cast<std::size_t>(count) * sizeof(float);
+  record.data.resize(bytes);
+  kernels::Memcpy(record.data.data(), data, bytes, CopyDir::kDeviceToHost);
+  checkpoint->AddOptimizerState(std::move(record));
+}
 
 // One AdamW parameter group: the parameters, their flat gradient offsets, and
 // the first/second moment buffers (float even in an fp16 build).
@@ -169,6 +206,60 @@ class NanochatOptimizer final : public Optimizer {
   }
 
   float GradNorm() const override { return grad_norm_; }
+
+  // Optimizer-state checkpoint records (docs/post-training.md section 7): the
+  // AdamW first/second moments and the Muon momentum/second-moment buffers,
+  // beside the model parameters.
+  void SaveState(Checkpoint* checkpoint) const {
+    for (const AdamWGroup& group : adamw_groups_) {
+      const std::string name = std::string("adamw.") + KindName(group.kind);
+      AddOptimizerStateRecord(checkpoint, name + ".m", group.m,
+                              group.moment_count);
+      AddOptimizerStateRecord(checkpoint, name + ".v", group.v,
+                              group.moment_count);
+    }
+    for (const MuonGroup& group : muon_groups_) {
+      const std::int64_t mat_total =
+          static_cast<std::int64_t>(group.num_params) * group.mat;
+      const std::string name = "muon." + std::to_string(group.rows) + "x" +
+                               std::to_string(group.cols);
+      AddOptimizerStateRecord(checkpoint, name + ".buf1", group.buf1,
+                              mat_total);
+      AddOptimizerStateRecord(checkpoint, name + ".buf2", group.buf2,
+                              group.buf2_len);
+    }
+  }
+
+  // Copies every matching record into the group buffers. Returns true when at
+  // least one record was restored.
+  bool LoadState(const Checkpoint& checkpoint) {
+    bool restored = false;
+    auto load = [&](const std::string& name, float* data, std::int64_t count) {
+      if (data == nullptr || count <= 0) return;
+      const TensorRecord* record = checkpoint.FindOptimizerState(name);
+      if (record == nullptr || record->dtype != DType::kFp32) return;
+      const std::size_t wanted =
+          static_cast<std::size_t>(count) * sizeof(float);
+      const std::size_t bytes = std::min(wanted, record->data.size());
+      if (bytes == 0) return;
+      kernels::Memcpy(data, record->data.data(), bytes, CopyDir::kHostToDevice);
+      restored = true;
+    };
+    for (const AdamWGroup& group : adamw_groups_) {
+      const std::string name = std::string("adamw.") + KindName(group.kind);
+      load(name + ".m", group.m, group.moment_count);
+      load(name + ".v", group.v, group.moment_count);
+    }
+    for (const MuonGroup& group : muon_groups_) {
+      const std::int64_t mat_total =
+          static_cast<std::int64_t>(group.num_params) * group.mat;
+      const std::string name = "muon." + std::to_string(group.rows) + "x" +
+                               std::to_string(group.cols);
+      load(name + ".buf1", group.buf1, mat_total);
+      load(name + ".buf2", group.buf2, group.buf2_len);
+    }
+    return restored;
+  }
 
   // Test-only introspection (declared by src/optim_test.cc). Reports the group
   // that owns `name`: kind 0 = AdamW, 1 = Muon, the matrix extents, and the
@@ -462,6 +553,21 @@ float Scheduler::WeightDecay(int step) const {
 // ---------------------------------------------------------------------------
 // Public entry points
 // ---------------------------------------------------------------------------
+
+// Optimizer state (docs/post-training.md section 7). The records live in
+// `Checkpoint`, not in the public `Optimizer` surface, so `src/train.cc`
+// moves them across the checkpoint boundary with these two functions.
+void SaveOptimizerState(const Optimizer& optimizer, Checkpoint* checkpoint) {
+  const auto* impl = dynamic_cast<const NanochatOptimizer*>(&optimizer);
+  if (impl == nullptr) return;
+  impl->SaveState(checkpoint);
+}
+
+bool LoadOptimizerState(const Checkpoint& checkpoint, Optimizer* optimizer) {
+  auto* impl = dynamic_cast<NanochatOptimizer*>(optimizer);
+  if (impl == nullptr) return false;
+  return impl->LoadState(checkpoint);
+}
 
 // Test-only introspection; declared (not frozen) by src/optim_test.cc.
 bool OptimizerParamGroupForTest(const Optimizer* optimizer, const char* name,

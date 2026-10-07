@@ -255,12 +255,14 @@ inline std::vector<float> ClassifierBackward(const ClassifierParams& params,
       sum_exp += std::exp(static_cast<double>(probs[j] - row_max));
     }
     const float inv = static_cast<float>(1.0 / sum_exp);
+    const float row_scale =
+        params.row_scale != nullptr ? params.row_scale[r] : 1.0f;
     for (int j = 0; j < vocab; ++j) {
       const float t = std::tanh(logits[base + j] / cap);
       const float sech2 = 1.0f - t * t;
       const float p = std::exp(probs[j] - row_max) * inv;
       const float onehot = (j == target) ? 1.0f : 0.0f;
-      dlogits[base + j] = (p - onehot) * sech2;
+      dlogits[base + j] = (p - onehot) * sech2 * row_scale;
     }
   }
   return dlogits;
@@ -280,16 +282,13 @@ inline std::vector<float> EmbeddingForward(int tokens, int dim,
   return out;
 }
 
-// Mirrors the CPU contract: zero only the touched rows, then add. `dtable_init`
-// is the incoming (persistent) gradient buffer.
+// Mirrors the CPU contract: add each token row to `dtable_init`, the incoming
+// (persistent) gradient buffer. The caller clears the buffer once, so repeated
+// calls sum.
 inline std::vector<float> EmbeddingBackward(
     int tokens, int dim, const std::vector<int>& ids,
     const std::vector<float>& dout, const std::vector<float>& dtable_init) {
   std::vector<float> dtable = dtable_init;
-  for (int i = 0; i < tokens; ++i) {
-    float* row = dtable.data() + static_cast<std::size_t>(ids[i]) * dim;
-    for (int d = 0; d < dim; ++d) row[d] = 0.0f;
-  }
   for (int i = 0; i < tokens; ++i) {
     float* row = dtable.data() + static_cast<std::size_t>(ids[i]) * dim;
     const std::size_t src = static_cast<std::size_t>(i) * dim;

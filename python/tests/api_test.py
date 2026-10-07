@@ -166,6 +166,91 @@ class ApiTest(unittest.TestCase):
         self.assertAlmostEqual(bpb, _float(records, "api/eval/val/bpb"),
                                delta=0.01)
 
+    def _grad_snapshot(self, model) -> dict:
+        snapshot = {}
+        for param in model.params():
+            if param.grad is not None:
+                snapshot[param.name] = param.grad.tolist()
+        return snapshot
+
+    def _grad_max_abs_diff(self, first: dict, second: dict) -> float:
+        worst = 0.0
+        for name, values in first.items():
+            self.assertIn(name, second)
+            for got, want in zip(values, second[name]):
+                worst = max(worst, abs(got - want))
+        return worst
+
+    def _tiny_batch(self, model, batch: int, seq: int):
+        vocab = model.config.vocab_size
+        count = batch * seq
+        tokens = [index % vocab for index in range(count)]
+        targets = [(index + 1) % vocab for index in range(count)]
+        return tokens, targets
+
+    def test_backward_weighted_matches_the_plain_backward(self) -> None:
+        records = self.records
+        model = Model(self.config(), seed=_int(records, "api/seed"))
+        data = self.token_data()
+        optimizer = Optimizer(model, **self.optimizer_kwargs())
+        trainer = Trainer(model, data, num_iterations=1, optimizer=optimizer)
+        tokens, targets = self._tiny_batch(model, trainer.batch, trainer.seq)
+
+        model.zero_grad()
+        model.forward_loss(tokens, targets, batch=trainer.batch,
+                           seq=trainer.seq)
+        model.backward()
+        plain = self._grad_snapshot(model)
+
+        model.zero_grad()
+        model.forward_loss(tokens, targets, batch=trainer.batch,
+                           seq=trainer.seq)
+        trainer.backward_weighted([1.0] * (trainer.batch * trainer.seq))
+        weighted = self._grad_snapshot(model)
+        self.assertLess(self._grad_max_abs_diff(plain, weighted), 1e-4)
+
+        with self.assertRaises(ValueError):
+            trainer.backward_weighted([1.0])
+
+    def test_grad_accum_matches_a_combined_batch(self) -> None:
+        records = self.records
+        model = Model(self.config(), seed=_int(records, "api/seed"))
+        data = self.token_data()
+        optimizer = Optimizer(model, **self.optimizer_kwargs())
+        trainer = Trainer(model, data, num_iterations=1, optimizer=optimizer)
+        batch, seq = trainer.batch, trainer.seq
+        first = self._tiny_batch(model, batch, seq)
+        second = self._tiny_batch(model, batch, seq)
+        # Shift the second micro-batch so the two windows differ.
+        second = ([value + 1 for value in second[0]],
+                  [value + 1 for value in second[1]])
+
+        model.zero_grad()
+        model.forward_loss(first[0], first[1], batch=batch, seq=seq)
+        trainer.backward_weighted([1.0] * (batch * seq), scale=0.5)
+        model.forward_loss(second[0], second[1], batch=batch, seq=seq)
+        trainer.backward_weighted([1.0] * (batch * seq), scale=0.5)
+        accumulated = self._grad_snapshot(model)
+
+        model.zero_grad()
+        model.forward_loss(first[0] + second[0], first[1] + second[1],
+                           batch=2 * batch, seq=seq)
+        model.backward()
+        combined = self._grad_snapshot(model)
+        self.assertLess(self._grad_max_abs_diff(accumulated, combined), 1e-4)
+
+    def test_grad_accum_iteration_runs(self) -> None:
+        records = self.records
+        model = Model(self.config(), seed=_int(records, "api/seed"))
+        data = self.token_data()
+        optimizer = Optimizer(model, **self.optimizer_kwargs())
+        trainer = Trainer(model, data, grad_accum=2, num_iterations=1,
+                          optimizer=optimizer)
+        self.assertEqual(trainer.grad_accum, 2)
+        step, loss = next(trainer)
+        self.assertEqual(step, 1)
+        self.assertGreater(loss, 0.0)
+
     def test_no_grad_context_manager(self) -> None:
         model = Model(self.config(), seed=0)
         with no_grad(model):

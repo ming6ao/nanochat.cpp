@@ -47,15 +47,27 @@ void RunCase(int vocab, int dim, const std::vector<int>& ids,
                    (std::string(name) + " fwd").c_str());
 
   // Backward over a persistent, non-zero gradient buffer: only the touched rows
-  // may change.
+  // change, and the contribution adds to the incoming value.
   DevBuf<ComputeType> dout(ToStorage(dout0));
   DevBuf<ComputeType> dtable(ToStorage(dtable_init));
+  const std::vector<float> once =
+      EmbeddingBackward(tokens, dim, ids, dout0, dtable_init);
+  const std::vector<float> twice =
+      EmbeddingBackward(tokens, dim, ids, dout0, once);
   nanochat::kernels::EmbeddingBackward(tokens, dim, ids.data(), dout.ptr,
                                        dtable.ptr);
   nanochat::kernels::Synchronize();
-  CheckVectorClose(FromStorage(dtable.Download()),
-                   EmbeddingBackward(tokens, dim, ids, dout0, dtable_init),
-                   1e-4, (std::string(name) + " bwd persistent").c_str());
+  CheckVectorClose(FromStorage(dtable.Download()), once, 1e-4,
+                   (std::string(name) + " bwd persistent").c_str());
+
+  // A second call on the same buffer sums, because the caller owns the one
+  // zeroing pass. A repeated id holds the sum of its occurrences over both
+  // calls.
+  nanochat::kernels::EmbeddingBackward(tokens, dim, ids.data(), dout.ptr,
+                                       dtable.ptr);
+  nanochat::kernels::Synchronize();
+  CheckVectorClose(FromStorage(dtable.Download()), twice, 1e-4,
+                   (std::string(name) + " bwd accumulate").c_str());
 
 #if !defined(NANOCHAT_PRECISION_FP16)
   // Finite-difference the gather with a zero-initialised gradient buffer so the

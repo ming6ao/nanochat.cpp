@@ -21,6 +21,7 @@
 #include "nanochat/capi.h"
 #include "nanochat/config.h"
 #include "nanochat/model.h"
+#include "nanochat/tensor.h"
 
 namespace {
 
@@ -106,6 +107,15 @@ static_assert(std::is_same<decltype(nanochat_generate_params::stop_ids),
               "nanochat_generate_params.stop_ids drifted");
 
 // --- Test harness ---------------------------------------------------------
+
+// The weighted and uniform backward paths reach the same value through
+// different arithmetic. fp32 agrees to a tight tolerance; the fp16 storage
+// rounds the per-row scale, so it needs a wider one.
+#if defined(NANOCHAT_PRECISION_FP16)
+constexpr double kGradientTolerance = 5e-2;
+#else
+constexpr double kGradientTolerance = 1e-4;
+#endif
 
 int g_failures = 0;
 
@@ -218,6 +228,66 @@ std::vector<int> MakeTargets(int batch, int seq, int vocab) {
         static_cast<int>((i * 11 + 5) % static_cast<std::size_t>(vocab));
   }
   return targets;
+}
+
+// Reads one parameter gradient into a float vector. It handles both build
+// precisions: a four-byte element is float32, a two-byte element is float16.
+std::vector<float> ReadGradient(nanochat_model* model, int index) {
+  nanochat_param param;
+  std::memset(&param, 0, sizeof(param));
+  if (nanochat_param_info(model, index, &param) != 0) return {};
+  const int element_size = nanochat_compute_type_size();
+  const std::size_t bytes = static_cast<std::size_t>(param.count) *
+                            static_cast<std::size_t>(element_size);
+  std::vector<unsigned char> raw(bytes);
+  if (nanochat_param_read(model, index, /*grad=*/1, 0, param.count,
+                          raw.data()) != param.count) {
+    return {};
+  }
+  std::vector<float> values(static_cast<std::size_t>(param.count));
+  for (std::size_t i = 0; i < values.size(); ++i) {
+    if (element_size == 4) {
+      float value = 0.0f;
+      std::memcpy(&value, raw.data() + i * 4, sizeof(value));
+      values[i] = value;
+    } else {
+      nanochat::Fp16 value;
+      std::memcpy(&value.bits, raw.data() + i * 2, sizeof(value.bits));
+      values[i] = nanochat::Fp16ToFloat(value);
+    }
+  }
+  return values;
+}
+
+// Checks that the gradient of `actual` equals `expected_scale` times the
+// gradient of `expected`, element by element, with a relative tolerance. A
+// near-zero element falls back to an absolute comparison.
+void CheckScaledGradients(nanochat_model* expected, nanochat_model* actual,
+                          double expected_scale, const char* what,
+                          double tolerance) {
+  const int count = nanochat_param_count(expected);
+  if (count != nanochat_param_count(actual)) {
+    Fail(std::string(what) + ": parameter counts differ");
+    return;
+  }
+  for (int i = 0; i < count; ++i) {
+    const std::vector<float> a = ReadGradient(expected, i);
+    const std::vector<float> b = ReadGradient(actual, i);
+    if (a.size() != b.size()) {
+      Fail(std::string(what) + ": gradient sizes differ");
+      return;
+    }
+    for (std::size_t j = 0; j < a.size(); ++j) {
+      const double want = expected_scale * static_cast<double>(a[j]);
+      const double got = static_cast<double>(b[j]);
+      const double magnitude =
+          std::fmax(1.0, std::fmax(std::fabs(want), std::fabs(got)));
+      if (std::fabs(got - want) > tolerance * magnitude) {
+        Fail(std::string(what) + ": gradient element differs");
+        return;
+      }
+    }
+  }
 }
 
 nanochat_optim_config TinyOptimizerConfig() {
@@ -385,6 +455,95 @@ nanochat_model* CheckModel() {
   return model;
 }
 
+// The weighted-backward entry point. On a masked batch with non-uniform row
+// weights the gradient must match the uniform-scale reference. The backward
+// pass is linear in the row scale, so a weight vector plus its complement
+// (`1 - w`) accumulates the same gradient as the plain uniform backward. The
+// scale argument is a uniform multiplier, so doubling it doubles every
+// gradient.
+void CheckWeightedBackward() {
+  const nanochat_config config = TinyConfig();
+  const int batch = 2;
+  const int seq = 4;
+  const int rows = batch * seq;
+
+  nanochat_model* reference = nanochat_model_create(&config, /*seed=*/77);
+  nanochat_model* weighted = nanochat_model_create(&config, /*seed=*/77);
+  Check("weighted: create returns two handles",
+        reference != nullptr && weighted != nullptr);
+  if (reference == nullptr || weighted == nullptr) {
+    nanochat_model_free(reference);
+    nanochat_model_free(weighted);
+    return;
+  }
+
+  // A tiny masked batch: rows 1 and 6 are ignored targets, so valid == 6.
+  std::vector<int> tokens = MakeTokens(batch, seq, config.vocab_size);
+  std::vector<int> targets = MakeTargets(batch, seq, config.vocab_size);
+  targets[1] = -1;
+  targets[6] = -1;
+
+  // Non-uniform row weights. The ignored rows carry weight 0, which the
+  // classifier also enforces on its own.
+  const float pattern[8] = {1.0f, 0.0f, 0.5f, 2.0f, 0.75f, 1.25f, 0.0f, 3.0f};
+  std::vector<float> weights(static_cast<std::size_t>(rows));
+  for (int i = 0; i < rows; ++i) {
+    weights[static_cast<std::size_t>(i)] = pattern[i];
+  }
+
+  // The reference is the uniform backward at scale 1.
+  nanochat_forward_loss(reference, tokens.data(), targets.data(), batch, seq);
+  nanochat_zero_grad(reference);
+  nanochat_backward(reference);
+
+  // The weighted run accumulates `w` and then its complement `1 - w`. The
+  // effective row scale is `w + (1 - w) == 1`, the uniform scale.
+  std::vector<float> complement(static_cast<std::size_t>(rows));
+  for (int i = 0; i < rows; ++i) {
+    complement[static_cast<std::size_t>(i)] =
+        1.0f - weights[static_cast<std::size_t>(i)];
+  }
+  nanochat_forward_loss(weighted, tokens.data(), targets.data(), batch, seq);
+  nanochat_zero_grad(weighted);
+  nanochat_backward_weighted(weighted, weights.data(), 1.0f);
+  nanochat_backward_weighted(weighted, complement.data(), 1.0f);
+  CheckScaledGradients(reference, weighted, 1.0,
+                       "weighted: non-uniform weights match the uniform "
+                       "reference",
+                       kGradientTolerance);
+
+  // The scale argument is a uniform multiplier: doubling the scale doubles
+  // every gradient.
+  nanochat_zero_grad(weighted);
+  nanochat_backward_weighted(weighted, weights.data(), 2.0f);
+  nanochat_zero_grad(reference);
+  nanochat_backward_weighted(reference, weights.data(), 1.0f);
+  CheckScaledGradients(reference, weighted, 2.0,
+                       "weighted: the scale doubles the gradient",
+                       kGradientTolerance);
+
+  // Error handling: a null model and a null weight buffer are errors, not
+  // crashes, and each reports the function name. The plain backward first
+  // seeds the thread-local error with a different name, so the check cannot
+  // pass on a stale message.
+  nanochat_backward(nullptr);
+  Check("weighted: the error starts as the plain backward",
+        std::strstr(nanochat_last_error(), "nanochat_backward_weighted") ==
+            nullptr);
+  nanochat_backward_weighted(nullptr, weights.data(), 1.0f);
+  Check("weighted: a null model sets the error",
+        std::strstr(nanochat_last_error(), "nanochat_backward_weighted") !=
+            nullptr);
+  nanochat_backward(nullptr);
+  nanochat_backward_weighted(weighted, nullptr, 1.0f);
+  Check("weighted: a null weight buffer sets the error",
+        std::strstr(nanochat_last_error(), "nanochat_backward_weighted") !=
+            nullptr);
+
+  nanochat_model_free(reference);
+  nanochat_model_free(weighted);
+}
+
 // Tokenizer, encode/decode, the document loader, and EvalBpb.
 void CheckTokenizerAndLoader(const char* parquet_path,
                              const char* tokenizer_path,
@@ -446,6 +605,7 @@ int main(int argc, char** argv) {
 
   CheckSandboxRule();
   CheckParams();
+  CheckWeightedBackward();
 
   nanochat_model* model = CheckModel();
   if (model != nullptr) {

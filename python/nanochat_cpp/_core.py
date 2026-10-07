@@ -244,6 +244,8 @@ _SIGNATURES = (
       ctypes.POINTER(ctypes.c_int), ctypes.c_int, ctypes.c_int),
      ctypes.c_float),
     ("nanochat_backward", (ModelHandle,), None),
+    ("nanochat_backward_weighted",
+     (ModelHandle, ctypes.POINTER(ctypes.c_float), ctypes.c_float), None),
     ("nanochat_zero_grad", (ModelHandle,), None),
     ("nanochat_param_count", (ModelHandle,), ctypes.c_int),
     ("nanochat_param_info",

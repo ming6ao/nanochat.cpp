@@ -172,6 +172,12 @@ void nanochat_model_free(nanochat_model* model);
 float nanochat_forward_loss(nanochat_model* model, const int* tokens,
                             const int* targets, int batch, int seq);
 void nanochat_backward(nanochat_model* model);
+// Weighted backward for SFT and RL (docs/post-training.md section 2.2).
+// `row_weights` holds one weight per row, that is `batch * seq` entries. A null
+// model or a null weight buffer is an error. The call accumulates into the
+// parameter gradients, so call nanochat_zero_grad first for a fresh gradient.
+void nanochat_backward_weighted(nanochat_model* model, const float* row_weights,
+                                float scale);
 void nanochat_zero_grad(nanochat_model* model);
 int nanochat_param_count(nanochat_model* model);
 int nanochat_param_info(nanochat_model* model, int index, nanochat_param* out);

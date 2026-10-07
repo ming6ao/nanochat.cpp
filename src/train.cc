@@ -38,6 +38,7 @@
 #include "nanochat/tensor.h"
 #include "nanochat/tokenizer.h"
 #include "src/ops.h"
+#include "src/optim_state.h"
 #include "src/parquet/reader.h"
 
 namespace nanochat {
@@ -302,8 +303,11 @@ double ComputeMfu(const Config& config, double tokens_per_second,
 // Checkpointer
 // ---------------------------------------------------------------------------
 
-bool Checkpointer::SaveModel(const Model& model, const std::string& path) {
-  Checkpoint checkpoint;
+namespace {
+
+// Collects `model.params()` into `checkpoint`. Shared by the parameter-only
+// and parameter-plus-optimizer `SaveModel` overloads.
+void CollectModelRecords(const Model& model, Checkpoint* checkpoint) {
   for (const ParamView& view : model.params()) {
     if (view.value == nullptr || view.count <= 0) continue;
     TensorRecord record;
@@ -318,12 +322,34 @@ bool Checkpointer::SaveModel(const Model& model, const std::string& path) {
     record.data.resize(bytes);
     kernels::Memcpy(record.data.data(), view.value, bytes,
                     CopyDir::kDeviceToHost);
-    checkpoint.Add(std::move(record));
+    checkpoint->Add(std::move(record));
   }
+}
+
+}  // namespace
+
+bool Checkpointer::SaveModel(const Model& model, const std::string& path) {
+  Checkpoint checkpoint;
+  CollectModelRecords(model, &checkpoint);
+  return checkpoint.Save(path);
+}
+
+bool Checkpointer::SaveModel(const Model& model, const Optimizer& optimizer,
+                             const std::string& path) {
+  Checkpoint checkpoint;
+  CollectModelRecords(model, &checkpoint);
+  // The AdamW moments and Muon buffers ride beside the parameters
+  // (docs/post-training.md section 7).
+  SaveOptimizerState(optimizer, &checkpoint);
   return checkpoint.Save(path);
 }
 
 bool Checkpointer::LoadModel(Model* model, const std::string& path) {
+  return LoadModel(model, nullptr, path);
+}
+
+bool Checkpointer::LoadModel(Model* model, Optimizer* optimizer,
+                             const std::string& path) {
   if (model == nullptr) return false;
   Checkpoint checkpoint;
   std::string error;
@@ -339,6 +365,9 @@ bool Checkpointer::LoadModel(Model* model, const std::string& path) {
     kernels::Memcpy(view.value, record->data.data(), bytes,
                     CopyDir::kHostToDevice);
   }
+  // A parameter-only file has no optimizer-state records; the moments stay at
+  // their initial zeros (the SFT warm-start behavior).
+  if (optimizer != nullptr) LoadOptimizerState(checkpoint, optimizer);
   return true;
 }
 
@@ -374,15 +403,10 @@ TrainLoop::TrainLoop(TrainConfig config) : config_(std::move(config)) {
 
   model_ = Model::Create(config_.model);
 
-  bool resumed = false;
-  if (!config_.resume_path.empty()) {
-    std::ifstream probe(config_.resume_path, std::ios::binary);
-    if (probe.good()) {
-      resumed = Checkpointer::LoadModel(model_.get(), config_.resume_path);
-    }
-  }
-  if (!resumed) model_->InitWeights(config_.seed);
-
+  // Build the optimizer before the optional resume, so `LoadModel` can
+  // restore the AdamW moments and Muon buffers beside the parameters
+  // (docs/post-training.md section 7). The optimizer only reads the
+  // parameter registry, not the weights, so the order is safe.
   SchedulerConfig scheduler_config = config_.scheduler;
   if (scheduler_config.num_iterations <= 0) {
     scheduler_config.num_iterations = config_.num_iterations;
@@ -390,6 +414,17 @@ TrainLoop::TrainLoop(TrainConfig config) : config_(std::move(config)) {
   config_.scheduler = scheduler_config;
   scheduler_ = std::make_unique<Scheduler>(scheduler_config);
   optimizer_ = CreateOptimizer(model_.get(), config_.optimizer, *scheduler_);
+
+  bool resumed = false;
+  if (!config_.resume_path.empty()) {
+    std::ifstream probe(config_.resume_path, std::ios::binary);
+    if (probe.good()) {
+      resumed = Checkpointer::LoadModel(model_.get(), optimizer_.get(),
+                                        config_.resume_path);
+    }
+  }
+  if (!resumed) model_->InitWeights(config_.seed);
+
   logger_ = std::make_unique<Logger>(config_.log_path);
 
   tokenizer_ = LoadTokenizer(config_.tokenizer_path);
@@ -425,7 +460,7 @@ TrainLoop::~TrainLoop() = default;
 
 void TrainLoop::Save(int step) {
   if (config_.checkpoint_path.empty()) return;
-  if (Checkpointer::SaveModel(*model_, config_.checkpoint_path)) {
+  if (Checkpointer::SaveModel(*model_, *optimizer_, config_.checkpoint_path)) {
     logger_->Info("saved checkpoint at step " + std::to_string(step));
   } else {
     logger_->Info("failed to save checkpoint at step " + std::to_string(step));

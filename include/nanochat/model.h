@@ -52,8 +52,9 @@ class Model {
 
   const Config& config() const { return config_; }
 
-  // Training graph: forward + softcap + cross-entropy. Returns the batch-mean
-  // loss in nats. Saves the activations Backward() needs.
+  // Training graph: forward + softcap + cross-entropy. Returns the mean loss
+  // in nats over the valid targets. A target of -1 is ignored and does not
+  // enter the mean. Saves the activations Backward() needs.
   virtual float ForwardLoss(const int* tokens, const int* targets, int batch,
                             int seq) = 0;
 
@@ -66,11 +67,22 @@ class Model {
 
   // Runs the backward pass and *accumulates* into the parameter gradients
   // without zeroing them first. `scale` multiplies the loss gradient; use
-  // `1 / micro_batches` for gradient accumulation. `Backward()` is equivalent
-  // to `ZeroGrad()` followed by `BackwardAccumulate(1.0f)`.
+  // `1 / micro_batches` for gradient accumulation. The pass divides by the
+  // number of valid targets, so a target of -1 is ignored
+  // (docs/post-training.md section 2.1). `Backward()` is equivalent to
+  // `ZeroGrad()` followed by `BackwardAccumulate(1.0f)`.
   virtual void BackwardAccumulate(float scale) = 0;
 
-  // Forward + backward + one optimizer step. Returns the batch-mean loss.
+  // Weighted policy-gradient backward (docs/post-training.md section 2.2).
+  // `row_weights` holds `batch * seq` entries. The pass applies
+  // `row_weights[i] * scale` to row `i` and divides by the number of valid
+  // targets. It accumulates into the parameter gradients and does not zero
+  // them. The classifier zeroes every ignored row, so a weight of 0 there means
+  // "do not train this position". Call `ZeroGrad()` first for a fresh gradient.
+  virtual void BackwardWeighted(const float* row_weights, float scale) = 0;
+
+  // Forward + backward + one optimizer step. Returns the mean loss over the
+  // valid targets.
   virtual float TrainStep(const int* tokens, const int* targets, int batch,
                           int seq, Optimizer* optimizer) = 0;
 

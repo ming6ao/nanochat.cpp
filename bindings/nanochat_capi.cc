@@ -46,7 +46,7 @@ namespace {
 
 // The C ABI version. Bump this string on every change to the surface or to a
 // mirrored struct; docs/python.md section 13 names that rule.
-constexpr char kNanochatVersion[] = "0.2.0";
+constexpr char kNanochatVersion[] = "0.3.0";
 
 // The message for the current thread. A `thread_local` string keeps the
 // pointer from `nanochat_last_error` valid until the next failure on this
@@ -310,6 +310,16 @@ void nanochat_backward(nanochat_model* model) {
   GuardVoid("nanochat_backward", [&]() {
     if (model == nullptr) throw std::invalid_argument("model is null");
     model->model->Backward();
+  });
+}
+
+void nanochat_backward_weighted(nanochat_model* model, const float* row_weights,
+                                float scale) {
+  GuardVoid("nanochat_backward_weighted", [&]() {
+    if (model == nullptr || row_weights == nullptr) {
+      throw std::invalid_argument("model or row_weights is null");
+    }
+    model->model->BackwardWeighted(row_weights, scale);
   });
 }
 

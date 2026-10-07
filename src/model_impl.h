@@ -32,6 +32,7 @@ class TrainModel final : public Model {
   void Backward() override;
   void ZeroGrad() override;
   void BackwardAccumulate(float scale) override;
+  void BackwardWeighted(const float* row_weights, float scale) override;
   float TrainStep(const int* tokens, const int* targets, int batch, int seq,
                   Optimizer* optimizer) override;
   void SetGradEnabled(bool enabled) override { grad_enabled_ = enabled; }
@@ -101,6 +102,11 @@ class TrainModel final : public Model {
                   bool save_for_backward);
   // Aborts when the most recent forward did not save activations for Backward.
   void RequireGradActivations(const char* caller) const;
+  // Shared body of `BackwardAccumulate` and `BackwardWeighted`. `row_weights`
+  // may be null for a uniform scale. Every row is divided by `divisor` (the
+  // valid-target count). A non-null `row_weights` multiplies row `r` by
+  // `row_weights[r] * scale / divisor` after the softcap chain rule.
+  void BackwardInternal(const float* row_weights, float scale, float divisor);
   const ComputeType* ActiveLosses() const {
     return grad_enabled_ ? losses_ : eval_losses_;
   }

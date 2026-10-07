@@ -91,6 +91,10 @@ __global__ void ClassifierBackwardKernel(const ClassifierParams params,
     }
     return;
   }
+  // A non-null row scale multiplies the whole row after the softcap chain
+  // rule. A null pointer keeps the unweighted arithmetic.
+  const float row_scale =
+      params.row_scale != nullptr ? params.row_scale[row] : 1.0f;
   const ComputeType* lrow = logits + base;
   float row_max = 0.0f;
   float sum_exp = 0.0f;
@@ -103,7 +107,7 @@ __global__ void ClassifierBackwardKernel(const ClassifierParams params,
     const float p = expf(z - row_max) * inv;
     const float onehot = (j == target) ? 1.0f : 0.0f;
     // dL/d(raw logit) = (softmax - onehot) * d(softcap)/d(raw).
-    dlogits[base + j] = ToComputeDev((p - onehot) * sech2);
+    dlogits[base + j] = ToComputeDev((p - onehot) * sech2 * row_scale);
   }
   for (int j = vocab + threadIdx.x; j < padded; j += blockDim.x) {
     dlogits[base + j] = ToComputeDev(0.0f);
