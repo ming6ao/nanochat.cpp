@@ -71,9 +71,21 @@ class Checkpointer {
   // Collects `model.params()` into a `Checkpoint` and writes it to `path`.
   static bool SaveModel(const Model& model, const std::string& path);
 
+  // Also writes the optimizer's AdamW moments and Muon buffers beside the
+  // parameters (docs/post-training.md section 7). The parameter-only file
+  // stays loadable.
+  static bool SaveModel(const Model& model, const Optimizer& optimizer,
+                        const std::string& path);
+
   // Loads `path` and copies every matching record into the model parameters.
   // Returns false when the file is missing or malformed.
   static bool LoadModel(Model* model, const std::string& path);
+
+  // Also restores the optimizer state when the file carries it. A
+  // parameter-only file leaves the optimizer state untouched and still
+  // returns true when the parameters loaded.
+  static bool LoadModel(Model* model, Optimizer* optimizer,
+                        const std::string& path);
 };
 
 class TrainLoop {

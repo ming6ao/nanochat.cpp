@@ -98,6 +98,42 @@ float ReadHost(const ComputeType* p) {
   return AsF(raw);
 }
 
+// Number of targets that are not the ignore index (-1). The classifier writes
+// a zero loss for an ignored row and the backward zeroes its gradient, so
+// these rows do not enter the mean (docs/post-training.md section 2.1).
+std::int64_t CountValidTargets(const int* targets, std::int64_t rows) {
+  std::int64_t valid = 0;
+  for (std::int64_t i = 0; i < rows; ++i) {
+    if (targets[i] != -1) ++valid;
+  }
+  return valid;
+}
+
+// Stages a host float array for a kernel pointer. The CPU reference backend
+// reads host memory; the CUDA backend reads a device copy. The CUDA classifier
+// entry point synchronizes before it returns, so the buffer is safe to release
+// at the end of the scope that owns it.
+class StagedRowScale {
+ public:
+  StagedRowScale(const float* host, std::int64_t count) {
+    if (host != nullptr && count > 0) {
+      const std::size_t bytes = static_cast<std::size_t>(count) * sizeof(float);
+      ptr_ = static_cast<float*>(kernels::Alloc(bytes));
+      kernels::Memcpy(ptr_, host, bytes, CopyDir::kHostToDevice);
+    }
+  }
+  ~StagedRowScale() {
+    if (ptr_ != nullptr) kernels::Free(ptr_);
+  }
+  StagedRowScale(const StagedRowScale&) = delete;
+  StagedRowScale& operator=(const StagedRowScale&) = delete;
+
+  const float* ptr() const { return ptr_; }
+
+ private:
+  float* ptr_ = nullptr;
+};
+
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -635,6 +671,11 @@ float TrainModel::ForwardLoss(const int* tokens, const int* targets, int batch,
   RunForward(tokens, targets, batch, seq, save_for_backward);
 
   const std::int64_t rows = static_cast<std::int64_t>(batch) * seq;
+  // The reference reduces with `F.cross_entropy(..., ignore_index=-1)` and the
+  // default mean, which divides by the non-ignored targets. Pretraining has no
+  // ignored target, so the divisor is `rows` there and the numbers are
+  // unchanged (docs/post-training.md section 2.1).
+  const std::int64_t valid = CountValidTargets(targets, rows);
   const ComputeType* losses = ActiveLosses();
   losses_host_.resize(static_cast<std::size_t>(rows));
   kernels::Memcpy(losses_host_.data(), losses,
@@ -645,7 +686,8 @@ float TrainModel::ForwardLoss(const int* tokens, const int* targets, int batch,
     total +=
         static_cast<double>(AsF(losses_host_[static_cast<std::size_t>(m)]));
   }
-  return static_cast<float>(total / static_cast<double>(rows));
+  if (valid == 0) return 0.0f;
+  return static_cast<float>(total / static_cast<double>(valid));
 }
 
 void TrainModel::RunForward(const int* tokens, const int* targets, int batch,
@@ -772,6 +814,30 @@ void TrainModel::Backward() {
 
 void TrainModel::BackwardAccumulate(float scale) {
   RequireGradActivations("BackwardAccumulate()");
+  const std::int64_t rows = rows_;
+  if (rows == 0) return;
+  const std::int64_t valid = CountValidTargets(targets_.data(), rows);
+  if (valid == 0) return;
+  BackwardInternal(nullptr, scale, static_cast<float>(valid));
+}
+
+void TrainModel::BackwardWeighted(const float* row_weights, float scale) {
+  RequireGradActivations("BackwardWeighted()");
+  if (row_weights == nullptr) {
+    std::fprintf(stderr,
+                 "nanochat: BackwardWeighted() called with a null row-weight "
+                 "buffer.\n");
+    std::abort();
+  }
+  const std::int64_t rows = rows_;
+  if (rows == 0) return;
+  const std::int64_t valid = CountValidTargets(targets_.data(), rows);
+  if (valid == 0) return;
+  BackwardInternal(row_weights, scale, static_cast<float>(valid));
+}
+
+void TrainModel::BackwardInternal(const float* row_weights, float scale,
+                                  float divisor) {
   const int layers = config_.num_layers;
   const int hidden = config_.hidden_dim;
   const int padded_vocab = config_.padded_vocab_size;
@@ -785,18 +851,36 @@ void TrainModel::BackwardAccumulate(float scale) {
   FillZero(x0_acc_, rows * hidden);
 
   // Classifier backward yields the per-row (sum-reduction) gradient; the loss
-  // is a batch mean, so scale by 1/rows.
+  // is a mean over valid targets, so divide by the valid count. A non-null
+  // `row_weights` folds `row_weights[r] * scale / divisor` into the
+  // classifier's per-row scale; a null pointer keeps the uniform path with one
+  // scaling pass.
   ClassifierParams classifier;
   classifier.rows = static_cast<int>(rows);
   classifier.vocab_size = vocab;
   classifier.padded_vocab_size = padded_vocab;
   classifier.softcap = kLogitSoftcap;
   classifier.ignore_index = -1;
+
+  const float* host_row_scale = nullptr;
+  std::vector<float> effective;
+  if (row_weights != nullptr) {
+    effective.resize(static_cast<std::size_t>(rows));
+    for (std::int64_t m = 0; m < rows; ++m) {
+      effective[static_cast<std::size_t>(m)] = row_weights[m] * scale / divisor;
+    }
+    host_row_scale = effective.data();
+  }
+  StagedRowScale staged_row_scale(host_row_scale, rows);
+  classifier.row_scale = staged_row_scale.ptr();
+
   kernels::ClassifierBackward(classifier, raw_logits_, targets_.data(),
                               dlogits_);
-  kernels::PointwiseForward(
-      PointwiseOp::kScale, static_cast<int>(rows * padded_vocab), dlogits_,
-      nullptr, scale / static_cast<float>(rows), 0.0f, dlogits_);
+  if (row_weights == nullptr) {
+    kernels::PointwiseForward(PointwiseOp::kScale,
+                              static_cast<int>(rows * padded_vocab), dlogits_,
+                              nullptr, scale / divisor, 0.0f, dlogits_);
+  }
 
   ops::LinearWgrad(x_final_norm_, dlogits_, lm_head_grad_, rows, hidden,
                    padded_vocab);
