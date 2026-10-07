@@ -142,6 +142,23 @@ typedef struct {
   float muon_momentum_start;
   float muon_momentum_peak;
   float muon_momentum_final;
+  // nanochat::OptimizerConfig (ANVIL, docs/optimizer-anvil-design.md).
+  int matrix_optimizer;
+  int adam_step_period;
+  float anvil_lr;
+  float anvil_weight_decay;
+  float anvil_momentum;
+  float anvil_beta2;
+  float anvil_fast_beta;
+  float anvil_slow_beta;
+  float anvil_fast_weight;
+  int anvil_engage_step;
+  int anvil_num_maps;
+  // nanochat::SchedulerConfig (ANVIL fast-rail beta).
+  float rail_beta_warmup_steps;
+  float rail_beta_cooldown_steps;
+  float rail_beta_min;
+  float rail_beta_max;
 } nanochat_optim_config;
 
 // Checks the sandbox rule and prepares the library. Call before any other

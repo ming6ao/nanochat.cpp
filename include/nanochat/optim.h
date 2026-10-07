@@ -25,6 +25,22 @@ struct OptimizerConfig {
   float adam_eps = 1e-10f;
   // Global gradient-norm clip; <= 0 disables clipping.
   float clip = 1.0f;
+
+  // ANVIL (docs/optimizer-anvil-design.md). `matrix_optimizer` selects the
+  // stacked-matrix update: 0 = Muon (default), 1 = ANVIL. ANVIL is opt-in and
+  // the two group sets are never populated together. `adam_step_period` gates
+  // the AdamW groups: 1 updates every step, 2 updates on odd steps only.
+  int matrix_optimizer = 0;
+  int adam_step_period = 1;
+  float anvil_lr = 0.023f;
+  float anvil_weight_decay = 2.25f;
+  float anvil_momentum = 0.95f;
+  float anvil_beta2 = 0.9f;
+  float anvil_fast_beta = 0.85f;
+  float anvil_slow_beta = 0.98f;
+  float anvil_fast_weight = 0.4385f;
+  int anvil_engage_step = 514;
+  int anvil_num_maps = 6;
 };
 
 class Optimizer {

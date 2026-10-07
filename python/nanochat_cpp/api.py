@@ -570,7 +570,18 @@ class Optimizer:
                  muon_momentum_warmup_steps: float = 400.0,
                  muon_momentum_start: float = 0.85,
                  muon_momentum_peak: float = 0.97,
-                 muon_momentum_final: float = 0.90) -> None:
+                 muon_momentum_final: float = 0.90,
+                 matrix_optimizer: int = 0, adam_step_period: int = 1,
+                 anvil_lr: float = 0.023, anvil_weight_decay: float = 2.25,
+                 anvil_momentum: float = 0.95, anvil_beta2: float = 0.9,
+                 anvil_fast_beta: float = 0.85,
+                 anvil_slow_beta: float = 0.98,
+                 anvil_fast_weight: float = 0.4385,
+                 anvil_engage_step: int = 514, anvil_num_maps: int = 6,
+                 rail_beta_warmup_steps: float = 240.0,
+                 rail_beta_cooldown_steps: float = 50.0,
+                 rail_beta_min: float = 0.85,
+                 rail_beta_max: float = 0.93) -> None:
         if not isinstance(model, Model):
             raise TypeError("model must be a nanochat_cpp.Model")
         self._lib = _lib.load()
@@ -596,6 +607,21 @@ class Optimizer:
         config.muon_momentum_start = float(muon_momentum_start)
         config.muon_momentum_peak = float(muon_momentum_peak)
         config.muon_momentum_final = float(muon_momentum_final)
+        config.matrix_optimizer = int(matrix_optimizer)
+        config.adam_step_period = int(adam_step_period)
+        config.anvil_lr = float(anvil_lr)
+        config.anvil_weight_decay = float(anvil_weight_decay)
+        config.anvil_momentum = float(anvil_momentum)
+        config.anvil_beta2 = float(anvil_beta2)
+        config.anvil_fast_beta = float(anvil_fast_beta)
+        config.anvil_slow_beta = float(anvil_slow_beta)
+        config.anvil_fast_weight = float(anvil_fast_weight)
+        config.anvil_engage_step = int(anvil_engage_step)
+        config.anvil_num_maps = int(anvil_num_maps)
+        config.rail_beta_warmup_steps = float(rail_beta_warmup_steps)
+        config.rail_beta_cooldown_steps = float(rail_beta_cooldown_steps)
+        config.rail_beta_min = float(rail_beta_min)
+        config.rail_beta_max = float(rail_beta_max)
         self.config = config
         handle = self._lib.nanochat_optim_create(
             model._handle, ctypes.byref(config))

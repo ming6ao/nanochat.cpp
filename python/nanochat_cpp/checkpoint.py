@@ -751,11 +751,18 @@ ADAMW_KINDS = ("lm_head", "embedding", "value_embedding", "resid", "x0",
                "smear")
 
 _MUON_NAME_RE = re.compile(r"^muon\.(\d+)x(\d+)\.(buf1|buf2)$")
+_ANVIL_NAME_RE = re.compile(
+    r"^anvil\.(\d+)x(\d+)\.(velocity|lane_energy)$")
 
 
 def muon_state_name(rows: int, cols: int, buffer: str) -> str:
     """The C++ record name for one stacked Muon buffer."""
     return f"muon.{int(rows)}x{int(cols)}.{buffer}"
+
+
+def anvil_state_name(rows: int, cols: int, buffer: str) -> str:
+    """The C++ record name for one stacked ANVIL buffer."""
+    return f"anvil.{int(rows)}x{int(cols)}.{buffer}"
 
 
 def optimizer_order_key(name: str) -> tuple:
@@ -771,7 +778,12 @@ def optimizer_order_key(name: str) -> tuple:
         rows, cols = int(match.group(1)), int(match.group(2))
         suffix = 0 if match.group(3) == "buf1" else 1
         return (1, rows, cols, suffix)
-    return (2, name)
+    match = _ANVIL_NAME_RE.match(name)
+    if match is not None:
+        rows, cols = int(match.group(1)), int(match.group(2))
+        suffix = 0 if match.group(3) == "velocity" else 1
+        return (2, rows, cols, suffix)
+    return (3, name)
 
 
 def _optimizer_payload(tensor: Any) -> bytes:
@@ -830,6 +842,47 @@ def _muon_records(state: Mapping[Any, Any],
     ]
 
 
+def _anvil_records(state: Mapping[Any, Any],
+                   params: Sequence[Any]) -> list[TensorRecord]:
+    """Build the two stacked ANVIL-state records for one shape group.
+
+    The reference ``AnvilAndAdam`` stores each ANVIL parameter's twin-rail
+    velocity as ``[2, *chunk_shape]`` and its lane energy as the reduced lane
+    shape. The C++ optimizer keeps both as flat fp32 buffers per shape group,
+    so the converter concatenates the per-parameter tensors in group order.
+    """
+    if not params:
+        return []
+    entry = state.get(params[0])
+    if not entry:
+        return []
+    velocity = entry.get("velocity")
+    lane_energy = entry.get("lane_energy")
+    if velocity is None or lane_energy is None:
+        return []
+    shape = tuple(int(dim) for dim in velocity.shape)
+    if len(shape) < 3:
+        raise CheckpointError(
+            "the reference ANVIL velocity buffer has a rank below three")
+    if shape[0] != 2:
+        raise CheckpointError(
+            "the reference ANVIL velocity must stack the two rails first")
+    if shape[1] != len(params):
+        raise CheckpointError(
+            "the reference ANVIL group stacks "
+            f"{shape[1]} buffers for {len(params)} parameters; this is a "
+            "sharded rank shard, not a single-rank shard")
+    rows, cols = shape[-2], shape[-1]
+    first = _optimizer_payload(velocity)
+    last = _optimizer_payload(lane_energy)
+    return [
+        TensorRecord(anvil_state_name(rows, cols, "velocity"), DTYPE_FP32,
+                     (len(first) // 4,), first),
+        TensorRecord(anvil_state_name(rows, cols, "lane_energy"), DTYPE_FP32,
+                     (len(last) // 4,), last),
+    ]
+
+
 def build_optimizer_records(
         optimizer_state_dict: Mapping[str, Any]) -> list[TensorRecord]:
     """Convert a reference optimizer ``state_dict`` into NCHKPT01 records.
@@ -837,8 +890,10 @@ def build_optimizer_records(
     The input is a ``MuonAdamW.state_dict()``: ``{"state": {index: {...}},
     "param_groups": [...]}``. The group order and ``kind`` match
     ``GPT.setup_optimizer``, so the AdamW groups map onto :data:`ADAMW_KINDS`
-    in order and each Muon group maps onto its ``rows``x``cols`` name. Every
-    record is fp32. A group without saved state is skipped.
+    in order and each Muon group maps onto its ``rows``x``cols`` name. An ANVIL
+    group (``kind == "anvil"``) maps onto ``anvil.<rows>x<cols>.velocity`` and
+    ``anvil.<rows>x<cols>.lane_energy``. Every record is fp32. A group without
+    saved state is skipped.
     """
     state = optimizer_state_dict.get("state") or {}
     groups = optimizer_state_dict.get("param_groups") or ()
@@ -849,6 +904,9 @@ def build_optimizer_records(
         params = list(group.get("params") or ())
         if kind == "muon":
             records.extend(_muon_records(state, params))
+            continue
+        if kind == "anvil":
+            records.extend(_anvil_records(state, params))
             continue
         if adamw_index >= len(ADAMW_KINDS):
             raise CheckpointError(

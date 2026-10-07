@@ -17,6 +17,7 @@
 namespace {
 
 using nanochat::AdamWParams;
+using nanochat::AnvilParams;
 using nanochat::AttentionParams;
 using nanochat::AttentionStatsCount;
 using nanochat::Caps;
@@ -625,6 +626,78 @@ void TestMuon() {
   for (int i = 0; i < 3; ++i) Check(std::isfinite(buf2[i]), "muon buf2 finite");
 }
 
+// ANVIL: with lr zero the parameter is untouched while the rails and the lane
+// energy still move; the zero-map cascade keeps every buffer finite. See
+// docs/optimizer-anvil-design.md.
+void TestAnvil() {
+  AnvilParams p;
+  p.num_params = 1;
+  p.rows = 3;
+  p.cols = 3;
+  p.lr = 0.0f;  // parameter must be untouched when lr is zero
+  p.momentum = 0.93f;
+  p.fast_beta = 0.85f;
+  p.slow_beta = 0.98f;
+  p.fast_weight = 0.4385f;
+  p.beta2 = 0.9f;
+  p.weight_decay = 0.0f;
+  p.num_maps = 6;
+  p.red_dim = -1;
+  p.nesterov = true;
+  Rng rng;
+  std::vector<float> grad0 = RandomVec(9, &rng);
+  std::vector<float> param0 = RandomVec(9, &rng);
+  std::vector<ComputeType> grad = ToStorage(grad0);
+  std::vector<ComputeType> param = ToStorage(param0);
+  const std::vector<ComputeType> param_before = param;
+  std::vector<float> velocity(18, 0.0f);
+  std::vector<float> lane(3, 0.0f);
+  kernels::AnvilUpdate(p, grad.data(), param.data(), velocity.data(),
+                       lane.data());
+  std::vector<float> got = FromStorage(param);
+  for (int i = 0; i < 9; ++i) {
+    // `lr = 0` must leave the stored value exactly as it was, in either
+    // precision (the float input is already rounded to storage).
+    CheckClose(U(param[i]), U(param_before[i]), 1e-6, "anvil lr=0 identity");
+    Check(std::isfinite(velocity[i]), "anvil fast rail finite");
+    Check(std::isfinite(velocity[9 + i]), "anvil slow rail finite");
+  }
+  for (int i = 0; i < 3; ++i) {
+    Check(std::isfinite(lane[i]), "anvil lane energy finite");
+  }
+
+  // A live step with the cascade disabled must still move the parameter and
+  // leave the lane energy positive.
+  AnvilParams live = p;
+  live.lr = 0.023f;
+  live.num_maps = 0;
+  std::vector<float> velocity_live(18, 0.0f);
+  std::vector<float> lane_live(3, 0.0f);
+  kernels::AnvilUpdate(live, grad.data(), param.data(), velocity_live.data(),
+                       lane_live.data());
+  std::vector<float> moved = FromStorage(param);
+  bool changed = false;
+  for (int i = 0; i < 9; ++i) {
+    if (std::fabs(moved[i] - got[i]) > 1e-7) changed = true;
+    Check(std::isfinite(moved[i]), "anvil maps=0 finite");
+  }
+  Check(changed, "anvil maps=0 moves the parameter");
+  double lane_sum = 0.0;
+  for (int i = 0; i < 3; ++i) {
+    lane_sum += lane_live[static_cast<std::size_t>(i)];
+  }
+  Check(lane_sum > 0.0, "anvil lane energy updated");
+
+  // rows/cols <= 0 is a no-op.
+  AnvilParams bad;
+  bad.rows = 0;
+  bad.cols = 0;
+  std::vector<ComputeType> one = ToStorage({1.0f});
+  std::vector<float> onef(2, 0.0f);
+  kernels::AnvilUpdate(bad, one.data(), one.data(), onef.data(), onef.data());
+  CheckClose(U(one[0]), 1.0, 1e-6, "anvil no-op shape");
+}
+
 void TestGlobalNorm() {
   std::vector<ComputeType> g = ToStorage({3.0f, 4.0f});
   float norm = 0.0f;
@@ -670,6 +743,7 @@ int main() {
   TestEmbedding();
   TestAdamW();
   TestMuon();
+  TestAnvil();
   TestGlobalNorm();
   if (g_failures != 0) {
     std::printf("%d check(s) failed\n", g_failures);

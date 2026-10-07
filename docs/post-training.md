@@ -243,8 +243,9 @@ Two containers exist:
   writes the same format.
 
 Both containers hold parameters. The `Checkpoint` class also carries an
-optimizer-state section. That section holds the AdamW first and second moments
-and the Muon momentum and second-moment buffers. The record names are stable,
+optimizer-state section. That section holds the AdamW first and second moments,
+the Muon momentum and second-moment buffers, and — when `matrix_optimizer` is
+1 — the ANVIL twin-rail velocity and lane energy. The record names are stable,
 so a later load can match them to the optimizer groups.
 `Checkpointer::SaveModel` and `Checkpointer::LoadModel` have `Optimizer`
 overloads. A parameter-only file stays loadable.

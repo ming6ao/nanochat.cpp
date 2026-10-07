@@ -1,6 +1,6 @@
 # The kernel seam (L1)
 
-The backend contract is a fixed set of host-callable functions. Nine compute
+The backend contract is a fixed set of host-callable functions. Ten compute
 families, one GEMM entry point, five device utilities. A backend is complete
 when every symbol resolves and passes the oracle.
 
@@ -21,7 +21,8 @@ kernel is in [DESIGN.md §3](../DESIGN.md). A backend supplies this header; see
 | 6 | `Embedding` | index gather / scatter-add | `wte` and every `value_embeds[i]` | yes/yes |
 | 7 | `AdamW` | stateful pointwise | embedding, head, scalar params | yes |
 | 8 | `Muon` | stateful + batched GEMM | matrix params (Polar Express via cuBLAS) | yes |
-| 9 | `GlobalNorm` | full reduction | gradient clipping | yes |
+| 9 | `ANVIL` | stateful + batched GEMM | matrix params, opt-in (whitening cascade via cuBLAS) | yes |
+| 10 | `GlobalNorm` | full reduction | gradient clipping | yes |
 
 Library-backed (not hand-written kernels):
 
@@ -103,6 +104,9 @@ void AdamWUpdate(int n, const AdamWParams&, ComputeType* p,
                  const ComputeType* g, float* m, float* v);
 void MuonUpdate(const MuonParams&, const ComputeType* stacked_grads,
                 ComputeType* stacked_params, float* buf1, float* buf2);
+void AnvilUpdate(const AnvilParams&, const ComputeType* stacked_grads,
+                 ComputeType* stacked_params, float* velocity,
+                 float* lane_energy);
 void GlobalNorm(int n, float clip, ComputeType* grads, float* out_norm);
 
 }  // namespace kernels

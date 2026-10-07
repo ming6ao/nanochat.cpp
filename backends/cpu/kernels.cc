@@ -109,6 +109,19 @@ constexpr float kPolarCoeffs[5][3] = {
     {2.3465413258596377f, -1.7097828382687081f, 0.42323551169305323f},
 };
 
+// ANVIL's six quintic spectral maps, from modded-nanogpt's
+// `track_1_short/optim/anvil.py`. Kept in sync with the CUDA family
+// (backends/cuda/kernels/anvil.cu) and the host reference
+// (backends/cuda/kernels/testing/optim_ref.h).
+constexpr float kAnvilMaps[6][3] = {
+    {3.923798038567f, -6.095026865488f, 3.905234618423f},
+    {3.278126713798f, -3.328923386476f, 0.989127286973f},
+    {3.505298394150f, -5.137358782410f, 1.968325560615f},
+    {2.815058591845f, -3.685181239622f, 1.417196497642f},
+    {2.245503932403f, -2.443826979899f, 0.963091710461f},
+    {2.256537145403f, -2.166840097229f, 0.929501253245f},
+};
+
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -1403,6 +1416,210 @@ void MuonUpdate(const MuonParams& params, const ComputeType* stacked_grads,
       const float decay =
           (gv * pv >= 0.0f) ? params.lr * params.weight_decay * pv : 0.0f;
       param[i] = ToCompute(pv - params.lr * gv - decay);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// ANVIL (twin-rail momentum -> whitening cascade -> lane equalizer -> update)
+// ---------------------------------------------------------------------------
+//
+// One ANVIL update for a stacked group, mirroring modded-nanogpt's
+// `track_1_short/optim/anvil.py` and docs/optimizer-anvil-design.md. The
+// working state is float (like Muon's), so the fp32 build can drive `Gemm` and
+// the fp16 build keeps a double-accumulator fallback.
+
+void AnvilUpdate(const AnvilParams& params, const ComputeType* stacked_grads,
+                 ComputeType* stacked_params, float* velocity,
+                 float* lane_energy) {
+  ConfigureThreads();
+  const int num_params = params.num_params > 0 ? params.num_params : 1;
+  const int rows = params.rows;
+  const int cols = params.cols;
+  if (rows <= 0 || cols <= 0) return;
+  const std::size_t mat = static_cast<std::size_t>(rows) * cols;
+  const std::size_t rail_stride = static_cast<std::size_t>(num_params) * mat;
+  const int num_maps = std::min(std::max(params.num_maps, 0), 6);
+  // `red_dim == -1` reduces over columns (one lane per row); `-2` over rows
+  // (one lane per column); anything else follows the larger extent, matching
+  // MuonUpdate.
+  const bool reduce_cols =
+      params.red_dim == -1 || (params.red_dim != -2 && rows >= cols);
+  const bool tall = rows > cols;
+  const int min_dim = std::min(rows, cols);
+  const std::size_t min_sq = static_cast<std::size_t>(min_dim) * min_dim;
+  const int lane_count = reduce_cols ? rows : cols;
+  const int lane_len = reduce_cols ? cols : rows;
+  const float inv_lane_len = 1.0f / static_cast<float>(lane_len);
+
+  std::vector<float> x(mat, 0.0f);
+  std::vector<float> a_mat(min_sq, 0.0f);
+  std::vector<float> a2_mat(min_sq, 0.0f);
+  std::vector<float> b_mat(min_sq, 0.0f);
+  std::vector<float> prod(mat, 0.0f);
+  std::vector<float> lane_power(static_cast<std::size_t>(lane_count), 0.0f);
+  std::vector<float> lane_scale(static_cast<std::size_t>(lane_count), 0.0f);
+
+  for (int m = 0; m < num_params; ++m) {
+    const std::size_t off = static_cast<std::size_t>(m) * mat;
+    const ComputeType* grad = stacked_grads + off;
+    ComputeType* param = stacked_params + off;
+    float* fast = velocity + off;
+    float* slow = velocity + rail_stride + off;
+    float* lane = lane_energy + static_cast<std::size_t>(m) * lane_count;
+
+    // Twin-rail momentum plus the Nesterov lookahead.
+#if defined(_OPENMP)
+#pragma omp parallel for schedule(static)
+#endif
+    for (std::size_t i = 0; i < mat; ++i) {
+      const float gr = AsFloat(grad[i]);
+      const float f = fast[i] + (1.0f - params.fast_beta) * (gr - fast[i]);
+      const float s = slow[i] + (1.0f - params.slow_beta) * (gr - slow[i]);
+      fast[i] = f;
+      slow[i] = s;
+      const float blend =
+          params.fast_weight * f + (1.0f - params.fast_weight) * s;
+      x[i] = params.nesterov
+                 ? (1.0f - params.momentum) * gr + params.momentum * blend
+                 : blend;
+    }
+
+    // The first Gram is taken on the unnormalized X; its trace is ||X||_F^2,
+    // which gives the Frobenius normalization for free.
+    if (tall) {
+      MuonMatmul(cols, cols, rows, x.data(), x.data(), a_mat.data(), true,
+                 false);
+    } else {
+      MuonMatmul(rows, rows, cols, x.data(), x.data(), a_mat.data(), false,
+                 true);
+    }
+    double trace = 0.0;
+    for (int i = 0; i < min_dim; ++i) {
+      trace +=
+          static_cast<double>(a_mat[static_cast<std::size_t>(i) * min_dim + i]);
+    }
+    const float d = std::sqrt(static_cast<float>(trace)) * 1.05f + 1e-6f;
+    const float inv_d = 1.0f / d;
+    const float inv_d2 = inv_d * inv_d;
+#if defined(_OPENMP)
+#pragma omp parallel for schedule(static)
+#endif
+    for (std::size_t i = 0; i < mat; ++i) x[i] *= inv_d;
+#if defined(_OPENMP)
+#pragma omp parallel for schedule(static)
+#endif
+    for (std::size_t i = 0; i < min_sq; ++i) a_mat[i] *= inv_d2;
+
+    // The whitening cascade: `B = b*A + c*(A@A)`, then `X = a*X + X@B` (or
+    // `X = a*X + B@X` when wide).
+    for (int k = 0; k < num_maps; ++k) {
+      if (k > 0) {
+        if (tall) {
+          MuonMatmul(cols, cols, rows, x.data(), x.data(), a_mat.data(), true,
+                     false);
+        } else {
+          MuonMatmul(rows, rows, cols, x.data(), x.data(), a_mat.data(), false,
+                     true);
+        }
+      }
+      MuonMatmul(min_dim, min_dim, min_dim, a_mat.data(), a_mat.data(),
+                 a2_mat.data(), false, false);
+      const float ca = kAnvilMaps[k][0];
+      const float cb = kAnvilMaps[k][1];
+      const float cc = kAnvilMaps[k][2];
+#if defined(_OPENMP)
+#pragma omp parallel for schedule(static)
+#endif
+      for (std::size_t i = 0; i < min_sq; ++i) {
+        b_mat[i] = cb * a_mat[i] + cc * a2_mat[i];
+      }
+      if (tall) {
+        MuonMatmul(rows, cols, cols, x.data(), b_mat.data(), prod.data(), false,
+                   false);
+      } else {
+        MuonMatmul(rows, cols, rows, b_mat.data(), x.data(), prod.data(), false,
+                   false);
+      }
+#if defined(_OPENMP)
+#pragma omp parallel for schedule(static)
+#endif
+      for (std::size_t i = 0; i < mat; ++i) x[i] = ca * x[i] + prod[i];
+    }
+
+    // Per-lane energy equalizer (NorMuon's low-rank variance estimate).
+    for (int l = 0; l < lane_count; ++l) {
+      double s = 0.0;
+      if (reduce_cols) {
+        for (int c = 0; c < cols; ++c) {
+          const float v = x[static_cast<std::size_t>(l) * cols + c];
+          s += static_cast<double>(v) * v;
+        }
+      } else {
+        for (int r = 0; r < rows; ++r) {
+          const float v = x[static_cast<std::size_t>(r) * cols + l];
+          s += static_cast<double>(v) * v;
+        }
+      }
+      lane_power[static_cast<std::size_t>(l)] =
+          static_cast<float>(s) * inv_lane_len;
+    }
+    double sum_power = 0.0;
+    for (int l = 0; l < lane_count; ++l) {
+      sum_power += lane_power[static_cast<std::size_t>(l)];
+    }
+    const float pre_norm =
+        std::sqrt(static_cast<float>(sum_power) * static_cast<float>(lane_len));
+    double sum_post = 0.0;
+    for (int l = 0; l < lane_count; ++l) {
+      const std::size_t idx = static_cast<std::size_t>(l);
+      const float power = lane_power[idx];
+      const float energy =
+          lane[idx] + (1.0f - params.beta2) * (power - lane[idx]);
+      lane[idx] = energy;
+      const float gain = 1.0f / std::sqrt(std::max(energy, 1e-10f));
+      lane_scale[idx] = gain;
+      sum_post += static_cast<double>(power * static_cast<float>(lane_len)) *
+                  gain * gain;
+    }
+    const float inv_post =
+        pre_norm / std::max(std::sqrt(static_cast<float>(sum_post)), 1e-10f);
+    for (int l = 0; l < lane_count; ++l) {
+      lane_scale[static_cast<std::size_t>(l)] *= inv_post;
+    }
+    if (reduce_cols) {
+#if defined(_OPENMP)
+#pragma omp parallel for schedule(static)
+#endif
+      for (int l = 0; l < lane_count; ++l) {
+        const float s = lane_scale[static_cast<std::size_t>(l)];
+        for (int c = 0; c < cols; ++c) {
+          x[static_cast<std::size_t>(l) * cols + c] *= s;
+        }
+      }
+    } else {
+#if defined(_OPENMP)
+#pragma omp parallel for schedule(static)
+#endif
+      for (int l = 0; l < lane_count; ++l) {
+        const float s = lane_scale[static_cast<std::size_t>(l)];
+        for (int r = 0; r < rows; ++r) {
+          x[static_cast<std::size_t>(r) * cols + l] *= s;
+        }
+      }
+    }
+
+    // Cautious (sign-aligned) weight decay gated on the slow rail, then the
+    // update. `weight_decay` already carries the outer `lr`, so the product
+    // `lr * weight_decay` is the reference's `lr^2` decay coefficient.
+#if defined(_OPENMP)
+#pragma omp parallel for schedule(static)
+#endif
+    for (std::size_t i = 0; i < mat; ++i) {
+      const float pv = AsFloat(param[i]);
+      const float decay =
+          (slow[i] * pv >= 0.0f) ? params.lr * params.weight_decay * pv : 0.0f;
+      param[i] = ToCompute(pv - decay - params.lr * x[i]);
     }
   }
 }

@@ -143,6 +143,28 @@ struct MuonParams {
   bool nesterov = true;
 };
 
+// ANVIL (docs/optimizer-anvil-design.md): the twin-rail momentum, the whitening
+// cascade, and the per-lane energy equalizer that replace Muon's Polar Express.
+// The host owns the schedule: `momentum` is the Nesterov lookahead (the rail
+// beta), `fast_beta` and `fast_weight` are already resolved from the engage
+// step, and `weight_decay` is `wd_mul * base_weight_decay * lr` so the kernel's
+// `lr * weight_decay` product reproduces the reference's `lr^2` decay.
+struct AnvilParams {
+  int num_params = 1;  // matrices stacked along axis 0
+  int rows = 0;        // trailing row extent of each matrix
+  int cols = 0;        // trailing column extent of each matrix
+  float lr = 0.0f;
+  float momentum = 0.95f;
+  float fast_beta = 0.85f;
+  float slow_beta = 0.98f;
+  float fast_weight = 0.4385f;
+  float beta2 = 0.9f;
+  float weight_decay = 0.0f;
+  int num_maps = 6;
+  int red_dim = -1;  // lane axis: -1 (columns) or -2 (rows)
+  bool nesterov = true;
+};
+
 // Softmax statistics saved by attention forward and consumed by its backward.
 // Layout is `[batch, num_heads, seq, 2]` with (max, sum_exp) per query row.
 inline int AttentionStatsCount(const AttentionParams& params) {
@@ -230,6 +252,13 @@ void AdamWUpdate(int n, const AdamWParams& params, ComputeType* p,
 // `[num_params, rows, 1]` or `[num_params, 1, cols]`.
 void MuonUpdate(const MuonParams& params, const ComputeType* stacked_grads,
                 ComputeType* stacked_params, float* buf1, float* buf2);
+
+// `velocity` holds `2 * num_params * rows * cols` floats: the fast rail first,
+// then the slow rail. `lane_energy` holds
+// `num_params * (red_dim == -1 ? rows : cols)` floats.
+void AnvilUpdate(const AnvilParams& params, const ComputeType* stacked_grads,
+                 ComputeType* stacked_params, float* velocity,
+                 float* lane_energy);
 
 // Computes the global L2 norm of `grads`, clips it to `clip` in place, and
 // writes the pre-clip norm to `out_norm`.

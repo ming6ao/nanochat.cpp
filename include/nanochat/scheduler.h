@@ -18,6 +18,14 @@ struct SchedulerConfig {
   float muon_momentum_start = 0.85f;
   float muon_momentum_peak = 0.97f;
   float muon_momentum_final = 0.90f;
+
+  // ANVIL's fast-rail beta (docs/optimizer-anvil-design.md): linear warmup from
+  // `rail_beta_min` to `rail_beta_max`, flat, then a linear cooldown over the
+  // last `rail_beta_cooldown_steps`.
+  float rail_beta_warmup_steps = 240.0f;
+  float rail_beta_cooldown_steps = 50.0f;
+  float rail_beta_min = 0.85f;
+  float rail_beta_max = 0.93f;
 };
 
 class Scheduler {
@@ -35,6 +43,11 @@ class Scheduler {
 
   // Cosine weight decay to zero over the run.
   float WeightDecay(int step) const;
+
+  // ANVIL's fast-rail beta and Nesterov lookahead: warm up from
+  // `rail_beta_min` to `rail_beta_max`, hold, then cool down over the last
+  // `rail_beta_cooldown_steps` of the run.
+  float RailBeta(int step) const;
 
   const SchedulerConfig& config() const { return config_; }
 

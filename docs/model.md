@@ -121,10 +121,14 @@ prefer additive changes. See [DESIGN.md §7](../DESIGN.md).
 - **AdamW groups**: lm_head, token embedding, value embeddings, resid/x0/smear/
   backout scalars.
 - **Muon groups**: matrix parameters, grouped by shape and stacked.
+- **ANVIL groups** (opt-in, `matrix_optimizer = 1`): the same matrix
+  parameters, with the twin-rail momentum and lane-energy state instead of the
+  Muon buffers. See [optimizer-anvil-design.md](optimizer-anvil-design.md).
 
-Schedules (LR multiplier, Muon momentum, weight decay) live in `Scheduler`.
-`AdamWUpdate` and `MuonUpdate` are the kernels; Muon's Polar Express iterations
-use batched cuBLAS GEMMs.
+Schedules (LR multiplier, Muon momentum, ANVIL rail beta, weight decay) live in
+`Scheduler`. `AdamWUpdate`, `MuonUpdate`, and `AnvilUpdate` are the kernels;
+Muon's Polar Express and ANVIL's whitening cascade both use batched cuBLAS
+GEMMs.
 
 The kernels themselves are declared in [kernels.md](kernels.md).
 

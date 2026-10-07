@@ -46,6 +46,11 @@ void Usage() {
       "  [schedule flags: --warmup-steps --warmdown-ratio --final-lr-frac\n"
       "   --muon-momentum-warmup-steps --muon-momentum-start\n"
       "   --muon-momentum-peak --muon-momentum-final]\n"
+      "  [ANVIL flags: --matrix-optimizer --adam-step-period --anvil-lr\n"
+      "   --anvil-weight-decay --anvil-momentum --anvil-beta2\n"
+      "   --anvil-fast-beta --anvil-slow-beta --anvil-fast-weight\n"
+      "   --anvil-engage-step --anvil-num-maps --rail-beta-warmup-steps\n"
+      "   --rail-beta-cooldown-steps --rail-beta-min --rail-beta-max]\n"
       "  [model flags: --layers --heads --kv-heads --hidden --seq\n"
       "   --vocab --padded-vocab --window-pattern --rope-base]\n");
 }
@@ -176,6 +181,51 @@ int main(int argc, char** argv) {
     } else if (flag == "--muon-momentum-final") {
       if (!nanochat::cli::ParseFloat(value, &parsed_float)) parsed_float = 0.0f;
       config.scheduler.muon_momentum_final = parsed_float;
+    } else if (flag == "--matrix-optimizer") {
+      config.optimizer.matrix_optimizer =
+          nanochat::cli::ParseInt(value, &parsed_int) ? parsed_int : 0;
+    } else if (flag == "--adam-step-period") {
+      config.optimizer.adam_step_period =
+          nanochat::cli::ParseInt(value, &parsed_int) ? parsed_int : 1;
+    } else if (flag == "--anvil-lr") {
+      if (!nanochat::cli::ParseFloat(value, &parsed_float)) parsed_float = 0.0f;
+      config.optimizer.anvil_lr = parsed_float;
+    } else if (flag == "--anvil-weight-decay") {
+      if (!nanochat::cli::ParseFloat(value, &parsed_float)) parsed_float = 0.0f;
+      config.optimizer.anvil_weight_decay = parsed_float;
+    } else if (flag == "--anvil-momentum") {
+      if (!nanochat::cli::ParseFloat(value, &parsed_float)) parsed_float = 0.0f;
+      config.optimizer.anvil_momentum = parsed_float;
+    } else if (flag == "--anvil-beta2") {
+      if (!nanochat::cli::ParseFloat(value, &parsed_float)) parsed_float = 0.0f;
+      config.optimizer.anvil_beta2 = parsed_float;
+    } else if (flag == "--anvil-fast-beta") {
+      if (!nanochat::cli::ParseFloat(value, &parsed_float)) parsed_float = 0.0f;
+      config.optimizer.anvil_fast_beta = parsed_float;
+    } else if (flag == "--anvil-slow-beta") {
+      if (!nanochat::cli::ParseFloat(value, &parsed_float)) parsed_float = 0.0f;
+      config.optimizer.anvil_slow_beta = parsed_float;
+    } else if (flag == "--anvil-fast-weight") {
+      if (!nanochat::cli::ParseFloat(value, &parsed_float)) parsed_float = 0.0f;
+      config.optimizer.anvil_fast_weight = parsed_float;
+    } else if (flag == "--anvil-engage-step") {
+      config.optimizer.anvil_engage_step =
+          nanochat::cli::ParseInt(value, &parsed_int) ? parsed_int : 0;
+    } else if (flag == "--anvil-num-maps") {
+      config.optimizer.anvil_num_maps =
+          nanochat::cli::ParseInt(value, &parsed_int) ? parsed_int : 6;
+    } else if (flag == "--rail-beta-warmup-steps") {
+      if (!nanochat::cli::ParseFloat(value, &parsed_float)) parsed_float = 0.0f;
+      config.scheduler.rail_beta_warmup_steps = parsed_float;
+    } else if (flag == "--rail-beta-cooldown-steps") {
+      if (!nanochat::cli::ParseFloat(value, &parsed_float)) parsed_float = 0.0f;
+      config.scheduler.rail_beta_cooldown_steps = parsed_float;
+    } else if (flag == "--rail-beta-min") {
+      if (!nanochat::cli::ParseFloat(value, &parsed_float)) parsed_float = 0.0f;
+      config.scheduler.rail_beta_min = parsed_float;
+    } else if (flag == "--rail-beta-max") {
+      if (!nanochat::cli::ParseFloat(value, &parsed_float)) parsed_float = 0.0f;
+      config.scheduler.rail_beta_max = parsed_float;
     } else {
       std::fprintf(stderr, "train_main: unknown flag %s\n", flag.c_str());
       Usage();
