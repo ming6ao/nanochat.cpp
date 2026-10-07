@@ -530,7 +530,7 @@ void TestClassifierRowScale() {
     return loss;
   };
   CheckFiniteDifference(logits0, dl, loss_at, 5e-3,
-                       "classifier row_scale backward");
+                        "classifier row_scale backward");
 #endif
 }
 
