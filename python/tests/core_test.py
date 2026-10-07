@@ -95,6 +95,47 @@ class CoreTest(unittest.TestCase):
         finally:
             self.lib.nanochat_model_free(handle)
 
+    def _read_grad(self, handle, index: int, count: int) -> list:
+        buffer = (ctypes.c_float * int(count))()
+        copied = self.lib.nanochat_param_read(
+            handle, index, 1, 0, int(count),
+            ctypes.cast(buffer, ctypes.c_void_p))
+        self.assertEqual(copied, int(count))
+        return [float(value) for value in buffer]
+
+    def test_backward_weighted_matches_the_plain_backward(self) -> None:
+        config = tiny_config()
+        handle = _core.check_handle(
+            self.lib,
+            self.lib.nanochat_model_create(ctypes.byref(config),
+                                           ctypes.c_uint64(23)),
+            "nanochat_model_create")
+        try:
+            tokens = (ctypes.c_int * 16)(*list(range(8)) * 2)
+            targets = (ctypes.c_int * 16)(*(list(range(1, 8)) + [0]) * 2)
+            param = _core.Param()
+            _core.check_code(
+                self.lib,
+                self.lib.nanochat_param_info(handle, 0, ctypes.byref(param)),
+                "nanochat_param_info")
+            count = int(param.count)
+
+            self.lib.nanochat_zero_grad(handle)
+            self.lib.nanochat_forward_loss(handle, tokens, targets, 2, 8)
+            self.lib.nanochat_backward(handle)
+            plain = self._read_grad(handle, 0, count)
+
+            self.lib.nanochat_zero_grad(handle)
+            self.lib.nanochat_forward_loss(handle, tokens, targets, 2, 8)
+            weights = (ctypes.c_float * 16)(*[1.0] * 16)
+            self.lib.nanochat_backward_weighted(
+                handle, weights, ctypes.c_float(1.0))
+            weighted = self._read_grad(handle, 0, count)
+            for got, want in zip(plain, weighted):
+                self.assertAlmostEqual(got, want, places=5)
+        finally:
+            self.lib.nanochat_model_free(handle)
+
     def test_optimizer_step(self) -> None:
         config = tiny_config()
         model = _core.check_handle(

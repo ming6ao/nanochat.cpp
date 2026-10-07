@@ -237,9 +237,10 @@ void TestEmbedding() {
   }
   CheckVectorClose(FromStorage(out_dev.Download()), ref_out, "embedding fwd");
 
-  // Backward: the kernel zeroes the touched rows, then scatter-adds dout. With
-  // a repeated id the two contributions must add (the atomic path), and an
-  // untouched row keeps its previous value.
+  // Backward: the kernel scatter-adds dout onto the persistent gradient
+  // buffer. With a repeated id the two contributions add (the atomic path),
+  // an untouched row keeps its previous value, and the caller owns the one
+  // zeroing pass.
   const float kPrev = 7.0f;
   std::vector<ComputeType> grad_init(vocab * dim, C(kPrev));
   DevBuf<ComputeType> dtable_grad(grad_init);
@@ -247,9 +248,6 @@ void TestEmbedding() {
   Synchronize();
 
   std::vector<float> ref_grad(vocab * dim, kPrev);
-  for (int t = 0; t < tokens; ++t) {
-    for (int d = 0; d < dim; ++d) ref_grad[ids[t] * dim + d] = 0.0f;
-  }
   for (int t = 0; t < tokens; ++t) {
     for (int d = 0; d < dim; ++d) {
       ref_grad[ids[t] * dim + d] += doutf[t * dim + d];

@@ -996,6 +996,9 @@ void ClassifierBackward(const ClassifierParams& params,
       params.padded_vocab_size > 0 ? params.padded_vocab_size : vocab;
   if (rows <= 0 || vocab <= 0) return;
   const float cap = params.softcap;
+  // Optional per-row weights (docs/post-training.md section 2.2). A null
+  // pointer keeps the unweighted arithmetic exactly as it was.
+  const float* row_scale = params.row_scale;
 #if defined(_OPENMP)
 #pragma omp parallel
 #endif
@@ -1029,12 +1032,24 @@ void ClassifierBackward(const ClassifierParams& params,
         sum_exp += std::exp(static_cast<double>(probs[j] - row_max));
       }
       const float inv = static_cast<float>(1.0 / sum_exp);
-      for (int j = 0; j < vocab; ++j) {
-        const float p = std::exp(probs[j] - row_max) * inv;
-        const float onehot = (j == target) ? 1.0f : 0.0f;
-        // dL/d(raw logit) = (softmax - onehot) * d(softcap)/d(raw).
-        dlogits[base + j] = ToCompute((p - onehot) * sech2[j]);
+      if (row_scale != nullptr) {
+        const float scale = row_scale[r];
+        for (int j = 0; j < vocab; ++j) {
+          const float p = std::exp(probs[j] - row_max) * inv;
+          const float onehot = (j == target) ? 1.0f : 0.0f;
+          // dL/d(raw logit) = (softmax - onehot) * d(softcap)/d(raw), then
+          // the per-row weight multiplies the whole row.
+          dlogits[base + j] = ToCompute((p - onehot) * sech2[j] * scale);
+        }
+      } else {
+        for (int j = 0; j < vocab; ++j) {
+          const float p = std::exp(probs[j] - row_max) * inv;
+          const float onehot = (j == target) ? 1.0f : 0.0f;
+          // dL/d(raw logit) = (softmax - onehot) * d(softcap)/d(raw).
+          dlogits[base + j] = ToCompute((p - onehot) * sech2[j]);
+        }
       }
+      // The padded vocabulary tail is always zero.
       for (int j = vocab; j < padded; ++j) dlogits[base + j] = ToCompute(0.0f);
     }
   }
@@ -1057,13 +1072,10 @@ void EmbeddingForward(int tokens, int dim, const int* ids,
 void EmbeddingBackward(int tokens, int dim, const int* ids,
                        const ComputeType* dout, ComputeType* dtable) {
   if (tokens <= 0 || dim <= 0) return;
-  // Zero only the rows this batch touches (docs/model.md). Doing this in a
-  // first pass makes duplicate ids safe: every touched row is zeroed before any
-  // contribution is added.
-  for (int i = 0; i < tokens; ++i) {
-    ComputeType* row = dtable + static_cast<std::int64_t>(ids[i]) * dim;
-    ZeroFill(row, static_cast<std::size_t>(dim));
-  }
+  // Add every token row to the dense gradient buffer. The caller clears the
+  // buffer once with ZeroGrad, so repeated backward calls sum. A duplicate id
+  // adds every occurrence. The scatter-add needs no zeroing pass
+  // (docs/model.md).
   for (int i = 0; i < tokens; ++i) {
     ComputeType* row = dtable + static_cast<std::int64_t>(ids[i]) * dim;
     const std::int64_t src = static_cast<std::int64_t>(i) * dim;

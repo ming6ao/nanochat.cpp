@@ -29,6 +29,7 @@ cc_library(
         "eval.h",
         "model_impl.h",
         "ops.h",
+        "optim_state.h",
         "train.h",
         "workspace.h",
     ],
@@ -237,6 +238,38 @@ cc_test(
     size = "small",
 )
 
+# Masked loss and the weighted backward (docs/post-training.md section 2): the
+# forward mean divides by the valid-target count, an ignored target carries a
+# zero per-row loss, `BackwardWeighted` shares the valid-count divisor, and a
+# row weight of 0 matches an ignored target. CPU only.
+cc_test(
+    name = "masked_loss_test",
+    srcs = ["masked_loss_test.cc"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    deps = [
+        ":model",
+        "//include/nanochat:nanochat",
+    ],
+    size = "small",
+)
+
+# Optimizer-state records in NCHKPT01 (docs/post-training.md section 7): a
+# save-and-reload test that continues a run, checks the loss curve is
+# continuous, compares the AdamW moments and Muon buffers byte for byte, and
+# keeps a parameter-only file loadable with zero moments. CPU only.
+cc_test(
+    name = "optimizer_state_test",
+    srcs = ["optimizer_state_test.cc"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    deps = [
+        ":model",
+        "//include/nanochat:nanochat",
+    ],
+    size = "small",
+)
+
 # CLI entry points. Each calls `nanochat::RequireSandboxOrDie` at the top of
 # main, so they refuse to run outside `tools/nanochat`. CPU only.
 cc_binary(
@@ -324,6 +357,8 @@ test_suite(name = "all", tests = [
     ":optim_test",
     ":data_test",
     ":harness_test",
+    ":masked_loss_test",
+    ":optimizer_state_test",
     # The tokenizer host package owns its own test suite.
     "//src/tokenizer:all",
 ])

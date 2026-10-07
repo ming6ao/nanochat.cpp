@@ -245,6 +245,24 @@ cc_test(
     size = "small",
 )
 
+# The whole-campaign gate (docs/post-training.md): a tiny CPU model proves
+# that `ForwardLoss` normalizes by the valid-target count, that
+# `BackwardWeighted` with all-ones weights matches `Backward`, and that two
+# `BackwardAccumulate` passes over micro-batches that share a token id sum to
+# one `Backward` over the concatenated batch. It needs no fixture and no torch,
+# so it stays a plain T0 CPU test.
+cc_test(
+    name = "post_training_core_test",
+    srcs = ["post_training_core_test.cc"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    deps = [
+        "//include/nanochat:nanochat",
+        "//src:model",
+    ],
+    size = "small",
+)
+
 # Aggregation point consumed by //:all_tests.
 test_suite(name = "all", tests = [
     ":oracle_test",
@@ -255,4 +273,5 @@ test_suite(name = "all", tests = [
     ":generate_parity_cuda_test",
     ":score_parity_test",
     ":loader_parity_test",
+    ":post_training_core_test",
 ])

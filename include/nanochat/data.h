@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "nanochat/tensor.h"
@@ -48,10 +49,45 @@ class Checkpoint {
   TensorRecord* Find(std::string_view name);
 
   void Add(TensorRecord record);
-  void Clear() { tensors_.clear(); }
+  void Clear() {
+    tensors_.clear();
+    optimizer_state_.clear();
+  }
+
+  // Optimizer-state records (docs/post-training.md section 7). The AdamW
+  // moments and the Muon buffers use the same self-describing record layout,
+  // but they live in this separate list. A loader can then tell a parameter
+  // from a state buffer, because no two records share a name. `Save` writes the
+  // list after the parameter records. A parameter-only NCHKPT01 file holds an
+  // empty list and stays loadable.
+  const std::vector<TensorRecord>& optimizer_state() const {
+    return optimizer_state_;
+  }
+  std::vector<TensorRecord>& optimizer_state() { return optimizer_state_; }
+
+  // Finds an optimizer-state record by name. Returns null when the file holds
+  // no such record.
+  const TensorRecord* FindOptimizerState(std::string_view name) const {
+    for (const TensorRecord& record : optimizer_state_) {
+      if (record.name == name) return &record;
+    }
+    return nullptr;
+  }
+  TensorRecord* FindOptimizerState(std::string_view name) {
+    for (TensorRecord& record : optimizer_state_) {
+      if (record.name == name) return &record;
+    }
+    return nullptr;
+  }
+
+  void AddOptimizerState(TensorRecord record) {
+    optimizer_state_.push_back(std::move(record));
+  }
+  void ClearOptimizerState() { optimizer_state_.clear(); }
 
  private:
   std::vector<TensorRecord> tensors_;
+  std::vector<TensorRecord> optimizer_state_;
 };
 
 }  // namespace nanochat

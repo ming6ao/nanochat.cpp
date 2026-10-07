@@ -27,9 +27,11 @@ The library target is `//backends/cpu:cpu`.
   writes the final activation into whatever buffer it is given, so a model that
   needs both must keep a copy of the pre-norm rows (for example
   `q_proj` for backward and a `q_prep` copy for attention).
-- **Write-not-accumulate.** `RmsNorm*`, `Pointwise*`, and `Classifier*` write
-  their outputs. `EmbeddingBackward` zeroes the touched rows and scatters-adds.
-  `AttentionBackward` zeroes `dq`/`dk`/`dv` before accumulating.
+- **Write-not-accumulate.** `RmsNorm*` and `Pointwise*` write their outputs.
+  `Classifier*` writes its outputs. `EmbeddingBackward` scatter-adds onto the
+  dense gradient buffer, so the caller zeroes that buffer once with `ZeroGrad`
+  and repeated backward calls sum. `AttentionBackward` zeroes `dq`/`dk`/`dv`
+  before accumulating.
 - **Loss scaling.** `ClassifierForward` writes per-row cross-entropy and
   `ClassifierBackward` writes the gradient of the *sum* of those rows
   (`softmax - onehot` through the softcap). The caller divides by the number of

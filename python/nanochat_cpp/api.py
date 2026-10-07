@@ -62,6 +62,21 @@ def _flatten_ints(values) -> list[int]:
     return flat
 
 
+def _flatten_floats(values) -> list[float]:
+    """A flat list of floats from a nested sequence or a ctypes array."""
+    flat: list[float] = []
+
+    def visit(value) -> None:
+        if isinstance(value, (list, tuple, array.array, ctypes.Array)):
+            for item in value:
+                visit(item)
+        else:
+            flat.append(float(value))
+
+    visit(values)
+    return flat
+
+
 def _int_buffer(values):
     """A flat ``ctypes`` int array from any int sequence."""
     flat = _flatten_ints(values)
@@ -405,6 +420,7 @@ class Model:
         else:
             self.device = "cpu"
         self.seed = int(seed) if seed is not None else 0
+        self._last_rows = 0
         self._c_config = config._to_c()
         handle = self._lib.nanochat_model_create(
             ctypes.byref(self._c_config), ctypes.c_uint64(self.seed))
@@ -426,11 +442,32 @@ class Model:
         if batch <= 0 or seq <= 0 or count != batch * seq:
             raise ValueError(
                 f"{count} tokens do not fit batch {batch} x seq {seq}")
+        self._last_rows = batch * seq
         return float(self._lib.nanochat_forward_loss(
             self._handle, buffer_tokens, buffer_targets, batch, seq))
 
     def backward(self) -> None:
         _void(self._lib, "nanochat_backward", self._handle)
+
+    def backward_weighted(self, row_weights, scale: float = 1.0) -> None:
+        """Accumulate a weighted backward pass over the most recent forward.
+
+        ``row_weights`` holds one weight per row, that is ``batch * seq``
+        entries for the most recent ``forward_loss``. The call accumulates
+        into the parameter gradients, so call ``zero_grad`` first
+        (docs/post-training.md section 2.2).
+        """
+        weights = _flatten_floats(row_weights)
+        if self._last_rows <= 0:
+            raise RuntimeError(
+                "forward_loss must run before backward_weighted")
+        if len(weights) != self._last_rows:
+            raise ValueError(
+                f"row_weights has {len(weights)} entries; "
+                f"expected {self._last_rows}")
+        buffer = (ctypes.c_float * len(weights))(*weights)
+        _void(self._lib, "nanochat_backward_weighted", self._handle, buffer,
+              ctypes.c_float(float(scale)))
 
     def zero_grad(self) -> None:
         _void(self._lib, "nanochat_zero_grad", self._handle)
@@ -701,11 +738,7 @@ class Trainer:
                 grad_accum = max(1, int(total_batch) // (self.batch * self.seq))
             else:
                 grad_accum = 1
-        self.grad_accum = int(grad_accum)
-        if self.grad_accum != 1:
-            raise NotImplementedError(
-                "gradient accumulation > 1 is not available through the C "
-                "application binary interface")
+        self.grad_accum = max(1, int(grad_accum))
         if num_iterations is None:
             num_iterations = getattr(optimizer, "num_iterations", 0) or 1
         self.num_iterations = int(num_iterations)
@@ -723,28 +756,55 @@ class Trainer:
     def __iter__(self) -> "Trainer":
         return self
 
+    def backward_weighted(self, row_weights, scale: float = 1.0) -> None:
+        """Accumulate a weighted backward pass over one micro-batch.
+
+        ``row_weights`` holds one weight per row, that is ``batch * seq``
+        entries. The call forwards to ``nanochat_backward_weighted`` and
+        accumulates into the parameter gradients (docs/post-training.md
+        section 2.2).
+        """
+        weights = _flatten_floats(row_weights)
+        expected = self.batch * self.seq
+        if len(weights) != expected:
+            raise ValueError(
+                f"row_weights has {len(weights)} entries; expected {expected}")
+        self.model.backward_weighted(weights, scale)
+
     def __next__(self):
         if self._step >= self.num_iterations:
             raise StopIteration
         step = self._step + 1
-        batch = self.data.next()
-        if batch is None:
-            # Cycle the epoch the same way the C++ TrainLoop does: reset the
-            # document stream once and read the first batch again. The loader
-            # provides fewer batches than the committed fixture has steps.
-            self.data.reset()
-            batch = self.data.next()
-        if batch is None:
-            raise RuntimeError(
-                "the document loader is exhausted after a reset")
-        tokens, targets = batch
+        # Gradient accumulation: sum `grad_accum` micro-batch gradients (each
+        # scaled by 1/grad_accum) before one optimizer step, exactly as the
+        # C++ TrainLoop does. The C surface has no uniform-scale backward, so a
+        # micro-batch uses the all-ones row weight that has the same effect.
+        accum = self.grad_accum if self.grad_accum > 0 else 1
+        inv_accum = 1.0 / accum
         self.model.zero_grad()
-        loss = self.model.forward_loss(tokens, targets, batch=self.batch,
-                                       seq=self.seq)
-        self.model.backward()
+        loss_sum = 0.0
+        for _ in range(accum):
+            batch = self.data.next()
+            if batch is None:
+                # Cycle the epoch the same way the C++ TrainLoop does: reset
+                # the document stream once and read the first batch again. The
+                # loader provides fewer batches than the fixture has steps.
+                self.data.reset()
+                batch = self.data.next()
+            if batch is None:
+                raise RuntimeError(
+                    "the document loader is exhausted after a reset")
+            tokens, targets = batch
+            loss_sum += self.model.forward_loss(tokens, targets,
+                                                batch=self.batch, seq=self.seq)
+            if accum == 1:
+                self.model.backward()
+            else:
+                self.backward_weighted([1.0] * (self.batch * self.seq),
+                                       scale=inv_accum)
         self.optimizer.step(step)
         self._step = step
-        return step, loss
+        return step, loss_sum * inv_accum
 
     def save(self, path) -> None:
         self.model.save(path)

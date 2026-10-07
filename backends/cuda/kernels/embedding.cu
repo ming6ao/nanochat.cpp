@@ -3,10 +3,10 @@
 // (the frozen seam's convention), so the entry points stage them into device
 // memory.
 //
-// The backward contract is the CPU reference's: zero only the rows this batch
-// touches, then add the output gradients. Duplicate ids are safe because the
-// zeroing pass runs in its own kernel before the scatter-add pass, and the
-// scatter-add uses atomics for the (possible) duplicate rows.
+// The backward contract is the CPU reference's: add each token row to the
+// gradient buffer. The caller clears the buffer once with ZeroGrad, so repeated
+// backward calls sum. A duplicate id adds every occurrence through the atomic
+// scatter-add, so no zeroing pass is necessary.
 //
 // See docs/kernels.md and docs/model.md.
 
@@ -24,7 +24,6 @@ namespace kernels {
 namespace {
 
 using cuda_kernels::ScatterAddRow;
-using cuda_kernels::ToComputeDev;
 
 // Stage the host-side token ids into device memory for the kernel's lifetime.
 struct DeviceIds {
@@ -62,19 +61,7 @@ __global__ void EmbeddingForwardKernel(int tokens, int dim,
   }
 }
 
-// Pass 1: zero the rows the batch touches. Duplicate ids simply write zero
-// more than once.
-__global__ void EmbeddingZeroRowsKernel(int dim, const int* __restrict__ ids,
-                                        ComputeType* __restrict__ dtable) {
-  const int token = blockIdx.x;
-  ComputeType* row = dtable + static_cast<long long>(ids[token]) * dim;
-  for (int d = threadIdx.x; d < dim; d += blockDim.x) {
-    row[d] = ToComputeDev(0.0f);
-  }
-}
-
-// Pass 2: scatter-add each row's output gradient. Atomics keep duplicate ids
-// correct.
+// Scatter-add each row's output gradient. Atomics keep duplicate ids correct.
 __global__ void EmbeddingScatterAddKernel(int dim, const int* __restrict__ ids,
                                           const ComputeType* __restrict__ dout,
                                           ComputeType* __restrict__ dtable) {
@@ -102,8 +89,6 @@ void EmbeddingBackward(int tokens, int dim, const int* ids,
   if (tokens <= 0 || dim <= 0) return;
   const DeviceIds device_ids(ids, tokens);
   const int block = cuda_kernels::BlockSizeForDim(dim);
-  cuda_backend::Launch(EmbeddingZeroRowsKernel, dim3(tokens), dim3(block), 0,
-                       dim, device_ids.ptr, dtable);
   cuda_backend::Launch(EmbeddingScatterAddKernel, dim3(tokens), dim3(block), 0,
                        dim, device_ids.ptr, dout, dtable);
 }
