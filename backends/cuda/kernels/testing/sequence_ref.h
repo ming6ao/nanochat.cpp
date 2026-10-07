@@ -255,12 +255,14 @@ inline std::vector<float> ClassifierBackward(const ClassifierParams& params,
       sum_exp += std::exp(static_cast<double>(probs[j] - row_max));
     }
     const float inv = static_cast<float>(1.0 / sum_exp);
+    const float row_scale =
+        params.row_scale != nullptr ? params.row_scale[r] : 1.0f;
     for (int j = 0; j < vocab; ++j) {
       const float t = std::tanh(logits[base + j] / cap);
       const float sech2 = 1.0f - t * t;
       const float p = std::exp(probs[j] - row_max) * inv;
       const float onehot = (j == target) ? 1.0f : 0.0f;
-      dlogits[base + j] = (p - onehot) * sech2;
+      dlogits[base + j] = (p - onehot) * sech2 * row_scale;
     }
   }
   return dlogits;
