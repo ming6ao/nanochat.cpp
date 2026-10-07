@@ -996,6 +996,9 @@ void ClassifierBackward(const ClassifierParams& params,
       params.padded_vocab_size > 0 ? params.padded_vocab_size : vocab;
   if (rows <= 0 || vocab <= 0) return;
   const float cap = params.softcap;
+  // Optional per-row weights (docs/post-training.md section 2.2). A null
+  // pointer keeps the unweighted arithmetic exactly as it was.
+  const float* row_scale = params.row_scale;
 #if defined(_OPENMP)
 #pragma omp parallel
 #endif
@@ -1029,12 +1032,24 @@ void ClassifierBackward(const ClassifierParams& params,
         sum_exp += std::exp(static_cast<double>(probs[j] - row_max));
       }
       const float inv = static_cast<float>(1.0 / sum_exp);
-      for (int j = 0; j < vocab; ++j) {
-        const float p = std::exp(probs[j] - row_max) * inv;
-        const float onehot = (j == target) ? 1.0f : 0.0f;
-        // dL/d(raw logit) = (softmax - onehot) * d(softcap)/d(raw).
-        dlogits[base + j] = ToCompute((p - onehot) * sech2[j]);
+      if (row_scale != nullptr) {
+        const float scale = row_scale[r];
+        for (int j = 0; j < vocab; ++j) {
+          const float p = std::exp(probs[j] - row_max) * inv;
+          const float onehot = (j == target) ? 1.0f : 0.0f;
+          // dL/d(raw logit) = (softmax - onehot) * d(softcap)/d(raw), then
+          // the per-row weight multiplies the whole row.
+          dlogits[base + j] = ToCompute((p - onehot) * sech2[j] * scale);
+        }
+      } else {
+        for (int j = 0; j < vocab; ++j) {
+          const float p = std::exp(probs[j] - row_max) * inv;
+          const float onehot = (j == target) ? 1.0f : 0.0f;
+          // dL/d(raw logit) = (softmax - onehot) * d(softcap)/d(raw).
+          dlogits[base + j] = ToCompute((p - onehot) * sech2[j]);
+        }
       }
+      // The padded vocabulary tail is always zero.
       for (int j = vocab; j < padded; ++j) dlogits[base + j] = ToCompute(0.0f);
     }
   }

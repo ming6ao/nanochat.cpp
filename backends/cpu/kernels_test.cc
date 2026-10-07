@@ -485,6 +485,55 @@ void TestClassifier() {
 #endif
 }
 
+// Weighted, masked classifier backward (docs/post-training.md section 2.2).
+// The loss is `sum_r row_scale[r] * loss_r`; ignored rows keep a zero weight
+// and the padded tail is still zeroed. The finite difference proves the per-row
+// multiplier sits after the softcap chain rule.
+void TestClassifierRowScale() {
+  ClassifierParams p;
+  p.rows = 3;
+  p.vocab_size = 4;
+  p.padded_vocab_size = 6;
+  p.softcap = 15.0f;
+  p.ignore_index = -1;
+  Rng rng;
+  std::vector<float> logits0 = RandomVec(3 * 6, &rng);
+  int targets[3] = {0, 2, -1};
+  const float row_scale[3] = {2.0f, 0.5f, 3.0f};
+  p.row_scale = row_scale;
+  std::vector<ComputeType> logits = ToStorage(logits0);
+
+  // Start the gradient buffer at a nonzero value so the zeroing is provable.
+  std::vector<ComputeType> dlogits(3 * 6, C(7.0f));
+  kernels::ClassifierBackward(p, logits.data(), targets, dlogits.data());
+
+  // Every padded vocabulary entry is zero, weighted path or not.
+  for (int r = 0; r < 3; ++r) {
+    for (int j = 4; j < 6; ++j) {
+      CheckClose(U(dlogits[r * 6 + j]), 0.0, 1e-6,
+                 "classifier row_scale padded tail");
+    }
+  }
+  // The ignored row is zero on every column, even with a nonzero weight.
+  for (int j = 0; j < 6; ++j) {
+    CheckClose(U(dlogits[2 * 6 + j]), 0.0, 1e-6,
+               "classifier row_scale ignored row");
+  }
+#if !defined(NANOCHAT_PRECISION_FP16)
+  std::vector<float> dl = FromStorage(dlogits);
+  auto loss_at = [&](const std::vector<float>& lv) {
+    std::vector<ComputeType> l2 = ToStorage(lv);
+    std::vector<ComputeType> ls(3);
+    kernels::ClassifierForward(p, l2.data(), targets, ls.data());
+    double loss = 0.0;
+    for (int r = 0; r < 3; ++r) loss += row_scale[r] * U(ls[r]);
+    return loss;
+  };
+  CheckFiniteDifference(logits0, dl, loss_at, 5e-3,
+                       "classifier row_scale backward");
+#endif
+}
+
 void TestEmbedding() {
   Rng rng;
   const int tokens = 4;
@@ -603,6 +652,7 @@ int main() {
   TestAttentionWindow();
   TestPointwise();
   TestClassifier();
+  TestClassifierRowScale();
   TestEmbedding();
   TestAdamW();
   TestMuon();
