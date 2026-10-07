@@ -281,11 +281,114 @@ void TestParameterOnlyStaysLoadable() {
   ExpectSameOptimizerState(restored_path, reference_zero_path);
 }
 
+// The ANVIL optimizer state (the twin-rail velocity and the lane energy)
+// round-trips through NCHKPT01: a run that saves at step K and resumes from the
+// file reproduces the reference final records byte for byte, and the records
+// carry the ANVIL names rather than the Muon buffers. `adam_step_period` is
+// exercised at 1 and 2 so the AdamW bias correction stays consistent across a
+// resume when the cadence skips steps.
+void TestAnvilStateRoundTrip(int adam_step_period) {
+  const Config config = TinyConfig();
+  const int batch = 2;
+  const int seq = 8;
+  const int rows = batch * seq;
+  const int total_steps = 5;
+  const int save_step = 2;
+
+  std::vector<std::vector<int>> tokens(static_cast<std::size_t>(total_steps));
+  std::vector<std::vector<int>> targets(static_cast<std::size_t>(total_steps));
+  Rng batch_rng(1357911);
+  for (int step = 0; step < total_steps; ++step) {
+    MakeBatch(&batch_rng, rows, config.vocab_size,
+              &tokens[static_cast<std::size_t>(step)],
+              &targets[static_cast<std::size_t>(step)]);
+  }
+
+  SchedulerConfig scheduler_config;
+  scheduler_config.num_iterations = total_steps;
+  Scheduler scheduler(scheduler_config);
+  OptimizerConfig optimizer_config;
+  optimizer_config.matrix_optimizer = 1;
+  optimizer_config.adam_step_period = adam_step_period;
+
+  const std::string tag = "_p" + std::to_string(adam_step_period);
+  const std::string resume_path =
+      TempPath("anvil_state_resume" + tag + ".ckpt");
+  const std::string reference_path =
+      TempPath("anvil_state_reference" + tag + ".ckpt");
+  const std::string resumed_path =
+      TempPath("anvil_state_resumed" + tag + ".ckpt");
+  {
+    std::unique_ptr<Model> model = Model::Create(config);
+    model->InitWeights(kSeed);
+    std::unique_ptr<Optimizer> optimizer =
+        nanochat::CreateOptimizer(model.get(), optimizer_config, scheduler);
+    for (int step = 1; step <= total_steps; ++step) {
+      RunStep(model.get(), optimizer.get(), step,
+              tokens[static_cast<std::size_t>(step - 1)],
+              targets[static_cast<std::size_t>(step - 1)], batch, seq);
+      if (step == save_step &&
+          !Checkpointer::SaveModel(*model, *optimizer, resume_path)) {
+        Fail("anvil state: save with optimizer state failed");
+        return;
+      }
+    }
+    if (!Checkpointer::SaveModel(*model, *optimizer, reference_path)) {
+      Fail("anvil state: final save failed");
+      return;
+    }
+  }
+  {
+    std::unique_ptr<Model> model = Model::Create(config);
+    model->InitWeights(kSeed + 99);
+    std::unique_ptr<Optimizer> optimizer =
+        nanochat::CreateOptimizer(model.get(), optimizer_config, scheduler);
+    if (!Checkpointer::LoadModel(model.get(), optimizer.get(), resume_path)) {
+      Fail("anvil state: load with optimizer state failed");
+      return;
+    }
+    for (int step = save_step + 1; step <= total_steps; ++step) {
+      RunStep(model.get(), optimizer.get(), step,
+              tokens[static_cast<std::size_t>(step - 1)],
+              targets[static_cast<std::size_t>(step - 1)], batch, seq);
+    }
+    if (!Checkpointer::SaveModel(*model, *optimizer, resumed_path)) {
+      Fail("anvil state: resumed final save failed");
+      return;
+    }
+  }
+  ExpectSameOptimizerState(reference_path, resumed_path);
+
+  Checkpoint checkpoint;
+  std::string error;
+  if (!checkpoint.Load(reference_path, &error)) {
+    Fail("anvil state: cannot load the reference: " + error);
+    return;
+  }
+  bool saw_velocity = false;
+  bool saw_lane_energy = false;
+  for (const TensorRecord& record : checkpoint.optimizer_state()) {
+    const bool anvil = record.name.rfind("anvil.", 0) == 0;
+    if (anvil && record.name.find(".velocity") != std::string::npos) {
+      saw_velocity = true;
+    }
+    if (anvil && record.name.find(".lane_energy") != std::string::npos) {
+      saw_lane_energy = true;
+    }
+  }
+  if (!saw_velocity) Fail("anvil state: no anvil.<shape>.velocity record");
+  if (!saw_lane_energy) {
+    Fail("anvil state: no anvil.<shape>.lane_energy record");
+  }
+}
+
 }  // namespace
 
 int main() {
   TestResumeContinuesRun();
   TestParameterOnlyStaysLoadable();
+  TestAnvilStateRoundTrip(1);
+  TestAnvilStateRoundTrip(2);
   if (g_failures != 0) {
     std::fprintf(stderr, "optimizer_state_test: %d failure(s)\n", g_failures);
     return 1;

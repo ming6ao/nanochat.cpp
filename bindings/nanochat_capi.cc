@@ -162,6 +162,23 @@ void ToOptimizerConfig(const nanochat_optim_config& source,
   scheduler->muon_momentum_start = source.muon_momentum_start;
   scheduler->muon_momentum_peak = source.muon_momentum_peak;
   scheduler->muon_momentum_final = source.muon_momentum_final;
+
+  optimizer->matrix_optimizer = source.matrix_optimizer;
+  optimizer->adam_step_period = source.adam_step_period;
+  optimizer->anvil_lr = source.anvil_lr;
+  optimizer->anvil_weight_decay = source.anvil_weight_decay;
+  optimizer->anvil_momentum = source.anvil_momentum;
+  optimizer->anvil_beta2 = source.anvil_beta2;
+  optimizer->anvil_fast_beta = source.anvil_fast_beta;
+  optimizer->anvil_slow_beta = source.anvil_slow_beta;
+  optimizer->anvil_fast_weight = source.anvil_fast_weight;
+  optimizer->anvil_engage_step = source.anvil_engage_step;
+  optimizer->anvil_num_maps = source.anvil_num_maps;
+
+  scheduler->rail_beta_warmup_steps = source.rail_beta_warmup_steps;
+  scheduler->rail_beta_cooldown_steps = source.rail_beta_cooldown_steps;
+  scheduler->rail_beta_min = source.rail_beta_min;
+  scheduler->rail_beta_max = source.rail_beta_max;
 }
 
 }  // namespace

@@ -162,6 +162,24 @@ cuda_library(
     alwayslink = True,
 )
 
+# ANVIL: the twin-rail momentum, the Frobenius-normalized whitening cascade
+# through batched cuBLAS GEMMs, the per-lane energy equalizer, and the
+# sign-aligned cautious update for the stacked matrix parameters. Opt-in beside
+# Muon (docs/optimizer-anvil-design.md).
+cuda_library(
+    name = "anvil",
+    srcs = ["anvil.cu"],
+    copts = nanochat_cuda_copts(),
+    defines = precision_defines(),
+    deps = [
+        ":device_utils",
+        "//backends/cuda:device",
+        "//backends/cuda:gemm",
+        "//include/nanochat:nanochat",
+    ],
+    alwayslink = True,
+)
+
 # ResFormer value gate: `v += 3*sigmoid(h[:12] @ gate_w^T) * ve`.
 cuda_library(
     name = "value_gate",
@@ -201,12 +219,13 @@ cc_library(
     ],
 )
 
-# Aggregate for the optimizer families: AdamW, Muon, and the gradient-clipping
-# GlobalNorm. The optimizer tests link this target.
+# Aggregate for the optimizer families: AdamW, Muon, ANVIL, and the
+# gradient-clipping GlobalNorm. The optimizer tests link this target.
 cc_library(
     name = "optimizer_kernels",
     deps = [
         ":adamw",
+        ":anvil",
         ":global_norm",
         ":muon",
     ],
@@ -396,6 +415,20 @@ cc_test(
     tags = ["gpu"],
 )
 
+cc_test(
+    name = "anvil_gpu_test",
+    srcs = ["anvil_test.cc"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    deps = [
+        ":optimizer_kernels",
+        "//backends/cuda/kernels/testing:optim_test_utils",
+        "//include/nanochat:nanochat",
+    ],
+    size = "small",
+    tags = ["gpu"],
+)
+
 # ---------------------------------------------------------------------------
 # Micro-benchmarks. Not tests: run them through the broker with
 # `tools/nanochat bench` / `tools/nanochat profile`.
@@ -434,6 +467,7 @@ cuda_binary(
 # Aggregation point consumed by //:all_tests.
 test_suite(name = "all", tests = [
     ":adamw_gpu_test",
+    ":anvil_gpu_test",
     ":attention_gpu_test",
     ":classifier_gpu_test",
     ":embedding_gpu_test",

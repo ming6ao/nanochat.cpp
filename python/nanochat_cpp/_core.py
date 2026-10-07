@@ -215,6 +215,21 @@ class OptimizerConfig(ctypes.Structure):
         ("muon_momentum_start", ctypes.c_float),
         ("muon_momentum_peak", ctypes.c_float),
         ("muon_momentum_final", ctypes.c_float),
+        ("matrix_optimizer", ctypes.c_int),
+        ("adam_step_period", ctypes.c_int),
+        ("anvil_lr", ctypes.c_float),
+        ("anvil_weight_decay", ctypes.c_float),
+        ("anvil_momentum", ctypes.c_float),
+        ("anvil_beta2", ctypes.c_float),
+        ("anvil_fast_beta", ctypes.c_float),
+        ("anvil_slow_beta", ctypes.c_float),
+        ("anvil_fast_weight", ctypes.c_float),
+        ("anvil_engage_step", ctypes.c_int),
+        ("anvil_num_maps", ctypes.c_int),
+        ("rail_beta_warmup_steps", ctypes.c_float),
+        ("rail_beta_cooldown_steps", ctypes.c_float),
+        ("rail_beta_min", ctypes.c_float),
+        ("rail_beta_max", ctypes.c_float),
     ]
 
 

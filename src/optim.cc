@@ -130,6 +130,24 @@ struct MuonGroup {
   float* buf2 = nullptr;
 };
 
+// One ANVIL group (docs/optimizer-anvil-design.md). Same shape grouping as
+// Muon, but the state is the twin-rail velocity and the lane energy instead of
+// the momentum and the factored second moment.
+struct AnvilGroup {
+  int rows = 0;
+  int cols = 0;
+  int num_params = 0;
+  float lr = 0.0f;  // nominal, pre-schedule, includes sqrt(max(1, rows/cols))
+  int red_dim = -1;
+  int lane_count = 0;
+  std::int64_t flat_offset = 0;
+  std::int64_t mat = 0;
+  std::vector<ParamView> params;
+  ComputeType* stacked_params = nullptr;
+  float* velocity = nullptr;     // 2 * num_params * mat floats
+  float* lane_energy = nullptr;  // num_params * lane_count floats
+};
+
 class NanochatOptimizer final : public Optimizer {
  public:
   NanochatOptimizer(Model* model, const OptimizerConfig& config,
@@ -163,21 +181,42 @@ class NanochatOptimizer final : public Optimizer {
 
     const float lrm = scheduler_.LrMultiplier(step);
 
-    for (AdamWGroup& group : adamw_groups_) {
-      for (std::size_t i = 0; i < group.params.size(); ++i) {
-        AdamWParams params;
-        params.lr = group.lr * lrm;
-        params.beta1 = group.beta1;
-        params.beta2 = group.beta2;
-        params.eps = group.eps;
-        params.weight_decay = group.weight_decay;
-        params.step = step;
-        kernels::AdamWUpdate(static_cast<int>(group.params[i].count), params,
-                             group.params[i].value,
-                             flat_ + group.grad_offsets[i],
-                             group.m + group.moment_offsets[i],
-                             group.v + group.moment_offsets[i]);
+    // AdamW cadence (docs/optimizer-anvil-design.md): the reference steps AdamW
+    // on the 0-based odd iterations (`training.is_adam_step`), which are the
+    // 1-based even `step`s here, so with `adam_step_period` of 2 the AdamW
+    // groups update on even steps only while the matrix groups update every
+    // step. The bias correction reads the Adam-update ordinal derived from the
+    // 0-based counter, so a resumed run re-derives it exactly; with the default
+    // period of 1 the ordinal is the global step, which keeps the Muon path
+    // bit-identical.
+    const int it = step - 1;
+    const bool run_adam =
+        config_.adam_step_period <= 1 || (it % config_.adam_step_period) == 1;
+    if (run_adam) {
+      const int adam_step = config_.adam_step_period > 1
+                                ? it / config_.adam_step_period + 1
+                                : step;
+      for (AdamWGroup& group : adamw_groups_) {
+        for (std::size_t i = 0; i < group.params.size(); ++i) {
+          AdamWParams params;
+          params.lr = group.lr * lrm;
+          params.beta1 = group.beta1;
+          params.beta2 = group.beta2;
+          params.eps = group.eps;
+          params.weight_decay = group.weight_decay;
+          params.step = adam_step;
+          kernels::AdamWUpdate(static_cast<int>(group.params[i].count), params,
+                               group.params[i].value,
+                               flat_ + group.grad_offsets[i],
+                               group.m + group.moment_offsets[i],
+                               group.v + group.moment_offsets[i]);
+        }
       }
+    }
+
+    if (config_.matrix_optimizer == 1) {
+      StepAnvil(step, lrm);
+      return;
     }
 
     // The Muon schedules come from the shared Scheduler: the learning rate is
@@ -228,6 +267,18 @@ class NanochatOptimizer final : public Optimizer {
       AddOptimizerStateRecord(checkpoint, name + ".buf2", group.buf2,
                               group.buf2_len);
     }
+    for (const AnvilGroup& group : anvil_groups_) {
+      const std::int64_t mat_total =
+          static_cast<std::int64_t>(group.num_params) * group.mat;
+      const std::int64_t lane_total =
+          static_cast<std::int64_t>(group.num_params) * group.lane_count;
+      const std::string name = "anvil." + std::to_string(group.rows) + "x" +
+                               std::to_string(group.cols);
+      AddOptimizerStateRecord(checkpoint, name + ".velocity", group.velocity,
+                              2 * mat_total);
+      AddOptimizerStateRecord(checkpoint, name + ".lane_energy",
+                              group.lane_energy, lane_total);
+    }
   }
 
   // Copies every matching record into the group buffers. Returns true when at
@@ -258,6 +309,16 @@ class NanochatOptimizer final : public Optimizer {
       load(name + ".buf1", group.buf1, mat_total);
       load(name + ".buf2", group.buf2, group.buf2_len);
     }
+    for (const AnvilGroup& group : anvil_groups_) {
+      const std::int64_t mat_total =
+          static_cast<std::int64_t>(group.num_params) * group.mat;
+      const std::int64_t lane_total =
+          static_cast<std::int64_t>(group.num_params) * group.lane_count;
+      const std::string name = "anvil." + std::to_string(group.rows) + "x" +
+                               std::to_string(group.cols);
+      load(name + ".velocity", group.velocity, 2 * mat_total);
+      load(name + ".lane_energy", group.lane_energy, lane_total);
+    }
     return restored;
   }
 
@@ -281,6 +342,16 @@ class NanochatOptimizer final : public Optimizer {
       for (const ParamView& view : group.params) {
         if (target != view.name) continue;
         if (kind != nullptr) *kind = 1;
+        if (rows != nullptr) *rows = view.rows;
+        if (cols != nullptr) *cols = view.cols;
+        if (lr != nullptr) *lr = group.lr;
+        return true;
+      }
+    }
+    for (const AnvilGroup& group : anvil_groups_) {
+      for (const ParamView& view : group.params) {
+        if (target != view.name) continue;
+        if (kind != nullptr) *kind = 2;
         if (rows != nullptr) *rows = view.rows;
         if (cols != nullptr) *cols = view.cols;
         if (lr != nullptr) *lr = group.lr;
@@ -357,6 +428,23 @@ class NanochatOptimizer final : public Optimizer {
     // `std::map` iterates in ascending shape order, matching Python's
     // `for shape in sorted({p.shape ...})`.
     for (auto& entry : muon_by_shape) {
+      if (config_.matrix_optimizer == 1) {
+        AnvilGroup group;
+        group.rows = entry.first.first;
+        group.cols = entry.first.second;
+        group.params = std::move(entry.second);
+        group.num_params = static_cast<int>(group.params.size());
+        group.mat = static_cast<std::int64_t>(group.rows) * group.cols;
+        const bool reduce_cols = group.rows >= group.cols;
+        group.red_dim = reduce_cols ? -1 : -2;
+        group.lane_count = reduce_cols ? group.rows : group.cols;
+        group.lr =
+            config_.anvil_lr *
+            std::sqrt(std::max(1.0f, static_cast<float>(group.rows) /
+                                         static_cast<float>(group.cols)));
+        anvil_groups_.push_back(std::move(group));
+        continue;
+      }
       MuonGroup group;
       group.rows = entry.first.first;
       group.cols = entry.first.second;
@@ -373,7 +461,8 @@ class NanochatOptimizer final : public Optimizer {
       muon_groups_.push_back(std::move(group));
     }
 
-    // Lay out the flat gradient buffer: AdamW groups first, then Muon groups.
+    // Lay out the flat gradient buffer: AdamW groups first, then the matrix
+    // groups.
     std::int64_t total = 0;
     for (AdamWGroup& group : adamw_groups_) {
       for (const ParamView& view : group.params) {
@@ -384,6 +473,10 @@ class NanochatOptimizer final : public Optimizer {
       }
     }
     for (MuonGroup& group : muon_groups_) {
+      group.flat_offset = total;
+      for (const ParamView& view : group.params) total += view.count;
+    }
+    for (AnvilGroup& group : anvil_groups_) {
       group.flat_offset = total;
       for (const ParamView& view : group.params) total += view.count;
     }
@@ -427,6 +520,28 @@ class NanochatOptimizer final : public Optimizer {
             static_cast<std::size_t>(group.buf2_len) * sizeof(float));
       }
     }
+
+    for (AnvilGroup& group : anvil_groups_) {
+      const std::int64_t mat_total =
+          static_cast<std::int64_t>(group.num_params) * group.mat;
+      const std::int64_t lane_total =
+          static_cast<std::int64_t>(group.num_params) * group.lane_count;
+      group.stacked_params =
+          static_cast<ComputeType*>(kernels::Alloc(ElementBytes(mat_total)));
+      group.velocity = static_cast<float*>(kernels::Alloc(
+          static_cast<std::size_t>(2 * mat_total) * sizeof(float)));
+      group.lane_energy = static_cast<float*>(
+          kernels::Alloc(static_cast<std::size_t>(lane_total) * sizeof(float)));
+      if (mat_total > 0) {
+        kernels::Memset(
+            group.velocity, 0,
+            static_cast<std::size_t>(2 * mat_total) * sizeof(float));
+      }
+      if (lane_total > 0) {
+        kernels::Memset(group.lane_energy, 0,
+                        static_cast<std::size_t>(lane_total) * sizeof(float));
+      }
+    }
   }
 
   void Release() {
@@ -440,6 +555,11 @@ class NanochatOptimizer final : public Optimizer {
       if (group.stacked_params != nullptr) kernels::Free(group.stacked_params);
       if (group.buf1 != nullptr) kernels::Free(group.buf1);
       if (group.buf2 != nullptr) kernels::Free(group.buf2);
+    }
+    for (AnvilGroup& group : anvil_groups_) {
+      if (group.stacked_params != nullptr) kernels::Free(group.stacked_params);
+      if (group.velocity != nullptr) kernels::Free(group.velocity);
+      if (group.lane_energy != nullptr) kernels::Free(group.lane_energy);
     }
     flat_ = nullptr;
     norm_dev_ = nullptr;
@@ -455,6 +575,14 @@ class NanochatOptimizer final : public Optimizer {
       }
     }
     for (MuonGroup& group : muon_groups_) {
+      std::int64_t offset = group.flat_offset;
+      for (const ParamView& view : group.params) {
+        kernels::Memcpy(flat_ + offset, view.grad, ElementBytes(view.count),
+                        CopyDir::kDeviceToDevice);
+        offset += view.count;
+      }
+    }
+    for (AnvilGroup& group : anvil_groups_) {
       std::int64_t offset = group.flat_offset;
       for (const ParamView& view : group.params) {
         kernels::Memcpy(flat_ + offset, view.grad, ElementBytes(view.count),
@@ -482,11 +610,65 @@ class NanochatOptimizer final : public Optimizer {
     }
   }
 
+  void GatherAnvilParams(AnvilGroup& group) {
+    for (int i = 0; i < group.num_params; ++i) {
+      kernels::Memcpy(
+          group.stacked_params + static_cast<std::int64_t>(i) * group.mat,
+          group.params[static_cast<std::size_t>(i)].value,
+          ElementBytes(group.mat), CopyDir::kDeviceToDevice);
+    }
+  }
+
+  void ScatterAnvilParams(AnvilGroup& group) {
+    for (int i = 0; i < group.num_params; ++i) {
+      kernels::Memcpy(
+          group.params[static_cast<std::size_t>(i)].value,
+          group.stacked_params + static_cast<std::int64_t>(i) * group.mat,
+          ElementBytes(group.mat), CopyDir::kDeviceToDevice);
+    }
+  }
+
+  // One ANVIL step over every stacked group. The rail schedule and the engage
+  // step come from the Scheduler and the config, so the kernel sees only the
+  // resolved per-step scalars. `weight_decay` carries the outer `lr`, exactly
+  // as docs/optimizer-anvil-design.md specifies.
+  void StepAnvil(int step, float lrm) {
+    const int it = step - 1;
+    const float rail_beta = scheduler_.RailBeta(step);
+    const bool engaged = it >= config_.anvil_engage_step;
+    const float fast_beta = engaged ? config_.anvil_fast_beta : rail_beta;
+    const float fast_weight = engaged ? config_.anvil_fast_weight : 1.0f;
+    const float anvil_wd = config_.anvil_weight_decay * config_.anvil_lr * lrm;
+
+    for (AnvilGroup& group : anvil_groups_) {
+      GatherAnvilParams(group);
+      AnvilParams params;
+      params.num_params = group.num_params;
+      params.rows = group.rows;
+      params.cols = group.cols;
+      params.lr = group.lr * lrm;
+      params.momentum = rail_beta;
+      params.fast_beta = fast_beta;
+      params.slow_beta = config_.anvil_slow_beta;
+      params.fast_weight = fast_weight;
+      params.beta2 = config_.anvil_beta2;
+      params.weight_decay = anvil_wd;
+      params.num_maps = config_.anvil_num_maps;
+      params.red_dim = group.red_dim;
+      params.nesterov = true;
+      kernels::AnvilUpdate(params, flat_ + group.flat_offset,
+                           group.stacked_params, group.velocity,
+                           group.lane_energy);
+      ScatterAnvilParams(group);
+    }
+  }
+
   OptimizerConfig config_;
   Scheduler scheduler_;
   std::vector<ParamView> views_;
   std::vector<AdamWGroup> adamw_groups_;
   std::vector<MuonGroup> muon_groups_;
+  std::vector<AnvilGroup> anvil_groups_;
   ComputeType* flat_ = nullptr;
   float* norm_dev_ = nullptr;
   std::int64_t total_count_ = 0;
@@ -548,6 +730,30 @@ float Scheduler::WeightDecay(int step) const {
   const float ratio =
       static_cast<float>(it) / static_cast<float>(config_.num_iterations);
   return config_.weight_decay_base * 0.5f * (1.0f + std::cos(kPi * ratio));
+}
+
+// ANVIL's fast-rail beta (docs/optimizer-anvil-design.md): linear warmup from
+// `rail_beta_min` to `rail_beta_max`, flat, then a linear cooldown over the
+// last `rail_beta_cooldown_steps`. Mirrors modded-nanogpt's `get_rail_beta`.
+float Scheduler::RailBeta(int step) const {
+  const int it = step - 1;
+  const float warmup = config_.rail_beta_warmup_steps;
+  const float cooldown = config_.rail_beta_cooldown_steps;
+  const float beta_min = config_.rail_beta_min;
+  const float beta_max = config_.rail_beta_max;
+  if (warmup > 0.0f && static_cast<float>(it) < warmup) {
+    const float frac = static_cast<float>(it) / warmup;
+    return beta_min + frac * (beta_max - beta_min);
+  }
+  const float cd_start = static_cast<float>(config_.num_iterations) - cooldown;
+  if (cooldown > 0.0f && static_cast<float>(it) > cd_start) {
+    // Clamp to [0, 1]: a run shorter than the cooldown would otherwise drive
+    // the fraction past 1 and the beta below `rail_beta_min`.
+    const float raw = (static_cast<float>(it) - cd_start) / cooldown;
+    const float frac = std::min(1.0f, std::max(0.0f, raw));
+    return beta_max - frac * (beta_max - beta_min);
+  }
+  return beta_max;
 }
 
 // ---------------------------------------------------------------------------

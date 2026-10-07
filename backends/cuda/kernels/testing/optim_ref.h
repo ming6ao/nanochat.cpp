@@ -330,6 +330,236 @@ inline void MuonUpdate(const MuonParams& params,
   }
 }
 
+// ANVIL's six quintic spectral maps, matching backends/cpu/kernels.cc and
+// backends/cuda/kernels/anvil.cu.
+constexpr float kAnvilMaps[6][3] = {
+    {3.923798038567f, -6.095026865488f, 3.905234618423f},
+    {3.278126713798f, -3.328923386476f, 0.989127286973f},
+    {3.505298394150f, -5.137358782410f, 1.968325560615f},
+    {2.815058591845f, -3.685181239622f, 1.417196497642f},
+    {2.245503932403f, -2.443826979899f, 0.963091710461f},
+    {2.256537145403f, -2.166840097229f, 0.929501253245f},
+};
+
+// Applies one ANVIL step in place over `num_params` matrices stacked along axis
+// 0. `stacked_params`, `velocity`, and `lane_energy` are updated;
+// `stacked_grads` is read-only. `velocity` holds `2 * num_params * rows * cols`
+// floats (fast rail then slow rail); `lane_energy` holds
+// `num_params * (red_dim == -1 ? rows : cols)` floats. This is the
+// authoritative description of the four stages: twin-rail Nesterov momentum,
+// the Frobenius-normalized whitening cascade, the per-lane energy equalizer,
+// and the sign-aligned update.
+inline void AnvilUpdate(const AnvilParams& params,
+                        const std::vector<float>& stacked_grads,
+                        std::vector<float>* stacked_params,
+                        std::vector<float>* velocity,
+                        std::vector<float>* lane_energy) {
+  const int num_params = params.num_params > 0 ? params.num_params : 1;
+  const int rows = params.rows;
+  const int cols = params.cols;
+  if (rows <= 0 || cols <= 0) return;
+  const std::size_t mat = static_cast<std::size_t>(rows) * cols;
+  const std::size_t rail_stride = static_cast<std::size_t>(num_params) * mat;
+  const int num_maps = std::min(std::max(params.num_maps, 0), 6);
+  const bool reduce_cols =
+      params.red_dim == -1 || (params.red_dim != -2 && rows >= cols);
+  const bool tall = rows > cols;
+  const int min_dim = std::min(rows, cols);
+  const std::size_t min_sq = static_cast<std::size_t>(min_dim) * min_dim;
+  const int lane_count = reduce_cols ? rows : cols;
+  const int lane_len = reduce_cols ? cols : rows;
+  const float inv_lane_len = 1.0f / static_cast<float>(lane_len);
+
+  std::vector<float> x(mat, 0.0f);
+  std::vector<float> a_mat(min_sq, 0.0f);
+  std::vector<float> a2_mat(min_sq, 0.0f);
+  std::vector<float> b_mat(min_sq, 0.0f);
+  std::vector<float> prod(mat, 0.0f);
+  std::vector<float> lane_power(static_cast<std::size_t>(lane_count), 0.0f);
+  std::vector<float> lane_scale(static_cast<std::size_t>(lane_count), 0.0f);
+
+  for (int m = 0; m < num_params; ++m) {
+    const std::size_t off = static_cast<std::size_t>(m) * mat;
+    const float* grad = stacked_grads.data() + off;
+    float* param = stacked_params->data() + off;
+    float* fast = velocity->data() + off;
+    float* slow = velocity->data() + rail_stride + off;
+    float* lane =
+        lane_energy->data() + static_cast<std::size_t>(m) * lane_count;
+
+    // Twin-rail momentum plus the Nesterov lookahead.
+    for (std::size_t i = 0; i < mat; ++i) {
+      const float gr = grad[i];
+      const float f = fast[i] + (1.0f - params.fast_beta) * (gr - fast[i]);
+      const float s = slow[i] + (1.0f - params.slow_beta) * (gr - slow[i]);
+      fast[i] = f;
+      slow[i] = s;
+      const float blend =
+          params.fast_weight * f + (1.0f - params.fast_weight) * s;
+      x[i] = params.nesterov
+                 ? (1.0f - params.momentum) * gr + params.momentum * blend
+                 : blend;
+    }
+
+    // First Gram, then the Frobenius normalization.
+    const auto gram = [&]() {
+      if (tall) {
+        for (int i = 0; i < cols; ++i) {
+          for (int j = 0; j < cols; ++j) {
+            double s = 0.0;
+            for (int r = 0; r < rows; ++r) {
+              s += static_cast<double>(
+                       x[static_cast<std::size_t>(r) * cols + i]) *
+                   x[static_cast<std::size_t>(r) * cols + j];
+            }
+            a_mat[static_cast<std::size_t>(i) * cols + j] =
+                static_cast<float>(s);
+          }
+        }
+      } else {
+        for (int i = 0; i < rows; ++i) {
+          for (int j = 0; j < rows; ++j) {
+            double s = 0.0;
+            for (int c = 0; c < cols; ++c) {
+              s += static_cast<double>(
+                       x[static_cast<std::size_t>(i) * cols + c]) *
+                   x[static_cast<std::size_t>(j) * cols + c];
+            }
+            a_mat[static_cast<std::size_t>(i) * rows + j] =
+                static_cast<float>(s);
+          }
+        }
+      }
+    };
+    gram();
+    double trace = 0.0;
+    for (int i = 0; i < min_dim; ++i) {
+      trace +=
+          static_cast<double>(a_mat[static_cast<std::size_t>(i) * min_dim + i]);
+    }
+    const float d = static_cast<float>(std::sqrt(trace)) * 1.05f + 1e-6f;
+    const float inv_d = 1.0f / d;
+    const float inv_d2 = inv_d * inv_d;
+    for (std::size_t i = 0; i < mat; ++i) x[i] *= inv_d;
+    for (std::size_t i = 0; i < min_sq; ++i) a_mat[i] *= inv_d2;
+
+    // The whitening cascade.
+    for (int k = 0; k < num_maps; ++k) {
+      if (k > 0) gram();
+      for (int i = 0; i < min_dim; ++i) {
+        for (int j = 0; j < min_dim; ++j) {
+          double s = 0.0;
+          for (int l = 0; l < min_dim; ++l) {
+            s += static_cast<double>(
+                     a_mat[static_cast<std::size_t>(i) * min_dim + l]) *
+                 a_mat[static_cast<std::size_t>(l) * min_dim + j];
+          }
+          a2_mat[static_cast<std::size_t>(i) * min_dim + j] =
+              static_cast<float>(s);
+        }
+      }
+      const float ca = kAnvilMaps[k][0];
+      const float cb = kAnvilMaps[k][1];
+      const float cc = kAnvilMaps[k][2];
+      for (std::size_t i = 0; i < min_sq; ++i) {
+        b_mat[i] = cb * a_mat[i] + cc * a2_mat[i];
+      }
+      if (tall) {
+        for (int r = 0; r < rows; ++r) {
+          for (int j = 0; j < cols; ++j) {
+            double s = 0.0;
+            for (int i = 0; i < cols; ++i) {
+              s += static_cast<double>(
+                       x[static_cast<std::size_t>(r) * cols + i]) *
+                   b_mat[static_cast<std::size_t>(i) * cols + j];
+            }
+            prod[static_cast<std::size_t>(r) * cols + j] =
+                static_cast<float>(s);
+          }
+        }
+      } else {
+        for (int r = 0; r < rows; ++r) {
+          for (int c = 0; c < cols; ++c) {
+            double s = 0.0;
+            for (int i = 0; i < rows; ++i) {
+              s += static_cast<double>(
+                       b_mat[static_cast<std::size_t>(r) * rows + i]) *
+                   x[static_cast<std::size_t>(i) * cols + c];
+            }
+            prod[static_cast<std::size_t>(r) * cols + c] =
+                static_cast<float>(s);
+          }
+        }
+      }
+      for (std::size_t i = 0; i < mat; ++i) x[i] = ca * x[i] + prod[i];
+    }
+
+    // Per-lane energy equalizer.
+    for (int l = 0; l < lane_count; ++l) {
+      double s = 0.0;
+      if (reduce_cols) {
+        for (int c = 0; c < cols; ++c) {
+          const float v = x[static_cast<std::size_t>(l) * cols + c];
+          s += static_cast<double>(v) * v;
+        }
+      } else {
+        for (int r = 0; r < rows; ++r) {
+          const float v = x[static_cast<std::size_t>(r) * cols + l];
+          s += static_cast<double>(v) * v;
+        }
+      }
+      lane_power[static_cast<std::size_t>(l)] =
+          static_cast<float>(s) * inv_lane_len;
+    }
+    double sum_power = 0.0;
+    for (int l = 0; l < lane_count; ++l) {
+      sum_power += lane_power[static_cast<std::size_t>(l)];
+    }
+    const float pre_norm = static_cast<float>(
+        std::sqrt(sum_power * static_cast<double>(lane_len)));
+    double sum_post = 0.0;
+    for (int l = 0; l < lane_count; ++l) {
+      const std::size_t idx = static_cast<std::size_t>(l);
+      const float power = lane_power[idx];
+      const float energy =
+          lane[idx] + (1.0f - params.beta2) * (power - lane[idx]);
+      lane[idx] = energy;
+      const float gain = 1.0f / std::sqrt(std::max(energy, 1e-10f));
+      lane_scale[idx] = gain;
+      sum_post += static_cast<double>(power * static_cast<float>(lane_len)) *
+                  gain * gain;
+    }
+    const float inv_post =
+        pre_norm / std::max(static_cast<float>(std::sqrt(sum_post)), 1e-10f);
+    for (int l = 0; l < lane_count; ++l) {
+      lane_scale[static_cast<std::size_t>(l)] *= inv_post;
+    }
+    if (reduce_cols) {
+      for (int l = 0; l < lane_count; ++l) {
+        const float s = lane_scale[static_cast<std::size_t>(l)];
+        for (int c = 0; c < cols; ++c) {
+          x[static_cast<std::size_t>(l) * cols + c] *= s;
+        }
+      }
+    } else {
+      for (int l = 0; l < lane_count; ++l) {
+        const float s = lane_scale[static_cast<std::size_t>(l)];
+        for (int r = 0; r < rows; ++r) {
+          x[static_cast<std::size_t>(r) * cols + l] *= s;
+        }
+      }
+    }
+
+    // Sign-aligned weight decay gated on the slow rail, then the update.
+    for (std::size_t i = 0; i < mat; ++i) {
+      const float pv = param[i];
+      const float decay =
+          (slow[i] * pv >= 0.0f) ? params.lr * params.weight_decay * pv : 0.0f;
+      param[i] = pv - decay - params.lr * x[i];
+    }
+  }
+}
+
 }  // namespace optimref
 }  // namespace dev
 }  // namespace nanochat

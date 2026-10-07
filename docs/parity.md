@@ -33,6 +33,9 @@ Status values:
 | E3 | `equivalent` | evaluation | reference checkpoints converted torch -> NCHKPT01 |
 | E4 | `equivalent` | evaluation | CORE and chat scoring use the C++ forward with reference task logic |
 | E5 | `out-of-scope` | evaluation | no distributed evaluation |
+| P1 | `open` | post-training | calculator tool absent in the MVP; the model samples its own python blocks |
+| P2 | `open` | post-training | file-driven `rl_step` makes the rollouts lag one optimizer step |
+| P3 | `equivalent` | post-training | SFT starts from a converted reference base checkpoint |
 | T1 | `equivalent` | tokenizer | native byte pair encoding trainer and encoder vs `rustbpe` + `tiktoken` |
 | T2 | `equivalent` | tokenizer | portable `NCTOKEN1` artifact and `int64` pair counts vs the reference pickle and `int32` |
 | T3 | `open` | tokenizer | stream decode buffers an incomplete UTF-8 suffix instead of one U+FFFD per token |
@@ -132,6 +135,46 @@ subset, not the sampled text.
 Reproducing the reference sampled text exactly would mean reimplementing the
 PyTorch RNG and its state layout, which is not worth it. Treat sampled metrics
 as nanochat.cpp's own seeded distribution.
+
+### P1 — Calculator tool
+
+**Status:** `open`. The reference `scripts/chat_rl.py` runs a calculator tool
+inside the generation loop. The engine detects a python block between
+`<|python_start|>` and `<|python_end|>`, evaluates the expression, and forces
+the result tokens. The `GenerateBatch` primitive never decodes text, because it
+is tokenizer-agnostic. The MVP cannot force the tool output, so the model
+samples its own python blocks. The bridge reads the reward from the final
+`####` answer.
+
+**Impact:** the RL reward and the GSM8K pass rate can differ from the
+reference. The reference supplies exact arithmetic results. The MVP relies on
+the arithmetic of the model.
+
+**Evidence:** none yet. The RL parity fixture (`post-training.md` section 12)
+is the gate.
+
+**Fix direction:** the streaming `chat_engine` protocol in `post-training.md`
+section 5.1. The bridge receives one token column at a time, decodes python
+blocks, and sends the forced tokens back.
+
+### P2 — File-driven RL step
+
+**Status:** `open`. The reference `scripts/chat_rl.py` generates a rollout with
+the current weights, computes the reward, and steps the optimizer in one
+process. The nanochat.cpp correctness gate is a file-driven `rl_step` binary
+that consumes a fixture. The binary reads a recorded rollout and a recorded
+advantage, so the rollout lags the optimizer by one step. The persistent worker
+removes the lag.
+
+**Impact:** the RL trajectory can differ from the reference. The policy that
+produced the rollout is one step behind the policy that takes the update.
+
+**Evidence:** the RL parity fixture is the gate (`post-training.md` section
+12). It is not in the tree yet.
+
+**Fix direction:** the persistent worker in `post-training.md` section 8. The
+worker holds the model and the optimizer and exchanges rollout and advantage
+messages with the bridge over pipes.
 
 ### T3 — Stream decode of an incomplete UTF-8 sequence
 
@@ -236,6 +279,21 @@ spans, the lowest-mean-NLL argmin and exact-argmax match, the
 ChatCORE mean. Only the forward arithmetic differs, in the same
 floating-point-order sense as D2 and D3; each decision is the same function of
 the logits. See [eval.md](eval.md) §4.3 and §5.
+
+### P3 — SFT base checkpoint provenance
+
+The reference `scripts/chat_sft.py` loads its base model from the reference
+`base_checkpoints` directory. A reference-comparable nanochat.cpp SFT run loads
+the same base model through the conversion in E3. The conversion re-lays the
+reference weights without recomputation, so the SFT start is the reference
+start. The optimizer-state section carries the reference moments, so the SFT
+warm-start uses the same starting state. The C++ `train_main` can also pretrain
+a native base checkpoint, and that path is not the parity prerequisite.
+
+**Impact:** none. The SFT start is the reference start.
+
+**Evidence:** E3 and `//src:optimizer_state_test`. The SFT loop is not in the
+tree yet (`post-training.md` section 11).
 
 ### T1 — Native tokenizer reimplementation
 

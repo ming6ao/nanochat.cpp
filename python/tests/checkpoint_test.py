@@ -268,16 +268,52 @@ class OptimizerStateTest(unittest.TestCase):
                 ]})
         self.assertEqual(records, [])
 
+    def test_anvil_group_names_the_two_records(self):
+        state = {
+            9: {
+                "velocity": _FakeTensor((2, 2, 3, 4), b"Q" * 192),
+                "lane_energy": _FakeTensor((2, 3, 1), b"R" * 24),
+            },
+        }
+        groups = [{"kind": "anvil", "params": [9, 10]}]
+        with mock.patch.object(checkpoint, "_optimizer_payload",
+                               lambda tensor: tensor.payload):
+            records = checkpoint.build_optimizer_records(
+                {"state": state, "param_groups": groups})
+        self.assertEqual([record.name for record in records], [
+            "anvil.3x4.velocity", "anvil.3x4.lane_energy"])
+        self.assertEqual(records[0].shape, (48,))
+        self.assertEqual(records[1].shape, (6,))
+        self.assertEqual(records[0].data, b"Q" * 192)
+        self.assertEqual(records[1].data, b"R" * 24)
+        self.assertEqual(records[0].dtype, checkpoint.DTYPE_FP32)
+
+    def test_anvil_sharded_group_is_rejected(self):
+        state = {
+            9: {
+                "velocity": _FakeTensor((2, 3, 3, 4), b"Q" * 288),
+                "lane_energy": _FakeTensor((3, 3, 1), b"R" * 36),
+            },
+        }
+        groups = [{"kind": "anvil", "params": [9, 10]}]
+        with mock.patch.object(checkpoint, "_optimizer_payload",
+                               lambda tensor: tensor.payload):
+            with self.assertRaises(checkpoint.CheckpointError):
+                checkpoint.build_optimizer_records(
+                    {"state": state, "param_groups": groups})
+
     def test_optimizer_order_key_matches_the_cxx_save_order(self):
         names = [
             "adamw.lm_head.m", "adamw.lm_head.v",
             "adamw.embedding.m", "adamw.embedding.v",
             "muon.4x8.buf2", "muon.4x8.buf1", "muon.2x2.buf1",
+            "anvil.4x8.lane_energy", "anvil.4x8.velocity",
         ]
         self.assertEqual(sorted(names, key=checkpoint.optimizer_order_key), [
             "adamw.lm_head.m", "adamw.lm_head.v",
             "adamw.embedding.m", "adamw.embedding.v",
             "muon.2x2.buf1", "muon.4x8.buf1", "muon.4x8.buf2",
+            "anvil.4x8.velocity", "anvil.4x8.lane_energy",
         ])
 
 
