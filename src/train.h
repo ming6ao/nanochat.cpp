@@ -104,6 +104,12 @@ class Checkpointer {
   static bool SaveModel(const Model& model, const Optimizer& optimizer,
                         const std::string& path);
 
+  // Also writes the 1-based optimizer step beside the optimizer state, so a
+  // resume continues the schedule instead of restarting the warmup
+  // (docs/training-seam.md section 10).
+  static bool SaveModel(const Model& model, const Optimizer& optimizer,
+                        int step, const std::string& path);
+
   // Loads `path` and copies every matching record into the model parameters.
   // Returns false when the file is missing or malformed.
   static bool LoadModel(Model* model, const std::string& path);
@@ -112,6 +118,11 @@ class Checkpointer {
   // parameter-only file leaves the optimizer state untouched and still
   // returns true when the parameters loaded.
   static bool LoadModel(Model* model, Optimizer* optimizer,
+                        const std::string& path);
+
+  // Also reads the stored optimizer step into `*step` when `step` is non-null.
+  // A file without a step record leaves `*step` unchanged.
+  static bool LoadModel(Model* model, Optimizer* optimizer, int* step,
                         const std::string& path);
 };
 
@@ -150,6 +161,10 @@ class TrainLoop {
   double peak_flops_ = 0.0;
   float last_loss_ = 0.0f;
   int last_step_ = 0;
+  // The step restored from `resume_path`, or 0 for a fresh run. `Run` starts
+  // at `resume_step_ + 1`, so a resume continues the schedule
+  // (docs/training-seam.md section 10).
+  int resume_step_ = 0;
 };
 
 }  // namespace nanochat

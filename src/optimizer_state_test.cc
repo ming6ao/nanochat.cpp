@@ -17,6 +17,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <memory>
 #include <string>
 #include <vector>
@@ -382,6 +383,129 @@ void TestAnvilStateRoundTrip(int adam_step_period) {
   }
 }
 
+// The optimizer-step record round-trips and drives a resumed schedule
+// (docs/training-seam.md section 10). The 4-arg `SaveModel` writes the step
+// beside the optimizer state; the 4-arg `LoadModel` reads it back, so a resume
+// continues from the stored step instead of restarting the warmup. A
+// parameter-only file carries no step record and leaves the caller at zero.
+void TestOptimizerStepRoundTrip() {
+  const Config config = TinyConfig();
+  const int batch = 2;
+  const int seq = 8;
+  const int rows = batch * seq;
+  const int total_steps = 6;
+  const int save_step = 3;
+
+  std::vector<std::vector<int>> tokens(static_cast<std::size_t>(total_steps));
+  std::vector<std::vector<int>> targets(static_cast<std::size_t>(total_steps));
+  Rng batch_rng(246801357);
+  for (int step = 0; step < total_steps; ++step) {
+    MakeBatch(&batch_rng, rows, config.vocab_size,
+              &tokens[static_cast<std::size_t>(step)],
+              &targets[static_cast<std::size_t>(step)]);
+  }
+
+  SchedulerConfig scheduler_config;
+  scheduler_config.num_iterations = total_steps;
+  Scheduler scheduler(scheduler_config);
+  OptimizerConfig optimizer_config;
+
+  const std::string resume_path = TempPath("optimizer_step_resume.ckpt");
+  std::vector<float> reference_losses(static_cast<std::size_t>(total_steps),
+                                      0.0f);
+  {
+    std::unique_ptr<Model> model = Model::Create(config);
+    model->InitWeights(kSeed);
+    std::unique_ptr<Optimizer> optimizer =
+        nanochat::CreateOptimizer(model.get(), optimizer_config, scheduler);
+    for (int step = 1; step <= total_steps; ++step) {
+      reference_losses[static_cast<std::size_t>(step - 1)] =
+          RunStep(model.get(), optimizer.get(), step,
+                  tokens[static_cast<std::size_t>(step - 1)],
+                  targets[static_cast<std::size_t>(step - 1)], batch, seq);
+      if (step == save_step &&
+          !Checkpointer::SaveModel(*model, *optimizer, step, resume_path)) {
+        Fail("step record: save failed");
+        return;
+      }
+    }
+  }
+
+  // The record carries the 1-based step under its stable name.
+  Checkpoint checkpoint;
+  std::string error;
+  if (!checkpoint.Load(resume_path, &error)) {
+    Fail("step record: cannot load the checkpoint: " + error);
+    return;
+  }
+  const TensorRecord* record = checkpoint.FindOptimizerState("optimizer/step");
+  if (record == nullptr) {
+    Fail("step record: no optimizer/step record");
+    return;
+  }
+  if (record->data.size() != sizeof(std::int32_t)) {
+    Fail("step record: wrong payload size");
+    return;
+  }
+  std::int32_t stored = 0;
+  std::memcpy(&stored, record->data.data(), sizeof(stored));
+  if (stored != save_step) Fail("step record: wrong stored step");
+
+  // A load reads the step back, and a run from that step continues the curve.
+  std::vector<float> resumed_losses(static_cast<std::size_t>(total_steps),
+                                    0.0f);
+  {
+    std::unique_ptr<Model> model = Model::Create(config);
+    model->InitWeights(kSeed + 5);
+    std::unique_ptr<Optimizer> optimizer =
+        nanochat::CreateOptimizer(model.get(), optimizer_config, scheduler);
+    int resume_step = 0;
+    if (!Checkpointer::LoadModel(model.get(), optimizer.get(), &resume_step,
+                                 resume_path)) {
+      Fail("step record: load failed");
+      return;
+    }
+    if (resume_step != save_step) {
+      Fail("step record: LoadModel did not restore the step");
+      return;
+    }
+    for (int step = resume_step + 1; step <= total_steps; ++step) {
+      resumed_losses[static_cast<std::size_t>(step - 1)] =
+          RunStep(model.get(), optimizer.get(), step,
+                  tokens[static_cast<std::size_t>(step - 1)],
+                  targets[static_cast<std::size_t>(step - 1)], batch, seq);
+    }
+  }
+  for (int step = save_step + 1; step <= total_steps; ++step) {
+    ExpectNear(resumed_losses[static_cast<std::size_t>(step - 1)],
+               reference_losses[static_cast<std::size_t>(step - 1)], 1e-5,
+               "step record: resumed loss at step " + std::to_string(step));
+  }
+
+  // A parameter-only file carries no step record and leaves the step alone.
+  const std::string params_only = TempPath("optimizer_step_params_only.ckpt");
+  {
+    std::unique_ptr<Model> model = Model::Create(config);
+    model->InitWeights(kSeed);
+    if (!Checkpointer::SaveModel(*model, params_only)) {
+      Fail("step record: parameter-only save failed");
+      return;
+    }
+  }
+  {
+    std::unique_ptr<Model> model = Model::Create(config);
+    int resume_step = 99;
+    if (!Checkpointer::LoadModel(model.get(), nullptr, &resume_step,
+                                 params_only)) {
+      Fail("step record: parameter-only load failed");
+      return;
+    }
+    if (resume_step != 99) {
+      Fail("step record: a parameter-only load changed the step");
+    }
+  }
+}
+
 }  // namespace
 
 int main() {
@@ -389,6 +513,7 @@ int main() {
   TestParameterOnlyStaysLoadable();
   TestAnvilStateRoundTrip(1);
   TestAnvilStateRoundTrip(2);
+  TestOptimizerStepRoundTrip();
   if (g_failures != 0) {
     std::fprintf(stderr, "optimizer_state_test: %d failure(s)\n", g_failures);
     return 1;

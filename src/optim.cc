@@ -775,6 +775,39 @@ bool LoadOptimizerState(const Checkpoint& checkpoint, Optimizer* optimizer) {
   return impl->LoadState(checkpoint);
 }
 
+// The optimizer-step record (docs/training-seam.md section 10). The container
+// has no integer dtype, so one four-byte record carries the little-endian
+// int32 step. `SaveOptimizerState` writes the group buffers; this writes the
+// driver's counter beside them.
+void SaveOptimizerStep(int step, Checkpoint* checkpoint) {
+  if (checkpoint == nullptr) return;
+  TensorRecord record;
+  record.name = kOptimizerStepRecordName;
+  record.dtype = DType::kFp32;
+  record.shape.assign(1, 1);
+  const std::uint32_t raw = static_cast<std::uint32_t>(step);
+  record.data.resize(sizeof(std::uint32_t));
+  record.data[0] = static_cast<std::byte>(raw & 0xffu);
+  record.data[1] = static_cast<std::byte>((raw >> 8) & 0xffu);
+  record.data[2] = static_cast<std::byte>((raw >> 16) & 0xffu);
+  record.data[3] = static_cast<std::byte>((raw >> 24) & 0xffu);
+  checkpoint->AddOptimizerState(std::move(record));
+}
+
+int LoadOptimizerStep(const Checkpoint& checkpoint) {
+  const TensorRecord* record =
+      checkpoint.FindOptimizerState(kOptimizerStepRecordName);
+  if (record == nullptr || record->data.size() < sizeof(std::uint32_t)) {
+    return 0;
+  }
+  const std::uint32_t raw =
+      static_cast<std::uint32_t>(record->data[0]) |
+      (static_cast<std::uint32_t>(record->data[1]) << 8) |
+      (static_cast<std::uint32_t>(record->data[2]) << 16) |
+      (static_cast<std::uint32_t>(record->data[3]) << 24);
+  return static_cast<int>(static_cast<std::int32_t>(raw));
+}
+
 // Test-only introspection; declared (not frozen) by src/optim_test.cc.
 bool OptimizerParamGroupForTest(const Optimizer* optimizer, const char* name,
                                 int* kind, int* rows, int* cols, float* lr) {

@@ -123,7 +123,7 @@ the location of the zero weights.
 
 Implementation: `render_for_completion` and the task logic live in
 `python/nanochat_cpp/chat.py` and `python/nanochat_cpp/tasks.py`.
-`render_conversation` is not in the tree yet (section 11).
+`render_conversation` is in `python/nanochat_cpp/chat.py`.
 
 ## 4. SFT
 
@@ -136,9 +136,10 @@ SFT pads the remainder of a row instead of cropping. The bridge masks the
 padding targets to `-1`. Validation uses the matching test splits.
 
 The native C++ loader in `src/data.cc` reads parquet documents and tokenizes
-during the run. It uses best-fit packing for pretraining. The SFT path needs a
-chat renderer and a mask, so the bridge owns the SFT packer. `DataLoader` does
-not know about chat data.
+during the run. It uses best-fit packing for pretraining. The bridge owns the
+SFT renderer and the mask. The C++ packed-row loader owns the padding and the
+batching ([training-seam.md](training-seam.md) section 4). `DataLoader` does not
+know about chat data.
 
 ### 4.2 Loop
 
@@ -243,10 +244,12 @@ Two containers exist:
   writes the same format.
 
 Both containers hold parameters. The `Checkpoint` class also carries an
-optimizer-state section. That section holds the AdamW first and second moments,
-the Muon momentum and second-moment buffers, and — when `matrix_optimizer` is
-1 — the ANVIL twin-rail velocity and lane energy. The record names are stable,
-so a later load can match them to the optimizer groups.
+optimizer-state section. That section holds the AdamW first and second moments.
+It also holds the Muon momentum and second-moment buffers. When
+`matrix_optimizer` is 1, it holds the ANVIL twin-rail velocity and lane energy.
+
+The record names are stable, so a later load can match them to the optimizer
+groups.
 `Checkpointer::SaveModel` and `Checkpointer::LoadModel` have `Optimizer`
 overloads. A parameter-only file stays loadable.
 
@@ -318,7 +321,7 @@ changes.
 | Checkpoint path resolution for base, SFT, and RL | Done | `python/nanochat_cpp/checkpoint.py` |
 | Reference `.pt` conversion into NCHKPT01 | Done | `tools/convert_checkpoint.py` |
 | Optimizer-state records in NCHKPT01 | Done | `include/nanochat/data.h`; `src/optim_state.h`; `src/optim.cc`; `src/optimizer_state_test.cc` |
-| SFT conversation renderer (`render_conversation`) | Missing | No file |
+| SFT conversation renderer (`render_conversation`) | Done | `python/nanochat_cpp/chat.py` |
 | SFT packer with padding and a loss mask | Missing | `src/data.cc` has the pretraining packer only |
 | SFT loop with a dataset-progress schedule and a warm start | Missing | `src/train.cc` has a step-based loop |
 | RL step binary and the RL parity fixture | Missing | No `rl_step` |

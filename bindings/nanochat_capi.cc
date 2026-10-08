@@ -46,7 +46,7 @@ namespace {
 
 // The C ABI version. Bump this string on every change to the surface or to a
 // mirrored struct; docs/python.md section 13 names that rule.
-constexpr char kNanochatVersion[] = "0.3.0";
+constexpr char kNanochatVersion[] = "0.4.0";
 
 // The message for the current thread. A `thread_local` string keeps the
 // pointer from `nanochat_last_error` valid until the next failure on this
@@ -337,6 +337,31 @@ void nanochat_backward_weighted(nanochat_model* model, const float* row_weights,
       throw std::invalid_argument("model or row_weights is null");
     }
     model->model->BackwardWeighted(row_weights, scale);
+  });
+}
+
+void nanochat_backward_accumulate(nanochat_model* model, float scale) {
+  GuardVoid("nanochat_backward_accumulate", [&]() {
+    if (model == nullptr) throw std::invalid_argument("model is null");
+    model->model->BackwardAccumulate(scale);
+  });
+}
+
+float nanochat_train_step(nanochat_model* model, nanochat_optim* optimizer,
+                          const int* tokens, const int* targets, int batch,
+                          int seq) {
+  return Guard("nanochat_train_step", 0.0f, [&]() -> float {
+    if (model == nullptr || tokens == nullptr || targets == nullptr) {
+      throw std::invalid_argument("model or token buffer is null");
+    }
+    if (batch <= 0 || seq <= 0) {
+      throw std::invalid_argument("batch and seq must be positive");
+    }
+    // A null optimizer runs the forward and backward without an update
+    // (docs/training-seam.md section 6.1).
+    nanochat::Optimizer* raw =
+        optimizer != nullptr ? optimizer->optimizer.get() : nullptr;
+    return model->model->TrainStep(tokens, targets, batch, seq, raw);
   });
 }
 

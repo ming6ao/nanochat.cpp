@@ -195,6 +195,17 @@ void nanochat_backward(nanochat_model* model);
 // parameter gradients, so call nanochat_zero_grad first for a fresh gradient.
 void nanochat_backward_weighted(nanochat_model* model, const float* row_weights,
                                 float scale);
+// Gradient accumulation (docs/training-seam.md section 6.1). Accumulates the
+// backward pass over the most recent forward into the parameter gradients
+// without zeroing them. `scale` multiplies the loss gradient; use
+// `1 / micro_batches`. A null model is an error.
+void nanochat_backward_accumulate(nanochat_model* model, float scale);
+// Forward + backward + one optimizer step (docs/training-seam.md section 6.1).
+// Returns the batch-mean loss over the valid targets. A null `optimizer` runs
+// the forward and backward without an update.
+float nanochat_train_step(nanochat_model* model, nanochat_optim* optimizer,
+                          const int* tokens, const int* targets, int batch,
+                          int seq);
 void nanochat_zero_grad(nanochat_model* model);
 int nanochat_param_count(nanochat_model* model);
 int nanochat_param_info(nanochat_model* model, int index, nanochat_param* out);

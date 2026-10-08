@@ -33,6 +33,7 @@ from .api import (
     evaluate,
     no_grad,
 )
+from .chat import render_conversation
 
 __all__ = [
     "BuildError",
@@ -52,6 +53,7 @@ __all__ = [
     "build",
     "evaluate",
     "no_grad",
+    "render_conversation",
     "api",
     "chat",
     "plan",

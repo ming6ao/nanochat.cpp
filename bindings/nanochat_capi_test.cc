@@ -544,6 +544,70 @@ void CheckWeightedBackward() {
   nanochat_model_free(weighted);
 }
 
+// The gradient-accumulation and combined-step entry points
+// (docs/training-seam.md section 6.1). `nanochat_backward_accumulate` matches
+// the plain backward on identical models, and `nanochat_train_step` runs
+// forward + backward + one optimizer step; a null optimizer skips the update.
+void CheckTrainStep() {
+  const nanochat_config config = TinyConfig();
+  const int batch = 2;
+  const int seq = 4;
+  const std::vector<int> tokens = MakeTokens(batch, seq, config.vocab_size);
+  const std::vector<int> targets = MakeTargets(batch, seq, config.vocab_size);
+
+  nanochat_model* plain = nanochat_model_create(&config, /*seed=*/91);
+  nanochat_model* accum = nanochat_model_create(&config, /*seed=*/91);
+  Check("accumulate: create returns two handles",
+        plain != nullptr && accum != nullptr);
+  if (plain != nullptr && accum != nullptr) {
+    nanochat_forward_loss(plain, tokens.data(), targets.data(), batch, seq);
+    nanochat_zero_grad(plain);
+    nanochat_backward(plain);
+    nanochat_forward_loss(accum, tokens.data(), targets.data(), batch, seq);
+    nanochat_zero_grad(accum);
+    nanochat_backward_accumulate(accum, 1.0f);
+    CheckScaledGradients(plain, accum, 1.0,
+                         "accumulate: matches the plain backward",
+                         kGradientTolerance);
+  }
+  nanochat_model_free(plain);
+  nanochat_model_free(accum);
+
+  // A null model is an error, not a crash, and reports the function name.
+  nanochat_backward(nullptr);
+  nanochat_backward_accumulate(nullptr, 1.0f);
+  Check("accumulate: a null model sets the error",
+        std::strstr(nanochat_last_error(), "nanochat_backward_accumulate") !=
+            nullptr);
+
+  nanochat_model* trained = nanochat_model_create(&config, /*seed=*/13);
+  Check("train_step: create returns a handle", trained != nullptr);
+  if (trained != nullptr) {
+    // A null optimizer runs the forward and backward without an update.
+    const float bare = nanochat_train_step(trained, nullptr, tokens.data(),
+                                           targets.data(), batch, seq);
+    Check("train_step: a null optimizer returns a finite loss",
+          std::isfinite(bare));
+
+    const nanochat_optim_config optim_config = TinyOptimizerConfig();
+    nanochat_optim* optimizer = nanochat_optim_create(trained, &optim_config);
+    Check("train_step: create returns a handle", optimizer != nullptr);
+    if (optimizer != nullptr) {
+      const float loss = nanochat_train_step(trained, optimizer, tokens.data(),
+                                             targets.data(), batch, seq);
+      Check("train_step: returns a finite loss", std::isfinite(loss));
+      nanochat_optim_free(optimizer);
+    }
+
+    // A null model is an error, not a crash, and reports the function name.
+    nanochat_train_step(nullptr, nullptr, tokens.data(), targets.data(), batch,
+                        seq);
+    Check("train_step: a null model sets the error",
+          std::strstr(nanochat_last_error(), "nanochat_train_step") != nullptr);
+    nanochat_model_free(trained);
+  }
+}
+
 // Tokenizer, encode/decode, the document loader, and EvalBpb.
 void CheckTokenizerAndLoader(const char* parquet_path,
                              const char* tokenizer_path,
@@ -606,6 +670,7 @@ int main(int argc, char** argv) {
   CheckSandboxRule();
   CheckParams();
   CheckWeightedBackward();
+  CheckTrainStep();
 
   nanochat_model* model = CheckModel();
   if (model != nullptr) {

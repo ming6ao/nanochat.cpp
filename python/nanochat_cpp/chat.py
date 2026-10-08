@@ -49,6 +49,7 @@ __all__ = [
     "build_task",
     "build_parser",
     "main",
+    "render_conversation",
 ]
 
 #: The default task list, in evaluation order.
@@ -123,6 +124,78 @@ def _specials(tokenizer) -> dict[str, int]:
         except Exception:  # noqa: BLE001 - a missing token is reported later
             continue
     return result
+
+
+def render_conversation(conversation, tokenizer) -> tuple[list[int], list[int]]:
+    """Render one conversation to ``(ids, mask)`` for a supervised dataset.
+
+    ``mask`` is 1 over the assistant text, the assistant end token, and the
+    python tool-call tokens, and 0 over BOS, the user text, and the tool-output
+    tokens (docs/training-seam.md section 6.5). This mirrors the notebook
+    template in ``notebooks/nanochat-cpp-on-t4-gpu.ipynb`` so the packed rows
+    and the reference renderer agree.
+    """
+    specials = _specials(tokenizer)
+    missing = [name for name in ("<|bos|>", "<|user_start|>",
+                                 "<|user_end|>", "<|assistant_start|>",
+                                 "<|assistant_end|>", "<|python_start|>",
+                                 "<|python_end|>", "<|output_start|>",
+                                 "<|output_end|>")
+               if name not in specials]
+    if missing:
+        raise ValueError(
+            f"the tokenizer lacks the chat special tokens {missing}")
+
+    messages = copy.deepcopy(conversation["messages"])
+    if messages and messages[0]["role"] == "system":
+        messages[1]["content"] = (messages[0]["content"] + "\n\n"
+                                  + messages[1]["content"])
+        messages = messages[1:]
+
+    ids = [specials["<|bos|>"]]
+    mask = [0]
+    for message in messages:
+        if message["role"] == "user":
+            ids.append(specials["<|user_start|>"])
+            mask.append(0)
+            for token in tokenizer.encode(message["content"]):
+                ids.append(token)
+                mask.append(0)
+            ids.append(specials["<|user_end|>"])
+            mask.append(0)
+            continue
+
+        ids.append(specials["<|assistant_start|>"])
+        mask.append(0)
+        content = message["content"]
+        if isinstance(content, str):
+            for token in tokenizer.encode(content):
+                ids.append(token)
+                mask.append(1)
+        else:
+            for part in content:
+                if part["type"] == "python":
+                    ids.append(specials["<|python_start|>"])
+                    mask.append(1)
+                    body, keep = tokenizer.encode(part["text"]), 1
+                elif part["type"] == "python_output":
+                    ids.append(specials["<|output_start|>"])
+                    mask.append(0)
+                    body, keep = tokenizer.encode(part["text"]), 0
+                else:
+                    body, keep = tokenizer.encode(part["text"]), 1
+                for token in body:
+                    ids.append(token)
+                    mask.append(keep)
+                if part["type"] == "python":
+                    ids.append(specials["<|python_end|>"])
+                    mask.append(1)
+                elif part["type"] == "python_output":
+                    ids.append(specials["<|output_end|>"])
+                    mask.append(0)
+        ids.append(specials["<|assistant_end|>"])
+        mask.append(1)
+    return ids, mask
 
 
 class _PromptRenderer:

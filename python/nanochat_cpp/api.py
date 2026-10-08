@@ -469,6 +469,44 @@ class Model:
         _void(self._lib, "nanochat_backward_weighted", self._handle, buffer,
               ctypes.c_float(float(scale)))
 
+    def backward_accumulate(self, scale: float = 1.0) -> None:
+        """Accumulate a backward pass over the most recent forward.
+
+        The call sums into the parameter gradients without zeroing them, so
+        call ``zero_grad`` first and use ``1 / micro_batches`` for gradient
+        accumulation (docs/training-seam.md section 6.1).
+        """
+        _void(self._lib, "nanochat_backward_accumulate", self._handle,
+              ctypes.c_float(float(scale)))
+
+    def train_step(self, tokens, targets, optimizer=None,
+                   batch: int | None = None, seq: int | None = None) -> float:
+        """Forward, backward, and one optimizer step; returns the loss.
+
+        ``optimizer`` is an :class:`Optimizer`, or ``None`` for the forward and
+        backward only. The model owns the step number internally, so no step
+        argument is passed (docs/training-seam.md section 6.1).
+        """
+        if optimizer is not None and not isinstance(optimizer, Optimizer):
+            raise TypeError(
+                "optimizer must be a nanochat_cpp.Optimizer or None")
+        buffer_tokens = _int_buffer(tokens)
+        buffer_targets = _int_buffer(targets)
+        count = len(buffer_tokens)
+        if seq is None:
+            seq = self.config.seq_len
+        seq = int(seq)
+        if batch is None:
+            batch = count // seq if seq else 0
+        batch = int(batch)
+        if batch <= 0 or seq <= 0 or count != batch * seq:
+            raise ValueError(
+                f"{count} tokens do not fit batch {batch} x seq {seq}")
+        self._last_rows = batch * seq
+        handle = None if optimizer is None else optimizer._handle
+        return float(self._lib.nanochat_train_step(
+            self._handle, handle, buffer_tokens, buffer_targets, batch, seq))
+
     def zero_grad(self) -> None:
         _void(self._lib, "nanochat_zero_grad", self._handle)
 
@@ -803,8 +841,7 @@ class Trainer:
         step = self._step + 1
         # Gradient accumulation: sum `grad_accum` micro-batch gradients (each
         # scaled by 1/grad_accum) before one optimizer step, exactly as the
-        # C++ TrainLoop does. The C surface has no uniform-scale backward, so a
-        # micro-batch uses the all-ones row weight that has the same effect.
+        # C++ TrainLoop does.
         accum = self.grad_accum if self.grad_accum > 0 else 1
         inv_accum = 1.0 / accum
         self.model.zero_grad()
@@ -826,8 +863,7 @@ class Trainer:
             if accum == 1:
                 self.model.backward()
             else:
-                self.backward_weighted([1.0] * (self.batch * self.seq),
-                                       scale=inv_accum)
+                self.model.backward_accumulate(inv_accum)
         self.optimizer.step(step)
         self._step = step
         return step, loss_sum * inv_accum

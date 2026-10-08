@@ -343,19 +343,34 @@ bool Checkpointer::SaveModel(const Model& model, const std::string& path) {
 
 bool Checkpointer::SaveModel(const Model& model, const Optimizer& optimizer,
                              const std::string& path) {
+  return SaveModel(model, optimizer, 0, path);
+}
+
+bool Checkpointer::SaveModel(const Model& model, const Optimizer& optimizer,
+                             int step, const std::string& path) {
   Checkpoint checkpoint;
   CollectModelRecords(model, &checkpoint);
   // The AdamW moments and Muon buffers ride beside the parameters
   // (docs/post-training.md section 7).
   SaveOptimizerState(optimizer, &checkpoint);
+  // The driver's step rides in the same section, so a resume continues the
+  // schedule from it instead of restarting the warmup
+  // (docs/training-seam.md section 10). A step of zero means no step is known;
+  // the record is then omitted and the load restarts at 1.
+  if (step > 0) SaveOptimizerStep(step, &checkpoint);
   return checkpoint.Save(path);
 }
 
 bool Checkpointer::LoadModel(Model* model, const std::string& path) {
-  return LoadModel(model, nullptr, path);
+  return LoadModel(model, nullptr, nullptr, path);
 }
 
 bool Checkpointer::LoadModel(Model* model, Optimizer* optimizer,
+                             const std::string& path) {
+  return LoadModel(model, optimizer, nullptr, path);
+}
+
+bool Checkpointer::LoadModel(Model* model, Optimizer* optimizer, int* step,
                              const std::string& path) {
   if (model == nullptr) return false;
   Checkpoint checkpoint;
@@ -375,6 +390,12 @@ bool Checkpointer::LoadModel(Model* model, Optimizer* optimizer,
   // A parameter-only file has no optimizer-state records; the moments stay at
   // their initial zeros (the SFT warm-start behavior).
   if (optimizer != nullptr) LoadOptimizerState(checkpoint, optimizer);
+  // The step record is optional, so a parameter-only file leaves `*step`
+  // unchanged and the driver restarts the schedule at 1.
+  if (step != nullptr) {
+    const int stored = LoadOptimizerStep(checkpoint);
+    if (stored > 0) *step = stored;
+  }
   return true;
 }
 
@@ -466,14 +487,23 @@ TrainLoop::TrainLoop(TrainConfig config) : config_(std::move(config)) {
   optimizer_ = CreateOptimizer(model_.get(), config_.optimizer, *scheduler_);
 
   bool resumed = false;
+  int resume_step = 0;
   if (!config_.resume_path.empty()) {
     std::ifstream probe(config_.resume_path, std::ios::binary);
     if (probe.good()) {
       resumed = Checkpointer::LoadModel(model_.get(), optimizer_.get(),
-                                        config_.resume_path);
+                                        &resume_step, config_.resume_path);
     }
   }
-  if (!resumed) model_->InitWeights(config_.seed);
+  if (!resumed) {
+    model_->InitWeights(config_.seed);
+    resume_step = 0;
+  }
+  resume_step_ = resume_step;
+  // Start the terminal-save counter at the resumed step, so a run that
+  // performs no step keeps the stored step record (docs/training-seam.md
+  // section 10).
+  last_step_ = resume_step;
 
   logger_ = std::make_unique<Logger>(config_.log_path);
 
@@ -538,7 +568,8 @@ TrainLoop::~TrainLoop() = default;
 
 void TrainLoop::Save(int step) {
   if (config_.checkpoint_path.empty()) return;
-  if (Checkpointer::SaveModel(*model_, *optimizer_, config_.checkpoint_path)) {
+  if (Checkpointer::SaveModel(*model_, *optimizer_, step,
+                              config_.checkpoint_path)) {
     logger_->Info("saved checkpoint at step " + std::to_string(step));
   } else {
     logger_->Info("failed to save checkpoint at step " + std::to_string(step));
@@ -549,11 +580,18 @@ float TrainLoop::Run() {
   const int seq = config_.effective_seq();
   const int batch = config_.batch;
   const std::int64_t tokens_per_step = static_cast<std::int64_t>(batch) * seq;
+  const int first_step = resume_step_ + 1;
+  if (resume_step_ > 0) {
+    logger_->Info("resuming from step " + std::to_string(resume_step_));
+  }
   logger_->Info("training for " + std::to_string(config_.num_iterations) +
                 " steps, batch " + std::to_string(batch) + " x " +
                 std::to_string(seq));
 
-  for (int step = 1; step <= config_.num_iterations; ++step) {
+  // A resume continues the schedule from the stored step, so the learning-rate
+  // warmup does not replay (docs/training-seam.md section 10). `num_iterations`
+  // is absolute.
+  for (int step = first_step; step <= config_.num_iterations; ++step) {
     const auto start = std::chrono::steady_clock::now();
 
     // Gradient accumulation: sum `grad_accum` micro-batch gradients (each

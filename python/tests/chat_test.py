@@ -76,6 +76,47 @@ class ChatTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             chat._PromptRenderer(_NoSpecials())
 
+    def test_render_conversation_masks(self) -> None:
+        conversation = {"messages": [
+            {"role": "user", "content": "Say hi"},
+            {"role": "assistant", "content": "Hello there"}]}
+        ids, mask = chat.render_conversation(conversation, self.tokenizer)
+        self.assertEqual(len(ids), len(mask))
+        specials = chat._specials(self.tokenizer)
+        self.assertEqual(ids[0], specials["<|bos|>"])
+        self.assertEqual(mask[0], 0)
+        self.assertEqual(ids[-1], specials["<|assistant_end|>"])
+        self.assertEqual(mask[-1], 1)
+        # The user span, markers included, is not a target.
+        user_start = ids.index(specials["<|user_start|>"])
+        user_end = ids.index(specials["<|user_end|>"])
+        self.assertEqual(mask[user_start:user_end + 1],
+                         [0] * (user_end - user_start + 1))
+        # Everything after the assistant marker is a target.
+        assistant_start = ids.index(specials["<|assistant_start|>"])
+        self.assertEqual(mask[assistant_start], 0)
+        self.assertTrue(all(flag == 1
+                            for flag in mask[assistant_start + 1:]))
+
+    def test_render_conversation_python_mask(self) -> None:
+        conversation = {"messages": [
+            {"role": "user", "content": "compute"},
+            {"role": "assistant", "content": [
+                {"type": "text", "text": "Let me "},
+                {"type": "python", "text": "print(1)"},
+                {"type": "python_output", "text": "1"}]}]}
+        ids, mask = chat.render_conversation(conversation, self.tokenizer)
+        self.assertEqual(len(ids), len(mask))
+        specials = chat._specials(self.tokenizer)
+        py_start = ids.index(specials["<|python_start|>"])
+        py_end = ids.index(specials["<|python_end|>"])
+        self.assertTrue(all(flag == 1 for flag in mask[py_start:py_end + 1]))
+        out_start = ids.index(specials["<|output_start|>"])
+        out_end = ids.index(specials["<|output_end|>"])
+        self.assertTrue(all(flag == 0
+                            for flag in mask[out_start:out_end + 1]))
+        self.assertEqual(mask[-1], 1)
+
     def test_baselines_and_task_lists(self) -> None:
         self.assertEqual(chat.ALL_TASKS, ("ARC-Easy", "ARC-Challenge", "MMLU",
                                           "GSM8K", "HumanEval"))
