@@ -68,6 +68,23 @@ cc_library(
     ],
 )
 
+# The reinforcement-learning optimizer step (docs/rl-notebook.md section 4,
+# docs/training-seam.md section 5.7). One library so the divisor lives in one
+# place and the file-driven `rl_step` binary, the persistent worker, and the C
+# ABI all share `RlStep` instead of copying it. It links the public headers and
+# the workflow (for `Model`/`Optimizer`), so it adds no vendor dependency.
+cc_library(
+    name = "rl",
+    srcs = ["rl.cc"],
+    hdrs = ["rl.h"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    deps = [
+        ":model",
+        "//include/nanochat:nanochat",
+    ],
+)
+
 # Model oracle parity: loads the committed CPU fixture and compares the model's
 # forward logits, loss, and every parameter gradient. See docs/testing.md.
 cc_test(

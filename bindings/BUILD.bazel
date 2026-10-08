@@ -19,6 +19,7 @@ cc_library(
     deps = [
         "//include/nanochat",
         "//src:model",
+        "//src:rl",
     ],
 )
 
@@ -33,6 +34,7 @@ cc_binary(
     deps = [
         "//include/nanochat",
         "//src:model",
+        "//src:rl",
     ],
 )
 
