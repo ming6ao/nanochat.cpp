@@ -75,11 +75,9 @@ float RlStep(Model* model, Optimizer* optimizer, const int* tokens,
     return loss;
   }
 
-  const std::int64_t divisor =
-      valid * static_cast<std::int64_t>(num_passes) *
-      static_cast<std::int64_t>(examples_per_rank);
-  const float scale =
-      static_cast<float>(valid) / static_cast<float>(divisor);
+  const std::int64_t divisor = valid * static_cast<std::int64_t>(num_passes) *
+                               static_cast<std::int64_t>(examples_per_rank);
+  const float scale = static_cast<float>(valid) / static_cast<float>(divisor);
 
   model->BackwardWeighted(advantages, scale);
   if (optimizer != nullptr) optimizer->Step(step);

@@ -627,8 +627,8 @@ void CheckRlStep() {
 
   // A non-uniform per-row advantage. The ignored rows carry weight 0, which
   // the classifier also enforces on its own.
-  const float pattern[8] = {0.5f,   0.0f,  1.5f, -0.75f,
-                            2.0f,  -1.25f, 0.0f, 0.25f};
+  const float pattern[8] = {0.5f, 0.0f,   1.5f, -0.75f,
+                            2.0f, -1.25f, 0.0f, 0.25f};
   std::vector<float> advantages(static_cast<std::size_t>(rows));
   for (int i = 0; i < rows; ++i) {
     advantages[static_cast<std::size_t>(i)] = pattern[i];
@@ -648,10 +648,10 @@ void CheckRlStep() {
   nanochat_model* actual = nanochat_model_create(&config, /*seed=*/55);
   Check("rl_step: create returns a handle", actual != nullptr);
   if (reference != nullptr && actual != nullptr) {
-    const float loss = nanochat_rl_step(actual, nullptr, tokens.data(),
-                                        targets.data(), advantages.data(),
-                                        batch, seq, /*num_passes=*/1,
-                                        /*examples_per_rank=*/1, /*step=*/1);
+    const float loss =
+        nanochat_rl_step(actual, nullptr, tokens.data(), targets.data(),
+                         advantages.data(), batch, seq, /*num_passes=*/1,
+                         /*examples_per_rank=*/1, /*step=*/1);
     Check("rl_step: returns a finite loss", std::isfinite(loss));
     CheckScaledGradients(reference, actual, 1.0,
                          "rl_step: the singular divisor matches the weighted "
@@ -707,9 +707,9 @@ void CheckRlStep() {
     nanochat_optim* optimizer = nanochat_optim_create(held, &optim_config);
     Check("rl_step: create returns an optimizer", optimizer != nullptr);
     if (optimizer != nullptr) {
-      const float loss = nanochat_rl_step(
-          held, optimizer, tokens.data(), targets.data(), advantages.data(),
-          batch, seq, 1, 1, /*step=*/1);
+      const float loss =
+          nanochat_rl_step(held, optimizer, tokens.data(), targets.data(),
+                           advantages.data(), batch, seq, 1, 1, /*step=*/1);
       Check("rl_step: a non-null optimizer returns a finite loss",
             std::isfinite(loss));
       Check("rl_step: a non-null optimizer reports a finite grad norm",

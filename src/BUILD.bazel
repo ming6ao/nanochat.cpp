@@ -406,6 +406,24 @@ cc_binary(
     ],
 )
 
+# The file-driven reinforcement-learning step (docs/rl-notebook.md section 4,
+# docs/training-seam.md section 6.4). It reads a fixture with the initial
+# parameters, the recorded rollouts, the targets, and the advantages, runs the
+# *shared* `RlStep`, and writes the loss, the gradient norm, and the parameter
+# trajectory. It is the RL analog of the training-parity harness, so it is the
+# correctness gate for the objective.
+cc_binary(
+    name = "rl_step_main",
+    srcs = ["rl_step_main.cc"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    deps = [
+        ":model",
+        ":rl",
+        "//include/nanochat:nanochat",
+    ],
+)
+
 # The tiny CLI flag helpers shared by the entry points (docs/build.md).
 cc_library(
     name = "cli",

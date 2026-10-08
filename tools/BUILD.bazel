@@ -29,6 +29,7 @@ exports_files([
     "dump_numerics_golden.py",
     "dump_oracle.py",
     "dump_train_fixture.py",
+    "dump_rl_fixture.py",
     "dump_generate_fixture.py",
     "dump_eval_fixture.py",
     "dump_tokenizer_fixture.py",
@@ -49,6 +50,15 @@ filegroup(
 filegroup(
     name = "dump_train_fixture",
     srcs = ["dump_train_fixture.py"],
+)
+
+# The RL parity fixture generator (docs/rl-notebook.md section 4,
+# docs/training-seam.md section 6.4). It records the parameters, the rollouts,
+# the targets, and the advantages for `//tests:rl_parity_test`; the pure-Python
+# reference needs no third-party package.
+filegroup(
+    name = "dump_rl_fixture",
+    srcs = ["dump_rl_fixture.py"],
 )
 
 # The Python-API fixture generator (docs/python.md section 11). It runs the
