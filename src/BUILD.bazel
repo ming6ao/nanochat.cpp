@@ -7,6 +7,20 @@ load("//:nanochat.bzl", "nanochat_copts", "precision_defines")
 
 package(default_visibility = ["//visibility:public"])
 
+# The device capability table the simulator reads (docs/simulator.md section 7).
+# It is a leaf: it depends only on `nanochat/tensor.h`, so the CPU reference
+# backend can link it to answer `GetCaps()` under `--config=sim` without
+# gaining a dependency on the workflow layer. `PeakFlopsForDevice` in
+# `train.cc` remains the authority for the MFU string patterns;
+# `//tests:device_profile_test` keeps the two consistent.
+cc_library(
+    name = "device_profile",
+    srcs = ["device_profile.cc"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    deps = ["//include/nanochat:nanochat"],
+)
+
 # The backend-agnostic workflow: runtime tensor plumbing (`tensor.cc`,
 # `workspace.h`), the reusable graph pieces (`ops.cc`), the fixed train graph
 # (`model.cc`), the two inference graphs (`generate.cc`), and the harness

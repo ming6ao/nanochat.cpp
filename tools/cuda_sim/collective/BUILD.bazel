@@ -1,0 +1,20 @@
+# tools/cuda_sim/collective/ -- the collective library mock and its coordinator
+# (docs/simulator.md sections 6.3 and 6.4).
+#
+# The mock defines the NCCL subset the gradient-sync seam needs as **weak**
+# symbols, so it links with no vendor library and a real NCCL would still win.
+# It rendezvouses through POSIX shared memory: four rank processes, one segment,
+# a bounded wait that turns a missing peer into a reported timeout instead of a
+# hang. CPU only.
+
+load("@rules_cc//cc:defs.bzl", "cc_library")
+load("//:nanochat.bzl", "nanochat_copts")
+
+package(default_visibility = ["//visibility:public"])
+
+cc_library(
+    name = "nccl_mock",
+    srcs = ["nccl_mock.cc"],
+    hdrs = ["nccl_mock.h"],
+    copts = nanochat_copts(),
+)

@@ -18,8 +18,19 @@ cc_library(
     srcs = ["kernels.cc"],
     copts = nanochat_copts() + ["-fopenmp"],
     linkopts = ["-fopenmp"],
-    defines = precision_defines(),
-    deps = ["//include/nanochat:nanochat"],
+    # `--config=sim` (docs/simulator.md section 4.1) compiles the capability
+    # override into the reference backend. The define is scoped to this target
+    # so the rest of the tree is unaffected by a simulated run.
+    defines = precision_defines() + select({
+        "//:sim": ["NANOCHAT_SIMULATOR"],
+        "//conditions:default": [],
+    }),
+    deps = [
+        "//include/nanochat:nanochat",
+        # The device profile table the override reads. It is a leaf library, so
+        # this does not point a backend at the workflow layer (DESIGN.md 2.1).
+        "//src:device_profile",
+    ],
 )
 
 # Self-check for the reference kernels: analytic identities plus a
@@ -30,7 +41,13 @@ cc_test(
     srcs = ["kernels_test.cc"],
     copts = nanochat_copts() + ["-fopenmp"],
     linkopts = ["-fopenmp"],
-    defines = precision_defines(),
+    # Under `--config=sim` the linked `:cpu` target answers `GetCaps()` from
+    # `NANOCHAT_SIM_PROFILE`, so the test needs the same define to guard its
+    # host-caps assertion.
+    defines = precision_defines() + select({
+        "//:sim": ["NANOCHAT_SIMULATOR"],
+        "//conditions:default": [],
+    }),
     deps = [
         ":cpu",
         "//include/nanochat:nanochat",

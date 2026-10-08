@@ -1,0 +1,74 @@
+# GNU version script for the S0 API interposer (docs/simulator.md section 5.1).
+#
+# The script does two jobs. It pins the exported set -- everything else in the
+# library stays private -- and it names the version nodes the binary under test
+# asks for. Our binary carries versioned references such as
+# `cublasCreate_v2@libcublas.so.12` and
+# `cudaGetDeviceProperties_v2@libcudart.so.12`, because the CUDA runtime and
+# cuBLAS link dynamically; `readelf -V` on
+# `bazel-bin/backends/cuda/cuda_runtime_gpu_test` shows those two nodes.
+#
+# `tools/cuda_sim/check_symbols.sh` reads this file as the required set and
+# compares it against the mock's dynamic symbol table and the binary's undefined
+# symbols.
+
+libcudart.so.12 {
+  global:
+    # Memory.
+    cudaMalloc;
+    cudaFree;
+    cudaMemcpy;
+    cudaMemset;
+    # Device.
+    cudaGetDevice;
+    cudaGetDeviceProperties_v2;
+    cudaGetErrorString;
+    cudaGetLastError;
+    cudaDeviceSynchronize;
+    # Launch and the fat-binary hooks the loader calls.
+    cudaLaunchKernel;
+    cudaFuncSetAttribute;
+    __cudaRegisterFatBinary;
+    __cudaRegisterFatBinaryEnd;
+    __cudaUnregisterFatBinary;
+    __cudaRegisterFunction;
+    # Reserved: streams, events, graphs, and the cuBLAS stream selector. The
+    # production backend uses none of them; the prototypes and the test
+    # scaffold do.
+    cudaStreamCreate;
+    cudaStreamDestroy;
+    cudaStreamSynchronize;
+    cudaStreamBeginCapture;
+    cudaStreamEndCapture;
+    cudaEventCreate;
+    cudaEventDestroy;
+    cudaEventRecord;
+    cudaEventSynchronize;
+    cudaEventElapsedTime;
+    cudaGraphInstantiate;
+    cudaGraphLaunch;
+    cudaGraphDestroy;
+    cudaGraphExecDestroy;
+};
+
+libcublas.so.12 {
+  global:
+    cublasCreate_v2;
+    cublasSgemm_v2;
+    cublasGemmStridedBatchedEx;
+    cublasGetStatusString;
+    cublasDestroy;
+    cublasSetStream;
+};
+
+# The interposer's own control surface. The S0 API test drives the mock
+# in-process, so these must be visible too.
+NANOCHAT_SIM_1.0 {
+  global:
+    nanochat_sim_reset;
+    nanochat_sim_log;
+    nanochat_sim_record_count;
+    nanochat_sim_profile;
+  local:
+    *;
+};

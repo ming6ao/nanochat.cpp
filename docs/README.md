@@ -23,6 +23,7 @@ detailed reference that the design points at.
 | [python.md](python.md) | The single Python surface: in-process compute API, planning, chat evaluation, and the `tools/nanochat` toolchain |
 | [sandbox.md](sandbox.md) | Execution sandbox and host resource governance |
 | [host-portability.md](host-portability.md) | Toolchain, optional sandbox, devices, and Kaggle |
+| [simulator.md](simulator.md) | The S0 simulator: device profiles, the reference engine, the emulation engine, the API interposer, and the collective mock |
 
 New here? Start with [../README.md](../README.md) for the quickstart, then
 [../DESIGN.md](../DESIGN.md) for the shape of the system.

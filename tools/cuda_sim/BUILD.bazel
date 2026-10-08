@@ -1,0 +1,71 @@
+# tools/cuda_sim/ -- the S0 simulator (docs/simulator.md).
+#
+# `:cuda_sim_interposer` is the API interposer: a shared library that exports
+# the CUDA runtime, the cuBLAS entry points, and the fat-binary hooks, records
+# and validates every call against the simulated device profile, and backs
+# `cudaMalloc` with host memory. `tools/nanochat simulate --suite api` preloads
+# it over the real CUDA backend and runs `//tests:cuda_sim_preload_test`.
+# `//tests:cuda_sim_test` also links the implementation, but only as an
+# in-process mock unit test -- it never exercises `LD_PRELOAD`.
+#
+# `cuda_sim.map` is the GNU version script that pins the exported set and names
+# the version nodes the binary under test references. `check_symbols.sh` is the
+# gate over both.
+#
+# Everything here is CPU only: no toolkit, no driver, no GPU.
+
+load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library")
+load("//:nanochat.bzl", "nanochat_copts")
+
+package(default_visibility = ["//visibility:public"])
+
+# The fabricated `cudaDeviceProp` layout, in a runtime-free header so
+# //tests:cuda_device_prop_abi_test can cross-check it against the real
+# <driver_types.h>.
+cc_library(
+    name = "cuda_device_prop_prefix",
+    hdrs = ["cuda_device_prop_prefix.h"],
+)
+
+# The interposer's implementation. `//tests:cuda_sim_test` links this directly
+# and drives the mock in process; the shared library below is the artifact
+# `LD_PRELOAD` uses.
+cc_library(
+    name = "cuda_sim_interposer_impl",
+    srcs = ["interposer.cc"],
+    hdrs = ["cuda_sim_abi.h"],
+    # Nothing inside the library calls the mock's own entry points, so the
+    # archive must be included whole or the shared library below would export
+    # nothing.
+    alwayslink = True,
+    copts = nanochat_copts(),
+    deps = [
+        "//include/nanochat:nanochat",
+        # The capability table the launch, shared-memory, and cuBLAS rules read
+        # (docs/simulator.md section 7).
+        "//src:device_profile",
+        ":cuda_device_prop_prefix",
+    ],
+)
+
+# The preloadable library. The version script pins the exported set and names
+# the `libcudart.so.12` / `libcublas.so.12` nodes the binary under test
+# references.
+cc_binary(
+    name = "cuda_sim_interposer",
+    additional_linker_inputs = ["cuda_sim.map"],
+    linkshared = True,
+    linkopts = [
+        # Nothing inside the library calls the mock's own entry points, so
+        # section garbage collection would drop every one of them; the exported
+        # set is what the version script lists, not what the link reaches.
+        "-Wl,--no-gc-sections",
+        "-Wl,--version-script=$(execpath :cuda_sim.map)",
+    ],
+    deps = [":cuda_sim_interposer_impl"],
+)
+
+exports_files([
+    "check_symbols.sh",
+    "cuda_sim.map",
+])

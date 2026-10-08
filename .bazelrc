@@ -54,6 +54,30 @@ build:cuda --define=backend=cuda
 build:cpu --define=backend=cpu
 build:cpu --define=precision=fp32
 
+# --- Simulator ---------------------------------------------------------------
+#
+# The S0 tier (docs/simulator.md sections 4.1 and 10). `sim` selects the
+# reference engine: the CPU backend compiles in the capability override and
+# answers `GetCaps()` from `NANOCHAT_SIM_PROFILE` through the device profile
+# table, while every value is still computed by the reference loops. The
+# precision is orthogonal -- add `--config=fp16` for the half-storage variant:
+#   tools/nanochat test //tests:sim_numerics_test --config=sim \
+#       --test_env=NANOCHAT_SIM_PROFILE=h100
+#
+# `h100` and `h200` are the complete named targets for the compile gate
+# (section 8): sm_90, fp32/fp16, and the CUDA backend.
+build:sim --define=simulator=1
+
+build:h100 --@rules_cuda//cuda:archs=sm_90
+build:h100 --define=precision=fp32
+build:h100 --define=backend=cuda
+build:h100 --define=simulator=1
+
+build:h200 --@rules_cuda//cuda:archs=sm_90
+build:h200 --define=precision=fp16
+build:h200 --define=backend=cuda
+build:h200 --define=simulator=1
+
 # --- Host targets -----------------------------------------------------------
 #
 # A complete named target for one host. `t4` is the Turing half-precision CUDA
@@ -106,6 +130,11 @@ test --test_env=NANOCHAT_GPU_DEVICES
 # insufficient for CUDA runtime version") even though the driver is new enough.
 # See docs/host-portability.md.
 test --test_env=LD_LIBRARY_PATH
+# The simulator profile name reaches the test process (docs/simulator.md
+# section 10). `tools/nanochat simulate` sets it per invocation through
+# `--test_env=NANOCHAT_SIM_PROFILE=<name>`; forwarding it here means a manual
+# `tools/nanochat test --config=sim <target>` picks up the caller's profile.
+test --test_env=NANOCHAT_SIM_PROFILE
 
 # --- Host-local overrides ---------------------------------------------------
 #

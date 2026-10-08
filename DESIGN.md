@@ -74,7 +74,16 @@ specified in [docs/kernels.md](docs/kernels.md).
    never link DuckDB. Parquet input uses the native reader
    ([parquet-native.md](docs/parquet-native.md)).
 2. `backends/**` includes only `nanochat/kernels.h` and `nanochat/tensor.h`.
-   **A kernel knows nothing about GPT.**
+   **A kernel knows nothing about GPT.** One additive exception exists for the
+   simulator ([simulator.md](docs/simulator.md), tier S0): a backend may include
+   `nanochat/device_profile.h`, a leaf header that declares only the simulated
+   capability table and itself depends only on `nanochat/tensor.h`. That is what
+   lets `GetCaps()` answer from a simulated profile. `backends/cpu/` links the
+   matching leaf unit `//src:device_profile` for it. The edge points *down* to a
+   leaf, not up into the workflow layer; the leaf carries no model code and no
+   kernel arithmetic, so the seam stays vendor-free and the reference backend
+   still computes every value. Adding a new edge of this shape needs the same
+   review as any other change to the layering rule.
 3. `kernels.h` contains no vendor types: pointers are `ComputeType*`, streams are
    opaque, and no CUDA header is ever included from it.
 
@@ -92,6 +101,11 @@ Bazel test wrapper. Executables call `nanochat::RequireSandboxOrDie` at startup,
 so a process launched outside the entry point fails loudly instead of consuming
 the host. This is outside L0-L6: it changes neither the kernel seam nor the
 public API. See [docs/sandbox.md](docs/sandbox.md).
+
+The simulator's S0 tier rides the same entry point: `tools/nanochat simulate`
+runs the CPU-only capability, API, collective, and emulation checks with no GPU
+broker ([simulator.md](docs/simulator.md)). The layer exception in §2.1 exists
+for that tier alone.
 
 ---
 

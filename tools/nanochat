@@ -32,7 +32,11 @@ tools/nanochat <command> [args...]
   eval  -- <cmd...>          alias for: run eval  -- <cmd...>
   bench -- <cmd...>          alias for: run t3-bench -- <cmd...>
   profile [opts]             build + run the attention benchmark under the GPU broker
-  doctor                     print environment, device, sandbox, and lock state
+  doctor [--json]            print environment, device, sandbox, and lock state
+  simulate [--device NAME] [--precision fp32|fp16] [--suite S] [--mode compile]
+                             S0 CPU-only simulator (no GPU, no broker); see
+                             docs/simulator.md. Suites: correctness api
+                             collective kernel profile all (default all)
   verify -- <cmd...>         alias for: run t2-parity -- <cmd...>
   gpu [--profile P] -- <cmd> acquire the GPU broker, then run
   help                       this message
@@ -256,6 +260,11 @@ case "$command" in
     if [[ -n $slice ]]; then
       d_sandbox=$(echo "$slice" | paste -sd' ' -)
     fi
+    # The simulator's S0 tier is CPU-only and takes no broker. The profile name
+    # is a build-time capability override, so it is worth reporting beside the
+    # device: a run with it set computes on the reference backend as the named
+    # target (docs/simulator.md section 10).
+    d_sim="${NANOCHAT_SIM_PROFILE:-unset}"
     if [[ -n ${NANOCHAT_SANDBOX_BACKEND:-} ]]; then
       d_sandbox_backend=$NANOCHAT_SANDBOX_BACKEND
     elif systemd-run --user --scope --quiet true >/dev/null 2>&1; then
@@ -287,10 +296,11 @@ case "$command" in
       NANOCHAT_DOCTOR_sandbox="$d_sandbox" \
       NANOCHAT_DOCTOR_sandbox_backend="$d_sandbox_backend" \
       NANOCHAT_DOCTOR_gpu_lock="$d_gpu_lock" \
+      NANOCHAT_DOCTOR_sim="$d_sim" \
       python3 - <<'PY'
 import json, os
 keys = ("repo", "revision", "branch", "nvcc", "bazel", "gpu", "gpu_procs",
-        "sandbox", "sandbox_backend", "gpu_lock")
+        "sandbox", "sandbox_backend", "gpu_lock", "sim")
 print(json.dumps({key: os.environ.get("NANOCHAT_DOCTOR_" + key, "")
                   for key in keys}))
 PY
@@ -307,6 +317,7 @@ PY
       [[ -n $d_gpu_procs ]] && echo "gpu procs: $d_gpu_procs"
       [[ -n $d_sandbox ]] && echo "sandbox:   $d_sandbox"
       echo "sandbox backend: $d_sandbox_backend"
+      echo "sim profile: $d_sim"
       [[ -n $d_gpu_lock ]] && echo "gpu lock:  $d_gpu_lock"
       for log in /tmp/nanochat-gpu.log /tmp/nanochat-sandbox.log; do
         [[ -f $log ]] || continue
@@ -321,6 +332,133 @@ PY
     fi
     ;;
   verify) run_profile t2-parity "$@" ;;
+
+  simulate)
+    # The S0 simulator (docs/simulator.md section 10). Every suite is CPU-only:
+    # the reference engine computes on the CPU backend under a capability
+    # override, the API interposer records runtime and cuBLAS calls, the
+    # collective mock runs the gradient-sync seam over four rank processes, and
+    # the emulation engine runs the real device kernels on the host. None of
+    # them touches the GPU, so this command takes the build lock and never the
+    # GPU broker.
+    sim_mode=run
+    sim_device=h100
+    sim_precision=""
+    sim_suite=all
+    while (( $# )); do
+      case "$1" in
+        --device) sim_device=${2:?--device needs a name}; shift 2 ;;
+        --device=*) sim_device=${1#--device=}; shift ;;
+        --precision) sim_precision=${2:?--precision needs a value}; shift 2 ;;
+        --precision=*) sim_precision=${1#--precision=}; shift ;;
+        --suite) sim_suite=${2:?--suite needs a name}; shift 2 ;;
+        --suite=*) sim_suite=${1#--suite=}; shift ;;
+        --mode) sim_mode=${2:?--mode needs a value}; shift 2 ;;
+        --mode=*) sim_mode=${1#--mode=}; shift ;;
+        *) die "simulate: unknown argument '$1'" ;;
+      esac
+    done
+    case "$sim_device" in
+      h100|h200|a100|t4|gtx1080ti) ;;
+      *) die "simulate: unknown device '$sim_device' (h100 h200 a100 t4 gtx1080ti)" ;;
+    esac
+    # The compile gate uses the device's named target, matching build:h100 and
+    # build:h200 in .bazelrc. A numerical run defaults to fp32: the committed
+    # oracle and training-parity fixtures are the fp32 CPU case, and the fp16
+    # CPU build records its own looser tolerance (docs/testing.md), so
+    # `--precision fp16` is explicit rather than implied by the device name.
+    if [[ -z $sim_precision ]]; then
+      if [[ $sim_mode == compile && $sim_device == h200 ]]; then
+        sim_precision=fp16
+      else
+        sim_precision=fp32
+      fi
+    fi
+    case "$sim_precision" in
+      fp32|fp16) ;;
+      *) die "simulate: unknown precision '$sim_precision' (fp32 fp16)" ;;
+    esac
+
+    if [[ $sim_mode == compile ]]; then
+      # The compile gate (section 8): build the whole CUDA backend for the
+      # target architecture. No GPU and no broker; the build lock serializes it
+      # against every other build on this host.
+      # The aggregate library alone carries no actions, so the gate also builds
+      # the binaries that link the whole backend: those compile and link every
+      # kernel family and the runtime for the target architecture.
+      with_build_lock "$bazel_bin" build --config="$sim_device" \
+        //backends/cuda:all_kernels \
+        //backends/cuda:cuda_runtime_gpu_test \
+        //backends/cuda/kernels:precision_gpu_test \
+        //backends/cuda/kernels:row_kernels_gpu_test \
+        //backends/cuda/kernels:sequence_oracle_gpu_test
+      exit 0
+    fi
+    [[ $sim_mode == run ]] || die "simulate: unknown mode '$sim_mode' (run compile)"
+
+    # The API suite is the only one that interposes over the real CUDA
+    # backend: build the preloadable mock and a CUDA-linked test, check the
+    # symbol gate against a real CUDA binary, then run the test with
+    # `LD_PRELOAD` pointing at the mock. No GPU broker: the preloaded mock
+    # serves memory from the host and never calls the real runtime.
+    if [[ $sim_suite == api || $sim_suite == all ]]; then
+      with_build_lock "$bazel_bin" build --config=cuda \
+        //tools/cuda_sim:cuda_sim_interposer \
+        //backends/cuda:cuda_runtime_gpu_test \
+        //tests:cuda_sim_preload_test
+      mock_so=$(readlink -f "$root/bazel-bin/tools/cuda_sim/libcuda_sim_interposer.so")
+      real_bin=$(readlink -f "$root/bazel-bin/backends/cuda/cuda_runtime_gpu_test")
+      [[ -f $mock_so ]] || die "simulate: the interposer .so was not built ($mock_so)"
+      [[ -f $real_bin ]] || die "simulate: $real_bin was not built"
+      # The symbol gate: the mock itself, a real CUDA-linked binary, and the
+      # negative case (a missing symbol must be rejected).
+      "$here/cuda_sim/check_symbols.sh"
+      "$here/cuda_sim/check_symbols.sh" "$real_bin"
+      "$here/cuda_sim/check_symbols.sh" --negative-self-test
+      sim_log=$(mktemp "${TMPDIR:-/tmp}/nanochat-sim-api.XXXXXX.jsonl")
+      trap 'rm -f "$sim_log"' EXIT
+      with_build_lock "$bazel_bin" test //tests:cuda_sim_preload_test \
+        --config=cuda \
+        --test_tag_filters=sim \
+        "--run_under=$sandbox --profile=t0-cpu --" \
+        --spawn_strategy=local \
+        "--test_env=NANOCHAT_SIM_PROFILE=$sim_device" \
+        "--test_env=LD_PRELOAD=$mock_so" \
+        "--test_env=NANOCHAT_SIM_LOG=$sim_log"
+      # The in-process mock unit test: same mock, no preload (it links the mock
+      # directly). Kept beside the preload run so the suite covers both halves.
+      with_build_lock "$bazel_bin" test //tests:cuda_sim_test \
+        --test_tag_filters=sim \
+        "--run_under=$sandbox --profile=t0-cpu --" \
+        --spawn_strategy=local \
+        "--test_env=NANOCHAT_SIM_PROFILE=$sim_device"
+    fi
+    [[ $sim_suite == api ]] && exit 0
+
+    case "$sim_suite" in
+      correctness) sim_targets=(//tests:oracle_test //tests:train_parity_test
+                                //tests:sim_numerics_test) ;;
+      collective) sim_targets=(//tests:collective_sim_test) ;;
+      kernel) sim_targets=(//tests:kernel_emu_test) ;;
+      profile) sim_targets=(//tests:device_profile_test) ;;
+      all) sim_targets=(//tests:oracle_test //tests:train_parity_test
+                        //tests:sim_numerics_test //tests:collective_sim_test
+                        //tests:kernel_emu_test //tests:device_profile_test) ;;
+      *) die "simulate: unknown suite '$sim_suite'" ;;
+    esac
+
+    sim_configs=(--config=sim)
+    [[ $sim_precision == fp16 ]] && sim_configs+=(--config=fp16)
+    # The reference-engine suites assert the override is live under
+    # `--config=sim`, so the profile name must reach the test process.
+    with_build_lock "$bazel_bin" test \
+      "${sim_targets[@]}" \
+      --test_tag_filters=-gpu \
+      "--run_under=$sandbox --profile=t0-cpu --" \
+      --spawn_strategy=local \
+      "--test_env=NANOCHAT_SIM_PROFILE=$sim_device" \
+      "${sim_configs[@]}"
+    ;;
 
   gpu)
     exec "$broker" "$@"

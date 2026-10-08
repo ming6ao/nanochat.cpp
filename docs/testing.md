@@ -8,11 +8,68 @@
 | T1 GPU correctness | tiny shapes (`B=2, T=8`), single kernel | < 100 ms | serialized via broker |
 | T2 GPU parity | full oracle, loss curve, small training | seconds–minutes | serialized, exclusive |
 | T3 GPU benchmark/profile | throughput, Nsight | minutes+ | scheduled, exclusive, native Linux |
+| S0 simulator | device profiles, the reference engine, the emulated kernels, the API interposer, the collective mock | ms-s | CPU only, `t0-cpu`, no broker |
 
 Rule: **the inner development loop is T0.** GPU tiers are gates, not iteration
 tools. If you are waiting on the GPU to test logic, that logic should have been
 tested on CPU. All tiers run under a resource profile; see
 [sandbox.md](sandbox.md).
+
+### S0: the simulator tier
+
+S0 is the CPU-only tier that exercises H100/H200-class behavior without a
+Hopper device ([simulator.md](simulator.md)). It takes no GPU broker, so it runs
+like T0 -- under the `t0-cpu` profile, in parallel with other T0 work. The
+suites are:
+
+```bash
+# Everything: oracle, training parity, API, collective, emulated kernels,
+# profile consistency. A numerical run defaults to fp32; the compile gate uses
+# the device's named target (h200 is fp16).
+tools/nanochat simulate --device h100
+tools/nanochat simulate --device h200
+
+# One suite.
+tools/nanochat simulate --device h100 --suite correctness   # reference engine
+tools/nanochat simulate --device h100 --suite api           # API interposer
+tools/nanochat simulate --device h100 --suite collective    # NCCL mock
+tools/nanochat simulate --device h100 --suite kernel        # emulated kernels
+tools/nanochat simulate --device h100 --suite profile       # device table
+
+# Compile the CUDA backend for the target architecture (no GPU, no broker).
+tools/nanochat simulate --device h200 --mode compile
+```
+
+The reference-engine suites add `--config=sim` and pass
+`--test_env=NANOCHAT_SIM_PROFILE=<device>`, which makes `kernels::GetCaps()`
+answer from `include/nanochat/device_profile.h` while every value is still
+computed by the CPU reference loops. `//tests:sim_numerics_test` asserts that
+the caps change and the numerics do not, so a profile can never silently move a
+result.
+
+The half-storage path is explicit: `--precision fp16` adds `--config=fp16`.
+The committed oracle and training-parity fixtures are the fp32 CPU case, and the
+fp16 CPU build records its own looser tolerance, so the fp16 *correctness* suite
+is expected to diverge from the fp32 fixture -- a pre-existing property of the
+fp16 reference backend, not of the simulator. The fp16 profile is still
+exercised: `//tests:sim_numerics_test` runs in both precisions and asserts that
+the profile changes the caps and not a single value.
+
+The collective mock rendezvouses through POSIX shared memory and bounds its
+wait (`NANOCHAT_SIM_TIMEOUT_MS`), so a rank that never issues the all-reduce is
+reported as a timeout instead of hanging the suite.
+
+The suite targets carry the `sim` tag. They are CPU-only and fast, so they stay
+in the default `tools/nanochat test` loop; the tag exists so a merge gate can
+select or exclude them by name. The one exception is
+`//tests:cuda_sim_preload_test`, which also carries `manual`: it links the real
+CUDA backend and must run under `tools/nanochat simulate --suite api`, which
+supplies `LD_PRELOAD`, `NANOCHAT_SIM_LOG`, and the profile.
+
+The fabricated `cudaDeviceProp` layout is pinned by
+`//tests:cuda_device_prop_abi_test`, a compile-time cross-check of
+`cudaDevicePropPrefix` against the real `<driver_types.h>`; it needs the CUDA
+toolkit headers but no device.
 
 ## Definition of done
 

@@ -723,7 +723,13 @@ void TestDeviceUtilities() {
   kernels::Free(p);
   kernels::Synchronize();
   Caps caps = kernels::GetCaps();
+#if defined(NANOCHAT_SIMULATOR)
+  // Under `--config=sim` the reference backend answers from
+  // `NANOCHAT_SIM_PROFILE`, so the caps describe the simulated device.
+  Check(caps.is_device, "caps is_device true under --config=sim");
+#else
   Check(!caps.is_device, "caps is_device false");
+#endif
   Check(caps.Supports(kComputeDType), "caps supports build precision");
 }
 

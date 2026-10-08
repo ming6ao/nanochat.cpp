@@ -186,6 +186,10 @@ Put the host values in `.bazelrc.local`.
 4. A binary outside `tools/nanochat` still fails.
 5. `tools/nanochat doctor` reports the selected sandbox backend.
 6. The tracked `.bazelrc` contains no absolute compiler path.
+7. `tools/nanochat simulate --device h100` passes with the `none` backend. The
+   S0 simulator is CPU-only by construction -- no toolkit, no driver, no GPU,
+   and no broker -- so it is the portable way to check Hopper-class behavior on
+   a host that has no Hopper device ([simulator.md](simulator.md)).
 
 ## 8. Kaggle Notebooks
 
@@ -455,6 +459,7 @@ the single-card path is fast.
 | GPU quota | A weekly GPU-hour limit | Keep the GPU for gates |
 | Driver mismatch | The image CUDA and the driver disagree | Check with `tools/nanochat doctor` |
 | `rules_cuda` autodetect | The toolkit path is not found | Set `CUDA_HOME` |
+| No CUDA toolkit | The CUDA build cannot compile | Use the S0 simulator: `tools/nanochat simulate --device h100` needs no toolkit |
 
 ### 10. Definition of done
 

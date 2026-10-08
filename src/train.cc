@@ -247,6 +247,8 @@ double PeakFlopsForDevice(const std::string& device_name) {
       {{"h100"}, 989e12},
       {{"h800", "nvl"}, 989e12},
       {{"h800"}, 756e12},
+      // NVIDIA Turing
+      {{"t4"}, 65e12},
       // NVIDIA Ampere data center
       {{"a100"}, 312e12},
       {{"a800"}, 312e12},
@@ -268,7 +270,11 @@ double PeakFlopsForDevice(const std::string& device_name) {
       {{"5090"}, 209.5e12},
       {{"4090"}, 165.2e12},
       {{"3090"}, 71e12},
-      // Pascal (FP32 CUDA-core peak; no tensor cores)
+      // Pascal (FP32 CUDA-core peak; no tensor cores). Both spellings are
+      // listed because the simulator's profile key is the compact device id
+      // (`gtx1080ti`), while a driver's `cudaDeviceProp.name` is the spaced
+      // marketing name.
+      {{"1080ti"}, 11.34e12},
       {{"1080 ti"}, 11.34e12},
   };
 

@@ -34,6 +34,15 @@ config_setting(
     define_values = {"backend": "cuda"},
 )
 
+# Simulator selection (docs/simulator.md sections 4.1 and 8). `--config=sim` sets
+# `--define=simulator=1`; the reference CPU backend then answers `GetCaps()`
+# from `NANOCHAT_SIM_PROFILE` through the device profile table instead of
+# reporting the host. It changes capabilities, never numerics.
+config_setting(
+    name = "sim",
+    define_values = {"simulator": "1"},
+)
+
 # Aggregation point: each package publishes `test_suite(name = "all")`; new
 # packages add their label here. Kept in sync with `bazel test //...`.
 #

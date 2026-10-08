@@ -29,6 +29,7 @@
 // normalization statistics".
 
 #include "nanochat/kernels.h"
+#include "nanochat/device_profile.h"
 
 #if defined(_OPENMP)
 #include <omp.h>
@@ -153,6 +154,22 @@ void Synchronize() {
 }
 
 Caps GetCaps() {
+#if defined(NANOCHAT_SIMULATOR)
+  // Reference engine (docs/simulator.md section 4.1): `--config=sim` compiles
+  // this branch in, and `NANOCHAT_SIM_PROFILE` names the target device. The
+  // host graph then sees a Hopper-class (or Turing/Ampere) device while every
+  // value is still computed by the loops below. The profile changes the
+  // reported caps, never the arithmetic; `//tests:sim_numerics_test` asserts
+  // that equality. An unset or unknown profile falls through to the host caps,
+  // so the default CPU behaviour is unchanged.
+  if (const char* sim = std::getenv("NANOCHAT_SIM_PROFILE");
+      sim != nullptr && *sim != '\0') {
+    if (const DeviceProfile* profile = FindDeviceProfile(sim);
+        profile != nullptr) {
+      return CapsFromProfile(*profile);
+    }
+  }
+#endif
   Caps caps;
   caps.device_index = 0;
   caps.compute_major = 0;
@@ -169,7 +186,6 @@ Caps GetCaps() {
   caps.device_name = "cpu";
   return caps;
 }
-
 // ---------------------------------------------------------------------------
 // Library-backed GEMM
 // ---------------------------------------------------------------------------

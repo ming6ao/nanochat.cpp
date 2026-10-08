@@ -26,22 +26,25 @@ happen through the integrator.
 
 | Workstream | Owns | Depends on |
 |---|---|---|
-| **Architect / Integrator** | `include/nanochat/*.h`, `MODULE.bazel`, `.bazelrc`, top-level `BUILD` files, `README.md`, `DESIGN.md`, `AGENTS.md`, `CONTRIBUTING.md`, `docs/**` | — |
+| **Architect / Integrator** | `include/nanochat/*.h`, `MODULE.bazel`, `.bazelrc`, top-level `BUILD` files, `tools/nanochat`, `README.md`, `DESIGN.md`, `AGENTS.md`, `CONTRIBUTING.md`, `docs/**` | — |
 | **Runtime** | `include/nanochat/tensor.h`, `src/tensor.cc`, `backends/cpu/` | frozen `kernels.h` |
 | **Oracle** | `tools/dump_*.py`, `tests/`, `tests/data/*.bin` | frozen `tensor.h` |
 | **Kernel agents** (one per family) | `backends/cuda/kernels/<family>.cu` + `<family>_test.cc` + `<family>_benchmark.cc` in the same directory | frozen `kernels.h` |
 | **Kernel agents** (shared) | `backends/cuda/kernels/testing/**` (host test scaffolding), `dev/kernels/**` (unpromoted prototypes) | — |
 | **Workflow** | `src/ops.cc`, `src/model.cc`, `src/generate.cc` | `kernels.h`, CPU backend |
 | **Optimizer** | `src/optim.cc` | `kernels.h` |
-| **Harness** | `src/train.cc`, `src/data.cc`, `src/eval.cc`, `src/*_main.cc`, `include/nanochat/{data,scheduler,logger,mfu}.h` | Model API |
+| **Harness** | `src/train.cc`, `src/data.cc`, `src/eval.cc`, `src/*_main.cc`, `src/device_profile.cc`, `include/nanochat/{data,scheduler,logger,mfu}.h` | Model API |
 | **Python surface** | `python/**`, `bindings/**` | C ABI `capi.h`, Model API |
 | **Data pipeline** | `src/tokenizer/**`, `src/parquet/**`, `include/nanochat/{tokenizer,bpe_trainer}.h` | frozen `data.h` |
 | **Notebooks** | `notebooks/**`, `tools/kaggle/**` | `docs/host-portability.md` |
+| **Simulator** | `tools/cuda_sim/**` (the API interposer, the emulation engine, the collective mock, `cuda_sim.map`, `check_symbols.sh`) | `docs/simulator.md`, frozen `tensor.h` |
 | **Build** | `MODULE.bazel`, `.bazelrc`, `BUILD.bazel` (setup only) | Architect |
 
 **Frozen interfaces** (architect-owned; coordinate before editing):
 
 - `include/nanochat/kernels.h` — the backend seam.
+- `include/nanochat/device_profile.h` — the simulator's capability table
+  (additive; it stays beside `PeakFlopsForDevice`).
 - `include/nanochat/tensor.h` — `Tensor`, `ComputeType`, `DType`, `Caps`.
 - `include/nanochat/config.h` — `Config`.
 - `include/nanochat/model.h` — the public Model API.
@@ -214,6 +217,10 @@ The integrator runs, per merge:
 
 - `tools/nanochat lint` (the Google C++ Style gate).
 - `bazel test //... --test_tag_filters=-gpu` (all CPU tests, under `t0-cpu`).
+  The S0 simulator suites ride this loop: they are CPU-only and need no broker.
+- `tools/nanochat simulate --device h100` when the change touches a kernel, the
+  backend seam, or the device profile (`docs/simulator.md`). It is still CPU
+  only.
 - A single T1 GPU smoke test covering the changed family (`t1-gpu`).
 - T2 parity only at Wave boundaries, not per commit (`t2-parity`).
 

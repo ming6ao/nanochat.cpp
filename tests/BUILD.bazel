@@ -263,6 +263,139 @@ cc_test(
     size = "small",
 )
 
+# The device profile / MFU consistency gate (docs/simulator.md section 7): the
+# simulator's capability table and `PeakFlopsForDevice` must agree on every
+# shared entry. Vendor-free and GPU-free, so it runs in the default T0 loop;
+# it carries the `sim` tag because it is part of the S0 simulator tier.
+cc_test(
+    name = "device_profile_test",
+    srcs = ["device_profile_test.cc"],
+    copts = nanochat_copts(),
+    deps = [
+        "//include/nanochat:nanochat",
+        # `PeakFlopsForDevice` stays the MFU authority and lives with the
+        # harness; the test reads both tables to compare them.
+        "//src:model",
+    ],
+    size = "small",
+    tags = ["sim"],
+)
+
+# The fabricated `cudaDeviceProp` cross-check (docs/simulator.md section 5.1):
+# the interposer's prefix must sit at the vendor field offsets, or `GetCaps()`
+# reads the wrong bytes. Compiled against the real `<driver_types.h>`, so drift
+# is a build failure. The asserts are constexpr; no device, no broker, no GPU.
+# It needs the CUDA toolkit headers, so it builds on a host with the toolkit.
+cc_test(
+    name = "cuda_device_prop_abi_test",
+    srcs = ["cuda_device_prop_abi_test.cc"],
+    copts = nanochat_copts(),
+    deps = [
+        "//include/nanochat:nanochat",
+        "//tools/cuda_sim:cuda_device_prop_prefix",
+    ],
+    size = "small",
+    tags = ["sim"],
+)
+
+# Simulator: the reference engine. Same graph and fixture as `oracle_test`,
+# run with and without the capability override, and asserted to produce
+# identical values (docs/simulator.md section 4.4). It carries the `sim` tag so
+# a merge gate can select it by name, but it stays in the default T0 loop: with
+# no `--config=sim` the override is inert, which the test also pins. Add it to
+# the `simulate` correctness suite, which runs it under `--config=sim`.
+cc_test(
+    name = "sim_numerics_test",
+    srcs = ["sim_numerics_test.cc"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    deps = [
+        "//include/nanochat:nanochat",
+        "//src:device_profile",
+        "//src:model",
+    ],
+    size = "small",
+    tags = ["sim"],
+)
+
+# Simulator: the emulation engine. Compares the real device kernels from
+# backends/cuda/kernels/ (compiled by the host compiler against the emulator's
+# CUDA stubs) against the CPU reference, kernel for kernel
+# (docs/simulator.md section 9.3). CPU only, so it runs in the default loop.
+cc_test(
+    name = "kernel_emu_test",
+    srcs = ["kernel_emu_test.cc"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    deps = [
+        "//backends/cpu:cpu",
+        "//include/nanochat:nanochat",
+        "//tools/cuda_sim/emu:emulated_kernels",
+    ],
+    size = "small",
+    tags = ["sim"],
+)
+
+# Simulator: the collective path. Four rank processes run the NCCL mock, and
+# the run must end with the elementwise sum on every rank; a rank that skips
+# the all-reduce must be reported as a timeout, not a hang (docs/simulator.md
+# section 12.3). CPU only.
+cc_test(
+    name = "collective_sim_test",
+    srcs = ["collective_sim_test.cc"],
+    copts = nanochat_copts(),
+    deps = [
+        "//include/nanochat:nanochat",
+        "//tools/cuda_sim/collective:nccl_mock",
+    ],
+    size = "small",
+    tags = ["sim"],
+)
+
+# Simulator: the API interposer, exercised in process. This is a *mock unit*
+# test: it links //tools/cuda_sim:cuda_sim_interposer_impl directly and drives
+# the mock's own entry points, asserting the named semantic invariants of
+# docs/simulator.md section 12.2. It is not a binding test -- nothing here
+# links the CUDA backend or exercises `LD_PRELOAD`; that is
+# //tests:cuda_sim_preload_test, run by `tools/nanochat simulate --suite api`.
+# CPU only; no GPU, driver, or toolkit.
+cc_test(
+    name = "cuda_sim_test",
+    srcs = ["cuda_sim_test.cc"],
+    copts = nanochat_copts(),
+    deps = [
+        "//include/nanochat:nanochat",
+        "//tools/cuda_sim:cuda_sim_interposer_impl",
+    ],
+    size = "small",
+    tags = ["sim"],
+)
+
+# Simulator: the real interposition path. Unlike `cuda_sim_test`, this links
+# the *real* CUDA backend (device.cu + gemm.cu) and is run with
+# `LD_PRELOAD=libcuda_sim_interposer.so`, so the calls below are bound to the
+# mock by the dynamic linker. It drives `kernels::GetCaps`, the memory calls,
+# both GEMM paths, and `Synchronize`, then asserts the mock's JSON log. It is
+# `manual` because it must only run under `tools/nanochat simulate --suite api`,
+# which supplies `LD_PRELOAD`, `NANOCHAT_SIM_LOG`, and `NANOCHAT_SIM_PROFILE`.
+cc_test(
+    name = "cuda_sim_preload_test",
+    srcs = ["cuda_sim_preload_test.cc"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    deps = [
+        "//backends/cuda:cuda",
+        "//include/nanochat:nanochat",
+        # To derive the expected caps from the profile name the run simulates.
+        "//src:device_profile",
+    ],
+    size = "small",
+    tags = [
+        "manual",
+        "sim",
+    ],
+)
+
 # Aggregation point consumed by //:all_tests.
 test_suite(name = "all", tests = [
     ":oracle_test",
@@ -274,4 +407,10 @@ test_suite(name = "all", tests = [
     ":score_parity_test",
     ":loader_parity_test",
     ":post_training_core_test",
+    ":device_profile_test",
+    ":cuda_device_prop_abi_test",
+    ":sim_numerics_test",
+    ":kernel_emu_test",
+    ":collective_sim_test",
+    ":cuda_sim_test",
 ])

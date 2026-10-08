@@ -1,0 +1,80 @@
+# tools/cuda_sim/emu/ -- the device-code emulation engine
+# (docs/simulator.md section 9).
+#
+# The engine compiles the real `backends/cuda/kernels/*.cu` sources with the
+# host compiler. This package supplies the stubbed CUDA headers, the
+# device-language mapping, the launcher, and the adapter that renames the seam
+# entry points so the emulated device code can be linked beside the CPU
+# reference and compared with it.
+#
+# Everything here is CPU-only: it needs no toolkit, no driver, and no GPU.
+
+load("@rules_cc//cc:defs.bzl", "cc_library")
+load("//:nanochat.bzl", "nanochat_copts", "precision_defines")
+
+package(default_visibility = ["//visibility:public"])
+
+# The headers an emulated translation unit needs. They are declared here (rather
+# than by depending on `//backends/cuda:*`, which is a `cuda_library`) so the
+# compile line stays a plain host compile with no toolkit include path: the
+# stubbed `<cuda_runtime.h>` in this directory is the only one reachable.
+cc_library(
+    name = "cuda_headers",
+    hdrs = [
+        "cuda_emu.h",
+        "cuda_fp16.h",
+        "cuda_runtime.h",
+        "emu_kernels.h",
+        "emu_prelude.h",
+        "math_constants.h",
+        "//backends/cuda:device.h",
+        "//backends/cuda/kernels:device_utils.cuh",
+        "//backends/cuda/kernels:rms_norm.h",
+    ],
+)
+
+# The emulated kernel sources. Bazel's C++ rules do not accept a `.cu` file in
+# `srcs`, so each one is copied to a `.cc` name; the copy is compiled by the
+# host compiler with the stubs above. The device bodies are byte-identical to
+# the originals -- only the launch mechanism and the seam symbol names differ.
+genrule(
+    name = "rms_norm_emulated_source",
+    srcs = ["//backends/cuda/kernels:rms_norm.cu"],
+    outs = ["rms_norm_emu.cc"],
+    cmd = "cp $< $@",
+)
+
+genrule(
+    name = "pointwise_emulated_source",
+    srcs = ["//backends/cuda/kernels:pointwise.cu"],
+    outs = ["pointwise_emu.cc"],
+    cmd = "cp $< $@",
+)
+
+cc_library(
+    name = "emulated_kernels",
+    srcs = [
+        "emu_runtime.cc",
+        ":pointwise_emulated_source",
+        ":rms_norm_emulated_source",
+    ],
+    copts = nanochat_copts() + [
+        # The repository root, so the kernel sources' own quoted includes
+        # ("backends/cuda/device.h" and friends) resolve.
+        "-I.",
+        # The stub CUDA headers, ahead of anything else.
+        "-Itools/cuda_sim/emu",
+        # The launch replacement and the seam renames, before any source.
+        "-include",
+        "tools/cuda_sim/emu/emu_prelude.h",
+    ],
+    defines = precision_defines(),
+    deps = [
+        # Declares the stub CUDA headers and the headers of the kernel sources,
+        # so they are present as inputs of this action (Bazel's sandbox makes
+        # only declared inputs visible, and `-include` needs the prelude to
+        # exist at its execroot path).
+        ":cuda_headers",
+        "//include/nanochat:nanochat",
+    ],
+)
