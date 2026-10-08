@@ -4,15 +4,15 @@ This document plans a simulator for the API calls and the numerics of
 `nanochat.cpp` on H100, H200, and later accelerator targets. The development
 host has no Hopper device, so the simulator must work without one.
 
-Status: implemented for the S0 tier. The device profile table, the reference
-engine, the emulation engine, the API interposer, the collective mock, and the
-`tools/nanochat simulate` command are in the tree and covered by tests. The
-sections below are the plan; each carries the status note where it matters.
-See "Status by section" at the end of this file.
+Status: implemented for the S0 tier. The tree holds the device profile table,
+the reference engine, the emulation engine, the API interposer, and the
+collective mock. The `tools/nanochat simulate` command runs them. Tests cover
+each part. The sections below are the plan; each carries the status note where
+it matters. See "Status by section" at the end of this file.
 
-The engine that runs the real device code on the host (section 9) is the
-strongest of the three: it executes the unchanged `backends/cuda/kernels/*.cu`
-bodies, so it checks the arithmetic the reference engine cannot.
+The host engine in section 9 is the strongest of the three. It runs the
+unchanged `backends/cuda/kernels/*.cu` bodies. So it checks the arithmetic
+that the reference engine cannot.
 
 ## 1. Purpose
 
@@ -363,11 +363,16 @@ The compile gate is secondary. It needs no interposer and no GPU.
 - `tools/nanochat simulate --device h100 --mode compile` builds
   `//backends/cuda:all_kernels` and the host graph for that architecture.
 - The gate holds the build lock. It takes no GPU broker.
-- The gate is planned to enable `-Werror` (excluding the legacy cuBLAS
-  deprecation) and to record `ptxas` register and shared-memory use per
-  architecture. Neither half is wired yet; until it is, the gate is the
-  architecture build in step 1 of section 10, and `nanochat.bzl` keeps `-Werror`
-  out of the inner loop.
+- The gate enables `-Werror` through `--config=sim-gate`. `nanochat.bzl` adds
+  `-Xcompiler -Werror` and the nvcc `-Werror all-warnings` class, and it
+  excludes the deprecation warning for the legacy cuBLAS enums through
+  `-Xcompiler -Wno-deprecated-declarations`.
+- The gate records the `ptxas` register and shared-memory use per kernel in
+  `/tmp/nanochat-sim-ptxas-<device>.log`. Set `NANOCHAT_SIM_PTXAS_LOG` to
+  change the path. A cached build compiles nothing, so the gate keeps the
+  previous log instead of erasing it.
+- The gate leaves `-Werror` out of the inner loop. Only `--config=sim-gate`
+  turns it on.
 
 The gate does not add an `sm_90a` config. The tree uses no `sm_90a` feature,
 so the config can only fail. The gate does not add an `a100` config. That
@@ -388,21 +393,21 @@ tests the arithmetic of the `.cu` kernels. The emulation engine closes that gap.
 - The build compiles the `backends/cuda/kernels/*.cu` sources with the host
   compiler and the header (`//tools/cuda_sim/emu:emulated_kernels`). A genrule
   copies each `.cu` to a `.cc` name, because Bazel's C++ rules do not accept a
-  `.cu` file in `srcs`; the text is unchanged.
-- The launch is intercepted at `cuda_backend::Launch`, not at
-  `cudaLaunchKernel`. `emu_prelude.h` is force-included ahead of
-  `backends/cuda/device.h`, whose `<<<...>>>` template is guarded by
-  `__CUDACC__` and is therefore not compiled; the prelude's replacement
-  iterates the grid and the block and runs the kernel body on the host.
-- Each block runs as a set of cooperative fibers on the launching host thread:
-  every CUDA thread of the block is live concurrently, barriers release when all
-  live threads arrive, and a block that cannot release one aborts with a
-  diagnostic instead of hanging. See the execution-model comment in
-  `cuda_emu.h` for the divergences from a device.
-- The seam entry points are renamed with an `Emu` prefix by
-  `emu_prelude.h` (`nanochat::kernels::EmuRmsNormForward` and so on), so the
-  emulated device code and the CPU reference link side by side and
-  `//tests:kernel_emu_test` can compare them.
+  `.cu` file in `srcs`; the text stays the same.
+- The engine intercepts the launch at `cuda_backend::Launch`, not at
+  `cudaLaunchKernel`. It force-includes `emu_prelude.h` ahead of
+  `backends/cuda/device.h`. That header guards its `<<<...>>>` template with
+  `__CUDACC__`, so the template does not compile. The prelude replacement
+  iterates the grid and the block, then runs the kernel body on the host.
+- Each block runs as a set of cooperative fibers on the launching host thread.
+  The scheduler keeps every CUDA thread of the block live at the same time.
+  A barrier releases when all live threads arrive. A block that cannot release
+  a barrier aborts with a diagnostic instead of hanging. See the
+  execution-model comment in `cuda_emu.h` for the divergences from a device.
+- `emu_prelude.h` renames the seam entry points with an `Emu` prefix
+  (`nanochat::kernels::EmuRmsNormForward` and so on). The emulated device code
+  and the CPU reference then link side by side, and `//tests:kernel_emu_test`
+  compares them.
 
 ### 9.2 Supported subset
 
@@ -438,10 +443,11 @@ mode alone, and a weaker check than real hardware.
 
 ## 10. Running the simulator
 
-Tier S0 is new. An S0 run exercises Hopper-class behavior but needs no GPU. The
-fast CPU-only S0 tests also ride the default `tools/nanochat test` loop (they
-carry the `sim` tag); the `simulate` command is what runs them under a
-`--config=sim` capability override and, for the API suite, under `LD_PRELOAD`.
+Tier S0 is new. An S0 run exercises Hopper-class behavior but needs no GPU.
+The fast CPU-only S0 tests also ride the default `tools/nanochat test` loop,
+because they carry the `sim` tag. The `simulate` command runs them under a
+`--config=sim` capability override. For the API suite, it also runs them under
+`LD_PRELOAD`.
 
 ```bash
 # Numerical correctness on a simulated H100, fp32.
@@ -472,7 +478,7 @@ The command does this:
    `--test_env=NANOCHAT_SIM_LOG=<abs temp>`. It also runs
    `tools/cuda_sim/check_symbols.sh` against the mock, against a real
    CUDA-linked binary (`//backends/cuda:cuda_runtime_gpu_test`), and with
-   `--negative-self-test` (a missing symbol must be rejected).
+   `--negative-self-test`, which rejects a missing symbol.
 5. Passes `--test_env=NANOCHAT_SIM_PROFILE=<name>`.
 
 The `.bazelrc` gains `test --test_env=NANOCHAT_SIM_PROFILE`. The `simulate`
@@ -551,8 +557,8 @@ the Architect / Integrator row.
 
 11. The NCCL-mock test (`//tests:collective_sim_test`) runs four ranks, merges
     their `NANOCHAT_SIM_LOG` records, and judges the merged timeline; every rank
-    ends with the elementwise sum. The gradient-sync *seam* numerics are owned
-    by `//src:distributed_test`, not by this test.
+    ends with the elementwise sum. `//src:distributed_test` owns the
+    gradient-sync *seam* numerics; this test does not.
 12. The collective deadlock check fails when one rank skips the all-reduce, and
     the coordinator rejects an unclosed group and an oversized buffer range.
 13. The emulated kernel matches the CPU reference kernel within tolerance.
@@ -573,11 +579,11 @@ The profile table comes first, because the other engines consume it.
 | 7 | Compile gate and the `doctor` line | Architecture and warning gate |
 | 8 | Documentation and merge-gate wiring | Repeatable check |
 
-Phases 1, 2, 3, 4, 5, 6, and 8 are implemented and tested. Phase 7 is wired:
-`--config=h100` and `--config=h200` exist, `tools/nanochat simulate --mode
-compile` builds `//backends/cuda:all_kernels` for the target architecture, and
-`tools/nanochat doctor` reports the simulated profile. The warnings-as-errors
-half of the gate and the recorded `ptxas` resource use are not yet wired.
+Phases 1, 2, 3, 4, 5, 6, and 8 have code and tests. Phase 7 now works:
+`--config=h100` and `--config=h200` exist, and `tools/nanochat simulate
+--mode compile` builds the whole CUDA backend for the target architecture.
+The gate enables `-Werror` through `--config=sim-gate`. It records the `ptxas`
+register and shared-memory use in `/tmp/nanochat-sim-ptxas-<device>.log`.
 
 ### Status by section
 

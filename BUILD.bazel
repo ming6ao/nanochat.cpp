@@ -43,6 +43,15 @@ config_setting(
     define_values = {"simulator": "1"},
 )
 
+# Simulator compile gate (docs/simulator.md section 8). `--config=sim-gate` sets
+# `--define=simulator_gate=1`; `nanochat.bzl` then adds `-Werror` and the ptxas
+# resource request to the CUDA compiler options. The setting stays out of the
+# normal build, so the inner loop keeps its warnings.
+config_setting(
+    name = "sim_gate",
+    define_values = {"simulator_gate": "1"},
+)
+
 # Aggregation point: each package publishes `test_suite(name = "all")`; new
 # packages add their label here. Kept in sync with `bazel test //...`.
 #

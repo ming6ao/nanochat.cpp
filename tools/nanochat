@@ -381,17 +381,54 @@ PY
 
     if [[ $sim_mode == compile ]]; then
       # The compile gate (section 8): build the whole CUDA backend for the
-      # target architecture. No GPU and no broker; the build lock serializes it
-      # against every other build on this host.
+      # target architecture under --config=sim-gate, so warnings become errors
+      # and ptxas reports the register and shared-memory use. No GPU and no
+      # broker; the build lock serializes it against every other build.
+      #
       # The aggregate library alone carries no actions, so the gate also builds
       # the binaries that link the whole backend: those compile and link every
       # kernel family and the runtime for the target architecture.
-      with_build_lock "$bazel_bin" build --config="$sim_device" \
+      ptxas_log=${NANOCHAT_SIM_PTXAS_LOG:-/tmp/nanochat-sim-ptxas-${sim_device}.log}
+      gate_log=$(mktemp)
+      gate_status=0
+      with_build_lock "$bazel_bin" build \
+        --config="$sim_device" --config=sim-gate \
         //backends/cuda:all_kernels \
         //backends/cuda:cuda_runtime_gpu_test \
         //backends/cuda/kernels:precision_gpu_test \
         //backends/cuda/kernels:row_kernels_gpu_test \
-        //backends/cuda/kernels:sequence_oracle_gpu_test
+        //backends/cuda/kernels:sequence_oracle_gpu_test \
+        > "$gate_log" 2>&1 || gate_status=$?
+      if (( gate_status != 0 )); then
+        cat "$gate_log" >&2
+        rm -f "$gate_log"
+        exit "$gate_status"
+      fi
+      # Keep the ptxas resource lines for the record. Bazel prints the compiler
+      # stderr as INFO lines when it carries a diagnostic. A cached build
+      # compiles nothing, so keep the previous log rather than erase it.
+      fresh_log=$(mktemp)
+      grep -E "ptxas info|Used [0-9]+ registers" "$gate_log" \
+        > "$fresh_log" 2>/dev/null || true
+      fresh_count=$(grep -cE "Used [0-9]+ registers" "$fresh_log" 2>/dev/null || true)
+      : "${fresh_count:=0}"
+      if (( fresh_count > 0 )); then
+        mv "$fresh_log" "$ptxas_log"
+        record_count=$fresh_count
+        record_note=fresh
+      elif [[ -s $ptxas_log ]]; then
+        rm -f "$fresh_log"
+        record_count=$(grep -cE "Used [0-9]+ registers" "$ptxas_log" 2>/dev/null || true)
+        : "${record_count:=0}"
+        record_note="build cached; kept the previous log"
+      else
+        rm -f "$fresh_log"
+        record_count=0
+        record_note="build cached and no earlier log"
+      fi
+      echo "simulate: compile gate OK ($sim_device, -Werror, ptxas records: $record_count; $record_note)"
+      echo "simulate: ptxas resource log -> $ptxas_log"
+      rm -f "$gate_log"
       exit 0
     fi
     [[ $sim_mode == run ]] || die "simulate: unknown mode '$sim_mode' (run compile)"

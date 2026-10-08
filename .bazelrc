@@ -67,6 +67,10 @@ build:cpu --define=precision=fp32
 # `h100` and `h200` are the complete named targets for the compile gate
 # (section 8): sm_90, fp32/fp16, and the CUDA backend.
 build:sim --define=simulator=1
+# The compile gate (docs/simulator.md section 8): turn warnings into errors and
+# ask ptxas for the register and shared-memory use. Additive with a device
+# config: `--config=h100 --config=sim-gate`.
+build:sim-gate --define=simulator_gate=1
 
 build:h100 --@rules_cuda//cuda:archs=sm_90
 build:h100 --define=precision=fp32

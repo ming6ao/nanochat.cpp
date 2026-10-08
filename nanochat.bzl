@@ -46,13 +46,35 @@ NANOCHAT_CUDA_COPTS = [
     "-Wextra",
 ]
 
+# The simulator compile gate (docs/simulator.md section 8). The host pass turns
+# every warning into an error, except the deprecation warning for the legacy
+# cuBLAS enums that `gemm.cu` still names; the interposer reports those enums
+# directly. The device pass does the same through nvcc's warning classes. The
+# last two entries ask ptxas for the per-kernel resource use.
+SIM_GATE_CUDA_COPTS = [
+    "-Xcompiler",
+    "-Werror",
+    "-Xcompiler",
+    "-Wno-deprecated-declarations",
+    "-Werror",
+    "all-warnings",
+    "-Xptxas",
+    "-v",
+]
+
 def nanochat_copts():
     """Host compiler options shared by every target."""
-    return list(NANOCHAT_COPTS)
+    return select({
+        "//:sim_gate": list(NANOCHAT_COPTS) + ["-Werror"],
+        "//conditions:default": list(NANOCHAT_COPTS),
+    })
 
 def nanochat_cuda_copts():
     """CUDA compiler options shared by every kernel target."""
-    return list(NANOCHAT_CUDA_COPTS)
+    return select({
+        "//:sim_gate": list(NANOCHAT_CUDA_COPTS) + SIM_GATE_CUDA_COPTS,
+        "//conditions:default": list(NANOCHAT_CUDA_COPTS),
+    })
 
 def precision_defines():
     """The #define for the selected precision (`--config=fp32` / `fp16`).
