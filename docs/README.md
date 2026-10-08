@@ -24,6 +24,7 @@ detailed reference that the design points at.
 | [python.md](python.md) | The single Python surface: in-process compute API, planning, chat evaluation, and the `tools/nanochat` toolchain |
 | [sandbox.md](sandbox.md) | Execution sandbox and host resource governance |
 | [host-portability.md](host-portability.md) | Toolchain, optional sandbox, devices, and Kaggle |
+| [notebook-workflow.md](notebook-workflow.md) | The Kaggle notebook workflow: the trial runner, run directories, and ablation sweeps |
 | [simulator.md](simulator.md) | The S0 simulator: device profiles, the reference engine, the emulation engine, the API interposer, and the collective mock |
 | [numerics-integration.md](numerics-integration.md) | The staged numeric trace: CPU, simulator, and Pascal GPU agreement |
 

@@ -1,0 +1,3 @@
+# Python bytecode from the notebook trial runner.
+__pycache__/
+*.pyc

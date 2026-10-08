@@ -258,19 +258,22 @@ startup --host_jvm_args=-Xmx1024m
 The backend and the precision stay per-command. The CPU test loop keeps the CPU
 backend and fp32. A GPU command adds `--config=cuda`.
 
-#### 3.1 The launcher notebook
+#### 3.1 The setup module
 
-Two notebooks live under `notebooks/`:
+The notebook loader cell clones the repository and adds `python/` and
+`notebooks/` to `sys.path`. The module `notebooks/kaggle_setup.py` does the
+rest:
 
-- `notebooks/nanochat-cpp-on-t4-gpu.ipynb` holds the content.
-- `notebooks/kaggle-launcher.ipynb` is thin. It clones the repository and runs
-  the content notebook with `%run`.
+1. `ensure_repository` fetches and pulls.
+2. `run_bootstrap` runs `tools/kaggle/bootstrap.sh`.
+3. `load_host_env` reads `~/.nanochat.env`.
+4. `apply_host_path` prepends the tool directories to `PATH`.
+5. `build_library` builds the T4 library and pins `NANOCHAT_CPP_LIB`.
 
-Import the launcher into Kaggle once. The launcher runs the repository copy of
-the content notebook. A change to a content cell then takes effect on the next
-run. Import the launcher again only when the launcher itself changes.
+The notebook calls `kaggle_setup.setup()` once. A change to a setup step takes
+effect on the next run, so you do not import the notebook again.
 
-Set the launcher to GPU T4 x2 and Internet on. The committed notebook metadata
+Set the notebook to GPU T4 x2 and Internet on. The committed notebook metadata
 requests both. Confirm them in the notebook settings.
 
 ### 4. Build and test
