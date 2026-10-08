@@ -53,7 +53,9 @@ fp16 CPU build records its own looser tolerance, so the fp16 *correctness* suite
 is expected to diverge from the fp32 fixture -- a pre-existing property of the
 fp16 reference backend, not of the simulator. The fp16 profile is still
 exercised: `//tests:sim_numerics_test` runs in both precisions and asserts that
-the profile changes the caps and not a single value.
+the profile changes the caps and not a single value. `//tests:numerics_trace_test`
+skips on an fp16 build, because the numeric trace covers fp32 only
+(`docs/numerics-integration.md` section 6.2).
 
 The collective mock rendezvouses through POSIX shared memory and bounds its
 wait (`NANOCHAT_SIM_TIMEOUT_MS`), so a rank that never issues the all-reduce is
@@ -61,10 +63,12 @@ reported as a timeout instead of hanging the suite.
 
 The suite targets carry the `sim` tag. They are CPU-only and fast, so they stay
 in the default `tools/nanochat test` loop; the tag exists so a merge gate can
-select or exclude them by name. The one exception is
-`//tests:cuda_sim_preload_test`, which also carries `manual`: it links the real
-CUDA backend and must run under `tools/nanochat simulate --suite api`, which
-supplies `LD_PRELOAD`, `NANOCHAT_SIM_LOG`, and the profile.
+select or exclude them by name. Two exceptions carry `manual`.
+`//tests:cuda_sim_preload_test` links the real CUDA backend and must run under
+`tools/nanochat simulate --suite api`, which supplies `LD_PRELOAD`,
+`NANOCHAT_SIM_LOG`, and the profile. `//tests:numerics_trace_test` replays a
+10-layer trace, which is too slow for the inner loop; run it through
+`tools/nanochat simulate --suite correctness` or by name.
 
 The fabricated `cudaDeviceProp` layout is pinned by
 `//tests:cuda_device_prop_abi_test`, a compile-time cross-check of

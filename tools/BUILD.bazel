@@ -8,7 +8,9 @@
 # build/test targets: they run on the host (CPU only) and are exported here so
 # they are visible from the repository root and reproducible. The converter's
 # torch-free logic lives in `nanochat_cpp.checkpoint` and is covered by
-# `//python:checkpoint_test`.
+# `//python:checkpoint_test`. `dump_numerics_golden.py` is the one exception to
+# the torch rule: it drives the C++ emitter of
+# `docs/numerics-integration.md`, so it needs no third-party package.
 #
 # `dump_tokenizer_fixture.py`, `check_tokenizer_parity.py`, and
 # `gen_unicode_tables.py` are the native-tokenizer host tools. The first needs
@@ -24,6 +26,7 @@ exports_files([
     "check_tokenizer_parity.py",
     "convert_checkpoint.py",
     "dump_api_fixture.py",
+    "dump_numerics_golden.py",
     "dump_oracle.py",
     "dump_train_fixture.py",
     "dump_generate_fixture.py",
@@ -64,6 +67,14 @@ filegroup(
 filegroup(
     name = "dump_eval_fixture",
     srcs = ["dump_eval_fixture.py"],
+)
+
+# The numeric-trace fixture generator (docs/numerics-integration.md). It builds
+# the emitter, runs it through `tools/nanochat`, and writes
+# `tests/data/numerics_golden_10l.bin`; it needs no third-party package.
+filegroup(
+    name = "dump_numerics_golden",
+    srcs = ["dump_numerics_golden.py"],
 )
 
 # The reference-checkpoint converter. It needs torch, so it is data, not a

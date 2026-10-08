@@ -25,6 +25,7 @@ detailed reference that the design points at.
 | [sandbox.md](sandbox.md) | Execution sandbox and host resource governance |
 | [host-portability.md](host-portability.md) | Toolchain, optional sandbox, devices, and Kaggle |
 | [simulator.md](simulator.md) | The S0 simulator: device profiles, the reference engine, the emulation engine, the API interposer, and the collective mock |
+| [numerics-integration.md](numerics-integration.md) | The staged numeric trace: CPU, simulator, and Pascal GPU agreement |
 
 New here? Start with [../README.md](../README.md) for the quickstart, then
 [../DESIGN.md](../DESIGN.md) for the shape of the system.

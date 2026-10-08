@@ -18,11 +18,16 @@
 //
 // The same little-endian record encoding backs the evaluation fixture
 // (`NANOEVL1`, written by `python/nanochat_cpp/eval_fixture.py` and
-// `tools/dump_eval_fixture.py`) and the tokenizer fixture (`NANOTOK1`, written
-// by `tools/dump_tokenizer_fixture.py`); `Parse` accepts all three magics so
-// each parity test can reuse this reader. See the module docstring in
-// tools/dump_oracle.py for the exact layout. This header is header-only on
-// purpose: it can be included directly, or linked through the
+// `tools/dump_eval_fixture.py`), the tokenizer fixture (`NANOTOK1`, written by
+// `tools/dump_tokenizer_fixture.py`), and the staged numeric trace
+// (`NANONUM1`, written by `tests/numerics_trace_emit_main.cc` and
+// `tools/dump_numerics_golden.py`); `Parse` accepts all four magics so each
+// parity test can reuse this reader. The numeric trace is flat by design -- the
+// phase, the step, and the parameter name go into the record name, for example
+// `train/step3/param_hash/transformer.h.0.attn.c_q.weight` -- so it needs no
+// record sequence and no reader change beyond the magic. See the module
+// docstring in tools/dump_oracle.py for the exact layout. This header is
+// header-only on purpose: it can be included directly, or linked through the
 // `//tests:oracle_fixture` library.
 
 namespace nanochat {
@@ -140,9 +145,11 @@ class Fixture {
     if (bytes.size() < 16) throw std::runtime_error("oracle: truncated header");
     if (std::memcmp(bytes.data(), "NANOORC1", 8) != 0 &&
         std::memcmp(bytes.data(), "NANOEVL1", 8) != 0 &&
-        std::memcmp(bytes.data(), "NANOTOK1", 8) != 0) {
+        std::memcmp(bytes.data(), "NANOTOK1", 8) != 0 &&
+        std::memcmp(bytes.data(), "NANONUM1", 8) != 0) {
       throw std::runtime_error(
-          "oracle: bad magic (expected NANOORC1, NANOEVL1, or NANOTOK1)");
+          "oracle: bad magic (expected NANOORC1, NANOEVL1, NANOTOK1, or "
+          "NANONUM1)");
     }
     const std::uint32_t version = detail::ReadU32(bytes.data() + 8);
     if (version != 1) throw std::runtime_error("oracle: unsupported version");

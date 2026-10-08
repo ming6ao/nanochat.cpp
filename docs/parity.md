@@ -29,6 +29,7 @@ Status values:
 | D6 | `open` | scaling | distributed data parallel training is absent |
 | D7 | `out-of-scope` | runtime | no `torch.compile`; disabled on Pascal anyway |
 | D8 | `equivalent` | harness | no batch prefetch overlap during backward |
+| D9 | `closed` | optimizer | C++ schedule warmdown count matches Python's `round` (half to even) |
 | E1 | `open` | evaluation | sampled modes use the C++ RNG, not torch; greedy is bit-identical |
 | E3 | `equivalent` | evaluation | reference checkpoints converted torch -> NCHKPT01 |
 | E4 | `equivalent` | evaluation | CORE and chat scoring use the C++ forward with reference task logic |
@@ -69,6 +70,40 @@ never import Python:
 tools/nanochat test //src/tokenizer:tokenizer_parity_test \
     //src/tokenizer:bpe_trainer_test
 ```
+
+## The staged numeric-trace contract (Path A)
+
+[numerics-integration.md](numerics-integration.md) defines the staged precision
+contract of the numeric integration test. That document calls the design Path A.
+`//tests:numerics_trace_test` and its GPU sibling
+`//tests:numerics_trace_cuda_test` gate the contract against one committed
+golden file, `tests/data/numerics_golden_10l.bin`.
+
+Path A does not claim bit-exact agreement across all three targets. Section 1
+of the plan states the reduction. The trace claims four weaker results:
+
+1. The CPU trace and the simulator trace agree bit for bit. The two targets
+   share one code path, and only `GetCaps()` changes.
+2. The CPU target and the simulator target repeat across runs. The GPU target
+   repeats within the tolerance table, because the device kernels use atomic
+   scatter-add operations, and atomic order is not a contract.
+3. The GPU trace agrees with the CPU golden trace within the tolerance table of
+   the plan, section 4. The table carries the measured maxima.
+4. The greedy token identifiers agree exactly on all three targets, and every
+   recorded logit margin stays above the tie threshold of the plan, section
+   6.4.
+
+The test computes the trace in process and compares it against the golden file.
+The CPU leg and the simulator leg compare byte for byte. The GPU leg compares
+the scalars within the tolerance table and the identifiers exactly. It skips
+the parameter hashes and the gradient hashes, because the atomic scatter-adds
+change those bytes by design. The GPU leg also runs the trace twice and
+compares the two runs, which gates clause 2.
+
+The contract does not cover the SFT loop or the RL loop. It covers the SFT
+arithmetic and the RL arithmetic only, as the plan states. The status table in
+[post-training.md](post-training.md) still marks the SFT renderer, the SFT
+packer, the SFT loop, the `rl_step` binary, and the RL fixture as **Missing**.
 
 ## Open differences
 
@@ -253,6 +288,27 @@ The reference prefetches the next batch while the GPU runs the backward pass
 (`x, y, ... = next(train_loader)` inside the accumulation loop). nanochat.cpp
 loads the next batch at the top of the next step. This is a throughput
 difference only; the sequence of batches presented to the model is the same.
+
+### D9 — Warmdown iteration count rounding
+
+**Status:** `closed`. The reference `scripts/base_train.py` computes the
+warmdown length with Python's `round`. Python rounds half to even, so
+`round(2.5)` is 2. `Scheduler::WarmdownIters()` in `src/optim.cc` used
+`std::lround`, which rounds half away from zero, so `std::lround(2.5)` is 3.
+The two forms differ only when `warmdown_ratio * num_iterations` is exactly a
+half-integer.
+
+The section 6.2 numeric-trace configuration uses five steps and a ratio of
+`0.5`, so the product is `2.5`. The C++ warmdown then started one step early
+and changed the learning rate and the Muon momentum at the last two steps. The
+loss error was `0.146` and the parameter L2 error was `0.372` against the
+PyTorch reference.
+
+`WarmdownIters()` now uses `std::nearbyint` under the default `FE_TONEAREST`
+mode, and it evaluates the product in `double`. This matches Python's `round`.
+The regression test is `TestWarmdownRounding` in `src/optim_test.cc`. Evidence:
+`//tests:train_parity` at the section 6.2 shape passes with a loss error of
+`9.54e-07`.
 
 ### E3 — Reference checkpoint conversion
 

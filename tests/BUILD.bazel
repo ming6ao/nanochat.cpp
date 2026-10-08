@@ -396,6 +396,103 @@ cc_test(
     ],
 )
 
+# The staged numeric trace of docs/numerics-integration.md. One source computes
+# the whole trace (training, evaluation, greedy generation, the SFT arithmetic,
+# and the RL arithmetic) as a flat list of named records; the emitter writes the
+# committed golden file, and the two tests replay it. The library is shared so
+# the emitter and the test cannot drift apart.
+cc_library(
+    name = "numerics_trace",
+    srcs = ["numerics_trace.cc"],
+    hdrs = ["numerics_trace.h"],
+    copts = _BACKEND_COPTS + nanochat_copts(),
+    defines = precision_defines(),
+    deps = [
+        ":oracle_fixture",
+        "//include/nanochat:nanochat",
+        "//src:model",
+    ],
+)
+
+# The golden-trace emitter, driven by `tools/dump_numerics_golden.py`. It writes
+# `tests/data/numerics_golden_10l.bin` from the fp32 CPU reference build; run it
+# through `tools/nanochat run t0-cpu --`, never directly.
+cc_binary(
+    name = "numerics_trace_emit",
+    srcs = ["numerics_trace_emit_main.cc"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    deps = [
+        ":numerics_trace",
+        "//include/nanochat:nanochat",
+        "//src:model",
+    ],
+)
+
+# The numeric-trace replay gate (docs/numerics-integration.md): the CPU trace
+# must equal the committed golden byte for byte, and `tools/nanochat simulate
+# --suite correctness` runs this same target under `--config=sim` as the
+# regression guard (section 2.2). A 10-layer run with double GEMM over five
+# steps is the slow part, so the target carries `manual` and stays out of the
+# default test loop; run it as `tools/nanochat test //tests:numerics_trace_test`
+# or through the simulator correctness suite.
+cc_test(
+    name = "numerics_trace_test",
+    srcs = ["numerics_trace_test.cc"],
+    # The exactness intent belongs to the target, not to a backend define: this
+    # target must reproduce the golden byte for byte, on the reference CPU
+    # backend and on the same backend under `--config=sim`.
+    copts = nanochat_copts() + ["-DNANOCHAT_TRACE_EXACT"],
+    defines = precision_defines(),
+    data = [
+        "data/loader_tokenizer.nctoken",
+        "data/numerics_golden_10l.bin",
+    ],
+    args = [
+        "$(rootpath data/numerics_golden_10l.bin)",
+        "$(rootpath data/loader_tokenizer.nctoken)",
+    ],
+    deps = [
+        ":numerics_trace",
+        "//include/nanochat:nanochat",
+        "//src:model",
+    ],
+    size = "medium",
+    tags = [
+        "manual",
+        "sim",
+    ],
+)
+
+# Same gate on the CUDA backend: the scalars must match the golden within the
+# measured tolerance table and the greedy identifiers must match exactly. The
+# parameter and gradient hashes are skipped (atomic scatter-adds change the
+# bytes by design). `gpu` keeps it out of the default loop, and
+# `tools/nanochat test --gpu` discovers it.
+cc_test(
+    name = "numerics_trace_cuda_test",
+    srcs = ["numerics_trace_test.cc"],
+    copts = _BACKEND_COPTS + nanochat_copts(),
+    defines = precision_defines(),
+    data = [
+        "data/loader_tokenizer.nctoken",
+        "data/numerics_golden_10l.bin",
+    ],
+    args = [
+        "$(rootpath data/numerics_golden_10l.bin)",
+        "$(rootpath data/loader_tokenizer.nctoken)",
+    ],
+    deps = [
+        ":numerics_trace",
+        "//include/nanochat:nanochat",
+        "//src:model",
+    ],
+    size = "small",
+    tags = [
+        "gpu",
+    ],
+)
+
 # Aggregation point consumed by //:all_tests.
 test_suite(name = "all", tests = [
     ":oracle_test",

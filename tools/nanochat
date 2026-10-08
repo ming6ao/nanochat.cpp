@@ -37,6 +37,8 @@ tools/nanochat <command> [args...]
                              S0 CPU-only simulator (no GPU, no broker); see
                              docs/simulator.md. Suites: correctness api
                              collective kernel profile all (default all)
+                             `correctness` also carries the staged numeric
+                             trace (docs/numerics-integration.md)
   verify -- <cmd...>         alias for: run t2-parity -- <cmd...>
   gpu [--profile P] -- <cmd> acquire the GPU broker, then run
   help                       this message
@@ -474,12 +476,14 @@ PY
 
     case "$sim_suite" in
       correctness) sim_targets=(//tests:oracle_test //tests:train_parity_test
-                                //tests:sim_numerics_test) ;;
+                                //tests:sim_numerics_test
+                                //tests:numerics_trace_test) ;;
       collective) sim_targets=(//tests:collective_sim_test) ;;
       kernel) sim_targets=(//tests:kernel_emu_test) ;;
       profile) sim_targets=(//tests:device_profile_test) ;;
       all) sim_targets=(//tests:oracle_test //tests:train_parity_test
-                        //tests:sim_numerics_test //tests:collective_sim_test
+                        //tests:sim_numerics_test //tests:numerics_trace_test
+                        //tests:collective_sim_test
                         //tests:kernel_emu_test //tests:device_profile_test) ;;
       *) die "simulate: unknown suite '$sim_suite'" ;;
     esac

@@ -218,11 +218,18 @@ The integrator runs, per merge:
 - `tools/nanochat lint` (the Google C++ Style gate).
 - `bazel test //... --test_tag_filters=-gpu` (all CPU tests, under `t0-cpu`).
   The S0 simulator suites ride this loop: they are CPU-only and need no broker.
+  One exception exists. `//tests:numerics_trace_test` carries the `manual` tag,
+  because a 10-layer replay is too slow for the inner loop. Run it through the
+  simulator suite below.
 - `tools/nanochat simulate --device h100` when the change touches a kernel, the
   backend seam, or the device profile (`docs/simulator.md`). It is still CPU
-  only.
+  only. Its `correctness` suite carries the CPU and simulator legs of the staged
+  numeric trace (`docs/numerics-integration.md`), so that run also gates Path A.
 - A single T1 GPU smoke test covering the changed family (`t1-gpu`).
 - T2 parity only at Wave boundaries, not per commit (`t2-parity`).
+  `tools/nanochat test --gpu //tests:numerics_trace_cuda_test` is the numeric
+  trace at that tier: about ten seconds on the broker, and it needs its own
+  `--config=sim` CPU run to be meaningful.
 
 This keeps GPU time bounded and predictable.
 

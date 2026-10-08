@@ -194,6 +194,44 @@ void TestSchedules() {
   std::printf("optim_test: schedules ok\n");
 }
 
+// The warmdown count must match Python's `round` (round half to even). The
+// reference `scripts/base_train.py` computes `round(warmdown_ratio *
+// num_iterations)`, and `round(2.5)` is 2, not 3. A half-away-from-zero
+// rounding starts the warmdown one step early and changes the learning rate
+// and the Muon momentum at the last two steps. See docs/parity.md D9.
+void TestWarmdownRounding() {
+  SchedulerConfig config = MakeSchedulerConfig();
+  config.num_iterations = 5;
+  config.warmdown_ratio = 0.5f;  // 0.5 * 5 = 2.5 -> half to even -> 2
+  const Scheduler scheduler(config);
+
+  const struct {
+    int step;
+    float lr;
+  } kLr[] = {
+      {3, 1.0f},
+      {4, 1.0f},
+      {5, 0.55f},
+  };
+  for (const auto& tc : kLr) {
+    ExpectNear(scheduler.LrMultiplier(tc.step), tc.lr, 1e-6f,
+               Format("warmdown rounding: LrMultiplier(%d)", tc.step));
+  }
+
+  const struct {
+    int step;
+    float momentum;
+  } kMomentum[] = {
+      {4, 0.94f},
+      {5, 0.935f},
+  };
+  for (const auto& tc : kMomentum) {
+    ExpectNear(scheduler.MuonMomentum(tc.step), tc.momentum, 1e-6f,
+               Format("warmdown rounding: MuonMomentum(%d)", tc.step));
+  }
+  std::printf("optim_test: warmdown rounding ok\n");
+}
+
 // ---------------------------------------------------------------------------
 // 2/3. Grouping and a few update steps
 // ---------------------------------------------------------------------------
@@ -820,6 +858,7 @@ void TestAdamCadence() {
 
 int main() {
   TestSchedules();
+  TestWarmdownRounding();
   RunStepsTest(1e9f);
   RunStepsTest(0.05f);
   RunZeroGradTest();

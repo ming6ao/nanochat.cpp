@@ -87,17 +87,22 @@ The CPU reference makes the numerical engine possible.
 
 ## 3. Simulator structure
 
-The simulator has three engines. The first two are primary.
+The simulator has three engines. The first two are primary. The reference
+engine is not a separate numeric implementation. It is the CPU backend from
+`backends/cpu/` with the `NANOCHAT_SIMULATOR` define. The profile changes the
+reported capabilities and nothing else (section 4.4).
 
 | Engine | Job | Numerics | Device needed | Tier |
 |---|---|---|---|---|
-| Reference engine | Run the graph and the correctness suites | Yes | No | S0 |
+| Reference engine (CPU backend) | Run the graph and the correctness suites | Yes | No | S0 |
 | API interposer | Validate the runtime and cuBLAS calls | No | No | S0 |
 | Emulation engine | Run the real device code on the host | Yes | No | S0 |
 
 A shared device profile table gives every engine the target capability data.
 
-- The reference engine reports the profile and computes on the CPU reference.
+- The reference engine is the CPU backend with the capability override. It
+  reports the profile and computes on the CPU reference. Only the `GetCaps()`
+  branch changes.
 - The API interposer reports the profile and records the real API calls.
 - The emulation engine runs the compiled device kernels on the host.
 
@@ -108,8 +113,9 @@ never touches the GPU. Section 10 defines it.
 
 ### 4.1 Mechanism
 
-The reference engine reuses the CPU reference backend. A new build config
-`--config=sim` selects that backend and defines `NANOCHAT_SIMULATOR`.
+The reference engine reuses the CPU reference backend. There is no second
+numeric implementation. A new build config `--config=sim` selects that backend
+and defines `NANOCHAT_SIMULATOR`.
 
 `GetCaps()` in `backends/cpu/kernels.cc` then reads `NANOCHAT_SIM_PROFILE` and
 returns `CapsFromProfile`. Every other line of the reference backend stays the
