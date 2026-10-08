@@ -85,6 +85,39 @@ The library search order is:
 4. the package directory;
 5. a build from the sources.
 
+### 3.3 On-demand build
+
+The compute layer builds the shared library when no prebuilt or cached copy
+exists. The function `build` takes explicit options and reads the environment
+for the rest:
+
+```python
+def build(backend=None, precision=None, arch=None, cache=None) -> Path:
+    ...
+```
+
+| Argument | Environment | Default |
+|---|---|---|
+| `backend` | `NANOCHAT_CPP_BACKEND` | `cpu` |
+| `precision` | `NANOCHAT_CPP_PRECISION` | `fp32` |
+| `arch` | `NANOCHAT_CUDA_ARCH` | empty (Bazel chooses) |
+| `cache` | `NANOCHAT_CPP_CACHE` | `~/.cache/nanochat_cpp` |
+
+`backend` and `precision` become lowercase, and the call strips whitespace.
+The call expands `cache` with `expanduser`. An argument left as `None` comes
+from the environment. So `nc.build()` keeps the environment behavior.
+
+`arch` sets the CUDA target with `--@rules_cuda//cuda:archs=`, and it also
+partitions the cache key. `cache` selects the CPU cache directory. A CUDA build
+returns the `bazel-bin` path, because the library needs the runpath beside it.
+
+```python
+# A CUDA build for the T4.
+library = nc.build(backend="cuda", precision="fp16", arch="sm_75")
+# A CPU build copies the result into the cache.
+cached = nc.build(backend="cpu", precision="fp32", cache=BASE / "build")
+```
+
 ## 4. Planning layer
 
 The reference plan needs two model-derived numbers:

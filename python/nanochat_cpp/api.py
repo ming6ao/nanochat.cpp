@@ -1002,6 +1002,16 @@ def evaluate(model: Model, parquet, tokenizer: Tokenizer, tokens: int | None = N
     return EvalReport(bpb=bpb, core=None)
 
 
-def build() -> Path:
-    """Build the shared library on demand and return its path."""
-    return _build.ensure_library()
+def build(backend: str | None = None, precision: str | None = None,
+          arch: str | None = None, cache: Path | None = None) -> Path:
+    """Build the shared library on demand and return its path.
+
+    The arguments override the environment for this call. ``backend`` is
+    ``"cpu"`` or ``"cuda"``. ``precision`` is ``"fp32"`` or ``"fp16"``.
+    ``arch`` is a CUDA architecture such as ``"sm_75"``. ``cache`` is the
+    build cache directory. An argument left as None comes from the
+    environment, so ``build()`` keeps the environment behavior.
+    """
+    options = _build.BuildOptions.resolve(
+        backend=backend, precision=precision, arch=arch, cache=cache)
+    return _build.ensure_library(options=options)

@@ -3,7 +3,7 @@
 The test is hermetic: it never compiles. It checks the build key is stable,
 that ``NANOCHAT_CPP_CACHE`` selects the cache, that an explicit
 ``NANOCHAT_CPP_LIB`` wins, and that ``NANOCHAT_CPP_PREBUILT`` forbids a build.
-See docs/python.md sections 5.1 and 5.5.
+See docs/python.md sections 3.2 and 3.3.
 """
 
 from __future__ import annotations
@@ -48,6 +48,99 @@ class CacheTest(unittest.TestCase):
             path = _build.cached_library("abc123", Path(directory))
             self.assertEqual(path.name, "libnanochat_shared_abc123.so")
             self.assertEqual(path.parent, Path(directory))
+
+
+class BuildOptionsTest(unittest.TestCase):
+    _NAMES = ("NANOCHAT_CPP_BACKEND", "NANOCHAT_CPP_PRECISION",
+              "NANOCHAT_CUDA_ARCH", "NANOCHAT_CPP_CACHE")
+
+    def setUp(self) -> None:
+        self._previous = {name: os.environ.get(name) for name in self._NAMES}
+        for name in self._NAMES:
+            os.environ.pop(name, None)
+
+    def tearDown(self) -> None:
+        for name, value in self._previous.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+    def test_from_env_reads_the_environment(self) -> None:
+        os.environ["NANOCHAT_CPP_BACKEND"] = "cuda"
+        os.environ["NANOCHAT_CPP_PRECISION"] = "fp16"
+        os.environ["NANOCHAT_CUDA_ARCH"] = "sm_75"
+        options = _build.BuildOptions.from_env()
+        self.assertEqual(options.backend, "cuda")
+        self.assertEqual(options.precision, "fp16")
+        self.assertEqual(options.arch, "sm_75")
+        self.assertEqual(options.cache, _build.cache_dir())
+
+    def test_key_changes_with_precision(self) -> None:
+        fp32 = _build.BuildOptions.resolve(precision="fp32")
+        fp16 = _build.BuildOptions.resolve(precision="fp16")
+        self.assertNotEqual(_build.build_key(options=fp32),
+                            _build.build_key(options=fp16))
+
+    def test_key_changes_with_arch(self) -> None:
+        sm75 = _build.BuildOptions.resolve(arch="sm_75")
+        sm80 = _build.BuildOptions.resolve(arch="sm_80")
+        self.assertNotEqual(_build.build_key(options=sm75),
+                            _build.build_key(options=sm80))
+
+    def test_explicit_options_override_the_environment(self) -> None:
+        os.environ["NANOCHAT_CPP_BACKEND"] = "cpu"
+        os.environ["NANOCHAT_CPP_PRECISION"] = "fp32"
+        os.environ["NANOCHAT_CUDA_ARCH"] = "sm_61"
+        options = _build.BuildOptions.resolve(
+            backend=" CUDA ", precision="FP16", arch="sm_75")
+        self.assertEqual(options.backend, "cuda")
+        self.assertEqual(options.precision, "fp16")
+        self.assertEqual(options.arch, "sm_75")
+        self.assertNotEqual(_build.build_key(options=options),
+                            _build.build_key(
+                                options=_build.BuildOptions.from_env()))
+
+    def test_cache_override_selects_the_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            options = _build.BuildOptions.resolve(cache=directory)
+            self.assertEqual(options.cache, Path(directory))
+            path = _build.cached_library(_build.build_key(options=options),
+                                         options.cache)
+            self.assertEqual(path.parent, Path(directory))
+
+    def test_cache_override_expands_the_user(self) -> None:
+        options = _build.BuildOptions.resolve(cache="~/nanochat-build")
+        self.assertEqual(options.cache, Path.home() / "nanochat-build")
+
+    def test_no_argument_key_equals_the_environment_key(self) -> None:
+        os.environ["NANOCHAT_CPP_BACKEND"] = "cuda"
+        os.environ["NANOCHAT_CPP_PRECISION"] = "fp16"
+        os.environ["NANOCHAT_CUDA_ARCH"] = "sm_75"
+        self.assertEqual(
+            _build.build_key(),
+            _build.build_key(options=_build.BuildOptions.from_env()))
+
+
+class BuildCommandTest(unittest.TestCase):
+    def test_cuda_arch_reaches_the_command(self) -> None:
+        options = _build.BuildOptions.resolve(
+            backend="cuda", precision="fp16", arch="sm_75")
+        command = _build._build_command(Path("tools/nanochat"), options)
+        self.assertIn("--config=t4", command)
+        self.assertIn("--@rules_cuda//cuda:archs=sm_75", command)
+
+    def test_cpu_command_has_no_arch_flag(self) -> None:
+        options = _build.BuildOptions.resolve(backend="cpu", arch="sm_75")
+        command = _build._build_command(Path("tools/nanochat"), options)
+        self.assertIn("--config=cpu", command)
+        self.assertNotIn("--@rules_cuda//cuda:archs=sm_75", command)
+
+    def test_no_arch_leaves_the_choice_to_bazel(self) -> None:
+        options = _build.BuildOptions.resolve(backend="cuda", arch="")
+        command = _build._build_command(Path("tools/nanochat"), options)
+        self.assertFalse(
+            [part for part in command if part.startswith("--@rules_cuda")])
 
 
 class SearchOrderTest(unittest.TestCase):
