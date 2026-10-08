@@ -1,7 +1,7 @@
 # Python API
 
 Status: implemented. This document replaced `python-bridge.md` and
-`python-api.md`, which are removed. It specifies one Python surface for
+`python-api.md`, which the project removed. It specifies one Python surface for
 `nanochat.cpp`.
 
 ## 1. Purpose
@@ -72,6 +72,10 @@ os.environ["NANOCHAT_CPP_CACHE"] = "/kaggle/working/.nanochat_cpp"
 os.environ["NANOCHAT_SANDBOX_BACKEND"] = "none"
 import nanochat_cpp as nc
 ```
+
+`tools/kaggle/bootstrap.sh` writes the same keys to `~/.nanochat.env` for a
+session that builds from source. Source the file in the terminal, or read it in
+the notebook.
 
 The library search order is:
 

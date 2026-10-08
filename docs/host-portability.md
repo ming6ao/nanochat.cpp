@@ -187,8 +187,8 @@ Put the host values in `.bazelrc.local`.
 5. `tools/nanochat doctor` reports the selected sandbox backend.
 6. The tracked `.bazelrc` contains no absolute compiler path.
 7. `tools/nanochat simulate --device h100` passes with the `none` backend. The
-   S0 simulator is CPU-only by construction -- no toolkit, no driver, no GPU,
-   and no broker -- so it is the portable way to check Hopper-class behavior on
+   S0 simulator is CPU-only by construction. It needs no toolkit, no driver, no
+   GPU, and no broker. It is the portable way to check Hopper-class behavior on
    a host that has no Hopper device ([simulator.md](simulator.md)).
 
 ## 8. Kaggle Notebooks
@@ -238,8 +238,13 @@ this:
 4. Install `pi` with the pi installer.
 5. Export `CUDA_HOME=/usr/local/cuda` and add `nvcc` to `PATH`.
 6. Write `.bazelrc.local` for the Kaggle host.
-7. Export `NANOCHAT_SANDBOX_BACKEND=none`.
+7. Write `~/.nanochat.env` with the host contract.
 8. Run `tools/nanochat doctor`.
+
+`~/.nanochat.env` holds the host contract: `NANOCHAT_SANDBOX_BACKEND`,
+`NANOCHAT_CPP_BACKEND`, `NANOCHAT_CPP_PRECISION`, `NANOCHAT_CUDA_ARCH`,
+`NANOCHAT_CPP_CACHE`, and `CUDA_HOME`. The notebook reads the file after
+bootstrap. The terminal sources it with `source ~/.nanochat.env`.
 
 The Kaggle host file sets only the arch and the resource budget:
 

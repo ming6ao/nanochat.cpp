@@ -126,6 +126,21 @@ startup --host_jvm_args=-Xmx1024m
 EOF
 }
 
+# Writes the host contract once, so the notebook and the terminal read the same
+# values. See docs/host-portability.md section 8.3.
+write_env_file() {
+  local file="$HOME/.nanochat.env"
+  {
+    echo "export NANOCHAT_SANDBOX_BACKEND=\"${NANOCHAT_SANDBOX_BACKEND:-none}\""
+    echo "export NANOCHAT_CPP_BACKEND=\"${NANOCHAT_CPP_BACKEND:-cuda}\""
+    echo "export NANOCHAT_CPP_PRECISION=\"${NANOCHAT_CPP_PRECISION:-fp16}\""
+    echo "export NANOCHAT_CUDA_ARCH=\"${NANOCHAT_CUDA_ARCH:-sm_75}\""
+    echo "export NANOCHAT_CPP_CACHE=\"${NANOCHAT_CPP_CACHE:-$HOME/.cache/nanochat_cpp}\""
+    echo "export CUDA_HOME=\"${CUDA_HOME:-/usr/local/cuda}\""
+  } >"$file"
+  log "wrote $file"
+}
+
 main() {
   log "prepare the Kaggle session"
   install_packages
@@ -134,6 +149,7 @@ main() {
   install_node
   install_pi
   write_bazelrc_local
+  write_env_file
   export NANOCHAT_SANDBOX_BACKEND="${NANOCHAT_SANDBOX_BACKEND:-none}"
   log "sandbox backend: $NANOCHAT_SANDBOX_BACKEND"
   log "node: $(node --version 2>/dev/null || echo missing)"
@@ -141,4 +157,7 @@ main() {
   "$root/tools/nanochat" doctor
 }
 
-main "$@"
+# Run only when the script is executed, not when a test sources it.
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+  main "$@"
+fi
