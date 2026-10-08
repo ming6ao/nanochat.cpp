@@ -46,6 +46,14 @@ class RateOverridesTest(unittest.TestCase):
         self.assertEqual(lab.rate_overrides(lab.Trial("x")), {})
 
 
+class RateFieldsTest(unittest.TestCase):
+    def test_matches_the_expected_rate_names(self) -> None:
+        self.assertEqual(set(lab.RATE_FIELDS), {
+            "embedding_lr", "unembedding_lr", "matrix_lr", "scalar_lr",
+            "weight_decay", "warmup_steps", "warmdown_ratio",
+            "final_lr_frac"})
+
+
 class FingerprintTest(unittest.TestCase):
     def test_is_stable(self) -> None:
         trial = lab.Trial("x", matrix_lr=0.01)
@@ -139,7 +147,9 @@ class ResumeDecisionTest(unittest.TestCase):
         self.assertEqual(lab.resume_decision(True, None, "b", False), "stale")
 
 
-class JsonTest(unittest.TestCase):
+class TempDirTest(unittest.TestCase):
+    """A test case with a temporary directory under ``self.root``."""
+
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory(prefix="nanochat_lab_")
         self.root = Path(self.tmp.name)
@@ -147,6 +157,8 @@ class JsonTest(unittest.TestCase):
     def tearDown(self) -> None:
         self.tmp.cleanup()
 
+
+class JsonTest(TempDirTest):
     def test_round_trip(self) -> None:
         path = self.root / "nested" / "config.json"
         lab.write_json(path, {"b": 1, "a": [1, 2]})
@@ -159,14 +171,7 @@ class JsonTest(unittest.TestCase):
                          ["summary.json"])
 
 
-class LoadResultsTest(unittest.TestCase):
-    def setUp(self) -> None:
-        self.tmp = tempfile.TemporaryDirectory(prefix="nanochat_lab_")
-        self.root = Path(self.tmp.name)
-
-    def tearDown(self) -> None:
-        self.tmp.cleanup()
-
+class LoadResultsTest(TempDirTest):
     def test_reads_summaries_and_errors(self) -> None:
         lab.write_json(self.root / "a" / "summary.json", {"bpb": 1.2})
         lab.write_json(self.root / "b" / "error.json", {"error": "boom"})

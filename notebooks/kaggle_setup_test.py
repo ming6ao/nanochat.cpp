@@ -37,16 +37,26 @@ class ParseEnvFileTest(unittest.TestCase):
                          {"K": "a=b"})
 
 
-class LoadHostEnvTest(unittest.TestCase):
+class EnvironTest(unittest.TestCase):
+    """A test case that restores ``os.environ`` after each test."""
+
     def setUp(self) -> None:
-        self.tmp = tempfile.TemporaryDirectory(prefix="nanochat_setup_")
-        self.path = Path(self.tmp.name) / kaggle_setup.HOST_ENV_NAME
         self.saved = dict(os.environ)
 
     def tearDown(self) -> None:
         os.environ.clear()
         os.environ.update(self.saved)
+
+
+class LoadHostEnvTest(EnvironTest):
+    def setUp(self) -> None:
+        super().setUp()
+        self.tmp = tempfile.TemporaryDirectory(prefix="nanochat_setup_")
+        self.path = Path(self.tmp.name) / kaggle_setup.HOST_ENV_NAME
+
+    def tearDown(self) -> None:
         self.tmp.cleanup()
+        super().tearDown()
 
     def test_applies_values(self) -> None:
         self.path.write_text('export NANOCHAT_CPP_BACKEND="cuda"\n',
@@ -59,14 +69,7 @@ class LoadHostEnvTest(unittest.TestCase):
         self.assertEqual(kaggle_setup.load_host_env(self.path), {})
 
 
-class ApplyHostPathTest(unittest.TestCase):
-    def setUp(self) -> None:
-        self.saved = dict(os.environ)
-
-    def tearDown(self) -> None:
-        os.environ.clear()
-        os.environ.update(self.saved)
-
+class ApplyHostPathTest(EnvironTest):
     def test_prepends_directories(self) -> None:
         os.environ["PATH"] = "/usr/bin"
         os.environ["CUDA_HOME"] = "/usr/local/cuda"

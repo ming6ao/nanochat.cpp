@@ -22,7 +22,7 @@ import subprocess
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Iterable, Mapping, Sequence
+from typing import TYPE_CHECKING, Iterable, Mapping
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     import nanochat_cpp as nc
@@ -52,18 +52,11 @@ __all__ = [
 #: The file name of the best checkpoint under the run root.
 BEST_CHECKPOINT = "best.nchkpt01"
 
-#: The rate fields a trial may override. Each name is a ``compute_plan``
-#: keyword. A ``None`` field keeps the plan default.
-RATE_FIELDS = (
-    "embedding_lr",
-    "unembedding_lr",
-    "matrix_lr",
-    "scalar_lr",
-    "weight_decay",
-    "warmup_steps",
-    "warmdown_ratio",
-    "final_lr_frac",
-)
+#: The ``Trial`` fields that are not rate knobs.
+_TRIAL_NON_RATE_FIELDS = frozenset({
+    "name", "depth", "seq_len", "window_pattern", "device_batch_size",
+    "total_batch_size", "num_iterations", "model_seed",
+})
 
 _SAFE_NAME = re.compile(r"[^A-Za-z0-9._-]+")
 
@@ -99,6 +92,13 @@ class Trial:
     model_seed: int = 42
 
 
+#: The rate fields a trial may override. Each name is a ``compute_plan``
+#: keyword. A ``None`` field keeps the plan default.
+RATE_FIELDS = tuple(
+    field.name for field in dataclasses.fields(Trial)
+    if field.name not in _TRIAL_NON_RATE_FIELDS)
+
+
 @dataclass
 class Prefix:
     """The shared, cached inputs that every trial reuses."""
@@ -113,15 +113,15 @@ class Prefix:
 class TrialResult:
     """The outcome of one trial.
 
-    ``model`` and ``plan`` are set only when ``keep_model`` is true. A resumed
-    trial keeps the plan but has no model.
+    ``model`` is set only for a fresh run with ``keep_model``. ``plan`` is
+    always set.
     """
 
     trial: Trial
     summary: dict
     metrics: list[dict] = field(default_factory=list)
-    model: Any | None = None
-    plan: Any | None = None
+    model: "nc.Model | None" = None
+    plan: "nc.plan.TrainPlan | None" = None
 
 
 def slugify(name: str) -> str:
@@ -132,7 +132,7 @@ def slugify(name: str) -> str:
     return slug
 
 
-def run_dir_for(out_root, trial: Trial) -> Path:
+def run_dir_for(out_root: str | Path, trial: Trial) -> Path:
     """The run directory of ``trial`` under ``out_root``."""
     return Path(out_root) / slugify(trial.name)
 
@@ -209,12 +209,12 @@ def resume_decision(summary_present: bool, stored_fingerprint: str | None,
     return "stale"
 
 
-def read_json(path) -> dict:
+def read_json(path: str | Path) -> dict:
     """Read a JSON object from ``path``."""
     return json.loads(Path(path).read_text(encoding="utf-8"))
 
 
-def write_json(path, payload) -> None:
+def write_json(path: str | Path, payload: Mapping) -> None:
     """Write JSON through a temporary file, then rename it into place."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -224,7 +224,7 @@ def write_json(path, payload) -> None:
     os.replace(temporary, path)
 
 
-def load_results(out_root) -> list[dict]:
+def load_results(out_root: str | Path) -> list[dict]:
     """Read every run directory under ``out_root`` into one row.
 
     A failed trial carries ``error`` and hides its earlier summary.
@@ -250,11 +250,11 @@ def load_results(out_root) -> list[dict]:
 
 @functools.lru_cache(maxsize=1)
 def _build_key() -> str | None:
-    """The library build key, or ``None`` when it is not available."""
+    """The library build key, or ``None`` when the accessor is absent."""
     try:
         import nanochat_cpp as nc
         return nc._build.build_key()
-    except Exception:  # noqa: BLE001 - the fingerprint is best effort
+    except (AttributeError, ImportError):
         return None
 
 
@@ -302,7 +302,8 @@ def _train(trainer, run_dir: Path, tokens_per_step: int) -> list[dict]:
     return rows
 
 
-def run_trial(trial: Trial, prefix: Prefix, out_root, device: str = "cuda", *,
+def run_trial(trial: Trial, prefix: Prefix, out_root: str | Path,
+              device: str = "cuda", *,
               keep_model: bool = False, force: bool = False,
               eval_tokens: int | None = None, threads: int = 4,
               build_key: str | None = None) -> TrialResult:
@@ -312,8 +313,8 @@ def run_trial(trial: Trial, prefix: Prefix, out_root, device: str = "cuda", *,
     :class:`StaleRunError` when the fingerprint differs. Run again when
     ``force`` is true.
 
-    ``model`` is present in the result only for a fresh run with
-    ``keep_model`` set. A resumed trial keeps the plan but has no model.
+    ``model`` is present only for a fresh run with ``keep_model`` set.
+    ``plan`` is always present.
     """
     import nanochat_cpp as nc
 
@@ -406,7 +407,7 @@ def run_trial(trial: Trial, prefix: Prefix, out_root, device: str = "cuda", *,
                        model=model if keep_model else None, plan=plan)
 
 
-def run_sweep(trials: Iterable[Trial], prefix: Prefix, out_root,
+def run_sweep(trials: Iterable[Trial], prefix: Prefix, out_root: str | Path,
               device: str = "cuda", *, metric: str = "bpb",
               keep_best_checkpoint: bool = True, force: bool = False,
               eval_tokens: int | None = None,

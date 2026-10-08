@@ -62,7 +62,7 @@ def parse_env_file(text: str) -> dict[str, str]:
     return values
 
 
-def load_host_env(path=None) -> dict[str, str]:
+def load_host_env(path: str | Path | None = None) -> dict[str, str]:
     """Read the host contract file and apply it to ``os.environ``.
 
     ``path`` defaults to ``~/.nanochat.env``. A missing file is not an error,
@@ -76,18 +76,18 @@ def load_host_env(path=None) -> dict[str, str]:
     return values
 
 
-def apply_host_path(home=None) -> list[str]:
+def apply_host_path(home: str | Path | None = None) -> list[str]:
     """Prepend the Kaggle tool directories to ``PATH``.
 
     The directories hold Bazelisk, Node.js, and the image CUDA toolkit. The
     call uses ``CUDA_HOME`` when the host contract set it.
     """
     home = Path(home) if home is not None else Path.home()
-    directories = [home / ".local" / "bin", home / ".local" / "node" / "bin"]
+    entries = [str(home / ".local" / "bin"),
+               str(home / ".local" / "node" / "bin")]
     cuda_home = os.environ.get("CUDA_HOME")
     if cuda_home:
-        directories.append(Path(cuda_home) / "bin")
-    entries = [str(directory) for directory in directories]
+        entries.append(str(Path(cuda_home) / "bin"))
     current = os.environ.get("PATH", "")
     os.environ["PATH"] = os.pathsep.join(entries + ([current] if current else []))
     return entries
@@ -97,7 +97,8 @@ def _git(root: Path, *args: str, check: bool = True) -> None:
     subprocess.run(["git", "-C", str(root), *args], check=check)
 
 
-def ensure_repository(url=DEFAULT_REPO_URL, dest=DEFAULT_REPO_DEST,
+def ensure_repository(url: str = DEFAULT_REPO_URL,
+                      dest: str | Path = DEFAULT_REPO_DEST,
                       ref: str | None = None) -> Path:
     """Clone the repository when absent, then fetch and pull."""
     dest = Path(dest)
@@ -115,15 +116,15 @@ def ensure_repository(url=DEFAULT_REPO_URL, dest=DEFAULT_REPO_DEST,
     return dest
 
 
-def run_bootstrap(root) -> Path:
+def run_bootstrap(root: str | Path) -> None:
     """Run ``tools/kaggle/bootstrap.sh`` for the session."""
     script = Path(root) / "tools" / "kaggle" / "bootstrap.sh"
     subprocess.run(["bash", str(script)], check=True)
-    return script
 
 
 def build_library(backend: str = "cuda", precision: str = "fp16",
-                  arch: str = "sm_75", cache=None) -> tuple[Path, str]:
+                  arch: str = "sm_75",
+                  cache: str | Path | None = None) -> tuple[Path, str]:
     """Build the shared library and pin ``NANOCHAT_CPP_LIB``.
 
     Return the library path and the build key. The build key lets a trial
@@ -131,11 +132,10 @@ def build_library(backend: str = "cuda", precision: str = "fp16",
     """
     import nanochat_cpp as nc
 
-    path = Path(nc.build(backend=backend, precision=precision, arch=arch,
-                         cache=cache))
-    os.environ["NANOCHAT_CPP_LIB"] = str(path)
     options = nc._build.BuildOptions.resolve(
         backend=backend, precision=precision, arch=arch, cache=cache)
+    path = Path(nc._build.ensure_library(options=options))
+    os.environ["NANOCHAT_CPP_LIB"] = str(path)
     return path, nc._build.build_key(options=options)
 
 
@@ -149,10 +149,11 @@ class Host:
     env: dict[str, str] = field(default_factory=dict)
 
 
-def setup(url: str = DEFAULT_REPO_URL, dest=DEFAULT_REPO_DEST,
+def setup(url: str = DEFAULT_REPO_URL, dest: str | Path = DEFAULT_REPO_DEST,
           ref: str | None = None, backend: str = "cuda",
-          precision: str = "fp16", arch: str = "sm_75", cache=None,
-          env_path=None) -> Host:
+          precision: str = "fp16", arch: str = "sm_75",
+          cache: str | Path | None = None,
+          env_path: str | Path | None = None) -> Host:
     """Prepare the session: fetch, bootstrap, host environment, and build."""
     repo = ensure_repository(url=url, dest=dest, ref=ref)
     run_bootstrap(repo)

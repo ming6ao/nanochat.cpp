@@ -38,8 +38,14 @@ class Trial:
     device_batch_size: int = 8
     total_batch_size: int = 4096
     num_iterations: int = 50
+    embedding_lr: float | None = None
+    unembedding_lr: float | None = None
     matrix_lr: float | None = None
+    scalar_lr: float | None = None
+    weight_decay: float | None = None
+    warmup_steps: int | None = None
     warmdown_ratio: float | None = None
+    final_lr_frac: float | None = None
     model_seed: int = 42
 ```
 
@@ -85,13 +91,12 @@ The notebook caches the prefix under `/kaggle/working/nanochat-cache`.
 ### 3.3 The run is a function
 
 `run_trial(trial, prefix, out_root, device="cuda", *, keep_model=False,
-force=False) -> TrialResult`
+force=False, eval_tokens=None, threads=4, build_key=None) -> TrialResult`
 
 The function does this:
 
 1. Compute the fingerprint of the trial and the resolved plan.
-2. Resume when the trial has finished and the fingerprint matches. Raise a
-   clear error when the fingerprint differs. Run again when `force` is true.
+2. Check the stored result against the fingerprint (section 3.6).
 3. Make the run directory. Write `config.json` and `revision`.
 4. Build the plan with `nc.plan.compute_plan`.
 5. Build the model, the optimizer, and the trainer.
@@ -110,14 +115,14 @@ class TrialResult:
     trial: Trial
     summary: dict
     metrics: list[dict] = field(default_factory=list)
-    model: object | None = None
-    plan: object | None = None
+    model: "nc.Model | None" = None
+    plan: "nc.plan.TrainPlan | None" = None
 ```
 
-`model` and `plan` are present only when `keep_model` is true. A sweep keeps
-the best model in memory and drops the others, so at most one model is alive.
-The demo sets `keep_model=True`, then plots the metrics and runs the supervised
-fine-tuning on the same model.
+`model` is present only for a fresh run with `keep_model`. `plan` is always
+present. A sweep keeps the best model in memory and drops the others, so at
+most one model is alive. The demo sets `keep_model=True`, then plots the
+metrics and runs the supervised fine-tuning on the same model.
 
 This keeps the plot cell and the fine-tuning cell working. A summary alone
 cannot feed them.
@@ -165,8 +170,8 @@ trial shows as a row with its error message.
 
 ### 3.8 The sweep
 
-`run_sweep(trials, prefix, out_root, device="cuda", *,
-keep_best_checkpoint=True) -> list[TrialResult]`
+`run_sweep` takes the `run_trial` options, plus `metric` and
+`keep_best_checkpoint`. The source is `notebooks/lab.py`.
 
 The function catches an exception for each trial, writes `error.json`, and
 continues to the next trial. One bad trial does not stop a time-limited
@@ -196,7 +201,7 @@ The content notebook keeps these sections.
 7. Sweep: `run_sweep(TRIALS, prefix, RUNS)`.
 8. Results: the pandas table.
 
-The demo path and the sweep path call the same function. Only section 6
+The demo path and the sweep path call the same function. Only item 6
 changes per experiment.
 
 ## 5. Files
@@ -207,7 +212,7 @@ changes per experiment.
 | `notebooks/lab_test.py` | New. Tests for the pure helpers. | Notebooks |
 | `notebooks/kaggle_setup.py` | New. The session setup: fetch, bootstrap, host environment, build. | Notebooks |
 | `notebooks/kaggle_setup_test.py` | New. Tests for the pure setup helpers. | Notebooks |
-| `notebooks/BUILD.bazel` | New. A `py_library` and a CPU `py_test`. | Notebooks |
+| `notebooks/BUILD.bazel` | New. Two `py_library` targets, two CPU `py_test` targets, and a `test_suite`. | Notebooks |
 | `notebooks/nanochat-cpp-on-t4-gpu.ipynb` | Use `lab` for the run sequence. | Notebooks |
 | `notebooks/kaggle_demo.py` | No change. | Notebooks |
 | `docs/notebook-workflow.md` | This document. | Architect |
@@ -219,18 +224,7 @@ module load. The pure helpers then import without the shared library.
 `notebooks/lab.py` stays inside the Notebooks workstream. No `python/` change
 is necessary. See `AGENTS.md`, section 1.
 
-## 6. Implementation steps
-
-1. Add `notebooks/lab.py` with the three types and the pure helpers.
-2. Add the fingerprint, the resume check, and the atomic writes.
-3. Add `run_trial` and `run_sweep`.
-4. Add `notebooks/lab_test.py` and `notebooks/BUILD.bazel`.
-5. Run `tools/nanochat test` for the new CPU test.
-6. Rewrite the pretrain, plot, and fine-tune cells to use `run_trial`.
-7. Add the sweep section and the results table.
-8. Add the index row and run the style checker.
-
-## 7. Test strategy
+## 6. Test strategy
 
 - Pure helpers: the fingerprint, the resume check, the atomic write, the
   summary aggregation, and the name validation. A CPU `py_test`. No GPU. This
@@ -243,7 +237,7 @@ is necessary. See `AGENTS.md`, section 1.
 The repository rule is to test logic on the CPU first. This design follows the
 rule. See `AGENTS.md`, section 5.
 
-## 8. Definition of Done
+## 7. Definition of Done
 
 1. `tools/nanochat test` covers the pure helpers.
 2. A three-trial sweep runs from the notebook, end to end.
@@ -252,7 +246,7 @@ rule. See `AGENTS.md`, section 5.
 5. A changed hyperparameter with the same name raises a clear error.
 6. The style checker passes on the new document.
 
-## 9. Risks and open questions
+## 8. Risks and open questions
 
 | Risk | Effect | Response |
 |---|---|---|
@@ -269,11 +263,7 @@ rule. See `AGENTS.md`, section 5.
 Decision: `notebooks/lab.py` lives under the Notebooks workstream. It is
 specific to the Kaggle demo. No `python/` change is necessary.
 
-Decision: the sweep writes the best checkpoint only, to
-`RUNS/best.nchkpt01`. A resumed trial has no live model, so the checkpoint
-from an earlier run stays in place.
-
-## 10. Non-goals
+## 9. Non-goals
 
 - No distributed training.
 - No notebook-to-script conversion.
