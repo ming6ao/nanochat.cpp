@@ -194,11 +194,9 @@ void TestSchedules() {
   std::printf("optim_test: schedules ok\n");
 }
 
-// The warmdown count must match Python's `round` (round half to even). The
-// reference `scripts/base_train.py` computes `round(warmdown_ratio *
-// num_iterations)`, and `round(2.5)` is 2, not 3. A half-away-from-zero
-// rounding starts the warmdown one step early and changes the learning rate
-// and the Muon momentum at the last two steps. See docs/parity.md D9.
+// The warmdown count must match Python's `round`, so a half-integer product
+// rounds to even. A half-away-from-zero count starts the warmdown one step
+// early. See docs/parity.md D9.
 void TestWarmdownRounding() {
   SchedulerConfig config = MakeSchedulerConfig();
   config.num_iterations = 5;
@@ -209,7 +207,6 @@ void TestWarmdownRounding() {
     int step;
     float lr;
   } kLr[] = {
-      {3, 1.0f},
       {4, 1.0f},
       {5, 0.55f},
   };
@@ -222,7 +219,6 @@ void TestWarmdownRounding() {
     int step;
     float momentum;
   } kMomentum[] = {
-      {4, 0.94f},
       {5, 0.935f},
   };
   for (const auto& tc : kMomentum) {

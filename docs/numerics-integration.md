@@ -17,7 +17,7 @@ GPU maxima.
 ## 1. The reduction, stated first
 
 Path A does not give bit-exact agreement across all three targets. It gives
-three weaker results. State them before the design.
+four weaker results. State them before the design.
 
 1. The CPU trace and the simulator trace are bit-identical. The two targets
    share one code path. Only `GetCaps()` changes.
@@ -28,10 +28,9 @@ three weaker results. State them before the design.
 4. Greedy token identifiers agree exactly on all three targets when the argmax
    margin is large.
 
-The test defers SFT and RL until the missing code lands. The status table in
-[post-training.md](post-training.md) marks the SFT renderer, the SFT packer,
-the SFT loop, the `rl_step` binary, and the RL fixture as **Missing**. Section
-6 gives kernel-level coverage only.
+The status table in [post-training.md](post-training.md) marks the SFT renderer,
+the SFT packer, the SFT loop, the `rl_step` binary, and the RL fixture as
+**Missing**. Section 6 gives kernel-level coverage only.
 
 ## 2. What the recon established
 

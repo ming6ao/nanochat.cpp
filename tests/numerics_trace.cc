@@ -119,11 +119,11 @@ Digest DigestOf(const ComputeType* data, std::int64_t count) {
 // The global L2 norm of every parameter gradient, summed in double on the host.
 // The trace records this value instead of `Optimizer::GradNorm()` because the
 // SFT and RL phases take no optimizer step, so one definition must cover every
-// phase.
+// phase. `Model::params()` always provides a gradient buffer with a positive
+// count.
 double HostGradNorm(const std::vector<ParamView>& params) {
   double sum = 0.0;
   for (const ParamView& view : params) {
-    if (view.grad == nullptr || view.count <= 0) continue;
     const std::vector<float> values = ReadFloats(view.grad, view.count);
     for (float value : values) {
       sum += static_cast<double>(value) * static_cast<double>(value);
@@ -648,13 +648,13 @@ std::vector<Record> RunTrace(const Config& config, const TraceShape& shape,
     out->train_loss.push_back(static_cast<double>(loss));
     for (const ParamView& view : params) {
       const Digest value = DigestOf(view.value, view.count);
-      const Digest grad = DigestOf(view.grad, view.count);
       records.push_back(Fp32Record(prefix + "/param_l2/" + view.name,
                                    static_cast<float>(value.l2)));
       records.push_back(Int64Record(prefix + "/param_hash/" + view.name,
                                     static_cast<std::int64_t>(value.hash)));
       records.push_back(Int64Record(prefix + "/grad_hash/" + view.name,
-                                    static_cast<std::int64_t>(grad.hash)));
+                                    static_cast<std::int64_t>(HashFloats(
+                                        ReadFloats(view.grad, view.count)))));
     }
   }
 
@@ -680,13 +680,9 @@ std::vector<Record> RunTrace(const Config& config, const TraceShape& shape,
         eval_tokens[static_cast<std::size_t>(b)].data(), rows));
   }
   loader.Reset();
-  float bpb = 0.0f;
-  {
-    // `EvalBpb` creates its own guard; the outer guard states that the whole
-    // call reads no gradient (docs/numerics-integration.md section 7, phase 2).
-    NoGradGuard guard(model.get());
-    bpb = EvalBpb(model.get(), &loader, shape.eval_steps);
-  }
+  // `EvalBpb` installs its own `NoGradGuard`
+  // (docs/numerics-integration.md section 7, phase 2).
+  const float bpb = EvalBpb(model.get(), &loader, shape.eval_steps);
   if (!std::isfinite(bpb)) {
     throw std::runtime_error("the evaluation produced no bits-per-byte");
   }
@@ -1004,16 +1000,23 @@ TraceComparison CompareTraces(const std::vector<Record>& got,
     return comparison;
   }
   const std::vector<std::string>& names = golden.names();
+  // Compares one record against the golden byte for byte and advances the
+  // counters. `prefix` names the record class in the failure message.
+  auto compare_bytes = [&](const std::string& name, const Record& record,
+                           const oracle::Tensor& want, const char* prefix) {
+    if (record.payload.size() != want.bytes ||
+        std::memcmp(record.payload.data(), want.data, want.bytes) != 0) {
+      Report(label, std::string(prefix) + "record '" + name +
+                        "' differs from the golden");
+      ++comparison.failures;
+    }
+    ++comparison.compared;
+  };
   for (std::size_t i = 0; i < got.size(); ++i) {
     const Record& record = got[i];
     const oracle::Tensor& want = golden.Get(names[i]);
     if (exact) {
-      if (record.payload.size() != want.bytes ||
-          std::memcmp(record.payload.data(), want.data, want.bytes) != 0) {
-        Report(label, "record '" + names[i] + "' differs from the golden");
-        ++comparison.failures;
-      }
-      ++comparison.compared;
+      compare_bytes(names[i], record, want, "");
       continue;
     }
     if (record.dtype == DType::kUInt8) {
@@ -1036,11 +1039,7 @@ TraceComparison CompareTraces(const std::vector<Record>& got,
         ++comparison.skipped;
         continue;
       }
-      if (std::memcmp(record.payload.data(), want.data, want.bytes) != 0) {
-        Report(label, "record '" + names[i] + "' differs from the golden");
-        ++comparison.failures;
-      }
-      ++comparison.compared;
+      compare_bytes(names[i], record, want, "");
       continue;
     }
     if (record.dtype == DType::kInt32 || record.dtype == DType::kInt64) {
@@ -1050,12 +1049,7 @@ TraceComparison CompareTraces(const std::vector<Record>& got,
         ++comparison.skipped;
         continue;
       }
-      if (std::memcmp(record.payload.data(), want.data, want.bytes) != 0) {
-        Report(label,
-               "integer record '" + names[i] + "' differs from the golden");
-        ++comparison.failures;
-      }
-      ++comparison.compared;
+      compare_bytes(names[i], record, want, "integer ");
       continue;
     }
     const int group = GroupOf(names[i]);

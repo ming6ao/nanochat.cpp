@@ -685,10 +685,8 @@ class NanochatOptimizer final : public Optimizer {
 // so every schedule is evaluated at `it = step - 1`.
 
 int Scheduler::WarmdownIters() const {
-  // Match Python's `round`: round half to even, not half away from zero.
-  // `std::lround(2.5)` is 3, but the reference `scripts/base_train.py` uses
-  // Python's `round(2.5)`, which is 2. The product is evaluated in double for
-  // the same reason the reference does.
+  // Round half to even, to match Python's `round` (docs/parity.md D9). The
+  // product is evaluated in double, as the reference does.
   const double value = static_cast<double>(config_.warmdown_ratio) *
                        static_cast<double>(config_.num_iterations);
   return static_cast<int>(std::nearbyint(value));

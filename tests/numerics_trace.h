@@ -32,26 +32,24 @@
 // Determinism. Every value comes from the model, the seed, and the committed
 // tokenizer; nothing reads the clock or an entropy source. The trace pins the
 // host thread count to one (`PinSingleThreaded`), so the golden file does not
-// depend on the sandbox thread budget. The hash is valid only for the exact
-// legs: the greedy identifiers and the hashes are meaningless on the GPU leg,
-// where the atomic scatter-adds change the bytes by design.
+// depend on the sandbox thread budget. The hashes are valid only for the exact
+// legs: they are meaningless on the GPU leg, where the atomic scatter-adds
+// change the bytes by design.
 namespace nanochat {
 namespace numerics {
 
 // The fixture magic of the numeric trace container.
 inline constexpr char kTraceMagic[] = "NANONUM1";
 
-// The tolerance table of docs/numerics-integration.md section 4, with the
-// maxima measured on the GTX 1080 Ti beside them. `kLossRtol` covers every
-// scalar that is not a parameter norm: the train loss and gradient norm
-// (measured 7.6e-8 relative), the evaluation bits per byte and losses
-// (bit-identical), the SFT arithmetic (bit-identical), and the RL arithmetic
-// (7.3e-7). `kParamL2Rtol` covers the parameter L2 norms (2.6e-5).
-// `kMarginAtol` compares the recorded logit margins, which are differences of
-// two logits and can sit near zero (1.4e-6 absolute). `kMinMargin` is the tie
-// rule of section 6.4: every recorded margin must exceed it (the smallest
-// recorded margin is 3.7e-3), or a one-unit roundoff difference can flip a
-// greedy identifier.
+// The tolerance table of docs/numerics-integration.md section 4.
+// `kLossRtol` covers every scalar that is not a parameter norm: the train loss
+// and gradient norm, the evaluation bits per byte and losses, the SFT
+// arithmetic, and the RL arithmetic. `kParamL2Rtol` covers the parameter L2
+// norms. `kMarginAtol` compares the recorded logit margins, which are
+// differences of two logits and can sit near zero. `kMinMargin` is the tie rule
+// of section 6.4: every recorded margin must exceed it, or a one-unit roundoff
+// difference can flip a greedy identifier. The measured maxima are in the
+// section 4 table.
 inline constexpr double kLossRtol = 1e-5;
 inline constexpr double kParamL2Rtol = 1e-4;
 inline constexpr double kMarginAtol = 1e-5;

@@ -218,9 +218,10 @@ The integrator runs, per merge:
 - `tools/nanochat lint` (the Google C++ Style gate).
 - `bazel test //... --test_tag_filters=-gpu` (all CPU tests, under `t0-cpu`).
   The S0 simulator suites ride this loop: they are CPU-only and need no broker.
-  One exception exists. `//tests:numerics_trace_test` carries the `manual` tag,
-  because a 10-layer replay is too slow for the inner loop. Run it through the
-  simulator suite below.
+  Two targets carry `manual` and stay out of it. `//tests:cuda_sim_preload_test`
+  needs `tools/nanochat simulate --suite api`. `//tests:numerics_trace_test`
+  replays a 10-layer trace, which is too slow for the inner loop; run it
+  through the simulator suite below.
 - `tools/nanochat simulate --device h100` when the change touches a kernel, the
   backend seam, or the device profile (`docs/simulator.md`). It is still CPU
   only. Its `correctness` suite carries the CPU and simulator legs of the staged

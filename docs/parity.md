@@ -79,26 +79,20 @@ contract of the numeric integration test. That document calls the design Path A.
 `//tests:numerics_trace_cuda_test` gate the contract against one committed
 golden file, `tests/data/numerics_golden_10l.bin`.
 
-Path A does not claim bit-exact agreement across all three targets. Section 1
-of the plan states the reduction. The trace claims four weaker results:
+The plan states the reduction in section 1 and the four clauses in section 3.
+The gate applies them as follows:
 
-1. The CPU trace and the simulator trace agree bit for bit. The two targets
-   share one code path, and only `GetCaps()` changes.
-2. The CPU target and the simulator target repeat across runs. The GPU target
-   repeats within the tolerance table, because the device kernels use atomic
-   scatter-add operations, and atomic order is not a contract.
-3. The GPU trace agrees with the CPU golden trace within the tolerance table of
-   the plan, section 4. The table carries the measured maxima.
-4. The greedy token identifiers agree exactly on all three targets, and every
-   recorded logit margin stays above the tie threshold of the plan, section
-   6.4.
+1. The CPU leg and the simulator leg compare byte for byte.
+2. The CPU leg and the simulator leg repeat across runs. The GPU leg repeats
+   within the tolerance table, because the atomic scatter-adds make the byte
+   order a non-contract.
+3. The GPU leg compares the scalars within the tolerance table of section 4.
+   It skips the parameter hashes and the gradient hashes.
+4. The GPU leg compares the greedy identifiers exactly, and every recorded
+   logit margin must stay above the tie threshold of section 6.4.
 
-The test computes the trace in process and compares it against the golden file.
-The CPU leg and the simulator leg compare byte for byte. The GPU leg compares
-the scalars within the tolerance table and the identifiers exactly. It skips
-the parameter hashes and the gradient hashes, because the atomic scatter-adds
-change those bytes by design. The GPU leg also runs the trace twice and
-compares the two runs, which gates clause 2.
+The GPU leg also runs the trace twice and compares the two runs, which gates
+the determinism clause.
 
 The contract does not cover the SFT loop or the RL loop. It covers the SFT
 arithmetic and the RL arithmetic only, as the plan states. The status table in
@@ -298,11 +292,12 @@ warmdown length with Python's `round`. Python rounds half to even, so
 The two forms differ only when `warmdown_ratio * num_iterations` is exactly a
 half-integer.
 
-The section 6.2 numeric-trace configuration uses five steps and a ratio of
-`0.5`, so the product is `2.5`. The C++ warmdown then started one step early
-and changed the learning rate and the Muon momentum at the last two steps. The
-loss error was `0.146` and the parameter L2 error was `0.372` against the
-PyTorch reference.
+A 5-step `tools/dump_train_fixture.py` run at the section 6.2 shape uses the
+default ratio `0.5`, so the product is `2.5`. The C++ warmdown then started one
+step early and changed the learning rate and the Muon momentum at the last two
+steps. The loss error was `0.146` and the parameter L2 error was `0.372`
+against the PyTorch reference. The fixture is not committed; regenerate it with
+`tools/dump_train_fixture.py --steps 5`.
 
 `WarmdownIters()` now uses `std::nearbyint` under the default `FE_TONEAREST`
 mode, and it evaluates the product in `double`. This matches Python's `round`.
