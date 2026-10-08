@@ -22,6 +22,7 @@ void Usage() {
   std::fprintf(
       stderr,
       "usage: train_main [options]\n"
+      "  --preset NAME          config preset (track3)\n"
       "  --train-parquet GLOB   training parquet (repeatable, csv)\n"
       "  --val-parquet GLOB     validation parquet (repeatable, csv)\n"
       "  --tokenizer PATH       NCTOKEN1 artifact (document mode)\n"
@@ -40,6 +41,10 @@ void Usage() {
       "  --resume PATH          resume weights from here\n"
       "  --log PATH             also write the run log here\n"
       "  --device NAME          device name for MFU\n"
+      "  --rank N               data parallel rank (default 0)\n"
+      "  --world-size N         data parallel group size (default 1)\n"
+      "  --master HOST          rank 0 host for the gradient sync\n"
+      "  --port N               rank 0 port for the gradient sync\n"
       "  [optimizer flags: --embedding-lr --unembedding-lr --matrix-lr\n"
       "   --scalar-lr --weight-decay --weight-decay-base --clip\n"
       "   --adam-eps --muon-ns-steps --muon-beta2]\n"
@@ -84,7 +89,17 @@ int main(int argc, char** argv) {
     int parsed_int = 0;
     std::uint64_t parsed_u64 = 0;
     float parsed_float = 0.0f;
-    if (flag == "--train-parquet") {
+    if (flag == "--preset") {
+      if (std::string(value) == "track3") {
+        nanochat::TrainConfig preset = nanochat::TrackThreeBaseline();
+        config.model = preset.model;
+        config.optimizer = preset.optimizer;
+        config.scheduler = preset.scheduler;
+      } else {
+        std::fprintf(stderr, "train_main: unknown preset %s\n", value);
+        return 2;
+      }
+    } else if (flag == "--train-parquet") {
       nanochat::cli::AppendCsv(value, &config.train_parquet);
     } else if (flag == "--val-parquet") {
       nanochat::cli::AppendCsv(value, &config.val_parquet);
@@ -130,6 +145,17 @@ int main(int argc, char** argv) {
       config.log_path = value;
     } else if (flag == "--device") {
       config.device_name = value;
+    } else if (flag == "--rank") {
+      config.rank =
+          nanochat::cli::ParseInt(value, &parsed_int) ? parsed_int : 0;
+    } else if (flag == "--world-size") {
+      config.world_size =
+          nanochat::cli::ParseInt(value, &parsed_int) ? parsed_int : 1;
+    } else if (flag == "--master") {
+      config.master = value;
+    } else if (flag == "--port") {
+      config.port =
+          nanochat::cli::ParseInt(value, &parsed_int) ? parsed_int : 29500;
     } else if (flag == "--embedding-lr") {
       if (!nanochat::cli::ParseFloat(value, &parsed_float)) parsed_float = 0.0f;
       config.optimizer.embedding_lr = parsed_float;
@@ -247,6 +273,15 @@ int main(int argc, char** argv) {
     std::fprintf(stderr,
                  "train_main: --num-iterations, --batch, and --grad-accum "
                  "must be > 0\n");
+    return 2;
+  }
+  if (config.world_size < 1 || config.rank < 0 ||
+      config.rank >= config.world_size) {
+    std::fprintf(stderr, "train_main: --rank must be in [0, --world-size)\n");
+    return 2;
+  }
+  if (config.port <= 0 || config.port > 65535) {
+    std::fprintf(stderr, "train_main: --port must be in [1, 65535]\n");
     return 2;
   }
 

@@ -20,6 +20,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <memory>
@@ -372,6 +373,49 @@ bool Checkpointer::LoadModel(Model* model, Optimizer* optimizer,
 }
 
 // ---------------------------------------------------------------------------
+// Track 3 baseline preset
+// ---------------------------------------------------------------------------
+
+float DistributedBackwardScale(int grad_accum, int world_size) {
+  const int accum = grad_accum > 0 ? grad_accum : 1;
+  const int world = world_size > 0 ? world_size : 1;
+  return 1.0f / static_cast<float>(accum * world);
+}
+
+TrainConfig TrackThreeBaseline() {
+  TrainConfig config;
+  Config& model = config.model;
+  model.num_layers = 12;
+  model.num_heads = 6;
+  model.num_kv_heads = 6;
+  model.hidden_dim = 768;
+  model.seq_len = 1024;
+  model.vocab_size = 32768;
+  model.padded_vocab_size = 32768;
+  model.window_pattern = "L";
+  model.value_embedding = false;
+
+  // The per-group learning rates and epsilon. The AdamW betas (0.8, 0.95) and
+  // the AdamW weight decay (0.001) are not representable: `src/optim.cc`
+  // hardcodes the per-group betas and decays, and
+  // `OptimizerConfig::weight_decay` has no effect. Muon's decay maps through
+  // the weight-decay schedule.
+  OptimizerConfig& optimizer = config.optimizer;
+  optimizer.embedding_lr = 0.7f;
+  optimizer.unembedding_lr = 0.004f;
+  optimizer.scalar_lr = 0.015f;
+  optimizer.matrix_lr = 0.025f;
+  optimizer.adam_eps = 1e-10f;
+
+  // Stable first, then a linear decay over the last 70 percent.
+  SchedulerConfig& scheduler = config.scheduler;
+  scheduler.warmdown_ratio = 0.7f;
+  scheduler.final_lr_frac = 0.0f;
+  scheduler.weight_decay_base = 0.05f;
+  return config;
+}
+
+// ---------------------------------------------------------------------------
 // TrainLoop
 // ---------------------------------------------------------------------------
 
@@ -427,6 +471,30 @@ TrainLoop::TrainLoop(TrainConfig config) : config_(std::move(config)) {
 
   logger_ = std::make_unique<Logger>(config_.log_path);
 
+  // The gradient sync. Rank 0 binds (or a single rank gets a no-op), so the
+  // constructor does not wait for a peer; the accept is deferred to the first
+  // step. See docs/distributed-design.md section 6.
+  DistributedConfig distributed;
+  distributed.rank = config_.rank;
+  distributed.world_size = config_.world_size;
+  distributed.master = config_.master;
+  distributed.port = config_.port;
+  sync_ = CreateGradientSync(distributed);
+  if (sync_ == nullptr) {
+    // A world size above 1 without a sync would train each rank on its own
+    // shard and save divergent checkpoints. Stop instead
+    // (docs/distributed-design.md section 6).
+    if (config_.world_size > 1) {
+      std::fprintf(stderr,
+                   "train: cannot create the gradient sync for world_size %d\n",
+                   config_.world_size);
+      std::abort();
+    }
+    logger_->Info(
+        "cannot create the gradient sync; the run has no distributed "
+        "reduction");
+  }
+
   tokenizer_ = LoadTokenizer(config_.tokenizer_path);
   if (tokenizer_ == nullptr) {
     logger_->Info("cannot load tokenizer: " + config_.tokenizer_path);
@@ -435,6 +503,10 @@ TrainLoop::TrainLoop(TrainConfig config) : config_(std::move(config)) {
         config_.train_source
             ? config_.train_source
             : MakeParquetFactory(config_.train_parquet, config_.text_column);
+    // Shard documents by rank. A world size of 1 returns the factory
+    // unchanged (docs/distributed-design.md section 7).
+    train_source = ShardDocumentSourceFactory(std::move(train_source),
+                                              config_.rank, config_.world_size);
     DocumentSourceFactory val_source =
         config_.val_source
             ? config_.val_source
@@ -483,6 +555,12 @@ float TrainLoop::Run() {
     // `loss = loss / grad_accum_steps` before each backward.
     const int accum = config_.grad_accum > 0 ? config_.grad_accum : 1;
     const float inv_accum = 1.0f / static_cast<float>(accum);
+    // The model's loss is a mean, so each rank holds the mean over its own
+    // batch. The backward carries 1/world_size as well, and the all-reduce sum
+    // below then gives the mean over the global batch. That equals the
+    // one-rank update (docs/distributed-design.md section 6).
+    const float backward_scale =
+        DistributedBackwardScale(accum, config_.world_size);
     optimizer_->ZeroGrad();
     float loss_sum = 0.0f;
     for (int micro = 0; micro < accum; ++micro) {
@@ -492,7 +570,16 @@ float TrainLoop::Run() {
       }
       loss_sum +=
           model_->ForwardLoss(tokens_.data(), targets_.data(), batch, seq);
-      model_->BackwardAccumulate(inv_accum);
+      model_->BackwardAccumulate(backward_scale);
+    }
+    // Sum the gradients across every rank before the step. The clip then sees
+    // the global mean gradient. A world size of 1 is a no-op
+    // (docs/distributed-design.md section 6).
+    if (sync_ != nullptr) {
+      for (const ParamView& parameter : model_->params()) {
+        if (parameter.grad == nullptr || parameter.count <= 0) continue;
+        sync_->AllReduceSum(parameter.grad, parameter.count);
+      }
     }
     optimizer_->Step(step);
     const float loss = loss_sum * inv_accum;

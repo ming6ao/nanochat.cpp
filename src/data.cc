@@ -489,4 +489,56 @@ const std::uint8_t* DataLoader::token_bytes(int* vocab_size) const {
   return impl_->tokenizer->TokenBytes();
 }
 
+// ---------------------------------------------------------------------------
+// Document sharding (docs/distributed-design.md section 7)
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// Filters one document stream by rank. The wrapper counts every document it
+// reads from `source_`, so rank `rank_` keeps document `i` only when
+// `i % world_size_ == rank_`. The count is deterministic from the start of the
+// stream, so a `Reset` (a new epoch) reproduces the same partition.
+class ShardedDocumentSource final : public DocumentSource {
+ public:
+  ShardedDocumentSource(std::unique_ptr<DocumentSource> source, int rank,
+                        int world_size)
+      : source_(std::move(source)), rank_(rank), world_size_(world_size) {}
+
+  bool Next(std::vector<std::string>* documents, std::string* error) override {
+    documents->clear();
+    std::vector<std::string> batch;
+    while (true) {
+      batch.clear();
+      if (!source_->Next(&batch, error)) return !documents->empty();
+      for (std::string& document : batch) {
+        const bool mine = (index_ % world_size_) == rank_;
+        ++index_;
+        if (mine) documents->push_back(std::move(document));
+      }
+      if (!documents->empty()) return true;
+    }
+  }
+
+ private:
+  std::unique_ptr<DocumentSource> source_;
+  int rank_ = 0;
+  int world_size_ = 1;
+  std::int64_t index_ = 0;
+};
+
+}  // namespace
+
+DocumentSourceFactory ShardDocumentSourceFactory(DocumentSourceFactory factory,
+                                                 int rank, int world_size) {
+  if (world_size <= 1) return factory;
+  return [factory = std::move(factory), rank,
+          world_size](std::string* error) -> std::unique_ptr<DocumentSource> {
+    std::unique_ptr<DocumentSource> source = factory(error);
+    if (source == nullptr) return nullptr;
+    return std::make_unique<ShardedDocumentSource>(std::move(source), rank,
+                                                   world_size);
+  };
+}
+
 }  // namespace nanochat

@@ -20,6 +20,9 @@ struct Config {
   int padded_vocab_size = 32768;  // rounded up for GEMM/classifier efficiency
   float rope_base = 100000.0f;
   std::string window_pattern = "SSSL";  // tiled across layers; last is always L
+  // Value embeddings (docs/distributed-design.md section 8). The default is the
+  // current model; the Track 3 baseline turns them off.
+  bool value_embedding = true;
 
   // Per-head width. `hidden_dim` must be divisible by `num_heads`.
   int head_dim() const { return hidden_dim / num_heads; }
@@ -32,8 +35,10 @@ struct Config {
   int mlp_dim() const { return 4 * hidden_dim; }
 
   // Value embeddings are present on alternating layers, and always on the last
-  // layer (mirrors nanochat's `has_ve`).
+  // layer (mirrors nanochat's `has_ve`). The field `value_embedding` disables
+  // them on every layer when false.
   bool has_value_embedding(int layer) const {
+    if (!value_embedding) return false;
     return layer % 2 == (num_layers - 1) % 2;
   }
 

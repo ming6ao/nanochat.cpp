@@ -16,6 +16,7 @@ cc_library(
     name = "model",
     srcs = [
         "data.cc",
+        "distributed.cc",
         "eval.cc",
         "generate.cc",
         "model.cc",
@@ -26,6 +27,7 @@ cc_library(
     ],
     hdrs = [
         "cli.h",
+        "distributed.h",
         "eval.h",
         "model_impl.h",
         "ops.h",
@@ -238,6 +240,39 @@ cc_test(
     size = "small",
 )
 
+# Distributed gradient sync (docs/distributed-design.md sections 4 and 7): two
+# CPU processes reduce over loopback TCP and match an independently computed
+# sum, and the stride document sharding partitions the document stream. CPU
+# only; no GPU and no broker.
+cc_test(
+    name = "distributed_test",
+    srcs = ["distributed_test.cc"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    deps = [
+        ":model",
+        "//include/nanochat:nanochat",
+    ],
+    size = "small",
+)
+
+# Data parallel training on the CPU backend (docs/distributed-design.md section
+# 12): two ranks that split one batch equal one rank on the whole batch, and two
+# `TrainLoop`s at rank 0 and rank 1 agree on the parameters after one step. CPU
+# only.
+cc_test(
+    name = "train_parallel_test",
+    srcs = ["train_parallel_test.cc"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    deps = [
+        ":model",
+        "//src/tokenizer:tokenizer",
+        "//include/nanochat:nanochat",
+    ],
+    size = "small",
+)
+
 # Masked loss and the weighted backward (docs/post-training.md section 2): the
 # forward mean divides by the valid-target count, an ignored target carries a
 # zero per-row loss, `BackwardWeighted` shares the valid-count divisor, and a
@@ -357,6 +392,8 @@ test_suite(name = "all", tests = [
     ":optim_test",
     ":data_test",
     ":harness_test",
+    ":distributed_test",
+    ":train_parallel_test",
     ":masked_loss_test",
     ":optimizer_state_test",
     # The tokenizer host package owns its own test suite.

@@ -343,12 +343,46 @@ void TestModelFlagParsing() {
   }
 }
 
+// The Track 3 preset (docs/distributed-design.md sections 8 and 9): dense
+// attention, no value embeddings, and the AdamW/Muon rates and schedule.
+void TestTrackThreeBaseline() {
+  const TrainConfig config = nanochat::TrackThreeBaseline();
+  if (config.model.num_layers != 12 || config.model.num_heads != 6 ||
+      config.model.num_kv_heads != 6 || config.model.hidden_dim != 768 ||
+      config.model.seq_len != 1024 || config.model.vocab_size != 32768 ||
+      config.model.padded_vocab_size != 32768 ||
+      config.model.window_pattern != "L" || config.model.value_embedding) {
+    Fail("TrackThreeBaseline: model fields");
+  }
+  if (config.model.window_left(0) != -1 || config.model.window_left(5) != -1) {
+    Fail("TrackThreeBaseline: the attention is not dense");
+  }
+  if (config.model.has_value_embedding(0) ||
+      config.model.has_value_embedding(config.model.num_layers - 1)) {
+    Fail("TrackThreeBaseline: value embeddings are enabled");
+  }
+  ExpectNear(config.optimizer.embedding_lr, 0.7, 1e-6,
+             "TrackThree embedding_lr");
+  ExpectNear(config.optimizer.unembedding_lr, 0.004, 1e-6,
+             "TrackThree unembedding_lr");
+  ExpectNear(config.optimizer.scalar_lr, 0.015, 1e-6, "TrackThree scalar_lr");
+  ExpectNear(config.optimizer.matrix_lr, 0.025, 1e-6, "TrackThree matrix_lr");
+  ExpectNear(config.optimizer.adam_eps, 1e-10, 1e-13, "TrackThree adam_eps");
+  ExpectNear(config.scheduler.warmdown_ratio, 0.7, 1e-6,
+             "TrackThree warmdown_ratio");
+  ExpectNear(config.scheduler.final_lr_frac, 0.0, 1e-9,
+             "TrackThree final_lr_frac");
+  ExpectNear(config.scheduler.weight_decay_base, 0.05, 1e-6,
+             "TrackThree weight_decay_base");
+}
+
 }  // namespace
 
 int main() {
   TestMfu();
   TestLogger();
   TestModelFlagParsing();
+  TestTrackThreeBaseline();
   TestTrainLoopMatchesHandRun();
   TestGradientAccumulation();
   if (g_failures != 0) {

@@ -10,6 +10,7 @@
 #include "nanochat/dataloader.h"
 #include "nanochat/optim.h"
 #include "nanochat/scheduler.h"
+#include "src/distributed.h"
 
 // The training driver's small internal interface (docs/model.md, harness
 // workstream). Plain C++ with no vendor headers, so `*_main.cc` and the tests
@@ -55,6 +56,13 @@ struct TrainConfig {
   int tokenizer_threads = 4;
   int document_buffer = 1000;
 
+  // Distributed (docs/distributed-design.md): data parallel rank and group.
+  // `world_size` 1 keeps the single-process run unchanged.
+  int rank = 0;
+  int world_size = 1;
+  std::string master = "127.0.0.1";
+  int port = 29500;
+
   // Optional in-memory sources. A test sets them to bypass the parquet reader;
   // `train_main` leaves them empty and reads the `train_parquet` globs.
   DocumentSourceFactory train_source;
@@ -62,6 +70,25 @@ struct TrainConfig {
 
   int effective_seq() const { return seq > 0 ? seq : model.seq_len; }
 };
+
+// The modded-nanogpt Track 3 baseline (docs/distributed-design.md sections 8
+// and 9): dense (`L`) attention, no value embeddings, and the AdamW/Muon rates
+// and schedule of the reference recipe. It is a preset, not a new set of flags:
+// the caller fills in the data paths, the batch, and the step count.
+//
+// The preset sets only fields that `OptimizerConfig` exposes. The reference
+// AdamW betas (0.8, 0.95) and AdamW weight decay (0.001) are not representable:
+// `src/optim.cc` hardcodes the per-group betas and decays, and
+// `OptimizerConfig::weight_decay` is unused. Muon's decay maps through the
+// weight-decay schedule.
+TrainConfig TrackThreeBaseline();
+
+// The scale applied to one micro-batch backward pass
+// (docs/distributed-design.md section 6). The model's loss is a mean, so the
+// factor is 1 / (grad_accum * world_size). The micro-batch sum and the
+// all-reduce sum then give the mean over the global batch, which equals the
+// one-rank update. A `world_size` of 1 leaves the accumulation scale unchanged.
+float DistributedBackwardScale(int grad_accum, int world_size);
 
 // Saves and loads a model's parameter set through the self-describing
 // `Checkpoint` container (docs/model.md). This is the harness's checkpoint
@@ -115,6 +142,7 @@ class TrainLoop {
   std::unique_ptr<Scheduler> scheduler_;
   std::unique_ptr<Logger> logger_;
   std::unique_ptr<Tokenizer> tokenizer_;
+  std::unique_ptr<GradientSync> sync_;
   std::unique_ptr<DataLoader> train_loader_;
   std::unique_ptr<DataLoader> val_loader_;
   std::vector<int> tokens_;

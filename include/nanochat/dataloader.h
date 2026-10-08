@@ -35,6 +35,14 @@ class DocumentSource {
 using DocumentSourceFactory =
     std::function<std::unique_ptr<DocumentSource>(std::string* error)>;
 
+// Wraps `factory` so that rank `rank` of `world_size` sees document `i` only
+// when `i % world_size == rank`, and drops the rest
+// (docs/distributed-design.md section 7). The stride is deterministic, so every
+// rank rebuilds the same partition on a new epoch. A `world_size` of 1 returns
+// `factory` unchanged.
+DocumentSourceFactory ShardDocumentSourceFactory(DocumentSourceFactory factory,
+                                                 int rank, int world_size);
+
 class DataLoader {
  public:
   // The loader owns a producer thread that reads documents from

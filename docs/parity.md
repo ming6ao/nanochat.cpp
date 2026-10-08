@@ -26,7 +26,7 @@ Status values:
 | D3 | `equivalent` | attention | cuBLAS GEMM + softmax kernels vs SDPA math backend |
 | D4 | `equivalent` | initialization | custom xorshift RNG vs the PyTorch RNG |
 | D5 | `equivalent` | optimizer | gradient norm computed for logging with `--clip 0` |
-| D6 | `out-of-scope` | scaling | no distributed data parallel training |
+| D6 | `open` | scaling | distributed data parallel training is absent |
 | D7 | `out-of-scope` | runtime | no `torch.compile`; disabled on Pascal anyway |
 | D8 | `equivalent` | harness | no batch prefetch overlap during backward |
 | E1 | `open` | evaluation | sampled modes use the C++ RNG, not torch; greedy is bit-identical |
@@ -326,13 +326,31 @@ The trainer counts pairs with `int64` instead of the reference `int32`. The wide
 type changes no result below the `int32` limit. The fixture-scale corpora stay
 far below it. This is a container and integer-width difference only.
 
-## Out of scope
-
 ### D6 — Distributed data parallel training
 
-The reference supports DDP (document sharding, gradient all-reduce, and
-rank-agreeing `inf`/`nan` handling). nanochat.cpp is single-process. Adding DDP
-is a scaling workstream, not a correctness gap for the single-GPU target.
+**Status:** `open`. The reference shards documents by rank, reduces the
+gradients with an all-reduce, and makes the ranks agree on `inf` and `nan`
+handling. `nanochat.cpp` runs one process. The project now targets two T4 cards
+in a Kaggle Notebook, so data parallel training enters the scope. The design is
+in [distributed-design.md](distributed-design.md).
+
+The tree implements the C++ host reference and the harness integration for
+architecture support. The model's loss is a mean, so the harness scales each
+local backward pass by `1 / world_size` and the all-reduce sums the result. The
+global gradient becomes the mean over the global batch, which matches the
+one-rank update.
+
+One difference stays open. `nanochat.cpp` shards documents by a stride. The
+reference splits one global token batch into contiguous rank slices. The stride
+re-partitions the same document pool, so a two-rank run and a one-rank run do
+not produce the same tokens in one step. The CPU gate pins the mean scale and
+the equality of the two ranks. The validation-loss equality needs the P3 and P4
+work.
+
+The NCCL path and the Kaggle notebook stay in P3. A resumed run restarts the
+epoch until the checkpoint stores the document index (P4).
+
+## Out of scope
 
 ### D7 — `torch.compile`
 

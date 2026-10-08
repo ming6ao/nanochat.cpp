@@ -84,6 +84,7 @@ struct Config {
   int padded_vocab_size = 32768;
   float rope_base = 100000.0f;
   std::string window_pattern = "SSSL";
+  bool value_embedding = true;
 };
 
 class Model {
