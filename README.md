@@ -71,7 +71,7 @@ dev/kernels/        unpromoted prototypes and the toolchain spike
 tests/              oracle fixtures and parity tests
 bindings/           the C ABI for the in-process Python API
 python/             the single Python surface: compute, planning, orchestration
-notebooks/          the Kaggle Notebook (one T4 card)
+notebooks/          the Kaggle launcher and the T4 notebook
 tools/              entry point, GPU broker, resource sandbox, fixtures
 tools/kaggle/       Kaggle Notebook bootstrap
 docs/               reference and how-to
