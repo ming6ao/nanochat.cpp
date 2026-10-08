@@ -293,7 +293,7 @@ fixed validation set.
 
 ## 13. Kaggle notebook
 
-Changes to `notebooks/nanochat-cpp-on-t4x2-gpus.ipynb`:
+Changes to `notebooks/nanochat-cpp-on-t4-gpu.ipynb`:
 
 1. Build the `t4` config.
 2. Stage the ClimbMix shards and the tokenizer, as today.
