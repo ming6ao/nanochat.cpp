@@ -417,6 +417,9 @@ tool `tools/convert_checkpoint.py` stays. The compute API does not import it.
 
 ## 8. Removed files
 
+This section is the historical migration record. The project removed the listed
+files, and the migration is complete.
+
 | Path | Action |
 |---|---|
 | `python/nanochat_cpp/base_train.py` | Remove. |
@@ -455,6 +458,8 @@ Update these references.
 | `tools/convert_checkpoint.py` | Point at `python.md`. |
 
 ## 10. Migration
+
+This section is the historical migration record. The steps are complete.
 
 1. Add `nanochat_params` and `nanochat_params_get` to `include/nanochat/capi.h`.
    Add `CountParams` to `src/train.cc` and declare it in

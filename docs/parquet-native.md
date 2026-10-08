@@ -205,8 +205,8 @@ not from the `<shard>.bytes` sidecar.
 
 ## 9. Status
 
-Phases 0 to 3 are done. The native reader replaces DuckDB, and `ParquetReader`
-is a `DocumentSource`.
+The project completed all phases. The native reader replaces DuckDB,
+`ParquetReader` is a `DocumentSource`, and training tokenizes during the run.
 
 | Phase | State | Notes |
 |---|---|---|

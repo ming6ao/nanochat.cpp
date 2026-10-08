@@ -97,8 +97,9 @@ deterministic metrics and a fixed seed for samples.
 
 ## 4. Base evaluation
 
-`nanochat_cpp.api.evaluate` and `//src:eval_main` cover up to three modes
-(`--eval core,bpb,sample`).
+This section describes the target design. The shipped tree implements only the
+bits-per-byte mode: `nanochat_cpp.api.evaluate` returns bpb, and `//src:eval_main`
+has no `--eval`, CORE, or sample flag. The remaining modes are not implemented.
 
 ### 4.1 Bits per byte
 
@@ -213,13 +214,16 @@ separately, mirroring the post-training loop's logging.
 
 ## 9. Status and roadmap
 
-All of the evaluation workstream described in this document is implemented:
+The project has shipped most of the evaluation workstream in this document:
 
 1. `checkpoint.py` converter so a reference checkpoint can be loaded.
 2. `ScoreBatch` + `score_main` + the fixture format.
 3. `GenerateBatch` ([model.md](model.md)).
-4. `nanochat_cpp.api.evaluate` (bpb) and `//src:eval_main` (bpb, sample, CORE).
+4. `nanochat_cpp.api.evaluate` (bpb) and `//src:eval_main` (bpb only).
 5. `nanochat_cpp.chat.ChatEvaluator` (categorical, generative, ChatCORE).
+
+The base CORE and sample modes are not wired into `eval_main` or
+`api.evaluate` yet.
 
 The differences that remain are tracked in [parity.md](parity.md): E3
 (reference checkpoints converted torch -> NCHKPT01) and E4 (CORE and chat

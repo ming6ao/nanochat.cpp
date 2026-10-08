@@ -61,7 +61,8 @@ Design points:
 - One hand-written struct of named buffers, with sizes computed on the host from
   the config and `(batch, seq)`. One `Alloc`, bump-pointer assignment. This is
   the llm.c `ActivationTensors` pattern.
-- `recompute` is a **compile-time** template flag, not a runtime branch.
+- Recompute is not implemented. The proposals are in
+  [optimizations.md](optimizations.md).
 - Norm statistics (`rstd`), optimizer moments, and master weights stay `float`.
 - `EmbeddingBackward` uses a **persistent** dense gradient buffer and zeroes only
   the touched rows (targets the largest measured hotspot).

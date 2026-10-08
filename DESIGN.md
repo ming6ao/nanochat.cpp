@@ -6,9 +6,12 @@ and [llama.cpp](https://github.com/ggml-org/llama.cpp). No PyTorch, no autograd
 engine, no graph compiler. One model definition, swappable hardware backends.
 
 Status: implemented and in use. The CPU reference backend and the CUDA backend
-(Pascal sm_61 and Turing sm_75) run the full training and inference graph. The
-Python surface, the native tokenizer, and the native parquet reader are in the
-tree. This document stays the design rationale.
+run the full training and inference graph. Pascal (GTX 1080 Ti, sm_61) is the
+measured device; the Turing (T4, sm_75) correctness gates are not recorded. The
+tree also holds the Python surface, the native tokenizer and parquet reader, the
+CPU-only simulator, and the host-reference data-parallel path. Supervised
+fine-tuning and reinforcement learning are partly implemented. This document
+stays the design rationale.
 
 This document is the design rationale: goals, invariants, and the reasoning
 behind the decisions. Interface reference and how-to material lives under
@@ -21,15 +24,20 @@ behind the decisions. Interface reference and how-to material lives under
 ### Goals
 
 - Train and run the **nanochat architecture** (RMSNorm, RoPE, QK-norm, GQA,
-  relu^2 MLP, sliding-window attention, value residual, Muon + AdamW) with no
-  framework dependency.
+  relu^2 MLP, sliding-window attention, value residual, AdamW, Muon, and the
+  opt-in ANVIL matrix optimizer) with no framework dependency.
 - **Hardware portability by replacement, not by configuration**: adding a
   backend means adding a directory that implements one header. The seam is
   designed so the public API and model definition are stable by default:
   changes to them are exceptional, additive where possible, and handled under
   the evolution rules in §7.
-- **First-class on Pascal (GTX 1080 Ti, sm_61)** and **Turing (T4, sm_75)**;
-  later NVIDIA generations are a backend variant, not a rewrite.
+- **First-class on Pascal (GTX 1080 Ti, sm_61)**. The **Turing (T4, sm_75)**
+  build configs exist; its correctness gates are not recorded. Later NVIDIA
+  generations are a backend variant, not a rewrite.
+- **Data-parallel training on two devices** behind one gradient-sync seam
+  ([docs/distributed-design.md](docs/distributed-design.md)).
+- **Validation without a GPU**, through the CPU-only simulator
+  ([docs/simulator.md](docs/simulator.md)).
 - Keep the mainline small and readable enough to audit in one sitting.
 - Every operator independently testable against a fixed oracle.
 
@@ -52,13 +60,13 @@ seam.
 
 ```text
 L6  App / CLI        train_main.cc  generate_main.cc  eval_main.cc
-L5  Train driver     TrainLoop  Scheduler  Checkpointer  Logger  Mfu        train.cc
-L4  Optim            AdamW  Muon  param groups                              optim.cc
+L5  Train driver     TrainLoop  Checkpointer  Logger  Mfu                  train.cc
+L4  Optim            AdamW  Muon  ANVIL  Scheduler  param groups          optim.cc
 L3  Model / graphs   Model (forward+backward)  Prefill  Decode  KvCache    model.cc generate.cc
 L2  Ops (internal)   Linear  Block  Mlp  ValueResidual  Smear  Backout      ops.cc
 L1  KERNEL API       <-- THE BACKEND SEAM  (nanochat/kernels.h)
 L0  Backend          backends/cpu/   backends/cuda/   alloc . stream . launch
-    Vendor           libm / OpenMP   |   cudart + cuBLAS (+ cuDNN, NCCL)
+    Vendor           libm / OpenMP   |   cudart + cuBLAS
 ```
 
 Host utilities sit beside L2-L5 and never above the kernel API: `Tokenizer`,
@@ -153,9 +161,8 @@ the norm/rope backward.
 
 ### 4.1 GEMM
 
-Keep cuBLAS/cuBLASLt as the GEMM engine. It is near-peak on GP102 (11.34 TFLOPS
-fp32), per-shape tuned, and portable across architectures. Do not hand-write a
-GEMM.
+Keep cuBLAS as the GEMM engine. It is near-peak on GP102 (11.34 TFLOPS fp32),
+per-shape tuned, and portable across architectures. Do not hand-write a GEMM.
 
 ### 4.2 Launch overhead
 
@@ -237,8 +244,9 @@ the common cases.
   needs to change. See [docs/build.md](docs/build.md).
 - **Fuse more**: only if the §3 rule holds and the fused backward is derivable.
   Develop in `dev/kernels/`, prove with a benchmark, then promote.
-- **Add a graph variant** (SFT/RL head): add to `model.cc`; topology stays in one
-  place.
+- **Add a training stage** (SFT or RL): reuse the fixed graph and the weighted
+  classifier backward. Keep the stage logic in the harness and the Python
+  bridge. No new graph topology is necessary.
 - **Optimize**: profile on native Linux (CUPTI is unavailable under WSL2).
   Priority order — attention fwd/bwd, Muon, QkPrep, sparse embedding backward.
 

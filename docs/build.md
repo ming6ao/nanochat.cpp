@@ -26,7 +26,7 @@ nanochat.cpp/
     cpu/kernels.cc  cpu/kernels_test.cc
     cuda/device.cu  cuda/gemm.cu  cuda/cuda_runtime_test.cc
     cuda/kernels/{rms_norm,qk_prep,attention,pointwise,classifier,
-                  embedding,adamw,muon,global_norm}.cu
+                  embedding,adamw,muon,anvil,global_norm,value_gate}.cu
     cuda/kernels/<family>_test.cc + <family>_benchmark.cc next to each kernel
     cuda/kernels/device_utils.cuh
     cuda/kernels/testing/        # host reference headers and test helpers
@@ -112,11 +112,12 @@ selects the CPU backend and fp32.
 
 ## Makefile fallback
 
-A single Makefile mirrors llm.c's autodetection (nvcc presence, arch via
-`nvidia-smi`, optional cuDNN/NCCL/OpenMP). The source layout is identical, so
-the build file is swappable.
+A single Makefile builds the P0 toolchain spike for an environment where
+`rules_cuda` is unavailable. It autodetects nvcc and the architecture in the
+spirit of llm.c. It does not build the kernel families.
 
-Runtime links against `cudart` + cuBLAS only on CUDA, and `libm` on CPU.
+The CUDA build links `cudart` and cuBLAS. The CPU build links `libm`. Neither
+links cuDNN or NCCL.
 
 ## Backends and selection
 
@@ -127,13 +128,13 @@ Selection is a build/link choice:
 ```
 --backend=cpu|cuda        link the backend library
 --precision=fp32|fp16     select ComputeType
---arch=sm_61|sm_75        CUDA --generate-code
+--arch=sm_61|sm_75|sm_90  CUDA --generate-code
 ```
 
 | Backend | Implements | Notes |
 |---|---|---|
 | `backends/cpu` | all of `kernels.h` with naive loops | reference, CI, oracle baseline; `-lm` (+ OpenMP) |
-| `backends/cuda` | all of `kernels.h`; cuBLAS for GEMM | Pascal fp32, Turing fp16; cuDNN/NCCL optional |
+| `backends/cuda` | all of `kernels.h`; cuBLAS for GEMM | Pascal fp32, Turing fp16; no cuDNN or NCCL |
 
 The shared workflow (`ops.cc`, `model.cc`, `generate.cc`, `optim.cc`,
 `train.cc`) compiles once and links against either backend. This is the one

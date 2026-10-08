@@ -26,7 +26,7 @@ Status values:
 | D3 | `equivalent` | attention | cuBLAS GEMM + softmax kernels vs SDPA math backend |
 | D4 | `equivalent` | initialization | custom xorshift RNG vs the PyTorch RNG |
 | D5 | `equivalent` | optimizer | gradient norm computed for logging with `--clip 0` |
-| D6 | `open` | scaling | distributed data parallel training is absent |
+| D6 | `open` | scaling | host-reference data parallel is implemented; NCCL and the two-rank validation stay open |
 | D7 | `out-of-scope` | runtime | no `torch.compile`; disabled on Pascal anyway |
 | D8 | `equivalent` | harness | no batch prefetch overlap during backward |
 | D9 | `closed` | optimizer | C++ schedule warmdown count matches Python's `round` (half to even) |

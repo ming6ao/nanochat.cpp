@@ -1,7 +1,7 @@
 # The kernel seam (L1)
 
-The backend contract is a fixed set of host-callable functions. Ten compute
-families, one GEMM entry point, five device utilities. A backend is complete
+The backend contract is a fixed set of host-callable functions. Eleven compute
+families, one GEMM entry point, and six device utilities. A backend is complete
 when every symbol resolves and passes the oracle.
 
 The rules that keep this seam vendor-free are in
@@ -23,10 +23,13 @@ kernel is in [DESIGN.md §3](../DESIGN.md). A backend supplies this header; see
 | 8 | `Muon` | stateful + batched GEMM | matrix params (Polar Express via cuBLAS) | yes |
 | 9 | `ANVIL` | stateful + batched GEMM | matrix params, opt-in (whitening cascade via cuBLAS) | yes |
 | 10 | `GlobalNorm` | full reduction | gradient clipping | yes |
+| 11 | `ValueGate` | row gate + per-head projection | value residual gate | yes/yes |
 
 Library-backed (not hand-written kernels):
 
-- `Gemm(mode)` — forward, dgrad, wgrad; cuBLAS/cuBLASLt on CUDA, reference on CPU.
+- `Gemm(mode)` — forward, dgrad, wgrad; cuBLAS on CUDA, reference on CPU.
+
+Helper: `ScalarDot`, a dot product over two buffers.
 
 Device utilities: `Alloc`, `Free`, `Memcpy(direction)`, `Memset`, `Synchronize`,
 `GetCaps`.

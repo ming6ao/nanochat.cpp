@@ -16,6 +16,7 @@ detailed reference that the design points at.
 | [cpu-performance.md](cpu-performance.md) | CPU backend baseline, cause, design, and phase results |
 | [attention.md](attention.md) | Attention baseline, Pascal feasibility, the fused window, results |
 | [optimizations.md](optimizations.md) | Planned recompute, fused-classifier, and row-kernel work |
+| [optimizer-anvil-design.md](optimizer-anvil-design.md) | The opt-in ANVIL matrix optimizer: design, state, and open parity work |
 | [eval.md](eval.md) | Base and chat evaluation, and the forward-only workspace |
 | [tokenizer.md](tokenizer.md) | The native BPE tokenizer: design, artifacts, training, and status |
 | [parquet-native.md](parquet-native.md) | The native parquet reader and on-the-fly tokenization plan |
