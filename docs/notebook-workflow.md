@@ -91,7 +91,8 @@ The notebook caches the prefix under `/kaggle/working/nanochat-cache`.
 ### 3.3 The run is a function
 
 `run_trial(trial, prefix, out_root, device="cuda", *, keep_model=False,
-force=False, eval_tokens=None, threads=4, build_key=None) -> TrialResult`
+force=False, eval_tokens=None, threads=4, build_key=None,
+progress=None) -> TrialResult`
 
 The function does this:
 
@@ -100,12 +101,18 @@ The function does this:
 3. Make the run directory. Write `config.json` and `revision`.
 4. Build the plan with `nc.plan.compute_plan`.
 5. Build the model, the optimizer, and the trainer.
-6. Append one `metrics.jsonl` record per step.
+6. Append one `metrics.jsonl` record per step. Call `progress` after each
+   step when you pass it.
 7. Evaluate the validation split with `nc.evaluate`.
 8. Write `summary.json` through a temporary file and `os.replace`.
 9. Return a `TrialResult`.
 
 The function is a module, not a cell. A test can call it.
+
+`progress` is an optional callable `(row, total)`. The runner calls it after
+each step. `ProgressReporter` prints step 1, the last step, and every `every`
+steps between. A line before the last step ends with a carriage return, so a
+notebook overwrites one line.
 
 ### 3.4 The result object
 
@@ -194,11 +201,12 @@ The content notebook keeps these sections.
 
 1. Setup: the loader cell, then `kaggle_setup.setup()`.
 2. Shared prefix: the data and the tokenizer.
-3. Demo trial: `run_trial(Trial("demo"), prefix, RUNS, keep_model=True)`.
+3. Demo trial: `run_trial(Trial("demo"), prefix, RUNS, keep_model=True,
+   progress=ProgressReporter())`.
 4. Metrics plot: from `result.metrics` and `result.model.device`.
 5. Fine-tune: from `result.model`, `result.plan`, and `prefix.tokenizer`.
 6. Trial list: a Python list of `Trial` objects for the sweep.
-7. Sweep: `run_sweep(TRIALS, prefix, RUNS)`.
+7. Sweep: `run_sweep(TRIALS, prefix, RUNS, progress=ProgressReporter())`.
 8. Results: the pandas table.
 
 The demo path and the sweep path call the same function. Only item 6
@@ -208,7 +216,7 @@ changes per experiment.
 
 | File | Change | Owner |
 |---|---|---|
-| `notebooks/lab.py` | New. `Trial`, `Prefix`, `TrialResult`, `run_trial`, `run_sweep`, `load_results`. | Notebooks |
+| `notebooks/lab.py` | New. `Trial`, `Prefix`, `TrialResult`, `ProgressReporter`, `run_trial`, `run_sweep`, `load_results`. | Notebooks |
 | `notebooks/lab_test.py` | New. Tests for the pure helpers. | Notebooks |
 | `notebooks/kaggle_setup.py` | New. The session setup: fetch, bootstrap, host environment, build. | Notebooks |
 | `notebooks/kaggle_setup_test.py` | New. Tests for the pure setup helpers. | Notebooks |

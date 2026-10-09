@@ -7,6 +7,7 @@ JSON write, and the results reader. See ``docs/notebook-workflow.md``.
 
 from __future__ import annotations
 
+import io
 import tempfile
 import unittest
 from pathlib import Path
@@ -127,6 +128,26 @@ class IsBetterTest(unittest.TestCase):
     def test_none_never_wins(self) -> None:
         self.assertFalse(lab.is_better(None, 1.0))
         self.assertFalse(lab.is_better(None, None))
+
+
+class ProgressReporterTest(unittest.TestCase):
+    def _row(self, step):
+        return {"step": step, "loss": 1.0, "tokens_per_sec": 1000.0,
+                "seconds": float(step)}
+
+    def test_reports_the_first_last_and_interval_steps(self) -> None:
+        stream = io.StringIO()
+        reporter = lab.ProgressReporter(every=10, stream=stream)
+        for step in range(1, 26):
+            reporter(self._row(step), 25)
+        self.assertEqual(len(stream.getvalue().splitlines()), 4)
+
+    def test_reports_every_step_at_one(self) -> None:
+        stream = io.StringIO()
+        reporter = lab.ProgressReporter(every=1, stream=stream)
+        for step in range(1, 4):
+            reporter(self._row(step), 3)
+        self.assertEqual(len(stream.getvalue().splitlines()), 3)
 
 
 class ResumeDecisionTest(unittest.TestCase):

@@ -19,10 +19,11 @@ import json
 import os
 import re
 import subprocess
+import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Iterable, Mapping
+from typing import TYPE_CHECKING, Callable, Iterable, Mapping
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     import nanochat_cpp as nc
@@ -31,6 +32,7 @@ __all__ = [
     "BEST_CHECKPOINT",
     "RATE_FIELDS",
     "Prefix",
+    "ProgressReporter",
     "StaleRunError",
     "Trial",
     "TrialResult",
@@ -122,6 +124,27 @@ class TrialResult:
     metrics: list[dict] = field(default_factory=list)
     model: "nc.Model | None" = None
     plan: "nc.plan.TrainPlan | None" = None
+
+
+class ProgressReporter:
+    """Print one training line every ``every`` steps, and the last step."""
+
+    def __init__(self, every: int = 10, stream=None) -> None:
+        self.every = max(1, int(every))
+        self.stream = stream
+
+    def __call__(self, row: Mapping, total: int) -> None:
+        step = int(row["step"])
+        if step != 1 and step % self.every and step != total:
+            return
+        elapsed = float(row["seconds"])
+        eta = (total - step) * elapsed / step
+        end = "\n" if step == total else "\r"
+        print(f"step {step}/{total}  loss {row['loss']:.4f}  "
+              f"{float(row['tokens_per_sec']):,.0f} tok/s  "
+              f"{elapsed:.1f}s  eta {eta:.1f}s",
+              end=end, flush=True,
+              file=self.stream if self.stream is not None else sys.stdout)
 
 
 def slugify(name: str) -> str:
@@ -281,8 +304,10 @@ def _read_metrics(run_dir: Path) -> list[dict]:
     return rows
 
 
-def _train(trainer, run_dir: Path, tokens_per_step: int) -> list[dict]:
-    """Iterate ``trainer`` and write one metrics record per step."""
+def _train(trainer, run_dir: Path, tokens_per_step: int, total: int,
+           progress: "Callable[[dict, int], None] | None" = None,
+           ) -> list[dict]:
+    """Iterate ``trainer``, write one record per step, and report."""
     rows: list[dict] = []
     previous = time.perf_counter()
     start = previous
@@ -299,6 +324,8 @@ def _train(trainer, run_dir: Path, tokens_per_step: int) -> list[dict]:
             rows.append(row)
             sink.write(json.dumps(row, sort_keys=True) + "\n")
             sink.flush()
+            if progress is not None:
+                progress(row, int(total))
     return rows
 
 
@@ -306,7 +333,9 @@ def run_trial(trial: Trial, prefix: Prefix, out_root: str | Path,
               device: str = "cuda", *,
               keep_model: bool = False, force: bool = False,
               eval_tokens: int | None = None, threads: int = 4,
-              build_key: str | None = None) -> TrialResult:
+              build_key: str | None = None,
+              progress: "Callable[[dict, int], None] | None" = None,
+              ) -> TrialResult:
     """Run one trial and write its run directory.
 
     Resume a finished trial when its fingerprint matches. Raise
@@ -314,7 +343,7 @@ def run_trial(trial: Trial, prefix: Prefix, out_root: str | Path,
     ``force`` is true.
 
     ``model`` is present only for a fresh run with ``keep_model`` set.
-    ``plan`` is always present.
+    ``plan`` is always present. ``progress`` runs on each step.
     """
     import nanochat_cpp as nc
 
@@ -381,7 +410,8 @@ def run_trial(trial: Trial, prefix: Prefix, out_root: str | Path,
     trainer = nc.Trainer(model, data, num_iterations=plan.num_iterations,
                          optimizer=optimizer, grad_accum=plan.grad_accum)
 
-    metrics = _train(trainer, run_dir, plan.total_batch_size)
+    metrics = _train(trainer, run_dir, plan.total_batch_size,
+                     plan.num_iterations, progress)
 
     bpb = nc.evaluate(model, parquet=prefix.val_parquet,
                       tokenizer=prefix.tokenizer, tokens=eval_tokens,
@@ -412,7 +442,9 @@ def run_sweep(trials: Iterable[Trial], prefix: Prefix, out_root: str | Path,
               keep_best_checkpoint: bool = True, force: bool = False,
               eval_tokens: int | None = None,
               threads: int = 4,
-              build_key: str | None = None) -> list[TrialResult]:
+              build_key: str | None = None,
+              progress: "Callable[[dict, int], None] | None" = None,
+              ) -> list[TrialResult]:
     """Run many trials and keep the best checkpoint only.
 
     One failed trial does not stop the sweep. The failure becomes an
@@ -443,7 +475,7 @@ def run_sweep(trials: Iterable[Trial], prefix: Prefix, out_root: str | Path,
             result = run_trial(trial, prefix, out_root, device,
                                keep_model=keep_best_checkpoint, force=force,
                                eval_tokens=eval_tokens, threads=threads,
-                               build_key=build_key)
+                               build_key=build_key, progress=progress)
         except Exception as exc:  # noqa: BLE001 - isolate one trial
             error = {"name": trial.name,
                      "error": f"{type(exc).__name__}: {exc}"}
