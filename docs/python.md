@@ -118,6 +118,11 @@ library = nc.build(backend="cuda", precision="fp16", arch="sm_75")
 cached = nc.build(backend="cpu", precision="fp32", cache=BASE / "build")
 ```
 
+The fp16 build trains correctly: each parameter keeps an fp32 master weight
+and the optimizer updates that weight in fp32. Loss scaling is still absent,
+so a very small gradient can still underflow in the half compute copy
+(`docs/build.md`).
+
 ## 4. Planning layer
 
 The reference plan needs two model-derived numbers:

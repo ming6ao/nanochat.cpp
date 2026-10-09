@@ -28,7 +28,8 @@ using cuda_kernels::ToComputeDev;
 __global__ void AdamWUpdateKernel(long long n, float lr, float beta1,
                                   float beta2, float eps, float weight_decay,
                                   float step_size, float bias2,
-                                  ComputeType* __restrict__ p,
+                                  float* __restrict__ master,
+                                  ComputeType* __restrict__ value,
                                   const ComputeType* __restrict__ g,
                                   float* __restrict__ m,
                                   float* __restrict__ v) {
@@ -37,22 +38,23 @@ __global__ void AdamWUpdateKernel(long long n, float lr, float beta1,
            static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x;
        i < n; i += stride) {
     const float grad = AsFloatDev(g[i]);
-    // Decoupled weight decay, applied to the parameter before the update.
-    float pi = AsFloatDev(p[i]) * (1.0f - lr * weight_decay);
+    // Decoupled weight decay, applied to the fp32 master before the update.
+    float pi = master[i] * (1.0f - lr * weight_decay);
     const float mi = m[i] + (1.0f - beta1) * (grad - m[i]);
     const float vi = v[i] + (1.0f - beta2) * (grad * grad - v[i]);
     m[i] = mi;
     v[i] = vi;
     const float denom = sqrtf(vi / bias2) + eps;
     pi -= step_size * (mi / denom);
-    p[i] = ToComputeDev(pi);
+    master[i] = pi;
+    value[i] = ToComputeDev(pi);
   }
 }
 
 }  // namespace
 
-void AdamWUpdate(int n, const AdamWParams& params, ComputeType* p,
-                 const ComputeType* g, float* m, float* v) {
+void AdamWUpdate(int n, const AdamWParams& params, float* master,
+                 ComputeType* value, const ComputeType* g, float* m, float* v) {
   if (n <= 0) return;
   // Bias correction is computed once on the host in fp32, matching the CPU
   // reference (1 - beta^step). `step` is 1-based.
@@ -70,7 +72,7 @@ void AdamWUpdate(int n, const AdamWParams& params, ComputeType* p,
   cuda_backend::Launch(AdamWUpdateKernel, dim3(grid), dim3(kThreads), 0,
                        static_cast<long long>(n), params.lr, params.beta1,
                        params.beta2, params.eps, params.weight_decay, step_size,
-                       bias2, p, g, m, v);
+                       bias2, master, value, g, m, v);
 }
 
 }  // namespace kernels

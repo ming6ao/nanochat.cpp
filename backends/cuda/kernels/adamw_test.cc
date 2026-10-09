@@ -30,10 +30,12 @@ using nanochat::dev::optimref::AdamWUpdate;
 void RunCase(int n, const AdamWParams& base, const char* name, int steps) {
   Rng rng;
   const std::vector<float> p0 = RandomVec(n, &rng);
-  const std::vector<float> g0 = RandomVec(n, &rng);
+  const std::vector<float> g_float = RandomVec(n, &rng);
+  const std::vector<float> g0 = FromStorage(ToStorage(g_float));
   std::vector<float> m0(n, 0.0f);
   std::vector<float> v0(n, 0.0f);
 
+  DevBuf<float> master(p0);
   DevBuf<ComputeType> p(ToStorage(p0));
   DevBuf<ComputeType> g(ToStorage(g0));
   DevBuf<float> m(m0);
@@ -46,13 +48,14 @@ void RunCase(int n, const AdamWParams& base, const char* name, int steps) {
   for (int s = 0; s < steps; ++s) {
     AdamWParams params = base;
     params.step = s + 1;
-    nanochat::kernels::AdamWUpdate(n, params, p.ptr, g.ptr, m.ptr, v.ptr);
+    nanochat::kernels::AdamWUpdate(n, params, master.ptr, p.ptr, g.ptr, m.ptr,
+                                   v.ptr);
     nanochat::kernels::Synchronize();
     AdamWUpdate(n, params, &p_ref, g0, &m_ref, &v_ref);
 
     char label[96];
     std::snprintf(label, sizeof(label), "%s step %d p", name, s + 1);
-    CheckVectorClose(FromStorage(p.Download()), p_ref, 1e-5, label);
+    CheckVectorClose(master.Download(), p_ref, 1e-5, label);
     std::snprintf(label, sizeof(label), "%s step %d m", name, s + 1);
     CheckVectorClose(m.Download(), m_ref, 1e-5, label);
     std::snprintf(label, sizeof(label), "%s step %d v", name, s + 1);
@@ -88,9 +91,10 @@ int main() {
 
   // n == 0 is a no-op.
   DevBuf<ComputeType> empty(1);
+  DevBuf<float> empty_master(1);
   DevBuf<float> emptyf(1);
-  nanochat::kernels::AdamWUpdate(0, base, empty.ptr, empty.ptr, emptyf.ptr,
-                                 emptyf.ptr);
+  nanochat::kernels::AdamWUpdate(0, base, empty_master.ptr, empty.ptr,
+                                 empty.ptr, emptyf.ptr, emptyf.ptr);
   nanochat::kernels::Synchronize();
 
   if (Failures() != 0) {

@@ -82,6 +82,7 @@ void RunCase(int num_params, int rows, int cols, int red_dim, int num_maps,
                               0.0f);
 
   DevBuf<ComputeType> grads(ToStorage(g0));
+  DevBuf<float> master(p0);
   DevBuf<ComputeType> params_dev(ToStorage(p0));
   DevBuf<float> velocity(velocity_ref);
   DevBuf<float> lane(lane_ref);
@@ -89,14 +90,14 @@ void RunCase(int num_params, int rows, int cols, int red_dim, int num_maps,
   std::vector<float> p_ref = p0;
 
   for (int s = 0; s < steps; ++s) {
-    nanochat::kernels::AnvilUpdate(params, grads.ptr, params_dev.ptr,
-                                   velocity.ptr, lane.ptr);
+    nanochat::kernels::AnvilUpdate(params, grads.ptr, master.ptr,
+                                   params_dev.ptr, velocity.ptr, lane.ptr);
     nanochat::kernels::Synchronize();
     AnvilUpdate(params, g0, &p_ref, &velocity_ref, &lane_ref);
 
     char label[128];
     std::snprintf(label, sizeof(label), "%s step %d params", name, s + 1);
-    CheckVectorClose(FromStorage(params_dev.Download()), p_ref, kTol, label);
+    CheckVectorClose(master.Download(), p_ref, kTol, label);
     std::snprintf(label, sizeof(label), "%s step %d velocity", name, s + 1);
     CheckVectorClose(velocity.Download(), velocity_ref, kTol, label);
     std::snprintf(label, sizeof(label), "%s step %d lane", name, s + 1);
@@ -133,12 +134,14 @@ int main() {
   // rows/cols <= 0 is a no-op.
   {
     DevBuf<ComputeType> one(1);
+    DevBuf<float> one_master(1);
     DevBuf<float> onef(1);
     DevBuf<float> onef2(2);
     AnvilParams bad;
     bad.rows = 0;
     bad.cols = 0;
-    nanochat::kernels::AnvilUpdate(bad, one.ptr, one.ptr, onef2.ptr, onef.ptr);
+    nanochat::kernels::AnvilUpdate(bad, one.ptr, one_master.ptr, one.ptr,
+                                   onef2.ptr, onef.ptr);
     nanochat::kernels::Synchronize();
   }
 

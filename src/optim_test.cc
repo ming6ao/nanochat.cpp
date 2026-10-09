@@ -279,7 +279,8 @@ struct ParamState {
   int rows = 0;
   int cols = 0;
   std::vector<ComputeType> grad;
-  std::vector<ComputeType> ref_value;  // expected current parameter
+  std::vector<ComputeType> ref_value;  // expected current compute copy
+  std::vector<float> ref_master;       // expected current fp32 master
   std::vector<float> m;                // AdamW first moment
   std::vector<float> v;                // AdamW second moment
   std::vector<float> buf1;             // Muon momentum
@@ -301,7 +302,11 @@ struct ParamState {
     const std::size_t count = static_cast<std::size_t>(view.count);
     state.grad.assign(count, ComputeType{});
     state.ref_value.resize(count);
-    for (std::size_t i = 0; i < count; ++i) state.ref_value[i] = view.value[i];
+    state.ref_master.resize(count);
+    for (std::size_t i = 0; i < count; ++i) {
+      state.ref_value[i] = view.value[i];
+      state.ref_master[i] = view.master[i];
+    }
     if (state.spec.kind == 0) {
       state.m.assign(count, 0.0f);
       state.v.assign(count, 0.0f);
@@ -333,12 +338,13 @@ struct ParamState {
       const float step_size = lr / bias1;
       for (std::size_t i = 0; i < state.grad.size(); ++i) {
         const float g = AsF32(state.grad[i]) * grad_scale;
-        float p = AsF32(state.ref_value[i]);
+        float p = state.ref_master[i];
         p *= (1.0f - lr * state.spec.weight_decay);
         state.m[i] += (1.0f - state.spec.beta1) * (g - state.m[i]);
         state.v[i] += (1.0f - state.spec.beta2) * (g * g - state.v[i]);
         const float denom = std::sqrt(state.v[i] / bias2) + oc.adam_eps;
         p -= step_size * (state.m[i] / denom);
+        state.ref_master[i] = p;
         StoreFloat(&state.ref_value[i], p);
       }
     } else {
@@ -357,18 +363,14 @@ struct ParamState {
       params.ns_steps = oc.muon_ns_steps;
       params.red_dim = state.rows >= state.cols ? -1 : -2;
       params.nesterov = true;
-      nanochat::kernels::MuonUpdate(params, scaled.data(),
-                                    state.ref_value.data(), state.buf1.data(),
-                                    state.buf2.data());
+      nanochat::kernels::MuonUpdate(
+          params, scaled.data(), state.ref_master.data(),
+          state.ref_value.data(), state.buf1.data(), state.buf2.data());
     }
   }
 }
 
 void RunStepsTest(float clip) {
-#if defined(NANOCHAT_PRECISION_FP16)
-  (void)clip;
-  std::printf("optim_test: update checks skipped (fp16 build)\n");
-#else
   const Config config = MakeConfig();
   std::unique_ptr<Model> model = Model::Create(config);
   model->InitWeights(0x5eed1234ull);
@@ -402,7 +404,14 @@ void RunStepsTest(float clip) {
   }
 
   Rng rng(0x123456789abcdefull);
+#if defined(NANOCHAT_PRECISION_FP16)
+  // The fp32 master keeps the update precise. The residual difference is the
+  // fp16 gradient that the clip scale rounds through storage, amplified by the
+  // embedding's slow second moment.
+  constexpr float kTolerance = 2e-3f;
+#else
   constexpr float kTolerance = 2e-5f;
+#endif
   for (int step = 1; step <= 3; ++step) {
     double sum_sq = 0.0;
     for (ParamState& state : states) {
@@ -428,9 +437,9 @@ void RunStepsTest(float clip) {
 
     for (const ParamState& state : states) {
       bool reported = false;
-      for (std::size_t i = 0; i < state.ref_value.size(); ++i) {
-        const float got = AsF32(state.view->value[i]);
-        const float want = AsF32(state.ref_value[i]);
+      for (std::size_t i = 0; i < state.ref_master.size(); ++i) {
+        const float got = state.view->master[i];
+        const float want = state.ref_master[i];
         if (std::fabs(got - want) > kTolerance) {
           Fail(Format("%s[%zu] step %d: got %.8g want %.8g", state.view->name,
                       i, step, got, want));
@@ -442,7 +451,6 @@ void RunStepsTest(float clip) {
     }
   }
   std::printf("optim_test: grouping and updates ok (clip=%.6g)\n", clip);
-#endif
 }
 
 // ---------------------------------------------------------------------------
@@ -631,6 +639,7 @@ struct AnvilRef {
   int red_dim = -1;
   std::vector<ComputeType> grad;
   std::vector<ComputeType> value;
+  std::vector<float> master;
   std::vector<float> velocity;
   std::vector<float> lane_energy;
 };
@@ -639,9 +648,6 @@ struct AnvilRef {
 // parameter, including the rail schedule, the engage step, and the
 // `lr * weight_decay` decay coefficient.
 void TestAnvilSteps() {
-#if defined(NANOCHAT_PRECISION_FP16)
-  std::printf("optim_test: ANVIL update checks skipped (fp16 build)\n");
-#else
   const Config config = MakeConfig();
   std::unique_ptr<Model> model = Model::Create(config);
   model->InitWeights(0xa17e1000ull);
@@ -674,7 +680,11 @@ void TestAnvilSteps() {
     const std::size_t count = static_cast<std::size_t>(view.count);
     ref.grad.assign(count, ComputeType{});
     ref.value.resize(count);
-    for (std::size_t i = 0; i < count; ++i) ref.value[i] = view.value[i];
+    ref.master.resize(count);
+    for (std::size_t i = 0; i < count; ++i) {
+      ref.value[i] = view.value[i];
+      ref.master[i] = view.master[i];
+    }
     ref.velocity.assign(2 * count, 0.0f);
     const int lanes = ref.red_dim == -1 ? rows : cols;
     ref.lane_energy.assign(static_cast<std::size_t>(lanes), 0.0f);
@@ -718,14 +728,14 @@ void TestAnvilSteps() {
       params.num_maps = oc.anvil_num_maps;
       params.red_dim = ref.red_dim;
       params.nesterov = true;
-      nanochat::kernels::AnvilUpdate(params, ref.grad.data(), ref.value.data(),
-                                     ref.velocity.data(),
+      nanochat::kernels::AnvilUpdate(params, ref.grad.data(), ref.master.data(),
+                                     ref.value.data(), ref.velocity.data(),
                                      ref.lane_energy.data());
     }
     for (AnvilRef& ref : refs) {
-      for (std::size_t i = 0; i < ref.value.size(); ++i) {
-        const float got = AsF32(ref.view->value[i]);
-        const float want = AsF32(ref.value[i]);
+      for (std::size_t i = 0; i < ref.master.size(); ++i) {
+        const float got = ref.view->master[i];
+        const float want = ref.master[i];
         if (std::fabs(got - want) > kTolerance) {
           Fail(Format("ANVIL %s[%zu] step %d: got %.8g want %.8g",
                       ref.view->name, i, step, got, want));
@@ -735,7 +745,6 @@ void TestAnvilSteps() {
     }
   }
   std::printf("optim_test: ANVIL update wiring ok\n");
-#endif
 }
 
 // The AdamW cadence: with `adam_step_period` of 2 the AdamW groups update on

@@ -38,6 +38,8 @@ class TrainModel final : public Model {
   void SetGradEnabled(bool enabled) override { grad_enabled_ = enabled; }
   bool grad_enabled() const override { return grad_enabled_; }
   std::vector<ParamView> params() const override;
+  void SyncMaster() override;
+  void SyncCompute() override;
   void Save(const std::string& path) const override;
   void Load(const std::string& path) override;
 
@@ -85,6 +87,7 @@ class TrainModel final : public Model {
     std::string name;
     ComputeType* value = nullptr;
     ComputeType* grad = nullptr;
+    float* master = nullptr;
     std::int64_t count = 0;
     int rows = 0;
     int cols = 0;

@@ -219,21 +219,24 @@ __global__ void AnvilEqualizerKernel(int rows, int cols, bool reduce_cols,
 
 __global__ void AnvilApplyKernel(long long total, long long rail_stride,
                                  float lr, float weight_decay,
-                                 ComputeType* __restrict__ params,
+                                 float* __restrict__ master,
+                                 ComputeType* __restrict__ value,
                                  const float* __restrict__ velocity,
                                  const ComputeType* __restrict__ x) {
   const long long stride = static_cast<long long>(gridDim.x) * blockDim.x;
   for (long long i =
            static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x;
        i < total; i += stride) {
-    const float pv = AsFloatDev(params[i]);
+    const float pv = master[i];
     const float gv = AsFloatDev(x[i]);
     // Cautious decay: only shrink a parameter whose sign agrees with the slow
     // rail, the denoised gradient estimate.
     const float decay = (velocity[rail_stride + i] * pv >= 0.0f)
                             ? lr * weight_decay * pv
                             : 0.0f;
-    params[i] = ToComputeDev(pv - decay - lr * gv);
+    const float pi = pv - decay - lr * gv;
+    master[i] = pi;
+    value[i] = ToComputeDev(pi);
   }
 }
 
@@ -269,8 +272,8 @@ void EnsureAnvilWorkspace(std::size_t elements, std::size_t scratch_floats) {
 }  // namespace
 
 void AnvilUpdate(const AnvilParams& params, const ComputeType* stacked_grads,
-                 ComputeType* stacked_params, float* velocity,
-                 float* lane_energy) {
+                 float* stacked_master, ComputeType* stacked_values,
+                 float* velocity, float* lane_energy) {
   const int num_params = params.num_params > 0 ? params.num_params : 1;
   const int rows = params.rows;
   const int cols = params.cols;
@@ -420,7 +423,7 @@ void AnvilUpdate(const AnvilParams& params, const ComputeType* stacked_grads,
                        scratch);
   cuda_backend::Launch(AnvilApplyKernel, dim3(elem_grid), dim3(kThreads), 0,
                        total, rail_stride, params.lr, params.weight_decay,
-                       stacked_params, velocity, x);
+                       stacked_master, stacked_values, velocity, x);
 }
 
 }  // namespace kernels

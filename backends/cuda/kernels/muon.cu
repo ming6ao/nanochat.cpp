@@ -252,18 +252,21 @@ __global__ void MuonNorMuonKernel(int rows, int cols, bool reduce_cols,
 // --- Cautious weight decay + parameter update ------------------------------
 
 __global__ void MuonApplyKernel(long long total, float lr, float weight_decay,
-                                ComputeType* __restrict__ params,
+                                float* __restrict__ master,
+                                ComputeType* __restrict__ value,
                                 const ComputeType* __restrict__ x) {
   const long long stride = static_cast<long long>(gridDim.x) * blockDim.x;
   for (long long i =
            static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x;
        i < total; i += stride) {
-    const float pv = AsFloatDev(params[i]);
+    const float pv = master[i];
     const float gv = AsFloatDev(x[i]);
     // Cautious decay: only shrink a parameter that agrees in sign with the
     // update direction.
     const float decay = (gv * pv >= 0.0f) ? lr * weight_decay * pv : 0.0f;
-    params[i] = ToComputeDev(pv - lr * gv - decay);
+    const float pi = pv - lr * gv - decay;
+    master[i] = pi;
+    value[i] = ToComputeDev(pi);
   }
 }
 
@@ -298,7 +301,8 @@ void EnsureMuonWorkspace(std::size_t elements, std::size_t scratch_floats) {
 }  // namespace
 
 void MuonUpdate(const MuonParams& params, const ComputeType* stacked_grads,
-                ComputeType* stacked_params, float* buf1, float* buf2) {
+                float* stacked_master, ComputeType* stacked_values, float* buf1,
+                float* buf2) {
   const int num_params = params.num_params > 0 ? params.num_params : 1;
   const int rows = params.rows;
   const int cols = params.cols;
@@ -433,8 +437,8 @@ void MuonUpdate(const MuonParams& params, const ComputeType* stacked_grads,
   cuda_backend::Launch(MuonNorMuonKernel, dim3(num_params), dim3(kThreads), 0,
                        rows, cols, reduce_cols, params.beta2, x, buf2, scratch);
   cuda_backend::Launch(MuonApplyKernel, dim3(elem_grid), dim3(kThreads), 0,
-                       total, params.lr, params.weight_decay, stacked_params,
-                       x);
+                       total, params.lr, params.weight_decay, stacked_master,
+                       stacked_values, x);
 }
 
 }  // namespace kernels

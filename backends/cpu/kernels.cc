@@ -1118,8 +1118,8 @@ void EmbeddingBackward(int tokens, int dim, const int* ids,
 // AdamW
 // ---------------------------------------------------------------------------
 
-void AdamWUpdate(int n, const AdamWParams& params, ComputeType* p,
-                 const ComputeType* g, float* m, float* v) {
+void AdamWUpdate(int n, const AdamWParams& params, float* master,
+                 ComputeType* value, const ComputeType* g, float* m, float* v) {
   if (n <= 0) return;
   const float bias1 =
       1.0f - std::pow(params.beta1, static_cast<float>(params.step));
@@ -1128,15 +1128,16 @@ void AdamWUpdate(int n, const AdamWParams& params, ComputeType* p,
   const float step_size = params.lr / bias1;
   for (int i = 0; i < n; ++i) {
     const float grad = AsFloat(g[i]);
-    // Decoupled weight decay, applied to the parameter before the update.
-    float pi = AsFloat(p[i]) * (1.0f - params.lr * params.weight_decay);
+    // Decoupled weight decay, applied to the fp32 master before the update.
+    float pi = master[i] * (1.0f - params.lr * params.weight_decay);
     const float mi = m[i] + (1.0f - params.beta1) * (grad - m[i]);
     const float vi = v[i] + (1.0f - params.beta2) * (grad * grad - v[i]);
     m[i] = mi;
     v[i] = vi;
     const float denom = std::sqrt(vi / bias2) + params.eps;
     pi -= step_size * (mi / denom);
-    p[i] = ToCompute(pi);
+    master[i] = pi;
+    value[i] = ToCompute(pi);
   }
 }
 
@@ -1181,7 +1182,8 @@ void MuonMatmul(int m, int n, int k, const float* a, const float* b, float* c,
 }  // namespace
 
 void MuonUpdate(const MuonParams& params, const ComputeType* stacked_grads,
-                ComputeType* stacked_params, float* buf1, float* buf2) {
+                float* stacked_master, ComputeType* stacked_values, float* buf1,
+                float* buf2) {
   ConfigureThreads();
   const int num_params = params.num_params > 0 ? params.num_params : 1;
   const int rows = params.rows;
@@ -1204,7 +1206,8 @@ void MuonUpdate(const MuonParams& params, const ComputeType* stacked_grads,
   for (int m = 0; m < num_params; ++m) {
     const std::size_t off = static_cast<std::size_t>(m) * mat;
     const ComputeType* grad = stacked_grads + off;
-    ComputeType* param = stacked_params + off;
+    float* master = stacked_master + off;
+    ComputeType* value = stacked_values + off;
     float* momentum_buf = buf1 + off;
     float* second_buf =
         buf2 + static_cast<std::size_t>(m) * (reduce_cols ? rows : cols);
@@ -1422,16 +1425,19 @@ void MuonUpdate(const MuonParams& params, const ComputeType* stacked_grads,
       }
     }
 
-    // Cautious weight decay + parameter update.
+    // Cautious weight decay + parameter update, accumulated in the fp32
+    // master and mirrored into the compute copy.
 #if defined(_OPENMP)
 #pragma omp parallel for schedule(static)
 #endif
     for (std::size_t i = 0; i < mat; ++i) {
-      const float pv = AsFloat(param[i]);
+      const float pv = master[i];
       const float gv = x[i];
       const float decay =
           (gv * pv >= 0.0f) ? params.lr * params.weight_decay * pv : 0.0f;
-      param[i] = ToCompute(pv - params.lr * gv - decay);
+      const float pi = pv - params.lr * gv - decay;
+      master[i] = pi;
+      value[i] = ToCompute(pi);
     }
   }
 }
@@ -1446,8 +1452,8 @@ void MuonUpdate(const MuonParams& params, const ComputeType* stacked_grads,
 // the fp16 build keeps a double-accumulator fallback.
 
 void AnvilUpdate(const AnvilParams& params, const ComputeType* stacked_grads,
-                 ComputeType* stacked_params, float* velocity,
-                 float* lane_energy) {
+                 float* stacked_master, ComputeType* stacked_values,
+                 float* velocity, float* lane_energy) {
   ConfigureThreads();
   const int num_params = params.num_params > 0 ? params.num_params : 1;
   const int rows = params.rows;
@@ -1479,7 +1485,8 @@ void AnvilUpdate(const AnvilParams& params, const ComputeType* stacked_grads,
   for (int m = 0; m < num_params; ++m) {
     const std::size_t off = static_cast<std::size_t>(m) * mat;
     const ComputeType* grad = stacked_grads + off;
-    ComputeType* param = stacked_params + off;
+    float* master = stacked_master + off;
+    ComputeType* value = stacked_values + off;
     float* fast = velocity + off;
     float* slow = velocity + rail_stride + off;
     float* lane = lane_energy + static_cast<std::size_t>(m) * lane_count;
@@ -1632,10 +1639,12 @@ void AnvilUpdate(const AnvilParams& params, const ComputeType* stacked_grads,
 #pragma omp parallel for schedule(static)
 #endif
     for (std::size_t i = 0; i < mat; ++i) {
-      const float pv = AsFloat(param[i]);
+      const float pv = master[i];
       const float decay =
           (slow[i] * pv >= 0.0f) ? params.lr * params.weight_decay * pv : 0.0f;
-      param[i] = ToCompute(pv - decay - params.lr * x[i]);
+      const float pi = pv - decay - params.lr * x[i];
+      master[i] = pi;
+      value[i] = ToCompute(pi);
     }
   }
 }

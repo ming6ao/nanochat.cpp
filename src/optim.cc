@@ -125,7 +125,8 @@ struct MuonGroup {
   std::int64_t mat = 0;
   std::int64_t buf2_len = 0;
   std::vector<ParamView> params;
-  ComputeType* stacked_params = nullptr;
+  float* stacked_master = nullptr;
+  ComputeType* stacked_values = nullptr;
   float* buf1 = nullptr;
   float* buf2 = nullptr;
 };
@@ -143,7 +144,8 @@ struct AnvilGroup {
   std::int64_t flat_offset = 0;
   std::int64_t mat = 0;
   std::vector<ParamView> params;
-  ComputeType* stacked_params = nullptr;
+  float* stacked_master = nullptr;
+  ComputeType* stacked_values = nullptr;
   float* velocity = nullptr;     // 2 * num_params * mat floats
   float* lane_energy = nullptr;  // num_params * lane_count floats
 };
@@ -206,7 +208,7 @@ class NanochatOptimizer final : public Optimizer {
           params.weight_decay = group.weight_decay;
           params.step = adam_step;
           kernels::AdamWUpdate(static_cast<int>(group.params[i].count), params,
-                               group.params[i].value,
+                               group.params[i].master, group.params[i].value,
                                flat_ + group.grad_offsets[i],
                                group.m + group.moment_offsets[i],
                                group.v + group.moment_offsets[i]);
@@ -226,7 +228,7 @@ class NanochatOptimizer final : public Optimizer {
     const float muon_weight_decay = scheduler_.WeightDecay(step);
 
     for (MuonGroup& group : muon_groups_) {
-      GatherMuonParams(group);
+      GatherStackedMaster(group);
       MuonParams params;
       params.num_params = group.num_params;
       params.rows = group.rows;
@@ -239,17 +241,79 @@ class NanochatOptimizer final : public Optimizer {
       params.red_dim = group.red_dim;
       params.nesterov = true;
       kernels::MuonUpdate(params, flat_ + group.flat_offset,
-                          group.stacked_params, group.buf1, group.buf2);
-      ScatterMuonParams(group);
+                          group.stacked_master, group.stacked_values,
+                          group.buf1, group.buf2);
+      ScatterStacked(group);
     }
   }
 
   float GradNorm() const override { return grad_norm_; }
 
+  // Visits every parameter with its offset in the flat gradient layout:
+  // AdamW groups first, then Muon, then ANVIL.
+  template <typename Fn>
+  void ForEachParam(Fn fn) const {
+    for (const AdamWGroup& group : adamw_groups_) {
+      for (std::size_t i = 0; i < group.params.size(); ++i) {
+        fn(group.params[i], group.grad_offsets[i]);
+      }
+    }
+    for (const MuonGroup& group : muon_groups_) {
+      std::int64_t offset = group.flat_offset;
+      for (const ParamView& view : group.params) {
+        fn(view, offset);
+        offset += view.count;
+      }
+    }
+    for (const AnvilGroup& group : anvil_groups_) {
+      std::int64_t offset = group.flat_offset;
+      for (const ParamView& view : group.params) {
+        fn(view, offset);
+        offset += view.count;
+      }
+    }
+  }
+
+  // The fp32 master weights are model state, but they are saved here so a
+  // resumed fp16 run restores them exactly; the fp16 compute copy alone
+  // cannot hold the fine updates. The layout is the flat gradient layout.
+  void SaveMasterRecord(Checkpoint* checkpoint) const {
+    if (checkpoint == nullptr || total_count_ <= 0) return;
+    std::vector<float> host(static_cast<std::size_t>(total_count_), 0.0f);
+    ForEachParam([&](const ParamView& view, std::int64_t offset) {
+      if (view.master == nullptr || view.count <= 0) return;
+      kernels::Memcpy(host.data() + offset, view.master,
+                      static_cast<std::size_t>(view.count) * sizeof(float),
+                      CopyDir::kDeviceToHost);
+    });
+    TensorRecord record;
+    record.name = "master";
+    record.dtype = DType::kFp32;
+    record.shape.assign(1, total_count_);
+    record.data.resize(host.size() * sizeof(float));
+    std::memcpy(record.data.data(), host.data(), record.data.size());
+    checkpoint->AddOptimizerState(std::move(record));
+  }
+
+  void LoadMasterRecord(const TensorRecord& record) {
+    const std::size_t available = record.data.size();
+    ForEachParam([&](const ParamView& view, std::int64_t offset) {
+      if (view.master == nullptr || view.count <= 0) return;
+      const std::size_t wanted =
+          static_cast<std::size_t>(view.count) * sizeof(float);
+      const std::size_t at = static_cast<std::size_t>(offset) * sizeof(float);
+      if (at + wanted > available) return;
+      kernels::Memcpy(view.master, record.data.data() + at, wanted,
+                      CopyDir::kHostToDevice);
+    });
+    if (model_ != nullptr) model_->SyncCompute();
+  }
+
   // Optimizer-state checkpoint records (docs/post-training.md section 7): the
   // AdamW first/second moments and the Muon momentum/second-moment buffers,
   // beside the model parameters.
   void SaveState(Checkpoint* checkpoint) const {
+    SaveMasterRecord(checkpoint);
     for (const AdamWGroup& group : adamw_groups_) {
       const std::string name = std::string("adamw.") + KindName(group.kind);
       AddOptimizerStateRecord(checkpoint, name + ".m", group.m,
@@ -319,6 +383,11 @@ class NanochatOptimizer final : public Optimizer {
       load(name + ".velocity", group.velocity, 2 * mat_total);
       load(name + ".lane_energy", group.lane_energy, lane_total);
     }
+    const TensorRecord* master_record = checkpoint.FindOptimizerState("master");
+    if (master_record != nullptr && master_record->dtype == DType::kFp32) {
+      LoadMasterRecord(*master_record);
+      restored = true;
+    }
     return restored;
   }
 
@@ -363,6 +432,7 @@ class NanochatOptimizer final : public Optimizer {
 
  private:
   void Build(Model* model) {
+    model_ = model;
     views_ = model->params();
     const float scale = DmodelLrScale(model->config().hidden_dim);
 
@@ -504,8 +574,14 @@ class NanochatOptimizer final : public Optimizer {
     for (MuonGroup& group : muon_groups_) {
       const std::int64_t mat_total =
           static_cast<std::int64_t>(group.num_params) * group.mat;
-      group.stacked_params =
+      group.stacked_values =
           static_cast<ComputeType*>(kernels::Alloc(ElementBytes(mat_total)));
+#if defined(NANOCHAT_PRECISION_FP16)
+      group.stacked_master = static_cast<float*>(
+          kernels::Alloc(static_cast<std::size_t>(mat_total) * sizeof(float)));
+#else
+      group.stacked_master = reinterpret_cast<float*>(group.stacked_values);
+#endif
       group.buf1 = static_cast<float*>(
           kernels::Alloc(static_cast<std::size_t>(mat_total) * sizeof(float)));
       group.buf2 = static_cast<float*>(kernels::Alloc(
@@ -526,8 +602,14 @@ class NanochatOptimizer final : public Optimizer {
           static_cast<std::int64_t>(group.num_params) * group.mat;
       const std::int64_t lane_total =
           static_cast<std::int64_t>(group.num_params) * group.lane_count;
-      group.stacked_params =
+      group.stacked_values =
           static_cast<ComputeType*>(kernels::Alloc(ElementBytes(mat_total)));
+#if defined(NANOCHAT_PRECISION_FP16)
+      group.stacked_master = static_cast<float*>(
+          kernels::Alloc(static_cast<std::size_t>(mat_total) * sizeof(float)));
+#else
+      group.stacked_master = reinterpret_cast<float*>(group.stacked_values);
+#endif
       group.velocity = static_cast<float*>(kernels::Alloc(
           static_cast<std::size_t>(2 * mat_total) * sizeof(float)));
       group.lane_energy = static_cast<float*>(
@@ -552,12 +634,18 @@ class NanochatOptimizer final : public Optimizer {
       if (group.v != nullptr) kernels::Free(group.v);
     }
     for (MuonGroup& group : muon_groups_) {
-      if (group.stacked_params != nullptr) kernels::Free(group.stacked_params);
+      if (group.stacked_values != nullptr) kernels::Free(group.stacked_values);
+#if defined(NANOCHAT_PRECISION_FP16)
+      if (group.stacked_master != nullptr) kernels::Free(group.stacked_master);
+#endif
       if (group.buf1 != nullptr) kernels::Free(group.buf1);
       if (group.buf2 != nullptr) kernels::Free(group.buf2);
     }
     for (AnvilGroup& group : anvil_groups_) {
-      if (group.stacked_params != nullptr) kernels::Free(group.stacked_params);
+      if (group.stacked_values != nullptr) kernels::Free(group.stacked_values);
+#if defined(NANOCHAT_PRECISION_FP16)
+      if (group.stacked_master != nullptr) kernels::Free(group.stacked_master);
+#endif
       if (group.velocity != nullptr) kernels::Free(group.velocity);
       if (group.lane_energy != nullptr) kernels::Free(group.lane_energy);
     }
@@ -567,64 +655,36 @@ class NanochatOptimizer final : public Optimizer {
 
   // Copy every gradient into the flat buffer, in grouping order.
   void GatherGradients() {
-    for (AdamWGroup& group : adamw_groups_) {
-      for (std::size_t i = 0; i < group.params.size(); ++i) {
-        kernels::Memcpy(flat_ + group.grad_offsets[i], group.params[i].grad,
-                        ElementBytes(group.params[i].count),
-                        CopyDir::kDeviceToDevice);
-      }
-    }
-    for (MuonGroup& group : muon_groups_) {
-      std::int64_t offset = group.flat_offset;
-      for (const ParamView& view : group.params) {
-        kernels::Memcpy(flat_ + offset, view.grad, ElementBytes(view.count),
-                        CopyDir::kDeviceToDevice);
-        offset += view.count;
-      }
-    }
-    for (AnvilGroup& group : anvil_groups_) {
-      std::int64_t offset = group.flat_offset;
-      for (const ParamView& view : group.params) {
-        kernels::Memcpy(flat_ + offset, view.grad, ElementBytes(view.count),
-                        CopyDir::kDeviceToDevice);
-        offset += view.count;
-      }
+    ForEachParam([&](const ParamView& view, std::int64_t offset) {
+      kernels::Memcpy(flat_ + offset, view.grad, ElementBytes(view.count),
+                      CopyDir::kDeviceToDevice);
+    });
+  }
+
+  // Gather the fp32 master of every parameter in a stacked group.
+  template <typename Group>
+  static void GatherStackedMaster(Group& group) {
+    for (int i = 0; i < group.num_params; ++i) {
+      kernels::Memcpy(
+          group.stacked_master + static_cast<std::int64_t>(i) * group.mat,
+          group.params[static_cast<std::size_t>(i)].master,
+          static_cast<std::size_t>(group.mat) * sizeof(float),
+          CopyDir::kDeviceToDevice);
     }
   }
 
-  void GatherMuonParams(MuonGroup& group) {
+  // Write the updated master and the compute copy back to every parameter.
+  template <typename Group>
+  static void ScatterStacked(Group& group) {
     for (int i = 0; i < group.num_params; ++i) {
-      kernels::Memcpy(
-          group.stacked_params + static_cast<std::int64_t>(i) * group.mat,
-          group.params[static_cast<std::size_t>(i)].value,
-          ElementBytes(group.mat), CopyDir::kDeviceToDevice);
-    }
-  }
-
-  void ScatterMuonParams(MuonGroup& group) {
-    for (int i = 0; i < group.num_params; ++i) {
-      kernels::Memcpy(
-          group.params[static_cast<std::size_t>(i)].value,
-          group.stacked_params + static_cast<std::int64_t>(i) * group.mat,
-          ElementBytes(group.mat), CopyDir::kDeviceToDevice);
-    }
-  }
-
-  void GatherAnvilParams(AnvilGroup& group) {
-    for (int i = 0; i < group.num_params; ++i) {
-      kernels::Memcpy(
-          group.stacked_params + static_cast<std::int64_t>(i) * group.mat,
-          group.params[static_cast<std::size_t>(i)].value,
-          ElementBytes(group.mat), CopyDir::kDeviceToDevice);
-    }
-  }
-
-  void ScatterAnvilParams(AnvilGroup& group) {
-    for (int i = 0; i < group.num_params; ++i) {
-      kernels::Memcpy(
-          group.params[static_cast<std::size_t>(i)].value,
-          group.stacked_params + static_cast<std::int64_t>(i) * group.mat,
-          ElementBytes(group.mat), CopyDir::kDeviceToDevice);
+      const std::int64_t offset = static_cast<std::int64_t>(i) * group.mat;
+      kernels::Memcpy(group.params[static_cast<std::size_t>(i)].master,
+                      group.stacked_master + offset,
+                      static_cast<std::size_t>(group.mat) * sizeof(float),
+                      CopyDir::kDeviceToDevice);
+      kernels::Memcpy(group.params[static_cast<std::size_t>(i)].value,
+                      group.stacked_values + offset, ElementBytes(group.mat),
+                      CopyDir::kDeviceToDevice);
     }
   }
 
@@ -641,7 +701,7 @@ class NanochatOptimizer final : public Optimizer {
     const float anvil_wd = config_.anvil_weight_decay * config_.anvil_lr * lrm;
 
     for (AnvilGroup& group : anvil_groups_) {
-      GatherAnvilParams(group);
+      GatherStackedMaster(group);
       AnvilParams params;
       params.num_params = group.num_params;
       params.rows = group.rows;
@@ -657,12 +717,13 @@ class NanochatOptimizer final : public Optimizer {
       params.red_dim = group.red_dim;
       params.nesterov = true;
       kernels::AnvilUpdate(params, flat_ + group.flat_offset,
-                           group.stacked_params, group.velocity,
-                           group.lane_energy);
-      ScatterAnvilParams(group);
+                           group.stacked_master, group.stacked_values,
+                           group.velocity, group.lane_energy);
+      ScatterStacked(group);
     }
   }
 
+  Model* model_ = nullptr;
   OptimizerConfig config_;
   Scheduler scheduler_;
   std::vector<ParamView> views_;

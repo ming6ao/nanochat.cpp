@@ -244,21 +244,28 @@ void EmbeddingForward(int tokens, int dim, const int* ids,
 void EmbeddingBackward(int tokens, int dim, const int* ids,
                        const ComputeType* dout, ComputeType* dtable);
 
-void AdamWUpdate(int n, const AdamWParams& params, ComputeType* p,
-                 const ComputeType* g, float* m, float* v);
+// The optimizer updates the fp32 master weight and writes the compute copy
+// (`ComputeType`) beside it. In an fp16 build the master is a separate float
+// buffer, so a fine update survives; in the fp32 build the caller passes the
+// same buffer for `master` and `value`. Master weights are float even in an
+// fp16 build (docs/model.md).
+void AdamWUpdate(int n, const AdamWParams& params, float* master,
+                 ComputeType* value, const ComputeType* g, float* m, float* v);
 
-// `stacked_*` are `[num_params, rows, cols]`; `buf1` is the momentum buffer of
-// the same shape and `buf2` is the factored second moment of shape
-// `[num_params, rows, 1]` or `[num_params, 1, cols]`.
+// `stacked_grads` and `stacked_values` are `[num_params, rows, cols]`;
+// `stacked_master` is the fp32 master of the same shape. `buf1` is the
+// momentum buffer of the same shape and `buf2` is the factored second moment
+// of shape `[num_params, rows, 1]` or `[num_params, 1, cols]`.
 void MuonUpdate(const MuonParams& params, const ComputeType* stacked_grads,
-                ComputeType* stacked_params, float* buf1, float* buf2);
+                float* stacked_master, ComputeType* stacked_values, float* buf1,
+                float* buf2);
 
 // `velocity` holds `2 * num_params * rows * cols` floats: the fast rail first,
 // then the slow rail. `lane_energy` holds
 // `num_params * (red_dim == -1 ? rows : cols)` floats.
 void AnvilUpdate(const AnvilParams& params, const ComputeType* stacked_grads,
-                 ComputeType* stacked_params, float* velocity,
-                 float* lane_energy);
+                 float* stacked_master, ComputeType* stacked_values,
+                 float* velocity, float* lane_energy);
 
 // Computes the global L2 norm of `grads`, clips it to `clip` in place, and
 // writes the pre-clip norm to `out_norm`.

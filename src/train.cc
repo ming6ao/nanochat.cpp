@@ -387,6 +387,9 @@ bool Checkpointer::LoadModel(Model* model, Optimizer* optimizer, int* step,
     kernels::Memcpy(view.value, record->data.data(), bytes,
                     CopyDir::kHostToDevice);
   }
+  // The file holds the compute copy. Rebuild the fp32 master from it, so the
+  // optimizer continues from the loaded weights.
+  model->SyncMaster();
   // A parameter-only file has no optimizer-state records; the moments stay at
   // their initial zeros (the SFT warm-start behavior).
   if (optimizer != nullptr) LoadOptimizerState(checkpoint, optimizer);

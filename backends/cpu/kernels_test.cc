@@ -590,10 +590,12 @@ void TestAdamW() {
   p.step = 1;
   std::vector<ComputeType> w = ToStorage({1.0f});
   std::vector<ComputeType> g = ToStorage({1.0f});
+  float master = 1.0f;
   float m = 0.0f;
   float v = 0.0f;
-  kernels::AdamWUpdate(1, p, w.data(), g.data(), &m, &v);
-  CheckClose(U(w[0]), 0.9, 1e-4, "adamw step");
+  kernels::AdamWUpdate(1, p, &master, w.data(), g.data(), &m, &v);
+  CheckClose(master, 0.9, 1e-4, "adamw master step");
+  CheckClose(U(w[0]), 0.9, 1e-4, "adamw value step");
   CheckClose(m, 0.1, 1e-6, "adamw m");
   CheckClose(v, 0.001, 1e-6, "adamw v");
 }
@@ -614,13 +616,14 @@ void TestMuon() {
   std::vector<float> grad0 = RandomVec(9, &rng);
   std::vector<float> param0 = RandomVec(9, &rng);
   std::vector<ComputeType> grad = ToStorage(grad0);
-  std::vector<ComputeType> param = ToStorage(param0);
+  std::vector<float> master = param0;
+  std::vector<ComputeType> values = ToStorage(param0);
   std::vector<float> buf1(9, 0.0f);
   std::vector<float> buf2(3, 0.0f);
-  kernels::MuonUpdate(p, grad.data(), param.data(), buf1.data(), buf2.data());
-  std::vector<float> got = FromStorage(param);
+  kernels::MuonUpdate(p, grad.data(), master.data(), values.data(), buf1.data(),
+                      buf2.data());
   for (int i = 0; i < 9; ++i) {
-    CheckClose(got[i], param0[i], 1e-6, "muon lr=0 identity");
+    CheckClose(master[i], param0[i], 1e-6, "muon lr=0 identity");
     Check(std::isfinite(buf1[i]), "muon buf1 finite");
   }
   for (int i = 0; i < 3; ++i) Check(std::isfinite(buf2[i]), "muon buf2 finite");
@@ -648,17 +651,16 @@ void TestAnvil() {
   std::vector<float> grad0 = RandomVec(9, &rng);
   std::vector<float> param0 = RandomVec(9, &rng);
   std::vector<ComputeType> grad = ToStorage(grad0);
-  std::vector<ComputeType> param = ToStorage(param0);
-  const std::vector<ComputeType> param_before = param;
+  std::vector<float> master = param0;
+  std::vector<ComputeType> values = ToStorage(param0);
+  const std::vector<float> master_before = master;
   std::vector<float> velocity(18, 0.0f);
   std::vector<float> lane(3, 0.0f);
-  kernels::AnvilUpdate(p, grad.data(), param.data(), velocity.data(),
-                       lane.data());
-  std::vector<float> got = FromStorage(param);
+  kernels::AnvilUpdate(p, grad.data(), master.data(), values.data(),
+                       velocity.data(), lane.data());
   for (int i = 0; i < 9; ++i) {
-    // `lr = 0` must leave the stored value exactly as it was, in either
-    // precision (the float input is already rounded to storage).
-    CheckClose(U(param[i]), U(param_before[i]), 1e-6, "anvil lr=0 identity");
+    // `lr = 0` must leave the fp32 master exactly as it was.
+    CheckClose(master[i], master_before[i], 1e-6, "anvil lr=0 identity");
     Check(std::isfinite(velocity[i]), "anvil fast rail finite");
     Check(std::isfinite(velocity[9 + i]), "anvil slow rail finite");
   }
@@ -673,13 +675,13 @@ void TestAnvil() {
   live.num_maps = 0;
   std::vector<float> velocity_live(18, 0.0f);
   std::vector<float> lane_live(3, 0.0f);
-  kernels::AnvilUpdate(live, grad.data(), param.data(), velocity_live.data(),
-                       lane_live.data());
-  std::vector<float> moved = FromStorage(param);
+  std::vector<float> master_live = master;
+  kernels::AnvilUpdate(live, grad.data(), master_live.data(), values.data(),
+                       velocity_live.data(), lane_live.data());
   bool changed = false;
   for (int i = 0; i < 9; ++i) {
-    if (std::fabs(moved[i] - got[i]) > 1e-7) changed = true;
-    Check(std::isfinite(moved[i]), "anvil maps=0 finite");
+    if (std::fabs(master_live[i] - master[i]) > 1e-7) changed = true;
+    Check(std::isfinite(master_live[i]), "anvil maps=0 finite");
   }
   Check(changed, "anvil maps=0 moves the parameter");
   double lane_sum = 0.0;
@@ -693,9 +695,11 @@ void TestAnvil() {
   bad.rows = 0;
   bad.cols = 0;
   std::vector<ComputeType> one = ToStorage({1.0f});
+  float one_master = 1.0f;
   std::vector<float> onef(2, 0.0f);
-  kernels::AnvilUpdate(bad, one.data(), one.data(), onef.data(), onef.data());
-  CheckClose(U(one[0]), 1.0, 1e-6, "anvil no-op shape");
+  kernels::AnvilUpdate(bad, one.data(), &one_master, one.data(), onef.data(),
+                       onef.data());
+  CheckClose(one_master, 1.0, 1e-6, "anvil no-op shape");
 }
 
 void TestGlobalNorm() {

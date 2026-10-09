@@ -51,12 +51,14 @@ void RunCase(int num_params, int rows, int cols, int red_dim, bool nesterov,
   params.nesterov = nesterov;
 
   Rng rng;
-  const std::vector<float> g0 = RandomVec(total, &rng);
+  const std::vector<float> g_float = RandomVec(total, &rng);
+  const std::vector<float> g0 = FromStorage(ToStorage(g_float));
   const std::vector<float> p0 = RandomVec(total, &rng);
   std::vector<float> buf1_ref(total, 0.0f);
   std::vector<float> buf2_ref(num_params * red_index, 0.0f);
 
   DevBuf<ComputeType> grads(ToStorage(g0));
+  DevBuf<float> master(p0);
   DevBuf<ComputeType> params_dev(ToStorage(p0));
   DevBuf<float> buf1(buf1_ref);
   DevBuf<float> buf2(buf2_ref);
@@ -64,14 +66,14 @@ void RunCase(int num_params, int rows, int cols, int red_dim, bool nesterov,
   std::vector<float> p_ref = p0;
 
   for (int s = 0; s < steps; ++s) {
-    nanochat::kernels::MuonUpdate(params, grads.ptr, params_dev.ptr, buf1.ptr,
-                                  buf2.ptr);
+    nanochat::kernels::MuonUpdate(params, grads.ptr, master.ptr, params_dev.ptr,
+                                  buf1.ptr, buf2.ptr);
     nanochat::kernels::Synchronize();
     MuonUpdate(params, g0, &p_ref, &buf1_ref, &buf2_ref);
 
     char label[128];
     std::snprintf(label, sizeof(label), "%s step %d params", name, s + 1);
-    CheckVectorClose(FromStorage(params_dev.Download()), p_ref, 1e-5, label);
+    CheckVectorClose(master.Download(), p_ref, 1e-5, label);
     std::snprintf(label, sizeof(label), "%s step %d buf1", name, s + 1);
     CheckVectorClose(buf1.Download(), buf1_ref, 1e-5, label);
     std::snprintf(label, sizeof(label), "%s step %d buf2", name, s + 1);
@@ -100,11 +102,13 @@ int main() {
   // rows/cols <= 0 is a no-op.
   {
     DevBuf<ComputeType> one(1);
+    DevBuf<float> one_master(1);
     DevBuf<float> onef(1);
     MuonParams bad;
     bad.rows = 0;
     bad.cols = 0;
-    nanochat::kernels::MuonUpdate(bad, one.ptr, one.ptr, onef.ptr, onef.ptr);
+    nanochat::kernels::MuonUpdate(bad, one.ptr, one_master.ptr, one.ptr,
+                                  onef.ptr, onef.ptr);
     nanochat::kernels::Synchronize();
   }
 

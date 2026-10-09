@@ -27,11 +27,14 @@ class DataLoader;
 // A non-owning view of one model parameter and its gradient, as exposed for the
 // optimizer. `rows` and `cols` are the trailing matrix extents for parameters
 // that Muon orthogonalizes; `rows == 0` marks a vector/scalar that AdamW owns.
-// Moment buffers belong to the optimizer, not the model.
+// Moment buffers belong to the optimizer, not the model. `master` is the fp32
+// master weight; in an fp16 build it is a separate float buffer, and in an fp32
+// build it aliases `value` (docs/model.md).
 struct ParamView {
   const char* name = "";
   ComputeType* value = nullptr;
   ComputeType* grad = nullptr;
+  float* master = nullptr;
   std::int64_t count = 0;
   int rows = 0;
   int cols = 0;
@@ -98,6 +101,17 @@ class Model {
 
   // Parameter views in the optimizer's grouping order.
   virtual std::vector<ParamView> params() const = 0;
+
+  // Rebuilds every fp32 master weight from its compute copy (`value`). The
+  // optimizer writes both, so the sync is needed only after the compute copy
+  // changes outside the optimizer: weight initialization and a checkpoint
+  // load. The default is a no-op, so a model without master weights stays
+  // valid (docs/model.md).
+  virtual void SyncMaster() {}
+
+  // The reverse of `SyncMaster`: rebuilds every compute copy from its fp32
+  // master after a checkpoint load restores the master directly.
+  virtual void SyncCompute() {}
 
   // Self-describing checkpoint container (docs/model.md).
   virtual void Save(const std::string& path) const = 0;

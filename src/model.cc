@@ -134,6 +134,26 @@ class StagedRowScale {
   float* ptr_ = nullptr;
 };
 
+// Copies a device buffer through the host and converts every element. The
+// master/compute sync runs only at initialization and at a checkpoint load, so
+// the round trip is never on the training path.
+template <typename Src, typename Dst, typename Convert>
+void ConvertDeviceBuffer(const Src* src, Dst* dst, std::int64_t count,
+                         Convert convert) {
+  std::vector<Src> input(static_cast<std::size_t>(count));
+  kernels::Memcpy(input.data(), src,
+                  static_cast<std::size_t>(count) * sizeof(Src),
+                  CopyDir::kDeviceToHost);
+  std::vector<Dst> output(static_cast<std::size_t>(count));
+  for (std::int64_t i = 0; i < count; ++i) {
+    output[static_cast<std::size_t>(i)] =
+        convert(input[static_cast<std::size_t>(i)]);
+  }
+  kernels::Memcpy(dst, output.data(),
+                  static_cast<std::size_t>(count) * sizeof(Dst),
+                  CopyDir::kHostToDevice);
+}
+
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -273,6 +293,9 @@ TrainModel::~TrainModel() {
   for (Param& p : params_) {
     if (p.value != nullptr) kernels::Free(p.value);
     if (p.grad != nullptr) kernels::Free(p.grad);
+#if defined(NANOCHAT_PRECISION_FP16)
+    if (p.master != nullptr) kernels::Free(p.master);
+#endif
   }
   if (cos_table_dev_ != nullptr) kernels::Free(cos_table_dev_);
   if (sin_table_dev_ != nullptr) kernels::Free(sin_table_dev_);
@@ -290,6 +313,15 @@ TrainModel::Param& TrainModel::AddParam(const std::string& name,
       kernels::Alloc(static_cast<std::size_t>(count) * sizeof(ComputeType)));
   p.grad = static_cast<ComputeType*>(
       kernels::Alloc(static_cast<std::size_t>(count) * sizeof(ComputeType)));
+#if defined(NANOCHAT_PRECISION_FP16)
+  // The fp32 master weight survives the fp16 round trip of every update. The
+  // fp32 build reaches `value` through the same pointer.
+  p.master = static_cast<float*>(
+      kernels::Alloc(static_cast<std::size_t>(count) * sizeof(float)));
+  kernels::Memset(p.master, 0, static_cast<std::size_t>(count) * sizeof(float));
+#else
+  p.master = reinterpret_cast<float*>(p.value);
+#endif
   FillZero(p.value, count);
   FillZero(p.grad, count);
   params_.push_back(std::move(p));
@@ -368,6 +400,7 @@ void TrainModel::InitWeights(std::uint64_t seed) {
                   kVeGateChannels * kv_heads, 0.0f, 0.02f, &rng);
     }
   }
+  SyncMaster();
 }
 
 // ---------------------------------------------------------------------------
@@ -741,7 +774,10 @@ void TrainModel::RunForward(const int* tokens, const int* targets, int batch,
     ops::BlockForward(shape, lweights_[static_cast<std::size_t>(i)], acts,
                       tokens, cos_table(), sin_table(), x, x0,
                       ReadHost(resid_ + i), ReadHost(x0_lambda_ + i));
-    if (save_for_backward && i == backout_layer_) {
+    // Capture the mid-layer backout activation in both modes: the eval path
+    // reads the buffer too, so gating the copy on `save_for_backward` made the
+    // forward read uninitialized memory and moved the bits-per-byte result.
+    if (i == backout_layer_) {
       kernels::Memcpy(
           x_backout, acts.x_out,
           static_cast<std::size_t>(rows * hidden) * sizeof(ComputeType),
@@ -972,12 +1008,33 @@ std::vector<ParamView> TrainModel::params() const {
     view.name = p.name.c_str();
     view.value = p.value;
     view.grad = p.grad;
+    view.master = p.master;
     view.count = p.count;
     view.rows = p.rows;
     view.cols = p.cols;
     views.push_back(view);
   }
   return views;
+}
+
+void TrainModel::SyncMaster() {
+#if defined(NANOCHAT_PRECISION_FP16)
+  for (Param& p : params_) {
+    if (p.master == nullptr || p.value == nullptr || p.count <= 0) continue;
+    ConvertDeviceBuffer(p.value, p.master, p.count,
+                        [](ComputeType value) { return AsF(value); });
+  }
+#endif
+}
+
+void TrainModel::SyncCompute() {
+#if defined(NANOCHAT_PRECISION_FP16)
+  for (Param& p : params_) {
+    if (p.master == nullptr || p.value == nullptr || p.count <= 0) continue;
+    ConvertDeviceBuffer(p.master, p.value, p.count,
+                        [](float value) { return ToC(value); });
+  }
+#endif
 }
 
 void TrainModel::Save(const std::string& path) const {
@@ -993,15 +1050,12 @@ void TrainModel::Save(const std::string& path) const {
     out.write(p.name.data(), name_len);
     const std::uint64_t elements = static_cast<std::uint64_t>(p.count);
     out.write(reinterpret_cast<const char*>(&elements), sizeof(elements));
-    std::vector<ComputeType> raw(static_cast<std::size_t>(p.count));
-    kernels::Memcpy(raw.data(), p.value,
-                    static_cast<std::size_t>(p.count) * sizeof(ComputeType),
-                    CopyDir::kDeviceToHost);
     std::vector<float> buffer(static_cast<std::size_t>(p.count));
-    for (std::int64_t i = 0; i < p.count; ++i) {
-      buffer[static_cast<std::size_t>(i)] =
-          AsF(raw[static_cast<std::size_t>(i)]);
-    }
+    // Save the fp32 master weight: the fp16 compute copy cannot hold the fine
+    // updates that a resume must keep.
+    kernels::Memcpy(buffer.data(), p.master,
+                    static_cast<std::size_t>(p.count) * sizeof(float),
+                    CopyDir::kDeviceToHost);
     out.write(reinterpret_cast<const char*>(buffer.data()),
               static_cast<std::streamsize>(buffer.size() * sizeof(float)));
   }
@@ -1035,6 +1089,10 @@ void TrainModel::Load(const std::string& path) {
         raw[static_cast<std::size_t>(i)] =
             ToC(buffer[static_cast<std::size_t>(i)]);
       }
+      // Restore the fp32 master, then derive the compute copy from it.
+      kernels::Memcpy(p.master, buffer.data(),
+                      static_cast<std::size_t>(limit) * sizeof(float),
+                      CopyDir::kHostToDevice);
       kernels::Memcpy(p.value, raw.data(),
                       static_cast<std::size_t>(limit) * sizeof(ComputeType),
                       CopyDir::kHostToDevice);

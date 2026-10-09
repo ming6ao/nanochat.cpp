@@ -172,7 +172,10 @@ Design for the Turing target. The T4 card is the second GPU family that
 selection rules.
 
 Status: partially implemented. The build configs exist. The correctness gates
-on Turing are not recorded yet.
+on Turing are not recorded yet. The fp16 build keeps an fp32 master weight per
+parameter and updates it in fp32, then mirrors each update into the half
+compute copy (see the precision section above and [kernels.md](kernels.md)).
+Loss scaling is still absent.
 
 ### 1. Goal
 
