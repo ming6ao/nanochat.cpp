@@ -113,6 +113,16 @@ py_test(
     size = "small",
 )
 
+# T0: the RL bridge renders prompts, speaks the worker pipe protocol, and
+# reports the loss. Hermetic: a fake worker, tokenizer, task, and shell tool,
+# so it needs no library, no Bazel, and no GPU.
+py_test(
+    name = "rl_test",
+    srcs = ["tests/rl_test.py"],
+    deps = [":nanochat_cpp"],
+    size = "small",
+)
+
 # T1: the CUDA flavor of the fixture-parity test. The same source and data as
 # `api_test`, but linked against the CUDA library under `--config=cuda`.
 py_test(
@@ -174,5 +184,6 @@ test_suite(
         ":plan_test",
         ":chat_test",
         ":toolchain_test",
+        ":rl_test",
     ],
 )

@@ -220,6 +220,55 @@ cc_test(
     tags = ["gpu"],
 )
 
+# RL parity: drives the shared `RlStep` over the rollouts, the targets, and the
+# advantages recorded by `tools/dump_rl_fixture.py`, then runs the file-driven
+# `//src:rl_step_main` on the same fixture and compares the loss, the gradient
+# norm, and the parameter trajectory. The fixture records the model-independent
+# normalization reference (the valid-target count and the divisor
+# `num_valid * num_passes * examples_per_rank`), which the test also checks.
+# The binary is launched as a subprocess from the runfiles tree, so this test
+# exercises the fixture input/output, not just the in-process step.
+cc_test(
+    name = "rl_parity_test",
+    srcs = ["rl_parity_test.cc"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    data = [
+        "data/rl_parity.bin",
+        "//src:rl_step_main",
+    ],
+    args = ["$(rootpath data/rl_parity.bin)"],
+    deps = [
+        ":oracle_fixture",
+        "//include/nanochat:nanochat",
+        "//src:model",
+        "//src:rl",
+    ],
+    size = "small",
+)
+
+# Same gate on the CUDA backend. Kept out of the default CPU loop by the `gpu`
+# tag; `tools/nanochat test --gpu //tests:rl_parity_cuda_test` runs it.
+cc_test(
+    name = "rl_parity_cuda_test",
+    srcs = ["rl_parity_test.cc"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    data = [
+        "data/rl_parity.bin",
+        "//src:rl_step_main",
+    ],
+    args = ["$(rootpath data/rl_parity.bin)"],
+    deps = [
+        ":oracle_fixture",
+        "//include/nanochat:nanochat",
+        "//src:model",
+        "//src:rl",
+    ],
+    size = "small",
+    tags = ["gpu"],
+)
+
 # Score parity: runs the real `score_main` on the synthetic CORE fixture from
 # `tools/dump_eval_fixture.py` and compares its per-position NLL, argmax, and
 # focused logits against the recorded PyTorch reference. The fixture carries
@@ -499,6 +548,7 @@ test_suite(name = "all", tests = [
     ":oracle_cuda_test",
     ":train_parity_test",
     ":train_parity_cuda_test",
+    ":rl_parity_test",
     ":generate_parity_test",
     ":generate_parity_cuda_test",
     ":score_parity_test",

@@ -29,6 +29,7 @@ tools/nanochat <command> [args...]
                              default); see docs/sandbox.md
   run <profile> -- <cmd...>  run a command under a sandbox profile
   train -- <cmd...>          alias for: run train -- <cmd...>
+  rl    -- <cmd...>          alias for: run train -- <cmd...>
   eval  -- <cmd...>          alias for: run eval  -- <cmd...>
   bench -- <cmd...>          alias for: run t3-bench -- <cmd...>
   profile [opts]             build + run the attention benchmark under the GPU broker
@@ -208,6 +209,7 @@ case "$command" in
     ;;
 
   train) run_profile train "$@" ;;
+  rl) run_profile train "$@" ;;
   eval) run_profile eval "$@" ;;
   bench) run_profile t3-bench "$@" ;;
 

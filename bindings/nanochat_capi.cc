@@ -41,12 +41,13 @@
 #include "nanochat/scheduler.h"
 #include "nanochat/tokenizer.h"
 #include "src/parquet/reader.h"
+#include "src/rl.h"
 
 namespace {
 
 // The C ABI version. Bump this string on every change to the surface or to a
 // mirrored struct; docs/python.md section 13 names that rule.
-constexpr char kNanochatVersion[] = "0.4.0";
+constexpr char kNanochatVersion[] = "0.5.0";
 
 // The message for the current thread. A `thread_local` string keeps the
 // pointer from `nanochat_last_error` valid until the next failure on this
@@ -372,6 +373,30 @@ void nanochat_zero_grad(nanochat_model* model) {
   });
 }
 
+float nanochat_rl_step(nanochat_model* model, nanochat_optim* optimizer,
+                       const int* tokens, const int* targets,
+                       const float* advantages, int batch, int seq,
+                       int num_passes, int examples_per_rank, int step) {
+  return Guard("nanochat_rl_step", 0.0f, [&]() -> float {
+    if (model == nullptr || tokens == nullptr || targets == nullptr ||
+        advantages == nullptr) {
+      throw std::invalid_argument("model or input buffer is null");
+    }
+    if (batch <= 0 || seq <= 0) {
+      throw std::invalid_argument("batch and seq must be positive");
+    }
+    // A null optimizer runs the forward and the weighted backward without an
+    // update. The divisor `num_valid * num_passes * examples_per_rank` and the
+    // ForwardLoss/BackwardWeighted/Optimizer::Step sequence live in `RlStep`
+    // (docs/training-seam.md section 5.7).
+    nanochat::Optimizer* raw =
+        optimizer != nullptr ? optimizer->optimizer.get() : nullptr;
+    return nanochat::RlStep(model->model.get(), raw, tokens, targets,
+                            advantages, batch, seq, num_passes,
+                            examples_per_rank, step);
+  });
+}
+
 int nanochat_param_count(nanochat_model* model) {
   return Guard("nanochat_param_count", 0, [&]() -> int {
     if (model == nullptr) throw std::invalid_argument("model is null");
@@ -668,6 +693,52 @@ void nanochat_generate(nanochat_model* model, const int* prompt, int length,
     std::vector<nanochat::GeneratedSequence> results;
     nanochat::GenerateBatch(model->model.get(), prompt, length, cpp_params,
                             &results);
+
+    model->gen_tokens.clear();
+    model->gen_mask.clear();
+    model->gen_lengths.clear();
+    model->gen_offsets.clear();
+    for (const nanochat::GeneratedSequence& row : results) {
+      model->gen_offsets.push_back(static_cast<int>(model->gen_tokens.size()));
+      model->gen_lengths.push_back(static_cast<int>(row.tokens.size()));
+      model->gen_tokens.insert(model->gen_tokens.end(), row.tokens.begin(),
+                               row.tokens.end());
+      model->gen_mask.insert(model->gen_mask.end(), row.mask.begin(),
+                             row.mask.end());
+    }
+    out->count = static_cast<int>(results.size());
+    out->tokens = model->gen_tokens.data();
+    out->mask = model->gen_mask.data();
+    out->lengths = model->gen_lengths.data();
+    out->offsets = model->gen_offsets.data();
+  });
+}
+
+void nanochat_generate_multi(nanochat_model* model, const int* prompts,
+                             const nanochat_generate_multi_params* params,
+                             nanochat_sequences* out) {
+  GuardVoid("nanochat_generate_multi", [&]() {
+    if (model == nullptr || prompts == nullptr || out == nullptr) {
+      throw std::invalid_argument("model, prompts, or out is null");
+    }
+    if (params == nullptr) {
+      throw std::invalid_argument("params is null");
+    }
+
+    nanochat::GenerateParams cpp_params;
+    cpp_params.num_samples = params->params.num_samples;
+    cpp_params.max_tokens = params->params.max_tokens;
+    cpp_params.temperature = params->params.temperature;
+    cpp_params.top_k = params->params.top_k;
+    cpp_params.seed = params->params.seed;
+    cpp_params.stop_id = params->params.stop_id;
+    cpp_params.bos_id = params->params.bos_id;
+    cpp_params.stop_ids = params->params.stop_ids;
+
+    std::vector<nanochat::GeneratedSequence> results;
+    nanochat::GenerateMultiPrompt(model->model.get(), prompts,
+                                  params->num_prompts, params->prompt_len,
+                                  cpp_params, params->row_stops, &results);
 
     model->gen_tokens.clear();
     model->gen_mask.clear();

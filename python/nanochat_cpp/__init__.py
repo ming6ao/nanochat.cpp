@@ -10,10 +10,12 @@ One Python surface with three layers:
   for build, test, lint, and doctor.
 
 The package imports only the Python standard library. The compute layer never
-imports ``torch``. ``chat`` owns the chat evaluation front end.
+imports ``torch``. ``chat`` owns the chat evaluation front end. ``rl`` owns
+the reinforcement-learning bridge: it renders the prompts, drives the
+persistent C++ worker, and scores the rollouts (docs/rl-notebook.md).
 """
 
-from . import _build, _core, _lib, api, chat, plan, toolchain
+from . import _build, _core, _lib, api, chat, plan, rl, toolchain
 from ._build import BuildError
 from ._core import NanochatError
 from .api import (
@@ -57,5 +59,6 @@ __all__ = [
     "api",
     "chat",
     "plan",
+    "rl",
     "toolchain",
 ]

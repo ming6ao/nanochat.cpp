@@ -2,7 +2,9 @@
 
 Every shell subcommand of ``tools/nanochat`` appears here once. The functions
 in :mod:`nanochat_cpp.toolchain` read this table, so a new shell subcommand is
-one table row. The module imports only the Python standard library.
+one table row. The ``rl`` row is the reinforcement-learning entry: an alias of
+``train`` for the persistent worker (``docs/rl-notebook.md`` section 4). The
+module imports only the Python standard library.
 """
 
 from __future__ import annotations
@@ -35,6 +37,7 @@ COMMANDS = (
     Command("prune", "reap orphaned Bazel output bases"),
     Command("run", "run a command under a sandbox profile"),
     Command("train", "alias for: run train -- <cmd...>", alias=True),
+    Command("rl", "alias for: train -- <rl_worker...>", alias=True),
     Command("eval", "alias for: run eval -- <cmd...>", alias=True),
     Command("bench", "alias for: run t3-bench -- <cmd...>", alias=True),
     Command("profile", "build and run the attention benchmark"),

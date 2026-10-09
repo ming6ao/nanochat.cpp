@@ -447,6 +447,25 @@ nanochat_model* CheckModel() {
   Check("generate: rows are nonempty",
         sequences.lengths != nullptr && sequences.lengths[0] > 0);
 
+  // The multi-prompt entry reuses the same staging buffers. Two prompts and
+  // two samples produce four rows in prompt-major order.
+  const int prompts[4] = {1, 2, 3, 4};
+  nanochat_generate_multi_params multi_params;
+  std::memset(&multi_params, 0, sizeof(multi_params));
+  multi_params.num_prompts = 2;
+  multi_params.prompt_len = 2;
+  multi_params.row_stops = nullptr;
+  multi_params.params = params;
+  nanochat_sequences multi_sequences;
+  std::memset(&multi_sequences, 0, sizeof(multi_sequences));
+  nanochat_generate_multi(model, prompts, &multi_params, &multi_sequences);
+  Check("generate_multi: row count", multi_sequences.count == 4);
+  Check("generate_multi: token buffer", multi_sequences.tokens != nullptr);
+  Check("generate_multi: lengths buffer", multi_sequences.lengths != nullptr);
+  Check("generate_multi: offsets buffer", multi_sequences.offsets != nullptr);
+  Check("generate_multi: rows are nonempty",
+        multi_sequences.lengths != nullptr && multi_sequences.lengths[0] > 0);
+
   // Checkpoint round trip through the C surface.
   const std::string path = TempPath("bindings_capi.nchkpt");
   nanochat_save(model, path.c_str());
@@ -608,6 +627,143 @@ void CheckTrainStep() {
   }
 }
 
+// The reinforcement-learning step (docs/training-seam.md section 5.7,
+// docs/post-training.md section 5.2). `nanochat_rl_step` runs `ForwardLoss`,
+// then `BackwardWeighted`, then `Optimizer::Step`, and the divisor
+// `num_valid * num_passes * examples_per_rank` is computed in C++. These
+// checks prove the divisor is applied, that the two normalization inputs
+// scale the gradient, that the step starts from a fresh gradient, and that the
+// optimizer step runs.
+void CheckRlStep() {
+  const nanochat_config config = TinyConfig();
+  const int batch = 2;
+  const int seq = 4;
+  const int rows = batch * seq;
+  const std::vector<int> tokens = MakeTokens(batch, seq, config.vocab_size);
+  std::vector<int> targets = MakeTargets(batch, seq, config.vocab_size);
+  targets[1] = -1;  // valid == rows - 2 == 6
+  targets[6] = -1;
+
+  // A non-uniform per-row advantage. The ignored rows carry weight 0, which
+  // the classifier also enforces on its own.
+  const float pattern[8] = {0.5f, 0.0f,   1.5f, -0.75f,
+                            2.0f, -1.25f, 0.0f, 0.25f};
+  std::vector<float> advantages(static_cast<std::size_t>(rows));
+  for (int i = 0; i < rows; ++i) {
+    advantages[static_cast<std::size_t>(i)] = pattern[i];
+  }
+
+  // The reference gradient: the weighted backward at scale 1, which is the
+  // RL step with num_passes == examples_per_rank == 1. At those values the
+  // divisor is num_valid, so the RL scale is 1 and the two must agree.
+  nanochat_model* reference = nanochat_model_create(&config, /*seed=*/55);
+  Check("rl_step: create returns a reference handle", reference != nullptr);
+  if (reference != nullptr) {
+    nanochat_forward_loss(reference, tokens.data(), targets.data(), batch, seq);
+    nanochat_zero_grad(reference);
+    nanochat_backward_weighted(reference, advantages.data(), 1.0f);
+  }
+
+  nanochat_model* actual = nanochat_model_create(&config, /*seed=*/55);
+  Check("rl_step: create returns a handle", actual != nullptr);
+  if (reference != nullptr && actual != nullptr) {
+    const float loss =
+        nanochat_rl_step(actual, nullptr, tokens.data(), targets.data(),
+                         advantages.data(), batch, seq, /*num_passes=*/1,
+                         /*examples_per_rank=*/1, /*step=*/1);
+    Check("rl_step: returns a finite loss", std::isfinite(loss));
+    CheckScaledGradients(reference, actual, 1.0,
+                         "rl_step: the singular divisor matches the weighted "
+                         "backward",
+                         kGradientTolerance);
+
+    // `examples_per_rank` enters the divisor: a value of 4 quarters every
+    // gradient. Python never computes this factor.
+    nanochat_rl_step(actual, nullptr, tokens.data(), targets.data(),
+                     advantages.data(), batch, seq, /*num_passes=*/1,
+                     /*examples_per_rank=*/4, /*step=*/1);
+    CheckScaledGradients(reference, actual, 0.25,
+                         "rl_step: examples_per_rank divides the gradient",
+                         kGradientTolerance);
+
+    // `num_passes` enters the divisor too: a value of 2 halves every gradient.
+    nanochat_rl_step(actual, nullptr, tokens.data(), targets.data(),
+                     advantages.data(), batch, seq, /*num_passes=*/2,
+                     /*examples_per_rank=*/1, /*step=*/1);
+    CheckScaledGradients(reference, actual, 0.5,
+                         "rl_step: num_passes divides the gradient",
+                         kGradientTolerance);
+  }
+
+  // The optimizer step runs: a parameter changes with a non-null optimizer and
+  // stays put with a null one.
+  const nanochat_optim_config optim_config = TinyOptimizerConfig();
+  nanochat_model* held = nanochat_model_create(&config, /*seed=*/55);
+  Check("rl_step: create returns a held handle", held != nullptr);
+  if (held != nullptr) {
+    nanochat_param param;
+    std::memset(&param, 0, sizeof(param));
+    Check("rl_step: param_info reads the first view",
+          nanochat_param_info(held, 0, &param) == 0);
+    const int element_size = nanochat_compute_type_size();
+    const std::size_t bytes = static_cast<std::size_t>(param.count) *
+                              static_cast<std::size_t>(element_size);
+    std::vector<unsigned char> before(bytes);
+    std::vector<unsigned char> after(bytes);
+    Check("rl_step: read the initial value",
+          nanochat_param_read(held, 0, /*grad=*/0, 0, param.count,
+                              before.data()) == param.count);
+
+    // A null optimizer runs the step without an update.
+    nanochat_rl_step(held, nullptr, tokens.data(), targets.data(),
+                     advantages.data(), batch, seq, 1, 1, 1);
+    Check("rl_step: read the unchanged value",
+          nanochat_param_read(held, 0, /*grad=*/0, 0, param.count,
+                              after.data()) == param.count);
+    Check("rl_step: a null optimizer leaves the parameters unchanged",
+          before == after);
+
+    nanochat_optim* optimizer = nanochat_optim_create(held, &optim_config);
+    Check("rl_step: create returns an optimizer", optimizer != nullptr);
+    if (optimizer != nullptr) {
+      const float loss =
+          nanochat_rl_step(held, optimizer, tokens.data(), targets.data(),
+                           advantages.data(), batch, seq, 1, 1, /*step=*/1);
+      Check("rl_step: a non-null optimizer returns a finite loss",
+            std::isfinite(loss));
+      Check("rl_step: a non-null optimizer reports a finite grad norm",
+            std::isfinite(nanochat_optim_grad_norm(optimizer)));
+      Check("rl_step: read the stepped value",
+            nanochat_param_read(held, 0, /*grad=*/0, 0, param.count,
+                                after.data()) == param.count);
+      Check("rl_step: the optimizer updates a parameter", before != after);
+      nanochat_optim_free(optimizer);
+    }
+    nanochat_model_free(held);
+  }
+
+  // Error handling: a null pointer and a bad normalization input are errors,
+  // not crashes, and each reports the function name. The plain backward first
+  // seeds the thread-local error with a different name, so the check cannot
+  // pass on a stale message.
+  nanochat_backward(nullptr);
+  nanochat_rl_step(nullptr, nullptr, tokens.data(), targets.data(),
+                   advantages.data(), batch, seq, 1, 1, 1);
+  Check("rl_step: a null model sets the error",
+        std::strstr(nanochat_last_error(), "nanochat_rl_step") != nullptr);
+  nanochat_rl_step(actual, nullptr, tokens.data(), targets.data(), nullptr,
+                   batch, seq, 1, 1, 1);
+  Check("rl_step: a null advantage buffer sets the error",
+        std::strstr(nanochat_last_error(), "nanochat_rl_step") != nullptr);
+  nanochat_rl_step(actual, nullptr, tokens.data(), targets.data(),
+                   advantages.data(), batch, seq, /*num_passes=*/0, 1, 1);
+  Check("rl_step: a zero num_passes sets the error",
+        std::strstr(nanochat_last_error(), "nanochat_rl_step") != nullptr);
+
+  nanochat_model_free(reference);
+  nanochat_model_free(actual);
+}
+
 // Tokenizer, encode/decode, the document loader, and EvalBpb.
 void CheckTokenizerAndLoader(const char* parquet_path,
                              const char* tokenizer_path,
@@ -671,6 +827,7 @@ int main(int argc, char** argv) {
   CheckParams();
   CheckWeightedBackward();
   CheckTrainStep();
+  CheckRlStep();
 
   nanochat_model* model = CheckModel();
   if (model != nullptr) {

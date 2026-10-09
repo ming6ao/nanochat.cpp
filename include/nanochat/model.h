@@ -241,6 +241,25 @@ void GenerateBatch(Model* model, const int* prompt, int prompt_len,
                    const GenerateParams& params,
                    std::vector<GeneratedSequence>* out);
 
+// Multi-prompt batched sampling: the whole rollout in one call
+// (docs/rl-notebook.md section 5 phase 5). `prompts` holds
+// `num_prompts * prompt_len` row-major prompt ids and every prompt has the same
+// length; the call samples `params.num_samples` rows per prompt, so `out` is
+// resized to `num_prompts * params.num_samples` rows in prompt-major order
+// (prompt 0's rows first, then prompt 1's, and so on). `row_stops` optionally
+// gives one terminal id per *output* row, that is `num_prompts *
+// params.num_samples` entries in the same prompt-major order; a negative entry
+// disables stopping for that row, and a null pointer reuses `params.stop_id`
+// and `params.stop_ids` for every prompt. The call issues one `GenerateBatch`
+// per prompt and returns every prompt's rows end to end, so the caller makes a
+// single call for the whole rollout. The call is forward-only; a null `model`
+// or `prompts`, a nonpositive `num_prompts` or `prompt_len`, or a nonpositive
+// `num_samples` produces an empty `out`.
+void GenerateMultiPrompt(Model* model, const int* prompts, int num_prompts,
+                         int prompt_len, const GenerateParams& params,
+                         const int* row_stops,
+                         std::vector<GeneratedSequence>* out);
+
 }  // namespace nanochat
 
 #endif  // NANOCHAT_MODEL_H_

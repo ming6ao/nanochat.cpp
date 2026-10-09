@@ -43,6 +43,7 @@ cc_library(
         "cli.h",
         "distributed.h",
         "eval.h",
+        "generate.h",
         "model_impl.h",
         "ops.h",
         "optim_state.h",
@@ -64,6 +65,71 @@ cc_library(
         # `train.cc` builds a document-mode loader from the native parquet
         # reader (docs/parquet-native.md), so the workflow links it too.
         "//src/parquet:parquet",
+        "//include/nanochat:nanochat",
+    ],
+)
+
+# The reinforcement-learning optimizer step (docs/rl-notebook.md section 4,
+# docs/training-seam.md section 5.7). One library so the divisor lives in one
+# place and the file-driven `rl_step` binary, the persistent worker, and the C
+# ABI all share `RlStep` instead of copying it. It links the public headers and
+# the workflow (for `Model`/`Optimizer`), so it adds no vendor dependency.
+cc_library(
+    name = "rl",
+    srcs = ["rl.cc"],
+    hdrs = ["rl.h"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    deps = [
+        ":model",
+        "//include/nanochat:nanochat",
+    ],
+)
+
+# The `NANOORC1` fixture container (docs/rl-notebook.md section 4). The
+# persistent worker reads its configuration and initial parameters from the
+# same fixture the file-driven `rl_step` binary consumes, so the worker has a
+# fixture-driven smoke mode that needs no bridge. It is dependency-free, so a
+# production binary can link it without depending on `//tests`.
+cc_library(
+    name = "rl_fixture",
+    srcs = ["rl_fixture.cc"],
+    hdrs = ["rl_fixture.h"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    deps = ["//include/nanochat:nanochat"],
+)
+
+# The persistent reinforcement-learning worker and its pipe protocol
+# (docs/rl-notebook.md section 4, docs/training-seam.md section 6.4). It holds
+# the model and the optimizer across messages and reaches the shared `RlStep`
+# through `//src:rl`.
+cc_library(
+    name = "rl_worker_lib",
+    srcs = ["rl_worker.cc"],
+    hdrs = ["rl_worker.h"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    deps = [
+        ":model",
+        ":rl",
+        "//include/nanochat:nanochat",
+    ],
+)
+
+# The worker entry point. Without `--steps` it serves the pipe protocol on
+# stdin/stdout; with `--fixture --steps N` it replays recorded rollouts so the
+# worker can be gated without the Python bridge.
+cc_binary(
+    name = "rl_worker",
+    srcs = ["rl_worker_main.cc"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    deps = [
+        ":model",
+        ":rl",
+        ":rl_fixture",
+        ":rl_worker_lib",
         "//include/nanochat:nanochat",
     ],
 )
@@ -385,6 +451,24 @@ cc_binary(
     deps = [
         ":model",
         "//src/tokenizer:tokenizer",
+        "//include/nanochat:nanochat",
+    ],
+)
+
+# The file-driven reinforcement-learning step (docs/rl-notebook.md section 4,
+# docs/training-seam.md section 6.4). It reads a fixture with the initial
+# parameters, the recorded rollouts, the targets, and the advantages, runs the
+# *shared* `RlStep`, and writes the loss, the gradient norm, and the parameter
+# trajectory. It is the RL analog of the training-parity harness, so it is the
+# correctness gate for the objective.
+cc_binary(
+    name = "rl_step_main",
+    srcs = ["rl_step_main.cc"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    deps = [
+        ":model",
+        ":rl",
         "//include/nanochat:nanochat",
     ],
 )

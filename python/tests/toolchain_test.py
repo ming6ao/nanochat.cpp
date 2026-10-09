@@ -94,6 +94,9 @@ class ToolchainTest(unittest.TestCase):
                    ["run", "t2-parity", "--", "binary", "--x"])
         self.check(self.toolchain.train(["binary"]),
                    ["train", "--", "binary"])
+        # The RL entry is an alias of the `train` profile.
+        self.check(self.toolchain.rl(["rl_worker"]),
+                   ["train", "--", "rl_worker"])
         self.check(self.toolchain.eval(["binary"]),
                    ["eval", "--", "binary"])
         self.check(self.toolchain.bench(["binary"]),

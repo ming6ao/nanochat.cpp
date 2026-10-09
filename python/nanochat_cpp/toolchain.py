@@ -37,6 +37,7 @@ __all__ = [
     "lint",
     "prune",
     "profile",
+    "rl",
     "run",
     "shutdown",
     "test",
@@ -185,6 +186,16 @@ class Toolchain:
     def train(self, argv: Sequence[str] | None = None) -> CommandResult:
         return self._run(["train", "--", *(argv or [])])
 
+    def rl(self, argv: Sequence[str] | None = None) -> CommandResult:
+        """Run the persistent RL worker.
+
+        The RL entry in :mod:`nanochat_cpp._entry` is an alias of ``train``
+        (``docs/rl-notebook.md`` section 4), and the shell routes the RL worker
+        through the ``train`` profile. The method emits that profile so the
+        alias works without a separate shell subcommand.
+        """
+        return self._run(["train", "--", *(argv or [])])
+
     def eval(self, argv: Sequence[str] | None = None) -> CommandResult:
         return self._run(["eval", "--", *(argv or [])])
 
@@ -313,6 +324,15 @@ def run(profile: str, argv: Sequence[str] | None = None) -> CommandResult:
 
 def train(argv: Sequence[str] | None = None) -> CommandResult:
     return _toolchain().train(argv)
+
+
+def rl(argv: Sequence[str] | None = None) -> CommandResult:
+    """Run the persistent RL worker through the ``train`` profile.
+
+    The RL entry in :mod:`nanochat_cpp._entry` is an alias of ``train``
+    (``docs/rl-notebook.md`` section 4).
+    """
+    return _toolchain().rl(argv)
 
 
 def eval(argv: Sequence[str] | None = None) -> CommandResult:  # noqa: A001
