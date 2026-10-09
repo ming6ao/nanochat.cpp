@@ -1,12 +1,14 @@
 # Distributed training design
 
+See [distributed-t4-plan.md](distributed-t4-plan.md) for the execution plan.
+
 Data-parallel training on two devices. This document describes the gradient-sync
 seam, the data sharding, the model configuration, and the launch.
 
-Status: P0, P1, and P2 are complete for architecture support. `Config` carries
+Status: the architecture phases P0, P1, and P2 are complete. `Config` carries
 `value_embedding`. `src/distributed.h` is the seam. `src/distributed.cc` is the
-backend-free host reference. `TrainLoop` averages every gradient once per step.
-Documents shard by a stride.
+backend-free host reference with device staging. `TrainLoop` averages every
+gradient once per step. Documents shard by a stride.
 
 `train_main` accepts `--preset track3`. The CPU gates `//src:distributed_test`
 and `//src:train_parallel_test` pass. P3 and P4 stay open. Scope: architecture
@@ -108,6 +110,12 @@ the buffers, and broadcasts the result. This parameter server is enough for a
 small rank count. The code includes POSIX sockets and the standard library
 only. `DESIGN.md` section 2.1 permits host POSIX headers in `src`; the rule
 forbids vendor headers.
+
+The CUDA backend keeps the gradients in device memory, so the host reference
+stages each buffer through host memory with `kernels::Memcpy` when
+`DistributedConfig::device_buffers` is true. The CPU backend copies nothing
+extra. The staging makes a correct two-card run possible before NCCL exists.
+See [distributed-t4-plan.md](distributed-t4-plan.md).
 
 The NCCL implementation calls `ncclAllReduce` with `ncclSum`. It selects the
 device from the rank. This file is the only place that includes `nccl.h`.
@@ -293,6 +301,9 @@ fixed validation set.
 
 ## 13. Kaggle notebook
 
+The two-card notebook is `notebooks/nanochat-cpp-on-2x-t4.ipynb`. The plan
+lives in [distributed-t4-plan.md](distributed-t4-plan.md).
+
 Changes to `notebooks/nanochat-cpp-on-t4-gpu.ipynb`:
 
 1. Build the `t4` config.
@@ -306,15 +317,15 @@ If NCCL fails, the run uses the host reference.
 
 ## 14. Phasing
 
-| Phase | Work | Gate | Status |
-|---|---|---|---|
-| P0 | Freeze the seam and the `Config` field | The architect approves this document | Done |
-| P1 | Track 3 configuration preset | `--preset track3` expresses the baseline | Done for the expressible fields; the betas and the AdamW decay stay open |
-| P2 | Host reference and the CPU two-rank test | The backward scale and the rank equality | Done |
-| P3 | NCCL and the Kaggle notebook | A two-card run completes a short run | Open |
-| P4 | Long run and resume | A resumed run reaches the step target | Open |
+The architecture phases P0 to P2 are complete. The phases cover the seam, the
+Track 3 preset, and the host reference with the CPU two-rank test.
 
-P1 removes the GPU from the critical path, as `DESIGN.md` section 4 requires.
+See [distributed-t4-plan.md](distributed-t4-plan.md) section 5 for the
+execution plan. The design phase P3 (NCCL) maps to phase C3. The design phase
+P4 (resume) stays open.
+
+P1 removed the GPU from the correctness path, as `DESIGN.md` section 4
+requires.
 
 ## 15. Risks
 
