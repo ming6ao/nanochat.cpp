@@ -22,6 +22,12 @@ py_library(
     deps = ["//python:nanochat_cpp"],
 )
 
+py_library(
+    name = "parallel",
+    srcs = ["parallel.py"],
+    imports = ["."],
+)
+
 py_test(
     name = "kaggle_setup_test",
     srcs = ["kaggle_setup_test.py"],
@@ -36,10 +42,18 @@ py_test(
     deps = [":lab"],
 )
 
+py_test(
+    name = "parallel_test",
+    srcs = ["parallel_test.py"],
+    size = "small",
+    deps = [":parallel"],
+)
+
 test_suite(
     name = "all",
     tests = [
         ":kaggle_setup_test",
         ":lab_test",
+        ":parallel_test",
     ],
 )
