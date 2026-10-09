@@ -27,6 +27,8 @@ any task is skipped; ``categorical_core`` stays valid when its three tasks ran.
 from __future__ import annotations
 
 import argparse
+import ast
+import collections
 import copy
 import dataclasses
 import os
@@ -37,12 +39,13 @@ from typing import Sequence
 
 from . import data
 from . import tasks as _tasks
-from .api import Config, Evaluator, Model, Tokenizer
+from .api import Config, Evaluator, GeneratedRow, Model, Tokenizer
 
 __all__ = [
     "ALL_TASKS",
     "BASELINES",
     "CATEGORICAL_TASKS",
+    "ChatEngine",
     "ChatEvaluator",
     "ChatReport",
     "TaskReport",
@@ -50,6 +53,7 @@ __all__ = [
     "build_parser",
     "main",
     "render_conversation",
+    "use_calculator",
 ]
 
 #: The default task list, in evaluation order.
@@ -278,6 +282,215 @@ def _load_tokenizer() -> Tokenizer:
             "chat evaluation needs the NCTOKEN1 container; run tok_train_main "
             "first (see docs/tokenizer.md)")
     return Tokenizer.load(artifact)
+
+
+# ---------------------------------------------------------------------------
+# Tool forcing (docs/parity.md item P1)
+# ---------------------------------------------------------------------------
+
+#: Name fragments the reference calculator rejects. They keep the forced
+#: expression away from the interpreter; the AST walk below only ever sees
+#: literals, arithmetic, and a string ``.count`` call.
+_DANGEROUS_NAMES = ("__", "import", "exec", "eval", "compile", "open",
+                    "file", "input", "raw_input", "globals", "locals", "vars",
+                    "dir", "getattr", "setattr", "delattr", "hasattr")
+
+#: The binary operators the calculator accepts. ``**`` is deliberately absent.
+_ARITHMETIC_OPS = {
+    ast.Add: lambda a, b: a + b,
+    ast.Sub: lambda a, b: a - b,
+    ast.Mult: lambda a, b: a * b,
+    ast.Div: lambda a, b: a / b,
+}
+
+
+def _eval_node(node):
+    """Evaluate one arithmetic or ``str.count`` AST node."""
+    if isinstance(node, ast.Expression):
+        return _eval_node(node.body)
+    if isinstance(node, ast.Constant):
+        if isinstance(node.value, bool) or not isinstance(
+                node.value, (int, float, str)):
+            raise ValueError("unsupported literal")
+        return node.value
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub):
+        return -_eval_node(node.operand)
+    if isinstance(node, ast.BinOp) and type(node.op) in _ARITHMETIC_OPS:
+        return _ARITHMETIC_OPS[type(node.op)](_eval_node(node.left),
+                                              _eval_node(node.right))
+    if (isinstance(node, ast.Call) and not node.keywords
+            and len(node.args) == 1
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "count"):
+        target = _eval_node(node.func.value)
+        needle = _eval_node(node.args[0])
+        if not isinstance(target, str) or not isinstance(needle, str):
+            raise ValueError("unsupported count call")
+        return target.count(needle)
+    raise ValueError("unsupported expression")
+
+
+def use_calculator(expr: str) -> str | None:
+    """Evaluate the expression of one python tool call, or return None.
+
+    Mirrors ``nanochat.engine.use_calculator`` (the reference calculator tool,
+    docs/parity.md item P1) so a forced output matches the reference: pure
+    arithmetic is allowed except ``**``, and only the string ``.count`` method
+    is otherwise supported. The result is ``str(result)``, exactly the text the
+    reference forces.
+    """
+    expr = expr.replace(",", "")
+    if all(character in "0123456789*+-/.() " for character in expr):
+        if "**" in expr:
+            return None
+    else:
+        allowed = ("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+                   "0123456789'\"()._ ")
+        if not all(character in allowed for character in expr):
+            return None
+        if any(name in expr.lower() for name in _DANGEROUS_NAMES):
+            return None
+        if ".count(" not in expr:
+            return None
+    try:
+        value = _eval_node(ast.parse(expr, mode="eval"))
+    except Exception:  # noqa: BLE001 - an unusable expression is no result
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        return None
+    return str(value)
+
+
+@dataclasses.dataclass
+class _ToolRowState:
+    """The per-row state of the streaming ``chat_engine`` protocol."""
+
+    tokens: list[int]
+    mask: list[int]
+    forced: collections.deque = dataclasses.field(
+        default_factory=collections.deque)
+    in_python_block: bool = False
+    expression: list[int] = dataclasses.field(default_factory=list)
+    completed: bool = False
+
+
+class ChatEngine:
+    """The streaming ``chat_engine`` protocol (docs/parity.md item P1).
+
+    The reference ``nanochat.engine.Engine.generate`` yields one token column at
+    a time. It watches for ``<|python_start|>`` ... ``<|python_end|>``, decodes
+    the expression, runs the calculator, and forces
+    ``<|output_start|> result <|output_end|>`` back into the row with mask 0.
+    This class reproduces that state machine on top of the public
+    :meth:`Model.generate`: :meth:`stream` yields ``(column, masks)`` per step
+    and :meth:`generate` collects rows, dropping the terminal token exactly like
+    :meth:`Model.generate`.
+
+    The C++ engine exposes the same seam (``src/generate.h``), with the forced
+    ids fed through the KV cache. Until the C ABI surfaces it, this driver
+    steps the model one token at a time, so keep the rollout shapes small
+    (docs/rl-notebook.md section 6): each step re-prefills the row.
+    """
+
+    def __init__(self, model: Model, tokenizer: Tokenizer) -> None:
+        if not isinstance(model, Model):
+            raise TypeError("model must be a nanochat_cpp.Model")
+        self.model = model
+        self.tokenizer = tokenizer
+        self.specials = _specials(tokenizer)
+        needed = ("<|python_start|>", "<|python_end|>", "<|output_start|>",
+                  "<|output_end|>", "<|assistant_end|>")
+        missing = [name for name in needed if name not in self.specials]
+        if missing:
+            raise ValueError(
+                f"the tokenizer lacks the chat special tokens {missing}")
+
+    def _sample(self, tokens, *, seed: int, temperature: float,
+                top_k: int) -> int:
+        """The next token after ``tokens``, one incremental step.
+
+        ``Model.generate`` with ``max_tokens=1`` prefills ``tokens[:-1]`` and
+        decodes ``tokens[-1]``, which is exactly one step of the reference
+        loop; the engine re-seeds from ``seed`` on every call, so the sampled
+        step is reproducible.
+        """
+        rows = self.model.generate(tokens, max_tokens=1,
+                                   temperature=temperature, top_k=top_k,
+                                   num_samples=1, seed=seed, stop_id=-1,
+                                   bos_id=-1)
+        return rows[0].tokens[-1]
+
+    def _advance(self, state: _ToolRowState, token: int) -> None:
+        """Update one row's tool state after ``token`` was emitted."""
+        specials = self.specials
+        if token == specials["<|assistant_end|>"]:
+            state.completed = True
+        if token == specials["<|python_start|>"]:
+            state.in_python_block = True
+            state.expression = []
+        elif token == specials["<|python_end|>"] and state.in_python_block:
+            state.in_python_block = False
+            if state.expression:
+                expr = self.tokenizer.decode(state.expression)
+                result = use_calculator(expr)
+                if result is not None:
+                    state.forced.append(specials["<|output_start|>"])
+                    state.forced.extend(self.tokenizer.encode(result))
+                    state.forced.append(specials["<|output_end|>"])
+            state.expression = []
+        elif state.in_python_block:
+            state.expression.append(token)
+
+    def stream(self, tokens, *, num_samples: int = 1, max_tokens: int = 256,
+               temperature: float = 1.0, top_k: int = 50, seed: int = 42):
+        """Yield ``(column, masks)`` one generation step at a time.
+
+        A completed row yields ``None`` in the column with mask 0; the stream
+        stops once every row is complete or after ``max_tokens`` steps. A
+        forced token has mask 0 and a sampled token has mask 1.
+        """
+        states = [_ToolRowState(list(tokens), [0] * len(tokens))
+                  for _ in range(num_samples)]
+        for _ in range(max_tokens):
+            if all(state.completed for state in states):
+                break
+            column: list[int | None] = []
+            masks: list[int] = []
+            for state in states:
+                if state.completed:
+                    column.append(None)
+                    masks.append(0)
+                    continue
+                if state.forced:
+                    token = state.forced.popleft()
+                    mask = 0
+                else:
+                    token = self._sample(state.tokens, seed=seed,
+                                         temperature=temperature, top_k=top_k)
+                    mask = 1
+                state.tokens.append(token)
+                state.mask.append(mask)
+                self._advance(state, token)
+                column.append(token)
+                masks.append(mask)
+            yield column, masks
+
+    def generate(self, tokens, *, num_samples: int = 1, max_tokens: int = 256,
+                 temperature: float = 1.0, top_k: int = 50,
+                 seed: int = 42) -> list[GeneratedRow]:
+        """Run :meth:`stream` to completion and return one row per sample."""
+        rows = [GeneratedRow(tokens=list(tokens), mask=[0] * len(tokens))
+                for _ in range(num_samples)]
+        terminal = self.specials["<|assistant_end|>"]
+        for column, masks in self.stream(
+                tokens, num_samples=num_samples, max_tokens=max_tokens,
+                temperature=temperature, top_k=top_k, seed=seed):
+            for index, token in enumerate(column):
+                if token is None or token == terminal:
+                    continue
+                rows[index].tokens.append(token)
+                rows[index].mask.append(masks[index])
+        return rows
 
 
 class ChatEvaluator:

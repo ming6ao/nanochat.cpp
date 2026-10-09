@@ -43,6 +43,7 @@ cc_library(
         "cli.h",
         "distributed.h",
         "eval.h",
+        "generate.h",
         "model_impl.h",
         "ops.h",
         "optim_state.h",

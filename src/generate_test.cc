@@ -27,6 +27,7 @@
 
 #include "nanochat/model.h"
 #include "nanochat/sampler.h"
+#include "src/generate.h"
 #include "src/model_impl.h"
 
 namespace {
@@ -215,6 +216,164 @@ void CheckMultiPromptMatchesNaive(Model* model, const Config& config,
   }
   std::printf("generate_test: %s matched the naive single-row loop\n",
               label.c_str());
+}
+
+// The tool-forcing hook (docs/parity.md item P1). After the first sampled
+// token of a row it injects `forced_`, mirroring the reference engine's
+// `python_end` handler that queues `<|output_start|> result <|output_end|>`.
+// `stop_after` ends the row on the first sampled token after the forced block.
+class ScriptedToolHook final : public nanochat::GenerateHook {
+ public:
+  ScriptedToolHook(std::vector<int> forced, int rows, bool stop_after)
+      : forced_(std::move(forced)),
+        fired_(static_cast<std::size_t>(rows), false),
+        stop_after_(stop_after) {}
+
+  bool OnToken(int row, int token, bool sampled,
+               std::vector<int>* forced) override {
+    (void)token;
+    const std::size_t index = static_cast<std::size_t>(row);
+    if (sampled && !fired_[index]) {
+      fired_[index] = true;
+      forced->insert(forced->end(), forced_.begin(), forced_.end());
+      return true;
+    }
+    return !(sampled && stop_after_);
+  }
+
+ private:
+  std::vector<int> forced_;
+  std::vector<bool> fired_;
+  bool stop_after_;
+};
+
+// Forces a fixed tool-output block and checks the three properties parity item
+// P1 needs: a forced id is written with mask 0, it is fed through the KV cache
+// (the id sampled after the block matches a hand-decoded cache), and the hook
+// can end a row. With a null hook the output must equal `GenerateBatch`.
+void CheckToolForcing(Model* model, const Config& config,
+                      const std::vector<int>& prompt) {
+  const int prompt_len = static_cast<int>(prompt.size());
+  nanochat::GenerateParams params;
+  params.num_samples = 2;
+  params.max_tokens = 6;
+  params.temperature = 0.0f;  // greedy, deterministic
+  params.top_k = 0;
+  params.seed = 4242;
+  params.bos_id = 1;
+  params.stop_id = -1;
+
+  // A null hook must reproduce the plain batch exactly.
+  std::vector<nanochat::GeneratedSequence> base;
+  nanochat::GenerateBatch(model, prompt.data(), prompt_len, params, &base);
+  ScriptedToolHook none(std::vector<int>(), params.num_samples, false);
+  std::vector<nanochat::GeneratedSequence> same;
+  nanochat::GenerateBatchWithHook(model, prompt.data(), prompt_len, params,
+                                  &none, &same);
+  if (same.size() != base.size()) {
+    Fail("an empty forcing hook changed the row count");
+    return;
+  }
+  for (std::size_t r = 0; r < base.size(); ++r) {
+    if (same[r].tokens != base[r].tokens || same[r].mask != base[r].mask) {
+      Fail("an empty forcing hook changed row " + std::to_string(r));
+    }
+  }
+
+  // Effective prompt: the prepended beginning-of-sequence id then the prompt.
+  std::vector<int> effective;
+  if (params.bos_id >= 0) effective.push_back(params.bos_id);
+  effective.insert(effective.end(), prompt.begin(), prompt.end());
+  const std::size_t prefix = effective.size();
+  if (base.empty() || base[0].tokens.size() <= prefix) {
+    Fail("tool-forcing baseline produced no sampled token");
+    return;
+  }
+  const int first_sampled = base[0].tokens[prefix];
+
+  // Hand-decode the cache the way the engine must. The first `Decode` samples
+  // the token that triggers the hook; the next `Decode` feeds it and its
+  // candidate is discarded while the first forced id is emitted; the remaining
+  // forced ids are fed in turn. The last `Decode` is the continuation the
+  // engine samples after the forced block.
+  const std::vector<int> forced_ids = {40, 41, 42};
+  const int capacity =
+      static_cast<int>(effective.size()) + params.max_tokens + 1;
+  std::unique_ptr<KvCache> kv = nanochat::CreateKvCache(config, capacity);
+  const int prefill_len = static_cast<int>(effective.size()) - 1;
+  if (prefill_len > 0) {
+    nanochat::Prefill(model, effective.data(), prefill_len, kv.get());
+  }
+  SampleParams sample;
+  sample.temperature = params.temperature;
+  sample.top_k = params.top_k;
+  sample.seed = params.seed;
+  const int hand_first =
+      nanochat::Decode(model, effective.back(), kv.get(), sample);
+  nanochat::Decode(model, hand_first, kv.get(), sample);
+  int continuation = -1;
+  for (int id : forced_ids) {
+    continuation = nanochat::Decode(model, id, kv.get(), sample);
+  }
+  if (hand_first != first_sampled) {
+    Fail("hand-decode first token disagrees with the batch");
+  }
+
+  ScriptedToolHook hook(forced_ids, params.num_samples, false);
+  std::vector<nanochat::GeneratedSequence> rows;
+  nanochat::GenerateBatchWithHook(model, prompt.data(), prompt_len, params,
+                                  &hook, &rows);
+  if (rows.size() != base.size()) {
+    Fail("forced batch row count changed");
+    return;
+  }
+  const std::size_t after_forced = prefix + 1 + forced_ids.size();
+  for (std::size_t r = 0; r < rows.size(); ++r) {
+    const nanochat::GeneratedSequence& row = rows[r];
+    if (row.tokens.size() <= after_forced) {
+      Fail("row " + std::to_string(r) + " is shorter than the forced block");
+      continue;
+    }
+    if (row.tokens[prefix] != first_sampled || row.mask[prefix] != 1) {
+      Fail("row " + std::to_string(r) +
+           " did not keep the triggering sampled token");
+    }
+    for (std::size_t i = 0; i < forced_ids.size(); ++i) {
+      if (row.tokens[prefix + 1 + i] != forced_ids[i]) {
+        Fail("row " + std::to_string(r) + " forced token " + std::to_string(i) +
+             " is wrong");
+      }
+      if (row.mask[prefix + 1 + i] != 0) {
+        Fail("row " + std::to_string(r) + " forced token " + std::to_string(i) +
+             " mask is not 0");
+      }
+    }
+    // This proves the forced ids were fed through the KV cache: the id sampled
+    // after the block must match the hand-decoded cache.
+    if (row.tokens[after_forced] != continuation ||
+        row.mask[after_forced] != 1) {
+      Fail("row " + std::to_string(r) +
+           " continuation after the forced block differs from the "
+           "hand-decoded cache");
+    }
+  }
+
+  // A hook that ends the row after the forced block stops it early: the row is
+  // the prefix, the trigger, the forced block, then one sampled token that the
+  // hook refuses to continue from.
+  ScriptedToolHook stopper(forced_ids, params.num_samples, true);
+  std::vector<nanochat::GeneratedSequence> stopped;
+  nanochat::GenerateBatchWithHook(model, prompt.data(), prompt_len, params,
+                                  &stopper, &stopped);
+  const std::size_t stopped_len = after_forced + 1;
+  for (std::size_t r = 0; r < stopped.size(); ++r) {
+    if (stopped[r].tokens.size() != stopped_len) {
+      Fail("stopping hook row " + std::to_string(r) + " length " +
+           std::to_string(stopped[r].tokens.size()) + " want " +
+           std::to_string(stopped_len));
+    }
+  }
+  std::printf("generate_test: tool forcing matched the hand-decoded cache\n");
 }
 
 // The training forward's soft-capped logits for one position, read from the
@@ -501,6 +660,9 @@ void Run() {
                                   row_stops.data(), &empty);
     if (!empty.empty()) Fail("zero-length prompt rollout produced rows");
   }
+
+  // --- Tool forcing (docs/parity.md item P1). ---
+  CheckToolForcing(model.get(), config, batched_prompt);
 }
 
 }  // namespace

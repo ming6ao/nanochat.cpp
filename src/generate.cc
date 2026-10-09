@@ -22,6 +22,7 @@
 #include "nanochat/kernels.h"
 #include "nanochat/rand.h"
 #include "nanochat/sampler.h"
+#include "src/generate.h"
 #include "src/ops.h"
 #include "src/workspace.h"
 
@@ -420,6 +421,12 @@ void DecodeLogits(Model* model, int token, KvCache* kv, float* logits_out) {
 void GenerateBatch(Model* model, const int* prompt, int prompt_len,
                    const GenerateParams& params,
                    std::vector<GeneratedSequence>* out) {
+  GenerateBatchWithHook(model, prompt, prompt_len, params, nullptr, out);
+}
+
+void GenerateBatchWithHook(Model* model, const int* prompt, int prompt_len,
+                           const GenerateParams& params, GenerateHook* hook,
+                           std::vector<GeneratedSequence>* out) {
   if (out == nullptr) return;
   out->clear();
   if (model == nullptr || prompt == nullptr || prompt_len < 0) return;
@@ -463,10 +470,15 @@ void GenerateBatch(Model* model, const int* prompt, int prompt_len,
   }
 
   // Each row starts as the effective prompt (masked as prompt ids) and feeds
-  // its own last token to the next step.
+  // its own last token to the next step. `forced` is one tool-output queue per
+  // row: the hook fills it and the engine drains one id per step
+  // (docs/parity.md item P1).
   std::vector<int> next(static_cast<std::size_t>(num_samples),
                         effective.back());
   std::vector<char> active(static_cast<std::size_t>(num_samples), 1);
+  std::vector<std::vector<int>> forced(static_cast<std::size_t>(num_samples));
+  std::vector<std::size_t> forced_head(static_cast<std::size_t>(num_samples),
+                                       0);
   for (int r = 0; r < num_samples; ++r) {
     GeneratedSequence& row = (*out)[static_cast<std::size_t>(r)];
     row.tokens = effective;
@@ -478,24 +490,38 @@ void GenerateBatch(Model* model, const int* prompt, int prompt_len,
   sample.top_k = params.top_k;
   sample.seed = params.seed;
 
-  // Decode the rows in lockstep. A row stops when it samples its terminal id,
-  // when sampling fails, or after `max_new` steps; the terminal id is not
-  // appended. Each row keeps its own cache and calls the single-row `Decode`
-  // path, so a batched run is exactly `num_samples` independent single-row
-  // runs: greedy decoding is deterministic and sampled decoding re-seeds from
-  // `params.seed` on every call, both reproducible and row-independent.
+  // Decode the rows in lockstep. Each step first feeds the row's previous
+  // token through `Decode`, which advances the KV cache and samples a
+  // candidate. A pending forced token then overrides that candidate: the forced
+  // id is emitted with mask 0, the sampled candidate is discarded, and the
+  // forced id becomes the next input. This mirrors the reference engine, which
+  // runs a forward pass for every yielded column, forced or sampled, so a
+  // forced block is fed through the cache exactly like a sampled run. A row
+  // stops when it emits its terminal id, when sampling fails, when the hook
+  // ends it, or after `max_new` steps; the terminal id is not appended. With a
+  // null hook there are no forced tokens, so a batched run is exactly
+  // `num_samples` independent single-row runs: greedy decoding is
+  // deterministic and sampled decoding re-seeds from `params.seed` on every
+  // call, both reproducible and row-independent.
   for (int step = 0; step < max_new; ++step) {
     bool any_active = false;
     for (int r = 0; r < num_samples; ++r) {
       if (active[static_cast<std::size_t>(r)] == 0) continue;
       any_active = true;
       GeneratedSequence& row = (*out)[static_cast<std::size_t>(r)];
-      const int token =
+      std::vector<int>& pending = forced[static_cast<std::size_t>(r)];
+      const std::size_t head = forced_head[static_cast<std::size_t>(r)];
+      const int candidate =
           Decode(model, next[static_cast<std::size_t>(r)],
                  caches[static_cast<std::size_t>(r)].get(), sample);
-      if (token < 0) {
+      if (candidate < 0) {
         active[static_cast<std::size_t>(r)] = 0;
         continue;
+      }
+      const bool sampled = head >= pending.size();
+      const int token = sampled ? candidate : pending[head];
+      if (!sampled) {
+        forced_head[static_cast<std::size_t>(r)] = head + 1;
       }
       const int stop =
           params.stop_ids != nullptr ? params.stop_ids[r] : params.stop_id;
@@ -504,8 +530,11 @@ void GenerateBatch(Model* model, const int* prompt, int prompt_len,
         continue;
       }
       row.tokens.push_back(token);
-      row.mask.push_back(1);
+      row.mask.push_back(sampled ? 1 : 0);
       next[static_cast<std::size_t>(r)] = token;
+      if (hook != nullptr && !hook->OnToken(r, token, sampled, &pending)) {
+        active[static_cast<std::size_t>(r)] = 0;
+      }
     }
     if (!any_active) break;
   }
