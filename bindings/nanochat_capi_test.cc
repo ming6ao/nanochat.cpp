@@ -447,6 +447,25 @@ nanochat_model* CheckModel() {
   Check("generate: rows are nonempty",
         sequences.lengths != nullptr && sequences.lengths[0] > 0);
 
+  // The multi-prompt entry reuses the same staging buffers. Two prompts and
+  // two samples produce four rows in prompt-major order.
+  const int prompts[4] = {1, 2, 3, 4};
+  nanochat_generate_multi_params multi_params;
+  std::memset(&multi_params, 0, sizeof(multi_params));
+  multi_params.num_prompts = 2;
+  multi_params.prompt_len = 2;
+  multi_params.row_stops = nullptr;
+  multi_params.params = params;
+  nanochat_sequences multi_sequences;
+  std::memset(&multi_sequences, 0, sizeof(multi_sequences));
+  nanochat_generate_multi(model, prompts, &multi_params, &multi_sequences);
+  Check("generate_multi: row count", multi_sequences.count == 4);
+  Check("generate_multi: token buffer", multi_sequences.tokens != nullptr);
+  Check("generate_multi: lengths buffer", multi_sequences.lengths != nullptr);
+  Check("generate_multi: offsets buffer", multi_sequences.offsets != nullptr);
+  Check("generate_multi: rows are nonempty",
+        multi_sequences.lengths != nullptr && multi_sequences.lengths[0] > 0);
+
   // Checkpoint round trip through the C surface.
   const std::string path = TempPath("bindings_capi.nchkpt");
   nanochat_save(model, path.c_str());

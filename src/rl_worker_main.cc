@@ -476,10 +476,6 @@ int main(int argc, char** argv) {
     std::fprintf(stderr, "rl_worker: --steps needs --fixture\n");
     return 2;
   }
-  if (fixture_path.empty() && checkpoint_path.empty()) {
-    std::fprintf(stderr, "rl_worker: need --fixture or --checkpoint\n");
-    return 2;
-  }
 
   RlWorker worker(model_config, optimizer_config, scheduler_config);
   if (worker.model() == nullptr || worker.optimizer() == nullptr) {

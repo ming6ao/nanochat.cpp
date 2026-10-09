@@ -23,7 +23,7 @@
 // The bridge -> worker messages:
 //
 //   `rollout prompt_len=<int> num_prompts=<int> prompts=<ids>
-//            [num_samples=<int>] [max_tokens=<int>] [temperature=<float>]
+//            [num_samples=<int>] max_tokens=<int> [temperature=<float>]
 //            [top_k=<int>] [seed=<uint64>] [stop_id=<int>] [bos_id=<int>]
 //            [stop_ids=<ids>]`
 //     `prompts` is `num_prompts * prompt_len` row-major prompt ids (so every

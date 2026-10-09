@@ -230,7 +230,7 @@ def _parameter_values(name: str, shape: tuple[int, ...], rng: Rng) -> bytes:
     return _f32([rng.uniform(-0.1, 0.1) for _ in range(count)])
 
 
-def _advantages(batch: int, values: list[float]) -> list[float]:
+def _advantages(values: list[float]) -> list[float]:
     """The per-row advantage: the reward minus the batch mean reward."""
     mean = sum(values) / len(values)
     return [value - mean for value in values]
@@ -256,7 +256,6 @@ def generate(args: argparse.Namespace) -> Path:
 
     # --- configuration -----------------------------------------------------
     writer.add("config/version", "i4", (1,), _i32_scalar(1))
-    writer.add("config/seed", "i8", (1,), _i64([args.seed]))
     writer.add("config/layers", "i4", (1,), _i32_scalar(layers))
     writer.add("config/heads", "i4", (1,), _i32_scalar(heads))
     writer.add("config/kv_heads", "i4", (1,), _i32_scalar(kv_heads))
@@ -269,7 +268,6 @@ def generate(args: argparse.Namespace) -> Path:
     writer.add("config/num_passes", "i4", (1,), _i32_scalar(args.num_passes))
     writer.add("config/examples_per_rank", "i4", (1,),
                _i32_scalar(args.examples_per_rank))
-    writer.add("config/prompt_len", "i4", (1,), _i32_scalar(prompt_len))
     writer.add("config/window_pattern", "u1", (len(args.window),),
                args.window.encode("ascii"))
     writer.add("config/opt/unembedding_lr", "f4", (1,),
@@ -321,7 +319,7 @@ def generate(args: argparse.Namespace) -> Path:
         targets = [-1] * rows
         advantages = [0.0] * rows
         rewards = [rng.uniform(0.0, 1.0) for _ in range(batch)]
-        row_advantage = _advantages(batch, rewards)
+        row_advantage = _advantages(rewards)
         for row in range(batch):
             for position in range(seq):
                 index = row * seq + position

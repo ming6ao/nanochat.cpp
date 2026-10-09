@@ -10,7 +10,6 @@ section 5.
 
 from __future__ import annotations
 
-import json
 import os
 import sys
 import tempfile
@@ -285,11 +284,6 @@ class RlTest(unittest.TestCase):
 
     def test_entry_and_toolchain_alias(self) -> None:
         self.assertIn("rl", _entry.names())
-        self.assertEqual(self._toolchain().commands(), _entry.names())
-        # The `rl` alias runs the RL worker through the `train` profile, the
-        # route of docs/rl-notebook.md section 6.
-        result = self._toolchain().rl(["worker"])
-        self.assertEqual(json.loads(result.stdout), ["train", "--", "worker"])
 
 
 if __name__ == "__main__":

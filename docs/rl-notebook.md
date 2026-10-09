@@ -1,6 +1,8 @@
 # Reinforcement learning in a notebook
 
-Status: proposed. The mechanism exists in parts. The notebook path does not.
+Status: partly delivered. The hand-rolled loop, the one-call facade, and the
+persistent worker exist. The multi-prompt C ABI binding and the tool-forcing
+driver are not wired yet.
 
 This document gives the plan to run reinforcement learning (RL) in a notebook.
 `docs/post-training.md` section 12 and `docs/training-seam.md` section 8 hold the
@@ -91,10 +93,11 @@ A `rl_step` binary shares the step logic. It reads a fixture. It is the
 correctness gate. The project trusts the worker only after
 `//tests:rl_parity_test` passes at tier T2.
 
-## 5. Work to build, in order
+## 5. The phases, and what shipped
 
 The phases come from `docs/training-seam.md` section 8. The owners follow
-`AGENTS.md` section 1.
+`AGENTS.md` section 1. Phases 1 to 4 are delivered. Phase 5 is delivered in
+C++ but its C ABI binding is not. Phase 6 is delivered in part.
 
 1. **Add `nanochat_rl_step` to the C ABI.** Add the call to
    `include/nanochat/capi.h` and the binding. It maps to `BackwardWeighted` and
@@ -109,12 +112,14 @@ The phases come from `docs/training-seam.md` section 8. The owners follow
    to the command table in `python/nanochat_cpp/_entry.py` and `toolchain.py`.
    Owner: Python surface.
 5. **Add multi-prompt rollout.** Extend the C ABI generation to many prompts
-   with an independent stop for each row. The current call is one prompt with
-   `num_samples` rows. Owner: architect for `capi.h`, and the generation owner
-   for the compute.
+   with an independent stop for each row. The compute and the header are in
+   place. The C ABI shim in `bindings/` is still owed. Owner: architect for
+   `capi.h`, and the generation owner for the compute.
 6. **Add tool forcing.** Stream the `chat_engine` protocol. Force the
-   tool-output tokens in the generation loop. This step closes parity item P1.
-   Owner: workflow and Python surface. This step is optional.
+   tool-output tokens in the generation loop. The C++ hook and the Python
+   driver exist. The driver is not wired to a tested path, so parity item P1
+   stays open in `docs/parity.md`. Owner: workflow and Python surface. This
+   step is optional.
 
 ## 6. Notebook concerns
 
@@ -136,17 +141,19 @@ The phases come from `docs/training-seam.md` section 8. The owners follow
 | Level | What the user writes | Available |
 |---|---|---|
 | Hand-rolled | The full loop | Yes, today |
-| Facade | `nc.rl.run(...)`, no loop | Needs phases 1 to 4 |
-| Batched and fast | The same call, many prompts | Needs phase 5 |
-| Tool-forced parity | The same call | Needs phase 6 |
+| Facade | `nc.rl.run(...)`, no loop | Delivered |
+| Batched and fast | The same call, many prompts | Delivered in C++; the C ABI shim is not |
+| Tool-forced parity | The same call | The mechanism exists; not yet wired |
 
-## 8. Current blockers
+## 8. Open items
 
-Three items block a convenient notebook today.
+Two items stay open.
 
-1. There is no `rl_step` binary and no `nc.rl` facade.
-2. There is no persistent worker, so the loop crosses the ABI every step.
-3. `generate` is single-prompt only, so rollout throughput is low.
+1. The multi-prompt C ABI call `nanochat_generate_multi` has no binding, so a
+   Python caller cannot reach the batched rollout through the C ABI.
+2. The tool-forcing driver (`ChatEngine` and `use_calculator`) is not wired to
+   a caller or a test, so `docs/parity.md` still records parity item P1 as
+   open.
 
 The objective is already golden-gated. The fixture is
 `tests/data/numerics_golden_10l.bin`. The gate is `//tests:numerics_trace_test`.

@@ -416,7 +416,7 @@ int RlWorker::Serve(std::istream& in, std::ostream& out) {
     }
     Emit(out, response);
   }
-  return 0;
+  return in.bad() ? 1 : 0;
 }
 
 }  // namespace nanochat

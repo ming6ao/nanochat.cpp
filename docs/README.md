@@ -21,7 +21,7 @@ detailed reference that the design points at.
 | [parquet-native.md](parquet-native.md) | The native parquet reader and on-the-fly tokenization plan |
 | [post-training.md](post-training.md) | Design and status: supervised fine-tuning and reinforcement learning |
 | [training-seam.md](training-seam.md) | The Python and C++ boundary for training: the seam rule, the current defects, and the target interface |
-| [rl-notebook.md](rl-notebook.md) | The plan to run reinforcement learning in a notebook: the hand-rolled loop, the `nc.rl` facade, and the work to build |
+| [rl-notebook.md](rl-notebook.md) | Reinforcement learning in a notebook: the hand-rolled loop, the `nc.rl` worker bridge, and the open items |
 | [python.md](python.md) | The single Python surface: in-process compute API, planning, chat evaluation, and the `tools/nanochat` toolchain |
 | [sandbox.md](sandbox.md) | Execution sandbox and host resource governance |
 | [host-portability.md](host-portability.md) | Toolchain, optional sandbox, devices, and Kaggle |

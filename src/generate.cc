@@ -548,11 +548,10 @@ void GenerateMultiPrompt(Model* model, const int* prompts, int num_prompts,
   out->clear();
   if (model == nullptr || prompts == nullptr) return;
   if (num_prompts <= 0 || prompt_len <= 0) return;
-  const int num_samples = params.num_samples > 0 ? params.num_samples : 0;
-  if (num_samples == 0) return;
+  if (params.num_samples <= 0) return;
 
   out->reserve(static_cast<std::size_t>(num_prompts) *
-               static_cast<std::size_t>(num_samples));
+               static_cast<std::size_t>(params.num_samples));
   for (int prompt = 0; prompt < num_prompts; ++prompt) {
     // `row_stops` is aligned with the flattened output rows, so the rows this
     // prompt owns are its own `num_samples`-entry slice. A null pointer leaves
@@ -560,7 +559,7 @@ void GenerateMultiPrompt(Model* model, const int* prompts, int num_prompts,
     GenerateParams per_prompt = params;
     if (row_stops != nullptr) {
       per_prompt.stop_ids =
-          row_stops + static_cast<std::size_t>(prompt) * num_samples;
+          row_stops + static_cast<std::size_t>(prompt) * params.num_samples;
     }
     std::vector<GeneratedSequence> rows;
     GenerateBatch(model,

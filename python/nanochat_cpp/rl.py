@@ -390,7 +390,7 @@ def _advantage_batch(rows_tokens: list[list[int]], rows_masks: list[list[int]],
     as its weight. A prompt position (or padding) carries ``-1`` (the one mask
     channel) and a zero weight, per ``docs/post-training.md`` section 5.2.
     """
-    seq = max((len(row) for row in rows_tokens), default=1)
+    seq = max(len(row) for row in rows_tokens)
     tokens: list[int] = []
     targets: list[int] = []
     weights: list[float] = []
@@ -533,7 +533,7 @@ def run(task, prompts: Sequence[dict], num_samples: int = DEFAULT_NUM_SAMPLES,
                 raise RlError(
                     "stop_ids must hold one id per sample "
                     f"({num_samples})")
-        terminal_id = terminals[0] if terminals else -1
+        terminal_id = terminals[0]
 
         if examples_per_rank is None:
             examples_per_rank = num_prompts
@@ -567,8 +567,7 @@ def run(task, prompts: Sequence[dict], num_samples: int = DEFAULT_NUM_SAMPLES,
             grad_norm = float(result["grad_norm"])
             losses.append(loss)
             grad_norms.append(grad_norm)
-            mean_rewards.append(sum(rewards) / len(rewards) if rewards
-                                else 0.0)
+            mean_rewards.append(sum(rewards) / len(rewards))
             if on_step is not None:
                 on_step(step, loss, grad_norm, rewards)
             if (checkpoint is not None and checkpoint_interval

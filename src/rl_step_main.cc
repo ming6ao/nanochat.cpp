@@ -279,7 +279,7 @@ float FloatAt(const Record& record, std::size_t index) {
   return value;
 }
 
-// Reads a required scalar. `kind` is "int" or "float" for the error message.
+// Reads a required scalar.
 bool ScalarInt(const std::vector<Record>& records, const std::string& name,
                std::int32_t* out, std::string* error) {
   const Record* record = FindRecord(records, name);
