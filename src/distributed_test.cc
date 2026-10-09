@@ -77,13 +77,18 @@ int FindFreePort() {
 
 // Joins the group as `rank` and reduces `start` once. Returns true when the
 // reduced buffer equals `expected`.
-bool RunRank(int rank, int port, const std::vector<ComputeType>& start,
+bool RunRank(int rank, int port, bool device_buffers,
+             const std::vector<ComputeType>& start,
              const std::vector<float>& expected) {
   DistributedConfig config;
   config.rank = rank;
   config.world_size = 2;
   config.master = "127.0.0.1";
   config.port = port;
+  // On the CPU backend `kernels::Memcpy` is a plain `memcpy`, so this branch
+  // reuses the same buffers. The obvious test failure is an index or branch
+  // bug in the staging path.
+  config.device_buffers = device_buffers;
   std::unique_ptr<GradientSync> sync = nanochat::CreateGradientSync(config);
   if (sync == nullptr) return false;
   if (sync->rank() != rank || sync->world_size() != 2) return false;
@@ -96,9 +101,9 @@ bool RunRank(int rank, int port, const std::vector<ComputeType>& start,
 }
 
 // Two processes reduce two different buffers; both must see the sum.
-void TestTwoRankAllReduce() {
-  const std::vector<float> rank0 = {1.5f, -2.25f, 3.0f, 0.125f, -4.0f};
-  const std::vector<float> rank1 = {0.5f, 2.25f, -1.0f, 0.875f, 4.5f};
+void RunAllReduceCase(const std::vector<float>& rank0,
+                      const std::vector<float>& rank1, bool device_buffers,
+                      const char* label) {
   std::vector<float> expected(rank0.size());
   for (std::size_t i = 0; i < expected.size(); ++i) {
     expected[i] = rank0[i] + rank1[i];
@@ -106,30 +111,39 @@ void TestTwoRankAllReduce() {
 
   const int port = FindFreePort();
   if (port <= 0) {
-    Fail("cannot find a free port");
+    Fail(std::string(label) + ": cannot find a free port");
     return;
   }
 
   const pid_t pid = ::fork();
   if (pid < 0) {
-    Fail("fork failed");
+    Fail(std::string(label) + ": fork failed");
     return;
   }
   if (pid == 0) {
     // Child: rank 1.
-    const bool ok = RunRank(1, port, MakeBuffer(rank1), expected);
+    const bool ok =
+        RunRank(1, port, device_buffers, MakeBuffer(rank1), expected);
     std::_Exit(ok ? 0 : 1);
   }
 
   // Parent: rank 0.
-  if (!RunRank(0, port, MakeBuffer(rank0), expected)) {
-    Fail("rank 0 all-reduce sum mismatch");
+  if (!RunRank(0, port, device_buffers, MakeBuffer(rank0), expected)) {
+    Fail(std::string(label) + ": rank 0 all-reduce sum mismatch");
   }
   int status = 0;
   ::waitpid(pid, &status, 0);
   if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
-    Fail("rank 1 all-reduce sum mismatch");
+    Fail(std::string(label) + ": rank 1 all-reduce sum mismatch");
   }
+}
+
+void TestTwoRankAllReduce() {
+  const std::vector<float> rank0 = {1.5f, -2.25f, 3.0f, 0.125f, -4.0f};
+  const std::vector<float> rank1 = {0.5f, 2.25f, -1.0f, 0.875f, 4.5f};
+  RunAllReduceCase(rank0, rank1, /*device_buffers=*/false, "host buffers");
+  // The CUDA backend path: the sync stages each buffer through host memory.
+  RunAllReduceCase(rank0, rank1, /*device_buffers=*/true, "device staged");
 }
 
 // A fixed in-memory document source that yields each document once.

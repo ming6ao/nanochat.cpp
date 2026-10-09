@@ -518,6 +518,10 @@ TrainLoop::TrainLoop(TrainConfig config) : config_(std::move(config)) {
   distributed.world_size = config_.world_size;
   distributed.master = config_.master;
   distributed.port = config_.port;
+  // The CUDA backend keeps the gradients in device memory, so the host
+  // reference must stage each reduction through host memory. The CPU backend
+  // reports `is_device` false and pays nothing.
+  distributed.device_buffers = kernels::GetCaps().is_device;
   sync_ = CreateGradientSync(distributed);
   if (sync_ == nullptr) {
     // A world size above 1 without a sync would train each rank on its own

@@ -22,6 +22,12 @@ struct DistributedConfig {
   int world_size = 1;
   std::string master = "127.0.0.1";
   int port = 29500;
+
+  // True when the model keeps its gradients in device memory (the CUDA
+  // backend). The host reference then stages each buffer through host memory
+  // with `kernels::Memcpy` before and after the reduction. The CPU reference
+  // backend leaves this false, so a CPU run copies nothing extra.
+  bool device_buffers = false;
 };
 
 class GradientSync {
