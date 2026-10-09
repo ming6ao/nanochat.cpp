@@ -903,7 +903,8 @@ void TrainModel::BackwardInternal(const float* row_weights, float scale,
   if (row_weights != nullptr) {
     effective.resize(static_cast<std::size_t>(rows));
     for (std::int64_t m = 0; m < rows; ++m) {
-      effective[static_cast<std::size_t>(m)] = row_weights[m] * scale / divisor;
+      effective[static_cast<std::size_t>(m)] =
+          row_weights[m] * scale * kDefaultLossScale / divisor;
     }
     host_row_scale = effective.data();
   }
@@ -913,9 +914,9 @@ void TrainModel::BackwardInternal(const float* row_weights, float scale,
   kernels::ClassifierBackward(classifier, raw_logits_, targets_.data(),
                               dlogits_);
   if (row_weights == nullptr) {
-    kernels::PointwiseForward(PointwiseOp::kScale,
-                              static_cast<int>(rows * padded_vocab), dlogits_,
-                              nullptr, scale / divisor, 0.0f, dlogits_);
+    kernels::PointwiseForward(
+        PointwiseOp::kScale, static_cast<int>(rows * padded_vocab), dlogits_,
+        nullptr, scale * kDefaultLossScale / divisor, 0.0f, dlogits_);
   }
 
   ops::LinearWgrad(x_final_norm_, dlogits_, lm_head_grad_, rows, hidden,

@@ -63,6 +63,52 @@ bool HasTensorCores() {
 }
 #endif
 
+// The fp32 GEMM used by the optimizer's orthogonalization workspace. cuBLAS
+// infers the same row-major layout as `Gemm`; see the block comment there.
+void GemmF32Impl(GemmMode mode, const GemmParams& params, const float* a,
+                 const float* b, float* c) {
+  (void)mode;
+  if (params.batch_count <= 0 || params.m <= 0 || params.n <= 0) return;
+  if (params.k < 0) return;
+
+  const bool ta = params.transpose_a;
+  const bool tb = params.transpose_b;
+  const int lda = params.lda > 0 ? params.lda : (ta ? params.m : params.k);
+  const int ldb = params.ldb > 0 ? params.ldb : (tb ? params.k : params.n);
+  const int ldc = params.ldc > 0 ? params.ldc : params.n;
+  const std::int64_t stride_a =
+      params.stride_a != 0
+          ? params.stride_a
+          : static_cast<std::int64_t>(ta ? params.k : params.m) * lda;
+  const std::int64_t stride_b =
+      params.stride_b != 0
+          ? params.stride_b
+          : static_cast<std::int64_t>(tb ? params.n : params.k) * ldb;
+  const std::int64_t stride_c = params.stride_c != 0
+                                    ? params.stride_c
+                                    : static_cast<std::int64_t>(params.m) * ldc;
+
+  const cublasOperation_t transa = tb ? CUBLAS_OP_T : CUBLAS_OP_N;
+  const cublasOperation_t transb = ta ? CUBLAS_OP_T : CUBLAS_OP_N;
+  const float alpha_f = params.alpha;
+  const float beta_f = params.beta;
+
+  if (params.batch_count == 1) {
+    CheckCublas(cublasSgemm(Handle(), transa, transb, /*m=*/params.n,
+                            /*n=*/params.m, /*k=*/params.k, &alpha_f, b, ldb, a,
+                            lda, &beta_f, c, ldc),
+                "cublasSgemm");
+    return;
+  }
+  CheckCublas(
+      cublasGemmStridedBatchedEx(
+          Handle(), transa, transb, /*m=*/params.n, /*n=*/params.m,
+          /*k=*/params.k, &alpha_f, b, CUDA_R_32F, ldb, stride_b, a, CUDA_R_32F,
+          lda, stride_a, &beta_f, c, CUDA_R_32F, ldc, stride_c,
+          params.batch_count, CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT),
+      "cublasGemmStridedBatchedEx");
+}
+
 }  // namespace
 
 void Gemm(GemmMode mode, const GemmParams& params, const ComputeType* a,
@@ -164,6 +210,11 @@ void Gemm(GemmMode mode, const GemmParams& params, const ComputeType* a,
                   blas_b, kDataType, lda, stride_a, beta, blas_c, kDataType,
                   ldc, stride_c, params.batch_count, compute_type, algo),
               "cublasGemmStridedBatchedEx");
+}
+
+void GemmF32(GemmMode mode, const GemmParams& params, const float* a,
+             const float* b, float* c) {
+  GemmF32Impl(mode, params, a, b, c);
 }
 
 }  // namespace kernels

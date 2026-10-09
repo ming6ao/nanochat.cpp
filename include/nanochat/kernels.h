@@ -191,6 +191,14 @@ Caps GetCaps();
 void Gemm(GemmMode mode, const GemmParams& params, const ComputeType* a,
           const ComputeType* b, ComputeType* c);
 
+// fp32 GEMM over a float workspace. The optimizer's orthogonalization
+// workspace must stay fp32 even in the fp16 build: the Newton-Schulz / Polar
+// Express iteration squares the working matrix, and fp16 loses the fine update
+// over a long run (the loss rises again after a few hundred steps). See
+// docs/model.md.
+void GemmF32(GemmMode mode, const GemmParams& params, const float* a,
+             const float* b, float* c);
+
 // --- Compute (fwd / bwd) ---------------------------------------------------
 
 void RmsNormForward(const RmsNormParams& params, const ComputeType* x,

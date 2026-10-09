@@ -150,6 +150,18 @@ struct DTypeTraits<Fp16> {
 inline constexpr DType kComputeDType = DTypeTraits<ComputeType>::value;
 inline constexpr std::size_t kComputeTypeSize = DTypeTraits<ComputeType>::size;
 
+// Loss scaling for the fp16 build (docs/build.md "Turing"). The backward seeds
+// its gradient with this factor so the intermediate gradients stay inside the
+// fp16 normal range instead of underflowing, and the optimizer removes it
+// again through the scale-invariant AdamW / Muon updates (the clip is scaled
+// with it). The fp32 build multiplies by one, so every schedule and kernel is
+// unchanged there.
+#if defined(NANOCHAT_PRECISION_FP16)
+inline constexpr float kDefaultLossScale = 1024.0f;
+#else
+inline constexpr float kDefaultLossScale = 1.0f;
+#endif
+
 // ---------------------------------------------------------------------------
 // Tensor: a non-owning descriptor
 // ---------------------------------------------------------------------------

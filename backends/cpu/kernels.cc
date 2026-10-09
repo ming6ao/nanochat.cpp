@@ -470,6 +470,22 @@ void Gemm(GemmMode mode, const GemmParams& params, const ComputeType* a,
   }
 }
 
+// The CPU build is fp32, so the fp32 GEMM is the ordinary one. The CUDA-only
+// fp32 optimizer workspace never reaches the CPU backend, so an fp16 CPU build
+// (which the reference loops do not support here) gets a no-op.
+void GemmF32(GemmMode mode, const GemmParams& params, const float* a,
+             const float* b, float* c) {
+#if defined(NANOCHAT_PRECISION_FP16)
+  (void)mode;
+  (void)params;
+  (void)a;
+  (void)b;
+  (void)c;
+#else
+  Gemm(mode, params, a, b, c);
+#endif
+}
+
 // ---------------------------------------------------------------------------
 // RmsNorm
 // ---------------------------------------------------------------------------

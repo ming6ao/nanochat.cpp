@@ -49,12 +49,15 @@ constexpr float kPolarCoeffs[5][3] = {
 // --- Momentum -------------------------------------------------------------
 
 // buf1[i] += (1 - momentum) * (grad[i] - buf1[i]); x carries either the
-// Nesterov-accelerated gradient or the plain first moment.
+// Nesterov-accelerated gradient or the plain first moment. The momentum
+// buffer and the working matrix are fp32 even in the fp16 build, so the
+// orthogonalization below never rounds through half (the loss otherwise rises
+// again after a few hundred steps).
 __global__ void MuonMomentumKernel(long long total, float momentum,
                                    bool nesterov,
                                    const ComputeType* __restrict__ grads,
                                    float* __restrict__ buf1,
-                                   ComputeType* __restrict__ x) {
+                                   float* __restrict__ x) {
   const long long stride = static_cast<long long>(gridDim.x) * blockDim.x;
   for (long long i =
            static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x;
@@ -62,63 +65,61 @@ __global__ void MuonMomentumKernel(long long total, float momentum,
     const float gr = AsFloatDev(grads[i]);
     const float b = buf1[i] + (1.0f - momentum) * (gr - buf1[i]);
     buf1[i] = b;
-    x[i] = ToComputeDev(nesterov ? (1.0f - momentum) * gr + momentum * b : b);
+    x[i] = nesterov ? (1.0f - momentum) * gr + momentum * b : b;
   }
 }
 
 // --- MuonEq equilibration + Frobenius normalisation ------------------------
 
 // Sum of squares of one matrix, reduced across the calling block.
-__device__ __forceinline__ float MatrixSumSq(const ComputeType* xm,
-                                             long long mat) {
+__device__ __forceinline__ float MatrixSumSq(const float* xm, long long mat) {
   float local = 0.0f;
   for (long long i = threadIdx.x; i < mat; i += blockDim.x) {
-    const float v = AsFloatDev(xm[i]);
+    const float v = xm[i];
     local += v * v;
   }
   return BlockReduceSum(local);
 }
 
 // Frobenius norm of each matrix (one block per matrix), written to `frob`.
-__global__ void MuonFrobKernel(int rows, int cols,
-                               const ComputeType* __restrict__ x,
+__global__ void MuonFrobKernel(int rows, int cols, const float* __restrict__ x,
                                float* __restrict__ frob) {
   const long long mat = static_cast<long long>(rows) * cols;
-  const ComputeType* xm = x + static_cast<long long>(blockIdx.x) * mat;
+  const float* xm = x + static_cast<long long>(blockIdx.x) * mat;
   const float sum = MatrixSumSq(xm, mat);
   if (threadIdx.x == 0) frob[blockIdx.x] = sqrtf(sum);
 }
 
 // Rescale each row to the mean row norm (one block per (matrix, row)).
 __global__ void MuonEquilibrateRowKernel(int rows, int cols,
-                                         ComputeType* __restrict__ x,
+                                         float* __restrict__ x,
                                          const float* __restrict__ frob) {
   const int p = blockIdx.y;
   const int r = blockIdx.x;
   const long long mat = static_cast<long long>(rows) * cols;
-  ComputeType* row =
+  float* row =
       x + static_cast<long long>(p) * mat + static_cast<long long>(r) * cols;
   float local = 0.0f;
   for (int c = threadIdx.x; c < cols; c += blockDim.x) {
-    const float v = AsFloatDev(row[c]);
+    const float v = row[c];
     local += v * v;
   }
   const float row_norm = fmaxf(sqrtf(BlockReduceSum(local)), 1e-6f);
   const float target = frob[p] / sqrtf(static_cast<float>(rows));
   const float s = target / row_norm;
   for (int c = threadIdx.x; c < cols; c += blockDim.x) {
-    row[c] = ToComputeDev(AsFloatDev(row[c]) * s);
+    row[c] *= s;
   }
 }
 
 // Divide each matrix by 1.01 * ||X||_F + 1e-6 (one block per matrix).
 __global__ void MuonEquilibrateDivKernel(int rows, int cols,
-                                         ComputeType* __restrict__ x) {
+                                         float* __restrict__ x) {
   const long long mat = static_cast<long long>(rows) * cols;
-  ComputeType* xm = x + static_cast<long long>(blockIdx.x) * mat;
+  float* xm = x + static_cast<long long>(blockIdx.x) * mat;
   const float div = sqrtf(MatrixSumSq(xm, mat)) * 1.01f + 1e-6f;
   for (long long i = threadIdx.x; i < mat; i += blockDim.x) {
-    xm[i] = ToComputeDev(AsFloatDev(xm[i]) / div);
+    xm[i] /= div;
   }
 }
 
@@ -126,48 +127,47 @@ __global__ void MuonEquilibrateDivKernel(int rows, int cols,
 
 // b = cb * a + cc * a2, elementwise over the stacked min x min buffers.
 __global__ void MuonBKernel(long long count, float cb, float cc,
-                            const ComputeType* __restrict__ a,
-                            const ComputeType* __restrict__ a2,
-                            ComputeType* __restrict__ b) {
+                            const float* __restrict__ a,
+                            const float* __restrict__ a2,
+                            float* __restrict__ b) {
   const long long stride = static_cast<long long>(gridDim.x) * blockDim.x;
   for (long long i =
            static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x;
        i < count; i += stride) {
-    b[i] = ToComputeDev(cb * AsFloatDev(a[i]) + cc * AsFloatDev(a2[i]));
+    b[i] = cb * a[i] + cc * a2[i];
   }
 }
 
 // x = ca * x + prod, elementwise over the stacked matrices.
 __global__ void MuonAxpbyKernel(long long count, float ca,
-                                ComputeType* __restrict__ x,
-                                const ComputeType* __restrict__ prod) {
+                                float* __restrict__ x,
+                                const float* __restrict__ prod) {
   const long long stride = static_cast<long long>(gridDim.x) * blockDim.x;
   for (long long i =
            static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x;
        i < count; i += stride) {
-    x[i] = ToComputeDev(ca * AsFloatDev(x[i]) + AsFloatDev(prod[i]));
+    x[i] = ca * x[i] + prod[i];
   }
 }
 
 // --- Muon+ renormalisation -------------------------------------------------
 
 // Snap the Frobenius norm of each matrix to sqrt(min(rows, cols)).
-__global__ void MuonRenormKernel(int rows, int cols,
-                                 ComputeType* __restrict__ x) {
+__global__ void MuonRenormKernel(int rows, int cols, float* __restrict__ x) {
   const long long mat = static_cast<long long>(rows) * cols;
-  ComputeType* xm = x + static_cast<long long>(blockIdx.x) * mat;
+  float* xm = x + static_cast<long long>(blockIdx.x) * mat;
   const int tid = threadIdx.x;
 
   float local = 0.0f;
   for (long long i = tid; i < mat; i += blockDim.x) {
-    const float v = AsFloatDev(xm[i]);
+    const float v = xm[i];
     local += v * v;
   }
   const float frob = BlockReduceSum(local);
   const float target = sqrtf(static_cast<float>(rows < cols ? rows : cols));
   const float scale = target / fmaxf(sqrtf(frob), 1e-6f);
   for (long long i = tid; i < mat; i += blockDim.x) {
-    xm[i] = ToComputeDev(AsFloatDev(xm[i]) * scale);
+    xm[i] *= scale;
   }
 }
 
@@ -178,12 +178,12 @@ __global__ void MuonRenormKernel(int rows, int cols,
 // `reduce_cols` selects the reduction axis: rows (one entry per row) or
 // columns (one entry per column), matching the CPU reference's `red_dim`.
 __global__ void MuonNorMuonKernel(int rows, int cols, bool reduce_cols,
-                                  float beta2, ComputeType* __restrict__ x,
+                                  float beta2, float* __restrict__ x,
                                   float* __restrict__ buf2,
                                   float* __restrict__ scratch) {
   const int p = blockIdx.x;
   const long long mat = static_cast<long long>(rows) * cols;
-  ComputeType* xm = x + static_cast<long long>(p) * mat;
+  float* xm = x + static_cast<long long>(p) * mat;
   const int red_index = reduce_cols ? rows : cols;
   const int red_size = reduce_cols ? cols : rows;
   float* second = buf2 + static_cast<long long>(p) * red_index;
@@ -194,14 +194,14 @@ __global__ void MuonNorMuonKernel(int rows, int cols, bool reduce_cols,
   for (int i = 0; i < red_index; ++i) {
     float local = 0.0f;
     if (reduce_cols) {
-      const ComputeType* row = xm + static_cast<long long>(i) * cols;
+      const float* row = xm + static_cast<long long>(i) * cols;
       for (int c = tid; c < cols; c += blockDim.x) {
-        const float v = AsFloatDev(row[c]);
+        const float v = row[c];
         local += v * v;
       }
     } else {
       for (int r = tid; r < rows; r += blockDim.x) {
-        const float v = AsFloatDev(xm[static_cast<long long>(r) * cols + i]);
+        const float v = xm[static_cast<long long>(r) * cols + i];
         local += v * v;
       }
     }
@@ -233,9 +233,9 @@ __global__ void MuonNorMuonKernel(int rows, int cols, bool reduce_cols,
   if (reduce_cols) {
     for (int r = 0; r < rows; ++r) {
       const float s = vmean[r] * global_scale;
-      ComputeType* row = xm + static_cast<long long>(r) * cols;
+      float* row = xm + static_cast<long long>(r) * cols;
       for (int c = tid; c < cols; c += blockDim.x) {
-        row[c] = ToComputeDev(AsFloatDev(row[c]) * s);
+        row[c] *= s;
       }
     }
   } else {
@@ -243,7 +243,7 @@ __global__ void MuonNorMuonKernel(int rows, int cols, bool reduce_cols,
       const float s = vmean[c] * global_scale;
       for (int r = tid; r < rows; r += blockDim.x) {
         const long long idx = static_cast<long long>(r) * cols + c;
-        xm[idx] = ToComputeDev(AsFloatDev(xm[idx]) * s);
+        xm[idx] *= s;
       }
     }
   }
@@ -254,13 +254,13 @@ __global__ void MuonNorMuonKernel(int rows, int cols, bool reduce_cols,
 __global__ void MuonApplyKernel(long long total, float lr, float weight_decay,
                                 float* __restrict__ master,
                                 ComputeType* __restrict__ value,
-                                const ComputeType* __restrict__ x) {
+                                const float* __restrict__ x) {
   const long long stride = static_cast<long long>(gridDim.x) * blockDim.x;
   for (long long i =
            static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x;
        i < total; i += stride) {
     const float pv = master[i];
-    const float gv = AsFloatDev(x[i]);
+    const float gv = x[i];
     // Cautious decay: only shrink a parameter that agrees in sign with the
     // update direction.
     const float decay = (gv * pv >= 0.0f) ? lr * weight_decay * pv : 0.0f;
@@ -279,7 +279,9 @@ int GridSize(long long count, int threads) {
 // Cached working buffers for MuonUpdate. cudaMalloc/cudaFree synchronize the
 // device and dominate the update when they run once per group per step, so the
 // buffers are allocated once at the largest size any group needs and reused.
-ComputeType* g_muon_workspace = nullptr;
+// The workspace is fp32 even in the fp16 build: the orthogonalization squares
+// the working matrix, and rounding it through half loses the update.
+float* g_muon_workspace = nullptr;
 std::size_t g_muon_workspace_capacity = 0;
 float* g_muon_scratch = nullptr;
 std::size_t g_muon_scratch_capacity = 0;
@@ -287,8 +289,7 @@ std::size_t g_muon_scratch_capacity = 0;
 void EnsureMuonWorkspace(std::size_t elements, std::size_t scratch_floats) {
   if (elements > g_muon_workspace_capacity) {
     if (g_muon_workspace != nullptr) Free(g_muon_workspace);
-    g_muon_workspace =
-        static_cast<ComputeType*>(Alloc(elements * sizeof(ComputeType)));
+    g_muon_workspace = static_cast<float*>(Alloc(elements * sizeof(float)));
     g_muon_workspace_capacity = elements;
   }
   if (scratch_floats > g_muon_scratch_capacity) {
@@ -322,16 +323,18 @@ void MuonUpdate(const MuonParams& params, const ComputeType* stacked_grads,
   const bool tall = rows > cols;
 
   // Working matrix (momentum output, orthonormalised in place) and the
-  // per-matrix GEMM operands. All stay ComputeType so they can feed cuBLAS.
-  // The layout is [x | prod | a | a2 | b], from one cached allocation.
+  // per-matrix GEMM operands. The workspace stays fp32 so the orthogonalization
+  // does not lose the update; the elementwise kernels read the fp16 gradient
+  // and write the fp32 result. The layout is [x | prod | a | a2 | b], from one
+  // cached allocation.
   const int red_index = reduce_cols ? rows : cols;
   EnsureMuonWorkspace(static_cast<std::size_t>(2 * total + 3 * min_total),
                       static_cast<std::size_t>(num_params) * red_index);
-  ComputeType* x = g_muon_workspace;
-  ComputeType* prod = x + total;
-  ComputeType* a = prod + total;
-  ComputeType* a2 = a + min_total;
-  ComputeType* b = a2 + min_total;
+  float* x = g_muon_workspace;
+  float* prod = x + total;
+  float* a = prod + total;
+  float* a2 = a + min_total;
+  float* b = a2 + min_total;
   float* scratch = g_muon_scratch;
 
   const int kThreads = 256;
@@ -363,7 +366,7 @@ void MuonUpdate(const MuonParams& params, const ComputeType* stacked_grads,
       ga.stride_a = mat;
       ga.stride_b = mat;
       ga.stride_c = min_sq;
-      Gemm(GemmMode::kForward, ga, x, x, a);
+      GemmF32(GemmMode::kForward, ga, x, x, a);
 
       // A2 = A A.
       GemmParams ga2;
@@ -374,7 +377,7 @@ void MuonUpdate(const MuonParams& params, const ComputeType* stacked_grads,
       ga2.stride_a = min_sq;
       ga2.stride_b = min_sq;
       ga2.stride_c = min_sq;
-      Gemm(GemmMode::kForward, ga2, a, a, a2);
+      GemmF32(GemmMode::kForward, ga2, a, a, a2);
 
       cuda_backend::Launch(MuonBKernel, dim3(min_grid), dim3(kThreads), 0,
                            min_total, cb, cc, a, a2, b);
@@ -388,7 +391,7 @@ void MuonUpdate(const MuonParams& params, const ComputeType* stacked_grads,
       gp.stride_a = mat;
       gp.stride_b = min_sq;
       gp.stride_c = mat;
-      Gemm(GemmMode::kForward, gp, x, b, prod);
+      GemmF32(GemmMode::kForward, gp, x, b, prod);
     } else {
       // A = X X^T  (rows x rows).
       GemmParams ga;
@@ -400,7 +403,7 @@ void MuonUpdate(const MuonParams& params, const ComputeType* stacked_grads,
       ga.stride_a = mat;
       ga.stride_b = mat;
       ga.stride_c = min_sq;
-      Gemm(GemmMode::kForward, ga, x, x, a);
+      GemmF32(GemmMode::kForward, ga, x, x, a);
 
       // A2 = A A.
       GemmParams ga2;
@@ -411,7 +414,7 @@ void MuonUpdate(const MuonParams& params, const ComputeType* stacked_grads,
       ga2.stride_a = min_sq;
       ga2.stride_b = min_sq;
       ga2.stride_c = min_sq;
-      Gemm(GemmMode::kForward, ga2, a, a, a2);
+      GemmF32(GemmMode::kForward, ga2, a, a, a2);
 
       cuda_backend::Launch(MuonBKernel, dim3(min_grid), dim3(kThreads), 0,
                            min_total, cb, cc, a, a2, b);
@@ -425,7 +428,7 @@ void MuonUpdate(const MuonParams& params, const ComputeType* stacked_grads,
       gp.stride_a = min_sq;
       gp.stride_b = mat;
       gp.stride_c = mat;
-      Gemm(GemmMode::kForward, gp, b, x, prod);
+      GemmF32(GemmMode::kForward, gp, b, x, prod);
     }
 
     cuda_backend::Launch(MuonAxpbyKernel, dim3(elem_grid), dim3(kThreads), 0,

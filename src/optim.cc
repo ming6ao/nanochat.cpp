@@ -175,11 +175,14 @@ class NanochatOptimizer final : public Optimizer {
 
     float norm = 0.0f;
     if (total_count_ > 0) {
-      kernels::GlobalNorm(static_cast<int>(total_count_), config_.clip, flat_,
-                          norm_dev_);
+      // The gradients carry the loss scale, so the clip moves with it and the
+      // reported norm is divided back out; the AdamW / Muon updates are
+      // scale-invariant, so the update itself is unchanged.
+      kernels::GlobalNorm(static_cast<int>(total_count_),
+                          config_.clip * kDefaultLossScale, flat_, norm_dev_);
       kernels::Memcpy(&norm, norm_dev_, sizeof(float), CopyDir::kDeviceToHost);
     }
-    grad_norm_ = norm;
+    grad_norm_ = norm / kDefaultLossScale;
 
     const float lrm = scheduler_.LrMultiplier(step);
 

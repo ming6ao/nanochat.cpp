@@ -175,7 +175,11 @@ Status: partially implemented. The build configs exist. The correctness gates
 on Turing are not recorded yet. The fp16 build keeps an fp32 master weight per
 parameter and updates it in fp32, then mirrors each update into the half
 compute copy (see the precision section above and [kernels.md](kernels.md)).
-Loss scaling is still absent.
+The backward seeds its gradient with a fixed loss scale (`kDefaultLossScale` in
+`nanochat/tensor.h`) so the fp16 intermediate gradients do not underflow; the
+optimizer scales the clip with it and divides the reported norm back out. The
+AdamW and Muon updates are scale-invariant, so the fixed scale changes no
+schedule. Dynamic scaling is still later work.
 
 ### 1. Goal
 
