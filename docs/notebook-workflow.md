@@ -111,8 +111,10 @@ The function is a module, not a cell. A test can call it.
 
 `progress` is an optional callable `(row, total)`. The runner calls it after
 each step. `ProgressReporter` prints step 1, the last step, and every `every`
-steps between. A line before the last step ends with a carriage return, so a
-notebook overwrites one line.
+steps between. Each line shows the loss, the learning rate, the gradient norm,
+the throughput, and the MFU. The reporter averages the throughput and the MFU
+over the interval. A line before the last step ends with a carriage return, so
+a notebook overwrites one line.
 
 ### 3.4 The result object
 
@@ -142,8 +144,8 @@ cannot feed them.
 |---|---|
 | `config.json` | The trial fields, the resolved plan rates, and the fingerprint |
 | `revision` | The git commit hash |
-| `metrics.jsonl` | One record per step: `step`, `loss`, `tokens_per_sec`, `seconds` |
-| `summary.json` | `bpb`, `final_loss`, `tokens_per_sec`, seconds, seeds, revision |
+| `metrics.jsonl` | One record per step: `step`, `loss`, `lr`, `grad_norm`, `tokens_per_sec`, `mfu`, `step_seconds`, `seconds` |
+| `summary.json` | `bpb`, `final_loss`, `tokens_per_sec`, `mfu`, seconds, seeds, revision |
 | `error.json` | Present only when the trial failed |
 
 Write `summary.json` and `error.json` atomically, through a temporary file and

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import io
 import tempfile
+import types
 import unittest
 from pathlib import Path
 
@@ -133,7 +134,8 @@ class IsBetterTest(unittest.TestCase):
 class ProgressReporterTest(unittest.TestCase):
     def _row(self, step):
         return {"step": step, "loss": 1.0, "tokens_per_sec": 1000.0,
-                "seconds": float(step)}
+                "lr": 0.02, "grad_norm": 1.5,
+                "mfu": 0.5, "step_seconds": 1.0, "seconds": float(step)}
 
     def test_reports_the_first_last_and_interval_steps(self) -> None:
         stream = io.StringIO()
@@ -148,6 +150,71 @@ class ProgressReporterTest(unittest.TestCase):
         for step in range(1, 4):
             reporter(self._row(step), 3)
         self.assertEqual(len(stream.getvalue().splitlines()), 3)
+
+    def test_line_reports_mfu(self) -> None:
+        stream = io.StringIO()
+        reporter = lab.ProgressReporter(every=10, stream=stream)
+        for step in range(1, 11):
+            reporter(self._row(step), 10)
+        line = stream.getvalue().splitlines()[-1]
+        self.assertIn("mfu 50.00%", line)
+
+    def test_line_reports_lr_and_grad_norm(self) -> None:
+        stream = io.StringIO()
+        reporter = lab.ProgressReporter(every=10, stream=stream)
+        reporter(self._row(1), 10)
+        line = stream.getvalue().splitlines()[0]
+        self.assertIn("lr 0.02", line)
+        self.assertIn("grad_norm 1.5", line)
+
+    def test_line_averages_over_the_interval(self) -> None:
+        stream = io.StringIO()
+        reporter = lab.ProgressReporter(every=3, stream=stream)
+        reporter(self._row(1), 3)
+        reporter({"step": 2, "loss": 1.0, "tokens_per_sec": 2000.0,
+                  "mfu": 0.8, "step_seconds": 1.0, "seconds": 2.0}, 3)
+        reporter({"step": 3, "loss": 1.0, "tokens_per_sec": 3000.0,
+                  "mfu": 0.7, "step_seconds": 1.0, "seconds": 3.0}, 3)
+        line = stream.getvalue().splitlines()[-1]
+        self.assertIn("2,500 tok/s", line)
+        self.assertIn("mfu 75.00%", line)
+
+
+class PeakFlopsTest(unittest.TestCase):
+    def test_known_device(self) -> None:
+        self.assertEqual(lab.peak_flops("Tesla T4"), 65e12)
+
+    def test_case_and_spacing_do_not_matter(self) -> None:
+        self.assertEqual(lab.peak_flops("NVIDIA GeForce GTX 1080 Ti"),
+                         11.34e12)
+
+    def test_unknown_device(self) -> None:
+        self.assertEqual(lab.peak_flops("a made up device"), 0.0)
+        self.assertEqual(lab.peak_flops(""), 0.0)
+
+
+class LrMultiplierTest(unittest.TestCase):
+    def _config(self, **overrides):
+        fields = {"warmup_steps": 0, "num_iterations": 100,
+                  "warmdown_ratio": 0.5, "final_lr_frac": 0.0}
+        fields.update(overrides)
+        return types.SimpleNamespace(**fields)
+
+    def test_warmup_ramps(self) -> None:
+        config = self._config(warmup_steps=10)
+        self.assertAlmostEqual(lab._lr_multiplier(1, config), 0.1)
+        self.assertAlmostEqual(lab._lr_multiplier(10, config), 1.0)
+
+    def test_constant_before_warmdown(self) -> None:
+        self.assertEqual(lab._lr_multiplier(1, self._config()), 1.0)
+
+    def test_warmdown_decays(self) -> None:
+        config = self._config()
+        self.assertAlmostEqual(lab._lr_multiplier(100, config), 0.02)
+
+    def test_final_lr_frac_holds_the_floor(self) -> None:
+        config = self._config(final_lr_frac=0.1)
+        self.assertAlmostEqual(lab._lr_multiplier(100, config), 0.118)
 
 
 class ResumeDecisionTest(unittest.TestCase):

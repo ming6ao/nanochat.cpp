@@ -41,6 +41,7 @@ __all__ = [
     "is_better",
     "load_results",
     "metric_value",
+    "peak_flops",
     "rate_overrides",
     "read_json",
     "resume_decision",
@@ -61,6 +62,25 @@ _TRIAL_NON_RATE_FIELDS = frozenset({
 })
 
 _SAFE_NAME = re.compile(r"[^A-Za-z0-9._-]+")
+
+#: Peak dense FLOPs per second by device-name fragment. The table holds the
+#: notebook targets only. ``PeakFlopsForDevice`` in ``src/train.cc`` owns the
+#: full table and stays the authority. An unknown device returns 0, so MFU
+#: reads 0. Keep this table consistent with the C++ table.
+_PEAK_FLOPS = (
+    ("t4", 65e12),
+    ("1080ti", 11.34e12),
+    ("1080 ti", 11.34e12),
+)
+
+
+def peak_flops(device_name: str) -> float:
+    """The peak dense FLOPs per second of ``device_name``, or 0 when unknown."""
+    name = str(device_name or "").lower()
+    for pattern, flops in _PEAK_FLOPS:
+        if pattern in name:
+            return flops
+    return 0.0
 
 
 class StaleRunError(ValueError):
@@ -127,24 +147,42 @@ class TrialResult:
 
 
 class ProgressReporter:
-    """Print one training line every ``every`` steps, and the last step."""
+    """Print one training line every ``every`` steps, and the last step.
+
+    The line reports the throughput and the MFU averaged over the interval
+    since the previous line. The average hides the noise of one step.
+    """
 
     def __init__(self, every: int = 10, stream=None) -> None:
         self.every = max(1, int(every))
         self.stream = stream
+        self._last_seconds = 0.0
+        self._tokens = 0.0
+        self._mfu_seconds = 0.0
 
     def __call__(self, row: Mapping, total: int) -> None:
         step = int(row["step"])
+        step_seconds = float(row.get("step_seconds", 0.0))
+        self._tokens += float(row["tokens_per_sec"]) * step_seconds
+        self._mfu_seconds += float(row.get("mfu", 0.0)) * step_seconds
         if step != 1 and step % self.every and step != total:
             return
         elapsed = float(row["seconds"])
+        interval = max(elapsed - self._last_seconds, 1e-9)
+        tokens_per_sec = self._tokens / interval
+        mfu = self._mfu_seconds / interval
         eta = (total - step) * elapsed / step
         end = "\n" if step == total else "\r"
         print(f"step {step}/{total}  loss {row['loss']:.4f}  "
-              f"{float(row['tokens_per_sec']):,.0f} tok/s  "
+              f"lr {float(row.get('lr', 0.0)):.6g}  "
+              f"grad_norm {float(row.get('grad_norm', 0.0)):.6g}  "
+              f"{tokens_per_sec:,.0f} tok/s  mfu {mfu * 100:.2f}%  "
               f"{elapsed:.1f}s  eta {eta:.1f}s",
               end=end, flush=True,
               file=self.stream if self.stream is not None else sys.stdout)
+        self._last_seconds = elapsed
+        self._tokens = 0.0
+        self._mfu_seconds = 0.0
 
 
 def slugify(name: str) -> str:
@@ -281,6 +319,18 @@ def _build_key() -> str | None:
         return None
 
 
+def _device_name(model) -> str:
+    """The device name of ``model``, or its short device string."""
+    try:
+        import nanochat_cpp as nc
+        info = nc._core.device_info(model._lib)
+        if info.device_name:
+            return info.device_name.decode("utf-8", "replace")
+    except (AttributeError, ImportError):
+        pass
+    return str(getattr(model, "device", ""))
+
+
 def _revision() -> str:
     """The short git revision of the repository, or ``unknown``."""
     root = Path(__file__).resolve().parents[1]
@@ -304,20 +354,61 @@ def _read_metrics(run_dir: Path) -> list[dict]:
     return rows
 
 
+def _lr_multiplier(step: int, config) -> float:
+    """The learning-rate multiplier of ``step``. ``step`` is 1-based.
+
+    Mirrors ``Scheduler::LrMultiplier`` in ``src/optim.cc``. Keep the two in
+    step.
+    """
+    it = int(step) - 1
+    warmup = int(config.warmup_steps)
+    num_iterations = int(config.num_iterations)
+    warmdown = round(float(config.warmdown_ratio) * num_iterations)
+    if warmup > 0 and it < warmup:
+        return (it + 1) / warmup
+    if warmdown <= 0 or it <= num_iterations - warmdown:
+        return 1.0
+    progress = (num_iterations - it) / warmdown
+    return progress + (1.0 - progress) * float(config.final_lr_frac)
+
+
 def _train(trainer, run_dir: Path, tokens_per_step: int, total: int,
            progress: "Callable[[dict, int], None] | None" = None,
-           ) -> list[dict]:
-    """Iterate ``trainer``, write one record per step, and report."""
+           *, flops_per_token: float = 0.0,
+           device_peak_flops: float = 0.0) -> list[dict]:
+    """Iterate ``trainer``, write one record per step, and report.
+
+    ``flops_per_token`` and ``device_peak_flops`` set the MFU of each record.
+    A zero ``device_peak_flops`` keeps the MFU at 0.
+    """
     rows: list[dict] = []
     previous = time.perf_counter()
     start = previous
+    optimizer = getattr(trainer, "optimizer", None)
+    config = getattr(optimizer, "config", None)
     with (run_dir / "metrics.jsonl").open("w", encoding="utf-8") as sink:
         for step, loss in trainer:
             now = time.perf_counter()
+            step_seconds = now - previous
+            tokens_per_sec = tokens_per_step / max(step_seconds, 1e-9)
+            mfu = 0.0
+            if device_peak_flops > 0.0:
+                mfu = tokens_per_sec * flops_per_token / device_peak_flops
+                mfu = min(max(mfu, 0.0), 1.0)
+            lr = 0.0
+            grad_norm = 0.0
+            if config is not None:
+                lr = float(config.matrix_lr) * _lr_multiplier(int(step), config)
+            if optimizer is not None:
+                grad_norm = float(optimizer.grad_norm())
             row = {
                 "step": int(step),
                 "loss": float(loss),
-                "tokens_per_sec": tokens_per_step / max(now - previous, 1e-9),
+                "lr": lr,
+                "grad_norm": grad_norm,
+                "tokens_per_sec": tokens_per_sec,
+                "mfu": mfu,
+                "step_seconds": step_seconds,
                 "seconds": now - start,
             }
             previous = now
@@ -411,7 +502,9 @@ def run_trial(trial: Trial, prefix: Prefix, out_root: str | Path,
                          optimizer=optimizer, grad_accum=plan.grad_accum)
 
     metrics = _train(trainer, run_dir, plan.total_batch_size,
-                     plan.num_iterations, progress)
+                     plan.num_iterations, progress,
+                     flops_per_token=plan.flops_per_token,
+                     device_peak_flops=peak_flops(_device_name(model)))
 
     bpb = nc.evaluate(model, parquet=prefix.val_parquet,
                       tokenizer=prefix.tokenizer, tokens=eval_tokens,
@@ -424,6 +517,7 @@ def run_trial(trial: Trial, prefix: Prefix, out_root: str | Path,
         "bpb": float(bpb),
         "final_loss": None if "loss" not in last else float(last["loss"]),
         "tokens_per_sec": float(last.get("tokens_per_sec", 0.0)),
+        "mfu": float(last.get("mfu", 0.0)),
         "seconds": float(last.get("seconds", 0.0)),
         "iterations": len(metrics),
         "parameters": int(model.param_count()),
