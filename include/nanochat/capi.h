@@ -119,6 +119,20 @@ typedef struct {
   const int* offsets;
 } nanochat_sequences;
 
+// Parameters for nanochat_generate_multi, a mirror of
+// nanochat::GenerateMultiPrompt. `num_prompts` prompts of `prompt_len` ids each
+// produce `params.num_samples` rows, so the output holds `num_prompts *
+// params.num_samples` rows in prompt-major order. `row_stops` optionally holds
+// one terminal id per output row (`num_prompts * params.num_samples` entries in
+// the same order); a negative entry disables stopping for that row, and a null
+// pointer reuses the `stop_id`/`stop_ids` fields of `params` for every prompt.
+typedef struct {
+  int num_prompts;
+  int prompt_len;
+  const int* row_stops;
+  nanochat_generate_params params;
+} nanochat_generate_multi_params;
+
 // Optimizer and schedule hyperparameters. The two groups mirror
 // nanochat::OptimizerConfig and nanochat::SchedulerConfig.
 typedef struct {
@@ -271,6 +285,16 @@ void nanochat_score_batch(nanochat_model* model, const int* tokens, int batch,
 void nanochat_generate(nanochat_model* model, const int* prompt, int length,
                        const nanochat_generate_params* params,
                        nanochat_sequences* out);
+
+// Multi-prompt batched generation: a whole rollout in one call, so a rollout
+// does not cross the ABI once per prompt. `prompts` holds `num_prompts *
+// prompt_len` row-major ids and `out` receives
+// `num_prompts * params.num_samples` rows in prompt-major order, with
+// model-owned buffers that stay valid until the next call. Additive; the
+// single-prompt nanochat_generate is unchanged.
+void nanochat_generate_multi(nanochat_model* model, const int* prompts,
+                             const nanochat_generate_multi_params* params,
+                             nanochat_sequences* out);
 
 // Forward-only bits-per-byte over `steps` batches from the loader.
 float nanochat_eval_bpb(nanochat_model* model, nanochat_loader* loader,

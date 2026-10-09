@@ -14,6 +14,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <iterator>
 #include <limits>
 #include <vector>
 
@@ -507,6 +508,37 @@ void GenerateBatch(Model* model, const int* prompt, int prompt_len,
       next[static_cast<std::size_t>(r)] = token;
     }
     if (!any_active) break;
+  }
+}
+
+void GenerateMultiPrompt(Model* model, const int* prompts, int num_prompts,
+                         int prompt_len, const GenerateParams& params,
+                         const int* row_stops,
+                         std::vector<GeneratedSequence>* out) {
+  if (out == nullptr) return;
+  out->clear();
+  if (model == nullptr || prompts == nullptr) return;
+  if (num_prompts <= 0 || prompt_len <= 0) return;
+  const int num_samples = params.num_samples > 0 ? params.num_samples : 0;
+  if (num_samples == 0) return;
+
+  out->reserve(static_cast<std::size_t>(num_prompts) *
+               static_cast<std::size_t>(num_samples));
+  for (int prompt = 0; prompt < num_prompts; ++prompt) {
+    // `row_stops` is aligned with the flattened output rows, so the rows this
+    // prompt owns are its own `num_samples`-entry slice. A null pointer leaves
+    // `params.stop_ids` in place, which each prompt then reuses.
+    GenerateParams per_prompt = params;
+    if (row_stops != nullptr) {
+      per_prompt.stop_ids =
+          row_stops + static_cast<std::size_t>(prompt) * num_samples;
+    }
+    std::vector<GeneratedSequence> rows;
+    GenerateBatch(model,
+                  prompts + static_cast<std::size_t>(prompt) * prompt_len,
+                  prompt_len, per_prompt, &rows);
+    out->insert(out->end(), std::make_move_iterator(rows.begin()),
+                std::make_move_iterator(rows.end()));
   }
 }
 

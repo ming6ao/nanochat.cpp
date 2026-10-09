@@ -28,8 +28,9 @@
 //            [stop_ids=<ids>]`
 //     `prompts` is `num_prompts * prompt_len` row-major prompt ids (so every
 //     prompt is the same length and the caller pads). The worker generates
-//     `num_samples` rows per prompt with `GenerateBatch` (a loop until the
-//     multi-prompt call lands; docs/rl-notebook.md section 5 phase 5).
+//     `num_samples` rows per prompt in one `GenerateMultiPrompt` call, so a
+//     rollout does not cross the ABI once per prompt
+//     (docs/rl-notebook.md section 5 phase 5).
 //
 //   `advantage batch=<int> seq=<int> num_passes=<int>
 //              examples_per_rank=<int> tokens=<ids> targets=<ids>

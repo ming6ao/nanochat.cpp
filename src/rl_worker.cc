@@ -9,7 +9,6 @@
 #include <cstdint>
 #include <cstdio>
 #include <exception>
-#include <iterator>
 #include <map>
 #include <sstream>
 #include <string>
@@ -370,17 +369,12 @@ RlWorkerResult RlWorker::Step(const int* tokens, const int* targets,
 void RlWorker::Generate(const std::vector<int>& prompts, int num_prompts,
                         int prompt_len, const GenerateParams& params,
                         std::vector<GeneratedSequence>* out) {
-  out->clear();
-  if (num_prompts <= 0 || prompt_len <= 0) return;
-  for (int prompt = 0; prompt < num_prompts; ++prompt) {
-    std::vector<GeneratedSequence> rows;
-    GenerateBatch(
-        model_.get(),
-        prompts.data() + static_cast<std::size_t>(prompt) * prompt_len,
-        prompt_len, params, &rows);
-    out->insert(out->end(), std::make_move_iterator(rows.begin()),
-                std::make_move_iterator(rows.end()));
-  }
+  // The multi-prompt rollout is one call: the same `num_samples` rows per
+  // prompt, with `params` (including any per-sample `stop_ids`) reused for
+  // every prompt. It shares the generation compute with the file-driven
+  // binary and the C ABI (docs/rl-notebook.md section 5 phase 5).
+  GenerateMultiPrompt(model_.get(), prompts.data(), num_prompts, prompt_len,
+                      params, nullptr, out);
 }
 
 bool RlWorker::SaveCheckpoint(const std::string& path, std::string* error) {

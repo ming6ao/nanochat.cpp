@@ -171,6 +171,52 @@ void CheckBatchMatchesNaive(Model* model, const Config& config,
               label.c_str());
 }
 
+// Runs one multi-prompt generation and checks every output row against the
+// naive single-row loop for its own prompt, including the prompt-major row
+// order and the per-row terminal id. This is the rollout the RL path uses: one
+// call for `num_prompts` prompts, `params.num_samples` rows each, and one
+// independent stop id per output row. When `row_stops` is empty the call falls
+// back to the shared `params.stop_id`.
+void CheckMultiPromptMatchesNaive(Model* model, const Config& config,
+                                  const std::vector<int>& prompts,
+                                  int num_prompts, int prompt_len,
+                                  const nanochat::GenerateParams& params,
+                                  const std::vector<int>& row_stops,
+                                  const std::string& label) {
+  std::vector<nanochat::GeneratedSequence> rows;
+  nanochat::GenerateMultiPrompt(
+      model, prompts.data(), num_prompts, prompt_len, params,
+      row_stops.empty() ? nullptr : row_stops.data(), &rows);
+  const int want_rows = num_prompts * params.num_samples;
+  if (static_cast<int>(rows.size()) != want_rows) {
+    Fail(label + ": row count " + std::to_string(rows.size()) + " want " +
+         std::to_string(want_rows));
+    return;
+  }
+  for (int p = 0; p < num_prompts; ++p) {
+    const int* prompt =
+        prompts.data() + static_cast<std::size_t>(p) * prompt_len;
+    for (int s = 0; s < params.num_samples; ++s) {
+      const int r = p * params.num_samples + s;
+      const int stop = static_cast<std::size_t>(r) < row_stops.size()
+                           ? row_stops[static_cast<std::size_t>(r)]
+                           : params.stop_id;
+      const NaiveRow want =
+          NaiveGenerate(model, config, prompt, prompt_len, params, stop);
+      if (rows[static_cast<std::size_t>(r)].tokens != want.tokens) {
+        Fail(label + ": row " + std::to_string(r) +
+             " tokens differ from the naive loop");
+      }
+      if (rows[static_cast<std::size_t>(r)].mask != want.mask) {
+        Fail(label + ": row " + std::to_string(r) +
+             " mask differs from the naive loop");
+      }
+    }
+  }
+  std::printf("generate_test: %s matched the naive single-row loop\n",
+              label.c_str());
+}
+
 // The training forward's soft-capped logits for one position, read from the
 // saved raw logits. `raw_logits()` is host memory on the CPU backend and device
 // memory on CUDA, so stage the whole `[total, padded]` buffer through the seam
@@ -380,6 +426,80 @@ void Run() {
         Fail("sampled batch is not reproducible at row " + std::to_string(r));
       }
     }
+  }
+
+  // --- Multi-prompt rollout: many prompts in one call, one stop per row. ---
+  {
+    const int multi_prompts_count = 2;
+    const int multi_prompt_len = 4;
+    const int multi_samples = 3;
+    // Two distinct prompts of the same length, laid out row-major as the
+    // multi-prompt call expects.
+    std::vector<int> multi_prompts(tokens.begin(),
+                                   tokens.begin() + multi_prompt_len);
+    multi_prompts.insert(multi_prompts.end(), tokens.begin() + 1,
+                         tokens.begin() + 1 + multi_prompt_len);
+
+    nanochat::GenerateParams multi;
+    multi.num_samples = multi_samples;
+    multi.max_tokens = 6;
+    multi.temperature = 0.0f;  // greedy, deterministic
+    multi.top_k = 0;
+    multi.seed = 4242;
+    multi.bos_id = 1;
+    multi.stop_id = -1;
+    multi.stop_ids = nullptr;
+
+    // One terminal id per output row, drawn from the greedy continuation of
+    // the prompt that owns the row, so the rows stop at different lengths. The
+    // first row of each prompt keeps no stop (the maximum-token path); a probe
+    // that is too short leaves a row without a stop as well.
+    std::vector<int> row_stops(
+        static_cast<std::size_t>(multi_prompts_count) * multi_samples, -1);
+    int shared_stop = -1;
+    const std::size_t multi_prefix =
+        static_cast<std::size_t>(multi_prompt_len) +
+        (multi.bos_id >= 0 ? 1 : 0);
+    for (int p = 0; p < multi_prompts_count; ++p) {
+      const NaiveRow probe = NaiveGenerate(
+          model.get(), config,
+          multi_prompts.data() + static_cast<std::size_t>(p) * multi_prompt_len,
+          multi_prompt_len, multi, -1);
+      if (probe.tokens.size() >= multi_prefix + 3) {
+        if (shared_stop < 0) shared_stop = probe.tokens[multi_prefix + 1];
+        row_stops[static_cast<std::size_t>(p) * multi_samples + 1] =
+            probe.tokens[multi_prefix + 1];
+        row_stops[static_cast<std::size_t>(p) * multi_samples + 2] =
+            probe.tokens[multi_prefix + 2];
+      }
+    }
+    CheckMultiPromptMatchesNaive(model.get(), config, multi_prompts,
+                                 multi_prompts_count, multi_prompt_len, multi,
+                                 row_stops, "multi-prompt rollout");
+
+    // A null stop array reuses the shared `stop_id` for every row and prompt.
+    nanochat::GenerateParams shared = multi;
+    shared.stop_id = shared_stop;
+    const std::vector<int> no_stops;
+    CheckMultiPromptMatchesNaive(model.get(), config, multi_prompts,
+                                 multi_prompts_count, multi_prompt_len, shared,
+                                 no_stops, "multi-prompt shared stop");
+
+    // Degenerate shapes produce an empty result instead of reading past the
+    // prompt list.
+    std::vector<nanochat::GeneratedSequence> empty;
+    nanochat::GenerateMultiPrompt(model.get(), multi_prompts.data(), 0,
+                                  multi_prompt_len, multi, row_stops.data(),
+                                  &empty);
+    if (!empty.empty()) Fail("zero-prompt rollout produced rows");
+    nanochat::GenerateMultiPrompt(model.get(), nullptr, multi_prompts_count,
+                                  multi_prompt_len, multi, row_stops.data(),
+                                  &empty);
+    if (!empty.empty()) Fail("null-prompt rollout produced rows");
+    nanochat::GenerateMultiPrompt(model.get(), multi_prompts.data(),
+                                  multi_prompts_count, 0, multi,
+                                  row_stops.data(), &empty);
+    if (!empty.empty()) Fail("zero-length prompt rollout produced rows");
   }
 }
 
