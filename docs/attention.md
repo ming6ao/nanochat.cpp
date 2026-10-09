@@ -125,7 +125,7 @@ tools/nanochat bench -- ./bazel-bin/src/eval_bench --batch 8 --seq 512 \
 ## Part 2. Pascal feasibility and plan
 
 This document answers a single question: **can a flash-attention-style kernel be
-implemented in `nanochat.cpp` for the Pascal host, and would it be faster than
+implemented in `nanochat.cpp` for the Pascal host?** **Would it be faster than
 the current attention path?** It records the investigation, the measured
 baseline, the feasibility judgment, and a staged plan with go/no-go gates.
 
@@ -152,19 +152,21 @@ attention parity).
 
 2. **What is worth porting is the algorithm, not the kernels.** The tiled
    online softmax, the causal/window tile skip, the recompute backward, and the
-   GQA handling are all architecture-neutral. On Pascal they must be written in
-   fp32 against CUDA cores and shared memory.
+   GQA handling are all architecture-neutral. On Pascal they must use fp32 against
+   CUDA cores and shared memory.
 
 3. **The current path leaves two large, measurable wins on the table.** It runs
    the query-key and probability-value products as *dense* cuBLAS GEMMs and
    masks afterwards. So a sliding-window layer costs exactly the same as a full
    causal layer: measured 1.571 ms versus 1.586 ms forward, even though the
-   window needs only 44% of the work. About 0.9 ms of the 1.586 ms forward is
+   window needs only 44% of the work.
+
+   About 0.9 ms of the 1.586 ms forward is
    transpose, softmax, and launch overhead around only ~0.67 ms of GEMM. A
    properly tiled kernel can skip masked tiles and fold the softmax and the
    layout conversion into the GEMM.
 
-4. **The win is plausible but not guaranteed, so it must be gated.** A prior
+4. **The win is plausible but not guaranteed, so the plan must gate it.** A prior
    experiment in this tree (the stale `attention_variant_bench` artifact)
    implemented a one-block-per-query-row tile ("score-caching v2"). It was
    ~7x *slower* than today's batched cuBLAS path (11.57 ms versus 1.59 ms
@@ -176,8 +178,8 @@ attention parity).
    outcome if the gates pass: roughly **2-3x on attention** at full context and
    roughly **2.3x on the windowed layers** that make up three quarters of the
    production `SSSL` model. At the current `d8_s512` shape attention is about
-   11% of the step, so that is an estimated **6-8% end-to-end step time** there,
-   growing with sequence length as attention's share grows. If the forward
+   11% of the step. That is an estimated **6-8% end-to-end step time** there, and
+   it grows with sequence length as attention's share grows. If the forward
    prototype cannot beat cuBLAS at `d8_s512`, stop and keep the current path.
 
 ---
@@ -208,9 +210,11 @@ Full-fused, IO-aware attention is not a tensor-core-only idea, however. The
 kernel just needs enough shared memory, registers, and fp32 FMA throughput.
 Pascal has 48 KB of shared memory per block (96 KB per streaming
 multiprocessor), 64K 32-bit registers per streaming multiprocessor, and 11.34
-TFLOP/s of fp32. That is enough to hold a tiled online softmax. What it does
-not have is the async copy pipeline that hides global latency, so the kernel
-has to be compute-bound (or rely on occupancy) to win.
+TFLOP/s of fp32.
+
+That is enough to hold a tiled online softmax. What it does not have is the
+async copy pipeline that hides global latency. So the kernel has to be
+compute-bound (or rely on occupancy) to win.
 
 ---
 
@@ -236,10 +240,10 @@ transposes. Grouped-query attention falls back to one strided GEMM per
 The path is a faithful "GEMM plus a row kernel" decomposition, the same shape
 as the PyTorch math backend. Its costs are structural:
 
-- the `seq x seq` score, probability, and gradient matrices are materialized in
-  HBM and streamed several times by the softmax kernels;
-- every tile of the matrix is computed, then masked, so causality and the
-  sliding window save nothing;
+- the softmax kernels materialize the `seq x seq` score, probability, and
+  gradient matrices in HBM and stream them several times;
+- the kernels compute every tile of the matrix, then mask it, so causality and
+  the sliding window save nothing;
 - the four layout transposes and the separate softmax kernel are pure overhead
   around the GEMMs.
 
@@ -271,19 +275,20 @@ Key readings:
   well-shaped batched cuBLAS GEMM on this device.
 - **Overhead dominates the GEMM at this shape.** From the measured per-product
   rates in commit `d253ef3` (batched QK 6,991 GFLOP/s, PV 5,843 GFLOP/s), the
-  forward GEMMs take about 2.147/6.991 + 2.147/5.843 = **0.674 ms**; the
-  remaining **~0.91 ms** (57%) is transposes, softmax, and launches. The
+  forward GEMMs take about 2.147/6.991 + 2.147/5.843 = **0.674 ms**.
+
+  The remaining **~0.91 ms** (57%) is transposes, softmax, and launches. The
   backward has the same shape of overhead around four GEMMs.
 - **The device has headroom.** Forward necessary work is 2.15 GFLOP. At 4
-  TFLOP/s that is 0.54 ms; at 2.5 TFLOP/s it is 0.86 ms. Both beat 1.586 ms.
-  The question is only whether a hand-written fp32 tile can reach that.
+  TFLOP/s that is 0.54 ms; at 2.5 TFLOP/s it is 0.86 ms. Both beat 1.586 ms;
+  the question is only whether a hand-written fp32 tile can reach that.
 
 Why the model shape matters: the production `Config` default is
-`window_pattern = "SSSL"`, so three of every four layers are windowed (the
+`window_pattern = "SSSL"`, so the model windows three of every four layers (the
 parity harness pins `L`). The average fraction of necessary attention work
 across the `SSSL` pattern is `(3 * 0.44 + 1 * 0.50) / 4 = 0.455` of the dense
-work. The fraction is roughly constant in sequence length (`w = seq/4`), so
-the opportunity does not shrink as context grows; it grows in absolute terms
+work. The fraction is roughly constant in sequence length (`w = seq/4`). The
+opportunity does not shrink as context grows; it grows in absolute terms
 because attention itself grows quadratically.
 
 ---
@@ -297,10 +302,11 @@ outer products:
 
 - **Forward.** One thread block owns a tile of `Br` query rows for one
   `(batch, head)`. It loops over key/value tiles of `Bc` rows. For each tile it
-  computes `S = Q Kᵀ`, applies the causal/window mask, updates a running row
-  maximum and running denominator in the online-softmax style, and accumulates
-  `O` in registers. `(row_max, sum_exp)` are written once per query row, exactly
-  as today. Fully masked key tiles are skipped before the dot product.
+  computes `S = Q Kᵀ` and applies the causal/window mask. It updates a running
+  row maximum and running denominator in the online-softmax style, and it
+  accumulates `O` in registers. The kernel writes `(row_max, sum_exp)` once per
+  query row, exactly as today. The kernel skips fully masked key tiles before
+  the dot product.
 - **Tile skipping.** For a query tile `[t0, t0+Br)` and a key tile
   `[j0, j0+Bc)`, the tile is entirely masked when
   `j0 > qpos_max` (fully causal) or when
@@ -310,8 +316,8 @@ outer products:
   `P = exp(S - row_max)` from the saved statistics, form `dP = dO Vᵀ`, apply
   `dS = P ∘ (dP - rowsum(P ∘ dP))`, then `dQ = dS K`, `dK = dSᵀ Q`, and
   `dV = Pᵀ dO`. The key/value gradients accumulate across the query tiles that
-  share a key/value head (GQA), so either atomic adds or a group reduction is
-  needed, exactly as the current grouped-query fallback already does.
+  share a key/value head (GQA). The kernel needs either atomic adds or a group
+  reduction, exactly as the current grouped-query fallback already does.
 - **Recompute beats storing `P` here.** Avoiding a 4-byte store and a 4-byte
   load of `P` saves 8 bytes per element; recomputing `S` costs `2 * head_dim`
   flops, so 256 flops per 8 bytes = 32 flop/byte. The device ridge point is
@@ -327,14 +333,14 @@ outer products:
 - Shared memory: keep the block at or under 48 KB so two blocks can be resident
   per streaming multiprocessor (96 KB total) without opt-in. A candidate for
   `head_dim = 128` (the only shape the model uses) is
-  `Br = 32` queries, `Bc = 32` keys, block 256 threads:
-  `Q` 16 KB + `K` 16 KB + `V` 16 KB = 48 KB, with `S` and `O` held in
-  registers (`O` is `32 x 128 / 256 = 16` registers per thread). Tile sizes
-  should be searched, not assumed.
+  `Br = 32` queries, `Bc = 32` keys, and block 256 threads. The tile uses
+  `Q` 16 KB + `K` 16 KB + `V` 16 KB = 48 KB. The kernel holds `S` and `O` in
+  registers (`O` is `32 x 128 / 256 = 16` registers per thread). Search the tile
+  sizes; do not assume them.
 - No tensor cores and fp16 at 1/64 rate: stay in fp32. `expf` matches the CPU
   reference; revisit `__expf` only if the oracle tolerance proves it safe.
-- No `ldmatrix`: register blocking must be built from plain shared-memory
-  loads, so the microkernel is the low-level risk.
+- No `ldmatrix`: register blocking must use plain shared-memory loads, so the
+  microkernel is the low-level risk.
 
 #### 5.3 Why the naive version fails
 
@@ -420,9 +426,10 @@ not promote the full-causal case.
 #### Phase 3 — promotion, dispatch, and end-to-end (1-2 sessions)
 
 - Move the validated kernels into `backends/cuda/kernels/attention.cu` behind a
-  `UseFusedAttention(params)` predicate, keeping the cuBLAS path for shapes the
-  fused kernel does not cover (for example `head_dim` other than 128, or very
-  short sequences where the batched GEMM is already launch-bound).
+  `UseFusedAttention(params)` predicate. The kernel keeps the cuBLAS path for
+  shapes the fused kernel does not cover. Those shapes include a `head_dim`
+  other than 128 and very short sequences, where the batched GEMM is already
+  launch-bound.
 - Keep the seam byte-for-byte; no header edit.
 - **Gates (all must pass):**
   - `tools/nanochat test --gpu //backends/cuda/kernels:attention_gpu_test`
@@ -439,7 +446,7 @@ not promote the full-causal case.
 
 - On sm_75 a real fp16 tensor-core flash attention (adapted from the upstream
   sm_75 forks) is possible, but there is no Turing device on this host, so it is
-  compile-only and cannot be benchmarked here. Keep it out of this effort; the
+  compile-only and the project cannot benchmark it here. Keep it out of this effort; the
   DESIGN already defers the decode/MMA path to Turing.
 
 ---

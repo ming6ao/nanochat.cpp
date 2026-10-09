@@ -7,6 +7,7 @@ detailed reference that the design points at.
 | Document | Contents |
 |---|---|
 | [build.md](build.md) | File layout, Bazel, Makefile fallback, backends, precision, Turing |
+| [precision.md](precision.md) | The precision policy: fp32 on Pascal, Turing, and the CPU; bf16 on Ampere and newer |
 | [kernels.md](kernels.md) | The backend seam: kernel inventory, API, device helpers |
 | [model.md](model.md) | Model API, graphs, optimizer, data and checkpoints, workspace |
 | [testing.md](testing.md) | Test tiers, oracle harness, finite-difference checks |

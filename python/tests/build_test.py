@@ -125,10 +125,21 @@ class BuildOptionsTest(unittest.TestCase):
 class BuildCommandTest(unittest.TestCase):
     def test_cuda_arch_reaches_the_command(self) -> None:
         options = _build.BuildOptions.resolve(
-            backend="cuda", precision="fp16", arch="sm_75")
+            backend="cuda", precision="fp32", arch="sm_75")
         command = _build._build_command(Path("tools/nanochat"), options)
-        self.assertIn("--config=t4", command)
+        self.assertIn("--config=cuda", command)
         self.assertIn("--@rules_cuda//cuda:archs=sm_75", command)
+
+    def test_cuda_fp16_request_raises(self) -> None:
+        options = _build.BuildOptions.resolve(
+            backend="cuda", precision="fp16", arch="sm_75")
+        with self.assertRaises(_build.BuildError):
+            _build._build_command(Path("tools/nanochat"), options)
+
+    def test_cpu_fp16_maps_to_the_fp16_config(self) -> None:
+        options = _build.BuildOptions.resolve(backend="cpu", precision="fp16")
+        command = _build._build_command(Path("tools/nanochat"), options)
+        self.assertIn("--config=fp16", command)
 
     def test_cpu_command_has_no_arch_flag(self) -> None:
         options = _build.BuildOptions.resolve(backend="cpu", arch="sm_75")

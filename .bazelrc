@@ -4,11 +4,11 @@
 #   * toolchain: the C++ standard here; the host compiler is host-local;
 #   * arch:      Pascal sm_61 is the default; --config=sm_75 and --config=t4
 #                select Turing (T4);
-#   * precision: fp32 is the default, fp16 is --config=fp16;
+#   * precision: fp32 is the default; fp16 is a test-only config (--config=fp16);
 #   * resources: cap the Bazel server and per-server action fan-out so several
 #                agent worktrees cannot exhaust the small shared host.
-# Named configs are additive: `--config=sm_75 --config=fp16` builds the Turing
-# half-precision variant. `--config=t4` is the complete Turing CUDA target.
+# Named configs are additive: `--config=sm_75 --config=fp16` builds the test-only
+# half-storage variant. `--config=t4` is the complete Turing CUDA target.
 
 # --- Toolchain --------------------------------------------------------------
 #
@@ -32,9 +32,10 @@ build:sm_75 --@rules_cuda//cuda:archs=sm_75
 
 # --- Precision --------------------------------------------------------------
 #
-# fp32 is the default; fp16 is for the sm_75 build. The config settings live at
-# //:fp32 and //:fp16 and are consumed with select() in per-directory BUILD
-# files. See docs/precision.md.
+# fp32 is the default on every host. fp16 is a test-only storage mode for the
+# simulator, selected with --config=fp16. The config settings live at //:fp32
+# and //:fp16 and are consumed with select() in per-directory BUILD files. See
+# docs/precision.md.
 build --define=precision=fp32
 build:fp16 --define=precision=fp16
 
@@ -84,15 +85,11 @@ build:h200 --define=simulator=1
 
 # --- Host targets -----------------------------------------------------------
 #
-# A complete named target for one host. `t4` is the Turing half-precision CUDA
-# build for a Kaggle Notebook (sm_75). `t4-fp32` is the same card at fp32, for
-# the correctness gate. See docs/turing-t4.md and docs/kaggle.md.
+# A complete named target for one host. `t4` is the Turing CUDA build for a
+# Kaggle Notebook (sm_75), at fp32. See docs/precision.md.
 build:t4 --@rules_cuda//cuda:archs=sm_75
-build:t4 --define=precision=fp16
+build:t4 --define=precision=fp32
 build:t4 --define=backend=cuda
-build:t4-fp32 --@rules_cuda//cuda:archs=sm_75
-build:t4-fp32 --define=precision=fp32
-build:t4-fp32 --define=backend=cuda
 
 # --- Resources --------------------------------------------------------------
 #

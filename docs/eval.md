@@ -3,9 +3,8 @@
 How `nanochat.cpp` measures a trained model. Evaluation is forward-only: it
 reads a checkpoint, runs the inference graphs, and reduces the result to a
 metric. It never computes gradients, never steps an optimizer, and never writes
-a checkpoint. The base and chat evaluation scripts (`scripts/base_eval.py`,
-`scripts/chat_eval.py`) are reproduced through the Python API
-([python.md](python.md)).
+a checkpoint. The Python API reproduces the base and chat evaluation scripts
+(`scripts/base_eval.py`, `scripts/chat_eval.py`) ([python.md](python.md)).
 
 This is a design document. The interface inventory is in
 [model.md](model.md); the process seam is in [python.md](python.md);
@@ -43,7 +42,7 @@ Evaluation splits along the existing process seam:
 | `GenerateBatch` (new) | prefill + batched decode with per-row stop and masks | samples, generative chat |
 
 The C++ side is tokenizer-agnostic. The bridge tokenizes with the reference BPE
-tokenizer and passes token ids, start/end indices, focus token ids, and stop
+tokenizer. It passes token ids, start/end indices, focus token ids, and stop
 token ids as data or CLI arguments. No tokenizer, jinja, pyarrow, or torch enters
 the C++ runtime.
 
@@ -59,8 +58,9 @@ in evaluation.
 `evaluate_bpb`. It sums per-token NLL over `steps` batches, sums the source-byte
 length of each target token from the loader's byte table, and returns
 `total_nats / (ln(2) * total_bytes)`. Special tokens and masked targets have zero
-bytes and are skipped. No change is needed beyond exposing train and val splits
-and mapping the reference's `--split-tokens` to a step count.
+bytes, so the implementation skips them. The implementation needs no other change
+beyond exposing the train and val splits and mapping the reference's
+`--split-tokens` to a step count.
 
 ### 3.2 `ScoreBatch`
 
@@ -73,26 +73,26 @@ Design constraints:
 - Input is a fixture of `N` padded sequences plus, per sequence, a candidate
   span `[start, end)` and optionally a focus set of token ids.
 - One `ForwardLoss` call with shifted targets; masked positions use the ignore
-  index. The saved per-token losses (`TrainModel::losses`) and the argmax of
-  `raw_logits` are staged to the host.
-- Output is per-position NLL and argmax, plus the focused logits when a focus set
-  is given (categorical chat only reads the letter tokens at the answer
+  index. The binary stages the saved per-token losses (`TrainModel::losses`) and
+  the argmax of `raw_logits` to the host.
+- Output is per-position NLL and argmax, plus the focused logits when the caller
+  gives a focus set (categorical chat only reads the letter tokens at the answer
   position).
 - The binary is `score_main`; it is stateless and writes a result file. The
-  fixture format is owned by the bridge (`eval_fixture.py`) and mirrored by the
-  test dumper.
+  bridge owns the fixture format (`eval_fixture.py`), and the test dumper mirrors
+  it.
 
 The reduction is deliberately *not* in C++. Whether a CORE example is correct is
-"lowest mean loss among candidates" or "exact argmax match"; whether an ARC
+"lowest mean loss among candidates" or "exact argmax match". Whether an ARC
 example is correct is "argmax over the answer letters". Those semantics stay in
 Python next to the reference implementation.
 
 ### 3.3 `GenerateBatch`
 
 Batched sampling: prefill once, clone the KV cache per sample, decode in
-lockstep, stop each row on its own terminal token, and return token ids plus a
-per-position `1`/`0` mask. See [model.md](model.md) for the graph and the
-sampling parameters. Evaluation uses greedy decoding (temperature 0) for
+lockstep, and stop each row on its own terminal token. The method returns token
+ids plus a per-position `1`/`0` mask. See [model.md](model.md) for the graph and
+the sampling parameters. Evaluation uses greedy decoding (temperature 0) for
 deterministic metrics and a fixed seed for samples.
 
 ## 4. Base evaluation
@@ -104,8 +104,9 @@ has no `--eval`, CORE, or sample flag. The remaining modes are not implemented.
 ### 4.1 Bits per byte
 
 For each of the train and val splits: materialize or reuse the shard, build a
-`DataLoader`, and call `EvalBpb`. The reference's `--split-tokens` is converted
-to `steps = split_tokens / (device_batch_size * seq_len)`. Result:
+`DataLoader`, and call `EvalBpb`. The bridge converts the reference's
+`--split-tokens` to `steps = split_tokens / (device_batch_size * seq_len)`.
+Result:
 `{split: bpb}`.
 
 ### 4.2 Samples
@@ -121,7 +122,7 @@ than a number.
 CORE is the largest piece. The bridge reproduces `evaluate_core` exactly; only
 the forward pass is C++.
 
-1. **Bundle.** Ensure `eval_bundle.zip` is present and unzipped under the base
+1. **Bundle.** Make sure `eval_bundle.zip` is present and unzipped under the base
    directory (network on first use only).
 2. **Tasks.** Read `core.yaml` for the ICL task list, `eval_meta_data.csv` for
    the random baselines, and the per-task JSONL from `eval_data/`.
@@ -130,7 +131,7 @@ the forward pass is C++.
    `random.Random(1234 + idx)`.
 4. **Render.** Three task types, each with a jinja template:
    - `multiple_choice`: contexts share a prefix, continuations differ.
-   - `schema`: contexts differ, the continuation is shared (common suffix).
+   - `schema`: contexts differ, the continuation is the same (common suffix).
    - `language_modeling`: two prompts, without and with the continuation.
    The bridge tokenizes each candidate and computes the candidate span from the
    common prefix or suffix.
@@ -141,8 +142,8 @@ the forward pass is C++.
    with `(accuracy - 0.01 * baseline) / (1 - 0.01 * baseline)`; CORE is the mean
    over tasks. Write the CSV in the reference format.
 
-A tiny synthetic CORE fixture is committed so the T0 test never needs the
-network or the real bundle.
+The repository contains a tiny synthetic CORE fixture, so the T0 test never
+needs the network or the real bundle.
 
 ## 5. Chat evaluation
 
@@ -159,8 +160,8 @@ answer letter. It calls `Evaluator.score` with the focus set and argmaxes the
 focused logits. `ScoreBatch` returns logits only at the requested position and
 token ids, so the caller never moves full `(B, T, V)` tensors.
 
-The letter token ids are cached; each letter is asserted to be a single token,
-as in the reference.
+The code caches the letter token ids. The code asserts that each letter is a
+single token, as in the reference.
 
 ### 5.2 Generative (GSM8K, HumanEval)
 
@@ -172,24 +173,24 @@ and evaluates:
   the reference answer.
 - **HumanEval**: extract the first code block, append the test harness, and run
   it through the reference `nanochat.execution.execute_code`. This is the one
-  place evaluation executes generated code; it runs inside the resource sandbox
-  and uses the reference guards (fresh interpreter, rlimits, scrubbed
+  place where evaluation executes generated code. It runs inside the resource
+  sandbox and uses the reference guards (fresh interpreter, rlimits, scrubbed
   environment, timeout). It is not a security boundary against adversarial code.
 
 ### 5.3 ChatCORE
 
 When all five tasks ran, ChatCORE is the mean centered accuracy with baselines
-ARC/MMLU 0.25 and GSM8K/HumanEval 0.0. The categorical subset is reported
-separately, mirroring the post-training loop's logging.
+ARC/MMLU 0.25 and GSM8K/HumanEval 0.0. The evaluator reports the categorical
+subset separately, mirroring the post-training loop's logging.
 
 ## 6. Checkpoints and the tokenizer
 
 - Evaluation loads a checkpoint by `source` (`base`/`sft`/`rl`), model tag, and
   step. C++-trained checkpoints are NCHKPT01 and load directly.
 - Reference checkpoints are torch `.pt` state dicts. A converter
-  (`checkpoint.py`) remaps names and dtypes to NCHKPT01 so released nanochat
-  models can be evaluated. This is the only path by which reference weights enter
-  the runtime.
+  (`checkpoint.py`) remaps names and dtypes to NCHKPT01, so the project can
+  evaluate released nanochat models. This is the only path by which reference
+  weights enter the runtime.
 - The tokenizer is the reference BPE artifact, loaded in Python. The C++ runtime
   receives only integer ids.
 
@@ -197,11 +198,11 @@ separately, mirroring the post-training loop's logging.
 
 - Forward-only: no gradients, no optimizer, no checkpoint writes.
 - Deterministic where the reference is deterministic (greedy decoding, fixed
-  few-shot seeds); sampled modes are seeded.
+  few-shot seeds). The sampled modes use a fixed seed.
 - Tokenizer-agnostic C++: ids in, ids and logits out.
 - Single process; no DDP ([parity.md](parity.md) D6).
-- The CORE bundle and task datasets are downloaded by the bridge, never by a C++
-  binary; committed fixtures keep the tests hermetic.
+- The bridge downloads the CORE bundle and task datasets; a C++ binary never
+  downloads them. Committed fixtures keep the tests hermetic.
 
 ## 8. Parity
 
@@ -216,7 +217,7 @@ separately, mirroring the post-training loop's logging.
 
 The project has shipped most of the evaluation workstream in this document:
 
-1. `checkpoint.py` converter so a reference checkpoint can be loaded.
+1. A `checkpoint.py` converter that loads a reference checkpoint.
 2. `ScoreBatch` + `score_main` + the fixture format.
 3. `GenerateBatch` ([model.md](model.md)).
 4. `nanochat_cpp.api.evaluate` (bpb) and `//src:eval_main` (bpb only).
@@ -225,11 +226,11 @@ The project has shipped most of the evaluation workstream in this document:
 The base CORE and sample modes are not wired into `eval_main` or
 `api.evaluate` yet.
 
-The differences that remain are tracked in [parity.md](parity.md): E3
+The project tracks the differences that remain in [parity.md](parity.md). E3
 (reference checkpoints converted torch -> NCHKPT01) and E4 (CORE and chat
-scoring use the C++ forward with the reference task logic) are `equivalent`;
+scoring use the C++ forward with the reference task logic) are `equivalent`.
 E1 (the sampled modes use the C++ RNG rather than torch, while greedy decoding
-is bit-identical) is `open`; E5 (no distributed evaluation) is `out-of-scope`
+is bit-identical) is `open`. E5 (no distributed evaluation) is `out-of-scope`
 for the single-GPU target. No evaluation item remains on the roadmap.
 
 Gates: a synthetic CORE fixture at T0; a converted-checkpoint bpb match and a
@@ -276,8 +277,9 @@ The arena contains three groups:
 | Backward and global scratch | `dx_*`, `g_a_`, `g_b_`, `block_scratch_` | `33 * R * hidden` |
 
 Here `R` is `batch * seq`. For `R = 32768`, `hidden = 768`, `L = 12`, and
-`padded_vocab = 32768`, the total is about 36 GB in fp32. The fp16 build halves
-that value. The 11 GB card cannot hold either value.
+`padded_vocab = 32768`, the total is about 36 GB in fp32. The fp16 storage test
+halves that value, but the fp16 build is test-only ([precision.md](precision.md)).
+The 11 GB card cannot hold either value.
 
 ### 3. Mechanism
 
@@ -456,4 +458,4 @@ source runs the CPU reference backend or the CUDA backend.
 - Chunking changes the summation order. Keep the host sum in `double`.
 - Two arenas use more total memory than one arena. The model holds both only
   when the caller uses both modes.
-- The fp16 build needs no change. The mode and the chunk logic use no dtype.
+- The fp16 storage test needs no change. The mode and the chunk logic use no dtype.

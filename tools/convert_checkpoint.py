@@ -10,7 +10,7 @@ is importable (and testable without torch). See ``docs/python.md``.
 A released checkpoint keeps the parameters under the same names the C++ model
 registers (``src/model.cc``), so the remap is mostly normalising the
 ``_orig_mod.``/``module.`` wrappers; the dtype policy casts every tensor to the
-container build's storage dtype (fp32, or fp16 for the sm_75 build).
+container build's storage dtype (fp32).
 
     # Explicit file.
     python3 tools/convert_checkpoint.py \

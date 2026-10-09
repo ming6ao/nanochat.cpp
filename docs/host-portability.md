@@ -20,7 +20,7 @@ Status: implemented in the tree. The WSL2 host file is `.bazelrc.wsl`.
 |---|---|---|---|
 | Host compiler | gcc-12 | image gcc | `.bazelrc.local` |
 | CUDA arch | sm_61 | sm_75 | `--config=t4` |
-| Precision | fp32 | fp16 and fp32 | `--config=fp16` |
+| Precision | fp32 | fp32 | build default |
 | Sandbox | systemd cgroups | none | `NANOCHAT_SANDBOX_BACKEND` |
 | GPU count | one | two | `NANOCHAT_GPU_DEVICES` |
 | Build jobs | four | two | `.bazelrc.local` |
@@ -64,10 +64,12 @@ different `rules_cuda` toolchain. It is a separate project with its own risk.
 | `sm_75` | sm_75 | fp32 | cpu |
 | `fp16` | sm_61 | fp16 | cpu |
 | `cuda` | sm_61 | fp32 | cuda |
-| `t4` | sm_75 | fp16 | cuda |
+| `t4` | sm_75 | fp32 | cuda |
 
-The `t4` config selects the Turing half-precision CUDA build. Add a `t4-fp32`
-config for the fp32 gate on the same card.
+The `t4` config selects the fp32 CUDA build for the Turing card. Stage 1
+removed the fp16 production build ([precision.md](precision.md)). The `fp16`
+config selects the CPU storage emulation. It is test-only. It serves the
+simulator.
 
 The Kaggle host file sets the arch to sm_75 and the resource budget. It does
 not set the backend or the precision. The backend and the precision stay
@@ -285,7 +287,7 @@ Run every command through `tools/nanochat`, as on the workstation.
 | `tools/nanochat build` | Build every target for sm_75, CPU backend |
 | `tools/nanochat test` | CPU tests under the `none` sandbox |
 | `tools/nanochat test --gpu //...` | T1 GPU tests, fp32 |
-| `tools/nanochat test --gpu --config=fp16 //...` | T1 GPU tests, fp16 |
+| `tools/nanochat test --gpu --config=fp16 //...` | fp16 test leg on the T4, test-only |
 | `tools/nanochat test --gpu //tests:oracle_cuda_test` | T2 oracle parity |
 
 The first session must prove the toolchain. Do this in order:
@@ -298,7 +300,7 @@ The first session must prove the toolchain. Do this in order:
 6. `tools/nanochat test --gpu //tests:train_parity_cuda_test`
 
 The entry point gains a `--config NAME` option for `build` and `test`. It
-forwards the named config to Bazel. This is how the fp16 gate runs on the T4.
+forwards the named config to Bazel.
 
 ### 5. Data and persistence
 
@@ -489,7 +491,7 @@ the single-card path is fast.
 1. `tools/kaggle/bootstrap.sh` prepares a fresh session.
 2. `tools/nanochat build` succeeds with the `none` sandbox.
 3. `tools/nanochat test` passes.
-4. The T1 GPU tests pass in fp32 and fp16.
+4. The T1 GPU tests pass in fp32.
 5. The T2 oracle and train-parity gates pass on sm_75.
 6. `pi --print` runs a `tools/nanochat` command.
 7. `gh pr create` opens a pull request from the session.

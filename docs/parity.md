@@ -3,10 +3,10 @@
 `nanochat.cpp` reimplements the architecture and training recipe of the PyTorch
 reference (`scripts/base_train.py`, `nanochat/gpt.py`, `nanochat/optim.py`,
 `nanochat/dataloader.py`). This document tracks every known difference between
-the two so that a divergence in a loss curve, a metric, or a parameter can be
-attributed quickly. It is the companion to
-[testing.md](testing.md) (how parity is gated) and
-[python.md](python.md) (how the reference is driven).
+the two. You can then attribute a divergence in a loss curve, a metric, or a
+parameter quickly. It is the companion to
+[testing.md](testing.md) (how the project gates parity) and
+[python.md](python.md) (how the harness drives the reference).
 
 Status values:
 
@@ -41,7 +41,7 @@ Status values:
 | T2 | `equivalent` | tokenizer | portable `NCTOKEN1` artifact and `int64` pair counts vs the reference pickle and `int32` |
 | T3 | `open` | tokenizer | stream decode buffers an incomplete UTF-8 suffix instead of one U+FFFD per token |
 
-## How parity is verified
+## How the project verifies parity
 
 Two data fixtures pin the model and optimizer against the reference:
 
@@ -52,8 +52,8 @@ Two data fixtures pin the model and optimizer against the reference:
   loss, gradient norm, and parameter norms) via `tools/dump_train_fixture.py`.
 
 Both fixtures **share the initial parameters and the exact batches** with the
-C++ side, so they isolate the model, backward pass, optimizer, and schedules
-from the data pipeline. That is deliberate: it means a failure points at the
+C++ side. They isolate the model, backward pass, optimizer, and schedules from
+the data pipeline. That is deliberate: it means a failure points at the
 graph, and it also means D1 is *not* covered by these gates.
 
 ```bash
@@ -110,14 +110,14 @@ rows against the reference rows on a fixed corpus.
 **Reference** (`nanochat/dataloader.py`,
 `tokenizing_distributed_data_loader_with_state_bos_bestfit`):
 
-- BOS-aligned best-fit packing: every row starts with BOS; documents are placed
-  largest-first; when nothing fits, the shortest buffered document is cropped
-  to fill the row exactly. Row capacity is `T + 1`, so `inputs = row[:-1]` and
-  `targets = row[1:]` are independent per row.
-- Documents are iterated sequentially over parquet row groups, sharded across
-  ranks and cycling epochs.
-- Roughly 35% of tokens are discarded to cropping at `T = 2048` (higher at
-  shorter `T`), which means more unique documents are consumed per step.
+- BOS-aligned best-fit packing: every row starts with BOS; the packer places
+  documents largest-first; when nothing fits, the packer crops the shortest
+  buffered document to fill the row exactly. Row capacity is `T + 1`, so
+  `inputs = row[:-1]` and `targets = row[1:]` are independent per row.
+- The loader iterates documents sequentially over parquet row groups, shards
+  them across ranks, and cycles epochs.
+- Cropping discards roughly 35% of tokens at `T = 2048` (higher at shorter
+  `T`), so the loader consumes more unique documents per step.
 
 **nanochat.cpp** (`src/data.cc`, `DataLoader`):
 
@@ -126,8 +126,8 @@ rows against the reference rows on a fixed corpus.
 - A producer thread refills a document buffer to `document_buffer`, the
   consumer picks the largest document that fits, and crops the shortest
   document when none fits. Row capacity is `T + 1`.
-- Documents are iterated sequentially over parquet row groups. `Reset` re-opens
-  the source, so a training run cycles epochs.
+- The loader iterates documents sequentially over parquet row groups. `Reset`
+  re-opens the source, so a training run cycles epochs.
 
 **Impact:** none. The packing is the reference packing.
 
@@ -141,7 +141,9 @@ batch size with the C++ side.
 **Status:** `open`. Evaluation runs its generative modes through the C++
 `GenerateBatch` primitive ([eval.md](eval.md) §4.2, §5.2), so they draw from the
 xorshift64\* source tracked in D4 rather than from the PyTorch global RNG the
-reference uses. Greedy decoding is bit-identical: it is an argmax with no random
+reference uses.
+
+Greedy decoding is bit-identical: it is an argmax with no random
 draw, and the generation parity fixture (`tests/data/generate_parity.bin`,
 `//tests:generate_parity_test`) pins it on the CPU and CUDA backends. The
 sampled paths are:
@@ -153,9 +155,9 @@ sampled paths are:
 
 **Impact:** the sampled text differs from the reference, so GSM8K and HumanEval
 pass rates and sample outputs are not run-for-run comparable. The deterministic
-metrics (bpb, CORE, categorical chat) are unaffected.
+metrics (bpb, CORE, categorical chat) stay unaffected.
 
-**Evidence:** the generation parity fixture covers greedy decoding only; the
+**Evidence:** the generation parity fixture covers greedy decoding only. The
 sampled outputs depend on the torch RNG state, so there is no committed fixture
 for them. The T2 chat evaluation gate compares per-task accuracy on a fixed
 subset, not the sampled text.
@@ -243,7 +245,7 @@ RMSNorm→RoPE→scale in `QkPrepForward` (`src/ops.cc`,
 `backends/cuda/kernels/qk_prep.cu`). The two orders are mathematically
 identical: RoPE is an orthogonal rotation within `head_dim` and RMSNorm is a
 scalar rescale, so `RMSNorm(R x) = R · RMSNorm(x)`. Only floating-point
-rounding differs. See [kernels.md](kernels.md).
+rounding differs; see [kernels.md](kernels.md).
 
 ### D3 — Attention backend
 
@@ -259,8 +261,10 @@ statistics contract; only the summation order differs. See
 ### D4 — Initialization RNG
 
 The reference initializes with PyTorch's global RNG; nanochat.cpp uses a
-xorshift64\* source in `src/model.cc` (`InitWeights`). The **distributions** are
-identical (verified against `GPT.init_weights`): `wte` normal std 0.8, `lm_head`
+xorshift64\* source in `src/model.cc` (`InitWeights`).
+
+The **distributions** are identical (verified against `GPT.init_weights`): `wte`
+normal std 0.8, `lm_head`
 normal std 0.001, attention projections uniform with standard deviation
 `1/sqrt(hidden)`, `c_proj` zero, `mlp.c_fc` at 0.4× that scale, and the scalar,
 smear-gate, value-embedding, and value-gate initializations all match. The
@@ -310,11 +314,11 @@ The regression test is `TestWarmdownRounding` in `src/optim_test.cc`. Evidence:
 The reference saves checkpoints as torch `.pt` state dictionaries; the C++
 runtime loads only the NCHKPT01 container. `tools/convert_checkpoint.py` and
 `python/nanochat_cpp/checkpoint.py` remap the reference parameter names and
-apply the dtype policy so a released base or SFT checkpoint can be loaded by
-`EvalBpb` and `score_main`. The conversion re-lays the reference weight values
-into the container without recomputing them, so the model being evaluated is the
-reference model; the only arithmetic difference is the forward-pass rounding
-already tracked in D2 and D3. See [eval.md](eval.md) §6. A converted `d8`
+apply the dtype policy, so `EvalBpb` and `score_main` can load a released base
+or SFT checkpoint. The conversion re-lays the reference weight values into the
+container without recomputing them, so the model being evaluated is the
+reference model. The only arithmetic difference is the forward-pass rounding
+already tracked in D2 and D3; see [eval.md](eval.md) §6. A converted `d8`
 checkpoint reproduces the reference bits-per-byte within the T2 tolerance.
 
 ### E4 — CORE and chat scoring
@@ -322,14 +326,17 @@ checkpoint reproduces the reference bits-per-byte within the T2 tolerance.
 The reference computes CORE (`nanochat.core_eval`) and categorical chat scoring
 with the torch forward and keeps every task decision in Python. nanochat.cpp
 runs one `ForwardLoss` over a padded batch in `score_main` (`ScoreBatch`) and
-returns per-position NLL, argmax, and focused logits; the bridge reproduces the
-reference task logic unchanged: the `random.Random(1337)` and
-`random.Random(1234 + idx)` few-shot sampling, the jinja rendering and candidate
-spans, the lowest-mean-NLL argmin and exact-argmax match, the
-`(accuracy - 0.01 * baseline) / (1 - 0.01 * baseline)` centering, and the
-ChatCORE mean. Only the forward arithmetic differs, in the same
-floating-point-order sense as D2 and D3; each decision is the same function of
-the logits. See [eval.md](eval.md) §4.3 and §5.
+returns per-position NLL, argmax, and focused logits.
+
+The bridge reproduces the reference task logic unchanged. The logic includes the
+`random.Random(1337)` and `random.Random(1234 + idx)` few-shot sampling, the
+jinja rendering and candidate spans, the lowest-mean-NLL argmin and exact-argmax
+match, the `(accuracy - 0.01 * baseline) / (1 - 0.01 * baseline)` centering, and
+the ChatCORE mean.
+
+Only the forward arithmetic differs, in the same floating-point-order sense as
+D2 and D3; each decision is the same function of the logits. See [eval.md](eval.md)
+§4.3 and §5.
 
 ### P3 — SFT base checkpoint provenance
 
@@ -405,17 +412,17 @@ epoch until the checkpoint stores the document index (P4).
 
 ### D7 — `torch.compile`
 
-The reference compiles the model and the fused optimizer steps. On Pascal this
-is disabled (`TORCH_COMPILE_DISABLE=1`; Triton needs SM 70+), so it has no
-effect on the current host and is not a parity item here. On newer hardware it
+The reference compiles the model and the fused optimizer steps. On Pascal the
+project disables it (`TORCH_COMPILE_DISABLE=1`; Triton needs SM 70+). So it has
+no effect on the current host and is not a parity item here. On newer hardware it
 would fuse elementwise work and change host dispatch cost, not the mathematics.
 
 ### E5 — Distributed evaluation
 
 The reference shards evaluation across ranks (each rank scores a slice of the
 token shard or the task set) and reduces the metric. nanochat.cpp evaluates in a
-single process, so the evaluated token count and the task count are bounded by
-one device. This is the evaluation-side counterpart of D6 and is out of scope
+single process, so one device bounds the evaluated token count and the task
+count. This is the evaluation-side counterpart of D6 and is out of scope
 for the single-GPU target.
 
 ## Adding a difference

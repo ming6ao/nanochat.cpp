@@ -144,7 +144,7 @@ The kernels themselves are declared in [kernels.md](kernels.md).
 - **Oracle**: `debug_state.bin`, produced offline by nanochat's `gpt.py`.
   `tests/oracle_test.cc` compares logits, loss, and gradients, then runs a few
   optimizer steps and matches losses. Per-backend tolerances (fp32 CUDA ~1e-5;
-  fp16 Turing looser).
+  the fp16 storage test is looser).
 
 The oracle fixture is consumed by the test harness described in
 [testing.md](testing.md).

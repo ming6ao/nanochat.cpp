@@ -122,7 +122,7 @@ def run_bootstrap(root: str | Path) -> None:
     subprocess.run(["bash", str(script)], check=True)
 
 
-def build_library(backend: str = "cuda", precision: str = "fp16",
+def build_library(backend: str = "cuda", precision: str = "fp32",
                   arch: str = "sm_75",
                   cache: str | Path | None = None) -> tuple[Path, str]:
     """Build the shared library and pin ``NANOCHAT_CPP_LIB``.
@@ -151,7 +151,7 @@ class Host:
 
 def setup(url: str = DEFAULT_REPO_URL, dest: str | Path = DEFAULT_REPO_DEST,
           ref: str | None = None, backend: str = "cuda",
-          precision: str = "fp16", arch: str = "sm_75",
+          precision: str = "fp32", arch: str = "sm_75",
           cache: str | Path | None = None,
           env_path: str | Path | None = None) -> Host:
     """Prepare the session: fetch, bootstrap, host environment, and build."""

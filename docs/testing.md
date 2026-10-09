@@ -105,7 +105,7 @@ sandbox is the priority. See [sandbox.md](sandbox.md).
 `tests/debug_state.bin` is produced offline by nanochat's `gpt.py` (see
 [model.md](model.md)). `tests/oracle_test.cc` compares logits, loss, and
 gradients, then runs a few optimizer steps and matches losses. Tolerances are
-per backend: fp32 CUDA ~1e-5; fp16 Turing looser.
+per backend: fp32 CUDA ~1e-5; the fp16 storage test is looser.
 
 The multi-step trajectory is a strict gate (loss `1e-5`, parameter `1e-4`).
 `tools/dump_oracle.py` records the AdamW `eps` it used as

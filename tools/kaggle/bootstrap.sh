@@ -133,7 +133,7 @@ write_env_file() {
   {
     echo "export NANOCHAT_SANDBOX_BACKEND=\"${NANOCHAT_SANDBOX_BACKEND:-none}\""
     echo "export NANOCHAT_CPP_BACKEND=\"${NANOCHAT_CPP_BACKEND:-cuda}\""
-    echo "export NANOCHAT_CPP_PRECISION=\"${NANOCHAT_CPP_PRECISION:-fp16}\""
+    echo "export NANOCHAT_CPP_PRECISION=\"${NANOCHAT_CPP_PRECISION:-fp32}\""
     echo "export NANOCHAT_CUDA_ARCH=\"${NANOCHAT_CUDA_ARCH:-sm_75}\""
     echo "export NANOCHAT_CPP_CACHE=\"${NANOCHAT_CPP_CACHE:-$HOME/.cache/nanochat_cpp}\""
     echo "export CUDA_HOME=\"${CUDA_HOME:-/usr/local/cuda}\""

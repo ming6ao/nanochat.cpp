@@ -127,14 +127,14 @@ Selection is a build/link choice:
 
 ```
 --backend=cpu|cuda        link the backend library
---precision=fp32|fp16     select ComputeType
+--precision=fp32|fp16     select ComputeType (fp16 is test-only)
 --arch=sm_61|sm_75|sm_90  CUDA --generate-code
 ```
 
 | Backend | Implements | Notes |
 |---|---|---|
 | `backends/cpu` | all of `kernels.h` with naive loops | reference, CI, oracle baseline; `-lm` (+ OpenMP) |
-| `backends/cuda` | all of `kernels.h`; cuBLAS for GEMM | Pascal fp32, Turing fp16; no cuDNN or NCCL |
+| `backends/cuda` | all of `kernels.h`; cuBLAS for GEMM | Pascal fp32, Turing fp32; no cuDNN or NCCL |
 
 The shared workflow (`ops.cc`, `model.cc`, `generate.cc`, `optim.cc`,
 `train.cc`) compiles once and links against either backend. This is the one
@@ -157,13 +157,14 @@ about GPT.
 `-DNANOCHAT_PRECISION=FP32|FP16` selects `using ComputeType = ...;` at build
 time. One precision per build; no runtime dtype dispatch.
 
-- Pascal (sm_61): fp32.
-- Turing (sm_75): fp16 permitted, with loss scaling.
+- Pascal (sm_61), Turing (sm_75), and the CPU: fp32.
+- The fp16 build is test-only. It serves the simulator.
 - The backend reports supported dtypes via `GetCaps()`; an invalid combination
   fails fast at startup.
 
-Precision is chosen at build time alongside the backend; see the
-backends section above.
+The build selects the precision at build time, together with the backend. See
+the backends section above. The bf16 build waits for Stage 2
+([precision.md](precision.md)).
 
 ## Turing (T4, sm_75)
 
@@ -171,11 +172,11 @@ Design for the Turing target. The T4 card is the second GPU family that
 `nanochat.cpp` supports. Read the backends and precision sections above for the
 selection rules.
 
-Status: partially implemented. The build configs exist. The correctness gates
-on Turing are not recorded yet. The fp16 build keeps an fp32 master weight per
-parameter and updates it in fp32, then mirrors each update into the half
-compute copy (see the precision section above and [kernels.md](kernels.md)).
-Loss scaling is still absent.
+Status: partially implemented. The build configs exist, but the Turing
+correctness gates have no recorded result yet. The `t4` build uses fp32 for the
+compute, so each parameter keeps one fp32 weight and the optimizer updates that
+weight in place. The build needs no master-weight mirror and no loss scaling.
+See the precision section above and [precision.md](precision.md).
 
 ### 1. Goal
 
@@ -201,21 +202,22 @@ new backend directory is necessary.
 | Config | Arch | Precision | Use |
 |---|---|---|---|
 | `sm_75` | sm_75 | fp32 | fp32 correctness gate |
-| `t4` | sm_75 | fp16 | default Kaggle build |
-| `t4-fp32` | sm_75 | fp32 | explicit fp32 GPU build |
+| `t4` | sm_75 | fp32 | default Kaggle build |
 
-The `t4` config includes `--config=cuda`. The half-precision build uses the
-tensor-op GEMM path on this card.
+The `t4` config includes `--config=cuda`. The `t4` build uses the fp32 GEMM
+path on this card.
 
-The T4 supports both precisions. The fp32 build is the correctness gate. The
-fp16 build is the performance build.
+The T4 build uses fp32. The fp32 build is the correctness gate and the default
+Kaggle build. The Turing hardware supports fp16, but Stage 1 does not use it
+([precision.md](precision.md)). Stage 1 removed the separate `t4-fp32` config.
 
 ### 4. GEMM behavior
 
 `backends/cuda/gemm.cu` selects the compute type from the device capability.
-On sm_75 the fp16 build uses `CUBLAS_GEMM_DEFAULT_TENSOR_OP` with
-`CUBLAS_COMPUTE_32F`. The accumulation stays in fp32. The fp32 build uses the
-classic `cublasSgemm` path for a single GEMM.
+The `t4` build uses the classic `cublasSgemm` path for a single GEMM. On sm_75
+an fp16 build still uses `CUBLAS_GEMM_DEFAULT_TENSOR_OP` with
+`CUBLAS_COMPUTE_32F`, and the accumulation stays in fp32. That path is
+test-only. It serves the simulator.
 
 The host graph and the optimizer state stay fp32 wherever the seam requires
 it. See the precision section above.
@@ -231,15 +233,17 @@ it must beat the current kernel at the training shape.
 
 | Tier | Target | Precision |
 |---|---|---|
-| T1 | `//backends/cuda/kernels:precision_gpu_test` | fp32, fp16 |
+| T1 | `//backends/cuda/kernels:precision_gpu_test` | fp32 |
 | T1 | `//backends/cuda:cuda_runtime_gpu_test` | fp32 |
 | T2 | `//tests:oracle_cuda_test` | fp32 |
 | T2 | `//tests:train_parity_cuda_test` | fp32 |
-| T3 | `//backends/cuda/kernels:attention_benchmark` | fp16 |
+| T3 | `//backends/cuda/kernels:attention_benchmark` | fp32 |
 
-The first fp16 run may exceed the recorded Pascal tolerance. Re-measure the
-worst error and record the new value in `precision_test.cc`. Do not widen the
-tolerance without a measurement.
+The CUDA `precision_gpu_test` target is precision-parameterized: it compiles
+in the fp32 build and the fp16 build. The T4 gate runs the fp32 build with the
+recorded fp32 tolerance. The fp16 leg stays test-only. It covers the fp16
+storage path on sm_61. Measure the worst error again and record the new value
+in `precision_test.cc`. Do not widen the tolerance without a measurement.
 
 Extend `//backends/cuda:cuda_runtime_gpu_test` to assert three things on
 sm_75: the device name, `has_tensor_cores`, and `supports_fp16`.
@@ -256,8 +260,8 @@ A Kaggle Notebook gives two T4 cards. See
 ### 8. Definition of done
 
 1. `tools/nanochat build --config=t4` succeeds.
-2. Every T1 GPU test passes on the T4 in fp32 and fp16.
+2. Every T1 GPU test passes on the T4 in fp32.
 3. The oracle and train-parity gates pass on sm_75.
-4. The recorded fp16 tolerance matches a fresh measurement.
+4. The recorded fp32 tolerance matches a fresh measurement.
 5. `cuda_runtime_gpu_test` asserts the Turing capabilities.
 6. [performance.md](performance.md) holds one T4 row at the training shape.

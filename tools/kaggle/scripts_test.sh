@@ -29,6 +29,7 @@ if [[ -n $bootstrap ]]; then
     fi
   done
   grep -q 'NANOCHAT_CPP_BACKEND="cuda"' "$tmp/.nanochat.env"
+  grep -q 'NANOCHAT_CPP_PRECISION="fp32"' "$tmp/.nanochat.env"
   grep -q 'NANOCHAT_CUDA_ARCH="sm_75"' "$tmp/.nanochat.env"
   echo "kaggle env file: OK"
 fi
