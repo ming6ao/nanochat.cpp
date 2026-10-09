@@ -85,6 +85,54 @@ cc_library(
     ],
 )
 
+# The `NANOORC1` fixture container (docs/rl-notebook.md section 4). The
+# persistent worker reads its configuration and initial parameters from the
+# same fixture the file-driven `rl_step` binary consumes, so the worker has a
+# fixture-driven smoke mode that needs no bridge. It is dependency-free, so a
+# production binary can link it without depending on `//tests`.
+cc_library(
+    name = "rl_fixture",
+    srcs = ["rl_fixture.cc"],
+    hdrs = ["rl_fixture.h"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    deps = ["//include/nanochat:nanochat"],
+)
+
+# The persistent reinforcement-learning worker and its pipe protocol
+# (docs/rl-notebook.md section 4, docs/training-seam.md section 6.4). It holds
+# the model and the optimizer across messages and reaches the shared `RlStep`
+# through `//src:rl`.
+cc_library(
+    name = "rl_worker_lib",
+    srcs = ["rl_worker.cc"],
+    hdrs = ["rl_worker.h"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    deps = [
+        ":model",
+        ":rl",
+        "//include/nanochat:nanochat",
+    ],
+)
+
+# The worker entry point. Without `--steps` it serves the pipe protocol on
+# stdin/stdout; with `--fixture --steps N` it replays recorded rollouts so the
+# worker can be gated without the Python bridge.
+cc_binary(
+    name = "rl_worker",
+    srcs = ["rl_worker_main.cc"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    deps = [
+        ":model",
+        ":rl",
+        ":rl_fixture",
+        ":rl_worker_lib",
+        "//include/nanochat:nanochat",
+    ],
+)
+
 # Model oracle parity: loads the committed CPU fixture and compares the model's
 # forward logits, loss, and every parameter gradient. See docs/testing.md.
 cc_test(
