@@ -11,7 +11,8 @@ Section 11 lists the state of each piece and names the file that holds it.
 
 The companion documents are [eval.md](eval.md) for evaluation,
 [python.md](python.md) for the process seam, [parity.md](parity.md) for the
-known differences, and [model.md](model.md) for the model and the data formats.
+known differences, [model.md](model.md) for the model and the data formats, and
+[sft-parity-plan.md](sft-parity-plan.md) for the parity plan.
 
 ## 1. Scope
 
