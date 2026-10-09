@@ -222,7 +222,7 @@ changes per experiment.
 | `notebooks/kaggle_setup_test.py` | New. Tests for the pure setup helpers. | Notebooks |
 | `notebooks/BUILD.bazel` | New. Two `py_library` targets, two CPU `py_test` targets, and a `test_suite`. | Notebooks |
 | `notebooks/nanochat-cpp-on-t4-gpu.ipynb` | Use `lab` for the run sequence. | Notebooks |
-| `notebooks/kaggle_demo.py` | No change. | Notebooks |
+| `notebooks/kaggle_demo.py` | Use `nanochat_cpp.sft_data` for the real SFT mixture. Fall back to the offline demo set when the hub is unreachable. | Notebooks |
 | `docs/notebook-workflow.md` | This document. | Architect |
 | `docs/README.md` | Add the index row. | Architect |
 

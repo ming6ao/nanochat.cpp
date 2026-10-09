@@ -28,6 +28,7 @@ python/nanochat_cpp/
   api.py             compute layer (unchanged)
   plan.py            planning layer (new)
   chat.py            chat evaluation (new)
+  sft_data.py        SFT mixture and packer (new)
   toolchain.py       orchestration layer (new)
   _entry.py          the command table for toolchain (new)
   checkpoint.py      reference .pt to NCHKPT01 (tool only)
@@ -334,6 +335,11 @@ The default task list is `ARC-Easy`, `ARC-Challenge`, `MMLU`, `GSM8K`, and
 `nanochat_cpp/tasks.py` stays as the internal module. It holds the datasets,
 `render_mc`, `extract_answer`, `extract_program`, and the HumanEval runner.
 
+`nanochat_cpp/sft_data.py` holds the supervised fine-tuning data. It has the
+reference mixture (SmolTalk, MMLU, and GSM8K), the deterministic task mixture,
+and the BOS-aligned best-fit packer with BOS padding and a `-1` mask. It reuses
+`tasks.load_hub_dataset`. See `docs/post-training.md` section 4.1.
+
 ### 5.3 HumanEval and failure isolation
 
 HumanEval runs generated code. The runner calls
@@ -487,6 +493,7 @@ Steps 1 to 4 add the replacement. Steps 6 and 7 remove the old surface.
 |---|---|
 | `python/tests/plan_test.py` | `compute_plan` matches the reference fixture. |
 | `python/tests/chat_test.py` | `ChatEvaluator` matches the committed chat fixture. |
+| `python/tests/sft_data_test.py` | The SFT packer and the task mixture, with a fake tokenizer. |
 | `python/tests/toolchain_test.py` | The argv for every command, against a fake entry script. |
 | `python/tests/api_test.py` | Unchanged. |
 | `python/tests/core_test.py` | Unchanged. |

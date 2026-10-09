@@ -105,6 +105,15 @@ py_test(
     size = "small",
 )
 
+# T0: the SFT packer and the task mixture. Hermetic: a fake tokenizer and a
+# fake renderer, so it needs no hub download, no library, and no GPU.
+py_test(
+    name = "sft_data_test",
+    srcs = ["tests/sft_data_test.py"],
+    deps = [":nanochat_cpp"],
+    size = "small",
+)
+
 # T0: the orchestration layer argv. Hermetic: no library, no Bazel, no GPU.
 py_test(
     name = "toolchain_test",
@@ -183,6 +192,7 @@ test_suite(
         ":eval_fixture_test",
         ":plan_test",
         ":chat_test",
+        ":sft_data_test",
         ":toolchain_test",
         ":rl_test",
     ],

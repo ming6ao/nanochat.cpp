@@ -249,6 +249,11 @@ section 3.1 describes.
 `render_conversation` becomes a public function in `nanochat_cpp.chat`. The
 underscore helpers stay internal.
 
+The reference mixture and the packer live in `nanochat_cpp.sft_data`. The
+mixture is SmolTalk, MMLU, and GSM8K. `sft_data.pack_rows` implements the
+BOS-aligned best-fit packer with BOS padding and a `-1` mask. It mirrors
+`sft_data_generator_bos_bestfit` in `scripts/chat_sft.py`.
+
 ## 7. Non-goals
 
 - A distributed supervised fine-tuning run. The C++ workflow has no distributed
@@ -269,7 +274,7 @@ interface work.
 | Phase | Owner | Gate |
 |---|---|---|
 | 1. Expose the existing step. Add `nanochat_train_step` and `nanochat_backward_accumulate`, use `backward_accumulate` in `Trainer`, and persist the optimizer step. (Done.) | Architect for `capi.h`; Python surface for `bindings/` and `api.py`; Harness for `src/train.cc` | The Python tests and `//bindings:nanochat_capi_test` |
-| 2. Add the packed-row source and the reader. Add `render_conversation`. (The renderer is done; the packed-row source remains.) | Harness for the loader; Python surface for the renderer | A packer test and a mask-shift test |
+| 2. Add the packed-row source and the reader. Add `render_conversation`. (The renderer, the mixture, and the Python packer are done; the native packed-row source remains.) | Harness for the loader; Python surface for the renderer | A packer test and a mask-shift test |
 | 3. Add the supervised fine-tuning driver and `sft_main`. | Harness for `src/`; Python surface for the facade | A short run at tier T2 against the reference loss curve |
 | 4. Add `nanochat_rl_step` and the parity fixture. | Harness for the step; Oracle for the fixture and the test | `//tests:rl_parity_test` at tier T2 |
 | 5. Add the reinforcement-learning worker. | Harness for the worker; Python surface for the bridge | An RL smoke run at tier T2 |

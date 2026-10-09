@@ -123,23 +123,40 @@ the location of the zero weights.
 
 Implementation: `render_for_completion` and the task logic live in
 `python/nanochat_cpp/chat.py` and `python/nanochat_cpp/tasks.py`.
-`render_conversation` is in `python/nanochat_cpp/chat.py`.
+`render_conversation` is in `python/nanochat_cpp/chat.py`. The reference
+mixture and the packer are in `python/nanochat_cpp/sft_data.py`.
 
 ## 4. SFT
 
 ### 4.1 Data
 
-The reference mixes SmolTalk (train), MMLU (auxiliary train, x3), and GSM8K
-(train, x4). The bridge renders each conversation with `render_conversation`.
-The bridge then packs the rows BOS-aligned with best-fit. Unlike pretraining,
-SFT pads the remainder of a row instead of cropping. The bridge masks the
-padding targets to `-1`. Validation uses the matching test splits.
+The bridge downloads and mixes the reference conversation sets in
+`python/nanochat_cpp/sft_data.py`. The mixture has three parts:
+
+- SmolTalk (`HuggingFaceTB/smol-smoltalk`), the train split, about 460K rows.
+- MMLU (`cais/mmlu`), the `auxiliary_train` split, three passes by default.
+- GSM8K (`openai/gsm8k`), the `main` train split, four passes by default.
+
+Validation uses the matching test splits. The bridge caps the MMLU test split at
+5200 rows and the GSM8K test split at 420 rows. The validation mixture then has
+the same task ratios as the training mixture.
+
+The loader reuses `nanochat_cpp.tasks.load_hub_dataset`. That function lists the
+auto-generated parquet shards through the hub API and reads them with pyarrow.
+The module imports only the standard library at import time. `numpy`,
+`pyarrow`, and `filelock` load lazily. The datasets cache under
+`~/.cache/nanochat/task_data`.
+
+The bridge renders each conversation with `render_conversation`. It then packs
+the rows BOS-aligned with best-fit (`sft_data.iter_packed_rows`). Unlike
+pretraining, SFT pads the remainder of a row with BOS instead of cropping. The
+bridge masks the padding targets and the user targets to `-1`.
 
 The native C++ loader in `src/data.cc` reads parquet documents and tokenizes
 during the run. It uses best-fit packing for pretraining. The bridge owns the
-SFT renderer and the mask. The C++ packed-row loader owns the padding and the
-batching ([training-seam.md](training-seam.md) section 4). `DataLoader` does not
-know about chat data.
+SFT renderer, the mixture, and the mask. The C++ packed-row loader owns the
+padding and the batching ([training-seam.md](training-seam.md) section 4).
+`DataLoader` does not know about chat data.
 
 ### 4.2 Loop
 
@@ -322,7 +339,8 @@ changes.
 | Reference `.pt` conversion into NCHKPT01 | Done | `tools/convert_checkpoint.py` |
 | Optimizer-state records in NCHKPT01 | Done | `include/nanochat/data.h`; `src/optim_state.h`; `src/optim.cc`; `src/optimizer_state_test.cc` |
 | SFT conversation renderer (`render_conversation`) | Done | `python/nanochat_cpp/chat.py` |
-| SFT packer with padding and a loss mask | Missing | `src/data.cc` has the pretraining packer only |
+| SFT mixture and Python packer | Done | `python/nanochat_cpp/sft_data.py` |
+| Native packed-row loader for SFT | Missing | `src/data.cc` has the pretraining packer only |
 | SFT loop with a dataset-progress schedule and a warm start | Missing | `src/train.cc` has a step-based loop |
 | RL step binary and the RL parity fixture | Missing | No `rl_step` |
 | RL orchestration worker | Missing | No worker |
@@ -338,12 +356,14 @@ headers, and the architect owns those headers (`AGENTS.md` section 1).
 Owner: Python surface for the renderer and the packer; data pipeline for a
 native shard reader.
 
-1. Add `render_conversation` to the Python bridge.
+1. Add `render_conversation` to the Python bridge. (Done.)
 2. Add the BOS-aligned best-fit packer with padding. Mark the padding targets
-   with `-1`.
-3. Add `tools/dump_sft_fixture.py` for a fixed conversation set.
+   with `-1`. (Done: `python/nanochat_cpp/sft_data.py`.)
+3. Add the reference mixture: SmolTalk, MMLU, and GSM8K. (Done.)
+4. Add `tools/dump_sft_fixture.py` for a fixed conversation set. (Remaining.)
+5. Add the native packed-row shard reader in `src/data.cc`. (Remaining.)
 
-Gate: `//python:chat_test` and a new packer parity test.
+Gate: `//python:sft_data_test` and a native packer parity test.
 
 ### Phase 2 — SFT loop
 
