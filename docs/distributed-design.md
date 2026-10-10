@@ -348,13 +348,13 @@ fixed validation set.
 The two-card notebook is `notebooks/nanochat-cpp-on-2x-t4.ipynb`. The plan
 lives in [distributed-plan.md](distributed-plan.md).
 
-Changes to `notebooks/nanochat-cpp-on-t4-gpu.ipynb`:
+The notebook runs these steps:
 
-1. Build the `t4` config.
-2. Stage the ClimbMix shards and the tokenizer, as today.
-3. Start the two-process run.
-4. Save the checkpoints under `/kaggle/working`.
-5. Save the notebook version to keep the output.
+1. Locate NCCL and set `NANOCHAT_NCCL_PATH`.
+2. Build the `t4` shared library and `//src:train_main`.
+3. Stage one ClimbMix shard, the validation shard, and the tokenizer.
+4. Run the best-fit model with one process on each card.
+5. Compare the two checkpoint hashes.
 
 The two cards do not have a peer link, so NCCL uses PCIe or shared memory. The
 CUDA build requires NCCL (section 5); there is no host-reference fallback. If
