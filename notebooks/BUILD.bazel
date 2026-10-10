@@ -28,6 +28,12 @@ py_library(
     imports = ["."],
 )
 
+py_library(
+    name = "pi_agent",
+    srcs = ["pi_agent.py"],
+    imports = ["."],
+)
+
 py_test(
     name = "kaggle_setup_test",
     srcs = ["kaggle_setup_test.py"],
@@ -49,11 +55,19 @@ py_test(
     deps = [":parallel"],
 )
 
+py_test(
+    name = "pi_agent_test",
+    srcs = ["pi_agent_test.py"],
+    size = "small",
+    deps = [":pi_agent"],
+)
+
 test_suite(
     name = "all",
     tests = [
         ":kaggle_setup_test",
         ":lab_test",
         ":parallel_test",
+        ":pi_agent_test",
     ],
 )
