@@ -23,6 +23,7 @@ def _read_lines(name: str, stream: TextIO, events: queue.Queue) -> None:
 
 
 def _report_event(event: dict) -> None:
+    """Print one event of the Pi JSON stream."""
     event_type = event.get("type")
 
     if event_type == "message_update":
@@ -35,7 +36,16 @@ def _report_event(event: dict) -> None:
         print(f"\n[pi] tool update: {event.get('toolName')}", flush=True)
     elif event_type == "tool_execution_end":
         print(f"\n[pi] finished tool: {event.get('toolName')}", flush=True)
-    elif event_type in {"turn_end", "agent_end", "agent_settled"}:
+    elif event_type == "turn_end":
+        error = event.get("message", {}).get("errorMessage")
+        print(f"\n[pi] turn failed: {error}" if error else "\n[pi] turn_end",
+              flush=True)
+    elif event_type == "agent_end":
+        print(f"\n[pi] agent_end willRetry={event.get('willRetry')}", flush=True)
+    elif event_type == "auto_retry_start":
+        print(f"\n[pi] retry {event.get('attempt')}/{event.get('maxAttempts')}",
+              flush=True)
+    elif event_type == "agent_settled":
         print(f"\n[pi] {event_type}", flush=True)
 
 
@@ -88,6 +98,7 @@ def run_pi(
 
     started = last_event = time.monotonic()
     closed_streams = 0
+    last_error: str | None = None
 
     try:
         while closed_streams < 2:
@@ -126,6 +137,8 @@ def run_pi(
                 print(f"\n[pi raw] {line.rstrip()}", flush=True)
                 continue
             _report_event(event)
+            if event.get("type") == "turn_end":
+                last_error = event.get("message", {}).get("errorMessage")
 
         return_code = process.wait()
     except BaseException:
@@ -136,4 +149,7 @@ def run_pi(
 
     if return_code != 0:
         raise subprocess.CalledProcessError(return_code, command)
+    # Pi exits with code zero after a failed model call. Check the stream too.
+    if last_error is not None:
+        raise RuntimeError(f"Pi run failed: {last_error}")
     return return_code

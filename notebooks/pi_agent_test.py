@@ -73,6 +73,60 @@ class RunPiTest(unittest.TestCase):
         ):
             pi_agent.run_pi("Inspect the repository.", cwd="/repo")
 
+    def test_raises_when_the_model_call_fails(self) -> None:
+        records = [
+            {"type": "turn_end", "message": {
+                "role": "assistant", "stopReason": "error",
+                "errorMessage": "503 overloaded"}},
+            {"type": "agent_end", "willRetry": True},
+            {"type": "auto_retry_start", "attempt": 1, "maxAttempts": 3,
+             "delayMs": 200, "errorMessage": "503 overloaded"},
+            {"type": "turn_end", "message": {
+                "role": "assistant", "stopReason": "error",
+                "errorMessage": "503 overloaded"}},
+            {"type": "agent_end", "willRetry": False},
+            {"type": "auto_retry_end", "success": False, "attempt": 1,
+             "finalError": "503 overloaded"},
+            {"type": "agent_settled", "aborted": False},
+        ]
+        stdout = "".join(json.dumps(record) + "\n" for record in records)
+        process = _FakeProcess(stdout)
+        with (
+            mock.patch.object(pi_agent.shutil, "which", return_value="/usr/bin/pi"),
+            mock.patch.object(pi_agent.subprocess, "Popen", return_value=process),
+            contextlib.redirect_stdout(io.StringIO()) as output,
+            self.assertRaises(RuntimeError) as raised,
+        ):
+            pi_agent.run_pi("Inspect the repository.", cwd="/repo")
+
+        self.assertIn("503 overloaded", str(raised.exception))
+        self.assertIn("503 overloaded", output.getvalue())
+
+    def test_a_recovered_retry_does_not_raise(self) -> None:
+        records = [
+            {"type": "turn_end", "message": {
+                "role": "assistant", "stopReason": "error",
+                "errorMessage": "503 overloaded"}},
+            {"type": "agent_end", "willRetry": True},
+            {"type": "auto_retry_start", "attempt": 1, "maxAttempts": 3,
+             "delayMs": 200, "errorMessage": "503 overloaded"},
+            {"type": "turn_end", "message": {
+                "role": "assistant", "stopReason": "stop"}},
+            {"type": "agent_end", "willRetry": False},
+            {"type": "auto_retry_end", "success": True, "attempt": 1},
+            {"type": "agent_settled", "aborted": False},
+        ]
+        stdout = "".join(json.dumps(record) + "\n" for record in records)
+        process = _FakeProcess(stdout)
+        with (
+            mock.patch.object(pi_agent.shutil, "which", return_value="/usr/bin/pi"),
+            mock.patch.object(pi_agent.subprocess, "Popen", return_value=process),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            result = pi_agent.run_pi("Inspect the repository.", cwd="/repo")
+
+        self.assertEqual(result, 0)
+
     def test_requires_pi_cli(self) -> None:
         with (
             mock.patch.object(pi_agent.shutil, "which", return_value=None),
