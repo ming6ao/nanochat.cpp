@@ -398,6 +398,7 @@ PY
       with_build_lock "$bazel_bin" build \
         --config="$sim_device" --config=sim-gate \
         //backends/cuda:all_kernels \
+        //backends/cuda/collective:native_sync \
         //backends/cuda:cuda_runtime_gpu_test \
         //backends/cuda/kernels:precision_gpu_test \
         //backends/cuda/kernels:row_kernels_gpu_test \

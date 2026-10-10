@@ -9,7 +9,12 @@ launch.
 Status: the project implements the data-parallel architecture. `Config` carries
 `value_embedding`. `src/distributed.h` is the seam. The CPU backend links the
 host reference in `src/distributed.cc`. The CUDA backend links NCCL in
-`backends/cuda/nccl_sync.cu`.
+`backends/cuda/nccl_sync.cu` by default. The native collective
+(`backends/cuda/collective/`, selected with `--config=native` or
+`--define=collective=native`) is the NCCL replacement
+([distributed-native-plan.md](distributed-native-plan.md)). It is complete for
+the ring schedule, the CPU memory transport, and the host-staged CUDA
+transport; the NVLink and RDMA transports await the H100 node.
 
 `TrainLoop` averages every gradient once per step. It overlaps the bucket
 reductions with the pack copies on a side stream. Documents shard by a stride.
@@ -103,14 +108,23 @@ Rules:
 
 ## 5. Implementations
 
-Two implementations. The build selects one, and the selection follows the
-backend (docs/distributed-plan.md phase 0). There is no host-reference fallback
-on the CUDA path.
+Two implementations ship today, and a third is selectable. The build selects
+one, and the selection follows the backend (docs/distributed-plan.md phase 0).
+There is no host-reference fallback on the CUDA path.
 
 | Implementation | File | Use |
 |---|---|---|
 | Host reference | `src/distributed.cc` | The CPU backend and the CPU tests |
-| NCCL | `backends/cuda/nccl_sync.cu` | The CUDA backend and the two T4 cards |
+| NCCL | `backends/cuda/nccl_sync.cu` | The CUDA backend and the two T4 cards (default) |
+| Native ring | `backends/cuda/collective/native_sync.cu` | The CUDA backend with `collective=native` |
+
+The native ring ([distributed-native-plan.md](distributed-native-plan.md))
+replaces NCCL on the CUDA path. It runs a ring reduce-scatter + all-gather over
+a completion-based `Transport`. The selection is per ring edge
+(section 3.2 of the native plan): NVLink when `cudaDeviceCanAccessPeer` passes,
+RDMA when an adapter reaches the peer, and host staging otherwise. The 2x T4
+pair has no peer access, so it exercises the host-staged path; the fast path is
+the 8x H100 node.
 
 The host reference uses a TCP exchange. Rank 0 receives each rank's buffer, sums
 the buffers, and broadcasts the result. This parameter server is enough for a

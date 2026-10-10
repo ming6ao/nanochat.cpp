@@ -61,9 +61,26 @@ cuda_library(
             ":device",
             "//include/nanochat:nanochat",
             "//src:distributed_seam",
+            "//src:rendezvous",
             "@nccl//:nccl",
         ],
         "//conditions:default": [],
+    }),
+)
+
+# The `CreateGradientSync` factory for a CUDA build. The collective selection
+# (docs/distributed-native-plan.md section 7, phase 0) lives here: `collective`
+# defaults to `nccl`, and `--config=native` selects the native ring. Both
+# libraries define the same symbol, so only one is linked.
+cc_library(
+    name = "gradient_sync",
+    deps = select({
+        "//:collective_native": [
+            "//backends/cuda/collective:native_sync",
+        ],
+        "//conditions:default": [
+            ":nccl_sync",
+        ],
     }),
 )
 

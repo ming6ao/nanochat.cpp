@@ -23,6 +23,12 @@ struct DistributedConfig {
   int world_size = 1;
   std::string master = "127.0.0.1";
   int port = 29500;
+  // The watchdog deadline for one reduction (docs/distributed-native-plan.md
+  // section 5.6). A missing peer is a fatal group error, not a retry.
+  int timeout_ms = 600000;
+  // The registered transfer-window pool size (section 5.4). The default
+  // matches the harness bucket count so every bucket can be in flight.
+  int max_inflight_reductions = 8;
 };
 
 class GradientSync {

@@ -52,6 +52,14 @@ nccl_repository = use_repo_rule("//third_party:nccl.bzl", "nccl_repository")
 
 nccl_repository(name = "nccl")
 
+# libibverbs for the native collective's RDMA transport
+# (docs/distributed-native-plan.md phase 0). The repository is scaffolding: no
+# target depends on it by default, because the transport selection falls back to
+# host staging when no RDMA adapter is present.
+rdma_repository = use_repo_rule("//third_party:rdma.bzl", "rdma_repository")
+
+rdma_repository(name = "rdma")
+
 # Python toolchain for the API tests. The `nanochat_cpp` package imports only
 # the standard library, so the system `python3` is enough and no hermetic
 # runtime is downloaded. `local_runtime_repo` introspects that interpreter and

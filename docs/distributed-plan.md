@@ -6,7 +6,10 @@ index. It also removes `docs/distributed-t4-plan.md` and folds its live content
 into `docs/distributed-design.md`.
 
 `docs/distributed-design.md` is the design authority. This file is the
-execution plan.
+execution plan for the NCCL backend. [distributed-native-plan.md](distributed-native-plan.md)
+supersedes it on the CUDA path: the native collective replaces NCCL behind the
+same seam, and `collective=nccl` stays the default until the native path
+reaches parity.
 
 ## 0. Status
 

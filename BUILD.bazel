@@ -34,6 +34,19 @@ config_setting(
     define_values = {"backend": "cuda"},
 )
 
+# Collective selection (docs/distributed-native-plan.md section 7, phase 0).
+# `collective=nccl` is the default until the native path reaches parity;
+# `--config=native` (or `--define=collective=native`) selects the native ring.
+config_setting(
+    name = "collective_native",
+    define_values = {"collective": "native"},
+)
+
+config_setting(
+    name = "collective_nccl",
+    define_values = {"collective": "nccl"},
+)
+
 # Simulator selection (docs/simulator.md sections 4.1 and 8). `--config=sim` sets
 # `--define=simulator=1`; the reference CPU backend then answers `GetCaps()`
 # from `NANOCHAT_SIM_PROFILE` through the device profile table instead of
@@ -69,6 +82,7 @@ test_suite(
     tests = [
         "//backends/cpu:all",
         "//backends/cuda:all",
+        "//backends/cuda/collective:all",
         "//backends/cuda/kernels:all",
         "//bindings:all",
         "//dev/kernels:all",
