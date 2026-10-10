@@ -78,7 +78,7 @@ class RunPiTest(unittest.TestCase):
         text = output.getvalue()
         self.assertIn("Checking the repository.", text)
         self.assertIn("running read", text)
-        self.assertIn("[pi] tools 1", text)
+        self.assertIn("tools 1 (read 1)", text)
         self.assertIn("[pi stderr] warning", text)
         arguments = popen.call_args.args[0]
         self.assertEqual(arguments[-2:], ["--", "Inspect the repository."])
@@ -121,7 +121,7 @@ class RunPiTest(unittest.TestCase):
         # The updates stay on one carriage-return line. Only the final
         # cumulative summary ends with a newline.
         self.assertEqual(text.count("\n"), 1)
-        self.assertIn("[pi] tools 1", text)
+        self.assertIn("tools 1 (bash 1)", text)
         self.assertNotIn("tool update", text)
 
     def test_two_tools_share_the_status_line(self) -> None:
@@ -141,7 +141,47 @@ class RunPiTest(unittest.TestCase):
 
         text = output.getvalue()
         self.assertIn("running bash, read", text)
-        self.assertIn("[pi] tools 2", text)
+        self.assertIn("tools 2 (bash 1, read 1)", text)
+
+    def test_reports_tokens_cost_and_thinking(self) -> None:
+        records = [
+            {"type": "message_update", "assistantMessageEvent": {
+                "type": "thinking_start", "contentIndex": 0}},
+            {"type": "message_update", "assistantMessageEvent": {
+                "type": "thinking_delta", "contentIndex": 0,
+                "delta": "checking"}},
+            {"type": "message_update", "assistantMessageEvent": {
+                "type": "thinking_end", "contentIndex": 0}},
+            {"type": "turn_end", "message": {
+                "role": "assistant", "stopReason": "stop",
+                "usage": {"input": 1200, "output": 340,
+                          "reasoning": 120,
+                          "cost": {"total": 0.0123}}}},
+        ]
+        with _pi(_FakeProcess(_stream(*records))) as (_, output):
+            pi_agent.run_pi("Inspect the repository.", cwd="/repo",
+                            stream=output)
+
+        text = output.getvalue()
+        self.assertIn("turns 1", text)
+        self.assertIn("think 0.0s", text)
+        self.assertIn("in 1.2k / out 340", text)
+        self.assertIn("reasoning 120", text)
+        self.assertIn("$0.0123", text)
+
+    def test_failed_tool_is_counted(self) -> None:
+        records = [
+            {"type": "tool_execution_start", "toolCallId": "c1",
+             "toolName": "bash"},
+            {"type": "tool_execution_end", "toolCallId": "c1",
+             "toolName": "bash", "isError": True},
+        ]
+        with _pi(_FakeProcess(_stream(*records))) as (_, output):
+            pi_agent.run_pi("Inspect the repository.", cwd="/repo",
+                            stream=output)
+
+        text = output.getvalue()
+        self.assertIn("failed 1", text)
 
     def test_raises_on_pi_error(self) -> None:
         process = _FakeProcess("", returncode=3)
