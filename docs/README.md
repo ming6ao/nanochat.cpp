@@ -14,6 +14,8 @@ detailed reference that the design points at.
 | [parity.md](parity.md) | Known differences from the PyTorch reference, with status |
 | [distributed-design.md](distributed-design.md) | Data-parallel training on two devices: the gradient-sync seam, sharding, the data cursor, and the launch |
 | [distributed-plan.md](distributed-plan.md) | The execution plan for NCCL, the overlap seam, and the data cursor |
+| [distributed-launch.md](distributed-launch.md) | The launch of a data-parallel run: the rank contract, the `tools/nanochat dist` command, and the Python helper |
+| [distributed-native-plan.md](distributed-native-plan.md) | The execution plan for a native all-reduce over NVLink and RDMA: the transport interface, the ring schedule, ownership, and the broker |
 | [performance.md](performance.md) | Performance measurement protocol and the debugging interface |
 | [cpu-performance.md](cpu-performance.md) | CPU backend baseline, cause, design, and phase results |
 | [attention.md](attention.md) | Attention baseline, Pascal feasibility, the fused window, results |

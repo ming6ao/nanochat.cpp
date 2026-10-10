@@ -262,22 +262,19 @@ generator. This difference changes the loss curve.
 ## 10. Launch
 
 `train_main` gains five options: `--preset track3`, `--rank`, `--world-size`,
-`--master`, and `--port`.
+`--master`, and `--port`. The preset sets the Track 3 model, optimizer, and
+scheduler fields. Pass `--preset track3` before the other flags, so a later
+flag can override one field.
 
-The preset sets the Track 3 model, optimizer, and scheduler fields. Pass
-`--preset track3` before the other flags, so a later flag can override one
-field.
+One process owns one rank. `tools/nanochat dist` starts the group. The
+environment carries the rank values, in the style of `torchrun`. The `dist`
+command takes one broker lock and one sandbox scope for the whole group.
+[distributed-launch.md](distributed-launch.md) is the authority for the
+launch.
 
-A two-process run on Kaggle starts one process per card:
-
-```bash
-CUDA_VISIBLE_DEVICES=0 train_main --preset track3 --rank 0 --world-size 2 --master 127.0.0.1 &
-CUDA_VISIBLE_DEVICES=1 train_main --preset track3 --rank 1 --world-size 2 --master 127.0.0.1 &
-wait
-```
-
-The notebook starts the two processes and waits. The Kaggle sandbox is off, so
-no cgroup step is necessary.
+This design removes the per-rank launch in `notebooks/parallel.py`. That code
+took the broker lock once per rank, so a multi-card host could deadlock.
+Kaggle hid the fault, because the sandbox and the broker are off there.
 
 ### 10.1 The best fit and the measured run
 
