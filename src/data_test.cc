@@ -214,12 +214,86 @@ void TestDocumentLoader() {
   }
 }
 
+// The data cursor resumes the exact document stream
+// (docs/distributed-design.md section 11). A loader consumes two batches and
+// records its cursor. A second loader, built with the sharded start that the
+// cursor implies, must produce the same third batch.
+void TestShardedResume() {
+  const std::string tokenizer_path = TempPath("data_resume_tokenizer.nctoken");
+  const std::vector<std::pair<std::string, std::uint32_t>> specials = {
+      {"<|bos|>", 256}};
+  if (!nanochat::SaveTokenizer(tokenizer_path, nanochat::NanochatSplitPattern(),
+                               {}, specials)) {
+    Fail("sharded resume: SaveTokenizer failed");
+    return;
+  }
+  std::unique_ptr<nanochat::Tokenizer> tokenizer =
+      nanochat::LoadTokenizer(tokenizer_path);
+  if (tokenizer == nullptr) {
+    Fail("sharded resume: LoadTokenizer failed");
+    return;
+  }
+
+  auto documents = std::make_shared<std::vector<std::string>>();
+  for (int i = 0; i < 40; ++i) {
+    documents->push_back("doc" + std::to_string(i) + "x");
+  }
+  nanochat::DocumentSourceFactory base =
+      [documents](std::string*) -> std::unique_ptr<nanochat::DocumentSource> {
+    return std::make_unique<VectorSource>(*documents);
+  };
+
+  const int batch = 2;
+  const int seq = 6;
+  const int rank = 1;
+  const int world = 2;
+  const std::size_t rows = static_cast<std::size_t>(batch) * seq;
+
+  nanochat::DocumentSourceFactory sharded =
+      nanochat::ShardDocumentSourceFactory(base, rank, world, /*start=*/0,
+                                           /*start_on_creation=*/0);
+  DataLoader first(sharded, tokenizer.get(), batch, seq, /*seed=*/7,
+                   /*tokenizer_threads=*/1, /*document_buffer=*/16);
+  std::vector<int> tokens(rows);
+  std::vector<int> targets(rows);
+  for (int i = 0; i < 2; ++i) {
+    if (!first.Next(tokens.data(), targets.data())) {
+      Fail("sharded resume: the first loader ended early");
+      return;
+    }
+  }
+  const nanochat::DataLoaderState state = first.State();
+  std::vector<int> expected_tokens(rows);
+  std::vector<int> expected_targets(rows);
+  if (!first.Next(expected_tokens.data(), expected_targets.data())) {
+    Fail("sharded resume: the first loader has no third batch");
+    return;
+  }
+
+  nanochat::DocumentSourceFactory resumed =
+      nanochat::ShardDocumentSourceFactory(base, rank, world,
+                                           state.source_position,
+                                           static_cast<int>(state.epoch));
+  DataLoader second(resumed, tokenizer.get(), batch, seq, /*seed=*/7,
+                    /*tokenizer_threads=*/1, /*document_buffer=*/16, &state);
+  std::vector<int> got_tokens(rows);
+  std::vector<int> got_targets(rows);
+  if (!second.Next(got_tokens.data(), got_targets.data())) {
+    Fail("sharded resume: the resumed loader ended early");
+    return;
+  }
+  if (got_tokens != expected_tokens || got_targets != expected_targets) {
+    Fail("sharded resume: the resumed batch does not match");
+  }
+}
+
 }  // namespace
 
 int main() {
   TestCheckpoint();
   TestTokenizer();
   TestDocumentLoader();
+  TestShardedResume();
   if (g_failures != 0) {
     std::fprintf(stderr, "data_test: %d failure(s)\n", g_failures);
     return 1;

@@ -1,18 +1,23 @@
 # Distributed training design
 
-See [distributed-t4-plan.md](distributed-t4-plan.md) for the execution plan.
+See [distributed-plan.md](distributed-plan.md) for the execution plan.
 
 Data-parallel training on two devices. This document describes the gradient-sync
-seam, the data sharding, the model configuration, and the launch.
+seam, the data sharding, the data cursor, the model configuration, and the
+launch.
 
-Status: the architecture phases P0, P1, and P2 are complete. `Config` carries
-`value_embedding`. `src/distributed.h` is the seam. `src/distributed.cc` is the
-backend-free host reference with device staging. `TrainLoop` averages every
-gradient once per step. Documents shard by a stride.
+Status: the project implements the data-parallel architecture. `Config` carries
+`value_embedding`. `src/distributed.h` is the seam. The CPU backend links the
+host reference in `src/distributed.cc`. The CUDA backend links NCCL in
+`backends/cuda/nccl_sync.cu`.
 
-`train_main` accepts `--preset track3`. The CPU gates `//src:distributed_test`
-and `//src:train_parallel_test` pass. P3 and P4 stay open. Scope: architecture
-support only.
+`TrainLoop` averages every gradient once per step. It overlaps the bucket
+reductions with the pack copies on a side stream. Documents shard by a stride.
+A sidecar beside the checkpoint stores the data cursor for an exact resume.
+
+`train_main` accepts `--preset track3`. The CPU gates `//src:distributed_test`,
+`//src:train_parallel_test`, and `//src:data_test` pass. The NCCL gate and the
+two-rank parity gate run on Kaggle (see section 12).
 
 ## 1. Goal
 
@@ -98,12 +103,14 @@ Rules:
 
 ## 5. Implementations
 
-Two implementations.
+Two implementations. The build selects one, and the selection follows the
+backend (docs/distributed-plan.md phase 0). There is no host-reference fallback
+on the CUDA path.
 
 | Implementation | File | Use |
 |---|---|---|
-| Host reference | `src/distributed.cc` | CPU tests and a portable fallback |
-| NCCL | `backends/cuda/nccl_sync.cu` | The two T4 cards |
+| Host reference | `src/distributed.cc` | The CPU backend and the CPU tests |
+| NCCL | `backends/cuda/nccl_sync.cu` | The CUDA backend and the two T4 cards |
 
 The host reference uses a TCP exchange. Rank 0 receives each rank's buffer, sums
 the buffers, and broadcasts the result. This parameter server is enough for a
@@ -111,14 +118,16 @@ small rank count. The code includes POSIX sockets and the standard library
 only. `DESIGN.md` section 2.1 permits host POSIX headers in `src`; the rule
 forbids vendor headers.
 
-The CUDA backend keeps the gradients in device memory, so the host reference
-stages each buffer through host memory with `kernels::Memcpy` when
-`DistributedConfig::device_buffers` is true. The CPU backend copies nothing
-extra. The staging makes a correct two-card run possible before NCCL exists.
-See [distributed-t4-plan.md](distributed-t4-plan.md).
+The NCCL implementation calls `ncclAllReduce` with `ncclSum`. Rank 0 generates
+the `ncclUniqueId` and broadcasts it to the peers over a one-shot TCP exchange;
+every rank then calls `ncclCommInitRank`. The launch sets
+`CUDA_VISIBLE_DEVICES` to the rank, so each process selects device 0. This file
+is the only place that includes `nccl.h`.
 
-The NCCL implementation calls `ncclAllReduce` with `ncclSum`. It selects the
-device from the rank. This file is the only place that includes `nccl.h`.
+The seam also has an asynchronous form, `AllReduceSumAsync` and `Wait`. The host
+reference treats it as synchronous, so the CPU behavior does not change. NCCL
+runs the reduction on a side stream. It synchronizes at `Wait`, so the pack copy
+of the next bucket overlaps the reduction of the current one (section 6).
 
 ## 6. Training loop integration
 
@@ -129,12 +138,16 @@ once per step.
 const float backward_scale = DistributedBackwardScale(accum, world_size);
 // ... for each micro-batch:
 model_->BackwardAccumulate(backward_scale);
-// ... after the accumulation:
-for (const ParamView& p : model_->params()) {
-  sync_->AllReduceSum(p.grad, p.count);
-}
+// ... after the accumulation, pack each bucket and issue the async reduce:
+sync_->AllReduceSumAsync(bucket, bucket_elems);
+// ... after every bucket:
+sync_->Wait();
 optimizer_->Step(step);
 ```
+
+The pack copy of one bucket runs on the main stream while the reduction of the
+previous bucket runs on the backend's side stream. The host reference runs the
+asynchronous call synchronously, so a CPU run does not change.
 
 The helper is one function:
 
@@ -266,6 +279,31 @@ wait
 The notebook starts the two processes and waits. The Kaggle sandbox is off, so
 no cgroup step is necessary.
 
+### 10.1 The best fit and the measured run
+
+The model-fit skill (`.agents/skills/model-fit/`) computes the shape and the
+memory. The best fit for the two T4 cards is `L16 C1024 H8 KV4 T4096 b1`: about
+252M parameters, about 9.1 GiB of card memory, and an estimated 5.1k tokens/s
+global.
+
+The measured 500-step run on two T4 cards used the host reference sync and
+`--grad-accum 8`. The global batch was 65536 tokens, not the reference 524288.
+
+| Property | Value |
+|---|---|
+| Exit status | 0 on both ranks |
+| First loss | 10.40 |
+| Final loss | 3.59 (rank 0), 3.75 (rank 1) |
+| Validation bpb | 1.88 at step 50, 1.13 at step 450 |
+| Throughput | 1214 tokens/s per rank, 2427 global |
+| MFU | 0.249 (fp32 peak, 8.1 TFLOP/s) |
+| Phase split | forward 26.4%, backward 63.2%, sync 4.4%, optimizer 5.9%, data 0.1% |
+| Checkpoints | byte-identical on the two ranks |
+
+The backward dominates the step. The sync is below the 0.1 target. Phase D1
+(recompute) and D2 (the attention tile) carry the next throughput gain; see
+[distributed-plan.md](distributed-plan.md).
+
 ## 11. Determinism and resume
 
 The two ranks produce the same parameter update, because the gradient sum is the
@@ -274,26 +312,32 @@ same. The optimizer state stays equal on both ranks.
 `Checkpointer` saves the model and the optimizer state. A resumed run reads the
 same file on both ranks.
 
-The data position is an open item. Each rank shards documents by a stride. A
-resumed run restarts the epoch, because the checkpoint does not store the
-document index. P4 adds the document index to the checkpoint.
+The data cursor rides in a sidecar file beside the checkpoint. The sidecar holds
+the epoch, the source position, and the encoded, not-yet-packed buffer. The
+buffer is part of the cursor. The reference best-fit packing takes the largest
+document that fits, so it reorders documents inside the buffer. A document
+index alone cannot reproduce it. A snapshot takes the producer gate, so it
+never records a read that has not reached the buffer.
+
+A resumed run applies the stored source position on the stored epoch's source
+creation. The loader skips earlier epochs without a full replay. The sidecar
+keeps the main checkpoint byte-identical across ranks, so the checkpoint hash
+check stays valid, and `//src:train_parallel_test` pins the exact resume.
 
 ## 12. Tests
 
 | Tier | Test | Gate |
 |---|---|---|
 | T0 CPU | `//src:distributed_test` | A two-process sum returns the correct buffer |
-| T0 CPU | `//src:train_parallel_test` | The mean scale and two equal ranks |
+| T0 CPU | `//src:train_parallel_test` | The mean scale, two equal ranks, and an exact resume |
+| T0 CPU | `//src:data_test` | The sharded start and the data cursor round-trip |
+| Simulator | `//tests:collective_sim_test` | The NCCL call sequence and the deadlock check |
 | T1 GPU | `//backends/cuda:nccl_sync_test` | The NCCL sum matches the host reference |
 | T2 GPU | A two-rank run versus one rank | The validation loss matches one rank |
 
 The host reference uses two processes on the CPU backend. This test needs no
-GPU. The GPU test runs on Kaggle, because the WSL2 host has one card.
-
-The two T0 CPU tests are complete. `//src:distributed_test` runs two processes
-over loopback TCP and checks the sum and the sharding.
-`//src:train_parallel_test` checks the backward scale and the equality of two
-ranks. The two GPU rows stay in P3.
+GPU. The simulator drives the NCCL mock on the CPU. The T1 and T2 gates run on
+Kaggle, because the WSL2 host has no NCCL and one card (section 15).
 
 The per-step parameter equality of a two-rank run and a one-rank run needs the
 data split of section 7. Until then, the T2 gate is the validation loss on the
@@ -302,7 +346,7 @@ fixed validation set.
 ## 13. Kaggle notebook
 
 The two-card notebook is `notebooks/nanochat-cpp-on-2x-t4.ipynb`. The plan
-lives in [distributed-t4-plan.md](distributed-t4-plan.md).
+lives in [distributed-plan.md](distributed-plan.md).
 
 Changes to `notebooks/nanochat-cpp-on-t4-gpu.ipynb`:
 
@@ -312,38 +356,42 @@ Changes to `notebooks/nanochat-cpp-on-t4-gpu.ipynb`:
 4. Save the checkpoints under `/kaggle/working`.
 5. Save the notebook version to keep the output.
 
-The two cards do not have a peer link. NCCL falls back to PCIe or shared memory.
-If NCCL fails, the run uses the host reference.
+The two cards do not have a peer link, so NCCL uses PCIe or shared memory. The
+CUDA build requires NCCL (section 5); there is no host-reference fallback. If
+NCCL is absent, the CUDA build fails at compile time.
 
 ## 14. Phasing
 
-The architecture phases P0 to P2 are complete. The phases cover the seam, the
-Track 3 preset, and the host reference with the CPU two-rank test.
+The architecture phases P0 to P4 are complete. They cover the seam, the Track 3
+preset, the host reference, the CPU two-rank test, NCCL, the overlap seam, and
+the data cursor.
 
-See [distributed-t4-plan.md](distributed-t4-plan.md) section 5 for the
-execution plan. The design phase P3 (NCCL) maps to phase C3. The design phase
-P4 (resume) stays open.
+The execution plan for the remaining throughput work is
+[distributed-plan.md](distributed-plan.md). The NCCL gate and the two-rank
+parity gate run on Kaggle (section 15).
 
-P1 removed the GPU from the correctness path, as `DESIGN.md` section 4
+The CPU path keeps the GPU off the correctness path, as `DESIGN.md` section 4
 requires.
 
 ## 15. Risks
 
 | Risk | Control |
 |---|---|
-| The Kaggle image lacks NCCL | The host reference is the fallback |
+| The Kaggle image lacks NCCL | Install NCCL, or point `NANOCHAT_NCCL_PATH` at it; a CUDA build needs it |
 | The two T4 cards lack a peer link | NCCL uses PCIe or shared memory |
-| The host reference is slow | It carries about 0.5 GB per step; measure it in P3 |
+| The host reference is slow | It is CPU-only now; it is not on the GPU path |
 | The stride sharding differs from the reference | `parity.md` D6 records the difference |
-| A resumed run repeats data | Store the document index in the checkpoint |
+| A resumed run repeats or skips data | The data cursor restores the source position and the buffer |
 
 ## 16. Open questions
 
-1. Does the Kaggle image carry NCCL?
-2. Does the WSL2 host allow a two-process test on one card? If not, P3 runs on
-   Kaggle.
+1. Which NCCL does the Kaggle image carry, and what is `NANOCHAT_NCCL_PATH`?
+2. The WSL2 host has no NCCL and one card, so the T1 and T2 gates run on Kaggle.
 3. Does the team want reference-exact initialization? This choice affects the
    loss curve.
 4. Should the data loader split one global batch into contiguous rank slices, as
    the reference does? That change would make the two-rank and one-rank runs
    equivalent per step.
+5. Should the backward expose a per-parameter gradient-ready hook? It would
+   overlap the reduction with the backward itself. It needs a frozen-header
+   change and a GPU measurement.

@@ -25,7 +25,6 @@
 #include <utility>
 #include <vector>
 
-#include "nanochat/kernels.h"
 #include "src/ops.h"
 
 namespace nanochat {
@@ -136,11 +135,9 @@ class NoopGradientSync final : public GradientSync {
 // one staging buffer is needed when the gradients live in device memory.
 class HostGradientSync final : public GradientSync {
  public:
-  HostGradientSync(int rank, int world_size, bool device_buffers,
-                   std::string master, int port)
+  HostGradientSync(int rank, int world_size, std::string master, int port)
       : rank_(rank),
         world_size_(world_size),
-        device_buffers_(device_buffers),
         master_(std::move(master)),
         port_(port) {}
 
@@ -161,19 +158,6 @@ class HostGradientSync final : public GradientSync {
     const std::size_t elements = static_cast<std::size_t>(count);
     const std::size_t bytes = elements * sizeof(ComputeType);
 
-    // The CUDA backend keeps the model in device memory, so the host reference
-    // stages the buffer through host memory first. On the CPU reference
-    // backend `device_buffers_` is false and this is a passthrough. The
-    // `kernels::Memcpy` seam is backend-owned, so this file still includes no
-    // vendor header.
-    ComputeType* working = buffer;
-    if (device_buffers_) {
-      if (device_staging_.size() < elements) device_staging_.resize(elements);
-      kernels::Memcpy(device_staging_.data(), buffer, bytes,
-                      CopyDir::kDeviceToHost);
-      working = device_staging_.data();
-    }
-
     if (rank_ == 0) {
       if (!AcceptPeers()) Die("cannot accept a peer");
       if (scratch_.size() < elements) scratch_.resize(elements);
@@ -182,19 +166,15 @@ class HostGradientSync final : public GradientSync {
           Die("cannot receive a gradient");
         }
         for (std::size_t i = 0; i < elements; ++i) {
-          working[i] = ToC(AsF(working[i]) + AsF(scratch_[i]));
+          buffer[i] = ToC(AsF(buffer[i]) + AsF(scratch_[i]));
         }
       }
       for (int fd : peers_) {
-        if (!WriteAll(fd, working, bytes)) Die("cannot broadcast the sum");
+        if (!WriteAll(fd, buffer, bytes)) Die("cannot broadcast the sum");
       }
     } else {
-      if (!WriteAll(client_fd_, working, bytes)) Die("cannot send a gradient");
-      if (!ReadAll(client_fd_, working, bytes)) Die("cannot receive the sum");
-    }
-
-    if (device_buffers_) {
-      kernels::Memcpy(buffer, working, bytes, CopyDir::kHostToDevice);
+      if (!WriteAll(client_fd_, buffer, bytes)) Die("cannot send a gradient");
+      if (!ReadAll(client_fd_, buffer, bytes)) Die("cannot receive the sum");
     }
   }
 
@@ -224,7 +204,6 @@ class HostGradientSync final : public GradientSync {
 
   int rank_ = 0;
   int world_size_ = 1;
-  bool device_buffers_ = false;
   std::string master_;
   int port_ = 0;
   int listen_fd_ = -1;
@@ -232,8 +211,6 @@ class HostGradientSync final : public GradientSync {
   bool accepted_ = false;
   std::vector<int> peers_;
   std::vector<ComputeType> scratch_;
-  // The host-side copy of one device gradient, reused across parameters.
-  std::vector<ComputeType> device_staging_;
 };
 
 }  // namespace
@@ -243,7 +220,6 @@ std::unique_ptr<GradientSync> CreateGradientSync(
   if (config.world_size <= 1) return std::make_unique<NoopGradientSync>();
   if (config.rank < 0 || config.rank >= config.world_size) return nullptr;
   auto sync = std::make_unique<HostGradientSync>(config.rank, config.world_size,
-                                                 config.device_buffers,
                                                  config.master, config.port);
   if (!sync->Setup()) return nullptr;
   return sync;

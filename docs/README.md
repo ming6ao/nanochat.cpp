@@ -12,8 +12,8 @@ detailed reference that the design points at.
 | [model.md](model.md) | Model API, graphs, optimizer, data and checkpoints, workspace |
 | [testing.md](testing.md) | Test tiers, oracle harness, finite-difference checks |
 | [parity.md](parity.md) | Known differences from the PyTorch reference, with status |
-| [distributed-t4-plan.md](distributed-t4-plan.md) | The plan for two-T4 Kaggle training: the design summary, the best fit, and the execution phases |
-| [distributed-design.md](distributed-design.md) | Data-parallel training on two devices: the gradient-sync seam, sharding, and the launch |
+| [distributed-design.md](distributed-design.md) | Data-parallel training on two devices: the gradient-sync seam, sharding, the data cursor, and the launch |
+| [distributed-plan.md](distributed-plan.md) | The execution plan for NCCL, the overlap seam, and the data cursor |
 | [performance.md](performance.md) | Performance measurement protocol and the debugging interface |
 | [cpu-performance.md](cpu-performance.md) | CPU backend baseline, cause, design, and phase results |
 | [attention.md](attention.md) | Attention baseline, Pascal feasibility, the fused window, results |

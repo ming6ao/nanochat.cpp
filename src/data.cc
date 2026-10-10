@@ -271,8 +271,17 @@ struct DataLoader::Impl {
   std::size_t document_buffer = 1000;
   std::uint64_t seed = 42;
 
+  // The data cursor (docs/distributed-design.md section 11). `epoch` counts the
+  // `Reset` calls. The resume cursor is the encoded `documents` buffer plus the
+  // source position, so `State()` can snapshot it consistently.
+  std::int64_t epoch = 0;
+
   std::thread producer;
   std::mutex mutex;
+  // The producer holds this gate across a source read, its encode, and the
+  // push. `State` locks the gate too, so a snapshot never catches a read that
+  // has not reached the buffer yet.
+  std::mutex producer_gate;
   std::condition_variable space_available;
   std::condition_variable data_available;
   std::deque<std::vector<int>> documents;
@@ -321,6 +330,10 @@ struct DataLoader::Impl {
         });
         if (stop) break;
       }
+      // The gate spans the read, the encode, and the push. `State` takes the
+      // same gate, so the snapshot never sees a read that is not yet in the
+      // buffer (docs/distributed-design.md section 11).
+      std::lock_guard<std::mutex> gate(producer_gate);
       std::vector<std::string> batch;
       std::string error;
       const bool ok = source != nullptr && source->Next(&batch, &error);
@@ -440,6 +453,20 @@ struct DataLoader::Impl {
     return true;
   }
 
+  // A consistent snapshot of the cursor
+  // (docs/distributed-design.md section 11). The gate keeps the producer from
+  // reading a batch that is not yet in the buffer, so the restored buffer and
+  // position replay the packing exactly.
+  DataLoaderState Snapshot() {
+    DataLoaderState state;
+    std::lock_guard<std::mutex> gate(producer_gate);
+    std::lock_guard<std::mutex> lock(mutex);
+    state.epoch = epoch;
+    state.source_position = source != nullptr ? source->position() : 0;
+    state.documents.assign(documents.begin(), documents.end());
+    return state;
+  }
+
   void ResetDocuments() {
     StopProducer();
     {
@@ -448,6 +475,9 @@ struct DataLoader::Impl {
       producer_done = false;
       producer_error.clear();
       stop = false;
+      // A new epoch restarts the cursor
+      // (docs/distributed-design.md section 11).
+      ++epoch;
     }
     StartProducer();
   }
@@ -456,13 +486,22 @@ struct DataLoader::Impl {
 DataLoader::DataLoader(DocumentSourceFactory source_factory,
                        const Tokenizer* tokenizer, int batch, int seq,
                        std::uint64_t seed, int tokenizer_threads,
-                       std::size_t document_buffer)
+                       std::size_t document_buffer,
+                       const DataLoaderState* restore)
     : impl_(std::make_unique<Impl>()), batch_(batch), seq_(seq) {
   impl_->source_factory = std::move(source_factory);
   impl_->tokenizer = tokenizer;
   impl_->tokenizer_threads = tokenizer_threads > 0 ? tokenizer_threads : 1;
   impl_->document_buffer = document_buffer == 0 ? 1 : document_buffer;
   impl_->seed = seed;
+  if (restore != nullptr) {
+    // Prime the epoch and the encoded buffer before the producer starts. The
+    // caller built `source_factory` to seek to `source_position`
+    // (docs/distributed-design.md section 11).
+    impl_->epoch = restore->epoch;
+    impl_->documents.assign(restore->documents.begin(),
+                            restore->documents.end());
+  }
   impl_->StartProducer();
 }
 
@@ -478,6 +517,11 @@ bool DataLoader::Next(int* tokens, int* targets) {
 void DataLoader::Reset() {
   if (impl_ == nullptr) return;
   impl_->ResetDocuments();
+}
+
+DataLoaderState DataLoader::State() const {
+  if (impl_ == nullptr) return DataLoaderState();
+  return impl_->Snapshot();
 }
 
 const std::uint8_t* DataLoader::token_bytes(int* vocab_size) const {
@@ -499,11 +543,20 @@ namespace {
 // reads from `source_`, so rank `rank_` keeps document `i` only when
 // `i % world_size_ == rank_`. The count is deterministic from the start of the
 // stream, so a `Reset` (a new epoch) reproduces the same partition.
+//
+// `begin_` is the global source position to resume at
+// (docs/distributed-design.md section 11). The wrapper reads and drops every
+// document before `begin_`, then continues the stride filter. The wrapper also
+// reports `position()`, the count of documents read from the underlying stream,
+// which is the resumable cursor.
 class ShardedDocumentSource final : public DocumentSource {
  public:
   ShardedDocumentSource(std::unique_ptr<DocumentSource> source, int rank,
-                        int world_size)
-      : source_(std::move(source)), rank_(rank), world_size_(world_size) {}
+                        int world_size, std::int64_t begin = 0)
+      : source_(std::move(source)),
+        rank_(rank),
+        world_size_(world_size),
+        begin_(begin) {}
 
   bool Next(std::vector<std::string>* documents, std::string* error) override {
     documents->clear();
@@ -512,6 +565,10 @@ class ShardedDocumentSource final : public DocumentSource {
       batch.clear();
       if (!source_->Next(&batch, error)) return !documents->empty();
       for (std::string& document : batch) {
+        if (index_ < begin_) {
+          ++index_;
+          continue;
+        }
         const bool mine = (index_ % world_size_) == rank_;
         ++index_;
         if (mine) documents->push_back(std::move(document));
@@ -520,25 +577,36 @@ class ShardedDocumentSource final : public DocumentSource {
     }
   }
 
+  std::int64_t position() const override { return index_; }
+
  private:
   std::unique_ptr<DocumentSource> source_;
   int rank_ = 0;
   int world_size_ = 1;
+  std::int64_t begin_ = 0;
   std::int64_t index_ = 0;
 };
 
 }  // namespace
 
 DocumentSourceFactory ShardDocumentSourceFactory(DocumentSourceFactory factory,
-                                                 int rank, int world_size) {
-  if (world_size <= 1) return factory;
-  return [factory = std::move(factory), rank,
-          world_size](std::string* error) -> std::unique_ptr<DocumentSource> {
-    std::unique_ptr<DocumentSource> source = factory(error);
-    if (source == nullptr) return nullptr;
-    return std::make_unique<ShardedDocumentSource>(std::move(source), rank,
-                                                   world_size);
-  };
+                                                 int rank, int world_size,
+                                                 std::int64_t start,
+                                                 int start_on_creation) {
+  auto creation = std::make_shared<int>(0);
+  return
+      [factory = std::move(factory), rank, world_size, start, start_on_creation,
+       creation](std::string* error) -> std::unique_ptr<DocumentSource> {
+        std::unique_ptr<DocumentSource> source = factory(error);
+        if (source == nullptr) return nullptr;
+        // The stored epoch selects the creation that carries the resume offset.
+        // An earlier creation begins at 0, so the earlier epochs are skipped
+        // without a full replay (docs/distributed-design.md section 11).
+        const std::int64_t begin = (*creation == start_on_creation) ? start : 0;
+        ++*creation;
+        return std::make_unique<ShardedDocumentSource>(std::move(source), rank,
+                                                       world_size, begin);
+      };
 }
 
 }  // namespace nanochat

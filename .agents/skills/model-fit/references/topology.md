@@ -75,4 +75,4 @@ micro-batch amortizes the reduction. A small micro-batch does not.
   value.
 
 The design is in `docs/distributed-design.md`. The execution plan is in
-`docs/distributed-t4-plan.md`.
+`docs/distributed-plan.md`.

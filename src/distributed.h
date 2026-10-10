@@ -12,8 +12,9 @@
 // through `ParamView`; the sync only needs the `grad` pointer and the `count`.
 //
 // This header includes only `nanochat/tensor.h` and the standard library. The
-// factory lives in a backend (the host reference in `src/distributed.cc` and,
-// later, NCCL in `backends/cuda`), so no vendor header is reachable here.
+// factory lives in a backend: the host reference in `src/distributed.cc` for
+// the CPU build, and NCCL in `backends/cuda/nccl_sync.cu` for the CUDA build.
+// No vendor header is reachable here.
 
 namespace nanochat {
 
@@ -22,12 +23,6 @@ struct DistributedConfig {
   int world_size = 1;
   std::string master = "127.0.0.1";
   int port = 29500;
-
-  // True when the model keeps its gradients in device memory (the CUDA
-  // backend). The host reference then stages each buffer through host memory
-  // with `kernels::Memcpy` before and after the reduction. The CPU reference
-  // backend leaves this false, so a CPU run copies nothing extra.
-  bool device_buffers = false;
 };
 
 class GradientSync {
@@ -41,6 +36,18 @@ class GradientSync {
   // rank. The sum, not the mean, keeps the global batch constant on any rank
   // count.
   virtual void AllReduceSum(ComputeType* buffer, std::int64_t count) = 0;
+
+  // The asynchronous form (docs/distributed-plan.md phase 2). The reduction
+  // runs on the backend's side stream and the call returns before it finishes.
+  // The caller must not touch `buffer` until `Wait` returns. The default
+  // implementation is synchronous, so a single-stream backend such as the host
+  // reference stays correct.
+  virtual void AllReduceSumAsync(ComputeType* buffer, std::int64_t count) {
+    AllReduceSum(buffer, count);
+  }
+
+  // Blocks until every asynchronous reduction issued so far has completed.
+  virtual void Wait() {}
 };
 
 // Builds the sync for `config`. A `world_size` of 1 returns a no-op object, so

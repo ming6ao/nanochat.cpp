@@ -45,6 +45,13 @@ use_repo(cuda, "cuda")
 
 register_toolchains("@cuda//toolchain:nvcc-local-toolchain")
 
+# NCCL is a system library. The repository rule in //third_party locates it. A
+# CUDA build selects //backends/cuda:nccl_sync, which needs this repository; a
+# CPU build never reaches it (docs/distributed-plan.md phases 0 and 1).
+nccl_repository = use_repo_rule("//third_party:nccl.bzl", "nccl_repository")
+
+nccl_repository(name = "nccl")
+
 # Python toolchain for the API tests. The `nanochat_cpp` package imports only
 # the standard library, so the system `python3` is enough and no hermetic
 # runtime is downloaded. `local_runtime_repo` introspects that interpreter and

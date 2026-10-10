@@ -21,6 +21,34 @@ cc_library(
     deps = ["//include/nanochat:nanochat"],
 )
 
+# The vendor-free gradient-sync seam (docs/distributed-design.md section 4).
+# The host reference and the NCCL backend share this header, so neither backend
+# depends on the other.
+cc_library(
+    name = "distributed_seam",
+    hdrs = ["distributed.h"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    deps = ["//include/nanochat:nanochat"],
+)
+
+# The host reference for the gradient-sync seam
+# (docs/distributed-design.md section 5). It defines `CreateGradientSync` for
+# the CPU backend. A CUDA build gets that symbol from
+# `//backends/cuda:nccl_sync` (docs/distributed-plan.md phase 0).
+cc_library(
+    name = "distributed_host",
+    srcs = ["distributed.cc"],
+    # `distributed.cc` uses the `AsF`/`ToC` conversion helpers from `ops.h`.
+    hdrs = ["ops.h"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    deps = [
+        ":distributed_seam",
+        "//include/nanochat:nanochat",
+    ],
+)
+
 # The backend-agnostic workflow: runtime tensor plumbing (`tensor.cc`,
 # `workspace.h`), the reusable graph pieces (`ops.cc`), the fixed train graph
 # (`model.cc`), the two inference graphs (`generate.cc`), and the harness
@@ -30,7 +58,6 @@ cc_library(
     name = "model",
     srcs = [
         "data.cc",
-        "distributed.cc",
         "eval.cc",
         "generate.cc",
         "model.cc",
@@ -41,7 +68,6 @@ cc_library(
     ],
     hdrs = [
         "cli.h",
-        "distributed.h",
         "eval.h",
         "generate.h",
         "model_impl.h",
@@ -54,13 +80,23 @@ cc_library(
     defines = precision_defines(),
     # Backend selection is a build/link choice (docs/build.md): the same
     # workflow sources link the reference CPU backend by default or the CUDA
-    # backend under `--config=cuda`.
+    # backend under `--config=cuda`. The gradient-sync factory follows the same
+    # choice: the host reference on the CPU and NCCL on the GPU
+    # (docs/distributed-plan.md phase 0). There is no host-reference fallback on
+    # the CUDA path.
     deps = select({
-        "//:backend_cuda": ["//backends/cuda:all_kernels"],
-        "//:backend_cpu": ["//backends/cpu"],
+        "//:backend_cuda": [
+            "//backends/cuda:all_kernels",
+            "//backends/cuda:nccl_sync",
+        ],
+        "//:backend_cpu": [
+            "//backends/cpu",
+            ":distributed_host",
+        ],
     }) + [
+        ":distributed_seam",
         # `train.cc` reads the device capability table for the precision-aware
-        # MFU peak (docs/precision.md, docs/distributed-t4-plan.md phase B1).
+        # MFU peak (docs/precision.md, docs/distributed-plan.md phase B1).
         ":device_profile",
         # `eval.cc` decodes the generated rows through the tokenizer stream
         # decoder, so the workflow library links the host tokenizer.

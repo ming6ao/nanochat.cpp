@@ -1,0 +1,5 @@
+# third_party/ -- repository rules for the non-Bazel libraries the CUDA backend
+# links. The NCCL rule lives here (docs/distributed-plan.md phase 1).
+package(default_visibility = ["//visibility:public"])
+
+exports_files(["nccl.bzl"])

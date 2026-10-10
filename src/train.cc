@@ -69,23 +69,21 @@ Logger::~Logger() = default;
 
 void Logger::Log(const LogRecord& record) {
   char buffer[384];
-  std::snprintf(buffer, sizeof(buffer),
-                "step %06d | loss %.6f | lr %.6g | grad_norm %.6g | "
-                "tok/s %.3f | mfu %.2f%% | step_ms %.3f | data_ms %.3f | "
-                "fwd_ms %.3f | bwd_ms %.3f | sync_ms %.3f | opt_ms %.3f | "
-                "eval_ms %.3f",
-                record.step, static_cast<double>(record.loss),
-                static_cast<double>(record.lr),
-                static_cast<double>(record.grad_norm),
-                static_cast<double>(record.tokens_per_second),
-                static_cast<double>(record.mfu) * 100.0,
-                static_cast<double>(record.step_ms),
-                static_cast<double>(record.data_ms),
-                static_cast<double>(record.forward_ms),
-                static_cast<double>(record.backward_ms),
-                static_cast<double>(record.sync_ms),
-                static_cast<double>(record.optim_ms),
-                static_cast<double>(record.eval_ms));
+  std::snprintf(
+      buffer, sizeof(buffer),
+      "step %06d | loss %.6f | lr %.6g | grad_norm %.6g | "
+      "tok/s %.3f | mfu %.2f%% | step_ms %.3f | data_ms %.3f | "
+      "fwd_ms %.3f | bwd_ms %.3f | sync_ms %.3f | opt_ms %.3f | "
+      "eval_ms %.3f",
+      record.step, static_cast<double>(record.loss),
+      static_cast<double>(record.lr), static_cast<double>(record.grad_norm),
+      static_cast<double>(record.tokens_per_second),
+      static_cast<double>(record.mfu) * 100.0,
+      static_cast<double>(record.step_ms), static_cast<double>(record.data_ms),
+      static_cast<double>(record.forward_ms),
+      static_cast<double>(record.backward_ms),
+      static_cast<double>(record.sync_ms), static_cast<double>(record.optim_ms),
+      static_cast<double>(record.eval_ms));
   const std::string line(buffer);
   std::fputs(line.c_str(), stdout);
   std::fputc('\n', stdout);
@@ -483,6 +481,17 @@ DocumentSourceFactory MakeParquetFactory(std::vector<std::string> files,
 
 }  // namespace
 
+namespace {
+
+// Defined beside `TrainLoop::Save`. Declared here so the constructor can read
+// the sidecar before the loader is built
+// (docs/distributed-design.md section 11).
+bool WriteDataState(const std::string& checkpoint_path,
+                    const DataLoaderState& state);
+bool ReadDataState(const std::string& checkpoint_path, DataLoaderState* state);
+
+}  // namespace
+
 TrainLoop::TrainLoop(TrainConfig config) : config_(std::move(config)) {
   if (config_.seq > 0) {
     config_.model.seq_len = config_.seq;
@@ -527,6 +536,12 @@ TrainLoop::TrainLoop(TrainConfig config) : config_(std::move(config)) {
   // performs no step keeps the stored step record (docs/training-seam.md
   // section 10).
   last_step_ = resume_step;
+  // The data cursor rides beside the checkpoint
+  // (docs/distributed-design.md section 11). A missing sidecar leaves both at
+  // 0, so the run starts the epoch from the beginning.
+  if (resumed) {
+    ReadDataState(config_.resume_path, &resume_state_);
+  }
 
   logger_ = std::make_unique<Logger>(config_.log_path);
 
@@ -538,10 +553,6 @@ TrainLoop::TrainLoop(TrainConfig config) : config_(std::move(config)) {
   distributed.world_size = config_.world_size;
   distributed.master = config_.master;
   distributed.port = config_.port;
-  // The CUDA backend keeps the gradients in device memory, so the host
-  // reference must stage each reduction through host memory. The CPU backend
-  // reports `is_device` false and pays nothing.
-  distributed.device_buffers = kernels::GetCaps().is_device;
   sync_ = CreateGradientSync(distributed);
   if (sync_ == nullptr) {
     // A world size above 1 without a sync would train each rank on its own
@@ -566,21 +577,30 @@ TrainLoop::TrainLoop(TrainConfig config) : config_(std::move(config)) {
         config_.train_source
             ? config_.train_source
             : MakeParquetFactory(config_.train_parquet, config_.text_column);
-    // Shard documents by rank. A world size of 1 returns the factory
-    // unchanged (docs/distributed-design.md section 7).
-    train_source = ShardDocumentSourceFactory(std::move(train_source),
-                                              config_.rank, config_.world_size);
+    // Shard documents by rank (docs/distributed-design.md section 7). The
+    // resume source position applies on the stored epoch's creation, so earlier
+    // epochs are skipped without a full replay
+    // (docs/distributed-design.md section 11).
+    train_source = ShardDocumentSourceFactory(
+        std::move(train_source), config_.rank, config_.world_size,
+        resume_state_.source_position, static_cast<int>(resume_state_.epoch));
     DocumentSourceFactory val_source =
         config_.val_source
             ? config_.val_source
             : MakeParquetFactory(config_.val_parquet, config_.text_column);
     train_loader_ = std::make_unique<DataLoader>(
         train_source, tokenizer_.get(), config_.batch, seq, config_.seed,
-        config_.tokenizer_threads, config_.document_buffer);
+        config_.tokenizer_threads, config_.document_buffer, &resume_state_);
     if (config_.val_source || !config_.val_parquet.empty()) {
       val_loader_ = std::make_unique<DataLoader>(
           val_source, tokenizer_.get(), config_.batch, seq, config_.seed + 1,
           config_.tokenizer_threads, config_.document_buffer);
+    }
+    // Advance to the resumed epoch. Each Reset opens the next epoch's source,
+    // and the stored position applies on that creation
+    // (docs/distributed-design.md section 11).
+    for (std::int64_t e = 0; e < resume_state_.epoch; ++e) {
+      train_loader_->Reset();
     }
   }
 
@@ -593,10 +613,99 @@ TrainLoop::TrainLoop(TrainConfig config) : config_(std::move(config)) {
 
 TrainLoop::~TrainLoop() = default;
 
+namespace {
+
+// The data-cursor sidecar (docs/distributed-design.md section 11). The cursor
+// lives beside the checkpoint, not inside it, so the parameter and optimizer
+// records stay byte-identical across ranks and the smoke test keeps its hash
+// check. The file holds the epoch, the source position, and the encoded, not
+// yet packed buffer. The buffer is part of the cursor, because the reference
+// best-fit packing reorders documents inside it.
+constexpr char kDataCursorSuffix[] = ".cursor";
+
+void AppendLE64(std::vector<std::byte>* out, std::uint64_t value) {
+  for (int i = 0; i < 8; ++i) {
+    out->push_back(static_cast<std::byte>((value >> (8 * i)) & 0xffu));
+  }
+}
+
+bool ReadLE64(std::istream& in, std::uint64_t* value) {
+  std::byte bytes[8];
+  in.read(reinterpret_cast<char*>(bytes), sizeof(bytes));
+  if (in.gcount() != static_cast<std::streamsize>(sizeof(bytes))) {
+    return false;
+  }
+  std::uint64_t result = 0;
+  for (int i = 0; i < 8; ++i) {
+    result |= static_cast<std::uint64_t>(bytes[i]) << (8 * i);
+  }
+  *value = result;
+  return true;
+}
+
+bool WriteDataState(const std::string& checkpoint_path,
+                    const DataLoaderState& state) {
+  if (checkpoint_path.empty()) return false;
+  std::vector<std::byte> bytes;
+  bytes.reserve(24 + state.documents.size() * 8);
+  AppendLE64(&bytes, static_cast<std::uint64_t>(state.epoch));
+  AppendLE64(&bytes, static_cast<std::uint64_t>(state.source_position));
+  AppendLE64(&bytes, static_cast<std::uint64_t>(state.documents.size()));
+  for (const std::vector<int>& document : state.documents) {
+    AppendLE64(&bytes, static_cast<std::uint64_t>(document.size()));
+    for (int token : document) {
+      AppendLE64(&bytes,
+                 static_cast<std::uint64_t>(static_cast<std::int64_t>(token)));
+    }
+  }
+  std::ofstream out(checkpoint_path + kDataCursorSuffix,
+                    std::ios::binary | std::ios::trunc);
+  if (!out) return false;
+  out.write(reinterpret_cast<const char*>(bytes.data()),
+            static_cast<std::streamsize>(bytes.size()));
+  return static_cast<bool>(out);
+}
+
+bool ReadDataState(const std::string& checkpoint_path, DataLoaderState* state) {
+  if (checkpoint_path.empty() || state == nullptr) return false;
+  std::ifstream in(checkpoint_path + kDataCursorSuffix, std::ios::binary);
+  if (!in) return false;
+  std::uint64_t epoch = 0;
+  std::uint64_t position = 0;
+  std::uint64_t count = 0;
+  if (!ReadLE64(in, &epoch) || !ReadLE64(in, &position) ||
+      !ReadLE64(in, &count)) {
+    return false;
+  }
+  // A badly large count must not allocate without bound.
+  if (count > (1ull << 30)) return false;
+  std::vector<std::vector<int>> documents(static_cast<std::size_t>(count));
+  for (std::vector<int>& document : documents) {
+    std::uint64_t tokens = 0;
+    if (!ReadLE64(in, &tokens)) return false;
+    if (tokens > (1ull << 30)) return false;
+    document.resize(static_cast<std::size_t>(tokens));
+    for (int& token : document) {
+      std::uint64_t raw = 0;
+      if (!ReadLE64(in, &raw)) return false;
+      token = static_cast<int>(static_cast<std::int64_t>(raw));
+    }
+  }
+  state->epoch = static_cast<std::int64_t>(epoch);
+  state->source_position = static_cast<std::int64_t>(position);
+  state->documents = std::move(documents);
+  return true;
+}
+
+}  // namespace
+
 void TrainLoop::Save(int step) {
   if (config_.checkpoint_path.empty()) return;
   if (Checkpointer::SaveModel(*model_, *optimizer_, step,
                               config_.checkpoint_path)) {
+    const DataLoaderState state =
+        train_loader_ ? train_loader_->State() : DataLoaderState();
+    WriteDataState(config_.checkpoint_path, state);
     logger_->Info("saved checkpoint at step " + std::to_string(step));
   } else {
     logger_->Info("failed to save checkpoint at step " + std::to_string(step));
@@ -613,9 +722,9 @@ void TrainLoop::AllReduceGradients() {
     if (parameter.grad == nullptr || parameter.count <= 0) continue;
     views.push_back(parameter);
     total += parameter.count;
-    max_param_bytes = std::max(
-        max_param_bytes,
-        static_cast<std::size_t>(parameter.count) * sizeof(ComputeType));
+    max_param_bytes =
+        std::max(max_param_bytes, static_cast<std::size_t>(parameter.count) *
+                                      sizeof(ComputeType));
   }
   if (views.empty()) return;
 
@@ -631,43 +740,68 @@ void TrainLoop::AllReduceGradients() {
   buckets = std::min(buckets, views.size());
   const std::size_t average = (total_bytes + buckets - 1) / buckets;
 
-  ComputeType* bucket =
-      static_cast<ComputeType*>(kernels::Alloc(average + max_param_bytes));
-  if (bucket == nullptr) {
-    std::fprintf(stderr, "train: cannot allocate the gradient bucket\n");
-    std::abort();
+  // One buffer for each bucket, so every reduction can be in flight on the
+  // backend's side stream while the next bucket is packed
+  // (docs/distributed-plan.md phase 2). The host reference treats the
+  // asynchronous call as synchronous, so the sum is unchanged and the CPU
+  // tests still exercise the same path.
+  const std::size_t stride = average + max_param_bytes;
+  std::vector<ComputeType*> buffers(buckets, nullptr);
+  for (std::size_t b = 0; b < buckets; ++b) {
+    buffers[b] = static_cast<ComputeType*>(kernels::Alloc(stride));
+    if (buffers[b] == nullptr) {
+      std::fprintf(stderr, "train: cannot allocate a gradient bucket\n");
+      std::abort();
+    }
   }
 
-  std::size_t bucket_elems = 0;
-  std::vector<std::pair<const ParamView*, std::size_t>> pending;
-  auto flush = [&]() {
-    if (bucket_elems == 0) return;
-    sync_->AllReduceSum(bucket, static_cast<std::int64_t>(bucket_elems));
-    for (const auto& entry : pending) {
-      const ParamView* view = entry.first;
-      const std::size_t offset = entry.second;
-      kernels::Memcpy(view->grad, bucket + offset,
-                      static_cast<std::size_t>(view->count) *
-                          sizeof(ComputeType),
-                      CopyDir::kDeviceToDevice);
+  struct Pending {
+    const ParamView* view;
+    std::size_t offset;
+  };
+  std::vector<std::vector<Pending>> pending(buckets);
+  std::vector<std::size_t> bucket_elems(buckets, 0);
+  std::size_t bucket = 0;
+
+  auto issue = [&](std::size_t b) {
+    if (bucket_elems[b] == 0) return;
+    sync_->AllReduceSumAsync(buffers[b],
+                             static_cast<std::int64_t>(bucket_elems[b]));
+  };
+  auto copy_back = [&](std::size_t b) {
+    for (const Pending& entry : pending[b]) {
+      kernels::Memcpy(
+          entry.view->grad, buffers[b] + entry.offset,
+          static_cast<std::size_t>(entry.view->count) * sizeof(ComputeType),
+          CopyDir::kDeviceToDevice);
     }
-    pending.clear();
-    bucket_elems = 0;
+    pending[b].clear();
+    bucket_elems[b] = 0;
   };
 
   for (const ParamView& view : views) {
     const std::size_t elements = static_cast<std::size_t>(view.count);
-    if (bucket_elems > 0 &&
-        (bucket_elems + elements) * sizeof(ComputeType) > average) {
-      flush();
+    if (bucket_elems[bucket] > 0 &&
+        (bucket_elems[bucket] + elements) * sizeof(ComputeType) > average) {
+      issue(bucket);
+      if (bucket + 1 >= buckets) {
+        // Every buffer is in flight. Wait, copy the sums back, and reuse them.
+        sync_->Wait();
+        for (std::size_t b = 0; b < buckets; ++b) copy_back(b);
+        bucket = 0;
+      } else {
+        ++bucket;
+      }
     }
-    kernels::Memcpy(bucket + bucket_elems, view.grad,
+    kernels::Memcpy(buffers[bucket] + bucket_elems[bucket], view.grad,
                     elements * sizeof(ComputeType), CopyDir::kDeviceToDevice);
-    pending.emplace_back(&view, bucket_elems);
-    bucket_elems += elements;
+    pending[bucket].push_back({&view, bucket_elems[bucket]});
+    bucket_elems[bucket] += elements;
   }
-  flush();
-  kernels::Free(bucket);
+  issue(bucket);
+  sync_->Wait();
+  for (std::size_t b = 0; b < buckets; ++b) copy_back(b);
+  for (ComputeType* buffer : buffers) kernels::Free(buffer);
 }
 
 float TrainLoop::Run() {
@@ -676,7 +810,7 @@ float TrainLoop::Run() {
   const int accum = config_.grad_accum > 0 ? config_.grad_accum : 1;
   // One optimizer step consumes `accum` micro-batches of `batch` sequences, so
   // the throughput must count every micro-batch
-  // (docs/distributed-t4-plan.md phase B1). The old record counted one.
+  // (docs/distributed-design.md section 6). The old record counted one.
   const std::int64_t tokens_per_step =
       static_cast<std::int64_t>(batch) * seq * accum;
   const int first_step = resume_step_ + 1;
@@ -702,8 +836,9 @@ float TrainLoop::Run() {
     const float backward_scale =
         DistributedBackwardScale(accum, config_.world_size);
 
-    // The phase split of one optimizer step (docs/distributed-t4-plan.md phase
-    // B1). The device is synchronized at each phase boundary, so the device
+    // The phase split of one optimizer step
+    // (docs/distributed-design.md section 6). The device is synchronized at
+    // each phase boundary, so the device
     // time lands in the phase that issued it instead of in the next phase's
     // first blocking copy. The CPU backend's `Synchronize` is a no-op.
     const auto mark = [] { return std::chrono::steady_clock::now(); };

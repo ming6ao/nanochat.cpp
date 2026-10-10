@@ -148,10 +148,10 @@ class TrainLoop {
   void Save(int step);
 
   // Reduces every parameter gradient across the ranks. When `sync_` is a real
-  // multi-rank group, the gradients are packed into a few large buckets first,
-  // so the host reference pays one TCP round trip per bucket instead of one per
-  // parameter (docs/distributed-t4-plan.md phase C1). A `world_size` of 1 is a
-  // no-op.
+  // multi-rank group, the gradients are packed into a few large buckets and
+  // issued with `AllReduceSumAsync`, so a bucket reduction overlaps the pack
+  // copy of the next bucket (docs/distributed-design.md section 6). A
+  // `world_size` of 1 is a no-op.
   void AllReduceGradients();
 
   TrainConfig config_;
@@ -172,6 +172,10 @@ class TrainLoop {
   // at `resume_step_ + 1`, so a resume continues the schedule
   // (docs/training-seam.md section 10).
   int resume_step_ = 0;
+  // The data cursor restored beside the checkpoint
+  // (docs/distributed-design.md section 11). The default state is a fresh run
+  // at epoch 0.
+  DataLoaderState resume_state_;
 };
 
 }  // namespace nanochat

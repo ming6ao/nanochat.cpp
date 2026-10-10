@@ -294,6 +294,70 @@ void TestTrainLoopRanksAgree() {
   CompareParameters(*loop0.model(), *loop1.model(), "two-rank TrainLoop", 1e-5);
 }
 
+// A resume from a mid-run checkpoint reproduces the uninterrupted run
+// (docs/distributed-design.md section 11). The data cursor sidecar must seek to
+// the exact document, so the resumed leg continues as if it had never stopped.
+void TestTrainLoopResume() {
+  Config config = TinyConfig();
+  config.vocab_size = 512;
+  config.padded_vocab_size = 512;
+  const int batch = 2;
+  const int seq = 8;
+  const std::string tokenizer_path = TempPath("train_resume.nctoken");
+  if (!nanochat::SaveTokenizer(tokenizer_path, nanochat::NanochatSplitPattern(),
+                               {}, {{"<|bos|>", 256}})) {
+    Fail("train resume: SaveTokenizer failed");
+    return;
+  }
+  auto documents = std::make_shared<std::vector<std::string>>();
+  for (int i = 0; i < 64; ++i) {
+    documents->push_back("resume" + std::to_string(i));
+  }
+  DocumentSourceFactory factory =
+      [documents](std::string*) -> std::unique_ptr<DocumentSource> {
+    return std::make_unique<VectorSource>(*documents, 4);
+  };
+
+  TrainConfig base;
+  base.model = config;
+  base.batch = batch;
+  base.seq = seq;
+  base.log_every = 0;
+  base.seed = kSeed;
+  base.tokenizer_path = tokenizer_path;
+  base.train_source = factory;
+  base.tokenizer_threads = 1;
+  base.document_buffer = 16;
+  base.scheduler.num_iterations = 6;
+
+  const std::string checkpoint = TempPath("train_resume.nchkpt01");
+
+  // The first leg: 3 steps of a 6-step schedule, so the learning rate matches
+  // the uninterrupted run at each step.
+  TrainConfig leg1 = base;
+  leg1.num_iterations = 3;
+  leg1.checkpoint_path = checkpoint;
+  TrainLoop loop1(std::move(leg1));
+  loop1.Run();
+
+  // The resumed leg: steps 4 to 6.
+  TrainConfig leg2 = base;
+  leg2.num_iterations = 6;
+  leg2.resume_path = checkpoint;
+  leg2.checkpoint_path = TempPath("train_resume_leg2.nchkpt01");
+  TrainLoop loop2(std::move(leg2));
+  loop2.Run();
+
+  // The reference: 6 steps without a resume.
+  TrainConfig reference = base;
+  reference.num_iterations = 6;
+  TrainLoop loop3(std::move(reference));
+  loop3.Run();
+
+  CompareParameters(*loop2.model(), *loop3.model(), "resume vs uninterrupted",
+                    1e-4);
+}
+
 void TestBackwardScale() {
   // The micro-batch sum and the all-reduce sum give the global mean when the
   // backward carries 1/(grad_accum * world_size)
@@ -319,6 +383,7 @@ int main() {
   TestBackwardScale();
   TestTwoRanksEqualOneRank();
   TestTrainLoopRanksAgree();
+  TestTrainLoopResume();
   if (g_failures != 0) {
     std::fprintf(stderr, "train_parallel_test: %d failure(s)\n", g_failures);
     return 1;

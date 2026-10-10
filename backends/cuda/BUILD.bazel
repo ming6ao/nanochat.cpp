@@ -40,6 +40,33 @@ cuda_library(
     alwayslink = True,
 )
 
+# The NCCL gradient-sync factory (docs/distributed-plan.md phase 1). This target
+# defines `CreateGradientSync` for a CUDA build; `//src:model` selects it for
+# `//:backend_cuda`. The source is empty under the CPU config, so `bazel build
+# //...` on a host without NCCL still builds, and the CPU backend keeps the host
+# reference. NCCL is a build-time dependency of every CUDA config.
+cuda_library(
+    name = "nccl_sync",
+    srcs = select({
+        "//:backend_cuda": ["nccl_sync.cu"],
+        "//conditions:default": [],
+    }),
+    copts = nanochat_cuda_copts(),
+    defines = precision_defines(),
+    # The factory is referenced only from `//src:model`, so the archive must be
+    # included whole or the linker would not reach the symbol.
+    alwayslink = True,
+    deps = select({
+        "//:backend_cuda": [
+            ":device",
+            "//include/nanochat:nanochat",
+            "//src:distributed_seam",
+            "@nccl//:nccl",
+        ],
+        "//conditions:default": [],
+    }),
+)
+
 # Convenience aggregate for the host graph and the per-family kernel libraries.
 # They depend on this target (or on :device) rather than reaching into the
 # individual translation units.
