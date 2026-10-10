@@ -91,6 +91,29 @@ class ParseLogTest(unittest.TestCase):
         self.assertAlmostEqual(rows[0]["loss"], 3.141593)
         self.assertAlmostEqual(rows[0]["mfu"], 0.425)
 
+    def test_reads_the_phase_split(self) -> None:
+        line = (LOG_LINE +
+                " | step_ms 21000.000 | data_ms 12.000 | fwd_ms 1500.000 | "
+                "bwd_ms 3200.000 | sync_ms 1200.000 | opt_ms 1100.000 | "
+                "eval_ms 0.000")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "rank0.log"
+            path.write_text(line + "\n", encoding="utf-8")
+            rows = parallel.parse_log(path)
+        self.assertEqual(len(rows), 1)
+        self.assertAlmostEqual(rows[0]["step_ms"], 21000.0)
+        self.assertAlmostEqual(rows[0]["forward_ms"], 1500.0)
+        self.assertAlmostEqual(rows[0]["sync_ms"], 1200.0)
+        self.assertAlmostEqual(rows[0]["eval_ms"], 0.0)
+
+    def test_a_line_without_the_phase_split_still_parses(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "rank0.log"
+            path.write_text(LOG_LINE + "\n", encoding="utf-8")
+            rows = parallel.parse_log(path)
+        self.assertEqual(len(rows), 1)
+        self.assertNotIn("step_ms", rows[0])
+
     def test_reads_a_special_value(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "rank0.log"

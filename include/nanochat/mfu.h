@@ -45,6 +45,14 @@ double EstimateDecodeFlops(const Config& config, int context_len);
 // best-effort and mirrors nanochat's `get_peak_flops`.
 double PeakFlopsForDevice(const std::string& device_name);
 
+// Peak dense FLOPs for `device_name` at the build's compute precision
+// (docs/precision.md). The production build is fp32 on Pascal, Turing, and the
+// CPU, so the MFU denominator is the CUDA-core fp32 rate there; a future bf16
+// build reads the tensor-core rate. `PeakFlopsForDevice` keeps the reference
+// tensor-core rate for compatibility, so the two differ on a device whose
+// reference recipe uses tensor cores. Returns 0 for an unknown device.
+double PeakFlopsForCompute(const std::string& device_name);
+
 // tokens_per_second * flops_per_token / peak_flops, clamped to [0, 1].
 double ComputeMfu(const Config& config, double tokens_per_second,
                   double peak_flops);

@@ -31,14 +31,22 @@ __all__ = [
     "parse_log",
 ]
 
-#: The one log line that ``Logger::Log`` writes (``src/train.cc``).
+#: The one log line that ``Logger::Log`` writes (``src/train.cc``). The phase
+#: fields after ``mfu`` are optional, so an older log still parses.
 _LOG_LINE = re.compile(
     r"step\s+(?P<step>\d+)\s*\|\s*"
     r"loss\s+(?P<loss>\S+)\s*\|\s*"
     r"lr\s+(?P<lr>\S+)\s*\|\s*"
     r"grad_norm\s+(?P<grad_norm>\S+)\s*\|\s*"
     r"tok/s\s+(?P<tokens_per_sec>\S+)\s*\|\s*"
-    r"mfu\s+(?P<mfu>\S+)%")
+    r"mfu\s+(?P<mfu>\S+)%"
+    r"(?:\s*\|\s*step_ms\s+(?P<step_ms>\S+)\s*\|\s*"
+    r"data_ms\s+(?P<data_ms>\S+)\s*\|\s*"
+    r"fwd_ms\s+(?P<forward_ms>\S+)\s*\|\s*"
+    r"bwd_ms\s+(?P<backward_ms>\S+)\s*\|\s*"
+    r"sync_ms\s+(?P<sync_ms>\S+)\s*\|\s*"
+    r"opt_ms\s+(?P<optim_ms>\S+)\s*\|\s*"
+    r"eval_ms\s+(?P<eval_ms>\S+))?")
 
 #: The extra ``train_main`` flags a small smoke run needs before ``--preset``
 #: is absent. The vocab must match the tokenizer.
@@ -188,14 +196,21 @@ def parse_log(path: str | Path) -> list[dict]:
         if match is None:
             continue
         try:
-            rows.append({
+            row = {
                 "step": int(match.group("step")),
                 "loss": float(match.group("loss")),
                 "lr": float(match.group("lr")),
                 "grad_norm": float(match.group("grad_norm")),
                 "tokens_per_sec": float(match.group("tokens_per_sec")),
                 "mfu": float(match.group("mfu")) / 100.0,
-            })
+            }
+            # The phase split is optional: an older log line has none.
+            for name in ("step_ms", "data_ms", "forward_ms", "backward_ms",
+                         "sync_ms", "optim_ms", "eval_ms"):
+                value = match.group(name)
+                if value is not None:
+                    row[name] = float(value)
+            rows.append(row)
         except ValueError:
             # A field that is not a number, for example a corrupted line.
             continue

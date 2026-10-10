@@ -147,6 +147,13 @@ class TrainLoop {
  private:
   void Save(int step);
 
+  // Reduces every parameter gradient across the ranks. When `sync_` is a real
+  // multi-rank group, the gradients are packed into a few large buckets first,
+  // so the host reference pays one TCP round trip per bucket instead of one per
+  // parameter (docs/distributed-t4-plan.md phase C1). A `world_size` of 1 is a
+  // no-op.
+  void AllReduceGradients();
+
   TrainConfig config_;
   std::unique_ptr<Model> model_;
   std::unique_ptr<Optimizer> optimizer_;
