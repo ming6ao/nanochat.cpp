@@ -123,6 +123,13 @@ void TestLogger() {
     record.grad_norm = 3.0f;
     record.tokens_per_second = 100.0f;
     record.mfu = 0.5f;
+    record.step_ms = 21000.0f;
+    record.data_ms = 12.0f;
+    record.forward_ms = 1500.0f;
+    record.backward_ms = 3200.0f;
+    record.sync_ms = 1200.0f;
+    record.optim_ms = 1100.0f;
+    record.eval_ms = 0.0f;
     logger.Log(record);
     logger.Info("hello");
     logger.Close();
@@ -133,6 +140,8 @@ void TestLogger() {
   if (contents.find("step 000007") == std::string::npos ||
       contents.find("loss 1.500000") == std::string::npos ||
       contents.find("mfu 50.00%") == std::string::npos ||
+      contents.find("step_ms 21000.000") == std::string::npos ||
+      contents.find("sync_ms 1200.000") == std::string::npos ||
       contents.find("[nanochat] hello") == std::string::npos) {
     Fail("Logger output missing an expected field: " + contents);
   }

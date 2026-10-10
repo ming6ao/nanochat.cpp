@@ -30,6 +30,7 @@
 
 #include "nanochat/data.h"
 #include "nanochat/dataloader.h"
+#include "nanochat/device_profile.h"
 #include "nanochat/kernels.h"
 #include "nanochat/logger.h"
 #include "nanochat/mfu.h"
@@ -67,15 +68,24 @@ Logger::Logger(const std::string& path) : impl_(std::make_unique<Impl>()) {
 Logger::~Logger() = default;
 
 void Logger::Log(const LogRecord& record) {
-  char buffer[256];
+  char buffer[384];
   std::snprintf(buffer, sizeof(buffer),
                 "step %06d | loss %.6f | lr %.6g | grad_norm %.6g | "
-                "tok/s %.3f | mfu %.2f%%",
+                "tok/s %.3f | mfu %.2f%% | step_ms %.3f | data_ms %.3f | "
+                "fwd_ms %.3f | bwd_ms %.3f | sync_ms %.3f | opt_ms %.3f | "
+                "eval_ms %.3f",
                 record.step, static_cast<double>(record.loss),
                 static_cast<double>(record.lr),
                 static_cast<double>(record.grad_norm),
                 static_cast<double>(record.tokens_per_second),
-                static_cast<double>(record.mfu) * 100.0);
+                static_cast<double>(record.mfu) * 100.0,
+                static_cast<double>(record.step_ms),
+                static_cast<double>(record.data_ms),
+                static_cast<double>(record.forward_ms),
+                static_cast<double>(record.backward_ms),
+                static_cast<double>(record.sync_ms),
+                static_cast<double>(record.optim_ms),
+                static_cast<double>(record.eval_ms));
   const std::string line(buffer);
   std::fputs(line.c_str(), stdout);
   std::fputc('\n', stdout);
@@ -291,6 +301,16 @@ double PeakFlopsForDevice(const std::string& device_name) {
     if (match) return entry.flops;
   }
   return 0.0;
+}
+
+double PeakFlopsForCompute(const std::string& device_name) {
+  const DeviceProfile* profile = FindDeviceProfile(device_name);
+  if (profile == nullptr) return 0.0;
+#if defined(NANOCHAT_PRECISION_FP16)
+  return profile->peak_fp16_flops;
+#else
+  return profile->peak_fp32_flops;
+#endif
 }
 
 double ComputeMfu(const Config& config, double tokens_per_second,
@@ -568,7 +588,7 @@ TrainLoop::TrainLoop(TrainConfig config) : config_(std::move(config)) {
                      static_cast<std::size_t>(config_.effective_seq()),
                  0);
   targets_.assign(tokens_.size(), 0);
-  peak_flops_ = PeakFlopsForDevice(config_.device_name);
+  peak_flops_ = PeakFlopsForCompute(config_.device_name);
 }
 
 TrainLoop::~TrainLoop() = default;
@@ -583,28 +603,97 @@ void TrainLoop::Save(int step) {
   }
 }
 
+void TrainLoop::AllReduceGradients() {
+  if (sync_ == nullptr || sync_->world_size() <= 1) return;
+
+  std::vector<ParamView> views;
+  std::int64_t total = 0;
+  std::size_t max_param_bytes = 0;
+  for (const ParamView& parameter : model_->params()) {
+    if (parameter.grad == nullptr || parameter.count <= 0) continue;
+    views.push_back(parameter);
+    total += parameter.count;
+    max_param_bytes = std::max(
+        max_param_bytes,
+        static_cast<std::size_t>(parameter.count) * sizeof(ComputeType));
+  }
+  if (views.empty()) return;
+
+  const std::size_t total_bytes =
+      static_cast<std::size_t>(total) * sizeof(ComputeType);
+  // Four to eight buckets, each about 128 MiB, amortize the host reference's
+  // per-call round trip. The elementwise sum is unchanged, so the reduced
+  // result is bit-identical to the per-parameter path.
+  constexpr std::size_t kTargetBucketBytes = 128ull << 20;
+  std::size_t buckets =
+      (total_bytes + kTargetBucketBytes - 1) / kTargetBucketBytes;
+  buckets = std::max<std::size_t>(4, std::min<std::size_t>(8, buckets));
+  buckets = std::min(buckets, views.size());
+  const std::size_t average = (total_bytes + buckets - 1) / buckets;
+
+  ComputeType* bucket =
+      static_cast<ComputeType*>(kernels::Alloc(average + max_param_bytes));
+  if (bucket == nullptr) {
+    std::fprintf(stderr, "train: cannot allocate the gradient bucket\n");
+    std::abort();
+  }
+
+  std::size_t bucket_elems = 0;
+  std::vector<std::pair<const ParamView*, std::size_t>> pending;
+  auto flush = [&]() {
+    if (bucket_elems == 0) return;
+    sync_->AllReduceSum(bucket, static_cast<std::int64_t>(bucket_elems));
+    for (const auto& entry : pending) {
+      const ParamView* view = entry.first;
+      const std::size_t offset = entry.second;
+      kernels::Memcpy(view->grad, bucket + offset,
+                      static_cast<std::size_t>(view->count) *
+                          sizeof(ComputeType),
+                      CopyDir::kDeviceToDevice);
+    }
+    pending.clear();
+    bucket_elems = 0;
+  };
+
+  for (const ParamView& view : views) {
+    const std::size_t elements = static_cast<std::size_t>(view.count);
+    if (bucket_elems > 0 &&
+        (bucket_elems + elements) * sizeof(ComputeType) > average) {
+      flush();
+    }
+    kernels::Memcpy(bucket + bucket_elems, view.grad,
+                    elements * sizeof(ComputeType), CopyDir::kDeviceToDevice);
+    pending.emplace_back(&view, bucket_elems);
+    bucket_elems += elements;
+  }
+  flush();
+  kernels::Free(bucket);
+}
+
 float TrainLoop::Run() {
   const int seq = config_.effective_seq();
   const int batch = config_.batch;
-  const std::int64_t tokens_per_step = static_cast<std::int64_t>(batch) * seq;
+  const int accum = config_.grad_accum > 0 ? config_.grad_accum : 1;
+  // One optimizer step consumes `accum` micro-batches of `batch` sequences, so
+  // the throughput must count every micro-batch
+  // (docs/distributed-t4-plan.md phase B1). The old record counted one.
+  const std::int64_t tokens_per_step =
+      static_cast<std::int64_t>(batch) * seq * accum;
   const int first_step = resume_step_ + 1;
   if (resume_step_ > 0) {
     logger_->Info("resuming from step " + std::to_string(resume_step_));
   }
   logger_->Info("training for " + std::to_string(config_.num_iterations) +
                 " steps, batch " + std::to_string(batch) + " x " +
-                std::to_string(seq));
+                std::to_string(seq) + " x " + std::to_string(accum));
 
   // A resume continues the schedule from the stored step, so the learning-rate
   // warmup does not replay (docs/training-seam.md section 10). `num_iterations`
   // is absolute.
   for (int step = first_step; step <= config_.num_iterations; ++step) {
-    const auto start = std::chrono::steady_clock::now();
-
     // Gradient accumulation: sum `grad_accum` micro-batch gradients (each
     // scaled by 1/grad_accum) before one optimizer step. Mirrors nanochat's
     // `loss = loss / grad_accum_steps` before each backward.
-    const int accum = config_.grad_accum > 0 ? config_.grad_accum : 1;
     const float inv_accum = 1.0f / static_cast<float>(accum);
     // The model's loss is a mean, so each rank holds the mean over its own
     // batch. The backward carries 1/world_size as well, and the all-reduce sum
@@ -612,37 +701,87 @@ float TrainLoop::Run() {
     // one-rank update (docs/distributed-design.md section 6).
     const float backward_scale =
         DistributedBackwardScale(accum, config_.world_size);
+
+    // The phase split of one optimizer step (docs/distributed-t4-plan.md phase
+    // B1). The device is synchronized at each phase boundary, so the device
+    // time lands in the phase that issued it instead of in the next phase's
+    // first blocking copy. The CPU backend's `Synchronize` is a no-op.
+    const auto mark = [] { return std::chrono::steady_clock::now(); };
+    const auto since = [](const std::chrono::steady_clock::time_point& a,
+                          const std::chrono::steady_clock::time_point& b) {
+      return std::chrono::duration<double>(b - a).count();
+    };
+    double data_s = 0.0;
+    double forward_s = 0.0;
+    double backward_s = 0.0;
+    double sync_s = 0.0;
+    double optim_s = 0.0;
+
+    const auto optim_start = mark();
     optimizer_->ZeroGrad();
+    kernels::Synchronize();
+    optim_s += since(optim_start, mark());
+
     float loss_sum = 0.0f;
     for (int micro = 0; micro < accum; ++micro) {
+      const auto data_start = mark();
       if (!train_loader_->Next(tokens_.data(), targets_.data())) {
         train_loader_->Reset();
         if (!train_loader_->Next(tokens_.data(), targets_.data())) break;
       }
+      const auto data_end = mark();
+      data_s += since(data_start, data_end);
+
       loss_sum +=
           model_->ForwardLoss(tokens_.data(), targets_.data(), batch, seq);
+      kernels::Synchronize();
+      const auto forward_end = mark();
+      forward_s += since(data_end, forward_end);
+
       model_->BackwardAccumulate(backward_scale);
+      kernels::Synchronize();
+      const auto backward_end = mark();
+      backward_s += since(forward_end, backward_end);
     }
     // Sum the gradients across every rank before the step. The clip then sees
     // the global mean gradient. A world size of 1 is a no-op
     // (docs/distributed-design.md section 6).
-    if (sync_ != nullptr) {
-      for (const ParamView& parameter : model_->params()) {
-        if (parameter.grad == nullptr || parameter.count <= 0) continue;
-        sync_->AllReduceSum(parameter.grad, parameter.count);
-      }
-    }
+    const auto sync_start = mark();
+    AllReduceGradients();
+    const auto sync_end = mark();
+    sync_s += since(sync_start, sync_end);
+
     optimizer_->Step(step);
+    kernels::Synchronize();
+    const auto optim_end = mark();
+    optim_s += since(sync_end, optim_end);
+
     const float loss = loss_sum * inv_accum;
 
-    const auto finish = std::chrono::steady_clock::now();
-    const double elapsed =
-        std::chrono::duration<double>(finish - start).count();
+    // The training time excludes evaluation, so a periodic evaluation does not
+    // distort the reported throughput.
+    const double train_seconds =
+        data_s + forward_s + backward_s + sync_s + optim_s;
     const double tokens_per_second =
-        elapsed > 0.0 ? static_cast<double>(tokens_per_step) / elapsed : 0.0;
+        train_seconds > 0.0
+            ? static_cast<double>(tokens_per_step) / train_seconds
+            : 0.0;
 
     last_loss_ = loss;
     last_step_ = step;
+
+    // Evaluation runs before the step is logged, so its milliseconds ride in
+    // the same record. The model state is final for the step either way.
+    double eval_s = 0.0;
+    if (val_loader_ != nullptr && config_.eval_every > 0 &&
+        step % config_.eval_every == 0) {
+      const auto eval_start = mark();
+      const float bpb =
+          EvalBpb(model_.get(), val_loader_.get(), config_.eval_steps);
+      eval_s = since(eval_start, mark());
+      logger_->Info("step " + std::to_string(step) + " val bpb " +
+                    std::to_string(bpb));
+    }
 
     if (config_.log_every > 0 && step % config_.log_every == 0) {
       LogRecord record;
@@ -653,15 +792,14 @@ float TrainLoop::Run() {
       record.tokens_per_second = static_cast<float>(tokens_per_second);
       record.mfu = static_cast<float>(
           ComputeMfu(config_.model, tokens_per_second, peak_flops_));
+      record.step_ms = static_cast<float>(train_seconds * 1000.0);
+      record.data_ms = static_cast<float>(data_s * 1000.0);
+      record.forward_ms = static_cast<float>(forward_s * 1000.0);
+      record.backward_ms = static_cast<float>(backward_s * 1000.0);
+      record.sync_ms = static_cast<float>(sync_s * 1000.0);
+      record.optim_ms = static_cast<float>(optim_s * 1000.0);
+      record.eval_ms = static_cast<float>(eval_s * 1000.0);
       logger_->Log(record);
-    }
-
-    if (val_loader_ != nullptr && config_.eval_every > 0 &&
-        step % config_.eval_every == 0) {
-      const float bpb =
-          EvalBpb(model_.get(), val_loader_.get(), config_.eval_steps);
-      logger_->Info("step " + std::to_string(step) + " val bpb " +
-                    std::to_string(bpb));
     }
 
     if (config_.save_every > 0 && step % config_.save_every == 0) {

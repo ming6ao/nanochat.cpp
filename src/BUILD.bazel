@@ -59,6 +59,9 @@ cc_library(
         "//:backend_cuda": ["//backends/cuda:all_kernels"],
         "//:backend_cpu": ["//backends/cpu"],
     }) + [
+        # `train.cc` reads the device capability table for the precision-aware
+        # MFU peak (docs/precision.md, docs/distributed-t4-plan.md phase B1).
+        ":device_profile",
         # `eval.cc` decodes the generated rows through the tokenizer stream
         # decoder, so the workflow library links the host tokenizer.
         "//src/tokenizer:tokenizer",

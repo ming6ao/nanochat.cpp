@@ -67,10 +67,11 @@ card, because the backend has no `cudaSetDevice` call.
 | The CPU two-rank gates | Done |
 | The launch helper (`notebooks/parallel.py`) | Done |
 | The model-fit skill (`.agents/skills/model-fit/`) | Done |
-| The Kaggle notebook | Present, not yet run on two cards |
+| The Kaggle notebook | Run on two cards (smoke and best-fit) |
+| A phase timer in `TrainLoop` | Done (B1) |
+| Gradient bucketing | Done (C1) |
 | NCCL | Not started |
 | Recompute and the fused classifier | Proposed |
-| A phase timer in `TrainLoop` | Not started |
 
 A correct two-card run is possible today. The run is slow, because the host
 reference moves each gradient over loopback TCP.
@@ -165,6 +166,35 @@ The `SSSL` window gives three of every four layers a quarter-length window. It
 cuts the attention arithmetic at long sequences. Use `L` for full context and
 the exact Track 3 recipe.
 
+### 3.5 The measured run
+
+The 500-step best fit on two T4 cards, one process per card, with the host
+reference sync. The run used `--grad-accum 8` instead of 64, so the global batch
+is 65536 tokens instead of the reference 524288; the architecture, the preset,
+and the sequence are unchanged. A larger accumulation only amortizes the fixed
+sync and optimizer cost further, so the per-step throughput barely moves.
+
+| Property | Value |
+|---|---|
+| Steps | 500 |
+| Exit status | 0 on both ranks |
+| First loss | 10.40 (ln 32768) |
+| Final loss | 3.59 (rank 0), 3.75 (rank 1) |
+| Minimum loss | 3.54 |
+| Validation bpb | 1.88 at step 50, 1.13 at step 450 |
+| Throughput | 1214 tokens/s per rank, 2427 global |
+| MFU | 0.249 (fp32 peak, 8.1 TFLOP/s) |
+| Phase split | forward 26.4%, backward 63.2%, sync 4.4%, optimizer 5.9%, data 0.1% |
+| Checkpoints | byte-identical on the two ranks |
+
+The throughput is about 48 percent of the section 3.3 estimate (5.1k global).
+The estimate assumes 80 percent GEMM efficiency and 25 percent attention
+efficiency. A forward-only measurement at the same shape reaches 5411 tokens/s
+per rank (3.0 TFLOP/s), so the gap is the fp32 GEMM and attention efficiency,
+not the reduction. The sync is below the 0.1 target at every step. The
+backward dominates the step, which is why phase D1 (recompute) and D2 (the
+attention tile) carry the next throughput gain.
+
 ## 4. The notebook
 
 `notebooks/nanochat-cpp-on-2x-t4.ipynb` is the target. It runs these steps:
@@ -205,20 +235,20 @@ Each milestone delivers a result. Each phase has a gate.
 |---|---|---|---|---|
 | A0 | Stage a device gradient through host memory | `src/distributed.*`, `src/train.cc`, `src/distributed_test.cc` | `//src:distributed_test` | Done |
 | A1 | The launch helper and the model-fit skill | `notebooks/parallel.py`, `.agents/skills/model-fit/` | `//notebooks:all` and the skill test | Done |
-| A2 | A short two-card run on Kaggle | the notebook | The smoke run exits 0 and the checkpoints match | Open |
+| A2 | A short two-card run on Kaggle | the notebook | The smoke run exits 0 and the checkpoints match | Done |
 
 ### Milestone B — the best-fit run
 
 | Phase | Work | Files | Gate | Status |
 |---|---|---|---|---|
-| B1 | A phase timer and the baselines | `src/train.cc` | The two-card phase split | Open |
-| B2 | The best fit on two cards | the notebook | The run completes at the target tokens/s | Open |
+| B1 | A phase timer and the baselines | `src/train.cc` | The two-card phase split | Done |
+| B2 | The best fit on two cards | the notebook | The run completes at the target tokens/s | Done |
 
 ### Milestone C — throughput
 
 | Phase | Work | Files | Gate | Status |
 |---|---|---|---|---|
-| C1 | Bucket the gradients | `src/train.cc`, `src/model.cc` | The round trips drop | Open |
+| C1 | Bucket the gradients | `src/train.cc`, `src/model.cc` | The round trips drop | Done |
 | C2 | Overlap the sync with the backward | `src/model.cc`, `src/train.cc` | The sync fraction is below 0.1 | Open |
 | C3 | NCCL | `backends/cuda/nccl_sync.cu`, BUILD | `//backends/cuda:nccl_sync_test` | Open |
 | C4 | The data path | `src/data.cc`, the notebook | The data phase is below five percent | Open |
