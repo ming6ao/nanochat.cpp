@@ -5,7 +5,8 @@ is the best only.
 
 This document specifies a productive experiment loop for a full-stack
 researcher on a Kaggle notebook. The notebook stays the front end. The run
-logic leaves the cells.
+logic leaves the cells. The content notebook runs one trial and evaluates it.
+The ablation sweep is an optional facility of the runner.
 
 ## 1. Problem
 
@@ -18,8 +19,8 @@ Three problems follow.
 
 ## 2. Goal
 
-One stable notebook. One trial list. One run function. One run directory per
-trial. One results table.
+One stable notebook. One run function. One run directory per trial. One
+results table. An optional trial list drives an ablation sweep.
 
 ## 3. Design
 
@@ -202,17 +203,18 @@ process is not brokered. Document the constraint before the feature.
 The content notebook keeps these sections.
 
 1. Setup: the loader cell, then `kaggle_setup.setup()`.
-2. Shared prefix: the data and the tokenizer.
+2. Data and tokenizer: the shared prefix.
 3. Demo trial: `run_trial(Trial("demo"), prefix, RUNS, keep_model=True,
    progress=ProgressReporter())`.
-4. Metrics plot: from `result.metrics` and `result.model.device`.
-5. Fine-tune: from `result.model`, `result.plan`, and `prefix.tokenizer`.
-6. Trial list: a Python list of `Trial` objects for the sweep.
-7. Sweep: `run_sweep(TRIALS, prefix, RUNS, progress=ProgressReporter())`.
-8. Results: the pandas table.
+4. Pretraining metrics: the loss, the throughput, and the MFU from
+   `result.metrics`.
+5. Base evaluation: bits per byte on the real ClimbMix train and validation
+   splits, and the reference sample prompts.
+6. Fine-tune: from `result.model`, `result.plan`, and `prefix.tokenizer`.
+7. Chat evaluation: `nanochat_cpp.chat.ChatEvaluator` on the real chat tasks.
 
-The demo path and the sweep path call the same function. Only item 6
-changes per experiment.
+The demo path and the evaluation path use the same model. The sweep is
+optional. Add a trial list and call `run_sweep` for an ablation study.
 
 ## 5. Files
 
@@ -250,11 +252,12 @@ rule. See `AGENTS.md`, section 5.
 ## 7. Definition of Done
 
 1. `tools/nanochat test` covers the pure helpers.
-2. A three-trial sweep runs from the notebook, end to end.
-3. The results table loads from `summary.json` and `error.json`.
-4. A second run skips a finished trial.
-5. A changed hyperparameter with the same name raises a clear error.
-6. The style checker passes on the new document.
+2. The base and chat evaluations run in the notebook, end to end.
+3. A three-trial sweep runs through `run_sweep`.
+4. The results table loads from `summary.json` and `error.json`.
+5. A second run skips a finished trial.
+6. A changed hyperparameter with the same name raises a clear error.
+7. The style checker passes on the document.
 
 ## 8. Risks and open questions
 
