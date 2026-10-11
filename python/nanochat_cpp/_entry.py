@@ -36,6 +36,7 @@ COMMANDS = (
     Command("shutdown", "stop this workspace's Bazel server now"),
     Command("prune", "reap orphaned Bazel output bases"),
     Command("run", "run a command under a sandbox profile"),
+    Command("dist", "one process per rank, one broker lock for the group"),
     Command("train", "alias for: run train -- <cmd...>", alias=True),
     Command("rl", "alias for: train -- <rl_worker...>", alias=True),
     Command("eval", "alias for: run eval -- <cmd...>", alias=True),

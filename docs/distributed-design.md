@@ -297,8 +297,10 @@ memory. The best fit for the two T4 cards is `L16 C1024 H8 KV4 T4096 b1`: about
 252M parameters, about 9.1 GiB of card memory, and an estimated 5.1k tokens/s
 global.
 
-The measured 500-step run on two T4 cards used the host reference sync and
-`--grad-accum 8`. The global batch was 65536 tokens, not the reference 524288.
+The measured 500-step run on two T4 cards uses the native ring collective
+(`--config=native`), the windowed attention backward, and pinned host staging.
+It runs `--grad-accum 8`. The global batch is 65536 tokens, not the reference
+524288.
 
 | Property | Value |
 |---|---|
@@ -306,14 +308,23 @@ The measured 500-step run on two T4 cards used the host reference sync and
 | First loss | 10.40 |
 | Final loss | 3.59 (rank 0), 3.75 (rank 1) |
 | Validation bpb | 1.88 at step 50, 1.13 at step 450 |
-| Throughput | 1214 tokens/s per rank, 2427 global |
-| MFU | 0.249 (fp32 peak, 8.1 TFLOP/s) |
-| Phase split | forward 26.4%, backward 63.2%, sync 4.4%, optimizer 5.9%, data 0.1% |
+| Throughput | about 1470 tokens/s per rank, about 2940 global |
+| MFU | 0.30 steady state (fp32 peak, 8.1 TFLOP/s) |
+| Phase split | forward 30.5%, backward 59.6%, sync 3.0%, optimizer 6.7%, data 0.1% |
 | Checkpoints | byte-identical on the two ranks |
 
-The backward dominates the step. The sync is below the 0.1 target. Phase D1
-(recompute) and D2 (the attention tile) carry the next throughput gain; see
-[distributed-plan.md](distributed-plan.md).
+The backward still dominates the step. Two changes raise the MFU above the
+30% target. The windowed attention backward
+(`backends/cuda/kernels/attention.cu`) runs the banded query-block schedule, so
+the `SSSL` sliding-window layers no longer pay for a dense `seq x seq` backward;
+that cut the backward by about a quarter. The host-staged ring uses pinned host
+memory, which cut the sync from about 2.5 s to about 0.7 s per step. The 70 W
+T4 power cap holds the sustained SM clock near 900 MHz, so the achievable MFU
+stays below the boost-clock peak.
+
+The remaining headroom is the overlap of the reduction with the backward
+([distributed-plan.md](distributed-plan.md) phase 2) and a fused windowed
+attention forward on the backward path.
 
 ## 11. Determinism and resume
 

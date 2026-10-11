@@ -5,7 +5,11 @@ replaces NCCL on the CUDA path. [distributed-design.md](distributed-design.md)
 holds the current seam design. [distributed-plan.md](distributed-plan.md) holds
 the NCCL plan that this document supersedes on the CUDA path.
 
-Status: plan. The project implements no phase yet.
+Status: delivered through phase 2 on the local T4 host. The ring schedule, the
+host-staged transport, the transfer-window pool, and `NativeGradientSync` are
+in `backends/cuda/collective/`. The 2x T4 pair has no peer access, so the ring
+stages through pinned host memory; the NVLink and RDMA transports await the
+H100 node. Phases 3 to 6 remain.
 
 ## 1. Goal and scope
 

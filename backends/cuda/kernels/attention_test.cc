@@ -131,6 +131,12 @@ int main() {
   window.window_left = 3;
   RunCase(window, "sliding-window");
 
+  // Grouped-query attention with a sliding window exercises the banded GQA
+  // backward (the shared key/value gradient accumulation).
+  AttentionParams gqa_window = gqa;
+  gqa_window.window_left = 3;
+  RunCase(gqa_window, "gqa-sliding-window");
+
   AttentionParams noncausal = base;
   noncausal.causal = false;
   noncausal.window_right = -1;

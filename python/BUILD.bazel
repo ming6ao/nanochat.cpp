@@ -122,6 +122,16 @@ py_test(
     size = "small",
 )
 
+# T0: the distributed launch plan, the launcher JSON summary, and the log
+# parser. Hermetic: a fake `tools/nanochat`, so it needs no library, no Bazel,
+# and no GPU. See docs/distributed-launch.md section 6.
+py_test(
+    name = "distributed_test",
+    srcs = ["tests/distributed_test.py"],
+    deps = [":nanochat_cpp"],
+    size = "small",
+)
+
 # T0: the RL bridge renders prompts, speaks the worker pipe protocol, and
 # reports the loss. Hermetic: a fake worker, tokenizer, task, and shell tool,
 # so it needs no library, no Bazel, and no GPU.
@@ -194,6 +204,7 @@ test_suite(
         ":chat_test",
         ":sft_data_test",
         ":toolchain_test",
+        ":distributed_test",
         ":rl_test",
     ],
 )

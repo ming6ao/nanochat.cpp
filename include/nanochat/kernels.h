@@ -102,6 +102,12 @@ struct AttentionParams {
   // `1 / sqrt(head_dim)`.
   int kv_len = 0;  // 0 => seq (self-attention)
   float scale = 0.0f;
+  // Additive field (API freeze): the row stride of the saved softmax
+  // statistics when the backward processes a query sub-block. 0 means the
+  // statistics are contiguous with `seq` rows per head. The windowed backward
+  // passes the full sequence length so the block kernel can index the shared
+  // statistics buffer at its query offset (docs/attention.md Part 2).
+  int stats_row_stride = 0;
 };
 
 // Logit softcap + cross-entropy + unpadded-vocab slice (docs/kernels.md and

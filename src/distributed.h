@@ -52,6 +52,12 @@ class GradientSync {
     AllReduceSum(buffer, count);
   }
 
+  // True when `AllReduceSumAsync` may still be running when it returns, so the
+  // harness must keep several gradient buckets in flight at once. The default
+  // is false: a synchronous backend finishes inside the call and needs only
+  // one reusable bucket (docs/distributed-design.md section 6).
+  virtual bool IsAsynchronous() const { return false; }
+
   // Blocks until every asynchronous reduction issued so far has completed.
   virtual void Wait() {}
 };

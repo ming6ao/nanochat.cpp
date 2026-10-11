@@ -2,8 +2,9 @@
 
 Attention is the largest CUDA kernel family. This document records the shipped
 baseline, the Pascal feasibility study, the fused windowed-forward promotion,
-and the measured results. Full-causal attention and every backward stay on
-cuBLAS. The fused windowed forward lives in
+the banded windowed backward, and the measured results. Full-causal attention
+stays on cuBLAS; the sliding-window backward runs the banded query-block
+schedule described in Part 2, section 5.4. The fused windowed forward lives in
 `backends/cuda/kernels/attention.cu` behind `UseFusedAttention`.
 
 Read [performance.md](performance.md) for the measurement protocol and
@@ -129,10 +130,14 @@ implemented in `nanochat.cpp` for the Pascal host?** **Would it be faster than
 the current attention path?** It records the investigation, the measured
 baseline, the feasibility judgment, and a staged plan with go/no-go gates.
 
-Status: delivered for the windowed forward. The fused windowed forward runs in
-`backends/cuda/kernels/attention.cu` behind `UseFusedAttention`. Full-causal
-attention and every backward stay on cuBLAS. The project removed the Phase 1
-prototype after promotion.
+Status: delivered for the windowed forward and the banded windowed backward.
+The fused windowed forward runs in `backends/cuda/kernels/attention.cu` behind
+`UseFusedAttention`. The sliding-window backward runs
+`AttentionBackwardWindowed` (multi-head) or `AttentionBackwardWindowedGqa`
+(grouped-query), dispatched by `UseWindowedBackward`, so the `SSSL` model never
+materializes the dense `seq x seq` backward. Full-causal attention and the
+non-windowed backward stay on cuBLAS. The project removed the Phase 1 prototype
+after promotion.
 
 Related: [performance.md](performance.md) (measurement protocol, the attention
 benchmark), [kernels.md](kernels.md) (the `Attention` family), [DESIGN.md](../DESIGN.md)

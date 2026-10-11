@@ -132,6 +132,9 @@ class NcclGradientSync final : public GradientSync {
                             "wait for the reduction");
   }
 
+  // NCCL runs on a side stream, so the harness double-buffers the buckets.
+  bool IsAsynchronous() const override { return true; }
+
  private:
   int rank_ = 0;
   int world_size_ = 1;

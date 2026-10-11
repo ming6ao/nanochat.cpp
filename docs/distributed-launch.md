@@ -1,6 +1,10 @@
 # Distributed launch
 
-Status: design. The launch moves from `notebooks/parallel.py` to host tooling.
+Status: delivered. `tools/nanochat dist` starts the rank group,
+`python/nanochat_cpp/distributed.py` wraps it, and
+`notebooks/nanochat-cpp-on-2x-t4.ipynb` uses it. `notebooks/parallel.py`
+remains for the older helper. The launch is the authority for the group
+contract.
 This document is the authority for the launch.
 [distributed-design.md](distributed-design.md) section 10 holds a summary.
 
