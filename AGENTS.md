@@ -31,6 +31,7 @@ happen through the integrator.
 | **Oracle** | `tools/dump_*.py`, `tests/`, `tests/data/*.bin` | frozen `tensor.h` |
 | **Kernel agents** (one per family) | `backends/cuda/kernels/<family>.cu` + `<family>_test.cc` + `<family>_benchmark.cc` in the same directory | frozen `kernels.h` |
 | **Kernel agents** (shared) | `backends/cuda/kernels/testing/**` (host test scaffolding), `dev/kernels/**` (unpromoted prototypes) | — |
+| **Collective** | `backends/cuda/collective/**`, `dev/collective/**` | frozen `kernels.h`, `src/rendezvous.h` |
 | **Workflow** | `src/ops.cc`, `src/model.cc`, `src/generate.cc` | `kernels.h`, CPU backend |
 | **Optimizer** | `src/optim.cc` | `kernels.h` |
 | **Harness** | `src/train.cc`, `src/data.cc`, `src/eval.cc`, `src/*_main.cc`, `src/device_profile.cc`, `include/nanochat/{data,scheduler,logger,mfu}.h` | Model API |

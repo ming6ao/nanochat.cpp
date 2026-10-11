@@ -1,0 +1,159 @@
+# backends/cuda/collective/ -- the native collective backend
+# (docs/distributed-native-plan.md). The private transport interface, the ring
+# schedule, the memory transport, and the CUDA NVLink/RDMA transports. The
+# schedule tests are CPU only and need no broker.
+
+load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
+load(
+    "//:nanochat.bzl",
+    "cuda_library",
+    "cuda_test",
+    "nanochat_copts",
+    "nanochat_cuda_copts",
+    "precision_defines",
+)
+
+package(default_visibility = ["//visibility:public"])
+
+# The backend-private transport interface (section 3). Vendor-free so the CPU
+# schedule test can include it.
+cc_library(
+    name = "transport",
+    hdrs = ["transport.h"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    deps = [
+        "//include/nanochat:nanochat",
+        "//src:distributed_seam",
+        "//src:rendezvous",
+    ],
+)
+
+# The ring reduce-scatter + all-gather schedule (section 5). Pure host logic.
+cc_library(
+    name = "ring_schedule",
+    srcs = ["ring_schedule.cc"],
+    hdrs = ["ring_schedule.h"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    deps = [
+        ":transport",
+        "//include/nanochat:nanochat",
+    ],
+)
+
+# The in-process memory transport (section 3), used by the CPU schedule test.
+cc_library(
+    name = "memory_transport",
+    srcs = ["memory_transport.cc"],
+    hdrs = ["memory_transport.h"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    deps = [":transport"],
+)
+
+# The host-staged pairwise transport (sections 3.2 and 5.4). It is the third
+# selection choice and the fallback on a host without NVLink peer access.
+cc_library(
+    name = "host_transport",
+    srcs = ["host_transport.cc"],
+    hdrs = ["host_transport.h"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    deps = [
+        ":transport",
+        "//include/nanochat:nanochat",
+        "//src:rendezvous",
+    ],
+)
+
+# The native `CreateGradientSync` adapter (sections 5.4-5.6). `//src:model`
+# selects it for `//:backend_cuda` when `collective=native`.
+cuda_library(
+    name = "native_sync",
+    srcs = select({
+        "//:backend_cuda": ["native_sync.cu"],
+        "//conditions:default": [],
+    }),
+    copts = nanochat_cuda_copts(),
+    defines = precision_defines(),
+    alwayslink = True,
+    deps = select({
+        "//:backend_cuda": [
+            ":host_transport",
+            ":ring_schedule",
+            ":transport",
+            "//backends/cuda:device",
+            "//include/nanochat:nanochat",
+            "//src:distributed_seam",
+            "//src:rendezvous",
+        ],
+        "//conditions:default": [],
+    }),
+)
+
+# The host transport and the ring schedule are also exercised by the CPU
+# schedule test; the adapter itself is GPU only.
+
+# T0: the ring at world sizes 1, 2, 4, and 8; the schedule trace; the
+# missing-peer timeout.
+cc_test(
+    name = "schedule_test",
+    srcs = ["schedule_test.cc"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    deps = [
+        ":memory_transport",
+        ":ring_schedule",
+        ":transport",
+        "//include/nanochat:nanochat",
+    ],
+    size = "small",
+)
+
+# T0: the per-neighbor selection, including a mixed group.
+cc_test(
+    name = "transport_select_test",
+    srcs = ["transport_select_test.cc"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    deps = [
+        ":ring_schedule",
+        ":transport",
+        "//include/nanochat:nanochat",
+    ],
+    size = "small",
+)
+
+# T1 GPU: a two-rank sum on two cards. `manual` keeps it out of the default
+# CPU loop; `gpu` makes `tools/nanochat test --gpu` select it. It is built only
+# under the CUDA backend.
+cc_test(
+    name = "nvlink_test",
+    srcs = select({
+        "//:backend_cuda": ["nvlink_test.cc"],
+        "//conditions:default": [],
+    }),
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    tags = [
+        "gpu",
+        "manual",
+    ],
+    deps = select({
+        "//:backend_cuda": [
+            ":native_sync",
+            "//backends/cuda:device",
+            "//include/nanochat:nanochat",
+            "//src:distributed_seam",
+        ],
+        "//conditions:default": [],
+    }),
+    size = "small",
+)
+
+# Aggregation point consumed by //:all_tests.
+test_suite(name = "all", tests = [
+    ":schedule_test",
+    ":transport_select_test",
+])

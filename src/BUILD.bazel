@@ -32,6 +32,21 @@ cc_library(
     deps = ["//include/nanochat:nanochat"],
 )
 
+# The vendor-free control plane shared by every gradient-sync backend
+# (docs/distributed-native-plan.md section 4). POSIX sockets only; no vendor
+# header, so the `src` layer stays vendor-free (DESIGN.md section 2.1).
+cc_library(
+    name = "rendezvous",
+    srcs = ["rendezvous.cc"],
+    hdrs = ["rendezvous.h"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    deps = [
+        ":distributed_seam",
+        "//include/nanochat:nanochat",
+    ],
+)
+
 # The host reference for the gradient-sync seam
 # (docs/distributed-design.md section 5). It defines `CreateGradientSync` for
 # the CPU backend. A CUDA build gets that symbol from
@@ -45,6 +60,7 @@ cc_library(
     defines = precision_defines(),
     deps = [
         ":distributed_seam",
+        ":rendezvous",
         "//include/nanochat:nanochat",
     ],
 )
@@ -87,7 +103,7 @@ cc_library(
     deps = select({
         "//:backend_cuda": [
             "//backends/cuda:all_kernels",
-            "//backends/cuda:nccl_sync",
+            "//backends/cuda:gradient_sync",
         ],
         "//:backend_cpu": [
             "//backends/cpu",

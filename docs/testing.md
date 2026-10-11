@@ -61,6 +61,17 @@ The collective mock rendezvouses through POSIX shared memory and bounds its
 wait (`NANOCHAT_SIM_TIMEOUT_MS`), so a rank that never issues the all-reduce is
 reported as a timeout instead of hanging the suite.
 
+The native collective (`backends/cuda/collective/`, selected with
+`--config=native`) adds two CPU-only tests to the default T0 loop and one T1
+GPU test: `//backends/cuda/collective:schedule_test` runs the ring at world
+sizes 1, 2, 4, and 8 over the in-process memory transport and judges the
+schedule trace; `//backends/cuda/collective:transport_select_test` checks the
+per-neighbor selection including a mixed group; and
+`//backends/cuda/collective:nvlink_test` (tags `gpu`, `manual`) reduces across
+two cards. On a host without NVLink peer access the T1 test exercises the
+host-staged fallback. See
+[distributed-native-plan.md](distributed-native-plan.md) section 13.
+
 The suite targets carry the `sim` tag. They are CPU-only and fast, so they stay
 in the default `tools/nanochat test` loop; the tag exists so a merge gate can
 select or exclude them by name. Two exceptions carry `manual`.

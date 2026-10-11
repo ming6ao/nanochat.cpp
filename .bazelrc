@@ -55,6 +55,14 @@ build:cuda --define=backend=cuda
 build:cpu --define=backend=cpu
 build:cpu --define=precision=fp32
 
+# --- Collective -------------------------------------------------------------
+# The native ring collective (docs/distributed-native-plan.md section 7).
+# `collective=nccl` is the default; `--config=native` selects the native
+# backend. It is additive with `--config=cuda`.
+build --define=collective=nccl
+build:native --define=collective=native
+build:native --define=backend=cuda
+
 # --- Simulator ---------------------------------------------------------------
 #
 # The S0 tier (docs/simulator.md sections 4.1 and 10). `sim` selects the
