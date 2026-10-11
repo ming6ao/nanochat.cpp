@@ -31,6 +31,7 @@ __all__ = [
     "check",
     "commands",
     "dispatch",
+    "dist",
     "doctor",
     "eval",
     "gpu",
@@ -183,6 +184,29 @@ class Toolchain:
             argv: Sequence[str] | None = None) -> CommandResult:
         return self._run(["run", str(profile), "--", *(argv or [])])
 
+    def dist(self, argv: Sequence[str], *, nproc_per_node: int = 2,
+             device: str | None = None, master: str = "127.0.0.1",
+             port: int = 29500, profile: str = "train",
+             log_dir: str | os.PathLike | None = None,
+             json: bool = False) -> CommandResult:
+        """Launch one process per rank through ``tools/nanochat dist``.
+
+        The rank values travel in the ``NANOCHAT_*`` environment, so ``argv``
+        is the same for every rank; a ``{rank}`` token in an argument expands
+        to the rank index. See ``docs/distributed-launch.md``.
+        """
+        arguments = ["dist", "--nproc-per-node", str(nproc_per_node)]
+        if device is not None:
+            arguments += ["--device", str(device)]
+        arguments += ["--profile", str(profile), "--master", str(master),
+                      "--port", str(port)]
+        if log_dir is not None:
+            arguments += ["--log-dir", str(log_dir)]
+        if json:
+            arguments.append("--json")
+        arguments += ["--", *(str(value) for value in argv)]
+        return self._run(arguments)
+
     def train(self, argv: Sequence[str] | None = None) -> CommandResult:
         return self._run(["train", "--", *(argv or [])])
 
@@ -320,6 +344,16 @@ def prune(*, apply: bool = False,
 
 def run(profile: str, argv: Sequence[str] | None = None) -> CommandResult:
     return _toolchain().run(profile, argv)
+
+
+def dist(argv: Sequence[str], *, nproc_per_node: int = 2,
+         device: str | None = None, master: str = "127.0.0.1",
+         port: int = 29500, profile: str = "train",
+         log_dir: str | os.PathLike | None = None,
+         json: bool = False) -> CommandResult:
+    return _toolchain().dist(argv, nproc_per_node=nproc_per_node,
+                             device=device, master=master, port=port,
+                             profile=profile, log_dir=log_dir, json=json)
 
 
 def train(argv: Sequence[str] | None = None) -> CommandResult:

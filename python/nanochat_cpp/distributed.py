@@ -1,28 +1,31 @@
 """Two-card data-parallel launch for the Kaggle notebook.
 
-One :class:`ParallelPlan` holds the run. :func:`command_for` builds the
-``train_main`` argument list for one rank. :func:`launch` starts one process per
-card, waits, and returns one :class:`RankResult` per rank.
+One :class:`DistributedPlan` holds the run. :func:`command_for` builds the
+``train_main`` argument list for one rank. :func:`launch` calls
+``tools/nanochat dist``, which starts one process per card under one broker
+lock, waits, and returns one :class:`RankResult` per rank.
 
-The gradient sync is the host reference in ``src/distributed.cc``. It sends
-each gradient over loopback TCP, so it needs no NCCL. The CUDA backend stages
-each gradient through host memory. See ``docs/distributed-design.md``.
+The gradient sync is the native collective
+(``backends/cuda/collective/native_sync.cu``, selected with
+``--config=native``). See ``docs/distributed-native-plan.md`` and
+``docs/distributed-launch.md``.
 """
 
 from __future__ import annotations
 
 import dataclasses
+import json
 import os
 import re
-import subprocess
-import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import toolchain
+
 __all__ = [
-    "ParallelError",
-    "ParallelPlan",
-    "ParallelResult",
+    "DistributedError",
+    "DistributedPlan",
+    "DistributedResult",
     "RankResult",
     "assert_complete",
     "command_for",
@@ -48,27 +51,17 @@ _LOG_LINE = re.compile(
     r"opt_ms\s+(?P<optim_ms>\S+)\s*\|\s*"
     r"eval_ms\s+(?P<eval_ms>\S+))?")
 
-#: The extra ``train_main`` flags a small smoke run needs before ``--preset``
-#: is absent. The vocab must match the tokenizer.
-SMOKE_FLAGS = (
-    "--layers", "4", "--heads", "4", "--kv-heads", "4",
-    "--hidden", "256", "--seq", "512",
-    "--vocab", "32768", "--padded-vocab", "32768",
-    "--window-pattern", "L",
-)
 
-
-class ParallelError(RuntimeError):
+class DistributedError(RuntimeError):
     """A rank failed, or the two ranks disagree."""
 
 
 @dataclass(frozen=True)
-class ParallelPlan:
+class DistributedPlan:
     """The inputs of one two-card run.
 
-    ``batch`` is the number of sequences in one micro-batch, so one forward
-    pass sees ``batch`` sequences. One rank consumes ``batch * grad_accum``
-    sequences per step. The global batch is
+    ``batch`` is the number of sequences in one micro-batch. One rank consumes
+    ``batch * grad_accum`` sequences per step. The global batch is
     ``batch * grad_accum * world_size * seq_len`` tokens. ``flags`` carries
     extra ``train_main`` flags and comes last, so it can override a preset
     field.
@@ -93,7 +86,9 @@ class ParallelPlan:
     world_size: int = 2
     master: str = "127.0.0.1"
     port: int = 29500
+    device: str | None = None
     device_name: str = "t4"
+    profile: str = "train"
 
     def log_path(self, rank: int) -> Path:
         """The structured log file of ``rank``."""
@@ -121,10 +116,11 @@ class RankResult:
     log_path: Path
     stdio_path: Path
     metrics: list[dict] = field(default_factory=list)
+    seconds: float = 0.0
 
 
 @dataclass
-class ParallelResult:
+class DistributedResult:
     """The outcome of one two-card run."""
 
     out_dir: Path
@@ -141,7 +137,7 @@ class ParallelResult:
         return all(code == 0 for code in self.returncodes)
 
 
-def command_for(rank: int, plan: ParallelPlan) -> list[str]:
+def command_for(rank: int, plan: DistributedPlan) -> list[str]:
     """The full argument list that runs ``rank`` of ``plan``.
 
     The list starts with the ``tools/nanochat`` entry point, so the executable
@@ -181,6 +177,35 @@ def command_for(rank: int, plan: ParallelPlan) -> list[str]:
     return argv
 
 
+def _shared_argv(plan: DistributedPlan) -> list[str]:
+    """The ``train_main`` argument list, with ``{rank}`` in the per-rank paths.
+
+    ``tools/nanochat dist`` expands ``{rank}`` per process, so one command
+    serves every rank. The rank values themselves travel in the ``NANOCHAT_*``
+    environment.
+    """
+    argv = [plan.binary,
+            "--train-parquet", str(plan.train_parquet),
+            "--tokenizer", str(plan.tokenizer)]
+    if plan.val_parquet:
+        argv += ["--val-parquet", str(plan.val_parquet)]
+    if plan.preset:
+        argv += ["--preset", plan.preset]
+    argv += ["--batch", str(plan.batch),
+             "--grad-accum", str(plan.grad_accum),
+             "--num-iterations", str(plan.num_iterations),
+             "--log-every", str(plan.log_every),
+             "--eval-every", str(plan.eval_every),
+             "--eval-steps", str(plan.eval_steps),
+             "--save-every", str(plan.save_every),
+             "--seed", str(plan.seed),
+             "--device", plan.device_name,
+             "--log", str(Path(plan.out_dir) / "rank{rank}.log"),
+             "--checkpoint", str(Path(plan.out_dir) / "rank{rank}.nchkpt01")]
+    argv += list(plan.flags)
+    return argv
+
+
 def parse_log(path: str | Path) -> list[dict]:
     """Read the structured log file into one dict per logged step.
 
@@ -204,7 +229,6 @@ def parse_log(path: str | Path) -> list[dict]:
                 "tokens_per_sec": float(match.group("tokens_per_sec")),
                 "mfu": float(match.group("mfu")) / 100.0,
             }
-            # The phase split is optional: an older log line has none.
             for name in ("step_ms", "data_ms", "forward_ms", "backward_ms",
                          "sync_ms", "optim_ms", "eval_ms"):
                 value = match.group(name)
@@ -212,73 +236,70 @@ def parse_log(path: str | Path) -> list[dict]:
                     row[name] = float(value)
             rows.append(row)
         except ValueError:
-            # A field that is not a number, for example a corrupted line.
             continue
     return rows
 
 
-def _wait(processes: list[subprocess.Popen], timeout: float | None,
-          poll_seconds: float) -> None:
-    """Wait for every process, or kill them after ``timeout`` seconds."""
-    start = time.monotonic()
-    while True:
-        if all(process.poll() is not None for process in processes):
-            return
-        if timeout is not None and time.monotonic() - start > timeout:
-            for process in processes:
-                if process.poll() is None:
-                    process.kill()
-            for process in processes:
-                process.wait()
-            return
-        time.sleep(poll_seconds)
+def launch(plan: DistributedPlan, root: str | Path = ".",
+           extra_env: dict | None = None,
+           timeout: float | None = None) -> DistributedResult:
+    """Start one process per card through ``tools/nanochat dist``.
 
-
-def launch(plan: ParallelPlan, root: str | Path = ".",
-           extra_env: dict | None = None, poll_seconds: float = 1.0,
-           timeout: float | None = None) -> ParallelResult:
-    """Start one process per card, wait, and collect the outcome.
-
-    Rank 0 binds the port. Rank 1 connects. Start rank 0 first, so the bind
-    wins the race; the client retries for about five seconds in any case.
-    ``extra_env`` overrides the child environment. ``CUDA_VISIBLE_DEVICES`` is
-    set to the rank, so each process sees one card as device 0.
+    The shell launcher holds one broker lock for the group, sets the
+    ``NANOCHAT_*`` rank variables, and expands ``{rank}`` in the command. It
+    returns the parsed JSON summary. ``timeout`` bounds the whole group.
     """
     out_dir = Path(plan.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+    entry = plan.entry
+    env = dict(os.environ)
+    env.update(extra_env or {})
+    tool = toolchain.Toolchain(entry=entry, repo_root=root, env=env,
+                               timeout=timeout)
+    result = tool.dist(_shared_argv(plan), nproc_per_node=plan.world_size,
+                       device=plan.device, master=plan.master, port=plan.port,
+                       profile=plan.profile, log_dir=out_dir, json=True)
+    ranks = _parse_summary(result.stdout, plan)
+    return DistributedResult(out_dir=out_dir, ranks=tuple(ranks))
 
-    processes: list[subprocess.Popen] = []
-    streams = []
-    for rank in range(plan.world_size):
-        env = os.environ.copy()
-        env.update(extra_env or {})
-        env["CUDA_VISIBLE_DEVICES"] = str(rank)
-        stream = open(plan.stdio_path(rank), "w", encoding="utf-8")
-        streams.append(stream)
-        processes.append(subprocess.Popen(
-            command_for(rank, plan), cwd=str(root), env=env,
-            stdout=stream, stderr=subprocess.STDOUT))
 
-    try:
-        _wait(processes, timeout, poll_seconds)
-    finally:
-        for stream in streams:
-            stream.close()
+def _parse_summary(stdout: str, plan: DistributedPlan) -> list[RankResult]:
+    """Turn the launcher's JSON summary into one :class:`RankResult` per rank.
 
+    A launcher that printed no JSON (an older shell tool) falls back to the
+    known per-rank paths, so the notebook still shows the loss curves.
+    """
+    payload = None
+    for line in reversed(stdout.splitlines()):
+        stripped = line.strip()
+        if stripped.startswith("{"):
+            try:
+                payload = json.loads(stripped)
+            except ValueError:
+                payload = None
+            if payload is not None:
+                break
+    by_rank: dict[int, dict] = {}
+    if isinstance(payload, dict):
+        for entry in payload.get("ranks", []):
+            if isinstance(entry, dict) and "rank" in entry:
+                by_rank[int(entry["rank"])] = entry
     ranks = []
-    for rank, process in enumerate(processes):
+    for rank in range(plan.world_size):
+        entry = by_rank.get(rank, {})
+        stdio = Path(entry.get("stdio", plan.stdio_path(rank)))
         ranks.append(RankResult(
             rank=rank,
-            returncode=process.returncode if process.returncode is not None
-            else -1,
+            returncode=int(entry.get("returncode", 0)),
             log_path=plan.log_path(rank),
-            stdio_path=plan.stdio_path(rank),
-            metrics=parse_log(plan.log_path(rank))))
-    return ParallelResult(out_dir=out_dir, ranks=tuple(ranks))
+            stdio_path=stdio,
+            metrics=parse_log(plan.log_path(rank)),
+            seconds=float(entry.get("seconds", 0.0) or 0.0)))
+    return ranks
 
 
-def assert_complete(result: ParallelResult) -> None:
-    """Raise :class:`ParallelError` when a rank failed or logged nothing.
+def assert_complete(result: DistributedResult) -> None:
+    """Raise :class:`DistributedError` when a rank failed or logged nothing.
 
     The message carries the last lines of the failing rank, so the notebook
     cell shows the cause without a second lookup.
@@ -295,10 +316,10 @@ def assert_complete(result: ParallelResult) -> None:
                 encoding="utf-8", errors="replace").splitlines()
             tail = "\n".join(lines[-15:])
         details.append(f"rank {rank.rank} exited {rank.returncode}:\n{tail}")
-    raise ParallelError("\n".join(details))
+    raise DistributedError("\n".join(details))
 
 
-def loss_rows(result: ParallelResult) -> list[dict]:
+def loss_rows(result: DistributedResult) -> list[dict]:
     """One row per step: ``{"step": s, "rank0": l0, "rank1": l1}``.
 
     The row count is the shortest rank log, so a partial log does not invent a
@@ -309,7 +330,8 @@ def loss_rows(result: ParallelResult) -> list[dict]:
                for rank in result.ranks}
     if not by_rank:
         return []
-    steps = sorted(set.intersection(*(set(values) for values in by_rank.values())))
+    steps = sorted(set.intersection(
+        *(set(values) for values in by_rank.values())))
     return [{"step": step, **{f"rank{rank}": values[step]
                               for rank, values in by_rank.items()}}
             for step in steps]

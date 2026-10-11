@@ -734,17 +734,23 @@ void TrainLoop::AllReduceGradients() {
   // per-call round trip. The elementwise sum is unchanged, so the reduced
   // result is bit-identical to the per-parameter path.
   constexpr std::size_t kTargetBucketBytes = 128ull << 20;
-  std::size_t buckets =
-      (total_bytes + kTargetBucketBytes - 1) / kTargetBucketBytes;
-  buckets = std::max<std::size_t>(4, std::min<std::size_t>(8, buckets));
-  buckets = std::min(buckets, views.size());
-  const std::size_t average = (total_bytes + buckets - 1) / buckets;
-
-  // One buffer for each bucket, so every reduction can be in flight on the
-  // backend's side stream while the next bucket is packed
-  // (docs/distributed-plan.md phase 2). The host reference treats the
-  // asynchronous call as synchronous, so the sum is unchanged and the CPU
-  // tests still exercise the same path.
+  // The synchronous path holds one reusable bucket. A larger bucket cuts the
+  // number of host-staged ring round trips, which dominate the sync time on
+  // the 2x T4 host-staging fallback.
+  constexpr std::size_t kSyncBucketBytes = 128ull << 20;
+  std::size_t buckets = 1;
+  std::size_t average = std::min<std::size_t>(total_bytes, kSyncBucketBytes);
+  if (sync_->IsAsynchronous()) {
+    // An asynchronous backend keeps several buckets in flight, so the pack copy
+    // of the next bucket overlaps the reduction of the current one. A
+    // synchronous backend finishes inside `AllReduceSumAsync`, so one reusable
+    // bucket is enough and it avoids holding a second copy of every gradient,
+    // which is what lets the best-fit run fit on a 16 GiB T4.
+    buckets = (total_bytes + kTargetBucketBytes - 1) / kTargetBucketBytes;
+    buckets = std::max<std::size_t>(4, std::min<std::size_t>(8, buckets));
+    buckets = std::min(buckets, views.size());
+    average = (total_bytes + buckets - 1) / buckets;
+  }
   const std::size_t stride = average + max_param_bytes;
   std::vector<ComputeType*> buffers(buckets, nullptr);
   for (std::size_t b = 0; b < buckets; ++b) {

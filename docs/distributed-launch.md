@@ -1,7 +1,10 @@
 # Distributed launch
 
-Status: design. The launch moves from `notebooks/parallel.py` to host tooling.
-This document is the authority for the launch.
+Status: delivered. `tools/nanochat dist` starts the rank group,
+`python/nanochat_cpp/distributed.py` wraps it, and
+`notebooks/nanochat-cpp-on-2x-t4.ipynb` uses it. The superseded per-rank helper
+`notebooks/parallel.py` is gone (phase 4). This document is the authority for
+the launch.
 [distributed-design.md](distributed-design.md) section 10 holds a summary.
 
 ## 1. Problem
@@ -197,7 +200,7 @@ Gate: a Python test with a fake `tools/nanochat`.
 1. Change the notebook to `nanochat_cpp.distributed`.
 2. Delete `notebooks/parallel.py`, `notebooks/parallel_test.py`, and the two
    `notebooks/BUILD.bazel` targets.
-3. Remove `SMOKE_FLAGS`.
+3. Remove `SMOKE_FLAGS` (it lived only in `notebooks/parallel.py`).
 
 Gate: one short two-rank Kaggle run passes the checkpoint hash check.
 

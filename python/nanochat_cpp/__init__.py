@@ -15,7 +15,7 @@ the reinforcement-learning bridge: it renders the prompts, drives the
 persistent C++ worker, and scores the rollouts (docs/rl-notebook.md).
 """
 
-from . import _build, _core, _lib, api, chat, plan, rl, sft_data, toolchain
+from . import _build, _core, _lib, api, chat, distributed, plan, rl, sft_data, toolchain
 from ._build import BuildError
 from ._core import NanochatError
 from .api import (
@@ -61,6 +61,7 @@ __all__ = [
     "build_val_mixture",
     "api",
     "chat",
+    "distributed",
     "plan",
     "rl",
     "sft_data",

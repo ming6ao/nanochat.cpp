@@ -28,6 +28,10 @@ tools/nanochat <command> [args...]
                              reap orphaned Bazel output bases (dry run by
                              default); see docs/sandbox.md
   run <profile> -- <cmd...>  run a command under a sandbox profile
+  dist [opts] -- <cmd...>    one process per rank; one broker lock for the
+                             group; sets the NANOCHAT_* rank variables and
+                             expands a `{rank}` token in the command. See
+                             docs/distributed-launch.md
   train -- <cmd...>          alias for: run train -- <cmd...>
   rl    -- <cmd...>          alias for: run train -- <cmd...>
   eval  -- <cmd...>          alias for: run eval  -- <cmd...>
@@ -199,6 +203,145 @@ case "$command" in
     profile=$1
     shift
     run_profile "$profile" "$@"
+    ;;
+
+  dist)
+    # Data-parallel launch: one process per rank, one broker lock and one
+    # sandbox scope for the group (docs/distributed-launch.md). The command is
+    # identical for every rank; the rank values travel in the environment and a
+    # `{rank}` token in an argument expands to the rank index. Rank 0 starts
+    # first so it wins the port bind race. See docs/distributed-launch.md.
+    nproc=2
+    device=""
+    dist_profile=train
+    master=127.0.0.1
+    port=29500
+    log_dir=""
+    dist_json=0
+    cmd=()
+    while (( $# )); do
+      case "$1" in
+        --nproc-per-node)
+          nproc=${2:?--nproc-per-node needs a value}
+          shift 2
+          ;;
+        --device)
+          device=${2:?--device needs a value}
+          shift 2
+          ;;
+        --profile)
+          dist_profile=${2:?--profile needs a value}
+          shift 2
+          ;;
+        --master)
+          master=${2:?--master needs a value}
+          shift 2
+          ;;
+        --port)
+          port=${2:?--port needs a value}
+          shift 2
+          ;;
+        --log-dir)
+          log_dir=${2:?--log-dir needs a value}
+          shift 2
+          ;;
+        --json)
+          dist_json=1
+          shift
+          ;;
+        --)
+          shift
+          cmd=("$@")
+          break
+          ;;
+        *) die "dist: unknown option $1" ;;
+      esac
+    done
+    (( ${#cmd[@]} )) || die "dist: no command given; use: tools/nanochat dist -- <cmd...>"
+    (( nproc >= 1 )) || die "dist: --nproc-per-node must be >= 1"
+    if [[ -z $device ]]; then
+      device=$(seq -s, 0 $((nproc - 1)))
+    fi
+    IFS=',' read -ra devices <<< "$device"
+    (( ${#devices[@]} == nproc )) || \
+      die "dist: --device has ${#devices[@]} entries, need $nproc"
+    if [[ -z $log_dir ]]; then
+      log_dir=$(mktemp -d /tmp/nanochat-dist.XXXXXX)
+    fi
+    mkdir -p "$log_dir"
+
+    # One broker lock for the whole rank group. A `train` lock per rank would
+    # deadlock on a multi-card host, so the group is the unit. Kaggle has no
+    # broker, so skip when the sandbox backend is `none` or another broker is
+    # already active (docs/distributed-launch.md section 5).
+    if [[ -z ${NANOCHAT_SANDBOX:-} && -z ${NANOCHAT_DIST_BROKERED:-} && \
+          ${NANOCHAT_SANDBOX_BACKEND:-auto} != none ]]; then
+      export NANOCHAT_DIST_BROKERED=1
+      broker_args=(--lock-only --device "$device" --)
+      reexec=("$0" dist --nproc-per-node "$nproc" --device "$device"
+              --profile "$dist_profile" --master "$master" --port "$port"
+              --log-dir "$log_dir")
+      (( dist_json )) && reexec+=(--json)
+      exec "$broker" "${broker_args[@]}" "${reexec[@]}" -- "${cmd[@]}"
+    fi
+
+    start=$(date +%s.%N)
+    pids=()
+    stdio_paths=()
+    for ((rank = 0; rank < nproc; rank++)); do
+      expanded=()
+      for arg in "${cmd[@]}"; do
+        expanded+=("${arg//\{rank\}/$rank}")
+      done
+      stdio="$log_dir/rank${rank}.stdio.log"
+      stdio_paths+=("$stdio")
+      CUDA_VISIBLE_DEVICES="${devices[$rank]}" \
+        NANOCHAT_WORLD_SIZE="$nproc" \
+        NANOCHAT_RANK="$rank" \
+        NANOCHAT_LOCAL_RANK="$rank" \
+        NANOCHAT_MASTER_ADDR="$master" \
+        NANOCHAT_MASTER_PORT="$port" \
+        "$sandbox" --profile "$dist_profile" -- "${expanded[@]}" \
+        >"$stdio" 2>&1 &
+      pids+=($!)
+      # Rank 0 binds the rendezvous port; give it a moment before the peers
+      # start so the connect does not race the bind.
+      (( rank == 0 && nproc > 1 )) && sleep 0.5
+    done
+
+    codes=()
+    for ((rank = 0; rank < nproc; rank++)); do
+      if wait "${pids[$rank]}"; then
+        codes[$rank]=0
+      else
+        codes[$rank]=$?
+      fi
+    done
+    end=$(date +%s.%N)
+    seconds=$(awk -v a="$start" -v b="$end" 'BEGIN { printf "%.3f", b - a }')
+    rc=0
+    for code in "${codes[@]}"; do
+      if (( code != 0 )); then
+        rc=$code
+        break
+      fi
+    done
+
+    if (( dist_json )); then
+      printf '{"ranks":['
+      for ((rank = 0; rank < nproc; rank++)); do
+        (( rank > 0 )) && printf ','
+        printf '{"rank":%d,"returncode":%d,"stdio":"%s","seconds":%s}' \
+          "$rank" "${codes[$rank]}" "${stdio_paths[$rank]}" "$seconds"
+      done
+      printf ']}\n'
+    else
+      for ((rank = 0; rank < nproc; rank++)); do
+        printf 'dist: rank %d exit %d (stdio %s)\n' \
+          "$rank" "${codes[$rank]}" "${stdio_paths[$rank]}"
+      done
+    fi
+    exit "$rc"
     ;;
 
   lint)

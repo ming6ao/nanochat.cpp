@@ -39,6 +39,20 @@ void Die(const std::string& message) {
   std::abort();
 }
 
+// Pinned host staging for the host-staged transport. A pageable bounce buffer
+// runs device-to-host copies at a few hundred MB/s; pinned memory reaches PCIe
+// speed, which is what makes the 2x T4 sync affordable (docs/attention.md Part
+// 2 has the measurement protocol).
+void* PinnedHostAlloc(std::size_t bytes) {
+  void* ptr = nullptr;
+  if (cudaMallocHost(&ptr, bytes) != cudaSuccess) return nullptr;
+  return ptr;
+}
+
+void PinnedHostFree(void* ptr) {
+  if (ptr != nullptr) cudaFreeHost(ptr);
+}
+
 std::size_t NextPowerOfTwo(std::size_t value) {
   std::size_t result = 1;
   while (result < value) result <<= 1;
@@ -124,7 +138,11 @@ class NativeGradientSync final : public GradientSync {
       return std::make_unique<cuda_backend::HostTransport>(fabric, self, peer,
                                                            send_direction);
     };
-    return ring_.Connect(config_, rendezvous_.get(), caps, factory);
+    if (!ring_.Connect(config_, rendezvous_.get(), caps, factory)) return false;
+    uses_host_staging_ =
+        ring_.next_kind() == cuda_backend::TransportKind::kHost &&
+        ring_.prev_kind() == cuda_backend::TransportKind::kHost;
+    return true;
   }
 
   void AllReduceSum(ComputeType* buffer, std::int64_t count) override {
@@ -132,30 +150,45 @@ class NativeGradientSync final : public GradientSync {
     Wait();
   }
 
-  // The synchronous window path: copy in, run the ring, copy out. The seam's
-  // contract (the caller must not touch `buffer` until `Wait`) is honored
-  // because the call completes before it returns.
+  // The synchronous path: copy in, run the ring, copy out. The seam's contract
+  // (the caller must not touch `buffer` until `Wait`) is honored because the
+  // call completes before it returns.
+  //
+  // The host-staged transport reads and writes the caller's buffer directly
+  // through host memory, so no registered window is needed and the ring runs in
+  // place. That avoids the window pool's memory and the extra device-to-device
+  // copies, which is what lets the best-fit run fit on a 16 GiB T4. A
+  // peer-memory transport (NVLink/RDMA) still needs the window, because a
+  // device pointer from one process is not valid in another.
   void AllReduceSumAsync(ComputeType* buffer, std::int64_t count) override {
     if (buffer == nullptr || count <= 0) return;
     const std::size_t bytes =
         static_cast<std::size_t>(count) * sizeof(ComputeType);
-    Window* window = AcquireWindow(bytes);
-    if (window == nullptr) Die("cannot allocate a transfer window");
-    kernels::Memcpy(window->ptr, buffer, bytes, CopyDir::kDeviceToDevice);
     EnsureScratch(bytes);
+
+    ComputeType* target = buffer;
+    Window* window = nullptr;
+    if (!uses_host_staging_) {
+      window = AcquireWindow(bytes);
+      if (window == nullptr) Die("cannot allocate a transfer window");
+      kernels::Memcpy(window->ptr, buffer, bytes, CopyDir::kDeviceToDevice);
+      target = window->ptr;
+    }
 
     const cuda_backend::TimePoint deadline =
         std::chrono::steady_clock::now() +
         std::chrono::milliseconds(config_.timeout_ms > 0 ? config_.timeout_ms
                                                          : 600000);
-    if (!cuda_backend::RingAllReduceSum(
-            ring_.Next(), ring_.Prev(), rank_, world_size_, window->ptr, count,
-            scratch_, &DeviceAdd, deadline, nullptr)) {
+    if (!cuda_backend::RingAllReduceSum(ring_.Next(), ring_.Prev(), rank_,
+                                        world_size_, target, count, scratch_,
+                                        &DeviceAdd, deadline, nullptr)) {
       Die("watchdog: rank " + std::to_string(rank_) +
           " timed out waiting for a peer during the all-reduce");
     }
-    kernels::Memcpy(buffer, window->ptr, bytes, CopyDir::kDeviceToDevice);
-    window->in_use = false;
+    if (window != nullptr) {
+      kernels::Memcpy(buffer, window->ptr, bytes, CopyDir::kDeviceToDevice);
+      window->in_use = false;
+    }
   }
 
   void Wait() override {}
@@ -169,10 +202,17 @@ class NativeGradientSync final : public GradientSync {
 
   bool PeerAccessible(int peer) {
     int device = 0;
-    if (cudaGetDevice(&device) != cudaSuccess) return false;
-    int can = 0;
-    if (cudaDeviceCanAccessPeer(&can, device, peer) != cudaSuccess)
+    if (cudaGetDevice(&device) != cudaSuccess) {
+      // A failed probe must not leave a sticky error that a later kernel
+      // launch reports as its own. Clear it before returning.
+      cudaGetLastError();
       return false;
+    }
+    int can = 0;
+    if (cudaDeviceCanAccessPeer(&can, device, peer) != cudaSuccess) {
+      cudaGetLastError();
+      return false;
+    }
     return can != 0;
   }
 
@@ -197,11 +237,16 @@ class NativeGradientSync final : public GradientSync {
   }
 
   void EnsureScratch(std::size_t bytes) {
-    // Two chunks of at most `count` elements each.
-    const std::size_t needed = 2 * bytes + 64;
+    // The ring holds at most two receive chunks, and `2 * chunk` never exceeds
+    // `count` for a world size of two or more, so one bucket's worth of
+    // elements is enough. Allocate the exact size (rounded up to a kilobyte)
+    // rather than the next power of two: the rounding waste is what pushed the
+    // best-fit eval over the 16 GiB card.
+    const std::size_t needed = bytes + 64;
     if (scratch_bytes_ >= needed) return;
     if (scratch_ != nullptr) kernels::Free(scratch_);
-    scratch_bytes_ = NextPowerOfTwo(needed);
+    const std::size_t rounded = ((needed + 1023) / 1024) * 1024;
+    scratch_bytes_ = rounded;
     scratch_ = static_cast<ComputeType*>(kernels::Alloc(scratch_bytes_));
     if (scratch_ == nullptr) Die("cannot allocate the schedule scratch");
   }
@@ -215,6 +260,9 @@ class NativeGradientSync final : public GradientSync {
   std::vector<Window> windows_;
   ComputeType* scratch_ = nullptr;
   std::size_t scratch_bytes_ = 0;
+  // True when both ring edges stage through host memory. The ring then runs in
+  // place on the caller's buffer and the window pool stays unused.
+  bool uses_host_staging_ = false;
 };
 
 }  // namespace
@@ -223,6 +271,7 @@ std::unique_ptr<GradientSync> CreateGradientSync(
     const DistributedConfig& config) {
   if (config.world_size <= 1) return std::make_unique<NoopGradientSync>();
   if (config.rank < 0 || config.rank >= config.world_size) return nullptr;
+  cuda_backend::SetHostStagingAllocator(&PinnedHostAlloc, &PinnedHostFree);
   auto sync = std::make_unique<NativeGradientSync>(config, config.rank,
                                                    config.world_size);
   if (!sync->Setup()) return nullptr;

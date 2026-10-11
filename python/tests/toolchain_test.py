@@ -114,6 +114,21 @@ class ToolchainTest(unittest.TestCase):
         self.check(self.toolchain.gpu(["binary"], profile="t1-gpu"),
                    ["gpu", "--profile", "t1-gpu", "--", "binary"])
 
+    def test_dist(self) -> None:
+        self.check(
+            self.toolchain.dist(["binary", "--log", "rank{rank}.log"],
+                                nproc_per_node=2, device="0,1",
+                                master="127.0.0.1", port=29500,
+                                profile="train", log_dir="/tmp/run", json=True),
+            ["dist", "--nproc-per-node", "2", "--device", "0,1",
+             "--profile", "train", "--master", "127.0.0.1",
+             "--port", "29500", "--log-dir", "/tmp/run", "--json", "--",
+             "binary", "--log", "rank{rank}.log"])
+        self.check(self.toolchain.dist(["binary"]),
+                   ["dist", "--nproc-per-node", "2", "--profile", "train",
+                    "--master", "127.0.0.1", "--port", "29500", "--",
+                    "binary"])
+
     def test_gpu_inside_sandbox_skips_the_broker(self) -> None:
         env = dict(self.env)
         env["NANOCHAT_SANDBOX"] = "t2-parity"

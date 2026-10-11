@@ -61,6 +61,23 @@ inline void AppendCsv(const std::string& text, std::vector<std::string>* out) {
   for (std::string& part : SplitCsv(text)) out->push_back(std::move(part));
 }
 
+// Reads an integer environment variable, returning `fallback` when it is
+// unset or unparseable. The launcher sets the `NANOCHAT_*` variables in the
+// style of `torchrun` (docs/distributed-launch.md section 4).
+inline int EnvInt(const char* name, int fallback) {
+  const char* value = std::getenv(name);
+  int parsed = 0;
+  if (value == nullptr || !ParseInt(value, &parsed)) return fallback;
+  return parsed;
+}
+
+// Reads a string environment variable, returning `fallback` when it is unset.
+inline std::string EnvString(const char* name, const std::string& fallback) {
+  const char* value = std::getenv(name);
+  if (value == nullptr) return fallback;
+  return std::string(value);
+}
+
 // True when `flag` configures the shared model `Config`.
 inline bool IsModelFlag(const std::string& flag) {
   return flag == "--layers" || flag == "--heads" || flag == "--kv-heads" ||
