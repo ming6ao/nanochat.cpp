@@ -737,7 +737,7 @@ void TrainLoop::AllReduceGradients() {
   // The synchronous path holds one reusable bucket. A larger bucket cuts the
   // number of host-staged ring round trips, which dominate the sync time on
   // the 2x T4 host-staging fallback.
-  constexpr std::size_t kSyncBucketBytes = 256ull << 20;
+  constexpr std::size_t kSyncBucketBytes = 128ull << 20;
   std::size_t buckets = 1;
   std::size_t average = std::min<std::size_t>(total_bytes, kSyncBucketBytes);
   if (sync_->IsAsynchronous()) {

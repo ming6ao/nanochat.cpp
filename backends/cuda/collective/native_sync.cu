@@ -239,12 +239,14 @@ class NativeGradientSync final : public GradientSync {
   void EnsureScratch(std::size_t bytes) {
     // The ring holds at most two receive chunks, and `2 * chunk` never exceeds
     // `count` for a world size of two or more, so one bucket's worth of
-    // elements is enough. The old two-bucket size wasted device memory on the
-    // best-fit run.
+    // elements is enough. Allocate the exact size (rounded up to a kilobyte)
+    // rather than the next power of two: the rounding waste is what pushed the
+    // best-fit eval over the 16 GiB card.
     const std::size_t needed = bytes + 64;
     if (scratch_bytes_ >= needed) return;
     if (scratch_ != nullptr) kernels::Free(scratch_);
-    scratch_bytes_ = NextPowerOfTwo(needed);
+    const std::size_t rounded = ((needed + 1023) / 1024) * 1024;
+    scratch_bytes_ = rounded;
     scratch_ = static_cast<ComputeType*>(kernels::Alloc(scratch_bytes_));
     if (scratch_ == nullptr) Die("cannot allocate the schedule scratch");
   }
