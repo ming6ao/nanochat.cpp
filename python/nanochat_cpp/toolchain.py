@@ -184,16 +184,15 @@ class Toolchain:
             argv: Sequence[str] | None = None) -> CommandResult:
         return self._run(["run", str(profile), "--", *(argv or [])])
 
-    def dist(self, argv: Sequence[str], *, nproc_per_node: int = 2,
-             device: str | None = None, master: str = "127.0.0.1",
-             port: int = 29500, profile: str = "train",
-             log_dir: str | os.PathLike | None = None,
-             json: bool = False) -> CommandResult:
-        """Launch one process per rank through ``tools/nanochat dist``.
+    def dist_argv(self, argv: Sequence[str], *, nproc_per_node: int = 2,
+                  device: str | None = None, master: str = "127.0.0.1",
+                  port: int = 29500, profile: str = "train",
+                  log_dir: str | os.PathLike | None = None,
+                  json: bool = False) -> list[str]:
+        """Build the ``tools/nanochat dist`` argument list without running it.
 
-        The rank values travel in the ``NANOCHAT_*`` environment, so ``argv``
-        is the same for every rank; a ``{rank}`` token in an argument expands
-        to the rank index. See ``docs/distributed-launch.md``.
+        ``launch_live`` uses the list to start the launcher itself, so the
+        caller can poll the run. :meth:`dist` runs the same list.
         """
         arguments = ["dist", "--nproc-per-node", str(nproc_per_node)]
         if device is not None:
@@ -205,7 +204,23 @@ class Toolchain:
         if json:
             arguments.append("--json")
         arguments += ["--", *(str(value) for value in argv)]
-        return self._run(arguments)
+        return arguments
+
+    def dist(self, argv: Sequence[str], *, nproc_per_node: int = 2,
+             device: str | None = None, master: str = "127.0.0.1",
+             port: int = 29500, profile: str = "train",
+             log_dir: str | os.PathLike | None = None,
+             json: bool = False) -> CommandResult:
+        """Launch one process per rank through ``tools/nanochat dist``.
+
+        The rank values travel in the ``NANOCHAT_*`` environment, so ``argv``
+        is the same for every rank; a ``{rank}`` token in an argument expands
+        to the rank index. See ``docs/distributed-launch.md``.
+        """
+        return self._run(self.dist_argv(
+            argv, nproc_per_node=nproc_per_node, device=device,
+            master=master, port=port, profile=profile, log_dir=log_dir,
+            json=json))
 
     def train(self, argv: Sequence[str] | None = None) -> CommandResult:
         return self._run(["train", "--", *(argv or [])])
