@@ -156,8 +156,9 @@ contract. One fixture test pins it.
 ## 7. The notebook
 
 `notebooks/nanochat-cpp-on-2x-t4.ipynb` imports `nanochat_cpp.distributed`.
-The notebook builds one plan and calls `launch`. The notebook keeps the loss
-plot and the checkpoint hash check. Those are presentation.
+The notebook builds one plan for two ranks and calls `launch`. It keeps the
+loss plot and the checkpoint hash check. It then loads the checkpoint in
+process for the evaluation and the post-training. Those are presentation.
 
 ## 8. Plan
 

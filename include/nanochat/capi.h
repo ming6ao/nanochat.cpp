@@ -28,7 +28,9 @@ typedef struct nanochat_optim nanochat_optim;
 typedef struct nanochat_loader nanochat_loader;
 typedef struct nanochat_tokenizer nanochat_tokenizer;
 
-// Model hyperparameters, a mirror of nanochat::Config.
+// Model hyperparameters, a mirror of nanochat::Config. `value_embedding` is
+// nonzero when the ResFormer value embeddings are present. The Track 3 preset
+// sets it to zero (docs/distributed-design.md section 8).
 typedef struct {
   int num_layers;
   int num_heads;
@@ -39,6 +41,7 @@ typedef struct {
   int padded_vocab_size;
   float rope_base;
   const char* window_pattern;
+  int value_embedding;
 } nanochat_config;
 
 // Model-derived planning inputs (docs/python.md section 4.1). `total` counts
@@ -251,6 +254,10 @@ int64_t nanochat_param_read(nanochat_model* model, int index, int grad,
                             int64_t offset, int64_t count, void* data);
 int64_t nanochat_param_write(nanochat_model* model, int index, int grad,
                              int64_t offset, int64_t count, const void* data);
+// `nanochat_save` writes the simple `NCMDL001` container. `nanochat_load`
+// accepts both that container and the self-describing `NCHKPT01` container
+// that the training harness writes (docs/model.md), so a distributed run's
+// checkpoint loads in process.
 void nanochat_save(nanochat_model* model, const char* path);
 void nanochat_load(nanochat_model* model, const char* path);
 

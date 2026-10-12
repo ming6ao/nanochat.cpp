@@ -240,9 +240,9 @@ this change.
 The native tokenizer has 32768 entries, so the loss target is not 3.28. This
 work supports the architecture, not the published number.
 
-The C ABI mirror `nanochat_config` and the Python `Config` do not expose the
-field yet. `--preset track3` and the C++ API do. A later change adds the field
-to the C ABI and to the Python surface.
+The C ABI mirror `nanochat_config` and the Python `Config` expose the field.
+`--preset track3`, the C++ API, and `nanochat_cpp.Config(value_embedding=False)`
+all select the Track 3 shape.
 
 ## 9. Optimizer and schedule mapping
 
@@ -368,19 +368,19 @@ fixed validation set.
 ## 13. Kaggle notebook
 
 The two-card notebook is `notebooks/nanochat-cpp-on-2x-t4.ipynb`. The plan
-lives in [distributed-plan.md](distributed-plan.md).
+lives in [distributed-native-plan.md](distributed-native-plan.md).
 
 The notebook runs these steps:
 
-1. Locate NCCL and set `NANOCHAT_NCCL_PATH`.
-2. Build the `t4` shared library and `//src:train_main`.
-3. Stage one ClimbMix shard, the validation shard, and the tokenizer.
-4. Run the best-fit model with one process on each card.
-5. Compare the two checkpoint hashes.
+1. Build the `t4` shared library and the `--config=native` `//src:train_main`.
+2. Stage one ClimbMix shard, the validation shard, and the tokenizer.
+3. Run the best-fit model with one process on each of the two cards.
+4. Compare the two checkpoint hashes.
+5. Load rank 0 in process. Run the base evaluation, the supervised fine-tuning,
+   and the chat evaluation.
 
-The two cards do not have a peer link, so NCCL uses PCIe or shared memory. The
-CUDA build requires NCCL (section 5); there is no host-reference fallback. If
-NCCL is absent, the CUDA build fails at compile time.
+The T4 cards do not have a peer link, so the native ring stages through pinned
+host memory (section 10.1). The `--config=native` build needs no NCCL.
 
 ## 14. Phasing
 

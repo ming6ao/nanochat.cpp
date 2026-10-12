@@ -14,7 +14,9 @@ from nanochat_cpp import _core, _lib
 
 
 def tiny_config() -> _core.Config:
-    return _core.Config(2, 8, 2, 32, 8, 64, 64, 100000.0, b"SL")
+    # The trailing 1 enables the value embeddings, so the tiny shape keeps the
+    # odd-layer value gate that the C++ fixture counts (bindings test).
+    return _core.Config(2, 8, 2, 32, 8, 64, 64, 100000.0, b"SL", 1)
 
 
 def optimizer_config() -> _core.OptimizerConfig:
@@ -48,6 +50,7 @@ class CoreTest(unittest.TestCase):
         # A field-order drift would silently corrupt the C conversion.
         self.assertEqual(_core.Config.num_layers.offset, 0)
         self.assertEqual(_core.Config.rope_base.offset, 7 * 4)
+        self.assertEqual(_core.Config.value_embedding.offset, 10 * 4)
         self.assertEqual(_core.Param.count.offset, 24)
         self.assertEqual(_core.OptimizerConfig.muon_ns_steps.offset, 5 * 4)
         self.assertEqual(_core.OptimizerConfig.num_iterations.offset, 9 * 4)

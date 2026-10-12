@@ -284,6 +284,12 @@ model = nc.Model(plan.config)
 optimizer = nc.Optimizer(model, **plan.optimizer, **plan.scheduler)
 ```
 
+`Config` carries a `value_embedding` flag. The default keeps the ResFormer value
+embeddings; `Config(value_embedding=False)` matches the Track 3 preset. The
+`Model.load` call accepts both the `NCMDL001` container that `Model.save` writes
+and the self-describing `NCHKPT01` container that the training harness writes
+(`docs/model.md`). A distributed run's checkpoint then loads in process.
+
 ## 5. Chat evaluation
 
 The chat evaluation becomes part of the Python API. The Python side owns the

@@ -14,6 +14,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
 #include <string>
 #include <type_traits>
 #include <vector>
@@ -22,6 +23,7 @@
 #include "nanochat/config.h"
 #include "nanochat/model.h"
 #include "nanochat/tensor.h"
+#include "src/train.h"
 
 namespace {
 
@@ -52,6 +54,11 @@ static_assert(
 static_assert(sizeof(nanochat_config::rope_base) ==
                   sizeof(nanochat::Config::rope_base),
               "nanochat_config.rope_base drifted from nanochat::Config");
+// The C mirror widens the C++ `bool` to an `int`, so this is a size floor
+// rather than an equality, the same rule the other scalar mirrors use.
+static_assert(sizeof(nanochat_config::value_embedding) >=
+                  sizeof(nanochat::Config::value_embedding),
+              "nanochat_config.value_embedding drifted from nanochat::Config");
 
 static_assert(sizeof(nanochat_param::count) ==
                   sizeof(nanochat::ParamView::count),
@@ -184,6 +191,9 @@ nanochat_config TinyConfig() {
   config.padded_vocab_size = 512;
   config.rope_base = 10000.0f;
   config.window_pattern = "S";
+  // The expected parameter counts include the value embeddings and the
+  // odd-layer value gate, so the tiny config keeps them on.
+  config.value_embedding = 1;
   return config;
 }
 
@@ -472,6 +482,73 @@ nanochat_model* CheckModel() {
   nanochat_load(model, path.c_str());
 
   return model;
+}
+
+// The harness `NCHKPT01` container loads through `nanochat_load`
+// (docs/model.md). A writer model saves the name-keyed container; a reader
+// model with a different seed loads it and must match a fresh model that uses
+// the writer's seed. The config turns the value embeddings off, so the test
+// also covers the Track 3 shape (docs/distributed-design.md section 8).
+void CheckHarnessCheckpoint() {
+  nanochat_config c_config;
+  std::memset(&c_config, 0, sizeof(c_config));
+  c_config.num_layers = 2;
+  c_config.num_heads = 2;
+  c_config.num_kv_heads = 1;
+  c_config.hidden_dim = 32;
+  c_config.seq_len = 8;
+  c_config.vocab_size = 512;
+  c_config.padded_vocab_size = 512;
+  c_config.rope_base = 10000.0f;
+  c_config.window_pattern = "S";
+  c_config.value_embedding = 0;
+
+  nanochat::Config cpp_config;
+  cpp_config.num_layers = c_config.num_layers;
+  cpp_config.num_heads = c_config.num_heads;
+  cpp_config.num_kv_heads = c_config.num_kv_heads;
+  cpp_config.hidden_dim = c_config.hidden_dim;
+  cpp_config.seq_len = c_config.seq_len;
+  cpp_config.vocab_size = c_config.vocab_size;
+  cpp_config.padded_vocab_size = c_config.padded_vocab_size;
+  cpp_config.rope_base = c_config.rope_base;
+  cpp_config.window_pattern = c_config.window_pattern;
+  cpp_config.value_embedding = false;
+  std::unique_ptr<nanochat::Model> writer = nanochat::Model::Create(cpp_config);
+  Check("harness: writer creates", writer != nullptr);
+  if (writer == nullptr) return;
+  writer->InitWeights(101);
+
+  const std::string path = TempPath("bindings_harness.nchkpt01");
+  Check("harness: save writes the container",
+        nanochat::Checkpointer::SaveModel(*writer, path));
+
+  nanochat_model* same = nanochat_model_create(&c_config, /*seed=*/101);
+  nanochat_model* reader = nanochat_model_create(&c_config, /*seed=*/202);
+  Check("harness: both handles create", same != nullptr && reader != nullptr);
+  if (same != nullptr && reader != nullptr) {
+    nanochat_load(reader, path.c_str());
+    const int count = nanochat_param_count(same);
+    bool equal = count > 0 && count == nanochat_param_count(reader);
+    for (int i = 0; i < count && equal; ++i) {
+      nanochat_param param;
+      if (nanochat_param_info(same, i, &param) != 0) {
+        equal = false;
+        break;
+      }
+      std::vector<float> writer_values(static_cast<std::size_t>(param.count));
+      std::vector<float> reader_values(static_cast<std::size_t>(param.count));
+      const int64_t read_a = nanochat_param_read(
+          same, i, /*grad=*/0, 0, param.count, writer_values.data());
+      const int64_t read_b = nanochat_param_read(
+          reader, i, /*grad=*/0, 0, param.count, reader_values.data());
+      equal = read_a == param.count && read_b == param.count &&
+              writer_values == reader_values;
+    }
+    Check("harness: loaded reader matches the writer weights", equal);
+  }
+  nanochat_model_free(reader);
+  nanochat_model_free(same);
 }
 
 // The weighted-backward entry point. On a masked batch with non-uniform row
@@ -825,6 +902,7 @@ int main(int argc, char** argv) {
 
   CheckSandboxRule();
   CheckParams();
+  CheckHarnessCheckpoint();
   CheckWeightedBackward();
   CheckTrainStep();
   CheckRlStep();

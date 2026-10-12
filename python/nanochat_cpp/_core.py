@@ -91,6 +91,7 @@ class Config(ctypes.Structure):
         ("padded_vocab_size", ctypes.c_int),
         ("rope_base", ctypes.c_float),
         ("window_pattern", ctypes.c_char_p),
+        ("value_embedding", ctypes.c_int),
     ]
 
 

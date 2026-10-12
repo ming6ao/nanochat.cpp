@@ -25,6 +25,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <exception>
+#include <fstream>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -42,12 +43,18 @@
 #include "nanochat/tokenizer.h"
 #include "src/parquet/reader.h"
 #include "src/rl.h"
+#include "src/train.h"
 
 namespace {
 
 // The C ABI version. Bump this string on every change to the surface or to a
 // mirrored struct; docs/python.md section 13 names that rule.
-constexpr char kNanochatVersion[] = "0.5.0";
+constexpr char kNanochatVersion[] = "0.6.0";
+
+// The magic that `Checkpoint::Save` writes (src/data.cc). A file with this
+// prefix is the harness container, so `nanochat_load` routes it through the
+// harness loader instead of `Model::Load`.
+constexpr char kHarnessCheckpointMagic[] = "NCHKPT01";
 
 // The message for the current thread. A `thread_local` string keeps the
 // pointer from `nanochat_last_error` valid until the next failure on this
@@ -111,6 +118,7 @@ nanochat::Config ToConfig(const nanochat_config& source) {
   config.rope_base = source.rope_base;
   config.window_pattern =
       source.window_pattern != nullptr ? source.window_pattern : "";
+  config.value_embedding = source.value_embedding != 0;
   return config;
 }
 
@@ -490,6 +498,20 @@ void nanochat_load(nanochat_model* model, const char* path) {
   GuardVoid("nanochat_load", [&]() {
     if (model == nullptr || path == nullptr) {
       throw std::invalid_argument("model or path is null");
+    }
+    // The harness container is name-keyed and self-describing. Detect it by
+    // its magic, then load through the harness so a distributed run's
+    // checkpoint loads in process. Any other file goes to `Model::Load`.
+    std::ifstream probe(path, std::ios::binary);
+    char magic[sizeof(kHarnessCheckpointMagic) - 1] = {};
+    probe.read(magic, sizeof(magic));
+    if (probe.gcount() == static_cast<std::streamsize>(sizeof(magic)) &&
+        std::memcmp(magic, kHarnessCheckpointMagic, sizeof(magic)) == 0) {
+      if (!nanochat::Checkpointer::LoadModel(model->model.get(), path)) {
+        throw std::runtime_error("cannot load checkpoint: " +
+                                 std::string(path));
+      }
+      return;
     }
     model->model->Load(path);
   });

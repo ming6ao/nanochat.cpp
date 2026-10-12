@@ -10,8 +10,8 @@ The ablation sweep is an optional facility of the runner.
 
 ## 1. Problem
 
-`notebooks/nanochat-cpp-on-t4-gpu.ipynb` holds the run sequence in cells.
-Three problems follow.
+The earlier one-card notebook held the run sequence in cells. Three problems
+follow.
 
 - A new experiment means a copy of the notebook. Parallel copies drift.
 - The result lives in a cell output. A cell output is not queryable.
@@ -225,7 +225,7 @@ optional. Add a trial list and call `run_sweep` for an ablation study.
 | `notebooks/kaggle_setup.py` | New. The session setup: fetch, bootstrap, host environment, build. | Notebooks |
 | `notebooks/kaggle_setup_test.py` | New. Tests for the pure setup helpers. | Notebooks |
 | `notebooks/BUILD.bazel` | New. Two `py_library` targets, two CPU `py_test` targets, and a `test_suite`. | Notebooks |
-| `notebooks/nanochat-cpp-on-t4-gpu.ipynb` | Use `lab` for the run sequence. | Notebooks |
+| `notebooks/nanochat-cpp-on-2x-t4.ipynb` | The end-to-end notebook. | Notebooks |
 | `notebooks/kaggle_demo.py` | Use `nanochat_cpp.sft_data` for the real SFT mixture. Fall back to the offline demo set when the hub is unreachable. | Notebooks |
 | `docs/notebook-workflow.md` | This document. | Architect |
 | `docs/README.md` | Add the index row. | Architect |

@@ -249,7 +249,8 @@ class Config:
     ``depth`` sets the layer count and, together with ``aspect_ratio`` and
     ``head_dim``, derives ``hidden_dim`` and ``num_heads``. Pass an explicit
     ``hidden_dim``, ``num_heads``, or ``num_kv_heads`` to override the derived
-    value.
+    value. Set ``value_embedding`` to ``False`` for the Track 3 preset, which
+    disables the ResFormer value embeddings.
     """
 
     def __init__(self, depth: int | None = None, *, num_layers: int | None = None,
@@ -258,7 +259,8 @@ class Config:
                  vocab_size: int = 32768, padded_vocab_size: int | None = None,
                  rope_base: float = 100000.0, window_pattern: str = "SSSL",
                  aspect_ratio: int = ASPECT_RATIO,
-                 head_dim: int = HEAD_DIM) -> None:
+                 head_dim: int = HEAD_DIM,
+                 value_embedding: bool = True) -> None:
         if num_layers is None:
             num_layers = int(depth) if depth is not None else 12
         if hidden_dim is None:
@@ -282,6 +284,7 @@ class Config:
         self.padded_vocab_size = int(padded_vocab_size)
         self.rope_base = float(rope_base)
         self.window_pattern = str(window_pattern)
+        self.value_embedding = bool(value_embedding)
 
     def _to_c(self) -> _core.Config:
         value = _core.Config()
@@ -294,6 +297,7 @@ class Config:
         value.padded_vocab_size = self.padded_vocab_size
         value.rope_base = self.rope_base
         value.window_pattern = self.window_pattern.encode("utf-8")
+        value.value_embedding = 1 if self.value_embedding else 0
         return value
 
     def __repr__(self) -> str:
@@ -303,7 +307,8 @@ class Config:
                 f"hidden_dim={self.hidden_dim}, seq_len={self.seq_len}, "
                 f"vocab_size={self.vocab_size}, "
                 f"padded_vocab_size={self.padded_vocab_size}, "
-                f"window_pattern={self.window_pattern!r})")
+                f"window_pattern={self.window_pattern!r}, "
+                f"value_embedding={self.value_embedding})")
 
 
 class Tokenizer:
