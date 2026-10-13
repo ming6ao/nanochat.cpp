@@ -32,7 +32,7 @@ def main(argv=None) -> int:
     plan = mesh_train.MeshTrainPlan.from_job(
         json.loads(job_path.read_text(encoding="utf-8")))
     try:
-        mesh_train.run(plan)
+        mesh_train.run(plan, progress=mesh_train.log_progress)
     except KeyboardInterrupt:
         print("mesh_worker: interrupted; the checkpoint is saved",
               flush=True)

@@ -56,6 +56,32 @@ class SummaryTest(unittest.TestCase):
         self.assertAlmostEqual(mesh_train.steady_mfu(rows), 0.5)
 
 
+class LogTest(unittest.TestCase):
+    def test_format_row_reports_every_field(self) -> None:
+        row = {"step": 3, "loss": 4.5, "grad_norm": 0.25, "step_seconds": 22.4,
+               "compute_seconds": 21.9, "tokens_per_sec": 2926.0,
+               "mfu": 0.3012}
+        text = mesh_train.format_row(row)
+        self.assertIn("loss 4.5000", text)
+        self.assertIn("grad_norm 0.25", text)
+        self.assertIn("step 22.40s", text)
+        self.assertIn("compute 21.90s", text)
+        self.assertIn("2,926 tok/s", text)
+        self.assertIn("mfu 30.12%", text)
+
+    def test_log_progress_writes_one_line(self) -> None:
+        import contextlib
+        import io
+
+        row = {"step": 1, "loss": 1.0, "grad_norm": 1.0, "step_seconds": 1.0,
+               "compute_seconds": 0.9, "tokens_per_sec": 10.0, "mfu": 0.1}
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            mesh_train.log_progress(row, 5)
+        self.assertEqual(buffer.getvalue().count("\n"), 1)
+        self.assertIn("[    1/5]", buffer.getvalue())
+
+
 class JobTest(unittest.TestCase):
     def test_round_trip(self) -> None:
         plan = _plan("/tmp/mesh-out")

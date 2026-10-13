@@ -33,9 +33,11 @@ __all__ = [
     "MeshLiveRun",
     "MeshRunResult",
     "MeshTrainPlan",
+    "format_row",
     "global_batch",
     "iterate",
     "launch",
+    "log_progress",
     "mfu",
     "read_metrics",
     "read_summary",
@@ -235,6 +237,27 @@ def steady_mfu(records) -> float:
         return 0.0
     tail = rows[len(rows) // 2:]
     return sum(float(row.get("mfu", 0.0)) for row in tail) / len(tail)
+
+
+def format_row(row: dict) -> str:
+    """One compact log line for a step record.
+
+    The line reports the loss, the gradient norm, the wall step time, the
+    compute time alone, the throughput, and the model FLOPs utilization. The
+    difference between the two times is the data cost.
+    """
+    return (f"loss {float(row['loss']):.4f}  "
+            f"grad_norm {float(row['grad_norm']):.4g}  "
+            f"step {float(row['step_seconds']):.2f}s  "
+            f"(compute {float(row.get('compute_seconds', 0.0)):.2f}s)  "
+            f"{float(row['tokens_per_sec']):,.0f} tok/s  "
+            f"mfu {float(row['mfu']) * 100:.2f}%")
+
+
+def log_progress(row: dict, total: int) -> None:
+    """A `progress` callback that prints one log line per step."""
+    print(f"[{int(row['step']):5d}/{int(total)}] {format_row(row)}",
+          flush=True)
 
 
 def read_metrics(path) -> list[dict]:
