@@ -520,6 +520,14 @@ class Model:
     def param_count(self) -> int:
         return int(self._lib.nanochat_param_count(self._handle))
 
+    def param_total(self) -> int:
+        """The scalar count over every parameter view.
+
+        `param_count` returns the number of views, which is not the scalar
+        count. Use this method for a parameter report.
+        """
+        return sum(view.count for view in self.params())
+
     def params(self) -> list[ParamView]:
         """The parameter views in the optimizer's grouping order."""
         library = self._lib

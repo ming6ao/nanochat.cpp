@@ -131,6 +131,16 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(config.num_heads, 4)
         self.assertEqual(config.padded_vocab_size, 1024)
 
+    def test_param_total_counts_scalars(self) -> None:
+        import nanochat_cpp as nc
+
+        config = self.config()
+        model = Model(config, seed=0)
+        total = model.param_total()
+        self.assertEqual(total, nc.plan.params(config).total)
+        self.assertGreater(model.param_count(), 0)
+        self.assertGreater(total, model.param_count())
+
     def test_tokenizer_round_trip(self) -> None:
         tokenizer = Tokenizer.load(resolve(TOKENIZER))
         text = "The capital of France is"
