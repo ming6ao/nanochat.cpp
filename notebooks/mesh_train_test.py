@@ -1,20 +1,24 @@
-"""T0: the pure helpers of the mesh training loop.
+"""T0: the pure helpers of the mesh training loop and the child launch.
 
 The test covers the batch mapping, the model FLOPs utilization, the summary
-statistics, and the loop itself against a fake runtime and loader. It needs no
-shared library, no GPU, and no broker. See ``docs/client-runtime-design.md``
-and ``docs/notebook-workflow.md``.
+statistics, the loop against a fake runtime, the plan job round trip, and the
+child launch against a fake ``tools/nanochat`` entry. It needs no shared
+library, no GPU, and no broker. See ``docs/notebook-workflow.md``.
 """
 
 from __future__ import annotations
 
 import json
+import stat
+import sys
 import tempfile
-import types
+import time
 import unittest
 from pathlib import Path
 
 import mesh_train
+import mesh_worker
+import nanochat_cpp as nc
 
 
 class GlobalBatchTest(unittest.TestCase):
@@ -52,10 +56,31 @@ class SummaryTest(unittest.TestCase):
         self.assertAlmostEqual(mesh_train.steady_mfu(rows), 0.5)
 
 
+class JobTest(unittest.TestCase):
+    def test_round_trip(self) -> None:
+        plan = _plan("/tmp/mesh-out")
+        job = plan.job()
+        self.assertEqual(job["tokenizer_path"], plan.tokenizer)
+        self.assertEqual(job["config"]["num_layers"], plan.config.num_layers)
+        self.assertEqual(job["config"]["window_pattern"],
+                         plan.config.window_pattern)
+
+        rebuilt = mesh_train.MeshTrainPlan.from_job(job)
+        self.assertEqual(rebuilt.train_parquet, plan.train_parquet)
+        self.assertEqual(rebuilt.tokenizer, plan.tokenizer)
+        self.assertEqual(rebuilt.global_sequences, plan.global_sequences)
+        self.assertEqual(rebuilt.sequence_length, plan.sequence_length)
+        self.assertEqual(rebuilt.config.value_embedding,
+                         plan.config.value_embedding)
+        self.assertEqual(rebuilt.preset, plan.preset)
+        self.assertEqual(rebuilt.flops_per_token, plan.flops_per_token)
+
+
 class _Metrics:
-    def __init__(self, loss, grad_norm=1.0):
+    def __init__(self, loss, grad_norm=1.0, step_seconds=0.05):
         self.loss = tuple(loss)
         self.grad_norm = grad_norm
+        self.step_seconds = step_seconds
         self.mean_loss = sum(loss) / len(loss)
 
 
@@ -93,12 +118,18 @@ class _FakeData:
         self.count = 0
 
 
+def _config() -> nc.Config:
+    return nc.Config(num_layers=2, num_heads=2, num_kv_heads=1, hidden_dim=32,
+                     seq_len=8, vocab_size=64, window_pattern="SL",
+                     value_embedding=False)
+
+
 def _plan(tmp: str, **overrides) -> mesh_train.MeshTrainPlan:
     values = dict(
         train_parquet="train.parquet",
-        tokenizer=object(),
+        tokenizer="tokenizer.nctoken",
         out_dir=tmp,
-        config=types.SimpleNamespace(seq_len=8),
+        config=_config(),
         per_rank_batch=1,
         grad_accum=2,
         world_size=2,
@@ -145,13 +176,13 @@ class IterateTest(unittest.TestCase):
             # over 1000 peak FLOP: 0.64.
             self.assertAlmostEqual(records[0]["mfu"], 0.64)
             self.assertAlmostEqual(records[0]["tokens_per_sec"], 320.0)
+            self.assertAlmostEqual(records[0]["compute_seconds"], 0.05)
             # The save cadence fires on steps 2 and 4.
             self.assertEqual(len(runtime.saved), 2)
 
-            written = plan.metrics_path().read_text(encoding="utf-8")
-            lines = [json.loads(line) for line in written.splitlines()]
-            self.assertEqual(len(lines), plan.steps)
-            self.assertEqual(lines[-1]["step"], plan.steps)
+            written = mesh_train.read_metrics(plan.metrics_path())
+            self.assertEqual(len(written), plan.steps)
+            self.assertEqual(written[-1]["step"], plan.steps)
 
     def test_resets_a_short_loader(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -173,6 +204,69 @@ class IterateTest(unittest.TestCase):
             plan = _plan(tmp, steps=2, save_every=0)
             with self.assertRaises(RuntimeError):
                 mesh_train.iterate(_FakeRuntime(), _FakeData(0), plan)
+
+
+_FAKE_ENTRY = """\
+import sys
+import time
+
+print("fake client", " ".join(sys.argv[1:]), flush=True)
+time.sleep(0.3)
+print("fake done", flush=True)
+"""
+
+_SLEEP_ENTRY = """\
+import time
+
+print("sleeping", flush=True)
+time.sleep(60)
+"""
+
+
+def _fake_entry(root: Path, body: str) -> Path:
+    entry = root / "fake-nanochat"
+    entry.write_text(f"#!{sys.executable}\n{body}", encoding="utf-8")
+    entry.chmod(entry.stat().st_mode | stat.S_IEXEC)
+    return entry
+
+
+class LaunchTest(unittest.TestCase):
+    def test_launch_runs_a_child_and_writes_a_log(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            entry = _fake_entry(root, _FAKE_ENTRY)
+            plan = _plan(str(root / "out"))
+            live = mesh_train.launch(plan, root=root, entry=str(entry))
+            code = live.wait(timeout=20)
+
+            self.assertEqual(code, 0)
+            self.assertIn("fake client", live.tail())
+            self.assertTrue((Path(plan.out_dir) / "worker.log").is_file())
+            job = json.loads(
+                (Path(plan.out_dir) / "job.json").read_text(encoding="utf-8"))
+            self.assertEqual(job["tokenizer_path"], plan.tokenizer)
+            self.assertEqual(job["per_rank_batch"], plan.per_rank_batch)
+
+    def test_terminate_stops_a_sleeping_child(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            entry = _fake_entry(root, _SLEEP_ENTRY)
+            plan = _plan(str(root / "out"))
+            live = mesh_train.launch(plan, root=root, entry=str(entry))
+            time.sleep(0.3)
+            self.assertTrue(live.running())
+            live.terminate(timeout=10)
+            self.assertFalse(live.running())
+
+
+class WorkerTest(unittest.TestCase):
+    def test_usage_error(self) -> None:
+        self.assertEqual(mesh_worker.main([]), 2)
+
+    def test_missing_job_raises(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(FileNotFoundError):
+                mesh_worker.main([str(Path(tmp) / "missing.json")])
 
 
 if __name__ == "__main__":

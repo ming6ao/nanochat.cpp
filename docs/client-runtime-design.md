@@ -582,8 +582,11 @@ This section records what the tree implements.
   `tools/nanochat client`.
 - `tools/nanochat client`: one broker lock for the full device set, then one
   sandbox scope.
-- `notebooks/mesh_train.py`: the notebook loop over the runtime, and
-  `notebooks/nanochat-cpp-on-2x-t4.ipynb`, the two-card end-to-end notebook.
+- `notebooks/mesh_train.py`: the notebook loop over the runtime, the
+  `MeshTrainPlan` job round trip, and the child `launch` through
+  `tools/nanochat client`. `notebooks/mesh_worker.py` is the child entry point,
+  and `notebooks/nanochat-cpp-on-2x-t4.ipynb` is the two-card end-to-end
+  notebook.
 - Phase 3: the CUDA backend state is thread-local, and each device thread binds
   with `SelectDevice`. The cuBLAS handle, the tensor-core flag, the device name
   buffer, and the attention, Muon, and ANVIL scratch buffers are per thread.

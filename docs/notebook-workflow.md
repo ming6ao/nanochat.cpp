@@ -193,17 +193,20 @@ resumed trial has no live model, so it cannot supply the checkpoint.
 ### 3.9 The two-card option: one client, one process
 
 The two-card notebook does not fan out one process per card. It uses the
-single-client multi-device runtime (`docs/client-runtime-design.md`). One
+single-client multi-device runtime (`docs/client-runtime-design.md`). One worker
 process owns both cards. `MeshRuntime` builds one model replica per device, one
 device thread per replica, and reduces the gradients with the in-process
 collective. One broker lock and one sandbox scope cover the run, so the
 per-rank `tools/gpu.sh` deadlock cannot occur.
 
+The notebook starts the worker in a child process (`mesh_train.launch` and
+`mesh_worker.py`), so the launch cell returns and the notebook status stays
+correct. A monitor cell polls `worker.log` and `metrics.jsonl` instead.
+
+`tools/nanochat client` selects the devices. The child runs the library in
+process. On Kaggle the sandbox backend is `none`, so the child is not brokered.
 The multi-process launch (`tools/nanochat dist`, `docs/distributed-launch.md`)
-stays for the process-isolation case. The notebook uses the in-process runtime.
-On Kaggle the sandbox backend is `none`, so the notebook process is not
-brokered. On a brokered host, run the client script through
-`python -m nanochat_cpp.run` or `tools/nanochat client`.
+stays for the process-isolation case.
 
 ## 4. The notebook shape
 
@@ -232,8 +235,9 @@ optional. Add a trial list and call `run_sweep` for an ablation study.
 | `notebooks/kaggle_setup.py` | New. The session setup: fetch, bootstrap, host environment, build. | Notebooks |
 | `notebooks/kaggle_setup_test.py` | New. Tests for the pure setup helpers. | Notebooks |
 | `notebooks/BUILD.bazel` | New. Two `py_library` targets, two CPU `py_test` targets, and a `test_suite`. | Notebooks |
-| `notebooks/mesh_train.py` | New. The single-client multi-device loop: `MeshTrainPlan`, `global_batch`, `iterate`, `run`. | Notebooks |
-| `notebooks/mesh_train_test.py` | New. Tests for the pure loop helpers. | Notebooks |
+| `notebooks/mesh_train.py` | New. The single-client multi-device loop: `MeshTrainPlan`, `global_batch`, `iterate`, `run`, and the child `launch`. | Notebooks |
+| `notebooks/mesh_worker.py` | New. The child entry point: read the job file, then call `mesh_train.run`. | Notebooks |
+| `notebooks/mesh_train_test.py` | New. Tests for the pure loop helpers and the child launch. | Notebooks |
 | `notebooks/nanochat-cpp-on-2x-t4.ipynb` | The end-to-end notebook: the mesh runtime, then the evaluation and the post-training. | Notebooks |
 | `notebooks/kaggle_demo.py` | Use `nanochat_cpp.sft_data` for the real SFT mixture. Fall back to the offline demo set when the hub is unreachable. | Notebooks |
 | `docs/notebook-workflow.md` | This document. | Architect |

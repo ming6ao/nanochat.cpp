@@ -30,6 +30,13 @@ py_library(
 )
 
 py_library(
+    name = "mesh_worker",
+    srcs = ["mesh_worker.py"],
+    imports = ["."],
+    deps = [":mesh_train"],
+)
+
+py_library(
     name = "pi_agent",
     srcs = ["pi_agent.py"],
     imports = ["."],
@@ -53,7 +60,10 @@ py_test(
     name = "mesh_train_test",
     srcs = ["mesh_train_test.py"],
     size = "small",
-    deps = [":mesh_train"],
+    deps = [
+        ":mesh_train",
+        ":mesh_worker",
+    ],
 )
 
 py_test(
