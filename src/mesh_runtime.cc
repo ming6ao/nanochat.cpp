@@ -18,6 +18,7 @@
 #include <vector>
 
 #include "nanochat/kernels.h"
+#include "src/train.h"
 
 namespace nanochat {
 namespace {
@@ -270,19 +271,27 @@ std::uint64_t MeshRuntime::ParamDigest(int replica) const {
 }
 
 void MeshRuntime::Save(const std::string& path) {
-  Model* replica = model(0);
-  if (replica == nullptr) {
+  Replica* replica = replicas_.empty() ? nullptr : replicas_[0].get();
+  if (replica == nullptr || replica->model == nullptr ||
+      replica->optimizer == nullptr) {
     throw std::runtime_error("the runtime has no replica to save");
   }
-  replica->Save(path);
+  // The harness container carries the optimizer state and the step beside the
+  // parameters, so a resume continues the schedule (docs/training-seam.md
+  // section 10). `Model::Save` would write the parameters only.
+  Checkpointer::SaveModel(*replica->model, *replica->optimizer, step_, path);
 }
 
 void MeshRuntime::Load(const std::string& path) {
-  for (int rank = 0; rank < world_size(); ++rank) {
-    Model* replica = model(rank);
-    replica->Load(path);
-    replica->SyncMaster();
+  int step = 0;
+  for (const auto& replica : replicas_) {
+    if (replica->model == nullptr || replica->optimizer == nullptr) continue;
+    if (!Checkpointer::LoadModel(replica->model.get(), replica->optimizer.get(),
+                                 &step, path)) {
+      throw std::runtime_error("the checkpoint did not load: " + path);
+    }
   }
+  if (step > 0) step_ = step;
 }
 
 }  // namespace nanochat

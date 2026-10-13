@@ -234,6 +234,37 @@ class RuntimeTest(unittest.TestCase):
         with self.assertRaises(_core.NanochatError):
             preset_optimizer_config("unknown")
 
+    def test_save_and_load_resumes_the_step(self) -> None:
+        import os
+        import tempfile
+
+        batch, seq, accum = 4, 8, 2
+        rows = batch * seq
+        tokens = ids(rows, 64, 7, 3)
+        targets = ids(rows, 64, 11, 5)
+
+        uninterrupted = self.make_runtime(1, batch, accum)
+        resumed = self.make_runtime(1, batch, accum)
+        try:
+            uninterrupted.train_step(tokens, targets)
+            uninterrupted.train_step(tokens, targets)
+            self.assertEqual(uninterrupted.step, 2)
+
+            resumed.train_step(tokens, targets)
+            with tempfile.TemporaryDirectory() as tmp:
+                path = os.path.join(tmp, "checkpoint.nchkpt01")
+                resumed.save(path)
+                resumed.load(path)
+            self.assertEqual(resumed.step, 1)
+            resumed.train_step(tokens, targets)
+            self.assertEqual(resumed.step, 2)
+
+            self._assert_same_parameters(uninterrupted, 0, resumed, 0,
+                                         tolerance=0.0)
+        finally:
+            uninterrupted.close()
+            resumed.close()
+
     def _assert_same_parameters(self, a, a_replica, b, b_replica,
                                 tolerance: float = 1e-4) -> None:
         count = a.param_count(a_replica)

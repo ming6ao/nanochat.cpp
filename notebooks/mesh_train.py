@@ -73,6 +73,7 @@ class MeshTrainPlan:
     log_every: int = 1
     save_every: int = 0
     preset: str = "track3"
+    resume: bool = False
     flops_per_token: float = 0.0
     peak_flops: float = 0.0
 
@@ -133,6 +134,7 @@ class MeshTrainPlan:
             "log_every": self.log_every,
             "save_every": self.save_every,
             "preset": self.preset,
+            "resume": self.resume,
             "flops_per_token": self.flops_per_token,
             "peak_flops": self.peak_flops,
         }
@@ -157,6 +159,7 @@ class MeshTrainPlan:
             log_every=int(data.get("log_every", 1)),
             save_every=int(data.get("save_every", 0)),
             preset=str(data.get("preset", "track3")),
+            resume=bool(data.get("resume", False)),
             flops_per_token=float(data.get("flops_per_token", 0.0)),
             peak_flops=float(data.get("peak_flops", 0.0)),
         )
@@ -298,30 +301,43 @@ def _preset_config(plan: MeshTrainPlan):
     return config
 
 
-def iterate(runtime, data, plan: MeshTrainPlan, *,
+def _next_batch(data):
+    """The next batch, cycling the loader when it ends."""
+    batch = data.next()
+    if batch is None and hasattr(data, "reset"):
+        data.reset()
+        batch = data.next()
+    if batch is None:
+        raise RuntimeError("the data loader returned no batch")
+    return batch
+
+
+def _skip(data, count: int) -> None:
+    """Advance the loader by `count` batches, so a resume replays the stream."""
+    for _ in range(max(0, int(count))):
+        _next_batch(data)
+
+
+def iterate(runtime, data, plan: MeshTrainPlan, *, start_step: int = 1,
             progress: "Callable[[dict, int], None] | None" = None,
             clock: Callable[[], float] = time.perf_counter) -> list[dict]:
-    """Run ``plan.steps`` steps and write one record per step.
+    """Run steps ``start_step`` to ``plan.steps`` and write one record each.
 
     ``runtime`` is any object with ``train_step``, ``metrics``, and ``save``.
-    ``data`` is any object with ``next`` and ``reset``. The function is pure
-    except for the runtime, the clock, and the metrics file, so a CPU test can
-    drive a fake runtime.
+    ``data`` is any object with ``next`` and ``reset``. A fresh run starts at
+    step 1 and truncates the metrics file. A resume starts above 1 and appends
+    to it. The function is pure except for the runtime, the clock, and the
+    metrics file, so a CPU test can drive a fake runtime.
     """
     tokens_per_step = plan.tokens_per_step
     plan.metrics_path().parent.mkdir(parents=True, exist_ok=True)
     records: list[dict] = []
     start = clock()
     previous = start
-    with plan.metrics_path().open("w", encoding="utf-8") as sink:
-        for step in range(1, int(plan.steps) + 1):
-            batch = data.next()
-            if batch is None and hasattr(data, "reset"):
-                data.reset()
-                batch = data.next()
-            if batch is None:
-                raise RuntimeError("the data loader returned no batch")
-            tokens, targets = batch
+    mode = "w" if start_step <= 1 else "a"
+    with plan.metrics_path().open(mode, encoding="utf-8") as sink:
+        for step in range(int(start_step), int(plan.steps) + 1):
+            tokens, targets = _next_batch(data)
             loss = runtime.train_step(tokens, targets)
             now = clock()
             step_seconds = max(now - previous, 1e-9)
@@ -359,6 +375,11 @@ def run(plan: MeshTrainPlan, *,
     train parquet and yields one global batch per ``next()``. The run writes a
     metrics record per step, a canonical checkpoint, and a summary. An
     interrupt saves the checkpoint before it propagates.
+
+    With ``plan.resume`` set and a checkpoint on disk, the run loads the
+    parameters, the optimizer state, and the step, then continues from the next
+    step. The loader replays the consumed batches, so the data stream also
+    continues.
     """
     import nanochat_cpp as nc
     from nanochat_cpp import mesh, runtime as rt
@@ -382,16 +403,24 @@ def run(plan: MeshTrainPlan, *,
                         batch=plan.global_sequences,
                         grad_accum=plan.grad_accum,
                         seq=plan.sequence_length, seed=plan.seed) as runtime:
+        start_step = 1
+        if plan.resume and checkpoint.is_file():
+            runtime.load(str(checkpoint))
+            start_step = runtime.step + 1
+            _skip(data, start_step - 1)
+            print(f"resumed from {checkpoint} at step {start_step}",
+                  flush=True)
         try:
-            records = iterate(runtime, data, plan, progress=progress)
+            iterate(runtime, data, plan, start_step=start_step,
+                    progress=progress)
         except BaseException:
             runtime.save(str(checkpoint))
             raise
         digests = tuple(f"{runtime.replica_digest(rank):016x}"
                         for rank in range(runtime.world_size))
         runtime.save(str(checkpoint))
-    result = MeshRunResult(plan=plan, records=records, checkpoint=checkpoint,
-                           replica_digests=digests)
+    result = MeshRunResult(plan=plan, records=read_metrics(plan.metrics_path()),
+                           checkpoint=checkpoint, replica_digests=digests)
     plan.summary_path().write_text(
         json.dumps(result.to_dict(), indent=1, sort_keys=True) + "\n",
         encoding="utf-8")
@@ -442,9 +471,28 @@ class MeshLiveRun:
             raise
 
     def terminate(self, timeout: float = 30.0) -> None:
-        """Stop the child group. Send SIGINT first, so the worker can save."""
+        """Stop the child group. Send SIGINT first, so the worker can save.
+
+        Further SIGINT delivery is ignored until the stop finishes, so a second
+        cancel click does not break the cleanup.
+        """
         if self.process.poll() is not None:
             return
+        previous = None
+        try:
+            previous = signal.signal(signal.SIGINT, signal.SIG_IGN)
+        except (ValueError, OSError):
+            previous = None
+        try:
+            self._stop(timeout)
+        finally:
+            if previous is not None:
+                try:
+                    signal.signal(signal.SIGINT, previous)
+                except (ValueError, OSError):
+                    pass
+
+    def _stop(self, timeout: float) -> None:
         try:
             os.killpg(os.getpgid(self.process.pid), signal.SIGINT)
         except (ProcessLookupError, PermissionError):

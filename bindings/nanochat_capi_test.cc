@@ -476,6 +476,7 @@ nanochat_model* CheckModel() {
             nanochat_runtime_param_digest(runtime, 0, &digest) ==
                 NANOCHAT_STATUS_OK);
       Check("runtime: digest is set", digest != 0);
+      Check("runtime: the step advances", nanochat_runtime_step(runtime) == 1);
       nanochat_runtime_free(runtime);
     }
     nanochat_mesh_free(mesh);

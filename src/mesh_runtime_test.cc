@@ -205,6 +205,36 @@ void TestMetrics() {
   }
 }
 
+// A save carries the optimizer state and the step, so a resumed run continues
+// the schedule and equals one uninterrupted run.
+void TestResume() {
+  const Config model = TinyConfig();
+  const MeshRuntimeConfig config = TinyRuntimeConfig(model);
+  const int rows = config.batch * config.seq;
+  const std::vector<int> tokens = MakeIds(rows, model.vocab_size, 7, 3);
+  const std::vector<int> targets = MakeIds(rows, model.vocab_size, 11, 5);
+  const std::string path = "mesh_runtime_resume.nchkpt01";
+
+  MeshRuntime uninterrupted(MeshSpec::Data(1), config);
+  uninterrupted.TrainStep(tokens.data(), targets.data());
+  uninterrupted.TrainStep(tokens.data(), targets.data());
+  if (uninterrupted.step() != 2) Fail("the step is not 2 after two steps");
+
+  MeshRuntime resumed(MeshSpec::Data(1), config);
+  resumed.TrainStep(tokens.data(), targets.data());
+  resumed.Save(path);
+  if (resumed.step() != 1) Fail("the step is not 1 after one step");
+
+  MeshRuntime restarted(MeshSpec::Data(1), config);
+  restarted.Load(path);
+  if (restarted.step() != 1) Fail("the loaded step is not 1");
+  restarted.TrainStep(tokens.data(), targets.data());
+
+  CompareParameters(*uninterrupted.model(0), *restarted.model(0),
+                    "resume vs uninterrupted", 0.0);
+  std::remove(path.c_str());
+}
+
 }  // namespace
 
 int main() {
@@ -214,6 +244,7 @@ int main() {
   TestTwoReplicasEqualOne();
   TestFourReplicasEqualOne();
   TestReplicasStayEqual();
+  TestResume();
   if (g_failures != 0) {
     std::fprintf(stderr, "mesh_runtime_test: %d failure(s)\n", g_failures);
     return 1;

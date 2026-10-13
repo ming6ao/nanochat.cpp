@@ -286,6 +286,7 @@ _SIGNATURES = (
       ctypes.c_int, ctypes.c_uint64), RuntimeHandle),
     ("nanochat_runtime_free", (RuntimeHandle,), None),
     ("nanochat_runtime_world_size", (RuntimeHandle,), ctypes.c_int),
+    ("nanochat_runtime_step", (RuntimeHandle,), ctypes.c_int),
     ("nanochat_runtime_train_step",
      (RuntimeHandle, ctypes.POINTER(ctypes.c_int),
       ctypes.POINTER(ctypes.c_int)), ctypes.c_float),

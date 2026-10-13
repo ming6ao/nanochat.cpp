@@ -203,6 +203,10 @@ The notebook starts the worker in a child process (`mesh_train.launch` and
 `mesh_worker.py`), so the launch cell returns and the notebook status stays
 correct. A monitor cell polls `worker.log` and `metrics.jsonl` instead.
 
+The plan sets `resume=True`. A re-run loads the checkpoint, which carries the
+optimizer state and the step, replays the consumed batches, and continues from
+the next step. Set `resume=False`, or delete the run directory, to start fresh.
+
 `tools/nanochat client` selects the devices. The child runs the library in
 process. On Kaggle the sandbox backend is `none`, so the child is not brokered.
 The multi-process launch (`tools/nanochat dist`, `docs/distributed-launch.md`)

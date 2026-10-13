@@ -141,6 +141,11 @@ class MeshRuntime:
         """The number of replicas, one per device."""
         return self._world_size
 
+    @property
+    def step(self) -> int:
+        """The 1-based step of the last step, or the loaded step."""
+        return int(self._lib.nanochat_runtime_step(self._handle))
+
     def train_step(self, tokens, targets) -> float:
         """Runs one step over one global batch. Returns the global mean loss.
 
@@ -233,11 +238,19 @@ class MeshRuntime:
         return list(buffer)
 
     def save(self, path) -> None:
-        """Writes the canonical checkpoint from replica 0."""
+        """Write the canonical checkpoint from replica 0.
+
+        The file carries the optimizer state and the step beside the
+        parameters, so :meth:`load` resumes the schedule.
+        """
         self._void("nanochat_runtime_save", str(path).encode("utf-8"))
 
     def load(self, path) -> None:
-        """Loads one checkpoint into every replica."""
+        """Load one checkpoint into every replica, optimizer state included.
+
+        The runtime :attr:`step` moves to the stored step. Call :meth:`step`
+        after this to learn where to resume.
+        """
         self._void("nanochat_runtime_load", str(path).encode("utf-8"))
 
     def _void(self, name, *arguments) -> None:

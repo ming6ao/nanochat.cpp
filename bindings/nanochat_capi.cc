@@ -51,7 +51,7 @@ namespace {
 
 // The C ABI version. Bump this string on every change to the surface or to a
 // mirrored struct; docs/python.md section 13 names that rule.
-constexpr char kNanochatVersion[] = "0.8.0";
+constexpr char kNanochatVersion[] = "0.9.0";
 
 // The magic that `Checkpoint::Save` writes (src/data.cc). A file with this
 // prefix is the harness container, so `nanochat_load` routes it through the
@@ -449,6 +449,15 @@ int nanochat_runtime_world_size(nanochat_runtime* runtime) {
       throw std::invalid_argument("runtime is null");
     }
     return runtime->runtime->world_size();
+  });
+}
+
+int nanochat_runtime_step(nanochat_runtime* runtime) {
+  return Guard("nanochat_runtime_step", -1, [&]() -> int {
+    if (runtime == nullptr || runtime->runtime == nullptr) {
+      throw std::invalid_argument("runtime is null");
+    }
+    return runtime->runtime->step();
   });
 }
 

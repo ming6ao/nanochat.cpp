@@ -275,9 +275,16 @@ nanochat_status nanochat_runtime_param_digest(nanochat_runtime* runtime,
                                               int replica, uint64_t* out);
 
 // Writes the runtime's canonical checkpoint from replica 0, or loads one into
-// every replica. The file is the simple `NCMDL001` container.
+// every replica. The file is the harness `NCHKPT01` container, so it carries
+// the optimizer state and the step beside the parameters. A load restores the
+// state and moves the step, so a resume continues the schedule. A load that
+// does not find the file sets the thread-local error.
 void nanochat_runtime_save(nanochat_runtime* runtime, const char* path);
 void nanochat_runtime_load(nanochat_runtime* runtime, const char* path);
+
+// The 1-based step of the last step, or the loaded step after a load. Returns
+// -1 on a bad handle.
+int nanochat_runtime_step(nanochat_runtime* runtime);
 
 // Fills `out` from `config`. Allocates no model. Returns a status.
 nanochat_status nanochat_params_get(const nanochat_config* config,

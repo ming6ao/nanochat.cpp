@@ -563,13 +563,14 @@ This section records what the tree implements.
   `src/distributed.h` does not change.
 - `src/mesh_runtime.h` and `src/mesh_runtime.cc`: one device thread per
   replica, the device binding, the contiguous global batch split, the
-  in-process reduction, the equal optimizer step, checkpoint save and load, the
+  in-process reduction, the equal optimizer step, a checkpoint save and load
+  that carries the optimizer state and the step through `Checkpointer`, the
   `MeshMetrics` report, and the `ParamDigest` replica check.
 - `include/nanochat/capi.h`: device enumeration, the mesh handle, the runtime
-  handle, the runtime save and load, the named optimizer preset
+  handle, the runtime save and load, the step, the named optimizer preset
   (`nanochat_optim_config_preset`), the metrics (`nanochat_runtime_metrics`),
   and the replica digest (`nanochat_runtime_param_digest`). The C application
-  binary interface version moves to `0.8.0`.
+  binary interface version moves to `0.9.0`.
 - `python/nanochat_cpp/mesh.py`: `devices`, `Device`, `Mesh`, `NamedSharding`,
   `PartitionSpec`, and the placement checks.
 - `python/nanochat_cpp/runtime.py`: `MeshRuntime`, which runs one global batch

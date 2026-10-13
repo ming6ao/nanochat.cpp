@@ -63,6 +63,8 @@ class MeshRuntime {
   int effective_seq() const { return seq_; }
   int global_batch() const { return config_.batch; }
   int slice_batch() const { return slice_rows_; }
+  // The 1-based step of the last `TrainStep`, or the loaded step after `Load`.
+  int step() const { return step_; }
 
   // Runs one step over `global_batch * effective_seq()` row-major ids. The
   // controller splits the batch into one contiguous slice per replica, and each
@@ -83,11 +85,13 @@ class MeshRuntime {
   // replica index.
   std::uint64_t ParamDigest(int replica) const;
 
-  // Writes the canonical checkpoint from replica 0. Every replica is equal,
-  // so one file is the whole state.
+  // Writes the canonical checkpoint from replica 0, including the optimizer
+  // state and the step, so a resume continues the schedule. Every replica is
+  // equal, so one file is the whole state.
   void Save(const std::string& path);
 
-  // Loads one checkpoint into every replica, so the replicas stay equal.
+  // Loads one checkpoint into every replica, optimizer state included, and
+  // sets the step. Throws when the file does not load.
   void Load(const std::string& path);
 
  private:

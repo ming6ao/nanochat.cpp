@@ -99,6 +99,7 @@ class JobTest(unittest.TestCase):
         self.assertEqual(rebuilt.config.value_embedding,
                          plan.config.value_embedding)
         self.assertEqual(rebuilt.preset, plan.preset)
+        self.assertEqual(rebuilt.resume, plan.resume)
         self.assertEqual(rebuilt.flops_per_token, plan.flops_per_token)
 
 
@@ -224,6 +225,22 @@ class IterateTest(unittest.TestCase):
             self.assertEqual(plan.sequence_length, 8)
             self.assertEqual(plan.global_sequences, 4)
             self.assertEqual(plan.tokens_per_step, 32)
+
+    def test_resume_appends_and_starts_later(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            # The first run reaches step 2. A resume of a longer plan starts
+            # at step 3 and appends to the same metrics file.
+            mesh_train.iterate(_FakeRuntime(), _FakeData(1),
+                               _plan(tmp, steps=2, save_every=0),
+                               clock=_fake_clock())
+            runtime = _FakeRuntime()
+            mesh_train.iterate(runtime, _FakeData(1),
+                               _plan(tmp, steps=4, save_every=0),
+                               start_step=3, clock=_fake_clock())
+            written = mesh_train.read_metrics(
+                Path(tmp) / "metrics.jsonl")
+            self.assertEqual([row["step"] for row in written], [1, 2, 3, 4])
+            self.assertEqual(runtime.steps, 2)
 
     def test_rejects_an_empty_loader(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
