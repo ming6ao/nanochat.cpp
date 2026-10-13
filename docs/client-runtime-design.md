@@ -563,9 +563,11 @@ This section records what the tree implements.
   `src/distributed.h` does not change.
 - `src/mesh_runtime.h` and `src/mesh_runtime.cc`: one device thread per
   replica, the device binding, the contiguous global batch split, the
-  in-process reduction, the equal optimizer step, a checkpoint save and load
-  that carries the optimizer state and the step through `Checkpointer`, the
-  `MeshMetrics` report, and the `ParamDigest` replica check.
+  in-process reduction, and the equal optimizer step.
+- The checkpoint save and load carries the optimizer state and the step
+  through `Checkpointer`, so a resume continues the schedule.
+- The same files expose the `MeshMetrics` report and the `ParamDigest` replica
+  check.
 - `include/nanochat/capi.h`: device enumeration, the mesh handle, the runtime
   handle, the runtime save and load, the step, the named optimizer preset
   (`nanochat_optim_config_preset`), the metrics (`nanochat_runtime_metrics`),
