@@ -139,8 +139,10 @@ void StridedGemm(int m, int n, int k, float alpha, float beta, bool transpose_a,
 // once per layer, so a cudaMalloc/free per call would dominate. The training
 // graph is single-threaded, so no locking is needed.
 ComputeType* CachedBuffer(int slot, std::size_t count) {
-  static ComputeType* buffers[2] = {nullptr, nullptr};
-  static std::size_t capacities[2] = {0, 0};
+  // Per device thread: the scratch belongs to the current device
+  // (docs/client-runtime-design.md section 8.1).
+  thread_local ComputeType* buffers[2] = {nullptr, nullptr};
+  thread_local std::size_t capacities[2] = {0, 0};
   if (count > capacities[slot]) {
     if (buffers[slot] != nullptr) Free(buffers[slot]);
     buffers[slot] =

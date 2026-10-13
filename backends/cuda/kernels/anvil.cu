@@ -249,10 +249,12 @@ int GridSize(long long count, int threads) {
 // Cached working buffers for AnvilUpdate. cudaMalloc/cudaFree synchronize the
 // device and dominate the update when they run once per group per step, so the
 // buffers are allocated once at the largest size any group needs and reused.
-ComputeType* g_anvil_workspace = nullptr;
-std::size_t g_anvil_workspace_capacity = 0;
-float* g_anvil_scratch = nullptr;
-std::size_t g_anvil_scratch_capacity = 0;
+// They are per device thread, so two device threads do not share one buffer
+// (docs/client-runtime-design.md section 8.1).
+thread_local ComputeType* g_anvil_workspace = nullptr;
+thread_local std::size_t g_anvil_workspace_capacity = 0;
+thread_local float* g_anvil_scratch = nullptr;
+thread_local std::size_t g_anvil_scratch_capacity = 0;
 
 void EnsureAnvilWorkspace(std::size_t elements, std::size_t scratch_floats) {
   if (elements > g_anvil_workspace_capacity) {

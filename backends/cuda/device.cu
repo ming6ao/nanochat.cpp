@@ -107,7 +107,9 @@ Caps GetCaps() {
   caps.supports_fp16 =
       props.major > 5 || (props.major == 5 && props.minor >= 3);
 
-  static char device_name[256];
+  // Per device thread, so two device threads do not overwrite one name buffer
+  // (docs/client-runtime-design.md section 8.1).
+  thread_local char device_name[256];
   std::snprintf(device_name, sizeof(device_name), "%s", props.name);
   caps.device_name = device_name;
   return caps;
@@ -146,6 +148,10 @@ std::vector<DeviceInfo> EnumerateDevices() {
     devices.push_back(info);
   }
   return devices;
+}
+
+void SelectDevice(int index) {
+  cuda_backend::CheckCuda(cudaSetDevice(index), "cudaSetDevice");
 }
 
 }  // namespace nanochat

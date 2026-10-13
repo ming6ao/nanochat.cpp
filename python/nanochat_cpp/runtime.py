@@ -73,9 +73,12 @@ class MeshRuntime:
         library = _lib.load()
         self._lib = library
         self._mesh = mesh
-        self._mesh_handle = library.nanochat_mesh_create_data(mesh.size)
+        indices = [int(device.index) for device in mesh.devices]
+        indices_buffer = (ctypes.c_int * len(indices))(*indices)
+        self._mesh_handle = library.nanochat_mesh_create(indices_buffer,
+                                                         len(indices))
         _core.check_handle(library, self._mesh_handle,
-                           "nanochat_mesh_create_data")
+                           "nanochat_mesh_create")
         optim_pointer = (
             ctypes.byref(core_optimizer)
             if core_optimizer is not None
@@ -164,6 +167,22 @@ class MeshRuntime:
             raise _core.NanochatError("nanochat_runtime_param_read",
                                       _core.last_error(self._lib))
         return list(buffer)
+
+    def save(self, path) -> None:
+        """Writes the canonical checkpoint from replica 0."""
+        self._void("nanochat_runtime_save", str(path).encode("utf-8"))
+
+    def load(self, path) -> None:
+        """Loads one checkpoint into every replica."""
+        self._void("nanochat_runtime_load", str(path).encode("utf-8"))
+
+    def _void(self, name, *arguments) -> None:
+        """Calls a ``void`` entry point and raises on a new error."""
+        before = _core.last_error(self._lib)
+        getattr(self._lib, name)(self._handle, *arguments)
+        after = _core.last_error(self._lib)
+        if after and after != before:
+            raise _core.NanochatError(name, after)
 
     def close(self) -> None:
         """Releases the runtime and the mesh handles. Safe to call twice."""

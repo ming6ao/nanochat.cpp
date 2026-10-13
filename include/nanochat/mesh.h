@@ -44,6 +44,12 @@ struct DeviceInfo {
 // entries are values.
 std::vector<DeviceInfo> EnumerateDevices();
 
+// Binds the calling thread to the backend device at `index`. The runtime calls
+// this once per device thread before it builds a replica, so the thread-affine
+// rule of docs/client-runtime-design.md section 8 holds. The CPU reference
+// backend makes it a no-op; the CUDA backend calls `cudaSetDevice`.
+void SelectDevice(int index);
+
 // ---------------------------------------------------------------------------
 // Mesh
 // ---------------------------------------------------------------------------
@@ -59,9 +65,15 @@ inline constexpr const char* kMeshDataAxis = "data";
 struct MeshSpec {
   std::vector<int> shape;
   std::vector<std::string> axis_names;
+  // The backend device index at each mesh position, in row-major order.
+  std::vector<int> device_indices;
 
-  // Builds a rank-1 data mesh over `size` devices. A size below 1 becomes 1.
+  // Builds a rank-1 data mesh over the devices `0, 1, ... , size - 1`. A size
+  // below 1 becomes 1.
   static MeshSpec Data(int size);
+
+  // Builds a rank-1 data mesh over the given device indices.
+  static MeshSpec Data(std::vector<int> device_indices);
 
   // The product of the axis sizes.
   int size() const;

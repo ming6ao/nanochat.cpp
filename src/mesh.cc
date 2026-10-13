@@ -6,6 +6,7 @@
 #include "nanochat/mesh.h"
 
 #include <string>
+#include <utility>
 
 namespace nanochat {
 namespace {
@@ -15,9 +16,20 @@ constexpr const char* kDataAxis = kMeshDataAxis;
 }  // namespace
 
 MeshSpec MeshSpec::Data(int size) {
+  const int count = size < 1 ? 1 : size;
+  std::vector<int> device_indices(static_cast<std::size_t>(count));
+  for (int i = 0; i < count; ++i) {
+    device_indices[static_cast<std::size_t>(i)] = i;
+  }
+  return Data(std::move(device_indices));
+}
+
+MeshSpec MeshSpec::Data(std::vector<int> device_indices) {
   MeshSpec mesh;
-  mesh.shape = {size < 1 ? 1 : size};
+  if (device_indices.empty()) device_indices.push_back(0);
+  mesh.shape = {static_cast<int>(device_indices.size())};
   mesh.axis_names = {kDataAxis};
+  mesh.device_indices = std::move(device_indices);
   return mesh;
 }
 
@@ -48,6 +60,10 @@ bool MeshSpec::Validate(std::string* error) const {
   if (axis_names[0] != kDataAxis) {
     return fail("the one mesh axis must be named \"" + std::string(kDataAxis) +
                 "\"; this mesh names it \"" + axis_names[0] + "\"");
+  }
+  if (!device_indices.empty() &&
+      device_indices.size() != static_cast<std::size_t>(size())) {
+    return fail("the device index list does not match the mesh size");
   }
   return true;
 }

@@ -46,7 +46,10 @@ void CheckCublas(cublasStatus_t status, const char* what) {
 }
 
 cublasHandle_t Handle() {
-  static cublasHandle_t handle = nullptr;
+  // One handle per device thread: a cuBLAS handle binds to the current device,
+  // so a shared handle would target the wrong card in a multi-device process
+  // (docs/client-runtime-design.md section 8.1).
+  thread_local cublasHandle_t handle = nullptr;
   if (handle == nullptr) {
     CheckCublas(cublasCreate(&handle), "cublasCreate");
   }
@@ -58,7 +61,8 @@ cublasHandle_t Handle() {
 // the fp16 build branches on it.
 #if defined(NANOCHAT_PRECISION_FP16)
 bool HasTensorCores() {
-  static const bool has_tensor_cores = GetCaps().has_tensor_cores;
+  // Per device thread, so each card caches its own capability.
+  thread_local const bool has_tensor_cores = GetCaps().has_tensor_cores;
   return has_tensor_cores;
 }
 #endif

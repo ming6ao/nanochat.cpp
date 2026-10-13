@@ -339,11 +339,18 @@ int nanochat_device_at(int ordinal, nanochat_device* out) {
   });
 }
 
-nanochat_mesh* nanochat_mesh_create_data(int size) {
-  return Guard("nanochat_mesh_create_data",
-               static_cast<nanochat_mesh*>(nullptr), [&]() -> nanochat_mesh* {
+nanochat_mesh* nanochat_mesh_create(const int* indices, int count) {
+  return Guard("nanochat_mesh_create", static_cast<nanochat_mesh*>(nullptr),
+               [&]() -> nanochat_mesh* {
+                 const int n = count < 1 ? 1 : count;
+                 std::vector<int> device_indices(static_cast<std::size_t>(n));
+                 for (int i = 0; i < n; ++i) {
+                   device_indices[static_cast<std::size_t>(i)] =
+                       indices != nullptr ? indices[i] : i;
+                 }
                  auto handle = std::make_unique<nanochat_mesh>();
-                 handle->mesh = nanochat::MeshSpec::Data(size);
+                 handle->mesh =
+                     nanochat::MeshSpec::Data(std::move(device_indices));
                  return handle.release();
                });
 }
@@ -457,6 +464,26 @@ int64_t nanochat_runtime_param_read(nanochat_runtime* runtime, int replica,
             nanochat::CopyDir::kDeviceToHost);
         return count;
       });
+}
+
+void nanochat_runtime_save(nanochat_runtime* runtime, const char* path) {
+  GuardVoid("nanochat_runtime_save", [&]() {
+    if (runtime == nullptr || runtime->runtime == nullptr) {
+      throw std::invalid_argument("runtime is null");
+    }
+    if (path == nullptr) throw std::invalid_argument("path is null");
+    runtime->runtime->Save(path);
+  });
+}
+
+void nanochat_runtime_load(nanochat_runtime* runtime, const char* path) {
+  GuardVoid("nanochat_runtime_load", [&]() {
+    if (runtime == nullptr || runtime->runtime == nullptr) {
+      throw std::invalid_argument("runtime is null");
+    }
+    if (path == nullptr) throw std::invalid_argument("path is null");
+    runtime->runtime->Load(path);
+  });
 }
 
 nanochat_status nanochat_params_get(const nanochat_config* config,

@@ -133,6 +133,28 @@ class RuntimeTest(unittest.TestCase):
                 pair.train_step(tokens, targets)
             self._assert_same_parameters(pair, 0, pair, 1, tolerance=0.0)
 
+    def test_save_and_load(self) -> None:
+        import os
+        import tempfile
+
+        batch, seq, accum = 4, 8, 2
+        rows = batch * seq
+        tokens = ids(rows, 64, 7, 3)
+
+        single = self.make_runtime(1, batch, accum)
+        pair = self.make_runtime(2, batch, accum)
+        try:
+            single.train_step(tokens, tokens)
+            with tempfile.TemporaryDirectory() as tmp:
+                path = os.path.join(tmp, "checkpoint.ncmdl")
+                single.save(path)
+                pair.load(path)
+            self._assert_same_parameters(single, 0, pair, 0, tolerance=0.0)
+            self._assert_same_parameters(pair, 0, pair, 1, tolerance=0.0)
+        finally:
+            single.close()
+            pair.close()
+
     def _assert_same_parameters(self, a, a_replica, b, b_replica,
                                 tolerance: float = 1e-4) -> None:
         count = a.param_count(a_replica)

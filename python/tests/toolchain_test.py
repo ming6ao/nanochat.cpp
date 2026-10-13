@@ -129,6 +129,15 @@ class ToolchainTest(unittest.TestCase):
                     "--master", "127.0.0.1", "--port", "29500", "--",
                     "binary"])
 
+    def test_client(self) -> None:
+        self.check(
+            self.toolchain.client(["python", "train.py"], device="0,1"),
+            ["client", "--device", "0,1", "--profile", "train", "--",
+             "python", "train.py"])
+        self.check(self.toolchain.client(["python", "train.py"]),
+                   ["client", "--profile", "train", "--", "python",
+                    "train.py"])
+
     def test_gpu_inside_sandbox_skips_the_broker(self) -> None:
         env = dict(self.env)
         env["NANOCHAT_SANDBOX"] = "t2-parity"

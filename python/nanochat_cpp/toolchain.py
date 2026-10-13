@@ -29,6 +29,7 @@ __all__ = [
     "bench",
     "build",
     "check",
+    "client",
     "commands",
     "dispatch",
     "dist",
@@ -207,6 +208,21 @@ class Toolchain:
         arguments += ["--", *(str(value) for value in argv)]
         return self._run(arguments)
 
+    def client(self, argv: Sequence[str], *, device: str | None = None,
+               profile: str = "train") -> CommandResult:
+        """Run one client process under one broker lock for the device set.
+
+        The client enumerates every local device itself, builds one mesh, and
+        trains in one process. See ``docs/client-runtime-design.md`` section
+        14.
+        """
+        arguments = ["client"]
+        if device is not None:
+            arguments += ["--device", str(device)]
+        arguments += ["--profile", str(profile), "--",
+                      *(str(value) for value in argv)]
+        return self._run(arguments)
+
     def train(self, argv: Sequence[str] | None = None) -> CommandResult:
         return self._run(["train", "--", *(argv or [])])
 
@@ -354,6 +370,11 @@ def dist(argv: Sequence[str], *, nproc_per_node: int = 2,
     return _toolchain().dist(argv, nproc_per_node=nproc_per_node,
                              device=device, master=master, port=port,
                              profile=profile, log_dir=log_dir, json=json)
+
+
+def client(argv: Sequence[str], *, device: str | None = None,
+           profile: str = "train") -> CommandResult:
+    return _toolchain().client(argv, device=device, profile=profile)
 
 
 def train(argv: Sequence[str] | None = None) -> CommandResult:

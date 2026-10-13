@@ -1766,4 +1766,8 @@ std::vector<DeviceInfo> EnumerateDevices() {
   return {info};
 }
 
+void SelectDevice(int /*index*/) {
+  // The reference backend is one host device, so every thread already uses it.
+}
+
 }  // namespace nanochat

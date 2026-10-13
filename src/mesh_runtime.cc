@@ -30,6 +30,7 @@ struct MeshRuntime::Replica {
 
   std::mutex mutex;
   std::condition_variable cv;
+  int device = 0;
   bool ready = false;
   bool has_work = false;
   bool done = false;
@@ -71,6 +72,9 @@ MeshRuntime::MeshRuntime(const MeshSpec& mesh, MeshRuntimeConfig config)
   for (int rank = 0; rank < world; ++rank) {
     replicas_.push_back(std::make_unique<Replica>());
     Replica* replica = replicas_.back().get();
+    replica->device = rank < static_cast<int>(mesh_.device_indices.size())
+                          ? mesh_.device_indices[static_cast<std::size_t>(rank)]
+                          : rank;
     replica->sync = collective_->Participant(rank);
     replica->thread = std::thread([this, replica] { ReplicaLoop(*replica); });
   }
@@ -97,6 +101,10 @@ MeshRuntime::~MeshRuntime() {
 }
 
 void MeshRuntime::ReplicaLoop(Replica& replica) {
+  // Bind the thread to its device before any backend call, so the model, the
+  // workspace, and the kernels all land on the right card
+  // (docs/client-runtime-design.md section 8).
+  SelectDevice(replica.device);
   replica.model = Model::Create(config_.model);
   replica.model->InitWeights(config_.seed);
   Scheduler scheduler(config_.scheduler);
@@ -208,6 +216,22 @@ int MeshRuntime::param_count(int replica) const {
   return replica_model == nullptr
              ? 0
              : static_cast<int>(replica_model->params().size());
+}
+
+void MeshRuntime::Save(const std::string& path) {
+  Model* replica = model(0);
+  if (replica == nullptr) {
+    throw std::runtime_error("the runtime has no replica to save");
+  }
+  replica->Save(path);
+}
+
+void MeshRuntime::Load(const std::string& path) {
+  for (int rank = 0; rank < world_size(); ++rank) {
+    Model* replica = model(rank);
+    replica->Load(path);
+    replica->SyncMaster();
+  }
 }
 
 }  // namespace nanochat

@@ -214,6 +214,16 @@ py_test(
     size = "small",
 )
 
+# T0: the client entry point re-enters `tools/nanochat client`
+# (docs/client-runtime-design.md section 14). Hermetic: a recording tool, so it
+# needs no library, no Bazel, and no GPU.
+py_test(
+    name = "run_test",
+    srcs = ["tests/run_test.py"],
+    deps = [":nanochat_cpp"],
+    size = "small",
+)
+
 # Aggregation point consumed by //:all_tests.
 test_suite(
     name = "all",
@@ -232,5 +242,6 @@ test_suite(
         ":rl_test",
         ":mesh_test",
         ":runtime_test",
+        ":run_test",
     ],
 )

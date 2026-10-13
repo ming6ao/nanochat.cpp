@@ -41,6 +41,18 @@ void TestDataMeshClampsSize() {
   if (mesh.size() != 1) Fail("a data mesh of 0 must clamp to 1");
 }
 
+void TestDeviceIndices() {
+  const nanochat::MeshSpec mesh = nanochat::MeshSpec::Data({3, 1});
+  if (mesh.size() != 2) Fail("a device-index mesh has the wrong size");
+  if (mesh.device_indices != std::vector<int>({3, 1})) {
+    Fail("the device indices are wrong");
+  }
+  std::string error;
+  if (!mesh.Validate(&error)) Fail("a device-index mesh failed validation");
+  // The reference backend binds every thread to the one host device.
+  nanochat::SelectDevice(0);
+}
+
 void TestRejectsRankTwo() {
   nanochat::MeshSpec mesh;
   mesh.shape = {2, 2};
@@ -85,6 +97,7 @@ int main() {
   nanochat::RequireSandboxOrDie("test");
   TestDataMesh();
   TestDataMeshClampsSize();
+  TestDeviceIndices();
   TestRejectsRankTwo();
   TestRejectsUnknownAxis();
   TestRejectsEmptyMesh();

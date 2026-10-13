@@ -32,6 +32,9 @@ tools/nanochat <command> [args...]
                              group; sets the NANOCHAT_* rank variables and
                              expands a `{rank}` token in the command. See
                              docs/distributed-launch.md
+  client [opts] -- <cmd...>  one client process; one broker lock for the full
+                             device set; the client sees all local devices as
+                             one mesh. See docs/client-runtime-design.md
   train -- <cmd...>          alias for: run train -- <cmd...>
   rl    -- <cmd...>          alias for: run train -- <cmd...>
   eval  -- <cmd...>          alias for: run eval  -- <cmd...>
@@ -342,6 +345,65 @@ case "$command" in
       done
     fi
     exit "$rc"
+    ;;
+
+  client)
+    # Single-process multi-device client: one broker lock for the full device
+    # set, then one sandbox scope (docs/client-runtime-design.md section 14).
+    # The client enumerates the devices itself, so only CUDA_VISIBLE_DEVICES
+    # travels to the process. Without --device, every local accelerator is
+    # selected.
+    client_device=""
+    client_profile=train
+    cmd=()
+    while (( $# )); do
+      case "$1" in
+        --device)
+          client_device=${2:?--device needs a value}
+          shift 2
+          ;;
+        --device=*)
+          client_device=${1#--device=}
+          shift
+          ;;
+        --profile)
+          client_profile=${2:?--profile needs a value}
+          shift 2
+          ;;
+        --profile=*)
+          client_profile=${1#--profile=}
+          shift
+          ;;
+        --)
+          shift
+          cmd=("$@")
+          break
+          ;;
+        *) die "client: unknown option $1" ;;
+      esac
+    done
+    (( ${#cmd[@]} )) || die "client: no command given; use: tools/nanochat client -- <cmd...>"
+    if [[ -z $client_device ]]; then
+      if [[ -n ${NANOCHAT_GPU_DEVICES:-} ]]; then
+        client_device=$NANOCHAT_GPU_DEVICES
+      elif command -v nvidia-smi >/dev/null 2>&1; then
+        client_device=$(nvidia-smi --query-gpu=index --format=csv,noheader \
+          2>/dev/null | paste -sd, -)
+        [[ -n $client_device ]] || client_device=0
+      else
+        client_device=0
+      fi
+    fi
+    # One broker lock for the whole device set. A per-device lock would let two
+    # clients split one model across the cards and corrupt the run.
+    if [[ -z ${NANOCHAT_SANDBOX:-} && -z ${NANOCHAT_CLIENT_BROKERED:-} && \
+          ${NANOCHAT_SANDBOX_BACKEND:-auto} != none ]]; then
+      export NANOCHAT_CLIENT_BROKERED=1
+      reexec=("$0" client --device "$client_device" --profile "$client_profile")
+      exec "$broker" --lock-only --device "$client_device" -- \
+        "${reexec[@]}" -- "${cmd[@]}"
+    fi
+    exec "$sandbox" --profile "$client_profile" -- "${cmd[@]}"
     ;;
 
   lint)

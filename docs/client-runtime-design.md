@@ -233,10 +233,10 @@ one device thread owns one device.
 
 This rule keeps the seam frozen.
 
-### 8.1 Backend state that must become thread-local
+### 8.1 Backend state that is thread-local
 
-The CUDA backend holds process-global state today. Each item must become
-thread-local:
+The CUDA backend holds process-global state in the first draft. Each item is
+thread-local now:
 
 | Item | File |
 |---|---|
@@ -354,8 +354,8 @@ The client is the entry point. The runtime keeps the sandbox rule.
 - The client process runs inside one sandbox scope. It takes one broker lock
   for the device set.
 - `tools/nanochat run train -- python train.py` is the strict form.
-- A console script `nanochat run train.py` re-enters `tools/nanochat`. The user
-  sees one command.
+- The console script `python -m nanochat_cpp.run train.py` re-enters
+  `tools/nanochat client`. The user sees one command.
 
 The `nanochat_init()` sandbox check stays. A run outside the entry point still
 fails fast.
@@ -552,40 +552,47 @@ This section records what the tree implements.
 
 ### Delivered
 
-- `include/nanochat/mesh.h`: the device list, `MeshSpec`, and the rank-1 data
-  rule. The CPU and CUDA backends implement `EnumerateDevices`.
+- `include/nanochat/mesh.h`: the device list, `MeshSpec` with the device
+  indices, `SelectDevice`, and the rank-1 data rule. The CPU and CUDA backends
+  implement `EnumerateDevices` and `SelectDevice`.
 - `src/mesh.cc`: the mesh validation shared by the runtime and the client.
 - `src/mesh_collective.h` and `src/mesh_collective.cc`: the in-process
   all-reduce over a reusable barrier and one host staging buffer. It satisfies
   the `GradientSync` seam, so `src/distributed.h` does not change.
 - `src/mesh_runtime.h` and `src/mesh_runtime.cc`: one device thread per
-  replica, one model and one optimizer per thread, the contiguous global batch
-  split, the in-process reduction, and the equal optimizer step.
-- `capi.h`: `nanochat_device_count`, `nanochat_device_at`, the `nanochat_mesh`
-  handle, and the `nanochat_runtime` handle. The C application binary interface
-  version moved to `0.7.0`.
+  replica, the device binding, the contiguous global batch split, the
+  in-process reduction, the equal optimizer step, and checkpoint save and load.
+- `include/nanochat/capi.h`: device enumeration, the mesh handle, the runtime
+  handle, and the runtime save and load. The C application binary interface
+  version moves to `0.7.0`.
 - `python/nanochat_cpp/mesh.py`: `devices`, `Device`, `Mesh`, `NamedSharding`,
   `PartitionSpec`, and the placement checks.
 - `python/nanochat_cpp/runtime.py`: `MeshRuntime`, which runs one global batch
-  over the mesh and returns one loss.
+  over the mesh, returns one loss, and saves or loads a checkpoint.
+- `python/nanochat_cpp/run.py`: the client entry point. It re-enters
+  `tools/nanochat client`.
+- `tools/nanochat client`: one broker lock for the full device set, then one
+  sandbox scope.
+- Phase 3: the CUDA backend state is thread-local, and each device thread binds
+  with `SelectDevice`. The cuBLAS handle, the tensor-core flag, the device name
+  buffer, and the attention, Muon, and ANVIL scratch buffers are per thread.
 - Tests: `//src:mesh_test`, `//src:mesh_runtime_test`, `//python:mesh_test`,
-  `//python:runtime_test`, and the device enumeration in
+  `//python:runtime_test`, `//python:run_test`, and the device enumeration in
   `//bindings:nanochat_capi_test`.
 
 ### The evidence
 
 The two-device and the four-device CPU runs equal the one-device run on the
 loss and on every parameter. The replicas of one runtime stay byte-identical
-over several steps. The Python client reproduces the same result through the C
-application binary interface.
+over several steps. A save from one replica loads into every replica. The
+Python client reproduces the same result through the C application binary
+interface. The CUDA compile gate passes with warnings as errors.
 
 ### Not delivered
 
-- Phase 3: the CUDA backend still holds process-global state: the cuBLAS
-  handle, the tensor-core flag, the device name buffer, and the scratch
-  buffers. A two-device CUDA run is therefore not safe yet. Section 8.1 and
-  section 17 phase 3 name the work.
-- Phase 4: the console script and the broker coverage for the full device set.
-- Phase 5: the peer-to-peer fast path and the loader behind the runtime.
-- The loader and the checkpoint are not yet wired to `MeshRuntime`. The client
-  supplies the global batch and reads parameters directly.
+- Phase 5: the peer-to-peer fast path. The host staging path is correct first
+  (section 9.4).
+- The controller drives the loader, so a step does not overlap the data read.
+  The overlap needs the loader behind the runtime (section 11).
+- A two-device CUDA run on real cards is not measured here. It needs the
+  `t1-gpu` and `t2-parity` gates on a multi-card host.

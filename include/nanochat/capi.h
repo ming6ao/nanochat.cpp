@@ -214,8 +214,10 @@ int nanochat_device_at(int ordinal, nanochat_device* out);
 typedef struct nanochat_mesh nanochat_mesh;
 typedef struct nanochat_runtime nanochat_runtime;
 
-// Builds a rank-1 data mesh over `size` devices. A size below 1 becomes 1.
-nanochat_mesh* nanochat_mesh_create_data(int size);
+// Builds a rank-1 data mesh over `count` devices. `indices` gives the backend
+// device index at each mesh position; a null pointer means `0, 1, ...`. A count
+// below 1 becomes 1.
+nanochat_mesh* nanochat_mesh_create(const int* indices, int count);
 void nanochat_mesh_free(nanochat_mesh* mesh);
 int nanochat_mesh_size(nanochat_mesh* mesh);
 
@@ -245,6 +247,11 @@ int nanochat_runtime_param_info(nanochat_runtime* runtime, int replica,
 int64_t nanochat_runtime_param_read(nanochat_runtime* runtime, int replica,
                                     int index, int grad, int64_t offset,
                                     int64_t count, void* data);
+
+// Writes the runtime's canonical checkpoint from replica 0, or loads one into
+// every replica. The file is the simple `NCMDL001` container.
+void nanochat_runtime_save(nanochat_runtime* runtime, const char* path);
+void nanochat_runtime_load(nanochat_runtime* runtime, const char* path);
 
 // Fills `out` from `config`. Allocates no model. Returns a status.
 nanochat_status nanochat_params_get(const nanochat_config* config,

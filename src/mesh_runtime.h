@@ -3,6 +3,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <string>
 #include <vector>
 
 #include "nanochat/config.h"
@@ -59,6 +60,13 @@ class MeshRuntime {
   Model* model(int replica);
   const Model* model(int replica) const;
   int param_count(int replica) const;
+
+  // Writes the canonical checkpoint from replica 0. Every replica is equal,
+  // so one file is the whole state.
+  void Save(const std::string& path);
+
+  // Loads one checkpoint into every replica, so the replicas stay equal.
+  void Load(const std::string& path);
 
  private:
   struct Replica;
