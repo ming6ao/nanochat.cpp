@@ -195,6 +195,57 @@ int nanochat_compute_type_size(void);
 // Fills `out` with a description of the active device.
 void nanochat_device_info(nanochat_device* out);
 
+// Enumerates the local accelerators for the single-client multi-device runtime
+// (docs/client-runtime-design.md section 5.1). `nanochat_device_count` returns
+// the number of local devices: one on the reference backend, or the CUDA device
+// count. `nanochat_device_at` fills `out` with the device at `ordinal` and
+// returns 0 on success, or a nonzero value when `ordinal` is out of range. The
+// device name points at a static string; the caller must not free it.
+int nanochat_device_count(void);
+int nanochat_device_at(int ordinal, nanochat_device* out);
+
+// The single-client multi-device runtime (docs/client-runtime-design.md). A
+// mesh handle owns one `MeshSpec`; a runtime handle owns one `MeshRuntime`,
+// with one model replica per device. `nanochat_runtime_train_step` splits one
+// global batch across the mesh, reduces the gradients in process, and returns
+// the global mean loss. `nanochat_runtime_param_read` copies a replica
+// parameter to the host through the kernel seam, so it is safe on a device
+// backend. Create the mesh first, then the runtime, and free each handle once.
+typedef struct nanochat_mesh nanochat_mesh;
+typedef struct nanochat_runtime nanochat_runtime;
+
+// Builds a rank-1 data mesh over `size` devices. A size below 1 becomes 1.
+nanochat_mesh* nanochat_mesh_create_data(int size);
+void nanochat_mesh_free(nanochat_mesh* mesh);
+int nanochat_mesh_size(nanochat_mesh* mesh);
+
+// Builds the runtime over `mesh`. `config` is the model shape, and `optim` may
+// be null for the defaults. `batch` is the global batch in sequences,
+// `grad_accum` is the micro-batch count per replica, and `seq` of 0 selects
+// `config.seq_len`. Returns null on failure.
+nanochat_runtime* nanochat_runtime_create(const nanochat_mesh* mesh,
+                                          const nanochat_config* config,
+                                          const nanochat_optim_config* optim,
+                                          int batch, int grad_accum, int seq,
+                                          uint64_t seed);
+void nanochat_runtime_free(nanochat_runtime* runtime);
+int nanochat_runtime_world_size(nanochat_runtime* runtime);
+
+// Runs one step over `batch * seq` row-major token and target ids. Returns the
+// global mean loss, or 0 on error.
+float nanochat_runtime_train_step(nanochat_runtime* runtime, const int* tokens,
+                                  const int* targets);
+
+// The parameter count of `replica`, or 0 on error. `grad` selects the gradient
+// when nonzero and the value otherwise. The read returns the number of
+// elements copied, or a negative value on error.
+int nanochat_runtime_param_count(nanochat_runtime* runtime, int replica);
+int nanochat_runtime_param_info(nanochat_runtime* runtime, int replica,
+                                int index, nanochat_param* out);
+int64_t nanochat_runtime_param_read(nanochat_runtime* runtime, int replica,
+                                    int index, int grad, int64_t offset,
+                                    int64_t count, void* data);
+
 // Fills `out` from `config`. Allocates no model. Returns a status.
 nanochat_status nanochat_params_get(const nanochat_config* config,
                                     nanochat_params* out);

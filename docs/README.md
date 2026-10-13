@@ -16,6 +16,7 @@ detailed reference that the design points at.
 | [distributed-plan.md](distributed-plan.md) | The execution plan for NCCL, the overlap seam, and the data cursor |
 | [distributed-launch.md](distributed-launch.md) | The launch of a data-parallel run: the rank contract, the `tools/nanochat dist` command, and the Python helper |
 | [distributed-native-plan.md](distributed-native-plan.md) | The execution plan for a native all-reduce over NVLink and RDMA: the transport interface, the ring schedule, ownership, and the broker |
+| [client-runtime-design.md](client-runtime-design.md) | The single-client multi-device runtime: one program, a device mesh, placement, the in-process collective, and the compatibility process runtime |
 | [performance.md](performance.md) | Performance measurement protocol and the debugging interface |
 | [cpu-performance.md](cpu-performance.md) | CPU backend baseline, cause, design, and phase results |
 | [attention.md](attention.md) | Attention baseline, Pascal feasibility, the fused window, results |

@@ -9,8 +9,11 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <string>
+#include <vector>
 
 #include "nanochat/kernels.h"
+#include "nanochat/mesh.h"
 #include "nanochat/tensor.h"
 
 namespace nanochat {
@@ -111,4 +114,38 @@ Caps GetCaps() {
 }
 
 }  // namespace kernels
+
+std::vector<DeviceInfo> EnumerateDevices() {
+  // The CUDA runtime enumerates the local devices. `props.name` is a local
+  // buffer, so the names are copied into a static list that keeps the pointers
+  // valid for the life of the process (as `Caps::device_name` requires).
+  std::vector<DeviceInfo> devices;
+  int count = 0;
+  if (cudaGetDeviceCount(&count) != cudaSuccess || count <= 0) return devices;
+
+  static std::vector<std::string> names;
+  if (names.empty()) {
+    names.reserve(static_cast<std::size_t>(count));
+  }
+  devices.reserve(static_cast<std::size_t>(count));
+  for (int i = 0; i < count; ++i) {
+    cudaDeviceProp props{};
+    if (cudaGetDeviceProperties(&props, i) != cudaSuccess) continue;
+    if (names.size() <= static_cast<std::size_t>(i)) {
+      names.emplace_back(props.name);
+    }
+    DeviceInfo info;
+    info.ordinal = i;
+    info.index = i;
+    info.name = names[static_cast<std::size_t>(i)].c_str();
+    info.total_memory_bytes = static_cast<std::size_t>(props.totalGlobalMem);
+    info.compute_major = props.major;
+    info.compute_minor = props.minor;
+    info.is_device = true;
+    info.has_tensor_cores = props.major >= 7;
+    devices.push_back(info);
+  }
+  return devices;
+}
+
 }  // namespace nanochat

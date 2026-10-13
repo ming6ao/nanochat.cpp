@@ -76,6 +76,9 @@ cc_library(
         "data.cc",
         "eval.cc",
         "generate.cc",
+        "mesh.cc",
+        "mesh_collective.cc",
+        "mesh_runtime.cc",
         "model.cc",
         "ops.cc",
         "optim.cc",
@@ -86,6 +89,8 @@ cc_library(
         "cli.h",
         "eval.h",
         "generate.h",
+        "mesh_collective.h",
+        "mesh_runtime.h",
         "model_impl.h",
         "ops.h",
         "optim_state.h",
@@ -375,6 +380,37 @@ cc_test(
     size = "small",
 )
 
+# The device mesh for the single-client multi-device runtime
+# (docs/client-runtime-design.md sections 5 and 7): the data-mesh construction,
+# the rank-1 rule, the axis name, and the backend device enumeration. CPU only.
+cc_test(
+    name = "mesh_test",
+    srcs = ["mesh_test.cc"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    deps = [
+        ":model",
+        "//include/nanochat:nanochat",
+    ],
+    size = "small",
+)
+
+# The single-client multi-device runtime (docs/client-runtime-design.md
+# sections 10 and 16): two and four replicas that split one global batch and
+# reduce with the in-process collective equal one replica on the whole batch,
+# and the replicas of one runtime stay byte-identical. CPU only.
+cc_test(
+    name = "mesh_runtime_test",
+    srcs = ["mesh_runtime_test.cc"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    deps = [
+        ":model",
+        "//include/nanochat:nanochat",
+    ],
+    size = "small",
+)
+
 # Distributed gradient sync (docs/distributed-design.md sections 4 and 7): two
 # CPU processes reduce over loopback TCP and match an independently computed
 # sum, and the stride document sharding partitions the document stream. CPU
@@ -545,6 +581,8 @@ test_suite(name = "all", tests = [
     ":optim_test",
     ":data_test",
     ":harness_test",
+    ":mesh_test",
+    ":mesh_runtime_test",
     ":distributed_test",
     ":train_parallel_test",
     ":masked_loss_test",

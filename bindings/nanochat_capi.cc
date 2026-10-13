@@ -35,12 +35,14 @@
 #include "nanochat/config.h"
 #include "nanochat/dataloader.h"
 #include "nanochat/kernels.h"
+#include "nanochat/mesh.h"
 #include "nanochat/mfu.h"
 #include "nanochat/model.h"
 #include "nanochat/optim.h"
 #include "nanochat/sandbox.h"
 #include "nanochat/scheduler.h"
 #include "nanochat/tokenizer.h"
+#include "src/mesh_runtime.h"
 #include "src/parquet/reader.h"
 #include "src/rl.h"
 #include "src/train.h"
@@ -49,7 +51,7 @@ namespace {
 
 // The C ABI version. Bump this string on every change to the surface or to a
 // mirrored struct; docs/python.md section 13 names that rule.
-constexpr char kNanochatVersion[] = "0.6.0";
+constexpr char kNanochatVersion[] = "0.7.0";
 
 // The magic that `Checkpoint::Save` writes (src/data.cc). A file with this
 // prefix is the harness container, so `nanochat_load` routes it through the
@@ -221,6 +223,42 @@ struct nanochat_tokenizer {
   std::unique_ptr<nanochat::Tokenizer> tokenizer;
 };
 
+struct nanochat_mesh {
+  nanochat::MeshSpec mesh;
+};
+
+struct nanochat_runtime {
+  std::unique_ptr<nanochat::MeshRuntime> runtime;
+};
+
+namespace {
+
+// The replica model of a runtime handle. Throws on a null handle or a bad
+// replica index, so the runtime entry points stay free of repeated checks.
+nanochat::Model* RuntimeModel(nanochat_runtime* runtime, int replica) {
+  if (runtime == nullptr || runtime->runtime == nullptr) {
+    throw std::invalid_argument("runtime is null");
+  }
+  nanochat::Model* model = runtime->runtime->model(replica);
+  if (model == nullptr) {
+    throw std::out_of_range("the replica index is out of range");
+  }
+  return model;
+}
+
+// The parameter view at `index` on `replica`.
+nanochat::ParamView RuntimeParam(nanochat_runtime* runtime, int replica,
+                                 int index) {
+  const std::vector<nanochat::ParamView> params =
+      RuntimeModel(runtime, replica)->params();
+  if (index < 0 || index >= static_cast<int>(params.size())) {
+    throw std::out_of_range("the parameter index is out of range");
+  }
+  return params[static_cast<std::size_t>(index)];
+}
+
+}  // namespace
+
 extern "C" {
 
 nanochat_status nanochat_init(void) {
@@ -273,6 +311,152 @@ void nanochat_device_info(nanochat_device* out) {
         static_cast<std::int64_t>(caps.total_memory_bytes);
     out->device_name = caps.device_name;
   });
+}
+
+int nanochat_device_count(void) {
+  return Guard("nanochat_device_count", 0, []() -> int {
+    return static_cast<int>(nanochat::EnumerateDevices().size());
+  });
+}
+
+int nanochat_device_at(int ordinal, nanochat_device* out) {
+  return Guard("nanochat_device_at", 1, [&]() -> int {
+    if (out == nullptr) throw std::invalid_argument("out is null");
+    const std::vector<nanochat::DeviceInfo> devices =
+        nanochat::EnumerateDevices();
+    if (ordinal < 0 || ordinal >= static_cast<int>(devices.size())) {
+      throw std::out_of_range("the device ordinal is out of range");
+    }
+    const nanochat::DeviceInfo& info =
+        devices[static_cast<std::size_t>(ordinal)];
+    out->device_index = info.index;
+    out->compute_major = info.compute_major;
+    out->compute_minor = info.compute_minor;
+    out->total_memory_bytes =
+        static_cast<std::int64_t>(info.total_memory_bytes);
+    out->device_name = info.name;
+    return 0;
+  });
+}
+
+nanochat_mesh* nanochat_mesh_create_data(int size) {
+  return Guard("nanochat_mesh_create_data",
+               static_cast<nanochat_mesh*>(nullptr), [&]() -> nanochat_mesh* {
+                 auto handle = std::make_unique<nanochat_mesh>();
+                 handle->mesh = nanochat::MeshSpec::Data(size);
+                 return handle.release();
+               });
+}
+
+void nanochat_mesh_free(nanochat_mesh* mesh) {
+  GuardVoid("nanochat_mesh_free", [&]() { delete mesh; });
+}
+
+int nanochat_mesh_size(nanochat_mesh* mesh) {
+  return Guard("nanochat_mesh_size", 0, [&]() -> int {
+    if (mesh == nullptr) throw std::invalid_argument("mesh is null");
+    return mesh->mesh.size();
+  });
+}
+
+nanochat_runtime* nanochat_runtime_create(const nanochat_mesh* mesh,
+                                          const nanochat_config* config,
+                                          const nanochat_optim_config* optim,
+                                          int batch, int grad_accum, int seq,
+                                          uint64_t seed) {
+  return Guard(
+      "nanochat_runtime_create", static_cast<nanochat_runtime*>(nullptr),
+      [&]() -> nanochat_runtime* {
+        if (mesh == nullptr || config == nullptr) {
+          throw std::invalid_argument("mesh and config must not be null");
+        }
+        nanochat::MeshRuntimeConfig runtime_config;
+        runtime_config.model = ToConfig(*config);
+        ValidateConfig(runtime_config.model);
+        if (optim != nullptr) {
+          ToOptimizerConfig(*optim, &runtime_config.optimizer,
+                            &runtime_config.scheduler);
+        }
+        runtime_config.batch = batch;
+        runtime_config.grad_accum = grad_accum;
+        runtime_config.seq = seq;
+        runtime_config.seed = seed;
+        auto handle = std::make_unique<nanochat_runtime>();
+        handle->runtime = std::make_unique<nanochat::MeshRuntime>(
+            mesh->mesh, std::move(runtime_config));
+        return handle.release();
+      });
+}
+
+void nanochat_runtime_free(nanochat_runtime* runtime) {
+  GuardVoid("nanochat_runtime_free", [&]() { delete runtime; });
+}
+
+int nanochat_runtime_world_size(nanochat_runtime* runtime) {
+  return Guard("nanochat_runtime_world_size", 0, [&]() -> int {
+    if (runtime == nullptr || runtime->runtime == nullptr) {
+      throw std::invalid_argument("runtime is null");
+    }
+    return runtime->runtime->world_size();
+  });
+}
+
+float nanochat_runtime_train_step(nanochat_runtime* runtime, const int* tokens,
+                                  const int* targets) {
+  return Guard("nanochat_runtime_train_step", 0.0f, [&]() -> float {
+    if (runtime == nullptr || runtime->runtime == nullptr) {
+      throw std::invalid_argument("runtime is null");
+    }
+    if (tokens == nullptr || targets == nullptr) {
+      throw std::invalid_argument("tokens and targets must not be null");
+    }
+    return runtime->runtime->TrainStep(tokens, targets);
+  });
+}
+
+int nanochat_runtime_param_count(nanochat_runtime* runtime, int replica) {
+  return Guard("nanochat_runtime_param_count", 0, [&]() -> int {
+    return static_cast<int>(RuntimeModel(runtime, replica)->params().size());
+  });
+}
+
+int nanochat_runtime_param_info(nanochat_runtime* runtime, int replica,
+                                int index, nanochat_param* out) {
+  return Guard("nanochat_runtime_param_info", -1, [&]() -> int {
+    if (out == nullptr) throw std::invalid_argument("out is null");
+    const nanochat::ParamView view = RuntimeParam(runtime, replica, index);
+    out->name = view.name;
+    out->value = view.value;
+    out->grad = view.grad;
+    out->count = view.count;
+    out->rows = view.rows;
+    out->cols = view.cols;
+    return 0;
+  });
+}
+
+int64_t nanochat_runtime_param_read(nanochat_runtime* runtime, int replica,
+                                    int index, int grad, int64_t offset,
+                                    int64_t count, void* data) {
+  return Guard(
+      "nanochat_runtime_param_read", static_cast<std::int64_t>(-1),
+      [&]() -> std::int64_t {
+        const nanochat::ParamView view = RuntimeParam(runtime, replica, index);
+        const nanochat::ComputeType* source = grad ? view.grad : view.value;
+        if (source == nullptr) {
+          throw std::invalid_argument("the parameter has no buffer");
+        }
+        if (offset < 0 || count < 0 || offset + count > view.count) {
+          throw std::out_of_range("the parameter range is out of bounds");
+        }
+        if (count == 0) return 0;
+        if (data == nullptr) throw std::invalid_argument("data is null");
+        nanochat::kernels::Memcpy(
+            data, source + offset,
+            static_cast<std::size_t>(count) * sizeof(nanochat::ComputeType),
+            nanochat::CopyDir::kDeviceToHost);
+        return count;
+      });
 }
 
 nanochat_status nanochat_params_get(const nanochat_config* config,

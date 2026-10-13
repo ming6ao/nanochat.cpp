@@ -90,7 +90,11 @@ specified in [docs/kernels.md](docs/kernels.md).
    matching leaf unit `//src:device_profile` for it. The edge points *down* to a
    leaf, not up into the workflow layer; the leaf carries no model code and no
    kernel arithmetic, so the seam stays vendor-free and the reference backend
-   still computes every value. Adding a new edge of this shape needs the same
+   still computes every value. `nanochat/mesh.h` is a second leaf of the same
+   shape: it declares the local device list and the mesh spec, and it depends
+   only on `nanochat/tensor.h`. A backend implements `EnumerateDevices` there,
+   so the single-client multi-device runtime can enumerate devices without a
+   change to `kernels.h`. Adding a new edge of this shape needs the same
    review as any other change to the layering rule.
 3. `kernels.h` contains no vendor types: pointers are `ComputeType*`, streams are
    opaque, and no CUDA header is ever included from it.

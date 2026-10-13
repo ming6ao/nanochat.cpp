@@ -190,6 +190,30 @@ py_test(
     tags = ["gpu", "manual"],
 )
 
+# T0: the device mesh and the placement language for the single-client
+# multi-device runtime (docs/client-runtime-design.md sections 5.1 to 5.4). It
+# loads the shared library for `devices()` and checks the rank-1 rule, the axis
+# name, and the placement set. CPU only; no GPU and no broker.
+py_test(
+    name = "mesh_test",
+    srcs = ["tests/mesh_test.py"],
+    data = ["//bindings:nanochat_shared"],
+    deps = [":nanochat_cpp"],
+    size = "small",
+)
+
+# T0: the single-client multi-device runtime client
+# (docs/client-runtime-design.md sections 10 and 16). Two and four replicas
+# that split one global batch equal one replica on the whole batch. The test
+# uses a simulated CPU mesh, so it needs no GPU and no broker.
+py_test(
+    name = "runtime_test",
+    srcs = ["tests/runtime_test.py"],
+    data = ["//bindings:nanochat_shared"],
+    deps = [":nanochat_cpp"],
+    size = "small",
+)
+
 # Aggregation point consumed by //:all_tests.
 test_suite(
     name = "all",
@@ -206,5 +230,7 @@ test_suite(
         ":toolchain_test",
         ":distributed_test",
         ":rl_test",
+        ":mesh_test",
+        ":runtime_test",
     ],
 )

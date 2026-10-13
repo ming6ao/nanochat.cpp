@@ -175,6 +175,28 @@ void CheckSandboxRule() {
   Check("init: ready", nanochat_init() == NANOCHAT_STATUS_OK);
 }
 
+// The device enumeration of docs/client-runtime-design.md section 5.1. The
+// reference backend reports one CPU device, and `nanochat_device_at` rejects an
+// out-of-range ordinal.
+void CheckDeviceEnumeration() {
+  const int count = nanochat_device_count();
+  Check("device: the count is positive", count >= 1);
+  nanochat_device first;
+  std::memset(&first, 0, sizeof(first));
+  Check("device: ordinal 0 resolves", nanochat_device_at(0, &first) == 0);
+  Check("device: ordinal 0 has a name",
+        first.device_name != nullptr && first.device_name[0] != '\0');
+  Check("device: ordinal 0 is the first index", first.device_index == 0);
+  nanochat_device outside;
+  std::memset(&outside, 0, sizeof(outside));
+  Check("device: an out-of-range ordinal is rejected",
+        nanochat_device_at(count, &outside) != 0);
+  Check("device: a negative ordinal is rejected",
+        nanochat_device_at(-1, &outside) != 0);
+  Check("device: a null out pointer is rejected",
+        nanochat_device_at(0, nullptr) != 0);
+}
+
 nanochat_config TinyConfig() {
   nanochat_config config;
   std::memset(&config, 0, sizeof(config));
@@ -901,6 +923,7 @@ int main(int argc, char** argv) {
   }
 
   CheckSandboxRule();
+  CheckDeviceEnumeration();
   CheckParams();
   CheckHarnessCheckpoint();
   CheckWeightedBackward();

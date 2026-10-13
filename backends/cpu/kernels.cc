@@ -30,6 +30,7 @@
 
 #include "nanochat/kernels.h"
 #include "nanochat/device_profile.h"
+#include "nanochat/mesh.h"
 
 #if defined(_OPENMP)
 #include <omp.h>
@@ -1749,4 +1750,20 @@ void ValueGateBackward(int rows, int hidden, int num_kv_heads, int head_dim,
 }
 
 }  // namespace kernels
+
+std::vector<DeviceInfo> EnumerateDevices() {
+  // The reference backend is one host device. The multi-device runtime builds a
+  // mesh directly in its tests, so enumeration stays truthful.
+  DeviceInfo info;
+  info.ordinal = 0;
+  info.index = 0;
+  info.name = "cpu";
+  info.total_memory_bytes = 0;
+  info.compute_major = 0;
+  info.compute_minor = 0;
+  info.is_device = false;
+  info.has_tensor_cores = false;
+  return {info};
+}
+
 }  // namespace nanochat

@@ -32,10 +32,14 @@ __all__ = [
     "OptimHandle",
     "LoaderHandle",
     "TokenizerHandle",
+    "MeshHandle",
+    "RuntimeHandle",
     "declare",
     "backend_name",
     "compute_type_size",
     "device_info",
+    "device_count",
+    "device_at",
     "last_error",
     "check_status",
     "check_handle",
@@ -240,6 +244,8 @@ ModelHandle = ctypes.c_void_p
 OptimHandle = ctypes.c_void_p
 LoaderHandle = ctypes.c_void_p
 TokenizerHandle = ctypes.c_void_p
+MeshHandle = ctypes.c_void_p
+RuntimeHandle = ctypes.c_void_p
 
 # The function table: name, argument types, result type. Every entry in
 # include/nanochat/capi.h is here.
@@ -250,6 +256,29 @@ _SIGNATURES = (
     ("nanochat_backend", (), ctypes.c_char_p),
     ("nanochat_compute_type_size", (), ctypes.c_int),
     ("nanochat_device_info", (ctypes.POINTER(Device),), None),
+    ("nanochat_device_count", (), ctypes.c_int),
+    ("nanochat_device_at", (ctypes.c_int, ctypes.POINTER(Device)),
+     ctypes.c_int),
+    ("nanochat_mesh_create_data", (ctypes.c_int,), MeshHandle),
+    ("nanochat_mesh_free", (MeshHandle,), None),
+    ("nanochat_mesh_size", (MeshHandle,), ctypes.c_int),
+    ("nanochat_runtime_create",
+     (MeshHandle, ctypes.POINTER(Config),
+      ctypes.POINTER(OptimizerConfig), ctypes.c_int, ctypes.c_int,
+      ctypes.c_int, ctypes.c_uint64), RuntimeHandle),
+    ("nanochat_runtime_free", (RuntimeHandle,), None),
+    ("nanochat_runtime_world_size", (RuntimeHandle,), ctypes.c_int),
+    ("nanochat_runtime_train_step",
+     (RuntimeHandle, ctypes.POINTER(ctypes.c_int),
+      ctypes.POINTER(ctypes.c_int)), ctypes.c_float),
+    ("nanochat_runtime_param_count",
+     (RuntimeHandle, ctypes.c_int), ctypes.c_int),
+    ("nanochat_runtime_param_info",
+     (RuntimeHandle, ctypes.c_int, ctypes.c_int, ctypes.POINTER(Param)),
+     ctypes.c_int),
+    ("nanochat_runtime_param_read",
+     (RuntimeHandle, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+      ctypes.c_int64, ctypes.c_int64, ctypes.c_void_p), ctypes.c_int64),
     ("nanochat_params_get",
      (ctypes.POINTER(Config), ctypes.POINTER(Params)), ctypes.c_int),
     ("nanochat_model_create",
@@ -361,6 +390,23 @@ def device_info(library) -> "Device":
     """The active device description."""
     info = Device()
     library.nanochat_device_info(ctypes.byref(info))
+    return info
+
+
+def device_count(library) -> int:
+    """The number of local accelerators."""
+    return int(library.nanochat_device_count())
+
+
+def device_at(library, ordinal: int) -> "Device":
+    """The local accelerator at ``ordinal``.
+
+    Raises ``NanochatError`` when the ordinal is out of range.
+    """
+    info = Device()
+    status = library.nanochat_device_at(int(ordinal), ctypes.byref(info))
+    if status != NANOCHAT_STATUS_OK:
+        raise NanochatError("nanochat_device_at", last_error(library))
     return info
 
 
