@@ -1,16 +1,23 @@
 // src/mesh_runtime.cc -- the single-client multi-device training runtime
 // (docs/client-runtime-design.md sections 7 and 10). One device thread per
-// replica, one in-process collective, one controller. CPU-tested; the CUDA
-// thread-local change is a later phase.
+// replica, one in-process collective, one controller. The CUDA backend state
+// is thread-local, so a device thread binds with `SelectDevice` before it
+// builds the replica.
 
 #include "src/mesh_runtime.h"
 
+#include <algorithm>
+#include <chrono>
 #include <condition_variable>
+#include <cstdint>
 #include <mutex>
 #include <stdexcept>
 #include <string>
 #include <thread>
 #include <utility>
+#include <vector>
+
+#include "nanochat/kernels.h"
 
 namespace nanochat {
 namespace {
@@ -40,6 +47,7 @@ struct MeshRuntime::Replica {
   int rows = 0;
   int step = 0;
   float loss = 0.0f;
+  float grad_norm = 0.0f;
 };
 
 MeshRuntime::MeshRuntime(const MeshSpec& mesh, MeshRuntimeConfig config)
@@ -162,6 +170,9 @@ float MeshRuntime::RunReplicaStep(Replica& replica, const int* tokens,
     replica.sync->AllReduceSum(parameter.grad, parameter.count);
   }
   replica.optimizer->Step(step);
+  // The reduced gradient is equal on every replica, so the norm is too. Read
+  // it after the step, before the controller sees `done`.
+  replica.grad_norm = replica.optimizer->GradNorm();
   return loss_sum / static_cast<float>(accum);
 }
 
@@ -169,6 +180,7 @@ float MeshRuntime::TrainStep(const int* tokens, const int* targets) {
   if (tokens == nullptr || targets == nullptr) {
     throw std::invalid_argument("tokens and targets must not be null");
   }
+  const auto start = std::chrono::steady_clock::now();
   const int world = mesh_.size();
   ++step_;
 
@@ -191,13 +203,18 @@ float MeshRuntime::TrainStep(const int* tokens, const int* targets) {
   }
 
   float loss = 0.0f;
+  metrics_.loss.resize(static_cast<std::size_t>(world));
   for (int rank = 0; rank < world; ++rank) {
     Replica& replica = *replicas_[static_cast<std::size_t>(rank)];
     std::unique_lock<std::mutex> lock(replica.mutex);
     replica.cv.wait(lock, [&replica] { return replica.done; });
     replica.done = false;
+    metrics_.loss[static_cast<std::size_t>(rank)] = replica.loss;
     loss += replica.loss;
   }
+  metrics_.grad_norm = replicas_.empty() ? 0.0f : replicas_[0]->grad_norm;
+  const auto end = std::chrono::steady_clock::now();
+  metrics_.step_seconds = std::chrono::duration<float>(end - start).count();
   return loss / static_cast<float>(world);
 }
 
@@ -216,6 +233,40 @@ int MeshRuntime::param_count(int replica) const {
   return replica_model == nullptr
              ? 0
              : static_cast<int>(replica_model->params().size());
+}
+
+std::uint64_t MeshRuntime::ParamDigest(int replica) const {
+  const Model* replica_model = model(replica);
+  if (replica_model == nullptr) {
+    throw std::out_of_range("the replica index is out of range");
+  }
+  // FNV-1a over the raw parameter bytes. The replicas are byte-identical, so
+  // the digest is exact. The chunk bounds the host staging buffer.
+  constexpr std::size_t kChunk = 4096;
+  constexpr std::uint64_t kOffsetBasis = 1469598103934665603ULL;
+  constexpr std::uint64_t kPrime = 1099511628211ULL;
+  std::vector<ComputeType> host(kChunk);
+  std::uint64_t hash = kOffsetBasis;
+  for (const ParamView& parameter : replica_model->params()) {
+    if (parameter.value == nullptr || parameter.count <= 0) continue;
+    std::int64_t remaining = parameter.count;
+    std::int64_t offset = 0;
+    while (remaining > 0) {
+      const std::size_t count = static_cast<std::size_t>(
+          std::min<std::int64_t>(remaining, static_cast<std::int64_t>(kChunk)));
+      kernels::Memcpy(host.data(), parameter.value + offset,
+                      count * sizeof(ComputeType), CopyDir::kDeviceToHost);
+      const auto* bytes = reinterpret_cast<const unsigned char*>(host.data());
+      const std::size_t byte_count = count * sizeof(ComputeType);
+      for (std::size_t i = 0; i < byte_count; ++i) {
+        hash ^= bytes[i];
+        hash *= kPrime;
+      }
+      offset += static_cast<std::int64_t>(count);
+      remaining -= static_cast<std::int64_t>(count);
+    }
+  }
+  return hash;
 }
 
 void MeshRuntime::Save(const std::string& path) {

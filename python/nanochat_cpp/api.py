@@ -37,6 +37,8 @@ __all__ = [
     "build",
     "evaluate",
     "no_grad",
+    "optimizer_config",
+    "preset_optimizer_config",
 ]
 
 #: The padding multiple for the classifier width, from scripts/base_train.py.
@@ -599,72 +601,98 @@ class Model:
             self._handle = None
 
 
-class Optimizer:
-    """The combined AdamW and Muon optimizer over one model."""
+#: The optimizer and scheduler fields, in `nanochat_optim_config` order. The
+#: defaults match `Optimizer`, so the builder and the class share one list.
+_OPTIMIZER_FIELDS = {
+    "unembedding_lr": 0.004,
+    "embedding_lr": 0.2,
+    "matrix_lr": 0.02,
+    "scalar_lr": 0.5,
+    "weight_decay": 0.0,
+    "muon_ns_steps": 5,
+    "muon_beta2": 0.9,
+    "adam_eps": 1e-10,
+    "clip": 1.0,
+    "num_iterations": 0,
+    "warmup_steps": 0,
+    "warmdown_ratio": 0.65,
+    "final_lr_frac": 0.0,
+    "weight_decay_base": 0.0,
+    "muon_momentum_warmup_steps": 400.0,
+    "muon_momentum_start": 0.85,
+    "muon_momentum_peak": 0.97,
+    "muon_momentum_final": 0.90,
+    "matrix_optimizer": 0,
+    "adam_step_period": 1,
+    "anvil_lr": 0.023,
+    "anvil_weight_decay": 2.25,
+    "anvil_momentum": 0.95,
+    "anvil_beta2": 0.9,
+    "anvil_fast_beta": 0.85,
+    "anvil_slow_beta": 0.98,
+    "anvil_fast_weight": 0.4385,
+    "anvil_engage_step": 514,
+    "anvil_num_maps": 6,
+    "rail_beta_warmup_steps": 240.0,
+    "rail_beta_cooldown_steps": 50.0,
+    "rail_beta_min": 0.85,
+    "rail_beta_max": 0.93,
+}
 
-    def __init__(self, model: Model, *, unembedding_lr: float = 0.004,
-                 embedding_lr: float = 0.2, matrix_lr: float = 0.02,
-                 scalar_lr: float = 0.5, weight_decay: float = 0.0,
-                 muon_ns_steps: int = 5, muon_beta2: float = 0.9,
-                 adam_eps: float = 1e-10, clip: float = 1.0,
-                 num_iterations: int = 0, warmup_steps: int = 0,
-                 warmdown_ratio: float = 0.65, final_lr_frac: float = 0.0,
-                 weight_decay_base: float = 0.0,
-                 muon_momentum_warmup_steps: float = 400.0,
-                 muon_momentum_start: float = 0.85,
-                 muon_momentum_peak: float = 0.97,
-                 muon_momentum_final: float = 0.90,
-                 matrix_optimizer: int = 0, adam_step_period: int = 1,
-                 anvil_lr: float = 0.023, anvil_weight_decay: float = 2.25,
-                 anvil_momentum: float = 0.95, anvil_beta2: float = 0.9,
-                 anvil_fast_beta: float = 0.85,
-                 anvil_slow_beta: float = 0.98,
-                 anvil_fast_weight: float = 0.4385,
-                 anvil_engage_step: int = 514, anvil_num_maps: int = 6,
-                 rail_beta_warmup_steps: float = 240.0,
-                 rail_beta_cooldown_steps: float = 50.0,
-                 rail_beta_min: float = 0.85,
-                 rail_beta_max: float = 0.93) -> None:
+
+def _optimizer_field_cast(name: str, value):
+    """Cast ``value`` to the ctypes field type declared for ``name``."""
+    field_type = dict(_core.OptimizerConfig._fields_)[name]
+    return int(value) if field_type is ctypes.c_int else float(value)
+
+
+def optimizer_config(**fields) -> _core.OptimizerConfig:
+    """Build a ``_core.OptimizerConfig`` from keyword fields.
+
+    The builder is the one source of truth for the optimizer and scheduler
+    defaults. `Optimizer` and `MeshRuntime` both use it, so the two paths
+    cannot drift. An unknown field raises ``TypeError``.
+    """
+    unknown = sorted(set(fields) - set(_OPTIMIZER_FIELDS))
+    if unknown:
+        raise TypeError(f"unknown optimizer field(s): {unknown}")
+    config = _core.OptimizerConfig()
+    for name, default in _OPTIMIZER_FIELDS.items():
+        value = fields[name] if name in fields else default
+        setattr(config, name, _optimizer_field_cast(name, value))
+    return config
+
+
+def preset_optimizer_config(name: str) -> _core.OptimizerConfig:
+    """The optimizer and scheduler fields of a named preset.
+
+    The C library owns the values, so ``track3`` here equals
+    ``train_main --preset track3``. See docs/client-runtime-design.md section
+    20.4.
+    """
+    library = _lib.load()
+    config = _core.OptimizerConfig()
+    status = library.nanochat_optim_config_preset(
+        str(name).encode("utf-8"), ctypes.byref(config))
+    _core.check_status(library, status, "nanochat_optim_config_preset")
+    return config
+
+
+class Optimizer:
+    """The combined AdamW and Muon optimizer over one model.
+
+    Every keyword argument is an optimizer or scheduler field from
+    :func:`optimizer_config`.
+    """
+
+    def __init__(self, model: Model, **fields) -> None:
         if not isinstance(model, Model):
             raise TypeError("model must be a nanochat_cpp.Model")
         self._lib = _lib.load()
         self.model = model
-        self.num_iterations = int(num_iterations)
-        self.warmup_steps = int(warmup_steps)
-        config = _core.OptimizerConfig()
-        config.unembedding_lr = float(unembedding_lr)
-        config.embedding_lr = float(embedding_lr)
-        config.matrix_lr = float(matrix_lr)
-        config.scalar_lr = float(scalar_lr)
-        config.weight_decay = float(weight_decay)
-        config.muon_ns_steps = int(muon_ns_steps)
-        config.muon_beta2 = float(muon_beta2)
-        config.adam_eps = float(adam_eps)
-        config.clip = float(clip)
-        config.num_iterations = int(num_iterations)
-        config.warmup_steps = int(warmup_steps)
-        config.warmdown_ratio = float(warmdown_ratio)
-        config.final_lr_frac = float(final_lr_frac)
-        config.weight_decay_base = float(weight_decay_base)
-        config.muon_momentum_warmup_steps = float(muon_momentum_warmup_steps)
-        config.muon_momentum_start = float(muon_momentum_start)
-        config.muon_momentum_peak = float(muon_momentum_peak)
-        config.muon_momentum_final = float(muon_momentum_final)
-        config.matrix_optimizer = int(matrix_optimizer)
-        config.adam_step_period = int(adam_step_period)
-        config.anvil_lr = float(anvil_lr)
-        config.anvil_weight_decay = float(anvil_weight_decay)
-        config.anvil_momentum = float(anvil_momentum)
-        config.anvil_beta2 = float(anvil_beta2)
-        config.anvil_fast_beta = float(anvil_fast_beta)
-        config.anvil_slow_beta = float(anvil_slow_beta)
-        config.anvil_fast_weight = float(anvil_fast_weight)
-        config.anvil_engage_step = int(anvil_engage_step)
-        config.anvil_num_maps = int(anvil_num_maps)
-        config.rail_beta_warmup_steps = float(rail_beta_warmup_steps)
-        config.rail_beta_cooldown_steps = float(rail_beta_cooldown_steps)
-        config.rail_beta_min = float(rail_beta_min)
-        config.rail_beta_max = float(rail_beta_max)
+        config = optimizer_config(**fields)
+        self.num_iterations = int(config.num_iterations)
+        self.warmup_steps = int(config.warmup_steps)
         self.config = config
         handle = self._lib.nanochat_optim_create(
             model._handle, ctypes.byref(config))

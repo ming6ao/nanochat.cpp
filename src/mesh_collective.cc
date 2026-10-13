@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cstddef>
 
+#include "nanochat/kernels.h"
 #include "src/ops.h"
 
 namespace nanochat {
@@ -22,12 +23,15 @@ class InProcessGradientSync final : public GradientSync {
   int world_size() const override { return group_->world_size(); }
 
   void AllReduceSum(ComputeType* buffer, std::int64_t count) override {
-    group_->AllReduce(rank_, buffer, count);
+    group_->AllReduce(rank_, buffer, count, &local_);
   }
 
  private:
   InProcessCollective* group_ = nullptr;
   int rank_ = 0;
+  // A private host scratch buffer, so the sum never writes a slot another rank
+  // reads.
+  std::vector<ComputeType> local_;
 };
 
 }  // namespace
@@ -53,34 +57,46 @@ void InProcessCollective::WaitPhase() {
 }
 
 void InProcessCollective::AllReduce(int rank, ComputeType* buffer,
-                                    std::int64_t count) {
+                                    std::int64_t count,
+                                    std::vector<ComputeType>* local) {
   if (world_size_ <= 1 || buffer == nullptr || count <= 0) return;
   const std::size_t elements = static_cast<std::size_t>(count);
   const std::size_t world = static_cast<std::size_t>(world_size_);
 
-  // Publish this rank's bucket into its staging slot. The resize happens under
-  // the lock; every participant passes the same `count` for one reduction, so
-  // the buffer settles after the first writer.
+  // Publish this rank's bucket into its staging slot. The copy goes through the
+  // kernel seam, so `buffer` may point to device memory. The resize and the
+  // copy share the lock, so a reallocation never races a copy.
   {
     std::lock_guard<std::mutex> lock(mutex_);
     if (staging_.size() < elements * world) {
       staging_.resize(elements * world);
     }
-    std::copy(buffer, buffer + elements,
-              staging_.begin() + static_cast<std::ptrdiff_t>(rank) *
-                                     static_cast<std::ptrdiff_t>(elements));
+    kernels::Memcpy(staging_.data() + static_cast<std::ptrdiff_t>(rank) *
+                                          static_cast<std::ptrdiff_t>(elements),
+                    buffer, elements * sizeof(ComputeType),
+                    CopyDir::kDeviceToHost);
   }
   WaitPhase();  // every slot is written
 
-  // Sum every other rank's slot into this rank's buffer, in rank order.
-  for (int other = 0; other < world_size_; ++other) {
-    if (other == rank) continue;
+  // Sum every slot into a private host buffer, in rank order, then copy the sum
+  // back. The rank order makes the result bit-identical on every replica.
+  if (local == nullptr) {
+    WaitPhase();  // keep the barrier balanced
+    return;
+  }
+  if (local->size() < elements) local->resize(elements);
+  std::copy(staging_.begin(),
+            staging_.begin() + static_cast<std::ptrdiff_t>(elements),
+            local->begin());
+  for (int other = 1; other < world_size_; ++other) {
     const ComputeType* slot =
         staging_.data() + static_cast<std::size_t>(other) * elements;
     for (std::size_t i = 0; i < elements; ++i) {
-      buffer[i] = ToC(AsF(buffer[i]) + AsF(slot[i]));
+      (*local)[i] = ToC(AsF((*local)[i]) + AsF(slot[i]));
     }
   }
+  kernels::Memcpy(buffer, local->data(), elements * sizeof(ComputeType),
+                  CopyDir::kHostToDevice);
   WaitPhase();  // every read is done before the next reduction
 }
 

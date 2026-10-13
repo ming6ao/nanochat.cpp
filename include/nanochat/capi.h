@@ -238,6 +238,25 @@ int nanochat_runtime_world_size(nanochat_runtime* runtime);
 float nanochat_runtime_train_step(nanochat_runtime* runtime, const int* tokens,
                                   const int* targets);
 
+// One step report, a mirror of `nanochat::MeshMetrics`
+// (docs/client-runtime-design.md section 20.4). `device_count` is the mesh
+// size. `loss` points to `device_count` per-replica losses. The buffer belongs
+// to the runtime and stays valid until the next step or the next call to
+// nanochat_runtime_metrics. `grad_norm` is the global gradient norm after the
+// reduce, so every replica reports the same value. `step_seconds` is the
+// wall-clock time of the last step.
+typedef struct {
+  int device_count;
+  const float* loss;
+  float grad_norm;
+  float step_seconds;
+} nanochat_metrics;
+
+// Fills `out` with the metrics of the last step. Call after
+// nanochat_runtime_train_step. Returns a status.
+nanochat_status nanochat_runtime_metrics(nanochat_runtime* runtime,
+                                         nanochat_metrics* out);
+
 // The parameter count of `replica`, or 0 on error. `grad` selects the gradient
 // when nonzero and the value otherwise. The read returns the number of
 // elements copied, or a negative value on error.
@@ -247,6 +266,13 @@ int nanochat_runtime_param_info(nanochat_runtime* runtime, int replica,
 int64_t nanochat_runtime_param_read(nanochat_runtime* runtime, int replica,
                                     int index, int grad, int64_t offset,
                                     int64_t count, void* data);
+
+// A 64-bit FNV-1a digest of every parameter of `replica`. The two replicas
+// return the same digest after a step, so a client can check the gradient
+// reduce without copying the whole model. A bad replica index or a null `out`
+// is an error. Returns a status.
+nanochat_status nanochat_runtime_param_digest(nanochat_runtime* runtime,
+                                              int replica, uint64_t* out);
 
 // Writes the runtime's canonical checkpoint from replica 0, or loads one into
 // every replica. The file is the simple `NCMDL001` container.
@@ -318,6 +344,14 @@ int64_t nanochat_param_write(nanochat_model* model, int index, int grad,
 // checkpoint loads in process.
 void nanochat_save(nanochat_model* model, const char* path);
 void nanochat_load(nanochat_model* model, const char* path);
+
+// Fills `out` with a named preset of the optimizer and scheduler
+// hyperparameters, so a client gets the same values as the `train_main`
+// `--preset` flag without copying them. `name` is `track3` today. A null
+// `out`, a null `name`, or an unknown name is an error. See
+// docs/client-runtime-design.md section 20.4.
+nanochat_status nanochat_optim_config_preset(const char* name,
+                                             nanochat_optim_config* out);
 
 // Optimizer. `nanochat_optim_create` returns an owned handle and null on
 // failure.

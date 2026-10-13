@@ -1,10 +1,11 @@
 # Distributed launch
 
-Status: delivered. `tools/nanochat dist` starts the rank group,
-`python/nanochat_cpp/distributed.py` wraps it, and
-`notebooks/nanochat-cpp-on-2x-t4.ipynb` uses it. The superseded per-rank helper
-`notebooks/parallel.py` is gone (phase 4). This document is the authority for
-the launch.
+Status: delivered. `tools/nanochat dist` starts the rank group, and
+`python/nanochat_cpp/distributed.py` wraps it. The two-card notebook now uses
+the single-client multi-device runtime instead
+(`docs/client-runtime-design.md`), so this launch serves the process-isolation
+case. The superseded per-rank helper `notebooks/parallel.py` is gone (phase 4).
+This document is the authority for the launch.
 [distributed-design.md](distributed-design.md) section 10 holds a summary.
 
 ## 1. Problem
@@ -155,10 +156,12 @@ contract. One fixture test pins it.
 
 ## 7. The notebook
 
-`notebooks/nanochat-cpp-on-2x-t4.ipynb` imports `nanochat_cpp.distributed`.
-The notebook builds one plan for two ranks and calls `launch`. It keeps the
-loss plot and the checkpoint hash check. It then loads the checkpoint in
-process for the evaluation and the post-training. Those are presentation.
+The two-card notebook no longer uses this launch. It uses the single-client
+multi-device runtime: one process, one `MeshRuntime`, and the in-process
+collective (`docs/client-runtime-design.md`). The mesh removes the rank from the
+user program, so the notebook opens no port and sets no rank variable. The
+launch stays for the process-isolation case: some drivers forbid two CUDA
+contexts in one process, and one bad device then stops one worker only.
 
 ## 8. Plan
 

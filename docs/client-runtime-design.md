@@ -557,27 +557,39 @@ This section records what the tree implements.
   implement `EnumerateDevices` and `SelectDevice`.
 - `src/mesh.cc`: the mesh validation shared by the runtime and the client.
 - `src/mesh_collective.h` and `src/mesh_collective.cc`: the in-process
-  all-reduce over a reusable barrier and one host staging buffer. It satisfies
-  the `GradientSync` seam, so `src/distributed.h` does not change.
+  all-reduce over a reusable barrier and one host staging buffer. It stages
+  every bucket through the kernel-seam copy, so a device gradient never reaches
+  the host as a raw pointer. It satisfies the `GradientSync` seam, so
+  `src/distributed.h` does not change.
 - `src/mesh_runtime.h` and `src/mesh_runtime.cc`: one device thread per
   replica, the device binding, the contiguous global batch split, the
-  in-process reduction, the equal optimizer step, and checkpoint save and load.
+  in-process reduction, the equal optimizer step, checkpoint save and load, the
+  `MeshMetrics` report, and the `ParamDigest` replica check.
 - `include/nanochat/capi.h`: device enumeration, the mesh handle, the runtime
-  handle, and the runtime save and load. The C application binary interface
-  version moves to `0.7.0`.
+  handle, the runtime save and load, the named optimizer preset
+  (`nanochat_optim_config_preset`), the metrics (`nanochat_runtime_metrics`),
+  and the replica digest (`nanochat_runtime_param_digest`). The C application
+  binary interface version moves to `0.8.0`.
 - `python/nanochat_cpp/mesh.py`: `devices`, `Device`, `Mesh`, `NamedSharding`,
   `PartitionSpec`, and the placement checks.
 - `python/nanochat_cpp/runtime.py`: `MeshRuntime`, which runs one global batch
-  over the mesh, returns one loss, and saves or loads a checkpoint.
+  over the mesh, returns one loss, reports `StepMetrics`, digests a replica,
+  and saves or loads a checkpoint.
+- `python/nanochat_cpp/api.py`: `optimizer_config` and `preset_optimizer_config`,
+  so `Optimizer` and `MeshRuntime` share one field list and the `track3` preset
+  has one C source of truth.
 - `python/nanochat_cpp/run.py`: the client entry point. It re-enters
   `tools/nanochat client`.
 - `tools/nanochat client`: one broker lock for the full device set, then one
   sandbox scope.
+- `notebooks/mesh_train.py`: the notebook loop over the runtime, and
+  `notebooks/nanochat-cpp-on-2x-t4.ipynb`, the two-card end-to-end notebook.
 - Phase 3: the CUDA backend state is thread-local, and each device thread binds
   with `SelectDevice`. The cuBLAS handle, the tensor-core flag, the device name
   buffer, and the attention, Muon, and ANVIL scratch buffers are per thread.
-- Tests: `//src:mesh_test`, `//src:mesh_runtime_test`, `//python:mesh_test`,
-  `//python:runtime_test`, `//python:run_test`, and the device enumeration in
+- Tests: `//src:mesh_test`, `//src:mesh_runtime_test`, `//src:runtime_gpu_test`,
+  `//python:mesh_test`, `//python:runtime_test`, `//python:run_test`,
+  `//notebooks:mesh_train_test`, and the device enumeration in
   `//bindings:nanochat_capi_test`.
 
 ### The evidence
@@ -586,13 +598,16 @@ The two-device and the four-device CPU runs equal the one-device run on the
 loss and on every parameter. The replicas of one runtime stay byte-identical
 over several steps. A save from one replica loads into every replica. The
 Python client reproduces the same result through the C application binary
-interface. The CUDA compile gate passes with warnings as errors.
+interface. `//src:runtime_gpu_test` runs two device threads on one card, and the
+replicas stay byte-identical. The CUDA compile gate passes with warnings as
+errors.
 
 ### Not delivered
 
-- Phase 5: the peer-to-peer fast path. The host staging path is correct first
-  (section 9.4).
+- Phase 5: the peer-to-peer fast path. The kernel-seam staging path is correct
+  first (section 9.4).
 - The controller drives the loader, so a step does not overlap the data read.
   The overlap needs the loader behind the runtime (section 11).
-- A two-device CUDA run on real cards is not measured here. It needs the
-  `t1-gpu` and `t2-parity` gates on a multi-card host.
+- A two-card CUDA run on real T4 cards is not measured here. It needs the
+  `t1-gpu` and `t2-parity` gates on a multi-card host. `//src:runtime_gpu_test`
+  covers two device threads on one card.

@@ -51,7 +51,7 @@ namespace {
 
 // The C ABI version. Bump this string on every change to the surface or to a
 // mirrored struct; docs/python.md section 13 names that rule.
-constexpr char kNanochatVersion[] = "0.7.0";
+constexpr char kNanochatVersion[] = "0.8.0";
 
 // The magic that `Checkpoint::Save` writes (src/data.cc). A file with this
 // prefix is the harness container, so `nanochat_load` routes it through the
@@ -190,6 +190,50 @@ void ToOptimizerConfig(const nanochat_optim_config& source,
   scheduler->rail_beta_cooldown_steps = source.rail_beta_cooldown_steps;
   scheduler->rail_beta_min = source.rail_beta_min;
   scheduler->rail_beta_max = source.rail_beta_max;
+}
+
+// The reverse of `ToOptimizerConfig`: copies a C++ optimizer and schedule into
+// the flat C struct. One place owns the field list, so the preset and any later
+// reader agree.
+void FromOptimizerConfig(const nanochat::OptimizerConfig& optimizer,
+                         const nanochat::SchedulerConfig& scheduler,
+                         nanochat_optim_config* out) {
+  out->unembedding_lr = optimizer.unembedding_lr;
+  out->embedding_lr = optimizer.embedding_lr;
+  out->matrix_lr = optimizer.matrix_lr;
+  out->scalar_lr = optimizer.scalar_lr;
+  out->weight_decay = optimizer.weight_decay;
+  out->muon_ns_steps = optimizer.muon_ns_steps;
+  out->muon_beta2 = optimizer.muon_beta2;
+  out->adam_eps = optimizer.adam_eps;
+  out->clip = optimizer.clip;
+
+  out->num_iterations = scheduler.num_iterations;
+  out->warmup_steps = scheduler.warmup_steps;
+  out->warmdown_ratio = scheduler.warmdown_ratio;
+  out->final_lr_frac = scheduler.final_lr_frac;
+  out->weight_decay_base = scheduler.weight_decay_base;
+  out->muon_momentum_warmup_steps = scheduler.muon_momentum_warmup_steps;
+  out->muon_momentum_start = scheduler.muon_momentum_start;
+  out->muon_momentum_peak = scheduler.muon_momentum_peak;
+  out->muon_momentum_final = scheduler.muon_momentum_final;
+
+  out->matrix_optimizer = optimizer.matrix_optimizer;
+  out->adam_step_period = optimizer.adam_step_period;
+  out->anvil_lr = optimizer.anvil_lr;
+  out->anvil_weight_decay = optimizer.anvil_weight_decay;
+  out->anvil_momentum = optimizer.anvil_momentum;
+  out->anvil_beta2 = optimizer.anvil_beta2;
+  out->anvil_fast_beta = optimizer.anvil_fast_beta;
+  out->anvil_slow_beta = optimizer.anvil_slow_beta;
+  out->anvil_fast_weight = optimizer.anvil_fast_weight;
+  out->anvil_engage_step = optimizer.anvil_engage_step;
+  out->anvil_num_maps = optimizer.anvil_num_maps;
+
+  out->rail_beta_warmup_steps = scheduler.rail_beta_warmup_steps;
+  out->rail_beta_cooldown_steps = scheduler.rail_beta_cooldown_steps;
+  out->rail_beta_min = scheduler.rail_beta_min;
+  out->rail_beta_max = scheduler.rail_beta_max;
 }
 
 }  // namespace
@@ -421,6 +465,22 @@ float nanochat_runtime_train_step(nanochat_runtime* runtime, const int* tokens,
   });
 }
 
+nanochat_status nanochat_runtime_metrics(nanochat_runtime* runtime,
+                                         nanochat_metrics* out) {
+  return Guard("nanochat_runtime_metrics", NANOCHAT_STATUS_ERROR, [&]() {
+    if (runtime == nullptr || runtime->runtime == nullptr) {
+      throw std::invalid_argument("runtime is null");
+    }
+    if (out == nullptr) throw std::invalid_argument("out is null");
+    const nanochat::MeshMetrics& metrics = runtime->runtime->metrics();
+    out->device_count = static_cast<int>(metrics.loss.size());
+    out->loss = metrics.loss.empty() ? nullptr : metrics.loss.data();
+    out->grad_norm = metrics.grad_norm;
+    out->step_seconds = metrics.step_seconds;
+    return NANOCHAT_STATUS_OK;
+  });
+}
+
 int nanochat_runtime_param_count(nanochat_runtime* runtime, int replica) {
   return Guard("nanochat_runtime_param_count", 0, [&]() -> int {
     return static_cast<int>(RuntimeModel(runtime, replica)->params().size());
@@ -464,6 +524,18 @@ int64_t nanochat_runtime_param_read(nanochat_runtime* runtime, int replica,
             nanochat::CopyDir::kDeviceToHost);
         return count;
       });
+}
+
+nanochat_status nanochat_runtime_param_digest(nanochat_runtime* runtime,
+                                              int replica, uint64_t* out) {
+  return Guard("nanochat_runtime_param_digest", NANOCHAT_STATUS_ERROR, [&]() {
+    if (runtime == nullptr || runtime->runtime == nullptr) {
+      throw std::invalid_argument("runtime is null");
+    }
+    if (out == nullptr) throw std::invalid_argument("out is null");
+    *out = runtime->runtime->ParamDigest(replica);
+    return NANOCHAT_STATUS_OK;
+  });
 }
 
 void nanochat_runtime_save(nanochat_runtime* runtime, const char* path) {
@@ -725,6 +797,20 @@ void nanochat_load(nanochat_model* model, const char* path) {
       return;
     }
     model->model->Load(path);
+  });
+}
+
+nanochat_status nanochat_optim_config_preset(const char* name,
+                                             nanochat_optim_config* out) {
+  return Guard("nanochat_optim_config_preset", NANOCHAT_STATUS_ERROR, [&]() {
+    if (name == nullptr) throw std::invalid_argument("name is null");
+    if (out == nullptr) throw std::invalid_argument("out is null");
+    if (std::strcmp(name, "track3") != 0) {
+      throw std::invalid_argument(std::string("unknown preset '") + name + "'");
+    }
+    const nanochat::TrainConfig preset = nanochat::TrackThreeBaseline();
+    FromOptimizerConfig(preset.optimizer, preset.scheduler, out);
+    return NANOCHAT_STATUS_OK;
   });
 }
 

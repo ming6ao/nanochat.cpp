@@ -155,6 +155,60 @@ class RuntimeTest(unittest.TestCase):
             single.close()
             pair.close()
 
+    def test_metrics_after_step(self) -> None:
+        batch, seq, accum = 4, 8, 2
+        rows = batch * seq
+        tokens = ids(rows, 64, 7, 3)
+        targets = ids(rows, 64, 11, 5)
+
+        with self.make_runtime(2, batch, accum) as pair:
+            loss = pair.train_step(tokens, targets)
+            metrics = pair.metrics()
+
+        self.assertEqual(len(metrics.loss), 2)
+        self.assertAlmostEqual(metrics.mean_loss, loss, places=5)
+        self.assertGreaterEqual(metrics.grad_norm, 0.0)
+        self.assertGreater(metrics.step_seconds, 0.0)
+
+    def test_replica_digest_matches(self) -> None:
+        batch, seq, accum = 4, 8, 2
+        rows = batch * seq
+        tokens = ids(rows, 64, 7, 3)
+        targets = ids(rows, 64, 11, 5)
+
+        with self.make_runtime(2, batch, accum) as pair:
+            before = pair.replica_digest(0)
+            self.assertEqual(before, pair.replica_digest(1))
+            pair.train_step(tokens, targets)
+            after = pair.replica_digest(0)
+            self.assertEqual(after, pair.replica_digest(1))
+            self.assertNotEqual(before, after,
+                                "a step must change the parameters")
+
+    def test_optimizer_config_builder(self) -> None:
+        from nanochat_cpp import optimizer_config
+
+        config = optimizer_config(num_iterations=7, matrix_lr=0.5)
+        self.assertEqual(config.num_iterations, 7)
+        self.assertAlmostEqual(config.matrix_lr, 0.5, places=6)
+        self.assertAlmostEqual(config.embedding_lr, 0.2, places=6)
+        with self.assertRaises(TypeError):
+            optimizer_config(not_a_field=1)
+
+    def test_track3_preset_matches_the_harness(self) -> None:
+        from nanochat_cpp import preset_optimizer_config
+
+        config = preset_optimizer_config("track3")
+        self.assertAlmostEqual(config.embedding_lr, 0.7, places=6)
+        self.assertAlmostEqual(config.unembedding_lr, 0.004, places=6)
+        self.assertAlmostEqual(config.scalar_lr, 0.015, places=6)
+        self.assertAlmostEqual(config.matrix_lr, 0.025, places=6)
+        self.assertAlmostEqual(config.warmdown_ratio, 0.7, places=6)
+        self.assertAlmostEqual(config.final_lr_frac, 0.0, places=6)
+        self.assertAlmostEqual(config.weight_decay_base, 0.05, places=6)
+        with self.assertRaises(_core.NanochatError):
+            preset_optimizer_config("unknown")
+
     def _assert_same_parameters(self, a, a_replica, b, b_replica,
                                 tolerance: float = 1e-4) -> None:
         count = a.param_count(a_replica)

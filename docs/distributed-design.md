@@ -364,20 +364,25 @@ fixed validation set.
 
 ## 13. Kaggle notebook
 
-The two-card notebook is `notebooks/nanochat-cpp-on-2x-t4.ipynb`. The plan
-lives in [distributed-native-plan.md](distributed-native-plan.md).
+The two-card notebook is `notebooks/nanochat-cpp-on-2x-t4.ipynb`. It uses the
+single-client multi-device runtime, so one process owns both cards
+([client-runtime-design.md](client-runtime-design.md)). The multi-process plan
+lives in [distributed-native-plan.md](distributed-native-plan.md) and
+[distributed-launch.md](distributed-launch.md).
 
 The notebook runs these steps:
 
-1. Build the `t4` shared library and the `--config=native` `//src:train_main`.
+1. Build the `t4` shared library. The library already holds the mesh runtime.
 2. Stage one ClimbMix shard, the validation shard, and the tokenizer.
-3. Run the best-fit model with one process on each of the two cards.
-4. Compare the two checkpoint hashes.
-5. Load rank 0 in process. Run the base evaluation, the supervised fine-tuning,
-   and the chat evaluation.
+3. Run the best-fit model with one `MeshRuntime` over the two cards.
+4. Compare the two replica parameter digests, and keep the canonical
+   checkpoint.
+5. Load the checkpoint in process. Run the base evaluation, the supervised
+   fine-tuning, and the chat evaluation.
 
-The T4 cards do not have a peer link, so the native ring stages through pinned
-host memory (section 10.1). The `--config=native` build needs no NCCL.
+The runtime stages the gradients through the kernel seam, so the CUDA build
+needs no NCCL. The T4 cards do not have a peer link, so the peer-to-peer fast
+path waits (section 10.1).
 
 ## 14. Phasing
 

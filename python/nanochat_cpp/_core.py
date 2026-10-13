@@ -28,6 +28,7 @@ __all__ = [
     "GenerateParams",
     "Sequences",
     "OptimizerConfig",
+    "Metrics",
     "ModelHandle",
     "OptimHandle",
     "LoaderHandle",
@@ -238,6 +239,22 @@ class OptimizerConfig(ctypes.Structure):
     ]
 
 
+class Metrics(ctypes.Structure):
+    """A mirror of ``nanochat::MeshMetrics`` (``nanochat_metrics``).
+
+    ``loss`` points to ``device_count`` per-replica losses. The buffer belongs
+    to the runtime and stays valid until the next step or the next call to
+    ``nanochat_runtime_metrics``.
+    """
+
+    _fields_ = [
+        ("device_count", ctypes.c_int),
+        ("loss", ctypes.POINTER(ctypes.c_float)),
+        ("grad_norm", ctypes.c_float),
+        ("step_seconds", ctypes.c_float),
+    ]
+
+
 # Opaque handles. The C declarations use ``struct nanochat_model *`` and
 # friends; a ``c_void_p`` carries the same pointer width.
 ModelHandle = ctypes.c_void_p
@@ -272,6 +289,8 @@ _SIGNATURES = (
     ("nanochat_runtime_train_step",
      (RuntimeHandle, ctypes.POINTER(ctypes.c_int),
       ctypes.POINTER(ctypes.c_int)), ctypes.c_float),
+    ("nanochat_runtime_metrics",
+     (RuntimeHandle, ctypes.POINTER(Metrics)), ctypes.c_int),
     ("nanochat_runtime_param_count",
      (RuntimeHandle, ctypes.c_int), ctypes.c_int),
     ("nanochat_runtime_param_info",
@@ -280,6 +299,9 @@ _SIGNATURES = (
     ("nanochat_runtime_param_read",
      (RuntimeHandle, ctypes.c_int, ctypes.c_int, ctypes.c_int,
       ctypes.c_int64, ctypes.c_int64, ctypes.c_void_p), ctypes.c_int64),
+    ("nanochat_runtime_param_digest",
+     (RuntimeHandle, ctypes.c_int, ctypes.POINTER(ctypes.c_uint64)),
+     ctypes.c_int),
     ("nanochat_runtime_save", (RuntimeHandle, ctypes.c_char_p), None),
     ("nanochat_runtime_load", (RuntimeHandle, ctypes.c_char_p), None),
     ("nanochat_params_get",
@@ -313,6 +335,8 @@ _SIGNATURES = (
     ("nanochat_load", (ModelHandle, ctypes.c_char_p), None),
     ("nanochat_optim_create",
      (ModelHandle, ctypes.POINTER(OptimizerConfig)), OptimHandle),
+    ("nanochat_optim_config_preset",
+     (ctypes.c_char_p, ctypes.POINTER(OptimizerConfig)), ctypes.c_int),
     ("nanochat_optim_step", (OptimHandle, ctypes.c_int), None),
     ("nanochat_optim_grad_norm", (OptimHandle,), ctypes.c_float),
     ("nanochat_optim_free", (OptimHandle,), None),

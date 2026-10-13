@@ -23,6 +23,13 @@ py_library(
 )
 
 py_library(
+    name = "mesh_train",
+    srcs = ["mesh_train.py"],
+    imports = ["."],
+    deps = ["//python:nanochat_cpp"],
+)
+
+py_library(
     name = "pi_agent",
     srcs = ["pi_agent.py"],
     imports = ["."],
@@ -43,6 +50,13 @@ py_test(
 )
 
 py_test(
+    name = "mesh_train_test",
+    srcs = ["mesh_train_test.py"],
+    size = "small",
+    deps = [":mesh_train"],
+)
+
+py_test(
     name = "pi_agent_test",
     srcs = ["pi_agent_test.py"],
     size = "small",
@@ -54,6 +68,7 @@ test_suite(
     tests = [
         ":kaggle_setup_test",
         ":lab_test",
+        ":mesh_train_test",
         ":pi_agent_test",
     ],
 )

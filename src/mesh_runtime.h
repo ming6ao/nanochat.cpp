@@ -20,8 +20,10 @@
 // in-process collective reduces the gradients, so every replica applies the
 // same update.
 //
-// The runtime is the C++ core of the client. The Python `Trainer` and the C
-// application binary interface are later phases; this file is CPU-tested.
+// The runtime is the C++ core of the client. The Python `MeshRuntime` and the
+// C application binary interface call into it; `//src:mesh_runtime_test`
+// covers the CPU path and `//src:runtime_gpu_test` covers two device threads on
+// one card.
 
 namespace nanochat {
 
@@ -36,6 +38,17 @@ struct MeshRuntimeConfig {
   int grad_accum = 1;  // micro-batches per replica per step
   int seq = 0;         // 0 selects `model.seq_len`
   std::uint64_t seed = 42;
+};
+
+// The report of the last training step (docs/client-runtime-design.md section
+// 20.4). `loss` holds one entry per replica, so a client can show the
+// per-device split. `grad_norm` is the reduced gradient norm; every replica
+// reports the same value. `step_seconds` is the wall-clock time of the last
+// `TrainStep`.
+struct MeshMetrics {
+  std::vector<float> loss;
+  float grad_norm = 0.0f;
+  float step_seconds = 0.0f;
 };
 
 class MeshRuntime {
@@ -61,6 +74,15 @@ class MeshRuntime {
   const Model* model(int replica) const;
   int param_count(int replica) const;
 
+  // The metrics of the last `TrainStep`, or zero values before the first step.
+  const MeshMetrics& metrics() const { return metrics_; }
+
+  // A 64-bit FNV-1a digest of every parameter of `replica`. The two replicas
+  // return the same digest after a step, so a client can check the gradient
+  // reduce without copying the whole model to the host. Throws on a bad
+  // replica index.
+  std::uint64_t ParamDigest(int replica) const;
+
   // Writes the canonical checkpoint from replica 0. Every replica is equal,
   // so one file is the whole state.
   void Save(const std::string& path);
@@ -83,6 +105,7 @@ class MeshRuntime {
   int step_ = 0;
   std::unique_ptr<InProcessCollective> collective_;
   std::vector<std::unique_ptr<Replica>> replicas_;
+  MeshMetrics metrics_;
 };
 
 }  // namespace nanochat
