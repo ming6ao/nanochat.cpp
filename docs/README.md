@@ -13,7 +13,6 @@ detailed reference that the design points at.
 | [testing.md](testing.md) | Test tiers, oracle harness, finite-difference checks |
 | [parity.md](parity.md) | Known differences from the PyTorch reference, with status |
 | [distributed-design.md](distributed-design.md) | Data-parallel training on two devices: the gradient-sync seam, sharding, the data cursor, and the launch |
-| [distributed-plan.md](distributed-plan.md) | The execution plan for NCCL, the overlap seam, and the data cursor |
 | [distributed-launch.md](distributed-launch.md) | The launch of a data-parallel run: the rank contract, the `tools/nanochat dist` command, and the Python helper |
 | [distributed-native-plan.md](distributed-native-plan.md) | The execution plan for a native all-reduce over NVLink and RDMA: the transport interface, the ring schedule, ownership, and the broker |
 | [client-runtime-design.md](client-runtime-design.md) | The single-client multi-device runtime: one program, a device mesh, placement, the in-process collective, and the compatibility process runtime |

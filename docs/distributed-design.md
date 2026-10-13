@@ -1,7 +1,5 @@
 # Distributed training design
 
-See [distributed-plan.md](distributed-plan.md) for the execution plan.
-
 Data-parallel training on two devices. This document describes the gradient-sync
 seam, the data sharding, the data cursor, the model configuration, and the
 launch.
@@ -109,8 +107,8 @@ Rules:
 ## 5. Implementations
 
 Two implementations ship today, and a third is selectable. The build selects
-one, and the selection follows the backend (docs/distributed-plan.md phase 0).
-There is no host-reference fallback on the CUDA path.
+one, and the selection follows the backend. There is no host-reference fallback
+on the CUDA path.
 
 | Implementation | File | Use |
 |---|---|---|
@@ -322,9 +320,8 @@ memory, which cut the sync from about 2.5 s to about 0.7 s per step. The 70 W
 T4 power cap holds the sustained SM clock near 900 MHz, so the achievable MFU
 stays below the boost-clock peak.
 
-The remaining headroom is the overlap of the reduction with the backward
-([distributed-plan.md](distributed-plan.md) phase 2) and a fused windowed
-attention forward on the backward path.
+The remaining headroom is the overlap of the reduction with the backward and a
+fused windowed attention forward on the backward path.
 
 ## 11. Determinism and resume
 
@@ -388,9 +385,7 @@ The architecture phases P0 to P4 are complete. They cover the seam, the Track 3
 preset, the host reference, the CPU two-rank test, NCCL, the overlap seam, and
 the data cursor.
 
-The execution plan for the remaining throughput work is
-[distributed-plan.md](distributed-plan.md). The NCCL gate and the two-rank
-parity gate run on Kaggle (section 15).
+The NCCL gate and the two-rank parity gate run on Kaggle (section 15).
 
 The CPU path keeps the GPU off the correctness path, as `DESIGN.md` section 4
 requires.

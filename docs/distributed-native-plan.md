@@ -2,8 +2,7 @@
 
 This document is the execution plan for a native all-reduce backend. The backend
 replaces NCCL on the CUDA path. [distributed-design.md](distributed-design.md)
-holds the current seam design. [distributed-plan.md](distributed-plan.md) holds
-the NCCL plan that this document supersedes on the CUDA path.
+holds the current seam design.
 
 Status: delivered through phase 2 on the local T4 host. The ring schedule, the
 host-staged transport, the transfer-window pool, and `NativeGradientSync` are
@@ -366,8 +365,7 @@ separate question.
 Owner: architect, with the collective agent.
 
 - Record the decision to drop NCCL as a hard dependency. Update
-  [distributed-design.md](distributed-design.md),
-  [distributed-plan.md](distributed-plan.md), and
+  [distributed-design.md](distributed-design.md) and
   [distributed-launch.md](distributed-launch.md).
 - Add a build define, for example `--define=collective=native`. Keep `nccl` as
   the default until parity.

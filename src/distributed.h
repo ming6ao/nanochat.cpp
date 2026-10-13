@@ -43,7 +43,7 @@ class GradientSync {
   // count.
   virtual void AllReduceSum(ComputeType* buffer, std::int64_t count) = 0;
 
-  // The asynchronous form (docs/distributed-plan.md phase 2). The reduction
+  // The asynchronous form. The reduction
   // runs on the backend's side stream and the call returns before it finishes.
   // The caller must not touch `buffer` until `Wait` returns. The default
   // implementation is synchronous, so a single-stream backend such as the host

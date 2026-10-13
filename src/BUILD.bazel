@@ -50,7 +50,7 @@ cc_library(
 # The host reference for the gradient-sync seam
 # (docs/distributed-design.md section 5). It defines `CreateGradientSync` for
 # the CPU backend. A CUDA build gets that symbol from
-# `//backends/cuda:nccl_sync` (docs/distributed-plan.md phase 0).
+# `//backends/cuda:nccl_sync`.
 cc_library(
     name = "distributed_host",
     srcs = ["distributed.cc"],
@@ -102,9 +102,8 @@ cc_library(
     # Backend selection is a build/link choice (docs/build.md): the same
     # workflow sources link the reference CPU backend by default or the CUDA
     # backend under `--config=cuda`. The gradient-sync factory follows the same
-    # choice: the host reference on the CPU and NCCL on the GPU
-    # (docs/distributed-plan.md phase 0). There is no host-reference fallback on
-    # the CUDA path.
+    # choice: the host reference on the CPU and NCCL on the GPU. There is no
+    # host-reference fallback on the CUDA path.
     deps = select({
         "//:backend_cuda": [
             "//backends/cuda:all_kernels",
@@ -117,7 +116,7 @@ cc_library(
     }) + [
         ":distributed_seam",
         # `train.cc` reads the device capability table for the precision-aware
-        # MFU peak (docs/precision.md, docs/distributed-plan.md phase B1).
+        # MFU peak (docs/precision.md).
         ":device_profile",
         # `eval.cc` decodes the generated rows through the tokenizer stream
         # decoder, so the workflow library links the host tokenizer.

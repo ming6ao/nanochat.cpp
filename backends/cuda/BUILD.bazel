@@ -40,7 +40,7 @@ cuda_library(
     alwayslink = True,
 )
 
-# The NCCL gradient-sync factory (docs/distributed-plan.md phase 1). This target
+# The NCCL gradient-sync factory. This target
 # defines `CreateGradientSync` for a CUDA build; `//src:model` selects it for
 # `//:backend_cuda`. The source is empty under the CPU config, so `bazel build
 # //...` on a host without NCCL still builds, and the CPU backend keeps the host
