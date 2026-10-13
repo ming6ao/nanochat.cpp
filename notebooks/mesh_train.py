@@ -405,11 +405,17 @@ def run(plan: MeshTrainPlan, *,
                         seq=plan.sequence_length, seed=plan.seed) as runtime:
         start_step = 1
         if plan.resume and checkpoint.is_file():
-            runtime.load(str(checkpoint))
-            start_step = runtime.step + 1
-            _skip(data, start_step - 1)
-            print(f"resumed from {checkpoint} at step {start_step}",
-                  flush=True)
+            try:
+                runtime.load(str(checkpoint))
+            except nc.NanochatError as error:
+                # An old or partial checkpoint must not stop the run. Report it
+                # and start fresh instead.
+                print(f"resume skipped: {error}", flush=True)
+            else:
+                start_step = runtime.step + 1
+                _skip(data, start_step - 1)
+                print(f"resumed from {checkpoint} at step {start_step}",
+                      flush=True)
         try:
             iterate(runtime, data, plan, start_step=start_step,
                     progress=progress)
