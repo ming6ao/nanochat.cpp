@@ -13,11 +13,12 @@ standard library and the shared-library loader only.
 from __future__ import annotations
 
 import ctypes
+import dataclasses
 
 from . import _core, _lib
 from .mesh import Mesh
 
-__all__ = ["MeshRuntime"]
+__all__ = ["MeshRuntime", "StepMetrics"]
 
 
 def _as_core_config(value, expected, label):
@@ -48,6 +49,25 @@ def _int_buffer(values):
 
     visit(values)
     return (ctypes.c_int * len(flat))(*flat)
+
+
+@dataclasses.dataclass(frozen=True)
+class StepMetrics:
+    """The report of the last training step.
+
+    ``loss`` holds one entry per replica. ``grad_norm`` is the reduced gradient
+    norm, so every replica reports the same value. ``step_seconds`` is the
+    wall-clock time of the last step.
+    """
+
+    loss: tuple[float, ...]
+    grad_norm: float
+    step_seconds: float
+
+    @property
+    def mean_loss(self) -> float:
+        """The mean loss over the replicas, or zero when the run has none."""
+        return sum(self.loss) / len(self.loss) if self.loss else 0.0
 
 
 class MeshRuntime:
@@ -125,6 +145,36 @@ class MeshRuntime:
         if after and after != before:
             raise _core.NanochatError("nanochat_runtime_train_step", after)
         return float(loss)
+
+    def metrics(self) -> StepMetrics:
+        """The metrics of the last step, one entry per replica.
+
+        Call after :meth:`train_step`. The per-replica loss buffer belongs to
+        the runtime, so the wrapper copies it into the result.
+        """
+        info = _core.Metrics()
+        status = self._lib.nanochat_runtime_metrics(self._handle,
+                                                    ctypes.byref(info))
+        _core.check_status(self._lib, status, "nanochat_runtime_metrics")
+        count = int(info.device_count)
+        loss = (tuple(float(info.loss[i]) for i in range(count))
+                if info.loss and count > 0 else ())
+        return StepMetrics(loss=loss, grad_norm=float(info.grad_norm),
+                           step_seconds=float(info.step_seconds))
+
+    def replica_digest(self, replica: int = 0) -> int:
+        """A 64-bit digest of every parameter of ``replica``.
+
+        The replicas of one runtime return the same digest after a step, so a
+        client can check the gradient reduce without copying the whole model
+        to the host.
+        """
+        out = ctypes.c_uint64()
+        status = self._lib.nanochat_runtime_param_digest(
+            self._handle, int(replica), ctypes.byref(out))
+        _core.check_status(self._lib, status,
+                           "nanochat_runtime_param_digest")
+        return int(out.value)
 
     def param_count(self, replica: int = 0) -> int:
         """The parameter count of ``replica``."""

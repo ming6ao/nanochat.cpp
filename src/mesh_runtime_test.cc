@@ -170,11 +170,47 @@ void TestRuntimeShape() {
   }
 }
 
+// The step metrics: one loss per replica, the reduced gradient norm, and the
+// step time (docs/client-runtime-design.md section 20.4).
+void TestMetrics() {
+  const Config model = TinyConfig();
+  const MeshRuntimeConfig config = TinyRuntimeConfig(model);
+  const int rows = config.batch * config.seq;
+  const std::vector<int> tokens = MakeIds(rows, model.vocab_size, 7, 3);
+  const std::vector<int> targets = MakeIds(rows, model.vocab_size, 11, 5);
+
+  MeshRuntime pair(MeshSpec::Data(2), config);
+  const std::uint64_t before = pair.ParamDigest(0);
+  if (before != pair.ParamDigest(1)) {
+    Fail("the replicas start unequal");
+  }
+  const float loss = pair.TrainStep(tokens.data(), targets.data());
+  if (pair.ParamDigest(0) != pair.ParamDigest(1)) {
+    Fail("the replica digest differs after a step");
+  }
+  if (pair.ParamDigest(0) == before) {
+    Fail("a step must change the parameters");
+  }
+  const nanochat::MeshMetrics& metrics = pair.metrics();
+  if (static_cast<int>(metrics.loss.size()) != pair.world_size()) {
+    Fail("metrics.loss must hold one entry per replica");
+  }
+  if (metrics.step_seconds <= 0.0f) Fail("step_seconds must be positive");
+  if (metrics.grad_norm < 0.0f) Fail("grad_norm must not be negative");
+  float mean = 0.0f;
+  for (float value : metrics.loss) mean += value;
+  mean /= static_cast<float>(metrics.loss.size());
+  if (std::fabs(mean - loss) > 1e-4f) {
+    Fail("the mean per-replica loss differs from TrainStep");
+  }
+}
+
 }  // namespace
 
 int main() {
   nanochat::RequireSandboxOrDie("test");
   TestRuntimeShape();
+  TestMetrics();
   TestTwoReplicasEqualOne();
   TestFourReplicasEqualOne();
   TestReplicasStayEqual();

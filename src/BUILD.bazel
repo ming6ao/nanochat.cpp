@@ -410,6 +410,24 @@ cc_test(
     size = "small",
 )
 
+# CUDA flavor of the mesh runtime (docs/client-runtime-design.md section 17
+# phase 3): two device threads that share one card. This proves the thread-local
+# backend state and the per-thread device binding, and it needs one accelerator
+# only. The `gpu` tag keeps it out of the default CPU test loop;
+# `//src:mesh_runtime_test` above remains the CPU proof.
+cc_test(
+    name = "runtime_gpu_test",
+    srcs = ["runtime_gpu_test.cc"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    deps = [
+        ":model",
+        "//include/nanochat:nanochat",
+    ],
+    size = "small",
+    tags = ["gpu"],
+)
+
 # Distributed gradient sync (docs/distributed-design.md sections 4 and 7): two
 # CPU processes reduce over loopback TCP and match an independently computed
 # sum, and the stride document sharding partitions the document stream. CPU

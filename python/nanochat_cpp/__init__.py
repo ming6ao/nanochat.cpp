@@ -34,6 +34,8 @@ from .api import (
     build,
     evaluate,
     no_grad,
+    optimizer_config,
+    preset_optimizer_config,
 )
 from .chat import render_conversation
 from .mesh import (
@@ -72,6 +74,8 @@ __all__ = [
     "devices",
     "evaluate",
     "no_grad",
+    "optimizer_config",
+    "preset_optimizer_config",
     "render_conversation",
     "build_train_mixture",
     "build_val_mixture",

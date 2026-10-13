@@ -14,13 +14,11 @@
 // every device thread. Each thread gets one `GradientSync` view through
 // `Participant`, so the existing gradient-sync seam is unchanged.
 //
-// The reduction stages every participant's bucket in one host buffer, uses a
-// reusable barrier to publish the writes, and sums every slot in rank order.
-// The rank order makes the sum deterministic, so every replica sees the same
-// bytes.
-//
-// This is the host/CPU path. It stages through host memory on purpose; the
-// device-memory fast path is a later phase (docs/client-runtime-design.md
+// The reduction stages every participant's bucket in one host buffer through
+// the kernel-seam copy, uses a reusable barrier to publish the writes, and sums
+// every slot in rank order. The rank order makes the sum deterministic, so
+// every replica sees the same bytes. The staging copy is the correctness path;
+// the peer-to-peer fast path is a later phase (docs/client-runtime-design.md
 // section 9.4).
 
 namespace nanochat {
@@ -39,7 +37,11 @@ class InProcessCollective {
 
   // Replaces `buffer` with the elementwise sum across every participant. Every
   // participant must call this the same number of times with the same `count`.
-  void AllReduce(int rank, ComputeType* buffer, std::int64_t count);
+  // `buffer` may point to device memory; the collective stages it through the
+  // kernel seam. `local` is a caller-owned host scratch buffer, one per
+  // participant, so no rank writes a slot another rank reads.
+  void AllReduce(int rank, ComputeType* buffer, std::int64_t count,
+                 std::vector<ComputeType>* local);
 
  private:
   // One reusable barrier phase. The last participant to arrive advances the

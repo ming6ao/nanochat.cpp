@@ -440,6 +440,47 @@ nanochat_model* CheckModel() {
 
   nanochat_zero_grad(model);
 
+  // The named optimizer preset and the runtime metrics. The preset returns the
+  // same fields as `TrackThreeBaseline` (docs/client-runtime-design.md section
+  // 20.4).
+  nanochat_optim_config preset;
+  std::memset(&preset, 0, sizeof(preset));
+  Check("preset: track3 returns ok",
+        nanochat_optim_config_preset("track3", &preset) == NANOCHAT_STATUS_OK);
+  Check("preset: track3 sets the embedding rate",
+        std::fabs(preset.embedding_lr - 0.7f) < 1e-6f);
+  Check("preset: track3 sets the warmdown ratio",
+        std::fabs(preset.warmdown_ratio - 0.7f) < 1e-6f);
+  Check("preset: an unknown name fails",
+        nanochat_optim_config_preset("nope", &preset) != NANOCHAT_STATUS_OK);
+
+  nanochat_mesh* mesh = nanochat_mesh_create(nullptr, 1);
+  Check("mesh: create returns a handle", mesh != nullptr);
+  if (mesh != nullptr) {
+    nanochat_runtime* runtime =
+        nanochat_runtime_create(mesh, &config, &optim_config, batch, 1, seq, 7);
+    Check("runtime: create returns a handle", runtime != nullptr);
+    if (runtime != nullptr) {
+      const float step_loss =
+          nanochat_runtime_train_step(runtime, tokens.data(), targets.data());
+      Check("runtime: train_step is finite", std::isfinite(step_loss));
+      nanochat_metrics metrics;
+      std::memset(&metrics, 0, sizeof(metrics));
+      Check("runtime: metrics returns ok",
+            nanochat_runtime_metrics(runtime, &metrics) == NANOCHAT_STATUS_OK);
+      Check("runtime: one loss per device", metrics.device_count == 1);
+      Check("runtime: the loss buffer is set", metrics.loss != nullptr);
+      Check("runtime: the step time is positive", metrics.step_seconds > 0.0f);
+      std::uint64_t digest = 0;
+      Check("runtime: digest returns ok",
+            nanochat_runtime_param_digest(runtime, 0, &digest) ==
+                NANOCHAT_STATUS_OK);
+      Check("runtime: digest is set", digest != 0);
+      nanochat_runtime_free(runtime);
+    }
+    nanochat_mesh_free(mesh);
+  }
+
   // ScoreBatch copies each ScoreResult to the flat C struct.
   std::vector<int> lengths = {seq, seq};
   std::vector<nanochat_focus> focus(static_cast<std::size_t>(batch));
