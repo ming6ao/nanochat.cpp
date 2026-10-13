@@ -17,6 +17,7 @@ import dataclasses
 import json
 import os
 import re
+import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -26,10 +27,12 @@ __all__ = [
     "DistributedError",
     "DistributedPlan",
     "DistributedResult",
+    "LiveRun",
     "RankResult",
     "assert_complete",
     "command_for",
     "launch",
+    "launch_live",
     "loss_rows",
     "parse_log",
 ]
@@ -263,6 +266,101 @@ def launch(plan: DistributedPlan, root: str | Path = ".",
     return DistributedResult(out_dir=out_dir, ranks=tuple(ranks))
 
 
+def launch_live(plan: DistributedPlan, root: str | Path = ".",
+                extra_env: dict | None = None,
+                timeout: float | None = None) -> "LiveRun":
+    """Start one process per card and return a pollable :class:`LiveRun`.
+
+    This is :func:`launch` without the block. Call :meth:`LiveRun.wait` to
+    collect the final :class:`DistributedResult`; the parsed records are
+    identical. The launcher's JSON summary stays on the pipe until then.
+    """
+    out_dir = Path(plan.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    env = dict(os.environ)
+    env.update(extra_env or {})
+    tool = toolchain.Toolchain(entry=plan.entry, repo_root=root, env=env,
+                               timeout=timeout)
+    argv = tool.dist_argv(
+        _shared_argv(plan), nproc_per_node=plan.world_size,
+        device=plan.device, master=plan.master, port=plan.port,
+        profile=plan.profile, log_dir=out_dir, json=True)
+    process = subprocess.Popen(
+        [str(tool.entry), *argv], cwd=str(tool.repo_root), env=env,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        start_new_session=True)
+    return LiveRun(plan=plan, out_dir=out_dir, process=process,
+                   timeout=timeout)
+
+
+class LiveRun:
+    """A running two-card launch that the caller can poll.
+
+    ``launch_live`` returns this handle as soon as the launcher starts. The
+    caller reads the per-rank structured logs while the run continues. The
+    training logger flushes each record, so a live tail shows every completed
+    step. Call :meth:`wait` to collect the final result.
+    """
+
+    def __init__(self, plan: DistributedPlan, out_dir: Path,
+                 process: subprocess.Popen, timeout: float | None = None) -> None:
+        self.plan = plan
+        self.out_dir = Path(out_dir)
+        self.process = process
+        self._timeout = timeout
+
+    def running(self) -> bool:
+        """True while at least one launcher process is alive."""
+        return self.process.poll() is None
+
+    def tail(self, rank: int = 0, lines: int = 15) -> str:
+        """The last ``lines`` lines of one rank structured log.
+
+        The logger flushes each record, so the tail shows every completed step
+        and every information line. A missing file returns an empty string.
+        """
+        path = self.plan.log_path(rank)
+        if not path.is_file():
+            return ""
+        text = path.read_text(encoding="utf-8", errors="replace")
+        return "\n".join(text.splitlines()[-lines:])
+
+    def rows(self, field: str = "loss") -> list[dict]:
+        """The live merged metric rows for ``field``, one column per rank."""
+        by_rank = {
+            rank: {row["step"]: row.get(field)
+                   for row in parse_log(self.plan.log_path(rank))}
+            for rank in range(self.plan.world_size)}
+        return _merged_rows(by_rank)
+
+    def wait(self, timeout: float | None = None) -> DistributedResult:
+        """Block until the group exits and return the final result.
+
+        ``timeout`` overrides the value from :func:`launch_live`. On timeout
+        the process group is terminated and
+        :class:`subprocess.TimeoutExpired` propagates.
+        """
+        if timeout is None:
+            timeout = self._timeout
+        try:
+            stdout, _ = self.process.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            self.terminate()
+            raise
+        return DistributedResult(
+            out_dir=self.out_dir,
+            ranks=tuple(_parse_summary(stdout or "", self.plan)))
+
+    def terminate(self) -> None:
+        """Stop the launcher and every rank process under it."""
+        if self.process.poll() is not None:
+            return
+        try:
+            os.killpg(os.getpgid(self.process.pid), 15)
+        except (ProcessLookupError, PermissionError):
+            self.process.terminate()
+
+
 def _parse_summary(stdout: str, plan: DistributedPlan) -> list[RankResult]:
     """Turn the launcher's JSON summary into one :class:`RankResult` per rank.
 
@@ -319,15 +417,13 @@ def assert_complete(result: DistributedResult) -> None:
     raise DistributedError("\n".join(details))
 
 
-def loss_rows(result: DistributedResult) -> list[dict]:
-    """One row per step: ``{"step": s, "rank0": l0, "rank1": l1}``.
+def _merged_rows(by_rank: dict[int, dict[int, float]]) -> list[dict]:
+    """One row per step, one column per rank, from ``{rank: {step: value}}``.
 
     The row count is the shortest rank log, so a partial log does not invent a
-    value. The ranks must agree on the loss; a difference points to a broken
-    all-reduce.
+    value. The ranks must agree on a reduced quantity; a difference points to a
+    broken all-reduce.
     """
-    by_rank = {rank.rank: {row["step"]: row["loss"] for row in rank.metrics}
-               for rank in result.ranks}
     if not by_rank:
         return []
     steps = sorted(set.intersection(
@@ -335,3 +431,11 @@ def loss_rows(result: DistributedResult) -> list[dict]:
     return [{"step": step, **{f"rank{rank}": values[step]
                               for rank, values in by_rank.items()}}
             for step in steps]
+
+
+def loss_rows(result: DistributedResult) -> list[dict]:
+    """One row per step: ``{"step": s, "rank0": l0, "rank1": l1}``."""
+    by_rank = {rank.rank: {row["step"]: row["loss"]
+                           for row in rank.metrics}
+               for rank in result.ranks}
+    return _merged_rows(by_rank)
