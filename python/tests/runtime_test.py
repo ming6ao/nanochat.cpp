@@ -8,6 +8,7 @@ mesh, so it needs no GPU and no broker
 
 from __future__ import annotations
 
+import array
 import unittest
 
 from nanochat_cpp import _core, _lib, mesh, runtime
@@ -169,6 +170,18 @@ class RuntimeTest(unittest.TestCase):
         self.assertAlmostEqual(metrics.mean_loss, loss, places=5)
         self.assertGreaterEqual(metrics.grad_norm, 0.0)
         self.assertGreater(metrics.step_seconds, 0.0)
+
+    def test_train_step_accepts_array_batches(self) -> None:
+        # The parquet loader returns `array.array` batches. The int buffer must
+        # iterate one, not hand the whole buffer to `int()`.
+        batch, seq, accum = 4, 8, 2
+        rows = batch * seq
+        tokens = array.array("i", ids(rows, 64, 7, 3))
+        targets = array.array("i", ids(rows, 64, 11, 5))
+
+        with self.make_runtime(1, batch, accum) as single:
+            loss = single.train_step(tokens, targets)
+        self.assertTrue(loss == loss, "the loss must be finite")
 
     def test_replica_digest_matches(self) -> None:
         batch, seq, accum = 4, 8, 2

@@ -12,6 +12,7 @@ standard library and the shared-library loader only.
 
 from __future__ import annotations
 
+import array
 import ctypes
 import dataclasses
 
@@ -37,11 +38,18 @@ def _as_core_config(value, expected, label):
 
 
 def _int_buffer(values):
-    """A flat ``ctypes`` int array from a nested sequence."""
+    """A flat ``ctypes`` int array from any int sequence.
+
+    The token loader returns ``array.array`` objects, and a caller may pass a
+    ``ctypes`` array or a list. Each of those iterates as integers, so the
+    helper accepts all of them. A scalar is not a valid batch. Without the
+    ``array.array`` arm, ``int()`` receives the whole buffer and parses its raw
+    bytes, which raises ``ValueError``.
+    """
     flat: list[int] = []
 
     def visit(value) -> None:
-        if isinstance(value, (list, tuple)):
+        if isinstance(value, (list, tuple, array.array, ctypes.Array)):
             for item in value:
                 visit(item)
         else:
