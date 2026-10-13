@@ -183,6 +183,18 @@ class RuntimeTest(unittest.TestCase):
             loss = single.train_step(tokens, targets)
         self.assertTrue(loss == loss, "the loss must be finite")
 
+    def test_train_step_accepts_raw_buffers(self) -> None:
+        # A caller may pass the raw int32 bytes or a byte memoryview. The
+        # helper must reinterpret those as int32, not iterate the bytes.
+        batch, seq, accum = 4, 8, 2
+        rows = batch * seq
+        tokens = array.array("i", ids(rows, 64, 7, 3)).tobytes()
+        targets = memoryview(array.array("i", ids(rows, 64, 11, 5)).tobytes())
+
+        with self.make_runtime(1, batch, accum) as single:
+            loss = single.train_step(tokens, targets)
+        self.assertTrue(loss == loss, "the loss must be finite")
+
     def test_replica_digest_matches(self) -> None:
         batch, seq, accum = 4, 8, 2
         rows = batch * seq

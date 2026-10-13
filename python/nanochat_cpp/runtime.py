@@ -38,18 +38,24 @@ def _as_core_config(value, expected, label):
 
 
 def _int_buffer(values):
-    """A flat ``ctypes`` int array from any int sequence.
+    """A flat ``ctypes`` int array from a batch of int32 ids.
 
-    The token loader returns ``array.array`` objects, and a caller may pass a
-    ``ctypes`` array or a list. Each of those iterates as integers, so the
-    helper accepts all of them. A scalar is not a valid batch. Without the
-    ``array.array`` arm, ``int()`` receives the whole buffer and parses its raw
-    bytes, which raises ``ValueError``.
+    A batch may arrive as a list, a tuple, an ``array.array``, a ``ctypes``
+    array, or a raw little-endian ``bytes`` buffer. The token loader returns
+    ``array.array``. A raw buffer is reinterpreted as int32, not iterated,
+    because iterating a ``bytes`` object yields single bytes. Without the
+    buffer arm, ``int()`` receives the whole buffer and parses its raw bytes,
+    which raises ``ValueError``.
     """
+    if isinstance(values, (bytes, bytearray)):
+        values = array.array("i", values)
+    elif isinstance(values, memoryview) and values.itemsize == 1:
+        values = values.cast("i")
     flat: list[int] = []
 
     def visit(value) -> None:
-        if isinstance(value, (list, tuple, array.array, ctypes.Array)):
+        if isinstance(value, (list, tuple, array.array, ctypes.Array,
+                              memoryview)):
             for item in value:
                 visit(item)
         else:
