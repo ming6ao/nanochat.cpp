@@ -8,7 +8,7 @@ so the notebook names no rank.
 :func:`launch` runs :func:`run` in a child process through
 ``tools/nanochat client``. The notebook cell returns, so the cell status stays
 correct, and the parent polls ``metrics.jsonl`` and ``worker.log`` instead. See
-``docs/notebook-workflow.md``.
+``docs/client-runtime-design.md``.
 
 The module imports ``nanochat_cpp`` inside the functions, not at module load.
 The pure helpers then import without the shared library.

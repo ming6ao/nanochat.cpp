@@ -1,23 +1,22 @@
-# notebooks/ — the Kaggle notebook and its trial runner. See
-# docs/notebook-workflow.md.
+# notebooks/ — the Kaggle notebook and the single-client mesh training loop.
 #
-# The runner imports only the Python standard library, so the tests run on the
-# registered local `python3` toolchain and need no third-party wheel.
+# The pure modules import only the Python standard library, so the tests run on
+# the registered local `python3` toolchain and need no third-party wheel.
 
 load("@rules_python//python:defs.bzl", "py_library", "py_test")
 
 package(default_visibility = ["//visibility:public"])
 
 py_library(
-    name = "kaggle_setup",
-    srcs = ["kaggle_setup.py"],
+    name = "args",
+    srcs = ["args.py"],
     imports = ["."],
     deps = ["//python:nanochat_cpp"],
 )
 
 py_library(
-    name = "lab",
-    srcs = ["lab.py"],
+    name = "kaggle_setup",
+    srcs = ["kaggle_setup.py"],
     imports = ["."],
     deps = ["//python:nanochat_cpp"],
 )
@@ -43,17 +42,19 @@ py_library(
 )
 
 py_test(
+    name = "args_test",
+    srcs = ["args_test.py"],
+    size = "small",
+    deps = [
+        ":args",
+    ],
+)
+
+py_test(
     name = "kaggle_setup_test",
     srcs = ["kaggle_setup_test.py"],
     size = "small",
     deps = [":kaggle_setup"],
-)
-
-py_test(
-    name = "lab_test",
-    srcs = ["lab_test.py"],
-    size = "small",
-    deps = [":lab"],
 )
 
 py_test(
@@ -76,8 +77,8 @@ py_test(
 test_suite(
     name = "all",
     tests = [
+        ":args_test",
         ":kaggle_setup_test",
-        ":lab_test",
         ":mesh_train_test",
         ":pi_agent_test",
     ],

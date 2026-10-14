@@ -3,7 +3,7 @@
 The test covers the batch mapping, the model FLOPs utilization, the summary
 statistics, the loop against a fake runtime, the plan job round trip, and the
 child launch against a fake ``tools/nanochat`` entry. It needs no shared
-library, no GPU, and no broker. See ``docs/notebook-workflow.md``.
+library, no GPU, and no broker. See ``docs/client-runtime-design.md``.
 """
 
 from __future__ import annotations

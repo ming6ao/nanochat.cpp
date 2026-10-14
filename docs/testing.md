@@ -235,10 +235,10 @@ tools/nanochat test //python:plan_test //python:chat_test \
 `//python:all` runs every Python target. `//bindings:all` runs the C surface
 test. Both ride `//:all_tests` and the default `tools/nanochat test`.
 
-The notebook workflow ([notebook-workflow.md](notebook-workflow.md)) adds two
-T0 tests: `//notebooks:kaggle_setup_test` for the host-contract parser and
-`//notebooks:lab_test` for the trial runner. `//notebooks:all` runs both. They
-ride `//:all_tests` and the default `tools/nanochat test`.
+The notebooks directory adds two T0 tests:
+`//notebooks:args_test` for the model and training argument data classes, and
+`//notebooks:kaggle_setup_test` for the host-contract parser. `//notebooks:all`
+runs both. They ride `//:all_tests` and the default `tools/nanochat test`.
 
 The Python targets use the local `python3` toolchain from `rules_python`, so
 they need no third-party wheel. `tools/dump_api_fixture.py`,

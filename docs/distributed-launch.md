@@ -15,8 +15,8 @@ train` for each rank. Two faults follow.
 
 The first fault is the layer. The file is process orchestration.
 `DESIGN.md` section 2.2 puts the process entry point outside the model layers.
-The notebooks directory holds presentation, not orchestration
-([notebook-workflow.md](notebook-workflow.md)).
+The notebooks directory ([../notebooks](../notebooks)) holds
+presentation, not orchestration.
 
 The second fault is the broker. `tools/nanochat train` takes the GPU broker
 lock for one rank. Two ranks take the lock twice. A multi-card host then

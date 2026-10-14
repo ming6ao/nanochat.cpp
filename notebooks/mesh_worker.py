@@ -3,7 +3,7 @@
 :func:`mesh_train.launch` starts this module through ``tools/nanochat
 client``, so one broker lock and one sandbox scope cover the whole mesh. The
 parent notebook cell returns, and the parent polls ``metrics.jsonl`` and
-``worker.log``. See ``docs/notebook-workflow.md``.
+``worker.log``. See ``docs/client-runtime-design.md``.
 
 Usage: ``python mesh_worker.py <job.json>``. The exit code is 0 on success and
 130 after an interrupt. On an interrupt, :func:`mesh_train.run` saves the
