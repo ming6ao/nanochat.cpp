@@ -165,6 +165,11 @@ A 50-step run at `d8_s512` matches the reference: loss `6e-6`, parameter L2
 bisecting a shape- or schedule-dependent bug. Like the oracle, the fixture is
 generated on the CPU with torch and the runtime tests never import torch.
 
+## SFT parity tolerances
+
+The SFT rungs reuse the tolerances above. The loss matches at `1e-5`. The
+parameter L2 matches at `1e-4`. The fp32 CUDA leg uses about `1e-5`.
+
 ## Tokenizer tests
 
 The tokenizer, the trainer, and the parquet reader are host

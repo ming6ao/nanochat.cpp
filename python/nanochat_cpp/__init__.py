@@ -15,7 +15,7 @@ the reinforcement-learning bridge: it renders the prompts, drives the
 persistent C++ worker, and scores the rollouts (docs/rl-notebook.md).
 """
 
-from . import _build, _core, _lib, api, chat, distributed, mesh, plan, rl, runtime, sft_data, toolchain
+from . import _build, _core, _lib, api, chat, distributed, mesh, plan, rl, runtime, sft, sft_data, toolchain
 from ._build import BuildError
 from ._core import NanochatError
 from .api import (

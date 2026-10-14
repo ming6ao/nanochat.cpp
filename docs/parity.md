@@ -37,6 +37,10 @@ Status values:
 | P1 | `open` | post-training | calculator tool absent in the MVP; the model samples its own python blocks |
 | P2 | `open` | post-training | file-driven `rl_step` makes the rollouts lag one optimizer step |
 | P3 | `equivalent` | post-training | SFT starts from a converted reference base checkpoint |
+| P4 | `open` | post-training | SFT data: the renderer, the mixture, and the packed rows are not yet compared to the reference |
+| P5 | `open` | post-training | SFT arithmetic: the loss, gradient, and optimizer trajectory are not yet compared to the reference |
+| P6 | `open` | post-training | SFT loop: the progress schedule, warm start, and checkpoints are not yet compared to the reference |
+| P7 | `open` | post-training | SFT validation: bits-per-byte and ChatCORE are not yet compared to the reference |
 | T1 | `equivalent` | tokenizer | native byte pair encoding trainer and encoder vs `rustbpe` + `tiktoken` |
 | T2 | `equivalent` | tokenizer | portable `NCTOKEN1` artifact and `int64` pair counts vs the reference pickle and `int32` |
 | T3 | `open` | tokenizer | stream decode buffers an incomplete UTF-8 suffix instead of one U+FFFD per token |
@@ -352,6 +356,72 @@ a native base checkpoint, and that path is not the parity prerequisite.
 
 **Evidence:** E3 and `//src:optimizer_state_test`. The SFT loop is not in the
 tree yet (`post-training.md` section 11).
+
+### P4 — SFT data parity
+
+**Status:** `open`. The reference renders each conversation, builds a mask,
+and packs the resulting token ids. The mix uses SmolTalk, MMLU, and GSM8K.
+The packer does best-fit packing with BOS padding. Every supervised position
+carries mask 1 and every other position carries mask 0.
+
+nanochat.cpp owns the same pieces in `python/nanochat_cpp/chat.py` and
+`python/nanochat_cpp/sft_data.py`. No fixture compares them yet. The renderer,
+the mixture order, and the packed rows can drift from the reference.
+
+**Impact:** SFT training loss and validation metrics can differ from the
+reference before the first step. The later rungs consume these rows.
+
+**Evidence:** none yet. Phase C of `sft-parity-plan.md` adds the gate
+`//python:sft_data_parity_test` against `tests/data/sft_pack_fixture.bin`.
+
+**Fix direction:** `tools/dump_sft_fixture.py` supplies the reference ids, masks,
+packed rows, and mixture order. Phase B records them. Phase C checks them.
+
+### P5 — SFT arithmetic parity
+
+**Status:** `open`. Run R2 compares the SFT loss, gradient norm, and parameter
+L2 after N optimizer steps. It uses the embedded base parameters, the embedded
+base moments, the packed rows, and the warm start. The gate is
+`tests/sft_step_parity_test.cc`, at T0 and then at T1 and T2.
+
+**Impact:** the SFT optimizer step can diverge from the reference even when the
+data matches. Phase D pins the step.
+
+**Evidence:** the masked loss and gradient path exist in `src/model.cc` and in
+`backends/cpu/kernels.cc`. The C++ step code exists. No SFT fixture drives it yet.
+
+**Fix direction:** add `tests/sft_step_parity_test.cc` and record the embedded
+parameters, packed rows, and optimizer settings in `tests/data/sft_step_fixture.bin`.
+
+### P6 — SFT loop parity
+
+**Status:** `open`. Run R3 compares the full loss curve and the checkpoints. It
+needs the native packed-row reader, `sft_main`, a progress-based learning-rate
+schedule, and the warm start. The gate is `//tests:sft_parity_test` at T2.
+
+**Impact:** the C++ run can use a different schedule than the reference. The
+learning rate and Muon momentum then diverge.
+
+**Evidence:** `src/train.cc` has a step-based loop only. No packed-row source
+exists in `src/data.cc`.
+
+**Fix direction:** implement the packed-row source, the progress schedule, and the
+warm start. Then compare a base-to-SFT run at T2.
+
+### P7 — SFT validation parity
+
+**Status:** `open`. Run R4 compares bits-per-byte and ChatCORE on the packed
+validation rows at the evaluation cadence. The gate is the same T2 run as P6,
+with the validation metrics recorded.
+
+**Impact:** a correct training loss can still pair with wrong validation
+metrics when the packed validation rows or the ChatCORE path differs.
+
+**Evidence:** the chat scoring code exists in `python/nanochat_cpp/chat.py`.
+`src/eval.cc` reads parquet documents. A packed-row evaluator does not exist yet.
+
+**Fix direction:** define a packed-row validation evaluator and record the
+reference metrics in `tests/data/sft_loop_fixture.bin`.
 
 ### T1 — Native tokenizer reimplementation
 

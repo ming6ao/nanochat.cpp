@@ -581,6 +581,18 @@ cc_binary(
     ],
 )
 
+# Supervised fine-tuning on a packed SFT shard (docs/post-training.md).
+cc_binary(
+    name = "sft_main",
+    srcs = ["sft_main.cc"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    deps = [
+        ":model",
+        "//include/nanochat:nanochat",
+    ],
+)
+
 # The tiny CLI flag helpers shared by the entry points (docs/build.md).
 cc_library(
     name = "cli",

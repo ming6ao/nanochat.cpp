@@ -320,6 +320,10 @@ difference.
 | P1 | `open` | The calculator tool is absent in the MVP; the model samples its own python blocks |
 | P2 | `open` | A file-driven `rl_step` makes the rollouts lag one optimizer step |
 | P3 | `equivalent` | SFT starts from a converted reference base checkpoint |
+| P4 | `open` | SFT data parity: renderer, mixture, and packer match the reference |
+| P5 | `open` | SFT arithmetic parity: loss, gradient, and optimizer trajectory match |
+| P6 | `open` | SFT loop parity: progress schedule, warm start, and checkpoints match |
+| P7 | `open` | SFT validation parity: bits-per-byte and ChatCORE match |
 
 ## 11. Status
 
@@ -343,9 +347,11 @@ changes.
 | SFT mixture and Python packer | Done | `python/nanochat_cpp/sft_data.py` |
 | Native packed-row loader for SFT | Missing | `src/data.cc` has the pretraining packer only |
 | SFT loop with a dataset-progress schedule and a warm start | Missing | `src/train.cc` has a step-based loop |
-| RL step binary and the RL parity fixture | Missing | No `rl_step` |
-| RL orchestration worker | Missing | No worker |
-| SFT and RL bridge commands | Missing | `python/nanochat_cpp` |
+| SFT parity rungs P4 to P7 | Open | No `sft_pack_fixture.bin` or `sft_step_parity_test` yet |
+| RL step binary and the RL parity fixture | Done | `src/rl_step_main.cc`, `tools/dump_rl_fixture.py`, `tests/rl_parity_test.cc` |
+| RL orchestration worker | Done | `src/rl_worker_main.cc`, `python/nanochat_cpp/rl.py` |
+| SFT bridge command | Missing | no `sft_main` or `nanochat_cpp.sft` |
+| RL bridge command | Done | `python/nanochat_cpp/rl.py` |
 
 ## 12. Remaining work
 
