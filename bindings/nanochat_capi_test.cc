@@ -477,6 +477,28 @@ nanochat_model* CheckModel() {
                 NANOCHAT_STATUS_OK);
       Check("runtime: digest is set", digest != 0);
       Check("runtime: the step advances", nanochat_runtime_step(runtime) == 1);
+
+      // `nanochat_runtime_load_weights` reads the parameter records only, so
+      // the parameters arrive and the step stays at zero
+      // (notebooks/checkpoint.md section 9.1).
+      const std::string params_path = TempPath("capi_runtime_params.ckpt");
+      nanochat_runtime_save(runtime, params_path.c_str());
+      nanochat_runtime* warmed = nanochat_runtime_create(
+          mesh, &config, &optim_config, batch, 1, seq, 7);
+      Check("runtime: the warmed runtime is created", warmed != nullptr);
+      if (warmed != nullptr) {
+        nanochat_runtime_load_weights(warmed, params_path.c_str());
+        Check("runtime: load_weights keeps the step at zero",
+              nanochat_runtime_step(warmed) == 0);
+        std::uint64_t warmed_digest = 0;
+        Check("runtime: load_weights digest returns ok",
+              nanochat_runtime_param_digest(warmed, 0, &warmed_digest) ==
+                  NANOCHAT_STATUS_OK);
+        Check("runtime: load_weights loads the parameters",
+              warmed_digest == digest);
+        nanochat_runtime_free(warmed);
+      }
+      std::remove(params_path.c_str());
       nanochat_runtime_free(runtime);
     }
     nanochat_mesh_free(mesh);

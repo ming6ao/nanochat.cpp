@@ -239,7 +239,8 @@ bool IsCheckpointContainer(const std::string& path) {
          std::memcmp(magic, kCheckpointMagic, sizeof(magic)) == 0;
 }
 
-bool Checkpoint::Load(const std::string& path, std::string* error) {
+bool Checkpoint::Load(const std::string& path, std::string* error,
+                      bool with_optimizer_state) {
   auto fail = [&](const std::string& message) {
     if (error != nullptr) *error = message;
     return false;
@@ -274,9 +275,11 @@ bool Checkpoint::Load(const std::string& path, std::string* error) {
   // The optimizer-state section is optional (docs/post-training.md section 7).
   // A parameter-only file ends after the parameter records; a file with
   // optimizer state carries a second count and its records. This keeps every
-  // parameter-only NCHKPT01 file loadable.
+  // parameter-only NCHKPT01 file loadable. A parameter-only read stops here,
+  // so it tolerates a truncated optimizer section (notebooks/checkpoint.md
+  // section 9).
   std::vector<TensorRecord> optimizer_state;
-  if (in.peek() != std::char_traits<char>::eof()) {
+  if (with_optimizer_state && in.peek() != std::char_traits<char>::eof()) {
     std::uint32_t state_count = 0;
     if (!ReadU32(in, &state_count)) {
       return fail("truncated checkpoint optimizer-state header: " + path);

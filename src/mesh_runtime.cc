@@ -295,4 +295,17 @@ void MeshRuntime::Load(const std::string& path) {
   if (step > 0) step_ = step;
 }
 
+void MeshRuntime::LoadWeights(const std::string& path) {
+  // `Checkpointer::LoadModel(model, path)` reads the parameter section only and
+  // rebuilds the fp32 master from it, so the moments stay at their initial
+  // zeros and `step_` does not move (notebooks/checkpoint.md section 9.1).
+  for (const auto& replica : replicas_) {
+    if (replica->model == nullptr) continue;
+    if (!Checkpointer::LoadModel(replica->model.get(), path)) {
+      throw std::runtime_error("the checkpoint parameters did not load: " +
+                               path);
+    }
+  }
+}
+
 }  // namespace nanochat

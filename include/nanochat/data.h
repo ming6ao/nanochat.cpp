@@ -58,7 +58,14 @@ bool IsCheckpointContainer(const std::string& path);
 
 class Checkpoint {
  public:
-  bool Load(const std::string& path, std::string* error = nullptr);
+  // Reads a container. `with_optimizer_state` selects the read mode
+  // (notebooks/checkpoint.md section 9). A true value reads the parameter
+  // records and the optimizer section. A false value reads the parameter
+  // records only and stops before the optimizer section, so the read does not
+  // parse or allocate the optimizer records. The optimizer section is last, so
+  // the stop is cheap. A parameter-only read leaves `optimizer_state()` empty.
+  bool Load(const std::string& path, std::string* error = nullptr,
+            bool with_optimizer_state = true);
   bool Save(const std::string& path) const;
 
   const std::vector<TensorRecord>& tensors() const { return tensors_; }

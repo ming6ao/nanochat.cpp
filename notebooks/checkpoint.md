@@ -1,15 +1,13 @@
 # Notebook lifecycle and checkpoint container design
 
-Status: partly implemented. The container is version 0 in the tree, with the
-fp32, bf16, and reserved int8 codes and the attribute block. The C++ writer
-stores the true tensor shape. The byte layout lives only in `src/data.cc`, and
-a host tool reaches it through the `nanochat_checkpoint_*` C surface. The
-following changes are not in the tree:
-
-- the parameter-only flag on `Checkpoint::Load`,
-- the `nanochat_runtime_load_parameters` entry point,
-- the Python `MeshRuntime.load(path, optimizer=)` argument, and
-- Part B.
+Status: Part A is implemented. Part B is not. The container is version 0 in the
+tree, with the fp32, bf16, and reserved int8 codes and the attribute block. The
+C++ writer stores the true tensor shape. The byte layout lives only in
+`src/data.cc`, and a host tool reaches it through the `nanochat_checkpoint_*` C
+surface. The parameter-only read is in the tree: the flag on
+`Checkpoint::Load`, the `Checkpointer::LoadModel` choice, the
+`nanochat_runtime_load_weights` C entry point, and the Python
+`MeshRuntime.load(path, optimizer=)` argument. Part B is not in the tree.
 
 The document has two parts. Part A specifies the checkpoint container. Part B
 specifies the three notebooks that use it. The container format is the shared
@@ -289,8 +287,8 @@ A new C entry point backs it:
 
 ```c
 // include/nanochat/capi.h
-void nanochat_runtime_load_parameters(nanochat_runtime* runtime,
-                                      const char* path);
+void nanochat_runtime_load_weights(nanochat_runtime* runtime,
+                                   const char* path);
 ```
 
 The function loads the parameters into every replica and leaves the optimizer
@@ -299,7 +297,7 @@ state and the step unchanged. The optimizer section is not read. The Python
 read.
 
 The change is additive. Bump `kNanochatVersion` in `bindings/nanochat_capi.cc`;
-the current value is `0.10.0`.
+the current value is `0.12.0`.
 
 ## 10. Versioning
 
@@ -738,7 +736,7 @@ The harness adds one container test in `src/optimizer_state_test.cc`, next to
 optimizer section, then reads it in parameter-only mode and in full mode. It
 checks that both modes return the same parameters. It appends a truncated
 optimizer section and checks that a parameter-only read tolerates it. A second
-check drives `nanochat_runtime_load_parameters` on a one-device runtime and
+check drives `nanochat_runtime_load_weights` on a one-device runtime and
 verifies that the optimizer state and the step stay unchanged.
 
 Both notebook tests run on the CPU with no network.
@@ -767,9 +765,10 @@ pins no layout constant of its own.
 
 1. The version 0 container, the storage dtype codes, the attribute block, and
    the `checkpoint.ckpt` rename are in the tree. Each change to the C surface
-   bumps `kNanochatVersion`; the current value is `0.10.0`.
-2. Land the parameter-only read in the harness, with its test. Add
-   `nanochat_runtime_load_parameters` and the Python `optimizer` argument.
+   bumps `kNanochatVersion`; the current value is `0.12.0`.
+2. The parameter-only read is in the tree, with its tests. It adds the flag on
+   `Checkpoint::Load`, the `Checkpointer::LoadModel` choice,
+   `nanochat_runtime_load_weights`, and the Python `optimizer` argument.
 3. Write `session.py`, `hub_checkpoint.py`, and their tests.
 4. Create `pretrain.ipynb`. Verify one full session, including the upload and
    the tag.

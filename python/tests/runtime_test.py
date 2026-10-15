@@ -265,6 +265,31 @@ class RuntimeTest(unittest.TestCase):
             uninterrupted.close()
             resumed.close()
 
+    def test_load_weights_keeps_optimizer_state(self) -> None:
+        import os
+        import tempfile
+
+        batch, seq, accum = 4, 8, 2
+        rows = batch * seq
+        tokens = ids(rows, 64, 7, 3)
+        targets = ids(rows, 64, 11, 5)
+
+        source = self.make_runtime(1, batch, accum)
+        warmed = self.make_runtime(1, batch, accum)
+        try:
+            source.train_step(tokens, targets)
+            self.assertEqual(source.step, 1)
+            with tempfile.TemporaryDirectory() as tmp:
+                path = os.path.join(tmp, "checkpoint.nchkpt01")
+                source.save(path)
+                warmed.load(path, optimizer=False)
+            # The parameters arrive and the step stays at zero.
+            self.assertEqual(warmed.step, 0)
+            self._assert_same_parameters(source, 0, warmed, 0, tolerance=0.0)
+        finally:
+            source.close()
+            warmed.close()
+
     def _assert_same_parameters(self, a, a_replica, b, b_replica,
                                 tolerance: float = 1e-4) -> None:
         count = a.param_count(a_replica)

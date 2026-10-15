@@ -51,7 +51,7 @@ namespace {
 
 // The C ABI version. Bump this string on every change to the surface or to a
 // mirrored struct; docs/python.md section 13 names that rule.
-constexpr char kNanochatVersion[] = "0.11.0";
+constexpr char kNanochatVersion[] = "0.12.0";
 
 // The message for the current thread. A `thread_local` string keeps the
 // pointer from `nanochat_last_error` valid until the next failure on this
@@ -569,6 +569,17 @@ void nanochat_runtime_load(nanochat_runtime* runtime, const char* path) {
     }
     if (path == nullptr) throw std::invalid_argument("path is null");
     runtime->runtime->Load(path);
+  });
+}
+
+void nanochat_runtime_load_weights(nanochat_runtime* runtime,
+                                   const char* path) {
+  GuardVoid("nanochat_runtime_load_weights", [&]() {
+    if (runtime == nullptr || runtime->runtime == nullptr) {
+      throw std::invalid_argument("runtime is null");
+    }
+    if (path == nullptr) throw std::invalid_argument("path is null");
+    runtime->runtime->LoadWeights(path);
   });
 }
 

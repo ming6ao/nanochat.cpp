@@ -20,6 +20,7 @@
 #include "nanochat/tensor.h"
 #include "src/mesh_runtime.h"
 #include "src/ops.h"
+#include "src/train.h"
 
 namespace {
 
@@ -235,6 +236,50 @@ void TestResume() {
   std::remove(path.c_str());
 }
 
+// A parameter-only load moves the parameters and leaves the optimizer state and
+// the step alone (notebooks/checkpoint.md section 9.1). Two runtimes that start
+// from the same parameters and the same fresh optimizer state must stay equal
+// after one step: one loaded the parameters through `LoadWeights`, and the
+// other through the parameter-only `Checkpointer::LoadModel`.
+void TestLoadWeightsKeepsOptimizerState() {
+  const Config model = TinyConfig();
+  const MeshRuntimeConfig config = TinyRuntimeConfig(model);
+  const int rows = config.batch * config.seq;
+  const std::vector<int> tokens = MakeIds(rows, model.vocab_size, 7, 3);
+  const std::vector<int> targets = MakeIds(rows, model.vocab_size, 11, 5);
+  const std::string full_path = "mesh_runtime_full.nchkpt01";
+  const std::string params_path = "mesh_runtime_params_only.nchkpt01";
+
+  // The source run trains one step, so its optimizer state is not zero.
+  MeshRuntime source(MeshSpec::Data(1), config);
+  source.TrainStep(tokens.data(), targets.data());
+  source.Save(full_path);
+  nanochat::Checkpointer::SaveModel(*source.model(0), params_path);
+
+  // `LoadWeights` reads the full file but stops before the optimizer
+  // section. The step stays at zero and the parameters arrive.
+  MeshRuntime loaded(MeshSpec::Data(1), config);
+  loaded.LoadWeights(full_path);
+  if (loaded.step() != 0) Fail("load_weights: the step moved");
+
+  // The reference runtime gets the same parameters through the parameter-only
+  // loader, so it also keeps the fresh optimizer state.
+  MeshRuntime reference(MeshSpec::Data(1), config);
+  if (!nanochat::Checkpointer::LoadModel(reference.model(0), params_path)) {
+    Fail("load_weights: the reference parameter-only load failed");
+    return;
+  }
+
+  // One step from the same parameters and the same fresh optimizer state must
+  // agree exactly. A loaded optimizer state would diverge.
+  loaded.TrainStep(tokens.data(), targets.data());
+  reference.TrainStep(tokens.data(), targets.data());
+  CompareParameters(*loaded.model(0), *reference.model(0),
+                    "load_weights vs a fresh optimizer", 0.0);
+  std::remove(full_path.c_str());
+  std::remove(params_path.c_str());
+}
+
 }  // namespace
 
 int main() {
@@ -245,6 +290,7 @@ int main() {
   TestFourReplicasEqualOne();
   TestReplicasStayEqual();
   TestResume();
+  TestLoadWeightsKeepsOptimizerState();
   if (g_failures != 0) {
     std::fprintf(stderr, "mesh_runtime_test: %d failure(s)\n", g_failures);
     return 1;

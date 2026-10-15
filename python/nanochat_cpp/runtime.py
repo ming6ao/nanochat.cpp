@@ -245,13 +245,21 @@ class MeshRuntime:
         """
         self._void("nanochat_runtime_save", str(path).encode("utf-8"))
 
-    def load(self, path) -> None:
-        """Load one checkpoint into every replica, optimizer state included.
+    def load(self, path, optimizer: bool = True) -> None:
+        """Load one checkpoint into every replica.
 
-        The runtime :attr:`step` moves to the stored step. Call :meth:`step`
-        after this to learn where to resume.
+        With ``optimizer=True`` (the default) the load reads the optimizer
+        state and the step, so :attr:`step` reports where to resume. With
+        ``optimizer=False`` the load reads the parameter records only, and the
+        optimizer state and the step stay unchanged. A fine-tuning warm start
+        uses ``optimizer=False``, so it does not inherit the pretraining
+        moments.
         """
-        self._void("nanochat_runtime_load", str(path).encode("utf-8"))
+        if optimizer:
+            self._void("nanochat_runtime_load", str(path).encode("utf-8"))
+        else:
+            self._void("nanochat_runtime_load_weights",
+                       str(path).encode("utf-8"))
 
     def _void(self, name, *arguments) -> None:
         """Calls a ``void`` entry point and raises on a new error."""

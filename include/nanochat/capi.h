@@ -282,6 +282,13 @@ nanochat_status nanochat_runtime_param_digest(nanochat_runtime* runtime,
 void nanochat_runtime_save(nanochat_runtime* runtime, const char* path);
 void nanochat_runtime_load(nanochat_runtime* runtime, const char* path);
 
+// Loads the parameter records of a checkpoint into every replica and leaves the
+// optimizer state and the step unchanged (notebooks/checkpoint.md section 9.1).
+// A fine-tuning warm start uses this entry point, so it does not inherit the
+// pretraining moments. The optimizer section is not read. A load that does not
+// find the file sets the thread-local error.
+void nanochat_runtime_load_weights(nanochat_runtime* runtime, const char* path);
+
 // The 1-based step of the last step, or the loaded step after a load. Returns
 // -1 on a bad handle.
 int nanochat_runtime_step(nanochat_runtime* runtime);

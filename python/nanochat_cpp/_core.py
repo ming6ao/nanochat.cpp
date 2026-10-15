@@ -332,6 +332,8 @@ _SIGNATURES = (
      ctypes.c_int),
     ("nanochat_runtime_save", (RuntimeHandle, ctypes.c_char_p), None),
     ("nanochat_runtime_load", (RuntimeHandle, ctypes.c_char_p), None),
+    ("nanochat_runtime_load_weights", (RuntimeHandle, ctypes.c_char_p),
+     None),
     ("nanochat_params_get",
      (ctypes.POINTER(Config), ctypes.POINTER(Params)), ctypes.c_int),
     ("nanochat_model_create",

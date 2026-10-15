@@ -18,6 +18,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <memory>
 #include <string>
 #include <vector>
@@ -282,6 +283,120 @@ void TestParameterOnlyStaysLoadable() {
   ExpectSameOptimizerState(restored_path, reference_zero_path);
 }
 
+// The parameter-only read skips the optimizer-state section
+// (notebooks/checkpoint.md sections 9 and 22). A full file reads the same
+// parameters in both modes, and a truncated optimizer section does not stop a
+// parameter-only read.
+void TestParameterOnlyReadSkipsOptimizerState() {
+  const Config config = TinyConfig();
+  const int batch = 2;
+  const int seq = 8;
+  const int rows = batch * seq;
+  const std::string full_path = TempPath("parameter_only_full.ckpt");
+  const std::string param_path = TempPath("parameter_only_params.ckpt");
+  const std::string trunc_path = TempPath("parameter_only_truncated.ckpt");
+
+  Rng rng(987654321);
+  std::vector<int> tokens;
+  std::vector<int> targets;
+  MakeBatch(&rng, rows, config.vocab_size, &tokens, &targets);
+
+  {
+    std::unique_ptr<Model> model = Model::Create(config);
+    model->InitWeights(kSeed);
+    SchedulerConfig scheduler_config;
+    Scheduler scheduler(scheduler_config);
+    OptimizerConfig optimizer_config;
+    std::unique_ptr<Optimizer> optimizer =
+        nanochat::CreateOptimizer(model.get(), optimizer_config, scheduler);
+    RunStep(model.get(), optimizer.get(), 1, tokens, targets, batch, seq);
+    if (!Checkpointer::SaveModel(*model, *optimizer, 1, full_path)) {
+      Fail("parameter-only read: full save failed");
+      return;
+    }
+    if (!Checkpointer::SaveModel(*model, param_path)) {
+      Fail("parameter-only read: parameter-only save failed");
+      return;
+    }
+  }
+
+  // The full read and the parameter-only read return the same parameters, and
+  // only the full read carries the optimizer-state records.
+  Checkpoint full;
+  Checkpoint params_only;
+  std::string error;
+  if (!full.Load(full_path, &error)) {
+    Fail("parameter-only read: full load failed: " + error);
+    return;
+  }
+  if (!params_only.Load(full_path, &error, /*with_optimizer_state=*/false)) {
+    Fail("parameter-only read: parameter-only load failed: " + error);
+    return;
+  }
+  if (full.optimizer_state().empty()) {
+    Fail("parameter-only read: the full read carries no optimizer state");
+  }
+  if (!params_only.optimizer_state().empty()) {
+    Fail("parameter-only read: the parameter-only read kept optimizer state");
+  }
+  if (full.tensors().size() != params_only.tensors().size()) {
+    Fail("parameter-only read: parameter count mismatch");
+    return;
+  }
+  for (const TensorRecord& record : full.tensors()) {
+    const TensorRecord* other = params_only.Find(record.name);
+    if (other == nullptr) {
+      Fail("parameter-only read: missing parameter " + record.name);
+      continue;
+    }
+    if (record.dtype != other->dtype || record.shape != other->shape ||
+        record.data != other->data) {
+      Fail("parameter-only read: parameter mismatch " + record.name);
+    }
+  }
+
+  // Cut the full file in the middle of the optimizer section. The parameter
+  // section ends four bytes before the end of a parameter-only file, because
+  // that file carries a trailing zero optimizer count. The full read fails on
+  // the truncated record; the parameter-only read stops before the section and
+  // succeeds.
+  std::streamoff parameter_end = 0;
+  {
+    std::ifstream in(param_path, std::ios::binary | std::ios::ate);
+    parameter_end = in.tellg();
+  }
+  if (parameter_end < 4) {
+    Fail("parameter-only read: the parameter-only file is too short");
+    return;
+  }
+  parameter_end -= 4;
+  {
+    std::ifstream in(full_path, std::ios::binary | std::ios::ate);
+    const std::streamoff size = in.tellg();
+    if (size < parameter_end + 5) {
+      Fail("parameter-only read: the full file is too short");
+      return;
+    }
+    in.seekg(0);
+    std::vector<char> bytes(static_cast<std::size_t>(parameter_end) + 5);
+    in.read(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+    std::ofstream out(trunc_path, std::ios::binary | std::ios::trunc);
+    out.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+  }
+  Checkpoint truncated_params;
+  if (!truncated_params.Load(trunc_path, &error,
+                             /*with_optimizer_state=*/false)) {
+    Fail("parameter-only read: a truncated section stopped the read: " + error);
+  }
+  if (truncated_params.tensors().empty()) {
+    Fail("parameter-only read: the truncated file carries no parameters");
+  }
+  Checkpoint truncated_full;
+  if (truncated_full.Load(trunc_path, &error)) {
+    Fail("parameter-only read: the full read accepted a truncated section");
+  }
+}
+
 // The ANVIL optimizer state (the twin-rail velocity and the lane energy)
 // round-trips through NCHKPT01: a run that saves at step K and resumes from the
 // file reproduces the reference final records byte for byte, and the records
@@ -511,6 +626,7 @@ void TestOptimizerStepRoundTrip() {
 int main() {
   TestResumeContinuesRun();
   TestParameterOnlyStaysLoadable();
+  TestParameterOnlyReadSkipsOptimizerState();
   TestAnvilStateRoundTrip(1);
   TestAnvilStateRoundTrip(2);
   TestOptimizerStepRoundTrip();

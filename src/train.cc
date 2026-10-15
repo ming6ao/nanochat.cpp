@@ -463,7 +463,11 @@ bool Checkpointer::LoadModel(Model* model, Optimizer* optimizer, int* step,
   if (!IsCheckpointContainer(path)) return LoadLegacyModel(model, path);
   Checkpoint checkpoint;
   std::string error;
-  if (!checkpoint.Load(path, &error)) return false;
+  // A caller that passes no optimizer reads the parameters only
+  // (notebooks/checkpoint.md section 9). The step record lives in the optimizer
+  // section, so a step-only caller reads the section too.
+  const bool with_optimizer_state = (optimizer != nullptr) || (step != nullptr);
+  if (!checkpoint.Load(path, &error, with_optimizer_state)) return false;
   for (const ParamView& view : model->params()) {
     const TensorRecord* record =
         checkpoint.Find(view.name != nullptr ? view.name : "");

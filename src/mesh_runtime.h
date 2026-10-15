@@ -94,6 +94,12 @@ class MeshRuntime {
   // sets the step. Throws when the file does not load.
   void Load(const std::string& path);
 
+  // Loads the parameter records of one checkpoint into every replica and
+  // leaves the optimizer state and the step unchanged. A fine-tuning warm start
+  // uses this path, so it does not inherit the pretraining moments
+  // (notebooks/checkpoint.md section 9.1). Throws when the file does not load.
+  void LoadWeights(const std::string& path);
+
  private:
   struct Replica;
 
