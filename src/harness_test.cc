@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <iterator>
 #include <memory>
@@ -269,6 +270,57 @@ void TestTrainLoopMatchesHandRun() {
     if (worst > 0.0) Fail("Checkpointer round-trip changed a parameter");
   }
 
+  // A bf16-stored file loads into the fp32 build: the reader converts each
+  // element, and the writer stored the true tensor shape
+  // (docs/precision.md section 5).
+  {
+    nanochat::Checkpoint stored;
+    std::string error;
+    if (!stored.Load(checkpoint, &error)) {
+      Fail("Checkpoint::Load failed: " + error);
+    }
+    bool saw_matrix_shape = false;
+    for (nanochat::TensorRecord& record : stored.tensors()) {
+      if (record.shape.size() == 2) saw_matrix_shape = true;
+      const std::size_t count = static_cast<std::size_t>(record.numel());
+      std::vector<std::byte> narrowed(count * 2);
+      for (std::size_t i = 0; i < count; ++i) {
+        float value = 0.0f;
+        std::memcpy(&value, record.data.data() + i * sizeof(float),
+                    sizeof(value));
+        const std::uint16_t bits = nanochat::FloatToBf16Bits(value);
+        std::memcpy(narrowed.data() + i * 2, &bits, 2);
+      }
+      record.dtype = nanochat::DType::kBf16;
+      record.data = std::move(narrowed);
+    }
+    if (!saw_matrix_shape) Fail("the writer did not store a matrix shape");
+    const std::string narrow_path = TempPath("harness_bf16.ckpt");
+    if (!stored.Save(narrow_path)) Fail("bf16 Checkpoint::Save failed");
+    std::unique_ptr<Model> narrow = Model::Create(config);
+    narrow->InitWeights(kSeed + 7);
+    if (!Checkpointer::LoadModel(narrow.get(), narrow_path)) {
+      Fail("bf16 Checkpointer::LoadModel failed");
+    }
+    const std::vector<nanochat::ParamView> c = narrow->params();
+    if (c.size() != a.size()) {
+      Fail("bf16 load parameter count mismatch");
+    } else {
+      double worst_relative = 0.0;
+      for (std::size_t i = 0; i < a.size(); ++i) {
+        for (std::int64_t j = 0; j < a[i].count; ++j) {
+          const double want = static_cast<double>(nanochat::AsF(a[i].value[j]));
+          const double got = static_cast<double>(nanochat::AsF(c[i].value[j]));
+          const double scale = std::max(1e-6, std::fabs(want));
+          worst_relative =
+              std::max(worst_relative, std::fabs(want - got) / scale);
+        }
+      }
+      // bf16 keeps seven mantissa bits, so the relative error is under 2^-8.
+      if (worst_relative > 0.01) Fail("bf16 load error is too large");
+    }
+  }
+
   // EvalBpb on the validation loader.
   nanochat::DataLoader loader(factory, tokenizer.get(), batch, seq, kSeed, 1,
                               16);
@@ -387,6 +439,73 @@ void TestTrackThreeBaseline() {
 
 }  // namespace
 
+// A legacy `NCMDL001` file still loads through `Checkpointer::LoadModel`
+// (docs/model.md). The project writes only `NCHKPT01` now, so this is the
+// read-only path.
+void TestLegacyCheckpoint() {
+  const Config config = TinyConfig();
+  std::unique_ptr<Model> writer = Model::Create(config);
+  writer->InitWeights(kSeed);
+  const std::vector<nanochat::ParamView> views = writer->params();
+  if (views.empty()) {
+    Fail("legacy checkpoint: the model has no parameters");
+    return;
+  }
+  const nanochat::ParamView& first = views[0];
+  const std::string name = first.name != nullptr ? first.name : "";
+  const std::vector<float> values(static_cast<std::size_t>(first.count), 0.25f);
+
+  const std::string path = TempPath("legacy.ncmdl");
+  {
+    std::ofstream out(path, std::ios::binary);
+    if (!out) {
+      Fail("legacy checkpoint: cannot write the file");
+      return;
+    }
+    out.write("NCMDL001", 8);
+    const std::uint32_t count = 1;
+    out.write(reinterpret_cast<const char*>(&count), sizeof(count));
+    const std::uint16_t name_len = static_cast<std::uint16_t>(name.size());
+    out.write(reinterpret_cast<const char*>(&name_len), sizeof(name_len));
+    out.write(name.data(), name_len);
+    const std::uint64_t elements = static_cast<std::uint64_t>(values.size());
+    out.write(reinterpret_cast<const char*>(&elements), sizeof(elements));
+    out.write(reinterpret_cast<const char*>(values.data()),
+              static_cast<std::streamsize>(values.size() * sizeof(float)));
+  }
+
+  std::unique_ptr<Model> reader = Model::Create(config);
+  reader->InitWeights(kSeed + 13);
+  if (!Checkpointer::LoadModel(reader.get(), path)) {
+    Fail("legacy checkpoint: LoadModel failed");
+    return;
+  }
+  const std::vector<nanochat::ParamView> loaded = reader->params();
+  for (const nanochat::ParamView& view : loaded) {
+    if (view.name == nullptr || name != view.name) continue;
+    double worst = 0.0;
+    for (std::int64_t j = 0; j < view.count; ++j) {
+      worst = std::max(
+          worst,
+          std::fabs(static_cast<double>(nanochat::AsF(view.value[j])) -
+                    static_cast<double>(values[static_cast<std::size_t>(j)])));
+    }
+    if (worst > 0.01) Fail("legacy checkpoint: a value did not load");
+    break;
+  }
+
+  // A file that is neither a container nor a legacy file does not load.
+  const std::string bad = TempPath("legacy_bad.ncmdl");
+  {
+    std::ofstream out(bad, std::ios::binary);
+    out.write("NOTACHKP", 8);
+  }
+  std::unique_ptr<Model> other = Model::Create(config);
+  if (Checkpointer::LoadModel(other.get(), bad)) {
+    Fail("legacy checkpoint: a bad file loaded");
+  }
+}
+
 int main() {
   TestMfu();
   TestLogger();
@@ -394,6 +513,7 @@ int main() {
   TestTrackThreeBaseline();
   TestTrainLoopMatchesHandRun();
   TestGradientAccumulation();
+  TestLegacyCheckpoint();
   if (g_failures != 0) {
     std::fprintf(stderr, "harness_test: %d failure(s)\n", g_failures);
     return 1;

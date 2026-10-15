@@ -35,6 +35,8 @@ __all__ = [
     "TokenizerHandle",
     "MeshHandle",
     "RuntimeHandle",
+    "CheckpointHandle",
+    "Record",
     "declare",
     "backend_name",
     "compute_type_size",
@@ -45,6 +47,7 @@ __all__ = [
     "check_status",
     "check_handle",
     "check_code",
+    "record_view",
     "set_grad_enabled",
 ]
 
@@ -255,6 +258,29 @@ class Metrics(ctypes.Structure):
     ]
 
 
+class Record(ctypes.Structure):
+    """A mirror of ``nanochat_record``.
+
+    ``dims`` holds ``ndim`` extents, ``data`` holds ``bytes`` payload bytes,
+    and ``attributes`` points to ``attribute_count`` records. Every pointer
+    belongs to the checkpoint owner, or to the caller of the write call.
+    """
+
+    pass
+
+
+Record._fields_ = [
+    ("name", ctypes.c_char_p),
+    ("dtype", ctypes.c_int32),
+    ("ndim", ctypes.c_int32),
+    ("dims", ctypes.POINTER(ctypes.c_int64)),
+    ("data", ctypes.c_void_p),
+    ("bytes", ctypes.c_int64),
+    ("attribute_count", ctypes.c_int64),
+    ("attributes", ctypes.POINTER(Record)),
+]
+
+
 # Opaque handles. The C declarations use ``struct nanochat_model *`` and
 # friends; a ``c_void_p`` carries the same pointer width.
 ModelHandle = ctypes.c_void_p
@@ -263,6 +289,7 @@ LoaderHandle = ctypes.c_void_p
 TokenizerHandle = ctypes.c_void_p
 MeshHandle = ctypes.c_void_p
 RuntimeHandle = ctypes.c_void_p
+CheckpointHandle = ctypes.c_void_p
 
 # The function table: name, argument types, result type. Every entry in
 # include/nanochat/capi.h is here.
@@ -374,6 +401,20 @@ _SIGNATURES = (
       ctypes.c_void_p, ctypes.c_int),
      ctypes.c_int),
     ("nanochat_tokenizer_free", (TokenizerHandle,), None),
+    ("nanochat_checkpoint_dtype",
+     (ctypes.c_int32, ctypes.POINTER(ctypes.c_char_p),
+      ctypes.POINTER(ctypes.c_int32), ctypes.POINTER(ctypes.c_int32)),
+     ctypes.c_int),
+    ("nanochat_checkpoint_write",
+     (ctypes.c_char_p, ctypes.POINTER(Record), ctypes.c_int64,
+      ctypes.POINTER(Record), ctypes.c_int64),
+     ctypes.c_int),
+    ("nanochat_checkpoint_read",
+     (ctypes.c_char_p, ctypes.POINTER(CheckpointHandle),
+      ctypes.POINTER(ctypes.POINTER(Record)), ctypes.POINTER(ctypes.c_int64),
+      ctypes.POINTER(ctypes.POINTER(Record)), ctypes.POINTER(ctypes.c_int64)),
+     ctypes.c_int),
+    ("nanochat_checkpoint_free", (CheckpointHandle,), None),
 )
 
 
@@ -457,6 +498,21 @@ def check_code(library, code: int, function: str) -> int:
     if code < 0:
         raise NanochatError(function, last_error(library))
     return code
+
+
+def record_view(view: "Record") -> tuple[str, int, tuple[int, ...], bytes]:
+    """Decode one ``Record`` into a plain Python tuple.
+
+    The result is ``(name, dtype, shape, data)``. ``data`` is a copy, so it
+    stays valid after the checkpoint handle is freed.
+    """
+    name = view.name.decode("utf-8", "replace") if view.name else ""
+    shape = tuple(int(view.dims[axis]) for axis in range(int(view.ndim)))
+    if view.bytes > 0:
+        data = ctypes.string_at(view.data, int(view.bytes))
+    else:
+        data = b""
+    return name, int(view.dtype), shape, data
 
 
 def set_grad_enabled(library, enabled: bool) -> bool:

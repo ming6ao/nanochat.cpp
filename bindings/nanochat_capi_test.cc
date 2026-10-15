@@ -957,6 +957,138 @@ void CheckTokenizerAndLoader(const char* parquet_path,
 
 }  // namespace
 
+// The checkpoint container surface (docs/model.md). One write call and one
+// read call round-trip every storage dtype, the attribute block, and both
+// sections, so a host tool can reach the layout without repeating it.
+void CheckCheckpointContainer() {
+  const char* name = nullptr;
+  int32_t code = 0;
+  int32_t size = 0;
+  Check(
+      "checkpoint dtype fp32",
+      nanochat_checkpoint_dtype(0, &name, &code, &size) == NANOCHAT_STATUS_OK &&
+          name != nullptr && std::strcmp(name, "float32") == 0 && code == 0 &&
+          size == 4);
+  Check(
+      "checkpoint dtype bf16",
+      nanochat_checkpoint_dtype(1, &name, &code, &size) == NANOCHAT_STATUS_OK &&
+          name != nullptr && std::strcmp(name, "bfloat16") == 0 && code == 1 &&
+          size == 2);
+  Check(
+      "checkpoint dtype int8",
+      nanochat_checkpoint_dtype(2, &name, &code, &size) == NANOCHAT_STATUS_OK &&
+          name != nullptr && std::strcmp(name, "int8") == 0 && code == 2 &&
+          size == 1);
+  Check(
+      "checkpoint dtype ends at the last entry",
+      nanochat_checkpoint_dtype(3, &name, &code, &size) == NANOCHAT_STATUS_OK &&
+          name == nullptr);
+  Check("checkpoint dtype rejects a null out pointer",
+        nanochat_checkpoint_dtype(0, nullptr, &code, &size) ==
+            NANOCHAT_STATUS_ERROR);
+
+  const float weights[6] = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f};
+  const std::int64_t weight_shape[2] = {2, 3};
+  const std::uint16_t bias_bits[2] = {0x3f80u, 0x4000u};  // 1.0 and 2.0
+  const std::int64_t bias_shape[1] = {2};
+  const std::uint8_t quantized[6] = {1, 2, 3, 4, 5, 6};
+  const std::int64_t quantized_shape[2] = {2, 3};
+  const float scale = 0.5f;
+  const std::int64_t scale_shape[1] = {1};
+  const float momentum[4] = {0.25f, 0.5f, 0.75f, 1.0f};
+  const std::int64_t momentum_shape[1] = {4};
+
+  const nanochat_record scale_record = {
+      "quant.scale", 0, 1, scale_shape, &scale, sizeof(scale), 0, nullptr};
+  const nanochat_record parameters[3] = {
+      {"weight", 0, 2, weight_shape, weights, sizeof(weights), 0, nullptr},
+      {"bias", 1, 1, bias_shape, bias_bits, sizeof(bias_bits), 0, nullptr},
+      {"quantized", 2, 2, quantized_shape, quantized, sizeof(quantized), 1,
+       &scale_record},
+  };
+  const nanochat_record optimizer[1] = {
+      {"adamw.lm_head.m", 0, 1, momentum_shape, momentum, sizeof(momentum), 0,
+       nullptr},
+  };
+
+  const std::string path = TempPath("capi_container.ckpt");
+  Check("checkpoint write",
+        nanochat_checkpoint_write(path.c_str(), parameters, 3, optimizer, 1) ==
+            NANOCHAT_STATUS_OK);
+
+  nanochat_checkpoint* owner = nullptr;
+  const nanochat_record* records = nullptr;
+  int64_t record_count = 0;
+  const nanochat_record* state = nullptr;
+  int64_t state_count = 0;
+  Check("checkpoint read",
+        nanochat_checkpoint_read(path.c_str(), &owner, &records, &record_count,
+                                 &state, &state_count) == NANOCHAT_STATUS_OK);
+  Check("checkpoint owner", owner != nullptr);
+  if (owner == nullptr) return;
+
+  Check("checkpoint parameter count", record_count == 3);
+  Check("checkpoint optimizer count", state_count == 1);
+
+  const nanochat_record& weight = records[0];
+  Check("checkpoint record name",
+        weight.name != nullptr && std::strcmp(weight.name, "weight") == 0);
+  Check("checkpoint record dtype", weight.dtype == 0);
+  Check("checkpoint record shape", weight.ndim == 2 && weight.dims != nullptr &&
+                                       weight.dims[0] == 2 &&
+                                       weight.dims[1] == 3);
+  Check("checkpoint record payload",
+        weight.bytes == static_cast<std::int64_t>(sizeof(weights)) &&
+            std::memcmp(weight.data, weights, sizeof(weights)) == 0);
+  Check("checkpoint record has no attribute", weight.attribute_count == 0);
+
+  Check("checkpoint bf16 dtype",
+        records[1].dtype == 1 && records[1].bytes == 4);
+
+  const nanochat_record& quantized_record = records[2];
+  Check("checkpoint int8 attribute count",
+        quantized_record.attribute_count == 1);
+  Check("checkpoint attribute pointer", quantized_record.attributes != nullptr);
+  if (quantized_record.attributes != nullptr) {
+    const nanochat_record& attribute = quantized_record.attributes[0];
+    Check("checkpoint attribute name",
+          attribute.name != nullptr &&
+              std::strcmp(attribute.name, "quant.scale") == 0);
+    Check("checkpoint attribute payload",
+          attribute.bytes == static_cast<std::int64_t>(sizeof(scale)) &&
+              std::memcmp(attribute.data, &scale, sizeof(scale)) == 0);
+  }
+  Check("checkpoint optimizer record",
+        state[0].name != nullptr &&
+            std::strcmp(state[0].name, "adamw.lm_head.m") == 0);
+  nanochat_checkpoint_free(owner);
+  nanochat_checkpoint_free(nullptr);
+}
+
+// A version 1 header loads in no build, because the container is version 0.
+void CheckCheckpointRejectsVersionOne() {
+  const std::string path = TempPath("capi_container_bad.ckpt");
+  std::FILE* file = std::fopen(path.c_str(), "wb");
+  Check("checkpoint bad file opens", file != nullptr);
+  if (file != nullptr) {
+    const char bytes[16] = {'N', 'C', 'H', 'K', 'P', 'T', '0', '1',
+                            1,   0,   0,   0,   0,   0,   0,   0};
+    std::fwrite(bytes, 1, sizeof(bytes), file);
+    std::fclose(file);
+  }
+  nanochat_checkpoint* owner = nullptr;
+  const nanochat_record* records = nullptr;
+  int64_t record_count = 0;
+  const nanochat_record* state = nullptr;
+  int64_t state_count = 0;
+  Check(
+      "checkpoint rejects version 1",
+      nanochat_checkpoint_read(path.c_str(), &owner, &records, &record_count,
+                               &state, &state_count) == NANOCHAT_STATUS_ERROR);
+  Check("checkpoint version 1 leaves no owner", owner == nullptr);
+  nanochat_checkpoint_free(owner);
+}
+
 int main(int argc, char** argv) {
   if (argc < 3) {
     std::fprintf(stderr, "usage: %s <text.parquet> <tokenizer.nctoken>\n",
@@ -965,6 +1097,8 @@ int main(int argc, char** argv) {
   }
 
   CheckSandboxRule();
+  CheckCheckpointContainer();
+  CheckCheckpointRejectsVersionOne();
   CheckDeviceEnumeration();
   CheckParams();
   CheckHarnessCheckpoint();

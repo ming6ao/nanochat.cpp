@@ -40,8 +40,6 @@ class TrainModel final : public Model {
   std::vector<ParamView> params() const override;
   void SyncMaster() override;
   void SyncCompute() override;
-  void Save(const std::string& path) const override;
-  void Load(const std::string& path) override;
 
   // --- test/debug accessors (not part of the public Model API) ---
   const ComputeType* raw_logits() const { return raw_logits_; }

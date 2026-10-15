@@ -79,6 +79,12 @@ cache.
 bf16 has seven mantissa bits. A parameter update needs more precision than
 that. bf16 has the fp32 exponent range, so no scale is necessary.
 
+The checkpoint container is a storage format. It stores fp32 or bf16 records,
+and the record dtype is separate from the build compute dtype. Store the
+canonical checkpoint in fp32. A bf16 container is a derived compact artifact.
+The fp16 CPU build stays for the simulator, and it does not write an fp16
+checkpoint.
+
 This rule is stricter than the reference. The reference keeps the matrix
 parameters in fp32, but it casts the embeddings to the compute dtype
 (`gpt.py:262-266`). Its embedding gradients are therefore bf16. This rule keeps

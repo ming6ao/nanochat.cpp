@@ -24,6 +24,8 @@
 
 namespace {
 
+using nanochat::Bf16FromFloat;
+using nanochat::Bf16ToFloat;
 using nanochat::Checkpoint;
 using nanochat::DataLoader;
 using nanochat::DType;
@@ -55,13 +57,29 @@ void TestCheckpoint() {
   }
   {
     TensorRecord record;
-    record.name = "half";
-    record.dtype = DType::kFp16;
+    record.name = "bf16";
+    record.dtype = DType::kBf16;
     record.shape = {4};
     record.data.resize(8);
     for (std::size_t i = 0; i < record.data.size(); ++i) {
       record.data[i] = static_cast<std::byte>(i);
     }
+    checkpoint.Add(std::move(record));
+  }
+  {
+    TensorRecord record;
+    record.name = "quantized";
+    record.dtype = DType::kInt8;
+    record.shape = {6};
+    record.data.resize(6);
+    nanochat::TensorAttribute scale;
+    scale.name = "quant.scale";
+    scale.dtype = DType::kFp32;
+    scale.shape = {1};
+    const float scale_value = 0.5f;
+    scale.data.resize(sizeof(scale_value));
+    std::memcpy(scale.data.data(), &scale_value, sizeof(scale_value));
+    record.attributes.push_back(std::move(scale));
     checkpoint.Add(std::move(record));
   }
 
@@ -74,7 +92,7 @@ void TestCheckpoint() {
     Fail("Checkpoint::Load failed: " + error);
     return;
   }
-  if (loaded.tensors().size() != 2) Fail("checkpoint record count mismatch");
+  if (loaded.tensors().size() != 3) Fail("checkpoint record count mismatch");
   const TensorRecord* weight = loaded.Find("weight");
   if (weight == nullptr) {
     Fail("checkpoint is missing 'weight'");
@@ -89,16 +107,38 @@ void TestCheckpoint() {
       Fail("checkpoint 'weight' payload mismatch");
     }
   }
-  const TensorRecord* half = loaded.Find("half");
-  if (half == nullptr || half->dtype != DType::kFp16 ||
-      half->shape != std::vector<std::int64_t>({4})) {
-    Fail("checkpoint 'half' metadata mismatch");
+  const TensorRecord* bf16 = loaded.Find("bf16");
+  if (bf16 == nullptr || bf16->dtype != DType::kBf16 ||
+      bf16->shape != std::vector<std::int64_t>({4})) {
+    Fail("checkpoint 'bf16' metadata mismatch");
+  }
+  const TensorRecord* quantized = loaded.Find("quantized");
+  if (quantized == nullptr || quantized->dtype != DType::kInt8 ||
+      quantized->attributes.size() != 1 ||
+      quantized->attributes[0].name != "quant.scale" ||
+      quantized->attributes[0].data.size() != sizeof(float)) {
+    Fail("checkpoint 'quantized' attribute mismatch");
   }
   if (loaded.Find("missing") != nullptr) Fail("Find returned a missing record");
 
   Checkpoint absent;
   if (absent.Load(TempPath("does_not_exist.bin"), &error)) {
     Fail("Checkpoint::Load accepted a missing file");
+  }
+}
+
+void TestBf16RoundTrip() {
+  // Every value below has at most seven fraction bits, so bf16 is exact.
+  const float exact[5] = {0.0f, 1.0f, -2.5f, 0.15625f, 3.140625f};
+  for (float value : exact) {
+    if (Bf16ToFloat(Bf16FromFloat(value)) != value) {
+      Fail("bf16 changed an exactly representable value");
+    }
+  }
+  // One plus one over 512 needs a ninth fraction bit, so bf16 loses it.
+  const float inexact = 1.0f + 1.0f / 512.0f;
+  if (Bf16ToFloat(Bf16FromFloat(inexact)) == inexact) {
+    Fail("bf16 kept a mantissa bit it cannot store");
   }
 }
 
@@ -291,6 +331,7 @@ void TestShardedResume() {
 
 int main() {
   TestCheckpoint();
+  TestBf16RoundTrip();
   TestTokenizer();
   TestDocumentLoader();
   TestShardedResume();

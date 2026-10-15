@@ -345,12 +345,62 @@ int64_t nanochat_param_read(nanochat_model* model, int index, int grad,
                             int64_t offset, int64_t count, void* data);
 int64_t nanochat_param_write(nanochat_model* model, int index, int grad,
                              int64_t offset, int64_t count, const void* data);
-// `nanochat_save` writes the simple `NCMDL001` container. `nanochat_load`
-// accepts both that container and the self-describing `NCHKPT01` container
-// that the training harness writes (docs/model.md), so a distributed run's
-// checkpoint loads in process.
+// `nanochat_save` writes the self-describing `NCHKPT01` container with the
+// parameters only. `nanochat_load` accepts that container and the legacy
+// `NCMDL001` file, so an older checkpoint still loads in process
+// (docs/model.md).
 void nanochat_save(nanochat_model* model, const char* path);
 void nanochat_load(nanochat_model* model, const char* path);
+// The checkpoint container surface (docs/model.md). The byte layout lives in
+// `src/data.cc` only; this surface lets a host tool build and inspect a
+// container without repeating the layout. The C++ training runtime does not
+// need it.
+//
+// One record and its attributes. A writer fills the struct, and a reader
+// returns it. `attributes` points to `attribute_count` entries, or to null.
+// Every pointer is owned by the caller of `write`, or by `*owner` after a
+// `read`.
+typedef struct nanochat_record {
+  const char* name;
+  int32_t dtype;
+  int32_t ndim;
+  const int64_t* dims;
+  const void* data;
+  int64_t bytes;
+  int64_t attribute_count;
+  const struct nanochat_record* attributes;
+} nanochat_record;
+
+// Opaque owner of the arrays that `nanochat_checkpoint_read` returns.
+typedef struct nanochat_checkpoint nanochat_checkpoint;
+
+// The storage dtype at `index`, in a stable order. Fills the name, the code,
+// and the element size. `name` points to a static string. The call fills
+// `*name` with null when `index` is past the last dtype, so a caller
+// enumerates from 0 until the name is null. A null out pointer is an error.
+nanochat_status nanochat_checkpoint_dtype(int32_t index, const char** name,
+                                          int32_t* code, int32_t* size);
+
+// Writes both record lists to `path` in the version 0 container layout. The
+// caller owns every buffer, and it keeps them alive for the call.
+nanochat_status nanochat_checkpoint_write(const char* path,
+                                          const nanochat_record* records,
+                                          int64_t record_count,
+                                          const nanochat_record* optimizer,
+                                          int64_t optimizer_count);
+
+// Reads both record lists from `path`. Every out parameter is required. The
+// arrays belong to `*owner`, and they stay valid until
+// `nanochat_checkpoint_free`. The file must be a version 0 container.
+nanochat_status nanochat_checkpoint_read(const char* path,
+                                         nanochat_checkpoint** owner,
+                                         const nanochat_record** records,
+                                         int64_t* record_count,
+                                         const nanochat_record** optimizer,
+                                         int64_t* optimizer_count);
+
+// Releases a handle and the arrays it owns. A null handle is accepted.
+void nanochat_checkpoint_free(nanochat_checkpoint* owner);
 
 // Fills `out` with a named preset of the optimizer and scheduler
 // hyperparameters, so a client gets the same values as the `train_main`

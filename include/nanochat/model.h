@@ -113,10 +113,6 @@ class Model {
   // master after a checkpoint load restores the master directly.
   virtual void SyncCompute() {}
 
-  // Self-describing checkpoint container (docs/model.md).
-  virtual void Save(const std::string& path) const = 0;
-  virtual void Load(const std::string& path) = 0;
-
  protected:
   explicit Model(Config config) : config_(std::move(config)) {}
 

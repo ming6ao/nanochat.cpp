@@ -19,7 +19,6 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
-#include <fstream>
 #include <vector>
 
 #include "nanochat/kernels.h"
@@ -1035,70 +1034,6 @@ void TrainModel::SyncCompute() {
                         [](float value) { return ToC(value); });
   }
 #endif
-}
-
-void TrainModel::Save(const std::string& path) const {
-  std::ofstream out(path, std::ios::binary);
-  if (!out) return;
-  const char magic[8] = {'N', 'C', 'M', 'D', 'L', '0', '0', '1'};
-  out.write(magic, 8);
-  const std::uint32_t count = static_cast<std::uint32_t>(params_.size());
-  out.write(reinterpret_cast<const char*>(&count), sizeof(count));
-  for (const Param& p : params_) {
-    const std::uint16_t name_len = static_cast<std::uint16_t>(p.name.size());
-    out.write(reinterpret_cast<const char*>(&name_len), sizeof(name_len));
-    out.write(p.name.data(), name_len);
-    const std::uint64_t elements = static_cast<std::uint64_t>(p.count);
-    out.write(reinterpret_cast<const char*>(&elements), sizeof(elements));
-    std::vector<float> buffer(static_cast<std::size_t>(p.count));
-    // Save the fp32 master weight: the fp16 compute copy cannot hold the fine
-    // updates that a resume must keep.
-    kernels::Memcpy(buffer.data(), p.master,
-                    static_cast<std::size_t>(p.count) * sizeof(float),
-                    CopyDir::kDeviceToHost);
-    out.write(reinterpret_cast<const char*>(buffer.data()),
-              static_cast<std::streamsize>(buffer.size() * sizeof(float)));
-  }
-}
-
-void TrainModel::Load(const std::string& path) {
-  std::ifstream in(path, std::ios::binary);
-  if (!in) return;
-  char magic[8];
-  in.read(magic, 8);
-  if (!in || std::memcmp(magic, "NCMDL001", 8) != 0) return;
-  std::uint32_t count = 0;
-  in.read(reinterpret_cast<char*>(&count), sizeof(count));
-  for (std::uint32_t k = 0; k < count; ++k) {
-    std::uint16_t name_len = 0;
-    in.read(reinterpret_cast<char*>(&name_len), sizeof(name_len));
-    std::string name(name_len, '\0');
-    in.read(name.data(), name_len);
-    std::uint64_t elements = 0;
-    in.read(reinterpret_cast<char*>(&elements), sizeof(elements));
-    std::vector<float> buffer(static_cast<std::size_t>(elements));
-    in.read(reinterpret_cast<char*>(buffer.data()),
-            static_cast<std::streamsize>(buffer.size() * sizeof(float)));
-    if (!in) return;
-    for (Param& p : params_) {
-      if (p.name != name) continue;
-      const std::int64_t limit =
-          std::min<std::int64_t>(p.count, static_cast<std::int64_t>(elements));
-      std::vector<ComputeType> raw(static_cast<std::size_t>(limit));
-      for (std::int64_t i = 0; i < limit; ++i) {
-        raw[static_cast<std::size_t>(i)] =
-            ToC(buffer[static_cast<std::size_t>(i)]);
-      }
-      // Restore the fp32 master, then derive the compute copy from it.
-      kernels::Memcpy(p.master, buffer.data(),
-                      static_cast<std::size_t>(limit) * sizeof(float),
-                      CopyDir::kHostToDevice);
-      kernels::Memcpy(p.value, raw.data(),
-                      static_cast<std::size_t>(limit) * sizeof(ComputeType),
-                      CopyDir::kHostToDevice);
-      break;
-    }
-  }
 }
 
 // ---------------------------------------------------------------------------

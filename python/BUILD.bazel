@@ -61,11 +61,12 @@ py_test(
     size = "small",
 )
 
-# T0: the reference-checkpoint name, dtype, container, and path logic.
-# Hermetic: standard library only.
+# T0: the reference-checkpoint name, dtype, container, and path logic. The
+# container bytes come from the C writer, so the test loads the shared library.
 py_test(
     name = "checkpoint_test",
     srcs = ["tests/checkpoint_test.py"],
+    data = ["//bindings:nanochat_shared"],
     deps = [":nanochat_cpp"],
     size = "small",
 )

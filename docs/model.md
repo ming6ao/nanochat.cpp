@@ -139,8 +139,10 @@ The kernels themselves are declared in [kernels.md](kernels.md).
 - **Data**: parquet documents, tokenized during the run by the native reader
   (`--train-parquet` and `--tokenizer`; [parquet-native.md](parquet-native.md)).
   No `pyarrow` and no Python at runtime.
-- **Checkpoint**: a self-describing tensor container (name, shape, dtype). Not a
-  framework `state_dict`.
+- **Checkpoint**: a self-describing tensor container (name, storage dtype,
+  shape, attributes). Version 0. Not a framework `state_dict`. The project
+  writes only this container; `Checkpointer::LoadModel` still reads a legacy
+  `NCMDL001` file.
 - **Oracle**: `debug_state.bin`, produced offline by nanochat's `gpt.py`.
   `tests/oracle_test.cc` compares logits, loss, and gradients, then runs a few
   optimizer steps and matches losses. Per-backend tolerances (fp32 CUDA ~1e-5;

@@ -91,8 +91,8 @@ TrainConfig TrackThreeBaseline();
 float DistributedBackwardScale(int grad_accum, int world_size);
 
 // Saves and loads a model's parameter set through the self-describing
-// `Checkpoint` container (docs/model.md). This is the harness's checkpoint
-// format; `Model::Save`/`Load` remain available with their own simpler format.
+// `Checkpoint` container (docs/model.md). This is the only checkpoint format
+// the project writes. `LoadModel` also reads a legacy `NCMDL001` file.
 class Checkpointer {
  public:
   // Collects `model.params()` into a `Checkpoint` and writes it to `path`.

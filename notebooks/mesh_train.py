@@ -95,7 +95,7 @@ class MeshTrainPlan:
 
     def checkpoint_path(self) -> Path:
         """The canonical checkpoint path."""
-        return Path(self.out_dir) / "base.ncmdl"
+        return Path(self.out_dir) / "checkpoint.ckpt"
 
     def metrics_path(self) -> Path:
         """The per-step metrics path."""

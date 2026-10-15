@@ -100,58 +100,127 @@ bool ReadI64(std::istream& in, std::int64_t* value) {
   return true;
 }
 
-// Writes one self-describing record: name, dtype, shape, and raw payload.
-// Parameter records and optimizer-state records share this layout.
-void WriteRecord(std::ostream& out, const TensorRecord& record) {
-  const std::size_t name_len = record.name.size();
-  const std::size_t clipped = std::min<std::size_t>(name_len, 0xffffu);
+// Writes the name, dtype, rank, and dimensions that an attribute and a record
+// share.
+void WriteNameDTypeShape(std::ostream& out, const std::string& name,
+                         DType dtype, const std::vector<std::int64_t>& shape) {
+  const std::size_t clipped = std::min<std::size_t>(name.size(), 0xffffu);
   WriteU16(out, static_cast<std::uint16_t>(clipped));
-  out.write(record.name.data(), static_cast<std::streamsize>(clipped));
-  WriteU32(out, static_cast<std::uint32_t>(record.dtype));
-  WriteU32(out, static_cast<std::uint32_t>(record.shape.size()));
-  for (std::int64_t dim : record.shape) WriteI64(out, dim);
-  WriteU64(out, static_cast<std::uint64_t>(record.data.size()));
-  if (!record.data.empty()) {
-    out.write(reinterpret_cast<const char*>(record.data.data()),
-              static_cast<std::streamsize>(record.data.size()));
+  out.write(name.data(), static_cast<std::streamsize>(clipped));
+  WriteU32(out, static_cast<std::uint32_t>(dtype));
+  WriteU32(out, static_cast<std::uint32_t>(shape.size()));
+  for (std::int64_t dim : shape) WriteI64(out, dim);
+}
+
+// Writes the payload byte count and the payload.
+void WritePayload(std::ostream& out, const std::vector<std::byte>& data) {
+  WriteU64(out, static_cast<std::uint64_t>(data.size()));
+  if (!data.empty()) {
+    out.write(reinterpret_cast<const char*>(data.data()),
+              static_cast<std::streamsize>(data.size()));
   }
+}
+
+// Writes one attribute record. An attribute has no attribute block.
+void WriteAttribute(std::ostream& out, const TensorAttribute& attribute) {
+  WriteNameDTypeShape(out, attribute.name, attribute.dtype, attribute.shape);
+  WritePayload(out, attribute.data);
+}
+
+// Writes one self-describing record: name, dtype, shape, the attribute block,
+// and the raw payload. Parameter records and optimizer-state records share
+// this layout (docs/precision.md section 5).
+void WriteRecord(std::ostream& out, const TensorRecord& record) {
+  WriteNameDTypeShape(out, record.name, record.dtype, record.shape);
+  WriteU32(out, static_cast<std::uint32_t>(record.attributes.size()));
+  for (const TensorAttribute& attribute : record.attributes) {
+    WriteAttribute(out, attribute);
+  }
+  WritePayload(out, record.data);
 }
 
 // Reads one self-describing record. On failure it writes a short reason to
 // `error` and returns false.
-bool ReadRecord(std::istream& in, TensorRecord* record, std::string* error) {
+
+// Reads a name, dtype, rank, and dimensions. An attribute and a record share
+// this prefix.
+bool ReadNameDTypeShape(std::istream& in, std::string* name, DType* dtype,
+                        std::vector<std::int64_t>* shape, std::string* error) {
   auto bad = [&](const char* reason) {
     if (error != nullptr) *error = reason;
     return false;
   };
   std::uint16_t name_len = 0;
   if (!ReadU16(in, &name_len)) return bad("truncated record name");
-  record->name.resize(name_len);
-  if (name_len > 0 && !ReadBytes(in, record->name.data(), name_len)) {
+  name->resize(name_len);
+  if (name_len > 0 && !ReadBytes(in, name->data(), name_len)) {
     return bad("truncated record name");
   }
-  std::uint32_t dtype = 0;
+  std::uint32_t raw_dtype = 0;
   std::uint32_t rank = 0;
-  if (!ReadU32(in, &dtype) || !ReadU32(in, &rank)) {
+  if (!ReadU32(in, &raw_dtype) || !ReadU32(in, &rank)) {
     return bad("truncated record header");
   }
-  if (dtype > static_cast<std::uint32_t>(DType::kFp16)) {
-    return bad("unknown checkpoint dtype");
-  }
+  const DType read_dtype = static_cast<DType>(raw_dtype);
+  if (!IsStorageDType(read_dtype)) return bad("unknown checkpoint dtype");
   if (rank > 8) return bad("checkpoint rank is too large");
-  record->dtype = static_cast<DType>(dtype);
-  record->shape.resize(rank);
+  *dtype = read_dtype;
+  shape->resize(rank);
   for (std::uint32_t d = 0; d < rank; ++d) {
-    if (!ReadI64(in, &record->shape[d])) return bad("truncated record shape");
-    if (record->shape[d] < 0) return bad("negative checkpoint dimension");
+    if (!ReadI64(in, &(*shape)[d])) return bad("truncated record shape");
+    if ((*shape)[d] < 0) return bad("negative checkpoint dimension");
   }
+  return true;
+}
+
+// Reads the payload byte count and the payload.
+bool ReadPayload(std::istream& in, std::vector<std::byte>* data,
+                 std::string* error) {
+  auto bad = [&](const char* reason) {
+    if (error != nullptr) *error = reason;
+    return false;
+  };
   std::uint64_t data_bytes = 0;
   if (!ReadU64(in, &data_bytes)) return bad("truncated record payload size");
-  record->data.resize(static_cast<std::size_t>(data_bytes));
-  if (data_bytes > 0 && !ReadBytes(in, record->data.data(), data_bytes)) {
+  data->resize(static_cast<std::size_t>(data_bytes));
+  if (data_bytes > 0 && !ReadBytes(in, data->data(), data_bytes)) {
     return bad("truncated record payload");
   }
   return true;
+}
+
+// Reads one attribute record. An attribute has no attribute block.
+bool ReadAttribute(std::istream& in, TensorAttribute* attribute,
+                   std::string* error) {
+  if (!ReadNameDTypeShape(in, &attribute->name, &attribute->dtype,
+                          &attribute->shape, error)) {
+    return false;
+  }
+  return ReadPayload(in, &attribute->data, error);
+}
+
+bool ReadRecord(std::istream& in, TensorRecord* record, std::string* error) {
+  if (!ReadNameDTypeShape(in, &record->name, &record->dtype, &record->shape,
+                          error)) {
+    return false;
+  }
+  // The block is small in practice: an int8 record carries one attribute. Cap
+  // the count so a malformed file cannot force a large allocation.
+  constexpr std::uint32_t kMaxAttributes = 64;
+  std::uint32_t attribute_count = 0;
+  if (!ReadU32(in, &attribute_count)) {
+    if (error != nullptr) *error = "truncated record attribute count";
+    return false;
+  }
+  if (attribute_count > kMaxAttributes) {
+    if (error != nullptr) *error = "checkpoint attribute count is too large";
+    return false;
+  }
+  record->attributes.resize(attribute_count);
+  for (TensorAttribute& attribute : record->attributes) {
+    if (!ReadAttribute(in, &attribute, error)) return false;
+  }
+  return ReadPayload(in, &record->data, error);
 }
 
 constexpr char kCheckpointMagic[8] = {'N', 'C', 'H', 'K', 'P', 'T', '0', '1'};
@@ -161,6 +230,14 @@ constexpr char kCheckpointMagic[8] = {'N', 'C', 'H', 'K', 'P', 'T', '0', '1'};
 // ---------------------------------------------------------------------------
 // Checkpoint
 // ---------------------------------------------------------------------------
+
+bool IsCheckpointContainer(const std::string& path) {
+  std::ifstream in(path, std::ios::binary);
+  if (!in) return false;
+  char magic[sizeof(kCheckpointMagic)] = {};
+  return ReadBytes(in, magic, sizeof(magic)) &&
+         std::memcmp(magic, kCheckpointMagic, sizeof(magic)) == 0;
+}
 
 bool Checkpoint::Load(const std::string& path, std::string* error) {
   auto fail = [&](const std::string& message) {
@@ -181,7 +258,7 @@ bool Checkpoint::Load(const std::string& path, std::string* error) {
   if (!ReadU32(in, &version) || !ReadU32(in, &count)) {
     return fail("truncated checkpoint header: " + path);
   }
-  if (version != 1) return fail("unsupported checkpoint version: " + path);
+  if (version != 0) return fail("unsupported checkpoint version: " + path);
 
   std::vector<TensorRecord> records;
   records.reserve(count);
@@ -225,7 +302,7 @@ bool Checkpoint::Save(const std::string& path) const {
   if (!out) return false;
 
   out.write(kCheckpointMagic, sizeof(kCheckpointMagic));
-  WriteU32(out, 1);
+  WriteU32(out, 0);
   WriteU32(out, static_cast<std::uint32_t>(tensors_.size()));
   for (const TensorRecord& record : tensors_) WriteRecord(out, record);
   // The optimizer-state section follows the parameters (docs/post-training.md

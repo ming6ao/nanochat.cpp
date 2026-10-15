@@ -13,6 +13,12 @@ from unittest import mock
 
 from nanochat_cpp import checkpoint
 
+# The storage dtype codes come from the C surface, so the test pins no layout
+# constant of its own.
+FP32 = checkpoint.dtype_code("float32")
+BF16 = checkpoint.dtype_code("bfloat16")
+INT8 = checkpoint.dtype_code("int8")
+
 CANONICAL_NAMES = [
     "lm_head.weight",
     "transformer.wte.weight",
@@ -88,63 +94,82 @@ class OrderKeyTest(unittest.TestCase):
 class DtypePolicyTest(unittest.TestCase):
     def test_container_dtype(self) -> None:
         self.assertEqual(checkpoint.container_dtype("fp32"), "float32")
-        self.assertEqual(checkpoint.container_dtype("float16"), "float16")
-        self.assertEqual(checkpoint.container_dtype("half"), "float16")
+        self.assertEqual(checkpoint.container_dtype("bfloat16"), "bfloat16")
+        self.assertEqual(checkpoint.container_dtype("bf16"), "bfloat16")
         self.assertEqual(checkpoint.container_dtype("torch.float32"),
                          "float32")
         with self.assertRaises(checkpoint.UnsupportedDtype):
-            checkpoint.container_dtype("bfloat16")
+            checkpoint.container_dtype("float16")
 
     def test_dtype_codes(self) -> None:
         self.assertEqual(checkpoint.dtype_code("float32"), 0)
-        self.assertEqual(checkpoint.dtype_code("fp16"), 1)
-        self.assertEqual(checkpoint.dtype_name(1), "float16")
+        self.assertEqual(checkpoint.dtype_code("bf16"), 1)
+        self.assertEqual(checkpoint.dtype_name(1), "bfloat16")
+        self.assertEqual(checkpoint.dtype_name(2), "int8")
+        self.assertEqual(checkpoint.dtype_size(0), 4)
+        self.assertEqual(checkpoint.dtype_size(1), 2)
+        self.assertEqual(checkpoint.dtype_size(2), 1)
+        with self.assertRaises(checkpoint.UnsupportedDtype):
+            checkpoint.dtype_name(3)
 
     def test_plan_conversion(self) -> None:
-        upcast = checkpoint.plan_conversion("bfloat16", "float32")
+        # An fp16 source upcasts into the fp32 container.
+        upcast = checkpoint.plan_conversion("float16", "float32")
         self.assertEqual(upcast.code, 0)
         self.assertTrue(upcast.upcast)
         self.assertFalse(upcast.lossy)
 
-        downcast = checkpoint.plan_conversion("float32", "float16")
+        downcast = checkpoint.plan_conversion("float32", "bfloat16")
         self.assertEqual(downcast.code, 1)
         self.assertTrue(downcast.downcast)
         self.assertTrue(downcast.lossy)
 
-        exact = checkpoint.plan_conversion("float16", "float16")
+        exact = checkpoint.plan_conversion("bfloat16", "bfloat16")
         self.assertFalse(exact.upcast)
         self.assertFalse(exact.downcast)
         self.assertFalse(exact.lossy)
 
-        self.assertTrue(checkpoint.plan_conversion("bfloat16",
-                                                   "float16").lossy)
+        self.assertTrue(checkpoint.plan_conversion("float16",
+                                                   "bfloat16").lossy)
 
 
 class ContainerTest(unittest.TestCase):
     def records(self):
         return [
-            checkpoint.TensorRecord("lm_head.weight", checkpoint.DTYPE_FP32,
+            checkpoint.TensorRecord("lm_head.weight", FP32,
                                     (2, 3), bytes(2 * 3 * 4)),
-            checkpoint.TensorRecord("resid_lambdas", checkpoint.DTYPE_FP16,
+            checkpoint.TensorRecord("resid_lambdas", BF16,
                                     (2,), bytes(2 * 2)),
         ]
 
     def test_magic_and_round_trip(self) -> None:
         records = self.records()
-        self.assertEqual(checkpoint.serialize(records)[:8], checkpoint.MAGIC)
+        self.assertEqual(checkpoint.serialize(records)[:8], b"NCHKPT01")
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "model.nchkpt01"
             checkpoint.write_checkpoint(path, records)
             loaded = checkpoint.read_checkpoint(path)
             self.assertEqual(loaded, records)
             self.assertEqual(loaded[0].dtype_name, "float32")
+            self.assertEqual(loaded[1].dtype_name, "bfloat16")
             self.assertEqual(loaded[0].numel(), 6)
 
     def test_short_payload_is_rejected(self) -> None:
-        bad = [checkpoint.TensorRecord("lm_head.weight", checkpoint.DTYPE_FP32,
+        bad = [checkpoint.TensorRecord("lm_head.weight", FP32,
                                        (2, 3), bytes(3))]
         with self.assertRaises(checkpoint.CheckpointError):
             checkpoint.serialize(bad)
+
+    def test_attribute_block_round_trip(self) -> None:
+        scale = checkpoint.TensorRecord("quant.scale", FP32,
+                                        (1,), bytes(4))
+        record = checkpoint.TensorRecord(
+            "lm_head.weight", INT8, (2, 3), bytes(6), (scale,))
+        payload = checkpoint.serialize([record])
+        loaded, _ = checkpoint.parse_checkpoint(payload)
+        self.assertEqual(loaded, [record])
+        self.assertEqual(loaded[0].attributes[0].name, "quant.scale")
+        self.assertEqual(loaded[0].element_size, 1)
 
 
 class PathResolutionTest(unittest.TestCase):
@@ -232,8 +257,7 @@ class OptimizerStateTest(unittest.TestCase):
         self.assertEqual(records["adamw.lm_head.m"].data, b"A" * 16 + b"C" * 4)
         self.assertEqual(records["adamw.lm_head.v"].data, b"B" * 16 + b"D" * 4)
         self.assertEqual(records["adamw.lm_head.m"].shape, (5,))
-        self.assertEqual(records["adamw.lm_head.m"].dtype,
-                         checkpoint.DTYPE_FP32)
+        self.assertEqual(records["adamw.lm_head.m"].dtype, FP32)
         self.assertEqual(records["muon.3x4.buf1"].data, b"M" * 96)
         self.assertEqual(records["muon.3x4.buf2"].data, b"V" * 24)
         self.assertEqual(records["muon.3x4.buf1"].shape, (24,))
@@ -286,7 +310,7 @@ class OptimizerStateTest(unittest.TestCase):
         self.assertEqual(records[1].shape, (6,))
         self.assertEqual(records[0].data, b"Q" * 192)
         self.assertEqual(records[1].data, b"R" * 24)
-        self.assertEqual(records[0].dtype, checkpoint.DTYPE_FP32)
+        self.assertEqual(records[0].dtype, FP32)
 
     def test_anvil_sharded_group_is_rejected(self):
         state = {
@@ -320,16 +344,13 @@ class OptimizerStateTest(unittest.TestCase):
 class OptimizerContainerTest(unittest.TestCase):
     def records(self):
         return [
-            checkpoint.TensorRecord("lm_head.weight", checkpoint.DTYPE_FP32,
-                                    (2, 3), bytes(24)),
+            checkpoint.TensorRecord("lm_head.weight", FP32, (2, 3), bytes(24)),
         ]
 
     def optimizer_records(self):
         return [
-            checkpoint.TensorRecord("adamw.lm_head.m", checkpoint.DTYPE_FP32,
-                                    (6,), bytes(24)),
-            checkpoint.TensorRecord("muon.4x4.buf1", checkpoint.DTYPE_FP32,
-                                    (16,), bytes(64)),
+            checkpoint.TensorRecord("adamw.lm_head.m", FP32, (6,), bytes(24)),
+            checkpoint.TensorRecord("muon.4x4.buf1", FP32, (16,), bytes(64)),
         ]
 
     def test_file_round_trip_with_optimizer_state(self):

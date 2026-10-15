@@ -101,13 +101,14 @@ class DistributedPlan:
         """The captured stdout and stderr file of ``rank``."""
         return Path(self.out_dir) / f"rank{rank}.stdio.log"
 
-    def checkpoint_path(self, rank: int) -> Path:
-        """The final checkpoint path of ``rank``.
+    def checkpoint_path(self) -> Path:
+        """The canonical checkpoint path.
 
-        Each rank writes its own file. The two checkpoints are equal, because
-        the reduced update is equal. Rank 0 is the canonical one.
+        Rank 0 writes one file. The other ranks write nothing, because a
+        data-parallel rank holds a full replica of the model
+        (docs/precision.md section 5).
         """
-        return Path(self.out_dir) / f"rank{rank}.nchkpt01"
+        return Path(self.out_dir) / "checkpoint.ckpt"
 
 
 @dataclass
@@ -175,7 +176,7 @@ def command_for(rank: int, plan: DistributedPlan) -> list[str]:
              "--master", plan.master,
              "--port", str(plan.port),
              "--log", str(plan.log_path(rank)),
-             "--checkpoint", str(plan.checkpoint_path(rank))]
+             "--checkpoint", str(plan.checkpoint_path())]
     argv += list(plan.flags)
     return argv
 
@@ -204,7 +205,7 @@ def _shared_argv(plan: DistributedPlan) -> list[str]:
              "--seed", str(plan.seed),
              "--device", plan.device_name,
              "--log", str(Path(plan.out_dir) / "rank{rank}.log"),
-             "--checkpoint", str(Path(plan.out_dir) / "rank{rank}.nchkpt01")]
+             "--checkpoint", str(plan.checkpoint_path())]
     argv += list(plan.flags)
     return argv
 

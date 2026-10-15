@@ -285,10 +285,10 @@ optimizer = nc.Optimizer(model, **plan.optimizer, **plan.scheduler)
 ```
 
 `Config` carries a `value_embedding` flag. The default keeps the ResFormer value
-embeddings; `Config(value_embedding=False)` matches the Track 3 preset. The
-`Model.load` call accepts both the `NCMDL001` container that `Model.save` writes
-and the self-describing `NCHKPT01` container that the training harness writes
-(`docs/model.md`). A distributed run's checkpoint then loads in process.
+embeddings; `Config(value_embedding=False)` matches the Track 3 preset.
+`Model.save` writes the self-describing parameter-only `NCHKPT01` container.
+`Model.load` accepts that container and the legacy `NCMDL001` file, so a
+distributed run's checkpoint loads in process (`docs/model.md`).
 
 ## 5. Chat evaluation
 
@@ -430,6 +430,14 @@ today. The change removes `launcher.py`.
 `nanochat_cpp/checkpoint.py` stays. It converts a reference `.pt` state
 dictionary to the `NCHKPT01` container. It imports `torch` on use only. The
 tool `tools/convert_checkpoint.py` stays. The compute API does not import it.
+
+The container byte layout lives only in `src/data.cc`. The module builds an
+in-memory record list and hands it to the `nanochat_checkpoint_*` surface
+(`include/nanochat/capi.h`). That surface owns the magic, the version, the
+dtype codes, the attribute block, and the record framing. One call writes both
+record lists, and one call reads them back. The module keeps the torch-side
+work: the name remap, the path resolution, the optimizer reassembly, and the
+dtype policy.
 
 ## 8. Removed files
 

@@ -24,11 +24,25 @@ namespace nanochat {
 // A self-describing container: `name`, dtype, shape, and raw payload per
 // tensor. Not a framework `state_dict`.
 
+// One attribute of a checkpoint record (docs/precision.md section 5). The
+// container reserves the block for int8: the `quant.scale` attribute carries
+// the scale. An fp32 or bf16 record carries no attribute, and int8 is not
+// implemented yet, so the block is empty in practice.
+struct TensorAttribute {
+  std::string name;
+  DType dtype = DType::kFp32;
+  std::vector<std::int64_t> shape;
+  std::vector<std::byte> data;
+};
+
 struct TensorRecord {
   std::string name;
   DType dtype = DType::kFp32;
   std::vector<std::int64_t> shape;
   std::vector<std::byte> data;
+
+  // The optional attribute block. Empty for an fp32 or bf16 record.
+  std::vector<TensorAttribute> attributes;
 
   std::int64_t numel() const {
     std::int64_t total = 1;
@@ -36,6 +50,11 @@ struct TensorRecord {
     return total;
   }
 };
+
+// True when `path` starts with the `NCHKPT01` magic. `Checkpointer::LoadModel`
+// uses this to route a file to the container reader or the legacy `NCMDL001`
+// reader (docs/model.md).
+bool IsCheckpointContainer(const std::string& path);
 
 class Checkpoint {
  public:

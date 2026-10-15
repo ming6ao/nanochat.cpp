@@ -255,11 +255,11 @@ Implementation: `include/nanochat/model.h` (`GenerateParams`,
 
 Two containers exist:
 
-- `NCMDL001` is the flat parameter file that `TrainModel::Save` writes
-  (`src/model.cc`).
+- `NCMDL001` is a legacy flat parameter file. The project no longer writes it.
+  `Checkpointer::LoadModel` still reads it (`src/train.cc`).
 - `NCHKPT01` is the self-describing container that `Checkpointer` uses
-  (`src/data.cc`). The reference converter in `python/nanochat_cpp/checkpoint.py`
-  writes the same format.
+  (`src/data.cc`). It is version 0. The reference converter in
+  `python/nanochat_cpp/checkpoint.py` writes the same format.
 
 Both containers hold parameters. The `Checkpoint` class also carries an
 optimizer-state section. That section holds the AdamW first and second moments.
@@ -271,6 +271,10 @@ groups.
 `Checkpointer::SaveModel` and `Checkpointer::LoadModel` have `Optimizer`
 overloads. A parameter-only file stays loadable.
 
+`NCHKPT01` stores fp32 or bf16 records. The record dtype is a storage dtype,
+separate from the build compute dtype. An fp32 container is the canonical
+artifact for a resume. A bf16 container is a compact artifact.
+
 Pretrain checkpoints load directly. Reference base and SFT checkpoints are torch
 `.pt` files. `tools/convert_checkpoint.py` remaps them. The converter also
 reads the reference optimizer state.
@@ -281,8 +285,11 @@ Implementation: `include/nanochat/data.h`; `src/optim_state.h`; `src/optim.cc`;
 
 ## 8. Orchestration and the sandbox
 
-- **SFT** is one job. The bridge materializes the packed shard, and then it
-  launches the C++ training binary under `tools/nanochat train`.
+- **SFT** has two entries. The scripted entry is the bridge. The bridge
+  materializes the packed shard, and then it launches the C++ training binary
+  (`sft_main`) under `tools/nanochat train`. The notebook entry is the
+  in-process one-device `MeshRuntime` loop in `notebooks/posttrain.ipynb`.
+  Both entries use the same loss, gradient, and optimizer code.
 - **RL** is on-policy. Generation and training interleave, and the optimizer
   moments persist. The target is a persistent worker. The worker holds the
   model and the optimizer. It exchanges rollout and advantage messages with the
@@ -350,7 +357,7 @@ changes.
 | SFT parity rungs P4 to P7 | Open | No `sft_pack_fixture.bin` or `sft_step_parity_test` yet |
 | RL step binary and the RL parity fixture | Done | `src/rl_step_main.cc`, `tools/dump_rl_fixture.py`, `tests/rl_parity_test.cc` |
 | RL orchestration worker | Done | `src/rl_worker_main.cc`, `python/nanochat_cpp/rl.py` |
-| SFT bridge command | Missing | no `sft_main` or `nanochat_cpp.sft` |
+| SFT bridge command | Done | `src/sft_main.cc`; `python/nanochat_cpp/sft.py` |
 | RL bridge command | Done | `python/nanochat_cpp/rl.py` |
 
 ## 12. Remaining work

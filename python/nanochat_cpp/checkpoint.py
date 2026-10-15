@@ -10,9 +10,11 @@ module bridges the two:
   prefixes are stripped, legacy aliases are folded onto the canonical names the
   C++ model registers (``src/model.cc``), and anything else is rejected so a
   silently dropped weight cannot slip through.
-* **Dtype policy.** The container stores only IEEE fp32 or fp16 (the values of
-  ``nanochat::DType``). The source tensor is upcast to fp32 and then cast to the
-  requested container dtype; the record carries the matching dtype code.
+* **Dtype policy.** The container stores fp32 or bf16. Both are storage
+  dtypes, separate from the build compute dtype. The source tensor is upcast
+  to fp32 and then cast to the requested container dtype; the record carries
+  the matching dtype code. int8 is reserved for a later release. fp16 is not a
+  container dtype.
 * **Path resolution.** ``source`` (``base``/``sft``/``rl``), ``--model-tag`` and
   ``--step`` resolve to ``model_<step:06d>.pt`` under ``NANOCHAT_BASE_DIR``,
   mirroring ``nanochat.checkpoint_manager``.
@@ -21,15 +23,16 @@ module bridges the two:
   buffers as a second record list (docs/post-training.md section 7). A
   parameter-only file stays loadable.
 
-Everything in this module is stdlib-only at import time. ``torch`` and
-``numpy`` are imported lazily inside the functions that touch tensors, so the
-torch-free self-test can import and exercise the name, dtype, container, and
-path logic without a GPU or PyTorch. The C++ runtime itself never imports
-PyTorch; this is a one-time host-side conversion.
+This module imports only the standard library at import time. ``torch`` and
+``numpy`` are imported lazily inside the functions that touch tensors. The
+container bytes come from the C library, so a conversion runs inside the
+sandbox (``docs/sandbox.md``). The name, dtype, and path helpers need no
+library, and the C++ runtime itself never imports PyTorch.
 
 Run it directly::
 
-    python3 tools/convert_checkpoint.py --source base --model-tag d20 --dtype fp32
+    tools/nanochat run t0-cpu -- python3 tools/convert_checkpoint.py \
+        --source base --model-tag d20 --dtype fp32
     tools/nanochat_cpp checkpoint --source sft --model-tag d20 --step 499
 
 or import the helpers::
@@ -42,36 +45,26 @@ or import the helpers::
 from __future__ import annotations
 
 import argparse
+import ctypes
 import dataclasses
+import functools
 import os
 import re
-import struct
+import tempfile
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+from . import _core
+
 # ---------------------------------------------------------------------------
-# Container format (must match src/data.cc)
+# Container format (owned by src/data.cc, reached through the C surface)
 # ---------------------------------------------------------------------------
-
-#: ``kCheckpointMagic`` in ``src/data.cc``.
-MAGIC = b"NCHKPT01"
-
-#: ``Checkpoint::Save`` writes version 1.
-VERSION = 1
-
-#: Values of ``nanochat::DType`` (``include/nanochat/tensor.h``).
-DTYPE_FP32 = 0
-DTYPE_FP16 = 1
-
-DTYPE_NAMES = {
-    DTYPE_FP32: "float32",
-    DTYPE_FP16: "float16",
-}
-DTYPE_CODES = {name: code for code, name in DTYPE_NAMES.items()}
-
-#: ``Checkpoint::Load`` rejects ranks above 8.
-MAX_RANK = 8
+#
+# The byte layout is single-sourced in `src/data.cc`. This module builds an
+# in-memory record list and hands it to `nanochat_checkpoint_*`, so the magic,
+# the version, the dtype codes, the attribute block, and the record framing
+# live in exactly one place (docs/model.md).
 
 #: The nanochat directory layout (``nanochat/checkpoint_manager.py``).
 CHECKPOINT_SOURCES = {
@@ -241,6 +234,8 @@ _SOURCE_DTYPE_ALIASES = {
     "bfloat16": "bfloat16",
     "bf16": "bfloat16",
     "bfloat": "bfloat16",
+    "int8": "int8",
+    "i8": "int8",
     "float64": "float64",
     "fp64": "float64",
     "f64": "float64",
@@ -248,7 +243,7 @@ _SOURCE_DTYPE_ALIASES = {
 }
 
 #: Dtypes the NCHKPT01 container and the C++ runtime can store.
-CONTAINER_DTYPES = ("float32", "float16")
+CONTAINER_DTYPES = ("float32", "bfloat16")
 
 
 def normalize_dtype(value: Any) -> str:
@@ -275,18 +270,65 @@ def container_dtype(value: Any) -> str:
     return canonical
 
 
+def _library():
+    """The loaded shared library that owns the container byte layout."""
+    from . import _lib  # Local import: keep this module importable alone.
+
+    return _lib.load()
+
+
+@functools.lru_cache(maxsize=None)
+def _dtype_table() -> tuple[tuple[str, int, int], ...]:
+    """The storage dtypes as ``(name, code, element size)``, in code order.
+
+    The C surface enumerates the dtypes, so this module keeps no code table of
+    its own (docs/model.md).
+    """
+    library = _library()
+    table: list[tuple[str, int, int]] = []
+    index = 0
+    while True:
+        name = ctypes.c_char_p()
+        code = ctypes.c_int32()
+        size = ctypes.c_int32()
+        status = library.nanochat_checkpoint_dtype(
+            index, ctypes.byref(name), ctypes.byref(code), ctypes.byref(size))
+        if status != _core.NANOCHAT_STATUS_OK:
+            raise CheckpointError(
+                f"nanochat_checkpoint_dtype: {_core.last_error(library)}")
+        if not name.value:
+            return tuple(table)
+        table.append(
+            (name.value.decode("utf-8"), int(code.value), int(size.value)))
+        index += 1
+
+
+def _dtype_entry(key: str | int) -> tuple[str, int, int]:
+    """The entry that matches a storage dtype name or a storage dtype code."""
+    for entry in _dtype_table():
+        if key == entry[0] or key == entry[1]:
+            return entry
+    raise UnsupportedDtype(f"unknown storage dtype: {key!r}")
+
+
 def dtype_code(name: Any) -> int:
-    """The ``nanochat::DType`` code for a container dtype name."""
-    canonical = container_dtype(name)
-    return DTYPE_CODES[canonical]
+    """The storage dtype code for a storage dtype name.
+
+    Unlike :func:`container_dtype`, this accepts every storage dtype the
+    container can hold, including the reserved int8. Only the converter's
+    write target is restricted.
+    """
+    return _dtype_entry(normalize_dtype(name))[1]
 
 
 def dtype_name(code: int) -> str:
-    """The container dtype name for a ``nanochat::DType`` code."""
-    try:
-        return DTYPE_NAMES[int(code)]
-    except (KeyError, ValueError, TypeError) as error:
-        raise UnsupportedDtype(f"unknown dtype code: {code!r}") from error
+    """The container dtype name for a storage dtype code."""
+    return _dtype_entry(int(code))[0]
+
+
+def dtype_size(code: int) -> int:
+    """The payload size of one element for a storage dtype code."""
+    return _dtype_entry(int(code))[2]
 
 
 @dataclasses.dataclass(frozen=True)
@@ -330,7 +372,7 @@ def plan_conversion(source: Any, target: Any) -> Conversion:
     return Conversion(
         source=source_name,
         target=target_name,
-        code=DTYPE_CODES[target_name],
+        code=dtype_code(target_name),
         upcast=upcast,
         downcast=downcast,
         lossy=lossy,
@@ -344,12 +386,17 @@ def plan_conversion(source: Any, target: Any) -> Conversion:
 
 @dataclasses.dataclass(frozen=True)
 class TensorRecord:
-    """One tensor in the container, matching ``nanochat::TensorRecord``."""
+    """One tensor in the container, matching ``nanochat::TensorRecord``.
+
+    ``attributes`` is the optional attribute block. An fp32 or bf16 record
+    leaves it empty. An int8 record carries one ``quant.scale`` attribute.
+    """
 
     name: str
     dtype: int
     shape: tuple[int, ...]
     data: bytes
+    attributes: tuple["TensorRecord", ...] = ()
 
     @property
     def dtype_name(self) -> str:
@@ -357,7 +404,7 @@ class TensorRecord:
 
     @property
     def element_size(self) -> int:
-        return 4 if self.dtype == DTYPE_FP32 else 2
+        return dtype_size(self.dtype)
 
     def numel(self) -> int:
         total = 1
@@ -369,134 +416,178 @@ class TensorRecord:
         return self.numel() * self.element_size
 
 
-def _pack_record(record: TensorRecord) -> bytes:
-    name_bytes = record.name.encode("utf-8")
-    if len(name_bytes) > 0xFFFF:
-        raise CheckpointError(f"record name is too long: {record.name!r}")
-    if record.dtype not in DTYPE_NAMES:
-        raise UnsupportedDtype(f"unknown dtype code: {record.dtype!r}")
-    if len(record.shape) > MAX_RANK:
+def _record_shape(record: TensorRecord) -> tuple[int, ...]:
+    shape = tuple(int(dim) for dim in record.shape)
+    if len(shape) > 8:
         raise CheckpointError(f"record rank is too large: {record.name!r}")
-    for dim in record.shape:
+    for dim in shape:
         if dim < 0:
             raise CheckpointError(
                 f"negative dimension in {record.name!r}: {dim}")
+    return shape
+
+
+def _check_status(library, status: int, function: str) -> None:
+    """Raise ``CheckpointError`` when a C call did not succeed."""
+    if status != _core.NANOCHAT_STATUS_OK:
+        raise CheckpointError(f"{function}: {_core.last_error(library)}")
+
+
+def _check_record(record: TensorRecord) -> None:
+    """Reject a record the container cannot hold, before the C call."""
+    if len(record.name.encode("utf-8")) > 0xFFFF:
+        raise CheckpointError(f"record name is too long: {record.name!r}")
+    dtype_size(record.dtype)
     if len(record.data) != record.expected_bytes():
         raise CheckpointError(
             f"payload size mismatch for {record.name!r}: "
             f"{len(record.data)} != {record.expected_bytes()}")
-    parts = [
-        struct.pack("<H", len(name_bytes)),
-        name_bytes,
-        struct.pack("<II", record.dtype, len(record.shape)),
-    ]
-    for dim in record.shape:
-        parts.append(struct.pack("<q", int(dim)))
-    parts.append(struct.pack("<Q", len(record.data)))
-    parts.append(record.data)
-    return b"".join(parts)
 
 
-def serialize(records: Sequence[TensorRecord],
-              optimizer_state: Sequence[TensorRecord] = ()) -> bytes:
-    """Serialise records into the NCHKPT01 byte layout.
+def _validate_records(records: Sequence[TensorRecord]) -> None:
+    """Reject a record the container cannot hold, before the C call."""
+    for record in records:
+        _check_record(record)
+        _validate_records(record.attributes)
 
-    ``optimizer_state`` is the optional optimizer-state section that follows
-    the parameter records (docs/post-training.md section 7). The section is
-    always written, with a zero count for a parameter-only file, so the bytes
-    match a C++ ``Checkpoint::Save``.
+
+def _build_records(records: Sequence[TensorRecord],
+                   keep: list) -> "ctypes.Array":
+    """A ``Record`` array for ``records``.
+
+    ``keep`` collects every buffer the array points into, so the caller can
+    hold them alive for the call.
     """
-    header = MAGIC + struct.pack("<II", VERSION, len(records))
-    params = b"".join(_pack_record(record) for record in records)
-    state = b"".join(_pack_record(record) for record in optimizer_state)
-    return (header + params + struct.pack("<I", len(optimizer_state)) + state)
+    array = (_core.Record * len(records))()
+    keep.append(array)
+    for index, record in enumerate(records):
+        entry = array[index]
+        name = record.name.encode("utf-8")
+        keep.append(name)
+        entry.name = name
+        entry.dtype = int(record.dtype)
+        entry.bytes = len(record.data)
+        shape = _record_shape(record)
+        entry.ndim = len(shape)
+        if shape:
+            dims = (ctypes.c_int64 * len(shape))(*shape)
+            keep.append(dims)
+            entry.dims = dims
+        else:
+            entry.dims = None
+        if record.data:
+            buffer = ctypes.create_string_buffer(record.data, len(record.data))
+            keep.append(buffer)
+            entry.data = ctypes.addressof(buffer)
+        else:
+            entry.data = None
+        entry.attribute_count = len(record.attributes)
+        if record.attributes:
+            entry.attributes = ctypes.cast(
+                _build_records(record.attributes, keep),
+                ctypes.POINTER(_core.Record))
+        else:
+            entry.attributes = None
+    return array
 
 
 def write_checkpoint(path: str | os.PathLike[str],
                      records: Sequence[TensorRecord],
                      optimizer_state: Sequence[TensorRecord] = ()) -> Path:
-    """Write ``records`` to ``path`` atomically and return the path."""
+    """Write ``records`` to ``path`` atomically and return the path.
+
+    The bytes come from the C container writer, so this module holds no copy
+    of the layout (docs/model.md).
+    """
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
     temporary = target.with_name(target.name + ".tmp")
-    temporary.write_bytes(serialize(records, optimizer_state))
+    _validate_records(records)
+    _validate_records(optimizer_state)
+    keep: list = []
+    parameters = _build_records(records, keep) if records else None
+    optimizer = (_build_records(optimizer_state, keep)
+                 if optimizer_state else None)
+    library = _library()
+    status = library.nanochat_checkpoint_write(
+        str(temporary).encode("utf-8"), parameters, len(records), optimizer,
+        len(optimizer_state))
+    _check_status(library, status, "nanochat_checkpoint_write")
     os.replace(temporary, target)
     return target
 
 
-def _need(data: bytes, offset: int, count: int, what: str) -> None:
-    if count < 0 or offset + count > len(data):
-        raise CheckpointError(f"truncated checkpoint while reading {what}")
+def serialize(records: Sequence[TensorRecord],
+              optimizer_state: Sequence[TensorRecord] = ()) -> bytes:
+    """The container bytes for ``records``.
+
+    A convenience wrapper over :func:`write_checkpoint` for a caller that wants
+    bytes instead of a file.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "container.nchkpt01"
+        write_checkpoint(path, records, optimizer_state)
+        return path.read_bytes()
 
 
-def _read_records(data: bytes, offset: int,
-                  count: int) -> tuple[list[TensorRecord], int]:
-    """Read ``count`` records from ``data`` and return them with the offset."""
-    records: list[TensorRecord] = []
-    for _ in range(count):
-        _need(data, offset, 2, "record name length")
-        (name_len,) = struct.unpack_from("<H", data, offset)
-        offset += 2
-        _need(data, offset, name_len, "record name")
-        name = data[offset:offset + name_len].decode("utf-8")
-        offset += name_len
-        _need(data, offset, 8, "record header")
-        dtype, rank = struct.unpack_from("<II", data, offset)
-        offset += 8
-        if rank > MAX_RANK:
-            raise CheckpointError(f"record rank is too large: {name!r}")
-        _need(data, offset, 8 * rank, "record shape")
-        shape = tuple(struct.unpack_from(f"<{rank}q", data, offset))
-        offset += 8 * rank
-        _need(data, offset, 8, "record payload size")
-        (payload_bytes,) = struct.unpack_from("<Q", data, offset)
-        offset += 8
-        _need(data, offset, payload_bytes, "record payload")
-        payload = data[offset:offset + payload_bytes]
-        offset += payload_bytes
-        records.append(TensorRecord(name, dtype, shape, payload))
-    return records, offset
+def _decode_record(view) -> TensorRecord:
+    name, dtype, shape, data = _core.record_view(view)
+    attributes = tuple(
+        _decode_record(view.attributes[index])
+        for index in range(int(view.attribute_count)))
+    return TensorRecord(name, dtype, shape, data, attributes)
+
+
+def _decode_records(pointer, count: int) -> list[TensorRecord]:
+    return [_decode_record(pointer[index]) for index in range(int(count))]
 
 
 def parse_checkpoint(data: bytes,
                      origin: str = "<bytes>") -> tuple[list[TensorRecord],
                                                        list[TensorRecord]]:
-    """Parse NCHKPT01 bytes into ``(parameters, optimizer_state)``.
+    """Decode NCHKPT01 bytes into ``(parameters, optimizer_state)``.
 
-    A parameter-only file written by an older converter ends after the
-    parameter records. A file with the optional optimizer-state section
-    carries a second count and its records. Both stay loadable.
+    ``origin`` names the source in an error message. The magic and the version
+    come from the C reader.
     """
-    if len(data) < 16 or data[:8] != MAGIC:
-        raise CheckpointError(f"bad checkpoint magic: {origin}")
-    version, count = struct.unpack_from("<II", data, 8)
-    if version != VERSION:
-        raise CheckpointError(f"unsupported checkpoint version: {version}")
-    records, offset = _read_records(data, 16, count)
-    optimizer_state: list[TensorRecord] = []
-    if offset < len(data):
-        _need(data, offset, 4, "optimizer-state count")
-        (state_count,) = struct.unpack_from("<I", data, offset)
-        offset += 4
-        optimizer_state, offset = _read_records(data, offset, state_count)
-    return records, optimizer_state
-
-
-def read_checkpoint(path: str | os.PathLike[str]) -> list[TensorRecord]:
-    """Parse the parameter records of an NCHKPT01 file."""
-    records, _ = parse_checkpoint(Path(path).read_bytes(), str(path))
-    return records
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "container.nchkpt01"
+        path.write_bytes(data)
+        try:
+            return read_checkpoint_full(path)
+        except CheckpointError as error:
+            raise CheckpointError(f"{error} ({origin})") from error
 
 
 def read_checkpoint_full(
         path: str | os.PathLike[str]) -> tuple[list[TensorRecord],
                                                list[TensorRecord]]:
-    """Parse the parameter and optimizer-state records of an NCHKPT01 file."""
-    return parse_checkpoint(Path(path).read_bytes(), str(path))
+    """Read the parameter and optimizer-state records of an NCHKPT01 file."""
+    library = _library()
+    owner = _core.CheckpointHandle()
+    records = ctypes.POINTER(_core.Record)()
+    record_count = ctypes.c_int64()
+    optimizer = ctypes.POINTER(_core.Record)()
+    optimizer_count = ctypes.c_int64()
+    status = library.nanochat_checkpoint_read(
+        str(path).encode("utf-8"), ctypes.byref(owner),
+        ctypes.byref(records), ctypes.byref(record_count),
+        ctypes.byref(optimizer), ctypes.byref(optimizer_count))
+    _check_status(library, status, "nanochat_checkpoint_read")
+    try:
+        return (_decode_records(records, record_count.value),
+                _decode_records(optimizer, optimizer_count.value))
+    finally:
+        library.nanochat_checkpoint_free(owner)
+
+
+def read_checkpoint(path: str | os.PathLike[str]) -> list[TensorRecord]:
+    """Read the parameter records of an NCHKPT01 file."""
+    return read_checkpoint_full(path)[0]
 
 
 def read_optimizer_state(path: str | os.PathLike[str]) -> list[TensorRecord]:
-    """Parse only the optimizer-state records of an NCHKPT01 file."""
+    """Read only the optimizer-state records of an NCHKPT01 file."""
     return read_checkpoint_full(path)[1]
 
 
@@ -681,8 +772,8 @@ def _tensor_payload(tensor: Any, target: str) -> bytes:
     import torch
 
     cpu = tensor.detach().to(dtype=torch.float32, device="cpu")
-    if target == "float16":
-        cpu = cpu.to(dtype=torch.float16)
+    if target == "bfloat16":
+        cpu = cpu.to(dtype=torch.bfloat16)
     array = cpu.contiguous().numpy()
     # The container is little-endian regardless of the host.
     return array.view(array.dtype.newbyteorder("<")).tobytes()
@@ -693,14 +784,14 @@ def build_records(state_dict: Mapping[str, Any], target: Any = "float32", *,
                   skip_non_float: bool = False) -> list[TensorRecord]:
     """Convert a loaded ``state_dict`` into NCHKPT01 records.
 
-    ``target`` is the container dtype (``fp32``/``fp16``). Unknown keys raise
+    ``target`` is the container dtype (``fp32``/``bf16``). Unknown keys raise
     (:class:`UnknownParameter`) unless ``skip_unknown``; non-floating tensors
     raise unless ``skip_non_float``.
     """
     import torch
 
     target_name = container_dtype(target)
-    code = DTYPE_CODES[target_name]
+    code = dtype_code(target_name)
 
     unknown: list[str] = []
     non_float: list[str] = []
@@ -835,9 +926,11 @@ def _muon_records(state: Mapping[Any, Any],
     first = _optimizer_payload(momentum)
     last = _optimizer_payload(second)
     return [
-        TensorRecord(muon_state_name(rows, cols, "buf1"), DTYPE_FP32,
+        TensorRecord(muon_state_name(rows, cols, "buf1"),
+                     dtype_code("float32"),
                      (len(first) // 4,), first),
-        TensorRecord(muon_state_name(rows, cols, "buf2"), DTYPE_FP32,
+        TensorRecord(muon_state_name(rows, cols, "buf2"),
+                     dtype_code("float32"),
                      (len(last) // 4,), last),
     ]
 
@@ -877,9 +970,11 @@ def _anvil_records(state: Mapping[Any, Any],
     first = _optimizer_payload(velocity)
     last = _optimizer_payload(lane_energy)
     return [
-        TensorRecord(anvil_state_name(rows, cols, "velocity"), DTYPE_FP32,
+        TensorRecord(anvil_state_name(rows, cols, "velocity"),
+                     dtype_code("float32"),
                      (len(first) // 4,), first),
-        TensorRecord(anvil_state_name(rows, cols, "lane_energy"), DTYPE_FP32,
+        TensorRecord(anvil_state_name(rows, cols, "lane_energy"),
+                     dtype_code("float32"),
                      (len(last) // 4,), last),
     ]
 
@@ -919,9 +1014,11 @@ def build_optimizer_records(
         second = _concat_optimizer_state(state, params, "exp_avg_sq")
         if first is None or second is None:
             continue
-        records.append(TensorRecord(f"adamw.{name}.m", DTYPE_FP32,
+        records.append(TensorRecord(f"adamw.{name}.m",
+                                    dtype_code("float32"),
                                     (len(first) // 4,), first))
-        records.append(TensorRecord(f"adamw.{name}.v", DTYPE_FP32,
+        records.append(TensorRecord(f"adamw.{name}.v",
+                                    dtype_code("float32"),
                                     (len(second) // 4,), second))
     return records
 
@@ -996,7 +1093,7 @@ def build_parser() -> argparse.ArgumentParser:
              "exists")
     parser.add_argument(
         "--dtype", default="float32",
-        help="container dtype: float32 (default) or float16")
+        help="container dtype: float32 (default) or bfloat16")
     parser.add_argument(
         "--skip-unknown", action="store_true",
         help="drop state-dict keys the C++ model does not define")

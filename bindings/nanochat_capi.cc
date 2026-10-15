@@ -25,7 +25,6 @@
 #include <cstdlib>
 #include <cstring>
 #include <exception>
-#include <fstream>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -33,6 +32,7 @@
 #include <vector>
 
 #include "nanochat/config.h"
+#include "nanochat/data.h"
 #include "nanochat/dataloader.h"
 #include "nanochat/kernels.h"
 #include "nanochat/mesh.h"
@@ -51,12 +51,7 @@ namespace {
 
 // The C ABI version. Bump this string on every change to the surface or to a
 // mirrored struct; docs/python.md section 13 names that rule.
-constexpr char kNanochatVersion[] = "0.9.0";
-
-// The magic that `Checkpoint::Save` writes (src/data.cc). A file with this
-// prefix is the harness container, so `nanochat_load` routes it through the
-// harness loader instead of `Model::Load`.
-constexpr char kHarnessCheckpointMagic[] = "NCHKPT01";
+constexpr char kNanochatVersion[] = "0.11.0";
 
 // The message for the current thread. A `thread_local` string keeps the
 // pointer from `nanochat_last_error` valid until the next failure on this
@@ -273,6 +268,16 @@ struct nanochat_mesh {
 
 struct nanochat_runtime {
   std::unique_ptr<nanochat::MeshRuntime> runtime;
+};
+
+// A checkpoint handle. `nanochat_checkpoint_read` fills the arrays and returns
+// the handle, so the caller can release everything with one free. The flat
+// arrays point into `checkpoint`, so every field lives as long as the handle.
+struct nanochat_checkpoint {
+  nanochat::Checkpoint checkpoint;
+  std::vector<nanochat_record> records;
+  std::vector<nanochat_record> optimizer_state;
+  std::vector<nanochat_record> attributes;
 };
 
 namespace {
@@ -782,7 +787,12 @@ void nanochat_save(nanochat_model* model, const char* path) {
     if (model == nullptr || path == nullptr) {
       throw std::invalid_argument("model or path is null");
     }
-    model->model->Save(path);
+    // Write the harness `NCHKPT01` container: one format for every writer
+    // (docs/model.md). This writes the parameters only, with no optimizer
+    // state and no step.
+    if (!nanochat::Checkpointer::SaveModel(*model->model, path)) {
+      throw std::runtime_error("cannot save checkpoint: " + std::string(path));
+    }
   });
 }
 
@@ -791,21 +801,11 @@ void nanochat_load(nanochat_model* model, const char* path) {
     if (model == nullptr || path == nullptr) {
       throw std::invalid_argument("model or path is null");
     }
-    // The harness container is name-keyed and self-describing. Detect it by
-    // its magic, then load through the harness so a distributed run's
-    // checkpoint loads in process. Any other file goes to `Model::Load`.
-    std::ifstream probe(path, std::ios::binary);
-    char magic[sizeof(kHarnessCheckpointMagic) - 1] = {};
-    probe.read(magic, sizeof(magic));
-    if (probe.gcount() == static_cast<std::streamsize>(sizeof(magic)) &&
-        std::memcmp(magic, kHarnessCheckpointMagic, sizeof(magic)) == 0) {
-      if (!nanochat::Checkpointer::LoadModel(model->model.get(), path)) {
-        throw std::runtime_error("cannot load checkpoint: " +
-                                 std::string(path));
-      }
-      return;
+    // `Checkpointer::LoadModel` routes a `NCHKPT01` container or a legacy
+    // `NCMDL001` file, so a distributed run's checkpoint loads in process.
+    if (!nanochat::Checkpointer::LoadModel(model->model.get(), path)) {
+      throw std::runtime_error("cannot load checkpoint: " + std::string(path));
     }
-    model->model->Load(path);
   });
 }
 
@@ -1157,5 +1157,227 @@ int nanochat_decode(nanochat_tokenizer* tokenizer, const int* ids, int count,
 void nanochat_tokenizer_free(nanochat_tokenizer* tokenizer) {
   delete tokenizer;
 }
+
+// --- Checkpoint container -------------------------------------------------
+
+namespace {
+
+nanochat::DType ReadStorageDType(int32_t dtype) {
+  const nanochat::DType storage = static_cast<nanochat::DType>(dtype);
+  if (!nanochat::IsStorageDType(storage)) {
+    throw std::invalid_argument("unknown storage dtype code");
+  }
+  return storage;
+}
+
+void ReadShape(int32_t ndim, const int64_t* dims,
+               std::vector<std::int64_t>* shape) {
+  if (ndim < 0 || ndim > 8) {
+    throw std::invalid_argument("ndim is out of range");
+  }
+  if (ndim > 0 && dims == nullptr) throw std::invalid_argument("dims is null");
+  shape->clear();
+  for (int32_t axis = 0; axis < ndim; ++axis) shape->push_back(dims[axis]);
+}
+
+std::vector<std::byte> ReadPayload(const void* data, int64_t bytes) {
+  if (bytes < 0) throw std::invalid_argument("byte count is negative");
+  if (bytes > 0 && data == nullptr) throw std::invalid_argument("data is null");
+  std::vector<std::byte> payload(static_cast<std::size_t>(bytes));
+  if (bytes > 0) {
+    std::memcpy(payload.data(), data, static_cast<std::size_t>(bytes));
+  }
+  return payload;
+}
+
+// Copies one `nanochat_record` and its attributes into a C++ record.
+nanochat::TensorRecord ToRecord(const nanochat_record& view) {
+  if (view.name == nullptr) throw std::invalid_argument("record name is null");
+  if (view.attribute_count < 0) {
+    throw std::invalid_argument("negative attribute count");
+  }
+  if (view.attribute_count > 0 && view.attributes == nullptr) {
+    throw std::invalid_argument("attributes is null");
+  }
+  nanochat::TensorRecord record;
+  record.name = view.name;
+  record.dtype = ReadStorageDType(view.dtype);
+  ReadShape(view.ndim, view.dims, &record.shape);
+  record.data = ReadPayload(view.data, view.bytes);
+  for (int64_t index = 0; index < view.attribute_count; ++index) {
+    const nanochat_record& source = view.attributes[index];
+    if (source.name == nullptr) {
+      throw std::invalid_argument("attribute name is null");
+    }
+    nanochat::TensorAttribute attribute;
+    attribute.name = source.name;
+    attribute.dtype = ReadStorageDType(source.dtype);
+    ReadShape(source.ndim, source.dims, &attribute.shape);
+    attribute.data = ReadPayload(source.data, source.bytes);
+    record.attributes.push_back(std::move(attribute));
+  }
+  return record;
+}
+
+// Converts a caller's list into C++ records.
+void AppendRecords(const nanochat_record* records, int64_t count,
+                   std::vector<nanochat::TensorRecord>* out) {
+  if (count < 0) throw std::invalid_argument("negative record count");
+  if (count > 0 && records == nullptr) {
+    throw std::invalid_argument("records is null");
+  }
+  for (int64_t index = 0; index < count; ++index) {
+    out->push_back(ToRecord(records[index]));
+  }
+}
+
+// Copies one C++ record into a `nanochat_record`. The pointers point into the
+// source record, which must outlive the view. `attributes` points into
+// `attribute_storage`, which the caller sizes before the fill.
+void FillRecord(const nanochat::TensorRecord& record, nanochat_record* out,
+                std::vector<nanochat_record>* attribute_storage,
+                std::size_t* cursor) {
+  out->name = record.name.c_str();
+  out->dtype = static_cast<int32_t>(record.dtype);
+  out->ndim = static_cast<int32_t>(record.shape.size());
+  out->dims = record.shape.empty() ? nullptr : record.shape.data();
+  out->data = reinterpret_cast<const void*>(record.data.data());
+  out->bytes = static_cast<int64_t>(record.data.size());
+  out->attribute_count = static_cast<int64_t>(record.attributes.size());
+  if (record.attributes.empty()) {
+    out->attributes = nullptr;
+    return;
+  }
+  const std::size_t start = *cursor;
+  for (const nanochat::TensorAttribute& attribute : record.attributes) {
+    nanochat_record& entry = (*attribute_storage)[(*cursor)++];
+    entry.name = attribute.name.c_str();
+    entry.dtype = static_cast<int32_t>(attribute.dtype);
+    entry.ndim = static_cast<int32_t>(attribute.shape.size());
+    entry.dims = attribute.shape.empty() ? nullptr : attribute.shape.data();
+    entry.data = reinterpret_cast<const void*>(attribute.data.data());
+    entry.bytes = static_cast<int64_t>(attribute.data.size());
+    entry.attribute_count = 0;
+    entry.attributes = nullptr;
+  }
+  out->attributes = attribute_storage->data() + start;
+}
+
+// Copies a whole C++ list into `out`. `attribute_storage` must already hold
+// room for every attribute of the list, and `cursor` advances across calls.
+void FillRecords(const std::vector<nanochat::TensorRecord>& source,
+                 std::vector<nanochat_record>* out,
+                 std::vector<nanochat_record>* attribute_storage,
+                 std::size_t* cursor) {
+  out->resize(source.size());
+  for (std::size_t index = 0; index < source.size(); ++index) {
+    FillRecord(source[index], &(*out)[index], attribute_storage, cursor);
+  }
+}
+
+// The attribute count of a whole list.
+std::size_t CountAttributes(const std::vector<nanochat::TensorRecord>& source) {
+  std::size_t total = 0;
+  for (const nanochat::TensorRecord& record : source) {
+    total += record.attributes.size();
+  }
+  return total;
+}
+
+// The stable name of a storage dtype.
+const char* StorageDTypeName(nanochat::DType dtype) {
+  switch (dtype) {
+    case nanochat::DType::kBf16:
+      return "bfloat16";
+    case nanochat::DType::kInt8:
+      return "int8";
+    case nanochat::DType::kFp32:
+    default:
+      return "float32";
+  }
+}
+
+// The storage dtypes, in code order.
+constexpr nanochat::DType kStorageDTypes[] = {
+    nanochat::DType::kFp32, nanochat::DType::kBf16, nanochat::DType::kInt8};
+
+}  // namespace
+
+nanochat_status nanochat_checkpoint_dtype(int32_t index, const char** name,
+                                          int32_t* code, int32_t* size) {
+  return Guard("nanochat_checkpoint_dtype", NANOCHAT_STATUS_ERROR, [&]() {
+    if (name == nullptr || code == nullptr || size == nullptr) {
+      throw std::invalid_argument("name, code, or size is null");
+    }
+    constexpr int32_t kCount = static_cast<int32_t>(sizeof(kStorageDTypes) /
+                                                    sizeof(kStorageDTypes[0]));
+    if (index < 0 || index >= kCount) {
+      *name = nullptr;
+      *code = 0;
+      *size = 0;
+      return NANOCHAT_STATUS_OK;
+    }
+    const nanochat::DType dtype = kStorageDTypes[index];
+    *name = StorageDTypeName(dtype);
+    *code = static_cast<int32_t>(dtype);
+    *size = static_cast<int32_t>(nanochat::SizeOf(dtype));
+    return NANOCHAT_STATUS_OK;
+  });
+}
+
+nanochat_status nanochat_checkpoint_write(const char* path,
+                                          const nanochat_record* records,
+                                          int64_t record_count,
+                                          const nanochat_record* optimizer,
+                                          int64_t optimizer_count) {
+  return Guard("nanochat_checkpoint_write", NANOCHAT_STATUS_ERROR, [&]() {
+    if (path == nullptr) throw std::invalid_argument("path is null");
+    nanochat::Checkpoint checkpoint;
+    AppendRecords(records, record_count, &checkpoint.tensors());
+    AppendRecords(optimizer, optimizer_count, &checkpoint.optimizer_state());
+    if (!checkpoint.Save(path)) {
+      throw std::runtime_error("cannot write checkpoint: " + std::string(path));
+    }
+    return NANOCHAT_STATUS_OK;
+  });
+}
+
+nanochat_status nanochat_checkpoint_read(const char* path,
+                                         nanochat_checkpoint** owner,
+                                         const nanochat_record** records,
+                                         int64_t* record_count,
+                                         const nanochat_record** optimizer,
+                                         int64_t* optimizer_count) {
+  return Guard("nanochat_checkpoint_read", NANOCHAT_STATUS_ERROR, [&]() {
+    if (path == nullptr || owner == nullptr || records == nullptr ||
+        record_count == nullptr || optimizer == nullptr ||
+        optimizer_count == nullptr) {
+      throw std::invalid_argument("a read argument is null");
+    }
+    std::unique_ptr<nanochat_checkpoint> handle(new nanochat_checkpoint());
+    std::string error;
+    if (!handle->checkpoint.Load(path, &error)) {
+      throw std::runtime_error("cannot read checkpoint: " + error);
+    }
+    const std::vector<nanochat::TensorRecord>& parameters =
+        handle->checkpoint.tensors();
+    const std::vector<nanochat::TensorRecord>& state =
+        handle->checkpoint.optimizer_state();
+    handle->attributes.resize(CountAttributes(parameters) +
+                              CountAttributes(state));
+    std::size_t cursor = 0;
+    FillRecords(parameters, &handle->records, &handle->attributes, &cursor);
+    FillRecords(state, &handle->optimizer_state, &handle->attributes, &cursor);
+    nanochat_checkpoint* result = handle.release();
+    *owner = result;
+    *records = result->records.data();
+    *record_count = static_cast<int64_t>(result->records.size());
+    *optimizer = result->optimizer_state.data();
+    *optimizer_count = static_cast<int64_t>(result->optimizer_state.size());
+    return NANOCHAT_STATUS_OK;
+  });
+}
+
+void nanochat_checkpoint_free(nanochat_checkpoint* owner) { delete owner; }
 
 }  // extern "C"

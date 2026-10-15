@@ -331,24 +331,91 @@ double ComputeMfu(const Config& config, double tokens_per_second,
 namespace {
 
 // Collects `model.params()` into `checkpoint`. Shared by the parameter-only
-// and parameter-plus-optimizer `SaveModel` overloads.
+// and parameter-plus-optimizer `SaveModel` overloads. The container stores
+// fp32: bf16 is a converter-side choice (docs/precision.md section 5).
 void CollectModelRecords(const Model& model, Checkpoint* checkpoint) {
   for (const ParamView& view : model.params()) {
     if (view.value == nullptr || view.count <= 0) continue;
     TensorRecord record;
     record.name = view.name != nullptr ? view.name : "";
-    record.dtype = kComputeDType;
-    // `assign` rather than an initializer-list assignment: GCC's -O2
-    // -Warray-bounds analysis mis-handles the `std::vector` initializer-list
-    // path for a one-element `std::int64_t` shape.
-    record.shape.assign(1, view.count);
-    const std::size_t bytes =
-        static_cast<std::size_t>(view.count) * kComputeTypeSize;
-    record.data.resize(bytes);
-    kernels::Memcpy(record.data.data(), view.value, bytes,
-                    CopyDir::kDeviceToHost);
+    record.dtype = DType::kFp32;
+    // The true tensor shape, not a flattened count. The loader is name-keyed
+    // and copies by element count, so the shape serves an external reader and
+    // the future per-channel int8 scale.
+    if (view.is_matrix()) {
+      record.shape.assign(2, 0);
+      record.shape[0] = view.rows;
+      record.shape[1] = view.cols;
+    } else {
+      // `assign` rather than an initializer-list assignment: GCC's -O2
+      // -Warray-bounds analysis mis-handles the `std::vector` initializer-list
+      // path for a one-element `std::int64_t` shape.
+      record.shape.assign(1, view.count);
+    }
+    const std::size_t count = static_cast<std::size_t>(view.count);
+    std::vector<float> floats(count);
+    if (kComputeDType == DType::kFp32) {
+      kernels::Memcpy(floats.data(), view.value, count * sizeof(float),
+                      CopyDir::kDeviceToHost);
+    } else {
+      // An fp16 build stores fp32, so the record stays portable.
+      std::vector<ComputeType> compute(count);
+      kernels::Memcpy(compute.data(), view.value, count * sizeof(ComputeType),
+                      CopyDir::kDeviceToHost);
+      for (std::size_t i = 0; i < count; ++i) {
+        floats[i] = ComputeToFloat(compute[i]);
+      }
+    }
+    record.data.resize(count * sizeof(float));
+    std::memcpy(record.data.data(), floats.data(), record.data.size());
     checkpoint->Add(std::move(record));
   }
+}
+
+// Copies a legacy `NCMDL001` file into the model parameters. The project no
+// longer writes this format, so it is read only (docs/model.md). The file
+// holds fp32 parameters and carries no optimizer state.
+bool LoadLegacyModel(Model* model, const std::string& path) {
+  std::ifstream in(path, std::ios::binary);
+  if (!in) return false;
+  char magic[8];
+  in.read(magic, sizeof(magic));
+  if (!in || std::memcmp(magic, "NCMDL001", sizeof(magic)) != 0) return false;
+  std::uint32_t count = 0;
+  in.read(reinterpret_cast<char*>(&count), sizeof(count));
+  if (!in) return false;
+  const std::vector<ParamView> views = model->params();
+  for (std::uint32_t index = 0; index < count; ++index) {
+    std::uint16_t name_len = 0;
+    in.read(reinterpret_cast<char*>(&name_len), sizeof(name_len));
+    if (!in) return false;
+    std::string name(name_len, '\0');
+    in.read(name.data(), name_len);
+    std::uint64_t elements = 0;
+    in.read(reinterpret_cast<char*>(&elements), sizeof(elements));
+    if (!in) return false;
+    std::vector<float> buffer(static_cast<std::size_t>(elements));
+    if (elements > 0) {
+      in.read(reinterpret_cast<char*>(buffer.data()),
+              static_cast<std::streamsize>(buffer.size() * sizeof(float)));
+      if (!in) return false;
+    }
+    for (const ParamView& view : views) {
+      if (view.name == nullptr || name != view.name) continue;
+      if (view.master == nullptr) break;
+      const std::int64_t limit = std::min<std::int64_t>(
+          view.count, static_cast<std::int64_t>(elements));
+      if (limit > 0) {
+        kernels::Memcpy(view.master, buffer.data(),
+                        static_cast<std::size_t>(limit) * sizeof(float),
+                        CopyDir::kHostToDevice);
+      }
+      break;
+    }
+  }
+  // The file carries the fp32 master. Rebuild the compute copy from it.
+  model->SyncCompute();
+  return true;
 }
 
 }  // namespace
@@ -391,18 +458,54 @@ bool Checkpointer::LoadModel(Model* model, Optimizer* optimizer,
 bool Checkpointer::LoadModel(Model* model, Optimizer* optimizer, int* step,
                              const std::string& path) {
   if (model == nullptr) return false;
+  // A legacy `NCMDL001` file holds parameters only, so the optimizer state and
+  // the step stay unchanged (docs/model.md).
+  if (!IsCheckpointContainer(path)) return LoadLegacyModel(model, path);
   Checkpoint checkpoint;
   std::string error;
   if (!checkpoint.Load(path, &error)) return false;
   for (const ParamView& view : model->params()) {
     const TensorRecord* record =
         checkpoint.Find(view.name != nullptr ? view.name : "");
-    if (record == nullptr || record->dtype != kComputeDType) continue;
-    const std::size_t wanted =
-        static_cast<std::size_t>(view.count) * kComputeTypeSize;
-    const std::size_t bytes = std::min(wanted, record->data.size());
-    if (bytes == 0) continue;
-    kernels::Memcpy(view.value, record->data.data(), bytes,
+    if (record == nullptr) continue;
+    const std::size_t count = static_cast<std::size_t>(view.count);
+    const std::size_t stored_size = SizeOf(record->dtype);
+    const std::size_t available = record->data.size() / stored_size;
+    const std::size_t elements = std::min(count, available);
+    if (elements == 0) continue;
+    if (record->dtype == kComputeDType) {
+      kernels::Memcpy(view.value, record->data.data(),
+                      elements * kComputeTypeSize, CopyDir::kHostToDevice);
+      continue;
+    }
+    // Convert the storage dtype into the build compute dtype, so an fp32 or
+    // bf16 file loads into any build (docs/precision.md section 5).
+    std::vector<ComputeType> compute(elements);
+    bool converted = true;
+    for (std::size_t i = 0; i < elements && converted; ++i) {
+      const std::byte* element = record->data.data() + i * stored_size;
+      float value = 0.0f;
+      switch (record->dtype) {
+        case DType::kFp32:
+          std::memcpy(&value, element, sizeof(value));
+          break;
+        case DType::kBf16: {
+          std::uint16_t bits = 0;
+          std::memcpy(&bits, element, sizeof(bits));
+          Bf16 stored;
+          stored.bits = bits;
+          value = Bf16ToFloat(stored);
+          break;
+        }
+        default:
+          converted = false;
+          break;
+      }
+      if (converted) compute[i] = ComputeFromFloat(value);
+    }
+    // int8 needs a per-tensor scale, so it is not loadable yet.
+    if (!converted) continue;
+    kernels::Memcpy(view.value, compute.data(), elements * kComputeTypeSize,
                     CopyDir::kHostToDevice);
   }
   // The file holds the compute copy. Rebuild the fp32 master from it, so the
@@ -701,6 +804,10 @@ bool ReadDataState(const std::string& checkpoint_path, DataLoaderState* state) {
 
 void TrainLoop::Save(int step) {
   if (config_.checkpoint_path.empty()) return;
+  // One canonical checkpoint from rank 0. A data-parallel run keeps a full
+  // replica on every rank, so a second file would be identical
+  // (docs/precision.md section 5).
+  if (config_.rank != 0) return;
   if (Checkpointer::SaveModel(*model_, *optimizer_, step,
                               config_.checkpoint_path)) {
     const DataLoaderState state =

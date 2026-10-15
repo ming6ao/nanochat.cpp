@@ -101,6 +101,43 @@ inline Fp16 Fp16FromFloat(float value) {
 
 inline float Fp16ToFloat(Fp16 value) { return HalfBitsToFloat(value.bits); }
 
+// 16-bit bfloat16 storage: the upper half of the fp32 bit pattern. It is a
+// storage dtype only, so no compute build maps to it yet (docs/precision.md).
+struct Bf16 {
+  std::uint16_t bits = 0;
+};
+
+inline bool operator==(Bf16 a, Bf16 b) { return a.bits == b.bits; }
+inline bool operator!=(Bf16 a, Bf16 b) { return a.bits != b.bits; }
+
+// Round-to-nearest-even float -> bfloat16. Inf and NaN keep their top bits.
+inline std::uint16_t FloatToBf16Bits(float value) {
+  std::uint32_t bits = 0;
+  std::memcpy(&bits, &value, sizeof(bits));
+  if ((bits & 0x7f800000u) == 0x7f800000u) {
+    return static_cast<std::uint16_t>(bits >> 16);
+  }
+  const std::uint32_t lsb = (bits >> 16) & 1u;
+  bits += 0x7fffu + lsb;
+  return static_cast<std::uint16_t>(bits >> 16);
+}
+
+// bfloat16 -> float. Exact for every encoding.
+inline float Bf16BitsToFloat(std::uint16_t bf16) {
+  const std::uint32_t bits = static_cast<std::uint32_t>(bf16) << 16;
+  float value = 0.0f;
+  std::memcpy(&value, &bits, sizeof(value));
+  return value;
+}
+
+inline Bf16 Bf16FromFloat(float value) {
+  Bf16 result;
+  result.bits = FloatToBf16Bits(value);
+  return result;
+}
+
+inline float Bf16ToFloat(Bf16 value) { return Bf16BitsToFloat(value.bits); }
+
 // The arithmetic type for this build: `float` for fp32, `Fp16` for fp16.
 #if defined(NANOCHAT_PRECISION_FP16) && defined(NANOCHAT_PRECISION_FP32)
 #error "exactly one precision must be selected"
@@ -112,23 +149,56 @@ using ComputeType = float;
 #error "no precision selected: define NANOCHAT_PRECISION_FP32 or FP16"
 #endif
 
+// Converts between the build compute type and float. A checkpoint load uses
+// these to convert a storage dtype into the compute dtype.
+inline ComputeType ComputeFromFloat(float value) {
+#if defined(NANOCHAT_PRECISION_FP16)
+  return Fp16FromFloat(value);
+#else
+  return value;
+#endif
+}
+
+inline float ComputeToFloat(ComputeType value) {
+#if defined(NANOCHAT_PRECISION_FP16)
+  return Fp16ToFloat(value);
+#else
+  return value;
+#endif
+}
+
 // ---------------------------------------------------------------------------
 // Dtype tags and element sizes
 // ---------------------------------------------------------------------------
 
+// The dtype tags. The first three are the container storage codes, so their
+// values are the on-disk contract (docs/precision.md section 5). `kFp16` is
+// compute only: the fp16 simulator build uses it, and the container has no
+// fp16 code.
 enum class DType {
   kFp32 = 0,
-  kFp16 = 1,
+  kBf16 = 1,
+  kInt8 = 2,
+  kFp16 = 3,
 };
 
 inline std::size_t SizeOf(DType dtype) {
   switch (dtype) {
+    case DType::kInt8:
+      return 1;
+    case DType::kBf16:
     case DType::kFp16:
       return 2;
     case DType::kFp32:
     default:
       return 4;
   }
+}
+
+// True for a dtype the checkpoint container can store.
+inline bool IsStorageDType(DType dtype) {
+  return dtype == DType::kFp32 || dtype == DType::kBf16 ||
+         dtype == DType::kInt8;
 }
 
 template <typename T>
@@ -138,6 +208,12 @@ template <>
 struct DTypeTraits<float> {
   static constexpr DType value = DType::kFp32;
   static constexpr std::size_t size = 4;
+};
+
+template <>
+struct DTypeTraits<Bf16> {
+  static constexpr DType value = DType::kBf16;
+  static constexpr std::size_t size = 2;
 };
 
 template <>
@@ -229,8 +305,13 @@ struct Caps {
 
   const char* device_name = "cpu";
 
+  // True when the device can run arithmetic at `dtype`. Only the compute
+  // dtypes are meaningful: fp32 and fp16 today. bf16 and int8 are storage
+  // dtypes (docs/precision.md section 5).
   bool Supports(DType dtype) const {
-    return dtype == DType::kFp16 ? supports_fp16 : supports_fp32;
+    if (dtype == DType::kFp16) return supports_fp16;
+    if (dtype == DType::kFp32) return supports_fp32;
+    return false;
   }
 };
 

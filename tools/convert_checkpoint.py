@@ -10,19 +10,29 @@ is importable (and testable without torch). See ``docs/python.md``.
 A released checkpoint keeps the parameters under the same names the C++ model
 registers (``src/model.cc``), so the remap is mostly normalising the
 ``_orig_mod.``/``module.`` wrappers; the dtype policy casts every tensor to the
-container build's storage dtype (fp32).
+requested storage dtype (fp32 by default, bf16 for a compact artifact).
+
+The container bytes come from the C library, so the conversion runs inside the
+sandbox (``docs/sandbox.md``).
 
     # Explicit file.
-    python3 tools/convert_checkpoint.py \
+    tools/nanochat run t0-cpu -- python3 tools/convert_checkpoint.py \
         --input ~/.cache/nanochat/base_checkpoints/d20/model_001000.pt \
         --dtype fp32 --verify
 
+    # A compact bf16 artifact.
+    tools/nanochat run t0-cpu -- python3 tools/convert_checkpoint.py \
+        --input ~/.cache/nanochat/base_checkpoints/d20/model_001000.pt \
+        --dtype bf16 --output model-bf16.nchkpt01
+
     # Resolve source/tag/step like the reference checkpoint manager.
-    python3 tools/convert_checkpoint.py \
+    tools/nanochat run t0-cpu -- python3 tools/convert_checkpoint.py \
         --source sft --model-tag d20 --step 499 --output model.nchkpt01
 
 The script needs the reference virtual environment (torch + numpy); run it with
-``python3`` from that environment. ``--print-path`` works without torch::
+``python3`` from that environment. Set ``NANOCHAT_ALLOW_UNSANDBOXED=1`` for a
+pure host-side run that touches no device. ``--print-path`` works without
+torch and without the library::
 
     python3 tools/convert_checkpoint.py --source base --model-tag d20 --print-path
 """

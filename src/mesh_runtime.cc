@@ -278,7 +278,8 @@ void MeshRuntime::Save(const std::string& path) {
   }
   // The harness container carries the optimizer state and the step beside the
   // parameters, so a resume continues the schedule (docs/training-seam.md
-  // section 10). `Model::Save` would write the parameters only.
+  // section 10). `Checkpointer::SaveModel(model, path)` writes the parameters
+  // only.
   Checkpointer::SaveModel(*replica->model, *replica->optimizer, step_, path);
 }
 

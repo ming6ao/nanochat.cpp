@@ -97,7 +97,7 @@ class DistributedTest(unittest.TestCase):
         self.assertIn("--world-size", argv)
         self.assertEqual(argv[-1], "16")
         self.assertIn(str(plan.log_path(1)), argv)
-        self.assertIn(str(plan.checkpoint_path(1)), argv)
+        self.assertIn(str(plan.checkpoint_path()), argv)
 
     def test_command_for_rejects_a_bad_rank(self) -> None:
         plan = self.plan()
