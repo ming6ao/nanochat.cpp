@@ -180,7 +180,7 @@ See the precision section above and [precision.md](precision.md).
 
 ### 1. Goal
 
-T4 is a first-class target. A Turing port uses the existing backend seam. No
+Turing is a supported target. A Turing port uses the existing backend seam. No
 new backend directory is necessary.
 
 ### 2. Capability difference

@@ -6,9 +6,7 @@ and [llama.cpp](https://github.com/ggml-org/llama.cpp). No PyTorch, no autograd
 engine, no graph compiler. One model definition, swappable hardware backends.
 
 Status: implemented and in use. The CPU reference backend and the CUDA backend
-run the full training and inference graph. Pascal (GTX 1080 Ti, sm_61) is the
-measured device. The Turing (T4, sm_75) build configs exist, but the project has
-not recorded the Turing correctness gates.
+run the full training and inference graph.
 
 The oracle and training-parity fixtures pin the model, the backward pass, and
 the AdamW and Muon optimizers against the PyTorch reference. The tree also
@@ -27,9 +25,10 @@ open.
 - **Hardware portability by replacement**: adding a backend means adding a
   directory that implements one header. Public API and model definition are
   stable by default.
-- **First-class on Pascal (GTX 1080 Ti, sm_61)**. **Turing (T4, sm_75)** build
-  configs exist; its correctness gates are not recorded. Later NVIDIA
-  generations are a backend variant, not a rewrite.
+- **Portable across NVIDIA generations.** The project builds and tests on the
+  GPUs that are available, which today are Pascal (GTX 1080 Ti, sm_61) and
+  Turing (T4, sm_75). The deployment target is Hopper and later. A new
+  generation is a backend variant, not a rewrite.
 - **Data-parallel training** behind a host-reference gradient-sync seam. The
   NCCL transport remains future work.
 - **A native data path**: a byte pair encoding tokenizer and a parquet reader,

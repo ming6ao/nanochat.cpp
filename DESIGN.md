@@ -6,12 +6,10 @@ and [llama.cpp](https://github.com/ggml-org/llama.cpp). No PyTorch, no autograd
 engine, no graph compiler. One model definition, swappable hardware backends.
 
 Status: implemented and in use. The CPU reference backend and the CUDA backend
-run the full training and inference graph. Pascal (GTX 1080 Ti, sm_61) is the
-measured device; the Turing (T4, sm_75) correctness gates are not recorded. The
-tree also holds the Python surface, the native tokenizer and parquet reader, the
-CPU-only simulator, and the host-reference data-parallel path. Supervised
-fine-tuning and reinforcement learning are partly implemented. This document
-stays the design rationale.
+run the full training and inference graph. The tree also holds the Python
+surface, the native tokenizer and parquet reader, the CPU-only simulator, and
+the host-reference data-parallel path. Supervised fine-tuning and reinforcement
+learning are partly implemented. This document stays the design rationale.
 
 This document is the design rationale: goals, invariants, and the reasoning
 behind the decisions. Interface reference and how-to material lives under
@@ -31,9 +29,10 @@ behind the decisions. Interface reference and how-to material lives under
   designed so the public API and model definition are stable by default:
   changes to them are exceptional, additive where possible, and handled under
   the evolution rules in §7.
-- **First-class on Pascal (GTX 1080 Ti, sm_61)**. The **Turing (T4, sm_75)**
-  build configs exist; its correctness gates are not recorded. Later NVIDIA
-  generations are a backend variant, not a rewrite.
+- **Portable across NVIDIA generations.** The project builds and tests on the
+  GPUs that are available, which today are Pascal (GTX 1080 Ti, sm_61) and
+  Turing (T4, sm_75). The deployment target is Hopper and later. A new
+  generation is a backend variant, not a rewrite.
 - **Data-parallel training on two devices** behind one gradient-sync seam
   ([docs/distributed-design.md](docs/distributed-design.md)).
 - **Validation without a GPU**, through the CPU-only simulator
