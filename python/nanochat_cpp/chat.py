@@ -135,9 +135,9 @@ def render_conversation(conversation, tokenizer) -> tuple[list[int], list[int]]:
 
     ``mask`` is 1 over the assistant text, the assistant end token, and the
     python tool-call tokens, and 0 over BOS, the user text, and the tool-output
-    tokens (docs/training-seam.md section 6.5). This mirrors the notebook
-    template in ``notebooks/nanochat-cpp-on-2x-t4.ipynb`` so the packed rows
-    and the reference renderer agree.
+    tokens (docs/training-seam.md section 6.5). This mirrors the packing path
+    in ``notebooks/posttrain.ipynb`` so the packed rows and the reference
+    renderer agree.
     """
     specials = _specials(tokenizer)
     missing = [name for name in ("<|bos|>", "<|user_start|>",

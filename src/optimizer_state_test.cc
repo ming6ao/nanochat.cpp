@@ -284,7 +284,7 @@ void TestParameterOnlyStaysLoadable() {
 }
 
 // The parameter-only read skips the optimizer-state section
-// (notebooks/checkpoint.md sections 9 and 22). A full file reads the same
+// (docs/checkpoint-format.md sections 9 and 22). A full file reads the same
 // parameters in both modes, and a truncated optimizer section does not stop a
 // parameter-only read.
 void TestParameterOnlyReadSkipsOptimizerState() {

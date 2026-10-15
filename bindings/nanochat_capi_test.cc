@@ -480,7 +480,7 @@ nanochat_model* CheckModel() {
 
       // `nanochat_runtime_load_weights` reads the parameter records only, so
       // the parameters arrive and the step stays at zero
-      // (notebooks/checkpoint.md section 9.1).
+      // (docs/checkpoint-format.md section 9.1).
       const std::string params_path = TempPath("capi_runtime_params.ckpt");
       nanochat_runtime_save(runtime, params_path.c_str());
       nanochat_runtime* warmed = nanochat_runtime_create(

@@ -298,7 +298,7 @@ void MeshRuntime::Load(const std::string& path) {
 void MeshRuntime::LoadWeights(const std::string& path) {
   // `Checkpointer::LoadModel(model, path)` reads the parameter section only and
   // rebuilds the fp32 master from it, so the moments stay at their initial
-  // zeros and `step_` does not move (notebooks/checkpoint.md section 9.1).
+  // zeros and `step_` does not move (docs/checkpoint-format.md section 9.1).
   for (const auto& replica : replicas_) {
     if (replica->model == nullptr) continue;
     if (!Checkpointer::LoadModel(replica->model.get(), path)) {

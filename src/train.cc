@@ -464,8 +464,8 @@ bool Checkpointer::LoadModel(Model* model, Optimizer* optimizer, int* step,
   Checkpoint checkpoint;
   std::string error;
   // A caller that passes no optimizer reads the parameters only
-  // (notebooks/checkpoint.md section 9). The step record lives in the optimizer
-  // section, so a step-only caller reads the section too.
+  // (docs/checkpoint-format.md section 9). The step record lives in the
+  // optimizer section, so a step-only caller reads the section too.
   const bool with_optimizer_state = (optimizer != nullptr) || (step != nullptr);
   if (!checkpoint.Load(path, &error, with_optimizer_state)) return false;
   for (const ParamView& view : model->params()) {

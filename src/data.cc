@@ -276,7 +276,7 @@ bool Checkpoint::Load(const std::string& path, std::string* error,
   // A parameter-only file ends after the parameter records; a file with
   // optimizer state carries a second count and its records. This keeps every
   // parameter-only NCHKPT01 file loadable. A parameter-only read stops here,
-  // so it tolerates a truncated optimizer section (notebooks/checkpoint.md
+  // so it tolerates a truncated optimizer section (docs/checkpoint-format.md
   // section 9).
   std::vector<TensorRecord> optimizer_state;
   if (with_optimizer_state && in.peek() != std::char_traits<char>::eof()) {

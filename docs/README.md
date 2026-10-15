@@ -10,6 +10,7 @@ detailed reference that the design points at.
 | [precision.md](precision.md) | The precision policy: fp32 on Pascal, Turing, and the CPU; bf16 on Ampere and newer |
 | [kernels.md](kernels.md) | The backend seam: kernel inventory, API, device helpers |
 | [model.md](model.md) | Model API, graphs, optimizer, data and checkpoints, workspace |
+| [checkpoint-format.md](checkpoint-format.md) | The version 0 `NCHKPT01` container, the parameter-only read, and the three pipeline notebooks |
 | [testing.md](testing.md) | Test tiers, oracle harness, finite-difference checks |
 | [parity.md](parity.md) | Known differences from the PyTorch reference, with status |
 | [distributed-design.md](distributed-design.md) | Data-parallel training on two devices: the gradient-sync seam, sharding, the data cursor, and the launch |

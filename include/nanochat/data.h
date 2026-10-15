@@ -59,7 +59,7 @@ bool IsCheckpointContainer(const std::string& path);
 class Checkpoint {
  public:
   // Reads a container. `with_optimizer_state` selects the read mode
-  // (notebooks/checkpoint.md section 9). A true value reads the parameter
+  // (docs/checkpoint-format.md section 9). A true value reads the parameter
   // records and the optimizer section. A false value reads the parameter
   // records only and stops before the optimizer section, so the read does not
   // parse or allocate the optimizer records. The optimizer section is last, so

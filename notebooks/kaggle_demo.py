@@ -1,4 +1,4 @@
-"""Helpers for ``notebooks/nanochat-cpp-on-2x-t4.ipynb``.
+"""Helpers for the pipeline notebooks, mainly ``notebooks/posttrain.ipynb``.
 
 The supervised fine-tuning cell uses these functions. They stay out of the
 notebook, so the notebook shows the API and the packing logic is importable.

@@ -237,10 +237,10 @@ void TestResume() {
 }
 
 // A parameter-only load moves the parameters and leaves the optimizer state and
-// the step alone (notebooks/checkpoint.md section 9.1). Two runtimes that start
-// from the same parameters and the same fresh optimizer state must stay equal
-// after one step: one loaded the parameters through `LoadWeights`, and the
-// other through the parameter-only `Checkpointer::LoadModel`.
+// the step alone (docs/checkpoint-format.md section 9.1). Two runtimes that
+// start from the same parameters and the same fresh optimizer state must stay
+// equal after one step: one loaded the parameters through `LoadWeights`, and
+// the other through the parameter-only `Checkpointer::LoadModel`.
 void TestLoadWeightsKeepsOptimizerState() {
   const Config model = TinyConfig();
   const MeshRuntimeConfig config = TinyRuntimeConfig(model);
@@ -280,6 +280,59 @@ void TestLoadWeightsKeepsOptimizerState() {
   std::remove(params_path.c_str());
 }
 
+// The runtime forwards a `-1` target to the masked loss unchanged. An ignored
+// row contributes nothing, so the loss equals the loss over the valid rows
+// alone, and a different target on an ignored row changes nothing. This is the
+// one-device supervised fine-tuning path (docs/checkpoint-format.md section
+// 20).
+void TestMaskedTargetsIgnoreLoss() {
+  const Config model = TinyConfig();
+  MeshRuntimeConfig config = TinyRuntimeConfig(model);
+  config.batch = 4;
+  config.grad_accum = 1;
+  const int seq = config.seq;
+  const int rows = config.batch * seq;
+  const int valid_rows = config.batch / 2;
+
+  const std::vector<int> tokens = MakeIds(rows, model.vocab_size, 13, 7);
+  std::vector<int> targets = MakeIds(rows, model.vocab_size, 17, 3);
+  for (int i = valid_rows * seq; i < rows; ++i) {
+    targets[static_cast<std::size_t>(i)] = -1;
+  }
+
+  MeshRuntime runtime(MeshSpec::Data(1), config);
+  const float masked = runtime.model(0)->ForwardLoss(
+      tokens.data(), targets.data(), config.batch, seq);
+  const float valid = runtime.model(0)->ForwardLoss(
+      tokens.data(), targets.data(), valid_rows, seq);
+  if (std::fabs(masked - valid) > 1e-5f) {
+    Fail("the masked loss differs from the valid-row loss: " +
+         std::to_string(masked) + " vs " + std::to_string(valid));
+  }
+
+  // Filling the ignored rows with a valid target changes the loss, so the
+  // runtime honors the ignore index instead of treating it as token 0.
+  std::vector<int> filled = targets;
+  for (int i = valid_rows * seq; i < rows; ++i) {
+    filled[static_cast<std::size_t>(i)] = 1;
+  }
+  const float filled_loss = runtime.model(0)->ForwardLoss(
+      tokens.data(), filled.data(), config.batch, seq);
+  if (std::fabs(masked - filled_loss) < 1e-6f) {
+    Fail("filling the ignored rows did not change the loss");
+  }
+
+  // One runtime step returns the same masked loss.
+  const float step_loss = runtime.TrainStep(tokens.data(), targets.data());
+  if (!std::isfinite(step_loss)) {
+    Fail("a masked runtime step returned a non-finite loss");
+  }
+  if (std::fabs(step_loss - masked) > 1e-5f) {
+    Fail("the runtime step loss differs from the masked forward loss: " +
+         std::to_string(step_loss) + " vs " + std::to_string(masked));
+  }
+}
+
 }  // namespace
 
 int main() {
@@ -291,6 +344,7 @@ int main() {
   TestReplicasStayEqual();
   TestResume();
   TestLoadWeightsKeepsOptimizerState();
+  TestMaskedTargetsIgnoreLoss();
   if (g_failures != 0) {
     std::fprintf(stderr, "mesh_runtime_test: %d failure(s)\n", g_failures);
     return 1;

@@ -1,21 +1,22 @@
-# Notebook lifecycle and checkpoint container design
+# Checkpoint format and notebook lifecycle
 
-Status: Part A is implemented. Part B is not. The container is version 0 in the
+Status: Parts A and B are implemented. The container is version 0 in the
 tree, with the fp32, bf16, and reserved int8 codes and the attribute block. The
 C++ writer stores the true tensor shape. The byte layout lives only in
 `src/data.cc`, and a host tool reaches it through the `nanochat_checkpoint_*` C
 surface. The parameter-only read is in the tree: the flag on
 `Checkpoint::Load`, the `Checkpointer::LoadModel` choice, the
 `nanochat_runtime_load_weights` C entry point, and the Python
-`MeshRuntime.load(path, optimizer=)` argument. Part B is not in the tree.
+`MeshRuntime.load(path, optimizer=)` argument. Part B is in the tree: the two
+shared modules, the three notebooks, and the one-device runtime masked-loss
+test.
 
 The document has two parts. Part A specifies the checkpoint container. Part B
 specifies the three notebooks that use it. The container format is the shared
 contract, so Part A comes first.
 
-Owners: the Notebooks workstream owns Part B and this file. Part A touches the
-training harness and adds one C entry point. Promote Part A to
-`docs/checkpoint-format.md` after architect review.
+Owners: the architect owns this file. The Notebooks workstream owns Part B.
+Part A touches the training harness and adds one C entry point.
 
 ## 1. Goals
 
@@ -41,7 +42,7 @@ training harness and adds one C entry point. Promote Part A to
 | Repository | One repository for the model family. One folder per stage. |
 | Namespace | Derived from `HfApi.whoami()`, with an `HF_USERNAME` override |
 | Visibility | Public by default |
-| Schema | `notebooks/checkpoint.md` part A. The layout lives in `src/data.cc`. |
+| Schema | `docs/checkpoint-format.md` part A. The layout lives in `src/data.cc`. |
 | Fine-tuning | The post-training notebook runs a one-device `MeshRuntime` loop |
 
 The `.ckpt` suffix names the `NCHKPT01` container. The suffix is cosmetic:
@@ -296,8 +297,9 @@ state and the step unchanged. The optimizer section is not read. The Python
 `MeshRuntime.load(path, optimizer=False)` calls it. The default keeps the full
 read.
 
-The change is additive. Bump `kNanochatVersion` in `bindings/nanochat_capi.cc`;
-the current value is `0.12.0`.
+The change is additive. The bump in `bindings/nanochat_capi.cc` is in the
+tree, so the current value is `0.12.0`. Part B adds no C entry point and does
+not bump the version again.
 
 ## 10. Versioning
 
@@ -466,42 +468,78 @@ mode must reshard to the target layout.
 | `notebooks/mesh_worker.py` | keep | The training worker |
 | `notebooks/pi_agent.py`, `pi_agent_test.py` | keep | The setup notebook agent |
 | `notebooks/kaggle_setup.py`, `kaggle_setup_test.py` | keep | The Kaggle session helpers |
-| `notebooks/kaggle_demo.py` | keep | The demo entry point |
+| `notebooks/kaggle_demo.py` | keep, docstring edit | The SFT mixture helper and the offline fallback |
 
 ## 15. Shared setup
 
 Every notebook runs the setup first. A reader can run any one notebook alone.
 The body lives in `notebooks/session.py`, so the code has one home.
 
-```python
-def load_secrets(names=("HF_TOKEN",)) -> dict[str, str]: ...
-def clone_and_build(repo_url, repo_path, ref=None, arch="sm_75") -> Host: ...
-def require_devices(count=2) -> list: ...
-def setup(repo_url, repo_path, *, arch="sm_75", devices=2) -> Session: ...
-```
-
-Each notebook runs two cells:
+The repository must be on disk and on `sys.path` before a notebook imports
+`session`. Cell 1 clones the repository and extends `sys.path`. Cell 2 calls
+`session.setup`. Cell 3 reports the devices.
 
 ```python
-import os, sys
+# Cell 1: put the repository on disk and on sys.path.
+import subprocess
+import sys
 from pathlib import Path
+
 REPO_URL = "https://github.com/ming6ao/nanochat.cpp"
 REPO = Path("/kaggle/working/nanochat.cpp")
 BASE = Path("/kaggle/working/nanochat-cache")
-import session
-sess = session.setup(REPO_URL, REPO, arch="sm_75", devices=2)
+
+if not (REPO / ".git").is_dir():
+    subprocess.run(["git", "clone", REPO_URL, str(REPO)], check=True)
+sys.path[:0] = [
+    str(REPO / "python"),
+    str(REPO / "notebooks"),
+    str(REPO / ".agents" / "skills" / "model-fit" / "scripts"),
+]
 ```
 
 ```python
+# Cell 2: secrets, bootstrap, build, and the device check.
+import session
+
+sess = session.setup(REPO_URL, REPO, arch="sm_75", devices=2, base=BASE)
+```
+
+```python
+# Cell 3: report the devices.
 import nanochat_cpp as nc
+
 for device in nc.devices():
     print(device, device.name,
           f"{device.total_memory_bytes / 2**30:.1f} GiB")
 ```
 
+The module exposes:
+
+```python
+@dataclasses.dataclass
+class Session:
+    host: Host
+    secrets: dict[str, str]
+    devices: list
+    base: Path
+
+def load_secrets(names=("HF_TOKEN",)) -> dict[str, str]: ...
+def clone_and_build(repo_url, repo_path, ref=None, arch="sm_75",
+                    devices=1, base=None) -> Session: ...
+def require_devices(count=1) -> list: ...
+def setup(repo_url, repo_path, *, arch="sm_75", devices=1,
+          base=None) -> Session: ...
+```
+
+The `devices` argument is the number of cards the notebook needs. The
+pretraining notebook passes `devices=2`. The evaluation and post-training
+notebooks keep the default `devices=1`, because both use one card.
+
 `session.py` wraps `notebooks/kaggle_setup.py`, which keeps the repository
 fetch, the bootstrap, and the build. The new `setup` adds the secrets load and
-the device check.
+the device check. The `model_fit` path from cell 1 gives the pretraining
+notebook its parameter report.
 
 `session.py` imports `kaggle_secrets` and `huggingface_hub` inside the
 functions. The tests then run without either package.
@@ -511,45 +549,91 @@ functions. The tests then run without either package.
 `notebooks/hub_checkpoint.py` holds every Hugging Face Hub call.
 
 ```python
-def repo_id_for(run_name, namespace=None, prefix="nanochat"): ...
+#: The files one notebook needs to load a stage.
+STAGE_PATTERNS = ("checkpoint.ckpt", "model.json", "tokenizer.nctoken")
+
+#: STAGE_PATTERNS plus the provenance files the post-training notebook copies.
+FULL_STAGE_PATTERNS = STAGE_PATTERNS + ("train.json", "run.json",
+                                        "metrics.jsonl", "summary.json",
+                                        "README.md")
+
+def default_namespace(api=None, environ=None): ... # HF_USERNAME or whoami
+def tokenizer_file(vocab_size): ...                # vocab-<size>.nctoken
+def repo_id_for(run_name, namespace=None, prefix="nanochat", api=None): ...
 def stage_dir(root, stage): ...                    # <root>/<stage>
 def build_run_record(...) -> dict: ...             # pure metadata assembly
 def push_stage(repo_id, stage, folder, *, token=None, private=False,
-               commit_message="", tag=None): ...
+               commit_message="", tag=None, api=None): ...
+def push_file(repo_id, path_in_repo, local_path, *, token=None,
+              commit_message="", api=None): ...
 def pull_stage(repo_id, stage, dest, *, revision="main", token=None,
-               patterns=STAGE_PATTERNS): ...
+               patterns=STAGE_PATTERNS, download=None): ...
+def pull_tokenizer(repo_id, vocab_size, dest, *, revision="main", token=None,
+                   download=None): ...          # path, or None on a miss
+def push_tokenizer(repo_id, vocab_size, local_path, *, token=None,
+                   commit_message="", api=None): ...
 def load_stage(repo_id, stage, dest, *, revision="main", token=None,
-               device="cuda"): ...                 # model, tokenizer, args
+               device="cuda", download=None, api=None): ...
+                                                   # model, tokenizer, args
 ```
 
-`load_stage` calls `nc.Model.load`, which uses the parameter-only read.
+`load_stage` calls `nc.Model.load`, which uses the parameter-only read. The
+`api` and `download` arguments default to the real Hugging Face calls. A test
+passes a fake object instead.
 
 ### 16.1 Upload
 
-```python
-from huggingface_hub import HfApi
+Every Hugging Face import stays inside the function, so the CPU test imports
+the module without the wheel. The caller can pass `api`. The default builds
+`HfApi(token=token)`.
 
-api = HfApi(token=token)
-api.create_repo(repo_id=repo_id, repo_type="model",
-                private=private, exist_ok=True)
-api.upload_folder(repo_id=repo_id, repo_type="model",
-                  folder_path=str(folder), path_in_repo=stage,
-                  commit_message=commit_message, token=token)
-if tag:
-    api.create_tag(repo_id=repo_id, tag=tag, repo_type="model", token=token)
+```python
+def push_stage(repo_id, stage, folder, *, token=None, private=False,
+               commit_message="", tag=None, api=None):
+    from huggingface_hub import HfApi
+
+    api = api or HfApi(token=token)
+    api.create_repo(repo_id=repo_id, repo_type="model",
+                    private=private, exist_ok=True)
+    api.upload_folder(repo_id=repo_id, repo_type="model",
+                      folder_path=str(folder), path_in_repo=stage,
+                      commit_message=commit_message, token=token)
+    if tag:
+        api.create_tag(repo_id=repo_id, tag=tag, repo_type="model",
+                       token=token)
+```
+
+`push_file` is the same call with one file:
+
+```python
+def push_file(repo_id, path_in_repo, local_path, *, token=None,
+              commit_message="", api=None):
+    from huggingface_hub import HfApi
+
+    api = api or HfApi(token=token)
+    api.upload_file(repo_id=repo_id, repo_type="model",
+                    path_or_fileobj=str(local_path),
+                    path_in_repo=path_in_repo,
+                    commit_message=commit_message, token=token)
 ```
 
 ### 16.2 Download
 
 ```python
-from huggingface_hub import snapshot_download
+def pull_stage(repo_id, stage, dest, *, revision="main", token=None,
+               patterns=STAGE_PATTERNS, download=None):
+    from huggingface_hub import snapshot_download
 
-local = snapshot_download(
-    repo_id=repo_id, repo_type="model", revision=revision,
-    local_dir=str(dest), token=token,
-    allow_patterns=[f"{stage}/{p}" for p in patterns])
-folder = Path(local) / stage
+    download = download or snapshot_download
+    local = download(
+        repo_id=repo_id, repo_type="model", revision=revision,
+        local_dir=str(dest), token=token,
+        allow_patterns=[f"{stage}/{p}" for p in patterns])
+    return Path(local) / stage
 ```
+
+`STAGE_PATTERNS` holds the three files a load needs. The evaluation notebook
+does not download `metrics.jsonl` or `summary.json`.
 
 ### 16.3 Load
 
@@ -562,6 +646,14 @@ model.load(str(folder / "checkpoint.ckpt"))   # parameters only
 tokenizer = nc.Tokenizer.load(str(folder / "tokenizer.nctoken"))
 ```
 
+The chat cell passes the loaded tokenizer. `nc.chat.ChatEvaluator` otherwise
+looks for `NANOCHAT_BASE_DIR/tokenizer/tokenizer.nctoken`, which a fresh
+session does not hold (`python/nanochat_cpp/chat.py`):
+
+```python
+report = nc.chat.ChatEvaluator(model, tokenizer=tokenizer).run(...)
+```
+
 The post-training notebook loads into a one-device runtime:
 
 ```python
@@ -570,6 +662,17 @@ runtime = nc.MeshRuntime(nc.Mesh((nc.devices()[0],)),
                          batch=1, grad_accum=1, seq=SFT_SEQ, seed=42)
 runtime.load(str(folder / "checkpoint.ckpt"), optimizer=False)
 ```
+
+`optimizer_config` comes from `args.TrainArgs`:
+
+```python
+SFT_TRAIN = args.TrainArgs(num_iterations=SFT_STEPS, embedding_lr=0.3, ...)
+optimizer_config = nc.optimizer_config(**SFT_TRAIN.optimizer_kwargs())
+```
+
+`nc.optimizer_config` and `nc.Optimizer` share one field set, so the runtime
+loop and the retired `nc.Model` loop cannot drift. The runtime schedule reads
+`num_iterations`, so `SFT_TRAIN.num_iterations` equals `SFT_STEPS`.
 
 `optimizer=False` skips the pretraining moments. The fine-tuning warm start
 then uses fresh optimizer state.
@@ -601,6 +704,8 @@ One repository holds the model family.
     README.md              # the model card
   sft/
     (the same file names)
+  reports/
+    <stage>-<revision>.json   # one evaluation report per stage and revision
 ```
 
 ### 17.2 Metadata files
@@ -636,7 +741,7 @@ The `sft` record names the base repository and the base tag.
 | Cell | Content |
 |---|---|
 | 1 | Markdown: the shape, the fixed cost, the Hub output |
-| 2 | Setup: secrets, clone, bootstrap, build, device check |
+| 2 | Setup: secrets, clone, bootstrap, build, device check (`devices=2`) |
 | 3 | Download the two ClimbMix shards |
 | 4 | Pull the tokenizer from the Hub; else train it and push it |
 | 5 | `args.ModelArgs` and the `model_fit` report |
@@ -649,18 +754,30 @@ The `sft` record names the base repository and the base tag.
 `MeshTrainPlan.checkpoint_path()` returns `checkpoint.ckpt` after the rename in
 section 24.
 
+The tokenizer lives in one repository per namespace:
+`<namespace>/nanochat-tokenizer`. Each vocabulary size is one file at the
+repository root, for example `vocab-32768.nctoken`. One `manifest.json` holds
+the provenance: the corpus, the input shard, the training command, the
+`rustbpe` commit, and the file digest. A pull misses on the first run, so the
+notebook trains the tokenizer and pushes it.
+
+The pretrain notebook builds the file name from `ModelArgs.vocab_size`, so no
+manifest lookup is needed. The model stage still holds the container as
+`tokenizer.nctoken`.
+
 ## 19. Notebook: `eval.ipynb`
 
 | Cell | Content |
 |---|---|
 | 1 | Markdown: evaluation is forward only, and it writes no checkpoint |
-| 2 | Setup |
+| 2 | Setup (`devices=1`) |
 | 3 | `REPO_ID`, `STAGE`, `REVISION`; `hub_checkpoint.load_stage` |
-| 4 | The train and validation bits-per-byte loop |
-| 5 | The sample prompts and the greedy completions |
-| 6 | `nc.chat.ChatEvaluator` on the reference tasks |
-| 7 | Write one JSON report and push it beside the stage folder |
-| 8 | Markdown: notes |
+| 4 | Download one ClimbMix validation shard for the bits-per-byte loop |
+| 5 | The train and validation bits-per-byte loop |
+| 6 | The sample prompts and the greedy completions |
+| 7 | `nc.chat.ChatEvaluator(model, tokenizer=tokenizer)` on the reference tasks |
+| 8 | Write one JSON report; `hub_checkpoint.push_file` it to `reports/` |
+| 9 | Markdown: notes |
 
 `STAGE` is `base` or `sft`. The load reads the parameter section only. The Hub
 download still fetches the whole `checkpoint.ckpt`, but the reader does not
@@ -671,12 +788,12 @@ parse the optimizer section.
 | Cell | Content |
 |---|---|
 | 1 | Markdown: supervised fine-tuning of a base checkpoint |
-| 2 | Setup |
+| 2 | Setup (`devices=1`) |
 | 3 | `hub_checkpoint.pull_stage` for the `base` stage |
 | 4 | Build the one-device `MeshRuntime`; `runtime.load(..., optimizer=False)` |
 | 5 | The base completion before fine-tuning |
 | 6 | The conversation mixture and the packing |
-| 7 | The fine-tuning loop on the runtime |
+| 7 | The fine-tuning loop on the runtime, one step per packed row |
 | 8 | `runtime.save("checkpoint.ckpt")`, then the metadata files |
 | 9 | `hub_checkpoint.push_stage` for the `sft` stage, with the base revision |
 | 10 | A small chat check |
@@ -687,6 +804,23 @@ and `seq=SFT_SEQ`. The base load passes `optimizer=False`, so the reader skips
 the pretraining optimizer section. The masked targets use `-1` for ignored
 positions.
 
+The runtime takes its optimizer and schedule from `args.TrainArgs`:
+
+```python
+SFT_TRAIN = args.TrainArgs(num_iterations=SFT_STEPS, embedding_lr=0.3,
+                           unembedding_lr=0.008, matrix_lr=0.02,
+                           scalar_lr=0.5, weight_decay=0.0, warmup_steps=2,
+                           warmdown_ratio=0.5, final_lr_frac=0.0)
+optimizer_config = nc.optimizer_config(**SFT_TRAIN.optimizer_kwargs())
+```
+
+`nc.optimizer_config` and `nc.Optimizer` share one field set
+(`python/nanochat_cpp/api.py`), so the runtime loop and the retired
+`nc.Model` loop cannot drift. The runtime schedule reads `num_iterations`, so
+`SFT_TRAIN.num_iterations` equals `SFT_STEPS`. The mixture comes from
+`kaggle_demo.build_sft_conversations`, which uses `nc.sft_data.demo_mixture`
+and falls back to the offline conversation set.
+
 `ForwardLoss` and `BackwardAccumulate` already ignore `-1`, so the runtime
 handles the supervised loss. Add one test that drives a one-device runtime with
 a `-1` target and checks that the loss ignores it.
@@ -695,10 +829,12 @@ The save writes the parameters plus the SFT optimizer state, so the SFT run can
 resume. The base load reads the parameter section only. The full chat
 evaluation stays in `eval.ipynb` with `STAGE = "sft"`.
 
-This path is a new decision. `docs/post-training.md` section 8 names the
-`nc.sft.run` bridge and `sft_main` as the SFT job. This design replaces that
-entry for the notebook with the in-process runtime loop. `sft_main` stays for a
-one-shot scripted run. Update `docs/post-training.md` section 8 to match.
+The scripted `nc.sft.run` bridge and `sft_main` stay for a one-shot job.
+`docs/post-training.md` section 8 already names both entries: the bridge and
+the in-process one-device `MeshRuntime` loop in `notebooks/posttrain.ipynb`.
+Keep the section as it stands. The notebook entry is now in the tree, so the
+architect should add it to the status table in `docs/post-training.md`
+section 11.
 
 ## 21. Failure handling
 
@@ -709,6 +845,10 @@ one-shot scripted run. Update `docs/post-training.md` section 8 to match.
   file.
 - `create_repo` can fail when the token lacks write access. Catch the error,
   report the repository name, and keep the local copy.
+- A repeated run can fail at `create_tag` when the tag exists. Catch the
+  error, report the tag, and keep the uploaded files.
+- A missing token can stop `repo_id_for` at `HfApi.whoami()`. Report the
+  corrective command before the first upload.
 - A private repository needs the token for the download too.
 - Never print the token.
 
@@ -717,14 +857,23 @@ one-shot scripted run. Update `docs/post-training.md` section 8 to match.
 `notebooks/BUILD.bazel` adds:
 
 ```
-py_library(name = "session", srcs = ["session.py"], ...)
-py_library(name = "hub_checkpoint", srcs = ["hub_checkpoint.py"], ...)
-py_test(name = "session_test", srcs = ["session_test.py"], deps = [":session"])
+py_library(name = "session", srcs = ["session.py"], imports = ["."],
+           deps = ["//python:nanochat_cpp", ":kaggle_setup"])
+py_library(name = "hub_checkpoint", srcs = ["hub_checkpoint.py"],
+           imports = ["."], deps = ["//python:nanochat_cpp", ":args"])
+py_test(name = "session_test", srcs = ["session_test.py"], size = "small",
+        deps = [":session"])
 py_test(name = "hub_checkpoint_test", srcs = ["hub_checkpoint_test.py"],
-        deps = [":hub_checkpoint", ":args"])
+        size = "small", deps = [":hub_checkpoint"])
 ```
 
 Both tests join the existing `test_suite(name = "all", ...)`.
+
+`hub_checkpoint.py` imports `huggingface_hub` inside each function, and each
+public function takes an `api` or `download` argument. The Hub test passes a
+fake object with `whoami`, `create_repo`, `upload_folder`, `create_tag`,
+`upload_file`, and a fake download function. No test imports
+`huggingface_hub`, so the CPU tests stay wheel-free.
 
 The Hub test covers the repository name and the stage path. It covers the
 metadata assembly for a base run and a fine-tuned run. It checks the upload
@@ -758,14 +907,21 @@ pins no layout constant of its own.
 - The pretraining notebook publishes the base stage. The eval and
   post-training notebooks load it in a later session with no retraining.
 - The post-training notebook publishes the fine-tuned stage.
+- The tokenizer repository holds one `vocab-<size>.nctoken` file for each
+  vocabulary size.
 - `tools/nanochat test` passes for the notebook tests and the container test.
 - No notebook prints a token.
 
 ## 24. Sequencing
 
+Steps 1 and 2 are in the tree. Steps 3 to 7 are implemented; each notebook
+needs one Kaggle session to verify end to end. Step 8 records the handoff to
+the architect.
+
 1. The version 0 container, the storage dtype codes, the attribute block, and
-   the `checkpoint.ckpt` rename are in the tree. Each change to the C surface
-   bumps `kNanochatVersion`; the current value is `0.12.0`.
+   the `checkpoint.ckpt` rename are in the tree. The C surface bump landed with
+   them, so `kNanochatVersion` is `0.12.0`. Part B adds no C entry point and
+   does not bump the version again.
 2. The parameter-only read is in the tree, with its tests. It adds the flag on
    `Checkpoint::Load`, the `Checkpointer::LoadModel` choice,
    `nanochat_runtime_load_weights`, and the Python `optimizer` argument.
@@ -777,14 +933,20 @@ pins no layout constant of its own.
    `sft` upload.
 7. Remove `nanochat-cpp-on-2x-t4.ipynb`. Rename the setup notebook. Add
    `README.md`.
-8. Ask the architect to promote part A to `docs/checkpoint-format.md`.
+8. Part A is the promoted schema in this file. The architect owns the file
+thereafter.
 
 ## 25. Open items
 
-1. The one-device runtime path for supervised fine-tuning needs the masked-loss
-   test in section 20. If it fails, keep `nc.Model` plus `nc.Optimizer` for the
-   loop and add a parameter-only `NCHKPT01` save entry point for the model. The
-   SFT checkpoint then cannot resume from its own optimizer state.
-2. The `docs/post-training.md` section 8 revision needs architect sign-off.
+1. Resolved. The one-device runtime masked-loss test is in
+   `src/mesh_runtime_test.cc` (`TestMaskedTargetsIgnoreLoss`), so the runtime
+   loop is the fine-tuning path. `nc.Model` plus `nc.Optimizer` is not needed.
+2. `docs/post-training.md` section 8 already records the in-process notebook
+   entry beside the `sft_main` bridge. No further revision to section 8 is
+   needed. The architect should add the notebook entry to the status table in
+   section 11.
 3. The model card template needs a final list of fields.
-4. The tokenizer repository stays a separate repository. Confirm the name.
+4. Decision: the tokenizer stays in a separate repository. The name is
+   `<namespace>/nanochat-tokenizer`. Each vocabulary size is one root file,
+   for example `vocab-32768.nctoken`, with one `manifest.json` for provenance.
+   Confirm with the architect.
