@@ -1,9 +1,11 @@
-"""The single-client multi-device training loop for the two-card notebook.
+"""The notebook launcher for the C++ mesh training driver.
 
-One :class:`MeshTrainPlan` holds the run. :func:`run` builds a device mesh, one
-``MeshRuntime``, and a parquet token loader, then calls :func:`iterate`. The
-runtime takes one global batch per step and reduces the gradients in process,
-so the notebook names no rank.
+One :class:`MeshTrainPlan` holds the run. It is a thin wrapper over the C++
+driver config and the data paths. :func:`run` builds the driver config and
+calls one C++ function, ``nanochat_mesh_train_run``. The driver owns the step
+loop, the metric record, the summary, the checkpoint interval, and the resume
+(docs/client-runtime-design.md section 10.1 and docs/training-seam.md
+section 6.6).
 
 :func:`launch` runs :func:`run` in a child process through
 ``tools/nanochat client``. The notebook cell returns, so the cell status stays
@@ -21,10 +23,9 @@ import os
 import signal
 import subprocess
 import sys
-import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     import nanochat_cpp as nc
@@ -33,12 +34,8 @@ __all__ = [
     "MeshLiveRun",
     "MeshRunResult",
     "MeshTrainPlan",
-    "format_row",
     "global_batch",
-    "iterate",
     "launch",
-    "log_progress",
-    "mfu",
     "read_metrics",
     "read_summary",
     "run",
@@ -51,7 +48,7 @@ class MeshTrainPlan:
 
     ``per_rank_batch`` is the number of sequences one device consumes in one
     micro-batch. ``grad_accum`` is the micro-batch count per device per step.
-    The runtime takes the global batch, so :func:`global_batch` multiplies the
+    The driver takes the global batch, so :func:`global_batch` multiplies the
     three factors. ``seq`` of zero selects ``config.seq_len``.
 
     ``tokenizer`` is the ``NCTOKEN1`` path, so the whole plan is serializable
@@ -105,64 +102,41 @@ class MeshTrainPlan:
         """The run summary path."""
         return Path(self.out_dir) / "summary.json"
 
-    def job(self) -> dict:
-        """A JSON-serializable job for the child process."""
-        config = self.config
-        return {
-            "train_parquet": self.train_parquet,
-            "tokenizer_path": self.tokenizer,
-            "out_dir": self.out_dir,
-            "config": {
-                "num_layers": int(config.num_layers),
-                "num_heads": int(config.num_heads),
-                "num_kv_heads": int(config.num_kv_heads),
-                "hidden_dim": int(config.hidden_dim),
-                "seq_len": int(config.seq_len),
-                "vocab_size": int(config.vocab_size),
-                "padded_vocab_size": int(config.padded_vocab_size),
-                "rope_base": float(config.rope_base),
-                "window_pattern": str(config.window_pattern),
-                "value_embedding": bool(config.value_embedding),
-            },
-            "per_rank_batch": self.per_rank_batch,
-            "grad_accum": self.grad_accum,
-            "world_size": self.world_size,
-            "steps": self.steps,
-            "seq": self.seq,
-            "seed": self.seed,
-            "data_seed": self.data_seed,
-            "log_every": self.log_every,
-            "save_every": self.save_every,
-            "preset": self.preset,
-            "resume": self.resume,
-            "flops_per_token": self.flops_per_token,
-            "peak_flops": self.peak_flops,
-        }
+    def train_config(self):
+        """The C++ driver config for this plan.
 
-    @classmethod
-    def from_job(cls, data: dict) -> "MeshTrainPlan":
-        """Rebuild a plan from :meth:`job` output. The child process uses this."""
-        import nanochat_cpp as nc
+        The optimizer and the schedule come from ``preset``, so the plan does
+        not carry optimizer fields.
+        """
+        from nanochat_cpp import runtime as rt
 
-        return cls(
-            train_parquet=data["train_parquet"],
-            tokenizer=data["tokenizer_path"],
-            out_dir=data["out_dir"],
-            config=nc.Config(**data["config"]),
-            per_rank_batch=int(data["per_rank_batch"]),
-            grad_accum=int(data["grad_accum"]),
-            world_size=int(data["world_size"]),
-            steps=int(data["steps"]),
-            seq=int(data.get("seq", 0)),
-            seed=int(data.get("seed", 42)),
-            data_seed=int(data.get("data_seed", 42)),
-            log_every=int(data.get("log_every", 1)),
-            save_every=int(data.get("save_every", 0)),
-            preset=str(data.get("preset", "track3")),
-            resume=bool(data.get("resume", False)),
-            flops_per_token=float(data.get("flops_per_token", 0.0)),
-            peak_flops=float(data.get("peak_flops", 0.0)),
+        return rt.MeshTrainConfig(
+            self.config,
+            preset=self.preset,
+            device_count=self.world_size,
+            tokenizer=self.tokenizer,
+            train_parquet=self.train_parquet,
+            batch=self.global_sequences,
+            grad_accum=self.grad_accum,
+            steps=self.steps,
+            seq=self.seq,
+            seed=self.seed,
+            data_seed=self.data_seed,
+            log_every=self.log_every,
+            save_every=self.save_every,
+            resume=self.resume,
+            out_dir=self.out_dir,
+            flops_per_token=self.flops_per_token,
+            peak_flops=self.peak_flops,
         )
+
+    def job_json(self) -> str:
+        """The JSON job the child process reads."""
+        config = self.train_config()
+        try:
+            return config.job_json()
+        finally:
+            config.close()
 
 
 @dataclass
@@ -173,19 +147,11 @@ class MeshRunResult:
     records: list[dict] = field(default_factory=list)
     checkpoint: Path | None = None
     replica_digests: tuple[str, ...] = ()
-
-    @property
-    def mean_loss(self) -> float:
-        """The mean loss over every logged step, or zero when none."""
-        return mean_loss(self.records)
-
-    @property
-    def steady_mfu(self) -> float:
-        """The mean model FLOPs utilization over the second half of the run."""
-        return steady_mfu(self.records)
+    mean_loss: float = 0.0
+    steady_mfu: float = 0.0
 
     def to_dict(self) -> dict:
-        """The serializable summary that :func:`run` writes."""
+        """The serializable summary of the run."""
         return {
             "checkpoint": str(self.checkpoint) if self.checkpoint else "",
             "steps": len(self.records),
@@ -198,8 +164,7 @@ class MeshRunResult:
 def global_batch(per_rank_batch: int, grad_accum: int, world_size: int) -> int:
     """The global sequence count of one step.
 
-    The multi-process path used a per-rank batch. The mesh runtime takes the
-    global batch instead, so this function rebuilds the same total:
+    The driver takes the global batch, so this function rebuilds the total:
     ``per_rank_batch * grad_accum * world_size``.
     """
     per_rank = int(per_rank_batch)
@@ -209,58 +174,6 @@ def global_batch(per_rank_batch: int, grad_accum: int, world_size: int) -> int:
         raise ValueError("per_rank_batch, grad_accum, and world_size must be "
                          "positive")
     return per_rank * accum * world
-
-
-def mfu(tokens_per_sec: float, flops_per_token: float,
-        peak_flops: float) -> float:
-    """The model FLOPs utilization, clamped to ``[0, 1]``.
-
-    A nonpositive ``peak_flops`` returns zero, so an unknown device reports no
-    utilization instead of a division by zero.
-    """
-    peak = float(peak_flops)
-    if peak <= 0.0:
-        return 0.0
-    value = float(tokens_per_sec) * float(flops_per_token) / peak
-    return min(max(value, 0.0), 1.0)
-
-
-def mean_loss(records) -> float:
-    """The mean of the ``loss`` field over ``records``, or zero when none."""
-    rows = list(records)
-    if not rows:
-        return 0.0
-    return sum(float(row["loss"]) for row in rows) / len(rows)
-
-
-def steady_mfu(records) -> float:
-    """The mean ``mfu`` over the second half of ``records``, or zero."""
-    rows = list(records)
-    if not rows:
-        return 0.0
-    tail = rows[len(rows) // 2:]
-    return sum(float(row.get("mfu", 0.0)) for row in tail) / len(tail)
-
-
-def format_row(row: dict) -> str:
-    """One compact log line for a step record.
-
-    The line reports the loss, the gradient norm, the wall step time, the
-    compute time alone, the throughput, and the model FLOPs utilization. The
-    difference between the two times is the data cost.
-    """
-    return (f"loss {float(row['loss']):.4f}  "
-            f"grad_norm {float(row['grad_norm']):.4g}  "
-            f"step {float(row['step_seconds']):.2f}s  "
-            f"(compute {float(row.get('compute_seconds', 0.0)):.2f}s)  "
-            f"{float(row['tokens_per_sec']):,.0f} tok/s  "
-            f"mfu {float(row['mfu']) * 100:.2f}%")
-
-
-def log_progress(row: dict, total: int) -> None:
-    """A `progress` callback that prints one log line per step."""
-    print(f"[{int(row['step']):5d}/{int(total)}] {format_row(row)}",
-          flush=True)
 
 
 def read_metrics(path) -> list[dict]:
@@ -292,145 +205,29 @@ def read_summary(out_dir) -> dict:
         return {}
 
 
-def _preset_config(plan: MeshTrainPlan):
-    """The optimizer config: the named preset with the run length."""
-    import nanochat_cpp as nc
+def run(plan: MeshTrainPlan) -> MeshRunResult:
+    """Build the C++ driver config and run the whole job.
 
-    config = nc.preset_optimizer_config(plan.preset)
-    config.num_iterations = int(plan.steps)
-    return config
-
-
-def _next_batch(data):
-    """The next batch, cycling the loader when it ends."""
-    batch = data.next()
-    if batch is None and hasattr(data, "reset"):
-        data.reset()
-        batch = data.next()
-    if batch is None:
-        raise RuntimeError("the data loader returned no batch")
-    return batch
-
-
-def _skip(data, count: int) -> None:
-    """Advance the loader by `count` batches, so a resume replays the stream."""
-    for _ in range(max(0, int(count))):
-        _next_batch(data)
-
-
-def iterate(runtime, data, plan: MeshTrainPlan, *, start_step: int = 1,
-            progress: "Callable[[dict, int], None] | None" = None,
-            clock: Callable[[], float] = time.perf_counter) -> list[dict]:
-    """Run steps ``start_step`` to ``plan.steps`` and write one record each.
-
-    ``runtime`` is any object with ``train_step``, ``metrics``, and ``save``.
-    ``data`` is any object with ``next`` and ``reset``. A fresh run starts at
-    step 1 and truncates the metrics file. A resume starts above 1 and appends
-    to it. The function is pure except for the runtime, the clock, and the
-    metrics file, so a CPU test can drive a fake runtime.
+    The driver writes ``metrics.jsonl``, ``summary.json``, and the canonical
+    checkpoint in the plan output directory. With ``plan.resume`` set and a
+    checkpoint on disk, the driver loads the parameters, the optimizer state,
+    and the step, then continues from the next step.
     """
-    tokens_per_step = plan.tokens_per_step
-    plan.metrics_path().parent.mkdir(parents=True, exist_ok=True)
-    records: list[dict] = []
-    start = clock()
-    previous = start
-    mode = "w" if start_step <= 1 else "a"
-    with plan.metrics_path().open(mode, encoding="utf-8") as sink:
-        for step in range(int(start_step), int(plan.steps) + 1):
-            tokens, targets = _next_batch(data)
-            loss = runtime.train_step(tokens, targets)
-            now = clock()
-            step_seconds = max(now - previous, 1e-9)
-            previous = now
-            metrics = runtime.metrics()
-            tokens_per_sec = tokens_per_step / step_seconds
-            row = {
-                "step": step,
-                "loss": float(loss),
-                "grad_norm": float(metrics.grad_norm),
-                "tokens_per_sec": tokens_per_sec,
-                "mfu": mfu(tokens_per_sec, plan.flops_per_token, plan.peak_flops),
-                "step_seconds": step_seconds,
-                "compute_seconds": float(metrics.step_seconds),
-                "seconds": now - start,
-                "device_loss": [float(value) for value in metrics.loss],
-            }
-            records.append(row)
-            sink.write(json.dumps(row, sort_keys=True) + "\n")
-            sink.flush()
-            if plan.save_every and step % int(plan.save_every) == 0:
-                runtime.save(str(plan.checkpoint_path()))
-            if progress is not None and (
-                    step == 1 or step == int(plan.steps) or
-                    step % max(1, int(plan.log_every)) == 0):
-                progress(row, int(plan.steps))
-    return records
-
-
-def run(plan: MeshTrainPlan, *,
-        progress: "Callable[[dict, int], None] | None" = None) -> MeshRunResult:
-    """Build the mesh runtime and the loader, then run the loop.
-
-    The mesh uses the first ``world_size`` local devices. The loader reads the
-    train parquet and yields one global batch per ``next()``. The run writes a
-    metrics record per step, a canonical checkpoint, and a summary. An
-    interrupt saves the checkpoint before it propagates.
-
-    With ``plan.resume`` set and a checkpoint on disk, the run loads the
-    parameters, the optimizer state, and the step, then continues from the next
-    step. The loader replays the consumed batches, so the data stream also
-    continues.
-    """
-    import nanochat_cpp as nc
-    from nanochat_cpp import mesh, runtime as rt
-
-    devices = mesh.devices()
-    if not devices:
-        raise RuntimeError("no local device is available")
-    if plan.world_size < 1 or plan.world_size > len(devices):
-        raise RuntimeError(
-            f"the mesh needs {plan.world_size} devices, but the host has "
-            f"{len(devices)}")
-    device_mesh = mesh.Mesh(tuple(devices[:plan.world_size]))
-
-    optimizer = _preset_config(plan)
-    tokenizer = nc.Tokenizer.load(plan.tokenizer)
-    data = nc.TokenData(plan.train_parquet, tokenizer,
-                        seq_len=plan.sequence_length,
-                        batch=plan.global_sequences, seed=plan.data_seed)
-    checkpoint = plan.checkpoint_path()
-    with rt.MeshRuntime(device_mesh, plan.config, optimizer,
-                        batch=plan.global_sequences,
-                        grad_accum=plan.grad_accum,
-                        seq=plan.sequence_length, seed=plan.seed) as runtime:
-        start_step = 1
-        if plan.resume and checkpoint.is_file():
-            try:
-                runtime.load(str(checkpoint))
-            except nc.NanochatError as error:
-                # An old or partial checkpoint must not stop the run. Report it
-                # and start fresh instead.
-                print(f"resume skipped: {error}", flush=True)
-            else:
-                start_step = runtime.step + 1
-                _skip(data, start_step - 1)
-                print(f"resumed from {checkpoint} at step {start_step}",
-                      flush=True)
-        try:
-            iterate(runtime, data, plan, start_step=start_step,
-                    progress=progress)
-        except BaseException:
-            runtime.save(str(checkpoint))
-            raise
-        digests = tuple(f"{runtime.replica_digest(rank):016x}"
-                        for rank in range(runtime.world_size))
-        runtime.save(str(checkpoint))
-    result = MeshRunResult(plan=plan, records=read_metrics(plan.metrics_path()),
-                           checkpoint=checkpoint, replica_digests=digests)
-    plan.summary_path().write_text(
-        json.dumps(result.to_dict(), indent=1, sort_keys=True) + "\n",
-        encoding="utf-8")
-    return result
+    config = plan.train_config()
+    try:
+        result = config.run()
+    finally:
+        config.close()
+    summary = read_summary(plan.out_dir)
+    checkpoint = Path(result.checkpoint) if result.checkpoint else None
+    return MeshRunResult(
+        plan=plan,
+        records=read_metrics(plan.metrics_path()),
+        checkpoint=checkpoint,
+        replica_digests=tuple(summary.get("replica_digests", ())),
+        mean_loss=float(result.mean_loss),
+        steady_mfu=float(result.steady_mfu),
+    )
 
 
 class MeshLiveRun:
@@ -527,8 +324,7 @@ def launch(plan: MeshTrainPlan, root: str | Path = ".", *,
     out_dir = Path(plan.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     job_path = out_dir / "job.json"
-    job_path.write_text(json.dumps(plan.job(), indent=1, sort_keys=True) + "\n",
-                        encoding="utf-8")
+    job_path.write_text(plan.job_json() + "\n", encoding="utf-8")
 
     worker = Path(__file__).with_name("mesh_worker.py")
     env = dict(os.environ)

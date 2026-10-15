@@ -293,6 +293,83 @@ void nanochat_runtime_load_weights(nanochat_runtime* runtime, const char* path);
 // -1 on a bad handle.
 int nanochat_runtime_step(nanochat_runtime* runtime);
 
+// The mesh training driver (docs/client-runtime-design.md section 10.1 and
+// docs/training-seam.md section 6.6). The driver owns the step loop, the metric
+// record, the summary, the checkpoint interval, and the resume. It drives one
+// runtime and one data loader, so the client calls one function per run and
+// never steps the optimizer itself.
+//
+// The caller fills one config and runs it. Python owns the job file for the
+// child process, so this interface carries no serializer and no parser.
+
+// The driver inputs, a mirror of `nanochat::MeshTrainConfig`. The caller owns
+// every pointer, the mesh handle, and the struct. The three groups carry one
+// topic each: `data` is the dataset and the tokenizer, `run` is the step loop,
+// and `output` is the written artifacts.
+//
+// `preset` names the optimizer and the schedule; "track3" is the reference
+// recipe. `mesh` is a `nanochat_mesh` handle; the driver reads its device
+// indices and does not free it. A zero `run.seq` selects `model.seq_len`. A
+// zero `flops_per_token` selects the model estimate, and a zero `peak_flops`
+// selects the active device table. An empty `output.checkpoint_path` selects
+// `out_dir/checkpoint.ckpt`; the metrics and the summary follow the same rule.
+
+// The dataset and the tokenizer.
+typedef struct {
+  const char* const* parquet;  // paths or globs
+  int parquet_count;
+  const char* tokenizer_path;  // the NCTOKEN1 artifact
+  uint64_t data_seed;          // the loader seed
+} nanochat_mesh_data_config;
+
+// The step loop.
+typedef struct {
+  int batch;           // the global batch, in sequences
+  int grad_accum;      // micro-batches per replica per step
+  int seq;             // 0 selects `model.seq_len`
+  uint64_t seed;       // the weights seed
+  int num_iterations;  // the absolute last step
+  int log_every;       // the human log cadence; 0 keeps the first and the last
+  int save_every;      // the checkpoint interval; the final save always runs
+  int resume;          // nonzero loads the checkpoint and continues
+} nanochat_mesh_run_config;
+
+// The written artifacts.
+typedef struct {
+  const char* out_dir;          // the run directory
+  const char* checkpoint_path;  // empty selects `out_dir/checkpoint.ckpt`
+} nanochat_mesh_output_config;
+
+typedef struct {
+  nanochat_config model;
+  const nanochat_mesh* mesh;
+  const char* preset;
+  double flops_per_token;  // 0 selects the model estimate
+  double peak_flops;       // 0 selects the active device table
+  nanochat_mesh_data_config data;
+  nanochat_mesh_run_config run;
+  nanochat_mesh_output_config output;
+} nanochat_mesh_train_config;
+
+// One driver run summary (docs/client-runtime-design.md section 10.1). The
+// caller allocates it. `interrupted` is nonzero when the run stopped before
+// the last step. `checkpoint` is a NUL-terminated path.
+typedef struct {
+  int steps;
+  int interrupted;
+  double mean_loss;
+  double steady_mfu;
+  char checkpoint[4096];
+} nanochat_mesh_train_summary;
+
+// Runs one job. The driver writes `metrics.jsonl` and `summary.json` under the
+// job `out_dir`, writes the checkpoint, and prints one human log line every
+// `log_every` steps. The call installs a SIGINT handler for the duration and
+// restores it on return. It returns the last loss, or 0 on error. A null `out`
+// skips the summary.
+float nanochat_mesh_train_run(const nanochat_mesh_train_config* config,
+                              nanochat_mesh_train_summary* out);
+
 // Fills `out` from `config`. Allocates no model. Returns a status.
 nanochat_status nanochat_params_get(const nanochat_config* config,
                                     nanochat_params* out);

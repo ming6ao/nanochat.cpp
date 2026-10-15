@@ -464,7 +464,7 @@ mode must reshard to the target layout.
 | `notebooks/README.md` | new | Run order and the checkpoint flow |
 | `notebooks/BUILD.bazel` | edit | Add the two libraries and the two tests |
 | `notebooks/args.py`, `args_test.py` | keep | The model arguments |
-| `notebooks/mesh_train.py`, `mesh_train_test.py` | keep | The pretraining launcher |
+| `notebooks/mesh_train.py`, `mesh_train_test.py` | keep | The thin pretraining launcher over the C++ mesh training driver |
 | `notebooks/mesh_worker.py` | keep | The training worker |
 | `notebooks/pi_agent.py`, `pi_agent_test.py` | keep | The setup notebook agent |
 | `notebooks/kaggle_setup.py`, `kaggle_setup_test.py` | keep | The Kaggle session helpers |
@@ -696,7 +696,7 @@ One repository holds the model family.
   base/
     checkpoint.ckpt        # NCHKPT01: parameters, optimizer state, and step
     model.json             # ModelArgs
-    train.json             # the mesh job or the TrainArgs
+    train.json             # the mesh driver job or the TrainArgs
     run.json               # lineage and provenance
     tokenizer.nctoken
     metrics.jsonl
@@ -713,9 +713,9 @@ One repository holds the model family.
 `model.json` holds `args.ModelArgs.to_json()` output. The container does not
 store the shape, so this file is mandatory.
 
-`train.json` holds the training knobs. For pretraining it holds the
-`MeshTrainPlan.job()` mapping. For post-training it holds
-`args.TrainArgs.to_json()` output.
+`train.json` holds the training knobs. For pretraining it holds the mesh driver
+job, which the notebook writes from the job dictionary. For post-training it
+holds `args.TrainArgs.to_json()` output.
 
 `run.json` holds the provenance record:
 
@@ -745,7 +745,7 @@ The `sft` record names the base repository and the base tag.
 | 3 | Download the two ClimbMix shards |
 | 4 | Pull the tokenizer from the Hub; else train it and push it |
 | 5 | `args.ModelArgs` and the `model_fit` report |
-| 6 | Build the `MeshTrainPlan`, then `mesh_train.launch` and stream |
+| 6 | Build the mesh driver job, then `mesh_train.launch` and stream the record |
 | 7 | Write `model.json`, `train.json`, `run.json`, and the model card |
 | 8 | `hub_checkpoint.push_stage` for the base folder, then tag the revision |
 | 9 | Short sanity check: a few validation steps and two samples |

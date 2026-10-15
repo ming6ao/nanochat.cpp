@@ -16,7 +16,7 @@ detailed reference that the design points at.
 | [distributed-design.md](distributed-design.md) | Data-parallel training on two devices: the gradient-sync seam, sharding, the data cursor, and the launch |
 | [distributed-launch.md](distributed-launch.md) | The launch of a data-parallel run: the rank contract, the `tools/nanochat dist` command, and the Python helper |
 | [distributed-native-plan.md](distributed-native-plan.md) | The execution plan for a native all-reduce over NVLink and RDMA: the transport interface, the ring schedule, ownership, and the broker |
-| [client-runtime-design.md](client-runtime-design.md) | The single-client multi-device runtime: one program, a device mesh, placement, the in-process collective, and the compatibility process runtime |
+| [client-runtime-design.md](client-runtime-design.md) | The single-client multi-device runtime: one program, a device mesh, placement, the in-process collective, the C++ mesh training driver, and the compatibility process runtime |
 | [performance.md](performance.md) | Performance measurement protocol and the debugging interface |
 | [cpu-performance.md](cpu-performance.md) | CPU backend baseline, cause, design, and phase results |
 | [attention.md](attention.md) | Attention baseline, Pascal feasibility, the fused window, results |
@@ -27,7 +27,7 @@ detailed reference that the design points at.
 | [parquet-native.md](parquet-native.md) | The native parquet reader and on-the-fly tokenization plan |
 | [post-training.md](post-training.md) | Design and status: supervised fine-tuning and reinforcement learning |
 | [sft-parity-plan.md](sft-parity-plan.md) | Earning reference parity for supervised fine-tuning: the four rungs, the fixtures, and the phases |
-| [training-seam.md](training-seam.md) | The Python and C++ boundary for training: the seam rule, the current defects, and the target interface |
+| [training-seam.md](training-seam.md) | The Python and C++ boundary for training: the seam rule, the current defects, the mesh driver, and the target interface |
 | [rl-notebook.md](rl-notebook.md) | Reinforcement learning in a notebook: the hand-rolled loop, the `nc.rl` worker bridge, and the open items |
 | [python.md](python.md) | The single Python surface: in-process compute API, planning, chat evaluation, and the `tools/nanochat` toolchain |
 | [sandbox.md](sandbox.md) | Execution sandbox and host resource governance |

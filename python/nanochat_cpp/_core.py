@@ -29,6 +29,11 @@ __all__ = [
     "Sequences",
     "OptimizerConfig",
     "Metrics",
+    "MeshTrainConfig",
+    "MeshTrainDataConfig",
+    "MeshTrainRunConfig",
+    "MeshTrainOutputConfig",
+    "MeshTrainSummary",
     "ModelHandle",
     "OptimHandle",
     "LoaderHandle",
@@ -258,6 +263,80 @@ class Metrics(ctypes.Structure):
     ]
 
 
+class MeshTrainDataConfig(ctypes.Structure):
+    """A mirror of ``nanochat_mesh_data_config``: the dataset and the
+    tokenizer (docs/client-runtime-design.md section 10.1).
+    """
+
+    _fields_ = [
+        ("parquet", ctypes.POINTER(ctypes.c_char_p)),
+        ("parquet_count", ctypes.c_int),
+        ("tokenizer_path", ctypes.c_char_p),
+        ("data_seed", ctypes.c_uint64),
+    ]
+
+
+class MeshTrainRunConfig(ctypes.Structure):
+    """A mirror of ``nanochat_mesh_run_config``: the step loop
+    (docs/client-runtime-design.md section 10.1).
+    """
+
+    _fields_ = [
+        ("batch", ctypes.c_int),
+        ("grad_accum", ctypes.c_int),
+        ("seq", ctypes.c_int),
+        ("seed", ctypes.c_uint64),
+        ("num_iterations", ctypes.c_int),
+        ("log_every", ctypes.c_int),
+        ("save_every", ctypes.c_int),
+        ("resume", ctypes.c_int),
+    ]
+
+
+class MeshTrainOutputConfig(ctypes.Structure):
+    """A mirror of ``nanochat_mesh_output_config``: the written artifacts
+    (docs/client-runtime-design.md section 10.1).
+    """
+
+    _fields_ = [
+        ("out_dir", ctypes.c_char_p),
+        ("checkpoint_path", ctypes.c_char_p),
+    ]
+
+
+class MeshTrainConfig(ctypes.Structure):
+    """A mirror of ``nanochat_mesh_train_config``
+    (docs/client-runtime-design.md section 10.1). The caller owns every
+    pointer, the mesh handle, and the struct, so the C call reads it only.
+    """
+
+    _fields_ = [
+        ("model", Config),
+        ("mesh", ctypes.c_void_p),
+        ("preset", ctypes.c_char_p),
+        ("flops_per_token", ctypes.c_double),
+        ("peak_flops", ctypes.c_double),
+        ("data", MeshTrainDataConfig),
+        ("run", MeshTrainRunConfig),
+        ("output", MeshTrainOutputConfig),
+    ]
+
+
+class MeshTrainSummary(ctypes.Structure):
+    """A mirror of ``nanochat_mesh_train_summary``
+    (docs/client-runtime-design.md section 10.1). The caller owns the struct,
+    so ``checkpoint`` is a fixed buffer and not an owned pointer.
+    """
+
+    _fields_ = [
+        ("steps", ctypes.c_int),
+        ("interrupted", ctypes.c_int),
+        ("mean_loss", ctypes.c_double),
+        ("steady_mfu", ctypes.c_double),
+        ("checkpoint", ctypes.c_char * 4096),
+    ]
+
+
 class Record(ctypes.Structure):
     """A mirror of ``nanochat_record``.
 
@@ -334,6 +413,9 @@ _SIGNATURES = (
     ("nanochat_runtime_load", (RuntimeHandle, ctypes.c_char_p), None),
     ("nanochat_runtime_load_weights", (RuntimeHandle, ctypes.c_char_p),
      None),
+    ("nanochat_mesh_train_run",
+     (ctypes.POINTER(MeshTrainConfig), ctypes.POINTER(MeshTrainSummary)),
+     ctypes.c_float),
     ("nanochat_params_get",
      (ctypes.POINTER(Config), ctypes.POINTER(Params)), ctypes.c_int),
     ("nanochat_model_create",

@@ -95,6 +95,7 @@ py_test(
     name = "mesh_train_test",
     srcs = ["mesh_train_test.py"],
     size = "small",
+    data = ["//bindings:nanochat_shared"],
     deps = [
         ":mesh_train",
         ":mesh_worker",

@@ -79,6 +79,7 @@ cc_library(
         "mesh.cc",
         "mesh_collective.cc",
         "mesh_runtime.cc",
+        "mesh_train.cc",
         "model.cc",
         "ops.cc",
         "optim.cc",
@@ -91,6 +92,7 @@ cc_library(
         "generate.h",
         "mesh_collective.h",
         "mesh_runtime.h",
+        "mesh_train.h",
         "model_impl.h",
         "ops.h",
         "optim_state.h",
@@ -405,6 +407,22 @@ cc_test(
     defines = precision_defines(),
     deps = [
         ":model",
+        "//include/nanochat:nanochat",
+    ],
+    size = "small",
+)
+
+# The mesh training driver (docs/client-runtime-design.md section 10.1): the
+# step loop, the metric record, the summary, the resume, and the injected
+# batch. CPU only.
+cc_test(
+    name = "mesh_train_test",
+    srcs = ["mesh_train_test.cc"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    deps = [
+        ":model",
+        "//src/tokenizer:tokenizer",
         "//include/nanochat:nanochat",
     ],
     size = "small",

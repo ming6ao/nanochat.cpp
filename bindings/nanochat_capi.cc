@@ -22,6 +22,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <exception>
@@ -43,6 +44,7 @@
 #include "nanochat/scheduler.h"
 #include "nanochat/tokenizer.h"
 #include "src/mesh_runtime.h"
+#include "src/mesh_train.h"
 #include "src/parquet/reader.h"
 #include "src/rl.h"
 #include "src/train.h"
@@ -306,6 +308,45 @@ nanochat::ParamView RuntimeParam(nanochat_runtime* runtime, int replica,
   return params[static_cast<std::size_t>(index)];
 }
 
+// Converts the C driver config into the C++ value. The caller keeps owning
+// every pointer and the mesh handle, so the value copies each string and the
+// mesh.
+nanochat::MeshTrainConfig ToMeshTrainConfig(
+    const nanochat_mesh_train_config& source) {
+  nanochat::MeshTrainConfig config;
+  config.model = ToConfig(source.model);
+  ValidateConfig(config.model);
+  if (source.mesh == nullptr) {
+    throw std::invalid_argument("mesh must not be null");
+  }
+  config.mesh = source.mesh->mesh;
+  config.preset = source.preset != nullptr ? source.preset : "track3";
+  config.batch = source.run.batch;
+  config.grad_accum = source.run.grad_accum;
+  config.seq = source.run.seq;
+  config.seed = source.run.seed;
+  config.data_seed = source.data.data_seed;
+  config.num_iterations = source.run.num_iterations;
+  config.log_every = source.run.log_every;
+  config.save_every = source.run.save_every;
+  config.resume = source.run.resume != 0;
+  config.flops_per_token = source.flops_per_token;
+  config.peak_flops = source.peak_flops;
+  config.out_dir =
+      source.output.out_dir != nullptr ? source.output.out_dir : "";
+  config.checkpoint_path = source.output.checkpoint_path != nullptr
+                               ? source.output.checkpoint_path
+                               : "";
+  config.tokenizer_path =
+      source.data.tokenizer_path != nullptr ? source.data.tokenizer_path : "";
+  for (int i = 0; i < source.data.parquet_count; ++i) {
+    if (source.data.parquet != nullptr && source.data.parquet[i] != nullptr) {
+      config.train_parquet.emplace_back(source.data.parquet[i]);
+    }
+  }
+  return config;
+}
+
 }  // namespace
 
 extern "C" {
@@ -463,6 +504,25 @@ int nanochat_runtime_step(nanochat_runtime* runtime) {
       throw std::invalid_argument("runtime is null");
     }
     return runtime->runtime->step();
+  });
+}
+
+float nanochat_mesh_train_run(const nanochat_mesh_train_config* config,
+                              nanochat_mesh_train_summary* out) {
+  return Guard("nanochat_mesh_train_run", 0.0f, [&]() -> float {
+    if (config == nullptr) throw std::invalid_argument("config is null");
+    nanochat::MeshTrainDriver driver(ToMeshTrainConfig(*config));
+    const float loss = driver.Run();
+    if (out != nullptr) {
+      const nanochat::MeshTrainSummary& summary = driver.summary();
+      out->steps = summary.steps;
+      out->interrupted = summary.interrupted ? 1 : 0;
+      out->mean_loss = summary.mean_loss;
+      out->steady_mfu = summary.steady_mfu;
+      std::snprintf(out->checkpoint, sizeof(out->checkpoint), "%s",
+                    summary.checkpoint.c_str());
+    }
+    return loss;
   });
 }
 

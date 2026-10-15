@@ -1,11 +1,17 @@
 # Single-client multi-device runtime design
 
 Status: partly delivered. This document describes the target and section 21
-records the delivered part. The C++ mesh runtime, the in-process collective,
-the C application binary interface, and the Python `mesh`/`runtime` client are
-implemented and CPU-tested. The CUDA thread-local change, the loader
-integration, and the compatibility process runtime are later phases. The kernel
-seam and the public model API do not change.
+records the delivered part. The tree implements and CPU-tests the C++ mesh
+runtime, the in-process collective, the C application binary interface, the
+mesh training driver, and the Python `mesh`/`runtime` client. The CUDA
+thread-local change, the loader integration, and the compatibility process
+runtime are later phases. The kernel seam and the public model API do not
+change.
+
+The mesh training driver is C++ by decision (section 20.5). The driver owns the
+step loop, the metric record, the summary, and the resume. Python calls one
+driver function per run. Phase 6 delivers the driver, so
+`notebooks/mesh_train.py` is a thin launcher over it.
 
 Related: [distributed-design.md](distributed-design.md),
 [distributed-launch.md](distributed-launch.md), [python.md](python.md), and
@@ -161,20 +167,25 @@ import nanochat
 
 devices = nanochat.devices()
 mesh = nanochat.Mesh(devices, ("data",))
-
 config = nanochat.Config(num_layers=12, hidden_dim=768)
-with nanochat.MeshRuntime(mesh, config, batch=32, grad_accum=4) as run:
-    for step in range(steps):
-        loss = run.train_step(tokens, targets)  # one global batch
-        print(step, loss)
+
+# The C++ driver owns the loop, the metric record, and the summary.
+result = nanochat.mesh_train.run(mesh, config,
+                                 train_parquet="shard-*.parquet",
+                                 tokenizer="tokenizer.nctoken",
+                                 out_dir="run", steps=5000, batch=32)
+print(result.mean_loss)
 ```
 
-The `MeshRuntime` splits the global batch across the mesh, reduces the
-gradients in process, and returns one loss. The client never names a rank.
+The `mesh_train.run` call returns when the run stops. It writes
+`metrics.jsonl`, `summary.json`, and the canonical checkpoint in `out_dir`. The
+client never names a rank and never steps the optimizer. Section 20.5 records
+this decision.
 
-`trainer.step()` returns one loss for the whole mesh. The loss is the global
-mean over the batch. `trainer.metrics()` returns the per-device breakdown and
-the timing fields. Section 20.4 records this decision.
+The lower-level `MeshRuntime` stays. `MeshRuntime.train_step()` splits one
+global batch across the mesh, reduces the gradients in process, and returns one
+loss. A test and a custom loop use it. `MeshRuntime.metrics()` returns the
+per-device breakdown and the timing fields. Section 20.4 records that decision.
 
 ## 6. What the model is not
 
@@ -212,9 +223,10 @@ New files:
 | `src/mesh.cc` | The mesh validation shared by the runtime and the client | Architect |
 | `src/mesh_collective.h`, `src/mesh_collective.cc` | The in-process all-reduce | Collective |
 | `src/mesh_runtime.h`, `src/mesh_runtime.cc` | Device threads, replicas, step dispatch | Harness |
-| `capi.h` additions | Device enumeration, the mesh handle, the runtime handle | Architect |
+| `src/mesh_train.h`, `src/mesh_train.cc` | The mesh training driver: the step loop, the metric record, the summary, and the resume | Harness |
+| `capi.h` additions | Device enumeration, the mesh handle, the runtime handle, the driver config struct, and the driver run call | Architect |
 | `python/nanochat_cpp/mesh.py` | `devices`, `Mesh`, `NamedSharding`, `PartitionSpec` | Python surface |
-| `python/nanochat_cpp/runtime.py` | `MeshRuntime`, the step loop | Python surface |
+| `python/nanochat_cpp/runtime.py` | `MeshRuntime`, and the coarse driver client | Python surface |
 
 The frozen header `kernels.h` does not change. Section 8 explains why.
 
@@ -306,6 +318,38 @@ reuse it. The host path is correct first.
 
 The global batch stays constant on any device count. Only the work per device
 changes. This matches `docs/distributed-design.md` section 3.
+
+### 10.1 The training driver owns the loop
+
+`MeshRuntime::TrainStep` is one step. It is the mechanism. A separate C++
+driver owns the run around it. The driver is `src/mesh_train.cc`.
+
+The driver owns five items:
+
+1. The step loop from the resume step to the last step.
+2. The metric record of each step, and the write to `metrics.jsonl`.
+3. The run summary, and the write to `summary.json`.
+4. The checkpoint interval and the final checkpoint.
+5. The interrupt path: the driver saves a checkpoint before the error leaves.
+
+The driver owns the loader. It accepts an injected `DocumentSourceFactory`, so
+a test supplies documents without parquet. Section 11 gives the loader rule.
+
+The driver writes one record shape. The shape follows the `LogRecord` fields in
+`src/train.cc` and adds one loss entry per device:
+
+```json
+{"version": 1, "step": 1, "loss": 4.1, "grad_norm": 0.9,
+ "tokens_per_sec": 12000.0, "mfu": 0.31, "step_seconds": 0.2,
+ "compute_seconds": 0.15, "seconds": 0.2, "device_loss": [4.1, 4.1]}
+```
+
+The summary holds `version`, `checkpoint`, `steps`, `mean_loss`,
+`steady_mfu`, and `replica_digests`. The driver owns both files. Python reads
+the files and displays the rows. Python does not compute a record.
+
+The `version` field is one integer. A consumer ignores an unknown field and
+rejects an unknown version. Section 20.5 records this decision.
 
 ## 11. Data and the loader
 
@@ -454,14 +498,33 @@ Gate: one command starts a two-device run. One broker lock covers the group.
 
 Gate: a benchmark records the reduction cost and the step time.
 
+### Phase 6 — The mesh training driver
+
+1. Add `src/mesh_train.h` and `src/mesh_train.cc`: the loop, the record, the
+   summary, the checkpoint interval, and the resume.
+2. Add one caller-owned driver config struct and one run call to `capi.h`.
+   The run call takes the struct, so no serializer and no parser exist.
+3. Replace the Python loop in `notebooks/mesh_train.py` with the driver call.
+   Reduce `MeshTrainPlan` to a thin wrapper over the driver config.
+
+Owner: Harness for `src/**`; Architect for `capi.h`; Python surface for the
+client; Notebooks for the plan wrapper.
+
+Gate: a CPU driver run writes the same loss sequence as the current Python
+loop on the fixed seed. A resume continues the counter and the schedule. A
+checkpoint exists after an interrupt.
+
 ## 18. Tests
 
 | Tier | Test | Gate |
 |---|---|---|
 | T0 CPU | `//src:mesh_test` | Device enumeration and mesh construction |
 | T0 CPU | `//src:runtime_test` | Two CPU devices equal one CPU device |
+| T0 CPU | `//src:mesh_train_test` | The driver record, the summary, the resume, and the interrupt save |
 | T0 CPU | `//backends/host/collective:inproc_sync_test` | The in-process sum matches the host reference |
 | T0 CPU | `//python:mesh_test` | The mesh, the placement, and the rejection of a bad placement |
+| T0 CPU | `//python:runtime_test` | The mesh runtime client over the C application binary interface |
+| T0 CPU | `//python:mesh_train_test` | The driver client writes the same records as the C++ driver |
 | Simulator | `//tests:collective_sim_test` | The call sequence and the deadlock check |
 | T1 GPU | `//src:runtime_gpu_test` | Two device threads on one card |
 | T2 GPU | A two-device run versus one device | The validation loss matches one device |
@@ -546,6 +609,31 @@ tokens. The delivered client returns one loss, and `MeshRuntime.param_read`
 exposes one replica at a time. A later `metrics()` follows the `LogRecord`
 fields in `src/train.cc` and adds one loss entry per device.
 
+### 20.5 The C++ driver owns the mesh loop
+
+Decision: a C++ driver owns the mesh step loop, the metric record, the summary,
+and the resume. Python calls one driver function per run. Python keeps the data
+choice, the tokenizer path, the MFU inputs, and the display.
+
+Reasons:
+
+- `docs/training-seam.md` section 2 already fixes the split. C++ owns mechanism.
+  Python owns policy and data. Section 9 of that document states the invariant.
+- `notebooks/mesh_train.py` rebuilds the harness layer. It repeats the step
+  loop, the MFU, the log format, and the summary.
+- The two log formats already differ. `Logger::Log` and `format_row` print
+  different fields for the same step.
+- `MeshTrainPlan.job()` and `from_job()` are a hand-written serializer with no
+  version. A new field needs three edits and can go missing in silence.
+
+The driver config mirrors the existing `TrainConfig` and `MeshRuntimeConfig`
+fields. One C serialization writes and reads the job, so Python does not own a
+second schema. The notebook keeps the child-process launch and the file polling,
+because those are process policy.
+
+This decision does not change the seam, the frozen headers, or the runtime
+step arithmetic. It moves the loop and the record only.
+
 ## 21. Delivery status
 
 This section records what the tree implements.
@@ -577,7 +665,18 @@ This section records what the tree implements.
   `PartitionSpec`, and the placement checks.
 - `python/nanochat_cpp/runtime.py`: `MeshRuntime`, which runs one global batch
   over the mesh, returns one loss, reports `StepMetrics`, digests a replica,
-  and saves or loads a checkpoint.
+  and saves or loads a checkpoint. The module also holds `MeshTrainConfig`, the
+  coarse client of the C++ mesh training driver.
+- Phase 6: `src/mesh_train.h` and `src/mesh_train.cc` own the step loop, the
+  metric record, the summary, the checkpoint interval, the resume, and the job
+  serializer. The driver accepts an injected document source, so a test runs
+  without parquet.
+- Phase 6: the coarse `capi.h` driver surface. The caller-owned
+  `nanochat_mesh_train_config` struct holds the inputs, takes a `nanochat_mesh`
+  handle for the devices, and groups the fields as `data`, `run`, and
+  `output`. `nanochat_mesh_train_run` runs the job from the struct and fills a
+  `nanochat_mesh_train_summary`. No serializer, no parser, and no per-field
+  setter exist. Python owns the job file for the child process.
 - `python/nanochat_cpp/api.py`: `optimizer_config` and `preset_optimizer_config`,
   so `Optimizer` and `MeshRuntime` share one field list and the `track3` preset
   has one C source of truth.
@@ -585,16 +684,17 @@ This section records what the tree implements.
   `tools/nanochat client`.
 - `tools/nanochat client`: one broker lock for the full device set, then one
   sandbox scope.
-- `notebooks/mesh_train.py`: the notebook loop over the runtime, the
-  `MeshTrainPlan` job round trip, and the child `launch` through
-  `tools/nanochat client`. `notebooks/mesh_worker.py` is the child entry point,
-  and `notebooks/nanochat-cpp-on-2x-t4.ipynb` is the two-card end-to-end
-  notebook.
+- `notebooks/mesh_train.py`: the thin launcher over the C++ driver. The plan
+  writes the job dictionary as JSON for the child, and the child `launch` runs
+  through `tools/nanochat client`. `notebooks/mesh_worker.py` is the child
+  entry point. The notebook reads `metrics.jsonl` and `summary.json`, which the
+  driver writes.
 - Phase 3: the CUDA backend state is thread-local, and each device thread binds
   with `SelectDevice`. The cuBLAS handle, the tensor-core flag, the device name
   buffer, and the attention, Muon, and ANVIL scratch buffers are per thread.
-- Tests: `//src:mesh_test`, `//src:mesh_runtime_test`, `//src:runtime_gpu_test`,
-  `//python:mesh_test`, `//python:runtime_test`, `//python:run_test`,
+- Tests: `//src:mesh_test`, `//src:mesh_runtime_test`, `//src:mesh_train_test`,
+  `//src:runtime_gpu_test`, `//python:mesh_test`, `//python:runtime_test`,
+  `//python:mesh_train_test`, `//python:run_test`,
   `//notebooks:mesh_train_test`, and the device enumeration in
   `//bindings:nanochat_capi_test`.
 
@@ -604,7 +704,9 @@ The two-device and the four-device CPU runs equal the one-device run on the
 loss and on every parameter. The replicas of one runtime stay byte-identical
 over several steps. A save from one replica loads into every replica. The
 Python client reproduces the same result through the C application binary
-interface. `//src:runtime_gpu_test` runs two device threads on one card, and the
+interface. `//src:mesh_train_test` proves the record, the summary, the resume,
+and the parity of the driver loss sequence with a hand-run runtime.
+`//src:runtime_gpu_test` runs two device threads on one card, and the
 replicas stay byte-identical. The CUDA compile gate passes with warnings as
 errors.
 

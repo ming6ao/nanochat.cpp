@@ -13,13 +13,17 @@ standard library and the shared-library loader only.
 from __future__ import annotations
 
 import array
+import copy
 import ctypes
 import dataclasses
+import json
+import os
 
 from . import _core, _lib
 from .mesh import Mesh
 
-__all__ = ["MeshRuntime", "StepMetrics"]
+__all__ = ["MeshRuntime", "MeshTrainConfig", "MeshTrainResult",
+           "StepMetrics"]
 
 
 def _as_core_config(value, expected, label):
@@ -35,6 +39,41 @@ def _as_core_config(value, expected, label):
         f"{label} must be a nanochat_cpp._core.{expected.__name__} or an "
         "object with _to_c()"
     )
+
+
+def _core_model_config(config):
+    """The ``_core.Config`` for ``config`` and the live window-pattern bytes.
+
+    ``Config._to_c`` sets ``window_pattern`` from temporary bytes, so the
+    caller keeps a copy alive across the later C call.
+    """
+    core = _as_core_config(config, _core.Config, "config")
+    pattern = bytes(core.window_pattern) if core.window_pattern else b""
+    core.window_pattern = pattern
+    return core, pattern
+
+
+def _model_to_dict(core) -> dict:
+    """The serializable model shape from a ``_core.Config``."""
+    return {
+        "num_layers": int(core.num_layers),
+        "num_heads": int(core.num_heads),
+        "num_kv_heads": int(core.num_kv_heads),
+        "hidden_dim": int(core.hidden_dim),
+        "seq_len": int(core.seq_len),
+        "vocab_size": int(core.vocab_size),
+        "padded_vocab_size": int(core.padded_vocab_size),
+        "rope_base": float(core.rope_base),
+        "window_pattern": (core.window_pattern or b"").decode("utf-8"),
+        "value_embedding": bool(core.value_embedding),
+    }
+
+
+def _model_from_dict(model: dict):
+    """The ``Config`` for a job dictionary."""
+    from .api import Config
+
+    return Config(**model)
 
 
 def _int_buffer(values):
@@ -303,3 +342,181 @@ class MeshRuntime:
             raise _core.NanochatError("nanochat_runtime_param_info",
                                       _core.last_error(self._lib))
         return info
+
+
+@dataclasses.dataclass(frozen=True)
+class MeshTrainResult:
+    """The outcome of one mesh driver run
+    (docs/client-runtime-design.md section 10.1).
+
+    ``interrupted`` is true when the run stopped before the last step, for
+    example after Control-C. ``checkpoint`` is the final checkpoint path, or
+    the empty string when the run wrote none.
+    """
+
+    loss: float
+    steps: int
+    interrupted: bool
+    mean_loss: float
+    steady_mfu: float
+    checkpoint: str
+
+
+class MeshTrainConfig:
+    """The C++ mesh training driver config, the coarse client
+    (docs/client-runtime-design.md section 10.1 and docs/training-seam.md
+    section 6.6).
+
+    The driver owns the step loop, the metric record, the summary, the
+    checkpoint interval, and the resume. The client holds the job as a plain
+    dictionary, builds one C config from it, and calls the C run. Python owns
+    the job file for the child process, so the C interface needs no serializer.
+    """
+
+    def __init__(self, config, preset="track3", device_count=1, *,
+                 tokenizer, train_parquet, batch, grad_accum, steps, seq=0,
+                 seed=42, data_seed=42, log_every=1, save_every=0,
+                 resume=False, out_dir="", checkpoint_path="",
+                 flops_per_token=0.0, peak_flops=0.0) -> None:
+        self._lib = _lib.load()
+        self._keepalive: list = []
+        self._mesh = None
+        self._config = None
+        core_model = _as_core_config(config, _core.Config, "config")
+        paths = ([train_parquet]
+                 if isinstance(train_parquet, (str, bytes, os.PathLike))
+                 else list(train_parquet))
+        self._job = {
+            "model": _model_to_dict(core_model),
+            "preset": str(preset),
+            "flops_per_token": float(flops_per_token),
+            "peak_flops": float(peak_flops),
+            "mesh": {"count": max(1, int(device_count))},
+            "data": {
+                "parquet": [str(path) for path in paths],
+                "tokenizer_path": str(tokenizer),
+                "data_seed": int(data_seed),
+            },
+            "run": {
+                "batch": int(batch),
+                "grad_accum": int(grad_accum),
+                "seq": int(seq),
+                "seed": int(seed),
+                "num_iterations": int(steps),
+                "log_every": int(log_every),
+                "save_every": int(save_every),
+                "resume": 1 if resume else 0,
+            },
+            "output": {
+                "out_dir": str(out_dir),
+                "checkpoint_path": str(checkpoint_path),
+            },
+        }
+
+    @classmethod
+    def from_dict(cls, data) -> "MeshTrainConfig":
+        """Rebuild a client from a job dictionary. The child uses this."""
+        job = cls.__new__(cls)
+        job._lib = _lib.load()
+        job._keepalive = []
+        job._mesh = None
+        job._config = None
+        job._job = copy.deepcopy(dict(data))
+        return job
+
+    def to_dict(self) -> dict:
+        """The serializable job. Python owns this format."""
+        return copy.deepcopy(self._job)
+
+    def job_json(self) -> str:
+        """The job as one JSON line for the child process."""
+        return json.dumps(self._job, sort_keys=True)
+
+    def run(self) -> MeshTrainResult:
+        """Runs the whole job and returns the final loss and the summary."""
+        config = self._to_c()
+        summary = _core.MeshTrainSummary()
+        before = _core.last_error(self._lib)
+        loss = float(self._lib.nanochat_mesh_train_run(
+            ctypes.byref(config), ctypes.byref(summary)))
+        after = _core.last_error(self._lib)
+        if after and after != before:
+            raise _core.NanochatError("nanochat_mesh_train_run", after)
+        checkpoint = summary.checkpoint.decode("utf-8", "replace")
+        return MeshTrainResult(loss=loss, steps=int(summary.steps),
+                               interrupted=bool(summary.interrupted),
+                               mean_loss=float(summary.mean_loss),
+                               steady_mfu=float(summary.steady_mfu),
+                               checkpoint=checkpoint)
+
+    def close(self) -> None:
+        """Releases the mesh handle and the cached config."""
+        if getattr(self, "_mesh", None):
+            self._lib.nanochat_mesh_free(self._mesh)
+            self._mesh = None
+        self._config = None
+        self._keepalive = []
+
+    def __enter__(self) -> "MeshTrainConfig":
+        return self
+
+    def __exit__(self, *_exc) -> None:
+        self.close()
+
+    def __del__(self) -> None:
+        try:
+            self.close()
+        except Exception:
+            pass
+
+    def _to_c(self) -> "_core.MeshTrainConfig":
+        """Builds the C config once and caches it."""
+        if self._config is not None:
+            return self._config
+        job = self._job
+        model, pattern = _core_model_config(_model_from_dict(job["model"]))
+        self._keepalive.append(pattern)
+        core = _core.MeshTrainConfig()
+        core.model = model
+        self._set_string(core, "preset", job["preset"])
+        core.flops_per_token = float(job["flops_per_token"])
+        core.peak_flops = float(job["peak_flops"])
+        count = max(1, int(job["mesh"]["count"]))
+        indices = (ctypes.c_int * count)(*range(count))
+        self._keepalive.append(indices)
+        self._mesh = self._lib.nanochat_mesh_create(indices, count)
+        _core.check_handle(self._lib, self._mesh, "nanochat_mesh_create")
+        core.mesh = self._mesh
+        data = job["data"]
+        self._set_string(core.data, "tokenizer_path", data["tokenizer_path"])
+        core.data.data_seed = int(data["data_seed"])
+        path_bytes = [str(path).encode("utf-8") for path in data["parquet"]]
+        self._keepalive.extend(path_bytes)
+        path_array = (ctypes.c_char_p * len(path_bytes))(*path_bytes)
+        self._keepalive.append(path_array)
+        core.data.parquet = path_array
+        core.data.parquet_count = len(path_bytes)
+        run = job["run"]
+        core.run.batch = int(run["batch"])
+        core.run.grad_accum = int(run["grad_accum"])
+        core.run.seq = int(run["seq"])
+        core.run.seed = int(run["seed"])
+        core.run.num_iterations = int(run["num_iterations"])
+        core.run.log_every = int(run["log_every"])
+        core.run.save_every = int(run["save_every"])
+        core.run.resume = int(run["resume"])
+        output = job["output"]
+        self._set_string(core.output, "out_dir", output["out_dir"])
+        self._set_string(core.output, "checkpoint_path",
+                         output["checkpoint_path"])
+        self._config = core
+        return core
+
+    def _set_string(self, container, name: str, value) -> None:
+        """Stores one encoded string in the C struct and keeps it alive."""
+        if value is None:
+            encoded = None
+        else:
+            encoded = str(value).encode("utf-8")
+            self._keepalive.append(encoded)
+        setattr(container, name, encoded)

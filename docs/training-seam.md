@@ -3,7 +3,8 @@
 Status: proposed. This document specifies the boundary between the Python
 surface and the C++ training driver. It also records the defects in the current
 boundary. The project completed the first increment of section 8, and section 5
-marks the fixed defects.
+marks the fixed defects. Section 6.6 extends the boundary to the mesh training
+driver, and phase 6 of section 8 delivers it.
 
 `post-training.md` section 11 stays the status of record for the post-training
 features. This document is the authority for the Python and C++ boundary. It
@@ -31,6 +32,11 @@ The compute layer in `python/nanochat_cpp/api.py` exposes `forward_loss`,
 Python. The `Trainer` class covers pretraining only. A user who wants to
 fine-tune writes the loop by hand, as the Kaggle notebook does. That loop
 duplicates `TrainLoop`.
+
+The mesh client repeats the same defect. `notebooks/mesh_train.py` owns the
+step loop, the metric record, the MFU, the summary, and the job serializer. The
+C++ mesh runtime provides one step and no loop. Section 5.8 records the defect,
+and section 6.6 gives the target.
 
 This document defines the correct split. It then proposes the smallest interface
 that removes the duplication.
@@ -94,8 +100,8 @@ the row packing, the padding, and the batching.
 
 ## 5. Defects in the current seam
 
-The first increment fixed 5.1, 5.2, and 5.6, and partly fixed 5.3. The other
-items remain.
+The first increment fixed 5.1, 5.2, and 5.6, and partly fixed 5.3. The mesh
+driver phase fixed 5.8. The other items remain.
 
 ### 5.1 The C++ interface is richer than the C interface (fixed)
 
@@ -150,6 +156,34 @@ The risk is for the future.
 count, the pass count, and the example count per rank. Python would compute
 that divisor today. The normalization is therefore not the single source of
 truth. The divisor must move into C++ with the reinforcement-learning step.
+
+### 5.8 The mesh client rebuilt the driver (fixed)
+
+`notebooks/mesh_train.py` drove the mesh runtime one batch at a time. It owned
+the loop, the record, and the summary. Each item in the first four rows
+duplicated a C++ source of truth. The last two rows had no C++ writer:
+
+| Python item | C++ source of truth |
+|---|---|
+| `iterate()` | `TrainLoop::Run` (`src/train.cc`) |
+| `mfu()`, `steady_mfu()` | `ComputeMfu` (`include/nanochat/mfu.h`) |
+| `format_row()` | `Logger::Log` (`src/train.cc:70`) |
+| `job()`, `from_job()` | `TrainConfig` (`src/train.h:32`) |
+| the `metrics.jsonl` writer | none |
+| the `summary.json` writer | none |
+
+The two log formats differed. `Logger::Log` prints `lr`, the timing split, and
+the evaluation time. `format_row` printed the gradient norm, the step time,
+the compute time, the throughput, and the MFU. So one record had two shapes.
+
+`job()` and `from_job()` were a hand-written serializer of twenty fields. No
+version marked the payload, so a stale `job.json` lost a field in silence.
+
+`src/mesh_runtime.cc` provides `TrainStep` and no loop. So the client could not
+delegate the loop. [client-runtime-design](client-runtime-design.md)
+section 10.1 and section 20.5 record the decision. `src/mesh_train.h` and
+`src/mesh_train.cc` now own the loop, the record, and the summary. One JSON
+serializer owns the job file, and the record carries a version.
 
 ## 6. Target design
 
@@ -254,6 +288,31 @@ mixture is SmolTalk, MMLU, and GSM8K. `sft_data.pack_rows` implements the
 BOS-aligned best-fit packer with BOS padding and a `-1` mask. It mirrors
 `sft_data_generator_bos_bestfit` in `scripts/chat_sft.py`.
 
+### 6.6 The mesh path uses one C++ driver
+
+The mesh path follows the same split. The C++ `src/mesh_train.cc` driver owns
+the loop, the metric record, the summary, the checkpoint interval, and the
+resume. It owns the parquet loader too, and it accepts an injected document
+source, so a test supplies documents without parquet.
+
+A coarse C interface in `capi.h` carries the driver. The client fills one
+caller-owned config struct and calls one run function. The run call takes the
+struct, not a file. Python owns the job file for the child process, so the C
+interface carries no serializer and no parser.
+
+`notebooks/mesh_train.py` keeps four jobs. It builds the driver config from the
+notebook arguments, writes the job file, launches the child through
+`tools/nanochat client`, and polls `metrics.jsonl` and `worker.log`. It does not
+step the optimizer, compute the MFU, or write the summary.
+
+`MeshTrainPlan` becomes a thin wrapper over the driver config and the data
+paths. `iterate()`, `mfu()`, `format_row()`, `job()`, and `from_job()` are
+removed. `read_metrics()`, `read_summary()`, and `MeshLiveRun` stay, because
+they read and display a file that C++ wrote. A file reader is not mechanism.
+
+The C interface carries data only. No callback from C++ into Python exists, as
+section 7 states.
+
 ## 7. Non-goals
 
 - A distributed supervised fine-tuning run. The C++ workflow has no distributed
@@ -278,11 +337,16 @@ interface work.
 | 3. Add the supervised fine-tuning driver and `sft_main`. | Harness for `src/`; Python surface for the facade | A short run at tier T2 against the reference loss curve |
 | 4. Add `nanochat_rl_step` and the parity fixture. | Harness for the step; Oracle for the fixture and the test | `//tests:rl_parity_test` at tier T2 |
 | 5. Add the reinforcement-learning worker. | Harness for the worker; Python surface for the bridge | An RL smoke run at tier T2 |
+| 6. Add the mesh training driver. Add `src/mesh_train.cc` and the driver calls in `capi.h`. Reduce `MeshTrainPlan` to a config wrapper. (Done.) | Harness for `src/**`; Architect for `capi.h`; Python surface for the client; Notebooks for the wrapper | The CPU driver loss sequence equals the old Python loop. The resume and the interrupt save work |
 
 ## 9. Invariants
 
 - One step implementation. The C++ driver is the only place that advances the
-  optimizer for a training run.
+  optimizer for a training run. The mesh driver is the mesh form of the same
+  rule.
+- One metric record. The C++ driver writes `metrics.jsonl` and `summary.json`.
+  Python reads the files and displays the rows. Python does not compute a
+  record.
 - Valid-token normalization is the single source of truth. The
   reinforcement-learning divisor moves into C++.
 - The model layer stays tokenizer-agnostic. The driver layer may use the

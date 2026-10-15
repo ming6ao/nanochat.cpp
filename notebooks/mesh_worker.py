@@ -1,13 +1,15 @@
-"""Run one mesh training plan from a JSON job file in a child process.
+"""Run one mesh training job from a JSON job file in a child process.
 
 :func:`mesh_train.launch` starts this module through ``tools/nanochat
 client``, so one broker lock and one sandbox scope cover the whole mesh. The
 parent notebook cell returns, and the parent polls ``metrics.jsonl`` and
 ``worker.log``. See ``docs/client-runtime-design.md``.
 
+The C++ driver owns the loop and the interrupt path, so it saves the checkpoint
+before it returns. This module only reports the outcome.
+
 Usage: ``python mesh_worker.py <job.json>``. The exit code is 0 on success and
-130 after an interrupt. On an interrupt, :func:`mesh_train.run` saves the
-checkpoint before the error propagates.
+130 after an interrupt.
 """
 
 from __future__ import annotations
@@ -26,16 +28,25 @@ def main(argv=None) -> int:
         print("usage: mesh_worker.py <job.json>", file=sys.stderr)
         return 2
 
-    import mesh_train
+    from nanochat_cpp import runtime as rt
 
     job_path = Path(arguments[0])
-    plan = mesh_train.MeshTrainPlan.from_job(
-        json.loads(job_path.read_text(encoding="utf-8")))
+    text = job_path.read_text(encoding="utf-8")
     try:
-        mesh_train.run(plan, progress=mesh_train.log_progress)
+        data = json.loads(text)
+    except ValueError as error:
+        print(f"mesh_worker: bad job file: {error}", file=sys.stderr)
+        return 2
+    config = rt.MeshTrainConfig.from_dict(data)
+    try:
+        result = config.run()
     except KeyboardInterrupt:
-        print("mesh_worker: interrupted; the checkpoint is saved",
-              flush=True)
+        print("mesh_worker: interrupted; the checkpoint is saved", flush=True)
+        return 130
+    finally:
+        config.close()
+    if result.interrupted:
+        print("mesh_worker: interrupted; the checkpoint is saved", flush=True)
         return 130
     return 0
 
