@@ -41,9 +41,9 @@ class MeshTrainClientTest(unittest.TestCase):
 
     def job(self, out_dir: str, *, steps: int = 2) -> MeshTrainConfig:
         return MeshTrainConfig(
-            self.config(), preset="track3", device_count=1,
+            self.config(), preset="track3", world_size=1,
             tokenizer=resolve(TOKENIZER), train_parquet=resolve(PARQUET),
-            batch=1, grad_accum=1, steps=steps, seq=8, seed=42,
+            per_rank_batch=1, grad_accum=1, steps=steps, seq=8, seed=42,
             data_seed=42, log_every=0, save_every=0, out_dir=out_dir,
             flops_per_token=2.0, peak_flops=1000.0)
 

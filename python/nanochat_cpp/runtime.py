@@ -18,12 +18,13 @@ import ctypes
 import dataclasses
 import json
 import os
+from pathlib import Path
 
 from . import _core, _lib
 from .mesh import Mesh
 
 __all__ = ["MeshRuntime", "MeshTrainConfig", "MeshTrainResult",
-           "StepMetrics"]
+           "StepMetrics", "global_batch"]
 
 
 def _as_core_config(value, expected, label):
@@ -74,6 +75,22 @@ def _model_from_dict(model: dict):
     from .api import Config
 
     return Config(**model)
+
+
+def global_batch(per_rank_batch: int, grad_accum: int,
+                 world_size: int) -> int:
+    """The global sequence count of one step.
+
+    The driver takes the global batch, so this function rebuilds the total:
+    ``per_rank_batch * grad_accum * world_size``.
+    """
+    per_rank = int(per_rank_batch)
+    accum = int(grad_accum)
+    world = int(world_size)
+    if per_rank < 1 or accum < 1 or world < 1:
+        raise ValueError("per_rank_batch, grad_accum, and world_size must be "
+                         "positive")
+    return per_rank * accum * world
 
 
 def _int_buffer(values):
@@ -373,9 +390,9 @@ class MeshTrainConfig:
     the job file for the child process, so the C interface needs no serializer.
     """
 
-    def __init__(self, config, preset="track3", device_count=1, *,
-                 tokenizer, train_parquet, batch, grad_accum, steps, seq=0,
-                 seed=42, data_seed=42, log_every=1, save_every=0,
+    def __init__(self, config, preset="track3", *, world_size=1,
+                 per_rank_batch, grad_accum, steps, tokenizer, train_parquet,
+                 seq=0, seed=42, data_seed=42, log_every=1, save_every=0,
                  resume=False, out_dir="", checkpoint_path="",
                  flops_per_token=0.0, peak_flops=0.0) -> None:
         self._lib = _lib.load()
@@ -386,19 +403,21 @@ class MeshTrainConfig:
         paths = ([train_parquet]
                  if isinstance(train_parquet, (str, bytes, os.PathLike))
                  else list(train_parquet))
+        count = max(1, int(world_size))
+        batch = global_batch(per_rank_batch, grad_accum, count)
         self._job = {
             "model": _model_to_dict(core_model),
             "preset": str(preset),
             "flops_per_token": float(flops_per_token),
             "peak_flops": float(peak_flops),
-            "mesh": {"count": max(1, int(device_count))},
+            "mesh": {"count": count},
             "data": {
                 "parquet": [str(path) for path in paths],
                 "tokenizer_path": str(tokenizer),
                 "data_seed": int(data_seed),
             },
             "run": {
-                "batch": int(batch),
+                "batch": batch,
                 "grad_accum": int(grad_accum),
                 "seq": int(seq),
                 "seed": int(seed),
@@ -424,9 +443,39 @@ class MeshTrainConfig:
         job._job = copy.deepcopy(dict(data))
         return job
 
-    def to_dict(self) -> dict:
-        """The serializable job. Python owns this format."""
-        return copy.deepcopy(self._job)
+    @property
+    def out_dir(self) -> str:
+        """The run directory."""
+        return str(self._job["output"]["out_dir"])
+
+    @property
+    def global_sequences(self) -> int:
+        """The global sequence count of one step."""
+        return int(self._job["run"]["batch"])
+
+    @property
+    def sequence_length(self) -> int:
+        """The sequence length of one step. A zero `seq` selects the model."""
+        seq = int(self._job["run"]["seq"])
+        return seq if seq > 0 else int(self._job["model"]["seq_len"])
+
+    @property
+    def tokens_per_step(self) -> int:
+        """The global token count of one step."""
+        return self.global_sequences * self.sequence_length
+
+    def checkpoint_path(self) -> Path:
+        """The canonical checkpoint path."""
+        path = str(self._job["output"]["checkpoint_path"])
+        return Path(path) if path else Path(self.out_dir) / "checkpoint.ckpt"
+
+    def metrics_path(self) -> Path:
+        """The per-step metrics path."""
+        return Path(self.out_dir) / "metrics.jsonl"
+
+    def summary_path(self) -> Path:
+        """The run summary path."""
+        return Path(self.out_dir) / "summary.json"
 
     def job_json(self) -> str:
         """The job as one JSON line for the child process."""

@@ -33,9 +33,9 @@ Python. The `Trainer` class covers pretraining only. A user who wants to
 fine-tune writes the loop by hand, as the Kaggle notebook does. That loop
 duplicates `TrainLoop`.
 
-The mesh client repeats the same defect. `notebooks/mesh_train.py` owns the
+The mesh client repeated the same defect. `notebooks/mesh_train.py` owned the
 step loop, the metric record, the MFU, the summary, and the job serializer. The
-C++ mesh runtime provides one step and no loop. Section 5.8 records the defect,
+C++ mesh runtime provided one step and no loop. Section 5.8 records the defect,
 and section 6.6 gives the target.
 
 This document defines the correct split. It then proposes the smallest interface
@@ -182,8 +182,8 @@ version marked the payload, so a stale `job.json` lost a field in silence.
 `src/mesh_runtime.cc` provides `TrainStep` and no loop. So the client could not
 delegate the loop. [client-runtime-design](client-runtime-design.md)
 section 10.1 and section 20.5 record the decision. `src/mesh_train.h` and
-`src/mesh_train.cc` now own the loop, the record, and the summary. One JSON
-serializer owns the job file, and the record carries a version.
+`src/mesh_train.cc` now own the loop, the record, and the summary. Python owns
+the job file, and the record carries a version.
 
 ## 6. Target design
 
@@ -305,10 +305,11 @@ notebook arguments, writes the job file, launches the child through
 `tools/nanochat client`, and polls `metrics.jsonl` and `worker.log`. It does not
 step the optimizer, compute the MFU, or write the summary.
 
-`MeshTrainPlan` becomes a thin wrapper over the driver config and the data
-paths. `iterate()`, `mfu()`, `format_row()`, `job()`, and `from_job()` are
-removed. `read_metrics()`, `read_summary()`, and `MeshLiveRun` stay, because
-they read and display a file that C++ wrote. A file reader is not mechanism.
+The notebook builds the Python driver config directly, so no second config
+class exists. The phase removes `iterate()`, `mfu()`, `format_row()`, `job()`,
+and `from_job()`. `read_metrics()`, `read_summary()`, and `MeshLiveRun` stay,
+because they read and display a file that C++ wrote. A file reader is not
+mechanism.
 
 The C interface carries data only. No callback from C++ into Python exists, as
 section 7 states.
@@ -337,7 +338,7 @@ interface work.
 | 3. Add the supervised fine-tuning driver and `sft_main`. | Harness for `src/`; Python surface for the facade | A short run at tier T2 against the reference loss curve |
 | 4. Add `nanochat_rl_step` and the parity fixture. | Harness for the step; Oracle for the fixture and the test | `//tests:rl_parity_test` at tier T2 |
 | 5. Add the reinforcement-learning worker. | Harness for the worker; Python surface for the bridge | An RL smoke run at tier T2 |
-| 6. Add the mesh training driver. Add `src/mesh_train.cc` and the driver calls in `capi.h`. Reduce `MeshTrainPlan` to a config wrapper. (Done.) | Harness for `src/**`; Architect for `capi.h`; Python surface for the client; Notebooks for the wrapper | The CPU driver loss sequence equals the old Python loop. The resume and the interrupt save work |
+| 6. Add the mesh training driver. Add `src/mesh_train.cc` and the driver calls in `capi.h`. Use the Python driver config directly. (Done.) | Harness for `src/**`; Architect for `capi.h`; Python surface for the client; Notebooks for the launcher | The CPU driver loss sequence equals the old Python loop. The resume and the interrupt save work |
 
 ## 9. Invariants
 

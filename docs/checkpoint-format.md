@@ -751,8 +751,8 @@ The `sft` record names the base repository and the base tag.
 | 9 | Short sanity check: a few validation steps and two samples |
 | 10 | Markdown: notes and the next notebook |
 
-`MeshTrainPlan.checkpoint_path()` returns `checkpoint.ckpt` after the rename in
-section 24.
+`MeshTrainConfig.checkpoint_path()` returns `checkpoint.ckpt` after the rename
+in section 24.
 
 The tokenizer lives in one repository per namespace:
 `<namespace>/nanochat-tokenizer`. Each vocabulary size is one file at the

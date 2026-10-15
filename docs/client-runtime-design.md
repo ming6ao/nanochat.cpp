@@ -166,18 +166,18 @@ A training program mentions no rank.
 import nanochat
 
 devices = nanochat.devices()
-mesh = nanochat.Mesh(devices, ("data",))
-config = nanochat.Config(num_layers=12, hidden_dim=768)
+model = nanochat.Config(num_layers=12, hidden_dim=768)
 
 # The C++ driver owns the loop, the metric record, and the summary.
-result = nanochat.mesh_train.run(mesh, config,
-                                 train_parquet="shard-*.parquet",
-                                 tokenizer="tokenizer.nctoken",
-                                 out_dir="run", steps=5000, batch=32)
+train = nanochat.MeshTrainConfig(
+    model, preset="track3", world_size=len(devices),
+    tokenizer="tokenizer.nctoken", train_parquet="shard-*.parquet",
+    per_rank_batch=1, grad_accum=4, steps=5000, out_dir="run")
+result = train.run()
 print(result.mean_loss)
 ```
 
-The `mesh_train.run` call returns when the run stops. It writes
+The `MeshTrainConfig.run` call returns when the run stops. It writes
 `metrics.jsonl`, `summary.json`, and the canonical checkpoint in `out_dir`. The
 client never names a rank and never steps the optimizer. Section 20.5 records
 this decision.
@@ -505,10 +505,11 @@ Gate: a benchmark records the reduction cost and the step time.
 2. Add one caller-owned driver config struct and one run call to `capi.h`.
    The run call takes the struct, so no serializer and no parser exist.
 3. Replace the Python loop in `notebooks/mesh_train.py` with the driver call.
-   Reduce `MeshTrainPlan` to a thin wrapper over the driver config.
+   The notebook builds the Python driver config directly, and the module keeps
+   only the child-process launch.
 
 Owner: Harness for `src/**`; Architect for `capi.h`; Python surface for the
-client; Notebooks for the plan wrapper.
+client; Notebooks for the launcher.
 
 Gate: a CPU driver run writes the same loss sequence as the current Python
 loop on the fixed seed. A resume continues the counter and the schedule. A
@@ -623,13 +624,13 @@ Reasons:
   loop, the MFU, the log format, and the summary.
 - The two log formats already differ. `Logger::Log` and `format_row` print
   different fields for the same step.
-- `MeshTrainPlan.job()` and `from_job()` are a hand-written serializer with no
-  version. A new field needs three edits and can go missing in silence.
+- `notebooks/mesh_train.py` carried a second config class beside the driver
+  config. One field change needed edits in both places.
 
 The driver config mirrors the existing `TrainConfig` and `MeshRuntimeConfig`
-fields. One C serialization writes and reads the job, so Python does not own a
-second schema. The notebook keeps the child-process launch and the file polling,
-because those are process policy.
+fields. Python owns the job file for the child process, so the C interface
+carries no serializer. The notebook keeps the child-process launch and the file
+polling, because those are process policy.
 
 This decision does not change the seam, the frozen headers, or the runtime
 step arithmetic. It moves the loop and the record only.
@@ -668,9 +669,8 @@ This section records what the tree implements.
   and saves or loads a checkpoint. The module also holds `MeshTrainConfig`, the
   coarse client of the C++ mesh training driver.
 - Phase 6: `src/mesh_train.h` and `src/mesh_train.cc` own the step loop, the
-  metric record, the summary, the checkpoint interval, the resume, and the job
-  serializer. The driver accepts an injected document source, so a test runs
-  without parquet.
+  metric record, the summary, the checkpoint interval, and the resume. The
+  driver accepts an injected document source, so a test runs without parquet.
 - Phase 6: the coarse `capi.h` driver surface. The caller-owned
   `nanochat_mesh_train_config` struct holds the inputs, takes a `nanochat_mesh`
   handle for the devices, and groups the fields as `data`, `run`, and

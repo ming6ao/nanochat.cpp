@@ -1,13 +1,11 @@
-"""The notebook launcher for the C++ mesh training driver.
+"""The child-process launcher for the C++ mesh training driver.
 
-One :class:`MeshTrainPlan` holds the run. It is a thin wrapper over the C++
-driver config and the data paths. :func:`run` builds the driver config and
-calls one C++ function, ``nanochat_mesh_train_run``. The driver owns the step
-loop, the metric record, the summary, the checkpoint interval, and the resume
-(docs/client-runtime-design.md section 10.1 and docs/training-seam.md
-section 6.6).
+The C++ driver owns the step loop, the metric record, the summary, the
+checkpoint interval, and the resume (docs/client-runtime-design.md section
+10.1). The client is :class:`nanochat_cpp.runtime.MeshTrainConfig`. This module
+holds only the Kaggle process seam.
 
-:func:`launch` runs :func:`run` in a child process through
+:func:`launch` runs one config in a child process through
 ``tools/nanochat client``. The notebook cell returns, so the cell status stays
 correct, and the parent polls ``metrics.jsonl`` and ``worker.log`` instead. See
 ``docs/client-runtime-design.md``.
@@ -23,157 +21,10 @@ import os
 import signal
 import subprocess
 import sys
-from dataclasses import dataclass, field
+import time
 from pathlib import Path
-from typing import TYPE_CHECKING
 
-if TYPE_CHECKING:  # pragma: no cover - typing only
-    import nanochat_cpp as nc
-
-__all__ = [
-    "MeshLiveRun",
-    "MeshRunResult",
-    "MeshTrainPlan",
-    "global_batch",
-    "launch",
-    "read_metrics",
-    "read_summary",
-    "run",
-]
-
-
-@dataclass(frozen=True)
-class MeshTrainPlan:
-    """The inputs of one mesh run.
-
-    ``per_rank_batch`` is the number of sequences one device consumes in one
-    micro-batch. ``grad_accum`` is the micro-batch count per device per step.
-    The driver takes the global batch, so :func:`global_batch` multiplies the
-    three factors. ``seq`` of zero selects ``config.seq_len``.
-
-    ``tokenizer`` is the ``NCTOKEN1`` path, so the whole plan is serializable
-    for the child process. ``flops_per_token`` and ``peak_flops`` set the model
-    FLOPs utilization. A zero ``peak_flops`` keeps it at zero.
-    """
-
-    train_parquet: str
-    tokenizer: str
-    out_dir: str
-    config: "nc.Config"
-    per_rank_batch: int
-    grad_accum: int
-    world_size: int
-    steps: int
-    seq: int = 0
-    seed: int = 42
-    data_seed: int = 42
-    log_every: int = 1
-    save_every: int = 0
-    preset: str = "track3"
-    resume: bool = False
-    flops_per_token: float = 0.0
-    peak_flops: float = 0.0
-
-    @property
-    def sequence_length(self) -> int:
-        """The sequence length of one step."""
-        return int(self.seq) if self.seq > 0 else int(self.config.seq_len)
-
-    @property
-    def global_sequences(self) -> int:
-        """The global number of sequences in one step."""
-        return global_batch(self.per_rank_batch, self.grad_accum,
-                            self.world_size)
-
-    @property
-    def tokens_per_step(self) -> int:
-        """The global number of tokens in one step."""
-        return self.global_sequences * self.sequence_length
-
-    def checkpoint_path(self) -> Path:
-        """The canonical checkpoint path."""
-        return Path(self.out_dir) / "checkpoint.ckpt"
-
-    def metrics_path(self) -> Path:
-        """The per-step metrics path."""
-        return Path(self.out_dir) / "metrics.jsonl"
-
-    def summary_path(self) -> Path:
-        """The run summary path."""
-        return Path(self.out_dir) / "summary.json"
-
-    def train_config(self):
-        """The C++ driver config for this plan.
-
-        The optimizer and the schedule come from ``preset``, so the plan does
-        not carry optimizer fields.
-        """
-        from nanochat_cpp import runtime as rt
-
-        return rt.MeshTrainConfig(
-            self.config,
-            preset=self.preset,
-            device_count=self.world_size,
-            tokenizer=self.tokenizer,
-            train_parquet=self.train_parquet,
-            batch=self.global_sequences,
-            grad_accum=self.grad_accum,
-            steps=self.steps,
-            seq=self.seq,
-            seed=self.seed,
-            data_seed=self.data_seed,
-            log_every=self.log_every,
-            save_every=self.save_every,
-            resume=self.resume,
-            out_dir=self.out_dir,
-            flops_per_token=self.flops_per_token,
-            peak_flops=self.peak_flops,
-        )
-
-    def job_json(self) -> str:
-        """The JSON job the child process reads."""
-        config = self.train_config()
-        try:
-            return config.job_json()
-        finally:
-            config.close()
-
-
-@dataclass
-class MeshRunResult:
-    """The outcome of one mesh run."""
-
-    plan: MeshTrainPlan
-    records: list[dict] = field(default_factory=list)
-    checkpoint: Path | None = None
-    replica_digests: tuple[str, ...] = ()
-    mean_loss: float = 0.0
-    steady_mfu: float = 0.0
-
-    def to_dict(self) -> dict:
-        """The serializable summary of the run."""
-        return {
-            "checkpoint": str(self.checkpoint) if self.checkpoint else "",
-            "steps": len(self.records),
-            "mean_loss": self.mean_loss,
-            "steady_mfu": self.steady_mfu,
-            "replica_digests": list(self.replica_digests),
-        }
-
-
-def global_batch(per_rank_batch: int, grad_accum: int, world_size: int) -> int:
-    """The global sequence count of one step.
-
-    The driver takes the global batch, so this function rebuilds the total:
-    ``per_rank_batch * grad_accum * world_size``.
-    """
-    per_rank = int(per_rank_batch)
-    accum = int(grad_accum)
-    world = int(world_size)
-    if per_rank < 1 or accum < 1 or world < 1:
-        raise ValueError("per_rank_batch, grad_accum, and world_size must be "
-                         "positive")
-    return per_rank * accum * world
+__all__ = ["MeshLiveRun", "launch", "read_metrics", "read_summary"]
 
 
 def read_metrics(path) -> list[dict]:
@@ -205,42 +56,17 @@ def read_summary(out_dir) -> dict:
         return {}
 
 
-def run(plan: MeshTrainPlan) -> MeshRunResult:
-    """Build the C++ driver config and run the whole job.
-
-    The driver writes ``metrics.jsonl``, ``summary.json``, and the canonical
-    checkpoint in the plan output directory. With ``plan.resume`` set and a
-    checkpoint on disk, the driver loads the parameters, the optimizer state,
-    and the step, then continues from the next step.
-    """
-    config = plan.train_config()
-    try:
-        result = config.run()
-    finally:
-        config.close()
-    summary = read_summary(plan.out_dir)
-    checkpoint = Path(result.checkpoint) if result.checkpoint else None
-    return MeshRunResult(
-        plan=plan,
-        records=read_metrics(plan.metrics_path()),
-        checkpoint=checkpoint,
-        replica_digests=tuple(summary.get("replica_digests", ())),
-        mean_loss=float(result.mean_loss),
-        steady_mfu=float(result.steady_mfu),
-    )
-
-
 class MeshLiveRun:
-    """A mesh worker that runs in a child process.
+    """A mesh driver that runs in a child process.
 
     The parent starts the child with :func:`launch` and polls it. The child
-    writes ``metrics.jsonl`` and ``worker.log`` in the plan directory, so the
+    writes ``metrics.jsonl`` and ``worker.log`` in the run directory, so the
     parent never reads a pipe and the notebook cell never blocks.
     """
 
-    def __init__(self, plan: MeshTrainPlan, process: subprocess.Popen, *,
+    def __init__(self, config, process: subprocess.Popen, *,
                  log_path, timeout: float | None = None) -> None:
-        self.plan = plan
+        self.config = config
         self.process = process
         self.log_path = Path(log_path)
         self._timeout = timeout
@@ -258,11 +84,31 @@ class MeshLiveRun:
 
     def rows(self) -> list[dict]:
         """The per-step metrics written so far."""
-        return read_metrics(self.plan.metrics_path())
+        return read_metrics(self.config.metrics_path())
 
     def summary(self) -> dict:
         """The final summary, or an empty dict before the child finishes."""
-        return read_summary(self.plan.out_dir)
+        return read_summary(self.config.out_dir)
+
+    def stream(self, interval: float = 5.0) -> None:
+        """Print the child log as it grows, until the child exits.
+
+        A Control-C stops the worker and returns. The C++ driver owns the
+        interrupt path, so the worker saves the checkpoint before it exits.
+        """
+        position = 0
+        try:
+            while self.running():
+                text = (self.log_path.read_text(encoding="utf-8",
+                                                errors="replace")
+                        if self.log_path.is_file() else "")
+                if len(text) > position:
+                    print(text[position:], end="", flush=True)
+                    position = len(text)
+                time.sleep(interval)
+        except KeyboardInterrupt:
+            print("\ninterrupt received; stopping the worker", flush=True)
+            self.terminate()
 
     def wait(self, timeout: float | None = None) -> int:
         """Block until the child exits and return its return code."""
@@ -310,21 +156,22 @@ class MeshLiveRun:
                 self.process.kill()
 
 
-def launch(plan: MeshTrainPlan, root: str | Path = ".", *,
+def launch(config, root: str | Path = ".", *,
            entry: str = "tools/nanochat", profile: str = "train",
            device: str | None = None, timeout: float | None = None,
            extra_env: dict | None = None) -> MeshLiveRun:
-    """Start :func:`run` in a child process and return a pollable handle.
+    """Start one config in a child process and return a pollable handle.
 
-    The child runs through ``tools/nanochat client``, so one broker lock and
-    one sandbox scope cover the whole mesh. The child stdout and stderr go to
+    ``config`` is a :class:`nanochat_cpp.runtime.MeshTrainConfig`. The child
+    runs through ``tools/nanochat client``, so one broker lock and one sandbox
+    scope cover the whole mesh. The child stdout and stderr go to
     ``worker.log``, so the parent never blocks on a full pipe.
     """
     root = Path(root)
-    out_dir = Path(plan.out_dir)
+    out_dir = Path(config.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     job_path = out_dir / "job.json"
-    job_path.write_text(plan.job_json() + "\n", encoding="utf-8")
+    job_path.write_text(config.job_json() + "\n", encoding="utf-8")
 
     worker = Path(__file__).with_name("mesh_worker.py")
     env = dict(os.environ)
@@ -344,4 +191,4 @@ def launch(plan: MeshTrainPlan, root: str | Path = ".", *,
         process = subprocess.Popen(command, cwd=str(root), env=env,
                                    stdout=log, stderr=subprocess.STDOUT,
                                    start_new_session=True)
-    return MeshLiveRun(plan, process, log_path=log_path, timeout=timeout)
+    return MeshLiveRun(config, process, log_path=log_path, timeout=timeout)

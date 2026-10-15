@@ -46,7 +46,7 @@ from .mesh import (
     PartitionSpec,
     devices,
 )
-from .runtime import MeshRuntime
+from .runtime import MeshRuntime, MeshTrainConfig
 from .sft_data import build_train_mixture, build_val_mixture
 
 __all__ = [
@@ -59,6 +59,7 @@ __all__ = [
     "Mesh",
     "MeshError",
     "MeshRuntime",
+    "MeshTrainConfig",
     "Model",
     "NanochatError",
     "NamedSharding",

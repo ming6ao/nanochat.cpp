@@ -1,9 +1,9 @@
 """T0: the pure helpers of the mesh launcher and the child launch.
 
-The test covers the batch mapping, the metrics and summary readers, the plan
-job JSON through the C++ serializer, and the child launch against a fake
-``tools/nanochat`` entry. The serializer and the plan config need the shared
-library; the rest needs nothing. See ``docs/client-runtime-design.md``.
+The test covers the global batch mapping, the metrics and summary readers, the
+driver config and its job round trip, and the child launch against a fake
+``tools/nanochat`` entry. The config needs the shared library; the rest needs
+nothing. See ``docs/client-runtime-design.md``.
 """
 
 from __future__ import annotations
@@ -26,13 +26,13 @@ class GlobalBatchTest(unittest.TestCase):
     def test_matches_the_multi_process_total(self) -> None:
         # One sequence per rank, eight micro-batches, two ranks: 65536 tokens
         # at seq 4096.
-        self.assertEqual(mesh_train.global_batch(1, 8, 2), 16)
-        self.assertEqual(mesh_train.global_batch(1, 8, 2) * 4096, 65536)
+        self.assertEqual(rt.global_batch(1, 8, 2), 16)
+        self.assertEqual(rt.global_batch(1, 8, 2) * 4096, 65536)
 
     def test_rejects_a_nonpositive_factor(self) -> None:
         for values in ((0, 1, 1), (1, 0, 1), (1, 1, 0)):
             with self.assertRaises(ValueError):
-                mesh_train.global_batch(*values)
+                rt.global_batch(*values)
 
 
 class ReaderTest(unittest.TestCase):
@@ -54,59 +54,59 @@ class ReaderTest(unittest.TestCase):
             self.assertEqual(mesh_train.read_summary(tmp), {})
 
 
-def _config() -> nc.Config:
+def _model() -> nc.Config:
     return nc.Config(num_layers=2, num_heads=2, num_kv_heads=1, hidden_dim=32,
                      seq_len=8, vocab_size=64, window_pattern="SL",
                      value_embedding=False)
 
 
-def _plan(tmp: str, **overrides) -> mesh_train.MeshTrainPlan:
+def _config(tmp: str, **overrides) -> rt.MeshTrainConfig:
     values = dict(
-        train_parquet="train.parquet",
         tokenizer="tokenizer.nctoken",
-        out_dir=tmp,
-        config=_config(),
+        train_parquet="train.parquet",
         per_rank_batch=1,
         grad_accum=2,
         world_size=2,
         steps=4,
         save_every=2,
+        out_dir=tmp,
         flops_per_token=2.0,
         peak_flops=1000.0,
     )
     values.update(overrides)
-    return mesh_train.MeshTrainPlan(**values)
+    return rt.MeshTrainConfig(_model(), **values)
 
 
-class PlanTest(unittest.TestCase):
+class ConfigTest(unittest.TestCase):
     def test_derived_counts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            plan = _plan(tmp)
-            self.assertEqual(plan.sequence_length, 8)
-            self.assertEqual(plan.global_sequences, 4)
-            self.assertEqual(plan.tokens_per_step, 32)
+            config = _config(tmp)
+            self.assertEqual(config.sequence_length, 8)
+            self.assertEqual(config.global_sequences, 4)
+            self.assertEqual(config.tokens_per_step, 32)
+            self.assertEqual(config.metrics_path(),
+                             Path(tmp) / "metrics.jsonl")
+            self.assertEqual(config.checkpoint_path(),
+                             Path(tmp) / "checkpoint.ckpt")
 
     def test_job_json_round_trip(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            plan = _plan(tmp)
-            job = json.loads(plan.job_json())
-            self.assertEqual(job["data"]["tokenizer_path"], plan.tokenizer)
-            self.assertEqual(job["run"]["batch"], plan.global_sequences)
-            self.assertEqual(job["run"]["grad_accum"], plan.grad_accum)
+            config = _config(tmp)
+            job = json.loads(config.job_json())
+            self.assertEqual(job["data"]["tokenizer_path"],
+                             "tokenizer.nctoken")
+            self.assertEqual(job["run"]["batch"], 4)
+            self.assertEqual(job["run"]["grad_accum"], 2)
             self.assertEqual(job["mesh"]["count"], 2)
-            self.assertEqual(job["model"]["num_layers"],
-                             plan.config.num_layers)
+            self.assertEqual(job["model"]["num_layers"], 2)
 
-            rebuilt = rt.MeshTrainConfig.from_dict(
-                json.loads(plan.job_json()))
+            rebuilt = rt.MeshTrainConfig.from_dict(job)
             try:
-                again = json.loads(rebuilt.job_json())
+                self.assertEqual(rebuilt.tokens_per_step,
+                                 config.tokens_per_step)
+                self.assertEqual(rebuilt.out_dir, tmp)
             finally:
                 rebuilt.close()
-            self.assertEqual(again["run"]["batch"], job["run"]["batch"])
-            self.assertEqual(again["run"]["seed"], job["run"]["seed"])
-            self.assertEqual(again["model"]["window_pattern"],
-                             job["model"]["window_pattern"])
 
 
 _FAKE_ENTRY = """\
@@ -138,24 +138,40 @@ class LaunchTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             entry = _fake_entry(root, _FAKE_ENTRY)
-            plan = _plan(str(root / "out"))
-            live = mesh_train.launch(plan, root=root, entry=str(entry))
+            config = _config(str(root / "out"))
+            live = mesh_train.launch(config, root=root, entry=str(entry))
             code = live.wait(timeout=20)
 
             self.assertEqual(code, 0)
             self.assertIn("fake client", live.tail())
-            self.assertTrue((Path(plan.out_dir) / "worker.log").is_file())
+            self.assertTrue((Path(config.out_dir) / "worker.log").is_file())
             job = json.loads(
-                (Path(plan.out_dir) / "job.json").read_text(encoding="utf-8"))
-            self.assertEqual(job["data"]["tokenizer_path"], plan.tokenizer)
-            self.assertEqual(job["run"]["batch"], plan.global_sequences)
+                (Path(config.out_dir) / "job.json").read_text(encoding="utf-8"))
+            self.assertEqual(job["data"]["tokenizer_path"],
+                             "tokenizer.nctoken")
+            self.assertEqual(job["run"]["batch"], config.global_sequences)
+
+    def test_stream_prints_the_child_log(self) -> None:
+        import contextlib
+        import io
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            entry = _fake_entry(root, _FAKE_ENTRY)
+            config = _config(str(root / "out"))
+            live = mesh_train.launch(config, root=root, entry=str(entry))
+            buffer = io.StringIO()
+            with contextlib.redirect_stdout(buffer):
+                live.stream(interval=0.05)
+            live.wait(timeout=20)
+            self.assertIn("fake client", buffer.getvalue())
 
     def test_terminate_stops_a_sleeping_child(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             entry = _fake_entry(root, _SLEEP_ENTRY)
-            plan = _plan(str(root / "out"))
-            live = mesh_train.launch(plan, root=root, entry=str(entry))
+            config = _config(str(root / "out"))
+            live = mesh_train.launch(config, root=root, entry=str(entry))
             time.sleep(0.3)
             self.assertTrue(live.running())
             live.terminate(timeout=10)
