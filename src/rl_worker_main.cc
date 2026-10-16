@@ -174,16 +174,19 @@ bool LoadParameters(const std::vector<rf::Record>& records, Model* model,
       *error = "missing or malformed parameter record '" + name + "'";
       return false;
     }
-    std::vector<ComputeType> host(static_cast<std::size_t>(view.count));
+    std::vector<float> host(static_cast<std::size_t>(view.count));
     for (std::int64_t i = 0; i < view.count; ++i) {
-      StoreFloat(host.data() + i,
-                 rf::FloatAt(*source, static_cast<std::size_t>(i)));
+      host[static_cast<std::size_t>(i)] =
+          rf::FloatAt(*source, static_cast<std::size_t>(i));
     }
+    // The canonical persistent weight is the fp32 master; the compute copy is
+    // rebuilt from it (docs/precision.md section 5).
     nanochat::kernels::Memcpy(
-        view.value, host.data(),
-        static_cast<std::size_t>(view.count) * sizeof(ComputeType),
+        view.master, host.data(),
+        static_cast<std::size_t>(view.count) * sizeof(float),
         CopyDir::kHostToDevice);
   }
+  model->SyncCompute();
   return true;
 }
 

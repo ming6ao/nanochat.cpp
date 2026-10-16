@@ -192,6 +192,7 @@ void TestCapsProjection() {
   ExpectTrue(caps.device_name == h100->name,
              "the device name is the profile name");
   ExpectTrue(caps.Supports(nanochat::DType::kFp32), "h100 supports fp32");
+  ExpectTrue(caps.Supports(nanochat::DType::kBf16), "h100 supports bf16");
 
   const DeviceProfile* pascal = nanochat::FindDeviceProfile("gtx1080ti");
   ExpectTrue(pascal != nullptr, "gtx1080ti is in the table");
@@ -200,6 +201,8 @@ void TestCapsProjection() {
   ExpectTrue(!pascal_caps.has_tensor_cores, "Pascal has no tensor cores");
   ExpectTrue(pascal_caps.compute_major == 6 && pascal_caps.compute_minor == 1,
              "the host is compute capability 6.1");
+  ExpectTrue(!pascal_caps.Supports(nanochat::DType::kBf16),
+             "Pascal does not support bf16");
 }
 
 }  // namespace

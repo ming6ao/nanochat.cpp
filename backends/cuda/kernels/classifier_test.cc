@@ -50,13 +50,13 @@ void RunCase(int rows, int vocab, int padded, bool use_ignore,
   if (use_ignore) targets[rows / 2] = p.ignore_index;
 
   DevBuf<ComputeType> dlogits_in(ToStorage(logits));
-  DevBuf<ComputeType> losses(rows);
+  DevBuf<float> losses(rows);
   nanochat::kernels::ClassifierForward(p, dlogits_in.ptr, targets.data(),
                                        losses.ptr);
   nanochat::kernels::Synchronize();
 
   const std::vector<float> ref_losses = ClassifierForward(p, logits, targets);
-  CheckVectorClose(FromStorage(losses.Download()), ref_losses, 1e-4,
+  CheckVectorClose(losses.Download(), ref_losses, 1e-4,
                    (std::string(name) + " fwd").c_str());
 
   DevBuf<ComputeType> dlogits(rows * padded);

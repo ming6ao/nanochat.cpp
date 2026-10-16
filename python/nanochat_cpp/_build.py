@@ -28,6 +28,7 @@ from pathlib import Path
 __all__ = [
     "BuildError",
     "BuildOptions",
+    "SUPPORTED_PRECISIONS",
     "architecture",
     "backend",
     "build",
@@ -89,8 +90,12 @@ def cache_dir() -> Path:
     return Path.home() / ".cache" / CACHE_DIRNAME
 
 
+#: The build precisions the tree supports (docs/precision.md).
+SUPPORTED_PRECISIONS = ("fp32", "bf16")
+
+
 def precision() -> str:
-    """The requested precision. fp32 is the only value (docs/precision.md)."""
+    """The requested precision: ``"fp32"`` or ``"bf16"``."""
     return os.environ.get("NANOCHAT_CPP_PRECISION", "fp32").strip().lower()
 
 
@@ -256,10 +261,10 @@ def cached_library(key: str | None = None,
 
 def _config_flag(options: BuildOptions) -> str:
     """The named Bazel configuration for the requested backend."""
-    if options.precision != "fp32":
+    if options.precision not in SUPPORTED_PRECISIONS:
         raise BuildError(
-            f"{options.precision} is not a build precision: fp32 is the only "
-            "precision (docs/precision.md)")
+            f"{options.precision} is not a build precision: "
+            f"{' or '.join(SUPPORTED_PRECISIONS)} (docs/precision.md)")
     if options.backend == "cpu":
         return "--config=cpu"
     return "--config=cuda"
@@ -282,6 +287,10 @@ def _build_command(entry: Path, options: BuildOptions) -> list[str]:
     architecture selects the compiled target and not only the cache key.
     """
     command = [str(entry), "build", SHARED_TARGET, _config_flag(options)]
+    # A command-line flag wins over a value in `.bazelrc`, so the precision is
+    # explicit even though `--config=cpu` and `--config=cuda` also set one
+    # (docs/precision.md).
+    command.append(f"--define=precision={options.precision}")
     if options.backend == "cuda" and options.arch:
         command.append(f"--@rules_cuda//cuda:archs={options.arch}")
     return command

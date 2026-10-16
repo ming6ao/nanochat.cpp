@@ -57,11 +57,11 @@ __host__ __device__ inline int PaddedVocab(const ClassifierParams& params) {
 __global__ void ClassifierForwardKernel(const ClassifierParams params,
                                         const ComputeType* __restrict__ logits,
                                         const int* __restrict__ targets,
-                                        ComputeType* __restrict__ losses) {
+                                        float* __restrict__ losses) {
   const int row = blockIdx.x;
   const int target = targets[row];
   if (target == params.ignore_index) {
-    if (threadIdx.x == 0) losses[row] = ToComputeDev(0.0f);
+    if (threadIdx.x == 0) losses[row] = 0.0f;
     return;
   }
   const int padded = PaddedVocab(params);
@@ -72,7 +72,7 @@ __global__ void ClassifierForwardKernel(const ClassifierParams params,
   if (threadIdx.x == 0) {
     const float z_target =
         params.softcap * tanhf(AsFloatDev(lrow[target]) / params.softcap);
-    losses[row] = ToComputeDev(logf(sum_exp) + row_max - z_target);
+    losses[row] = logf(sum_exp) + row_max - z_target;
   }
 }
 
@@ -118,7 +118,7 @@ __global__ void ClassifierBackwardKernel(const ClassifierParams params,
 
 void ClassifierForward(const ClassifierParams& params,
                        const ComputeType* logits, const int* targets,
-                       ComputeType* losses) {
+                       float* losses) {
   if (params.rows <= 0 || params.vocab_size <= 0) return;
   const DeviceTargets device_targets(targets, params.rows);
   constexpr int kThreads = 256;

@@ -64,7 +64,7 @@ class NoopGradientSync final : public GradientSync {
  public:
   int rank() const override { return 0; }
   int world_size() const override { return 1; }
-  void AllReduceSum(ComputeType*, std::int64_t) override {}
+  void AllReduceSum(GradientType*, std::int64_t) override {}
 };
 
 class NcclGradientSync final : public GradientSync {
@@ -100,7 +100,7 @@ class NcclGradientSync final : public GradientSync {
     return ncclCommInitRank(&comm_, world_size_, id, rank_) == ncclSuccess;
   }
 
-  void AllReduceSum(ComputeType* buffer, std::int64_t count) override {
+  void AllReduceSum(GradientType* buffer, std::int64_t count) override {
     AllReduceSumAsync(buffer, count);
     Wait();
   }
@@ -109,7 +109,7 @@ class NcclGradientSync final : public GradientSync {
   // on the main stream overlaps it (docs/distributed-plan.md phase 2). The
   // side stream waits on an event recorded after the caller produced `buffer`
   // on the main stream.
-  void AllReduceSumAsync(ComputeType* buffer, std::int64_t count) override {
+  void AllReduceSumAsync(GradientType* buffer, std::int64_t count) override {
     if (buffer == nullptr || count <= 0) return;
     cuda_backend::CheckCuda(
         cudaEventRecord(ready_event_, cuda_backend::Stream()),

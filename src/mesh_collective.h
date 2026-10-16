@@ -40,8 +40,8 @@ class InProcessCollective {
   // `buffer` may point to device memory; the collective stages it through the
   // kernel seam. `local` is a caller-owned host scratch buffer, one per
   // participant, so no rank writes a slot another rank reads.
-  void AllReduce(int rank, ComputeType* buffer, std::int64_t count,
-                 std::vector<ComputeType>* local);
+  void AllReduce(int rank, GradientType* buffer, std::int64_t count,
+                 std::vector<GradientType>* local);
 
  private:
   // One reusable barrier phase. The last participant to arrive advances the
@@ -50,7 +50,7 @@ class InProcessCollective {
 
   std::mutex mutex_;
   std::condition_variable cv_;
-  std::vector<ComputeType> staging_;
+  std::vector<GradientType> staging_;
   int world_size_ = 1;
   int arrived_ = 0;
   int generation_ = 0;

@@ -91,14 +91,14 @@ int ChunkLength(std::int64_t count, std::int64_t chunk, int index) {
 }  // namespace
 
 bool RingAllReduceSum(Transport* next, Transport* prev, int rank,
-                      int world_size, ComputeType* buffer, std::int64_t count,
-                      ComputeType* scratch, AddFn add, TimePoint deadline,
+                      int world_size, GradientType* buffer, std::int64_t count,
+                      GradientType* scratch, AddFn add, TimePoint deadline,
                       ScheduleTrace* trace) {
   if (world_size <= 1 || count <= 0) return true;
   if (next == nullptr || prev == nullptr || add == nullptr) return false;
   const int n = world_size;
   const std::int64_t chunk = RingChunkSize(count, n);
-  const std::size_t element = sizeof(ComputeType);
+  const std::size_t element = sizeof(GradientType);
   const int next_rank = next->peer_rank();
   const int prev_rank = prev->peer_rank();
   auto offset = [chunk](int c) { return static_cast<std::int64_t>(c) * chunk; };
@@ -127,7 +127,7 @@ bool RingAllReduceSum(Transport* next, Transport* prev, int rank,
     const int slot = step % 2;
     const int recv_len = ChunkLength(count, chunk, recv_chunk);
     const int send_len = ChunkLength(count, chunk, send_chunk);
-    ComputeType* recv_dst = scratch + static_cast<std::int64_t>(slot) * chunk;
+    GradientType* recv_dst = scratch + static_cast<std::int64_t>(slot) * chunk;
     Token recv_token = prev->Recv(slot, recv_dst,
                                   static_cast<std::size_t>(recv_len) * element);
     Token send_token = next->Send(slot, buffer + offset(send_chunk),

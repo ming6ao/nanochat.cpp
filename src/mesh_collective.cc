@@ -22,7 +22,7 @@ class InProcessGradientSync final : public GradientSync {
   int rank() const override { return rank_; }
   int world_size() const override { return group_->world_size(); }
 
-  void AllReduceSum(ComputeType* buffer, std::int64_t count) override {
+  void AllReduceSum(GradientType* buffer, std::int64_t count) override {
     group_->AllReduce(rank_, buffer, count, &local_);
   }
 
@@ -31,7 +31,7 @@ class InProcessGradientSync final : public GradientSync {
   int rank_ = 0;
   // A private host scratch buffer, so the sum never writes a slot another rank
   // reads.
-  std::vector<ComputeType> local_;
+  std::vector<GradientType> local_;
 };
 
 }  // namespace
@@ -56,9 +56,9 @@ void InProcessCollective::WaitPhase() {
   cv_.wait(lock, [this, generation] { return generation_ != generation; });
 }
 
-void InProcessCollective::AllReduce(int rank, ComputeType* buffer,
+void InProcessCollective::AllReduce(int rank, GradientType* buffer,
                                     std::int64_t count,
-                                    std::vector<ComputeType>* local) {
+                                    std::vector<GradientType>* local) {
   if (world_size_ <= 1 || buffer == nullptr || count <= 0) return;
   const std::size_t elements = static_cast<std::size_t>(count);
   const std::size_t world = static_cast<std::size_t>(world_size_);
@@ -73,7 +73,7 @@ void InProcessCollective::AllReduce(int rank, ComputeType* buffer,
     }
     kernels::Memcpy(staging_.data() + static_cast<std::ptrdiff_t>(rank) *
                                           static_cast<std::ptrdiff_t>(elements),
-                    buffer, elements * sizeof(ComputeType),
+                    buffer, elements * sizeof(GradientType),
                     CopyDir::kDeviceToHost);
   }
   WaitPhase();  // every slot is written
@@ -89,13 +89,13 @@ void InProcessCollective::AllReduce(int rank, ComputeType* buffer,
             staging_.begin() + static_cast<std::ptrdiff_t>(elements),
             local->begin());
   for (int other = 1; other < world_size_; ++other) {
-    const ComputeType* slot =
+    const GradientType* slot =
         staging_.data() + static_cast<std::size_t>(other) * elements;
     for (std::size_t i = 0; i < elements; ++i) {
-      (*local)[i] = ToC(AsF((*local)[i]) + AsF(slot[i]));
+      (*local)[i] += slot[i];
     }
   }
-  kernels::Memcpy(buffer, local->data(), elements * sizeof(ComputeType),
+  kernels::Memcpy(buffer, local->data(), elements * sizeof(GradientType),
                   CopyDir::kHostToDevice);
   WaitPhase();  // every read is done before the next reduction
 }

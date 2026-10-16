@@ -23,6 +23,7 @@
 #include <type_traits>
 #include <vector>
 
+#include "nanochat/kernels.h"
 #include "nanochat/model.h"
 #include "src/model_impl.h"
 
@@ -49,9 +50,18 @@ std::string Format(const char* fmt, ...) {
   return std::string(buffer);
 }
 
-inline float AsF32(ComputeType value) { return value; }
+inline float AsF32(ComputeType value) { return static_cast<float>(value); }
 
-inline void StoreFloat(ComputeType* dst, float value) { *dst = value; }
+// Writes fp32 host values into the parameter's fp32 master. The caller then
+// calls `Model::SyncCompute()` to rebuild the compute copy
+// (docs/precision.md section 5). In the fp32 build the master aliases the
+// compute copy, so the pair of calls is a plain write.
+void StoreValues(const ParamView& view, const float* values) {
+  if (view.master == nullptr || view.count <= 0 || values == nullptr) return;
+  nanochat::kernels::Memcpy(
+      view.master, values, static_cast<std::size_t>(view.count) * sizeof(float),
+      nanochat::CopyDir::kHostToDevice);
+}
 
 struct Rng {
   std::uint64_t state;
@@ -70,6 +80,15 @@ struct Rng {
 };
 
 int Run() {
+  // The check is a central finite difference with a step of 1e-2. A bf16 store
+  // has 7 mantissa bits, so the perturbed loss is a step function of the
+  // perturbation and the difference is meaningless. The bf16 parity gate is the
+  // bf16 numeric trace (docs/precision.md section 6, Stage 2).
+#if !defined(NANOCHAT_PRECISION_FP32)
+  std::printf(
+      "model_gradient: skipped (bf16 build; a finite difference needs fp32)\n");
+  return 0;
+#endif
   Config config;
   config.num_layers = 2;
   config.num_heads = 8;
@@ -95,18 +114,22 @@ int Run() {
     for (const ParamView& view : views) {
       const std::string name(view.name);
       if (name.find("c_proj.weight") == std::string::npos) continue;
+      std::vector<float> host(static_cast<std::size_t>(view.count));
       for (std::int64_t i = 0; i < view.count; ++i) {
-        StoreFloat(view.value + i, 0.05f * rng.Uniform());
+        host[static_cast<std::size_t>(i)] = 0.05f * rng.Uniform();
       }
+      StoreValues(view, host.data());
     }
     // `smear_lambda` is initialized to zero (gate disabled). Set it nonzero so
     // the smear gate participates and the finite difference covers
     // SmearBackward's elementwise input gradient.
     for (const ParamView& view : views) {
       if (std::string(view.name) == "smear_lambda") {
-        StoreFloat(view.value, 0.7f);
+        const float value = 0.7f;
+        StoreValues(view, &value);
       }
     }
+    model->SyncCompute();
   }
 
   std::vector<int> tokens(static_cast<std::size_t>(rows));
@@ -129,7 +152,7 @@ int Run() {
     base[k].resize(static_cast<std::size_t>(count));
     analytic[k].resize(static_cast<std::size_t>(count));
     for (std::int64_t i = 0; i < count; ++i) {
-      base[k][static_cast<std::size_t>(i)] = AsF32(views[k].value[i]);
+      base[k][static_cast<std::size_t>(i)] = views[k].master[i];
       analytic[k][static_cast<std::size_t>(i)] = AsF32(views[k].grad[i]);
     }
   }
@@ -158,32 +181,37 @@ int Run() {
 
     // p + h*d
     for (std::size_t k = 0; k < views.size(); ++k) {
+      std::vector<float> host(static_cast<std::size_t>(views[k].count));
       for (std::int64_t i = 0; i < views[k].count; ++i) {
-        StoreFloat(views[k].value + i,
-                   base[k][static_cast<std::size_t>(i)] +
-                       h * dir[k][static_cast<std::size_t>(i)]);
+        host[static_cast<std::size_t>(i)] =
+            base[k][static_cast<std::size_t>(i)] +
+            h * dir[k][static_cast<std::size_t>(i)];
       }
+      StoreValues(views[k], host.data());
     }
+    model->SyncCompute();
     const float loss_plus =
         model->ForwardLoss(tokens.data(), targets.data(), batch, seq);
 
     // p - h*d
     for (std::size_t k = 0; k < views.size(); ++k) {
+      std::vector<float> host(static_cast<std::size_t>(views[k].count));
       for (std::int64_t i = 0; i < views[k].count; ++i) {
-        StoreFloat(views[k].value + i,
-                   base[k][static_cast<std::size_t>(i)] -
-                       h * dir[k][static_cast<std::size_t>(i)]);
+        host[static_cast<std::size_t>(i)] =
+            base[k][static_cast<std::size_t>(i)] -
+            h * dir[k][static_cast<std::size_t>(i)];
       }
+      StoreValues(views[k], host.data());
     }
+    model->SyncCompute();
     const float loss_minus =
         model->ForwardLoss(tokens.data(), targets.data(), batch, seq);
 
     // Restore exactly.
     for (std::size_t k = 0; k < views.size(); ++k) {
-      for (std::int64_t i = 0; i < views[k].count; ++i) {
-        StoreFloat(views[k].value + i, base[k][static_cast<std::size_t>(i)]);
-      }
+      StoreValues(views[k], base[k].data());
     }
+    model->SyncCompute();
 
     const double numeric =
         (static_cast<double>(loss_plus) - static_cast<double>(loss_minus)) /

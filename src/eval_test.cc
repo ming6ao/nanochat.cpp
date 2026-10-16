@@ -85,7 +85,7 @@ int Argmax(const ComputeType* row, int vocab) {
 // Runs `ForwardLoss` on the hand-built targets and stages the saved losses and
 // raw logits, the reference the primitive must reproduce.
 struct Reference {
-  std::vector<ComputeType> losses;
+  std::vector<float> losses;
   std::vector<ComputeType> logits;
 };
 
@@ -98,10 +98,9 @@ Reference RunReference(Model* model, const std::vector<int>& tokens,
   const int padded_vocab = model->config().padded_vocab_size;
   Reference reference;
   reference.losses.resize(static_cast<std::size_t>(rows));
-  nanochat::kernels::Memcpy(
-      reference.losses.data(), impl->losses(),
-      static_cast<std::size_t>(rows) * sizeof(ComputeType),
-      CopyDir::kDeviceToHost);
+  nanochat::kernels::Memcpy(reference.losses.data(), impl->losses(),
+                            static_cast<std::size_t>(rows) * sizeof(float),
+                            CopyDir::kDeviceToHost);
   reference.logits.resize(static_cast<std::size_t>(rows) * padded_vocab);
   nanochat::kernels::Memcpy(
       reference.logits.data(), impl->raw_logits(),
@@ -176,8 +175,7 @@ void CheckShapeMaskingAndFocus() {
           static_cast<std::size_t>(b) * seq + static_cast<std::size_t>(p);
       if (valid) {
         CheckClosed(
-            result.nll[static_cast<std::size_t>(p)],
-            nanochat::AsF(reference.losses[index]),
+            result.nll[static_cast<std::size_t>(p)], reference.losses[index],
             "nll row " + std::to_string(b) + " position " + std::to_string(p));
         const ComputeType* lrow =
             reference.logits.data() + index * static_cast<std::size_t>(padded);
@@ -259,7 +257,7 @@ void CheckFullLengthNoFocus() {
         }
       } else {
         CheckClosed(result.nll[static_cast<std::size_t>(p)],
-                    nanochat::AsF(reference.losses[index]), "full-length nll");
+                    reference.losses[index], "full-length nll");
       }
     }
   }

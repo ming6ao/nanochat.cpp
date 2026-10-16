@@ -46,7 +46,7 @@ class TrainModel final : public Model {
   // Per-row cross-entropy (nats) saved by the most recent ForwardLoss; length
   // `last_batch() * last_seq()`. `EvalBpb` sums these before dividing by bytes.
   // The grad-mode forward writes the eval-mode buffer instead.
-  const ComputeType* losses() const { return ActiveLosses(); }
+  const float* losses() const { return ActiveLosses(); }
   int last_batch() const { return batch_; }
   int last_seq() const { return seq_; }
   // Bytes reserved by the arena the active grad mode uses (docs/eval.md).
@@ -84,7 +84,7 @@ class TrainModel final : public Model {
   struct Param {
     std::string name;
     ComputeType* value = nullptr;
-    ComputeType* grad = nullptr;
+    GradientType* grad = nullptr;
     float* master = nullptr;
     std::int64_t count = 0;
     int rows = 0;
@@ -108,7 +108,7 @@ class TrainModel final : public Model {
   // valid-target count). A non-null `row_weights` multiplies row `r` by
   // `row_weights[r] * scale / divisor` after the softcap chain rule.
   void BackwardInternal(const float* row_weights, float scale, float divisor);
-  const ComputeType* ActiveLosses() const {
+  const float* ActiveLosses() const {
     return grad_enabled_ ? losses_ : eval_losses_;
   }
   void BuildRope(int seq);
@@ -120,19 +120,19 @@ class TrainModel final : public Model {
   std::vector<ops::BlockActivations> lacts_;
 
   ComputeType* wte_ = nullptr;
-  ComputeType* wte_grad_ = nullptr;
+  GradientType* wte_grad_ = nullptr;
   ComputeType* lm_head_ = nullptr;
-  ComputeType* lm_head_grad_ = nullptr;
+  GradientType* lm_head_grad_ = nullptr;
   ComputeType* resid_ = nullptr;
-  ComputeType* resid_grad_ = nullptr;
+  GradientType* resid_grad_ = nullptr;
   ComputeType* x0_lambda_ = nullptr;
-  ComputeType* x0_lambda_grad_ = nullptr;
+  GradientType* x0_lambda_grad_ = nullptr;
   ComputeType* smear_gate_ = nullptr;
-  ComputeType* smear_gate_grad_ = nullptr;
+  GradientType* smear_gate_grad_ = nullptr;
   ComputeType* smear_lambda_ = nullptr;
-  ComputeType* smear_lambda_grad_ = nullptr;
+  GradientType* smear_lambda_grad_ = nullptr;
   ComputeType* backout_lambda_ = nullptr;
-  ComputeType* backout_lambda_grad_ = nullptr;
+  GradientType* backout_lambda_grad_ = nullptr;
 
   // Global activations and gradient scratch, all carved from `workspace_`.
   ComputeType* emb_raw_ = nullptr;
@@ -146,7 +146,7 @@ class TrainModel final : public Model {
   float* smear_sig_ = nullptr;
   ComputeType* raw_logits_ = nullptr;
   ComputeType* dlogits_ = nullptr;
-  ComputeType* losses_ = nullptr;
+  float* losses_ = nullptr;
   ComputeType* dx_final_norm_ = nullptr;
   ComputeType* dx_final_pre_ = nullptr;
   ComputeType* dbackout_ = nullptr;
@@ -175,7 +175,7 @@ class TrainModel final : public Model {
   ComputeType* eval_x_final_pre_ = nullptr;
   ComputeType* eval_x_final_norm_ = nullptr;
   ComputeType* eval_logits_ = nullptr;
-  ComputeType* eval_losses_ = nullptr;
+  float* eval_losses_ = nullptr;
   float* eval_rstd_emb_ = nullptr;
   float* eval_rstd_final_ = nullptr;
   float* eval_smear_sig_ = nullptr;
@@ -196,7 +196,7 @@ class TrainModel final : public Model {
 
   // Host staging for the per-token losses so `ForwardLoss` can sum them
   // without dereferencing device memory.
-  std::vector<ComputeType> losses_host_;
+  std::vector<float> losses_host_;
 
   // Host copy of the current batch, so Backward() (which takes no arguments)
   // sees exactly the ids ForwardLoss() ran with.

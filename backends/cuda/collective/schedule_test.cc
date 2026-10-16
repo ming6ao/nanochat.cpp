@@ -24,6 +24,7 @@
 namespace {
 
 using nanochat::ComputeType;
+using nanochat::GradientType;
 using nanochat::cuda_backend::AddFn;
 using nanochat::cuda_backend::JudgeScheduleTrace;
 using nanochat::cuda_backend::MemoryBus;
@@ -41,7 +42,7 @@ void Fail(const std::string& message) {
   ++g_failures;
 }
 
-void HostAdd(ComputeType* dst, const ComputeType* src, std::int64_t count) {
+void HostAdd(GradientType* dst, const GradientType* src, std::int64_t count) {
   for (std::int64_t i = 0; i < count; ++i) dst[i] += src[i];
 }
 
@@ -52,9 +53,9 @@ float RankValue(int rank, std::int64_t index) {
 // Runs one ring all-reduce across `world` logical ranks in one process.
 void RunWorld(int world, int count) {
   auto bus = std::make_shared<MemoryBus>();
-  std::vector<std::vector<ComputeType>> buffers(
+  std::vector<std::vector<GradientType>> buffers(
       static_cast<std::size_t>(world));
-  std::vector<std::vector<ComputeType>> scratch(
+  std::vector<std::vector<GradientType>> scratch(
       static_cast<std::size_t>(world));
   std::vector<std::unique_ptr<MemoryTransport>> next(
       static_cast<std::size_t>(world));
@@ -68,7 +69,7 @@ void RunWorld(int world, int count) {
         static_cast<std::size_t>(count));
     for (int i = 0; i < count; ++i) {
       buffers[static_cast<std::size_t>(r)][static_cast<std::size_t>(i)] =
-          static_cast<ComputeType>(RankValue(r, i));
+          RankValue(r, i);
     }
     const std::int64_t chunk = RingChunkSize(count, world);
     scratch[static_cast<std::size_t>(r)].assign(
@@ -136,8 +137,8 @@ void RunTimeout() {
   next.RegisterWindow(nullptr, 0);
   prev.RegisterWindow(nullptr, 0);
   constexpr int kCount = 8;
-  std::vector<ComputeType> buffer(kCount, 1.0f);
-  std::vector<ComputeType> scratch(2 * kCount, 0.0f);
+  std::vector<GradientType> buffer(kCount, 1.0f);
+  std::vector<GradientType> scratch(2 * kCount, 0.0f);
   const TimePoint deadline =
       std::chrono::steady_clock::now() + std::chrono::milliseconds(200);
   const bool ok = RingAllReduceSum(&next, &prev, 0, 2, buffer.data(), kCount,

@@ -92,6 +92,7 @@ Caps CapsFromProfile(const DeviceProfile& profile) {
   caps.has_cublas = true;
   caps.has_tensor_cores = profile.has_tensor_cores;
   caps.supports_fp32 = true;
+  caps.supports_bf16 = profile.supports_bf16;
   caps.device_name = profile.name;
   return caps;
 }

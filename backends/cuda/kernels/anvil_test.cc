@@ -22,7 +22,6 @@ using nanochat::ComputeType;
 using nanochat::dev::CheckVectorClose;
 using nanochat::dev::DevBuf;
 using nanochat::dev::Failures;
-using nanochat::dev::FromStorage;
 using nanochat::dev::RandomVec;
 using nanochat::dev::Rng;
 using nanochat::dev::ToStorage;
@@ -69,13 +68,13 @@ void RunCase(int num_params, int rows, int cols, int red_dim, int num_maps,
   Rng rng;
   const std::vector<float> g_float = RandomVec(total, &rng);
   const std::vector<float> p_float = RandomVec(total, &rng);
-  const std::vector<float> g0 = FromStorage(ToStorage(g_float));
-  const std::vector<float> p0 = FromStorage(ToStorage(p_float));
+  const std::vector<float> g0 = g_float;
+  const std::vector<float> p0 = p_float;
   std::vector<float> velocity_ref(static_cast<std::size_t>(2) * total, 0.0f);
   std::vector<float> lane_ref(static_cast<std::size_t>(num_params) * lane_count,
                               0.0f);
 
-  DevBuf<ComputeType> grads(ToStorage(g0));
+  DevBuf<float> grads(g0);
   DevBuf<float> master(p0);
   DevBuf<ComputeType> params_dev(ToStorage(p0));
   DevBuf<float> velocity(velocity_ref);
@@ -127,15 +126,16 @@ int main() {
 
   // rows/cols <= 0 is a no-op.
   {
-    DevBuf<ComputeType> one(1);
+    DevBuf<float> one_grad(1);
+    DevBuf<ComputeType> one_value(1);
     DevBuf<float> one_master(1);
     DevBuf<float> onef(1);
     DevBuf<float> onef2(2);
     AnvilParams bad;
     bad.rows = 0;
     bad.cols = 0;
-    nanochat::kernels::AnvilUpdate(bad, one.ptr, one_master.ptr, one.ptr,
-                                   onef2.ptr, onef.ptr);
+    nanochat::kernels::AnvilUpdate(bad, one_grad.ptr, one_master.ptr,
+                                   one_value.ptr, onef2.ptr, onef.ptr);
     nanochat::kernels::Synchronize();
   }
 

@@ -29,7 +29,7 @@ class DataLoader;
 struct ParamView {
   const char* name = "";
   ComputeType* value = nullptr;
-  ComputeType* grad = nullptr;
+  GradientType* grad = nullptr;
   float* master = nullptr;
   std::int64_t count = 0;
   int rows = 0;

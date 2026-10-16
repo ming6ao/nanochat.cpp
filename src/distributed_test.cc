@@ -30,11 +30,11 @@
 
 namespace {
 
-using nanochat::ComputeType;
 using nanochat::DistributedConfig;
 using nanochat::DocumentSource;
 using nanochat::DocumentSourceFactory;
 using nanochat::GradientSync;
+using nanochat::GradientType;
 
 int g_failures = 0;
 
@@ -43,11 +43,8 @@ void Fail(const std::string& message) {
   ++g_failures;
 }
 
-std::vector<ComputeType> MakeBuffer(const std::vector<float>& values) {
-  std::vector<ComputeType> buffer(values.size());
-  for (std::size_t i = 0; i < values.size(); ++i) {
-    buffer[i] = nanochat::ToC(values[i]);
-  }
+std::vector<GradientType> MakeBuffer(const std::vector<float>& values) {
+  std::vector<GradientType> buffer(values.begin(), values.end());
   return buffer;
 }
 
@@ -77,7 +74,7 @@ int FindFreePort() {
 
 // Joins the group as `rank` and reduces `start` once. Returns true when the
 // reduced buffer equals `expected`.
-bool RunRank(int rank, int port, const std::vector<ComputeType>& start,
+bool RunRank(int rank, int port, const std::vector<GradientType>& start,
              const std::vector<float>& expected) {
   DistributedConfig config;
   config.rank = rank;
@@ -87,10 +84,10 @@ bool RunRank(int rank, int port, const std::vector<ComputeType>& start,
   std::unique_ptr<GradientSync> sync = nanochat::CreateGradientSync(config);
   if (sync == nullptr) return false;
   if (sync->rank() != rank || sync->world_size() != 2) return false;
-  std::vector<ComputeType> buffer = start;
+  std::vector<GradientType> buffer = start;
   sync->AllReduceSum(buffer.data(), static_cast<std::int64_t>(buffer.size()));
   for (std::size_t i = 0; i < buffer.size(); ++i) {
-    if (std::fabs(nanochat::AsF(buffer[i]) - expected[i]) > 1e-4f) return false;
+    if (std::fabs(buffer[i] - expected[i]) > 1e-4f) return false;
   }
   return true;
 }

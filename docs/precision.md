@@ -1,8 +1,9 @@
 # Precision policy
 
-Status: accepted. Stage 1 is complete; Stage 2 comes later. This document
-defines the precision policy for every host. One build has one compute type.
-The tree uses fp32 and bf16 only. It holds no fp16 code.
+Status: accepted. Stage 1 is complete. Stage 2 is delivered for the C++ and
+CUDA surfaces. This document defines the precision policy for every host. One
+build has one compute type. The tree uses fp32 and bf16 only. It holds no fp16
+code.
 
 ## 1. Decision
 
@@ -72,11 +73,11 @@ precision set.
 | Kaggle T4 | sm_75 | fp32 | fp32 | `--config=t4` |
 | Ampere and newer | sm_80 and sm_90 | bf16 | fp32 | `--config=bf16` |
 
-The Ampere row is Stage 2. It comes later (section 6).
+The Ampere row is Stage 2, which is delivered (section 6).
 
-The named targets follow the table. The `a100` target takes bf16 in Stage 2. The
-`h100` target is fp32 today and takes bf16 in Stage 2. The `h200` target is
-fp16 today and takes fp32 in Stage 1, then bf16 in Stage 2.
+The named targets follow the table. The `a100` target is sm_80 with bf16. The
+`h100` and `h200` targets are sm_90 with bf16. `--config=bf16` selects the bf16
+compute type on any architecture.
 
 ## 5. Storage rule
 
@@ -159,24 +160,75 @@ Result: the gate passes. `tools/nanochat build`, `tools/nanochat test`, and
 processing unit and the simulator. The `sm_90` compile gate passes at fp32. No
 target name, flag, or type name contains "fp16".
 
-### Stage 2: add the bf16 compute path for Ampere and newer (pending)
+### Stage 2: add the bf16 compute path for Ampere and newer (delivered)
 
-Some groundwork already exists. The tree holds the `Bf16` type, the
-`DType::kBf16` tag, the `supports_bf16` field, and the bf16 rates. The compute
-path is the remaining work.
+The tree has the `Bf16` type, the `DType::kBf16` tag, device-profile bf16
+support, and bf16 peak rates. This stage adds the compute path.
 
-1. Add `Caps::supports_bf16` and extend `Caps::Supports`.
-2. Wire `supports_bf16` from `src/device_profile.cc` into `Caps`.
-3. Add the bf16 GEMM. Use `cublasGemmEx` with `CUDA_R_16BF` and
-   `CUBLAS_COMPUTE_32F`.
-4. Add the mixed storage seam: bf16 activations, and fp32 master weights,
-   gradients, moments, and statistics.
-5. Add `--config=bf16`, and move the `a100`, `h100`, and `h200` targets to it.
-6. Add the bf16 leg to the simulator, the emulator, and the numeric trace.
-7. Keep the persistent state in fp32 (section 5).
+Use this type contract:
 
-Stage 2 needs the fp32 gradient seam change. It needs no loss scaling. Other
-documents call this stage "Stage 2a".
+- Keep master weights, parameter gradients, optimizer state, loss values, and
+  reduction statistics in fp32.
+- Store parameter compute copies, activations, activation gradients, GEMM
+  operands, and the key/value cache in bf16.
+- Accumulate GEMM products and reductions in fp32. Store activation outputs as
+  bf16, and store weight-gradient outputs as fp32.
+- Accumulate embedding gradients directly into fp32 parameter-gradient buffers.
+- Round each stored bf16 value to nearest-even. Do not use loss scaling.
+
+Delivered:
+
+1. `ComputeType` selection. `include/nanochat/tensor.h` selects `float` for
+   `NANOCHAT_PRECISION_FP32` and `Bf16` for `NANOCHAT_PRECISION_BF16`. The bf16
+   item adds `Bf16(float)`, `operator float`, and the compound assignments, and
+   the conversion helpers are `__host__ __device__`.
+2. `GradientType` is fp32 in every build. `ParamView::grad` and the optimizer
+   buffers use it, so a parameter gradient is never bf16.
+3. `Caps::supports_bf16`. `CapsFromProfile` copies it from the device profile,
+   the CUDA backend sets it from `major >= 8`, and the CPU reference reports it.
+   `Caps::Supports(DType::kBf16)` reports it. `Model::Create` fails fast when
+   the build compute type is not supported by the device.
+4. A CPU bf16 reference path. The reference stores bf16 where the compute type
+   is bf16 and accumulates in fp32 or double, so the CPU records the same
+   rounding the device does.
+5. The bf16 GEMM. `Gemm` uses `cublasGemmEx` with `CUDA_R_16BF` operands and
+   `CUBLAS_COMPUTE_32F`. The new `GemmWgrad` entry point writes an fp32 result,
+   so the weight-gradient GEMM reads bf16 operands and accumulates into fp32.
+6. The CUDA bf16 kernels. `AtomicAddDev` gains a bf16 compare-and-swap form
+   (a half-word write cannot use the native atomic add), and the embedding
+   scatter-add, the value-gate weight gradient, and the global norm write fp32.
+7. The optimizer path. `AdamWUpdate`, `MuonUpdate`, and `AnvilUpdate` read fp32
+   gradients and keep fp32 moments, then write the bf16 compute copy.
+8. The checkpoint path. The canonical record stays fp32. `CollectModelRecords`
+   reads the master, a load writes the master and rebuilds the compute copy,
+   and a load accepts an fp32 or a bf16 record in any build.
+9. `--config=bf16`, and the `a100` target at sm_80. The `h100` and `h200`
+   targets at sm_90 select bf16 too.
+10. The Python surface. `Model.dtype` and `TensorView.dtype` report the compute
+    type, and the parameter view reads and writes Python floats for both
+    fp32 and bf16.
+11. The simulator and the emulator. The simulated device reports
+    `supports_bf16`, the emulator tests bf16 conversion, and the kernel
+    emulator tolerance carries the bf16 storage granularity.
+
+Gate: `tools/nanochat build`, `tools/nanochat build --config=bf16`,
+`tools/nanochat test`, `tools/nanochat test --config=bf16`, and
+`tools/nanochat lint` pass. The compile gate passes for `a100`, `h100`, and
+`h200`. The fp32 build keeps every committed fp32 golden.
+
+#### What the bf16 leg does not cover yet
+
+A bf16 build cannot reproduce a committed fp32 golden, so a test that compares
+against one prints a skip. Those tests keep their full strength in the fp32
+build. The skipped legs are the numeric trace, the oracle, the training parity,
+the scoring parity, the model oracle, the model gradient, and the two Python
+fixtures. A bf16 build still runs every one of those code paths through the
+tests that do not compare against a golden. The in-build two-path checks run in
+both builds with a precision-aware bound.
+
+The bf16 numeric trace is the remaining work. It needs its own committed golden,
+produced by the bf16 CPU emitter, and its own tolerance table. The fp32 trace and
+its tolerances stay unchanged. Other documents call this stage "Stage 2a".
 
 ## 7. What this avoids
 
@@ -189,8 +241,8 @@ Stage 2 removes the loss-scaling project:
 - the inf and nan detection and the step skip;
 - the half to fp32 gradient unscale.
 
-Stage 2 removes the fp16 master-weight mirror. The fp32 build needs no mirror,
-because the master weight aliases the parameter.
+Stage 2 keeps one fp32 master weight and adds a bf16 compute copy for bf16
+builds. In an fp32 build, the master weight still aliases the parameter.
 
 The checkpoint format is precision-independent. The model saves an fp32 master
 with no dtype tag (`src/model.cc:1040`). No migration is necessary.
@@ -203,10 +255,15 @@ with no dtype tag (`src/model.cc:1040`). No migration is necessary.
 - The attention kernel does not use tensor cores today (`docs/build.md`).
   Attention runs at the fp32 rate in either case. The realized loss is below
   8 times.
-- Stage 1 touches every backend, the simulator, and the tests. Land it as one
-  change, and keep the fp32 gates green.
-- The `h200` target is fp32 until Stage 2.
-- Stage 2 is new code. Keep the fp32 build as the correctness gate.
+- Stage 1 touches every backend, the simulator, and the tests. Stage 2 touches
+  the same set again, because the fp32 build stays the correctness gate and
+  must pass unchanged.
+- The `h200` target is sm_90 with bf16, like `h100`.
+- A bf16 build cannot reproduce a committed fp32 golden, so the golden-fixture
+  gates run in the fp32 build and print a skip in the bf16 build. The bf16
+  numeric trace is the remaining leg (section 6).
+- Stage 2 is new code. The fp32 build is still the correctness gate, and the
+  tree keeps every fp32 test at its recorded tolerance.
 
 ## 9. Decisions on the former open questions
 
@@ -224,6 +281,10 @@ with no dtype tag (`src/model.cc:1040`). No migration is necessary.
 4. **The dangling references.** Fixed in Stage 1. `.bazelrc` points to
    `docs/build.md` and `docs/python.md`. `tools/sandbox/profiles.conf` points to
    `docs/host-portability.md`.
+5. **The bf16 gate.** The fp32 build stays the golden gate. In a bf16 build the
+   golden-fixture tests print a skip, and the in-build equality checks run with a
+   bound derived from the storage precision. The bf16 numeric trace becomes the
+   bf16 gate when it lands.
 
 ## See also
 

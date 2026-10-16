@@ -41,14 +41,14 @@ class GradientSync {
   // Replaces `buffer` (length `count`) with the elementwise sum across every
   // rank. The sum, not the mean, keeps the global batch constant on any rank
   // count.
-  virtual void AllReduceSum(ComputeType* buffer, std::int64_t count) = 0;
+  virtual void AllReduceSum(GradientType* buffer, std::int64_t count) = 0;
 
   // The asynchronous form. The reduction
   // runs on the backend's side stream and the call returns before it finishes.
   // The caller must not touch `buffer` until `Wait` returns. The default
   // implementation is synchronous, so a single-stream backend such as the host
   // reference stays correct.
-  virtual void AllReduceSumAsync(ComputeType* buffer, std::int64_t count) {
+  virtual void AllReduceSumAsync(GradientType* buffer, std::int64_t count) {
     AllReduceSum(buffer, count);
   }
 

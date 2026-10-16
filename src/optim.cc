@@ -26,6 +26,7 @@
 #include <cstring>
 #include <map>
 #include <string>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -48,8 +49,12 @@ float DmodelLrScale(int hidden_dim) {
   return std::sqrt(kDmodelRef / static_cast<float>(hidden_dim));
 }
 
-std::size_t ElementBytes(std::int64_t count) {
+std::size_t ComputeBytes(std::int64_t count) {
   return static_cast<std::size_t>(count) * sizeof(ComputeType);
+}
+
+std::size_t GradientBytes(std::int64_t count) {
+  return static_cast<std::size_t>(count) * sizeof(GradientType);
 }
 
 enum class AdamWKind {
@@ -545,7 +550,7 @@ class NanochatOptimizer final : public Optimizer {
     total_count_ = total;
 
     flat_ =
-        static_cast<ComputeType*>(kernels::Alloc(ElementBytes(total_count_)));
+        static_cast<GradientType*>(kernels::Alloc(GradientBytes(total_count_)));
     norm_dev_ = static_cast<float*>(kernels::Alloc(sizeof(float)));
 
     for (AdamWGroup& group : adamw_groups_) {
@@ -567,10 +572,13 @@ class NanochatOptimizer final : public Optimizer {
       const std::int64_t mat_total =
           static_cast<std::int64_t>(group.num_params) * group.mat;
       group.stacked_values =
-          static_cast<ComputeType*>(kernels::Alloc(ElementBytes(mat_total)));
-      // The fp32 master is the stacked value buffer (docs/precision.md
-      // section 5).
-      group.stacked_master = reinterpret_cast<float*>(group.stacked_values);
+          static_cast<ComputeType*>(kernels::Alloc(ComputeBytes(mat_total)));
+      if constexpr (std::is_same_v<ComputeType, float>) {
+        group.stacked_master = reinterpret_cast<float*>(group.stacked_values);
+      } else {
+        group.stacked_master = static_cast<float*>(kernels::Alloc(
+            static_cast<std::size_t>(mat_total) * sizeof(float)));
+      }
       group.buf1 = static_cast<float*>(
           kernels::Alloc(static_cast<std::size_t>(mat_total) * sizeof(float)));
       group.buf2 = static_cast<float*>(kernels::Alloc(
@@ -592,10 +600,13 @@ class NanochatOptimizer final : public Optimizer {
       const std::int64_t lane_total =
           static_cast<std::int64_t>(group.num_params) * group.lane_count;
       group.stacked_values =
-          static_cast<ComputeType*>(kernels::Alloc(ElementBytes(mat_total)));
-      // The fp32 master is the stacked value buffer (docs/precision.md
-      // section 5).
-      group.stacked_master = reinterpret_cast<float*>(group.stacked_values);
+          static_cast<ComputeType*>(kernels::Alloc(ComputeBytes(mat_total)));
+      if constexpr (std::is_same_v<ComputeType, float>) {
+        group.stacked_master = reinterpret_cast<float*>(group.stacked_values);
+      } else {
+        group.stacked_master = static_cast<float*>(kernels::Alloc(
+            static_cast<std::size_t>(mat_total) * sizeof(float)));
+      }
       group.velocity = static_cast<float*>(kernels::Alloc(
           static_cast<std::size_t>(2 * mat_total) * sizeof(float)));
       group.lane_energy = static_cast<float*>(
@@ -621,11 +632,19 @@ class NanochatOptimizer final : public Optimizer {
     }
     for (MuonGroup& group : muon_groups_) {
       if (group.stacked_values != nullptr) kernels::Free(group.stacked_values);
+      if constexpr (!std::is_same_v<ComputeType, float>) {
+        if (group.stacked_master != nullptr)
+          kernels::Free(group.stacked_master);
+      }
       if (group.buf1 != nullptr) kernels::Free(group.buf1);
       if (group.buf2 != nullptr) kernels::Free(group.buf2);
     }
     for (AnvilGroup& group : anvil_groups_) {
       if (group.stacked_values != nullptr) kernels::Free(group.stacked_values);
+      if constexpr (!std::is_same_v<ComputeType, float>) {
+        if (group.stacked_master != nullptr)
+          kernels::Free(group.stacked_master);
+      }
       if (group.velocity != nullptr) kernels::Free(group.velocity);
       if (group.lane_energy != nullptr) kernels::Free(group.lane_energy);
     }
@@ -636,7 +655,7 @@ class NanochatOptimizer final : public Optimizer {
   // Copy every gradient into the flat buffer, in grouping order.
   void GatherGradients() {
     ForEachParam([&](const ParamView& view, std::int64_t offset) {
-      kernels::Memcpy(flat_ + offset, view.grad, ElementBytes(view.count),
+      kernels::Memcpy(flat_ + offset, view.grad, GradientBytes(view.count),
                       CopyDir::kDeviceToDevice);
     });
   }
@@ -663,7 +682,7 @@ class NanochatOptimizer final : public Optimizer {
                       static_cast<std::size_t>(group.mat) * sizeof(float),
                       CopyDir::kDeviceToDevice);
       kernels::Memcpy(group.params[static_cast<std::size_t>(i)].value,
-                      group.stacked_values + offset, ElementBytes(group.mat),
+                      group.stacked_values + offset, ComputeBytes(group.mat),
                       CopyDir::kDeviceToDevice);
     }
   }
@@ -710,7 +729,7 @@ class NanochatOptimizer final : public Optimizer {
   std::vector<AdamWGroup> adamw_groups_;
   std::vector<MuonGroup> muon_groups_;
   std::vector<AnvilGroup> anvil_groups_;
-  ComputeType* flat_ = nullptr;
+  GradientType* flat_ = nullptr;
   float* norm_dev_ = nullptr;
   std::int64_t total_count_ = 0;
   float grad_norm_ = 0.0f;

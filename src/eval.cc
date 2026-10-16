@@ -51,13 +51,13 @@ float EvalBpb(Model* model, DataLoader* loader, int steps) {
     if (!loader->Next(tokens.data(), targets.data())) break;
     model->ForwardLoss(tokens.data(), targets.data(), batch, seq);
     auto* impl = static_cast<TrainModel*>(model);
-    const ComputeType* losses = impl->losses();
+    const float* losses = impl->losses();
     if (losses == nullptr) break;
     // Stage the per-token losses once; the CUDA backend keeps them in device
     // memory.
-    std::vector<ComputeType> losses_host(static_cast<std::size_t>(rows));
+    std::vector<float> losses_host(static_cast<std::size_t>(rows));
     kernels::Memcpy(losses_host.data(), losses,
-                    static_cast<std::size_t>(rows) * sizeof(ComputeType),
+                    static_cast<std::size_t>(rows) * sizeof(float),
                     CopyDir::kDeviceToHost);
     for (std::int64_t i = 0; i < rows; ++i) {
       const int target = targets[static_cast<std::size_t>(i)];
@@ -68,7 +68,7 @@ float EvalBpb(Model* model, DataLoader* loader, int steps) {
       }
       if (bytes <= 0) continue;
       total_nats +=
-          static_cast<double>(AsF(losses_host[static_cast<std::size_t>(i)]));
+          static_cast<double>(losses_host[static_cast<std::size_t>(i)]);
       total_bytes += bytes;
     }
   }
@@ -119,12 +119,11 @@ void ScoreBatch(Model* model, const int* tokens, int batch, int seq,
   model->ForwardLoss(tokens, targets.data(), batch, seq);
 
   // Stage the per-token losses (the CUDA backend keeps them in device memory).
-  std::vector<ComputeType> losses_host(static_cast<std::size_t>(rows),
-                                       ComputeType{});
-  const ComputeType* losses = impl->losses();
+  std::vector<float> losses_host(static_cast<std::size_t>(rows), 0.0f);
+  const float* losses = impl->losses();
   if (losses != nullptr) {
     kernels::Memcpy(losses_host.data(), losses,
-                    static_cast<std::size_t>(rows) * sizeof(ComputeType),
+                    static_cast<std::size_t>(rows) * sizeof(float),
                     CopyDir::kDeviceToHost);
   }
 
@@ -153,7 +152,7 @@ void ScoreBatch(Model* model, const int* tokens, int batch, int seq,
     for (int p = 0; p + 1 < length; ++p) {
       const std::int64_t row = base + p;
       result.nll[static_cast<std::size_t>(p)] =
-          AsF(losses_host[static_cast<std::size_t>(row)]);
+          losses_host[static_cast<std::size_t>(row)];
       const ComputeType* lrow =
           logits_host.data() + static_cast<std::size_t>(row) *
                                    static_cast<std::size_t>(padded_vocab);

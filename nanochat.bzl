@@ -77,9 +77,8 @@ def nanochat_cuda_copts():
     })
 
 def precision_defines():
-    """The #define for the build precision.
-
-    fp32 is the only precision today (docs/precision.md), so the define is a
-    constant. The seam stays so a future compute type returns its own define.
-    """
-    return ["NANOCHAT_PRECISION_FP32"]
+    """The #define for the build precision."""
+    return select({
+        "//:bf16": ["NANOCHAT_PRECISION_BF16"],
+        "//:fp32": ["NANOCHAT_PRECISION_FP32"],
+    })

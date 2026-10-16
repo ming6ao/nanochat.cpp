@@ -123,13 +123,16 @@ same. The host graph therefore sees a Hopper-class device, and the compute
 still runs on the CPU.
 
 ```bash
-# The oracle and the training trajectory on a simulated H100, fp32.
-tools/nanochat simulate --device h100 --precision fp32 --suite correctness
+# The oracle and the training trajectory on a simulated H100.
+tools/nanochat simulate --device h100 --suite correctness
 
-# The same on an H200. fp32 is the only precision (docs/precision.md), so every
-# run matches the committed fp32 fixtures.
+# The same on an H200.
 tools/nanochat simulate --device h200 --suite correctness
 ```
+
+The reference engine runs the fp32 build, so every run matches the committed
+fp32 fixtures. The simulated device still reports the bf16 capability of its
+profile through `Caps::supports_bf16` ([precision.md](precision.md)).
 
 ### 4.2 What the reference engine validates
 
@@ -140,9 +143,8 @@ tools/nanochat simulate --device h200 --suite correctness
 - The capability gates: the precision gate, the workspace sizing, and the MFU
   computation.
 
-fp32 is the only precision. The CPU backend compiles with `ComputeType = float`
-(docs/precision.md), so the simulated profile changes the caps and never a
-value.
+The reference engine runs the fp32 build. The simulated profile changes the
+reported caps and never a value ([precision.md](precision.md)).
 
 ### 4.3 What the reference engine does not validate
 

@@ -289,18 +289,23 @@ class MeshRuntime:
         """The elements of parameter ``index`` on ``replica``.
 
         The read copies through the kernel seam, so it is safe on a device
-        backend. The Python view supports a four-byte float32 build.
+        backend. A gradient view is fp32 in every build; a value view holds the
+        build compute type, which the call decodes to Python floats
+        (docs/precision.md section 5).
         """
         info = self._param_info(index, replica)
         count = int(info.count)
         if count <= 0:
             return []
-        if _core.compute_type_size(self._lib) != 4:
+        element_size = (ctypes.sizeof(ctypes.c_float) if grad
+                        else _core.compute_type_size(self._lib))
+        if element_size not in _core.SUPPORTED_COMPUTE_SIZES:
             raise _core.NanochatError(
                 "param_read",
-                "the Python view supports a four-byte float32 build",
+                f"this build uses {element_size} bytes per element, which the "
+                "Python view cannot decode",
             )
-        buffer = (ctypes.c_float * count)()
+        buffer = _core.compute_buffer(element_size, count)
         copied = self._lib.nanochat_runtime_param_read(
             self._handle,
             int(replica),
@@ -313,7 +318,7 @@ class MeshRuntime:
         if copied != count:
             raise _core.NanochatError("nanochat_runtime_param_read",
                                       _core.last_error(self._lib))
-        return list(buffer)
+        return _core.compute_values(buffer, element_size)
 
     def save(self, path) -> None:
         """Write the canonical checkpoint from replica 0.

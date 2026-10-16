@@ -98,7 +98,7 @@ void CheckClassifier(const Fixture& fixture) {
 
   DevBuf<ComputeType> logits_dev(
       ToStorage(std::vector<float>(raw.f32(), raw.f32() + raw.numel())));
-  DevBuf<ComputeType> losses_dev(rows);
+  DevBuf<float> losses_dev(rows);
   nanochat::kernels::ClassifierForward(p, logits_dev.ptr, targets,
                                        losses_dev.ptr);
   nanochat::kernels::Synchronize();
@@ -117,7 +117,7 @@ void CheckClassifier(const Fixture& fixture) {
     expected_losses[r] =
         static_cast<float>(std::log(sum)) + row_max - row[targets[r]];
   }
-  const std::vector<float> got_losses = FromStorage(losses_dev.Download());
+  const std::vector<float> got_losses = losses_dev.Download();
   CheckVectorClose(got_losses, expected_losses, 1e-5, "oracle classifier fwd");
 
   double mean = 0.0;
@@ -167,11 +167,11 @@ void CheckEmbedding(const Fixture& fixture) {
   const std::vector<float> dout0 = RandomVec(tokens_count * dim, &rng);
   const std::vector<float> dtable_init(vocab * dim, 0.0f);
   DevBuf<ComputeType> dout_dev(ToStorage(dout0));
-  DevBuf<ComputeType> dtable_dev(ToStorage(dtable_init));
+  DevBuf<float> dtable_dev(dtable_init);
   nanochat::kernels::EmbeddingBackward(tokens_count, dim, ids, dout_dev.ptr,
                                        dtable_dev.ptr);
   nanochat::kernels::Synchronize();
-  CheckVectorClose(FromStorage(dtable_dev.Download()),
+  CheckVectorClose(dtable_dev.Download(),
                    EmbeddingBackward(tokens_count, dim,
                                      std::vector<int>(ids, ids + tokens_count),
                                      dout0, dtable_init),

@@ -19,12 +19,22 @@ _BACKEND_COPTS = select({
     "//:backend_cpu": [],
 })
 
-# Header-only reader for the binary oracle fixture. Kept separate from the test
-# so `//src` (and the CUDA parity tests) can parse the same reference tensors.
+# Header-only reader for the binary oracle fixture, plus the shared parameter
+# staging helper. `param_stage.h` writes fp32 fixture values into the parameter
+# master and refreshes the compute copy (docs/precision.md section 5), so the
+# fixture tests work in both the fp32 and the bf16 build. Kept separate from the
+# test so `//src` (and the CUDA parity tests) can parse the same reference
+# tensors.
 cc_library(
     name = "oracle_fixture",
-    hdrs = ["oracle_fixture.h"],
-    deps = ["//src:record_file"],
+    hdrs = [
+        "oracle_fixture.h",
+        "param_stage.h",
+    ],
+    deps = [
+        "//include/nanochat:nanochat",
+        "//src:record_file",
+    ],
 )
 
 # The reference tokenizer fixture, `NANOTOK1`, produced by

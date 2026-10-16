@@ -52,6 +52,7 @@
 #include "nanochat/scheduler.h"
 #include "src/model_impl.h"
 #include "tests/oracle_fixture.h"
+#include "tests/param_stage.h"
 
 // The promoted fused windowed forward is selected by a backend-internal
 // predicate, `UseFusedAttention(window_left >= 0 && head_dim == 128)`. That
@@ -233,22 +234,20 @@ void CheckAdamWStep1(const Fixture& fixture, const std::string& name, double lr,
 // `kernels::Memcpy` and every read of a parameter/logit goes through a host
 // staging buffer.
 
-inline float AsFloat32(ComputeType value) { return value; }
+inline float AsFloat32(ComputeType value) { return static_cast<float>(value); }
 
-inline void StoreFloat(ComputeType* dst, float value) { *dst = value; }
-
-void CopyCompute(const ComputeType* src, std::int64_t count,
-                 std::vector<float>* out) {
-  std::vector<ComputeType> host(static_cast<std::size_t>(count));
+template <typename T>
+void CopyCompute(const T* src, std::int64_t count, std::vector<float>* out) {
+  std::vector<T> host(static_cast<std::size_t>(count));
   if (count > 0) {
-    nanochat::kernels::Memcpy(
-        host.data(), src, static_cast<std::size_t>(count) * sizeof(ComputeType),
-        nanochat::CopyDir::kDeviceToHost);
+    nanochat::kernels::Memcpy(host.data(), src,
+                              static_cast<std::size_t>(count) * sizeof(T),
+                              nanochat::CopyDir::kDeviceToHost);
   }
   out->resize(static_cast<std::size_t>(count));
   for (std::int64_t i = 0; i < count; ++i) {
     (*out)[static_cast<std::size_t>(i)] =
-        AsFloat32(host[static_cast<std::size_t>(i)]);
+        static_cast<float>(host[static_cast<std::size_t>(i)]);
   }
 }
 
@@ -293,22 +292,22 @@ void LoadParameters(const Fixture& fixture, Model* model) {
       continue;
     }
     const float* src = source.f32();
-    std::vector<ComputeType> host(static_cast<std::size_t>(view.count));
+    std::vector<float> host(static_cast<std::size_t>(view.count));
     for (std::int64_t i = 0; i < view.count; ++i) {
-      StoreFloat(host.data() + i, src[i]);
+      host[static_cast<std::size_t>(i)] = src[i];
     }
-    nanochat::kernels::Memcpy(
-        view.value, host.data(),
-        static_cast<std::size_t>(view.count) * sizeof(ComputeType),
-        nanochat::CopyDir::kHostToDevice);
+    nanochat::testutil::StageParameter(view, host.data());
   }
+  // The write landed in the fp32 master, so rebuild every compute copy.
+  model->SyncCompute();
 }
 
 // Compares one device buffer against a fixture record and folds the maximum
 // absolute difference into `*max_error`.
-void CompareToFixture(const ComputeType* got_dev, std::int64_t count,
-                      const Tensor& want, const std::string& what,
-                      double tolerance, double* max_error) {
+template <typename T>
+void CompareToFixture(const T* got_dev, std::int64_t count, const Tensor& want,
+                      const std::string& what, double tolerance,
+                      double* max_error) {
   if (want.dtype != nanochat::oracle::DType::kFp32) {
     Fail(what + ": fixture record is not fp32");
     return;
@@ -713,14 +712,13 @@ void RunModelParity(const Fixture& fixture) {
       const Tensor& source = fixture.Get(record);
       const std::int64_t count =
           std::min<std::int64_t>(view.count, source.numel());
-      std::vector<ComputeType> host(static_cast<std::size_t>(count));
+      std::vector<float> host(static_cast<std::size_t>(count));
       for (std::int64_t i = 0; i < count; ++i) {
-        StoreFloat(host.data() + i, source.f32()[i]);
+        host[static_cast<std::size_t>(i)] = source.f32()[i];
       }
-      nanochat::kernels::Memcpy(
-          view.grad, host.data(),
-          static_cast<std::size_t>(count) * sizeof(ComputeType),
-          nanochat::CopyDir::kHostToDevice);
+      nanochat::kernels::Memcpy(view.grad, host.data(),
+                                static_cast<std::size_t>(count) * sizeof(float),
+                                nanochat::CopyDir::kHostToDevice);
     }
     std::unique_ptr<Optimizer> step1 =
         nanochat::CreateOptimizer(model.get(), opt, scheduler);
@@ -967,6 +965,7 @@ void CheckFusedAttentionParity() {
 }  // namespace
 
 int main(int argc, char** argv) {
+  if (nanochat::testutil::SkipFp32Golden("oracle")) return 0;
   std::string path;
   try {
     path = LocateFixture(argc, argv);

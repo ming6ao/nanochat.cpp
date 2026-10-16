@@ -74,9 +74,19 @@ std::string Format(const char* fmt, ...) {
 
 // The tolerance for this comparison. docs/testing.md records the backend's
 // overall tolerance; the atol/rtol split here is the test's own.
+//
+// The emulated kernels store `ComputeType`, so a bf16 build rounds every result
+// to 7 mantissa bits while the fp64 host reference below does not. The bounds
+// therefore carry that storage granularity in the bf16 build.
+#if defined(NANOCHAT_PRECISION_FP32)
 double Atol() { return 1e-5; }
 
 double Rtol() { return 1e-4; }
+#else
+double Atol() { return 0.01; }
+
+double Rtol() { return 0.02; }
+#endif
 
 void ExpectClose(const std::vector<float>& got, const std::vector<float>& want,
                  const std::string& what) {

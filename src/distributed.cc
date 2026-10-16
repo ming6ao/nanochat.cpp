@@ -45,7 +45,7 @@ class NoopGradientSync final : public GradientSync {
  public:
   int rank() const override { return 0; }
   int world_size() const override { return 1; }
-  void AllReduceSum(ComputeType*, std::int64_t) override {}
+  void AllReduceSum(GradientType*, std::int64_t) override {}
 };
 
 // The TCP parameter server (rank 0) and its clients (every other rank). Up to
@@ -70,10 +70,10 @@ class HostGradientSync final : public GradientSync {
   int rank() const override { return rank_; }
   int world_size() const override { return world_size_; }
 
-  void AllReduceSum(ComputeType* buffer, std::int64_t count) override {
+  void AllReduceSum(GradientType* buffer, std::int64_t count) override {
     if (buffer == nullptr || count <= 0) return;
     const std::size_t elements = static_cast<std::size_t>(count);
-    const std::size_t bytes = elements * sizeof(ComputeType);
+    const std::size_t bytes = elements * sizeof(GradientType);
 
     if (rank_ == 0) {
       if (!AcceptPeers()) Die("cannot accept a peer");
@@ -83,7 +83,7 @@ class HostGradientSync final : public GradientSync {
           Die("cannot receive a gradient");
         }
         for (std::size_t i = 0; i < elements; ++i) {
-          buffer[i] = ToC(AsF(buffer[i]) + AsF(scratch_[i]));
+          buffer[i] += scratch_[i];
         }
       }
       for (int fd : peers_) {
@@ -133,7 +133,7 @@ class HostGradientSync final : public GradientSync {
   int client_fd_ = -1;
   bool accepted_ = false;
   std::vector<int> peers_;
-  std::vector<ComputeType> scratch_;
+  std::vector<GradientType> scratch_;
 };
 
 }  // namespace

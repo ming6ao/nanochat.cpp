@@ -27,8 +27,6 @@
 
 namespace {
 
-using nanochat::AsF;
-using nanochat::ComputeType;
 using nanochat::Config;
 using nanochat::Model;
 using nanochat::ParamView;
@@ -71,12 +69,12 @@ Config TinyConfig() {
 
 // Stages the per-row losses that the most recent forward saved. The CUDA
 // backend keeps them in device memory.
-std::vector<ComputeType> ReadLosses(TrainModel* model, std::int64_t rows) {
-  std::vector<ComputeType> host(static_cast<std::size_t>(rows));
-  const ComputeType* losses = model->losses();
-  nanochat::kernels::Memcpy(
-      host.data(), losses, static_cast<std::size_t>(rows) * sizeof(ComputeType),
-      nanochat::CopyDir::kDeviceToHost);
+std::vector<float> ReadLosses(TrainModel* model, std::int64_t rows) {
+  std::vector<float> host(static_cast<std::size_t>(rows));
+  const float* losses = model->losses();
+  nanochat::kernels::Memcpy(host.data(), losses,
+                            static_cast<std::size_t>(rows) * sizeof(float),
+                            nanochat::CopyDir::kDeviceToHost);
   return host;
 }
 
@@ -94,9 +92,8 @@ void ExpectSameGradients(Model* a, Model* b, const std::string& what) {
       return;
     }
     for (std::int64_t i = 0; i < pa[k].count; ++i) {
-      worst =
-          std::max(worst, std::fabs(static_cast<double>(AsF(pa[k].grad[i])) -
-                                    static_cast<double>(AsF(pb[k].grad[i]))));
+      worst = std::max(worst, std::fabs(static_cast<double>(pa[k].grad[i]) -
+                                        static_cast<double>(pb[k].grad[i])));
     }
   }
   if (worst > kGradientTolerance) {
@@ -132,16 +129,16 @@ void TestValidCountDenominator() {
 
   const float loss =
       model->ForwardLoss(tokens.data(), targets.data(), batch, seq);
-  const std::vector<ComputeType> losses = ReadLosses(impl, rows);
+  const std::vector<float> losses = ReadLosses(impl, rows);
 
   double valid_sum = 0.0;
   for (std::int64_t i = 0; i < rows; ++i) {
-    const double value = AsF(losses[static_cast<std::size_t>(i)]);
+    const double value = losses[static_cast<std::size_t>(i)];
     if (targets[static_cast<std::size_t>(i)] != -1) valid_sum += value;
   }
 
   for (std::int64_t m : masked) {
-    if (AsF(losses[static_cast<std::size_t>(m)]) != 0.0f) {
+    if (losses[static_cast<std::size_t>(m)] != 0.0f) {
       Fail("masked row carries a nonzero per-row loss");
     }
   }

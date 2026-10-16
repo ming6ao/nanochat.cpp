@@ -52,14 +52,14 @@ constexpr float kPolarCoeffs[5][3] = {
 // Nesterov-accelerated gradient or the plain first moment.
 __global__ void MuonMomentumKernel(long long total, float momentum,
                                    bool nesterov,
-                                   const ComputeType* __restrict__ grads,
+                                   const float* __restrict__ grads,
                                    float* __restrict__ buf1,
                                    ComputeType* __restrict__ x) {
   const long long stride = static_cast<long long>(gridDim.x) * blockDim.x;
   for (long long i =
            static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x;
        i < total; i += stride) {
-    const float gr = AsFloatDev(grads[i]);
+    const float gr = grads[i];
     const float b = buf1[i] + (1.0f - momentum) * (gr - buf1[i]);
     buf1[i] = b;
     x[i] = ToComputeDev(nesterov ? (1.0f - momentum) * gr + momentum * b : b);
@@ -302,7 +302,7 @@ void EnsureMuonWorkspace(std::size_t elements, std::size_t scratch_floats) {
 
 }  // namespace
 
-void MuonUpdate(const MuonParams& params, const ComputeType* stacked_grads,
+void MuonUpdate(const MuonParams& params, const float* stacked_grads,
                 float* stacked_master, ComputeType* stacked_values, float* buf1,
                 float* buf2) {
   const int num_params = params.num_params > 0 ? params.num_params : 1;

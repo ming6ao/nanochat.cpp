@@ -72,7 +72,7 @@ __global__ void ValueGateBackwardKernel(
     const ComputeType* __restrict__ h, const ComputeType* __restrict__ ve,
     const ComputeType* __restrict__ gate_w,
     const ComputeType* __restrict__ gate, const ComputeType* __restrict__ dv,
-    ComputeType* __restrict__ gate_w_grad, ComputeType* __restrict__ dh,
+    float* __restrict__ gate_w_grad, ComputeType* __restrict__ dh,
     ComputeType* __restrict__ dve) {
   const int row = blockIdx.x;
   const int tid = threadIdx.x;
@@ -125,7 +125,7 @@ void ValueGateForward(int rows, int hidden, int num_kv_heads, int head_dim,
 void ValueGateBackward(int rows, int hidden, int num_kv_heads, int head_dim,
                        const ComputeType* h, const ComputeType* ve,
                        const ComputeType* gate_w, const ComputeType* gate,
-                       const ComputeType* dv, ComputeType* gate_w_grad,
+                       const ComputeType* dv, float* gate_w_grad,
                        ComputeType* dh, ComputeType* dve) {
   if (rows <= 0 || hidden < kGateChannels || num_kv_heads <= 0 ||
       head_dim <= 0) {

@@ -24,7 +24,6 @@ namespace kernels {
 namespace {
 
 using cuda_kernels::AsFloatDev;
-using cuda_kernels::ToComputeDev;
 
 // Sum of squares across the whole buffer, accumulated in double to match the
 // CPU reference, then a published norm and clip scale.
@@ -36,11 +35,11 @@ __device__ float g_global_norm_scale = 1.0f;
 __device__ double g_scalar_dot_sum = 0.0;
 
 __global__ void GlobalNormPartialKernel(int n,
-                                        const ComputeType* __restrict__ grads) {
+                                        const float* __restrict__ grads) {
   double local = 0.0;
   const int stride = gridDim.x * blockDim.x;
   for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < n; i += stride) {
-    const double v = AsFloatDev(grads[i]);
+    const double v = grads[i];
     local += v * v;
   }
   const double block_sum = cuda_kernels::BlockReduceSum(local);
@@ -56,11 +55,11 @@ __global__ void GlobalNormFinalizeKernel(float clip, float* __restrict__ norm) {
   g_global_norm_sum = 0.0;
 }
 
-__global__ void GlobalNormScaleKernel(int n, ComputeType* __restrict__ grads) {
+__global__ void GlobalNormScaleKernel(int n, float* __restrict__ grads) {
   const float scale = g_global_norm_scale;
   const int stride = gridDim.x * blockDim.x;
   for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < n; i += stride) {
-    grads[i] = ToComputeDev(AsFloatDev(grads[i]) * scale);
+    grads[i] *= scale;
   }
 }
 
@@ -78,18 +77,18 @@ __global__ void ScalarDotPartialKernel(int n, const ComputeType* __restrict__ a,
   if (threadIdx.x == 0) atomicAdd(&g_scalar_dot_sum, block_sum);
 }
 
-__global__ void ScalarDotFinalizeKernel(ComputeType* __restrict__ out,
-                                        float scale, bool accumulate) {
+__global__ void ScalarDotFinalizeKernel(float* __restrict__ out, float scale,
+                                        bool accumulate) {
   if (threadIdx.x != 0 || blockIdx.x != 0) return;
   const float value = scale * static_cast<float>(g_scalar_dot_sum);
-  out[0] = ToComputeDev(accumulate ? AsFloatDev(out[0]) + value : value);
+  out[0] = accumulate ? out[0] + value : value;
   // Reset for the next invocation; the stream ordering makes this safe.
   g_scalar_dot_sum = 0.0;
 }
 
 }  // namespace
 
-void GlobalNorm(int n, float clip, ComputeType* grads, float* out_norm) {
+void GlobalNorm(int n, float clip, float* grads, float* out_norm) {
   if (n <= 0) return;
   constexpr int kThreads = 256;
   constexpr int kMaxBlocks = 512;
@@ -104,8 +103,8 @@ void GlobalNorm(int n, float clip, ComputeType* grads, float* out_norm) {
                        grads);
 }
 
-void ScalarDot(const ComputeType* a, const ComputeType* b, int n,
-               ComputeType* out, float scale, bool accumulate) {
+void ScalarDot(const ComputeType* a, const ComputeType* b, int n, float* out,
+               float scale, bool accumulate) {
   if (n <= 0) return;
   constexpr int kThreads = 256;
   constexpr int kMaxBlocks = 512;

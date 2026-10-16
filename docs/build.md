@@ -127,14 +127,14 @@ Selection is a build/link choice:
 
 ```
 --backend=cpu|cuda        link the backend library
---precision=fp32          select ComputeType
---arch=sm_61|sm_75|sm_90  CUDA --generate-code
+--precision=fp32|bf16     select ComputeType
+--arch=sm_61|sm_75|sm_80|sm_90  CUDA --generate-code
 ```
 
 | Backend | Implements | Notes |
 |---|---|---|
 | `backends/cpu` | all of `kernels.h` with naive loops | reference, CI, oracle baseline; `-lm` (+ OpenMP) |
-| `backends/cuda` | all of `kernels.h`; cuBLAS for GEMM | Pascal fp32, Turing fp32; no cuDNN or NCCL |
+| `backends/cuda` | all of `kernels.h`; cuBLAS for GEMM | Pascal fp32, Turing fp32, Ampere and newer bf16; no cuDNN or NCCL |
 
 The shared workflow (`ops.cc`, `model.cc`, `generate.cc`, `optim.cc`,
 `train.cc`) compiles once and links against either backend. This is the one
@@ -154,18 +154,23 @@ about GPT.
 
 ## Precision
 
-`-DNANOCHAT_PRECISION=FP32` selects `using ComputeType = float;` at build
-time. One precision per build; no runtime dtype dispatch.
+`-DNANOCHAT_PRECISION_FP32` selects `using ComputeType = float;` and
+`-DNANOCHAT_PRECISION_BF16` selects `using ComputeType = Bf16;`, both at build
+time. One precision per build; no runtime dtype dispatch. The fp16 build and its
+half-storage path are removed ([precision.md](precision.md)).
 
 - Pascal (sm_61), Turing (sm_75), and the CPU: fp32.
-- fp32 is the only precision. The fp16 build and its half-storage path are
-  removed ([precision.md](precision.md)).
-- The backend reports supported dtypes via `GetCaps()`; an invalid combination
-  fails fast at startup.
+- Ampere (sm_80) and Hopper (sm_90): bf16.
+- The persistent state stays fp32 in every build, so the parameter gradient is
+  always `GradientType = float` even when the compute type is bf16
+  ([precision.md](precision.md) section 5).
+- The backend reports supported dtypes through `Caps::Supports`. A bf16 build on
+  a device without bf16 fails fast: `Model::Create` returns null with
+  "compute dtype is not supported by <device>".
 
-The build selects the precision at build time, together with the backend. See
-the backends section above. The bf16 build waits for Stage 2
-([precision.md](precision.md)).
+`--config=bf16` selects the define. `--config=a100`, `--config=h100`, and
+`--config=h200` are the complete Ampere and Hopper targets; each selects the
+matching architecture, `--config=bf16`, and the CUDA backend.
 
 ## Turing (T4, sm_75)
 
@@ -201,6 +206,9 @@ new backend directory is necessary.
 |---|---|---|---|
 | `sm_75` | sm_75 | fp32 | fp32 correctness gate |
 | `t4` | sm_75 | fp32 | default Kaggle build |
+| `bf16` | default | bf16 | bf16 compute for Ampere and newer |
+| `a100` | sm_80 | bf16 | first Ampere target |
+| `h100`, `h200` | sm_90 | bf16 | Hopper target and compile gate |
 
 The `t4` config includes `--config=cuda`. The `t4` build uses the fp32 GEMM
 path on this card.
@@ -211,8 +219,11 @@ Kaggle build. The Turing hardware supports fp16, but no build uses it
 
 ### 4. GEMM behavior
 
-`backends/cuda/gemm.cu` uses fp32 accumulation on every device. The `t4` build
-uses the classic `cublasSgemm` path for a single GEMM.
+`backends/cuda/gemm.cu` uses fp32 accumulation on every device
+(`CUBLAS_COMPUTE_32F`). The `t4` build uses the classic `cublasSgemm` path for a
+single GEMM. A bf16 build uses `cublasGemmEx` with `CUDA_R_16BF` operands. A
+forward or dgrad GEMM writes a bf16 result; `GemmWgrad` writes the fp32
+parameter gradient.
 
 The host graph and the optimizer state stay fp32 wherever the seam requires
 it. See the precision section above.
@@ -238,6 +249,10 @@ The CUDA `precision_gpu_test` target builds at the fp32 precision only. The T4
 gate runs the fp32 build with the recorded fp32 tolerance. Measure the worst
 error again and record the new value in `precision_test.cc`. Do not widen the
 tolerance without a measurement.
+
+The T2 targets compare against committed fp32 PyTorch goldens, so they run only
+in the fp32 build. The bf16 gates are listed in
+[precision.md](precision.md) section 6.
 
 Extend `//backends/cuda:cuda_runtime_gpu_test` to assert two things on sm_75:
 the device name and `has_tensor_cores`.

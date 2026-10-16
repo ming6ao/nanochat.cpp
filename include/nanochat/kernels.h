@@ -197,6 +197,11 @@ Caps GetCaps();
 void Gemm(GemmMode mode, const GemmParams& params, const ComputeType* a,
           const ComputeType* b, ComputeType* c);
 
+// Weight-gradient GEMM. The operands use the build compute type; the result
+// accumulates into fp32 parameter-gradient storage.
+void GemmWgrad(const GemmParams& params, const ComputeType* a,
+               const ComputeType* b, float* c);
+
 // --- Compute (fwd / bwd) ---------------------------------------------------
 
 void RmsNormForward(const RmsNormParams& params, const ComputeType* x,
@@ -236,7 +241,7 @@ void PointwiseBackward(PointwiseOp op, int n, const ComputeType* a,
 
 void ClassifierForward(const ClassifierParams& params,
                        const ComputeType* logits, const int* targets,
-                       ComputeType* losses);
+                       float* losses);
 
 void ClassifierBackward(const ClassifierParams& params,
                         const ComputeType* logits, const int* targets,
@@ -248,39 +253,39 @@ void EmbeddingForward(int tokens, int dim, const int* ids,
 // `dtable` is a dense gradient buffer; the backend zeroes only the touched rows
 // (docs/model.md).
 void EmbeddingBackward(int tokens, int dim, const int* ids,
-                       const ComputeType* dout, ComputeType* dtable);
+                       const ComputeType* dout, float* dtable);
 
 // The optimizer updates the fp32 master weight and writes the compute copy
 // (`ComputeType`) beside it. The fp32 build passes one buffer for `master` and
 // `value`, so the pointer aliases the parameter (docs/model.md).
 void AdamWUpdate(int n, const AdamWParams& params, float* master,
-                 ComputeType* value, const ComputeType* g, float* m, float* v);
+                 ComputeType* value, const float* g, float* m, float* v);
 
 // `stacked_grads` and `stacked_values` are `[num_params, rows, cols]`;
 // `stacked_master` is the fp32 master of the same shape. `buf1` is the
 // momentum buffer of the same shape and `buf2` is the factored second moment
 // of shape `[num_params, rows, 1]` or `[num_params, 1, cols]`.
-void MuonUpdate(const MuonParams& params, const ComputeType* stacked_grads,
+void MuonUpdate(const MuonParams& params, const float* stacked_grads,
                 float* stacked_master, ComputeType* stacked_values, float* buf1,
                 float* buf2);
 
 // `velocity` holds `2 * num_params * rows * cols` floats: the fast rail first,
 // then the slow rail. `lane_energy` holds
 // `num_params * (red_dim == -1 ? rows : cols)` floats.
-void AnvilUpdate(const AnvilParams& params, const ComputeType* stacked_grads,
+void AnvilUpdate(const AnvilParams& params, const float* stacked_grads,
                  float* stacked_master, ComputeType* stacked_values,
                  float* velocity, float* lane_energy);
 
 // Computes the global L2 norm of `grads`, clips it to `clip` in place, and
 // writes the pre-clip norm to `out_norm`.
-void GlobalNorm(int n, float clip, ComputeType* grads, float* out_norm);
+void GlobalNorm(int n, float clip, float* grads, float* out_norm);
 
 // Reduces `dot(a, b)` over `n` elements into the single-element buffer `out`:
 // `out = scale * dot(a, b)`, or `out += scale * dot(a, b)` when `accumulate`.
 // This is the device-side replacement for the host round trip that the scalar
 // parameter gradients (resid, x0_lambda, backout_lambda) used to need.
-void ScalarDot(const ComputeType* a, const ComputeType* b, int n,
-               ComputeType* out, float scale, bool accumulate);
+void ScalarDot(const ComputeType* a, const ComputeType* b, int n, float* out,
+               float scale, bool accumulate);
 
 // ResFormer value gate. For each row and key/value head,
 //   gate = 3 * sigmoid(dot(h[row, :12], gate_w[kvh, :]))
@@ -297,7 +302,7 @@ void ValueGateForward(int rows, int hidden, int num_kv_heads, int head_dim,
 void ValueGateBackward(int rows, int hidden, int num_kv_heads, int head_dim,
                        const ComputeType* h, const ComputeType* ve,
                        const ComputeType* gate_w, const ComputeType* gate,
-                       const ComputeType* dv, ComputeType* gate_w_grad,
+                       const ComputeType* dv, float* gate_w_grad,
                        ComputeType* dh, ComputeType* dve);
 
 }  // namespace kernels

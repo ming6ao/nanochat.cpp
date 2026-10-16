@@ -57,7 +57,7 @@ void LinearForward(const ComputeType* x, const ComputeType* w, ComputeType* y,
   kernels::Gemm(GemmMode::kForward, params, x, w, y);
 }
 
-void LinearWgrad(const ComputeType* x, const ComputeType* dy, ComputeType* dw,
+void LinearWgrad(const ComputeType* x, const ComputeType* dy, float* dw,
                  std::int64_t rows, std::int64_t in, std::int64_t out) {
   if (rows <= 0 || in <= 0 || out <= 0) return;
   // dw[out, in] += dy[rows, out]^T @ x[rows, in].
@@ -68,7 +68,7 @@ void LinearWgrad(const ComputeType* x, const ComputeType* dy, ComputeType* dw,
   params.alpha = 1.0f;
   params.beta = 1.0f;
   params.transpose_a = true;
-  kernels::Gemm(GemmMode::kWgrad, params, dy, x, dw);
+  kernels::GemmWgrad(params, dy, x, dw);
 }
 
 void LinearDgrad(const ComputeType* dy, const ComputeType* w, ComputeType* dx,
@@ -209,7 +209,7 @@ void ValueResidualBackward(std::int64_t rows, int hidden, int num_kv_heads,
                            int head_dim, const ComputeType* h,
                            const ComputeType* ve, const ComputeType* gate_w,
                            const ComputeType* gate, const ComputeType* dv,
-                           ComputeType* gate_w_grad, ComputeType* dh,
+                           float* gate_w_grad, ComputeType* dh,
                            ComputeType* dve) {
   if (rows <= 0 || hidden < kVeGateChannels || num_kv_heads <= 0 ||
       head_dim <= 0) {
@@ -244,8 +244,8 @@ void MlpBackward(const ComputeType* h, const ComputeType* c_fc,
                  const ComputeType* c_proj, const ComputeType* pre_act,
                  const ComputeType* act, const ComputeType* dout,
                  std::int64_t rows, std::int64_t hidden, std::int64_t mlp_dim,
-                 ComputeType* c_fc_grad, ComputeType* c_proj_grad,
-                 ComputeType* dh, ComputeType* dact, ComputeType* dpre) {
+                 float* c_fc_grad, float* c_proj_grad, ComputeType* dh,
+                 ComputeType* dact, ComputeType* dpre) {
   if (rows <= 0 || hidden <= 0 || mlp_dim <= 0) return;
   LinearWgrad(act, dout, c_proj_grad, rows, mlp_dim, hidden);
   LinearDgrad(dout, c_proj, dact, rows, mlp_dim, hidden, false);
@@ -304,8 +304,7 @@ void SmearForward(std::int64_t batch, std::int64_t seq, std::int64_t hidden,
 void SmearBackward(std::int64_t batch, std::int64_t seq, std::int64_t hidden,
                    const ComputeType* emb_norm, const ComputeType* gate_w,
                    const float* sig, float lambda, const ComputeType* d_x0,
-                   ComputeType* gate_w_grad, ComputeType* lambda_grad,
-                   ComputeType* de) {
+                   float* gate_w_grad, float* lambda_grad, ComputeType* de) {
   if (batch <= 0 || seq <= 0 || hidden <= 0) return;
   const std::int64_t rows = batch * seq;
   const std::int64_t count = rows * hidden;
@@ -318,8 +317,12 @@ void SmearBackward(std::int64_t batch, std::int64_t seq, std::int64_t hidden,
   std::vector<ComputeType> dxh = StageToHost(d_x0, count);
   // Identity path: x0[t] contains emb_norm[t] directly.
   std::vector<ComputeType> deh = dxh;
-  std::vector<ComputeType> wgh = StageToHost(gate_w_grad, kSmearChannels);
-  std::vector<ComputeType> lgh = StageToHost(lambda_grad, 1);
+  std::vector<float> wgh(kSmearChannels);
+  std::vector<float> lgh(1);
+  kernels::Memcpy(wgh.data(), gate_w_grad, wgh.size() * sizeof(float),
+                  CopyDir::kDeviceToHost);
+  kernels::Memcpy(lgh.data(), lambda_grad, sizeof(float),
+                  CopyDir::kDeviceToHost);
   double dlambda = 0.0;
   for (std::int64_t b = 0; b < batch; ++b) {
     for (std::int64_t t = 1; t < seq; ++t) {
@@ -347,19 +350,20 @@ void SmearBackward(std::int64_t batch, std::int64_t seq, std::int64_t hidden,
       dlambda += static_cast<double>(dgate_f) * s;
       const float dpre = dgate_f * lambda * s * (1.0f - s);
       for (int j = 0; j < kSmearChannels; ++j) {
-        wgh[static_cast<std::size_t>(j)] =
-            ToC(AsF(wgh[static_cast<std::size_t>(j)]) +
-                dpre * AsF(ee[static_cast<std::size_t>(m + j)]));
+        wgh[static_cast<std::size_t>(j)] +=
+            dpre * AsF(ee[static_cast<std::size_t>(m + j)]);
         deh[static_cast<std::size_t>(m + j)] =
             ToC(AsF(deh[static_cast<std::size_t>(m + j)]) +
                 dpre * AsF(wh[static_cast<std::size_t>(j)]));
       }
     }
   }
-  lgh[0] = ToC(AsF(lgh[0]) + static_cast<float>(dlambda));
+  lgh[0] += static_cast<float>(dlambda);
   StageToDevice(de, deh);
-  StageToDevice(gate_w_grad, wgh);
-  StageToDevice(lambda_grad, lgh);
+  kernels::Memcpy(gate_w_grad, wgh.data(), wgh.size() * sizeof(float),
+                  CopyDir::kHostToDevice);
+  kernels::Memcpy(lambda_grad, lgh.data(), sizeof(float),
+                  CopyDir::kHostToDevice);
 }
 
 // ---------------------------------------------------------------------------
@@ -374,8 +378,8 @@ void BackoutForward(const ComputeType* x, const ComputeType* x_backout,
 }
 
 void BackoutBackward(const ComputeType* d_pre, const ComputeType* x_backout,
-                     float lambda, ComputeType* dbackout,
-                     ComputeType* lambda_grad, std::int64_t n) {
+                     float lambda, ComputeType* dbackout, float* lambda_grad,
+                     std::int64_t n) {
   if (n <= 0) return;
   // The elementwise scale and the scalar dot product both run on the device;
   // no host round trip.
@@ -489,8 +493,8 @@ void BlockBackward(const BlockShape& shape, const BlockWeights& weights,
                    const float* cos, const float* sin, float resid,
                    float x0_lambda, const ComputeType* x_in,
                    const ComputeType* x0, const ComputeType* dout,
-                   ComputeType* dx_in, ComputeType* x0_acc,
-                   ComputeType* resid_grad, ComputeType* x0_lambda_grad) {
+                   ComputeType* dx_in, ComputeType* x0_acc, float* resid_grad,
+                   float* x0_lambda_grad) {
   const std::int64_t rows = static_cast<std::int64_t>(shape.batch) * shape.seq;
   const int hidden = shape.hidden;
   const int heads = shape.num_heads;

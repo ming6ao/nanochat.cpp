@@ -65,8 +65,8 @@ different `rules_cuda` toolchain. It is a separate project with its own risk.
 | `cuda` | sm_61 | fp32 | cuda |
 | `t4` | sm_75 | fp32 | cuda |
 
-The `t4` config selects the fp32 CUDA build for the Turing card. fp32 is the
-only precision (docs/precision.md).
+The `t4` config selects the fp32 CUDA build for the Turing card. Turing has no
+bf16, so the T4 runs fp32 ([precision.md](precision.md)).
 
 The Kaggle host file sets the arch to sm_75 and the resource budget. It does
 not set the backend. The backend stays per-command, so the CPU test loop keeps

@@ -19,6 +19,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <type_traits>
 #include <vector>
 
 #include "nanochat/kernels.h"
@@ -60,27 +61,31 @@ class Rng {
   std::uint64_t state_;
 };
 
-void FillNormal(ComputeType* data, std::int64_t count, float stddev, Rng* rng) {
+void FillNormal(float* data, std::int64_t count, float stddev, Rng* rng) {
   if (count <= 0) return;
-  std::vector<ComputeType> host(static_cast<std::size_t>(count));
+  std::vector<float> host(static_cast<std::size_t>(count));
   for (std::int64_t i = 0; i < count; ++i) {
-    host[static_cast<std::size_t>(i)] = ToC(stddev * rng->Normal());
+    host[static_cast<std::size_t>(i)] = stddev * rng->Normal();
   }
   kernels::Memcpy(data, host.data(),
-                  static_cast<std::size_t>(count) * sizeof(ComputeType),
+                  static_cast<std::size_t>(count) * sizeof(float),
                   CopyDir::kHostToDevice);
 }
 
-void FillUniform(ComputeType* data, std::int64_t count, float lo, float hi,
+void FillUniform(float* data, std::int64_t count, float lo, float hi,
                  Rng* rng) {
   if (count <= 0) return;
-  std::vector<ComputeType> host(static_cast<std::size_t>(count));
+  std::vector<float> host(static_cast<std::size_t>(count));
   for (std::int64_t i = 0; i < count; ++i) {
-    host[static_cast<std::size_t>(i)] = ToC(rng->Uniform(lo, hi));
+    host[static_cast<std::size_t>(i)] = rng->Uniform(lo, hi);
   }
   kernels::Memcpy(data, host.data(),
-                  static_cast<std::size_t>(count) * sizeof(ComputeType),
+                  static_cast<std::size_t>(count) * sizeof(float),
                   CopyDir::kHostToDevice);
+}
+
+void FillZeroFp32(float* data, std::int64_t count) {
+  kernels::Memset(data, 0, static_cast<std::size_t>(count) * sizeof(float));
 }
 
 void FillZero(ComputeType* data, std::int64_t count) {
@@ -292,7 +297,9 @@ TrainModel::~TrainModel() {
   for (Param& p : params_) {
     if (p.value != nullptr) kernels::Free(p.value);
     if (p.grad != nullptr) kernels::Free(p.grad);
-    // `p.master` aliases `p.value` in the fp32 build, so it is not freed here.
+    if constexpr (!std::is_same_v<ComputeType, float>) {
+      if (p.master != nullptr) kernels::Free(p.master);
+    }
   }
   if (cos_table_dev_ != nullptr) kernels::Free(cos_table_dev_);
   if (sin_table_dev_ != nullptr) kernels::Free(sin_table_dev_);
@@ -306,21 +313,35 @@ TrainModel::Param& TrainModel::AddParam(const std::string& name,
   p.count = count;
   p.rows = rows;
   p.cols = cols;
-  p.value = static_cast<ComputeType*>(
-      kernels::Alloc(static_cast<std::size_t>(count) * sizeof(ComputeType)));
-  p.grad = static_cast<ComputeType*>(
-      kernels::Alloc(static_cast<std::size_t>(count) * sizeof(ComputeType)));
-  // The fp32 master weight is the parameter itself, so the build needs no
-  // master-weight mirror (docs/precision.md section 5).
-  p.master = reinterpret_cast<float*>(p.value);
+  const std::size_t elements = static_cast<std::size_t>(count);
+  p.value =
+      static_cast<ComputeType*>(kernels::Alloc(elements * sizeof(ComputeType)));
+  p.grad = static_cast<GradientType*>(
+      kernels::Alloc(elements * sizeof(GradientType)));
+  if constexpr (std::is_same_v<ComputeType, float>) {
+    p.master = reinterpret_cast<float*>(p.value);
+  } else {
+    p.master = static_cast<float*>(kernels::Alloc(elements * sizeof(float)));
+  }
   FillZero(p.value, count);
-  FillZero(p.grad, count);
+  kernels::Memset(p.grad, 0, elements * sizeof(GradientType));
+  if constexpr (!std::is_same_v<ComputeType, float>) {
+    kernels::Memset(p.master, 0, elements * sizeof(float));
+  }
   params_.push_back(std::move(p));
   return params_.back();
 }
 
 std::unique_ptr<Model> Model::Create(const Config& config, std::string* error) {
   if (!config.Validate(error)) return nullptr;
+  const Caps caps = kernels::GetCaps();
+  if (!caps.Supports(kComputeDType)) {
+    if (error != nullptr) {
+      *error =
+          std::string("compute dtype is not supported by ") + caps.device_name;
+    }
+    return nullptr;
+  }
   return std::make_unique<TrainModel>(config);
 }
 
@@ -337,62 +358,67 @@ void TrainModel::InitWeights(std::uint64_t seed) {
   const int kv_dim = config_.kv_dim();
 
   Rng rng(seed);
+  auto master_for = [this](ComputeType* value) {
+    for (Param& param : params_) {
+      if (param.value == value) return param.master;
+    }
+    return static_cast<float*>(nullptr);
+  };
 
-  FillNormal(wte_, static_cast<std::int64_t>(padded_vocab) * hidden, 0.8f,
-             &rng);
-  FillNormal(lm_head_, static_cast<std::int64_t>(padded_vocab) * hidden, 0.001f,
-             &rng);
+  FillNormal(master_for(wte_), static_cast<std::int64_t>(padded_vocab) * hidden,
+             0.8f, &rng);
+  FillNormal(master_for(lm_head_),
+             static_cast<std::int64_t>(padded_vocab) * hidden, 0.001f, &rng);
 
   const float s = std::sqrt(3.0f) / std::sqrt(static_cast<float>(hidden));
   const float denom = static_cast<float>(std::max(layers - 1, 1));
   // Scalar parameters: build on the host, then upload to the (possibly
   // device) parameter buffers.
-  std::vector<ComputeType> resid_host(static_cast<std::size_t>(layers));
-  std::vector<ComputeType> x0_host(static_cast<std::size_t>(layers));
+  std::vector<float> resid_host(static_cast<std::size_t>(layers));
+  std::vector<float> x0_host(static_cast<std::size_t>(layers));
   for (int i = 0; i < layers; ++i) {
     resid_host[static_cast<std::size_t>(i)] =
-        ToC(1.15f - 0.10f * static_cast<float>(i) / denom);
+        1.15f - 0.10f * static_cast<float>(i) / denom;
     x0_host[static_cast<std::size_t>(i)] =
-        ToC(0.20f - 0.15f * static_cast<float>(i) / denom);
+        0.20f - 0.15f * static_cast<float>(i) / denom;
   }
-  kernels::Memcpy(resid_, resid_host.data(),
-                  resid_host.size() * sizeof(ComputeType),
+  kernels::Memcpy(master_for(resid_), resid_host.data(),
+                  resid_host.size() * sizeof(float), CopyDir::kHostToDevice);
+  kernels::Memcpy(master_for(x0_lambda_), x0_host.data(),
+                  x0_host.size() * sizeof(float), CopyDir::kHostToDevice);
+  const float smear_lambda_host = 0.0f;
+  const float backout_lambda_host = 0.2f;
+  kernels::Memcpy(master_for(smear_lambda_), &smear_lambda_host, sizeof(float),
                   CopyDir::kHostToDevice);
-  kernels::Memcpy(x0_lambda_, x0_host.data(),
-                  x0_host.size() * sizeof(ComputeType), CopyDir::kHostToDevice);
-  const ComputeType smear_lambda_host = ToC(0.0f);
-  const ComputeType backout_lambda_host = ToC(0.2f);
-  kernels::Memcpy(smear_lambda_, &smear_lambda_host, sizeof(ComputeType),
-                  CopyDir::kHostToDevice);
-  kernels::Memcpy(backout_lambda_, &backout_lambda_host, sizeof(ComputeType),
-                  CopyDir::kHostToDevice);
-  FillUniform(smear_gate_, kSmearChannels, 0.0f, 0.02f, &rng);
+  kernels::Memcpy(master_for(backout_lambda_), &backout_lambda_host,
+                  sizeof(float), CopyDir::kHostToDevice);
+  FillUniform(master_for(smear_gate_), kSmearChannels, 0.0f, 0.02f, &rng);
 
   for (int i = 0; i < layers; ++i) {
     ops::BlockWeights& w = lweights_[i];
-    FillUniform(const_cast<ComputeType*>(w.c_q),
+    FillUniform(master_for(const_cast<ComputeType*>(w.c_q)),
                 static_cast<std::int64_t>(config_.query_dim()) * hidden, -s, s,
                 &rng);
-    FillUniform(const_cast<ComputeType*>(w.c_k),
+    FillUniform(master_for(const_cast<ComputeType*>(w.c_k)),
                 static_cast<std::int64_t>(kv_dim) * hidden, -s, s, &rng);
-    FillUniform(const_cast<ComputeType*>(w.c_v),
+    FillUniform(master_for(const_cast<ComputeType*>(w.c_v)),
                 static_cast<std::int64_t>(kv_dim) * hidden, -s, s, &rng);
-    FillZero(const_cast<ComputeType*>(w.c_proj_attn),
-             static_cast<std::int64_t>(hidden) * hidden);
-    FillUniform(const_cast<ComputeType*>(w.c_fc),
+    FillZeroFp32(master_for(const_cast<ComputeType*>(w.c_proj_attn)),
+                 static_cast<std::int64_t>(hidden) * hidden);
+    FillUniform(master_for(const_cast<ComputeType*>(w.c_fc)),
                 static_cast<std::int64_t>(mlp_dim) * hidden, -0.4f * s,
                 0.4f * s, &rng);
-    FillZero(const_cast<ComputeType*>(w.c_proj_mlp),
-             static_cast<std::int64_t>(hidden) * mlp_dim);
+    FillZeroFp32(master_for(const_cast<ComputeType*>(w.c_proj_mlp)),
+                 static_cast<std::int64_t>(hidden) * mlp_dim);
     if (w.has_ve) {
-      FillUniform(const_cast<ComputeType*>(w.value_embeds),
+      FillUniform(master_for(const_cast<ComputeType*>(w.value_embeds)),
                   static_cast<std::int64_t>(padded_vocab) * kv_dim, -s, s,
                   &rng);
-      FillUniform(const_cast<ComputeType*>(w.ve_gate),
+      FillUniform(master_for(const_cast<ComputeType*>(w.ve_gate)),
                   kVeGateChannels * kv_heads, 0.0f, 0.02f, &rng);
     }
   }
-  SyncMaster();
+  SyncCompute();
 }
 
 // ---------------------------------------------------------------------------
@@ -499,7 +525,7 @@ void TrainModel::BuildTrainWorkspace(int batch, int seq) {
   c(&x_final_norm_, rows * hidden);
   c(&raw_logits_, rows * padded_vocab);
   c(&dlogits_, rows * padded_vocab);
-  c(&losses_, rows);
+  f(&losses_, rows);
   c(&dx_final_norm_, rows * hidden);
   c(&dx_final_pre_, rows * hidden);
   c(&dbackout_, rows * hidden);
@@ -607,7 +633,7 @@ void TrainModel::BuildEvalWorkspace(int batch, int seq) {
   c(&eval_x_final_pre_, rows * hidden);
   c(&eval_x_final_norm_, rows * hidden);
   c(&eval_logits_, chunk * padded_vocab);
-  c(&eval_losses_, rows);
+  f(&eval_losses_, rows);
   f(&eval_rstd_emb_, rows);
   f(&eval_rstd_final_, rows);
   f(&eval_smear_sig_, rows);
@@ -701,15 +727,14 @@ float TrainModel::ForwardLoss(const int* tokens, const int* targets, int batch,
   // ignored target, so the divisor is `rows` there and the numbers are
   // unchanged (docs/post-training.md section 2.1).
   const std::int64_t valid = CountValidTargets(targets, rows);
-  const ComputeType* losses = ActiveLosses();
+  const float* losses = ActiveLosses();
   losses_host_.resize(static_cast<std::size_t>(rows));
   kernels::Memcpy(losses_host_.data(), losses,
-                  static_cast<std::size_t>(rows) * sizeof(ComputeType),
+                  static_cast<std::size_t>(rows) * sizeof(float),
                   CopyDir::kDeviceToHost);
   double total = 0.0;
   for (std::int64_t m = 0; m < rows; ++m) {
-    total +=
-        static_cast<double>(AsF(losses_host_[static_cast<std::size_t>(m)]));
+    total += static_cast<double>(losses_host_[static_cast<std::size_t>(m)]);
   }
   if (valid == 0) return 0.0f;
   return static_cast<float>(total / static_cast<double>(valid));
@@ -830,7 +855,8 @@ void TrainModel::RequireGradActivations(const char* caller) const {
 
 void TrainModel::ZeroGrad() {
   for (Param& p : params_) {
-    FillZero(p.grad, p.count);
+    kernels::Memset(p.grad, 0,
+                    static_cast<std::size_t>(p.count) * sizeof(GradientType));
   }
 }
 
@@ -1009,13 +1035,22 @@ std::vector<ParamView> TrainModel::params() const {
 }
 
 void TrainModel::SyncMaster() {
-  // The fp32 master weight is the parameter itself, so there is nothing to
-  // synchronize (docs/precision.md section 5).
+  if constexpr (!std::is_same_v<ComputeType, float>) {
+    for (const Param& p : params_) {
+      ConvertDeviceBuffer(p.value, p.master, p.count, [](ComputeType value) {
+        return ComputeToFloat(value);
+      });
+    }
+  }
 }
 
 void TrainModel::SyncCompute() {
-  // The fp32 master weight is the parameter itself, so there is nothing to
-  // synchronize (docs/precision.md section 5).
+  if constexpr (!std::is_same_v<ComputeType, float>) {
+    for (const Param& p : params_) {
+      ConvertDeviceBuffer(p.master, p.value, p.count,
+                          [](float value) { return ComputeFromFloat(value); });
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------

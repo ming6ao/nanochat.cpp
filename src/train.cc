@@ -379,8 +379,17 @@ void CollectModelRecords(const Model& model, Checkpoint* checkpoint) {
     }
     const std::size_t count = static_cast<std::size_t>(view.count);
     std::vector<float> floats(count);
-    kernels::Memcpy(floats.data(), view.value, count * sizeof(float),
-                    CopyDir::kDeviceToHost);
+    if (view.master != nullptr) {
+      kernels::Memcpy(floats.data(), view.master, count * sizeof(float),
+                      CopyDir::kDeviceToHost);
+    } else {
+      std::vector<ComputeType> compute(count);
+      kernels::Memcpy(compute.data(), view.value, count * sizeof(ComputeType),
+                      CopyDir::kDeviceToHost);
+      for (std::size_t i = 0; i < count; ++i) {
+        floats[i] = ComputeToFloat(compute[i]);
+      }
+    }
     record.data.resize(count * sizeof(float));
     std::memcpy(record.data.data(), floats.data(), record.data.size());
     checkpoint->Add(std::move(record));
@@ -492,44 +501,43 @@ bool Checkpointer::LoadModel(Model* model, Optimizer* optimizer, int* step,
     const std::size_t available = record->data.size() / stored_size;
     const std::size_t elements = std::min(count, available);
     if (elements == 0) continue;
-    if (record->dtype == kComputeDType) {
-      kernels::Memcpy(view.value, record->data.data(),
-                      elements * kComputeTypeSize, CopyDir::kHostToDevice);
-      continue;
-    }
-    // Convert the storage dtype into the build compute dtype, so an fp32 or
-    // bf16 file loads into any build (docs/precision.md section 5).
-    std::vector<ComputeType> compute(elements);
+    std::vector<float> master(elements);
     bool converted = true;
     for (std::size_t i = 0; i < elements && converted; ++i) {
       const std::byte* element = record->data.data() + i * stored_size;
-      float value = 0.0f;
       switch (record->dtype) {
         case DType::kFp32:
-          std::memcpy(&value, element, sizeof(value));
+          std::memcpy(&master[i], element, sizeof(float));
           break;
         case DType::kBf16: {
           std::uint16_t bits = 0;
           std::memcpy(&bits, element, sizeof(bits));
           Bf16 stored;
           stored.bits = bits;
-          value = Bf16ToFloat(stored);
+          master[i] = Bf16ToFloat(stored);
           break;
         }
         default:
           converted = false;
           break;
       }
-      if (converted) compute[i] = ComputeFromFloat(value);
     }
     // int8 needs a per-tensor scale, so it is not loadable yet.
     if (!converted) continue;
-    kernels::Memcpy(view.value, compute.data(), elements * kComputeTypeSize,
-                    CopyDir::kHostToDevice);
+    if (view.master != nullptr) {
+      kernels::Memcpy(view.master, master.data(), elements * sizeof(float),
+                      CopyDir::kHostToDevice);
+    } else {
+      std::vector<ComputeType> compute(elements);
+      for (std::size_t i = 0; i < elements; ++i) {
+        compute[i] = ComputeFromFloat(master[i]);
+      }
+      kernels::Memcpy(view.value, compute.data(), elements * kComputeTypeSize,
+                      CopyDir::kHostToDevice);
+    }
   }
-  // The file holds the compute copy. Rebuild the fp32 master from it, so the
-  // optimizer continues from the loaded weights.
-  model->SyncMaster();
+  // Rebuild every compute copy from the loaded fp32 master weights.
+  model->SyncCompute();
   // A parameter-only file has no optimizer-state records; the moments stay at
   // their initial zeros (the SFT warm-start behavior).
   if (optimizer != nullptr) LoadOptimizerState(checkpoint, optimizer);
@@ -850,12 +858,12 @@ void TrainLoop::AllReduceGradients() {
     total += parameter.count;
     max_param_bytes =
         std::max(max_param_bytes, static_cast<std::size_t>(parameter.count) *
-                                      sizeof(ComputeType));
+                                      sizeof(GradientType));
   }
   if (views.empty()) return;
 
   const std::size_t total_bytes =
-      static_cast<std::size_t>(total) * sizeof(ComputeType);
+      static_cast<std::size_t>(total) * sizeof(GradientType);
   // Four to eight buckets, each about 128 MiB, amortize the host reference's
   // per-call round trip. The elementwise sum is unchanged, so the reduced
   // result is bit-identical to the per-parameter path.
@@ -878,9 +886,9 @@ void TrainLoop::AllReduceGradients() {
     average = (total_bytes + buckets - 1) / buckets;
   }
   const std::size_t stride = average + max_param_bytes;
-  std::vector<ComputeType*> buffers(buckets, nullptr);
+  std::vector<GradientType*> buffers(buckets, nullptr);
   for (std::size_t b = 0; b < buckets; ++b) {
-    buffers[b] = static_cast<ComputeType*>(kernels::Alloc(stride));
+    buffers[b] = static_cast<GradientType*>(kernels::Alloc(stride));
     if (buffers[b] == nullptr) {
       std::fprintf(stderr, "train: cannot allocate a gradient bucket\n");
       std::abort();
@@ -904,7 +912,7 @@ void TrainLoop::AllReduceGradients() {
     for (const Pending& entry : pending[b]) {
       kernels::Memcpy(
           entry.view->grad, buffers[b] + entry.offset,
-          static_cast<std::size_t>(entry.view->count) * sizeof(ComputeType),
+          static_cast<std::size_t>(entry.view->count) * sizeof(GradientType),
           CopyDir::kDeviceToDevice);
     }
     pending[b].clear();
@@ -914,7 +922,7 @@ void TrainLoop::AllReduceGradients() {
   for (const ParamView& view : views) {
     const std::size_t elements = static_cast<std::size_t>(view.count);
     if (bucket_elems[bucket] > 0 &&
-        (bucket_elems[bucket] + elements) * sizeof(ComputeType) > average) {
+        (bucket_elems[bucket] + elements) * sizeof(GradientType) > average) {
       issue(bucket);
       if (bucket + 1 >= buckets) {
         // Every buffer is in flight. Wait, copy the sums back, and reuse them.
@@ -926,14 +934,14 @@ void TrainLoop::AllReduceGradients() {
       }
     }
     kernels::Memcpy(buffers[bucket] + bucket_elems[bucket], view.grad,
-                    elements * sizeof(ComputeType), CopyDir::kDeviceToDevice);
+                    elements * sizeof(GradientType), CopyDir::kDeviceToDevice);
     pending[bucket].push_back({&view, bucket_elems[bucket]});
     bucket_elems[bucket] += elements;
   }
   issue(bucket);
   sync_->Wait();
   for (std::size_t b = 0; b < buckets; ++b) copy_back(b);
-  for (ComputeType* buffer : buffers) kernels::Free(buffer);
+  for (GradientType* buffer : buffers) kernels::Free(buffer);
 }
 
 float TrainLoop::Run() {

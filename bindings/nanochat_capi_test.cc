@@ -117,7 +117,15 @@ static_assert(std::is_same<decltype(nanochat_generate_params::stop_ids),
 
 // The weighted and uniform backward paths reach the same value through
 // different arithmetic. fp32 agrees to a tight tolerance.
+// The gradient tolerance for "two code paths over the same graph agree". The
+// paired runs fold an equivalent scale into the classifier gradient in two
+// different orders, so an fp32 store makes them the same arithmetic while a
+// bf16 store rounds the intermediate at a different point.
+#if defined(NANOCHAT_PRECISION_FP32)
 constexpr double kGradientTolerance = 1e-4;
+#else
+constexpr double kGradientTolerance = 1e-1;
+#endif
 
 int g_failures = 0;
 
@@ -257,15 +265,15 @@ std::vector<int> MakeTargets(int batch, int seq, int vocab) {
   return targets;
 }
 
-// Reads one parameter gradient into a float vector. The compute type is fp32,
-// so one element is four bytes (docs/precision.md).
+// Reads one parameter gradient into a float vector. A parameter gradient is
+// fp32 in every build, whatever the build compute type is
+// (docs/precision.md section 5).
 std::vector<float> ReadGradient(nanochat_model* model, int index) {
   nanochat_param param;
   std::memset(&param, 0, sizeof(param));
   if (nanochat_param_info(model, index, &param) != 0) return {};
-  const int element_size = nanochat_compute_type_size();
-  const std::size_t bytes = static_cast<std::size_t>(param.count) *
-                            static_cast<std::size_t>(element_size);
+  const std::size_t bytes =
+      static_cast<std::size_t>(param.count) * sizeof(float);
   std::vector<unsigned char> raw(bytes);
   if (nanochat_param_read(model, index, /*grad=*/1, 0, param.count,
                           raw.data()) != param.count) {

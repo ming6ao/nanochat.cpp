@@ -8,8 +8,8 @@
 #include "dev/kernels/pascal_spike.h"
 #include "nanochat/sandbox.h"
 
-#if !defined(NANOCHAT_PRECISION_FP32)
-#error "no precision selected; --config=fp32 sets it"
+#if !defined(NANOCHAT_PRECISION_FP32) && !defined(NANOCHAT_PRECISION_BF16)
+#error "no precision selected"
 #endif
 
 int main() {

@@ -20,7 +20,6 @@ using nanochat::MuonParams;
 using nanochat::dev::CheckVectorClose;
 using nanochat::dev::DevBuf;
 using nanochat::dev::Failures;
-using nanochat::dev::FromStorage;
 using nanochat::dev::RandomVec;
 using nanochat::dev::Rng;
 using nanochat::dev::ToStorage;
@@ -52,12 +51,12 @@ void RunCase(int num_params, int rows, int cols, int red_dim, bool nesterov,
 
   Rng rng;
   const std::vector<float> g_float = RandomVec(total, &rng);
-  const std::vector<float> g0 = FromStorage(ToStorage(g_float));
+  const std::vector<float> g0 = g_float;
   const std::vector<float> p0 = RandomVec(total, &rng);
   std::vector<float> buf1_ref(total, 0.0f);
   std::vector<float> buf2_ref(num_params * red_index, 0.0f);
 
-  DevBuf<ComputeType> grads(ToStorage(g0));
+  DevBuf<float> grads(g0);
   DevBuf<float> master(p0);
   DevBuf<ComputeType> params_dev(ToStorage(p0));
   DevBuf<float> buf1(buf1_ref);
@@ -101,14 +100,15 @@ int main() {
 
   // rows/cols <= 0 is a no-op.
   {
-    DevBuf<ComputeType> one(1);
+    DevBuf<float> one_grad(1);
+    DevBuf<ComputeType> one_value(1);
     DevBuf<float> one_master(1);
     DevBuf<float> onef(1);
     MuonParams bad;
     bad.rows = 0;
     bad.cols = 0;
-    nanochat::kernels::MuonUpdate(bad, one.ptr, one_master.ptr, one.ptr,
-                                  onef.ptr, onef.ptr);
+    nanochat::kernels::MuonUpdate(bad, one_grad.ptr, one_master.ptr,
+                                  one_value.ptr, onef.ptr, onef.ptr);
     nanochat::kernels::Synchronize();
   }
 

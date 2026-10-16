@@ -100,11 +100,14 @@ def build(backend=None, precision=None, arch=None, cache=None) -> Path:
 | Argument | Environment | Default |
 |---|---|---|
 | `backend` | `NANOCHAT_CPP_BACKEND` | `cpu` |
-| `precision` | `NANOCHAT_CPP_PRECISION` | `fp32` |
+| `precision` | `NANOCHAT_CPP_PRECISION` | `fp32` (`fp32` or `bf16`) |
 | `arch` | `NANOCHAT_CUDA_ARCH` | empty (Bazel chooses) |
 | `cache` | `NANOCHAT_CPP_CACHE` | `~/.cache/nanochat_cpp` |
 
 `backend` and `precision` become lowercase, and the call strips whitespace.
+`precision` accepts `fp32` and `bf16`; the build passes the precision as an
+explicit `--define`, so it does not depend on the order of the named configs
+([precision.md](precision.md)).
 The call expands `cache` with `expanduser`. An argument left as `None` comes
 from the environment. So `nc.build()` keeps the environment behavior.
 
@@ -289,6 +292,19 @@ embeddings; `Config(value_embedding=False)` matches the Track 3 preset.
 `Model.save` writes the self-describing parameter-only `NCHKPT01` container.
 `Model.load` accepts that container and the legacy `NCMDL001` file, so a
 distributed run's checkpoint loads in process (`docs/model.md`).
+
+`Model.params()` returns a `ParamView` for each parameter. `ParamView.value` and
+`ParamView.grad` are `TensorView` objects that read and write Python floats
+through the C surface, and `ParamView.grad` is `None` for a parameter without a
+gradient buffer. `Model.dtype` and `TensorView.dtype` report the build compute
+type: `bf16` or `fp32` for a value, and always `fp32` for a gradient
+([precision.md](precision.md) section 5). A `bf16` value view decodes and encodes
+bfloat16 at the boundary, so a caller never sees a two-byte element.
+
+`Model.bits_per_byte`-style comparisons against a committed reference fixture
+are fp32 gates. A bf16 build cannot reproduce an fp32 golden, so the fixture
+comparison is skipped in a bf16 build and the leg is recorded in the test output
+(precision.md section 6).
 
 ## 5. Chat evaluation
 

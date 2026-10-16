@@ -29,6 +29,7 @@
 #include "nanochat/model.h"
 #include "src/model_impl.h"
 #include "tests/oracle_fixture.h"
+#include "tests/param_stage.h"
 
 namespace {
 
@@ -61,7 +62,7 @@ std::string Format(const char* fmt, ...) {
   return std::string(buffer);
 }
 
-inline float AsFloat32(ComputeType value) { return value; }
+inline float AsFloat32(ComputeType value) { return static_cast<float>(value); }
 
 std::string Join(const std::vector<std::string>& parts) {
   std::string joined;
@@ -120,8 +121,6 @@ Config ConfigFromFixture(const Fixture& fixture) {
   return config;
 }
 
-inline void StoreFloat(ComputeType* dst, float value) { *dst = value; }
-
 void LoadParameters(const Fixture& fixture, Model* model) {
   std::vector<nanochat::ParamView> views = model->params();
   for (const nanochat::ParamView& view : views) {
@@ -144,29 +143,28 @@ void LoadParameters(const Fixture& fixture, Model* model) {
     const float* src = source.f32();
     // Stage the fixture values on the host, then upload in one copy so the same
     // helper works whether `view.value` is host (CPU) or device (CUDA).
-    std::vector<ComputeType> host(static_cast<std::size_t>(view.count));
+    std::vector<float> host(static_cast<std::size_t>(view.count));
     for (std::int64_t i = 0; i < view.count; ++i) {
-      StoreFloat(host.data() + i, src[i]);
+      host[static_cast<std::size_t>(i)] = src[i];
     }
-    nanochat::kernels::Memcpy(
-        view.value, host.data(),
-        static_cast<std::size_t>(view.count) * sizeof(ComputeType),
-        nanochat::CopyDir::kHostToDevice);
+    nanochat::testutil::StageParameter(view, host.data());
   }
+  // The write landed in the fp32 master, so rebuild every compute copy.
+  model->SyncCompute();
 }
 
-void CopyCompute(const ComputeType* src, std::int64_t count,
-                 std::vector<float>* out) {
-  std::vector<ComputeType> host(static_cast<std::size_t>(count));
+template <typename T>
+void CopyCompute(const T* src, std::int64_t count, std::vector<float>* out) {
+  std::vector<T> host(static_cast<std::size_t>(count));
   if (count > 0) {
-    nanochat::kernels::Memcpy(
-        host.data(), src, static_cast<std::size_t>(count) * sizeof(ComputeType),
-        nanochat::CopyDir::kDeviceToHost);
+    nanochat::kernels::Memcpy(host.data(), src,
+                              static_cast<std::size_t>(count) * sizeof(T),
+                              nanochat::CopyDir::kDeviceToHost);
   }
   out->resize(static_cast<std::size_t>(count));
   for (std::int64_t i = 0; i < count; ++i) {
     (*out)[static_cast<std::size_t>(i)] =
-        AsFloat32(host[static_cast<std::size_t>(i)]);
+        static_cast<float>(host[static_cast<std::size_t>(i)]);
   }
 }
 
@@ -292,6 +290,7 @@ void RunChecks(const Fixture& fixture) {
 }  // namespace
 
 int main(int argc, char** argv) {
+  if (nanochat::testutil::SkipFp32Golden("model_oracle")) return 0;
   std::string path;
   try {
     path = LocateFixture(argc, argv);

@@ -165,6 +165,7 @@ Caps GetCaps() {
   // The CPU reference implements the build precision. The host fails fast on a
   // build whose precision is not in this set.
   caps.supports_fp32 = true;
+  caps.supports_bf16 = true;
   caps.device_name = "cpu";
   return caps;
 }
@@ -327,18 +328,19 @@ float GemmDotProduct(const T* a, const T* b, int lda, int ldb, int i, int j,
 
 // Write one output element. A zero `beta` never reads the previous value, which
 // matches the shipped contract.
-inline ComputeType GemmStore(ComputeType* dst, float partial, float alpha,
-                             float beta) {
+template <typename T>
+T GemmStore(T* dst, float partial, float alpha, float beta) {
   if (beta != 0.0f) {
-    return ToCompute(alpha * partial + beta * AsFloat(*dst));
+    return T(alpha * partial + beta * static_cast<float>(*dst));
   }
-  return ToCompute(alpha * partial);
+  return T(alpha * partial);
 }
 
 }  // namespace
 
-void Gemm(GemmMode mode, const GemmParams& params, const ComputeType* a,
-          const ComputeType* b, ComputeType* c) {
+template <typename T>
+void GemmImpl(GemmMode mode, const GemmParams& params, const ComputeType* a,
+              const ComputeType* b, T* c) {
   (void)mode;
   const int m = params.m;
   const int n = params.n;
@@ -376,7 +378,7 @@ void Gemm(GemmMode mode, const GemmParams& params, const ComputeType* a,
   for (int bi = 0; bi < batch; ++bi) {
     const ComputeType* ab = a + bi * stride_a;
     const ComputeType* bb = b + bi * stride_b;
-    ComputeType* cb = c + bi * stride_c;
+    T* cb = c + bi * stride_c;
 
     // The packed `b` panel is shared by every worker and rewritten for each
     // column block. The packed `a` block is private to a worker.
@@ -413,9 +415,8 @@ void Gemm(GemmMode mode, const GemmParams& params, const ComputeType* a,
                   bpanel.data() + static_cast<std::int64_t>(g) * group_stride;
               micro(k, apack.data(), k, bp, kGemmNr, acc);
               for (int i = 0; i < kGemmMr; ++i) {
-                ComputeType* crow = cb +
-                                    static_cast<std::int64_t>(ic + i) * ldc +
-                                    jc + g * kGemmNr;
+                T* crow = cb + static_cast<std::int64_t>(ic + i) * ldc + jc +
+                          g * kGemmNr;
                 for (int j = 0; j < kGemmNr; ++j) {
                   crow[j] = GemmStore(crow + j, static_cast<float>(acc[i][j]),
                                       alpha, beta);
@@ -425,8 +426,7 @@ void Gemm(GemmMode mode, const GemmParams& params, const ComputeType* a,
             // Partial column tile at the right edge.
             for (int j = groups * kGemmNr; j < nc; ++j) {
               for (int i = 0; i < kGemmMr; ++i) {
-                ComputeType* crow =
-                    cb + static_cast<std::int64_t>(ic + i) * ldc + jc + j;
+                T* crow = cb + static_cast<std::int64_t>(ic + i) * ldc + jc + j;
                 const float partial =
                     GemmDotProduct(ab, bb, lda, ldb, ic + i, jc + j, k,
                                    transpose_a, transpose_b);
@@ -436,8 +436,7 @@ void Gemm(GemmMode mode, const GemmParams& params, const ComputeType* a,
           } else {
             // Partial row tile at the bottom edge.
             for (int i = 0; i < mr; ++i) {
-              ComputeType* crow =
-                  cb + static_cast<std::int64_t>(ic + i) * ldc + jc;
+              T* crow = cb + static_cast<std::int64_t>(ic + i) * ldc + jc;
               for (int j = 0; j < nc; ++j) {
                 const float partial =
                     GemmDotProduct(ab, bb, lda, ldb, ic + i, jc + j, k,
@@ -450,6 +449,16 @@ void Gemm(GemmMode mode, const GemmParams& params, const ComputeType* a,
       }
     }
   }
+}
+
+void Gemm(GemmMode mode, const GemmParams& params, const ComputeType* a,
+          const ComputeType* b, ComputeType* c) {
+  GemmImpl(mode, params, a, b, c);
+}
+
+void GemmWgrad(const GemmParams& params, const ComputeType* a,
+               const ComputeType* b, float* c) {
+  GemmImpl(GemmMode::kWgrad, params, a, b, c);
 }
 
 // ---------------------------------------------------------------------------
@@ -954,7 +963,7 @@ void PointwiseBackward(PointwiseOp op, int n, const ComputeType* a,
 
 void ClassifierForward(const ClassifierParams& params,
                        const ComputeType* logits, const int* targets,
-                       ComputeType* losses) {
+                       float* losses) {
   ConfigureThreads();
   const int rows = params.rows;
   const int vocab = params.vocab_size;
@@ -975,7 +984,7 @@ void ClassifierForward(const ClassifierParams& params,
     for (int r = 0; r < rows; ++r) {
       const int target = targets[r];
       if (target == params.ignore_index) {
-        losses[r] = ToCompute(0.0f);
+        losses[r] = 0.0f;
         continue;
       }
       const std::int64_t base = static_cast<std::int64_t>(r) * padded;
@@ -992,7 +1001,7 @@ void ClassifierForward(const ClassifierParams& params,
       }
       const float loss =
           static_cast<float>(std::log(sum_exp)) + row_max - z[target];
-      losses[r] = ToCompute(loss);
+      losses[r] = loss;
     }
   }
 }
@@ -1081,17 +1090,17 @@ void EmbeddingForward(int tokens, int dim, const int* ids,
 }
 
 void EmbeddingBackward(int tokens, int dim, const int* ids,
-                       const ComputeType* dout, ComputeType* dtable) {
+                       const ComputeType* dout, float* dtable) {
   if (tokens <= 0 || dim <= 0) return;
   // Add every token row to the dense gradient buffer. The caller clears the
   // buffer once with ZeroGrad, so repeated backward calls sum. A duplicate id
   // adds every occurrence. The scatter-add needs no zeroing pass
   // (docs/model.md).
   for (int i = 0; i < tokens; ++i) {
-    ComputeType* row = dtable + static_cast<std::int64_t>(ids[i]) * dim;
+    float* row = dtable + static_cast<std::int64_t>(ids[i]) * dim;
     const std::int64_t src = static_cast<std::int64_t>(i) * dim;
     for (int d = 0; d < dim; ++d) {
-      row[d] = ToCompute(AsFloat(row[d]) + AsFloat(dout[src + d]));
+      row[d] += AsFloat(dout[src + d]);
     }
   }
 }
@@ -1101,7 +1110,7 @@ void EmbeddingBackward(int tokens, int dim, const int* ids,
 // ---------------------------------------------------------------------------
 
 void AdamWUpdate(int n, const AdamWParams& params, float* master,
-                 ComputeType* value, const ComputeType* g, float* m, float* v) {
+                 ComputeType* value, const float* g, float* m, float* v) {
   if (n <= 0) return;
   const float bias1 =
       1.0f - std::pow(params.beta1, static_cast<float>(params.step));
@@ -1109,7 +1118,7 @@ void AdamWUpdate(int n, const AdamWParams& params, float* master,
       1.0f - std::pow(params.beta2, static_cast<float>(params.step));
   const float step_size = params.lr / bias1;
   for (int i = 0; i < n; ++i) {
-    const float grad = AsFloat(g[i]);
+    const float grad = g[i];
     // Decoupled weight decay, applied to the fp32 master before the update.
     float pi = master[i] * (1.0f - params.lr * params.weight_decay);
     const float mi = m[i] + (1.0f - params.beta1) * (grad - m[i]);
@@ -1129,12 +1138,16 @@ void AdamWUpdate(int n, const AdamWParams& params, float* master,
 
 namespace {
 
-// Float matrix multiply used by MuonUpdate. The Muon working state is always
-// float, so the tuned `Gemm` (whose operands are ComputeType) is only callable
-// when ComputeType is float. The fp32 build forwards to `Gemm` and keeps its
-// double accumulator.
+// Float matrix multiply used by MuonUpdate. The optimizer working state stays
+// fp32 even when the model compute tensors use bf16.
+//
+// The fp32 build forwards to the tuned `Gemm`, whose operands are `ComputeType`
+// (that is, `float`), so the fp32 optimizer arithmetic is unchanged. The bf16
+// build cannot call it, because its operands are not `float`, so it uses a
+// plain double-accumulator loop.
 void MuonMatmul(int m, int n, int k, const float* a, const float* b, float* c,
                 bool transpose_a, bool transpose_b) {
+#if defined(NANOCHAT_PRECISION_FP32)
   GemmParams params;
   params.m = m;
   params.n = n;
@@ -1144,11 +1157,28 @@ void MuonMatmul(int m, int n, int k, const float* a, const float* b, float* c,
   params.transpose_a = transpose_a;
   params.transpose_b = transpose_b;
   Gemm(GemmMode::kForward, params, a, b, c);
+#else
+  for (int i = 0; i < m; ++i) {
+    for (int j = 0; j < n; ++j) {
+      double sum = 0.0;
+      for (int l = 0; l < k; ++l) {
+        const std::int64_t a_index = transpose_a
+                                         ? static_cast<std::int64_t>(l) * m + i
+                                         : static_cast<std::int64_t>(i) * k + l;
+        const std::int64_t b_index = transpose_b
+                                         ? static_cast<std::int64_t>(j) * k + l
+                                         : static_cast<std::int64_t>(l) * n + j;
+        sum += static_cast<double>(a[a_index]) * b[b_index];
+      }
+      c[static_cast<std::int64_t>(i) * n + j] = static_cast<float>(sum);
+    }
+  }
+#endif
 }
 
 }  // namespace
 
-void MuonUpdate(const MuonParams& params, const ComputeType* stacked_grads,
+void MuonUpdate(const MuonParams& params, const float* stacked_grads,
                 float* stacked_master, ComputeType* stacked_values, float* buf1,
                 float* buf2) {
   ConfigureThreads();
@@ -1172,7 +1202,7 @@ void MuonUpdate(const MuonParams& params, const ComputeType* stacked_grads,
 
   for (int m = 0; m < num_params; ++m) {
     const std::size_t off = static_cast<std::size_t>(m) * mat;
-    const ComputeType* grad = stacked_grads + off;
+    const float* grad = stacked_grads + off;
     float* master = stacked_master + off;
     ComputeType* value = stacked_values + off;
     float* momentum_buf = buf1 + off;
@@ -1185,7 +1215,7 @@ void MuonUpdate(const MuonParams& params, const ComputeType* stacked_grads,
 #pragma omp parallel for schedule(static)
 #endif
     for (std::size_t i = 0; i < mat; ++i) {
-      const float gr = AsFloat(grad[i]);
+      const float gr = grad[i];
       momentum_buf[i] =
           momentum_buf[i] + (1.0f - params.momentum) * (gr - momentum_buf[i]);
       x[i] = params.nesterov ? (1.0f - params.momentum) * gr +
@@ -1417,7 +1447,7 @@ void MuonUpdate(const MuonParams& params, const ComputeType* stacked_grads,
 // `track_1_short/optim/anvil.py` and docs/optimizer-anvil-design.md. The
 // working state is float (like Muon's), so the fp32 build can drive `Gemm`.
 
-void AnvilUpdate(const AnvilParams& params, const ComputeType* stacked_grads,
+void AnvilUpdate(const AnvilParams& params, const float* stacked_grads,
                  float* stacked_master, ComputeType* stacked_values,
                  float* velocity, float* lane_energy) {
   ConfigureThreads();
@@ -1450,7 +1480,7 @@ void AnvilUpdate(const AnvilParams& params, const ComputeType* stacked_grads,
 
   for (int m = 0; m < num_params; ++m) {
     const std::size_t off = static_cast<std::size_t>(m) * mat;
-    const ComputeType* grad = stacked_grads + off;
+    const float* grad = stacked_grads + off;
     float* master = stacked_master + off;
     ComputeType* value = stacked_values + off;
     float* fast = velocity + off;
@@ -1462,7 +1492,7 @@ void AnvilUpdate(const AnvilParams& params, const ComputeType* stacked_grads,
 #pragma omp parallel for schedule(static)
 #endif
     for (std::size_t i = 0; i < mat; ++i) {
-      const float gr = AsFloat(grad[i]);
+      const float gr = grad[i];
       const float f = fast[i] + (1.0f - params.fast_beta) * (gr - fast[i]);
       const float s = slow[i] + (1.0f - params.slow_beta) * (gr - slow[i]);
       fast[i] = f;
@@ -1619,10 +1649,10 @@ void AnvilUpdate(const AnvilParams& params, const ComputeType* stacked_grads,
 // GlobalNorm (gradient clipping)
 // ---------------------------------------------------------------------------
 
-void GlobalNorm(int n, float clip, ComputeType* grads, float* out_norm) {
+void GlobalNorm(int n, float clip, float* grads, float* out_norm) {
   double sum_sq = 0.0;
   for (int i = 0; i < n; ++i) {
-    const double v = AsFloat(grads[i]);
+    const double v = grads[i];
     sum_sq += v * v;
   }
   const float norm = static_cast<float>(std::sqrt(sum_sq));
@@ -1630,13 +1660,13 @@ void GlobalNorm(int n, float clip, ComputeType* grads, float* out_norm) {
   if (clip > 0.0f && norm > clip) {
     const float scale = clip / norm;
     for (int i = 0; i < n; ++i) {
-      grads[i] = ToCompute(AsFloat(grads[i]) * scale);
+      grads[i] *= scale;
     }
   }
 }
 
-void ScalarDot(const ComputeType* a, const ComputeType* b, int n,
-               ComputeType* out, float scale, bool accumulate) {
+void ScalarDot(const ComputeType* a, const ComputeType* b, int n, float* out,
+               float scale, bool accumulate) {
   if (n <= 0) return;
   double dot = 0.0;
   for (int i = 0; i < n; ++i) {
@@ -1644,7 +1674,7 @@ void ScalarDot(const ComputeType* a, const ComputeType* b, int n,
         static_cast<double>(AsFloat(a[i])) * static_cast<double>(AsFloat(b[i]));
   }
   const float value = scale * static_cast<float>(dot);
-  out[0] = ToCompute(accumulate ? AsFloat(out[0]) + value : value);
+  out[0] = accumulate ? out[0] + value : value;
 }
 
 void ValueGateForward(int rows, int hidden, int num_kv_heads, int head_dim,
@@ -1681,7 +1711,7 @@ void ValueGateForward(int rows, int hidden, int num_kv_heads, int head_dim,
 void ValueGateBackward(int rows, int hidden, int num_kv_heads, int head_dim,
                        const ComputeType* h, const ComputeType* ve,
                        const ComputeType* gate_w, const ComputeType* gate,
-                       const ComputeType* dv, ComputeType* gate_w_grad,
+                       const ComputeType* dv, float* gate_w_grad,
                        ComputeType* dh, ComputeType* dve) {
   constexpr int kChannels = 12;
   if (rows <= 0 || hidden < kChannels || num_kv_heads <= 0 || head_dim <= 0) {
@@ -1705,8 +1735,7 @@ void ValueGateBackward(int rows, int hidden, int num_kv_heads, int head_dim,
       }
       const float dpre = static_cast<float>(dgate) * g * (1.0f - g / 3.0f);
       for (int j = 0; j < kChannels; ++j) {
-        gate_w_grad[kh * kChannels + j] = ToCompute(
-            AsFloat(gate_w_grad[kh * kChannels + j]) + dpre * AsFloat(hrow[j]));
+        gate_w_grad[kh * kChannels + j] += dpre * AsFloat(hrow[j]);
         dhrow[j] = ToCompute(AsFloat(dhrow[j]) +
                              dpre * AsFloat(gate_w[kh * kChannels + j]));
       }

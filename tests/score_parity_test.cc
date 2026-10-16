@@ -37,6 +37,7 @@
 #include "nanochat/model.h"
 #include "src/train.h"
 #include "tests/oracle_fixture.h"
+#include "tests/param_stage.h"
 
 namespace {
 
@@ -95,8 +96,6 @@ Config ConfigFromFixture(const Fixture& fixture) {
   return config;
 }
 
-inline void StoreFloat(ComputeType* dst, float value) { *dst = value; }
-
 // Loads `param/<name>` into every model parameter. The names match PyTorch's
 // `named_parameters()` (proven by the oracle test), so the mapping is direct.
 void LoadParameters(const Fixture& fixture, Model* model) {
@@ -113,15 +112,14 @@ void LoadParameters(const Fixture& fixture, Model* model) {
                   static_cast<long long>(source.numel())));
       continue;
     }
-    std::vector<ComputeType> host(static_cast<std::size_t>(view.count));
+    std::vector<float> host(static_cast<std::size_t>(view.count));
     for (std::int64_t i = 0; i < view.count; ++i) {
-      StoreFloat(host.data() + i, source.f32()[i]);
+      host[static_cast<std::size_t>(i)] = source.f32()[i];
     }
-    nanochat::kernels::Memcpy(
-        view.value, host.data(),
-        static_cast<std::size_t>(view.count) * sizeof(ComputeType),
-        CopyDir::kHostToDevice);
+    nanochat::testutil::StageParameter(view, host.data());
   }
+  // The write landed in the fp32 master, so rebuild every compute copy.
+  model->SyncCompute();
 }
 
 std::vector<int> ReadInts(const Tensor& tensor) {
@@ -374,6 +372,7 @@ void Run(const std::string& fixture_path) {
 }  // namespace
 
 int main(int argc, char** argv) {
+  if (nanochat::testutil::SkipFp32Golden("score_parity")) return 0;
   try {
     Run(LocateFixture(argc, argv));
   } catch (const std::exception& error) {

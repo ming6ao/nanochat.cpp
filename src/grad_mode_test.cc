@@ -53,15 +53,14 @@ Config TinyConfig() {
   return config;
 }
 
-std::vector<ComputeType> StageLosses(Model* model, int rows) {
+std::vector<float> StageLosses(Model* model, int rows) {
   auto* impl = static_cast<TrainModel*>(model);
-  std::vector<ComputeType> host(static_cast<std::size_t>(rows));
-  const ComputeType* losses = impl->losses();
+  std::vector<float> host(static_cast<std::size_t>(rows));
+  const float* losses = impl->losses();
   if (losses != nullptr) {
-    nanochat::kernels::Memcpy(
-        host.data(), losses,
-        static_cast<std::size_t>(rows) * sizeof(ComputeType),
-        CopyDir::kDeviceToHost);
+    nanochat::kernels::Memcpy(host.data(), losses,
+                              static_cast<std::size_t>(rows) * sizeof(float),
+                              CopyDir::kDeviceToHost);
   }
   return host;
 }
@@ -83,15 +82,15 @@ std::vector<int> MakeTargets(int batch, int seq, int vocab) {
   return targets;
 }
 
-void CompareRows(const std::vector<ComputeType>& want,
-                 const std::vector<ComputeType>& got, const std::string& what) {
+void CompareRows(const std::vector<float>& want, const std::vector<float>& got,
+                 const std::string& what) {
   if (want.size() != got.size()) {
     Fail(what + ": row count mismatch");
     return;
   }
   for (std::size_t i = 0; i < want.size(); ++i) {
-    const double a = nanochat::AsF(want[i]);
-    const double b = nanochat::AsF(got[i]);
+    const double a = want[i];
+    const double b = got[i];
     if (std::fabs(a - b) > kLossTolerance * (1.0 + std::fabs(a))) {
       Fail(what + ": row " + std::to_string(i) + " got " + std::to_string(b) +
            " want " + std::to_string(a));
@@ -114,10 +113,10 @@ void CheckEvalParity() {
 
   const float train_loss =
       model->ForwardLoss(tokens.data(), targets.data(), batch, seq);
-  const std::vector<ComputeType> train_rows = StageLosses(model.get(), rows);
+  const std::vector<float> train_rows = StageLosses(model.get(), rows);
 
   float eval_loss = 0.0f;
-  std::vector<ComputeType> eval_rows;
+  std::vector<float> eval_rows;
   {
     NoGradGuard guard(model.get());
     eval_loss = model->ForwardLoss(tokens.data(), targets.data(), batch, seq);
@@ -156,9 +155,9 @@ void CheckEvalTiling() {
   const std::vector<int> targets = MakeTargets(batch, seq, config.vocab_size);
 
   model->ForwardLoss(tokens.data(), targets.data(), batch, seq);
-  const std::vector<ComputeType> train_rows = StageLosses(model.get(), rows);
+  const std::vector<float> train_rows = StageLosses(model.get(), rows);
 
-  std::vector<ComputeType> eval_rows;
+  std::vector<float> eval_rows;
   {
     NoGradGuard guard(model.get());
     model->ForwardLoss(tokens.data(), targets.data(), batch, seq);

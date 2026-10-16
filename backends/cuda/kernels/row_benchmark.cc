@@ -91,7 +91,7 @@ void BenchPointwise(Rng* rng, int n, int iters) {
 }
 
 void BenchGlobalNorm(Rng* rng, int n, int iters) {
-  DevBuf<ComputeType> g(ToStorage(RandomVec(n, rng)));
+  DevBuf<float> g(RandomVec(n, rng));
   DevBuf<float> norm(1);
   char label[64];
   std::snprintf(label, sizeof(label), "globalnorm n=%d", n);

@@ -49,7 +49,7 @@ void RunCase(int vocab, int dim, const std::vector<int>& ids,
   // Backward over a persistent, non-zero gradient buffer: only the touched rows
   // change, and the contribution adds to the incoming value.
   DevBuf<ComputeType> dout(ToStorage(dout0));
-  DevBuf<ComputeType> dtable(ToStorage(dtable_init));
+  DevBuf<float> dtable(dtable_init);
   const std::vector<float> once =
       EmbeddingBackward(tokens, dim, ids, dout0, dtable_init);
   const std::vector<float> twice =
@@ -57,7 +57,7 @@ void RunCase(int vocab, int dim, const std::vector<int>& ids,
   nanochat::kernels::EmbeddingBackward(tokens, dim, ids.data(), dout.ptr,
                                        dtable.ptr);
   nanochat::kernels::Synchronize();
-  CheckVectorClose(FromStorage(dtable.Download()), once, 1e-4,
+  CheckVectorClose(dtable.Download(), once, 1e-4,
                    (std::string(name) + " bwd persistent").c_str());
 
   // A second call on the same buffer sums, because the caller owns the one
@@ -66,17 +66,16 @@ void RunCase(int vocab, int dim, const std::vector<int>& ids,
   nanochat::kernels::EmbeddingBackward(tokens, dim, ids.data(), dout.ptr,
                                        dtable.ptr);
   nanochat::kernels::Synchronize();
-  CheckVectorClose(FromStorage(dtable.Download()), twice, 1e-4,
+  CheckVectorClose(dtable.Download(), twice, 1e-4,
                    (std::string(name) + " bwd accumulate").c_str());
 
   // Finite-difference the gather with a zero-initialised gradient buffer so the
   // analytic gradient is exact on untouched rows as well.
-  DevBuf<ComputeType> dtable_zero(
-      ToStorage(std::vector<float>(vocab * dim, 0.0f)));
+  DevBuf<float> dtable_zero(std::vector<float>(vocab * dim, 0.0f));
   nanochat::kernels::EmbeddingBackward(tokens, dim, ids.data(), dout.ptr,
                                        dtable_zero.ptr);
   nanochat::kernels::Synchronize();
-  const std::vector<float> analytic = FromStorage(dtable_zero.Download());
+  const std::vector<float> analytic = dtable_zero.Download();
   auto loss_at = [&](const std::vector<float>& tv) {
     const std::vector<float> o = EmbeddingForward(tokens, dim, ids, tv);
     double loss = 0.0;

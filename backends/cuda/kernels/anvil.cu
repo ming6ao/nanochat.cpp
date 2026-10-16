@@ -57,14 +57,14 @@ __global__ void AnvilMomentumKernel(long long total, long long rail_stride,
                                     float fast_beta, float slow_beta,
                                     float fast_weight, float momentum,
                                     bool nesterov,
-                                    const ComputeType* __restrict__ grads,
+                                    const float* __restrict__ grads,
                                     float* __restrict__ velocity,
                                     ComputeType* __restrict__ x) {
   const long long stride = static_cast<long long>(gridDim.x) * blockDim.x;
   for (long long i =
            static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x;
        i < total; i += stride) {
-    const float gr = AsFloatDev(grads[i]);
+    const float gr = grads[i];
     float* fast = velocity + i;
     float* slow = velocity + rail_stride + i;
     const float f = *fast + (1.0f - fast_beta) * (gr - *fast);
@@ -273,7 +273,7 @@ void EnsureAnvilWorkspace(std::size_t elements, std::size_t scratch_floats) {
 
 }  // namespace
 
-void AnvilUpdate(const AnvilParams& params, const ComputeType* stacked_grads,
+void AnvilUpdate(const AnvilParams& params, const float* stacked_grads,
                  float* stacked_master, ComputeType* stacked_values,
                  float* velocity, float* lane_energy) {
   const int num_params = params.num_params > 0 ? params.num_params : 1;

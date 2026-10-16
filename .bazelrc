@@ -4,8 +4,7 @@
 #   * toolchain: the C++ standard here; the host compiler is host-local;
 #   * arch:      Pascal sm_61 is the default; --config=sm_75 and --config=t4
 #                select Turing (T4);
-#   * precision: fp32 is the only precision (docs/precision.md). The
-#                selector stays as a build-time define;
+#   * precision: fp32 or bf16 (docs/precision.md), selected by a build define;
 #   * resources: cap the Bazel server and per-server action fan-out so several
 #                agent worktrees cannot exhaust the small shared host.
 # Named configs are additive: `--config=sm_75 --config=sim`. `--config=t4` is
@@ -33,9 +32,9 @@ build:sm_75 --@rules_cuda//cuda:archs=sm_75
 
 # --- Precision --------------------------------------------------------------
 #
-# fp32 is the only precision on every host (docs/precision.md). The define
-# selects `ComputeType = float`; there is no runtime dtype dispatch.
+# The selector is a build-time define; there is no runtime dtype dispatch.
 build --define=precision=fp32
+build:bf16 --define=precision=bf16
 
 # --- Backend ----------------------------------------------------------------
 #
@@ -71,22 +70,29 @@ build:native --define=backend=cuda
 #   tools/nanochat test //tests:sim_numerics_test --config=sim \
 #       --test_env=NANOCHAT_SIM_PROFILE=h100
 #
-# `h100` and `h200` are the complete named targets for the compile gate
-# (section 8): sm_90, fp32, and the CUDA backend.
+# `a100`, `h100`, and `h200` select bf16 for Ampere and newer devices.
 build:sim --define=simulator=1
 # The compile gate (docs/simulator.md section 8): turn warnings into errors and
 # ask ptxas for the register and shared-memory use. Additive with a device
 # config: `--config=h100 --config=sim-gate`.
 build:sim-gate --define=simulator_gate=1
 
+build:a100 --@rules_cuda//cuda:archs=sm_80
+build:a100 --define=precision=bf16
+build:a100 --define=backend=cuda
+build:a100 --define=collective=native
+build:a100 --define=simulator=1
+
 build:h100 --@rules_cuda//cuda:archs=sm_90
-build:h100 --define=precision=fp32
+build:h100 --define=precision=bf16
 build:h100 --define=backend=cuda
+build:h100 --define=collective=native
 build:h100 --define=simulator=1
 
 build:h200 --@rules_cuda//cuda:archs=sm_90
-build:h200 --define=precision=fp32
+build:h200 --define=precision=bf16
 build:h200 --define=backend=cuda
+build:h200 --define=collective=native
 build:h200 --define=simulator=1
 
 # --- Host targets -----------------------------------------------------------

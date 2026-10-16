@@ -68,19 +68,18 @@ void ExpectTrue(bool condition, const std::string& what) {
 }
 
 // Copies a (possibly device-resident) buffer to host floats.
-std::vector<float> ReadCompute(const nanochat::ComputeType* src,
-                               std::int64_t count) {
-  std::vector<nanochat::ComputeType> host(static_cast<std::size_t>(count));
+template <typename T>
+std::vector<float> ReadCompute(const T* src, std::int64_t count) {
+  std::vector<T> host(static_cast<std::size_t>(count));
   if (count > 0) {
-    nanochat::kernels::Memcpy(
-        host.data(), src,
-        static_cast<std::size_t>(count) * sizeof(nanochat::ComputeType),
-        CopyDir::kDeviceToHost);
+    nanochat::kernels::Memcpy(host.data(), src,
+                              static_cast<std::size_t>(count) * sizeof(T),
+                              CopyDir::kDeviceToHost);
   }
   std::vector<float> out(static_cast<std::size_t>(count));
   for (std::int64_t i = 0; i < count; ++i) {
     out[static_cast<std::size_t>(i)] =
-        nanochat::AsF(host[static_cast<std::size_t>(i)]);
+        static_cast<float>(host[static_cast<std::size_t>(i)]);
   }
   return out;
 }

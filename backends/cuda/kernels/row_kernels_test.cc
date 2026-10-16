@@ -23,7 +23,10 @@ using nanochat::kernels::Memcpy;
 using nanochat::kernels::Synchronize;
 
 ComputeType C(float v) { return v; }
-float U(ComputeType v) { return v; }
+template <typename T>
+float U(T value) {
+  return static_cast<float>(value);
+}
 constexpr double kOutTol = 1e-4;
 
 int g_failures = 0;
@@ -115,11 +118,11 @@ int main() {
 
   // GlobalNorm: {3, 4} has norm 5, clipped to 2.5 -> {1.5, 2}.
   {
-    DevBuf<ComputeType> g(std::vector<ComputeType>{C(3.0f), C(4.0f)});
+    DevBuf<float> g(std::vector<float>{3.0f, 4.0f});
     DevBuf<float> norm(std::vector<float>{0.0f});
     nanochat::kernels::GlobalNorm(2, 2.5f, g.ptr, norm.ptr);
     Synchronize();
-    const std::vector<ComputeType> gh = g.Download();
+    const std::vector<float> gh = g.Download();
     const std::vector<float> nh = norm.Download();
     CheckClose(nh[0], 5.0, 1e-4, "globalnorm pre-clip");
     CheckClose(U(gh[0]), 1.5, kOutTol, "globalnorm clipped 0");

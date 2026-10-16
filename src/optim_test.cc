@@ -264,7 +264,7 @@ struct ParamState {
   GroupSpec spec;
   int rows = 0;
   int cols = 0;
-  std::vector<ComputeType> grad;
+  std::vector<float> grad;
   std::vector<ComputeType> ref_value;  // expected current compute copy
   std::vector<float> ref_master;       // expected current fp32 master
   std::vector<float> m;                // AdamW first moment
@@ -286,7 +286,7 @@ struct ParamState {
     state.spec =
         SpecFor(std::string(view.name), config, oc, view.rows, view.cols);
     const std::size_t count = static_cast<std::size_t>(view.count);
-    state.grad.assign(count, ComputeType{});
+    state.grad.assign(count, 0.0f);
     state.ref_value.resize(count);
     state.ref_master.resize(count);
     for (std::size_t i = 0; i < count; ++i) {
@@ -323,7 +323,7 @@ struct ParamState {
           1.0f - std::pow(state.spec.beta2, static_cast<float>(step));
       const float step_size = lr / bias1;
       for (std::size_t i = 0; i < state.grad.size(); ++i) {
-        const float g = AsF32(state.grad[i]) * grad_scale;
+        const float g = state.grad[i] * grad_scale;
         float p = state.ref_master[i];
         p *= (1.0f - lr * state.spec.weight_decay);
         state.m[i] += (1.0f - state.spec.beta1) * (g - state.m[i]);
@@ -334,9 +334,9 @@ struct ParamState {
         StoreFloat(&state.ref_value[i], p);
       }
     } else {
-      std::vector<ComputeType> scaled(state.grad.size());
+      std::vector<float> scaled(state.grad.size());
       for (std::size_t i = 0; i < state.grad.size(); ++i) {
-        StoreFloat(&scaled[i], AsF32(state.grad[i]) * grad_scale);
+        scaled[i] = state.grad[i] * grad_scale;
       }
       nanochat::MuonParams params;
       params.num_params = 1;
@@ -396,11 +396,11 @@ void RunStepsTest(float clip) {
     for (ParamState& state : states) {
       for (std::size_t i = 0; i < state.grad.size(); ++i) {
         const float value = 0.05f * rng.Uniform();
-        StoreFloat(&state.grad[i], value);
+        state.grad[i] = value;
         sum_sq += static_cast<double>(value) * value;
       }
       std::memcpy(state.view->grad, state.grad.data(),
-                  state.grad.size() * sizeof(ComputeType));
+                  state.grad.size() * sizeof(float));
     }
     const float expected_norm = static_cast<float>(std::sqrt(sum_sq));
     const float scale =
@@ -452,11 +452,11 @@ void RunZeroGradTest() {
   for (std::size_t k = 0; k < views.size(); ++k) {
     initial[k].resize(static_cast<std::size_t>(views[k].count));
     for (std::int64_t i = 0; i < views[k].count; ++i) {
-      initial[k][static_cast<std::size_t>(i)] = AsF32(views[k].value[i]);
+      initial[k][static_cast<std::size_t>(i)] = views[k].master[i];
     }
     nanochat::kernels::Memset(
         views[k].grad, 0,
-        static_cast<std::size_t>(views[k].count) * sizeof(ComputeType));
+        static_cast<std::size_t>(views[k].count) * sizeof(float));
   }
 
   optimizer->Step(1);
@@ -470,7 +470,8 @@ void RunZeroGradTest() {
     const float factor = 1.0f - state.spec.lr * lrm * wd;
     for (std::int64_t i = 0; i < state.view->count; ++i) {
       const float got = AsF32(state.view->value[i]);
-      const float want = initial[k][static_cast<std::size_t>(i)] * factor;
+      const float want = nanochat::ComputeToFloat(nanochat::ComputeFromFloat(
+          initial[k][static_cast<std::size_t>(i)] * factor));
       if (std::fabs(got - want) > 2e-5f) {
         Fail(Format("zero-grad %s[%lld]: got %.8g want %.8g", state.view->name,
                     static_cast<long long>(i), got, want));
@@ -608,7 +609,7 @@ struct AnvilRef {
   int rows = 0;
   int cols = 0;
   int red_dim = -1;
-  std::vector<ComputeType> grad;
+  std::vector<float> grad;
   std::vector<ComputeType> value;
   std::vector<float> master;
   std::vector<float> velocity;
@@ -649,7 +650,7 @@ void TestAnvilSteps() {
     ref.cols = cols;
     ref.red_dim = rows >= cols ? -1 : -2;
     const std::size_t count = static_cast<std::size_t>(view.count);
-    ref.grad.assign(count, ComputeType{});
+    ref.grad.assign(count, 0.0f);
     ref.value.resize(count);
     ref.master.resize(count);
     for (std::size_t i = 0; i < count; ++i) {
@@ -671,10 +672,10 @@ void TestAnvilSteps() {
   for (int step = 1; step <= 3; ++step) {
     for (AnvilRef& ref : refs) {
       for (std::size_t i = 0; i < ref.grad.size(); ++i) {
-        StoreFloat(&ref.grad[i], 0.05f * rng.Uniform());
+        ref.grad[i] = 0.05f * rng.Uniform();
       }
       std::memcpy(ref.view->grad, ref.grad.data(),
-                  ref.grad.size() * sizeof(ComputeType));
+                  ref.grad.size() * sizeof(float));
     }
     optimizer->Step(step);
 
@@ -747,24 +748,28 @@ void TestAdamCadence() {
 
   for (const ParamView& view : views) {
     nanochat::kernels::Memset(
-        view.grad, 0,
-        static_cast<std::size_t>(view.count) * sizeof(ComputeType));
+        view.grad, 0, static_cast<std::size_t>(view.count) * sizeof(float));
   }
   const std::size_t count = static_cast<std::size_t>(target->count);
   Rng rng(0xca4e5eedull);
-  std::vector<ComputeType> grad(count);
+  std::vector<float> grad(count);
   for (std::size_t i = 0; i < count; ++i) {
-    StoreFloat(&grad[i], 0.05f * rng.Uniform());
+    grad[i] = 0.05f * rng.Uniform();
   }
-  std::memcpy(target->grad, grad.data(), count * sizeof(ComputeType));
+  std::memcpy(target->grad, grad.data(), count * sizeof(float));
 
   std::vector<float> initial(count);
-  for (std::size_t i = 0; i < count; ++i) initial[i] = AsF32(target->value[i]);
+  std::vector<float> initial_compute(count);
+  for (std::size_t i = 0; i < count; ++i) {
+    initial[i] = target->master[i];
+    initial_compute[i] =
+        nanochat::ComputeToFloat(nanochat::ComputeFromFloat(initial[i]));
+  }
 
   optimizer->Step(1);
   bool odd_changed = false;
   for (std::size_t i = 0; i < count; ++i) {
-    if (std::fabs(AsF32(target->value[i]) - initial[i]) > 1e-9f) {
+    if (std::fabs(AsF32(target->value[i]) - initial_compute[i]) > 1e-9f) {
       odd_changed = true;
     }
   }
@@ -775,7 +780,9 @@ void TestAdamCadence() {
   bool even_changed = false;
   for (std::size_t i = 0; i < count; ++i) {
     after_two[i] = AsF32(target->value[i]);
-    if (std::fabs(after_two[i] - initial[i]) > 1e-7f) even_changed = true;
+    if (std::fabs(after_two[i] - initial_compute[i]) > 1e-7f) {
+      even_changed = true;
+    }
   }
   if (!even_changed) Fail("Adam cadence: AdamW did not run on an even step");
 
@@ -807,7 +814,7 @@ void TestAdamCadence() {
     const float bias2 = 1.0f - std::pow(beta2, static_cast<float>(t));
     const float step_size = lr / bias1;
     for (std::size_t i = 0; i < count; ++i) {
-      const float g = AsF32(grad[i]);
+      const float g = grad[i];
       float p = want[i] * (1.0f - lr * wd);
       m[i] += (1.0f - beta1) * (g - m[i]);
       v[i] += (1.0f - beta2) * (g * g - v[i]);
@@ -818,8 +825,10 @@ void TestAdamCadence() {
   }
   for (std::size_t i = 0; i < count; ++i) {
     const float got = AsF32(target->value[i]);
-    if (std::fabs(got - want[i]) > 2e-5f) {
-      Fail(Format("Adam cadence[%zu]: got %.8g want %.8g", i, got, want[i]));
+    const float expected =
+        nanochat::ComputeToFloat(nanochat::ComputeFromFloat(want[i]));
+    if (std::fabs(got - expected) > 2e-5f) {
+      Fail(Format("Adam cadence[%zu]: got %.8g want %.8g", i, got, expected));
       break;
     }
   }

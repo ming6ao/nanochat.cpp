@@ -46,10 +46,11 @@ computed by the CPU reference loops. `//tests:sim_numerics_test` asserts that
 the caps change and the numerics do not, so a profile can never silently move a
 result.
 
-fp32 is the only precision (docs/precision.md): the simulator runs the
-reference engine once, and every suite compares against the committed fp32
-fixtures. The numeric trace covers fp32 only
-(`docs/numerics-integration.md` section 6.2).
+The simulator runs the reference engine once, and every suite compares against
+the committed fp32 fixtures. The numeric trace covers fp32 only
+(`docs/numerics-integration.md` section 6.2). The simulated device reports the
+bf16 capability of its profile through `Caps::supports_bf16`
+([precision.md](precision.md) section 6).
 
 The collective mock rendezvouses through POSIX shared memory and bounds its
 wait (`NANOCHAT_SIM_TIMEOUT_MS`), so a rank that never issues the all-reduce is
@@ -93,6 +94,46 @@ Every workstream must pass, in order:
 
 A workstream is not done until 1–6 pass on the **CPU** backend and at least
 small-shape GPU correctness passes.
+
+### The bf16 build
+
+`--config=bf16` selects `ComputeType = Bf16`. The parameter gradient, the
+optimizer state, the loss, and every reduction statistic stay fp32
+([precision.md](precision.md) section 5). The fp32 build stays the correctness
+gate. The committed oracle, training-parity, scoring-parity, and numeric-trace
+fixtures are fp32 PyTorch goldens. A bf16 build rounds every stored value to
+7 mantissa bits, so it cannot reproduce them.
+
+Run both builds:
+
+```bash
+tools/nanochat build
+tools/nanochat test
+tools/nanochat build --config=bf16
+tools/nanochat test --config=bf16
+tools/nanochat lint
+```
+
+In a bf16 build the golden-fixture tests print a skip line and return success.
+The skip is visible in the test output, so a reviewer can see which leg was not
+exercised. The bf16 numeric trace in
+[precision.md](precision.md) section 6 is the bf16 gate.
+
+A test that compares two code paths inside one build must derive its bound from
+the storage precision. Use a named constant, so the two builds differ in the
+bound and not in the check:
+
+```cpp
+#if defined(NANOCHAT_PRECISION_FP32)
+constexpr double kPathAtol = 1e-6;
+#else
+constexpr double kPathAtol = 1e-4;
+#endif
+```
+
+A test that writes a parameter from an fp32 fixture writes the fp32 master and
+then calls `Model::SyncCompute()`, so the compute copy is derived and the test
+works in both builds. `tests/param_stage.h` holds that helper.
 
 ## How tests are sandboxed
 

@@ -71,6 +71,21 @@ std::vector<int> MakeIds(int rows, int vocab, int a, int b) {
   return ids;
 }
 
+// The tolerance for "N replicas equal one replica". A replica reduces the same
+// global batch in a different summation order, so the two trajectories differ
+// by accumulation roundoff. A bf16 build rounds every activation to 7 mantissa
+// bits, which widens that gap, so the bound follows the compute precision.
+#if defined(NANOCHAT_PRECISION_FP32)
+constexpr double kReplicaTolerance = 1e-4;
+#else
+constexpr double kReplicaTolerance = 5e-3;
+#endif
+
+// Compares the fp32 master weights, the canonical persistent state
+// (docs/precision.md section 5). Two replicas that ran the same global batch
+// must agree on that state; the bf16 compute copies can differ by one storage
+// unit in the last place when the two fp32 masters straddle a rounding
+// boundary, so they are not the right comparison target.
 void CompareParameters(const Model& a, const Model& b, const std::string& what,
                        double tolerance) {
   const std::vector<ParamView> pa = a.params();
@@ -82,9 +97,8 @@ void CompareParameters(const Model& a, const Model& b, const std::string& what,
   double worst = 0.0;
   for (std::size_t i = 0; i < pa.size(); ++i) {
     for (std::int64_t j = 0; j < pa[i].count; ++j) {
-      worst = std::max(
-          worst, std::fabs(static_cast<double>(nanochat::AsF(pa[i].value[j])) -
-                           static_cast<double>(nanochat::AsF(pb[i].value[j]))));
+      worst = std::max(worst, std::fabs(static_cast<double>(pa[i].master[j]) -
+                                        static_cast<double>(pb[i].master[j])));
     }
   }
   if (worst > tolerance) {
@@ -114,8 +128,10 @@ void TestTwoReplicasEqualOne() {
     Fail("the global loss differs: one replica " + std::to_string(loss_single) +
          ", two replicas " + std::to_string(loss_pair));
   }
-  CompareParameters(*single.model(0), *pair.model(0), "replica 0 vs one", 1e-4);
-  CompareParameters(*single.model(0), *pair.model(1), "replica 1 vs one", 1e-4);
+  CompareParameters(*single.model(0), *pair.model(0), "replica 0 vs one",
+                    kReplicaTolerance);
+  CompareParameters(*single.model(0), *pair.model(1), "replica 1 vs one",
+                    kReplicaTolerance);
 }
 
 // Four replicas equal one replica: the collective scales past a pair.
@@ -135,7 +151,8 @@ void TestFourReplicasEqualOne() {
 
   for (int rank = 0; rank < quad.world_size(); ++rank) {
     CompareParameters(*single.model(0), *quad.model(rank),
-                      "replica " + std::to_string(rank) + " vs one", 1e-4);
+                      "replica " + std::to_string(rank) + " vs one",
+                      kReplicaTolerance);
   }
 }
 

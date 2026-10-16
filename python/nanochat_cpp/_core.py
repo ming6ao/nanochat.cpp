@@ -14,6 +14,9 @@ library.
 from __future__ import annotations
 
 import ctypes
+import struct
+
+_struct = struct
 
 __all__ = [
     "NanochatError",
@@ -538,8 +541,73 @@ def backend_name(library) -> str:
 
 
 def compute_type_size(library) -> int:
-    """The parameter element size in bytes: four for fp32."""
+    """The parameter element size in bytes: four for fp32, two for bf16."""
     return int(library.nanochat_compute_type_size())
+
+
+#: The compute element sizes the Python surface can decode.
+SUPPORTED_COMPUTE_SIZES = (2, 4)
+
+
+def compute_type_name(element_size: int) -> str:
+    """The compute type name for an element size: ``"bf16"`` or ``"fp32"``."""
+    return "bf16" if int(element_size) == 2 else "fp32"
+
+
+def compute_buffer(element_size: int, count: int):
+    """A ctypes buffer of ``count`` compute elements.
+
+    The buffer holds the build compute type, so the byte layout is the one the C
+    surface copies (docs/precision.md section 5).
+    """
+    element_size = int(element_size)
+    if element_size == 4:
+        return (ctypes.c_float * int(count))()
+    if element_size == 2:
+        return (ctypes.c_uint16 * int(count))()
+    raise NanochatError(
+        "compute_buffer",
+        f"{element_size} bytes per element is not a supported compute type",
+    )
+
+
+def compute_values(buffer, element_size: int) -> list:
+    """The float values of a compute buffer.
+
+    A four-byte buffer already holds fp32. A two-byte buffer holds bf16, the
+    upper half of the fp32 bit pattern, so the decode is a shift and a bit
+    reinterpretation.
+    """
+    if int(element_size) == 4:
+        return [float(value) for value in buffer]
+    out = []
+    for raw in buffer:
+        out.append(_bf16_to_float(int(raw)))
+    return out
+
+
+def _bf16_to_float(bits: int) -> float:
+    """The fp32 value of one bfloat16 encoding."""
+    word = (int(bits) & 0xFFFF) << 16
+    return _struct.unpack("<f", _struct.pack("<I", word))[0]
+
+
+def _float_to_bf16(value: float) -> int:
+    """The round-to-nearest-even bfloat16 encoding of one fp32 value."""
+    word = _struct.unpack("<I", _struct.pack("<f", float(value)))[0]
+    if word & 0x7F800000 == 0x7F800000:
+        return (word >> 16) & 0xFFFF
+    word += 0x7FFF + ((word >> 16) & 1)
+    return (word >> 16) & 0xFFFF
+
+
+def store_compute_value(buffer, index: int, value: float,
+                        element_size: int) -> None:
+    """Writes one float into a compute buffer at ``index``."""
+    if int(element_size) == 4:
+        buffer[int(index)] = float(value)
+        return
+    buffer[int(index)] = _float_to_bf16(value)
 
 
 def device_info(library) -> "Device":

@@ -12,20 +12,17 @@
 
 namespace {
 
-using nanochat::ComputeType;
 using nanochat::dev::CheckClose;
 using nanochat::dev::CheckVectorClose;
 using nanochat::dev::DevBuf;
 using nanochat::dev::Failures;
-using nanochat::dev::FromStorage;
 using nanochat::dev::RandomVec;
 using nanochat::dev::Rng;
-using nanochat::dev::ToStorage;
 using nanochat::dev::rowref::GlobalNorm;
 
 void RunCase(const std::vector<float>& g0, float clip, const char* name) {
   const int n = static_cast<int>(g0.size());
-  DevBuf<ComputeType> g(ToStorage(g0));
+  DevBuf<float> g(g0);
   DevBuf<float> norm(1);
   nanochat::kernels::GlobalNorm(n, clip, g.ptr, norm.ptr);
   nanochat::kernels::Synchronize();
@@ -33,7 +30,7 @@ void RunCase(const std::vector<float>& g0, float clip, const char* name) {
   std::vector<float> ref = g0;
   const float ref_norm = GlobalNorm(n, clip, &ref);
   CheckClose(norm.Download()[0], ref_norm, 1e-4, name);
-  CheckVectorClose(FromStorage(g.Download()), ref, 1e-4, name);
+  CheckVectorClose(g.Download(), ref, 1e-4, name);
 }
 
 }  // namespace
@@ -56,7 +53,7 @@ int main() {
   RunCase(big, 1e9f, "large unclipped");
 
   // n == 0 is a no-op and must not launch or read the norm buffer.
-  DevBuf<ComputeType> empty(1);
+  DevBuf<float> empty(1);
   DevBuf<float> norm(1);
   nanochat::kernels::GlobalNorm(0, 1.0f, empty.ptr, norm.ptr);
   nanochat::kernels::GlobalNorm(0, 1.0f, empty.ptr, nullptr);

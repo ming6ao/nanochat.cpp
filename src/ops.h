@@ -48,7 +48,7 @@ void LinearForward(const ComputeType* x, const ComputeType* w, ComputeType* y,
                    std::int64_t rows, std::int64_t in, std::int64_t out,
                    bool accumulate = false);
 
-void LinearWgrad(const ComputeType* x, const ComputeType* dy, ComputeType* dw,
+void LinearWgrad(const ComputeType* x, const ComputeType* dy, float* dw,
                  std::int64_t rows, std::int64_t in, std::int64_t out);
 
 void LinearDgrad(const ComputeType* dy, const ComputeType* w, ComputeType* dx,
@@ -123,7 +123,7 @@ void ValueResidualBackward(std::int64_t rows, int hidden, int num_kv_heads,
                            int head_dim, const ComputeType* h,
                            const ComputeType* ve, const ComputeType* gate_w,
                            const ComputeType* gate, const ComputeType* dv,
-                           ComputeType* gate_w_grad, ComputeType* dh,
+                           float* gate_w_grad, ComputeType* dh,
                            ComputeType* dve);
 
 // ---------------------------------------------------------------------------
@@ -141,8 +141,8 @@ void MlpBackward(const ComputeType* h, const ComputeType* c_fc,
                  const ComputeType* c_proj, const ComputeType* pre_act,
                  const ComputeType* act, const ComputeType* dout,
                  std::int64_t rows, std::int64_t hidden, std::int64_t mlp_dim,
-                 ComputeType* c_fc_grad, ComputeType* c_proj_grad,
-                 ComputeType* dh, ComputeType* dact, ComputeType* dpre);
+                 float* c_fc_grad, float* c_proj_grad, ComputeType* dh,
+                 ComputeType* dact, ComputeType* dpre);
 
 // ---------------------------------------------------------------------------
 // Smear: mix the previous token's normalized embedding into the current one
@@ -156,8 +156,7 @@ void SmearForward(std::int64_t batch, std::int64_t seq, std::int64_t hidden,
 void SmearBackward(std::int64_t batch, std::int64_t seq, std::int64_t hidden,
                    const ComputeType* emb_norm, const ComputeType* gate_w,
                    const float* sig, float lambda, const ComputeType* d_x0,
-                   ComputeType* gate_w_grad, ComputeType* lambda_grad,
-                   ComputeType* de);
+                   float* gate_w_grad, float* lambda_grad, ComputeType* de);
 
 // ---------------------------------------------------------------------------
 // Backout: subtract a scaled mid-layer residual before the final norm.
@@ -167,8 +166,8 @@ void BackoutForward(const ComputeType* x, const ComputeType* x_backout,
                     float lambda, ComputeType* out, std::int64_t n);
 
 void BackoutBackward(const ComputeType* d_pre, const ComputeType* x_backout,
-                     float lambda, ComputeType* dbackout,
-                     ComputeType* lambda_grad, std::int64_t n);
+                     float lambda, ComputeType* dbackout, float* lambda_grad,
+                     std::int64_t n);
 
 // ---------------------------------------------------------------------------
 // A full transformer block (residual blend -> attention -> MLP). `BlockForward`
@@ -242,14 +241,14 @@ struct BlockActivations {
 
 // Parameter gradient views for one block.
 struct BlockGrads {
-  ComputeType* c_q_grad = nullptr;
-  ComputeType* c_k_grad = nullptr;
-  ComputeType* c_v_grad = nullptr;
-  ComputeType* c_proj_attn_grad = nullptr;
-  ComputeType* ve_gate_grad = nullptr;       // nullable
-  ComputeType* value_embeds_grad = nullptr;  // nullable
-  ComputeType* c_fc_grad = nullptr;
-  ComputeType* c_proj_mlp_grad = nullptr;
+  float* c_q_grad = nullptr;
+  float* c_k_grad = nullptr;
+  float* c_v_grad = nullptr;
+  float* c_proj_attn_grad = nullptr;
+  float* ve_gate_grad = nullptr;       // nullable
+  float* value_embeds_grad = nullptr;  // nullable
+  float* c_fc_grad = nullptr;
+  float* c_proj_mlp_grad = nullptr;
 };
 
 // Backward-only scratch for one block.
@@ -282,8 +281,8 @@ void BlockBackward(const BlockShape& shape, const BlockWeights& weights,
                    const float* cos, const float* sin, float resid,
                    float x0_lambda, const ComputeType* x_in,
                    const ComputeType* x0, const ComputeType* dout,
-                   ComputeType* dx_in, ComputeType* x0_acc,
-                   ComputeType* resid_grad, ComputeType* x0_lambda_grad);
+                   ComputeType* dx_in, ComputeType* x0_acc, float* resid_grad,
+                   float* x0_lambda_grad);
 
 }  // namespace ops
 }  // namespace nanochat

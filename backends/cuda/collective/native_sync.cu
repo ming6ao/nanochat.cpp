@@ -61,14 +61,14 @@ std::size_t NextPowerOfTwo(std::size_t value) {
 
 // Adds `src` into `dst` elementwise on the backend stream, then synchronizes so
 // the host-staged transport can safely read `dst`.
-__global__ void AddKernel(ComputeType* dst, const ComputeType* src,
+__global__ void AddKernel(GradientType* dst, const GradientType* src,
                           long long count) {
   const long long index =
       static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x;
   if (index < count) dst[index] = dst[index] + src[index];
 }
 
-void DeviceAdd(ComputeType* dst, const ComputeType* src, std::int64_t count) {
+void DeviceAdd(GradientType* dst, const GradientType* src, std::int64_t count) {
   if (count <= 0) return;
   const int threads = 256;
   const int blocks = static_cast<int>((count + threads - 1) / threads);
@@ -82,7 +82,7 @@ class NoopGradientSync final : public GradientSync {
  public:
   int rank() const override { return 0; }
   int world_size() const override { return 1; }
-  void AllReduceSum(ComputeType*, std::int64_t) override {}
+  void AllReduceSum(GradientType*, std::int64_t) override {}
 };
 
 class NativeGradientSync final : public GradientSync {
@@ -145,7 +145,7 @@ class NativeGradientSync final : public GradientSync {
     return true;
   }
 
-  void AllReduceSum(ComputeType* buffer, std::int64_t count) override {
+  void AllReduceSum(GradientType* buffer, std::int64_t count) override {
     AllReduceSumAsync(buffer, count);
     Wait();
   }
@@ -160,13 +160,13 @@ class NativeGradientSync final : public GradientSync {
   // copies, which is what lets the best-fit run fit on a 16 GiB T4. A
   // peer-memory transport (NVLink/RDMA) still needs the window, because a
   // device pointer from one process is not valid in another.
-  void AllReduceSumAsync(ComputeType* buffer, std::int64_t count) override {
+  void AllReduceSumAsync(GradientType* buffer, std::int64_t count) override {
     if (buffer == nullptr || count <= 0) return;
     const std::size_t bytes =
-        static_cast<std::size_t>(count) * sizeof(ComputeType);
+        static_cast<std::size_t>(count) * sizeof(GradientType);
     EnsureScratch(bytes);
 
-    ComputeType* target = buffer;
+    GradientType* target = buffer;
     Window* window = nullptr;
     if (!uses_host_staging_) {
       window = AcquireWindow(bytes);
@@ -195,7 +195,7 @@ class NativeGradientSync final : public GradientSync {
 
  private:
   struct Window {
-    ComputeType* ptr = nullptr;
+    GradientType* ptr = nullptr;
     std::size_t bytes = 0;
     bool in_use = false;
   };
@@ -227,7 +227,7 @@ class NativeGradientSync final : public GradientSync {
       if (window.in_use) continue;
       if (window.ptr != nullptr) kernels::Free(window.ptr);
       const std::size_t capacity = NextPowerOfTwo(bytes);
-      window.ptr = static_cast<ComputeType*>(kernels::Alloc(capacity));
+      window.ptr = static_cast<GradientType*>(kernels::Alloc(capacity));
       if (window.ptr == nullptr) return nullptr;
       window.bytes = capacity;
       window.in_use = true;
@@ -247,7 +247,7 @@ class NativeGradientSync final : public GradientSync {
     if (scratch_ != nullptr) kernels::Free(scratch_);
     const std::size_t rounded = ((needed + 1023) / 1024) * 1024;
     scratch_bytes_ = rounded;
-    scratch_ = static_cast<ComputeType*>(kernels::Alloc(scratch_bytes_));
+    scratch_ = static_cast<GradientType*>(kernels::Alloc(scratch_bytes_));
     if (scratch_ == nullptr) Die("cannot allocate the schedule scratch");
   }
 
@@ -258,7 +258,7 @@ class NativeGradientSync final : public GradientSync {
   std::shared_ptr<cuda_backend::HostFabric> host_fabric_;
   cuda_backend::RingTransports ring_;
   std::vector<Window> windows_;
-  ComputeType* scratch_ = nullptr;
+  GradientType* scratch_ = nullptr;
   std::size_t scratch_bytes_ = 0;
   // True when both ring edges stage through host memory. The ring then runs in
   // place on the caller's buffer and the window pool stays unused.

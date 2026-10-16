@@ -5,9 +5,10 @@ are in [simulator.md](simulator.md): the reference engine, the API interposer,
 the collective mock, the device profile table, the compile gate, and the
 emulation engine.
 
-The subject of this document is the precision coverage. The S0 tier covers fp32
-today. The bf16 and fp8 work needs both engines, the profile table, and the
-numeric trace to cover the new formats.
+The subject of this document is the precision coverage. The S0 tier runs the
+fp32 build, and Stage 2 of [precision.md](precision.md) adds the bf16 build.
+The fp8 work and the bf16 leg of the numeric trace stay open: the table below
+records which surface covers what today.
 
 - [simulator.md](simulator.md) — the three engines and the S0 tier.
 - [fp8-training.md](fp8-training.md) — the fp8 design this document supports.
@@ -40,21 +41,22 @@ without a GPU.
 | Surface | Path | Covers today |
 |---|---|---|
 | Device profile table | `include/nanochat/device_profile.h`, `src/device_profile.cc` | fp32 and bf16 rates; no fp8 |
-| Reference engine | `backends/cpu/kernels.cc` under `--config=sim` | fp32 |
+| Reference engine | `backends/cpu/kernels.cc` under `--config=sim` | fp32, and bf16 under `--config=bf16` |
 | API interposer | `tools/cuda_sim/cuda_sim.map`, `interposer.cc` | The CUDA runtime, and four cuBLAS calls |
-| Emulation engine | `tools/cuda_sim/emu/` | `RmsNorm` and `Pointwise`, in fp32 |
+| Emulation engine | `tools/cuda_sim/emu/` | `RmsNorm` and `Pointwise`, in fp32 and bf16 |
 | Numeric trace | `tests/numerics_trace*` | fp32 on the CPU, the simulator, and the GPU |
 
 ## 3. Part 1: the device profile table
 
-The table already carries `supports_bf16`, and no dtype consumes it. That is a
-deliberate state: `docs/simulator.md` section 7 records it.
+The table carries `supports_bf16`, and `CapsFromProfile` passes it to `Caps`, so
+`Caps::Supports(DType::kBf16)` answers for a simulated device (Stage 2 of
+[precision.md](precision.md)).
 
 Add three things:
 
 1. `supports_fp8` to `DeviceProfile`.
 2. `peak_fp8_flops` to `DeviceProfile`.
-3. `supports_bf16` and `supports_fp8` to `Caps`, and extend `Caps::Supports`.
+3. `supports_fp8` to `Caps`, and extend `Caps::Supports` with it.
 
 The rate is dense and non-sparse. Use 1,979 TFLOP/s for the H100 and the H200.
 Use 0 for every other entry in the table today.

@@ -36,8 +36,15 @@ namespace kernels {
 
 void* Alloc(std::size_t bytes) {
   if (bytes == 0) return nullptr;
+  // Round the request up to a four-byte boundary. `AtomicAddDev` on a bf16
+  // target updates the aligned 32-bit word that contains the element, because
+  // there is no 16-bit atomic compare-and-swap. That word can extend two bytes
+  // past the last element of a buffer with an odd element count, so the
+  // allocation must cover it. The rounding changes no kernel's indexing and
+  // costs at most three bytes.
+  const std::size_t rounded = (bytes + 3u) & ~static_cast<std::size_t>(3u);
   void* ptr = nullptr;
-  const cudaError_t status = cudaMalloc(&ptr, bytes);
+  const cudaError_t status = cudaMalloc(&ptr, rounded);
   if (status != cudaSuccess) {
     std::fprintf(stderr, "fatal: cudaMalloc(%zu bytes) failed: %s\n", bytes,
                  cudaGetErrorString(status));
@@ -101,6 +108,7 @@ Caps GetCaps() {
   // Tensor cores arrive with Volta (sm_70).
   caps.has_tensor_cores = props.major >= 7;
   caps.supports_fp32 = true;
+  caps.supports_bf16 = props.major >= 8;
 
   // Per device thread, so two device threads do not overwrite one name buffer
   // (docs/client-runtime-design.md section 8.1).

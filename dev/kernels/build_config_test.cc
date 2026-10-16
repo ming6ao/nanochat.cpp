@@ -6,12 +6,18 @@
 
 #include "nanochat/sandbox.h"
 
-#if !defined(NANOCHAT_PRECISION_FP32)
-#error "no precision selected; --config=fp32 sets it"
+#if defined(NANOCHAT_PRECISION_FP32) && defined(NANOCHAT_PRECISION_BF16)
+#error "select one precision"
+#elif defined(NANOCHAT_PRECISION_BF16)
+constexpr const char* kPrecision = "bf16";
+#elif defined(NANOCHAT_PRECISION_FP32)
+constexpr const char* kPrecision = "fp32";
+#else
+#error "no precision selected"
 #endif
 
 int main() {
   nanochat::RequireSandboxOrDie("test");
-  std::printf("build config: precision=fp32\n");
+  std::printf("build config: precision=%s\n", kPrecision);
   return 0;
 }

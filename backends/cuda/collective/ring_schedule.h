@@ -23,7 +23,7 @@ namespace nanochat {
 namespace cuda_backend {
 
 // Adds `src` into `dst` elementwise. The schedule's only compute primitive.
-using AddFn = void (*)(ComputeType* dst, const ComputeType* src,
+using AddFn = void (*)(GradientType* dst, const GradientType* src,
                        std::int64_t count);
 
 // One recorded schedule operation. The trace is the correctness artifact for
@@ -60,8 +60,8 @@ bool JudgeScheduleTrace(const ScheduleTrace& trace, std::string* error);
 // Returns true when every rank is the elementwise sum, false on timeout or
 // error. A `world_size` of 1 or a `count` of 0 is a no-op.
 bool RingAllReduceSum(Transport* next, Transport* prev, int rank,
-                      int world_size, ComputeType* buffer, std::int64_t count,
-                      ComputeType* scratch, AddFn add, TimePoint deadline,
+                      int world_size, GradientType* buffer, std::int64_t count,
+                      GradientType* scratch, AddFn add, TimePoint deadline,
                       ScheduleTrace* trace);
 
 // The chunk size the schedule uses for `count` and `world_size`. Exposed so the

@@ -42,6 +42,7 @@
 #include "nanochat/scheduler.h"
 #include "src/model_impl.h"
 #include "tests/oracle_fixture.h"
+#include "tests/param_stage.h"
 
 namespace {
 
@@ -95,27 +96,27 @@ bool Within(double got, double want, double atol, double rtol) {
   return std::fabs(got - want) <= atol + rtol * std::fabs(want);
 }
 
-inline float AsFloat32(ComputeType value) { return value; }
-
-inline void StoreFloat(ComputeType* dst, float value) { *dst = value; }
+inline float AsFloat32(ComputeType value) { return static_cast<float>(value); }
 
 // Copies a (possibly device-resident) buffer to host floats.
-std::vector<float> ReadCompute(const ComputeType* src, std::int64_t count) {
-  std::vector<ComputeType> host(static_cast<std::size_t>(count));
+template <typename T>
+std::vector<float> ReadCompute(const T* src, std::int64_t count) {
+  std::vector<T> host(static_cast<std::size_t>(count));
   if (count > 0) {
-    nanochat::kernels::Memcpy(
-        host.data(), src, static_cast<std::size_t>(count) * sizeof(ComputeType),
-        CopyDir::kDeviceToHost);
+    nanochat::kernels::Memcpy(host.data(), src,
+                              static_cast<std::size_t>(count) * sizeof(T),
+                              CopyDir::kDeviceToHost);
   }
   std::vector<float> out(static_cast<std::size_t>(count));
   for (std::int64_t i = 0; i < count; ++i) {
     out[static_cast<std::size_t>(i)] =
-        AsFloat32(host[static_cast<std::size_t>(i)]);
+        static_cast<float>(host[static_cast<std::size_t>(i)]);
   }
   return out;
 }
 
-double L2Norm(const ComputeType* data, std::int64_t count) {
+template <typename T>
+double L2Norm(const T* data, std::int64_t count) {
   const std::vector<float> host = ReadCompute(data, count);
   double sum = 0.0;
   for (float value : host) sum += static_cast<double>(value) * value;
@@ -199,15 +200,14 @@ void LoadParameters(const Fixture& fixture, Model* model) {
                   static_cast<long long>(source.numel())));
       continue;
     }
-    std::vector<ComputeType> host(static_cast<std::size_t>(view.count));
+    std::vector<float> host(static_cast<std::size_t>(view.count));
     for (std::int64_t i = 0; i < view.count; ++i) {
-      StoreFloat(host.data() + i, source.f32()[i]);
+      host[static_cast<std::size_t>(i)] = source.f32()[i];
     }
-    nanochat::kernels::Memcpy(
-        view.value, host.data(),
-        static_cast<std::size_t>(view.count) * sizeof(ComputeType),
-        CopyDir::kHostToDevice);
+    nanochat::testutil::StageParameter(view, host.data());
   }
+  // The write landed in the fp32 master, so rebuild every compute copy.
+  model->SyncCompute();
 }
 
 void CheckLoss(const Fixture& fixture, int step, double loss) {
@@ -373,6 +373,7 @@ std::string LocateFixture(int argc, char** argv) {
 }  // namespace
 
 int main(int argc, char** argv) {
+  if (nanochat::testutil::SkipFp32Golden("train_parity")) return 0;
   g_stop_on_first_failure = std::getenv("TRAIN_PARITY_STOP") != nullptr;
   try {
     Run(LocateFixture(argc, argv));

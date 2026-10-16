@@ -45,6 +45,7 @@
 #include "nanochat/scheduler.h"
 #include "src/rl.h"
 #include "tests/oracle_fixture.h"
+#include "tests/param_stage.h"
 
 namespace {
 
@@ -102,8 +103,6 @@ std::string Getenv(const char* name) {
 }
 
 inline float AsFloat32(ComputeType value) { return value; }
-
-inline void StoreFloat(ComputeType* dst, float value) { *dst = value; }
 
 // Copies a (possibly device-resident) buffer to host floats.
 std::vector<float> ReadCompute(const ComputeType* src, std::int64_t count) {
@@ -201,15 +200,14 @@ void LoadParameters(const Fixture& fixture, Model* model) {
                   static_cast<long long>(source.numel())));
       continue;
     }
-    std::vector<ComputeType> host(static_cast<std::size_t>(view.count));
+    std::vector<float> host(static_cast<std::size_t>(view.count));
     for (std::int64_t i = 0; i < view.count; ++i) {
-      StoreFloat(host.data() + i, source.f32()[i]);
+      host[static_cast<std::size_t>(i)] = source.f32()[i];
     }
-    nanochat::kernels::Memcpy(
-        view.value, host.data(),
-        static_cast<std::size_t>(view.count) * sizeof(ComputeType),
-        CopyDir::kHostToDevice);
+    nanochat::testutil::StageParameter(view, host.data());
   }
+  // The write landed in the fp32 master, so rebuild every compute copy.
+  model->SyncCompute();
 }
 
 std::string LocateFixture(int argc, char** argv) {

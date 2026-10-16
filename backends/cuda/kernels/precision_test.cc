@@ -229,8 +229,8 @@ void TestEmbedding() {
   // an untouched row keeps its previous value, and the caller owns the one
   // zeroing pass.
   const float kPrev = 7.0f;
-  std::vector<ComputeType> grad_init(vocab * dim, C(kPrev));
-  DevBuf<ComputeType> dtable_grad(grad_init);
+  std::vector<float> grad_init(vocab * dim, kPrev);
+  DevBuf<float> dtable_grad(grad_init);
   EmbeddingBackward(tokens, dim, ids, dout_dev.ptr, dtable_grad.ptr);
   Synchronize();
 
@@ -240,8 +240,7 @@ void TestEmbedding() {
       ref_grad[ids[t] * dim + d] += doutf[t * dim + d];
     }
   }
-  CheckVectorClose(FromStorage(dtable_grad.Download()), ref_grad,
-                   "embedding bwd");
+  CheckVectorClose(dtable_grad.Download(), ref_grad, "embedding bwd");
 }
 
 // ---------------------------------------------------------------------------

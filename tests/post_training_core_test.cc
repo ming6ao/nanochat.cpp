@@ -71,17 +71,18 @@ void ExpectNear(double got, double want, double tolerance,
 }
 
 // Copies a (possibly device-resident) buffer to host floats.
-std::vector<float> ReadCompute(const ComputeType* src, std::int64_t count) {
-  std::vector<ComputeType> host(static_cast<std::size_t>(count));
+template <typename T>
+std::vector<float> ReadCompute(const T* src, std::int64_t count) {
+  std::vector<T> host(static_cast<std::size_t>(count));
   if (count > 0) {
-    nanochat::kernels::Memcpy(
-        host.data(), src, static_cast<std::size_t>(count) * sizeof(ComputeType),
-        CopyDir::kDeviceToHost);
+    nanochat::kernels::Memcpy(host.data(), src,
+                              static_cast<std::size_t>(count) * sizeof(T),
+                              CopyDir::kDeviceToHost);
   }
   std::vector<float> out(static_cast<std::size_t>(count));
   for (std::int64_t i = 0; i < count; ++i) {
     out[static_cast<std::size_t>(i)] =
-        nanochat::AsF(host[static_cast<std::size_t>(i)]);
+        static_cast<float>(host[static_cast<std::size_t>(i)]);
   }
   return out;
 }
@@ -144,6 +145,22 @@ ParamView FindParam(Model* model, const std::string& name) {
   }
   return ParamView{};
 }
+
+// The bound for "two code paths over the same graph agree".
+//
+// The paths below fold an equivalent scale into the classifier gradient in two
+// different orders: one multiplies the classifier row weight in place, the
+// other runs a separate scaling pass over the stored gradient. With an fp32
+// store the two orders are the same arithmetic. With a bf16 store the
+// intermediate is rounded to 7 mantissa bits at a different point, so the bound
+// follows the compute precision (docs/precision.md section 5).
+#if defined(NANOCHAT_PRECISION_FP32)
+constexpr double kPathAtol = 1e-6;
+constexpr double kPathRtol = 1e-4;
+#else
+constexpr double kPathAtol = 1e-4;
+constexpr double kPathRtol = 5e-2;
+#endif
 
 // Compares every parameter gradient of two identically initialized models.
 // Returns true when all gradients agree within `atol + rtol * max(|a|, |b|)`.
@@ -281,7 +298,7 @@ void CheckWeightedMatchesBackward() {
   weighted->ZeroGrad();
   weighted->BackwardWeighted(ones.data(), 1.0f);
 
-  CompareGradients(uniform.get(), weighted.get(), 1e-6, 1e-5,
+  CompareGradients(uniform.get(), weighted.get(), kPathAtol, kPathRtol,
                    "ones-weighted == Backward");
 }
 
@@ -332,7 +349,7 @@ void CheckAccumulateMatchesConcatenated() {
   accum->ForwardLoss(tokens1.data(), targets1.data(), micro, seq);
   accum->BackwardAccumulate(0.5f);
 
-  CompareGradients(single.get(), accum.get(), 1e-6, 1e-4,
+  CompareGradients(single.get(), accum.get(), kPathAtol, kPathRtol,
                    "micro-batch accumulation == concatenated");
 
   // The shared embedding row must be nonzero in the accumulated model. This is

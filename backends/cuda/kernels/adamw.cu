@@ -25,19 +25,16 @@ namespace {
 using cuda_kernels::AsFloatDev;
 using cuda_kernels::ToComputeDev;
 
-__global__ void AdamWUpdateKernel(long long n, float lr, float beta1,
-                                  float beta2, float eps, float weight_decay,
-                                  float step_size, float bias2,
-                                  float* __restrict__ master,
-                                  ComputeType* __restrict__ value,
-                                  const ComputeType* __restrict__ g,
-                                  float* __restrict__ m,
-                                  float* __restrict__ v) {
+__global__ void AdamWUpdateKernel(
+    long long n, float lr, float beta1, float beta2, float eps,
+    float weight_decay, float step_size, float bias2,
+    float* __restrict__ master, ComputeType* __restrict__ value,
+    const float* __restrict__ g, float* __restrict__ m, float* __restrict__ v) {
   const long long stride = static_cast<long long>(gridDim.x) * blockDim.x;
   for (long long i =
            static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x;
        i < n; i += stride) {
-    const float grad = AsFloatDev(g[i]);
+    const float grad = g[i];
     // Decoupled weight decay, applied to the fp32 master before the update.
     float pi = master[i] * (1.0f - lr * weight_decay);
     const float mi = m[i] + (1.0f - beta1) * (grad - m[i]);
@@ -54,7 +51,7 @@ __global__ void AdamWUpdateKernel(long long n, float lr, float beta1,
 }  // namespace
 
 void AdamWUpdate(int n, const AdamWParams& params, float* master,
-                 ComputeType* value, const ComputeType* g, float* m, float* v) {
+                 ComputeType* value, const float* g, float* m, float* v) {
   if (n <= 0) return;
   // Bias correction is computed once on the host in fp32, matching the CPU
   // reference (1 - beta^step). `step` is 1-based.

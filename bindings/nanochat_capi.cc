@@ -572,7 +572,15 @@ int64_t nanochat_runtime_param_read(nanochat_runtime* runtime, int replica,
       "nanochat_runtime_param_read", static_cast<std::int64_t>(-1),
       [&]() -> std::int64_t {
         const nanochat::ParamView view = RuntimeParam(runtime, replica, index);
-        const nanochat::ComputeType* source = grad ? view.grad : view.value;
+        const void* source = nullptr;
+        std::size_t element_size = 0;
+        if (grad) {
+          source = view.grad;
+          element_size = sizeof(nanochat::GradientType);
+        } else {
+          source = view.value;
+          element_size = sizeof(nanochat::ComputeType);
+        }
         if (source == nullptr) {
           throw std::invalid_argument("the parameter has no buffer");
         }
@@ -582,8 +590,10 @@ int64_t nanochat_runtime_param_read(nanochat_runtime* runtime, int replica,
         if (count == 0) return 0;
         if (data == nullptr) throw std::invalid_argument("data is null");
         nanochat::kernels::Memcpy(
-            data, source + offset,
-            static_cast<std::size_t>(count) * sizeof(nanochat::ComputeType),
+            data,
+            static_cast<const char*>(source) +
+                static_cast<std::size_t>(offset) * element_size,
+            static_cast<std::size_t>(count) * element_size,
             nanochat::CopyDir::kDeviceToHost);
         return count;
       });
@@ -792,16 +802,23 @@ int nanochat_param_info(nanochat_model* model, int index, nanochat_param* out) {
 // the model buffer, which is host memory on the CPU backend and device memory
 // on the CUDA backend. `host` is the caller buffer; it may be null only for an
 // empty range.
-nanochat::ComputeType* ResolveParamRange(nanochat_model* model, int index,
-                                         int grad, int64_t offset,
-                                         int64_t count, const void* host) {
+void* ResolveParamRange(nanochat_model* model, int index, int grad,
+                        int64_t offset, int64_t count, const void* host,
+                        std::size_t* element_size) {
   if (model == nullptr) throw std::invalid_argument("model is null");
   const std::vector<nanochat::ParamView> params = model->model->params();
   if (index < 0 || index >= static_cast<int>(params.size())) {
     throw std::out_of_range("parameter index out of range");
   }
   const nanochat::ParamView& view = params[static_cast<std::size_t>(index)];
-  nanochat::ComputeType* buffer = grad != 0 ? view.grad : view.value;
+  void* buffer = nullptr;
+  if (grad != 0) {
+    buffer = view.grad;
+    *element_size = sizeof(nanochat::GradientType);
+  } else {
+    buffer = view.value;
+    *element_size = sizeof(nanochat::ComputeType);
+  }
   if (buffer == nullptr) throw std::runtime_error("parameter buffer is null");
   if (host == nullptr && count > 0) {
     throw std::invalid_argument("data is null");
@@ -809,20 +826,22 @@ nanochat::ComputeType* ResolveParamRange(nanochat_model* model, int index,
   if (offset < 0 || count < 0 || offset + count > view.count) {
     throw std::out_of_range("parameter range out of bounds");
   }
-  return buffer + offset;
+  return static_cast<char*>(buffer) +
+         static_cast<std::size_t>(offset) * *element_size;
 }
 
 int64_t nanochat_param_read(nanochat_model* model, int index, int grad,
                             int64_t offset, int64_t count, void* data) {
   return Guard("nanochat_param_read", static_cast<std::int64_t>(-1),
                [&]() -> std::int64_t {
-                 nanochat::ComputeType* source =
-                     ResolveParamRange(model, index, grad, offset, count, data);
+                 std::size_t element_size = 0;
+                 const void* source = ResolveParamRange(
+                     model, index, grad, offset, count, data, &element_size);
                  if (count == 0) return 0;
-                 nanochat::kernels::Memcpy(data, source,
-                                           static_cast<std::size_t>(count) *
-                                               sizeof(nanochat::ComputeType),
-                                           nanochat::CopyDir::kDeviceToHost);
+                 nanochat::kernels::Memcpy(
+                     data, source,
+                     static_cast<std::size_t>(count) * element_size,
+                     nanochat::CopyDir::kDeviceToHost);
                  return count;
                });
 }
@@ -831,13 +850,21 @@ int64_t nanochat_param_write(nanochat_model* model, int index, int grad,
                              int64_t offset, int64_t count, const void* data) {
   return Guard("nanochat_param_write", static_cast<std::int64_t>(-1),
                [&]() -> std::int64_t {
-                 nanochat::ComputeType* target =
-                     ResolveParamRange(model, index, grad, offset, count, data);
+                 std::size_t element_size = 0;
+                 void* target = ResolveParamRange(model, index, grad, offset,
+                                                  count, data, &element_size);
                  if (count == 0) return 0;
-                 nanochat::kernels::Memcpy(target, data,
-                                           static_cast<std::size_t>(count) *
-                                               sizeof(nanochat::ComputeType),
-                                           nanochat::CopyDir::kHostToDevice);
+                 nanochat::kernels::Memcpy(
+                     target, data,
+                     static_cast<std::size_t>(count) * element_size,
+                     nanochat::CopyDir::kHostToDevice);
+                 if (grad == 0 && model != nullptr && model->model != nullptr) {
+                   // The compute copy changed outside the optimizer, so rebuild
+                   // the canonical fp32 master from it; otherwise the next
+                   // optimizer step would overwrite the write
+                   // (docs/precision.md section 5).
+                   model->model->SyncMaster();
+                 }
                  return count;
                });
 }

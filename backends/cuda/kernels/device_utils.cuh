@@ -36,13 +36,33 @@ __device__ __forceinline__ float AsFloatDev(ComputeType v) { return v; }
 
 __device__ __forceinline__ ComputeType ToComputeDev(float v) { return v; }
 
-// Atomic add of a float into ComputeType storage. The fp32 build uses the
-// native atomic.
-//
-// The attention backward needs this because grouped-query attention lets
-// several query heads accumulate into the same key/value gradient row.
-__device__ __forceinline__ void AtomicAddDev(ComputeType* addr, float value) {
+// Atomic add into fp32 parameter-gradient storage.
+__device__ __forceinline__ void AtomicAddDev(float* addr, float value) {
   atomicAdd(addr, value);
+}
+
+// Bfloat16 has no native atomic add on the supported CUDA versions. Update one
+// packed 16-bit value with a compare-and-swap loop on the aligned 32-bit word
+// that contains it; the half of the word that does not hold the target element
+// is preserved. `Alloc` rounds every device allocation up to four bytes, so the
+// word stays inside the allocation even when the element is the last one of an
+// odd-length buffer (backends/cuda/device.cu).
+__device__ __forceinline__ void AtomicAddDev(Bf16* addr, float value) {
+  const std::uintptr_t address = reinterpret_cast<std::uintptr_t>(addr);
+  auto* word = reinterpret_cast<unsigned int*>(address & ~std::uintptr_t{3});
+  const unsigned int shift = static_cast<unsigned int>(address & 2u) * 8u;
+  const unsigned int mask = 0xffffu << shift;
+  unsigned int old = *word;
+  unsigned int assumed = 0;
+  do {
+    assumed = old;
+    const std::uint16_t bits =
+        static_cast<std::uint16_t>((assumed & mask) >> shift);
+    const std::uint16_t sum = FloatToBf16Bits(Bf16BitsToFloat(bits) + value);
+    const unsigned int replacement =
+        (assumed & ~mask) | (static_cast<unsigned int>(sum) << shift);
+    old = atomicCAS(word, assumed, replacement);
+  } while (old != assumed);
 }
 
 // Block-wide sum over `val`. Every thread in the block must call it, and the

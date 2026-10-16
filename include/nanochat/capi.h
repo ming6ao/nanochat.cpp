@@ -69,10 +69,10 @@ typedef struct {
   const char* device_name;
 } nanochat_device;
 
-// One parameter view, a mirror of nanochat::ParamView. `value` and `grad`
-// point to the build compute type, float32 or float16. `count` is the number
-// of elements. `rows` and `cols` are the matrix extents for Muon; a zero
-// `rows` marks a vector or a scalar.
+// One parameter view, a mirror of nanochat::ParamView. `value` points to the
+// build compute type, fp32 or bf16. `grad` points to fp32 storage. `count` is
+// the number of elements. `rows` and `cols` are the matrix extents for Muon; a
+// zero `rows` marks a vector or a scalar.
 typedef struct {
   const char* name;
   void* value;
@@ -433,8 +433,11 @@ int nanochat_param_info(nanochat_model* model, int index, nanochat_param* out);
 // and the value otherwise. Each function returns the number of elements
 // copied, or a negative value on error. Use these instead of dereferencing the
 // `nanochat_param` pointers, because a device backend keeps the buffers in
-// device memory. The host buffer holds the build compute type: four-byte
-// float32 (docs/precision.md).
+// device memory. For a value the host buffer holds the build compute type
+// (`nanochat_compute_type_size()` bytes per element); for a gradient it always
+// holds four-byte float32 (docs/precision.md section 5). A value write also
+// rebuilds the fp32 master from the compute copy, so the next optimizer step
+// cannot discard it.
 int64_t nanochat_param_read(nanochat_model* model, int index, int grad,
                             int64_t offset, int64_t count, void* data);
 int64_t nanochat_param_write(nanochat_model* model, int index, int grad,

@@ -82,16 +82,18 @@ Record MakeRecord(const std::string& name, DType dtype,
 }
 
 // Stages a (possibly device-resident) buffer to host floats.
-std::vector<float> ReadFloats(const ComputeType* src, std::int64_t count) {
-  std::vector<ComputeType> host(static_cast<std::size_t>(count));
+template <typename T>
+std::vector<float> ReadFloats(const T* src, std::int64_t count) {
+  std::vector<T> host(static_cast<std::size_t>(count));
   if (count > 0) {
     kernels::Memcpy(host.data(), src,
-                    static_cast<std::size_t>(count) * sizeof(ComputeType),
+                    static_cast<std::size_t>(count) * sizeof(T),
                     CopyDir::kDeviceToHost);
   }
   std::vector<float> out(static_cast<std::size_t>(count));
   for (std::int64_t i = 0; i < count; ++i) {
-    out[static_cast<std::size_t>(i)] = AsF(host[static_cast<std::size_t>(i)]);
+    out[static_cast<std::size_t>(i)] =
+        static_cast<float>(host[static_cast<std::size_t>(i)]);
   }
   return out;
 }

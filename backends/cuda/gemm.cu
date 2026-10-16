@@ -26,9 +26,12 @@ namespace kernels {
 
 namespace {
 
-// The operand type of the build compute type. fp32 is the only compute type
-// today (docs/precision.md).
+// cuBLAS operand type of the build compute type.
+#if defined(NANOCHAT_PRECISION_BF16)
+constexpr cudaDataType_t kDataType = CUDA_R_16BF;
+#else
 constexpr cudaDataType_t kDataType = CUDA_R_32F;
+#endif
 
 void CheckCublas(cublasStatus_t status, const char* what) {
   if (status == CUBLAS_STATUS_SUCCESS) return;
@@ -48,27 +51,16 @@ cublasHandle_t Handle() {
   return handle;
 }
 
-}  // namespace
-
-void Gemm(GemmMode mode, const GemmParams& params, const ComputeType* a,
-          const ComputeType* b, ComputeType* c) {
-  // The mode is descriptive: forward, dgrad, and wgrad all reduce to the same
-  // GEMM once the host has chosen the operands, as kernels.h documents.
-  (void)mode;
+void GemmImpl(const GemmParams& params, const ComputeType* a,
+              const ComputeType* b, void* c, cudaDataType_t c_type) {
   if (params.batch_count <= 0 || params.m <= 0 || params.n <= 0) return;
   if (params.k < 0) return;
 
   const bool ta = params.transpose_a;
   const bool tb = params.transpose_b;
-
-  // Leading dimensions of the *stored* operands. Zero means "infer a dense
-  // row-major layout from the logical shape": op(A) is m x k, op(B) is k x n,
-  // C is m x n.
   const int lda = params.lda > 0 ? params.lda : (ta ? params.m : params.k);
   const int ldb = params.ldb > 0 ? params.ldb : (tb ? params.k : params.n);
   const int ldc = params.ldc > 0 ? params.ldc : params.n;
-
-  // Per-batch element strides; zero means the dense size of the stored operand.
   const std::int64_t stride_a =
       params.stride_a != 0
           ? params.stride_a
@@ -80,49 +72,53 @@ void Gemm(GemmMode mode, const GemmParams& params, const ComputeType* a,
   const std::int64_t stride_c = params.stride_c != 0
                                     ? params.stride_c
                                     : static_cast<std::int64_t>(params.m) * ldc;
-
-  // Row-major C = op(A) * op(B) is, after transposing the whole product,
-  // C^T = op(B)^T * op(A)^T. cuBLAS computes a column-major product, so pass
-  // op(B)'s buffer as its A operand and op(A)'s buffer as its B operand, with
-  // the row-major buffers reinterpreted column-major (which supplies the
-  // trailing transpose). The m/n extents therefore swap as well.
   const cublasOperation_t transa = tb ? CUBLAS_OP_T : CUBLAS_OP_N;
   const cublasOperation_t transb = ta ? CUBLAS_OP_T : CUBLAS_OP_N;
-
-  // fp32 uses fp32 accumulation on every device.
   const cublasComputeType_t compute_type = CUBLAS_COMPUTE_32F;
   const cublasGemmAlgo_t algo = CUBLAS_GEMM_DEFAULT;
-
-  const float alpha_f = params.alpha;
-  const float beta_f = params.beta;
-  const void* alpha = &alpha_f;
-  const void* beta = &beta_f;
+  const float alpha = params.alpha;
+  const float beta = params.beta;
   const void* blas_a = reinterpret_cast<const void*>(b);
   const void* blas_b = reinterpret_cast<const void*>(a);
-  void* blas_c = reinterpret_cast<void*>(c);
 
-  // A single GEMM runs faster through the classic API than through the
-  // strided-batched API with `CUBLAS_GEMM_DEFAULT`. At the language-model head
-  // shape (M=16384, N=32768, K=768) `cublasSgemm` reaches about 8.8 TFLOP/s
-  // and `cublasGemmStridedBatchedEx` about 3.6 TFLOP/s on Pascal. The two
-  // calls take the same operands and flags, so the result is unchanged.
-  // See docs/performance.md.
-  if (params.batch_count == 1) {
-    CheckCublas(cublasSgemm(Handle(), transa, transb, /*m=*/params.n,
-                            /*n=*/params.m, /*k=*/params.k, &alpha_f,
-                            static_cast<const float*>(blas_a), ldb,
-                            static_cast<const float*>(blas_b), lda, &beta_f,
-                            static_cast<float*>(blas_c), ldc),
+  if (params.batch_count == 1 && kDataType == CUDA_R_32F &&
+      c_type == CUDA_R_32F) {
+    CheckCublas(cublasSgemm(Handle(), transa, transb, params.n, params.m,
+                            params.k, &alpha, static_cast<const float*>(blas_a),
+                            ldb, static_cast<const float*>(blas_b), lda, &beta,
+                            static_cast<float*>(c), ldc),
                 "cublasSgemm");
     return;
   }
 
+  if (params.batch_count == 1) {
+    CheckCublas(
+        cublasGemmEx(Handle(), transa, transb, params.n, params.m, params.k,
+                     &alpha, blas_a, kDataType, ldb, blas_b, kDataType, lda,
+                     &beta, c, c_type, ldc, compute_type, algo),
+        "cublasGemmEx");
+    return;
+  }
+
   CheckCublas(cublasGemmStridedBatchedEx(
-                  Handle(), transa, transb, /*m=*/params.n, /*n=*/params.m,
-                  /*k=*/params.k, alpha, blas_a, kDataType, ldb, stride_b,
-                  blas_b, kDataType, lda, stride_a, beta, blas_c, kDataType,
-                  ldc, stride_c, params.batch_count, compute_type, algo),
+                  Handle(), transa, transb, params.n, params.m, params.k,
+                  &alpha, blas_a, kDataType, ldb, stride_b, blas_b, kDataType,
+                  lda, stride_a, &beta, c, c_type, ldc, stride_c,
+                  params.batch_count, compute_type, algo),
               "cublasGemmStridedBatchedEx");
+}
+
+}  // namespace
+
+void Gemm(GemmMode mode, const GemmParams& params, const ComputeType* a,
+          const ComputeType* b, ComputeType* c) {
+  (void)mode;
+  GemmImpl(params, a, b, c, kDataType);
+}
+
+void GemmWgrad(const GemmParams& params, const ComputeType* a,
+               const ComputeType* b, float* c) {
+  GemmImpl(params, a, b, c, CUDA_R_32F);
 }
 
 }  // namespace kernels

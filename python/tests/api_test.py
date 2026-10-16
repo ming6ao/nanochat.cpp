@@ -156,6 +156,13 @@ class ApiTest(unittest.TestCase):
         steps = _int(records, "api/config/steps")
 
         model = Model(self.config(), seed=seed)
+        if model.dtype != "fp32":
+            # The fixture is an fp32 PyTorch golden; a bf16 build rounds every
+            # stored activation to 7 mantissa bits and cannot reproduce it. The
+            # bf16 parity gate is the bf16 numeric trace
+            # (docs/precision.md section 6, Stage 2).
+            self.skipTest("the fixture is an fp32 golden and the build is "
+                          + model.dtype)
         data = self.token_data()
         optimizer = Optimizer(model, **self.optimizer_kwargs())
         trainer = Trainer(model, data, num_iterations=steps,

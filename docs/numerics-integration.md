@@ -34,7 +34,7 @@ the SFT packer, the SFT loop, the `rl_step` binary, and the RL fixture as
 
 ## 2. What the recon established
 
-Four facts shape the design.
+Five facts shape the design.
 
 1. The CPU backend uses `double` accumulators. See the GEMM microkernel in
    `backends/cpu/kernels.cc`. The Pascal kernels use `float` accumulators, and
@@ -49,6 +49,11 @@ Four facts shape the design.
 4. The CUDA device kernels use atomic operations. The attention key and value
    gradients, the embedding scatter-add, the value-gate weight gradient, and
    the block combine all use atomics. Atomic order is not a contract.
+5. The committed trace is an fp32 golden. A bf16 build (`--config=bf16`) rounds
+   every stored activation and weight to 7 mantissa bits, so it cannot reproduce
+   the golden. The bf16 numeric trace in
+   [precision.md](precision.md) section 6 is the remaining bf16 leg. Until it
+   lands, the trace runs in the fp32 build and a bf16 build reports the skip.
 
 One more fact fixes the architecture. Bazel selects the backend at link time
 (see `src/BUILD.bazel`). The CPU backend and the CUDA backend define the same

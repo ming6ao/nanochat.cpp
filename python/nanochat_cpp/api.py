@@ -122,8 +122,12 @@ class TensorView:
 
     The view copies each access through the C surface, so it is safe on the CPU
     backend and on the CUDA backend where the buffer lives in device memory.
-    The view keeps the model alive so the buffer stays valid. The dtype is the
-    build compute type; the Python view supports the four-byte float32 build.
+    The view keeps the model alive so the buffer stays valid.
+
+    The dtype is the build compute type. The view reads and writes Python
+    floats whatever that type is: a four-byte fp32 buffer is read directly, and
+    a two-byte bf16 buffer is decoded and encoded at the boundary
+    (docs/precision.md section 5).
     """
 
     def __init__(self, model,
@@ -134,14 +138,29 @@ class TensorView:
         self._grad = 1 if grad else 0
         self._library = model._lib
         self._element_size = _core.compute_type_size(self._library)
-        if self._element_size != ctypes.sizeof(ctypes.c_float):
+        # A gradient is fp32 in every build; only a value uses the compute type.
+        read_size = (ctypes.sizeof(ctypes.c_float) if self._grad
+                     else self._element_size)
+        if read_size not in _core.SUPPORTED_COMPUTE_SIZES:
             raise NanochatError(
                 "TensorView",
-                "the Python view supports a four-byte float32 build; this "
-                f"build uses {self._element_size} bytes per element")
+                f"this build uses {read_size} bytes per element, which the "
+                "Python view cannot decode")
+
+    @property
+    def dtype(self) -> str:
+        """The dtype of a value view: ``"bf16"`` or ``"fp32"``."""
+        if self._grad:
+            return "fp32"
+        return _core.compute_type_name(self._element_size)
+
+    def _element_bytes(self) -> int:
+        if self._grad:
+            return ctypes.sizeof(ctypes.c_float)
+        return self._element_size
 
     def _buffer(self, count: int):
-        return (ctypes.c_float * int(count))()
+        return _core.compute_buffer(self._element_bytes(), count)
 
     def _read(self, offset: int, count: int) -> list[float]:
         count = int(count)
@@ -154,7 +173,7 @@ class TensorView:
         if copied != count:
             raise NanochatError("nanochat_param_read",
                                 _core.last_error(self._library))
-        return [float(value) for value in buffer]
+        return _core.compute_values(buffer, self._element_bytes())
 
     def __len__(self) -> int:
         return self.count
@@ -172,7 +191,7 @@ class TensorView:
         if index < 0 or index >= self.count:
             raise IndexError(index)
         buffer = self._buffer(1)
-        buffer[0] = float(value)
+        _core.store_compute_value(buffer, 0, value, self._element_bytes())
         copied = self._library.nanochat_param_write(
             self._model._handle, self._index, self._grad, index, 1,
             ctypes.cast(buffer, ctypes.c_void_p))
@@ -527,6 +546,15 @@ class Model:
         count. Use this method for a parameter report.
         """
         return sum(view.count for view in self.params())
+
+    @property
+    def dtype(self) -> str:
+        """The build compute type of a parameter value: ``"bf16"`` or ``"fp32"``.
+
+        A parameter gradient is fp32 in every build
+        (docs/precision.md section 5).
+        """
+        return _core.compute_type_name(_core.compute_type_size(self._lib))
 
     def params(self) -> list[ParamView]:
         """The parameter views in the optimizer's grouping order."""
@@ -1048,7 +1076,7 @@ def build(backend: str | None = None, precision: str | None = None,
     """Build the shared library on demand and return its path.
 
     The arguments override the environment for this call. ``backend`` is
-    ``"cpu"`` or ``"cuda"``. ``precision`` is ``"fp32"``, the only value
+    ``"cpu"`` or ``"cuda"``. ``precision`` is ``"fp32"`` or ``"bf16"``
     (docs/precision.md).
     ``arch`` is a CUDA architecture such as ``"sm_75"``. ``cache`` is the
     build cache directory. An argument left as None comes from the
