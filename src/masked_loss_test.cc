@@ -37,13 +37,8 @@ using nanochat::TrainModel;
 constexpr std::uint64_t kSeed = 20241001;
 
 // The weighted and uniform backward paths reach the same value through
-// different arithmetic. fp32 agrees to a tight tolerance; the fp16 storage
-// rounds the per-row scale, so it needs a wider one.
-#if defined(NANOCHAT_PRECISION_FP16)
-constexpr double kGradientTolerance = 5e-2;
-#else
+// different arithmetic. fp32 agrees to a tight tolerance.
 constexpr double kGradientTolerance = 1e-4;
-#endif
 
 int g_failures = 0;
 

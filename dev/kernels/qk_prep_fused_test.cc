@@ -138,7 +138,6 @@ void RunCase(const QkPrepParams& p, const char* name) {
   CheckVectorClose(FromStorage(k_grad.Download()), ref_dk, 1e-4,
                    (std::string(name) + " decomp bwd dk").c_str());
 
-#if !defined(NANOCHAT_PRECISION_FP16)
   // Finite-difference the prototype fused backward against the reference
   // forward: d/dq of sum(ref_q(q) * wq) + sum(ref_k * wk). Recompute the
   // reference forward in fp32 so the perturbation resolves.
@@ -161,7 +160,6 @@ void RunCase(const QkPrepParams& p, const char* name) {
       [&](const std::vector<float>& kv) { return loss_at(q0, kv); }, 2e-3,
       (std::string(name) + " fused fd dk").c_str());
   (void)half;
-#endif
 }
 
 }  // namespace

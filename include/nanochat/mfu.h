@@ -47,11 +47,11 @@ double EstimateDecodeFlops(const Config& config, int context_len);
 double PeakFlopsForDevice(const std::string& device_name);
 
 // Peak dense FLOPs for `device_name` at the build's compute precision
-// (docs/precision.md). The production build is fp32 on Pascal, Turing, and the
-// CPU, so the MFU denominator is the CUDA-core fp32 rate there; a future bf16
-// build reads the tensor-core rate. `PeakFlopsForDevice` keeps the reference
-// tensor-core rate for compatibility, so the two differ on a device whose
-// reference recipe uses tensor cores. Returns 0 for an unknown device.
+// (docs/precision.md). fp32 is the only compute type today, so the MFU
+// denominator is the CUDA-core fp32 rate. A future bf16 build reads the
+// tensor-core rate. `PeakFlopsForDevice` keeps the reference tensor-core rate
+// for compatibility, so the two differ on a device whose reference recipe uses
+// tensor cores. Returns 0 for an unknown device.
 double PeakFlopsForCompute(const std::string& device_name);
 
 // tokens_per_second * flops_per_token / peak_flops, clamped to [0, 1].
@@ -65,13 +65,13 @@ double ComputeMfu(const Config& config, double tokens_per_second,
 // The precision one counter row uses. The model selects a rate per operation
 // from the assignment in docs/performance-model.md section 5; it never derives
 // one rate from the build precision alone.
-enum class ComputePrecision { kFp32, kFp16, kBf16, kFp8 };
+enum class ComputePrecision { kFp32, kBf16, kFp8 };
 
 // The short name of `precision`, for a report row.
 const char* PrecisionName(ComputePrecision precision);
 
-// The build's compute precision: fp16 under `NANOCHAT_PRECISION_FP16`, fp32
-// otherwise. It is the fallback assignment for an operation that has no fp8
+// The build's compute precision. fp32 is the only compute type today, so this
+// returns kFp32. It is the fallback assignment for an operation that has no fp8
 // path in the current tree.
 ComputePrecision BuildComputePrecision();
 
@@ -113,7 +113,6 @@ ComputePrecision AssignMatrixPrecision(int rows, int cols,
 // second.
 struct PerformanceLimits {
   double fp32_flops = 0.0;
-  double fp16_flops = 0.0;
   double bf16_flops = 0.0;
   double fp8_flops = 0.0;
   double bandwidth_bytes_per_second = 0.0;

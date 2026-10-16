@@ -292,9 +292,7 @@ TrainModel::~TrainModel() {
   for (Param& p : params_) {
     if (p.value != nullptr) kernels::Free(p.value);
     if (p.grad != nullptr) kernels::Free(p.grad);
-#if defined(NANOCHAT_PRECISION_FP16)
-    if (p.master != nullptr) kernels::Free(p.master);
-#endif
+    // `p.master` aliases `p.value` in the fp32 build, so it is not freed here.
   }
   if (cos_table_dev_ != nullptr) kernels::Free(cos_table_dev_);
   if (sin_table_dev_ != nullptr) kernels::Free(sin_table_dev_);
@@ -312,15 +310,9 @@ TrainModel::Param& TrainModel::AddParam(const std::string& name,
       kernels::Alloc(static_cast<std::size_t>(count) * sizeof(ComputeType)));
   p.grad = static_cast<ComputeType*>(
       kernels::Alloc(static_cast<std::size_t>(count) * sizeof(ComputeType)));
-#if defined(NANOCHAT_PRECISION_FP16)
-  // The fp32 master weight survives the fp16 round trip of every update. The
-  // fp32 build reaches `value` through the same pointer.
-  p.master = static_cast<float*>(
-      kernels::Alloc(static_cast<std::size_t>(count) * sizeof(float)));
-  kernels::Memset(p.master, 0, static_cast<std::size_t>(count) * sizeof(float));
-#else
+  // The fp32 master weight is the parameter itself, so the build needs no
+  // master-weight mirror (docs/precision.md section 5).
   p.master = reinterpret_cast<float*>(p.value);
-#endif
   FillZero(p.value, count);
   FillZero(p.grad, count);
   params_.push_back(std::move(p));
@@ -1017,23 +1009,13 @@ std::vector<ParamView> TrainModel::params() const {
 }
 
 void TrainModel::SyncMaster() {
-#if defined(NANOCHAT_PRECISION_FP16)
-  for (Param& p : params_) {
-    if (p.master == nullptr || p.value == nullptr || p.count <= 0) continue;
-    ConvertDeviceBuffer(p.value, p.master, p.count,
-                        [](ComputeType value) { return AsF(value); });
-  }
-#endif
+  // The fp32 master weight is the parameter itself, so there is nothing to
+  // synchronize (docs/precision.md section 5).
 }
 
 void TrainModel::SyncCompute() {
-#if defined(NANOCHAT_PRECISION_FP16)
-  for (Param& p : params_) {
-    if (p.master == nullptr || p.value == nullptr || p.count <= 0) continue;
-    ConvertDeviceBuffer(p.master, p.value, p.count,
-                        [](float value) { return ToC(value); });
-  }
-#endif
+  // The fp32 master weight is the parameter itself, so there is nothing to
+  // synchronize (docs/precision.md section 5).
 }
 
 // ---------------------------------------------------------------------------

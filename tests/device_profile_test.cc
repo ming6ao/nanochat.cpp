@@ -9,8 +9,8 @@
 //   1. The join key is the lowercased device name.
 //   2. Every profile name resolves to exactly one MFU entry (a nonzero rate).
 //   3. For a shared entry, the MFU rate equals the profile's peak at the
-//      precision the MFU table models: the fp16 tensor-core rate on a
-//      tensor-core device, the fp32 CUDA-core rate otherwise.
+//      precision the MFU table models: the bf16 tensor-core rate on a device
+//      with bf16, the fp32 CUDA-core rate otherwise.
 //
 // It needs no GPU, no fixture, and no broker: tier S0, a plain T0 CPU test.
 
@@ -58,12 +58,15 @@ void ExpectNear(double actual, double expected, double tolerance,
   }
 }
 
-// The rate the MFU table models for this device: the tensor-core fp16 rate when
-// the device has tensor cores, and the CUDA-core fp32 rate otherwise. This is
-// the rate nanochat's `get_peak_flops` reports.
+// The rate the MFU table models for this device: the tensor-core bf16 rate when
+// the device has bf16, and the CUDA-core fp32 rate otherwise. The Turing T4 has
+// tensor cores but no bf16, and its build runs fp32, so it reports the fp32
+// rate. See docs/precision.md.
 double MfuPeakFor(const DeviceProfile& profile) {
-  return profile.has_tensor_cores ? profile.peak_fp16_flops
-                                  : profile.peak_fp32_flops;
+  if (profile.supports_bf16 && profile.peak_bf16_flops > 0.0) {
+    return profile.peak_bf16_flops;
+  }
+  return profile.peak_fp32_flops;
 }
 
 void TestJoinKey() {
@@ -98,13 +101,13 @@ void TestMfuConsistency() {
     ExpectNear(
         mfu_peak, MfuPeakFor(*profile), 1.0,
         Format("MFU rate for \"%s\" matches the profile peak", name.c_str()));
-    // The fp32 and fp16 rates are both recorded and the tensor-core flag picks
-    // the one the MFU table models, so exactly one of them is the shared rate.
+    // The fp32 rate is always recorded; a bf16 rate is recorded on a device
+    // that has bf16, and it is the rate the MFU table models there.
     ExpectTrue(profile->peak_fp32_flops > 0.0,
                Format("profile \"%s\" records an fp32 rate", name.c_str()));
-    if (profile->has_tensor_cores) {
-      ExpectTrue(profile->peak_fp16_flops > 0.0,
-                 Format("profile \"%s\" records an fp16 rate", name.c_str()));
+    if (profile->supports_bf16) {
+      ExpectTrue(profile->peak_bf16_flops > 0.0,
+                 Format("profile \"%s\" records a bf16 rate", name.c_str()));
     }
   }
   // Every profile in the table is reachable by name, and the table has no
@@ -161,9 +164,6 @@ void TestLimitTable() {
     ExpectNear(nanochat::PeakFlopsForCompute(name, ComputePrecision::kFp32),
                profile->peak_fp32_flops, 1.0,
                Format("%s explicit fp32 peak", name.c_str()));
-    ExpectNear(nanochat::PeakFlopsForCompute(name, ComputePrecision::kFp16),
-               profile->peak_fp16_flops, 1.0,
-               Format("%s explicit fp16 peak", name.c_str()));
     ExpectNear(nanochat::PeakFlopsForCompute(name, ComputePrecision::kBf16),
                profile->peak_bf16_flops, 1.0,
                Format("%s explicit bf16 peak", name.c_str()));
@@ -191,7 +191,6 @@ void TestCapsProjection() {
              "the memory budget is carried through");
   ExpectTrue(caps.device_name == h100->name,
              "the device name is the profile name");
-  ExpectTrue(caps.Supports(nanochat::DType::kFp16), "h100 supports fp16");
   ExpectTrue(caps.Supports(nanochat::DType::kFp32), "h100 supports fp32");
 
   const DeviceProfile* pascal = nanochat::FindDeviceProfile("gtx1080ti");

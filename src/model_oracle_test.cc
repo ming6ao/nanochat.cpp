@@ -61,14 +61,7 @@ std::string Format(const char* fmt, ...) {
   return std::string(buffer);
 }
 
-template <typename T = ComputeType>
-float AsFloat32(T value) {
-  if constexpr (std::is_same_v<T, float>) {
-    return value;
-  } else {
-    return nanochat::Fp16ToFloat(value);
-  }
-}
+inline float AsFloat32(ComputeType value) { return value; }
 
 std::string Join(const std::vector<std::string>& parts) {
   std::string joined;
@@ -127,14 +120,7 @@ Config ConfigFromFixture(const Fixture& fixture) {
   return config;
 }
 
-template <typename T = ComputeType>
-void StoreFloat(T* dst, float value) {
-  if constexpr (std::is_same_v<T, float>) {
-    *dst = value;
-  } else {
-    *dst = nanochat::Fp16FromFloat(value);
-  }
-}
+inline void StoreFloat(ComputeType* dst, float value) { *dst = value; }
 
 void LoadParameters(const Fixture& fixture, Model* model) {
   std::vector<nanochat::ParamView> views = model->params();

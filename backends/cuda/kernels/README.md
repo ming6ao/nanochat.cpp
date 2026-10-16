@@ -33,8 +33,7 @@ See [docs/kernels.md](../../../docs/kernels.md) for the kernel inventory and
   output to them. This keeps the oracle torch-free and the test deterministic.
 - **Finite-difference every backward.** Check the analytic gradients against
   central differences of the reference forward (`h = 1e-2`, relative tolerance
-  `2e-3`). Finite differences run in fp32 only. The fp16 storage cannot resolve
-  the perturbation.
+  `2e-3`). Finite differences run in fp32.
 - **Fixed seeds.** The `Rng` type is a deterministic xorshift, so a failure
   reproduces.
 - **Tag GPU tests `gpu`.** `tools/nanochat test` filters them out with

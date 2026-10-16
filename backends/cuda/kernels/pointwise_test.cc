@@ -59,7 +59,6 @@ void TestOp(PointwiseOp op, const char* name, const std::vector<float>& a0,
   CheckVectorClose(FromStorage(da.Download()), ref_da, 1e-4, "pointwise da");
   CheckVectorClose(FromStorage(db.Download()), ref_db, 1e-4, "pointwise db");
 
-#if !defined(NANOCHAT_PRECISION_FP16)
   auto loss_at = [&](const std::vector<float>& av,
                      const std::vector<float>& bv) {
     const std::vector<float> o = PointwiseForward(op, av, bv, kAlpha, kBeta);
@@ -76,7 +75,6 @@ void TestOp(PointwiseOp op, const char* name, const std::vector<float>& a0,
         [&](const std::vector<float>& bv) { return loss_at(a0, bv); }, 2e-3,
         "pointwise db");
   }
-#endif
 }
 
 }  // namespace

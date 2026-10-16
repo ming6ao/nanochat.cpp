@@ -437,8 +437,7 @@ __global__ void __launch_bounds__(kFusedThreads, kFusedMinBlocks)
   // Shared memory: the key tile, the value tile, and the probability tile for
   // the current key tile. The key/value rows are padded by one element so the
   // strided per-lane reads hit distinct banks. The raw buffer is typed double
-  // so it is 8-byte aligned, which keeps the float probability tile aligned in
-  // the fp16 build too.
+  // so it is 8-byte aligned.
   extern __shared__ double shared_raw[];
   ComputeType* ks = reinterpret_cast<ComputeType*>(shared_raw);
   const int kv_stride = dim + 1;

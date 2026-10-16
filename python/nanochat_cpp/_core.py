@@ -538,7 +538,7 @@ def backend_name(library) -> str:
 
 
 def compute_type_size(library) -> int:
-    """The parameter element size in bytes: four for fp32, two for fp16."""
+    """The parameter element size in bytes: four for fp32."""
     return int(library.nanochat_compute_type_size())
 
 

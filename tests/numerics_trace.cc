@@ -413,13 +413,7 @@ std::string BackendName() {
 #endif
 }
 
-std::string PrecisionName() {
-#if defined(NANOCHAT_PRECISION_FP16)
-  return "fp16";
-#else
-  return "fp32";
-#endif
-}
+std::string PrecisionName() { return "fp32"; }
 
 std::string BuildName() { return BackendName() + "-" + PrecisionName(); }
 

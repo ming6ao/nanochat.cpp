@@ -22,7 +22,6 @@ cc_library(
     name = "cuda_headers",
     hdrs = [
         "cuda_emu.h",
-        "cuda_fp16.h",
         "cuda_runtime.h",
         "emu_kernels.h",
         "emu_prelude.h",

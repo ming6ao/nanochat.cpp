@@ -49,23 +49,9 @@ std::string Format(const char* fmt, ...) {
   return std::string(buffer);
 }
 
-template <typename T = ComputeType>
-float AsF32(T value) {
-  if constexpr (std::is_same_v<T, float>) {
-    return value;
-  } else {
-    return nanochat::Fp16ToFloat(value);
-  }
-}
+inline float AsF32(ComputeType value) { return value; }
 
-template <typename T = ComputeType>
-void StoreFloat(T* dst, float value) {
-  if constexpr (std::is_same_v<T, float>) {
-    *dst = value;
-  } else {
-    *dst = nanochat::Fp16FromFloat(value);
-  }
-}
+inline void StoreFloat(ComputeType* dst, float value) { *dst = value; }
 
 struct Rng {
   std::uint64_t state;
@@ -84,12 +70,6 @@ struct Rng {
 };
 
 int Run() {
-#if defined(NANOCHAT_PRECISION_FP16)
-  // fp16 storage cannot resolve a central difference at the needed magnitude;
-  // the fp32 kernel test is the finite-difference gate (docs/testing.md).
-  std::printf("model_gradient_test: skipped (fp16 build)\n");
-  return 0;
-#else
   Config config;
   config.num_layers = 2;
   config.num_heads = 8;
@@ -219,7 +199,6 @@ int Run() {
     }
   }
   return g_failures == 0 ? 0 : 1;
-#endif
 }
 
 }  // namespace

@@ -97,7 +97,7 @@ void AddOptimizerStateRecord(Checkpoint* checkpoint, const std::string& name,
 }
 
 // One AdamW parameter group: the parameters, their flat gradient offsets, and
-// the first/second moment buffers (float even in an fp16 build).
+// the first/second moment buffers, which stay float on every device.
 struct AdamWGroup {
   AdamWKind kind = AdamWKind::kLmHead;
   std::vector<ParamView> params;
@@ -267,9 +267,8 @@ class NanochatOptimizer final : public Optimizer {
     }
   }
 
-  // The fp32 master weights are model state, but they are saved here so a
-  // resumed fp16 run restores them exactly; the fp16 compute copy alone
-  // cannot hold the fine updates. The layout is the flat gradient layout.
+  // The fp32 master weights are model state. In the fp32 build they alias the
+  // parameters, so the record is a copy of the model state.
   void SaveMasterRecord(Checkpoint* checkpoint) const {
     if (checkpoint == nullptr || total_count_ <= 0) return;
     std::vector<float> host(static_cast<std::size_t>(total_count_), 0.0f);
@@ -569,12 +568,9 @@ class NanochatOptimizer final : public Optimizer {
           static_cast<std::int64_t>(group.num_params) * group.mat;
       group.stacked_values =
           static_cast<ComputeType*>(kernels::Alloc(ElementBytes(mat_total)));
-#if defined(NANOCHAT_PRECISION_FP16)
-      group.stacked_master = static_cast<float*>(
-          kernels::Alloc(static_cast<std::size_t>(mat_total) * sizeof(float)));
-#else
+      // The fp32 master is the stacked value buffer (docs/precision.md
+      // section 5).
       group.stacked_master = reinterpret_cast<float*>(group.stacked_values);
-#endif
       group.buf1 = static_cast<float*>(
           kernels::Alloc(static_cast<std::size_t>(mat_total) * sizeof(float)));
       group.buf2 = static_cast<float*>(kernels::Alloc(
@@ -597,12 +593,9 @@ class NanochatOptimizer final : public Optimizer {
           static_cast<std::int64_t>(group.num_params) * group.lane_count;
       group.stacked_values =
           static_cast<ComputeType*>(kernels::Alloc(ElementBytes(mat_total)));
-#if defined(NANOCHAT_PRECISION_FP16)
-      group.stacked_master = static_cast<float*>(
-          kernels::Alloc(static_cast<std::size_t>(mat_total) * sizeof(float)));
-#else
+      // The fp32 master is the stacked value buffer (docs/precision.md
+      // section 5).
       group.stacked_master = reinterpret_cast<float*>(group.stacked_values);
-#endif
       group.velocity = static_cast<float*>(kernels::Alloc(
           static_cast<std::size_t>(2 * mat_total) * sizeof(float)));
       group.lane_energy = static_cast<float*>(
@@ -628,17 +621,11 @@ class NanochatOptimizer final : public Optimizer {
     }
     for (MuonGroup& group : muon_groups_) {
       if (group.stacked_values != nullptr) kernels::Free(group.stacked_values);
-#if defined(NANOCHAT_PRECISION_FP16)
-      if (group.stacked_master != nullptr) kernels::Free(group.stacked_master);
-#endif
       if (group.buf1 != nullptr) kernels::Free(group.buf1);
       if (group.buf2 != nullptr) kernels::Free(group.buf2);
     }
     for (AnvilGroup& group : anvil_groups_) {
       if (group.stacked_values != nullptr) kernels::Free(group.stacked_values);
-#if defined(NANOCHAT_PRECISION_FP16)
-      if (group.stacked_master != nullptr) kernels::Free(group.stacked_master);
-#endif
       if (group.velocity != nullptr) kernels::Free(group.velocity);
       if (group.lane_energy != nullptr) kernels::Free(group.lane_energy);
     }

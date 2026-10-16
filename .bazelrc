@@ -4,11 +4,12 @@
 #   * toolchain: the C++ standard here; the host compiler is host-local;
 #   * arch:      Pascal sm_61 is the default; --config=sm_75 and --config=t4
 #                select Turing (T4);
-#   * precision: fp32 is the default; fp16 is a test-only config (--config=fp16);
+#   * precision: fp32 is the only precision (docs/precision.md). The
+#                selector stays as a build-time define;
 #   * resources: cap the Bazel server and per-server action fan-out so several
 #                agent worktrees cannot exhaust the small shared host.
-# Named configs are additive: `--config=sm_75 --config=fp16` builds the test-only
-# half-storage variant. `--config=t4` is the complete Turing CUDA target.
+# Named configs are additive: `--config=sm_75 --config=sim`. `--config=t4` is
+# the complete Turing CUDA target.
 
 # --- Toolchain --------------------------------------------------------------
 #
@@ -32,24 +33,21 @@ build:sm_75 --@rules_cuda//cuda:archs=sm_75
 
 # --- Precision --------------------------------------------------------------
 #
-# fp32 is the default on every host. fp16 is a test-only storage mode for the
-# simulator, selected with --config=fp16. The config settings live at //:fp32
-# and //:fp16 and are consumed with select() in per-directory BUILD files. See
-# docs/precision.md.
+# fp32 is the only precision on every host (docs/precision.md). The define
+# selects `ComputeType = float`; there is no runtime dtype dispatch.
 build --define=precision=fp32
-build:fp16 --define=precision=fp16
 
 # --- Backend ----------------------------------------------------------------
 #
 # `src/**` links the reference CPU backend by default; `--config=cuda` links
 # the CUDA backend for GPU oracle parity and the sm_75 port. The selection is a
 # build/link decision only -- the workflow sources are compiled once. See
-# docs/backends.md.
+# docs/build.md.
 #
 # `--config=cpu` states that default backend and precision together. It is the
 # configuration the Python API documents for the host-only shared library:
 # tools/nanochat build //bindings:nanochat_shared --config=cpu. See
-# docs/python-api.md.
+# docs/python.md.
 build --define=backend=cpu
 build:cuda --define=backend=cuda
 build:cpu --define=backend=cpu
@@ -69,12 +67,12 @@ build:native --define=backend=cuda
 # reference engine: the CPU backend compiles in the capability override and
 # answers `GetCaps()` from `NANOCHAT_SIM_PROFILE` through the device profile
 # table, while every value is still computed by the reference loops. The
-# precision is orthogonal -- add `--config=fp16` for the half-storage variant:
+# precision is orthogonal:
 #   tools/nanochat test //tests:sim_numerics_test --config=sim \
 #       --test_env=NANOCHAT_SIM_PROFILE=h100
 #
 # `h100` and `h200` are the complete named targets for the compile gate
-# (section 8): sm_90, fp32/fp16, and the CUDA backend.
+# (section 8): sm_90, fp32, and the CUDA backend.
 build:sim --define=simulator=1
 # The compile gate (docs/simulator.md section 8): turn warnings into errors and
 # ask ptxas for the register and shared-memory use. Additive with a device
@@ -87,7 +85,7 @@ build:h100 --define=backend=cuda
 build:h100 --define=simulator=1
 
 build:h200 --@rules_cuda//cuda:archs=sm_90
-build:h200 --define=precision=fp16
+build:h200 --define=precision=fp32
 build:h200 --define=backend=cuda
 build:h200 --define=simulator=1
 

@@ -69,7 +69,6 @@ void RunCase(int vocab, int dim, const std::vector<int>& ids,
   CheckVectorClose(FromStorage(dtable.Download()), twice, 1e-4,
                    (std::string(name) + " bwd accumulate").c_str());
 
-#if !defined(NANOCHAT_PRECISION_FP16)
   // Finite-difference the gather with a zero-initialised gradient buffer so the
   // analytic gradient is exact on untouched rows as well.
   DevBuf<ComputeType> dtable_zero(
@@ -86,7 +85,6 @@ void RunCase(int vocab, int dim, const std::vector<int>& ids,
   };
   CheckFiniteDifference(table0, analytic, loss_at, 3e-3,
                         (std::string(name) + " dtable").c_str());
-#endif
 }
 
 }  // namespace

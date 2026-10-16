@@ -5,7 +5,7 @@ correctness baseline, the oracle-on-CPU path, and the backend that lets the
 workflow, optimizer, and model run before any GPU kernel exists.
 
 - `kernels.cc` — all eleven compute families, `Gemm`, and the device utilities.
-  `--config=fp32` (default) / `--config=fp16` select `ComputeType`.
+  `--config=fp32` selects `ComputeType` (docs/precision.md).
 - `kernels_test.cc` — analytic checks plus finite-difference gradient checks
   for every family with a backward. Run with `tools/nanochat test
   //backends/cpu:kernels_test`.

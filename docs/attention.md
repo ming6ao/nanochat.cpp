@@ -419,8 +419,8 @@ not promote the full-causal case.
 #### Phase 2 — fused fp32 backward prototype (2-2.5 sessions)
 
 - The prototype backward using the recompute scheme, with atomic
-  key/value gradient accumulation for GQA (the existing `AtomicAddDev` handles
-  the sm_61 fp16 case; fp32 uses the native atomic).
+  key/value gradient accumulation for GQA (the existing `AtomicAddDev` uses the
+  native fp32 atomic).
 - Correctness: the existing `attention_test.cc` shapes plus finite differences
   at fp32, and a direct comparison against `sequence_ref`.
 - **Gate:** at `d8_s512` full causal, backward must beat the shipped 2.857 ms,
@@ -449,10 +449,11 @@ not promote the full-causal case.
 
 #### Phase 4 — optional, separate (Turing)
 
-- On sm_75 a real fp16 tensor-core flash attention (adapted from the upstream
-  sm_75 forks) is possible, but there is no Turing device on this host, so it is
+- On sm_75 a tensor-core flash attention in a bf16 build is possible, but there
+  is no Turing device on this host, so it is
   compile-only and the project cannot benchmark it here. Keep it out of this effort; the
-  DESIGN already defers the decode/MMA path to Turing.
+  DESIGN already defers the decode/MMA path to Turing. See
+  [attention-tensor-core.md](attention-tensor-core.md).
 
 ---
 

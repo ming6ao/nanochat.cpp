@@ -1,17 +1,11 @@
 // Precision-independent GPU correctness for the CUDA backend: a float
-// reference for the elementwise/norm, attention, and embedding families,
-// exercised in both the fp32 and the fp16 build. The fp16 build runs on Pascal
-// (sm_61), so this test also covers the fp16 key/value and scatter-add atomic
-// fallback and the fp32 statistics / master-state contract.
+// reference for the elementwise/norm, attention, and embedding families.
 //
 // The device inputs are rounded to ComputeType first and the reference then
 // consumes those exact stored values, so the recorded tolerance measures only
-// the kernel arithmetic, not the input conversion. Tolerances (relative,
-// scaled by (1 + |want|)):
-//   fp32: 1e-4   (the device reduces in float, the oracle in double)
-//   fp16: 2e-3   (half ulp near 1.0 is ~9.8e-4; the atomic key/value
-//                 accumulation in the backward rounds once per contribution.
-//                 Observed worst case over these shapes is ~6.8e-4.)
+// the kernel arithmetic, not the input conversion. Tolerance (relative, scaled
+// by (1 + |want|)): 1e-4, because the device reduces in float and the oracle in
+// double.
 //
 // Host code only: it includes no CUDA header and drives the sealed
 // nanochat/kernels.h API, so it stays vendor-free. See docs/testing.md and
@@ -44,16 +38,9 @@ using nanochat::kernels::PointwiseForward;
 using nanochat::kernels::RmsNormForward;
 using nanochat::kernels::Synchronize;
 
-#if defined(NANOCHAT_PRECISION_FP16)
-ComputeType C(float v) { return nanochat::Fp16FromFloat(v); }
-float U(ComputeType v) { return nanochat::Fp16ToFloat(v); }
-// Recorded fp16 tolerance; see the header comment for the justification.
-constexpr double kTol = 2e-3;
-#else
 ComputeType C(float v) { return v; }
 float U(ComputeType v) { return v; }
 constexpr double kTol = 1e-4;
-#endif
 
 int g_failures = 0;
 int g_checks = 0;
@@ -209,7 +196,7 @@ void TestPointwise() {
 }
 
 // ---------------------------------------------------------------------------
-// Embedding (sequence family): duplicate ids force the fp16 scatter-add atomic
+// Embedding (sequence family): duplicate ids force the scatter-add atomic
 // ---------------------------------------------------------------------------
 
 void TestEmbedding() {
@@ -278,7 +265,7 @@ bool KeyAllowed(const AttentionParams& p, int qpos, int j) {
 void TestAttention() {
   // Tiny grouped-query shape: two query heads share one key/value head, and
   // several causal query rows write the same key/value row, so the backward
-  // exercises the fp16 atomic fallback.
+  // exercises the atomic accumulation.
   AttentionParams p;
   p.batch = 1;
   p.seq = 3;

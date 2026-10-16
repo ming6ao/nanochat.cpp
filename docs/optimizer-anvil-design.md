@@ -183,7 +183,7 @@ never coexist.
 `AnvilUpdate` is one seam symbol with three implementations that must agree:
 
 - `backends/cpu/kernels.cc` — the reference (float working state, `Gemm` in
-  fp32, a double-accumulator fallback in fp16);
+  fp32);
 - `backends/cuda/kernels/anvil.cu` — the CUDA family: momentum, the first Gram
   and its normalization, the cascade (batched cuBLAS GEMMs), the equalizer, and
   the apply;
@@ -196,15 +196,12 @@ dominates the update.
 
 The GPU test `//backends/cuda/kernels:anvil_gpu_test` covers tall, wide, and
 square matrices, both `red_dim` values, `num_maps` 0 and 3, both rail states,
-Nesterov on and off, and the `rows <= 0` no-op. In fp32 it holds a 1e-5
-tolerance; the fp16 build records a looser tolerance because the working matrix
-is stored as half. Both builds pass.
+Nesterov on and off, and the `rows <= 0` no-op. It holds a 1e-5 tolerance.
 
 The reference casts the working matrix to bfloat16 before the first Gram and
 re-rounds it at every cascade map. The fp32 build here deliberately keeps the
-whole cascade in fp32 (only the fp16 build rounds through half), so an fp32
-curve comparison against `anvil.py` shows small systematic differences that are
-not defects.
+whole cascade in fp32, so an fp32 curve comparison against `anvil.py` shows
+small systematic differences that are not defects.
 
 ## 9. Deferred
 

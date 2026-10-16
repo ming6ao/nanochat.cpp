@@ -44,7 +44,7 @@ tools/nanochat <command> [args...]
                              CPU only, no GPU broker; see
                              docs/performance-model.md
   doctor [--json]            print environment, device, sandbox, and lock state
-  simulate [--device NAME] [--precision fp32|fp16] [--suite S] [--mode compile]
+  simulate [--device NAME] [--suite S] [--mode compile]
                              S0 CPU-only simulator (no GPU, no broker); see
                              docs/simulator.md. Suites: correctness api
                              collective kernel profile all (default all)
@@ -566,14 +566,11 @@ PY
     # GPU broker.
     sim_mode=run
     sim_device=h100
-    sim_precision=""
     sim_suite=all
     while (( $# )); do
       case "$1" in
         --device) sim_device=${2:?--device needs a name}; shift 2 ;;
         --device=*) sim_device=${1#--device=}; shift ;;
-        --precision) sim_precision=${2:?--precision needs a value}; shift 2 ;;
-        --precision=*) sim_precision=${1#--precision=}; shift ;;
         --suite) sim_suite=${2:?--suite needs a name}; shift 2 ;;
         --suite=*) sim_suite=${1#--suite=}; shift ;;
         --mode) sim_mode=${2:?--mode needs a value}; shift 2 ;;
@@ -585,23 +582,6 @@ PY
       h100|h200|a100|t4|gtx1080ti) ;;
       *) die "simulate: unknown device '$sim_device' (h100 h200 a100 t4 gtx1080ti)" ;;
     esac
-    # The compile gate uses the device's named target, matching build:h100 and
-    # build:h200 in .bazelrc. A numerical run defaults to fp32: the committed
-    # oracle and training-parity fixtures are the fp32 CPU case, and the fp16
-    # CPU build records its own looser tolerance (docs/testing.md), so
-    # `--precision fp16` is explicit rather than implied by the device name.
-    if [[ -z $sim_precision ]]; then
-      if [[ $sim_mode == compile && $sim_device == h200 ]]; then
-        sim_precision=fp16
-      else
-        sim_precision=fp32
-      fi
-    fi
-    case "$sim_precision" in
-      fp32|fp16) ;;
-      *) die "simulate: unknown precision '$sim_precision' (fp32 fp16)" ;;
-    esac
-
     if [[ $sim_mode == compile ]]; then
       # The compile gate (section 8): build the whole CUDA backend for the
       # target architecture under --config=sim-gate, so warnings become errors
@@ -710,8 +690,8 @@ PY
       *) die "simulate: unknown suite '$sim_suite'" ;;
     esac
 
+    # fp32 is the only precision (docs/precision.md).
     sim_configs=(--config=sim)
-    [[ $sim_precision == fp16 ]] && sim_configs+=(--config=fp16)
     # The reference-engine suites assert the override is live under
     # `--config=sim`, so the profile name must reach the test process.
     with_build_lock "$bazel_bin" test \

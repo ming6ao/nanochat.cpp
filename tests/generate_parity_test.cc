@@ -64,14 +64,7 @@ std::string Format(const char* fmt, ...) {
   return std::string(buffer);
 }
 
-template <typename T = ComputeType>
-void StoreFloat(T* dst, float value) {
-  if constexpr (std::is_same_v<T, float>) {
-    *dst = value;
-  } else {
-    *dst = nanochat::Fp16FromFloat(value);
-  }
-}
+inline void StoreFloat(ComputeType* dst, float value) { *dst = value; }
 
 Config ConfigFromFixture(const Fixture& fixture) {
   Config config;

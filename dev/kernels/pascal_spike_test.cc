@@ -8,21 +8,14 @@
 #include "dev/kernels/pascal_spike.h"
 #include "nanochat/sandbox.h"
 
-#if defined(NANOCHAT_PRECISION_FP16) && defined(NANOCHAT_PRECISION_FP32)
-#error "exactly one precision must be selected"
-#endif
-#if !defined(NANOCHAT_PRECISION_FP16) && !defined(NANOCHAT_PRECISION_FP32)
-#error "no precision selected; --config=fp32 / --config=fp16 sets it"
+#if !defined(NANOCHAT_PRECISION_FP32)
+#error "no precision selected; --config=fp32 sets it"
 #endif
 
 int main() {
   nanochat::RequireSandboxOrDie("test");
 
-#if defined(NANOCHAT_PRECISION_FP16)
-  std::printf("pascal_spike: precision fp16\n");
-#else
   std::printf("pascal_spike: precision fp32\n");
-#endif
 
   int major = 0;
   int minor = 0;

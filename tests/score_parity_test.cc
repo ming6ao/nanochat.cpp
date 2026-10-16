@@ -95,14 +95,7 @@ Config ConfigFromFixture(const Fixture& fixture) {
   return config;
 }
 
-template <typename T = ComputeType>
-void StoreFloat(T* dst, float value) {
-  if constexpr (std::is_same_v<T, float>) {
-    *dst = value;
-  } else {
-    *dst = nanochat::Fp16FromFloat(value);
-  }
-}
+inline void StoreFloat(ComputeType* dst, float value) { *dst = value; }
 
 // Loads `param/<name>` into every model parameter. The names match PyTorch's
 // `named_parameters()` (proven by the oracle test), so the mapping is direct.

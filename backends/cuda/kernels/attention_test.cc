@@ -79,7 +79,6 @@ void RunCase(const AttentionParams& p, const char* name) {
   CheckVectorClose(FromStorage(dv.Download()), ref_dv, 1e-4,
                    (std::string(name) + " bwd dv").c_str());
 
-#if !defined(NANOCHAT_PRECISION_FP16)
   auto loss_at = [&](const std::vector<float>& qv, const std::vector<float>& kv,
                      const std::vector<float>& vv) {
     std::vector<float> s;
@@ -100,7 +99,6 @@ void RunCase(const AttentionParams& p, const char* name) {
       v0, FromStorage(dv.Download()),
       [&](const std::vector<float>& vv) { return loss_at(q0, k0, vv); }, 3e-3,
       (std::string(name) + " dv").c_str());
-#endif
 }
 
 }  // namespace

@@ -34,11 +34,7 @@
 namespace nanochat {
 namespace {
 
-#if defined(NANOCHAT_PRECISION_FP16)
-constexpr ncclDataType_t kNcclType = ncclHalf;
-#else
 constexpr ncclDataType_t kNcclType = ncclFloat;
-#endif
 
 void Die(const std::string& message) {
   std::fprintf(stderr, "nccl_sync: %s\n", message.c_str());

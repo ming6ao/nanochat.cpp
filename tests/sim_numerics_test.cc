@@ -14,10 +14,9 @@
 // live assertions (under `--config=sim`) confirm the override is actually
 // active and that the caps describe the requested device.
 //
-// The test builds in both fp32 and fp16 (`--config=fp16`), so the fp16 half
-// pins that the half-storage path is untouched by the profile too. Under
-// `--config=sim` it additionally asserts that the override is actually active,
-// so a run that silently fell through to the host caps cannot pass.
+// The test builds at fp32 (docs/precision.md). Under `--config=sim` it
+// additionally asserts that the override is actually active, so a run that
+// silently fell through to the host caps cannot pass.
 //
 // No GPU, no fixture, no torch: tier S0, a plain T0 CPU test.
 
@@ -221,11 +220,7 @@ int main() {
     return 1;
   }
   std::printf("sim numerics: all checks passed (precision=%s, simulator=%s)\n",
-#if defined(NANOCHAT_PRECISION_FP16)
-              "fp16",
-#else
               "fp32",
-#endif
 #if defined(NANOCHAT_SIMULATOR)
               "on"
 #else

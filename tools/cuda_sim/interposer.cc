@@ -293,6 +293,28 @@ cudaError_t cudaGetDevice(int* device) {
   return kCudaSuccess;
 }
 
+// The simulator models one device. `backends/cuda/device.cu` enumerates the
+// local devices with this call, so the count must be positive, or the device
+// list stays empty.
+cudaError_t cudaGetDeviceCount(int* count) {
+  if (count == nullptr) {
+    Record("cudaGetDeviceCount", "", "error: null count pointer");
+    return kCudaErrorInvalidValue;
+  }
+  *count = 1;
+  Record("cudaGetDeviceCount", "\"count\":1", "ok");
+  return kCudaSuccess;
+}
+
+// Only device 0 exists in the simulation. A bind to another ordinal fails, so a
+// wrong device index cannot pass silently.
+cudaError_t cudaSetDevice(int device) {
+  const bool ok = device == 0;
+  Record("cudaSetDevice", "\"device\":" + std::to_string(device),
+         ok ? "ok" : "error: the simulator has one device (ordinal 0)");
+  return ok ? kCudaSuccess : kCudaErrorInvalidDevice;
+}
+
 cudaError_t cudaGetDeviceProperties_v2(cudaDevicePropPrefix* prop,
                                        int /*device*/) {
   if (prop == nullptr) return kCudaErrorInvalidValue;
@@ -332,6 +354,8 @@ const char* cudaGetErrorString(cudaError_t status) {
       return "invalid device pointer";
     case kCudaErrorInvalidConfiguration:
       return "invalid configuration argument";
+    case kCudaErrorInvalidDevice:
+      return "invalid device ordinal";
     default:
       return "unknown error";
   }

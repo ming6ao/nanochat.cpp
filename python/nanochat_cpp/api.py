@@ -1048,7 +1048,8 @@ def build(backend: str | None = None, precision: str | None = None,
     """Build the shared library on demand and return its path.
 
     The arguments override the environment for this call. ``backend`` is
-    ``"cpu"`` or ``"cuda"``. ``precision`` is ``"fp32"`` or ``"fp16"``.
+    ``"cpu"`` or ``"cuda"``. ``precision`` is ``"fp32"``, the only value
+    (docs/precision.md).
     ``arch`` is a CUDA architecture such as ``"sm_75"``. ``cache`` is the
     build cache directory. An argument left as None comes from the
     environment, so ``build()`` keeps the environment behavior.

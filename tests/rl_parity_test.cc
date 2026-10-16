@@ -62,7 +62,7 @@ using nanochat::SchedulerConfig;
 using nanochat::oracle::Fixture;
 using nanochat::oracle::Tensor;
 
-// The two runs share the same fp32 (or fp16) kernels and the same inputs, so
+// The two runs share the same fp32 kernels and the same inputs, so
 // the difference is roundoff from separate processes. These bounds match the
 // training-parity gate: they leave headroom for a device backend's atomic
 // reductions without hiding a real divergence.
@@ -101,23 +101,9 @@ std::string Getenv(const char* name) {
   return value != nullptr ? value : std::string();
 }
 
-template <typename T = ComputeType>
-float AsFloat32(T value) {
-  if constexpr (std::is_same_v<T, float>) {
-    return value;
-  } else {
-    return nanochat::Fp16ToFloat(value);
-  }
-}
+inline float AsFloat32(ComputeType value) { return value; }
 
-template <typename T = ComputeType>
-void StoreFloat(T* dst, float value) {
-  if constexpr (std::is_same_v<T, float>) {
-    *dst = value;
-  } else {
-    *dst = nanochat::Fp16FromFloat(value);
-  }
-}
+inline void StoreFloat(ComputeType* dst, float value) { *dst = value; }
 
 // Copies a (possibly device-resident) buffer to host floats.
 std::vector<float> ReadCompute(const ComputeType* src, std::int64_t count) {

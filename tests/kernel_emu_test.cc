@@ -73,23 +73,10 @@ std::string Format(const char* fmt, ...) {
 }
 
 // The tolerance for this comparison. docs/testing.md records the backend's
-// overall tolerance (fp32 tight, fp16 looser because storage quantizes to
-// half); the atol/rtol split here is the test's own.
-double Atol() {
-#if defined(NANOCHAT_PRECISION_FP16)
-  return 2e-3;
-#else
-  return 1e-5;
-#endif
-}
+// overall tolerance; the atol/rtol split here is the test's own.
+double Atol() { return 1e-5; }
 
-double Rtol() {
-#if defined(NANOCHAT_PRECISION_FP16)
-  return 2e-3;
-#else
-  return 1e-4;
-#endif
-}
+double Rtol() { return 1e-4; }
 
 void ExpectClose(const std::vector<float>& got, const std::vector<float>& want,
                  const std::string& what) {
@@ -110,7 +97,7 @@ void ExpectClose(const std::vector<float>& got, const std::vector<float>& want,
   }
 }
 
-// A deterministic, well-conditioned input. Large enough that the fp16 build
+// A deterministic, well-conditioned input. Large enough that the comparison
 // does not saturate, and varied enough that a wrong reduction order shows up.
 std::vector<float> MakeInput(std::size_t count, float scale, int seed) {
   std::vector<float> out(count);
@@ -124,21 +111,9 @@ std::vector<float> MakeInput(std::size_t count, float scale, int seed) {
   return out;
 }
 
-ComputeType ToStorage(float value) {
-#if defined(NANOCHAT_PRECISION_FP16)
-  return nanochat::Fp16FromFloat(value);
-#else
-  return value;
-#endif
-}
+ComputeType ToStorage(float value) { return value; }
 
-float ToFloat(ComputeType value) {
-#if defined(NANOCHAT_PRECISION_FP16)
-  return nanochat::Fp16ToFloat(value);
-#else
-  return value;
-#endif
-}
+float ToFloat(ComputeType value) { return value; }
 
 std::vector<ComputeType> ToStorage(const std::vector<float>& values) {
   std::vector<ComputeType> out(values.size());
@@ -414,13 +389,8 @@ int main() {
   }
   const nanochat::emu::LaunchStats& stats = nanochat::emu::Stats();
   std::printf(
-      "kernel emu: all checks passed (precision=%s, %lld launches, "
+      "kernel emu: all checks passed (precision=fp32, %lld launches, "
       "max block %zu)\n",
-#if defined(NANOCHAT_PRECISION_FP16)
-      "fp16",
-#else
-      "fp32",
-#endif
       static_cast<long long>(stats.launches), stats.max_block_threads);
   return 0;
 }

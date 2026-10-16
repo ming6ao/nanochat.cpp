@@ -14,18 +14,14 @@
 
 NVCC      ?= nvcc
 HOSTCXX   ?= g++-12
-PRECISION ?= fp32
 CUDA_ARCH ?= $(shell \
   nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | \
   head -n1 | tr -d '.' | sed 's/^/sm_/')
 CUDA_ARCH := $(if $(CUDA_ARCH),$(CUDA_ARCH),sm_61)
 COMPUTE   := $(patsubst sm_%,compute_%,$(CUDA_ARCH))
 
-ifeq ($(PRECISION),fp16)
-PRECISION_DEFINE := -DNANOCHAT_PRECISION_FP16
-else
+# fp32 is the only precision (docs/precision.md).
 PRECISION_DEFINE := -DNANOCHAT_PRECISION_FP32
-endif
 
 BUILD_DIR := build
 INCLUDES  := -Iinclude -I.

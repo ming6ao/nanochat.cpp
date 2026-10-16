@@ -116,13 +116,8 @@ static_assert(std::is_same<decltype(nanochat_generate_params::stop_ids),
 // --- Test harness ---------------------------------------------------------
 
 // The weighted and uniform backward paths reach the same value through
-// different arithmetic. fp32 agrees to a tight tolerance; the fp16 storage
-// rounds the per-row scale, so it needs a wider one.
-#if defined(NANOCHAT_PRECISION_FP16)
-constexpr double kGradientTolerance = 5e-2;
-#else
+// different arithmetic. fp32 agrees to a tight tolerance.
 constexpr double kGradientTolerance = 1e-4;
-#endif
 
 int g_failures = 0;
 
@@ -262,8 +257,8 @@ std::vector<int> MakeTargets(int batch, int seq, int vocab) {
   return targets;
 }
 
-// Reads one parameter gradient into a float vector. It handles both build
-// precisions: a four-byte element is float32, a two-byte element is float16.
+// Reads one parameter gradient into a float vector. The compute type is fp32,
+// so one element is four bytes (docs/precision.md).
 std::vector<float> ReadGradient(nanochat_model* model, int index) {
   nanochat_param param;
   std::memset(&param, 0, sizeof(param));
@@ -278,15 +273,9 @@ std::vector<float> ReadGradient(nanochat_model* model, int index) {
   }
   std::vector<float> values(static_cast<std::size_t>(param.count));
   for (std::size_t i = 0; i < values.size(); ++i) {
-    if (element_size == 4) {
-      float value = 0.0f;
-      std::memcpy(&value, raw.data() + i * 4, sizeof(value));
-      values[i] = value;
-    } else {
-      nanochat::Fp16 value;
-      std::memcpy(&value.bits, raw.data() + i * 2, sizeof(value.bits));
-      values[i] = nanochat::Fp16ToFloat(value);
-    }
+    float value = 0.0f;
+    std::memcpy(&value, raw.data() + i * 4, sizeof(value));
+    values[i] = value;
   }
   return values;
 }

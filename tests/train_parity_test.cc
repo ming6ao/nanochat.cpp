@@ -95,23 +95,9 @@ bool Within(double got, double want, double atol, double rtol) {
   return std::fabs(got - want) <= atol + rtol * std::fabs(want);
 }
 
-template <typename T = ComputeType>
-float AsFloat32(T value) {
-  if constexpr (std::is_same_v<T, float>) {
-    return value;
-  } else {
-    return nanochat::Fp16ToFloat(value);
-  }
-}
+inline float AsFloat32(ComputeType value) { return value; }
 
-template <typename T = ComputeType>
-void StoreFloat(T* dst, float value) {
-  if constexpr (std::is_same_v<T, float>) {
-    *dst = value;
-  } else {
-    *dst = nanochat::Fp16FromFloat(value);
-  }
-}
+inline void StoreFloat(ComputeType* dst, float value) { *dst = value; }
 
 // Copies a (possibly device-resident) buffer to host floats.
 std::vector<float> ReadCompute(const ComputeType* src, std::int64_t count) {

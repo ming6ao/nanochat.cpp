@@ -8,9 +8,9 @@
 // are header-only so they inline into every caller.
 //
 // The arithmetic mirrors backends/cpu/kernels.cc exactly: storage is
-// ComputeType (float or Fp16), the working type is always float, and the
-// reduction runs in float. The CPU reference accumulates in double; the device
-// uses float, which is well inside the fp32 oracle tolerance (docs/testing.md).
+// ComputeType (float), the working type is always float, and the reduction
+// runs in float. The CPU reference accumulates in double; the device uses
+// float, which is well inside the fp32 oracle tolerance (docs/testing.md).
 //
 // See docs/kernels.md ("Shared device helpers") and docs/build.md.
 
@@ -22,9 +22,6 @@
 
 #include "nanochat/kernels.h"
 #include "nanochat/tensor.h"
-#if defined(NANOCHAT_PRECISION_FP16)
-#include <cuda_fp16.h>
-#endif
 
 namespace nanochat {
 namespace cuda_kernels {
@@ -33,59 +30,19 @@ namespace cuda_kernels {
 // shared array of this size, so every launch must stay at or below it.
 constexpr int kMaxBlockThreads = 1024;
 
-// Storage <-> float at the device boundary. Fp16 is bit-compatible with
-// __half, so the conversion goes through the CUDA intrinsics rather than a
-// reinterpret_cast.
-#if defined(NANOCHAT_PRECISION_FP16)
-__device__ __forceinline__ float AsFloatDev(ComputeType v) {
-  return __half2float(__ushort_as_half(v.bits));
-}
-
-__device__ __forceinline__ ComputeType ToComputeDev(float v) {
-  ComputeType out;
-  out.bits = __half_as_ushort(__float2half_rn(v));
-  return out;
-}
-#else
+// Storage <-> float at the device boundary. fp32 is the only compute type
+// today, so both conversions are the identity.
 __device__ __forceinline__ float AsFloatDev(ComputeType v) { return v; }
 
 __device__ __forceinline__ ComputeType ToComputeDev(float v) { return v; }
-#endif
 
-// Atomic add of a float into ComputeType storage. fp32 uses the native atomic.
-// fp16 uses the native scalar __half atomic on sm_70+, where the compiler
-// exposes one. Pascal (sm_60/sm_61) has neither a scalar __half atomicAdd nor
-// a 16-bit atomicCAS, so the fallback packs the target half into its aligned
-// 32-bit word and CASes the word. Only the target 16 bits change; the
-// neighbouring half is written back unchanged, which keeps the operation safe
-// even when the pair straddles a workspace slot boundary.
+// Atomic add of a float into ComputeType storage. The fp32 build uses the
+// native atomic.
 //
 // The attention backward needs this because grouped-query attention lets
 // several query heads accumulate into the same key/value gradient row.
 __device__ __forceinline__ void AtomicAddDev(ComputeType* addr, float value) {
-#if defined(NANOCHAT_PRECISION_FP16)
-#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 700)
-  atomicAdd(reinterpret_cast<__half*>(addr), __float2half_rn(value));
-#else
-  const std::uintptr_t address = reinterpret_cast<std::uintptr_t>(addr);
-  unsigned int* word = reinterpret_cast<unsigned int*>(
-      address & ~static_cast<std::uintptr_t>(3));
-  const unsigned int shift = (address & 2u) != 0 ? 16u : 0u;
-  const unsigned int mask = 0xffffu << shift;
-  unsigned int assumed;
-  unsigned int old = *word;
-  do {
-    assumed = old;
-    const __half current = __ushort_as_half(
-        static_cast<unsigned short>((assumed >> shift) & 0xffffu));
-    const unsigned int updated = static_cast<unsigned int>(
-        __half_as_ushort(__float2half_rn(__half2float(current) + value)));
-    old = atomicCAS(word, assumed, (assumed & ~mask) | (updated << shift));
-  } while (assumed != old);
-#endif
-#else
   atomicAdd(addr, value);
-#endif
 }
 
 // Block-wide sum over `val`. Every thread in the block must call it, and the

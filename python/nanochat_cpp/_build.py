@@ -90,7 +90,7 @@ def cache_dir() -> Path:
 
 
 def precision() -> str:
-    """The requested precision, ``fp32`` by default."""
+    """The requested precision. fp32 is the only value (docs/precision.md)."""
     return os.environ.get("NANOCHAT_CPP_PRECISION", "fp32").strip().lower()
 
 
@@ -255,16 +255,13 @@ def cached_library(key: str | None = None,
 
 
 def _config_flag(options: BuildOptions) -> str:
-    """The named Bazel configuration for the requested backend and precision."""
-    if options.backend == "cpu":
-        if options.precision == "fp16":
-            return "--config=fp16"
-        return "--config=cpu"
-    if options.precision == "fp16":
+    """The named Bazel configuration for the requested backend."""
+    if options.precision != "fp32":
         raise BuildError(
-            "fp16 is not a CUDA production build: use fp32 on Turing and "
-            "Pascal, or set NANOCHAT_CPP_BACKEND=cpu for the fp16 test "
-            "build. See docs/precision.md")
+            f"{options.precision} is not a build precision: fp32 is the only "
+            "precision (docs/precision.md)")
+    if options.backend == "cpu":
+        return "--config=cpu"
     return "--config=cuda"
 
 

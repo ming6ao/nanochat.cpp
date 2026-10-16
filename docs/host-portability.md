@@ -62,18 +62,15 @@ different `rules_cuda` toolchain. It is a separate project with its own risk.
 |---|---|---|---|
 | default | sm_61 | fp32 | cpu |
 | `sm_75` | sm_75 | fp32 | cpu |
-| `fp16` | sm_61 | fp16 | cpu |
 | `cuda` | sm_61 | fp32 | cuda |
 | `t4` | sm_75 | fp32 | cuda |
 
-The `t4` config selects the fp32 CUDA build for the Turing card. Stage 1
-removed the fp16 production build ([precision.md](precision.md)). The `fp16`
-config selects the CPU storage emulation. It is test-only. It serves the
-simulator.
+The `t4` config selects the fp32 CUDA build for the Turing card. fp32 is the
+only precision (docs/precision.md).
 
 The Kaggle host file sets the arch to sm_75 and the resource budget. It does
-not set the backend or the precision. The backend and the precision stay
-per-command, so the CPU test loop keeps the CPU backend and fp32.
+not set the backend. The backend stays per-command, so the CPU test loop keeps
+the CPU backend and fp32.
 
 ## 4. Optional sandbox
 
@@ -287,7 +284,6 @@ Run every command through `tools/nanochat`, as on the workstation.
 | `tools/nanochat build` | Build every target for sm_75, CPU backend |
 | `tools/nanochat test` | CPU tests under the `none` sandbox |
 | `tools/nanochat test --gpu //...` | T1 GPU tests, fp32 |
-| `tools/nanochat test --gpu --config=fp16 //...` | fp16 test leg on the T4, test-only |
 | `tools/nanochat test --gpu //tests:oracle_cuda_test` | T2 oracle parity |
 
 The first session must prove the toolchain. Do this in order:

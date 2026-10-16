@@ -77,12 +77,9 @@ def nanochat_cuda_copts():
     })
 
 def precision_defines():
-    """The #define for the selected precision (`--config=fp32` / `fp16`).
+    """The #define for the build precision.
 
-    The config_settings live in the root package, which is the aggregation
-    point every per-directory BUILD file can rely on.
+    fp32 is the only precision today (docs/precision.md), so the define is a
+    constant. The seam stays so a future compute type returns its own define.
     """
-    return select({
-        "//:fp16": ["NANOCHAT_PRECISION_FP16"],
-        "//:fp32": ["NANOCHAT_PRECISION_FP32"],
-    })
+    return ["NANOCHAT_PRECISION_FP32"]

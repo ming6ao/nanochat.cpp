@@ -34,13 +34,8 @@ using nanochat::RmsNormParams;
 
 namespace kernels = nanochat::kernels;
 
-#if defined(NANOCHAT_PRECISION_FP16)
-ComputeType C(float v) { return nanochat::Fp16FromFloat(v); }
-float U(ComputeType v) { return nanochat::Fp16ToFloat(v); }
-#else
 ComputeType C(float v) { return v; }
 float U(ComputeType v) { return v; }
-#endif
 
 int g_failures = 0;
 
@@ -87,9 +82,8 @@ std::vector<float> FromStorage(const std::vector<ComputeType>& v) {
   return out;
 }
 
-#if !defined(NANOCHAT_PRECISION_FP16)
 // Central finite difference of a scalar loss over x, compared against an
-// analytic gradient. fp32 only: fp16 storage cannot resolve the perturbation.
+// analytic gradient.
 template <typename LossFn>
 void CheckFiniteDifference(const std::vector<float>& x0,
                            const std::vector<float>& analytic, LossFn loss_at,
@@ -109,7 +103,6 @@ void CheckFiniteDifference(const std::vector<float>& x0,
     }
   }
 }
-#endif
 
 void TestGemm() {
   // 2x2 * 2x2 = [[19,22],[43,50]].
@@ -190,7 +183,6 @@ void TestRmsNorm() {
   CheckClose(U(out[0]), 3.0f * r, 1e-5, "rms out0");
   CheckClose(U(out[1]), 4.0f * r, 1e-5, "rms out1");
 
-#if !defined(NANOCHAT_PRECISION_FP16)
   // Finite-difference the backward: loss = sum(out * w).
   Rng rng;
   RmsNormParams q;
@@ -216,7 +208,6 @@ void TestRmsNorm() {
     return loss;
   };
   CheckFiniteDifference(x0, dx, loss_at, 1e-3, "rms backward");
-#endif
 }
 
 void TestQkPrep() {
@@ -237,7 +228,6 @@ void TestQkPrep() {
   CheckClose(U(q[0]), 3.0f * r * 1.2f, 1e-4, "qkprep fwd q0");
   CheckClose(U(q[1]), 4.0f * r * 1.2f, 1e-4, "qkprep fwd q1");
 
-#if !defined(NANOCHAT_PRECISION_FP16)
   // Backward with a real RoPE table.
   Rng rng;
   QkPrepParams p2;
@@ -280,7 +270,6 @@ void TestQkPrep() {
   CheckFiniteDifference(
       k0, dk_an, [&](const std::vector<float>& xv) { return loss_at(q0, xv); },
       2e-3, "qkprep dk");
-#endif
 }
 
 void TestAttention() {
@@ -295,7 +284,6 @@ void TestAttention() {
   p.window_right = 0;
   p.kv_len = 0;
   p.scale = 0.0f;
-#if !defined(NANOCHAT_PRECISION_FP16)
   const int qn = 1 * 3 * 2 * 2;
   const int kn = 1 * 3 * 1 * 2;
   Rng rng;
@@ -344,11 +332,9 @@ void TestAttention() {
       "attention dv");
   // Causal: the first query row only sees key 0.
   Check(stats[0] == stats[0], "attention stats finite");
-#endif
 }
 
 void TestAttentionWindow() {
-#if !defined(NANOCHAT_PRECISION_FP16)
   AttentionParams p;
   p.batch = 1;
   p.seq = 4;
@@ -406,7 +392,6 @@ void TestAttentionWindow() {
       v0, dva,
       [&](const std::vector<float>& xv) { return loss_at(q0, k0, xv); }, 2e-3,
       "window dv");
-#endif
 }
 
 void TestPointwise() {
@@ -427,7 +412,6 @@ void TestPointwise() {
     std::vector<ComputeType> da(n), db(n);
     kernels::PointwiseBackward(op, n, as.data(), bs.data(), dys.data(), 1.5f,
                                0.5f, da.data(), db.data());
-#if !defined(NANOCHAT_PRECISION_FP16)
     std::vector<float> daa = FromStorage(da);
     std::vector<float> dba = FromStorage(db);
     auto loss_at = [&](const std::vector<float>& av,
@@ -447,7 +431,6 @@ void TestPointwise() {
     CheckFiniteDifference(
         b0, dba, [&](const std::vector<float>& bv) { return loss_at(a0, bv); },
         2e-3, "pointwise db");
-#endif
   }
 }
 
@@ -472,7 +455,6 @@ void TestClassifier() {
   for (int j = 0; j < 6; ++j) {
     CheckClose(U(dlogits[2 * 6 + j]), 0.0, 1e-6, "classifier ignore grad");
   }
-#if !defined(NANOCHAT_PRECISION_FP16)
   std::vector<float> dl = FromStorage(dlogits);
   auto loss_at = [&](const std::vector<float>& lv) {
     std::vector<ComputeType> l2 = ToStorage(lv);
@@ -483,7 +465,6 @@ void TestClassifier() {
     return loss;
   };
   CheckFiniteDifference(logits0, dl, loss_at, 5e-3, "classifier backward");
-#endif
 }
 
 // Weighted, masked classifier backward (docs/post-training.md section 2.2).
@@ -520,7 +501,6 @@ void TestClassifierRowScale() {
     CheckClose(U(dlogits[2 * 6 + j]), 0.0, 1e-6,
                "classifier row_scale ignored row");
   }
-#if !defined(NANOCHAT_PRECISION_FP16)
   std::vector<float> dl = FromStorage(dlogits);
   auto loss_at = [&](const std::vector<float>& lv) {
     std::vector<ComputeType> l2 = ToStorage(lv);
@@ -532,7 +512,6 @@ void TestClassifierRowScale() {
   };
   CheckFiniteDifference(logits0, dl, loss_at, 5e-3,
                         "classifier row_scale backward");
-#endif
 }
 
 void TestEmbedding() {
@@ -759,12 +738,6 @@ int main() {
     std::printf("%d check(s) failed\n", g_failures);
     return 1;
   }
-  std::printf("cpu kernels: all checks passed (precision=%s)\n",
-#if defined(NANOCHAT_PRECISION_FP16)
-              "fp16"
-#else
-              "fp32"
-#endif
-  );
+  std::printf("cpu kernels: all checks passed (precision=%s)\n", "fp32");
   return 0;
 }

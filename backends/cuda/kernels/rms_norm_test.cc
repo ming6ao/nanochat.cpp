@@ -66,7 +66,6 @@ void TestForwardBackward() {
     const std::vector<float> ref_dx = RmsNormBackward(p, x0, dy0, ref_rstd);
     CheckVectorClose(FromStorage(dx.Download()), ref_dx, 1e-4, "rms bwd dx");
 
-#if !defined(NANOCHAT_PRECISION_FP16)
     // Finite-difference the device backward against the reference forward.
     // The kernel uses the reference's rstd, which the forward above shows is
     // equal to the device's within tolerance.
@@ -79,7 +78,6 @@ void TestForwardBackward() {
     };
     CheckFiniteDifference(x0, FromStorage(dx.Download()), loss_at, 2e-3,
                           "rms dx");
-#endif
   }
 }
 
@@ -123,7 +121,6 @@ void TestFusedResidual() {
   CheckVectorClose(FromStorage(dx.Download()), ref_g, 1e-4, "fused dx");
   CheckVectorClose(FromStorage(dres.Download()), ref_g, 1e-4, "fused dres");
 
-#if !defined(NANOCHAT_PRECISION_FP16)
   auto loss_at = [&](const std::vector<float>& xv,
                      const std::vector<float>& rv) {
     RmsNormParams p_loss = p;
@@ -143,7 +140,6 @@ void TestFusedResidual() {
       res0, FromStorage(dres.Download()),
       [&](const std::vector<float>& rv) { return loss_at(x0, rv); }, 2e-3,
       "fused dres");
-#endif
 }
 
 }  // namespace

@@ -347,16 +347,15 @@ the adapter enforces one.
 
 ## 6. Single precision only
 
-The collective reduces single precision only. `ComputeType` is `float` in the
-fp32 build. Remove the fp16 dtype branch from the collective.
+The collective reduces single precision only. `ComputeType` is `float`. The
+fp16 dtype branch is gone from the collective ([precision.md](precision.md)).
 
-[precision.md](precision.md) section 6 defines the policy. Stage 1 removes fp16
-from the production path and keeps `--config=fp16` for the simulator only. So
-the production reduction is fp32. The collective needs fp32 only.
+[precision.md](precision.md) section 6 defines the policy. Stage 1 removed fp16
+from the tree, so every reduction is fp32. The collective needs fp32 only.
 
-The device target for this work is `--config=h100`, which is fp32. The `h200`
-config is out of the collective path. The architect decides the `h200` fate as a
-separate question.
+The device target for this work is `--config=h100`, which is fp32. Stage 1 moves
+the `h200` target to fp32 and Stage 2 moves it to bf16 (precision.md section 4).
+The `h200` config is outside the collective path.
 
 ## 7. Phases
 
@@ -615,13 +614,11 @@ current section 5 table.
 Type: decision, mostly closed.
 
 [precision.md](precision.md) section 6 already accepts Stage 1. Stage 1 removes
-fp16 from the production path and keeps `--config=fp16` for the simulator only.
-So the production reduction is fp32, and the collective needs fp32 only.
+fp16 from the tree, so every reduction is fp32, and the collective needs fp32
+only.
 
-Scope the collective to fp32 and close this question for this work. Add one
-sentence to [precision.md](precision.md) section 6. Let the architect decide the
-`h200` config as a separate question. That question does not block the
-collective.
+Scope the collective to fp32. Stage 1 moves the `h200` target to fp32 and Stage
+2 moves it to bf16 (precision.md section 4). Neither step blocks the collective.
 
 ### 11.4 Node ownership and the broker
 
@@ -655,7 +652,7 @@ the largest correctness risk in the two-stream design.
 |---|---|---|---|---|
 | RDMA adapter and GPUDirect | Discovery | `ibv_devinfo`, `nvidia-smi topo -m`, and an `ibv_reg_mr` probe | Collective | Phase 3 |
 | RDMA fallback or required | Decision | One written roadmap answer, plus a reversible selection rule | Architect | Phase 3 default |
-| Retire fp16 | Decision, mostly closed | One sentence in [precision.md](precision.md); the `h200` fate is separate | Architect | Nothing |
+| Retire fp16 | Closed | precision.md section 6 Stage 1 removes fp16 from the tree; the `h200` target is fp32 until Stage 2 | Architect | Nothing |
 | Node ownership and broker | Discovery and contract | Four written answers; a `doctor` extension; `docs/node-h100.md` | Architect | Phase 5 gates |
 | Schedule trace | Recommendation | Reuse the mock's JSONL and coordinator pattern | Collective and Oracle | Phase 1 |
 

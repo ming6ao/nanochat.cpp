@@ -73,23 +73,9 @@ void ExpectNear(float actual, float expected, float tolerance,
   }
 }
 
-template <typename T = ComputeType>
-float AsF32(T value) {
-  if constexpr (std::is_same_v<T, float>) {
-    return value;
-  } else {
-    return nanochat::Fp16ToFloat(value);
-  }
-}
+inline float AsF32(ComputeType value) { return value; }
 
-template <typename T = ComputeType>
-void StoreFloat(T* dst, float value) {
-  if constexpr (std::is_same_v<T, float>) {
-    *dst = value;
-  } else {
-    *dst = nanochat::Fp16FromFloat(value);
-  }
-}
+inline void StoreFloat(ComputeType* dst, float value) { *dst = value; }
 
 struct Rng {
   std::uint64_t state;
@@ -404,14 +390,7 @@ void RunStepsTest(float clip) {
   }
 
   Rng rng(0x123456789abcdefull);
-#if defined(NANOCHAT_PRECISION_FP16)
-  // The fp32 master keeps the update precise. The residual difference is the
-  // fp16 gradient that the clip scale rounds through storage, amplified by the
-  // embedding's slow second moment.
-  constexpr float kTolerance = 2e-3f;
-#else
   constexpr float kTolerance = 2e-5f;
-#endif
   for (int step = 1; step <= 3; ++step) {
     double sum_sq = 0.0;
     for (ParamState& state : states) {
@@ -458,9 +437,6 @@ void RunStepsTest(float clip) {
 // ---------------------------------------------------------------------------
 
 void RunZeroGradTest() {
-#if defined(NANOCHAT_PRECISION_FP16)
-  std::printf("optim_test: zero-gradient check skipped (fp16 build)\n");
-#else
   const Config config = MakeConfig();
   std::unique_ptr<Model> model = Model::Create(config);
   model->InitWeights(0xfeedfaceull);
@@ -503,7 +479,6 @@ void RunZeroGradTest() {
     }
   }
   std::printf("optim_test: zero-gradient decay ok\n");
-#endif
 }
 
 // ---------------------------------------------------------------------------
@@ -512,9 +487,6 @@ void RunZeroGradTest() {
 // ---------------------------------------------------------------------------
 
 void RunTrainStepTest() {
-#if defined(NANOCHAT_PRECISION_FP16)
-  std::printf("optim_test: TrainStep check skipped (fp16 build)\n");
-#else
   const Config config = MakeConfig();
   std::unique_ptr<Model> model = Model::Create(config);
   model->InitWeights(0xabcdef01ull);
@@ -550,7 +522,6 @@ void RunTrainStepTest() {
   }
   if (change == 0.0) Fail("TrainStep did not update any parameter");
   std::printf("optim_test: TrainStep wiring ok\n");
-#endif
 }
 
 // ---------------------------------------------------------------------------
@@ -752,9 +723,6 @@ void TestAnvilSteps() {
 // bias correction reads the Adam-update ordinal derived from the 0-based
 // counter, not the global step.
 void TestAdamCadence() {
-#if defined(NANOCHAT_PRECISION_FP16)
-  std::printf("optim_test: Adam cadence check skipped (fp16 build)\n");
-#else
   const Config config = MakeConfig();
   std::unique_ptr<Model> model = Model::Create(config);
   model->InitWeights(0xcad4e001ull);
@@ -856,7 +824,6 @@ void TestAdamCadence() {
     }
   }
   std::printf("optim_test: Adam cadence ok\n");
-#endif
 }
 
 }  // namespace

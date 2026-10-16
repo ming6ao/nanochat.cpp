@@ -26,7 +26,7 @@ cuda_library(
     alwayslink = True,
 )
 
-# The GEMM entry point: cuBLAS for fp32 and for the sm_75 fp16 build config.
+# The GEMM entry point: cuBLAS for fp32.
 cuda_library(
     name = "gemm",
     srcs = ["gemm.cu"],

@@ -188,7 +188,7 @@ const char* nanochat_version(void);
 // The active backend: "cpu" for the reference backend, or "cuda" when the
 // library links the CUDA kernels. The string is static. Call after
 // nanochat_init. `nanochat_compute_type_size` reports the parameter element
-// size in bytes, four for fp32 and two for fp16.
+// size in bytes, which is four for fp32 (docs/precision.md).
 const char* nanochat_backend(void);
 int nanochat_compute_type_size(void);
 
@@ -434,7 +434,7 @@ int nanochat_param_info(nanochat_model* model, int index, nanochat_param* out);
 // copied, or a negative value on error. Use these instead of dereferencing the
 // `nanochat_param` pointers, because a device backend keeps the buffers in
 // device memory. The host buffer holds the build compute type: four-byte
-// float32, or two-byte float16 under a half-precision build.
+// float32 (docs/precision.md).
 int64_t nanochat_param_read(nanochat_model* model, int index, int grad,
                             int64_t offset, int64_t count, void* data);
 int64_t nanochat_param_write(nanochat_model* model, int index, int grad,

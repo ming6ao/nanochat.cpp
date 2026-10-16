@@ -6,8 +6,8 @@
 // speed: double-width accumulators for reductions, float working state, and no
 // vectorisation. `Gemm` is the exception: it blocks the output rows and
 // columns into register tiles and packs the `b` operand, because the language
-// model spends most of its time there. The build selects ComputeType (fp32 or
-// fp16) at compile time;
+// model spends most of its time there. The build selects ComputeType (fp32)
+// at compile time;
 // the arithmetic below is always performed in float and converted at the
 // storage boundary through AsFloat / ToCompute.
 //
@@ -43,43 +43,26 @@
 #include <cstdlib>
 #include <cstring>
 #include <limits>
-#include <type_traits>
 #include <vector>
 
 namespace nanochat {
 namespace kernels {
 namespace {
 
-// Storage <-> float boundary. In an fp16 build the optimizer state and the
-// reductions still run in float (docs/build.md). The conversion helpers are
-// templated on the storage type so that `if constexpr` discards the unused
-// branch instead of requiring both to compile.
-template <typename T>
-inline float AsFloatT(T v) {
-  if constexpr (std::is_same_v<T, float>) {
-    return v;
-  } else {
-    return Fp16ToFloat(v);
-  }
-}
+// Storage <-> float boundary. fp32 is the only compute type today, so both
+// conversions are the identity. The optimizer state and the reductions run in
+// float (docs/build.md).
+inline float AsFloatT(ComputeType v) { return v; }
 
-template <typename T>
-inline T ToComputeT(float v) {
-  if constexpr (std::is_same_v<T, float>) {
-    return v;
-  } else {
-    return Fp16FromFloat(v);
-  }
-}
+inline ComputeType ToComputeT(float v) { return v; }
 
 inline float AsFloat(ComputeType v) { return AsFloatT(v); }
 
-inline ComputeType ToCompute(float v) { return ToComputeT<ComputeType>(v); }
+inline ComputeType ToCompute(float v) { return ToComputeT(v); }
 
 inline float Sigmoid(float x) { return 1.0f / (1.0f + std::exp(-x)); }
 
-// Zero a typed ComputeType range without tripping -Wclass-memaccess in an
-// fp16 build (Fp16 is a non-trivial struct).
+// Zero a typed ComputeType range.
 inline void ZeroFill(ComputeType* ptr, std::size_t count) {
   std::fill(ptr, ptr + count, ToCompute(0.0f));
 }
@@ -179,11 +162,9 @@ Caps GetCaps() {
   caps.is_device = false;
   caps.has_cublas = false;
   caps.has_tensor_cores = false;
-  // The CPU reference implements the build precision. It can emulate both, so
-  // both are reported as supported; the host fails fast on a build whose
-  // precision is not in this set.
+  // The CPU reference implements the build precision. The host fails fast on a
+  // build whose precision is not in this set.
   caps.supports_fp32 = true;
-  caps.supports_fp16 = true;
   caps.device_name = "cpu";
   return caps;
 }
@@ -1151,23 +1132,9 @@ namespace {
 // Float matrix multiply used by MuonUpdate. The Muon working state is always
 // float, so the tuned `Gemm` (whose operands are ComputeType) is only callable
 // when ComputeType is float. The fp32 build forwards to `Gemm` and keeps its
-// double accumulator; the fp16 build keeps a portable double-accumulator
-// fallback.
+// double accumulator.
 void MuonMatmul(int m, int n, int k, const float* a, const float* b, float* c,
                 bool transpose_a, bool transpose_b) {
-#if defined(NANOCHAT_PRECISION_FP16)
-  for (int i = 0; i < m; ++i) {
-    for (int j = 0; j < n; ++j) {
-      double sum = 0.0;
-      for (int l = 0; l < k; ++l) {
-        const float av = transpose_a ? a[l * m + i] : a[i * k + l];
-        const float bv = transpose_b ? b[j * k + l] : b[l * n + j];
-        sum += static_cast<double>(av) * static_cast<double>(bv);
-      }
-      c[i * n + j] = static_cast<float>(sum);
-    }
-  }
-#else
   GemmParams params;
   params.m = m;
   params.n = n;
@@ -1177,7 +1144,6 @@ void MuonMatmul(int m, int n, int k, const float* a, const float* b, float* c,
   params.transpose_a = transpose_a;
   params.transpose_b = transpose_b;
   Gemm(GemmMode::kForward, params, a, b, c);
-#endif
 }
 
 }  // namespace
@@ -1449,8 +1415,7 @@ void MuonUpdate(const MuonParams& params, const ComputeType* stacked_grads,
 //
 // One ANVIL update for a stacked group, mirroring modded-nanogpt's
 // `track_1_short/optim/anvil.py` and docs/optimizer-anvil-design.md. The
-// working state is float (like Muon's), so the fp32 build can drive `Gemm` and
-// the fp16 build keeps a double-accumulator fallback.
+// working state is float (like Muon's), so the fp32 build can drive `Gemm`.
 
 void AnvilUpdate(const AnvilParams& params, const ComputeType* stacked_grads,
                  float* stacked_master, ComputeType* stacked_values,

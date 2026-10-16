@@ -119,15 +119,6 @@ int Run(int argc, char** argv) {
               BackendName().c_str(), PrecisionName().c_str(),
               BuildName().c_str(), exact ? "(exact)" : "(tolerance)",
               golden_path.c_str());
-  if (PrecisionName() != "fp32") {
-    // The trace covers fp32 only (docs/numerics-integration.md section 6.2).
-    // Skip rather than fail, because `tools/nanochat simulate --precision fp16`
-    // runs this target as part of the `correctness` suite.
-    std::printf(
-        "numerics_trace: skipped, the trace covers fp32 only "
-        "(docs/numerics-integration.md section 6.2)\n");
-    return 0;
-  }
 
   TraceStats stats;
   const std::vector<Record> records =

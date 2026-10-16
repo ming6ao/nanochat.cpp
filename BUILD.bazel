@@ -9,16 +9,11 @@
 
 package(default_visibility = ["//visibility:public"])
 
-# Precision selection (docs/build.md). `--config=fp32` is the default and
-# `--config=fp16` selects the half-precision build; see .bazelrc.
+# Precision selection (docs/build.md). fp32 is the only precision; the
+# setting documents the `--config=fp32` build flag. See .bazelrc.
 config_setting(
     name = "fp32",
     define_values = {"precision": "fp32"},
-)
-
-config_setting(
-    name = "fp16",
-    define_values = {"precision": "fp16"},
 )
 
 # Backend selection (docs/build.md). `--backend=cpu` links the reference

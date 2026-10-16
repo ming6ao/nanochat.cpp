@@ -33,7 +33,6 @@ double PrecisionBytes(ComputePrecision precision) {
   switch (precision) {
     case ComputePrecision::kFp8:
       return 1.0;
-    case ComputePrecision::kFp16:
     case ComputePrecision::kBf16:
       return 2.0;
     case ComputePrecision::kFp32:
@@ -173,8 +172,6 @@ const char* PrecisionName(ComputePrecision precision) {
   switch (precision) {
     case ComputePrecision::kFp32:
       return "fp32";
-    case ComputePrecision::kFp16:
-      return "fp16";
     case ComputePrecision::kBf16:
       return "bf16";
     case ComputePrecision::kFp8:
@@ -183,13 +180,7 @@ const char* PrecisionName(ComputePrecision precision) {
   return "unknown";
 }
 
-ComputePrecision BuildComputePrecision() {
-#if defined(NANOCHAT_PRECISION_FP16)
-  return ComputePrecision::kFp16;
-#else
-  return ComputePrecision::kFp32;
-#endif
-}
+ComputePrecision BuildComputePrecision() { return ComputePrecision::kFp32; }
 
 ComputePrecision AssignMatrixPrecision(int rows, int cols,
                                        ComputePrecision build) {
@@ -209,8 +200,6 @@ double PerformanceLimits::PeakFlops(ComputePrecision precision) const {
   switch (precision) {
     case ComputePrecision::kFp32:
       return fp32_flops;
-    case ComputePrecision::kFp16:
-      return fp16_flops;
     case ComputePrecision::kBf16:
       return bf16_flops;
     case ComputePrecision::kFp8:
@@ -224,7 +213,6 @@ PerformanceLimits LimitsForDevice(const std::string& device_name) {
   const DeviceProfile* profile = FindDeviceProfile(device_name);
   if (profile == nullptr) return limits;
   limits.fp32_flops = profile->peak_fp32_flops;
-  limits.fp16_flops = profile->peak_fp16_flops;
   limits.bf16_flops = profile->peak_bf16_flops;
   limits.fp8_flops = profile->peak_fp8_flops;
   limits.bandwidth_bytes_per_second = profile->peak_bandwidth_bytes_per_second;

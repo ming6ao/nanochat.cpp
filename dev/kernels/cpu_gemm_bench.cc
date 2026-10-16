@@ -44,17 +44,9 @@ using nanochat::ComputeType;
 using nanochat::GemmMode;
 using nanochat::GemmParams;
 
-// Build the arithmetic type for this precision configuration. The default and
-// only Phase 0 configuration is fp32, but the fp16 build must still compile.
-ComputeType ToCompute(float value) {
-#if defined(NANOCHAT_PRECISION_FP16)
-  ComputeType out;
-  out.bits = nanochat::FloatToHalfBits(value);
-  return out;
-#else
-  return value;
-#endif
-}
+// Build the arithmetic type for this precision configuration. fp32 is the only
+// build precision.
+ComputeType ToCompute(float value) { return value; }
 
 void Fill(std::vector<ComputeType>& buffer, float value) {
   for (ComputeType& element : buffer) element = ToCompute(value);

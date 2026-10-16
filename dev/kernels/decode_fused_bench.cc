@@ -62,11 +62,7 @@ struct Config {
   int seq_len = 128;  // KV-cache length the decode step attends over
 };
 
-#if defined(NANOCHAT_PRECISION_FP16)
-constexpr cudaDataType_t kGemmType = CUDA_R_16F;
-#else
 constexpr cudaDataType_t kGemmType = CUDA_R_32F;
-#endif
 
 // Row-major C = op(A) * op(B), mirroring backends/cuda/gemm.cu but on the
 // caller's handle/stream so the operation is capturable.

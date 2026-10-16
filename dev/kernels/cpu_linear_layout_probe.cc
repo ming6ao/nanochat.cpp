@@ -44,15 +44,7 @@ using nanochat::ComputeType;
 using nanochat::GemmMode;
 using nanochat::GemmParams;
 
-ComputeType ToCompute(float value) {
-#if defined(NANOCHAT_PRECISION_FP16)
-  ComputeType out;
-  out.bits = nanochat::FloatToHalfBits(value);
-  return out;
-#else
-  return value;
-#endif
-}
+ComputeType ToCompute(float value) { return value; }
 
 void Fill(std::vector<ComputeType>& buffer, float value) {
   for (ComputeType& element : buffer) element = ToCompute(value);

@@ -233,23 +233,9 @@ void CheckAdamWStep1(const Fixture& fixture, const std::string& name, double lr,
 // `kernels::Memcpy` and every read of a parameter/logit goes through a host
 // staging buffer.
 
-template <typename T = ComputeType>
-float AsFloat32(T value) {
-  if constexpr (std::is_same_v<T, float>) {
-    return value;
-  } else {
-    return nanochat::Fp16ToFloat(value);
-  }
-}
+inline float AsFloat32(ComputeType value) { return value; }
 
-template <typename T = ComputeType>
-void StoreFloat(T* dst, float value) {
-  if constexpr (std::is_same_v<T, float>) {
-    *dst = value;
-  } else {
-    *dst = nanochat::Fp16FromFloat(value);
-  }
-}
+inline void StoreFloat(ComputeType* dst, float value) { *dst = value; }
 
 void CopyCompute(const ComputeType* src, std::int64_t count,
                  std::vector<float>* out) {

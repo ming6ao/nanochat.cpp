@@ -36,15 +36,13 @@ struct DeviceProfile {
   std::size_t total_memory_bytes = 0;
 
   bool has_tensor_cores = false;  // fp16/bf16 MMA units
-  bool supports_fp16 = false;
   bool supports_bf16 = false;
 
   // Dense (non-sparse) peak rates. The fp32 rate is the CUDA-core rate; the
-  // fp16/bf16 rates are the tensor-core rates on a device that has them. A
-  // rate of 0 means the device has no path at that precision. The fp8 rate is
-  // the E4M3/E5M2 tensor-core rate (docs/performance-model.md section 6).
+  // bf16 rate is the tensor-core rate on a device that has it. A rate of 0
+  // means the device has no path at that precision. The fp8 rate is the
+  // E4M3/E5M2 tensor-core rate (docs/performance-model.md section 6).
   double peak_fp32_flops = 0.0;
-  double peak_fp16_flops = 0.0;
   double peak_bf16_flops = 0.0;
   double peak_fp8_flops = 0.0;
 

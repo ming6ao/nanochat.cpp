@@ -80,7 +80,6 @@ void RunCase(const QkPrepParams& p) {
   CheckVectorClose(got_dq, ref_dq, 1e-4, "qk bwd dq");
   CheckVectorClose(got_dk, ref_dk, 1e-4, "qk bwd dk");
 
-#if !defined(NANOCHAT_PRECISION_FP16)
   auto loss_at = [&](const std::vector<float>& qv,
                      const std::vector<float>& kv) {
     std::vector<float> qb = qv;
@@ -97,7 +96,6 @@ void RunCase(const QkPrepParams& p) {
   CheckFiniteDifference(
       k0, got_dk, [&](const std::vector<float>& kv) { return loss_at(q0, kv); },
       2e-3, "qk dk");
-#endif
 }
 
 }  // namespace

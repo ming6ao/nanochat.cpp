@@ -22,20 +22,9 @@ using nanochat::kernels::Free;
 using nanochat::kernels::Memcpy;
 using nanochat::kernels::Synchronize;
 
-#if defined(NANOCHAT_PRECISION_FP16)
-ComputeType C(float v) { return nanochat::Fp16FromFloat(v); }
-float U(ComputeType v) { return nanochat::Fp16ToFloat(v); }
-// Recorded fp16 tolerance for a value that has passed through one or two
-// half-rounded elementwise steps. The half ulp near 1.0 is 2^-10 ~= 9.8e-4,
-// so 2e-3 (relative, through CheckClose's (1 + |want|) factor) leaves room for
-// a couple of roundings without hiding a wrong result. The fp32 build keeps
-// the tight 1e-4.
-constexpr double kOutTol = 2e-3;
-#else
 ComputeType C(float v) { return v; }
 float U(ComputeType v) { return v; }
 constexpr double kOutTol = 1e-4;
-#endif
 
 int g_failures = 0;
 

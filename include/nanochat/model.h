@@ -25,8 +25,7 @@ class DataLoader;
 // optimizer. `rows` and `cols` are the trailing matrix extents for parameters
 // that Muon orthogonalizes; `rows == 0` marks a vector/scalar that AdamW owns.
 // Moment buffers belong to the optimizer, not the model. `master` is the fp32
-// master weight; in an fp16 build it is a separate float buffer, and in an fp32
-// build it aliases `value` (docs/model.md).
+// master weight, which aliases `value` in the fp32 build (docs/model.md).
 struct ParamView {
   const char* name = "";
   ComputeType* value = nullptr;

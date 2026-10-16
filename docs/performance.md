@@ -103,8 +103,7 @@ Split the step before you choose a fix:
   (`backends/cuda/kernels/attention_benchmark.cc`).
 - Memory access in the attention tile: uncoalesced key/value loads, a serial
   dot product, and no key/value reuse across query rows.
-- Backward key/value atomics, especially grouped-query attention and the fp16
-  compare-and-swap fallback on Pascal.
+- Backward key/value atomics, especially grouped-query attention on Pascal.
 - GEMM (cuBLAS). Confirm the rate. Do not assume it.
 - QkPrep, Pointwise, Classifier, and Embedding.
 - The optimizer and the global-norm clip.

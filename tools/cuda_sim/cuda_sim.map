@@ -21,6 +21,8 @@ libcudart.so.12 {
     cudaMemset;
     # Device.
     cudaGetDevice;
+    cudaGetDeviceCount;
+    cudaSetDevice;
     cudaGetDeviceProperties_v2;
     cudaGetErrorString;
     cudaGetLastError;

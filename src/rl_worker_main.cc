@@ -50,23 +50,9 @@ using nanochat::RlWorker;
 using nanochat::SchedulerConfig;
 namespace rf = nanochat::rl_fixture;
 
-template <typename T = ComputeType>
-float AsFloat32(T value) {
-  if constexpr (std::is_same_v<T, float>) {
-    return value;
-  } else {
-    return nanochat::Fp16ToFloat(value);
-  }
-}
+inline float AsFloat32(ComputeType value) { return value; }
 
-template <typename T = ComputeType>
-void StoreFloat(T* dst, float value) {
-  if constexpr (std::is_same_v<T, float>) {
-    *dst = value;
-  } else {
-    *dst = nanochat::Fp16FromFloat(value);
-  }
-}
+inline void StoreFloat(ComputeType* dst, float value) { *dst = value; }
 
 std::vector<float> ReadCompute(const ComputeType* src, std::int64_t count) {
   std::vector<ComputeType> host(static_cast<std::size_t>(count));

@@ -17,88 +17,10 @@ namespace nanochat {
 // Precision (docs/build.md)
 // ---------------------------------------------------------------------------
 //
-// Selected at build time by the toolchain (`--config=fp32` / `--config=fp16`,
-// which define NANOCHAT_PRECISION_FP32 / NANOCHAT_PRECISION_FP16). There is one
-// precision per build and no runtime dtype dispatch.
-
-// 16-bit IEEE-754 storage. Bit-compatible with CUDA `__half`, so a backend may
-// reinterpret_cast between Fp16 and the vendor type without a vendor header
-// crossing the seam. Host code converts through FloatToHalf / HalfToFloat.
-struct Fp16 {
-  std::uint16_t bits = 0;
-};
-
-inline bool operator==(Fp16 a, Fp16 b) { return a.bits == b.bits; }
-inline bool operator!=(Fp16 a, Fp16 b) { return a.bits != b.bits; }
-
-// Round-to-nearest-even float -> half. Correct for normals, subnormals, and
-// the inf/NaN encodings.
-inline std::uint16_t FloatToHalfBits(float value) {
-  std::uint32_t bits = 0;
-  std::memcpy(&bits, &value, sizeof(bits));
-  const std::uint32_t sign = (bits >> 16) & 0x8000u;
-  const std::uint32_t magnitude = bits & 0x7fffffffu;
-  if (magnitude >= 0x7f800000u) {  // inf or NaN
-    const std::uint32_t payload = (magnitude > 0x7f800000u) ? 0x0200u : 0u;
-    return static_cast<std::uint16_t>(sign | 0x7c00u | payload);
-  }
-  if (magnitude >= 0x47800000u) {  // overflow (> 65504) rounds to inf
-    return static_cast<std::uint16_t>(sign | 0x7c00u);
-  }
-  if (magnitude < 0x38800000u) {  // subnormal or zero (< 2^-14)
-    const std::uint32_t exponent = (magnitude >> 23) & 0xffu;
-    if (exponent < 103u) return static_cast<std::uint16_t>(sign);
-    std::uint32_t mantissa = (magnitude & 0x7fffffu) | 0x800000u;
-    const int shift = 126 - static_cast<int>(exponent);
-    std::uint32_t half = mantissa >> shift;
-    const std::uint32_t remainder = mantissa & ((1u << shift) - 1u);
-    const std::uint32_t halfway = 1u << (shift - 1);
-    if (remainder > halfway || (remainder == halfway && (half & 1u))) ++half;
-    return static_cast<std::uint16_t>(sign | half);
-  }
-  const std::uint32_t exponent = (magnitude >> 23) & 0xffu;
-  const std::uint32_t mantissa = magnitude & 0x7fffffu;
-  std::uint32_t half = ((exponent - 112u) << 10) | (mantissa >> 13);
-  const std::uint32_t remainder = mantissa & 0x1fffu;
-  if (remainder > 0x1000u || (remainder == 0x1000u && (half & 1u))) ++half;
-  return static_cast<std::uint16_t>(sign | half);
-}
-
-// Half -> float. Exact for every half encoding.
-inline float HalfBitsToFloat(std::uint16_t half) {
-  const std::uint32_t sign = static_cast<std::uint32_t>(half & 0x8000u) << 16;
-  std::uint32_t exponent = (half >> 10) & 0x1fu;
-  std::uint32_t mantissa = half & 0x3ffu;
-  std::uint32_t bits = 0;
-  if (exponent == 0) {
-    if (mantissa == 0) {
-      bits = sign;  // signed zero
-    } else {
-      exponent = 127 - 15 + 1;
-      while ((mantissa & 0x400u) == 0) {
-        mantissa <<= 1;
-        --exponent;
-      }
-      mantissa &= 0x3ffu;
-      bits = sign | (exponent << 23) | (mantissa << 13);
-    }
-  } else if (exponent == 0x1fu) {
-    bits = sign | 0x7f800000u | (mantissa << 13);  // inf / NaN
-  } else {
-    bits = sign | ((exponent - 15 + 127) << 23) | (mantissa << 13);
-  }
-  float value = 0.0f;
-  std::memcpy(&value, &bits, sizeof(value));
-  return value;
-}
-
-inline Fp16 Fp16FromFloat(float value) {
-  Fp16 result;
-  result.bits = FloatToHalfBits(value);
-  return result;
-}
-
-inline float Fp16ToFloat(Fp16 value) { return HalfBitsToFloat(value.bits); }
+// Selected at build time by the toolchain (`--config=fp32`, which defines
+// NANOCHAT_PRECISION_FP32). There is one precision per build and no runtime
+// dtype dispatch. fp32 is the only compute type today; the bf16 compute path is
+// Stage 2 of docs/precision.md.
 
 // 16-bit bfloat16 storage: the upper half of the fp32 bit pattern. It is a
 // storage dtype only, so no compute build maps to it yet (docs/precision.md).
@@ -137,48 +59,31 @@ inline Bf16 Bf16FromFloat(float value) {
 
 inline float Bf16ToFloat(Bf16 value) { return Bf16BitsToFloat(value.bits); }
 
-// The arithmetic type for this build: `float` for fp32, `Fp16` for fp16.
-#if defined(NANOCHAT_PRECISION_FP16) && defined(NANOCHAT_PRECISION_FP32)
-#error "exactly one precision must be selected"
-#elif defined(NANOCHAT_PRECISION_FP16)
-using ComputeType = Fp16;
-#elif defined(NANOCHAT_PRECISION_FP32)
-using ComputeType = float;
-#else
-#error "no precision selected: define NANOCHAT_PRECISION_FP32 or FP16"
+// The arithmetic type for this build. fp32 is the only compute type today.
+#if !defined(NANOCHAT_PRECISION_FP32)
+#error "no precision selected: define NANOCHAT_PRECISION_FP32"
 #endif
+using ComputeType = float;
 
 // Converts between the build compute type and float. A checkpoint load uses
-// these to convert a storage dtype into the compute dtype.
-inline ComputeType ComputeFromFloat(float value) {
-#if defined(NANOCHAT_PRECISION_FP16)
-  return Fp16FromFloat(value);
-#else
-  return value;
-#endif
-}
+// these to convert a storage dtype into the compute dtype. The fp32 compute
+// type needs no conversion; the calls stay for a future compute type.
+inline ComputeType ComputeFromFloat(float value) { return value; }
 
-inline float ComputeToFloat(ComputeType value) {
-#if defined(NANOCHAT_PRECISION_FP16)
-  return Fp16ToFloat(value);
-#else
-  return value;
-#endif
-}
+inline float ComputeToFloat(ComputeType value) { return value; }
 
 // ---------------------------------------------------------------------------
 // Dtype tags and element sizes
 // ---------------------------------------------------------------------------
 
 // The dtype tags. The first three are the container storage codes, so their
-// values are the on-disk contract (docs/precision.md section 5). `kFp16` is
-// compute only: the fp16 simulator build uses it, and the container has no
-// fp16 code.
+// values are the on-disk contract (docs/precision.md section 5). The code 3
+// belonged to `kFp16`. Stage 1 of docs/precision.md retired that tag and keeps
+// the code reserved.
 enum class DType {
   kFp32 = 0,
   kBf16 = 1,
   kInt8 = 2,
-  kFp16 = 3,
 };
 
 inline std::size_t SizeOf(DType dtype) {
@@ -186,7 +91,6 @@ inline std::size_t SizeOf(DType dtype) {
     case DType::kInt8:
       return 1;
     case DType::kBf16:
-    case DType::kFp16:
       return 2;
     case DType::kFp32:
     default:
@@ -215,12 +119,6 @@ struct DTypeTraits<Bf16> {
   static constexpr std::size_t size = 2;
 };
 
-template <>
-struct DTypeTraits<Fp16> {
-  static constexpr DType value = DType::kFp16;
-  static constexpr std::size_t size = 2;
-};
-
 // The storage dtype that backs ComputeType in this build.
 inline constexpr DType kComputeDType = DTypeTraits<ComputeType>::value;
 inline constexpr std::size_t kComputeTypeSize = DTypeTraits<ComputeType>::size;
@@ -242,15 +140,13 @@ struct Caps {
   bool has_cublas = false;        // a batched GEMM library is available
   bool has_tensor_cores = false;  // fp16/bf16 MMA units
   bool supports_fp32 = true;
-  bool supports_fp16 = false;
 
   const char* device_name = "cpu";
 
   // True when the device can run arithmetic at `dtype`. Only the compute
-  // dtypes are meaningful: fp32 and fp16 today. bf16 and int8 are storage
-  // dtypes (docs/precision.md section 5).
+  // dtypes are meaningful: fp32 today. bf16 and int8 are storage dtypes
+  // (docs/precision.md section 5).
   bool Supports(DType dtype) const {
-    if (dtype == DType::kFp16) return supports_fp16;
     if (dtype == DType::kFp32) return supports_fp32;
     return false;
   }

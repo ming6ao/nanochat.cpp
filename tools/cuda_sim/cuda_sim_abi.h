@@ -43,6 +43,7 @@ constexpr cudaError_t kCudaSuccess = 0;
 constexpr cudaError_t kCudaErrorInvalidValue = 1;
 constexpr cudaError_t kCudaErrorInvalidDevicePointer = 17;
 constexpr cudaError_t kCudaErrorInvalidConfiguration = 9;
+constexpr cudaError_t kCudaErrorInvalidDevice = 10;
 constexpr cudaError_t kCudaErrorInvalidResourceHandle = 33;
 
 // The attribute `gemm.cu`'s neighbours would set before a >48 KB launch. The
@@ -102,6 +103,8 @@ cudaError_t cudaMemcpy(void* dst, const void* src, std::size_t bytes,
                        cudaMemcpyKindAbi kind);
 cudaError_t cudaMemset(void* pointer, int value, std::size_t bytes);
 cudaError_t cudaGetDevice(int* device);
+cudaError_t cudaGetDeviceCount(int* count);
+cudaError_t cudaSetDevice(int device);
 cudaError_t cudaGetDeviceProperties_v2(cudaDevicePropPrefix* prop, int device);
 const char* cudaGetErrorString(cudaError_t status);
 cudaError_t cudaGetLastError(void);

@@ -24,8 +24,7 @@ suites are:
 
 ```bash
 # Everything: oracle, training parity, API, collective, emulated kernels,
-# profile consistency. A numerical run defaults to fp32; the compile gate uses
-# the device's named target (h200 is fp16).
+# profile consistency. Every run is fp32 (docs/precision.md).
 tools/nanochat simulate --device h100
 tools/nanochat simulate --device h200
 
@@ -47,14 +46,9 @@ computed by the CPU reference loops. `//tests:sim_numerics_test` asserts that
 the caps change and the numerics do not, so a profile can never silently move a
 result.
 
-The half-storage path is explicit: `--precision fp16` adds `--config=fp16`.
-The committed oracle and training-parity fixtures are the fp32 CPU case, and the
-fp16 CPU build records its own looser tolerance, so the fp16 *correctness* suite
-is expected to diverge from the fp32 fixture -- a pre-existing property of the
-fp16 reference backend, not of the simulator. The fp16 profile is still
-exercised: `//tests:sim_numerics_test` runs in both precisions and asserts that
-the profile changes the caps and not a single value. `//tests:numerics_trace_test`
-skips on an fp16 build, because the numeric trace covers fp32 only
+fp32 is the only precision (docs/precision.md): the simulator runs the
+reference engine once, and every suite compares against the committed fp32
+fixtures. The numeric trace covers fp32 only
 (`docs/numerics-integration.md` section 6.2).
 
 The collective mock rendezvouses through POSIX shared memory and bounds its
@@ -131,7 +125,7 @@ Each generator keeps its own fixture format and runtime requirements.
 `tests/debug_state.bin` is produced offline by nanochat's `gpt.py` (see
 [model.md](model.md)). `tests/oracle_test.cc` compares logits, loss, and
 gradients, then runs a few optimizer steps and matches losses. Tolerances are
-per backend: fp32 CUDA ~1e-5; the fp16 storage test is looser.
+per backend: fp32 CUDA ~1e-5.
 
 The multi-step trajectory is a strict gate (loss `1e-5`, parameter `1e-4`).
 `tools/dump_training_fixtures.py oracle` records the AdamW `eps` it used as

@@ -165,8 +165,7 @@ stored value to the build compute dtype.
 | 1 | bf16 | 2 bytes | in use |
 | 2 | int8 | 1 byte | reserved |
 
-There is no fp16 code. The fp16 compute build stays for the simulator. That
-build stores fp32 or bf16.
+There is no fp16 code. The container stores fp32 or bf16 (docs/precision.md).
 
 The C values are `DType::kFp32`, `DType::kBf16`, and `DType::kInt8` in
 `include/nanochat/tensor.h`. A host tool enumerates them through

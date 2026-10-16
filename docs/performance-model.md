@@ -199,7 +199,6 @@ fp8 rate. Add these two fields:
 ```cpp
 // Dense (non-sparse) peak rates and the peak HBM bandwidth.
 double peak_fp32_flops = 0.0;   // exists
-double peak_fp16_flops = 0.0;   // exists
 double peak_bf16_flops = 0.0;   // exists
 double peak_fp8_flops = 0.0;    // new
 double peak_bandwidth_bytes_per_second = 0.0;  // new
@@ -207,13 +206,13 @@ double peak_bandwidth_bytes_per_second = 0.0;  // new
 
 Fill the fp8 rate for Hopper and Ada. Fill the bandwidth for every entry.
 
-| Device | fp32 | fp16 and bf16 | fp8 | Bandwidth | bf16 ridge point |
+| Device | fp32 | bf16 | fp8 | Bandwidth | bf16 ridge point |
 |---|---:|---:|---:|---:|---:|
 | h200 | 67.0 TFLOP/s | 989 TFLOP/s | 1,979 TFLOP/s | 4.8 TB/s | 206 FLOP/byte |
 | h100 | 66.9 TFLOP/s | 989 TFLOP/s | 1,979 TFLOP/s | 3.35 TB/s | 295 FLOP/byte |
 | a100 | 19.5 TFLOP/s | 312 TFLOP/s | 0 | 2.0 TB/s | 156 FLOP/byte |
-| t4 | 8.1 TFLOP/s | 65 TFLOP/s | 0 | 320 GB/s | 203 FLOP/byte |
-| gtx1080ti | 11.34 TFLOP/s | 0.177 TFLOP/s | 0 | 484 GB/s | none |
+| t4 | 8.1 TFLOP/s | 0 | 0 | 320 GB/s | none |
+| gtx1080ti | 11.34 TFLOP/s | 0 | 0 | 484 GB/s | none |
 
 The ridge point is the rate divided by the bandwidth. It decides which limit
 binds. Section 7 uses it.

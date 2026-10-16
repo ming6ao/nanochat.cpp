@@ -15,7 +15,7 @@
 //   * Every tensor is dense row-major unless a parameter says otherwise.
 //   * Token ids and targets are `int` (one per row) and live on the host.
 //   * Norm statistics (`rstd`), optimizer moments, and master weights are
-//     `float` even in an fp16 build (docs/build.md).
+//     `float` on every device (docs/build.md).
 
 namespace nanochat {
 
@@ -251,10 +251,8 @@ void EmbeddingBackward(int tokens, int dim, const int* ids,
                        const ComputeType* dout, ComputeType* dtable);
 
 // The optimizer updates the fp32 master weight and writes the compute copy
-// (`ComputeType`) beside it. In an fp16 build the master is a separate float
-// buffer, so a fine update survives; in the fp32 build the caller passes the
-// same buffer for `master` and `value`. Master weights are float even in an
-// fp16 build (docs/model.md).
+// (`ComputeType`) beside it. The fp32 build passes one buffer for `master` and
+// `value`, so the pointer aliases the parameter (docs/model.md).
 void AdamWUpdate(int n, const AdamWParams& params, float* master,
                  ComputeType* value, const ComputeType* g, float* m, float* v);
 

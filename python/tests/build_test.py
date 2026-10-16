@@ -68,19 +68,13 @@ class BuildOptionsTest(unittest.TestCase):
 
     def test_from_env_reads_the_environment(self) -> None:
         os.environ["NANOCHAT_CPP_BACKEND"] = "cuda"
-        os.environ["NANOCHAT_CPP_PRECISION"] = "fp16"
+        os.environ["NANOCHAT_CPP_PRECISION"] = "fp32"
         os.environ["NANOCHAT_CUDA_ARCH"] = "sm_75"
         options = _build.BuildOptions.from_env()
         self.assertEqual(options.backend, "cuda")
-        self.assertEqual(options.precision, "fp16")
+        self.assertEqual(options.precision, "fp32")
         self.assertEqual(options.arch, "sm_75")
         self.assertEqual(options.cache, _build.cache_dir())
-
-    def test_key_changes_with_precision(self) -> None:
-        fp32 = _build.BuildOptions.resolve(precision="fp32")
-        fp16 = _build.BuildOptions.resolve(precision="fp16")
-        self.assertNotEqual(_build.build_key(options=fp32),
-                            _build.build_key(options=fp16))
 
     def test_key_changes_with_arch(self) -> None:
         sm75 = _build.BuildOptions.resolve(arch="sm_75")
@@ -93,9 +87,9 @@ class BuildOptionsTest(unittest.TestCase):
         os.environ["NANOCHAT_CPP_PRECISION"] = "fp32"
         os.environ["NANOCHAT_CUDA_ARCH"] = "sm_61"
         options = _build.BuildOptions.resolve(
-            backend=" CUDA ", precision="FP16", arch="sm_75")
+            backend=" CUDA ", precision="FP32", arch="sm_75")
         self.assertEqual(options.backend, "cuda")
-        self.assertEqual(options.precision, "fp16")
+        self.assertEqual(options.precision, "fp32")
         self.assertEqual(options.arch, "sm_75")
         self.assertNotEqual(_build.build_key(options=options),
                             _build.build_key(
@@ -115,7 +109,7 @@ class BuildOptionsTest(unittest.TestCase):
 
     def test_no_argument_key_equals_the_environment_key(self) -> None:
         os.environ["NANOCHAT_CPP_BACKEND"] = "cuda"
-        os.environ["NANOCHAT_CPP_PRECISION"] = "fp16"
+        os.environ["NANOCHAT_CPP_PRECISION"] = "fp32"
         os.environ["NANOCHAT_CUDA_ARCH"] = "sm_75"
         self.assertEqual(
             _build.build_key(),
@@ -130,16 +124,11 @@ class BuildCommandTest(unittest.TestCase):
         self.assertIn("--config=cuda", command)
         self.assertIn("--@rules_cuda//cuda:archs=sm_75", command)
 
-    def test_cuda_fp16_request_raises(self) -> None:
+    def test_fp16_request_raises(self) -> None:
         options = _build.BuildOptions.resolve(
             backend="cuda", precision="fp16", arch="sm_75")
         with self.assertRaises(_build.BuildError):
             _build._build_command(Path("tools/nanochat"), options)
-
-    def test_cpu_fp16_maps_to_the_fp16_config(self) -> None:
-        options = _build.BuildOptions.resolve(backend="cpu", precision="fp16")
-        command = _build._build_command(Path("tools/nanochat"), options)
-        self.assertIn("--config=fp16", command)
 
     def test_cpu_command_has_no_arch_flag(self) -> None:
         options = _build.BuildOptions.resolve(backend="cpu", arch="sm_75")

@@ -247,8 +247,7 @@ cc_test(
 )
 
 # T1 GPU correctness with a float reference for the elementwise/norm and
-# attention families, run in both the fp32 and fp16 builds. The fp16 half is
-# what pins the recorded tolerance and the Pascal atomics on sm_61.
+# attention families at the fp32 build precision.
 cc_test(
     name = "precision_gpu_test",
     srcs = ["precision_test.cc"],

@@ -54,8 +54,8 @@ These facts shape the plan. I verified each one on the development host.
   `backends/cuda/device.h`.
 - `GetCaps()` in `backends/cuda/device.cu` maps `cudaDeviceProp` to `Caps`.
   `GetCaps()` in `backends/cpu/kernels.cc` reports the CPU reference.
-- The tensor-core rule is `major >= 7`. The fp16 rule is `sm_53` or newer.
-  Hopper reports `major == 9`, so both rules already include it.
+- The tensor-core rule is `major >= 7`. Hopper reports `major == 9`, so the
+  rule already includes it.
 - `backends/cuda/gemm.cu` uses `CUBLAS_GEMM_DEFAULT_TENSOR_OP` and the
   `cublasGemmAlgo_t` type. Both are legacy since CUDA 11.0. The fp32 path uses
   `CUBLAS_GEMM_DEFAULT` and `cublasSgemm`, so no algorithm enum reaches Hopper.
@@ -126,12 +126,9 @@ still runs on the CPU.
 # The oracle and the training trajectory on a simulated H100, fp32.
 tools/nanochat simulate --device h100 --precision fp32 --suite correctness
 
-# The same on an H200. A numerical run defaults to fp32: the committed fixtures
-# are the fp32 CPU case, so the fp16 correctness suite diverges from the fp32
-# oracle fixture for reasons that predate the simulator (see docs/testing.md).
-# The half-storage path is still covered, by //tests:sim_numerics_test in the
-# fp16 build and by `--device h200 --mode compile`.
-tools/nanochat simulate --device h200 --precision fp32 --suite correctness
+# The same on an H200. fp32 is the only precision (docs/precision.md), so every
+# run matches the committed fp32 fixtures.
+tools/nanochat simulate --device h200 --suite correctness
 ```
 
 ### 4.2 What the reference engine validates
@@ -142,12 +139,10 @@ tools/nanochat simulate --device h200 --precision fp32 --suite correctness
 - The finite-difference gradient check for every kernel family.
 - The capability gates: the precision gate, the workspace sizing, and the MFU
   computation.
-- The fp16 storage path, when the build selects fp16 (see the precision note in
-section 4.1's command list).
 
-The precision matters. The CPU backend compiles with `ComputeType = Fp16` under
-`--config=fp16`. It then rounds storage to half and computes in float. So the
-simulator exercises half-storage numerics for the fp16 profile.
+fp32 is the only precision. The CPU backend compiles with `ComputeType = float`
+(docs/precision.md), so the simulated profile changes the caps and never a
+value.
 
 ### 4.3 What the reference engine does not validate
 
@@ -209,7 +204,7 @@ in-process unit test of the mock, not a binding test.)
 | Family | Symbols | Production use |
 |---|---|---|
 | Memory | `cudaMalloc`, `cudaFree`, `cudaMemcpy`, `cudaMemset` | yes |
-| Device | `cudaGetDevice`, `cudaGetDeviceProperties_v2`, `cudaGetErrorString`, `cudaGetLastError`, `cudaDeviceSynchronize` | yes |
+| Device | `cudaGetDevice`, `cudaGetDeviceCount`, `cudaSetDevice`, `cudaGetDeviceProperties_v2`, `cudaGetErrorString`, `cudaGetLastError`, `cudaDeviceSynchronize` | yes |
 | Launch | `cudaLaunchKernel`, `cudaFuncSetAttribute`, `__cudaRegisterFatBinary`, `__cudaRegisterFatBinaryEnd`, `__cudaUnregisterFatBinary`, `__cudaRegisterFunction` | yes |
 | cuBLAS | `cublasCreate_v2`, `cublasSgemm_v2`, `cublasGemmStridedBatchedEx`, `cublasGetStatusString` | yes |
 | Streams | `cudaStreamCreate`, `cudaStreamDestroy`, `cudaStreamSynchronize`, `cudaStreamBeginCapture`, `cudaStreamEndCapture` | reserved |
@@ -233,7 +228,7 @@ the CUDA API rules.
 | Launch limits | `blockDim` is within the profile limit. Grid dimensions are positive. |
 | Shared memory | The dynamic size is within the profile limit. A size above 48 KB needs the device attribute. |
 | Attribute order | A large-shared-memory launch must follow the matching `cudaFuncSetAttribute` call. |
-| cuBLAS compute type | fp16 on a tensor-core device uses `CUBLAS_COMPUTE_32F`. A Pascal-only path must not appear. |
+| cuBLAS compute type | A GEMM on a tensor-core device must accumulate with `CUBLAS_COMPUTE_32F`. A Pascal-only compute type must not appear. |
 | Legacy cuBLAS | The interposer reports `CUBLAS_GEMM_DEFAULT_TENSOR_OP` and `cublasGemmAlgo_t` as legacy. |
 | Transpose and leading dimension | The `lda`, `ldb`, and `ldc` values are consistent with the transpose flags. |
 | Handle order | `cublasCreate` runs before any cuBLAS call. A destroyed handle is not reused. |
@@ -333,8 +328,8 @@ wire protocol that the real pattern must follow.
 ## 7. Part 4: device profile table
 
 The profile table holds one entry per target. Each entry records the name, the
-compute capability, the memory size, the tensor-core flag, the fp16 and bf16
-flags, and the peak rates.
+compute capability, the memory size, the tensor-core flag, the bf16 flag, and
+the peak rates.
 
 Path: `include/nanochat/device_profile.h` and `src/device_profile.cc`.
 The header is additive and architect-owned.
@@ -346,7 +341,8 @@ The consistency test is objective:
 
 - The join key is the lowercased device name.
 - The test matches a profile name against the `PeakFlopsForDevice` patterns.
-- The test asserts equal fp32 and fp16 peak rates for every shared entry.
+- The test asserts that the MFU rate equals the profile peak at the precision
+  the MFU table models.
 - The test asserts that every profile name resolves to one MFU entry.
 
 `PeakFlopsForDevice` stays the authority for the MFU string patterns. The
@@ -365,7 +361,7 @@ profile.
 The compile gate is secondary. It needs no interposer and no GPU.
 
 - New `.bazelrc` configs: `h100` (`sm_90`, fp32, cuda) and `h200` (`sm_90`,
-  fp16, cuda).
+  fp32, cuda).
 - `tools/nanochat simulate --device h100 --mode compile` builds
   `//backends/cuda:all_kernels` and the host graph for that architecture.
 - The gate holds the build lock. It takes no GPU broker.
@@ -394,8 +390,8 @@ tests the arithmetic of the `.cu` kernels. The emulation engine closes that gap.
 ### 9.1 Mechanism
 
 - A host execution header maps the CUDA subset to C++
-  (`tools/cuda_sim/emu/cuda_emu.h`, with the stub `<cuda_runtime.h>`,
-  `<cuda_fp16.h>`, and `<math_constants.h>` beside it).
+  (`tools/cuda_sim/emu/cuda_emu.h`, with the stub `<cuda_runtime.h>` and
+  `<math_constants.h>` beside it).
 - The build compiles the `backends/cuda/kernels/*.cu` sources with the host
   compiler and the header (`//tools/cuda_sim/emu:emulated_kernels`). A genrule
   copies each `.cu` to a `.cc` name, because Bazel's C++ rules do not accept a
@@ -533,8 +529,8 @@ the Architect / Integrator row.
 
 ### 12.1 Reference engine
 
-1. `//tests:oracle_test` passes under `--config=sim` for fp32 and fp16.
-2. `//tests:train_parity_test` passes under `--config=sim` for fp32 and fp16.
+1. `//tests:oracle_test` passes under `--config=sim` at fp32.
+2. `//tests:train_parity_test` passes under `--config=sim` at fp32.
 3. The finite-difference checks pass under `--config=sim`.
 4. The reference engine gives identical values with and without the profile
    override.
@@ -556,8 +552,8 @@ the Architect / Integrator row.
    - No pointer value appears in the assertion.
 9. A synthetic interposer test issues a 64 KB launch with no attribute. The
    check must fail.
-10. The legacy-enum case builds with `--config=cuda --config=fp16` under a
-    simulated tensor-core profile. The interposer then reports the legacy enum.
+10. The legacy-enum case builds with `--config=cuda` under a simulated
+    tensor-core profile. The interposer then reports the legacy enum.
 
 ### 12.3 Collective and kernel
 
@@ -568,7 +564,7 @@ the Architect / Integrator row.
 12. The collective deadlock check fails when one rank skips the all-reduce, and
     the coordinator rejects an unclosed group and an oversized buffer range.
 13. The emulated kernel matches the CPU reference kernel within tolerance.
-14. The compile gate passes for `sm_90` in fp32 and fp16.
+14. The compile gate passes for `sm_90` at fp32.
 
 ## 13. Phasing
 

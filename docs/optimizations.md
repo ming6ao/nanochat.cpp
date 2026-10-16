@@ -682,9 +682,8 @@ template <typename T>
 __device__ __forceinline__ void StorePackedStreaming(T* p, Packed<T> v);
 ```
 
-The fp32 build packs four elements. The fp16 build packs eight elements. The
-same helper serves both. The load and the store use a `reinterpret_cast` to
-`int4`, as `llm.c` does.
+The fp32 build packs four elements. The load and the store use a
+`reinterpret_cast` to `int4`, as `llm.c` does.
 
 #### 4.2 The streaming hint
 

@@ -80,7 +80,6 @@ void RunCase(int rows, int vocab, int padded, bool use_ignore,
     }
   }
 
-#if !defined(NANOCHAT_PRECISION_FP16)
   auto loss_at = [&](const std::vector<float>& lv) {
     const std::vector<float> l = ClassifierForward(p, lv, targets);
     double loss = 0.0;
@@ -89,7 +88,6 @@ void RunCase(int rows, int vocab, int padded, bool use_ignore,
   };
   CheckFiniteDifference(logits, got, loss_at, 3e-3,
                         (std::string(name) + " dlogits").c_str());
-#endif
 }
 
 // Weighted, masked backward: a non-null `row_scale` multiplies every row
@@ -152,7 +150,6 @@ void RunWeightedCase(int rows, int vocab, int padded, bool use_ignore,
     }
   }
 
-#if !defined(NANOCHAT_PRECISION_FP16)
   auto weighted_loss_at = [&](const std::vector<float>& lv) {
     const std::vector<float> l = ClassifierForward(ref_params, lv, targets);
     double loss = 0.0;
@@ -161,7 +158,6 @@ void RunWeightedCase(int rows, int vocab, int padded, bool use_ignore,
   };
   CheckFiniteDifference(logits, got, weighted_loss_at, 3e-3,
                         (std::string(name) + " dlogits").c_str());
-#endif
 }
 
 }  // namespace

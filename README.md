@@ -106,7 +106,7 @@ run bound.
 
 - `--device` selects a device profile: `h100`, `h200`, `a100`, `t4`, or
   `gtx1080ti`.
-- `--precision` selects the build precision: `fp32`, `fp16`, `bf16`, `fp8`, or
+- `--precision` selects the modeled precision: `fp32`, `bf16`, `fp8`, or
   `auto`. The `fp8` tier applies the fp8 conversion rule in
   [docs/performance-model.md](docs/performance-model.md) section 5.1.
 - `--batch`, `--grad-accum`, and `--devices` set the training plan.

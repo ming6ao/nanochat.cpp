@@ -33,7 +33,7 @@ void Usage() {
       stderr,
       "usage: roofline_main [options]\n"
       "  --device NAME          device profile (default h100)\n"
-      "  --precision P          fp32|fp16|bf16|fp8, or auto (default auto)\n"
+      "  --precision P          fp32|bf16|fp8, or auto (default auto)\n"
       "  --batch N              micro-batch per device (default 1)\n"
       "  --grad-accum N         micro-batches per step (default 1)\n"
       "  --devices N            data-parallel world size (default 1)\n"
@@ -61,8 +61,6 @@ bool ParsePrecision(const std::string& name, nanochat::ComputePrecision* out) {
   using nanochat::ComputePrecision;
   if (name == "fp32") {
     *out = ComputePrecision::kFp32;
-  } else if (name == "fp16") {
-    *out = ComputePrecision::kFp16;
   } else if (name == "bf16") {
     *out = ComputePrecision::kBf16;
   } else if (name == "fp8") {

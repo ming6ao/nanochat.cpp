@@ -356,12 +356,10 @@ nanochat_status nanochat_init(void) {
     // instead of failing inside the first kernel launch (docs/build.md).
     const nanochat::Caps caps = nanochat::kernels::GetCaps();
     if (!caps.Supports(nanochat::kComputeDType)) {
-      const char* precision =
-          nanochat::kComputeDType == nanochat::DType::kFp16 ? "fp16" : "fp32";
       SetLastError(
           "nanochat_init",
           std::string("the device does not support the build ") +
-              "precision (" + precision + "): " +
+              "precision (fp32): " +
               (caps.device_name != nullptr ? caps.device_name : "unknown"));
       return NANOCHAT_STATUS_ERROR;
     }

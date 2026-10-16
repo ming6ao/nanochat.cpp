@@ -27,30 +27,11 @@ using nanochat::kernels::Memcpy;
 using nanochat::kernels::Memset;
 using nanochat::kernels::Synchronize;
 
-#if defined(NANOCHAT_PRECISION_FP16)
-float ToFloat(nanochat::Fp16 value) { return nanochat::Fp16ToFloat(value); }
-#else
 float ToFloat(float value) { return value; }
-#endif
 
-ComputeType FromFloat(float value) {
-#if defined(NANOCHAT_PRECISION_FP16)
-  return nanochat::Fp16FromFloat(value);
-#else
-  return value;
-#endif
-}
+ComputeType FromFloat(float value) { return value; }
 
-#if defined(NANOCHAT_PRECISION_FP16)
-// Recorded fp16 GEMM tolerance. cuBLAS on Pascal (sm_61) has no fp32-compute
-// half path and runs native HGEMM (fp16 accumulation), so the sum over k
-// rounds per term; Volta+ uses the fp32-accumulating tensor-op path. The
-// reference itself accumulates in fp32, and the observed worst case over
-// these tiny shapes is well inside 1e-2.
-constexpr float kTolerance = 1e-2f;
-#else
 constexpr float kTolerance = 1e-3f;
-#endif
 
 double g_worst_error = 0.0;
 

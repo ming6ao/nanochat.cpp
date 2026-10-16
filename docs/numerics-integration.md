@@ -404,11 +404,11 @@ per-merge GPU budget in [AGENTS.md](../AGENTS.md) section 5.5.
 - Missing code blocks full SFT and full RL coverage.
 - The 11 GB card and the 5 GiB sandbox cap bound the sequence length and the
   vocabulary. Keep `seq_len` at or below 256.
-- The golden file depends on the pinned host thread count and on the tokenizer
-  artifact of the evaluation phase. Regenerate it with
-  `python3 tools/dump_runtime_fixtures.py numerics` after a change to either one.
-- The trace covers fp32 only. An fp16 build must not replay the golden, and the
-test stops with that message.
+- The golden file depends on the pinned host thread count, on the tokenizer
+  artifact of the evaluation phase, and on the eval forward path. Regenerate it
+  with `python3 tools/dump_runtime_fixtures.py numerics` after a change to any
+  one of them.
+- The trace covers fp32 only, the only build precision (docs/precision.md).
 
 ## 10. Open questions
 

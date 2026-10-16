@@ -3,7 +3,6 @@
 
 #include <cmath>
 #include <cstdint>
-#include <type_traits>
 
 #include "nanochat/kernels.h"
 #include "nanochat/tensor.h"
@@ -31,23 +30,11 @@ constexpr float kQkScale = 1.2f;
 constexpr int kVeGateChannels = 12;
 constexpr int kSmearChannels = 24;
 
-template <typename T>
-inline float AsF(T value) {
-  if constexpr (std::is_same_v<T, float>) {
-    return value;
-  } else {
-    return Fp16ToFloat(value);
-  }
-}
+// The storage <-> float boundary for the compute type. fp32 is the only
+// compute type today, so both directions are the identity.
+inline float AsF(ComputeType value) { return value; }
 
-template <typename T = ComputeType>
-inline T ToC(float value) {
-  if constexpr (std::is_same_v<T, float>) {
-    return value;
-  } else {
-    return Fp16FromFloat(value);
-  }
-}
+inline ComputeType ToC(float value) { return value; }
 
 inline float Sigmoid(float x) { return 1.0f / (1.0f + std::exp(-x)); }
 

@@ -127,7 +127,7 @@ Selection is a build/link choice:
 
 ```
 --backend=cpu|cuda        link the backend library
---precision=fp32|fp16     select ComputeType (fp16 is test-only)
+--precision=fp32          select ComputeType
 --arch=sm_61|sm_75|sm_90  CUDA --generate-code
 ```
 
@@ -154,11 +154,12 @@ about GPT.
 
 ## Precision
 
-`-DNANOCHAT_PRECISION=FP32|FP16` selects `using ComputeType = ...;` at build
+`-DNANOCHAT_PRECISION=FP32` selects `using ComputeType = float;` at build
 time. One precision per build; no runtime dtype dispatch.
 
 - Pascal (sm_61), Turing (sm_75), and the CPU: fp32.
-- The fp16 build is test-only. It serves the simulator.
+- fp32 is the only precision. The fp16 build and its half-storage path are
+  removed ([precision.md](precision.md)).
 - The backend reports supported dtypes via `GetCaps()`; an invalid combination
   fails fast at startup.
 
@@ -188,14 +189,11 @@ new backend directory is necessary.
 | Feature | Pascal sm_61 | Turing sm_75 |
 |---|---|---|
 | fp32 arithmetic | yes | yes |
-| fp16 storage | software | native `__half` |
-| fp16 tensor cores | no | yes |
-| `__half` atomic add | fallback loop | native, sm_70 and newer |
-| cuBLAS fp16 path | HGEMM, 16F compute | tensor-op, 32F compute |
 | `mma` instructions | no | yes |
 
 `GetCaps()` reports the differences. `caps.has_tensor_cores` is true for
-`major >= 7`. `caps.supports_fp16` is true for sm_53 and newer.
+`major >= 7`. Turing has fp16 tensor cores, but no build uses them
+([precision.md](precision.md)); the T4 runs fp32.
 
 ### 3. Build configuration
 
@@ -208,16 +206,13 @@ The `t4` config includes `--config=cuda`. The `t4` build uses the fp32 GEMM
 path on this card.
 
 The T4 build uses fp32. The fp32 build is the correctness gate and the default
-Kaggle build. The Turing hardware supports fp16, but Stage 1 does not use it
+Kaggle build. The Turing hardware supports fp16, but no build uses it
 ([precision.md](precision.md)). Stage 1 removed the separate `t4-fp32` config.
 
 ### 4. GEMM behavior
 
-`backends/cuda/gemm.cu` selects the compute type from the device capability.
-The `t4` build uses the classic `cublasSgemm` path for a single GEMM. On sm_75
-an fp16 build still uses `CUBLAS_GEMM_DEFAULT_TENSOR_OP` with
-`CUBLAS_COMPUTE_32F`, and the accumulation stays in fp32. That path is
-test-only. It serves the simulator.
+`backends/cuda/gemm.cu` uses fp32 accumulation on every device. The `t4` build
+uses the classic `cublasSgemm` path for a single GEMM.
 
 The host graph and the optimizer state stay fp32 wherever the seam requires
 it. See the precision section above.
@@ -239,14 +234,13 @@ it must beat the current kernel at the training shape.
 | T2 | `//tests:train_parity_cuda_test` | fp32 |
 | T3 | `//backends/cuda/kernels:attention_benchmark` | fp32 |
 
-The CUDA `precision_gpu_test` target is precision-parameterized: it compiles
-in the fp32 build and the fp16 build. The T4 gate runs the fp32 build with the
-recorded fp32 tolerance. The fp16 leg stays test-only. It covers the fp16
-storage path on sm_61. Measure the worst error again and record the new value
-in `precision_test.cc`. Do not widen the tolerance without a measurement.
+The CUDA `precision_gpu_test` target builds at the fp32 precision only. The T4
+gate runs the fp32 build with the recorded fp32 tolerance. Measure the worst
+error again and record the new value in `precision_test.cc`. Do not widen the
+tolerance without a measurement.
 
-Extend `//backends/cuda:cuda_runtime_gpu_test` to assert three things on
-sm_75: the device name, `has_tensor_cores`, and `supports_fp16`.
+Extend `//backends/cuda:cuda_runtime_gpu_test` to assert two things on sm_75:
+the device name and `has_tensor_cores`.
 
 ### 7. Two cards
 

@@ -30,14 +30,8 @@ using nanochat::dev::optimref::AnvilUpdate;
 
 // The device stores ComputeType, so the reference consumes the same stored
 // values the device does and the tolerance measures only the kernel arithmetic,
-// not the input conversion. fp32 keeps the tight 1e-5; fp16 stores the working
-// matrix as half, and the recorded tolerance covers the half-ulp rounding
-// (2^-11 ~ 4.9e-4) that the cascade and the equalizer propagate.
-#if defined(NANOCHAT_PRECISION_FP16)
-constexpr double kTol = 3e-3;
-#else
+// not the input conversion.
 constexpr double kTol = 1e-5;
-#endif
 
 // The per-matrix lane count implied by the CPU reference's `red_dim` rule.
 int LaneCount(int rows, int cols, int red_dim) {

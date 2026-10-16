@@ -18,13 +18,8 @@
 namespace nanochat {
 namespace dev {
 
-#if defined(NANOCHAT_PRECISION_FP16)
-inline ComputeType C(float v) { return Fp16FromFloat(v); }
-inline float U(ComputeType v) { return Fp16ToFloat(v); }
-#else
 inline ComputeType C(float v) { return v; }
 inline float U(ComputeType v) { return v; }
-#endif
 
 inline std::vector<ComputeType> ToStorage(const std::vector<float>& v) {
   std::vector<ComputeType> out(v.size());
@@ -127,9 +122,8 @@ struct DevBuf {
   }
 };
 
-#if !defined(NANOCHAT_PRECISION_FP16)
 // Central finite difference of a scalar loss over x, compared against an
-// analytic gradient. fp32 only: fp16 storage cannot resolve the perturbation.
+// analytic gradient.
 template <typename LossFn>
 void CheckFiniteDifference(const std::vector<float>& x0,
                            const std::vector<float>& analytic, LossFn loss_at,
@@ -153,16 +147,6 @@ void CheckFiniteDifference(const std::vector<float>& x0,
   }
   std::printf("  finite-diff %-14s max abs error %.3g\n", what, worst);
 }
-#else
-// fp16 storage cannot resolve the finite-difference perturbation, so the check
-// is skipped (docs/testing.md). Provide the symbol so the family tests that
-// import it still compile under `--config=fp16`.
-template <typename LossFn>
-void CheckFiniteDifference(const std::vector<float>&, const std::vector<float>&,
-                           LossFn, double, const char* what) {
-  std::printf("  finite-diff %-14s skipped (fp16 build)\n", what);
-}
-#endif
 
 }  // namespace dev
 }  // namespace nanochat

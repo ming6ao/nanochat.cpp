@@ -270,8 +270,9 @@ double PeakFlopsForDevice(const std::string& device_name) {
       {{"h100"}, 989e12},
       {{"h800", "nvl"}, 989e12},
       {{"h800"}, 756e12},
-      // NVIDIA Turing
-      {{"t4"}, 65e12},
+      // NVIDIA Turing. The T4 has no bf16 and the build runs fp32, so the MFU
+      // denominator is the fp32 rate (docs/precision.md).
+      {{"t4"}, 8.1e12},
       // NVIDIA Ampere data center
       {{"a100"}, 312e12},
       {{"a800"}, 312e12},
@@ -327,8 +328,6 @@ double PeakFlopsForCompute(const std::string& device_name,
   switch (precision) {
     case ComputePrecision::kFp32:
       return profile->peak_fp32_flops;
-    case ComputePrecision::kFp16:
-      return profile->peak_fp16_flops;
     case ComputePrecision::kBf16:
       return profile->peak_bf16_flops;
     case ComputePrecision::kFp8:
@@ -380,18 +379,8 @@ void CollectModelRecords(const Model& model, Checkpoint* checkpoint) {
     }
     const std::size_t count = static_cast<std::size_t>(view.count);
     std::vector<float> floats(count);
-    if (kComputeDType == DType::kFp32) {
-      kernels::Memcpy(floats.data(), view.value, count * sizeof(float),
-                      CopyDir::kDeviceToHost);
-    } else {
-      // An fp16 build stores fp32, so the record stays portable.
-      std::vector<ComputeType> compute(count);
-      kernels::Memcpy(compute.data(), view.value, count * sizeof(ComputeType),
-                      CopyDir::kDeviceToHost);
-      for (std::size_t i = 0; i < count; ++i) {
-        floats[i] = ComputeToFloat(compute[i]);
-      }
-    }
+    kernels::Memcpy(floats.data(), view.value, count * sizeof(float),
+                    CopyDir::kDeviceToHost);
     record.data.resize(count * sizeof(float));
     std::memcpy(record.data.data(), floats.data(), record.data.size());
     checkpoint->Add(std::move(record));

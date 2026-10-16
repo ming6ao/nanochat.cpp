@@ -277,9 +277,8 @@ The arena contains three groups:
 | Backward and global scratch | `dx_*`, `g_a_`, `g_b_`, `block_scratch_` | `33 * R * hidden` |
 
 Here `R` is `batch * seq`. For `R = 32768`, `hidden = 768`, `L = 12`, and
-`padded_vocab = 32768`, the total is about 36 GB in fp32. The fp16 storage test
-halves that value, but the fp16 build is test-only ([precision.md](precision.md)).
-The 11 GB card cannot hold either value.
+`padded_vocab = 32768`, the total is about 36 GB in fp32. The 11 GB card cannot
+hold it.
 
 ### 3. Mechanism
 
@@ -458,4 +457,5 @@ source runs the CPU reference backend or the CUDA backend.
 - Chunking changes the summation order. Keep the host sum in `double`.
 - Two arenas use more total memory than one arena. The model holds both only
   when the caller uses both modes.
-- The fp16 storage test needs no change. The mode and the chunk logic use no dtype.
+- The storage precision does not change. The mode and the chunk logic use no
+  dtype.

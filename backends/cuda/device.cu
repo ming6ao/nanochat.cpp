@@ -98,14 +98,9 @@ Caps GetCaps() {
   caps.compute_major = props.major;
   caps.compute_minor = props.minor;
   caps.total_memory_bytes = static_cast<std::size_t>(props.totalGlobalMem);
-  // Tensor cores arrive with Volta (sm_70) and are the reason fp16 is wired for
-  // the sm_75 build config; GEMM selects the tensor-op algorithm only when they
-  // are present.
+  // Tensor cores arrive with Volta (sm_70).
   caps.has_tensor_cores = props.major >= 7;
   caps.supports_fp32 = true;
-  // __half storage and cuBLAS half GEMM need sm_53 or newer. Compute in fp32.
-  caps.supports_fp16 =
-      props.major > 5 || (props.major == 5 && props.minor >= 3);
 
   // Per device thread, so two device threads do not overwrite one name buffer
   // (docs/client-runtime-design.md section 8.1).
