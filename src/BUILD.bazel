@@ -84,6 +84,7 @@ cc_library(
         "model.cc",
         "ops.cc",
         "optim.cc",
+        "performance_model.cc",
         "tensor.cc",
         "train.cc",
     ],
@@ -585,6 +586,22 @@ cc_binary(
     copts = nanochat_copts(),
     defines = precision_defines(),
     deps = [
+        ":model",
+        "//include/nanochat:nanochat",
+    ],
+)
+
+# The performance-model report (docs/performance-model.md). It prints the
+# operation counter table, the roofline, and the step and run bound for one
+# configuration and one device. It runs on the CPU and needs no GPU and no
+# broker. Run it through `tools/nanochat roofline`.
+cc_binary(
+    name = "roofline_main",
+    srcs = ["roofline_main.cc"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    deps = [
+        ":cli",
         ":model",
         "//include/nanochat:nanochat",
     ],

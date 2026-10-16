@@ -331,6 +331,23 @@ cc_test(
     tags = ["sim"],
 )
 
+# The performance-model gate (docs/performance-model.md section 12): the
+# counter struct sums to `EstimateFlopsPerToken`, the precision assignment
+# follows the fp8 rule, the roofline labels each family, and the estimator
+# reproduces the section 7.2 bound for the depth-24 shape. Vendor-free and
+# GPU-free, so it runs in the default T0 loop.
+cc_test(
+    name = "performance_model_test",
+    srcs = ["performance_model_test.cc"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    deps = [
+        "//include/nanochat:nanochat",
+        "//src:model",
+    ],
+    size = "small",
+)
+
 # The fabricated `cudaDeviceProp` cross-check (docs/simulator.md section 5.1):
 # the interposer's prefix must sit at the vendor field offsets, or `GetCaps()`
 # reads the wrong bytes. Compiled against the real `<driver_types.h>`, so drift
@@ -556,6 +573,7 @@ test_suite(name = "all", tests = [
     ":loader_parity_test",
     ":post_training_core_test",
     ":device_profile_test",
+    ":performance_model_test",
     ":cuda_device_prop_abi_test",
     ":sim_numerics_test",
     ":kernel_emu_test",

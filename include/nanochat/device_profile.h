@@ -41,16 +41,27 @@ struct DeviceProfile {
 
   // Dense (non-sparse) peak rates. The fp32 rate is the CUDA-core rate; the
   // fp16/bf16 rates are the tensor-core rates on a device that has them. A
-  // rate of 0 means the device has no path at that precision.
+  // rate of 0 means the device has no path at that precision. The fp8 rate is
+  // the E4M3/E5M2 tensor-core rate (docs/performance-model.md section 6).
   double peak_fp32_flops = 0.0;
   double peak_fp16_flops = 0.0;
   double peak_bf16_flops = 0.0;
+  double peak_fp8_flops = 0.0;
+
+  // The peak HBM bandwidth, in bytes per second. The estimator divides the
+  // operand bytes by this value (docs/performance-model.md section 6).
+  double peak_bandwidth_bytes_per_second = 0.0;
 
   int warp_size = 32;
   int max_threads_per_block = 1024;
   // The opt-in maximum, the value a launch must request through
   // `cudaFuncSetAttribute` before exceeding the 48 KB default.
   std::size_t max_shared_memory_per_block = 48 * 1024;
+
+  // The nominal cost of one kernel launch, in microseconds. The launch cost
+  // is a device property, not a per-shape value
+  // (docs/performance-model.md section 7).
+  double launch_us = 5.0;
 };
 
 // The profile table. The returned pointers are stable for the life of the

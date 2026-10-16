@@ -40,6 +40,9 @@ tools/nanochat <command> [args...]
   eval  -- <cmd...>          alias for: run eval  -- <cmd...>
   bench -- <cmd...>          alias for: run t3-bench -- <cmd...>
   profile [opts]             build + run the attention benchmark under the GPU broker
+  roofline [opts]            build + run the performance model (roofline bound)
+                             CPU only, no GPU broker; see
+                             docs/performance-model.md
   doctor [--json]            print environment, device, sandbox, and lock state
   simulate [--device NAME] [--precision fp32|fp16] [--suite S] [--mode compile]
                              S0 CPU-only simulator (no GPU, no broker); see
@@ -427,6 +430,17 @@ case "$command" in
     exec 9>&-
     exec "$broker" --profile t3-bench -- \
       "$root/bazel-bin/backends/cuda/kernels/attention_benchmark" "$@"
+    ;;
+
+  roofline)
+    # The analytic performance model (docs/performance-model.md): build the
+    # roofline estimator and run it under the CPU sandbox. It needs no GPU and
+    # no broker. Extra arguments pass through to the binary (--device,
+    # --precision, --batch, --devices, --tokens, --json).
+    with_build_lock "$bazel_bin" build //src:roofline_main
+    exec 9>&-
+    exec "$sandbox" --profile t0-cpu -- \
+      "$root/bazel-bin/src/roofline_main" "$@"
     ;;
 
   doctor)

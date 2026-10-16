@@ -22,19 +22,19 @@ namespace {
 const DeviceProfile kProfiles[] = {
     // NVIDIA Hopper.
     {"h100", 9, 0, 80ull * 1024 * 1024 * 1024, true, true, true, 66.9e12,
-     989e12, 989e12, 32, 1024, 227 * 1024},
+     989e12, 989e12, 1979e12, 3.35e12, 32, 1024, 227 * 1024, 3.0},
     {"h200", 9, 0, 141ull * 1024 * 1024 * 1024, true, true, true, 67.0e12,
-     989e12, 989e12, 32, 1024, 227 * 1024},
+     989e12, 989e12, 1979e12, 4.8e12, 32, 1024, 227 * 1024, 3.0},
     // NVIDIA Ampere data center.
     {"a100", 8, 0, 80ull * 1024 * 1024 * 1024, true, true, true, 19.5e12,
-     312e12, 312e12, 32, 1024, 163 * 1024},
+     312e12, 312e12, 0.0, 2.0e12, 32, 1024, 163 * 1024, 4.0},
     // NVIDIA Turing.
     {"t4", 7, 5, 16ull * 1024 * 1024 * 1024, true, true, false, 8.1e12, 65e12,
-     0.0, 32, 1024, 64 * 1024},
+     0.0, 0.0, 320e9, 32, 1024, 64 * 1024, 6.0},
     // Pascal (the development host). No tensor cores; bf16 has no path at all,
     // and fp16 is a storage format at a fractional CUDA-core rate.
     {"gtx1080ti", 6, 1, 11ull * 1024 * 1024 * 1024, false, true, false,
-     11.34e12, 0.177e12, 0.0, 32, 1024, 48 * 1024},
+     11.34e12, 0.177e12, 0.0, 0.0, 484e9, 32, 1024, 48 * 1024, 5.0},
 };
 
 std::string ToLower(const std::string& value) {

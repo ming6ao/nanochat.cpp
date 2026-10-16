@@ -28,6 +28,7 @@
 namespace {
 
 using nanochat::Caps;
+using nanochat::ComputePrecision;
 using nanochat::DeviceProfile;
 
 int g_failures = 0;
@@ -119,6 +120,63 @@ void TestMfuConsistency() {
   ExpectTrue(seen.size() >= 5, "the table covers the planned targets");
 }
 
+void TestLimitTable() {
+  // The fp8 rate and the bandwidth column (docs/performance-model.md section
+  // 6). Hopper carries both; the older targets carry a bandwidth only, and a
+  // zero fp8 rate means "no fp8 path".
+  const DeviceProfile* h100 = nanochat::FindDeviceProfile("h100");
+  ExpectTrue(h100 != nullptr, "h100 is in the table");
+  if (h100 != nullptr) {
+    ExpectNear(h100->peak_fp8_flops, 1979e12, 1.0, "h100 fp8 rate");
+    ExpectNear(h100->peak_bandwidth_bytes_per_second, 3.35e12, 1.0,
+               "h100 bandwidth");
+    ExpectNear(nanochat::PeakFlopsForCompute("h100", ComputePrecision::kFp8),
+               1979e12, 1.0, "h100 explicit fp8 peak");
+  }
+  const DeviceProfile* h200 = nanochat::FindDeviceProfile("h200");
+  ExpectTrue(h200 != nullptr, "h200 is in the table");
+  if (h200 != nullptr) {
+    ExpectNear(h200->peak_bandwidth_bytes_per_second, 4.8e12, 1.0,
+               "h200 bandwidth");
+  }
+  const DeviceProfile* a100 = nanochat::FindDeviceProfile("a100");
+  ExpectTrue(a100 != nullptr, "a100 is in the table");
+  if (a100 != nullptr) {
+    ExpectNear(a100->peak_fp8_flops, 0.0, 1e-9, "a100 has no fp8 path");
+    ExpectNear(a100->peak_bandwidth_bytes_per_second, 2.0e12, 1.0,
+               "a100 bandwidth");
+  }
+  const DeviceProfile* t4 = nanochat::FindDeviceProfile("t4");
+  ExpectTrue(t4 != nullptr, "t4 is in the table");
+  if (t4 != nullptr) {
+    ExpectNear(t4->peak_bandwidth_bytes_per_second, 320e9, 1.0, "t4 bandwidth");
+  }
+
+  // Every row records a bandwidth, and the explicit-precision selector returns
+  // exactly the profile field at every precision.
+  for (const DeviceProfile* profile : nanochat::AllDeviceProfiles()) {
+    const std::string name = profile->name;
+    ExpectTrue(profile->peak_bandwidth_bytes_per_second > 0.0,
+               Format("profile \"%s\" records a bandwidth", name.c_str()));
+    ExpectNear(nanochat::PeakFlopsForCompute(name, ComputePrecision::kFp32),
+               profile->peak_fp32_flops, 1.0,
+               Format("%s explicit fp32 peak", name.c_str()));
+    ExpectNear(nanochat::PeakFlopsForCompute(name, ComputePrecision::kFp16),
+               profile->peak_fp16_flops, 1.0,
+               Format("%s explicit fp16 peak", name.c_str()));
+    ExpectNear(nanochat::PeakFlopsForCompute(name, ComputePrecision::kBf16),
+               profile->peak_bf16_flops, 1.0,
+               Format("%s explicit bf16 peak", name.c_str()));
+    ExpectNear(nanochat::PeakFlopsForCompute(name, ComputePrecision::kFp8),
+               profile->peak_fp8_flops, 1.0,
+               Format("%s explicit fp8 peak", name.c_str()));
+  }
+  // An unknown device has no limit row.
+  ExpectNear(
+      nanochat::PeakFlopsForCompute("unknown device", ComputePrecision::kFp8),
+      0.0, 1e-9, "unknown device has no fp8 peak");
+}
+
 void TestCapsProjection() {
   const DeviceProfile* h100 = nanochat::FindDeviceProfile("h100");
   ExpectTrue(h100 != nullptr, "h100 is in the table");
@@ -151,6 +209,7 @@ int main() {
   nanochat::RequireSandboxOrDie("test");
   TestJoinKey();
   TestMfuConsistency();
+  TestLimitTable();
   TestCapsProjection();
   if (g_failures != 0) {
     std::printf("%d check(s) failed\n", g_failures);

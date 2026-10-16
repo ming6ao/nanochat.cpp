@@ -191,16 +191,31 @@ ParamBreakdown CountParams(const Config& config) {
 }
 
 double EstimateFlopsPerToken(const Config& config) {
+  return CountFlopsPerToken(config).total();
+}
+
+FlopCounts CountFlopsPerToken(const Config& config) {
   const int heads = config.num_heads;
   const int head_dim = config.head_dim();
   const int seq = config.seq_len;
-  double attention = 0.0;
+  double attention_forward = 0.0;
+  double attention_backward = 0.0;
   for (int i = 0; i < config.num_layers; ++i) {
     const int left = config.window_left(i);
     const int effective = left < 0 ? seq : std::min(left, seq);
-    attention += 12.0 * heads * head_dim * effective;
+    // The scores and the output GEMMs are the forward pass; the backward pass
+    // is twice the forward work. The two rows sum to the 12 FLOPs per head,
+    // head dimension, and window that `EstimateFlopsPerToken` counts.
+    attention_forward += 4.0 * heads * head_dim * effective;
+    attention_backward += 8.0 * heads * head_dim * effective;
   }
-  return 6.0 * NumMatmulParams(config) + attention;
+  const double matmul = NumMatmulParams(config);
+  FlopCounts counts;
+  counts.gemm_forward = 2.0 * matmul;
+  counts.gemm_backward = 4.0 * matmul;
+  counts.attention_forward = attention_forward;
+  counts.attention_backward = attention_backward;
+  return counts;
 }
 
 double EstimatePrefillFlops(const Config& config, int num_tokens) {
@@ -302,13 +317,24 @@ double PeakFlopsForDevice(const std::string& device_name) {
 }
 
 double PeakFlopsForCompute(const std::string& device_name) {
+  return PeakFlopsForCompute(device_name, BuildComputePrecision());
+}
+
+double PeakFlopsForCompute(const std::string& device_name,
+                           ComputePrecision precision) {
   const DeviceProfile* profile = FindDeviceProfile(device_name);
   if (profile == nullptr) return 0.0;
-#if defined(NANOCHAT_PRECISION_FP16)
-  return profile->peak_fp16_flops;
-#else
-  return profile->peak_fp32_flops;
-#endif
+  switch (precision) {
+    case ComputePrecision::kFp32:
+      return profile->peak_fp32_flops;
+    case ComputePrecision::kFp16:
+      return profile->peak_fp16_flops;
+    case ComputePrecision::kBf16:
+      return profile->peak_bf16_flops;
+    case ComputePrecision::kFp8:
+      return profile->peak_fp8_flops;
+  }
+  return 0.0;
 }
 
 double ComputeMfu(const Config& config, double tokens_per_second,
@@ -937,6 +963,24 @@ float TrainLoop::Run() {
   logger_->Info("training for " + std::to_string(config_.num_iterations) +
                 " steps, batch " + std::to_string(batch) + " x " +
                 std::to_string(seq) + " x " + std::to_string(accum));
+
+  // The analytic step bound (docs/performance-model.md section 7). It is a
+  // limit, not a prediction: a measured step below the bound is normal, and
+  // the gap is the finding. The harness does not know the interconnect, so the
+  // bound excludes the gradient sync; the estimator reports it when a link is
+  // configured. The report goes out once, with the run summary.
+  {
+    ModelPlan plan;
+    plan.batch = batch;
+    plan.grad_accum = accum;
+    plan.world_size = config_.world_size;
+    const PerformanceLimits limits = LimitsForDevice(config_.device_name);
+    const PerformanceEstimate bound =
+        EstimatePerformance(config_.model, limits, plan);
+    logger_->Info("analytic step bound " +
+                  std::to_string(bound.step_seconds * 1000.0) + " ms");
+    logger_->Info("\n" + FormatPerformanceReport(bound));
+  }
 
   // A resume continues the schedule from the stored step, so the learning-rate
   // warmup does not replay (docs/training-seam.md section 10). `num_iterations`

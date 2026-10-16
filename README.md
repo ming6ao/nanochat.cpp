@@ -79,6 +79,47 @@ scoring each have a binary: `//src:train_main`, `//src:eval_main`,
 - [docs/sandbox.md](docs/sandbox.md) — the resource budgets every job runs
   under.
 
+## The performance model
+
+The performance model reports the fastest possible step at one shape. It also
+reports the operation that binds and the distance from the measured step. The
+model uses the device peaks and the operation counters. It holds no fitted
+value. It needs no GPU and no broker.
+
+The `roofline` command builds the estimator and runs it under the CPU sandbox:
+
+```bash
+# The depth-24 H100 bound from docs/performance-model.md section 7.2.
+tools/nanochat roofline --device h100 --precision fp8 \
+    --layers 24 --heads 12 --kv-heads 12 --hidden 1536 --seq 2048 \
+    --batch 16 --grad-accum 4 --devices 8 --tokens 5.84e9 --link-gbps 600
+
+# The same report as `nanochat.roofline.v1` JSON.
+tools/nanochat roofline --json --device h100 --precision fp8 \
+    --layers 24 --heads 12 --kv-heads 12 --hidden 1536 --seq 2048 \
+    --batch 16 --grad-accum 4 --devices 8 --tokens 5.84e9 --link-gbps 600
+```
+
+The output is one row per operation with the compute time, the memory time,
+the bound, and the binding limit. The last line gives the step bound and the
+run bound.
+
+- `--device` selects a device profile: `h100`, `h200`, `a100`, `t4`, or
+  `gtx1080ti`.
+- `--precision` selects the build precision: `fp32`, `fp16`, `bf16`, `fp8`, or
+  `auto`. The `fp8` tier applies the fp8 conversion rule in
+  [docs/performance-model.md](docs/performance-model.md) section 5.1.
+- `--batch`, `--grad-accum`, and `--devices` set the training plan.
+- `--tokens` sets the run length. The value `0` models one optimizer step.
+- `--link-gbps` sets the per-rank link bandwidth for the gradient sync.
+- The model flags (`--layers`, `--heads`, `--kv-heads`, `--hidden`, `--seq`,
+  `--vocab`, `--padded-vocab`, `--window-pattern`, `--rope-base`) set the
+  architecture.
+
+Run `tools/nanochat roofline --help` for the full option list. See
+[docs/performance-model.md](docs/performance-model.md) for the model, the
+counter table, and the device limit table.
+
 ## Repository layout
 
 ```
