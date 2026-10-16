@@ -327,7 +327,8 @@ TrainModel::Param& TrainModel::AddParam(const std::string& name,
   return params_.back();
 }
 
-std::unique_ptr<Model> Model::Create(const Config& config) {
+std::unique_ptr<Model> Model::Create(const Config& config, std::string* error) {
+  if (!config.Validate(error)) return nullptr;
   return std::make_unique<TrainModel>(config);
 }
 
@@ -990,7 +991,6 @@ float TrainModel::TrainStep(const int* tokens, const int* targets, int batch,
                  "nanochat: TrainStep() called with grad mode disabled.\n");
     std::abort();
   }
-  if (optimizer != nullptr) optimizer->ZeroGrad();
   const float loss = ForwardLoss(tokens, targets, batch, seq);
   Backward();
   if (optimizer != nullptr) {

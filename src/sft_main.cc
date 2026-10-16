@@ -159,7 +159,7 @@ int main(int argc, char** argv) {
       ++row_cursor;
     }
 
-    optimizer->ZeroGrad();
+    model->ZeroGrad();
     const float loss = model->ForwardLoss(tokens.data(), targets.data(),
                                           config.batch, shard_seq);
     model->Backward();

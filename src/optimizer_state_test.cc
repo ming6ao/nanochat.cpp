@@ -105,7 +105,7 @@ void MakeBatch(Rng* rng, int rows, int vocab, std::vector<int>* tokens,
 float RunStep(Model* model, Optimizer* optimizer, int step,
               const std::vector<int>& tokens, const std::vector<int>& targets,
               int batch, int seq) {
-  optimizer->ZeroGrad();
+  model->ZeroGrad();
   const float loss =
       model->ForwardLoss(tokens.data(), targets.data(), batch, seq);
   model->Backward();

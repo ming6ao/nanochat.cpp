@@ -163,13 +163,6 @@ class NanochatOptimizer final : public Optimizer {
   NanochatOptimizer(const NanochatOptimizer&) = delete;
   NanochatOptimizer& operator=(const NanochatOptimizer&) = delete;
 
-  void ZeroGrad() override {
-    for (const ParamView& view : views_) {
-      if (view.grad == nullptr || view.count <= 0) continue;
-      kernels::Memset(view.grad, 0, ElementBytes(view.count));
-    }
-  }
-
   void Step(int step) override {
     GatherGradients();
 

@@ -4,11 +4,10 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
-#include <initializer_list>
 
 // Core value types shared by every layer: the precision alias, the storage
-// dtype tags, a lightweight tensor descriptor, and the backend capability
-// report. This header is vendor-free on purpose (DESIGN.md section 2.1): no
+// dtype tags, and the backend capability report. This header is vendor-free
+// on purpose (DESIGN.md section 2.1): no
 // CUDA/HIP header is ever reachable from it, so a backend can be replaced as a
 // build/link decision. See docs/build.md.
 
@@ -225,64 +224,6 @@ struct DTypeTraits<Fp16> {
 // The storage dtype that backs ComputeType in this build.
 inline constexpr DType kComputeDType = DTypeTraits<ComputeType>::value;
 inline constexpr std::size_t kComputeTypeSize = DTypeTraits<ComputeType>::size;
-
-// ---------------------------------------------------------------------------
-// Tensor: a non-owning descriptor
-// ---------------------------------------------------------------------------
-//
-// Tensors never own storage here. Device memory is handed out by the backend
-// (kernels::Alloc) and the fixed forward/backward graphs carve it into named
-// workspace slots (docs/model.md). A Tensor is therefore just a typed view:
-// pointer, rank, shape, and strides.
-
-inline constexpr int kMaxTensorRank = 4;
-
-struct Tensor {
-  void* data = nullptr;
-  DType dtype = kComputeDType;
-  int rank = 0;
-  std::int64_t shape[kMaxTensorRank] = {0, 0, 0, 0};
-  std::int64_t stride[kMaxTensorRank] = {0, 0, 0, 0};
-
-  std::int64_t dim(int axis) const {
-    return (axis >= 0 && axis < rank) ? shape[axis] : 0;
-  }
-
-  std::int64_t numel() const {
-    std::int64_t total = 1;
-    for (int axis = 0; axis < rank; ++axis) total *= shape[axis];
-    return total;
-  }
-
-  // True when the strides describe a dense row-major layout.
-  bool IsContiguous() const {
-    std::int64_t expected = 1;
-    for (int axis = rank - 1; axis >= 0; --axis) {
-      if (shape[axis] != 1 && stride[axis] != expected) return false;
-      expected *= shape[axis];
-    }
-    return true;
-  }
-
-  // Builds a dense, row-major view over `data`.
-  static Tensor Contiguous(void* data, DType dtype,
-                           std::initializer_list<std::int64_t> dims) {
-    Tensor tensor;
-    tensor.data = data;
-    tensor.dtype = dtype;
-    tensor.rank = static_cast<int>(dims.size());
-    std::int64_t stride = 1;
-    int axis = tensor.rank;
-    for (auto it = dims.end(); it != dims.begin();) {
-      --it;
-      --axis;
-      tensor.shape[axis] = *it;
-      tensor.stride[axis] = stride;
-      stride *= *it;
-    }
-    return tensor;
-  }
-};
 
 // ---------------------------------------------------------------------------
 // Backend capabilities

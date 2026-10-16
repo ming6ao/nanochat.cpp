@@ -123,26 +123,8 @@ nanochat::Config ToConfig(const nanochat_config& source) {
 
 // Rejects a config that cannot build a model graph.
 void ValidateConfig(const nanochat::Config& config) {
-  if (config.num_layers <= 0 || config.num_heads <= 0 ||
-      config.num_kv_heads <= 0 || config.hidden_dim <= 0 ||
-      config.seq_len <= 0 || config.vocab_size <= 0 ||
-      config.padded_vocab_size <= 0) {
-    throw std::invalid_argument("config fields must be positive");
-  }
-  // The ResFormer smear and value gates read the first 24 and 12 channels of a
-  // hidden row (ops::kSmearChannels and ops::kVeGateChannels). A narrower row
-  // would read out of bounds, so reject it instead of computing NaN.
-  if (config.hidden_dim < 24) {
-    throw std::invalid_argument(
-        "hidden_dim must be at least 24 for the "
-        "smear and value gates");
-  }
-  if (config.hidden_dim % config.num_heads != 0) {
-    throw std::invalid_argument("hidden_dim must be divisible by num_heads");
-  }
-  if (config.padded_vocab_size < config.vocab_size) {
-    throw std::invalid_argument("padded_vocab_size must be >= vocab_size");
-  }
+  std::string error;
+  if (!config.Validate(&error)) throw std::invalid_argument(error);
 }
 
 // Converts the flat C optimizer config to the `OptimizerConfig` and

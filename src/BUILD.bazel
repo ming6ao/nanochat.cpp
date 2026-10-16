@@ -254,6 +254,20 @@ cc_test(
     tags = ["gpu"],
 )
 
+# Model configuration validation catches invalid graph dimensions and
+# metadata before model allocation.
+cc_test(
+    name = "config_test",
+    srcs = ["config_test.cc"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    deps = [
+        ":model",
+        "//include/nanochat:nanochat",
+    ],
+    size = "small",
+)
+
 # Supplementary finite-difference check: the fixture zero-initializes the two
 # projections, and zero-initializes `smear_lambda`, so the oracle test cannot
 # exercise the attention/QkPrep/MLP backward or the smear input gradient. This

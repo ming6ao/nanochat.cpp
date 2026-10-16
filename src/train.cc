@@ -970,7 +970,7 @@ float TrainLoop::Run() {
     double optim_s = 0.0;
 
     const auto optim_start = mark();
-    optimizer_->ZeroGrad();
+    model_->ZeroGrad();
     kernels::Synchronize();
     optim_s += since(optim_start, mark());
 

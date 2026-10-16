@@ -49,9 +49,6 @@ class Optimizer {
  public:
   virtual ~Optimizer() = default;
 
-  // Zeroes every parameter gradient before a backward pass.
-  virtual void ZeroGrad() = 0;
-
   // Applies one update step; `step` is 1-based and drives the schedules.
   virtual void Step(int step) = 0;
 

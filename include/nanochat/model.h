@@ -11,13 +11,10 @@
 #include "nanochat/sampler.h"
 #include "nanochat/tensor.h"
 
-// The public model API: the training graph, the two inference graphs, and the
-// evaluation entry point and compute primitives (docs/model.md, docs/eval.md).
-// This header is frozen; treat it as stable by default and prefer additive
-// changes (DESIGN.md section 7).
+// The model, training, inference, and evaluation API. The graph topology lives
+// in model.cc (train forward + backward) and generate.cc (prefill + decode).
 //
-// The topology lives in model.cc (train forward + backward) and generate.cc
-// (prefill + decode). No other translation unit knows the architecture.
+// No other translation unit knows the architecture.
 
 namespace nanochat {
 
@@ -46,9 +43,10 @@ class Model {
  public:
   virtual ~Model() = default;
 
-  // Builds a model with the given architecture. The returned model owns all of
-  // its weights and per-graph workspace.
-  static std::unique_ptr<Model> Create(const Config& config);
+  // Builds a model with the given architecture. Returns null when config is
+  // invalid and writes the reason to `error` when it is not null.
+  static std::unique_ptr<Model> Create(const Config& config,
+                                       std::string* error = nullptr);
 
   // Deterministically initializes every weight (docs/model.md).
   virtual void InitWeights(std::uint64_t seed) = 0;
