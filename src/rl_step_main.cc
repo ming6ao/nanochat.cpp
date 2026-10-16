@@ -17,8 +17,8 @@
 //
 // The fixture wire format is the little-endian `NANOORC1` container of
 // `src/container.h`; the fixture is produced by
-// `tools/dump_rl_fixture.py`. The result file carries only `result/` records,
-// so a reader can parse it on its own.
+// `tools/dump_training_fixtures.py rl`. The result file carries only `result/`
+// records, so a reader can parse it on its own.
 //
 //   tools/nanochat run t0-cpu -- <rl_step> --fixture in.bin --out out.bin
 

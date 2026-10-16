@@ -3,8 +3,8 @@
 // Trains the native trainer on the fixed reference corpus and compares the
 // ordered merge list against `tests/data/tokenizer_fixture.bin` rank by rank.
 // The fixture is data, so this test never imports Python. The corpus literal
-// below is the `CORPUS` list of `tools/dump_tokenizer_fixture.py`; the merge
-// comparison fails if the two corpora differ.
+// below is the `CORPUS` list of `tools/dump_data_fixtures.py tokenizer`; the
+// merge comparison fails if the two corpora differ.
 
 #include <algorithm>
 #include <cstddef>
@@ -36,7 +36,7 @@ void Fail(const std::string& message) {
 }
 
 // The fixed reference corpus, in order. It is the `CORPUS` list of
-// `tools/dump_tokenizer_fixture.py`.
+// `tools/dump_data_fixtures.py tokenizer`.
 const char* const kCorpus[] = {
     "The quick brown fox jumps over the lazy dog.",
     "Pack my box with five dozen liquor jugs.",

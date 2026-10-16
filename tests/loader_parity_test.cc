@@ -1,8 +1,8 @@
 // tests/loader_parity_test.cc -- the document-mode loader parity gate
 // (docs/parquet-native.md phase 8).
 //
-// Reads the committed fixture that `tools/dump_loader_fixture.py` produced from
-// the reference `tokenizing_distributed_data_loader_bos_bestfit`
+// Reads the committed fixture that `tools/dump_data_fixtures.py loader`
+// produced from the reference `tokenizing_distributed_data_loader_bos_bestfit`
 // (`nanochat/dataloader.py`). The fixture holds the documents, the loader
 // shape, and the reference rows. The test rebuilds the loader over a fixed
 // document source and checks the rows token for token. It never imports

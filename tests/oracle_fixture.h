@@ -14,22 +14,24 @@
 #include "src/record_file.h"
 
 // Reader for the CPU oracle fixture, `tests/data/debug_state.bin`, produced
-// offline by `tools/dump_oracle.py`. The fixture is data, so this reader has no
-// torch dependency and no dependency on the model: any test (CPU, CUDA, or the
-// model skeleton) can parse the same reference tensors.
+// offline by `tools/dump_training_fixtures.py oracle`. The fixture is data, so
+// this reader has no torch dependency and no dependency on the model: any test
+// (CPU, CUDA, or the model skeleton) can parse the same reference tensors.
 //
 // The same little-endian record encoding backs the evaluation fixture
 // (`NANOEVL1`, written by `python/nanochat_cpp/eval_fixture.py` and
-// `tools/dump_eval_fixture.py`), the tokenizer fixture (`NANOTOK1`, written by
-// `tools/dump_tokenizer_fixture.py`), and the staged numeric trace
+// `tools/dump_model_fixtures.py eval`), the tokenizer fixture (`NANOTOK1`,
+// written by `tools/dump_data_fixtures.py tokenizer`), and the staged numeric
+// trace
 // (`NANONUM1`, written by `tests/numerics_trace_emit_main.cc` and
-// `tools/dump_numerics_golden.py`); `Parse` accepts all four magics so each
-// parity test can reuse this reader. The numeric trace is flat by design -- the
-// phase, the step, and the parameter name go into the record name, for example
-// `train/step3/param_hash/transformer.h.0.attn.c_q.weight` -- so it needs no
-// record sequence and no reader change beyond the magic. See the module
-// docstring in tools/dump_oracle.py for the exact layout. This header is
-// header-only on purpose: it can be included directly, or linked through the
+// `tools/dump_runtime_fixtures.py numerics`); `Parse` accepts all four magics
+// so each parity test can reuse this reader. The numeric trace is flat by
+// design -- the phase, the step, and the parameter name go into the record
+// name, for example `train/step3/param_hash/transformer.h.0.attn.c_q.weight` --
+// so it needs no record sequence and no reader change beyond the magic. See the
+// module docstring in tools/dump_training_fixtures.py oracle for the exact
+// layout. This header is header-only on purpose: it can be included directly,
+// or linked through the
 // `//tests:oracle_fixture` library.
 
 namespace nanochat {

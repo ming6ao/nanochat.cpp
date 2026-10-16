@@ -79,7 +79,7 @@ Parallelism is gated on interface readiness, not on agent availability.
    `gpu` test). Fall back to a Makefile if `rules_cuda` blocks.
 2. Freeze `kernels.h`, `tensor.h`, `config.h`, `model.h`.
 3. CPU reference backend: every kernel as a naive loop.
-4. `tools/dump_oracle.py` + `tests/data/debug_state.bin` fixtures.
+4. `tools/dump_training_fixtures.py oracle` + `tests/data/debug_state.bin` fixtures.
 5. `Model` skeleton on the CPU backend (forward + backward end to end).
 
 **Wave 1 (parallel).** Kernel agents each own one family: the implementation,

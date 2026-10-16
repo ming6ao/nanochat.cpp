@@ -355,7 +355,7 @@ changes.
 | Native packed-row loader for SFT | Missing | `src/data.cc` has the pretraining packer only |
 | SFT loop with a dataset-progress schedule and a warm start | Missing | `src/train.cc` has a step-based loop |
 | SFT parity rungs P4 to P7 | Open | No `sft_pack_fixture.bin` or `sft_step_parity_test` yet |
-| RL step binary and the RL parity fixture | Done | `src/rl_step_main.cc`, `tools/dump_rl_fixture.py`, `tests/rl_parity_test.cc` |
+| RL step binary and the RL parity fixture | Done | `src/rl_step_main.cc`, `tools/dump_training_fixtures.py rl`, `tests/rl_parity_test.cc` |
 | RL orchestration worker | Done | `src/rl_worker_main.cc`, `python/nanochat_cpp/rl.py` |
 | SFT bridge command | Done | `src/sft_main.cc`; `python/nanochat_cpp/sft.py` |
 | RL bridge command | Done | `python/nanochat_cpp/rl.py` |
@@ -395,7 +395,7 @@ Gate: A short SFT run at T2. Compare the loss curve to the reference.
 Owner: harness for `src/`; oracle for `tools/**` and `tests/**`.
 
 1. Add a file-driven `rl_step` binary.
-2. Add `tools/dump_rl_fixture.py`. Record the reference advantages, the targets,
+2. Add `tools/dump_training_fixtures.py rl`. Record the reference advantages, the targets,
    and the first-step trajectory.
 3. Normalize by `num_valid * num_passes * examples_per_rank`.
 

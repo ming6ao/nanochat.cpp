@@ -35,7 +35,7 @@ covers the SFT data, the SFT arithmetic, the SFT loop, or the SFT validation.
 `//tests:numerics_trace_test` records an SFT masked loss and an SFT gradient
 norm (`tests/numerics_trace.cc` lines 802 to 845). That trace is a cross-target
 regression guard. Its golden file comes from the C++ emitter, not from torch
-(`tools/dump_numerics_golden.py` lines 8 to 9). It uses a synthetic mask and
+(`tools/dump_runtime_fixtures.py numerics`). It uses a synthetic mask and
 takes no optimizer step. It gives no reference evidence for SFT arithmetic.
 
 ## 3. The four rungs
@@ -56,7 +56,7 @@ The warm start leans on entry `P3` and on `LoadOptimizerState`
 
 ## 4. Required fixtures
 
-Add three fixtures. Follow the pattern of `tools/dump_train_fixture.py`.
+Add three fixtures. Follow the pattern of `tools/dump_training_fixtures.py train`.
 
 ### 4.1 `tests/data/sft_pack_fixture.bin`
 

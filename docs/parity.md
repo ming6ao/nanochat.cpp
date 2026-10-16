@@ -50,10 +50,10 @@ Status values:
 Two data fixtures pin the model and optimizer against the reference:
 
 - `tests/debug_state.bin` (forward, backward, and a few optimizer steps) via
-  `tools/dump_oracle.py`.
+  `tools/dump_training_fixtures.py oracle`.
 - `tests/data/train_parity.bin` (a full training trajectory: initial
   parameters, the exact token/target batch at every step, and the per-step
-  loss, gradient norm, and parameter norms) via `tools/dump_train_fixture.py`.
+  loss, gradient norm, and parameter norms) via `tools/dump_training_fixtures.py train`.
 
 Both fixtures **share the initial parameters and the exact batches** with the
 C++ side. They isolate the model, backward pass, optimizer, and schedules from
@@ -67,7 +67,7 @@ tools/nanochat test --gpu //tests:oracle_cuda_test //tests:train_parity_cuda_tes
 
 A third fixture pins the tokenizer. `tests/data/tokenizer_fixture.bin` records
 the reference merges, token bytes, split cases, encode cases, and decode cases
-from `tools/dump_tokenizer_fixture.py`. The two C++ tests match it on the CPU and
+from `tools/dump_data_fixtures.py tokenizer`. The two C++ tests match it on the CPU and
 never import Python:
 
 ```bash
@@ -136,7 +136,7 @@ rows against the reference rows on a fixed corpus.
 **Impact:** none. The packing is the reference packing.
 
 **Evidence:** `//tests:loader_parity_test` compares the C++ rows to a fixture
-that `tools/dump_loader_fixture.py` produced from the reference loader. The
+that `tools/dump_data_fixtures.py loader` produced from the reference loader. The
 fixture shares the documents, the tokenizer, the buffer size, and the source
 batch size with the C++ side.
 
@@ -300,12 +300,12 @@ warmdown length with Python's `round`. Python rounds half to even, so
 The two forms differ only when `warmdown_ratio * num_iterations` is exactly a
 half-integer.
 
-A 5-step `tools/dump_train_fixture.py` run at the section 6.2 shape uses the
+A 5-step `tools/dump_training_fixtures.py train` run at the section 6.2 shape uses the
 default ratio `0.5`, so the product is `2.5`. The C++ warmdown then started one
 step early and changed the learning rate and the Muon momentum at the last two
 steps. The loss error was `0.146` and the parameter L2 error was `0.372`
 against the PyTorch reference. The fixture is not committed; regenerate it with
-`tools/dump_train_fixture.py --steps 5`.
+`tools/dump_training_fixtures.py train --steps 5`.
 
 `WarmdownIters()` now uses `std::nearbyint` under the default `FE_TONEAREST`
 mode, and it evaluates the product in `double`. This matches Python's `round`.

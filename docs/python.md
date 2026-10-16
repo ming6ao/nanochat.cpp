@@ -229,10 +229,10 @@ Two traps follow from the reference:
   `scalars`, but `num_matmul_params` counts it as a matrix. `CountParams`
   follows `num_scaling_params`.
 
-A new tool `tools/dump_plan_fixture.py` writes `tests/data/plan_fixture.bin`
+A new tool `tools/dump_model_fixtures.py plan` writes `tests/data/plan_fixture.bin`
 from the reference. The Oracle workstream owns the tool and the fixture
 (`AGENTS.md` section 1). The test `plan_test.py` compares every field. The
-existing `tools/dump_train_fixture.py` holds token and loss data only, so it
+existing `tools/dump_training_fixtures.py train` holds token and loss data only, so it
 cannot pin the plan.
 
 ### 4.4 The Python surface
@@ -490,7 +490,7 @@ This section is the historical migration record. The steps are complete.
    `include/nanochat/mfu.h` or a new harness header. Implement the wrapper in
    `bindings/nanochat_capi.cc`. Call it in `bindings/nanochat_capi_test.cc`,
    and declare it in `_core.py`.
-2. Add `plan.py`, `tools/dump_plan_fixture.py`, `tests/data/plan_fixture.bin`,
+2. Add `plan.py`, `tools/dump_model_fixtures.py plan`, `tests/data/plan_fixture.bin`,
    and `plan_test.py`.
 3. Add `chat.py` and a fixture test.
 4. Add `toolchain.py`, `_entry.py`, and `doctor --json`.
@@ -568,6 +568,6 @@ Owner decisions:
 3. Add owner rows for `bindings/**` and `python/**` to `AGENTS.md` section 1.
    Name the `src/BUILD.bazel` editor.
 4. Confirm that the Oracle workstream owns `tests/data/plan_fixture.bin` and
-   `tools/dump_plan_fixture.py`.
+   `tools/dump_model_fixtures.py plan`.
 5. Decide whether the deferred local HumanEval runner becomes a tracked
    follow-up.

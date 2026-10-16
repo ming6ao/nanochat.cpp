@@ -208,7 +208,7 @@ not defects.
 
 ## 9. Deferred
 
-- The ANVIL oracle fixture. `tools/dump_oracle.py` is untouched in this phase;
+- The ANVIL oracle fixture. `tools/dump_training_fixtures.py oracle` is untouched in this phase;
   the fixture lands after the first training comparison.
 - Per-matrix learning-rate multipliers (the reference's 2x on MLP `c_proj`) and
   frozen matrices.

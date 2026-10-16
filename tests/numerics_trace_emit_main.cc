@@ -2,7 +2,7 @@
 //
 // Runs the whole staged trace once on the CPU reference backend and writes the
 // committed golden file, in the container that `src/container.h` owns.
-// `tools/dump_numerics_golden.py` builds this binary, runs it through
+// `tools/dump_runtime_fixtures.py numerics` builds this binary, runs it through
 // `tools/nanochat`, and records the summary. Run it from the repository root:
 //
 //   tools/nanochat build //tests:numerics_trace_emit

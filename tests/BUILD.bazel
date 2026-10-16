@@ -1,6 +1,6 @@
 # tests/ — the oracle fixture and the end-to-end oracle harness. The fixture
 # itself is data (`data/debug_state.bin`), produced offline by
-# `tools/dump_oracle.py`; `oracle_fixture.h` is a torch-free reader that any
+# `tools/dump_training_fixtures.py oracle`; `oracle_fixture.h` is a torch-free reader that any
 # backend or the model skeleton can reuse. See docs/testing.md.
 
 load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library", "cc_test")
@@ -28,7 +28,7 @@ cc_library(
 )
 
 # The reference tokenizer fixture, `NANOTOK1`, produced by
-# `tools/dump_tokenizer_fixture.py`. The tokenizer parity test in `//src` reads
+# `tools/dump_data_fixtures.py tokenizer`. The tokenizer parity test in `//src` reads
 # it with `//tests:oracle_fixture`. See docs/tokenizer.md section 12.
 filegroup(
     name = "tokenizer_fixture",
@@ -36,7 +36,7 @@ filegroup(
 )
 
 # The Python-API reference fixture, `NANOEVL1`, produced by
-# `tools/dump_api_fixture.py`. The in-process Python tests read it as data and
+# `tools/dump_runtime_fixtures.py api`. The in-process Python tests read it as data and
 # compare the `Trainer` loss curve and the `Evaluator` bits-per-byte result
 # against the committed C++ run. The parameter trajectory stays in
 # `tests/data/train_parity.bin`; the `api/data/train_parity` record names it.
@@ -46,7 +46,7 @@ filegroup(
 )
 
 # The planning reference fixture, `NANOPLAN`, produced by
-# `tools/dump_plan_fixture.py`. The Python plan test reads it as data and
+# `tools/dump_model_fixtures.py plan`. The Python plan test reads it as data and
 # compares the C parameter counts and the reference base_train.py plan
 # arithmetic. See docs/python.md sections 4.3 and 11.
 filegroup(
@@ -55,7 +55,7 @@ filegroup(
 )
 
 # The chat prompt fixture, `NANCHAT1`, produced by
-# `tools/dump_chat_fixture.py`. The Python chat test reads it as data and
+# `tools/dump_data_fixtures.py chat`. The Python chat test reads it as data and
 # compares the prompt renderer to the reference tokenizer. See docs/python.md
 # sections 5 and 11.
 filegroup(
@@ -66,7 +66,7 @@ filegroup(
 # The document-mode loader parity gate (docs/parquet-native.md phase 8). The
 # C++ rows must match the reference
 # `tokenizing_distributed_data_loader_bos_bestfit` for a fixed corpus and
-# tokenizer. `tools/dump_loader_fixture.py` writes both files.
+# tokenizer. `tools/dump_data_fixtures.py loader` writes both files.
 cc_test(
     name = "loader_parity_test",
     srcs = ["loader_parity_test.cc"],
@@ -131,7 +131,7 @@ cc_test(
 
 # Multi-step training parity: drives the C++ model over a recorded training
 # trajectory (initial parameters, exact batches, per-step loss, gradient norm,
-# and parameter L2) produced by `tools/dump_train_fixture.py`. The committed
+# and parameter L2) produced by `tools/dump_training_fixtures.py train`. The committed
 # fixture is the compact CPU case; the same source also builds as the
 # `train_parity` binary for a production fixture run under the sandbox.
 cc_test(
@@ -182,7 +182,7 @@ cc_binary(
 )
 
 # Generation parity: drives `GenerateBatch` in greedy mode from the parameters
-# and prompt recorded by `tools/dump_generate_fixture.py`, and compares the
+# and prompt recorded by `tools/dump_model_fixtures.py generate`, and compares the
 # generated token ids and the per-position 1/0 mask against the PyTorch
 # reference exactly. The fixture's parameters are trained briefly so the
 # classifier is peaked and the argmax is stable against roundoff. The committed
@@ -222,7 +222,7 @@ cc_test(
 )
 
 # RL parity: drives the shared `RlStep` over the rollouts, the targets, and the
-# advantages recorded by `tools/dump_rl_fixture.py`, then runs the file-driven
+# advantages recorded by `tools/dump_training_fixtures.py rl`, then runs the file-driven
 # `//src:rl_step_main` on the same fixture and compares the loss, the gradient
 # norm, and the parameter trajectory. The fixture records the model-independent
 # normalization reference (the valid-target count and the divisor
@@ -271,7 +271,7 @@ cc_test(
 )
 
 # Score parity: runs the real `score_main` on the synthetic CORE fixture from
-# `tools/dump_eval_fixture.py` and compares its per-position NLL, argmax, and
+# `tools/dump_model_fixtures.py eval` and compares its per-position NLL, argmax, and
 # focused logits against the recorded PyTorch reference. The fixture carries
 # the model parameters, so the test rebuilds the reference model and writes the
 # checkpoint `score_main` loads; the runfiles also carry the `score_main`
@@ -464,7 +464,7 @@ cc_library(
     ],
 )
 
-# The golden-trace emitter, driven by `tools/dump_numerics_golden.py`. It writes
+# The golden-trace emitter, driven by `tools/dump_runtime_fixtures.py numerics`. It writes
 # `tests/data/numerics_golden_10l.bin` from the fp32 CPU reference build; run it
 # through `tools/nanochat run t0-cpu --`, never directly.
 cc_binary(

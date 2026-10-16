@@ -111,6 +111,21 @@ does not depend on whether a Bazel server is already running. The trade-off is
 that Bazel's own filesystem sandbox is disabled for these runs; the resource
 sandbox is the priority. See [sandbox.md](sandbox.md).
 
+## Fixture generator commands
+
+The offline fixture generators use four grouped scripts. Pass a fixture name after the script name.
+
+| Script | Fixture names |
+|---|---|
+| `tools/dump_training_fixtures.py` | `oracle`, `train`, `rl` |
+| `tools/dump_model_fixtures.py` | `generate`, `eval`, `plan` |
+| `tools/dump_data_fixtures.py` | `tokenizer`, `loader`, `chat` |
+| `tools/dump_runtime_fixtures.py` | `api`, `numerics` |
+
+For example, run `python3 tools/dump_training_fixtures.py oracle --out tests/data/debug_state.bin`.
+The shared `tools/fixture_format.py` writer keeps the common record layouts stable.
+Each generator keeps its own fixture format and runtime requirements.
+
 ## Oracle fixtures
 
 `tests/debug_state.bin` is produced offline by nanochat's `gpt.py` (see
@@ -119,18 +134,18 @@ gradients, then runs a few optimizer steps and matches losses. Tolerances are
 per backend: fp32 CUDA ~1e-5; the fp16 storage test is looser.
 
 The multi-step trajectory is a strict gate (loss `1e-5`, parameter `1e-4`).
-`tools/dump_oracle.py` records the AdamW `eps` it used as
+`tools/dump_training_fixtures.py oracle` records the AdamW `eps` it used as
 `config/opt/adam_eps` (currently `1e-4`) and the C++ test matches it: several
 fixture parameters have a true gradient of exactly zero at this initialization,
 so at nanochat's default `eps=1e-10` their fp32 roundoff would be amplified
 into unreproducible updates. Regenerate the fixture with
-`python tools/dump_oracle.py --adam-eps 1e-4`.
+`python tools/dump_training_fixtures.py oracle --adam-eps 1e-4`.
 
 Fixtures are data, so GPU tests never need torch at runtime. Use fixed seeds.
 
 ## Training-parity harness
 
-`tools/dump_train_fixture.py` records a multi-step *training trajectory* from
+`tools/dump_training_fixtures.py train` records a multi-step *training trajectory* from
 nanochat's PyTorch `gpt.py`: the initial parameters, the exact token/target
 batch at every step, and, after every step, the loss, the global gradient norm,
 and the L2 norm of every parameter (and optionally the final parameter tensors).
@@ -151,7 +166,7 @@ The same source builds as the standalone `//tests:train_parity` binary for an
 arbitrary production fixture:
 
 ```bash
-python3 tools/dump_train_fixture.py --out /tmp/train_parity_d8_s512_50.bin \
+python3 tools/dump_training_fixtures.py train --out /tmp/train_parity_d8_s512_50.bin \
     --layers 8 --heads 4 --kv-heads 4 --embd 512 --vocab 32768 --pad-to 32768 \
     --seq 512 --batch 8 --steps 50 --window L --adam-eps 1e-4
 tools/nanochat gpu --profile t2-parity -- \
@@ -246,8 +261,8 @@ The notebooks directory adds two T0 tests:
 runs both. They ride `//:all_tests` and the default `tools/nanochat test`.
 
 The Python targets use the local `python3` toolchain from `rules_python`, so
-they need no third-party wheel. `tools/dump_api_fixture.py`,
-`tools/dump_plan_fixture.py`, and `tools/dump_chat_fixture.py` produce the
+they need no third-party wheel. `tools/dump_runtime_fixtures.py api`,
+`tools/dump_model_fixtures.py plan`, and `tools/dump_data_fixtures.py chat` produce the
 committed fixtures offline.
 
 ## Finite-difference checks
