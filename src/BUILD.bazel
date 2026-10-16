@@ -80,6 +80,7 @@ cc_library(
         "mesh_collective.cc",
         "mesh_runtime.cc",
         "mesh_train.cc",
+        "sft_shard.cc",
         "model.cc",
         "ops.cc",
         "optim.cc",
@@ -93,6 +94,7 @@ cc_library(
         "mesh_collective.h",
         "mesh_runtime.h",
         "mesh_train.h",
+        "sft_shard.h",
         "model_impl.h",
         "ops.h",
         "optim_state.h",
@@ -126,6 +128,9 @@ cc_library(
         # `train.cc` builds a document-mode loader from the native parquet
         # reader (docs/parquet-native.md), so the workflow links it too.
         "//src/parquet:parquet",
+        # `mesh_train.cc` and `sft_shard.cc` read the `NCSFT001` shard through
+        # the shared record file (docs/training-seam.md section 6.2).
+        ":record_file",
         "//include/nanochat:nanochat",
     ],
 )
@@ -147,18 +152,35 @@ cc_library(
     ],
 )
 
-# The `NANOORC1` fixture container (docs/rl-notebook.md section 4). The
-# persistent worker reads its configuration and initial parameters from the
-# same fixture the file-driven `rl_step` binary consumes, so the worker has a
-# fixture-driven smoke mode that needs no bridge. It is dependency-free, so a
-# production binary can link it without depending on `//tests`.
+# The shared little-endian typed-record file (docs/rl-notebook.md section
+# 4, docs/training-seam.md section 6.2). One layout backs the oracle fixture,
+# the RL fixture, the evaluation fixture, the tokenizer fixture, and the numeric
+# trace, so a test and a production binary read the same records. It is a leaf:
+# the standard library only.
 cc_library(
-    name = "rl_fixture",
-    srcs = ["rl_fixture.cc"],
-    hdrs = ["rl_fixture.h"],
+    name = "record_file",
+    srcs = ["record_file.cc"],
+    hdrs = ["record_file.h"],
     copts = nanochat_copts(),
     defines = precision_defines(),
     deps = ["//include/nanochat:nanochat"],
+)
+
+# The `NANOORC1` RL fixture (docs/rl-notebook.md section 4). It is the shared
+# record file under the RL magic. The persistent worker reads its configuration
+# and initial parameters from the same fixture the file-driven `rl_step` binary
+# consumes, so the worker has a fixture-driven smoke mode that needs no bridge.
+# It is dependency-free, so a production binary can link it without depending
+# on `//tests`.
+cc_library(
+    name = "rl_fixture",
+    hdrs = ["rl_fixture.h"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    deps = [
+        ":record_file",
+        "//include/nanochat:nanochat",
+    ],
 )
 
 # The persistent reinforcement-learning worker and its pipe protocol
@@ -565,6 +587,7 @@ cc_binary(
     defines = precision_defines(),
     deps = [
         ":model",
+        ":record_file",
         "//include/nanochat:nanochat",
     ],
 )
@@ -595,6 +618,7 @@ cc_binary(
     deps = [
         ":model",
         ":rl",
+        ":rl_fixture",
         "//include/nanochat:nanochat",
     ],
 )

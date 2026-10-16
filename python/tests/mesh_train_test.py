@@ -89,6 +89,48 @@ class MeshTrainClientTest(unittest.TestCase):
             self.assertEqual(again["run"]["batch"], 1)
             self.assertEqual(again["mesh"]["count"], 1)
 
+    def sft_shard(self, path, *, seq_len: int = 8):
+        from nanochat_cpp import sft
+
+        class _FakeTokenizer:
+            def get_bos_token_id(self) -> int:
+                return 0
+
+        def fake_render(conversation, tokenizer):
+            return list(conversation), [1] * len(conversation)
+
+        conversations = [[1, 2, 3]] * 6
+        return sft.pack(path, conversations, _FakeTokenizer(), seq_len=seq_len,
+                        render=fake_render)
+
+    def test_sft_shard_run(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="mesh_client_") as tmp:
+            shard = self.sft_shard(Path(tmp) / "sft.nchsft")
+            config = MeshTrainConfig(
+                self.config(), preset="track3", world_size=1,
+                packed_rows_path=str(shard), per_rank_batch=1, grad_accum=1,
+                steps=2, seq=8, seed=42, log_every=0, save_every=0,
+                out_dir=tmp)
+            try:
+                result = config.run()
+            finally:
+                config.close()
+            self.assertEqual(result.steps, 2)
+            metrics = Path(tmp) / "metrics.jsonl"
+            written = [line for line in
+                       metrics.read_text(encoding="utf-8").splitlines()
+                       if line]
+            self.assertEqual(len(written), 2)
+
+    def test_sft_shard_reject_a_mismatched_sequence(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="mesh_client_") as tmp:
+            shard = self.sft_shard(Path(tmp) / "sft.nchsft", seq_len=4)
+            with self.assertRaises(RuntimeError):
+                MeshTrainConfig(
+                    self.config(), preset="track3", world_size=1,
+                    packed_rows_path=str(shard), per_rank_batch=1,
+                    grad_accum=1, steps=1, seq=8, out_dir=tmp).run()
+
 
 if __name__ == "__main__":
     unittest.main()

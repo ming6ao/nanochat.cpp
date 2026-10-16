@@ -7,41 +7,58 @@ the C++ SFT driver, launched through ``tools/nanochat train``.
 from __future__ import annotations
 
 import os
-import struct
+import sys
+from array import array
 from pathlib import Path
 from typing import Callable
 
-from . import _build, toolchain
-from . import sft_data
+from . import _build, eval_fixture, sft_data, toolchain
 
 __all__ = ["pack", "run"]
 
+#: The magic of the packed SFT shard. The layout is the shared record file
+#: (`src/record_file.h`), so the C++ reader owns it.
 _MAGIC = b"NCSFT001"
+
+
+def _pack_int32(values: array) -> bytes:
+    """Little-endian bytes for one ``int32`` payload."""
+    buffer = array("i", values)
+    if buffer.itemsize != 4:
+        raise ValueError("this host's C int is not 32 bits")
+    if sys.byteorder != "little":
+        buffer.byteswap()
+    return buffer.tobytes()
 
 
 def pack(output_path, conversations, tokenizer, seq_len: int,
          render: Callable | None = None) -> Path:
-    path = Path(output_path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    count = 0
-    with path.open("wb") as file:
-        file.write(_MAGIC)
-        file.write(struct.pack("<QQ", seq_len, 0))
-        for inputs, targets in sft_data.iter_packed_rows(
-                conversations, tokenizer, seq_len, render=render):
-            if len(inputs) != seq_len or len(targets) != seq_len:
-                continue
-            for value in inputs:
-                file.write(struct.pack("<i", int(value)))
-            for value in targets:
-                file.write(struct.pack("<i", int(value)))
-            count += 1
-        size = file.tell()
-        file.seek(16)
-        file.write(struct.pack("<Q", count))
-        file.seek(size)
-        file.flush()
-    return path
+    """Write the packed rows as one ``NCSFT001`` record file.
+
+    The file holds two ``int32`` records, ``tokens`` and ``targets``, each of
+    shape ``[rows, seq_len]``. A target of ``-1`` marks an ignored position.
+    The C++ mesh training driver and ``sft_main`` read the file through
+    ``src/record_file.h`` (docs/training-seam.md section 6.2).
+    """
+    seq_len = int(seq_len)
+    inputs = array("i")
+    targets = array("i")
+    rows = 0
+    for row_inputs, row_targets in sft_data.iter_packed_rows(
+            conversations, tokenizer, seq_len, render=render):
+        if len(row_inputs) != seq_len or len(row_targets) != seq_len:
+            continue
+        inputs.extend(int(value) for value in row_inputs)
+        targets.extend(int(value) for value in row_targets)
+        rows += 1
+    shape = (rows, seq_len)
+    records = [
+        eval_fixture.Record("tokens", eval_fixture.DTYPE_INT32, shape,
+                            _pack_int32(inputs)),
+        eval_fixture.Record("targets", eval_fixture.DTYPE_INT32, shape,
+                            _pack_int32(targets)),
+    ]
+    return eval_fixture.write(output_path, records, magic=_MAGIC)
 
 
 def run(shard, checkpoint, *, binary: str | None = None,

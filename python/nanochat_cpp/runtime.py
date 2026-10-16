@@ -77,6 +77,28 @@ def _model_from_dict(model: dict):
     return Config(**model)
 
 
+def _optimizer_to_dict(optimizer) -> dict | None:
+    """The optimizer fields as a job dictionary, or None to select the
+    preset."""
+    if optimizer is None:
+        return None
+    if not isinstance(optimizer, _core.OptimizerConfig):
+        raise TypeError("optimizer must be a nanochat_cpp._core.OptimizerConfig")
+    return {name: getattr(optimizer, name)
+            for name, _kind in _core.OptimizerConfig._fields_}
+
+
+def _optimizer_from_dict(data) -> "_core.OptimizerConfig | None":
+    """The ``OptimizerConfig`` for a job dictionary, or None."""
+    if not data:
+        return None
+    config = _core.OptimizerConfig()
+    for name, _kind in _core.OptimizerConfig._fields_:
+        if name in data:
+            setattr(config, name, data[name])
+    return config
+
+
 def global_batch(per_rank_batch: int, grad_accum: int,
                  world_size: int) -> int:
     """The global sequence count of one step.
@@ -391,10 +413,12 @@ class MeshTrainConfig:
     """
 
     def __init__(self, config, preset="track3", *, world_size=1,
-                 per_rank_batch, grad_accum, steps, tokenizer, train_parquet,
-                 seq=0, seed=42, data_seed=42, log_every=1, save_every=0,
-                 resume=False, out_dir="", checkpoint_path="",
-                 flops_per_token=0.0, peak_flops=0.0) -> None:
+                 per_rank_batch, grad_accum, steps, tokenizer="",
+                 train_parquet=(), packed_rows_path="", optimizer=None,
+                 warm_start_path="", seq=0, seed=42, data_seed=42,
+                 log_every=1, save_every=0, resume=False, out_dir="",
+                 checkpoint_path="", flops_per_token=0.0,
+                 peak_flops=0.0) -> None:
         self._lib = _lib.load()
         self._keepalive: list = []
         self._mesh = None
@@ -408,12 +432,15 @@ class MeshTrainConfig:
         self._job = {
             "model": _model_to_dict(core_model),
             "preset": str(preset),
+            "optimizer": _optimizer_to_dict(optimizer),
+            "warm_start_path": str(warm_start_path),
             "flops_per_token": float(flops_per_token),
             "peak_flops": float(peak_flops),
             "mesh": {"count": count},
             "data": {
                 "parquet": [str(path) for path in paths],
                 "tokenizer_path": str(tokenizer),
+                "packed_rows_path": str(packed_rows_path),
                 "data_seed": int(data_seed),
             },
             "run": {
@@ -528,6 +555,11 @@ class MeshTrainConfig:
         core = _core.MeshTrainConfig()
         core.model = model
         self._set_string(core, "preset", job["preset"])
+        self._set_string(core, "warm_start_path", job.get("warm_start_path", ""))
+        optimizer = _optimizer_from_dict(job.get("optimizer"))
+        if optimizer is not None:
+            self._keepalive.append(optimizer)
+            core.optimizer = ctypes.pointer(optimizer)
         core.flops_per_token = float(job["flops_per_token"])
         core.peak_flops = float(job["peak_flops"])
         count = max(1, int(job["mesh"]["count"]))
@@ -538,6 +570,7 @@ class MeshTrainConfig:
         core.mesh = self._mesh
         data = job["data"]
         self._set_string(core.data, "tokenizer_path", data["tokenizer_path"])
+        self._set_string(core.data, "packed_rows_path", data.get("packed_rows_path", ""))
         core.data.data_seed = int(data["data_seed"])
         path_bytes = [str(path).encode("utf-8") for path in data["parquet"]]
         self._keepalive.extend(path_bytes)

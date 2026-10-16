@@ -16,7 +16,7 @@
 // `--config=sim`, and on the Pascal GPU.
 //
 // Container. The trace reuses the little-endian record layout that
-// `tests/oracle_fixture.h` reads, under its own 8-byte magic `NANONUM1`. The
+// `src/container.h` owns, under its own 8-byte magic `NANONUM1`. The
 // layout is unchanged, so Phase 0 added one magic string and no record
 // sequence: `[magic][u32 version][u32 count]`, then one
 // `[u16 name_len][name][u8 dtype][u8 ndim][u64 shape...][payload]` per record.

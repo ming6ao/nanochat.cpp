@@ -790,19 +790,20 @@ parse the optimizer section.
 | 1 | Markdown: supervised fine-tuning of a base checkpoint |
 | 2 | Setup (`devices=1`) |
 | 3 | `hub_checkpoint.pull_stage` for the `base` stage |
-| 4 | Build the one-device `MeshRuntime`; `runtime.load(..., optimizer=False)` |
+| 4 | Build the mesh driver config; the warm start is the base parameters only |
 | 5 | The base completion before fine-tuning |
-| 6 | The conversation mixture and the packing |
-| 7 | The fine-tuning loop on the runtime, one step per packed row |
-| 8 | `runtime.save("checkpoint.ckpt")`, then the metadata files |
+| 6 | The conversation mixture and the `NCSFT001` shard write |
+| 7 | Run the driver on the packed shard, then check that the loss decreased |
+| 8 | The metadata files; the driver wrote the checkpoint |
 | 9 | `hub_checkpoint.push_stage` for the `sft` stage, with the base revision |
 | 10 | A small chat check |
 | 11 | Markdown: notes |
 
-The one-device `MeshRuntime` uses `world_size=1`, `grad_accum=1`, `batch=1`,
-and `seq=SFT_SEQ`. The base load passes `optimizer=False`, so the reader skips
-the pretraining optimizer section. The masked targets use `-1` for ignored
-positions.
+The driver uses one card, `world_size=1`, `per_rank_batch=1`, `grad_accum=1`,
+and `seq=SFT_SEQ`. The warm start loads the base parameters only, so the reader
+skips the pretraining optimizer section. The masked targets use `-1` for ignored
+positions. The driver reads the `NCSFT001` shard that `nc.sft.pack` wrote, so
+Python never steps the optimizer.
 
 The runtime takes its optimizer and schedule from `args.TrainArgs`:
 

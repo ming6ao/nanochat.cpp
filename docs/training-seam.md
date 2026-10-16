@@ -78,8 +78,10 @@ The step arithmetic already lives in C++ and is correct.
 | Step loop, logging, evaluation, checkpoint interval | `TrainLoop` (`src/train.cc`) |
 
 The gaps are in the driver, not in the arithmetic. `TrainLoop` reads parquet
-documents through `DataLoader` and uses the unweighted path only. It has no
-packed-row source and no weighted step.
+documents through `DataLoader` and uses the unweighted path only. The mesh
+driver gained a packed `NCSFT001` shard path and a weights-only warm start
+(section 6.2). The `TrainLoop` packed-row source and the weighted step remain
+open.
 
 ## 4. What Python owns
 
@@ -133,10 +135,13 @@ fixture (`python/tests/api_test.py:143`). The gate compares per-step losses only
 The loop structure can still drift.
 
 ### 5.5 There is no supervised fine-tuning or reinforcement-learning driver
+(partly fixed)
 
-`Trainer` takes `TokenData`, which reads parquet. There is no `SftTrainer` and
-no `RlTrainer`. A user cannot reach the stated goal, "pretrain and post-train a
-model," through the interface. The user writes mechanism instead. Section 11 of
+`Trainer` takes `TokenData`, which reads parquet. The mesh driver now reads a
+packed `NCSFT001` shard and does a weights-only warm start, so `posttrain.ipynb`
+runs through the C++ driver (section 6.2). There is still no `SftTrainer` or
+`sft_main` binary, and no `RlTrainer`. The user writes mechanism for the
+reinforcement-learning path. Section 11 of
 [post-training.md](post-training.md) lists the missing parts.
 
 ### 5.6 The renderer is private and incomplete (fixed)
@@ -204,27 +209,36 @@ backward already carries the per-row weight for reinforcement learning
 (`include/nanochat/model.h:76`). A separate mask field would create two mask
 channels with no precedence rule.
 
-### 6.2 Add a packed-row data path
+### 6.2 The packed-row data path (partly done)
 
 `DocumentSource` yields raw text (`include/nanochat/dataloader.h:22`). The
 `DataLoader` tokenizes and packs that text. A supervised fine-tuning source
 cannot use `DocumentSource`, because Python already rendered the text into token
 ids and targets.
 
-Add a packed-row source beside `DocumentSource` in
-`include/nanochat/dataloader.h`. It yields `tokens` and `targets` buffers of
-`batch * seq` entries, with `-1` at an ignored target. Add a small loader that
-batches those rows. `TrainLoop` then accepts either source.
+The mesh driver now reads one packed `NCSFT001` shard. Python writes the shard
+with `nanochat_cpp.sft.pack`. The shard is a typed-record file
+(`src/record_file.h`) with two `int32` records, `tokens` and `targets`, each of
+shape `[rows, seq]`. A target of `-1` marks an ignored position. The file is
+self-describing and versioned, so `src/sft_shard.h` holds only the typed view,
+and `sft_main` and the mesh driver share one loader. The driver loads the shard
+and cycles the rows, so it needs no reader thread.
 
-The file format is a packed shard. The bridge writes the shard. The reader lives
-with the other native readers. The header `dataloader.h` is harness-owned, so
-this change needs no frozen-header edit.
+`TrainLoop` still reads parquet only. A packed-row source beside
+`DocumentSource` in `include/nanochat/dataloader.h` remains open, so a
+parquet-free `TrainLoop` can run. The header is harness-owned, so that change
+needs no frozen-header edit.
 
-### 6.3 Extend the C++ driver
+### 6.3 Explicit rates and the warm start (partly done)
 
-`TrainConfig` already accepts a `DocumentSourceFactory` for the training data
-(`src/train.h`). Add the packed-row source beside it. `TrainLoop` then gains
-four items from [post-training.md](post-training.md) section 12:
+The mesh driver takes an explicit optimizer and schedule, so a fine-tuning run
+passes its own rates and does not use the `track3` preset. It also takes a
+weights-only warm start: the driver loads the parameter records of a base
+checkpoint and keeps the fresh optimizer state
+(`docs/checkpoint-format.md` section 9.1).
+
+`TrainLoop` (`src/train.h`) still lacks the packed-row source and these items
+from [post-training.md](post-training.md) section 12:
 
 1. A progress-based learning-rate schedule.
 2. A flat or ramped Muon momentum option.
@@ -267,10 +281,10 @@ Proposed Python shape:
 
 ```python
 # Python renders the conversations and writes a packed shard.
-shard = nc.sft.pack(conversations, tokenizer, seq_len=512)
+shard = nc.sft.pack("chatsft.nchsft", conversations, tokenizer, seq_len=512)
 # The facade launches the C++ driver through tools/nanochat, so the
 # sandbox and the GPU broker apply.
-nc.sft.run(shard, steps=1000, checkpoint="chatsft.nchkpt01")
+nc.sft.run(shard, "chatsft.nchkpt01", num_iterations=1000)
 ```
 
 `nc.sft.run` calls the toolchain, which runs `tools/nanochat train -- sft_main
@@ -334,8 +348,8 @@ interface work.
 | Phase | Owner | Gate |
 |---|---|---|
 | 1. Expose the existing step. Add `nanochat_train_step` and `nanochat_backward_accumulate`, use `backward_accumulate` in `Trainer`, and persist the optimizer step. (Done.) | Architect for `capi.h`; Python surface for `bindings/` and `api.py`; Harness for `src/train.cc` | The Python tests and `//bindings:nanochat_capi_test` |
-| 2. Add the packed-row source and the reader. Add `render_conversation`. (The renderer, the mixture, and the Python packer are done; the native packed-row source remains.) | Harness for the loader; Python surface for the renderer | A packer test and a mask-shift test |
-| 3. Add the supervised fine-tuning driver and `sft_main`. | Harness for `src/`; Python surface for the facade | A short run at tier T2 against the reference loss curve |
+| 2. Add the packed-row source and the reader. Add `render_conversation`. (Partly done: the renderer, the Python packer, and the mesh driver shard reader exist. The `TrainLoop` packed-row source remains.) | Harness for the loader; Python surface for the renderer | A packer test and a mask-shift test |
+| 3. Add the supervised fine-tuning driver and `sft_main`. (Partly done: the mesh driver runs the SFT loop from a shard. The standalone `sft_main` remains.) | Harness for `src/`; Python surface for the facade | A short run at tier T2 against the reference loss curve |
 | 4. Add `nanochat_rl_step` and the parity fixture. | Harness for the step; Oracle for the fixture and the test | `//tests:rl_parity_test` at tier T2 |
 | 5. Add the reinforcement-learning worker. | Harness for the worker; Python surface for the bridge | An RL smoke run at tier T2 |
 | 6. Add the mesh training driver. Add `src/mesh_train.cc` and the driver calls in `capi.h`. Use the Python driver config directly. (Done.) | Harness for `src/**`; Architect for `capi.h`; Python surface for the client; Notebooks for the launcher | The CPU driver loss sequence equals the old Python loop. The resume and the interrupt save work |

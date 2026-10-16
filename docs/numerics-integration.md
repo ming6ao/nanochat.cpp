@@ -124,16 +124,17 @@ two Bazel targets. One committed golden file is the reference.
   golden implies CPU equals simulator. No second binary and no file passing
   between builds are necessary.
 
-The test reuses `tests/oracle_fixture.h`. That reader already stores named
-float tensors and scalars. Phase 0 added one magic string to the reader and no
-record sequence, because the flat layout holds the trace.
+The test reuses the shared container reader, `src/container.h`, through
+`tests/oracle_fixture.h`. That reader already stores named float tensors and
+scalars. Phase 0 added one magic string and no record sequence, because the
+flat layout holds the trace.
 
 ### 5.1 Trace format
 
-The trace reuses the little-endian record layout of `tests/oracle_fixture.h`
-under its own magic `NANONUM1`. The phase, the step, and the parameter name live
-in the record name. The container is `[8-byte magic][u32 version][u32 count]`,
-then one record per
+The trace reuses the little-endian record layout of `src/container.h` under its
+own magic `NANONUM1`. The phase, the step, and the parameter name live in the
+record name. The container is `[8-byte magic][u32 version][u32 count]`, then one
+record per
 `[u16 name length][name][u8 dtype][u8 width][u64 shape...][payload]`.
 
 | Record group | Names |
@@ -280,8 +281,8 @@ This phase blocks all other phases. The Architect and the Oracle deliver one
 approval together.
 
 1. The Architect records the contract in [parity.md](parity.md).
-2. The Oracle extends `tests/oracle_fixture.h` with the `NANONUM1` magic. The
-   flat record layout holds the trace, so no record sequence is necessary.
+2. The Oracle extends `src/container.h` with the `NANONUM1` magic. The flat
+   record layout holds the trace, so no record sequence is necessary.
 3. The Architect freezes the format.
 
 Gate: a reviewer approves the contract and the format. Phase 1 does not start

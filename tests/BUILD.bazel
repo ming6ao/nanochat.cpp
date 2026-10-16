@@ -24,6 +24,7 @@ _BACKEND_COPTS = select({
 cc_library(
     name = "oracle_fixture",
     hdrs = ["oracle_fixture.h"],
+    deps = ["//src:record_file"],
 )
 
 # The reference tokenizer fixture, `NANOTOK1`, produced by

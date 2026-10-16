@@ -23,7 +23,8 @@ layout is in `docs/checkpoint-format.md`.
 
 `nc.Model.load` and `MeshRuntime.load(optimizer=False)` read the parameter
 records only. They skip the optimizer section, so an evaluation or a
-fine-tuning warm start does not allocate the pretraining moments.
+fine-tuning warm start does not allocate the pretraining moments. The mesh
+driver warm start uses the same parameter-only read.
 
 The C++ mesh training driver writes `metrics.jsonl` and `summary.json` in the
 run directory. The notebook polls the two files, so a cell never blocks on the

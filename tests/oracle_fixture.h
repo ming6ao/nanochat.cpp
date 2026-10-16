@@ -11,6 +11,8 @@
 #include <utility>
 #include <vector>
 
+#include "src/record_file.h"
+
 // Reader for the CPU oracle fixture, `tests/data/debug_state.bin`, produced
 // offline by `tools/dump_oracle.py`. The fixture is data, so this reader has no
 // torch dependency and no dependency on the model: any test (CPU, CUDA, or the
@@ -142,68 +144,28 @@ class Fixture {
 
   static Fixture Parse(std::vector<std::uint8_t> bytes) {
     Fixture fixture;
-    if (bytes.size() < 16) throw std::runtime_error("oracle: truncated header");
-    if (std::memcmp(bytes.data(), "NANOORC1", 8) != 0 &&
-        std::memcmp(bytes.data(), "NANOEVL1", 8) != 0 &&
-        std::memcmp(bytes.data(), "NANOTOK1", 8) != 0 &&
-        std::memcmp(bytes.data(), "NANONUM1", 8) != 0) {
-      throw std::runtime_error(
-          "oracle: bad magic (expected NANOORC1, NANOEVL1, NANOTOK1, or "
-          "NANONUM1)");
+    std::vector<Record> records;
+    std::string error;
+    if (!ParseRecordFile(bytes,
+                         {"NANOORC1", "NANOEVL1", "NANOTOK1", "NANONUM1"},
+                         &records, &error)) {
+      throw std::runtime_error("oracle: " + error);
     }
-    const std::uint32_t version = detail::ReadU32(bytes.data() + 8);
-    if (version != 1) throw std::runtime_error("oracle: unsupported version");
-    const std::uint32_t count = detail::ReadU32(bytes.data() + 12);
-
-    std::size_t offset = 16;
-    for (std::uint32_t i = 0; i < count; ++i) {
-      if (offset + 2 > bytes.size())
-        throw std::runtime_error("oracle: truncated name length");
-      const std::uint16_t name_len = detail::ReadU16(bytes.data() + offset);
-      offset += 2;
-      if (offset + name_len > bytes.size())
-        throw std::runtime_error("oracle: truncated name");
-      std::string name(reinterpret_cast<const char*>(bytes.data() + offset),
-                       name_len);
-      offset += name_len;
-
-      if (offset + 2 > bytes.size())
-        throw std::runtime_error("oracle: truncated dtype");
-      const DType dtype = static_cast<DType>(bytes[offset]);
-      const std::uint8_t ndim = bytes[offset + 1];
-      offset += 2;
-
-      std::vector<std::int64_t> shape(ndim);
-      for (std::uint8_t d = 0; d < ndim; ++d) {
-        if (offset + 8 > bytes.size())
-          throw std::runtime_error("oracle: truncated shape");
-        shape[d] =
-            static_cast<std::int64_t>(detail::ReadU64(bytes.data() + offset));
-        offset += 8;
-      }
-
-      std::int64_t numel = 1;
-      for (std::int64_t extent : shape) numel *= extent;
-      const std::size_t payload_bytes =
-          static_cast<std::size_t>(numel) * ElemSize(dtype);
-      if (offset + payload_bytes > bytes.size()) {
-        throw std::runtime_error("oracle: truncated payload for '" + name +
-                                 "'");
-      }
-      fixture.payloads_.emplace_back(bytes.begin() + offset,
-                                     bytes.begin() + offset + payload_bytes);
-      offset += payload_bytes;
-
+    fixture.payloads_.reserve(records.size());
+    for (Record& record : records) {
+      fixture.payloads_.push_back(std::move(record.data));
       Tensor tensor;
-      tensor.dtype = dtype;
-      tensor.shape = shape;
+      tensor.dtype = static_cast<DType>(record.dtype);
+      tensor.shape.reserve(record.shape.size());
+      for (std::uint64_t extent : record.shape) {
+        tensor.shape.push_back(static_cast<std::int64_t>(extent));
+      }
       tensor.data = fixture.payloads_.back().data();
-      tensor.bytes = payload_bytes;
+      tensor.bytes = fixture.payloads_.back().size();
+      const std::string name = record.name;
+      fixture.order_.push_back(name);
       fixture.tensors_.emplace(name, std::move(tensor));
-      fixture.order_.push_back(std::move(name));
     }
-    if (offset != bytes.size())
-      throw std::runtime_error("oracle: trailing bytes");
     return fixture;
   }
 

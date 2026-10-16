@@ -11,6 +11,7 @@
 #include "nanochat/mesh.h"
 #include "nanochat/optim.h"
 #include "nanochat/scheduler.h"
+#include "src/sft_shard.h"
 
 // The mesh training driver (docs/client-runtime-design.md section 10.1 and
 // docs/training-seam.md section 6.6). The driver owns the step loop, the
@@ -65,10 +66,18 @@ struct MeshTrainConfig {
   MeshSpec mesh;
   Config model;
   std::string preset = "track3";
+  // The explicit optimizer and schedule. `use_preset` false selects these and
+  // ignores `preset`. The binding sets them from the C `nanochat_optim_config`.
+  OptimizerConfig optimizer;
+  SchedulerConfig scheduler;
+  bool use_preset = true;
+  // A weights-only warm start. The driver loads the parameter records and
+  // keeps the fresh optimizer state (docs/checkpoint-format.md section 9.1).
+  std::string warm_start_path;
 
   int batch = 1;       // the global batch, in sequences
   int grad_accum = 1;  // micro-batches per replica per step
-  int seq = 0;         // 0 selects `model.seq_len`
+  int seq = 0;         // 0 selects the shard or `model.seq_len`
   std::uint64_t seed = 42;
   std::uint64_t data_seed = 42;  // the loader seed, separate from the weights
   int num_iterations = 100;
@@ -88,10 +97,13 @@ struct MeshTrainConfig {
   std::string metrics_path;     // empty selects `out_dir/metrics.jsonl`
   std::string summary_path;     // empty selects `out_dir/summary.json`
 
-  // The data (docs/parquet-native.md). `train_source` is empty in production,
+  // The data (docs/parquet-native.md). A nonempty `packed_rows_path` selects
+  // the packed `NCSFT001` SFT shard and ignores the parquet fields
+  // (docs/training-seam.md section 6.2). `train_source` is empty in production,
   // so the driver builds the parquet factory. A test injects a source.
   std::vector<std::string> train_parquet;
   std::string tokenizer_path;
+  std::string packed_rows_path;
   std::string text_column = "text";
   int tokenizer_threads = 4;
   int document_buffer = 1000;
@@ -136,6 +148,9 @@ class MeshTrainDriver {
   std::unique_ptr<DataLoader> loader_;
   std::vector<int> tokens_;
   std::vector<int> targets_;
+  SftShard shard_;
+  int row_count_ = 0;
+  int row_index_ = 0;
   std::vector<MeshStepRecord> records_;
   MeshTrainSummary summary_;
   double flops_per_token_ = 0.0;

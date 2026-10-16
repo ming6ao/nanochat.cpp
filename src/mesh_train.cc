@@ -16,6 +16,7 @@
 #include <csignal>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <memory>
@@ -70,7 +71,7 @@ double MfuOf(double tokens_per_sec, double flops_per_token, double peak_flops) {
   const double value = tokens_per_sec * flops_per_token / peak_flops;
   return std::min(std::max(value, 0.0), 1.0);
 }
-
+// ---------------------------------------------------------------------------
 // ---------------------------------------------------------------------------
 // A minimal JSON writer. The key order is sorted, so the file is deterministic.
 // ---------------------------------------------------------------------------
@@ -193,24 +194,41 @@ MeshTrainDriver::MeshTrainDriver(MeshTrainConfig config)
   }
 
   model_ = config_.model;
-  if (config_.seq > 0) {
-    model_.seq_len = config_.seq;
-  } else {
+
+  // A packed SFT shard selects the rows path and owns the sequence length. The
+  // model keeps its own `seq_len`, so a short SFT row does not change the
+  // attention window.
+  if (!config_.packed_rows_path.empty()) {
+    std::string shard_error;
+    if (!LoadSftShard(config_.packed_rows_path, &shard_, &shard_error)) {
+      throw std::runtime_error(shard_error);
+    }
+    row_count_ = shard_.rows;
+    if (config_.seq <= 0) config_.seq = shard_.seq;
+    if (config_.seq != shard_.seq) {
+      throw std::invalid_argument(
+          "the SFT shard and the configured sequence length differ");
+    }
+  } else if (config_.seq <= 0) {
     config_.seq = model_.seq_len;
   }
   if (config_.batch <= 0 || config_.seq <= 0) {
     throw std::invalid_argument("the batch and the sequence must be positive");
   }
 
-  // The preset owns the optimizer and the schedule. The run length is
-  // absolute, so a resume continues the schedule (docs/training-seam.md
-  // section 10).
-  OptimizerConfig optimizer;
-  SchedulerConfig scheduler;
-  if (config_.preset.empty() || config_.preset == "track3") {
-    const TrainConfig baseline = TrackThreeBaseline();
-    optimizer = baseline.optimizer;
-    scheduler = baseline.scheduler;
+  // An explicit optimizer wins. Otherwise the preset owns the optimizer and
+  // the schedule. The run length is absolute, so a resume continues the
+  // schedule (docs/training-seam.md section 10).
+  OptimizerConfig optimizer = config_.optimizer;
+  SchedulerConfig scheduler = config_.scheduler;
+  if (config_.use_preset) {
+    optimizer = OptimizerConfig();
+    scheduler = SchedulerConfig();
+    if (config_.preset.empty() || config_.preset == "track3") {
+      const TrainConfig baseline = TrackThreeBaseline();
+      optimizer = baseline.optimizer;
+      scheduler = baseline.scheduler;
+    }
   }
   scheduler.num_iterations = config_.num_iterations;
 
@@ -225,19 +243,21 @@ MeshTrainDriver::MeshTrainDriver(MeshTrainConfig config)
   runtime_ =
       std::make_unique<MeshRuntime>(config_.mesh, std::move(runtime_config));
 
-  tokenizer_ = LoadTokenizer(config_.tokenizer_path);
-  if (tokenizer_ == nullptr) {
-    throw std::runtime_error("cannot load tokenizer: " +
-                             config_.tokenizer_path);
+  if (config_.packed_rows_path.empty()) {
+    tokenizer_ = LoadTokenizer(config_.tokenizer_path);
+    if (tokenizer_ == nullptr) {
+      throw std::runtime_error("cannot load tokenizer: " +
+                               config_.tokenizer_path);
+    }
+    DocumentSourceFactory factory =
+        config_.train_source
+            ? config_.train_source
+            : MakeParquetFactory(config_.train_parquet, config_.text_column);
+    loader_ = std::make_unique<DataLoader>(
+        std::move(factory), tokenizer_.get(), config_.batch,
+        config_.effective_seq(), config_.data_seed, config_.tokenizer_threads,
+        static_cast<std::size_t>(config_.document_buffer));
   }
-  DocumentSourceFactory factory =
-      config_.train_source
-          ? config_.train_source
-          : MakeParquetFactory(config_.train_parquet, config_.text_column);
-  loader_ = std::make_unique<DataLoader>(
-      std::move(factory), tokenizer_.get(), config_.batch,
-      config_.effective_seq(), config_.data_seed, config_.tokenizer_threads,
-      static_cast<std::size_t>(config_.document_buffer));
 
   // The MFU inputs. A zero override selects the model estimate and the active
   // device table, so the client does not pass a device name.
@@ -258,6 +278,14 @@ MeshTrainDriver::MeshTrainDriver(MeshTrainConfig config)
                      static_cast<std::size_t>(config_.effective_seq()),
                  0);
   targets_.assign(tokens_.size(), 0);
+
+  // A weights-only warm start, then a full resume. The driver loads the
+  // parameters from the warm start and keeps the fresh optimizer state, so a
+  // fine-tuning run does not inherit the pretraining moments
+  // (docs/checkpoint-format.md section 9.1).
+  if (!config_.warm_start_path.empty()) {
+    runtime_->LoadWeights(config_.warm_start_path);
+  }
 
   // A resume loads the parameters, the optimizer state, and the step, then
   // replays the consumed batches, so the data stream also continues
@@ -285,6 +313,20 @@ MeshTrainDriver::~MeshTrainDriver() = default;
 
 bool MeshTrainDriver::LoadBatch(std::vector<int>* tokens,
                                 std::vector<int>* targets) {
+  if (row_count_ > 0) {
+    const int seq = config_.effective_seq();
+    for (int row = 0; row < config_.batch; ++row) {
+      const std::size_t source =
+          static_cast<std::size_t>((row_index_ + row) % row_count_) * seq;
+      const std::size_t destination = static_cast<std::size_t>(row) * seq;
+      std::copy_n(shard_.tokens.begin() + source, seq,
+                  tokens->begin() + destination);
+      std::copy_n(shard_.targets.begin() + source, seq,
+                  targets->begin() + destination);
+    }
+    row_index_ = (row_index_ + config_.batch) % row_count_;
+    return true;
+  }
   if (loader_ == nullptr) return false;
   if (loader_->Next(tokens->data(), targets->data())) return true;
   loader_->Reset();

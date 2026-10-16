@@ -79,8 +79,8 @@ Design constraints:
   gives a focus set (categorical chat only reads the letter tokens at the answer
   position).
 - The binary is `score_main`; it is stateless and writes a result file. The
-  bridge owns the fixture format (`eval_fixture.py`), and the test dumper mirrors
-  it.
+  layout lives in `src/record_file.h`. `python/nanochat_cpp/eval_fixture.py`
+  writes the `NANOEVL1` file, and the test dumper mirrors it.
 
 The reduction is deliberately *not* in C++. Whether a CORE example is correct is
 "lowest mean loss among candidates" or "exact argmax match". Whether an ARC

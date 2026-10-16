@@ -1,7 +1,7 @@
 // tests/numerics_trace_emit_main.cc -- the golden-trace emitter.
 //
 // Runs the whole staged trace once on the CPU reference backend and writes the
-// committed golden file, in the container that `tests/oracle_fixture.h` reads.
+// committed golden file, in the container that `src/container.h` owns.
 // `tools/dump_numerics_golden.py` builds this binary, runs it through
 // `tools/nanochat`, and records the summary. Run it from the repository root:
 //

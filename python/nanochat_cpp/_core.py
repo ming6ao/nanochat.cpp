@@ -272,6 +272,7 @@ class MeshTrainDataConfig(ctypes.Structure):
         ("parquet", ctypes.POINTER(ctypes.c_char_p)),
         ("parquet_count", ctypes.c_int),
         ("tokenizer_path", ctypes.c_char_p),
+        ("packed_rows_path", ctypes.c_char_p),
         ("data_seed", ctypes.c_uint64),
     ]
 
@@ -314,6 +315,8 @@ class MeshTrainConfig(ctypes.Structure):
         ("model", Config),
         ("mesh", ctypes.c_void_p),
         ("preset", ctypes.c_char_p),
+        ("optimizer", ctypes.POINTER(OptimizerConfig)),
+        ("warm_start_path", ctypes.c_char_p),
         ("flops_per_token", ctypes.c_double),
         ("peak_flops", ctypes.c_double),
         ("data", MeshTrainDataConfig),

@@ -9,9 +9,10 @@
 //       --num-iterations 1000 --batch 2
 //
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
-#include <fstream>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -19,28 +20,8 @@
 #include "nanochat/optim.h"
 #include "nanochat/sandbox.h"
 #include "src/cli.h"
+#include "src/sft_shard.h"
 #include "src/train.h"
-
-namespace {
-
-struct PackedShard {
-  std::uint64_t rows = 0;
-  std::uint64_t seq = 0;
-};
-
-bool ReadHeader(std::ifstream& in, PackedShard* shard) {
-  char magic[8];
-  in.read(magic, 8);
-  if (!in) return false;
-  if (std::string(magic, 8) != "NCSFT001") return false;
-  in.read(reinterpret_cast<char*>(&shard->seq), sizeof(shard->seq));
-  if (!in) return false;
-  in.read(reinterpret_cast<char*>(&shard->rows), sizeof(shard->rows));
-  if (!in) return false;
-  return true;
-}
-
-}  // namespace
 
 int main(int argc, char** argv) {
   nanochat::RequireSandboxOrDie("sft");
@@ -84,9 +65,8 @@ int main(int argc, char** argv) {
     } else if (flag == "--seq") {
       config.seq = nanochat::cli::ParseInt(value, &parsed_int) ? parsed_int : 0;
     } else if (flag == "--seed") {
-      config.seed = nanochat::cli::ParseU64(value, &parsed_u64)
-                        ? parsed_u64
-                        : config.seed;
+      config.seed = nanochat::cli::ParseU64(value, &parsed_u64) ? parsed_u64
+                                                                : config.seed;
     } else if (flag == "--device") {
       config.device_name = value;
     } else {
@@ -118,27 +98,19 @@ int main(int argc, char** argv) {
   config.scheduler.muon_momentum_peak = 0.95f;
   config.scheduler.muon_momentum_final = 0.95f;
 
-  // Read the shard header before building the model. The shard carries the
-  // owned sequence length, which the SFT mix uses verbatim.
-  std::ifstream in(rows_path, std::ios::binary);
-  if (!in) {
-    std::fprintf(stderr, "sft_main: cannot open %s\n", rows_path.c_str());
+  // Read the shard before building the model. The shard carries the owned
+  // sequence length, which the SFT mix uses verbatim.
+  nanochat::SftShard shard;
+  std::string shard_error;
+  if (!nanochat::LoadSftShard(rows_path, &shard, &shard_error)) {
+    std::fprintf(stderr, "sft_main: %s\n", shard_error.c_str());
     return 2;
   }
-  PackedShard shard;
-  if (!ReadHeader(in, &shard)) {
-    std::fprintf(stderr, "sft_main: bad shard header\n");
-    return 2;
-  }
-  const int shard_seq = static_cast<int>(shard.seq);
+  const int shard_seq = shard.seq;
   if (config.seq <= 0) config.seq = shard_seq;
   if (config.seq != shard_seq) {
     std::fprintf(stderr, "sft_main: seq mismatch (%d vs %d)\n", config.seq,
                  shard_seq);
-    return 2;
-  }
-  if (shard.rows == 0) {
-    std::fprintf(stderr, "sft_main: empty shard\n");
     return 2;
   }
 
@@ -148,7 +120,8 @@ int main(int argc, char** argv) {
   nanochat::Config model_config = config.model;
   if (model_config.seq_len <= 0) model_config.seq_len = shard_seq;
 
-  std::unique_ptr<nanochat::Model> model = nanochat::Model::Create(model_config);
+  std::unique_ptr<nanochat::Model> model =
+      nanochat::Model::Create(model_config);
   nanochat::SchedulerConfig scheduler_config = config.scheduler;
   if (scheduler_config.num_iterations <= 0) {
     scheduler_config.num_iterations =
@@ -156,8 +129,8 @@ int main(int argc, char** argv) {
   }
   config.scheduler = scheduler_config;
   auto scheduler = std::make_unique<nanochat::Scheduler>(scheduler_config);
-  auto optimizer = nanochat::CreateOptimizer(model.get(), config.optimizer,
-                                            *scheduler);
+  auto optimizer =
+      nanochat::CreateOptimizer(model.get(), config.optimizer, *scheduler);
 
   int step = 0;
   if (!config.resume_path.empty()) {
@@ -167,58 +140,28 @@ int main(int argc, char** argv) {
     model->InitWeights(config.seed);
   }
   const int first_step = step > 0 ? step + 1 : 1;
-  const int target_steps = std::max(first_step - 1 + config.num_iterations,
-                                   config.num_iterations);
+  const int target_steps =
+      std::max(first_step - 1 + config.num_iterations, config.num_iterations);
 
-  const std::uint64_t rows_total = shard.rows;
-  std::uint64_t row_cursor = 0;
+  std::vector<int> tokens(static_cast<std::size_t>(config.batch) * shard_seq);
+  std::vector<int> targets(tokens.size());
+  int row_cursor = 0;
   for (int current = first_step; current <= target_steps; ++current) {
-    if (row_cursor >= rows_total) row_cursor = 0;  // cycle epochs
-    std::vector<int> tokens;
-    std::vector<int> targets;
-    tokens.reserve(static_cast<std::size_t>(config.batch) * shard_seq);
-    targets.reserve(static_cast<std::size_t>(config.batch) * shard_seq);
-
-    int rows_in_batch = 0;
     for (int r = 0; r < config.batch; ++r) {
-      if (row_cursor >= rows_total) {
-        row_cursor = 0;
-        if (rows_in_batch == 0) break;
-      }
-      if (row_cursor >= rows_total) break;
-      const std::uint64_t row_offset = row_cursor;
-      in.clear();
-      in.seekg(static_cast<std::streamoff>(
-                   8 * 3 + row_offset * shard_seq * 2 * sizeof(std::int32_t)),
-               std::ios::beg);
-      // Header size: magic 8 + seq 8 + rows 8 = 24.
-      std::vector<std::int32_t> row_tokens(shard_seq);
-      std::vector<std::int32_t> row_targets(shard_seq);
-      in.read(reinterpret_cast<char*>(row_tokens.data()),
-              static_cast<std::streamsize>(shard_seq * sizeof(std::int32_t)));
-      in.read(reinterpret_cast<char*>(row_targets.data()),
-              static_cast<std::streamsize>(shard_seq * sizeof(std::int32_t)));
-      if (!in) {
-        std::fprintf(stderr, "sft_main: read failure at row %llu\n",
-                     static_cast<unsigned long long>(row_offset));
-        return 2;
-      }
-      for (int t = 0; t < shard_seq; ++t) {
-        tokens.push_back(static_cast<int>(row_tokens[t]));
-        targets.push_back(static_cast<int>(row_targets[t]));
-      }
+      if (row_cursor >= shard.rows) row_cursor = 0;
+      const std::size_t source =
+          static_cast<std::size_t>(row_cursor) * shard_seq;
+      const std::size_t destination = static_cast<std::size_t>(r) * shard_seq;
+      std::copy_n(shard.tokens.begin() + source, shard_seq,
+                  tokens.begin() + destination);
+      std::copy_n(shard.targets.begin() + source, shard_seq,
+                  targets.begin() + destination);
       ++row_cursor;
-      ++rows_in_batch;
-    }
-    if (rows_in_batch == 0) break;
-    if (rows_in_batch < config.batch) {
-      const int missing = config.batch - rows_in_batch;
-      (void)missing;
     }
 
     optimizer->ZeroGrad();
-    const float loss =
-        model->ForwardLoss(tokens.data(), targets.data(), rows_in_batch, shard_seq);
+    const float loss = model->ForwardLoss(tokens.data(), targets.data(),
+                                          config.batch, shard_seq);
     model->Backward();
     optimizer->Step(current);
 
@@ -228,7 +171,7 @@ int main(int argc, char** argv) {
 
   if (!config.checkpoint_path.empty()) {
     nanochat::Checkpointer::SaveModel(*model, *optimizer, target_steps,
-                                     config.checkpoint_path);
+                                      config.checkpoint_path);
   }
   return 0;
 }

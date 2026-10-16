@@ -26,6 +26,7 @@
 #include "nanochat/tokenizer.h"
 #include "src/mesh_runtime.h"
 #include "src/mesh_train.h"
+#include "src/record_file.h"
 #include "src/tokenizer/split_pattern.h"
 #include "src/tokenizer/tokenizer_internal.h"
 #include "src/train.h"
@@ -261,10 +262,49 @@ void TestDriverMatchesHandRun() {
 
 }  // namespace
 
+// The packed `NCSFT001` shard: the driver cycles the rows and writes one record
+// per step (docs/training-seam.md section 6.2).
+void TestDriverRunsPackedRows() {
+  const Fixture fixture = MakeFixture();
+  const std::string out = (fixture.root / "rows").string();
+  const std::string shard_path = (fixture.root / "rows.nchsft").string();
+  const int seq = 8;
+  const int rows = 3;
+  std::vector<std::int32_t> flat_tokens;
+  std::vector<std::int32_t> flat_targets;
+  for (int row = 0; row < rows; ++row) {
+    for (int i = 0; i < seq; ++i) flat_tokens.push_back((i + row) % 64);
+    for (int i = 0; i < seq; ++i) flat_targets.push_back(i % 64);
+  }
+  const std::vector<std::uint64_t> shape = {static_cast<std::uint64_t>(rows),
+                                            static_cast<std::uint64_t>(seq)};
+  std::vector<nanochat::Record> records;
+  records.push_back(nanochat::MakeInt32Record("tokens", shape, flat_tokens));
+  records.push_back(nanochat::MakeInt32Record("targets", shape, flat_targets));
+  std::string error;
+  if (!nanochat::SaveRecordFile(shard_path, "NCSFT001", records, &error)) {
+    Fail("SaveRecordFile failed: " + error);
+    return;
+  }
+
+  MeshTrainConfig config = TinyDriverConfig(fixture, out, 2);
+  config.packed_rows_path = shard_path;
+  config.tokenizer_path.clear();
+  config.train_source = nullptr;
+  config.seq = seq;
+  MeshTrainDriver driver(std::move(config));
+  driver.Run();
+  if (driver.records().size() != 2) Fail("the rows run must write two records");
+  if (CountLines(ReadFile(out + "/metrics.jsonl")) != 2) {
+    Fail("the rows run must write two metric lines");
+  }
+}
+
 int main() {
   TestDriverWritesRecordAndSummary();
   TestResumeContinues();
   TestDriverMatchesHandRun();
+  TestDriverRunsPackedRows();
   if (g_failures != 0) {
     std::fprintf(stderr, "%d failure(s)\n", g_failures);
     return 1;

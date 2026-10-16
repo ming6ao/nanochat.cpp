@@ -308,10 +308,11 @@ int nanochat_runtime_step(nanochat_runtime* runtime);
 // and `output` is the written artifacts.
 //
 // `preset` names the optimizer and the schedule; "track3" is the reference
-// recipe. `mesh` is a `nanochat_mesh` handle; the driver reads its device
-// indices and does not free it. A zero `run.seq` selects `model.seq_len`. A
-// zero `flops_per_token` selects the model estimate, and a zero `peak_flops`
-// selects the active device table. An empty `output.checkpoint_path` selects
+// recipe. A non-null `optimizer` overrides the preset. `mesh` is a
+// `nanochat_mesh` handle; the driver reads its device indices and does not free
+// it. A zero `run.seq` selects the packed row length or `model.seq_len`. A zero
+// `flops_per_token` selects the model estimate, and a zero `peak_flops` selects
+// the active device table. An empty `output.checkpoint_path` selects
 // `out_dir/checkpoint.ckpt`; the metrics and the summary follow the same rule.
 
 // The dataset and the tokenizer.
@@ -319,7 +320,9 @@ typedef struct {
   const char* const* parquet;  // paths or globs
   int parquet_count;
   const char* tokenizer_path;  // the NCTOKEN1 artifact
-  uint64_t data_seed;          // the loader seed
+  const char*
+      packed_rows_path;  // an `NCSFT001` packed shard; empty selects parquet
+  uint64_t data_seed;    // the loader seed
 } nanochat_mesh_data_config;
 
 // The step loop.
@@ -344,6 +347,13 @@ typedef struct {
   nanochat_config model;
   const nanochat_mesh* mesh;
   const char* preset;
+  // An explicit optimizer and schedule. A non-null pointer wins and the preset
+  // is ignored, so a fine-tuning run can pass its own rates. A null pointer
+  // selects the named preset.
+  const nanochat_optim_config* optimizer;
+  // A weights-only warm start. The driver loads the parameter records and
+  // keeps the fresh optimizer state (docs/checkpoint-format.md section 9.1).
+  const char* warm_start_path;
   double flops_per_token;  // 0 selects the model estimate
   double peak_flops;       // 0 selects the active device table
   nanochat_mesh_data_config data;

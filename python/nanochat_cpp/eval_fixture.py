@@ -228,9 +228,15 @@ def _pack_record(record: Record) -> bytes:
     return b"".join(parts)
 
 
-def serialize(records: Sequence[Record]) -> bytes:
-    """Serialise ``records`` into the ``NANOEVL1`` byte layout."""
-    header = MAGIC + struct.pack("<II", VERSION, len(records))
+def serialize(records: Sequence[Record], magic: bytes = MAGIC) -> bytes:
+    """Serialise ``records`` into the record-file byte layout.
+
+    ``magic`` names the file kind. It defaults to the ``NANOEVL1`` evaluation
+    fixture; the ``NCSFT001`` SFT shard passes its own.
+    """
+    if len(magic) != 8:
+        raise EvalFixtureError("the record-file magic must be eight bytes")
+    header = magic + struct.pack("<II", VERSION, len(records))
     return header + b"".join(_pack_record(record) for record in records)
 
 
@@ -239,14 +245,14 @@ def _need(data: bytes, offset: int, count: int, what: str) -> None:
         raise EvalFixtureError(f"truncated fixture while reading {what}")
 
 
-def parse(data: bytes) -> list[Record]:
-    """Parse a ``NANOEVL1`` byte string into records.
+def parse(data: bytes, magic: bytes = MAGIC) -> list[Record]:
+    """Parse a record-file byte string into records.
 
     The inverse of :func:`serialize`. Rejects a bad magic, an unknown version,
     unknown dtype codes, duplicate names, truncation, and trailing bytes.
     """
-    if len(data) < 16 or data[:8] != MAGIC:
-        raise EvalFixtureError("bad fixture magic (expected NANOEVL1)")
+    if len(data) < 16 or data[:8] != magic:
+        raise EvalFixtureError(f"bad fixture magic (expected {magic!r})")
     version, count = struct.unpack_from("<II", data, 8)
     if version != VERSION:
         raise EvalFixtureError(f"unsupported fixture version: {version}")
@@ -301,19 +307,21 @@ def parse(data: bytes) -> list[Record]:
     return records
 
 
-def write(path: str | os.PathLike[str], records: Sequence[Record]) -> Path:
+def write(path: str | os.PathLike[str], records: Sequence[Record],
+          magic: bytes = MAGIC) -> Path:
     """Write ``records`` to ``path`` atomically and return the path."""
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
     temporary = target.with_name(target.name + ".tmp")
-    temporary.write_bytes(serialize(records))
+    temporary.write_bytes(serialize(records, magic))
     os.replace(temporary, target)
     return target
 
 
-def read(path: str | os.PathLike[str]) -> list[Record]:
-    """Read and parse a ``NANOEVL1`` file."""
-    return parse(Path(path).read_bytes())
+def read(path: str | os.PathLike[str],
+         magic: bytes = MAGIC) -> list[Record]:
+    """Read and parse a record file."""
+    return parse(Path(path).read_bytes(), magic)
 
 
 # ---------------------------------------------------------------------------

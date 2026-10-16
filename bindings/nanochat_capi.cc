@@ -321,6 +321,12 @@ nanochat::MeshTrainConfig ToMeshTrainConfig(
   }
   config.mesh = source.mesh->mesh;
   config.preset = source.preset != nullptr ? source.preset : "track3";
+  if (source.optimizer != nullptr) {
+    ToOptimizerConfig(*source.optimizer, &config.optimizer, &config.scheduler);
+    config.use_preset = false;
+  }
+  config.warm_start_path =
+      source.warm_start_path != nullptr ? source.warm_start_path : "";
   config.batch = source.run.batch;
   config.grad_accum = source.run.grad_accum;
   config.seq = source.run.seq;
@@ -339,6 +345,9 @@ nanochat::MeshTrainConfig ToMeshTrainConfig(
                                : "";
   config.tokenizer_path =
       source.data.tokenizer_path != nullptr ? source.data.tokenizer_path : "";
+  config.packed_rows_path = source.data.packed_rows_path != nullptr
+                                ? source.data.packed_rows_path
+                                : "";
   for (int i = 0; i < source.data.parquet_count; ++i) {
     if (source.data.parquet != nullptr && source.data.parquet[i] != nullptr) {
       config.train_parquet.emplace_back(source.data.parquet[i]);
