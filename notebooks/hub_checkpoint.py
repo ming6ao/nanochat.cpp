@@ -9,16 +9,24 @@ fake and run without the wheel and without network access. See
 
 from __future__ import annotations
 
+import datetime
+import json
 import os
+import shutil
 from pathlib import Path
 
 __all__ = [
+    "CLIMBMIX_REPO",
     "CONTAINER",
     "FULL_STAGE_PATTERNS",
     "STAGE_PATTERNS",
+    "TRAIN_SHARD",
+    "VAL_SHARD",
     "build_run_record",
     "default_namespace",
+    "download_climbmix",
     "load_stage",
+    "now_utc",
     "pull_stage",
     "pull_tokenizer",
     "push_file",
@@ -27,6 +35,7 @@ __all__ = [
     "repo_id_for",
     "stage_dir",
     "tokenizer_file",
+    "write_stage",
 ]
 
 #: The files a notebook needs to load a stage.
@@ -41,6 +50,15 @@ CONTAINER = "NCHKPT01"
 
 #: The repository name prefix of one model family.
 PREFIX = "nanochat"
+
+#: The ClimbMix dataset repository.
+CLIMBMIX_REPO = "karpathy/climbmix-400b-shuffle"
+
+#: The training shard the pretraining notebook reads.
+TRAIN_SHARD = "shard_00000.parquet"
+
+#: The validation shard the pretraining and evaluation notebooks read.
+VAL_SHARD = "shard_06542.parquet"
 
 
 def tokenizer_file(vocab_size) -> str:
@@ -108,6 +126,58 @@ def build_run_record(*, stage, run_name, git_revision="", build_key="",
     }
 
 
+def now_utc() -> str:
+    """The current time in UTC as an ISO 8601 string."""
+    return datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+
+def _stage_card(record, description) -> str:
+    """The model card text of one stage record."""
+    lines = [f"# {record['run_name']}", ""]
+    if description:
+        lines += [str(description), ""]
+    lines += [
+        f"- stage: `{record['stage']}`",
+        f"- container: `{record['container']}`",
+        f"- source revision: `{record['git_revision']}`",
+        f"- step: {record['step']}",
+    ]
+    if record["parent_repo_id"]:
+        lines.append(f"- parent: `{record['parent_repo_id']}` "
+                     f"at `{record['parent_revision']}`")
+    return "\n".join(lines) + "\n"
+
+
+def write_stage(folder, *, stage, run_name, model_json, train_json,
+                tokenizer, git_revision="", build_key="", cuda_arch="",
+                step=0, parent_repo_id="", parent_revision="",
+                created_utc="", description="") -> dict:
+    """Write one local stage folder and return the provenance record.
+
+    The folder gets ``model.json``, ``train.json``, ``tokenizer.nctoken``,
+    ``run.json``, and ``README.md``. The caller then calls
+    :func:`push_stage` to upload the folder.
+    """
+    folder = Path(folder)
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "model.json").write_text(str(model_json) + "\n",
+                                       encoding="utf-8")
+    (folder / "train.json").write_text(str(train_json) + "\n",
+                                       encoding="utf-8")
+    shutil.copyfile(tokenizer, folder / "tokenizer.nctoken")
+    record = build_run_record(
+        stage=stage, run_name=run_name, git_revision=git_revision,
+        build_key=build_key, cuda_arch=cuda_arch, step=step,
+        parent_repo_id=parent_repo_id, parent_revision=parent_revision,
+        created_utc=created_utc)
+    (folder / "run.json").write_text(
+        json.dumps(record, indent=1, sort_keys=True) + "\n",
+        encoding="utf-8")
+    (folder / "README.md").write_text(_stage_card(record, description),
+                                      encoding="utf-8")
+    return record
+
+
 def push_stage(repo_id, stage, folder, *, token=None, private=False,
                commit_message="", tag=None, api=None) -> str:
     """Upload one stage folder into the repository and optionally tag it."""
@@ -151,6 +221,27 @@ def pull_stage(repo_id, stage, dest, *, revision="main", token=None,
                      local_dir=str(dest), token=token,
                      allow_patterns=[f"{stage}/{name}" for name in patterns])
     return Path(local) / str(stage)
+
+
+def download_climbmix(dest, *, repo_id=CLIMBMIX_REPO,
+                      shards=(TRAIN_SHARD, VAL_SHARD), token=None,
+                      download=None) -> Path:
+    """Download the ClimbMix shards into ``dest`` and return the folder.
+
+    The call skips a shard that is already present, so a notebook can call it
+    on every run.
+    """
+    dest = Path(dest)
+    missing = [name for name in shards if not (dest / name).is_file()]
+    if not missing:
+        return dest
+    if download is None:
+        from huggingface_hub import snapshot_download  # noqa: PLC0415
+
+        download = snapshot_download
+    download(repo_id=repo_id, repo_type="dataset", local_dir=str(dest),
+             allow_patterns=list(missing), token=token)
+    return dest
 
 
 def pull_tokenizer(repo_id, vocab_size, dest, *, revision="main", token=None,

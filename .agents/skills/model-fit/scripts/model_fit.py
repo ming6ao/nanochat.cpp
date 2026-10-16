@@ -45,6 +45,7 @@ __all__ = [
     "recommend",
     "search",
     "shape_flags",
+    "spec_from",
     "step_seconds",
     "tokens_per_second",
     "train_arena_bytes",
@@ -276,6 +277,21 @@ class ModelSpec:
             raise ValueError("heads must divide by kv_heads")
         if self.seq < 1:
             raise ValueError("seq must be positive")
+
+
+def spec_from(model) -> ModelSpec:
+    """Build a :class:`ModelSpec` from a notebook ``ModelArgs`` object.
+
+    ``model`` carries the notebook field names: ``num_layers``,
+    ``hidden_dim``, ``num_heads``, ``num_kv_heads``, ``seq_len``,
+    ``vocab_size``, ``window_pattern``, and ``value_embedding``.
+    """
+    return ModelSpec(
+        layers=int(model.num_layers), hidden=int(model.hidden_dim),
+        heads=int(model.num_heads), kv_heads=int(model.num_kv_heads),
+        seq=int(model.seq_len), vocab=int(model.vocab_size),
+        window=str(model.window_pattern),
+        value_embedding=bool(model.value_embedding))
 
 
 def parameter_counts(spec: ModelSpec) -> dict[str, int]:

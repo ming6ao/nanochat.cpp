@@ -10,6 +10,9 @@ from __future__ import annotations
 
 import contextlib
 import io
+import sys
+import tempfile
+import types
 import unittest
 from pathlib import Path
 
@@ -81,6 +84,76 @@ class SessionTest(unittest.TestCase):
         prepared = self.make()
         with self.assertRaises(Exception):
             prepared.base = Path("/other")
+
+    def test_revision_reads_the_repository(self) -> None:
+        prepared = self.make()
+        calls = []
+        original = kaggle_setup.revision
+        kaggle_setup.revision = lambda root: calls.append(root) or "abc123"
+        try:
+            self.assertEqual(prepared.revision, "abc123")
+        finally:
+            kaggle_setup.revision = original
+        self.assertEqual(calls, [Path("/repo")])
+
+
+class DescribeTest(unittest.TestCase):
+    def test_prints_library_secrets_and_devices(self) -> None:
+        host = kaggle_setup.Host(repo=Path("/repo"), library=Path("/lib.so"),
+                                 build_key="key", env={})
+        device = types.SimpleNamespace(name="T4",
+                                       total_memory_bytes=16 * 2**30)
+        prepared = session.Session(host=host, secrets={"HF_TOKEN": "t"},
+                                   devices=[device], base=Path("/base"))
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            returned = session.describe(prepared)
+        self.assertIs(returned, prepared)
+        text = buffer.getvalue()
+        self.assertIn("library: /lib.so", text)
+        self.assertIn("secrets: ['HF_TOKEN']", text)
+        self.assertIn("T4", text)
+        self.assertIn("16.0 GiB", text)
+
+
+class BootstrapTest(unittest.TestCase):
+    def test_adds_the_helper_path_and_calls_setup(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            helper = repo / ".agents" / "skills" / "model-fit" / "scripts"
+            helper.mkdir(parents=True)
+            captured = {}
+            original = session.setup
+            saved_path = list(sys.path)
+
+            def fake_setup(**kwargs):
+                captured.update(kwargs)
+                return "prepared"
+
+            session.setup = fake_setup
+            try:
+                result = session.bootstrap(repo_path=repo, arch="sm_75",
+                                           devices=2)
+                self.assertEqual(sys.path[0], str(helper))
+            finally:
+                session.setup = original
+                sys.path[:] = saved_path
+            self.assertEqual(result, "prepared")
+            self.assertEqual(captured["repo_path"], repo)
+            self.assertEqual(captured["devices"], 2)
+            self.assertEqual(captured["arch"], "sm_75")
+
+    def test_missing_helper_directory_is_ignored(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            original = session.setup
+            session.setup = lambda **kwargs: "prepared"
+            saved_path = list(sys.path)
+            try:
+                result = session.bootstrap(repo_path=Path(tmp))
+            finally:
+                session.setup = original
+                sys.path[:] = saved_path
+            self.assertEqual(result, "prepared")
 
 
 if __name__ == "__main__":

@@ -8,6 +8,7 @@ The test covers the host contract parser, the environment loader, and the
 from __future__ import annotations
 
 import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -85,3 +86,18 @@ class ApplyHostPathTest(EnvironTest):
         entries = kaggle_setup.apply_host_path(home="/home/kaggle")
         self.assertEqual(entries, ["/home/kaggle/.local/bin",
                                    "/home/kaggle/.local/node/bin"])
+
+
+class RevisionTest(unittest.TestCase):
+    def test_reads_the_short_revision(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="nanochat_rev_") as tmp:
+            root = Path(tmp)
+            subprocess.run(["git", "init", "-q", str(root)], check=True)
+            subprocess.run(["git", "-C", str(root), "-c", "user.email=t@e",
+                            "-c", "user.name=t", "commit", "-q",
+                            "--allow-empty", "-m", "c"], check=True)
+            expected = subprocess.run(
+                ["git", "-C", str(root), "rev-parse", "--short", "HEAD"],
+                capture_output=True, text=True, check=True).stdout.strip()
+            self.assertEqual(kaggle_setup.revision(root), expected)
+            self.assertEqual(len(expected), 7)

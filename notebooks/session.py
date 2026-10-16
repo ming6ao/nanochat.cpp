@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import dataclasses
 import os
+import sys
 from pathlib import Path
 
 import kaggle_setup
@@ -24,7 +25,9 @@ __all__ = [
     "DEFAULT_BASE",
     "SECRET_NAMES",
     "Session",
+    "bootstrap",
     "clone_and_build",
+    "describe",
     "load_secrets",
     "require_devices",
     "setup",
@@ -66,6 +69,11 @@ class Session:
     def build_key(self) -> str:
         """The build key of the shared library."""
         return self.host.build_key
+
+    @property
+    def revision(self) -> str:
+        """The short Git revision of the session repository."""
+        return kaggle_setup.revision(self.repo)
 
 
 def load_secrets(names=SECRET_NAMES, client=None, environ=None) -> dict:
@@ -141,3 +149,33 @@ def setup(repo_url=kaggle_setup.DEFAULT_REPO_URL,
                            arch=arch, devices=devices, base=base,
                            backend=backend, precision=precision,
                            env_path=env_path, secrets=secrets)
+
+
+def bootstrap(repo_url=kaggle_setup.DEFAULT_REPO_URL,
+              repo_path=kaggle_setup.DEFAULT_REPO_DEST, *, arch="sm_75",
+              devices=1, base=None, backend="cuda", precision="fp32",
+              ref=None, env_path=None, secrets=None) -> Session:
+    """Add the helper paths and run the session setup.
+
+    The notebook clones the repository and adds ``python/`` and
+    ``notebooks/`` to ``sys.path`` before it imports this module. This call
+    adds the model-fit helper scripts, then runs :func:`setup`.
+    """
+    helper = (Path(repo_path) / ".agents" / "skills" / "model-fit"
+              / "scripts")
+    if helper.is_dir() and str(helper) not in sys.path:
+        sys.path.insert(0, str(helper))
+    return setup(repo_url=repo_url, repo_path=repo_path, arch=arch,
+                 devices=devices, base=base, backend=backend,
+                 precision=precision, ref=ref, env_path=env_path,
+                 secrets=secrets)
+
+
+def describe(prepared: "Session") -> "Session":
+    """Print the library, the secret names, and the devices of a session."""
+    print("library:", prepared.library)
+    print("secrets:", sorted(prepared.secrets))
+    for device in prepared.devices:
+        memory = float(getattr(device, "total_memory_bytes", 0))
+        print(device, getattr(device, "name", ""), f"{memory / 2**30:.1f} GiB")
+    return prepared

@@ -22,6 +22,7 @@ __all__ = [
     "ensure_repository",
     "load_host_env",
     "parse_env_file",
+    "revision",
     "run_bootstrap",
     "setup",
 ]
@@ -114,6 +115,14 @@ def ensure_repository(url: str = DEFAULT_REPO_URL,
         arguments += ["--branch", ref]
     subprocess.run(["git", *arguments, url, str(dest)], check=True)
     return dest
+
+
+def revision(root: str | Path) -> str:
+    """The short Git revision of the working tree at ``root``."""
+    result = subprocess.run(
+        ["git", "-C", str(root), "rev-parse", "--short", "HEAD"],
+        capture_output=True, text=True, check=True)
+    return result.stdout.strip()
 
 
 def run_bootstrap(root: str | Path) -> None:

@@ -7,6 +7,7 @@ section 22.
 
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -223,6 +224,90 @@ class PullTokenizerTest(unittest.TestCase):
             download = FakeDownload(raise_error=True)
             self.assertIsNone(hub_checkpoint.pull_tokenizer(
                 "alice/nanochat-tokenizer", 32768, tmp, download=download))
+
+
+class NowUtcTest(unittest.TestCase):
+    def test_isoformat_with_utc_offset(self) -> None:
+        value = hub_checkpoint.now_utc()
+        self.assertIn("T", value)
+        self.assertTrue(value.endswith("+00:00"), value)
+
+
+class WriteStageTest(unittest.TestCase):
+    def write(self, folder, **overrides):
+        tokenizer = Path(folder).parent / "source.nctoken"
+        tokenizer.parent.mkdir(parents=True, exist_ok=True)
+        tokenizer.write_bytes(b"tok")
+        values = dict(
+            stage="base", run_name="base-run", model_json='{"a": 1}',
+            train_json='{"b": 2}', tokenizer=tokenizer,
+            git_revision="abc123", build_key="key", cuda_arch="sm_75",
+            step=500, created_utc="2026-01-01T00:00:00Z",
+            description="Base model, pretrained.")
+        values.update(overrides)
+        return hub_checkpoint.write_stage(folder, **values)
+
+    def test_writes_every_file_and_returns_the_record(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp) / "base"
+            record = self.write(folder)
+            self.assertEqual(record["stage"], "base")
+            self.assertEqual(record["step"], 500)
+            self.assertEqual(record["parent_repo_id"], "")
+            self.assertEqual((folder / "model.json").read_text(),
+                             '{"a": 1}\n')
+            self.assertEqual((folder / "train.json").read_text(),
+                             '{"b": 2}\n')
+            self.assertEqual((folder / "tokenizer.nctoken").read_bytes(),
+                             b"tok")
+            self.assertEqual(
+                json.loads((folder / "run.json").read_text())["step"], 500)
+            card = (folder / "README.md").read_text()
+            self.assertIn("# base-run", card)
+            self.assertIn("Base model, pretrained.", card)
+            self.assertNotIn("parent", card)
+
+    def test_sft_card_names_the_parent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp) / "sft"
+            record = self.write(
+                folder, stage="sft", run_name="sft-run", step=40,
+                parent_repo_id="alice/nanochat-base",
+                parent_revision="base-500")
+            self.assertEqual(record["parent_repo_id"],
+                             "alice/nanochat-base")
+            card = (folder / "README.md").read_text()
+            self.assertIn("alice/nanochat-base", card)
+            self.assertIn("base-500", card)
+
+
+class DownloadClimbmixTest(unittest.TestCase):
+    def test_downloads_the_missing_shards(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            download = FakeDownload()
+            folder = hub_checkpoint.download_climbmix(tmp, download=download)
+            self.assertEqual(folder, Path(tmp))
+            self.assertEqual(download.calls[0]["repo_type"], "dataset")
+            self.assertEqual(
+                download.calls[0]["allow_patterns"],
+                [hub_checkpoint.TRAIN_SHARD, hub_checkpoint.VAL_SHARD])
+
+    def test_skips_a_present_shard(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / hub_checkpoint.TRAIN_SHARD).write_bytes(b"x")
+            download = FakeDownload()
+            hub_checkpoint.download_climbmix(tmp, download=download)
+            self.assertEqual(download.calls[0]["allow_patterns"],
+                             [hub_checkpoint.VAL_SHARD])
+
+    def test_all_present_makes_no_call(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            for name in (hub_checkpoint.TRAIN_SHARD,
+                         hub_checkpoint.VAL_SHARD):
+                (Path(tmp) / name).write_bytes(b"x")
+            download = FakeDownload()
+            hub_checkpoint.download_climbmix(tmp, download=download)
+            self.assertEqual(download.calls, [])
 
 
 if __name__ == "__main__":

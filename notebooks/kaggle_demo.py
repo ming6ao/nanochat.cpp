@@ -17,9 +17,11 @@ import nanochat_cpp as nc
 
 __all__ = [
     "DEMO_CONVERSATIONS",
+    "SAMPLE_PROMPTS",
     "build_sft_conversations",
     "complete",
     "pack_conversations",
+    "print_samples",
     "shifted_targets",
 ]
 
@@ -85,7 +87,29 @@ DEMO_CONVERSATIONS += [
 
 def complete(model, tokenizer, prompt, max_tokens=12):
     """Greedy completion of a prompt, decoded without the prompt tokens."""
-    ids = tokenizer.encode(prompt)
+    bos = tokenizer.get_bos_token_id()
+    ids = ([bos] if bos >= 0 else []) + tokenizer.encode(prompt)
     row = model.generate(ids, max_tokens=max_tokens, temperature=0.0)[0]
     return tokenizer.decode(
         [token for token, keep in zip(row.tokens, row.mask) if keep])
+
+
+#: The fixed prompts the evaluation notebook scores.
+SAMPLE_PROMPTS = [
+    "The capital of France is",
+    "The chemical symbol of gold is",
+    "If yesterday was Friday, then tomorrow will be",
+    "The opposite of hot is",
+    "The planets of the solar system are:",
+    "My favorite color is",
+    "If 5*x + 3 = 13, then x is",
+]
+
+
+def print_samples(model, tokenizer, prompts=None, max_tokens=16):
+    """Print one greedy completion for each prompt, with a divider."""
+    prompts = SAMPLE_PROMPTS if prompts is None else prompts
+    for prompt in prompts:
+        print("-" * 40)
+        print(prompt + complete(model, tokenizer, prompt,
+                                max_tokens=max_tokens), flush=True)

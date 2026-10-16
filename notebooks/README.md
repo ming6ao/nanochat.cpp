@@ -1,8 +1,9 @@
 # Notebooks
 
-Three notebooks run the model pipeline on a Kaggle session with two T4 cards.
-Each notebook performs its own setup, so any one notebook runs alone in a
-fresh session. The shared code lives in `session.py` and `hub_checkpoint.py`.
+Three pipeline notebooks run the model pipeline on a Kaggle session with two
+T4 cards. Each notebook performs its own setup, so any one notebook runs alone
+in a fresh session. The shared code lives in `session.py` and
+`hub_checkpoint.py`.
 
 ## Run order
 
@@ -57,11 +58,24 @@ example `vocab-32768.nctoken`.
 
 ## Shared modules
 
-- `session.py` reads the Kaggle secrets, clones the repository, builds the
-  shared library, and checks the device count. `session.setup` is the one
-  entry point.
+- `session.py` holds the one session entry point. A notebook clones the
+  repository, adds the package paths, then calls `session.bootstrap`. The call
+  reads the Kaggle secrets, builds the shared library, and checks the device
+  count. `session.describe` prints the library, the secret names, and the
+  devices. `session.setup` stays for a caller that already added the paths.
+- `kaggle_setup.py` owns the repository fetch, the bootstrap, the host
+  environment, the library build, and `revision(root)` for the short Git
+  revision.
 - `hub_checkpoint.py` holds every Hugging Face Hub call. It imports
   `huggingface_hub` inside each function, so the tests run without the wheel.
+  `download_climbmix` fetches the data shards. `load_stage` and `pull_stage`
+  fetch a published stage. `write_stage` writes the local metadata and the
+  model card. `push_stage` and `push_file` upload the result.
+- `kaggle_demo.py` holds the supervised fine-tuning helpers. `print_samples`
+  prints one greedy completion for each fixed prompt.
+- `mesh_train.py` launches the C++ mesh driver in a child process. The
+  notebook cell polls `metrics.jsonl` and `summary.json` through the returned
+  handle.
 
 ## Tests
 

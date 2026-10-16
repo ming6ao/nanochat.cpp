@@ -170,5 +170,28 @@ class AnswerTest(unittest.TestCase):
         self.assertNotIn("--batch", flags)
 
 
+class SpecFromTest(unittest.TestCase):
+    def test_maps_the_notebook_fields(self) -> None:
+        class ModelArgs:
+            num_layers = 16
+            hidden_dim = 1024
+            num_heads = 8
+            num_kv_heads = 4
+            seq_len = 4096
+            vocab_size = 32768
+            window_pattern = "SSSL"
+            value_embedding = True
+
+        spec = model_fit.spec_from(ModelArgs())
+        self.assertEqual(spec.layers, 16)
+        self.assertEqual(spec.hidden, 1024)
+        self.assertEqual(spec.heads, 8)
+        self.assertEqual(spec.kv_heads, 4)
+        self.assertEqual(spec.seq, 4096)
+        self.assertEqual(spec.vocab, 32768)
+        self.assertEqual(spec.window, "SSSL")
+        self.assertTrue(spec.value_embedding)
+
+
 if __name__ == "__main__":
     unittest.main()
