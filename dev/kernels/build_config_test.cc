@@ -5,16 +5,12 @@
 #include <cstdio>
 
 #include "nanochat/sandbox.h"
+#include "nanochat/tensor.h"
 
-#if defined(NANOCHAT_PRECISION_FP32) && defined(NANOCHAT_PRECISION_BF16)
-#error "select one precision"
-#elif defined(NANOCHAT_PRECISION_BF16)
-constexpr const char* kPrecision = "bf16";
-#elif defined(NANOCHAT_PRECISION_FP32)
-constexpr const char* kPrecision = "fp32";
-#else
-#error "no precision selected"
-#endif
+constexpr const char* kPrecision =
+    nanochat::kBuildPrecision == nanochat::BuildPrecision::kFp32   ? "fp32"
+    : nanochat::kBuildPrecision == nanochat::BuildPrecision::kBf16 ? "bf16"
+                                                                   : "fp8";
 
 int main() {
   nanochat::RequireSandboxOrDie("test");

@@ -472,7 +472,7 @@ them against the CPU backend:
 
 ```bash
 cd ~/repos/nanochat.cpp
-g++ -O2 -std=c++20 -fopenmp -DNANOCHAT_PRECISION_FP32 -Iinclude -I. \
+g++ -O2 -std=c++20 -fopenmp -DNANOCHAT_PRECISION=0 -Iinclude -I. \
   backends/cpu/kernels.cc /tmp/nanochat-cpu-bench/gemm_omp.cc \
   -o /tmp/nanochat-cpu-bench/gemm_omp
 tools/nanochat run train -- /tmp/nanochat-cpu-bench/gemm_omp

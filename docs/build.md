@@ -154,10 +154,11 @@ about GPT.
 
 ## Precision
 
-`-DNANOCHAT_PRECISION_FP32` selects `using ComputeType = float;` and
-`-DNANOCHAT_PRECISION_BF16` selects `using ComputeType = Bf16;`, both at build
-time. One precision per build; no runtime dtype dispatch. The fp16 build and its
-half-storage path are removed ([precision.md](precision.md)).
+`-DNANOCHAT_PRECISION=0` selects fp32, `=1` selects bf16, and `=2` selects fp8.
+The fp8 compute type is bf16. `include/nanochat/tensor.h` maps the value to
+`BuildPrecision`, so one precision exists per build and no runtime dtype
+dispatch occurs. The fp16 build and its half-storage path are removed
+([precision.md](precision.md)).
 
 - Pascal (sm_61), Turing (sm_75), and the CPU: fp32.
 - Ampere (sm_80) and Hopper (sm_90): bf16.

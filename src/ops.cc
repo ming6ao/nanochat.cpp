@@ -46,38 +46,38 @@ void LinearForward(const ComputeType* x, const ComputeType* w, ComputeType* y,
                    bool accumulate, const Fp8Scratch* fp8) {
   if (rows <= 0 || in <= 0 || out <= 0) return;
   (void)fp8;  // unused in a dense build
-#if defined(NANOCHAT_FP8)
-  // The eligible matmuls take fp8 operands with an fp32 accumulator
-  // (docs/fp8-training.md sections 6 and 7). Quantize both operands for this
-  // call. The reuse of an operand the same step already quantized is a later
-  // optimization (docs/fp8-training.md section 7).
-  if (fp8 != nullptr && fp8->ready() && Fp8Eligible(out, in)) {
-    QuantizeFp8Params quantize;
-    quantize.format = Fp8Format::kE4M3;
-    quantize.count = static_cast<int>(rows * in);
-    kernels::QuantizeFp8(quantize, x, fp8->a_bytes, fp8->a_scale);
-    quantize.count = static_cast<int>(out * in);
-    kernels::QuantizeFp8(quantize, w, fp8->b_bytes, fp8->b_scale);
-    ScaledGemmParams scaled;
-    scaled.m = static_cast<int>(rows);
-    scaled.n = static_cast<int>(out);
-    scaled.k = static_cast<int>(in);
-    scaled.alpha = 1.0f;
-    scaled.beta = accumulate ? 1.0f : 0.0f;
-    // The weight is stored [out, in] (PyTorch's Linear convention).
-    scaled.transpose_b = true;
-    // The forward uses the reduced-precision reduction
-    // (docs/fp8-training.md section 5.2).
-    scaled.fast_accum = true;
-    scaled.format_a = Fp8Format::kE4M3;
-    scaled.format_b = Fp8Format::kE4M3;
-    scaled.scale_a = fp8->a_scale;
-    scaled.scale_b = fp8->b_scale;
-    kernels::GemmScaledFp8(GemmMode::kForward, scaled, fp8->a_bytes,
-                           fp8->b_bytes, y);
-    return;
+  if constexpr (kFp8Build) {
+    // The eligible matmuls take fp8 operands with an fp32 accumulator
+    // (docs/fp8-training.md sections 6 and 7). Quantize both operands for this
+    // call. The reuse of an operand the same step already quantized is a later
+    // optimization (docs/fp8-training.md section 7).
+    if (fp8 != nullptr && fp8->ready() && Fp8Eligible(out, in)) {
+      QuantizeFp8Params quantize;
+      quantize.format = Fp8Format::kE4M3;
+      quantize.count = static_cast<int>(rows * in);
+      kernels::QuantizeFp8(quantize, x, fp8->a_bytes, fp8->a_scale);
+      quantize.count = static_cast<int>(out * in);
+      kernels::QuantizeFp8(quantize, w, fp8->b_bytes, fp8->b_scale);
+      ScaledGemmParams scaled;
+      scaled.m = static_cast<int>(rows);
+      scaled.n = static_cast<int>(out);
+      scaled.k = static_cast<int>(in);
+      scaled.alpha = 1.0f;
+      scaled.beta = accumulate ? 1.0f : 0.0f;
+      // The weight is stored [out, in] (PyTorch's Linear convention).
+      scaled.transpose_b = true;
+      // The forward uses the reduced-precision reduction
+      // (docs/fp8-training.md section 5.2).
+      scaled.fast_accum = true;
+      scaled.format_a = Fp8Format::kE4M3;
+      scaled.format_b = Fp8Format::kE4M3;
+      scaled.scale_a = fp8->a_scale;
+      scaled.scale_b = fp8->b_scale;
+      kernels::GemmScaledFp8(GemmMode::kForward, scaled, fp8->a_bytes,
+                             fp8->b_bytes, y);
+      return;
+    }
   }
-#endif
   GemmParams params;
   params.m = static_cast<int>(rows);
   params.n = static_cast<int>(out);
@@ -91,8 +91,38 @@ void LinearForward(const ComputeType* x, const ComputeType* w, ComputeType* y,
 }
 
 void LinearWgrad(const ComputeType* x, const ComputeType* dy, float* dw,
-                 std::int64_t rows, std::int64_t in, std::int64_t out) {
+                 std::int64_t rows, std::int64_t in, std::int64_t out,
+                 const Fp8Scratch* fp8) {
   if (rows <= 0 || in <= 0 || out <= 0) return;
+  (void)fp8;  // unused in a dense build
+  if constexpr (kFp8Build) {
+    // A = the output gradient (E5M2), B = the saved activation (E4M3). The
+    // output is the fp32 parameter gradient (docs/fp8-training.md section 7).
+    if (fp8 != nullptr && fp8->ready() && Fp8Eligible(out, in)) {
+      QuantizeFp8Params quantize;
+      quantize.format = Fp8Format::kE5M2;
+      quantize.count = static_cast<int>(rows * out);
+      kernels::QuantizeFp8(quantize, dy, fp8->a_bytes, fp8->a_scale);
+      quantize.format = Fp8Format::kE4M3;
+      quantize.count = static_cast<int>(rows * in);
+      kernels::QuantizeFp8(quantize, x, fp8->b_bytes, fp8->b_scale);
+      ScaledGemmParams scaled;
+      scaled.m = static_cast<int>(out);
+      scaled.n = static_cast<int>(in);
+      scaled.k = static_cast<int>(rows);
+      scaled.alpha = 1.0f;
+      scaled.beta = 1.0f;
+      scaled.transpose_a = true;
+      scaled.fast_accum = false;
+      scaled.format_a = Fp8Format::kE5M2;
+      scaled.format_b = Fp8Format::kE4M3;
+      scaled.scale_a = fp8->a_scale;
+      scaled.scale_b = fp8->b_scale;
+      kernels::GemmScaledFp8(GemmMode::kWgrad, scaled, fp8->a_bytes,
+                             fp8->b_bytes, dw);
+      return;
+    }
+  }
   // dw[out, in] += dy[rows, out]^T @ x[rows, in].
   GemmParams params;
   params.m = static_cast<int>(out);
@@ -106,8 +136,39 @@ void LinearWgrad(const ComputeType* x, const ComputeType* dy, float* dw,
 
 void LinearDgrad(const ComputeType* dy, const ComputeType* w, ComputeType* dx,
                  std::int64_t rows, std::int64_t in, std::int64_t out,
-                 bool accumulate) {
+                 bool accumulate, const Fp8Scratch* fp8) {
   if (rows <= 0 || in <= 0 || out <= 0) return;
+  (void)fp8;  // unused in a dense build
+  if constexpr (kFp8Build) {
+    // A = the output gradient (E5M2), B = the weight (E4M3). The output is an
+    // activation, so it stores the compute type (docs/fp8-training.md
+    // section 7).
+    if (fp8 != nullptr && fp8->ready() && Fp8Eligible(out, in)) {
+      QuantizeFp8Params quantize;
+      quantize.format = Fp8Format::kE5M2;
+      quantize.count = static_cast<int>(rows * out);
+      kernels::QuantizeFp8(quantize, dy, fp8->a_bytes, fp8->a_scale);
+      quantize.format = Fp8Format::kE4M3;
+      quantize.count = static_cast<int>(out * in);
+      kernels::QuantizeFp8(quantize, w, fp8->b_bytes, fp8->b_scale);
+      ScaledGemmParams scaled;
+      scaled.m = static_cast<int>(rows);
+      scaled.n = static_cast<int>(in);
+      scaled.k = static_cast<int>(out);
+      scaled.alpha = 1.0f;
+      scaled.beta = accumulate ? 1.0f : 0.0f;
+      scaled.transpose_a = false;
+      scaled.transpose_b = false;
+      scaled.fast_accum = false;
+      scaled.format_a = Fp8Format::kE5M2;
+      scaled.format_b = Fp8Format::kE4M3;
+      scaled.scale_a = fp8->a_scale;
+      scaled.scale_b = fp8->b_scale;
+      kernels::GemmScaledFp8(GemmMode::kDgrad, scaled, fp8->a_bytes,
+                             fp8->b_bytes, dx);
+      return;
+    }
+  }
   // dx[rows, in] = dy[rows, out] @ w[out, in].
   GemmParams params;
   params.m = static_cast<int>(rows);
@@ -279,15 +340,15 @@ void MlpBackward(const ComputeType* h, const ComputeType* c_fc,
                  const ComputeType* act, const ComputeType* dout,
                  std::int64_t rows, std::int64_t hidden, std::int64_t mlp_dim,
                  float* c_fc_grad, float* c_proj_grad, ComputeType* dh,
-                 ComputeType* dact, ComputeType* dpre) {
+                 ComputeType* dact, ComputeType* dpre, const Fp8Scratch* fp8) {
   if (rows <= 0 || hidden <= 0 || mlp_dim <= 0) return;
-  LinearWgrad(act, dout, c_proj_grad, rows, mlp_dim, hidden);
-  LinearDgrad(dout, c_proj, dact, rows, mlp_dim, hidden, false);
+  LinearWgrad(act, dout, c_proj_grad, rows, mlp_dim, hidden, fp8);
+  LinearDgrad(dout, c_proj, dact, rows, mlp_dim, hidden, false, fp8);
   kernels::PointwiseBackward(PointwiseOp::kReluSquare,
                              static_cast<int>(rows * mlp_dim), pre_act, nullptr,
                              dact, 0.0f, 0.0f, dpre, nullptr);
-  LinearWgrad(h, dpre, c_fc_grad, rows, hidden, mlp_dim);
-  LinearDgrad(dpre, c_fc, dh, rows, hidden, mlp_dim, false);
+  LinearWgrad(h, dpre, c_fc_grad, rows, hidden, mlp_dim, fp8);
+  LinearDgrad(dpre, c_fc, dh, rows, hidden, mlp_dim, false, fp8);
 }
 
 // ---------------------------------------------------------------------------
@@ -546,7 +607,8 @@ void BlockBackward(const BlockShape& shape, const BlockWeights& weights,
   // --- MLP: x_out = x_mid + c_proj(relu^2(c_fc(h2))). ---
   MlpBackward(acts.h2, weights.c_fc, weights.c_proj_mlp, acts.pre_act, acts.act,
               dout, rows, hidden, mlp_dim, grads.c_fc_grad,
-              grads.c_proj_mlp_grad, scratch.dh2, scratch.dact, scratch.dpre);
+              grads.c_proj_mlp_grad, scratch.dh2, scratch.dact, scratch.dpre,
+              &scratch.fp8);
   RmsNormBackward(rows, hidden, shape.rms_eps, acts.x_mid, scratch.dh2,
                   acts.rstd2, scratch.dx_mid);
   kernels::PointwiseForward(PointwiseOp::kScaleAdd,
@@ -555,9 +617,9 @@ void BlockBackward(const BlockShape& shape, const BlockWeights& weights,
 
   // --- Attention: x_mid = xr + c_proj(attention(q, k, v)). ---
   LinearWgrad(acts.attn_out, scratch.dx_mid, grads.c_proj_attn_grad, rows,
-              hidden, hidden);
+              hidden, hidden, &scratch.fp8);
   LinearDgrad(scratch.dx_mid, weights.c_proj_attn, scratch.dy_attn, rows,
-              hidden, hidden, false);
+              hidden, hidden, false, &scratch.fp8);
 
   AttentionShape attn;
   attn.batch = shape.batch;
@@ -575,8 +637,10 @@ void BlockBackward(const BlockShape& shape, const BlockWeights& weights,
                     scratch.dv);
 
   // Value projection and the ResFormer gate.
-  LinearWgrad(acts.h, scratch.dv, grads.c_v_grad, rows, hidden, kv_dim);
-  LinearDgrad(scratch.dv, weights.c_v, scratch.dh, rows, hidden, kv_dim, false);
+  LinearWgrad(acts.h, scratch.dv, grads.c_v_grad, rows, hidden, kv_dim,
+              &scratch.fp8);
+  LinearDgrad(scratch.dv, weights.c_v, scratch.dh, rows, hidden, kv_dim, false,
+              &scratch.fp8);
   if (weights.has_ve) {
     ValueResidualBackward(rows, hidden, kv_heads, head_dim, acts.h,
                           acts.ve_values, weights.ve_gate, acts.ve_gate,
@@ -590,11 +654,14 @@ void BlockBackward(const BlockShape& shape, const BlockWeights& weights,
   QkPrepBackward(shape.batch, shape.seq, heads, kv_heads, head_dim,
                  shape.rms_eps, shape.qk_scale, cos, sin, scratch.dq,
                  scratch.dk, acts.q_pre, acts.k_pre);
-  LinearWgrad(acts.h, acts.q_pre, grads.c_q_grad, rows, hidden, query_dim);
+  LinearWgrad(acts.h, acts.q_pre, grads.c_q_grad, rows, hidden, query_dim,
+              &scratch.fp8);
   LinearDgrad(acts.q_pre, weights.c_q, scratch.dh, rows, hidden, query_dim,
-              true);
-  LinearWgrad(acts.h, acts.k_pre, grads.c_k_grad, rows, hidden, kv_dim);
-  LinearDgrad(acts.k_pre, weights.c_k, scratch.dh, rows, hidden, kv_dim, true);
+              true, &scratch.fp8);
+  LinearWgrad(acts.h, acts.k_pre, grads.c_k_grad, rows, hidden, kv_dim,
+              &scratch.fp8);
+  LinearDgrad(acts.k_pre, weights.c_k, scratch.dh, rows, hidden, kv_dim, true,
+              &scratch.fp8);
 
   // Pre-attention norm, then the residual blend xr = resid*x + x0_lambda*x0.
   RmsNormBackward(rows, hidden, shape.rms_eps, acts.xr, scratch.dh, acts.rstd1,

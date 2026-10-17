@@ -28,11 +28,7 @@ namespace kernels {
 namespace {
 
 // cuBLAS operand type of the build compute type.
-#if defined(NANOCHAT_PRECISION_BF16)
-constexpr cudaDataType_t kDataType = CUDA_R_16BF;
-#else
-constexpr cudaDataType_t kDataType = CUDA_R_32F;
-#endif
+constexpr cudaDataType_t kDataType = kComputeIsBf16 ? CUDA_R_16BF : CUDA_R_32F;
 
 void CheckCublas(cublasStatus_t status, const char* what) {
   if (status == CUBLAS_STATUS_SUCCESS) return;

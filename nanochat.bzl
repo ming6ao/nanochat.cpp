@@ -77,9 +77,13 @@ def nanochat_cuda_copts():
     })
 
 def precision_defines():
-    """The #define for the build precision."""
+    """The #define for the build precision.
+
+    One value, not one boolean per precision. `include/nanochat/tensor.h` maps
+    it to `nanochat::BuildPrecision`.
+    """
     return select({
-        "//:fp8": ["NANOCHAT_PRECISION_BF16", "NANOCHAT_FP8"],
-        "//:bf16": ["NANOCHAT_PRECISION_BF16"],
-        "//:fp32": ["NANOCHAT_PRECISION_FP32"],
+        "//:fp32": ["NANOCHAT_PRECISION=0"],
+        "//:bf16": ["NANOCHAT_PRECISION=1"],
+        "//:fp8": ["NANOCHAT_PRECISION=2"],
     })

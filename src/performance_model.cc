@@ -180,7 +180,17 @@ const char* PrecisionName(ComputePrecision precision) {
   return "unknown";
 }
 
-ComputePrecision BuildComputePrecision() { return ComputePrecision::kFp32; }
+ComputePrecision BuildComputePrecision() {
+  switch (kBuildPrecision) {
+    case BuildPrecision::kBf16:
+      return ComputePrecision::kBf16;
+    case BuildPrecision::kFp8:
+      return ComputePrecision::kFp8;
+    case BuildPrecision::kFp32:
+    default:
+      return ComputePrecision::kFp32;
+  }
+}
 
 ComputePrecision AssignMatrixPrecision(int rows, int cols,
                                        ComputePrecision build) {

@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <type_traits>
 
 // Core value types shared by every layer: the precision alias, the storage
 // dtype tags, and the backend capability report. This header is vendor-free
@@ -114,18 +115,32 @@ NANOCHAT_HOST_DEVICE inline float Bf16ToFloat(Bf16 value) {
 
 #undef NANOCHAT_HOST_DEVICE
 
-// The arithmetic type for this build. The bf16 build stores compute tensors as
-// `Bf16`; the fp32 build stores them as `float`.
-#if defined(NANOCHAT_PRECISION_FP32) && defined(NANOCHAT_PRECISION_BF16)
-#error "select exactly one precision"
-#elif defined(NANOCHAT_PRECISION_BF16)
-using ComputeType = Bf16;
-#elif defined(NANOCHAT_PRECISION_FP32)
-using ComputeType = float;
-#else
+// The build precision. The numbers match `precision_defines()` in nanochat.bzl,
+// so the build macro maps straight to this enum.
+enum class BuildPrecision { kFp32 = 0, kBf16 = 1, kFp8 = 2 };
+
+#if !defined(NANOCHAT_PRECISION)
 #error \
-    "no precision selected: define NANOCHAT_PRECISION_FP32 or NANOCHAT_PRECISION_BF16"
+    "no precision selected: build with --config=fp32, --config=bf16, or --config=fp8"
+#else
+static_assert(NANOCHAT_PRECISION >= 0 && NANOCHAT_PRECISION <= 2,
+              "NANOCHAT_PRECISION is out of range");
 #endif
+
+inline constexpr BuildPrecision kBuildPrecision =
+    static_cast<BuildPrecision>(NANOCHAT_PRECISION);
+
+// True when the compute type is bf16. The fp8 build computes in bf16 and
+// quantizes the eligible matmuls (docs/fp8-training.md section 3.3).
+inline constexpr bool kComputeIsBf16 = kBuildPrecision != BuildPrecision::kFp32;
+
+// True in the fp8 build. The graph reads `if constexpr (kFp8Build)` instead of
+// a preprocessor block.
+inline constexpr bool kFp8Build = kBuildPrecision == BuildPrecision::kFp8;
+
+// The arithmetic type for this build. The bf16 and fp8 builds store compute
+// tensors as `Bf16`; the fp32 build stores them as `float`.
+using ComputeType = std::conditional_t<kComputeIsBf16, Bf16, float>;
 
 // Persistent parameter gradients and optimizer state use fp32 in every build.
 using GradientType = float;

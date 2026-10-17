@@ -110,17 +110,18 @@ Add the storage tags and the scaled GEMM seam
 `GemmScaledFp8` in `backends/cpu/kernels.cc`. The implementation quantizes,
 accumulates in fp32, and dequantizes.
 
-Status: the tree holds the forward path. The seam, both backends, the build
-config, and the model plumbing are in. `--config=fp8` and
-`simulate --precision fp8`
-select the fp8 build. `src/ops.cc` quantizes the eligible forward matmuls, and
-`src/model.cc` owns the workspace slots (one byte per operand, one fp32 per
-scale, rebuilt per step). `//tests:fp8_graph_test` compares the fp8 forward
-against the dense forward at an eligible shape.
+Status: delivered, except the operand reuse across calls. The seam, both
+backends, the build config, and the model plumbing are in. `--config=fp8` and
+`simulate --precision fp8` select the fp8 build. `src/ops.cc` quantizes the
+eligible forward and backward matmuls, and `src/model.cc` owns the workspace
+slots (one byte per operand, one fp32 per scale, rebuilt per step).
+`//tests:fp8_graph_test` compares the fp8 forward and backward against the dense
+path at an eligible shape.
 
-The backward stays dense (the mixed choice of [fp8-training.md](fp8-training.md)
-section 7.1), so the fp8 layer set is the forward only. The fp8 backward and
-the operand reuse across calls are follow-ups.
+The operand reuse, rules 2 to 4 of [fp8-training.md](fp8-training.md)
+section 7, is the remaining follow-up: the code quantizes a tensor again even
+when the same step already quantized it. The result is correct; the extra casts
+are a cost only.
 
 Gate:
 
@@ -355,10 +356,10 @@ checks move to the merge gate.
 Do A1, A2, A3, and C1 first, so the fast gate exists early. Then do A4, A5, and
 A6. Then do B1 and B2.
 
-Status: A1, A2, A3 (the forward), A4, A5 (except the `mma` loop), B1, and C1 are
-complete. The two `DType` tags moved into A1, because `Caps::Supports` reads
-them. The open items are the fp8 backward, the external fp8 golden for A6, and
-the `mma` loop. See section 9.
+Status: A1, A2, A3 (forward and backward), A4, A5 (except the `mma` loop), B1,
+and C1 are complete. The two `DType` tags moved into A1, because
+`Caps::Supports` reads them. The open items are the fp8 operand reuse, the
+external fp8 golden for A6, and the `mma` loop. See section 9.
 
 ## 7. Validation
 
@@ -392,9 +393,9 @@ the `mma` loop. See section 9.
    decision, the gate always runs on a fresh run; there is no stamp.
 2. Is one fp8 attention shape enough, or is one shape per window pattern needed?
 3. Does the `fp8-full` suite run at every merge, or only at a Wave boundary?
-4. When does the fp8 backward land? The forward-only cut is in; the backward
-   needs the E5M2 operand roles and the reuse rules
-   ([fp8-training.md](fp8-training.md) section 7).
+4. When does the fp8 operand reuse land? The forward and the backward quantize
+   per call today. The reuse saves the extra casts
+   ([fp8-training.md](fp8-training.md) section 7, rules 2 to 4).
 
 ## See also
 

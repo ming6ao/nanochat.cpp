@@ -33,11 +33,10 @@ using nanochat::PointwiseOp;
 using nanochat::QkPrepParams;
 using nanochat::RmsNormParams;
 
-#if defined(NANOCHAT_PRECISION_BF16)
-constexpr char kPrecisionName[] = "bf16";
-#else
-constexpr char kPrecisionName[] = "fp32";
-#endif
+constexpr const char* kPrecisionName =
+    nanochat::kBuildPrecision == nanochat::BuildPrecision::kFp32   ? "fp32"
+    : nanochat::kBuildPrecision == nanochat::BuildPrecision::kBf16 ? "bf16"
+                                                                   : "fp8";
 
 namespace kernels = nanochat::kernels;
 

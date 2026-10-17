@@ -72,11 +72,12 @@ void LinearForward(const ComputeType* x, const ComputeType* w, ComputeType* y,
                    bool accumulate = false, const Fp8Scratch* fp8 = nullptr);
 
 void LinearWgrad(const ComputeType* x, const ComputeType* dy, float* dw,
-                 std::int64_t rows, std::int64_t in, std::int64_t out);
+                 std::int64_t rows, std::int64_t in, std::int64_t out,
+                 const Fp8Scratch* fp8 = nullptr);
 
 void LinearDgrad(const ComputeType* dy, const ComputeType* w, ComputeType* dx,
                  std::int64_t rows, std::int64_t in, std::int64_t out,
-                 bool accumulate = false);
+                 bool accumulate = false, const Fp8Scratch* fp8 = nullptr);
 
 // ---------------------------------------------------------------------------
 // RMSNorm (no learnable scale).
@@ -166,7 +167,8 @@ void MlpBackward(const ComputeType* h, const ComputeType* c_fc,
                  const ComputeType* act, const ComputeType* dout,
                  std::int64_t rows, std::int64_t hidden, std::int64_t mlp_dim,
                  float* c_fc_grad, float* c_proj_grad, ComputeType* dh,
-                 ComputeType* dact, ComputeType* dpre);
+                 ComputeType* dact, ComputeType* dpre,
+                 const Fp8Scratch* fp8 = nullptr);
 
 // ---------------------------------------------------------------------------
 // Smear: mix the previous token's normalized embedding into the current one
@@ -292,6 +294,9 @@ struct BlockScratch {
   ComputeType* dact = nullptr;
   ComputeType* dpre = nullptr;
   ComputeType* dve = nullptr;
+  // The fp8 scratch for the eligible backward matmuls
+  // (docs/fp8-training.md section 7). Null in a dense build.
+  Fp8Scratch fp8;
 };
 
 // Runs one block forward: `x` and `x0` are the current residual stream and the

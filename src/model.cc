@@ -499,11 +499,10 @@ void TrainModel::BuildTrainWorkspace(int batch, int seq) {
     std::int64_t count;
   };
   std::vector<BSlot> byte_slots;
-#if defined(NANOCHAT_FP8)
-  auto b = [&](std::uint8_t** dest, std::int64_t count) {
+  // Unused in a dense build, where no byte slot exists.
+  [[maybe_unused]] auto b = [&](std::uint8_t** dest, std::int64_t count) {
     byte_slots.push_back({dest, count});
   };
-#endif
 
   for (int i = 0; i < layers; ++i) {
     ops::BlockActivations& a = lacts_[i];
@@ -525,16 +524,16 @@ void TrainModel::BuildTrainWorkspace(int batch, int seq) {
     c(&a.pre_act, rows * mlp_dim);
     c(&a.act, rows * mlp_dim);
     c(&a.x_out, rows * hidden);
-#if defined(NANOCHAT_FP8)
-    // The fp8 operands and their scales for this layer
-    // (docs/fp8-training.md section 6.3). One scratch pair is reused by every
-    // eligible matmul of the block: the activation can be as wide as the MLP
-    // input, and the weight as large as the MLP projection.
-    b(&a.fp8.a_bytes, rows * mlp_dim);
-    b(&a.fp8.b_bytes, static_cast<std::int64_t>(hidden) * mlp_dim);
-    f(&a.fp8.a_scale, 1);
-    f(&a.fp8.b_scale, 1);
-#endif
+    if constexpr (kFp8Build) {
+      // The fp8 operands and their scales for this layer
+      // (docs/fp8-training.md section 6.3). One scratch pair is reused by every
+      // eligible matmul of the block: the activation can be as wide as the MLP
+      // input, and the weight as large as the MLP projection.
+      b(&a.fp8.a_bytes, rows * mlp_dim);
+      b(&a.fp8.b_bytes, static_cast<std::int64_t>(hidden) * mlp_dim);
+      f(&a.fp8.a_scale, 1);
+      f(&a.fp8.b_scale, 1);
+    }
   }
 
   c(&emb_raw_, rows * hidden);
@@ -544,13 +543,13 @@ void TrainModel::BuildTrainWorkspace(int batch, int seq) {
   c(&x_final_pre_, rows * hidden);
   c(&x_final_norm_, rows * hidden);
   c(&raw_logits_, rows * padded_vocab);
-#if defined(NANOCHAT_FP8)
-  // The classifier head, which is an eligible matmul at the production shape.
-  b(&head_fp8_.a_bytes, rows * hidden);
-  b(&head_fp8_.b_bytes, static_cast<std::int64_t>(hidden) * padded_vocab);
-  f(&head_fp8_.a_scale, 1);
-  f(&head_fp8_.b_scale, 1);
-#endif
+  if constexpr (kFp8Build) {
+    // The classifier head, which is an eligible matmul at the production shape.
+    b(&head_fp8_.a_bytes, rows * padded_vocab);
+    b(&head_fp8_.b_bytes, static_cast<std::int64_t>(hidden) * padded_vocab);
+    f(&head_fp8_.a_scale, 1);
+    f(&head_fp8_.b_scale, 1);
+  }
   c(&dlogits_, rows * padded_vocab);
   f(&losses_, rows);
   c(&dx_final_norm_, rows * hidden);
@@ -579,6 +578,17 @@ void TrainModel::BuildTrainWorkspace(int batch, int seq) {
   c(&sc.dact, rows * mlp_dim);
   c(&sc.dpre, rows * mlp_dim);
   c(&sc.dve, rows * kv_dim);
+  if constexpr (kFp8Build) {
+    // The backward fp8 scratch (docs/fp8-training.md section 7). The operands
+    // are the output gradient, the saved activation, and the weight. Size for
+    // the largest of each across the block.
+    b(&sc.fp8.a_bytes, rows * static_cast<std::int64_t>(std::max(
+                                  mlp_dim, std::max(query_dim, kv_dim))));
+    b(&sc.fp8.b_bytes,
+      std::max(rows * mlp_dim, static_cast<std::int64_t>(hidden) * mlp_dim));
+    f(&sc.fp8.a_scale, 1);
+    f(&sc.fp8.b_scale, 1);
+  }
 
   std::size_t bytes = 0;
   for (const CSlot& slot : compute_slots) {
@@ -971,9 +981,9 @@ void TrainModel::BackwardInternal(const float* row_weights, float scale,
   }
 
   ops::LinearWgrad(x_final_norm_, dlogits_, lm_head_grad_, rows, hidden,
-                   padded_vocab);
+                   padded_vocab, &head_fp8_);
   ops::LinearDgrad(dlogits_, lm_head_, dx_final_norm_, rows, hidden,
-                   padded_vocab, false);
+                   padded_vocab, false, &head_fp8_);
   ops::RmsNormBackward(rows, hidden, kRmsEps, x_final_pre_, dx_final_norm_,
                        rstd_final_, dx_final_pre_);
 

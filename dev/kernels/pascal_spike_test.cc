@@ -7,10 +7,7 @@
 
 #include "dev/kernels/pascal_spike.h"
 #include "nanochat/sandbox.h"
-
-#if !defined(NANOCHAT_PRECISION_FP32) && !defined(NANOCHAT_PRECISION_BF16)
-#error "no precision selected"
-#endif
+#include "nanochat/tensor.h"
 
 int main() {
   nanochat::RequireSandboxOrDie("test");

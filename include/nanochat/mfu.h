@@ -70,9 +70,9 @@ enum class ComputePrecision { kFp32, kBf16, kFp8 };
 // The short name of `precision`, for a report row.
 const char* PrecisionName(ComputePrecision precision);
 
-// The build's compute precision. fp32 is the only compute type today, so this
-// returns kFp32. It is the fallback assignment for an operation that has no fp8
-// path in the current tree.
+// The build's compute precision, from `kBuildPrecision` in
+// `nanochat/tensor.h`. It is the fallback assignment for an operation that has
+// no fp8 path in the current tree.
 ComputePrecision BuildComputePrecision();
 
 // Peak dense FLOPs for `device_name` at an explicit `precision`. It is the

@@ -178,10 +178,10 @@ Use this type contract:
 
 Delivered:
 
-1. `ComputeType` selection. `include/nanochat/tensor.h` selects `float` for
-   `NANOCHAT_PRECISION_FP32` and `Bf16` for `NANOCHAT_PRECISION_BF16`. The bf16
-   item adds `Bf16(float)`, `operator float`, and the compound assignments, and
-   the conversion helpers are `__host__ __device__`.
+1. `ComputeType` selection. `include/nanochat/tensor.h` maps the build value
+   `NANOCHAT_PRECISION` to `BuildPrecision`: `float` for fp32, and `Bf16` for
+   bf16 and fp8. The bf16 item adds `Bf16(float)`, `operator float`, and the
+   compound assignments, and the conversion helpers are `__host__ __device__`.
 2. `GradientType` is fp32 in every build. `ParamView::grad` and the optimizer
    buffers use it, so a parameter gradient is never bf16.
 3. `Caps::supports_bf16`. `CapsFromProfile` copies it from the device profile,

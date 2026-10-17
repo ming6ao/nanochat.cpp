@@ -124,11 +124,7 @@ the storage precision. Use a named constant, so the two builds differ in the
 bound and not in the check:
 
 ```cpp
-#if defined(NANOCHAT_PRECISION_FP32)
-constexpr double kPathAtol = 1e-6;
-#else
-constexpr double kPathAtol = 1e-4;
-#endif
+constexpr double kPathAtol = nanochat::kComputeIsBf16 ? 1e-4 : 1e-6;
 ```
 
 A test that writes a parameter from an fp32 fixture writes the fp32 master and

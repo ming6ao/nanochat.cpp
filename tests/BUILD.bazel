@@ -372,9 +372,9 @@ cc_test(
 )
 
 # The fp8 graph plumbing gate (docs/correctness-gates.md sections 3.3 and 5.1).
-# The eligible forward matmuls take the fp8 path and are compared against the
-# dense path in the same build. `precision_defines` gives the source the
-# `NANOCHAT_FP8` define the branch is guarded by.
+# The eligible forward and backward matmuls take the fp8 path and are compared
+# against the dense path in the same build. `precision_defines` gives the source
+# the `NANOCHAT_PRECISION` value that `kFp8Build` comes from.
 cc_test(
     name = "fp8_graph_test",
     srcs = ["fp8_graph_test.cc"],
