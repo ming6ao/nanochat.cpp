@@ -45,6 +45,7 @@ void LinearForward(const ComputeType* x, const ComputeType* w, ComputeType* y,
                    std::int64_t rows, std::int64_t in, std::int64_t out,
                    bool accumulate, const Fp8Scratch* fp8) {
   if (rows <= 0 || in <= 0 || out <= 0) return;
+  (void)fp8;  // unused in a dense build
 #if defined(NANOCHAT_FP8)
   // The eligible matmuls take fp8 operands with an fp32 accumulator
   // (docs/fp8-training.md sections 6 and 7). Quantize both operands for this

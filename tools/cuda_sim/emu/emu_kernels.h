@@ -35,6 +35,26 @@ void EmuPointwiseBackward(PointwiseOp op, int n, const ComputeType* a,
 void EmuQuantizeFp8(const QuantizeFp8Params& params, const ComputeType* src,
                     std::uint8_t* dst, float* dequant);
 
+void EmuValueGateForward(int rows, int hidden, int num_kv_heads, int head_dim,
+                         const ComputeType* h, const ComputeType* ve,
+                         const ComputeType* gate_w, ComputeType* v,
+                         ComputeType* gate_out);
+
+void EmuValueGateBackward(int rows, int hidden, int num_kv_heads, int head_dim,
+                          const ComputeType* h, const ComputeType* ve,
+                          const ComputeType* gate_w, const ComputeType* gate,
+                          const ComputeType* dv, float* gate_w_grad,
+                          ComputeType* dh, ComputeType* dve);
+
+void EmuAttentionForward(const AttentionParams& params, const ComputeType* q,
+                         const ComputeType* k, const ComputeType* v,
+                         ComputeType* out, float* stats);
+
+void EmuAttentionBackward(const AttentionParams& params, const ComputeType* q,
+                          const ComputeType* k, const ComputeType* v,
+                          const float* stats, const ComputeType* dout,
+                          ComputeType* dq, ComputeType* dk, ComputeType* dv);
+
 }  // namespace kernels
 
 namespace cuda_kernels {

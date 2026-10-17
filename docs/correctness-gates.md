@@ -159,15 +159,21 @@ attention forward. Map `mma` to a scalar loop for one narrow case only. Record
 in [attention-tensor-core.md](attention-tensor-core.md) phase A3 that the
 tile still needs hardware.
 
-Status: the cast is complete. `cuda_fp8.h` maps the conversion intrinsics to
-`nanochat/fp8.h`, the emulator compiles `backends/cuda/kernels/fp8.cu`, and
-`//tests:kernel_emu_test` compares the emulated cast to the CPU reference
-exactly. `__float_as_uint` and `__uint_as_float` joined `cuda_emu.h`.
+Status: complete except the `mma` scalar loop. `cuda_fp8.h` maps the conversion
+intrinsics to `nanochat/fp8.h`. `cuda_emu.h` carries a per-block dynamic shared
+buffer, and the BUILD file rewrites the `extern __shared__` declaration in the
+emulated copy of `value_gate.cu` and `attention.cu`. The device sources do not
+change; only the copies do.
 
-Still open: `extern __shared__` and the `mma` scalar loop. See section 9.
+`//tests:kernel_emu_test` compares the emulated cast, the value gate, and the
+attention forward (the cuBLAS path and the fused windowed path) against the CPU
+reference. It also asserts that the dynamic shared path ran.
 
-Gate: the emulated cast kernel and the value gate match the CPU reference. The
-cast holds today; the value gate waits for `extern __shared__`.
+The `mma` scalar loop stays open: the tensor-core tile needs hardware
+([attention-tensor-core.md](attention-tensor-core.md) phase A3).
+
+Gate: the emulated cast, the value gate, and the attention forward match the
+CPU reference. All three hold today.
 
 ### 3.6 The fp8 trace leg
 
@@ -190,6 +196,12 @@ Gate: the CPU leg is exact, and the simulator leg equals the CPU leg.
 Prove, once per fresh run on the real card, the four things that the simulator
 cannot. Abort before the first optimizer step on a mismatch. Do not fall back to
 bf16, because `DESIGN.md` section 6 forbids a runtime precision branch.
+
+Status: delivered. `src/hw_gate.cc` implements the cases and a host reference.
+`src/train.cc` runs it before the first step when the device is real, and exits
+with code 2 on a mismatch. `train_main --hw-check {auto,on,off}` selects the
+behaviour. `//tests:hw_gate_cuda_test` is the standalone twin. There is no
+stamp, by decision: the gate always runs on a fresh run.
 
 ### 4.2 The shape of the gate
 
@@ -338,16 +350,15 @@ checks move to the merge gate.
 | A5 | The emulator fp8 header and `extern __shared__` | Simulator | `kernel_emu_test` |
 | A6 | The fp8 trace leg and the tolerance rows | Oracle, Architect | The exact CPU and simulator legs |
 | B1 | The hardware startup gate | Harness | `hw_gate_cuda_test` |
-| B2 | The integration into `train_main` and the stamp | Harness | A live run |
+| B2 | The integration into `train_main` | Harness | A live run. There is no stamp. |
 
 Do A1, A2, A3, and C1 first, so the fast gate exists early. Then do A4, A5, and
 A6. Then do B1 and B2.
 
-Status: A1, A2, A3 (the forward), A4, the fp8 part of A5, and C1 are complete.
-The two `DType` tags moved into A1, because `Caps::Supports` reads them. The
-open items are the fp8 backward, the external fp8 golden for A6,
-`extern __shared__` and the `mma` loop (A5), and the Hopper gate (B). See
-section 9.
+Status: A1, A2, A3 (the forward), A4, A5 (except the `mma` loop), B1, and C1 are
+complete. The two `DType` tags moved into A1, because `Caps::Supports` reads
+them. The open items are the fp8 backward, the external fp8 golden for A6, and
+the `mma` loop. See section 9.
 
 ## 7. Validation
 

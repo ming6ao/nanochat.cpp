@@ -29,6 +29,10 @@
 #define PointwiseForward EmuPointwiseForward
 #define PointwiseBackward EmuPointwiseBackward
 #define QuantizeFp8 EmuQuantizeFp8
+#define ValueGateForward EmuValueGateForward
+#define ValueGateBackward EmuValueGateBackward
+#define AttentionForward EmuAttentionForward
+#define AttentionBackward EmuAttentionBackward
 
 namespace nanochat {
 namespace cuda_backend {

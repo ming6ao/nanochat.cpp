@@ -58,15 +58,40 @@ genrule(
     cmd = "cp $< $@",
 )
 
+# The macro-based emulator cannot express `extern __shared__ T name[];`, because
+# `__shared__` maps to `static`. The executed-source rewrite turns the one
+# declaration into a pointer to the block's dynamic shared buffer
+# (docs/simulator-precision.md section 6.2). The device source itself does not
+# change; only this copy does.
+genrule(
+    name = "value_gate_emulated_source",
+    srcs = ["//backends/cuda/kernels:value_gate.cu"],
+    outs = ["value_gate_emu.cc"],
+    cmd = "sed -E 's/extern __shared__ +([A-Za-z_][A-Za-z0-9_]*) +([A-Za-z_][A-Za-z0-9_]*)\\[\\];/\\1* \\2 = static_cast<\\1*>(::nanochat::emu::DynamicShared());/' $< > $@",
+)
+
+genrule(
+    name = "attention_emulated_source",
+    srcs = ["//backends/cuda/kernels:attention.cu"],
+    outs = ["attention_emu.cc"],
+    cmd = "sed -E 's/extern __shared__ +([A-Za-z_][A-Za-z0-9_]*) +([A-Za-z_][A-Za-z0-9_]*)\\[\\];/\\1* \\2 = static_cast<\\1*>(::nanochat::emu::DynamicShared());/' $< > $@",
+)
+
 cc_library(
     name = "emulated_kernels",
     srcs = [
         "emu_runtime.cc",
+        ":attention_emulated_source",
         ":fp8_emulated_source",
         ":pointwise_emulated_source",
         ":rms_norm_emulated_source",
+        ":value_gate_emulated_source",
     ],
     copts = nanochat_copts() + [
+        # The device compiler does not warn about an unused kernel parameter, so
+        # the host pass must not either: the value-gate kernels take `rows` for
+        # the grid.
+        "-Wno-unused-parameter",
         # The repository root, so the kernel sources' own quoted includes
         # ("backends/cuda/device.h" and friends) resolve.
         "-I.",

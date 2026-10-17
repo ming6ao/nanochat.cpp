@@ -39,6 +39,7 @@
 #include "nanochat/scheduler.h"
 #include "nanochat/tensor.h"
 #include "nanochat/tokenizer.h"
+#include "src/hw_gate.h"
 #include "src/ops.h"
 #include "src/optim_state.h"
 #include "src/parquet/reader.h"
@@ -977,6 +978,27 @@ float TrainLoop::Run() {
     logger_->Info("analytic step bound " +
                   std::to_string(bound.step_seconds * 1000.0) + " ms");
     logger_->Info("\n" + FormatPerformanceReport(bound));
+  }
+
+  // The hardware correctness gate (docs/correctness-gates.md section 4). Run
+  // it once, before the first step, so a bad fp8 or tensor-core result aborts
+  // the run instead of wasting device time. `kAuto` runs it on a real device
+  // and skips it on the CPU reference.
+  {
+    const Caps gate_caps = kernels::GetCaps();
+    const bool run_gate = config_.hw_check == TrainConfig::HwCheck::kOn ||
+                          (config_.hw_check == TrainConfig::HwCheck::kAuto &&
+                           gate_caps.is_device);
+    if (run_gate) {
+      const HardwareGateResult gate = RunHardwareCorrectnessGate();
+      if (!gate.passed) {
+        logger_->Info("hardware correctness gate FAILED: " +
+                      gate.first_failure);
+        std::exit(2);
+      }
+      logger_->Info("hardware correctness gate passed (" +
+                    std::to_string(gate.cases) + " cases)");
+    }
   }
 
   // A resume continues the schedule from the stored step, so the learning-rate

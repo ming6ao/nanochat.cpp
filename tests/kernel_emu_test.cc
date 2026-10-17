@@ -396,6 +396,97 @@ void CheckQuantizeFp8() {
   }
 }
 
+// The value gate: the emulated kernel against the CPU reference. This is the
+// `extern __shared__` path the executed-source rewrite covers
+// (docs/simulator-precision.md section 6.2).
+void CheckValueGate(int rows, int kv_heads, int head_dim) {
+  const int hidden = 32;
+  const int gate_channels = 12;
+  const int value_count = rows * kv_heads * head_dim;
+  const int gate_count = rows * kv_heads;
+  const int h_count = rows * hidden;
+  const int w_count = kv_heads * gate_channels;
+
+  const std::vector<float> h_f = MakeInput(h_count, 1.0f, 11);
+  const std::vector<float> ve_f = MakeInput(value_count, 1.0f, 13);
+  const std::vector<float> w_f = MakeInput(w_count, 1.0f, 17);
+  std::vector<ComputeType> h(h_count), ve(value_count), w(w_count);
+  for (int i = 0; i < h_count; ++i) h[i] = nanochat::ComputeFromFloat(h_f[i]);
+  for (int i = 0; i < value_count; ++i) {
+    ve[i] = nanochat::ComputeFromFloat(ve_f[i]);
+  }
+  for (int i = 0; i < w_count; ++i) w[i] = nanochat::ComputeFromFloat(w_f[i]);
+
+  const ComputeType zero = nanochat::ComputeFromFloat(0.0f);
+  std::vector<ComputeType> v_ref(value_count, zero);
+  std::vector<ComputeType> gate_ref(gate_count, zero);
+  std::vector<ComputeType> v_emu(value_count, zero);
+  std::vector<ComputeType> gate_emu(gate_count, zero);
+  nanochat::kernels::ValueGateForward(rows, hidden, kv_heads, head_dim,
+                                      h.data(), ve.data(), w.data(),
+                                      v_ref.data(), gate_ref.data());
+  nanochat::kernels::EmuValueGateForward(rows, hidden, kv_heads, head_dim,
+                                         h.data(), ve.data(), w.data(),
+                                         v_emu.data(), gate_emu.data());
+  ExpectClose(ToFloat(v_ref), ToFloat(v_emu), "value gate forward v");
+  ExpectClose(ToFloat(gate_ref), ToFloat(gate_emu), "value gate forward gate");
+
+  // The backward. `gate_w_grad` and `dh` accumulate, so they start at zero.
+  const std::vector<float> dv_f = MakeInput(value_count, 1.0f, 19);
+  std::vector<ComputeType> dv(value_count);
+  for (int i = 0; i < value_count; ++i) {
+    dv[i] = nanochat::ComputeFromFloat(dv_f[i]);
+  }
+  std::vector<float> wgrad_ref(w_count, 0.0f);
+  std::vector<float> wgrad_emu(w_count, 0.0f);
+  std::vector<ComputeType> dh_ref(h_count, zero);
+  std::vector<ComputeType> dh_emu(h_count, zero);
+  std::vector<ComputeType> dve_ref(value_count, zero);
+  std::vector<ComputeType> dve_emu(value_count, zero);
+  nanochat::kernels::ValueGateBackward(
+      rows, hidden, kv_heads, head_dim, h.data(), ve.data(), w.data(),
+      gate_ref.data(), dv.data(), wgrad_ref.data(), dh_ref.data(),
+      dve_ref.data());
+  nanochat::kernels::EmuValueGateBackward(
+      rows, hidden, kv_heads, head_dim, h.data(), ve.data(), w.data(),
+      gate_ref.data(), dv.data(), wgrad_emu.data(), dh_emu.data(),
+      dve_emu.data());
+  ExpectClose(wgrad_ref, wgrad_emu, "value gate backward gate_w_grad");
+  ExpectClose(ToFloat(dh_ref), ToFloat(dh_emu), "value gate backward dh");
+  ExpectClose(ToFloat(dve_ref), ToFloat(dve_emu), "value gate backward dve");
+}
+
+// Attention: the emulated kernels against the CPU reference. The fused
+// windowed forward uses `extern __shared__`, which the executed-source rewrite
+// covers (docs/simulator-precision.md section 6.2).
+void CheckAttention(const nanochat::AttentionParams& params) {
+  const int dim = params.head_dim;
+  const int kv_len = params.kv_len > 0 ? params.kv_len : params.seq;
+  const int q_count = params.batch * params.seq * params.num_heads * dim;
+  const int k_count = params.batch * kv_len * params.num_kv_heads * dim;
+  const int stats_count = params.batch * params.num_heads * params.seq * 2;
+
+  const std::vector<float> q_f = MakeInput(q_count, 1.0f, 23);
+  const std::vector<float> k_f = MakeInput(k_count, 1.0f, 29);
+  const std::vector<float> v_f = MakeInput(k_count, 1.0f, 31);
+  std::vector<ComputeType> q(q_count), k(k_count), v(k_count);
+  for (int i = 0; i < q_count; ++i) q[i] = nanochat::ComputeFromFloat(q_f[i]);
+  for (int i = 0; i < k_count; ++i) k[i] = nanochat::ComputeFromFloat(k_f[i]);
+  for (int i = 0; i < k_count; ++i) v[i] = nanochat::ComputeFromFloat(v_f[i]);
+
+  const ComputeType zero = nanochat::ComputeFromFloat(0.0f);
+  std::vector<ComputeType> out_ref(q_count, zero);
+  std::vector<ComputeType> out_emu(q_count, zero);
+  std::vector<float> stats_ref(stats_count, 0.0f);
+  std::vector<float> stats_emu(stats_count, 0.0f);
+  nanochat::kernels::AttentionForward(params, q.data(), k.data(), v.data(),
+                                      out_ref.data(), stats_ref.data());
+  nanochat::kernels::EmuAttentionForward(params, q.data(), k.data(), v.data(),
+                                         out_emu.data(), stats_emu.data());
+  ExpectClose(ToFloat(out_ref), ToFloat(out_emu), "attention forward out");
+  ExpectClose(stats_ref, stats_emu, "attention forward stats");
+}
+
 }  // namespace
 
 int main() {
@@ -432,6 +523,39 @@ int main() {
 
   // The fp8 cast: the emulated device code against the CPU reference.
   CheckQuantizeFp8();
+
+  // The value gate, which uses `extern __shared__`.
+  CheckValueGate(3, 2, 8);
+  CheckValueGate(5, 4, 4);
+
+  // Attention: the cuBLAS path, then the fused windowed path, which also uses
+  // `extern __shared__`.
+  {
+    nanochat::AttentionParams params;
+    params.batch = 2;
+    params.seq = 8;
+    params.num_heads = 2;
+    params.num_kv_heads = 2;
+    params.head_dim = 8;
+    params.causal = true;
+    CheckAttention(params);
+  }
+  {
+    nanochat::AttentionParams params;
+    params.batch = 1;
+    params.seq = 8;
+    params.num_heads = 1;
+    params.num_kv_heads = 1;
+    params.head_dim = 128;
+    params.causal = true;
+    params.window_left = 4;
+    CheckAttention(params);
+  }
+
+  // The `extern __shared__` path ran: the dynamic shared buffer was sized.
+  if (nanochat::emu::Stats().max_dynamic_shared_bytes == 0) {
+    Fail("the dynamic shared-memory path was exercised");
+  }
 
   if (g_failures != 0) {
     std::printf("%d check(s) failed\n", g_failures);

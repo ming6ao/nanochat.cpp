@@ -196,6 +196,10 @@ struct BlockRuntime {
   std::vector<std::unique_ptr<Fiber>> fibers;
   ucontext_t scheduler;
   char* shuffle = nullptr;
+  // The block's dynamic shared memory, for an `extern __shared__` declaration.
+  // The executed-source rewrite turns the declaration into a pointer to this
+  // buffer (docs/simulator-precision.md section 6.2).
+  char* dynamic_shared = nullptr;
   int current = -1;  // the fiber that is running, or -1
   int cursor = 0;    // the scheduler's place in the thread list
   int finished = 0;
@@ -204,6 +208,13 @@ struct BlockRuntime {
 };
 
 extern thread_local BlockRuntime* g_block;
+
+// The base of the running block's dynamic shared memory. An emulated kernel
+// that used `extern __shared__ T name[];` calls this instead, through the
+// rewrite in the BUILD file.
+inline void* DynamicShared() {
+  return g_block != nullptr ? g_block->dynamic_shared : nullptr;
+}
 
 // Resumes `g_block->scheduler`; the scheduler resumes this fiber later.
 void YieldToScheduler();
@@ -386,9 +397,11 @@ bool ReleaseBarriers(BlockRuntime& runtime);
 // of them finish, or aborts when the block deadlocks.
 template <typename Kernel, typename... Args>
 void RunBlock(Kernel kernel, const dim3& block_idx, const dim3& block_dim,
-              const dim3& grid_dim, char* shuffle, int threads, Args... args) {
+              const dim3& grid_dim, char* shuffle, char* dynamic_shared,
+              int threads, Args... args) {
   BlockRuntime runtime;
   runtime.shuffle = shuffle;
+  runtime.dynamic_shared = dynamic_shared;
   runtime.fibers.reserve(static_cast<std::size_t>(threads));
   const unsigned int bx = block_dim.x > 0 ? block_dim.x : 1;
   const unsigned int by = block_dim.y > 0 ? block_dim.y : 1;
@@ -463,11 +476,14 @@ void LaunchEmulatedKernel(Kernel kernel, dim3 grid, dim3 block,
 
   std::vector<char> shuffle(static_cast<std::size_t>(kMaxWarps) * kWarpSize *
                             kShuffleLaneBytes);
+  // The dynamic shared memory. One buffer serves every block, because the
+  // blocks run one after another.
+  std::vector<char> dynamic_shared(shared_bytes > 0 ? shared_bytes : 1);
   for (unsigned int bz = 0; bz < grid.z; ++bz) {
     for (unsigned int by_ = 0; by_ < grid.y; ++by_) {
       for (unsigned int bx_ = 0; bx_ < grid.x; ++bx_) {
         RunBlock(kernel, dim3(bx_, by_, bz), block, grid, shuffle.data(),
-                 static_cast<int>(threads), args...);
+                 dynamic_shared.data(), static_cast<int>(threads), args...);
       }
     }
   }

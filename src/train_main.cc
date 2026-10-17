@@ -41,6 +41,7 @@ void Usage() {
       "  --resume PATH          resume weights from here\n"
       "  --log PATH             also write the run log here\n"
       "  --device NAME          device name for MFU\n"
+      "  --hw-check MODE        startup gate: auto (default), on, or off\n"
       "  --rank N               data parallel rank (default 0)\n"
       "  --world-size N         data parallel group size (default 1)\n"
       "  --master HOST          rank 0 host for the gradient sync\n"
@@ -150,6 +151,17 @@ int main(int argc, char** argv) {
       config.log_path = value;
     } else if (flag == "--device") {
       config.device_name = value;
+    } else if (flag == "--hw-check") {
+      if (value == "auto") {
+        config.hw_check = nanochat::TrainConfig::HwCheck::kAuto;
+      } else if (value == "on") {
+        config.hw_check = nanochat::TrainConfig::HwCheck::kOn;
+      } else if (value == "off") {
+        config.hw_check = nanochat::TrainConfig::HwCheck::kOff;
+      } else {
+        std::fprintf(stderr, "fatal: --hw-check must be auto, on, or off\n");
+        return 2;
+      }
     } else if (flag == "--rank") {
       config.rank =
           nanochat::cli::ParseInt(value, &parsed_int) ? parsed_int : 0;

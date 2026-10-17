@@ -388,6 +388,26 @@ cc_test(
     tags = ["sim"],
 )
 
+# The standalone hardware correctness gate (docs/correctness-gates.md section
+# 4.6). `manual` keeps it out of the default run; `gpu` selects the broker.
+# `tools/nanochat test --gpu //tests:hw_gate_cuda_test` runs it against a real
+# device. It prints a skip line on a host with no accelerator.
+cc_test(
+    name = "hw_gate_cuda_test",
+    srcs = ["hw_gate_cuda_test.cc"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    deps = [
+        "//include/nanochat:nanochat",
+        "//src:model",
+    ],
+    size = "small",
+    tags = [
+        "gpu",
+        "manual",
+    ],
+)
+
 # The performance-model gate (docs/performance-model.md section 12): the
 # counter struct sums to `EstimateFlopsPerToken`, the precision assignment
 # follows the fp8 rule, the roofline labels each family, and the estimator
@@ -633,6 +653,7 @@ test_suite(name = "all", tests = [
     ":fp8_rounding_test",
     ":fp8_gemm_test",
     ":fp8_graph_test",
+    ":hw_gate_cuda_test",
     ":performance_model_test",
     ":cuda_device_prop_abi_test",
     ":sim_numerics_test",

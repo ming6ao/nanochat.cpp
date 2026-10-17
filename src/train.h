@@ -34,6 +34,15 @@ struct TrainConfig {
   OptimizerConfig optimizer;
   SchedulerConfig scheduler;
 
+  // The hardware correctness gate (docs/correctness-gates.md section 4).
+  // `kAuto` runs it on a real device and skips it on the CPU reference.
+  enum class HwCheck {
+    kAuto = 0,
+    kOn = 1,
+    kOff = 2,
+  };
+  HwCheck hw_check = HwCheck::kAuto;
+
   int batch = 8;
   int grad_accum = 1;  // micro-batches summed before each optimizer step
   int seq = 0;         // 0 selects `model.seq_len`
