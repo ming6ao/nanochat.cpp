@@ -101,7 +101,9 @@ void TestFamilyCoverage() {
              "the log holds a kernel launch");
   ExpectTrue(
       log.find("\"call\":\"cublasGemmStridedBatchedEx\"") != std::string::npos,
-      "the log holds a cuBLAS call");
+      "the log holds a batched cuBLAS call");
+  ExpectTrue(log.find("\"call\":\"cublasGemmEx\"") != std::string::npos,
+             "the log holds a single-batch cuBLAS call");
 }
 
 void TestNoPointerValues() {
@@ -115,18 +117,31 @@ void TestNoPointerValues() {
 void TestTensorCoreComputeType() {
   const std::vector<std::string> lines = Lines(nanochat_sim_log());
   bool checked = false;
+  bool single_batch_checked = false;
   for (const std::string& line : lines) {
-    if (line.find("cublasGemmStridedBatchedEx") == std::string::npos) continue;
+    const bool batched =
+        line.find("cublasGemmStridedBatchedEx") != std::string::npos;
+    const bool single = line.find("cublasGemmEx") != std::string::npos;
+    if (!batched && !single) continue;
     if (line.find("\"tensor_cores\":true") == std::string::npos) continue;
     // Only accepted calls carry the invariant; a rejected call is a negative
     // test exercising the rule. An accepted verdict may carry the legacy-enum
     // note appended, so match the `ok` prefix rather than the exact token.
     if (line.find("\"verdict\":\"ok") == std::string::npos) continue;
-    checked = true;
+    if (batched) checked = true;
+    if (single) {
+      single_batch_checked = true;
+      // `cublasGemmEx` is the one-batch form, so the recorded batch count is
+      // fixed.
+      ExpectTrue(line.find("\"batch_count\":1") != std::string::npos,
+                 "cublasGemmEx records a single batch");
+    }
     ExpectTrue(line.find("\"compute_type\":68") != std::string::npos,
                "a tensor-core GEMM accumulates with CUBLAS_COMPUTE_32F");
   }
   ExpectTrue(checked, "at least one tensor-core GEMM was recorded");
+  ExpectTrue(single_batch_checked,
+             "at least one tensor-core single-batch GEMM was recorded");
 }
 
 // Invariant 8: no launch above the 48 KB default is accepted unless a
@@ -241,6 +256,11 @@ void TestHandleOrder() {
           &b, kCudaR32F, 4, 0, &beta, &c, kCudaR32F, 4, 0, 1, kCublasCompute32F,
           kCublasGemmDefaultTensorOp) != kCublasStatusSuccess,
       "a cuBLAS call before cublasCreate_v2 is rejected");
+  ExpectTrue(cublasGemmEx(nullptr, kCublasOpN, kCublasOpN, 1, 1, 1, &alpha, &a,
+                          kCudaR32F, 4, &b, kCudaR32F, 4, &beta, &c, kCudaR32F,
+                          4, kCublasCompute32F,
+                          kCublasGemmDefault) != kCublasStatusSuccess,
+             "a single-batch cuBLAS call before cublasCreate_v2 is rejected");
   ExpectTrue(nanochat_sim_record_count() > before, "the rejection is recorded");
 
   cublasHandle_t handle = nullptr;
@@ -255,6 +275,11 @@ void TestHandleOrder() {
           &b, kCudaR32F, 4, 0, &beta, &c, kCudaR32F, 4, 0, 1, kCublasCompute32F,
           kCublasGemmDefaultTensorOp) != kCublasStatusSuccess,
       "a destroyed handle is not reused");
+  ExpectTrue(cublasGemmEx(handle, kCublasOpN, kCublasOpN, 1, 1, 1, &alpha, &a,
+                          kCudaR32F, 4, &b, kCudaR32F, 4, &beta, &c, kCudaR32F,
+                          4, kCublasCompute32F,
+                          kCublasGemmDefault) != kCublasStatusSuccess,
+             "a destroyed handle is not reused by cublasGemmEx");
 }
 
 // The tensor-core compute-type rule (docs/simulator.md section 5.3): a GEMM on
@@ -276,6 +301,14 @@ void TestTensorCoreComputeTypeRule() {
                  kCublasCompute16F, kCublasGemmDefault) != kCublasStatusSuccess,
              "CUBLAS_COMPUTE_16F is rejected on a tensor-core profile");
   ExpectTrue(nanochat_sim_record_count() > before, "the rejection is recorded");
+  const int after_batched = nanochat_sim_record_count();
+  ExpectTrue(cublasGemmEx(handle, kCublasOpN, kCublasOpN, 8, 8, 8, &alpha, &a,
+                          kCudaR32F, 8, &b, kCudaR32F, 8, &beta, &c, kCudaR32F,
+                          8, kCublasCompute16F,
+                          kCublasGemmDefault) != kCublasStatusSuccess,
+             "CUBLAS_COMPUTE_16F is rejected by cublasGemmEx too");
+  ExpectTrue(nanochat_sim_record_count() > after_batched,
+             "the single-batch rejection is recorded");
   ExpectTrue(cublasDestroy(handle) == kCublasStatusSuccess,
              "cublasDestroy succeeds");
 }
@@ -321,6 +354,15 @@ void DriveTheBackend() {
                  device_buffer, kCudaR32F, 8, 64, 2, kCublasCompute32F,
                  kCublasGemmDefaultTensorOp) == kCublasStatusSuccess,
              "the tensor-core GEMM is accepted");
+  // The single-batch form the bf16 mixed path uses (`gemm.cu` routes a
+  // one-batch GEMM whose operands are not all fp32 here), so invariant 8 covers
+  // both entry points.
+  ExpectTrue(
+      cublasGemmEx(handle, kCublasOpN, kCublasOpN, 8, 8, 8, &alpha,
+                   device_buffer, kCudaR16F, 8, device_buffer, kCudaR16F, 8,
+                   &beta, device_buffer, kCudaR32F, 8, kCublasCompute32F,
+                   kCublasGemmDefault) == kCublasStatusSuccess,
+      "the single-batch mixed GEMM is accepted");
   ExpectTrue(cublasDestroy(handle) == kCublasStatusSuccess,
              "cublasDestroy succeeds");
 

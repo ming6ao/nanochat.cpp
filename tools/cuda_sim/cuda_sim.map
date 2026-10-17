@@ -57,6 +57,7 @@ libcublas.so.12 {
   global:
     cublasCreate_v2;
     cublasSgemm_v2;
+    cublasGemmEx;
     cublasGemmStridedBatchedEx;
     cublasGetStatusString;
     cublasDestroy;

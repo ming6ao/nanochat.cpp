@@ -138,6 +138,14 @@ cublasStatus_t cublasGemmStridedBatchedEx(
     cublasDataType_t b_type, int ldb, long long stride_b, const void* beta,
     void* c, cublasDataType_t c_type, int ldc, long long stride_c,
     int batch_count, cublasComputeType_t compute_type, cublasGemmAlgo_t algo);
+cublasStatus_t cublasGemmEx(cublasHandle_t handle, cublasOperation_t transa,
+                            cublasOperation_t transb, int m, int n, int k,
+                            const void* alpha, const void* a,
+                            cublasDataType_t a_type, int lda, const void* b,
+                            cublasDataType_t b_type, int ldb, const void* beta,
+                            void* c, cublasDataType_t c_type, int ldc,
+                            cublasComputeType_t compute_type,
+                            cublasGemmAlgo_t algo);
 
 // Clears the log, the allocation registry, the cuBLAS handles, and the
 // per-function attribute table. The binding canary is re-armed.

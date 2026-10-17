@@ -656,21 +656,16 @@ cublasStatus_t cublasSgemm_v2(cublasHandle_t handle, cublasOperation_t transa,
   return dimensions_ok ? kCublasStatusSuccess : kCublasStatusInvalidValue;
 }
 
-cublasStatus_t cublasGemmStridedBatchedEx(
-    cublasHandle_t handle, cublasOperation_t transa, cublasOperation_t transb,
-    int m, int n, int k, const void* alpha, const void* a,
-    cublasDataType_t a_type, int lda, long long stride_a, const void* b,
-    cublasDataType_t b_type, int ldb, long long stride_b, const void* beta,
-    void* c, cublasDataType_t c_type, int ldc, long long stride_c,
+// The shared body of the two extended-GEMM entry points. The CUDA API defines
+// `cublasGemmEx` as the strided-batched call restricted to one batch and zero
+// stride, and `gemm.cu` reaches it for a single-batch GEMM whose operands are
+// not all fp32 (the bf16 mixed path, docs/precision.md). Both entry points
+// therefore run the same rules and record the same shape; only the recorded
+// name and the batch count differ.
+static cublasStatus_t GemmExCommon(
+    const char* call, cublasHandle_t handle, cublasOperation_t transa,
+    cublasOperation_t transb, int m, int n, int k, int lda, int ldb, int ldc,
     int batch_count, cublasComputeType_t compute_type, cublasGemmAlgo_t algo) {
-  (void)alpha;
-  (void)beta;
-  (void)a;
-  (void)b;
-  (void)c;
-  (void)a_type;
-  (void)b_type;
-  (void)c_type;
   InterposerState& state = State();
   bool handle_ok = false;
   {
@@ -678,7 +673,7 @@ cublasStatus_t cublasGemmStridedBatchedEx(
     handle_ok = handle != nullptr && handle == state.cublas_handle;
   }
   if (!handle_ok) {
-    Record("cublasGemmStridedBatchedEx", "",
+    Record(call, "",
            "error: cuBLAS call before cublasCreate_v2 (or after "
            "cublasDestroy)");
     return kCublasStatusNotInitialized;
@@ -716,10 +711,7 @@ cublasStatus_t cublasGemmStridedBatchedEx(
     ok = false;
     verdict = "error: leading dimension below the operand row";
   }
-  (void)stride_a;
-  (void)stride_b;
-  (void)stride_c;
-  Record("cublasGemmStridedBatchedEx",
+  Record(call,
          "\"m\":" + std::to_string(m) + ",\"n\":" + std::to_string(n) +
              ",\"k\":" + std::to_string(k) +
              ",\"batch_count\":" + std::to_string(batch_count) +
@@ -729,6 +721,48 @@ cublasStatus_t cublasGemmStridedBatchedEx(
              ",\"legacy_enum\":" + (legacy ? "true" : "false"),
          verdict);
   return ok ? kCublasStatusSuccess : kCublasStatusInvalidValue;
+}
+
+cublasStatus_t cublasGemmStridedBatchedEx(
+    cublasHandle_t handle, cublasOperation_t transa, cublasOperation_t transb,
+    int m, int n, int k, const void* alpha, const void* a,
+    cublasDataType_t a_type, int lda, long long stride_a, const void* b,
+    cublasDataType_t b_type, int ldb, long long stride_b, const void* beta,
+    void* c, cublasDataType_t c_type, int ldc, long long stride_c,
+    int batch_count, cublasComputeType_t compute_type, cublasGemmAlgo_t algo) {
+  (void)alpha;
+  (void)beta;
+  (void)a;
+  (void)b;
+  (void)c;
+  (void)a_type;
+  (void)b_type;
+  (void)c_type;
+  (void)stride_a;
+  (void)stride_b;
+  (void)stride_c;
+  return GemmExCommon("cublasGemmStridedBatchedEx", handle, transa, transb, m,
+                      n, k, lda, ldb, ldc, batch_count, compute_type, algo);
+}
+
+cublasStatus_t cublasGemmEx(cublasHandle_t handle, cublasOperation_t transa,
+                            cublasOperation_t transb, int m, int n, int k,
+                            const void* alpha, const void* a,
+                            cublasDataType_t a_type, int lda, const void* b,
+                            cublasDataType_t b_type, int ldb, const void* beta,
+                            void* c, cublasDataType_t c_type, int ldc,
+                            cublasComputeType_t compute_type,
+                            cublasGemmAlgo_t algo) {
+  (void)alpha;
+  (void)beta;
+  (void)a;
+  (void)b;
+  (void)c;
+  (void)a_type;
+  (void)b_type;
+  (void)c_type;
+  return GemmExCommon("cublasGemmEx", handle, transa, transb, m, n, k, lda, ldb,
+                      ldc, 1, compute_type, algo);
 }
 
 }  // extern "C"

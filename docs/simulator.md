@@ -208,7 +208,7 @@ in-process unit test of the mock, not a binding test.)
 | Memory | `cudaMalloc`, `cudaFree`, `cudaMemcpy`, `cudaMemset` | yes |
 | Device | `cudaGetDevice`, `cudaGetDeviceCount`, `cudaSetDevice`, `cudaGetDeviceProperties_v2`, `cudaGetErrorString`, `cudaGetLastError`, `cudaDeviceSynchronize` | yes |
 | Launch | `cudaLaunchKernel`, `cudaFuncSetAttribute`, `__cudaRegisterFatBinary`, `__cudaRegisterFatBinaryEnd`, `__cudaUnregisterFatBinary`, `__cudaRegisterFunction` | yes |
-| cuBLAS | `cublasCreate_v2`, `cublasSgemm_v2`, `cublasGemmStridedBatchedEx`, `cublasGetStatusString` | yes |
+| cuBLAS | `cublasCreate_v2`, `cublasSgemm_v2`, `cublasGemmEx`, `cublasGemmStridedBatchedEx`, `cublasGetStatusString` | yes |
 | Streams | `cudaStreamCreate`, `cudaStreamDestroy`, `cudaStreamSynchronize`, `cudaStreamBeginCapture`, `cudaStreamEndCapture` | reserved |
 | Events | `cudaEventCreate`, `cudaEventDestroy`, `cudaEventRecord`, `cudaEventSynchronize`, `cudaEventElapsedTime` | reserved |
 | Graphs | `cudaGraphInstantiate`, `cudaGraphLaunch`, `cudaGraphDestroy`, `cudaGraphExecDestroy` | reserved |
@@ -217,6 +217,12 @@ in-process unit test of the mock, not a binding test.)
 `cudaFuncSetAttribute` is in the table with a production use of "yes" for the
 rule, not for the current tree. No current call uses it. Section 12.3 gives the
 synthetic trigger.
+
+`cublasGemmEx` is the one-batch form of `cublasGemmStridedBatchedEx`, which is
+what `backends/cuda/gemm.cu` reaches when a single GEMM's operands are not all
+fp32 (the bf16 build; [build.md](build.md), "GEMM behavior"). An fp32 build
+links the name but never calls it, so the mock implements both through one
+shared body and records the same arguments.
 
 ### 5.3 Validation rules
 
@@ -548,8 +554,9 @@ the Architect / Integrator row.
 8. The API-log test asserts named invariants over the normalized log:
    - The log holds at least one `cudaMalloc`, one kernel launch, and one cuBLAS
      call.
-   - Every `cublasGemmStridedBatchedEx` record under a tensor-core profile has
-     `compute_type == CUBLAS_COMPUTE_32F`.
+   - Every accepted `cublasGemmStridedBatchedEx` or `cublasGemmEx` record under a
+     tensor-core profile has `compute_type == CUBLAS_COMPUTE_32F`, and a
+     `cublasGemmEx` record holds `batch_count == 1`.
    - No launch above 48 KB lacks a preceding `cudaFuncSetAttribute`.
    - No pointer value appears in the assertion.
 9. A synthetic interposer test issues a 64 KB launch with no attribute. The
