@@ -263,8 +263,7 @@ Two containers exist:
 
 Both containers hold parameters. The `Checkpoint` class also carries an
 optimizer-state section. That section holds the AdamW first and second moments.
-It also holds the Muon momentum and second-moment buffers. When
-`matrix_optimizer` is 1, it holds the ANVIL twin-rail velocity and lane energy.
+It also holds the Muon momentum and second-moment buffers.
 
 The record names are stable, so a later load can match them to the optimizer
 groups.

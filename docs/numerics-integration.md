@@ -155,7 +155,7 @@ record per
 | RL | `rl/prompt/<r>`, `rl/ids/<r>`, `rl/reward/<r>`, `rl/advantage/<r>`, `rl/mean_reward`, `rl/valid_targets`, `rl/loss`, `rl/grad_norm`, `rl/margin_min` |
 
 The `sched/*` group records the AdamW and Muon fields of the reference
-configuration. The Anvil rail fields are not recorded.
+configuration.
 
 The trace stores the two hashes as 64-bit integers. The hash is FNV-1a over the
 staged host float bytes of one parameter buffer or one gradient buffer. The

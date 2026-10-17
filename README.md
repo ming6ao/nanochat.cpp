@@ -10,18 +10,17 @@ run the full training and inference graph.
 
 The oracle and training-parity fixtures pin the model, the backward pass, and
 the AdamW and Muon optimizers against the PyTorch reference. The tree also
-carries data-parallel training on a host reference and an opt-in ANVIL
-optimizer. It carries a native byte pair encoding tokenizer, a parquet reader, a
-CPU-only CUDA simulator, and a Python surface. Supervised fine-tuning and
-reinforcement learning are partly implemented, and the ANVIL oracle is still
-open.
+carries data-parallel training on a host reference. It carries a native byte
+pair encoding tokenizer, a parquet reader, a CPU-only CUDA simulator, and a
+Python surface. Supervised fine-tuning and reinforcement learning are partly
+implemented.
 [docs/parity.md](docs/parity.md) lists the remaining known differences.
 
 ## What this is
 
 - The **nanochat architecture** (RMSNorm, RoPE, QK-norm, GQA, relu^2 MLP,
-  sliding-window attention, value residual, AdamW, Muon, and the opt-in ANVIL
-  matrix optimizer) with no framework dependency.
+  sliding-window attention, value residual, AdamW, and Muon) with no framework
+  dependency.
 - **Hardware portability by replacement**: adding a backend means adding a
   directory that implements one header. Public API and model definition are
   stable by default.

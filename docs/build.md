@@ -26,7 +26,7 @@ nanochat.cpp/
     cpu/kernels.cc  cpu/kernels_test.cc
     cuda/device.cu  cuda/gemm.cu  cuda/cuda_runtime_test.cc
     cuda/kernels/{rms_norm,qk_prep,attention,pointwise,classifier,
-                  embedding,adamw,muon,anvil,global_norm,value_gate}.cu
+                  embedding,adamw,muon,global_norm,value_gate}.cu
     cuda/kernels/<family>_test.cc + <family>_benchmark.cc next to each kernel
     cuda/kernels/device_utils.cuh
     cuda/kernels/testing/        # host reference headers and test helpers

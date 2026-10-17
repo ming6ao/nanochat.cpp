@@ -208,7 +208,7 @@ never touches the kernel seam.
 App / CLI        train.py   (one process, one program)
 Runtime (new)    DeviceMesh  DeviceContext  ReplicaGroup  Collective
 Train driver     TrainLoop   Checkpointer  Logger      (one per replica)
-Optim            AdamW  Muon  ANVIL  Scheduler
+Optim            AdamW  Muon  Scheduler
 Model / graphs   Model  Prefill  Decode  KvCache
 Ops
 KERNEL API       <-- unchanged seam
@@ -255,7 +255,6 @@ thread-local now:
 | cuBLAS handle | `backends/cuda/gemm.cu` |
 | Tensor-core flag | `backends/cuda/gemm.cu` |
 | Device name buffer | `backends/cuda/device.cu` |
-| ANVIL scratch | `backends/cuda/kernels/anvil.cu` |
 | Muon scratch | `backends/cuda/kernels/muon.cu` |
 | Attention scratch | `backends/cuda/kernels/attention.cu` |
 
@@ -691,7 +690,7 @@ This section records what the tree implements.
   driver writes.
 - Phase 3: the CUDA backend state is thread-local, and each device thread binds
   with `SelectDevice`. The cuBLAS handle, the tensor-core flag, the device name
-  buffer, and the attention, Muon, and ANVIL scratch buffers are per thread.
+  buffer, and the attention and Muon scratch buffers are per thread.
 - Tests: `//src:mesh_test`, `//src:mesh_runtime_test`, `//src:mesh_train_test`,
   `//src:runtime_gpu_test`, `//python:mesh_test`, `//python:runtime_test`,
   `//python:mesh_train_test`, `//python:run_test`,

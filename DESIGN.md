@@ -22,8 +22,8 @@ behind the decisions. Interface reference and how-to material lives under
 ### Goals
 
 - Train and run the **nanochat architecture** (RMSNorm, RoPE, QK-norm, GQA,
-  relu^2 MLP, sliding-window attention, value residual, AdamW, Muon, and the
-  opt-in ANVIL matrix optimizer) with no framework dependency.
+  relu^2 MLP, sliding-window attention, value residual, AdamW, and Muon) with no
+  framework dependency.
 - **Hardware portability by replacement, not by configuration**: adding a
   backend means adding a directory that implements one header. The seam is
   designed so the public API and model definition are stable by default:
@@ -60,7 +60,7 @@ seam.
 ```text
 L6  App / CLI        train_main.cc  generate_main.cc  eval_main.cc
 L5  Train driver     TrainLoop  Checkpointer  Logger  Mfu                  train.cc
-L4  Optim            AdamW  Muon  ANVIL  Scheduler  param groups          optim.cc
+L4  Optim            AdamW  Muon  Scheduler  param groups                 optim.cc
 L3  Model / graphs   Model (forward+backward)  Prefill  Decode  KvCache    model.cc generate.cc
 L2  Ops (internal)   Linear  Block  Mlp  ValueResidual  Smear  Backout      ops.cc
 L1  KERNEL API       <-- THE BACKEND SEAM  (nanochat/kernels.h)

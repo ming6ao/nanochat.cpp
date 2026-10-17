@@ -197,8 +197,8 @@ Delivered:
 6. The CUDA bf16 kernels. `AtomicAddDev` gains a bf16 compare-and-swap form
    (a half-word write cannot use the native atomic add), and the embedding
    scatter-add, the value-gate weight gradient, and the global norm write fp32.
-7. The optimizer path. `AdamWUpdate`, `MuonUpdate`, and `AnvilUpdate` read fp32
-   gradients and keep fp32 moments, then write the bf16 compute copy.
+7. The optimizer path. `AdamWUpdate` and `MuonUpdate` read fp32 gradients and
+   keep fp32 moments, then write the bf16 compute copy.
 8. The checkpoint path. The canonical record stays fp32. `CollectModelRecords`
    reads the master, a load writes the master and rebuilds the compute copy,
    and a load accepts an fp32 or a bf16 record in any build.

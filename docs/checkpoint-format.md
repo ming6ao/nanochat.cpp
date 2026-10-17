@@ -70,7 +70,7 @@ The notebooks save through the training runtime. The runtime writes
 
 | Writer | Container | Optimizer section | Step record |
 |---|---|---|---|
-| `MeshRuntime.save` (`nc.MeshRuntime.save`) | `NCHKPT01` | AdamW, Muon, ANVIL | yes |
+| `MeshRuntime.save` (`nc.MeshRuntime.save`) | `NCHKPT01` | AdamW, Muon | yes |
 | `Checkpointer::SaveModel(model, optimizer, step, path)` | `NCHKPT01` | per the optimizer | yes |
 | `Checkpointer::SaveModel(model, path)` | `NCHKPT01` | empty count | no |
 | `nc.Model.save` (`nanochat_save`) | `NCHKPT01` | empty count | no |
@@ -227,8 +227,6 @@ collide with a parameter record.
 | `adamw.<kind>.v` | AdamW second moment |
 | `muon.<rows>x<cols>.buf1` | Muon momentum buffer |
 | `muon.<rows>x<cols>.buf2` | Muon second-moment buffer |
-| `anvil.<rows>x<cols>.velocity` | ANVIL twin-rail velocity |
-| `anvil.<rows>x<cols>.lane_energy` | ANVIL lane energy |
 | `optimizer/step` | the 1-based step, four raw little-endian `int32` bytes |
 
 `<kind>` is one of `lm_head`, `embedding`, `value_embedding`, `resid`, `x0`,
@@ -404,8 +402,8 @@ global against local shape. It has no shard index. It has no manifest that
 names the shard files.
 
 The Python converter rejects a sharded input. In
-`python/nanochat_cpp/checkpoint.py`, `_muon_records` and `_anvil_records` raise
-"this is a sharded rank shard, not a single-rank shard". The check runs when
+`python/nanochat_cpp/checkpoint.py`, `_muon_records` raises "this is a sharded
+rank shard, not a single-rank shard". The check runs when
 the reference optimizer group stacks a different number of buffers than the
 group holds.
 
