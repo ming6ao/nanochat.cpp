@@ -116,17 +116,24 @@ int main() {
     CheckClose(U(o[1]), 0.5f * -2.0f + 0.25f * 3.0f, kOutTol, "pointwise 1");
   }
 
-  // GlobalNorm: {3, 4} has norm 5, clipped to 2.5 -> {1.5, 2}.
+  // GradNorm: {3, 4} has norm 5, and a clip of 2.5 publishes scale 0.5.
   {
     DevBuf<float> g(std::vector<float>{3.0f, 4.0f});
     DevBuf<float> norm(std::vector<float>{0.0f});
-    nanochat::kernels::GlobalNorm(2, 2.5f, g.ptr, norm.ptr);
+    DevBuf<float> scale(std::vector<float>{0.0f});
+    DevBuf<const float*> span(std::vector<const float*>{g.ptr});
+    DevBuf<int> span_count(std::vector<int>{2});
+    nanochat::kernels::GradNorm(span.ptr, span_count.ptr, 1, 2.5f, norm.ptr,
+                                scale.ptr);
     Synchronize();
     const std::vector<float> gh = g.Download();
     const std::vector<float> nh = norm.Download();
-    CheckClose(nh[0], 5.0, 1e-4, "globalnorm pre-clip");
-    CheckClose(U(gh[0]), 1.5, kOutTol, "globalnorm clipped 0");
-    CheckClose(U(gh[1]), 2.0, kOutTol, "globalnorm clipped 1");
+    const std::vector<float> sh = scale.Download();
+    CheckClose(nh[0], 5.0, 1e-4, "gradnorm norm");
+    CheckClose(sh[0], 0.5, 1e-4, "gradnorm scale");
+    // The buffer is untouched: the caller applies the scale.
+    CheckClose(U(gh[0]), 3.0, kOutTol, "gradnorm grad 0");
+    CheckClose(U(gh[1]), 4.0, kOutTol, "gradnorm grad 1");
   }
 
   // Fused residual add + norm: out = rmsnorm(x + residual).

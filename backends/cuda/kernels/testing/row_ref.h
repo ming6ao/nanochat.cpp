@@ -263,18 +263,20 @@ inline void PointwiseBackward(PointwiseOp op, const std::vector<float>& a,
   }
 }
 
-// --- GlobalNorm -----------------------------------------------------------
+// --- GradNorm -------------------------------------------------------------
 
-inline float GlobalNorm(int n, float clip, std::vector<float>* grads) {
+// The reference over a set of spans: returns the norm and writes the clip
+// scale to `scale`. The buffers are left untouched, as the kernel leaves them.
+inline float GradNorm(const std::vector<std::vector<float>>& spans, float clip,
+                      float* scale) {
   double sum_sq = 0.0;
-  for (int i = 0; i < n; ++i) {
-    sum_sq += static_cast<double>((*grads)[i]) * (*grads)[i];
+  for (const std::vector<float>& span : spans) {
+    for (const float value : span) {
+      sum_sq += static_cast<double>(value) * value;
+    }
   }
   const float norm = static_cast<float>(std::sqrt(sum_sq));
-  if (clip > 0.0f && norm > clip) {
-    const float s = clip / norm;
-    for (int i = 0; i < n; ++i) (*grads)[i] *= s;
-  }
+  *scale = (clip > 0.0f && norm > clip) ? (clip / norm) : 1.0f;
   return norm;
 }
 

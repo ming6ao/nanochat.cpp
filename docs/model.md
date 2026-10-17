@@ -130,6 +130,32 @@ batched cuBLAS GEMMs.
 
 The kernels themselves are declared in [kernels.md](kernels.md).
 
+### Optimizer state
+
+Every parameter carries a fp32 master, a `ComputeType` compute copy, and one
+fp32 gradient. In the fp32 build the master aliases the compute copy; in a bf16
+build they are two buffers.
+
+| Item | Bytes per parameter |
+|---|---|
+| master and compute copy | 4 (fp32 build), 6 (bf16 build) |
+| parameter gradient | 4 |
+| AdamW first and second moment | 8, AdamW groups only |
+| Muon momentum and factored second moment | 4, Muon groups only |
+
+Gradient clipping is global over every parameter, but it no longer needs a copy
+of every gradient. `Step` reduces the per-parameter gradients in one streaming
+pass (`kernels::GradNorm`) and folds the clip scale into each update through
+`AdamWParams::grad_scale` and `MuonParams::grad_scale`, so the decoupled weight
+decay stays unscaled. The Muon groups still stack, because the kernel's operand
+is `[num_params, rows, cols]`: one reusable buffer sized for the widest group is
+refilled immediately before that group's update.
+
+At the default `d12` shape (84.9 M Muon parameters, 201.3 M AdamW parameters)
+the block is about 4.1 GiB in the fp32 build and 4.6 GiB in the bf16 build,
+about 1 GiB below the former design, which staged a second fp32 copy of every
+gradient in one flat buffer.
+
 ## Data, checkpoints, and the oracle
 
 - **Data**: parquet documents, tokenized during the run by the native reader

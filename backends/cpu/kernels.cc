@@ -1105,7 +1105,9 @@ void AdamWUpdate(int n, const AdamWParams& params, float* master,
       1.0f - std::pow(params.beta2, static_cast<float>(params.step));
   const float step_size = params.lr / bias1;
   for (int i = 0; i < n; ++i) {
-    const float grad = g[i];
+    // The clip scale rides on the gradient read, so the decoupled weight decay
+    // below stays unscaled (one when the clip is inactive).
+    const float grad = g[i] * params.grad_scale;
     // Decoupled weight decay, applied to the fp32 master before the update.
     float pi = master[i] * (1.0f - params.lr * params.weight_decay);
     const float mi = m[i] + (1.0f - params.beta1) * (grad - m[i]);
@@ -1202,7 +1204,7 @@ void MuonUpdate(const MuonParams& params, const float* stacked_grads,
 #pragma omp parallel for schedule(static)
 #endif
     for (std::size_t i = 0; i < mat; ++i) {
-      const float gr = grad[i];
+      const float gr = grad[i] * params.grad_scale;
       momentum_buf[i] =
           momentum_buf[i] + (1.0f - params.momentum) * (gr - momentum_buf[i]);
       x[i] = params.nesterov ? (1.0f - params.momentum) * gr +
@@ -1427,23 +1429,26 @@ void MuonUpdate(const MuonParams& params, const float* stacked_grads,
 }
 
 // ---------------------------------------------------------------------------
-// ---------------------------------------------------------------------------
-// GlobalNorm (gradient clipping)
+// GradNorm (gradient-norm reporting and the clip scale)
 // ---------------------------------------------------------------------------
 
-void GlobalNorm(int n, float clip, float* grads, float* out_norm) {
+void GradNorm(const float* const* grads, const int* counts, int num_spans,
+              float clip, float* out_norm, float* out_scale) {
+  if (grads == nullptr || counts == nullptr || num_spans <= 0) return;
   double sum_sq = 0.0;
-  for (int i = 0; i < n; ++i) {
-    const double v = grads[i];
-    sum_sq += v * v;
+  for (int s = 0; s < num_spans; ++s) {
+    const float* span = grads[s];
+    if (span == nullptr) continue;
+    const int n = counts[s];
+    for (int i = 0; i < n; ++i) {
+      const double v = span[i];
+      sum_sq += v * v;
+    }
   }
   const float norm = static_cast<float>(std::sqrt(sum_sq));
   if (out_norm != nullptr) out_norm[0] = norm;
-  if (clip > 0.0f && norm > clip) {
-    const float scale = clip / norm;
-    for (int i = 0; i < n; ++i) {
-      grads[i] *= scale;
-    }
+  if (out_scale != nullptr) {
+    out_scale[0] = (clip > 0.0f && norm > clip) ? (clip / norm) : 1.0f;
   }
 }
 

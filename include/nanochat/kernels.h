@@ -134,6 +134,9 @@ struct AdamWParams {
   float eps = 1e-10f;
   float weight_decay = 0.0f;
   int step = 1;  // 1-based, for bias correction
+  // The gradient clip scale, folded into the gradient read. One when the clip
+  // is disabled or inactive, so an unscaled read is bit-identical.
+  float grad_scale = 1.0f;
 };
 
 struct MuonParams {
@@ -147,6 +150,8 @@ struct MuonParams {
   int ns_steps = 5;
   int red_dim = -1;  // variance reduction axis: -1 (columns) or -2 (rows)
   bool nesterov = true;
+  // The gradient clip scale, folded into the gradient read (see AdamWParams).
+  float grad_scale = 1.0f;
 };
 
 // Softmax statistics saved by attention forward and consumed by its backward.
@@ -247,9 +252,19 @@ void MuonUpdate(const MuonParams& params, const float* stacked_grads,
                 float* stacked_master, ComputeType* stacked_values, float* buf1,
                 float* buf2);
 
-// Computes the global L2 norm of `grads`, clips it to `clip` in place, and
-// writes the pre-clip norm to `out_norm`.
-void GlobalNorm(int n, float clip, float* grads, float* out_norm);
+// Accumulates the sum of squares of `num_spans` gradient buffers in double,
+// writes the pre-clip L2 norm to `out_norm`, and writes the clip scale to
+// `out_scale`. The scale is one when `clip <= 0` or when the norm does not
+// exceed `clip`; otherwise it is `clip / norm`. No gradient buffer is modified:
+// the caller folds `*out_scale` into the `grad_scale` of every update, which is
+// what keeps the weight decay unscaled. Both outputs are single-element device
+// buffers, and either may be null.
+//
+// `grads` and `counts` are device arrays of `num_spans` entries: the kernel
+// reads them, so they cannot live on the host (`EmbeddingForward`'s `ids`
+// follow the same rule).
+void GradNorm(const float* const* grads, const int* counts, int num_spans,
+              float clip, float* out_norm, float* out_scale);
 
 // Reduces `dot(a, b)` over `n` elements into the single-element buffer `out`:
 // `out = scale * dot(a, b)`, or `out += scale * dot(a, b)` when `accumulate`.

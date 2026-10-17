@@ -90,14 +90,18 @@ void BenchPointwise(Rng* rng, int n, int iters) {
   });
 }
 
-void BenchGlobalNorm(Rng* rng, int n, int iters) {
+void BenchGradNorm(Rng* rng, int n, int iters) {
   DevBuf<float> g(RandomVec(n, rng));
   DevBuf<float> norm(1);
+  DevBuf<float> scale(1);
+  DevBuf<const float*> span(std::vector<const float*>{g.ptr});
+  DevBuf<int> span_count(std::vector<int>{n});
   char label[64];
-  std::snprintf(label, sizeof(label), "globalnorm n=%d", n);
-  // A tiny clip keeps the scale pass exercised every iteration.
-  TimeIt(label, iters,
-         [&] { nanochat::kernels::GlobalNorm(n, 1e-3f, g.ptr, norm.ptr); });
+  std::snprintf(label, sizeof(label), "gradnorm n=%d", n);
+  TimeIt(label, iters, [&] {
+    nanochat::kernels::GradNorm(span.ptr, span_count.ptr, 1, 1e-3f, norm.ptr,
+                                scale.ptr);
+  });
 }
 
 }  // namespace
@@ -113,7 +117,7 @@ int main() {
   BenchQkPrep(&rng, 8, 512, 8, 64, 20);
   BenchPointwise(&rng, 1 << 16, 200);
   BenchPointwise(&rng, 1 << 20, 50);
-  BenchGlobalNorm(&rng, 1 << 16, 200);
-  BenchGlobalNorm(&rng, 1 << 20, 50);
+  BenchGradNorm(&rng, 1 << 16, 200);
+  BenchGradNorm(&rng, 1 << 20, 50);
   return 0;
 }

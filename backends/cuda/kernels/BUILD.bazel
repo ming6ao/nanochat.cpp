@@ -1,6 +1,6 @@
 # backends/cuda/kernels/ — one translation unit per kernel family plus the
 # shared device_utils.cuh helpers. This package holds the row and elementwise
-# families (RmsNorm, QkPrep, Pointwise, GlobalNorm) and the sequence families
+# families (RmsNorm, QkPrep, Pointwise, GradNorm) and the sequence families
 # (Attention, Classifier, Embedding); the optimizer targets land alongside
 # them. See docs/kernels.md.
 
@@ -69,10 +69,10 @@ cuda_library(
     alwayslink = True,
 )
 
-# GlobalNorm: global L2 reduction and in-place clip.
+# GradNorm: the L2 norm over a set of gradient spans, plus the clip scale.
 cuda_library(
-    name = "global_norm",
-    srcs = ["global_norm.cu"],
+    name = "grad_norm",
+    srcs = ["grad_norm.cu"],
     copts = nanochat_cuda_copts(),
     defines = precision_defines(),
     deps = [
@@ -180,7 +180,7 @@ cuda_library(
 cc_library(
     name = "row_kernels",
     deps = [
-        ":global_norm",
+        ":grad_norm",
         ":pointwise",
         ":qk_prep",
         ":rms_norm",
@@ -202,12 +202,12 @@ cc_library(
 )
 
 # Aggregate for the optimizer families: AdamW, Muon, and the
-# gradient-clipping GlobalNorm. The optimizer tests link this target.
+# gradient-norm GradNorm. The optimizer tests link this target.
 cc_library(
     name = "optimizer_kernels",
     deps = [
         ":adamw",
-        ":global_norm",
+        ":grad_norm",
         ":muon",
     ],
 )
@@ -295,8 +295,8 @@ cc_test(
 )
 
 cc_test(
-    name = "global_norm_gpu_test",
-    srcs = ["global_norm_test.cc"],
+    name = "grad_norm_gpu_test",
+    srcs = ["grad_norm_test.cc"],
     copts = nanochat_copts(),
     defines = precision_defines(),
     deps = [
@@ -436,7 +436,7 @@ test_suite(name = "all", tests = [
     ":attention_gpu_test",
     ":classifier_gpu_test",
     ":embedding_gpu_test",
-    ":global_norm_gpu_test",
+    ":grad_norm_gpu_test",
     ":muon_gpu_test",
     ":pointwise_gpu_test",
     ":precision_gpu_test",

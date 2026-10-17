@@ -696,7 +696,7 @@ operand that sees reuse. The choice is per kernel:
 - `ClassifierForward` and `ClassifierBackward`: stream `logits`.
 - `EmbeddingForward`: stream the output. Keep the table gather scalar, because
   the kernel indexes the rows.
-- `GlobalNorm`: stream `grads`.
+- `GradNorm`: stream each span in `grads`.
 - The attention softmax row kernels: stream `scores`, `probs`, and `dprobs`.
 
 #### 4.3 Alignment and the tail
@@ -741,7 +741,7 @@ classifier until the parity run proves the packed one safe.
 | `rms_norm.cu` | `x`, `out` | packed load and store | Low |
 | `pointwise.cu` | `a`, `b`, `out` | packed load and store | Low |
 | `embedding.cu` | `out`, `dtable` | packed store, scalar gather | Low |
-| `global_norm.cu` | `grads` | packed load and store | Low |
+| `grad_norm.cu` | `grads` | packed load | Low |
 | `attention.cu` | softmax rows | packed load and store | Medium |
 | `classifier.cu` | `logits` | packed load, scalar reduction | Medium |
 
@@ -777,7 +777,7 @@ timings. Use the `t0-cpu` profile for the CPU tests.
 #### Phase 1 — the helper and the simple families (1 session)
 
 - Add the packed helper to `device_utils.cuh`.
-- Convert `rms_norm.cu`, `pointwise.cu`, `embedding.cu`, and `global_norm.cu`.
+- Convert `rms_norm.cu`, `pointwise.cu`, `embedding.cu`, and `grad_norm.cu`.
 - Gate: each family gains at least 10% in byte rate.
 - Gate: the finite-difference test and the oracle fixture stay green.
 

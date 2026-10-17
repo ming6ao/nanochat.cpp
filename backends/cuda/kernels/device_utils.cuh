@@ -2,7 +2,7 @@
 #define NANOCHAT_BACKENDS_CUDA_KERNELS_DEVICE_UTILS_CUH_
 
 // Shared device-side helpers for the row/elementwise families (RmsNorm,
-// QkPrep, Pointwise, GlobalNorm) and the sequence families (Attention,
+// QkPrep, Pointwise, GradNorm) and the sequence families (Attention,
 // Classifier, Embedding). They remove duplication *without* merging kernel
 // boundaries: each .cu still owns its own entry points, and the helpers below
 // are header-only so they inline into every caller.

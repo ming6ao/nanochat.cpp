@@ -279,7 +279,7 @@ weights; the parity fixtures sidestep this by sharing the initial parameters.
 
 The reference does no gradient clipping in `scripts/base_train.py` and does not
 compute a norm. nanochat.cpp's optimizer computes a global norm every step
-(`kernels::GlobalNorm` with `clip = 0`) so the logger can report it. This is
+(`kernels::GradNorm` with `clip = 0`) so the logger can report it. This is
 numerically the identity (the clip scale is 1) and does not change the update;
 it does add one device-to-host synchronization per step. It is not a
 training-math difference.

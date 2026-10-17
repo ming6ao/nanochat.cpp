@@ -258,7 +258,7 @@ thread-local now:
 | Muon scratch | `backends/cuda/kernels/muon.cu` |
 | Attention scratch | `backends/cuda/kernels/attention.cu` |
 
-The device globals in `backends/cuda/kernels/global_norm.cu` stay device
+The device globals in `backends/cuda/kernels/grad_norm.cu` stay device
 globals. Each device has its own copy of the module state. One thread drives one
 device, so the order is safe.
 

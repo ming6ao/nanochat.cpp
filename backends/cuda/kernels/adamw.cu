@@ -27,14 +27,16 @@ using cuda_kernels::ToComputeDev;
 
 __global__ void AdamWUpdateKernel(
     long long n, float lr, float beta1, float beta2, float eps,
-    float weight_decay, float step_size, float bias2,
+    float weight_decay, float step_size, float bias2, float grad_scale,
     float* __restrict__ master, ComputeType* __restrict__ value,
     const float* __restrict__ g, float* __restrict__ m, float* __restrict__ v) {
   const long long stride = static_cast<long long>(gridDim.x) * blockDim.x;
   for (long long i =
            static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x;
        i < n; i += stride) {
-    const float grad = g[i];
+    // The clip scale rides on the gradient read, so the decoupled weight decay
+    // above stays unscaled (one when the clip is inactive).
+    const float grad = g[i] * grad_scale;
     // Decoupled weight decay, applied to the fp32 master before the update.
     float pi = master[i] * (1.0f - lr * weight_decay);
     const float mi = m[i] + (1.0f - beta1) * (grad - m[i]);
@@ -69,7 +71,7 @@ void AdamWUpdate(int n, const AdamWParams& params, float* master,
   cuda_backend::Launch(AdamWUpdateKernel, dim3(grid), dim3(kThreads), 0,
                        static_cast<long long>(n), params.lr, params.beta1,
                        params.beta2, params.eps, params.weight_decay, step_size,
-                       bias2, master, value, g, m, v);
+                       bias2, params.grad_scale, master, value, g, m, v);
 }
 
 }  // namespace kernels

@@ -49,9 +49,10 @@ constexpr float kPolarCoeffs[5][3] = {
 // --- Momentum -------------------------------------------------------------
 
 // buf1[i] += (1 - momentum) * (grad[i] - buf1[i]); x carries either the
-// Nesterov-accelerated gradient or the plain first moment.
+// Nesterov-accelerated gradient or the plain first moment. `grad_scale` carries
+// the global clip scale (one when the clip is inactive).
 __global__ void MuonMomentumKernel(long long total, float momentum,
-                                   bool nesterov,
+                                   bool nesterov, float grad_scale,
                                    const float* __restrict__ grads,
                                    float* __restrict__ buf1,
                                    ComputeType* __restrict__ x) {
@@ -59,7 +60,7 @@ __global__ void MuonMomentumKernel(long long total, float momentum,
   for (long long i =
            static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x;
        i < total; i += stride) {
-    const float gr = grads[i];
+    const float gr = grads[i] * grad_scale;
     const float b = buf1[i] + (1.0f - momentum) * (gr - buf1[i]);
     buf1[i] = b;
     x[i] = ToComputeDev(nesterov ? (1.0f - momentum) * gr + momentum * b : b);
@@ -341,8 +342,8 @@ void MuonUpdate(const MuonParams& params, const float* stacked_grads,
   const int min_grid = GridSize(min_total, kThreads);
 
   cuda_backend::Launch(MuonMomentumKernel, dim3(elem_grid), dim3(kThreads), 0,
-                       total, params.momentum, params.nesterov, stacked_grads,
-                       buf1, x);
+                       total, params.momentum, params.nesterov,
+                       params.grad_scale, stacked_grads, buf1, x);
   cuda_backend::Launch(MuonFrobKernel, dim3(num_params), dim3(kThreads), 0,
                        rows, cols, x, scratch);
   cuda_backend::Launch(MuonEquilibrateRowKernel, dim3(rows, num_params),

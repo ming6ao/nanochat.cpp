@@ -622,17 +622,35 @@ void TestMuon() {
   for (int i = 0; i < 3; ++i) Check(std::isfinite(buf2[i]), "muon buf2 finite");
 }
 
-void TestGlobalNorm() {
+void TestGradNorm() {
   std::vector<float> g = {3.0f, 4.0f};
+  const float* span = g.data();
+  const int count = 2;
   float norm = 0.0f;
-  kernels::GlobalNorm(2, 2.5f, g.data(), &norm);
-  CheckClose(norm, 5.0, 1e-6, "globalnorm pre-clip");
-  CheckClose(U(g[0]), 1.5, 1e-6, "globalnorm clipped 0");
-  CheckClose(U(g[1]), 2.0, 1e-6, "globalnorm clipped 1");
+  float scale = 0.0f;
+  kernels::GradNorm(&span, &count, 1, 2.5f, &norm, &scale);
+  CheckClose(norm, 5.0, 1e-6, "gradnorm norm");
+  CheckClose(scale, 0.5, 1e-6, "gradnorm scale");
+  // The buffer is untouched: the caller folds the scale into its update.
+  CheckClose(U(g[0]), 3.0, 1e-6, "gradnorm grad 0");
+  CheckClose(U(g[1]), 4.0, 1e-6, "gradnorm grad 1");
 
-  std::vector<float> g2 = {3.0f, 4.0f};
-  kernels::GlobalNorm(2, 10.0f, g2.data(), &norm);
-  CheckClose(U(g2[0]), 3.0, 1e-6, "globalnorm unclipped");
+  kernels::GradNorm(&span, &count, 1, 10.0f, &norm, &scale);
+  CheckClose(scale, 1.0, 1e-6, "gradnorm unclipped scale");
+
+  // Several spans: the norm is over the concatenation, and the scale is shared.
+  std::vector<float> a = {3.0f};
+  std::vector<float> b = {4.0f};
+  std::vector<float> empty;
+  const float* spans[3] = {a.data(), empty.data(), b.data()};
+  const int counts[3] = {1, 0, 1};
+  kernels::GradNorm(spans, counts, 3, 2.5f, &norm, &scale);
+  CheckClose(norm, 5.0, 1e-6, "gradnorm multi-span norm");
+  CheckClose(scale, 0.5, 1e-6, "gradnorm multi-span scale");
+
+  // A null output is accepted, and so is an empty span set.
+  kernels::GradNorm(spans, counts, 3, 10.0f, nullptr, nullptr);
+  kernels::GradNorm(nullptr, nullptr, 0, 1.0f, &norm, &scale);
 }
 
 void TestBf16Conversions() {
@@ -697,7 +715,7 @@ int main() {
   TestEmbedding();
   TestAdamW();
   TestMuon();
-  TestGlobalNorm();
+  TestGradNorm();
   if (g_failures != 0) {
     std::printf("%d check(s) failed\n", g_failures);
     return 1;

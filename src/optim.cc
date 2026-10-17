@@ -12,10 +12,12 @@
 // The schedules mirror nanochat's training loop (`get_lr_multiplier`,
 // `get_muon_momentum`, `get_weight_decay`) and live in `Scheduler`.
 //
-// Gradient clipping is global across every parameter. `GlobalNorm` clips one
-// contiguous buffer, so `Step` gathers every gradient into a single flat
-// buffer (in grouping order), clips it once, and then drives the per-group
-// kernels straight from that buffer.
+// Gradient clipping is global across every parameter. `GradNorm` reduces the
+// per-parameter gradients in one streaming pass and returns the scale, which
+// every update folds into its gradient read (`grad_scale`); no buffer is
+// staged. The Muon groups still stack, because the kernel's operand is
+// `[num_params, rows, cols]`, but through one reusable buffer refilled per
+// group rather than a copy of every gradient.
 
 #include "nanochat/optim.h"
 
@@ -101,12 +103,11 @@ void AddOptimizerStateRecord(Checkpoint* checkpoint, const std::string& name,
   checkpoint->AddOptimizerState(std::move(record));
 }
 
-// One AdamW parameter group: the parameters, their flat gradient offsets, and
-// the first/second moment buffers, which stay float on every device.
+// One AdamW parameter group: the parameters, their moment offsets, and the
+// first/second moment buffers, which stay float on every device.
 struct AdamWGroup {
   AdamWKind kind = AdamWKind::kLmHead;
   std::vector<ParamView> params;
-  std::vector<std::int64_t> grad_offsets;
   std::vector<std::int64_t> moment_offsets;
   float lr = 0.0f;  // nominal, pre-schedule
   float beta1 = 0.9f;
@@ -126,7 +127,6 @@ struct MuonGroup {
   int num_params = 0;
   float lr = 0.0f;  // nominal, pre-schedule, includes sqrt(max(1, rows/cols))
   int red_dim = -1;
-  std::int64_t flat_offset = 0;
   std::int64_t mat = 0;
   std::int64_t buf2_len = 0;
   std::vector<ParamView> params;
@@ -150,15 +150,16 @@ class NanochatOptimizer final : public Optimizer {
   NanochatOptimizer& operator=(const NanochatOptimizer&) = delete;
 
   void Step(int step) override {
-    GatherGradients();
-
-    float norm = 0.0f;
-    if (total_count_ > 0) {
-      kernels::GlobalNorm(static_cast<int>(total_count_), config_.clip, flat_,
-                          norm_dev_);
-      kernels::Memcpy(&norm, norm_dev_, sizeof(float), CopyDir::kDeviceToHost);
+    // One streaming pass over the per-parameter gradients: the norm for the
+    // logger and the clip scale for the updates. Nothing is staged.
+    float stats[2] = {0.0f, 1.0f};
+    if (num_spans_ > 0) {
+      kernels::GradNorm(norm_grads_, norm_counts_, num_spans_, config_.clip,
+                        norm_dev_, norm_dev_ + 1);
+      kernels::Memcpy(stats, norm_dev_, sizeof(stats), CopyDir::kDeviceToHost);
     }
-    grad_norm_ = norm;
+    grad_norm_ = stats[0];
+    const float grad_scale = stats[1];
 
     const float lrm = scheduler_.LrMultiplier(step);
 
@@ -171,9 +172,10 @@ class NanochatOptimizer final : public Optimizer {
         params.eps = group.eps;
         params.weight_decay = group.weight_decay;
         params.step = step;
+        params.grad_scale = grad_scale;
         kernels::AdamWUpdate(static_cast<int>(group.params[i].count), params,
                              group.params[i].master, group.params[i].value,
-                             flat_ + group.grad_offsets[i],
+                             group.params[i].grad,
                              group.m + group.moment_offsets[i],
                              group.v + group.moment_offsets[i]);
       }
@@ -186,6 +188,7 @@ class NanochatOptimizer final : public Optimizer {
     const float muon_weight_decay = scheduler_.WeightDecay(step);
 
     for (MuonGroup& group : muon_groups_) {
+      GatherStackedGrads(group);
       GatherStackedMaster(group);
       MuonParams params;
       params.num_params = group.num_params;
@@ -198,26 +201,30 @@ class NanochatOptimizer final : public Optimizer {
       params.ns_steps = config_.muon_ns_steps;
       params.red_dim = group.red_dim;
       params.nesterov = true;
-      kernels::MuonUpdate(params, flat_ + group.flat_offset,
-                          group.stacked_master, group.stacked_values,
-                          group.buf1, group.buf2);
+      params.grad_scale = grad_scale;
+      kernels::MuonUpdate(params, muon_stack_, group.stacked_master,
+                          group.stacked_values, group.buf1, group.buf2);
       ScatterStacked(group);
     }
   }
 
   float GradNorm() const override { return grad_norm_; }
 
-  // Visits every parameter with its offset in the flat gradient layout:
-  // AdamW groups first, then Muon.
+  // Visits every parameter with its offset in the concatenated `master`
+  // record, which the grouping fixes: AdamW groups first (in
+  // `setup_optimizer` order), then the Muon groups by shape. The offsets are
+  // computed here so the record layout stays independent of the gradient
+  // handling.
   template <typename Fn>
   void ForEachParam(Fn fn) const {
+    std::int64_t offset = 0;
     for (const AdamWGroup& group : adamw_groups_) {
-      for (std::size_t i = 0; i < group.params.size(); ++i) {
-        fn(group.params[i], group.grad_offsets[i]);
+      for (const ParamView& view : group.params) {
+        fn(view, offset);
+        offset += view.count;
       }
     }
     for (const MuonGroup& group : muon_groups_) {
-      std::int64_t offset = group.flat_offset;
       for (const ParamView& view : group.params) {
         fn(view, offset);
         offset += view.count;
@@ -432,26 +439,61 @@ class NanochatOptimizer final : public Optimizer {
       muon_groups_.push_back(std::move(group));
     }
 
-    // Lay out the flat gradient buffer: AdamW groups first, then the matrix
-    // groups.
+    // The AdamW moments are per-group and offset by the parameter order; the
+    // gradient spans feed `GradNorm`; `total_count_` sizes the concatenated
+    // `master` record.
+    std::vector<const GradientType*> grad_spans;
+    std::vector<int> span_counts;
     std::int64_t total = 0;
     for (AdamWGroup& group : adamw_groups_) {
       for (const ParamView& view : group.params) {
-        group.grad_offsets.push_back(total);
         group.moment_offsets.push_back(group.moment_count);
         total += view.count;
         group.moment_count += view.count;
+        grad_spans.push_back(view.grad);
+        span_counts.push_back(static_cast<int>(view.count));
       }
     }
-    for (MuonGroup& group : muon_groups_) {
-      group.flat_offset = total;
-      for (const ParamView& view : group.params) total += view.count;
+    for (const MuonGroup& group : muon_groups_) {
+      for (const ParamView& view : group.params) {
+        total += view.count;
+        grad_spans.push_back(view.grad);
+        span_counts.push_back(static_cast<int>(view.count));
+      }
     }
     total_count_ = total;
 
-    flat_ =
-        static_cast<GradientType*>(kernels::Alloc(GradientBytes(total_count_)));
-    norm_dev_ = static_cast<float*>(kernels::Alloc(sizeof(float)));
+    // The span table is device memory: `GradNorm` walks it on the device. It is
+    // built once, because the parameter buffers never move.
+    num_spans_ = static_cast<int>(grad_spans.size());
+    if (num_spans_ > 0) {
+      const std::size_t table =
+          static_cast<std::size_t>(num_spans_) * sizeof(const GradientType*);
+      norm_grads_ = static_cast<const GradientType**>(kernels::Alloc(table));
+      kernels::Memcpy(norm_grads_, grad_spans.data(), table,
+                      CopyDir::kHostToDevice);
+      const std::size_t counts_bytes =
+          static_cast<std::size_t>(num_spans_) * sizeof(int);
+      norm_counts_ = static_cast<int*>(kernels::Alloc(counts_bytes));
+      kernels::Memcpy(norm_counts_, span_counts.data(), counts_bytes,
+                      CopyDir::kHostToDevice);
+    }
+
+    // One reusable gradient stack, sized for the widest Muon group:
+    // `MuonUpdate` reads `[num_params, rows, cols]`, and each group is gathered
+    // into this buffer immediately before its update.
+    std::int64_t stack_len = 0;
+    for (const MuonGroup& group : muon_groups_) {
+      const std::int64_t len =
+          static_cast<std::int64_t>(group.num_params) * group.mat;
+      if (len > stack_len) stack_len = len;
+    }
+    if (stack_len > 0) {
+      muon_stack_ =
+          static_cast<GradientType*>(kernels::Alloc(GradientBytes(stack_len)));
+    }
+    // One two-element buffer: the norm and the clip scale.
+    norm_dev_ = static_cast<float*>(kernels::Alloc(2 * sizeof(float)));
 
     for (AdamWGroup& group : adamw_groups_) {
       group.m = static_cast<float*>(kernels::Alloc(
@@ -496,7 +538,9 @@ class NanochatOptimizer final : public Optimizer {
   }
 
   void Release() {
-    if (flat_ != nullptr) kernels::Free(flat_);
+    if (muon_stack_ != nullptr) kernels::Free(muon_stack_);
+    if (norm_grads_ != nullptr) kernels::Free(norm_grads_);
+    if (norm_counts_ != nullptr) kernels::Free(norm_counts_);
     if (norm_dev_ != nullptr) kernels::Free(norm_dev_);
     for (AdamWGroup& group : adamw_groups_) {
       if (group.m != nullptr) kernels::Free(group.m);
@@ -511,16 +555,21 @@ class NanochatOptimizer final : public Optimizer {
       if (group.buf1 != nullptr) kernels::Free(group.buf1);
       if (group.buf2 != nullptr) kernels::Free(group.buf2);
     }
-    flat_ = nullptr;
+    muon_stack_ = nullptr;
+    norm_grads_ = nullptr;
+    norm_counts_ = nullptr;
     norm_dev_ = nullptr;
   }
 
-  // Copy every gradient into the flat buffer, in grouping order.
-  void GatherGradients() {
-    ForEachParam([&](const ParamView& view, std::int64_t offset) {
-      kernels::Memcpy(flat_ + offset, view.grad, GradientBytes(view.count),
-                      CopyDir::kDeviceToDevice);
-    });
+  // Gather one Muon group's gradients into the reusable stack, in the group's
+  // parameter order, so the kernel sees the `[num_params, rows, cols]` layout
+  // the flat buffer used to provide.
+  void GatherStackedGrads(const MuonGroup& group) {
+    for (int i = 0; i < group.num_params; ++i) {
+      kernels::Memcpy(muon_stack_ + static_cast<std::int64_t>(i) * group.mat,
+                      group.params[static_cast<std::size_t>(i)].grad,
+                      GradientBytes(group.mat), CopyDir::kDeviceToDevice);
+    }
   }
 
   // Gather the fp32 master of every parameter in a stacked group.
@@ -558,7 +607,10 @@ class NanochatOptimizer final : public Optimizer {
   std::vector<ParamView> views_;
   std::vector<AdamWGroup> adamw_groups_;
   std::vector<MuonGroup> muon_groups_;
-  GradientType* flat_ = nullptr;
+  const GradientType** norm_grads_ = nullptr;  // device table, `num_spans_`
+  int* norm_counts_ = nullptr;                 // device table, `num_spans_`
+  int num_spans_ = 0;
+  GradientType* muon_stack_ = nullptr;
   float* norm_dev_ = nullptr;
   std::int64_t total_count_ = 0;
   float grad_norm_ = 0.0f;
