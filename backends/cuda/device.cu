@@ -109,6 +109,10 @@ Caps GetCaps() {
   caps.has_tensor_cores = props.major >= 7;
   caps.supports_fp32 = true;
   caps.supports_bf16 = props.major >= 8;
+  // The fp8 E4M3/E5M2 tensor core arrives with Ada (sm_89). Hopper reports 9.0
+  // (docs/fp8-training.md section 5.3).
+  caps.supports_fp8 =
+      (props.major > 8) || (props.major == 8 && props.minor >= 9);
 
   // Per device thread, so two device threads do not overwrite one name buffer
   // (docs/client-runtime-design.md section 8.1).

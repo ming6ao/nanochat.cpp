@@ -12,6 +12,7 @@
 #include "nanochat/kernels.h"
 #include "nanochat/tensor.h"
 
+#include <cublasLt.h>
 #include <cublas_v2.h>
 #include <cuda_runtime.h>
 
@@ -49,6 +50,21 @@ cublasHandle_t Handle() {
     CheckCublas(cublasCreate(&handle), "cublasCreate");
   }
   return handle;
+}
+
+// The `cublasLt` handle, for the scaled fp8 path
+// (docs/fp8-training.md section 5.2). One handle per device thread.
+cublasLtHandle_t LtHandle() {
+  thread_local cublasLtHandle_t handle = nullptr;
+  if (handle == nullptr) {
+    CheckCublas(cublasLtCreate(&handle), "cublasLtCreate");
+  }
+  return handle;
+}
+
+// The `cublasLt` data type of one fp8 format.
+cudaDataType_t LtDataType(Fp8Format format) {
+  return format == Fp8Format::kE4M3 ? CUDA_R_8F_E4M3 : CUDA_R_8F_E5M2;
 }
 
 void GemmImpl(const GemmParams& params, const ComputeType* a,
@@ -119,6 +135,118 @@ void Gemm(GemmMode mode, const GemmParams& params, const ComputeType* a,
 void GemmWgrad(const GemmParams& params, const ComputeType* a,
                const ComputeType* b, float* c) {
   GemmImpl(params, a, b, c, CUDA_R_32F);
+}
+
+void GemmScaledFp8(GemmMode mode, const ScaledGemmParams& params,
+                   const std::uint8_t* a, const std::uint8_t* b, void* c) {
+  if (params.m <= 0 || params.n <= 0 || params.k <= 0) return;
+  if (params.batch_count > 1) {
+    std::fprintf(stderr,
+                 "fatal: GemmScaledFp8 does not support a batch count above "
+                 "one yet\n");
+    std::exit(1);
+  }
+  // The column-major swap, the same trick as the dense path above: compute
+  // C^T = op(ltA) * op(ltB) with ltA the stored B and ltB the stored A
+  // (docs/fp8-training.md section 7). A row-major [r, c] operand is a
+  // column-major [c, r] matrix with leading dimension `c`, which is the
+  // descriptor's row count after the swap.
+  const bool ta = params.transpose_a;
+  const bool tb = params.transpose_b;
+  const int lt_a_rows = tb ? params.k : params.n;
+  const int lt_a_cols = tb ? params.n : params.k;
+  const int lt_b_rows = ta ? params.m : params.k;
+  const int lt_b_cols = ta ? params.k : params.m;
+  const int lt_c_rows = params.n;
+  const int lt_c_cols = params.m;
+
+  cublasLtMatmulDesc_t op_desc = nullptr;
+  cublasLtMatrixLayout_t a_desc = nullptr;
+  cublasLtMatrixLayout_t b_desc = nullptr;
+  cublasLtMatrixLayout_t c_desc = nullptr;
+  cublasLtMatmulPreference_t pref = nullptr;
+
+  CheckCublas(
+      cublasLtMatmulDescCreate(&op_desc, CUBLAS_COMPUTE_32F, CUDA_R_32F),
+      "cublasLtMatmulDescCreate");
+  const cublasOperation_t op_a = tb ? CUBLAS_OP_T : CUBLAS_OP_N;
+  const cublasOperation_t op_b = ta ? CUBLAS_OP_T : CUBLAS_OP_N;
+  CheckCublas(cublasLtMatmulDescSetAttribute(
+                  op_desc, CUBLASLT_MATMUL_DESC_TRANSA, &op_a, sizeof(op_a)),
+              "cublasLt set TRANSA");
+  CheckCublas(cublasLtMatmulDescSetAttribute(
+                  op_desc, CUBLASLT_MATMUL_DESC_TRANSB, &op_b, sizeof(op_b)),
+              "cublasLt set TRANSB");
+  // The operand roles are swapped, so the matmul A scale belongs to the stored
+  // B and the matmul B scale belongs to the stored A.
+  if (params.scale_b != nullptr) {
+    CheckCublas(cublasLtMatmulDescSetAttribute(
+                    op_desc, CUBLASLT_MATMUL_DESC_A_SCALE_POINTER,
+                    &params.scale_b, sizeof(params.scale_b)),
+                "cublasLt set A scale");
+  }
+  if (params.scale_a != nullptr) {
+    CheckCublas(cublasLtMatmulDescSetAttribute(
+                    op_desc, CUBLASLT_MATMUL_DESC_B_SCALE_POINTER,
+                    &params.scale_a, sizeof(params.scale_a)),
+                "cublasLt set B scale");
+  }
+  if (params.fast_accum) {
+    const int32_t fast = 1;
+    CheckCublas(
+        cublasLtMatmulDescSetAttribute(op_desc, CUBLASLT_MATMUL_DESC_FAST_ACCUM,
+                                       &fast, sizeof(fast)),
+        "cublasLt set fast accum");
+  }
+
+  CheckCublas(cublasLtMatrixLayoutCreate(&a_desc, LtDataType(params.format_b),
+                                         lt_a_rows, lt_a_cols, lt_a_rows),
+              "cublasLt layout A");
+  CheckCublas(cublasLtMatrixLayoutCreate(&b_desc, LtDataType(params.format_a),
+                                         lt_b_rows, lt_b_cols, lt_b_rows),
+              "cublasLt layout B");
+  // The weight gradient keeps fp32; the forward and the input gradient store
+  // the compute type (docs/fp8-training.md section 7).
+  const cudaDataType_t c_type =
+      mode == GemmMode::kWgrad ? CUDA_R_32F : kDataType;
+  CheckCublas(cublasLtMatrixLayoutCreate(&c_desc, c_type, lt_c_rows, lt_c_cols,
+                                         lt_c_rows),
+              "cublasLt layout C");
+  CheckCublas(cublasLtMatmulPreferenceCreate(&pref),
+              "cublasLtMatmulPreferenceCreate");
+  std::size_t workspace_request = 32u * 1024u * 1024u;
+  CheckCublas(cublasLtMatmulPreferenceSetAttribute(
+                  pref, CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES,
+                  &workspace_request, sizeof(workspace_request)),
+              "cublasLt preference workspace");
+
+  cublasLtMatmulHeuristicResult_t heuristic{};
+  int returned = 0;
+  CheckCublas(cublasLtMatmulAlgoGetHeuristic(LtHandle(), op_desc, a_desc,
+                                             b_desc, c_desc, c_desc, pref, 1,
+                                             &heuristic, &returned),
+              "cublasLtMatmulAlgoGetHeuristic");
+  if (returned == 0) {
+    std::fprintf(stderr, "fatal: no cublasLt fp8 algorithm for this shape\n");
+    std::exit(1);
+  }
+
+  void* workspace = nullptr;
+  if (heuristic.workspaceSize > 0) workspace = Alloc(heuristic.workspaceSize);
+  const float alpha = params.alpha;
+  const float beta = params.beta;
+  CheckCublas(
+      cublasLtMatmul(LtHandle(), op_desc, &alpha, b, a_desc, a, b_desc, &beta,
+                     c, c_desc, c, c_desc, &heuristic.algo, workspace,
+                     heuristic.workspaceSize, cuda_backend::Stream()),
+      "cublasLtMatmul");
+  if (workspace != nullptr) Free(workspace);
+
+  cublasLtMatmulPreferenceDestroy(pref);
+  cublasLtMatrixLayoutDestroy(c_desc);
+  cublasLtMatrixLayoutDestroy(b_desc);
+  cublasLtMatrixLayoutDestroy(a_desc);
+  cublasLtMatmulDescDestroy(op_desc);
 }
 
 }  // namespace kernels

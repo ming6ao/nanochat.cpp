@@ -43,8 +43,40 @@ void StageToDevice(ComputeType* dst, const std::vector<ComputeType>& host) {
 
 void LinearForward(const ComputeType* x, const ComputeType* w, ComputeType* y,
                    std::int64_t rows, std::int64_t in, std::int64_t out,
-                   bool accumulate) {
+                   bool accumulate, const Fp8Scratch* fp8) {
   if (rows <= 0 || in <= 0 || out <= 0) return;
+#if defined(NANOCHAT_FP8)
+  // The eligible matmuls take fp8 operands with an fp32 accumulator
+  // (docs/fp8-training.md sections 6 and 7). Quantize both operands for this
+  // call. The reuse of an operand the same step already quantized is a later
+  // optimization (docs/fp8-training.md section 7).
+  if (fp8 != nullptr && fp8->ready() && Fp8Eligible(out, in)) {
+    QuantizeFp8Params quantize;
+    quantize.format = Fp8Format::kE4M3;
+    quantize.count = static_cast<int>(rows * in);
+    kernels::QuantizeFp8(quantize, x, fp8->a_bytes, fp8->a_scale);
+    quantize.count = static_cast<int>(out * in);
+    kernels::QuantizeFp8(quantize, w, fp8->b_bytes, fp8->b_scale);
+    ScaledGemmParams scaled;
+    scaled.m = static_cast<int>(rows);
+    scaled.n = static_cast<int>(out);
+    scaled.k = static_cast<int>(in);
+    scaled.alpha = 1.0f;
+    scaled.beta = accumulate ? 1.0f : 0.0f;
+    // The weight is stored [out, in] (PyTorch's Linear convention).
+    scaled.transpose_b = true;
+    // The forward uses the reduced-precision reduction
+    // (docs/fp8-training.md section 5.2).
+    scaled.fast_accum = true;
+    scaled.format_a = Fp8Format::kE4M3;
+    scaled.format_b = Fp8Format::kE4M3;
+    scaled.scale_a = fp8->a_scale;
+    scaled.scale_b = fp8->b_scale;
+    kernels::GemmScaledFp8(GemmMode::kForward, scaled, fp8->a_bytes,
+                           fp8->b_bytes, y);
+    return;
+  }
+#endif
   GemmParams params;
   params.m = static_cast<int>(rows);
   params.n = static_cast<int>(out);
@@ -228,13 +260,14 @@ void MlpForward(const ComputeType* h, const ComputeType* c_fc,
                 const ComputeType* c_proj, std::int64_t rows,
                 std::int64_t hidden, std::int64_t mlp_dim, ComputeType* pre_act,
                 ComputeType* act, ComputeType* scratch,
-                const ComputeType* x_mid, ComputeType* out) {
+                const ComputeType* x_mid, ComputeType* out,
+                const Fp8Scratch* fp8) {
   if (rows <= 0 || hidden <= 0 || mlp_dim <= 0) return;
-  LinearForward(h, c_fc, pre_act, rows, hidden, mlp_dim);
+  LinearForward(h, c_fc, pre_act, rows, hidden, mlp_dim, false, fp8);
   kernels::PointwiseForward(PointwiseOp::kReluSquare,
                             static_cast<int>(rows * mlp_dim), pre_act, nullptr,
                             0.0f, 0.0f, act);
-  LinearForward(act, c_proj, scratch, rows, mlp_dim, hidden);
+  LinearForward(act, c_proj, scratch, rows, mlp_dim, hidden, false, fp8);
   kernels::PointwiseForward(PointwiseOp::kScaleAdd,
                             static_cast<int>(rows * hidden), scratch, x_mid,
                             1.0f, 1.0f, out);
@@ -413,14 +446,16 @@ void BlockForward(const BlockShape& shape, const BlockWeights& weights,
                             x0_lambda, acts.xr);
   RmsNormForward(rows, hidden, shape.rms_eps, acts.xr, acts.h, acts.rstd1);
 
-  LinearForward(acts.h, weights.c_q, acts.q_final, rows, hidden, query_dim);
+  LinearForward(acts.h, weights.c_q, acts.q_final, rows, hidden, query_dim,
+                false, &acts.fp8);
   if (acts.q_pre != nullptr && acts.q_pre != acts.q_final) {
     kernels::Memcpy(
         acts.q_pre, acts.q_final,
         static_cast<std::size_t>(rows * query_dim) * sizeof(ComputeType),
         CopyDir::kDeviceToDevice);
   }
-  LinearForward(acts.h, weights.c_k, acts.k_final, rows, hidden, kv_dim);
+  LinearForward(acts.h, weights.c_k, acts.k_final, rows, hidden, kv_dim, false,
+                &acts.fp8);
   if (acts.k_pre != nullptr && acts.k_pre != acts.k_final) {
     kernels::Memcpy(
         acts.k_pre, acts.k_final,
@@ -428,7 +463,8 @@ void BlockForward(const BlockShape& shape, const BlockWeights& weights,
         CopyDir::kDeviceToDevice);
   }
 
-  LinearForward(acts.h, weights.c_v, acts.v_final, rows, hidden, kv_dim);
+  LinearForward(acts.h, weights.c_v, acts.v_final, rows, hidden, kv_dim, false,
+                &acts.fp8);
   if (weights.has_ve) {
     kernels::EmbeddingForward(static_cast<int>(rows), kv_dim, tokens,
                               weights.value_embeds, acts.ve_values);
@@ -477,14 +513,15 @@ void BlockForward(const BlockShape& shape, const BlockWeights& weights,
                    acts.attn_stats);
 
   LinearForward(acts.attn_out, weights.c_proj_attn, acts.scratch_a, rows,
-                hidden, hidden);
+                hidden, hidden, false, &acts.fp8);
   kernels::PointwiseForward(PointwiseOp::kScaleAdd,
                             static_cast<int>(rows * hidden), acts.scratch_a,
                             acts.xr, 1.0f, 1.0f, acts.x_mid);
 
   RmsNormForward(rows, hidden, shape.rms_eps, acts.x_mid, acts.h2, acts.rstd2);
   MlpForward(acts.h2, weights.c_fc, weights.c_proj_mlp, rows, hidden, mlp_dim,
-             acts.pre_act, acts.act, acts.scratch_b, acts.x_mid, acts.x_out);
+             acts.pre_act, acts.act, acts.scratch_b, acts.x_mid, acts.x_out,
+             &acts.fp8);
 }
 
 void BlockBackward(const BlockShape& shape, const BlockWeights& weights,

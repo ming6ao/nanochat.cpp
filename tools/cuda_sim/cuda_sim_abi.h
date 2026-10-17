@@ -90,6 +90,45 @@ constexpr cublasDataType_t kCudaR16F = 2;
 constexpr cublasDataType_t kCudaR32F = 0;
 
 // ---------------------------------------------------------------------------
+// The cublasLt subset (docs/simulator-precision.md section 5)
+// ---------------------------------------------------------------------------
+
+using cublasLtHandle_t = void*;
+using cublasLtMatmulDesc_t = void*;
+using cublasLtMatrixLayout_t = void*;
+using cublasLtMatmulPreference_t = void*;
+using cublasLtMatmulDescAttributes_t = int;
+using cublasLtMatmulPreferenceAttributes_t = int;
+using cudaDataType_t = int;
+
+constexpr cudaDataType_t kCudaR16BF = 14;
+constexpr cudaDataType_t kCudaR8FE4M3 = 28;
+constexpr cudaDataType_t kCudaR8FE5M2 = 29;
+
+// The descriptor attributes the fp8 path sets, and the preference attribute it
+// queries. The values are the vendor ABI's in CUDA 12.
+constexpr cublasLtMatmulDescAttributes_t kCublasLtDescTransA = 3;
+constexpr cublasLtMatmulDescAttributes_t kCublasLtDescTransB = 4;
+constexpr cublasLtMatmulDescAttributes_t kCublasLtDescAScalePointer = 17;
+constexpr cublasLtMatmulDescAttributes_t kCublasLtDescBScalePointer = 18;
+constexpr cublasLtMatmulDescAttributes_t kCublasLtDescFastAccum = 25;
+constexpr cublasLtMatmulPreferenceAttributes_t kCublasLtPrefMaxWorkspace = 1;
+
+// The algorithm descriptor is 8 words; the heuristic result that carries it
+// must match the vendor layout, because the caller reads `workspaceSize`.
+struct cublasLtMatmulAlgo_t {
+  std::uint64_t data[8];
+};
+
+struct cublasLtMatmulHeuristicResult_t {
+  cublasLtMatmulAlgo_t algo;
+  std::size_t workspaceSize;
+  cublasStatus_t state;
+  float wavesCount;
+  int reserved[4];
+};
+
+// ---------------------------------------------------------------------------
 // The control surface the S0 API test uses
 // ---------------------------------------------------------------------------
 
@@ -146,6 +185,54 @@ cublasStatus_t cublasGemmEx(cublasHandle_t handle, cublasOperation_t transa,
                             void* c, cublasDataType_t c_type, int ldc,
                             cublasComputeType_t compute_type,
                             cublasGemmAlgo_t algo);
+
+// The cublasLt entry points the scaled fp8 path uses.
+cublasStatus_t cublasLtCreate(cublasLtHandle_t* light_handle);
+cublasStatus_t cublasLtDestroy(cublasLtHandle_t light_handle);
+const char* cublasLtGetStatusString(cublasStatus_t status);
+cublasStatus_t cublasLtMatmulDescCreate(cublasLtMatmulDesc_t* matmul_desc,
+                                        cublasComputeType_t compute_type,
+                                        cudaDataType_t scale_type);
+cublasStatus_t cublasLtMatmulDescDestroy(cublasLtMatmulDesc_t matmul_desc);
+cublasStatus_t cublasLtMatmulDescSetAttribute(
+    cublasLtMatmulDesc_t matmul_desc, cublasLtMatmulDescAttributes_t attribute,
+    const void* buffer, std::size_t size_in_bytes);
+cublasStatus_t cublasLtMatmulDescGetAttribute(
+    cublasLtMatmulDesc_t matmul_desc, cublasLtMatmulDescAttributes_t attribute,
+    void* buffer, std::size_t size_in_bytes, std::size_t* size_written);
+cublasStatus_t cublasLtMatrixLayoutCreate(cublasLtMatrixLayout_t* layout,
+                                          cudaDataType_t type,
+                                          std::uint64_t rows,
+                                          std::uint64_t cols, std::int64_t ld);
+cublasStatus_t cublasLtMatrixLayoutDestroy(cublasLtMatrixLayout_t layout);
+cublasStatus_t cublasLtMatrixLayoutSetAttribute(cublasLtMatrixLayout_t layout,
+                                                int attribute,
+                                                const void* buffer,
+                                                std::size_t size_in_bytes);
+cublasStatus_t cublasLtMatmulPreferenceCreate(
+    cublasLtMatmulPreference_t* preference);
+cublasStatus_t cublasLtMatmulPreferenceDestroy(
+    cublasLtMatmulPreference_t preference);
+cublasStatus_t cublasLtMatmulPreferenceSetAttribute(
+    cublasLtMatmulPreference_t preference,
+    cublasLtMatmulPreferenceAttributes_t attribute, const void* buffer,
+    std::size_t size_in_bytes);
+cublasStatus_t cublasLtMatmulAlgoGetHeuristic(
+    cublasLtHandle_t light_handle, cublasLtMatmulDesc_t operation_desc,
+    cublasLtMatrixLayout_t a_desc, cublasLtMatrixLayout_t b_desc,
+    cublasLtMatrixLayout_t c_desc, cublasLtMatrixLayout_t d_desc,
+    cublasLtMatmulPreference_t preference, int requested_algo_count,
+    cublasLtMatmulHeuristicResult_t heuristic_results[],
+    int* return_algo_count);
+cublasStatus_t cublasLtMatmul(cublasLtHandle_t light_handle,
+                              cublasLtMatmulDesc_t compute_desc,
+                              const void* alpha, const void* a,
+                              cublasLtMatrixLayout_t a_desc, const void* b,
+                              cublasLtMatrixLayout_t b_desc, const void* beta,
+                              const void* c, cublasLtMatrixLayout_t c_desc,
+                              void* d, cublasLtMatrixLayout_t d_desc,
+                              const cublasLtMatmulAlgo_t* algo, void* workspace,
+                              std::size_t workspace_size, cudaStream_t stream);
 
 // Clears the log, the allocation registry, the cuBLAS handles, and the
 // per-function attribute table. The binding canary is re-armed.

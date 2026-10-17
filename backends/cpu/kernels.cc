@@ -30,6 +30,7 @@
 
 #include "nanochat/kernels.h"
 #include "nanochat/device_profile.h"
+#include "nanochat/fp8.h"
 #include "nanochat/mesh.h"
 
 #if defined(_OPENMP)
@@ -446,6 +447,129 @@ void Gemm(GemmMode mode, const GemmParams& params, const ComputeType* a,
 void GemmWgrad(const GemmParams& params, const ComputeType* a,
                const ComputeType* b, float* c) {
   GemmImpl(GemmMode::kWgrad, params, a, b, c);
+}
+
+// ---------------------------------------------------------------------------
+// Scaled fp8 GEMM (docs/fp8-training.md sections 4 and 5)
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// The fp8 value of one byte, in the format of the operand.
+float DecodeFp8(std::uint8_t bits, Fp8Format format) {
+  return format == Fp8Format::kE4M3 ? Fp8E4M3Decode(bits) : Fp8E5M2Decode(bits);
+}
+
+std::uint8_t EncodeFp8(float value, Fp8Format format) {
+  return format == Fp8Format::kE4M3 ? Fp8E4M3Encode(value)
+                                    : Fp8E5M2Encode(value);
+}
+
+float Fp8Max(Fp8Format format) {
+  return format == Fp8Format::kE4M3 ? kFp8E4M3Max : kFp8E5M2Max;
+}
+
+}  // namespace
+
+void QuantizeFp8(const QuantizeFp8Params& params, const ComputeType* src,
+                 std::uint8_t* dst, float* dequant) {
+  const int count = params.count;
+  if (count <= 0 || src == nullptr || dst == nullptr) {
+    if (dequant != nullptr) *dequant = 1.0f;
+    return;
+  }
+  // The amax over the tensor, then the dynamic scale
+  // (docs/fp8-training.md section 4.2). The floor keeps an all-zero tensor
+  // finite.
+  float amax = 0.0f;
+  for (int i = 0; i < count; ++i) {
+    const float magnitude = std::fabs(ComputeToFloat(src[i]));
+    if (magnitude > amax) amax = magnitude;
+  }
+  const float magnitude = amax > params.amax_floor ? amax : params.amax_floor;
+  const float fp8_max = Fp8Max(params.format);
+  const float scale = fp8_max / magnitude;
+  for (int i = 0; i < count; ++i) {
+    // The encoder saturates, so a separate clamp is not necessary.
+    dst[i] = EncodeFp8(ComputeToFloat(src[i]) * scale, params.format);
+  }
+  if (dequant != nullptr) *dequant = magnitude / fp8_max;
+}
+
+void GemmScaledFp8(GemmMode mode, const ScaledGemmParams& params,
+                   const std::uint8_t* a, const std::uint8_t* b, void* c) {
+  const int m = params.m;
+  const int n = params.n;
+  const int k = params.k;
+  if (m <= 0 || n <= 0 || k <= 0) return;
+  const int batch = params.batch_count > 0 ? params.batch_count : 1;
+  const float scale_a = params.scale_a != nullptr ? *params.scale_a : 1.0f;
+  const float scale_b = params.scale_b != nullptr ? *params.scale_b : 1.0f;
+  // The weight gradient is a parameter gradient, so it stays fp32. The forward
+  // and the input gradient produce an activation, so they store the compute
+  // type (docs/fp8-training.md section 7).
+  const bool fp32_output = mode == GemmMode::kWgrad;
+
+  // A direct triple loop over the decoded operands. The dequantization stays in
+  // float and the accumulator in double, so a bf16 build does not re-round the
+  // operand: the fp8 value times the scale needs more mantissa bits than bf16
+  // carries (docs/fp8-training.md section 3.2).
+  const int rows_a = params.transpose_a ? k : m;
+  const int cols_a = params.transpose_a ? m : k;
+  const int rows_b = params.transpose_b ? n : k;
+  const int cols_b = params.transpose_b ? k : n;
+  const std::int64_t stride_a = static_cast<std::int64_t>(rows_a) * cols_a;
+  const std::int64_t stride_b = static_cast<std::int64_t>(rows_b) * cols_b;
+  const std::int64_t stride_c = static_cast<std::int64_t>(m) * n;
+  const std::size_t element_bytes =
+      fp32_output ? sizeof(float) : sizeof(ComputeType);
+  const float alpha = params.alpha;
+  const float beta = params.beta;
+
+  for (int bi = 0; bi < batch; ++bi) {
+    const std::uint8_t* ab = a + bi * stride_a;
+    const std::uint8_t* bb = b + bi * stride_b;
+    char* cb_bytes = static_cast<char*>(c) +
+                     static_cast<std::size_t>(bi) *
+                         static_cast<std::size_t>(stride_c) * element_bytes;
+    float* cb_float =
+        fp32_output ? reinterpret_cast<float*>(cb_bytes) : nullptr;
+    ComputeType* cb_compute =
+        fp32_output ? nullptr : reinterpret_cast<ComputeType*>(cb_bytes);
+#if defined(_OPENMP)
+#pragma omp parallel for collapse(2) schedule(static)
+#endif
+    for (int i = 0; i < m; ++i) {
+      for (int j = 0; j < n; ++j) {
+        double acc = 0.0;
+        for (int p = 0; p < k; ++p) {
+          const double av = DecodeFp8(
+              params.transpose_a ? ab[static_cast<std::int64_t>(p) * m + i]
+                                 : ab[static_cast<std::int64_t>(i) * k + p],
+              params.format_a);
+          const double bv = DecodeFp8(
+              params.transpose_b ? bb[static_cast<std::int64_t>(j) * k + p]
+                                 : bb[static_cast<std::int64_t>(p) * n + j],
+              params.format_b);
+          acc += av * bv;
+        }
+        const std::int64_t index = static_cast<std::int64_t>(i) * n + j;
+        double result = static_cast<double>(alpha) * (acc * scale_a * scale_b);
+        if (fp32_output) {
+          if (beta != 0.0f) {
+            result += static_cast<double>(beta) * cb_float[index];
+          }
+          cb_float[index] = static_cast<float>(result);
+        } else {
+          if (beta != 0.0f) {
+            result +=
+                static_cast<double>(beta) * ComputeToFloat(cb_compute[index]);
+          }
+          cb_compute[index] = ComputeFromFloat(static_cast<float>(result));
+        }
+      }
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------

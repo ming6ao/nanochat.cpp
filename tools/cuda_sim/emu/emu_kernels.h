@@ -32,6 +32,9 @@ void EmuPointwiseBackward(PointwiseOp op, int n, const ComputeType* a,
                           float alpha, float beta, ComputeType* da,
                           ComputeType* db);
 
+void EmuQuantizeFp8(const QuantizeFp8Params& params, const ComputeType* src,
+                    std::uint8_t* dst, float* dequant);
+
 }  // namespace kernels
 
 namespace cuda_kernels {

@@ -145,16 +145,22 @@ inline float ComputeToFloat(ComputeType value) {
 // The dtype tags. The first three are the container storage codes, so their
 // values are the on-disk contract (docs/precision.md section 5). The code 3
 // belonged to `kFp16`. Stage 1 of docs/precision.md retired that tag and keeps
-// the code reserved.
+// the code reserved. The two fp8 tags are GEMM operand tags, not storage codes:
+// the checkpoint container stays fp32, so `IsStorageDType` rejects both
+// (docs/fp8-training.md section 3.1).
 enum class DType {
   kFp32 = 0,
   kBf16 = 1,
   kInt8 = 2,
+  kFp8E4M3 = 4,  // forward operands, one byte
+  kFp8E5M2 = 5,  // backward operands, one byte
 };
 
 inline std::size_t SizeOf(DType dtype) {
   switch (dtype) {
     case DType::kInt8:
+    case DType::kFp8E4M3:
+    case DType::kFp8E5M2:
       return 1;
     case DType::kBf16:
       return 2;
@@ -207,6 +213,7 @@ struct Caps {
   bool has_tensor_cores = false;  // fp16/bf16 MMA units
   bool supports_fp32 = true;
   bool supports_bf16 = false;
+  bool supports_fp8 = false;  // the E4M3/E5M2 tensor-core path (sm_89+)
 
   const char* device_name = "cpu";
 
@@ -215,6 +222,9 @@ struct Caps {
   bool Supports(DType dtype) const {
     if (dtype == DType::kFp32) return supports_fp32;
     if (dtype == DType::kBf16) return supports_bf16;
+    if (dtype == DType::kFp8E4M3 || dtype == DType::kFp8E5M2) {
+      return supports_fp8;
+    }
     return false;
   }
 };

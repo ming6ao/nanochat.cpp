@@ -26,7 +26,8 @@ cuda_library(
     alwayslink = True,
 )
 
-# The GEMM entry point: cuBLAS for fp32.
+# The GEMM entry point: cuBLAS for fp32, and cublasLt for the scaled fp8 path
+# (docs/fp8-training.md section 5.2).
 cuda_library(
     name = "gemm",
     srcs = ["gemm.cu"],
@@ -35,6 +36,7 @@ cuda_library(
     deps = [
         ":device",
         "//include/nanochat:nanochat",
+        # `cublas` brings both libcublas and libcublasLt.
         "@cuda//:cublas",
     ],
     alwayslink = True,

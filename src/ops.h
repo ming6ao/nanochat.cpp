@@ -30,6 +30,29 @@ constexpr float kQkScale = 1.2f;
 constexpr int kVeGateChannels = 12;
 constexpr int kSmearChannels = 24;
 
+// The fp8 scratch for one linear call: the two byte operands and the two
+// dequantization scales (docs/fp8-training.md sections 4.3 and 6.3). The
+// workspace owns the memory. A caller that passes a null scratch, or a scratch
+// whose pointers are null, uses the dense compute-type path.
+struct Fp8Scratch {
+  std::uint8_t* a_bytes = nullptr;  // the activation operand
+  std::uint8_t* b_bytes = nullptr;  // the weight operand
+  float* a_scale = nullptr;
+  float* b_scale = nullptr;
+
+  bool ready() const {
+    return a_bytes != nullptr && b_bytes != nullptr && a_scale != nullptr &&
+           b_scale != nullptr;
+  }
+};
+
+// The fp8 eligibility rule (docs/performance-model.md section 5.2): both
+// dimensions are divisible by 16, and the smaller dimension is at least 128.
+inline bool Fp8Eligible(std::int64_t rows, std::int64_t cols) {
+  return rows > 0 && cols > 0 && rows % 16 == 0 && cols % 16 == 0 &&
+         std::min(rows, cols) >= 128;
+}
+
 // The storage <-> float boundary for the compute type. fp32 is the only
 // compute type today, so both directions are the identity.
 inline float AsF(ComputeType value) { return value; }
@@ -46,7 +69,7 @@ namespace ops {
 
 void LinearForward(const ComputeType* x, const ComputeType* w, ComputeType* y,
                    std::int64_t rows, std::int64_t in, std::int64_t out,
-                   bool accumulate = false);
+                   bool accumulate = false, const Fp8Scratch* fp8 = nullptr);
 
 void LinearWgrad(const ComputeType* x, const ComputeType* dy, float* dw,
                  std::int64_t rows, std::int64_t in, std::int64_t out);
@@ -135,7 +158,8 @@ void MlpForward(const ComputeType* h, const ComputeType* c_fc,
                 const ComputeType* c_proj, std::int64_t rows,
                 std::int64_t hidden, std::int64_t mlp_dim, ComputeType* pre_act,
                 ComputeType* act, ComputeType* scratch,
-                const ComputeType* x_mid, ComputeType* out);
+                const ComputeType* x_mid, ComputeType* out,
+                const Fp8Scratch* fp8 = nullptr);
 
 void MlpBackward(const ComputeType* h, const ComputeType* c_fc,
                  const ComputeType* c_proj, const ComputeType* pre_act,
@@ -227,6 +251,10 @@ struct BlockActivations {
   ComputeType* x_out = nullptr;
   ComputeType* scratch_a = nullptr;
   ComputeType* scratch_b = nullptr;
+  // The fp8 scratch for the eligible forward matmuls
+  // (docs/fp8-training.md section 6.3). Null in a dense build or on the
+  // evaluation path, so the same block forward serves both.
+  Fp8Scratch fp8;
   // When set, attention reads these key/value rows instead of `k_final`/
   // `v_final` (the inference graphs read the KV cache).
   const ComputeType* attn_k = nullptr;

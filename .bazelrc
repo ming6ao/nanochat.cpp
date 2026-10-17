@@ -35,6 +35,10 @@ build:sm_75 --@rules_cuda//cuda:archs=sm_75
 # The selector is a build-time define; there is no runtime dtype dispatch.
 build --define=precision=fp32
 build:bf16 --define=precision=bf16
+# The fp8 tier computes in bf16 and quantizes the eligible matmuls
+# (docs/fp8-training.md section 3.3). Put it after a device config so the
+# later `--define` wins: `--config=h100 --config=fp8`.
+build:fp8 --define=precision=fp8
 
 # --- Backend ----------------------------------------------------------------
 #

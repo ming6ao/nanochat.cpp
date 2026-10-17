@@ -359,6 +359,43 @@ void CheckRmsNormFusedResidualBackward(int rows, int dim) {
   ExpectClose(ToFloat(dresidual), want, what + " dresidual");
 }
 
+// The emulated fp8 cast against the CPU reference. Both use the shared rounding
+// header, so the bytes and the dequantization value must match exactly
+// (docs/simulator-precision.md invariants 2 and 13).
+void CheckQuantizeFp8() {
+  constexpr int kCount = 64;
+  const std::vector<float> source =
+      MakeInput(static_cast<std::size_t>(kCount), 2.0f, 7);
+  std::vector<ComputeType> input(static_cast<std::size_t>(kCount));
+  for (int i = 0; i < kCount; ++i) {
+    input[static_cast<std::size_t>(i)] =
+        nanochat::ComputeFromFloat(source[static_cast<std::size_t>(i)]);
+  }
+  for (nanochat::Fp8Format format :
+       {nanochat::Fp8Format::kE4M3, nanochat::Fp8Format::kE5M2}) {
+    std::vector<std::uint8_t> reference(static_cast<std::size_t>(kCount), 0);
+    std::vector<std::uint8_t> emulated(static_cast<std::size_t>(kCount), 0);
+    float reference_dequant = 0.0f;
+    float emulated_dequant = 0.0f;
+    nanochat::QuantizeFp8Params params;
+    params.count = kCount;
+    params.format = format;
+    nanochat::kernels::QuantizeFp8(params, input.data(), reference.data(),
+                                   &reference_dequant);
+    nanochat::kernels::EmuQuantizeFp8(params, input.data(), emulated.data(),
+                                      &emulated_dequant);
+    ExpectClose({reference_dequant}, {emulated_dequant}, "fp8 dequantization");
+    for (int i = 0; i < kCount; ++i) {
+      const std::size_t index = static_cast<std::size_t>(i);
+      if (reference[index] != emulated[index]) {
+        Fail(Format("fp8 byte %d differs: emulated 0x%02X vs reference 0x%02X",
+                    i, emulated[index], reference[index]));
+        return;
+      }
+    }
+  }
+}
+
 }  // namespace
 
 int main() {
@@ -392,6 +429,9 @@ int main() {
   CheckRmsNormFusedResidualForward(3, 128);
   CheckRmsNormFusedResidualBackward(2, 16);
   CheckRmsNormFusedResidualBackward(3, 128);
+
+  // The fp8 cast: the emulated device code against the CPU reference.
+  CheckQuantizeFp8();
 
   if (g_failures != 0) {
     std::printf("%d check(s) failed\n", g_failures);

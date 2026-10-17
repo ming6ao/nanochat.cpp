@@ -64,6 +64,27 @@ libcublas.so.12 {
     cublasSetStream;
 };
 
+# The scaled fp8 path calls cublasLt, not cublasGemmEx
+# (docs/fp8-training.md section 5.2, docs/simulator-precision.md section 5).
+libcublasLt.so.12 {
+  global:
+    cublasLtCreate;
+    cublasLtDestroy;
+    cublasLtGetStatusString;
+    cublasLtMatmul;
+    cublasLtMatmulDescCreate;
+    cublasLtMatmulDescDestroy;
+    cublasLtMatmulDescSetAttribute;
+    cublasLtMatmulDescGetAttribute;
+    cublasLtMatrixLayoutCreate;
+    cublasLtMatrixLayoutDestroy;
+    cublasLtMatrixLayoutSetAttribute;
+    cublasLtMatmulPreferenceCreate;
+    cublasLtMatmulPreferenceDestroy;
+    cublasLtMatmulPreferenceSetAttribute;
+    cublasLtMatmulAlgoGetHeuristic;
+};
+
 # The interposer's own control surface. The S0 API test drives the mock
 # in-process, so these must be visible too.
 NANOCHAT_SIM_1.0 {

@@ -141,6 +141,20 @@ inline float rsqrtf(float value) { return 1.0f / std::sqrt(value); }
 // `extern __shared__` is a separate form and is not supported.
 #define __shared__ static
 
+// Bit reinterpretation, used by the fp8 cast. `__float_as_uint` and
+// `__uint_as_float` are device intrinsics on a real device.
+inline unsigned int __float_as_uint(float value) {
+  unsigned int bits = 0;
+  std::memcpy(&bits, &value, sizeof(bits));
+  return bits;
+}
+
+inline float __uint_as_float(unsigned int bits) {
+  float value = 0.0f;
+  std::memcpy(&value, &bits, sizeof(value));
+  return value;
+}
+
 // ---------------------------------------------------------------------------
 // The block runtime
 // ---------------------------------------------------------------------------

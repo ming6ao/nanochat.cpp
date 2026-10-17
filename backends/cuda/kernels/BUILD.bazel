@@ -69,6 +69,22 @@ cuda_library(
     alwayslink = True,
 )
 
+# Fp8: the dynamic amax and scale, then the fp8 cast
+# (docs/fp8-training.md section 4.2). The cast uses the CUDA conversion
+# intrinsic, which matches the shared `nanochat/fp8.h` rounding.
+cuda_library(
+    name = "fp8",
+    srcs = ["fp8.cu"],
+    copts = nanochat_cuda_copts(),
+    defines = precision_defines(),
+    deps = [
+        ":device_utils",
+        "//backends/cuda:device",
+        "//include/nanochat:nanochat",
+    ],
+    alwayslink = True,
+)
+
 # GradNorm: the L2 norm over a set of gradient spans, plus the clip scale.
 cuda_library(
     name = "grad_norm",
@@ -180,6 +196,7 @@ cuda_library(
 cc_library(
     name = "row_kernels",
     deps = [
+        ":fp8",
         ":grad_norm",
         ":pointwise",
         ":qk_prep",

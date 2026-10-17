@@ -37,6 +37,9 @@ struct DeviceProfile {
 
   bool has_tensor_cores = false;  // fp16/bf16 MMA units
   bool supports_bf16 = false;
+  // The E4M3/E5M2 tensor-core path. Ada reports 8.9 and Hopper reports 9.0;
+  // Ampere and older have no fp8 mode (docs/fp8-training.md section 5.3).
+  bool supports_fp8 = false;
 
   // Dense (non-sparse) peak rates. The fp32 rate is the CUDA-core rate; the
   // bf16 rate is the tensor-core rate on a device that has it. A rate of 0

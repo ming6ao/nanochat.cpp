@@ -158,6 +158,10 @@ class TrainModel final : public Model {
   ComputeType* scratch_a_ = nullptr;
   ComputeType* scratch_b_ = nullptr;
 
+  // The fp8 scratch for the classifier head (docs/fp8-training.md section
+  // 6.3). Null unless the build is fp8 and the head matmul is eligible.
+  Fp8Scratch head_fp8_;
+
   ops::BlockScratch block_scratch_;
 
   // Grad-mode state and the evaluation workspace (docs/eval.md). The

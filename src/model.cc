@@ -494,6 +494,16 @@ void TrainModel::BuildTrainWorkspace(int batch, int seq) {
   auto f = [&](float** dest, std::int64_t count) {
     float_slots.push_back({dest, count});
   };
+  struct BSlot {
+    std::uint8_t** dest;
+    std::int64_t count;
+  };
+  std::vector<BSlot> byte_slots;
+#if defined(NANOCHAT_FP8)
+  auto b = [&](std::uint8_t** dest, std::int64_t count) {
+    byte_slots.push_back({dest, count});
+  };
+#endif
 
   for (int i = 0; i < layers; ++i) {
     ops::BlockActivations& a = lacts_[i];
@@ -515,6 +525,16 @@ void TrainModel::BuildTrainWorkspace(int batch, int seq) {
     c(&a.pre_act, rows * mlp_dim);
     c(&a.act, rows * mlp_dim);
     c(&a.x_out, rows * hidden);
+#if defined(NANOCHAT_FP8)
+    // The fp8 operands and their scales for this layer
+    // (docs/fp8-training.md section 6.3). One scratch pair is reused by every
+    // eligible matmul of the block: the activation can be as wide as the MLP
+    // input, and the weight as large as the MLP projection.
+    b(&a.fp8.a_bytes, rows * mlp_dim);
+    b(&a.fp8.b_bytes, static_cast<std::int64_t>(hidden) * mlp_dim);
+    f(&a.fp8.a_scale, 1);
+    f(&a.fp8.b_scale, 1);
+#endif
   }
 
   c(&emb_raw_, rows * hidden);
@@ -524,6 +544,13 @@ void TrainModel::BuildTrainWorkspace(int batch, int seq) {
   c(&x_final_pre_, rows * hidden);
   c(&x_final_norm_, rows * hidden);
   c(&raw_logits_, rows * padded_vocab);
+#if defined(NANOCHAT_FP8)
+  // The classifier head, which is an eligible matmul at the production shape.
+  b(&head_fp8_.a_bytes, rows * hidden);
+  b(&head_fp8_.b_bytes, static_cast<std::int64_t>(hidden) * padded_vocab);
+  f(&head_fp8_.a_scale, 1);
+  f(&head_fp8_.b_scale, 1);
+#endif
   c(&dlogits_, rows * padded_vocab);
   f(&losses_, rows);
   c(&dx_final_norm_, rows * hidden);
@@ -560,6 +587,9 @@ void TrainModel::BuildTrainWorkspace(int batch, int seq) {
   for (const FSlot& slot : float_slots) {
     bytes += static_cast<std::size_t>(slot.count) * sizeof(float);
   }
+  for (const BSlot& slot : byte_slots) {
+    bytes += static_cast<std::size_t>(slot.count);
+  }
   bytes += 256;  // alignment slack
 
   workspace_.Reserve(bytes);
@@ -570,6 +600,10 @@ void TrainModel::BuildTrainWorkspace(int batch, int seq) {
   }
   for (const FSlot& slot : float_slots) {
     *slot.dest = workspace_.Alloc<float>(static_cast<std::size_t>(slot.count));
+  }
+  for (const BSlot& slot : byte_slots) {
+    *slot.dest =
+        workspace_.Alloc<std::uint8_t>(static_cast<std::size_t>(slot.count));
   }
 
   // The two projection scratch slots are shared across layers; every layer's
@@ -817,7 +851,7 @@ void TrainModel::RunForward(const int* tokens, const int* targets, int batch,
   if (save_for_backward) {
     classifier.rows = static_cast<int>(rows);
     ops::LinearForward(x_final_norm, lm_head_, raw_logits_, rows, hidden,
-                       padded_vocab);
+                       padded_vocab, false, &head_fp8_);
     kernels::ClassifierForward(classifier, raw_logits_, targets, losses_);
   } else {
     // Tile the classifier over row chunks so the logits buffer stays small.

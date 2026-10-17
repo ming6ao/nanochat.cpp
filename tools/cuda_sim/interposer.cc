@@ -22,6 +22,7 @@
 
 #include "tools/cuda_sim/cuda_sim_abi.h"
 
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -38,6 +39,26 @@ namespace {
 // The recorder
 // ---------------------------------------------------------------------------
 
+// The state the interposer keeps for one cublasLt matmul descriptor and one
+// matrix layout. The opaque handle is the map key, so the descriptors of one
+// call are checked against each other.
+struct LtDescriptor {
+  cublasComputeType_t compute_type = 0;
+  cudaDataType_t scale_type = 0;
+  cublasOperation_t trans_a = 0;
+  cublasOperation_t trans_b = 0;
+  const float* a_scale = nullptr;
+  const float* b_scale = nullptr;
+  bool fast_accum = false;
+};
+
+struct LtLayout {
+  cudaDataType_t type = 0;
+  std::uint64_t rows = 0;
+  std::uint64_t cols = 0;
+  std::int64_t ld = 0;
+};
+
 struct InterposerState {
   std::mutex mutex;
   std::string log;
@@ -51,6 +72,11 @@ struct InterposerState {
   cublasHandle_t cublas_handle = nullptr;
   bool cublas_created = false;
   bool cublas_destroyed = false;
+  // The live cublasLt handle and the descriptors created against it.
+  cublasLtHandle_t lt_handle = nullptr;
+  std::map<void*, LtDescriptor> lt_descriptors;
+  std::map<void*, LtLayout> lt_layouts;
+  std::map<void*, bool> lt_preferences;
   // The fat-binary token the loader passes back.
   void* fat_binary_token = nullptr;
 };
@@ -174,6 +200,10 @@ void nanochat_sim_reset(void) {
   state.cublas_handle = nullptr;
   state.cublas_created = false;
   state.cublas_destroyed = false;
+  state.lt_handle = nullptr;
+  state.lt_descriptors.clear();
+  state.lt_layouts.clear();
+  state.lt_preferences.clear();
   state.fat_binary_token = nullptr;
 }
 
@@ -763,6 +793,349 @@ cublasStatus_t cublasGemmEx(cublasHandle_t handle, cublasOperation_t transa,
   (void)c_type;
   return GemmExCommon("cublasGemmEx", handle, transa, transb, m, n, k, lda, ldb,
                       ldc, 1, compute_type, algo);
+}
+
+// ---------------------------------------------------------------------------
+// cublasLt (docs/simulator-precision.md section 5)
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// True when the layout type is one of the two fp8 operand formats.
+bool IsFp8Type(cudaDataType_t type) {
+  return type == kCudaR8FE4M3 || type == kCudaR8FE5M2;
+}
+
+}  // namespace
+
+cublasStatus_t cublasLtCreate(cublasLtHandle_t* light_handle) {
+  if (light_handle == nullptr) return kCublasStatusInvalidValue;
+  {
+    std::lock_guard<std::mutex> lock(State().mutex);
+    State().lt_handle = static_cast<void*>(&State());
+  }
+  *light_handle = State().lt_handle;
+  Record("cublasLtCreate", "\"handle_non_null\":true", "ok");
+  return kCublasStatusSuccess;
+}
+
+cublasStatus_t cublasLtDestroy(cublasLtHandle_t light_handle) {
+  bool known = false;
+  {
+    std::lock_guard<std::mutex> lock(State().mutex);
+    known = light_handle != nullptr && light_handle == State().lt_handle;
+    if (known) State().lt_handle = nullptr;
+  }
+  Record("cublasLtDestroy", "", known ? "ok" : "error: unknown handle");
+  return known ? kCublasStatusSuccess : kCublasStatusInvalidValue;
+}
+
+const char* cublasLtGetStatusString(cublasStatus_t status) {
+  return cublasGetStatusString(status);
+}
+
+cublasStatus_t cublasLtMatmulDescCreate(cublasLtMatmulDesc_t* matmul_desc,
+                                        cublasComputeType_t compute_type,
+                                        cudaDataType_t scale_type) {
+  if (matmul_desc == nullptr) return kCublasStatusInvalidValue;
+  void* token = new int(0);
+  {
+    std::lock_guard<std::mutex> lock(State().mutex);
+    LtDescriptor& desc = State().lt_descriptors[token];
+    desc.compute_type = compute_type;
+    desc.scale_type = scale_type;
+  }
+  *matmul_desc = token;
+  Record("cublasLtMatmulDescCreate",
+         "\"compute_type\":" + std::to_string(compute_type) +
+             ",\"scale_type\":" + std::to_string(scale_type),
+         "ok");
+  return kCublasStatusSuccess;
+}
+
+cublasStatus_t cublasLtMatmulDescDestroy(cublasLtMatmulDesc_t matmul_desc) {
+  bool known = false;
+  {
+    std::lock_guard<std::mutex> lock(State().mutex);
+    known = State().lt_descriptors.erase(matmul_desc) > 0;
+  }
+  if (known) delete static_cast<int*>(matmul_desc);
+  Record("cublasLtMatmulDescDestroy", "",
+         known ? "ok" : "error: unknown descriptor");
+  return known ? kCublasStatusSuccess : kCublasStatusInvalidValue;
+}
+
+cublasStatus_t cublasLtMatmulDescSetAttribute(
+    cublasLtMatmulDesc_t matmul_desc, cublasLtMatmulDescAttributes_t attribute,
+    const void* buffer, std::size_t size_in_bytes) {
+  InterposerState& state = State();
+  bool known = false;
+  {
+    std::lock_guard<std::mutex> lock(state.mutex);
+    known = state.lt_descriptors.count(matmul_desc) != 0;
+  }
+  if (!known) {
+    Record("cublasLtMatmulDescSetAttribute", "",
+           "error: attribute set on an unknown descriptor");
+    return kCublasStatusInvalidValue;
+  }
+  std::string verdict = "ok";
+  {
+    std::lock_guard<std::mutex> lock(state.mutex);
+    LtDescriptor& desc = state.lt_descriptors[matmul_desc];
+    if (buffer == nullptr || size_in_bytes == 0) {
+      verdict = "error: null or empty attribute buffer";
+    } else if (attribute == kCublasLtDescTransA) {
+      std::memcpy(&desc.trans_a, buffer, sizeof(desc.trans_a));
+    } else if (attribute == kCublasLtDescTransB) {
+      std::memcpy(&desc.trans_b, buffer, sizeof(desc.trans_b));
+    } else if (attribute == kCublasLtDescAScalePointer) {
+      std::memcpy(&desc.a_scale, buffer, sizeof(desc.a_scale));
+    } else if (attribute == kCublasLtDescBScalePointer) {
+      std::memcpy(&desc.b_scale, buffer, sizeof(desc.b_scale));
+    } else if (attribute == kCublasLtDescFastAccum) {
+      std::int32_t fast = 0;
+      std::memcpy(&fast, buffer, sizeof(fast));
+      desc.fast_accum = fast != 0;
+    }
+  }
+  Record("cublasLtMatmulDescSetAttribute",
+         "\"attribute\":" + std::to_string(attribute), verdict);
+  return verdict == "ok" ? kCublasStatusSuccess : kCublasStatusInvalidValue;
+}
+
+cublasStatus_t cublasLtMatmulDescGetAttribute(
+    cublasLtMatmulDesc_t matmul_desc, cublasLtMatmulDescAttributes_t attribute,
+    void* buffer, std::size_t size_in_bytes, std::size_t* size_written) {
+  (void)buffer;
+  (void)size_in_bytes;
+  if (size_written != nullptr) *size_written = 0;
+  InterposerState& state = State();
+  bool known = false;
+  {
+    std::lock_guard<std::mutex> lock(state.mutex);
+    known = state.lt_descriptors.count(matmul_desc) != 0;
+  }
+  Record("cublasLtMatmulDescGetAttribute",
+         "\"attribute\":" + std::to_string(attribute),
+         known ? "ok" : "error: unknown descriptor");
+  return known ? kCublasStatusSuccess : kCublasStatusInvalidValue;
+}
+
+cublasStatus_t cublasLtMatrixLayoutCreate(cublasLtMatrixLayout_t* layout,
+                                          cudaDataType_t type,
+                                          std::uint64_t rows,
+                                          std::uint64_t cols, std::int64_t ld) {
+  if (layout == nullptr) return kCublasStatusInvalidValue;
+  void* token = new int(0);
+  {
+    std::lock_guard<std::mutex> lock(State().mutex);
+    LtLayout& entry = State().lt_layouts[token];
+    entry.type = type;
+    entry.rows = rows;
+    entry.cols = cols;
+    entry.ld = ld;
+  }
+  *layout = token;
+  Record(
+      "cublasLtMatrixLayoutCreate",
+      "\"type\":" + std::to_string(type) + ",\"rows\":" + std::to_string(rows) +
+          ",\"cols\":" + std::to_string(cols) + ",\"ld\":" + std::to_string(ld),
+      "ok");
+  return kCublasStatusSuccess;
+}
+
+cublasStatus_t cublasLtMatrixLayoutDestroy(cublasLtMatrixLayout_t layout) {
+  bool known = false;
+  {
+    std::lock_guard<std::mutex> lock(State().mutex);
+    known = State().lt_layouts.erase(layout) > 0;
+  }
+  if (known) delete static_cast<int*>(layout);
+  Record("cublasLtMatrixLayoutDestroy", "",
+         known ? "ok" : "error: unknown layout");
+  return known ? kCublasStatusSuccess : kCublasStatusInvalidValue;
+}
+
+cublasStatus_t cublasLtMatrixLayoutSetAttribute(cublasLtMatrixLayout_t layout,
+                                                int attribute,
+                                                const void* buffer,
+                                                std::size_t size_in_bytes) {
+  (void)buffer;
+  (void)size_in_bytes;
+  bool known = false;
+  {
+    std::lock_guard<std::mutex> lock(State().mutex);
+    known = State().lt_layouts.count(layout) != 0;
+  }
+  Record("cublasLtMatrixLayoutSetAttribute",
+         "\"attribute\":" + std::to_string(attribute),
+         known ? "ok" : "error: unknown layout");
+  return known ? kCublasStatusSuccess : kCublasStatusInvalidValue;
+}
+
+cublasStatus_t cublasLtMatmulPreferenceCreate(
+    cublasLtMatmulPreference_t* preference) {
+  if (preference == nullptr) return kCublasStatusInvalidValue;
+  void* token = new int(0);
+  {
+    std::lock_guard<std::mutex> lock(State().mutex);
+    State().lt_preferences[token] = true;
+  }
+  *preference = token;
+  Record("cublasLtMatmulPreferenceCreate", "", "ok");
+  return kCublasStatusSuccess;
+}
+
+cublasStatus_t cublasLtMatmulPreferenceDestroy(
+    cublasLtMatmulPreference_t preference) {
+  bool known = false;
+  {
+    std::lock_guard<std::mutex> lock(State().mutex);
+    known = State().lt_preferences.erase(preference) > 0;
+  }
+  if (known) delete static_cast<int*>(preference);
+  Record("cublasLtMatmulPreferenceDestroy", "",
+         known ? "ok" : "error: unknown preference");
+  return known ? kCublasStatusSuccess : kCublasStatusInvalidValue;
+}
+
+cublasStatus_t cublasLtMatmulPreferenceSetAttribute(
+    cublasLtMatmulPreference_t preference,
+    cublasLtMatmulPreferenceAttributes_t attribute, const void* buffer,
+    std::size_t size_in_bytes) {
+  (void)buffer;
+  (void)size_in_bytes;
+  bool known = false;
+  {
+    std::lock_guard<std::mutex> lock(State().mutex);
+    known = State().lt_preferences.count(preference) != 0;
+  }
+  Record("cublasLtMatmulPreferenceSetAttribute",
+         "\"attribute\":" + std::to_string(attribute),
+         known ? "ok" : "error: unknown preference");
+  return known ? kCublasStatusSuccess : kCublasStatusInvalidValue;
+}
+
+cublasStatus_t cublasLtMatmulAlgoGetHeuristic(
+    cublasLtHandle_t light_handle, cublasLtMatmulDesc_t operation_desc,
+    cublasLtMatrixLayout_t a_desc, cublasLtMatrixLayout_t b_desc,
+    cublasLtMatrixLayout_t c_desc, cublasLtMatrixLayout_t d_desc,
+    cublasLtMatmulPreference_t preference, int requested_algo_count,
+    cublasLtMatmulHeuristicResult_t heuristic_results[],
+    int* return_algo_count) {
+  (void)operation_desc;
+  (void)a_desc;
+  (void)b_desc;
+  (void)c_desc;
+  (void)d_desc;
+  (void)preference;
+  if (return_algo_count != nullptr) *return_algo_count = 0;
+  bool handle_ok = false;
+  {
+    std::lock_guard<std::mutex> lock(State().mutex);
+    handle_ok = light_handle != nullptr && light_handle == State().lt_handle;
+  }
+  if (!handle_ok) {
+    Record("cublasLtMatmulAlgoGetHeuristic", "",
+           "error: cublasLt call before cublasLtCreate");
+    return kCublasStatusNotInitialized;
+  }
+  if (heuristic_results == nullptr || requested_algo_count < 1) {
+    Record("cublasLtMatmulAlgoGetHeuristic", "", "error: no result slot");
+    return kCublasStatusInvalidValue;
+  }
+  // The mock computes nothing, so a zeroed algorithm and no workspace are
+  // enough: the choice cannot change a result.
+  heuristic_results[0] = cublasLtMatmulHeuristicResult_t{};
+  heuristic_results[0].state = kCublasStatusSuccess;
+  heuristic_results[0].workspaceSize = 0;
+  if (return_algo_count != nullptr) *return_algo_count = 1;
+  Record("cublasLtMatmulAlgoGetHeuristic",
+         "\"requested\":" + std::to_string(requested_algo_count), "ok");
+  return kCublasStatusSuccess;
+}
+
+cublasStatus_t cublasLtMatmul(cublasLtHandle_t light_handle,
+                              cublasLtMatmulDesc_t compute_desc,
+                              const void* alpha, const void* a,
+                              cublasLtMatrixLayout_t a_desc, const void* b,
+                              cublasLtMatrixLayout_t b_desc, const void* beta,
+                              const void* c, cublasLtMatrixLayout_t c_desc,
+                              void* d, cublasLtMatrixLayout_t d_desc,
+                              const cublasLtMatmulAlgo_t* algo, void* workspace,
+                              std::size_t workspace_size, cudaStream_t stream) {
+  (void)alpha;
+  (void)a;
+  (void)b;
+  (void)beta;
+  (void)c;
+  (void)d;
+  (void)d_desc;
+  (void)algo;
+  (void)workspace;
+  (void)workspace_size;
+  (void)stream;
+  InterposerState& state = State();
+  LtDescriptor desc;
+  LtLayout a_layout;
+  LtLayout b_layout;
+  LtLayout c_layout;
+  bool ok = true;
+  std::string verdict = "ok";
+  {
+    std::lock_guard<std::mutex> lock(state.mutex);
+    const bool handle_ok =
+        light_handle != nullptr && light_handle == state.lt_handle;
+    const auto desc_it = state.lt_descriptors.find(compute_desc);
+    const auto a_it = state.lt_layouts.find(a_desc);
+    const auto b_it = state.lt_layouts.find(b_desc);
+    const auto c_it = state.lt_layouts.find(c_desc);
+    if (!handle_ok) {
+      ok = false;
+      verdict = "error: cublasLt call before cublasLtCreate";
+    } else if (desc_it == state.lt_descriptors.end() ||
+               a_it == state.lt_layouts.end() ||
+               b_it == state.lt_layouts.end() ||
+               c_it == state.lt_layouts.end()) {
+      ok = false;
+      verdict = "error: unknown descriptor";
+    } else {
+      desc = desc_it->second;
+      a_layout = a_it->second;
+      b_layout = b_it->second;
+      c_layout = c_it->second;
+    }
+  }
+  const bool fp8 = IsFp8Type(a_layout.type) || IsFp8Type(b_layout.type);
+  if (ok && fp8) {
+    const nanochat::DeviceProfile* profile = Profile();
+    if (profile != nullptr && !profile->supports_fp8) {
+      ok = false;
+      verdict = "error: fp8 call on a profile without fp8 support";
+    } else if (desc.compute_type != kCublasCompute32F) {
+      ok = false;
+      verdict = "error: fp8 call must accumulate with CUBLAS_COMPUTE_32F";
+    } else if (c_layout.type != kCudaR32F) {
+      ok = false;
+      verdict = "error: fp8 call must write an fp32 accumulator";
+    } else if (desc.a_scale == nullptr || desc.b_scale == nullptr) {
+      ok = false;
+      verdict = "error: fp8 call is missing a scale pointer";
+    } else if (!(std::isfinite(*desc.a_scale) && *desc.a_scale > 0.0f &&
+                 std::isfinite(*desc.b_scale) && *desc.b_scale > 0.0f)) {
+      ok = false;
+      verdict = "error: fp8 scale is not finite and positive";
+    }
+  }
+  Record("cublasLtMatmul",
+         "\"a_type\":" + std::to_string(a_layout.type) +
+             ",\"b_type\":" + std::to_string(b_layout.type) +
+             ",\"c_type\":" + std::to_string(c_layout.type) +
+             ",\"compute_type\":" + std::to_string(desc.compute_type) +
+             ",\"fp8\":" + (fp8 ? "true" : "false"),
+         verdict);
+  return ok ? kCublasStatusSuccess : kCublasStatusInvalidValue;
 }
 
 }  // extern "C"

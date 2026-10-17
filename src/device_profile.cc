@@ -21,19 +21,19 @@ namespace {
 // (non-sparse) and in FLOP/s. See docs/simulator.md section 7.
 const DeviceProfile kProfiles[] = {
     // NVIDIA Hopper.
-    {"h100", 9, 0, 80ull * 1024 * 1024 * 1024, true, true, 66.9e12, 989e12,
-     1979e12, 3.35e12, 32, 1024, 227 * 1024, 3.0},
-    {"h200", 9, 0, 141ull * 1024 * 1024 * 1024, true, true, 67.0e12, 989e12,
-     1979e12, 4.8e12, 32, 1024, 227 * 1024, 3.0},
+    {"h100", 9, 0, 80ull * 1024 * 1024 * 1024, true, true, true, 66.9e12,
+     989e12, 1979e12, 3.35e12, 32, 1024, 227 * 1024, 3.0},
+    {"h200", 9, 0, 141ull * 1024 * 1024 * 1024, true, true, true, 67.0e12,
+     989e12, 1979e12, 4.8e12, 32, 1024, 227 * 1024, 3.0},
     // NVIDIA Ampere data center.
-    {"a100", 8, 0, 80ull * 1024 * 1024 * 1024, true, true, 19.5e12, 312e12, 0.0,
-     2.0e12, 32, 1024, 163 * 1024, 4.0},
+    {"a100", 8, 0, 80ull * 1024 * 1024 * 1024, true, true, false, 19.5e12,
+     312e12, 0.0, 2.0e12, 32, 1024, 163 * 1024, 4.0},
     // NVIDIA Turing. No bf16, so the T4 runs fp32.
-    {"t4", 7, 5, 16ull * 1024 * 1024 * 1024, true, false, 8.1e12, 0.0, 0.0,
-     320e9, 32, 1024, 64 * 1024, 6.0},
+    {"t4", 7, 5, 16ull * 1024 * 1024 * 1024, true, false, false, 8.1e12, 0.0,
+     0.0, 320e9, 32, 1024, 64 * 1024, 6.0},
     // Pascal (the development host). No tensor cores and no bf16.
-    {"gtx1080ti", 6, 1, 11ull * 1024 * 1024 * 1024, false, false, 11.34e12, 0.0,
-     0.0, 484e9, 32, 1024, 48 * 1024, 5.0},
+    {"gtx1080ti", 6, 1, 11ull * 1024 * 1024 * 1024, false, false, false,
+     11.34e12, 0.0, 0.0, 484e9, 32, 1024, 48 * 1024, 5.0},
 };
 
 std::string ToLower(const std::string& value) {
@@ -93,6 +93,7 @@ Caps CapsFromProfile(const DeviceProfile& profile) {
   caps.has_tensor_cores = profile.has_tensor_cores;
   caps.supports_fp32 = true;
   caps.supports_bf16 = profile.supports_bf16;
+  caps.supports_fp8 = profile.supports_fp8;
   caps.device_name = profile.name;
   return caps;
 }

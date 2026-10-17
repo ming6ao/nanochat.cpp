@@ -11,6 +11,8 @@
 //   3. For a shared entry, the MFU rate equals the profile's peak at the
 //      precision the MFU table models: the bf16 tensor-core rate on a device
 //      with bf16, the fp32 CUDA-core rate otherwise.
+//   4. The fp8 rate and the fp8 flag agree, and an fp8 device reports compute
+//      capability 8.9 or higher (docs/correctness-gates.md section 3.1).
 //
 // It needs no GPU, no fixture, and no broker: tier S0, a plain T0 CPU test.
 
@@ -205,6 +207,49 @@ void TestCapsProjection() {
              "Pascal does not support bf16");
 }
 
+void TestFp8Capability() {
+  // The fp8 rows (docs/simulator-precision.md section 3,
+  // docs/correctness-gates.md section 3.1). Three rules hold:
+  //   1. A nonzero fp8 rate means `supports_fp8` is true, and the opposite.
+  //   2. An fp8 device reports compute capability 8.9 or higher.
+  //   3. The `Caps` projection carries the flag, and `Supports` answers for
+  //      both fp8 operand tags.
+  for (const DeviceProfile* profile : nanochat::AllDeviceProfiles()) {
+    const std::string name = profile->name;
+    const bool has_rate = profile->peak_fp8_flops > 0.0;
+    ExpectTrue(
+        has_rate == profile->supports_fp8,
+        Format("profile \"%s\" ties its fp8 rate to the flag", name.c_str()));
+    if (profile->supports_fp8) {
+      const bool modern =
+          profile->compute_major > 8 ||
+          (profile->compute_major == 8 && profile->compute_minor >= 9);
+      ExpectTrue(modern, Format("profile \"%s\" with fp8 is compute capability "
+                                "8.9 or higher",
+                                name.c_str()));
+    }
+    const Caps caps = nanochat::CapsFromProfile(*profile);
+    ExpectTrue(caps.supports_fp8 == profile->supports_fp8,
+               Format("caps carry the fp8 flag for \"%s\"", name.c_str()));
+    ExpectTrue(
+        caps.Supports(nanochat::DType::kFp8E4M3) == profile->supports_fp8,
+        Format("Supports(kFp8E4M3) agrees for \"%s\"", name.c_str()));
+    ExpectTrue(
+        caps.Supports(nanochat::DType::kFp8E5M2) == profile->supports_fp8,
+        Format("Supports(kFp8E5M2) agrees for \"%s\"", name.c_str()));
+  }
+  // An fp8 operand is one byte, and it is not a container storage code: the
+  // checkpoint stays fp32 (docs/fp8-training.md section 3.1).
+  ExpectTrue(nanochat::SizeOf(nanochat::DType::kFp8E4M3) == 1,
+             "E4M3 is one byte");
+  ExpectTrue(nanochat::SizeOf(nanochat::DType::kFp8E5M2) == 1,
+             "E5M2 is one byte");
+  ExpectTrue(!nanochat::IsStorageDType(nanochat::DType::kFp8E4M3),
+             "E4M3 is not a checkpoint storage dtype");
+  ExpectTrue(!nanochat::IsStorageDType(nanochat::DType::kFp8E5M2),
+             "E5M2 is not a checkpoint storage dtype");
+}
+
 }  // namespace
 
 int main() {
@@ -213,6 +258,7 @@ int main() {
   TestMfuConsistency();
   TestLimitTable();
   TestCapsProjection();
+  TestFp8Capability();
   if (g_failures != 0) {
     std::printf("%d check(s) failed\n", g_failures);
     return 1;

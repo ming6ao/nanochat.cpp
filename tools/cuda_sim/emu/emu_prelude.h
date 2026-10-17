@@ -28,6 +28,7 @@
 #define RmsNormBackwardFusedResidual EmuRmsNormBackwardFusedResidual
 #define PointwiseForward EmuPointwiseForward
 #define PointwiseBackward EmuPointwiseBackward
+#define QuantizeFp8 EmuQuantizeFp8
 
 namespace nanochat {
 namespace cuda_backend {

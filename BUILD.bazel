@@ -20,6 +20,13 @@ config_setting(
     define_values = {"precision": "bf16"},
 )
 
+# The fp8 tier: an fp8 build computes in bf16 and quantizes the eligible
+# matmuls (docs/fp8-training.md section 3.3).
+config_setting(
+    name = "fp8",
+    define_values = {"precision": "fp8"},
+)
+
 # Backend selection (docs/build.md). `--backend=cpu` links the reference
 # backend; `--backend=cuda` links the CUDA backend. `src/**` selects between
 # them, so the shared workflow compiles once and links against either.

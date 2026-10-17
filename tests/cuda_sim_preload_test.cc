@@ -154,6 +154,55 @@ int DriveTheRealBackend(const std::string& profile_name) {
   ExpectTrue(host_c.size() == static_cast<std::size_t>(kM) * kN,
              "the device-to-host copy returned the output");
 
+  // The scaled fp8 path (docs/simulator-precision.md section 5). The mock
+  // records and validates the cublasLt call shape; it does not compute. Only an
+  // fp8 profile accepts the call, so the block is guarded by the capability.
+  if (caps.supports_fp8) {
+    constexpr int kFp8 = 16;
+    const std::size_t fp8_count = static_cast<std::size_t>(kFp8) * kFp8;
+    std::uint8_t* qx =
+        static_cast<std::uint8_t*>(nanochat::kernels::Alloc(fp8_count));
+    std::uint8_t* qw =
+        static_cast<std::uint8_t*>(nanochat::kernels::Alloc(fp8_count));
+    float* scale_x =
+        static_cast<float*>(nanochat::kernels::Alloc(sizeof(float)));
+    float* scale_w =
+        static_cast<float*>(nanochat::kernels::Alloc(sizeof(float)));
+    // The forward output is the compute type (docs/fp8-training.md section 7).
+    nanochat::ComputeType* y = static_cast<nanochat::ComputeType*>(
+        nanochat::kernels::Alloc(fp8_count * sizeof(nanochat::ComputeType)));
+    const bool allocated = qx != nullptr && qw != nullptr &&
+                           scale_x != nullptr && scale_w != nullptr &&
+                           y != nullptr;
+    ExpectTrue(allocated, "the fp8 buffers allocate");
+    if (allocated) {
+      // A finite, positive scale: the mock checks the range, not the value
+      // (docs/simulator-precision.md section 5.2).
+      const float one = 1.0f;
+      nanochat::kernels::Memcpy(scale_x, &one, sizeof(float),
+                                nanochat::CopyDir::kHostToDevice);
+      nanochat::kernels::Memcpy(scale_w, &one, sizeof(float),
+                                nanochat::CopyDir::kHostToDevice);
+      nanochat::ScaledGemmParams scaled;
+      scaled.m = kFp8;
+      scaled.n = kFp8;
+      scaled.k = kFp8;
+      scaled.transpose_b = true;
+      scaled.format_a = nanochat::Fp8Format::kE4M3;
+      scaled.format_b = nanochat::Fp8Format::kE4M3;
+      scaled.scale_a = scale_x;
+      scaled.scale_b = scale_w;
+      nanochat::kernels::GemmScaledFp8(nanochat::GemmMode::kForward, scaled, qx,
+                                       qw, y);
+      nanochat::kernels::Synchronize();
+    }
+    nanochat::kernels::Free(qx);
+    nanochat::kernels::Free(qw);
+    nanochat::kernels::Free(scale_x);
+    nanochat::kernels::Free(scale_w);
+    nanochat::kernels::Free(y);
+  }
+
   nanochat::kernels::Free(a);
   nanochat::kernels::Free(b);
   nanochat::kernels::Free(c);
@@ -209,6 +258,27 @@ void CheckLog(const std::string& log, const std::string& profile,
   } else {
     ExpectTrue(!saw_tensor_core,
                "a non-tensor-core profile records no tensor-core GEMM");
+  }
+
+  // The scaled fp8 call shape (docs/simulator-precision.md section 5.2).
+  const nanochat::DeviceProfile* entry = nanochat::FindDeviceProfile(profile);
+  if (entry != nullptr && entry->supports_fp8) {
+    ExpectTrue(Contains(log, "\"call\":\"cublasLtMatmul\""),
+               "the fp8 path issued cublasLtMatmul");
+    bool accepted = false;
+    for (const std::string& line : Lines(log)) {
+      if (line.find("\"call\":\"cublasLtMatmul\"") == std::string::npos) {
+        continue;
+      }
+      ExpectTrue(line.find("\"verdict\":\"ok") != std::string::npos,
+                 "the fp8 cublasLt call was accepted on an fp8 profile");
+      ExpectTrue(line.find("\"fp8\":true") != std::string::npos,
+                 "the fp8 call carries an fp8 operand");
+      ExpectTrue(line.find("\"c_type\":0") != std::string::npos,
+                 "the fp8 call writes an fp32 accumulator");
+      accepted = true;
+    }
+    ExpectTrue(accepted, "at least one cublasLtMatmul was recorded");
   }
 
   // A log without addresses stays comparable across runs.

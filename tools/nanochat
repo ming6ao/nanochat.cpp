@@ -44,12 +44,15 @@ tools/nanochat <command> [args...]
                              CPU only, no GPU broker; see
                              docs/performance-model.md
   doctor [--json]            print environment, device, sandbox, and lock state
-  simulate [--device NAME] [--suite S] [--mode compile]
+  simulate [--device NAME] [--suite S] [--mode compile] [--precision P]
                              S0 CPU-only simulator (no GPU, no broker); see
-                             docs/simulator.md. Suites: correctness api
-                             collective kernel profile all (default all)
+                             docs/simulator.md. Suites: correctness fp8-fast
+                             api collective kernel profile all (default all)
                              `correctness` also carries the staged numeric
                              trace (docs/numerics-integration.md)
+                             `fp8-fast` is the fast fp8 core
+                             (docs/correctness-gates.md section 5.1)
+                             Precision: fp32 (default) bf16 fp8
   verify -- <cmd...>         alias for: run t2-parity -- <cmd...>
   gpu [--profile P] -- <cmd> acquire the GPU broker, then run
   help                       this message
@@ -567,6 +570,7 @@ PY
     sim_mode=run
     sim_device=h100
     sim_suite=all
+    sim_precision=fp32
     while (( $# )); do
       case "$1" in
         --device) sim_device=${2:?--device needs a name}; shift 2 ;;
@@ -575,6 +579,10 @@ PY
         --suite=*) sim_suite=${1#--suite=}; shift ;;
         --mode) sim_mode=${2:?--mode needs a value}; shift 2 ;;
         --mode=*) sim_mode=${1#--mode=}; shift ;;
+        # The precision selects the build the reference engine runs
+        # (docs/correctness-gates.md section 3.3). fp32 is the default.
+        --precision) sim_precision=${2:?--precision needs a name}; shift 2 ;;
+        --precision=*) sim_precision=${1#--precision=}; shift ;;
         *) die "simulate: unknown argument '$1'" ;;
       esac
     done
@@ -680,18 +688,33 @@ PY
       correctness) sim_targets=(//tests:oracle_test //tests:train_parity_test
                                 //tests:sim_numerics_test
                                 //tests:numerics_trace_test) ;;
+      # The fast fp8 core (docs/correctness-gates.md section 5.1): the shared
+      # rounding header and the scaled GEMM seam on the CPU. Milliseconds, so
+      # it rides the inner development loop.
+      fp8-fast) sim_targets=(//tests:fp8_rounding_test //tests:fp8_gemm_test
+                             //tests:fp8_graph_test
+                             //tests:device_profile_test) ;;
       collective) sim_targets=(//tests:collective_sim_test) ;;
       kernel) sim_targets=(//tests:kernel_emu_test) ;;
       profile) sim_targets=(//tests:device_profile_test) ;;
       all) sim_targets=(//tests:oracle_test //tests:train_parity_test
                         //tests:sim_numerics_test //tests:numerics_trace_test
+                        //tests:fp8_rounding_test //tests:fp8_gemm_test
+                        //tests:fp8_graph_test
                         //tests:collective_sim_test
                         //tests:kernel_emu_test //tests:device_profile_test) ;;
       *) die "simulate: unknown suite '$sim_suite'" ;;
     esac
 
-    # fp32 is the only precision (docs/precision.md).
+    # fp32 is the default; the other tiers select their build config
+    # (docs/precision.md, docs/fp8-training.md section 3.3).
     sim_configs=(--config=sim)
+    case "$sim_precision" in
+      fp32) ;;
+      bf16) sim_configs+=(--config=bf16) ;;
+      fp8) sim_configs+=(--config=fp8) ;;
+      *) die "simulate: unknown precision '$sim_precision' (fp32 bf16 fp8)" ;;
+    esac
     # The reference-engine suites assert the override is live under
     # `--config=sim`, so the profile name must reach the test process.
     with_build_lock "$bazel_bin" test \

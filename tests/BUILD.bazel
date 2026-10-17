@@ -341,6 +341,53 @@ cc_test(
     tags = ["sim"],
 )
 
+# The shared fp8 conversion gate (docs/correctness-gates.md section 3.2). The CPU
+# reference backend and the emulation engine share `nanochat/fp8.h`, so this test
+# pins the header against the format definition: known encodings, the round trip,
+# the tie rule, saturation, and the sign. Vendor-free and GPU-free, so it runs in
+# the default T0 loop and carries the `sim` tag.
+cc_test(
+    name = "fp8_rounding_test",
+    srcs = ["fp8_rounding_test.cc"],
+    copts = nanochat_copts(),
+    deps = ["//include/nanochat:nanochat"],
+    size = "small",
+    tags = ["sim"],
+)
+
+# The scaled fp8 seam gate (docs/correctness-gates.md section 3.3). It drives
+# `QuantizeFp8` and `GemmScaledFp8` on the CPU reference backend against an
+# independent triple-loop reference, for the forward, dgrad, and wgrad operand
+# roles. It links the CPU backend directly so it needs no GPU and no broker.
+cc_test(
+    name = "fp8_gemm_test",
+    srcs = ["fp8_gemm_test.cc"],
+    copts = nanochat_copts(),
+    deps = [
+        "//backends/cpu:cpu",
+        "//include/nanochat:nanochat",
+    ],
+    size = "small",
+    tags = ["sim"],
+)
+
+# The fp8 graph plumbing gate (docs/correctness-gates.md sections 3.3 and 5.1).
+# The eligible forward matmuls take the fp8 path and are compared against the
+# dense path in the same build. `precision_defines` gives the source the
+# `NANOCHAT_FP8` define the branch is guarded by.
+cc_test(
+    name = "fp8_graph_test",
+    srcs = ["fp8_graph_test.cc"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    deps = [
+        "//include/nanochat:nanochat",
+        "//src:model",
+    ],
+    size = "small",
+    tags = ["sim"],
+)
+
 # The performance-model gate (docs/performance-model.md section 12): the
 # counter struct sums to `EstimateFlopsPerToken`, the precision assignment
 # follows the fp8 rule, the roofline labels each family, and the estimator
@@ -583,6 +630,9 @@ test_suite(name = "all", tests = [
     ":loader_parity_test",
     ":post_training_core_test",
     ":device_profile_test",
+    ":fp8_rounding_test",
+    ":fp8_gemm_test",
+    ":fp8_graph_test",
     ":performance_model_test",
     ":cuda_device_prop_abi_test",
     ":sim_numerics_test",

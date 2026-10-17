@@ -22,6 +22,7 @@ cc_library(
     name = "cuda_headers",
     hdrs = [
         "cuda_emu.h",
+        "cuda_fp8.h",
         "cuda_runtime.h",
         "emu_kernels.h",
         "emu_prelude.h",
@@ -50,10 +51,18 @@ genrule(
     cmd = "cp $< $@",
 )
 
+genrule(
+    name = "fp8_emulated_source",
+    srcs = ["//backends/cuda/kernels:fp8.cu"],
+    outs = ["fp8_emu.cc"],
+    cmd = "cp $< $@",
+)
+
 cc_library(
     name = "emulated_kernels",
     srcs = [
         "emu_runtime.cc",
+        ":fp8_emulated_source",
         ":pointwise_emulated_source",
         ":rms_norm_emulated_source",
     ],

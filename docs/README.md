@@ -38,6 +38,7 @@ detailed reference that the design points at.
 | [node-h100.md](node-h100.md) | The H100 node run book: the memory plan, the batch plan, the launch, and the acceptance run |
 | [simulator.md](simulator.md) | The S0 simulator: device profiles, the reference engine, the emulation engine, the API interposer, and the collective mock |
 | [simulator-precision.md](simulator-precision.md) | The simulator at bf16 and fp8: the profile rows, the fp8 rounding, the cuBLASLt coverage, the emulator intrinsics, and the trace leg |
+| [correctness-gates.md](correctness-gates.md) | The correctness split: what the simulator proves, the Hopper startup gate, and the speed budget |
 | [numerics-integration.md](numerics-integration.md) | The staged numeric trace: CPU, simulator, and Pascal GPU agreement |
 
 New here? Start with [../README.md](../README.md) for the quickstart, then

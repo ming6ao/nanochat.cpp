@@ -72,6 +72,47 @@ struct GemmParams {
   std::int64_t stride_c = 0;
 };
 
+// One fp8 operand format. The forward pass uses E4M3 and the backward pass uses
+// E5M2 (docs/fp8-training.md section 3.1).
+enum class Fp8Format {
+  kE4M3 = 0,  // forward operands
+  kE5M2 = 1,  // backward operands
+};
+
+struct QuantizeFp8Params {
+  int count = 0;  // elements in `src`
+  Fp8Format format = Fp8Format::kE4M3;
+  // The amax floor. An all-zero tensor has an amax of zero, so the scale would
+  // be infinite without it (docs/fp8-training.md section 4.1).
+  float amax_floor = 1e-12f;
+};
+
+// A scaled fp8 matrix multiply: `C = alpha * op(A) * op(B) + beta * C`, with
+// fp8 operands and an fp32 accumulator. The output type follows the mode: the
+// forward and the input gradient produce an activation, so `c` is
+// `ComputeType*`; the weight gradient produces a parameter gradient, so `c` is
+// `float*` (docs/fp8-training.md section 7).
+//
+// `scale_a` and `scale_b` are the dequantization values from `QuantizeFp8`, and
+// a null pointer means 1.0. The two formats are separate, because the input and
+// weight gradients mix E5M2 and E4M3 in one call (docs/fp8-training.md
+// section 7).
+struct ScaledGemmParams {
+  int m = 0;  // rows of C
+  int n = 0;  // columns of C
+  int k = 0;  // reduction extent
+  int batch_count = 1;
+  float alpha = 1.0f;
+  float beta = 0.0f;
+  bool transpose_a = false;
+  bool transpose_b = false;
+  bool fast_accum = false;  // reduced-precision reduction; forward only
+  Fp8Format format_a = Fp8Format::kE4M3;
+  Fp8Format format_b = Fp8Format::kE4M3;
+  const float* scale_a = nullptr;  // dequantization value for A
+  const float* scale_b = nullptr;  // dequantization value for B
+};
+
 struct RmsNormParams {
   int rows = 0;  // rows to reduce over
   int dim = 0;   // row width
@@ -184,6 +225,18 @@ void Gemm(GemmMode mode, const GemmParams& params, const ComputeType* a,
 // accumulates into fp32 parameter-gradient storage.
 void GemmWgrad(const GemmParams& params, const ComputeType* a,
                const ComputeType* b, float* c);
+
+// --- Scaled fp8 GEMM (docs/fp8-training.md sections 4 and 5) ---------------
+
+// Quantizes `src` to one byte per element with one tensorwise scale, and writes
+// the dequantization value (`1 / scale`) to `*dequant`. The rounding is shared
+// with the simulator through `nanochat/fp8.h`, so the device and the CPU
+// reference agree (docs/correctness-gates.md section 3.2).
+void QuantizeFp8(const QuantizeFp8Params& params, const ComputeType* src,
+                 std::uint8_t* dst, float* dequant);
+
+void GemmScaledFp8(GemmMode mode, const ScaledGemmParams& params,
+                   const std::uint8_t* a, const std::uint8_t* b, void* c);
 
 // --- Compute (fwd / bwd) ---------------------------------------------------
 

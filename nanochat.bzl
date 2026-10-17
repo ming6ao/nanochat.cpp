@@ -79,6 +79,7 @@ def nanochat_cuda_copts():
 def precision_defines():
     """The #define for the build precision."""
     return select({
+        "//:fp8": ["NANOCHAT_PRECISION_BF16", "NANOCHAT_FP8"],
         "//:bf16": ["NANOCHAT_PRECISION_BF16"],
         "//:fp32": ["NANOCHAT_PRECISION_FP32"],
     })
