@@ -525,213 +525,14 @@ void RunTrainStepTest() {
   std::printf("optim_test: TrainStep wiring ok\n");
 }
 
-// ---------------------------------------------------------------------------
-// 6. ANVIL: rail schedule, selector, update wiring, and the Adam cadence.
-// ---------------------------------------------------------------------------
-
-// The rail beta mirrors modded-nanogpt's `get_rail_beta` (0-based loop
-// counter), so `RailBeta(step)` is evaluated at `it = step - 1`.
-void TestAnvilSchedules() {
-  SchedulerConfig c = MakeSchedulerConfig();
-  c.num_iterations = 1000;
-  c.rail_beta_warmup_steps = 240.0f;
-  c.rail_beta_cooldown_steps = 50.0f;
-  c.rail_beta_min = 0.85f;
-  c.rail_beta_max = 0.93f;
-  const Scheduler scheduler(c);
-  ExpectNear(scheduler.RailBeta(1), 0.85f, 1e-6f, "RailBeta(1)");
-  ExpectNear(scheduler.RailBeta(121), 0.89f, 1e-6f, "RailBeta(121)");
-  ExpectNear(scheduler.RailBeta(241), 0.93f, 1e-6f, "RailBeta(241)");
-  ExpectNear(scheduler.RailBeta(951), 0.93f, 1e-6f, "RailBeta(951)");
-  ExpectNear(scheduler.RailBeta(976), 0.89f, 1e-6f, "RailBeta(976)");
-  ExpectNear(scheduler.RailBeta(1001), 0.85f, 1e-6f, "RailBeta(1001)");
-  std::printf("optim_test: ANVIL rail schedule ok\n");
-}
-
-// The selector is opt-in: matrix parameters report kind 2 under ANVIL and kind
-// 1 under the default Muon, and the ANVIL nominal learning rate carries the
-// sqrt(max(1, rows/cols)) scale.
-void TestAnvilSelector() {
-  const Config config = MakeConfig();
-  std::unique_ptr<Model> model = Model::Create(config);
-  model->InitWeights(0x51e1c701ull);
-  const Scheduler scheduler(MakeSchedulerConfig());
-  const std::vector<ParamView> views = model->params();
-
-  OptimizerConfig oc = MakeOptimizerConfig();
-  oc.matrix_optimizer = 1;
-  std::unique_ptr<Optimizer> anvil =
-      nanochat::CreateOptimizer(model.get(), oc, scheduler);
-  for (const ParamView& view : views) {
-    int kind = -1;
-    int rows = -1;
-    int cols = -1;
-    float lr = 0.0f;
-    if (!nanochat::OptimizerParamGroupForTest(anvil.get(), view.name, &kind,
-                                              &rows, &cols, &lr)) {
-      Fail("ANVIL: unclassified " + std::string(view.name));
-      continue;
-    }
-    if (kind == 0) continue;  // AdamW is unchanged
-    if (kind != 2) {
-      Fail("ANVIL: expected kind 2 for " + std::string(view.name));
-      continue;
-    }
-    const float want =
-        oc.anvil_lr * std::sqrt(std::max(1.0f, static_cast<float>(rows) /
-                                                   static_cast<float>(cols)));
-    ExpectNear(lr, want, 1e-6f, "ANVIL nominal lr " + std::string(view.name));
-  }
-
-  // The default stays Muon (kind 1).
-  oc.matrix_optimizer = 0;
-  std::unique_ptr<Optimizer> muon =
-      nanochat::CreateOptimizer(model.get(), oc, scheduler);
-  for (const ParamView& view : views) {
-    int kind = -1;
-    int rows = -1;
-    int cols = -1;
-    float lr = 0.0f;
-    if (!nanochat::OptimizerParamGroupForTest(muon.get(), view.name, &kind,
-                                              &rows, &cols, &lr)) {
-      continue;
-    }
-    if (kind == 0) continue;
-    if (kind != 1) Fail("Muon: expected kind 1 for " + std::string(view.name));
-  }
-  std::printf("optim_test: ANVIL selector ok\n");
-}
-
-// One ANVIL matrix parameter's reference state, driven one parameter at a time
-// through the kernel exactly as the optimizer drives a stacked group.
-struct AnvilRef {
-  const ParamView* view = nullptr;
-  int rows = 0;
-  int cols = 0;
-  int red_dim = -1;
-  std::vector<float> grad;
-  std::vector<ComputeType> value;
-  std::vector<float> master;
-  std::vector<float> velocity;
-  std::vector<float> lane_energy;
-};
-
-// The optimizer's ANVIL step must match `kernels::AnvilUpdate` driven per
-// parameter, including the rail schedule, the engage step, and the
-// `lr * weight_decay` decay coefficient.
-void TestAnvilSteps() {
-  const Config config = MakeConfig();
-  std::unique_ptr<Model> model = Model::Create(config);
-  model->InitWeights(0xa17e1000ull);
-
-  OptimizerConfig oc = MakeOptimizerConfig();
-  oc.matrix_optimizer = 1;
-  oc.clip = 1e9f;
-  oc.anvil_engage_step = 2;  // exercise both the pre- and post-engage rails
-  const Scheduler scheduler(MakeSchedulerConfig());
-  std::unique_ptr<Optimizer> optimizer =
-      nanochat::CreateOptimizer(model.get(), oc, scheduler);
-
-  const std::vector<ParamView> views = model->params();
-  std::vector<AnvilRef> refs;
-  for (const ParamView& view : views) {
-    int kind = -1;
-    int rows = -1;
-    int cols = -1;
-    float lr = 0.0f;
-    if (!nanochat::OptimizerParamGroupForTest(optimizer.get(), view.name, &kind,
-                                              &rows, &cols, &lr)) {
-      continue;
-    }
-    if (kind != 2) continue;
-    AnvilRef ref;
-    ref.view = &view;
-    ref.rows = rows;
-    ref.cols = cols;
-    ref.red_dim = rows >= cols ? -1 : -2;
-    const std::size_t count = static_cast<std::size_t>(view.count);
-    ref.grad.assign(count, 0.0f);
-    ref.value.resize(count);
-    ref.master.resize(count);
-    for (std::size_t i = 0; i < count; ++i) {
-      ref.value[i] = view.value[i];
-      ref.master[i] = view.master[i];
-    }
-    ref.velocity.assign(2 * count, 0.0f);
-    const int lanes = ref.red_dim == -1 ? rows : cols;
-    ref.lane_energy.assign(static_cast<std::size_t>(lanes), 0.0f);
-    refs.push_back(std::move(ref));
-  }
-  if (refs.empty()) {
-    Fail("ANVIL: no matrix groups were classified");
-    return;
-  }
-
-  Rng rng(0x0a17e5eedull);
-  constexpr float kTolerance = 2e-5f;
-  for (int step = 1; step <= 3; ++step) {
-    for (AnvilRef& ref : refs) {
-      for (std::size_t i = 0; i < ref.grad.size(); ++i) {
-        ref.grad[i] = 0.05f * rng.Uniform();
-      }
-      std::memcpy(ref.view->grad, ref.grad.data(),
-                  ref.grad.size() * sizeof(float));
-    }
-    optimizer->Step(step);
-
-    const float lrm = scheduler.LrMultiplier(step);
-    const float rail_beta = scheduler.RailBeta(step);
-    const bool engaged = (step - 1) >= oc.anvil_engage_step;
-    for (AnvilRef& ref : refs) {
-      nanochat::AnvilParams params;
-      params.num_params = 1;
-      params.rows = ref.rows;
-      params.cols = ref.cols;
-      params.lr = oc.anvil_lr *
-                  std::sqrt(std::max(1.0f, static_cast<float>(ref.rows) /
-                                               static_cast<float>(ref.cols))) *
-                  lrm;
-      params.momentum = rail_beta;
-      params.fast_beta = engaged ? oc.anvil_fast_beta : rail_beta;
-      params.fast_weight = engaged ? oc.anvil_fast_weight : 1.0f;
-      params.slow_beta = oc.anvil_slow_beta;
-      params.beta2 = oc.anvil_beta2;
-      params.weight_decay = oc.anvil_weight_decay * oc.anvil_lr * lrm;
-      params.num_maps = oc.anvil_num_maps;
-      params.red_dim = ref.red_dim;
-      params.nesterov = true;
-      nanochat::kernels::AnvilUpdate(params, ref.grad.data(), ref.master.data(),
-                                     ref.value.data(), ref.velocity.data(),
-                                     ref.lane_energy.data());
-    }
-    for (AnvilRef& ref : refs) {
-      for (std::size_t i = 0; i < ref.master.size(); ++i) {
-        const float got = ref.view->master[i];
-        const float want = ref.master[i];
-        if (std::fabs(got - want) > kTolerance) {
-          Fail(Format("ANVIL %s[%zu] step %d: got %.8g want %.8g",
-                      ref.view->name, i, step, got, want));
-          break;
-        }
-      }
-    }
-  }
-  std::printf("optim_test: ANVIL update wiring ok\n");
-}
-
-// The AdamW cadence: with `adam_step_period` of 2 the AdamW groups update on
-// the 1-based even steps only (the reference's 0-based odd iterations), and the
-// bias correction reads the Adam-update ordinal derived from the 0-based
-// counter, not the global step.
-void TestAdamCadence() {
+// The AdamW wiring: two steps must match a canonical AdamW with bias
+// correction at `t` = 1 and 2, driven through `kernels::AdamWUpdate`.
+void TestAdamWiring() {
   const Config config = MakeConfig();
   std::unique_ptr<Model> model = Model::Create(config);
   model->InitWeights(0xcad4e001ull);
 
   OptimizerConfig oc = MakeOptimizerConfig();
-  oc.matrix_optimizer = 1;
-  oc.adam_step_period = 2;
-  oc.clip = 1e9f;
   const Scheduler scheduler(MakeSchedulerConfig());
   std::unique_ptr<Optimizer> optimizer =
       nanochat::CreateOptimizer(model.get(), oc, scheduler);
@@ -742,7 +543,7 @@ void TestAdamCadence() {
     if (std::string(view.name) == "lm_head.weight") target = &view;
   }
   if (target == nullptr) {
-    Fail("Adam cadence: lm_head.weight is missing");
+    Fail("AdamW wiring: lm_head.weight is missing");
     return;
   }
 
@@ -759,46 +560,11 @@ void TestAdamCadence() {
   std::memcpy(target->grad, grad.data(), count * sizeof(float));
 
   std::vector<float> initial(count);
-  std::vector<float> initial_compute(count);
-  for (std::size_t i = 0; i < count; ++i) {
-    initial[i] = target->master[i];
-    initial_compute[i] =
-        nanochat::ComputeToFloat(nanochat::ComputeFromFloat(initial[i]));
-  }
+  for (std::size_t i = 0; i < count; ++i) initial[i] = target->master[i];
 
   optimizer->Step(1);
-  bool odd_changed = false;
-  for (std::size_t i = 0; i < count; ++i) {
-    if (std::fabs(AsF32(target->value[i]) - initial_compute[i]) > 1e-9f) {
-      odd_changed = true;
-    }
-  }
-  if (odd_changed) Fail("Adam cadence: AdamW ran on an odd step");
-
   optimizer->Step(2);
-  std::vector<float> after_two(count);
-  bool even_changed = false;
-  for (std::size_t i = 0; i < count; ++i) {
-    after_two[i] = AsF32(target->value[i]);
-    if (std::fabs(after_two[i] - initial_compute[i]) > 1e-7f) {
-      even_changed = true;
-    }
-  }
-  if (!even_changed) Fail("Adam cadence: AdamW did not run on an even step");
 
-  optimizer->Step(3);
-  bool odd_again_changed = false;
-  for (std::size_t i = 0; i < count; ++i) {
-    if (std::fabs(AsF32(target->value[i]) - after_two[i]) > 1e-9f) {
-      odd_again_changed = true;
-    }
-  }
-  if (odd_again_changed) Fail("Adam cadence: AdamW ran on an odd step");
-
-  optimizer->Step(4);
-
-  // The two AdamW executions (global steps 2 and 4) must match a canonical
-  // AdamW with `step` 1 and 2, not 1 and 3.
   const float scale = std::sqrt(768.0f / static_cast<float>(config.hidden_dim));
   const float group_lr = oc.unembedding_lr * scale;
   const float beta1 = 0.8f;
@@ -807,9 +573,8 @@ void TestAdamCadence() {
   std::vector<float> want = initial;
   std::vector<float> m(count, 0.0f);
   std::vector<float> v(count, 0.0f);
-  const int global_steps[2] = {2, 4};
   for (int t = 1; t <= 2; ++t) {
-    const float lr = group_lr * scheduler.LrMultiplier(global_steps[t - 1]);
+    const float lr = group_lr * scheduler.LrMultiplier(t);
     const float bias1 = 1.0f - std::pow(beta1, static_cast<float>(t));
     const float bias2 = 1.0f - std::pow(beta2, static_cast<float>(t));
     const float step_size = lr / bias1;
@@ -828,11 +593,11 @@ void TestAdamCadence() {
     const float expected =
         nanochat::ComputeToFloat(nanochat::ComputeFromFloat(want[i]));
     if (std::fabs(got - expected) > 2e-5f) {
-      Fail(Format("Adam cadence[%zu]: got %.8g want %.8g", i, got, expected));
+      Fail(Format("AdamW wiring[%zu]: got %.8g want %.8g", i, got, expected));
       break;
     }
   }
-  std::printf("optim_test: Adam cadence ok\n");
+  std::printf("optim_test: AdamW wiring ok\n");
 }
 
 }  // namespace
@@ -844,10 +609,7 @@ int main() {
   RunStepsTest(0.05f);
   RunZeroGradTest();
   RunTrainStepTest();
-  TestAnvilSchedules();
-  TestAnvilSelector();
-  TestAnvilSteps();
-  TestAdamCadence();
+  TestAdamWiring();
 
   if (g_failures != 0) {
     std::fprintf(stderr, "optim_test: %d check(s) failed\n", g_failures);

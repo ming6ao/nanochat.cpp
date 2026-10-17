@@ -658,21 +658,6 @@ _OPTIMIZER_FIELDS = {
     "muon_momentum_start": 0.85,
     "muon_momentum_peak": 0.97,
     "muon_momentum_final": 0.90,
-    "matrix_optimizer": 0,
-    "adam_step_period": 1,
-    "anvil_lr": 0.023,
-    "anvil_weight_decay": 2.25,
-    "anvil_momentum": 0.95,
-    "anvil_beta2": 0.9,
-    "anvil_fast_beta": 0.85,
-    "anvil_slow_beta": 0.98,
-    "anvil_fast_weight": 0.4385,
-    "anvil_engage_step": 514,
-    "anvil_num_maps": 6,
-    "rail_beta_warmup_steps": 240.0,
-    "rail_beta_cooldown_steps": 50.0,
-    "rail_beta_min": 0.85,
-    "rail_beta_max": 0.93,
 }
 
 

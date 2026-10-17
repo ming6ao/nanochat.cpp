@@ -152,23 +152,6 @@ void ToOptimizerConfig(const nanochat_optim_config& source,
   scheduler->muon_momentum_start = source.muon_momentum_start;
   scheduler->muon_momentum_peak = source.muon_momentum_peak;
   scheduler->muon_momentum_final = source.muon_momentum_final;
-
-  optimizer->matrix_optimizer = source.matrix_optimizer;
-  optimizer->adam_step_period = source.adam_step_period;
-  optimizer->anvil_lr = source.anvil_lr;
-  optimizer->anvil_weight_decay = source.anvil_weight_decay;
-  optimizer->anvil_momentum = source.anvil_momentum;
-  optimizer->anvil_beta2 = source.anvil_beta2;
-  optimizer->anvil_fast_beta = source.anvil_fast_beta;
-  optimizer->anvil_slow_beta = source.anvil_slow_beta;
-  optimizer->anvil_fast_weight = source.anvil_fast_weight;
-  optimizer->anvil_engage_step = source.anvil_engage_step;
-  optimizer->anvil_num_maps = source.anvil_num_maps;
-
-  scheduler->rail_beta_warmup_steps = source.rail_beta_warmup_steps;
-  scheduler->rail_beta_cooldown_steps = source.rail_beta_cooldown_steps;
-  scheduler->rail_beta_min = source.rail_beta_min;
-  scheduler->rail_beta_max = source.rail_beta_max;
 }
 
 // The reverse of `ToOptimizerConfig`: copies a C++ optimizer and schedule into
@@ -196,23 +179,6 @@ void FromOptimizerConfig(const nanochat::OptimizerConfig& optimizer,
   out->muon_momentum_start = scheduler.muon_momentum_start;
   out->muon_momentum_peak = scheduler.muon_momentum_peak;
   out->muon_momentum_final = scheduler.muon_momentum_final;
-
-  out->matrix_optimizer = optimizer.matrix_optimizer;
-  out->adam_step_period = optimizer.adam_step_period;
-  out->anvil_lr = optimizer.anvil_lr;
-  out->anvil_weight_decay = optimizer.anvil_weight_decay;
-  out->anvil_momentum = optimizer.anvil_momentum;
-  out->anvil_beta2 = optimizer.anvil_beta2;
-  out->anvil_fast_beta = optimizer.anvil_fast_beta;
-  out->anvil_slow_beta = optimizer.anvil_slow_beta;
-  out->anvil_fast_weight = optimizer.anvil_fast_weight;
-  out->anvil_engage_step = optimizer.anvil_engage_step;
-  out->anvil_num_maps = optimizer.anvil_num_maps;
-
-  out->rail_beta_warmup_steps = scheduler.rail_beta_warmup_steps;
-  out->rail_beta_cooldown_steps = scheduler.rail_beta_cooldown_steps;
-  out->rail_beta_min = scheduler.rail_beta_min;
-  out->rail_beta_max = scheduler.rail_beta_max;
 }
 
 }  // namespace
@@ -377,6 +343,10 @@ const char* nanochat_backend(void) {
 
 int nanochat_compute_type_size(void) {
   return static_cast<int>(sizeof(nanochat::ComputeType));
+}
+
+size_t nanochat_optim_config_size(void) {
+  return sizeof(nanochat_optim_config);
 }
 
 void nanochat_device_info(nanochat_device* out) {

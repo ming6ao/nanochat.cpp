@@ -206,7 +206,7 @@ void Usage() {
       "   --vocab --padded-vocab --window-pattern --rope-base]\n"
       "  [optimizer flags: --embedding-lr --unembedding-lr --matrix-lr\n"
       "   --scalar-lr --weight-decay --clip --adam-eps --muon-ns-steps\n"
-      "   --muon-beta2 --matrix-optimizer --adam-step-period]\n"
+      "   --muon-beta2]\n"
       "  [schedule flags: --num-iterations --warmup-steps --warmdown-ratio\n"
       "   --final-lr-frac --weight-decay-base --muon-momentum-warmup-steps\n"
       "   --muon-momentum-start --muon-momentum-peak --muon-momentum-final]\n"
@@ -357,12 +357,6 @@ int main(int argc, char** argv) {
     } else if (flag == "--muon-beta2") {
       if (!nanochat::cli::ParseFloat(value, &parsed_float)) parsed_float = 0.0f;
       optimizer_config.muon_beta2 = parsed_float;
-    } else if (flag == "--matrix-optimizer") {
-      optimizer_config.matrix_optimizer =
-          nanochat::cli::ParseInt(value, &parsed_int) ? parsed_int : 0;
-    } else if (flag == "--adam-step-period") {
-      optimizer_config.adam_step_period =
-          nanochat::cli::ParseInt(value, &parsed_int) ? parsed_int : 1;
     } else if (flag == "--num-iterations") {
       scheduler_config.num_iterations =
           nanochat::cli::ParseInt(value, &parsed_int) ? parsed_int : 0;
