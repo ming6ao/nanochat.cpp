@@ -6,9 +6,10 @@ the shared library into the repository, so the Bazel sandbox always has them.
 
 The generated BUILD defines `nccl`. When the library is present it uses a
 `cc_import`, so Bazel treats the shared object as a link input and an rpath
-entry. When NCCL is absent, the CUDA build fails at the `#include <nccl.h>` line
-with a clear error. The CPU build never reaches the target, because the CUDA
-backend selects it away (docs/distributed-plan.md phase 0).
+entry. When NCCL is absent, the rule writes a stub header whose `#error` names
+the fix, so the failure happens at the compile with a clear message instead of a
+confusing analysis error. The CPU build never reaches the target, because the
+CUDA backend selects it away (docs/distributed-plan.md phase 0).
 """
 
 def _nccl_repo_impl(repository_ctx):
@@ -51,8 +52,15 @@ def _nccl_repo_impl(repository_ctx):
                     output = "lib/" + lib_name,
                 )
     else:
-        # Keep the `includes` directory valid when NCCL is absent.
-        repository_ctx.file("include/.keep", "")
+        # No NCCL: a stub header. `glob(["include/*.h"])` then matches it, so the
+        # analysis succeeds, and the `#error` fails the compile with the fix.
+        repository_ctx.file(
+            "include/nccl.h",
+            "#error \"NCCL is not installed. Set NANOCHAT_NCCL_PATH to its " +
+            "prefix, or use the native ring collective: " +
+            "tools/nanochat build --config=cuda --config=native. " +
+            "See docs/distributed-native-plan.md section 7.\"\n",
+        )
 
     lines = [
         'load("@rules_cc//cc:defs.bzl", "cc_import", "cc_library")',

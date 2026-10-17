@@ -67,6 +67,21 @@ die() {
   exit 2
 }
 
+# True when the host has the NCCL headers and library. The CUDA backend's
+# default collective is NCCL; the native ring is the fallback
+# (docs/distributed-native-plan.md section 7). The prefixes match
+# third_party/nccl.bzl.
+have_nccl() {
+  local prefixes=()
+  [[ -n ${NANOCHAT_NCCL_PATH:-} ]] && prefixes+=("$NANOCHAT_NCCL_PATH")
+  prefixes+=(/usr /usr/local /opt/nccl)
+  local prefix
+  for prefix in "${prefixes[@]}"; do
+    [[ -f $prefix/include/nccl.h ]] && return 0
+  done
+  return 1
+}
+
 # Bazel itself does not read .bazelversion; Bazelisk does. Prefer Bazelisk so
 # the version pinned in .bazelversion is honored, and fall back to a system
 # `bazel` otherwise. See docs/build.md.
@@ -183,6 +198,12 @@ case "$command" in
       # A GPU run selects the CUDA backend so the shared workflow (//src:model)
       # links the kernels under test instead of the CPU reference.
       bazel_args+=(--config=cuda)
+      # The bare `--config=cuda` selects the NCCL collective. Fall back to the
+      # native ring when NCCL is absent, so the GPU tests build on a host
+      # without it (docs/distributed-native-plan.md section 7).
+      if ! have_nccl; then
+        bazel_args+=(--config=native)
+      fi
     fi
     if (( gpu )); then
       # Hold the single-GPU lock for the whole suite, and the build lock while
