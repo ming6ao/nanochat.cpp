@@ -33,10 +33,6 @@
 #include "nanochat/fp8.h"
 #include "nanochat/mesh.h"
 
-#if defined(_OPENMP)
-#include <omp.h>
-#endif
-
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
@@ -45,6 +41,11 @@
 #include <cstring>
 #include <limits>
 #include <vector>
+
+// OpenMP is always on for this target: `backends/cpu/BUILD.bazel` puts
+// `-fopenmp` in both `copts` and `linkopts`. The compiler therefore defines
+// `_OPENMP`, and the pragmas below need no guard.
+#include <omp.h>
 
 namespace nanochat {
 namespace kernels {
@@ -81,7 +82,6 @@ inline void ZeroFill(ComputeType* ptr, std::size_t count) {
 // OMP_NUM_THREADS, but a library thread pool reads NANOCHAT_NUM_THREADS. Apply
 // it once, before the first parallel region.
 inline void ConfigureThreads() {
-#if defined(_OPENMP)
   static const bool configured = [] {
     const char* env = std::getenv("NANOCHAT_NUM_THREADS");
     if (env != nullptr) {
@@ -91,7 +91,6 @@ inline void ConfigureThreads() {
     return true;
   }();
   (void)configured;
-#endif
 }
 
 // The GEMM thread count. The kernel reductions depend on the thread order, so a
@@ -101,14 +100,10 @@ inline void ConfigureThreads() {
 // overrides the count for the GEMM alone, which lets such a caller use the CPU
 // budget it was granted.
 inline int GemmThreads() {
-#if defined(_OPENMP)
   const char* env = std::getenv("NANOCHAT_GEMM_THREADS");
   const int parsed = env != nullptr ? std::atoi(env) : 0;
   if (parsed > 0) return parsed;
   return omp_get_max_threads();
-#else
-  return 1;
-#endif
 }
 
 // Polar Express coefficients (num_iters=5), from nanochat/optim.py / the
@@ -399,25 +394,19 @@ void GemmImpl(GemmMode mode, const GemmParams& params, const A* a, const A* b,
     std::vector<float> bpanel(static_cast<std::size_t>(group_stride) *
                               panel_groups);
 
-#if defined(_OPENMP)
 #pragma omp parallel num_threads(GemmThreads())
-#endif
     {
       std::vector<float> apack(static_cast<std::size_t>(kGemmMr) * k);
       for (int jc = 0; jc < n; jc += kGemmNc) {
         const int nc = std::min(kGemmNc, n - jc);
-#if defined(_OPENMP)
 #pragma omp single
-#endif
         {
           PackGemmB(bb, ldb, jc, nc / kGemmNr, k, group_stride, transpose_b,
                     bpanel.data());
         }
         // The `single` construct above has an implicit barrier, so every worker
         // sees the finished panel.
-#if defined(_OPENMP)
 #pragma omp for schedule(static)
-#endif
         for (int ic = 0; ic < m; ic += kGemmMr) {
           const int mr = std::min(kGemmMr, m - ic);
           if (mr == kGemmMr) {
@@ -781,18 +770,14 @@ void AttentionForward(const AttentionParams& params, const ComputeType* q,
                           : 1.0f / std::sqrt(static_cast<float>(dim));
   const std::int64_t total_rows =
       static_cast<std::int64_t>(batch) * heads * seq;
-#if defined(_OPENMP)
 #pragma omp parallel
-#endif
   {
     std::vector<float> acc(dim);
     // Cache the scaled score of every allowed key. The softmax pass then reads
     // the cached value instead of recomputing the query-key dot product. Each
     // score is the same float the shipped code compares and exponentiates.
     std::vector<float> scores(kv_len);
-#if defined(_OPENMP)
 #pragma omp for schedule(guided)
-#endif
     for (std::int64_t row = 0; row < total_rows; ++row) {
       const int t = static_cast<int>(row % seq);
       const int h = static_cast<int>((row / seq) % heads);
@@ -888,14 +873,10 @@ void AttentionBackward(const AttentionParams& params, const ComputeType* q,
   std::vector<float> probs(red_size, 0.0f);
   std::vector<float> ds(red_size, 0.0f);
 
-#if defined(_OPENMP)
 #pragma omp parallel
-#endif
   {
     std::vector<float> dp(kv_len);
-#if defined(_OPENMP)
 #pragma omp for schedule(guided)
-#endif
     for (std::int64_t row = 0; row < total_rows; ++row) {
       const int t = static_cast<int>(row % seq);
       const int h = static_cast<int>((row / seq) % heads);
@@ -957,9 +938,7 @@ void AttentionBackward(const AttentionParams& params, const ComputeType* q,
   const int group = (kv_heads > 0 && kv_heads < heads) ? heads / kv_heads : 1;
   const std::int64_t total_keys =
       static_cast<std::int64_t>(batch) * kv_heads * kv_len;
-#if defined(_OPENMP)
 #pragma omp parallel for schedule(guided)
-#endif
   for (std::int64_t key = 0; key < total_keys; ++key) {
     const int j = static_cast<int>(key % kv_len);
     const int kvh = static_cast<int>((key / kv_len) % kv_heads);
@@ -1086,16 +1065,12 @@ void ClassifierForward(const ClassifierParams& params,
       params.padded_vocab_size > 0 ? params.padded_vocab_size : vocab;
   if (rows <= 0 || vocab <= 0) return;
   const float cap = params.softcap;
-#if defined(_OPENMP)
 #pragma omp parallel
-#endif
   {
     // The softcap is computed once per element, then the max and the sum walk
     // the cached values. The arithmetic is the shipped arithmetic.
     std::vector<float> z(vocab);
-#if defined(_OPENMP)
 #pragma omp for schedule(static)
-#endif
     for (int r = 0; r < rows; ++r) {
       const int target = targets[r];
       if (target == params.ignore_index) {
@@ -1134,9 +1109,7 @@ void ClassifierBackward(const ClassifierParams& params,
   // Optional per-row weights (docs/post-training.md section 2.2). A null
   // pointer keeps the unweighted arithmetic exactly as it was.
   const float* row_scale = params.row_scale;
-#if defined(_OPENMP)
 #pragma omp parallel
-#endif
   {
     // `probs` holds the softcapped logit and `sech2` holds 1 - tanh^2, so each
     // element needs one tanh. The two exponentials of the shipped code stay
@@ -1144,9 +1117,7 @@ void ClassifierBackward(const ClassifierParams& params,
     // float overload, exactly as the shipped code does.
     std::vector<float> probs(vocab);
     std::vector<float> sech2(vocab);
-#if defined(_OPENMP)
 #pragma omp for schedule(static)
-#endif
     for (int r = 0; r < rows; ++r) {
       const std::int64_t base = static_cast<std::int64_t>(r) * padded;
       const int target = targets[r];
@@ -1314,9 +1285,7 @@ void MuonUpdate(const MuonParams& params, const float* stacked_grads,
 
     // Nesterov momentum: update the first moment, then the accelerated
     // gradient.
-#if defined(_OPENMP)
 #pragma omp parallel for schedule(static)
-#endif
     for (std::size_t i = 0; i < mat; ++i) {
       const float gr = grad[i] * params.grad_scale;
       momentum_buf[i] =
@@ -1329,17 +1298,13 @@ void MuonUpdate(const MuonParams& params, const float* stacked_grads,
     // MuonEq row equilibration: rescale each row to the mean row norm.
     {
       double frob_sq = 0.0;
-#if defined(_OPENMP)
 #pragma omp parallel for schedule(static) reduction(+ : frob_sq)
-#endif
       for (std::size_t i = 0; i < mat; ++i) {
         frob_sq += static_cast<double>(x[i]) * x[i];
       }
       const float target = static_cast<float>(std::sqrt(frob_sq)) /
                            std::sqrt(static_cast<float>(rows));
-#if defined(_OPENMP)
 #pragma omp parallel for schedule(static)
-#endif
       for (int r = 0; r < rows; ++r) {
         double row_sq = 0.0;
         for (int c = 0; c < cols; ++c) {
@@ -1358,16 +1323,12 @@ void MuonUpdate(const MuonParams& params, const float* stacked_grads,
     // Normalise the Frobenius norm before the polar iterations.
     {
       double frob_sq = 0.0;
-#if defined(_OPENMP)
 #pragma omp parallel for schedule(static) reduction(+ : frob_sq)
-#endif
       for (std::size_t i = 0; i < mat; ++i) {
         frob_sq += static_cast<double>(x[i]) * x[i];
       }
       const float div = static_cast<float>(std::sqrt(frob_sq)) * 1.01f + 1e-6f;
-#if defined(_OPENMP)
 #pragma omp parallel for schedule(static)
-#endif
       for (std::size_t i = 0; i < mat; ++i) x[i] /= div;
     }
 
@@ -1412,9 +1373,7 @@ void MuonUpdate(const MuonParams& params, const float* stacked_grads,
     // Muon+ renormalisation: snap the Frobenius norm to sqrt(min(rows, cols)).
     {
       double frob_sq = 0.0;
-#if defined(_OPENMP)
 #pragma omp parallel for schedule(static) reduction(+ : frob_sq)
-#endif
       for (std::size_t i = 0; i < mat; ++i) {
         frob_sq += static_cast<double>(x[i]) * x[i];
       }
@@ -1422,9 +1381,7 @@ void MuonUpdate(const MuonParams& params, const float* stacked_grads,
           std::sqrt(static_cast<float>(std::min(rows, cols)));
       const float scale =
           target_norm / std::max(static_cast<float>(std::sqrt(frob_sq)), 1e-6f);
-#if defined(_OPENMP)
 #pragma omp parallel for schedule(static)
-#endif
       for (std::size_t i = 0; i < mat; ++i) x[i] *= scale;
     }
 
@@ -1433,9 +1390,7 @@ void MuonUpdate(const MuonParams& params, const float* stacked_grads,
       const std::size_t red_size = static_cast<std::size_t>(cols);
       std::vector<float> v_mean(rows, 0.0f);
       double sum_vmean = 0.0;
-#if defined(_OPENMP)
 #pragma omp parallel for schedule(static) reduction(+ : sum_vmean)
-#endif
       for (int r = 0; r < rows; ++r) {
         double s = 0.0;
         for (int c = 0; c < cols; ++c) {
@@ -1448,18 +1403,14 @@ void MuonUpdate(const MuonParams& params, const float* stacked_grads,
       const float v_norm = std::sqrt(static_cast<float>(sum_vmean) *
                                      static_cast<float>(red_size));
       std::vector<float> step_size(rows, 0.0f);
-#if defined(_OPENMP)
 #pragma omp parallel for schedule(static)
-#endif
       for (int r = 0; r < rows; ++r) {
         second_buf[r] =
             second_buf[r] + (1.0f - params.beta2) * (v_mean[r] - second_buf[r]);
         step_size[r] = 1.0f / std::sqrt(std::max(second_buf[r], 1e-10f));
       }
       double sum_scaled = 0.0;
-#if defined(_OPENMP)
 #pragma omp parallel for schedule(static) reduction(+ : sum_scaled)
-#endif
       for (int r = 0; r < rows; ++r) {
         sum_scaled +=
             static_cast<double>(v_mean[r] * static_cast<float>(red_size)) *
@@ -1467,9 +1418,7 @@ void MuonUpdate(const MuonParams& params, const float* stacked_grads,
       }
       const float v_norm_new = std::sqrt(static_cast<float>(sum_scaled));
       const float denom = std::max(v_norm_new, 1e-10f);
-#if defined(_OPENMP)
 #pragma omp parallel for schedule(static)
-#endif
       for (int r = 0; r < rows; ++r) {
         const float final_scale = step_size[r] * (v_norm / denom);
         for (int c = 0; c < cols; ++c) {
@@ -1480,9 +1429,7 @@ void MuonUpdate(const MuonParams& params, const float* stacked_grads,
       const std::size_t red_size = static_cast<std::size_t>(rows);
       std::vector<float> v_mean(cols, 0.0f);
       double sum_vmean = 0.0;
-#if defined(_OPENMP)
 #pragma omp parallel for schedule(static) reduction(+ : sum_vmean)
-#endif
       for (int c = 0; c < cols; ++c) {
         double s = 0.0;
         for (int r = 0; r < rows; ++r) {
@@ -1495,18 +1442,14 @@ void MuonUpdate(const MuonParams& params, const float* stacked_grads,
       const float v_norm = std::sqrt(static_cast<float>(sum_vmean) *
                                      static_cast<float>(red_size));
       std::vector<float> step_size(cols, 0.0f);
-#if defined(_OPENMP)
 #pragma omp parallel for schedule(static)
-#endif
       for (int c = 0; c < cols; ++c) {
         second_buf[c] =
             second_buf[c] + (1.0f - params.beta2) * (v_mean[c] - second_buf[c]);
         step_size[c] = 1.0f / std::sqrt(std::max(second_buf[c], 1e-10f));
       }
       double sum_scaled = 0.0;
-#if defined(_OPENMP)
 #pragma omp parallel for schedule(static) reduction(+ : sum_scaled)
-#endif
       for (int c = 0; c < cols; ++c) {
         sum_scaled +=
             static_cast<double>(v_mean[c] * static_cast<float>(red_size)) *
@@ -1514,9 +1457,7 @@ void MuonUpdate(const MuonParams& params, const float* stacked_grads,
       }
       const float v_norm_new = std::sqrt(static_cast<float>(sum_scaled));
       const float denom = std::max(v_norm_new, 1e-10f);
-#if defined(_OPENMP)
 #pragma omp parallel for schedule(static)
-#endif
       for (int r = 0; r < rows; ++r) {
         for (int c = 0; c < cols; ++c) {
           x[static_cast<std::size_t>(r) * cols + c] *=
@@ -1527,9 +1468,7 @@ void MuonUpdate(const MuonParams& params, const float* stacked_grads,
 
     // Cautious weight decay + parameter update, accumulated in the fp32
     // master and mirrored into the compute copy.
-#if defined(_OPENMP)
 #pragma omp parallel for schedule(static)
-#endif
     for (std::size_t i = 0; i < mat; ++i) {
       const float pv = master[i];
       const float gv = x[i];
@@ -1666,3 +1605,4 @@ void SelectDevice(int /*index*/) {
 }
 
 }  // namespace nanochat
+
