@@ -78,32 +78,35 @@ inline void ZeroFill(ComputeType* ptr, std::size_t count) {
   std::fill(ptr, ptr + count, ToCompute(0.0f));
 }
 
+// The thread count in environment variable `name`. Return `fallback` when the
+// variable is unset, empty, or not positive.
+inline int ThreadsFromEnv(const char* name, int fallback) {
+  const char* env = std::getenv(name);
+  if (env == nullptr) return fallback;
+  const int parsed = std::atoi(env);
+  return parsed > 0 ? parsed : fallback;
+}
+
 // Honour the NANOCHAT_NUM_THREADS contract. The sandbox sets it together with
 // OMP_NUM_THREADS, but a library thread pool reads NANOCHAT_NUM_THREADS. Apply
 // it once, before the first parallel region.
 inline void ConfigureThreads() {
   static const bool configured = [] {
-    const char* env = std::getenv("NANOCHAT_NUM_THREADS");
-    if (env != nullptr) {
-      const int n = std::atoi(env);
-      if (n > 0) omp_set_num_threads(n);
-    }
+    omp_set_num_threads(
+        ThreadsFromEnv("NANOCHAT_NUM_THREADS", omp_get_max_threads()));
     return true;
   }();
   (void)configured;
 }
 
 // The GEMM thread count. The kernel reductions depend on the thread order, so a
-// caller that needs a stable golden pins `NANOHAT_NUM_THREADS` to one. The GEMM
+// caller that needs a stable golden pins NANOCHAT_NUM_THREADS to one. The GEMM
 // does not need that: every output is one accumulator over a fixed reduction
-// order, so any thread count gives the same bytes. `NANOHAT_GEMM_THREADS`
+// order, so any thread count gives the same bytes. NANOCHAT_GEMM_THREADS
 // overrides the count for the GEMM alone, which lets such a caller use the CPU
 // budget it was granted.
 inline int GemmThreads() {
-  const char* env = std::getenv("NANOCHAT_GEMM_THREADS");
-  const int parsed = env != nullptr ? std::atoi(env) : 0;
-  if (parsed > 0) return parsed;
-  return omp_get_max_threads();
+  return ThreadsFromEnv("NANOCHAT_GEMM_THREADS", omp_get_max_threads());
 }
 
 // Polar Express coefficients (num_iters=5), from nanochat/optim.py / the
@@ -389,29 +392,24 @@ void GemmImpl(GemmMode mode, const GemmParams& params, const A* a, const A* b,
     const A* bb = b + bi * stride_b;
     T* cb = c + bi * stride_c;
 
-    // The packed `b` panel is shared by every worker and rewritten for each
-    // column block. The packed `a` block is private to a worker.
+    // One packed `b` panel per column block. The workers only read it, and it
+    // is rebuilt between the parallel regions, so no barrier is necessary. The
+    // packed `a` block is private to a worker.
     std::vector<float> bpanel(static_cast<std::size_t>(group_stride) *
                               panel_groups);
-
+    for (int jc = 0; jc < n; jc += kGemmNc) {
+      const int nc = std::min(kGemmNc, n - jc);
+      const int groups = nc / kGemmNr;
+      PackGemmB(bb, ldb, jc, groups, k, group_stride, transpose_b,
+                bpanel.data());
 #pragma omp parallel num_threads(GemmThreads())
-    {
-      std::vector<float> apack(static_cast<std::size_t>(kGemmMr) * k);
-      for (int jc = 0; jc < n; jc += kGemmNc) {
-        const int nc = std::min(kGemmNc, n - jc);
-#pragma omp single
-        {
-          PackGemmB(bb, ldb, jc, nc / kGemmNr, k, group_stride, transpose_b,
-                    bpanel.data());
-        }
-        // The `single` construct above has an implicit barrier, so every worker
-        // sees the finished panel.
+      {
+        std::vector<float> apack(static_cast<std::size_t>(kGemmMr) * k);
 #pragma omp for schedule(static)
         for (int ic = 0; ic < m; ic += kGemmMr) {
           const int mr = std::min(kGemmMr, m - ic);
           if (mr == kGemmMr) {
             PackGemmA(ab, lda, ic, mr, k, transpose_a, apack.data());
-            const int groups = nc / kGemmNr;
             for (int g = 0; g < groups; ++g) {
               double acc[kGemmMr][kGemmNr] = {};
               const float* bp =
@@ -1266,6 +1264,15 @@ void MuonUpdate(const MuonParams& params, const float* stacked_grads,
       params.red_dim == -1 || (params.red_dim != -2 && rows >= cols);
   const bool tall = rows > cols;
 
+  // The variance reduction runs along the rows or the columns. Call that axis
+  // "lines" and the other axis "k": a line is one row when `reduce_cols` is
+  // true, and one column otherwise. `line_stride` and `k_stride` address
+  // element (line, k) of the row-major matrix without a branch in the loop.
+  const int lines = reduce_cols ? rows : cols;
+  const int line_len = reduce_cols ? cols : rows;
+  const int line_stride = reduce_cols ? cols : 1;
+  const int k_stride = reduce_cols ? 1 : cols;
+
   const int k_extent = std::min(rows, cols);
   std::vector<float> x(mat, 0.0f);
   std::vector<float> a_mat(static_cast<std::size_t>(k_extent) * k_extent, 0.0f);
@@ -1283,63 +1290,50 @@ void MuonUpdate(const MuonParams& params, const float* stacked_grads,
     float* second_buf =
         buf2 + static_cast<std::size_t>(m) * (reduce_cols ? rows : cols);
 
-    // The step forks two teams: one for the loops before the polar iteration
-    // and one for the loops after it. The polar loop stays outside both.
-    // `MuonMatmul` starts its own team, and a region around it would make the
-    // GEMM run on one thread. The two regions cut twelve forks to two.
-    //
-    // Each reduction needs its own slot: the runtime adds the combined total to
-    // the value that the slot holds on entry. Every scalar derived from a slot
-    // is computed once per thread from the same total, so all threads hold the
-    // same bits.
-    double frob_eq = 0.0;
-    double frob_pre = 0.0;
-#pragma omp parallel
-    {
-      // Nesterov momentum: update the first moment, then the accelerated
-      // gradient.
-#pragma omp for schedule(static)
-      for (std::size_t i = 0; i < mat; ++i) {
-        const float gr = grad[i] * params.grad_scale;
-        momentum_buf[i] =
-            momentum_buf[i] + (1.0f - params.momentum) * (gr - momentum_buf[i]);
-        x[i] = params.nesterov ? (1.0f - params.momentum) * gr +
-                                     params.momentum * momentum_buf[i]
-                               : momentum_buf[i];
-      }
-
-      // MuonEq row equilibration: rescale each row to the mean row norm.
-#pragma omp for schedule(static) reduction(+ : frob_eq)
-      for (std::size_t i = 0; i < mat; ++i) {
-        frob_eq += static_cast<double>(x[i]) * x[i];
-      }
-      const float target = static_cast<float>(std::sqrt(frob_eq)) /
-                           std::sqrt(static_cast<float>(rows));
-#pragma omp for schedule(static)
-      for (int r = 0; r < rows; ++r) {
-        double row_sq = 0.0;
-        for (int c = 0; c < cols; ++c) {
-          const float xv = x[static_cast<std::size_t>(r) * cols + c];
-          row_sq += static_cast<double>(xv) * xv;
-        }
-        const float row_norm =
-            std::max(static_cast<float>(std::sqrt(row_sq)), 1e-6f);
-        const float s = target / row_norm;
-        for (int c = 0; c < cols; ++c) {
-          x[static_cast<std::size_t>(r) * cols + c] *= s;
-        }
-      }
-
-      // Normalise the Frobenius norm before the polar iterations.
-#pragma omp for schedule(static) reduction(+ : frob_pre)
-      for (std::size_t i = 0; i < mat; ++i) {
-        frob_pre += static_cast<double>(x[i]) * x[i];
-      }
-      const float frob_norm = static_cast<float>(std::sqrt(frob_pre));
-      const float div = frob_norm * 1.01f + 1e-6f;
-#pragma omp for schedule(static)
-      for (std::size_t i = 0; i < mat; ++i) x[i] /= div;
+    // Nesterov momentum: update the first moment, then the accelerated
+    // gradient.
+#pragma omp parallel for schedule(static)
+    for (std::size_t i = 0; i < mat; ++i) {
+      const float gr = grad[i] * params.grad_scale;
+      momentum_buf[i] =
+          momentum_buf[i] + (1.0f - params.momentum) * (gr - momentum_buf[i]);
+      x[i] = params.nesterov ? (1.0f - params.momentum) * gr +
+                                   params.momentum * momentum_buf[i]
+                             : momentum_buf[i];
     }
+
+    // MuonEq row equilibration: rescale each row to the mean row norm.
+    double frob_eq = 0.0;
+#pragma omp parallel for schedule(static) reduction(+ : frob_eq)
+    for (std::size_t i = 0; i < mat; ++i) {
+      frob_eq += static_cast<double>(x[i]) * x[i];
+    }
+    const float target = static_cast<float>(std::sqrt(frob_eq)) /
+                         std::sqrt(static_cast<float>(rows));
+#pragma omp parallel for schedule(static)
+    for (int r = 0; r < rows; ++r) {
+      double row_sq = 0.0;
+      for (int c = 0; c < cols; ++c) {
+        const float xv = x[static_cast<std::size_t>(r) * cols + c];
+        row_sq += static_cast<double>(xv) * xv;
+      }
+      const float row_norm =
+          std::max(static_cast<float>(std::sqrt(row_sq)), 1e-6f);
+      const float s = target / row_norm;
+      for (int c = 0; c < cols; ++c) {
+        x[static_cast<std::size_t>(r) * cols + c] *= s;
+      }
+    }
+
+    // Normalise the Frobenius norm before the polar iterations.
+    double frob_pre = 0.0;
+#pragma omp parallel for schedule(static) reduction(+ : frob_pre)
+    for (std::size_t i = 0; i < mat; ++i) {
+      frob_pre += static_cast<double>(x[i]) * x[i];
+    }
+    const float div = static_cast<float>(std::sqrt(frob_pre)) * 1.01f + 1e-6f;
+#pragma omp parallel for schedule(static)
+    for (std::size_t i = 0; i < mat; ++i) x[i] /= div;
 
     // Polar Express orthogonalisation.
     for (int it = 0; it < ns_steps; ++it) {
@@ -1379,115 +1373,77 @@ void MuonUpdate(const MuonParams& params, const float* stacked_grads,
       }
     }
 
-    // The second team covers the loops after the polar iteration. None of them
-    // calls the GEMM, so one region holds all of them.
-    const std::size_t red_len =
-        static_cast<std::size_t>(reduce_cols ? rows : cols);
-    std::vector<float> v_mean(red_len, 0.0f);
-    std::vector<float> step_size(red_len, 0.0f);
+    // Muon+ renormalisation: snap the norm to sqrt(min(rows, cols)).
     double frob_post = 0.0;
+#pragma omp parallel for schedule(static) reduction(+ : frob_post)
+    for (std::size_t i = 0; i < mat; ++i) {
+      frob_post += static_cast<double>(x[i]) * x[i];
+    }
+    const float target_norm =
+        std::sqrt(static_cast<float>(std::min(rows, cols)));
+    const float frob_norm = static_cast<float>(std::sqrt(frob_post));
+    const float scale = target_norm / std::max(frob_norm, 1e-6f);
+#pragma omp parallel for schedule(static)
+    for (std::size_t i = 0; i < mat; ++i) x[i] *= scale;
+
+    // NorMuon variance reduction with a factored second moment along one axis.
+    std::vector<float> v_mean(lines, 0.0f);
+    std::vector<float> step_size(lines, 0.0f);
     double sum_vmean = 0.0;
+#pragma omp parallel for schedule(static) reduction(+ : sum_vmean)
+    for (int line = 0; line < lines; ++line) {
+      double s = 0.0;
+      for (int k = 0; k < line_len; ++k) {
+        const float xv = x[static_cast<std::size_t>(line) * line_stride +
+                           static_cast<std::size_t>(k) * k_stride];
+        s += static_cast<double>(xv) * xv;
+      }
+      v_mean[line] = static_cast<float>(s / line_len);
+      sum_vmean += v_mean[line];
+    }
+    const float v_norm =
+        std::sqrt(static_cast<float>(sum_vmean) * static_cast<float>(line_len));
+#pragma omp parallel for schedule(static)
+    for (int line = 0; line < lines; ++line) {
+      second_buf[line] =
+          second_buf[line] +
+          (1.0f - params.beta2) * (v_mean[line] - second_buf[line]);
+      step_size[line] = 1.0f / std::sqrt(std::max(second_buf[line], 1e-10f));
+    }
     double sum_scaled = 0.0;
-#pragma omp parallel
-    {
-      // Muon+ renormalisation: snap the norm to sqrt(min(rows, cols)).
-#pragma omp for schedule(static) reduction(+ : frob_post)
-      for (std::size_t i = 0; i < mat; ++i) {
-        frob_post += static_cast<double>(x[i]) * x[i];
+#pragma omp parallel for schedule(static) reduction(+ : sum_scaled)
+    for (int line = 0; line < lines; ++line) {
+      sum_scaled +=
+          static_cast<double>(v_mean[line] * static_cast<float>(line_len)) *
+          step_size[line] * step_size[line];
+    }
+    const float denom =
+        std::max(static_cast<float>(std::sqrt(sum_scaled)), 1e-10f);
+    // Fold the global renormalisation into the per-line step size, then scale
+    // the whole matrix along the reduction axis.
+    const float v_scale = v_norm / denom;
+#pragma omp parallel for schedule(static)
+    for (int line = 0; line < lines; ++line) step_size[line] *= v_scale;
+#pragma omp parallel for schedule(static)
+    for (int line = 0; line < lines; ++line) {
+      const float s = step_size[line];
+      for (int k = 0; k < line_len; ++k) {
+        x[static_cast<std::size_t>(line) * line_stride +
+          static_cast<std::size_t>(k) * k_stride] *= s;
       }
-      const float target_norm =
-          std::sqrt(static_cast<float>(std::min(rows, cols)));
-      const float frob_norm = static_cast<float>(std::sqrt(frob_post));
-      const float scale = target_norm / std::max(frob_norm, 1e-6f);
-#pragma omp for schedule(static)
-      for (std::size_t i = 0; i < mat; ++i) x[i] *= scale;
+    }
 
-      // NorMuon variance reduction with a factored second moment. The branch
-      // condition is shared, so every thread runs the same number of loops.
-      if (reduce_cols) {
-        const std::size_t red_size = static_cast<std::size_t>(cols);
-#pragma omp for schedule(static) reduction(+ : sum_vmean)
-        for (int r = 0; r < rows; ++r) {
-          double s = 0.0;
-          for (int c = 0; c < cols; ++c) {
-            const float xv = x[static_cast<std::size_t>(r) * cols + c];
-            s += static_cast<double>(xv) * xv;
-          }
-          v_mean[r] = static_cast<float>(s / red_size);
-          sum_vmean += v_mean[r];
-        }
-        const float v_norm = std::sqrt(static_cast<float>(sum_vmean) *
-                                       static_cast<float>(red_size));
-#pragma omp for schedule(static)
-        for (int r = 0; r < rows; ++r) {
-          second_buf[r] = second_buf[r] +
-                          (1.0f - params.beta2) * (v_mean[r] - second_buf[r]);
-          step_size[r] = 1.0f / std::sqrt(std::max(second_buf[r], 1e-10f));
-        }
-#pragma omp for schedule(static) reduction(+ : sum_scaled)
-        for (int r = 0; r < rows; ++r) {
-          sum_scaled +=
-              static_cast<double>(v_mean[r] * static_cast<float>(red_size)) *
-              step_size[r] * step_size[r];
-        }
-        const float v_norm_new = std::sqrt(static_cast<float>(sum_scaled));
-        const float denom = std::max(v_norm_new, 1e-10f);
-#pragma omp for schedule(static)
-        for (int r = 0; r < rows; ++r) {
-          const float final_scale = step_size[r] * (v_norm / denom);
-          for (int c = 0; c < cols; ++c) {
-            x[static_cast<std::size_t>(r) * cols + c] *= final_scale;
-          }
-        }
-      } else {
-        const std::size_t red_size = static_cast<std::size_t>(rows);
-#pragma omp for schedule(static) reduction(+ : sum_vmean)
-        for (int c = 0; c < cols; ++c) {
-          double s = 0.0;
-          for (int r = 0; r < rows; ++r) {
-            const float xv = x[static_cast<std::size_t>(r) * cols + c];
-            s += static_cast<double>(xv) * xv;
-          }
-          v_mean[c] = static_cast<float>(s / red_size);
-          sum_vmean += v_mean[c];
-        }
-        const float v_norm = std::sqrt(static_cast<float>(sum_vmean) *
-                                       static_cast<float>(red_size));
-#pragma omp for schedule(static)
-        for (int c = 0; c < cols; ++c) {
-          second_buf[c] = second_buf[c] +
-                          (1.0f - params.beta2) * (v_mean[c] - second_buf[c]);
-          step_size[c] = 1.0f / std::sqrt(std::max(second_buf[c], 1e-10f));
-        }
-#pragma omp for schedule(static) reduction(+ : sum_scaled)
-        for (int c = 0; c < cols; ++c) {
-          sum_scaled +=
-              static_cast<double>(v_mean[c] * static_cast<float>(red_size)) *
-              step_size[c] * step_size[c];
-        }
-        const float v_norm_new = std::sqrt(static_cast<float>(sum_scaled));
-        const float denom = std::max(v_norm_new, 1e-10f);
-#pragma omp for schedule(static)
-        for (int r = 0; r < rows; ++r) {
-          for (int c = 0; c < cols; ++c) {
-            x[static_cast<std::size_t>(r) * cols + c] *=
-                step_size[c] * (v_norm / denom);
-          }
-        }
-      }
-
-      // Cautious weight decay + parameter update, accumulated in the fp32
-      // master and mirrored into the compute copy.
-#pragma omp for schedule(static)
-      for (std::size_t i = 0; i < mat; ++i) {
-        const float pv = master[i];
-        const float gv = x[i];
-        const float decay =
-            (gv * pv >= 0.0f) ? params.lr * params.weight_decay * pv : 0.0f;
-        const float pi = pv - params.lr * gv - decay;
-        master[i] = pi;
-        value[i] = ToCompute(pi);
-      }
+    // Cautious weight decay + parameter update, accumulated in the fp32 master
+    // and mirrored into the compute copy.
+#pragma omp parallel for schedule(static)
+    for (std::size_t i = 0; i < mat; ++i) {
+      const float pv = master[i];
+      const float gv = x[i];
+      const float decay =
+          (gv * pv >= 0.0f) ? params.lr * params.weight_decay * pv : 0.0f;
+      const float pi = pv - params.lr * gv - decay;
+      master[i] = pi;
+      value[i] = ToCompute(pi);
     }
   }
 }
