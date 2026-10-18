@@ -104,7 +104,7 @@ The `none` backend does this:
 
 - Set `NANOCHAT_SANDBOX=off`.
 - Do not start a scope.
-- Do not apply `taskset` or `prlimit`.
+- Do not apply `taskset`.
 - Do not install the aggregate slice.
 - Log one line to `/tmp/nanochat-sandbox.log`.
 - Exec the command.
@@ -122,7 +122,7 @@ This is a small behavior change. A reader must not treat `off` as an error.
 
 ### 4.5 The verify step
 
-`verify.sh` reads the limits back from the process cgroup. The `none` backend
+the verifier reads the limits back from the process cgroup. The `none` backend
 skips this step. A host without cgroups cannot verify them. On Kaggle the
 container is the boundary.
 
@@ -146,7 +146,7 @@ value, `libcuda` is unresolvable and `cudaMalloc` fails with
 
 A test action does not inherit the worker's shell, so `CUDA_VISIBLE_DEVICES`
 never reaches it on its own. The worker exports `NANOCHAT_GPU_DEVICES` for the
-job, and the test wrapper (`tools/sandbox.sh`) sets `CUDA_VISIBLE_DEVICES` from
+job, and the test wrapper (`python/nanochat_cpp/sandbox.py`) sets `CUDA_VISIBLE_DEVICES` from
 it. Without that step a GPU job runs on the default device even when the worker
 owned a different one.
 

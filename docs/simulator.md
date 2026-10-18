@@ -486,7 +486,7 @@ The command does this:
    absolute `.so` path, and runs the preload test with
    `--test_env=LD_PRELOAD=<abs .so>` and
    `--test_env=NANOCHAT_SIM_LOG=<abs temp>`. It also runs
-   `tools/cuda_sim/check_symbols.sh` against the mock, against a real
+   `tools/cuda_sim/check_symbols.py` against the mock, against a real
    CUDA-linked binary (`//backends/cuda:cuda_runtime_gpu_test`), and with
    `--negative-self-test`, which rejects a missing symbol.
 5. Passes `--test_env=NANOCHAT_SIM_PROFILE=<name>`.
@@ -514,7 +514,7 @@ the Architect / Integrator row.
 | Reference-engine suite wiring | `tools/nanochat` | Architect |
 | Interposer library | `tools/cuda_sim/` | Simulator |
 | Version script | `tools/cuda_sim/cuda_sim.map` | Simulator |
-| Symbol gate | `tools/cuda_sim/check_symbols.sh` | Simulator |
+| Symbol gate | `tools/cuda_sim/check_symbols.py` | Simulator |
 | Binding canary | `tools/cuda_sim/` | Simulator |
 | Collective mock and coordinator | `tools/cuda_sim/collective/` | Simulator |
 | Device profile header | `include/nanochat/device_profile.h` | Architect |

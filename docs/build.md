@@ -48,10 +48,8 @@ nanochat.cpp/
     BUILD.bazel
   tests/oracle_test.cc  tests/data/debug_state.bin
   tools/
-    nanochat                   # the single execution entry point (a shim)
-    sandbox.sh                 # the sandboxed launcher
-    sandbox/profiles.conf      # per-profile cgroup budgets
-    sandbox/verify.sh          # read-back check of the applied limits
+    nanochat                   # the single execution entry point
+    sandbox/profiles.json      # per-profile cgroup budgets
     sandbox/nanochat.slice     # aggregate user-slice budget (drop-in)
     sandbox/README.md
     dump_fixtures.py           # the offline fixture generator

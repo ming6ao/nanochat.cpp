@@ -143,15 +143,47 @@ py_test(
     data = [
         "//tools:fixtures",
         "//tools:nanochat",
-        "//tools:sandbox_scripts",
+        "//tools:sandbox_data",
     ],
     deps = [":nanochat_cpp"],
     size = "small",
 )
 
+# T0: the resource sandbox launcher and the limit verifier. The launcher runs
+# as `--run_under` for every CPU test action, so this suite covers the trust
+# path. Hermetic and CPU-only: it reads the profile table and runs the `none`
+# backend. See docs/sandbox.md and docs/python-sandbox-plan.md.
+py_test(
+    name = "sandbox_test",
+    srcs = ["tests/sandbox_test.py"],
+    deps = [":nanochat_cpp"],
+    size = "small",
+)
+
+# T0: the style gate. Hermetic and CPU-only: a fake `clang-format` on PATH and
+# one file per violation. See docs/testing.md and
+# docs/python-sandbox-plan.md.
+py_test(
+    name = "lint_test",
+    srcs = ["tests/lint_test.py"],
+    deps = [":nanochat_cpp"],
+    size = "small",
+)
+
+# T0: the symbol gate for the S0 API interposer. Hermetic and CPU-only: fake
+# `nm` and `readelf` on PATH feed it canned output. The real mock is checked by
+# `tools/nanochat simulate --suite api`. See docs/simulator.md and
+# docs/python-sandbox-plan.md.
+py_test(
+    name = "cuda_sim_symbols_test",
+    srcs = ["tests/cuda_sim_symbols_test.py"],
+    data = ["//tools/cuda_sim:check_symbols.py"],
+    size = "small",
+)
+
 # T0: the GPU job queue store, worker, and state machine. Hermetic and
 # CPU-only: a temporary queue directory, a fake `nvidia-smi`, and a fake
-# `tools/sandbox.sh`. See docs/gpu-queue-plan.md.
+# `python/nanochat_cpp/sandbox.py`. See docs/gpu-queue-plan.md.
 py_test(
     name = "gpu_queue_test",
     srcs = ["tests/gpu_queue_test.py"],
@@ -294,6 +326,9 @@ test_suite(
         ":toolchain_test",
         ":prune_test",
         ":contract_test",
+        ":sandbox_test",
+        ":lint_test",
+        ":cuda_sim_symbols_test",
         ":gpu_queue_test",
         ":distributed_test",
         ":rl_test",

@@ -9,7 +9,7 @@
 # in-process mock unit test -- it never exercises `LD_PRELOAD`.
 #
 # `cuda_sim.map` is the GNU version script that pins the exported set and names
-# the version nodes the binary under test references. `check_symbols.sh` is the
+# the version nodes the binary under test references. `check_symbols.py` is the
 # gate over both.
 #
 # Everything here is CPU only: no toolkit, no driver, no GPU.
@@ -66,6 +66,6 @@ cc_binary(
 )
 
 exports_files([
-    "check_symbols.sh",
+    "check_symbols.py",
     "cuda_sim.map",
 ])

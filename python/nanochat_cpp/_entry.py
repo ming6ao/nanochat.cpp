@@ -123,7 +123,7 @@ COMMANDS = (
 _HEADER = "tools/nanochat <command> [args...]"
 _FOOTER = (
     "Profiles: t0-cpu t1-gpu t2-parity t3-bench train eval",
-    "Profile budgets: tools/sandbox/profiles.conf",
+    "Profile budgets: tools/sandbox/profiles.json",
 )
 
 _BY_NAME = {entry.name: entry for entry in COMMANDS}

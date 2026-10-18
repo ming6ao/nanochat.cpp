@@ -134,7 +134,7 @@ Add these symbols to `tools/cuda_sim/cuda_sim.map` under a new version node,
 | `cublasLtMatmulAlgoGetHeuristic` | The algorithm choice |
 | `cublasLtGetStatusString` | The error text |
 
-`tools/cuda_sim/check_symbols.sh` reads the map as the required set, and compares
+`tools/cuda_sim/check_symbols.py` reads the map as the required set, and compares
 it against the mock's dynamic symbol table and the binary's undefined symbols.
 The gate therefore fails until every symbol resolves. That is the intent.
 
@@ -266,7 +266,7 @@ The collective mock already covers the multi-rank case at fp32. Extend nothing.
 | The fp8 rounding | A shared header | Runtime |
 | The CPU backend emulation | `backends/cpu/kernels.cc` | Runtime |
 | The interposer symbols | `tools/cuda_sim/cuda_sim.map`, `interposer.cc` | Simulator |
-| The symbol gate | `tools/cuda_sim/check_symbols.sh` | Simulator |
+| The symbol gate | `tools/cuda_sim/check_symbols.py` | Simulator |
 | The emulator fp8 header | `tools/cuda_sim/emu/cuda_fp8.h` | Simulator |
 | The trace leg | `tests/numerics_trace.h` | Oracle |
 | The tolerance rows | `docs/numerics-integration.md` | Architect |
@@ -279,7 +279,7 @@ The collective mock already covers the multi-rank case at fp32. Extend nothing.
    passes.
 3. `tools/nanochat simulate --device h100 --suite api` passes, and the symbol
    gate resolves every new `cublasLt` symbol.
-4. The negative self-test of `check_symbols.sh` still fails on a missing symbol.
+4. The negative self-test of `check_symbols.py` still fails on a missing symbol.
 5. The fp8 kernel emulation matches the CPU fp8 reference within the recorded
    tolerance.
 6. The fp8 trace leg passes on a real card.

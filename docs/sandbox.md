@@ -1,7 +1,7 @@
 # Execution sandbox and resource governance
 
 Every long-running or agent-launched process — training, eval, GPU tests,
-dev-kernel tests, benchmarks — runs through `tools/sandbox.sh`, which applies a
+dev-kernel tests, benchmarks — runs through `python/nanochat_cpp/sandbox.py`, which applies a
 named resource **profile** using cgroup v2. This is an execution concern, not a
 compute concern: it never appears in `kernels.h`, `tensor.h`, `config.h`, or
 `model.h`, and nothing in `src/` links against it.
@@ -20,7 +20,8 @@ directly and keeps the entry-point guard. See
 - **CPU pinning:** `taskset` (`sched_setaffinity`). The `cpuset` controller is
   **not** delegated to the user manager on this WSL image, so `AllowedCPUs=` is
   silently ignored and must not be relied on.
-- **Hard backstops:** `prlimit --core=0` and an optional `RuntimeMaxSec`.
+- **Hard backstops:** the verifier clears the core limit
+  (`resource.RLIMIT_CORE`), and a profile may set `RuntimeMaxSec`.
   `RLIMIT_NPROC` is deliberately left alone — it is per-UID host-wide and would
   break unrelated agent processes; `TasksMax` is the per-cgroup fork-bomb
   guard instead.
@@ -37,7 +38,7 @@ for WSL itself, systemd, the Bazel server, and the agent shells: **≤ 8 CPUs an
 
 Two tiers of limit:
 
-1. **Per-job profile** — one cgroup per launch, from `tools/sandbox/profiles.conf`.
+1. **Per-job profile** — one cgroup per launch, from `tools/sandbox/profiles.json`.
 2. **Aggregate slice** — `~/.config/systemd/user/nanochat.slice` with its own
    `MemoryMax`/`CPUQuota`, so several concurrent T0 jobs cannot add up past the
    host budget even if each is individually small.
@@ -75,7 +76,7 @@ The profile also exports thread-count env (`OMP_NUM_THREADS`,
 `NANOCHAT_NUM_THREADS`) matching `CPUQuota`, because cuBLAS and the OpenMP CPU
 backend otherwise spawn 12 workers and thrash. The cgroup is the ceiling; the
 env is the polite hint. The defaults assume the 12 vCPU / 7.7 GiB host; edit
-`tools/sandbox/profiles.conf` for other machines.
+`tools/sandbox/profiles.json` for other machines.
 
 ## Entry point
 
@@ -101,25 +102,25 @@ tools/nanochat gpuq status            # the queue depth and the worker
 ### Lower-level scripts
 
 These are the pieces the entry point uses; call them directly only when you
-need to. `tools/sandbox.sh` applies the cgroup budget. The GPU worker owns the
+need to. `python/nanochat_cpp/sandbox.py` applies the cgroup budget. The GPU worker owns the
 device and the jobs, so no separate lock file exists. The queue serializes all
 heavy jobs, not only GPU ones, because RAM and CPU are also single-host
 resources.
 
 ```bash
 # A single binary under a profile.
-tools/sandbox.sh --profile=train -- ./bazel-bin/train/train_main --config d8
+python/nanochat_cpp/sandbox.py --profile=train -- ./bazel-bin/train/train_main --config d8
 
 # GPU binary: submit one job to the queue and wait for it.
 tools/nanochat gpu --profile=t1-gpu -- ./bazel-bin/.../rms_norm_dev
 
 # Escape the aggregate slice (benchmarks that want the whole host).
-tools/sandbox.sh --no-slice --profile=t3-bench -- ./bench
+python/nanochat_cpp/sandbox.py --no-slice --profile=t3-bench -- ./bench
 ```
 
 ## Runtime guard
 
-`tools/sandbox.sh` exports `NANOCHAT_SANDBOX=<profile>`. Executables call
+`python/nanochat_cpp/sandbox.py` exports `NANOCHAT_SANDBOX=<profile>`. Executables call
 `nanochat::RequireSandboxOrDie(<task>)` at startup; if the sentinel is absent
 and `NANOCHAT_ALLOW_UNSANDBOXED` is not set, they print the corrective command
 and exit non-zero. This is the guarantee: a binary launched outside the entry
@@ -128,7 +129,7 @@ point fails instead of running unbounded. The guard is declared in
 
 ## Verification
 
-Before running the command, `tools/sandbox/verify.sh` reads `memory.max`,
+Before running the command, `python/nanochat_cpp/sandbox.py verify` reads `memory.max`,
 `cpu.max`, `pids.max`, and the CPU affinity back from the process cgroup and
 exits non-zero if they do not match the requested profile. A budget that was
 silently not applied is treated as a failure, not as a sandboxed run. Each
@@ -138,7 +139,7 @@ launch is logged to `/tmp/nanochat-sandbox.log`.
 
 Test processes are children of the long-lived Bazel server, so wrapping the
 `bazel` client does not cap them. `tools/nanochat test` handles this by passing
-`--run_under='tools/sandbox.sh --profile=… --'`, which sandboxes each test
+`--run_under='python/nanochat_cpp/sandbox.py --profile=… --'`, which sandboxes each test
 action, together with `--spawn_strategy=local`, which is required so the
 wrapper can reach the systemd user manager and `/sys/fs/cgroup`. A GPU test
 action uses `--run_under='tools/nanochat gpuq submit --profile=t1-gpu --'`

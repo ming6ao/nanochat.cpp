@@ -54,7 +54,7 @@ owns their defaults. The launch, the queue, and the sandbox are host tooling.
 | Gradient sum | C++ | `src/distributed.cc`, `backends/cuda/nccl_sync.cu` |
 | Process start | Host tooling | `tools/nanochat` |
 | GPU queue job | Host tooling | `python/nanochat_cpp/gpu_queue.py` |
-| Sandbox scope | Host tooling | `tools/sandbox.sh` |
+| Sandbox scope | Host tooling | `python/nanochat_cpp/sandbox.py` |
 | Notebook helper | Python | `python/nanochat_cpp/distributed.py` |
 
 A launcher in C++ would move host tooling into L6. It would also run before
@@ -116,7 +116,7 @@ The `dist` command skips the queue in two cases:
 The `dist` command must kill every rank on a signal. It must also wait for
 every child, so no orphan rank holds a card.
 
-The `dist` profile in `tools/sandbox/profiles.conf` covers the group. The
+The `dist` profile in `tools/sandbox/profiles.json` covers the group. The
 `train` profile covers one rank, so it is too small.
 
 The summary gives the per-rank return code, the log path, the stdio path, and
@@ -186,7 +186,7 @@ Gate: a CPU test covers the flag-over-variable order.
 ### Phase 2 — The launcher
 
 1. Add the `dist` case to `tools/nanochat`.
-2. Add the `dist` profile to `tools/sandbox/profiles.conf`.
+2. Add the `dist` profile to `tools/sandbox/profiles.json`.
 3. Add the signal handler and the wait.
 4. Add the `--json` summary.
 
@@ -238,7 +238,7 @@ Gate: one short two-rank Kaggle run passes the checkpoint hash check.
 |---|---|---|
 | 0 | Architect | `docs/**` |
 | 1 | Harness | `src/train_main.cc`, `src/cli.h` |
-| 2 | Architect | `tools/nanochat`, `tools/sandbox/profiles.conf` |
+| 2 | Architect | `tools/nanochat`, `tools/sandbox/profiles.json` |
 | 3 | Python surface | `python/nanochat_cpp/**` |
 | 4 | Notebooks | `notebooks/**` |
 

@@ -284,7 +284,7 @@ OpenMP as an allowed CPU dependency.
 
 The thread count comes from the environment:
 
-- `tools/sandbox.sh` sets `OMP_NUM_THREADS` for every profile.
+- `python/nanochat_cpp/sandbox.py` sets `OMP_NUM_THREADS` for every profile.
 - The same wrapper sets `NANOCHAT_NUM_THREADS` for library thread pools.
 - If neither variable exists, OpenMP uses the hardware concurrency.
 

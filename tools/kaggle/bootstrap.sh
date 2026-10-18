@@ -8,7 +8,7 @@
 # tools/nanochat doctor. A second run is safe and fast.
 #
 # A Kaggle container has no systemd and no cgroup v2 user manager, so the
-# resource sandbox stays off. tools/sandbox.sh resolves to backend=none by
+# resource sandbox stays off. python/nanochat_cpp/sandbox.py resolves to backend=none by
 # itself; this script also exports NANOCHAT_SANDBOX_BACKEND=none for the
 # session. See docs/host-portability.md.
 set -euo pipefail

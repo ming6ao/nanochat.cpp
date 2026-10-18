@@ -1,0 +1,70 @@
+{
+  "version": 1,
+  "slice": "nanochat.slice",
+  "profiles": {
+    "t0-cpu": {
+      "quota": "200%",
+      "mem_high": "1536M",
+      "mem_max": "2G",
+      "pids": "128",
+      "cpus": "0-1",
+      "runtime": null
+    },
+    "t1-gpu": {
+      "quota": "200%",
+      "mem_high": "2G",
+      "mem_max": "3G",
+      "pids": "128",
+      "cpus": "0-1",
+      "runtime": null
+    },
+    "t2-parity": {
+      "quota": "800%",
+      "mem_high": "5G",
+      "mem_max": "6G",
+      "pids": "256",
+      "cpus": "0-7",
+      "runtime": null
+    },
+    "t3-bench": {
+      "quota": "1000%",
+      "mem_high": "5G",
+      "mem_max": "6G",
+      "pids": "256",
+      "cpus": "0-11",
+      "runtime": null
+    },
+    "train": {
+      "quota": "800%",
+      "mem_high": "5G",
+      "mem_max": "6G",
+      "pids": "512",
+      "cpus": "0-7",
+      "runtime": null
+    },
+    "eval": {
+      "quota": "400%",
+      "mem_high": "3G",
+      "mem_max": "4G",
+      "pids": "128",
+      "cpus": "0-3",
+      "runtime": null
+    },
+    "kaggle-cpu": {
+      "quota": "200%",
+      "mem_high": "2G",
+      "mem_max": "3G",
+      "pids": "256",
+      "cpus": "0-1",
+      "runtime": null
+    },
+    "kaggle-gpu": {
+      "quota": "400%",
+      "mem_high": "8G",
+      "mem_max": "11G",
+      "pids": "256",
+      "cpus": "0-3",
+      "runtime": null
+    }
+  }
+}

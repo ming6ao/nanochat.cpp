@@ -279,7 +279,7 @@ with no dtype tag (`src/model.cc:1040`). No migration is necessary.
    order is the `a100` profile under the simulator, then an sm_80 card, then an
    sm_90 card.
 4. **The dangling references.** Fixed in Stage 1. `.bazelrc` points to
-   `docs/build.md` and `docs/python.md`. `tools/sandbox/profiles.conf` points to
+   `docs/build.md` and `docs/python.md`. `tools/sandbox/profiles.json` points to
    `docs/host-portability.md`.
 5. **The bf16 gate.** The fp32 build stays the golden gate. In a bf16 build the
    golden-fixture tests print a skip, and the in-build equality checks run with a

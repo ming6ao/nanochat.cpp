@@ -410,10 +410,10 @@ The host tool has two Python layers, and one command table.
 
 `python/nanochat_cpp/cli.py` is the command line. It owns the dispatch, the
 argument assembly, the Bazel wiring, the build lock, and the sandbox and queue
-routing. `tools/nanochat` is a shim that starts it, so the path stays stable
-for the Bazel `--run_under` strings. The shell keeps only the resource
-launcher, `tools/sandbox.sh`. See `docs/script-consolidation-plan.md`
-(section 4, decisions 1 and 10).
+routing. `tools/nanochat` is the Python entry point that starts it, so the path
+stays stable for the Bazel `--run_under` strings. The resource launcher is
+`python/nanochat_cpp/sandbox.py`. See `docs/script-consolidation-plan.md`
+(section 4, decisions 1 and 10) and `docs/python-sandbox-plan.md`.
 
 `nanochat_cpp.toolchain` is the typed client. It exposes every command as a
 Python function, builds the argument list, runs `tools/nanochat` through

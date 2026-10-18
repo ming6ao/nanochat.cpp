@@ -1,28 +1,35 @@
-#!/usr/bin/env bash
-# nanochat — the single execution entry point.
-#
-# usage: tools/nanochat <command> [args...]
-#
-# Every test, training, eval, benchmark, and verification run goes through here
-# so the resource sandbox, the GPU queue, and the Bazel test wiring are chosen
-# once and cannot be assembled incorrectly. Run `tools/nanochat help` for the
-# command list.
-#
-# This file is a shim. The command table, the argument assembly, the Bazel
-# wiring, and the build lock live in `python/nanochat_cpp/cli.py`. The path
-# `tools/nanochat` stays stable because the Bazel `--run_under` strings and
-# every document name it. See docs/script-consolidation-plan.md, and
-# docs/sandbox.md, docs/testing.md, and docs/gpu-queue-plan.md.
-set -euo pipefail
+#!/usr/bin/env python3
+"""The nanochat.cpp execution entry point.
 
-here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+Every test, training run, evaluation, benchmark, and verification run starts
+here, so the resource sandbox, the GPU queue, and the Bazel wiring are chosen
+once and cannot be assembled incorrectly. The command table, the argument
+assembly, the Bazel wiring, the build lock, and the sandbox and queue routing
+live in ``python/nanochat_cpp/cli.py``. Run ``tools/nanochat help`` for the
+command list.
 
-# The host tool requires the Python floor that docs/build.md records.
-python3 -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)' \
-  2>/dev/null ||
-  {
-    echo "nanochat: python3 3.10 or later is required; found $(python3 --version 2>&1 || echo 'no python3 on PATH')" >&2
-    exit 2
-  }
+The host tool needs Python 3.10 or later, which ``docs/build.md`` records.
 
-exec python3 "$here/../python/nanochat_cpp/cli.py" "$@"
+This file keeps its name. ``include/nanochat/sandbox.h`` prints
+``run: tools/nanochat help``, and every document names the path.
+"""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+# This file lives at <repo>/tools/nanochat; the package lives under
+# <repo>/python. Put that on the path, so the tool runs from any directory.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "python"))
+
+from nanochat_cpp import cli  # noqa: E402
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Run one command. ``cli.main`` reports an argument error as code 2."""
+    return cli.main(sys.argv[1:] if argv is None else argv)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -39,7 +39,7 @@ happen through the integrator.
 | **Python surface** | `python/**` except `cli.py` and `_entry.py`, `bindings/**` | C ABI `capi.h`, Model API |
 | **Data pipeline** | `src/tokenizer/**`, `src/parquet/**`, `include/nanochat/{tokenizer,bpe_trainer}.h` | frozen `data.h` |
 | **Notebooks** | `notebooks/**`, `tools/kaggle/**` | `docs/host-portability.md` |
-| **Simulator** | `tools/cuda_sim/**` (the API interposer, the emulation engine, the collective mock, `cuda_sim.map`, `check_symbols.sh`) | `docs/simulator.md`, frozen `tensor.h` |
+| **Simulator** | `tools/cuda_sim/**` (the API interposer, the emulation engine, the collective mock, `cuda_sim.map`, `check_symbols.py`) | `docs/simulator.md`, frozen `tensor.h` |
 | **Build** | `MODULE.bazel`, `.bazelrc`, `BUILD.bazel` (setup only) | Architect |
 
 **Frozen interfaces** (architect-owned; coordinate before editing):
@@ -112,7 +112,7 @@ The first is several agents launching training jobs or benchmarks at once. That
 thrashes the 11 GB card and invalidates timings. The second is a runaway test
 that exhausts host RAM or CPU.
 
-The process-launch boundary handles both, through `tools/sandbox.sh` (limits) and
+The process-launch boundary handles both, through `python/nanochat_cpp/sandbox.py` (limits) and
 the GPU job queue (one worker owns the GPU). See
 [docs/gpu-queue-plan.md](docs/gpu-queue-plan.md) and
 [docs/sandbox.md](docs/sandbox.md).
@@ -146,11 +146,11 @@ tools/nanochat gpuq status            # the queue depth and the worker
 
 Below it, the GPU queue owns the device. One worker process runs the jobs in
 first-in, first-out order, and it assigns the devices. The worker runs each job
-through `tools/sandbox.sh`. That script applies a cgroup v2 budget (RAM, CPU,
+through `python/nanochat_cpp/sandbox.py`. That program applies a cgroup v2 budget (RAM, CPU,
 pids, wall clock) through the **unprivileged systemd user manager**, then
 verifies the limits. It needs no root and no container runtime. Full sources:
-`tools/nanochat`, `python/nanochat_cpp/gpu_queue.py`, `tools/sandbox.sh`,
-`tools/sandbox/profiles.conf`.
+`tools/nanochat`, `python/nanochat_cpp/gpu_queue.py`, `python/nanochat_cpp/sandbox.py`,
+`tools/sandbox/profiles.json`.
 
 - GPU suites: `tools/nanochat test --gpu <target>` submits one job per test
   action; a bare GPU binary runs as `tools/nanochat gpu -- <binary>`.
@@ -160,7 +160,7 @@ verifies the limits. It needs no root and no container runtime. Full sources:
 - Keep a log (`/tmp/nanochat-gpu.log`) so agents can see who used the GPU, and
   `/tmp/nanochat-sandbox.log` for the per-launch limits.
 
-**Profiles** (`tools/sandbox/profiles.conf`; host budget 12 CPU / 7.7 GiB):
+**Profiles** (`tools/sandbox/profiles.json`; host budget 12 CPU / 7.7 GiB):
 
 | Profile | CPUQuota | Mem high/max | Use |
 |---|---|---|---|

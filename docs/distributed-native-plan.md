@@ -509,7 +509,7 @@ broker for an 8x H100 node. Treat the node as one resource.
   rule. Do not take one lock per rank.
 - The lock covers all 8 cards. The `nvidia-smi` gate must see all 8 cards as
   idle before the group starts.
-- Add a node-class sandbox profile to `tools/sandbox/profiles.conf`, for example
+- Add a node-class sandbox profile to `tools/sandbox/profiles.json`, for example
   `node-train`. Size the memory, the central processing unit quota, and the
   process count for eight ranks on one node. Do not reuse the `train` profile,
   which serves the WSL2 host.

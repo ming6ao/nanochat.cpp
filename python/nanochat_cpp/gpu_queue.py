@@ -8,8 +8,9 @@ and the state machine. Plain files hold the logs.
 The module imports only the Python standard library. Run it as a script, or
 through ``tools/nanochat gpuq <action>``.
 
-Every job runs under ``tools/sandbox.sh --profile <profile> -- <command>``.
-The worker owns the devices and assigns them. The client does not name one.
+Every job runs under
+``python/nanochat_cpp/sandbox.py --profile <profile> -- <command>``. The worker
+owns the devices and assigns them. The client does not name one.
 """
 
 from __future__ import annotations
@@ -365,10 +366,10 @@ def device_pids(devices: str) -> list[str]:
 
 def resolve_sandbox(directory: str) -> str:
     """The sandbox launcher for a job: the worktree copy, or the worker copy."""
-    candidate = Path(directory) / "tools" / "sandbox.sh"
+    candidate = Path(directory) / "python" / "nanochat_cpp" / "sandbox.py"
     if candidate.is_file():
         return str(candidate)
-    return str(repo_root() / "tools" / "sandbox.sh")
+    return str(Path(__file__).resolve().parent / "sandbox.py")
 
 
 def _terminate(proc: subprocess.Popen) -> None:

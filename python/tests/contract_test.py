@@ -83,7 +83,7 @@ class ContractTest(unittest.TestCase):
         shim.write_text(FAKE_BAZELISK, encoding="utf-8")
         shim.chmod(shim.stat().st_mode | stat.S_IEXEC)
         cls.entry = cls.root / "tools" / "nanochat"
-        cls.sandbox = cls.root / "tools" / "sandbox.sh"
+        cls.sandbox = cls.root / "python" / "nanochat_cpp" / "sandbox.py"
         cls.env = dict(os.environ)
         for name in ("NANOCHAT_SANDBOX", "NANOCHAT_SANDBOX_BACKEND",
                      "NANOCHAT_SANDBOX_PROFILE", "NANOCHAT_GPU_QUEUED"):
@@ -202,7 +202,7 @@ class ContractTest(unittest.TestCase):
         """The CPU and GPU test paths keep their ``--run_under`` wrapper."""
         cpu = self._bazel_line(self.plan("--dry-run", "test", "//bindings:all"))
         self.assertTrue(self._run_under(cpu).endswith(
-            "sandbox.sh --profile=t0-cpu --"), self._run_under(cpu))
+            "sandbox.py --profile=t0-cpu --"), self._run_under(cpu))
         self.assertIn("--test_tag_filters=-gpu", cpu)
         gpu = self._bazel_line(self.plan("--dry-run", "test", "--gpu",
                                          "//bindings:all"))

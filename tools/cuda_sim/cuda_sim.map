@@ -8,7 +8,7 @@
 # cuBLAS link dynamically; `readelf -V` on
 # `bazel-bin/backends/cuda/cuda_runtime_gpu_test` shows those two nodes.
 #
-# `tools/cuda_sim/check_symbols.sh` reads this file as the required set and
+# `tools/cuda_sim/check_symbols.py` reads this file as the required set and
 # compares it against the mock's dynamic symbol table and the binary's undefined
 # symbols.
 

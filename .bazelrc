@@ -130,9 +130,9 @@ build --local_resources=memory=3072
 # --- Tests ------------------------------------------------------------------
 test --test_output=errors
 
-# tools/sandbox.sh wraps every test action. The systemd backend needs the
-# client's session environment; the none backend needs none of it. Bazel's
-# default test environment is minimal, so forward these explicitly.
+# python/nanochat_cpp/sandbox.py wraps every test action. The systemd backend
+# needs the client's session environment; the none backend needs none of it.
+# Bazel's default test environment is minimal, so forward these explicitly.
 test --test_env=HOME
 test --test_env=XDG_RUNTIME_DIR
 test --test_env=DBUS_SESSION_BUS_ADDRESS

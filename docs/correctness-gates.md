@@ -144,9 +144,9 @@ Status: delivered. The map exports the family, the mock implements it in
 `tools/cuda_sim/interposer.cc`, and the ABI lives in
 `tools/cuda_sim/cuda_sim_abi.h`. `//tests:cuda_sim_preload_test` issues a scaled
 GEMM through the real `gemm.cu` and asserts the recorded call shape.
-`check_symbols.sh` resolves 57 required symbols.
+`check_symbols.py` resolves 57 required symbols.
 
-Gate: `tools/cuda_sim/check_symbols.sh` resolves every symbol, and the negative
+Gate: `tools/cuda_sim/check_symbols.py` resolves every symbol, and the negative
 case still fails. Both hold today.
 
 ### 3.5 The emulation engine
@@ -360,7 +360,7 @@ checks move to the merge gate.
 | A2 | The shared rounding header and its unit test | Runtime, Oracle | The exact bit table |
 | A3 | `GemmScaledFp8` and the fp8 graph | Runtime | `simulate --precision fp8` |
 | C1 | The `fp8-fast` suite | Architect | Less than 2 s |
-| A4 | The `cublasLt` interposer and the symbol gate | Simulator | `check_symbols.sh` |
+| A4 | The `cublasLt` interposer and the symbol gate | Simulator | `check_symbols.py` |
 | A5 | The emulator fp8 header and `extern __shared__` | Simulator | `kernel_emu_test` |
 | A6 | The fp8 trace leg and the tolerance rows | Oracle, Architect | The exact CPU and simulator legs |
 | B1 | The hardware startup gate | Harness | `hw_gate_cuda_test` |
@@ -381,7 +381,7 @@ external fp8 golden for A6, and the `mma` loop. See section 9.
 2. `tools/nanochat simulate --device h100 --precision fp8 --suite correctness`
    passes.
 3. The fp8 trace leg is exact on the CPU and on the simulator.
-4. `check_symbols.sh` resolves every `cublasLt` symbol, and the negative case
+4. `check_symbols.py` resolves every `cublasLt` symbol, and the negative case
    fails.
 5. The hardware gate passes on a fresh Hopper run in less than 1 second.
 6. The fault injection makes the gate exit with code 2.

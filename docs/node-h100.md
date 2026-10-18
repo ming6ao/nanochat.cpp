@@ -156,7 +156,7 @@ Run one step first, then check the free memory, then start the full run.
 
 ## 7. The broker and the sandbox on a native host
 
-The sandbox profiles in `tools/sandbox/profiles.conf` are host-local. They were
+The sandbox profiles in `tools/sandbox/profiles.json` are host-local. They were
 written for a 12 vCPU and 7.7 GiB WSL2 host. The H100 node has a different CPU
 and memory budget.
 

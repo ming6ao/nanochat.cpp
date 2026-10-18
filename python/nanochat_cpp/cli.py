@@ -1,9 +1,11 @@
 """The ``tools/nanochat`` command line.
 
-``tools/nanochat`` is a thin shim that starts this module. The command table,
+``tools/nanochat`` is the Python entry point that starts this module. The
+command table,
 the argument assembly, the Bazel wiring, the build lock, and the sandbox and
-queue routing live here. The shell keeps the resource launcher
-(``tools/sandbox.sh``). See ``docs/script-consolidation-plan.md``.
+queue routing live here. The resource launcher is
+``python/nanochat_cpp/sandbox.py``. See ``docs/script-consolidation-plan.md``
+and ``docs/python-sandbox-plan.md``.
 
 The observable contract is frozen (decision 4 of the plan): the environment
 variable names, the two log paths and their line formats, the exit codes, the
@@ -32,7 +34,7 @@ _PYTHON_DIR = Path(__file__).resolve().parents[1]
 if str(_PYTHON_DIR) not in sys.path:
     sys.path.insert(0, str(_PYTHON_DIR))
 
-from nanochat_cpp import _entry, gpu_queue, prune  # noqa: E402
+from nanochat_cpp import _entry, gpu_queue, lint, prune  # noqa: E402
 
 __all__ = ["main"]
 
@@ -40,7 +42,7 @@ HERE = Path(__file__).resolve().parent
 REPO_ROOT = HERE.parents[1]
 TOOLS = REPO_ROOT / "tools"
 ENTRY = TOOLS / "nanochat"
-SANDBOX = TOOLS / "sandbox.sh"
+SANDBOX = HERE / "sandbox.py"
 BAZEL_BIN = REPO_ROOT / "bazel-bin"
 
 BUILD_LOCK = os.environ.get("NANOCHAT_BUILD_LOCK", "/tmp/nanochat-build.lock")
@@ -243,7 +245,7 @@ def cmd_check(argv: list[str], ctx: Context) -> int:
 
 
 def cmd_lint(argv: list[str], ctx: Context) -> int:
-    return exec_replace([str(TOOLS / "lint.sh"), *argv])
+    return lint.main(argv)
 
 
 def cmd_shutdown(argv: list[str], ctx: Context) -> int:
@@ -763,7 +765,7 @@ def _simulate_api(ctx: Context, device: str) -> int:
     mock = (BAZEL_BIN / "tools" / "cuda_sim"
             / "libcuda_sim_interposer.so").resolve()
     real = (BAZEL_BIN / "backends" / "cuda" / "cuda_runtime_gpu_test").resolve()
-    gate = str(TOOLS / "cuda_sim" / "check_symbols.sh")
+    gate = str(TOOLS / "cuda_sim" / "check_symbols.py")
     sim_log = "<sim-api>.jsonl" if ctx.dry_run else str(
         Path(_tempdir("nanochat-sim-api.")) / "events.jsonl")
     build_argv = ["build", "--config=cuda",

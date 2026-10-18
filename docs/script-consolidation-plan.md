@@ -15,6 +15,32 @@ inventory against commit `bd6fa95`, which landed the GPU queue. It cuts the
 completed GPU work to history (section 5). It also splits the language move into
 four stages. See section 12 for what landed.
 
+## 0. Amendment: the sandbox moves to Python
+
+A later change moves the resource launcher, the limit verifier, the style gate,
+and the symbol gate to Python. It removes the shell trust boundary that this
+plan kept. See [python-sandbox-plan.md](python-sandbox-plan.md).
+
+These decisions are superseded.
+
+- Decision 2, "Shell owns the resource launcher". `python/nanochat_cpp/sandbox.py`
+  now holds the launcher.
+- Decision 3, "`tools/sandbox.sh` stays the `--run_under` program". The wrapper
+  for a CPU test action is now
+  `python/nanochat_cpp/sandbox.py --profile=t0-cpu --`.
+- Decision 5, "Keep `profiles.conf` as the only profile source". The single
+  source is now `tools/sandbox/profiles.json`.
+- Decision 7, "Keep `tools/sandbox/verify.sh` as a separate program". The
+  verifier is now the `verify` subcommand of `sandbox.py`. It stays a separate
+  process, because it reads the cgroup of its own process.
+- Decision 9, "Freeze the sandbox interface". The interface stays frozen. Only
+  the program name changed.
+
+Decision 4 still holds. The environment variable names, the two log paths, the
+log line formats, the exit codes, the `NANOCHAT_SANDBOX` sentinel, and the
+`doctor --json` keys do not change. The symbol gate keeps its output and its
+exit codes.
+
 ## 1. Goal
 
 Three results are the target.
@@ -155,6 +181,10 @@ with_build_lock() { exec 9>"$build_lock"; flock 9; "$@" 9>&-; }
   `prlimit`, and the `--run_under` string are shell work.
 - Do not merge `tools/sandbox/verify.sh` into `tools/sandbox.sh`. A merge would
   change the `/tmp/nanochat-sandbox.log` line that decision 4 freezes.
+
+Both bullets above are superseded by section 0 and by
+[python-sandbox-plan.md](python-sandbox-plan.md). The verifier stays a separate
+process, so the log line does not change.
 - Do not convert the Kaggle scripts. They install packages and edit `PATH`.
 - Do not change a fixture subcommand name or a fixture binary format.
 - Keep the `Makefile`, which is the non-Bazel fallback.
@@ -360,6 +390,8 @@ and no stale path remains in the documents.
 - A new third-party dependency.
 - A merge of `tools/sandbox/verify.sh` into `tools/sandbox.sh`.
 
+The first and last bullets are superseded by section 0.
+
 ## 12. What landed
 
 The whole change is in one working tree. The stages landed in order, and the
@@ -377,6 +409,17 @@ project forbids an interactive commit, so they are not separate commits.
 | S8 | `python/nanochat_cpp/prune.py` and `//python:prune_test`. `tools/prune_bazel_output_bases`, `tools/prune_test.sh`, and `//tools:prune_test` are gone. |
 | S9 to S12 | `python/nanochat_cpp/cli.py` holds the dispatch. `tools/nanochat` is a shim. `_entry.py` holds the command list, the help lines, and the `help` row. |
 | S13 | `toolchain.py` drops the text doctor fallback, and `docs/python.md` sections 6 and 12 describe the two Python layers. |
+
+The sandbox work of section 0 landed afterwards, in these stages.
+
+| Stage | Artifact |
+|---|---|
+| P1 | `tools/sandbox/profiles.json` and `python/nanochat_cpp/sandbox.py`. `//python:sandbox_test`. |
+| P2 | The call sites name the new launcher. `tools/sandbox.sh` and `tools/sandbox/verify.sh` are gone. |
+| P3 | `python/nanochat_cpp/lint.py`. `tools/lint.sh` is gone. |
+| P4 | `tools/cuda_sim/check_symbols.py`, which reads only `global:` blocks. The shell version is gone. |
+| P5 | `tools/nanochat` is a Python program with a shebang. |
+| P6 | The documents name the new paths. |
 
 Three small deviations from the stage text are worth a record.
 

@@ -3,7 +3,7 @@ Description=nanochat aggregate resource budget
 
 [Slice]
 # Aggregate ceiling for all concurrent nanochat jobs. Individual launches get a
-# per-profile budget (profiles.conf); this is the hard sum. Install with:
+# per-profile budget (profiles.json); this is the hard sum. Install with:
 #   mkdir -p ~/.config/systemd/user
 #   cp tools/sandbox/nanochat.slice ~/.config/systemd/user/
 #   systemctl --user daemon-reload

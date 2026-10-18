@@ -2,8 +2,8 @@
 
 The test is hermetic and CPU-only. It uses a temporary queue directory, a fake
 ``nvidia-smi`` that reports no compute processes, and a fake
-``tools/sandbox.sh`` that execs the command directly. No GPU and no systemd
-scope are involved. See docs/gpu-queue-plan.md.
+``python/nanochat_cpp/sandbox.py`` that execs the command directly. No GPU and
+no systemd scope are involved. See docs/gpu-queue-plan.md.
 """
 
 from __future__ import annotations
@@ -37,8 +37,8 @@ class GpuQueueTest(unittest.TestCase):
         self.root = Path(self.tmp.name)
         self.base = self.root / "queue"
         self.work = self.root / "work"
-        (self.work / "tools").mkdir(parents=True)
-        sandbox = self.work / "tools" / "sandbox.sh"
+        (self.work / "python" / "nanochat_cpp").mkdir(parents=True)
+        sandbox = self.work / "python" / "nanochat_cpp" / "sandbox.py"
         sandbox.write_text(FAKE_SANDBOX, encoding="utf-8")
         sandbox.chmod(0o755)
 

@@ -233,7 +233,7 @@ reverse-mode template metaprogramming.
 decompressor (ZSTD, restricted to `src/parquet/`; see §2.1).
 - Container runtimes and sandboxing daemons (Docker, Podman, bubblewrap,
   firejail). Isolation is host cgroup v2 plus user namespaces, applied by
-  `tools/sandbox.sh`; no image, no daemon, no new dependency.
+  `python/nanochat_cpp/sandbox.py`; no image, no daemon, no new dependency.
 
 ---
 

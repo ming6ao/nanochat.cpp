@@ -21,20 +21,16 @@ exports_files([
     "fixture_format.py",
     "gen_unicode_tables.py",
     "nanochat",
-    "sandbox.sh",
-    "lint.sh",
 ])
 
-# The sandbox launcher and its resources. `tools/nanochat` wraps the launcher,
-# and `python/tests/contract_test.py` runs both from the runfiles tree, so the
-# files travel together.
+# The sandbox resources. The launcher is
+# `python/nanochat_cpp/sandbox.py`, and `python/tests/contract_test.py` runs it
+# from the runfiles tree, so the data it reads travels with the test.
 filegroup(
-    name = "sandbox_scripts",
+    name = "sandbox_data",
     srcs = [
-        "sandbox.sh",
         "sandbox/nanochat.slice",
-        "sandbox/profiles.conf",
-        "sandbox/verify.sh",
+        "sandbox/profiles.json",
     ],
 )
 

@@ -134,7 +134,7 @@ works in both builds. `tests/param_stage.h` holds that helper.
 ## How tests are sandboxed
 
 `tools/nanochat test` runs Bazel with
-`--run_under='tools/sandbox.sh --profile=… --'`, so every test action gets its
+`--run_under='python/nanochat_cpp/sandbox.py --profile=… --'`, so every test action gets its
 own cgroup, and forces `--spawn_strategy=local` so the wrapper can reach the
 systemd user manager. A GPU suite uses
 `--run_under='tools/nanochat gpuq submit --profile=t1-gpu --'` instead: the

@@ -162,7 +162,7 @@ Every job runs under the sandbox. The `command` column holds a leaf command,
 and the worker always runs it as:
 
 ```text
-tools/sandbox.sh --profile <profile> -- <command...>
+python/nanochat_cpp/sandbox.py --profile <profile> -- <command...>
 ```
 
 There is no second mode. This removes the `wrapper` column, and the worker has
@@ -185,7 +185,7 @@ leaf job, and the worker sandboxes that leaf. The Bazel client and the server
 stay outside the sandbox, and the GPU is granted for the test alone.
 
 This changes two decisions in `docs/script-consolidation-plan.md`: decision 3
-(`tools/sandbox.sh` as the only `--run_under` program) and decision 4 (the
+(`python/nanochat_cpp/sandbox.py` as the only `--run_under` program) and decision 4 (the
 frozen `--run_under` string). Update both documents and the contract test
 together.
 
@@ -198,7 +198,7 @@ The job state is durable. The worker state is a lease.
 
 The worker is a Python module, for example `python/nanochat_cpp/gpu_queue.py`.
 Python owns orchestration, and it reaches the sandbox through the one allowed
-form `tools/sandbox.sh --profile <name> -- <cmd...>`. The module imports only
+form `python/nanochat_cpp/sandbox.py --profile <name> -- <cmd...>`. The module imports only
 the standard library.
 
 ### 4.1 The lease
@@ -229,7 +229,7 @@ not name one.
 3. At claim, the worker assigns the devices to the job and writes
    `jobs.devices`.
 4. The worker exports `NANOCHAT_GPU_DEVICES` for the job.
-   `tools/sandbox.sh` turns that value into `CUDA_VISIBLE_DEVICES`.
+   `python/nanochat_cpp/sandbox.py` turns that value into `CUDA_VISIBLE_DEVICES`.
 
 Stage 1 runs one job at a time and assigns the whole pool. A later stage can
 run one job per free device subset. The per-device lock files disappear,
@@ -273,7 +273,7 @@ job first. `ORDER BY submitted` gives the first-in, first-out order.
 3. Run the `nvidia-smi` gate when `nvidia-smi` is present. Refuse the job when a
    foreign process owns the assigned device, unless `--force` is set.
 4. Build the launch command:
-   `tools/sandbox.sh --profile <profile> -- <command...>`.
+   `python/nanochat_cpp/sandbox.py --profile <profile> -- <command...>`.
 5. Start it with `setsid`, so the job owns a process group. Set the working
    directory to `directory`. Redirect standard output and standard error to
    `<base>/logs/<id>.stdout` and `.stderr`.
@@ -393,7 +393,7 @@ low.
 
 ## 10. Limits and safety
 
-- Every job runs under `tools/sandbox.sh`, so no mode is exempt.
+- Every job runs under `python/nanochat_cpp/sandbox.py`, so no mode is exempt.
 - The worker enforces `timeout` and kills the process group.
 - The queue directory has mode `0700`. The database and the logs are readable
   only by the user.
@@ -457,7 +457,7 @@ A stage is not done until the default loop passes and the queue tests pass.
    filesystem spool with atomic renames and a reconcile pass.
 2. Schema: fifteen columns for `jobs`, five for `workers`. No priority, no
    wrapper, no boot identifier, no duplicate timestamps, no stored log paths.
-3. Every job runs under `tools/sandbox.sh`.
+3. Every job runs under `python/nanochat_cpp/sandbox.py`.
 4. The worker owns the devices and assigns them. The client does not name one.
 5. Submit mode: blocking by default. `gpuq submit` waits and returns the job
    exit code. `--no-wait` prints the job identifier and exits `0`.
@@ -499,7 +499,7 @@ Ship this manifest in this project:
 
 Sliceme then runs its combined-tree checks through the queue, and it never
 learns what a GPU is. A CPU-only campaign can point the command at
-`tools/sandbox.sh` instead.
+`python/nanochat_cpp/sandbox.py` instead.
 
 The Sliceme worker does not submit jobs. The worker contract tells it not to run
 any test. The engine runs the checks. The interactive agent and the ad-hoc
@@ -508,7 +508,7 @@ callers.
 
 ## 16. Non-goals
 
-- A change to the sandbox mechanism or to `profiles.conf`.
+- A change to the sandbox mechanism or to `profiles.json`.
 - A change to the fixture format, the C++ guard, or a frozen header.
 - A new third-party dependency. SQLite is in the standard library, so it does
   not count.
