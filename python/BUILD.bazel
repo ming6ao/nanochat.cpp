@@ -123,6 +123,32 @@ py_test(
     size = "small",
 )
 
+# T0: the Bazel output-base reaper, moved out of shell. Hermetic: a synthetic
+# output user root and a fake live server, so it needs no GPU and never touches
+# the real `~/.cache/bazel`. See docs/sandbox.md.
+py_test(
+    name = "prune_test",
+    srcs = ["tests/prune_test.py"],
+    deps = [":nanochat_cpp"],
+    size = "small",
+)
+
+# T0: the observable contract of `tools/nanochat` before the language move
+# (docs/script-consolidation-plan.md section 7, P2). It runs the real entry
+# script and the real sandbox launcher, so the runfiles carry both. A fake
+# `bazelisk` on PATH keeps the startup lookup happy without a Bazel run.
+py_test(
+    name = "contract_test",
+    srcs = ["tests/contract_test.py"],
+    data = [
+        "//tools:fixtures",
+        "//tools:nanochat",
+        "//tools:sandbox_scripts",
+    ],
+    deps = [":nanochat_cpp"],
+    size = "small",
+)
+
 # T0: the GPU job queue store, worker, and state machine. Hermetic and
 # CPU-only: a temporary queue directory, a fake `nvidia-smi`, and a fake
 # `tools/sandbox.sh`. See docs/gpu-queue-plan.md.
@@ -266,6 +292,8 @@ test_suite(
         ":chat_test",
         ":sft_data_test",
         ":toolchain_test",
+        ":prune_test",
+        ":contract_test",
         ":gpu_queue_test",
         ":distributed_test",
         ":rl_test",

@@ -104,7 +104,7 @@ C++ but its C ABI binding is not. Phase 6 is delivered in part.
    the divisor. The divisor moves into C++ per `docs/training-seam.md` section
    5.7. Owner: architect for the header, Python surface for the binding.
 2. **Add the `rl_step` binary and the parity fixture.** Add the file-driven
-   binary. Add `tools/dump_training_fixtures.py rl`. Gate: `//tests:rl_parity_test` at tier
+   binary. Add `tools/dump_fixtures.py rl`. Gate: `//tests:rl_parity_test` at tier
    T2. Owner: harness for the step, oracle for the fixture.
 3. **Add the persistent worker.** Add the worker binary and the pipe protocol.
    Gate: an RL smoke run at tier T2. Owner: harness.

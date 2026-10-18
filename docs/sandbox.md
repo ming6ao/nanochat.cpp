@@ -175,9 +175,10 @@ idle-server heaps, which fits the headroom the budget leaves.
 
 Bazel names each output base `md5(workspace_path)` under
 `~/.cache/bazel/_bazel_$USER`. Every worktree is a distinct workspace, so it
-gets its own output base (roughly 150-310 MB) that survives the worktree and
-accumulates one per node: dozens of dead trees, several GB, all of it streaming
-through the page cache and inflating the WSL2 `Vmmem` reading. `tools/nanochat
+gets its own output base (roughly 150-310 MB), and that base survives the
+worktree. One node accumulates dozens of dead trees and several GB. All of it
+streams through the page cache and inflates the WSL2 `Vmmem` reading.
+`tools/nanochat
 shutdown` stops a server but does not delete its output base.
 
 The coordinator reaps them with one command. It is a dry run by default and only
@@ -197,7 +198,7 @@ Steady state is an empty `tools/nanochat prune`: if it lists anything, a worktre
 was removed without reaping its base. Use `--worktree DIR` to restrict the reap
 to bases at or under a just-removed directory, `--sizes` to report bytes, and
 `--json` for machine-readable output. The mechanism is
-`tools/prune_bazel_output_bases`; the command wraps it.
+`python/nanochat_cpp/prune.py`; the command wraps it.
 
 ## WSL2 caveats
 

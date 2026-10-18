@@ -1,6 +1,6 @@
 // tests/train_parity_test.cc -- the multi-step training-parity gate.
 //
-// Reads a fixture produced by `tools/dump_training_fixtures.py train` and
+// Reads a fixture produced by `tools/dump_fixtures.py train` and
 // drives `nanochat.cpp`'s `Model::TrainStep` over the recorded batches from the
 // recorded initial parameters, with the recorded optimizer and learning-rate
 // schedule. After every step it compares, against the PyTorch reference:

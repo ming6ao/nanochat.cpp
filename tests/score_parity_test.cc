@@ -1,7 +1,7 @@
 // tests/score_parity_test.cc -- the CORE scoring-parity gate.
 //
 // Reads the synthetic CORE fixture produced by
-// `tools/dump_model_fixtures.py eval` and runs the real `score_main` binary on
+// `tools/dump_fixtures.py eval` and runs the real `score_main` binary on
 // it, then compares `score_main`'s result fixture against the PyTorch reference
 // recorded in the same file:
 //

@@ -154,7 +154,7 @@ The implementation lives in its own package, `src/tokenizer/`.
 | `src/tokenizer/tok_train_main.cc` | The training command line. |
 | `src/parquet/reader.{h,cc}` | The native parquet reader (docs/parquet-native.md). |
 | `tools/gen_unicode_tables.py` | The table generator. |
-| `tools/dump_data_fixtures.py tokenizer` | The reference fixture generator. |
+| `tools/dump_fixtures.py tokenizer` | The reference fixture generator. |
 | `tools/check_tokenizer_parity.py` | The full-vocabulary parity gate. |
 
 ## 5. Artifact format
@@ -384,7 +384,7 @@ Every test is tier T0. The tests need no GPU and no broker.
 | `src/tokenizer/tokenizer_parity_test.cc` | The fixture: merges, encode, decode, token bytes. |
 | `src/parquet/reader_test.cc` | The reader order and the text column on a tiny fixture. |
 
-The fixture comes from `tools/dump_data_fixtures.py tokenizer`. The script trains a
+The fixture comes from `tools/dump_fixtures.py tokenizer`. The script trains a
 small reference tokenizer on a fixed corpus, and it records:
 
 - the pattern, the ordered merges, and the special tokens;
@@ -454,7 +454,7 @@ The table lists the landed files.
 | `src/tokenizer/bpe_trainer_test.cc` | The reference merge list, rank by rank. |
 | `src/parquet/reader_test.cc` | The reader order and the text column. |
 | `tests/data/tokenizer_fixture.bin` | The reference fixture. |
-| `tools/dump_data_fixtures.py tokenizer` | The reference fixture generator. |
+| `tools/dump_fixtures.py tokenizer` | The reference fixture generator. |
 | `tools/gen_unicode_tables.py` | The table generator. |
 | `tools/check_tokenizer_parity.py` | The full-vocabulary parity gate. |
 | `python/nanochat_cpp/data.py` | The Python layer reads `NCTOKEN1` and builds a `tiktoken` encoding. |

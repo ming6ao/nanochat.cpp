@@ -1,6 +1,6 @@
 // tests/generate_parity_test.cc -- the generation-parity gate.
 //
-// Reads a fixture produced by `tools/dump_model_fixtures.py generate` and
+// Reads a fixture produced by `tools/dump_fixtures.py generate` and
 // drives `nanochat.cpp`'s `GenerateBatch` in greedy mode from the recorded
 // parameters and prompt. The fixture is data, so the same source links the
 // reference CPU backend by default and the CUDA backend under `--config=cuda`,

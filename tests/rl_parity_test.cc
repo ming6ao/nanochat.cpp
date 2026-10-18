@@ -1,6 +1,6 @@
 // tests/rl_parity_test.cc -- the reinforcement-learning parity gate.
 //
-// Reads the fixture produced by `tools/dump_training_fixtures.py rl` and drives
+// Reads the fixture produced by `tools/dump_fixtures.py rl` and drives
 // the RL step over the recorded rollouts from the recorded initial parameters.
 // The step is the shared `nanochat::RlStep` (docs/training-seam.md
 // section 5.7), so the test and the file-driven `rl_step` binary cannot drift

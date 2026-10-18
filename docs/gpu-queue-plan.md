@@ -423,7 +423,7 @@ Run these after each stage.
 
 1. `tools/nanochat lint`
 2. `tools/nanochat test`
-3. `tools/nanochat test //tools:prune_test //tools:kaggle_scripts_test`
+3. `tools/nanochat test //python:prune_test //tools:kaggle_scripts_test`
 4. One T1 GPU smoke test through the queue.
 5. A queue test with two concurrent submits. The jobs must run in order, one at
    a time. Both exit codes must match.

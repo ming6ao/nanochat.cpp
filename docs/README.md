@@ -35,7 +35,7 @@ detailed reference that the design points at.
 | [python.md](python.md) | The single Python surface: in-process compute API, planning, chat evaluation, and the `tools/nanochat` toolchain |
 | [sandbox.md](sandbox.md) | Execution sandbox and host resource governance |
 | [host-portability.md](host-portability.md) | Toolchain, optional sandbox, devices, and Kaggle |
-| [script-consolidation-plan.md](script-consolidation-plan.md) | The plan to merge and simplify the host scripts: the command table, the fixture generators, and the sandbox launcher |
+| [script-consolidation-plan.md](script-consolidation-plan.md) | The plan to give each host task one home: the command table, the fixture generators, and the Python dispatch |
 | [gpu-queue-plan.md](gpu-queue-plan.md) | The GPU job queue: one worker owns the GPU, a SQLite store holds the jobs, and `tools/nanochat gpuq` submits them |
 | [node-h100.md](node-h100.md) | The H100 node run book: the memory plan, the batch plan, the launch, and the acceptance run |
 | [simulator.md](simulator.md) | The S0 simulator: device profiles, the reference engine, the emulation engine, the API interposer, and the collective mock |

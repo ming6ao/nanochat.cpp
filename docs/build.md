@@ -38,18 +38,25 @@ nanochat.cpp/
       __init__.py  _core.py  _lib.py  _build.py  api.py
       plan.py  chat.py  toolchain.py  _entry.py  checkpoint.py
       data.py  tasks.py  eval_fixture.py  reference.py
+      cli.py                     # the tools/nanochat command line
+      prune.py                   # the Bazel output-base reaper
       gpu_queue.py               # the GPU job queue (worker + client)
     tests/{core,build,api,plan,chat,toolchain,data,checkpoint,eval_fixture}_test.py
     tests/gpu_queue_test.py      # T0 test for the queue
+    tests/prune_test.py          # T0 test for the reaper
+    tests/contract_test.py       # T0 test for the host-tool contract
     BUILD.bazel
   tests/oracle_test.cc  tests/data/debug_state.bin
   tools/
-    nanochat                   # the single execution entry point
+    nanochat                   # the single execution entry point (a shim)
     sandbox.sh                 # the sandboxed launcher
     sandbox/profiles.conf      # per-profile cgroup budgets
     sandbox/verify.sh          # read-back check of the applied limits
     sandbox/nanochat.slice     # aggregate user-slice budget (drop-in)
     sandbox/README.md
+    dump_fixtures.py           # the offline fixture generator
+    fixture_common.py          # the shared fixture helpers
+    fixture_format.py          # the shared fixture record writer
   data/*.parquet
 ```
 
@@ -108,7 +115,8 @@ The in-process Python API (docs/python.md) adds two packages.
 only the Python standard library, so the root module registers the local
 `python3` toolchain through `local_runtime_repo` and
 `local_runtime_toolchains_repo`. The flag `dev_dependency = True` keeps the
-local toolchain out of a downstream module. Build the shared library with
+local toolchain out of a downstream module. The host tool requires Python 3.10
+or later, and it checks that floor at startup. Build the shared library with
 `tools/nanochat build //bindings:nanochat_shared --config=cpu`; the config
 selects the CPU backend and fp32.
 

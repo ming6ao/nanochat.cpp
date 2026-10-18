@@ -57,11 +57,11 @@ wait (`NANOCHAT_SIM_TIMEOUT_MS`), so a rank that never issues the all-reduce is
 reported as a timeout instead of hanging the suite.
 
 The native collective (`backends/cuda/collective/`, selected with
-`--config=native`) adds two CPU-only tests to the default T0 loop and one T1
-GPU test: `//backends/cuda/collective:schedule_test` runs the ring at world
-sizes 1, 2, 4, and 8 over the in-process memory transport and judges the
-schedule trace; `//backends/cuda/collective:transport_select_test` checks the
-per-neighbor selection including a mixed group; and
+`--config=native`) adds two CPU-only tests to the default T0 loop, and one T1
+GPU test. `//backends/cuda/collective:schedule_test` runs the ring at world
+sizes 1, 2, 4, and 8 over the in-process memory transport, then judges the
+schedule trace. `//backends/cuda/collective:transport_select_test` checks the
+per-neighbor selection, including a mixed group.
 `//backends/cuda/collective:nvlink_test` (tags `gpu`, `manual`) reduces across
 two cards. On a host without NVLink peer access the T1 test exercises the
 host-staged fallback. See
@@ -146,18 +146,17 @@ the resource sandbox is the priority. See [sandbox.md](sandbox.md).
 
 ## Fixture generator commands
 
-The offline fixture generators use four grouped scripts. Pass a fixture name after the script name.
+The offline fixture generator is one grouped script. Pass a fixture name after
+the script name.
 
 | Script | Fixture names |
 |---|---|
-| `tools/dump_training_fixtures.py` | `oracle`, `train`, `rl` |
-| `tools/dump_model_fixtures.py` | `generate`, `eval`, `plan` |
-| `tools/dump_data_fixtures.py` | `tokenizer`, `loader`, `chat` |
-| `tools/dump_runtime_fixtures.py` | `api`, `numerics` |
+| `tools/dump_fixtures.py` | `oracle`, `train`, `rl`, `generate`, `eval`, `plan`, `tokenizer`, `loader`, `chat`, `api`, `numerics` |
 
-For example, run `python3 tools/dump_training_fixtures.py oracle --out tests/data/debug_state.bin`.
-The shared `tools/fixture_format.py` writer keeps the common record layouts stable.
-Each generator keeps its own fixture format and runtime requirements.
+For example, run `python3 tools/dump_fixtures.py oracle --out tests/data/debug_state.bin`.
+The shared `tools/fixture_format.py` writer keeps the common record layouts stable,
+and `tools/fixture_common.py` holds the shared helpers.
+Each fixture kind keeps its own format and runtime requirements.
 
 ## Oracle fixtures
 
@@ -167,39 +166,40 @@ gradients, then runs a few optimizer steps and matches losses. Tolerances are
 per backend: fp32 CUDA ~1e-5.
 
 The multi-step trajectory is a strict gate (loss `1e-5`, parameter `1e-4`).
-`tools/dump_training_fixtures.py oracle` records the AdamW `eps` it used as
-`config/opt/adam_eps` (currently `1e-4`) and the C++ test matches it: several
-fixture parameters have a true gradient of exactly zero at this initialization,
-so at nanochat's default `eps=1e-10` their fp32 roundoff would be amplified
-into unreproducible updates. Regenerate the fixture with
-`python tools/dump_training_fixtures.py oracle --adam-eps 1e-4`.
+`tools/dump_fixtures.py oracle` records the AdamW `eps` it used as
+`config/opt/adam_eps` (currently `1e-4`), and the C++ test matches it. Several
+fixture parameters have a true gradient of exactly zero at this initialization.
+At nanochat's default `eps=1e-10` their fp32 roundoff would be amplified into
+unreproducible updates. Regenerate the fixture with
+`python tools/dump_fixtures.py oracle --adam-eps 1e-4`.
 
 Fixtures are data, so GPU tests never need torch at runtime. Use fixed seeds.
 
 ## Training-parity harness
 
-`tools/dump_training_fixtures.py train` records a multi-step *training trajectory* from
-nanochat's PyTorch `gpt.py`: the initial parameters, the exact token/target
-batch at every step, and, after every step, the loss, the global gradient norm,
-and the L2 norm of every parameter (and optionally the final parameter tensors).
+`tools/dump_fixtures.py train` records a multi-step *training trajectory* from
+nanochat's PyTorch `gpt.py`. It holds the initial parameters and the exact
+token/target batch at every step. After every step it holds the loss, the
+global gradient norm, and the L2 norm of every parameter (and optionally the
+final parameter tensors).
 `tests/train_parity_test.cc` drives `nanochat.cpp`'s `TrainStep` from the same
 initial parameters over the same batches with the same optimizer and
 learning-rate schedule, and compares the loss, gradient, and parameter
-trajectories. This is the scaled-up version of the oracle trajectory gate: it
-is what catches a bug that only appears after the first update, when the
+trajectories. This is the scaled-up version of the oracle trajectory gate. It
+catches a bug that only appears after the first update, when the
 zero-initialized output projections activate the attention and MLP backward.
 
-The committed fixture `tests/data/train_parity.bin` is the compact CPU case
-(`--nonzero-projections` so the whole graph is active at step 0) and runs as
+The committed fixture `tests/data/train_parity.bin` is the compact CPU case,
+with `--nonzero-projections`, so the whole graph is active at step 0. It runs as
 `//tests:train_parity_test` (CPU) and `//tests:train_parity_cuda_test` (GPU).
 Because the fixture shares the exact batches, this gate covers the model,
-backward pass, optimizer, and schedules but **not** the data pipeline; the
-loader difference is tracked as entry D1 in [parity.md](parity.md).
+backward pass, optimizer, and schedules. It does **not** cover the data
+pipeline, and the loader difference is entry D1 in [parity.md](parity.md).
 The same source builds as the standalone `//tests:train_parity` binary for an
 arbitrary production fixture:
 
 ```bash
-python3 tools/dump_training_fixtures.py train --out /tmp/train_parity_d8_s512_50.bin \
+python3 tools/dump_fixtures.py train --out /tmp/train_parity_d8_s512_50.bin \
     --layers 8 --heads 4 --kv-heads 4 --embd 512 --vocab 32768 --pad-to 32768 \
     --seq 512 --batch 8 --steps 50 --window L --adam-eps 1e-4
 tools/nanochat gpu --profile t2-parity -- \
@@ -294,8 +294,8 @@ The notebooks directory adds two T0 tests:
 runs both. They ride `//:all_tests` and the default `tools/nanochat test`.
 
 The Python targets use the local `python3` toolchain from `rules_python`, so
-they need no third-party wheel. `tools/dump_runtime_fixtures.py api`,
-`tools/dump_model_fixtures.py plan`, and `tools/dump_data_fixtures.py chat` produce the
+they need no third-party wheel. `tools/dump_fixtures.py api`,
+`tools/dump_fixtures.py plan`, and `tools/dump_fixtures.py chat` produce the
 committed fixtures offline.
 
 ## Finite-difference checks

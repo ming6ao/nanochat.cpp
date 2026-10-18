@@ -14,7 +14,7 @@
 //
 // The same source builds as `//tests:numerics_trace_test` (CPU),
 // `//tests:numerics_trace_cuda_test` (GPU), and the simulator leg runs the CPU
-// target under `--config=sim`. See `tools/dump_runtime_fixtures.py numerics`
+// target under `--config=sim`. See `tools/dump_fixtures.py numerics`
 // for the generator and `tests/numerics_trace.h` for the record format.
 
 #include <cstdint>

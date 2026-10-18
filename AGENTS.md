@@ -11,9 +11,10 @@ See `DESIGN.md` for the architecture. This file is about process.
 > wrapper for you. Run `tools/nanochat help`; see [docs/sandbox.md](docs/sandbox.md)
 > and [docs/testing.md](docs/testing.md). Executables refuse to start outside it.
 
-The host: one **GTX 1080 Ti (sm_61, 11 GB)** under **WSL2**, driver 536.99,
-CUDA 12.0, Bazel 9.2.0 (pinned in `.bazelversion`, run via Bazelisk), no
-cmake/ninja/clang. CUPTI is **not** available under
+The host: one **GTX 1080 Ti (sm_61, 11 GB)** under **WSL2**. The driver is
+536.99, and CUDA is 12.0. The project pins Bazel 9.2.0 in `.bazelversion` and
+runs it through Bazelisk. The host has no cmake, ninja, or clang. CUPTI is **not**
+available under
 WSL2, so Nsight/perf profiling must happen on native Linux.
 
 ---
@@ -26,7 +27,7 @@ happen through the integrator.
 
 | Workstream | Owns | Depends on |
 |---|---|---|
-| **Architect / Integrator** | `include/nanochat/*.h`, `MODULE.bazel`, `.bazelrc`, top-level `BUILD` files, `tools/nanochat`, `README.md`, `DESIGN.md`, `AGENTS.md`, `CONTRIBUTING.md`, `docs/**` | — |
+| **Architect / Integrator** | `include/nanochat/*.h`, `MODULE.bazel`, `.bazelrc`, top-level `BUILD` files, `tools/nanochat`, `python/nanochat_cpp/cli.py`, `python/nanochat_cpp/_entry.py`, `README.md`, `DESIGN.md`, `AGENTS.md`, `CONTRIBUTING.md`, `docs/**` | — |
 | **Runtime** | `include/nanochat/tensor.h`, `src/tensor.cc`, `backends/cpu/` | frozen `kernels.h` |
 | **Oracle** | `tools/dump_*.py`, `tests/`, `tests/data/*.bin` | frozen `tensor.h` |
 | **Kernel agents** (one per family) | `backends/cuda/kernels/<family>.cu` + `<family>_test.cc` + `<family>_benchmark.cc` in the same directory | frozen `kernels.h` |
@@ -35,7 +36,7 @@ happen through the integrator.
 | **Workflow** | `src/ops.cc`, `src/model.cc`, `src/generate.cc` | `kernels.h`, CPU backend |
 | **Optimizer** | `src/optim.cc` | `kernels.h` |
 | **Harness** | `src/train.cc`, `src/data.cc`, `src/eval.cc`, `src/*_main.cc`, `src/device_profile.cc`, `include/nanochat/{data,scheduler,logger,mfu}.h` | Model API |
-| **Python surface** | `python/**`, `bindings/**` | C ABI `capi.h`, Model API |
+| **Python surface** | `python/**` except `cli.py` and `_entry.py`, `bindings/**` | C ABI `capi.h`, Model API |
 | **Data pipeline** | `src/tokenizer/**`, `src/parquet/**`, `include/nanochat/{tokenizer,bpe_trainer}.h` | frozen `data.h` |
 | **Notebooks** | `notebooks/**`, `tools/kaggle/**` | `docs/host-portability.md` |
 | **Simulator** | `tools/cuda_sim/**` (the API interposer, the emulation engine, the collective mock, `cuda_sim.map`, `check_symbols.sh`) | `docs/simulator.md`, frozen `tensor.h` |
@@ -79,7 +80,7 @@ Parallelism is gated on interface readiness, not on agent availability.
    `gpu` test). Fall back to a Makefile if `rules_cuda` blocks.
 2. Freeze `kernels.h`, `tensor.h`, `config.h`, `model.h`.
 3. CPU reference backend: every kernel as a naive loop.
-4. `tools/dump_training_fixtures.py oracle` + `tests/data/debug_state.bin` fixtures.
+4. `tools/dump_fixtures.py oracle` + `tests/data/debug_state.bin` fixtures.
 5. `Model` skeleton on the CPU backend (forward + backward end to end).
 
 **Wave 1 (parallel).** Kernel agents each own one family: the implementation,
@@ -106,10 +107,12 @@ finite-difference checks, oracle parity, and formatting — lives in
 
 ## 5. Coordinating the single local GPU via the sandbox gateway
 
-There is **one GPU** and **one host**. The failure modes to avoid are several
-agents launching training jobs or benchmarks at once — thrashing the 11 GB card
-and invalidating timings — and a runaway test exhausting host RAM or CPU. Both
-are handled at the process-launch boundary by `tools/sandbox.sh` (limits) and
+There is **one GPU** and **one host**. Two failure modes are worth avoiding.
+The first is several agents launching training jobs or benchmarks at once. That
+thrashes the 11 GB card and invalidates timings. The second is a runaway test
+that exhausts host RAM or CPU.
+
+The process-launch boundary handles both, through `tools/sandbox.sh` (limits) and
 the GPU job queue (one worker owns the GPU). See
 [docs/gpu-queue-plan.md](docs/gpu-queue-plan.md) and
 [docs/sandbox.md](docs/sandbox.md).
@@ -143,9 +146,9 @@ tools/nanochat gpuq status            # the queue depth and the worker
 
 Below it, the GPU queue owns the device. One worker process runs the jobs in
 first-in, first-out order, and it assigns the devices. The worker runs each job
-through `tools/sandbox.sh`, which applies a cgroup v2 budget (RAM, CPU, pids,
-wall clock) through the **unprivileged systemd user manager** — no root, no
-container runtime — and verifies the limits were applied. Full sources:
+through `tools/sandbox.sh`. That script applies a cgroup v2 budget (RAM, CPU,
+pids, wall clock) through the **unprivileged systemd user manager**, then
+verifies the limits. It needs no root and no container runtime. Full sources:
 `tools/nanochat`, `python/nanochat_cpp/gpu_queue.py`, `tools/sandbox.sh`,
 `tools/sandbox/profiles.conf`.
 
@@ -212,7 +215,7 @@ cc_test(
   will eventually collide with a test; run benchmarks through the queue and
   record the commit hash.
 - **`CUDA_LAUNCH_BLOCKING=1`** only for debugging, never for timing.
-- **Profile on native Linux.** Under WSL2, CUPTI is unavailable; do not attempt
+- **Profile on native Linux.** Under WSL2, CUPTI is unavailable; do not try
   Nsight there.
 - **Detect a stuck GPU.** If a job leaves the device in a bad state, the
   worker's `nvidia-smi` gate refuses the next job until it clears; the

@@ -1,9 +1,9 @@
 # tools/ — the execution entry point and host tooling.
 #
-# The offline fixture generators use four grouped scripts. They keep distinct
-# commands and output formats, but share the record writer where their layouts
-# match. Their optional reference packages load only for the selected command.
-# The scripts run on the host and are source files, not build targets.
+# The offline fixture generators are one grouped script, `dump_fixtures.py`,
+# with the shared helpers in `fixture_common.py`. The script runs on the host
+# and is a source file, not a build target. See
+# docs/script-consolidation-plan.md.
 #
 # `convert_checkpoint.py` forwards to the tested implementation in
 # `python/nanochat_cpp/checkpoint.py`. The native-tokenizer tools are described
@@ -16,36 +16,37 @@ package(default_visibility = ["//visibility:public"])
 exports_files([
     "check_tokenizer_parity.py",
     "convert_checkpoint.py",
-    "dump_data_fixtures.py",
-    "dump_model_fixtures.py",
-    "dump_runtime_fixtures.py",
-    "dump_training_fixtures.py",
+    "dump_fixtures.py",
+    "fixture_common.py",
     "fixture_format.py",
     "gen_unicode_tables.py",
     "nanochat",
     "sandbox.sh",
     "lint.sh",
-    "prune_bazel_output_bases",
 ])
 
+# The sandbox launcher and its resources. `tools/nanochat` wraps the launcher,
+# and `python/tests/contract_test.py` runs both from the runfiles tree, so the
+# files travel together.
 filegroup(
-    name = "dump_training_fixtures",
-    srcs = ["dump_training_fixtures.py", "fixture_format.py"],
+    name = "sandbox_scripts",
+    srcs = [
+        "sandbox.sh",
+        "sandbox/nanochat.slice",
+        "sandbox/profiles.conf",
+        "sandbox/verify.sh",
+    ],
 )
 
+# The merged fixture generator and its shared helpers. The contract suite
+# reads the usage line, and a fixture run needs both files.
 filegroup(
-    name = "dump_model_fixtures",
-    srcs = ["dump_model_fixtures.py", "fixture_format.py"],
-)
-
-filegroup(
-    name = "dump_data_fixtures",
-    srcs = ["dump_data_fixtures.py", "fixture_format.py"],
-)
-
-filegroup(
-    name = "dump_runtime_fixtures",
-    srcs = ["dump_runtime_fixtures.py"],
+    name = "fixtures",
+    srcs = [
+        "dump_fixtures.py",
+        "fixture_common.py",
+        "fixture_format.py",
+    ],
 )
 
 # The reference-checkpoint converter. See `docs/python.md`.
@@ -73,16 +74,6 @@ filegroup(
     ],
 )
 
-# T0 test for the output-base reaper. Hermetic and CPU-only: it builds a
-# synthetic Bazel output user root under TEST_TMPDIR and never touches the real
-# cache. See tools/prune_test.sh.
-sh_test(
-    name = "prune_test",
-    srcs = ["prune_test.sh"],
-    args = ["$(location :prune_bazel_output_bases)"],
-    data = ["prune_bazel_output_bases"],
-)
-
 # T0 syntax test for the Kaggle host scripts. Hermetic and CPU-only: it runs
 # `bash -n` on each script and never touches the network.
 sh_test(
@@ -103,7 +94,6 @@ sh_test(
 test_suite(
     name = "all",
     tests = [
-        ":prune_test",
         ":kaggle_scripts_test",
     ],
 )

@@ -50,10 +50,10 @@ Status values:
 Two data fixtures pin the model and optimizer against the reference:
 
 - `tests/debug_state.bin` (forward, backward, and a few optimizer steps) via
-  `tools/dump_training_fixtures.py oracle`.
+  `tools/dump_fixtures.py oracle`.
 - `tests/data/train_parity.bin` (a full training trajectory: initial
   parameters, the exact token/target batch at every step, and the per-step
-  loss, gradient norm, and parameter norms) via `tools/dump_training_fixtures.py train`.
+  loss, gradient norm, and parameter norms) via `tools/dump_fixtures.py train`.
 
 Both fixtures **share the initial parameters and the exact batches** with the
 C++ side. They isolate the model, backward pass, optimizer, and schedules from
@@ -67,7 +67,7 @@ tools/nanochat test --gpu //tests:oracle_cuda_test //tests:train_parity_cuda_tes
 
 A third fixture pins the tokenizer. `tests/data/tokenizer_fixture.bin` records
 the reference merges, token bytes, split cases, encode cases, and decode cases
-from `tools/dump_data_fixtures.py tokenizer`. The two C++ tests match it on the CPU and
+from `tools/dump_fixtures.py tokenizer`. The two C++ tests match it on the CPU and
 never import Python:
 
 ```bash
@@ -136,7 +136,7 @@ rows against the reference rows on a fixed corpus.
 **Impact:** none. The packing is the reference packing.
 
 **Evidence:** `//tests:loader_parity_test` compares the C++ rows to a fixture
-that `tools/dump_data_fixtures.py loader` produced from the reference loader. The
+that `tools/dump_fixtures.py loader` produced from the reference loader. The
 fixture shares the documents, the tokenizer, the buffer size, and the source
 batch size with the C++ side.
 
@@ -267,10 +267,10 @@ statistics contract; only the summation order differs. See
 The reference initializes with PyTorch's global RNG; nanochat.cpp uses a
 xorshift64\* source in `src/model.cc` (`InitWeights`).
 
-The **distributions** are identical (verified against `GPT.init_weights`): `wte`
-normal std 0.8, `lm_head`
+The **distributions** are identical (verified against `GPT.init_weights`). The
+values are `wte` normal std 0.8, `lm_head`
 normal std 0.001, attention projections uniform with standard deviation
-`1/sqrt(hidden)`, `c_proj` zero, `mlp.c_fc` at 0.4× that scale, and the scalar,
+`1/sqrt(hidden)`, `c_proj` zero, and `mlp.c_fc` at 0.4× that scale. The scalar,
 smear-gate, value-embedding, and value-gate initializations all match. The
 **concrete values** differ, so the same seed does not reproduce the reference
 weights; the parity fixtures sidestep this by sharing the initial parameters.
@@ -300,12 +300,12 @@ warmdown length with Python's `round`. Python rounds half to even, so
 The two forms differ only when `warmdown_ratio * num_iterations` is exactly a
 half-integer.
 
-A 5-step `tools/dump_training_fixtures.py train` run at the section 6.2 shape uses the
+A 5-step `tools/dump_fixtures.py train` run at the section 6.2 shape uses the
 default ratio `0.5`, so the product is `2.5`. The C++ warmdown then started one
 step early and changed the learning rate and the Muon momentum at the last two
 steps. The loss error was `0.146` and the parameter L2 error was `0.372`
 against the PyTorch reference. The fixture is not committed; regenerate it with
-`tools/dump_training_fixtures.py train --steps 5`.
+`tools/dump_fixtures.py train --steps 5`.
 
 `WarmdownIters()` now uses `std::nearbyint` under the default `FE_TONEAREST`
 mode, and it evaluates the product in `double`. This matches Python's `round`.
@@ -374,8 +374,9 @@ reference before the first step. The later rungs consume these rows.
 **Evidence:** none yet. Phase C of `sft-parity-plan.md` adds the gate
 `//python:sft_data_parity_test` against `tests/data/sft_pack_fixture.bin`.
 
-**Fix direction:** `tools/dump_sft_fixture.py` supplies the reference ids, masks,
-packed rows, and mixture order. Phase B records them. Phase C checks them.
+**Fix direction:** `tools/dump_fixtures.py sft` supplies the reference ids,
+masks, packed rows, and mixture order. Phase B records them. Phase C checks
+them.
 
 ### P5 — SFT arithmetic parity
 

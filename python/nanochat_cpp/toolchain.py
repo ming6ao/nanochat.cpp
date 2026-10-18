@@ -291,15 +291,10 @@ class Toolchain:
         return self._run(["gpuq", *(str(value) for value in argv)])
 
     def doctor(self) -> DoctorReport:
-        """Return the environment report, from JSON when available."""
+        """Return the environment report from the tool's JSON output."""
         result = self._run(["doctor", "--json"], check=False)
         report = _parse_doctor_json(result.stdout)
-        if report is not None:
-            return report
-        # An older shell tool prints text only. Parse what is present.
-        report = _parse_doctor_text(result.stdout)
-        if result.returncode != 0 and not result.stdout.strip() and \
-                not result.stderr.strip():
+        if report is None:
             raise ToolError(result)
         return report
 
@@ -314,7 +309,7 @@ class Toolchain:
 
 
 def _parse_doctor_json(text: str) -> DoctorReport | None:
-    """Parse a JSON doctor report, or return None for a non-JSON tool."""
+    """Parse a JSON doctor report, or return None for a non-JSON report."""
     stripped = text.strip()
     if not stripped.startswith("{"):
         return None
@@ -334,20 +329,6 @@ def _parse_doctor_json(text: str) -> DoctorReport | None:
         else:
             fields[field.name] = "" if value is None else str(value)
     return DoctorReport(raw=text, **fields)
-
-
-def _parse_doctor_text(text: str) -> DoctorReport:
-    """Parse the older text doctor output into a report (best effort)."""
-    values: dict[str, object] = {}
-    names = {field.name for field in dataclasses.fields(DoctorReport)}
-    for line in text.splitlines():
-        if ":" not in line:
-            continue
-        key, _, value = line.partition(":")
-        normalized = key.strip().lower().replace(" ", "_")
-        if normalized in names and normalized != "gpu_queue":
-            values[normalized] = value.strip()
-    return DoctorReport(raw=text, **values)  # type: ignore[arg-type]
 
 
 # -- Module-level surface over one default toolchain ---------------------

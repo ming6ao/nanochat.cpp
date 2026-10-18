@@ -1,7 +1,7 @@
 // CPU oracle test.
 //
 // Reads the committed fixture `tests/data/debug_state.bin` (produced offline by
-// `tools/dump_training_fixtures.py oracle` from nanochat's `gpt.py`) and checks
+// `tools/dump_fixtures.py oracle` from nanochat's `gpt.py`) and checks
 // the reference math that the C++ model must reproduce:
 //
 //   1. the post-softcap logits are `15 * tanh(raw / 15)`;

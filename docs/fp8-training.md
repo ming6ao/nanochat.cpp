@@ -501,7 +501,7 @@ fp32 on save.
 | The `--config=fp8` build define and the `h100` fp8 config | `.bazelrc`, `nanochat.bzl` | Architect and Build |
 | The shared fp8 rounding function and the CPU emulation | `include/nanochat/fp8.h`, `backends/cpu/kernels.cc` | Runtime |
 | The simulator rounding and the `cublasLt` coverage | `tools/cuda_sim/**` | Simulator |
-| The fixtures, the dump command, and the test gates | `tests/`, `tests/data/`, `tools/dump_training_fixtures.py` | Oracle |
+| The fixtures, the dump command, and the test gates | `tests/`, `tests/data/`, `tools/dump_fixtures.py` | Oracle |
 | The checkpoint records | none needed (section 8) | — |
 
 ## 11. Validation
@@ -634,7 +634,7 @@ Each decision cites its basis. The first four are the former open questions.
    generation never build the fp8 operands.
    Basis: `scripts/base_train.py:426`, `:445`, `:472`.
 8. **The fixtures, the producer, and the gate names.** The Oracle owns them.
-   Add the `fp8` command to `tools/dump_training_fixtures.py`, and add the
+   Add the `fp8` command to `tools/dump_fixtures.py`, and add the
    three fixtures of section 11.
 9. **The layout removal.** The fused cast writes the fp8 activation in both
    layouts, and the backward reads the output gradient with a column-major

@@ -354,7 +354,7 @@ changes.
 | Native packed-row loader for SFT | Missing | `src/data.cc` has the pretraining packer only |
 | SFT loop with a dataset-progress schedule and a warm start | Missing | `src/train.cc` has a step-based loop |
 | SFT parity rungs P4 to P7 | Open | No `sft_pack_fixture.bin` or `sft_step_parity_test` yet |
-| RL step binary and the RL parity fixture | Done | `src/rl_step_main.cc`, `tools/dump_training_fixtures.py rl`, `tests/rl_parity_test.cc` |
+| RL step binary and the RL parity fixture | Done | `src/rl_step_main.cc`, `tools/dump_fixtures.py rl`, `tests/rl_parity_test.cc` |
 | RL orchestration worker | Done | `src/rl_worker_main.cc`, `python/nanochat_cpp/rl.py` |
 | SFT bridge command | Done | `src/sft_main.cc`; `python/nanochat_cpp/sft.py` |
 | RL bridge command | Done | `python/nanochat_cpp/rl.py` |
@@ -373,7 +373,8 @@ native shard reader.
 2. Add the BOS-aligned best-fit packer with padding. Mark the padding targets
    with `-1`. (Done: `python/nanochat_cpp/sft_data.py`.)
 3. Add the reference mixture: SmolTalk, MMLU, and GSM8K. (Done.)
-4. Add `tools/dump_sft_fixture.py` for a fixed conversation set. (Remaining.)
+4. Add the `sft` command to `tools/dump_fixtures.py` for a fixed conversation
+   set. (Remaining.)
 5. Add the native packed-row shard reader in `src/data.cc`. (Remaining.)
 
 Gate: `//python:sft_data_test` and a native packer parity test.
@@ -394,7 +395,7 @@ Gate: A short SFT run at T2. Compare the loss curve to the reference.
 Owner: harness for `src/`; oracle for `tools/**` and `tests/**`.
 
 1. Add a file-driven `rl_step` binary.
-2. Add `tools/dump_training_fixtures.py rl`. Record the reference advantages, the targets,
+2. Add `tools/dump_fixtures.py rl`. Record the reference advantages, the targets,
    and the first-step trajectory.
 3. Normalize by `num_valid * num_passes * examples_per_rank`.
 

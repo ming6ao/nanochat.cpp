@@ -232,10 +232,10 @@ Two traps follow from the reference:
   `scalars`, but `num_matmul_params` counts it as a matrix. `CountParams`
   follows `num_scaling_params`.
 
-A new tool `tools/dump_model_fixtures.py plan` writes `tests/data/plan_fixture.bin`
+A new tool `tools/dump_fixtures.py plan` writes `tests/data/plan_fixture.bin`
 from the reference. The Oracle workstream owns the tool and the fixture
 (`AGENTS.md` section 1). The test `plan_test.py` compares every field. The
-existing `tools/dump_training_fixtures.py train` holds token and loss data only, so it
+existing `tools/dump_fixtures.py train` holds token and loss data only, so it
 cannot pin the plan.
 
 ### 4.4 The Python surface
@@ -406,9 +406,19 @@ Notebook uses the `none` backend and calls `ChatEvaluator` directly.
 
 ## 6. Orchestration layer
 
-The orchestration layer exposes every `tools/nanochat` command as a Python
-function. It calls the shell tool through `subprocess`. It never calls Bazel,
-the sandbox, or the GPU queue directly.
+The host tool has two Python layers, and one command table.
+
+`python/nanochat_cpp/cli.py` is the command line. It owns the dispatch, the
+argument assembly, the Bazel wiring, the build lock, and the sandbox and queue
+routing. `tools/nanochat` is a shim that starts it, so the path stays stable
+for the Bazel `--run_under` strings. The shell keeps only the resource
+launcher, `tools/sandbox.sh`. See `docs/script-consolidation-plan.md`
+(section 4, decisions 1 and 10).
+
+`nanochat_cpp.toolchain` is the typed client. It exposes every command as a
+Python function, builds the argument list, runs `tools/nanochat` through
+`subprocess`, and reads the result. It never calls Bazel, the sandbox, or the
+GPU queue directly. `cli.py` is the only place that does.
 
 | Python call | Shell command |
 |---|---|
@@ -428,20 +438,21 @@ the sandbox, or the GPU queue directly.
 | `dispatch(name, *args)` | any command, by name |
 | `commands()` | the command list |
 
-The command table in `_entry.py` is the single source of truth. Each command
-function reads the table. A new shell subcommand is one table row.
+The command table in `_entry.py` is the single source of truth. It holds the
+command list, the help lines, and the summary of each row. `cli.py` renders the
+usage block from it and dispatches one handler per row. `toolchain.py` reads it
+for `commands()` and `dispatch()`. A new subcommand is one row.
 
 `CommandResult` holds `argv`, `returncode`, `stdout`, `stderr`, and `seconds`.
 `ToolError` carries the failing `argv`, the return code, and `stderr`.
 `doctor()` returns a `DoctorReport`.
 
-The shell tool gains one flag, `doctor --json`. The Python layer parses the
-JSON. A text fallback covers an older shell tool.
+`tools/nanochat doctor --json` emits one JSON object. The typed client parses
+it. Both sides share the `_entry` table, so the layer has one code path.
 
 When the process already runs inside a sandbox or a queued job, the layer must
-not submit another job. The layer reads `NANOCHAT_SANDBOX` and
-`NANOCHAT_GPU_QUEUED`, as `launcher.launch` does today. The change removes
-`launcher.py`.
+not submit another job. `cli.py` reads `NANOCHAT_SANDBOX` and
+`NANOCHAT_GPU_QUEUED`. This rule removed `launcher.py`.
 
 ## 7. Checkpoint conversion
 
@@ -557,7 +568,7 @@ no GPU.
 | `smear_gate` disagrees between the two reference functions. | Section 4.3 pins the assignment. The fixture pins both functions. |
 | HumanEval needs the reference package. | A skipped `TaskReport` and a `None` chat_core. A local runner is a later step. |
 | One task failure stops the run. | Per-task `BaseException` isolation in `ChatEvaluator.run`. |
-| The orchestration layer duplicates the shell logic. | The layer only builds `argv` and reads the result. |
+| The typed client duplicates the command table. | One table (`_entry.py`) renders the help text, drives the command line, and backs `commands()`. The contract suite compares the client `argv` with the tool's `--dry-run` plan. |
 | The shell text changes. | `toolchain_test.py` checks the argv for every command. |
 
 ## 13. Decisions
@@ -586,6 +597,6 @@ Owner decisions:
 3. Add owner rows for `bindings/**` and `python/**` to `AGENTS.md` section 1.
    Name the `src/BUILD.bazel` editor.
 4. Confirm that the Oracle workstream owns `tests/data/plan_fixture.bin` and
-   `tools/dump_model_fixtures.py plan`.
+   `tools/dump_fixtures.py plan`.
 5. Decide whether the deferred local HumanEval runner becomes a tracked
    follow-up.

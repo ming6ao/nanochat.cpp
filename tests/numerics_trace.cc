@@ -202,7 +202,7 @@ DocumentSourceFactory FixedFactory() {
 }
 
 OptimizerConfig TraceOptimizerConfig() {
-  // The reference recipe (tools/dump_runtime_fixtures.py api) with clipping
+  // The reference recipe (tools/dump_fixtures.py api) with clipping
   // disabled, so the trace records unclipped gradients. `adam_eps = 1e-4`
   // matches the committed fixtures: several parameters have a true gradient of
   // exactly zero at this initialization (docs/testing.md).

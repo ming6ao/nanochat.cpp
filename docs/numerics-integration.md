@@ -318,7 +318,7 @@ before this gate.
 
 ### Phase 1: trace primitives, training trace, and tolerance calibration
 
-1. The Oracle writes `tools/dump_runtime_fixtures.py numerics`.
+1. The Oracle writes `tools/dump_fixtures.py numerics`.
 2. The Oracle adds the trace writer and the hash helper.
 3. The Oracle writes the training emitter. The emitter builds the model with
    `Model::Create` and calls `InitWeights(seed)`. The emitter then drives
@@ -434,7 +434,7 @@ per-merge GPU budget in [AGENTS.md](../AGENTS.md) section 5.5.
   vocabulary. Keep `seq_len` at or below 256.
 - The golden file depends on the pinned host thread count, on the tokenizer
   artifact of the evaluation phase, and on the eval forward path. Regenerate it
-  with `python3 tools/dump_runtime_fixtures.py numerics` after a change to any
+  with `python3 tools/dump_fixtures.py numerics` after a change to any
   one of them.
 - The trace covers fp32 only, the only build precision (docs/precision.md).
 

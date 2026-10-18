@@ -35,7 +35,7 @@ covers the SFT data, the SFT arithmetic, the SFT loop, or the SFT validation.
 `//tests:numerics_trace_test` records an SFT masked loss and an SFT gradient
 norm (`tests/numerics_trace.cc` lines 802 to 845). That trace is a cross-target
 regression guard. Its golden file comes from the C++ emitter, not from torch
-(`tools/dump_runtime_fixtures.py numerics`). It uses a synthetic mask and
+(`tools/dump_fixtures.py numerics`). It uses a synthetic mask and
 takes no optimizer step. It gives no reference evidence for SFT arithmetic.
 
 ## 3. The four rungs
@@ -56,7 +56,7 @@ The warm start leans on entry `P3` and on `LoadOptimizerState`
 
 ## 4. Required fixtures
 
-Add three fixtures. Follow the pattern of `tools/dump_training_fixtures.py train`.
+Add three fixtures. Follow the pattern of `tools/dump_fixtures.py train`.
 
 ### 4.1 `tests/data/sft_pack_fixture.bin`
 
@@ -148,10 +148,10 @@ The fixture and the loop must share these values.
 | Phase | Owner | Deliverable | Gate |
 |---|---|---|---|
 | A. Freeze the contract | Architect | Add `P4` to `P7` to `parity.md`. Update `post-training.md` sections 10 and 11. Set the tolerances from the oracle fixtures and the training-parity harness in `docs/testing.md` (loss `1e-5`, parameter `1e-4`, fp32 CUDA about `1e-5`). | Document review and the ASD-STE100 checker |
-| B. Fixtures | Oracle | Add `tools/dump_sft_fixture.py`. Commit the three fixtures. | The fixtures load on the CPU with no reference checkout |
+| B. Fixtures | Oracle | Add the `sft` command to `tools/dump_fixtures.py`. Commit the three fixtures. | The fixtures load on the CPU with no reference checkout |
 | C. R1 data parity | Python surface for `python/tests/`; Oracle for the fixture | Extend `python/tests/sft_data_test.py` against `sft_pack_fixture.bin`. Use the pinned tokenizer. Check the mixture order and the validation rows. | `tools/nanochat test //python:sft_data_parity_test` at T0 |
 | D. R2 arithmetic parity | Harness and Oracle | Add `tests/sft_step_parity_test.cc`. Drive an N-step trajectory from the embedded base parameters and moments. Compare loss, gradient norm, and parameter L2 per step. Add the warm start. Extend the numeric trace with one SFT optimizer step, and regenerate `tests/data/numerics_golden_10l.bin` and the tolerance table in `docs/numerics-integration.md` section 4. | T0, then T1 at the tiny shape, then T2 |
-| E. R3 schedule fixture | Oracle and Harness | Add `tools/dump_sft_loop_fixture.py`. Record progress, epoch, the rate multiplier, and the momentum. Add a unit test. | T0 |
+| E. R3 schedule fixture | Oracle and Harness | Add the `sft_loop` command to `tools/dump_fixtures.py`. Record progress, epoch, the rate multiplier, and the momentum. Add a unit test. | T0 |
 | F. R3 native reader and `sft_main` | Harness for `src/data.cc` and `src/train.cc`; Python surface for the bridge | Add the packed-row source in `src/data.cc`. Add `sft_main` and `nc.sft.run`. Add the progress schedule. Consume the R2 warm start. | `//tests:sft_parity_test` at T2 |
 | G. R3 and R4 loop and validation parity | Integrator | Run both implementations from one base checkpoint. Compare the loss curve, the validation bits-per-byte, ChatCORE, and the final parameter L2. Set `P6` and `P7`. | T2, then the `parity.md` update |
 

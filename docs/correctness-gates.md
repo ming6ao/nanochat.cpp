@@ -186,7 +186,7 @@ Keep the greedy-identifier row exact.
 Status: delivered for the CPU and simulator legs. The fp8 golden is
 `tests/data/numerics_golden_10l_fp8.bin`, produced by the CPU emitter under
 `--config=fp8`, through
-`tools/dump_runtime_fixtures.py numerics --precision fp8`. The test picks the
+`tools/dump_fixtures.py numerics --precision fp8`. The test picks the
 golden by the build precision and prints a skip when a precision has no golden.
 The fp8 rows are in [numerics-integration.md](numerics-integration.md)
 section 4.
