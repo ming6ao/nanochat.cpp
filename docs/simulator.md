@@ -372,7 +372,7 @@ The compile gate is secondary. It needs no interposer and no GPU.
   fp32, cuda).
 - `tools/nanochat simulate --device h100 --mode compile` builds
   `//backends/cuda:all_kernels` and the host graph for that architecture.
-- The gate holds the build lock. It takes no GPU broker.
+- The gate holds the build lock. It takes no GPU queue.
 - The gate enables `-Werror` through `--config=sim-gate`. `nanochat.bzl` adds
   `-Xcompiler -Werror` and the nvcc `-Werror all-warnings` class, and it
   excludes the deprecation warning for the legacy cuBLAS enums through
@@ -479,7 +479,7 @@ tools/nanochat simulate --device h100 --suite kernel
 The command does this:
 
 1. Builds the needed targets under the build lock.
-2. Runs the tests with the `t0-cpu` sandbox profile and no GPU broker.
+2. Runs the tests with the `t0-cpu` sandbox profile and no GPU queue.
 3. For the correctness suite, adds `--config=sim` and the selected precision.
 4. For the API suite, builds `//tools/cuda_sim:cuda_sim_interposer` and
    `//tests:cuda_sim_preload_test` under `--config=cuda`, resolves the mock's

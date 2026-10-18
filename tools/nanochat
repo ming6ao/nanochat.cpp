@@ -4,15 +4,15 @@
 # usage: tools/nanochat <command> [args...]
 #
 # Every test, training, eval, benchmark, and verification run goes through here
-# so the resource sandbox, the GPU broker, and the Bazel test wiring are chosen
+# so the resource sandbox, the GPU queue, and the Bazel test wiring are chosen
 # once and cannot be assembled incorrectly. Run `tools/nanochat help` for the
-# command list. See docs/sandbox.md and docs/testing.md.
+# command list. See docs/sandbox.md, docs/testing.md, and docs/gpu-queue-plan.md.
 set -euo pipefail
 
 here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 root=$(cd -- "$here/.." && pwd)
 sandbox="$here/sandbox.sh"
-broker="$here/gpu.sh"
+self="$here/nanochat"
 
 usage() {
   cat <<'EOF'
@@ -20,32 +20,37 @@ tools/nanochat <command> [args...]
 
   build [targets...]         bazel build (default //...; serialized)
   test [--gpu] [--config NAME] [targets...]
-                             run tests; every test is sandboxed per action
+                             run tests; every test is sandboxed per action,
+                             and every GPU action is submitted to the queue
   check [--gpu]              build, then CPU tests (and GPU tests with --gpu)
   lint [file...]             style gate: clang-format + the text checks
   shutdown                   stop this workspace's Bazel server now
   prune [--apply] [--worktree DIR]
                              reap orphaned Bazel output bases (dry run by
                              default); see docs/sandbox.md
-  run <profile> -- <cmd...>  run a command under a sandbox profile
-  dist [opts] -- <cmd...>    one process per rank; one broker lock for the
+  gpuq <action> [opts]       the GPU job queue: submit, list, status, wait,
+                             logs, cancel, start, stop; see
+                             docs/gpu-queue-plan.md
+  run <profile> -- <cmd...>  run a command under a sandbox profile; a GPU
+                             profile is submitted to the queue
+  dist [opts] -- <cmd...>    one process per rank; one queue job for the
                              group; sets the NANOCHAT_* rank variables and
                              expands a `{rank}` token in the command. See
                              docs/distributed-launch.md
-  client [opts] -- <cmd...>  one client process; one broker lock for the full
+  client [opts] -- <cmd...>  one client process; one queue job for the full
                              device set; the client sees all local devices as
                              one mesh. See docs/client-runtime-design.md
   train -- <cmd...>          alias for: run train -- <cmd...>
   rl    -- <cmd...>          alias for: run train -- <cmd...>
   eval  -- <cmd...>          alias for: run eval  -- <cmd...>
   bench -- <cmd...>          alias for: run t3-bench -- <cmd...>
-  profile [opts]             build + run the attention benchmark under the GPU broker
+  profile [opts]             build + run the attention benchmark in the queue
   roofline [opts]            build + run the performance model (roofline bound)
-                             CPU only, no GPU broker; see
+                             CPU only, no GPU queue; see
                              docs/performance-model.md
-  doctor [--json]            print environment, device, sandbox, and lock state
+  doctor [--json]            print environment, device, sandbox, and queue state
   simulate [--device NAME] [--suite S] [--mode compile] [--precision P]
-                             S0 CPU-only simulator (no GPU, no broker); see
+                             S0 CPU-only simulator (no GPU, no queue); see
                              docs/simulator.md. Suites: correctness fp8-fast
                              api collective kernel profile all (default all)
                              `correctness` also carries the staged numeric
@@ -54,7 +59,7 @@ tools/nanochat <command> [args...]
                              (docs/correctness-gates.md section 5.1)
                              Precision: fp32 (default) bf16 fp8
   verify -- <cmd...>         alias for: run t2-parity -- <cmd...>
-  gpu [--profile P] -- <cmd> acquire the GPU broker, then run
+  gpu [--profile P] -- <cmd> submit one job to the GPU queue
   help                       this message
 
 Profiles: t0-cpu t1-gpu t2-parity t3-bench train eval
@@ -97,8 +102,8 @@ fi
 # running several at once multiplies the per-server memory budget and has
 # exhausted the shared host. The lock lives on this shell's descriptor 9 and is
 # closed on the child (9>&-) so the detached Bazel server cannot inherit it --
-# that inheritance is what deadlocked the GPU broker before. Idle servers are
-# reaped by `startup --max_idle_secs` in .bazelrc; `tools/nanochat shutdown`
+# that inheritance is what deadlocked the old GPU broker before. Idle servers
+# are reaped by `startup --max_idle_secs` in .bazelrc; `tools/nanochat shutdown`
 # reaps one immediately. Set NANOCHAT_BUILD_LOCK to override the path.
 build_lock=${NANOCHAT_BUILD_LOCK:-/tmp/nanochat-build.lock}
 with_build_lock() {
@@ -113,6 +118,20 @@ run_profile() { # profile [--] cmd...
   [[ ${1:-} == "--" ]] && shift
   (( $# )) || die "no command given; use: tools/nanochat run $profile -- <cmd...>"
   exec "$sandbox" --profile "$profile" -- "$@"
+}
+
+# Submit a GPU job to the queue and wait for its exit code
+# (docs/gpu-queue-plan.md). Inside a sandbox or a queued job the command runs
+# directly: the queue already sandboxed it, and a nested scope is not useful.
+submit_profile() { # profile [--] cmd...
+  local profile=$1
+  shift
+  [[ ${1:-} == "--" ]] && shift
+  (( $# )) || die "no command given; use: tools/nanochat run $profile -- <cmd...>"
+  if [[ -n ${NANOCHAT_SANDBOX:-} || -n ${NANOCHAT_GPU_QUEUED:-} ]]; then
+    exec "$@"
+  fi
+  exec "$self" gpuq submit --profile "$profile" -- "$@"
 }
 
 (( $# )) || {
@@ -185,12 +204,20 @@ case "$command" in
       profile=t0-cpu
       tag_filter=-gpu
     fi
-    # --run_under sandboxes each test action; --spawn_strategy=local is required
-    # so the wrapper can reach the systemd user manager and /sys/fs/cgroup.
+    # --run_under wraps each test action. A CPU action runs under the sandbox
+    # directly. A GPU action submits to the queue instead: the worker applies
+    # the sandbox and owns the device (docs/gpu-queue-plan.md section 3.4).
+    # --spawn_strategy=local is required so the CPU wrapper can reach the
+    # systemd user manager and /sys/fs/cgroup.
+    if (( gpu )); then
+      run_under="$self gpuq submit --profile=$profile --"
+    else
+      run_under="$sandbox --profile=$profile --"
+    fi
     bazel_args=(
       "${targets[@]}"
       "--test_tag_filters=$tag_filter"
-      "--run_under=$sandbox --profile=$profile --"
+      "--run_under=$run_under"
       --spawn_strategy=local
       "${configs[@]}"
     )
@@ -198,6 +225,9 @@ case "$command" in
       # A GPU run selects the CUDA backend so the shared workflow (//src:model)
       # links the kernels under test instead of the CPU reference.
       bazel_args+=(--config=cuda)
+      # One GPU test action at a time. The queue serializes the jobs anyway;
+      # this keeps the Bazel side from holding many blocked wrappers.
+      bazel_args+=(--local_test_jobs=1)
       # The bare `--config=cuda` selects the NCCL collective. Fall back to the
       # native ring when NCCL is absent, so the GPU tests build on a host
       # without it (docs/distributed-native-plan.md section 7).
@@ -205,14 +235,7 @@ case "$command" in
         bazel_args+=(--config=native)
       fi
     fi
-    if (( gpu )); then
-      # Hold the single-GPU lock for the whole suite, and the build lock while
-      # the suite's targets compile.
-      with_build_lock "$broker" --lock-only --profile "$profile" -- \
-        "$bazel_bin" test "${bazel_args[@]}"
-    else
-      with_build_lock "$bazel_bin" test "${bazel_args[@]}"
-    fi
+    with_build_lock "$bazel_bin" test "${bazel_args[@]}"
     ;;
 
   check)
@@ -232,17 +255,31 @@ case "$command" in
     (( $# )) || die "run needs a profile"
     profile=$1
     shift
-    run_profile "$profile" "$@"
+    # t0-cpu needs no GPU, so it runs directly. A GPU profile is submitted to
+    # the queue (docs/gpu-queue-plan.md section 7).
+    if [[ $profile == t0-cpu ]]; then
+      run_profile "$profile" "$@"
+    else
+      submit_profile "$profile" "$@"
+    fi
+    ;;
+
+  gpuq)
+    # The GPU job queue (docs/gpu-queue-plan.md). The worker owns the GPU and
+    # runs the jobs in order. The client submits a job, waits, and returns the
+    # job exit code.
+    exec python3 "$root/python/nanochat_cpp/gpu_queue.py" "$@"
     ;;
 
   dist)
-    # Data-parallel launch: one process per rank, one broker lock and one
+    # Data-parallel launch: one process per rank, one queue job and one
     # sandbox scope for the group (docs/distributed-launch.md). The command is
     # identical for every rank; the rank values travel in the environment and a
     # `{rank}` token in an argument expands to the rank index. Rank 0 starts
     # first so it wins the port bind race. See docs/distributed-launch.md.
     nproc=2
     device=""
+    device_given=0
     dist_profile=train
     master=127.0.0.1
     port=29500
@@ -257,6 +294,7 @@ case "$command" in
           ;;
         --device)
           device=${2:?--device needs a value}
+          device_given=1
           shift 2
           ;;
         --profile)
@@ -289,6 +327,14 @@ case "$command" in
     done
     (( ${#cmd[@]} )) || die "dist: no command given; use: tools/nanochat dist -- <cmd...>"
     (( nproc >= 1 )) || die "dist: --nproc-per-node must be >= 1"
+    if [[ -z $device && -n ${NANOCHAT_GPU_DEVICES:-} ]]; then
+      # The worker owns the pool. Take the first nproc devices from it
+      # (docs/gpu-queue-plan.md section 4.2).
+      IFS=',' read -ra pool <<< "$NANOCHAT_GPU_DEVICES"
+      (( ${#pool[@]} >= nproc )) || \
+        die "dist: the worker assigned ${#pool[@]} device(s), need $nproc"
+      device=$(IFS=,; echo "${pool[*]:0:nproc}")
+    fi
     if [[ -z $device ]]; then
       device=$(seq -s, 0 $((nproc - 1)))
     fi
@@ -300,19 +346,26 @@ case "$command" in
     fi
     mkdir -p "$log_dir"
 
-    # One broker lock for the whole rank group. A `train` lock per rank would
-    # deadlock on a multi-card host, so the group is the unit. Kaggle has no
-    # broker, so skip when the sandbox backend is `none` or another broker is
-    # already active (docs/distributed-launch.md section 5).
-    if [[ -z ${NANOCHAT_SANDBOX:-} && -z ${NANOCHAT_DIST_BROKERED:-} && \
+    # One queue job for the whole rank group (docs/gpu-queue-plan.md section
+    # 3.4). The worker sandboxes the launcher, and the ranks are its children,
+    # so a rank does not take a nested scope. Kaggle has no queue, so skip when
+    # the sandbox backend is `none` or the job is already queued.
+    if [[ -z ${NANOCHAT_SANDBOX:-} && -z ${NANOCHAT_GPU_QUEUED:-} && \
           ${NANOCHAT_SANDBOX_BACKEND:-auto} != none ]]; then
-      export NANOCHAT_DIST_BROKERED=1
-      broker_args=(--lock-only --device "$device" --)
-      reexec=("$0" dist --nproc-per-node "$nproc" --device "$device"
+      reexec=("$self" dist --nproc-per-node "$nproc"
               --profile "$dist_profile" --master "$master" --port "$port"
               --log-dir "$log_dir")
+      (( device_given )) && reexec+=(--device "$device")
       (( dist_json )) && reexec+=(--json)
-      exec "$broker" "${broker_args[@]}" "${reexec[@]}" -- "${cmd[@]}"
+      exec "$self" gpuq submit --profile "$dist_profile" -- \
+        "${reexec[@]}" -- "${cmd[@]}"
+    fi
+
+    # Inside a queued job the outer scope already applies the budget and the
+    # CPU affinity, and the ranks inherit both.
+    launcher=()
+    if [[ -z ${NANOCHAT_GPU_QUEUED:-} ]]; then
+      launcher=("$sandbox" --profile "$dist_profile" --)
     fi
 
     start=$(date +%s.%N)
@@ -331,7 +384,7 @@ case "$command" in
         NANOCHAT_LOCAL_RANK="$rank" \
         NANOCHAT_MASTER_ADDR="$master" \
         NANOCHAT_MASTER_PORT="$port" \
-        "$sandbox" --profile "$dist_profile" -- "${expanded[@]}" \
+        "${launcher[@]}" "${expanded[@]}" \
         >"$stdio" 2>&1 &
       pids+=($!)
       # Rank 0 binds the rendezvous port; give it a moment before the peers
@@ -375,22 +428,25 @@ case "$command" in
     ;;
 
   client)
-    # Single-process multi-device client: one broker lock for the full device
-    # set, then one sandbox scope (docs/client-runtime-design.md section 14).
-    # The client enumerates the devices itself, so only CUDA_VISIBLE_DEVICES
-    # travels to the process. Without --device, every local accelerator is
-    # selected.
+    # Single-process multi-device client: one queue job for the full device
+    # set, then one sandbox scope (docs/client-runtime-design.md section 14,
+    # docs/gpu-queue-plan.md section 3.4). The client enumerates the devices
+    # itself, so only CUDA_VISIBLE_DEVICES travels to the process. Without
+    # --device, every local accelerator is selected.
     client_device=""
+    client_device_given=0
     client_profile=train
     cmd=()
     while (( $# )); do
       case "$1" in
         --device)
           client_device=${2:?--device needs a value}
+          client_device_given=1
           shift 2
           ;;
         --device=*)
           client_device=${1#--device=}
+          client_device_given=1
           shift
           ;;
         --profile)
@@ -421,14 +477,19 @@ case "$command" in
         client_device=0
       fi
     fi
-    # One broker lock for the whole device set. A per-device lock would let two
-    # clients split one model across the cards and corrupt the run.
-    if [[ -z ${NANOCHAT_SANDBOX:-} && -z ${NANOCHAT_CLIENT_BROKERED:-} && \
+    # One queue job for the whole device set. The worker owns the devices, so
+    # the client does not name one. A per-device split would let two clients
+    # split one model across the cards and corrupt the run.
+    if [[ -z ${NANOCHAT_SANDBOX:-} && -z ${NANOCHAT_GPU_QUEUED:-} && \
           ${NANOCHAT_SANDBOX_BACKEND:-auto} != none ]]; then
-      export NANOCHAT_CLIENT_BROKERED=1
-      reexec=("$0" client --device "$client_device" --profile "$client_profile")
-      exec "$broker" --lock-only --device "$client_device" -- \
+      reexec=("$self" client --profile "$client_profile")
+      (( client_device_given )) && reexec+=(--device "$client_device")
+      exec "$self" gpuq submit --profile "$client_profile" -- \
         "${reexec[@]}" -- "${cmd[@]}"
+    fi
+    # Inside a queued job the outer scope already applies the budget.
+    if [[ -n ${NANOCHAT_GPU_QUEUED:-} ]]; then
+      exec "${cmd[@]}"
     fi
     exec "$sandbox" --profile "$client_profile" -- "${cmd[@]}"
     ;;
@@ -440,26 +501,26 @@ case "$command" in
     exec "$here/lint.sh" "$@"
     ;;
 
-  train) run_profile train "$@" ;;
-  rl) run_profile train "$@" ;;
-  eval) run_profile eval "$@" ;;
-  bench) run_profile t3-bench "$@" ;;
+  train) submit_profile train "$@" ;;
+  rl) submit_profile train "$@" ;;
+  eval) submit_profile eval "$@" ;;
+  bench) submit_profile t3-bench "$@" ;;
 
   profile)
-    # Standard performance battery: build the attention benchmark, then run it
-    # under the exclusive benchmark profile with the GPU broker held. Extra
-    # arguments pass through to the binary (--json, --out PATH, --iters N,
-    # --rounds N). Use this instead of `bench` when timing must be exclusive.
+    # Standard performance battery: build the attention benchmark, then submit
+    # it as one job under the exclusive benchmark profile. Extra arguments pass
+    # through to the binary (--json, --out PATH, --iters N, --rounds N). Use
+    # this instead of `bench` when the timing must be exclusive.
     with_build_lock "$bazel_bin" build //backends/cuda/kernels:attention_benchmark
     exec 9>&-
-    exec "$broker" --profile t3-bench -- \
+    exec "$self" gpuq submit --profile t3-bench -- \
       "$root/bazel-bin/backends/cuda/kernels/attention_benchmark" "$@"
     ;;
 
   roofline)
     # The analytic performance model (docs/performance-model.md): build the
     # roofline estimator and run it under the CPU sandbox. It needs no GPU and
-    # no broker. Extra arguments pass through to the binary (--device,
+    # no queue. Extra arguments pass through to the binary (--device,
     # --precision, --batch, --devices, --tokens, --json).
     with_build_lock "$bazel_bin" build //src:roofline_main
     exec 9>&-
@@ -507,7 +568,7 @@ case "$command" in
     if [[ -n $slice ]]; then
       d_sandbox=$(echo "$slice" | paste -sd' ' -)
     fi
-    # The simulator's S0 tier is CPU-only and takes no broker. The profile name
+    # The simulator's S0 tier is CPU-only and takes no queue. The profile name
     # is a build-time capability override, so it is worth reporting beside the
     # device: a run with it set computes on the reference backend as the named
     # target (docs/simulator.md section 10).
@@ -519,18 +580,11 @@ case "$command" in
     else
       d_sandbox_backend="none (systemd unavailable)"
     fi
-    # The broker keeps one lock per device set, so probe the same path that
-    # tools/gpu.sh locks. See docs/host-portability.md section 5.
-    gpu_devices=${NANOCHAT_GPU_DEVICES:-0}
-    gpu_lock="/tmp/nanochat-gpu-${gpu_devices//,/_}.lock"
-    d_gpu_lock=""
-    if [[ -e $gpu_lock ]]; then
-      if flock -n "$gpu_lock" -c true 2>/dev/null; then
-        d_gpu_lock=free
-      else
-        d_gpu_lock="HELD (another job is running)"
-      fi
-    fi
+    # The GPU queue owns the device and the jobs (docs/gpu-queue-plan.md
+    # section 9). Report the worker, the pool, and the depth as one object.
+    d_gpu_queue=$(python3 "$root/python/nanochat_cpp/gpu_queue.py" \
+      status --json 2>/dev/null || true)
+    [[ -n $d_gpu_queue ]] || d_gpu_queue='{}'
 
     if (( doctor_json )); then
       NANOCHAT_DOCTOR_repo="$d_repo" \
@@ -542,14 +596,22 @@ case "$command" in
       NANOCHAT_DOCTOR_gpu_procs="$d_gpu_procs" \
       NANOCHAT_DOCTOR_sandbox="$d_sandbox" \
       NANOCHAT_DOCTOR_sandbox_backend="$d_sandbox_backend" \
-      NANOCHAT_DOCTOR_gpu_lock="$d_gpu_lock" \
+      NANOCHAT_DOCTOR_gpu_queue="$d_gpu_queue" \
       NANOCHAT_DOCTOR_sim="$d_sim" \
       python3 - <<'PY'
 import json, os
 keys = ("repo", "revision", "branch", "nvcc", "bazel", "gpu", "gpu_procs",
-        "sandbox", "sandbox_backend", "gpu_lock", "sim")
-print(json.dumps({key: os.environ.get("NANOCHAT_DOCTOR_" + key, "")
-                  for key in keys}))
+        "sandbox", "sandbox_backend", "gpu_queue", "sim")
+def value(key):
+    raw = os.environ.get("NANOCHAT_DOCTOR_" + key, "")
+    if key != "gpu_queue":
+        return raw
+    try:
+        parsed = json.loads(raw)
+    except ValueError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+print(json.dumps({key: value(key) for key in keys}))
 PY
     else
       echo "nanochat.cpp doctor"
@@ -565,7 +627,16 @@ PY
       [[ -n $d_sandbox ]] && echo "sandbox:   $d_sandbox"
       echo "sandbox backend: $d_sandbox_backend"
       echo "sim profile: $d_sim"
-      [[ -n $d_gpu_lock ]] && echo "gpu lock:  $d_gpu_lock"
+      GPU_QUEUE_JSON="$d_gpu_queue" python3 -c '
+import json, os
+queue = json.loads(os.environ["GPU_QUEUE_JSON"])
+if queue.get("alive"):
+    print("gpu queue: worker %s devices %s queued %s running %s" % (
+        queue.get("worker_id", ""), queue.get("devices", ""),
+        queue.get("queued", 0), queue.get("running_job") or "-"))
+else:
+    print("gpu queue: idle (no worker)")
+'
       for log in /tmp/nanochat-gpu.log /tmp/nanochat-sandbox.log; do
         [[ -f $log ]] || continue
         echo "--- tail $log ---"
@@ -578,7 +649,7 @@ PY
       done
     fi
     ;;
-  verify) run_profile t2-parity "$@" ;;
+  verify) submit_profile t2-parity "$@" ;;
 
   simulate)
     # The S0 simulator (docs/simulator.md section 10). Every suite is CPU-only:
@@ -587,7 +658,7 @@ PY
     # collective mock runs the gradient-sync seam over four rank processes, and
     # the emulation engine runs the real device kernels on the host. None of
     # them touches the GPU, so this command takes the build lock and never the
-    # GPU broker.
+    # GPU queue.
     sim_mode=run
     sim_device=h100
     sim_suite=all
@@ -615,7 +686,7 @@ PY
       # The compile gate (section 8): build the whole CUDA backend for the
       # target architecture under --config=sim-gate, so warnings become errors
       # and ptxas reports the register and shared-memory use. No GPU and no
-      # broker; the build lock serializes it against every other build.
+      # queue; the build lock serializes it against every other build.
       #
       # The aggregate library alone carries no actions, so the gate also builds
       # the binaries that link the whole backend: those compile and link every
@@ -669,7 +740,7 @@ PY
     # The API suite is the only one that interposes over the real CUDA
     # backend: build the preloadable mock and a CUDA-linked test, check the
     # symbol gate against a real CUDA binary, then run the test with
-    # `LD_PRELOAD` pointing at the mock. No GPU broker: the preloaded mock
+    # `LD_PRELOAD` pointing at the mock. No GPU queue: the preloaded mock
     # serves memory from the host and never calls the real runtime.
     if [[ $sim_suite == api || $sim_suite == all ]]; then
       with_build_lock "$bazel_bin" build --config=cuda \
@@ -748,7 +819,34 @@ PY
     ;;
 
   gpu)
-    exec "$broker" "$@"
+    # Submit one job to the GPU queue (docs/gpu-queue-plan.md section 7).
+    # Inside a sandbox or a queued job the command runs directly.
+    if [[ -n ${NANOCHAT_SANDBOX:-} || -n ${NANOCHAT_GPU_QUEUED:-} ]]; then
+      gpu_profile=t1-gpu
+      while (( $# )); do
+        case "$1" in
+          --profile)
+            gpu_profile=${2:?--profile needs a name}
+            shift 2
+            ;;
+          --profile=*)
+            gpu_profile=${1#--profile=}
+            shift
+            ;;
+          --)
+            shift
+            break
+            ;;
+          *) break ;;
+        esac
+      done
+      (( $# )) || die "gpu: no command given"
+      if [[ -n ${NANOCHAT_GPU_QUEUED:-} ]]; then
+        exec "$@"
+      fi
+      exec "$sandbox" --profile "$gpu_profile" -- "$@"
+    fi
+    exec "$self" gpuq submit "$@"
     ;;
 
   *)

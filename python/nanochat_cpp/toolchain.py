@@ -2,7 +2,7 @@
 
 The layer exposes every ``tools/nanochat`` command as a Python function. It
 calls the shell tool through ``subprocess`` and never calls Bazel, the sandbox,
-or the GPU broker directly. :class:`CommandResult` carries the result and
+or the GPU queue directly. :class:`CommandResult` carries the result and
 :class:`ToolError` reports a failure.
 
 The command table in :mod:`nanochat_cpp._entry` is the single source of truth.
@@ -36,6 +36,7 @@ __all__ = [
     "doctor",
     "eval",
     "gpu",
+    "gpuq",
     "lint",
     "prune",
     "profile",
@@ -82,8 +83,10 @@ class ToolError(RuntimeError):
 class DoctorReport:
     """The parsed ``tools/nanochat doctor --json`` result.
 
-    ``raw`` holds the unparsed output so a caller can show it when the shell
-    tool is older and prints text only.
+    ``gpu_queue`` holds the queue object: ``worker_id``, ``alive``,
+    ``devices``, ``depth``, ``running_job``, and ``queued``. ``raw`` holds the
+    unparsed output so a caller can show it when the shell tool is older and
+    prints text only.
     """
 
     repo: str = ""
@@ -95,7 +98,7 @@ class DoctorReport:
     gpu_procs: str = ""
     sandbox: str = ""
     sandbox_backend: str = ""
-    gpu_lock: str = ""
+    gpu_queue: dict = dataclasses.field(default_factory=dict)
     raw: str = ""
 
 
@@ -225,7 +228,7 @@ class Toolchain:
 
     def client(self, argv: Sequence[str], *, device: str | None = None,
                profile: str = "train") -> CommandResult:
-        """Run one client process under one broker lock for the device set.
+        """Run one client process under one queue job for the device set.
 
         The client enumerates every local device itself, builds one mesh, and
         trains in one process. See ``docs/client-runtime-design.md`` section
@@ -265,18 +268,27 @@ class Toolchain:
 
     def gpu(self, argv: Sequence[str], *,
             profile: str | None = None) -> CommandResult:
-        """Acquire the GPU broker, then run ``argv``.
+        """Submit one GPU job to the queue, then wait for it.
 
-        When the process already runs inside the sandbox, the broker is
-        already held, so the command runs directly. This mirrors
-        ``launcher.launch`` and avoids a nested lock.
+        When the process already runs inside the sandbox or a queued job, the
+        command runs directly. This mirrors the shell entry point and avoids a
+        nested job.
         """
-        if self.env.get("NANOCHAT_SANDBOX"):
+        if self.env.get("NANOCHAT_SANDBOX") or \
+                self.env.get("NANOCHAT_GPU_QUEUED"):
             return self._run(argv)
         prefix = ["gpu"]
         if profile is not None:
             prefix.extend(["--profile", str(profile)])
         return self._run([*prefix, "--", *argv])
+
+    def gpuq(self, argv: Sequence[str]) -> CommandResult:
+        """Run one ``tools/nanochat gpuq`` action.
+
+        ``argv`` is the action and its arguments, for example
+        ``["status", "--json"]`` or ``["submit", "--", "binary"]``.
+        """
+        return self._run(["gpuq", *(str(value) for value in argv)])
 
     def doctor(self) -> DoctorReport:
         """Return the environment report, from JSON when available."""
@@ -317,22 +329,25 @@ def _parse_doctor_json(text: str) -> DoctorReport | None:
         if field.name == "raw":
             continue
         value = payload.get(field.name, "")
-        fields[field.name] = "" if value is None else str(value)
+        if field.name == "gpu_queue":
+            fields[field.name] = value if isinstance(value, dict) else {}
+        else:
+            fields[field.name] = "" if value is None else str(value)
     return DoctorReport(raw=text, **fields)
 
 
 def _parse_doctor_text(text: str) -> DoctorReport:
     """Parse the older text doctor output into a report (best effort)."""
-    values: dict[str, str] = {}
+    values: dict[str, object] = {}
+    names = {field.name for field in dataclasses.fields(DoctorReport)}
     for line in text.splitlines():
         if ":" not in line:
             continue
         key, _, value = line.partition(":")
         normalized = key.strip().lower().replace(" ", "_")
-        if normalized in {field.name for field in
-                          dataclasses.fields(DoctorReport)}:
+        if normalized in names and normalized != "gpu_queue":
             values[normalized] = value.strip()
-    return DoctorReport(raw=text, **values)
+    return DoctorReport(raw=text, **values)  # type: ignore[arg-type]
 
 
 # -- Module-level surface over one default toolchain ---------------------
@@ -424,6 +439,10 @@ def profile(argv: Sequence[str] = ()) -> CommandResult:
 def gpu(argv: Sequence[str], *,
         profile: str | None = None) -> CommandResult:
     return _toolchain().gpu(argv, profile=profile)
+
+
+def gpuq(argv: Sequence[str]) -> CommandResult:
+    return _toolchain().gpuq(argv)
 
 
 def doctor() -> DoctorReport:

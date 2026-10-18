@@ -123,7 +123,7 @@ The native parquet reader matches `pyarrow` on real ClimbMix shards. See
 
 ## 6. The launch
 
-One process per rank, one broker lock for the group:
+One process per rank, one queue job for the group:
 
 ```bash
 tools/nanochat dist --nproc-per-node 8 --profile train \
@@ -137,7 +137,7 @@ tools/nanochat dist --nproc-per-node 8 --profile train \
     --save-every 1000 --eval-every 500 --log-every 10
 ```
 
-`tools/nanochat dist` starts one process per rank. It takes one broker lock
+`tools/nanochat dist` starts one process per rank. It submits one queue job
 for the group, applies the `train` sandbox profile, and sets the five rank
 variables that `train_main` reads:
 
@@ -166,7 +166,7 @@ Before the run:
    host memory, the process count, and the wall clock. It does not bound the
    device memory.
 2. Confirm the aggregate ceiling in `tools/sandbox/nanochat.slice`.
-3. Treat the eight cards as one resource. Take one broker lock for the whole
+3. Treat the eight cards as one resource. Submit one queue job for the whole
    group, as `tools/nanochat dist` does.
 4. Confirm that `tools/nanochat doctor` reports the device, the sandbox, and the
    lock state.

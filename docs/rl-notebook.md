@@ -128,7 +128,7 @@ C++ but its C ABI binding is not. Phase 6 is delivered in part.
   directly. It must not call `tools/nanochat`, because Kaggle has no systemd
   user manager.
 - **Workstation.** The facade calls `tools/nanochat` with a new profile and
-  command, for example `tools/nanochat train -- rl_worker ...`. The GPU broker
+  command, for example `tools/nanochat train -- rl_worker ...`. The GPU queue
   and the sandbox apply.
 - **Checkpoints.** The `rl` path already resolves to `chatrl_checkpoints`
   (`python/nanochat_cpp/checkpoint.py`). A warm start and the optimizer state

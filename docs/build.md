@@ -38,12 +38,14 @@ nanochat.cpp/
       __init__.py  _core.py  _lib.py  _build.py  api.py
       plan.py  chat.py  toolchain.py  _entry.py  checkpoint.py
       data.py  tasks.py  eval_fixture.py  reference.py
+      gpu_queue.py               # the GPU job queue (worker + client)
     tests/{core,build,api,plan,chat,toolchain,data,checkpoint,eval_fixture}_test.py
+    tests/gpu_queue_test.py      # T0 test for the queue
     BUILD.bazel
   tests/oracle_test.cc  tests/data/debug_state.bin
   tools/
     nanochat                   # the single execution entry point
-    gpu.sh  sandbox.sh         # broker + sandboxed launcher
+    sandbox.sh                 # the sandboxed launcher
     sandbox/profiles.conf      # per-profile cgroup budgets
     sandbox/verify.sh          # read-back check of the applied limits
     sandbox/nanochat.slice     # aggregate user-slice budget (drop-in)

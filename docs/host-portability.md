@@ -144,22 +144,26 @@ Bazel puts the runfiles on the test's `LD_LIBRARY_PATH`. Without the client
 value, `libcuda` is unresolvable and `cudaMalloc` fails with
 `CUDA_ERROR_INSUFFICIENT_DRIVER`.
 
-A test action does not inherit the broker's shell, so `CUDA_VISIBLE_DEVICES`
-never reaches it on its own. The test wrapper (`tools/sandbox.sh`) therefore
-sets `CUDA_VISIBLE_DEVICES` from the forwarded `NANOCHAT_GPU_DEVICES`. Without
-that step a GPU suite runs on the default device even when the broker locked a
-different one.
+A test action does not inherit the worker's shell, so `CUDA_VISIBLE_DEVICES`
+never reaches it on its own. The worker exports `NANOCHAT_GPU_DEVICES` for the
+job, and the test wrapper (`tools/sandbox.sh`) sets `CUDA_VISIBLE_DEVICES` from
+it. Without that step a GPU job runs on the default device even when the worker
+owned a different one.
 
-## 5. GPU broker and device selection
+## 5. GPU queue and device selection
 
-The broker serializes heavy GPU jobs. Keep the flock lock and the `nvidia-smi`
-gate on every host. Add device selection:
+The GPU job queue serializes the heavy GPU jobs
+([gpu-queue-plan.md](gpu-queue-plan.md)). The worker owns the devices and the
+`nvidia-smi` gate. The client does not name a device.
 
-- `tools/gpu.sh --device N` sets `CUDA_VISIBLE_DEVICES=N`.
-- Keep one lock per device, at `/tmp/nanochat-gpu-<N>.lock`.
-- `NANOCHAT_GPU_DEVICES` sets the default device set. The test wrapper turns
-  it into `CUDA_VISIBLE_DEVICES` for the test action (section 4.6).
-- Two independent jobs can use two devices at the same time.
+- The worker reads the pool from `nvidia-smi`, or from `NANOCHAT_GPU_DEVICES`
+  when it is set.
+- At claim, the worker assigns the pool to the job and exports
+  `NANOCHAT_GPU_DEVICES`.
+- The test wrapper turns that value into `CUDA_VISIBLE_DEVICES` for the job
+  (section 4.6).
+- Stage 1 runs one job at a time and assigns the whole pool. A later stage can
+  run one job per free device subset.
 
 The `none` backend does not enforce the aggregate RAM and CPU budget. The host
 quota is the only ceiling. Do not start two heavy jobs on one card.
@@ -461,8 +465,8 @@ A Kaggle session ends at the time limit. The container and its processes stop.
 The model is single-device. One job uses one card. Two cards give two options.
 
 Option A: two independent jobs. Run one job on device 0 and one on device 1.
-Each job takes its own broker lock with `tools/gpu.sh --device N`. This option
-needs only the device selection from section 5.
+The queue runs one job at a time, so this option needs stage Q6 of
+[gpu-queue-plan.md](gpu-queue-plan.md): one job per free device subset.
 
 Option B: data-parallel training. One process owns each card. The processes
 all-reduce their gradients with NCCL, then each process steps its optimizer.

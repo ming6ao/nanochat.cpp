@@ -18,7 +18,7 @@ tested on CPU. All tiers run under a resource profile; see
 ### S0: the simulator tier
 
 S0 is the CPU-only tier that exercises H100/H200-class behavior without a
-Hopper device ([simulator.md](simulator.md)). It takes no GPU broker, so it runs
+Hopper device ([simulator.md](simulator.md)). It takes no GPU queue, so it runs
 like T0 -- under the `t0-cpu` profile, in parallel with other T0 work. The
 suites are:
 
@@ -136,11 +136,13 @@ works in both builds. `tests/param_stage.h` holds that helper.
 `tools/nanochat test` runs Bazel with
 `--run_under='tools/sandbox.sh --profile=… --'`, so every test action gets its
 own cgroup, and forces `--spawn_strategy=local` so the wrapper can reach the
-systemd user manager. GPU suites hold the broker lock for the whole invocation
-with `tools/gpu.sh --lock-only`. Sandboxing per test action means the result
-does not depend on whether a Bazel server is already running. The trade-off is
-that Bazel's own filesystem sandbox is disabled for these runs; the resource
-sandbox is the priority. See [sandbox.md](sandbox.md).
+systemd user manager. A GPU suite uses
+`--run_under='tools/nanochat gpuq submit --profile=t1-gpu --'` instead: the
+queue worker sandboxes each test action and owns the device
+([gpu-queue-plan.md](gpu-queue-plan.md)). Sandboxing per test action means the
+result does not depend on whether a Bazel server is already running. The
+trade-off is that Bazel's own filesystem sandbox is disabled for these runs;
+the resource sandbox is the priority. See [sandbox.md](sandbox.md).
 
 ## Fixture generator commands
 

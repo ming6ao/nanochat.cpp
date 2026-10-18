@@ -23,7 +23,6 @@ exports_files([
     "fixture_format.py",
     "gen_unicode_tables.py",
     "nanochat",
-    "gpu.sh",
     "sandbox.sh",
     "lint.sh",
     "prune_bazel_output_bases",

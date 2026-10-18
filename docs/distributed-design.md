@@ -280,13 +280,13 @@ flag can override one field.
 
 One process owns one rank. `tools/nanochat dist` starts the group. The
 environment carries the rank values, in the style of `torchrun`. The `dist`
-command takes one broker lock and one sandbox scope for the whole group.
+command submits one queue job and applies one sandbox scope for the whole group.
 [distributed-launch.md](distributed-launch.md) is the authority for the
 launch.
 
 This design removes the per-rank launch in `notebooks/parallel.py`. That code
-took the broker lock once per rank, so a multi-card host could deadlock.
-Kaggle hid the fault, because the sandbox and the broker are off there.
+took a lock once per rank, so a multi-card host could deadlock. Kaggle hid the
+fault, because the sandbox and the queue are off there.
 
 ### 10.1 The best fit and the measured run
 

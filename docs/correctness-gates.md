@@ -17,7 +17,7 @@ and [attention-tensor-core.md](attention-tensor-core.md).
 
 ## 1. The split
 
-The simulator is the S0 tier. It is CPU-only and it takes no GPU broker
+The simulator is the S0 tier. It is CPU-only and it takes no GPU queue
 ([testing.md](testing.md) section "S0: the simulator tier"). The simulator
 computes real values on the CPU reference backend. It cannot compute a
 tensor-core result, because the CPU has no tensor core.

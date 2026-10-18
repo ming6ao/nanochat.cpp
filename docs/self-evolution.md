@@ -72,7 +72,8 @@ external model is a scaffold. Section 8.4 explains the exit.
 6. **The build is the gate.** A failed build discards the edit and stops the
    step.
 7. **Every job uses the entry point.** `tools/nanochat` applies the sandbox and
-   the broker. See [sandbox.md](sandbox.md). The controller is not a job. It
+   submits the job to the GPU queue. See [sandbox.md](sandbox.md) and
+   [gpu-queue-plan.md](gpu-queue-plan.md). The controller is not a job. It
    runs for hours and it blocks on human input, so it sets
    `NANOCHAT_SANDBOX_BACKEND=none` for itself. Every child job stays under
    `tools/nanochat`.
@@ -243,15 +244,15 @@ editor never writes inside `python/nanochat_cpp/evolve/**` or `tools/evolve`.
 ### 7.11 Model lifecycle manager
 
 The manager owns the GPU tenure. The single card allows one tenant. The manager
-coordinates with `tools/gpu.sh`.
+coordinates with the GPU queue.
 
 ```text
 UNLOADED --load--> REASONING --unload--> UNLOADED
 UNLOADED --load--> TRAINING  --unload--> UNLOADED
 ```
 
-A transition needs the broker lock. The manager frees the model with
-`nanochat_model_free` before it releases the lock. This frees the reason model
+A transition needs the card to be free. The manager frees the model with
+`nanochat_model_free` before it releases the card. This frees the reason model
 before the training job starts.
 
 ### 7.12 Checkpoint registry and Hub transport
@@ -380,7 +381,7 @@ There is one GPU. The loop must serialize the GPU work.
 | Teacher call | Network only | The GPU stays free |
 | Training | GPU held | Long and exclusive |
 | Evaluation | GPU held | Short |
-| Build and test | CPU, and the GPU test tier | Through the broker |
+| Build and test | CPU, and the GPU test tier | Through the queue |
 
 The table has one consequence. The reason model and the training job cannot
 share the card. The unload step is mandatory, not optional. The lifecycle
@@ -396,7 +397,7 @@ manager enforces this rule.
 | The Hub is down | Continue with the local cache |
 | The teacher returns garbage | Retry once, then escalate to the human |
 | The human does not answer | Park the goal, keep the loop on other goals |
-| The GPU is busy | Wait on the broker |
+| The GPU is busy | Wait in the queue |
 
 ## 12. Safety
 
@@ -488,7 +489,7 @@ interfaces.
 | `tasks` | `python/nanochat_cpp/tasks.py` | GSM8K, HumanEval, ARC, MMLU |
 | `checkpoint` | `python/nanochat_cpp/checkpoint.py` | The `NCHKPT01` container |
 | C ABI | `include/nanochat/capi.h` | The in-process compute calls |
-| Tool entry | `tools/nanochat` | The sandbox and the broker |
+| Tool entry | `tools/nanochat` | The sandbox and the GPU queue |
 | Agent runner | `notebooks/pi_agent.py` | An external coding agent |
 
 The agent runner is the precedent for the teacher path. It already streams the
@@ -571,6 +572,6 @@ All five questions are resolved.
   classifier.
 - [training-seam.md](training-seam.md) — the Python and C++ boundary.
 - [rl-notebook.md](rl-notebook.md) — the RL worker bridge.
-- [sandbox.md](sandbox.md) — the resource sandbox and the GPU broker.
+- [sandbox.md](sandbox.md) — the resource sandbox and the GPU queue.
 - [testing.md](testing.md) — the test tiers and the Definition of Done.
 - [eval.md](eval.md) — the evaluation surfaces.

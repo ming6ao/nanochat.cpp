@@ -394,8 +394,8 @@ reduction only.
 
 The client is the entry point. The runtime keeps the sandbox rule.
 
-- The client process runs inside one sandbox scope. It takes one broker lock
-  for the device set.
+- The client process runs inside one sandbox scope. It takes one queue job for
+  the device set.
 - `tools/nanochat run train -- python train.py` is the strict form.
 - The console script `python -m nanochat_cpp.run train.py` re-enters
   `tools/nanochat client`. The user sees one command.
@@ -403,8 +403,8 @@ The client is the entry point. The runtime keeps the sandbox rule.
 The `nanochat_init()` sandbox check stays. A run outside the entry point still
 fails fast.
 
-The broker key is the full device set, for example `0,1,2,3`. One lock covers
-the group. A second run on the same set waits.
+The worker owns the full device set, for example `0,1,2,3`. One job covers the
+group. A second job on the same set waits.
 
 ## 15. The compatibility runtime
 
@@ -485,10 +485,10 @@ Gate: the numerical trace passes on the device mesh.
 ### Phase 4 — The client entry point and the compatibility runtime
 
 1. Add the console script.
-2. Add the broker coverage for the full device set.
+2. Add the queue job for the full device set.
 3. Add Runtime B behind the same interface.
 
-Gate: one command starts a two-device run. One broker lock covers the group.
+Gate: one command starts a two-device run. One queue job covers the group.
 
 ### Phase 5 — Fast collective and data overlap
 
@@ -681,7 +681,7 @@ This section records what the tree implements.
   has one C source of truth.
 - `python/nanochat_cpp/run.py`: the client entry point. It re-enters
   `tools/nanochat client`.
-- `tools/nanochat client`: one broker lock for the full device set, then one
+- `tools/nanochat client`: one queue job for the full device set, then one
   sandbox scope.
 - `notebooks/mesh_train.py`: the thin launcher over the C++ driver. The plan
   writes the job dictionary as JSON for the child, and the child `launch` runs

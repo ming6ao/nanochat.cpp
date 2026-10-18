@@ -2,8 +2,8 @@
 
 One :class:`DistributedPlan` holds the run. :func:`command_for` builds the
 ``train_main`` argument list for one rank. :func:`launch` calls
-``tools/nanochat dist``, which starts one process per card under one broker
-lock, waits, and returns one :class:`RankResult` per rank.
+``tools/nanochat dist``, which starts one process per card under one queue
+job, waits, and returns one :class:`RankResult` per rank.
 
 The gradient sync is the native collective
 (``backends/cuda/collective/native_sync.cu``, selected with
@@ -249,7 +249,7 @@ def launch(plan: DistributedPlan, root: str | Path = ".",
            timeout: float | None = None) -> DistributedResult:
     """Start one process per card through ``tools/nanochat dist``.
 
-    The shell launcher holds one broker lock for the group, sets the
+    The shell launcher submits one queue job for the group, sets the
     ``NANOCHAT_*`` rank variables, and expands ``{rank}`` in the command. It
     returns the parsed JSON summary. ``timeout`` bounds the whole group.
     """

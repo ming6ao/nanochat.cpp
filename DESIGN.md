@@ -107,11 +107,12 @@ move — when it must move, see §7.
 
 Running anything — build, test, training, eval, benchmark, or verification —
 goes through one host-tooling command, `tools/nanochat`. It selects the resource
-profile, applies the sandbox, acquires the GPU broker when needed, and wires the
-Bazel test wrapper. Executables call `nanochat::RequireSandboxOrDie` at startup,
-so a process launched outside the entry point fails loudly instead of consuming
-the host. This is outside L0-L6: it changes neither the kernel seam nor the
-public API. See [docs/sandbox.md](docs/sandbox.md).
+profile, applies the sandbox, submits the GPU job to the queue when needed, and
+wires the Bazel test wrapper. Executables call `nanochat::RequireSandboxOrDie`
+at startup, so a process launched outside the entry point fails loudly instead
+of consuming the host. This is outside L0-L6: it changes neither the kernel seam
+nor the public API. See [docs/sandbox.md](docs/sandbox.md) and
+[docs/gpu-queue-plan.md](docs/gpu-queue-plan.md).
 
 The simulator's S0 tier rides the same entry point: `tools/nanochat simulate`
 runs the CPU-only capability, API, collective, and emulation checks with no GPU

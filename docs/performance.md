@@ -11,13 +11,15 @@ the primary instrument. Kernel counters need native Linux.
 ## 1. Measure through the entry point
 
 Run every timing through `tools/nanochat`. The entry point applies the sandbox
-and the single-GPU broker. Do not run a benchmark binary directly.
+and submits the job to the single-GPU queue. Do not run a benchmark binary
+directly.
 
 - `tools/nanochat doctor` reports the revision, the toolchain, the device, the
-  sandbox limits, and the broker state. Use it before a measurement.
-- `tools/nanochat profile [opts]` builds and runs the attention benchmark under
-  the `t3-bench` profile. The GPU broker stays held. The options are `--json`,
-  `--out PATH`, `--warmup N`, `--iters N`, and `--rounds N`.
+  sandbox limits, and the queue state. Use it before a measurement.
+- `tools/nanochat profile [opts]` builds and submits the attention benchmark
+  under the `t3-bench` profile. The worker holds the GPU for the job. The
+  options are `--json`, `--out PATH`, `--warmup N`, `--iters N`, and
+  `--rounds N`.
 - `tools/nanochat bench -- <binary> ...` runs another benchmark under the
   `t3-bench` profile.
 

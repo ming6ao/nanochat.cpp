@@ -283,7 +283,7 @@ Proposed Python shape:
 # Python renders the conversations and writes a packed shard.
 shard = nc.sft.pack("chatsft.nchsft", conversations, tokenizer, seq_len=512)
 # The facade launches the C++ driver through tools/nanochat, so the
-# sandbox and the GPU broker apply.
+# sandbox and the GPU queue apply.
 nc.sft.run(shard, "chatsft.nchkpt01", num_iterations=1000)
 ```
 

@@ -7,7 +7,7 @@ See `DESIGN.md` for the architecture. This file is about process.
 
 > **Run everything through `tools/nanochat`.** Do not call `bazel test`,
 > `train_main`, `eval_main`, or any `*_test`/`*_dev` binary directly. The entry
-> point applies the resource sandbox, the GPU broker, and the Bazel test
+> point applies the resource sandbox, the GPU job queue, and the Bazel test
 > wrapper for you. Run `tools/nanochat help`; see [docs/sandbox.md](docs/sandbox.md)
 > and [docs/testing.md](docs/testing.md). Executables refuse to start outside it.
 
@@ -110,13 +110,15 @@ There is **one GPU** and **one host**. The failure modes to avoid are several
 agents launching training jobs or benchmarks at once — thrashing the 11 GB card
 and invalidating timings — and a runaway test exhausting host RAM or CPU. Both
 are handled at the process-launch boundary by `tools/sandbox.sh` (limits) and
-`tools/gpu.sh` (the single-GPU lock). See [docs/sandbox.md](docs/sandbox.md).
+the GPU job queue (one worker owns the GPU). See
+[docs/gpu-queue-plan.md](docs/gpu-queue-plan.md) and
+[docs/sandbox.md](docs/sandbox.md).
 
 ### 5.1 Tier the tests
 
 Test tiers are defined in [docs/testing.md](docs/testing.md). The scheduling
 rule here is: T0 runs in parallel under the `t0-cpu` profile; T1/T2/T3 are
-serialized through the broker and exclusive; T3 runs on native Linux.
+serialized through the queue and exclusive; T3 runs on native Linux.
 
 Rule: **the inner development loop is T0.** GPU tiers are gates, not iteration
 tools. If an agent finds itself waiting on the GPU to test logic, it should have
@@ -125,28 +127,32 @@ been testing on CPU.
 ### 5.2 The sandbox gateway
 
 The entry point is **`tools/nanochat`** (`tools/nanochat help`): it picks the
-profile, applies the sandbox, acquires the GPU broker, and builds the correct
-Bazel test command. Use it for every run:
+profile, applies the sandbox, submits the GPU job, and builds the correct Bazel
+test command. Use it for every run:
 
 ```bash
 tools/nanochat build                 # bazel build //...
 tools/nanochat test                  # all non-GPU tests, each sandboxed
-tools/nanochat test --gpu <target>   # GPU tests, broker held for the suite
+tools/nanochat test --gpu <target>   # GPU tests, one queue job per action
 tools/nanochat lint                  # Google C++ Style gate (clang-format + checks)
 tools/nanochat train -- <binary> ...  # profile=train
 tools/nanochat eval  -- <binary> ...  # profile=eval
 tools/nanochat verify -- <binary> ... # profile=t2-parity
+tools/nanochat gpuq status            # the queue depth and the worker
 ```
 
-Below it, `tools/gpu.sh` takes the exclusive GPU lock and refuses to run if the
-device is busy; it hands off to `tools/sandbox.sh`, which applies a cgroup v2
-budget (RAM, CPU, pids, wall clock) through the **unprivileged systemd user
-manager** — no root, no container runtime — and verifies the limits were
-applied. Full sources: `tools/nanochat`, `tools/gpu.sh`, `tools/sandbox.sh`,
+Below it, the GPU queue owns the device. One worker process runs the jobs in
+first-in, first-out order, and it assigns the devices. The worker runs each job
+through `tools/sandbox.sh`, which applies a cgroup v2 budget (RAM, CPU, pids,
+wall clock) through the **unprivileged systemd user manager** — no root, no
+container runtime — and verifies the limits were applied. Full sources:
+`tools/nanochat`, `python/nanochat_cpp/gpu_queue.py`, `tools/sandbox.sh`,
 `tools/sandbox/profiles.conf`.
 
-- GPU suites: `tools/nanochat test --gpu <target>` holds the broker lock for
-  the whole suite; a bare GPU binary runs as `tools/nanochat gpu -- <binary>`.
+- GPU suites: `tools/nanochat test --gpu <target>` submits one job per test
+  action; a bare GPU binary runs as `tools/nanochat gpu -- <binary>`.
+- The queue: `tools/nanochat gpuq list`, `gpuq status`, `gpuq logs <id>`,
+  `gpuq cancel <id>`, `gpuq stop`.
 - A bare CPU test or binary: `tools/nanochat run t0-cpu -- <binary>`.
 - Keep a log (`/tmp/nanochat-gpu.log`) so agents can see who used the GPU, and
   `/tmp/nanochat-sandbox.log` for the per-launch limits.
@@ -203,14 +209,14 @@ cc_test(
   `nanochat::RequireSandboxOrDie` at startup and exit with the corrective
   command when launched outside `tools/nanochat`.
 - **Benchmarks are separate from correctness.** A benchmark that runs anytime
-  will eventually collide with a test; run benchmarks through the broker and
+  will eventually collide with a test; run benchmarks through the queue and
   record the commit hash.
 - **`CUDA_LAUNCH_BLOCKING=1`** only for debugging, never for timing.
 - **Profile on native Linux.** Under WSL2, CUPTI is unavailable; do not attempt
   Nsight there.
-- **Detect a stuck GPU.** If a job leaves the device in a bad state, the broker's
-  `nvidia-smi` gate refuses the next job until it clears; the integrator can
-  `nvidia-smi` / reset.
+- **Detect a stuck GPU.** If a job leaves the device in a bad state, the
+  worker's `nvidia-smi` gate refuses the next job until it clears; the
+  integrator can `nvidia-smi` / reset.
 
 ### 5.5 Merge-gate GPU budget
 
@@ -218,7 +224,7 @@ The integrator runs, per merge:
 
 - `tools/nanochat lint` (the Google C++ Style gate).
 - `bazel test //... --test_tag_filters=-gpu` (all CPU tests, under `t0-cpu`).
-  The S0 simulator suites ride this loop: they are CPU-only and need no broker.
+  The S0 simulator suites ride this loop: they are CPU-only and need no queue.
   Two targets carry `manual` and stay out of it. `//tests:cuda_sim_preload_test`
   needs `tools/nanochat simulate --suite api`. `//tests:numerics_trace_test`
   replays a 10-layer trace, which is too slow for the inner loop; run it
@@ -230,7 +236,7 @@ The integrator runs, per merge:
 - A single T1 GPU smoke test covering the changed family (`t1-gpu`).
 - T2 parity only at Wave boundaries, not per commit (`t2-parity`).
   `tools/nanochat test --gpu //tests:numerics_trace_cuda_test` is the numeric
-  trace at that tier: about ten seconds on the broker, and it needs its own
+  trace at that tier: about ten seconds in the queue, and it needs its own
   `--config=sim` CPU run to be meaningful.
 
 This keeps GPU time bounded and predictable.
@@ -270,7 +276,7 @@ This keeps GPU time bounded and predictable.
 ## 8. Anti-patterns
 
 - Editing a frozen header to make a kernel compile.
-- Running training or long benchmarks on the GPU outside the broker.
+- Running training or long benchmarks on the GPU outside the queue.
 - Running training, eval, a GPU test, or a benchmark without `tools/nanochat`.
 - Calling `bazel test`, `train_main`, `eval_main`, or a `*_test`/`*_dev` binary
   directly instead of going through `tools/nanochat`.

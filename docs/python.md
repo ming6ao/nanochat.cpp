@@ -408,7 +408,7 @@ Notebook uses the `none` backend and calls `ChatEvaluator` directly.
 
 The orchestration layer exposes every `tools/nanochat` command as a Python
 function. It calls the shell tool through `subprocess`. It never calls Bazel,
-the sandbox, or the GPU broker directly.
+the sandbox, or the GPU queue directly.
 
 | Python call | Shell command |
 |---|---|
@@ -424,6 +424,7 @@ the sandbox, or the GPU broker directly.
 | `profile(argv=())` | `profile [opts]` |
 | `doctor()` | `doctor` |
 | `gpu(argv, profile=None)` | `gpu [--profile P] -- <cmd...>` |
+| `gpuq(argv)` | `gpuq <action> ...` |
 | `dispatch(name, *args)` | any command, by name |
 | `commands()` | the command list |
 
@@ -437,9 +438,10 @@ function reads the table. A new shell subcommand is one table row.
 The shell tool gains one flag, `doctor --json`. The Python layer parses the
 JSON. A text fallback covers an older shell tool.
 
-When the process already runs inside a sandbox, the layer must not acquire the
-broker again. The layer reads `NANOCHAT_SANDBOX`, as `launcher.launch` does
-today. The change removes `launcher.py`.
+When the process already runs inside a sandbox or a queued job, the layer must
+not submit another job. The layer reads `NANOCHAT_SANDBOX` and
+`NANOCHAT_GPU_QUEUED`, as `launcher.launch` does today. The change removes
+`launcher.py`.
 
 ## 7. Checkpoint conversion
 

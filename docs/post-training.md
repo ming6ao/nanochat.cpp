@@ -296,7 +296,7 @@ Implementation: `include/nanochat/data.h`; `src/optim_state.h`; `src/optim.cc`;
 - For correctness, the same step logic exists as a file-driven `rl_step` binary.
   That binary consumes a fixture. It is the RL analog of the training-parity
   harness, and it is the gate for the objective.
-- Every run goes through `tools/nanochat`, so the GPU broker and the resource
+- Every run goes through `tools/nanochat`, so the GPU queue and the resource
   sandbox apply ([sandbox.md](sandbox.md)).
 
 Implementation: not in the tree yet (section 11).

@@ -25,7 +25,10 @@ argv = sys.argv[1:]
 if argv and argv[0] == "doctor":
     print(json.dumps({{"repo": "/fake", "revision": "abc", "branch": "main",
                        "nvcc": "release 12.0", "gpu": "fake gpu",
-                       "sandbox_backend": "systemd", "gpu_lock": "free"}}))
+                       "sandbox_backend": "systemd",
+                       "gpu_queue": {{"worker_id": "w1", "alive": True,
+                                     "devices": "0", "depth": 0,
+                                     "running_job": None, "queued": 0}}}}))
 elif argv and argv[0] == "shutdown":
     sys.stderr.write("boom\\n")
     sys.exit(3)
@@ -138,12 +141,23 @@ class ToolchainTest(unittest.TestCase):
                    ["client", "--profile", "train", "--", "python",
                     "train.py"])
 
-    def test_gpu_inside_sandbox_skips_the_broker(self) -> None:
+    def test_gpu_inside_sandbox_skips_the_queue(self) -> None:
         env = dict(self.env)
         env["NANOCHAT_SANDBOX"] = "t2-parity"
         inside = toolchain.Toolchain(entry=self.entry, repo_root=self.tmp.name,
                                      env=env)
         self.check(inside.gpu(["binary"]), ["binary"])
+        queued_env = dict(self.env)
+        queued_env["NANOCHAT_GPU_QUEUED"] = "1"
+        queued = toolchain.Toolchain(entry=self.entry, repo_root=self.tmp.name,
+                                     env=queued_env)
+        self.check(queued.gpu(["binary"]), ["binary"])
+
+    def test_gpuq(self) -> None:
+        self.check(self.toolchain.gpuq(["status", "--json"]),
+                   ["gpuq", "status", "--json"])
+        self.check(self.toolchain.gpuq(["submit", "--", "binary"]),
+                   ["gpuq", "submit", "--", "binary"])
 
     def test_dispatch_and_commands(self) -> None:
         self.check(self.toolchain.dispatch("build", "//a"),
@@ -159,7 +173,8 @@ class ToolchainTest(unittest.TestCase):
         self.assertEqual(report.branch, "main")
         self.assertEqual(report.nvcc, "release 12.0")
         self.assertEqual(report.sandbox_backend, "systemd")
-        self.assertEqual(report.gpu_lock, "free")
+        self.assertEqual(report.gpu_queue["worker_id"], "w1")
+        self.assertTrue(report.gpu_queue["alive"])
         self.assertTrue(report.raw)
 
 

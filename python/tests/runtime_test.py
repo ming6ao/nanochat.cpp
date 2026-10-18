@@ -2,7 +2,7 @@
 
 Two and four replicas that split one global batch equal one replica on the whole
 batch, and the replicas of one runtime stay equal. The test uses a simulated CPU
-mesh, so it needs no GPU and no broker
+mesh, so it needs no GPU and no queue
 (docs/client-runtime-design.md sections 10 and 16).
 """
 

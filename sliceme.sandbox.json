@@ -1,0 +1,4 @@
+{
+  "version": 1,
+  "command": ["tools/nanochat", "gpuq", "submit", "--profile=t0-cpu", "--"]
+}

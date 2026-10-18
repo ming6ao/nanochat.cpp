@@ -66,7 +66,7 @@ falls back to a system `bazel`.
 |---|---|---|---|---|---|
 | `t0-cpu` | 200% | 1.5G / 2G | 128 | 0-1 | default CPU tests, oracle-on-CPU |
 | `t1-gpu` | 200% | 2G / 3G | 128 | 0-1 | tiny kernel tests, `B=2,T=8` |
-| `t2-parity` | 800% | 5G / 6G | 256 | 0-7 | exclusive, GPU broker held |
+| `t2-parity` | 800% | 5G / 6G | 256 | 0-7 | exclusive, GPU queue held |
 | `t3-bench` | 1000% | 5G / 6G | 256 | 0-11 | exclusive, native Linux for Nsight |
 | `train` | 800% | 5G / 6G | 512 | 0-7 | `RuntimeMaxSec` optional |
 | `eval` | 400% | 3G / 4G | 128 | 0-3 | forward only |
@@ -80,36 +80,38 @@ env is the polite hint. The defaults assume the 12 vCPU / 7.7 GiB host; edit
 ## Entry point
 
 Use `tools/nanochat` for every run. It chooses the profile, applies the
-sandbox, acquires the GPU broker, and wires the Bazel test wrapper.
+sandbox, submits the GPU job to the queue, and wires the Bazel test wrapper.
 
 ```bash
 tools/nanochat build                  # bazel build //...
 tools/nanochat test                   # all non-GPU tests, each sandboxed
-tools/nanochat test --gpu <target>    # GPU tests, broker held for the suite
+tools/nanochat test --gpu <target>    # GPU tests, one queue job per action
 tools/nanochat check                  # build, then CPU tests
 tools/nanochat train -- <binary> ...  # profile=train
 tools/nanochat eval  -- <binary> ...  # profile=eval
 tools/nanochat bench -- <binary> ...  # profile=t3-bench
 tools/nanochat verify -- <binary> ... # profile=t2-parity
 tools/nanochat run <profile> -- <cmd> # any profile
+tools/nanochat gpuq status            # the queue depth and the worker
 ```
 
-`tools/nanochat help` lists the commands.
+`tools/nanochat help` lists the commands. The GPU job queue is described in
+[docs/gpu-queue-plan.md](gpu-queue-plan.md).
 
 ### Lower-level scripts
 
 These are the pieces the entry point uses; call them directly only when you
-need to. `tools/gpu.sh` takes the exclusive GPU lock and runs the `nvidia-smi`
-gate; `tools/sandbox.sh` applies the cgroup budget. The broker's lock serializes
-all heavy jobs, not only GPU ones, because RAM and CPU are also single-host
+need to. `tools/sandbox.sh` applies the cgroup budget. The GPU worker owns the
+device and the jobs, so no separate lock file exists. The queue serializes all
+heavy jobs, not only GPU ones, because RAM and CPU are also single-host
 resources.
 
 ```bash
 # A single binary under a profile.
 tools/sandbox.sh --profile=train -- ./bazel-bin/train/train_main --config d8
 
-# GPU binary: broker acquires the lock, then applies a GPU profile.
-tools/gpu.sh --profile=t1-gpu -- ./bazel-bin/.../rms_norm_dev
+# GPU binary: submit one job to the queue and wait for it.
+tools/nanochat gpu --profile=t1-gpu -- ./bazel-bin/.../rms_norm_dev
 
 # Escape the aggregate slice (benchmarks that want the whole host).
 tools/sandbox.sh --no-slice --profile=t3-bench -- ./bench
@@ -138,11 +140,13 @@ Test processes are children of the long-lived Bazel server, so wrapping the
 `bazel` client does not cap them. `tools/nanochat test` handles this by passing
 `--run_under='tools/sandbox.sh --profile=… --'`, which sandboxes each test
 action, together with `--spawn_strategy=local`, which is required so the
-wrapper can reach the systemd user manager and `/sys/fs/cgroup`.
+wrapper can reach the systemd user manager and `/sys/fs/cgroup`. A GPU test
+action uses `--run_under='tools/nanochat gpuq submit --profile=t1-gpu --'`
+instead: the worker sandboxes the test and owns the device.
 
 ```bash
 tools/nanochat test                 # --test_tag_filters=-gpu, per-test sandbox
-tools/nanochat test --gpu <target>  # broker lock held, per-test sandbox
+tools/nanochat test --gpu <target>  # one queue job per test action
 ```
 
 Bazel's own filesystem sandbox is disabled for these runs, so the resource

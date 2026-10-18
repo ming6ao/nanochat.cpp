@@ -18,17 +18,17 @@ The first fault is the layer. The file is process orchestration.
 The notebooks directory ([../notebooks](../notebooks)) holds
 presentation, not orchestration.
 
-The second fault is the broker. `tools/nanochat train` takes the GPU broker
-lock for one rank. Two ranks take the lock twice. A multi-card host then
-blocks, or the run deadlocks. Kaggle hides the fault, because the sandbox and
-the broker are off there.
+The second fault is the GPU queue. `tools/nanochat train` submits one job for
+one rank. Two ranks submit twice, and the queue runs them one after the other.
+A multi-card host then serializes the ranks, or the run blocks. Kaggle hides
+the fault, because the sandbox and the queue are off there.
 
 ## 2. Goals and non-goals
 
 Goals:
 
 - One process per rank.
-- One broker lock for the rank group.
+- One queue job for the rank group.
 - One sandbox scope for the group.
 - A rank contract in the environment, as `torchrun` uses.
 - One shell entry point, `tools/nanochat dist`.
@@ -45,7 +45,7 @@ Non-goals:
 ## 3. Position in the architecture
 
 `train_main` owns one rank. The rank values configure training, so C++
-owns their defaults. The launch, the broker, and the sandbox are host tooling.
+owns their defaults. The launch, the queue, and the sandbox are host tooling.
 `DESIGN.md` section 2.2 and section 6 put them there.
 
 | Task | Owner | File |
@@ -53,7 +53,7 @@ owns their defaults. The launch, the broker, and the sandbox are host tooling.
 | Rank and group values | C++ at L6 | `src/train_main.cc` |
 | Gradient sum | C++ | `src/distributed.cc`, `backends/cuda/nccl_sync.cu` |
 | Process start | Host tooling | `tools/nanochat` |
-| Broker lock | Host tooling | `tools/gpu.sh` |
+| GPU queue job | Host tooling | `python/nanochat_cpp/gpu_queue.py` |
 | Sandbox scope | Host tooling | `tools/sandbox.sh` |
 | Notebook helper | Python | `python/nanochat_cpp/distributed.py` |
 
@@ -97,8 +97,9 @@ tools/nanochat dist [--nproc-per-node N] [--device LIST] [--profile P]
 
 The `dist` command does these steps:
 
-1. Select the device set. The default is `0..N-1`.
-2. Acquire one broker lock for the device set.
+1. Select the device set. The default is `0..N-1`, or the first `N` entries
+   of the worker's pool when `NANOCHAT_GPU_DEVICES` is set.
+2. Submit one queue job for the whole group, and wait for it.
 3. Apply one sandbox profile to the group.
 4. Set `CUDA_VISIBLE_DEVICES`, `NANOCHAT_RANK`, `NANOCHAT_LOCAL_RANK`, and
    `NANOCHAT_WORLD_SIZE` for each rank.
@@ -107,9 +108,9 @@ The `dist` command does these steps:
 7. Wait for every rank. Return the first nonzero status.
 8. Print a summary. With `--json`, print one JSON object.
 
-The `dist` command skips the broker in two cases:
+The `dist` command skips the queue in two cases:
 
-- `NANOCHAT_SANDBOX` has a value, so another broker is active.
+- `NANOCHAT_GPU_QUEUED` has a value, so a queue job already runs it.
 - The sandbox backend is `none`, as on Kaggle.
 
 The `dist` command must kill every rank on a signal. It must also wait for
@@ -190,7 +191,7 @@ Gate: a CPU test covers the flag-over-variable order.
 4. Add the `--json` summary.
 
 Gate: a CPU test with a fake command. The test checks the first nonzero
-status, the rank logs, the signal kill, and one broker acquisition.
+status, the rank logs, the signal kill, and one queue job for the group.
 
 ### Phase 3 — The Python surface
 
@@ -211,8 +212,7 @@ Gate: one short two-rank Kaggle run passes the checkpoint hash check.
 ## 9. Definition of Done
 
 1. `tools/nanochat dist --nproc-per-node 2 -- <command>` starts two ranks.
-2. One broker lock covers the group. A second job on the same device set
-   waits.
+2. One queue job covers the group. A second job on the same device set waits.
 3. The `dist` command exits with the first nonzero rank status.
 4. A signal kills every rank.
 5. `--json` prints one object with the per-rank fields.
@@ -230,7 +230,7 @@ Gate: one short two-rank Kaggle run passes the checkpoint hash check.
 | A signal leaves an orphan rank | Trap the signal and kill the group. Test it |
 | The log format drifts from the parser | One fixture test pins the format |
 | The move crosses a workstream boundary | Phase 0 assigns the owners first |
-| Kaggle has no broker | Skip the broker when the backend is `none` |
+| Kaggle has no queue | Skip the queue when the backend is `none` |
 
 ## 11. Ownership
 

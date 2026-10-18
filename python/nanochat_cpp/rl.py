@@ -26,7 +26,7 @@ and computes ``advantage = reward - mean(reward)`` per example, then sends an
 
 The worker is started directly when ``NANOCHAT_SANDBOX_BACKEND`` is ``none``
 (the Kaggle notebook, ``docs/python.md`` section 3.1). Otherwise it is started
-through ``tools/nanochat train -- <worker>`` so the GPU broker and the resource
+through ``tools/nanochat train -- <worker>`` so the GPU queue and the resource
 sandbox apply (``docs/rl-notebook.md`` section 6).
 
 This module imports only the Python standard library and the sibling

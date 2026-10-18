@@ -134,7 +134,7 @@ bindings/           the C ABI for the in-process Python API
 python/             the single Python surface: compute, planning, chat,
                     orchestration
 notebooks/          the Kaggle setup module, the T4 notebook, the trial runner
-tools/              entry point, GPU broker, resource sandbox, fixtures
+tools/              entry point, GPU job queue, resource sandbox, fixtures
 tools/cuda_sim/     the CPU-only CUDA simulator
 tools/kaggle/       Kaggle Notebook bootstrap
 docs/               reference and how-to
