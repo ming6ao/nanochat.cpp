@@ -416,7 +416,7 @@ if _command == 'api':
         repo_root = _REPO_ROOT
         parquet = (repo_root / args.parquet).resolve()
         tokenizer = (repo_root / args.tokenizer).resolve()
-        out = Path(args.out)
+        out = Path(args.out or DEFAULT_OUT_BY_PRECISION[args.precision])
         if not out.is_absolute():
             out = repo_root / out
         for path, what in ((parquet, "parquet"), (tokenizer, "tokenizer")):
@@ -452,7 +452,9 @@ if _command == 'api':
 
 if _command == 'numerics':
     __doc__ = textwrap.dedent("""\
-        Generate the staged numeric golden trace, ``tests/data/numerics_golden_10l.bin``.
+        Generate the staged numeric golden trace. The default output is
+        ``tests/data/numerics_golden_10l.bin`` at fp32; ``--precision fp8`` writes
+        ``tests/data/numerics_golden_10l_fp8.bin`` from the fp8 CPU build.
 
         The trace of ``docs/numerics-integration.md`` is one flat list of named records
         in the little-endian container that ``tests/oracle_fixture.h`` reads, under the
@@ -499,7 +501,14 @@ if _command == 'numerics':
     #: One element size per dtype code (`tests/oracle_fixture.h`).
     _ELEM_SIZE = {0: 4, 1: 4, 2: 8, 3: 8, 4: 1}
 
-    DEFAULT_OUT = "tests/data/numerics_golden_10l.bin"
+    # The fp32 golden keeps the original name. Each other precision has its own
+    # file, because a bf16 or fp8 build cannot reproduce the fp32 golden
+    # (docs/precision.md section 6).
+    DEFAULT_OUT_BY_PRECISION = {
+        "fp32": "tests/data/numerics_golden_10l.bin",
+        "bf16": "tests/data/numerics_golden_10l_bf16.bin",
+        "fp8": "tests/data/numerics_golden_10l_fp8.bin",
+    }
     DEFAULT_TOKENIZER = "tests/data/loader_tokenizer.nctoken"
     EMIT_TARGET = "//tests:numerics_trace_emit"
     EMIT_BINARY = "bazel-bin/tests/numerics_trace_emit"
@@ -561,7 +570,7 @@ if _command == 'numerics':
         return result
 
 
-    def summarize(records, out: Path) -> None:
+    def summarize(records, out: Path, expected_precision: str) -> None:
         """Prints the fixture summary and the checks a reviewer needs."""
         values = {name: (dtype, shape, payload)
                   for name, dtype, shape, payload in records}
@@ -592,14 +601,18 @@ if _command == 'numerics':
             print("rl row %d: reward %.6f, advantage %.6g"
                   % (row, scalar(values, f"rl/reward/{row}"),
                      scalar(values, f"rl/advantage/{row}")))
-        if backend != "cpu" or precision != "fp32":
-            raise SystemExit("the golden trace must come from the fp32 CPU build")
+        if backend != "cpu" or precision != expected_precision:
+            raise SystemExit("the golden trace must come from the "
+                             + expected_precision + " CPU build")
 
 
     def parse_args(argv) -> argparse.Namespace:
         parser = argparse.ArgumentParser(description=__doc__)
-        parser.add_argument("--out", default=DEFAULT_OUT,
-                            help="output fixture path")
+        parser.add_argument("--out", default=None,
+                            help="output fixture path (default: the precision's name)")
+        parser.add_argument("--precision", default="fp32",
+                            choices=("fp32", "bf16", "fp8"),
+                            help="the build precision of the golden")
         parser.add_argument("--tokenizer", default=DEFAULT_TOKENIZER,
                             help="the committed NCTOKEN1 artifact of the eval phase")
         parser.add_argument("--no-build", action="store_true",
@@ -621,7 +634,8 @@ if _command == 'numerics':
         if not tokenizer.is_file():
             raise SystemExit(f"missing tokenizer file: {tokenizer}")
         if not args.no_build:
-            run_nanochat(repo_root, ["build", EMIT_TARGET])
+            config = [] if args.precision == "fp32" else ["--config=" + args.precision]
+            run_nanochat(repo_root, ["build", *config, EMIT_TARGET])
         emitter = repo_root / EMIT_BINARY
         if not emitter.is_file():
             raise SystemExit(f"missing emitter {emitter}; run "
@@ -644,7 +658,7 @@ if _command == 'numerics':
             os.replace(beside, out)
 
         # Re-read the committed path, so the summary describes the file on disk.
-        summarize(read_records(out), out)
+        summarize(read_records(out), out, args.precision)
         return 0
     _selected_main = main
 

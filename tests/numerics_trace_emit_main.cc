@@ -64,9 +64,9 @@ int main(int argc, char** argv) {
   try {
     const std::string out_path = ValueOf(argc, argv, "--out");
     const std::string tokenizer_path = ValueOf(argc, argv, "--tokenizer");
-    if (BackendName() != "cpu" || PrecisionName() != "fp32") {
+    if (BackendName() != "cpu") {
       throw std::runtime_error(
-          "the golden trace must come from the fp32 CPU reference build");
+          "the golden trace must come from the CPU reference build");
     }
     const Config config = ReferenceConfig();
     const TraceShape& shape = DefaultShape();

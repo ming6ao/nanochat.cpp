@@ -415,7 +415,17 @@ std::string BackendName() {
 #endif
 }
 
-std::string PrecisionName() { return "fp32"; }
+std::string PrecisionName() {
+  switch (kBuildPrecision) {
+    case BuildPrecision::kBf16:
+      return "bf16";
+    case BuildPrecision::kFp8:
+      return "fp8";
+    case BuildPrecision::kFp32:
+    default:
+      return "fp32";
+  }
+}
 
 std::string BuildName() { return BackendName() + "-" + PrecisionName(); }
 

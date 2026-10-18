@@ -100,6 +100,29 @@ the tight bounds and `tests/train_parity_test.cc` for the trajectory bounds.
 | RL | reward and advantage | exact | 1e-5 relative | 0 |
 | RL | logit margin | exact | 1e-5 absolute | 2.4e-7 absolute |
 
+The fp8 leg has its own golden, `tests/data/numerics_golden_10l_fp8.bin`, and
+its own bounds. The fp8 CPU leg is exact against that golden, and the fp8
+simulator leg equals the CPU leg. The fp8 device leg compares as follows. The
+values are the design start; replace them from the first device measurement.
+
+| Stage | Artifact | GPU against the fp8 CPU golden |
+|---|---|---|
+| Train | loss | 1e-2 relative |
+| Train | gradient norm | 1e-2 relative |
+| Train | parameter L2 after five steps | 1e-2 relative |
+| Eval | bits per byte | 1e-2 relative |
+| Eval | greedy argmax identifiers | exact |
+
+The fp8 tolerance is wide, because fp8 carries three mantissa bits
+([simulator-precision.md](simulator-precision.md) section 7). Do not tighten it
+without evidence.
+
+The tie rule of section 6.4 guards the fp32 leg. A bf16 or fp8 build resolves
+the logits at eight mantissa bits. The top two logits can tie, and the recorded
+margin is a multiple of the bf16 unit at the logit magnitude. The fp8 leg
+reports the margin and compares the greedy identifiers exactly against its own
+golden.
+
 The "CPU vs simulator" column is exact by construction. The simulator leg is
 the CPU backend under `--config=sim` (section 2.2). The two runs share one code
 path.

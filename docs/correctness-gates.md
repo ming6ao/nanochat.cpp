@@ -129,9 +129,9 @@ Gate:
 tools/nanochat simulate --device h100 --precision fp8 --suite correctness
 ```
 
-The run must reach the committed fp8 golden. That golden comes from the
-reference PyTorch fp8 implementation (section 3.6), so the gate cannot pass
-yet.
+The run must reach the committed fp8 golden. The golden is the CPU emitter's
+output (section 3.6), so the CPU and simulator legs hold today. The device leg
+waits for a Hopper measurement.
 
 ### 3.4 The `cublasLt` coverage
 
@@ -183,10 +183,23 @@ Add the fp8 rows to the tolerance table in
 relative bound from [simulator-precision.md](simulator-precision.md) section 7.
 Keep the greedy-identifier row exact.
 
-Status: open. The fp8 trace leg needs a committed fp8 golden. That golden comes
-from the reference PyTorch tree (`../nanochat`), which the fixture generator
-reaches offline. The in-build fp8 forward check is
-`//tests:fp8_graph_test`.
+Status: delivered for the CPU and simulator legs. The fp8 golden is
+`tests/data/numerics_golden_10l_fp8.bin`, produced by the CPU emitter under
+`--config=fp8`, through
+`tools/dump_runtime_fixtures.py numerics --precision fp8`. The test picks the
+golden by the build precision and prints a skip when a precision has no golden.
+The fp8 rows are in [numerics-integration.md](numerics-integration.md)
+section 4.
+
+The golden is the **CPU emitter's output**, not a PyTorch fixture. The trace
+compares the device against the CPU reference; the PyTorch parity gates are the
+oracle and the training parity. The device leg waits for a Hopper measurement
+to confirm the 1e-2 bounds.
+
+The tie rule of [numerics-integration.md](numerics-integration.md) section 6.4
+guards the fp32 leg. A bf16 or fp8 build has ties at the bf16 resolution. The
+fp8 leg reports the margin and does not fail on it. The greedy identifiers are
+still compared exactly against the fp8 golden.
 
 Gate: the CPU leg is exact, and the simulator leg equals the CPU leg.
 

@@ -588,12 +588,19 @@ cc_test(
     # backend and on the same backend under `--config=sim`.
     copts = nanochat_copts() + ["-DNANOCHAT_TRACE_EXACT"],
     defines = precision_defines(),
+    # One golden per precision. The fp8 build reproduces the fp8 golden exactly;
+    # a build whose precision has no golden yet is passed the fp32 file and
+    # prints a skip.
     data = [
         "data/loader_tokenizer.nctoken",
-        "data/numerics_golden_10l.bin",
-    ],
-    args = [
-        "$(rootpath data/numerics_golden_10l.bin)",
+    ] + select({
+        "//:fp8": ["data/numerics_golden_10l_fp8.bin"],
+        "//conditions:default": ["data/numerics_golden_10l.bin"],
+    }),
+    args = select({
+        "//:fp8": ["$(rootpath data/numerics_golden_10l_fp8.bin)"],
+        "//conditions:default": ["$(rootpath data/numerics_golden_10l.bin)"],
+    }) + [
         "$(rootpath data/loader_tokenizer.nctoken)",
     ],
     deps = [
@@ -602,6 +609,10 @@ cc_test(
         "//src:model",
     ],
     size = "medium",
+    # The trace pins the host thread count to one for determinism, so a
+    # ten-layer run with double GEMM over five steps exceeds the medium
+    # timeout on the two-CPU sandbox.
+    timeout = "long",
     tags = [
         "manual",
         "sim",
@@ -620,10 +631,14 @@ cc_test(
     defines = precision_defines(),
     data = [
         "data/loader_tokenizer.nctoken",
-        "data/numerics_golden_10l.bin",
-    ],
-    args = [
-        "$(rootpath data/numerics_golden_10l.bin)",
+    ] + select({
+        "//:fp8": ["data/numerics_golden_10l_fp8.bin"],
+        "//conditions:default": ["data/numerics_golden_10l.bin"],
+    }),
+    args = select({
+        "//:fp8": ["$(rootpath data/numerics_golden_10l_fp8.bin)"],
+        "//conditions:default": ["$(rootpath data/numerics_golden_10l.bin)"],
+    }) + [
         "$(rootpath data/loader_tokenizer.nctoken)",
     ],
     deps = [

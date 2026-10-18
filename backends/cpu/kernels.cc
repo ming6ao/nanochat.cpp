@@ -510,65 +510,43 @@ void GemmScaledFp8(GemmMode mode, const ScaledGemmParams& params,
   // type (docs/fp8-training.md section 7).
   const bool fp32_output = mode == GemmMode::kWgrad;
 
-  // A direct triple loop over the decoded operands. The dequantization stays in
-  // float and the accumulator in double, so a bf16 build does not re-round the
-  // operand: the fp8 value times the scale needs more mantissa bits than bf16
-  // carries (docs/fp8-training.md section 3.2).
+  // Dequantize the raw fp8 values, not the scaled values. A raw fp8 value is
+  // exact in the compute type, because bf16 and float both carry more mantissa
+  // and exponent bits (docs/fp8-training.md section 3.2). The two scales then
+  // factor out of the sum, so fold them into `alpha` and reuse the blocked
+  // dense GEMM and its double accumulator. A per-element scale would round to
+  // bf16 and make the reference inexact.
   const int rows_a = params.transpose_a ? k : m;
   const int cols_a = params.transpose_a ? m : k;
   const int rows_b = params.transpose_b ? n : k;
   const int cols_b = params.transpose_b ? k : n;
-  const std::int64_t stride_a = static_cast<std::int64_t>(rows_a) * cols_a;
-  const std::int64_t stride_b = static_cast<std::int64_t>(rows_b) * cols_b;
-  const std::int64_t stride_c = static_cast<std::int64_t>(m) * n;
-  const std::size_t element_bytes =
-      fp32_output ? sizeof(float) : sizeof(ComputeType);
-  const float alpha = params.alpha;
-  const float beta = params.beta;
+  const std::size_t count_a = static_cast<std::size_t>(batch) * rows_a * cols_a;
+  const std::size_t count_b = static_cast<std::size_t>(batch) * rows_b * cols_b;
 
-  for (int bi = 0; bi < batch; ++bi) {
-    const std::uint8_t* ab = a + bi * stride_a;
-    const std::uint8_t* bb = b + bi * stride_b;
-    char* cb_bytes = static_cast<char*>(c) +
-                     static_cast<std::size_t>(bi) *
-                         static_cast<std::size_t>(stride_c) * element_bytes;
-    float* cb_float =
-        fp32_output ? reinterpret_cast<float*>(cb_bytes) : nullptr;
-    ComputeType* cb_compute =
-        fp32_output ? nullptr : reinterpret_cast<ComputeType*>(cb_bytes);
-#if defined(_OPENMP)
-#pragma omp parallel for collapse(2) schedule(static)
-#endif
-    for (int i = 0; i < m; ++i) {
-      for (int j = 0; j < n; ++j) {
-        double acc = 0.0;
-        for (int p = 0; p < k; ++p) {
-          const double av = DecodeFp8(
-              params.transpose_a ? ab[static_cast<std::int64_t>(p) * m + i]
-                                 : ab[static_cast<std::int64_t>(i) * k + p],
-              params.format_a);
-          const double bv = DecodeFp8(
-              params.transpose_b ? bb[static_cast<std::int64_t>(j) * k + p]
-                                 : bb[static_cast<std::int64_t>(p) * n + j],
-              params.format_b);
-          acc += av * bv;
-        }
-        const std::int64_t index = static_cast<std::int64_t>(i) * n + j;
-        double result = static_cast<double>(alpha) * (acc * scale_a * scale_b);
-        if (fp32_output) {
-          if (beta != 0.0f) {
-            result += static_cast<double>(beta) * cb_float[index];
-          }
-          cb_float[index] = static_cast<float>(result);
-        } else {
-          if (beta != 0.0f) {
-            result +=
-                static_cast<double>(beta) * ComputeToFloat(cb_compute[index]);
-          }
-          cb_compute[index] = ComputeFromFloat(static_cast<float>(result));
-        }
-      }
-    }
+  std::vector<ComputeType> a_dequant(count_a);
+  std::vector<ComputeType> b_dequant(count_b);
+  for (std::size_t i = 0; i < count_a; ++i) {
+    a_dequant[i] = ComputeFromFloat(DecodeFp8(a[i], params.format_a));
+  }
+  for (std::size_t i = 0; i < count_b; ++i) {
+    b_dequant[i] = ComputeFromFloat(DecodeFp8(b[i], params.format_b));
+  }
+
+  GemmParams dense;
+  dense.m = m;
+  dense.n = n;
+  dense.k = k;
+  dense.batch_count = batch;
+  dense.alpha = params.alpha * scale_a * scale_b;
+  dense.beta = params.beta;
+  dense.transpose_a = params.transpose_a;
+  dense.transpose_b = params.transpose_b;
+  if (fp32_output) {
+    GemmImpl<float>(mode, dense, a_dequant.data(), b_dequant.data(),
+                    static_cast<float*>(c));
+  } else {
+    GemmImpl<ComputeType>(mode, dense, a_dequant.data(), b_dequant.data(),
+                          static_cast<ComputeType*>(c));
   }
 }
 
