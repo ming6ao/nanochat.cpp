@@ -371,6 +371,22 @@ cc_test(
     tags = ["sim"],
 )
 
+# The CPU GEMM thread-independence guard (docs/numerics-integration.md section
+# 6.2). The numeric trace pins the kernel reductions to one thread for a stable
+# golden and lets the GEMM use the granted CPUs. This test pins that the GEMM
+# bytes do not depend on the thread count. CPU only.
+cc_test(
+    name = "gemm_threads_test",
+    srcs = ["gemm_threads_test.cc"],
+    copts = nanochat_copts(),
+    deps = [
+        "//backends/cpu:cpu",
+        "//include/nanochat:nanochat",
+    ],
+    size = "small",
+    tags = ["sim"],
+)
+
 # The fp8 graph plumbing gate (docs/correctness-gates.md sections 3.3 and 5.1).
 # The eligible forward and backward matmuls take the fp8 path and are compared
 # against the dense path in the same build. `precision_defines` gives the source
@@ -667,6 +683,7 @@ test_suite(name = "all", tests = [
     ":device_profile_test",
     ":fp8_rounding_test",
     ":fp8_gemm_test",
+    ":gemm_threads_test",
     ":fp8_graph_test",
     ":hw_gate_cuda_test",
     ":performance_model_test",

@@ -121,11 +121,7 @@ static_assert(std::is_same<decltype(nanochat_generate_params::stop_ids),
 // paired runs fold an equivalent scale into the classifier gradient in two
 // different orders, so an fp32 store makes them the same arithmetic while a
 // bf16 store rounds the intermediate at a different point.
-#if defined(NANOCHAT_PRECISION_FP32)
-constexpr double kGradientTolerance = 1e-4;
-#else
-constexpr double kGradientTolerance = 1e-1;
-#endif
+constexpr double kGradientTolerance = nanochat::kComputeIsBf16 ? 1e-1 : 1e-4;
 
 int g_failures = 0;
 

@@ -154,13 +154,8 @@ ParamView FindParam(Model* model, const std::string& name) {
 // store the two orders are the same arithmetic. With a bf16 store the
 // intermediate is rounded to 7 mantissa bits at a different point, so the bound
 // follows the compute precision (docs/precision.md section 5).
-#if defined(NANOCHAT_PRECISION_FP32)
-constexpr double kPathAtol = 1e-6;
-constexpr double kPathRtol = 1e-4;
-#else
-constexpr double kPathAtol = 1e-4;
-constexpr double kPathRtol = 5e-2;
-#endif
+constexpr double kPathAtol = nanochat::kComputeIsBf16 ? 1e-4 : 1e-6;
+constexpr double kPathRtol = nanochat::kComputeIsBf16 ? 5e-2 : 1e-4;
 
 // Compares every parameter gradient of two identically initialized models.
 // Returns true when all gradients agree within `atol + rtol * max(|a|, |b|)`.

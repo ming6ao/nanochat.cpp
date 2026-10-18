@@ -120,17 +120,6 @@ int Run(int argc, char** argv) {
   const std::string tokenizer_path =
       LocateFile(argc, argv, 2, "tests/data/loader_tokenizer.nctoken");
 
-  const Config config = ReferenceConfig();
-  const TraceShape& shape = DefaultShape();
-  const bool exact = kExactTrace;
-  std::printf("numerics_trace: backend %s precision %s build %s %s golden %s\n",
-              BackendName().c_str(), PrecisionName().c_str(),
-              BuildName().c_str(), exact ? "(exact)" : "(tolerance)",
-              golden_path.c_str());
-
-  TraceStats stats;
-  const std::vector<Record> records =
-      RunTrace(config, shape, tokenizer_path, &stats);
   const Fixture golden = Fixture::Load(golden_path);
   // A build whose precision differs from the golden prints a skip and returns
   // success, the way a bf16 build skips the fp32 goldens
@@ -145,6 +134,18 @@ int Run(int argc, char** argv) {
       return 0;
     }
   }
+
+  const Config config = ReferenceConfig();
+  const TraceShape& shape = DefaultShape();
+  const bool exact = kExactTrace;
+  std::printf("numerics_trace: backend %s precision %s build %s %s golden %s\n",
+              BackendName().c_str(), PrecisionName().c_str(),
+              BuildName().c_str(), exact ? "(exact)" : "(tolerance)",
+              golden_path.c_str());
+
+  TraceStats stats;
+  const std::vector<Record> records =
+      RunTrace(config, shape, tokenizer_path, &stats);
   std::printf("numerics_trace: %d records, %d parameters, %d steps\n",
               stats.records, stats.parameters, shape.steps);
 

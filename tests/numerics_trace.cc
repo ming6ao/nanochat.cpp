@@ -537,6 +537,12 @@ void PinSingleThreaded() {
   // parallel region, and its kernel reductions depend on the thread count. Pin
   // it to one so the golden trace does not depend on the sandbox budget.
   setenv("NANOCHAT_NUM_THREADS", "1", 1);
+  // The GEMM is deterministic per output, so it keeps the CPU budget the
+  // sandbox granted. The sandbox publishes that budget as OMP_NUM_THREADS.
+  const char* granted = std::getenv("OMP_NUM_THREADS");
+  if (granted != nullptr && *granted != '\0') {
+    setenv("NANOCHAT_GEMM_THREADS", granted, 1);
+  }
 }
 
 std::vector<Record> RunTrace(const Config& config, const TraceShape& shape,

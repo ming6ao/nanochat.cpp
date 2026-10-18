@@ -84,11 +84,12 @@ int Run() {
   // has 7 mantissa bits, so the perturbed loss is a step function of the
   // perturbation and the difference is meaningless. The bf16 parity gate is the
   // bf16 numeric trace (docs/precision.md section 6, Stage 2).
-#if !defined(NANOCHAT_PRECISION_FP32)
-  std::printf(
-      "model_gradient: skipped (bf16 build; a finite difference needs fp32)\n");
-  return 0;
-#endif
+  if constexpr (nanochat::kComputeIsBf16) {
+    std::printf(
+        "model_gradient: skipped (bf16 build; a finite difference needs "
+        "fp32)\n");
+    return 0;
+  }
   Config config;
   config.num_layers = 2;
   config.num_heads = 8;

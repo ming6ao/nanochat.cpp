@@ -53,7 +53,16 @@ namespace {
 // Storage <-> float boundary. fp32 is the only compute type today, so both
 // conversions are the identity. The optimizer state and the reductions run in
 // float (docs/build.md).
-inline float AsFloatT(ComputeType v) { return v; }
+// The float value of an operand. The dense GEMM takes either the compute type
+// or a plain float, so both are accepted. The float case is the identity; a
+// bf16 case converts. Without the float overload, a float operand in a bf16
+// build would round through the compute type.
+inline float AsFloatT(float v) { return v; }
+
+template <typename T>
+inline float AsFloatT(T v) {
+  return static_cast<float>(v);
+}
 
 inline ComputeType ToComputeT(float v) { return v; }
 
@@ -82,6 +91,23 @@ inline void ConfigureThreads() {
     return true;
   }();
   (void)configured;
+#endif
+}
+
+// The GEMM thread count. The kernel reductions depend on the thread order, so a
+// caller that needs a stable golden pins `NANOHAT_NUM_THREADS` to one. The GEMM
+// does not need that: every output is one accumulator over a fixed reduction
+// order, so any thread count gives the same bytes. `NANOHAT_GEMM_THREADS`
+// overrides the count for the GEMM alone, which lets such a caller use the CPU
+// budget it was granted.
+inline int GemmThreads() {
+#if defined(_OPENMP)
+  const char* env = std::getenv("NANOCHAT_GEMM_THREADS");
+  const int parsed = env != nullptr ? std::atoi(env) : 0;
+  if (parsed > 0) return parsed;
+  return omp_get_max_threads();
+#else
+  return 1;
 #endif
 }
 
@@ -326,9 +352,9 @@ T GemmStore(T* dst, float partial, float alpha, float beta) {
 
 }  // namespace
 
-template <typename T>
-void GemmImpl(GemmMode mode, const GemmParams& params, const ComputeType* a,
-              const ComputeType* b, T* c) {
+template <typename T, typename A>
+void GemmImpl(GemmMode mode, const GemmParams& params, const A* a, const A* b,
+              T* c) {
   (void)mode;
   const int m = params.m;
   const int n = params.n;
@@ -364,8 +390,8 @@ void GemmImpl(GemmMode mode, const GemmParams& params, const ComputeType* a,
   const GemmMicroFn micro = ResolveGemmMicro();
 
   for (int bi = 0; bi < batch; ++bi) {
-    const ComputeType* ab = a + bi * stride_a;
-    const ComputeType* bb = b + bi * stride_b;
+    const A* ab = a + bi * stride_a;
+    const A* bb = b + bi * stride_b;
     T* cb = c + bi * stride_c;
 
     // The packed `b` panel is shared by every worker and rewritten for each
@@ -374,7 +400,7 @@ void GemmImpl(GemmMode mode, const GemmParams& params, const ComputeType* a,
                               panel_groups);
 
 #if defined(_OPENMP)
-#pragma omp parallel
+#pragma omp parallel num_threads(GemmThreads())
 #endif
     {
       std::vector<float> apack(static_cast<std::size_t>(kGemmMr) * k);
@@ -1238,7 +1264,10 @@ namespace {
 // plain double-accumulator loop.
 void MuonMatmul(int m, int n, int k, const float* a, const float* b, float* c,
                 bool transpose_a, bool transpose_b) {
-#if defined(NANOCHAT_PRECISION_FP32)
+  // The operands are the fp32 Muon momentum, and the dense GEMM takes a float
+  // operand directly, so this uses the blocked path in every build. A naive
+  // loop here made the Newton-Schulz iterations the slowest part of the trace
+  // by an order of magnitude.
   GemmParams params;
   params.m = m;
   params.n = n;
@@ -1247,24 +1276,7 @@ void MuonMatmul(int m, int n, int k, const float* a, const float* b, float* c,
   params.beta = 0.0f;
   params.transpose_a = transpose_a;
   params.transpose_b = transpose_b;
-  Gemm(GemmMode::kForward, params, a, b, c);
-#else
-  for (int i = 0; i < m; ++i) {
-    for (int j = 0; j < n; ++j) {
-      double sum = 0.0;
-      for (int l = 0; l < k; ++l) {
-        const std::int64_t a_index = transpose_a
-                                         ? static_cast<std::int64_t>(l) * m + i
-                                         : static_cast<std::int64_t>(i) * k + l;
-        const std::int64_t b_index = transpose_b
-                                         ? static_cast<std::int64_t>(j) * k + l
-                                         : static_cast<std::int64_t>(l) * n + j;
-        sum += static_cast<double>(a[a_index]) * b[b_index];
-      }
-      c[static_cast<std::int64_t>(i) * n + j] = static_cast<float>(sum);
-    }
-  }
-#endif
+  GemmImpl<float, float>(GemmMode::kForward, params, a, b, c);
 }
 
 }  // namespace

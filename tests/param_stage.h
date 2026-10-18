@@ -29,11 +29,7 @@ namespace testutil {
 // this build. The bf16 build rounds every stored activation and weight to 7
 // mantissa bits, so it cannot reproduce an fp32 golden. The bf16 parity gate is
 // the separate bf16 numeric trace (docs/precision.md section 6, Stage 2).
-#if defined(NANOCHAT_PRECISION_FP32)
-inline constexpr bool kFp32Compute = true;
-#else
-inline constexpr bool kFp32Compute = false;
-#endif
+inline constexpr bool kFp32Compute = !nanochat::kComputeIsBf16;
 
 // Returns true when a golden-fixture parity test must stop without running.
 // The skip is printed, so a bf16 run records why the leg was not exercised.

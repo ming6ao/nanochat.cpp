@@ -75,11 +75,7 @@ std::vector<int> MakeIds(int rows, int vocab, int a, int b) {
 // global batch in a different summation order, so the two trajectories differ
 // by accumulation roundoff. A bf16 build rounds every activation to 7 mantissa
 // bits, which widens that gap, so the bound follows the compute precision.
-#if defined(NANOCHAT_PRECISION_FP32)
-constexpr double kReplicaTolerance = 1e-4;
-#else
-constexpr double kReplicaTolerance = 5e-3;
-#endif
+constexpr double kReplicaTolerance = nanochat::kComputeIsBf16 ? 5e-3 : 1e-4;
 
 // Compares the fp32 master weights, the canonical persistent state
 // (docs/precision.md section 5). Two replicas that ran the same global batch

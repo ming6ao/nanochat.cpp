@@ -702,15 +702,15 @@ int main() {
   // fp32 build stays the correctness gate (docs/precision.md section 8). The
   // bf16 build still reaches every entry point below through the checks that
   // survive rounding, and the bf16 numeric trace covers the gradients.
-#if defined(NANOCHAT_PRECISION_FP32)
-  TestRmsNorm();
-  TestQkPrep();
-  TestAttention();
-  TestAttentionWindow();
-  TestPointwise();
-  TestClassifier();
-  TestClassifierRowScale();
-#endif
+  if constexpr (!nanochat::kComputeIsBf16) {
+    TestRmsNorm();
+    TestQkPrep();
+    TestAttention();
+    TestAttentionWindow();
+    TestPointwise();
+    TestClassifier();
+    TestClassifierRowScale();
+  }
   TestEmbedding();
   TestAdamW();
   TestMuon();

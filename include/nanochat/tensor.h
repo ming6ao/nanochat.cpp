@@ -18,8 +18,9 @@ namespace nanochat {
 // Precision (docs/build.md)
 // ---------------------------------------------------------------------------
 //
-// Selected at build time by the toolchain: `--config=fp32` defines
-// NANOCHAT_PRECISION_FP32 and `--config=bf16` defines NANOCHAT_PRECISION_BF16.
+// Selected at build time by the toolchain: `--config=fp32`, `--config=bf16`,
+// or `--config=fp8`. Each sets one value, `NANOCHAT_PRECISION`, which maps
+// to `BuildPrecision` below.
 // There is one precision per build and no runtime dtype dispatch. The
 // persistent state stays fp32 in every build; see `GradientType` below and
 // docs/precision.md section 5.
