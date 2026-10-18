@@ -122,10 +122,10 @@ cc_binary(
 # CPU GEMM micro-benchmark: the reference backend's C = A * B over a few
 # shapes. CPU-only, so it runs under the `t0-cpu` profile.
 #
-# `-fopenmp` in `copts` defines `_OPENMP` in the benchmark translation unit, so
-# `ActiveThreadCount()` reports the real OpenMP pool instead of the scalar
-# fallback. The linked `//backends/cpu:cpu` library already carries OpenMP, so
-# the flag changes only the reported thread count, not the GEMM math.
+# `-fopenmp` in `copts` and `linkopts` gives `ActiveThreadCount()` the real
+# OpenMP pool, rather than a scalar fallback. The linked `//backends/cpu:cpu`
+# library already carries OpenMP, so the flag changes only the reported thread
+# count, not the GEMM math.
 cc_binary(
     name = "cpu_gemm_bench",
     srcs = ["cpu_gemm_bench.cc"],

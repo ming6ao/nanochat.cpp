@@ -30,9 +30,7 @@
 #include <string>
 #include <vector>
 
-#if defined(_OPENMP)
 #include <omp.h>
-#endif
 
 #include "nanochat/kernels.h"
 #include "nanochat/sandbox.h"
@@ -85,13 +83,7 @@ struct Result {
   double gflops = 0.0;
 };
 
-int ActiveThreadCount() {
-#if defined(_OPENMP)
-  return omp_get_max_threads();
-#else
-  return 1;
-#endif
-}
+int ActiveThreadCount() { return omp_get_max_threads(); }
 
 Result TimeShape(const Shape& shape, const Options& options) {
   const int rows_a = shape.transpose_a ? shape.k : shape.m;

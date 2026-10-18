@@ -30,9 +30,7 @@
 #include <string>
 #include <vector>
 
-#if defined(_OPENMP)
 #include <omp.h>
-#endif
 
 #include "nanochat/kernels.h"
 #include "nanochat/sandbox.h"
@@ -91,16 +89,10 @@ struct Result {
 };
 
 // The number of threads the GEMM uses. This target compiles with `-fopenmp`
-// (`dev/kernels/BUILD.bazel`), so `_OPENMP` is defined and this reports the
-// OpenMP pool. The pool reads `NANOCHAT_NUM_THREADS` or `OMP_NUM_THREADS` from
-// the sandbox profile (docs/cpu-performance.md Part 2, section 4.2).
-int ActiveThreadCount() {
-#if defined(_OPENMP)
-  return omp_get_max_threads();
-#else
-  return 1;
-#endif
-}
+// (`dev/kernels/BUILD.bazel`), so this reports the OpenMP pool. The pool reads
+// `NANOCHAT_NUM_THREADS` or `OMP_NUM_THREADS` from the sandbox profile
+// (docs/cpu-performance.md Part 2, section 4.2).
+int ActiveThreadCount() { return omp_get_max_threads(); }
 
 // Warm up, then time `rounds` single calls and keep the fastest. Each of these
 // shapes takes hundreds of milliseconds, so a per-call timer resolves well.
