@@ -1,15 +1,16 @@
 """T0: the pure setup helpers of ``session.py``.
 
-The test covers the secret loader, the device check, and the session view. It
-injects a fake secrets client and a device list, so it needs no Kaggle
-package, no shared library, and no network. See ``docs/checkpoint-format.md``
-section 22.
+The test covers the secret loader, the device check, the session view, and the
+run host of a session. It injects a fake secrets client, a fake run host, and a
+device list, so it needs no Kaggle package, no shared library, and no network.
+See ``docs/host-portability.md``.
 """
 
 from __future__ import annotations
 
 import contextlib
 import io
+import os
 import sys
 import tempfile
 import types
@@ -18,6 +19,20 @@ from pathlib import Path
 
 import kaggle_setup
 import session
+import target
+
+
+class FakeRemote(target.Target):
+    """A run host that runs the job on its own card set."""
+
+    name = "remote"
+    needs_local_devices = False
+
+    def cache_root(self) -> Path:
+        return Path("/remote/base")
+
+    def run(self, config, **options):
+        return None
 
 
 class FakeClient:
@@ -80,6 +95,17 @@ class SessionTest(unittest.TestCase):
         self.assertEqual(prepared.base, Path("/base"))
         self.assertEqual(prepared.devices, [1, 2])
 
+    def test_the_default_target_is_local(self) -> None:
+        self.assertIsInstance(self.make().target, target.LocalTarget)
+
+    def test_a_named_target_is_reported(self) -> None:
+        host = kaggle_setup.Host(repo=Path("/repo"), library=Path("/lib.so"),
+                                 build_key="key", env={})
+        prepared = session.Session(host=host, secrets={}, devices=[],
+                                   base=Path("/base"),
+                                   target=FakeRemote())
+        self.assertEqual(prepared.target.name, "remote")
+
     def test_frozen(self) -> None:
         prepared = self.make()
         with self.assertRaises(Exception):
@@ -97,6 +123,42 @@ class SessionTest(unittest.TestCase):
         self.assertEqual(calls, [Path("/repo")])
 
 
+class TargetPlumbingTest(unittest.TestCase):
+    """The session of a remote run host: no local card, its own root."""
+
+    def setUp(self) -> None:
+        self.saved = os.environ.pop("NANOCHAT_BASE_DIR", None)
+        self.original_setup = kaggle_setup.setup
+        self.original_devices = session.require_devices
+        kaggle_setup.setup = lambda **kwargs: kaggle_setup.Host(
+            repo=Path("/repo"), library=Path("/lib.so"), build_key="key",
+            env={})
+
+    def tearDown(self) -> None:
+        kaggle_setup.setup = self.original_setup
+        session.require_devices = self.original_devices
+        os.environ.pop("NANOCHAT_BASE_DIR", None)
+        if self.saved is not None:
+            os.environ["NANOCHAT_BASE_DIR"] = self.saved
+
+    def test_a_remote_host_skips_the_device_check(self) -> None:
+        session.require_devices = lambda *a, **k: self.fail(
+            "a remote host has no local card")
+        prepared = session.clone_and_build(target=FakeRemote(), secrets={})
+        self.assertEqual(prepared.devices, [])
+        self.assertEqual(prepared.target.name, "remote")
+        self.assertEqual(prepared.base, Path("/remote/base"))
+        self.assertEqual(os.environ["NANOCHAT_BASE_DIR"], "/remote/base")
+
+    def test_a_local_host_keeps_the_device_check(self) -> None:
+        session.require_devices = lambda count, devices=None: ["0"] * count
+        prepared = session.clone_and_build(target="local", secrets={},
+                                           base=Path("/base"))
+        self.assertEqual(prepared.devices, ["0"])
+        self.assertEqual(prepared.target.name, "local")
+        self.assertEqual(prepared.base, Path("/base"))
+
+
 class DescribeTest(unittest.TestCase):
     def test_prints_library_secrets_and_devices(self) -> None:
         host = kaggle_setup.Host(repo=Path("/repo"), library=Path("/lib.so"),
@@ -110,6 +172,7 @@ class DescribeTest(unittest.TestCase):
             returned = session.describe(prepared)
         self.assertIs(returned, prepared)
         text = buffer.getvalue()
+        self.assertIn("target: local", text)
         self.assertIn("library: /lib.so", text)
         self.assertIn("secrets: ['HF_TOKEN']", text)
         self.assertIn("T4", text)
@@ -142,6 +205,17 @@ class BootstrapTest(unittest.TestCase):
             self.assertEqual(captured["repo_path"], repo)
             self.assertEqual(captured["devices"], 2)
             self.assertEqual(captured["arch"], "sm_75")
+            self.assertIsNone(captured["target"])
+
+    def test_the_target_reaches_setup(self) -> None:
+        captured = {}
+        original = session.setup
+        session.setup = lambda **kwargs: captured.update(kwargs) or "prepared"
+        try:
+            session.bootstrap(repo_path=Path("/repo"), target=FakeRemote())
+        finally:
+            session.setup = original
+        self.assertEqual(captured["target"].name, "remote")
 
     def test_missing_helper_directory_is_ignored(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

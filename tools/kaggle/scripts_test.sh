@@ -21,7 +21,7 @@ if [[ -n $bootstrap ]]; then
   trap 'rm -rf "$tmp"' EXIT
   HOME="$tmp" bash -c 'source "$1"; write_env_file' _ "$bootstrap"
   for key in NANOCHAT_SANDBOX_BACKEND NANOCHAT_CPP_BACKEND \
-             NANOCHAT_CPP_PRECISION NANOCHAT_CUDA_ARCH \
+             NANOCHAT_CPP_PRECISION NANOCHAT_CUDA_ARCH NANOCHAT_TARGET \
              NANOCHAT_CPP_CACHE CUDA_HOME; do
     if ! grep -q "export $key=" "$tmp/.nanochat.env"; then
       echo "missing $key in .nanochat.env" >&2
@@ -31,6 +31,7 @@ if [[ -n $bootstrap ]]; then
   grep -q 'NANOCHAT_CPP_BACKEND="cuda"' "$tmp/.nanochat.env"
   grep -q 'NANOCHAT_CPP_PRECISION="fp32"' "$tmp/.nanochat.env"
   grep -q 'NANOCHAT_CUDA_ARCH="sm_75"' "$tmp/.nanochat.env"
+  grep -q 'NANOCHAT_TARGET="local"' "$tmp/.nanochat.env"
   echo "kaggle env file: OK"
 fi
 

@@ -1,0 +1,24 @@
+# tools/modal/ — the deployed Modal app. See docs/host-portability.md.
+#
+# `app.py` imports the Modal SDK at module load, so it is a source file, not a
+# build target. The test imports it with a stub SDK, so it needs no SDK and no
+# account.
+
+load("@rules_python//python:defs.bzl", "py_test")
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files(["app.py"])
+
+py_test(
+    name = "modal_app_test",
+    srcs = ["modal_app_test.py"],
+    data = ["app.py"],
+    size = "small",
+    deps = ["//notebooks:target"],
+)
+
+test_suite(
+    name = "all",
+    tests = [":modal_app_test"],
+)

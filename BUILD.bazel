@@ -97,6 +97,7 @@ test_suite(
         "//src:all",
         "//tests:all",
         "//tools:all",
+        "//tools/modal:all",
     ],
 )
 

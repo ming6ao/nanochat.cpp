@@ -5,6 +5,9 @@ T4 cards. Each notebook performs its own setup, so any one notebook runs alone
 in a fresh session. The shared code lives in `session.py` and
 `hub_checkpoint.py`.
 
+A fourth notebook, `modal_pretrain.ipynb`, runs the pretraining on Modal and
+keeps the Kaggle notebook as the client.
+
 ## Run order
 
 1. `pretrain.ipynb` downloads the data and the tokenizer, pretrains the base
@@ -13,6 +16,12 @@ in a fresh session. The shared code lives in `session.py` and
    checkpoint.
 3. `posttrain.ipynb` downloads the `base` stage, fine-tunes it, and publishes
    the `sft` stage.
+
+`modal_pretrain.ipynb` replaces step 1 when the training runs on Modal. The
+notebook stays on Kaggle and the C++ driver runs in a Modal container. Set
+`NANOCHAT_TARGET=modal`, add the two `MODAL_TOKEN_ID` and `MODAL_TOKEN_SECRET`
+secrets, and deploy `tools/modal/app.py` first. It publishes the same `base`
+stage, so steps 2 and 3 are unchanged.
 
 `setup.ipynb` is a manual session check and the `pi` agent. It is optional,
 because every pipeline notebook runs its own setup.
@@ -66,6 +75,14 @@ example `vocab-32768.nctoken`.
 - `kaggle_setup.py` owns the repository fetch, the bootstrap, the host
   environment, the library build, and `revision(root)` for the short Git
   revision.
+- `target.py` owns the run host. `resolve` reads `NANOCHAT_TARGET`, and
+  `local` is the default. `Target.prepare` maps every job path to the root the
+  host reads, so a remote host needs no notebook change. The module also parses
+  the two run records, so both hosts report the same rows.
+- The `modal` host is in `target.py` too. `ModalTarget` uploads the input files
+  to the runs Volume, spawns the deployed function in `tools/modal/app.py`, and
+  returns a `ModalLiveRun`. That handle polls the run directory through the
+  Volume, so the cell returns and never blocks.
 - `hub_checkpoint.py` holds every Hugging Face Hub call. It imports
   `huggingface_hub` inside each function, so the tests run without the wheel.
   `download_climbmix` fetches the data shards. `load_stage` and `pull_stage`
@@ -75,7 +92,8 @@ example `vocab-32768.nctoken`.
   prints one greedy completion for each fixed prompt.
 - `mesh_train.py` launches the C++ mesh driver in a child process. The
   notebook cell polls `metrics.jsonl` and `summary.json` through the returned
-  handle.
+  handle. `launch` resolves the run host from `target.py`, and `launch_local`
+  is the local host.
 
 ## Tests
 

@@ -1,10 +1,10 @@
-"""The shared Kaggle session setup for the three notebooks.
+"""The shared notebook session setup for the three notebooks.
 
 Every notebook runs the setup before its own cells. The bodies live here, so
 the code has one home and the tests can drive it. The module wraps
 ``notebooks/kaggle_setup.py``, which keeps the repository fetch, the
-bootstrap, and the build. This module adds the Kaggle secrets, the cache root,
-and the device check.
+bootstrap, and the build. This module adds the notebook secrets, the staging
+root, the device check, and the run host.
 
 The module imports ``kaggle_secrets`` inside :func:`load_secrets` and
 ``nanochat_cpp`` inside :func:`require_devices`, so the tests import without
@@ -20,6 +20,7 @@ import sys
 from pathlib import Path
 
 import kaggle_setup
+import target as targets
 
 __all__ = [
     "DEFAULT_BASE",
@@ -37,8 +38,8 @@ __all__ = [
 #: names authenticate the ``pi`` agent in ``setup.ipynb``.
 SECRET_NAMES = ("HF_TOKEN",)
 
-#: The cache root a notebook uses when the caller names none.
-DEFAULT_BASE = Path("/kaggle/working/nanochat-cache")
+#: The staging root a notebook uses when the caller names none.
+DEFAULT_BASE = targets.NOTEBOOK_BASE
 
 
 @dataclasses.dataclass(frozen=True)
@@ -47,13 +48,16 @@ class Session:
 
     ``host`` is the :class:`kaggle_setup.Host`. ``secrets`` holds the values
     the loader found. ``devices`` holds the device records the notebook needs.
-    ``base`` is the cache root, also set as ``NANOCHAT_BASE_DIR``.
+    ``base`` is the staging root, also set as ``NANOCHAT_BASE_DIR``.
+    ``target`` is the run host, and it defaults to the local host.
     """
 
     host: kaggle_setup.Host
     secrets: dict
     devices: list
     base: Path
+    target: targets.Target = dataclasses.field(
+        default_factory=targets.LocalTarget)
 
     @property
     def repo(self) -> Path:
@@ -122,44 +126,51 @@ def require_devices(count=1, devices=None) -> list:
 def clone_and_build(repo_url=kaggle_setup.DEFAULT_REPO_URL,
                     repo_path=kaggle_setup.DEFAULT_REPO_DEST, ref=None,
                     arch="sm_75", devices=1, base=None, backend="cuda",
-                    precision="fp32", env_path=None, secrets=None) -> Session:
+                    precision="fp32", env_path=None, secrets=None,
+                    target=None) -> Session:
     """Fetch, bootstrap, build, and check the session.
 
-    ``base`` becomes ``NANOCHAT_BASE_DIR``. ``devices`` is the number of cards
-    the notebook needs.
+    ``base`` becomes ``NANOCHAT_BASE_DIR`` and defaults to the staging root of
+    the run host. ``devices`` is the number of cards the notebook needs. A
+    remote run host runs the job on its own card set, so it needs none.
     """
     if secrets is None:
         secrets = load_secrets()
-    base_path = Path(base) if base is not None else DEFAULT_BASE
+    resolved = targets.resolve(target)
+    base_path = Path(base) if base is not None else resolved.cache_root()
     os.environ["NANOCHAT_BASE_DIR"] = str(base_path)
     host = kaggle_setup.setup(url=repo_url, dest=repo_path, ref=ref,
                               backend=backend, precision=precision,
                               arch=arch, env_path=env_path)
-    device_list = require_devices(devices)
+    device_list = (require_devices(devices)
+                   if resolved.needs_local_devices else [])
     return Session(host=host, secrets=secrets, devices=device_list,
-                   base=base_path)
+                   base=base_path, target=resolved)
 
 
 def setup(repo_url=kaggle_setup.DEFAULT_REPO_URL,
           repo_path=kaggle_setup.DEFAULT_REPO_DEST, *, arch="sm_75",
           devices=1, base=None, backend="cuda", precision="fp32", ref=None,
-          env_path=None, secrets=None) -> Session:
+          env_path=None, secrets=None, target=None) -> Session:
     """The one entry point a notebook calls."""
     return clone_and_build(repo_url=repo_url, repo_path=repo_path, ref=ref,
                            arch=arch, devices=devices, base=base,
                            backend=backend, precision=precision,
-                           env_path=env_path, secrets=secrets)
+                           env_path=env_path, secrets=secrets,
+                           target=target)
 
 
 def bootstrap(repo_url=kaggle_setup.DEFAULT_REPO_URL,
               repo_path=kaggle_setup.DEFAULT_REPO_DEST, *, arch="sm_75",
               devices=1, base=None, backend="cuda", precision="fp32",
-              ref=None, env_path=None, secrets=None) -> Session:
+              ref=None, env_path=None, secrets=None,
+              target=None) -> Session:
     """Add the helper paths and run the session setup.
 
     The notebook clones the repository and adds ``python/`` and
     ``notebooks/`` to ``sys.path`` before it imports this module. This call
-    adds the model-fit helper scripts, then runs :func:`setup`.
+    adds the model-fit helper scripts, then runs :func:`setup`. ``target``
+    names the run host, from :mod:`target`.
     """
     helper = (Path(repo_path) / ".agents" / "skills" / "model-fit"
               / "scripts")
@@ -168,11 +179,12 @@ def bootstrap(repo_url=kaggle_setup.DEFAULT_REPO_URL,
     return setup(repo_url=repo_url, repo_path=repo_path, arch=arch,
                  devices=devices, base=base, backend=backend,
                  precision=precision, ref=ref, env_path=env_path,
-                 secrets=secrets)
+                 secrets=secrets, target=target)
 
 
 def describe(prepared: "Session") -> "Session":
-    """Print the library, the secret names, and the devices of a session."""
+    """Print the target, the library, the secrets, and the devices."""
+    print("target:", prepared.target.name)
     print("library:", prepared.library)
     print("secrets:", sorted(prepared.secrets))
     for device in prepared.devices:

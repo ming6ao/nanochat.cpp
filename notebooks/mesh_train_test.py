@@ -19,6 +19,7 @@ from pathlib import Path
 import mesh_train
 import mesh_worker
 import nanochat_cpp as nc
+import target
 from nanochat_cpp import runtime as rt
 
 
@@ -176,6 +177,47 @@ class LaunchTest(unittest.TestCase):
             self.assertTrue(live.running())
             live.terminate(timeout=10)
             self.assertFalse(live.running())
+
+
+class DispatchTest(unittest.TestCase):
+    """``launch`` picks the run host and keeps the local path unchanged."""
+
+    class Recording(target.Target):
+        name = "recording"
+        needs_local_devices = False
+
+        def __init__(self) -> None:
+            self.calls = []
+
+        def run(self, config, **options):
+            self.calls.append((config, options))
+            return "remote-handle"
+
+    def test_a_named_host_runs_remotely(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = _config(str(Path(tmp) / "out"))
+            host = self.Recording()
+            result = mesh_train.launch(config, root=tmp, target=host,
+                                       timeout=7)
+        self.assertEqual(result, "remote-handle")
+        self.assertEqual(host.calls[0][1], {"timeout": 7, "extra_env": None,
+                                            "publish": None})
+
+    def test_the_default_host_still_runs_a_child(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            entry = _fake_entry(root, _FAKE_ENTRY)
+            config = _config(str(root / "out"))
+            live = mesh_train.launch(config, root=root, entry=str(entry),
+                                     target="local")
+            self.assertIsInstance(live, mesh_train.MeshLiveRun)
+            self.assertEqual(live.wait(timeout=20), 0)
+
+    def test_an_unknown_host_raises(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = _config(str(Path(tmp) / "out"))
+            with self.assertRaises(ValueError):
+                mesh_train.launch(config, root=tmp, target="slurm")
 
 
 class WorkerTest(unittest.TestCase):

@@ -3,11 +3,13 @@
 The C++ driver owns the step loop, the metric record, the summary, the
 checkpoint interval, and the resume (docs/client-runtime-design.md section
 10.1). The client is :class:`nanochat_cpp.runtime.MeshTrainConfig`. This module
-holds only the Kaggle process seam.
+holds the process seam of the local run host.
 
-:func:`launch` runs one config in a child process through
-``tools/nanochat client``. The notebook cell returns, so the cell status stays
-correct, and the parent polls ``metrics.jsonl`` and ``worker.log`` instead. See
+:func:`launch` is the one entry a notebook calls. It resolves the run host
+from :mod:`target` and starts the job there. :func:`launch_local` is the local
+host: a child process through ``tools/nanochat client``. The notebook cell
+returns, so the cell status stays correct, and the parent polls
+``metrics.jsonl`` and ``worker.log`` instead. See
 ``docs/client-runtime-design.md``.
 
 The module imports ``nanochat_cpp`` inside the functions, not at module load.
@@ -16,7 +18,6 @@ The pure helpers then import without the shared library.
 
 from __future__ import annotations
 
-import json
 import os
 import signal
 import subprocess
@@ -24,7 +25,15 @@ import sys
 import time
 from pathlib import Path
 
-__all__ = ["MeshLiveRun", "launch", "read_metrics", "read_summary"]
+import target as hosts
+
+__all__ = [
+    "MeshLiveRun",
+    "launch",
+    "launch_local",
+    "read_metrics",
+    "read_summary",
+]
 
 
 def read_metrics(path) -> list[dict]:
@@ -32,17 +41,8 @@ def read_metrics(path) -> list[dict]:
     path = Path(path)
     if not path.is_file():
         return []
-    rows: list[dict] = []
-    for line in path.read_text(encoding="utf-8",
-                               errors="replace").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            rows.append(json.loads(line))
-        except ValueError:
-            continue
-    return rows
+    return hosts.parse_metrics(
+        path.read_text(encoding="utf-8", errors="replace"))
 
 
 def read_summary(out_dir) -> dict:
@@ -50,10 +50,8 @@ def read_summary(out_dir) -> dict:
     path = Path(out_dir) / "summary.json"
     if not path.is_file():
         return {}
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except ValueError:
-        return {}
+    return hosts.parse_summary(
+        path.read_text(encoding="utf-8", errors="replace"))
 
 
 class MeshLiveRun:
@@ -159,7 +157,38 @@ class MeshLiveRun:
 def launch(config, root: str | Path = ".", *,
            entry: str = "tools/nanochat", profile: str = "train",
            device: str | None = None, timeout: float | None = None,
-           extra_env: dict | None = None) -> MeshLiveRun:
+           extra_env: dict | None = None, target=None, publish=None):
+    """Start one config on the named run host and return a live handle.
+
+    ``target`` is a name from :mod:`target` or a :class:`target.Target`. A
+    ``target`` of ``None`` reads ``NANOCHAT_TARGET``, else it uses ``local``. A
+    remote host ignores ``root``, ``entry``, ``profile``, and ``device``,
+    because the remote image owns the code and the environment. A remote host
+    returns its own handle with the surface of :class:`MeshLiveRun`:
+    ``running``, ``rows``, ``summary``, ``tail``, ``stream``, ``wait``, and
+    ``terminate``.
+
+    ``publish`` is a dictionary of stage metadata for a remote host, or
+    ``None``. The local host publishes from the client with ``hub_checkpoint``,
+    so it rejects the argument.
+    """
+    resolved = hosts.resolve(target)
+    if isinstance(resolved, hosts.LocalTarget):
+        if publish is not None:
+            raise ValueError(
+                "the local host publishes from the client: call "
+                "hub_checkpoint.write_stage and push_stage after the run")
+        return launch_local(config, root, entry=entry, profile=profile,
+                            device=device, timeout=timeout,
+                            extra_env=extra_env)
+    return resolved.run(config, timeout=timeout, extra_env=extra_env,
+                        publish=publish)
+
+
+def launch_local(config, root: str | Path = ".", *,
+                 entry: str = "tools/nanochat", profile: str = "train",
+                 device: str | None = None, timeout: float | None = None,
+                 extra_env: dict | None = None) -> MeshLiveRun:
     """Start one config in a child process and return a pollable handle.
 
     ``config`` is a :class:`nanochat_cpp.runtime.MeshTrainConfig`. The child
