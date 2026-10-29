@@ -278,9 +278,15 @@ void MeshRuntime::Save(const std::string& path) {
   }
   // The harness container carries the optimizer state and the step beside the
   // parameters, so a resume continues the schedule (docs/training-seam.md
-  // section 10). `Checkpointer::SaveModel(model, path)` writes the parameters
-  // only.
-  Checkpointer::SaveModel(*replica->model, *replica->optimizer, step_, path);
+  // section 10). The mesh is the one caller that knows its data-parallel
+  // width, so it records that too (stage A.6).
+  CheckpointSaveOptions options;
+  options.step = step_ > 0 ? static_cast<std::uint64_t>(step_) : 0;
+  options.world_size = world_size();
+  if (!Checkpointer::SaveModel(*replica->model, replica->optimizer.get(),
+                               options, path)) {
+    throw std::runtime_error("cannot write the checkpoint: " + path);
+  }
 }
 
 void MeshRuntime::Load(const std::string& path) {

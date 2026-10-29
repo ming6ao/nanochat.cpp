@@ -14,6 +14,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <deque>
 #include <fstream>
@@ -25,6 +26,7 @@
 #include <vector>
 
 #include "nanochat/dataloader.h"
+#include "nanochat/fields.h"
 #include "nanochat/tokenizer.h"
 
 namespace nanochat {
@@ -225,6 +227,69 @@ bool ReadRecord(std::istream& in, TensorRecord* record, std::string* error) {
 
 constexpr char kCheckpointMagic[8] = {'N', 'C', 'H', 'K', 'P', 'T', '0', '1'};
 
+// The version word names the layout inside the magic's layout family
+// (docs/checkpoint-metadata-and-examples-plan.md section 2.2). Version 0 is the
+// container with no metadata section; version 1 adds it between the header and
+// the parameter count. The magic stays `NCHKPT01` for both (open decision O5),
+// so a mismatched pair can only be a legacy magic beside a container version
+// word, which `DetectFormat` reports as `kLegacyModel` and `Load` rejects.
+constexpr std::uint32_t kContainerVersion0 = 0;
+constexpr std::uint32_t kContainerVersion1 = 1;
+
+// Reports a fact about the file that `Checkpoint::Load` does not act on. The
+// container has no logger, so the metadata reader writes its one warning per
+// load to stderr: returning it as an error would turn "a newer file" into a
+// failure, and a caller that never sees it would not know the block grew.
+void Warn(const std::string& message) {
+  std::fprintf(stderr, "checkpoint: warning: %s\n", message.c_str());
+}
+
+// Reads the metadata block of a version 1 file: the word count, then the words
+// (sections 2.1 and 3). Both directions of drift are accepted, because a
+// checkpoint that already sits on the Hub has to keep loading: a shorter block
+// keeps the member initializers and reports the fields it did not carry, and a
+// longer block reports the trailing words this build does not know. A bad value
+// inside the block is a hard error, and `metadata` is then unusable
+// (`Checkpoint::Load` drops it and fails).
+bool ReadMetadata(std::istream& in, CheckpointMetadata* metadata,
+                  std::string* error, const std::string& path) {
+  auto bad = [&](const std::string& reason) {
+    if (error != nullptr) *error = reason + ": " + path;
+    return false;
+  };
+  std::uint32_t num_words = 0;
+  if (!ReadU32(in, &num_words)) {
+    return bad("truncated checkpoint metadata header");
+  }
+  // A version 1 file always writes the block, so an empty one is a corrupted
+  // header and not a file from an older writer.
+  if (num_words == 0) return bad("checkpoint metadata section is empty");
+  // The block length comes from the file, so the cap is checked before any word
+  // is allocated or visited (rule 3).
+  if (num_words > kMaxBlockWords) {
+    return bad("checkpoint metadata section is too large");
+  }
+  std::vector<std::uint32_t> words(num_words);
+  for (std::uint32_t i = 0; i < num_words; ++i) {
+    if (!ReadU32(in, &words[i])) return bad("truncated checkpoint metadata");
+  }
+  const IFields::ReadResult result = metadata->Read(words, 0);
+  if (result.pos == 0) return bad("invalid checkpoint metadata");
+  if (result.extra_u32 != 0) {
+    // The data is newer than this build: accept it and count what it carried
+    // (design decision D6). One line per load, not one per word.
+    Warn(path + " carries " + std::to_string(result.extra_u32) +
+         " metadata word(s) this build does not know; loading anyway");
+  }
+  // The recorded config is the run config, so an impossible one is a hard
+  // error at the load and not a surprise at the first GEMM (stage A.6).
+  std::string config_error;
+  if (!metadata->config.Validate(&config_error)) {
+    return bad("checkpoint metadata config is invalid (" + config_error + ")");
+  }
+  return true;
+}
+
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -239,12 +304,43 @@ bool IsCheckpointContainer(const std::string& path) {
          std::memcmp(magic, kCheckpointMagic, sizeof(magic)) == 0;
 }
 
+CheckpointFormat DetectFormat(const std::string& path) {
+  // The magic names the layout family, and `IsCheckpointContainer` is its one
+  // check in the tree. A legacy `NCMDL001` file, and anything else that does
+  // not start with the container magic, reads as `kLegacyModel` here and the
+  // reader then reports the bad magic itself.
+  if (!IsCheckpointContainer(path)) return CheckpointFormat::kLegacyModel;
+
+  std::ifstream in(path, std::ios::binary);
+  if (!in) return CheckpointFormat::kContainerV0;
+  char magic[sizeof(kCheckpointMagic)] = {};
+  std::uint32_t version = 0;
+  if (!ReadBytes(in, magic, sizeof(magic)) || !ReadU32(in, &version)) {
+    // The magic is there and the version word is not. Report the oldest layout
+    // so `Load` reads the version word itself and reports the truncation
+    // instead of this probe.
+    return CheckpointFormat::kContainerV0;
+  }
+  if (version == kContainerVersion0) return CheckpointFormat::kContainerV0;
+  // A version above 1 is newer than this build, so it reads as the newest
+  // layout the enum has and the reader then rejects the version word, which is
+  // the hard error open decision O5 asks for.
+  return CheckpointFormat::kContainerV1;
+}
+
 bool Checkpoint::Load(const std::string& path, std::string* error,
                       bool with_optimizer_state) {
   auto fail = [&](const std::string& message) {
     if (error != nullptr) *error = message;
     return false;
   };
+
+  // The layout is chosen by one value, not by a bool
+  // (docs/checkpoint-metadata-and-examples-plan.md section 2.2).
+  const CheckpointFormat format = DetectFormat(path);
+  if (format == CheckpointFormat::kLegacyModel) {
+    return fail("bad checkpoint magic: " + path);
+  }
 
   std::ifstream in(path, std::ios::binary);
   if (!in) return fail("cannot open checkpoint: " + path);
@@ -255,11 +351,36 @@ bool Checkpoint::Load(const std::string& path, std::string* error,
     return fail("bad checkpoint magic: " + path);
   }
   std::uint32_t version = 0;
-  std::uint32_t count = 0;
-  if (!ReadU32(in, &version) || !ReadU32(in, &count)) {
+  if (!ReadU32(in, &version)) {
     return fail("truncated checkpoint header: " + path);
   }
-  if (version != 0) return fail("unsupported checkpoint version: " + path);
+  if (version != kContainerVersion0 && version != kContainerVersion1) {
+    return fail("unsupported checkpoint version " + std::to_string(version) +
+                ": " + path);
+  }
+  // The magic names the layout family and the version word names the layout
+  // inside it, so a pair that disagrees is a hard error (section 2.2). Under
+  // open decision O5 the magic stays the same for both versions, so this only
+  // catches a file that changed between the two reads.
+  if ((format == CheckpointFormat::kContainerV1) !=
+      (version == kContainerVersion1)) {
+    return fail("checkpoint magic and version disagree: " + path);
+  }
+
+  // A version 0 file has no metadata section, so it reads as the member
+  // initializers of `CheckpointMetadata` and every field stays defined
+  // (section 2.2). A version 1 file carries the block between the header and
+  // the parameter count.
+  CheckpointMetadata metadata;
+  if (format == CheckpointFormat::kContainerV1 &&
+      !ReadMetadata(in, &metadata, error, path)) {
+    return false;
+  }
+
+  std::uint32_t count = 0;
+  if (!ReadU32(in, &count)) {
+    return fail("truncated checkpoint header: " + path);
+  }
 
   std::vector<TensorRecord> records;
   records.reserve(count);
@@ -275,9 +396,9 @@ bool Checkpoint::Load(const std::string& path, std::string* error,
   // The optimizer-state section is optional (docs/post-training.md section 7).
   // A parameter-only file ends after the parameter records; a file with
   // optimizer state carries a second count and its records. This keeps every
-  // parameter-only NCHKPT01 file loadable. A parameter-only read stops here,
-  // so it tolerates a truncated optimizer section (docs/checkpoint-format.md
-  // section 9).
+  // parameter-only file loadable. A parameter-only read stops here, so it
+  // tolerates a truncated optimizer section (docs/checkpoint-format.md section
+  // 9).
   std::vector<TensorRecord> optimizer_state;
   if (with_optimizer_state && in.peek() != std::char_traits<char>::eof()) {
     std::uint32_t state_count = 0;
@@ -297,15 +418,33 @@ bool Checkpoint::Load(const std::string& path, std::string* error,
 
   tensors_ = std::move(records);
   optimizer_state_ = std::move(optimizer_state);
+  metadata_ = std::move(metadata);
   return true;
 }
 
 bool Checkpoint::Save(const std::string& path) const {
+  // The metadata block is what version 1 adds, so a value the block cannot
+  // carry makes `Write` return an empty stream: the file is then never created,
+  // instead of carrying a partial block (design decision D7).
+  const std::vector<std::uint32_t> metadata_words = metadata_.Write();
+  if (metadata_words.empty() || metadata_words.size() > kMaxBlockWords) {
+    return false;
+  }
+  // The recorded config is the run config, so an impossible one fails before
+  // the write and not at the first GEMM after a load (stage A.6).
+  std::string config_error;
+  if (!metadata_.config.Validate(&config_error)) return false;
+
   std::ofstream out(path, std::ios::binary | std::ios::trunc);
   if (!out) return false;
 
+  // The header, then the metadata block, then the version 0 record stream
+  // unchanged (docs/checkpoint-format.md section 2.1). The record framing is
+  // byte identical in both versions, so nothing below this line moved.
   out.write(kCheckpointMagic, sizeof(kCheckpointMagic));
-  WriteU32(out, 0);
+  WriteU32(out, kContainerVersion1);
+  WriteU32(out, static_cast<std::uint32_t>(metadata_words.size()));
+  for (std::uint32_t word : metadata_words) WriteU32(out, word);
   WriteU32(out, static_cast<std::uint32_t>(tensors_.size()));
   for (const TensorRecord& record : tensors_) WriteRecord(out, record);
   // The optimizer-state section follows the parameters (docs/post-training.md

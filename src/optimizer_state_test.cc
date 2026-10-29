@@ -1,5 +1,5 @@
-// src/optimizer_state_test.cc -- the optimizer-state records in NCHKPT01
-// (docs/post-training.md section 7).
+// src/optimizer_state_test.cc -- the optimizer-state records in the checkpoint
+// container (docs/post-training.md section 7).
 //
 // The test proves three things on the tiny architecture used by
 // `src/harness_test.cc` and `src/optim_test.cc`:

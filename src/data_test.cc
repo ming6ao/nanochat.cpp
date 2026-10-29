@@ -2,8 +2,11 @@
 //
 // Round-trips a temporary token shard (both uint16 and uint32 widths), checks
 // the `DataLoader` batch shape and the one-token targets shift, verifies the
-// `Checkpoint` container round-trips name/dtype/shape/payload, and checks the
-// `LoadTokenizer` contract (a valid artifact loads, a bad file returns null).
+// `Checkpoint` container round-trips name/dtype/shape/payload, checks the
+// version 1 metadata block and the version 0 read path
+// (docs/checkpoint-metadata-and-examples-plan.md sections 2.1, 2.2, and 4), and
+// checks the `LoadTokenizer` contract (a valid artifact loads, a bad file
+// returns null).
 
 #include <cstdint>
 #include <cstdio>
@@ -27,8 +30,12 @@ namespace {
 using nanochat::Bf16FromFloat;
 using nanochat::Bf16ToFloat;
 using nanochat::Checkpoint;
+using nanochat::CheckpointFormat;
+using nanochat::CheckpointMetadata;
+using nanochat::ComputePrecision;
 using nanochat::DataLoader;
 using nanochat::DType;
+using nanochat::Stage;
 using nanochat::TensorRecord;
 
 int g_failures = 0;
@@ -36,6 +43,10 @@ int g_failures = 0;
 void Fail(const std::string& message) {
   std::fprintf(stderr, "FAIL: %s\n", message.c_str());
   ++g_failures;
+}
+
+void Expect(bool condition, const std::string& message) {
+  if (!condition) Fail(message);
 }
 
 std::string TempPath(const std::string& name) {
@@ -124,6 +135,210 @@ void TestCheckpoint() {
   Checkpoint absent;
   if (absent.Load(TempPath("does_not_exist.bin"), &error)) {
     Fail("Checkpoint::Load accepted a missing file");
+  }
+}
+
+// True when the two run configs are the same. The comparison is made on the
+// metadata words of each config, through `VisitConfig`, so the check lists no
+// `Config` field and needs no drift test (open decision O4).
+bool SameConfig(const nanochat::Config& left, const nanochat::Config& right) {
+  nanochat::Config left_copy = left;
+  nanochat::Config right_copy = right;
+  nanochat::ConfigBlock recorded(left_copy);
+  nanochat::ConfigBlock runtime(right_copy);
+  return recorded.Write() == runtime.Write();
+}
+
+// A small but valid run config, distinct from the defaults in every field the
+// metadata block carries, so a field that did not round-trip is visible.
+nanochat::Config TinyRunConfig() {
+  nanochat::Config config;
+  config.num_layers = 4;
+  config.num_heads = 2;
+  config.num_kv_heads = 1;
+  config.hidden_dim = 64;
+  config.seq_len = 64;
+  config.vocab_size = 256;
+  config.padded_vocab_size = 256;
+  config.rope_base = 500000.0f;
+  config.window_pattern = "SL";
+  config.value_embedding = false;
+  return config;
+}
+
+// The version 1 metadata block round-trips every field, and the file is a
+// version 1 container (docs/checkpoint-metadata-and-examples-plan.md sections
+// 2.1, 2.2, and 4).
+void TestCheckpointMetadata() {
+  Checkpoint checkpoint;
+  {
+    TensorRecord record;
+    record.name = "weight";
+    record.dtype = DType::kFp32;
+    record.shape = {2, 2};
+    const float values[4] = {1.0f, 2.0f, 3.0f, 4.0f};
+    record.data.resize(sizeof(values));
+    std::memcpy(record.data.data(), values, sizeof(values));
+    checkpoint.Add(std::move(record));
+  }
+
+  CheckpointMetadata metadata;
+  metadata.stage = Stage::kRl;
+  // Above 2^32, so a stream that swapped the two words would fail here.
+  metadata.step = 1234567890123ull;
+  metadata.world_size = 8;
+  metadata.precision = ComputePrecision::kBf16;
+  metadata.config = TinyRunConfig();
+  metadata.tokenizer_id = "nanochat-32k";
+  metadata.git_revision = "abc1234";
+  metadata.created_utc = "2025-06-01T00:00:00Z";
+  metadata.notes = {"resumed from base", "hub:nanochat/base"};
+  checkpoint.set_metadata(metadata);
+
+  const std::string path = TempPath("checkpoint_metadata.ckpt");
+  if (!checkpoint.Save(path)) {
+    Fail("metadata: Checkpoint::Save failed");
+    return;
+  }
+  Expect(nanochat::DetectFormat(path) == CheckpointFormat::kContainerV1,
+         "metadata: DetectFormat did not report a version 1 container");
+
+  Checkpoint loaded;
+  std::string error;
+  if (!loaded.Load(path, &error)) {
+    Fail("metadata: Checkpoint::Load failed: " + error);
+    return;
+  }
+  const CheckpointMetadata read = loaded.metadata();
+  Expect(read.schema == metadata.schema, "metadata: schema changed");
+  Expect(read.stage == metadata.stage, "metadata: stage changed");
+  Expect(read.step == metadata.step, "metadata: step changed");
+  Expect(read.world_size == metadata.world_size,
+         "metadata: world_size changed");
+  Expect(read.precision == metadata.precision, "metadata: precision changed");
+  Expect(SameConfig(read.config, metadata.config),
+         "metadata: the run config changed");
+  Expect(read.tokenizer_id == metadata.tokenizer_id,
+         "metadata: tokenizer_id changed");
+  Expect(read.git_revision == metadata.git_revision,
+         "metadata: git_revision changed");
+  Expect(read.created_utc == metadata.created_utc,
+         "metadata: created_utc changed");
+  Expect(read.notes == metadata.notes, "metadata: notes changed");
+  // The record stream is unchanged by the metadata section.
+  const TensorRecord* weight = loaded.Find("weight");
+  if (weight == nullptr) {
+    Fail("metadata: the parameter record is missing");
+  } else {
+    Expect(weight->shape == std::vector<std::int64_t>({2, 2}),
+           "metadata: the parameter record changed");
+  }
+}
+
+// An all-default metadata block is written and read back unchanged: it is what
+// a version 0 file reads as, so a caller never sees an unset field.
+void TestEmptyMetadata() {
+  Checkpoint checkpoint;
+  TensorRecord record;
+  record.name = "weight";
+  record.shape = {1};
+  record.data.resize(sizeof(float));
+  checkpoint.Add(std::move(record));
+  checkpoint.set_metadata(CheckpointMetadata());
+
+  const std::string path = TempPath("checkpoint_metadata_empty.ckpt");
+  if (!checkpoint.Save(path)) {
+    Fail("empty metadata: Checkpoint::Save failed");
+    return;
+  }
+  Checkpoint loaded;
+  std::string error;
+  if (!loaded.Load(path, &error)) {
+    Fail("empty metadata: Checkpoint::Load failed: " + error);
+    return;
+  }
+  const CheckpointMetadata read = loaded.metadata();
+  Expect(read.stage == Stage::kBase, "empty metadata: the stage is not base");
+  Expect(read.step == 0 && read.world_size == 1,
+         "empty metadata: the step or the world size is not the default");
+  Expect(read.precision == ComputePrecision::kFp32,
+         "empty metadata: the precision is not the default");
+  Expect(read.tokenizer_id.empty() && read.git_revision.empty() &&
+             read.created_utc.empty() && read.notes.empty(),
+         "empty metadata: a string or the notes are not empty");
+  Expect(SameConfig(read.config, nanochat::Config()),
+         "empty metadata: the config is not the default");
+}
+
+// A version 0 file carries no metadata section (docs/checkpoint-format.md
+// section 5.1). The reader reports the member initializers, and `DetectFormat`
+// names the version instead of the reader guessing from a bool.
+void TestVersionZeroContainer() {
+  const std::string path = TempPath("checkpoint_v0_handwritten.ckpt");
+  {
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    const char header[] = {'N', 'C', 'H', 'K', 'P', 'T', '0', '1',
+                           0,   0,   0,   0,   0,   0,   0,   0,
+                           0,   0,   0,   0};
+    out.write(header, sizeof(header));
+  }
+  Expect(nanochat::DetectFormat(path) == CheckpointFormat::kContainerV0,
+         "version 0: DetectFormat did not report a version 0 container");
+  Expect(nanochat::IsCheckpointContainer(path),
+         "version 0: IsCheckpointContainer rejected the file");
+
+  Checkpoint loaded;
+  std::string error;
+  if (!loaded.Load(path, &error)) {
+    Fail("version 0: Checkpoint::Load failed: " + error);
+    return;
+  }
+  Expect(loaded.tensors().empty(), "version 0: the file carries records");
+  const CheckpointMetadata read = loaded.metadata();
+  Expect(read.stage == Stage::kBase && read.step == 0,
+         "version 0: the metadata is not the default");
+  Expect(SameConfig(read.config, nanochat::Config()),
+         "version 0: the config is not the default");
+}
+
+// A file that is not a container at all, and a metadata section the reader
+// cannot trust, are both hard errors.
+void TestMalformedContainers() {
+  const std::string legacy = TempPath("checkpoint_legacy_handwritten.ckpt");
+  {
+    std::ofstream out(legacy, std::ios::binary | std::ios::trunc);
+    const char header[] = {'N', 'C', 'M', 'D', 'L', '0', '0', '1',
+                           0,   0,   0,   0};
+    out.write(header, sizeof(header));
+  }
+  Expect(nanochat::DetectFormat(legacy) == CheckpointFormat::kLegacyModel,
+         "malformed: DetectFormat did not report the legacy layout");
+  Checkpoint legacy_checkpoint;
+  Expect(!legacy_checkpoint.Load(legacy, nullptr),
+         "malformed: Load accepted a legacy file");
+  Expect(nanochat::DetectFormat(TempPath("does_not_exist.bin")) ==
+             CheckpointFormat::kLegacyModel,
+         "malformed: DetectFormat opened a missing path");
+
+  // A version 1 header with an empty metadata section, and one whose section
+  // claims more words than the cap allows.
+  const char* names[] = {"checkpoint_metadata_none.ckpt",
+                         "checkpoint_metadata_huge.ckpt"};
+  const char zeros[4] = {0, 0, 0, 0};
+  const char huge[4] = {'\xff', '\xff', '\xff', '\xff'};
+  for (int i = 0; i < 2; ++i) {
+    const std::string path = TempPath(names[i]);
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    const char header[] = {'N', 'C', 'H', 'K', 'P', 'T', '0', '1',
+                           1,   0,   0,   0};
+    out.write(header, sizeof(header));
+    out.write(i == 0 ? zeros : huge, sizeof(zeros));
+  }
+  for (const char* name : names) {
+    Checkpoint checkpoint;
+    std::string error;
+    Expect(!checkpoint.Load(TempPath(name), &error),
+           std::string("malformed: Load accepted ") + name);
   }
 }
 
@@ -331,6 +546,10 @@ void TestShardedResume() {
 
 int main() {
   TestCheckpoint();
+  TestCheckpointMetadata();
+  TestEmptyMetadata();
+  TestVersionZeroContainer();
+  TestMalformedContainers();
   TestBf16RoundTrip();
   TestTokenizer();
   TestDocumentLoader();

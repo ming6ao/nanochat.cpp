@@ -32,6 +32,35 @@ cc_library(
     deps = ["//include/nanochat:nanochat"],
 )
 
+# The field visitor of the checkpoint metadata block
+# (docs/checkpoint-metadata-and-examples-plan.md stage A.1,
+# docs/checkpoint-format.md section 2.1). It is a leaf like `record_file`: the
+# standard library and the public headers only, so no kernel and no backend
+# links it, and a second container reader could reuse it unchanged.
+cc_library(
+    name = "fields",
+    srcs = ["fields.cc"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    deps = ["//include/nanochat:nanochat"],
+)
+
+# The run metadata block as a serializable struct: the `VisitConfig` field
+# order and the enum range checks of `nanochat/checkpoint_metadata.h`
+# (docs/checkpoint-metadata-and-examples-plan.md sections 3 and 4). Host-only,
+# and it lists no `Config` field of its own, so the visitor stays the one place
+# the config's word stream is written (open decision O4).
+cc_library(
+    name = "checkpoint_metadata",
+    srcs = ["checkpoint_metadata.cc"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    deps = [
+        ":fields",
+        "//include/nanochat:nanochat",
+    ],
+)
+
 # The vendor-free control plane shared by every gradient-sync backend
 # (docs/distributed-native-plan.md section 4). POSIX sockets only; no vendor
 # header, so the `src` layer stays vendor-free (DESIGN.md section 2.1).
@@ -121,7 +150,11 @@ cc_library(
             ":distributed_host",
         ],
     }) + [
+        ":checkpoint_metadata",
         ":distributed_seam",
+        # `data.cc` reads and writes the metadata block through the field
+        # visitor (docs/checkpoint-metadata-and-examples-plan.md section 2.1).
+        ":fields",
         # `train.cc` reads the device capability table for the precision-aware
         # MFU peak (docs/precision.md).
         ":device_profile",
@@ -355,6 +388,24 @@ cc_test(
     size = "small",
 )
 
+# The field visitor (docs/checkpoint-metadata-and-examples-plan.md stage A.1):
+# the upstream suite of `gemma.cpp` `io/fields_test.cc` -- round trip, new code
+# with old data, old code with new data, an invalid float, an invalid string,
+# back-to-back writes, the vector cap, and enum validity. It is host-only and
+# links no backend, so it runs on every configuration.
+cc_test(
+    name = "fields_test",
+    srcs = ["fields_test.cc"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    deps = [
+        ":checkpoint_metadata",
+        ":fields",
+        "//include/nanochat:nanochat",
+    ],
+    size = "small",
+)
+
 # ScoreBatch (docs/eval.md section 3.2): the NLL/argmax shape contract, the
 # masking of a row's final position and its padding, agreement with a hand-built
 # ForwardLoss over the same shifted targets, and the focused-logit extraction at
@@ -534,10 +585,10 @@ cc_test(
     size = "small",
 )
 
-# Optimizer-state records in NCHKPT01 (docs/post-training.md section 7): a
-# save-and-reload test that continues a run, checks the loss curve is
-# continuous, compares the AdamW moments and Muon buffers byte for byte, and
-# keeps a parameter-only file loadable with zero moments. CPU only.
+# Optimizer-state records in the checkpoint container (docs/post-training.md
+# section 7): a save-and-reload test that continues a run, checks the loss
+# curve is continuous, compares the AdamW moments and Muon buffers byte for
+# byte, and keeps a parameter-only file loadable with zero moments. CPU only.
 cc_test(
     name = "optimizer_state_test",
     srcs = ["optimizer_state_test.cc"],
@@ -683,6 +734,7 @@ test_suite(name = "all", tests = [
     ":eval_test",
     ":grad_mode_test",
     ":optim_test",
+    ":fields_test",
     ":data_test",
     ":harness_test",
     ":mesh_test",
