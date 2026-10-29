@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Convert a reference nanochat ``.pt`` checkpoint into the NCHKPT01 container.
+"""Convert a reference nanochat ``.pt`` checkpoint into the checkpoint container.
 
 The C++ runtime reads only its own self-describing container and never imports
 PyTorch, so a released base or SFT checkpoint has to be remapped once on the
