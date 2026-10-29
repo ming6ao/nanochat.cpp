@@ -45,7 +45,7 @@ STAGE_PATTERNS = ("checkpoint.ckpt", "model.json", "tokenizer.nctoken")
 FULL_STAGE_PATTERNS = STAGE_PATTERNS + (
     "train.json", "run.json", "metrics.jsonl", "summary.json", "README.md")
 
-#: The container name the notebooks write.
+#: The checkpoint container magic the notebooks write.
 CONTAINER = "NCHKPT01"
 
 #: The repository name prefix of one model family.
@@ -110,7 +110,7 @@ def build_run_record(*, stage, run_name, git_revision="", build_key="",
     """Assemble the provenance record. Pure; no Hub call.
 
     The record names the stage, the run, the source revision, the build, the
-    container, the parent stage, and the step.
+    checkpoint container, the parent stage, and the step.
     """
     return {
         "stage": str(stage),
