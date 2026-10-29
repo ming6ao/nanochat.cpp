@@ -477,7 +477,10 @@ nanochat_status nanochat_checkpoint_write(const char* path,
 
 // Reads both record lists from `path`. Every out parameter is required. The
 // arrays belong to `*owner`, and they stay valid until
-// `nanochat_checkpoint_free`. The file must be a version 0 container.
+// `nanochat_checkpoint_free`. The file may be a version 0 or a version 1
+// container: the record framing is identical in both, and a version 0 file
+// simply has no metadata block. A legacy `NCMDL001` file and an unsupported
+// `version` word are errors.
 nanochat_status nanochat_checkpoint_read(const char* path,
                                          nanochat_checkpoint** owner,
                                          const nanochat_record** records,
@@ -487,6 +490,78 @@ nanochat_status nanochat_checkpoint_read(const char* path,
 
 // Releases a handle and the arrays it owns. A null handle is accepted.
 void nanochat_checkpoint_free(nanochat_checkpoint* owner);
+
+// The run metadata block of the container
+// (docs/checkpoint-metadata-and-examples-plan.md section 4). A version 1 file
+// carries it; a version 0 file reads as the defaults, so every field is always
+// defined and a caller needs no presence test.
+//
+// The stage values match `nanochat::Stage` (open decision O3) and never change;
+// the C surface spells them out so a binding holds no C++ enum. There is no
+// pretrain value.
+typedef enum {
+  NANOCHAT_STAGE_BASE = 0,
+  NANOCHAT_STAGE_SFT = 1,
+  NANOCHAT_STAGE_RL = 2,
+} nanochat_stage;
+
+// The precision values match `nanochat::ComputePrecision` (open decision O2).
+// The recorded value is informational: it never changes a load decision.
+typedef enum {
+  NANOCHAT_PRECISION_FP32 = 0,
+  NANOCHAT_PRECISION_BF16 = 1,
+  NANOCHAT_PRECISION_FP8 = 2,
+} nanochat_precision;
+
+// The metadata block, a mirror of `nanochat::CheckpointMetadata`. Every string
+// points into the storage of the `nanochat_checkpoint` handle that the read
+// returned and stays valid until `nanochat_checkpoint_free`; the caller must
+// not free it. `config_json` is the nested run config as one JSON object
+// (`nanochat.config.v1`, one key per `Config` member), which beats twelve
+// scalar getters: the caller decodes it with the JSON parser it already has,
+// and a new config field needs no new C function. `notes` points to
+// `note_count` entries, or is null for no notes.
+typedef struct {
+  int32_t schema;  // The metadata schema, not the file version.
+  int32_t stage;   // A nanochat_stage value.
+  int64_t step;
+  int64_t world_size;
+  int32_t precision;  // A nanochat_precision value.
+  const char* config_json;
+  const char* tokenizer_id;
+  const char* git_revision;  // Informational only.
+  const char* created_utc;   // ISO-8601, informational only.
+  const char* const* notes;
+  int32_t note_count;
+} nanochat_checkpoint_metadata;
+
+// Reads the metadata block of the container at `path` into `*out`. The handle
+// `*owner` owns every string of `*out`, and the caller releases both with
+// `nanochat_checkpoint_free`. The record lists are not read, so a caller that
+// only needs the run facts does not allocate the parameters. An unreadable
+// path, a bad magic, an unsupported version, or a bad value inside the block
+// is a failure status: nothing is filled in a partial state, and
+// `nanochat_last_error` names the field that failed.
+nanochat_status nanochat_checkpoint_metadata_read(
+    const char* path, nanochat_checkpoint** owner,
+    nanochat_checkpoint_metadata* out);
+
+// Flat accessors over a metadata block. Each is nil-safe: a null `meta` yields
+// 0. They exist so a caller that mirrors only the scalars, such as the Python
+// surface, reads them through a function instead of an offset.
+int32_t nanochat_checkpoint_metadata_stage(
+    const nanochat_checkpoint_metadata* meta);
+int64_t nanochat_checkpoint_metadata_step(
+    const nanochat_checkpoint_metadata* meta);
+int64_t nanochat_checkpoint_metadata_world_size(
+    const nanochat_checkpoint_metadata* meta);
+
+// The nested config of `meta` as one JSON object, or null for a null `meta`.
+// A version 0 file yields the default config object, so the caller always gets
+// a decodable value. The string belongs to the handle that
+// `nanochat_checkpoint_metadata_read` returned.
+const char* nanochat_checkpoint_metadata_config_json(
+    const nanochat_checkpoint_metadata* meta);
 
 // Fills `out` with a named preset of the optimizer and scheduler
 // hyperparameters, so a client gets the same values as the `train_main`
