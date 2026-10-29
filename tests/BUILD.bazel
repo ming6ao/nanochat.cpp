@@ -73,6 +73,27 @@ filegroup(
     srcs = ["data/chat_fixture.bin"],
 )
 
+# The version 0 checkpoint fixture, `tests/data/checkpoint_v0.ckpt`, produced by
+# `tools/dump_fixtures.py checkpoint` from the writer before the metadata work
+# moved it, so the bytes are the ones a Hub artifact already carries
+# (docs/checkpoint-metadata-and-examples-plan.md stage A.2).
+# `//tests:checkpoint_compat_test` reads it with the shipped reader; the note
+# `tests/data/checkpoint_v0.txt` is the durable record this summary cites:
+#
+#   name               dtype       shape   payload bytes   FNV-1a 64
+#   fixture/weights    float32     (2, 3)             24   0x7610708711193cf0
+#   fixture/bias       bfloat16    (3,)                6   0x702bf156049a2035
+#
+# Concatenated payload checksum 0x41273f0935abaaa8, file size 145 bytes,
+# sha256 f7a5b88723bc5f50787eddf63f6166d36df42df3217c4f078a97bb7e1f6c3a27.
+# Never regenerate it: once `Checkpoint::Save` writes a version word above 0 the
+# generator command produces version 1 bytes, and writing them here would delete
+# the guard this file exists to provide.
+filegroup(
+    name = "checkpoint_v0_fixture",
+    srcs = ["data/checkpoint_v0.ckpt"],
+)
+
 # The document-mode loader parity gate (docs/parquet-native.md phase 8). The
 # C++ rows must match the reference
 # `tokenizing_distributed_data_loader_bos_bestfit` for a fixed corpus and
@@ -94,6 +115,33 @@ cc_test(
         "//include/nanochat:nanochat",
         "//src:model",
         "//src/tokenizer:tokenizer",
+    ],
+    size = "small",
+)
+
+# The version 0/1 checkpoint compatibility guard
+# (docs/checkpoint-metadata-and-examples-plan.md stage A.4 and section 5's case
+# table): the release gate that keeps the artifacts already on the Hub loading.
+# It reads the pinned version 0 fixture and asserts its record names, storage
+# dtypes, shapes, payload bytes, and checksums, that a version 1 file round-trips
+# every field, that both drift directions are accepted and counted (`extra_u32`
+# and `missing_fields`), and that every malformed input is a hard error with no
+# partial load. It also carries section 8's precision gate, so the same target
+# runs in the bf16 and fp8 builds:
+# `tools/nanochat test //tests:checkpoint_compat_test --config=bf16`.
+cc_test(
+    name = "checkpoint_compat_test",
+    srcs = ["checkpoint_compat_test.cc"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    data = ["data/checkpoint_v0.ckpt"],
+    args = ["$(rootpath data/checkpoint_v0.ckpt)"],
+    deps = [
+        "//include/nanochat:nanochat",
+        # `Checkpoint` lives with the workflow (`src/data.cc`), and
+        # `BuildComputePrecision`/`PrecisionName` live in
+        # `src/performance_model.cc`, so the precision gate can report the build.
+        "//src:model",
     ],
     size = "small",
 )
@@ -679,6 +727,7 @@ test_suite(name = "all", tests = [
     ":generate_parity_cuda_test",
     ":score_parity_test",
     ":loader_parity_test",
+    ":checkpoint_compat_test",
     ":post_training_core_test",
     ":device_profile_test",
     ":fp8_rounding_test",
