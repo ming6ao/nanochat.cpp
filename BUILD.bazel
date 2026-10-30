@@ -83,8 +83,9 @@ config_setting(
 # are aggregated here without the root graph referencing a target that does not
 # exist yet. A genuinely new package (a new directory with its own BUILD file)
 # is the only case that would add a label to this list. The two example
-# packages are that case: each is a new directory, so each `//examples/<x>:all`
-# rides here next to the package suites below (docs/examples.md).
+# packages and the model package are that case: each is a new directory, so
+# each `//examples/<x>:all` and `//models/<name>:all` rides here next to the
+# package suites below (docs/examples.md, docs/model-and-device-bringup.md).
 test_suite(
     name = "all_tests",
     tests = [
@@ -96,6 +97,7 @@ test_suite(
         "//dev/kernels:all",
         "//examples/checkpoint_roundtrip:all",
         "//examples/hello_world:all",
+        "//models/nanochat-default:all",
         "//notebooks:all",
         "//python:all",
         "//src:all",

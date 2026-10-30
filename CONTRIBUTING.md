@@ -62,4 +62,12 @@ directly; the entry point is what applies the sandbox. See
   [docs/examples.md](docs/examples.md).
 - Design decisions and the invariants that constrain them live in
   [DESIGN.md](DESIGN.md). Keep frozen headers `nanochat/{kernels,tensor,config,
-  model}.h` architect-owned, and prefer additive changes.
+  model,plan,model_spec}.h` architect-owned, and prefer additive changes.
+
+## Reviewing a model or device bring-up
+
+A bring-up adds a directory, `models/<name>/` or `backends/<name>/`, and edits
+nothing else. Reject the change, unless a contract extension lands first, if it
+edits a frozen header, a shared source file, a shared build file, or another
+package for one model or one device. The authority and the full list are §13 of
+[docs/model-and-device-bringup.md](docs/model-and-device-bringup.md).

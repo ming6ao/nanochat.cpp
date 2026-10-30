@@ -97,11 +97,20 @@ specified in [docs/kernels.md](docs/kernels.md).
    review as any other change to the layering rule.
 3. `kernels.h` contains no vendor types: pointers are `ComputeType*`, streams are
    opaque, and no CUDA header is ever included from it.
+4. **No cross naming.** Nothing above the kernel seam names a specific model or
+   a specific device, and nothing below it names a graph. The seam names
+   neither.
+5. **A bring-up adds a directory.** A model bring-up edits only
+   `models/<name>/**`; a device bring-up edits only `backends/<name>/**`.
+   Neither edits a frozen header, a shared build file, or another package
+   without a contract extension first.
 
-These three rules are the load-bearing invariants: they let a backend be
+The first three rules are the load-bearing invariants: they let a backend be
 replaced as a build/link decision rather than a source change. API stability is
 the default and cheap by construction, not a guarantee that the API cannot
-move — when it must move, see §7.
+move — when it must move, see §7. Rules 4 and 5 are the isolation promise; the
+bring-up contract that makes them operational is
+[model-and-device-bringup.md](docs/model-and-device-bringup.md) §4 and §13.
 
 ### 2.2 Execution entry
 
