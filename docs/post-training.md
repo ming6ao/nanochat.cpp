@@ -257,8 +257,10 @@ Two containers exist:
 
 - `NCMDL001` is a legacy flat parameter file. The project no longer writes it.
   `Checkpointer::LoadModel` still reads it (`src/train.cc`).
-- `NCHKPT01` is the self-describing container that `Checkpointer` uses
-  (`src/data.cc`). It is version 0. The reference converter in
+- The checkpoint container is the self-describing file `Checkpointer` uses
+  (`src/data.cc`). Writers write version 1, which carries the run metadata
+  block; readers accept version 0 and version 1
+  (`docs/checkpoint-format.md`). The reference converter in
   `python/nanochat_cpp/checkpoint.py` writes the same format.
 
 Both containers hold parameters. The `Checkpoint` class also carries an
@@ -270,8 +272,8 @@ groups.
 `Checkpointer::SaveModel` and `Checkpointer::LoadModel` have `Optimizer`
 overloads. A parameter-only file stays loadable.
 
-`NCHKPT01` stores fp32 or bf16 records. The record dtype is a storage dtype,
-separate from the build compute dtype. An fp32 container is the canonical
+The checkpoint container stores fp32 or bf16 records. The record dtype is a
+storage dtype, separate from the build compute dtype. An fp32 container is the canonical
 artifact for a resume. A bf16 container is a compact artifact.
 
 Pretrain checkpoints load directly. Reference base and SFT checkpoints are torch
@@ -320,7 +322,7 @@ difference.
 | ID | Status | Difference |
 |---|---|---|
 | E1 | `open` | Sampled modes use the C++ RNG, not torch; greedy is bit-identical |
-| E3 | `equivalent` | Reference checkpoints converted torch to NCHKPT01 |
+| E3 | `equivalent` | Reference checkpoints converted torch to the checkpoint container |
 | E4 | `equivalent` | CORE and chat scoring use the C++ forward with the reference task logic |
 | E5 | `out-of-scope` | No distributed evaluation |
 | P1 | `open` | The calculator tool is absent in the MVP; the model samples its own python blocks |
@@ -347,8 +349,8 @@ changes.
 | ChatCORE and generative chat evaluation | Done | `python/nanochat_cpp/chat.py` |
 | `render_for_completion` prompt builder | Done | `python/nanochat_cpp/chat.py` |
 | Checkpoint path resolution for base, SFT, and RL | Done | `python/nanochat_cpp/checkpoint.py` |
-| Reference `.pt` conversion into NCHKPT01 | Done | `tools/convert_checkpoint.py` |
-| Optimizer-state records in NCHKPT01 | Done | `include/nanochat/data.h`; `src/optim_state.h`; `src/optim.cc`; `src/optimizer_state_test.cc` |
+| Reference `.pt` conversion into the checkpoint container | Done | `tools/convert_checkpoint.py` |
+| Optimizer-state records in the checkpoint container | Done | `include/nanochat/data.h`; `src/optim_state.h`; `src/optim.cc`; `src/optimizer_state_test.cc` |
 | SFT conversation renderer (`render_conversation`) | Done | `python/nanochat_cpp/chat.py` |
 | SFT mixture and Python packer | Done | `python/nanochat_cpp/sft_data.py` |
 | Native packed-row loader for SFT | Missing | `src/data.cc` has the pretraining packer only |

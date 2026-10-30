@@ -1,10 +1,13 @@
 # Checkpoint format and notebook lifecycle
 
-Status: Parts A and B are implemented. The container is version 0 in the
-tree, with the fp32, bf16, and reserved int8 codes and the attribute block. The
-C++ writer stores the true tensor shape. The byte layout lives only in
-`src/data.cc`, and a host tool reaches it through the `nanochat_checkpoint_*` C
-surface. The parameter-only read is in the tree: the flag on
+Status: Parts A and B are implemented. Every writer writes version 1, which
+adds the run metadata block between the header and the parameter count
+(section 5.3), and the reader accepts version 0 and version 1. The fp32, bf16,
+and reserved int8 codes and the attribute block are unchanged. The C++ writer
+stores the true tensor shape. The record byte layout lives only in `src/data.cc`,
+the metadata block in `src/fields.cc` and `src/checkpoint_metadata.cc`, and a
+host tool reaches both through the `nanochat_checkpoint_*` C surface. The
+parameter-only read is in the tree: the flag on
 `Checkpoint::Load`, the `Checkpointer::LoadModel` choice, the
 `nanochat_runtime_load_weights` C entry point, and the Python
 `MeshRuntime.load(path, optimizer=)` argument. Part B is in the tree: the two
@@ -34,7 +37,8 @@ Part A touches the training harness and adds one C entry point.
 |---|---|
 | File set | `setup.ipynb`, `pretrain.ipynb`, `eval.ipynb`, `posttrain.ipynb` |
 | Name prefix | No `nanochat-cpp-` prefix on any notebook |
-| Container | One format. Magic `NCHKPT01`. Version 0. |
+| Container | One format. Magic `NCHKPT01`. Writers write version 1; readers accept version 0 and version 1. |
+| Run metadata | One visitor block between the header and the parameter count (section 5.3), with the drift rules of section 5.4 |
 | Storage | fp32 for the canonical artifact. bf16 for a compact artifact. |
 | File suffix | `.ckpt` |
 | Writer | The notebooks save through the training runtime |
@@ -60,20 +64,35 @@ The canonical name is `checkpoint.ckpt`. The magic is independent of the file
 name. A reader detects the container by the eight magic bytes, not by the
 suffix.
 
-`NCHKPT01` is the only container the project writes. Reads still accept the
-legacy `NCMDL001` container, and no writer produces it.
+`NCHKPT01` is the only container the project writes, and the `version` word
+says which layout inside it a file carries: 1 for a file this tree writes, and
+0 for a file an older build wrote, which the committed fixture
+`tests/data/checkpoint_v0.ckpt` pins. Reads accept both versions. They also
+still accept the legacy `NCMDL001` container, and no writer produces it.
 
 ## 4. Writers
 
-The notebooks save through the training runtime. The runtime writes
-`NCHKPT01`.
+The notebooks save through the training runtime, and every writer writes
+version 1, so every file a notebook, a script, or a test produces carries the
+metadata block. The `version` word is the only difference between the writers;
+they all use the one container.
 
-| Writer | Container | Optimizer section | Step record |
+| Writer | Run metadata | Optimizer section | Step record |
 |---|---|---|---|
-| `MeshRuntime.save` (`nc.MeshRuntime.save`) | `NCHKPT01` | AdamW, Muon | yes |
-| `Checkpointer::SaveModel(model, optimizer, step, path)` | `NCHKPT01` | per the optimizer | yes |
-| `Checkpointer::SaveModel(model, path)` | `NCHKPT01` | empty count | no |
-| `nc.Model.save` (`nanochat_save`) | `NCHKPT01` | empty count | no |
+| `MeshRuntime.save` (`nc.MeshRuntime.save`) | the step and the data-parallel world size, from the runtime | AdamW, Muon | yes |
+| `Checkpointer::SaveModel(model, optimizer, options, path)` | every field of `CheckpointSaveOptions`, plus `model.config()` | per the optimizer | when `options.step` is above zero |
+| `Checkpointer::SaveModel(model, optimizer, step, path)` | the step, and the defaults elsewhere | per the optimizer | yes |
+| `Checkpointer::SaveModel(model, path)` | the defaults: base, step 0, world size 1 | empty count | no |
+| `nc.Model.save` (`nanochat_save`) | the defaults | empty count | no |
+
+`Checkpointer::SaveModel` fills the block from `model.config()` and from the
+`CheckpointSaveOptions` the caller passes (open decision O1), and validates the
+config before the write, so an impossible config fails at the save and at the
+load instead of at the first GEMM. `created_utc` stays empty: a save has to be
+reproducible, and the field is informational, so a tool that wants a timestamp
+writes one. `src/sft_main.cc` records `Stage::kSft` and
+`RlWorker::SaveCheckpoint` records `Stage::kRl`, so a reader tells the stages
+apart without a side file.
 
 `nc.Model.save` writes the parameters only. The project no longer writes
 `NCMDL001`; `Checkpointer::LoadModel` still reads a legacy file. The pretraining
@@ -88,6 +107,9 @@ language runtime, and no object graph. The writer is `Checkpoint::Save` in
 
 ### 5.1 Header and sections
 
+Version 0 is the container with no run metadata block. The tree wrote it before
+the metadata work, and every artifact that already sits on the Hub is one.
+
 | Offset | Size | Field | Notes |
 |---|---|---|---|
 | 0 | 8 | magic | the ASCII bytes `NCHKPT01` |
@@ -96,6 +118,26 @@ language runtime, and no object graph. The writer is `Checkpoint::Save` in
 | 16 | variable | the parameter records | see section 6 |
 | after the parameters | 4 | optimizer count | `uint32` |
 | after the count | variable | the optimizer records | see section 6 |
+
+Version 1 is what every writer in section 4 produces. It adds the metadata word
+count and the metadata words directly after the header, and nothing below them
+moves.
+
+| Offset | Size | Field | Notes |
+|---|---|---|---|
+| 0 | 8 | magic | the ASCII bytes `NCHKPT01`, the same family word in both versions |
+| 8 | 4 | version | `uint32`, the value 1 |
+| 12 | 4 | metadata word count | `uint32`, above zero and at most `kMaxBlockWords` (64 KiB) |
+| 16 | `4 * count` | the metadata words | `uint32` each, see section 5.3 |
+| after the metadata | 4 | parameter count | `uint32` |
+| then | variable | the parameter records | byte identical to the version 0 layout above |
+| then | 4 | optimizer count | `uint32` |
+| then | variable | the optimizer records | byte identical to the version 0 layout above |
+
+The record framing is byte identical in both versions, so `ReadRecord`, the
+Python decoder, and the `nanochat_checkpoint_*` surface read either version
+without a branch. The metadata sits before the parameter count, so a
+parameter-only read keeps its early stop: the optimizer section stays last.
 
 The parameter section is always first. The optimizer section is optional. A
 parameter-only file writes an optimizer count of zero.
@@ -106,6 +148,118 @@ Every integer is little-endian. The helper functions `WriteU16`, `WriteU32`,
 `WriteU64`, and `WriteI64` in `src/data.cc` serialize the values by hand. A
 `uint32` value is four bytes, least significant byte first. An `int64` value is
 the two's-complement form of a `uint64`.
+
+The metadata words are `uint32` values in the same encoding, and each one is
+four bytes: the block is a word stream, not a byte stream. Section 5.3 says how
+a type that does not fit one word is carried.
+
+### 5.3 The metadata section
+
+The block is one `IFields` word stream (`include/nanochat/fields.h`), written
+and read by `CheckpointMetadata` (`include/nanochat/checkpoint_metadata.h`).
+The container writes the block's word count first, so a reader bounds the block
+before it visits a word and rejects an oversized one early. A version 1 file
+always writes the block, so a word count of zero is a corrupted header and not
+a file from an older writer.
+
+The word stream rules (`include/nanochat/fields.h`):
+
+- `uint32`, `int32`, and `float` take one word each. A float travels as its bit
+  pattern, so a read never converts a value.
+- `uint64` takes two words, the low 32 bits first and then bits 32-63 (open
+  decision O6). `step` is the one 64-bit field, and the order is part of the
+  contract: a stream written high word first would still decode, to a wrong
+  value.
+- `bool` and an enum take one word, as the `uint32` value.
+- A string takes one length word and then that many words of characters, zero
+  padded to the last whole word; the reader trims the trailing nulls.
+- A vector takes one count word and then the words of each entry.
+- A nested block takes one size word and then its payload, which the size does
+  not count. The size prefix is why an older reader can skip a block it does
+  not know, and why a newer reader can tell how many words a block it knows
+  carried.
+
+`CheckpointMetadata::VisitFields` is the field order, and the order is the
+format:
+
+| Order | Field | Type | Stored as |
+|---|---|---|---|
+| 1 | `schema` | `uint32` | one word, 1 today |
+| 2 | `stage` | `Stage` | one word, the enumerator value |
+| 3 | `step` | `uint64` | two words, low 32 bits first |
+| 4 | `world_size` | `uint32` | one word, 1 or more |
+| 5 | `precision` | `ComputePrecision` | one word, the enumerator value |
+| 6 | `config` | nested block | one size word, then the config fields |
+| 7 | `tokenizer_id` | string | one length word, then the characters |
+| 8 | `git_revision` | string | the same |
+| 9 | `created_utc` | string | the same |
+| 10 | `notes` | vector of strings | one count word, then one string per entry |
+
+The `schema` is the metadata schema version, not the file version. It moves
+only when the meaning of a field moves, which the append-only rule forbids, so
+it stays 1.
+
+The config block carries the `Config` members in the order
+`VisitConfig` writes them (`src/checkpoint_metadata.cc`): `num_layers`,
+`num_heads`, `num_kv_heads`, `hidden_dim`, `seq_len`, `vocab_size`,
+`padded_vocab_size`, `rope_base`, `window_pattern`, `value_embedding`. `Config`
+stays the one declaration of the model shape: there is no mirror struct, so no
+field is duplicated and no drift test is needed (open decision O4). The load
+validates the recorded config, and a mismatch between the file config and the
+runtime config fails with a message instead of at the first GEMM.
+
+The stage mapping (open decision O3) is the notebook vocabulary. The stored
+value is the enumerator, so a new stage is a new field and never an inserted
+enumerator:
+
+| Notebook stage | `Stage` | Stored value |
+|---|---|---|
+| `base` | `Stage::kBase` | 0 |
+| `sft` | `Stage::kSft` | 1 |
+| `rl` | `Stage::kRl` | 2 |
+
+There is no `kPretrain`: `base` is the pretraining stage.
+
+The `precision` is a `ComputePrecision` from `include/nanochat/mfu.h` (open
+decision O2), the enum a report row already names, so the tree keeps one
+precision enum. The recorded value is informational: it never changes how a
+file loads, and a version 0 file reports `fp32` under every `--config` build.
+
+The caps (rule 3 of the block):
+
+| Item | Cap | On a larger value |
+|---|---|---|
+| one string | 4096 words, `kMaxStringWords` | hard error |
+| one vector | 1024 entries, `kMaxVectorEntries` | hard error |
+| the whole block | 64 KiB, `kMaxBlockWords` | hard error before any word is visited |
+
+The block is a few dozen words in practice, beside gigabytes of weights, so
+these caps bound a malformed file and not a real one. They are the same kind of
+bound as the container's `kMaxAttributes = 64`, and they keep the block from
+growing into a second config file.
+
+### 5.4 Compatibility rules
+
+The rules come from design decisions D5, D6, and D7. Together they are the
+reason a checkpoint that already sits on the Hub keeps loading after a field is
+added, in both directions.
+
+| Case | Rule | What the reader does |
+|---|---|---|
+| Trailing metadata words this build does not know (D5) | Accept and count | Reads the block, reports the `extra_u32` count it did not use, and prints one warning per load |
+| Metadata fields this build does not know (D6) | Accept and count | Stops at the end of the block and keeps the member initializers; `IFields::ReadResult::missing_fields` counts them for a caller that visits the block directly |
+| A version 0 file | Accept | Reads the record stream and reports the metadata defaults |
+| A bad value inside the block (D7) | Hard error | `Checkpoint::Load` returns false with the field in `error`, and no partial load |
+| A metadata word count of zero, or above the cap (D7) | Hard error | The header is rejected before a word is visited |
+| A version word above 1 (D7) | Hard error | `unsupported checkpoint version` |
+| An invalid recorded config (D7) | Hard error | The config is validated at the load, so a mismatch fails there |
+| A record the build cannot read (D7) | Hard error | The existing record reader already reports the reason, and nothing moved |
+
+The defaults are the member initializers of `CheckpointMetadata`, so an unset
+field is always defined: `schema` 1, `stage` base, `step` 0, `world_size` 1,
+`precision` fp32, the default `Config`, and empty strings and notes.
+`created_utc` and `git_revision` are informational only (rule 4), so no load
+decision depends on them.
 
 ## 6. Record layout
 
@@ -238,12 +392,17 @@ are an integer, not a float. The reader must not read the step as a float.
 
 ## 9. Reader modes
 
-The container has two read modes.
+The container has two read modes, and both read either version.
 
 | Mode | Reads | Used by |
 |---|---|---|
-| Parameter only | the header and the parameter records | `nc.Model.load`, `MeshRuntime.load(optimizer=False)` |
-| Full | the header, the parameter records, and the optimizer section | A resume through `MeshRuntime.load` |
+| Parameter only | the header, the metadata block, and the parameter records | `nc.Model.load`, `MeshRuntime.load(optimizer=False)` |
+| Full | the header, the metadata block, the parameter records, and the optimizer section | A resume through `MeshRuntime.load` |
+
+The metadata block is small and every read needs it, so neither mode skips it:
+a version 1 file yields its run facts in both modes, and a version 0 file
+yields the defaults. The optimizer section stays the only section a mode can
+skip.
 
 `Checkpoint::Load` gains one flag:
 
@@ -300,27 +459,73 @@ not bump the version again.
 
 ## 10. Versioning
 
-The version field is 0. A reader accepts the value 0 and rejects any other
-value. No earlier published container exists, so version 0 needs no
-compatibility branch.
+The `version` word names the layout inside the magic's layout family. A reader
+accepts the values 0 and 1, and rejects any other value with `unsupported
+checkpoint version`, so an old build fails on a new file with a clear message
+instead of a misparse.
+
+| Version | Layout | Written by | Read by |
+|---|---|---|---|
+| 0 | the header, then the parameter and optimizer records, with no metadata block | the tree before the metadata work; pinned by the committed fixture `tests/data/checkpoint_v0.ckpt` | every build from here on |
+| 1 | the metadata block between the header and the parameter count, then the version 0 record stream unchanged | every writer in section 4 | this tree |
+
+Version 0 needs no compatibility branch beyond "read no metadata block, then
+report the member initializers", so the load of an old artifact is the same
+code path with one skipped section.
+
+The version history is short because the layout changed once:
+
+| Date | Version | Change |
+|---|---|---|
+| the first container | 0 | the fp32, bf16, and reserved int8 codes, the attribute block, and the optimizer section |
+| the metadata work | 1 | the run metadata block after the header; the record stream is byte identical |
 
 A new optimizer buffer becomes one more record, so that addition needs no
 version change. A new record attribute needs no version change, because the
-attribute block is already present. A new dtype code needs a reader branch. A
-change to the header or to the record layout needs a version change.
+attribute block is already present. A new metadata field needs no version
+change either, because the block carries its own length and its own drift
+counters (section 5.4). A new dtype code needs a reader branch. A change to the
+header, to the record layout, or to the meaning of a metadata field needs a
+version change.
 
-Old `NCMDL001` files stay readable. `Checkpointer::LoadModel` routes on the
-magic: `IsCheckpointContainer` sends a version 0 container to `Checkpoint`, and
-any other file to the legacy reader.
+The magic names the layout family and `version` names the layout inside it, so
+a pair that disagrees is a hard error. This tree writes one magic for both
+versions (open decision O5), so the check only catches a file that changed
+between the two reads. A second magic word protects no in-tree reader, and an
+unknown version word already fails early, so the version word is the whole
+layout gate.
+
+Old `NCMDL001` files stay readable. `Checkpointer::LoadModel` routes on
+`DetectFormat`: `kContainerV0` and `kContainerV1` go to `Checkpoint`, and
+`kLegacyModel` goes to the legacy reader. A version word above 1 reads as
+`kContainerV1` from `DetectFormat` and is then rejected by the reader, which is
+the one hard error the gate needs.
+
+The check that old code rejects a new file is a release gate and not an
+automated test in this tree (open decision O8): one build of a fixed parent
+commit, one version 1 file, and the error message expected.
 
 ## 11. The schema in machine-readable form
 
-The bytes are the contract. The decoded view is one object:
+The bytes are the contract. The decoded view is one object, and a version 1
+file adds the `metadata` member:
 
 ```json
 {
   "magic": "NCHKPT01",
-  "version": 0,
+  "version": 1,
+  "metadata": {
+    "schema": 1,
+    "stage": "base",
+    "step": 2000,
+    "world_size": 2,
+    "precision": "fp32",
+    "config": {"num_layers": 12, "num_heads": 12, "hidden_dim": 768},
+    "tokenizer_id": "vocab-32768.nctoken",
+    "git_revision": "0123456",
+    "created_utc": "",
+    "notes": []
+  },
   "parameters": [
     {"name": "transformer.wte.weight", "dtype": 1, "shape": [32768, 1024],
      "elements": 33554432, "bytes": 67108864, "attributes": []}
@@ -333,18 +538,25 @@ The bytes are the contract. The decoded view is one object:
 ```
 
 The block is illustrative. It shows one bf16 parameter record. Under fp32 the
-dtype is 0 and the byte count doubles.
+dtype is 0 and the byte count doubles. The `config` member carries one key per
+`Config` member; the three keys above are shown to keep the example short. A
+version 0 file decodes to the same object without the `metadata` member, and
+`checkpoint.read_metadata` reports the defaults for it.
 
 The constants are the C values. The C surface reports them:
 `nanochat_checkpoint_dtype` enumerates each dtype with its name, code, and
-element size.
+element size, and `nanochat_checkpoint_metadata_read` reports the run metadata
+block.
 
 | Constant | Source |
 |---|---|
 | `MAGIC` | `kCheckpointMagic` in `src/data.cc` |
-| `VERSION` | the `Checkpoint::Save` header, 0 |
+| `VERSION` | the `Checkpoint::Save` header, 1 |
+| `METADATA_SCHEMA` | `kMetadataSchema` in `include/nanochat/checkpoint_metadata.h`, 1 |
+| `STAGE_BASE`, `STAGE_SFT`, `STAGE_RL` | `Stage::kBase`, `kSft`, `kRl`, stored 0, 1, 2 |
 | `DTYPE_FP32`, `DTYPE_BF16`, `DTYPE_INT8` | `DType::kFp32`, `kBf16`, `kInt8` |
 | `MAX_NDIM` | the `ReadRecord` limit, 8 |
+| `MAX_METADATA_WORDS` | `kMaxBlockWords` in `include/nanochat/fields.h`, 64 KiB |
 
 The C source of truth is `src/data.cc` plus `include/nanochat/data.h`. The C
 surface exposes it, so a host tool does not repeat it (`docs/python.md`
@@ -360,6 +572,9 @@ AdamW keeps two moments and Muon keeps two buffers.
 
 A parameter-only read avoids the optimizer section. That is the reason for the
 flag in section 9.
+
+The metadata block is negligible beside the weights: a full one is a few dozen
+words, and the cap is 64 KiB. Version 0 has no block at all.
 
 ---
 
@@ -895,6 +1110,27 @@ as bf16 and loads it back. `bindings/nanochat_capi_test.cc` round-trips the C
 checkpoint surface. The Python container test loads the shared library, so it
 pins no layout constant of its own.
 
+`tests/checkpoint_compat_test.cc` is the version 0/1 guard, and it is the file
+to read before changing this layout. It loads the committed fixture
+`tests/data/checkpoint_v0.ckpt` and asserts the exact record names, storage
+dtypes, shapes, and payload checksums, so a change that moves a version 0 byte
+fails there instead of on a Hub artifact. It round-trips a version 1 file,
+accepts and counts both drift directions of section 5.4, and pins the hard
+errors of that table. It runs in the T0 loop and under `--config=bf16` and
+`--config=fp8`, because the recorded `precision` must never change a load
+decision:
+
+```
+tools/nanochat test //tests:checkpoint_compat_test
+tools/nanochat test //tests:checkpoint_compat_test --config=bf16
+tools/nanochat test //tests:checkpoint_compat_test --config=fp8
+```
+
+`src/fields_test.cc` covers the visitor itself, ported case for case from
+`gemma.cpp` `io/fields_test.cc`: the round trip, new code over old data, old
+code over new data, an invalid float, an invalid string, a second write, the
+vector cap, and the enum check.
+
 ## 23. Definition of Done
 
 - Three notebooks exist. Each one runs end to end on a two-T4 Kaggle session.
@@ -912,9 +1148,9 @@ pins no layout constant of its own.
 
 ## 24. Sequencing
 
-Steps 1 and 2 are in the tree. Steps 3 to 7 are implemented; each notebook
-needs one Kaggle session to verify end to end. Step 8 records the handoff to
-the architect.
+Steps 1 and 2 are in the tree, and so is step 9. Steps 3 to 7 are implemented;
+each notebook needs one Kaggle session to verify end to end. Step 8 records the
+handoff to the architect.
 
 1. The version 0 container, the storage dtype codes, the attribute block, and
    the `checkpoint.ckpt` rename are in the tree. The C surface bump landed with
@@ -933,6 +1169,11 @@ the architect.
    `README.md`.
 8. Part A is the promoted schema in this file. The architect owns the file
 thereafter.
+9. The run metadata block is in the tree. Writers write version 1, the reader
+   accepts version 0 and version 1, `tests/checkpoint_compat_test.cc` pins
+   both, and the C surface and `python/nanochat_cpp/checkpoint.py` report the
+   block. The layout is sections 5.3 and 5.4 of this file, and the two examples
+   in `examples/` are the runnable form of it.
 
 ## 25. Open items
 

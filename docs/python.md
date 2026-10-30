@@ -31,7 +31,7 @@ python/nanochat_cpp/
   sft_data.py        SFT mixture and packer (new)
   toolchain.py       orchestration layer (new)
   _entry.py          the command table for toolchain (new)
-  checkpoint.py      reference .pt to NCHKPT01 (tool only)
+  checkpoint.py      reference .pt to the container; metadata read
   data.py            NCTOKEN1 reader and parquet listing (internal)
   tasks.py           ARC, MMLU, GSM8K, HumanEval (internal)
   eval_fixture.py    fixture wire format (test only)
@@ -289,9 +289,10 @@ optimizer = nc.Optimizer(model, **plan.optimizer, **plan.scheduler)
 
 `Config` carries a `value_embedding` flag. The default keeps the ResFormer value
 embeddings; `Config(value_embedding=False)` matches the Track 3 preset.
-`Model.save` writes the self-describing parameter-only `NCHKPT01` container.
-`Model.load` accepts that container and the legacy `NCMDL001` file, so a
-distributed run's checkpoint loads in process (`docs/model.md`).
+`Model.save` writes the self-describing parameter-only checkpoint container,
+version 1. `Model.load` accepts that container, either version of it, and the
+legacy `NCMDL001` file, so a distributed run's checkpoint loads in process
+(`docs/model.md`).
 
 `Model.params()` returns a `ParamView` for each parameter. `ParamView.value` and
 `ParamView.grad` are `TensorView` objects that read and write Python floats
@@ -457,16 +458,37 @@ not submit another job. `cli.py` reads `NANOCHAT_SANDBOX` and
 ## 7. Checkpoint conversion
 
 `nanochat_cpp/checkpoint.py` stays. It converts a reference `.pt` state
-dictionary to the `NCHKPT01` container. It imports `torch` on use only. The
+dictionary to the checkpoint container. It imports `torch` on use only. The
 tool `tools/convert_checkpoint.py` stays. The compute API does not import it.
 
-The container byte layout lives only in `src/data.cc`. The module builds an
+The container byte layout lives only in `src/data.cc` and the metadata block
+only in `src/fields.cc` and `src/checkpoint_metadata.cc`. The module builds an
 in-memory record list and hands it to the `nanochat_checkpoint_*` surface
 (`include/nanochat/capi.h`). That surface owns the magic, the version, the
 dtype codes, the attribute block, and the record framing. One call writes both
 record lists, and one call reads them back. The module keeps the torch-side
 work: the name remap, the path resolution, the optimizer reassembly, and the
 dtype policy.
+
+### 7.1 The run metadata read
+
+`read_metadata(path)` returns the run metadata block of the container as one
+mapping. It calls `nanochat_checkpoint_metadata_read` and the flat getters
+beside it, so the module holds no copy of the field order, the caps, or the
+default values: the block has one decoder, in C. The keys are `METADATA_KEYS`,
+in order: `format`, `schema`, `stage`, `step`, `world_size`, `precision`,
+`config`, `tokenizer_id`, `git_revision`, `created_utc`, and `notes`. `config`
+is a decoded `dict`, so a caller reads `metadata["config"]["num_layers"]`
+without a second parser, and `stage` and `precision` are the names in
+`CHECKPOINT_STAGES` and `CHECKPOINT_PRECISIONS`.
+
+A version 0 file carries no metadata block, so it reports the defaults of
+every key, taken from the C values rather than invented here.
+`detect_format(path)` answers the one question the C surface does not: it reads
+the header prefix (the magic and the version word) and returns `"version-0"` or
+`"version-1"`. `parse_checkpoint` keeps its two-element tuple, so
+`read_metadata` is additive and no existing caller changes (`docs/checkpoint-format.md`
+sections 5.3 and 5.4 for the block itself).
 
 ## 8. Removed files
 

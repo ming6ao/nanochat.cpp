@@ -11,8 +11,11 @@ nanochat.cpp/
   include/nanochat/
     capi.h  config.h  tensor.h  kernels.h  model.h  optim.h  data.h  sandbox.h
     tokenizer.h  dataloader.h  rand.h  sampler.h  scheduler.h  logger.h  mfu.h
+    fields.h  checkpoint_metadata.h  # the metadata block; host-only, vendor-free
   src/
     ops.cc  model.cc  generate.cc  optim.cc  train.cc  data.cc  eval.cc
+    fields.cc  checkpoint_metadata.cc  # the visitor and the metadata block
+    fields_test.cc                # the ported visitor tests
     *_main.cc
     parquet/                   # the native parquet reader (docs/parquet-native.md)
       thrift.{h,cc}  format.{h,cc}  levels.{h,cc}  reader.{h,cc}
@@ -31,6 +34,9 @@ nanochat.cpp/
     cuda/kernels/device_utils.cuh
     cuda/kernels/testing/        # host reference headers and test helpers
   dev/kernels/                   # unpromoted prototypes and the toolchain spike
+  examples/                      # the smallest examples of the public API
+    hello_world/                 # inference: config, model, generate (docs/examples.md)
+    checkpoint_roundtrip/        # the container: save, load, metadata (docs/examples.md)
   bindings/                      # the C ABI for the in-process Python API
     nanochat_capi.cc  nanochat_capi_test.cc  BUILD.bazel
   python/
@@ -57,6 +63,17 @@ nanochat.cpp/
     fixture_format.py          # the shared fixture record writer
   data/*.parquet
 ```
+
+`include/nanochat/fields.h` is host-only and vendor-free. It is the field
+visitor the checkpoint container's metadata block is built on: plain scalar
+code over a `uint32` word stream, with no device, SIMD, or backend header, and
+no kernel header includes it. `include/nanochat/checkpoint_metadata.h` sits
+beside it and is host-only for the same reason. Neither one appears in
+`kernels.h`, and neither one reaches `backends/`.
+
+Every example under `examples/` is one package with a `cc_binary`, a `cc_test`
+over the same source, and a `test_suite(name = "all")`, so an example cannot
+rot. `docs/examples.md` says what each one shows and how long it stays.
 
 ## Bazel
 

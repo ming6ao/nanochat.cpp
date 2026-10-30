@@ -265,7 +265,7 @@ upload and download.
 The registry marks one version as current. If the metric does not improve, the
 registry restores the parent. The converter in
 `python/nanochat_cpp/checkpoint.py` reads a torch `state_dict` and writes the
-`NCHKPT01` container. The Hub stores the released container.
+checkpoint container. The Hub stores the released container.
 
 ### 7.13 Safety gate
 
@@ -487,7 +487,7 @@ interfaces.
 | `sft_data` | `python/nanochat_cpp/sft_data.py` | The conversation mixture |
 | `rl` | `python/nanochat_cpp/rl.py` | The rollout and advantage loop |
 | `tasks` | `python/nanochat_cpp/tasks.py` | GSM8K, HumanEval, ARC, MMLU |
-| `checkpoint` | `python/nanochat_cpp/checkpoint.py` | The `NCHKPT01` container |
+| `checkpoint` | `python/nanochat_cpp/checkpoint.py` | The checkpoint container and its run metadata |
 | C ABI | `include/nanochat/capi.h` | The in-process compute calls |
 | Tool entry | `tools/nanochat` | The sandbox and the GPU queue |
 | Agent runner | `notebooks/pi_agent.py` | An external coding agent |
@@ -560,8 +560,8 @@ All five questions are resolved.
 3. Hub: human approval for every upload and every delete.
 4. Teacher exit: a pass-rate within 5 percent of the teacher over 20
    consecutive held-out tasks, with no escalation.
-5. Registry: a full `NCHKPT01` snapshot on the Hub, with the hash and the code
-   revision in the local index.
+5. Registry: a full checkpoint container snapshot on the Hub, with the hash and
+   the code revision in the local index.
 
 ## 19. References
 
