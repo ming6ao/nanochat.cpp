@@ -61,12 +61,20 @@ py_test(
     size = "small",
 )
 
-# T0: the reference-checkpoint name, dtype, container, and path logic. The
-# container bytes come from the C writer, so the test loads the shared library.
+# T0: the reference-checkpoint name, dtype, container, metadata, and path
+# logic. The test reads two files: the committed version 0 fixture
+# `//tests:checkpoint_v0_fixture` (`tests/data/checkpoint_v0.ckpt`, the pinned
+# bytes a Hub artifact already carries) and `//bindings:nanochat_shared`, whose
+# C writer fills the metadata. The version 1 file is written at test time into a
+# temporary directory, so no second fixture is committed here
+# (docs/checkpoint-metadata-and-examples-plan.md stages A.2 and A.5).
 py_test(
     name = "checkpoint_test",
     srcs = ["tests/checkpoint_test.py"],
-    data = ["//bindings:nanochat_shared"],
+    data = [
+        "//bindings:nanochat_shared",
+        "//tests:checkpoint_v0_fixture",
+    ],
     deps = [":nanochat_cpp"],
     size = "small",
 )
