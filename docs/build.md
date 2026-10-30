@@ -8,12 +8,26 @@ nanochat.cpp/
   MODULE.bazel  .bazelrc
   README.md  DESIGN.md  AGENTS.md  CONTRIBUTING.md
   docs/                        # reference and how-to
+  spec/                        # the contract vocabulary: prose and data, no code
+    versions.md  capability_bits.md  block_kinds.md  pointwise_ops.md  decisions.md
+  models/                      # the model axis: one directory per model package
+    nanochat-default/
+      spec.json                # the architecture description (the block list)
+      tolerances.json          # this model's numeric contract
+      fixtures/*.bin           # the committed fixtures its gates compare
+      BUILD.bazel              # exports the package label
   include/nanochat/
     capi.h  config.h  tensor.h  kernels.h  model.h  optim.h  data.h  sandbox.h
     tokenizer.h  dataloader.h  rand.h  sampler.h  scheduler.h  logger.h  mfu.h
+    model_spec.h               # the description as data, and ModelSpec -> Config
+    plan.h                     # the plan structure and the pure BuildPlan
     fields.h  checkpoint_metadata.h  # the metadata block; host-only, vendor-free
   src/
     ops.cc  model.cc  generate.cc  optim.cc  train.cc  data.cc  eval.cc
+    model_spec.cc              # the spec reader, the validator, the derivation
+    plan.cc  plan_main.cc      # the planner, and the probe `doctor` prints
+    capability_names.h/.cc     # the vocabulary name to kFeature* bit table
+    device_profile.cc          # derives the device table from backends/*/caps.json
     fields.cc  checkpoint_metadata.cc  # the visitor and the metadata block
     fields_test.cc                # the ported visitor tests
     *_main.cc
@@ -27,7 +41,11 @@ nanochat.cpp/
       *_test.cc
   backends/
     cpu/kernels.cc  cpu/kernels_test.cc
+    cpu/caps.json              # the reference device declaration
+    cuda/caps.json             # the declaration of every device this backend serves
+    cuda/fused_overrides.cc    # the fused families, registered as overrides
     cuda/device.cu  cuda/gemm.cu  cuda/cuda_runtime_test.cc
+    cuda/row_reduce.cu  cuda/span_reduce.cu  # the two primitive reductions
     cuda/kernels/{rms_norm,qk_prep,attention,pointwise,classifier,
                   embedding,adamw,muon,grad_norm,value_gate}.cu
     cuda/kernels/<family>_test.cc + <family>_benchmark.cc next to each kernel
@@ -61,6 +79,8 @@ nanochat.cpp/
     dump_fixtures.py           # the offline fixture generator
     fixture_common.py          # the shared fixture helpers
     fixture_format.py          # the shared fixture record writer
+    gen_matrix.py              # the section 11 matrix: rendered, and checked
+    isolation_gate.py          # the section 10.4 regenerate-and-diff gate
   data/*.parquet
 ```
 
@@ -70,6 +90,29 @@ code over a `uint32` word stream, with no device, SIMD, or backend header, and
 no kernel header includes it. `include/nanochat/checkpoint_metadata.h` sits
 beside it and is host-only for the same reason. Neither one appears in
 `kernels.h`, and neither one reaches `backends/`.
+
+`spec/` holds prose and data and **no code**. It carries no build target, no
+header, and no source file: it is the vocabulary the two axes declare against
+and the authority those declarations are reviewed by — version numbers,
+capability bits, block kinds, op codes and their accuracy bounds, and the
+decision records. `docs/` describes what the tree computes; `spec/` names the
+words it says it in, and a name is only ever spelled once. A document that
+needs a name links into `spec/` rather than copying the table
+([model-and-device-bringup.md](model-and-device-bringup.md) §3 and §17).
+
+`backends/<name>/caps.json` is **the single device declaration**. The profile
+table the simulator reads — `include/nanochat/device_profile.h` and its
+`src/device_profile.cc` derivation — has no hand-written row: every entry comes
+from a `caps.json`, so a device bring-up adds a file under `backends/` and no
+row in a header. The same file is what the planner reads, and
+`spec/capability_bits.md` is the authority for the bit names it spells.
+
+`models/` is the other axis: one directory per model package, holding the
+architecture description, the tolerances, and the fixtures the model's gates
+compare. A model bring-up adds a directory and edits no shared file
+([model-and-device-bringup.md](model-and-device-bringup.md) §6 and §12.2).
+Each package is its own Bazel package, so a diff inside one rebuilds only that
+package's targets and its matrix row.
 
 Every example under `examples/` is one package with a `cc_binary`, a `cc_test`
 over the same source, and a `test_suite(name = "all")`, so an example cannot

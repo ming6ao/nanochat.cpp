@@ -9,8 +9,10 @@ detailed reference that the design points at.
 | [build.md](build.md) | File layout, Bazel, Makefile fallback, backends, precision, Turing |
 | [precision.md](precision.md) | The precision policy: fp32 on Pascal, Turing, and the CPU; bf16 on Ampere and newer; fp16 removed from the tree |
 | [fp8-training.md](fp8-training.md) | The fp8 tier: the storage tags, the scale rule, the scaled GEMM, the layer set, and the backward pass |
-| [kernels.md](kernels.md) | The backend seam: kernel inventory, API, device helpers |
-| [model.md](model.md) | Model API, graphs, optimizer, data and checkpoints, workspace |
+| [kernels.md](kernels.md) | The backend seam: kernel inventory, **the tier column and the 16-of-30 bring-up cost**, API, device helpers |
+| [model.md](model.md) | Model API, graphs, the model description and its block kinds, optimizer, data and checkpoints, workspace |
+| [model-and-device-bringup.md](model-and-device-bringup.md) | The two axes: the directory contract, the kernel tiers, the model description, the planner, isolation, the conformance matrix, the checklists, and the open questions with their decision records |
+| [conformance-matrix.md](conformance-matrix.md) | The model/device/tier/graph matrix. **Generated** by `tools/gen_matrix.py`; do not edit a row |
 | [examples.md](examples.md) | The two smallest examples of the public API: what each one shows, how to run it, and its line budget |
 | [checkpoint-format.md](checkpoint-format.md) | The checkpoint container: the version 1 layout and the version 0 layout, the compatibility rules, the parameter-only read, and the three pipeline notebooks |
 | [checkpoint-metadata-and-examples-plan.md](checkpoint-metadata-and-examples-plan.md) | The plan for versioned run metadata in the container and the two smallest examples of the public API |
@@ -44,6 +46,30 @@ detailed reference that the design points at.
 | [simulator-precision.md](simulator-precision.md) | The simulator at bf16 and fp8: the profile rows, the fp8 rounding, the cuBLASLt coverage, the emulator intrinsics, and the trace leg |
 | [correctness-gates.md](correctness-gates.md) | The correctness split: what the simulator proves, the Hopper startup gate, and the speed budget |
 | [numerics-integration.md](numerics-integration.md) | The staged numeric trace: CPU, simulator, and Pascal GPU agreement |
+
+## The contract vocabulary, `spec/`
+
+This directory is the architect-owned reference: it says what the tree does.
+[`../spec/`](../spec/) beside it holds the *vocabulary* — the names the two axes
+declare against, and the authority a declaration is reviewed by. It carries
+prose and data and no code. Where a name matters, the document here links into
+`spec/` instead of copying the table, because a second copy of a closed list is
+the drift the design warns about (§17 of
+[model-and-device-bringup.md](model-and-device-bringup.md)).
+
+| File | Contents |
+|---|---|
+| [../spec/versions.md](../spec/versions.md) | The four contract versions and the rules that move them: additions are free, a removal needs a deprecation release, a meaning change needs a new name |
+| [../spec/capability_bits.md](../spec/capability_bits.md) | The fifteen capability bits, their meanings, their obligations, and the one spelling rule |
+| [../spec/block_kinds.md](../spec/block_kinds.md) | The block kinds, what each computes, the saved slots its backward reads, and the workspace-sharing rule |
+| [../spec/pointwise_ops.md](../spec/pointwise_ops.md) | The nine pointwise op codes and the declared accuracy bound of each |
+| [../spec/decisions.md](../spec/decisions.md) | The nine decision records D-001 to D-009 that the bring-up document cites |
+
+Where each is read from: the tier table is [kernels.md](kernels.md), not here
+and not in `spec/`; the block kinds and their slots are
+[model.md](model.md) § The model description and
+[../spec/block_kinds.md](../spec/block_kinds.md); the matrix is
+[conformance-matrix.md](conformance-matrix.md).
 
 New here? Start with [../README.md](../README.md) for the quickstart, then
 [../DESIGN.md](../DESIGN.md) for the shape of the system.
