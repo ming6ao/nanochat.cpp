@@ -47,6 +47,24 @@ class Model {
   static std::unique_ptr<Model> Create(const Config& config,
                                        std::string* error = nullptr);
 
+  // The spec selector. `spec_name` names a `models/<name>/spec.json`; a null
+  // name selects the built-in default, so a caller with no opinion about the
+  // model definition gets the historical behaviour. The name resolves through
+  // `LookupModelSpec` (nanochat/model_spec.h), the spec is validated, and its
+  // derived `Config` must agree with `config`; a missing file, a rejected spec,
+  // or a disagreement writes `error` and returns null. The selector reads
+  // files, so it is host work: it never touches the device.
+  //
+  // This is a sibling overload rather than a third defaulted argument, because
+  // `Create(config)` and `Create(config, &error)` must both keep resolving to
+  // the declaration above: a defaulted `const char*` would make the first call
+  // ambiguous and would take the second away from its `std::string*`. Both
+  // existing spellings therefore compile unchanged, and the new spelling is
+  // `Create(config, name)` or `Create(config, name, &error)`.
+  static std::unique_ptr<Model> Create(const Config& config,
+                                       const char* spec_name,
+                                       std::string* error = nullptr);
+
   // Deterministically initializes every weight (docs/model.md).
   virtual void InitWeights(std::uint64_t seed) = 0;
 

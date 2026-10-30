@@ -8,6 +8,14 @@
 // emulation engine all read their capability data from here, so a simulated
 // device is described in exactly one place.
 //
+// The rows are not maintained here. Every entry derives from
+// `backends/<name>/caps.json`, and `src/device_profile.cc` holds the
+// derivation: a device bring-up adds one file under `backends/` and no row, in
+// this header or in the table it declares. The header declares the shape of a
+// profile and the lookups over the derived list, and it holds no
+// device-specific row and no device-specific branch, which keeps DESIGN.md
+// section 7's "add hardware" rule true for the table as well as for the seam.
+//
 // This header is additive and architect-owned. It stays *beside*
 // `PeakFlopsForDevice` in `src/train.cc`: that function remains the authority
 // for the MFU string patterns, and this table is the authority for the
@@ -69,9 +77,10 @@ struct DeviceProfile {
 // process and the entries are ordered by descending capability.
 const std::vector<const DeviceProfile*>& AllDeviceProfiles();
 
-// Looks up a profile by name. The comparison is on the lowercased name (and on
-// the `device_name` spelling a run reports), so "H100" and "h100" resolve to
-// the same entry. Returns null when nothing matches.
+// Looks up a profile by name. The comparison is on the lowercased, whitespace-
+// stripped name (and on the `device_name` spelling a run reports), so a vendor
+// spelling and the join key resolve to the same entry. Returns null when
+// nothing matches.
 const DeviceProfile* FindDeviceProfile(const std::string& name);
 
 // Projects a profile onto the vendor-free capability struct the kernel seam
