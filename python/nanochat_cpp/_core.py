@@ -45,6 +45,13 @@ __all__ = [
     "RuntimeHandle",
     "CheckpointHandle",
     "Record",
+    "CheckpointMetadata",
+    "NANOCHAT_STAGE_BASE",
+    "NANOCHAT_STAGE_SFT",
+    "NANOCHAT_STAGE_RL",
+    "NANOCHAT_PRECISION_FP32",
+    "NANOCHAT_PRECISION_BF16",
+    "NANOCHAT_PRECISION_FP8",
     "declare",
     "backend_name",
     "compute_type_size",
@@ -63,6 +70,18 @@ __all__ = [
 NANOCHAT_STATUS_OK = 0
 #: A ``nanochat_status`` value that means failure.
 NANOCHAT_STATUS_ERROR = 1
+
+#: The ``nanochat_stage`` values of the metadata block, in stored order. They
+#: match ``nanochat::Stage`` and never change.
+NANOCHAT_STAGE_BASE = 0
+NANOCHAT_STAGE_SFT = 1
+NANOCHAT_STAGE_RL = 2
+
+#: The ``nanochat_precision`` values of the metadata block, in stored order.
+#: They match ``nanochat::ComputePrecision`` and never change.
+NANOCHAT_PRECISION_FP32 = 0
+NANOCHAT_PRECISION_BF16 = 1
+NANOCHAT_PRECISION_FP8 = 2
 
 #: One process-wide cache of the declared function table, keyed by the shared
 #: library object identity. ``declare`` is idempotent, but the cache keeps a
@@ -351,6 +370,31 @@ Record._fields_ = [
 ]
 
 
+class CheckpointMetadata(ctypes.Structure):
+    """A mirror of ``nanochat_checkpoint_metadata``.
+
+    ``schema`` is the metadata schema, not the container version, and ``stage``
+    and ``precision`` hold a ``nanochat_stage`` and a ``nanochat_precision``
+    code. Every string pointer belongs to the checkpoint handle that the read
+    returned, ``notes`` points to ``note_count`` entries, and the caller must
+    free neither.
+    """
+
+    _fields_ = [
+        ("schema", ctypes.c_int32),
+        ("stage", ctypes.c_int32),
+        ("step", ctypes.c_int64),
+        ("world_size", ctypes.c_int64),
+        ("precision", ctypes.c_int32),
+        ("config_json", ctypes.c_char_p),
+        ("tokenizer_id", ctypes.c_char_p),
+        ("git_revision", ctypes.c_char_p),
+        ("created_utc", ctypes.c_char_p),
+        ("notes", ctypes.POINTER(ctypes.c_char_p)),
+        ("note_count", ctypes.c_int32),
+    ]
+
+
 # Opaque handles. The C declarations use ``struct nanochat_model *`` and
 # friends; a ``c_void_p`` carries the same pointer width.
 ModelHandle = ctypes.c_void_p
@@ -490,6 +534,18 @@ _SIGNATURES = (
       ctypes.POINTER(ctypes.POINTER(Record)), ctypes.POINTER(ctypes.c_int64)),
      ctypes.c_int),
     ("nanochat_checkpoint_free", (CheckpointHandle,), None),
+    ("nanochat_checkpoint_metadata_read",
+     (ctypes.c_char_p, ctypes.POINTER(CheckpointHandle),
+      ctypes.POINTER(CheckpointMetadata)),
+     ctypes.c_int),
+    ("nanochat_checkpoint_metadata_stage",
+     (ctypes.POINTER(CheckpointMetadata),), ctypes.c_int32),
+    ("nanochat_checkpoint_metadata_step",
+     (ctypes.POINTER(CheckpointMetadata),), ctypes.c_int64),
+    ("nanochat_checkpoint_metadata_world_size",
+     (ctypes.POINTER(CheckpointMetadata),), ctypes.c_int64),
+    ("nanochat_checkpoint_metadata_config_json",
+     (ctypes.POINTER(CheckpointMetadata),), ctypes.c_char_p),
 )
 
 

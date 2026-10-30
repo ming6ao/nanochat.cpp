@@ -1,4 +1,4 @@
-"""Reference-checkpoint conversion into the ``NCHKPT01`` container.
+"""Reference-checkpoint conversion into the checkpoint container.
 
 The C++ runtime reads only its own self-describing container
 (``docs/model.md``): a magic header and a flat list of
@@ -22,6 +22,11 @@ module bridges the two:
   model, the converter reads it and emits the AdamW moments and the Muon
   buffers as a second record list (docs/post-training.md section 7). A
   parameter-only file stays loadable.
+* **Run metadata.** A version 1 file also carries the run facts of the run
+  that wrote it: the stage, the step, the world size, the precision, the run
+  config, the tokenizer id, the source revision, the creation time, and the
+  notes. :func:`read_metadata` returns them as one mapping, and a version 0
+  file reads as the defaults, so a caller needs no presence test.
 
 This module imports only the standard library at import time. ``torch`` and
 ``numpy`` are imported lazily inside the functions that touch tensors. The
@@ -40,6 +45,7 @@ or import the helpers::
     from nanochat_cpp import checkpoint
     resolved = checkpoint.resolve("base", "d20", step=1000)
     records = checkpoint.build_records(state_dict, "float32")
+    facts = checkpoint.read_metadata(resolved.model_path)
 """
 
 from __future__ import annotations
@@ -48,6 +54,7 @@ import argparse
 import ctypes
 import dataclasses
 import functools
+import json
 import os
 import re
 import tempfile
@@ -83,7 +90,7 @@ class UnknownParameter(CheckpointError):
 
 
 class UnsupportedDtype(CheckpointError):
-    """A dtype is not one the NCHKPT01 container can store."""
+    """A dtype is not one the checkpoint container can store."""
 
 
 # ---------------------------------------------------------------------------
@@ -242,7 +249,7 @@ _SOURCE_DTYPE_ALIASES = {
     "double": "float64",
 }
 
-#: Dtypes the NCHKPT01 container and the C++ runtime can store.
+#: Dtypes the checkpoint container and the C++ runtime can store.
 CONTAINER_DTYPES = ("float32", "bfloat16")
 
 
@@ -265,8 +272,8 @@ def container_dtype(value: Any) -> str:
     canonical = normalize_dtype(value)
     if canonical not in CONTAINER_DTYPES:
         raise UnsupportedDtype(
-            f"{value!r} cannot be stored in NCHKPT01; expected one of "
-            f"{', '.join(CONTAINER_DTYPES)}")
+            f"{value!r} cannot be stored in the checkpoint container; "
+            f"expected one of {', '.join(CONTAINER_DTYPES)}")
     return canonical
 
 
@@ -545,10 +552,13 @@ def _decode_records(pointer, count: int) -> list[TensorRecord]:
 def parse_checkpoint(data: bytes,
                      origin: str = "<bytes>") -> tuple[list[TensorRecord],
                                                        list[TensorRecord]]:
-    """Decode NCHKPT01 bytes into ``(parameters, optimizer_state)``.
+    """Decode container bytes into ``(parameters, optimizer_state)``.
 
     ``origin`` names the source in an error message. The magic and the version
-    come from the C reader.
+    come from the C reader. The result stays the two-element pair (open
+    decision O7): the run metadata of a version 1 file arrives through
+    :func:`read_metadata` and never as a third element, so an existing
+    two-element unpack keeps working.
     """
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / "container.nchkpt01"
@@ -562,7 +572,7 @@ def parse_checkpoint(data: bytes,
 def read_checkpoint_full(
         path: str | os.PathLike[str]) -> tuple[list[TensorRecord],
                                                list[TensorRecord]]:
-    """Read the parameter and optimizer-state records of an NCHKPT01 file."""
+    """Read the parameter and optimizer-state records of a container file."""
     library = _library()
     owner = _core.CheckpointHandle()
     records = ctypes.POINTER(_core.Record)()
@@ -582,13 +592,217 @@ def read_checkpoint_full(
 
 
 def read_checkpoint(path: str | os.PathLike[str]) -> list[TensorRecord]:
-    """Read the parameter records of an NCHKPT01 file."""
+    """Read the parameter records of a container file."""
     return read_checkpoint_full(path)[0]
 
 
 def read_optimizer_state(path: str | os.PathLike[str]) -> list[TensorRecord]:
-    """Read only the optimizer-state records of an NCHKPT01 file."""
+    """Read only the optimizer-state records of a container file."""
     return read_checkpoint_full(path)[1]
+
+
+# ---------------------------------------------------------------------------
+# Run metadata
+# ---------------------------------------------------------------------------
+#
+# A version 1 file carries the run facts of the run that wrote it, in one block
+# between the header and the parameter count (docs/checkpoint-format.md). A
+# version 0 file has no such block, so its facts read as the defaults of the
+# block and every value below is always defined. The block itself comes from
+# the C reader through `nanochat_checkpoint_metadata_read`, so this module
+# holds no copy of the field order, the caps, or the default values.
+
+#: The magic of the checkpoint container, as one code constant. The C writer
+#: owns the bytes; this copy only lets :func:`detect_format` name the version
+#: word without a second description of the layout.
+CONTAINER_MAGIC = b"NCHKPT01"
+
+#: The version 0 container, which carries no metadata block.
+CONTAINER_VERSION_0 = "version-0"
+#: The version 1 container, which carries the metadata block.
+CONTAINER_VERSION_1 = "version-1"
+#: The container versions this module names, oldest first.
+CONTAINER_VERSIONS = (CONTAINER_VERSION_0, CONTAINER_VERSION_1)
+
+#: The training stages, in the stored order of the metadata block.
+CHECKPOINT_STAGES = ("base", "sft", "rl")
+
+#: The compute precisions, in the stored order of the metadata block.
+CHECKPOINT_PRECISIONS = ("fp32", "bf16", "fp8")
+
+#: The keys of :func:`read_metadata`, in order.
+METADATA_KEYS = (
+    "format",
+    "schema",
+    "stage",
+    "step",
+    "world_size",
+    "precision",
+    "config",
+    "tokenizer_id",
+    "git_revision",
+    "created_utc",
+    "notes",
+)
+
+#: The header prefix that :func:`detect_format` reads: the magic, then the
+#: version word. The C reader owns the layout and the C surface reports the
+#: metadata block rather than the file version, so these two sizes are the
+#: whole of the header this module knows.
+_MAGIC_BYTES = len(CONTAINER_MAGIC)
+_VERSION_BYTES = 4
+_HEADER_BYTES = _MAGIC_BYTES + _VERSION_BYTES
+
+
+def detect_format(path: str | os.PathLike[str]) -> str:
+    """The container version of ``path``: ``"version-0"`` or ``"version-1"``.
+
+    A version 0 file carries no metadata block, so :func:`read_metadata`
+    reports the defaults for it; a version 1 file carries the block. This is
+    the one question the C surface does not answer, so the read is the header
+    prefix: the magic and the version word.
+
+    Raises ``CheckpointError`` when the path cannot be read, when the file is
+    not a container, when the header is truncated, or when the version word is
+    above the newest version this module knows. A legacy file is reported that
+    way rather than named, because nothing in this module reads one.
+    """
+    try:
+        with open(path, "rb") as handle:
+            header = handle.read(_HEADER_BYTES)
+    except OSError as error:
+        raise CheckpointError(f"cannot read {path}: {error}") from error
+    if len(header) < _HEADER_BYTES:
+        raise CheckpointError(f"not a checkpoint container: {path}")
+    if header[:_MAGIC_BYTES] != CONTAINER_MAGIC:
+        raise CheckpointError(f"not a checkpoint container: {path}")
+    version = int.from_bytes(header[_MAGIC_BYTES:_HEADER_BYTES], "little")
+    if version >= len(CONTAINER_VERSIONS):
+        raise CheckpointError(
+            f"unsupported checkpoint version {version}: {path}")
+    return CONTAINER_VERSIONS[version]
+
+
+def read_metadata(path: str | os.PathLike[str]) -> dict[str, Any]:
+    """The run metadata of the container at ``path``, as one mapping.
+
+    The keys are :data:`METADATA_KEYS`, in order:
+
+    ``format``
+        The container version the file carries, ``"version-0"`` or
+        ``"version-1"`` (see :func:`detect_format`). A version 0 file has no
+        metadata block, so it reports the defaults of every other key.
+    ``schema``
+        The metadata schema, 1 today. It is not the file version, and it moves
+        only when the meaning of a field moves.
+    ``stage``
+        The stage the checkpoint came from: ``"base"``, ``"sft"``, or
+        ``"rl"``. There is no pretrain value; ``base`` is it. The stored
+        integer is the index in :data:`CHECKPOINT_STAGES`.
+    ``step``
+        The optimizer step of the run, as an integer over the whole 64-bit
+        range, so a long pretraining run keeps the step a resume schedule
+        needs.
+    ``world_size``
+        The number of ranks the file was written on. The default is 1.
+    ``precision``
+        The recorded compute precision: ``"fp32"``, ``"bf16"``, or
+        ``"fp8"``, the index in :data:`CHECKPOINT_PRECISIONS`. It is
+        informational: it never changes how a file loads, and a version 0 file
+        reports ``"fp32"`` under every build.
+    ``config``
+        The run config as a decoded Python ``dict``, one key per ``Config``
+        member, so a caller reads ``metadata["config"]["num_layers"]``
+        without a second parser. A version 0 file reports the default config.
+    ``tokenizer_id``
+        The tokenizer artifact name or its hash, or ``""`` when unset.
+    ``git_revision``
+        The source revision of the writer, or ``""``. Informational only: no
+        load decision depends on it, so a re-save under a new revision cannot
+        change how a file loads.
+    ``created_utc``
+        The ISO-8601 creation time, or ``""``. Informational only, in the same
+        way as ``git_revision``.
+    ``notes``
+        The free-form notes as a list of strings, empty when the file carries
+        none.
+
+    The caps are those of the block, so a caller can size a buffer or reject
+    an artifact: a string holds at most 4096 words, the note list at most 1024
+    entries, and the whole block at most 64 KiB. A value past a cap, or a value
+    of the wrong type, is a hard error; the read never returns a partial
+    mapping.
+
+    Raises ``CheckpointError`` for an unreadable path, a bad magic, an
+    unsupported version, or a bad value inside the block.
+    """
+    library = _library()
+    owner = _core.CheckpointHandle()
+    raw = _core.CheckpointMetadata()
+    try:
+        status = library.nanochat_checkpoint_metadata_read(
+            str(path).encode("utf-8"), ctypes.byref(owner),
+            ctypes.byref(raw))
+        _check_status(library, status, "nanochat_checkpoint_metadata_read")
+        # The block is read, so the path is a container and the header read
+        # that names the version cannot fail on it.
+        detected = detect_format(path)
+        return {
+            "format": detected,
+            "schema": int(raw.schema),
+            "stage": _enum_name(CHECKPOINT_STAGES, raw.stage, "stage"),
+            "step": int(raw.step),
+            "world_size": int(raw.world_size),
+            "precision": _enum_name(CHECKPOINT_PRECISIONS, raw.precision,
+                                    "precision"),
+            "config": _json_object(raw.config_json, "config"),
+            "tokenizer_id": _text(raw.tokenizer_id),
+            "git_revision": _text(raw.git_revision),
+            "created_utc": _text(raw.created_utc),
+            "notes": _note_list(raw),
+        }
+    finally:
+        library.nanochat_checkpoint_free(owner)
+
+
+def _text(value: Any) -> str:
+    """The text of a C string that may be null."""
+    return value.decode("utf-8", "replace") if value else ""
+
+
+def _enum_name(names: Sequence[str], code: int, field: str) -> str:
+    """The name of one stored enum value.
+
+    The C reader already rejects an unknown value, so this is the last check
+    before the name reaches the caller.
+    """
+    index = int(code)
+    if 0 <= index < len(names):
+        return names[index]
+    raise CheckpointError(
+        f"unknown {field} value {index} in the checkpoint metadata")
+
+
+def _json_object(value: Any, field: str) -> dict:
+    """The decoded JSON object of one metadata field."""
+    if not value:
+        return {}
+    try:
+        decoded = json.loads(value.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise CheckpointError(
+            f"the metadata {field} is not JSON: {error}") from error
+    if not isinstance(decoded, dict):
+        raise CheckpointError(
+            f"the metadata {field} is not a JSON object")
+    return decoded
+
+
+def _note_list(raw: Any) -> list[str]:
+    """The decoded notes of one metadata block, in block order."""
+    if not raw.notes:
+        return []
+    return [_text(raw.notes[index]) for index in range(int(raw.note_count))]
 
 
 # ---------------------------------------------------------------------------
@@ -782,7 +996,7 @@ def _tensor_payload(tensor: Any, target: str) -> bytes:
 def build_records(state_dict: Mapping[str, Any], target: Any = "float32", *,
                   skip_unknown: bool = False,
                   skip_non_float: bool = False) -> list[TensorRecord]:
-    """Convert a loaded ``state_dict`` into NCHKPT01 records.
+    """Convert a loaded ``state_dict`` into checkpoint-container records.
 
     ``target`` is the container dtype (``fp32``/``bf16``). Unknown keys raise
     (:class:`UnknownParameter`) unless ``skip_unknown``; non-floating tensors
@@ -925,7 +1139,7 @@ def _muon_records(state: Mapping[Any, Any],
 
 def build_optimizer_records(
         optimizer_state_dict: Mapping[str, Any]) -> list[TensorRecord]:
-    """Convert a reference optimizer ``state_dict`` into NCHKPT01 records.
+    """Convert a reference optimizer ``state_dict`` into container records.
 
     The input is a ``MuonAdamW.state_dict()``: ``{"state": {index: {...}},
     "param_groups": [...]}``. The group order and ``kind`` match
@@ -999,7 +1213,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="convert_checkpoint",
         description="Convert a reference nanochat .pt state dict into the "
-                    "NCHKPT01 container the C++ runtime loads.")
+                    "checkpoint container the C++ runtime loads.")
     parser.add_argument(
         "--input", type=Path, default=None,
         help="explicit model_<step>.pt; overrides --source/--model-tag/--step")
@@ -1058,7 +1272,7 @@ def _summary(origin: str, target: str, records: Sequence[TensorRecord],
     elements = sum(record.numel() for record in records)
     payload = sum(len(record.data) for record in records)
     sources = ", ".join(source_dtypes) if source_dtypes else "unknown"
-    return (f"{origin} -> NCHKPT01: {len(records)} tensors, "
+    return (f"{origin} -> checkpoint container: {len(records)} tensors, "
             f"{elements:,} elements, {payload / (1024 * 1024):.1f} MiB, "
             f"dtype {target} (source {sources})")
 
