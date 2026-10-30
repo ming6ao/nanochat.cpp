@@ -7,6 +7,15 @@ section 7, P4). The kinds are ``oracle``, ``train``, ``rl``, ``generate``,
 and ``checkpoint``. Run ``python3 tools/dump_fixtures.py <kind> [options]``.
 Each kind keeps its own ``--help`` text.
 
+Model-scoped kinds (``oracle``, ``train``, ``rl``, ``generate``, ``eval``, and
+``numerics``) take ``--model NAME`` (default ``nanochat-default``), read
+``models/<name>/spec.json``, and default their output to
+``models/<name>/fixtures/<fixture>``. A caller can still pass an explicit
+``--out``. ``--check`` regenerates into a temporary directory and compares the
+bytes with the committed model fixture; in a tree without torch/numpy it
+falls back to verifying the committed bytes against
+``models/<name>/fixtures/manifest.json`` and says which proof ran.
+
 The module imports no third-party package at import time. Each kind imports
 its own reference package, so a kind that does not touch PyTorch stays fast.
 """
@@ -16,18 +25,36 @@ from __future__ import annotations
 import sys
 import textwrap
 
-from fixture_common import (COMMANDS, USAGE, as_f32 as _as_f32,
-                            as_i32 as _as_i32, scalar as _scalar,
-                            build_config, selected_command)
+from fixture_common import (COMMANDS, MODEL_FIXTURES, USAGE,
+                            add_check_argument, add_model_argument,
+                            as_f32 as _as_f32, as_i32 as _as_i32,
+                            check_committed_manifest, check_generated,
+                            build_config, compare_fixture_bytes,
+                            model_fixtures_dir,
+                            model_from_argv, resolve_out,
+                            scalar as _scalar, selected_command,
+                            torch_available)
 
 if __name__ == "__main__":
-    _command = selected_command(sys.argv[1:])
+    _argv = sys.argv[1:]
+    _command = selected_command(_argv)
 else:
+    _argv = []
     _command = None
+
+# A model-scoped ``--check`` can prove its own bytes only when the reference
+# torch/numpy pair is importable. Without it, verify the committed fixture
+# against models/<name>/fixtures/manifest.json before any kind imports torch;
+# this keeps the check useful in the CPU-only sandbox and says which proof ran.
+if (_command is not None and _command in MODEL_FIXTURES
+        and _command != "numerics" and "--check" in _argv[1:]
+        and not torch_available()):
+    raise SystemExit(check_committed_manifest(_command,
+                                              model_from_argv(_argv[1:])))
 
 if _command == 'oracle':
     __doc__ = textwrap.dedent("""\
-        Generate the CPU oracle fixture, ``tests/data/debug_state.bin``.
+        Generate the CPU oracle fixture, ``models/<name>/fixtures/debug_state.bin``.
 
         The fixture is *data*: it is produced once, offline, from nanochat's reference
         ``gpt.py`` (PyTorch) and committed to the tree. Runtime tests never import
@@ -266,9 +293,12 @@ if _command == 'oracle':
 
 
     def parse_args(argv: list[str]) -> argparse.Namespace:
-        default_out = REPO_ROOT / "tests" / "data" / "debug_state.bin"
         parser = argparse.ArgumentParser(description=__doc__)
-        parser.add_argument("--out", default=str(default_out), help="output .bin path")
+        add_model_argument(parser)
+        add_check_argument(parser)
+        parser.add_argument("--out", default=None,
+                            help="output .bin path (default: "
+                                 "models/<model>/fixtures/debug_state.bin)")
         parser.add_argument("--seed", type=int, default=DEFAULT_SEED)
         parser.add_argument("--layers", type=int, default=DEFAULT_LAYERS)
         parser.add_argument("--heads", type=int, default=DEFAULT_HEADS)
@@ -281,11 +311,15 @@ if _command == 'oracle':
         parser.add_argument("--window", default=DEFAULT_WINDOW)
         parser.add_argument("--pad-to", type=int, default=DEFAULT_PAD_TO)
         parser.add_argument("--adam-eps", type=float, default=1e-4)
-        return parser.parse_args(argv)
+        args = parser.parse_args(argv)
+        args.out = str(resolve_out(args, "debug_state.bin"))
+        return args
 
 
     def main(argv: list[str]) -> int:
         args = parse_args(argv)
+        if args.check:
+            return check_generated("oracle", args, generate)
         if torch.cuda.is_available():
             raise RuntimeError(
                 "the oracle fixture must be generated on the CPU; "
@@ -304,7 +338,8 @@ if _command == 'oracle':
 
 if _command == 'train':
     __doc__ = textwrap.dedent("""\
-        Generate a multi-step *training-parity* fixture.
+        Generate a multi-step *training-parity* fixture,
+        ``models/<name>/fixtures/train_parity.bin``.
 
         This is the scaled-up cousin of ``tools/dump_training_fixtures.py oracle``. Where the oracle
         fixture records one forward/backward and a couple of optimizer steps, this
@@ -634,7 +669,11 @@ if _command == 'train':
 
     def parse_args(argv: list[str]) -> argparse.Namespace:
         parser = argparse.ArgumentParser(description=__doc__)
-        parser.add_argument("--out", required=True, help="output .bin path")
+        add_model_argument(parser)
+        add_check_argument(parser)
+        parser.add_argument("--out", default=None,
+                            help="output .bin path (default: "
+                                 "models/<model>/fixtures/train_parity.bin)")
         parser.add_argument("--seed", type=int, default=DEFAULT_SEED)
         parser.add_argument("--layers", type=int, default=DEFAULT_LAYERS)
         parser.add_argument("--heads", type=int, default=DEFAULT_HEADS)
@@ -671,11 +710,15 @@ if _command == 'train':
         parser.add_argument("--muon-momentum-start", type=float, default=0.85)
         parser.add_argument("--muon-momentum-peak", type=float, default=0.97)
         parser.add_argument("--muon-momentum-final", type=float, default=0.90)
-        return parser.parse_args(argv)
+        args = parser.parse_args(argv)
+        args.out = str(resolve_out(args, "train_parity.bin"))
+        return args
 
 
     def main(argv: list[str]) -> int:
         args = parse_args(argv)
+        if args.check:
+            return check_generated("train", args, generate)
         if torch.cuda.is_available():
             raise RuntimeError(
                 "the training fixture must be generated on the CPU; "
@@ -693,7 +736,7 @@ if _command == 'train':
 if _command == 'rl':
     __doc__ = textwrap.dedent("""\
         Generate the reinforcement-learning parity fixture,
-        ``tests/data/rl_parity.bin``.
+        ``models/<name>/fixtures/rl_parity.bin``.
 
         This is the RL cousin of ``tools/dump_training_fixtures.py train``. It records the inputs
         of one short RL run so the file-driven ``rl_step`` binary and
@@ -995,7 +1038,11 @@ if _command == 'rl':
 
     def parse_args(argv: list[str]) -> argparse.Namespace:
         parser = argparse.ArgumentParser(description=__doc__)
-        parser.add_argument("--out", required=True, help="output .bin path")
+        add_model_argument(parser)
+        add_check_argument(parser)
+        parser.add_argument("--out", default=None,
+                            help="output .bin path (default: "
+                                 "models/<model>/fixtures/rl_parity.bin)")
         parser.add_argument("--seed", type=int, default=DEFAULT_SEED)
         parser.add_argument("--layers", type=int, default=DEFAULT_LAYERS)
         parser.add_argument("--heads", type=int, default=DEFAULT_HEADS)
@@ -1030,11 +1077,15 @@ if _command == 'rl':
         parser.add_argument("--muon-momentum-start", type=float, default=0.85)
         parser.add_argument("--muon-momentum-peak", type=float, default=0.97)
         parser.add_argument("--muon-momentum-final", type=float, default=0.90)
-        return parser.parse_args(argv)
+        args = parser.parse_args(argv)
+        args.out = str(resolve_out(args, "rl_parity.bin"))
+        return args
 
 
     def main(argv: list[str]) -> int:
         args = parse_args(argv)
+        if args.check:
+            return check_generated("rl", args, generate)
         path = generate(args)
         size = path.stat().st_size
         print(
@@ -1048,7 +1099,7 @@ if _command == 'rl':
 
 if _command == 'generate':
     __doc__ = textwrap.dedent("""\
-        Generate the *generation-parity* fixture, ``tests/data/generate_parity.bin``.
+        Generate the *generation-parity* fixture, ``models/<name>/fixtures/generate_parity.bin``.
 
         This is the inference analogue of ``tools/dump_training_fixtures.py oracle`` (one forward/backward)
         and ``tools/dump_training_fixtures.py train`` (a training trajectory). It records a fixed
@@ -1260,7 +1311,11 @@ if _command == 'generate':
 
     def parse_args(argv: list[str]) -> argparse.Namespace:
         parser = argparse.ArgumentParser(description=__doc__)
-        parser.add_argument("--out", required=True, help="output .bin path")
+        add_model_argument(parser)
+        add_check_argument(parser)
+        parser.add_argument("--out", default=None,
+                            help="output .bin path (default: "
+                                 "models/<model>/fixtures/generate_parity.bin)")
         parser.add_argument("--seed", type=int, default=DEFAULT_SEED)
         parser.add_argument("--layers", type=int, default=DEFAULT_LAYERS)
         parser.add_argument("--heads", type=int, default=DEFAULT_HEADS)
@@ -1274,11 +1329,15 @@ if _command == 'generate':
         parser.add_argument("--max-tokens", type=int, default=DEFAULT_MAX_TOKENS)
         parser.add_argument("--train-steps", type=int, default=DEFAULT_TRAIN_STEPS)
         parser.add_argument("--batch", type=int, default=DEFAULT_BATCH)
-        return parser.parse_args(argv)
+        args = parser.parse_args(argv)
+        args.out = str(resolve_out(args, "generate_parity.bin"))
+        return args
 
 
     def main(argv: list[str]) -> int:
         args = parse_args(argv)
+        if args.check:
+            return check_generated("generate", args, generate)
         if torch.cuda.is_available():
             raise RuntimeError(
                 "the generation fixture must be generated on the CPU; "
@@ -1295,7 +1354,7 @@ if _command == 'generate':
 
 if _command == 'eval':
     __doc__ = textwrap.dedent("""\
-        Generate the *score-parity* fixture, ``tests/data/core_eval.bin``.
+        Generate the *score-parity* fixture, ``models/<name>/fixtures/core_eval.bin``.
 
         This is the evaluation analogue of ``tools/dump_model_fixtures.py generate``. It
         records a tiny, fully synthetic CORE-shaped scoring problem and the PyTorch
@@ -1681,8 +1740,11 @@ if _command == 'eval':
 
     def parse_args(argv: list[str]) -> argparse.Namespace:
         parser = argparse.ArgumentParser(description=__doc__)
-        parser.add_argument("--out", default="tests/data/core_eval.bin",
-                            help="output .bin path")
+        add_model_argument(parser)
+        add_check_argument(parser)
+        parser.add_argument("--out", default=None,
+                            help="output .bin path (default: "
+                                 "models/<model>/fixtures/core_eval.bin)")
         parser.add_argument("--seed", type=int, default=DEFAULT_SEED)
         parser.add_argument("--layers", type=int, default=DEFAULT_LAYERS)
         parser.add_argument("--heads", type=int, default=DEFAULT_HEADS)
@@ -1695,11 +1757,15 @@ if _command == 'eval':
         parser.add_argument("--pad-id", type=int, default=DEFAULT_PAD_ID)
         parser.add_argument("--train-steps", type=int, default=DEFAULT_TRAIN_STEPS)
         parser.add_argument("--batch", type=int, default=DEFAULT_BATCH)
-        return parser.parse_args(argv)
+        args = parser.parse_args(argv)
+        args.out = str(resolve_out(args, "core_eval.bin"))
+        return args
 
 
     def main(argv: list[str]) -> int:
         args = parse_args(argv)
+        if args.check:
+            return check_generated("eval", args, build_fixture)
         if torch.cuda.is_available():
             raise RuntimeError(
                 "the score fixture must be generated on the CPU; "
@@ -1916,6 +1982,7 @@ if _command == 'plan':
 
     def main(argv: list[str] | None = None) -> int:
         parser = argparse.ArgumentParser(description=__doc__)
+        add_model_argument(parser)
         parser.add_argument("--out", default="tests/data/plan_fixture.bin")
         args = parser.parse_args(argv)
 
@@ -2409,6 +2476,7 @@ if _command == 'tokenizer':
         root = Path(__file__).resolve().parents[1]
         parser = argparse.ArgumentParser(
             description="Generate the reference tokenizer fixture.")
+        add_model_argument(parser)
         parser.add_argument(
             "--vocab-size", type=int, default=DEFAULT_VOCAB_SIZE,
             help="full vocabulary size, including the nine special tokens")
@@ -2559,6 +2627,7 @@ if _command == 'loader':
 
     def main(argv: list[str]) -> int:
         parser = argparse.ArgumentParser(description=__doc__)
+        add_model_argument(parser)
         parser.add_argument("--dump-docs", type=Path,
                             help="write the fixed corpus and exit")
         parser.add_argument("--tokenizer", type=Path,
@@ -2670,6 +2739,7 @@ if _command == 'chat':
 
     def main(argv: list[str] | None = None) -> int:
         parser = argparse.ArgumentParser(description=__doc__)
+        add_model_argument(parser)
         parser.add_argument("--out", default="tests/data/chat_fixture.bin")
         parser.add_argument("--tokenizer", default=TOKENIZER)
         args = parser.parse_args(argv)
@@ -3069,6 +3139,7 @@ if _command == 'api':
 
     def parse_args(argv) -> argparse.Namespace:
         parser = argparse.ArgumentParser(description=__doc__)
+        add_model_argument(parser)
         parser.add_argument("--out", default="tests/data/api_fixture.bin",
                             help="output fixture path")
         parser.add_argument("--parquet",
@@ -3141,8 +3212,9 @@ if _command == 'api':
 if _command == 'numerics':
     __doc__ = textwrap.dedent("""\
         Generate the staged numeric golden trace. The default output is
-        ``tests/data/numerics_golden_10l.bin`` at fp32; ``--precision fp8`` writes
-        ``tests/data/numerics_golden_10l_fp8.bin`` from the fp8 CPU build.
+        ``models/<name>/fixtures/numerics_golden_10l.bin`` at fp32;
+        ``--precision fp8`` writes
+        ``models/<name>/fixtures/numerics_golden_10l_fp8.bin`` from the fp8 CPU build.
 
         The trace of ``docs/numerics-integration.md`` is one flat list of named records
         in the little-endian container that ``tests/oracle_fixture.h`` reads, under the
@@ -3296,8 +3368,11 @@ if _command == 'numerics':
 
     def parse_args(argv) -> argparse.Namespace:
         parser = argparse.ArgumentParser(description=__doc__)
+        add_model_argument(parser)
+        add_check_argument(parser)
         parser.add_argument("--out", default=None,
-                            help="output fixture path (default: the precision's name)")
+                            help="output fixture path (default: "
+                                 "models/<model>/fixtures/<precision name>)")
         parser.add_argument("--precision", default="fp32",
                             choices=("fp32", "bf16", "fp8"),
                             help="the build precision of the golden")
@@ -3313,9 +3388,19 @@ if _command == 'numerics':
         # The fixture is the CPU reference. Keep the shared GPU free.
         os.environ["CUDA_VISIBLE_DEVICES"] = ""
         repo_root = _REPO_ROOT
-        out = Path(args.out)
-        if not out.is_absolute():
-            out = repo_root / out
+        committed_dir = model_fixtures_dir(args.model)
+        default_name = DEFAULT_OUT_BY_PRECISION[args.precision]
+        committed = committed_dir / Path(default_name).name
+        if args.out is None:
+            out = committed
+        else:
+            out = Path(args.out)
+            if not out.is_absolute():
+                out = repo_root / out
+        if args.check:
+            check_dir_obj = tempfile.TemporaryDirectory(
+                prefix="nanochat-numerics-check-")
+            out = Path(check_dir_obj.name) / committed.name
         tokenizer = Path(args.tokenizer)
         if not tokenizer.is_absolute():
             tokenizer = repo_root / tokenizer
@@ -3347,6 +3432,9 @@ if _command == 'numerics':
 
         # Re-read the committed path, so the summary describes the file on disk.
         summarize(read_records(out), out, args.precision)
+        if args.check:
+            if not compare_fixture_bytes(out, committed):
+                return 1
         return 0
     _selected_main = main
 
@@ -3492,6 +3580,7 @@ if _command == 'checkpoint':
 
     def main(argv: list[str] | None = None) -> int:
         parser = argparse.ArgumentParser(description=__doc__)
+        add_model_argument(parser)
         parser.add_argument("--out", default="tests/data/checkpoint_v0.ckpt",
                             help="the fixture to write (default: %(default)s)")
         args = parser.parse_args(argv)
