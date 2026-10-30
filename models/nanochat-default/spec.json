@@ -1,0 +1,145 @@
+{
+  "spec_version": 1,
+  "name": "nanochat-default",
+  "requires": [
+    "rope",
+    "sliding_window",
+    "value_gate",
+    "primitive_tier_complete"
+  ],
+  "dimensions": {
+    "num_heads": 6,
+    "num_kv_heads": 6,
+    "hidden_dim": 768,
+    "seq_len": 2048,
+    "rope_base": 100000.0
+  },
+  "blocks": [
+    {
+      "norm": "rms_norm",
+      "attention": "sliding_window",
+      "attention_variant": "mha",
+      "position": "rope",
+      "mlp": "relu_square",
+      "residual": "blend",
+      "dtype": "build_default"
+    },
+    {
+      "norm": "rms_norm",
+      "attention": "sliding_window",
+      "attention_variant": "mha",
+      "position": "rope",
+      "mlp": "relu_square",
+      "residual": "blend",
+      "dtype": "build_default"
+    },
+    {
+      "norm": "rms_norm",
+      "attention": "sliding_window",
+      "attention_variant": "mha",
+      "position": "rope",
+      "mlp": "relu_square",
+      "residual": "blend",
+      "dtype": "build_default"
+    },
+    {
+      "norm": "rms_norm",
+      "attention": "causal",
+      "attention_variant": "mha",
+      "position": "rope",
+      "mlp": "relu_square",
+      "residual": "blend",
+      "dtype": "build_default"
+    },
+    {
+      "norm": "rms_norm",
+      "attention": "sliding_window",
+      "attention_variant": "mha",
+      "position": "rope",
+      "mlp": "relu_square",
+      "residual": "blend",
+      "dtype": "build_default"
+    },
+    {
+      "norm": "rms_norm",
+      "attention": "sliding_window",
+      "attention_variant": "mha",
+      "position": "rope",
+      "mlp": "relu_square",
+      "residual": "blend",
+      "dtype": "build_default"
+    },
+    {
+      "norm": "rms_norm",
+      "attention": "sliding_window",
+      "attention_variant": "mha",
+      "position": "rope",
+      "mlp": "relu_square",
+      "residual": "blend",
+      "dtype": "build_default"
+    },
+    {
+      "norm": "rms_norm",
+      "attention": "causal",
+      "attention_variant": "mha",
+      "position": "rope",
+      "mlp": "relu_square",
+      "residual": "blend",
+      "dtype": "build_default"
+    },
+    {
+      "norm": "rms_norm",
+      "attention": "sliding_window",
+      "attention_variant": "mha",
+      "position": "rope",
+      "mlp": "relu_square",
+      "residual": "blend",
+      "dtype": "build_default"
+    },
+    {
+      "norm": "rms_norm",
+      "attention": "sliding_window",
+      "attention_variant": "mha",
+      "position": "rope",
+      "mlp": "relu_square",
+      "residual": "blend",
+      "dtype": "build_default"
+    },
+    {
+      "norm": "rms_norm",
+      "attention": "sliding_window",
+      "attention_variant": "mha",
+      "position": "rope",
+      "mlp": "relu_square",
+      "residual": "blend",
+      "dtype": "build_default"
+    },
+    {
+      "norm": "rms_norm",
+      "attention": "causal",
+      "attention_variant": "mha",
+      "position": "rope",
+      "mlp": "relu_square",
+      "residual": "blend",
+      "dtype": "build_default"
+    }
+  ],
+  "embeddings": {
+    "vocab_size": 32768,
+    "padded_vocab_size": 32768,
+    "value_embedding": true
+  },
+  "head": {
+    "kind": "untied_linear",
+    "logit_softcap": 15.0
+  },
+  "loss": {
+    "kind": "softcap_cross_entropy",
+    "ignore_index": -1
+  },
+  "policy": {
+    "dtype": "build_default",
+    "allow_fused_overrides": true,
+    "require_primitive_tier": true
+  }
+}

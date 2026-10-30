@@ -1,0 +1,882 @@
+{
+  "schema_version": 1,
+  "model": "nanochat-default",
+  "review": "A tolerance change is a contract-owner review, not a model-owner decision. A loosened tolerance turns the isolation gate into self-certification (docs/model-and-device-bringup.md section 11).",
+  "fixtures": [
+    {
+      "file": "fixtures/debug_state.bin",
+      "source": "tests/data/debug_state.bin",
+      "sha256": "06a4959cd83b8b4efe89a170c641ee66754d3f840e1396a634e7ff38f25b5407",
+      "precision": "fp32",
+      "record_count": 156,
+      "coverage": "every record name in fixtures/manifest.json resolves to exactly one bound; the first matching entry wins",
+      "records": [
+        {
+          "match": "config/*",
+          "bound": {
+            "mode": "exact",
+            "source": "tests/oracle_test.cc: fixture configuration"
+          }
+        },
+        {
+          "match": "input/*",
+          "bound": {
+            "mode": "exact",
+            "source": "tests/oracle_test.cc: fixture inputs"
+          }
+        },
+        {
+          "match": "param/*",
+          "bound": {
+            "mode": "exact",
+            "source": "tests/oracle_test.cc: initial parameters are inputs"
+          }
+        },
+        {
+          "match": "forward/*",
+          "bound": {
+            "mode": "absolute",
+            "atol": 1e-05,
+            "rtol": 0.0,
+            "source": "tests/oracle_test.cc kForwardTolerance"
+          }
+        },
+        {
+          "match": "grad/*",
+          "bound": {
+            "mode": "absolute",
+            "atol": 1e-05,
+            "rtol": 0.0,
+            "source": "tests/oracle_test.cc kBackwardTolerance"
+          }
+        },
+        {
+          "match": "step/0/param/*",
+          "bound": {
+            "mode": "absolute",
+            "atol": 1e-05,
+            "rtol": 0.0,
+            "source": "tests/oracle_test.cc kOptimizerTolerance at step 0"
+          }
+        },
+        {
+          "match": "step/1/param/*",
+          "bound": {
+            "mode": "absolute",
+            "atol": 1e-05,
+            "rtol": 0.0,
+            "source": "tests/oracle_test.cc kOptimizerTolerance tight single step"
+          }
+        },
+        {
+          "match": "step/*/loss",
+          "bound": {
+            "mode": "absolute",
+            "atol": 1e-05,
+            "rtol": 0.0,
+            "source": "tests/oracle_test.cc kTrajectoryLossTolerance"
+          }
+        },
+        {
+          "match": "step/*/param/*",
+          "bound": {
+            "mode": "absolute",
+            "atol": 0.0001,
+            "rtol": 0.0,
+            "source": "tests/oracle_test.cc kTrajectoryParamTolerance"
+          }
+        }
+      ]
+    },
+    {
+      "file": "fixtures/core_eval.bin",
+      "source": "tests/data/core_eval.bin",
+      "sha256": "28f6f8f174a471fd6772c0ab947bde02a282ce307acf7687d27a6f9bbf7d4e6e",
+      "precision": "fp32",
+      "record_count": 43,
+      "coverage": "every record name in fixtures/manifest.json resolves to exactly one bound; the first matching entry wins",
+      "records": [
+        {
+          "match": "config/*",
+          "bound": {
+            "mode": "exact",
+            "source": "tests/score_parity_test.cc: fixture configuration"
+          }
+        },
+        {
+          "match": "input/*",
+          "bound": {
+            "mode": "exact",
+            "source": "tests/score_parity_test.cc: fixture inputs"
+          }
+        },
+        {
+          "match": "param/*",
+          "bound": {
+            "mode": "exact",
+            "source": "tests/score_parity_test.cc: reference parameters are inputs"
+          }
+        },
+        {
+          "match": "result/nll",
+          "bound": {
+            "mode": "absolute",
+            "atol": 0.0001,
+            "rtol": 0.0001,
+            "source": "tests/score_parity_test.cc kTolerance"
+          }
+        },
+        {
+          "match": "result/focus_logits",
+          "bound": {
+            "mode": "absolute",
+            "atol": 0.0001,
+            "rtol": 0.0001,
+            "source": "tests/score_parity_test.cc kTolerance"
+          }
+        },
+        {
+          "match": "result/argmax",
+          "bound": {
+            "mode": "exact",
+            "source": "tests/score_parity_test.cc: argmax is exact"
+          }
+        },
+        {
+          "match": "result/focus_offsets",
+          "bound": {
+            "mode": "exact",
+            "source": "tests/score_parity_test.cc: focus offsets are exact"
+          }
+        }
+      ]
+    },
+    {
+      "file": "fixtures/train_parity.bin",
+      "source": "tests/data/train_parity.bin",
+      "sha256": "006d6aaa62393cb95e641765d954e45950653f45082a644a62c5b75cf8caca23",
+      "precision": "fp32",
+      "record_count": 993,
+      "coverage": "every record name in fixtures/manifest.json resolves to exactly one bound; the first matching entry wins",
+      "records": [
+        {
+          "match": "config/*",
+          "bound": {
+            "mode": "exact",
+            "source": "tests/train_parity_test.cc: fixture configuration"
+          }
+        },
+        {
+          "match": "param/*",
+          "bound": {
+            "mode": "exact",
+            "source": "tests/train_parity_test.cc: initial parameters are inputs"
+          }
+        },
+        {
+          "match": "batch/*",
+          "bound": {
+            "mode": "exact",
+            "source": "tests/train_parity_test.cc: batches are inputs"
+          }
+        },
+        {
+          "match": "step/*/loss",
+          "bound": {
+            "mode": "relative",
+            "atol": 0.002,
+            "rtol": 0.002,
+            "source": "tests/train_parity_test.cc kLossAtol/kLossRtol"
+          }
+        },
+        {
+          "match": "step/*/grad_norm",
+          "bound": {
+            "mode": "relative",
+            "atol": 0.001,
+            "rtol": 0.01,
+            "source": "tests/train_parity_test.cc kGradNormAtol/kGradNormRtol"
+          }
+        },
+        {
+          "match": "step/*/param_l2/*",
+          "bound": {
+            "mode": "relative",
+            "atol": 0.001,
+            "rtol": 0.005,
+            "source": "tests/train_parity_test.cc kParamL2Atol/kParamL2Rtol"
+          }
+        },
+        {
+          "match": "step/*/grad_l2/*",
+          "bound": {
+            "mode": "relative",
+            "atol": 0.001,
+            "rtol": 0.005,
+            "source": "tests/train_parity_test.cc kParamL2Atol/kParamL2Rtol"
+          }
+        }
+      ]
+    },
+    {
+      "file": "fixtures/generate_parity.bin",
+      "source": "tests/data/generate_parity.bin",
+      "sha256": "65af290d95eeaeefcc60fbb7ec8c75b3fa274a22cd8808d1c5199354bf092db3",
+      "precision": "fp32",
+      "record_count": 39,
+      "coverage": "every record name in fixtures/manifest.json resolves to exactly one bound; the first matching entry wins",
+      "records": [
+        {
+          "match": "*",
+          "bound": {
+            "mode": "exact",
+            "source": "tests/generate_parity_test.cc: parameters and greedy ids/mask are exact"
+          }
+        }
+      ]
+    },
+    {
+      "file": "fixtures/rl_parity.bin",
+      "source": "tests/data/rl_parity.bin",
+      "sha256": "42735fc17fcea63ac6335ef78b952ba8ed83ee30fabf59335f39406debed12f2",
+      "precision": "fp32",
+      "record_count": 69,
+      "coverage": "every record name in fixtures/manifest.json resolves to exactly one bound; the first matching entry wins",
+      "records": [
+        {
+          "match": "*",
+          "bound": {
+            "mode": "exact",
+            "source": "tests/rl_parity_test.cc: rollouts, advantages, and the normalization reference are inputs"
+          }
+        }
+      ]
+    },
+    {
+      "file": "fixtures/numerics_golden_10l.bin",
+      "source": "tests/data/numerics_golden_10l.bin",
+      "sha256": "2af2a12c26b8b9bbf76eb70e40afa3b3c0f1306b8a4aa58150ccbe630705edad",
+      "precision": "fp32",
+      "record_count": 1500,
+      "coverage": "every record name in fixtures/manifest.json resolves to exactly one bound; the first matching entry wins",
+      "records": [
+        {
+          "match": "header/backend",
+          "bound": {
+            "mode": "producer_identity",
+            "source": "docs/numerics-integration.md section 5.1"
+          }
+        },
+        {
+          "match": "header/precision",
+          "bound": {
+            "mode": "producer_identity",
+            "source": "docs/numerics-integration.md section 5.1"
+          }
+        },
+        {
+          "match": "header/version",
+          "bound": {
+            "mode": "exact",
+            "source": "docs/numerics-integration.md section 4: identity row"
+          }
+        },
+        {
+          "match": "header/seed",
+          "bound": {
+            "mode": "exact",
+            "source": "docs/numerics-integration.md section 4: identity row"
+          }
+        },
+        {
+          "match": "header/steps",
+          "bound": {
+            "mode": "exact",
+            "source": "docs/numerics-integration.md section 4: identity row"
+          }
+        },
+        {
+          "match": "header/*",
+          "bound": {
+            "mode": "exact_or_skip_device",
+            "source": "docs/numerics-integration.md section 5.1: producer strings other than backend/precision are skipped on the device leg"
+          }
+        },
+        {
+          "match": "train/step*/param_hash/*",
+          "bound": {
+            "mode": "exact_or_skip_device",
+            "source": "docs/numerics-integration.md section 6.3"
+          }
+        },
+        {
+          "match": "train/step*/grad_hash/*",
+          "bound": {
+            "mode": "exact_or_skip_device",
+            "source": "docs/numerics-integration.md section 6.3"
+          }
+        },
+        {
+          "match": "eval/logits_hash",
+          "bound": {
+            "mode": "exact_or_skip_device",
+            "source": "docs/numerics-integration.md section 6.3"
+          }
+        },
+        {
+          "match": "train/step*/loss",
+          "bound": {
+            "mode": "relative",
+            "atol": 0.0,
+            "rtol": 1e-05,
+            "source": "docs/numerics-integration.md section 4: train loss"
+          }
+        },
+        {
+          "match": "train/step*/grad_norm",
+          "bound": {
+            "mode": "relative",
+            "atol": 0.0,
+            "rtol": 1e-05,
+            "source": "docs/numerics-integration.md section 4: train gradient norm"
+          }
+        },
+        {
+          "match": "train/step*/param_l2/*",
+          "bound": {
+            "mode": "relative",
+            "atol": 0.0,
+            "rtol": 1e-05,
+            "source": "docs/numerics-integration.md section 4: train parameter L2"
+          }
+        },
+        {
+          "match": "eval/bpb",
+          "bound": {
+            "mode": "relative",
+            "atol": 0.0,
+            "rtol": 1e-05,
+            "source": "docs/numerics-integration.md section 4: eval bits per byte"
+          }
+        },
+        {
+          "match": "eval/loss/*",
+          "bound": {
+            "mode": "relative",
+            "atol": 0.0,
+            "rtol": 1e-05,
+            "source": "docs/numerics-integration.md section 4: eval per-batch loss"
+          }
+        },
+        {
+          "match": "eval/margin_min",
+          "bound": {
+            "mode": "absolute",
+            "atol": 1e-05,
+            "rtol": 0.0,
+            "source": "docs/numerics-integration.md section 4: logit margin"
+          }
+        },
+        {
+          "match": "eval/tokens/*",
+          "bound": {
+            "mode": "exact",
+            "source": "docs/numerics-integration.md section 4: eval inputs"
+          }
+        },
+        {
+          "match": "eval/argmax/*",
+          "bound": {
+            "mode": "exact",
+            "source": "docs/numerics-integration.md section 4: eval greedy identifiers"
+          }
+        },
+        {
+          "match": "gen/margin_min",
+          "bound": {
+            "mode": "absolute",
+            "atol": 1e-05,
+            "rtol": 0.0,
+            "source": "docs/numerics-integration.md section 4: logit margin"
+          }
+        },
+        {
+          "match": "gen/margin/*",
+          "bound": {
+            "mode": "absolute",
+            "atol": 1e-05,
+            "rtol": 0.0,
+            "source": "docs/numerics-integration.md section 4: logit margin"
+          }
+        },
+        {
+          "match": "gen/ids",
+          "bound": {
+            "mode": "exact",
+            "source": "docs/numerics-integration.md section 4: generate greedy identifiers"
+          }
+        },
+        {
+          "match": "gen/mask",
+          "bound": {
+            "mode": "exact",
+            "source": "docs/numerics-integration.md section 4: generate greedy mask"
+          }
+        },
+        {
+          "match": "gen/prompt",
+          "bound": {
+            "mode": "exact",
+            "source": "docs/numerics-integration.md section 4: generate input"
+          }
+        },
+        {
+          "match": "sft/loss",
+          "bound": {
+            "mode": "relative",
+            "atol": 0.0,
+            "rtol": 1e-05,
+            "source": "docs/numerics-integration.md section 4: SFT masked weighted loss"
+          }
+        },
+        {
+          "match": "sft/grad_norm",
+          "bound": {
+            "mode": "relative",
+            "atol": 0.0,
+            "rtol": 1e-05,
+            "source": "docs/numerics-integration.md section 4: SFT gradient norm"
+          }
+        },
+        {
+          "match": "sft/*",
+          "bound": {
+            "mode": "exact",
+            "source": "SFT arithmetic inputs and valid-target count"
+          }
+        },
+        {
+          "match": "rl/loss",
+          "bound": {
+            "mode": "relative",
+            "atol": 0.0,
+            "rtol": 1e-05,
+            "source": "docs/numerics-integration.md section 4: RL advantage-weighted loss"
+          }
+        },
+        {
+          "match": "rl/grad_norm",
+          "bound": {
+            "mode": "relative",
+            "atol": 0.0,
+            "rtol": 1e-05,
+            "source": "docs/numerics-integration.md section 4: RL gradient norm"
+          }
+        },
+        {
+          "match": "rl/reward/*",
+          "bound": {
+            "mode": "relative",
+            "atol": 0.0,
+            "rtol": 1e-05,
+            "source": "docs/numerics-integration.md section 4: RL reward"
+          }
+        },
+        {
+          "match": "rl/mean_reward",
+          "bound": {
+            "mode": "relative",
+            "atol": 0.0,
+            "rtol": 1e-05,
+            "source": "docs/numerics-integration.md section 4: RL reward"
+          }
+        },
+        {
+          "match": "rl/advantage/*",
+          "bound": {
+            "mode": "relative",
+            "atol": 0.0,
+            "rtol": 1e-05,
+            "source": "docs/numerics-integration.md section 4: RL advantage"
+          }
+        },
+        {
+          "match": "rl/margin_min",
+          "bound": {
+            "mode": "absolute",
+            "atol": 1e-05,
+            "rtol": 0.0,
+            "source": "docs/numerics-integration.md section 4: logit margin"
+          }
+        },
+        {
+          "match": "rl/*",
+          "bound": {
+            "mode": "exact",
+            "source": "docs/numerics-integration.md section 4: RL greedy identifiers, prompts, reference normalization"
+          }
+        },
+        {
+          "match": "config/*",
+          "bound": {
+            "mode": "exact",
+            "source": "the reference configuration is committed"
+          }
+        },
+        {
+          "match": "opt/*",
+          "bound": {
+            "mode": "exact",
+            "source": "the optimizer configuration is committed"
+          }
+        },
+        {
+          "match": "sched/*",
+          "bound": {
+            "mode": "exact",
+            "source": "the schedule configuration is committed"
+          }
+        },
+        {
+          "match": "train/batches",
+          "bound": {
+            "mode": "exact"
+          }
+        },
+        {
+          "match": "eval/steps",
+          "bound": {
+            "mode": "exact"
+          }
+        },
+        {
+          "match": "gen/prompt_len",
+          "bound": {
+            "mode": "exact"
+          }
+        },
+        {
+          "match": "gen/tokens",
+          "bound": {
+            "mode": "exact"
+          }
+        },
+        {
+          "match": "gen/num_samples",
+          "bound": {
+            "mode": "exact"
+          }
+        }
+      ]
+    },
+    {
+      "file": "fixtures/numerics_golden_10l_fp8.bin",
+      "source": "tests/data/numerics_golden_10l_fp8.bin",
+      "sha256": "5b30b15f05c027e0780d9d69f960977ff76167af2402d646097f368a37d8cfa8",
+      "precision": "fp8",
+      "record_count": 1500,
+      "coverage": "every record name in fixtures/manifest.json resolves to exactly one bound; the first matching entry wins",
+      "records": [
+        {
+          "match": "header/backend",
+          "bound": {
+            "mode": "producer_identity",
+            "source": "docs/numerics-integration.md section 5.1"
+          }
+        },
+        {
+          "match": "header/precision",
+          "bound": {
+            "mode": "producer_identity",
+            "source": "docs/numerics-integration.md section 5.1"
+          }
+        },
+        {
+          "match": "header/version",
+          "bound": {
+            "mode": "exact",
+            "source": "docs/numerics-integration.md section 4: identity row"
+          }
+        },
+        {
+          "match": "header/seed",
+          "bound": {
+            "mode": "exact",
+            "source": "docs/numerics-integration.md section 4: identity row"
+          }
+        },
+        {
+          "match": "header/steps",
+          "bound": {
+            "mode": "exact",
+            "source": "docs/numerics-integration.md section 4: identity row"
+          }
+        },
+        {
+          "match": "header/*",
+          "bound": {
+            "mode": "exact_or_skip_device",
+            "source": "docs/numerics-integration.md section 5.1: producer strings other than backend/precision are skipped on the device leg"
+          }
+        },
+        {
+          "match": "train/step*/param_hash/*",
+          "bound": {
+            "mode": "exact_or_skip_device",
+            "source": "docs/numerics-integration.md section 6.3"
+          }
+        },
+        {
+          "match": "train/step*/grad_hash/*",
+          "bound": {
+            "mode": "exact_or_skip_device",
+            "source": "docs/numerics-integration.md section 6.3"
+          }
+        },
+        {
+          "match": "eval/logits_hash",
+          "bound": {
+            "mode": "exact_or_skip_device",
+            "source": "docs/numerics-integration.md section 6.3"
+          }
+        },
+        {
+          "match": "train/step*/loss",
+          "bound": {
+            "mode": "relative",
+            "atol": 0.0,
+            "rtol": 0.01,
+            "source": "docs/numerics-integration.md section 4 fp8 leg: train loss"
+          }
+        },
+        {
+          "match": "train/step*/grad_norm",
+          "bound": {
+            "mode": "relative",
+            "atol": 0.0,
+            "rtol": 0.01,
+            "source": "docs/numerics-integration.md section 4 fp8 leg: train gradient norm"
+          }
+        },
+        {
+          "match": "train/step*/param_l2/*",
+          "bound": {
+            "mode": "relative",
+            "atol": 0.0,
+            "rtol": 0.01,
+            "source": "docs/numerics-integration.md section 4 fp8 leg: train parameter L2"
+          }
+        },
+        {
+          "match": "eval/bpb",
+          "bound": {
+            "mode": "relative",
+            "atol": 0.0,
+            "rtol": 0.01,
+            "source": "docs/numerics-integration.md section 4 fp8 leg: eval bits per byte"
+          }
+        },
+        {
+          "match": "eval/loss/*",
+          "bound": {
+            "mode": "relative",
+            "atol": 0.0,
+            "rtol": 0.01,
+            "source": "docs/numerics-integration.md section 4 fp8 leg: eval per-batch loss"
+          }
+        },
+        {
+          "match": "eval/margin_min",
+          "bound": {
+            "mode": "report_only",
+            "source": "docs/numerics-integration.md section 4 fp8 leg: margins reported, ids exact"
+          }
+        },
+        {
+          "match": "eval/tokens/*",
+          "bound": {
+            "mode": "exact",
+            "source": "docs/numerics-integration.md section 4 fp8 leg: eval inputs"
+          }
+        },
+        {
+          "match": "eval/argmax/*",
+          "bound": {
+            "mode": "exact",
+            "source": "docs/numerics-integration.md section 4 fp8 leg: eval greedy identifiers"
+          }
+        },
+        {
+          "match": "gen/margin_min",
+          "bound": {
+            "mode": "report_only",
+            "source": "docs/numerics-integration.md section 4 fp8 leg: margins reported, ids exact"
+          }
+        },
+        {
+          "match": "gen/margin/*",
+          "bound": {
+            "mode": "report_only",
+            "source": "docs/numerics-integration.md section 4 fp8 leg: margins reported, ids exact"
+          }
+        },
+        {
+          "match": "gen/ids",
+          "bound": {
+            "mode": "exact",
+            "source": "docs/numerics-integration.md section 4 fp8 leg: generate greedy identifiers"
+          }
+        },
+        {
+          "match": "gen/mask",
+          "bound": {
+            "mode": "exact",
+            "source": "docs/numerics-integration.md section 4 fp8 leg: generate greedy mask"
+          }
+        },
+        {
+          "match": "gen/prompt",
+          "bound": {
+            "mode": "exact",
+            "source": "docs/numerics-integration.md section 4 fp8 leg: generate input"
+          }
+        },
+        {
+          "match": "sft/loss",
+          "bound": {
+            "mode": "relative",
+            "atol": 0.0,
+            "rtol": 0.01,
+            "source": "docs/numerics-integration.md section 4 fp8 leg: SFT masked weighted loss"
+          }
+        },
+        {
+          "match": "sft/grad_norm",
+          "bound": {
+            "mode": "relative",
+            "atol": 0.0,
+            "rtol": 0.01,
+            "source": "docs/numerics-integration.md section 4 fp8 leg: SFT gradient norm"
+          }
+        },
+        {
+          "match": "sft/*",
+          "bound": {
+            "mode": "exact",
+            "source": "SFT arithmetic inputs and valid-target count"
+          }
+        },
+        {
+          "match": "rl/loss",
+          "bound": {
+            "mode": "relative",
+            "atol": 0.0,
+            "rtol": 0.01,
+            "source": "docs/numerics-integration.md section 4 fp8 leg: RL advantage-weighted loss"
+          }
+        },
+        {
+          "match": "rl/grad_norm",
+          "bound": {
+            "mode": "relative",
+            "atol": 0.0,
+            "rtol": 0.01,
+            "source": "docs/numerics-integration.md section 4 fp8 leg: RL gradient norm"
+          }
+        },
+        {
+          "match": "rl/reward/*",
+          "bound": {
+            "mode": "relative",
+            "atol": 0.0,
+            "rtol": 0.01,
+            "source": "docs/numerics-integration.md section 4 fp8 leg: RL reward"
+          }
+        },
+        {
+          "match": "rl/mean_reward",
+          "bound": {
+            "mode": "relative",
+            "atol": 0.0,
+            "rtol": 0.01,
+            "source": "docs/numerics-integration.md section 4 fp8 leg: RL reward"
+          }
+        },
+        {
+          "match": "rl/advantage/*",
+          "bound": {
+            "mode": "relative",
+            "atol": 0.0,
+            "rtol": 0.01,
+            "source": "docs/numerics-integration.md section 4 fp8 leg: RL advantage"
+          }
+        },
+        {
+          "match": "rl/margin_min",
+          "bound": {
+            "mode": "report_only",
+            "source": "docs/numerics-integration.md section 4 fp8 leg: margins reported, ids exact"
+          }
+        },
+        {
+          "match": "rl/*",
+          "bound": {
+            "mode": "exact",
+            "source": "docs/numerics-integration.md section 4 fp8 leg: RL greedy identifiers, prompts, reference normalization"
+          }
+        },
+        {
+          "match": "config/*",
+          "bound": {
+            "mode": "exact",
+            "source": "the reference configuration is committed"
+          }
+        },
+        {
+          "match": "opt/*",
+          "bound": {
+            "mode": "exact",
+            "source": "the optimizer configuration is committed"
+          }
+        },
+        {
+          "match": "sched/*",
+          "bound": {
+            "mode": "exact",
+            "source": "the schedule configuration is committed"
+          }
+        },
+        {
+          "match": "train/batches",
+          "bound": {
+            "mode": "exact"
+          }
+        },
+        {
+          "match": "eval/steps",
+          "bound": {
+            "mode": "exact"
+          }
+        },
+        {
+          "match": "gen/prompt_len",
+          "bound": {
+            "mode": "exact"
+          }
+        },
+        {
+          "match": "gen/tokens",
+          "bound": {
+            "mode": "exact"
+          }
+        },
+        {
+          "match": "gen/num_samples",
+          "bound": {
+            "mode": "exact"
+          }
+        }
+      ]
+    }
+  ]
+}
