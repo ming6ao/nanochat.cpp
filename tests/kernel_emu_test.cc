@@ -44,6 +44,7 @@ namespace {
 using nanochat::ComputeType;
 using nanochat::CopyDir;
 using nanochat::PointwiseOp;
+using nanochat::PointwiseParams;
 using nanochat::RmsNormParams;
 using nanochat::cuda_kernels::EmuRmsNormBackwardFusedResidual;
 using nanochat::cuda_kernels::EmuRmsNormForwardFusedResidual;
@@ -184,8 +185,14 @@ void CheckPointwiseForward(PointwiseOp op, int n) {
 
   std::vector<ComputeType> reference(static_cast<std::size_t>(n));
   std::vector<ComputeType> emulated(static_cast<std::size_t>(n));
-  PointwiseForward(op, n, a.data(), b.data(), alpha, beta, reference.data());
-  EmuPointwiseForward(op, n, a.data(), b.data(), alpha, beta, emulated.data());
+  // The scalar argument list became PointwiseParams (seam version 2).
+  PointwiseParams params;
+  params.op = op;
+  params.count = n;
+  params.alpha = alpha;
+  params.beta = beta;
+  PointwiseForward(params, a.data(), b.data(), reference.data());
+  EmuPointwiseForward(params, a.data(), b.data(), emulated.data());
 
   ExpectClose(ToFloat(emulated), ToFloat(reference),
               Format("pointwise forward op=%d n=%d", static_cast<int>(op), n));
@@ -216,10 +223,13 @@ void CheckPointwiseBackward(PointwiseOp op, int n) {
     ComputeType* ref_b = want_db ? reference_db.data() : nullptr;
     ComputeType* emu_a = want_da ? emulated_da.data() : nullptr;
     ComputeType* emu_b = want_db ? emulated_db.data() : nullptr;
-    PointwiseBackward(op, n, a.data(), b.data(), dy.data(), alpha, beta, ref_a,
-                      ref_b);
-    EmuPointwiseBackward(op, n, a.data(), b.data(), dy.data(), alpha, beta,
-                         emu_a, emu_b);
+    PointwiseParams params;
+    params.op = op;
+    params.count = n;
+    params.alpha = alpha;
+    params.beta = beta;
+    PointwiseBackward(params, a.data(), b.data(), dy.data(), ref_a, ref_b);
+    EmuPointwiseBackward(params, a.data(), b.data(), dy.data(), emu_a, emu_b);
     if (want_da) {
       ExpectClose(ToFloat(emulated_da), ToFloat(reference_da),
                   Format("pointwise backward op=%d n=%d da config=%d",
