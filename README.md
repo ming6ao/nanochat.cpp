@@ -78,6 +78,26 @@ scoring each have a binary: `//src:train_main`, `//src:eval_main`,
 - [docs/sandbox.md](docs/sandbox.md) — the resource budgets every job runs
   under.
 
+## Examples
+
+`examples/` carries the two smallest programs that use the public API, and
+[docs/examples.md](docs/examples.md) is their reference. Each one is a whole
+workflow in one file, with a tiny config, a fixed seed, and no model file:
+
+```bash
+# Inference end to end: config, model, generate, print the ids.
+tools/nanochat run t0-cpu -- bazel-bin/examples/hello_world/hello_world
+
+# The checkpoint container: save, load, print the metadata and records.
+tools/nanochat run t0-cpu -- \
+    bazel-bin/examples/checkpoint_roundtrip/checkpoint_roundtrip
+```
+
+Both are `cc_test`s as well as binaries, so `tools/nanochat test` runs them
+with the rest of the CPU tests. [docs/examples.md](docs/examples.md) says what
+each one proves, the one line to change for a larger model, and the line budget
+that keeps them readable.
+
 ## The performance model
 
 The performance model reports the fastest possible step at one shape. It also
@@ -129,6 +149,7 @@ backends/cpu/       reference implementation of every kernel
 backends/cuda/      CUDA implementation; cuBLAS for GEMM
 backends/cuda/kernels/  kernels, per-family tests, benchmarks, test scaffolding
 dev/kernels/        unpromoted prototypes and the toolchain spike
+examples/           the two smallest programs that use the public API
 tests/              oracle fixtures, parity tests, and the staged numeric trace
 bindings/           the C ABI for the in-process Python API
 python/             the single Python surface: compute, planning, chat,
@@ -148,6 +169,8 @@ docs/               reference and how-to
   [sandbox.md](docs/sandbox.md).
 - [docs/parity.md](docs/parity.md) — known differences from the PyTorch
   reference.
+- [docs/examples.md](docs/examples.md) — the two smallest examples of the
+  public API, and how to run them.
 - [docs/python.md](docs/python.md) — the nanochat-compatible
   Python entry points.
 - [docs/host-portability.md](docs/host-portability.md) — the second host,
