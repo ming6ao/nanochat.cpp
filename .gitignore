@@ -6,3 +6,7 @@
 /.bazelrc.local
 # Kaggle session scratch.
 /.nanochat.env
+
+# Python bytecode caches from the tool and test scripts.
+__pycache__/
+*.pyc
