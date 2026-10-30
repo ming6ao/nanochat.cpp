@@ -1,7 +1,8 @@
-# backends/cuda/ — the CUDA device runtime and the cuBLAS GEMM entry point.
-# This package implements the device/memory and GEMM halves of the frozen seam
-# (nanochat/kernels.h); the per-family compute kernels live in
-# backends/cuda/kernels/. See docs/build.md and docs/kernels.md.
+# backends/cuda/ — the CUDA device runtime, the capability declaration, the two
+# primitive reductions, and the fused-override registrations. This package
+# implements the device/memory half of the frozen seam (nanochat/kernels.h); the
+# per-family compute kernels live in backends/cuda/kernels/. See docs/build.md
+# and docs/kernels.md.
 
 load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
 load(
@@ -14,15 +15,98 @@ load(
 
 package(default_visibility = ["//visibility:public"])
 
+# The capability declaration: the single source of the bits this backend offers
+# (docs/model-and-device-bringup.md section 6). `src/device_profile.cc` derives
+# its table from this file and from the sibling `backends/*/caps.json` files, so
+# the file is exported under the same label name the CPU backend uses
+# (`//backends/cpu:caps_json`) for the derivation, and the caps test reads the
+# same bytes. `filegroup` is a native rule and needs no load.
+filegroup(
+    name = "caps_json",
+    srcs = ["caps.json"],
+)
+
+# The one place a capability *name* meets a capability *bit*: the table that
+# maps the `spec/capability_bits.md` vocabulary onto the `kFeature*` constants in
+# `nanochat/tensor.h`, with a compile-time distinctness check and a run-time
+# check that fails loudly on a name with no mapping. Host-only, so the runtime,
+# the caps test, and the override registrations share it.
+cc_library(
+    name = "caps_names",
+    srcs = ["caps_names.cc"],
+    hdrs = ["caps_names.h"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    deps = ["//include/nanochat:nanochat"],
+)
+
 # Alloc/Free/Memcpy/Memset/Synchronize/GetCaps plus the backend-internal
 # stream/launch helpers. cuda_library adds the CUDA runtime implicitly.
+#
+# `GetCaps()` fills `Caps::feature_mask` from two inputs and no third one: the
+# caps.json-derived profile entry (`//src:device_profile`, the same leaf the CPU
+# backend links for the simulator, DESIGN.md section 2.1) and the precision
+# facts `cudaDeviceProp` reports. The mask is checked against the vocabulary
+# before it is returned.
 cuda_library(
     name = "device",
     srcs = ["device.cu"],
     hdrs = ["device.h"],
     copts = nanochat_cuda_copts(),
     defines = precision_defines(),
-    deps = ["//include/nanochat:nanochat"],
+    deps = [
+        ":caps_names",
+        "//include/nanochat:nanochat",
+        "//src:device_profile",
+    ],
+    alwayslink = True,
+)
+
+# The two reductions of the primitive tier. They are separate libraries on
+# purpose: a per-segment scan and a device-wide ragged reduction are different
+# algorithms with different correctness risks, and a device may run them on
+# different units (docs/model-and-device-bringup.md section 7.2,
+# spec/decisions.md D-001).
+cuda_library(
+    name = "row_reduce",
+    srcs = ["row_reduce.cu"],
+    copts = nanochat_cuda_copts(),
+    defines = precision_defines(),
+    deps = [
+        "//backends/cuda/kernels:device_utils",
+        ":device",
+        "//include/nanochat:nanochat",
+    ],
+    alwayslink = True,
+)
+
+cuda_library(
+    name = "span_reduce",
+    srcs = ["span_reduce.cu"],
+    copts = nanochat_cuda_copts(),
+    defines = precision_defines(),
+    deps = [
+        "//backends/cuda/kernels:device_utils",
+        ":device",
+        "//include/nanochat:nanochat",
+    ],
+    alwayslink = True,
+)
+
+# The fused-override registrations the planner reads through
+# `RegisteredFusedOverrides` (nanochat/plan.h). Data plus the checks that an
+# entry names a composition the plan knows and is gated on a capability bit with
+# a vocabulary name. `alwayslink` keeps the symbol reachable from the plan, which
+# is the only caller.
+cc_library(
+    name = "fused_overrides",
+    srcs = ["fused_overrides.cc"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    deps = [
+        ":caps_names",
+        "//include/nanochat:nanochat",
+    ],
     alwayslink = True,
 )
 
@@ -97,13 +181,17 @@ cc_library(
     ],
 )
 
-# The whole CUDA backend behind one label: the device runtime, GEMM, and every
-# kernel family. This is what `src/**` links when `--config=cuda` selects the
-# backend (docs/build.md), mirroring `//backends/cpu`.
+# The whole CUDA backend behind one label: the device runtime, GEMM, the two
+# primitive reductions, the fused-override registrations, and every kernel
+# family. This is what `src/**` links when `--config=cuda` selects the backend
+# (docs/build.md), mirroring `//backends/cpu`.
 cc_library(
     name = "all_kernels",
     deps = [
         ":cuda",
+        ":fused_overrides",
+        ":row_reduce",
+        ":span_reduce",
         "//backends/cuda/kernels:optimizer_kernels",
         "//backends/cuda/kernels:row_kernels",
         "//backends/cuda/kernels:sequence_kernels",
@@ -125,5 +213,89 @@ cc_test(
     tags = ["gpu"],
 )
 
+# T1 GPU correctness for the two reductions of the primitive tier
+# (docs/model-and-device-bringup.md section 7.2). Tiny shapes plus one shape per
+# reduction that exceeds a single block, so the strided scan and the chunked
+# launch are both exercised.
+cc_test(
+    name = "row_reduce_gpu_test",
+    srcs = ["row_reduce_test.cc"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    deps = [
+        ":row_reduce",
+        "//backends/cuda/kernels/testing:row_test_utils",
+        "//include/nanochat:nanochat",
+    ],
+    size = "small",
+    tags = ["gpu"],
+)
+
+cc_test(
+    name = "span_reduce_gpu_test",
+    srcs = ["span_reduce_test.cc"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    deps = [
+        ":span_reduce",
+        "//backends/cuda/kernels/testing:row_test_utils",
+        "//include/nanochat:nanochat",
+    ],
+    size = "small",
+    tags = ["gpu"],
+)
+
+# The capability declaration gate: `caps.json` against the mask `GetCaps()`
+# reports, and against the fused-override registrations. The file is read
+# through its runfiles path, so the test compares the declaration the backend
+# ships rather than a copy of it.
+cc_test(
+    name = "caps_gpu_test",
+    srcs = ["caps_test.cc"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    data = ["caps.json"],
+    args = ["$(rootpath caps.json)"],
+    deps = [
+        ":caps_names",
+        ":device",
+        ":fused_overrides",
+        "//include/nanochat:nanochat",
+    ],
+    size = "small",
+    tags = ["gpu"],
+)
+
+# The fused-override gate of docs/model-and-device-bringup.md section 7.4
+# condition 1: one trace comparison per fused family at the T1 tiny shapes, plus
+# the cross-check that a registered override and its trace comparison move
+# together. This is what a later removal of a fused family must keep green
+# (section 7.6).
+cc_test(
+    name = "fused_override_trace_gpu_test",
+    srcs = ["fused_override_trace_test.cc"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    deps = [
+        ":fused_overrides",
+        "//backends/cuda/kernels:row_kernels",
+        "//backends/cuda/kernels:sequence_kernels",
+        "//backends/cuda/kernels/testing:row_test_utils",
+        "//backends/cuda/kernels/testing:sequence_test_utils",
+        "//include/nanochat:nanochat",
+    ],
+    size = "small",
+    tags = ["gpu"],
+)
+
 # Aggregation point consumed by //:all_tests.
-test_suite(name = "all")
+test_suite(
+    name = "all",
+    tests = [
+        ":caps_gpu_test",
+        ":cuda_runtime_gpu_test",
+        ":fused_override_trace_gpu_test",
+        ":row_reduce_gpu_test",
+        ":span_reduce_gpu_test",
+    ],
+)

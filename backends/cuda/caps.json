@@ -1,0 +1,421 @@
+{
+  "format": "nanochat.caps/1",
+  "capability_vocabulary": 1,
+  "backend": "cuda",
+  "vendor": "nvidia",
+  "note": "The declaration of this device axis (docs/model-and-device-bringup.md section 6): one entry per NVIDIA device this backend supports, in the shape nanochat/device_profile.h declares, so src/device_profile.cc derives its table from this file and from the sibling caps files and no header holds a row. 'features' holds spec/capability_bits.md vocabulary names verbatim, lower_snake_case, one string per bit, and lists only the bits this backend honours on that device: the fp8 pair appears only where the silicon has the E4M3/E5M2 tensor core and bf16 only where bf16 arithmetic exists, because a declaration may not grant a precision the card lacks (section 4 of the bit file). The primitive tier is complete on every entry: both reductions, the pointwise family with all nine op codes, gather and scatter-add, and causal group-query attention in the full and the sliding variant at one tile size. The three override_* bits are promises about this backend's fused families and hold on every device, so every entry declares them; override_value_gate is absent because include/nanochat/tensor.h has no constant for it, and a declared name with no constant is a run-time lie the planner can never see.",
+  "devices": [
+    {
+      "name": "h100",
+      "is_device": true,
+      "seam": 2,
+      "compute_major": 9,
+      "compute_minor": 0,
+      "total_memory_bytes": 85899345920,
+      "has_tensor_cores": true,
+      "supports_bf16": true,
+      "supports_fp8": true,
+      "peak_fp32_flops": 66.9e12,
+      "peak_bf16_flops": 989e12,
+      "peak_fp8_flops": 1979e12,
+      "peak_bandwidth_bytes_per_second": 3.35e12,
+      "warp_size": 32,
+      "max_threads_per_block": 1024,
+      "max_shared_memory_per_block": 232448,
+      "launch_us": 3.0,
+      "utilities": [
+        "alloc",
+        "free",
+        "memcpy",
+        "memset",
+        "synchronize",
+        "get_caps"
+      ],
+      "primitives": [
+        "gemm",
+        "gemm_wgrad",
+        "quantize_fp8",
+        "gemm_scaled_fp8",
+        "pointwise",
+        "row_reduce",
+        "span_reduce",
+        "embedding_forward",
+        "embedding_backward",
+        "attention_forward",
+        "attention_backward"
+      ],
+      "pointwise_codes": [
+        "kScale",
+        "kScaleAdd",
+        "kGateMul",
+        "kReluSquare",
+        "kSoftcap",
+        "kExp",
+        "kRsqrt",
+        "kLog",
+        "kRowScale"
+      ],
+      "reduce_ops": [
+        "kSumSq",
+        "kSum",
+        "kMax",
+        "kLogSumExp"
+      ],
+      "attention": {
+        "variants": [
+          "full",
+          "sliding"
+        ],
+        "tile_rows": 1
+      },
+      "stateful": [
+        "adamw",
+        "muon"
+      ],
+      "features": [
+        "gqa",
+        "rope",
+        "sliding_window",
+        "value_gate",
+        "fp32",
+        "bf16",
+        "fp8_storage",
+        "fp8_gemm",
+        "primitive_tier_complete",
+        "stateful_adamw",
+        "stateful_muon",
+        "override_rms_norm",
+        "override_qk_prep",
+        "override_classifier"
+      ]
+    },
+    {
+      "name": "h200",
+      "is_device": true,
+      "seam": 2,
+      "compute_major": 9,
+      "compute_minor": 0,
+      "total_memory_bytes": 151397597184,
+      "has_tensor_cores": true,
+      "supports_bf16": true,
+      "supports_fp8": true,
+      "peak_fp32_flops": 67.0e12,
+      "peak_bf16_flops": 989e12,
+      "peak_fp8_flops": 1979e12,
+      "peak_bandwidth_bytes_per_second": 4.8e12,
+      "warp_size": 32,
+      "max_threads_per_block": 1024,
+      "max_shared_memory_per_block": 232448,
+      "launch_us": 3.0,
+      "utilities": [
+        "alloc",
+        "free",
+        "memcpy",
+        "memset",
+        "synchronize",
+        "get_caps"
+      ],
+      "primitives": [
+        "gemm",
+        "gemm_wgrad",
+        "quantize_fp8",
+        "gemm_scaled_fp8",
+        "pointwise",
+        "row_reduce",
+        "span_reduce",
+        "embedding_forward",
+        "embedding_backward",
+        "attention_forward",
+        "attention_backward"
+      ],
+      "pointwise_codes": [
+        "kScale",
+        "kScaleAdd",
+        "kGateMul",
+        "kReluSquare",
+        "kSoftcap",
+        "kExp",
+        "kRsqrt",
+        "kLog",
+        "kRowScale"
+      ],
+      "reduce_ops": [
+        "kSumSq",
+        "kSum",
+        "kMax",
+        "kLogSumExp"
+      ],
+      "attention": {
+        "variants": [
+          "full",
+          "sliding"
+        ],
+        "tile_rows": 1
+      },
+      "stateful": [
+        "adamw",
+        "muon"
+      ],
+      "features": [
+        "gqa",
+        "rope",
+        "sliding_window",
+        "value_gate",
+        "fp32",
+        "bf16",
+        "fp8_storage",
+        "fp8_gemm",
+        "primitive_tier_complete",
+        "stateful_adamw",
+        "stateful_muon",
+        "override_rms_norm",
+        "override_qk_prep",
+        "override_classifier"
+      ]
+    },
+    {
+      "name": "a100",
+      "is_device": true,
+      "seam": 2,
+      "compute_major": 8,
+      "compute_minor": 0,
+      "total_memory_bytes": 85899345920,
+      "has_tensor_cores": true,
+      "supports_bf16": true,
+      "supports_fp8": false,
+      "peak_fp32_flops": 19.5e12,
+      "peak_bf16_flops": 312e12,
+      "peak_fp8_flops": 0.0,
+      "peak_bandwidth_bytes_per_second": 2.0e12,
+      "warp_size": 32,
+      "max_threads_per_block": 1024,
+      "max_shared_memory_per_block": 166912,
+      "launch_us": 4.0,
+      "utilities": [
+        "alloc",
+        "free",
+        "memcpy",
+        "memset",
+        "synchronize",
+        "get_caps"
+      ],
+      "primitives": [
+        "gemm",
+        "gemm_wgrad",
+        "quantize_fp8",
+        "gemm_scaled_fp8",
+        "pointwise",
+        "row_reduce",
+        "span_reduce",
+        "embedding_forward",
+        "embedding_backward",
+        "attention_forward",
+        "attention_backward"
+      ],
+      "pointwise_codes": [
+        "kScale",
+        "kScaleAdd",
+        "kGateMul",
+        "kReluSquare",
+        "kSoftcap",
+        "kExp",
+        "kRsqrt",
+        "kLog",
+        "kRowScale"
+      ],
+      "reduce_ops": [
+        "kSumSq",
+        "kSum",
+        "kMax",
+        "kLogSumExp"
+      ],
+      "attention": {
+        "variants": [
+          "full",
+          "sliding"
+        ],
+        "tile_rows": 1
+      },
+      "stateful": [
+        "adamw",
+        "muon"
+      ],
+      "features": [
+        "gqa",
+        "rope",
+        "sliding_window",
+        "value_gate",
+        "fp32",
+        "bf16",
+        "primitive_tier_complete",
+        "stateful_adamw",
+        "stateful_muon",
+        "override_rms_norm",
+        "override_qk_prep",
+        "override_classifier"
+      ]
+    },
+    {
+      "name": "t4",
+      "is_device": true,
+      "seam": 2,
+      "compute_major": 7,
+      "compute_minor": 5,
+      "total_memory_bytes": 17179869184,
+      "has_tensor_cores": true,
+      "supports_bf16": false,
+      "supports_fp8": false,
+      "peak_fp32_flops": 8.1e12,
+      "peak_bf16_flops": 0.0,
+      "peak_fp8_flops": 0.0,
+      "peak_bandwidth_bytes_per_second": 320e9,
+      "warp_size": 32,
+      "max_threads_per_block": 1024,
+      "max_shared_memory_per_block": 65536,
+      "launch_us": 6.0,
+      "utilities": [
+        "alloc",
+        "free",
+        "memcpy",
+        "memset",
+        "synchronize",
+        "get_caps"
+      ],
+      "primitives": [
+        "gemm",
+        "gemm_wgrad",
+        "quantize_fp8",
+        "gemm_scaled_fp8",
+        "pointwise",
+        "row_reduce",
+        "span_reduce",
+        "embedding_forward",
+        "embedding_backward",
+        "attention_forward",
+        "attention_backward"
+      ],
+      "pointwise_codes": [
+        "kScale",
+        "kScaleAdd",
+        "kGateMul",
+        "kReluSquare",
+        "kSoftcap",
+        "kExp",
+        "kRsqrt",
+        "kLog",
+        "kRowScale"
+      ],
+      "reduce_ops": [
+        "kSumSq",
+        "kSum",
+        "kMax",
+        "kLogSumExp"
+      ],
+      "attention": {
+        "variants": [
+          "full",
+          "sliding"
+        ],
+        "tile_rows": 1
+      },
+      "stateful": [
+        "adamw",
+        "muon"
+      ],
+      "features": [
+        "gqa",
+        "rope",
+        "sliding_window",
+        "value_gate",
+        "fp32",
+        "primitive_tier_complete",
+        "stateful_adamw",
+        "stateful_muon",
+        "override_rms_norm",
+        "override_qk_prep",
+        "override_classifier"
+      ]
+    },
+    {
+      "name": "gtx1080ti",
+      "is_device": true,
+      "seam": 2,
+      "compute_major": 6,
+      "compute_minor": 1,
+      "total_memory_bytes": 11811160064,
+      "has_tensor_cores": false,
+      "supports_bf16": false,
+      "supports_fp8": false,
+      "peak_fp32_flops": 11.34e12,
+      "peak_bf16_flops": 0.0,
+      "peak_fp8_flops": 0.0,
+      "peak_bandwidth_bytes_per_second": 484e9,
+      "warp_size": 32,
+      "max_threads_per_block": 1024,
+      "max_shared_memory_per_block": 49152,
+      "launch_us": 5.0,
+      "utilities": [
+        "alloc",
+        "free",
+        "memcpy",
+        "memset",
+        "synchronize",
+        "get_caps"
+      ],
+      "primitives": [
+        "gemm",
+        "gemm_wgrad",
+        "quantize_fp8",
+        "gemm_scaled_fp8",
+        "pointwise",
+        "row_reduce",
+        "span_reduce",
+        "embedding_forward",
+        "embedding_backward",
+        "attention_forward",
+        "attention_backward"
+      ],
+      "pointwise_codes": [
+        "kScale",
+        "kScaleAdd",
+        "kGateMul",
+        "kReluSquare",
+        "kSoftcap",
+        "kExp",
+        "kRsqrt",
+        "kLog",
+        "kRowScale"
+      ],
+      "reduce_ops": [
+        "kSumSq",
+        "kSum",
+        "kMax",
+        "kLogSumExp"
+      ],
+      "attention": {
+        "variants": [
+          "full",
+          "sliding"
+        ],
+        "tile_rows": 1
+      },
+      "stateful": [
+        "adamw",
+        "muon"
+      ],
+      "features": [
+        "gqa",
+        "rope",
+        "sliding_window",
+        "value_gate",
+        "fp32",
+        "primitive_tier_complete",
+        "stateful_adamw",
+        "stateful_muon",
+        "override_rms_norm",
+        "override_qk_prep",
+        "override_classifier"
+      ]
+    }
+  ]
+}

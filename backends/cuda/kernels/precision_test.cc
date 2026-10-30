@@ -176,8 +176,10 @@ void TestPointwise() {
   DevBuf<ComputeType> da(a);
   DevBuf<ComputeType> db(b);
   DevBuf<ComputeType> dout(n);
-  PointwiseForward(PointwiseOp::kReluSquare, n, da.ptr, db.ptr, 0.0f, 0.0f,
-                   dout.ptr);
+  nanochat::PointwiseParams relu_square;
+  relu_square.op = PointwiseOp::kReluSquare;
+  relu_square.count = n;
+  PointwiseForward(relu_square, da.ptr, db.ptr, dout.ptr);
   Synchronize();
   std::vector<float> ref(n);
   for (int i = 0; i < n; ++i) {
@@ -186,12 +188,16 @@ void TestPointwise() {
   }
   CheckVectorClose(FromStorage(dout.Download()), ref, "pointwise relu^2");
 
-  const float alpha = 0.5f;
-  const float beta = 0.25f;
-  PointwiseForward(PointwiseOp::kScaleAdd, n, da.ptr, db.ptr, alpha, beta,
-                   dout.ptr);
+  nanochat::PointwiseParams scale_add;
+  scale_add.op = PointwiseOp::kScaleAdd;
+  scale_add.count = n;
+  scale_add.alpha = 0.5f;
+  scale_add.beta = 0.25f;
+  PointwiseForward(scale_add, da.ptr, db.ptr, dout.ptr);
   Synchronize();
-  for (int i = 0; i < n; ++i) ref[i] = alpha * af[i] + beta * bf[i];
+  for (int i = 0; i < n; ++i) {
+    ref[i] = scale_add.alpha * af[i] + scale_add.beta * bf[i];
+  }
   CheckVectorClose(FromStorage(dout.Download()), ref, "pointwise scale-add");
 }
 
