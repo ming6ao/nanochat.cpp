@@ -28,10 +28,13 @@ from pathlib import Path
 
 from nanochat_cpp import _entry, cli, toolchain
 
-#: The frozen ``doctor --json`` keys.
+#: The frozen ``doctor --json`` keys, in the order ``cli.DOCTOR_KEYS`` uses.
+#: The tuple is append-only: ``plan`` is the device-and-graph plan that
+#: ``//src:plan_main`` reports (``docs/model-and-device-bringup.md`` section 9
+#: rule 6), so it took the last slot and moved no other key.
 DOCTOR_KEYS = (
     "repo", "revision", "branch", "nvcc", "bazel", "gpu", "gpu_procs",
-    "sandbox", "sandbox_backend", "gpu_queue", "sim",
+    "sandbox", "sandbox_backend", "gpu_queue", "sim", "plan",
 )
 
 #: Every fixture kind that the merged generator must keep, in the help order
