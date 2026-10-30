@@ -134,21 +134,34 @@ void AttentionBackward(const AttentionShape& shape, const ComputeType* q,
                        ComputeType* dq, ComputeType* dk, ComputeType* dv);
 
 // ---------------------------------------------------------------------------
-// ResFormer value residual: `v += 3*sigmoid(h[:12] @ ve_gate^T) * ve`, per
-// key/value head. `gate_out` saves the per-head gate for the backward.
+// ResFormer value residual, expressed as a composition (docs/model-and-device-
+// bringup.md section 7.4): a GEMM for the gate dot, the pointwise family for the
+// sigmoid (`kGateMul` with a unit operand), the gate factor (`kScale`) and the
+// per-head broadcast (`kRowScale`), and the caller's accumulating projection for
+// the addition.
+//
+// `ValueGateForward` computes and saves the gate only: `gate_out[row, kvh] =
+// m * sigmoid(dot(h[row, :kVeGateChannels], gate_w[kvh, :]))`. `ValueGateApply`
+// writes `v = gate * ve` into the value rows, and the caller accumulates the
+// value projection on top of it, so the addition costs no second full-size
+// buffer. The gate is a saved slot: the backward reads it rather than
+// recomputing it (`spec/block_kinds.md` section 2), so a fused override that
+// saves a differently-rounded gate fails the same fixture.
 // ---------------------------------------------------------------------------
 
-void ValueResidualForward(std::int64_t rows, int hidden, int num_kv_heads,
-                          int head_dim, const ComputeType* h,
-                          const ComputeType* ve, const ComputeType* gate_w,
-                          ComputeType* v, ComputeType* gate_out);
+void ValueGateForward(std::int64_t rows, int hidden, int num_kv_heads,
+                      const ComputeType* h, const ComputeType* gate_w,
+                      ComputeType* gate_out);
 
-void ValueResidualBackward(std::int64_t rows, int hidden, int num_kv_heads,
-                           int head_dim, const ComputeType* h,
-                           const ComputeType* ve, const ComputeType* gate_w,
-                           const ComputeType* gate, const ComputeType* dv,
-                           float* gate_w_grad, ComputeType* dh,
-                           ComputeType* dve);
+void ValueGateApply(std::int64_t rows, int num_kv_heads, int head_dim,
+                    const ComputeType* gate, const ComputeType* ve,
+                    ComputeType* v);
+
+void ValueGateBackward(std::int64_t rows, int hidden, int num_kv_heads,
+                       int head_dim, const ComputeType* h,
+                       const ComputeType* ve, const ComputeType* gate_w,
+                       const ComputeType* gate, const ComputeType* dv,
+                       float* gate_w_grad, ComputeType* dh, ComputeType* dve);
 
 // ---------------------------------------------------------------------------
 // relu^2 MLP: `out = x_mid + c_proj(relu^2(c_fc(h)))`. `scratch` receives the
@@ -194,6 +207,49 @@ void BackoutForward(const ComputeType* x, const ComputeType* x_backout,
 void BackoutBackward(const ComputeType* d_pre, const ComputeType* x_backout,
                      float lambda, ComputeType* dbackout, float* lambda_grad,
                      std::int64_t n);
+
+// ---------------------------------------------------------------------------
+// Classifier: the loss composition. Logit softcap, cross-entropy over the
+// unpadded vocabulary, the ignore index, and the optional per-row weight, all
+// built from `Pointwise` (kSoftcap, kExp, kScale, kRowScale), `RowReduce`
+// (kMax, kSum, kLogSumExp) and `Embedding` (the per-row target gather).
+//
+// `row_scale` is a *host* array of `rows` entries: it is an input to this call
+// and never a device operand, which is why the composition can multiply by it
+// per row without a second device buffer.
+//
+// The composition is the definition; the fused `ClassifierForward` /
+// `ClassifierBackward` families remain an override behind their capability bit.
+// ---------------------------------------------------------------------------
+
+struct ClassifierShape {
+  int rows = 0;
+  int vocab_size = 0;
+  int padded_vocab_size = 0;
+  float softcap = kLogitSoftcap;
+  int ignore_index = -1;
+  const float* row_scale = nullptr;  // host array of `rows` weights, or null
+};
+
+void ClassifierForward(const ClassifierShape& shape, const ComputeType* logits,
+                       const int* targets, float* losses);
+
+void ClassifierBackward(const ClassifierShape& shape, const ComputeType* logits,
+                        const int* targets, ComputeType* dlogits);
+
+// ---------------------------------------------------------------------------
+// The global gradient-norm composition: the sum of squares of every gradient
+// span (`SpanReduce` with no second operand and `kSumSq`-equivalent arithmetic
+// over the squares), the norm, and the clip scale. There is no fused family
+// behind it in vocabulary 1: `spec/capability_bits.md` section 5 records that
+// `grad_norm` has no override bit, so this composition IS the implementation.
+//
+// `grads` and `counts` are device arrays of `num_spans` entries.
+// ---------------------------------------------------------------------------
+
+void GradNormForward(const float* const* grads, const int* counts,
+                     int num_spans, float clip, float* out_norm,
+                     float* out_scale);
 
 // ---------------------------------------------------------------------------
 // A full transformer block (residual blend -> attention -> MLP). `BlockForward`
