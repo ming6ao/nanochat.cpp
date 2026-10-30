@@ -12,6 +12,26 @@ variable names, the two log paths and their line formats, the exit codes, the
 two ``--run_under`` strings, the ``NANOCHAT_SANDBOX`` sentinel, the
 ``doctor --json`` keys, the fixture subcommand names, and the fixture binary
 layouts. ``python/tests/contract_test.py`` pins them.
+
+The ``doctor --json`` keys are ``repo``, ``revision``, ``branch``, ``nvcc``,
+``bazel``, ``gpu``, ``gpu_procs``, ``sandbox``, ``sandbox_backend``,
+``gpu_queue``, ``sim``, and ``plan``, in that order. The tuple is append-only:
+a key is added at the end, never renamed, reordered, or dropped, because both
+the text printer and the typed client read it in order.
+
+The ``plan`` value is the device-and-graph plan that ``//src:plan_main`` prints
+for the probe spec (``docs/model-and-device-bringup.md`` section 9 rule 6 and
+section 9.1 rule 3): the user sees which implementation each composition
+resolved to on this host, before a model loads, without reading source. It is
+an object with ``available``, ``reason``, ``ok``, ``spec``, ``graph``,
+``device_index``, ``choices``, ``gaps``, and ``why_not``. ``choices`` holds one
+entry per composition the graph runs - the chosen ``implementation``, whether a
+``fused`` family won, and the ``declined`` fallbacks with the reason each one
+lost - and ``gaps`` lists the compositions that could not be placed at all when
+``ok`` is false. Collection is non-fatal: on a partial build, or when the probe
+spec is missing, ``available`` is false and ``reason`` says why, because a
+``doctor`` run must not fail on a partial checkout. ``nanochat_cpp.plan`` is
+the training-hyperparameter planner, unrelated to this object.
 """
 
 from __future__ import annotations
@@ -50,9 +70,18 @@ BUILD_LOCK = os.environ.get("NANOCHAT_BUILD_LOCK", "/tmp/nanochat-build.lock")
 #: The commands that `--dry-run` covers.
 DRY_RUN_COMMANDS = ("build", "test", "check", "run", "simulate")
 
-#: The `doctor --json` keys, in output order.
+#: The `doctor --json` keys, in output order. Append-only.
 DOCTOR_KEYS = ("repo", "revision", "branch", "nvcc", "bazel", "gpu",
-               "gpu_procs", "sandbox", "sandbox_backend", "gpu_queue", "sim")
+               "gpu_procs", "sandbox", "sandbox_backend", "gpu_queue", "sim",
+               "plan")
+
+#: The model package the doctor's plan probe asks about. A package name rather
+#: than a path, so `plan_main` resolves it the same way `Model::Create` does.
+DOCTOR_PLAN_SPEC = "nanochat-default"
+
+#: The graph the doctor's plan probe resolves. Training is the graph a bring-up
+#: check looks at first, and it is `plan_main`'s own default.
+DOCTOR_PLAN_GRAPH = "train"
 
 #: The sandbox profiles that `run` sends to the queue instead of the launcher.
 DIRECT_PROFILE = "t0-cpu"
@@ -561,7 +590,107 @@ def _doctor_values() -> dict:
         "sandbox_backend": backend,
         "gpu_queue": _queue_status(),
         "sim": sim,
+        "plan": _plan_status(),
     }
+
+
+def _plan_status() -> dict:
+    """The device-and-graph plan for the probe spec, or why there is none.
+
+    `//src:plan_main` prints the plan that `nanochat::BuildPlan` resolves for
+    `DOCTOR_PLAN_SPEC` and `DOCTOR_PLAN_GRAPH` (section 9.1 rule 3). The plan
+    is pure, so the probe needs no device, no checkpoint, and no tokenizer.
+
+    Non-fatal by design: `doctor` runs on a partial build, so a binary that is
+    not built or a spec that is not readable reports the reason instead of
+    failing the command. `available` is false in that case and `reason` says
+    why; the rest of the object keeps its shape so a reader never has to guess
+    which keys exist.
+
+    The probe inherits the environment, so `NANOCHAT_SIM_PROFILE` makes it
+    resolve against the simulated device, the same reading the ``sim`` key
+    reports.
+    """
+    plan = {
+        "available": False,
+        "reason": "",
+        "ok": False,
+        "spec": DOCTOR_PLAN_SPEC,
+        "graph": DOCTOR_PLAN_GRAPH,
+        "device_index": 0,
+        "choices": [],
+        "gaps": [],
+        "why_not": "",
+    }
+    binary = BAZEL_BIN / "src" / "plan_main"
+    if not binary.exists():
+        plan["reason"] = (f"{binary} is not built; "
+                          "run: tools/nanochat build //src:plan_main")
+        return plan
+    # The working directory is the repository root so the binary finds
+    # `models/<name>/spec.json` relative to it; a plan is rejected with exit 1
+    # and still prints JSON, so only an unparseable report means "unavailable".
+    try:
+        result = _run([str(binary), f"--spec={DOCTOR_PLAN_SPEC}",
+                       f"--graph={DOCTOR_PLAN_GRAPH}", "--json"],
+                      capture_output=True, text=True, cwd=str(REPO_ROOT))
+    except OSError as error:
+        plan["reason"] = f"plan probe could not run {binary}: {error}"
+        return plan
+    try:
+        payload = json.loads(result.stdout or "")
+    except ValueError:
+        payload = None
+    if not isinstance(payload, dict):
+        detail = " ".join(result.stderr.split())
+        plan["reason"] = (f"plan probe failed: {detail}" if detail else
+                          f"plan probe exited {result.returncode} "
+                          "without a report")
+        return plan
+    device_index = payload.get("device_index")
+    plan.update({
+        "available": True,
+        "ok": bool(payload.get("ok")),
+        "spec": str(payload.get("spec") or DOCTOR_PLAN_SPEC),
+        "graph": str(payload.get("graph") or DOCTOR_PLAN_GRAPH),
+        "device_index": device_index if isinstance(device_index, int) else 0,
+        "choices": _plan_choices(payload.get("choices")),
+        "gaps": _plan_gaps(payload.get("gaps")),
+        "why_not": str(payload.get("why_not") or ""),
+    })
+    return plan
+
+
+def _plan_choices(choices) -> list[dict]:
+    """The plan's per-composition decisions, with a fixed shape per entry."""
+    out = []
+    for choice in choices if isinstance(choices, list) else []:
+        if not isinstance(choice, dict):
+            continue
+        declined = []
+        for entry in choice.get("declined") or []:
+            if not isinstance(entry, dict):
+                continue
+            declined.append({
+                "implementation": str(entry.get("implementation") or ""),
+                "reason": str(entry.get("reason") or ""),
+            })
+        out.append({"composition": str(choice.get("composition") or ""),
+                    "implementation": str(choice.get("implementation") or ""),
+                    "fused": bool(choice.get("fused")),
+                    "declined": declined})
+    return out
+
+
+def _plan_gaps(gaps) -> list[dict]:
+    """The compositions the plan could not place, and why."""
+    out = []
+    for gap in gaps if isinstance(gaps, list) else []:
+        if not isinstance(gap, dict):
+            continue
+        out.append({"composition": str(gap.get("composition") or ""),
+                    "reason": str(gap.get("reason") or "")})
+    return out
 
 
 def _queue_status() -> dict:
@@ -605,6 +734,7 @@ def _print_doctor(values: dict) -> None:
               f"running {queue.get('running_job') or '-'}")
     else:
         print("gpu queue: idle (no worker)")
+    _print_plan(values["plan"])
     for log in ("/tmp/nanochat-gpu.log", "/tmp/nanochat-sandbox.log"):
         if not os.path.isfile(log):
             continue
@@ -619,6 +749,35 @@ def _print_doctor(values: dict) -> None:
         stamp = time.strftime("%Y-%m-%d %H:%M",
                               time.localtime(binary.stat().st_mtime))
         print(f"built:     {binary} ({stamp})")
+
+
+def _print_plan(plan: dict) -> None:
+    """The plan section: the probe, the resolution, then one line per piece.
+
+    It reads like `//src:plan_main`'s own text report, so a user who runs the
+    binary by hand sees the same sentences `doctor` prints.
+    """
+    if not plan["available"]:
+        print(f"plan:      unavailable ({plan['reason']})")
+        return
+    print(f"plan:      {plan['spec']}, graph {plan['graph']}, "
+          f"device {plan['device_index']}: "
+          f"{'ok' if plan['ok'] else 'rejected'}")
+    if not plan["ok"]:
+        # The rejection message already names the missing bits and the
+        # consequence, so it is printed as the binary wrote it.
+        if plan["why_not"]:
+            print(plan["why_not"].rstrip())
+        for gap in plan["gaps"]:
+            print(f"           gap {gap['composition']}: {gap['reason']}")
+        return
+    for choice in plan["choices"]:
+        fused = " (fused)" if choice["fused"] else ""
+        print(f"           {choice['composition']}: "
+              f"{choice['implementation']}{fused}")
+        for declined in choice["declined"]:
+            print(f"             declined {declined['implementation']}: "
+                  f"{declined['reason']}")
 
 
 def _tail(path: str, count: int) -> list[str]:
