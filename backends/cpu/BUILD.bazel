@@ -6,6 +6,34 @@ load("//:nanochat.bzl", "nanochat_copts", "precision_defines")
 
 package(default_visibility = ["//visibility:public"])
 
+# The reference declaration of this device: the six utilities, the arithmetic
+# primitives (both reductions included), the two stateful entries, both attention
+# variants at one tile size, and the capability bits it offers
+# (spec/capability_bits.md). Exported as a file so the device-profile derivation
+# (`src/device_profile.cc`) and `//backends/cpu:caps_test` read the same bytes
+# rather than a second hand-written copy. It declares no fused-override bit, so
+# the planner resolves every composition to the composition path here
+# (docs/model-and-device-bringup.md section 7.4).
+filegroup(
+    name = "caps_json",
+    srcs = ["caps.json"],
+)
+
+# The string-to-constant table of `spec/capability_bits.md` section 2: one row per
+# vocabulary name, carrying the `kFeature*` constant the frozen
+# `include/nanochat/tensor.h` actually defines. `caps_test` checks the
+# declaration against it, so a declared name with no constant fails loudly
+# instead of being dropped on the floor. The table includes `tensor.h`, so it
+# needs the build precision like every other target that does.
+cc_library(
+    name = "caps_names",
+    hdrs = ["caps_names.h"],
+    defines = precision_defines(),
+    deps = [
+        "//include/nanochat:nanochat",
+    ],
+)
+
 # The CPU backend: every symbol in nanochat/kernels.h as a naive loop. The
 # precision (fp32 / fp16) is a build-time define, so the library is built once
 # per `--config` and vendored into whichever executable links it.
@@ -55,5 +83,29 @@ cc_test(
     size = "small",
 )
 
-# Aggregation point consumed by //:all_tests.
-test_suite(name = "all")
+# The declaration's own gate: caps.json is data, so this test is what keeps it
+# honest. It reads its bits against the vocabulary of spec/capability_bits.md and
+# fails on any fused-override bit, which is the section 7.4 consequence stated as
+# data.
+cc_test(
+    name = "caps_test",
+    srcs = ["caps_test.cc"],
+    copts = nanochat_copts(),
+    data = [":caps_json"],
+    defines = precision_defines(),
+    deps = [
+        ":caps_names",
+        "//include/nanochat:nanochat",
+    ],
+    size = "small",
+)
+
+# Aggregation point consumed by //:all_tests. Each test is listed, so a new
+# test file is added here rather than picked up implicitly.
+test_suite(
+    name = "all",
+    tests = [
+        ":caps_test",
+        ":kernels_test",
+    ],
+)
