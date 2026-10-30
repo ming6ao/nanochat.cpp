@@ -1,23 +1,134 @@
-"""T0: the reference-checkpoint name, dtype, container, and path logic.
+"""T0: the reference-checkpoint name, dtype, container, path, and metadata.
 
-This replaces the removed self-test checks and is hermetic: standard library
-only. See docs/python.md section 11.1.
+This replaces the removed self-test checks and is hermetic: the standard
+library plus the loaded shared library, no third-party import and no network.
+See docs/python.md section 11.1 and
+`docs/checkpoint-metadata-and-examples-plan.md` stage A.5.
 """
 
 from __future__ import annotations
 
+import ctypes
+import json
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
-from nanochat_cpp import checkpoint
+from nanochat_cpp import _build, _core, _lib, checkpoint
+from nanochat_cpp.api import Config, Model
 
 # The storage dtype codes come from the C surface, so the test pins no layout
 # constant of its own.
 FP32 = checkpoint.dtype_code("float32")
 BF16 = checkpoint.dtype_code("bfloat16")
 INT8 = checkpoint.dtype_code("int8")
+
+#: The committed version 0 container (`//tests:checkpoint_v0_fixture`). It was
+#: written before the metadata section existed, so it carries no block and its
+#: run facts read as the defaults of one (stage A.2).
+FIXTURE = "tests/data/checkpoint_v0.ckpt"
+
+
+def resolve(relative: str) -> Path:
+    """A runfiles path when the test runs under Bazel, else a source path."""
+    found = _lib.find_in_runfiles(relative)
+    if found is not None:
+        return found
+    return _build.repo_root() / relative
+
+
+def tiny_config() -> Config:
+    """A valid model config with no member at its default value.
+
+    Every member the metadata block records differs from the default of
+    `nanochat::Config`, so the config in the block has to come from the model
+    and not from an accident of the writer's defaults (`Config::Validate`
+    accepts the shape: the hidden width is divisible by the head count, the
+    per-head width is even, and the vocabulary is its own padded size).
+    """
+    return Config(num_layers=2, num_heads=2, num_kv_heads=1, hidden_dim=32,
+                  seq_len=64, vocab_size=256, padded_vocab_size=256,
+                  rope_base=10000.0, window_pattern="SL",
+                  value_embedding=False)
+
+
+def config_object(config) -> dict:
+    """The run config as the metadata JSON renders it.
+
+    One key per `nanochat::Config` member, in the field order `VisitConfig`
+    writes (`src/checkpoint_metadata.cc`), so this is the independent copy the
+    test compares the decoded metadata against. Almost every name is also the
+    member name the Python mirror uses, which is why the mapping is spelled
+    out here rather than derived.
+    """
+    return {
+        "num_layers": config.num_layers,
+        "num_heads": config.num_heads,
+        "num_kv_heads": config.num_kv_heads,
+        "hidden_dim": config.hidden_dim,
+        "seq_len": config.seq_len,
+        "vocab_size": config.vocab_size,
+        "padded_vocab_size": config.padded_vocab_size,
+        "rope_base": float(config.rope_base),
+        "window_pattern": config.window_pattern,
+        "value_embedding": bool(config.value_embedding),
+    }
+
+
+def with_float_rope_base(config: dict) -> dict:
+    """``config`` with ``rope_base`` as a float.
+
+    The JSON object holds the shortest number that reloads to the same value,
+    so an integral base arrives as a Python ``int``; the comparison is on the
+    value, never on the JSON type.
+    """
+    normalised = dict(config)
+    normalised["rope_base"] = float(normalised["rope_base"])
+    return normalised
+
+
+def _text(value) -> str:
+    """The text of a C string that may be null."""
+    return value.decode("utf-8") if value else ""
+
+
+def flat_metadata(path) -> dict:
+    """The run facts through the flat C accessors, not through the mapping.
+
+    `read_metadata` fills its mapping from the metadata struct, so the test
+    reads the same block a second time through the getters that
+    `include/nanochat/capi.h` declares and compares the two halves of the C
+    surface. Every string belongs to the handle, so the copy is made inside
+    the ``try``.
+    """
+    library = _lib.load()
+    owner = _core.CheckpointHandle()
+    raw = _core.CheckpointMetadata()
+    status = library.nanochat_checkpoint_metadata_read(
+        str(path).encode("utf-8"), ctypes.byref(owner), ctypes.byref(raw))
+    _core.check_status(library, status, "nanochat_checkpoint_metadata_read")
+    metadata = ctypes.byref(raw)
+    try:
+        return {
+            "schema": int(raw.schema),
+            "stage": int(library.nanochat_checkpoint_metadata_stage(metadata)),
+            "step": int(library.nanochat_checkpoint_metadata_step(metadata)),
+            "world_size": int(
+                library.nanochat_checkpoint_metadata_world_size(metadata)),
+            "precision": int(raw.precision),
+            "config": json.loads(
+                library.nanochat_checkpoint_metadata_config_json(metadata)),
+            "tokenizer_id": _text(raw.tokenizer_id),
+            "git_revision": _text(raw.git_revision),
+            "created_utc": _text(raw.created_utc),
+            "notes": [] if not raw.notes else [
+                _text(raw.notes[index])
+                for index in range(int(raw.note_count))],
+        }
+    finally:
+        library.nanochat_checkpoint_free(owner)
+
 
 CANONICAL_NAMES = [
     "lm_head.weight",
@@ -170,6 +281,181 @@ class ContainerTest(unittest.TestCase):
         self.assertEqual(loaded, [record])
         self.assertEqual(loaded[0].attributes[0].name, "quant.scale")
         self.assertEqual(loaded[0].element_size, 1)
+
+
+class MetadataCase(unittest.TestCase):
+    """The checks every `read_metadata` mapping shares."""
+
+    def assert_metadata_keys(self, metadata: dict) -> None:
+        """Every key of the mapping, in the documented order."""
+        self.assertEqual(list(metadata), list(checkpoint.METADATA_KEYS))
+
+    def assert_matches_the_c_api(self, path, metadata: dict) -> None:
+        """Every field equals the value the C surface returns for it."""
+        raw = flat_metadata(path)
+        self.assertEqual(raw["schema"], metadata["schema"])
+        self.assertEqual(checkpoint.CHECKPOINT_STAGES[raw["stage"]],
+                         metadata["stage"])
+        self.assertEqual(raw["step"], metadata["step"])
+        self.assertEqual(raw["world_size"], metadata["world_size"])
+        self.assertEqual(checkpoint.CHECKPOINT_PRECISIONS[raw["precision"]],
+                         metadata["precision"])
+        # The decoded config, not its JSON text: the mapping hands a caller a
+        # dict so no second parser is needed (section 4).
+        self.assertEqual(raw["config"], metadata["config"])
+        for key in ("tokenizer_id", "git_revision", "created_utc", "notes"):
+            self.assertEqual(raw[key], metadata[key], key)
+
+    def assert_config_is(self, metadata: dict, config) -> None:
+        """The decoded config is ``config``, key for key."""
+        got = metadata["config"]
+        self.assertEqual(set(got), set(config_object(config)))
+        self.assertEqual(with_float_rope_base(got),
+                         with_float_rope_base(config_object(config)))
+
+    def assert_default_run_facts(self, metadata: dict) -> None:
+        """The run facts a file with no metadata block reports.
+
+        They are the member initializers of `CheckpointMetadata`, so they hold
+        under every build: the recorded precision is fixed rather than the
+        build's (section 8).
+        """
+        self.assertEqual(metadata["schema"], 1)
+        self.assertEqual(metadata["stage"], "base")
+        self.assertEqual(metadata["step"], 0)
+        self.assertEqual(metadata["world_size"], 1)
+        self.assertEqual(metadata["precision"], "fp32")
+        self.assertEqual(metadata["tokenizer_id"], "")
+        self.assertEqual(metadata["git_revision"], "")
+        self.assertEqual(metadata["created_utc"], "")
+        self.assertEqual(metadata["notes"], [])
+
+
+class MetadataFixtureTest(MetadataCase):
+    """The committed version 0 container reads as the defaults."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.path = resolve(FIXTURE)
+        cls.metadata = checkpoint.read_metadata(cls.path)
+
+    def test_the_mapping_holds_every_key(self) -> None:
+        self.assert_metadata_keys(self.metadata)
+
+    def test_the_detected_format_is_version_zero(self) -> None:
+        self.assertEqual(checkpoint.detect_format(self.path),
+                         checkpoint.CONTAINER_VERSION_0)
+        self.assertEqual(self.metadata["format"],
+                         checkpoint.CONTAINER_VERSION_0)
+
+    def test_the_run_facts_are_the_defaults(self) -> None:
+        self.assert_default_run_facts(self.metadata)
+
+    def test_the_config_is_the_default_config(self) -> None:
+        # A version 0 file has no block, so the config is the member
+        # initializer of `CheckpointMetadata`. `Config()` spells the same
+        # defaults, so the test pins no number of its own.
+        self.assert_config_is(self.metadata, Config())
+
+    def test_the_mapping_matches_the_c_api(self) -> None:
+        self.assert_matches_the_c_api(self.path, self.metadata)
+
+
+class MetadataVersionOneTest(MetadataCase):
+    """A version 1 file, written at test time by the C writer."""
+
+    def records(self):
+        return [
+            checkpoint.TensorRecord("lm_head.weight", FP32, (2, 3),
+                                    bytes(2 * 3 * 4)),
+        ]
+
+    def test_the_record_writer_writes_the_default_block(self) -> None:
+        # `nanochat_checkpoint_write` writes the current layout, so a caller
+        # that sets no run facts still gets a complete block rather than a
+        # version 0 file it would have to upgrade first.
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "model.nchkpt01"
+            checkpoint.write_checkpoint(path, self.records())
+            metadata = checkpoint.read_metadata(path)
+            self.assert_metadata_keys(metadata)
+            self.assertEqual(checkpoint.detect_format(path),
+                             checkpoint.CONTAINER_VERSION_1)
+            self.assertEqual(metadata["format"],
+                             checkpoint.CONTAINER_VERSION_1)
+            self.assert_default_run_facts(metadata)
+            self.assert_config_is(metadata, Config())
+            self.assert_matches_the_c_api(path, metadata)
+
+    def test_a_model_save_records_the_model_config(self) -> None:
+        config = tiny_config()
+        model = Model(config, seed=7)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "model.nchkpt01"
+            model.save(path)
+            metadata = checkpoint.read_metadata(path)
+            self.assert_metadata_keys(metadata)
+            self.assertEqual(checkpoint.detect_format(path),
+                             checkpoint.CONTAINER_VERSION_1)
+            self.assertEqual(metadata["format"],
+                             checkpoint.CONTAINER_VERSION_1)
+            # The block follows the model, not the writer's default config.
+            self.assert_config_is(metadata, config)
+            # `Checkpointer::SaveModel` fills the schema, the world size of a
+            # single process, and the build precision. This save carries no
+            # step and no stage, so both keep their defaults, and the run
+            # facts only a caller knows stay empty.
+            self.assertEqual(metadata["schema"], 1)
+            self.assertEqual(metadata["stage"], "base")
+            self.assertEqual(metadata["step"], 0)
+            self.assertEqual(metadata["world_size"], 1)
+            self.assertIn(metadata["precision"],
+                          checkpoint.CHECKPOINT_PRECISIONS)
+            # The recorded value is the build precision. The parameter element
+            # size reports it for fp32 and bf16; the fp8 tier quantizes the
+            # matmuls over bf16 parameters, so it is the one build where the
+            # parameter type does not name the recorded precision.
+            if metadata["precision"] != "fp8":
+                self.assertEqual(metadata["precision"], model.dtype)
+            self.assertEqual(metadata["tokenizer_id"], "")
+            self.assertEqual(metadata["git_revision"], "")
+            self.assertEqual(metadata["created_utc"], "")
+            self.assertEqual(metadata["notes"], [])
+            self.assert_matches_the_c_api(path, metadata)
+
+
+class ParseCheckpointCompatTest(unittest.TestCase):
+    """The compatibility promise of open decision O7, as a test."""
+
+    def records(self):
+        return [
+            checkpoint.TensorRecord("lm_head.weight", FP32, (2, 3),
+                                    bytes(2 * 3 * 4)),
+            checkpoint.TensorRecord("resid_lambdas", BF16, (2,), bytes(2 * 2)),
+        ]
+
+    def test_parse_checkpoint_returns_the_two_element_pair(self) -> None:
+        records = self.records()
+        result = checkpoint.parse_checkpoint(checkpoint.serialize(records))
+        self.assertIsInstance(result, tuple)
+        self.assertEqual(len(result), 2)
+        # The unpack every existing caller uses keeps working: the metadata of
+        # a version 1 file never becomes a third element, so the run facts
+        # arrive through `read_metadata` instead.
+        parameters, optimizer_state = result
+        self.assertEqual(parameters, records)
+        self.assertEqual(optimizer_state, [])
+
+    def test_the_run_facts_come_from_read_metadata(self) -> None:
+        records = self.records()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "model.nchkpt01"
+            checkpoint.write_checkpoint(path, records)
+            # One file holds both, and the second one is a separate call.
+            self.assertEqual(
+                len(checkpoint.parse_checkpoint(path.read_bytes())), 2)
+            self.assertEqual(checkpoint.read_metadata(path)["format"],
+                             checkpoint.CONTAINER_VERSION_1)
 
 
 class PathResolutionTest(unittest.TestCase):

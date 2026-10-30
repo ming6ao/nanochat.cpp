@@ -53,6 +53,13 @@ directly; the entry point is what applies the sandbox. See
 - The backend seam is [docs/kernels.md](docs/kernels.md). Adding hardware means
   a new `backends/<x>/`; see [docs/build.md](docs/build.md).
 - The public model API and the five graphs are [docs/model.md](docs/model.md).
+- An example under `examples/` includes only `include/nanochat/**` and the
+  `src/*.h` headers that carry a stability note. No vendor header, and no
+  `backends/` include. Today every example gets what it needs from the public
+  headers alone, so a missing symbol is a gap in `include/nanochat/` to fill,
+  not a reason to reach inside `src/` or `backends/`. Both examples are also
+  `cc_test`s, so `tools/nanochat check` covers them; see
+  [docs/examples.md](docs/examples.md).
 - Design decisions and the invariants that constrain them live in
   [DESIGN.md](DESIGN.md). Keep frozen headers `nanochat/{kernels,tensor,config,
   model}.h` architect-owned, and prefer additive changes.

@@ -166,8 +166,8 @@ def worker_argv(worker, config: Config | None = None,
     """The worker argument list: the binary, the model flags, and the load.
 
     The flags match ``nanochat::cli::IsModelFlag`` so the worker recreates the
-    exact model shape the bridge used to render the prompts. ``load`` is an
-    ``NCHKPT01`` checkpoint to warm-start the model and the optimizer state
+    exact model shape the bridge used to render the prompts. ``load`` is a
+    checkpoint container path to warm-start the model and the optimizer state
     from.
     """
     argv = [str(worker)]
@@ -456,11 +456,11 @@ def run(task, prompts: Sequence[dict], num_samples: int = DEFAULT_NUM_SAMPLES,
     scores the rollouts; the worker holds the model and the optimizer and runs
     the step.
 
-    ``checkpoint`` is the ``NCHKPT01`` path the worker saves to. It is used as
-    the warm start when it already exists. ``checkpoint_interval`` saves every
-    ``checkpoint_interval`` steps. ``config`` (or ``model.config``) gives the
-    worker the model shape. ``tokenizer`` defaults to the ``NCTOKEN1``
-    artifact.
+    ``checkpoint`` is the checkpoint container path the worker saves to. It is
+    used as the warm start when it already exists. ``checkpoint_interval``
+    saves every ``checkpoint_interval`` steps. ``config`` (or ``model.config``)
+    gives the worker the model shape. ``tokenizer`` defaults to the
+    ``NCTOKEN1`` artifact.
 
     The worker is started directly when ``NANOCHAT_SANDBOX_BACKEND`` is
     ``none``, and through ``tools/nanochat train -- <worker>`` otherwise. The

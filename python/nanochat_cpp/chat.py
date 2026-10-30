@@ -669,7 +669,7 @@ def build_parser() -> argparse.ArgumentParser:
         description="Chat evaluation over the in-process nanochat.cpp API "
                     "(docs/python.md section 5.4)")
     parser.add_argument("--model", required=True, type=str,
-                        help="NCHKPT01 checkpoint path")
+                        help="checkpoint container path")
     parser.add_argument("--tasks", type=str, default=None,
                         help="comma-separated task names (default: all)")
     parser.add_argument("--max-problems", type=int, default=None)

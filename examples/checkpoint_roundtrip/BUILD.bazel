@@ -1,0 +1,44 @@
+# examples/checkpoint_roundtrip — the smallest checkpoint container example
+# (docs/checkpoint-metadata-and-examples-plan.md section 6, decisions E1-E6,
+# and stage B.2). One source builds as both a binary and a test, so the
+# documented run command and the guard rail cannot drift apart (stage B.4).
+
+load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_test")
+load("//:nanochat.bzl", "nanochat_copts", "precision_defines")
+
+package(default_visibility = ["//visibility:public"])
+
+# The example itself. It links the container through the public headers only,
+# and `//src:model` supplies `Checkpoint`, `DetectFormat`, and `PrecisionName`
+# while selecting the backend (CPU by default, CUDA under `--config=cuda`),
+# exactly as the other entry points do.
+cc_binary(
+    name = "checkpoint_roundtrip",
+    srcs = ["checkpoint_roundtrip.cc"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    deps = [
+        "//include/nanochat:nanochat",
+        "//src:model",
+    ],
+)
+
+# The same source as a T0 CPU test: the two fixed records pin the record count,
+# and the report keeps both the metadata block and the record table (stage
+# B.4). `tools/nanochat test` runs it with the rest of `//:all_tests`.
+cc_test(
+    name = "roundtrip_test",
+    srcs = ["checkpoint_roundtrip.cc"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    deps = [
+        "//include/nanochat:nanochat",
+        "//src:model",
+    ],
+    size = "small",
+)
+
+test_suite(
+    name = "all",
+    tests = [":roundtrip_test"],
+)

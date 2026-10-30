@@ -132,7 +132,7 @@ C++ but its C ABI binding is not. Phase 6 is delivered in part.
   and the sandbox apply.
 - **Checkpoints.** The `rl` path already resolves to `chatrl_checkpoints`
   (`python/nanochat_cpp/checkpoint.py`). A warm start and the optimizer state
-  use `NCHKPT01`.
+  use the checkpoint container.
 - **Sizes.** A notebook GPU is small. Keep the rollout batch and `num_samples`
   small. The plan caps the shapes at tier T1 and tier T2.
 

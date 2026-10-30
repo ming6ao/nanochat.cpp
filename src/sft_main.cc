@@ -170,7 +170,13 @@ int main(int argc, char** argv) {
   }
 
   if (!config.checkpoint_path.empty()) {
-    nanochat::Checkpointer::SaveModel(*model, *optimizer, target_steps,
+    // The finetune records its stage, so a reader can tell an SFT checkpoint
+    // from a base or RL one without a side file (stage A.6, open decision O3).
+    nanochat::CheckpointSaveOptions options;
+    options.stage = nanochat::Stage::kSft;
+    options.step = target_steps > 0 ? static_cast<std::uint64_t>(target_steps)
+                                    : 0;
+    nanochat::Checkpointer::SaveModel(*model, optimizer.get(), options,
                                       config.checkpoint_path);
   }
   return 0;

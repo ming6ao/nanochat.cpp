@@ -28,7 +28,7 @@ because every pipeline notebook runs its own setup.
 
 ## Checkpoint flow
 
-The project writes one container, `NCHKPT01`, with the `.ckpt` suffix. The
+The project writes one checkpoint container with the `.ckpt` suffix. The
 layout is in `docs/checkpoint-format.md`.
 
 `nc.Model.load` and `MeshRuntime.load(optimizer=False)` read the parameter
@@ -47,7 +47,8 @@ One repository holds the model family: `<namespace>/nanochat-<run_name>`.
 ```
 <repo_id>/
   base/
-    checkpoint.ckpt     NCHKPT01: parameters, optimizer state, and step
+    checkpoint.ckpt     the checkpoint container: parameters, optimizer
+                        state, and step
     model.json          the ModelArgs
     train.json          the training job or the TrainArgs
     run.json            the lineage record

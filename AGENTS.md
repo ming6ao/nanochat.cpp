@@ -39,6 +39,7 @@ happen through the integrator.
 | **Python surface** | `python/**` except `cli.py` and `_entry.py`, `bindings/**` | C ABI `capi.h`, Model API |
 | **Data pipeline** | `src/tokenizer/**`, `src/parquet/**`, `include/nanochat/{tokenizer,bpe_trainer}.h` | frozen `data.h` |
 | **Notebooks** | `notebooks/**`, `tools/kaggle/**` | `docs/host-portability.md` |
+| **Examples** | `examples/**`, one package per directory: `examples/hello_world/**` (inference) and `examples/checkpoint_roundtrip/**` (the container) | public `include/nanochat/**` and `//src:model`; no vendor header, no `backends/` include (`docs/examples.md`) |
 | **Simulator** | `tools/cuda_sim/**` (the API interposer, the emulation engine, the collective mock, `cuda_sim.map`, `check_symbols.py`) | `docs/simulator.md`, frozen `tensor.h` |
 | **Build** | `MODULE.bazel`, `.bazelrc`, `BUILD.bazel` (setup only) | Architect |
 
@@ -256,6 +257,11 @@ This keeps GPU time bounded and predictable.
   file.
 - `BUILD.bazel` files are owned per directory; only the build agent edits the
   root ones.
+- The two example packages aggregate through `test_suite(name = "all_tests")`
+  in the root `BUILD.bazel`. An example edits its own directory and never the
+  root file: the build agent adds the label, so the two examples cannot fight
+  each other or the build agent over one shared file. The include rule for an
+  example is in §1 and in `docs/examples.md`.
 - Shared docs (`README.md`, `DESIGN.md`, `AGENTS.md`, `CONTRIBUTING.md`,
   `docs/**`) are architect-owned.
 

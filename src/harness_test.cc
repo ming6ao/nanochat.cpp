@@ -440,8 +440,8 @@ void TestTrackThreeBaseline() {
 }  // namespace
 
 // A legacy `NCMDL001` file still loads through `Checkpointer::LoadModel`
-// (docs/model.md). The project writes only `NCHKPT01` now, so this is the
-// read-only path.
+// (docs/model.md). The project writes only the checkpoint container now, so
+// this is the read-only path.
 void TestLegacyCheckpoint() {
   const Config config = TinyConfig();
   std::unique_ptr<Model> writer = Model::Create(config);

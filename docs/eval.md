@@ -186,9 +186,9 @@ subset separately, mirroring the post-training loop's logging.
 ## 6. Checkpoints and the tokenizer
 
 - Evaluation loads a checkpoint by `source` (`base`/`sft`/`rl`), model tag, and
-  step. C++-trained checkpoints are NCHKPT01 and load directly.
+  step. C++-trained checkpoints use the checkpoint container and load directly.
 - Reference checkpoints are torch `.pt` state dicts. A converter
-  (`checkpoint.py`) remaps names and dtypes to NCHKPT01, so the project can
+  (`checkpoint.py`) remaps names and dtypes to the container, so the project can
   evaluate released nanochat models. This is the only path by which reference
   weights enter the runtime.
 - The tokenizer is the reference BPE artifact, loaded in Python. The C++ runtime
@@ -208,7 +208,7 @@ subset separately, mirroring the post-training loop's logging.
 
 | ID | Status | Difference |
 |---|---|---|
-| E3 | `equivalent` | reference checkpoints converted torch -> NCHKPT01 |
+| E3 | `equivalent` | reference checkpoints converted torch -> the checkpoint container |
 | E4 | `equivalent` | CORE/chat scoring uses the C++ forward with reference task logic |
 | E1 | `open` | sampled modes use the C++ RNG, not torch (greedy is bit-identical) |
 | E5 | `out-of-scope` | no distributed evaluation |
@@ -227,8 +227,9 @@ The base CORE and sample modes are not wired into `eval_main` or
 `api.evaluate` yet.
 
 The project tracks the differences that remain in [parity.md](parity.md). E3
-(reference checkpoints converted torch -> NCHKPT01) and E4 (CORE and chat
-scoring use the C++ forward with the reference task logic) are `equivalent`.
+(reference checkpoints converted torch -> the checkpoint container) and E4
+(CORE and chat scoring use the C++ forward with the reference task logic) are
+`equivalent`.
 E1 (the sampled modes use the C++ RNG rather than torch, while greedy decoding
 is bit-identical) is `open`. E5 (no distributed evaluation) is `out-of-scope`
 for the single-GPU target. No evaluation item remains on the roadmap.

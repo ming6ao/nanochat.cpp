@@ -40,7 +40,7 @@
 //     template and the loss mask (docs/post-training.md section 9), so it sends
 //     the prompt positions as `-1` and the sampled positions as the token id.
 //
-//   `save path=<path>`   -- write an NCHKPT01 checkpoint of the live model,
+//   `save path=<path>`   -- write a checkpoint container of the live model,
 //                           optimizer moments, and step counter.
 //   `ping`               -- liveness probe.
 //   `quit`               -- flush and close.
@@ -115,9 +115,9 @@ class RlWorker {
                 int prompt_len, const GenerateParams& params,
                 std::vector<GeneratedSequence>* out);
 
-  // Writes the live model, the optimizer moments, and the step counter as an
-  // NCHKPT01 checkpoint (docs/post-training.md section 7). Returns false with a
-  // message in `*error` on a write failure.
+  // Writes the live model, the optimizer moments, and the step counter as a
+  // checkpoint container (docs/post-training.md section 7). Returns false with
+  // a message in `*error` on a write failure.
   bool SaveCheckpoint(const std::string& path, std::string* error);
 
   // Serves the pipe protocol on `in`/`out` until end of input or a `quit`.

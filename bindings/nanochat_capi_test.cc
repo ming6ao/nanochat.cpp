@@ -20,7 +20,9 @@
 #include <vector>
 
 #include "nanochat/capi.h"
+#include "nanochat/checkpoint_metadata.h"
 #include "nanochat/config.h"
+#include "nanochat/data.h"
 #include "nanochat/model.h"
 #include "nanochat/tensor.h"
 #include "src/train.h"
@@ -112,6 +114,42 @@ static_assert(std::is_same<decltype(nanochat_generate_params::bos_id),
 static_assert(std::is_same<decltype(nanochat_generate_params::stop_ids),
                            decltype(nanochat::GenerateParams::stop_ids)>::value,
               "nanochat_generate_params.stop_ids drifted");
+
+// The metadata mirror (docs/checkpoint-metadata-and-examples-plan.md sections 3
+// and 4). The C enums spell the stored values out, so a renumbered enumerator
+// would change the container format in silence; the assertions below stop that
+// at compile time. A widened scalar follows the same rule as the `bool` above:
+// a size floor rather than an equality.
+static_assert(static_cast<int>(nanochat::Stage::kBase) == NANOCHAT_STAGE_BASE,
+              "NANOCHAT_STAGE_BASE drifted from nanochat::Stage");
+static_assert(static_cast<int>(nanochat::Stage::kSft) == NANOCHAT_STAGE_SFT,
+              "NANOCHAT_STAGE_SFT drifted from nanochat::Stage");
+static_assert(static_cast<int>(nanochat::Stage::kRl) == NANOCHAT_STAGE_RL,
+              "NANOCHAT_STAGE_RL drifted from nanochat::Stage");
+static_assert(static_cast<int>(nanochat::ComputePrecision::kFp32) ==
+                  NANOCHAT_PRECISION_FP32,
+              "NANOCHAT_PRECISION_FP32 drifted from ComputePrecision");
+static_assert(static_cast<int>(nanochat::ComputePrecision::kBf16) ==
+                  NANOCHAT_PRECISION_BF16,
+              "NANOCHAT_PRECISION_BF16 drifted from ComputePrecision");
+static_assert(static_cast<int>(nanochat::ComputePrecision::kFp8) ==
+                  NANOCHAT_PRECISION_FP8,
+              "NANOCHAT_PRECISION_FP8 drifted from ComputePrecision");
+static_assert(sizeof(nanochat_checkpoint_metadata::schema) ==
+                  sizeof(nanochat::CheckpointMetadata::schema),
+              "nanochat_checkpoint_metadata.schema drifted");
+static_assert(sizeof(nanochat_checkpoint_metadata::stage) ==
+                  sizeof(nanochat::CheckpointMetadata::stage),
+              "nanochat_checkpoint_metadata.stage drifted");
+static_assert(sizeof(nanochat_checkpoint_metadata::step) ==
+                  sizeof(nanochat::CheckpointMetadata::step),
+              "nanochat_checkpoint_metadata.step drifted");
+static_assert(sizeof(nanochat_checkpoint_metadata::world_size) >=
+                  sizeof(nanochat::CheckpointMetadata::world_size),
+              "nanochat_checkpoint_metadata.world_size drifted");
+static_assert(sizeof(nanochat_checkpoint_metadata::precision) ==
+                  sizeof(nanochat::CheckpointMetadata::precision),
+              "nanochat_checkpoint_metadata.precision drifted");
 
 // --- Test harness ---------------------------------------------------------
 
@@ -1080,8 +1118,11 @@ void CheckCheckpointContainer() {
   nanochat_checkpoint_free(nullptr);
 }
 
-// A version 1 header loads in no build, because the container is version 0.
-void CheckCheckpointRejectsVersionOne() {
+// A version 1 header with no metadata section is a hard error (design
+// decision D7), so a file that stops after the version word fails instead of
+// loading with a partial block. The version 1 layout itself loads, and
+// `CheckCheckpointMetadata` covers it.
+void CheckCheckpointRejectsTruncatedVersionOne() {
   const std::string path = TempPath("capi_container_bad.ckpt");
   std::FILE* file = std::fopen(path.c_str(), "wb");
   Check("checkpoint bad file opens", file != nullptr);
@@ -1097,11 +1138,233 @@ void CheckCheckpointRejectsVersionOne() {
   const nanochat_record* state = nullptr;
   int64_t state_count = 0;
   Check(
-      "checkpoint rejects version 1",
+      "checkpoint rejects a truncated version 1 header",
       nanochat_checkpoint_read(path.c_str(), &owner, &records, &record_count,
                                &state, &state_count) == NANOCHAT_STATUS_ERROR);
   Check("checkpoint version 1 leaves no owner", owner == nullptr);
   nanochat_checkpoint_free(owner);
+}
+
+// The metadata surface (docs/checkpoint-metadata-and-examples-plan.md section
+// 4). A version 0 file reads as the defaults of `CheckpointMetadata`, so a
+// caller needs no presence test; a version 1 file carries the block, and every
+// field reaches the flat struct and the flat accessors. An unreadable path and
+// a malformed file return the failure status without filling any field.
+void CheckCheckpointMetadata() {
+  // The default config object of `nanochat.config.v1`: one key per
+  // `nanochat::Config` member, in the declaration order of
+  // `include/nanochat/config.h`. A version 0 file reports it, because the block
+  // it lacks reads as the member initializers.
+  const char kDefaultConfigJson[] =
+      "{\"num_layers\":12,\"num_heads\":6,\"num_kv_heads\":6,"
+      "\"hidden_dim\":768,\"seq_len\":2048,\"vocab_size\":32768,"
+      "\"padded_vocab_size\":32768,\"rope_base\":100000,"
+      "\"window_pattern\":\"SSSL\",\"value_embedding\":true}";
+
+  // A version 0 container: the magic, the version word 0, and an empty
+  // parameter list. Nothing follows, and the parameter-only read stops at the
+  // end of the file, so these 16 bytes are a complete version 0 file
+  // (docs/checkpoint-metadata-and-examples-plan.md section 2.1 with no metadata
+  // section).
+  const std::string v0_path = TempPath("capi_metadata_v0.ckpt");
+  std::FILE* v0_file = std::fopen(v0_path.c_str(), "wb");
+  Check("metadata v0: file opens", v0_file != nullptr);
+  if (v0_file != nullptr) {
+    const char bytes[16] = {'N', 'C', 'H', 'K', 'P', 'T', '0', '1',
+                            0,   0,   0,   0,   0,   0,   0,   0};
+    std::fwrite(bytes, 1, sizeof(bytes), v0_file);
+    std::fclose(v0_file);
+  }
+
+  nanochat_checkpoint* owner = nullptr;
+  nanochat_checkpoint_metadata metadata = {};
+  Check("metadata v0: read succeeds",
+        nanochat_checkpoint_metadata_read(v0_path.c_str(), &owner, &metadata) ==
+            NANOCHAT_STATUS_OK);
+  Check("metadata v0: owner is set", owner != nullptr);
+  if (owner != nullptr) {
+    Check("metadata v0: schema is the metadata schema", metadata.schema == 1);
+    Check("metadata v0: stage defaults to base",
+          metadata.stage == NANOCHAT_STAGE_BASE);
+    Check("metadata v0: step defaults to zero", metadata.step == 0);
+    Check("metadata v0: world size defaults to one", metadata.world_size == 1);
+    Check("metadata v0: precision defaults to fp32",
+          metadata.precision == NANOCHAT_PRECISION_FP32);
+    Check("metadata v0: config is the default object",
+          metadata.config_json != nullptr &&
+              std::strcmp(metadata.config_json, kDefaultConfigJson) == 0);
+    Check("metadata v0: tokenizer id is empty",
+          metadata.tokenizer_id != nullptr && metadata.tokenizer_id[0] == '\0');
+    Check("metadata v0: git revision is empty",
+          metadata.git_revision != nullptr && metadata.git_revision[0] == '\0');
+    Check("metadata v0: created is empty",
+          metadata.created_utc != nullptr && metadata.created_utc[0] == '\0');
+    Check("metadata v0: no notes",
+          metadata.notes == nullptr && metadata.note_count == 0);
+    Check(
+        "metadata v0: the getters agree",
+        nanochat_checkpoint_metadata_stage(&metadata) == NANOCHAT_STAGE_BASE &&
+            nanochat_checkpoint_metadata_step(&metadata) == 0 &&
+            nanochat_checkpoint_metadata_world_size(&metadata) == 1 &&
+            nanochat_checkpoint_metadata_config_json(&metadata) ==
+                metadata.config_json);
+  }
+  nanochat_checkpoint_free(owner);
+
+  // A version 1 file with non-default run facts. The C writer takes records
+  // only, so the block is written through the host writer that owns it, and the
+  // C surface is checked as the reader a binding uses.
+  const std::string v1_path = TempPath("capi_metadata_v1.ckpt");
+  nanochat::Checkpoint wrote;
+  nanochat::CheckpointMetadata facts;
+  facts.stage = nanochat::Stage::kSft;
+  facts.step = 4294967296LL + 7;  // Above 2^32: the whole 64-bit range stays.
+  facts.world_size = 8;
+  facts.precision = nanochat::ComputePrecision::kBf16;
+  facts.config.num_layers = 4;
+  facts.config.num_heads = 2;
+  facts.config.num_kv_heads = 1;
+  facts.config.hidden_dim = 64;
+  facts.config.seq_len = 512;
+  facts.config.vocab_size = 256;
+  facts.config.padded_vocab_size = 256;
+  facts.config.rope_base = 10000.0f;
+  facts.config.window_pattern = "SL";
+  facts.config.value_embedding = false;
+  facts.tokenizer_id = "nanochat-32k.nctoken";
+  facts.git_revision = "0123456789abcdef";
+  facts.created_utc = "2026-02-14T00:00:00Z";
+  facts.notes = {"first run", "resumed from step 4194304"};
+  wrote.set_metadata(facts);
+  Check("metadata v1: write succeeds", wrote.Save(v1_path));
+
+  owner = nullptr;
+  nanochat_checkpoint_metadata read = {};
+  Check("metadata v1: read succeeds",
+        nanochat_checkpoint_metadata_read(v1_path.c_str(), &owner, &read) ==
+            NANOCHAT_STATUS_OK);
+  Check("metadata v1: owner is set", owner != nullptr);
+  if (owner != nullptr) {
+    Check("metadata v1: schema", read.schema == 1);
+    Check("metadata v1: stage", read.stage == NANOCHAT_STAGE_SFT);
+    Check("metadata v1: step keeps the full 64-bit value",
+          read.step == static_cast<int64_t>(facts.step));
+    Check("metadata v1: world size", read.world_size == 8);
+    Check("metadata v1: precision", read.precision == NANOCHAT_PRECISION_BF16);
+    Check("metadata v1: config is the written config",
+          read.config_json != nullptr &&
+              std::strcmp(read.config_json,
+                          "{\"num_layers\":4,\"num_heads\":2,"
+                          "\"num_kv_heads\":1,\"hidden_dim\":64,"
+                          "\"seq_len\":512,\"vocab_size\":256,"
+                          "\"padded_vocab_size\":256,\"rope_base\":10000,"
+                          "\"window_pattern\":\"SL\","
+                          "\"value_embedding\":false}") == 0);
+    Check("metadata v1: tokenizer id",
+          read.tokenizer_id != nullptr &&
+              std::strcmp(read.tokenizer_id, "nanochat-32k.nctoken") == 0);
+    Check("metadata v1: git revision",
+          read.git_revision != nullptr &&
+              std::strcmp(read.git_revision, "0123456789abcdef") == 0);
+    Check("metadata v1: created",
+          read.created_utc != nullptr &&
+              std::strcmp(read.created_utc, "2026-02-14T00:00:00Z") == 0);
+    Check("metadata v1: note count", read.note_count == 2);
+    Check("metadata v1: notes",
+          read.note_count == 2 && read.notes != nullptr &&
+              std::strcmp(read.notes[0], "first run") == 0 &&
+              std::strcmp(read.notes[1], "resumed from step 4194304") == 0);
+    Check("metadata v1: the getters agree",
+          nanochat_checkpoint_metadata_stage(&read) == NANOCHAT_STAGE_SFT &&
+              nanochat_checkpoint_metadata_step(&read) ==
+                  static_cast<int64_t>(facts.step) &&
+              nanochat_checkpoint_metadata_world_size(&read) == 8 &&
+              nanochat_checkpoint_metadata_config_json(&read) ==
+                  read.config_json);
+  }
+  nanochat_checkpoint_free(owner);
+
+  // The flat accessors are nil-safe, so a caller that mirrors only the scalars
+  // needs no null test of its own.
+  Check("metadata getters accept a null block",
+        nanochat_checkpoint_metadata_stage(nullptr) == 0 &&
+            nanochat_checkpoint_metadata_step(nullptr) == 0 &&
+            nanochat_checkpoint_metadata_world_size(nullptr) == 0 &&
+            nanochat_checkpoint_metadata_config_json(nullptr) == nullptr);
+
+  // An unreadable path. The struct keeps every value it had, and no handle is
+  // returned, so a caller cannot see a half-filled block (design decision D7).
+  const std::string absent_path = TempPath("capi_metadata_absent.ckpt");
+  nanochat_checkpoint* absent_owner = nullptr;
+  nanochat_checkpoint_metadata absent = {};
+  absent.schema = -1;
+  absent.stage = -1;
+  absent.step = -1;
+  absent.world_size = -1;
+  absent.precision = -1;
+  absent.note_count = -1;
+  Check("metadata: a missing file fails",
+        nanochat_checkpoint_metadata_read(absent_path.c_str(), &absent_owner,
+                                          &absent) == NANOCHAT_STATUS_ERROR);
+  Check("metadata: a missing file leaves no owner", absent_owner == nullptr);
+  Check("metadata: a missing file fills nothing",
+        absent.schema == -1 && absent.stage == -1 && absent.step == -1 &&
+            absent.world_size == -1 && absent.precision == -1 &&
+            absent.config_json == nullptr && absent.tokenizer_id == nullptr &&
+            absent.note_count == -1);
+  Check("metadata: a missing file names the failure",
+        std::strlen(nanochat_last_error()) > 0);
+
+  // A malformed file: the version 1 header with a metadata word count above the
+  // 64 KiB block cap, which is a hard error before any word is read.
+  const std::string malformed_path = TempPath("capi_metadata_malformed.ckpt");
+  std::FILE* malformed_file = std::fopen(malformed_path.c_str(), "wb");
+  Check("metadata malformed: file opens", malformed_file != nullptr);
+  if (malformed_file != nullptr) {
+    const char bytes[16] = {'N', 'C', 'H', 'K', 'P', 'T', '0',  '1',
+                            1,   0,   0,   0,   0,   0,   0x10, 0x00};
+    std::fwrite(bytes, 1, sizeof(bytes), malformed_file);
+    std::fclose(malformed_file);
+  }
+  nanochat_checkpoint* malformed_owner = nullptr;
+  nanochat_checkpoint_metadata malformed = {};
+  malformed.stage = -1;
+  malformed.step = -1;
+  malformed.world_size = -1;
+  malformed.precision = -1;
+  malformed.note_count = -1;
+  Check("metadata: a malformed file fails",
+        nanochat_checkpoint_metadata_read(malformed_path.c_str(),
+                                          &malformed_owner,
+                                          &malformed) == NANOCHAT_STATUS_ERROR);
+  Check("metadata: a malformed file leaves no owner",
+        malformed_owner == nullptr);
+  Check("metadata: a malformed file fills nothing",
+        malformed.schema == 0 && malformed.stage == -1 &&
+            malformed.step == -1 && malformed.world_size == -1 &&
+            malformed.precision == -1 && malformed.config_json == nullptr &&
+            malformed.tokenizer_id == nullptr && malformed.note_count == -1);
+  nanochat_checkpoint_free(malformed_owner);
+
+  // A bad magic names the failure too: the metadata read never guesses a
+  // layout for a legacy `NCMDL001` file.
+  const std::string legacy_path = TempPath("capi_metadata_legacy.ckpt");
+  std::FILE* legacy_file = std::fopen(legacy_path.c_str(), "wb");
+  Check("metadata legacy: file opens", legacy_file != nullptr);
+  if (legacy_file != nullptr) {
+    const char bytes[16] = {'N', 'C', 'M', 'D', 'L', '0', '0', '1',
+                            0,   0,   0,   0,   0,   0,   0,   0};
+    std::fwrite(bytes, 1, sizeof(bytes), legacy_file);
+    std::fclose(legacy_file);
+  }
+  nanochat_checkpoint* legacy_owner = nullptr;
+  nanochat_checkpoint_metadata legacy = {};
+  Check("metadata: a legacy model file fails",
+        nanochat_checkpoint_metadata_read(legacy_path.c_str(), &legacy_owner,
+                                          &legacy) == NANOCHAT_STATUS_ERROR);
+  Check("metadata: a legacy model file leaves no owner",
+        legacy_owner == nullptr);
+  nanochat_checkpoint_free(legacy_owner);
 }
 
 int main(int argc, char** argv) {
@@ -1113,7 +1376,8 @@ int main(int argc, char** argv) {
 
   CheckSandboxRule();
   CheckCheckpointContainer();
-  CheckCheckpointRejectsVersionOne();
+  CheckCheckpointRejectsTruncatedVersionOne();
+  CheckCheckpointMetadata();
   CheckDeviceEnumeration();
   CheckParams();
   CheckHarnessCheckpoint();

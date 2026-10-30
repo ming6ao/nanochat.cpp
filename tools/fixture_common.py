@@ -38,6 +38,7 @@ COMMANDS = (
     "chat",
     "api",
     "numerics",
+    "checkpoint",
 )
 
 #: The usage line for the merged generator.

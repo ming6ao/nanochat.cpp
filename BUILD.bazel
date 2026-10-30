@@ -82,7 +82,9 @@ config_setting(
 # are wired into `//src:all` and `//tests:all` by their owning packages, so they
 # are aggregated here without the root graph referencing a target that does not
 # exist yet. A genuinely new package (a new directory with its own BUILD file)
-# is the only case that would add a label to this list.
+# is the only case that would add a label to this list. The two example
+# packages are that case: each is a new directory, so each `//examples/<x>:all`
+# rides here next to the package suites below (docs/examples.md).
 test_suite(
     name = "all_tests",
     tests = [
@@ -92,6 +94,8 @@ test_suite(
         "//backends/cuda/kernels:all",
         "//bindings:all",
         "//dev/kernels:all",
+        "//examples/checkpoint_roundtrip:all",
+        "//examples/hello_world:all",
         "//notebooks:all",
         "//python:all",
         "//src:all",

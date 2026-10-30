@@ -23,11 +23,13 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <limits>
 #include <memory>
 #include <string>
 #include <utility>
 #include <vector>
 
+#include "nanochat/checkpoint_metadata.h"
 #include "nanochat/data.h"
 #include "nanochat/dataloader.h"
 #include "nanochat/device_profile.h"
@@ -443,32 +445,84 @@ bool LoadLegacyModel(Model* model, const std::string& path) {
   return true;
 }
 
+// True when the two run configs are the same. The comparison is made on the
+// metadata words of each config, through `VisitConfig`, so a `Config` field
+// added later is covered without a second list of members and without a drift
+// test (open decision O4).
+bool SameConfig(Config left, Config right) {
+  ConfigBlock recorded(left);
+  ConfigBlock runtime(right);
+  return recorded.Write() == runtime.Write();
+}
+
 }  // namespace
 
 bool Checkpointer::SaveModel(const Model& model, const std::string& path) {
-  Checkpoint checkpoint;
-  CollectModelRecords(model, &checkpoint);
-  return checkpoint.Save(path);
+  return SaveModel(model, nullptr, CheckpointSaveOptions(), path);
 }
 
 bool Checkpointer::SaveModel(const Model& model, const Optimizer& optimizer,
                              const std::string& path) {
-  return SaveModel(model, optimizer, 0, path);
+  return SaveModel(model, &optimizer, CheckpointSaveOptions(), path);
 }
 
 bool Checkpointer::SaveModel(const Model& model, const Optimizer& optimizer,
                              int step, const std::string& path) {
+  CheckpointSaveOptions options;
+  options.step = step > 0 ? static_cast<std::uint64_t>(step) : 0;
+  return SaveModel(model, &optimizer, options, path);
+}
+
+bool Checkpointer::SaveModel(const Model& model, const Optimizer* optimizer,
+                             const CheckpointSaveOptions& options,
+                             const std::string& path, std::string* error) {
+  auto fail = [error](const std::string& message) {
+    if (error != nullptr) *error = message;
+    return false;
+  };
+
   Checkpoint checkpoint;
   CollectModelRecords(model, &checkpoint);
   // The AdamW moments and Muon buffers ride beside the parameters
   // (docs/post-training.md section 7).
-  SaveOptimizerState(optimizer, &checkpoint);
-  // The driver's step rides in the same section, so a resume continues the
+  if (optimizer != nullptr) SaveOptimizerState(*optimizer, &checkpoint);
+  // The step also rides in the optimizer section, so a resume continues the
   // schedule from it instead of restarting the warmup
   // (docs/training-seam.md section 10). A step of zero means no step is known;
-  // the record is then omitted and the load restarts at 1.
-  if (step > 0) SaveOptimizerStep(step, &checkpoint);
-  return checkpoint.Save(path);
+  // the record and the metadata field are then both omitted.
+  if (options.step > 0) {
+    if (options.step > static_cast<std::uint64_t>(
+                          std::numeric_limits<int>::max())) {
+      return fail("the step does not fit the optimizer step record: " + path);
+    }
+    SaveOptimizerStep(static_cast<int>(options.step), &checkpoint);
+  }
+
+  // Fill the metadata block from what the model and the build know, plus what
+  // only the caller knows (stage A.6, open decision O1).
+  CheckpointMetadata metadata;
+  metadata.stage = options.stage;
+  metadata.step = options.step;
+  metadata.world_size =
+      options.world_size > 0 ? static_cast<std::uint32_t>(options.world_size)
+                             : 1u;
+  metadata.precision = options.precision;
+  metadata.config = model.config();
+  metadata.tokenizer_id = options.tokenizer_id;
+  metadata.git_revision = options.git_revision;
+  metadata.notes = options.notes;
+  // `created_utc` stays empty: a save has to be reproducible, and rule 4 of
+  // `nanochat/checkpoint_metadata.h` makes the field informational, so a tool
+  // that wants a stamp writes one instead of the trainer inventing one here.
+  std::string config_error;
+  if (!metadata.config.Validate(&config_error)) {
+    return fail("the model config is invalid (" + config_error + "): " + path);
+  }
+  checkpoint.set_metadata(std::move(metadata));
+  if (!checkpoint.Save(path)) {
+    return fail("cannot write the checkpoint container: " + path);
+  }
+  return true;
 }
 
 bool Checkpointer::LoadModel(Model* model, const std::string& path) {
@@ -483,9 +537,13 @@ bool Checkpointer::LoadModel(Model* model, Optimizer* optimizer,
 bool Checkpointer::LoadModel(Model* model, Optimizer* optimizer, int* step,
                              const std::string& path) {
   if (model == nullptr) return false;
-  // A legacy `NCMDL001` file holds parameters only, so the optimizer state and
-  // the step stay unchanged (docs/model.md).
-  if (!IsCheckpointContainer(path)) return LoadLegacyModel(model, path);
+  // One value routes the read (docs/checkpoint-metadata-and-examples-plan.md
+  // section 2.2). A legacy `NCMDL001` file holds parameters only, so the
+  // optimizer state and the step stay unchanged (docs/model.md).
+  const CheckpointFormat format = DetectFormat(path);
+  if (format == CheckpointFormat::kLegacyModel) {
+    return LoadLegacyModel(model, path);
+  }
   Checkpoint checkpoint;
   std::string error;
   // A caller that passes no optimizer reads the parameters only
@@ -493,6 +551,16 @@ bool Checkpointer::LoadModel(Model* model, Optimizer* optimizer, int* step,
   // optimizer section, so a step-only caller reads the section too.
   const bool with_optimizer_state = (optimizer != nullptr) || (step != nullptr);
   if (!checkpoint.Load(path, &error, with_optimizer_state)) return false;
+  // A version 1 file records the run config it was written with, so a mismatch
+  // with the runtime model fails here, before a kernel reads a wrong-shape
+  // weight (stage A.6). A version 0 file carries no config, so it cannot be
+  // compared and loads as before.
+  if (format == CheckpointFormat::kContainerV1 &&
+      !SameConfig(checkpoint.metadata().config, model->config())) {
+    std::fprintf(stderr, "checkpoint: the recorded run config differs: %s\n",
+                 path.c_str());
+    return false;
+  }
   for (const ParamView& view : model->params()) {
     const TensorRecord* record =
         checkpoint.Find(view.name != nullptr ? view.name : "");

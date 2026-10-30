@@ -31,7 +31,7 @@ Status values:
 | D8 | `equivalent` | harness | no batch prefetch overlap during backward |
 | D9 | `closed` | optimizer | C++ schedule warmdown count matches Python's `round` (half to even) |
 | E1 | `open` | evaluation | sampled modes use the C++ RNG, not torch; greedy is bit-identical |
-| E3 | `equivalent` | evaluation | reference checkpoints converted torch -> NCHKPT01 |
+| E3 | `equivalent` | evaluation | reference checkpoints converted torch -> the checkpoint container |
 | E4 | `equivalent` | evaluation | CORE and chat scoring use the C++ forward with reference task logic |
 | E5 | `out-of-scope` | evaluation | no distributed evaluation |
 | P1 | `open` | post-training | calculator tool absent in the MVP; the model samples its own python blocks |
@@ -316,7 +316,7 @@ The regression test is `TestWarmdownRounding` in `src/optim_test.cc`. Evidence:
 ### E3 — Reference checkpoint conversion
 
 The reference saves checkpoints as torch `.pt` state dictionaries; the C++
-runtime loads only the NCHKPT01 container. `tools/convert_checkpoint.py` and
+runtime loads only the checkpoint container. `tools/convert_checkpoint.py` and
 `python/nanochat_cpp/checkpoint.py` remap the reference parameter names and
 apply the dtype policy, so `EvalBpb` and `score_main` can load a released base
 or SFT checkpoint. The conversion re-lays the reference weight values into the

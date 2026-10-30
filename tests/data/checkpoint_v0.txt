@@ -1,0 +1,103 @@
+checkpoint_v0.ckpt -- the version 0 pin for the checkpoint metadata work
+=========================================================================
+
+What this file is
+-----------------
+
+`tests/data/checkpoint_v0.ckpt` holds the bytes the *unchanged* version 0
+writer produced, captured before anything moved `Checkpoint::Save` in
+`src/data.cc`. It is stage A.2 of
+`docs/checkpoint-metadata-and-examples-plan.md`: the compatibility guard needs
+a version 0 container that came from the old code path, not from the new one.
+`//tests:checkpoint_compat_test` reads this file with the shipped reader and
+asserts the table below, so a change that moves a version 0 byte fails in the
+tree instead of on a Hub artifact.
+
+The binary carries no header comment, so this note is the durable record the
+C++ test cites.
+
+How it was generated
+--------------------
+
+    python3 tools/dump_fixtures.py checkpoint
+
+`tools/dump_fixtures.py` (kind `checkpoint`) builds two fixed-seed records and
+hands them to `nanochat_cpp.checkpoint.write_checkpoint`, which calls
+`nanochat_checkpoint_write`, which calls `Checkpoint::Save` in `src/data.cc`.
+No layout is copied into Python: the magic, the version word, the dtype codes,
+and the record framing stay single-sourced in `src/data.cc`
+(docs/checkpoint-format.md).
+
+The seed is `20250601` (`random.Random(20250601)`), one `uniform(-1.0, 1.0)`
+value per element.
+
+Tree state at generation: the public header nodes had landed
+(`include/nanochat/fields.h`, `include/nanochat/checkpoint_metadata.h`) but
+their implementation (`src/fields.cc`, `VisitConfig`) lands in `src-core`, so
+the shared library still had a few unresolved symbols and could not be
+dlopen-ed. A throwaway stub outside the repository supplied those symbols for
+this one command only. None of them is reachable from the write path -- the
+version 0 writer never visits a metadata block -- so the bytes are the bytes of
+the unmodified writer. Re-running the plain command above after `src-core`
+lands must reproduce this file byte for byte; use that run to confirm the pin,
+never to replace it.
+
+Records
+-------
+
+    name               dtype      shape   elements  payload bytes
+    fixture/weights    float32    (2, 3)         6              24
+    fixture/bias       bfloat16   (3,)           3               6
+
+A float32 element is the seed value rounded to the nearest fp32. A bfloat16
+element is the round-to-nearest-even narrowing of that same fp32 value, so the
+two records describe one number stream.
+
+Payload checksums (FNV-1a, 64 bit: offset basis 0xcbf29ce484222325, prime
+0x100000001b3, over the payload bytes in record order):
+
+    fixture/weights    0x7610708711193cf0
+    fixture/bias       0x702bf156049a2035
+    concatenated       0x41273f0935abaaa8   (30 payload bytes)
+
+Payload bytes:
+
+    fixture/weights    3fe1043f4eb34d3f79f693bdd1eff7bea13c34bf62b1c6be
+    fixture/bias       34bf933ef23e
+
+Container facts
+---------------
+
+    file size          145 bytes
+    file sha256
+        f7a5b88723bc5f50787eddf63f6166d36df42df3217c4f078a97bb7e1f6c3a27
+        (as 32-bit words: f7a5b887 23bc5f50 787eddf6 3f6166d3
+         6df42df3 217c4f07 8a97bb7e 1f6c3a27)
+    magic              NCHKPT01 (ASCII, 8 bytes, offset 0)
+    version word       0 (uint32, offset 8) -- a version 0 container
+    parameter count    2 (uint32, offset 12)
+    optimizer count    0 (uint32, after the records) -- parameter-only file
+    metadata block     none: the version 0 layout has no metadata section
+    attribute records  none: both records carry an attribute count of 0
+
+The record framing is the one in docs/checkpoint-format.md section 6: a uint16
+name length, the raw name bytes, the uint32 storage dtype code, the uint32
+rank, the int64 dimensions, the uint32 attribute count, the uint64 payload byte
+count, and the payload.
+
+Determinism
+-----------
+
+Generation is deterministic: the seed is fixed, and four runs (three into a
+scratch path while checking, plus the run that wrote this directory) produced
+byte-identical files with sha256 f7a5b887...6c3a27. A non-deterministic fixture
+would make the compat test flaky, so a run that differs is a bug in the
+generator or in the writer, not a reason to re-pin the file.
+
+Do not regenerate
+-----------------
+
+This file pins the version 0 writer. Once `src/data.cc` writes a version word
+above 0, the plain command above produces version 1 bytes, and writing them
+here would delete the guard this file exists to provide. A version 1 fixture,
+if one is wanted, is a second file with its own name and its own note.

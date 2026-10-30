@@ -6,8 +6,10 @@
 #include <string>
 #include <vector>
 
+#include "nanochat/checkpoint_metadata.h"
 #include "nanochat/config.h"
 #include "nanochat/dataloader.h"
+#include "nanochat/mfu.h"
 #include "nanochat/optim.h"
 #include "nanochat/scheduler.h"
 #include "src/distributed.h"
@@ -99,6 +101,29 @@ TrainConfig TrackThreeBaseline();
 // one-rank update. A `world_size` of 1 leaves the accumulation scale unchanged.
 float DistributedBackwardScale(int grad_accum, int world_size);
 
+// What a save records beside the parameters
+// (docs/checkpoint-metadata-and-examples-plan.md sections 3 and 4, open
+// decision O1). The three `SaveModel` overloads that already existed fill this
+// with defaults, so no call site changes; a caller that knows more than a path
+// passes the full form instead. `config` is not here: `SaveModel` always
+// records `model.config()`, because the run config is the model's, and a
+// second copy could drift.
+struct CheckpointSaveOptions {
+  Stage stage = Stage::kBase;
+  // The 1-based optimizer step. Zero means no step is known, so the step is
+  // omitted from both the metadata block and the optimizer section.
+  std::uint64_t step = 0;
+  // The data-parallel world size the step was taken with. One for a single
+  // process, which is what every non-mesh caller is.
+  int world_size = 1;
+  // The build's compute precision, informational only (open decision O2): the
+  // recorded value never changes a load decision.
+  ComputePrecision precision = BuildComputePrecision();
+  std::string tokenizer_id;  // The tokenizer artifact name or its hash.
+  std::string git_revision;  // Informational only.
+  std::vector<std::string> notes;
+};
+
 // Saves and loads a model's parameter set through the self-describing
 // `Checkpoint` container (docs/model.md). This is the only checkpoint format
 // the project writes. `LoadModel` also reads a legacy `NCMDL001` file.
@@ -119,8 +144,20 @@ class Checkpointer {
   static bool SaveModel(const Model& model, const Optimizer& optimizer,
                         int step, const std::string& path);
 
+  // The full form, and what the three overloads above call. `optimizer` may be
+  // null for a parameter-only file, and `options` carries the run facts only
+  // the caller knows (open decision O1). `SaveModel` fills the step, the
+  // precision, the world size, and the config, so the metadata block is
+  // complete without a second call (stage A.6). On failure `*error` names the
+  // reason when it is not null.
+  static bool SaveModel(const Model& model, const Optimizer* optimizer,
+                        const CheckpointSaveOptions& options,
+                        const std::string& path, std::string* error = nullptr);
+
   // Loads `path` and copies every matching record into the model parameters.
-  // Returns false when the file is missing or malformed.
+  // Returns false when the file is missing or malformed, and when a version 1
+  // file recorded a run config that differs from `model->config()`: a mismatch
+  // fails here with a message instead of at the first GEMM (stage A.6).
   static bool LoadModel(Model* model, const std::string& path);
 
   // Also restores the optimizer state when the file carries it. A

@@ -32,6 +32,7 @@
 #include <utility>
 #include <vector>
 
+#include "nanochat/checkpoint_metadata.h"
 #include "nanochat/config.h"
 #include "nanochat/data.h"
 #include "nanochat/dataloader.h"
@@ -52,8 +53,11 @@
 namespace {
 
 // The C ABI version. Bump this string on every change to the surface or to a
-// mirrored struct; docs/python.md section 13 names that rule.
-constexpr char kNanochatVersion[] = "0.12.0";
+// mirrored struct; docs/python.md section 13 names that rule. 0.13.0 adds the
+// metadata surface: `nanochat_checkpoint_metadata_read`, the three flat
+// accessors, the config JSON accessor, and the mirrored
+// `nanochat_checkpoint_metadata` struct.
+constexpr char kNanochatVersion[] = "0.13.0";
 
 // The message for the current thread. A `thread_local` string keeps the
 // pointer from `nanochat_last_error` valid until the next failure on this
@@ -228,6 +232,13 @@ struct nanochat_checkpoint {
   std::vector<nanochat_record> records;
   std::vector<nanochat_record> optimizer_state;
   std::vector<nanochat_record> attributes;
+  // The metadata block that `nanochat_checkpoint_metadata_read` returns, plus
+  // the storage that the `const char*` fields of the flat C struct point into.
+  // One handle owns all of it, so a caller releases the block and the strings
+  // with a single `nanochat_checkpoint_free`.
+  nanochat::CheckpointMetadata metadata;
+  std::string config_json;
+  std::vector<const char*> note_pointers;
 };
 
 namespace {
@@ -1216,6 +1227,15 @@ void nanochat_tokenizer_free(nanochat_tokenizer* tokenizer) {
 }
 
 // --- Checkpoint container -------------------------------------------------
+//
+// Both container versions reach this surface. The writer emits the version 1
+// layout, which adds the metadata section between the header and the parameter
+// count; the record framing is byte identical to version 0, so a reader of
+// either version goes through the same `nanochat_checkpoint_read` and the same
+// `nanochat_record` mirror. `nanochat_checkpoint_metadata_read` reports the run
+// metadata: a version 1 file carries it, and a version 0 file reads as the
+// defaults of `CheckpointMetadata`, so the caller always has every field and
+// needs no presence test.
 
 namespace {
 
@@ -1358,6 +1378,96 @@ const char* StorageDTypeName(nanochat::DType dtype) {
 constexpr nanochat::DType kStorageDTypes[] = {
     nanochat::DType::kFp32, nanochat::DType::kBf16, nanochat::DType::kInt8};
 
+// Appends `value` as a JSON string literal. A config string holds an `SL`
+// window pattern in practice, but the escape is unconditional so a future
+// string field cannot produce a document a JSON parser rejects.
+void AppendJsonString(std::string* out, const std::string& value) {
+  out->push_back('"');
+  for (const char raw : value) {
+    const unsigned char byte = static_cast<unsigned char>(raw);
+    switch (raw) {
+      case '"':
+        out->append("\\\"");
+        break;
+      case '\\':
+        out->append("\\\\");
+        break;
+      case '\n':
+        out->append("\\n");
+        break;
+      case '\r':
+        out->append("\\r");
+        break;
+      case '\t':
+        out->append("\\t");
+        break;
+      default:
+        if (byte < 0x20) {
+          char escape[8];
+          std::snprintf(escape, sizeof(escape), "\\u%04x",
+                        static_cast<unsigned int>(byte));
+          out->append(escape);
+        } else {
+          out->push_back(raw);
+        }
+        break;
+    }
+  }
+  out->push_back('"');
+}
+
+// Appends one `"key":` pair header, with the separating comma after the first
+// pair, so the object is built in one readable sequence.
+void AppendJsonKey(std::string* out, const char* key, bool first) {
+  if (!first) out->push_back(',');
+  out->push_back('"');
+  out->append(key);
+  out->append("\":");
+}
+
+// The nested run config of a metadata block as one JSON object. A binding
+// decodes it with the JSON parser it already has, so a new `Config` field needs
+// no new C function (docs/checkpoint-metadata-and-examples-plan.md section 4).
+//
+// The shape is `nanochat.config.v1`: one key per `nanochat::Config` member, in
+// the declaration order of `include/nanochat/config.h`, and nothing else. There
+// is no schema key inside the object, because a caller reads every key it knows
+// and ignores the rest, which is the same rule the metadata block itself
+// follows. The object is compact (no whitespace), so a byte comparison in a
+// test stays readable contract.
+std::string ConfigJson(const nanochat::Config& config) {
+  std::string json;
+  json.reserve(256);
+  json.push_back('{');
+  AppendJsonKey(&json, "num_layers", true);
+  json.append(std::to_string(config.num_layers));
+  AppendJsonKey(&json, "num_heads", false);
+  json.append(std::to_string(config.num_heads));
+  AppendJsonKey(&json, "num_kv_heads", false);
+  json.append(std::to_string(config.num_kv_heads));
+  AppendJsonKey(&json, "hidden_dim", false);
+  json.append(std::to_string(config.hidden_dim));
+  AppendJsonKey(&json, "seq_len", false);
+  json.append(std::to_string(config.seq_len));
+  AppendJsonKey(&json, "vocab_size", false);
+  json.append(std::to_string(config.vocab_size));
+  AppendJsonKey(&json, "padded_vocab_size", false);
+  json.append(std::to_string(config.padded_vocab_size));
+  // Nine significant digits round-trip a `float`, so a decoder that widens the
+  // value to a double gets the stored number back exactly.
+  AppendJsonKey(&json, "rope_base", false);
+  char rope_base[32];
+  std::snprintf(rope_base, sizeof(rope_base), "%.9g",
+                static_cast<double>(config.rope_base));
+  json.append(rope_base);
+  AppendJsonKey(&json, "window_pattern", false);
+  AppendJsonString(&json, config.window_pattern);
+  AppendJsonKey(&json, "value_embedding", false);
+  json.append(config.value_embedding ? "true" : "false");
+  json.push_back('}');
+  return json;
+}
+
 }  // namespace
 
 nanochat_status nanochat_checkpoint_dtype(int32_t index, const char** name,
@@ -1382,6 +1492,11 @@ nanochat_status nanochat_checkpoint_dtype(int32_t index, const char** name,
   });
 }
 
+// Writes both record lists to `path` in the current container layout. The
+// container writer emits version 1, so the file carries the metadata section
+// with the default run facts; there is no separate version 0 writer and no
+// migration tool, because the reader accepts an older file and the next save
+// upgrades it.
 nanochat_status nanochat_checkpoint_write(const char* path,
                                           const nanochat_record* records,
                                           int64_t record_count,
@@ -1436,5 +1551,92 @@ nanochat_status nanochat_checkpoint_read(const char* path,
 }
 
 void nanochat_checkpoint_free(nanochat_checkpoint* owner) { delete owner; }
+
+// The metadata block of the container
+// (docs/checkpoint-metadata-and-examples-plan.md sections 4 and 5). The read
+// takes the parameter-only mode of `Checkpoint::Load`, so the optimizer records
+// are never parsed, and it drops the parameter payloads once the block is
+// copied, because a caller that asks for the run facts keeps nothing else.
+// Nothing reaches `*out` or `*owner` until the whole file has been read, so a
+// failure leaves the caller's struct exactly as it was (design decision D7: no
+// partial load).
+nanochat_status nanochat_checkpoint_metadata_read(
+    const char* path, nanochat_checkpoint** owner,
+    nanochat_checkpoint_metadata* out) {
+  return Guard(
+      "nanochat_checkpoint_metadata_read", NANOCHAT_STATUS_ERROR, [&]() {
+        if (path == nullptr || owner == nullptr || out == nullptr) {
+          throw std::invalid_argument("path, owner, or out is null");
+        }
+        std::unique_ptr<nanochat_checkpoint> handle(new nanochat_checkpoint());
+        std::string error;
+        if (!handle->checkpoint.Load(path, &error,
+                                     /*with_optimizer_state=*/false)) {
+          throw std::runtime_error("cannot read checkpoint metadata: " + error);
+        }
+        // Both container versions are accepted. A version 1 file fills
+        // the block from its metadata section; a version 0 file has
+        // none, so the copy below is exactly the member initializers of
+        // `CheckpointMetadata` and every field stays defined. The
+        // returned strings point into `handle->metadata`, which the
+        // handle owns until the free.
+        handle->metadata = handle->checkpoint.metadata();
+        handle->checkpoint.tensors().clear();
+        handle->checkpoint.ClearOptimizerState();
+        handle->config_json = ConfigJson(handle->metadata.config);
+        handle->note_pointers.reserve(handle->metadata.notes.size());
+        for (const std::string& note : handle->metadata.notes) {
+          handle->note_pointers.push_back(note.c_str());
+        }
+
+        nanochat_checkpoint_metadata filled{};
+        filled.schema = static_cast<int32_t>(handle->metadata.schema);
+        // The C enums spell the stored values out, so the cast is the
+        // whole mapping and a binding holds no C++ enum (O2 and O3).
+        filled.stage = static_cast<int32_t>(handle->metadata.stage);
+        filled.step = static_cast<int64_t>(handle->metadata.step);
+        filled.world_size = static_cast<int64_t>(handle->metadata.world_size);
+        filled.precision = static_cast<int32_t>(handle->metadata.precision);
+        filled.config_json = handle->config_json.c_str();
+        filled.tokenizer_id = handle->metadata.tokenizer_id.c_str();
+        filled.git_revision = handle->metadata.git_revision.c_str();
+        filled.created_utc = handle->metadata.created_utc.c_str();
+        filled.notes = handle->note_pointers.empty()
+                           ? nullptr
+                           : handle->note_pointers.data();
+        filled.note_count = static_cast<int32_t>(handle->note_pointers.size());
+
+        nanochat_checkpoint* result = handle.release();
+        *owner = result;
+        *out = filled;
+        return NANOCHAT_STATUS_OK;
+      });
+}
+
+// The flat accessors. Each is nil-safe, so a caller that mirrors only the
+// scalars reads them through a function instead of an offset, and a null
+// `meta` is a zero rather than a crash.
+int32_t nanochat_checkpoint_metadata_stage(
+    const nanochat_checkpoint_metadata* meta) {
+  return meta != nullptr ? meta->stage : 0;
+}
+
+int64_t nanochat_checkpoint_metadata_step(
+    const nanochat_checkpoint_metadata* meta) {
+  return meta != nullptr ? meta->step : 0;
+}
+
+int64_t nanochat_checkpoint_metadata_world_size(
+    const nanochat_checkpoint_metadata* meta) {
+  return meta != nullptr ? meta->world_size : 0;
+}
+
+// The nested config of `meta` as one JSON object. The pointer is the same one
+// the read returned, so its lifetime is the owning handle's, and the getter
+// adds no copy and no allocation.
+const char* nanochat_checkpoint_metadata_config_json(
+    const nanochat_checkpoint_metadata* meta) {
+  return meta != nullptr ? meta->config_json : nullptr;
+}
 
 }  // extern "C"

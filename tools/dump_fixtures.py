@@ -3,9 +3,9 @@
 
 One module holds every fixture kind (``docs/script-consolidation-plan.md``
 section 7, P4). The kinds are ``oracle``, ``train``, ``rl``, ``generate``,
-``eval``, ``plan``, ``tokenizer``, ``loader``, ``chat``, ``api``, and
-``numerics``. Run ``python3 tools/dump_fixtures.py <kind> [options]``. Each
-kind keeps its own ``--help`` text.
+``eval``, ``plan``, ``tokenizer``, ``loader``, ``chat``, ``api``, ``numerics``,
+and ``checkpoint``. Run ``python3 tools/dump_fixtures.py <kind> [options]``.
+Each kind keeps its own ``--help`` text.
 
 The module imports no third-party package at import time. Each kind imports
 its own reference package, so a kind that does not touch PyTorch stays fast.
@@ -3350,7 +3350,161 @@ if _command == 'numerics':
         return 0
     _selected_main = main
 
+if _command == 'checkpoint':
+    __doc__ = textwrap.dedent("""\
+        Write the version 0 checkpoint fixture, ``tests/data/checkpoint_v0.ckpt``.
 
+        The fixture is the *version 0 pin* for the metadata work: it records the
+        bytes the current C writer (``src/data.cc``) produces, taken before
+        anything changes that writer
+        (docs/checkpoint-metadata-and-examples-plan.md stage A.2).
+        ``//tests:checkpoint_compat_test`` reads this file with the current reader
+        and asserts the table below, so a change that moves a version 0 byte fails
+        in the tree instead of on a Hub artifact.
+
+        The bytes come from ``nanochat_cpp.checkpoint.write_checkpoint``, which
+        calls the C writer through ``nanochat_checkpoint_write``. This script holds
+        no copy of the layout: the magic, the version, the dtype codes, and the
+        record framing stay single-sourced in ``src/data.cc`` (docs/model.md).
+
+        What it holds
+        -------------
+        Two parameter records and no optimizer-state section, drawn from the fixed
+        seed ``20250601`` (``random.Random(SEED)``), one value per element, each
+        uniform in ``[-1, 1)``::
+
+            name             dtype      shape   elements  payload bytes
+            fixture/weights  float32    (2, 3)  6         24
+            fixture/bias     bfloat16   (3,)    3         6
+
+        A float32 element is the value rounded to the nearest fp32. A bfloat16
+        element is the round-to-nearest-even narrowing of that same fp32 value, so
+        the two dtypes describe one number stream.
+
+        Expected payload checksums
+        --------------------------
+        FNV-1a, 64 bit (offset basis ``0xcbf29ce484222325``, prime
+        ``0x100000001b3``), the digest the numerics trace and the mesh runtime
+        already use, over the payload bytes in record order::
+
+            fixture/weights   0x7610708711193cf0
+            fixture/bias      0x702bf156049a2035
+            concatenated      0x41273f0935abaaa8
+
+        The generation is deterministic: two runs produce identical bytes, and the
+        seed is fixed, so the committed file matches these checksums.
+
+        Run it from anywhere; the script locates the repository root from
+        ``__file__``::
+
+            python3 tools/dump_fixtures.py checkpoint
+            python3 tools/dump_fixtures.py checkpoint --out /tmp/checkpoint_v0.ckpt
+
+        The script imports no third-party package: the record set is built with
+        ``struct`` and ``random``, and the C library owns the container bytes.
+
+    """)
+    import argparse
+    import random
+    import struct
+    from pathlib import Path
+
+    #: The fixture seed. A fixed seed keeps the payload bytes identical on every
+    #: host, so the committed file and the checksums above stay valid.
+    SEED = 20250601
+
+    #: The records, in record order: name, storage dtype, shape.
+    RECORDS = (
+        ("fixture/weights", "float32", (2, 3)),
+        ("fixture/bias", "bfloat16", (3,)),
+    )
+
+    # FNV-1a, 64 bit: the offset basis and the prime.
+    _FNV_OFFSET = 0xCBF29CE484222325
+    _FNV_PRIME = 0x100000001B3
+    _U64_MASK = 0xFFFFFFFFFFFFFFFF
+
+
+    def _repo_root() -> Path:
+        """The repository root, found from this file."""
+        return Path(__file__).resolve().parents[1]
+
+
+    def _checkpoint_module():
+        """The bridge module that owns the container writer."""
+        import sys
+        sys.path.insert(0, str(_repo_root() / "python"))
+        from nanochat_cpp import checkpoint  # noqa: E402
+        return checkpoint
+
+
+    def fnv1a64(data: bytes) -> int:
+        """The 64-bit FNV-1a digest of ``data``."""
+        digest = _FNV_OFFSET
+        for byte in data:
+            digest = ((digest ^ byte) * _FNV_PRIME) & _U64_MASK
+        return digest
+
+
+    def payload(values: list[float], dtype: str) -> bytes:
+        """The little-endian payload of ``values`` stored as ``dtype``."""
+        if dtype == "float32":
+            return b"".join(struct.pack("<f", value) for value in values)
+        if dtype == "bfloat16":
+            out = bytearray()
+            for value in values:
+                bits = struct.unpack("<I", struct.pack("<f", value))[0]
+                # Round to nearest even on the 16-bit narrowing: add half an ulp
+                # plus the low bit, then drop the low half.
+                bits = (bits + 0x7FFF + ((bits >> 16) & 1)) & 0xFFFFFFFF
+                out += struct.pack("<H", (bits >> 16) & 0xFFFF)
+            return bytes(out)
+        raise SystemExit("unsupported fixture dtype: " + dtype)
+
+
+    def build_records(checkpoint) -> list:
+        """The two fixed-seed records, as the writer's own record type."""
+        rng = random.Random(SEED)
+        records = []
+        for name, dtype, shape in RECORDS:
+            elements = 1
+            for dim in shape:
+                elements *= int(dim)
+            values = [rng.uniform(-1.0, 1.0) for _ in range(elements)]
+            records.append(checkpoint.TensorRecord(
+                name, checkpoint.dtype_code(dtype), shape,
+                payload(values, dtype)))
+        return records
+
+
+    def summarize(records) -> int:
+        """Print the record table and the checksums the fixture pins."""
+        joined = b""
+        for record in records:
+            joined += record.data
+            print(f"{record.name:<16} {record.dtype_name:<8} "
+                  f"{str(record.shape):<7} {len(record.data):>3} bytes  "
+                  f"fnv1a 0x{fnv1a64(record.data):016x}")
+        print(f"{'concatenated':<16} {'':<8} {'':<7} {len(joined):>3} bytes  "
+              f"fnv1a 0x{fnv1a64(joined):016x}")
+        return 0
+
+
+    def main(argv: list[str] | None = None) -> int:
+        parser = argparse.ArgumentParser(description=__doc__)
+        parser.add_argument("--out", default="tests/data/checkpoint_v0.ckpt",
+                            help="the fixture to write (default: %(default)s)")
+        args = parser.parse_args(argv)
+
+        out = Path(args.out)
+        if not out.is_absolute():
+            out = _repo_root() / out
+        checkpoint = _checkpoint_module()
+        records = build_records(checkpoint)
+        checkpoint.write_checkpoint(out, records)
+        print(f"wrote {len(records)} records to {out}")
+        return summarize(records)
+    _selected_main = main
 
 if __name__ == "__main__":
     raise SystemExit(_selected_main(sys.argv[2:]))
