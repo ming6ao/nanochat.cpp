@@ -35,7 +35,7 @@ def find_reference_repo() -> Path:
 
 
 def ensure_reference_on_path() -> Path:
-    """Make ``import nanochat`` work and pin the base data directory."""
+    """Make the reference package importable and pin the base data directory."""
     repo = find_reference_repo()
     if str(repo) not in sys.path:
         sys.path.insert(0, str(repo))

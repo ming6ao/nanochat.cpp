@@ -1,10 +1,9 @@
-"""Supervised fine-tuning data: the reference mixture and the packer.
+"""Supervised fine-tuning data: the mixture and the packer.
 
 This module mirrors ``scripts/chat_sft.py``, ``tasks/smoltalk.py``, and
-``tasks/common.py`` in the PyTorch ``nanochat`` tree. The bridge downloads and
-mixes the datasets, renders each conversation, and packs the rows (docs/
-post-training.md sections 3 and 4). The C++ side receives the token ids and a
-``-1`` target mask.
+``tasks/common.py`` in the PyTorch ``nanochat`` tree. It owns the mixture
+builders, the conversation packer and the renderer call. The C++ side receives
+the token ids and a ``-1`` target mask.
 
 The packer is a pinned mirror of ``sft_data_generator_bos_bestfit``: a
 100-conversation buffer (:data:`PACK_BUFFER_SIZE`), a largest-fit search, BOS
@@ -23,10 +22,17 @@ Validation uses the matching test splits. The reference caps the MMLU test
 split at 5.2K rows and the GSM8K test split at 420 rows, so the validation
 mixture has the same task ratios as the training mixture.
 
-The module is standard-library only at import time. ``numpy``, ``pyarrow``,
-and ``filelock`` load lazily inside the functions that need them. This is the
-same policy as :mod:`nanochat_cpp.tasks`, so the torch-free bridge can import
-this module anywhere.
+The module imports only the standard library (rule 1 of
+``docs/dependency-layering-plan.md`` section 4), so the mixture builders stay
+importable with no extra installed. The datasets arrive through the
+registration seam of :mod:`nanochat_cpp.seam`: a host registers the hub loader
+once (`seam.register_hub_loader`) and these builders reach the Hub through it
+(:class:`SmolTalk` calls it directly, and the MMLU and GSM8K classes reach it
+through :func:`nanochat_cpp.tasks.load_hub_dataset`), never through an import.
+A builder that runs with nothing registered raises
+:class:`nanochat_cpp.seam.MissingAdapter` naming the extra to install, and the
+reference renderer of an SFT parity run lives in the Z2 package of section 5,
+not here.
 """
 
 from __future__ import annotations
@@ -34,7 +40,8 @@ from __future__ import annotations
 import random
 from collections.abc import Iterator
 
-from .tasks import GSM8K, MMLU, Task, load_hub_dataset
+from . import seam
+from .tasks import GSM8K, MMLU, Task
 
 SMOLLTALK_REPO = "HuggingFaceTB/smol-smoltalk"
 MMLU_EPOCHS = 3
@@ -44,12 +51,19 @@ VAL_GSM8K_STOP = 420
 
 
 class SmolTalk(Task):
-    """SmolTalk general conversations (mirrors ``tasks.smoltalk.SmolTalk``)."""
+    """SmolTalk general conversations (mirrors ``tasks.smoltalk.SmolTalk``).
+
+    The conversations come from the registered hub loader
+    (:func:`nanochat_cpp.seam.hub_loader`), which is where ``pyarrow`` and
+    ``filelock`` live. Nothing registered raises
+    :class:`nanochat_cpp.seam.MissingAdapter` naming the extra to install.
+    """
 
     def __init__(self, split, **kwargs) -> None:
         super().__init__(**kwargs)
         assert split in ["train", "test"], "SmolTalk split must be train|test"
-        self.ds = load_hub_dataset(SMOLLTALK_REPO, split=split).shuffle(seed=42)
+        loader = seam.hub_loader()
+        self.ds = loader(SMOLLTALK_REPO, split=split).shuffle(seed=42)
 
     def num_examples(self) -> int:
         return len(self.ds)
