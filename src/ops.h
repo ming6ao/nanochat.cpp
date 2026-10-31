@@ -135,10 +135,10 @@ void AttentionBackward(const AttentionShape& shape, const ComputeType* q,
 
 // ---------------------------------------------------------------------------
 // ResFormer value residual, expressed as a composition (docs/model-and-device-
-// bringup.md section 7.4): a GEMM for the gate dot, the pointwise family for the
-// sigmoid (`kGateMul` with a unit operand), the gate factor (`kScale`) and the
-// per-head broadcast (`kRowScale`), and the caller's accumulating projection for
-// the addition.
+// bringup.md section 7.4): a GEMM for the gate dot, the pointwise family for
+// the sigmoid (`kGateMul` with a unit operand), the gate factor (`kScale`) and
+// the per-head broadcast (`kRowScale`), and the caller's accumulating
+// projection for the addition.
 //
 // `ValueGateForward` computes and saves the gate only: `gate_out[row, kvh] =
 // m * sigmoid(dot(h[row, :kVeGateChannels], gate_w[kvh, :]))`. `ValueGateApply`
