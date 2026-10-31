@@ -28,9 +28,12 @@ four weaker results. State them before the design.
 4. Greedy token identifiers agree exactly on all three targets when the argmax
    margin is large.
 
-The status table in [post-training.md](post-training.md) marks the SFT renderer,
-the SFT packer, the SFT loop, the `rl_step` binary, and the RL fixture as
-**Missing**. Section 6 gives kernel-level coverage only.
+The status table in [post-training.md](post-training.md) now marks the SFT
+renderer, the SFT packer, the SFT loop, the `rl_step` binary, and the RL fixture
+as **Done**. This trace still gives kernel-level coverage only: the SFT leg is
+one masked loss and one gradient norm with no optimizer step, and the RL leg is
+one advantage-weighted step. `docs/parity.md` `P5` cites
+`//tests:sft_step_parity_test`, not this table.
 
 ## 2. What the recon established
 
@@ -104,6 +107,18 @@ The fp8 leg has its own golden, `tests/data/numerics_golden_10l_fp8.bin`, and
 its own bounds. The fp8 CPU leg is exact against that golden, and the fp8
 simulator leg equals the CPU leg. The fp8 device leg compares as follows. The
 values are the design start; replace them from the first device measurement.
+
+Two notes on the table. The `SFT` row is the masked weighted loss and the
+gradient norm of one forward and one backward pass over a synthetic mask. It
+takes no optimizer step, so it does not pin the SFT optimizer arithmetic. The
+SFT optimizer step row (the post-step loss and the gradient norm) is deferred.
+The committed golden is host-pinned: its mirror under
+`models/nanochat-default/fixtures/` carries a digest that
+`//tests:model_isolation_test` pins, so extending the trace takes one
+reference-builder run that updates the golden, the mirror, and the manifest
+together. Section 10 of [sft-parity-plan.md](sft-parity-plan.md) records it as a
+campaign risk. Until that run, the SFT arithmetic evidence is
+`//tests:sft_step_parity_test` against a committed fixture and not this table.
 
 | Stage | Artifact | GPU against the fp8 CPU golden |
 |---|---|---|
@@ -429,7 +444,11 @@ per-merge GPU budget in [AGENTS.md](../AGENTS.md) section 5.5.
 - A cuBLAS version change can change the reduction order. `backends/cuda/gemm.cu`
   uses `CUBLAS_GEMM_DEFAULT`, which is a heuristic. Pin the CUDA toolkit version
   and the cuBLAS version in the tolerance record.
-- Missing code blocks full SFT and full RL coverage.
+- Missing code blocks full SFT and full RL coverage. The SFT leg takes no
+  optimizer step, so the post-step loss and gradient norm are not recorded. The
+  extension is deferred until one reference-builder run can update the golden,
+  the mirror under `models/nanochat-default/fixtures/`, and its manifest
+  together; see `docs/sft-parity-plan.md` section 10.
 - The 11 GB card and the 5 GiB sandbox cap bound the sequence length and the
   vocabulary. Keep `seq_len` at or below 256.
 - The golden file depends on the pinned host thread count, on the tokenizer

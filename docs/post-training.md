@@ -176,9 +176,12 @@ The SFT loop follows the base training loop with these differences:
 The bridge starts SFT as one job. The loop does not depend on fresh model
 output.
 
-Implementation: `TrainLoop` in `src/train.cc` provides the step loop, the
-scheduler, the logger, and checkpointing. The dataset-progress schedule and the
-SFT warm start are not in the tree yet (section 11).
+Implementation: `src/sft_main.cc` runs the packed-row loop, the
+`LrMultiplierForProgress` schedule, the warm start and the `--resume` path, the
+gradient accumulation, the bits-per-byte evaluation on `--val-rows`, and the
+checkpoint write with the `Recipe` block of D7. `TrainLoop` in `src/train.cc`
+still provides the step loop for pretraining, which keeps the step schedule and
+`Scheduler::LrMultiplier`.
 
 ## 5. RL
 
@@ -328,10 +331,10 @@ difference.
 | P1 | `open` | The calculator tool is absent in the MVP; the model samples its own python blocks |
 | P2 | `open` | A file-driven `rl_step` makes the rollouts lag one optimizer step |
 | P3 | `equivalent` | SFT starts from a converted reference base checkpoint |
-| P4 | `open` | SFT data parity: renderer, mixture, and packer match the reference |
-| P5 | `open` | SFT arithmetic parity: loss, gradient, and optimizer trajectory match |
-| P6 | `open` | SFT loop parity: progress schedule, warm start, and checkpoints match |
-| P7 | `open` | SFT validation parity: bits-per-byte and ChatCORE match |
+| P4 | `closed` | SFT data parity (interim name): the renderer, the mixture, and the packer match the reference |
+| P5 | `equivalent` | SFT arithmetic parity (interim name): the loss, the gradient, and the optimizer trajectory match on the CPU backend |
+| P6 | `open` | SFT loop parity: the driver gate has not run; the progress schedule and the momentum it computes are pinned at T0 |
+| P7 | `open` | SFT validation parity: the packed bits-per-byte is pinned; ChatCORE is not measured |
 
 ## 11. Status
 
@@ -354,9 +357,18 @@ changes.
 | SFT conversation renderer (`render_conversation`) | Done | `python/nanochat_cpp/chat.py`; truncates at 2048 tokens |
 | SFT mixture and Python packer | Done | `python/nanochat_cpp/sft_data.py`; `PackedRowStream` mirrors the reference buffer and stop rule |
 | Native packed-row reader for SFT | Done | `src/sft_shard.{h,cc}`; `src/mesh_train.cc` and `sft_main` share it |
-| SFT driver on the packed shard | Partial | `src/sft_main.cc`: no progress schedule, warm start, accumulation, or evaluation |
-| SFT loop with a dataset-progress schedule and a warm start | Missing | `src/train.cc` has a step-based loop |
-| SFT parity rungs P4 to P7 | Open | The fixtures and gates are missing; see `docs/sft-parity-plan.md` |
+| SFT driver on the packed shard | Done | `src/sft_main.cc`: `--warm-start`, `--resume`, `--grad-accum`, `--val-rows`, `--eval-every`, `--eval-tokens`, `--chatcore-every`, and the progress schedule of D1 |
+| SFT loop with a dataset-progress schedule and a warm start | Done | `src/sft_main.cc`: the running maximum of `approx_progress` feeds `LrMultiplierForProgress`; a warm start loads the weights and the moments at step 0 |
+| Recipe block in the checkpoint metadata | Done | `include/nanochat/checkpoint_metadata.h`; `src/fields.cc`; `//src:fields_test`; design decision D7 |
+| Packed-row validation evaluator | Done | `src/eval.cc` `EvaluatePackedRows`; `src/eval_test.cc`; design decision D6 |
+| SFT bridge flags for the warm start and the evaluation cadence | Done | `python/nanochat_cpp/sft.py` `run()` |
+| SFT fixtures | Done | `tests/data/sft_pack_fixture.bin`, `tests/data/sft_step_fixture.bin`, `tests/data/sft_rows_fixture.nchsft`, `tests/data/sft_base_fixture.ckpt`, `tests/data/sft_loop_fixture.bin`; the layout, the settings, and the digests are in `tests/data/sft_fixtures.txt` |
+| SFT fixture load gate | Done | `//tests:sft_fixture_load_test`, T0 |
+| SFT data parity gate (`P4`, run R1) | Done | `//python:sft_data_parity_test` against `tests/data/sft_pack_fixture.bin`, T0 |
+| SFT arithmetic parity gate (`P5`, run R2) | Done at T0 | `//tests:sft_step_parity_test` against `tests/data/sft_step_fixture.bin` and `tests/data/sft_base_fixture.ckpt`; the T1 and T2 legs have not run on this host |
+| SFT schedule parity gate (run R3, schedule half) | Done | `//tests:sft_loop_parity_test` against `tests/data/sft_loop_fixture.bin`, T0 |
+| SFT driver parity gate (`P6` and `P7`, runs R3 and R4) | Built, not run | `//tests:sft_parity_test`; T2 and `manual`, so run it at a wave boundary |
+| SFT parity rungs `P4` to `P7` | `P4` `closed`; `P5` `equivalent` on the CPU backend; `P6` and `P7` `open` | `docs/parity.md`; `docs/sft-parity-plan.md` |
 | RL step binary and the RL parity fixture | Done | `src/rl_step_main.cc`, `tools/dump_fixtures.py rl`, `tests/rl_parity_test.cc` |
 | RL orchestration worker | Done | `src/rl_worker_main.cc`, `python/nanochat_cpp/rl.py` |
 | SFT bridge command | Done | `src/sft_main.cc`; `python/nanochat_cpp/sft.py` |

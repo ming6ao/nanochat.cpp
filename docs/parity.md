@@ -37,10 +37,10 @@ Status values:
 | P1 | `open` | post-training | calculator tool absent in the MVP; the model samples its own python blocks |
 | P2 | `open` | post-training | file-driven `rl_step` makes the rollouts lag one optimizer step |
 | P3 | `equivalent` | post-training | SFT starts from a converted reference base checkpoint |
-| P4 | `open` | post-training | SFT data: the renderer, the mixture, and the packed rows are not yet compared to the reference |
-| P5 | `open` | post-training | SFT arithmetic: the loss, gradient, and optimizer trajectory are not yet compared to the reference |
-| P6 | `open` | post-training | SFT loop: the progress schedule, warm start, and checkpoints are not yet compared to the reference |
-| P7 | `open` | post-training | SFT validation: bits-per-byte and ChatCORE are not yet compared to the reference |
+| P4 | `closed` | post-training | SFT data: the render ids, the mask, the mixture order, and the packed rows match the reference |
+| P5 | `equivalent` | post-training | SFT arithmetic: the loss, gradient, and optimizer trajectory match on the CPU backend, in the floating-point-order sense |
+| P6 | `open` | post-training | SFT loop: the driver gate has not run; the progress schedule, the rate, and the momentum it computes are pinned at T0 |
+| P7 | `open` | post-training | SFT validation: the packed bits-per-byte is pinned; ChatCORE is not measured, and the driver gate has not run |
 | T1 | `equivalent` | tokenizer | native byte pair encoding trainer and encoder vs `rustbpe` + `tiktoken` |
 | T2 | `equivalent` | tokenizer | portable `NCTOKEN1` artifact and `int64` pair counts vs the reference pickle and `int32` |
 | T3 | `open` | tokenizer | stream decode buffers an incomplete UTF-8 suffix instead of one U+FFFD per token |
@@ -75,6 +75,25 @@ tools/nanochat test //src/tokenizer:tokenizer_parity_test \
     //src/tokenizer:bpe_trainer_test
 ```
 
+Five more fixtures pin the supervised-fine-tuning path. One generator run writes
+them, and `tests/data/sft_fixtures.txt` records what each file holds:
+`tests/data/sft_pack_fixture.bin` (the conversations, the reference render, the
+transcribed packer, the mixture order, and the fixture tokenizer),
+`tests/data/sft_step_fixture.bin` (an eight-step reference trajectory),
+`tests/data/sft_rows_fixture.nchsft` (the packed row shard),
+`tests/data/sft_base_fixture.ckpt` (the reference parameters and moments at step
+0), and `tests/data/sft_loop_fixture.bin` (the progress stream and the loss
+curve of the same eight steps). The gates are:
+
+```bash
+tools/nanochat test //python:sft_data_parity_test //tests:sft_fixture_load_test \
+    //tests:sft_step_parity_test //tests:sft_loop_parity_test
+tools/nanochat test --gpu //tests:sft_parity_test
+```
+
+The first line is T0 and needs no GPU, no torch, and no reference checkout. The
+second line is T2 and runs at a wave boundary.
+
 ## The staged numeric-trace contract (Path A)
 
 [numerics-integration.md](numerics-integration.md) defines the staged precision
@@ -99,9 +118,12 @@ The GPU leg also runs the trace twice and compares the two runs, which gates
 the determinism clause.
 
 The contract does not cover the SFT loop or the RL loop. It covers the SFT
-arithmetic and the RL arithmetic only, as the plan states. The status table in
-[post-training.md](post-training.md) still marks the SFT renderer, the SFT
-packer, the SFT loop, the `rl_step` binary, and the RL fixture as **Missing**.
+arithmetic and the RL arithmetic only, as the plan states. The SFT arithmetic
+leg of the trace is the masked weighted loss and the gradient norm of that one
+forward and backward pass; it takes no optimizer step, so it is not the `P5`
+evidence. That row comes from `//tests:sft_step_parity_test` against a fixture.
+See section 10 of [sft-parity-plan.md](sft-parity-plan.md) for why the trace was
+not extended in this campaign.
 
 ## Open differences
 
@@ -354,76 +376,150 @@ a native base checkpoint, and that path is not the parity prerequisite.
 
 **Impact:** none. The SFT start is the reference start.
 
-**Evidence:** E3 and `//src:optimizer_state_test`. The SFT loop is not in the
-tree yet (`post-training.md` section 11).
+**Evidence:** E3 and `//src:optimizer_state_test`. The SFT loop is in the tree
+(`src/sft_main.cc`, `post-training.md` section 11), and `P5` pins the warm start
+against the reference.
 
 ### P4 — SFT data parity
 
-**Status:** `open`. The reference renders each conversation, builds a mask,
-and packs the resulting token ids. The mix uses SmolTalk, MMLU, and GSM8K.
-The packer does best-fit packing with BOS padding. Every supervised position
-carries mask 1 and every other position carries mask 0.
+**Status:** `closed`. The reference renders each conversation, builds a mask,
+and packs the resulting token ids. The packer does best-fit packing with BOS
+padding. Every supervised position carries mask 1 and every other position
+carries mask 0.
 
 nanochat.cpp owns the same pieces in `python/nanochat_cpp/chat.py` and
-`python/nanochat_cpp/sft_data.py`. No fixture compares them yet. The renderer,
-the mixture order, and the packed rows can drift from the reference.
+`python/nanochat_cpp/sft_data.py`. The gate compares them with the reference
+output and every recorded value matches: the renderer produces the same ids and
+the same mask for all eight conversations of the fixture, `pack_rows` makes the
+same largest-fit choice, the same BOS padding, and the same `-1` targets, and
+`TaskMixture` produces the same seed-42 order for the training set and for the
+validation set, including the two `stop` values.
 
-**Impact:** SFT training loss and validation metrics can differ from the
-reference before the first step. The later rungs consume these rows.
+**Impact:** none. The rows nanochat.cpp trains on are the reference rows.
 
-**Evidence:** none yet. Phase C of `sft-parity-plan.md` adds the gate
-`//python:sft_data_parity_test` against `tests/data/sft_pack_fixture.bin`.
+**Evidence:** `//python:sft_data_parity_test`, the R1 gate, at T0 CPU, against
+`tests/data/sft_pack_fixture.bin`. It loads the fixture, builds a tokenizer from
+the `pieces` table alone, and compares the render, the pack, and the two
+mixtures. The recorded run passed its nine cases. `tests/data/sft_fixtures.txt`
+holds the record layout, the pinned settings, and the file digest.
 
-**Fix direction:** `tools/dump_fixtures.py sft` supplies the reference ids,
-masks, packed rows, and mixture order. Phase B records them. Phase C checks
-them.
+**Limit:** the committed mixture order is the synthetic five-task set of the
+fixture, not the real hub order. The first risk below says how to verify the
+real one.
 
 ### P5 — SFT arithmetic parity
 
-**Status:** `open`. Run R2 compares the SFT loss, gradient norm, and parameter
-L2 after N optimizer steps. It uses the embedded base parameters, the embedded
-base moments, the packed rows, and the warm start. The gate is
-`tests/sft_step_parity_test.cc`, at T0 and then at T1 and T2.
+**Status:** `equivalent`. Run R2 compares the SFT loss, gradient norm, and
+parameter L2 after eight optimizer steps. It uses the reference base parameters
+and moments, the packed rows, the pinned optimizer settings, and the warm
+start. The C++ path computes the same function in a different floating-point
+order, which is the same class as `D2` and `D3`.
 
-**Impact:** the SFT optimizer step can diverge from the reference even when the
-data matches. Phase D pins the step.
+The bounds are wider than the pretraining trajectory, and the reason is one
+pinned setting: `adam_eps = 1e-10`. It divides a near-zero gradient's moment by
+`sqrt(v) + 1e-10`, so the last bits of a gradient that the two sides accumulate
+in a different order become a full-size step. The measured maxima of the
+recorded run are `9.05e-4` for the loss, `8.4e-3` for the gradient norm,
+`1.56e-1` absolute for the parameter L2 (`1.3e-3` relative on a norm of
+`1.25e2`), and `5.96e-8` for the schedule. A wrong rate, a wrong epsilon, or a
+wrong parameter grouping moves the total parameter L2 by percent, and the same
+trajectory at `adam_eps = 1e-4` misses the first step by 5 percent.
 
-**Evidence:** the masked loss and gradient path exist in `src/model.cc` and in
-`backends/cpu/kernels.cc`. The C++ step code exists. No SFT fixture drives it yet.
+**Impact:** none for the CPU backend. A few scalar parameters do differ by
+percent-scale relative norms (`x0_lambdas`, `backout_lambda`), because the
+reference gradient of those parameters is itself roundoff at this scale. The
+bound is the total parameter L2, and the per-parameter norms are diagnostics.
+See [testing.md](testing.md) for the table.
 
-**Fix direction:** add `tests/sft_step_parity_test.cc` and record the embedded
-parameters, packed rows, and optimizer settings in `tests/data/sft_step_fixture.bin`.
+**Evidence:** `//tests:sft_step_parity_test` at T0 CPU, the R2 gate, against
+`tests/data/sft_step_fixture.bin` and `tests/data/sft_base_fixture.ckpt`. The
+recorded run passed. The T1 leg is `//tests:sft_step_parity_gpu_test` and the
+T2 leg is `//tests:sft_step_parity`; neither has run on this host, so this row
+claims the CPU backend only.
 
 ### P6 — SFT loop parity
 
-**Status:** `open`. Run R3 compares the full loss curve and the checkpoints. It
-needs the native packed-row reader, `sft_main`, a progress-based learning-rate
-schedule, and the warm start. The gate is `//tests:sft_parity_test` at T2.
+**Status:** `open`. Run R3 compares the full loss curve and the checkpoints of
+the driver against the reference loop. The driver now has what it needs: the
+native packed-row reader, `sft_main` with a progress schedule and a warm start,
+the accumulation of section 5.1, and the evaluation cadence of section 5.4.
 
-**Impact:** the C++ run can use a different schedule than the reference. The
-learning rate and Muon momentum then diverge.
+What is pinned: the progress stream, the rate multiplier, the Muon momentum,
+the epoch counter, and the shape of the loss curve. Those are numbers the
+schedule computes, not numbers a full driver run produced. The gate that runs
+the real binary is `//tests:sft_parity_test` at T2, and it has not run on this
+host. A gate that did not run is not evidence.
 
-**Evidence:** `src/train.cc` has a step-based loop only. The packed-row reader
-exists in `src/sft_shard.cc`, but `sft_main` has no progress schedule and no
-warm start.
+**Impact:** an untested driver can apply the right schedule to the wrong step,
+epoch, or accumulation count, and the loss curve then diverges from the
+reference while every schedule value still matches.
 
-**Fix direction:** implement the packed-row source, the progress schedule, and the
-warm start. Then compare a base-to-SFT run at T2.
+**Evidence:** `//tests:sft_loop_parity_test` at T0 (the R3 schedule half)
+passed against `tests/data/sft_loop_fixture.bin`; the maximum schedule
+difference is `5.96e-08`. The driver half is `//tests:sft_parity_test`, which is
+built and not yet run. `tests/data/sft_fixtures.txt` section 5 records the trace
+it will compare against.
+
+**Missing run:** `tools/nanochat test --gpu //tests:sft_parity_test` at a wave
+boundary, and the phase G comparison of section 7 of
+[sft-parity-plan.md](sft-parity-plan.md).
 
 ### P7 — SFT validation parity
 
 **Status:** `open`. Run R4 compares bits-per-byte and ChatCORE on the packed
-validation rows at the evaluation cadence. The gate is the same T2 run as P6,
-with the validation metrics recorded.
+validation rows at the evaluation cadence.
 
-**Impact:** a correct training loss can still pair with wrong validation
-metrics when the packed validation rows or the ChatCORE path differs.
+Bits-per-byte is pinned. `EvaluatePackedRows` sums `mean_loss * valid_targets`
+nats and divides by `ln(2) * total_target_bytes`, and the loop fixture records
+the reference value (`0.542344` over the four rows). `//tests:sft_loop_parity_test`
+reproduces it from the recorded token-byte table and the shard.
 
-**Evidence:** the chat scoring code exists in `python/nanochat_cpp/chat.py`.
-`src/eval.cc` reads parquet documents. A packed-row evaluator does not exist yet.
+ChatCORE is not measured by any fixture. The loop fixture carries the sentinel
+`-1` at `chatcore/8`, and `config/chatcore_measured` is `0`. The reason is that
+ChatCORE needs the chat bundle, a trained tokenizer, and the downloaded task
+sets, none of which belong in a hermetic T0 fixture. Only the phase G run can
+produce the value, and that run has not happened.
 
-**Fix direction:** define a packed-row validation evaluator and record the
-reference metrics in `tests/data/sft_loop_fixture.bin`.
+**Impact:** the training loss and the bits-per-byte can be right while the
+ChatCORE path is wrong, which is the metric the reference reports.
+
+**Evidence:** the packed bits-per-byte path is pinned at T0 by
+`//tests:sft_loop_parity_test` and by `//src:eval_test`. ChatCORE has no SFT
+evidence; the chat scoring code itself is `E4`.
+
+**Missing run:** the phase G comparison at T2, which must record the
+bits-per-byte and the ChatCORE value of the same run as the driver.
+
+### What the SFT rows do not cover
+
+These are the risks of section 10 of [sft-parity-plan.md](sft-parity-plan.md),
+next to the rows they qualify.
+
+- **The real hub mixture order.** `P4` is closed against the synthetic
+  five-task order of the fixture, not against the hub order. Verify the real
+  order once by hand with `python3 tools/dump_fixtures.py sft --real-mixture`,
+  which needs a network download and a pinned `datasets` version. It is not
+  part of any gate.
+- **Tokenizer drift.** A new tokenizer artifact changes the ids and the fixture
+  digest, so `P4` and every later row read stale bytes. Regenerate the pack
+  fixture, then the step and loop fixtures, in the same change.
+- **The progress tail beyond eight steps.** `P6` pins eight steps, and the
+  driver follows the running maximum of the progress. A longer run can still
+  differ at the tail of the decay. A longer fixture, or the phase G run, is the
+  check.
+- **The validation-length restart rule.** The evaluator reads one pass and
+  requires `eval_steps * device_batch <= validation rows`. Section 5.4 of the
+  plan forbids the condition for the pinned run; a new shard size needs its own
+  pin.
+- **GPU budget.** `P5` and `P6` have T1 and T2 legs, and `P7` needs the T2 run
+  for ChatCORE. Schedule them at a wave boundary, not for every commit.
+- **The base fixture's metadata block.** `tests/data/sft_base_fixture.ckpt`
+  records the container writer's default run config (12 layers) while its
+  tensors are the two-layer fixture model, so `Checkpointer::LoadModel` refuses
+  it as a direct warm start. `//tests:sft_parity_test` restates the header with
+  the shape the tensors have, in its own temporary directory. The two real
+  fixes are a fixture that records the tiny config, or a warm-start load that
+  skips the recorded-config check. Section 10 of the plan records it.
 
 ### T1 — Native tokenizer reimplementation
 
