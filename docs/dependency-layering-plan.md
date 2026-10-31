@@ -1,12 +1,17 @@
 # Dependency layering and host packaging: plan
 
-Status: proposal. Not started. Owner: Architect.
+Status: implemented, except D6. Owner: Architect.
+
+The campaign of 2026-10-30 landed stages S0 to S7 of section 9. All eight phases
+passed their recorded checks, and the evidence is
+`.sliceme/feat--dependency-layering-plan.evidence.md`. Section 12 records what
+is in the tree and what is still open.
 
 The C++ core must stay lean. Notebooks, Modal training, and the PyTorch parity
 work must still run. This plan reaches both goals with one rule: each dependency
 enters at one zone, and the build proves the zone boundary.
 
-Section 2 records the three leaks in the tree as it stands. Section 3 records
+Section 2 records the four leaks in the tree as it stood. Section 3 records
 the decisions. Section 9 records the stages and the ownership handoffs.
 
 The plan separates three artifacts. They change on different schedules.
@@ -376,12 +381,23 @@ Coordinate that one edit.
 
 | Item | State |
 |---|---|
-| `pyproject.toml` | absent |
-| `nanochat_cpp_bridge` | absent |
-| Gate G1 to G5 | absent |
-| Binary wheel | absent |
-| Weights volume in the Modal app | absent |
-| Fixture provenance | absent |
-| The container read and write | present, in `checkpoint.py` |
-| The Hub publish path | present, in `notebooks/hub_checkpoint.py` |
+| `pyproject.toml` | present, in `python/`; the base dependency list is empty |
+| `nanochat_cpp_bridge` | present, six modules and `fixtures/` |
+| Gate G1 to G5 | present, `python/tests/gate_*_test.py` |
+| The parity dispatch test | present, `python/tests/parity_dispatch_test.py` |
+| Binary wheel | absent; D6 is open and needs the Build workstream |
+| The wheel search entry in `_lib.py` | present; it falls through while no wheel is installed |
+| Weights volume in the Modal app | present, `nanochat-weights`, keyed by the stage revision |
+| Fixture provenance | present; `producer` and `generated_by` in all seven records |
+| The container read and write | present, in `python/nanochat_cpp/checkpoint.py` |
+| The Hub publish path | present, in `python/nanochat_cpp_bridge/hf_hub.py` |
 | The fixture hash record | present, in the model manifest |
+
+Open after the campaign:
+
+- D6, the per-architecture wheel. D7 added its search entry, so the release is
+the only missing half.
+- Q1 to Q5 of section 10.
+- The CPU tier of a campaign check. The campaign submitted every check through
+the GPU queue, including two that only read JSON, which section 5.1 of
+`AGENTS.md` puts at `t0-cpu`.
