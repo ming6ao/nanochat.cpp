@@ -590,9 +590,9 @@ void TestExtraTrailingWords() {
   ExpectSameRecords(loaded, written, "extra words");
 }
 
-// Case 4: a metadata block that lacks the last two fields. The read succeeds,
-// `missing_fields` counts them, and the two members keep their initializers
-// (design decision D6).
+// Case 4: a metadata block that lacks the last three fields. The read
+// succeeds, `missing_fields` counts them, and the three members keep their
+// initializers (design decisions D6 and D7).
 void TestMissingTrailingFields() {
   const Checkpoint written = MakeContainer();
   const std::string base_path = TempPath("compat_missing_base.ckpt");
@@ -620,14 +620,14 @@ void TestMissingTrailingFields() {
     return;
   }
 
-  // New code, old data: the fields the block carries are applied, the two it
-  // does not carry keep their initializers, and the count is exactly two.
+  // New code, old data: the fields the block carries are applied, the three it
+  // does not carry keep their initializers, and the count is exactly three.
   CheckpointMetadata read;
   const IFields::ReadResult result = read.Read(words, 0);
   Expect(result.pos != 0, "missing fields: the block did not read");
-  Expect(result.missing_fields == 2, "missing fields: missing_fields is " +
+  Expect(result.missing_fields == 3, "missing fields: missing_fields is " +
                                          Count(result.missing_fields) +
-                                         ", not 2");
+                                         ", not 3");
   Expect(result.extra_u32 == 0,
          "missing fields: the read reported trailing words too");
   Expect(read.stage == older.stage,
@@ -646,6 +646,12 @@ void TestMissingTrailingFields() {
   Expect(read.created_utc.empty(),
          "missing fields: created_utc is not the initializer");
   Expect(read.notes.empty(), "missing fields: notes is not the initializer");
+  // The recipe block of D7 is appended last, so an older block does not carry
+  // it. Its members keep the defaults of include/nanochat/checkpoint_metadata.h.
+  Expect(read.recipe.device_batch_size == 0,
+         "missing fields: recipe device_batch_size is not the initializer");
+  Expect(read.recipe.warmdown_ratio == 0.65f,
+         "missing fields: recipe warmdown_ratio is not the initializer");
 
   // The same block inside a file: the load succeeds and reads the record
   // stream of the trailing bytes.
