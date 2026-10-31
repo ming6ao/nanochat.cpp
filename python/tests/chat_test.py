@@ -6,6 +6,11 @@ few synthetic conversations. The test renders the same conversations with
 :class:`nanochat_cpp.chat._PromptRenderer` and compares the ids. It also checks
 the per-task failure isolation and the core aggregation. See docs/python.md
 sections 5 and 11.
+
+The task classes read their dataset through the registration seam of
+``docs/dependency-layering-plan.md`` section 4, so they import no dataset
+library (section 2.1). A fake hub loader keeps that coverage hermetic: no
+network, no ``pyarrow``, and no ``numpy``.
 """
 
 from __future__ import annotations
@@ -15,7 +20,7 @@ import struct
 import unittest
 from pathlib import Path
 
-from nanochat_cpp import _build, _lib, chat, tasks
+from nanochat_cpp import _build, _lib, chat, seam, tasks
 from nanochat_cpp.api import Config, Model, Tokenizer
 
 FIXTURE = "tests/data/chat_fixture.bin"
@@ -235,6 +240,75 @@ class ChatTest(unittest.TestCase):
         self.assertEqual(chat._parse_tasks(None), list(chat.ALL_TASKS))
         with self.assertRaises(SystemExit):
             chat._parse_tasks("Nonsense")
+
+
+class _FakeDataset:
+    """What a task class needs of a dataset: len, an index, and shuffle."""
+
+    def __init__(self, rows) -> None:
+        self.rows = list(rows)
+
+    def __len__(self) -> int:
+        return len(self.rows)
+
+    def __getitem__(self, index):
+        return self.rows[index]
+
+    def shuffle(self, seed=0):  # noqa: ANN001 - test double
+        """The reference loader shuffles in place; a fake keeps its order."""
+        return self
+
+
+class _FakeHubLoader:
+    """The hub loader the seam carries: a fixed table, no network."""
+
+    def __init__(self, rows) -> None:
+        self.rows = rows
+        self.calls: list[tuple] = []
+
+    def __call__(self, repo_id, subset="default", split="train"):
+        self.calls.append((repo_id, subset, split))
+        return _FakeDataset(self.rows[repo_id])
+
+
+class TaskSeamTest(unittest.TestCase):
+    """A task builds through the registration seam, with no dataset library."""
+
+    ROWS = {"allenai/ai2_arc": [{
+        "question": "Which is bigger?",
+        "choices": {"text": ["ant", "whale"], "label": ["A", "B"]},
+        "answerKey": "B",
+    }]}
+
+    def test_a_task_builds_through_a_registered_loader(self) -> None:
+        loader = _FakeHubLoader(self.ROWS)
+        with seam.use(hub_loader=loader):
+            task = chat.build_task("ARC-Easy")
+            example = task.get_example(0)
+        self.assertEqual(loader.calls,
+                         [("allenai/ai2_arc", "ARC-Easy", "test")])
+        self.assertEqual(example["letters"], ["A", "B"])
+        self.assertEqual(
+            example["messages"][0]["content"],
+            tasks.render_mc("Which is bigger?", ["A", "B"],
+                            ["ant", "whale"]))
+        self.assertTrue(task.evaluate(example, "B"))
+        self.assertFalse(task.evaluate(example, "A"))
+
+    def test_build_task_takes_the_adapters_for_one_call(self) -> None:
+        """The ``adapters`` argument is the scoped form of the same seam."""
+        loader = _FakeHubLoader(self.ROWS)
+        task = chat.build_task("ARC-Easy", adapters={"hub_loader": loader})
+        self.assertEqual(task.num_examples(), 1)
+        self.assertIsNone(seam.registered_hub_loader(),
+                          "the scoped loader outlived the call")
+
+    def test_an_unregistered_loader_names_the_extra(self) -> None:
+        with seam.use():
+            seam.reset()
+            with self.assertRaises(seam.MissingAdapter) as caught:
+                chat.build_task("ARC-Easy")
+        self.assertIn("hfdata", str(caught.exception))
 
 
 if __name__ == "__main__":

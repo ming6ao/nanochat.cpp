@@ -40,6 +40,7 @@ detailed reference that the design points at.
 | [sandbox.md](sandbox.md) | Execution sandbox and host resource governance |
 | [host-portability.md](host-portability.md) | Toolchain, optional sandbox, devices, and Kaggle |
 | [script-consolidation-plan.md](script-consolidation-plan.md) | The plan to give each host task one home: the command table, the fixture generators, and the Python dispatch |
+| [dependency-layering-plan.md](dependency-layering-plan.md) | The plan to keep the core free of third-party packages: the four zones, the packaging, the binary wheels, and the fixture provenance |
 | [gpu-queue-plan.md](gpu-queue-plan.md) | The GPU job queue: one worker owns the GPU, a SQLite store holds the jobs, and `tools/nanochat gpuq` submits them |
 | [node-h100.md](node-h100.md) | The H100 node run book: the memory plan, the batch plan, the launch, and the acceptance run |
 | [simulator.md](simulator.md) | The S0 simulator: device profiles, the reference engine, the emulation engine, the API interposer, and the collective mock |

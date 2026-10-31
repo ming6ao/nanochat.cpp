@@ -1,7 +1,10 @@
 # notebooks/ — the Kaggle notebook and the single-client mesh training loop.
 #
-# The pure modules import only the Python standard library, so the tests run on
-# the registered local `python3` toolchain and need no third-party wheel.
+# A notebook is a host (Z3 of docs/dependency-layering-plan.md section 4), so
+# its modules import either package of the distribution. The heavy imports stay
+# inside the calls of `nanochat_cpp_bridge`: the modules here import the
+# standard library and the two packages, and the tests therefore run on the
+# registered local `python3` toolchain with no third-party wheel.
 
 load("@rules_python//python:defs.bzl", "py_library", "py_test")
 
@@ -44,6 +47,10 @@ py_library(
     imports = ["."],
     deps = [
         ":args",
+        # The Hub save and load calls have one home in the adapter package
+        # (Z2). This library forwards to it; `huggingface_hub` is imported
+        # inside those calls, so the test needs no wheel and no network.
+        "//python:nanochat_cpp_bridge",
         "//python:nanochat_cpp",
     ],
 )

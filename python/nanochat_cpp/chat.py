@@ -1,8 +1,14 @@
 """Chat evaluation for the Python API (docs/python.md section 5).
 
-The Python side owns the task datasets, the prompt rendering, the answer
+The Python side owns the task classes, the prompt rendering, the answer
 extraction, and the metric rules. The C side owns the forward pass. This is
 the split of the removed ``chat_eval.py``, moved under the in-process API.
+
+Every task reads a hub dataset, so the dataset loader and the code executor
+of HumanEval arrive through the registration seam of
+:mod:`nanochat_cpp.seam`; this module imports only the standard library and
+names no third-party package (rule 1 of ``docs/dependency-layering-plan.md``
+section 4, gate G5).
 
 Two task paths:
 
@@ -38,6 +44,7 @@ from pathlib import Path
 from typing import Sequence
 
 from . import data
+from . import seam
 from . import tasks as _tasks
 from .api import Config, Evaluator, GeneratedRow, Model, Tokenizer
 
@@ -94,11 +101,25 @@ class ChatReport:
     categorical_core: float | None
 
 
-def build_task(task_name: str) -> _tasks.Task:
+def build_task(task_name: str, *, adapters=None) -> _tasks.Task:
     """Construct the reference task object for ``task_name``.
 
-    The subset and split choices match ``scripts/chat_eval.py`` exactly.
+    The subset and split choices match ``scripts/chat_eval.py`` exactly. All
+    five tasks read a hub dataset, so the dataset loader comes from the
+    registration seam of :mod:`nanochat_cpp.seam` and never from an import:
+    a host registers one before it evaluates
+    (:func:`nanochat_cpp.seam.register_hub_loader`) and a test hands in a fake.
+    ``adapters`` registers a mapping of them for the duration of the call
+    (``{"hub_loader": loader, "code_executor": executor}``), so one caller can
+    stay scoped. Nothing registered raises
+    :class:`nanochat_cpp.seam.MissingAdapter` naming the extra to install.
+
+    This module names no third-party package and no Z2 module (gate G5), so
+    the hub-backed task arrives through that seam and not through an import.
     """
+    if adapters:
+        with seam.use(**adapters):
+            return build_task(task_name)
     if task_name == "HumanEval":
         return _tasks.HumanEval()
     if task_name == "MMLU":
@@ -510,12 +531,26 @@ class ChatEngine:
 
 
 class ChatEvaluator:
-    """Run the chat tasks against one model, with per-task isolation."""
+    """Run the chat tasks against one model, with per-task isolation.
+
+    The five task names and the per-task isolation of ``docs/rl-notebook.md``
+    stay. A hub-backed task (every task here reads a hub dataset, and HumanEval
+    runs generated code) arrives through the registration seam of
+    :mod:`nanochat_cpp.seam`, so a host hands its loader and its executor in
+    with ``hub_loader=`` and ``code_executor=`` and this file names no
+    third-party module and no Z2 module. A test hands in fakes; leaving both
+    out uses whatever the process registered.
+    """
 
     def __init__(self, model: Model, *,
-                 tokenizer: Tokenizer | None = None) -> None:
+                 tokenizer: Tokenizer | None = None,
+                 hub_loader=None, code_executor=None) -> None:
         if not isinstance(model, Model):
             raise TypeError("model must be a nanochat_cpp.Model")
+        if hub_loader is not None:
+            seam.register_hub_loader(hub_loader)
+        if code_executor is not None:
+            seam.register_code_executor(code_executor)
         self.model = model
         self._evaluator = Evaluator(model)
         if tokenizer is None:

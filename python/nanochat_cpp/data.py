@@ -4,13 +4,16 @@ The C++ runtime reads parquet documents and tokenizes during the run
 (``docs/parquet-native.md``), so the bridge no longer materializes ``NANO``
 shards. This module supplies the two things the runtime still needs:
 
-- ``parquet_files`` -- the parquet paths for a split, in dataset order.
-- ``nctoken1_path`` -- the portable ``NCTOKEN1`` artifact.
+- ``nctoken1_path`` -- the portable ``NCTOKEN1`` artifact;
+- the reader of that artifact and the pure derivations over it
+  (:func:`mergeable_ranks`, :func:`token_byte_lengths`).
 
-It also reads that artifact and builds a ``tiktoken`` encoding from its merge
-list (docs/tokenizer.md section 5), so the fixture generator and the self-test
-can share the tokenizer with the C++ side. ``tiktoken`` is imported lazily, so
-the torch-free self-test can import this module.
+The ``tiktoken`` encoding built from the merge list, the reference tokenizer
+interface over it, and the parquet path listing of a split all need a
+third-party package, so they are **not** here: they live in the Z2 package of
+``docs/dependency-layering-plan.md`` section 5, behind a function the caller is
+handed. This module imports only the standard library, so the torch-free
+self-test can import it anywhere.
 """
 
 from __future__ import annotations
@@ -32,16 +35,6 @@ def _tokenizer_dir() -> Path:
     base = os.environ.get("NANOCHAT_BASE_DIR", str(Path.home() / ".cache" /
                                                      "nanochat"))
     return Path(base) / "tokenizer"
-
-
-def parquet_files(split: str) -> list[str]:
-    """The parquet paths for a split. Train is all but the last file, and val
-    is the last file, matching the reference dataloader. The C++ reader expands
-    and orders them (docs/parquet-native.md)."""
-    assert split in ("train", "val"), "split must be 'train' or 'val'"
-    from nanochat.dataset import list_parquet_files
-    paths = [str(p) for p in list_parquet_files()]
-    return paths[:-1] if split == "train" else paths[-1:]
 
 
 def nctoken1_path() -> Path | None:
@@ -151,72 +144,3 @@ def token_byte_lengths(artifact: Nctoken1Artifact) -> list[int]:
     table = [0] * (len(lengths) + len(artifact.special_tokens))
     table[:len(lengths)] = lengths
     return table
-
-
-def build_tiktoken_encoding(artifact: Nctoken1Artifact):
-    """Build a ``tiktoken.Encoding`` from an ``NCTOKEN1`` artifact.
-
-    ``tiktoken`` is imported here, not at module import, so the torch-free
-    self-test can import this module. The reference environment supplies the
-    package.
-    """
-    import tiktoken
-
-    return tiktoken.Encoding(
-        name="nctoken1",
-        pat_str=artifact.pattern,
-        mergeable_ranks=mergeable_ranks(artifact),
-        special_tokens=dict(artifact.special_tokens),
-    )
-
-
-class Nctoken1Tokenizer:
-    """The reference tokenizer interface, backed by the portable artifact.
-
-    ``get_vocab_size``, ``get_bos_token_id``, and ``encode`` match the
-    reference ``nanochat.tokenizer`` interface, so the same object drives the
-    reference dataloader in the loader-parity fixture.
-    """
-
-    def __init__(self, artifact: Nctoken1Artifact) -> None:
-        self.artifact = artifact
-        self.encoding = build_tiktoken_encoding(artifact)
-        self._bos_id = self.encoding.encode_single_token("<|bos|>")
-
-    def get_vocab_size(self) -> int:
-        return self.encoding.n_vocab
-
-    def get_bos_token_id(self) -> int:
-        return self._bos_id
-
-    def encode_special(self, name: str) -> int:
-        return self.encoding.encode_single_token(name)
-
-    def decode(self, ids) -> str:
-        return self.encoding.decode(ids)
-
-    def encode(self, text, prepend=None, append=None, num_threads=1):
-        if isinstance(text, str):
-            ids = self.encoding.encode_ordinary(text)
-            if prepend is not None:
-                ids.insert(0, prepend)
-            if append is not None:
-                ids.append(append)
-            return ids
-        rows = self.encoding.encode_ordinary_batch(
-            text, num_threads=num_threads)
-        if prepend is not None:
-            for row in rows:
-                row.insert(0, prepend)
-        if append is not None:
-            for row in rows:
-                row.append(append)
-        return rows
-
-    def token_byte_lengths(self) -> list[int]:
-        return token_byte_lengths(self.artifact)
-
-
-def load_nctoken1(path) -> Nctoken1Tokenizer:
-    """Read an ``NCTOKEN1`` artifact and wrap its ``tiktoken`` encoding."""
-    return Nctoken1Tokenizer(read_nctoken1(path))

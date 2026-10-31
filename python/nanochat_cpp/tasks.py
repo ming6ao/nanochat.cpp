@@ -1,122 +1,53 @@
 """Chat evaluation tasks (mirrors the reference ``tasks/`` package).
 
-The bridge owns the task datasets and the evaluation criteria for chat
-evaluation, exactly as ``scripts/chat_eval.py`` imports them from the reference
-``tasks`` package: ``ARC``, ``MMLU``, ``GSM8K`` and ``HumanEval``, plus the
-shared :func:`render_mc` prompt renderer and the GSM8K/HumanEval answer
-extraction. Only the model compute is C++ (see ``docs/eval.md`` section 5).
+The core owns the task classes, the evaluation criteria, the prompt renderers
+and the answer parsers of chat evaluation, exactly as ``scripts/chat_eval.py``
+imports them from the reference ``tasks`` package: ``ARC``, ``MMLU``, ``GSM8K``
+and ``HumanEval``, plus the shared :func:`render_mc` prompt renderer and the
+GSM8K/HumanEval answer extraction. Only the model compute is C++ (see
+``docs/eval.md`` section 5).
 
-The module is stdlib-only at import time. ``numpy``, ``pyarrow``,
-``filelock`` and the reference ``nanochat`` package are imported lazily inside
-the functions that need them, so the torch-free bridge self-test can import and
-exercise the pure prompt/extraction logic anywhere.
+The module imports only the standard library, at import time and after it
+(rule 1 of ``docs/dependency-layering-plan.md`` section 4). Two things a task
+class cannot do alone are handed in through the registration seam of
+:mod:`nanochat_cpp.seam`:
 
-HumanEval is the one place chat evaluation executes generated code. It goes
-through the reference ``nanochat.execution.execute_code`` (fresh interpreter,
-rlimits, scrubbed environment, timeout) and therefore inherits the reference
-guards rather than reimplementing them. When the bridge runs under
-``tools/nanochat`` the child process inherits the resource sandbox cgroup.
+* the hub dataset loader -- ``pyarrow`` and ``filelock`` live behind it, so a
+  dataset access needs no import here;
+* the code executor -- HumanEval is the one place chat evaluation runs
+  generated code, and it inherits the reference guards (a fresh interpreter,
+  rlimits, a scrubbed environment, a timeout) rather than reimplementing them.
+
+A host registers both once (`seam.register_hub_loader`, ...). When nothing is
+registered, a dataset-backed class raises
+:class:`nanochat_cpp.seam.MissingAdapter` naming the extra to install, and the
+prompt/extraction logic stays importable and testable anywhere. A test hands
+in a fake loader, so it needs no network and no wheel.
 """
 
 from __future__ import annotations
 
-import json
-import os
 import re
-import urllib.request
+
+from . import seam
 
 # ---------------------------------------------------------------------------
 # Dataset access (mirrors nanochat/tasks/common.py)
 # ---------------------------------------------------------------------------
 
 
-def get_base_dir() -> str:
-    """The nanochat cache root (``NANOCHAT_BASE_DIR`` or ``~/.cache/nanochat``).
-
-    Copied from ``nanochat.common.get_base_dir`` so the task datasets land in
-    the same place as the reference implementation without importing torch.
-    """
-    if os.environ.get("NANOCHAT_BASE_DIR"):
-        nanochat_dir = os.environ["NANOCHAT_BASE_DIR"]
-    else:
-        home_dir = os.path.expanduser("~")
-        cache_dir = os.path.join(home_dir, ".cache")
-        nanochat_dir = os.path.join(cache_dir, "nanochat")
-    os.makedirs(nanochat_dir, exist_ok=True)
-    return nanochat_dir
-
-
-class HubDataset:
-    """A minimal HuggingFace ``datasets.Dataset`` stand-in over a pyarrow table.
-
-    Offers lazy row access and a seeded shuffle that matches
-    ``datasets.Dataset.shuffle(seed=seed)`` exactly, so the example order the
-    reference evaluates is reproduced. Mirrors ``tasks.common.HubDataset``.
-    """
-
-    def __init__(self, table, permutation=None):
-        self.table = table
-        self.permutation = permutation
-
-    def __len__(self):
-        return self.table.num_rows
-
-    def shuffle(self, seed):
-        import numpy as np
-
-        permutation = np.random.default_rng(seed).permutation(len(self))
-        return HubDataset(self.table, permutation)
-
-    def __getitem__(self, index):
-        physical_index = (index if self.permutation is None
-                          else int(self.permutation[index]))
-        return {column: self.table[column][physical_index].as_py()
-                for column in self.table.column_names}
-
-
 def load_hub_dataset(repo_id, subset="default", split="train"):
-    """Load a hub dataset through its auto-generated parquet export.
+    """Load a hub dataset through the registered loader.
 
-    Mirrors ``tasks.common.load_hub_dataset``: list the parquet shards through
-    the hub API, download them once into the base directory, and read them with
-    pyarrow. The manifest is written last, so its presence means the download
-    completed; a file lock serializes concurrent ranks.
+    The dataset access itself -- the parquet shard listing, the download under
+    a file lock, and the ``pyarrow`` read -- belongs to the caller's loader,
+    which it registers once with :func:`nanochat_cpp.seam.register_hub_loader`.
+    This function is the one place the task classes reach it, so a host and a
+    test swap the loader in one move. An unregistered loader raises
+    :class:`nanochat_cpp.seam.MissingAdapter` naming the extra to install.
     """
-    import pyarrow as pa
-    import pyarrow.parquet as pq
-    from filelock import FileLock
-
-    base_dir = get_base_dir()
-    slug = repo_id.replace("/", "--")
-    shards_dir = os.path.join(base_dir, "task_data", slug, subset, split)
-    manifest_path = os.path.join(shards_dir, "manifest.json")
-    if not os.path.exists(manifest_path):
-        os.makedirs(shards_dir, exist_ok=True)
-        with FileLock(manifest_path + ".lock"):
-            # Only a single rank acquires the lock and downloads; the others
-            # block here and then skip because the manifest now exists.
-            if not os.path.exists(manifest_path):
-                listing_url = (f"https://huggingface.co/api/datasets/{repo_id}"
-                               f"/parquet/{subset}/{split}")
-                with urllib.request.urlopen(listing_url) as response:
-                    shard_urls = json.loads(response.read())
-                filenames = []
-                for shard_index, shard_url in enumerate(shard_urls):
-                    filename = f"{shard_index:05d}.parquet"
-                    print(f"Downloading {shard_url} ...")
-                    with urllib.request.urlopen(shard_url) as response:
-                        content = response.read()
-                    with open(os.path.join(shards_dir, filename), "wb") as f:
-                        f.write(content)
-                    filenames.append(filename)
-                with open(manifest_path, "w") as f:
-                    json.dump(filenames, f)
-    with open(manifest_path, "r") as f:
-        filenames = json.load(f)
-    shard_paths = [os.path.join(shards_dir, filename) for filename in filenames]
-    tables = [pq.read_table(path) for path in shard_paths]
-    table = pa.concat_tables(tables)
-    return HubDataset(table)
+    loader = seam.hub_loader()
+    return loader(repo_id, subset, split=split)
 
 
 class Task:
@@ -397,18 +328,16 @@ def extract_program(completion):
 
 
 def _execute_code(code: str):
-    """Run generated code through the reference guarded executor.
+    """Run generated code through the registered executor.
 
-    Imported lazily so this module stays importable without the reference
-    package; the call itself is the reference ``execute_code`` (fresh
-    interpreter, rlimits, scrubbed environment, timeout), not a copy.
+    The executor -- a fresh interpreter, rlimits, a scrubbed environment, a
+    timeout -- belongs to the caller, which registers one with
+    :func:`nanochat_cpp.seam.register_code_executor`. An unregistered executor
+    raises :class:`nanochat_cpp.seam.MissingAdapter` naming the extra to
+    install; the criterion below reads only the ``success`` attribute, so a
+    test can hand in a stub.
     """
-    from . import reference
-
-    reference.ensure_reference_on_path()
-    from nanochat.execution import execute_code
-
-    return execute_code(code)
+    return seam.code_executor()(code)
 
 
 class HumanEval(Task):
@@ -463,7 +392,6 @@ class HumanEval(Task):
 
 
 __all__ = [
-    "HubDataset",
     "load_hub_dataset",
     "Task",
     "render_mc",

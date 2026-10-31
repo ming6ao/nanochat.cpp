@@ -4,11 +4,20 @@
 # of the C++ code.
 #
 # The package imports only the Python standard library, so the tests run on the
-# registered local `python3` toolchain and need no third-party wheel.
+# registered local `python3` toolchain and need no third-party wheel. Every
+# third-party import has one home: `nanochat_cpp_bridge`, the second import
+# package of the one distribution declared in pyproject.toml
+# (docs/dependency-layering-plan.md sections 4 and 6.1).
 
 load("@rules_python//python:defs.bzl", "py_library", "py_test")
 
 package(default_visibility = ["//visibility:public"])
+
+# The package description: the empty base dependency list and the extras of
+# section 6.1. Exported so a test in another package (gate G3, which reads it
+# through the runfiles) can name it, and so a consumer sees the file that
+# states the invariant.
+exports_files(["pyproject.toml"])
 
 # The in-process Python API and the process bridge. `imports = ["."]` puts
 # `python/` on the import path of every dependent, so `import nanochat_cpp`
@@ -17,6 +26,20 @@ py_library(
     name = "nanochat_cpp",
     srcs = glob(["nanochat_cpp/*.py"]),
     imports = ["."],
+)
+
+# The adapter package (Z2 of section 4). One distribution, two import packages
+# (D1, D2): the base install carries this library beside `nanochat_cpp`, and a
+# module here imports its heavy package inside the function that needs it, so
+# the target builds and the import succeeds with no extra installed.
+py_library(
+    name = "nanochat_cpp_bridge",
+    srcs = glob([
+        "nanochat_cpp_bridge/*.py",
+        "nanochat_cpp_bridge/fixtures/*.py",
+    ]),
+    imports = ["."],
+    deps = [":nanochat_cpp"],
 )
 
 # T0: the ctypes core loads the CPU library and runs one forward/backward step.
@@ -53,11 +76,16 @@ py_test(
     size = "small",
 )
 
-# T0: the NCTOKEN1 reader. Hermetic: standard library only.
+# T0: the NCTOKEN1 reader. Hermetic: standard library only. The tokenizer
+# bridge coverage reads `nanochat_cpp_bridge.reference_data`, so this test
+# depends on the Z2 library.
 py_test(
     name = "data_test",
     srcs = ["tests/data_test.py"],
-    deps = [":nanochat_cpp"],
+    deps = [
+        ":nanochat_cpp",
+        ":nanochat_cpp_bridge",
+    ],
     size = "small",
 )
 
@@ -67,7 +95,10 @@ py_test(
 # bytes a Hub artifact already carries) and `//bindings:nanochat_shared`, whose
 # C writer fills the metadata. The version 1 file is written at test time into a
 # temporary directory, so no second fixture is committed here
-# (docs/checkpoint-metadata-and-examples-plan.md stages A.2 and A.5).
+# (docs/checkpoint-metadata-and-examples-plan.md stages A.2 and A.5). The torch
+# half of the conversion lives in `nanochat_cpp_bridge.torch_checkpoint`, so
+# the test depends on the Z2 library; it drives that builder with fake tensors
+# and still needs no torch.
 py_test(
     name = "checkpoint_test",
     srcs = ["tests/checkpoint_test.py"],
@@ -75,7 +106,10 @@ py_test(
         "//bindings:nanochat_shared",
         "//tests:checkpoint_v0_fixture",
     ],
-    deps = [":nanochat_cpp"],
+    deps = [
+        ":nanochat_cpp",
+        ":nanochat_cpp_bridge",
+    ],
     size = "small",
 )
 
@@ -333,6 +367,57 @@ py_test(
     size = "small",
 )
 
+# The five boundary gates of docs/dependency-layering-plan.md section 8. A
+# boundary that no test reads is a comment, so each gate is a self-contained
+# unittest module that needs no wheel, no library, and no network.
+
+# T0: G1 runs the core import in a fresh `python3 -I -S` subprocess, so the
+# runfiles carry the sources that subprocess imports from the tree.
+py_test(
+    name = "gate_import_isolation_test",
+    srcs = ["tests/gate_import_isolation_test.py"],
+    deps = [":nanochat_cpp"],
+    size = "small",
+)
+
+# T0: G2 walks the syntax tree of every core module and fails on an import
+# outside the standard library, including one inside a function. It reads the
+# sources through its library's runfiles.
+py_test(
+    name = "gate_stdlib_imports_test",
+    srcs = ["tests/gate_stdlib_imports_test.py"],
+    deps = [":nanochat_cpp"],
+    size = "small",
+)
+
+# T0: G3 reads the package description and fails when the base dependency list
+# is missing or not empty (section 6.1), so the file is the test's data.
+py_test(
+    name = "gate_pyproject_test",
+    srcs = ["tests/gate_pyproject_test.py"],
+    data = ["pyproject.toml"],
+    size = "small",
+)
+
+# T0: G4 reads every model manifest and fails on a record with no producer
+# (section 7.2). The model's `files` label is the data, so the gate sees the
+# same bytes the model package publishes.
+py_test(
+    name = "gate_provenance_test",
+    srcs = ["tests/gate_provenance_test.py"],
+    data = ["//models/nanochat-default:files"],
+    size = "small",
+)
+
+# T0: G5 scans the core text and fails on one mention of the Z2 package, which
+# is rule 5 of the zones. It reads the sources through its library's runfiles.
+py_test(
+    name = "gate_core_independence_test",
+    srcs = ["tests/gate_core_independence_test.py"],
+    deps = [":nanochat_cpp"],
+    size = "small",
+)
+
 # Aggregation point consumed by //:all_tests.
 test_suite(
     name = "all",
@@ -359,5 +444,10 @@ test_suite(
         ":mesh_test",
         ":runtime_test",
         ":run_test",
+        ":gate_import_isolation_test",
+        ":gate_stdlib_imports_test",
+        ":gate_pyproject_test",
+        ":gate_provenance_test",
+        ":gate_core_independence_test",
     ],
 )

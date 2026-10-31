@@ -1,5 +1,16 @@
 """T0: the reference-checkpoint name, dtype, container, path, and metadata.
 
+The container half of the conversion is `nanochat_cpp.checkpoint`: the magic,
+the record framing, the dtype table, the name remap, the metadata block, and
+the path resolution, all standard library plus the loaded shared library. The
+torch half -- reading a reference `state_dict`, casting its tensors, and
+reassembling the AdamW and Muon optimizer state -- is
+`nanochat_cpp_bridge.torch_checkpoint`, the Z2 package of
+`docs/dependency-layering-plan.md` section 4. The conversion tests below drive
+that builder with fake tensors, so this file still needs no torch and no
+network; the container tests feed the records it returns into the core's write
+path, which is the boundary the two halves meet at.
+
 This replaces the removed self-test checks and is hermetic: the standard
 library plus the loaded shared library, no third-party import and no network.
 See docs/python.md section 11.1 and
@@ -17,6 +28,12 @@ from unittest import mock
 
 from nanochat_cpp import _build, _core, _lib, checkpoint
 from nanochat_cpp.api import Config, Model
+from nanochat_cpp_bridge import torch_checkpoint
+from nanochat_cpp_bridge.torch_checkpoint import (
+    build_optimizer_records,
+    build_records,
+    optimizer_order_key,
+)
 
 # The storage dtype codes come from the C surface, so the test pins no layout
 # constant of its own.
@@ -496,43 +513,132 @@ class PathResolutionTest(unittest.TestCase):
 
 
 class _FakeTensor:
-    """A stdlib stand-in for one reference optimizer tensor."""
+    """A stdlib stand-in for one reference tensor."""
 
     def __init__(self, shape, payload):
         self.shape = tuple(shape)
         self.payload = payload
 
+    def is_floating_point(self) -> bool:
+        return True
+
+
+class _FakeTorch:
+    """The two things the record builder asks of ``torch``.
+
+    ``build_records`` imports torch to answer ``isinstance(tensor, Tensor)``
+    and to cast a payload, and nothing else. A test class satisfies both, so
+    the builder runs on a host with no wheel installed.
+    """
+
+    Tensor = _FakeTensor
+
+
+def _payload(tensor, target="float32"):
+    """The payload of a fake tensor, standing in for the cast to bytes.
+
+    ``_tensor_payload`` takes the target dtype and ``_optimizer_payload`` does
+    not, so the default lets one stand-in patch both.
+    """
+    return tensor.payload
+
+
+def _optimizer_state():
+    """A reference optimizer state dict: AdamW moments and one Muon shard."""
+    state = {
+        0: {
+            "step": 3,
+            "exp_avg": _FakeTensor((2, 2), b"A" * 16),
+            "exp_avg_sq": _FakeTensor((2, 2), b"B" * 16),
+        },
+        7: {
+            "step": 3,
+            "exp_avg": _FakeTensor((1,), b"C" * 4),
+            "exp_avg_sq": _FakeTensor((1,), b"D" * 4),
+        },
+        9: {
+            "momentum_buffer": _FakeTensor((2, 3, 4), b"M" * 96),
+            "second_momentum_buffer": _FakeTensor((2, 3, 1), b"V" * 24),
+        },
+    }
+    groups = [
+        {"kind": "adamw", "params": [0, 7]},
+        {"kind": "muon", "params": [9, 10]},
+    ]
+    return {"state": state, "param_groups": groups}
+
+
+class RecordBuildTest(unittest.TestCase):
+    """A reference state dict becomes container records, with no torch."""
+
+    def build(self, state_dict, **options):
+        module = mock.patch.object(torch_checkpoint, "_torch",
+                                   lambda: _FakeTorch)
+        cast = mock.patch.object(torch_checkpoint, "_tensor_payload", _payload)
+        with module, cast:
+            return build_records(state_dict, **options)
+
+    def test_wrapped_and_legacy_names_become_canonical_records(self) -> None:
+        state = {
+            "module._orig_mod.transformer.wte.weight": _FakeTensor(
+                (2, 2), b"w" * 16),
+            "transformer.h.0.attn.proj.weight": _FakeTensor((1, 1), b"p" * 4),
+        }
+        records = self.build(state)
+        self.assertEqual([record.name for record in records], [
+            "transformer.wte.weight",
+            "transformer.h.0.attn.c_proj.weight",
+        ])
+        self.assertEqual(records[0].shape, (2, 2))
+        self.assertEqual(records[0].dtype, FP32)
+        self.assertEqual(records[0].data, b"w" * 16)
+
+    def test_the_target_dtype_is_a_container_dtype(self) -> None:
+        # The fake payload is the same for both targets: a fake tensor "casts"
+        # to the bytes it was built with, and the builder only asks the target
+        # dtype for its code.
+        state = {"lm_head.weight": _FakeTensor((4,), bytes(8))}
+        self.assertEqual(self.build(state)[0].dtype, FP32)
+        self.assertEqual(self.build(state, target="bfloat16")[0].dtype, BF16)
+        with self.assertRaises(checkpoint.UnsupportedDtype):
+            self.build(state, target="float16")
+
+    def test_an_unknown_key_is_rejected_unless_skipped(self) -> None:
+        state = {
+            "optimizer.momentum": _FakeTensor((1,), b"x" * 4),
+            "lm_head.weight": _FakeTensor((1,), b"y" * 4),
+        }
+        with self.assertRaises(checkpoint.UnknownParameter):
+            self.build(state)
+        records = self.build(state, skip_unknown=True)
+        self.assertEqual([record.name for record in records],
+                         ["lm_head.weight"])
+
+    def test_the_records_feed_the_container_write(self) -> None:
+        """The two halves of the conversion meet at the core's write path."""
+        parameters = self.build({
+            "transformer.wte.weight": _FakeTensor((2, 2), b"w" * 16),
+        })
+        with mock.patch.object(torch_checkpoint, "_optimizer_payload",
+                               _payload):
+            optimizer = build_optimizer_records(_optimizer_state())
+        self.assertEqual([record.name for record in optimizer],
+                         ["adamw.lm_head.m", "adamw.lm_head.v",
+                          "muon.3x4.buf1", "muon.3x4.buf2"])
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "model.nchkpt01"
+            checkpoint.write_checkpoint(path, parameters, optimizer)
+            self.assertEqual(checkpoint.read_checkpoint_full(path),
+                             (parameters, optimizer))
+
 
 class OptimizerStateTest(unittest.TestCase):
     """The reference optimizer shard becomes C++ optimizer-state records."""
 
-    def optimizer_state(self):
-        state = {
-            0: {
-                "step": 3,
-                "exp_avg": _FakeTensor((2, 2), b"A" * 16),
-                "exp_avg_sq": _FakeTensor((2, 2), b"B" * 16),
-            },
-            7: {
-                "step": 3,
-                "exp_avg": _FakeTensor((1,), b"C" * 4),
-                "exp_avg_sq": _FakeTensor((1,), b"D" * 4),
-            },
-            9: {
-                "momentum_buffer": _FakeTensor((2, 3, 4), b"M" * 96),
-                "second_momentum_buffer": _FakeTensor((2, 3, 1), b"V" * 24),
-            },
-        }
-        groups = [
-            {"kind": "adamw", "params": [0, 7]},
-            {"kind": "muon", "params": [9, 10]},
-        ]
-        return {"state": state, "param_groups": groups}
-
     def build(self):
-        with mock.patch.object(checkpoint, "_optimizer_payload",
-                               lambda tensor: tensor.payload):
-            return checkpoint.build_optimizer_records(self.optimizer_state())
+        with mock.patch.object(torch_checkpoint, "_optimizer_payload",
+                               _payload):
+            return build_optimizer_records(_optimizer_state())
 
     def test_adamw_groups_are_concatenated(self):
         records = {record.name: record for record in self.build()}
@@ -555,9 +661,9 @@ class OptimizerStateTest(unittest.TestCase):
             for i in range(6)
         }
         groups = [{"kind": "adamw", "params": [i]} for i in range(6)]
-        with mock.patch.object(checkpoint, "_optimizer_payload",
-                               lambda tensor: tensor.payload):
-            records = checkpoint.build_optimizer_records(
+        with mock.patch.object(torch_checkpoint, "_optimizer_payload",
+                               _payload):
+            records = build_optimizer_records(
                 {"state": state, "param_groups": groups})
         self.assertEqual([record.name for record in records], [
             "adamw.lm_head.m", "adamw.lm_head.v",
@@ -569,9 +675,9 @@ class OptimizerStateTest(unittest.TestCase):
         ])
 
     def test_group_without_saved_state_is_skipped(self):
-        with mock.patch.object(checkpoint, "_optimizer_payload",
-                               lambda tensor: tensor.payload):
-            records = checkpoint.build_optimizer_records(
+        with mock.patch.object(torch_checkpoint, "_optimizer_payload",
+                               _payload):
+            records = build_optimizer_records(
                 {"state": {}, "param_groups": [
                     {"kind": "adamw", "params": [0]},
                     {"kind": "muon", "params": [1]},
@@ -584,7 +690,7 @@ class OptimizerStateTest(unittest.TestCase):
             "adamw.embedding.m", "adamw.embedding.v",
             "muon.4x8.buf2", "muon.4x8.buf1", "muon.2x2.buf1",
         ]
-        self.assertEqual(sorted(names, key=checkpoint.optimizer_order_key), [
+        self.assertEqual(sorted(names, key=optimizer_order_key), [
             "adamw.lm_head.m", "adamw.lm_head.v",
             "adamw.embedding.m", "adamw.embedding.v",
             "muon.2x2.buf1", "muon.4x8.buf1", "muon.4x8.buf2",

@@ -58,6 +58,20 @@ directory and edits no frozen header. See
 flagship package in
 [models/nanochat-default](models/nanochat-default/README.md).
 
+## Install
+
+The base install is the whole Python surface with no third-party dependency:
+`pip install nanochat-cpp` carries both import packages, `nanochat_cpp` imports
+only the standard library, and `nanochat_cpp_bridge` imports its heavy package
+inside the function that needs it, so the base stays inert until a task adds one
+extra. `nanochat-cpp[hub]` reads a stage from a notebook,
+`nanochat-cpp[reference,nanochat]` produces a parity fixture, and
+`nanochat-cpp[reference,nanochat,hfdata]` builds SFT data from the Hub; the
+`nanochat-cpp-convert` console script converts a reference checkpoint. The
+per-architecture binary wheel that carries the shared library is not published
+yet, so a host that needs the C++ core builds the source tree below, which is
+also the workstation path.
+
 ## Quickstart
 
 ```bash

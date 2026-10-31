@@ -8,6 +8,15 @@ assembly, the Bazel wiring, the build lock, and the sandbox and queue routing
 live in ``python/nanochat_cpp/cli.py``. Run ``tools/nanochat help`` for the
 command list.
 
+One command is not in that table. ``tools/nanochat parity produce <kind>`` runs
+an offline parity producer (``docs/dependency-layering-plan.md`` section 7.3):
+a producer imports PyTorch and the reference checkout, so it lives in the
+adapter package a host installs as an extra, and the core command table must
+not name that package. This tool therefore dispatches ``parity`` itself, before
+the delegation below, and the row appears in the usage under its own heading.
+No producer runs under ``test``, so the build lock and the sandbox still cover
+every long job.
+
 The host tool needs Python 3.10 or later, which ``docs/build.md`` records.
 
 This file keeps its name. ``include/nanochat/sandbox.h`` prints
@@ -16,19 +25,300 @@ This file keeps its name. ``include/nanochat/sandbox.h`` prints
 
 from __future__ import annotations
 
+import importlib
+import importlib.util
+import os
+import subprocess
 import sys
 from pathlib import Path
 
 # This file lives at <repo>/tools/nanochat; the package lives under
 # <repo>/python. Put that on the path, so the tool runs from any directory.
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "python"))
+REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO_ROOT / "python"))
 
-from nanochat_cpp import cli  # noqa: E402
+from nanochat_cpp import _entry, cli  # noqa: E402
+
+#: The one command this host adds to the core table.
+PARITY = "parity"
+
+#: The extras of section 6.2 that supply a producer: PyTorch, numpy, and the
+#: reference checkout.
+PARITY_EXTRA = "reference,nanochat"
+
+#: The interpreter of the reference environment, when a caller pins one.
+PYTHON_ENV = "NANOCHAT_PYTHON"
+
+#: Set on the child of a re-exec, so one producer run moves interpreter once.
+INPROCESS_ENV = "NANOCHAT_PARITY_INPROCESS"
+
+#: The host rows of the help block. They are indented three spaces, not the two
+#: of a core command row, because the parity command is a host command and not a
+#: row of the core table: ``python/tests/contract_test.py`` reads the two-space
+#: rows of ``tools/nanochat help`` and pins them against
+#: ``nanochat_cpp._entry.names()``.
+PARITY_HELP = """\
+Reference fixtures: the offline parity producers of
+docs/dependency-layering-plan.md section 7.3. A producer runs in the reference
+environment, writes the bytes a T0 test reads, and prints the environment
+record a model manifest stamps (section 7.2). No producer runs under `test`.
+
+   parity produce <kind> [options]
+                             run one producer and print its provenance record
+   parity help               this message
+"""
+
+#: The error text a producer-less host gets, so the fix is one line.
+_MISSING_ENVIRONMENT = (
+    "no reference environment can run a parity producer: install the extras "
+    "({line}) or set {variable} to the interpreter that has them"
+)
+
+
+class ParityError(Exception):
+    """A ``parity`` command-line error. ``main`` prints it and returns 2."""
+
+
+# -- the parity command ------------------------------------------------------
+
+
+def _fixtures():
+    """The producer package of Z2, imported on use: a host may import it."""
+    return importlib.import_module("nanochat_cpp_bridge.fixtures")
+
+
+def _extras():
+    """The extras map of Z2: it names the install line of a missing package."""
+    return importlib.import_module("nanochat_cpp_bridge._extras")
+
+
+def _kinds() -> tuple[str, ...]:
+    """Every producer kind and alias, sorted, for the usage line."""
+    try:
+        fixtures = _fixtures()
+    except ImportError:
+        return ()
+    return tuple(sorted(set(fixtures.KINDS) | set(fixtures.ALIASES)))
+
+
+def parity_usage() -> str:
+    """The ``parity`` usage block, with the producer kinds this tree offers."""
+    kinds = _kinds()
+    listing = (", ".join(kinds) if kinds
+               else "unknown: the adapter package did not import")
+    return PARITY_HELP + "\nKinds: " + listing + "\n"
+
+
+def _produce_usage() -> str:
+    """The usage of ``parity produce``, before a kind is known."""
+    return (
+        "usage: tools/nanochat parity produce <kind> [options]\n"
+        "\n"
+        "Run one offline parity producer and print its provenance record.\n"
+        "`parity produce <kind> --help` shows the options of one kind.\n"
+        "\n"
+        + parity_usage())
+
+
+def _wants_help(argv: list[str]) -> bool:
+    """Whether the arguments ask for help rather than for a run."""
+    return any(argument in ("-h", "--help") for argument in argv)
+
+
+def _producer_module(kind: str):
+    """The producer module of ``kind``, imported with no extra installed."""
+    fixtures = _fixtures()
+    try:
+        return fixtures.producer_module(kind)
+    except ValueError as error:
+        raise ParityError(str(error)) from error
+
+
+def _producer_path(kind: str) -> str:
+    """The import path of the module that produces ``kind``."""
+    fixtures = _fixtures()
+    return fixtures.KINDS[fixtures.canonical_kind(kind)]
+
+
+def _no_environment(detail: str | None = None):
+    """The named error of a missing reference environment (section 6.2)."""
+    extras = _extras()
+    line = extras.INSTALL_LINE.format(extra=PARITY_EXTRA)
+    message = _MISSING_ENVIRONMENT.format(line=line, variable=PYTHON_ENV)
+    if detail:
+        message += f" ({detail})"
+    return extras.MissingExtra(message)
+
+
+def _has_extras() -> bool:
+    """Whether this interpreter can run a producer: torch and the reference.
+
+    The probe puts the reference checkout on ``sys.path`` (which a producer
+    needs anyway) and then asks for the module spec, so it never imports torch:
+    a host with a half-installed wheel stays cheap and side-effect free.
+    """
+    from nanochat_cpp import reference  # noqa: PLC0415 - Z1, on use
+
+    try:
+        reference.ensure_reference_on_path()
+    except SystemExit:
+        # No reference checkout: the probe below reports the missing package.
+        pass
+    for package in ("torch", "nanochat"):
+        try:
+            if importlib.util.find_spec(package) is None:
+                return False
+        except (ImportError, ValueError):
+            return False
+    return True
+
+
+def _checkout_venv() -> Path | None:
+    """The reference checkout's ``.venv`` interpreter, when it has one.
+
+    The reference environment is a virtual environment beside the reference
+    checkout, which is the shape ``tools/dump_fixtures.py`` documents. A
+    checkout without one establishes nothing, so this returns ``None`` rather
+    than inventing a path.
+    """
+    from nanochat_cpp import reference  # noqa: PLC0415 - Z1, on use
+
+    try:
+        repo = reference.find_reference_repo()
+    except SystemExit:
+        return None
+    for name in ("python3", "python"):
+        candidate = repo / ".venv" / "bin" / name
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return candidate
+    return None
+
+
+def _reference_interpreter() -> str | None:
+    """The interpreter that runs a producer, or ``None`` when none is found.
+
+    Order: this interpreter when it already holds the extras, so the common
+    case costs no second process; then ``NANOCHAT_PYTHON``; then the reference
+    checkout's virtual environment (section 7.3).
+    """
+    if _has_extras():
+        return sys.executable
+    explicit = os.environ.get(PYTHON_ENV)
+    if explicit:
+        return explicit
+    venv = _checkout_venv()
+    return None if venv is None else str(venv)
+
+
+def _reexec(interpreter: str, kind: str, options: list[str]) -> int:
+    """Re-run this command under the reference interpreter."""
+    environment = dict(os.environ)
+    environment[INPROCESS_ENV] = "1"
+    argv = [interpreter, str(Path(__file__).resolve()), PARITY, "produce",
+            kind, *options]
+    sys.stderr.write(f"nanochat: running the producer in {interpreter}\n")
+    try:
+        return subprocess.run(argv, env=environment, check=False).returncode
+    except OSError as error:
+        raise _no_environment(str(error)) from error
+
+
+def _produce_here(kind: str, options: list[str]) -> int:
+    """Run one producer in this process and report the path it wrote.
+
+    The producer's own parser types and validates the options, so a host
+    forwards what it was given and the defaults stay in one place.
+    """
+    module = _producer_module(kind)
+    build = getattr(module, "build_parser", None)
+    if build is None:
+        raise ParityError(
+            f"the {kind!r} producer has no build_parser, so the tool cannot "
+            f"forward options to it; run it as a module instead: "
+            f"python3 -m {_producer_path(kind)} --help")
+    parsed = build().parse_args(options)
+    settings = {key: value for key, value in vars(parsed).items()
+                if key not in ("out", "model")}
+    forwarded: dict = {}
+    for name in ("out", "model"):
+        value = getattr(parsed, name, None)
+        if value is not None:
+            forwarded[name] = value
+    path = _fixtures().produce(kind, **forwarded, **settings)
+    sys.stdout.flush()
+    sys.stderr.write(f"nanochat: produced {path}\n")
+    return 0
+
+
+def _run(kind: str, options: list[str]) -> int:
+    """Run one producer, moving to the reference interpreter when needed."""
+    if os.environ.get(INPROCESS_ENV) == "1":
+        return _produce_here(kind, options)
+    interpreter = _reference_interpreter()
+    if interpreter is None:
+        raise _no_environment()
+    if os.path.realpath(interpreter) == os.path.realpath(sys.executable):
+        return _produce_here(kind, options)
+    return _reexec(interpreter, kind, options)
+
+
+def _produce(argv: list[str]) -> int:
+    """Run ``parity produce``: resolve the kind, then the producer."""
+    kind = argv[0] if argv and not argv[0].startswith("-") else None
+    options = list(argv[1:]) if kind is not None else list(argv)
+    if kind is None:
+        if _wants_help(options):
+            sys.stdout.write(_produce_usage())
+            return 0
+        sys.stderr.write(_produce_usage())
+        return 2
+    module = _producer_module(kind)
+    if _wants_help(options):
+        build = getattr(module, "build_parser", None)
+        if build is None:
+            raise ParityError(
+                f"the {kind!r} producer has no build_parser; run it as a "
+                f"module instead: python3 -m {_producer_path(kind)} --help")
+        build().print_help()
+        return 0
+    return _run(kind, options)
+
+
+def _parity(argv: list[str]) -> int:
+    """Run one ``parity`` action and return the exit code."""
+    if not argv:
+        sys.stdout.write(parity_usage())
+        return 2
+    action, rest = argv[0], argv[1:]
+    if action in ("help", "-h", "--help"):
+        sys.stdout.write(parity_usage())
+        return 0
+    if action != "produce":
+        raise ParityError(
+            f"unknown parity action {action!r} "
+            "(try: tools/nanochat parity help)")
+    return _produce(rest)
+
+
+def _report_parity(argv: list[str]) -> int:
+    """Run ``parity`` and print its errors the way ``cli`` prints its own."""
+    extras = _extras()
+    try:
+        return _parity(argv)
+    except (ParityError, extras.MissingExtra) as error:
+        sys.stderr.write(f"nanochat: {error}\n")
+        return 2
 
 
 def main(argv: list[str] | None = None) -> int:
     """Run one command. ``cli.main`` reports an argument error as code 2."""
-    return cli.main(sys.argv[1:] if argv is None else argv)
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    if arguments and arguments[0] == PARITY:
+        return _report_parity(arguments[1:])
+    if arguments and arguments[0] in ("help", "-h", "--help"):
+        sys.stdout.write(_entry.usage() + "\n" + parity_usage())
+        return 0
+    return cli.main(arguments)
 
 
 if __name__ == "__main__":

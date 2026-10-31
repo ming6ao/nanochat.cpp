@@ -28,6 +28,11 @@ two kinds cannot drift apart (``docs/sft-parity-plan.md`` sections 5 to 7).
 
 The module imports no third-party package at import time. Each kind imports
 its own reference package, so a kind that does not touch PyTorch stays fast.
+The helpers that need one of those packages live in the adapter package
+``nanochat_cpp_bridge`` (``docs/dependency-layering-plan.md`` section 5): a
+kind imports ``reference_data`` for the ``tiktoken`` encoding and the
+reference tokenizer, and the core keeps the ``NCTOKEN1`` reader and the
+container writer.
 """
 
 from __future__ import annotations
@@ -2592,7 +2597,11 @@ if _command == 'loader':
         sys.path.insert(0, str(bridge))
         import torch
         from nanochat import dataloader
-        from nanochat_cpp.data import load_nctoken1
+        # The ``tiktoken`` tokenizer over an NCTOKEN1 artifact lives in the
+        # adapter package; the core's reader, ``nanochat_cpp.data.read_nctoken1``,
+        # stays in the standard library only (docs/dependency-layering-plan.md
+        # sections 2.1 and 5).
+        from nanochat_cpp_bridge.reference_data import load_nctoken1
 
         tokenizer = load_nctoken1(str(tokenizer_path))
         docs = documents()
@@ -2762,9 +2771,12 @@ if _command == 'chat':
 
         ensure_reference_on_path()
         from nanochat.tokenizer import RustBPETokenizer  # noqa: E402
+        # ``build_tiktoken_encoding`` needs ``tiktoken``, so it lives in the
+        # adapter package; the artifact reader is the core's (section 5).
+        from nanochat_cpp_bridge import reference_data  # noqa: E402
 
         artifact = data.read_nctoken1(repo_root / args.tokenizer)
-        encoding = data.build_tiktoken_encoding(artifact)
+        encoding = reference_data.build_tiktoken_encoding(artifact)
         tokenizer = RustBPETokenizer(encoding, "<|bos|>")
 
         cases = []
