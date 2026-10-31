@@ -1,0 +1,59 @@
+# python/ — the package description of the distribution (docs/dependency-
+# layering-plan.md section 6.1).
+#
+# One distribution, two import packages (D1 and D2): `nanochat_cpp` (Z1, the
+# standard library only) and `nanochat_cpp_bridge` (Z2, every heavy import).
+# The base dependency list is empty on purpose — it is the invariant of rule 1
+# of section 4 and the line gate G3 reads — so `pip install nanochat-cpp`
+# pulls no third-party package and the wheel stays pure. A task installs the
+# extra of section 6.2 and nothing else; a bridge module is inert until then,
+# because it imports its heavy package inside the function that needs it.
+#
+#   pip install nanochat-cpp                       # the pure wheel
+#   pip install "nanochat-cpp[hub]"                # a notebook, or a stage
+#   pip install "nanochat-cpp[reference,nanochat]" # produce a parity fixture
+
+[build-system]
+# Build time only: the tools that turn this tree into a wheel. Nothing here is
+# a runtime requirement, and none of it may reach `project.dependencies`.
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nanochat-cpp"
+version = "0.1.0"
+description = "The Python surface of nanochat.cpp: the API, the tooling, and the reference adapters."
+requires-python = ">=3.10"
+dependencies = []          # Z1. This line is the invariant.
+
+[project.optional-dependencies]
+# Read a stage from the Hugging Face Hub: one checkpoint, one tokenizer.
+hub       = ["huggingface_hub>=0.24", "safetensors>=0.4"]
+# Convert a reference checkpoint and build the reference mixture.
+reference = ["torch>=2.4", "numpy>=1.26", "tiktoken>=0.8"]
+# The reference PyTorch nanochat checkout the producers compare against.
+nanochat  = ["nanochat @ git+https://github.com/karpathy/nanochat"]
+# Task and SFT data from the Hub. `filelock` belongs here and never in the base
+# list: the tasks-side hub loader used it (sections 2.1 and 11).
+hfdata    = ["datasets>=2.20", "tokenizers>=0.20", "pyarrow>=16", "filelock>=3.13"]
+# The Modal image and its worker entry.
+modal     = ["modal>=0.64"]
+# A notebook session on a host that has no source tree.
+notebook  = ["jupyterlab", "ipykernel"]
+
+[project.urls]
+# D12: the first channel is a repository, not a release index. The URL is the
+# one the Kaggle fallback clones (notebooks/kaggle_setup.py).
+Repository = "https://github.com/ming6ao/nanochat.cpp"
+
+[project.scripts]
+# The converter of section 2.1. `tools/convert_checkpoint.py` forwards here, so
+# the wheel and the source tree share one entry point. Converting needs the
+# `reference` extra; the base install carries the module and no torch.
+nanochat-cpp-convert = "nanochat_cpp_bridge.torch_checkpoint:main"
+
+[tool.setuptools.packages.find]
+# Both import packages ship in the one distribution (D1, D2). The base install
+# carries the bridge files too: they import with no extra, and only a call
+# needs one.
+include = ["nanochat_cpp*", "nanochat_cpp_bridge*"]
