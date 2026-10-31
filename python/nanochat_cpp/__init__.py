@@ -86,6 +86,7 @@ __all__ = [
     "chat",
     "distributed",
     "mesh",
+    "pipeline",
     "plan",
     "rl",
     "runtime",
@@ -135,9 +136,9 @@ _EXPORTS = {
 #: stay honest without importing any of them.
 _SUBMODULES = (
     "_build", "_core", "_entry", "_lib", "api", "chat", "checkpoint", "cli",
-    "data", "distributed", "eval_fixture", "gpu_queue", "lint", "mesh", "plan",
-    "prune", "reference", "rl", "run", "runtime", "sandbox", "seam", "sft",
-    "sft_data", "tasks", "toolchain",
+    "data", "distributed", "eval_fixture", "gpu_queue", "lint", "mesh",
+    "pipeline", "plan", "prune", "reference", "rl", "run", "runtime",
+    "sandbox", "seam", "sft", "sft_data", "tasks", "toolchain",
 )
 
 

@@ -114,6 +114,12 @@ class Toolchain:
     ``env`` overrides the child environment; the default is a copy of
     ``os.environ``. ``check`` controls whether a nonzero status raises
     :class:`ToolError`; the per-call ``check`` argument wins.
+
+    A command that runs a child executable has two shapes (see
+    :meth:`_dispatch`): through ``tools/nanochat`` when this process holds no
+    scope, and as a direct child of this process when it already does. The
+    second shape is what keeps the three stages of the chain inside the one
+    scope the run was given (docs/pipeline-plan.md B5).
     """
 
     def __init__(self, entry: str | os.PathLike | None = None,
@@ -132,19 +138,40 @@ class Toolchain:
     def _run(self, argv: Sequence[str], check: bool | None = None) -> CommandResult:
         """Run ``self.entry`` with ``argv`` and capture the result."""
         arguments = [str(value) for value in argv]
-        command = [str(self.entry), *arguments]
+        return self._capture([str(self.entry), *arguments], arguments, check)
+
+    def _run_direct(self, argv: Sequence[str],
+                    check: bool | None = None) -> CommandResult:
+        """Run one child executable itself and capture the result.
+
+        The child inherits ``self.env``, which holds the ``NANOCHAT_SANDBOX``
+        or ``NANOCHAT_GPU_QUEUED`` sentinel that says a scope or a queued job
+        is already active, so the child runs inside the scope this process
+        already holds and no second profile is created.
+        """
+        arguments = [str(value) for value in argv]
+        return self._capture(arguments, arguments, check)
+
+    def _capture(self, command: Sequence[str], arguments: Sequence[str],
+                 check: bool | None = None) -> CommandResult:
+        """Run ``command`` and capture it; ``arguments`` is the reported argv.
+
+        The entry point and a direct child share this path, so the two arms
+        report one :class:`CommandResult` and fail the same way.
+        """
+        reported = [str(value) for value in arguments]
         start = time.monotonic()
         try:
             completed = subprocess.run(
-                command, cwd=str(self.repo_root), env=self.env,
-                capture_output=True, text=True, timeout=self.timeout,
-                check=False)
+                [str(part) for part in command], cwd=str(self.repo_root),
+                env=self.env, capture_output=True, text=True,
+                timeout=self.timeout, check=False)
             seconds = time.monotonic() - start
         except OSError as error:
-            result = CommandResult(tuple(arguments), 127, "", str(error),
+            result = CommandResult(tuple(reported), 127, "", str(error),
                                    time.monotonic() - start)
             raise ToolError(result) from error
-        result = CommandResult(argv=tuple(arguments),
+        result = CommandResult(argv=tuple(reported),
                                returncode=completed.returncode,
                                stdout=completed.stdout,
                                stderr=completed.stderr,
@@ -152,6 +179,49 @@ class Toolchain:
         if (self._check if check is None else check) and result.returncode != 0:
             raise ToolError(result)
         return result
+
+    # -- The in-scope branch ----------------------------------------------
+
+    def _dispatch(self, direct: Sequence[str] | None,
+                  wrapped: Sequence[str]) -> CommandResult:
+        """Run a command directly inside a scope, and via the entry outside.
+
+        When ``NANOCHAT_SANDBOX`` or ``NANOCHAT_GPU_QUEUED`` is set this
+        process already holds a resource scope or a queued job, so ``direct``
+        (one child executable and its arguments) runs as a child of this
+        process and inherits that scope. Otherwise ``wrapped`` runs through
+        ``tools/nanochat``, which starts the sandbox scope, the GPU queue, and
+        the resource profile.
+
+        ``direct`` is ``None`` for a command whose argv carries flags and not
+        a child executable (:meth:`profile`): the entry point owns that
+        command, so both arms run ``wrapped``.
+
+        Two facts about the tree make this the only working shape, and both
+        are one command each to check. First, the entry point is not a
+        passthrough: ``tools/nanochat /bin/echo hi`` prints ``unknown command
+        '/bin/echo'`` and exits 2, so handing a raw child argv to ``_run``
+        cannot be the direct arm (the pre-B5 branch of :meth:`gpu` did exactly
+        that, and so never ran its child). Second, the entry point already
+        skips its own scope when a sentinel is set: ``cli.Context.submit``
+        execs the child under ``in_sandbox()``, which
+        ``NANOCHAT_SANDBOX=t0-cpu tools/nanochat train -- /bin/echo ok`` shows
+        by printing ``ok`` and starting no profile. So the defect of B5 is
+        narrower than "a nested tools/nanochat starts a nested scope": what
+        still re-enters is the *queue* (:meth:`gpu` under a bare sandbox
+        sentinel, and ``profile``, whose handler submits a job). This helper is
+        the facade-level statement of one rule: a child launched from a
+        process that already holds a scope runs in that scope, and nothing
+        asks for a second one (docs/pipeline-plan.md B5).
+        """
+        if direct is not None and self._in_scope():
+            return self._run_direct(direct)
+        return self._run(wrapped)
+
+    def _in_scope(self) -> bool:
+        """True when this process already runs inside a scope or a queued job."""
+        return bool(self.env.get("NANOCHAT_SANDBOX")
+                    or self.env.get("NANOCHAT_GPU_QUEUED"))
 
     # -- Commands ---------------------------------------------------------
 
@@ -242,7 +312,14 @@ class Toolchain:
         return self._run(arguments)
 
     def train(self, argv: Sequence[str] | None = None) -> CommandResult:
-        return self._run(["train", "--", *(argv or [])])
+        """Run one child executable under the ``train`` profile.
+
+        Inside a scope or a queued job the child itself runs, so a stage of the
+        chain keeps the one scope it was given and starts no second profile
+        (docs/pipeline-plan.md B5).
+        """
+        arguments = [*(argv or [])]
+        return self._dispatch(arguments, ["train", "--", *arguments])
 
     def rl(self, argv: Sequence[str] | None = None) -> CommandResult:
         """Run the persistent RL worker.
@@ -252,35 +329,46 @@ class Toolchain:
         through the ``train`` profile. The method emits that profile so the
         alias works without a separate shell subcommand.
         """
-        return self._run(["train", "--", *(argv or [])])
+        arguments = [*(argv or [])]
+        return self._dispatch(arguments, ["train", "--", *arguments])
 
     def eval(self, argv: Sequence[str] | None = None) -> CommandResult:
-        return self._run(["eval", "--", *(argv or [])])
+        """Run one evaluation child, directly inside an active scope."""
+        arguments = [*(argv or [])]
+        return self._dispatch(arguments, ["eval", "--", *arguments])
 
     def bench(self, argv: Sequence[str] | None = None) -> CommandResult:
-        return self._run(["bench", "--", *(argv or [])])
+        """Run one benchmark child, directly inside an active scope."""
+        arguments = [*(argv or [])]
+        return self._dispatch(arguments, ["bench", "--", *arguments])
 
     def verify(self, argv: Sequence[str] | None = None) -> CommandResult:
-        return self._run(["verify", "--", *(argv or [])])
+        """Run one verification child, directly inside an active scope."""
+        arguments = [*(argv or [])]
+        return self._dispatch(arguments, ["verify", "--", *arguments])
 
     def profile(self, argv: Sequence[str] = ()) -> CommandResult:
-        return self._run(["profile", *argv])
+        """Run the attention-benchmark profile.
+
+        ``argv`` carries flags (``--json``), not a child executable: the entry
+        point builds the benchmark and submits it to the queue itself, so this
+        method has no direct arm and calls the entry point in both branches.
+        """
+        arguments = [*argv]
+        return self._dispatch(None, ["profile", *arguments])
 
     def gpu(self, argv: Sequence[str], *,
             profile: str | None = None) -> CommandResult:
         """Submit one GPU job to the queue, then wait for it.
 
         When the process already runs inside the sandbox or a queued job, the
-        command runs directly. This mirrors the shell entry point and avoids a
-        nested job.
+        command itself runs and no second job is submitted. This mirrors the
+        shell entry point and avoids a nested job.
         """
-        if self.env.get("NANOCHAT_SANDBOX") or \
-                self.env.get("NANOCHAT_GPU_QUEUED"):
-            return self._run(argv)
         prefix = ["gpu"]
         if profile is not None:
             prefix.extend(["--profile", str(profile)])
-        return self._run([*prefix, "--", *argv])
+        return self._dispatch(argv, [*prefix, "--", *argv])
 
     def gpuq(self, argv: Sequence[str]) -> CommandResult:
         """Run one ``tools/nanochat gpuq`` action.

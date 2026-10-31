@@ -14,6 +14,14 @@ item 5:
 5. an installed ``nanochat_cpp_cuda_<arch>`` wheel;
 6. the cache or an on-demand build from ``nanochat_cpp._build``.
 
+The two stage executables of the chain follow the same shape, because
+:func:`nanochat_cpp._build.stage_binary` resolves them in this module's order
+and not in the shorter list of ``docs/python.md`` section 3.2 that omits them:
+the override, the runfiles tree, ``bazel-bin/src/<name>``, and the
+``nanochat-<name>`` entry point of a future wheel. A library and a stage
+executable are then found by one rule, so a reader who trusts one docstring
+trusts the other (``docs/pipeline-plan.md`` B6).
+
 Item 5 is how a host that installed a binary wheel finds its library without a
 repository clone (section 6.4). A wheel is named for the CUDA architecture it
 was built for, ``nanochat_cpp_cuda_sm75`` for example, so a request for another
