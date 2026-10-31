@@ -25,6 +25,24 @@ struct OptimizerConfig {
   float adam_eps = 1e-10f;
   // Global gradient-norm clip; <= 0 disables clipping.
   float clip = 1.0f;
+  // The fraction of every group rate that a run starts from (design decision D3
+  // of docs/sft-parity-plan.md): the reference SFT run multiplies each group
+  // rate by `init_lr_frac = 0.8` once, before the first step, and lets the
+  // schedule take it from there.
+  //
+  // `src/optim.cc` applies it once, to every group, inside `Build`, which is
+  // where the per-group rates are set: the unembedding, the embedding, the
+  // value embeddings, the residual lambdas, the x0 lambdas, the smear and
+  // backout group (the reference scales the smear group too, even though its
+  // rate is the one constant of section 5.2's table rather than a configured
+  // rate), and the Muon matrices. No call site scales a rate: `Step` multiplies
+  // `group.lr` by the schedule only, so a second scaling at a call site would
+  // square the factor.
+  //
+  // The default of 1.0 is today's behavior, so a run that does not set it (and
+  // every caller of the C surface `nanochat/capi.h`, whose flat
+  // `nanochat_optim_config` does not carry the field) is unchanged.
+  float init_lr_frac = 1.0f;
 };
 
 class Optimizer {
