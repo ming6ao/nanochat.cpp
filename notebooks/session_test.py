@@ -230,5 +230,117 @@ class BootstrapTest(unittest.TestCase):
             self.assertEqual(result, "prepared")
 
 
+class FakeInstalledPackage:
+    """A ``nanochat_cpp`` module with the one attribute the session reads."""
+
+    def __init__(self, location="/opt/site-packages/nanochat_cpp/__init__.py"):
+        self.__file__ = location
+
+
+class InstalledTest(unittest.TestCase):
+    """The installed-package path of section 6.5: no clone and no build."""
+
+    def setUp(self) -> None:
+        # Hold the originals as instance attributes: a function stored on the
+        # class binds as a method, and the restore would then pass ``self``.
+        self.original_setup = kaggle_setup.setup
+        self.original_revision = kaggle_setup.installed_revision
+        self.calls = {}
+        self.saved_base = os.environ.pop("NANOCHAT_BASE_DIR", None)
+        kaggle_setup.setup = self.record
+        kaggle_setup.installed_revision = lambda: "nanochat-cpp 0.1.0"
+
+    def tearDown(self) -> None:
+        kaggle_setup.setup = self.original_setup
+        kaggle_setup.installed_revision = self.original_revision
+        os.environ.pop("NANOCHAT_BASE_DIR", None)
+        if self.saved_base is not None:
+            os.environ["NANOCHAT_BASE_DIR"] = self.saved_base
+
+    def record(self, **kwargs):
+        """Record the call and clone nothing."""
+        self.calls = dict(kwargs)
+        return kaggle_setup.Host(repo=Path("/opt/site-packages"),
+                                 library=Path("/lib.so"), build_key="key",
+                                 env={}, mode=kaggle_setup.MODE_INSTALLED)
+
+    def prepare(self, **overrides) -> session.Session:
+        values = dict(devices=1, base=Path("/base"), secrets={},
+                      target=FakeRemote())
+        values.update(overrides)
+        return session.installed_session(FakeInstalledPackage(), **values)
+
+    def test_the_choice_is_visible_and_no_clone_runs(self) -> None:
+        prepared = self.prepare()
+        self.assertEqual(prepared.mode, "installed")
+        self.assertTrue(prepared.installed)
+        self.assertEqual(prepared.devices, [])
+        self.assertEqual(prepared.revision, "nanochat-cpp 0.1.0")
+        self.assertEqual(os.environ["NANOCHAT_BASE_DIR"], "/base")
+        self.assertTrue(self.calls["prefer_installed"])
+        self.assertIsInstance(self.calls["package"], FakeInstalledPackage)
+
+    def test_describe_names_the_mode(self) -> None:
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            session.describe(self.prepare())
+        self.assertIn("mode: installed", buffer.getvalue())
+        self.assertIn("revision: nanochat-cpp 0.1.0", buffer.getvalue())
+
+    def test_the_distribution_revision_survives_no_checkout(self) -> None:
+        prepared = self.prepare()
+        original = kaggle_setup.revision
+        kaggle_setup.revision = lambda root: self.fail(
+            "an installed session has no checkout to ask")
+        try:
+            self.assertEqual(prepared.revision, "nanochat-cpp 0.1.0")
+        finally:
+            kaggle_setup.revision = original
+
+
+class SetupChoiceTest(unittest.TestCase):
+    """``setup`` prefers the installed package and keeps the fallback."""
+
+    def setUp(self) -> None:
+        self.original_package = kaggle_setup.installed_package
+        self.original_clone = session.clone_and_build
+        self.original_kaggle_setup = kaggle_setup.setup
+        self.original_session_setup = session.setup
+
+    def tearDown(self) -> None:
+        kaggle_setup.installed_package = self.original_package
+        session.clone_and_build = self.original_clone
+        kaggle_setup.setup = self.original_kaggle_setup
+        session.setup = self.original_session_setup
+
+    def test_an_importable_package_skips_the_clone(self) -> None:
+        kaggle_setup.installed_package = FakeInstalledPackage
+        session.clone_and_build = lambda **kwargs: self.fail(
+            "the installed package must not clone")
+        calls = {}
+        kaggle_setup.setup = lambda **kwargs: calls.update(kwargs) or \
+            kaggle_setup.Host(repo=Path("/opt/site-packages"),
+                              library=Path("/lib.so"), build_key="key",
+                              env={}, mode=kaggle_setup.MODE_INSTALLED)
+        prepared = session.setup(devices=1, base=Path("/base"), secrets={},
+                                 target=FakeRemote())
+        self.assertTrue(prepared.installed)
+        self.assertTrue(calls["prefer_installed"])
+
+    def test_no_package_takes_the_clone_fallback(self) -> None:
+        kaggle_setup.installed_package = lambda: None
+        session.clone_and_build = lambda **kwargs: "cloned"
+        self.assertEqual(session.setup(), "cloned")
+
+    def test_bootstrap_keeps_the_source_path(self) -> None:
+        captured = {}
+        session.setup = lambda **kwargs: captured.update(kwargs) or "prepared"
+        try:
+            session.bootstrap(repo_path=Path("/repo"))
+        finally:
+            session.setup = self.original_session_setup
+        self.assertFalse(captured["prefer_installed"])
+
+
 if __name__ == "__main__":
     unittest.main()

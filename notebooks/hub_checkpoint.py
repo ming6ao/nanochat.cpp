@@ -1,19 +1,32 @@
 """The shared Hugging Face Hub helper for the three notebooks.
 
-The module holds every Hugging Face Hub call, so the notebooks show the flow
-and the calls have one home. Each function imports ``huggingface_hub`` inside
-the body and takes an ``api`` or ``download`` argument. The CPU tests inject a
-fake and run without the wheel and without network access. See
-``docs/checkpoint-format.md`` section 16.
+The Hub save and load calls have one home: ``nanochat_cpp_bridge.hf_hub``,
+the adapter zone of ``docs/dependency-layering-plan.md`` section 4, so a
+notebook, a Modal container, and a script run the same sequence. This module
+is the host's handle on that home. It keeps only what a host owns:
+
+- the pure helpers the notebook cells and the CPU tests name
+  (``tokenizer_file``, ``repo_id_for``, ``build_run_record``, ``now_utc``,
+  ``stage_dir``), which import nothing outside the standard library;
+- ``write_stage``, which writes the local stage folder beside the container;
+- ``load_stage``, which rebuilds a model from a pulled stage and so needs this
+  host's ``args`` module and the released package. A package never imports a
+  host (rule 4 of section 4), which is why the model wrapper stays here.
+
+Every Hub save and load call forwards to the Z2 module, which imports
+``huggingface_hub`` inside the call. The CPU tests inject a fake ``api`` or a
+fake ``download``, so they run without the wheel and without network access.
+See ``docs/checkpoint-format.md`` section 16.
 """
 
 from __future__ import annotations
 
 import datetime
 import json
-import os
 import shutil
 from pathlib import Path
+
+from nanochat_cpp_bridge import hf_hub
 
 __all__ = [
     "CLIMBMIX_REPO",
@@ -38,27 +51,16 @@ __all__ = [
     "write_stage",
 ]
 
-#: The files a notebook needs to load a stage.
-STAGE_PATTERNS = ("checkpoint.ckpt", "model.json", "tokenizer.nctoken")
-
-#: STAGE_PATTERNS plus the provenance files the post-training notebook copies.
-FULL_STAGE_PATTERNS = STAGE_PATTERNS + (
-    "train.json", "run.json", "metrics.jsonl", "summary.json", "README.md")
-
-#: The checkpoint container magic the notebooks write.
-CONTAINER = "NCHKPT01"
-
-#: The repository name prefix of one model family.
-PREFIX = "nanochat"
-
-#: The ClimbMix dataset repository.
-CLIMBMIX_REPO = "karpathy/climbmix-400b-shuffle"
-
-#: The training shard the pretraining notebook reads.
-TRAIN_SHARD = "shard_00000.parquet"
-
-#: The validation shard the pretraining and evaluation notebooks read.
-VAL_SHARD = "shard_06542.parquet"
+# The patterns, the container magic, the repository prefix, and the shard names
+# come from the Z2 Hub module, so a notebook pulls exactly what the same module
+# pushes. One home for the layout of ``docs/checkpoint-format.md`` section 16.
+STAGE_PATTERNS = hf_hub.STAGE_PATTERNS
+FULL_STAGE_PATTERNS = hf_hub.FULL_STAGE_PATTERNS
+CONTAINER = hf_hub.CONTAINER
+PREFIX = hf_hub.PREFIX
+CLIMBMIX_REPO = hf_hub.CLIMBMIX_REPO
+TRAIN_SHARD = hf_hub.TRAIN_SHARD
+VAL_SHARD = hf_hub.VAL_SHARD
 
 
 def tokenizer_file(vocab_size) -> str:
@@ -70,22 +72,9 @@ def default_namespace(api=None, environ=None) -> str:
     """The namespace for a new repository.
 
     ``HF_USERNAME`` overrides the account name. Otherwise the name comes from
-    ``HfApi.whoami()``.
+    ``HfApi.whoami()``, through the Z2 Hub module.
     """
-    environ = os.environ if environ is None else environ
-    override = environ.get("HF_USERNAME")
-    if override:
-        return override
-    if api is None:
-        from huggingface_hub import HfApi  # noqa: PLC0415
-
-        api = HfApi()
-    info = api.whoami() or {}
-    name = info.get("name") or info.get("user")
-    if not name:
-        raise RuntimeError(
-            "cannot resolve the Hugging Face namespace; set HF_USERNAME")
-    return name
+    return hf_hub.default_namespace(api=api, environ=environ)
 
 
 def repo_id_for(run_name, namespace=None, prefix=PREFIX, api=None,
@@ -155,8 +144,8 @@ def write_stage(folder, *, stage, run_name, model_json, train_json,
     """Write one local stage folder and return the provenance record.
 
     The folder gets ``model.json``, ``train.json``, ``tokenizer.nctoken``,
-    ``run.json``, and ``README.md``. The caller then calls
-    :func:`push_stage` to upload the folder.
+    ``run.json``, and ``README.md``. The caller then calls :func:`push_stage`
+    to upload the folder. No Hub call runs here, so the write works offline.
     """
     folder = Path(folder)
     folder.mkdir(parents=True, exist_ok=True)
@@ -178,107 +167,59 @@ def write_stage(folder, *, stage, run_name, model_json, train_json,
     return record
 
 
-def push_stage(repo_id, stage, folder, *, token=None, private=False,
-               commit_message="", tag=None, api=None) -> str:
-    """Upload one stage folder into the repository and optionally tag it."""
-    if api is None:
-        from huggingface_hub import HfApi  # noqa: PLC0415
+def push_stage(repo_id, stage, folder, **options) -> str:
+    """Upload one stage folder into the repository and optionally tag it.
 
-        api = HfApi(token=token)
-    api.create_repo(repo_id=repo_id, repo_type="model", private=private,
-                    exist_ok=True)
-    api.upload_folder(repo_id=repo_id, repo_type="model",
-                      folder_path=str(folder), path_in_repo=str(stage),
-                      commit_message=commit_message, token=token)
-    if tag:
-        api.create_tag(repo_id=repo_id, tag=tag, repo_type="model",
-                       token=token)
-    return str(stage)
+    The upload runs in ``nanochat_cpp_bridge.hf_hub``. ``options`` are its
+    ``token``, ``private``, ``commit_message``, ``tag``, and ``api``.
+    """
+    return hf_hub.push_stage(repo_id, stage, folder, **options)
 
 
-def push_file(repo_id, path_in_repo, local_path, *, token=None,
-              commit_message="", api=None) -> str:
-    """Upload one file into the repository."""
-    if api is None:
-        from huggingface_hub import HfApi  # noqa: PLC0415
+def push_file(repo_id, path_in_repo, local_path, **options) -> str:
+    """Upload one file into the repository.
 
-        api = HfApi(token=token)
-    api.upload_file(repo_id=repo_id, repo_type="model",
-                    path_or_fileobj=str(local_path),
-                    path_in_repo=str(path_in_repo),
-                    commit_message=commit_message, token=token)
-    return str(path_in_repo)
+    The upload runs in ``nanochat_cpp_bridge.hf_hub``. ``options`` are its
+    ``token``, ``commit_message``, and ``api``.
+    """
+    return hf_hub.push_file(repo_id, path_in_repo, local_path, **options)
 
 
-def pull_stage(repo_id, stage, dest, *, revision="main", token=None,
-               patterns=STAGE_PATTERNS, download=None) -> Path:
-    """Download the named files of one stage and return the stage folder."""
-    if download is None:
-        from huggingface_hub import snapshot_download  # noqa: PLC0415
+def pull_stage(repo_id, stage, dest, **options) -> Path:
+    """Download the named files of one stage and return the stage folder.
 
-        download = snapshot_download
-    local = download(repo_id=repo_id, repo_type="model", revision=revision,
-                     local_dir=str(dest), token=token,
-                     allow_patterns=[f"{stage}/{name}" for name in patterns])
-    return Path(local) / str(stage)
+    The download runs in ``nanochat_cpp_bridge.hf_hub``. ``options`` are its
+    ``revision``, ``token``, ``patterns``, and ``download``.
+    """
+    return hf_hub.pull_stage(repo_id, stage, dest, **options)
 
 
-def download_climbmix(dest, *, repo_id=CLIMBMIX_REPO,
-                      shards=(TRAIN_SHARD, VAL_SHARD), token=None,
-                      download=None) -> Path:
+def download_climbmix(dest, **options) -> Path:
     """Download the ClimbMix shards into ``dest`` and return the folder.
 
-    The call skips a shard that is already present, so a notebook can call it
-    on every run.
+    The download runs in ``nanochat_cpp_bridge.hf_hub``, which skips a shard
+    that ``dest`` already holds, so a notebook can call it on every run.
+    ``options`` are its ``repo_id``, ``shards``, ``token``, and ``download``.
     """
-    dest = Path(dest)
-    missing = [name for name in shards if not (dest / name).is_file()]
-    if not missing:
-        return dest
-    if download is None:
-        from huggingface_hub import snapshot_download  # noqa: PLC0415
-
-        download = snapshot_download
-    download(repo_id=repo_id, repo_type="dataset", local_dir=str(dest),
-             allow_patterns=list(missing), token=token)
-    return dest
+    return hf_hub.download_climbmix(dest, **options)
 
 
-def pull_tokenizer(repo_id, vocab_size, dest, *, revision="main", token=None,
-                   download=None):
+def pull_tokenizer(repo_id, vocab_size, dest, **options):
     """Download the tokenizer file for one vocabulary size.
 
     Return the local path, or ``None`` when the repository does not hold it.
-    A missing tokenizer means the notebook trains one.
+    A missing tokenizer means the notebook trains one. The download runs in
+    ``nanochat_cpp_bridge.hf_hub``.
     """
-    if download is None:
-        from huggingface_hub import snapshot_download  # noqa: PLC0415
-
-        download = snapshot_download
-    name = tokenizer_file(vocab_size)
-    try:
-        local = download(repo_id=repo_id, repo_type="model",
-                         revision=revision, local_dir=str(dest), token=token,
-                         allow_patterns=[name])
-    except Exception:  # noqa: BLE001 - a miss means "train it"
-        return None
-    path = Path(local) / name
-    return path if path.is_file() else None
+    return hf_hub.pull_tokenizer(repo_id, vocab_size, dest, **options)
 
 
-def push_tokenizer(repo_id, vocab_size, local_path, *, token=None,
-                   commit_message="", api=None) -> str:
-    """Upload one tokenizer file to the tokenizer repository."""
-    if api is None:
-        from huggingface_hub import HfApi  # noqa: PLC0415
+def push_tokenizer(repo_id, vocab_size, local_path, **options) -> str:
+    """Upload one tokenizer file to the tokenizer repository.
 
-        api = HfApi(token=token)
-    api.create_repo(repo_id=repo_id, repo_type="model", exist_ok=True)
-    name = tokenizer_file(vocab_size)
-    api.upload_file(repo_id=repo_id, repo_type="model",
-                    path_or_fileobj=str(local_path), path_in_repo=name,
-                    commit_message=commit_message, token=token)
-    return name
+    The upload runs in ``nanochat_cpp_bridge.hf_hub``.
+    """
+    return hf_hub.push_tokenizer(repo_id, vocab_size, local_path, **options)
 
 
 def load_stage(repo_id, stage, dest, *, revision="main", token=None,
@@ -286,7 +227,9 @@ def load_stage(repo_id, stage, dest, *, revision="main", token=None,
     """Download one stage and build the model, the tokenizer, and the args.
 
     Return ``(model, tokenizer, model_args)``. The load is parameter only, so
-    the pretraining optimizer section is not read.
+    the pretraining optimizer section is not read. The download forwards to
+    ``nanochat_cpp_bridge.hf_hub``; the model comes from the released package,
+    which is why this wrapper stays on the host.
     """
     import args as model_args_module  # noqa: PLC0415
     import nanochat_cpp as nc  # noqa: PLC0415

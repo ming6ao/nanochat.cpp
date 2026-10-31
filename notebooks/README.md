@@ -68,14 +68,20 @@ example `vocab-32768.nctoken`.
 
 ## Shared modules
 
-- `session.py` holds the one session entry point. A notebook clones the
-  repository, adds the package paths, then calls `session.bootstrap`. The call
-  reads the Kaggle secrets, builds the shared library, and checks the device
-  count. `session.describe` prints the library, the secret names, and the
-  devices. `session.setup` stays for a caller that already added the paths.
+- `session.py` holds the one session entry point. Each notebook installs the
+distribution with one cell and configures the environment with one cell, then
+calls `session.setup`. The call prefers the installed package: the shared
+library comes from the search order of
+`docs/dependency-layering-plan.md` section 6.3, so nothing is cloned and
+nothing is built. When the package is absent it falls back to
+`session.clone_and_build`, which fetches the repository, runs the bootstrap,
+and builds the library. The returned session says which path ran. The call
+reads the Kaggle secrets and checks the device count. `session.describe`
+prints the mode, the library, the secret names, and the devices.
 - `kaggle_setup.py` owns the repository fetch, the bootstrap, the host
   environment, the library build, and `revision(root)` for the short Git
-  revision.
+  revision. Its `setup` prefers the installed package too, and
+  `prefer_installed=False` forces the clone fallback.
 - `target.py` owns the run host. `resolve` reads `NANOCHAT_TARGET`, and
   `local` is the default. `Target.prepare` maps every job path to the root the
   host reads, so a remote host needs no notebook change. The module also parses
@@ -84,8 +90,12 @@ example `vocab-32768.nctoken`.
   to the runs Volume, spawns the deployed function in `tools/modal/app.py`, and
   returns a `ModalLiveRun`. That handle polls the run directory through the
   Volume, so the cell returns and never blocks.
-- `hub_checkpoint.py` holds every Hugging Face Hub call. It imports
-  `huggingface_hub` inside each function, so the tests run without the wheel.
+- `hub_checkpoint.py` is the host's handle on the Hugging Face Hub. Every save
+  and load call forwards to `nanochat_cpp_bridge.hf_hub`, which imports
+  `huggingface_hub` inside the call, so the tests run without the wheel. The
+  module keeps the pure helpers a notebook owns (`tokenizer_file`,
+  `repo_id_for`, `build_run_record`, `now_utc`, `stage_dir`, `write_stage`) and
+  the model wrapper `load_stage`, which needs this host's `args` module.
   `download_climbmix` fetches the data shards. `load_stage` and `pull_stage`
   fetch a published stage. `write_stage` writes the local metadata and the
   model card. `push_stage` and `push_file` upload the result.
@@ -106,5 +116,13 @@ GPU.
 ## Running a notebook
 
 In a Kaggle session, set the accelerator to T4 and turn Internet on. Add the
-`HF_TOKEN` secret. Each notebook clones the repository, builds the shared
-library for `sm_75`, and runs.
+`HF_TOKEN` secret. Each notebook's first cell installs the distribution
+(`pip install "nanochat-cpp[hub]"`) and its second cell sets
+`NANOCHAT_SANDBOX_BACKEND`. The shared modules (`session.py`,
+`hub_checkpoint.py`) live in this directory, so open the notebook from the
+repository's `notebooks/` directory; the package itself comes from the
+install. A session without the package takes the clone and build fallback.
+
+The C++ mesh driver still runs from a source tree (`tools/nanochat client`), so
+a notebook that trains locally needs the clone fallback even when the package
+is installed. An evaluation of a published stage needs neither.
