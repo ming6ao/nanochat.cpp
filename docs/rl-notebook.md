@@ -1,12 +1,13 @@
 # Reinforcement learning in a notebook
 
-Status: partly delivered. The hand-rolled loop, the one-call facade, and the
-persistent worker exist. The multi-prompt C ABI binding and the tool-forcing
-driver are not wired yet.
+Status: partly delivered. The hand-rolled loop, the one-call facade, the
+persistent worker, and the three-stage chain of section 9 exist. The
+multi-prompt C ABI binding and the tool-forcing driver are not wired yet.
 
 This document gives the plan to run reinforcement learning (RL) in a notebook.
 `docs/post-training.md` section 12 and `docs/training-seam.md` section 8 hold the
-same plan from the design side. This document is the notebook view.
+same plan from the design side. This document is the notebook view. Section 9
+gives the one-job chain that runs this call last, after base training and SFT.
 
 ## 1. Purpose
 
@@ -66,7 +67,9 @@ nc.rl.run(
     prompts=conversations,
     num_samples=4,
     steps=1000,
-    checkpoint="chatrl.nchkpt01",
+    config=shape,                       # the model shape, as model flags
+    warm_start="chatsft.nchkpt01",      # the load path
+    checkpoint="chatrl.nchkpt01",       # the save path
     checkpoint_interval=100,
 )
 ```
@@ -74,6 +77,22 @@ nc.rl.run(
 The user writes prompts and selects a task. The user does not write a loop.
 Python still owns the reward, so Python stays in the control loop. The mechanism
 moves into a persistent C++ worker.
+
+Three arguments carry three separate facts, and the second is why the call is
+safe to make at all:
+
+- `warm_start` is the container the worker loads the weights and the optimizer
+  moments from. It reaches the worker as `--checkpoint`.
+- `checkpoint` is the container the worker saves to, and nothing else. A save
+  path never becomes a load path, so a stage that warm starts from the SFT
+  checkpoint and saves to its own file keeps its parent intact (blocker B3 of
+  `docs/pipeline-plan.md`). The legacy rule that derived the load path from
+  `checkpoint` is removed, and `docs/python.md` section 3.4 records that as a
+  breaking change.
+- `config` is the model shape. It reaches the worker through
+  `nanochat_cpp.api.model_flags`, the one model flag list on the Python side, so
+  the worker rebuilds the shape of the run it warm starts from and the two
+  stages cannot drift (B1 and B2 of the same plan).
 
 ## 4. The worker
 
@@ -159,3 +178,99 @@ The objective is already golden-gated. The fixture is
 `tests/data/numerics_golden_10l.bin`. The gate is `//tests:numerics_trace_test`.
 The correctness risk is therefore low. The remaining work is the interface and
 the orchestration.
+
+## 9. The chain: one job file, three stages
+
+`nc.rl.run` is the last of three stages, and one job file drives all three on
+any host. The chain is `python/nanochat_cpp/pipeline.py`, and it holds no
+training logic, no model flag list of its own, and no host name (design decision
+D1 of `docs/pipeline-plan.md`). Each stage calls one facade and reads the
+checkpoint of the stage before it:
+
+| Stage | Facade |
+|---|---|
+| base | `runtime.MeshTrainConfig` |
+| SFT | `sft.pack`, then `sft.run` |
+| RL | `rl.run` |
+
+```python
+# base: the mesh driver at world_size = 1, over the fixture corpus.
+runtime.MeshTrainConfig(config(job), steps=job.base_steps, ...)
+# SFT: one packed shard, the base checkpoint as the load path.
+sft.run(shard, ckpt, config=config(job), warm_start=base.checkpoint,
+        num_iterations=job.sft_steps)
+# RL: the SFT checkpoint as the load path, its own file as the save path.
+rl.run(reward, prompts, num_samples=job.num_samples, steps=job.rl_steps,
+       config=config(job), warm_start=sft.checkpoint, checkpoint=rl_ckpt,
+       max_tokens=job.max_tokens)
+```
+
+`config(job)` is `pipeline.PROFILES[job.profile]`, so the shape has one home;
+`PROFILES` holds the `demo` profile of decision D5, and every stage receives it
+as an `nanochat_cpp.api.Config`, which `api.model_flags` turns into the flags
+the stage binaries parse. The load path and the save path stay separate at every
+stage (B3), so each checkpoint survives the stage that reads it.
+
+A job is plain data with a JSON round trip: `run_id`, `profile`, `base_steps`,
+`sft_steps`, `rl_steps`, `num_prompts`, `num_samples`, `max_tokens`, `seed`,
+`out_root`, `corpus`, `deliver`, `temperature`, and `top_k`. `out_root` is empty
+in a committed job, because the host that owns a run root fills it: the Colab
+notebook sets `NANOCHAT_RUNS_DIR`, and the Modal app rewrites it to
+`/runs/<run_id>`.
+
+The reward is a class with a `reward` method, which `rl.run` accepts directly,
+so no Hub dataset loads. It is graded: 1.0 for the right number, 0.5 for the
+`####` marker, and otherwise the character overlap with the reference. A graded
+reward keeps the advantages of a group from collapsing into zeros, and the seed
+mix of B4 makes the four samples of a group differ in the first place, so the
+advantage vector is not zero either.
+
+`pipeline.run(job)` runs the three stages and returns a `Report`, and
+`python -m nanochat_cpp.pipeline <job>` is the same call from a command line.
+`deliver()` writes the two artifacts, and `//python:pipeline_test` asserts A1 to
+A9 of `docs/pipeline-plan.md` section 7 over the `demo` profile, so the
+assertions and not the loss values are the contract.
+
+### 9.1 The delivered artifacts
+
+`deliver()` writes the contract of decision D6. Five paths name it:
+
+```
+<run_root>/<run_id>/base/checkpoint.ckpt
+<run_root>/<run_id>/sft/checkpoint.ckpt
+<run_root>/<run_id>/rl/checkpoint.ckpt
+<run_root>/<run_id>/deliver/chatrl.ckpt
+<run_root>/<run_id>/deliver/pipeline_report.json
+```
+
+`deliver/chatrl.ckpt` is the RL checkpoint copied byte for byte, and the report
+is the review artifact: the stage order and the step counts, the loss traces and
+the mean rewards, the checkpoint digests and the metadata blocks, the seconds
+and the seeds, the model shape and the tokenizer digest, and the host block of
+`backend`, `arch`, `precision`, and `revision`. A reviewer reads the report and
+the checkpoint, not the run.
+
+The copy is verified against the digest the stage recorded. One field is empty
+by construction: `nc.sft.run` returns an exit status and not a loss trace, so
+the SFT stage says so in `extra` and the report carries an empty trace for it.
+The RL stage reads its rewards through `on_step`, which receives the per-rollout
+rewards, so it records the mean reward and the count of groups whose advantages
+are all zero.
+
+### 9.2 The two entry forms
+
+The entry is always the tool, never a bare module (decision D10), because both
+stage executables call `RequireSandboxOrDie`, and a notebook's
+`NANOCHAT_SANDBOX_BACKEND=none` satisfies the library only. Two forms exist:
+
+```
+# The host form: one `train` scope, or the `none` backend of a container.
+tools/nanochat train -- python -m nanochat_cpp.pipeline <job>
+
+# The container form: the owner routes the work through the GPU queue.
+tools/nanochat client --profile train -- python -m nanochat_cpp.pipeline <job>
+```
+
+The first form is the one the Colab notebook and a workstation use; the second
+is the one the Modal `pipeline` function uses. `docs/host-portability.md`
+section 9 gives the three hosts and what each one records.

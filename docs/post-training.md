@@ -269,6 +269,31 @@ The container commits the `nanochat-runs` Volume every ten seconds, and a
 client sees a record only after a commit. A crash between two commits loses the
 last seconds of the log, so keep the checkpoint interval small.
 
+### 5.6 The warm start and the two checkpoint paths
+
+Two facts hold about a warm start. The first is the design decision D11. The
+second landed with B3: the load path and the save path are separate arguments.
+
+- **A warm start carries the optimizer state** (design decision D11). The
+  weights, the AdamW first and second moments, and the Muon buffers travel
+  together, as section 7 describes, and the driver reads the recipe from the
+  checkpoint it loads. Clearing the moments would change the stage for every
+  caller to simplify one test, and it would hide the one thing a warm start is
+  for.
+- **`warm_start` names the load and `checkpoint` names the save**
+  (`nc.rl.run(warm_start=..., checkpoint=...)`). `warm_start` reaches the
+  worker as `--checkpoint`, and `checkpoint` is the save target and nothing
+  else. The legacy rule that derived a load path from `checkpoint` is removed,
+  because a save path must never become a load path: it made an RL stage
+  overwrite the checkpoint it warm started from (blocker B3 of
+  `docs/pipeline-plan.md`). A stage therefore needs both arguments whenever it
+  starts from its parent, and the chain of `docs/rl-notebook.md` section 9
+  always passes them.
+
+A graded reward and the per-row seed mix of B4 are what make the advantage
+vector non-zero beside that: the four samples of a group draw from four streams,
+so the group is not four copies of one completion.
+
 ## 6. Generation for rollouts
 
 RL rollouts and generative evaluation share `GenerateBatch`. The primitive
@@ -406,6 +431,7 @@ changes.
 | SFT parity rungs `P4` to `P7` | `P4` `closed`; `P5` `equivalent` on the CPU backend; `P6` and `P7` `open` | `docs/parity.md`; `docs/sft-parity-plan.md` |
 | RL step binary and the RL parity fixture | Done | `src/rl_step_main.cc`, `tools/dump_fixtures.py rl`, `tests/rl_parity_test.cc` |
 | RL orchestration worker | Done | `src/rl_worker_main.cc`, `python/nanochat_cpp/rl.py` |
+| RL warm start: the load path and the save path as two arguments (section 5.6) | Done | `python/nanochat_cpp/rl.py` `run()` and `worker_argv()`; `python/tests/rl_test.py` |
 | SFT bridge command | Done | `src/sft_main.cc`; `python/nanochat_cpp/sft.py` |
 | RL bridge command | Done | `python/nanochat_cpp/rl.py` |
 

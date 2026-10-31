@@ -1,8 +1,9 @@
 # The pipeline plan: one chain, three hosts
 
-Status: ready to execute. Rows 0 and 0b to 0d have landed. The owners of D9 and
-the four review decisions of section 11 are settled, so rows 1 to 11 have no
-open blocker. Two small questions remain, and neither blocks a row.
+Status: executed. Rows 0 to 11 have landed, and section 3 records what each
+blocker's fix turned out to be. The owners of D9 and the four review decisions
+of section 11 are settled. Two small questions remain, and neither blocked a
+row.
 
 This plan extends [post-training.md](post-training.md), which holds the RL design,
 and [host-portability.md](host-portability.md), which holds the host contract.
@@ -42,16 +43,19 @@ leg, and a GPU comparison uses a tolerance.
 
 ## 3. The blockers
 
-Six defects block the automated chain. Four more landed on 2026-10-31.
+Six defects blocked the automated chain. All six have landed, and four more
+landed on 2026-10-31. The last column names the row of section 8 that landed
+each one, because the reading of a blocker and the fix that landed are not
+always the same thing (B5).
 
 | # | Blocker | State |
 |---|---|---|
-| B1 | The SFT stage cannot set the model shape | open |
-| B2 | No model flag sets `value_embedding` | open |
-| B3 | The RL stage overwrites the checkpoint it warm starts from | open |
-| B4 | Every rollout in a group is identical | open |
-| B5 | A nested `tools/nanochat` starts a nested sandbox scope | open |
-| B6 | The two stage executables exist only in a Bazel tree | open |
+| B1 | The SFT stage cannot set the model shape | landed, row 4 |
+| B2 | No model flag sets `value_embedding` | landed, row 2 |
+| B3 | The RL stage overwrites the checkpoint it warm starts from | landed, row 5 |
+| B4 | Every rollout in a group is identical | landed, row 3 |
+| B5 | A nested `tools/nanochat` starts a nested sandbox scope | landed, row 1, with the premise corrected |
+| B6 | The two stage executables exist only in a Bazel tree | landed, row 6 |
 | B7 | The startup gate probed a fast-accumulate fp8 GEMM on every card | landed |
 | B8 | `--hw-check` compared a `const char*` with a literal | landed |
 | B9 | The host rope leg read the device table | landed |
@@ -160,24 +164,39 @@ once at this change.
 
 ### B5. A nested `tools/nanochat` starts a nested sandbox scope
 
-`Toolchain.gpu` runs the command directly when `NANOCHAT_SANDBOX` or
-`NANOCHAT_GPU_QUEUED` is set. The six other methods that reach the entry point
-do not: `train`, `rl`, `eval`, `bench`, `verify`, and `profile`. So a stage
-launched from a sandboxed test action re-enters `sandbox.py` and starts a scope
-inside a scope.
+Landed as row 1, and the premise was narrower than the title. Two facts about
+the tree, each one command to check, correct it:
 
-Change: one private helper in `python/nanochat_cpp/toolchain.py` holds the
-in-sandbox branch, and the six methods call it. The helper keeps the documented
-rule from the docstring of `Toolchain.gpu`.
+- The entry point already skips its own scope when a sentinel is set:
+  `cli.Context.submit` execs the child under `in_sandbox()`, so
+  `NANOCHAT_SANDBOX=t0-cpu tools/nanochat train -- /bin/echo ok` prints `ok`
+  and starts no profile. The six facades therefore started no second scope, and
+  the chain did not have the nesting defect this row was written for.
+- The entry point is not a passthrough: `tools/nanochat /bin/echo hi` prints
+  `unknown command '/bin/echo'` and exits 2. So handing a raw child argv to it
+  cannot be the inside-scope arm.
 
-Test: `python/tests/toolchain_test.py` gains one case per method, beside
-`test_gpu_inside_sandbox_skips_the_queue`.
+What was left is the real defect, and it is a smaller one. `Toolchain.gpu` ran
+its child by giving the entry point a raw argv, which exited 2 and never ran the
+child, and a bare sandbox sentinel still re-entered the *queue*: `gpu` under
+`NANOCHAT_SANDBOX`, and `profile`, whose handler submits the job itself.
 
-This change makes one sandbox profile the real ceiling for the whole chain. It
-is not what makes the chain run. Without it each stage child starts a scope
-inside the scope. systemd allows that, and the inner profile hides its budget
-from the outer one. The order of section 8 puts B5 first because the later rows
-add stage launches that a person runs by hand.
+Change, as it landed: one private helper, `Toolchain._dispatch(direct, wrapped)`,
+holds the in-scope branch and the six training facades call it, so the rule is
+stated at the facade instead of in a docstring. When `NANOCHAT_SANDBOX` or
+`NANOCHAT_GPU_QUEUED` is set, `direct` — one child executable and its arguments
+— runs as a child of this process; otherwise `wrapped` runs through
+`tools/nanochat`. `profile` passes `direct=None`, because its argv carries flags
+and not a child executable, so both of its arms run the entry point.
+
+Test, as it landed: `python/tests/toolchain_test.py` has one case per method,
+beside `test_gpu_inside_sandbox_skips_the_queue`.
+
+The row still earns its place in the order, for the reason it always had: one
+sandbox profile is the real ceiling for the whole chain once the stage launches
+run by hand, and a child that leaves the scope hides its budget from the parent.
+It is not what makes the chain run, and the fix that landed is not the one the
+defect statement named. That is why the state column of section 3 says so.
 
 ### B6. The two stage executables exist only in a Bazel tree
 
@@ -383,8 +402,8 @@ and the report names the root it used.
 |---|---|---|---|---|---|
 | Local CPU | `cpu` | none | `train` scope | Bazel | `//python:pipeline_test`, default loop |
 | Local GPU | `cuda` | card | `t1-gpu` queue job | Bazel | `//python:pipeline_gpu_test`, `gpu` tag |
-| Colab | `cuda` | `sm_75` | `none` | bootstrap + Bazel | manual run, recorded in `docs/host-portability.md` |
-| Modal | `cuda` | `sm_75` | `none` | image build | `modal run ...::pipeline_demo`; row 11 records the host block |
+| Colab | `cuda` | `sm_75` | `none` | bootstrap + Bazel | manual run; owed, and recorded as owed in `docs/host-portability.md` section 9.2 |
+| Modal | `cuda` | `sm_75` | `none` | image build | `modal run ...::pipeline_demo`; owed, with the host block of `docs/host-portability.md` section 9.3 |
 | Modal CPU | `cpu` | none | `none` | image build, CPU config | verification only |
 
 ### 6.1 Local CPU and local GPU
@@ -396,8 +415,9 @@ NANOCHAT_CPP_BACKEND=cpu tools/nanochat train -- \
 ```
 
 One `train` scope, at 6 GB and 800 % CPU, covers all three stages. B5 keeps the
-stage children inside that scope instead of starting a second scope inside the
-first.
+stage children inside that scope: the entry point already skips its own scope
+under a sentinel, so a facade runs its child directly instead of re-entering the
+entry point, and nothing asks for a second profile (section 3, B5).
 
 For the local GPU, run the same command with `NANOCHAT_CPP_BACKEND=cuda` under
 `tools/nanochat gpu --profile t1-gpu -- ...`. `tools/nanochat doctor` reports
