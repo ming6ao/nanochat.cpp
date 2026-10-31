@@ -8,7 +8,9 @@
 // decode samples a valid token id, and that batched generation
 // (`GenerateBatch`) reproduces a naive single-row loop (prefill one cache, then
 // decode it token by token) for greedy and sampled decoding, including the
-// per-row terminal id and the returned 1/0 mask.
+// per-row terminal id and the returned 1/0 mask. The sampled loop mixes the row
+// index and the decode step into the seed, so the naive reference mixes them
+// the same way; the three properties of that mix are the `CheckSeedMix` cases.
 //
 // The tiny architecture matches the gradient test (2 layers, 8 query heads,
 // 2 key/value heads, hidden 32, seq 8, vocab 64, window "SL"), so the whole
@@ -70,10 +72,31 @@ double MaxDiff(const std::vector<float>& got, const std::vector<float>& want) {
   return worst;
 }
 
+// The file-local `MixSeed` of generate.cc (docs/pipeline-plan.md section 3, B4)
+// mixes the row index, the prompt index, and the decode step into the sampler
+// seed. The single-row reference below has to mix the seed the same way, or it
+// would compare a batched row against a run that re-draws the first step's
+// quantile at every step. The mix is repeated here on purpose: the reference is
+// an independent loop, and the three `CheckSeedMix` cases pin the rule itself,
+// so a change to the helper alone cannot pass unnoticed.
+std::uint64_t MixTestSeed(std::uint64_t seed, std::uint64_t index,
+                          std::uint64_t step) {
+  const std::uint64_t lanes[2] = {index, step};
+  std::uint64_t mixed = seed;
+  for (const std::uint64_t lane : lanes) {
+    mixed += lane * 0x9e3779b97f4a7c15ULL;
+    mixed = (mixed ^ (mixed >> 30)) * 0xbf58476d1ce4e5b9ULL;
+    mixed = (mixed ^ (mixed >> 27)) * 0x94d049bb133111ebULL;
+    mixed ^= mixed >> 31;
+  }
+  return mixed;
+}
+
 // A single row produced without the batched engine: prefill one cache and
 // decode it one token at a time. This is the reference the batched loop must
-// reproduce exactly for greedy decoding and, because `Decode` re-seeds itself
-// from `params.seed` on every call, for sampled decoding as well.
+// reproduce exactly for greedy decoding and, because `Decode` seeds a fresh
+// generator from the value it is handed, for sampled decoding as well when the
+// row index and the step enter the seed through `MixTestSeed`.
 struct NaiveRow {
   std::vector<int> tokens;
   std::vector<std::uint8_t> mask;
@@ -81,7 +104,7 @@ struct NaiveRow {
 
 NaiveRow NaiveGenerate(Model* model, const Config& config, const int* prompt,
                        int prompt_len, const nanochat::GenerateParams& params,
-                       int stop_id) {
+                       int stop_id, std::uint64_t row_index = 0) {
   NaiveRow row;
   std::vector<int> effective;
   if (params.bos_id >= 0) effective.push_back(params.bos_id);
@@ -105,6 +128,8 @@ NaiveRow NaiveGenerate(Model* model, const Config& config, const int* prompt,
 
   int next = effective.back();
   for (int step = 0; step < max_new; ++step) {
+    sample.seed =
+        MixTestSeed(params.seed, row_index, static_cast<std::uint64_t>(step));
     const int token = nanochat::Decode(model, next, kv.get(), sample);
     if (token < 0) break;
     if (stop_id >= 0 && token == stop_id) break;
@@ -117,7 +142,9 @@ NaiveRow NaiveGenerate(Model* model, const Config& config, const int* prompt,
 
 // Runs one batched generation and checks every row against the naive loop,
 // including the 1/0 mask (0 for prompt ids, 1 for sampled ids) and the
-// invariant that a terminal id is never emitted.
+// invariant that a terminal id is never emitted. Row `r` of the batch is
+// compared against row `r` of the naive loop, since the row index is part of
+// the sampler seed (docs/pipeline-plan.md section 3, B4).
 void CheckBatchMatchesNaive(Model* model, const Config& config,
                             const int* prompt, int prompt_len,
                             const nanochat::GenerateParams& params,
@@ -132,7 +159,7 @@ void CheckBatchMatchesNaive(Model* model, const Config& config,
   }
   for (std::size_t r = 0; r < rows.size(); ++r) {
     const NaiveRow want =
-        NaiveGenerate(model, config, prompt, prompt_len, params, stops[r]);
+        NaiveGenerate(model, config, prompt, prompt_len, params, stops[r], r);
     if (rows[r].tokens != want.tokens) {
       Fail(label + ": row " + std::to_string(r) +
            " tokens differ from the naive loop");
@@ -177,7 +204,9 @@ void CheckBatchMatchesNaive(Model* model, const Config& config,
 // order and the per-row terminal id. This is the rollout the RL path uses: one
 // call for `num_prompts` prompts, `params.num_samples` rows each, and one
 // independent stop id per output row. When `row_stops` is empty the call falls
-// back to the shared `params.stop_id`.
+// back to the shared `params.stop_id`. The prompt index enters the seed the way
+// `GenerateMultiPrompt` mixes it, so prompt `p`'s rows are compared against a
+// naive run seeded from `MixTestSeed(params.seed, p, 0)`.
 void CheckMultiPromptMatchesNaive(Model* model, const Config& config,
                                   const std::vector<int>& prompts,
                                   int num_prompts, int prompt_len,
@@ -197,13 +226,16 @@ void CheckMultiPromptMatchesNaive(Model* model, const Config& config,
   for (int p = 0; p < num_prompts; ++p) {
     const int* prompt =
         prompts.data() + static_cast<std::size_t>(p) * prompt_len;
+    nanochat::GenerateParams per_prompt = params;
+    per_prompt.seed =
+        MixTestSeed(params.seed, static_cast<std::uint64_t>(p), 0);
     for (int s = 0; s < params.num_samples; ++s) {
       const int r = p * params.num_samples + s;
       const int stop = static_cast<std::size_t>(r) < row_stops.size()
                            ? row_stops[static_cast<std::size_t>(r)]
                            : params.stop_id;
       const NaiveRow want =
-          NaiveGenerate(model, config, prompt, prompt_len, params, stop);
+          NaiveGenerate(model, config, prompt, prompt_len, per_prompt, stop, s);
       if (rows[static_cast<std::size_t>(r)].tokens != want.tokens) {
         Fail(label + ": row " + std::to_string(r) +
              " tokens differ from the naive loop");
@@ -216,6 +248,115 @@ void CheckMultiPromptMatchesNaive(Model* model, const Config& config,
   }
   std::printf("generate_test: %s matched the naive single-row loop\n",
               label.c_str());
+}
+
+// The three properties of the seed mix (docs/pipeline-plan.md section 3, B4):
+// four rows of one prompt at one seed draw four distinct streams, row 0 of a
+// one-row batch equals row 0 of a four-row batch at the same seed, and two
+// prompts at one seed give different first rows. Before the mix every row at
+// every step drew the same quantile, so the first and the third comparison
+// failed and the RL stage trained on four copies of one rollout.
+void CheckSeedMix(Model* model, const Config& config,
+                  const std::vector<int>& prompt) {
+  const int prompt_len = static_cast<int>(prompt.size());
+
+  nanochat::GenerateParams params;
+  params.num_samples = 4;
+  params.max_tokens = 4;
+  // A temperature high enough that the softmax over the vocabulary is flat:
+  // the ids are then a near-uniform function of the seed alone, so this case
+  // tests the mix rather than the tiny model's logits. A peaked distribution
+  // would let two rows collide by luck and hide a stream they no longer share.
+  params.temperature = 1000.0f;
+  params.top_k = 0;
+  params.seed = 20241101;
+  params.bos_id = 1;
+  params.stop_id = -1;
+
+  const std::size_t prefix =
+      prompt.size() + (params.bos_id >= 0 ? std::size_t{1} : std::size_t{0});
+  const auto sampled_span = [prefix](const nanochat::GeneratedSequence& row) {
+    return std::vector<int>(row.tokens.begin() + prefix, row.tokens.end());
+  };
+
+  // Row independence, part one: the rows of one batch differ from each other.
+  std::vector<nanochat::GeneratedSequence> four;
+  nanochat::GenerateBatch(model, prompt.data(), prompt_len, params, &four);
+  if (four.size() != static_cast<std::size_t>(params.num_samples)) {
+    Fail("seed mix: the four-row batch returned " +
+         std::to_string(four.size()) + " rows");
+    return;
+  }
+  for (std::size_t r = 0; r < four.size(); ++r) {
+    if (sampled_span(four[r]).empty()) {
+      Fail("seed mix: row " + std::to_string(r) + " sampled nothing");
+      return;
+    }
+  }
+  for (std::size_t a = 0; a < four.size(); ++a) {
+    for (std::size_t b = a + 1; b < four.size(); ++b) {
+      if (sampled_span(four[a]) == sampled_span(four[b])) {
+        Fail("seed mix: rows " + std::to_string(a) + " and " +
+             std::to_string(b) + " draw the same stream");
+      }
+    }
+  }
+
+  // Row independence, part two: the stream belongs to the row index, not to the
+  // row count, so row 0 of a one-row run is row 0 of the four-row run.
+  nanochat::GenerateParams one = params;
+  one.num_samples = 1;
+  std::vector<nanochat::GeneratedSequence> single;
+  nanochat::GenerateBatch(model, prompt.data(), prompt_len, one, &single);
+  if (single.size() != 1) {
+    Fail("seed mix: the one-row batch returned " +
+         std::to_string(single.size()) + " rows");
+  } else if (single[0].tokens != four[0].tokens ||
+             single[0].mask != four[0].mask) {
+    Fail(
+        "seed mix: row 0 of a one-row batch differs from row 0 of a "
+        "four-row batch");
+  }
+
+  // Reproducibility: one seed, one batch, one answer.
+  std::vector<nanochat::GeneratedSequence> again;
+  nanochat::GenerateBatch(model, prompt.data(), prompt_len, params, &again);
+  if (again.size() != four.size()) {
+    Fail("seed mix: a second call at one seed returned " +
+         std::to_string(again.size()) + " rows");
+  } else {
+    for (std::size_t r = 0; r < four.size(); ++r) {
+      if (again[r].tokens != four[r].tokens || again[r].mask != four[r].mask) {
+        Fail(
+            "seed mix: a second call at one seed drew a different stream at "
+            "row " +
+            std::to_string(r));
+      }
+    }
+  }
+
+  // Prompt independence: two prompts at one seed do not share a stream, in the
+  // same way two rows of one prompt no longer do.
+  std::vector<int> prompts(prompt);
+  for (int i = 0; i < prompt_len; ++i) {
+    prompts.push_back((prompt[static_cast<std::size_t>(i)] + 1) %
+                      config.vocab_size);
+  }
+  nanochat::GenerateParams multi = params;
+  multi.num_samples = 2;
+  std::vector<nanochat::GeneratedSequence> rolled;
+  nanochat::GenerateMultiPrompt(model, prompts.data(), 2, prompt_len, multi,
+                                nullptr, &rolled);
+  if (rolled.size() != 4) {
+    Fail("seed mix: the two-prompt rollout returned " +
+         std::to_string(rolled.size()) + " rows");
+  } else if (sampled_span(rolled[0]) == sampled_span(rolled[2])) {
+    Fail(
+        "seed mix: row 0 of prompt 0 and row 0 of prompt 1 draw the same "
+        "stream");
+  }
+  std::printf(
+      "generate_test: the seed mix separates rows, prompts, and steps\n");
 }
 
 // The tool-forcing hook (docs/parity.md item P1). After the first sampled
@@ -586,6 +727,9 @@ void Run() {
       }
     }
   }
+
+  // --- The seed mix of B4 (docs/pipeline-plan.md section 3). ---
+  CheckSeedMix(model.get(), config, batched_prompt);
 
   // --- Multi-prompt rollout: many prompts in one call, one stop per row. ---
   {

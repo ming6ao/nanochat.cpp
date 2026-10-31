@@ -42,6 +42,30 @@ std::vector<ComputeType> StageToHost(const ComputeType* src,
   return host;
 }
 
+// Mixes the row index, the prompt index, and the decode step into the sampler
+// seed. `SampleToken` builds a fresh generator from `params.seed` on every
+// call, so without this mix every row of a batch and every step of a row would
+// draw the same quantile: the four samples of one group would hold the same
+// text and every advantage would be zero (docs/pipeline-plan.md section 3, B4).
+//
+// The mix is a splitmix64 finalizer over the three coordinates, so it stays a
+// file-local helper: `include/nanochat/model.h` and
+// `include/nanochat/sampler.h` are frozen and do not move (section 4, D7). The
+// result depends only on the arguments, so row `r` of a batch equals row `r` of
+// a one-row run at the same seed, and one seed reproduces one run.
+std::uint64_t MixSeed(std::uint64_t seed, std::uint64_t index,
+                      std::uint64_t step) {
+  const std::uint64_t lanes[2] = {index, step};
+  std::uint64_t mixed = seed;
+  for (const std::uint64_t lane : lanes) {
+    mixed += lane * 0x9e3779b97f4a7c15ULL;
+    mixed = (mixed ^ (mixed >> 30)) * 0xbf58476d1ce4e5b9ULL;
+    mixed = (mixed ^ (mixed >> 27)) * 0x94d049bb133111ebULL;
+    mixed ^= mixed >> 31;
+  }
+  return mixed;
+}
+
 // Activation slots for one inference pass, sized once for `max_seq` rows and
 // reused by every prefill/decode call. The block slots are a single set because
 // layers run sequentially.
@@ -500,9 +524,10 @@ void GenerateBatchWithHook(Model* model, const int* prompt, int prompt_len,
   // stops when it emits its terminal id, when sampling fails, when the hook
   // ends it, or after `max_new` steps; the terminal id is not appended. With a
   // null hook there are no forced tokens, so a batched run is exactly
-  // `num_samples` independent single-row runs: greedy decoding is
-  // deterministic and sampled decoding re-seeds from `params.seed` on every
-  // call, both reproducible and row-independent.
+  // `num_samples` independent single-row runs: the row index and the step enter
+  // the seed below, so rows differ from each other and a row still reproduces
+  // on its own. The greedy path draws no random value, so it ignores the seed
+  // (docs/pipeline-plan.md section 3, B4).
   for (int step = 0; step < max_new; ++step) {
     bool any_active = false;
     for (int r = 0; r < num_samples; ++r) {
@@ -511,6 +536,10 @@ void GenerateBatchWithHook(Model* model, const int* prompt, int prompt_len,
       GeneratedSequence& row = (*out)[static_cast<std::size_t>(r)];
       std::vector<int>& pending = forced[static_cast<std::size_t>(r)];
       const std::size_t head = forced_head[static_cast<std::size_t>(r)];
+      // Draw row `r` and step `step` from their own stream instead of the one
+      // quantile every row and step would otherwise share.
+      sample.seed = MixSeed(params.seed, static_cast<std::uint64_t>(r),
+                            static_cast<std::uint64_t>(step));
       const int candidate =
           Decode(model, next[static_cast<std::size_t>(r)],
                  caches[static_cast<std::size_t>(r)].get(), sample);
@@ -561,6 +590,13 @@ void GenerateMultiPrompt(Model* model, const int* prompts, int num_prompts,
       per_prompt.stop_ids =
           row_stops + static_cast<std::size_t>(prompt) * params.num_samples;
     }
+    // Mix the prompt index into the seed, so row `r` of one prompt does not
+    // draw the quantile of row `r` of the next, the way two rows of one prompt
+    // no longer draw the same one (docs/pipeline-plan.md section 3, B4). The
+    // inner `GenerateBatch` then mixes the row index and the step into this
+    // seed.
+    per_prompt.seed =
+        MixSeed(params.seed, static_cast<std::uint64_t>(prompt), 0);
     std::vector<GeneratedSequence> rows;
     GenerateBatch(model,
                   prompts + static_cast<std::size_t>(prompt) * prompt_len,

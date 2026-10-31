@@ -78,12 +78,14 @@ inline std::string EnvString(const char* name, const std::string& fallback) {
   return std::string(value);
 }
 
-// True when `flag` configures the shared model `Config`.
+// True when `flag` configures the shared model `Config`. Every field a stage
+// command line can set lives here, so a run recorded from a command line can be
+// reproduced from it (docs/pipeline-plan.md section 3).
 inline bool IsModelFlag(const std::string& flag) {
   return flag == "--layers" || flag == "--heads" || flag == "--kv-heads" ||
          flag == "--hidden" || flag == "--seq" || flag == "--vocab" ||
          flag == "--padded-vocab" || flag == "--window-pattern" ||
-         flag == "--rope-base";
+         flag == "--rope-base" || flag == "--value-embedding";
 }
 
 // Applies one model flag. Returns false when the flag or its value is invalid.
@@ -104,6 +106,20 @@ inline bool ApplyModelFlag(const std::string& flag, const char* value,
     return true;
   }
   if (flag == "--rope-base") return ParseFloat(value, &config->rope_base);
+  if (flag == "--value-embedding") {
+    // A boolean field takes exactly `0` or `1`; any other word is an error, so
+    // a stage cannot half-apply the field (docs/pipeline-plan.md B2).
+    const std::string text(value);
+    if (text == "1") {
+      config->value_embedding = true;
+      return true;
+    }
+    if (text == "0") {
+      config->value_embedding = false;
+      return true;
+    }
+    return false;
+  }
   return false;
 }
 

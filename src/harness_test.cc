@@ -399,6 +399,59 @@ void TestModelFlagParsing() {
   if (nanochat::cli::ApplyModelFlag("--layers", "not-a-number", &config)) {
     Fail("ApplyModelFlag accepted a bad integer");
   }
+
+  // `--value-embedding` is the model field that had no flag, so no stage
+  // command line could reproduce a base run with value embeddings off
+  // (docs/pipeline-plan.md section 3, B2). A boolean field takes exactly 0 or
+  // 1; a start value opposite to the one under test proves the write and not
+  // only the return value.
+  Config embedding;
+  if (!nanochat::cli::ApplyModelFlag("--value-embedding", "0", &embedding) ||
+      embedding.value_embedding) {
+    Fail("ApplyModelFlag --value-embedding 0 failed");
+  }
+  if (!nanochat::cli::ApplyModelFlag("--value-embedding", "1", &embedding) ||
+      !embedding.value_embedding) {
+    Fail("ApplyModelFlag --value-embedding 1 failed");
+  }
+  if (nanochat::cli::ApplyModelFlag("--value-embedding", "true", &embedding) ||
+      nanochat::cli::ApplyModelFlag("--value-embedding", "2", &embedding) ||
+      nanochat::cli::ApplyModelFlag("--value-embedding", "", &embedding)) {
+    Fail("ApplyModelFlag --value-embedding accepted a value other than 0 or 1");
+  }
+
+  // Every name `IsModelFlag` knows must also be a name `ApplyModelFlag` accepts
+  // with a value it can parse: a flag one function knows and the other does not
+  // would let a stage command line lose a model field silently. The table is
+  // the test's, so the two functions can no longer disagree (section 3, B2).
+  struct ModelFlagCase {
+    const char* flag;
+    const char* value;
+  };
+  const ModelFlagCase cases[] = {
+      {"--layers", "2"},        {"--heads", "8"},
+      {"--kv-heads", "2"},      {"--hidden", "32"},
+      {"--seq", "8"},           {"--vocab", "64"},
+      {"--padded-vocab", "64"}, {"--window-pattern", "SL"},
+      {"--rope-base", "10000"}, {"--value-embedding", "0"},
+  };
+  for (const ModelFlagCase& item : cases) {
+    Config parsed;
+    if (!nanochat::cli::IsModelFlag(item.flag)) {
+      Fail(std::string("IsModelFlag does not know ") + item.flag);
+      continue;
+    }
+    if (!nanochat::cli::ApplyModelFlag(item.flag, item.value, &parsed)) {
+      Fail(std::string("IsModelFlag knows ") + item.flag +
+           " but ApplyModelFlag rejects it");
+    }
+  }
+  Config untouched;
+  if (nanochat::cli::IsModelFlag("--temperature") ||
+      nanochat::cli::ApplyModelFlag("--temperature", "1", &untouched)) {
+    Fail("the model flag table claims a flag that is not a model field");
+  }
+
   const std::vector<std::string> parts = nanochat::cli::SplitCsv("a,b,,c");
   if (parts != std::vector<std::string>({"a", "b", "c"})) {
     Fail("SplitCsv mismatch");

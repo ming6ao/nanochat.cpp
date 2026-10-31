@@ -53,7 +53,8 @@ void Usage() {
       "   --muon-momentum-warmup-steps --muon-momentum-start\n"
       "   --muon-momentum-peak --muon-momentum-final]\n"
       "  [model flags: --layers --heads --kv-heads --hidden --seq\n"
-      "   --vocab --padded-vocab --window-pattern --rope-base]\n");
+      "   --vocab --padded-vocab --window-pattern --rope-base\n"
+      "   --value-embedding <0|1>]\n");
 }
 
 }  // namespace
