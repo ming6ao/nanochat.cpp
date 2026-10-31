@@ -92,8 +92,8 @@ void RmsNormBackward(std::int64_t rows, std::int64_t dim, float eps,
 
 // ---------------------------------------------------------------------------
 // QK-norm + RoPE + scale, in place on the query/key projections. `cos`/`sin`
-// point at the first rotary row for this call (the decode path offsets them by
-// the KV-cache position).
+// are device tables; they point at the first rotary row for this call (the
+// decode path offsets them by the KV-cache position).
 // ---------------------------------------------------------------------------
 
 void QkPrepForward(int batch, int seq, int num_heads, int num_kv_heads,

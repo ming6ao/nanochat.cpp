@@ -33,5 +33,9 @@ int main() {
   }
   std::printf("hw gate: passed (%d cases on %s)\n", gate.cases,
               caps.device_name);
+  if (gate.skipped > 0) {
+    std::printf("hw gate: skipped %d cases: %s\n", gate.skipped,
+                gate.skipped_reason.c_str());
+  }
   return 0;
 }

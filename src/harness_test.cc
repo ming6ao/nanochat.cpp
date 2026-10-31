@@ -51,6 +51,7 @@ using nanochat::Scheduler;
 using nanochat::SchedulerConfig;
 using nanochat::TrainConfig;
 using nanochat::TrainLoop;
+using HwCheck = nanochat::TrainConfig::HwCheck;
 
 constexpr std::uint64_t kSeed = 20241001;
 int g_failures = 0;
@@ -404,6 +405,31 @@ void TestModelFlagParsing() {
   }
 }
 
+// `--hw-check` takes three words and rejects anything else. The mode starts at
+// a value no enumerator holds, so each row proves the write and not only the
+// return value.
+void TestHwCheckParsing() {
+  struct Case {
+    const char* text;
+    HwCheck want;
+  };
+  const Case cases[] = {
+      {"auto", HwCheck::kAuto},
+      {"on", HwCheck::kOn},
+      {"off", HwCheck::kOff},
+  };
+  for (const Case& item : cases) {
+    HwCheck mode = static_cast<HwCheck>(-1);
+    if (!nanochat::ParseHwCheck(item.text, &mode) || mode != item.want) {
+      Fail(std::string("ParseHwCheck rejected ") + item.text);
+    }
+  }
+  HwCheck mode = HwCheck::kOn;
+  if (nanochat::ParseHwCheck("sometimes", &mode) || mode != HwCheck::kOn) {
+    Fail("ParseHwCheck accepted an unknown word, or changed the mode");
+  }
+}
+
 // The Track 3 preset (docs/distributed-design.md sections 8 and 9): dense
 // attention, no value embeddings, and the AdamW/Muon rates and schedule.
 void TestTrackThreeBaseline() {
@@ -510,6 +536,7 @@ int main() {
   TestMfu();
   TestLogger();
   TestModelFlagParsing();
+  TestHwCheckParsing();
   TestTrackThreeBaseline();
   TestTrainLoopMatchesHandRun();
   TestGradientAccumulation();

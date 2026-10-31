@@ -194,6 +194,52 @@ class ComputeScratch {
   ComputeType* data_ = nullptr;
 };
 
+// The span list `SpanReduce` reads. The seam takes the span pointers, the
+// optional second operand pointers, and the per-span counts from device memory
+// (`include/nanochat/kernels.h`), so a composition that builds them in stack
+// storage stages them first. The optimizer keeps the same tables resident for
+// its per-step reduce (`src/optim.cc`, `norm_grads_` and `norm_counts_`); this
+// is the one-call form. On the CPU backend `Alloc` returns host memory, so the
+// staging copies are memcpy calls and the numbers do not change.
+class SpanList {
+ public:
+  SpanList(const ComputeType* const* spans, const ComputeType* const* other,
+           const int* counts, int num_spans) {
+    if (num_spans <= 0) return;
+    spans_ = StagePointers(spans, num_spans);
+    if (other != nullptr) other_ = StagePointers(other, num_spans);
+    const std::size_t count_bytes =
+        static_cast<std::size_t>(num_spans) * sizeof(int);
+    counts_ = static_cast<int*>(kernels::Alloc(count_bytes));
+    kernels::Memcpy(counts_, counts, count_bytes, CopyDir::kHostToDevice);
+  }
+  ~SpanList() {
+    if (spans_ != nullptr) kernels::Free(spans_);
+    if (other_ != nullptr) kernels::Free(other_);
+    if (counts_ != nullptr) kernels::Free(counts_);
+  }
+  SpanList(const SpanList&) = delete;
+  SpanList& operator=(const SpanList&) = delete;
+
+  const ComputeType* const* spans() const { return spans_; }
+  const ComputeType* const* other() const { return other_; }
+  const int* counts() const { return counts_; }
+
+ private:
+  static ComputeType** StagePointers(const ComputeType* const* source,
+                                     int count) {
+    const std::size_t bytes =
+        static_cast<std::size_t>(count) * sizeof(ComputeType*);
+    ComputeType** device = static_cast<ComputeType**>(kernels::Alloc(bytes));
+    kernels::Memcpy(device, source, bytes, CopyDir::kHostToDevice);
+    return device;
+  }
+
+  ComputeType** spans_ = nullptr;
+  ComputeType** other_ = nullptr;
+  int* counts_ = nullptr;
+};
+
 // The per-row scalars of a composition. The reduction entries write `float`
 // (norm statistics, log-sum-exp results) and the pointwise family is typed on
 // `ComputeType`. In the fp32 build the two are one buffer and every sync below
@@ -357,6 +403,20 @@ void NormBackward(int rows, int dim, float /*eps*/, const ComputeType* x,
 // this file: the rotation's operand varies with the row's sequence position, so
 // it has no primitive over a flat elementwise family. `heads` is the number of
 // head rows (query or key) and the buffers are `[batch, seq, heads, head_dim]`.
+//
+// `cos` and `sin` are the model's device copies (`src/model_impl.h`,
+// `cos_table()`), because the kernels read them from device memory. This leg
+// runs on the host, so it stages them first; on the CPU backend the staging
+// copy is a memcpy.
+std::vector<float> HostTable(const float* table, std::size_t count) {
+  std::vector<float> host(count);
+  if (count > 0) {
+    kernels::Memcpy(host.data(), table, count * sizeof(float),
+                    CopyDir::kDeviceToHost);
+  }
+  return host;
+}
+
 void RopeForwardHost(int batch, int seq, int heads, int head_dim, float scale,
                      const float* cos, const float* sin, ComputeType* tensor) {
   if (batch <= 0 || seq <= 0 || heads <= 0 || head_dim <= 0) return;
@@ -637,6 +697,11 @@ void QkPrepForward(int batch, int seq, int num_heads, int num_kv_heads,
     ComputeType* tensor;
   };
   const Pass passes[2] = {{num_heads, q}, {num_kv_heads, k}};
+  const std::size_t table_count =
+      static_cast<std::size_t>(seq) * static_cast<std::size_t>(head_dim / 2);
+  // One staging copy per call, shared by the query and key passes.
+  const std::vector<float> host_cos = HostTable(cos, table_count);
+  const std::vector<float> host_sin = HostTable(sin, table_count);
   for (const Pass& pass : passes) {
     if (pass.tensor == nullptr || pass.heads <= 0) continue;
     // The norm leg: one reduction over each head row, then the per-row
@@ -646,8 +711,8 @@ void QkPrepForward(int batch, int seq, int num_heads, int num_kv_heads,
     NormForward(rows * pass.heads, head_dim, 0, eps, pass.tensor, pass.tensor,
                 &rstd);
     // The rotation leg: rotate, then the qk scale, in one rotation pass.
-    RopeForwardHost(batch, seq, pass.heads, head_dim, scale, cos, sin,
-                    pass.tensor);
+    RopeForwardHost(batch, seq, pass.heads, head_dim, scale, host_cos.data(),
+                    host_sin.data(), pass.tensor);
   }
 }
 
@@ -662,12 +727,17 @@ void QkPrepBackward(int batch, int seq, int num_heads, int num_kv_heads,
     ComputeType* saved;
   };
   const Pass passes[2] = {{num_heads, dq, q}, {num_kv_heads, dk, k}};
+  const std::size_t table_count =
+      static_cast<std::size_t>(seq) * static_cast<std::size_t>(head_dim / 2);
+  const std::vector<float> host_cos = HostTable(cos, table_count);
+  const std::vector<float> host_sin = HostTable(sin, table_count);
   for (const Pass& pass : passes) {
     if (pass.saved == nullptr || pass.grad == nullptr || pass.heads <= 0) {
       continue;
     }
-    RopeNormBackwardHost(batch, seq, pass.heads, head_dim, eps, scale, cos, sin,
-                         pass.grad, pass.saved);
+    RopeNormBackwardHost(batch, seq, pass.heads, head_dim, eps, scale,
+                         host_cos.data(), host_sin.data(), pass.grad,
+                         pass.saved);
   }
 }
 
@@ -1005,12 +1075,13 @@ void BackoutBackward(const ComputeType* d_pre, const ComputeType* x_backout,
   const ComputeType* spans[1] = {d_pre};
   const ComputeType* other[1] = {x_backout};
   const int counts[1] = {static_cast<int>(n)};
+  const SpanList list(spans, other, counts, 1);
   SpanReduceParams params;
   params.num_spans = 1;
-  params.counts = counts;
+  params.counts = list.counts();
   params.scale = -1.0f;
   params.accumulate = true;
-  kernels::SpanReduce(params, spans, other, lambda_grad);
+  kernels::SpanReduce(params, list.spans(), list.other(), lambda_grad);
 }
 
 // ---------------------------------------------------------------------------
@@ -1413,15 +1484,18 @@ void BlockBackward(const BlockShape& shape, const BlockWeights& weights,
   {
     const ComputeType* spans[1] = {scratch.dxr};
     const ComputeType* other[1] = {x_in};
+    const ComputeType* other_x0[1] = {x0};
     const int counts[1] = {static_cast<int>(rows * hidden)};
+    const SpanList list(spans, other, counts, 1);
+    const SpanList list_x0(spans, other_x0, counts, 1);
     SpanReduceParams params;
     params.num_spans = 1;
-    params.counts = counts;
+    params.counts = list.counts();
     params.scale = 1.0f;
     params.accumulate = true;
-    kernels::SpanReduce(params, spans, other, resid_grad);
-    const ComputeType* other_x0[1] = {x0};
-    kernels::SpanReduce(params, spans, other_x0, x0_lambda_grad);
+    kernels::SpanReduce(params, list.spans(), list.other(), resid_grad);
+    kernels::SpanReduce(params, list_x0.spans(), list_x0.other(),
+                        x0_lambda_grad);
   }
 }
 

@@ -152,13 +152,7 @@ int main(int argc, char** argv) {
     } else if (flag == "--device") {
       config.device_name = value;
     } else if (flag == "--hw-check") {
-      if (value == "auto") {
-        config.hw_check = nanochat::TrainConfig::HwCheck::kAuto;
-      } else if (value == "on") {
-        config.hw_check = nanochat::TrainConfig::HwCheck::kOn;
-      } else if (value == "off") {
-        config.hw_check = nanochat::TrainConfig::HwCheck::kOff;
-      } else {
+      if (!nanochat::ParseHwCheck(value, &config.hw_check)) {
         std::fprintf(stderr, "fatal: --hw-check must be auto, on, or off\n");
         return 2;
       }

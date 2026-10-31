@@ -82,6 +82,25 @@ struct TrainConfig {
   int effective_seq() const { return seq > 0 ? seq : model.seq_len; }
 };
 
+// Parses the `--hw-check` value: `auto`, `on`, or `off`. Returns false for any
+// other word, so a caller reports the usage instead of silently choosing a
+// mode.
+inline bool ParseHwCheck(const std::string& text, TrainConfig::HwCheck* mode) {
+  if (text == "auto") {
+    *mode = TrainConfig::HwCheck::kAuto;
+    return true;
+  }
+  if (text == "on") {
+    *mode = TrainConfig::HwCheck::kOn;
+    return true;
+  }
+  if (text == "off") {
+    *mode = TrainConfig::HwCheck::kOff;
+    return true;
+  }
+  return false;
+}
+
 // The modded-nanogpt Track 3 baseline (docs/distributed-design.md sections 8
 // and 9): dense (`L`) attention, no value embeddings, and the AdamW/Muon rates
 // and schedule of the reference recipe. It is a preset, not a new set of flags:
