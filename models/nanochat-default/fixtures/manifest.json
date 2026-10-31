@@ -1,13 +1,22 @@
 {
   "schema_version": 1,
   "model": "nanochat-default",
-  "note": "Copied, not regenerated. The tools node --model selector becomes the generating authority after this release and must reproduce these bytes exactly. tests/data was not moved, rewritten, or deleted.",
+  "note": "Copied, not regenerated. Every record carries the section 7.2 provenance pair: `producer`, the environment that produced or verified the bytes, and `generated_by`, the module or generator that makes them. The versions of debug_state.bin, core_eval.bin, train_parity.bin and generate_parity.bin come from one verification run in the reference virtual environment (python 3.10.21, torch 2.7.1+cu118, numpy 2.2.6, reference checkout HEAD 010ecf81915f3a368f5138857945d82dc9a5614b). That run reproduced each of those four files byte for byte, but the bytes themselves were copied from tests/data, so every record says so: producer.source names the run and regenerated is false, because the recorded environment is the verification run, not the historical producer. train_parity.bin additionally needs --nonzero-projections, an option the NANOORC1 container does not record. Three records are unverified and say why in producer.source: rl_parity.bin, because the current rl generator writes 67 records and 107998 bytes and no config/seed or config/prompt_len record while the committed file has 69 records and 108062 bytes, and both numerics_golden_10l records, whose trace is emitted by the C++ //tests:numerics_trace_emit binary on the reference trace host. A generator revision that writes both config records, or a Model owner's answer, settles rl_parity.bin; a run on the reference trace host settles the two goldens. docs/node-h100.md cites the leaderboard entry a825e63; the commit recorded here is the checkout HEAD the verification run imported, not a substitute for that entry. The tools node --model selector becomes the generating authority after this release and must reproduce these bytes exactly. tests/data was not moved, rewritten, or deleted.",
   "fixtures": [
     {
       "file": "fixtures/debug_state.bin",
       "source": "tests/data/debug_state.bin",
       "magic": "NANOORC1",
       "format_version": 1,
+      "producer": {
+        "torch": "2.7.1+cu118",
+        "numpy": "2.2.6",
+        "nanochat_commit": "010ecf81915f3a368f5138857945d82dc9a5614b",
+        "python": "3.10.21",
+        "source": "verified by a run: tools/dump_fixtures.py oracle --check reproduced this file's sha256 byte for byte in the reference virtual environment on 2026-10-30. The bytes are a copy of tests/data/debug_state.bin, so the recorded environment is the verification run, not the historical producer.",
+        "regenerated": false
+      },
+      "generated_by": "tools/dump_fixtures.py oracle",
       "record_count": 156,
       "size_bytes": 652387,
       "sha256": "06a4959cd83b8b4efe89a170c641ee66754d3f840e1396a634e7ff38f25b5407",
@@ -177,6 +186,15 @@
       "source": "tests/data/core_eval.bin",
       "magic": "NANOEVL1",
       "format_version": 1,
+      "producer": {
+        "torch": "2.7.1+cu118",
+        "numpy": "2.2.6",
+        "nanochat_commit": "010ecf81915f3a368f5138857945d82dc9a5614b",
+        "python": "3.10.21",
+        "source": "verified by a run: tools/dump_fixtures.py eval --check reproduced this file's sha256 byte for byte in the reference virtual environment on 2026-10-30. The bytes are a copy of tests/data/core_eval.bin, so the recorded environment is the verification run, not the historical producer.",
+        "regenerated": false
+      },
+      "generated_by": "tools/dump_fixtures.py eval",
       "record_count": 43,
       "size_bytes": 107247,
       "sha256": "28f6f8f174a471fd6772c0ab947bde02a282ce307acf7687d27a6f9bbf7d4e6e",
@@ -233,6 +251,15 @@
       "source": "tests/data/train_parity.bin",
       "magic": "NANOORC1",
       "format_version": 1,
+      "producer": {
+        "torch": "2.7.1+cu118",
+        "numpy": "2.2.6",
+        "nanochat_commit": "010ecf81915f3a368f5138857945d82dc9a5614b",
+        "python": "3.10.21",
+        "source": "verified by a run: nanochat_cpp_bridge.fixtures.train_parity --nonzero-projections reproduced this file's sha256 byte for byte in the reference virtual environment on 2026-10-30. The bytes are a copy of tests/data/train_parity.bin, so the recorded environment is the verification run, not the historical producer.",
+        "regenerated": false
+      },
+      "generated_by": "nanochat_cpp_bridge.fixtures.train_parity",
       "record_count": 993,
       "size_bytes": 161760,
       "sha256": "006d6aaa62393cb95e641765d954e45950653f45082a644a62c5b75cf8caca23",
@@ -1239,6 +1266,15 @@
       "source": "tests/data/generate_parity.bin",
       "magic": "NANOORC1",
       "format_version": 1,
+      "producer": {
+        "torch": "2.7.1+cu118",
+        "numpy": "2.2.6",
+        "nanochat_commit": "010ecf81915f3a368f5138857945d82dc9a5614b",
+        "python": "3.10.21",
+        "source": "verified by a run: tools/dump_fixtures.py generate --check reproduced this file's sha256 byte for byte in the reference virtual environment on 2026-10-30. The bytes are a copy of tests/data/generate_parity.bin, so the recorded environment is the verification run, not the historical producer.",
+        "regenerated": false
+      },
+      "generated_by": "tools/dump_fixtures.py generate",
       "record_count": 39,
       "size_bytes": 106368,
       "sha256": "65af290d95eeaeefcc60fbb7ec8c75b3fa274a22cd8808d1c5199354bf092db3",
@@ -1291,6 +1327,11 @@
       "source": "tests/data/rl_parity.bin",
       "magic": "NANOORC1",
       "format_version": 1,
+      "producer": {
+        "source": "unverified: no run in this tree reproduces these bytes. tools/dump_fixtures.py rl writes 67 records and 107998 bytes and no config/seed or config/prompt_len record, while this file has 69 records and 108062 bytes, so the producer that wrote it is a revision of the rl generator from before those two config records were dropped. A generator revision that writes both config records, or a Model owner's answer, settles it. The bytes are a copy of tests/data/rl_parity.bin.",
+        "regenerated": false
+      },
+      "generated_by": "tools/dump_fixtures.py rl",
       "record_count": 69,
       "size_bytes": 108062,
       "sha256": "42735fc17fcea63ac6335ef78b952ba8ed83ee30fabf59335f39406debed12f2",
@@ -1373,6 +1414,11 @@
       "source": "tests/data/numerics_golden_10l.bin",
       "magic": "NANONUM1",
       "format_version": 1,
+      "producer": {
+        "source": "unverified: the golden trace is emitted by the C++ //tests:numerics_trace_emit binary on the reference trace host, so no torch, numpy or Python version describes its producer, and a re-emission on this host differs in 745 records by design. A run on the reference trace host settles it. The bytes are a copy of tests/data/numerics_golden_10l.bin.",
+        "regenerated": false
+      },
+      "generated_by": "tools/dump_fixtures.py numerics --precision fp32",
       "record_count": 1500,
       "size_bytes": 118370,
       "sha256": "2af2a12c26b8b9bbf76eb70e40afa3b3c0f1306b8a4aa58150ccbe630705edad",
@@ -2886,6 +2932,11 @@
       "source": "tests/data/numerics_golden_10l_fp8.bin",
       "magic": "NANONUM1",
       "format_version": 1,
+      "producer": {
+        "source": "unverified: the golden trace is emitted by the C++ //tests:numerics_trace_emit binary on the reference trace host, so no torch, numpy or Python version describes its producer, and a re-emission on this host differs in 931 records by design. A run on the reference trace host settles it. The bytes are a copy of tests/data/numerics_golden_10l_fp8.bin.",
+        "regenerated": false
+      },
+      "generated_by": "tools/dump_fixtures.py numerics --precision fp8",
       "record_count": 1500,
       "size_bytes": 118368,
       "sha256": "5b30b15f05c027e0780d9d69f960977ff76167af2402d646097f368a37d8cfa8",
