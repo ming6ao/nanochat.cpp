@@ -375,7 +375,7 @@ class PipelineTest(unittest.TestCase):
         """
         self.assertEqual(
             (self.job.num_samples, self.job.max_tokens, self.job.temperature,
-             self.job.top_k), (4, 32, 1.0, 0),
+             self.job.top_k), (4, 32, 1.5, 0),
             "the rollout shape is pinned in Job, so a change here is a "
             "deliberate one and A6's comparison must be re-read")
         graded = self.legs["graded"]

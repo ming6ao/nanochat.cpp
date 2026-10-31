@@ -196,7 +196,13 @@ class Job:
     out_root: str = ""
     corpus: str = "fixture"
     deliver: bool = True
-    temperature: float = 1.0
+    # Sampling temperature of the rollouts. It stays above 1.0 because the
+    # demo model answers a fixture conversation and emits its stop token, so at
+    # 1.0 every rollout of a group scores the same text and every advantage is
+    # zero (docs/pipeline-plan.md B4 and section 7 A5). Measured on the local
+    # CUDA card: 1.0 and 1.2 give one distinct reward per group, 1.5 gives three
+    # of four, and 2.0 gives four of four at the cost of unreadable text.
+    temperature: float = 1.5
     top_k: int = 0
 
     def to_dict(self) -> dict:

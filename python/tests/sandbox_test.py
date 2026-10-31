@@ -188,7 +188,9 @@ class SandboxTest(unittest.TestCase):
             "t2-parity", "t3-bench", "train"])
         self.assertEqual(profiles["t0-cpu"], {
             "quota": "200%", "mem_high": "1536M", "mem_max": "2G",
-            "pids": "128", "cpus": "0-1", "runtime": None})
+            # 512 tasks: a cold Bazel server starts about one hundred skyframe
+            # threads, and 128 killed that start (docs/sandbox.md).
+            "pids": "512", "cpus": "0-1", "runtime": None})
         self.assertEqual(sandbox.load_profiles()["slice"], "nanochat.slice")
 
     def test_an_unknown_profile_raises(self) -> None:

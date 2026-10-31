@@ -356,6 +356,10 @@ py_test(
 py_test(
     name = "pipeline_gpu_test",
     srcs = ["tests/pipeline_test.py"],
+    # One source for two targets. Without `main`, rules_python looks for
+    # `pipeline_gpu_test.py` in `srcs` and the analysis fails before the test
+    # runs, which is how this target escaped every earlier gate.
+    main = "tests/pipeline_test.py",
     data = [
         "//bindings:nanochat_shared",
         "//src:sft_main",
