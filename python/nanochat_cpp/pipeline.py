@@ -96,8 +96,13 @@ FIXTURE_TOKENIZER = Path("tests") / "data" / "loader_tokenizer.nctoken"
 CONVERSATIONS_NAME = "conversations.json"
 
 #: The global batch of the base stage, in sequences. ``world_size`` is 1, so
-#: this is the whole batch of one step.
-BASE_BATCH = 2
+#: this is the whole batch of one step. It stays at one row because the
+#: committed corpus is small: ``src/parquet/testdata/text.parquet`` holds 10
+#: documents and 109 bytes, so one epoch is at most 119 tokens with one BOS per
+#: document. A demo row is ``seq + 1`` = 65 tokens, so two rows would need 130
+#: tokens and a batch would never form. The loader resets once per step and a
+#: fresh epoch always fills one 65-token row (docs/pipeline-plan.md D5, row 7).
+BASE_BATCH = 1
 
 #: The micro-batch of the SFT stage.
 SFT_BATCH = 2
