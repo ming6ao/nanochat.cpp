@@ -351,11 +351,12 @@ changes.
 | Checkpoint path resolution for base, SFT, and RL | Done | `python/nanochat_cpp/checkpoint.py` |
 | Reference `.pt` conversion into the checkpoint container | Done | `tools/convert_checkpoint.py` |
 | Optimizer-state records in the checkpoint container | Done | `include/nanochat/data.h`; `src/optim_state.h`; `src/optim.cc`; `src/optimizer_state_test.cc` |
-| SFT conversation renderer (`render_conversation`) | Done | `python/nanochat_cpp/chat.py` |
-| SFT mixture and Python packer | Done | `python/nanochat_cpp/sft_data.py` |
-| Native packed-row loader for SFT | Missing | `src/data.cc` has the pretraining packer only |
+| SFT conversation renderer (`render_conversation`) | Done | `python/nanochat_cpp/chat.py`; truncates at 2048 tokens |
+| SFT mixture and Python packer | Done | `python/nanochat_cpp/sft_data.py`; `PackedRowStream` mirrors the reference buffer and stop rule |
+| Native packed-row reader for SFT | Done | `src/sft_shard.{h,cc}`; `src/mesh_train.cc` and `sft_main` share it |
+| SFT driver on the packed shard | Partial | `src/sft_main.cc`: no progress schedule, warm start, accumulation, or evaluation |
 | SFT loop with a dataset-progress schedule and a warm start | Missing | `src/train.cc` has a step-based loop |
-| SFT parity rungs P4 to P7 | Open | No `sft_pack_fixture.bin` or `sft_step_parity_test` yet |
+| SFT parity rungs P4 to P7 | Open | The fixtures and gates are missing; see `docs/sft-parity-plan.md` |
 | RL step binary and the RL parity fixture | Done | `src/rl_step_main.cc`, `tools/dump_fixtures.py rl`, `tests/rl_parity_test.cc` |
 | RL orchestration worker | Done | `src/rl_worker_main.cc`, `python/nanochat_cpp/rl.py` |
 | SFT bridge command | Done | `src/sft_main.cc`; `python/nanochat_cpp/sft.py` |

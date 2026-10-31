@@ -6,6 +6,12 @@ mixes the datasets, renders each conversation, and packs the rows (docs/
 post-training.md sections 3 and 4). The C++ side receives the token ids and a
 ``-1`` target mask.
 
+The packer is a pinned mirror of ``sft_data_generator_bos_bestfit``: a
+100-conversation buffer (:data:`PACK_BUFFER_SIZE`), a largest-fit search, BOS
+padding of the remainder, a cursor stride of the world size with wrap, and a
+``consumed`` counter that ends the stream. The renderer is pinned to a
+2048-token truncation (:data:`RENDER_MAX_TOKENS`).
+
 The reference training mixture has three parts:
 
 * SmolTalk (``HuggingFaceTB/smol-smoltalk``), the train split, about 460K
@@ -138,8 +144,23 @@ def demo_mixture(limit: int = 64) -> TaskMixture:
     ])
 
 
+#: The conversation buffer size of the reference packer. It refills the
+#: buffer to this many conversations before each best-fit search
+#: (``scripts/chat_sft.py:198``, ``buffer_size=100``).
+PACK_BUFFER_SIZE = 100
+
+#: The reference renderer truncation. ``Tokenizer.render_conversation``
+#: defaults to 2048 tokens, and ``scripts/chat_sft.py`` never overrides it.
+RENDER_MAX_TOKENS = 2048
+
+
 def iter_packed_rows(conversations, tokenizer, seq_len: int,
-                     render=None) -> Iterator[tuple[list[int], list[int]]]:
+                     render=None, *,
+                     buffer_size: int = PACK_BUFFER_SIZE,
+                     render_max_tokens: int = RENDER_MAX_TOKENS,
+                     batch: int = 1, num_iterations: int = 0,
+                     rank: int = 0,
+                     world_size: int = 1) -> Iterator[tuple[list[int], list[int]]]:
     """Yield ``(tokens, targets)`` rows of length ``seq_len``.
 
     Each row is BOS-aligned and best-fit packed. A conversation that fits the
@@ -148,73 +169,221 @@ def iter_packed_rows(conversations, tokenizer, seq_len: int,
     The padding targets and the masked user targets are ``-1``. A conversation
     that is longer than a full row is skipped.
 
-    ``render`` defaults to :func:`nanochat_cpp.chat.render_conversation`. A
-    caller can pass a different renderer, for example in a test.
+    The keyword arguments pin the reference packer: ``buffer_size`` is the
+    best-fit buffer, ``render_max_tokens`` is the renderer truncation, and
+    ``batch``, ``num_iterations``, ``rank``, and ``world_size`` drive the
+    cursor and the progress counters. The stream ends after one epoch, in the
+    same iteration that the reference sets ``last_step``.
 
-    This mirrors ``sft_data_generator_bos_bestfit`` in ``scripts/chat_sft.py``.
+    ``render`` defaults to :func:`nanochat_cpp.chat.render_conversation` with
+    ``max_tokens=render_max_tokens``. A caller can pass a different renderer,
+    for example in a test.
+
+    This is :class:`PackedRowStream` with ``batch=1``, so ``num_iterations``
+    counts rows. Use the class directly when the iteration counters must match
+    a training batch.
     """
-    if render is None:
-        from .chat import render_conversation as render  # noqa: PLC0415
+    return iter(PackedRowStream(
+        conversations, tokenizer, seq_len, render,
+        buffer_size=buffer_size, render_max_tokens=render_max_tokens,
+        batch=batch, num_iterations=num_iterations, rank=rank,
+        world_size=world_size))
 
-    bos = tokenizer.get_bos_token_id()
-    row_capacity = seq_len + 1  # the last position is the target only
-    source = iter(conversations)
-    buffer = []
-    exhausted = False
 
-    def refill() -> None:
-        nonlocal exhausted
-        while not exhausted:
-            try:
-                conversation = next(source)
-            except StopIteration:
-                exhausted = True
-                break
-            ids, mask = render(conversation, tokenizer)
-            if len(ids) > row_capacity:
-                continue  # this conversation can never fit a row
-            buffer.append((ids, mask))
+class PackedRowStream:
+    """The reference BOS-aligned best-fit row stream over one epoch.
 
-    while True:
-        row, mask_row = [], []
-        while len(row) < row_capacity:
-            if not buffer:
-                refill()
-                if not buffer:
-                    break
-            remaining = row_capacity - len(row)
+    This mirrors ``sft_data_generator_bos_bestfit`` in ``scripts/chat_sft.py``
+    line by line: the same 100-conversation buffer, the same largest-fit
+    search, the same BOS padding, the same cursor stride and wrap, the same
+    ``consumed`` counter, and the same ``last_step`` stop rule.
+
+    The counters are attributes, so a driver can read them after each row:
+
+    * ``rows`` -- rows yielded so far.
+    * ``iterations`` -- completed batches, the reference ``it``. It advances
+      every ``batch`` rows and drives ``approx_progress`` when
+      ``num_iterations`` is positive.
+    * ``consumed`` -- conversations packed so far. The reference starts it at
+      the rank and adds the world size per packed conversation.
+    * ``epoch`` -- passes over the conversation list. It advances on a cursor
+      wrap, which a skipped oversized conversation also causes.
+    * ``approx_progress`` -- the raw fraction the reference computes,
+      ``iterations / num_iterations`` or ``consumed / len(conversations)``.
+    * ``progress`` -- the running maximum of ``approx_progress``, which is what
+      the reference training loop uses.
+    * ``last_step`` -- true after the final batch of the stream.
+
+    The stream is finite. It ends after the batch that sets ``last_step``, so
+    one pass over the list yields about one epoch of rows. A consumer that
+    needs more restarts the stream.
+    """
+
+    def __init__(self, conversations, tokenizer, seq_len: int, render=None, *,
+                 buffer_size: int = PACK_BUFFER_SIZE,
+                 render_max_tokens: int = RENDER_MAX_TOKENS,
+                 batch: int = 1, num_iterations: int = 0,
+                 rank: int = 0, world_size: int = 1) -> None:
+        size = len(conversations)
+        if size <= 0:
+            raise ValueError("the SFT conversation list is empty")
+        if int(seq_len) < 1:
+            raise ValueError(f"seq_len must be positive, got {seq_len}")
+        if int(buffer_size) < 1:
+            raise ValueError(f"buffer_size must be positive, got {buffer_size}")
+        if int(world_size) < 1:
+            raise ValueError(f"world_size must be positive, got {world_size}")
+        if int(batch) < 1:
+            raise ValueError(f"batch must be positive, got {batch}")
+        if not 0 <= int(rank) < size:
+            raise ValueError(f"rank {rank} is outside the dataset ({size})")
+
+        self._conversations = conversations
+        self._tokenizer = tokenizer
+        self._size = size
+        self._seq_len = int(seq_len)
+        self._row_capacity = self._seq_len + 1  # the last position is the target
+        self._bos = tokenizer.get_bos_token_id()
+        self._buffer_size = int(buffer_size)
+        self._batch = int(batch)
+        self._num_iterations = int(num_iterations)
+        self._world_size = int(world_size)
+        self._render = render if render is not None else self._default_render(
+            render_max_tokens)
+
+        self._buffer: list[tuple[list[int], list[int]]] = []
+        self._cursor = int(rank)
+        self._consumed = int(rank)
+        self._epoch = 1
+        self._iterations = 0
+        self._rows_in_batch = 0
+        self._done = False
+        self._stall = 0
+
+        #: Rows yielded so far.
+        self.rows = 0
+        #: The raw reference progress fraction.
+        self.approx_progress = 0.0
+        #: The running maximum of ``approx_progress``.
+        self.progress = 0.0
+        #: True after the final batch of the stream.
+        self.last_step = False
+
+    @staticmethod
+    def _default_render(render_max_tokens: int):
+        """The pinned reference renderer, with its truncation."""
+        from .chat import render_conversation  # noqa: PLC0415
+
+        def render(conversation, tokenizer):  # noqa: ANN001, ANN202
+            return render_conversation(conversation, tokenizer,
+                                       max_tokens=render_max_tokens)
+
+        return render
+
+    @property
+    def iterations(self) -> int:
+        """Completed batches, the reference ``it``."""
+        return self._iterations
+
+    @property
+    def consumed(self) -> int:
+        """Conversations packed so far."""
+        return self._consumed
+
+    @property
+    def epoch(self) -> int:
+        """Passes over the conversation list."""
+        return self._epoch
+
+    def __iter__(self) -> "PackedRowStream":
+        return self
+
+    def __next__(self) -> tuple[list[int], list[int]]:
+        if self._done:
+            raise StopIteration
+        row = self._next_row()
+        self.rows += 1
+        self._rows_in_batch += 1
+        if self._rows_in_batch >= self._batch:
+            self._rows_in_batch = 0
+            self._update_progress()
+            if self.last_step:
+                self._done = True
+        return row
+
+    def _update_progress(self) -> None:
+        """One reference batch boundary: ``it``, progress, and ``last_step``."""
+        self._iterations += 1
+        if self._num_iterations > 0:
+            self.approx_progress = self._iterations / self._num_iterations
+        else:
+            self.approx_progress = self._consumed / self._size
+        self.progress = max(self.progress, self.approx_progress)
+        self.last_step = self._consumed >= self._size
+        if 0 < self._num_iterations <= self._iterations:
+            self.last_step = True
+
+    def _refill(self) -> None:
+        """Fetch conversations until the buffer is full, as the reference does."""
+        while len(self._buffer) < self._buffer_size:
+            conversation = self._conversations[self._cursor]
+            ids, mask = self._render(conversation, self._tokenizer)
+            self._cursor += self._world_size
+            if self._cursor >= self._size:
+                self._cursor %= self._size
+                self._epoch += 1
+            if len(ids) > self._row_capacity:
+                # This conversation can never fit one row. The reference skips
+                # it at fetch time; the guard below turns a dataset with no
+                # packable conversation into an error instead of a hang.
+                self._stall += 1
+                if self._stall >= self._size:
+                    raise ValueError(
+                        "no conversation fits one row of "
+                        f"{self._row_capacity} tokens")
+                continue
+            self._stall = 0
+            self._buffer.append((ids, mask))
+
+    def _next_row(self) -> tuple[list[int], list[int]]:
+        """Assemble one row with the largest-fit search of the reference."""
+        row: list[int] = []
+        mask_row: list[int] = []
+        content_len = self._row_capacity
+        while len(row) < self._row_capacity:
+            while len(self._buffer) < self._buffer_size:
+                self._refill()
+            remaining = self._row_capacity - len(row)
             best_index, best_length = -1, 0
-            for index, (ids, _) in enumerate(buffer):
+            for index, (ids, _) in enumerate(self._buffer):
                 if len(ids) <= remaining and len(ids) > best_length:
                     best_index, best_length = index, len(ids)
             if best_index < 0:
-                break  # no conversation fits; pad the remainder below
-            ids, mask = buffer.pop(best_index)
+                # No conversation fits. Pad the remainder instead of cropping.
+                content_len = len(row)
+                row.extend([self._bos] * remaining)
+                mask_row.extend([0] * remaining)
+                break
+            ids, mask = self._buffer.pop(best_index)
             row.extend(ids)
             mask_row.extend(mask)
+            self._consumed += self._world_size
 
-        if not row:
-            return
-        content_len = len(row)
-        if len(row) < row_capacity:
-            pad = row_capacity - len(row)
-            row.extend([bos] * pad)
-            mask_row.extend([0] * pad)
-
-        inputs = row[:seq_len]
+        inputs = row[:self._seq_len]
         targets = [token if keep else -1
-                   for token, keep in zip(row[1:row_capacity],
-                                          mask_row[1:row_capacity])]
+                   for token, keep in zip(row[1:self._row_capacity],
+                                          mask_row[1:self._row_capacity])]
         # Mask the padding targets at the end of the row.
-        for position in range(max(content_len - 1, 0), seq_len):
+        for position in range(max(content_len - 1, 0), self._seq_len):
             targets[position] = -1
-        yield inputs, targets
+        return inputs, targets
 
 
-def pack_rows(conversations, tokenizer, seq_len: int, render=None) -> list:
+def pack_rows(conversations, tokenizer, seq_len: int, render=None,
+              **kwargs) -> list:
     """Materialize :func:`iter_packed_rows` into a list of rows."""
     return list(iter_packed_rows(conversations, tokenizer, seq_len,
-                                 render=render))
+                                 render=render, **kwargs))
 
 
 __all__ = [
@@ -225,8 +394,11 @@ __all__ = [
     "GSM8K_EPOCHS",
     "VAL_MMLU_STOP",
     "VAL_GSM8K_STOP",
+    "PACK_BUFFER_SIZE",
+    "RENDER_MAX_TOKENS",
     "SmolTalk",
     "TaskMixture",
+    "PackedRowStream",
     "build_train_mixture",
     "build_val_mixture",
     "demo_mixture",

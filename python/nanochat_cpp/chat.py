@@ -130,7 +130,8 @@ def _specials(tokenizer) -> dict[str, int]:
     return result
 
 
-def render_conversation(conversation, tokenizer) -> tuple[list[int], list[int]]:
+def render_conversation(conversation, tokenizer,
+                        max_tokens: int = 2048) -> tuple[list[int], list[int]]:
     """Render one conversation to ``(ids, mask)`` for a supervised dataset.
 
     ``mask`` is 1 over the assistant text, the assistant end token, and the
@@ -138,6 +139,11 @@ def render_conversation(conversation, tokenizer) -> tuple[list[int], list[int]]:
     tokens (docs/training-seam.md section 6.5). This mirrors the packing path
     in ``notebooks/posttrain.ipynb`` so the packed rows and the reference
     renderer agree.
+
+    ``max_tokens`` truncates the result to that many tokens, ids and mask
+    together. The reference ``Tokenizer.render_conversation`` defaults to
+    2048, and ``scripts/chat_sft.py`` never overrides it, so this default is
+    part of the SFT data contract (docs/sft-parity-plan.md section 5.1).
     """
     specials = _specials(tokenizer)
     missing = [name for name in ("<|bos|>", "<|user_start|>",
@@ -151,14 +157,21 @@ def render_conversation(conversation, tokenizer) -> tuple[list[int], list[int]]:
             f"the tokenizer lacks the chat special tokens {missing}")
 
     messages = copy.deepcopy(conversation["messages"])
+    assert messages, "a conversation must have at least one message"
     if messages and messages[0]["role"] == "system":
+        assert messages[1]["role"] == "user", (
+            "a system message must be followed by a user message")
         messages[1]["content"] = (messages[0]["content"] + "\n\n"
                                   + messages[1]["content"])
         messages = messages[1:]
 
     ids = [specials["<|bos|>"]]
     mask = [0]
-    for message in messages:
+    for index, message in enumerate(messages):
+        expected_role = "user" if index % 2 == 0 else "assistant"
+        assert message["role"] == expected_role, (
+            f"message {index} has role {message['role']} but should be "
+            f"{expected_role}")
         if message["role"] == "user":
             ids.append(specials["<|user_start|>"])
             mask.append(0)
@@ -186,8 +199,11 @@ def render_conversation(conversation, tokenizer) -> tuple[list[int], list[int]]:
                     ids.append(specials["<|output_start|>"])
                     mask.append(0)
                     body, keep = tokenizer.encode(part["text"]), 0
-                else:
+                elif part["type"] == "text":
                     body, keep = tokenizer.encode(part["text"]), 1
+                else:
+                    raise ValueError(
+                        f"unknown part type: {part['type']}")
                 for token in body:
                     ids.append(token)
                     mask.append(keep)
@@ -199,7 +215,7 @@ def render_conversation(conversation, tokenizer) -> tuple[list[int], list[int]]:
                     mask.append(0)
         ids.append(specials["<|assistant_end|>"])
         mask.append(1)
-    return ids, mask
+    return ids[:max_tokens], mask[:max_tokens]
 
 
 class _PromptRenderer:

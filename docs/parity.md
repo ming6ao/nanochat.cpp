@@ -403,8 +403,9 @@ schedule, and the warm start. The gate is `//tests:sft_parity_test` at T2.
 **Impact:** the C++ run can use a different schedule than the reference. The
 learning rate and Muon momentum then diverge.
 
-**Evidence:** `src/train.cc` has a step-based loop only. No packed-row source
-exists in `src/data.cc`.
+**Evidence:** `src/train.cc` has a step-based loop only. The packed-row reader
+exists in `src/sft_shard.cc`, but `sft_main` has no progress schedule and no
+warm start.
 
 **Fix direction:** implement the packed-row source, the progress schedule, and the
 warm start. Then compare a base-to-SFT run at T2.
