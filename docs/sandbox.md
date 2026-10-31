@@ -65,12 +65,19 @@ falls back to a system `bazel`.
 
 | Profile | CPUQuota | Mem high/max | pids | affinity | notes |
 |---|---|---|---|---|---|
-| `t0-cpu` | 200% | 1.5G / 2G | 128 | 0-1 | default CPU tests, oracle-on-CPU |
-| `t1-gpu` | 200% | 2G / 3G | 128 | 0-1 | tiny kernel tests, `B=2,T=8` |
+| `t0-cpu` | 200% | 1.5G / 2G | 512 | 0-1 | default CPU tests, oracle-on-CPU |
+| `t1-gpu` | 200% | 2G / 3G | 512 | 0-1 | tiny kernel tests, `B=2,T=8` |
 | `t2-parity` | 800% | 5G / 6G | 256 | 0-7 | exclusive, GPU queue held |
 | `t3-bench` | 1000% | 5G / 6G | 256 | 0-11 | exclusive, native Linux for Nsight |
 | `train` | 800% | 5G / 6G | 512 | 0-7 | `RuntimeMaxSec` optional |
-| `eval` | 400% | 3G / 4G | 128 | 0-3 | forward only |
+| `eval` | 400% | 3G / 4G | 512 | 0-3 | forward only |
+
+A profile that hosts a Bazel server needs a large `pids` value. On a cold
+output base the Bazel server starts about one hundred `skyframe` threads before
+it loads the first target. A `TasksMax` of 128 kills that start with
+`pthread_create failed (EAGAIN)`, and Bazel reports it as an out-of-memory
+crash. The `t0-cpu`, `t1-gpu`, and `eval` profiles therefore carry 512 tasks.
+The aggregate ceiling is the `nanochat.slice` value of 1024.
 
 The profile also exports thread-count env (`OMP_NUM_THREADS`,
 `NANOCHAT_NUM_THREADS`) matching `CPUQuota`, because cuBLAS and the OpenMP CPU

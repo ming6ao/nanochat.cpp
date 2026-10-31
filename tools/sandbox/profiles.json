@@ -6,7 +6,7 @@
       "quota": "200%",
       "mem_high": "1536M",
       "mem_max": "2G",
-      "pids": "128",
+      "pids": "512",
       "cpus": "0-1",
       "runtime": null
     },
@@ -14,7 +14,7 @@
       "quota": "200%",
       "mem_high": "2G",
       "mem_max": "3G",
-      "pids": "128",
+      "pids": "512",
       "cpus": "0-1",
       "runtime": null
     },
@@ -46,7 +46,7 @@
       "quota": "400%",
       "mem_high": "3G",
       "mem_max": "4G",
-      "pids": "128",
+      "pids": "512",
       "cpus": "0-3",
       "runtime": null
     },
