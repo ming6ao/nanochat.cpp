@@ -194,12 +194,48 @@ the script name.
 
 | Script | Fixture names |
 |---|---|
-| `tools/dump_fixtures.py` | `oracle`, `train`, `rl`, `generate`, `eval`, `plan`, `tokenizer`, `loader`, `chat`, `api`, `numerics` |
+| `tools/dump_fixtures.py` | `oracle`, `train`, `rl`, `generate`, `eval`, `plan`, `tokenizer`, `loader`, `chat`, `api`, `numerics`, `checkpoint`, `sft`, `sft_loop` |
 
 For example, run `python3 tools/dump_fixtures.py oracle --out tests/data/debug_state.bin`.
 The shared `tools/fixture_format.py` writer keeps the common record layouts stable,
 and `tools/fixture_common.py` holds the shared helpers.
 Each fixture kind keeps its own format and runtime requirements.
+
+### The two SFT fixture kinds
+
+`tools/dump_fixtures.py sft` writes four files, and
+`tools/dump_fixtures.py sft_loop` writes the fifth. Both are tier T0.
+
+`tests/data/sft_pack_fixture.bin` is `NANCHAT1` plus JSON: the eight
+conversations, the reference render, the transcribed packer, the synthetic
+mixture order, and the fixture tokenizer.
+
+`tests/data/sft_step_fixture.bin` is a `NANOORC1` record file: the pinned
+settings and the per-step loss, gradient norm, parameter L2, rate multiplier,
+and Muon momentum of an eight-step reference trajectory.
+
+`tests/data/sft_rows_fixture.nchsft` is the `NCSFT001` packed row shard that the
+same packer produced.
+
+`tests/data/sft_base_fixture.ckpt` is the `NCHKPT01` checkpoint with the
+reference parameters and the reference optimizer moments at step 0.
+
+`tests/data/sft_loop_fixture.bin` is a second `NANOORC1` file: the progress
+stream, the rate multiplier, the momentum, the epoch, the loss curve, and the
+packed bits-per-byte of the same eight steps.
+
+Both kinds are hermetic. They read a reference checkout to generate the bytes
+and never again afterwards: every gate that consumes a fixture imports no
+torch, opens no network socket, and needs no tokenizer artifact. `sft_loop`
+reads the shard, the base checkpoint, and the pack fixture, so it runs second.
+The pinned settings live in one module, `tools/sft_fixture.py`, which both kinds
+import, so the step and the loop fixtures cannot disagree.
+
+The layout of every record, its dtype, its shape, the pinned settings, and the
+SHA-256 of each file are recorded in `tests/data/sft_fixtures.txt`, because a
+binary cannot carry a header comment. `docs/sft-parity-plan.md` section 6 is the
+design. Both kinds print the digest of each file they write, so a re-pin is
+copied from the generator's output instead of derived a second time.
 
 ## Oracle fixtures
 
@@ -256,10 +292,91 @@ A 50-step run at `d8_s512` matches the reference: loss `6e-6`, parameter L2
 bisecting a shape- or schedule-dependent bug. Like the oracle, the fixture is
 generated on the CPU with torch and the runtime tests never import torch.
 
-## SFT parity tolerances
+## SFT parity gates
 
-The SFT rungs reuse the tolerances above. The loss matches at `1e-5`. The
-parameter L2 matches at `1e-4`. The fp32 CUDA leg uses about `1e-5`.
+The supervised-fine-tuning rungs of `docs/sft-parity-plan.md` section 3 have one
+gate each. Every one compares one backend against one committed fixture, as
+`docs/parity.md` requires.
+
+| Gate | Tier | Fixture | What it compares |
+|---|---|---|---|
+| `//python:sft_data_parity_test` | T0 CPU | `sft_pack_fixture.bin` | The render ids and mask, the packed rows, the mixture order, and the two `stop` values |
+| `//tests:sft_fixture_load_test` | T0 CPU | All five `sft_*` files | That the containers, the shard, the checkpoint, and the pack JSON all read |
+| `//tests:sft_step_parity_test` | T0 CPU | `sft_step_fixture.bin`, `sft_base_fixture.ckpt` | The per-step loss, gradient norm, parameter L2, rate, and momentum |
+| `//tests:sft_step_parity_gpu_test` | T1 GPU | The same two files | The same eight-step trajectory on the CUDA backend |
+| `//tests:sft_step_parity` | T2 | A fixture named on the command line | A larger trajectory through the standalone binary |
+| `//tests:sft_loop_parity_test` | T0 CPU | `sft_loop_fixture.bin`, `sft_step_fixture.bin` | `LrMultiplierForProgress`, the momentum, the epoch, and the packed bits-per-byte |
+| `//tests:sft_parity_test` | T2 GPU | The loop, step, rows, and base fixtures | The real `sft_main` output lines and the checkpoint it writes |
+
+Every fixture name above is under `tests/data/`. The gates compare against the
+recorded values, not against each other:
+
+- `//python:sft_data_parity_test` compares `render_conversation` and `pack_rows`
+  with the transcribed reference packer, and `TaskMixture` with the recorded
+  seed-42 order.
+- `//tests:sft_fixture_load_test` proves the fixtures load on this host, with no
+  reference checkout, no torch, and no tokenizer artifact.
+- `//tests:sft_step_parity_test` drives `ForwardLoss`, `BackwardWeighted`, and
+  `Optimizer::Step` for eight steps, and then compares every final parameter.
+- `//tests:sft_loop_parity_test` recomputes the rate multiplier from the
+  recorded progress and the momentum from the step, then compares the two
+  against the trace and reproduces the recorded bits-per-byte.
+- `//tests:sft_parity_test` runs the real binary, so it pins the flags, the
+  accumulation, the progress stream, the evaluation cadence, and the `Recipe`
+  block of the checkpoint it writes.
+
+`//tests:sft_parity_test` carries the `gpu` and `manual` tags, so the default T0
+loop and the wildcard GPU sweep both skip it. Run it by name at a wave boundary.
+`//tests:sft_step_parity_gpu_test` carries the same two tags.
+
+State of the gates, as of the last recorded run in this tree:
+
+| Gate | Result |
+|---|---|
+| `//python:sft_data_parity_test` | Passed at T0, 9 test cases |
+| `//tests:sft_fixture_load_test` | Passed at T0 |
+| `//tests:sft_step_parity_test` | Passed at T0; the measured maxima are printed per run |
+| `//tests:sft_loop_parity_test` | Passed at T0; the maximum schedule difference is `5.96e-08` |
+| `//tests:sft_step_parity_gpu_test` | Not run on this host |
+| `//tests:sft_parity_test` | Not run on this host |
+| `//tests:sft_step_parity` | Not run on this host |
+
+A GPU tier that did not run is not evidence. `docs/parity.md` records `P5` for
+the CPU backend only, and it leaves `P6` and `P7` open.
+
+### The bounds these gates read
+
+The first three bounds are the pretraining numbers. The SFT step trajectory
+reads a wider class, and the reason is one setting: section 5.1 of
+`docs/sft-parity-plan.md` pins `adam_eps = 1e-10`, the reference value. A
+near-zero gradient then divides its moment by `sqrt(v) + 1e-10`, so the last
+bits of a gradient that both sides compute in a different order become a
+full-size step. The pretraining oracle fixture avoids this by pinning `1e-4`
+(`tools/dump_fixtures.py oracle`); the SFT recipe cannot.
+
+| Quantity | Bound | Where it applies |
+|---|---|---|
+| Loss | `1e-5` absolute and relative | The pretraining fixture (`//tests:oracle_test`, `//tests:train_parity_test`) and the numeric trace (`//tests:numerics_trace_test`) |
+| Parameter L2 | `1e-4` relative | The pretraining trajectory and the numeric trace |
+| fp32 CUDA | about `1e-5` relative | The GPU leg of a pretraining or numeric-trace gate |
+| Schedule values (`lr`, momentum, progress) | `1e-6` absolute and relative | Every SFT gate. These are exact settings, so only the fp32 round trip separates the two sides |
+| SFT loss, per step | `2e-3` absolute and relative | `//tests:sft_step_parity_test`, `//tests:sft_parity_test` |
+| SFT gradient norm, per step | `1e-3` absolute, `2e-2` relative | The same two gates |
+| SFT parameter L2, per step | `1e-3` absolute, `5e-3` relative | The same two gates |
+| SFT validation loss, against the train curve | `5e-2` relative | `//tests:sft_loop_parity_test`: the evaluation reads every row while `train/loss/<k>` logs one micro-batch |
+
+`//tests:sft_step_parity_test` prints its measured maxima on every run, so a
+drift is visible even when it passes. The measured values of the recorded run
+are `9.05e-4` for the loss, `8.4e-3` for the gradient norm, `1.56e-1` absolute
+(`1.3e-3` relative) for the parameter L2, and `5.96e-8` for the schedule.
+
+The total parameter L2 is the gate, and the per-parameter norms are diagnostics.
+A few scalars do disagree by percent-scale relative differences
+(`x0_lambdas` `4.2e-1`, `backout_lambda` at a norm of `0.058` against `0.404`),
+because the reference gradient of those parameters is itself roundoff at this
+scale. A wrong rate, a wrong epsilon, or a wrong parameter grouping moves the
+total parameter L2 by percent, not by `1e-3`: the same trajectory at
+`adam_eps = 1e-4` misses the first step's parameter L2 by 5 percent.
 
 ## Tokenizer tests
 

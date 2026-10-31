@@ -54,7 +54,8 @@ __all__ = [
     "torch_available",
 ]
 
-#: Every fixture subcommand, in help order.
+#: Every fixture subcommand, in help order. The order is append-only: a kind
+#: that lands later joins the end, so an existing help line keeps its shape.
 COMMANDS = (
     "oracle",
     "train",
@@ -68,6 +69,8 @@ COMMANDS = (
     "api",
     "numerics",
     "checkpoint",
+    "sft",
+    "sft_loop",
 )
 
 #: The usage line for the merged generator. The ``--model`` and ``--check``

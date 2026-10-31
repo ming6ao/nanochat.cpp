@@ -194,6 +194,105 @@ void ScoreBatch(Model* model, const int* tokens, int batch, int seq,
   }
 }
 
+// Bits-per-byte over the packed validation rows (design decision D6 of
+// docs/sft-parity-plan.md). The packed-row counterpart of `EvalBpb`: the rows
+// come from an `NCSFT001` shard instead of a document loader, and the byte
+// table is the tokenizer's, as an `int` per token id.
+//
+// `Model::ForwardLoss` returns the mean over the valid targets of one batch, so
+// the nats that batch contributes are `mean_loss * valid_targets`. The metric
+// then divides by the bytes those targets represent, exactly as the reference
+// `evaluate_bpb` does.
+bool EvaluatePackedRows(Model* model, const SftShard& shard,
+                        const std::vector<int>& token_bytes, int device_batch,
+                        int eval_steps, PackedBpb* out, std::string* error) {
+  auto fail = [error](const std::string& message) {
+    if (error != nullptr) *error = message;
+    return false;
+  };
+  if (out != nullptr) *out = PackedBpb();
+  if (model == nullptr) return fail("the evaluator has no model");
+  if (device_batch <= 0) {
+    return fail("the evaluation batch size is not positive");
+  }
+  if (eval_steps <= 0) return fail("the evaluation step count is not positive");
+  if (shard.seq <= 0 || shard.rows <= 0) {
+    return fail("the validation shard is empty");
+  }
+  if (shard.tokens.size() < static_cast<std::size_t>(shard.rows) * shard.seq ||
+      shard.targets.size() < static_cast<std::size_t>(shard.rows) * shard.seq) {
+    return fail("the validation shard holds fewer values than its shape says");
+  }
+
+  // One pass, never a restart: the pass reads `eval_steps` batches of
+  // `device_batch` rows from the start of the shard (section 5.4 of the plan,
+  // and the validation-length risk of section 10).
+  const std::int64_t want_rows =
+      static_cast<std::int64_t>(eval_steps) * device_batch;
+  if (want_rows > shard.rows) {
+    return fail("the validation shard holds " + std::to_string(shard.rows) +
+                " rows, fewer than the " + std::to_string(want_rows) +
+                " that eval_steps * device_batch reads in one pass");
+  }
+
+  // Forward-only path (docs/eval.md): this mirrors the reference
+  // `@torch.no_grad()`. The guard restores the previous grad mode on return.
+  NoGradGuard guard(model);
+
+  const std::size_t rows_per_batch = static_cast<std::size_t>(device_batch) *
+                                     static_cast<std::size_t>(shard.seq);
+  const std::size_t table_size = token_bytes.size();
+  double total_nats = 0.0;
+  std::int64_t total_bytes = 0;
+  std::int64_t total_valid = 0;
+
+  for (int step = 0; step < eval_steps; ++step) {
+    const std::size_t base = static_cast<std::size_t>(step) * rows_per_batch;
+    const int* tokens = shard.tokens.data() + base;
+    const int* targets = shard.targets.data() + base;
+
+    // The divisor of this batch: every target that is not the ignore index,
+    // which is what `ForwardLoss` divides its mean by.
+    std::int64_t valid = 0;
+    for (std::size_t i = 0; i < rows_per_batch; ++i) {
+      if (targets[i] >= 0) ++valid;
+    }
+    if (valid == 0) continue;
+
+    const float mean_loss =
+        model->ForwardLoss(tokens, targets, device_batch, shard.seq);
+    if (!std::isfinite(mean_loss)) {
+      return fail("the model returned a non-finite loss for evaluation step " +
+                  std::to_string(step));
+    }
+    total_nats += static_cast<double>(mean_loss) * static_cast<double>(valid);
+    for (std::size_t i = 0; i < rows_per_batch; ++i) {
+      const int target = targets[i];
+      if (target < 0) continue;
+      if (static_cast<std::size_t>(target) >= table_size) {
+        return fail("the shard targets token " + std::to_string(target) +
+                    ", which the token-byte table does not cover");
+      }
+      const int bytes = token_bytes[static_cast<std::size_t>(target)];
+      if (bytes > 0) total_bytes += bytes;
+    }
+    total_valid += valid;
+  }
+
+  if (out != nullptr) {
+    out->valid_targets = total_valid;
+    out->target_bytes = total_bytes;
+  }
+  if (total_bytes <= 0) {
+    return fail("the packed validation rows hold no valid target bytes");
+  }
+  if (out != nullptr) {
+    out->bpb = static_cast<float>(
+        total_nats / (std::log(2.0) * static_cast<double>(total_bytes)));
+  }
+  return true;
+}
+
 std::string DecodeGeneratedRow(const Tokenizer& tokenizer,
                                const GeneratedSequence& row) {
   TokenStreamDecoder decoder(tokenizer);

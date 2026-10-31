@@ -4,8 +4,9 @@
 One module holds every fixture kind (``docs/script-consolidation-plan.md``
 section 7, P4). The kinds are ``oracle``, ``train``, ``rl``, ``generate``,
 ``eval``, ``plan``, ``tokenizer``, ``loader``, ``chat``, ``api``, ``numerics``,
-and ``checkpoint``. Run ``python3 tools/dump_fixtures.py <kind> [options]``.
-Each kind keeps its own ``--help`` text.
+``checkpoint``, ``sft``, and ``sft_loop``. Run
+``python3 tools/dump_fixtures.py <kind> [options]``. Each kind keeps its own
+``--help`` text.
 
 Model-scoped kinds (``oracle``, ``train``, ``rl``, ``generate``, ``eval``, and
 ``numerics``) take ``--model NAME`` (default ``nanochat-default``), read
@@ -15,6 +16,15 @@ Model-scoped kinds (``oracle``, ``train``, ``rl``, ``generate``, ``eval``, and
 bytes with the committed model fixture; in a tree without torch/numpy it
 falls back to verifying the committed bytes against
 ``models/<name>/fixtures/manifest.json`` and says which proof ran.
+
+The two supervised fine-tuning kinds (``sft`` and ``sft_loop``) are harness
+data, not model definitions, so they always write into ``tests/data/``. Both
+are hermetic at test time: a runtime test reads the committed bytes with no
+reference checkout, no network, and no torch. ``sft`` writes the pack fixture,
+the packed shard, the base checkpoint, and the eight-step trajectory;
+``sft_loop`` reads the shard and the checkpoint and writes the loop trace. The
+pinned settings and the shared model live in ``tools/sft_fixture.py``, so the
+two kinds cannot drift apart (``docs/sft-parity-plan.md`` sections 5 to 7).
 
 The module imports no third-party package at import time. Each kind imports
 its own reference package, so a kind that does not touch PyTorch stays fast.
@@ -3605,6 +3615,595 @@ if _command == 'checkpoint':
         checkpoint.write_checkpoint(out, records)
         print(f"wrote {len(records)} records to {out}")
         return summarize(records)
+    _selected_main = main
+
+if _command == 'sft':
+    __doc__ = textwrap.dedent("""\
+        Generate the supervised fine-tuning fixtures of
+        ``docs/sft-parity-plan.md`` section 6, phase B items 1 to 3.
+
+        One run writes four committed files from one pinned tiny model and one
+        pinned conversation corpus. They make the SFT rungs ``R1`` and ``R2``
+        hermetic: a runtime test reads them with no reference checkout, no network,
+        and no torch.
+
+        What it writes
+        --------------
+        ``tests/data/sft_pack_fixture.bin`` (section 6.1)
+            ``NANCHAT1``, one ``uint32`` version word, then UTF-8 JSON: the pinned
+            ``settings``, the ``tokenizer`` pin, the eight ``conversations``, the
+            reference ``render`` ids and mask of every conversation, the reference
+            ``pack`` inputs and targets, and the two mixtures of D8.
+
+        ``tests/data/sft_rows_fixture.nchsft`` (section 6.4)
+            The same packed rows as an ``NCSFT001`` shard of shape ``[rows, 32]``,
+            written through ``nanochat_cpp.sft.pack``. The generator also proves the
+            transcription below and the merged packer agree row for row.
+
+        ``tests/data/sft_base_fixture.ckpt`` (section 6.4)
+            The reference parameters and the reference optimizer moments at step 0,
+            written through the path of ``tools/convert_checkpoint.py``, so the
+            container bytes come from the C library and the names are canonical.
+
+        ``tests/data/sft_step_fixture.bin`` (section 6.2)
+            The eight-step reference trajectory as ``tools/fixture_format.py``
+            records: the configuration (including the effective per-group rate
+            table), the micro-batches of every step, the loss (the mean over the
+            accumulation), the gradient norm, the parameter L2, the rate multiplier,
+            the momentum, and the final parameters.
+
+        Pinned settings (section 5)
+        ---------------------------
+        Model: 2 layers, ``hidden_dim=32``, 2 heads, 2 KV heads, ``vocab_size=256``,
+        ``padded_vocab_size=256``, ``seq_len=32``, ``window_pattern="L"``. Pack: 8
+        conversations, ``buffer_size=100``, ``render_max_tokens=2048``, rank 0, world
+        size 1. Step: 8 steps, ``device_batch_size=1``, ``grad_accum=2``. Optimizer:
+        the four rates, ``init_lr_frac=0.8``, ``adam_eps=1e-10``, no gradient clip.
+        Schedule: ``warmup_ratio=0``, ``warmdown_ratio=0.5``, ``final_lr_frac=0``,
+        and the Muon momentum ramp 0.85 to 0.95 over 300 steps. The constants live in
+        ``tools/sft_fixture.py``, which the ``sft_loop`` kind reads too, so the two
+        kinds cannot drift apart.
+
+        The reference packer (section 6.1)
+        ----------------------------------
+        The ``pack`` object is a transcription of ``scripts/chat_sft.py:178-300``
+        (``sft_data_generator_bos_bestfit``): a buffer refill before every
+        largest-fit search, the largest conversation that fits the row, BOS padding
+        of the remainder, a row capacity of ``max_seq_len + 1``, inputs as the first
+        ``max_seq_len`` positions and targets as the last, ``-1`` for a masked or a
+        padded target, a cursor advance by the world size with an epoch wrap, a
+        too-long conversation skipped at fetch time, and the ``last_step`` stop rule.
+        It runs with rank 0 and world size 1. The run fails when the transcription
+        and ``nanochat_cpp.sft_data`` disagree.
+
+        The tokenizer (section 6.1)
+        ---------------------------
+        The pinned model has a 256-entry vocabulary, which cannot hold a trained BPE
+        vocabulary, so the fixture tokenizer is a piece table: the distinct pieces of
+        the fixture corpus, in first-appearance order, after the nine chat special
+        tokens. The pack fixture records the artifact name, its SHA-256, the
+        special-token map, the vocabulary, the per-id byte table, and a ``pieces``
+        table from every string the renderer encodes to its reference ids. The phase
+        C.1 test builds a tokenizer from that table, so the ids it compares are the
+        ids this run recorded. There is no tokenizer artifact to drift.
+
+        What the run needs
+        ------------------
+        The reference PyTorch checkout (``NANOCHAT_REPO``), ``torch``, ``numpy``, and
+        the built ``nanochat_cpp`` shared library, on the CPU. Run it from anywhere::
+
+            python3 tools/dump_fixtures.py sft
+            python3 tools/dump_fixtures.py sft --dir /tmp/sft --seed 7
+
+        The script forces the CPU and disables ``torch.compile``, so the trajectory is
+        deterministic. It ends by printing the SHA-256 of every file it wrote, so the
+        ``fixtures`` node can copy the digests into ``tests/data/sft_fixtures.txt``
+        without a second derivation.
+
+        ``--real-mixture`` (D8)
+        -----------------------
+        The default ``mixture`` and ``validation_mixture`` objects pin the reference
+        mixture algorithm over a synthetic five-task and three-task set, so the gate
+        is hermetic. ``--real-mixture`` replaces those two objects with the real hub
+        order; the conversations and the packed rows stay the pinned synthetic
+        corpus either way. That mode needs a network download of SmolTalk, MMLU, and
+        GSM8K plus a pinned ``datasets`` version. It is a manual check, not part of
+        any gate.
+
+    """)
+    import argparse
+    from pathlib import Path
+
+    from fixture_format import FixtureWriter
+    import sft_fixture as fx
+
+    #: The rank and the world size the reference packer runs at (section 6.1).
+    RANK = fx.PACK["rank"]
+    WORLD_SIZE = fx.PACK["world_size"]
+    #: The placeholder the transcription puts in a padded position before it
+    #: substitutes the BOS id, the way the reference pads with BOS tokens.
+    PAD = -1
+
+
+    def repo_path(value: str) -> Path:
+        """One fixture path, resolved against the repository root."""
+        path = Path(value)
+        if path.is_absolute():
+            return path
+        return Path(__file__).resolve().parents[1] / path
+
+
+    def reference_pack(conversations, render, seq_len, buffer_size, rank,
+                       world_size):
+        """The reference packer, transcribed from ``scripts/chat_sft.py:178-300``.
+
+        ``render`` turns one conversation into ``(ids, mask)``, exactly as
+        ``tokenizer.render_conversation`` does with the default 2048-token
+        truncation. The result is one epoch of rows, each ``(row, mask_row,
+        content_len)``: the reference ``last_step`` stop rule ends the stream after
+        the row in which ``consumed >= len(conversations)``.
+        """
+        dataset_size = len(conversations)
+        if dataset_size <= 0:
+            raise SystemExit("the SFT conversation list is empty")
+        # +1 for the target at the last position of the row.
+        row_capacity = seq_len + 1
+        buffer = []
+        cursor = rank
+        consumed = rank
+        rows = []
+        # The reference skips a too-long conversation at fetch time. When every
+        # conversation is too long the reference would refill forever, so the
+        # guard below reports the corpus instead of hanging. It cannot trigger
+        # for the pinned corpus.
+        skips = 0
+        while True:
+            row = []
+            mask_row = []
+            content_len = row_capacity
+            while len(row) < row_capacity:
+                # Refill the buffer *before* the largest-fit search, as the
+                # reference generator does.
+                while len(buffer) < buffer_size:
+                    ids, mask = render(conversations[cursor])
+                    cursor += world_size
+                    if cursor >= dataset_size:
+                        cursor %= dataset_size
+                    if len(ids) > row_capacity:
+                        # Too long to ever fit one row: skip it at fetch time.
+                        skips += 1
+                        if skips >= dataset_size:
+                            raise SystemExit(
+                                "no conversation fits one row of "
+                                f"{row_capacity} tokens")
+                        continue
+                    skips = 0
+                    buffer.append((ids, mask))
+                remaining = row_capacity - len(row)
+                best_index, best_length = -1, 0
+                for index, (ids, _) in enumerate(buffer):
+                    if len(ids) <= remaining and len(ids) > best_length:
+                        best_index, best_length = index, len(ids)
+                if best_index >= 0:
+                    ids, mask = buffer.pop(best_index)
+                    row.extend(ids)
+                    mask_row.extend(mask)
+                    consumed += world_size
+                    continue
+                # Nothing fits: pad the remainder with BOS instead of cropping,
+                # so no supervised token is ever discarded.
+                content_len = len(row)
+                row.extend([PAD] * remaining)
+                mask_row.extend([0] * remaining)
+                break
+            rows.append((row, mask_row, content_len))
+            if consumed >= dataset_size:
+                break
+        return rows
+
+
+    def pack_rows(rows, seq_len, bos_token):
+        """Turn the transcribed rows into ``(inputs, targets)`` pairs.
+
+        The reference slices each row into inputs (the first ``max_seq_len``
+        positions) and targets (the last ``max_seq_len`` positions), masks a
+        target whose source position is not supervised, and masks the padding tail
+        after ``content_len - 1``.
+        """
+        packed = []
+        for row, mask_row, content_len in rows:
+            full = [bos_token if token == PAD else token for token in row]
+            targets = [token if keep else -1
+                       for token, keep in zip(full[1:], mask_row[1:])]
+            for position in range(max(content_len - 1, 0), seq_len):
+                targets[position] = -1
+            packed.append((full[:seq_len], targets))
+        return packed
+
+
+    def write_step_fixture(path, torch, model, optimizer, rows):
+        """Write the eight-step trajectory of section 6.2."""
+        steps = fx.STEP["steps"]
+        accumulate = fx.STEP["grad_accum"]
+        batch = fx.STEP["device_batch_size"]
+        seq = fx.STEP["seq_len"]
+
+        stream = fx.row_cycle(rows)
+        micro_batches = []
+        for _ in range(steps):
+            micro = [next(stream)[0] for _ in range(accumulate * batch)]
+            micro_batches.append(micro)
+
+        writer = FixtureWriter(Path(path))
+        writer.add("config/version", fx.i32([1]))
+        writer.add("config/seed", fx.i32([fx.SEED]))
+        writer.add("config/layers", fx.i32([fx.MODEL["layers"]]))
+        writer.add("config/heads", fx.i32([fx.MODEL["heads"]]))
+        writer.add("config/kv_heads", fx.i32([fx.MODEL["kv_heads"]]))
+        writer.add("config/embd", fx.i32([fx.MODEL["embd"]]))
+        writer.add("config/seq", fx.i32([seq]))
+        writer.add("config/vocab", fx.i32([fx.MODEL["vocab"]]))
+        writer.add("config/padded_vocab", fx.i32([fx.MODEL["padded_vocab"]]))
+        writer.add("config/window_pattern", fx.u8(fx.MODEL["window_pattern"]))
+        writer.add("config/device_batch_size", fx.i32([batch]))
+        writer.add("config/grad_accum", fx.i32([accumulate]))
+        writer.add("config/steps", fx.i32([steps]))
+        writer.add("config/opt/unembedding_lr",
+                   _scalar(fx.OPT["unembedding_lr"]))
+        writer.add("config/opt/embedding_lr", _scalar(fx.OPT["embedding_lr"]))
+        writer.add("config/opt/matrix_lr", _scalar(fx.OPT["matrix_lr"]))
+        writer.add("config/opt/scalar_lr", _scalar(fx.OPT["scalar_lr"]))
+        writer.add("config/opt/init_lr_frac", _scalar(fx.OPT["init_lr_frac"]))
+        writer.add("config/opt/adam_eps", _scalar(fx.OPT["adam_eps"]))
+        writer.add("config/opt/clip", _scalar(fx.OPT["clip"]))
+        writer.add("config/opt/lr_scale",
+                   _scalar((fx.MODEL["embd"] / 768) ** -0.5))
+        writer.add("config/schedule/warmup_ratio",
+                   _scalar(fx.SCHEDULE["warmup_ratio"]))
+        writer.add("config/schedule/warmdown_ratio",
+                   _scalar(fx.SCHEDULE["warmdown_ratio"]))
+        writer.add("config/schedule/final_lr_frac",
+                   _scalar(fx.SCHEDULE["final_lr_frac"]))
+        writer.add("config/schedule/muon_momentum_steps",
+                   fx.i32([fx.SCHEDULE["muon_momentum_steps"]]))
+        for name in ("start", "peak", "final"):
+            writer.add(f"config/schedule/muon_momentum_{name}",
+                       _scalar(fx.SCHEDULE[f"muon_momentum_{name}"]))
+        # The rate table of section 5.2 as the pinned run uses it: the listed
+        # rate, times the (hidden_dim / 768) ** -0.5 scale, times
+        # init_lr_frac, which D3 applies once on the optimizer configuration.
+        for name, rate in fx.group_rates(optimizer).items():
+            writer.add(f"config/opt/rate/{name}", _scalar(rate))
+
+        for step, micro in enumerate(micro_batches, start=1):
+            tokens = [pair[0] for pair in micro]
+            targets = [pair[1] for pair in micro]
+            writer.add(f"data/step/{step}/tokens",
+                       fx.i32([value for row in tokens for value in row])
+                       .reshape(accumulate, batch, seq))
+            writer.add(f"data/step/{step}/targets",
+                       fx.i32([value for row in targets for value in row])
+                       .reshape(accumulate, batch, seq))
+
+        for step, micro in enumerate(micro_batches, start=1):
+            tokens = torch.tensor([pair[0] for pair in micro],
+                                  dtype=torch.long).reshape(accumulate, batch,
+                                                            seq)
+            targets = torch.tensor([pair[1] for pair in micro],
+                                   dtype=torch.long).reshape(accumulate, batch,
+                                                             seq)
+            model.zero_grad(set_to_none=True)
+            losses = []
+            for index in range(accumulate):
+                loss = model(tokens[index], targets=targets[index])
+                losses.append(float(loss))
+                (loss / accumulate).backward()
+            grad_norm = fx.total_grad_norm(model)
+            multiplier, momentum = fx.apply_schedule(
+                optimizer, step / steps, step - 1)
+            optimizer.step()
+            model.zero_grad(set_to_none=True)
+            writer.add(f"step/{step}/loss",
+                       _scalar(sum(losses) / len(losses)))
+            writer.add(f"step/{step}/grad_norm", _scalar(grad_norm))
+            writer.add(f"step/{step}/param_l2",
+                       _scalar(fx.total_param_l2(model)))
+            writer.add(f"step/{step}/lr", _scalar(multiplier))
+            writer.add(f"step/{step}/momentum", _scalar(momentum))
+
+        for name, parameter in model.named_parameters():
+            writer.add(f"step/{steps}/param/{name}", _as_f32(parameter))
+        writer.write()
+        return Path(path)
+
+
+    def write_pack_fixture(path, tokenizer, render, rows, mixture,
+                           validation_mixture):
+        """Write the ``NANCHAT1`` JSON of section 6.1."""
+        renders = [render(conversation) for conversation in fx.CONVERSATIONS]
+        payload = {
+            "version": 1,
+            "settings": {
+                **fx.PACK,
+                "seed": fx.SEED,
+                "conversations": len(fx.CONVERSATIONS),
+                "rows": len(rows),
+            },
+            "tokenizer": fx.tokenizer_record(tokenizer),
+            "conversations": [
+                {"name": conversation["name"],
+                 "messages": conversation["messages"]}
+                for conversation in fx.CONVERSATIONS
+            ],
+            "render": [{"ids": ids, "mask": mask} for ids, mask in renders],
+            "pack": {
+                "rows": len(rows),
+                "inputs": [inputs for inputs, _ in rows],
+                "targets": [targets for _, targets in rows],
+            },
+            "mixture": mixture,
+            "validation_mixture": validation_mixture,
+        }
+        fx.write_json_fixture(path, payload)
+        return Path(path)
+
+
+    def generate(args) -> list:
+        """Write the four fixtures and return their paths in command order."""
+        torch, np, GPT, GPTConfig = fx.setup_reference()
+        fx.python_path()
+        from nanochat_cpp import sft as bridge  # noqa: E402 - path is ready
+        from nanochat_cpp.chat import render_conversation  # noqa: E402
+
+        directory = repo_path(args.dir)
+        tokenizer = fx.build_tokenizer()
+
+
+        def render(conversation):
+            return render_conversation(
+                conversation, tokenizer,
+                max_tokens=fx.PACK["render_max_tokens"])
+
+        bos_token = tokenizer.get_bos_token_id()
+        transcribed = reference_pack(
+            fx.CONVERSATIONS, render, fx.PACK["seq_len"],
+            fx.PACK["buffer_size"], RANK, WORLD_SIZE)
+        rows = pack_rows(transcribed, fx.PACK["seq_len"], bos_token)
+
+        rows_path = Path(bridge.pack(directory / fx.ROWS_FIXTURE,
+                                     fx.CONVERSATIONS, tokenizer,
+                                     fx.PACK["seq_len"]))
+        written = fx.load_shard(rows_path)
+        if written != rows:
+            raise SystemExit(
+                "the transcribed reference packer and nanochat_cpp.sft_data "
+                "disagree: "
+                f"{len(written)} shard rows, {len(rows)} transcribed")
+
+        mixture, validation_mixture = fx.build_mixture_records(
+            real=args.real_mixture)
+        pack_path = write_pack_fixture(
+            directory / fx.PACK_FIXTURE, tokenizer, render, rows, mixture,
+            validation_mixture)
+
+        model = fx.build_model(GPT, GPTConfig, np, args.seed)
+        optimizer = fx.build_optimizer(model)
+        fx.materialize_moments(optimizer)
+        base_path = directory / fx.BASE_FIXTURE
+        fx.write_base_checkpoint(base_path, model, optimizer)
+
+        step_path = write_step_fixture(directory / fx.STEP_FIXTURE, torch,
+                                       model, optimizer, rows)
+        return [pack_path, step_path, rows_path, base_path]
+
+
+    def parse_args(argv: list) -> argparse.Namespace:
+        parser = argparse.ArgumentParser(description=__doc__)
+        add_model_argument(parser)
+        parser.add_argument("--dir", default=fx.FIXTURE_DIR, metavar="DIR",
+                            help="the fixture directory "
+                                 "(default: %(default)s)")
+        parser.add_argument("--seed", type=int, default=fx.SEED,
+                            help="the weight seed (default: %(default)s)")
+        parser.add_argument(
+            "--real-mixture", action="store_true",
+            help="record the real hub mixture order instead of the "
+                 "synthetic D8 task set; needs a network download plus a "
+                 "pinned datasets version, and is not part of any gate")
+        return parser.parse_args(argv)
+
+
+    def main(argv: list) -> int:
+        args = parse_args(argv)
+        paths = generate(args)
+        return fx.record_checksums(paths)
+    _selected_main = main
+
+if _command == 'sft_loop':
+    __doc__ = textwrap.dedent("""\
+        Generate the supervised fine-tuning loop fixture,
+        ``tests/data/sft_loop_fixture.bin`` (``docs/sft-parity-plan.md`` section 6.3,
+        phase B item 3).
+
+        The kind reads the two files the ``sft`` kind writes — the packed shard
+        ``tests/data/sft_rows_fixture.nchsft`` and the base checkpoint
+        ``tests/data/sft_base_fixture.ckpt`` — and runs the reference model, the
+        reference optimizer, and the reference schedule over them for eight steps. It
+        records the trace and the loss curve, so ``//tests:sft_loop_parity_test``
+        (phase E) can replay the schedule without torch.
+
+        What it writes
+        --------------
+        ``config/num_iterations``, ``config/rows``, ``config/eval_every``
+            The pinned run: eight iterations, the shard row count, and the
+            evaluation interval of section 5.4.
+
+        ``loop/<k>/step``, ``progress``, ``epoch``, ``lr_multiplier``, ``momentum``
+            One set per step ``k = 1..8``: the 0-based counter the momentum schedule
+            evaluates at, the progress value the rate schedule consumes, the pass
+            over the shard, and the two schedule outputs.
+
+        ``train/loss/<k>``
+            The last micro-batch loss of step ``k``, which is the value the
+            reference loop logs.
+
+        ``val/bpb/8``, ``chatcore/8``
+            The final-step evaluation of section 5.4. ``config/eval_every``,
+            ``config/eval_tokens``, ``config/chatcore_every``, and the two ChatCORE
+            caps pin the cadence next to it.
+
+        What the run needs
+        ------------------
+        The reference PyTorch checkout (``NANOCHAT_REPO``), ``torch``, ``numpy``, and
+        the built ``nanochat_cpp`` shared library, on the CPU::
+
+            python3 tools/dump_fixtures.py sft_loop
+            python3 tools/dump_fixtures.py sft_loop --out /tmp/loop.bin
+
+        It reads the token-byte table from the pack fixture, because bits-per-byte
+        divides the summed negative log-probability by the summed target bytes (D6).
+        The evaluation pass is one pass over the shard, the packed-row validation of
+        that decision.
+
+        ``chatcore/8``
+        --------------
+        ChatCORE needs the chat evaluation bundle, the trained tokenizer, and the task
+        datasets, so the pinned run cannot measure it: the record carries the
+        sentinel ``-1`` and ``config/chatcore_measured`` is ``0``. Phase G measures
+        ChatCORE on the real run; this fixture pins the cadence only.
+
+        The kind ends by printing the SHA-256 of the file it wrote, in the style of
+        the ``checkpoint`` kind.
+
+    """)
+    import argparse
+    from pathlib import Path
+
+    from fixture_format import FixtureWriter
+    import sft_fixture as fx
+
+
+    def repo_path(value: str) -> Path:
+        """One fixture path, resolved against the repository root."""
+        path = Path(value)
+        if path.is_absolute():
+            return path
+        return Path(__file__).resolve().parents[1] / path
+
+
+    def generate(args) -> Path:
+        """Run the pinned reference loop and write the loop fixture."""
+        torch, np, GPT, GPTConfig = fx.setup_reference()
+
+        rows = fx.load_shard(repo_path(args.rows))
+        token_bytes = fx.read_pack_fixture(
+            repo_path(args.pack))["tokenizer"]["token_bytes"]
+        if len(token_bytes) != fx.MODEL["vocab"]:
+            raise SystemExit(
+                "the pack fixture pins "
+                f"{len(token_bytes)} token byte lengths, the model has "
+                f"{fx.MODEL['vocab']} ids")
+
+        model = fx.build_model(GPT, GPTConfig, np)
+        optimizer = fx.build_optimizer(model)
+        fx.materialize_moments(optimizer)
+        fx.load_state(repo_path(args.base), model, optimizer)
+        model.train()
+
+        steps = fx.LOOP["num_iterations"]
+        accumulate = fx.LOOP["grad_accum"]
+        batch = fx.LOOP["device_batch_size"]
+        seq = fx.LOOP["seq_len"]
+        stream = fx.row_cycle(rows)
+
+        writer = FixtureWriter(repo_path(args.out))
+        writer.add("config/version", fx.i32([1]))
+        writer.add("config/num_iterations", fx.i32([steps]))
+        writer.add("config/rows", fx.i32([len(rows)]))
+        writer.add("config/eval_every", fx.i32([fx.EVAL["eval_every"]]))
+        writer.add("config/eval_at", fx.i32([fx.LOOP["eval_step"]]))
+        writer.add("config/eval_tokens", fx.i32([fx.EVAL["eval_tokens"]]))
+        writer.add("config/chatcore_every",
+                   fx.i32([fx.EVAL["chatcore_every"]]))
+        writer.add("config/chatcore_max_cat",
+                   fx.i32([fx.EVAL["chatcore_max_cat"]]))
+        writer.add("config/chatcore_max_sample",
+                   fx.i32([fx.EVAL["chatcore_max_sample"]]))
+        writer.add("config/device_batch_size",
+                   fx.i32([fx.LOOP["device_batch_size"]]))
+        writer.add("config/grad_accum", fx.i32([accumulate]))
+        writer.add("config/seq_len", fx.i32([fx.LOOP["seq_len"]]))
+        writer.add("config/chatcore_measured", fx.i32([0]))
+        writer.add("config/token_bytes", fx.i32(token_bytes))
+
+        progress = 0.0
+        for step in range(1, steps + 1):
+            fetched = [next(stream) for _ in range(accumulate * batch)]
+            epoch = fetched[-1][1]
+            micro = [row for row, _ in fetched]
+            tokens = torch.tensor([pair[0] for pair in micro],
+                                  dtype=torch.long).reshape(accumulate, batch,
+                                                            seq)
+            targets = torch.tensor([pair[1] for pair in micro],
+                                   dtype=torch.long).reshape(accumulate, batch,
+                                                             seq)
+            model.zero_grad(set_to_none=True)
+            losses = []
+            for index in range(accumulate):
+                loss = model(tokens[index], targets=targets[index])
+                losses.append(float(loss))
+                (loss / accumulate).backward()
+            # One optimization step advances progress: the reference drives it
+            # from the data stream, and this fixture replaces the stream with a
+            # fixed row list, so progress is the step fraction of the pinned 8
+            # iterations.
+            progress = max(progress, step / steps)
+            multiplier, momentum = fx.apply_schedule(optimizer, progress,
+                                                     step - 1)
+            optimizer.step()
+            model.zero_grad(set_to_none=True)
+
+            writer.add(f"loop/{step}/step", fx.i32([step - 1]))
+            writer.add(f"loop/{step}/progress", _scalar(progress))
+            writer.add(f"loop/{step}/epoch", fx.i32([epoch]))
+            writer.add(f"loop/{step}/lr_multiplier", _scalar(multiplier))
+            writer.add(f"loop/{step}/momentum", _scalar(momentum))
+            writer.add(f"train/loss/{step}", _scalar(losses[-1]))
+
+        model.eval()
+        with torch.no_grad():
+            bpb = fx.evaluate_bpb(model, rows, token_bytes)
+        writer.add("val/bpb/8", _scalar(bpb))
+        writer.add("chatcore/8", _scalar(-1.0))
+        writer.write()
+        return repo_path(args.out)
+
+
+    def parse_args(argv: list) -> argparse.Namespace:
+        parser = argparse.ArgumentParser(description=__doc__)
+        add_model_argument(parser)
+        parser.add_argument("--rows", default=fx.FIXTURE_DIR + "/"
+                            + fx.ROWS_FIXTURE,
+                            help="the packed shard the sft kind wrote "
+                                 "(default: %(default)s)")
+        parser.add_argument("--base", default=fx.FIXTURE_DIR + "/"
+                            + fx.BASE_FIXTURE,
+                            help="the base checkpoint the sft kind wrote "
+                                 "(default: %(default)s)")
+        parser.add_argument("--pack", default=fx.FIXTURE_DIR + "/"
+                            + fx.PACK_FIXTURE,
+                            help="the pack fixture that pins the token-byte "
+                                 "table (default: %(default)s)")
+        parser.add_argument("--out", default=fx.FIXTURE_DIR + "/"
+                            + fx.LOOP_FIXTURE,
+                            help="the fixture to write (default: %(default)s)")
+        return parser.parse_args(argv)
+
+
+    def main(argv: list) -> int:
+        args = parse_args(argv)
+        path = generate(args)
+        return fx.record_checksums([path])
     _selected_main = main
 
 if __name__ == "__main__":

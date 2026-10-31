@@ -491,8 +491,8 @@ bool Checkpointer::SaveModel(const Model& model, const Optimizer* optimizer,
   // (docs/training-seam.md section 10). A step of zero means no step is known;
   // the record and the metadata field are then both omitted.
   if (options.step > 0) {
-    if (options.step > static_cast<std::uint64_t>(
-                          std::numeric_limits<int>::max())) {
+    if (options.step >
+        static_cast<std::uint64_t>(std::numeric_limits<int>::max())) {
       return fail("the step does not fit the optimizer step record: " + path);
     }
     SaveOptimizerStep(static_cast<int>(options.step), &checkpoint);
@@ -503,14 +503,18 @@ bool Checkpointer::SaveModel(const Model& model, const Optimizer* optimizer,
   CheckpointMetadata metadata;
   metadata.stage = options.stage;
   metadata.step = options.step;
-  metadata.world_size =
-      options.world_size > 0 ? static_cast<std::uint32_t>(options.world_size)
-                             : 1u;
+  metadata.world_size = options.world_size > 0
+                            ? static_cast<std::uint32_t>(options.world_size)
+                            : 1u;
   metadata.precision = options.precision;
   metadata.config = model.config();
   metadata.tokenizer_id = options.tokenizer_id;
   metadata.git_revision = options.git_revision;
   metadata.notes = options.notes;
+  // The recipe rides in the metadata block (design decision D7 of
+  // docs/sft-parity-plan.md), so a later finetune inherits the batch shape and
+  // the rates from the file instead of being told them again.
+  metadata.recipe = options.recipe;
   // `created_utc` stays empty: a save has to be reproducible, and rule 4 of
   // `nanochat/checkpoint_metadata.h` makes the field informational, so a tool
   // that wants a stamp writes one instead of the trainer inventing one here.

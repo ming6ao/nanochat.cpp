@@ -38,11 +38,13 @@ DOCTOR_KEYS = (
 )
 
 #: Every fixture kind that the merged generator must keep, in the help order
-#: of ``tools/fixture_common.COMMANDS`` (the version 0 checkpoint pin came
-#: last, so the order stays append-only).
+#: of ``tools/fixture_common.COMMANDS`` (the version 0 checkpoint pin and the
+#: two supervised fine-tuning kinds came last, so the order stays
+#: append-only).
 GENERATOR_COMMANDS = (
     "oracle", "train", "rl", "generate", "eval", "plan",
     "tokenizer", "loader", "chat", "api", "numerics", "checkpoint",
+    "sft", "sft_loop",
 )
 
 #: The frozen line that the ``none`` backend appends to the sandbox log.

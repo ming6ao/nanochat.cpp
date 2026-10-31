@@ -4,9 +4,10 @@ How to earn the name "reference parity" for the supervised fine-tuning path.
 This document is the schedule. [post-training.md](post-training.md) is the
 design. [parity.md](parity.md) is the status of record.
 
-Status: Phase A landed. This document pins the data path, and Phase C.0 landed
-with it. Phase B is next. Phases C.1, D, E, F, and G remain. Section 9 lists the
-state of the tree.
+Status: Phases A to F have landed, with the fixtures, the gates, and the driver
+surface each one names. Phase G is open: the T2 driver run and the reference
+comparison have not happened, so `P6` and `P7` stay `open`. Section 9 lists the
+state of the tree and section 10 the risks this campaign carries.
 
 ## 1. Goal
 
@@ -345,11 +346,11 @@ same rows from the same start. The real mixture stays an optional check (D8).
 | Phase | Owner | State | Gate |
 |---|---|---|---|
 | A. Freeze the contract | Architect | Done | Document review and the ASD-STE100 checker |
-| B. Fixtures | Oracle | Open | The fixtures load on the CPU with no reference checkout |
-| C. R1 data parity | Python surface, Oracle | C.0 done, C.1 open | `//python:sft_data_parity_test` at T0 |
-| D. R2 arithmetic parity | Harness, Oracle | Open | T0, then T1, then T2 |
-| E. R3 schedule | Architect, Optimizer, Harness | Open | `//tests:sft_loop_parity_test` at T0 |
-| F. R3 reader and driver | Harness, Python surface | Partial | `//tests:sft_parity_test` at T2 |
+| B. Fixtures | Oracle | Done | The fixtures load on the CPU with no reference checkout |
+| C. R1 data parity | Python surface, Oracle | Done | `//python:sft_data_parity_test` at T0 |
+| D. R2 arithmetic parity | Harness, Oracle | T0 done; the T1 and T2 legs have not run | `//tests:sft_step_parity_test` at T0, then the GPU legs |
+| E. R3 schedule | Architect, Optimizer, Harness | Done | `//tests:sft_loop_parity_test` at T0 |
+| F. R3 reader and driver | Harness, Python surface | Done; the T2 run is open | `//tests:sft_parity_test` at T2 |
 | G. R3 and R4 parity | Integrator | Open | T2, then the `parity.md` update |
 
 ### Phase A. Freeze the contract (done)
@@ -494,10 +495,16 @@ The warm start belongs to R2. Phase F consumes it and does not repeat it.
 
 Use these names until Phase G closes:
 
-- After Phase C: "SFT data parity" (`P4`).
-- After Phase D: "SFT arithmetic parity" (`P5`), with the GPU leg.
+- After Phase C: "SFT data parity" (`P4`). Earned: the R1 gate passes at T0, so
+  `docs/parity.md` sets `P4` to `closed`.
+- After Phase D: "SFT arithmetic parity" (`P5`), with the GPU leg. The T0 leg
+  passes, so `docs/parity.md` sets `P5` to `equivalent` for the CPU backend. The
+  name stays interim because the T1 and T2 legs have not run.
 - Until Phase G: "SFT loop parity" (`P6`) and "SFT validation parity" (`P7`)
-  stay `open`.
+  stay `open`, because their gate is the T2 driver run and it has not happened.
+
+`docs/post-training.md` cites these names with the fixture files
+`tests/data/sft_*_fixture.*` until Phase G closes them.
 
 ## 9. State of the tree
 
@@ -507,15 +514,15 @@ Use these names until Phase G closes:
 | SFT mixture and packer | Done, pinned | `python/nanochat_cpp/sft_data.py` |
 | Packer parity against a reference transcription | Done | `python/tests/sft_data_test.py` |
 | Native packed-row reader | Done | `src/sft_shard.{h,cc}`, used by `src/mesh_train.cc` |
-| SFT driver | Partial | `src/sft_main.cc`: no progress schedule, no warm start, no accumulation, no evaluation |
-| SFT bridge | Partial | `python/nanochat_cpp/sft.py` |
-| Packed-row validation | Missing | `src/eval.cc` reads parquet documents only |
-| Recipe metadata | Missing | `include/nanochat/checkpoint_metadata.h` |
-| SFT fixtures | Missing | `tests/data/sft_*_fixture.bin` |
-| Data parity gate | Missing | `//python:sft_data_parity_test` |
-| Arithmetic parity gate | Missing | `//tests:sft_step_parity_test` |
-| Schedule parity gate | Missing | `//tests:sft_loop_parity_test` |
-| Loop parity gate | Missing | `//tests:sft_parity_test` |
+| SFT driver | Done | `src/sft_main.cc`: the progress schedule, the warm start and `--resume`, the accumulation, and the evaluation cadence |
+| SFT bridge | Done | `python/nanochat_cpp/sft.py`: `run()` forwards the five new flags |
+| Packed-row validation | Done | `src/eval.cc` `EvaluatePackedRows` (D6), pinned by `//src:eval_test` |
+| Recipe metadata | Done | `include/nanochat/checkpoint_metadata.h`; `src/fields.cc` (D7), pinned by `//src:fields_test` |
+| SFT fixtures | Done | `tests/data/sft_*_fixture.*`; the layout and the digests are in `tests/data/sft_fixtures.txt` |
+| Data parity gate | Done | `//python:sft_data_parity_test` |
+| Arithmetic parity gate | Done at T0 | `//tests:sft_step_parity_test`; the T1 and T2 legs have not run |
+| Schedule parity gate | Done | `//tests:sft_loop_parity_test` |
+| Loop parity gate | Built, not run | `//tests:sft_parity_test`, T2 and `manual` |
 
 ## 10. Risks
 
@@ -535,6 +542,47 @@ Use these names until Phase G closes:
   not for every commit.
 - Environment. The reference environment has torch and pyarrow. The optional
   `--real-mixture` mode also needs `datasets`, which is absent today.
+
+### Risks this campaign carries
+
+These three are open when the campaign ends. Each one names the fix, not just
+the problem.
+
+1. **The numerics-trace extension is deferred.** Phase D item 4 asked for one
+   SFT optimizer step in `tests/numerics_trace.cc`, with the post-step loss and
+   gradient norm. The extension is not in the tree. The reason is that the
+   committed golden is host-pinned: `tests/data/numerics_golden_10l.bin` is
+   mirrored under `models/nanochat-default/fixtures/`, and
+   `//tests:model_isolation_test` pins the digest of that manifest. This host
+   reproduces the floats but not the recorded hashes, so a local regeneration
+   would re-pin the trace to this machine. The fix is one reference-builder run
+   that extends the trace and updates the golden, the mirror, and the manifest
+   in the same change. Until then `docs/numerics-integration.md` section 4 keeps
+   the SFT row at the masked loss and the gradient norm, and the SFT arithmetic
+   evidence is `//tests:sft_step_parity_test`. `//tests:numerics_trace_test`
+   already fails on the base commit for this reason alone (863 records, and the
+   greedy identifiers among them). The target carries the `manual` tag, so the
+   default `tools/nanochat test` loop does not run it.
+2. **The base fixture records the wrong run config.**
+   `tests/data/sft_base_fixture.ckpt` holds the section 5.5 tiny model in its
+   tensors, but its metadata block is the Python writer's default run facts (12
+   layers, `hidden_dim=768`). `Checkpointer::LoadModel` compares the recorded
+   config with the runtime model and refuses a mismatch, so a `--warm-start`
+   from the committed file as it stands is rejected before a kernel reads a
+   weight. `//tests:sft_parity_test` works around it by restating the header
+   with the shape the tensors have, in its own temporary directory; no
+   committed byte changes. The two real fixes are a fixture that records the
+   tiny config, which needs a metadata argument on the public writer, or a
+   warm-start load that skips the recorded-config check. Pick one before the
+   phase G run, because the run takes the file as it is.
+3. **`tools/nanochat lint` is already red on the base commit.** The failures
+   are in files this campaign never touched: non-ASCII em dashes under
+   `backends/cuda/*`, and formatting findings in `src/plan*.cc`, `src/model*.cc`,
+   `src/ops*.cc`, `src/json*.cc`, `tests/device_profile_test.cc`, and
+   `examples/checkpoint_roundtrip/checkpoint_roundtrip.cc`. This campaign
+   formats every file it changes, so it adds no violation, but the global gate
+   stays red until the earlier merge is formatted. Check the finding list before
+   attributing a lint failure to SFT work.
 
 ## 11. Non-goals
 
