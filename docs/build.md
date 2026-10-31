@@ -178,6 +178,30 @@ or later, and it checks that floor at startup. Build the shared library with
 `tools/nanochat build //bindings:nanochat_shared --config=cpu`; the config
 selects the CPU backend and fp32.
 
+### Python environments
+
+The host tools and the `py_test` targets need the standard library and the
+system `python3` only. Keep that interpreter free of third-party packages.
+
+A task that needs an extra installs it in one environment outside the tree.
+Then no worktree carries a second copy. The command names an extra of
+[dependency-layering-plan.md](dependency-layering-plan.md) section 6.2, not a
+package list:
+
+```bash
+uv venv --python 3.12 ~/.venvs/nanochat-cpp
+uv pip install --python ~/.venvs/nanochat-cpp/bin/python -e "python[modal,hub]"
+```
+
+Do not add an extra to the reference environment. `tools/nanochat parity
+produce` resolves the reference interpreter itself. A producer records that
+environment as its provenance.
+
+Do not activate the environment for `tools/nanochat test` or `build`. Bazel
+resolves `python3` through `PATH` (`local_runtime_repo` above). An active
+environment therefore becomes the test interpreter. Its site-packages can then
+hide an import that breaks the layering rule.
+
 ## Makefile fallback
 
 A single Makefile builds the P0 toolchain spike for an environment where
