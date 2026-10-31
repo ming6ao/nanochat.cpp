@@ -418,6 +418,22 @@ py_test(
     size = "small",
 )
 
+# T0: the `tools/nanochat parity` dispatch of the plan's section 7.3. Hermetic
+# and torch-free: it runs the dispatch and the producer's own `--help`, and the
+# canary asserts that no torch is importable, so a help path that needed an
+# extra would fail here instead of on a host. The script is a host file, so it
+# travels as data and not as a dependency.
+py_test(
+    name = "parity_dispatch_test",
+    srcs = ["tests/parity_dispatch_test.py"],
+    data = ["//tools:nanochat"],
+    deps = [
+        ":nanochat_cpp",
+        ":nanochat_cpp_bridge",
+    ],
+    size = "small",
+)
+
 # Aggregation point consumed by //:all_tests.
 test_suite(
     name = "all",
@@ -449,5 +465,6 @@ test_suite(
         ":gate_pyproject_test",
         ":gate_provenance_test",
         ":gate_core_independence_test",
+        ":parity_dispatch_test",
     ],
 )
