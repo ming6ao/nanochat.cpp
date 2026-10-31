@@ -3,9 +3,12 @@
 # The offline fixture generators are one grouped script, `dump_fixtures.py`,
 # with the shared helpers in `fixture_common.py`. The script runs on the host
 # and is a source file, not a build target. See
-# docs/script-consolidation-plan.md.
+# docs/script-consolidation-plan.md. A new parity fixture is not added here:
+# the producers of docs/dependency-layering-plan.md section 7.3 run through
+# `tools/nanochat parity produce <kind>` and live in `python/nanochat_cpp_bridge`.
 #
-# `convert_checkpoint.py` forwards to the tested implementation in
+# `convert_checkpoint.py` forwards to the PyTorch half of the conversion in
+# `python/nanochat_cpp_bridge/torch_checkpoint.py`; the container writer stays in
 # `python/nanochat_cpp/checkpoint.py`. The native-tokenizer tools are described
 # in `docs/tokenizer.md`.
 
@@ -71,7 +74,10 @@ filegroup(
     ],
 )
 
-# The reference-checkpoint converter. See `docs/python.md`.
+# The reference-checkpoint converter. See `docs/python.md`. The script reaches
+# `nanochat_cpp_bridge` through its own `sys.path` insertion rather than a
+# dependency: the packaging node declares that library in `python/BUILD.bazel`,
+# and a host script is not a build target.
 filegroup(
     name = "convert_checkpoint",
     srcs = ["convert_checkpoint.py"],

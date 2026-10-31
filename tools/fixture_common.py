@@ -13,6 +13,13 @@ the reference package it needs, so a kind that does not touch PyTorch stays
 fast. The ``--model`` path helpers use only ``hashlib``, ``importlib.util``,
 ``json``, ``pathlib``, and ``sys``, so the manifest-backed ``--check``
 fallback runs in a tree with no torch installed.
+
+A new parity fixture is not added here. The producers whose environment a model
+manifest records (``docs/dependency-layering-plan.md`` section 7.2) run through
+``tools/nanochat parity produce <kind>`` and live in the adapter package
+(``nanochat_cpp_bridge.fixtures``, section 7.3); the kinds below are the
+generator this tree already has, and its ``--model``/``--check`` surface is
+pinned by ``python/tests/contract_test.py``.
 """
 
 from __future__ import annotations
