@@ -4,6 +4,11 @@ The test is hermetic. It uses a fake tokenizer and a fake renderer, so it needs
 no hub download, no pyarrow, and no shared library. See docs/post-training.md
 section 4 and docs/training-seam.md section 6.5.
 
+The mixture builders read their datasets through the registration seam of
+``docs/dependency-layering-plan.md`` section 4, so ``sft_data`` imports no
+dataset library (section 2.1). A fake hub loader exercises that seam, so the
+coverage stays hermetic: no network, no ``pyarrow``, and no ``numpy``.
+
 The packer is a pinned mirror of ``sft_data_generator_bos_bestfit`` in
 ``scripts/chat_sft.py``. :func:`reference_rows` is a direct transcription of
 that generator, and :class:`ReferenceEquivalenceTest` compares the two over
@@ -15,7 +20,7 @@ from __future__ import annotations
 import random
 import unittest
 
-from nanochat_cpp import sft_data
+from nanochat_cpp import seam, sft_data
 from nanochat_cpp.tasks import Task
 
 
@@ -288,6 +293,84 @@ class _FakeTask(Task):
 
     def get_example(self, index: int):
         return self.values[index]
+
+
+class _FakeDataset:
+    """What a task class needs of a dataset: len, an index, and shuffle."""
+
+    def __init__(self, rows) -> None:
+        self.rows = list(rows)
+
+    def __len__(self) -> int:
+        return len(self.rows)
+
+    def __getitem__(self, index):
+        return self.rows[index]
+
+    def shuffle(self, seed=0):  # noqa: ANN001 - test double
+        """The reference loader shuffles in place; a fake keeps its order."""
+        return self
+
+
+class _FakeHubLoader:
+    """The hub loader the seam carries: a fixed table, no network."""
+
+    def __init__(self, rows) -> None:
+        self.rows = rows
+        self.calls: list[tuple] = []
+
+    def __call__(self, repo_id, subset="default", split="train"):
+        self.calls.append((repo_id, subset, split))
+        return _FakeDataset(self.rows[repo_id])
+
+
+class MixtureSeamTest(unittest.TestCase):
+    """The mixture builders reach the Hub through the registration seam."""
+
+    ROWS = {
+        sft_data.SMOLLTALK_REPO: [
+            {"messages": [{"role": "user", "content": "hi"},
+                          {"role": "assistant", "content": "hello"}]},
+        ],
+        "cais/mmlu": [
+            {"question": "q", "choices": ["a", "b", "c", "d"],
+             "answer": 0, "subject": "s"},
+        ],
+        "openai/gsm8k": [
+            {"question": "q", "answer": "#### 4"},
+        ],
+    }
+
+    def test_the_training_mixture_takes_the_hub_from_the_seam(self) -> None:
+        loader = _FakeHubLoader(self.ROWS)
+        with seam.use(hub_loader=loader):
+            mixture = sft_data.build_train_mixture()
+        passes = 1 + sft_data.MMLU_EPOCHS + sft_data.GSM8K_EPOCHS
+        self.assertEqual(len(mixture.tasks), passes)
+        self.assertEqual(mixture.lengths, [1] * passes)
+        self.assertEqual(len(mixture), passes)
+        self.assertEqual(loader.calls[0],
+                         (sft_data.SMOLLTALK_REPO, "default", "train"))
+        self.assertIn(("cais/mmlu", "all", "auxiliary_train"), loader.calls)
+        self.assertIn(("openai/gsm8k", "main", "train"), loader.calls)
+
+    def test_the_validation_mixture_reads_the_test_splits(self) -> None:
+        loader = _FakeHubLoader(self.ROWS)
+        with seam.use(hub_loader=loader):
+            mixture = sft_data.build_val_mixture()
+        self.assertEqual([call[2] for call in loader.calls],
+                         ["test", "test", "test"])
+        # The stop of each validation task caps its length, so the mixture has
+        # the task ratios of the training mixture whatever the shard holds.
+        self.assertEqual(len(mixture), 1 + sft_data.VAL_MMLU_STOP
+                         + sft_data.VAL_GSM8K_STOP)
+
+    def test_a_mixture_without_a_loader_names_the_extra(self) -> None:
+        with seam.use():
+            seam.reset()
+            with self.assertRaises(seam.MissingAdapter) as caught:
+                sft_data.build_train_mixture()
+        self.assertIn("hfdata", str(caught.exception))
 
 
 if __name__ == "__main__":
