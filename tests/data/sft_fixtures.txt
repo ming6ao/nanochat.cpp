@@ -1,0 +1,449 @@
+the five SFT fixtures -- tests/data/sft_*
+=========================================
+
+What these files are
+--------------------
+
+`docs/sft-parity-plan.md` section 7 phase B items 4 and 5: one generator run
+writes the committed artifacts the SFT rungs read, so no later gate needs the
+reference PyTorch checkout, a torch import, a tokenizer artifact, or a network.
+Each file comes from `tools/dump_fixtures.py`; nothing here was laid out by
+hand. A binary cannot carry a header comment, so this note is the durable
+record the C++ and Python tests cite.
+
+    file                        bytes    sha256
+    sft_pack_fixture.bin        42529    755f345a6b4ff6068c834d5f737d3615314110fecb2c72239e670edbb86b6058
+    sft_step_fixture.bin       205346    c9971433957e7616b6b812b6f7742918cf2978b0b9773eb8b0133ea428bbd6b4
+    sft_rows_fixture.nchsft      1093    8cc9cf358a50c42f7aca8746793c18eed8ce3a3116b7ad2de27b7b92c036686f
+    sft_base_fixture.ckpt       497586   534c21b86b468453071ad8327cf4fbef8a899af1d5b745a01b8568b3c6796b14
+    sft_loop_fixture.bin         3021    774b3f2dd2ca54be4889e42ce4e685f7247bc401c80eb817d122d580b2094033
+
+Together 749575 bytes (732 KiB), which is the budget of section 5.5: a two-layer
+model, eight conversations, four packed rows, thirty-two tokens per row, and
+eight steps. The fixtures node must not grow the T0 suite, so a change that
+moves any of those numbers is a change to the plan, not to these files.
+
+How they were generated
+-----------------------
+
+Run from the repository root, in order, with the reference checkout's
+environment (`NANOCHAT_REPO` naming the directory that holds the `nanochat`
+package, torch 2.7.1+cu118 and numpy 2.2.6 on the CPU):
+
+    NANOCHAT_SANDBOX_BACKEND=none python3 tools/dump_fixtures.py sft
+    NANOCHAT_SANDBOX_BACKEND=none python3 tools/dump_fixtures.py sft_loop
+
+The `sft` kind writes four files: the pack fixture, the step fixture, the
+NCSFT001 row shard, and the base checkpoint. The `sft_loop` kind reads the
+shard, the base checkpoint, and the pack fixture, then writes the loop fixture,
+so it must run second. Both kinds print the SHA-256 of every file they write;
+the digests above are copied from that output, not derived a second time.
+
+`NANOCHAT_SANDBOX_BACKEND=none` is only there to satisfy the shared library's
+start check (`nanochat_init`, docs/python.md section 3.1). The kinds take the
+CPU, force `torch.set_num_threads(1)`, and disable `torch.compile`, so the run
+needs no GPU and no C++ compiler beyond the shared library the bridge loads.
+
+The pinned settings live in `tools/sft_fixture.py`, which both kinds import, so
+the step and the loop fixture cannot disagree: seed 1234, 2 layers,
+`hidden_dim=32`, 2 heads, 2 KV heads, `vocab_size=256`,
+`padded_vocab_size=256`, `seq_len=32`, `window_pattern="L"`, 8 conversations,
+`buffer_size=100`, `render_max_tokens=2048`, rank 0, world size 1, 8 steps,
+`device_batch_size=1`, `grad_accum=2`, `init_lr_frac=0.8`, `adam_eps=1e-10`,
+no gradient clip, `warmup_ratio=0`, `warmdown_ratio=0.5`, `final_lr_frac=0`,
+and the Muon momentum ramp from 0.85 to 0.95 over 300 steps.
+
+Determinism
+-----------
+
+Each kind was run three times: twice into a scratch directory (`--dir` for
+`sft`, `--out`/`--rows`/`--base`/`--pack` for `sft_loop`) and once into
+`tests/data`. All three runs produced byte-identical output with the digests in
+the table above. A non-deterministic fixture would make the step and loop parity
+gates flaky rather than wrong, so a run that differs is a bug in the generator
+or in the reference, never a reason to re-pin a file.
+
+Phase B gate, run verbatim against this directory:
+
+    python3 -c 'import json,sys; raw=open("tests/data/sft_pack_fixture.bin","rb").read(); assert raw[:8]==b"NANCHAT1"; json.loads(raw[12:])'
+
+The decoded object carries the keys `version`, `settings`, `tokenizer`,
+`conversations`, `render`, `pack`, `mixture`, and `validation_mixture`, which
+are the conversation, render, pack, mixture, and validation_mixture sections
+plus their two pins.
+
+1. tests/data/sft_pack_fixture.bin -- section 6.1
+-------------------------------------------------
+
+`NANCHAT1`, one `uint32` version word (`1`) at offset 8, then UTF-8 JSON from
+offset 12. Two digests appear in the JSON: the tokenizer definition digest
+(`767e6699e50d04d8643a390d9ab20c3b40c169c7f68723b10675ba3f7815dabf`), which is
+the SHA-256 of the canonical JSON of `name`, `special_tokens`, and
+`vocabulary`, and nothing else. The file's own digest is the table above.
+
+    key                       kind     contents
+    version                   int      1 (the JSON schema version)
+    settings                  object   see the settings table below
+    tokenizer                 object   see the tokenizer table below
+    conversations             array    8 objects {name, messages}
+    render                    array    8 objects {ids, mask}
+    pack                      object   {rows, inputs, targets}
+    mixture                   object   {seed, tasks, conversations, order}
+    validation_mixture        object   {seed, tasks, conversations, order}
+
+`settings`:
+
+    key                 value        key                 value
+    buffer_size         100          render_max_tokens   2048
+    conversations       8            rank                0
+    rows                4            seed                1234
+    seq_len             32           stop_rule           "last_step"
+    world_size          1
+
+`conversations` names, in order: `smoltalk`, `mmlu`, `gsm8k_tool`, `system`,
+`short`, `capital`, `greeting`, `long`. Each `messages` entry is a list of
+`{role, content}` objects.
+
+`render` is the reference `render_conversation` output per conversation: `ids`
+is the token-id list and `mask` is the same-length 0/1 list selecting the
+assistant positions the loss trains on. Lengths are 21, 20, 21, 17, 7, 13, 13,
+and 2048; the last one is the truncation pin, since `long` renders to exactly
+`render_max_tokens`. Mask sums are 9, 2, 8, 2, 2, 2, 6, and 0, so the truncated
+conversation ends with no trainable position.
+
+`pack` is the transcribed reference packer (`sft_data_generator_bos_bestfit`,
+`scripts/chat_sft.py:178-300`) at rank 0, world size 1: four rows of the
+`max_seq_len + 1 = 33` token capacity, cut here to the 32 inputs and the 32
+targets. Each row packs two conversations -- 28 tokens in rows 0 and 2, 27 in
+rows 1 and 3 -- and the largest-fit search then pads the remainder with BOS
+(`0`) instead of cropping, so the tail of `inputs` is padding and its `targets`
+are `-1`. `-1` marks any masked or padded target. Rows 0 and 2 hold the same
+two conversations, and so do rows 1 and 3, because the refilled buffer offers
+the same candidates each pass; the 2048-token `long` conversation is skipped at
+fetch time as too long for one row. The `last_step` stop rule ends the stream
+after the fourth row, which is the point at which all eight conversations have
+been consumed (two per row).
+
+    row  inputs
+    0    [0,1,9,10,11,12,13,14,15,16,2,3,17,18,14,19,20,21,13,22,4,0,1,47,2,3,48,4,0,0,0,0]
+    1    [0,1,23,24,33,34,35,16,2,3,5,36,34,35,6,7,37,8,38,39,4,0,1,47,2,3,48,4,0,0,0,0]
+    2    same as row 0
+    3    same as row 1
+
+    row  targets
+    0    [-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,17,18,14,19,20,21,13,22,4,-1,-1,-1,-1,-1,48,4,-1,-1,-1,-1,-1]
+    1    [-1,-1,-1,-1,-1,-1,-1,-1,-1,5,36,34,35,6,-1,-1,-1,38,39,4,-1,-1,-1,-1,-1,48,4,-1,-1,-1,-1,-1]
+    2    same as row 0
+    3    same as row 1
+
+`tokenizer`:
+
+    key             kind     contents
+    name            string   fixture/sft_piece_table/v1
+    sha256          string   the definition digest (see above)
+    special_tokens  object   the nine chat specials
+    vocabulary      array    62 {piece, id} objects, id 9 upward
+    token_bytes     array    256 int32, the per-id byte count for bits-per-byte
+    pieces          object   20 text fragments -> reference token ids
+
+Special tokens: `<|bos|>` 0, `<|user_start|>` 1, `<|user_end|>` 2,
+`<|assistant_start|>` 3, `<|assistant_end|>` 4, `<|python_start|>` 5,
+`<|python_end|>` 6, `<|output_start|>` 7, `<|output_end|>` 8.
+
+There is no tokenizer artifact to read: `padded_vocab_size=256` cannot hold a
+trained BPE vocabulary, so the fixture tokenizer is a piece table built from
+the fixture corpus in first-appearance order. `pieces` covers every fragment
+the eight conversations encode, including the 2048-token `long` fragment, which
+is why the phase C.1 test can build a tokenizer from the table alone. A new
+tokenizer artifact would change the ids and therefore the digest, so it
+regenerates this file in the same change (section 10).
+
+`mixture` and `validation_mixture` pin the reference `TaskMixture` order over a
+synthetic task set with seed 42 (D8):
+
+    object                tasks (name, split, length, stop)
+    mixture               smoltalk train 7; mmlu auxiliary_train 3; mmlu
+                          auxiliary_train 3; gsm8k train 2; gsm8k train 2
+                          -> 17 conversations
+    validation_mixture    smoltalk test 5; mmlu test 3 stop 5200; gsm8k test 2
+                          stop 420 -> 10 conversations
+
+`order` is the list of `[task_index, local_index]` pairs the shuffle produced,
+grouped per epoch. `--real-mixture` replaces these two objects with the real
+hub order and needs a network download plus a pinned `datasets` version; it is
+a manual check and is not part of any gate, so the committed objects are the
+synthetic ones.
+
+2. tests/data/sft_rows_fixture.nchsft -- section 6.4
+----------------------------------------------------
+
+`NCSFT001`, the record-file container of `src/record_file.h`: the eight-byte
+magic, a `uint32` version (`1`), a `uint32` record count (`2`), then the records
+`[uint16 name length, name, uint8 dtype, uint8 rank, uint64 extents, payload]`.
+The bytes come from `nanochat_cpp.sft.pack`, so the layout is single-sourced.
+
+    record     dtype    shape   contents
+    tokens     int32    (4, 32)  the packed row inputs
+    targets    int32    (4, 32)  the packed row targets, -1 where masked
+
+The rows are the `pack` rows of the fixture above, so the shard and the JSON
+are the same pass. The generator also compares its transcription against the
+merged packer row for row and fails the run when they disagree, which is what
+keeps section 6.1 and section 6.4 from drifting apart.
+
+3. tests/data/sft_base_fixture.ckpt -- section 6.4
+--------------------------------------------------
+
+`NCHKPT01`, the version 1 container of `docs/checkpoint-format.md`: magic, the
+`uint32` version word (`1`) at offset 8, the `uint32` parameter count (`21`) at
+offset 12, the metadata block, the 21 parameter records, then the `uint32`
+optimizer count (`20`) and the 20 optimizer records. The bytes come from
+`nanochat_cpp.checkpoint.write_checkpoint`, the path `tools/convert_checkpoint.py`
+uses, so the names are the canonical C++ names. Every payload is `float32`
+(dtype code 0).
+
+Parameters, in file order:
+
+    name                                shape       name                                shape
+    lm_head.weight                      (256, 32)   transformer.h.1.attn.c_q.weight      (32, 32)
+    transformer.wte.weight              (256, 32)   transformer.h.1.attn.c_k.weight      (32, 32)
+    value_embeds.1.weight               (256, 32)   transformer.h.1.attn.c_v.weight      (32, 32)
+    resid_lambdas                       (2,)        transformer.h.1.attn.c_proj.weight   (32, 32)
+    x0_lambdas                          (2,)        transformer.h.1.attn.ve_gate.weight  (2, 12)
+    smear_gate.weight                   (1, 24)     transformer.h.1.mlp.c_fc.weight      (128, 32)
+    smear_lambda                        (1,)        transformer.h.1.mlp.c_proj.weight    (32, 128)
+    backout_lambda                      (1,)
+    transformer.h.0.attn.c_q.weight     (32, 32)
+    transformer.h.0.attn.c_k.weight     (32, 32)
+    transformer.h.0.attn.c_v.weight     (32, 32)
+    transformer.h.0.attn.c_proj.weight  (32, 32)
+    transformer.h.0.mlp.c_fc.weight     (128, 32)
+    transformer.h.0.mlp.c_proj.weight   (32, 128)
+
+Optimizer moments, in file order, as group buffers (the C++ container stores
+one concatenated AdamW pair per group and one stacked Muon pair per shape):
+
+    name                   shape    name              shape
+    adamw.lm_head.m         (8192,)  adamw.smear.m     (26,)
+    adamw.lm_head.v         (8192,)  adamw.smear.v     (26,)
+    adamw.embedding.m       (8192,)  muon.2x12.buf1    (24,)
+    adamw.embedding.v       (8192,)  muon.2x12.buf2    (12,)
+    adamw.value_embedding.m (8192,)  muon.32x32.buf1   (8192,)
+    adamw.value_embedding.v (8192,)  muon.32x32.buf2   (256,)
+    adamw.resid.m           (2,)     muon.32x128.buf1  (8192,)
+    adamw.resid.v           (2,)     muon.32x128.buf2  (256,)
+    adamw.x0.m              (2,)     muon.128x32.buf1  (8192,)
+    adamw.x0.v              (2,)     muon.128x32.buf2  (256,)
+
+Both lists are written at step 0, and the seed that produced them is 1234
+(`config/seed` of the step fixture). The Muon buffers are per shape group:
+`muon.32x32.*` holds the eight 32x32 matrices (the `c_q`, `c_k`, `c_v`, and
+`c_proj` weight of each layer, 8 * 1024 = 8192 values), `muon.32x128.*` the two
+`c_fc` weights, `muon.128x32.*` the two `mlp.c_proj` weights, and `muon.2x12.*`
+the single `ve_gate` matrix (24 values). `buf1` is the full momentum buffer;
+`buf2` is the second momentum, one vector per matrix along the shorter of the
+two dimensions, which is why the 32x32 group holds 8 * 32 = 256 values and the
+2x12 group holds 12.
+
+The metadata block is the container writer's default run facts, not a
+description of this tiny model: `schema` 1, `stage` `base`, `step` 0,
+`world_size` 1, `precision` `fp32`, an empty `tokenizer_id`, and the `Config`
+member defaults (12 layers, 6 heads, 6 KV heads, `hidden_dim` 768, `seq_len`
+2048, `vocab_size` 32768, `rope_base` 100000, `window_pattern` `SSSL`). The
+public writer takes no metadata argument, so the generator cannot set it; the
+tiny shape lives in the tensors and in the `config/*` records of the step and
+loop fixtures, and `Checkpoint::Load` only rejects a metadata config that is
+internally invalid. The block also carries no `recipe` section: `Recipe` is a
+header declaration only until `src-core` lands, and a file that predates the
+block reads with the member defaults (D7).
+
+4. tests/data/sft_step_fixture.bin -- section 6.2
+-------------------------------------------------
+
+`NANOORC1`, the record container of `tools/fixture_format.py`: the eight-byte
+magic, a `uint32` version (`1`), a `uint32` record count (`112`), then the same
+record framing as the shard. The same container the pretraining parity tests
+read.
+
+    group                        count  dtype          shape     contents
+    config/...                      28  int32, fp32,   (1,)     the pinned run
+                                         uint8                   facts; see the
+                                                                 table below
+    config/opt/rate/...              7  fp32           (1,)     the effective
+                                                                 rate table
+    data/step/<k>/tokens             8  int32          (2,1,32)  the two micro-
+    data/step/<k>/targets            8  int32          (2,1,32)  batches of
+                                                                 step k = 1..8
+    step/<k>/loss                    8  fp32           (1,)     the mean loss
+    step/<k>/grad_norm               8  fp32           (1,)     over the
+    step/<k>/param_l2                8  fp32           (1,)     accumulation,
+    step/<k>/lr                      8  fp32           (1,)     the global
+    step/<k>/momentum                8  fp32           (1,)     gradient norm,
+                                                                 the parameter
+    step/8/param/<name>             21  fp32           varied   L2, the rate
+                                                                 multiplier, the
+                                                                 Muon momentum,
+                                                                 and the final
+                                                                 parameters
+
+The only `uint8` record in the file is `config/window_pattern`, the one-byte
+`"L"`; every other `config/*` record is `int32` or `fp32` and scalar.
+
+`config/*` values:
+
+    record                              value
+    config/version                      1
+    config/seed                         1234
+    config/layers                       2
+    config/heads                        2
+    config/kv_heads                     2
+    config/embd                         32
+    config/seq                          32
+    config/vocab                        256
+    config/padded_vocab                 256
+    config/window_pattern               "L"
+    config/device_batch_size            1
+    config/grad_accum                   2
+    config/steps                        8
+    config/opt/unembedding_lr           0.004
+    config/opt/embedding_lr             0.3
+    config/opt/matrix_lr                0.02
+    config/opt/scalar_lr                0.5
+    config/opt/init_lr_frac             0.8
+    config/opt/adam_eps                 1e-10
+    config/opt/clip                     0.0
+    config/opt/lr_scale                 4.898979663848877   ((32/768) ** -0.5)
+    config/schedule/warmup_ratio        0.0
+    config/schedule/warmdown_ratio      0.5
+    config/schedule/final_lr_frac       0.0
+    config/schedule/muon_momentum_steps 300
+    config/schedule/muon_momentum_start 0.85
+    config/schedule/muon_momentum_peak  0.95
+    config/schedule/muon_momentum_final 0.95
+
+`config/opt/rate/*` is the rate table after the `(hidden_dim / 768) ** -0.5`
+scale:
+
+    lm_head 0.01567673496901989    resid  0.004
+    embedding 1.1757550239562988   x0     0.4
+    value_embedding 0.5878775119781494   smear 0.1599999964237213
+    muon 0.01600000075995922
+
+The per-step scalars, which are the values `//tests:sft_step_parity_test`
+compares:
+
+    step   loss                grad_norm           param_l2            lr     momentum
+    1      5.54571533203125     1.3576149940490723  79.93028259277344   1.0    0.8500000238418579
+    2      5.287267684936523    1.5212377309799194  86.74752807617188   1.0    0.8503333330154419
+    3      4.529292106628418    1.5089915990829468  97.74327087402344   1.0    0.8506666421890259
+    4      3.8902602195739746   1.455264687538147   109.88953399658203  1.0    0.8510000109672546
+    5      3.3322010040283203   1.3589487075805664  117.96819305419922  0.75   0.8513333201408386
+    6      2.9353671073913574   1.289775013923645   122.69151306152344  0.5    0.8516666889190674
+    7      2.683260679244995    1.249049186706543   124.74162292480469  0.25   0.8519999980926514
+    8      2.560389518737793    1.2276803255081177  124.74162292480469  0.0    0.8523333072662354
+
+The rate multiplier follows the progress stream of section 5.2 with
+`warmup_ratio=0`, `warmdown_ratio=0.5`, and `final_lr_frac=0`: progress 0.125 to
+0.5 returns 1.0, then linear decay to 0.0 at progress 1.0. Step 8 runs at
+multiplier 0.0, so its `param_l2` equals step 7's exactly (124.74162292480469).
+
+`step/8/param/*` names and shapes (all fp32): `resid_lambdas` (2,),
+`x0_lambdas` (2,), `smear_lambda` (1,), `backout_lambda` (1,),
+`transformer.wte.weight` (256, 32), `transformer.h.0.attn.c_q.weight` (32, 32),
+`.c_k` (32, 32), `.c_v` (32, 32), `.c_proj` (32, 32),
+`transformer.h.0.mlp.c_fc.weight` (128, 32), `.c_proj` (32, 128),
+`transformer.h.1.attn.c_q.weight` (32, 32), `.c_k` (32, 32), `.c_v` (32, 32),
+`.c_proj` (32, 32), `transformer.h.1.attn.ve_gate.weight` (2, 12),
+`transformer.h.1.mlp.c_fc.weight` (128, 32), `.c_proj` (32, 128),
+`lm_head.weight` (256, 32), `smear_gate.weight` (1, 24),
+`value_embeds.1.weight` (256, 32). That is the same 21 parameters as the base
+checkpoint, under the reference names the step kind uses.
+
+The micro-batches are the shard: `data/step/<k>/*` holds rows `2k - 2` and
+`2k - 1` of the four `NCSFT001` rows, wrapping after the fourth, so step 1
+starts from row 0 and step 3 returns to it. The values above are the reference
+model at each step, not a second packing, so a change to the shard shows up in
+both files or in neither.
+
+5. tests/data/sft_loop_fixture.bin -- section 6.3
+-------------------------------------------------
+
+`NANOORC1`, version 1, 64 records. The kind loads the base checkpoint and the
+shard, runs the reference model, optimizer, and schedule for eight steps, and
+records the trace:
+
+    group                       count  dtype  shape     contents
+    config/num_iterations           1  int32  (1,)      8
+    config/rows                     1  int32  (1,)      4, the shard row count
+    config/eval_every               1  int32  (1,)      200
+    config/eval_at                  1  int32  (1,)      8, the evaluation step
+    config/eval_tokens              1  int32  (1,)      20971520 (40 * 524288)
+    config/chatcore_every           1  int32  (1,)      200
+    config/chatcore_max_cat         1  int32  (1,)      -1
+    config/chatcore_max_sample      1  int32  (1,)      24
+    config/device_batch_size        1  int32  (1,)      1
+    config/grad_accum               1  int32  (1,)      2
+    config/seq_len                  1  int32  (1,)      32
+    config/chatcore_measured        1  int32  (1,)      0, ChatCORE not measured
+    config/token_bytes              1  int32  (256,)    the per-id byte table,
+                                                         copied from the pack
+                                                         fixture (D6)
+    config/version                  1  int32  (1,)      1
+    loop/<k>/step                   8  int32  (1,)      0-based counter, k-1
+    loop/<k>/progress               8  fp32   (1,)      the rate progress
+    loop/<k>/epoch                  8  int32  (1,)      the pass over the shard
+    loop/<k>/lr_multiplier          8  fp32   (1,)      the schedule output
+    loop/<k>/momentum               8  fp32   (1,)      the Muon momentum
+    train/loss/<k>                  8  fp32   (1,)      the logged loss of step k
+    val/bpb/8                       1  fp32   (1,)      the final evaluation
+    chatcore/8                      1  fp32   (1,)      the sentinel -1
+
+    k   step  progress  epoch  lr_multiplier  momentum             train/loss
+    1   0     0.125     1      1.0            0.8500000238418579   5.544482231140137
+    2   1     0.25      1      1.0            0.8503333330154419   5.294756889343262
+    3   2     0.375     2      1.0            0.8506666421890259   4.538682460784912
+    4   3     0.5       2      1.0            0.8510000109672546   3.8959529399871826
+    5   4     0.625     3      0.75           0.8513333201408386   3.3401191234588623
+    6   5     0.75      3      0.5            0.8516666889190674   2.945984363555908
+    7   6     0.875     4      0.25           0.8519999980926514   2.694514513015747
+    8   7     1.0       4      0.0            0.8523333072662354   2.5713748931884766
+
+`val/bpb/8` is `0.542344331741333` bits per byte over the four rows, summed as
+`mean_loss * valid_targets` nats divided by `ln(2) * total_target_bytes` (D6),
+one pass over the shard.
+
+The loop fixture trains the same shard as the step fixture but records the last
+micro-batch loss of each step, which is what the reference loop logs, while the
+step fixture records the mean over the accumulation. The two curves therefore
+differ in about the third decimal (`5.54448...` against `5.54571...` at step
+1); each gate compares its own fixture, so do not compare one curve against
+the other.
+
+`chatcore/8` is `-1` and `config/chatcore_measured` is `0`, because ChatCORE
+needs the chat bundle, the trained tokenizer, and the downloaded task sets. The
+loop fixture pins the cadence of section 5.4 and nothing else; phase G measures
+ChatCORE on the real run. A test that reads `chatcore/8` must therefore accept
+the sentinel rather than compare it to a value.
+
+What these fixtures do not pin
+------------------------------
+
+- The real hub mixture order. `--real-mixture` is the manual check of section
+  10: it needs a network download and a pinned `datasets` version, and it
+  rewrites the two mixture objects only.
+- The ChatCORE value, for the reason above.
+- The metadata block of the base checkpoint, which is the writer's default run
+  facts rather than the tiny model, and carries no `recipe` section yet.
+- Anything past step 8. The decay tail beyond progress 1.0 (section 10's
+  progress-tail risk) is not exercised by this fixture; a longer run needs its
+  own pin.
+
+Do not hand-edit
+----------------
+
+Not one byte of these five files is written by hand, and no later node may
+patch one. If a fixture is wrong, the fix is a change to
+`tools/sft_fixture.py` (or to the reference it transcribes) and a rerun of both
+kinds in the order above, with this note's digest table updated from the
+generator's own output. A run whose digests differ from the table is a
+regression report, not a new pin.

@@ -64,7 +64,43 @@ def pack(output_path, conversations, tokenizer, seq_len: int,
 def run(shard, checkpoint, *, binary: str | None = None,
         num_iterations: int = 100, batch: int = 2, seq_len: int | None = None,
         seed: int = 42, resume: str | None = None,
-        device: str | None = None) -> int:
+        device: str | None = None, warm_start: str | None = None,
+        val_rows: str | None = None,
+        eval_every: int | None = None, eval_tokens: int | None = None,
+        chatcore_every: int | None = None) -> int:
+    """Run the C++ SFT driver over one packed shard.
+
+    ``shard`` is the ``NCSFT001`` file :func:`pack` writes and ``checkpoint``
+    is the checkpoint container the driver saves to. The remaining keyword
+    arguments are the driver flags: ``num_iterations``, ``batch``,
+    ``seq_len``, ``seed``, ``device``, and the ones below.
+
+    ``warm_start`` loads a base checkpoint's weights and optimizer moments and
+    is **not** a resume (design decision D5): the rates are the fresh SFT ones
+    and the step counter starts at 0, whereas ``resume`` restores this run's
+    stored step and continues its schedule. The driver rejects both flags at
+    once, and rejects ``resume`` with a base file.
+
+    The run is scheduled by *progress* rather than by a step count (design
+    decision D1): the driver turns the packed rows consumed so far into an
+    ``approx_progress`` and feeds its running maximum to
+    ``LrMultiplierForProgress``, which is what the reference SFT loop does.
+    The driver also reads the recipe (the learning rates, adam epsilon, the
+    warmdown ratio, and the Muon momentum schedule) from the checkpoint it
+    loads (design decision D7), so a warm start carries the reference SFT
+    settings rather than the pretraining ones.
+
+    ``val_rows`` is the packed validation shard the evaluation reads and
+    ``eval_tokens`` is the token budget of one pass; without ``val_rows`` the
+    driver has nothing to evaluate and skips the bits-per-byte pass entirely.
+    ``eval_every`` and ``chatcore_every`` set the bits-per-byte and ChatCORE
+    cadence in steps, and the driver always evaluates at its final step. It
+    reports the ChatCORE sentinel ``-1``, because it does not measure that
+    score itself. Each of these is forwarded as its own flag and only when it
+    is not ``None``, so the driver's own defaults apply otherwise.
+
+    Returns the driver's exit status.
+    """
     if binary is None:
         env_binary = os.environ.get("NANOCHAT_SFT_MAIN")
         if env_binary:
@@ -82,8 +118,23 @@ def run(shard, checkpoint, *, binary: str | None = None,
         arguments.extend(["--seq", str(seq_len)])
     if resume is not None:
         arguments.extend(["--resume", str(resume)])
+    # Design decision D5: a warm start and a resume are different loads. The
+    # driver rejects a run that names both, so the bridge only forwards them.
+    if warm_start is not None:
+        arguments.extend(["--warm-start", str(warm_start)])
     if device is not None:
         arguments.extend(["--device", device])
+    if val_rows is not None:
+        arguments.extend(["--val-rows", str(val_rows)])
+    # The intervals and the token budget are integers; `int()` here keeps a
+    # float or a numeric string from reaching the driver as a bad flag value,
+    # which the driver would read as 0 (and so as "disabled").
+    if eval_every is not None:
+        arguments.extend(["--eval-every", str(int(eval_every))])
+    if eval_tokens is not None:
+        arguments.extend(["--eval-tokens", str(int(eval_tokens))])
+    if chatcore_every is not None:
+        arguments.extend(["--chatcore-every", str(int(chatcore_every))])
     argv = [str(binary), *arguments]
     result = toolchain.train(argv)
     return result.returncode

@@ -1,9 +1,9 @@
 # tools/ — the execution entry point and host tooling.
 #
 # The offline fixture generators are one grouped script, `dump_fixtures.py`,
-# with the shared helpers in `fixture_common.py`. The script runs on the host
-# and is a source file, not a build target. See
-# docs/script-consolidation-plan.md.
+# with the shared helpers in `fixture_common.py` and the shared SFT machinery in
+# `sft_fixture.py`. The scripts run on the host and are source files, not build
+# targets. See docs/script-consolidation-plan.md.
 #
 # `convert_checkpoint.py` forwards to the tested implementation in
 # `python/nanochat_cpp/checkpoint.py`. The native-tokenizer tools are described
@@ -23,6 +23,7 @@ exports_files([
     "gen_unicode_tables.py",
     "isolation_gate.py",
     "nanochat",
+    "sft_fixture.py",
 ])
 
 # The sandbox resources. The launcher is
@@ -49,6 +50,7 @@ filegroup(
         "fixture_format.py",
         "gen_matrix.py",
         "isolation_gate.py",
+        "sft_fixture.py",
     ],
 )
 
@@ -68,6 +70,7 @@ filegroup(
         "dump_fixtures.py",
         "fixture_common.py",
         "fixture_format.py",
+        "sft_fixture.py",
     ],
 )
 

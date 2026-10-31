@@ -43,6 +43,21 @@ void SaveOptimizerState(const Optimizer& optimizer, Checkpoint* checkpoint);
 // parameter-only checkpoint returns false and leaves the optimizer unchanged.
 bool LoadOptimizerState(const Checkpoint& checkpoint, Optimizer* optimizer);
 
+// Sets the learning-rate multiplier the next `Optimizer::Step` calls apply
+// (design decision D1 of docs/sft-parity-plan.md). The SFT driver resolves the
+// value from `Scheduler::LrMultiplierForProgress(running max progress)` and the
+// run's recipe, then hands it here; the pretraining loop never calls this and
+// keeps the step-based `Scheduler::LrMultiplier`.
+//
+// This is a multiplier, not a rate. The optimizer's `group.lr` already carries
+// the `init_lr_frac` scale (design decision D3), and `Step` multiplies by this
+// value exactly once, so a caller cannot square the factor or scale a group
+// twice. A no-op when `optimizer` is not the native optimizer.
+void SetOptimizerProgressMultiplier(Optimizer* optimizer, float multiplier);
+
+// Drops the override above, so `Step` returns to `LrMultiplier(step)`.
+void ClearOptimizerProgressMultiplier(Optimizer* optimizer);
+
 }  // namespace nanochat
 
 #endif  // NANOCHAT_SRC_OPTIM_STATE_H_

@@ -179,6 +179,12 @@ cc_library(
 cc_library(
     name = "checkpoint_metadata",
     srcs = ["checkpoint_metadata.cc"],
+    hdrs = [
+        # The `Recipe` block's usability rule (design decision D7 of
+        # docs/sft-parity-plan.md): the check the SFT driver runs on the recipe
+        # it inherited, beside the word stream that reads it.
+        "recipe.h",
+    ],
     copts = nanochat_copts(),
     defines = precision_defines(),
     deps = [
@@ -849,6 +855,9 @@ cc_binary(
     copts = nanochat_copts(),
     defines = precision_defines(),
     deps = [
+        # The recipe block's usability rule and the field visitor it sits beside
+        # (design decision D7 of docs/sft-parity-plan.md).
+        ":checkpoint_metadata",
         ":model",
         "//include/nanochat:nanochat",
     ],
