@@ -35,6 +35,7 @@ detailed reference that the design points at.
 | [sft-parity-plan.md](sft-parity-plan.md) | Earning reference parity for supervised fine-tuning: the four rungs, the fixtures, and the phases |
 | [training-seam.md](training-seam.md) | The Python and C++ boundary for training: the seam rule, the current defects, the mesh driver, and the target interface |
 | [rl-notebook.md](rl-notebook.md) | Reinforcement learning in a notebook: the hand-rolled loop, the `nc.rl` worker bridge, and the open items |
+| [pipeline-plan.md](pipeline-plan.md) | The plan for one chain on three hosts: base, then SFT, then RL, with the six blockers and the host matrix |
 | [self-evolution.md](self-evolution.md) | The self-evolution loop: the goal intake, the stuck detector, the human escalation, the intervention dataset, the training round, and the Hub transport |
 | [python.md](python.md) | The single Python surface: in-process compute API, planning, chat evaluation, and the `tools/nanochat` toolchain |
 | [sandbox.md](sandbox.md) | Execution sandbox and host resource governance |
@@ -54,8 +55,8 @@ This directory is the architect-owned reference: it says what the tree does.
 [`../spec/`](../spec/) beside it holds the *vocabulary* — the names the two axes
 declare against, and the authority a declaration is reviewed by. It carries
 prose and data and no code. Where a name matters, the document here links into
-`spec/` instead of copying the table, because a second copy of a closed list is
-the drift the design warns about (§17 of
+`spec/` instead of copying the table. A second copy of a closed list is the
+drift the design warns about (§17 of
 [model-and-device-bringup.md](model-and-device-bringup.md)).
 
 | File | Contents |
