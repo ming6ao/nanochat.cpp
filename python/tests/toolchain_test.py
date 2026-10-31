@@ -5,6 +5,15 @@ fake entry script that echoes its argument list as JSON, then checks the argv
 for every command in the table, and it gives that script a fake
 ``doctor --json`` report (environment plus the device-and-graph plan) so the
 parser assertions describe a real report. See docs/python.md sections 6 and 11.
+
+Two shapes are covered, because the layer has two (docs/pipeline-plan.md B5).
+Outside a scope a command goes through the entry point, which starts the scope;
+inside one (``NANOCHAT_SANDBOX`` or ``NANOCHAT_GPU_QUEUED`` set) a command that
+runs a child executable runs that child directly and never calls the entry
+point, so no second scope starts. A fake child records its own argv beside the
+fake entry's log, so each case proves which one ran. ``profile`` is the one
+command whose argv carries flags and not a child, so it reaches the entry in
+both branches.
 """
 
 from __future__ import annotations
@@ -34,12 +43,17 @@ REASON_BIT_CLEAR = ('the device does not declare override_qk_prep, so this '
 #: ``cli._plan_status`` adds, so no build runs and no GPU is needed.
 FAKE_ENTRY = """#!{python}
 import json
+import os
 import sys
 
 REASON_FUSED_WINS = {fused_wins!r}
 REASON_BIT_CLEAR = {bit_clear!r}
 
 argv = sys.argv[1:]
+entry_log = os.environ.get("FAKE_ENTRY_LOG")
+if entry_log:
+    with open(entry_log, "a", encoding="utf-8") as handle:
+        handle.write(json.dumps(argv) + "\\n")
 if argv and argv[0] == "doctor":
     plan = {{"available": True, "reason": "", "ok": True,
             "spec": "nanochat-default", "graph": "train",
@@ -67,6 +81,24 @@ else:
     print(json.dumps(argv))
 """
 
+#: A stand-in for one child executable of a command that runs a child (a stage
+#: binary, an evaluation binary, a GPU job). It records its whole argv -- the
+#: program name included -- in ``FAKE_CHILD_LOG`` and echoes it as JSON, so a
+#: case proves the child ran, with the argv the layer reports, and that the entry
+#: point did not (docs/pipeline-plan.md B5).
+FAKE_CHILD = """#!{python}
+import json
+import os
+import sys
+
+argv = list(sys.argv)
+child_log = os.environ.get("FAKE_CHILD_LOG")
+if child_log:
+    with open(child_log, "a", encoding="utf-8") as handle:
+        handle.write(json.dumps(argv) + "\\n")
+print(json.dumps(argv))
+"""
+
 #: The keys the ``doctor --json`` report's ``plan`` object carries, in the order
 #: ``cli._plan_status`` builds them. Append-only, like ``cli.DOCTOR_KEYS``.
 DOCTOR_PLAN_KEYS = (
@@ -86,8 +118,16 @@ class ToolchainTest(unittest.TestCase):
                               bit_clear=REASON_BIT_CLEAR),
             encoding="utf-8")
         cls.entry.chmod(cls.entry.stat().st_mode | stat.S_IEXEC)
+        cls.child = Path(cls.tmp.name) / "fake-child"
+        cls.child.write_text(FAKE_CHILD.format(python=sys.executable),
+                             encoding="utf-8")
+        cls.child.chmod(cls.child.stat().st_mode | stat.S_IEXEC)
         cls.env = dict(os.environ)
+        # The class-level toolchain describes the outside-a-scope shape, so both
+        # sentinels are cleared: a host that runs the suite from inside a
+        # queued job must not turn every argv case into a direct child run.
         cls.env.pop("NANOCHAT_SANDBOX", None)
+        cls.env.pop("NANOCHAT_GPU_QUEUED", None)
         cls.toolchain = toolchain.Toolchain(
             entry=cls.entry, repo_root=cls.tmp.name, env=cls.env)
 
@@ -102,6 +142,48 @@ class ToolchainTest(unittest.TestCase):
         self.assertEqual(self.argv_of(result), expected)
         self.assertEqual(result.returncode, 0)
         self.assertEqual(list(result.argv), expected)
+
+    # -- The two shapes of one command (docs/pipeline-plan.md B5) ----------
+
+    #: The two sentinels that say a scope or a queued job is already active.
+    SENTINELS = (("NANOCHAT_SANDBOX", "t0-cpu"), ("NANOCHAT_GPU_QUEUED", "1"))
+
+    def in_scope(self, variable: str, value: str = "t0-cpu"):
+        """A toolchain inside a scope, with one log per script it may run.
+
+        ``variable`` is the sentinel in the child environment. The fake entry
+        and the fake child each record their argv in their own file, so a case
+        can prove which of the two ran.
+        """
+        directory = Path(tempfile.mkdtemp(dir=self.tmp.name))
+        env = dict(self.env)
+        env[variable] = value
+        env["FAKE_ENTRY_LOG"] = str(directory / "entry.log")
+        env["FAKE_CHILD_LOG"] = str(directory / "child.log")
+        tool = toolchain.Toolchain(entry=self.entry, repo_root=self.tmp.name,
+                                  env=env)
+        return tool, directory / "entry.log", directory / "child.log"
+
+    def assert_child_ran(self, result, expected, entry_log, child_log) -> None:
+        """The child ran with ``expected``, and the entry point never ran."""
+        self.assertEqual(self.argv_of(result), expected)
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(list(result.argv), expected)
+        self.assertTrue(child_log.is_file(),
+                        "the child executable never ran")
+        self.assertEqual(json.loads(child_log.read_text(encoding="utf-8")),
+                         expected)
+        self.assertFalse(entry_log.is_file(),
+                         "the entry point ran inside a scope, so a second "
+                         "scope could start")
+
+    def child_ran_in_every_sentinel(self, call, expected) -> None:
+        """``call`` runs the child and not the entry under both sentinels."""
+        for variable, value in self.SENTINELS:
+            with self.subTest(sentinel=variable):
+                tool, entry_log, child_log = self.in_scope(variable, value)
+                self.assert_child_ran(call(tool), expected, entry_log,
+                                      child_log)
 
     def test_build(self) -> None:
         self.check(self.toolchain.build(), ["build"])
@@ -182,17 +264,59 @@ class ToolchainTest(unittest.TestCase):
                    ["client", "--profile", "train", "--", "python",
                     "train.py"])
 
+    def test_train_inside_a_scope_runs_the_child(self) -> None:
+        child = str(self.child)
+        self.child_ran_in_every_sentinel(
+            lambda tool: tool.train([child, "--rows", "sft.nchsft"]),
+            [child, "--rows", "sft.nchsft"])
+
+    def test_rl_inside_a_scope_runs_the_child(self) -> None:
+        child = str(self.child)
+        self.child_ran_in_every_sentinel(
+            lambda tool: tool.rl([child, "--layers", "2"]),
+            [child, "--layers", "2"])
+
+    def test_eval_inside_a_scope_runs_the_child(self) -> None:
+        child = str(self.child)
+        self.child_ran_in_every_sentinel(
+            lambda tool: tool.eval([child]), [child])
+
+    def test_bench_inside_a_scope_runs_the_child(self) -> None:
+        child = str(self.child)
+        self.child_ran_in_every_sentinel(
+            lambda tool: tool.bench([child]), [child])
+
+    def test_verify_inside_a_scope_runs_the_child(self) -> None:
+        child = str(self.child)
+        self.child_ran_in_every_sentinel(
+            lambda tool: tool.verify([child]), [child])
+
     def test_gpu_inside_sandbox_skips_the_queue(self) -> None:
-        env = dict(self.env)
-        env["NANOCHAT_SANDBOX"] = "t2-parity"
-        inside = toolchain.Toolchain(entry=self.entry, repo_root=self.tmp.name,
-                                     env=env)
-        self.check(inside.gpu(["binary"]), ["binary"])
-        queued_env = dict(self.env)
-        queued_env["NANOCHAT_GPU_QUEUED"] = "1"
-        queued = toolchain.Toolchain(entry=self.entry, repo_root=self.tmp.name,
-                                     env=queued_env)
-        self.check(queued.gpu(["binary"]), ["binary"])
+        """A GPU job submitted from inside a scope runs the child itself.
+
+        The pre-B5 branch handed the raw child argv to the entry point, which
+        prints ``unknown command`` and exits 2, so the child never ran. The
+        shape a case must see now is the child's own argv, the child's record
+        of it, and no entry call.
+        """
+        child = str(self.child)
+        self.child_ran_in_every_sentinel(
+            lambda tool: tool.gpu([child], profile="t1-gpu"), [child])
+
+    def test_profile_inside_a_scope_still_reaches_the_entry(self) -> None:
+        """``profile`` carries flags, not a child, so the entry owns it.
+
+        Both branches reach the entry point: there is no child executable to
+        run directly, and the entry point submits the benchmark itself.
+        """
+        for variable, value in self.SENTINELS:
+            with self.subTest(sentinel=variable):
+                tool, entry_log, child_log = self.in_scope(variable, value)
+                self.check(tool.profile(["--json"]), ["profile", "--json"])
+                self.assertTrue(entry_log.is_file(),
+                                "profile must reach the entry point")
+                self.assertFalse(child_log.is_file(),
+                                 "profile has no child executable")
 
     def test_gpuq(self) -> None:
         self.check(self.toolchain.gpuq(["status", "--json"]),
