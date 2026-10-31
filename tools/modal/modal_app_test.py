@@ -14,6 +14,7 @@ import importlib.util
 import io
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import types
@@ -37,39 +38,42 @@ class _Chain:
         return self
 
 
-def _decorator(*_args, **_kwargs):
-    """The stub of ``app.function``: it returns the wrapped function."""
-
-    def apply(func):
-        return func
-
-    return apply
-
-
 def _stub_sdk() -> types.ModuleType:
     """A Modal SDK whose images, volumes, and secrets accept any call.
 
-    The stub records the Volume names and the ``app.function`` keywords, so a
-    test reads which volumes the app declares and which one each function
-    mounts.
+    The stub records the Volume names, the ``app.function`` keywords and the
+    name of each decorated function, and the ``app.local_entrypoint`` calls,
+    so a test reads which volumes the app declares, which one each function
+    mounts, and which entry point a person runs by hand.
     """
     module = types.ModuleType("modal")
     module.volume_names = []
     module.function_calls = []
+    module.local_entrypoints = []
 
     def from_name(name, create_if_missing=False, **_kwargs):
         module.volume_names.append((str(name), bool(create_if_missing)))
         return _Chain()
 
     def function(**kwargs):
-        module.function_calls.append(kwargs)
-        return _decorator()
+        def apply(func):
+            module.function_calls.append(dict(kwargs, name=func.__name__))
+            return func
+
+        return apply
+
+    def local_entrypoint(**_kwargs):
+        def apply(func):
+            module.local_entrypoints.append(func.__name__)
+            return func
+
+        return apply
 
     module.Image = _Chain()
     module.Volume = types.SimpleNamespace(from_name=from_name)
     module.Secret = _Chain()
     module.App = lambda *_args, **_kwargs: types.SimpleNamespace(
-        function=function)
+        function=function, local_entrypoint=local_entrypoint)
     return module
 
 
@@ -94,8 +98,12 @@ class AppTest(unittest.TestCase):
         cls.app = _load_app()
 
     def test_the_entry_points_exist(self) -> None:
-        for name in ("doctor", "train"):
+        for name in ("doctor", "train", "pipeline", "pipeline_demo"):
             self.assertTrue(callable(getattr(self.app, name)), name)
+
+    def test_the_demo_is_a_local_entry_point(self) -> None:
+        _module, sdk = _load_app(with_sdk=True)
+        self.assertEqual(sdk.local_entrypoints, ["pipeline_demo"])
 
     def test_the_type_and_the_architecture_are_one_pair(self) -> None:
         self.assertEqual(self.app.GPU_TYPE, "T4")
@@ -120,6 +128,25 @@ class AppTest(unittest.TestCase):
         self.assertEqual(self.app.LIBRARY,
                          f"{self.app.REPO_ROOT}/bazel-bin/bindings/"
                          "libnanochat_shared.so")
+
+    def test_the_image_carries_the_two_stage_executables(self) -> None:
+        # The chain launches both children, and one build produces all three
+        # outputs (docs/pipeline-plan.md B6 and D2).
+        self.assertEqual(self.app.STAGE_TARGETS,
+                         ("//src:sft_main", "//src:rl_worker"))
+        self.assertEqual(
+            self.app.STAGE_TARGETS,
+            tuple(f"//src:{name}" for name in self.app.STAGE_NAMES))
+
+    def test_the_image_names_the_two_stage_executables(self) -> None:
+        # The environment override wins in `_build.stage_binary`, which is what
+        # makes them findable when the install, and not the tree, answers
+        # `import nanochat_cpp` (section 6.4).
+        root = self.app.REPO_ROOT
+        self.assertEqual(
+            self.app.STAGE_ENV,
+            {"NANOCHAT_SFT_MAIN": f"{root}/bazel-bin/src/sft_main",
+             "NANOCHAT_RL_WORKER": f"{root}/bazel-bin/src/rl_worker"})
 
 
 class CheckCardsTest(unittest.TestCase):
@@ -155,6 +182,18 @@ class CheckCardsTest(unittest.TestCase):
         with self.assertRaises(RuntimeError) as caught:
             self.app._check_cards(self.job(4))
         self.assertIn("set world_size", str(caught.exception))
+
+    def test_a_job_without_a_mesh_is_the_function_count(self) -> None:
+        # A pipeline job declares no mesh: the chain runs one replica of each
+        # stage (docs/pipeline-plan.md B11), so the function's count governs.
+        self.app._check_cards(json.dumps({"run_id": "demo",
+                                          "profile": "demo"}))
+
+    def test_a_wrong_architecture_stops_a_pipeline_job(self) -> None:
+        self.app._device_capability = lambda: "8.0"
+        with self.assertRaises(RuntimeError) as caught:
+            self.app._check_cards(json.dumps({"run_id": "demo"}))
+        self.assertIn("deploy an image", str(caught.exception))
 
 
 class PublishTest(unittest.TestCase):
@@ -224,6 +263,229 @@ class PublishTest(unittest.TestCase):
         self.assertEqual(self.calls, [])
 
 
+class PipelineTest(unittest.TestCase):
+    """The chain entry of section 6.3: one job file, one report, one uploader.
+
+    The stub keeps the function callable, so the body runs here with a
+    temporary run root, a fake Volume, and a fake launcher. The launcher writes
+    the ``deliver/`` folder and the corpus the real chain writes.
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.app, cls.sdk = _load_app(with_sdk=True)
+
+    def setUp(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = temporary.name
+        for name, value in (("REMOTE_ROOT", self.root),
+                            ("package_source", lambda: "repository"),
+                            ("_device_capability", lambda: "7.5"),
+                            ("_device_count", lambda: 1)):
+            patcher = mock.patch.object(self.app, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.commits = []
+        patcher = mock.patch.object(
+            self.app, "runs",
+            types.SimpleNamespace(commit=lambda: self.commits.append(True)))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.commands = []
+        self.environments = []
+        self.returncode = 0
+        self.report = {"version": 1, "stages": [],
+                       "host": {"arch": "sm_75", "backend": "cuda"}}
+        patcher = mock.patch.object(
+            self.app, "subprocess",
+            types.SimpleNamespace(run=self.launch,
+                                  STDOUT=subprocess.STDOUT))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def launch(self, argv, **kwargs):
+        """Stand in for the ``tools/nanochat client`` launch."""
+        self.commands.append(list(argv))
+        self.environments.append(kwargs.get("env"))
+        job_path = Path(argv[-1])
+        job = json.loads(job_path.read_text(encoding="utf-8"))
+        folder = self.app.chain_dir(job_path.parent, job)
+        deliver = folder / self.app.DELIVER_DIRNAME
+        deliver.mkdir(parents=True, exist_ok=True)
+        if self.report is not None:
+            (deliver / self.app.REPORT_NAME).write_text(
+                json.dumps(self.report), encoding="utf-8")
+        corpus = folder / self.app.CORPUS_DIRNAME
+        corpus.mkdir(parents=True, exist_ok=True)
+        (corpus / "loader_tokenizer.nctoken").write_text("tok")
+        (folder / "rl").mkdir(parents=True, exist_ok=True)
+        return types.SimpleNamespace(returncode=self.returncode)
+
+    def call(self, name):
+        """The ``app.function`` keywords of the function ``name``."""
+        for keywords in self.sdk.function_calls:
+            if keywords["name"] == name:
+                return keywords
+        raise AssertionError(f"no function named {name}")
+
+    def run_once(self, job=None, run_id="run-1", **kwargs):
+        """Run the function once and return its parsed answer."""
+        text = self.app.pipeline(
+            json.dumps({"run_id": "demo"} if job is None else job),
+            run_id, **kwargs)
+        return json.loads(text)
+
+    def test_the_argv_names_the_client_and_the_chain_module(self) -> None:
+        # Design decision D10: the module is always wrapped by tools/nanochat.
+        self.run_once()
+        argv = self.commands[0]
+        self.assertEqual(argv[:7], ["tools/nanochat", "client", "--profile",
+                                    "train", "--", sys.executable, "-m"])
+        self.assertEqual(argv[7], "nanochat_cpp.pipeline")
+        self.assertEqual(argv[8],
+                         str(Path(self.root) / "run-1" / "job.json"))
+        self.assertEqual(len(argv), 9)
+
+    def test_the_chain_runs_from_the_one_source_environment(self) -> None:
+        self.run_once()
+        self.assertEqual(self.environments[0],
+                         self.app.worker_env("repository"))
+
+    def test_out_root_is_rewritten_to_the_volume(self) -> None:
+        self.run_once({"run_id": "demo", "base_steps": 100,
+                       "out_root": "/elsewhere/runs/demo"})
+        job = json.loads(
+            (Path(self.root) / "run-1" / "job.json").read_text())
+        self.assertEqual(job["out_root"], f"{self.root}/run-1")
+        self.assertEqual(job["base_steps"], 100)
+        self.assertEqual(job["run_id"], "demo")
+
+    def test_the_run_directory_and_the_job_file_are_kept(self) -> None:
+        self.run_once()
+        run_dir = Path(self.root) / "run-1"
+        self.assertTrue((run_dir / "job.json").is_file())
+        self.assertTrue((run_dir / "worker.log").is_file())
+
+    def test_the_run_directory_is_committed_for_a_poll(self) -> None:
+        self.run_once()
+        self.assertEqual(self.commits, [True])
+
+    def test_the_card_check_runs_on_the_rewritten_job(self) -> None:
+        seen = []
+        with mock.patch.object(self.app, "_check_cards", seen.append):
+            self.run_once()
+        self.assertEqual(json.loads(seen[0])["out_root"],
+                         f"{self.root}/run-1")
+
+    def test_one_chain_at_a_time_on_one_card(self) -> None:
+        # Another chain at the same time would fight for the Volume and the
+        # card, so the function keeps the `train` limit (section 6.3).
+        keywords = self.call("pipeline")
+        self.assertEqual(keywords["max_containers"], 1)
+        self.assertEqual(keywords["gpu"], self.app.gpu_request())
+        self.assertEqual(keywords["timeout"], self.app.TIMEOUT_SECONDS)
+        self.assertIsInstance(keywords["secrets"], list)
+
+    def test_the_report_of_the_chain_comes_back(self) -> None:
+        answer = self.run_once()
+        self.assertEqual(answer["report"]["host"]["arch"], "sm_75")
+        self.assertEqual(answer["run_dir"],
+                         str(Path(self.root) / "run-1" / "demo"))
+        self.assertEqual(answer["source"], "repository")
+        self.assertEqual(answer["publish"], {})
+
+    def test_an_undelivered_chain_reports_an_empty_document(self) -> None:
+        self.report = None
+        answer = json.loads(self.app.pipeline(json.dumps({"run_id": "demo"}),
+                                              "run-1"))
+        self.assertEqual(answer["report"], {})
+
+    def test_a_failed_chain_stops_the_function(self) -> None:
+        self.returncode = 2
+        with self.assertRaises(RuntimeError) as caught:
+            self.run_once()
+        self.assertIn("the chain exited 2", str(caught.exception))
+
+    def test_the_final_stage_publishes_through_the_one_uploader(self) -> None:
+        calls = []
+
+        def publish(job_json, run_dir, publish_json):
+            calls.append((json.loads(job_json), str(run_dir), publish_json))
+            return {"stage": "chatrl"}
+
+        meta = json.dumps({"stage": "chatrl", "repo_id": "o/m"})
+        with mock.patch.object(self.app, "_publish", publish):
+            answer = self.run_once(publish_json=meta)
+        job, folder, publish_json = calls[0]
+        chain = Path(self.root) / "run-1" / "demo"
+        self.assertEqual(folder, str(chain / "rl"))
+        self.assertEqual(publish_json, meta)
+        self.assertEqual(
+            job["data"]["tokenizer_path"],
+            str(Path(self.root) / "run-1" / "demo" / "corpus"
+                / "loader_tokenizer.nctoken"))
+        self.assertEqual(answer["publish"], {"stage": "chatrl"})
+
+    def test_the_stage_argument_is_noted_and_ignored(self) -> None:
+        # The signature carries it so one client call shape serves both
+        # functions; the chain warm starts each stage from the one before it.
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            answer = self.run_once(stage_json=json.dumps({"stage": "base"}))
+        self.assertIn("takes no stage_json", stderr.getvalue())
+        self.assertEqual(answer["report"]["host"]["arch"], "sm_75")
+
+    def test_the_report_names_the_tokenizer_of_the_corpus(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            corpus = folder / self.app.CORPUS_DIRNAME
+            corpus.mkdir()
+            (corpus / "loader_tokenizer.nctoken").write_text("tok")
+            named = corpus / "named.nctoken"
+            named.write_text("tok")
+            report = {"stages": [{"name": "base",
+                                 "extra": {"tokenizer": str(named)}}]}
+            self.assertEqual(self.app.stage_tokenizer(report, folder),
+                             str(named))
+
+    def test_the_corpus_is_the_fallback_for_the_tokenizer(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            corpus = folder / self.app.CORPUS_DIRNAME
+            corpus.mkdir()
+            tokenizer = corpus / "loader_tokenizer.nctoken"
+            tokenizer.write_text("tok")
+            self.assertEqual(self.app.stage_tokenizer({}, folder),
+                             str(tokenizer))
+        self.assertEqual(self.app.stage_tokenizer({}, folder / "nope"), "")
+
+    def test_the_run_directory_nests_the_job_run_id(self) -> None:
+        self.assertEqual(self.app.chain_dir("/runs/x", {"run_id": "demo"}),
+                         Path("/runs/x/demo"))
+        self.assertEqual(self.app.chain_dir("/runs/x", {}), Path("/runs/x"))
+
+    def test_the_demo_job_runs_the_demo_profile(self) -> None:
+        job = self.app.demo_job()
+        self.assertEqual(job["run_id"], "demo")
+        self.assertEqual(job["profile"], "demo")
+        self.assertEqual(job["out_root"], "")
+        self.assertTrue(job["deliver"])
+
+    def test_the_demo_job_falls_back_to_the_copy_in_this_file(self) -> None:
+        # A workstation that installed the Modal SDK and not the package.
+        with mock.patch.dict(sys.modules, {"nanochat_cpp.pipeline": None}):
+            job = self.app.demo_job("other")
+        self.assertEqual(job, dict(self.app.DEMO_JOB, run_id="other"))
+
+    def test_the_demo_job_matches_the_package_defaults(self) -> None:
+        try:
+            from nanochat_cpp import pipeline as chain  # noqa: PLC0415
+        except Exception:  # noqa: BLE001 - the test host may not hold it
+            self.skipTest("nanochat_cpp is not importable here")
+        self.assertEqual(self.app.DEMO_JOB, chain.Job().to_dict())
+
+
 class ImageTest(unittest.TestCase):
     """The image must install the package and keep the tree as the fallback."""
 
@@ -251,6 +513,18 @@ class ImageTest(unittest.TestCase):
     def test_the_train_function_accepts_a_stage(self) -> None:
         self.assertIn('stage_json: str = ""', self.text)
 
+    def test_the_image_build_names_the_stage_executables(self) -> None:
+        self.assertIn("_build.build_stages(options=_build.BuildOptions",
+                      self.text)
+        self.assertIn("//src:sft_main", self.text)
+        self.assertIn("//src:rl_worker", self.text)
+
+    def test_the_host_file_stays_out_of_the_image(self) -> None:
+        # The host file pins /usr/bin/gcc-12, which the image does not have, so
+        # a deploy from a host that ran tools/kaggle/bootstrap.sh would build
+        # an image that cannot compile (section 8 row 10).
+        self.assertRegex(self.text, r"ignore=\[[^\]]*\.bazelrc\.local")
+
 
 class WeightsTest(unittest.TestCase):
     """The weights Volume holds ``<repo_id>/<stage>/`` (section 6.4, D8)."""
@@ -266,12 +540,16 @@ class WeightsTest(unittest.TestCase):
         self.assertEqual(self.app.WEIGHTS_ROOT, "/weights")
 
     def test_both_volumes_are_mounted_on_the_worker(self) -> None:
-        mounted = [call["volumes"] for call in self.sdk.function_calls
-                   if "volumes" in call]
-        self.assertEqual(len(mounted), 1)
-        self.assertEqual(sorted(mounted[0]), ["/runs", "/weights"])
-        self.assertIs(mounted[0]["/weights"], self.app.weights)
-        self.assertIs(mounted[0]["/runs"], self.app.runs)
+        mounted = {call["name"]: call["volumes"]
+                   for call in self.sdk.function_calls if "volumes" in call}
+        self.assertEqual(sorted(mounted), ["pipeline", "train"])
+        self.assertEqual(sorted(mounted["train"]), ["/runs", "/weights"])
+        self.assertIs(mounted["train"]["/weights"], self.app.weights)
+        self.assertIs(mounted["train"]["/runs"], self.app.runs)
+        # The chain reads and writes the run root only: its stages warm start
+        # from each other, so it never reads the stage cache of `train`.
+        self.assertEqual(sorted(mounted["pipeline"]), ["/runs"])
+        self.assertIs(mounted["pipeline"]["/runs"], self.app.runs)
 
     def test_a_stage_is_a_repository_and_a_stage_folder(self) -> None:
         self.assertEqual(self.app.stage_dir("owner/model", "base"),

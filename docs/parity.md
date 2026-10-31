@@ -30,7 +30,7 @@ Status values:
 | D7 | `out-of-scope` | runtime | no `torch.compile`; disabled on Pascal anyway |
 | D8 | `equivalent` | harness | no batch prefetch overlap during backward |
 | D9 | `closed` | optimizer | C++ schedule warmdown count matches Python's `round` (half to even) |
-| E1 | `open` | evaluation | sampled modes use the C++ RNG, not torch; greedy is bit-identical |
+| E1 | `open` | evaluation | sampled modes use the C++ RNG, not torch, and derive the stream per row, per prompt, and per step; greedy is bit-identical |
 | E3 | `equivalent` | evaluation | reference checkpoints converted torch -> the checkpoint container |
 | E4 | `equivalent` | evaluation | CORE and chat scoring use the C++ forward with reference task logic |
 | E5 | `out-of-scope` | evaluation | no distributed evaluation |
@@ -182,6 +182,19 @@ sampled paths are:
 **Impact:** the sampled text differs from the reference, so GSM8K and HumanEval
 pass rates and sample outputs are not run-for-run comparable. The deterministic
 metrics (bpb, CORE, categorical chat) stay unaffected.
+
+The sampled stream is derived per row, per prompt, and per step: `GenerateBatch`
+mixes the row index and the decode step into the seed before each decode call,
+and `GenerateMultiPrompt` mixes the prompt index, so row `r` of a batch draws the
+same quantile as row `r` of a one-row run at that seed and no two rows draw the
+same one (blocker B4 of `docs/pipeline-plan.md`). Every recorded sampled
+evaluation number therefore moved once, at that change.
+
+No fixture moved with it. `tests/data/generate_parity.bin` records greedy output
+at temperature 0, which draws no random value, and `tests/data/rl_parity.bin`
+replays recorded rows instead of generating them, so
+`//tests:generate_parity_test` and `//tests:rl_parity_test` hold the same bytes
+they held before the seed mix landed.
 
 **Evidence:** the generation parity fixture covers greedy decoding only. The
 sampled outputs depend on the torch RNG state, so there is no committed fixture

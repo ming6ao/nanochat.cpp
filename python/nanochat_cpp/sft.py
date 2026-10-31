@@ -12,7 +12,8 @@ from array import array
 from pathlib import Path
 from typing import Callable
 
-from . import _build, eval_fixture, sft_data, toolchain
+from . import _build, api, eval_fixture, sft_data
+from . import toolchain as _toolchain
 
 __all__ = ["pack", "run"]
 
@@ -61,13 +62,15 @@ def pack(output_path, conversations, tokenizer, seq_len: int,
     return eval_fixture.write(output_path, records, magic=_MAGIC)
 
 
-def run(shard, checkpoint, *, binary: str | None = None,
+def run(shard, checkpoint, *, config: api.Config | None = None,
+        binary: str | os.PathLike | None = None,
         num_iterations: int = 100, batch: int = 2, seq_len: int | None = None,
         seed: int = 42, resume: str | None = None,
         device: str | None = None, warm_start: str | None = None,
         val_rows: str | None = None,
         eval_every: int | None = None, eval_tokens: int | None = None,
-        chatcore_every: int | None = None) -> int:
+        chatcore_every: int | None = None,
+        toolchain: _toolchain.Toolchain | None = None) -> int:
     """Run the C++ SFT driver over one packed shard.
 
     ``shard`` is the ``NCSFT001`` file :func:`pack` writes and ``checkpoint``
@@ -75,11 +78,25 @@ def run(shard, checkpoint, *, binary: str | None = None,
     arguments are the driver flags: ``num_iterations``, ``batch``,
     ``seq_len``, ``seed``, ``device``, and the ones below.
 
+    ``config`` is the model shape the driver builds. It reaches the driver as
+    :func:`nanochat_cpp.api.model_flags`, the one home of the model flag list,
+    so an SFT stage recreates the shape of the run whose weights it warm starts
+    from and the driver's ``Checkpointer::LoadModel`` accepts that file
+    (docs/pipeline-plan.md B1). Without ``config`` no model flag is sent and
+    the driver's own shape applies.
+
+    The shard owns the sequence length, because :func:`pack` wrote rows that
+    wide: a ``config`` whose ``seq_len`` disagrees with ``seq_len``
+    raises :class:`ValueError` rather than building a model the rows do not fit
+    (B1).
+
     ``warm_start`` loads a base checkpoint's weights and optimizer moments and
     is **not** a resume (design decision D5): the rates are the fresh SFT ones
     and the step counter starts at 0, whereas ``resume`` restores this run's
     stored step and continues its schedule. The driver rejects both flags at
-    once, and rejects ``resume`` with a base file.
+    once, and rejects ``resume`` with a base file. ``warm_start`` is the load
+    path and ``checkpoint`` is the save path: they are two different arguments,
+    and the driver names them ``--warm-start`` and ``--checkpoint``.
 
     The run is scheduled by *progress* rather than by a step count (design
     decision D1): the driver turns the packed rows consumed so far into an
@@ -99,14 +116,23 @@ def run(shard, checkpoint, *, binary: str | None = None,
     score itself. Each of these is forwarded as its own flag and only when it
     is not ``None``, so the driver's own defaults apply otherwise.
 
+    ``binary`` defaults to :func:`nanochat_cpp._build.stage_binary`, and
+    ``toolchain`` injects the orchestration object, in the style of
+    :func:`nanochat_cpp.rl.run`, so a test can pin the argv with a fake.
+
     Returns the driver's exit status.
     """
+    if config is not None and seq_len is not None and \
+            int(config.seq_len) != int(seq_len):
+        raise ValueError(
+            f"the shard is {int(seq_len)} tokens wide but config.seq_len is "
+            f"{int(config.seq_len)}; the shard owns the sequence length "
+            f"(docs/pipeline-plan.md B1)")
     if binary is None:
-        env_binary = os.environ.get("NANOCHAT_SFT_MAIN")
-        if env_binary:
-            binary = env_binary
-        else:
-            binary = str(_build.repo_root() / "bazel-bin" / "src" / "sft_main")
+        # A tree checkout, a runfiles tree, or an installed wheel; a tree with
+        # no build raises the resolver's message and not a file-not-found
+        # (docs/pipeline-plan.md B6).
+        binary = _build.stage_binary("sft_main")
     arguments = [
         "--rows", str(shard),
         "--checkpoint", str(checkpoint),
@@ -114,7 +140,13 @@ def run(shard, checkpoint, *, binary: str | None = None,
         "--batch", str(batch),
         "--seed", str(seed),
     ]
-    if seq_len is not None:
+    # The model flags come from `api.model_flags`, so this facade and the RL
+    # one cannot drift (B1). The driver's flag loop reads them in any order.
+    arguments.extend(api.model_flags(config))
+    # The model flags already carry `--seq` when a config is given, so the
+    # driver flags name it only for a caller that owns no shape; a repeated
+    # `--seq` would say the same thing twice.
+    if seq_len is not None and config is None:
         arguments.extend(["--seq", str(seq_len)])
     if resume is not None:
         arguments.extend(["--resume", str(resume)])
@@ -136,5 +168,6 @@ def run(shard, checkpoint, *, binary: str | None = None,
     if chatcore_every is not None:
         arguments.extend(["--chatcore-every", str(int(chatcore_every))])
     argv = [str(binary), *arguments]
-    result = toolchain.train(argv)
+    runner = _toolchain if toolchain is None else toolchain
+    result = runner.train(argv)
     return result.returncode

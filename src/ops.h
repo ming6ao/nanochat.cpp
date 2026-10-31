@@ -92,8 +92,8 @@ void RmsNormBackward(std::int64_t rows, std::int64_t dim, float eps,
 
 // ---------------------------------------------------------------------------
 // QK-norm + RoPE + scale, in place on the query/key projections. `cos`/`sin`
-// point at the first rotary row for this call (the decode path offsets them by
-// the KV-cache position).
+// are device tables; they point at the first rotary row for this call (the
+// decode path offsets them by the KV-cache position).
 // ---------------------------------------------------------------------------
 
 void QkPrepForward(int batch, int seq, int num_heads, int num_kv_heads,
@@ -135,10 +135,10 @@ void AttentionBackward(const AttentionShape& shape, const ComputeType* q,
 
 // ---------------------------------------------------------------------------
 // ResFormer value residual, expressed as a composition (docs/model-and-device-
-// bringup.md section 7.4): a GEMM for the gate dot, the pointwise family for the
-// sigmoid (`kGateMul` with a unit operand), the gate factor (`kScale`) and the
-// per-head broadcast (`kRowScale`), and the caller's accumulating projection for
-// the addition.
+// bringup.md section 7.4): a GEMM for the gate dot, the pointwise family for
+// the sigmoid (`kGateMul` with a unit operand), the gate factor (`kScale`) and
+// the per-head broadcast (`kRowScale`), and the caller's accumulating
+// projection for the addition.
 //
 // `ValueGateForward` computes and saves the gate only: `gate_out[row, kvh] =
 // m * sigmoid(dot(h[row, :kVeGateChannels], gate_w[kvh, :]))`. `ValueGateApply`

@@ -36,6 +36,7 @@ __all__ = [
     "Trainer",
     "build",
     "evaluate",
+    "model_flags",
     "no_grad",
     "optimizer_config",
     "preset_optimizer_config",
@@ -330,6 +331,45 @@ class Config:
                 f"padded_vocab_size={self.padded_vocab_size}, "
                 f"window_pattern={self.window_pattern!r}, "
                 f"value_embedding={self.value_embedding})")
+
+
+def _flag_float(value) -> str:
+    """The flag spelling of a float: ``%.9g``, which round-trips a float32."""
+    return format(float(value), ".9g")
+
+
+def model_flags(config: Config | None = None) -> list[str]:
+    """The model flags of ``config``, as ``nanochat::cli::IsModelFlag`` reads them.
+
+    This is the one home of the model flag list on the Python side
+    (docs/pipeline-plan.md B1 and B2). ``nanochat::cli::ApplyModelFlag``
+    (``src/cli.h``) is the home on the C++ side, and every binary parses the
+    same names, so a stage command line rebuilds the exact shape a stage was
+    started with. The two facades (:func:`nanochat_cpp.sft.run` and
+    :func:`nanochat_cpp.rl.run`) call this function instead of keeping lists of
+    their own, so the SFT stage and the RL stage cannot drift.
+
+    ``--seq`` is among the flags because a shard owns the sequence length: the
+    packed rows of :func:`nanochat_cpp.sft.pack` are ``seq_len`` wide, and the
+    driver must build the model at that width.
+
+    ``None`` answers an empty list, so a caller that owns no shape passes no
+    flag and the binary's own defaults apply.
+    """
+    if config is None:
+        return []
+    return [
+        "--layers", str(config.num_layers),
+        "--heads", str(config.num_heads),
+        "--kv-heads", str(config.num_kv_heads),
+        "--hidden", str(config.hidden_dim),
+        "--seq", str(config.seq_len),
+        "--vocab", str(config.vocab_size),
+        "--padded-vocab", str(config.padded_vocab_size),
+        "--window-pattern", str(config.window_pattern),
+        "--rope-base", _flag_float(config.rope_base),
+        "--value-embedding", "1" if config.value_embedding else "0",
+    ]
 
 
 class Tokenizer:

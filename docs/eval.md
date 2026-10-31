@@ -145,6 +145,27 @@ the forward pass is C++.
 The repository contains a tiny synthetic CORE fixture, so the T0 test never
 needs the network or the real bundle.
 
+### 4.4 The sampled stream, and what moved
+
+`ChatEvaluator` is the one consumer of the sampled stream that ships: its
+GSM8K and HumanEval legs generate, and a generated answer is a sample. The
+base-eval sample mode of section 4.2 and `ChatEvaluator` share one primitive,
+`GenerateBatch` and its multi-prompt sibling, so the seed mix of B4 (see
+`docs/pipeline-plan.md`) reaches both.
+
+The stream is now derived per row, per prompt, and per step instead of one seed
+for every row and every step. So every recorded sampled evaluation number moved
+once, at that change: a sampled GSM8K or HumanEval accuracy, and a printed
+sample, are not comparable with a number recorded before it. A greedy number
+did not move, because greedy decoding is an argmax with no random draw: the
+bpb, CORE, and categorical chat metrics keep the values they held, and
+`docs/parity.md` item E1 records the same split.
+
+Treat a sampled number as nanochat.cpp's own seeded distribution, as E1 says,
+and record the seed beside it. The rule matters more after B4 than before it:
+four rows of one group now differ, so a sampled accuracy is a number a seed
+reproduces and not one that a rerun happens to match.
+
 ## 5. Chat evaluation
 
 `nanochat_cpp.chat.ChatEvaluator` runs five tasks and reports per-task accuracy

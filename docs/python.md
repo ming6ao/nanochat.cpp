@@ -29,6 +29,9 @@ python/nanochat_cpp/
   plan.py            planning layer (new)
   chat.py            chat evaluation (new)
   sft_data.py        SFT mixture and packer (new)
+  sft.py             the SFT facade: pack then run a stage
+  rl.py              the RL facade: rollouts, advantages, the worker
+  pipeline.py        the base, SFT, and RL chain of one job file
   toolchain.py       orchestration layer (new)
   _entry.py          the command table for toolchain (new)
   checkpoint.py      reference .pt to the container; metadata read
@@ -60,6 +63,17 @@ The library stops with a corrective message when the three checks fail. A
 Kaggle Notebook sets the `none` backend. A workstation run goes through
 `tools/nanochat`. Section 5.4 gives the chat evaluation route.
 
+The same rule holds one level up, at the facades. A facade that launches a
+child from a process that already holds a scope must run that child directly,
+because the entry point is not a passthrough and because the entry point already
+skips its own scope when a sentinel is set. `Toolchain._dispatch` is the one
+statement of that rule: when `NANOCHAT_SANDBOX` or `NANOCHAT_GPU_QUEUED` is set
+it runs the child and its arguments as a child of this process, and otherwise it
+runs the command through `tools/nanochat`. `train`, `rl`, `eval`, `bench`,
+`verify`, `gpu`, and `profile` all call it, so a stage of the chain keeps the
+scope it was given (blocker B5 of `docs/pipeline-plan.md`; the comment there
+holds the two commands that show why).
+
 ### 3.2 Kaggle delivery
 
 The Kaggle install cell sets the library, the cache, and the sandbox backend:
@@ -78,13 +92,35 @@ import nanochat_cpp as nc
 session that builds from source. Source the file in the terminal, or read it in
 the notebook.
 
-The library search order is:
+The library search order is the one `nanochat_cpp._lib.load` implements:
 
 1. the path in `NANOCHAT_CPP_LIB`;
-2. a cached library that matches the build key;
+2. the Bazel runfiles tree, so a `py_test` or a `bazel run` finds the library
+   its data dependencies carry;
 3. the development tree under `bazel-bin/bindings/`;
-4. the package directory;
-5. a build from the sources.
+4. a library bundled beside the package;
+5. an installed `nanochat_cpp_cuda_<arch>` wheel, which is how a host that
+   installed a binary wheel finds its library without a clone
+   (`docs/dependency-layering-plan.md` section 6.3);
+6. the cache, or an on-demand build from the sources (section 3.3).
+
+The two stage executables of the chain follow the same shape, through
+`nanochat_cpp._build.stage_binary(name)`, which is the one resolver a facade
+calls:
+
+1. the `NANOCHAT_SFT_MAIN` or `NANOCHAT_RL_WORKER` override, which wins even when
+   the file is absent, because the caller named it;
+2. the Bazel runfiles tree, at `src/<name>`;
+3. `bazel-bin/src/<name>`, the development tree;
+4. `nanochat-<name>` on `PATH`, the entry point of a future wheel;
+5. an error that names the build command, so a tree with no build fails with one
+   line a reader can paste.
+
+A wheel install has no `bazel-bin`, so a facade fails at item 5 with that
+message and not with a file-not-found from the launcher (decision D8).
+`_build.build_stages(options)` builds the library and both children in one
+`tools/nanochat build` call, so `_build._build_command` keeps one home for the
+command line (B6).
 
 ### 3.3 On-demand build
 
@@ -125,6 +161,57 @@ cached = nc.build(backend="cpu", precision="fp32", cache=BASE / "build")
 The fp32 build trains on the T4. Each parameter keeps one fp32 weight, and the
 optimizer updates that weight in place. fp32 covers the gradient range, so the
 build needs no loss scaling ([precision.md](precision.md)).
+
+### 3.4 The stage facades, the model flags, and the load path
+
+Two facades launch a stage executable: `nc.sft.run` and `nc.rl.run`. Each one
+takes the model shape as a `Config`, and each one hands it to
+`api.model_flags(config)`, which is the one model flag list on the Python side
+(blockers B1 and B2 of `docs/pipeline-plan.md`):
+
+```python
+def model_flags(config: Config | None = None) -> list[str]:
+    """`--layers`, `--heads`, `--kv-heads`, `--hidden`, `--seq`, `--vocab`,
+    `--padded-vocab`, `--window-pattern`, `--rope-base`, `--value-embedding`."""
+```
+
+`nanochat::cli::IsModelFlag` and `nanochat::cli::ApplyModelFlag` (`src/cli.h`)
+are the same list on the C++ side, and every binary that prints the model flags
+prints `--value-embedding` too, so a stage command line reproduces a base run
+with the value embeddings off as well as on (B2). `--seq` is among the ten flags
+because a packed shard owns the sequence length: `sft.run` raises `ValueError`
+when `config.seq_len` and `seq_len` disagree rather than letting the driver
+build a model the rows do not fit. `None` answers an empty list, so a caller
+that owns no shape sends no flag and the driver's own defaults apply.
+
+```python
+nc.sft.run(shard, checkpoint, *, config=None, warm_start=None, ...) -> int
+nc.rl.run(task, prompts, ..., *, warm_start=None, config=None, ...) -> RlReport
+```
+
+`warm_start` is the load path and `checkpoint` is the save path, in both
+facades. The SFT driver names them `--warm-start` and `--checkpoint`, and it
+rejects a run that names a warm start and a `resume` at once. The RL worker
+loads `warm_start` through its `--checkpoint` flag and writes `checkpoint` on
+the `save` message. The RL facade used to derive its load from `checkpoint` when
+that file existed, so a warm start overwrote its parent; that derivation is
+removed, because a save path never becomes a load path. This is the breaking
+change a caller of `nc.rl.run` must act on:
+
+| Before | After |
+|---|---|
+| `nc.rl.run(..., checkpoint="sft.ckpt")` loaded `sft.ckpt` and then saved over it | it loads nothing and saves to `sft.ckpt` |
+| a warm start was implicit, from the save path | `nc.rl.run(..., warm_start="sft.ckpt", checkpoint="rl.ckpt")` names both paths |
+
+`checkpoint` remains optional for a run that only reports, and `config` remains
+optional for a caller that owns no shape. A stage that warm starts and saves
+must pass both arguments, which is what `nanochat_cpp.pipeline` does at every
+stage ([rl-notebook.md](rl-notebook.md) section 9).
+
+Both facades resolve their child with `_build.stage_binary`, in the order of
+section 3.2, so a tree checkout, a runfiles tree, and a future wheel are one
+rule. `binary=` and `worker=` override the resolver, and `toolchain=` injects the
+orchestration object, so a test pins the argv with a fake.
 
 ## 4. Planning layer
 
@@ -559,6 +646,10 @@ Steps 1 to 4 add the replacement. Steps 6 and 7 remove the old surface.
 | `python/tests/plan_test.py` | `compute_plan` matches the reference fixture. |
 | `python/tests/chat_test.py` | `ChatEvaluator` matches the committed chat fixture. |
 | `python/tests/sft_data_test.py` | The SFT packer and the task mixture, with a fake tokenizer. |
+| `python/tests/sft_test.py` | `sft.run` pins its argv, including `api.model_flags(config)`, with a fake toolchain. |
+| `python/tests/rl_test.py` | The RL worker argv and the message protocol, including `warm_start` as the load path. |
+| `python/tests/build_test.py` | `_build.stage_binary` over a fake tree, and the one `build_stages` command line. |
+| `python/tests/pipeline_test.py` | The base, SFT, and RL chain over the `demo` profile: assertions A1 to A9 of `docs/pipeline-plan.md` section 7. |
 | `python/tests/toolchain_test.py` | The argv for every command, against a fake entry script. |
 | `python/tests/api_test.py` | Unchanged. |
 | `python/tests/core_test.py` | Unchanged. |

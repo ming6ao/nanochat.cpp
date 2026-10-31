@@ -35,15 +35,27 @@ happen through the integrator.
 | **Kernel agents** (one per family) | `backends/cuda/kernels/<family>.cu` + `<family>_test.cc` + `<family>_benchmark.cc` in the same directory | frozen `kernels.h` |
 | **Kernel agents** (shared) | `backends/cuda/kernels/testing/**` (host test scaffolding), `dev/kernels/**` (unpromoted prototypes) | — |
 | **Collective** | `backends/cuda/collective/**`, `dev/collective/**` | frozen `kernels.h`, `src/rendezvous.h` |
-| **Workflow** | `src/ops.cc`, `src/model.cc`, `src/generate.cc` | `kernels.h`, CPU backend |
+| **Workflow** | `src/ops.cc`, `src/model.cc`, `src/generate.cc` (the rollout seed mix, B4 of `docs/pipeline-plan.md`) | `kernels.h`, CPU backend |
 | **Optimizer** | `src/optim.cc` | `kernels.h` |
-| **Harness** | `src/train.cc`, `src/data.cc`, `src/eval.cc`, `src/*_main.cc`, `src/device_profile.cc`, `include/nanochat/{data,scheduler,logger,mfu}.h` | Model API |
-| **Python surface** | `python/**` except `cli.py` and `_entry.py`, `bindings/**` | C ABI `capi.h`, Model API |
+| **Harness** | `src/cli.h`, `src/train.cc`, `src/data.cc`, `src/eval.cc`, `src/*_main.cc` (`src/train_main.cc` among them), `src/device_profile.cc`, `include/nanochat/{data,scheduler,logger,mfu}.h` | Model API |
+| **Python surface** | `python/**` except `cli.py` and `_entry.py` (`pipeline.py` and `tests/pipeline_test.py` are here), `bindings/**`, `tools/modal/app.py`, `tools/modal/modal_app_test.py` | C ABI `capi.h`, Model API |
 | **Data pipeline** | `src/tokenizer/**`, `src/parquet/**`, `include/nanochat/{tokenizer,bpe_trainer}.h` | frozen `data.h` |
 | **Notebooks** | `notebooks/**`, `tools/kaggle/**` | `docs/host-portability.md` |
 | **Examples** | `examples/**`, one package per directory: `examples/hello_world/**` (inference) and `examples/checkpoint_roundtrip/**` (the container) | public `include/nanochat/**` and `//src:model`; no vendor header, no `backends/` include (`docs/examples.md`) |
 | **Simulator** | `tools/cuda_sim/**` (the API interposer, the emulation engine, the collective mock, `cuda_sim.map`, `check_symbols.py`) | `docs/simulator.md`, frozen `tensor.h` |
 | **Build** | `MODULE.bazel`, `.bazelrc`, `BUILD.bazel` (setup only) | Architect |
+
+The one-job chain of [docs/pipeline-plan.md](docs/pipeline-plan.md) adds no
+workstream, because decision D9 gives each of its files an owner that already
+exists. `python/nanochat_cpp/pipeline.py` and `python/tests/pipeline_test.py`
+are the Python surface's, as are `tools/modal/app.py` and
+`tools/modal/modal_app_test.py`. `src/cli.h` is the Harness's, beside
+`src/train_main.cc`, so one workstream owns the flag and the binary that reads
+it. `src/generate.cc` is the Workflow's. A per-directory `BUILD.bazel` still
+belongs to the directory's owner (`AGENTS.md` §6), so `python/BUILD.bazel` is
+the Python surface's and `src/BUILD.bazel` is the owning workstream's; the
+two stage binaries are declared there and the chain's two tests in
+`python/BUILD.bazel`, so the root `BUILD.bazel` gains nothing.
 
 **Frozen interfaces** (contract-owned: the architect; coordinate before
 editing):
@@ -244,6 +256,13 @@ The integrator runs, per merge:
   needs `tools/nanochat simulate --suite api`. `//tests:numerics_trace_test`
   replays a 10-layer trace, which is too slow for the inner loop; run it
   through the simulator suite below.
+- `//python:pipeline_test` rides that loop too. It is the gate of the whole
+  post-training chain ([docs/pipeline-plan.md](docs/pipeline-plan.md) section
+  7): one job file, base then SFT then RL at the `demo` profile, over the
+  committed fixtures and the real stage executables, about 5 s. Its CUDA twin
+  is `//python:pipeline_gpu_test`, the same source with the `gpu` and `manual`
+  tags, so the `-gpu` filter keeps it out of the default loop and it runs only
+  through `tools/nanochat test --gpu //python:pipeline_gpu_test`.
 - `tools/nanochat simulate --device h100` when the change touches a kernel, the
   backend seam, or the device profile (`docs/simulator.md`). It is still CPU
   only. Its `correctness` suite carries the CPU and simulator legs of the staged

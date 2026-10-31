@@ -13,7 +13,8 @@ the AdamW and Muon optimizers against the PyTorch reference. The tree also
 carries data-parallel training on a host reference. It carries a native byte
 pair encoding tokenizer, a parquet reader, a CPU-only CUDA simulator, and a
 Python surface. Supervised fine-tuning and reinforcement learning are partly
-implemented.
+implemented. At the `demo` scale one job file drives both post-training stages
+end to end ([the one-job chain](#the-one-job-chain)).
 [docs/parity.md](docs/parity.md) lists the remaining known differences.
 
 ## What this is
@@ -101,6 +102,35 @@ scoring each have a binary: `//src:train_main`, `//src:eval_main`,
 - [docs/testing.md](docs/testing.md) — the test tiers and Definition of Done.
 - [docs/sandbox.md](docs/sandbox.md) — the resource budgets every job runs
   under.
+
+## The one-job chain
+
+One job file drives post-training end to end: base training, then supervised
+fine-tuning, then reinforcement learning, each stage warm starting from the
+checkpoint the stage before it wrote. The chain is
+[`python/nanochat_cpp/pipeline.py`](python/nanochat_cpp/pipeline.py), the
+committed example job is
+[`notebooks/pipeline_job.json`](notebooks/pipeline_job.json), and the stages are
+the two binaries `//src:sft_main` and `//src:rl_worker`. A run ends in
+`<out_root>/<run_id>/deliver/`, where `out_root` is the job's own value or
+`$NANOCHAT_RUNS_DIR`: `chatrl.ckpt` beside `pipeline_report.json`, the review
+artifact that carries the stage order, the step counts, the loss traces, the
+metadata blocks, the digests, and the host block. The same job runs on three
+hosts, this workstation's CPU under the `train` profile, a Colab T4 that builds
+from source, and a Modal T4 whose image builds the chain;
+[docs/host-portability.md](docs/host-portability.md) section 9 has one row per
+host. `//python:pipeline_test` is the gate of the chain in the default CPU test
+loop and `//python:pipeline_gpu_test` is its CUDA twin
+([docs/pipeline-plan.md](docs/pipeline-plan.md) section 7). Every run is wrapped
+by the entry point, because both stage executables refuse to start outside it:
+
+```bash
+# Build the two stage binaries, then run the demo job: base@100, sft@100,
+# rl@105, and the two files of deliver/.
+tools/nanochat build //src:sft_main //src:rl_worker
+PYTHONPATH=python tools/nanochat train -- \
+    python -m nanochat_cpp.pipeline notebooks/pipeline_job.json
+```
 
 ## Examples
 

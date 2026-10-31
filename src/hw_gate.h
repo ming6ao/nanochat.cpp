@@ -23,7 +23,9 @@ namespace nanochat {
 struct HardwareGateResult {
   bool passed = true;
   int cases = 0;
+  int skipped = 0;  // cases the device cannot run, such as fp8 below sm_89
   std::string first_failure;
+  std::string skipped_reason;
 };
 
 // Runs every case and returns the result. A caller that wants a hard failure

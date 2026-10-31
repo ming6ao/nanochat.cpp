@@ -1070,6 +1070,13 @@ float TrainLoop::Run() {
       }
       logger_->Info("hardware correctness gate passed (" +
                     std::to_string(gate.cases) + " cases)");
+      if (gate.skipped > 0) {
+        // A skip is not a pass: name what the device could not be asked, so a
+        // green run on a pre-Ada card does not read as full coverage.
+        logger_->Info("hardware correctness gate skipped " +
+                      std::to_string(gate.skipped) +
+                      " cases: " + gate.skipped_reason);
+      }
     }
   }
 

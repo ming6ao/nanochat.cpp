@@ -24,6 +24,19 @@ py_library(
     deps = ["//python:nanochat_cpp"],
 )
 
+# The Colab half of the session setup: the source-tree path of D8 and the
+# second call that builds both stage executables. It forwards to
+# `kaggle_setup`, so the two hosts share one setup implementation.
+py_library(
+    name = "colab_setup",
+    srcs = ["colab_setup.py"],
+    imports = ["."],
+    deps = [
+        ":kaggle_setup",
+        "//python:nanochat_cpp",
+    ],
+)
+
 py_library(
     name = "target",
     srcs = ["target.py"],

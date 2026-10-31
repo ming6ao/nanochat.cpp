@@ -3,13 +3,16 @@
 Hermetic: a fake tokenizer, a fake task, and an executable Python stand-in for
 the worker replace the C++ library, so the test needs no shared library, no
 Bazel, and no GPU. It checks the renderer, the advantage, the worker argv, the
-direct start, and the ``tools/nanochat train`` start. See
-``docs/rl-notebook.md`` sections 3 and 4 and ``docs/post-training.md``
-section 5.
+direct start, and the ``tools/nanochat train`` start. The two load-path cases
+pin the B3 split of ``docs/pipeline-plan.md``: ``warm_start`` is the worker's
+``--checkpoint`` load flag and ``checkpoint`` is the save target, so a save path
+never becomes a load path. See ``docs/rl-notebook.md`` sections 3 and 4 and
+``docs/post-training.md`` section 5.
 """
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 import tempfile
@@ -20,13 +23,19 @@ from nanochat_cpp import _entry, rl, toolchain
 from nanochat_cpp.api import Config
 
 # A stand-in for the persistent worker. It speaks the protocol of
-# `src/rl_worker.h` and records every request it receives.
+# `src/rl_worker.h`, records every request it receives, and records its own
+# argument list so a case can pin the load flag the bridge passes it.
 FAKE_WORKER = '''#!{python}
+import json
 import os
 import sys
 
 log_path = os.environ.get("FAKE_WORKER_LOG")
 log = open(log_path, "a", encoding="utf-8") if log_path else None
+argv_path = os.environ.get("FAKE_WORKER_ARGV")
+if argv_path:
+    with open(argv_path, "w", encoding="utf-8") as handle:
+        json.dump(sys.argv[1:], handle)
 
 
 def emit(line):
@@ -177,6 +186,24 @@ class RlTest(unittest.TestCase):
         return toolchain.Toolchain(entry=self.entry, repo_root=self.tmp.name,
                                    env=self.env if env is None else env)
 
+    def _worker_argv(self, env: dict) -> list:
+        """The argument list the fake worker was started with."""
+        path = Path(env["FAKE_WORKER_ARGV"])
+        self.assertTrue(path.is_file(), "the fake worker never started")
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    def _requests(self, kind: str) -> list:
+        """The recorded protocol requests of one kind, in order."""
+        lines = self.log.read_text(encoding="utf-8").strip().splitlines()
+        found = []
+        for line in lines:
+            parts = line.split(" ")
+            if parts[0] != kind:
+                continue
+            found.append(
+                dict(token.partition("=")[::2] for token in parts[1:]))
+        return found
+
     def test_advantages(self) -> None:
         self.assertEqual(rl.advantages([1.0, 0.0]), [0.5, -0.5])
         self.assertEqual(rl.advantages([2.0]), [0.0])
@@ -228,6 +255,55 @@ class RlTest(unittest.TestCase):
         self.assertEqual(report.loss, 1.0)
         self.assertEqual(report.grad_norm, 3.0)
         self.assertTrue(checkpoint.is_file())
+
+    def test_warm_start_reaches_the_worker_as_the_load_flag(self) -> None:
+        """``warm_start`` loads and ``checkpoint`` saves, two different paths.
+
+        The worker's load flag is ``--checkpoint``, so the warm start travels
+        there while the save target stays the bridge's own ``checkpoint``. The
+        save message names the save path, so a stage that warm starts from its
+        parent keeps the parent intact (docs/pipeline-plan.md B3).
+        """
+        warm = Path(self.tmp.name) / "sft.nchkpt01"
+        warm.write_text("sft", encoding="utf-8")
+        checkpoint = Path(self.tmp.name) / "rl.nchkpt01"
+        env = dict(self.env)
+        env["FAKE_WORKER_ARGV"] = str(Path(self.tmp.name) / "worker.argv")
+        report = rl.run(
+            _Reply(), [CONVERSATION], num_samples=2, steps=1,
+            checkpoint=str(checkpoint), warm_start=str(warm),
+            config=_config(), tokenizer=_FakeTokenizer(), worker=self.worker,
+            env=env, seed=0)
+        argv = self._worker_argv(env)
+        self.assertEqual(argv[argv.index("--checkpoint") + 1], str(warm))
+        self.assertEqual(argv.count("--checkpoint"), 1)
+        self.assertNotIn(str(checkpoint), argv)
+        saves = self._requests("save")
+        self.assertTrue(saves, "the worker was never asked to save")
+        self.assertEqual(saves[-1]["path"], str(checkpoint))
+        self.assertEqual(report.checkpoint, str(checkpoint))
+        self.assertTrue(checkpoint.is_file())
+
+    def test_checkpoint_alone_sends_no_load_flag(self) -> None:
+        """A save path never becomes a load path (B3, the removed derivation).
+
+        The save target exists before the run, which is exactly the case the
+        legacy derivation keyed on: it turned an existing ``checkpoint`` into
+        the load path. The worker must get no load flag at all.
+        """
+        checkpoint = Path(self.tmp.name) / "rl.nchkpt01"
+        checkpoint.write_text("stale", encoding="utf-8")
+        env = dict(self.env)
+        env["FAKE_WORKER_ARGV"] = str(Path(self.tmp.name) / "worker.argv")
+        rl.run(_Reply(), [CONVERSATION], num_samples=2, steps=1,
+               checkpoint=str(checkpoint), config=_config(),
+               tokenizer=_FakeTokenizer(), worker=self.worker, env=env,
+               seed=0)
+        argv = self._worker_argv(env)
+        self.assertNotIn("--checkpoint", argv)
+        self.assertEqual(
+            [request["path"] for request in self._requests("save")],
+            [str(checkpoint)])
 
     def test_run_through_tools_nanochat(self) -> None:
         # Not the `none` backend: the bridge runs `tools/nanochat train --`.

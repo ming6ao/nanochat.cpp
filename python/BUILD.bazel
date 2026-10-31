@@ -172,6 +172,37 @@ py_test(
     size = "small",
 )
 
+# T0: the SFT bridge builds the driver argv the driver reads (B1 and B3 of
+# `docs/pipeline-plan.md` section 3). Hermetic: a fake toolchain records the
+# argument list instead of running the driver, so it needs no library, no
+# Bazel, and no GPU.
+py_test(
+    name = "sft_test",
+    srcs = ["tests/sft_test.py"],
+    deps = [":nanochat_cpp"],
+    size = "small",
+)
+
+# T0: the one-job chain -- base, then SFT, then RL -- at the `demo` profile.
+# This is the integration gate of `docs/pipeline-plan.md` section 7: the chain
+# runs the real stage executables over the committed fixture corpus, so the
+# runfiles carry the shared library, `//src:sft_main`, `//src:rl_worker`, the
+# parquet document set, and the NCTOKEN1 tokenizer artifact. About 5 s at the
+# demo shape, so it stays in the default T0 loop.
+py_test(
+    name = "pipeline_test",
+    srcs = ["tests/pipeline_test.py"],
+    data = [
+        "//bindings:nanochat_shared",
+        "//src:sft_main",
+        "//src:rl_worker",
+        "//src/parquet:testdata/text.parquet",
+        "//tests:data/loader_tokenizer.nctoken",
+    ],
+    deps = [":nanochat_cpp"],
+    size = "medium",
+)
+
 # T0: the orchestration layer argv. Hermetic: no library, no Bazel, no GPU.
 py_test(
     name = "toolchain_test",
@@ -316,6 +347,28 @@ py_test(
     tags = ["gpu", "manual"],
 )
 
+# T1: the whole chain on the CUDA backend. The same source and data as
+# `pipeline_test`, one source for the two targets, with `NANOCHAT_CPP_BACKEND`
+# set so the ctypes core loads the CUDA library. `tools/nanochat test --gpu`
+# builds it under `--config=cuda` and selects it by the `gpu` tag; the `-gpu`
+# filter of the CPU loop keeps the same source out of the default run
+# (`docs/pipeline-plan.md` section 7).
+py_test(
+    name = "pipeline_gpu_test",
+    srcs = ["tests/pipeline_test.py"],
+    data = [
+        "//bindings:nanochat_shared",
+        "//src:sft_main",
+        "//src:rl_worker",
+        "//src/parquet:testdata/text.parquet",
+        "//tests:data/loader_tokenizer.nctoken",
+    ],
+    deps = [":nanochat_cpp"],
+    size = "medium",
+    env = {"NANOCHAT_CPP_BACKEND": "cuda"},
+    tags = ["gpu", "manual"],
+)
+
 # T0: the device mesh and the placement language for the single-client
 # multi-device runtime (docs/client-runtime-design.md sections 5.1 to 5.4). It
 # loads the shared library for `devices()` and checks the rank-1 rule, the axis
@@ -448,6 +501,8 @@ test_suite(
         ":chat_test",
         ":sft_data_test",
         ":sft_data_parity_test",
+        ":sft_test",
+        ":pipeline_test",
         ":toolchain_test",
         ":prune_test",
         ":contract_test",

@@ -1,12 +1,20 @@
 """Compile the nanochat shared library on demand.
 
-The function ``ensure_library`` follows the order in docs/python.md
-section 3.2:
+The function ``ensure_library`` is the last step of the library search: the
+runfiles tree, the development tree, a library beside the package, and an
+installed binary wheel are tried first by ``nanochat_cpp._lib``, and what is
+left here is
 
-1. use the path in ``NANOCHAT_CPP_LIB`` when the file exists;
-2. use a cached library when the build key matches;
-3. build the library through ``tools/nanochat``;
-4. stop with a clear message when no compiler and no prebuilt library exist.
+1. the path in ``NANOCHAT_CPP_LIB`` when the file exists;
+2. a cached library when the build key matches;
+3. a build of the library through ``tools/nanochat``;
+4. a stop with a clear message when no compiler and no prebuilt library exist.
+
+The stage executables use the same shape: :func:`stage_binary` resolves the
+environment override, the Bazel runfiles tree, ``bazel-bin/src/<name>``, and
+the ``nanochat-<name>`` entry point of a future wheel before it stops, so the
+library and the two children of the chain are found by one rule
+(docs/pipeline-plan.md B6).
 
 The build key is a hash of the source contents, the compiler version, the
 optional CUDA architecture, the precision, and the backend (section 3.3). Two
@@ -24,15 +32,18 @@ import os
 import shutil
 import subprocess
 from pathlib import Path
+from typing import Sequence
 
 __all__ = [
     "BuildError",
     "BuildOptions",
+    "STAGE_NAMES",
     "SUPPORTED_PRECISIONS",
     "architecture",
     "backend",
     "build",
     "build_key",
+    "build_stages",
     "cache_dir",
     "cached_library",
     "compiler_version",
@@ -42,6 +53,7 @@ __all__ = [
     "precision",
     "repo_root",
     "source_hash",
+    "stage_binary",
 ]
 
 #: The cache directory name under the user cache home.
@@ -52,6 +64,11 @@ LIBRARY_NAME = "libnanochat_shared.so"
 
 #: The Bazel target that builds the shared library.
 SHARED_TARGET = "//bindings:nanochat_shared"
+
+#: The two stage executables of the chain, in pipeline order
+#: (docs/pipeline-plan.md B6). A name is both the Bazel label under ``//src``
+#: and the program name of a future wheel entry point.
+STAGE_NAMES = ("sft_main", "rl_worker")
 
 #: Source directories whose contents change the compiled library.
 _SOURCE_DIRS = ("bindings", "src", "include", "backends")
@@ -280,13 +297,18 @@ def _no_library_message(cache: Path) -> str:
     )
 
 
-def _build_command(entry: Path, options: BuildOptions) -> list[str]:
+def _build_command(entry: Path, options: BuildOptions,
+                   targets: Sequence[str] = (SHARED_TARGET,)) -> list[str]:
     """The ``tools/nanochat build`` command for one set of options.
+
+    ``targets`` defaults to the shared library. :func:`build_stages` passes the
+    library and the two stage executables, so this function stays the one home
+    of the command line and of the configuration flags it carries.
 
     A command-line flag wins over the ``.bazelrc`` value, so an explicit CUDA
     architecture selects the compiled target and not only the cache key.
     """
-    command = [str(entry), "build", SHARED_TARGET, _config_flag(options)]
+    command = [str(entry), "build", *targets, _config_flag(options)]
     # A command-line flag wins over a value in `.bazelrc`, so the precision is
     # explicit even though `--config=cpu` and `--config=cuda` also set one
     # (docs/precision.md).
@@ -341,6 +363,135 @@ def build(key: str | None = None, root: Path | None = None,
     destination = cached_library(key, directory)
     shutil.copy2(built, destination)
     return destination
+
+
+def stage_override(name: str) -> str:
+    """The environment variable that overrides the stage executable ``name``.
+
+    ``sft_main`` is ``NANOCHAT_SFT_MAIN`` and ``rl_worker`` is
+    ``NANOCHAT_RL_WORKER``: the program name upper-cased behind the prefix, so
+    a new stage needs no second table (docs/pipeline-plan.md B6).
+    """
+    return "NANOCHAT_" + str(name).upper()
+
+
+def stage_target(name: str) -> str:
+    """The Bazel label of the stage executable ``name``: ``//src:<name>``."""
+    return f"//src:{name}"
+
+
+def _stages_command(entry: Path, options: BuildOptions) -> list[str]:
+    """The one ``tools/nanochat build`` command of :func:`build_stages`."""
+    targets = (SHARED_TARGET, *(stage_target(name) for name in STAGE_NAMES))
+    return _build_command(entry, options, targets)
+
+
+def stage_binary(name: str, options: BuildOptions | None = None,
+                 root: Path | None = None) -> Path:
+    """Resolve one stage executable, or raise :class:`BuildError`.
+
+    The order is the one B6 fixes, which is the order of ``nanochat_cpp._lib``
+    rather than the shorter list of ``docs/python.md`` section 3.2:
+
+    1. the ``NANOCHAT_SFT_MAIN`` or ``NANOCHAT_RL_WORKER`` override, which wins
+       even when the file is absent, because the caller named it;
+    2. the Bazel runfiles tree, so a ``py_test`` or a ``bazel run`` finds the
+       executable its data dependencies carry;
+    3. ``bazel-bin/src/<name>``, the development tree;
+    4. ``shutil.which("nanochat-" + name)``, the entry point of a future wheel;
+    5. an error that names the build command, so a tree with no build fails
+       with one line a reader can paste.
+
+    A wheel install has no ``bazel-bin``, so a facade that takes a default
+    binary fails here with this message and not with a file-not-found from the
+    launcher (documents decision D8).
+
+    ``root`` overrides the tree the development build is looked up in, and
+    ``options`` only shapes the message, so a test can resolve a fake tree
+    without building one.
+    """
+    override = os.environ.get(stage_override(name), "").strip()
+    if override:
+        return Path(override).expanduser()
+
+    # The runfiles search lives in ``_lib``, which imports this module, so the
+    # import is local: one runfiles implementation for the library and for the
+    # stage executables.
+    from . import _lib
+
+    runfiles = _lib.find_in_runfiles(f"src/{name}")
+    if runfiles is not None:
+        return runfiles
+
+    tree = Path(root) if root is not None else repo_root()
+    development = tree / "bazel-bin" / "src" / str(name)
+    if development.is_file():
+        return development
+
+    installed = shutil.which("nanochat-" + str(name))
+    if installed:
+        return Path(installed)
+
+    if options is None:
+        options = BuildOptions.from_env()
+    command = _command_text(_stages_command(
+        tree / "tools" / "nanochat", options))
+    raise BuildError(
+        f"cannot find the {name} executable: {stage_override(name)} is unset, "
+        f"there is no runfiles entry, {development} does not exist, and "
+        f"nanochat-{name} is not on PATH; build it with: {command}")
+
+
+def _command_text(command: Sequence[str]) -> str:
+    """One shell-readable line for a command list."""
+    return " ".join(str(part) for part in command)
+
+
+def build_stages(options: BuildOptions | None = None,
+                 root: Path | None = None) -> tuple[Path, Path, Path]:
+    """Build the shared library and both stage executables in one call.
+
+    The chain needs the library and the two children, and one
+    ``tools/nanochat build`` command names all three, so a host runs one build
+    instead of three (docs/pipeline-plan.md B6 and D2). ``_build_command``
+    stays the one home of the command line: this function adds the two stage
+    targets and nothing else.
+
+    Returns ``(library, sft_main, rl_worker)``, resolved the way the rest of
+    the package resolves them. Raises :class:`BuildError` when the entry point
+    is missing, the build fails, or an output is absent afterwards.
+    """
+    if options is None:
+        options = BuildOptions.from_env()
+    root = Path(root) if root is not None else repo_root()
+    entry = root / "tools" / "nanochat"
+    if not entry.is_file():
+        raise BuildError(
+            f"cannot build the stage executables: {entry} is missing; a tree "
+            f"checkout is the only build route until a binary wheel exists "
+            f"(documents decision D8)")
+    command = _stages_command(entry, options)
+    try:
+        result = subprocess.run(command, cwd=str(root), capture_output=True,
+                                text=True)
+    except OSError as error:
+        raise BuildError(
+            f"cannot run {_command_text(command)}: {error}") from error
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip()
+        raise BuildError(
+            f"the stage build failed ({result.returncode}): "
+            f"{_command_text(command)}\n{detail}")
+    library = root / "bazel-bin" / "bindings" / LIBRARY_NAME
+    stages = tuple(root / "bazel-bin" / "src" / name for name in STAGE_NAMES)
+    missing = [str(path) for path in (library, *stages) if not path.is_file()]
+    if missing:
+        verb = "are" if len(missing) > 1 else "is"
+        raise BuildError(
+            f"the stage build reported success but {', '.join(missing)} "
+            f"{verb} missing; the command was {_command_text(command)}")
+    return (library,
+            *(stage_binary(name, options, root) for name in STAGE_NAMES))
 
 
 def ensure_library(root: Path | None = None,

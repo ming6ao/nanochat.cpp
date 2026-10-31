@@ -47,7 +47,8 @@ void Usage() {
                "  --seed N               weight init and sampling seed\n"
                "  --out PATH             write tokens and mask per sample\n"
                "  [model flags: --layers --heads --kv-heads --hidden --seq\n"
-               "   --vocab --padded-vocab --window-pattern --rope-base]\n");
+               "   --vocab --padded-vocab --window-pattern --rope-base\n"
+               "   --value-embedding <0|1>]\n");
 }
 
 std::vector<int> ParseTokenIds(const std::string& text) {

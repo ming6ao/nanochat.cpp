@@ -1,4 +1,4 @@
-"""The Modal app that runs one nanochat.cpp training job.
+"""The Modal app that runs one nanochat.cpp job, and the chain of one job file.
 
 The image holds the package and the compiled shared library; the weights
 Volume holds the weights. That split is section 6.4 of
@@ -11,26 +11,40 @@ download, not an image build.
   ``.revision``. ``fetch_stage`` downloads a revision it does not hold yet and
   returns the folder, so a warm start is a download and never a rebuild.
 
+Two functions run here. ``train`` runs one stage of a job; ``pipeline`` runs
+the whole base, SFT, and RL chain of one job file through
+``python -m nanochat_cpp.pipeline``, which is the container entry of
+design decision D10 (``docs/pipeline-plan.md`` section 6.3). One image holds
+both, and one build produces the library and the two stage executables the
+chain launches, so the CPU and the CUDA leg of that chapter share the build
+line and differ only in its configuration (sections 6.4 and B6).
+
 The image installs the distribution of ``python/pyproject.toml`` with the
 ``hub`` extra at build time, so site-packages answers ``import nanochat_cpp``
 and ``import nanochat_cpp_bridge``. The repository tree stays baked in as the
 fallback, because this campaign publishes no binary wheel: `tools/`,
 `notebooks/`, and the Bazel build all need the source tree. ``package_source``
-reports which of the two answered, and ``train`` logs it at run start; the
-worker then runs from that one path, and ``NANOCHAT_CPP_SOURCE`` forces the
-tree when a run needs it. One commented line below replaces the
-tree install with the ``nanochat_cpp_cuda_sm75`` wheel once D6 publishes it.
+reports which of the two answered, and ``train`` and ``pipeline`` log it at
+run start; the worker then runs from that one path, and
+``NANOCHAT_CPP_SOURCE`` forces the tree when a run needs it. One commented
+line below replaces the tree install with the ``nanochat_cpp_cuda_sm75`` wheel
+once D6 publishes it.
 
 Deploy and check it once, from a workstation or a notebook:
 
     pip install modal && modal setup
     modal deploy tools/modal/app.py
     modal run tools/modal/app.py::doctor
+    modal run tools/modal/app.py::pipeline_demo
+
+The last line runs one demo chain in the image and prints the report the chain
+delivers, with ``host.arch`` of ``sm_75`` and ``deliver/`` on the
+``nanochat-runs`` Volume.
 
 The client in ``notebooks/target.py`` uploads the job inputs and spawns
-``train``. The run directory arrives on the ``nanochat-runs`` Volume at
-``/runs``, so the notebook polls it. A publish also runs here, beside the
-checkpoint, so the checkpoint never crosses the notebook. See
+``train`` or ``pipeline``. The run directory arrives on the ``nanochat-runs``
+Volume at ``/runs``, so the notebook polls it. A publish also runs here,
+beside the checkpoint, so the checkpoint never crosses the notebook. See
 ``docs/host-portability.md``.
 
 Create the Secret once, so a publish can reach the Hub:
@@ -39,7 +53,8 @@ Create the Secret once, so a publish can reach the Hub:
 
 ``GPU_TYPE``, ``GPU_COUNT``, and ``CUDA_ARCH`` form one triple. The type and
 the architecture are a pair, because the image compiles for exactly that
-architecture. ``train`` checks all three against the container and the job.
+architecture. Both functions check all three against the container and the
+job.
 """
 
 from __future__ import annotations
@@ -94,6 +109,31 @@ REPO_ROOT = "/repo"
 #: The shared library that the image build produces.
 LIBRARY = f"{REPO_ROOT}/bazel-bin/bindings/libnanochat_shared.so"
 
+#: The two stage executables the chain launches, beside the library: the Bazel
+#: labels the one image build names (``docs/pipeline-plan.md`` B6), so a
+#: container needs no second build and the wheel line below stays a later
+#: one-line change.
+STAGE_NAMES = ("sft_main", "rl_worker")
+STAGE_TARGETS = ("//src:sft_main", "//src:rl_worker")
+
+#: The directory of the image build that holds them, and the variables that
+#: name them. ``nanochat_cpp._build.stage_binary`` prefers the override, and
+#: the image sets it because the installed distribution answers ``import
+#: nanochat_cpp`` from site-packages, where ``repo_root()`` is not the image
+#: tree (section 6.4). The names follow ``_build.stage_override``: the program
+#: name upper-cased behind the prefix.
+STAGE_BIN = f"{REPO_ROOT}/bazel-bin/src"
+STAGE_ENV = {f"NANOCHAT_{name.upper()}": f"{STAGE_BIN}/{name}"
+             for name in STAGE_NAMES}
+
+#: The directory the chain delivers into, the report it writes, and the corpus
+#: folder whose tokenizer a stage upload reads. The names mirror
+#: ``nanochat_cpp.pipeline`` (``deliver()`` and ``CORPUS_DIRNAME``).
+DELIVER_DIRNAME = "deliver"
+REPORT_NAME = "pipeline_report.json"
+CORPUS_DIRNAME = "corpus"
+TOKENIZER_SUFFIX = ".nctoken"
+
 #: The commit-seconds of one live volume commit. A poll of the client sees a
 #: metric record only after the container commits the Volume.
 COMMIT_SECONDS = 10
@@ -126,7 +166,15 @@ image = (
         "chmod 0755 /usr/local/bin/bazelisk",
     )
     .add_local_dir(str(REPO), remote_path=REPO_ROOT, copy=True,
-                   ignore=[".git", "bazel-*", "**/__pycache__"])
+                   ignore=[".git", "bazel-*", "**/__pycache__",
+                           # The host file of `docs/host-portability.md`
+                           # section 8.3 pins the compiler and the budget of
+                           # the workstation, such as /usr/bin/gcc-12, which
+                           # an Ubuntu 22.04 image does not have. A deploy from
+                           # a host that ran `tools/kaggle/bootstrap.sh` would
+                           # otherwise build an image that cannot compile
+                           # (`docs/pipeline-plan.md` section 8 row 10).
+                           ".bazelrc.local"])
     # Install the package at image build (section 6.4). The tree install builds
     # the distribution of python/pyproject.toml in place, so both import
     # packages and the `hub` extra — huggingface_hub and safetensors — reach
@@ -140,16 +188,25 @@ image = (
         "CUDA_HOME": "/usr/local/cuda",
         "NANOCHAT_CPP_BACKEND": "cuda",
         "NANOCHAT_CPP_LIB": LIBRARY,
+        # The chain launches both stage executables, so the image names them
+        # where they were built (B6). The installed distribution resolves
+        # `bazel-bin/src/<name>` from its own site-packages location, which is
+        # not the image tree, so the override is the one path that holds.
+        **STAGE_ENV,
         "NANOCHAT_CPP_PRECISION": "fp32",
         "NANOCHAT_CUDA_ARCH": CUDA_ARCH,
         "NANOCHAT_SANDBOX_BACKEND": "none",
         "NANOCHAT_TARGET": "local",
         "PYTHONPATH": f"{REPO_ROOT}/python:{REPO_ROOT}/notebooks",
     })
+    # One build names the library and the two stage executables, so the image
+    # satisfies D2 and the chain finds both children (B6). The builder
+    # `_build.build_stages` is the one home of that command line, so the Colab
+    # setup and this image ask for the same three targets.
     .run_commands(
         f"cd {REPO_ROOT} && python3 -c "
         "\"from nanochat_cpp import _build; "
-        "_build.build(options=_build.BuildOptions.resolve("
+        "_build.build_stages(options=_build.BuildOptions.resolve("
         f"backend='cuda', precision='fp32', arch='{CUDA_ARCH}'))\"",
     )
     .workdir(REPO_ROOT)
@@ -241,9 +298,11 @@ def _device_count() -> int:
 def _check_cards(job_json: str) -> None:
     """Stop unless the container matches the function and the job.
 
-    The function declares one type and one count. The job declares one
-    replica per device in ``mesh.count``. A mismatch fails here, before the
-    upload, not inside the driver.
+    The function declares one type and one count. A train job declares one
+    replica per device in ``mesh.count``. A pipeline job declares no mesh,
+    because the chain runs one replica of each stage (``docs/pipeline-plan.md``
+    B11), so the count the function declares is the answer. A mismatch fails
+    here, before the upload, not inside the driver.
     """
     expected = _capability(CUDA_ARCH)
     actual = _device_capability()
@@ -256,7 +315,8 @@ def _check_cards(job_json: str) -> None:
         raise RuntimeError(
             f"the function asks for {GPU_COUNT} card(s), but the container "
             f"has {count}; set GPU_COUNT to the value the job uses")
-    replicas = int(json.loads(job_json)["mesh"]["count"])
+    mesh = json.loads(job_json).get("mesh") or {}
+    replicas = int(mesh.get("count", count))
     if replicas != count:
         raise RuntimeError(
             f"the job asks for {replicas} replicas, but the container has "
@@ -480,3 +540,203 @@ def train(job_json: str, run_id: str, publish_json: str = "",
         else {}
     return json.dumps({"summary": summary, "publish": published,
                        "source": source}, sort_keys=True)
+
+
+def chain_dir(run_root, job) -> Path:
+    """The directory the chain writes: ``<out_root>/<job run_id>``.
+
+    ``nanochat_cpp.pipeline`` nests its own ``run_id`` under ``out_root``, so
+    the app names the outer directory on the Volume and the job names the inner
+    one. The report and the delivered checkpoint sit under it, in ``deliver/``.
+    """
+    return Path(run_root) / str((job or {}).get("run_id", ""))
+
+
+def read_report(folder) -> dict:
+    """The report the chain delivered, or an empty document.
+
+    ``deliver()`` writes ``deliver/pipeline_report.json`` beside the delivered
+    checkpoint (design decision D6), so a chain that ran without delivery has
+    no report and reports an empty one.
+    """
+    path = Path(folder) / DELIVER_DIRNAME / REPORT_NAME
+    if not path.is_file():
+        return {}
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def stage_tokenizer(report, folder) -> str:
+    """The tokenizer path the chain copied, for the stage uploader.
+
+    ``_publish`` reads ``data.tokenizer_path`` from a train job, and a pipeline
+    job holds no such field: the chain builds its corpus and copies the
+    tokenizer beside it. The report names that path in the base stage's
+    ``extra``, and the corpus folder is the fallback.
+    """
+    for stage in report.get("stages") or ():
+        extra = (stage or {}).get("extra") or {}
+        value = str(extra.get("tokenizer") or "")
+        if value and Path(value).is_file():
+            return value
+    corpus = Path(folder) / CORPUS_DIRNAME
+    found = sorted(corpus.glob(f"*{TOKENIZER_SUFFIX}")) \
+        if corpus.is_dir() else []
+    return str(found[0]) if found else ""
+
+
+def publish_job_json(job, tokenizer) -> str:
+    """The job document ``_publish`` reads, built from a pipeline job.
+
+    The uploader reads ``data.tokenizer_path`` and nothing else of the job, so
+    the app fills that one field from the chain's corpus and keeps the rest.
+    """
+    document = dict(job)
+    data = dict(document.get("data") or {})
+    data["tokenizer_path"] = str(tokenizer)
+    document["data"] = data
+    return json.dumps(document, sort_keys=True)
+
+
+@app.function(
+    image=image,
+    gpu=gpu_request(),
+    volumes={REMOTE_ROOT: runs},
+    secrets=_secrets(),
+    timeout=TIMEOUT_SECONDS,
+    max_containers=1,
+)
+def pipeline(job_json: str, run_id: str, stage_json: str = "",
+             publish_json: str = "") -> str:
+    """Run the whole base, SFT, and RL chain and return its report.
+
+    One job file runs three stages (``docs/pipeline-plan.md`` section 1), and
+    the container entry is the one design decision D10 names:
+    ``tools/nanochat client --profile train -- python -m
+    nanochat_cpp.pipeline <job.json>``. The function mirrors ``train``:
+    ``max_containers=1`` keeps one chain at a time, ``_check_cards`` stops a
+    container that does not match the image, the commit keeper makes the run
+    directory visible to a poll, and ``worker.log`` holds the chain's output.
+
+    The app rewrites ``out_root`` to ``/runs/<run_id>``, because the app owns
+    the Volume path and one job runs three stages, so no stage owns the
+    directory. The chain nests the job's own ``run_id`` under it.
+
+    An empty ``publish_json`` stops after the chain, which has already
+    delivered ``deliver/``. A non-empty value reuses :func:`_publish` for the
+    Hub push of the final stage, so the chain gains no second uploader. The
+    metadata is the same document a train publish sends; the tokenizer comes
+    from the corpus the chain built.
+
+    ``stage_json`` is accepted and ignored: the signature carries it so one
+    client call shape serves both functions, and the chain warm starts each
+    stage from the checkpoint of the stage before it, so a Modal stage cache
+    has nothing to point at. A non-empty value is noted on the log.
+
+    The return value is one JSON document with ``report``, ``publish``,
+    ``source``, and ``run_dir``: the section 6.4 answer of which nanochat.cpp
+    the worker ran, and the directory the chain wrote on the Volume.
+    """
+    source = package_source()
+    print(f"modal: nanochat.cpp runs from the {source} path", file=sys.stderr)
+    if stage_json:
+        print("modal: a pipeline call takes no stage_json; the chain warm "
+              "starts each stage from the one before it", file=sys.stderr)
+    job = json.loads(job_json)
+    job["out_root"] = str(Path(REMOTE_ROOT) / str(run_id))
+    job_json = json.dumps(job, sort_keys=True)
+    _check_cards(job_json)
+    run_dir = Path(REMOTE_ROOT) / str(run_id)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    job_path = run_dir / "job.json"
+    job_path.write_text(job_json + "\n", encoding="utf-8")
+
+    stop = threading.Event()
+    keeper = threading.Thread(target=_commit_loop,
+                              args=(runs, stop, COMMIT_SECONDS), daemon=True)
+    keeper.start()
+    log_path = run_dir / "worker.log"
+    try:
+        with log_path.open("w", encoding="utf-8") as log:
+            result = subprocess.run(
+                ["tools/nanochat", "client", "--profile", "train", "--",
+                 sys.executable, "-m", "nanochat_cpp.pipeline",
+                 str(job_path)],
+                env=worker_env(source), stdout=log, stderr=subprocess.STDOUT,
+                check=False)
+    finally:
+        stop.set()
+        runs.commit()
+
+    if result.returncode != 0:
+        tail = "\n".join(
+            log_path.read_text(encoding="utf-8").splitlines()[-20:])
+        raise RuntimeError(f"the chain exited {result.returncode}:\n{tail}")
+    folder = chain_dir(run_dir, job)
+    report = read_report(folder)
+    published = {}
+    if publish_json:
+        published = _publish(
+            publish_job_json(job, stage_tokenizer(report, folder)),
+            folder / "rl", publish_json)
+    return json.dumps({"report": report, "publish": published,
+                       "source": source, "run_dir": str(folder)},
+                      sort_keys=True)
+
+
+#: The run id, and the job, of :func:`pipeline_demo`: the shape of the ``demo``
+#: profile that ``docs/pipeline-plan.md`` section 7 gates. The copy is the
+#: fallback of :func:`demo_job` on a workstation that installed the Modal SDK
+#: and not the package, so the entry point runs from anywhere.
+DEMO_RUN_ID = "pipeline-demo"
+DEMO_JOB = {
+    "run_id": "demo",
+    "profile": "demo",
+    "base_steps": 100,
+    "sft_steps": 100,
+    "rl_steps": 5,
+    "num_prompts": 4,
+    "num_samples": 4,
+    "max_tokens": 32,
+    "seed": 42,
+    "out_root": "",
+    "corpus": "fixture",
+    "deliver": True,
+    "temperature": 1.0,
+    "top_k": 0,
+}
+
+
+def demo_job(run_id: str = "demo") -> dict:
+    """The demo job: ``nanochat_cpp.pipeline.Job``'s defaults when they answer.
+
+    The package owns the job shape (design decision D5), so a host that holds
+    it reads the defaults from there; :data:`DEMO_JOB` is the fallback of a
+    workstation that installed only the Modal SDK. Either way ``out_root``
+    stays empty, because the function rewrites it onto the Volume.
+    """
+    try:
+        from nanochat_cpp.pipeline import Job  # noqa: PLC0415 - optional
+    except Exception:  # noqa: BLE001 - a host without the package falls back
+        return dict(DEMO_JOB, run_id=str(run_id))
+    return dict(Job(run_id=str(run_id)).to_dict())
+
+
+@app.local_entrypoint()
+def pipeline_demo(job: str = "", run_id: str = DEMO_RUN_ID) -> None:
+    """Run one chain in the image and print the report it delivered.
+
+        modal run tools/modal/app.py::pipeline_demo
+        modal run tools/modal/app.py::pipeline_demo --job my-job.json
+
+    ``job`` names a job file on this host; without one, the demo job runs. The
+    chain writes ``<run_id>/<job run_id>/deliver/`` on the ``nanochat-runs``
+    Volume, and the printed document is the report of that folder, so a run is
+    checked without a notebook (``docs/pipeline-plan.md`` section 6.3).
+    """
+    payload = (json.loads(Path(job).read_text(encoding="utf-8")) if job
+               else demo_job())
+    if not payload.get("run_id"):
+        payload["run_id"] = dict(DEMO_JOB)["run_id"]
+    result = json.loads(pipeline.remote(
+        json.dumps(payload, sort_keys=True), str(run_id)))
+    print(json.dumps(result, indent=1, sort_keys=True))

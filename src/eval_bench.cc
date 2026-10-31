@@ -42,7 +42,8 @@ void Usage() {
                "  --seed N               token/weight seed (default 42)\n"
                "  --json                 write a nanochat.bench.v1 JSON row\n"
                "  [model flags: --layers --heads --kv-heads --hidden --seq\n"
-               "   --vocab --padded-vocab --window-pattern --rope-base]\n");
+               "   --vocab --padded-vocab --window-pattern --rope-base\n"
+               "   --value-embedding <0|1>]\n");
 }
 
 // Deterministic xorshift64* so a run reproduces on any backend.

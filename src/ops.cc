@@ -13,9 +13,10 @@
 //   * A composition declares its saved slots and its backward reads only those
 //     (`spec/block_kinds.md` section 3). The slots are the caller's buffers, so
 //     a fused override and this composition can share one workspace: `rstd`,
-//     `q_pre`/`k_pre`, `pre_act`, `ve_values`/`ve_gate` and `attn_stats` are all
-//     named on the way in.
-//   * `Attention` is the documented exception (section 7.2): its iteration space
+//     `q_pre`/`k_pre`, `pre_act`, `ve_values`/`ve_gate` and `attn_stats` are
+//     all named on the way in.
+//   * `Attention` is the documented exception (section 7.2): its iteration
+//   space
 //     is T x T, no composition of the other primitives reproduces its tiling
 //     without materializing a T x T tensor, so the attention kind is served by
 //     the primitive directly. It is the only seam family this file calls that
@@ -42,8 +43,8 @@ namespace {
 // Staging helpers
 // ---------------------------------------------------------------------------
 //
-// Two kinds of host traffic survive in this file, and both are marked where they
-// are used so a later change can delete exactly one of them:
+// Two kinds of host traffic survive in this file, and both are marked where
+// they are used so a later change can delete exactly one of them:
 //
 //   * `StageToHost` / `StageToDevice`: the rotary rotation of `QkPrep`. The
 //     primitive set has no operand whose value varies with the row's sequence
@@ -52,8 +53,8 @@ namespace {
 //     activation's size. The node report records the missing primitive (a
 //     pointwise code with a periodic table operand, or a `kRotatePair` code).
 //   * `StageScalar` / `StoreScalar`: the classifier's per-row scalar, one float
-//     per row. It is a constant-sized round trip per row, not a staging pass over
-//     an activation.
+//     per row. It is a constant-sized round trip per row, not a staging pass
+//     over an activation.
 
 std::vector<ComputeType> StageToHost(const ComputeType* src,
                                      std::int64_t count) {
@@ -194,6 +195,52 @@ class ComputeScratch {
   ComputeType* data_ = nullptr;
 };
 
+// The span list `SpanReduce` reads. The seam takes the span pointers, the
+// optional second operand pointers, and the per-span counts from device memory
+// (`include/nanochat/kernels.h`), so a composition that builds them in stack
+// storage stages them first. The optimizer keeps the same tables resident for
+// its per-step reduce (`src/optim.cc`, `norm_grads_` and `norm_counts_`); this
+// is the one-call form. On the CPU backend `Alloc` returns host memory, so the
+// staging copies are memcpy calls and the numbers do not change.
+class SpanList {
+ public:
+  SpanList(const ComputeType* const* spans, const ComputeType* const* other,
+           const int* counts, int num_spans) {
+    if (num_spans <= 0) return;
+    spans_ = StagePointers(spans, num_spans);
+    if (other != nullptr) other_ = StagePointers(other, num_spans);
+    const std::size_t count_bytes =
+        static_cast<std::size_t>(num_spans) * sizeof(int);
+    counts_ = static_cast<int*>(kernels::Alloc(count_bytes));
+    kernels::Memcpy(counts_, counts, count_bytes, CopyDir::kHostToDevice);
+  }
+  ~SpanList() {
+    if (spans_ != nullptr) kernels::Free(spans_);
+    if (other_ != nullptr) kernels::Free(other_);
+    if (counts_ != nullptr) kernels::Free(counts_);
+  }
+  SpanList(const SpanList&) = delete;
+  SpanList& operator=(const SpanList&) = delete;
+
+  const ComputeType* const* spans() const { return spans_; }
+  const ComputeType* const* other() const { return other_; }
+  const int* counts() const { return counts_; }
+
+ private:
+  static ComputeType** StagePointers(const ComputeType* const* source,
+                                     int count) {
+    const std::size_t bytes =
+        static_cast<std::size_t>(count) * sizeof(ComputeType*);
+    ComputeType** device = static_cast<ComputeType**>(kernels::Alloc(bytes));
+    kernels::Memcpy(device, source, bytes, CopyDir::kHostToDevice);
+    return device;
+  }
+
+  ComputeType** spans_ = nullptr;
+  ComputeType** other_ = nullptr;
+  int* counts_ = nullptr;
+};
+
 // The per-row scalars of a composition. The reduction entries write `float`
 // (norm statistics, log-sum-exp results) and the pointwise family is typed on
 // `ComputeType`. In the fp32 build the two are one buffer and every sync below
@@ -229,8 +276,8 @@ class RowScalars {
   void ToCompute() {
     if constexpr (!std::is_same_v<ComputeType, float>) {
       std::vector<float> host(static_cast<std::size_t>(count_));
-      kernels::Memcpy(host.data(), floats_.data(),
-                      host.size() * sizeof(float), CopyDir::kDeviceToHost);
+      kernels::Memcpy(host.data(), floats_.data(), host.size() * sizeof(float),
+                      CopyDir::kDeviceToHost);
       std::vector<ComputeType> wide(host.size());
       for (std::size_t i = 0; i < host.size(); ++i) {
         wide[i] = ToC(host[i]);
@@ -357,13 +404,26 @@ void NormBackward(int rows, int dim, float /*eps*/, const ComputeType* x,
 // this file: the rotation's operand varies with the row's sequence position, so
 // it has no primitive over a flat elementwise family. `heads` is the number of
 // head rows (query or key) and the buffers are `[batch, seq, heads, head_dim]`.
+//
+// `cos` and `sin` are the model's device copies (`src/model_impl.h`,
+// `cos_table()`), because the kernels read them from device memory. This leg
+// runs on the host, so it stages them first; on the CPU backend the staging
+// copy is a memcpy.
+std::vector<float> HostTable(const float* table, std::size_t count) {
+  std::vector<float> host(count);
+  if (count > 0) {
+    kernels::Memcpy(host.data(), table, count * sizeof(float),
+                    CopyDir::kDeviceToHost);
+  }
+  return host;
+}
+
 void RopeForwardHost(int batch, int seq, int heads, int head_dim, float scale,
                      const float* cos, const float* sin, ComputeType* tensor) {
   if (batch <= 0 || seq <= 0 || heads <= 0 || head_dim <= 0) return;
   const int half = head_dim / 2;
-  std::vector<ComputeType> host =
-      StageToHost(tensor, static_cast<std::int64_t>(batch) * seq * heads *
-                              head_dim);
+  std::vector<ComputeType> host = StageToHost(
+      tensor, static_cast<std::int64_t>(batch) * seq * heads * head_dim);
   for (int b = 0; b < batch; ++b) {
     for (int t = 0; t < seq; ++t) {
       const std::int64_t row_cos = static_cast<std::int64_t>(t) * half;
@@ -423,21 +483,20 @@ void RopeNormBackwardHost(int batch, int seq, int heads, int head_dim,
               AsF(ghost[static_cast<std::size_t>(base + half + d)]);
           g[static_cast<std::size_t>(d)] = scale * (g1 * c - g2 * s);
           g[static_cast<std::size_t>(half + d)] = scale * (g1 * s + g2 * c);
-          sum_sq += static_cast<double>(x1) * x1 +
-                    static_cast<double>(x2) * x2;
-          dot += static_cast<double>(x1) * g[static_cast<std::size_t>(d)] +
-                 static_cast<double>(x2) *
-                     g[static_cast<std::size_t>(half + d)];
+          sum_sq += static_cast<double>(x1) * x1 + static_cast<double>(x2) * x2;
+          dot +=
+              static_cast<double>(x1) * g[static_cast<std::size_t>(d)] +
+              static_cast<double>(x2) * g[static_cast<std::size_t>(half + d)];
         }
         // The normalization statistic recovered from the saved rows, then the
         // same backward the norm composition applies.
-        const float r = 1.0f / std::sqrt(static_cast<float>(sum_sq) * inv_dim +
-                                        eps);
+        const float r =
+            1.0f / std::sqrt(static_cast<float>(sum_sq) * inv_dim + eps);
         const float coeff = r * r * r * static_cast<float>(dot) * inv_dim;
         for (int d = 0; d < head_dim; ++d) {
           const float xv = AsF(xhost[static_cast<std::size_t>(base + d)]);
-          xhost[static_cast<std::size_t>(base + d)] = ToC(
-              r * g[static_cast<std::size_t>(d)] - coeff * xv);
+          xhost[static_cast<std::size_t>(base + d)] =
+              ToC(r * g[static_cast<std::size_t>(d)] - coeff * xv);
         }
       }
     }
@@ -637,6 +696,11 @@ void QkPrepForward(int batch, int seq, int num_heads, int num_kv_heads,
     ComputeType* tensor;
   };
   const Pass passes[2] = {{num_heads, q}, {num_kv_heads, k}};
+  const std::size_t table_count =
+      static_cast<std::size_t>(seq) * static_cast<std::size_t>(head_dim / 2);
+  // One staging copy per call, shared by the query and key passes.
+  const std::vector<float> host_cos = HostTable(cos, table_count);
+  const std::vector<float> host_sin = HostTable(sin, table_count);
   for (const Pass& pass : passes) {
     if (pass.tensor == nullptr || pass.heads <= 0) continue;
     // The norm leg: one reduction over each head row, then the per-row
@@ -646,8 +710,8 @@ void QkPrepForward(int batch, int seq, int num_heads, int num_kv_heads,
     NormForward(rows * pass.heads, head_dim, 0, eps, pass.tensor, pass.tensor,
                 &rstd);
     // The rotation leg: rotate, then the qk scale, in one rotation pass.
-    RopeForwardHost(batch, seq, pass.heads, head_dim, scale, cos, sin,
-                    pass.tensor);
+    RopeForwardHost(batch, seq, pass.heads, head_dim, scale, host_cos.data(),
+                    host_sin.data(), pass.tensor);
   }
 }
 
@@ -662,12 +726,17 @@ void QkPrepBackward(int batch, int seq, int num_heads, int num_kv_heads,
     ComputeType* saved;
   };
   const Pass passes[2] = {{num_heads, dq, q}, {num_kv_heads, dk, k}};
+  const std::size_t table_count =
+      static_cast<std::size_t>(seq) * static_cast<std::size_t>(head_dim / 2);
+  const std::vector<float> host_cos = HostTable(cos, table_count);
+  const std::vector<float> host_sin = HostTable(sin, table_count);
   for (const Pass& pass : passes) {
     if (pass.saved == nullptr || pass.grad == nullptr || pass.heads <= 0) {
       continue;
     }
-    RopeNormBackwardHost(batch, seq, pass.heads, head_dim, eps, scale, cos, sin,
-                         pass.grad, pass.saved);
+    RopeNormBackwardHost(batch, seq, pass.heads, head_dim, eps, scale,
+                         host_cos.data(), host_sin.data(), pass.grad,
+                         pass.saved);
   }
 }
 
@@ -725,11 +794,14 @@ void AttentionBackward(const AttentionShape& shape, const ComputeType* q,
 // ---------------------------------------------------------------------------
 //
 // forward: pre[row, kvh] = h[row, :G] @ gate_w[kvh, :]        (Gemm)
-//          gate[row, kvh] = 3 * sigmoid(pre)                 (kGateMul + kScale)
-//          v[row, kvh, :] += gate[row, kvh] * ve[row, kvh, :] (kRowScale, the
-//                                                             caller accumulates)
+//          gate[row, kvh] = 3 * sigmoid(pre)                 (kGateMul +
+//          kScale) v[row, kvh, :] += gate[row, kvh] * ve[row, kvh, :]
+//          (kRowScale, the
+//                                                             caller
+//                                                             accumulates)
 // backward: dve = gate * dv                                  (kRowScale)
-//           dgate[row, kvh] = sum_d dv * ve                  (kRowScale product +
+//           dgate[row, kvh] = sum_d dv * ve                  (kRowScale product
+//           +
 //                                                             RowReduce kSum)
 //           dpre = dgate * gate * (1 - gate/3)               (pointwise codes)
 //           gate_w_grad[kvh, :] += dpre^T @ h[:, :G]         (GemmWgrad)
@@ -997,20 +1069,21 @@ void BackoutBackward(const ComputeType* d_pre, const ComputeType* x_backout,
                      float lambda, ComputeType* dbackout, float* lambda_grad,
                      std::int64_t n) {
   if (n <= 0) return;
-  // The elementwise scale runs through the pointwise family; the scalar dot that
-  // the lambda gradient needs is a `SpanReduce` over two ragged lists of one
-  // span each, which is the composition `GradNorm` and `ScalarDot` share.
+  // The elementwise scale runs through the pointwise family; the scalar dot
+  // that the lambda gradient needs is a `SpanReduce` over two ragged lists of
+  // one span each, which is the composition `GradNorm` and `ScalarDot` share.
   Pw(PointwiseOp::kScale, static_cast<int>(n), d_pre, nullptr, dbackout,
      -lambda);
   const ComputeType* spans[1] = {d_pre};
   const ComputeType* other[1] = {x_backout};
   const int counts[1] = {static_cast<int>(n)};
+  const SpanList list(spans, other, counts, 1);
   SpanReduceParams params;
   params.num_spans = 1;
-  params.counts = counts;
+  params.counts = list.counts();
   params.scale = -1.0f;
   params.accumulate = true;
-  kernels::SpanReduce(params, spans, other, lambda_grad);
+  kernels::SpanReduce(params, list.spans(), list.other(), lambda_grad);
 }
 
 // ---------------------------------------------------------------------------
@@ -1018,9 +1091,9 @@ void BackoutBackward(const ComputeType* d_pre, const ComputeType* x_backout,
 // ---------------------------------------------------------------------------
 //
 // Per row: the softcapped logit row (`kSoftcap`), its log-sum-exp (`RowReduce`
-// kMax + kExp + kSum), and the target's value (the `Embedding` per-row gather at
-// a width of one, which is the addressable-element primitive the seam already
-// has). The scalars the two need are copied to the host, which is a
+// kMax + kExp + kSum), and the target's value (the `Embedding` per-row gather
+// at a width of one, which is the addressable-element primitive the seam
+// already has). The scalars the two need are copied to the host, which is a
 // constant-size round trip per row and not a staging pass over the logits.
 //
 // The row-at-a-time walk is the composition's shape, not a limitation of the
@@ -1034,15 +1107,15 @@ void ClassifierForward(const ClassifierShape& shape, const ComputeType* logits,
                        const int* targets, float* losses) {
   const int rows = shape.rows;
   const int vocab = shape.vocab_size;
-  const int padded = shape.padded_vocab_size > 0 ? shape.padded_vocab_size
-                                                 : vocab;
+  const int padded =
+      shape.padded_vocab_size > 0 ? shape.padded_vocab_size : vocab;
   if (rows <= 0 || vocab <= 0 || logits == nullptr || targets == nullptr ||
       losses == nullptr) {
     return;
   }
-  ComputeScratch row_buffer(vocab);   // the softcapped logit row
-  ComputeScratch gathered(1);         // the target's softcapped value
-  FloatScratch lse(1);                // the row's log-sum-exp
+  ComputeScratch row_buffer(vocab);  // the softcapped logit row
+  ComputeScratch gathered(1);        // the target's softcapped value
+  FloatScratch lse(1);               // the row's log-sum-exp
   for (int r = 0; r < rows; ++r) {
     if (targets[r] == shape.ignore_index) {
       StoreScalar(losses + r, 0.0f);
@@ -1075,19 +1148,19 @@ void ClassifierBackward(const ClassifierShape& shape, const ComputeType* logits,
                         const int* targets, ComputeType* dlogits) {
   const int rows = shape.rows;
   const int vocab = shape.vocab_size;
-  const int padded = shape.padded_vocab_size > 0 ? shape.padded_vocab_size
-                                                 : vocab;
+  const int padded =
+      shape.padded_vocab_size > 0 ? shape.padded_vocab_size : vocab;
   if (rows <= 0 || vocab <= 0 || logits == nullptr || targets == nullptr ||
       dlogits == nullptr) {
     return;
   }
   FloatScratch row_max(1);
   FloatScratch sum_exp(1);
-  ComputeScratch z(vocab);       // the softcapped row
-  ComputeScratch e(vocab);       // exp(z - max)
-  ComputeScratch sech2(vocab);   // 1 - (z / cap)^2, the softcap's derivative
-  ComputeScratch u(vocab);       // (p - onehot) * sech2 * row_scale
-  ComputeScratch gathered(1);    // the target's sech2
+  ComputeScratch z(vocab);      // the softcapped row
+  ComputeScratch e(vocab);      // exp(z - max)
+  ComputeScratch sech2(vocab);  // 1 - (z / cap)^2, the softcap's derivative
+  ComputeScratch u(vocab);      // (p - onehot) * sech2 * row_scale
+  ComputeScratch gathered(1);   // the target's sech2
   const ConstantVector ones(1.0f, vocab);
   for (int r = 0; r < rows; ++r) {
     const std::int64_t base = static_cast<std::int64_t>(r) * padded;
@@ -1142,9 +1215,9 @@ void ClassifierBackward(const ClassifierShape& shape, const ComputeType* logits,
                     static_cast<std::size_t>(vocab) * sizeof(ComputeType),
                     CopyDir::kDeviceToDevice);
     if (padded > vocab) {
-      kernels::Memset(dlogits + base + vocab, 0,
-                      static_cast<std::size_t>(padded - vocab) *
-                          sizeof(ComputeType));
+      kernels::Memset(
+          dlogits + base + vocab, 0,
+          static_cast<std::size_t>(padded - vocab) * sizeof(ComputeType));
     }
   }
 }
@@ -1160,11 +1233,11 @@ void ClassifierBackward(const ClassifierShape& shape, const ComputeType* logits,
 // scale are two scalars, so they are formed once on the host from the single
 // reduced value.
 
-// The ragged sum of squares through `SpanReduce`, in a form that is instantiated
-// only for the build whose compute type is the gradient type: the entry point's
-// span list is `ComputeType`, and the tree's gradients are the persistent fp32
-// type in every build. A build where the two differ takes the staging branch in
-// `GradNormForward` instead.
+// The ragged sum of squares through `SpanReduce`, in a form that is
+// instantiated only for the build whose compute type is the gradient type: the
+// entry point's span list is `ComputeType`, and the tree's gradients are the
+// persistent fp32 type in every build. A build where the two differ takes the
+// staging branch in `GradNormForward` instead.
 template <typename ReduceType>
 float RaggedSumOfSquares(const float* const* grads, const int* counts,
                          int num_spans) {
@@ -1192,17 +1265,17 @@ void GradNormForward(const float* const* grads, const int* counts,
     // (`include/nanochat/kernels.h`, `SpanReduceParams`).
     sum_sq = RaggedSumOfSquares<ComputeType>(grads, counts, num_spans);
   } else {
-    // In a bf16 build the ragged reduction's operand is the compute type and the
-    // gradient spans are fp32 (`GradientType`), so the squares are formed here.
-    // This is the composition's second staging helper; the node report records
-    // the missing primitive (a reduction whose operand is the persistent fp32
-    // type, or a cast entry in the utilities).
+    // In a bf16 build the ragged reduction's operand is the compute type and
+    // the gradient spans are fp32 (`GradientType`), so the squares are formed
+    // here. This is the composition's second staging helper; the node report
+    // records the missing primitive (a reduction whose operand is the
+    // persistent fp32 type, or a cast entry in the utilities).
     double acc = 0.0;
     for (int s = 0; s < num_spans; ++s) {
       if (grads[s] == nullptr || counts[s] <= 0) continue;
       std::vector<float> span(static_cast<std::size_t>(counts[s]));
-      kernels::Memcpy(span.data(), grads[s],
-                      span.size() * sizeof(float), CopyDir::kDeviceToHost);
+      kernels::Memcpy(span.data(), grads[s], span.size() * sizeof(float),
+                      CopyDir::kDeviceToHost);
       for (float value : span) acc += static_cast<double>(value) * value;
     }
     sum_sq = static_cast<float>(acc);
@@ -1255,10 +1328,10 @@ void BlockForward(const BlockShape& shape, const BlockWeights& weights,
   }
 
   if (weights.has_ve) {
-    // The gate composition writes `gate * ve` into the value rows first, and the
-    // value projection accumulates on top of it: `v = c_v(h) + gate * ve` with
-    // one add, which is the same rounding the fused family produces without a
-    // second full-size buffer.
+    // The gate composition writes `gate * ve` into the value rows first, and
+    // the value projection accumulates on top of it: `v = c_v(h) + gate * ve`
+    // with one add, which is the same rounding the fused family produces
+    // without a second full-size buffer.
     kernels::EmbeddingForward(static_cast<int>(rows), kv_dim, tokens,
                               weights.value_embeds, acts.ve_values);
     ValueGateForward(rows, hidden, kv_heads, acts.h, weights.ve_gate,
@@ -1268,8 +1341,8 @@ void BlockForward(const BlockShape& shape, const BlockWeights& weights,
     LinearForward(acts.h, weights.c_v, acts.v_final, rows, hidden, kv_dim, true,
                   &acts.fp8);
   } else {
-    LinearForward(acts.h, weights.c_v, acts.v_final, rows, hidden, kv_dim, false,
-                  &acts.fp8);
+    LinearForward(acts.h, weights.c_v, acts.v_final, rows, hidden, kv_dim,
+                  false, &acts.fp8);
   }
 
   QkPrepForward(shape.batch, shape.seq, heads, kv_heads, head_dim,
@@ -1413,15 +1486,18 @@ void BlockBackward(const BlockShape& shape, const BlockWeights& weights,
   {
     const ComputeType* spans[1] = {scratch.dxr};
     const ComputeType* other[1] = {x_in};
+    const ComputeType* other_x0[1] = {x0};
     const int counts[1] = {static_cast<int>(rows * hidden)};
+    const SpanList list(spans, other, counts, 1);
+    const SpanList list_x0(spans, other_x0, counts, 1);
     SpanReduceParams params;
     params.num_spans = 1;
-    params.counts = counts;
+    params.counts = list.counts();
     params.scale = 1.0f;
     params.accumulate = true;
-    kernels::SpanReduce(params, spans, other, resid_grad);
-    const ComputeType* other_x0[1] = {x0};
-    kernels::SpanReduce(params, spans, other_x0, x0_lambda_grad);
+    kernels::SpanReduce(params, list.spans(), list.other(), resid_grad);
+    kernels::SpanReduce(params, list_x0.spans(), list_x0.other(),
+                        x0_lambda_grad);
   }
 }
 

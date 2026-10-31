@@ -111,7 +111,10 @@ const char* kUsage =
     "  --chatcore-every N the ChatCORE interval (default 200, 0 disables). "
     "The\n"
     "                     C++ driver does not measure ChatCORE, so it reports\n"
-    "                     the sentinel -1 at the cadence (section 5.4).\n";
+    "                     the sentinel -1 at the cadence (section 5.4).\n"
+    "  [model flags: --layers --heads --kv-heads --hidden --seq\n"
+    "   --vocab --padded-vocab --window-pattern --rope-base\n"
+    "   --value-embedding <0|1>]\n";
 
 // Reads one little-endian `int32` per token id from `path`. Returns false with
 // a message on a missing, empty, or non-positive table.

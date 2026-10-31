@@ -195,6 +195,7 @@ For each training example, per step:
    token ids and masks.
 3. The bridge decodes the samples, computes the reward, and forms
    `advantage = reward - mean(reward)` across the samples of that example.
+   Phase 6 of section 12 replaces this baseline with the group-relative form.
 4. The bridge masks the prompt positions and the forced tool-output positions.
    The sampled positions stay. This is the same `mask = 0` rule as SFT.
 
@@ -238,6 +239,60 @@ flat Muon momentum. Checkpoints go to `chatrl_checkpoints/<tag>`.
 
 Report GSM8K pass@k on the test split every `eval_every` steps. Use the
 generative path from [eval.md](eval.md).
+
+### 5.5 A standalone run on a card
+
+The pinned settings for one RL stage, run on its own:
+
+| Setting | Value | Why |
+|---|---|---|
+| Card | `T4`, one, `sm_75` | The deployed image, and the Kaggle architecture |
+| Precision | fp32 | The T4 default of [precision.md](precision.md) |
+| Model | 16 layers, hidden 1024, 8 heads, 4 key/value heads, seq 4096 | The 252M shape of `pretrain.ipynb` |
+| Warm start | the `chat` stage, else `sft` | RL starts from a chat model |
+| Task | `gsm8k` | The one task with a `reward` method |
+| Smoke shape | 8 prompts, 4 samples, 3 steps, 256 tokens | A few seconds of card time |
+| First real run | 8 prompts, 4 samples, 100 steps | One card, one container |
+| Checkpoint | `chatrl.nchkpt01` every 25 steps | A pull after a crash keeps the work |
+
+`nc.rl.run` runs one stage on any host under `tools/nanochat train`. In a Modal
+container the run holds one container, and `fetch_stage` in `tools/modal/app.py`
+reads the warm start from the `nanochat-weights` Volume. So a warm start is one
+download, and it never needs an image build.
+
+The smoke shape holds 32 rollouts per step. At 256 completion tokens each, the
+rollout reply is one line of about 15000 integers, which is about 75 KiB. The
+pipe carries that. A larger batch needs the reply split across messages, which
+is part of Phase 8 of section 12.
+
+The container commits the `nanochat-runs` Volume every ten seconds, and a
+client sees a record only after a commit. A crash between two commits loses the
+last seconds of the log, so keep the checkpoint interval small.
+
+### 5.6 The warm start and the two checkpoint paths
+
+Two facts hold about a warm start. The first is the design decision D11. The
+second landed with B3: the load path and the save path are separate arguments.
+
+- **A warm start carries the optimizer state** (design decision D11). The
+  weights, the AdamW first and second moments, and the Muon buffers travel
+  together, as section 7 describes, and the driver reads the recipe from the
+  checkpoint it loads. Clearing the moments would change the stage for every
+  caller to simplify one test, and it would hide the one thing a warm start is
+  for.
+- **`warm_start` names the load and `checkpoint` names the save**
+  (`nc.rl.run(warm_start=..., checkpoint=...)`). `warm_start` reaches the
+  worker as `--checkpoint`, and `checkpoint` is the save target and nothing
+  else. The legacy rule that derived a load path from `checkpoint` is removed,
+  because a save path must never become a load path: it made an RL stage
+  overwrite the checkpoint it warm started from (blocker B3 of
+  `docs/pipeline-plan.md`). A stage therefore needs both arguments whenever it
+  starts from its parent, and the chain of `docs/rl-notebook.md` section 9
+  always passes them.
+
+A graded reward and the per-row seed mix of B4 are what make the advantage
+vector non-zero beside that: the four samples of a group draw from four streams,
+so the group is not four copies of one completion.
 
 ## 6. Generation for rollouts
 
@@ -304,7 +359,8 @@ Implementation: `include/nanochat/data.h`; `src/optim_state.h`; `src/optim.cc`;
 - Every run goes through `tools/nanochat`, so the GPU queue and the resource
   sandbox apply ([sandbox.md](sandbox.md)).
 
-Implementation: not in the tree yet (section 11).
+Implementation: `src/sft_main.cc` with `python/nanochat_cpp/sft.py`, and
+`src/rl_worker_main.cc` with `python/nanochat_cpp/rl.py` (section 11).
 
 ## 9. Invariants and non-goals
 
@@ -315,6 +371,10 @@ Implementation: not in the tree yet (section 11).
   chat template and the loss mask.
 - Single process; no distributed data parallel ([parity.md](parity.md) D6).
 - No native chat template in C++.
+- No overlap of rollout and update, and no policy versioning.
+- No clipped policy optimization with a reference model, and no Kullback
+  Leibler term.
+- No preference optimization.
 
 ## 10. Parity
 
@@ -371,6 +431,7 @@ changes.
 | SFT parity rungs `P4` to `P7` | `P4` `closed`; `P5` `equivalent` on the CPU backend; `P6` and `P7` `open` | `docs/parity.md`; `docs/sft-parity-plan.md` |
 | RL step binary and the RL parity fixture | Done | `src/rl_step_main.cc`, `tools/dump_fixtures.py rl`, `tests/rl_parity_test.cc` |
 | RL orchestration worker | Done | `src/rl_worker_main.cc`, `python/nanochat_cpp/rl.py` |
+| RL warm start: the load path and the save path as two arguments (section 5.6) | Done | `python/nanochat_cpp/rl.py` `run()` and `worker_argv()`; `python/tests/rl_test.py` |
 | SFT bridge command | Done | `src/sft_main.cc`; `python/nanochat_cpp/sft.py` |
 | RL bridge command | Done | `python/nanochat_cpp/rl.py` |
 
@@ -433,3 +494,52 @@ Owner: workflow for the streaming protocol; Python surface for the bridge.
 2. Force the tool-output tokens in the generation loop.
 
 Gate: A parity measurement at T1.
+
+### Phase 6 — The group-relative baseline
+
+Owner: Python surface for `python/nanochat_cpp/rl.py`. No frozen header moves.
+
+1. Divide `reward - mean(reward)` by the group standard deviation, with a floor
+   of `1e-6`.
+2. Drop a group whose rewards are all equal. Count `used_groups` and
+   `dropped_groups` in `RlReport`.
+3. Cover a mixed group, a uniform group, and a group of one sample in
+   `python/tests/rl_test.py`.
+4. Update section 5.1 when the form lands.
+
+Gate: `//python:rl_test`, then a two-step card run that reports both counters.
+
+A sparse reward makes a uniform group, and such a step trains on nothing. Watch
+`dropped_groups`, and choose a task whose reward is not all-or-nothing at the
+start of a run.
+
+### Phase 7 — An executed reward behind the seam
+
+Owner: Python surface for the task, the seam registration, and the record;
+harness if a reward timeout needs a worker change.
+
+1. Add a task whose reward applies a patch and runs a test command in a Modal
+   Sandbox. Reach the sandbox through one callable that registers in
+   `nanochat_cpp.seam`, as the HumanEval executor does, so a test supplies a
+   fake and needs no account.
+2. Add a reward timeout and a reward cache, because a repeated wrong answer must
+   not pay twice.
+3. Record each rollout: the patch, the exit status, and the test output.
+
+Gate: a fake sandbox returns a fixed status and the reward matches it. One card
+run grades four rollouts of one task, and the record holds four rows.
+
+The pipe protocol is synchronous. The worker rolls out, the client scores, and
+the worker steps. So a reward that runs a test suite holds the card while it
+waits. The timeout and the Sandbox are the first two mitigations. Real overlap
+needs policy versioning, which stays out of scope (section 9).
+
+### Phase 8 — Multi-turn tool rollouts (design only)
+
+This phase changes the worker, so it needs its own document. The open items:
+
+1. A message kind `turn` that carries the tool calls and the tool results.
+2. A mask that follows a conversation of several turns.
+3. A context limit, because the default `seq_len` is 2048 and an agent needs
+   more.
+4. A reward that reads the whole conversation, not one completion.

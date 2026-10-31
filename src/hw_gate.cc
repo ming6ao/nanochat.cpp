@@ -33,6 +33,12 @@ namespace {
 // The gate collects every failure, but the caller wants the first one.
 bool g_failed = false;
 std::string g_first_failure;
+// Cases run by the last call, so the result counts itself.
+int g_cases = 0;
+
+// The scaled fp8 GEMM cases `CheckScaledGemmCases` defines. They cannot run
+// below compute capability 8.9, so the skip branch counts them instead.
+constexpr int kScaledGemmCases = 6;
 
 void Fail(const std::string& what) {
   if (!g_failed) g_first_failure = what;
@@ -104,6 +110,7 @@ double DecodeFp8(std::uint8_t bits, Fp8Format format) {
 // Case 1: the fp8 conversion. The device cast must match the shared rounding
 // header, byte for byte, and derive the same scale.
 void CheckConversion() {
+  ++g_cases;
   const int count = 256;
   std::vector<float> values(count);
   std::uint32_t state = 7u;
@@ -170,6 +177,7 @@ void CheckScaledGemm(const std::string& name, int m, int n, int k,
                      bool transpose_a, bool transpose_b, Fp8Format format_a,
                      Fp8Format format_b, float beta, bool fast_accum,
                      bool fp32_output) {
+  ++g_cases;
   const int a_count = m * k;
   const int b_count = k * n;
   const int c_count = m * n;
@@ -328,6 +336,7 @@ void CheckScaledGemmCases() {
 // Case 7: the attention forward at one small causal shape, against a naive
 // host softmax.
 void CheckAttention() {
+  ++g_cases;
   const int batch = 1;
   const int seq = 8;
   const int heads = 2;
@@ -423,15 +432,35 @@ void CheckAttention() {
 HardwareGateResult RunHardwareCorrectnessGate() {
   g_failed = false;
   g_first_failure.clear();
+  g_cases = 0;
 
   CheckConversion();
-  CheckScaledGemmCases();
+  // The scaled fp8 GEMM needs the Ada tensor-core path (docs/fp8-training.md
+  // section 5.3), which `Caps::supports_fp8` declares. Do not ask a device for
+  // arithmetic it does not have. The CPU reference runs every case, because it
+  // has no tensor cores to disagree with.
+  const Caps caps = kernels::GetCaps();
+  int skipped = 0;
+  std::string skipped_reason;
+  if (!caps.is_device || caps.supports_fp8) {
+    CheckScaledGemmCases();
+  } else {
+    skipped = kScaledGemmCases;
+    skipped_reason = Format(
+        "the fp8 scaled GEMM needs compute capability 8.9 or 9.0, and this "
+        "device reports %d.%d",
+        caps.compute_major, caps.compute_minor);
+    std::fprintf(stderr, "hw gate: skipped %d fp8 cases: %s\n", skipped,
+                 skipped_reason.c_str());
+  }
   CheckAttention();
 
   HardwareGateResult result;
   result.passed = !g_failed;
-  result.cases = 9;
+  result.cases = g_cases;
+  result.skipped = skipped;
   result.first_failure = g_first_failure;
+  result.skipped_reason = skipped_reason;
   return result;
 }
 

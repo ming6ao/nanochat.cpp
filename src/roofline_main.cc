@@ -45,7 +45,8 @@ void Usage() {
       "  --json                 write nanochat.roofline.v1 JSON\n"
       "  --help                 this message\n"
       "  [model flags: --layers --heads --kv-heads --hidden --seq\n"
-      "   --vocab --padded-vocab --window-pattern --rope-base]\n");
+      "   --vocab --padded-vocab --window-pattern --rope-base\n"
+      "   --value-embedding <0|1>]\n");
 }
 
 bool ParseDouble(const char* text, double* out) {

@@ -188,6 +188,20 @@ void GemmScaledFp8(GemmMode mode, const ScaledGemmParams& params,
                 "cublasLt set B scale");
   }
   if (params.fast_accum) {
+    // Fast accumulation needs the Ada/Hopper fp8 path (docs/fp8-training.md
+    // section 5.3). Below sm_89 `cublasLt` answers status 7 for the attribute,
+    // and `CheckCublas` would abort from a device thread. The capability is a
+    // per-device fact, so ask once per device thread, like `Handle()` above.
+    static thread_local const bool kFastAccumSupported = GetCaps().supports_fp8;
+    if (!kFastAccumSupported) {
+      const Caps caps = GetCaps();
+      std::fprintf(stderr,
+                   "fatal: fast accumulation needs compute capability 8.9 or "
+                   "9.0 (docs/fp8-training.md section 5.3); this device "
+                   "reports %d.%d\n",
+                   caps.compute_major, caps.compute_minor);
+      std::exit(1);
+    }
     const int32_t fast = 1;
     CheckCublas(
         cublasLtMatmulDescSetAttribute(op_desc, CUBLASLT_MATMUL_DESC_FAST_ACCUM,

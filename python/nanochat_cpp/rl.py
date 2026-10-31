@@ -38,10 +38,9 @@ from __future__ import annotations
 import dataclasses
 import os
 import subprocess
-from pathlib import Path
 from typing import Callable, Sequence
 
-from . import _build, chat, data
+from . import _build, api, chat, data
 from . import toolchain as _toolchain
 from .api import Config, Tokenizer
 
@@ -57,11 +56,10 @@ __all__ = [
 #: The sandbox backend value that starts the worker directly (Kaggle).
 DIRECT_BACKEND = "none"
 
-#: The environment variable that overrides the worker binary path.
-WORKER_ENV = "NANOCHAT_RL_WORKER"
-
-#: The worker binary, relative to the repository root.
-WORKER_RELATIVE = Path("bazel-bin") / "src" / "rl_worker"
+#: The worker executable name the resolver of ``_build`` knows. The
+#: ``NANOCHAT_RL_WORKER`` override belongs to ``_build.stage_binary``, so the
+#: bridge holds no path of its own (docs/pipeline-plan.md B6).
+WORKER_NAME = "rl_worker"
 
 #: The ``NANOCHAT_SANDBOX_BACKEND`` variable (docs/python.md section 3.1).
 BACKEND_ENV = "NANOCHAT_SANDBOX_BACKEND"
@@ -165,24 +163,15 @@ def worker_argv(worker, config: Config | None = None,
                 load: str | os.PathLike | None = None) -> list[str]:
     """The worker argument list: the binary, the model flags, and the load.
 
-    The flags match ``nanochat::cli::IsModelFlag`` so the worker recreates the
-    exact model shape the bridge used to render the prompts. ``load`` is a
-    checkpoint container path to warm-start the model and the optimizer state
-    from.
+    The flags come from :func:`nanochat_cpp.api.model_flags`, the one home of
+    the model flag list, so the worker recreates the exact model shape the
+    bridge used to render the prompts and the two stages cannot drift
+    (docs/pipeline-plan.md B1). ``load`` is a checkpoint container path to warm
+    start the model and the optimizer state from, and it reaches the worker as
+    ``--checkpoint``, which is the worker's load flag.
     """
     argv = [str(worker)]
-    if config is not None:
-        argv.extend([
-            "--layers", str(config.num_layers),
-            "--heads", str(config.num_heads),
-            "--kv-heads", str(config.num_kv_heads),
-            "--hidden", str(config.hidden_dim),
-            "--seq", str(config.seq_len),
-            "--vocab", str(config.vocab_size),
-            "--padded-vocab", str(config.padded_vocab_size),
-            "--window-pattern", str(config.window_pattern),
-            "--rope-base", _format_float(config.rope_base),
-        ])
+    argv.extend(api.model_flags(config))
     if load is not None:
         argv.extend(["--checkpoint", str(load)])
     return argv
@@ -437,6 +426,7 @@ def _spawn(argv: Sequence[str], tool: _toolchain.Toolchain,
 def run(task, prompts: Sequence[dict], num_samples: int = DEFAULT_NUM_SAMPLES,
         steps: int = 1, checkpoint: str | os.PathLike | None = None,
         checkpoint_interval: int | None = None, *,
+        warm_start: str | os.PathLike | None = None,
         config: Config | None = None, model=None, tokenizer=None,
         worker: str | os.PathLike | None = None,
         toolchain: _toolchain.Toolchain | None = None,
@@ -456,11 +446,20 @@ def run(task, prompts: Sequence[dict], num_samples: int = DEFAULT_NUM_SAMPLES,
     scores the rollouts; the worker holds the model and the optimizer and runs
     the step.
 
-    ``checkpoint`` is the checkpoint container path the worker saves to. It is
-    used as the warm start when it already exists. ``checkpoint_interval``
-    saves every ``checkpoint_interval`` steps. ``config`` (or ``model.config``)
-    gives the worker the model shape. ``tokenizer`` defaults to the
-    ``NCTOKEN1`` artifact.
+    ``checkpoint`` is the checkpoint container path the worker saves to, and
+    nothing else: a save path never becomes a load path. ``warm_start`` is the
+    container the worker loads the weights and optimizer moments from, and it
+    reaches the worker as ``--checkpoint``. A stage that warm starts from the
+    SFT checkpoint and saves to its own file therefore keeps its parent intact
+    (docs/pipeline-plan.md B3). ``checkpoint_interval`` saves every
+    ``checkpoint_interval`` steps. ``config`` (or ``model.config``) gives the
+    worker the model shape, through :func:`nanochat_cpp.api.model_flags`.
+    ``tokenizer`` defaults to the ``NCTOKEN1`` artifact.
+
+    ``worker`` defaults to :func:`nanochat_cpp._build.stage_binary`, which
+    resolves the environment override, the runfiles tree, ``bazel-bin``, and an
+    installed wheel, so a wheel install fails with the resolver's message and
+    not with a file-not-found (B6).
 
     The worker is started directly when ``NANOCHAT_SANDBOX_BACKEND`` is
     ``none``, and through ``tools/nanochat train -- <worker>`` otherwise. The
@@ -492,18 +491,10 @@ def run(task, prompts: Sequence[dict], num_samples: int = DEFAULT_NUM_SAMPLES,
     direct = environ.get(BACKEND_ENV, "").strip().lower() == DIRECT_BACKEND
     if worker is not None:
         worker_path = worker
-    elif environ.get(WORKER_ENV):
-        worker_path = environ[WORKER_ENV]
     else:
-        worker_path = _build.repo_root() / WORKER_RELATIVE
+        worker_path = _build.stage_binary(WORKER_NAME)
 
-    load: Path | None = None
-    if checkpoint is not None:
-        candidate = Path(checkpoint).expanduser()
-        if candidate.is_file():
-            load = candidate
-
-    argv = worker_argv(worker_path, config, load)
+    argv = worker_argv(worker_path, config, warm_start)
     process = _spawn(argv, tool, environ, direct)
     client = _Worker(process)
 

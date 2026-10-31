@@ -496,3 +496,154 @@ the single-card path is fast.
 6. `pi --print` runs a `tools/nanochat` command.
 7. `gh pr create` opens a pull request from the session.
 8. `gh pr merge` merges the pull request on the origin.
+
+## 9. The pipeline chain on three hosts
+
+One job file runs base training, then SFT, then RL, and each stage reads the
+checkpoint of the stage before it. `docs/rl-notebook.md` section 9 gives the
+chain itself; this section gives what each host contributes and what the run
+records about it. The entry is always the tool (design decision D10 of
+`docs/pipeline-plan.md`), because both stage executables call
+`RequireSandboxOrDie`, and a notebook's `NANOCHAT_SANDBOX_BACKEND=none`
+satisfies the library only.
+
+### 9.1 The host block of a run
+
+`pipeline._host()` fills one block of `deliver/pipeline_report.json` from the
+run, not from the host file: `backend` is `_build.backend()`, `arch` is
+`_build.architecture()`, `precision` is `_build.precision()`, and `revision` is
+`NANOCHAT_SOURCE_REVISION` when it is set, else the short revision
+`git rev-parse HEAD` reports, else the `git_revision` the stages recorded. A
+container that copies the tree without `.git` sets the variable, so a report
+still says which build ran, and the block on two legs is the one field a reader
+compares.
+
+| Leg | `backend` | `arch` | `precision` | Sandbox | Build |
+|---|---|---|---|---|---|
+| Local CPU | `cpu` | empty | `fp32` | `train` scope | Bazel |
+| Local GPU | `cuda` | the card's capability | `fp32` | `t1-gpu` queue job | Bazel |
+| Colab T4 | `cuda` | `sm_75` | `fp32` | `none` | source build |
+| Modal T4 | `cuda` | `sm_75` | `fp32` | `none` | image build |
+| Modal CPU | `cpu` | empty | `fp32` | `none` | image build, CPU config |
+
+The two card legs are `sm_75` because the image compiles for `sm_75` and a free
+Colab session hands out a T4. A local card uses its own architecture through
+`NANOCHAT_CUDA_ARCH`, and `tools/nanochat doctor` reports the name, the driver,
+the memory, the use, and the utilisation but not the capability, so the value
+comes from `nvidia-smi --query-gpu=compute_cap --format=csv,noheader`.
+
+The last row is the verification-only leg of section 9.4. It needs the second
+image, which the tree does not hold today, so it records no gate and no number.
+
+### 9.2 Colab with a T4: the gate is owed
+
+Row 9 of `docs/pipeline-plan.md` names a manual Colab run as its gate, and
+section 6.2 of that plan gives the four cells. This campaign wrote
+`notebooks/colab_pipeline.ipynb` and `notebooks/colab_setup.py` and ran neither
+on Colab, so the gate stays owed until a session runs the four cells. No leg of
+the table below is a measurement: each is a fact the runtime fixes, and a
+measurement appears here only after a run produces one.
+
+| Property | Value | Where it comes from |
+|---|---|---|
+| Backend | `cuda` | cell 2 sets `NANOCHAT_CPP_BACKEND` |
+| Arch | `sm_75` | `probe()` maps `nvidia-smi --query-gpu=compute_cap` to `sm_<major><minor>`, and a free session gives a T4 |
+| Precision | `fp32` | the build default |
+| Sandbox | `none` | Colab has no systemd user manager, so no cgroup scope exists |
+| Build | from source | decision D8: the install root carries no `tools/nanochat` and no stage binary |
+| Entry | `tools/nanochat train -- python -m nanochat_cpp.pipeline` | decision D10 |
+
+A paid session can give a V100, `sm_70`, or an A100, `sm_80`. An `sm_75` build
+then fails inside `nanochat_init` with a message about the architecture, not
+about the job, so cell 2 sets `NANOCHAT_CUDA_ARCH` from `probe()` and the setup
+build asks for the same value.
+
+The procedure, which is the record until a run exists:
+
+1. **Setup.** Clone the tree, install Bazelisk with `tools/kaggle/bootstrap.sh`,
+   then `colab_setup.setup(backend="cuda", arch=probe(),
+   prefer_installed=False)`, then `colab_setup.stages(...)`. Two calls, not one:
+   `setup` resolves the library only. `prefer_installed=False` is required, not
+   a preference, because `setup` prefers an installed distribution by default
+   and that root has no `tools/nanochat` and no stage binary, which contradicts
+   D8 and breaks D10.
+2. **Environment.** Five values: `NANOCHAT_BASE_DIR=/content/cache`,
+   `NANOCHAT_RUNS_DIR=/content/runs`, `NANOCHAT_CPP_BACKEND=cuda`,
+   `NANOCHAT_CUDA_ARCH=probe()`, and `NANOCHAT_SANDBOX_BACKEND=none`. The cell
+   also puts the tree's `python/` on `PYTHONPATH`, because the tool replaces
+   itself with the command it wraps and the child starts in the notebook's
+   directory. It never sets `NANOCHAT_ALLOW_UNSANDBOXED`: section 4 and
+   `docs/sandbox.md` forbid the override, and the container quota is the only
+   bound here.
+3. **Run.** `tools/nanochat train -- python -m nanochat_cpp.pipeline
+   /content/runs/job.json`. Cell 3 must wrap the module, because the backend
+   value satisfies `nanochat_init` only: a bare module starts the chain and then
+   fails inside the first stage executable, which accepts `NANOCHAT_SANDBOX` or
+   the tool's sentinel and not the backend value.
+4. **Collect.** Print the report and offer one download of `deliver/`.
+
+What a passing run must show, as a checklist and not as a result:
+
+- The three stages with the step counts the job asked for: `base`@100,
+  `sft`@100, and `rl`@105.
+- `deliver/chatrl.ckpt` and `deliver/pipeline_report.json` under
+  `/content/runs/<run_id>/`.
+- `host.backend` equal to `cuda` and `host.arch` equal to `sm_75`.
+- A base loss trace that falls from its first step to its last.
+
+The manual gate is recorded as owed: a later run replaces this status line with
+the date of the session and adds the report excerpt it printed.
+
+### 9.3 Modal with a T4
+
+`tools/modal/app.py` holds one function beside `train`. Its host block is the
+one in the table of section 9.1, and the function itself is:
+
+```
+@app.function(image=image, gpu=gpu_request(), volumes={"/runs": runs},
+              secrets=_secrets(), timeout=TIMEOUT_SECONDS, max_containers=1)
+def pipeline(job_json, run_id, stage_json="", publish_json="") -> str
+```
+
+- The image builds the library and both stage executables in one call
+  (`_build.build_stages`), so a container needs no second build, and it names
+  the two binaries through the `NANOCHAT_SFT_MAIN` and `NANOCHAT_RL_WORKER`
+  overrides, because the installed distribution's `repo_root()` is not the image
+  tree (B6).
+- `GPU_TYPE`, `GPU_COUNT`, and `CUDA_ARCH` form one triple, and the type and
+  the architecture are a pair with the image build, because the image compiles
+  for exactly that architecture. `_check_cards` stops a container whose card
+  does not match them. `max_containers=1` keeps one chain at a time.
+- The app rewrites `out_root` to `/runs/<run_id>`, because the app owns the
+  Volume path and one job runs three stages. The chain nests the job's own
+  `run_id` under it, so `deliver/` lands at `/runs/<run_id>/<run_id>/deliver/`.
+- The work starts as `tools/nanochat client --profile train -- python -m
+  nanochat_cpp.pipeline <job.json>`, which is the container entry of D10, and
+  `worker.log` holds its output. The commit keeper makes the run directory
+  visible to a poll of the `nanochat-runs` Volume.
+- An empty `publish_json` stops after the chain, which has already delivered
+  `deliver/`. A non-empty value reuses `_publish` for the Hub push of the final
+  stage, so the chain gains no second uploader.
+- `stage_json` is accepted and ignored: the chain warm starts each stage from
+  the checkpoint of the stage before it, so a Modal stage cache has nothing to
+  point at.
+
+The gate is `modal run tools/modal/app.py::pipeline_demo`, which runs the demo
+job in the image and prints the report. It is owed in the same way as the Colab
+gate of section 9.2: this campaign wrote the function and its contract test and
+ran no `modal run`, so the record is the procedure and the host facts, and a
+passing run must show the four items of the checklist there with `host.arch` of
+`sm_75`.
+
+### 9.4 The Modal CPU leg is a second image
+
+The image above pins one compiled backend: `NANOCHAT_CPP_LIB` names the CUDA
+library and the build passes `--config=cuda`. A container with no card therefore
+fails inside `nanochat_init`, and `_check_cards` calls `nvidia-smi`, which does
+not exist there.
+
+So a CPU verification leg is a second image whose build passes `--config=cpu`
+and whose function omits `gpu=`, not a CPU branch inside `tools/modal/app.py`.
+One Bazel output base holds one build of `libnanochat_shared.so`, so the two
+images must stay apart. The tree holds the CUDA image today; the CPU image is
+the verification-only leg of the table in section 9.1, and it runs no gate.

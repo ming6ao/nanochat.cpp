@@ -74,7 +74,8 @@ void Usage() {
       "  --model PATH           checkpoint to load\n"
       "  --seed N               weight init seed when no checkpoint\n"
       "  [model flags: --layers --heads --kv-heads --hidden --seq\n"
-      "   --vocab --padded-vocab --window-pattern --rope-base]\n");
+      "   --vocab --padded-vocab --window-pattern --rope-base\n"
+      "   --value-embedding <0|1>]\n");
 }
 
 }  // namespace
