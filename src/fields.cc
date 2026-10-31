@@ -126,11 +126,11 @@ class FieldsReader final : public IFieldsVisitor {
   }
 
   void operator()(std::uint32_t& value) override {
-    // A field that failed earlier rejects the whole block, so no member after it
-    // takes a value from a stream the read has already abandoned (rule 5 of
-    // `nanochat/checkpoint_metadata.h`: no partial load). This is what makes the
-    // `Recipe` block of design decision D7 all-or-nothing: one bad rate and the
-    // caller keeps every member initializer instead of half a recipe.
+    // A field that failed earlier rejects the whole block, so no member after
+    // it takes a value from a stream the read has already abandoned (rule 5 of
+    // `nanochat/checkpoint_metadata.h`: no partial load). This is what makes
+    // the `Recipe` block of design decision D7 all-or-nothing: one bad rate and
+    // the caller keeps every member initializer instead of half a recipe.
     if (AnyInvalid()) return;
     std::uint32_t word = 0;
     if (!NextWord(&word)) return;

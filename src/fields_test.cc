@@ -248,7 +248,7 @@ void TestNewCodeOldData() {
   }
 
   NewFields read;
-  read.u64 = 99;             // An initializer that must survive the read.
+  read.u64 = 99;  // An initializer that must survive the read.
   read.notes = {"untouched"};
   const IFields::ReadResult result = read.Read(words, 0);
   if (result.pos == 0) Fail("new code, old data: Read failed");
@@ -348,9 +348,9 @@ void TestInvalidString() {
     StringField written;
     written.value.assign(cap_chars, 'a');
     const std::vector<std::uint32_t> words = written.Write();
-    Expect(words.size() ==
-           static_cast<std::size_t>(nanochat::kMaxStringWords) + 1,
-           "invalid string: the cap does not fit its words");
+    Expect(
+        words.size() == static_cast<std::size_t>(nanochat::kMaxStringWords) + 1,
+        "invalid string: the cap does not fit its words");
     StringField read;
     Expect(read.Read(words, 0).pos != 0,
            "invalid string: a string at the cap did not load");
@@ -658,8 +658,8 @@ void TestRecipeBlock() {
          "recipe: the block is not the last field of the metadata block");
 }
 
-// The file predates the recipe block: the reader counts the one field it did not
-// see and keeps every `Recipe` initializer (design decision D7).
+// The file predates the recipe block: the reader counts the one field it did
+// not see and keeps every `Recipe` initializer (design decision D7).
 void TestRecipeBlockMissing() {
   CheckpointMetadata written;
   written.stage = Stage::kSft;
@@ -699,7 +699,8 @@ void TestRecipeBlockMissing() {
   Expect(read.notes == written.notes, "recipe missing: notes changed");
   Expect(read.recipe.device_batch_size == -1 &&
              read.recipe.total_batch_size == -1 &&
-             read.recipe.embedding_lr == -1.0f && read.recipe.gsm8k_epochs == -1,
+             read.recipe.embedding_lr == -1.0f &&
+             read.recipe.gsm8k_epochs == -1,
          "recipe missing: the block defaults were overwritten");
 
   // With no sentinel the same read yields exactly the member initializers the
@@ -708,19 +709,19 @@ void TestRecipeBlockMissing() {
   const IFields::ReadResult default_result = defaults.Read(older, 0);
   if (default_result.pos == 0) Fail("recipe missing: the default read failed");
   const Recipe expected;
-  Expect(defaults.recipe.device_batch_size == expected.device_batch_size &&
-             defaults.recipe.total_batch_size == expected.total_batch_size &&
-             defaults.recipe.embedding_lr == expected.embedding_lr &&
-             defaults.recipe.unembedding_lr == expected.unembedding_lr &&
-             defaults.recipe.matrix_lr == expected.matrix_lr &&
-             defaults.recipe.scalar_lr == expected.scalar_lr &&
-             defaults.recipe.init_lr_frac == expected.init_lr_frac &&
-             defaults.recipe.warmdown_ratio == expected.warmdown_ratio &&
-             defaults.recipe.muon_momentum_steps ==
-                 expected.muon_momentum_steps &&
-             defaults.recipe.mmlu_epochs == expected.mmlu_epochs &&
-             defaults.recipe.gsm8k_epochs == expected.gsm8k_epochs,
-         "recipe missing: the member defaults changed");
+  Expect(
+      defaults.recipe.device_batch_size == expected.device_batch_size &&
+          defaults.recipe.total_batch_size == expected.total_batch_size &&
+          defaults.recipe.embedding_lr == expected.embedding_lr &&
+          defaults.recipe.unembedding_lr == expected.unembedding_lr &&
+          defaults.recipe.matrix_lr == expected.matrix_lr &&
+          defaults.recipe.scalar_lr == expected.scalar_lr &&
+          defaults.recipe.init_lr_frac == expected.init_lr_frac &&
+          defaults.recipe.warmdown_ratio == expected.warmdown_ratio &&
+          defaults.recipe.muon_momentum_steps == expected.muon_momentum_steps &&
+          defaults.recipe.mmlu_epochs == expected.mmlu_epochs &&
+          defaults.recipe.gsm8k_epochs == expected.gsm8k_epochs,
+      "recipe missing: the member defaults changed");
 }
 
 // A file newer than this build: three trailing words after the recipe block are
@@ -742,7 +743,8 @@ void TestRecipeExtraTrailingWords() {
   CheckpointMetadata read;
   const IFields::ReadResult result = read.Read(words, 0);
   if (result.pos == 0) Fail("recipe extra: Read failed");
-  Expect(result.missing_fields == 0, "recipe extra: missing_fields is not zero");
+  Expect(result.missing_fields == 0,
+         "recipe extra: missing_fields is not zero");
   Expect(result.extra_u32 == 3, "recipe extra: extra_u32 is not 3");
   Expect(result.pos == words.size() - 3,
          "recipe extra: pos did not stop at the first extra word");
@@ -798,8 +800,8 @@ void TestRecipeBlockMalformed() {
 }
 
 // The recipe a run can start from (design decision D7). The word stream only
-// carries the values; `RecipeUsable` is the half that reads like a schedule, and
-// the SFT driver refuses to inherit from a block it rejects.
+// carries the values; `RecipeUsable` is the half that reads like a schedule,
+// and the SFT driver refuses to inherit from a block it rejects.
 void TestRecipeUsable() {
   std::string error;
   Recipe recipe;  // Every default is a recipe the build itself writes.
@@ -840,8 +842,7 @@ void TestRecipeUsable() {
       {"a warmdown ratio above one",
        [](Recipe* r) { r->warmdown_ratio = 1.5f; }},
       {"a negative init_lr_frac", [](Recipe* r) { r->init_lr_frac = -0.8f; }},
-      {"a momentum above one",
-       [](Recipe* r) { r->muon_momentum_peak = 1.2f; }},
+      {"a momentum above one", [](Recipe* r) { r->muon_momentum_peak = 1.2f; }},
   };
   for (const auto& tc : kRejected) {
     Recipe bad;

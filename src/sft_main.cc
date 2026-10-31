@@ -9,10 +9,11 @@
 //     scaled once by `init_lr_frac = 0.8` (design decision D3), and no gradient
 //     clip (D4);
 //   * a warm start (`--warm-start PATH`): weights and optimizer moments from a
-//     base checkpoint, fresh SFT rates, and a step counter that stays at 0 (D5).
-//     A `--resume PATH` continues the same run instead, moments and stored step
-//     together;
-//   * a learning rate driven by dataset progress (`Scheduler::LrMultiplierForProgress`
+//     base checkpoint, fresh SFT rates, and a step counter that stays at 0
+//     (D5). A `--resume PATH` continues the same run instead, moments and
+//     stored step together;
+//   * a learning rate driven by dataset progress
+//   (`Scheduler::LrMultiplierForProgress`
 //     over the running maximum of `approx_progress`), not by a step total fixed
 //     before the run started (D1), while the Muon momentum keeps its 1-based
 //     step (D2);
@@ -84,29 +85,36 @@ const char* kUsage =
     "       [--grad-accum N] [--eval-every N] [--eval-tokens N]\n"
     "       [--chatcore-every N] [--seq N] [--seed N] [--device NAME]\n"
     "\n"
-    "  --warm-start PATH  weights and optimizer moments from a base checkpoint.\n"
-    "                     The rates are the fresh SFT ones and the step counter\n"
+    "  --warm-start PATH  weights and optimizer moments from a base "
+    "checkpoint.\n"
+    "                     The rates are the fresh SFT ones and the step "
+    "counter\n"
     "                     starts at 0 (design decision D5).\n"
     "  --resume PATH      weights, moments, and the stored step of this run.\n"
-    "                     Not for a base checkpoint: its stored step breaks the\n"
+    "                     Not for a base checkpoint: its stored step breaks "
+    "the\n"
     "                     SFT schedule, so use --warm-start for a base file.\n"
     "  --val-rows PATH    the packed validation shard the evaluation reads.\n"
-    "  --token-bytes PATH one little-endian int32 per token id, the source bytes\n"
+    "  --token-bytes PATH one little-endian int32 per token id, the source "
+    "bytes\n"
     "                     the id represents (bits-per-byte, design decision\n"
     "                     D6). Without a table every target counts one byte.\n"
-    "  --grad-accum N     micro-batches per optimizer step. The default is the\n"
+    "  --grad-accum N     micro-batches per optimizer step. The default is "
+    "the\n"
     "                     recipe's total_batch_size / (device_batch_size *\n"
     "                     max_seq_len * world_size) of section 5.1.\n"
-    "  --eval-every N     bits-per-byte every N steps (default 200, 0 disables).\n"
+    "  --eval-every N     bits-per-byte every N steps (default 200, 0 "
+    "disables).\n"
     "  --eval-tokens N    the token budget of one evaluation pass (default\n"
     "                     40 * 524288); the pass never reads past one pass of\n"
     "                     the validation shard.\n"
-    "  --chatcore-every N the ChatCORE interval (default 200, 0 disables). The\n"
+    "  --chatcore-every N the ChatCORE interval (default 200, 0 disables). "
+    "The\n"
     "                     C++ driver does not measure ChatCORE, so it reports\n"
     "                     the sentinel -1 at the cadence (section 5.4).\n";
 
-// Reads one little-endian `int32` per token id from `path`. Returns false with a
-// message on a missing, empty, or non-positive table.
+// Reads one little-endian `int32` per token id from `path`. Returns false with
+// a message on a missing, empty, or non-positive table.
 bool LoadTokenBytes(const std::string& path, std::vector<int>* out,
                     std::string* error) {
   out->clear();
@@ -119,22 +127,19 @@ bool LoadTokenBytes(const std::string& path, std::vector<int>* out,
                                  std::istreambuf_iterator<char>());
   if (raw.empty() || raw.size() % sizeof(std::int32_t) != 0) {
     if (error != nullptr) {
-      *error = "the token-byte table is not a whole number of int32 values: " +
-               path;
+      *error =
+          "the token-byte table is not a whole number of int32 values: " + path;
     }
     return false;
   }
   const std::size_t count = raw.size() / sizeof(std::int32_t);
   out->resize(count);
   for (std::size_t i = 0; i < count; ++i) {
-    const std::int32_t value =
-        static_cast<std::int32_t>(static_cast<std::uint32_t>(raw[i * 4]) |
-                                  (static_cast<std::uint32_t>(raw[i * 4 + 1])
-                                   << 8) |
-                                  (static_cast<std::uint32_t>(raw[i * 4 + 2])
-                                   << 16) |
-                                  (static_cast<std::uint32_t>(raw[i * 4 + 3])
-                                   << 24));
+    const std::int32_t value = static_cast<std::int32_t>(
+        static_cast<std::uint32_t>(raw[i * 4]) |
+        (static_cast<std::uint32_t>(raw[i * 4 + 1]) << 8) |
+        (static_cast<std::uint32_t>(raw[i * 4 + 2]) << 16) |
+        (static_cast<std::uint32_t>(raw[i * 4 + 3]) << 24));
     if (value < 0) {
       if (error != nullptr) {
         *error = "the token-byte table holds a negative length: " + path;
@@ -207,11 +212,9 @@ int main(int argc, char** argv) {
       config.batch =
           nanochat::cli::ParseInt(value, &parsed_int) ? parsed_int : 0;
     } else if (flag == "--grad-accum") {
-      grad_accum =
-          nanochat::cli::ParseInt(value, &parsed_int) ? parsed_int : 0;
+      grad_accum = nanochat::cli::ParseInt(value, &parsed_int) ? parsed_int : 0;
     } else if (flag == "--eval-every") {
-      eval_every =
-          nanochat::cli::ParseInt(value, &parsed_int) ? parsed_int : 0;
+      eval_every = nanochat::cli::ParseInt(value, &parsed_int) ? parsed_int : 0;
     } else if (flag == "--eval-tokens") {
       eval_tokens =
           nanochat::cli::ParseInt(value, &parsed_int) ? parsed_int : 0;
@@ -237,22 +240,21 @@ int main(int argc, char** argv) {
   // that named both is ambiguous, and a resume of a base checkpoint would
   // continue the base step counter into the SFT schedule.
   if (!warm_start_path.empty() && !config.resume_path.empty()) {
-    std::fprintf(stderr,
-                 "sft_main: --warm-start and --resume are mutually exclusive\n");
+    std::fprintf(
+        stderr, "sft_main: --warm-start and --resume are mutually exclusive\n");
     return 2;
   }
   if (config.num_iterations <= 0) config.num_iterations = 1;
 
   // The recipe the run follows (design decision D7): the one its source
-  // checkpoint recorded, when it recorded one, and the pinned section 5 settings
-  // otherwise. The read is metadata-only in the sense that the optimizer section
-  // is not parsed; `Checkpointer::LoadModel` below re-reads the file for the
-  // records themselves.
-  const std::string source_path = !warm_start_path.empty()
-                                      ? warm_start_path
-                                      : config.resume_path;
+  // checkpoint recorded, when it recorded one, and the pinned section 5
+  // settings otherwise. The read is metadata-only in the sense that the
+  // optimizer section is not parsed; `Checkpointer::LoadModel` below re-reads
+  // the file for the records themselves.
+  const std::string source_path =
+      !warm_start_path.empty() ? warm_start_path : config.resume_path;
   nanochat::Recipe recipe;
-  recipe.device_batch_size = 0;   // "not recorded" until the shape is resolved
+  recipe.device_batch_size = 0;  // "not recorded" until the shape is resolved
   recipe.total_batch_size = 0;
   recipe.embedding_lr = kSftEmbeddingLr;
   recipe.unembedding_lr = kSftUnembeddingLr;
@@ -279,20 +281,21 @@ int main(int argc, char** argv) {
     if (source.Load(source_path, &load_error, /*with_optimizer_state=*/false)) {
       metadata = source.metadata();
     } else {
-      std::fprintf(stderr,
-                   "sft_main: %s carries no metadata block (%s); the pinned SFT "
-                   "settings apply\n",
-                   source_path.c_str(), load_error.c_str());
+      std::fprintf(
+          stderr,
+          "sft_main: %s carries no metadata block (%s); the pinned SFT "
+          "settings apply\n",
+          source_path.c_str(), load_error.c_str());
     }
     if (!config.resume_path.empty() &&
         metadata.stage != nanochat::Stage::kSft) {
       // D5: a base checkpoint's stored step is the base run's, and adopting it
       // would start the SFT schedule somewhere in the middle of its warmdown.
-      const char* recorded = metadata.stage == nanochat::Stage::kBase
-                                 ? "the base stage"
-                                 : (metadata.stage == nanochat::Stage::kRl
-                                        ? "the rl stage"
-                                        : "no SFT stage");
+      const char* recorded =
+          metadata.stage == nanochat::Stage::kBase
+              ? "the base stage"
+              : (metadata.stage == nanochat::Stage::kRl ? "the rl stage"
+                                                        : "no SFT stage");
       std::fprintf(stderr,
                    "sft_main: --resume needs an SFT checkpoint, and %s records "
                    "%s; use --warm-start for a base checkpoint\n",
@@ -350,12 +353,11 @@ int main(int argc, char** argv) {
   }
   // The shard owns the sequence length (section 5.1: the row capacity is
   // `max_seq_len + 1`, so the packed rows are the authority). A caller that
-  // pinned `--seq` has to agree with it, because a model at another length would
-  // read the packed rows at the wrong stride.
+  // pinned `--seq` has to agree with it, because a model at another length
+  // would read the packed rows at the wrong stride.
   const int shard_seq = shard.seq;
   if (seq_pinned && config.model.seq_len != shard_seq) {
-    std::fprintf(stderr,
-                 "sft_main: --seq is %d, the shard seq is %d\n",
+    std::fprintf(stderr, "sft_main: --seq is %d, the shard seq is %d\n",
                  config.model.seq_len, shard_seq);
     return 2;
   }
@@ -365,14 +367,14 @@ int main(int argc, char** argv) {
 
   // The gradient accumulation of section 5.1:
   //   total_batch_size / (device_batch_size * max_seq_len * world_size).
-  // An explicit `--grad-accum` wins, and a recipe without a recorded total batch
-  // size leaves the accumulation at one micro-batch.
+  // An explicit `--grad-accum` wins, and a recipe without a recorded total
+  // batch size leaves the accumulation at one micro-batch.
   const int world_size = config.world_size > 0 ? config.world_size : 1;
   if (grad_accum < 0) {
     grad_accum = 1;
     if (recipe.total_batch_size > 0 && config.batch > 0) {
-      const std::int64_t per_step = static_cast<std::int64_t>(config.batch) *
-                                    shard_seq * world_size;
+      const std::int64_t per_step =
+          static_cast<std::int64_t>(config.batch) * shard_seq * world_size;
       if (per_step > 0) {
         grad_accum = static_cast<int>(recipe.total_batch_size / per_step);
       }
@@ -399,14 +401,14 @@ int main(int argc, char** argv) {
   auto optimizer =
       nanochat::CreateOptimizer(model.get(), config.optimizer, *scheduler);
 
-  // The warm start and the resume (design decision D5). Both restore the weights
-  // and the optimizer moments; only the resume restores the step, because a warm
-  // start begins the fresh SFT schedule at 0. `nullptr` for the step is what
-  // keeps the caller's counter (`src/train.cc` leaves it alone).
+  // The warm start and the resume (design decision D5). Both restore the
+  // weights and the optimizer moments; only the resume restores the step,
+  // because a warm start begins the fresh SFT schedule at 0. `nullptr` for the
+  // step is what keeps the caller's counter (`src/train.cc` leaves it alone).
   int step = 0;
   if (!warm_start_path.empty()) {
-    if (!nanochat::Checkpointer::LoadModel(model.get(), optimizer.get(), nullptr,
-                                           warm_start_path)) {
+    if (!nanochat::Checkpointer::LoadModel(model.get(), optimizer.get(),
+                                           nullptr, warm_start_path)) {
       std::fprintf(stderr, "sft_main: cannot warm-start from %s\n",
                    warm_start_path.c_str());
       return 2;
@@ -435,7 +437,8 @@ int main(int argc, char** argv) {
       return 2;
     }
     if (val_shard.seq != shard_seq) {
-      std::fprintf(stderr, "sft_main: the validation shard has seq %d, the run %d\n",
+      std::fprintf(stderr,
+                   "sft_main: the validation shard has seq %d, the run %d\n",
                    val_shard.seq, shard_seq);
       return 2;
     }
@@ -454,10 +457,10 @@ int main(int argc, char** argv) {
         return 2;
       }
     } else {
-      // The `EvalBpb` fallback: with no byte table every target counts one byte.
-      token_bytes.assign(static_cast<std::size_t>(
-                             std::max(model_config.vocab_size, 1)),
-                         1);
+      // The `EvalBpb` fallback: with no byte table every target counts one
+      // byte.
+      token_bytes.assign(
+          static_cast<std::size_t>(std::max(model_config.vocab_size, 1)), 1);
       std::fprintf(stderr,
                    "sft_main: no --token-bytes table, so every target counts "
                    "one byte\n");
@@ -466,10 +469,10 @@ int main(int argc, char** argv) {
 
   // The driver's own step counter. `Optimizer::Step` is 1-based, and the
   // schedules that stay step-indexed evaluate at `step - 1`, which is the
-  // reference's 0-based `it` (design decision D2): the Muon momentum of step `k`
-  // is `MuonMomentum(k)`, computed at `k - 1`, so a warm start that resets the
-  // counter to 0 restarts the momentum ramp exactly as the reference does. No
-  // code changes for D2.
+  // reference's 0-based `it` (design decision D2): the Muon momentum of step
+  // `k` is `MuonMomentum(k)`, computed at `k - 1`, so a warm start that resets
+  // the counter to 0 restarts the momentum ramp exactly as the reference does.
+  // No code changes for D2.
   const int first_step = step > 0 ? step + 1 : 1;
   const int target_steps =
       std::max(first_step - 1 + config.num_iterations, config.num_iterations);
@@ -506,21 +509,21 @@ int main(int argc, char** argv) {
         ++row_cursor;
         ++rows_consumed;
       }
-      // The loss is the mean over the batch's valid targets, so the accumulation
-      // scale of `src/train.h` is 1 / grad_accum: the micro-batch sums then give
-      // the mean over the global batch.
+      // The loss is the mean over the batch's valid targets, so the
+      // accumulation scale of `src/train.h` is 1 / grad_accum: the micro-batch
+      // sums then give the mean over the global batch.
       last_micro_loss = model->ForwardLoss(tokens.data(), targets.data(),
                                            config.batch, shard_seq);
       model->BackwardAccumulate(1.0f / static_cast<float>(config.grad_accum));
     }
 
     // The progress stream (design decision D1): the reference advances progress
-    // once per batch boundary and keeps its running maximum. The iteration count
-    // when the run knows its total, and the fraction of the shard it consumed
-    // otherwise. The count is relative to this invocation's first step, so a
-    // resumed run walks its own warmdown instead of starting past the end of the
-    // previous one, and the value is capped at 1 so the multiplier can never go
-    // negative.
+    // once per batch boundary and keeps its running maximum. The iteration
+    // count when the run knows its total, and the fraction of the shard it
+    // consumed otherwise. The count is relative to this invocation's first
+    // step, so a resumed run walks its own warmdown instead of starting past
+    // the end of the previous one, and the value is capped at 1 so the
+    // multiplier can never go negative.
     const int iterations_done = current - first_step + 1;
     const float approx_progress =
         config.num_iterations > 0
@@ -586,8 +589,8 @@ int main(int argc, char** argv) {
   if (!config.checkpoint_path.empty()) {
     // The finetune records its stage, so a reader can tell an SFT checkpoint
     // from a base or RL one without a side file (stage A.6, open decision O3),
-    // and its recipe, so a later finetune inherits the batch shape and the rates
-    // (design decision D7).
+    // and its recipe, so a later finetune inherits the batch shape and the
+    // rates (design decision D7).
     nanochat::CheckpointSaveOptions options;
     options.stage = nanochat::Stage::kSft;
     options.step = last_step > 0 ? static_cast<std::uint64_t>(last_step) : 0;

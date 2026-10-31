@@ -184,11 +184,11 @@ void TestSchedules() {
   std::printf("optim_test: schedules ok\n");
 }
 
-// The SFT progress schedule (design decision D1 of docs/sft-parity-plan.md): the
-// three branches of `scripts/chat_sft.py:310-317`, the inclusive right endpoint
-// of the constant segment, the `progress == 1.0` endpoint, and the two guard
-// cases (`warmup_ratio == 0`, `warmdown_ratio == 0`) that must not divide by
-// zero.
+// The SFT progress schedule (design decision D1 of docs/sft-parity-plan.md):
+// the three branches of `scripts/chat_sft.py:310-317`, the inclusive right
+// endpoint of the constant segment, the `progress == 1.0` endpoint, and the two
+// guard cases (`warmup_ratio == 0`, `warmdown_ratio == 0`) that must not divide
+// by zero.
 void TestLrMultiplierForProgress() {
   SchedulerConfig config = MakeSchedulerConfig();
   config.warmup_ratio = 0.1f;
@@ -269,8 +269,7 @@ void TestLrMultiplierForProgress() {
   const Scheduler pretrain(MakeSchedulerConfig());
   for (int step = 1; step <= 11; ++step) {
     ExpectNear(pretrain_ratio.LrMultiplier(step), pretrain.LrMultiplier(step),
-               0.0f,
-               Format("warmup_ratio changed LrMultiplier(%d)", step));
+               0.0f, Format("warmup_ratio changed LrMultiplier(%d)", step));
   }
   std::printf("optim_test: progress schedule ok\n");
 }
@@ -533,9 +532,10 @@ void RunStepsTest(float clip, float init_lr_frac = 1.0f) {
       (void)reported;
     }
   }
-  std::printf("optim_test: grouping and updates ok (clip=%.6g, "
-              "init_lr_frac=%.6g)\n",
-              clip, static_cast<double>(init_lr_frac));
+  std::printf(
+      "optim_test: grouping and updates ok (clip=%.6g, "
+      "init_lr_frac=%.6g)\n",
+      clip, static_cast<double>(init_lr_frac));
 }
 
 // ---------------------------------------------------------------------------
@@ -592,9 +592,9 @@ void RunZeroGradTest() {
 // exactly once. Two optimizers over the same model shape, one at 1.0 and one at
 // 0.8, must report group rates in that exact ratio -- for the unembedding, the
 // embedding, the value embeddings, the residual lambdas, the x0 lambdas, the
-// smear and backout group, and the Muon matrices. A rate scaled twice would show
-// up as 0.64 of the base rate and a group that missed the scale as 1.0 of it, so
-// the ratio check fails on both mistakes.
+// smear and backout group, and the Muon matrices. A rate scaled twice would
+// show up as 0.64 of the base rate and a group that missed the scale as 1.0 of
+// it, so the ratio check fails on both mistakes.
 void TestInitLrFrac() {
   constexpr float kFrac = 0.8f;
   const Config config = MakeConfig();
@@ -730,8 +730,8 @@ void TestInitLrFrac() {
           initial_scaled[index] * (1.0f - lr * 0.01f) - lr * sign;
       const float got = view.master[i];
       if (std::fabs(got - want) > 2e-5f) {
-        Fail(Format("init_lr_frac scaled step[%zu]: got %.8g want %.8g",
-                    index, got, want));
+        Fail(Format("init_lr_frac scaled step[%zu]: got %.8g want %.8g", index,
+                    got, want));
         break;
       }
     }
@@ -860,8 +860,8 @@ void TestAdamWiring() {
 // The progress schedule reaches the optimizer through
 // `SetOptimizerProgressMultiplier` (design decision D1). The multiplier
 // replaces the step-based `LrMultiplier(step)` output for the step, it does not
-// multiply it, so the resolved learning rate is `group.lr * multiplier` with the
-// `init_lr_frac` scale in `group.lr` applied once and nothing squared.
+// multiply it, so the resolved learning rate is `group.lr * multiplier` with
+// the `init_lr_frac` scale in `group.lr` applied once and nothing squared.
 void TestProgressMultiplierOverride() {
   const Config config = MakeConfig();
   SchedulerConfig scheduler_config = MakeSchedulerConfig();
@@ -943,8 +943,8 @@ void TestProgressMultiplierOverride() {
         const float want = initial[i] * (1.0f - lr * 0.01f) - lr * sign;
         const float got = view.master[static_cast<std::int64_t>(i)];
         if (std::fabs(got - want) > 2e-5f) {
-          Fail(Format("override optimizer %zu value %zu: got %.8g want %.8g",
-                      k, i, got, want));
+          Fail(Format("override optimizer %zu value %zu: got %.8g want %.8g", k,
+                      i, got, want));
           break;
         }
       }

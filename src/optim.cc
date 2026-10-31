@@ -157,8 +157,8 @@ class NanochatOptimizer final : public Optimizer {
     float stats[2] = {0.0f, 1.0f};
     if (num_spans_ > 0) {
       // The gradient norm is the `GradNorm` composition, not a fused family: it
-      // is one `SpanReduce` over the same ragged list twice (the per-span dot of
-      // a buffer with itself is its sum of squares) plus the clip scale
+      // is one `SpanReduce` over the same ragged list twice (the per-span dot
+      // of a buffer with itself is its sum of squares) plus the clip scale
       // (src/ops.cc, spec/block_kinds.md section 6). The seam change that moved
       // the reduction out of the fused entry is what this call follows.
       ops::GradNormForward(norm_grads_, norm_counts_, num_spans_, config_.clip,
@@ -173,8 +173,8 @@ class NanochatOptimizer final : public Optimizer {
     // second scaling here would square the factor (design decision D3 in
     // `nanochat/optim.h`). A driver that resolves the rate from something other
     // than the step -- the SFT progress stream of design decision D1 -- hands
-    // its value to `SetProgressMultiplier`, which replaces the schedule's output
-    // for that step instead of multiplying it.
+    // its value to `SetProgressMultiplier`, which replaces the schedule's
+    // output for that step instead of multiplying it.
     const float lrm = lr_multiplier_override_ >= 0.0f
                           ? lr_multiplier_override_
                           : scheduler_.LrMultiplier(step);
@@ -410,11 +410,11 @@ class NanochatOptimizer final : public Optimizer {
       AdamWGroup& group = adamw_groups_[i];
       group.kind = specs[i].kind;
       // Design decision D3: the reference multiplies every group rate by
-      // `init_lr_frac` once, before the first step, and lets the schedule take it
-      // from there. The scaling happens here, where the per-group rate is set,
-      // and nowhere else; the smear group is scaled like every other group even
-      // though its rate is a constant of the recipe rather than a configured
-      // rate (section 5.2 of docs/sft-parity-plan.md).
+      // `init_lr_frac` once, before the first step, and lets the schedule take
+      // it from there. The scaling happens here, where the per-group rate is
+      // set, and nowhere else; the smear group is scaled like every other group
+      // even though its rate is a constant of the recipe rather than a
+      // configured rate (section 5.2 of docs/sft-parity-plan.md).
       group.lr = specs[i].lr * config_.init_lr_frac;
       group.beta1 = specs[i].beta1;
       group.beta2 = specs[i].beta2;
@@ -465,10 +465,9 @@ class NanochatOptimizer final : public Optimizer {
                        (reduce_cols ? group.rows : group.cols);
       // `init_lr_frac` scales the Muon matrices too, once, in the same place as
       // the AdamW groups (design decision D3).
-      group.lr =
-          config_.matrix_lr * config_.init_lr_frac *
-          std::sqrt(std::max(1.0f, static_cast<float>(group.rows) /
-                                      static_cast<float>(group.cols)));
+      group.lr = config_.matrix_lr * config_.init_lr_frac *
+                 std::sqrt(std::max(1.0f, static_cast<float>(group.rows) /
+                                              static_cast<float>(group.cols)));
       muon_groups_.push_back(std::move(group));
     }
 
@@ -684,9 +683,9 @@ float Scheduler::LrMultiplier(int step) const {
 
 // The SFT learning-rate multiplier (design decision D1 of
 // docs/sft-parity-plan.md): the body of `scripts/chat_sft.py:310-317`, in the
-// same three branches and with the same endpoints. `progress` is the fraction of
-// the run that has happened, not a step count, because an SFT run stops at the
-// end of its data and a step total fixed before the run started does not
+// same three branches and with the same endpoints. `progress` is the fraction
+// of the run that has happened, not a step count, because an SFT run stops at
+// the end of its data and a step total fixed before the run started does not
 // describe it.
 float Scheduler::LrMultiplierForProgress(float progress) const {
   const float warmup = config_.warmup_ratio;

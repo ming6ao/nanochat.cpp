@@ -311,8 +311,8 @@ std::vector<int> TinyTokenBytes(int vocab) {
   return table;
 }
 
-// One packed row pair: `seq` inputs and `seq` targets, the last two of which are
-// padding (a target of -1) on the shorter rows.
+// One packed row pair: `seq` inputs and `seq` targets, the last two of which
+// are padding (a target of -1) on the shorter rows.
 struct PackedRow {
   std::vector<int> tokens;
   std::vector<int> targets;
@@ -350,10 +350,10 @@ nanochat::SftShard Flatten(const std::vector<PackedRow>& rows, int seq) {
   return shard;
 }
 
-// The independent metric: run `ForwardLoss` row by row, sum the per-token losses
-// of the valid targets from the staged losses, sum the bytes those targets
-// represent, and divide. It never uses the `mean_loss * valid_targets` identity
-// the evaluator is built on.
+// The independent metric: run `ForwardLoss` row by row, sum the per-token
+// losses of the valid targets from the staged losses, sum the bytes those
+// targets represent, and divide. It never uses the `mean_loss * valid_targets`
+// identity the evaluator is built on.
 struct ExpectedBpb {
   double nats = 0.0;
   double bytes = 0.0;
@@ -361,7 +361,7 @@ struct ExpectedBpb {
 };
 
 ExpectedBpb ExpectedOverRows(Model* model, const std::vector<PackedRow>& rows,
-                            int seq, const std::vector<int>& token_bytes) {
+                             int seq, const std::vector<int>& token_bytes) {
   auto* impl = static_cast<TrainModel*>(model);
   ExpectedBpb expected;
   const std::size_t row_values = static_cast<std::size_t>(seq);
@@ -405,8 +405,8 @@ void CheckPackedRows() {
     return;
   }
 
-  const ExpectedBpb expected = ExpectedOverRows(model.get(), rows, seq,
-                                                token_bytes);
+  const ExpectedBpb expected =
+      ExpectedOverRows(model.get(), rows, seq, token_bytes);
   if (expected.valid == 0 || expected.bytes == 0.0) {
     Fail("packed rows: the shard has no valid targets");
     return;
@@ -438,7 +438,8 @@ void CheckPackedRows() {
         shard.tokens.data() + static_cast<std::size_t>(step) * 2 * seq,
         shard.targets.data() + static_cast<std::size_t>(step) * 2 * seq, 2,
         seq);
-    identity_nats += static_cast<double>(mean_loss) * static_cast<double>(valid);
+    identity_nats +=
+        static_cast<double>(mean_loss) * static_cast<double>(valid);
   }
   CheckClosed(result.bpb, identity_nats / (std::log(2.0) * expected.bytes),
               "packed rows: bpb from mean_loss * valid_targets");
@@ -456,8 +457,8 @@ void CheckPackedRowsTooShort() {
   model->InitWeights(99);
 
   const int seq = 5;
-  const nanochat::SftShard shard = Flatten(TinyShard(3, seq, config.vocab_size),
-                                           seq);
+  const nanochat::SftShard shard =
+      Flatten(TinyShard(3, seq, config.vocab_size), seq);
   const std::vector<int> token_bytes = TinyTokenBytes(config.vocab_size);
 
   nanochat::PackedBpb result;
@@ -476,8 +477,8 @@ void CheckPackedRowsTooShort() {
   // target at zero bytes would change the metric.
   std::vector<int> short_table(static_cast<std::size_t>(seq), 1);
   error.clear();
-  const nanochat::SftShard full = Flatten(TinyShard(2, seq, config.vocab_size),
-                                          seq);
+  const nanochat::SftShard full =
+      Flatten(TinyShard(2, seq, config.vocab_size), seq);
   if (nanochat::EvaluatePackedRows(model.get(), full, short_table, 2, 1,
                                    &result, &error)) {
     Fail("packed rows: an uncovered target was accepted");

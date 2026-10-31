@@ -647,7 +647,8 @@ void TestMissingTrailingFields() {
          "missing fields: created_utc is not the initializer");
   Expect(read.notes.empty(), "missing fields: notes is not the initializer");
   // The recipe block of D7 is appended last, so an older block does not carry
-  // it. Its members keep the defaults of include/nanochat/checkpoint_metadata.h.
+  // it. Its members keep the defaults of
+  // include/nanochat/checkpoint_metadata.h.
   Expect(read.recipe.device_batch_size == 0,
          "missing fields: recipe device_batch_size is not the initializer");
   Expect(read.recipe.warmdown_ratio == 0.65f,

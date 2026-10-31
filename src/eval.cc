@@ -196,8 +196,8 @@ void ScoreBatch(Model* model, const int* tokens, int batch, int seq,
 
 // Bits-per-byte over the packed validation rows (design decision D6 of
 // docs/sft-parity-plan.md). The packed-row counterpart of `EvalBpb`: the rows
-// come from an `NCSFT001` shard instead of a document loader, and the byte table
-// is the tokenizer's, as an `int` per token id.
+// come from an `NCSFT001` shard instead of a document loader, and the byte
+// table is the tokenizer's, as an `int` per token id.
 //
 // `Model::ForwardLoss` returns the mean over the valid targets of one batch, so
 // the nats that batch contributes are `mean_loss * valid_targets`. The metric
@@ -219,10 +219,8 @@ bool EvaluatePackedRows(Model* model, const SftShard& shard,
   if (shard.seq <= 0 || shard.rows <= 0) {
     return fail("the validation shard is empty");
   }
-  if (shard.tokens.size() <
-          static_cast<std::size_t>(shard.rows) * shard.seq ||
-      shard.targets.size() <
-          static_cast<std::size_t>(shard.rows) * shard.seq) {
+  if (shard.tokens.size() < static_cast<std::size_t>(shard.rows) * shard.seq ||
+      shard.targets.size() < static_cast<std::size_t>(shard.rows) * shard.seq) {
     return fail("the validation shard holds fewer values than its shape says");
   }
 
@@ -249,8 +247,7 @@ bool EvaluatePackedRows(Model* model, const SftShard& shard,
   std::int64_t total_valid = 0;
 
   for (int step = 0; step < eval_steps; ++step) {
-    const std::size_t base =
-        static_cast<std::size_t>(step) * rows_per_batch;
+    const std::size_t base = static_cast<std::size_t>(step) * rows_per_batch;
     const int* tokens = shard.tokens.data() + base;
     const int* targets = shard.targets.data() + base;
 
