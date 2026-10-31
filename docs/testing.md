@@ -15,6 +15,49 @@ tools. If you are waiting on the GPU to test logic, that logic should have been
 tested on CPU. All tiers run under a resource profile; see
 [sandbox.md](sandbox.md).
 
+### The four conformance tiers
+
+Four of the tiers above are the **conformance** tiers, and those four are the
+Tier axis of the matrix in [conformance-matrix.md](conformance-matrix.md):
+
+| Tier | Proves | Needs silicon |
+|---|---|---|
+| `T0 CPU` | The reference semantics of every graph, on the CPU backend | no |
+| `S0 simulator` | A device profile's behaviour, through the reference engine, the emulated kernels, the API interposer, and the collective mock | no |
+| `T1 GPU correctness` | One tiny shape per primitive (`B=2, T=8`) on the card | yes |
+| `T2 GPU parity` | The full oracle, the loss curve, and a small training run, against the committed goldens | yes |
+
+`T3 GPU benchmark/profile` is deliberately not among them: a throughput number
+that moves is information, not a pass or a fail, so no matrix row is a
+benchmark row.
+
+**Tier per device, not tier per model.** This is the rule of
+[model-and-device-bringup.md](model-and-device-bringup.md) §11, and it is what
+keeps a table of models × devices × tiers from growing into a slow gate:
+
+- `T0 CPU` for every model, always. This is the definition of conformant.
+- `S0 simulator` for a declared device with no physical sample on this host.
+- `T1 GPU correctness` for a device that has silicon here, at tiny shapes.
+- `T2 GPU parity` only for the flagship model, at a wave boundary.
+
+**Graph coverage is a column of every row.** A row names which of the five
+graphs of [model.md](model.md) it proves. The minimum for a passing row is the
+train step *and* decode; a complete row covers all five, and a row that skips a
+graph names the one it skips. Without that column a model that runs its train
+step and breaks in prefill looks green.
+
+**The matrix is generated and checked, never maintained.** It is rendered by
+`python3 tools/gen_matrix.py` from `models/*/spec.json` and
+`backends/*/caps.json`, and a document is validated against the derivation with
+`python3 tools/gen_matrix.py --check --matrix docs/conformance-matrix.md`. A
+row for an undeclared model, a tier the tier rule does not produce, a duplicate
+row, and a passing row that skips the train step or decode all fail, with the
+offending label named. `//tests:matrix_gate_test` runs the check in the T0 loop,
+so a hand-edited row breaks a gate instead of drifting, and
+`tools/isolation_gate.py` is the companion gate of §10.4: it regenerates a
+model's fixtures, diffs them against the committed bytes, and confirms every
+other model is unchanged.
+
 ### S0: the simulator tier
 
 S0 is the CPU-only tier that exercises H100/H200-class behavior without a

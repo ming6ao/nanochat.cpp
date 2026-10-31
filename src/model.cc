@@ -23,7 +23,10 @@
 #include <vector>
 
 #include "nanochat/kernels.h"
+#include "nanochat/logger.h"
+#include "nanochat/model_spec.h"
 #include "nanochat/optim.h"
+#include "nanochat/plan.h"
 #include "src/ops.h"
 
 namespace nanochat {
@@ -117,26 +120,20 @@ std::int64_t CountValidTargets(const int* targets, std::int64_t rows) {
 // reads host memory; the CUDA backend reads a device copy. The CUDA classifier
 // entry point synchronizes before it returns, so the buffer is safe to release
 // at the end of the scope that owns it.
-class StagedRowScale {
- public:
-  StagedRowScale(const float* host, std::int64_t count) {
-    if (host != nullptr && count > 0) {
-      const std::size_t bytes = static_cast<std::size_t>(count) * sizeof(float);
-      ptr_ = static_cast<float*>(kernels::Alloc(bytes));
-      kernels::Memcpy(ptr_, host, bytes, CopyDir::kHostToDevice);
-    }
-  }
-  ~StagedRowScale() {
-    if (ptr_ != nullptr) kernels::Free(ptr_);
-  }
-  StagedRowScale(const StagedRowScale&) = delete;
-  StagedRowScale& operator=(const StagedRowScale&) = delete;
-
-  const float* ptr() const { return ptr_; }
-
- private:
-  float* ptr_ = nullptr;
-};
+// One pointwise call with the parameter block spelled out. The family replaced
+// its scalar argument list with `PointwiseParams` for the row broadcast and the
+// transcendental codes (spec/pointwise_ops.md section 2), so the graph reads one
+// field per meaning instead of a positional argument.
+void Pw(PointwiseOp op, int count, const ComputeType* a, const ComputeType* b,
+        ComputeType* out, float alpha = 1.0f, float beta = 0.0f) {
+  if (count <= 0) return;
+  PointwiseParams params;
+  params.op = op;
+  params.count = count;
+  params.alpha = alpha;
+  params.beta = beta;
+  kernels::PointwiseForward(params, a, b, out);
+}
 
 // Copies a device buffer through the host and converts every element. The
 // master/compute sync runs only at initialization and at a checkpoint load, so
@@ -164,7 +161,9 @@ void ConvertDeviceBuffer(const Src* src, Dst* dst, std::int64_t count,
 // Construction / destruction
 // ---------------------------------------------------------------------------
 
-TrainModel::TrainModel(const Config& config) : Model(config) {
+TrainModel::TrainModel(const ModelSpec& spec, const Config& config,
+                       const Plan& plan)
+    : Model(config), spec_(spec), plan_(plan) {
   const int layers = config_.num_layers;
   const int hidden = config_.hidden_dim;
   const int heads = config_.num_heads;
@@ -198,7 +197,7 @@ TrainModel::TrainModel(const Config& config) : Model(config) {
     wte_grad_ = p.grad;
   }
   for (int i = 0; i < layers; ++i) {
-    if (!config_.has_value_embedding(i)) continue;
+    if (!BlockHasValueEmbedding(i)) continue;
     char name[64];
     std::snprintf(name, sizeof(name), "value_embeds.%d.weight", i);
     const Param& p =
@@ -268,7 +267,7 @@ TrainModel::TrainModel(const Config& config) : Model(config) {
       w.c_proj_attn = p.value;
       g.c_proj_attn_grad = p.grad;
     }
-    if (config_.has_value_embedding(i)) {
+    if (BlockHasValueEmbedding(i)) {
       std::snprintf(name, sizeof(name), "transformer.h.%d.attn.ve_gate.weight",
                     i);
       const Param& p =
@@ -332,6 +331,171 @@ TrainModel::Param& TrainModel::AddParam(const std::string& name,
   return params_.back();
 }
 
+bool TrainModel::BlockHasValueEmbedding(int layer) const {
+  if (layer < 0 || static_cast<std::size_t>(layer) >= spec_.blocks.size()) {
+    return false;
+  }
+  // The block list says whether this block consumes a value embedding (the
+  // ResFormer value-gated residual); the derived `Config` says which layers the
+  // embedding table covers. A block that declares the plain residual has none,
+  // so the two answers cannot drift into a parameter with no gate or a gate with
+  // no parameter.
+  return spec_.blocks[static_cast<std::size_t>(layer)].residual ==
+             ResidualKind::kBlend &&
+         config_.has_value_embedding(layer);
+}
+
+int TrainModel::BlockWindowLeft(int layer) const {
+  if (layer < 0 || static_cast<std::size_t>(layer) >= spec_.blocks.size()) {
+    return -1;
+  }
+  // The mask kind is the block's declared meaning: a `sliding_window` block gets
+  // the derived short window, and a `causal` block has no left extent. `-1` is
+  // `Config`'s "full context" spelling.
+  return spec_.blocks[static_cast<std::size_t>(layer)].attention ==
+                 AttentionKind::kSlidingWindow
+             ? config_.short_window()
+             : -1;
+}
+
+namespace {
+
+// The ordered block list a caller's own `Config` implies.
+//
+// The historical `Create(config)` entry point reads no spec, so its block list
+// is derived from the same two facts `Config` already carries: the window pattern
+// ('S' entries are sliding-window blocks, and the final layer is full context,
+// which is exactly `Config::window_left`), and whether value embeddings exist at
+// all (the ResFormer value-gated residual). That keeps the historical meaning of
+// the call while making the graph read a block list: after this, the topology is
+// driven by block kinds and not by an index into a pattern string.
+void BlocksFromConfig(const Config& config, std::vector<BlockSpec>* blocks) {
+  blocks->clear();
+  blocks->reserve(static_cast<std::size_t>(config.num_layers));
+  for (int i = 0; i < config.num_layers; ++i) {
+    BlockSpec block;
+    const bool last = i == config.num_layers - 1;
+    block.attention =
+        (!last && !config.window_pattern.empty() &&
+         config.window_pattern[static_cast<std::size_t>(i) %
+                               config.window_pattern.size()] == 'S')
+            ? AttentionKind::kSlidingWindow
+            : AttentionKind::kCausal;
+    block.residual =
+        config.value_embedding ? ResidualKind::kBlend : ResidualKind::kPlain;
+    blocks->push_back(block);
+  }
+}
+
+// The description a caller's own `Config` implies, for the historical entry
+// point. It names no model package, because this call read none.
+ModelSpec SpecFromConfig(const Config& config) {
+  ModelSpec spec;
+  spec.spec_version = kModelSpecVersion;
+  spec.name = "config";
+  // The mechanisms this Config needs, spelled the way a spec's `requires` is: a
+  // pattern with an 'S' entry needs the windowed mask, and every block needs the
+  // complete primitive tier.
+  spec.requires_features = kFeaturePrimitiveTierComplete;
+  for (char kind : config.window_pattern) {
+    if (kind == 'S') spec.requires_features |= kFeatureSlidingWindow;
+  }
+  if (config.value_embedding) spec.requires_features |= kFeatureValueGate;
+  spec.dimensions.num_heads = config.num_heads;
+  spec.dimensions.num_kv_heads = config.num_kv_heads;
+  spec.dimensions.hidden_dim = config.hidden_dim;
+  spec.dimensions.seq_len = config.seq_len;
+  spec.dimensions.rope_base = config.rope_base;
+  spec.embeddings.vocab_size = config.vocab_size;
+  spec.embeddings.padded_vocab_size = config.padded_vocab_size;
+  spec.embeddings.value_embedding = config.value_embedding;
+  spec.blocks.clear();
+  BlocksFromConfig(config, &spec.blocks);
+  return spec;
+}
+
+// Field-by-field agreement between the Config a caller passed and the one the
+// spec derives. The selector's contract is that the two describe one model: a
+// caller that passes a `Config` disagreeing with its spec is asking for two
+// different models, and the error names the first field that differs.
+bool ConfigsAgree(const Config& given, const Config& derived,
+                  std::string* error) {
+  const auto disagree = [error](const char* field, const std::string& a,
+                                const std::string& b) {
+    if (error != nullptr) {
+      *error = std::string("the spec derives a Config whose ") + field +
+               " is " + a + ", but the caller passed " + b;
+    }
+    return false;
+  };
+  if (given.num_layers != derived.num_layers) {
+    return disagree("num_layers", std::to_string(derived.num_layers),
+                    std::to_string(given.num_layers));
+  }
+  if (given.num_heads != derived.num_heads) {
+    return disagree("num_heads", std::to_string(derived.num_heads),
+                    std::to_string(given.num_heads));
+  }
+  if (given.num_kv_heads != derived.num_kv_heads) {
+    return disagree("num_kv_heads", std::to_string(derived.num_kv_heads),
+                    std::to_string(given.num_kv_heads));
+  }
+  if (given.hidden_dim != derived.hidden_dim) {
+    return disagree("hidden_dim", std::to_string(derived.hidden_dim),
+                    std::to_string(given.hidden_dim));
+  }
+  if (given.seq_len != derived.seq_len) {
+    return disagree("seq_len", std::to_string(derived.seq_len),
+                    std::to_string(given.seq_len));
+  }
+  if (given.vocab_size != derived.vocab_size) {
+    return disagree("vocab_size", std::to_string(derived.vocab_size),
+                    std::to_string(given.vocab_size));
+  }
+  if (given.padded_vocab_size != derived.padded_vocab_size) {
+    return disagree("padded_vocab_size",
+                    std::to_string(derived.padded_vocab_size),
+                    std::to_string(given.padded_vocab_size));
+  }
+  if (given.rope_base != derived.rope_base) {
+    return disagree("rope_base", std::to_string(derived.rope_base),
+                    std::to_string(given.rope_base));
+  }
+  if (given.window_pattern != derived.window_pattern) {
+    return disagree("window_pattern", "\"" + derived.window_pattern + "\"",
+                    "\"" + given.window_pattern + "\"");
+  }
+  if (given.value_embedding != derived.value_embedding) {
+    return disagree("value_embedding", derived.value_embedding ? "true" : "false",
+                    given.value_embedding ? "true" : "false");
+  }
+  return true;
+}
+
+// The one line the model logs for its plan. `tools/nanochat doctor` prints the
+// full report from `//src:plan_main`; this is the same decision in the log a
+// training run already writes, so a user sees which implementation each
+// composition resolved to without reading source.
+std::string DescribePlan(const Plan& plan) {
+  std::string line = std::string("plan: spec \"") + plan.spec_name +
+                     "\", graph " + GraphKindName(plan.graph) +
+                     ", device " + std::to_string(plan.device_index);
+  for (const CompositionChoice& choice : plan.choices) {
+    line += std::string("\n  ") + CompositionName(choice.composition) + ": " +
+            choice.implementation + (choice.fused ? " (fused)" : "");
+    for (const DeclinedImpl& declined : choice.declined) {
+      line += "\n      declined " + declined.implementation + ": " +
+              declined.reason;
+    }
+  }
+  line +=
+      "\n  (this Plan is the device-and-graph plan; it is unrelated to "
+      "python/nanochat_cpp/plan.py, the training-hyperparameter planner)";
+  return line;
+}
+
+}  // namespace
+
 std::unique_ptr<Model> Model::Create(const Config& config, std::string* error) {
   if (!config.Validate(error)) return nullptr;
   const Caps caps = kernels::GetCaps();
@@ -342,7 +506,69 @@ std::unique_ptr<Model> Model::Create(const Config& config, std::string* error) {
     }
     return nullptr;
   }
-  return std::make_unique<TrainModel>(config);
+  // No spec is read on this path, so the caller's `Config` stays the authority
+  // and the plan is plan-less: the block list is the one that Config implies.
+  return std::make_unique<TrainModel>(SpecFromConfig(config), config, Plan());
+}
+
+std::unique_ptr<Model> Model::Create(const Config& config, const char* spec_name,
+                                     std::string* error) {
+  if (!config.Validate(error)) return nullptr;
+  const Caps caps = kernels::GetCaps();
+  if (!caps.Supports(kComputeDType)) {
+    if (error != nullptr) {
+      *error =
+          std::string("compute dtype is not supported by ") + caps.device_name;
+    }
+    return nullptr;
+  }
+
+  // 1. The description. A null name selects the built-in default, so a caller
+  // with no opinion about the model definition keeps the historical behaviour.
+  ModelSpec spec;
+  std::string why;
+  if (!LookupModelSpec(spec_name, &spec, &why)) {
+    if (error != nullptr) *error = why;
+    return nullptr;
+  }
+
+  // 2. The derived struct, and the check that the caller and the spec describe
+  // one model.
+  Config derived;
+  if (!ModelSpecToConfig(spec, &derived, &why)) {
+    if (error != nullptr) {
+      *error = "spec \"" + spec.name + "\" is invalid: " + why;
+    }
+    return nullptr;
+  }
+  if (!ConfigsAgree(config, derived, &why)) {
+    if (error != nullptr) {
+      *error = "spec \"" + spec.name + "\" disagrees with the given Config: " +
+               why;
+    }
+    return nullptr;
+  }
+
+  // 3. The plan, built once (docs/model-and-device-bringup.md section 9.1 rule
+  // 2: one caller at first, no entry point changes). Nothing re-decides at
+  // launch, and a rejection is the caller's answer rather than a warning.
+  PlanRequest request;
+  request.model = &spec;
+  request.graph = GraphKind::kTrain;
+  request.device_index = caps.device_index;
+  std::string why_not;
+  const Plan plan = BuildPlan(request, &why_not);
+  if (!plan.ok) {
+    if (error != nullptr) *error = why_not;
+    return nullptr;
+  }
+
+  // 4. The choice is observable: one log line per plan, through the logger the
+  // run already writes. (This Plan is unrelated to `python/nanochat_cpp/plan.py`.)
+  Logger logger;
+  logger.Info(DescribePlan(plan));
+
+  return std::make_unique<TrainModel>(spec, derived, plan);
 }
 
 // ---------------------------------------------------------------------------
@@ -829,7 +1055,7 @@ void TrainModel::RunForward(const int* tokens, const int* targets, int batch,
 
   const ComputeType* x = x0;
   for (int i = 0; i < layers; ++i) {
-    shape.window_left = config_.window_left(i);
+    shape.window_left = BlockWindowLeft(i);
     ops::BlockActivations& acts =
         save_for_backward ? lacts_[static_cast<std::size_t>(i)] : eval_block_;
     ops::BlockForward(shape, lweights_[static_cast<std::size_t>(i)], acts,
@@ -853,7 +1079,10 @@ void TrainModel::RunForward(const int* tokens, const int* targets, int batch,
   ops::RmsNormForward(rows, hidden, kRmsEps, x_final_pre, x_final_norm,
                       rstd_final);
 
-  ClassifierParams classifier;
+  // The classifier composition, not the fused family: the loss is built from
+  // `Pointwise`, `RowReduce` and the per-row `Embedding` gather
+  // (spec/block_kinds.md section 4: the composition tier is the definition).
+  ops::ClassifierShape classifier;
   classifier.vocab_size = vocab;
   classifier.padded_vocab_size = padded_vocab;
   classifier.softcap = kLogitSoftcap;
@@ -862,7 +1091,7 @@ void TrainModel::RunForward(const int* tokens, const int* targets, int batch,
     classifier.rows = static_cast<int>(rows);
     ops::LinearForward(x_final_norm, lm_head_, raw_logits_, rows, hidden,
                        padded_vocab, false, &head_fp8_);
-    kernels::ClassifierForward(classifier, raw_logits_, targets, losses_);
+    ops::ClassifierForward(classifier, raw_logits_, targets, losses_);
   } else {
     // Tile the classifier over row chunks so the logits buffer stays small.
     for (std::int64_t off = 0; off < rows; off += eval_chunk_rows_) {
@@ -871,8 +1100,8 @@ void TrainModel::RunForward(const int* tokens, const int* targets, int batch,
       classifier.rows = static_cast<int>(chunk);
       ops::LinearForward(x_final_norm + off * hidden, lm_head_, eval_logits_,
                          chunk, hidden, padded_vocab);
-      kernels::ClassifierForward(classifier, eval_logits_, targets + off,
-                                 eval_losses_ + off);
+      ops::ClassifierForward(classifier, eval_logits_, targets + off,
+                             eval_losses_ + off);
     }
   }
 }
@@ -953,7 +1182,7 @@ void TrainModel::BackwardInternal(const float* row_weights, float scale,
   // `row_weights` folds `row_weights[r] * scale / divisor` into the
   // classifier's per-row scale; a null pointer keeps the uniform path with one
   // scaling pass.
-  ClassifierParams classifier;
+  ops::ClassifierShape classifier;
   classifier.rows = static_cast<int>(rows);
   classifier.vocab_size = vocab;
   classifier.padded_vocab_size = padded_vocab;
@@ -969,15 +1198,14 @@ void TrainModel::BackwardInternal(const float* row_weights, float scale,
     }
     host_row_scale = effective.data();
   }
-  StagedRowScale staged_row_scale(host_row_scale, rows);
-  classifier.row_scale = staged_row_scale.ptr();
+  // The composition reads the per-row weight on the host, where the caller
+  // already computed it, so no device copy is needed.
+  classifier.row_scale = host_row_scale;
 
-  kernels::ClassifierBackward(classifier, raw_logits_, targets_.data(),
-                              dlogits_);
+  ops::ClassifierBackward(classifier, raw_logits_, targets_.data(), dlogits_);
   if (row_weights == nullptr) {
-    kernels::PointwiseForward(PointwiseOp::kScale,
-                              static_cast<int>(rows * padded_vocab), dlogits_,
-                              nullptr, scale / divisor, 0.0f, dlogits_);
+    Pw(PointwiseOp::kScale, static_cast<int>(rows * padded_vocab), dlogits_,
+       nullptr, dlogits_, scale / divisor);
   }
 
   ops::LinearWgrad(x_final_norm_, dlogits_, lm_head_grad_, rows, hidden,
@@ -1015,11 +1243,10 @@ void TrainModel::BackwardInternal(const float* row_weights, float scale,
                   CopyDir::kDeviceToDevice);
   for (int i = layers - 1; i >= 0; --i) {
     if (i == backout_layer_) {
-      kernels::PointwiseForward(PointwiseOp::kScaleAdd,
-                                static_cast<int>(rows * hidden), dcur,
-                                dbackout_, 1.0f, 1.0f, dcur);
+      Pw(PointwiseOp::kScaleAdd, static_cast<int>(rows * hidden), dcur,
+         dbackout_, dcur, 1.0f, 1.0f);
     }
-    shape.window_left = config_.window_left(i);
+    shape.window_left = BlockWindowLeft(i);
     const ComputeType* x_in = (i == 0) ? x0_ : lacts_[i - 1].x_out;
     ops::BlockBackward(shape, lweights_[i], lacts_[i], lgrads_[i],
                        block_scratch_, tokens_.data(), cos_table(), sin_table(),
@@ -1031,9 +1258,8 @@ void TrainModel::BackwardInternal(const float* row_weights, float scale,
 
   // `dcur` is the gradient w.r.t. the post-smear embedding x0. The per-layer
   // x0_lambdas terms were accumulated separately in x0_acc_.
-  kernels::PointwiseForward(PointwiseOp::kScaleAdd,
-                            static_cast<int>(rows * hidden), dcur, x0_acc_,
-                            1.0f, 1.0f, dcur);
+  Pw(PointwiseOp::kScaleAdd, static_cast<int>(rows * hidden), dcur, x0_acc_,
+     dcur, 1.0f, 1.0f);
   ops::SmearBackward(batch_, seq_, hidden, emb_norm_, smear_gate_, smear_sig_,
                      ReadHost(smear_lambda_), dcur, smear_gate_grad_,
                      smear_lambda_grad_, de_);

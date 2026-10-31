@@ -27,6 +27,16 @@
 // makes the normalization statistics recoverable, which is why the header says
 // the backward "reads the saved forward outputs ... to recover the
 // normalization statistics".
+//
+// This backend is the proof of the primitive and composition tier
+// (docs/model-and-device-bringup.md section 7.4): the loops below are the
+// primitives, `src/ops.cc` is the definition of the compositions over them, and
+// the reference trades speed for clarity. `backends/cpu/caps.json` states the
+// section 7.4 consequence as data by declaring no fused-override bit, so the
+// planner resolves every composition to the composition path here. The fused
+// families that still live in this file (RmsNorm, QkPrep, Classifier,
+// ValueGate) are the symbols `src/ops.cc` calls today; they are removed once
+// that call site is rewritten, and the README names them as the follow-up.
 
 #include "nanochat/kernels.h"
 #include "nanochat/device_profile.h"
@@ -37,6 +47,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <limits>
@@ -72,6 +83,25 @@ inline float AsFloat(ComputeType v) { return AsFloatT(v); }
 inline ComputeType ToCompute(float v) { return ToComputeT(v); }
 
 inline float Sigmoid(float x) { return 1.0f / (1.0f + std::exp(-x)); }
+
+// The `kRowScale` guard (spec/pointwise_ops.md section 3.1). A width of 0, a
+// width larger than the count, and a count that is not a multiple of it are
+// declared errors, because a wrong width silently reads the wrong row and every
+// number downstream still looks plausible. The seam has no error return, so the
+// rejection is a message naming the count and the width plus no write at all: a
+// loud no-op beats a plausible wrong answer, and the caller-side rejection
+// belongs to the composition tier.
+inline bool ValidRowScaleWidth(int count, int row_width) {
+  return row_width > 0 && row_width <= count && count % row_width == 0;
+}
+
+inline void RejectRowScaleWidth(const char* entry, int count, int row_width) {
+  std::fprintf(stderr,
+               "pointwise: %s: kRowScale needs row_width > 0, "
+               "row_width <= count and count %% row_width == 0 "
+               "(count %d, row_width %d)\n",
+               entry, count, row_width);
+}
 
 // Zero a typed ComputeType range.
 inline void ZeroFill(ComputeType* ptr, std::size_t count) {
@@ -979,14 +1009,51 @@ void AttentionBackward(const AttentionParams& params, const ComputeType* q,
 // ---------------------------------------------------------------------------
 // Pointwise
 // ---------------------------------------------------------------------------
+//
+// One loop over the flat element count and one `switch` arm per code
+// (spec/pointwise_ops.md). The switch has no `default` arm on purpose: the enum
+// is closed, so a code this file forgets is a compile error rather than a
+// silent fallthrough.
+//
+// `kRowScale` is the row broadcast (D-002, spec/pointwise_ops.md section 3.1):
+// `a` holds one scalar per row and `b`/`out` hold `count` values, so
+// `out[r, c] = a[r] * b[r, c]` needs no materialized `rows x width` operand, no
+// second pass, and no workspace slot that grows with the sequence length. It is
+// the one code whose index expression is not `i`, so it is handled before the
+// elementwise loop; the row scalar is read once per row, before the row it
+// addresses is written, which is what keeps an `out` that aliases `a` reading
+// the value it was given. It reads no scalar of the parameter block: the
+// spec's field list for the code is `row_width` alone.
 
-void PointwiseForward(PointwiseOp op, int n, const ComputeType* a,
-                      const ComputeType* b, float alpha, float beta,
-                      ComputeType* out) {
+void PointwiseForward(const PointwiseParams& params, const ComputeType* a,
+                      const ComputeType* b, ComputeType* out) {
+  const int n = params.count;
+  if (n <= 0 || a == nullptr || out == nullptr) return;
+  const float alpha = params.alpha;
+  const float beta = params.beta;
+
+  if (params.op == PointwiseOp::kRowScale) {
+    const int row_width = params.row_width;
+    if (!ValidRowScaleWidth(n, row_width)) {
+      RejectRowScaleWidth("PointwiseForward", n, row_width);
+      return;
+    }
+    if (b == nullptr) return;
+    const int rows = n / row_width;
+    for (int r = 0; r < rows; ++r) {
+      const std::int64_t base = static_cast<std::int64_t>(r) * row_width;
+      const float scalar = AsFloat(a[r]);
+      for (int c = 0; c < row_width; ++c) {
+        out[base + c] = ToCompute(scalar * AsFloat(b[base + c]));
+      }
+    }
+    return;
+  }
+
   for (int i = 0; i < n; ++i) {
     const float av = AsFloat(a[i]);
     float result = 0.0f;
-    switch (op) {
+    switch (params.op) {
       case PointwiseOp::kScale:
         result = alpha * av;
         break;
@@ -1006,18 +1073,67 @@ void PointwiseForward(PointwiseOp op, int n, const ComputeType* a,
         result = cap * std::tanh(av / cap);
         break;
       }
+      case PointwiseOp::kExp:
+        result = std::exp(av);
+        break;
+      case PointwiseOp::kRsqrt:
+        result = 1.0f / std::sqrt(av);
+        break;
+      case PointwiseOp::kLog:
+        result = std::log(av);
+        break;
+      case PointwiseOp::kRowScale:
+        // Unreachable: the row broadcast is handled above, before the loop,
+        // because its index expression is not `i`. Named here so the switch
+        // stays exhaustive with no `default` arm.
+        break;
     }
     out[i] = ToCompute(result);
   }
 }
 
-void PointwiseBackward(PointwiseOp op, int n, const ComputeType* a,
-                       const ComputeType* b, const ComputeType* dy, float alpha,
-                       float beta, ComputeType* da, ComputeType* db) {
+void PointwiseBackward(const PointwiseParams& params, const ComputeType* a,
+                       const ComputeType* b, const ComputeType* dy,
+                       ComputeType* da, ComputeType* db) {
+  const int n = params.count;
+  if (n <= 0 || a == nullptr || dy == nullptr) return;
+  const float alpha = params.alpha;
+  const float beta = params.beta;
+
+  if (params.op == PointwiseOp::kRowScale) {
+    const int row_width = params.row_width;
+    if (!ValidRowScaleWidth(n, row_width)) {
+      RejectRowScaleWidth("PointwiseBackward", n, row_width);
+      return;
+    }
+    const int rows = n / row_width;
+    // `da[r] = sum_c dy[r, c] * b[r, c]` is the per-row reduction of
+    // spec/pointwise_ops.md section 3.1. It runs as a loop over the row the
+    // caller already gave us, so the forward's broadcast costs no allocation
+    // here either.
+    if (da != nullptr) {
+      for (int r = 0; r < rows; ++r) {
+        const std::int64_t base = static_cast<std::int64_t>(r) * row_width;
+        double sum = 0.0;
+        for (int c = 0; c < row_width; ++c) {
+          sum += static_cast<double>(AsFloat(dy[base + c])) *
+                 static_cast<double>(AsFloat(b[base + c]));
+        }
+        da[r] = ToCompute(static_cast<float>(sum));
+      }
+    }
+    if (db != nullptr) {
+      for (int i = 0; i < n; ++i) {
+        db[i] = ToCompute(AsFloat(a[i / row_width]) * AsFloat(dy[i]));
+      }
+    }
+    return;
+  }
+
   for (int i = 0; i < n; ++i) {
     const float av = AsFloat(a[i]);
     const float dyv = AsFloat(dy[i]);
-    switch (op) {
+    switch (params.op) {
       case PointwiseOp::kScale:
         if (da != nullptr) da[i] = ToCompute(alpha * dyv);
         break;
@@ -1045,6 +1161,27 @@ void PointwiseBackward(PointwiseOp op, int n, const ComputeType* a,
         }
         break;
       }
+      case PointwiseOp::kExp:
+        // d/da exp(a) = exp(a), recomputed from `a`. The contract says the
+        // backward reads its operands and never `out`, so a fused override and
+        // a composition can share one workspace
+        // (spec/pointwise_ops.md section 2).
+        if (da != nullptr) da[i] = ToCompute(dyv * std::exp(av));
+        break;
+      case PointwiseOp::kRsqrt: {
+        // d/da a^(-1/2) = -0.5 * a^(-3/2), recomputed from `a`.
+        if (da != nullptr) {
+          const float r = 1.0f / std::sqrt(av);
+          da[i] = ToCompute(-0.5f * dyv * r * r * r);
+        }
+        break;
+      }
+      case PointwiseOp::kLog:
+        if (da != nullptr) da[i] = ToCompute(dyv / av);
+        break;
+      case PointwiseOp::kRowScale:
+        // Unreachable: handled above, as in the forward.
+        break;
     }
   }
 }
@@ -1446,6 +1583,113 @@ void MuonUpdate(const MuonParams& params, const float* stacked_grads,
       value[i] = ToCompute(pi);
     }
   }
+}
+
+// ---------------------------------------------------------------------------
+// Reductions (the primitive tier's two entries, D-001)
+// ---------------------------------------------------------------------------
+//
+// `RowReduce` is the highest-risk line in the seam (D-001, D-006): one
+// descriptor serves RmsNorm's sum of squares, QkPrep's `head_dim` slice inside
+// a wider row, and the Classifier's vocabulary-offset row reduction, so one
+// indexing mistake reaches all three operators at once. It is written exactly
+// as the descriptor reads it: segment `s` starts at `offset + s * count *
+// stride` and walks `count` elements `stride` apart.
+//
+// `SpanReduce` is the ragged sibling: the span pointers and their lengths live
+// in memory the caller filled, so nothing here returns to the host for them and
+// nothing allocates. The order across spans is span 0 first, which is what
+// makes this backend's answer reproducible; the seam says the order is
+// unspecified, so a device that sums in another order is gated by a tolerance
+// and not by bytes.
+
+void RowReduce(const RowReduceParams& params, const ComputeType* a,
+               float* out) {
+  const int n_out = params.n_out;
+  const int count = params.count;
+  if (n_out <= 0 || count <= 0 || a == nullptr || out == nullptr) return;
+  // A non-positive stride would fold every segment onto one element; the seam
+  // declares 1 as the dense default and a caller has no reason to pass 0.
+  const std::int64_t stride = params.stride > 0 ? params.stride : 1;
+  const std::int64_t pitch = static_cast<std::int64_t>(count) * stride;
+  for (int s = 0; s < n_out; ++s) {
+    const ComputeType* seg =
+        a + params.offset + static_cast<std::int64_t>(s) * pitch;
+    switch (params.op) {
+      case ReduceOp::kSumSq: {
+        double sum = 0.0;
+        for (int j = 0; j < count; ++j) {
+          const double v = AsFloat(seg[static_cast<std::int64_t>(j) * stride]);
+          sum += v * v;
+        }
+        out[s] = static_cast<float>(sum);
+        break;
+      }
+      case ReduceOp::kSum: {
+        double sum = 0.0;
+        for (int j = 0; j < count; ++j) {
+          sum += static_cast<double>(
+              AsFloat(seg[static_cast<std::int64_t>(j) * stride]));
+        }
+        out[s] = static_cast<float>(sum);
+        break;
+      }
+      case ReduceOp::kMax: {
+        float best = -std::numeric_limits<float>::infinity();
+        for (int j = 0; j < count; ++j) {
+          const float v = AsFloat(seg[static_cast<std::int64_t>(j) * stride]);
+          if (v > best) best = v;
+        }
+        out[s] = best;
+        break;
+      }
+      case ReduceOp::kLogSumExp: {
+        // Max-stable: the row maximum is subtracted before the exponential and
+        // added back, so a row of large logits does not overflow and the result
+        // is the natural log of the sum of exponentials.
+        float best = -std::numeric_limits<float>::infinity();
+        for (int j = 0; j < count; ++j) {
+          const float v = AsFloat(seg[static_cast<std::int64_t>(j) * stride]);
+          if (v > best) best = v;
+        }
+        double sum = 0.0;
+        for (int j = 0; j < count; ++j) {
+          const float v = AsFloat(seg[static_cast<std::int64_t>(j) * stride]);
+          sum += std::exp(static_cast<double>(v - best));
+        }
+        out[s] = best + static_cast<float>(std::log(sum));
+        break;
+      }
+    }
+  }
+}
+
+void SpanReduce(const SpanReduceParams& params, const ComputeType* const* spans,
+                const ComputeType* const* other, float* out) {
+  if (out == nullptr) return;
+  double acc = 0.0;
+  if (spans != nullptr && params.counts != nullptr) {
+    for (int s = 0; s < params.num_spans; ++s) {
+      const ComputeType* span = spans[s];
+      const int n = params.counts[s];
+      if (span == nullptr || n <= 0) continue;
+      const ComputeType* second = other != nullptr ? other[s] : nullptr;
+      if (second == nullptr) {
+        for (int i = 0; i < n; ++i) {
+          acc += static_cast<double>(AsFloat(span[i]));
+        }
+      } else {
+        // One entry point serves a plain sum and a dot: the second list is the
+        // same ragged shape, so the per-span reduction of the pair is a dot.
+        for (int i = 0; i < n; ++i) {
+          acc += static_cast<double>(AsFloat(span[i])) *
+                 static_cast<double>(AsFloat(second[i]));
+        }
+      }
+    }
+  }
+  const float value = params.scale * static_cast<float>(acc);
+  out[0] = params.accumulate ? out[0] + value : value;
 }
 
 // ---------------------------------------------------------------------------

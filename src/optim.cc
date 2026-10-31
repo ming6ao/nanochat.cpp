@@ -21,6 +21,8 @@
 
 #include "nanochat/optim.h"
 
+#include "src/ops.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
@@ -154,8 +156,13 @@ class NanochatOptimizer final : public Optimizer {
     // logger and the clip scale for the updates. Nothing is staged.
     float stats[2] = {0.0f, 1.0f};
     if (num_spans_ > 0) {
-      kernels::GradNorm(norm_grads_, norm_counts_, num_spans_, config_.clip,
-                        norm_dev_, norm_dev_ + 1);
+      // The gradient norm is the `GradNorm` composition, not a fused family: it
+      // is one `SpanReduce` over the same ragged list twice (the per-span dot of
+      // a buffer with itself is its sum of squares) plus the clip scale
+      // (src/ops.cc, spec/block_kinds.md section 6). The seam change that moved
+      // the reduction out of the fused entry is what this call follows.
+      ops::GradNormForward(norm_grads_, norm_counts_, num_spans_, config_.clip,
+                           norm_dev_, norm_dev_ + 1);
       kernels::Memcpy(stats, norm_dev_, sizeof(stats), CopyDir::kDeviceToHost);
     }
     grad_norm_ = stats[0];

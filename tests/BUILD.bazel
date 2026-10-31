@@ -4,6 +4,7 @@
 # backend or the model skeleton can reuse. See docs/testing.md.
 
 load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library", "cc_test")
+load("@rules_python//python:defs.bzl", "py_test")
 load("//:nanochat.bzl", "nanochat_copts", "precision_defines")
 
 package(default_visibility = ["//visibility:public"])
@@ -371,22 +372,119 @@ cc_test(
     size = "small",
 )
 
-# The device profile / MFU consistency gate (docs/simulator.md section 7): the
-# simulator's capability table and `PeakFlopsForDevice` must agree on every
-# shared entry. Vendor-free and GPU-free, so it runs in the default T0 loop;
-# it carries the `sim` tag because it is part of the S0 simulator tier.
+# The device profile / MFU consistency gate (docs/simulator.md section 7) and
+# the caps.json derivation gate (docs/model-and-device-bringup.md sections 6 and
+# 16): the simulator's capability table and `PeakFlopsForDevice` must agree on
+# every shared entry, and every row of the table must re-derive from a
+# `devices[]` entry in `backends/<name>/caps.json`. The two declarations are the
+# test's data, so it reads the same bytes the derivation reads. Vendor-free and
+# GPU-free, so it runs in the default T0 loop; it carries the `sim` tag because
+# it is part of the S0 simulator tier.
 cc_test(
     name = "device_profile_test",
     srcs = ["device_profile_test.cc"],
     copts = nanochat_copts(),
+    data = [
+        "//backends/cpu:caps_json",
+        "//backends/cuda:caps_json",
+    ],
     deps = [
         "//include/nanochat:nanochat",
         # `PeakFlopsForDevice` stays the MFU authority and lives with the
         # harness; the test reads both tables to compare them.
         "//src:model",
+        # The declarations are JSON, so the test parses them with the same
+        # reader the derivation uses instead of a second hand-rolled scanner.
+        "//src:json",
     ],
     size = "small",
     tags = ["sim"],
+)
+
+# The section 16 P3 gate: a plan is built under T0 CPU with no device present
+# (docs/model-and-device-bringup.md section 9.1 rule 1). Four claims: a complete
+# fabricated capability mask builds a plan whose every composition runs the
+# composition path; a mask missing a required bit is rejected with the bit and
+# its consequence named; a mask that satisfies `requires` but lacks a
+# composition's own bit leaves that composition unplaced and names the gap; and
+# a mask declaring an override bit selects the fused family and records the
+# composition as the declined fallback. No device is opened, no checkpoint is
+# read, and no kernel runs.
+cc_test(
+    name = "plan_gate_test",
+    srcs = ["plan_gate_test.cc"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    # The reference declaration is what a device that reports no mask is read
+    # through, so the fabricated device answers are compared with the same file
+    # a launch reads.
+    data = ["//backends/cpu:caps_json"],
+    deps = [
+        "//include/nanochat:nanochat",
+        "//src:model_spec",
+        # `src/plan_internal.h` is the fabricated-device seam: the test supplies
+        # the device's answer and the registration table itself.
+        "//src:plan",
+    ],
+    size = "small",
+)
+
+# The section 10.4 gate in code: the flagship model's fixtures re-derive from
+# their own bytes, diff against their source within
+# `models/nanochat-default/tolerances.json`, and stay unchanged when a second
+# fabricated model spec is built in a temporary directory (the second model is
+# not committed: section 2 keeps it out of scope). Step 3 is the isolation
+# proof, and it needs no GPU: the CPU-only path is the whole gate.
+cc_test(
+    name = "model_isolation_test",
+    srcs = ["model_isolation_test.cc"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    data = [
+        # The model package: its spec, its tolerance contract, and its fixtures.
+        "//models/nanochat-default:files",
+        # The generator's home for the same bytes this release. The two
+        # directories coexist; neither is moved and neither is rewritten.
+        "data/core_eval.bin",
+        "data/debug_state.bin",
+        "data/generate_parity.bin",
+        "data/numerics_golden_10l.bin",
+        "data/numerics_golden_10l_fp8.bin",
+        "data/rl_parity.bin",
+        "data/train_parity.bin",
+    ],
+    deps = [
+        ":oracle_fixture",
+        "//include/nanochat:nanochat",
+        # The fabricated second model goes through the real spec reader and the
+        # real derivation, so a rename cannot pass as a second model.
+        "//src:model_spec",
+        # tolerances.json and the manifest are JSON: one reader for both.
+        "//src:json",
+    ],
+    size = "small",
+)
+
+# The two generated artifacts as *checks* (docs/model-and-device-bringup.md
+# sections 11 and 10.4): the model/device conformance matrix is derived, so a
+# hand-added row fails with the offending label named; and the cross-package
+# isolation gate fails with the offending fixture and record named. Both
+# scripts travel in the runfiles, and both run in check mode against the
+# committed tree, so the suite writes nothing into `models/` or `tests/`.
+# Hermetic and CPU-only: the standard library, no torch, no GPU, no network.
+py_test(
+    name = "matrix_gate_test",
+    srcs = ["matrix_gate_test.py"],
+    data = [
+        "//backends/cpu:caps_json",
+        "//backends/cuda:caps_json",
+        "//models/nanochat-default:files",
+        # The isolation gate script and the fixture generator it drives.
+        "//tools:isolation_gate",
+        # The matrix generator's filegroup.
+        "//tools:matrix",
+    ],
+    size = "small",
 )
 
 # The shared fp8 conversion gate (docs/correctness-gates.md section 3.2). The CPU
@@ -730,6 +828,9 @@ test_suite(name = "all", tests = [
     ":checkpoint_compat_test",
     ":post_training_core_test",
     ":device_profile_test",
+    ":plan_gate_test",
+    ":model_isolation_test",
+    ":matrix_gate_test",
     ":fp8_rounding_test",
     ":fp8_gemm_test",
     ":gemm_threads_test",

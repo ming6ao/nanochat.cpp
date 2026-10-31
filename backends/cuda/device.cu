@@ -7,11 +7,14 @@
 
 #include <cuda_runtime.h>
 
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
 #include <vector>
 
+#include "backends/cuda/caps_names.h"
+#include "nanochat/device_profile.h"
 #include "nanochat/kernels.h"
 #include "nanochat/mesh.h"
 #include "nanochat/tensor.h"
@@ -29,6 +32,49 @@ void CheckCuda(cudaError_t status, const char* what) {
 }
 
 void CheckLastError(const char* what) { CheckCuda(cudaGetLastError(), what); }
+
+namespace {
+
+// The fp8 path this backend ships: `QuantizeFp8` (kernels/fp8.cu) and
+// `GemmScaledFp8` (gemm.cu's cublasLt branch) are compiled into every CUDA
+// build, unconditionally. `spec/capability_bits.md` section 4: a device that
+// offers no fp8 path declares neither fp8 bit, so the pair below can only be
+// offered when this is true. It is a build fact and not a device fact, which is
+// why it lives here and not in `cudaDeviceProp`.
+constexpr bool kFp8PathBuilt = true;
+
+// The four precision bits. They are the only bits whose truth the silicon
+// decides, so they are the only ones `GetCaps()` computes rather than copies
+// from the declaration; the set is named once so the mask arithmetic below
+// cannot forget one of them.
+constexpr std::uint64_t kPrecisionBits =
+    kFeatureFp32 | kFeatureBf16 | kFeatureFp8Storage | kFeatureFp8Gemm;
+
+}  // namespace
+
+std::uint64_t DeclaredFeatureMask(const char* device_name) {
+  if (device_name == nullptr || *device_name == '\0') return 0;
+  // The lookup normalizes case and whitespace, so the vendor spelling a driver
+  // reports ("NVIDIA GeForce GTX 1080 Ti") and the profile's join key
+  // ("gtx1080ti") resolve to one entry. The projection is the same one the
+  // simulator uses, so the two tiers cannot disagree about a profile.
+  const DeviceProfile* profile = FindDeviceProfile(device_name);
+  if (profile == nullptr) return 0;
+  return CapsFromProfile(*profile).feature_mask;
+}
+
+std::uint64_t PrecisionFeatureBits(int major, int minor) {
+  std::uint64_t bits = kFeatureFp32;
+  // bf16 arithmetic needs Ampere's bf16 units.
+  if (major >= 8) bits |= kFeatureBf16;
+  // The fp8 E4M3/E5M2 tensor core arrives with Ada (sm_89); Hopper reports
+  // 9.0 (docs/fp8-training.md section 5.3). `fp8_gemm` implies `fp8_storage`,
+  // so the pair is offered together or not at all.
+  if ((major > 8 || (major == 8 && minor >= 9)) && kFp8PathBuilt) {
+    bits |= kFeatureFp8Storage | kFeatureFp8Gemm;
+  }
+  return bits;
+}
 
 }  // namespace cuda_backend
 
@@ -105,20 +151,58 @@ Caps GetCaps() {
   caps.compute_major = props.major;
   caps.compute_minor = props.minor;
   caps.total_memory_bytes = static_cast<std::size_t>(props.totalGlobalMem);
-  // Tensor cores arrive with Volta (sm_70).
+  // A fact about the part, not a promise the backend makes: tensor cores
+  // arrive with Volta (sm_70) and the flag stays a boolean
+  // (spec/capability_bits.md section 5, "a boolean that is a fact stays a
+  // boolean").
   caps.has_tensor_cores = props.major >= 7;
-  caps.supports_fp32 = true;
-  caps.supports_bf16 = props.major >= 8;
-  // The fp8 E4M3/E5M2 tensor core arrives with Ada (sm_89). Hopper reports 9.0
-  // (docs/fp8-training.md section 5.3).
-  caps.supports_fp8 =
-      (props.major > 8) || (props.major == 8 && props.minor >= 9);
 
   // Per device thread, so two device threads do not overwrite one name buffer
-  // (docs/client-runtime-design.md section 8.1).
+  // (docs/client-runtime-design.md section 8.1). The spelling is the driver's
+  // and is kept verbatim: it is the join key `FindDeviceProfile` normalizes.
   thread_local char device_name[256];
   std::snprintf(device_name, sizeof(device_name), "%s", props.name);
   caps.device_name = device_name;
+
+  // ---- the capability mask ------------------------------------------------
+  //
+  // Two inputs, and no third one. The declaration supplies the architecture,
+  // tier, stateful, and override bits (`backends/cuda/caps.json`, through the
+  // derived profile entry), and the silicon supplies the four precision bits.
+  //
+  // The two are combined as `(declared without its precision bits) | (what the
+  // silicon reports)` rather than as a union of everything, because the two
+  // sides have different authority. A declaration may not *grant* a precision
+  // bit: a profile written for the fastest member of a family must not make a
+  // Pascal card claim bf16 (spec/capability_bits.md section 4). And a
+  // declaration may not *withhold* one either, because this backend's
+  // correctness does not depend on the caps.json derivation having run: the
+  // silicon's precision is a fact `cudaDeviceProp` answers on its own.
+  const std::uint64_t declared =
+      cuda_backend::DeclaredFeatureMask(caps.device_name);
+  const std::uint64_t silicon =
+      cuda_backend::PrecisionFeatureBits(props.major, props.minor);
+  const std::uint64_t mask =
+      (declared & ~cuda_backend::kPrecisionBits) | silicon;
+
+  // Fail loudly at the first capability report when a bit arrives that no
+  // vocabulary name maps to. A silent unknown bit is the run-time lie
+  // spec/capability_bits.md section 2 warns about: the planner would read a
+  // promise nobody can look up, and the user would be told the wrong
+  // implementation ran.
+  cuda_backend::RequireNamedBits(mask, "caps.json / the device profile");
+  caps.feature_mask = mask;
+
+  // The three booleans and `Supports(DType)` are one answer spelled twice, so
+  // they are read off the mask rather than recomputed from the part: a caller
+  // that asks `supports_bf16` and a caller that asks `HasFeature(kFeatureBf16)`
+  // cannot disagree. `supports_fp8` is the tensor-core path, which is the pair
+  // (`fp8_gemm` implies `fp8_storage`, spec/capability_bits.md bit 8), so it
+  // asks for both.
+  caps.supports_fp32 = (mask & kFeatureFp32) != 0;
+  caps.supports_bf16 = (mask & kFeatureBf16) != 0;
+  caps.supports_fp8 = (mask & (kFeatureFp8Storage | kFeatureFp8Gemm)) ==
+                      (kFeatureFp8Storage | kFeatureFp8Gemm);
   return caps;
 }
 

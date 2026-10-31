@@ -48,6 +48,16 @@ implemented.
 - A distributed-training product beyond the host reference. The NCCL transport
   is not implemented.
 
+## Models and devices
+
+A model is a package under `models/`, described by `spec.json`; a device is a
+package under `backends/`, declared by `caps.json`. Both sides declare against
+the shared vocabulary in `spec/`, and the plan resolves them. A bring-up adds a
+directory and edits no frozen header. See
+[docs/model-and-device-bringup.md](docs/model-and-device-bringup.md) and the
+flagship package in
+[models/nanochat-default](models/nanochat-default/README.md).
+
 ## Quickstart
 
 ```bash
@@ -150,6 +160,8 @@ backends/cuda/      CUDA implementation; cuBLAS for GEMM
 backends/cuda/kernels/  kernels, per-family tests, benchmarks, test scaffolding
 dev/kernels/        unpromoted prototypes and the toolchain spike
 examples/           the two smallest programs that use the public API
+models/             one package per model: its spec, tolerances, and fixtures
+spec/               the contract vocabulary both axes declare against
 tests/              oracle fixtures, parity tests, and the staged numeric trace
 bindings/           the C ABI for the in-process Python API
 python/             the single Python surface: compute, planning, chat,

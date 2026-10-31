@@ -82,11 +82,15 @@ void BenchPointwise(Rng* rng, int n, int iters) {
   DevBuf<ComputeType> a(ToStorage(RandomVec(n, rng)));
   DevBuf<ComputeType> b(ToStorage(RandomVec(n, rng)));
   DevBuf<ComputeType> out(n);
+  nanochat::PointwiseParams p;
+  p.op = nanochat::PointwiseOp::kScaleAdd;
+  p.count = n;
+  p.alpha = 1.0f;
+  p.beta = 1.0f;
   char label[64];
   std::snprintf(label, sizeof(label), "pointwise n=%d", n);
   TimeIt(label, iters, [&] {
-    nanochat::kernels::PointwiseForward(nanochat::PointwiseOp::kScaleAdd, n,
-                                        a.ptr, b.ptr, 1.0f, 1.0f, out.ptr);
+    nanochat::kernels::PointwiseForward(p, a.ptr, b.ptr, out.ptr);
   });
 }
 

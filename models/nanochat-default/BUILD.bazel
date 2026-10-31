@@ -1,0 +1,39 @@
+# models/nanochat-default — the flagship model package.
+#
+# This is a data package: the spec, its tolerance contract, and the committed
+# golden-trace fixtures. It builds no code. The common options are loaded from
+# //:nanochat.bzl like the other packages so a future target in this package
+# picks up the same toolchain settings, and so the package follows one import
+# convention (docs/build.md).
+load("//:nanochat.bzl", "nanochat_copts")
+
+package(default_visibility = ["//visibility:public"])
+
+# The package's data, in one label: spec.json is the model definition,
+# tolerances.json is its numeric contract, and fixtures/ carries the golden
+# trace bytes plus the manifest that proves they match tests/data byte for
+# byte. The matrix generator and the model/device plan read this label instead
+# of reaching into the directory.
+filegroup(
+    name = "files",
+    srcs = [
+        "spec.json",
+        "tolerances.json",
+    ] + glob(["fixtures/**"]),
+)
+
+# The same data under the model-axis name, so a caller that asks for "the
+# model" and a caller that asks for "the package files" agree by construction.
+alias(
+    name = "model",
+    actual = ":files",
+)
+
+# Present even while empty: the matrix generator and //:all_tests enumerate
+# every model package through `<package>:all` without a special case. A future
+# spec-compatibility or fixture-checksum test lands here and is picked up by
+# the aggregation automatically.
+test_suite(
+    name = "all",
+    tests = [],
+)

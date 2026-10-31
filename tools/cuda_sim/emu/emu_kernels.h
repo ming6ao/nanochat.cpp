@@ -23,14 +23,12 @@ void EmuRmsNormBackward(const RmsNormParams& params, const ComputeType* x,
                         const ComputeType* dy, const float* rstd,
                         ComputeType* dx);
 
-void EmuPointwiseForward(PointwiseOp op, int n, const ComputeType* a,
-                         const ComputeType* b, float alpha, float beta,
-                         ComputeType* out);
+void EmuPointwiseForward(const PointwiseParams& params, const ComputeType* a,
+                         const ComputeType* b, ComputeType* out);
 
-void EmuPointwiseBackward(PointwiseOp op, int n, const ComputeType* a,
+void EmuPointwiseBackward(const PointwiseParams& params, const ComputeType* a,
                           const ComputeType* b, const ComputeType* dy,
-                          float alpha, float beta, ComputeType* da,
-                          ComputeType* db);
+                          ComputeType* da, ComputeType* db);
 
 void EmuQuantizeFp8(const QuantizeFp8Params& params, const ComputeType* src,
                     std::uint8_t* dst, float* dequant);

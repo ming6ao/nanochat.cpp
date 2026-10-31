@@ -15,10 +15,136 @@ package(default_visibility = ["//visibility:public"])
 # `//tests:device_profile_test` keeps the two consistent.
 cc_library(
     name = "device_profile",
-    srcs = ["device_profile.cc"],
+    srcs = [
+        "device_profile.cc",
+    ],
+    hdrs = [
+        # The declared mask view of the same parse (`src/device_caps.h`) and the
+        # two leaf helpers the derivation reads its files with.
+        "device_caps.h",
+    ],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    # The declarations the table is derived from. They are `data` rather than a
+    # compiled-in row, so a device bring-up adds a `devices[]` entry in one of
+    # these files and no row anywhere in `src/` or in a header. `data` on a
+    # library propagates to the runfiles of every test and binary that depends on
+    # it, which is how `//tests:device_profile_test` and a simulated run both see
+    # the same bytes.
+    data = [
+        "//backends/cpu:caps_json",
+        "//backends/cuda:caps_json",
+    ],
+    deps = [
+        ":capability_names",
+        ":json",
+        "//include/nanochat:nanochat",
+    ],
+)
+
+# The small strict JSON reader the two data files of this campaign are read with
+# (`models/<name>/spec.json`, `backends/<name>/caps.json`). Standard library only,
+# so any layer may use it without reaching above the seam (DESIGN.md section 2.1).
+cc_library(
+    name = "json",
+    srcs = ["json.cc"],
+    hdrs = ["json.h"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+)
+
+# The capability vocabulary above the seam: the vocabulary spelling of every bit,
+# the `kFeature*` constant it maps to, and the model-terms consequence of a
+# device not declaring it (`spec/capability_bits.md` sections 2 and 4). The spec
+# reader needs it to turn `requires` into a mask, and the planner needs it to name
+# a missing bit; neither can borrow a backend's table, because `src/` compiles
+# against either backend.
+cc_library(
+    name = "capability_names",
+    srcs = ["capability_names.cc"],
+    hdrs = ["capability_names.h"],
     copts = nanochat_copts(),
     defines = precision_defines(),
     deps = ["//include/nanochat:nanochat"],
+)
+
+# The spec reader and the derivation into `Config` (`nanochat/model_spec.h`): the
+# closed field set, the block kind vocabulary, and `ModelSpecToConfig`. Host work
+# only - it reads one file and touches no device.
+cc_library(
+    name = "model_spec",
+    srcs = ["model_spec.cc"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    deps = [
+        ":capability_names",
+        ":json",
+        "//include/nanochat:nanochat",
+    ],
+)
+
+# The pure device-and-graph plan (`nanochat/plan.h`). It reads the spec, the
+# graph kind and the device's answer, and it mutates nothing: a bring-up check and
+# a test can build a plan for a fabricated capability mask with no device present.
+# `src/plan_internal.h` is the seam that lets a test supply that mask and the
+# registration table; the public `BuildPlan` fills both from the backend.
+cc_library(
+    name = "plan",
+    srcs = ["plan.cc"],
+    hdrs = [
+        "device_caps.h",
+        "plan_internal.h",
+    ],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    deps = [
+        ":capability_names",
+        # `EffectiveDeviceMask` falls back to the device's own declaration when a
+        # backend reports no mask, so the planner reads the same single source.
+        ":device_profile",
+        ":model_spec",
+        "//include/nanochat:nanochat",
+    ] + select({
+        # `BuildPlan` reads `kernels::GetCaps()` and the backend's fused-override
+        # registrations, so the planner links the backend the workflow links.
+        "//:backend_cuda": ["//backends/cuda:all_kernels"],
+        "//:backend_cpu": ["//backends/cpu"],
+    }),
+)
+
+# The plan as a report, before a model loads: `tools/nanochat doctor` runs this so
+# a user proves which implementation each composition resolved to, and why the
+# ones that lost were declined (docs/model-and-device-bringup.md section 9.1 rule
+# 3). It reads the public headers only and builds no graph.
+cc_binary(
+    name = "plan_main",
+    srcs = ["plan_main.cc"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    deps = [
+        ":model_spec",
+        ":plan",
+        "//include/nanochat:nanochat",
+    ],
+)
+
+# The planner's gate (section 9.1 rule 1, section 16 P3): a fabricated capability
+# mask builds a plan under T0 CPU with no device present, a mask missing a
+# required bit is rejected with the bit and the consequence, and a mask declaring
+# an override bit resolves that composition to the fused family and records the
+# composition as a declined fallback.
+cc_test(
+    name = "plan_test",
+    srcs = ["plan_test.cc"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    deps = [
+        ":capability_names",
+        ":model_spec",
+        ":plan",
+        "//include/nanochat:nanochat",
+    ],
+    size = "small",
 )
 
 # The vendor-free gradient-sync seam (docs/distributed-design.md section 4).
@@ -152,6 +278,11 @@ cc_library(
     }) + [
         ":checkpoint_metadata",
         ":distributed_seam",
+        # `model.cc` reads `models/<name>/spec.json` through the selector,
+        # derives the `Config`, and builds the device-and-graph plan once
+        # (`nanochat/model_spec.h`, `nanochat/plan.h`).
+        ":model_spec",
+        ":plan",
         # `data.cc` reads and writes the metadata block through the field
         # visitor (docs/checkpoint-metadata-and-examples-plan.md section 2.1).
         ":fields",
@@ -297,6 +428,10 @@ cc_test(
     srcs = ["config_test.cc"],
     copts = nanochat_copts(),
     defines = precision_defines(),
+    # The spec-equality check reads the flagship package's own description, so the
+    # package's files are this test's data. It is the P2 gate of section 16: the
+    # spec must derive today's `Config` field by field.
+    data = ["//models/nanochat-default:files"],
     deps = [
         ":model",
         "//include/nanochat:nanochat",
@@ -743,6 +878,9 @@ test_suite(name = "all", tests = [
     ":train_parallel_test",
     ":masked_loss_test",
     ":optimizer_state_test",
+    # The planner's gate: a fabricated capability mask builds a plan under T0 CPU
+    # with no device present (section 16 P3).
+    ":plan_test",
     # The tokenizer host package owns its own test suite.
     "//src/tokenizer:all",
 ])

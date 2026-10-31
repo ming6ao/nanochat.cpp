@@ -14,6 +14,86 @@ The topology lives in exactly two files: `model.cc` (train forward + backward)
 and `generate.cc` (prefill + decode + generate). No other file knows the
 architecture.
 
+## The model description
+
+The architecture is data. `models/<name>/spec.json` is the description, parsed by
+`include/nanochat/model_spec.h` into a `ModelSpec`, and `ModelSpecToConfig`
+derives the runtime `Config` from it. `Config` therefore stays the *derived*
+struct: it keeps `head_dim()`, `mlp_dim()`, `window_left()`, and `Validate()`, and
+the spec never duplicates them. The one field the spec drives is
+`window_pattern`, built from the ordered block list — `'S'` for a sliding-window
+block, `'L'` for a full-context one — and reduced to its shortest repeating
+unit, so the twelve-block list of `models/nanochat-default/spec.json` derives the
+historical `"SSSL"`. The block list and the mask the graph runs cannot disagree.
+
+`models/nanochat-default/spec.json` is the only package in the tree. Its block
+list is twelve blocks, nine sliding-window and three full-context, in the order
+`SSSL SSSL SSSL`; `requires` names `rope`, `sliding_window`, `value_gate`, and
+`primitive_tier_complete`; and its `dimensions`, `embeddings`, `head`, `loss`,
+and `policy` groups reproduce today's `Config` defaults and the softcap the
+kernel defaults to.
+
+`Model::Create(config, spec_name)` selects a package by name, and a null name
+selects the built-in default, which is the spec that reproduces `Config`'s own
+defaults. The name resolves through `LookupModelSpec`, the spec is validated,
+and its derived `Config` must agree with the `Config` the caller passed; a
+mismatch returns null with the reason. The selector reads the host filesystem
+and nothing else.
+
+### Block kinds and their saved slots
+
+The ordered block list is the topological part of the description. A **block
+kind is a named meaning, not a code path**: it says what a position computes and
+nothing about which function runs there. The names, the arithmetic, the closed
+list, and the sharing rules are [../spec/block_kinds.md](../spec/block_kinds.md),
+which is the authority and is not restated here. What follows is the inventory
+the tree actually parses (`src/model_spec.cc` holds the accepted strings) with
+the slots each backward reads, because the slot set is what the workspace is
+sized from.
+
+| Field and value | In the graph | Saved slots its backward reads |
+|---|---|---|
+| `norm` = `rms_norm` | before attention and before the MLP | the input rows (`xr`, `x_mid`) and the per-row `rstd` (`rstd1`, `rstd2`) |
+| `attention` = `causal` or `sliding_window`, with `attention_variant` = `mha` or `gqa` | the pairwise operator over the sequence | `q_final`, `k_final`, `v_final`, `attn_stats` |
+| `position` = `rope` (or `none`) | position, on q and k, with the qk scale | `q_pre`, `k_pre`, plus the `cos`/`sin` tables (constants, not slots) |
+| `mlp` = `relu_square` | the feed-forward transform | `pre_act`, and deliberately not `act` |
+| `residual` = `blend` (the ResFormer residual) or `plain` | how a sublayer output rejoins the stream | `plain`: none. `blend`: `ve_values`, `ve_gate`, and the hidden rows `h` that fed the gate |
+
+The mask (`attention`) and the head mapping (`attention_variant`) are fields of
+the entry and not kinds: the two masks differ only in which keys a query row
+sees, so the arithmetic, the head mapping, the saved slots, and the tolerance are
+identical, and `mha` is `gqa` with one key/value head per query head.
+
+Every block in `models/nanochat-default/spec.json` names `blend`, and the value
+gate is the ResFormer mechanism that comes with it: `Config::has_value_embedding(layer)`
+decides which layers carry a gate (alternating, and always the last), so the
+gate's three slots are declared for the kind and are live only on those layers.
+
+The slot names above are the `BlockActivations` fields in `src/ops.h`, so the
+declaration and the workspace are the same list rather than two lists that must
+agree. A composition reads only the slots its kinds declare, which is what lets
+a fused override and a composition share one workspace
+([block_kinds.md](../spec/block_kinds.md) §3, and §7.6 condition 1 of
+[model-and-device-bringup.md](model-and-device-bringup.md)).
+
+`Config` never learns which kind a block names, and the graph never learns which
+device runs it: the block list says what the layers are, and the plan says how
+each named piece runs ([model-and-device-bringup.md](model-and-device-bringup.md)
+§9).
+
+### One definition of semantics
+
+The rule from [model-and-device-bringup.md §8.1](model-and-device-bringup.md):
+
+> One definition of semantics. N implementations. One golden trace.
+
+The composition in `src/ops.cc` defines what a kind computes. A fused family in
+a backend is an optimization of that definition and must match its trace within
+the committed tolerance, so a fast path is always an optimization of a known
+reference and never a second definition. Two implementations of one meaning are
+allowed; two meanings behind one name are not — a model that needs different
+behaviour needs a new kind.
+
 ## Batched generation
 
 `GenerateBatch` is the shared sampling primitive for evaluation samples,
@@ -90,7 +170,12 @@ struct Config {
 
 class Model {
  public:
-  static std::unique_ptr<Model> Create(const Config& config);
+  static std::unique_ptr<Model> Create(const Config& config,
+                                       std::string* error = nullptr);
+  // The spec selector: a null name selects the built-in default.
+  static std::unique_ptr<Model> Create(const Config& config,
+                                       const char* spec_name,
+                                       std::string* error = nullptr);
   void InitWeights(uint64_t seed);
 
   float ForwardLoss(const int* tokens, const int* targets, int batch, int seq);
@@ -114,7 +199,10 @@ float EvalBpb(Model* model, DataLoader* loader, int steps);
 ```
 
 `Config` and `Model` are frozen headers; treat them as stable by default and
-prefer additive changes. See [DESIGN.md §7](../DESIGN.md).
+prefer additive changes. See [DESIGN.md §7](../DESIGN.md). The spec selector is
+such an addition: it is a sibling overload, so `Create(config)` and
+`Create(config, &error)` keep resolving to the original declaration and every
+existing call site compiles unchanged.
 
 ## Optimizer
 

@@ -108,8 +108,12 @@ int main() {
     DevBuf<ComputeType> a(std::vector<ComputeType>{C(1.0f), C(-2.0f), C(0.5f)});
     DevBuf<ComputeType> b(std::vector<ComputeType>{C(2.0f), C(3.0f), C(-1.0f)});
     DevBuf<ComputeType> out(std::vector<ComputeType>(n, C(0.0f)));
-    nanochat::kernels::PointwiseForward(nanochat::PointwiseOp::kScaleAdd, n,
-                                        a.ptr, b.ptr, 0.5f, 0.25f, out.ptr);
+    nanochat::PointwiseParams p;
+    p.op = nanochat::PointwiseOp::kScaleAdd;
+    p.count = n;
+    p.alpha = 0.5f;
+    p.beta = 0.25f;
+    nanochat::kernels::PointwiseForward(p, a.ptr, b.ptr, out.ptr);
     Synchronize();
     const std::vector<ComputeType> o = out.Download();
     CheckClose(U(o[0]), 0.5f * 1.0f + 0.25f * 2.0f, kOutTol, "pointwise 0");

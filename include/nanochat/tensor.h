@@ -215,6 +215,64 @@ inline constexpr std::size_t kComputeTypeSize = DTypeTraits<ComputeType>::size;
 // Backend capabilities
 // ---------------------------------------------------------------------------
 
+// The closed list of mechanism bits `Caps::feature_mask` carries. Every bit
+// names a *mechanism* the seam can run. No bit names a model and no bit names a
+// device: a model asks for mechanisms through `ModelSpec::requires_features`,
+// and a device answers through its own `backends/<name>/caps.json` (see
+// nanochat/device_profile.h), so adding a model or a device adds no bit here.
+//
+// The names below are the authority for the *values*; spec/capability_bits.md
+// holds the identical names for the prose and for the caps files. The list is
+// closed: a consumer that tests a bit that does not exist should fail to
+// compile rather than read a silent false.
+
+// The bit at `index`. A named helper rather than a shift at each constant, so
+// the table below stays one name per line and readable.
+constexpr std::uint64_t CapabilityBit(int index) {
+  return std::uint64_t{1} << index;
+}
+
+// Attention with fewer key/value heads than query heads (GQA).
+inline constexpr std::uint64_t kFeatureGqa = CapabilityBit(0);
+// Rotary position embeddings.
+inline constexpr std::uint64_t kFeatureRope = CapabilityBit(1);
+// A causal mask with a left window.
+inline constexpr std::uint64_t kFeatureSlidingWindow = CapabilityBit(2);
+// The ResFormer value gate (`ValueGateForward` / `ValueGateBackward`).
+inline constexpr std::uint64_t kFeatureValueGate = CapabilityBit(3);
+// bf16 compute and storage.
+inline constexpr std::uint64_t kFeatureBf16 = CapabilityBit(4);
+// fp32 compute and storage.
+inline constexpr std::uint64_t kFeatureFp32 = CapabilityBit(5);
+// The fp8 storage codes (one byte of E4M3 or E5M2 in a container).
+inline constexpr std::uint64_t kFeatureFp8Storage = CapabilityBit(6);
+// The scaled fp8 GEMM path (`GemmScaledFp8` with `QuantizeFp8`).
+inline constexpr std::uint64_t kFeatureFp8Gemm = CapabilityBit(7);
+// Every primitive family in nanochat/kernels.h resolves and passes its gate.
+// This is the non-fused tier: a spec that requires it cannot run on a backend
+// that still has holes in the seam.
+inline constexpr std::uint64_t kFeaturePrimitiveTierComplete = CapabilityBit(8);
+// The two stateful training entries: AdamW and Muon.
+inline constexpr std::uint64_t kFeatureAdamW = CapabilityBit(9);
+inline constexpr std::uint64_t kFeatureMuon = CapabilityBit(10);
+
+// One fused-override bit per composition whose fusion is legal under the
+// boundary rule, that is per composition a backend may substitute with a
+// registered fused family (nanochat/plan.h). Each bit is set only when that
+// family exists *and* passed its gate; the plan reads it to decide whether the
+// override competes with the primitive implementation.
+//
+//   kFeatureFusedResidualRmsNorm   residual add + RmsNorm, for `rms_norm`
+//   kFeatureFusedQkPrep            norm + rope + scale, for `qk_prep`
+//   kFeatureFusedAttention         attention with qk_prep folded in, for
+//                                  `attention` (the v2 candidate)
+//   kFeatureFusedClassifier        softcap + cross-entropy + the logits scale,
+//                                  for `classifier`
+inline constexpr std::uint64_t kFeatureFusedResidualRmsNorm = CapabilityBit(11);
+inline constexpr std::uint64_t kFeatureFusedQkPrep = CapabilityBit(12);
+inline constexpr std::uint64_t kFeatureFusedAttention = CapabilityBit(13);
+inline constexpr std::uint64_t kFeatureFusedClassifier = CapabilityBit(14);
+
 // A vendor-free description of the active device. `kernels::GetCaps()` returns
 // one of these; the host fails fast at startup when the build's precision is
 // not in the supported set (docs/build.md).
@@ -231,6 +289,13 @@ struct Caps {
   bool supports_bf16 = false;
   bool supports_fp8 = false;  // the E4M3/E5M2 tensor-core path (sm_89+)
 
+  // The mechanism bits: the OR of the kFeature* constants above. This sits
+  // beside the three precision flags rather than replacing them, because those
+  // three are the contract every existing caller reads and `Supports(DType)` is
+  // a dtype query, not a bit test. Zero claims nothing beyond the three flags,
+  // which is what a backend that reports no extra mechanism says.
+  std::uint64_t feature_mask = 0;
+
   const char* device_name = "cpu";
 
   // True when the device can run arithmetic at `dtype`. Only the compute
@@ -242,6 +307,13 @@ struct Caps {
       return supports_fp8;
     }
     return false;
+  }
+
+  // True when every bit in `feature` is set in `feature_mask`, so one call
+  // answers a single-bit query and a combination (a spec's `requires_features`
+  // mask) alike. A query of 0 is vacuously true.
+  bool HasFeature(std::uint64_t feature) const {
+    return (feature & feature_mask) == feature;
   }
 };
 

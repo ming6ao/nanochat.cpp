@@ -2,7 +2,9 @@
 
 The test is hermetic: it needs no library, no Bazel, and no GPU. It writes a
 fake entry script that echoes its argument list as JSON, then checks the argv
-for every command in the table. See docs/python.md sections 6 and 11.
+for every command in the table, and it gives that script a fake
+``doctor --json`` report (environment plus the device-and-graph plan) so the
+parser assertions describe a real report. See docs/python.md sections 6 and 11.
 """
 
 from __future__ import annotations
@@ -17,18 +19,47 @@ from pathlib import Path
 
 from nanochat_cpp import _entry, toolchain
 
+#: Why a fused family won its composition (``src/plan.cc``): the device
+#: declares the bit that gates it, so the composition path is what lost.
+REASON_FUSED_WINS = ('the device declares override_rms_norm and the fused '
+                     'family "rms_norm" implements the same composition faster')
+
+#: Why a registered family lost (``src/plan.cc``): the bit is the switch, so a
+#: family that landed before its gate is declined by name instead of chosen.
+REASON_BIT_CLEAR = ('the device does not declare override_qk_prep, so this '
+                    'fused family is not offered here')
+
+#: The fake ``doctor --json`` report. The ``plan`` object is the graph's plan
+#: that ``//src:plan_main --json`` prints, wrapped in the availability fields
+#: ``cli._plan_status`` adds, so no build runs and no GPU is needed.
 FAKE_ENTRY = """#!{python}
 import json
 import sys
 
+REASON_FUSED_WINS = {fused_wins!r}
+REASON_BIT_CLEAR = {bit_clear!r}
+
 argv = sys.argv[1:]
 if argv and argv[0] == "doctor":
+    plan = {{"available": True, "reason": "", "ok": True,
+            "spec": "nanochat-default", "graph": "train",
+            "device_index": 0, "gaps": [], "why_not": "",
+            "choices": [
+                {{"composition": "rms_norm", "implementation": "rms_norm",
+                  "fused": True,
+                  "declined": [{{"implementation": "composition",
+                                "reason": REASON_FUSED_WINS}}]}},
+                {{"composition": "qk_prep", "implementation": "composition",
+                  "fused": False,
+                  "declined": [{{"implementation": "qk_prep",
+                                "reason": REASON_BIT_CLEAR}}]}}]}}
     print(json.dumps({{"repo": "/fake", "revision": "abc", "branch": "main",
                        "nvcc": "release 12.0", "gpu": "fake gpu",
                        "sandbox_backend": "systemd",
                        "gpu_queue": {{"worker_id": "w1", "alive": True,
                                      "devices": "0", "depth": 0,
-                                     "running_job": None, "queued": 0}}}}))
+                                     "running_job": None, "queued": 0}},
+                       "plan": plan}}))
 elif argv and argv[0] == "shutdown":
     sys.stderr.write("boom\\n")
     sys.exit(3)
@@ -36,14 +67,24 @@ else:
     print(json.dumps(argv))
 """
 
+#: The keys the ``doctor --json`` report's ``plan`` object carries, in the order
+#: ``cli._plan_status`` builds them. Append-only, like ``cli.DOCTOR_KEYS``.
+DOCTOR_PLAN_KEYS = (
+    "available", "reason", "ok", "spec", "graph", "device_index",
+    "choices", "gaps", "why_not",
+)
+
 
 class ToolchainTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.tmp = tempfile.TemporaryDirectory(prefix="nanochat_toolchain_")
         cls.entry = Path(cls.tmp.name) / "fake-nanochat"
-        cls.entry.write_text(FAKE_ENTRY.format(python=sys.executable),
-                             encoding="utf-8")
+        cls.entry.write_text(
+            FAKE_ENTRY.format(python=sys.executable,
+                              fused_wins=REASON_FUSED_WINS,
+                              bit_clear=REASON_BIT_CLEAR),
+            encoding="utf-8")
         cls.entry.chmod(cls.entry.stat().st_mode | stat.S_IEXEC)
         cls.env = dict(os.environ)
         cls.env.pop("NANOCHAT_SANDBOX", None)
@@ -176,6 +217,43 @@ class ToolchainTest(unittest.TestCase):
         self.assertEqual(report.gpu_queue["worker_id"], "w1")
         self.assertTrue(report.gpu_queue["alive"])
         self.assertTrue(report.raw)
+
+    def test_doctor_json_reports_the_plan(self) -> None:
+        """The report names the chosen implementation and the declined ones.
+
+        Section 9 rule 6 of ``docs/model-and-device-bringup.md`` makes the plan
+        observable: a user proves why their path changed without reading
+        source, and rule 4 says a plan is the chosen implementation for each
+        composition plus the fallbacks it declined. The fake payload stands in
+        for ``//src:plan_main --json`` in the shape ``cli._plan_status``
+        publishes, so the suite stays hermetic: no Bazel run and no GPU.
+        ``DoctorReport`` carries the object in ``raw``; it has no ``plan``
+        field yet, which is why the assertion reads the payload.
+        """
+        report = self.toolchain.doctor()
+        plan = json.loads(report.raw)["plan"]
+        self.assertEqual(sorted(plan), sorted(DOCTOR_PLAN_KEYS))
+        self.assertTrue(plan["available"])
+        self.assertTrue(plan["ok"])
+        self.assertEqual(plan["spec"], "nanochat-default")
+        choices = {choice["composition"]: choice
+                   for choice in plan["choices"]}
+        # The fused family won, and the composition path it beat is named next
+        # to the reason it lost.
+        fused = choices["rms_norm"]
+        self.assertTrue(fused["fused"])
+        self.assertEqual(fused["implementation"], "rms_norm")
+        self.assertEqual([(entry["implementation"], entry["reason"])
+                          for entry in fused["declined"]],
+                         [("composition", REASON_FUSED_WINS)])
+        # A family whose capability bit is clear is declined by name, so the
+        # composition path is the choice the reader sees.
+        declined = choices["qk_prep"]
+        self.assertFalse(declined["fused"])
+        self.assertEqual(declined["implementation"], "composition")
+        self.assertEqual([(entry["implementation"], entry["reason"])
+                          for entry in declined["declined"]],
+                         [("qk_prep", REASON_BIT_CLEAR)])
 
 
 if __name__ == "__main__":

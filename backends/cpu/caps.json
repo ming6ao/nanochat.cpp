@@ -1,0 +1,88 @@
+{
+  "format": "nanochat.caps/1",
+  "capability_vocabulary": 1,
+  "backend": "cpu",
+  "vendor": "host",
+  "note": "The reference declaration (docs/model-and-device-bringup.md section 7.4): the six device utilities, the arithmetic primitives including both reductions and both attention variants at one tile size, the two stateful entries, and the capability bits this backend offers. 'features' holds spec/capability_bits.md vocabulary names verbatim, lower_snake_case, one string per bit. It declares no override_* bit on purpose: with no fused override declared, the planner resolves every composition to the composition path on this backend, which is section 7.4's consequence expressed as data rather than as prose. The performance fields are zero because a host device has no launch cost, no HBM rate and no tensor cores; is_device is false for the same reason.",
+  "devices": [
+    {
+      "name": "cpu",
+      "is_device": false,
+      "seam": 2,
+      "compute_major": 0,
+      "compute_minor": 0,
+      "total_memory_bytes": 0,
+      "has_tensor_cores": false,
+      "supports_bf16": true,
+      "supports_fp8": false,
+      "peak_fp32_flops": 0.0,
+      "peak_bf16_flops": 0.0,
+      "peak_fp8_flops": 0.0,
+      "peak_bandwidth_bytes_per_second": 0.0,
+      "warp_size": 1,
+      "max_threads_per_block": 1,
+      "max_shared_memory_per_block": 0,
+      "launch_us": 0.0,
+      "utilities": [
+        "alloc",
+        "free",
+        "memcpy",
+        "memset",
+        "synchronize",
+        "get_caps"
+      ],
+      "primitives": [
+        "gemm",
+        "gemm_wgrad",
+        "quantize_fp8",
+        "gemm_scaled_fp8",
+        "pointwise",
+        "row_reduce",
+        "span_reduce",
+        "embedding_forward",
+        "embedding_backward",
+        "attention_forward",
+        "attention_backward"
+      ],
+      "pointwise_codes": [
+        "kScale",
+        "kScaleAdd",
+        "kGateMul",
+        "kReluSquare",
+        "kSoftcap",
+        "kExp",
+        "kRsqrt",
+        "kLog",
+        "kRowScale"
+      ],
+      "reduce_ops": [
+        "kSumSq",
+        "kSum",
+        "kMax",
+        "kLogSumExp"
+      ],
+      "attention": {
+        "variants": [
+          "full",
+          "sliding"
+        ],
+        "tile_rows": 1
+      },
+      "stateful": [
+        "adamw",
+        "muon"
+      ],
+      "features": [
+        "gqa",
+        "rope",
+        "sliding_window",
+        "value_gate",
+        "fp32",
+        "bf16",
+        "primitive_tier_complete",
+        "stateful_adamw",
+        "stateful_muon"
+      ]
+    }
+  ]
+}

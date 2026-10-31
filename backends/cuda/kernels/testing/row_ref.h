@@ -193,15 +193,32 @@ inline void QkPrepBackward(const QkPrepParams& p, const std::vector<float>& cos,
 
 // --- Pointwise ------------------------------------------------------------
 
-inline std::vector<float> PointwiseForward(PointwiseOp op,
+// The host reference for the nine codes of spec/pointwise_ops.md, one arm per
+// code and no `default`, matching backends/cpu/kernels.cc and the device. It
+// takes the same `PointwiseParams` block as the seam so the reference cannot
+// drift from the meaning of a field.
+//
+// `kRowScale` is the row broadcast: `a` holds `count / row_width` row scalars,
+// `b` and `out` hold `count` values, and `out[i] = a[i / row_width] * b[i]`. It
+// reads neither `alpha` nor `beta`, and it does not reject an invalid width --
+// the test only calls it with a valid one.
+inline std::vector<float> PointwiseForward(const PointwiseParams& p,
                                            const std::vector<float>& a,
-                                           const std::vector<float>& b,
-                                           float alpha, float beta) {
-  std::vector<float> out(a.size(), 0.0f);
-  for (std::size_t i = 0; i < a.size(); ++i) {
+                                           const std::vector<float>& b) {
+  const int n = p.count;
+  std::vector<float> out(static_cast<std::size_t>(n), 0.0f);
+  const float alpha = p.alpha;
+  const float beta = p.beta;
+  if (p.op == PointwiseOp::kRowScale) {
+    for (int i = 0; i < n; ++i) {
+      out[i] = a[i / p.row_width] * b[i];
+    }
+    return out;
+  }
+  for (int i = 0; i < n; ++i) {
     const float av = a[i];
     float result = 0.0f;
-    switch (op) {
+    switch (p.op) {
       case PointwiseOp::kScale:
         result = alpha * av;
         break;
@@ -219,21 +236,57 @@ inline std::vector<float> PointwiseForward(PointwiseOp op,
       case PointwiseOp::kSoftcap:
         result = alpha * std::tanh(av / alpha);
         break;
+      case PointwiseOp::kExp:
+        result = std::exp(av);
+        break;
+      case PointwiseOp::kRsqrt:
+        result = 1.0f / std::sqrt(av);
+        break;
+      case PointwiseOp::kLog:
+        result = std::log(av);
+        break;
+      case PointwiseOp::kRowScale:
+        // Unreachable: the row broadcast is handled above.
+        break;
     }
     out[i] = result;
   }
   return out;
 }
 
-inline void PointwiseBackward(PointwiseOp op, const std::vector<float>& a,
+// `da[r] = sum_c dy[r,c] * b[r,c]` and `db[i] = dy[i] * a[i / row_width]` for
+// the broadcast; the elementwise pair for every other code. An unusable row
+// width leaves the gradients alone, as the device does.
+inline void PointwiseBackward(const PointwiseParams& p,
+                              const std::vector<float>& a,
                               const std::vector<float>& b,
-                              const std::vector<float>& dy, float alpha,
-                              float beta, std::vector<float>* da,
-                              std::vector<float>* db) {
-  for (std::size_t i = 0; i < a.size(); ++i) {
+                              const std::vector<float>& dy,
+                              std::vector<float>* da, std::vector<float>* db) {
+  const int n = p.count;
+  const float alpha = p.alpha;
+  const float beta = p.beta;
+  if (p.op == PointwiseOp::kRowScale) {
+    const int row_width = p.row_width;
+    if (row_width <= 0 || row_width > n || n % row_width != 0) return;
+    if (da != nullptr) {
+      for (int r = 0; r < n / row_width; ++r) {
+        double sum = 0.0;
+        for (int c = 0; c < row_width; ++c) {
+          const std::size_t i = static_cast<std::size_t>(r) * row_width + c;
+          sum += static_cast<double>(dy[i]) * b[i];
+        }
+        (*da)[r] = static_cast<float>(sum);
+      }
+    }
+    if (db != nullptr) {
+      for (int i = 0; i < n; ++i) (*db)[i] = a[i / row_width] * dy[i];
+    }
+    return;
+  }
+  for (int i = 0; i < n; ++i) {
     const float av = a[i];
     const float dyv = dy[i];
-    switch (op) {
+    switch (p.op) {
       case PointwiseOp::kScale:
         if (da != nullptr) (*da)[i] = alpha * dyv;
         break;
@@ -259,6 +312,22 @@ inline void PointwiseBackward(PointwiseOp op, const std::vector<float>& a,
         }
         break;
       }
+      case PointwiseOp::kExp:
+        if (da != nullptr) (*da)[i] = dyv * std::exp(av);
+        break;
+      case PointwiseOp::kRsqrt: {
+        if (da != nullptr) {
+          const float r = 1.0f / std::sqrt(av);
+          (*da)[i] = -0.5f * dyv * r * r * r;
+        }
+        break;
+      }
+      case PointwiseOp::kLog:
+        if (da != nullptr) (*da)[i] = dyv / av;
+        break;
+      case PointwiseOp::kRowScale:
+        // Unreachable: handled above.
+        break;
     }
   }
 }

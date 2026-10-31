@@ -28,7 +28,9 @@ happen through the integrator.
 | Workstream | Owns | Depends on |
 |---|---|---|
 | **Architect / Integrator** | `include/nanochat/*.h`, `MODULE.bazel`, `.bazelrc`, top-level `BUILD` files, `tools/nanochat`, `python/nanochat_cpp/cli.py`, `python/nanochat_cpp/_entry.py`, `README.md`, `DESIGN.md`, `AGENTS.md`, `CONTRIBUTING.md`, `docs/**` | — |
-| **Runtime** | `include/nanochat/tensor.h`, `src/tensor.cc`, `backends/cpu/` | frozen `kernels.h` |
+| **Contract** (the architect) | `spec/**`, the frozen headers below, and this document | — |
+| **Model owners** (one per model) | `models/<name>/**` | `spec/**`, the frozen headers |
+| **Runtime** | `include/nanochat/tensor.h`, `src/tensor.cc`, `backends/cpu/` (`caps.json` is the device's single declaration; no header row is added per device) | frozen `kernels.h` |
 | **Oracle** | `tools/dump_*.py`, `tests/`, `tests/data/*.bin` | frozen `tensor.h` |
 | **Kernel agents** (one per family) | `backends/cuda/kernels/<family>.cu` + `<family>_test.cc` + `<family>_benchmark.cc` in the same directory | frozen `kernels.h` |
 | **Kernel agents** (shared) | `backends/cuda/kernels/testing/**` (host test scaffolding), `dev/kernels/**` (unpromoted prototypes) | — |
@@ -43,7 +45,8 @@ happen through the integrator.
 | **Simulator** | `tools/cuda_sim/**` (the API interposer, the emulation engine, the collective mock, `cuda_sim.map`, `check_symbols.py`) | `docs/simulator.md`, frozen `tensor.h` |
 | **Build** | `MODULE.bazel`, `.bazelrc`, `BUILD.bazel` (setup only) | Architect |
 
-**Frozen interfaces** (architect-owned; coordinate before editing):
+**Frozen interfaces** (contract-owned: the architect; coordinate before
+editing):
 
 - `include/nanochat/kernels.h` — the backend seam.
 - `include/nanochat/device_profile.h` — the simulator's capability table
@@ -52,9 +55,17 @@ happen through the integrator.
 - `include/nanochat/config.h` — `Config`.
 - `include/nanochat/model.h` — the public Model API.
 - `include/nanochat/capi.h` — the C ABI for the in-process Python API.
+- `include/nanochat/plan.h` — the pure `BuildPlan` and its `PlanRequest`
+  (contract-owned).
+- `include/nanochat/model_spec.h` — the closed `ModelSpec` description
+  (contract-owned).
 
 A frozen header may still gain symbols during Wave 0. After the freeze, edits
 stay architect-owned, and additive changes are preferred.
+
+A bring-up may not edit a frozen header, a shared build file, or another
+package without a contract extension first; that is the rejection list in §13
+of [docs/model-and-device-bringup.md](docs/model-and-device-bringup.md).
 
 ---
 

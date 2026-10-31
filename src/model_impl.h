@@ -7,6 +7,8 @@
 #include <vector>
 
 #include "nanochat/model.h"
+#include "nanochat/model_spec.h"
+#include "nanochat/plan.h"
 #include "src/ops.h"
 #include "src/workspace.h"
 
@@ -23,7 +25,13 @@ namespace nanochat {
 
 class TrainModel final : public Model {
  public:
-  explicit TrainModel(const Config& config);
+  // `spec` is the description the graph is built from: the ordered block list
+  // drives the topology (a block kind is a named meaning, not a branch on a
+  // model name), and `config` is the derived struct it produced. `plan` is the
+  // device-and-graph plan `Model::Create` built once; it may be plan-less (no
+  // choices) for the historical `Create(config)` entry point, which reads no
+  // spec. *This* Plan is unrelated to `python/nanochat_cpp/plan.py`.
+  TrainModel(const ModelSpec& spec, const Config& config, const Plan& plan);
   ~TrainModel() override;
 
   void InitWeights(std::uint64_t seed) override;
@@ -43,6 +51,10 @@ class TrainModel final : public Model {
 
   // --- test/debug accessors (not part of the public Model API) ---
   const ComputeType* raw_logits() const { return raw_logits_; }
+  // The description this model was built from, and the plan it stored. A
+  // plan-less model (the historical `Create(config)`) reports no choices.
+  const ModelSpec& spec() const { return spec_; }
+  const Plan& plan() const { return plan_; }
   // Per-row cross-entropy (nats) saved by the most recent ForwardLoss; length
   // `last_batch() * last_seq()`. `EvalBpb` sums these before dividing by bytes.
   // The grad-mode forward writes the eval-mode buffer instead.
@@ -93,6 +105,18 @@ class TrainModel final : public Model {
 
   Param& AddParam(const std::string& name, std::int64_t count, int rows,
                   int cols);
+  // True when `layer` carries the ResFormer value embedding: the block list says
+  // whether the block consumes one (the value-gated residual), and the derived
+  // `Config` says which layers carry the table. Two questions, one answer each,
+  // so a block that declares the plain residual has no value embedding
+  // regardless of the table.
+  bool BlockHasValueEmbedding(int layer) const;
+  // The left extent of `layer`'s attention window, from the block's declared
+  // mask kind: a sliding-window block gets the derived short window and a
+  // full-context block gets -1 (no left extent). `Config::window_left` is the
+  // derived accessor; the graph reads the block list, so a block kind is a
+  // named meaning rather than an index into a pattern string.
+  int BlockWindowLeft(int layer) const;
   void BuildTrainWorkspace(int batch, int seq);
   void BuildEvalWorkspace(int batch, int seq);
   // The shared forward topology for both grad modes (docs/eval.md). When
@@ -112,6 +136,10 @@ class TrainModel final : public Model {
     return grad_enabled_ ? losses_ : eval_losses_;
   }
   void BuildRope(int seq);
+
+  // The description and the plan, both fixed at construction.
+  ModelSpec spec_;
+  Plan plan_;
 
   // Parameters, in the optimizer's grouping order (docs/model.md).
   std::vector<Param> params_;

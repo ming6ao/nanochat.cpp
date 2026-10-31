@@ -19,7 +19,9 @@ exports_files([
     "dump_fixtures.py",
     "fixture_common.py",
     "fixture_format.py",
+    "gen_matrix.py",
     "gen_unicode_tables.py",
+    "isolation_gate.py",
     "nanochat",
 ])
 
@@ -35,10 +37,34 @@ filegroup(
 )
 
 # The merged fixture generator and its shared helpers. The contract suite
-# reads the usage line, and a fixture run needs both files.
+# reads the usage line, and a fixture run needs both files. The two P4 oracle
+# tools travel in the same group so a test that already consumes
+# `//tools:fixtures` gets the selector check, the matrix generator, and the
+# isolation gate in its runfiles with no new label.
 filegroup(
     name = "fixtures",
     srcs = [
+        "dump_fixtures.py",
+        "fixture_common.py",
+        "fixture_format.py",
+        "gen_matrix.py",
+        "isolation_gate.py",
+    ],
+)
+
+# The section 11 matrix generator. It reads models/*/spec.json and
+# backends/*/caps.json and is standard-library only.
+filegroup(
+    name = "matrix",
+    srcs = ["gen_matrix.py"],
+)
+
+# The section 10.4 regenerate-and-diff gate. It drives dump_fixtures.py, so
+# the shared helpers travel with it.
+filegroup(
+    name = "isolation_gate",
+    srcs = [
+        "isolation_gate.py",
         "dump_fixtures.py",
         "fixture_common.py",
         "fixture_format.py",

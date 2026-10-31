@@ -7,9 +7,25 @@
 #include "nanochat/tensor.h"
 
 // The backend seam (L1 in DESIGN.md section 2). A backend is complete when
-// every symbol below resolves and passes the oracle. This header is frozen and
+// every symbol below resolves and passes the oracle. This header is closed and
 // vendor-free: it never includes a CUDA/HIP header, pointers are always
 // `ComputeType*`, and device streams are opaque. See docs/kernels.md.
+//
+// Seam version: 2. The version lives in this header comment rather than in one
+// symbol (DESIGN.md section 10.3), because a backend implements the header as
+// one contract: it is bumped once per change set, under the evolution rules in
+// DESIGN.md section 7, and a bring-up pins the number it implements.
+//   1  the seam as it stood: the GEMM entry, the scaled fp8 GEMM, the compute
+//      families (RmsNorm, QkPrep, Attention, Classifier, Embedding, ValueGate),
+//      the two stateful training entries (AdamW, Muon), GradNorm, ScalarDot,
+//      and the pointwise pair with a scalar argument list.
+//   2  adds `RowReduce` and `SpanReduce`, and replaces the pointwise scalar
+//      argument list with `PointwiseParams` plus the kExp, kRsqrt, kLog and
+//      kRowScale codes. The reductions are new symbols; the pointwise pair
+//      keeps its name and its arithmetic, and the runtime updates those call
+//      sites in the same change set.
+// One bump covers one change set, however many symbols that set adds. A worker
+// who later wants a second header edit reports it instead of making it.
 //
 // Layout conventions:
 //   * Every tensor is dense row-major unless a parameter says otherwise.
@@ -18,6 +34,11 @@
 //     `float` on every device (docs/build.md).
 
 namespace nanochat {
+
+// The seam version this header declares. A backend pins the number it
+// implements, so an out-of-tree backend cannot bind an older contract by
+// accident. See the header comment for what each version covers.
+inline constexpr int kKernelSeamVersion = 2;
 
 enum class CopyDir {
   kHostToDevice = 0,
@@ -34,15 +55,34 @@ enum class GemmMode {
   kWgrad = 2,    // gradient with respect to B
 };
 
-// Pointwise op codes (relu^2, scale-add, gate-mul, scale, softcap). The same
-// code drives forward and backward so the pair cannot drift apart
-// (DESIGN.md section 5).
+// Pointwise op codes: the five arithmetic codes (four plain, one with a row
+// broadcast), the softcap, and the three transcendental codes. The same code
+// drives forward and backward so the pair cannot drift apart (DESIGN.md
+// section 5).
+//
+// The enum is closed. One build links the runtime and every backend, so a
+// backend's switch covers every code with no `default` arm: a missing code is a
+// compile error, never a silent run-time fallthrough. The per-code arithmetic
+// and the meaning of alpha and beta are in `PointwiseParams` below.
 enum class PointwiseOp {
   kScale = 0,       // out = alpha * a
   kScaleAdd = 1,    // out = alpha * a + beta * b
   kGateMul = 2,     // out = sigmoid(a) * b
   kReluSquare = 3,  // out = relu(a)^2
-  kSoftcap = 4,     // out = cap * tanh(a / cap)
+  kSoftcap = 4,     // out = cap * tanh(a / cap), with cap read from alpha
+  kExp = 5,         // out = exp(a)
+  kRsqrt = 6,       // out = 1 / sqrt(a)
+  kLog = 7,         // out = log(a)
+  kRowScale = 8,    // out[i] = alpha * a[i] * b[i % row_width]
+};
+
+// The combine op of a reduction. Closed for the same reason as `PointwiseOp`:
+// a backend's switch names every code and has no `default` arm.
+enum class ReduceOp {
+  kSumSq = 0,      // sum of squares: the unitless mean-square argument
+  kSum = 1,        // plain sum
+  kMax = 2,        // segment maximum, the stable log-sum-exp seed
+  kLogSumExp = 3,  // log(sum(exp(x))): nats, computed max-stable
 };
 
 // ---------------------------------------------------------------------------
@@ -113,6 +153,77 @@ struct ScaledGemmParams {
   const float* scale_b = nullptr;  // dequantization value for B
 };
 
+// ---------------------------------------------------------------------------
+// Reductions
+// ---------------------------------------------------------------------------
+//
+// Two reduction entries, plus the existing `ScalarDot`, and not one descriptor
+// with three modes. A single descriptor carrying "per-segment", "ragged list"
+// and "scalar dot" modes would merge three different algorithms, three
+// different correctness risks, and three different units into one parameter
+// block:
+//
+//   * Algorithm. `RowReduce` is a per-segment reduction whose shape is known at
+//     launch, so one segment can reduce inside one CTA. `SpanReduce` reduces a
+//     list the host never reads, so the segment boundaries are visible only to
+//     the kernel and a span may exceed one CTA. `ScalarDot` is one contiguous
+//     dot with a fixed launch. No single launch covers all three, so no single
+//     descriptor should pretend to.
+//   * Correctness risk. `RowReduce`'s result feeds a divisor (RmsNorm, QkPrep)
+//     and a log-sum-exp (Classifier), so a wrong index or a wrong combine is a
+//     silently wrong loss and the gate has to be near-exact. `SpanReduce` is an
+//     accumulation whose order across spans is already unspecified, so its gate
+//     is a tolerance. Sharing one code would put the tolerance gate on the path
+//     that needs the strict one.
+//   * Units. `RowReduce` returns a unitless mean-square argument (RmsNorm,
+//     QkPrep), nats (the Classifier's log-sum-exp), or a raw sum. `SpanReduce`
+//     returns a sum of products. Different units mean different reference
+//     formulas, which is what the oracle compares against.
+//
+// `RowReduce` is the highest-risk line in the seam: one reduction must serve
+// RmsNorm, QkPrep and Classifier, with different combine ops and different
+// offsets. Neither of the other two is a row reduction: `SpanReduce` reduces a
+// ragged device-resident list, and `ScalarDot` reduces one contiguous buffer.
+//
+// The field sets below are closed, exactly as section 7.2 states them. A field
+// is not added here because one consumer wants one: if the CPU RmsNorm
+// comparison (the open question recorded in section 17) finds a missing field,
+// that is a reported follow-up, not a silent second edit to this header.
+
+// One reduction per equally shaped segment: `n_out` scalars from `n_out`
+// segments of `count` elements each. Element `j` of segment `s` is
+// `a[offset + s * count * stride + j * stride]`, so the same call covers a
+// contiguous row (`count` = row width, `stride` = 1, `n_out` = rows) and a
+// head_dim slice inside a wider row (`offset` at the head, `count` = head_dim,
+// `stride` = 1, `n_out` = 1, or `n_out` = rows * heads when the heads are
+// densely packed).
+//
+// This is the highest-risk line: RmsNorm reads it as a sum of squares per row,
+// QkPrep as a sum of squares per head slice, and Classifier as a max-stable
+// log-sum-exp per row. One indexing mistake or one wrong combine reaches all
+// three operators at once, so each consumer keeps its own oracle gate.
+struct RowReduceParams {
+  int n_out = 0;            // segments, one output scalar each
+  int count = 0;            // elements per segment
+  std::int64_t stride = 1;  // element stride inside a segment
+  std::int64_t offset = 0;  // element offset of the first segment
+  ReduceOp op = ReduceOp::kSumSq;
+};
+
+// A ragged reduction to one scalar: `num_spans` segments whose lengths differ.
+// The segment pointers and the lengths live in *device* memory, so the caller
+// builds the list without a host round trip (`GradNorm`'s `grads` and `counts`
+// follow the same rule). `other` is a second list of the same ragged shape:
+// when it is not null the reduction is the per-segment dot product of the two,
+// so one entry point serves a plain sum and a dot. `scale` multiplies the
+// result, and `accumulate` adds to `*out` instead of writing it.
+struct SpanReduceParams {
+  int num_spans = 0;
+  const int* counts = nullptr;  // device array: elements per span, in order
+  float scale = 1.0f;
+  bool accumulate = false;
+};
+
 struct RmsNormParams {
   int rows = 0;  // rows to reduce over
   int dim = 0;   // row width
@@ -149,6 +260,46 @@ struct AttentionParams {
   // passes the full sequence length so the block kernel can index the shared
   // statistics buffer at its query offset (docs/attention.md Part 2).
   int stats_row_stride = 0;
+};
+
+// The pointwise block. It replaces the former scalar argument list
+// `(op, n, a, b, alpha, beta)` so that a broadcast and the transcendental codes
+// could be added without another positional argument.
+//
+// Per-code arithmetic and the meaning of alpha and beta:
+//   kScale       out = alpha * a                            (beta unused)
+//   kScaleAdd    out = alpha * a + beta * b
+//   kGateMul     out = sigmoid(a) * b                (alpha, beta unused)
+//   kReluSquare  out = relu(a)^2                     (alpha, beta unused)
+//   kSoftcap     out = alpha * tanh(a / alpha)  (the cap is alpha; beta unused)
+//   kExp         out = exp(a)                        (alpha, beta unused)
+//   kRsqrt       out = 1 / sqrt(a)                   (alpha, beta unused)
+//   kLog         out = log(a)                        (alpha, beta unused)
+//   kRowScale    out[i] = alpha * a[i] * b[i % row_width]     (beta unused)
+// An unused value is ignored, not asserted: a stale alpha or beta cannot change
+// a result the code does not read.
+//
+// `row_width` is the width of the row the broadcast reads. `b` holds one row of
+// `row_width` entries, replicated down the `count / row_width` rows of `a`; 0
+// means `count`, which is the whole-buffer case. The backward writes `da` and
+// accumulates the per-row-element sum into the `row_width` entries of `db`, so
+// the caller treats `db` as an accumulation buffer.
+//
+// Accuracy. The arithmetic codes (kScale, kScaleAdd, kGateMul, kReluSquare,
+// kRowScale) are bit-exact across devices and the pointwise gate compares them
+// bit for bit. The transcendental codes (kSoftcap, kExp, kRsqrt, kLog) are not
+// bit-exact across devices and cannot be: exp, tanh and rsqrt differ in the
+// last bit between a libm, a device intrinsic, and a hand-written polynomial.
+// Their accuracy obligation is therefore a declared bound per code, and it
+// lives in spec/pointwise_ops.md, which is the authority for the bounds; this
+// header is the authority for the code list. A code with no declared bound
+// there does not ship.
+struct PointwiseParams {
+  PointwiseOp op = PointwiseOp::kScale;
+  int count = 0;      // elements in `a`, in `out`, and in `dy` on the backward
+  int row_width = 0;  // width of the row a broadcast reads; 0 => count
+  float alpha = 1.0f;
+  float beta = 0.0f;
 };
 
 // Logit softcap + cross-entropy + unpadded-vocab slice (docs/kernels.md and
@@ -267,13 +418,17 @@ void AttentionBackward(const AttentionParams& params, const ComputeType* q,
                        const float* stats, const ComputeType* dout,
                        ComputeType* dq, ComputeType* dk, ComputeType* dv);
 
-void PointwiseForward(PointwiseOp op, int n, const ComputeType* a,
-                      const ComputeType* b, float alpha, float beta,
-                      ComputeType* out);
+// `b` is read by kScaleAdd and kGateMul and is the broadcast table for
+// kRowScale; the codes that do not read it accept null.
+void PointwiseForward(const PointwiseParams& params, const ComputeType* a,
+                      const ComputeType* b, ComputeType* out);
 
-void PointwiseBackward(PointwiseOp op, int n, const ComputeType* a,
-                       const ComputeType* b, const ComputeType* dy, float alpha,
-                       float beta, ComputeType* da, ComputeType* db);
+// Backward of the matching forward. `da` is always written. `db` is read by
+// kScaleAdd (scaled by beta) and accumulated by kRowScale; a null `db` is
+// allowed for the codes whose backward does not touch it.
+void PointwiseBackward(const PointwiseParams& params, const ComputeType* a,
+                       const ComputeType* b, const ComputeType* dy,
+                       ComputeType* da, ComputeType* db);
 
 void ClassifierForward(const ClassifierParams& params,
                        const ComputeType* logits, const int* targets,
@@ -304,6 +459,22 @@ void AdamWUpdate(int n, const AdamWParams& params, float* master,
 void MuonUpdate(const MuonParams& params, const float* stacked_grads,
                 float* stacked_master, ComputeType* stacked_values, float* buf1,
                 float* buf2);
+
+// --- Reductions ------------------------------------------------------------
+
+// Writes one scalar per segment to `out`, a device buffer of
+// `RowReduceParams::n_out` floats. `out` is written, never accumulated, and the
+// three consumers (RmsNorm, QkPrep, Classifier) read it back as `rstd` input,
+// per-head scale input, or row statistics.
+void RowReduce(const RowReduceParams& params, const ComputeType* a, float* out);
+
+// Reduces a ragged, device-resident span list to the single scalar `*out`: the
+// sum of the spans, or the dot product of `spans` and `other` when `other` is
+// not null, scaled by `params.scale` and written to or added to `*out`. The
+// order across spans is unspecified, so this entry is not the one a bit-exact
+// gate rides on; `RowReduce` is.
+void SpanReduce(const SpanReduceParams& params, const ComputeType* const* spans,
+                const ComputeType* const* other, float* out);
 
 // Accumulates the sum of squares of `num_spans` gradient buffers in double,
 // writes the pre-clip L2 norm to `out_norm`, and writes the clip scale to
