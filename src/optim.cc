@@ -168,7 +168,16 @@ class NanochatOptimizer final : public Optimizer {
     grad_norm_ = stats[0];
     const float grad_scale = stats[1];
 
-    const float lrm = scheduler_.LrMultiplier(step);
+    // The learning-rate multiplier is the schedule's, and only the schedule's:
+    // `group.lr` already carries `init_lr_frac` (applied once in `Build`), so a
+    // second scaling here would square the factor (design decision D3 in
+    // `nanochat/optim.h`). A driver that resolves the rate from something other
+    // than the step -- the SFT progress stream of design decision D1 -- hands
+    // its value to `SetProgressMultiplier`, which replaces the schedule's output
+    // for that step instead of multiplying it.
+    const float lrm = lr_multiplier_override_ >= 0.0f
+                          ? lr_multiplier_override_
+                          : scheduler_.LrMultiplier(step);
 
     for (AdamWGroup& group : adamw_groups_) {
       for (std::size_t i = 0; i < group.params.size(); ++i) {
@@ -216,6 +225,14 @@ class NanochatOptimizer final : public Optimizer {
   }
 
   float GradNorm() const override { return grad_norm_; }
+
+  // Overrides the learning-rate multiplier of the next `Step` calls, or returns
+  // to the scheduler's own curve for a negative value (design decision D1). The
+  // value is a multiplier, not a rate: `Step` still multiplies `group.lr` by it
+  // exactly once, so no call site scales a rate.
+  void SetProgressMultiplier(float multiplier) {
+    lr_multiplier_override_ = multiplier;
+  }
 
   // Visits every parameter with its offset in the concatenated `master`
   // record, which the grouping fixes: AdamW groups first (in
@@ -392,7 +409,13 @@ class NanochatOptimizer final : public Optimizer {
     for (std::size_t i = 0; i < adamw_groups_.size(); ++i) {
       AdamWGroup& group = adamw_groups_[i];
       group.kind = specs[i].kind;
-      group.lr = specs[i].lr;
+      // Design decision D3: the reference multiplies every group rate by
+      // `init_lr_frac` once, before the first step, and lets the schedule take it
+      // from there. The scaling happens here, where the per-group rate is set,
+      // and nowhere else; the smear group is scaled like every other group even
+      // though its rate is a constant of the recipe rather than a configured
+      // rate (section 5.2 of docs/sft-parity-plan.md).
+      group.lr = specs[i].lr * config_.init_lr_frac;
       group.beta1 = specs[i].beta1;
       group.beta2 = specs[i].beta2;
       group.eps = config_.adam_eps;
@@ -440,9 +463,12 @@ class NanochatOptimizer final : public Optimizer {
       group.red_dim = reduce_cols ? -1 : -2;
       group.buf2_len = static_cast<std::int64_t>(group.num_params) *
                        (reduce_cols ? group.rows : group.cols);
-      group.lr = config_.matrix_lr *
-                 std::sqrt(std::max(1.0f, static_cast<float>(group.rows) /
-                                              static_cast<float>(group.cols)));
+      // `init_lr_frac` scales the Muon matrices too, once, in the same place as
+      // the AdamW groups (design decision D3).
+      group.lr =
+          config_.matrix_lr * config_.init_lr_frac *
+          std::sqrt(std::max(1.0f, static_cast<float>(group.rows) /
+                                      static_cast<float>(group.cols)));
       muon_groups_.push_back(std::move(group));
     }
 
@@ -621,6 +647,8 @@ class NanochatOptimizer final : public Optimizer {
   float* norm_dev_ = nullptr;
   std::int64_t total_count_ = 0;
   float grad_norm_ = 0.0f;
+  // A negative value means "no override": `Step` uses `LrMultiplier(step)`.
+  float lr_multiplier_override_ = -1.0f;
 };
 
 }  // namespace
@@ -652,6 +680,33 @@ float Scheduler::LrMultiplier(int step) const {
   const float progress =
       static_cast<float>(num_iters - it) / static_cast<float>(warmdown);
   return progress + (1.0f - progress) * config_.final_lr_frac;
+}
+
+// The SFT learning-rate multiplier (design decision D1 of
+// docs/sft-parity-plan.md): the body of `scripts/chat_sft.py:310-317`, in the
+// same three branches and with the same endpoints. `progress` is the fraction of
+// the run that has happened, not a step count, because an SFT run stops at the
+// end of its data and a step total fixed before the run started does not
+// describe it.
+float Scheduler::LrMultiplierForProgress(float progress) const {
+  const float warmup = config_.warmup_ratio;
+  const float warmdown = config_.warmdown_ratio;
+  // Branch 1: the warmup. The `warmup > 0` guard is what keeps the division
+  // finite for the pinned SFT run, whose `warmup_ratio` is 0 (section 5.2), and
+  // it agrees with the reference: `progress < warmup_ratio` is false for every
+  // non-negative `progress` when the ratio is 0.
+  if (warmup > 0.0f && progress < warmup) {
+    return (progress + 1e-8f) / warmup;
+  }
+  // Branch 2: the constant segment. It is inclusive at its right endpoint, so
+  // the segment ends exactly at `1 - warmdown_ratio`.
+  if (progress <= 1.0f - warmdown) return 1.0f;
+  // Branch 3: the warmdown, ending at `final_lr_frac` for `progress == 1`. A
+  // `warmdown_ratio` of 0 leaves no segment to walk, so the run ends at the
+  // final fraction instead of dividing by zero.
+  if (warmdown <= 0.0f) return config_.final_lr_frac;
+  const float decay = (progress - (1.0f - warmdown)) / warmdown;
+  return 1.0f + decay * (config_.final_lr_frac - 1.0f);
 }
 
 float Scheduler::MuonMomentum(int step) const {
@@ -699,6 +754,28 @@ bool LoadOptimizerState(const Checkpoint& checkpoint, Optimizer* optimizer) {
   auto* impl = dynamic_cast<NanochatOptimizer*>(optimizer);
   if (impl == nullptr) return false;
   return impl->LoadState(checkpoint);
+}
+
+// The progress schedule's entry point (design decision D1 of
+// docs/sft-parity-plan.md). `Optimizer::Step` resolves the learning-rate
+// multiplier from `Scheduler::LrMultiplier`, which is the pretraining curve
+// indexed by a step total. An SFT run follows `LrMultiplierForProgress`
+// instead, and it needs the momentum and weight-decay schedules to keep their
+// step indexing (design decision D2), so the driver resolves the multiplier and
+// hands it over here. This replaces the schedule's output for the following
+// steps; it never scales `group.lr`, because `init_lr_frac` already did that
+// once in `Build` (design decision D3).
+void SetOptimizerProgressMultiplier(Optimizer* optimizer, float multiplier) {
+  auto* impl = dynamic_cast<NanochatOptimizer*>(optimizer);
+  if (impl == nullptr) return;
+  impl->SetProgressMultiplier(multiplier);
+}
+
+// Restores the scheduler's own curve, so a driver that stops feeding progress
+// (or a later phase that drives the same optimizer from steps) sees
+// `LrMultiplier(step)` again.
+void ClearOptimizerProgressMultiplier(Optimizer* optimizer) {
+  SetOptimizerProgressMultiplier(optimizer, -1.0f);
 }
 
 // The optimizer-step record (docs/training-seam.md section 10). The container

@@ -126,12 +126,19 @@ class FieldsReader final : public IFieldsVisitor {
   }
 
   void operator()(std::uint32_t& value) override {
+    // A field that failed earlier rejects the whole block, so no member after it
+    // takes a value from a stream the read has already abandoned (rule 5 of
+    // `nanochat/checkpoint_metadata.h`: no partial load). This is what makes the
+    // `Recipe` block of design decision D7 all-or-nothing: one bad rate and the
+    // caller keeps every member initializer instead of half a recipe.
+    if (AnyInvalid()) return;
     std::uint32_t word = 0;
     if (!NextWord(&word)) return;
     value = word;
   }
 
   void operator()(std::int32_t& value) override {
+    if (AnyInvalid()) return;
     std::uint32_t word = 0;
     if (!NextWord(&word)) return;
     value = std::bit_cast<std::int32_t>(word);
@@ -140,6 +147,7 @@ class FieldsReader final : public IFieldsVisitor {
   void operator()(std::uint64_t& value) override {
     // The low word first, then bits 32-63 (open decision O6). A missing field
     // leaves the member at its initializer, so neither word is written.
+    if (AnyInvalid()) return;
     std::uint32_t low = 0;
     if (!NextWord(&low)) return;
     std::uint32_t high = 0;
@@ -148,6 +156,7 @@ class FieldsReader final : public IFieldsVisitor {
   }
 
   void operator()(float& value) override {
+    if (AnyInvalid()) return;
     std::uint32_t word = 0;
     if (!NextWord(&word)) return;
     const float stored = std::bit_cast<float>(word);

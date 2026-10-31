@@ -19,6 +19,7 @@
 #include "nanochat/kernels.h"
 #include "nanochat/model.h"
 #include "nanochat/tensor.h"
+#include "src/eval.h"
 #include "src/model_impl.h"
 #include "src/ops.h"
 
@@ -290,12 +291,208 @@ void CheckEmptyRows() {
   }
 }
 
+// --- The packed-row evaluator (design decision D6) -------------------------
+//
+// The shard, the token-byte table, and the model are all in this file, so the
+// test needs no artifact: a known shard, a known table, and a hand-computed
+// bits-per-byte from the per-token losses the model itself reports.
+
+// A token-byte table over the tiny vocabulary: one to three bytes per id, with
+// two ids that stand for a masked special and an unused id (zero bytes).
+std::vector<int> TinyTokenBytes(int vocab) {
+  std::vector<int> table(static_cast<std::size_t>(vocab), 1);
+  for (int i = 0; i < vocab; ++i) {
+    table[static_cast<std::size_t>(i)] = 1 + (i % 3);
+  }
+  // Never a target in this shard, because a zero-byte target would contribute
+  // its loss to the model's mean while contributing no bytes.
+  table[0] = 0;
+  table[63] = 0;
+  return table;
+}
+
+// One packed row pair: `seq` inputs and `seq` targets, the last two of which are
+// padding (a target of -1) on the shorter rows.
+struct PackedRow {
+  std::vector<int> tokens;
+  std::vector<int> targets;
+};
+
+std::vector<PackedRow> TinyShard(int rows, int seq, int vocab) {
+  std::vector<PackedRow> shard(static_cast<std::size_t>(rows));
+  for (int r = 0; r < rows; ++r) {
+    PackedRow& row = shard[static_cast<std::size_t>(r)];
+    row.tokens.resize(static_cast<std::size_t>(seq));
+    row.targets.resize(static_cast<std::size_t>(seq), -1);
+    const int valid = seq - 2 - (r % 2);
+    for (int p = 0; p < seq; ++p) {
+      row.tokens[static_cast<std::size_t>(p)] =
+          1 + ((r * 7 + p * 5) % (vocab - 2));
+    }
+    for (int p = 0; p < valid; ++p) {
+      row.targets[static_cast<std::size_t>(p)] =
+          row.tokens[static_cast<std::size_t>(p)];
+    }
+  }
+  return shard;
+}
+
+nanochat::SftShard Flatten(const std::vector<PackedRow>& rows, int seq) {
+  nanochat::SftShard shard;
+  shard.rows = static_cast<int>(rows.size());
+  shard.seq = seq;
+  for (const PackedRow& row : rows) {
+    shard.tokens.insert(shard.tokens.end(), row.tokens.begin(),
+                        row.tokens.end());
+    shard.targets.insert(shard.targets.end(), row.targets.begin(),
+                         row.targets.end());
+  }
+  return shard;
+}
+
+// The independent metric: run `ForwardLoss` row by row, sum the per-token losses
+// of the valid targets from the staged losses, sum the bytes those targets
+// represent, and divide. It never uses the `mean_loss * valid_targets` identity
+// the evaluator is built on.
+struct ExpectedBpb {
+  double nats = 0.0;
+  double bytes = 0.0;
+  std::int64_t valid = 0;
+};
+
+ExpectedBpb ExpectedOverRows(Model* model, const std::vector<PackedRow>& rows,
+                            int seq, const std::vector<int>& token_bytes) {
+  auto* impl = static_cast<TrainModel*>(model);
+  ExpectedBpb expected;
+  const std::size_t row_values = static_cast<std::size_t>(seq);
+  std::vector<float> losses(row_values);
+  for (const PackedRow& row : rows) {
+    model->ForwardLoss(row.tokens.data(), row.targets.data(), 1, seq);
+    nanochat::kernels::Memcpy(losses.data(), impl->losses(),
+                              row_values * sizeof(float),
+                              CopyDir::kDeviceToHost);
+    for (int p = 0; p < seq; ++p) {
+      const int target = row.targets[static_cast<std::size_t>(p)];
+      if (target < 0) continue;
+      const int bytes = token_bytes[static_cast<std::size_t>(target)];
+      if (bytes <= 0) continue;
+      expected.nats += static_cast<double>(losses[static_cast<std::size_t>(p)]);
+      expected.bytes += bytes;
+      ++expected.valid;
+    }
+  }
+  return expected;
+}
+
+// The metric over a batch of two rows and two steps, against the independent
+// recomputation, and against `total_nats / (ln(2) * total_bytes)` computed by
+// hand.
+void CheckPackedRows() {
+  const Config config = TinyConfig();
+  std::unique_ptr<Model> model = Model::Create(config);
+  model->InitWeights(4242);
+
+  const int seq = 6;
+  const std::vector<PackedRow> rows = TinyShard(4, seq, config.vocab_size);
+  const nanochat::SftShard shard = Flatten(rows, seq);
+  const std::vector<int> token_bytes = TinyTokenBytes(config.vocab_size);
+
+  nanochat::PackedBpb result;
+  std::string error;
+  if (!nanochat::EvaluatePackedRows(model.get(), shard, token_bytes, 2, 2,
+                                    &result, &error)) {
+    Fail("packed rows: EvaluatePackedRows failed: " + error);
+    return;
+  }
+
+  const ExpectedBpb expected = ExpectedOverRows(model.get(), rows, seq,
+                                                token_bytes);
+  if (expected.valid == 0 || expected.bytes == 0.0) {
+    Fail("packed rows: the shard has no valid targets");
+    return;
+  }
+  if (result.valid_targets != expected.valid) {
+    Fail("packed rows: valid_targets is " +
+         std::to_string(result.valid_targets) + ", want " +
+         std::to_string(expected.valid));
+  }
+  if (result.target_bytes != static_cast<std::int64_t>(expected.bytes)) {
+    Fail("packed rows: target_bytes is " + std::to_string(result.target_bytes) +
+         ", want " + std::to_string(expected.bytes));
+  }
+  const double want_bpb =
+      expected.nats / (std::log(2.0) * static_cast<double>(expected.bytes));
+  CheckClosed(result.bpb, want_bpb, "packed rows: bpb");
+
+  // The same number from the identity the evaluator uses: the model's mean loss
+  // per batch times the batch's valid-target count.
+  double identity_nats = 0.0;
+  for (int step = 0; step < 2; ++step) {
+    std::int64_t valid = 0;
+    for (std::size_t i = 0; i < static_cast<std::size_t>(2) * seq; ++i) {
+      const int target =
+          shard.targets[static_cast<std::size_t>(step) * 2 * seq + i];
+      if (target >= 0) ++valid;
+    }
+    const float mean_loss = model->ForwardLoss(
+        shard.tokens.data() + static_cast<std::size_t>(step) * 2 * seq,
+        shard.targets.data() + static_cast<std::size_t>(step) * 2 * seq, 2,
+        seq);
+    identity_nats += static_cast<double>(mean_loss) * static_cast<double>(valid);
+  }
+  CheckClosed(result.bpb, identity_nats / (std::log(2.0) * expected.bytes),
+              "packed rows: bpb from mean_loss * valid_targets");
+
+  // The forward-only path leaves grad mode as it found it.
+  if (!model->grad_enabled()) Fail("packed rows: grad mode was not restored");
+}
+
+// The pass reads the shard once, so a shard shorter than
+// `eval_steps * device_batch` is an error with a message rather than a partial
+// number (section 5.4 and section 10 of the plan).
+void CheckPackedRowsTooShort() {
+  const Config config = TinyConfig();
+  std::unique_ptr<Model> model = Model::Create(config);
+  model->InitWeights(99);
+
+  const int seq = 5;
+  const nanochat::SftShard shard = Flatten(TinyShard(3, seq, config.vocab_size),
+                                           seq);
+  const std::vector<int> token_bytes = TinyTokenBytes(config.vocab_size);
+
+  nanochat::PackedBpb result;
+  std::string error;
+  if (nanochat::EvaluatePackedRows(model.get(), shard, token_bytes, 2, 2,
+                                   &result, &error)) {
+    Fail("packed rows: a shard shorter than one pass was accepted");
+    return;
+  }
+  if (error.empty()) Fail("packed rows: the short shard gave no message");
+  if (result.valid_targets != 0 || result.target_bytes != 0) {
+    Fail("packed rows: a failed pass did not clear the result");
+  }
+
+  // A table that does not cover a target is an error too: silently scoring the
+  // target at zero bytes would change the metric.
+  std::vector<int> short_table(static_cast<std::size_t>(seq), 1);
+  error.clear();
+  const nanochat::SftShard full = Flatten(TinyShard(2, seq, config.vocab_size),
+                                          seq);
+  if (nanochat::EvaluatePackedRows(model.get(), full, short_table, 2, 1,
+                                   &result, &error)) {
+    Fail("packed rows: an uncovered target was accepted");
+  }
+  if (error.empty()) Fail("packed rows: the uncovered target gave no message");
+}
+
 }  // namespace
 
 int main() {
   CheckShapeMaskingAndFocus();
   CheckFullLengthNoFocus();
   CheckEmptyRows();
+  CheckPackedRows();
+  CheckPackedRowsTooShort();
 
   if (g_failures != 0) {
     std::fprintf(stderr, "eval_test: %d check(s) failed\n", g_failures);

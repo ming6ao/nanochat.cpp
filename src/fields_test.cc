@@ -21,6 +21,7 @@
 
 #include "nanochat/checkpoint_metadata.h"
 #include "nanochat/fields.h"
+#include "src/recipe.h"
 
 namespace {
 
@@ -29,6 +30,7 @@ using nanochat::ComputePrecision;
 using nanochat::ConfigBlock;
 using nanochat::IFields;
 using nanochat::IFieldsVisitor;
+using nanochat::Recipe;
 using nanochat::Stage;
 
 int g_failures = 0;
@@ -566,6 +568,294 @@ void TestMetadataBlock() {
          "metadata: the old view changed a shared field");
 }
 
+// The `Recipe` block (design decision D7 of docs/sft-parity-plan.md): the field
+// order is the format, the block is visited last, and every member round-trips.
+void TestRecipeBlock() {
+  CheckpointMetadata written;
+  written.stage = Stage::kSft;
+  written.step = 8;
+  written.world_size = 4;
+  written.config.num_layers = 2;
+  written.config.hidden_dim = 32;
+
+  Recipe& recipe = written.recipe;
+  recipe.device_batch_size = 2;
+  recipe.total_batch_size = 128;
+  recipe.embedding_lr = 0.3f;
+  recipe.unembedding_lr = 0.004f;
+  recipe.matrix_lr = 0.02f;
+  recipe.scalar_lr = 0.5f;
+  recipe.adam_eps = 1e-10f;
+  recipe.init_lr_frac = 0.8f;
+  recipe.warmup_ratio = 0.0f;
+  recipe.warmdown_ratio = 0.5f;
+  recipe.final_lr_frac = 0.0f;
+  recipe.muon_momentum_steps = 300.0f;
+  recipe.muon_momentum_start = 0.85f;
+  recipe.muon_momentum_peak = 0.95f;
+  recipe.muon_momentum_final = 0.95f;
+  recipe.mmlu_epochs = 3;
+  recipe.gsm8k_epochs = 4;
+
+  const std::vector<std::uint32_t> words = written.Write();
+  if (words.empty()) {
+    Fail("recipe: Write produced no words");
+    return;
+  }
+
+  CheckpointMetadata read;
+  const IFields::ReadResult result = read.Read(words, 0);
+  if (result.pos == 0) Fail("recipe: Read failed");
+  Expect(result.missing_fields == 0, "recipe: missing_fields is not zero");
+  Expect(result.extra_u32 == 0, "recipe: extra_u32 is not zero");
+  Expect(result.pos == words.size(), "recipe: pos did not consume the block");
+
+  Expect(read.recipe.device_batch_size == recipe.device_batch_size,
+         "recipe: device_batch_size changed");
+  Expect(read.recipe.total_batch_size == recipe.total_batch_size,
+         "recipe: total_batch_size changed");
+  Expect(read.recipe.embedding_lr == recipe.embedding_lr,
+         "recipe: embedding_lr changed");
+  Expect(read.recipe.unembedding_lr == recipe.unembedding_lr,
+         "recipe: unembedding_lr changed");
+  Expect(read.recipe.matrix_lr == recipe.matrix_lr,
+         "recipe: matrix_lr changed");
+  Expect(read.recipe.scalar_lr == recipe.scalar_lr,
+         "recipe: scalar_lr changed");
+  Expect(read.recipe.adam_eps == recipe.adam_eps, "recipe: adam_eps changed");
+  Expect(read.recipe.init_lr_frac == recipe.init_lr_frac,
+         "recipe: init_lr_frac changed");
+  Expect(read.recipe.warmup_ratio == recipe.warmup_ratio,
+         "recipe: warmup_ratio changed");
+  Expect(read.recipe.warmdown_ratio == recipe.warmdown_ratio,
+         "recipe: warmdown_ratio changed");
+  Expect(read.recipe.final_lr_frac == recipe.final_lr_frac,
+         "recipe: final_lr_frac changed");
+  Expect(read.recipe.muon_momentum_steps == recipe.muon_momentum_steps,
+         "recipe: muon_momentum_steps changed");
+  Expect(read.recipe.muon_momentum_start == recipe.muon_momentum_start,
+         "recipe: muon_momentum_start changed");
+  Expect(read.recipe.muon_momentum_peak == recipe.muon_momentum_peak,
+         "recipe: muon_momentum_peak changed");
+  Expect(read.recipe.muon_momentum_final == recipe.muon_momentum_final,
+         "recipe: muon_momentum_final changed");
+  Expect(read.recipe.mmlu_epochs == recipe.mmlu_epochs,
+         "recipe: mmlu_epochs changed");
+  Expect(read.recipe.gsm8k_epochs == recipe.gsm8k_epochs,
+         "recipe: gsm8k_epochs changed");
+
+  // Rule 1: the block is visited last, so its words are the tail of the stream:
+  // one size word and then the member words, which are the words a bare
+  // `Recipe` writes.
+  const std::vector<std::uint32_t> recipe_words = recipe.Write();
+  Expect(words.size() > recipe_words.size(),
+         "recipe: the block is not in the stream");
+  const std::size_t begin = words.size() - recipe_words.size() - 1;
+  Expect(words[begin] == recipe_words.size(),
+         "recipe: the size word is not the block length");
+  Expect(std::equal(recipe_words.begin(), recipe_words.end(),
+                    words.begin() + static_cast<std::ptrdiff_t>(begin + 1)),
+         "recipe: the block is not the last field of the metadata block");
+}
+
+// The file predates the recipe block: the reader counts the one field it did not
+// see and keeps every `Recipe` initializer (design decision D7).
+void TestRecipeBlockMissing() {
+  CheckpointMetadata written;
+  written.stage = Stage::kSft;
+  written.step = 3;
+  written.tokenizer_id = "nanochat-32k";
+  written.notes = {"pre-recipe"};
+  const std::vector<std::uint32_t> full = written.Write();
+  if (full.empty()) {
+    Fail("recipe missing: Write produced no words");
+    return;
+  }
+  // The block a build older than D7 wrote is the same stream without the recipe
+  // block: its size word and its member words.
+  const std::size_t recipe_words = Recipe().Write().size() + 1;
+  Expect(full.size() > recipe_words,
+         "recipe missing: the stream is shorter than the block");
+  const std::vector<std::uint32_t> older(
+      full.begin(), full.end() - static_cast<std::ptrdiff_t>(recipe_words));
+
+  // A reader that knows the block reports it as one missing field and touches
+  // nothing else. The sentinel members prove the read did not resize or zero
+  // the defaults away.
+  CheckpointMetadata read;
+  read.recipe.device_batch_size = -1;
+  read.recipe.total_batch_size = -1;
+  read.recipe.embedding_lr = -1.0f;
+  read.recipe.gsm8k_epochs = -1;
+  const IFields::ReadResult result = read.Read(older, 0);
+  if (result.pos == 0) Fail("recipe missing: Read failed");
+  Expect(result.missing_fields == 1,
+         "recipe missing: missing_fields is not 1 (the block)");
+  Expect(result.extra_u32 == 0, "recipe missing: extra_u32 is not zero");
+  Expect(read.stage == written.stage && read.step == written.step,
+         "recipe missing: a leading field changed");
+  Expect(read.tokenizer_id == written.tokenizer_id,
+         "recipe missing: tokenizer_id changed");
+  Expect(read.notes == written.notes, "recipe missing: notes changed");
+  Expect(read.recipe.device_batch_size == -1 &&
+             read.recipe.total_batch_size == -1 &&
+             read.recipe.embedding_lr == -1.0f && read.recipe.gsm8k_epochs == -1,
+         "recipe missing: the block defaults were overwritten");
+
+  // With no sentinel the same read yields exactly the member initializers the
+  // header documents, which is what a finetune inherits from such a file.
+  CheckpointMetadata defaults;
+  const IFields::ReadResult default_result = defaults.Read(older, 0);
+  if (default_result.pos == 0) Fail("recipe missing: the default read failed");
+  const Recipe expected;
+  Expect(defaults.recipe.device_batch_size == expected.device_batch_size &&
+             defaults.recipe.total_batch_size == expected.total_batch_size &&
+             defaults.recipe.embedding_lr == expected.embedding_lr &&
+             defaults.recipe.unembedding_lr == expected.unembedding_lr &&
+             defaults.recipe.matrix_lr == expected.matrix_lr &&
+             defaults.recipe.scalar_lr == expected.scalar_lr &&
+             defaults.recipe.init_lr_frac == expected.init_lr_frac &&
+             defaults.recipe.warmdown_ratio == expected.warmdown_ratio &&
+             defaults.recipe.muon_momentum_steps ==
+                 expected.muon_momentum_steps &&
+             defaults.recipe.mmlu_epochs == expected.mmlu_epochs &&
+             defaults.recipe.gsm8k_epochs == expected.gsm8k_epochs,
+         "recipe missing: the member defaults changed");
+}
+
+// A file newer than this build: three trailing words after the recipe block are
+// counted and skipped, and the block still reads (rule 1, design decision D6).
+void TestRecipeExtraTrailingWords() {
+  CheckpointMetadata written;
+  written.stage = Stage::kSft;
+  written.recipe.init_lr_frac = 0.8f;
+  written.recipe.total_batch_size = 64;
+  std::vector<std::uint32_t> words = written.Write();
+  if (words.empty()) {
+    Fail("recipe extra: Write produced no words");
+    return;
+  }
+  words.push_back(0xfeedfaceu);
+  words.push_back(7);
+  words.push_back(0x0badf00du);
+
+  CheckpointMetadata read;
+  const IFields::ReadResult result = read.Read(words, 0);
+  if (result.pos == 0) Fail("recipe extra: Read failed");
+  Expect(result.missing_fields == 0, "recipe extra: missing_fields is not zero");
+  Expect(result.extra_u32 == 3, "recipe extra: extra_u32 is not 3");
+  Expect(result.pos == words.size() - 3,
+         "recipe extra: pos did not stop at the first extra word");
+  Expect(read.stage == written.stage, "recipe extra: stage changed");
+  Expect(read.recipe.init_lr_frac == 0.8f,
+         "recipe extra: init_lr_frac changed");
+  Expect(read.recipe.total_batch_size == 64,
+         "recipe extra: total_batch_size changed");
+}
+
+// A malformed block is a hard error: no partial load and no silently adopted
+// rate (rule 5, design decision D7).
+void TestRecipeBlockMalformed() {
+  CheckpointMetadata written;
+  written.stage = Stage::kSft;
+  written.recipe.init_lr_frac = 0.8f;
+  const std::vector<std::uint32_t> words = written.Write();
+  if (words.empty()) {
+    Fail("recipe malformed: Write produced no words");
+    return;
+  }
+  const std::size_t recipe_words = Recipe().Write().size();
+  const std::size_t size_word = words.size() - recipe_words - 1;
+
+  {
+    // The block claims more words than the enclosing block holds.
+    std::vector<std::uint32_t> bad = words;
+    bad[size_word] = static_cast<std::uint32_t>(recipe_words + 8);
+    CheckpointMetadata read;
+    Expect(read.Read(bad, 0).pos == 0,
+           "recipe malformed: an oversized block was accepted");
+  }
+  {
+    // The block is cut short, so the words the size word promises are absent.
+    std::vector<std::uint32_t> bad(
+        words.begin(), words.end() - static_cast<std::ptrdiff_t>(6));
+    CheckpointMetadata read;
+    Expect(read.Read(bad, 0).pos == 0,
+           "recipe malformed: a truncated block was accepted");
+  }
+  {
+    // A rate the format cannot carry is a hard error, wherever it sits in the
+    // block.
+    std::vector<std::uint32_t> bad = words;
+    bad[size_word + 3] = 0x7fc00000u;  // a quiet NaN rate
+    CheckpointMetadata read;
+    read.recipe.init_lr_frac = 0.5f;
+    const IFields::ReadResult result = read.Read(bad, 0);
+    Expect(result.pos == 0, "recipe malformed: a NaN rate was accepted");
+    Expect(read.recipe.init_lr_frac == 0.5f,
+           "recipe malformed: a failed read overwrote a member");
+  }
+}
+
+// The recipe a run can start from (design decision D7). The word stream only
+// carries the values; `RecipeUsable` is the half that reads like a schedule, and
+// the SFT driver refuses to inherit from a block it rejects.
+void TestRecipeUsable() {
+  std::string error;
+  Recipe recipe;  // Every default is a recipe the build itself writes.
+  if (!nanochat::RecipeUsable(recipe, &error)) {
+    Fail("recipe usable: the defaults were rejected: " + error);
+  }
+  // A recorded batch shape is usable, and so is an absent one.
+  recipe.device_batch_size = 2;
+  recipe.total_batch_size = 2 * 32;
+  if (!nanochat::RecipeUsable(recipe, &error)) {
+    Fail("recipe usable: a recorded batch shape was rejected: " + error);
+  }
+
+  const struct {
+    const char* what;
+    void (*mutate)(Recipe*);
+  } kRejected[] = {
+      {"half a batch shape",
+       [](Recipe* r) {
+         r->device_batch_size = 2;
+         r->total_batch_size = 0;
+       }},
+      {"the other half of a batch shape",
+       [](Recipe* r) {
+         r->device_batch_size = 0;
+         r->total_batch_size = 64;
+       }},
+      {"a negative batch size",
+       [](Recipe* r) {
+         r->device_batch_size = -2;
+         r->total_batch_size = -64;
+       }},
+      {"a negative rate", [](Recipe* r) { r->matrix_lr = -0.02f; }},
+      {"a negative epsilon", [](Recipe* r) { r->adam_eps = -1e-10f; }},
+      {"a negative momentum ramp",
+       [](Recipe* r) { r->muon_momentum_steps = -300.0f; }},
+      {"a negative mixture weight", [](Recipe* r) { r->gsm8k_epochs = -4; }},
+      {"a warmdown ratio above one",
+       [](Recipe* r) { r->warmdown_ratio = 1.5f; }},
+      {"a negative init_lr_frac", [](Recipe* r) { r->init_lr_frac = -0.8f; }},
+      {"a momentum above one",
+       [](Recipe* r) { r->muon_momentum_peak = 1.2f; }},
+  };
+  for (const auto& tc : kRejected) {
+    Recipe bad;
+    tc.mutate(&bad);
+    error.clear();
+    if (nanochat::RecipeUsable(bad, &error)) {
+      Fail(std::string("recipe usable: ") + tc.what + " was accepted");
+    }
+    if (error.empty()) {
+      Fail(std::string("recipe usable: ") + tc.what + " gave no message");
+    }
+  }
+}
+
 }  // namespace
 
 int main() {
@@ -580,6 +870,11 @@ int main() {
   TestBoolValidity();
   TestNestedBlock();
   TestMetadataBlock();
+  TestRecipeBlock();
+  TestRecipeBlockMissing();
+  TestRecipeExtraTrailingWords();
+  TestRecipeBlockMalformed();
+  TestRecipeUsable();
   if (g_failures != 0) {
     std::fprintf(stderr, "fields_test: %d failure(s)\n", g_failures);
     return 1;

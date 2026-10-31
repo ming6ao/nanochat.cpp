@@ -511,6 +511,10 @@ bool Checkpointer::SaveModel(const Model& model, const Optimizer* optimizer,
   metadata.tokenizer_id = options.tokenizer_id;
   metadata.git_revision = options.git_revision;
   metadata.notes = options.notes;
+  // The recipe rides in the metadata block (design decision D7 of
+  // docs/sft-parity-plan.md), so a later finetune inherits the batch shape and
+  // the rates from the file instead of being told them again.
+  metadata.recipe = options.recipe;
   // `created_utc` stays empty: a save has to be reproducible, and rule 4 of
   // `nanochat/checkpoint_metadata.h` makes the field informational, so a tool
   // that wants a stamp writes one instead of the trainer inventing one here.

@@ -122,6 +122,15 @@ struct CheckpointSaveOptions {
   std::string tokenizer_id;  // The tokenizer artifact name or its hash.
   std::string git_revision;  // Informational only.
   std::vector<std::string> notes;
+  // The training recipe the run followed (design decision D7 of
+  // docs/sft-parity-plan.md): the batch shape, the per-group rates, and the
+  // schedule a finetune inherits from this file. A caller that does not know one
+  // leaves the defaults, which are the values the base training loop uses, so
+  // the block is written either way and an older reader counts it as trailing
+  // words (rule 1 of `nanochat/checkpoint_metadata.h`). `src/sft_main.cc` fills
+  // it from the settings the run resolved, so a second SFT run can warm-start
+  // from this file and inherit exactly them.
+  Recipe recipe;
 };
 
 // Saves and loads a model's parameter set through the self-describing
