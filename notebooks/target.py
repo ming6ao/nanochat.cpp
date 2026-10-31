@@ -30,6 +30,9 @@ __all__ = [
     "DEFAULT",
     "FUNCTION",
     "INPUT_FIELDS",
+    "JOB_KINDS",
+    "JOB_PIPELINE",
+    "JOB_TRAIN",
     "JobPlan",
     "LocalTarget",
     "ModalLiveRun",
@@ -80,6 +83,15 @@ FUNCTION = "train"
 RUNS_VOLUME = "nanochat-runs"
 REMOTE_ROOT = "/runs"
 SECRET_NAME = "huggingface"
+
+#: The two kinds of job a Modal function runs (``docs/pipeline-plan.md``
+#: section 6.3). A ``train`` job is one stage and names its run directory in
+#: ``output.out_dir``. A ``pipeline`` job is the whole chain and names the root
+#: it writes under in ``out_root``, because one job runs three stages and no
+#: single stage owns the directory.
+JOB_TRAIN = "train"
+JOB_PIPELINE = "pipeline"
+JOB_KINDS = (JOB_TRAIN, JOB_PIPELINE)
 
 #: The files a run writes. A client pulls the ones it needs back.
 RUN_FILES = (
@@ -246,17 +258,29 @@ class ModalTarget(Target):
 
     The path map is built per run, because the remote root is a fixed mount
     point and the local root depends on the notebook.
+
+    ``function`` names the Modal function to spawn, and ``job_kind`` names the
+    shape of the job it runs: :data:`JOB_TRAIN` for one stage, whose run
+    directory is ``output.out_dir``, and :data:`JOB_PIPELINE` for the whole
+    chain, whose run root is ``out_root`` (``docs/pipeline-plan.md`` section
+    6.3). The two travel together, because the function and the job shape are
+    the same choice.
     """
 
     name = "modal"
     needs_local_devices = False
 
     def __init__(self, *, app_name=APP_NAME, function=FUNCTION,
-                 volume=RUNS_VOLUME, remote_root=REMOTE_ROOT) -> None:
+                 volume=RUNS_VOLUME, remote_root=REMOTE_ROOT,
+                 job_kind=JOB_TRAIN) -> None:
+        if job_kind not in JOB_KINDS:
+            raise ValueError(
+                f"unknown job kind {job_kind!r}: {' or '.join(JOB_KINDS)}")
         self.app_name = app_name
         self.function = function
         self.volume = volume
         self.remote_root = str(remote_root)
+        self.job_kind = job_kind
 
     def local_root(self, stage_root=None) -> Path:
         """The local run root: the caller value, else :meth:`run_root`."""
@@ -266,18 +290,36 @@ class ModalTarget(Target):
     def prepare(self, config, stage_root=None) -> JobPlan:
         """Build the plan of one job, with every path on the host root.
 
-        A run needs an ``out_dir``, because the run directory is the Volume
-        path. An empty value raises ``RuntimeError``.
+        A run needs a directory on the runs Volume, because that directory is
+        the path the client polls. A ``train`` job names it in
+        ``output.out_dir``; a ``pipeline`` job names the root of the chain in
+        ``out_root``, which is mapped to the Volume the same way and written
+        back into the job the container receives. An empty value raises
+        ``RuntimeError`` for either kind.
         """
+        local_root = self.local_root(stage_root)
         job = map_job(json.loads(config.job_json()),
-                      self.local_root(stage_root), Path(self.remote_root))
-        out_dir = _field_value(job, ("output", "out_dir"))
-        if not out_dir:
-            raise RuntimeError(
-                "a modal run needs an out_dir on the config: the run "
-                "directory is the path on the runs Volume")
+                      local_root, Path(self.remote_root))
+        if self.job_kind == JOB_PIPELINE:
+            # The field table of `map_job` stays as it is: a pipeline job
+            # holds no input path to upload, so the one root the chain writes
+            # under is mapped here and nowhere else.
+            out_dir = _field_value(job, ("out_root",))
+            if not out_dir:
+                raise RuntimeError(
+                    "a pipeline run needs an out_root on the job: the run "
+                    "root is the path on the runs Volume")
+            out_dir = _to_host(out_dir, local_root, self.remote_root)
+            job["out_root"] = out_dir
+        else:
+            out_dir = _field_value(job, ("output", "out_dir"))
+            if not out_dir:
+                raise RuntimeError(
+                    "a modal run needs an out_dir on the config: the run "
+                    "directory is the path on the runs Volume")
+            out_dir = str(out_dir)
         return JobPlan(job_json=json.dumps(job, sort_keys=True),
-                       out_dir=str(out_dir),
+                       out_dir=out_dir,
                        job_path=Path(config.out_dir) / "job.json")
 
     def relative_dir(self, plan) -> str:

@@ -1,9 +1,10 @@
 """T0: the run-host seam of ``target.py``.
 
-The test covers the job translation, the plan, the registry, the two roots, the
-record parsers, the Modal upload and spawn, and the live handle. The Modal SDK
-is a fake and the Volume is a file table, so the test needs no SDK, no account,
-no card, and no network. See ``docs/host-portability.md``.
+The test covers the job translation, the plan, the two job kinds of the Modal
+host, the registry, the two roots, the record parsers, the Modal upload and
+spawn, and the live handle. The Modal SDK is a fake and the Volume is a file
+table, so the test needs no SDK, no account, no card, and no network. See
+``docs/host-portability.md``.
 """
 
 from __future__ import annotations
@@ -49,12 +50,27 @@ def _job(stage="/stage") -> dict:
     }
 
 
+def _pipeline_job(stage="/stage") -> dict:
+    """A pipeline job: one run root, and no per-stage output directory.
+
+    It mirrors the committed example of ``notebooks/pipeline_job.json``, which
+    holds the ``Job()`` defaults; only the root is set here, so the plan has a
+    path to map.
+    """
+    return {
+        "run_id": "demo",
+        "profile": "demo",
+        "out_root": f"{stage}/runs",
+    }
+
+
 class FakeSDK:
     """The two Modal calls the target makes, and the Volume file table."""
 
     def __init__(self, files=None) -> None:
         self.files = dict(files or {})
         self.uploads = []
+        self.functions = []
         self.spawned = []
         self.cancelled = False
         self.Volume = types.SimpleNamespace(from_name=self._volume)
@@ -64,7 +80,8 @@ class FakeSDK:
         return types.SimpleNamespace(batch_upload=self._batch,
                                      read_file=self._read)
 
-    def _function(self, *_args, **_kwargs):
+    def _function(self, *args, **_kwargs):
+        self.functions.append(args)
         return types.SimpleNamespace(spawn=self._spawn)
 
     def _batch(self):
@@ -287,6 +304,67 @@ class SpawnTest(unittest.TestCase):
             job = json.loads((Path(tmp) / "runs" / "base"
                               / "job.json").read_text(encoding="utf-8"))
         self.assertEqual(job["output"]["out_dir"], "/runs/runs/base")
+
+
+class PipelineTargetTest(unittest.TestCase):
+    """The client half of the Modal pipeline entry (section 6.3)."""
+
+    def host(self, **options):
+        return target.ModalTarget(function="pipeline", job_kind="pipeline",
+                                  **options)
+
+    def test_the_run_root_comes_from_out_root(self) -> None:
+        config = FakeConfig("/stage/runs", _pipeline_job())
+        plan = self.host().prepare(config, Path("/stage"))
+        self.assertEqual(plan.out_dir, "/runs/runs")
+        self.assertEqual(plan.job_path, Path("/stage/runs/job.json"))
+        self.assertEqual(json.loads(plan.job_json)["out_root"], "/runs/runs")
+
+    def test_a_pipeline_plan_needs_an_out_root(self) -> None:
+        job = _pipeline_job()
+        job["out_root"] = ""
+        with self.assertRaises(RuntimeError) as caught:
+            self.host().prepare(FakeConfig("/stage/runs", job), Path("/stage"))
+        self.assertIn("out_root", str(caught.exception))
+
+    def test_the_run_directory_is_volume_relative(self) -> None:
+        host = self.host()
+        plan = host.prepare(FakeConfig("/stage/runs", _pipeline_job()),
+                            Path("/stage"))
+        self.assertEqual(host.relative_dir(plan), "runs")
+
+    def test_the_function_name_reaches_submit(self) -> None:
+        sdk = FakeSDK()
+        host = self.host()
+        config = FakeConfig("/stage/runs", _pipeline_job())
+        plan = host.prepare(config, Path("/stage"))
+        with mock.patch.object(target, "client", lambda: sdk):
+            live = host.submit(plan, host.uploads(config, Path("/stage")))
+        self.assertEqual(sdk.functions, [(target.APP_NAME, "pipeline")])
+        self.assertEqual(sdk.spawned, [(plan.job_json, "runs", "")])
+        self.assertIsInstance(live, target.ModalLiveRun)
+
+    def test_no_publish_target_is_assumed(self) -> None:
+        sdk = FakeSDK()
+        host = self.host()
+        config = FakeConfig("/stage/runs", _pipeline_job())
+        plan = host.prepare(config, Path("/stage"))
+        # A pipeline job holds no input path, so nothing is uploaded, and the
+        # publish stays empty until a caller passes one.
+        self.assertEqual(host.uploads(config, Path("/stage")), [])
+        with mock.patch.object(target, "client", lambda: sdk):
+            host.submit(plan, [])
+        self.assertEqual(sdk.uploads, [])
+        self.assertEqual(sdk.spawned[0][2], "")
+
+    def test_the_kind_defaults_to_train(self) -> None:
+        self.assertEqual(target.ModalTarget().job_kind, target.JOB_TRAIN)
+        self.assertEqual(target.ModalTarget().function, target.FUNCTION)
+
+    def test_an_unknown_kind_raises(self) -> None:
+        with self.assertRaises(ValueError) as caught:
+            target.ModalTarget(job_kind="chain")
+        self.assertIn("unknown job kind", str(caught.exception))
 
 
 class LiveRunTest(unittest.TestCase):

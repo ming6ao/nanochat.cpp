@@ -8,6 +8,13 @@ in a fresh session. The shared code lives in `session.py` and
 A fourth notebook, `modal_pretrain.ipynb`, runs the pretraining on Modal and
 keeps the Kaggle notebook as the client.
 
+A fifth notebook, `colab_pipeline.ipynb`, runs the whole chain on a free Colab
+T4: base training, then SFT, then RL, from one job file. It clones the tree and
+builds from source, because the install root carries no `tools/nanochat` and no
+stage binary. Its four cells are setup, environment, run, and collect, and
+`colab_setup.py` holds the two calls they make. `pipeline_job.json` is the
+committed example job. See `docs/pipeline-plan.md` section 6.2.
+
 ## Run order
 
 1. `pretrain.ipynb` downloads the data and the tokenizer, pretrains the base
@@ -82,6 +89,13 @@ prints the mode, the library, the secret names, and the devices.
   environment, the library build, and `revision(root)` for the short Git
   revision. Its `setup` prefers the installed package too, and
   `prefer_installed=False` forces the clone fallback.
+- `colab_setup.py` is the Colab half of the session setup, and it is additive:
+  it forwards to `kaggle_setup`. `setup` fixes the `/content` destination and
+  passes `prefer_installed=False`, because the chain needs `tools/nanochat` and
+  the two stage executables, which the install root does not carry. `stages`
+  builds the library and both executables in one call with the Colab defaults,
+  and `probe` maps `nvidia-smi --query-gpu=compute_cap` to `sm_75` on a T4, so
+  a paid session fails with a message about the architecture.
 - `target.py` owns the run host. `resolve` reads `NANOCHAT_TARGET`, and
   `local` is the default. `Target.prepare` maps every job path to the root the
   host reads, so a remote host needs no notebook change. The module also parses
@@ -89,7 +103,10 @@ prints the mode, the library, the secret names, and the devices.
 - The `modal` host is in `target.py` too. `ModalTarget` uploads the input files
   to the runs Volume, spawns the deployed function in `tools/modal/app.py`, and
   returns a `ModalLiveRun`. That handle polls the run directory through the
-  Volume, so the cell returns and never blocks.
+  Volume, so the cell returns and never blocks. `function` names the function
+  to spawn and `job_kind` names the job shape: `train` reads the run directory
+  from `output.out_dir`, and `pipeline` reads the root of the whole chain from
+  `out_root`.
 - `hub_checkpoint.py` is the host's handle on the Hugging Face Hub. Every save
   and load call forwards to `nanochat_cpp_bridge.hf_hub`, which imports
   `huggingface_hub` inside the call, so the tests run without the wheel. The

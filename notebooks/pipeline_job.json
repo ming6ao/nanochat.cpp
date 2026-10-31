@@ -1,0 +1,16 @@
+{
+  "run_id": "demo",
+  "profile": "demo",
+  "base_steps": 100,
+  "sft_steps": 100,
+  "rl_steps": 5,
+  "num_prompts": 4,
+  "num_samples": 4,
+  "max_tokens": 32,
+  "seed": 42,
+  "out_root": "",
+  "corpus": "fixture",
+  "deliver": true,
+  "temperature": 1.0,
+  "top_k": 0
+}
