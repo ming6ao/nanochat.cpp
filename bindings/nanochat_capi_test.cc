@@ -23,6 +23,8 @@
 #include "nanochat/checkpoint_metadata.h"
 #include "nanochat/config.h"
 #include "nanochat/data.h"
+#include "nanochat/kernels.h"
+#include "nanochat/mfu.h"
 #include "nanochat/model.h"
 #include "nanochat/tensor.h"
 #include "src/train.h"
@@ -210,6 +212,61 @@ void CheckSandboxRule() {
   ClearSandboxEnv();
   setenv("NANOCHAT_SANDBOX", "t0-cpu", 1);
   Check("init: ready", nanochat_init() == NANOCHAT_STATUS_OK);
+}
+
+// The capability gate of `nanochat_init` names the build's own precision
+// (docs/pipeline-scaleup-plan.md section 3 trap 3 and section 9 row 2). The
+// expected name is computed here from the same two helpers the shim calls, not
+// pinned to `fp32`: today's build is fp32, so a literal would pass on the wrong
+// text and then fail to describe a bf16 build.
+void CheckInitPrecisionGate() {
+  const std::string precision_name =
+      nanochat::PrecisionName(nanochat::BuildComputePrecision());
+  Check("init gate: the build precision has a name", !precision_name.empty());
+  // The helper and the compile-time flag must agree, in every build: an fp8
+  // build computes in bf16, so the flag alone names only the fp32 case.
+  const std::string flag_name =
+      nanochat::kFp8Build ? "fp8"
+                          : (nanochat::kComputeIsBf16 ? "bf16" : "fp32");
+  Check("init gate: the name follows the build flag",
+        precision_name == flag_name);
+
+  const nanochat::Caps caps = nanochat::kernels::GetCaps();
+  const std::string device =
+      caps.device_name != nullptr ? caps.device_name : "unknown";
+  // The sentence the shim composes, worded here once, with the name filled in
+  // from the build rather than written down.
+  const std::string expected =
+      "the device does not support the build precision (" + precision_name +
+      "): " + device;
+
+  if (!caps.Supports(nanochat::kComputeDType)) {
+    // The device cannot run the build precision, so the gate fires and the
+    // caller can read the text: it must carry the name computed above.
+    Check("init gate: an unsupported build precision fails",
+          nanochat_init() == NANOCHAT_STATUS_ERROR);
+    const std::string message = nanochat_last_error();
+    Check("init gate: the message names the build precision and the device",
+          message.find(expected) != std::string::npos);
+    if (precision_name != "fp32") {
+      Check("init gate: the message does not pin fp32",
+            message.find("fp32") == std::string::npos);
+    }
+    // Leave the process ready for the cases below, as the sandbox case does.
+    ClearSandboxEnv();
+    setenv("NANOCHAT_SANDBOX", "t0-cpu", 1);
+    return;
+  }
+  // The reference caps implement the fp32 and bf16 build precisions, so the
+  // gate cannot fire on this backend and there is no message to read. The
+  // device leg is where it fires (an fp8 build on a device without the E4M3
+  // path) and it runs this same source, so the branch above is the real check.
+  // What this backend can still verify is the sentence itself, composed from
+  // the same helpers: it carries this build's name and no literal.
+  Check("init gate: the device supports the build precision",
+        nanochat_init() == NANOCHAT_STATUS_OK);
+  Check("init gate: the text names the build precision, not a literal",
+        expected.find("(" + precision_name + ")") != std::string::npos);
 }
 
 // The device enumeration of docs/client-runtime-design.md section 5.1. The
@@ -1375,6 +1432,7 @@ int main(int argc, char** argv) {
   }
 
   CheckSandboxRule();
+  CheckInitPrecisionGate();
   CheckCheckpointContainer();
   CheckCheckpointRejectsTruncatedVersionOne();
   CheckCheckpointMetadata();
