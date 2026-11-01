@@ -1,4 +1,4 @@
-"""The one-job chain: base training, then SFT, then RL.
+"""The one-job chain: base training, then SFT, then RL, then eval.
 
 One job file runs the whole chain on any host: a local CPU, a Colab T4, or a
 Modal T4 (``docs/pipeline-plan.md`` section 1). Each stage calls one existing
@@ -11,7 +11,14 @@ stage                         call
 ``stage_sft``                 :func:`nanochat_cpp.sft.pack` then
                               :func:`nanochat_cpp.sft.run`
 ``stage_rl``                  :func:`nanochat_cpp.rl.run`
+``stage_eval``                :func:`nanochat_cpp.api.evaluate` then
+                              :meth:`nanochat_cpp.api.Model.generate`
 ============================  =========================================
+
+The eval stage is the one stage with no executable and no checkpoint: it runs
+in this process over the base checkpoint and the RL checkpoint, so the report
+holds both numbers and a reader sees the two bits per byte side by side
+(design decisions P4 and P5 of ``docs/pipeline-scaleup-plan.md``).
 
 The module holds no training logic, no model flag list of its own, and no host
 name (design decision D1). The model shape has one home here, :data:`PROFILES`,
@@ -66,13 +73,19 @@ __all__ = [
     "main",
     "run",
     "stage_base",
+    "stage_eval",
     "stage_rl",
     "stage_sft",
 ]
 
 #: The report schema. It moves only when the meaning of a report field moves,
 #: and it is not the checkpoint container version.
-REPORT_VERSION = 1
+#:
+#: 2: the eval stage, and the ``step_ms``, tokens per second, ``mfu``, and
+#:    hardware check facts of the base stage (``docs/pipeline-scaleup-plan.md``
+#:    section 9 rows 4 and 5). No fixture moves: the report version is not the
+#:    container version, so an old checkpoint still reads.
+REPORT_VERSION = 2
 
 #: The directory the corpus builder fills, under the run directory.
 CORPUS_DIRNAME = "corpus"
@@ -99,23 +112,53 @@ CONVERSATIONS_NAME = "conversations.json"
 #: this is the whole batch of one step. It stays at one row because the
 #: committed corpus is small: ``src/parquet/testdata/text.parquet`` holds 10
 #: documents and 109 bytes, so one epoch is at most 119 tokens with one BOS per
-#: document. A demo row is ``seq + 1`` = 65 tokens, so two rows would need 130
-#: tokens and a batch would never form. The loader resets once per step and a
-#: fresh epoch always fills one 65-token row (docs/pipeline-plan.md D5, row 7).
+#: document. A row is ``seq + 1`` = 65 tokens at either profile, so two rows
+#: would need 130 tokens and a batch would never form. The loader resets once
+#: per step and a fresh epoch always fills one 65-token row
+#: (docs/pipeline-plan.md D5, row 7; docs/pipeline-scaleup-plan.md P2).
 BASE_BATCH = 1
+
+#: The evaluator batch of the eval stage, in sequences. It is passed by hand
+#: because the default of :func:`nanochat_cpp.api.evaluate` is 8: no evaluator
+#: call resets the data loader, a fresh epoch fills one 65-token row, and a
+#: batch of eight would report no bytes and return infinity
+#: (docs/pipeline-scaleup-plan.md section 6).
+EVAL_BATCH = 1
+
+#: The capability the hardware gate's fp8 group needs, as ``(major, minor)``:
+#: the scaled fp8 GEMM is an Ada and Hopper tensor-core path
+#: (``src/hw_gate.cc``, ``docs/fp8-training.md`` section 5.3).
+FP8_COMPUTE_CAPABILITY = (8, 9)
 
 #: The micro-batch of the SFT stage.
 SFT_BATCH = 2
 
-#: The demo model shape of design decision D5: 2 layers, hidden 64, 4 heads,
-#: 2 key/value heads, sequence 64, and vocabulary 487 padded to 512. The 487
-#: is the committed fixture tokenizer's id count, so no id is out of range, and
-#: the cost is about four seconds of CPU for the whole chain.
+#: The model shapes, the one home of a shape (design decision D5).
+#:
+#: ``demo`` is 2 layers, hidden 64, 4 heads, 2 key/value heads, sequence 64,
+#: and vocabulary 487 padded to 512. The 487 is the committed fixture
+#: tokenizer's id count, so no id is out of range, and the cost is about four
+#: seconds of CPU for the whole chain. The default test loop keeps it.
+#:
+#: ``standard`` is 8 layers, hidden 512, 8 heads, 4 key/value heads, sequence
+#: 64, and the same vocabulary 487 padded to 512
+#: (``docs/pipeline-scaleup-plan`` P1 and section 5). The sequence length and
+#: the base batch stay where they are, because the committed corpus fills
+#: exactly one 65-token row per epoch (P2). The window pattern is ``L`` -- one
+#: full-attention pass at this length -- at both shapes.
 PROFILES = {
     "demo": api.Config(num_layers=2, num_heads=4, num_kv_heads=2,
                        hidden_dim=64, seq_len=64, vocab_size=487,
                        padded_vocab_size=512, window_pattern="L"),
+    "standard": api.Config(num_layers=8, num_heads=8, num_kv_heads=4,
+                           hidden_dim=512, seq_len=64, vocab_size=487,
+                           padded_vocab_size=512, window_pattern="L"),
 }
+
+#: The profile a job runs unless it names another one. ``standard`` is the
+#: default because it is the shape the throughput facts are read at; ``demo``
+#: stays for the CPU test loop (P1).
+DEFAULT_PROFILE = "standard"
 
 #: The fixture conversations, in corpus order. Each is a grade-school-math
 #: example: the user asks a question and the assistant answer carries the
@@ -158,7 +201,7 @@ def config(job: "Job") -> api.Config:
 
     Every stage receives the shape through this function and hands it to its
     facade, which renders it with :func:`nanochat_cpp.api.model_flags`. So a
-    shape is written once (design decision D5) and read by all three stages.
+    shape is written once (design decision D5) and read by every stage.
     """
     try:
         return PROFILES[job.profile]
@@ -175,23 +218,34 @@ def config(job: "Job") -> api.Config:
 
 @dataclass(frozen=True)
 class Job:
-    """One chain: the three schedules, the rollout shape, and the run root.
+    """One chain: the four schedules, the rollout shape, and the run root.
 
     A job is plain data with a JSON round trip (:meth:`to_dict`,
     :meth:`from_dict`, :meth:`to_json`, and :meth:`from_json`), so one file
     drives every host. It holds no host name and no host path: ``out_root`` is
     empty on a host that rewrites it, and the app or the notebook fills it
     (design decision D10). ``run_id`` names the directory under ``out_root``.
+
+    The schedule is the one of ``docs/pipeline-scaleup-plan.md`` section 5:
+    200 base steps, 200 SFT steps, 8 RL steps, one evaluator batch, and two
+    sampled completions. The profile defaults to ``standard``, so a job file
+    that names nothing runs the shape a throughput number can be read at.
     """
 
     run_id: str = "demo"
-    profile: str = "demo"
-    base_steps: int = 100
-    sft_steps: int = 100
-    rl_steps: int = 5
+    profile: str = DEFAULT_PROFILE
+    base_steps: int = 200
+    sft_steps: int = 200
+    rl_steps: int = 8
     num_prompts: int = 4
     num_samples: int = 4
     max_tokens: int = 32
+    # The eval stage: one batch of one row over the corpus, and two greedy
+    # completions. ``eval_batches`` is one because the corpus holds 119 tokens
+    # and one epoch fills one 65-token row, and it is not a tunable number in
+    # this plan (section 5).
+    eval_batches: int = 1
+    eval_samples: int = 2
     seed: int = 42
     out_root: str = ""
     corpus: str = "fixture"
@@ -410,18 +464,19 @@ def _published_tokenizer() -> Path:
     return root / TOKENIZER_DIRNAME / data.NCTOKEN1_NAME
 
 
-def _metric_losses(path: str | os.PathLike) -> tuple[float, ...]:
-    """The per-step losses of the mesh driver's ``metrics.jsonl``.
+def _metric_records(path: str | os.PathLike) -> tuple[dict, ...]:
+    """The per-step records of the mesh driver's ``metrics.jsonl``.
 
-    One JSON object per step (``src/mesh_train.h``); a line that does not parse
-    or carries no ``loss`` is skipped, so a truncated final line costs one
-    entry and not the trace.
+    One JSON object per step (``src/mesh_train.h``), and the driver writes the
+    step time, the tokens per second, and the model FLOPs utilization of every
+    step beside the loss. A line that does not parse or is not an object is
+    skipped, so a truncated final line costs one record and not the file.
     """
     try:
         text = Path(path).read_text(encoding="utf-8")
     except OSError:
         return ()
-    losses: list[float] = []
+    records: list[dict] = []
     for line in text.splitlines():
         line = line.strip()
         if not line:
@@ -430,9 +485,31 @@ def _metric_losses(path: str | os.PathLike) -> tuple[float, ...]:
             record = json.loads(line)
         except ValueError:
             continue
-        if isinstance(record, dict) and "loss" in record:
-            losses.append(float(record["loss"]))
+        if isinstance(record, dict):
+            records.append(record)
+    return tuple(records)
+
+
+def _metric_losses(records: Sequence[Mapping]) -> tuple[float, ...]:
+    """The per-step losses of a driver's metric records.
+
+    A record that carries no ``loss``, or one whose ``loss`` is not a number,
+    is skipped, so a truncated final line costs one entry and not the trace.
+    """
+    losses: list[float] = []
+    for record in records:
+        if not isinstance(record.get("loss"), (int, float)):
+            continue
+        losses.append(float(record["loss"]))
     return tuple(losses)
+
+
+def _mean(values: Sequence[float]) -> float:
+    """The arithmetic mean of ``values``, or 0.0 when there is none."""
+    numbers = [float(value) for value in values]
+    if not numbers:
+        return 0.0
+    return float(sum(numbers) / len(numbers))
 
 
 def _stage(name: str, steps: int, losses, path: str | os.PathLike,
@@ -457,6 +534,106 @@ def _stage(name: str, steps: int, losses, path: str | os.PathLike,
 def _total_seconds(stages: Sequence[Stage]) -> float:
     """The sum of the stage times, which is the run time of the chain."""
     return float(sum(stage.seconds for stage in stages))
+
+
+def _rates(records: Sequence[Mapping], seconds: float, steps_ran: int,
+           shape: api.Config, steady_mfu: float = 0.0) -> dict:
+    """The rate facts of the base stage: ``step_ms``, tokens per second, mfu.
+
+    ``seconds`` is the stage's own wall clock, the number the stage records, so
+    ``step_ms`` is that time divided by the steps that ran and the throughput
+    is the tokens those steps moved divided by the same time. ``mfu`` is read
+    from what the driver wrote and never computed here from a guessed peak: the
+    driver turns the shape's FLOPs per token
+    (``EstimateFlopsPerToken``) and the measured tokens per second into the
+    number (``ComputeMfu``, ``src/mesh_train.cc``), and an unknown device names
+    no peak and so records 0.0. The per-step values come first and the run
+    summary's steady value is the fallback, so a driver that wrote no metrics
+    still reports the number it recorded (``docs/pipeline-scaleup-plan.md``
+    section 9 row 4).
+    """
+    steps = max(1, int(steps_ran))
+    elapsed = float(seconds)
+    tokens = float(steps) * BASE_BATCH * int(shape.seq_len)
+    step_ms = 1000.0 * elapsed / steps
+    tokens_per_sec = tokens / elapsed if elapsed > 0.0 else 0.0
+    per_step = [float(record["mfu"]) for record in records
+                if isinstance(record.get("mfu"), (int, float))]
+    mfu = _mean(per_step) if per_step else float(steady_mfu)
+    return {
+        "step_ms": step_ms,
+        "tokens_per_sec": tokens_per_sec,
+        "mfu": mfu,
+    }
+
+
+def _capability(arch: str) -> tuple[int, int] | None:
+    """The compute capability an architecture name states, or ``None``.
+
+    ``sm_75``, ``sm90``, ``sm_90a``, and ``9.0`` all name a capability. An
+    empty name leaves the choice to the builder, so the answer is ``None`` and
+    the caller says the fact is unknown rather than inventing one.
+    """
+    text = str(arch or "").strip().lower()
+    if text.startswith("sm"):
+        text = text[2:].lstrip("_- ")
+    if not text:
+        return None
+    if "." in text:
+        major, _, minor = text.partition(".")
+        minor = minor.rstrip("a")
+        if major.isdigit() and minor.isdigit():
+            return int(major), int(minor)
+        return None
+    digits = text.rstrip("a")
+    if len(digits) == 2 and digits.isdigit():
+        return int(digits[0]), int(digits[1])
+    return None
+
+
+def _hardware() -> dict:
+    """The hardware-check facts of the base stage.
+
+    ``backend``, ``arch``, and ``precision`` are the build's own facts, the
+    same three the report's ``host`` block carries. ``startup_check`` and
+    ``fp8_cases`` say which branch of the hardware correctness gate this host
+    takes (``src/hw_gate.cc``, ``docs/correctness-gates.md`` section 4): the
+    gate runs only on a device, so the CPU reference skips it, and its fp8
+    group runs only on compute capability 8.9 or above, so a T4 leg reports a
+    skip of the fp8 cases where an H100 leg runs them
+    (``docs/pipeline-scaleup-plan.md`` section 8).
+
+    Nothing here is guessed: a fact the host cannot state stays out of the
+    report, and an architecture the builder chose (an empty ``arch``) reports
+    the fp8 group as unknown. The fp8 group of a host whose gate is skipped is
+    ``not_run`` and not ``skipped``, because no case was asked at all.
+    """
+    backend = _build.backend()
+    arch = _build.architecture()
+    capability = _capability(arch)
+    if backend != "cuda":
+        startup = "skipped"
+        reason = ("the hardware correctness gate runs only on a device, and "
+                  f"this build runs on the {backend or 'unknown'} backend")
+        fp8 = "not_run"
+    else:
+        startup = "ran"
+        reason = ("the hardware correctness gate runs on a device at "
+                  "hw_check=auto")
+        if capability is None:
+            fp8 = "unknown"
+        elif capability >= FP8_COMPUTE_CAPABILITY:
+            fp8 = "ran"
+        else:
+            fp8 = "skipped"
+    return {
+        "backend": backend,
+        "arch": arch,
+        "precision": _build.precision(),
+        "startup_check": startup,
+        "startup_check_reason": reason,
+        "fp8_cases": fp8,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -602,7 +779,11 @@ def stage_base(job: "Job") -> Stage:
     One :class:`nanochat_cpp.runtime.MeshTrainConfig` call with a mesh of one
     device. The driver writes ``metrics.jsonl``, ``summary.json``, and the
     checkpoint, so the loss trace of the stage is read back from the metrics
-    file it wrote.
+    file it wrote, and so are the rates: the step time, the tokens per second,
+    and the model FLOPs utilization of every step. The stage's ``extra``
+    therefore holds the rates and the hardware-check facts beside the corpus
+    block (``docs/pipeline-scaleup-plan.md`` section 9 row 4), and no number in
+    it is estimated here.
     """
     shape = config(job)
     corpus = build_corpus(job)
@@ -628,16 +809,22 @@ def stage_base(job: "Job") -> Stage:
     )
     with client:
         summary = client.run()
-        losses = _metric_losses(client.metrics_path())
+        records = _metric_records(client.metrics_path())
+        metrics_path = client.metrics_path()
+    seconds = time.monotonic() - started
+    losses = _metric_losses(records)
+    steps_ran = int(summary.steps)
     extra = _corpus_facts(corpus)
+    extra.update(_rates(records, seconds, steps_ran, shape,
+                        float(summary.steady_mfu)))
     extra.update({
         "mean_loss": float(summary.mean_loss),
-        "steps_ran": int(summary.steps),
+        "steps_ran": steps_ran,
         "interrupted": bool(summary.interrupted),
-        "metrics": str(client.metrics_path()),
+        "metrics": str(metrics_path),
+        "hardware": _hardware(),
     })
-    return _stage("base", job.base_steps, losses, target,
-                  time.monotonic() - started, extra)
+    return _stage("base", job.base_steps, losses, target, seconds, extra)
 
 
 def stage_sft(job: "Job", base: Stage) -> Stage:
@@ -760,6 +947,100 @@ def stage_rl(job: "Job", sft_stage: Stage) -> Stage:
     return _stage("rl", job.rl_steps, report.losses, target, seconds, extra)
 
 
+def _loaded(shape: api.Config, path: str) -> api.Model:
+    """One model at the job's shape, loaded from a checkpoint container."""
+    model = api.Model(shape)
+    model.load(str(path))
+    return model
+
+
+def _bpb(model: api.Model, corpus: Mapping[str, str], tokenizer,
+         job: "Job") -> float:
+    """The bits per byte of one loaded model over the corpus's parquet.
+
+    ``EVAL_BATCH`` is passed by hand because the default of
+    :func:`nanochat_cpp.api.evaluate` is 8 and the committed corpus fills one
+    65-token row per epoch; the report names the batch it used (section 6).
+    """
+    report = api.evaluate(model, corpus["parquet"], tokenizer,
+                          steps=int(job.eval_batches), batch=EVAL_BATCH,
+                          seed=int(job.seed))
+    return float(report.bpb)
+
+
+def _completions(conversations: Sequence[Mapping], tokenizer, model: api.Model,
+                 job: "Job") -> list[str]:
+    """``job.eval_samples`` greedy completions of the corpus, decoded to text.
+
+    The prompt is the RL stage's prompt: :func:`nanochat_cpp.rl.render_prompts`
+    renders each conversation up to the assistant marker, so the two stages ask
+    the model the same question and the samples read as the chain's own output.
+    Greedy sampling (``temperature=0.0``) keeps the report reproducible, and
+    only the sampled ids are decoded, which is the mask rule of
+    :class:`nanochat_cpp.api.GeneratedRow`.
+    """
+    prompts = rl.render_prompts(list(conversations), tokenizer)
+    if not prompts:
+        return []
+    texts: list[str] = []
+    for index in range(int(job.eval_samples)):
+        prompt = prompts[index % len(prompts)]
+        rows = model.generate(prompt, temperature=0.0,
+                              max_tokens=int(job.max_tokens),
+                              seed=int(job.seed) + index)
+        if not rows:
+            continue
+        row = rows[0]
+        generated = [token for token, mask
+                     in zip(row.tokens, row.mask) if mask]
+        # A stop token the tokenizer decodes to nothing still names the row, so
+        # a sample is never an empty string a reader has to guess at.
+        texts.append(tokenizer.decode(generated or row.tokens))
+    return texts
+
+
+def stage_eval(job: "Job", base: Stage, rl: Stage) -> Stage:
+    """Evaluate the base checkpoint and the RL checkpoint in this process.
+
+    The one stage with no executable (design decision P4): the model is built
+    with :class:`nanochat_cpp.api.Model` at the job's shape, loaded from a
+    checkpoint container, and scored with :func:`nanochat_cpp.api.evaluate`.
+    Both checkpoints are scored, so the report holds the two bits per byte side
+    by side and a reader sees what the RL stage did to the base model (P5).
+
+    No checkpoint is written: the record names the RL file, because
+    ``deliver()`` copies the checkpoint of the last stage and the delivered
+    artifact has to stay ``deliver/chatrl.ckpt`` with the RL weights. The
+    digest in ``evaluated_sha256`` is read after the eval work, so a pass that
+    wrote to the container would show up as a mismatch against the RL stage's
+    own digest (section 6).
+    """
+    shape = config(job)
+    corpus = build_corpus(job)
+    conversations = _conversations(corpus)
+    tokenizer = api.Tokenizer.load(corpus["tokenizer"])
+    started = time.monotonic()
+    model = _loaded(shape, base.checkpoint)
+    bpb_base = _bpb(model, corpus, tokenizer, job)
+    # The rebinding releases the base model before the RL one is built, so the
+    # stage holds one model arena at a time.
+    model = _loaded(shape, rl.checkpoint)
+    bpb_rl = _bpb(model, corpus, tokenizer, job)
+    samples = _completions(conversations, tokenizer, model, job)
+    seconds = time.monotonic() - started
+    extra = {
+        "bpb_base": bpb_base,
+        "bpb_rl": bpb_rl,
+        "eval_batches": int(job.eval_batches),
+        "eval_batch": EVAL_BATCH,
+        "eval_corpus": corpus["parquet"],
+        "evaluated": rl.checkpoint,
+        "evaluated_sha256": _sha256(rl.checkpoint),
+        "samples": samples,
+    }
+    return _stage("eval", job.eval_batches, (), rl.checkpoint, seconds, extra)
+
+
 # ---------------------------------------------------------------------------
 # Delivery and the run
 # ---------------------------------------------------------------------------
@@ -833,11 +1114,19 @@ def deliver(job: "Job", stages: Sequence[Stage], *,
       ``job.seed``;
     * the model shape and the tokenizer digest: ``stages[].metadata["config"]``
       and ``stages[].extra["tokenizer_sha256"]`` of the base stage's corpus;
+    * the base stage's rates and the hardware-check facts:
+      ``stages[].extra["step_ms"]``, ``stages[].extra["tokens_per_sec"]``,
+      ``stages[].extra["mfu"]``, and ``stages[].extra["hardware"]``;
+    * the eval line: ``stages[].extra["bpb_base"]``, ``bpb_rl``,
+      ``eval_batches``, ``eval_batch``, ``eval_corpus``, ``evaluated``,
+      ``evaluated_sha256``, and ``samples``;
     * the source revision: ``host.revision``, beside ``host.backend``,
       ``host.arch``, and ``host.precision``.
 
     The copy is verified against the digest the stage recorded, so a report
-    that names a digest names the bytes beside it.
+    that names a digest names the bytes beside it. The last stage is the eval
+    stage, which names the RL checkpoint as its artifact -- the file it did not
+    write -- so the delivered copy stays the RL file (section 6).
     """
     if not stages:
         raise PipelineError("there is no stage to deliver")
@@ -864,24 +1153,65 @@ def deliver(job: "Job", stages: Sequence[Stage], *,
     return str(delivered), str(report_path)
 
 
+def _check_profile(name: str, shape: api.Config) -> None:
+    """Reject a profile that ``Config::Validate`` would reject.
+
+    The rules are the ones ``include/nanochat/config.h`` states, and a
+    profile that breaks one otherwise fails inside a stage executable, where
+    the message names the C flag and not the profile. Each message here names
+    the rule and the profile (``docs/pipeline-scaleup-plan.md`` section 5).
+    """
+    heads = int(shape.num_heads)
+    kv_heads = int(shape.num_kv_heads)
+    hidden = int(shape.hidden_dim)
+    if heads < 1 or kv_heads < 1:
+        raise PipelineError(
+            f"the {name!r} profile breaks the Config::Validate rule that "
+            f"model dimensions must be positive: num_heads {heads} and "
+            f"num_kv_heads {kv_heads}")
+    if hidden % heads != 0:
+        raise PipelineError(
+            f"the {name!r} profile breaks the Config::Validate rule that "
+            f"hidden_dim must be divisible by num_heads: hidden_dim {hidden} "
+            f"and num_heads {heads}")
+    if heads % kv_heads != 0:
+        raise PipelineError(
+            f"the {name!r} profile breaks the Config::Validate rule that "
+            f"num_heads must be divisible by num_kv_heads: num_heads {heads} "
+            f"and num_kv_heads {kv_heads}")
+    if int(shape.vocab_size) > int(shape.padded_vocab_size):
+        raise PipelineError(
+            f"the {name!r} profile breaks the Config::Validate rule that "
+            f"vocab_size must not be above padded_vocab_size: vocab_size "
+            f"{int(shape.vocab_size)} and padded_vocab_size "
+            f"{int(shape.padded_vocab_size)}")
+
+
 def _check(job: "Job") -> None:
     """Reject a job that cannot run, before any stage starts."""
     shape = config(job)
     for name in ("base_steps", "sft_steps", "rl_steps", "num_prompts",
-                 "num_samples", "max_tokens"):
+                 "num_samples", "max_tokens", "eval_batches",
+                 "eval_samples"):
         if int(getattr(job, name)) < 1:
             raise PipelineError(f"the job's {name} must be positive")
     if int(shape.seq_len) < 1:
         raise PipelineError("the profile's seq_len must be positive")
+    _check_profile(job.profile, shape)
 
 
 def run(job: "Job", *, out_root: str | os.PathLike | None = None) -> Report:
-    """Run base, then SFT, then RL, and return the delivered report.
+    """Run base, then SFT, then RL, then eval, and return the report.
 
     ``out_root`` overrides ``job.out_root`` for this call, so a host that owns
     the volume rewrites the root without rewriting the job. The run directory
     is ``<run_root>/<run_id>/``, which holds one directory per stage, the
     corpus, and ``deliver/`` (D6).
+
+    The eval stage comes last and writes no checkpoint, so it names the RL
+    file as its own artifact: ``deliver()`` copies the checkpoint of the last
+    stage and the delivered file stays ``deliver/chatrl.ckpt`` carrying the RL
+    weights (``docs/pipeline-scaleup-plan.md`` section 6).
 
     With ``job.deliver`` the two deliverable files are written and the report
     that is returned is the report that was written, read back from the file.
@@ -896,7 +1226,8 @@ def run(job: "Job", *, out_root: str | os.PathLike | None = None) -> Report:
     base = stage_base(job)
     sft_stage = stage_sft(job, base)
     rl_stage = stage_rl(job, sft_stage)
-    stages = (base, sft_stage, rl_stage)
+    eval_stage = stage_eval(job, base, rl_stage)
+    stages = (base, sft_stage, rl_stage, eval_stage)
     if not job.deliver:
         return _report(job, stages)
     # `deliver` names its `out_root` the run directory, not the root that
@@ -911,6 +1242,15 @@ def run(job: "Job", *, out_root: str | os.PathLike | None = None) -> Report:
 def _print_summary(report: Report) -> None:
     """Print one line per stage and the delivered paths."""
     for stage in report.stages:
+        if stage.name == "eval":
+            # The eval stage has no loss trace of its own; the two bits per
+            # byte are what a reader compares.
+            print(f"eval: batches={stage.steps} "
+                  f"bpb_base={stage.extra.get('bpb_base')} "
+                  f"bpb_rl={stage.extra.get('bpb_rl')} "
+                  f"seconds={stage.seconds:.2f} "
+                  f"evaluated={stage.checkpoint}")
+            continue
         last = stage.losses[-1] if stage.losses else float("nan")
         print(f"{stage.name}: steps={stage.steps} last_loss={last:.6f} "
               f"seconds={stage.seconds:.2f} checkpoint={stage.checkpoint}")
@@ -930,7 +1270,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     """
     parser = argparse.ArgumentParser(
         prog="python -m nanochat_cpp.pipeline",
-        description="Run the base, SFT, and RL chain of one job file.")
+        description="Run the base, SFT, RL, and eval chain of one job file.")
     parser.add_argument("job", help="the job JSON file (see nanochat_cpp."
                                    "pipeline.Job.to_json)")
     parser.add_argument("--out-root", default=None,
