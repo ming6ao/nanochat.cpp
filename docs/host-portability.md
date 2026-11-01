@@ -64,9 +64,22 @@ different `rules_cuda` toolchain. It is a separate project with its own risk.
 | `sm_75` | sm_75 | fp32 | cpu |
 | `cuda` | sm_61 | fp32 | cuda |
 | `t4` | sm_75 | fp32 | cuda |
+| `hopper` | sm_90 | bf16 | cuda |
 
 The `t4` config selects the fp32 CUDA build for the Turing card. Turing has no
 bf16, so the T4 runs fp32 ([precision.md](precision.md)).
+
+The `hopper` config selects the bf16 CUDA build for a Hopper card, `sm_90`. It
+is the hand-run form of the same build the chain's H100 leg runs, and it is not
+the `h100` config: `h100` is the *simulator* profile, which sets
+`--define=simulator=1` and answers from the device profile table instead of the
+card, and it also swaps the collective to `native`. `hopper` sets neither, so a
+hand run builds the real backend for Hopper and keeps the default `nccl`
+collective that `world_size=1` expects ([build.md](build.md), the Precision
+section). It is a hand-run shorthand only: `_build._build_command` still emits
+its explicit flag triple, `--config=cuda --define=precision=<p>
+--@rules_cuda//cuda:archs=<a>`, and never a named config, so the H100 leg and a
+hand run are the same build.
 
 The Kaggle host file sets the arch to sm_75 and the resource budget. It does
 not set the backend. The backend stays per-command, so the CPU test loop keeps
@@ -523,7 +536,8 @@ compares.
 | Local CPU | `cpu` | empty | `fp32` | `train` scope | Bazel |
 | Local GPU | `cuda` | the card's capability | `fp32` | `t1-gpu` queue job | Bazel |
 | Colab T4 | `cuda` | `sm_75` | `fp32` | `none` | source build |
-| Modal T4 | `cuda` | `sm_75` | `fp32` | `none` | image build |
+| Modal T4 leg | `cuda` | `sm_75` | `fp32` | `none` | image build |
+| Modal H100 leg | `cuda` | `sm_90` | `bf16` | `none` | image build, bf16 |
 | Modal CPU | `cpu` | empty | `fp32` | `none` | image build, CPU config |
 
 The two card legs are `sm_75` because the image compiles for `sm_75` and a free
@@ -534,6 +548,11 @@ comes from `nvidia-smi --query-gpu=compute_cap --format=csv,noheader`.
 
 The last row is the verification-only leg of section 9.4. It needs the second
 image, which the tree does not hold today, so it records no gate and no number.
+
+The two Modal rows are one run, not two independent ones: the T4 leg runs first
+at fp32, the H100 leg second at bf16, each in its own image, and the host block
+of each report is what tells a reader which one produced it. Section 9.3 has
+the two functions, the run ids, and the gates that compare the pair.
 
 ### 9.2 Colab with a T4: the gate is owed
 
@@ -584,8 +603,9 @@ The procedure, which is the record until a run exists:
 
 What a passing run must show, as a checklist and not as a result:
 
-- The three stages with the step counts the job asked for: `base`@100,
-  `sft`@100, and `rl`@105.
+- The four stages with the step counts the job asked for, and the eval record
+  with both `bpb` values finite. The committed example job asks for `base`@200,
+  `sft`@200, `rl`@8, and one evaluator batch.
 - `deliver/chatrl.ckpt` and `deliver/pipeline_report.json` under
   `/content/runs/<run_id>/`.
 - `host.backend` equal to `cuda` and `host.arch` equal to `sm_75`.
@@ -594,28 +614,46 @@ What a passing run must show, as a checklist and not as a result:
 The manual gate is recorded as owed: a later run replaces this status line with
 the date of the session and adds the report excerpt it printed.
 
-### 9.3 Modal with a T4
+### 9.3 Modal: two legs, two images, two precisions
 
-`tools/modal/app.py` holds one function beside `train`. Its host block is the
-one in the table of section 9.1, and the function itself is:
+`tools/modal/app.py` holds four functions over two images, and one entry point
+runs both legs of one job. Each leg's host block is a row of the table in
+section 9.1, and the legs themselves are rows of this table:
+
+| Leg | Card | Arch | Precision | Image | Functions | Run id |
+|---|---|---|---|---|---|---|
+| `t4` | `T4` | `sm_75` | `fp32` | fp32, `sm_75` | `train`, `pipeline` | `<run_id>-t4` |
+| `h100` | `H100` | `sm_90` | `bf16` | bf16, `sm_90` | `train_h100`, `pipeline_h100` | `<run_id>-h100` |
+
+The two images are the point. One Bazel output base holds one build of
+`libnanochat_shared.so`, and a container compiles for exactly one architecture
+and one precision, so the T4 leg and the H100 leg cannot share a library. The
+frozen `Leg` record carries the name, the card type, the card count, the
+architecture, the precision, and the build configuration; `image_for(leg)`
+returns that leg's image, and the stage executables, `NANOCHAT_CPP_PRECISION`,
+`NANOCHAT_CUDA_ARCH`, and the build command all read the leg. The function a
+leg deploys is one shape:
 
 ```
-@app.function(image=image, gpu=gpu_request(), volumes={"/runs": runs},
-              secrets=_secrets(), timeout=TIMEOUT_SECONDS, max_containers=1)
+@app.function(image=image_for(leg), gpu=leg.gpu, cpu=CPU_CORES,
+              volumes={"/runs": runs}, secrets=_secrets(),
+              timeout=TIMEOUT_SECONDS, max_containers=1)
 def pipeline(job_json, run_id, stage_json="", publish_json="") -> str
+def pipeline_h100(job_json, run_id, stage_json="", publish_json="") -> str
 ```
 
-- The image builds the library and both stage executables in one call
-  (`_build.build_stages`), so a container needs no second build, and it names
-  the two binaries through the `NANOCHAT_SFT_MAIN` and `NANOCHAT_RL_WORKER`
-  overrides, because the installed distribution's `repo_root()` is not the image
-  tree (B6).
-- `GPU_TYPE`, `GPU_COUNT`, and `CUDA_ARCH` form one triple, and the type and
-  the architecture are a pair with the image build, because the image compiles
-  for exactly that architecture. `_check_cards` stops a container whose card
-  does not match them. `max_containers=1` keeps one chain at a time.
+What the two legs share, so they cannot drift:
+
+- `pipeline` and `pipeline_h100` are thin faces of one `_pipeline_on(leg, ...)`.
+- The image builds the library, both stage executables, and `//src:roofline_main`
+  in one call, so a container needs no second build. It names the two binaries
+  through the `NANOCHAT_SFT_MAIN` and `NANOCHAT_RL_WORKER` overrides, because
+  the installed distribution's `repo_root()` is not the image tree (B6).
+- `_check_cards(leg, ...)` stops a container whose card does not match the
+  leg's type, count, and architecture, and `max_containers=1` keeps one chain at
+  a time.
 - The app rewrites `out_root` to `/runs/<run_id>`, because the app owns the
-  Volume path and one job runs three stages. The chain nests the job's own
+  Volume path and one job runs four stages. The chain nests the job's own
   `run_id` under it, so `deliver/` lands at `/runs/<run_id>/<run_id>/deliver/`.
 - The work starts as `tools/nanochat client --profile train -- python -m
   nanochat_cpp.pipeline <job.json>`, which is the container entry of D10, and
@@ -627,10 +665,34 @@ def pipeline(job_json, run_id, stage_json="", publish_json="") -> str
 - `stage_json` is accepted and ignored: the chain warm starts each stage from
   the checkpoint of the stage before it, so a Modal stage cache has nothing to
   point at.
+- Both functions pass the same `cpu=` value. Modal sizes the CPU by memory when
+  `cpu=` is absent, so two legs with different memory would get different host
+  budgets, and gate G2 of `docs/pipeline-scaleup-plan.md` section 8 compares the
+  two base step times: an equal `cpu=` is what makes that comparison mean
+  something.
 
-The gate is `modal run tools/modal/app.py::pipeline_demo`, which runs the demo
-job in the image and prints the report. It ran on 2026-10-31 on a T4. This is
-the host block and the outcome of the report it delivered:
+What only the entry point does:
+
+- `pipeline_demo` runs the T4 leg first and the H100 leg second. The T4 report is
+  on the Volume before the H100 container starts, so a reviewer reads the cheap
+  leg while the expensive one runs, and an H100 failure leaves the T4 report
+  readable.
+- The two run ids are `<run_id>-t4` and `<run_id>-h100`, so both reports stay on
+  the `nanochat-runs` Volume side by side.
+- It prints one document with three keys: `legs` (each leg's host block, base
+  rates, RL checkpoint facts, and roofline record), `comparison` (the cross-leg
+  step-time ratio, the speed ratio, and the MFU), and `gates` (G1 to G3, each
+  pass or fail with the numbers it read). It exits non-zero when a gate fails.
+- Gate G1 reads the H100 report's `host.precision`, `host.arch`, and the RL
+  checkpoint metadata. G2 bounds the H100 base step time at 1.25 times the T4
+  one. G3 divides the measured H100 step by the roofline prediction the H100
+  container recorded and holds the ratio inside `[1, 200]` until row 9 of
+  `docs/pipeline-scaleup-plan.md` narrows it. No gate reads the MFU or the speed
+  ratio.
+
+The T4 leg has one recorded run. `modal run tools/modal/app.py::pipeline_demo`
+ran on 2026-10-31, before the second leg existed, on a T4 and at the demo job of
+that day. This is the host block and the outcome of the report it delivered:
 
 | Item | Value |
 |---|---|
@@ -643,10 +705,17 @@ the host block and the outcome of the report it delivered:
 | base loss | 6.1874 to 0.0049 |
 | `total_seconds` | 4.46 |
 
+The H100 leg has no recorded run. The first two-leg run is row 9 of
+`docs/pipeline-scaleup-plan.md`, and it is still owed: a row appears above only
+after a run produces one, and no number of the H100 leg is a forecast in a
+table that reads as a measurement.
+
 The image work is not what it looks like. The layer chain takes 49 seconds on
 a cached base image: copy 2.1 s, install 6.6 s, environment 1.6 s, and the
 Bazel CUDA build 36.8 s. The first build cost about 25 minutes, almost all of
-it pulling the 4.11 GB CUDA devel base and installing `build-essential`.
+it pulling the 4.11 GB CUDA devel base and installing `build-essential`. The
+second leg doubles both numbers once: the H100 image is a second build and a
+second cached image, and later deploys of either use the cache.
 
 Two app defects surfaced only when the gate ran, and both are fixed in the
 follow-up pull request. The module derived the repository from its own path,

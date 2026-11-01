@@ -277,9 +277,8 @@ void TestVersionZeroContainer() {
   const std::string path = TempPath("checkpoint_v0_handwritten.ckpt");
   {
     std::ofstream out(path, std::ios::binary | std::ios::trunc);
-    const char header[] = {'N', 'C', 'H', 'K', 'P', 'T', '0', '1',
-                           0,   0,   0,   0,   0,   0,   0,   0,
-                           0,   0,   0,   0};
+    const char header[] = {'N', 'C', 'H', 'K', 'P', 'T', '0', '1', 0, 0,
+                           0,   0,   0,   0,   0,   0,   0,   0,   0, 0};
     out.write(header, sizeof(header));
   }
   Expect(nanochat::DetectFormat(path) == CheckpointFormat::kContainerV0,
@@ -307,8 +306,7 @@ void TestMalformedContainers() {
   const std::string legacy = TempPath("checkpoint_legacy_handwritten.ckpt");
   {
     std::ofstream out(legacy, std::ios::binary | std::ios::trunc);
-    const char header[] = {'N', 'C', 'M', 'D', 'L', '0', '0', '1',
-                           0,   0,   0,   0};
+    const char header[] = {'N', 'C', 'M', 'D', 'L', '0', '0', '1', 0, 0, 0, 0};
     out.write(header, sizeof(header));
   }
   Expect(nanochat::DetectFormat(legacy) == CheckpointFormat::kLegacyModel,
@@ -329,8 +327,7 @@ void TestMalformedContainers() {
   for (int i = 0; i < 2; ++i) {
     const std::string path = TempPath(names[i]);
     std::ofstream out(path, std::ios::binary | std::ios::trunc);
-    const char header[] = {'N', 'C', 'H', 'K', 'P', 'T', '0', '1',
-                           1,   0,   0,   0};
+    const char header[] = {'N', 'C', 'H', 'K', 'P', 'T', '0', '1', 1, 0, 0, 0};
     out.write(header, sizeof(header));
     out.write(i == 0 ? zeros : huge, sizeof(zeros));
   }

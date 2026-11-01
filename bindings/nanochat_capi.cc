@@ -330,13 +330,18 @@ nanochat_status nanochat_init(void) {
       return NANOCHAT_STATUS_ERROR;
     }
     // The build fixes the precision. Fail fast when the device cannot run it,
-    // instead of failing inside the first kernel launch (docs/build.md).
+    // instead of failing inside the first kernel launch (docs/build.md). The
+    // message names the build's own precision, never a literal: a bf16 build
+    // must report bf16, or the failure on the device leg would contradict the
+    // build it came from (docs/pipeline-scaleup-plan.md section 3 trap 3).
     const nanochat::Caps caps = nanochat::kernels::GetCaps();
     if (!caps.Supports(nanochat::kComputeDType)) {
+      const std::string precision_name =
+          nanochat::PrecisionName(nanochat::BuildComputePrecision());
       SetLastError(
           "nanochat_init",
-          std::string("the device does not support the build ") +
-              "precision (fp32): " +
+          std::string("the device does not support the build precision (") +
+              precision_name + "): " +
               (caps.device_name != nullptr ? caps.device_name : "unknown"));
       return NANOCHAT_STATUS_ERROR;
     }

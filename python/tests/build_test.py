@@ -13,6 +13,12 @@ environment override, the runfiles tree, ``bazel-bin/src/<name>``, and the
 library and both children with one ``tools/nanochat build`` line. Both are
 covered over a fake tree: a directory, a runfiles root, a fake
 ``tools/nanochat`` script, and a temporary ``PATH``, so no Bazel run happens.
+
+The last class is row 1 of ``docs/pipeline-scaleup-plan.md``: the named
+``hopper`` config of ``.bazelrc``, asserted beside the ``h100`` stanza so the
+hand-run Hopper build and the H100 *simulator* profile cannot be confused
+again, and the explicit flag triple the build helper emits instead of either
+name.
 """
 
 from __future__ import annotations
@@ -27,6 +33,48 @@ from pathlib import Path
 from unittest import mock
 
 from nanochat_cpp import _build, _lib
+
+
+def tree_file(relative: str) -> Path:
+    """One tracked file of the tree, from the runfiles or from the checkout.
+
+    A ``py_test`` reads its data through the runfiles tree, and
+    ``//python:build_test`` declares none: the ``.bazelrc`` it asserts on is
+    read from the checkout that the runfiles symlinks resolve into -- the same
+    path ``nanochat_cpp.sandbox`` reads ``tools/sandbox/profiles.json`` from on
+    every test action. The error says what to declare, so a future target that
+    hides the tree fails with the fix and not with a ``KeyError``.
+    """
+    found = _lib.find_in_runfiles(relative)
+    if found is not None:
+        return found
+    candidate = _build.repo_root() / relative
+    if candidate.is_file():
+        return candidate
+    raise AssertionError(
+        f"cannot read {relative}: there is no runfiles entry and no checkout "
+        f"at {candidate}; declare {relative} as data of this target")
+
+
+def bazelrc_stanzas(text: str) -> dict:
+    """The flags of every named config in ``.bazelrc``, as name -> [flags].
+
+    Only ``build:NAME`` lines count. A comment above a stanza is a comment, so
+    the ``h100`` comment that mentions ``simulator`` cannot make ``hopper``
+    look as if it set one.
+    """
+    stanzas: dict = {}
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        words = stripped.split()
+        if not words[0].startswith("build:"):
+            continue
+        name, *flags = words
+        stanzas.setdefault(name, []).extend(flags)
+    return stanzas
+
 
 #: A fake ``tools/nanochat``: it records its argv, and on a zero status it
 #: creates the three outputs the build would create, relative to the working
@@ -188,6 +236,94 @@ class BuildCommandTest(unittest.TestCase):
         command = _build._build_command(Path("tools/nanochat"), options)
         self.assertFalse(
             [part for part in command if part.startswith("--@rules_cuda")])
+
+    def test_the_leg_triple_and_never_a_named_config(self) -> None:
+        """The helper emits the explicit triple, not ``--config=hopper``.
+
+        Row 1 of ``docs/pipeline-scaleup-plan.md`` adds the ``hopper`` name for
+        a hand run only; the H100 leg of the Modal app keeps the triple of
+        section 7, so a card build and its report name the same three flags. A
+        helper that started emitting a named config would inherit whatever that
+        stanza sets, which is how the simulator config got into a hardware run
+        once already (section 3, trap 1).
+        """
+        options = _build.BuildOptions.resolve(backend="cuda",
+                                              precision="bf16",
+                                              arch="sm_90")
+        command = _build._build_command(Path("tools/nanochat"), options)
+        self.assertIn("--config=cuda", command)
+        self.assertIn("--define=precision=bf16", command)
+        self.assertIn("--@rules_cuda//cuda:archs=sm_90", command)
+        for forbidden in ("--config=hopper", "--config=h100"):
+            self.assertNotIn(forbidden, command)
+        self.assertEqual(
+            [part for part in command if part.startswith("--config=")],
+            ["--config=cuda"],
+            f"the helper named a config of .bazelrc: {command}")
+
+
+class BazelConfigTest(unittest.TestCase):
+    """Row 1: the ``hopper`` config, pinned beside the ``h100`` simulator.
+
+    ``--config=h100`` is the simulator profile of ``.bazelrc``: it sets
+    ``--define=simulator=1``, which compiles in the capability override, and it
+    swaps the collective to ``native``. ``--config=hopper`` is the hand-run
+    build for a real Hopper card, so it must set neither: the chain runs
+    ``world_size=1`` and keeps the default ``nccl`` collective
+    (``docs/pipeline-scaleup-plan.md`` section 3 trap 1, P7, and section 7).
+    The two stanzas are read in one class, so the pair cannot drift apart
+    without a red test.
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.path = tree_file(".bazelrc")
+        cls.text = cls.path.read_text(encoding="utf-8")
+        cls.stanzas = bazelrc_stanzas(cls.text)
+
+    def flags(self, name: str) -> list:
+        """The flags of one named config, with a readable missing case."""
+        self.assertIn(
+            name, self.stanzas,
+            f"{self.path} has no {name} stanza; it holds "
+            f"{sorted(self.stanzas)}")
+        return self.stanzas[name]
+
+    def test_the_hopper_stanza_is_the_hand_run_build(self) -> None:
+        """sm_90 at bf16 on the CUDA backend, and nothing of the simulator."""
+        flags = self.flags("build:hopper")
+        self.assertIn("--@rules_cuda//cuda:archs=sm_90", flags)
+        self.assertIn("--define=precision=bf16", flags)
+        self.assertIn("--define=backend=cuda", flags)
+        for forbidden in ("--define=simulator=1", "--define=collective=native"):
+            self.assertNotIn(
+                forbidden, flags,
+                f"the hopper stanza set {forbidden}, which is the {forbidden} "
+                f"of the h100 simulator profile (section 3, trap 1): {flags}")
+        for flag in flags:
+            self.assertNotIn(
+                "simulator", flag,
+                f"the hopper stanza mentions a simulator flag: {flag}")
+
+    def test_the_h100_stanza_is_still_the_simulator(self) -> None:
+        """The neighbour: the same arch and precision, plus both simulator
+        defines, so an edit that turns one into the other is visible."""
+        flags = self.flags("build:h100")
+        self.assertIn("--@rules_cuda//cuda:archs=sm_90", flags)
+        self.assertIn("--define=precision=bf16", flags)
+        self.assertIn("--define=backend=cuda", flags)
+        self.assertIn("--define=simulator=1", flags)
+        self.assertIn("--define=collective=native", flags)
+        self.assertNotEqual(sorted(self.flags("build:hopper")), sorted(flags),
+                            "the hopper and h100 stanzas are the same stanza, "
+                            "so one of the two names is the other")
+
+    def test_the_t4_host_target_is_untouched_beside_them(self) -> None:
+        """``t4`` is the other complete named target: sm_75 at fp32."""
+        flags = self.flags("build:t4")
+        self.assertIn("--@rules_cuda//cuda:archs=sm_75", flags)
+        self.assertIn("--define=precision=fp32", flags)
+        self.assertIn("--define=backend=cuda", flags)
 
 
 class SearchOrderTest(unittest.TestCase):

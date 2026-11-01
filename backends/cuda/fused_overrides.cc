@@ -20,15 +20,15 @@
 // This backend implements five fused families, and registers three of them.
 // The other two are blocked on the capability vocabulary, not on the code:
 //
-//   * `value_gate` — `spec/capability_bits.md` bit 15 is `override_value_gate`,
-//     and `include/nanochat/tensor.h` has no constant for it. A registration
-//     under a bit that no header constant spells would never be set in any
-//     `feature_mask`, so the planner would never resolve it: dead code that
-//     looks live, which `spec/capability_bits.md` section 5 forbids. The
-//     one-line follow-up is `kFeatureOverrideValueGate` in the header plus one
-//     row in `backends/cuda/caps_names.h`; the trace test already covers the
-//     family.
-//   * `grad_norm` — vocabulary 1 has no override bit at all: `GradNorm` is a
+//   * `value_gate` -- `spec/capability_bits.md` bit 15 is
+//     `override_value_gate`, and `include/nanochat/tensor.h` has no constant
+//     for it. A registration under a bit that no header constant spells would
+//     never be set in any `feature_mask`, so the planner would never resolve
+//     it: dead code that looks live, which `spec/capability_bits.md` section 5
+//     forbids. The one-line follow-up is `kFeatureOverrideValueGate` in the
+//     header plus one row in `backends/cuda/caps_names.h`; the trace test
+//     already covers the family.
+//   * `grad_norm` -- vocabulary 1 has no override bit at all: `GradNorm` is a
 //     composition with no fused counterpart in the partition
 //     (docs/model-and-device-bringup.md section 7.3), and
 //     `spec/capability_bits.md` section 5 names it explicitly. Nothing is

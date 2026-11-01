@@ -116,8 +116,9 @@ the two binaries `//src:sft_main` and `//src:rl_worker`. A run ends in
 `$NANOCHAT_RUNS_DIR`: `chatrl.ckpt` beside `pipeline_report.json`, the review
 artifact that carries the stage order, the step counts, the loss traces, the
 metadata blocks, the digests, and the host block. The same job runs on three
-hosts, this workstation's CPU under the `train` profile, a Colab T4 that builds
-from source, and a Modal T4 whose image builds the chain;
+kinds of host: this workstation's CPU under the `train` profile, a Colab T4
+that builds from source, and Modal, where two legs run the job, a T4 at fp32
+and then an H100 at bf16, each from its own image;
 [docs/host-portability.md](docs/host-portability.md) section 9 has one row per
 host. `//python:pipeline_test` is the gate of the chain in the default CPU test
 loop and `//python:pipeline_gpu_test` is its CUDA twin
@@ -125,11 +126,28 @@ loop and `//python:pipeline_gpu_test` is its CUDA twin
 by the entry point, because both stage executables refuse to start outside it:
 
 ```bash
-# Build the two stage binaries, then run the demo job: base@100, sft@100,
-# rl@105, and the two files of deliver/.
+# Build the two stage binaries, then run the example job: base@200, sft@200,
+# rl@8, the in-process eval on one batch, and the two files of deliver/.
 tools/nanochat build //src:sft_main //src:rl_worker
 PYTHONPATH=python tools/nanochat train -- \
     python -m nanochat_cpp.pipeline notebooks/pipeline_job.json
+```
+
+The Modal run repeats that job as two legs, and the entry point is what compares
+them. `pipeline_demo` runs the T4 leg first and the H100 leg second, prints one
+document with three keys -- `legs` (each leg's report summary), `comparison`
+(the cross-leg step-time ratio beside the recorded MFU and speed ratio), and
+`gates` (G1 to G3, each pass or fail with the numbers it read) -- and exits
+non-zero when a gate fails. [docs/pipeline-plan.md](docs/pipeline-plan.md) has
+the chain and the gates, and
+[docs/host-portability.md](docs/host-portability.md) the two legs, the two
+images, and the two precisions.
+
+```bash
+# Both legs of one job. The T4 leg writes <run_id>-t4 first; the H100 leg
+# writes <run_id>-h100 second, so a failed H100 leg leaves the T4 report
+# readable. Both reports land on the nanochat-runs Volume.
+modal run tools/modal/app.py::pipeline_demo
 ```
 
 ## Examples

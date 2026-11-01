@@ -1,8 +1,22 @@
 # The fp8 training path
 
-Status: proposed, after a review and a decision pass. The tree holds no fp8
-arithmetic. The prerequisite is met: the bf16 compute path from Stage 2 of
+Status: proposed, after a review and a decision pass. The seam and the kernels
+have landed; the training graph has not. What the tree holds today is the
+shared rounding rule (`include/nanochat/fp8.h`), the device quantization kernel
+(`backends/cuda/kernels/fp8.cu`), the two seam entries `QuantizeFp8` and
+`GemmScaledFp8` (`include/nanochat/kernels.h`), the `--config=fp8` build define,
+and three fp8 tests (`//tests:fp8_rounding_test`, `//tests:fp8_gemm_test`, and
+`//tests:fp8_graph_test`). So the earlier version of this line, "the tree holds
+no fp8 arithmetic", is false, and section 2 carries the corrected rows. The
+prerequisite is met: the bf16 compute path from Stage 2 of
 [precision.md](precision.md) is delivered (commit `387a88a`).
+
+The Hopper hardware check already runs the landed arithmetic under a bf16
+build: the startup gate at `src/hw_gate.cc` casts through the shared rounding
+header, runs the scaled fp8 GEMM cases when `Caps::supports_fp8` is true (sm_89
+or sm_90), and runs the attention tile at the build compute type. That is what
+the chain's H100 leg proves on real silicon, and it is not the training graph:
+the fp8 planner rule and an fp8 training run stay a later row.
 
 This document is the design and the plan for the Hopper target. It states which
 piece each phase changes.
@@ -49,17 +63,17 @@ optimizer state and the loss in fp32.
 | Item | Today | Path |
 |---|---|---|
 | Compute type | One compile-time type: fp32, or bf16 | `include/nanochat/tensor.h:118-125` |
-| Storage tags | fp32, bf16, int8. The code 3 is retired | `include/nanochat/tensor.h:149-153` |
-| Capability flags | `supports_fp32`, `supports_bf16`. No `supports_fp8` | `include/nanochat/tensor.h:199-219` |
+| Storage tags | fp32, bf16, int8, and the two fp8 tags `kFp8E4M3` and `kFp8E5M2`. The code 3 stays retired | `include/nanochat/tensor.h:167-173` |
+| Capability flags | `supports_fp32`, `supports_bf16`, and `supports_fp8` | `include/nanochat/tensor.h:288-290`, `include/nanochat/device_profile.h:50` |
 | Device rates | fp32, bf16, and fp8. The `h100` row carries 1979 TFLOP/s | `src/device_profile.cc:24` |
 | GEMM seam | `Gemm` and `GemmWgrad` take `ComputeType` pointers | `include/nanochat/kernels.h:197`, `:202` |
 | GEMM engine | `cublasSgemm` and `cublasGemmEx` | `backends/cuda/gemm.cu` |
 | Precision assignment | `AssignMatrixPrecision` applies the fp8 rule | `src/performance_model.cc:185-197` |
 | Peak for the MFU line | `PeakFlopsForCompute` knows the fp8 rate | `src/train.cc:325-340` |
 | Roofline | The fp8 build and the fp8 rates are reportable | `src/roofline_main.cc` |
-| fp8 arithmetic | None | — |
-| fp8 build define | None | `.bazelrc` |
-| fp8 test gates | None | `tests/` |
+| fp8 arithmetic | The shared rounding rule, the device quantization kernel, and the scaled GEMM, wired into the graph's linear forward and backward under `if constexpr (kFp8Build)` | `include/nanochat/fp8.h`, `backends/cuda/kernels/fp8.cu`, `include/nanochat/kernels.h:380-390`, `src/ops.cc:518`, `:567`, `:611` |
+| fp8 build define | `--config=fp8` selects `--define=precision=fp8`, which computes in bf16 and quantizes the eligible matmuls | `.bazelrc:42`, `include/nanochat/tensor.h:138-140` |
+| fp8 test gates | Three: the shared rounding, the scaled seam, and the eligible-shape graph plumbing | `//tests:fp8_rounding_test`, `//tests:fp8_gemm_test`, `//tests:fp8_graph_test` |
 
 The estimator already counts the arithmetic correctly for the new path.
 `EstimateFlopsPerToken` in `src/train.cc` counts six operations per matmul
@@ -313,6 +327,10 @@ Add the gate in three places:
    existing compute-dtype check at `src/model.cc:338`. That check is the
    existing fail-fast pattern, so fp8 follows it.
 
+The first two are in the tree. The third is the open one, and it belongs with
+the fp8 training graph rather than with the seam: a build that has no layer set
+has nothing for a model-creation check to refuse.
+
 A build with fp8 on a device without support must fail when the model is
 created. Do not fall back at runtime, because `DESIGN.md` section 6 forbids a
 runtime precision branch.
@@ -563,13 +581,13 @@ so the forward work has a gate.
 
 | Section | Status |
 |---|---|
-| 3 Precision tier | Proposed; the tags are not in the tree |
-| 4 Scaling | Decided: dynamic tensorwise scaling (section 4.2) |
-| 5 Seam change | Proposed |
-| 6 Layer set | Decided; aligned with `src/performance_model.cc` |
-| 7 Backward pass | Decided; the format table matches `src/performance_model.cc` |
+| 3 Precision tier | The tags, the formats, and `supports_fp8` are in the tree; the tier is a build define, `--config=fp8` |
+| 4 Scaling | Decided: dynamic tensorwise scaling (section 4.2), and the kernel implements it |
+| 5 Seam change | Landed: `QuantizeFp8` and `GemmScaledFp8` are seam entries (`include/nanochat/kernels.h`), and the graph calls them under `if constexpr (kFp8Build)` behind the eligibility rule of `src/ops.h:51` |
+| 6 Layer set | Decided; aligned with `src/performance_model.cc`. The graph reads a shape eligibility rule, not yet a named layer set |
+| 7 Backward pass | Decided; the format table matches `src/performance_model.cc`, and the mixed E5M2/E4M3 weight-gradient call is in `src/ops.cc` |
 | 8 Optimizer and checkpoint | No work needed (section 8) |
-| 12 Phases | Not started |
+| 12 Phases | F0 to F2 landed. F3 to F7 open: no training run at the layer set, no fp8 planner rule, and no measured fp8 speed |
 
 ## 14. Risks and non-goals
 

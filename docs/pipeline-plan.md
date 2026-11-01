@@ -5,19 +5,44 @@ blocker's fix turned out to be. The owners of D9 and the four review decisions
 of section 11 are settled. Two small questions remain, and neither blocked a
 row.
 
+Extended: [pipeline-scaleup-plan.md](pipeline-scaleup-plan.md) took the chain to
+a bigger shape, a fourth stage, and a second card. D3 of section 4 is now a
+sequence of two legs, section 5 holds the `standard` profile and the longer
+schedule, section 6.3 holds the two Modal legs, section 7 holds A10 to A13, and
+section 11 holds the decisions that came with the extension. The measured
+numbers of section 2 and section 6.3 are the demo-shape runs of this plan, and
+they stay exactly where they are: they are a record, not a forecast.
+
 This plan extends [post-training.md](post-training.md), which holds the RL design,
 and [host-portability.md](host-portability.md), which holds the host contract.
 This document covers the whole chain: base training, supervised fine-tuning
-(SFT), then RL, on a local CPU, on Colab with a T4, and on Modal with a T4.
+(SFT), RL, then an evaluation, on a local CPU, on Colab with a T4, and on Modal,
+where two legs run the same job: a T4 at fp32 and an H100 at bf16.
 
 ## 1. Goal
 
-One job file runs base training, then SFT, then RL, on any of three hosts. Each
-stage reads the weights of the stage before it. The run delivers one final
-checkpoint and one report.
+One job file runs base training, then SFT, then RL, then an evaluation, on any
+of three hosts. Each stage reads the weights of the stage before it. The run
+delivers one final checkpoint and one report.
 
 The model is small, so a person can watch the chain end to end in seconds on the
 CPU and in under a minute on a card.
+
+Two legs, and not one, run on Modal. The first leg is a T4 at fp32: the pinned
+triple of D3, the card a free Colab session hands out, and the cheap leg a
+reviewer reads while the second one runs. The second leg is an H100 at bf16:
+the same job, its own image, and the precision its own card declares. Each leg
+writes one report under its own run id, `<run_id>-t4` and `<run_id>-h100`, so
+both stay on the runs Volume and a failed H100 leg leaves the T4 report
+readable. The entry point compares the two reports and fails when a gate fails
+(section 6.3 and gates G1 to G3).
+
+The fourth stage is the evaluation. It runs in the chain's own process, after
+RL, and writes no checkpoint: it scores the base checkpoint and the RL
+checkpoint with one evaluator batch, so the report holds both bits-per-byte
+numbers side by side (P4 and P5 of
+[pipeline-scaleup-plan.md](pipeline-scaleup-plan.md) section 4, and section 5
+below).
 
 ## 2. What runs today
 
@@ -262,7 +287,7 @@ reproducer: run it in a loop and keep the failing output.
 |---|---|
 | D1 | One orchestration module, `python/nanochat_cpp/pipeline.py`. Each stage calls an existing facade. It holds no training logic, no model flag list of its own, and no host name. |
 | D2 | Every host builds the two stage binaries, through the resolver of B6. A tree build is the only route until the dependency plan publishes a binary wheel. |
-| D3 | The pinned triple is T4, one card, `sm_75`, fp32. A local card uses its own architecture through `NANOCHAT_CUDA_ARCH`. |
+| D3 | The pinned triple is T4, one card, `sm_75`, fp32, and it is the first of two legs: a second leg runs the same job on one H100 card, `sm_90`, at bf16, in its own image and under its own run id. A local card uses its own architecture through `NANOCHAT_CUDA_ARCH`. |
 | D4 | The corpus is the committed fixture. Base reads `src/parquet/testdata/text.parquet` with `tests/data/loader_tokenizer.nctoken`. SFT reads one shard that `nc.sft.pack` writes, and RL reads four of those conversations. No stage reads the Hub. |
 | D5 | The demo shape has 2 layers, hidden 64, 4 heads, 2 key/value heads, sequence 64, and vocabulary 487 padded to 512. It costs about 4 s of CPU for the whole chain. |
 | D6 | `deliver/` is the artifact contract, below. |
@@ -282,9 +307,12 @@ The artifact contract of D6:
 <run_root>/<run_id>/deliver/pipeline_report.json
 ```
 
+The eval stage of section 5 writes no checkpoint and no directory: its whole
+record is one `stage` entry inside `deliver/pipeline_report.json`.
+
 The report is the review artifact. It holds these items:
 
-- the stage order and the step counts;
+- the stage order: base, SFT, RL, then eval, with the step counts;
 - the loss traces and the mean rewards;
 - the checkpoint digests and the metadata blocks;
 - the seconds and the seeds;
@@ -324,27 +352,40 @@ the owning workstream's.
 
 ## 5. The pipeline module
 
+The module as it stands after the extension, whose design is
+[pipeline-scaleup-plan.md](pipeline-scaleup-plan.md) sections 5 and 6:
+
 ```python
 # python/nanochat_cpp/pipeline.py
 
-PROFILES = {"demo": Config(num_layers=2, num_heads=4, num_kv_heads=2,
-                           hidden_dim=64, seq_len=64, vocab_size=487,
-                           padded_vocab_size=512, window_pattern="L")}
+PROFILES = {
+    "demo": Config(num_layers=2, num_heads=4, num_kv_heads=2,
+                   hidden_dim=64, seq_len=64, vocab_size=487,
+                   padded_vocab_size=512, window_pattern="L"),
+    "standard": Config(num_layers=8, num_heads=8, num_kv_heads=4,
+                       hidden_dim=512, seq_len=64, vocab_size=487,
+                       padded_vocab_size=512, window_pattern="L"),
+}
+DEFAULT_PROFILE = "standard"
 
 @dataclass(frozen=True)
 class Job:                 # JSON round trip; one file for all three hosts
-    run_id: str
-    profile: str = "demo"
-    base_steps: int = 100
-    sft_steps: int = 100
-    rl_steps: int = 5
+    run_id: str = "demo"
+    profile: str = DEFAULT_PROFILE
+    base_steps: int = 200
+    sft_steps: int = 200
+    rl_steps: int = 8
     num_prompts: int = 4
     num_samples: int = 4
     max_tokens: int = 32
+    eval_batches: int = 1        # one batch; the corpus allows no more
+    eval_samples: int = 2
     seed: int = 42
     out_root: str = ""
     corpus: str = "fixture"      # "fixture" today; "reference" is a follow-on
     deliver: bool = True
+    temperature: float = 1.5
+    top_k: int = 0
 
 @dataclass(frozen=True)
 class Stage:               # one stage's facts
@@ -359,7 +400,7 @@ class Stage:               # one stage's facts
 
 @dataclass(frozen=True)
 class Report:
-    version: int               # the report schema, 1 today
+    version: int               # the report schema, 2 today
     job: Job
     stages: tuple[Stage, ...]
     delivered: str
@@ -370,10 +411,24 @@ class Report:
 def stage_base(job) -> Stage
 def stage_sft(job, base: Stage) -> Stage
 def stage_rl(job, sft: Stage) -> Stage
+def stage_eval(job, base: Stage, rl: Stage) -> Stage
 def deliver(job, stages, *, out_root) -> tuple[str, str]
 def run(job, *, out_root=None) -> Report
 def main(argv=None) -> int        # python -m nanochat_cpp.pipeline job.json
 ```
+
+`demo` is the shape of D5 and it stays, because the CPU test loop runs it in
+about five seconds. `standard` is the shape a throughput number is read at, and
+`Job()` defaults to it: 8 layers, hidden 512, 8 heads, 4 key/value heads,
+sequence 64, the same vocabulary 487 padded to 512, and the `L` window pattern.
+The sequence length and the base batch stay where they are, because the
+committed corpus fills exactly one 65-token row per epoch
+([pipeline-scaleup-plan.md](pipeline-scaleup-plan.md) P1, P2 and section 5).
+
+The schedule grows by about a factor of two: 200 base steps, 200 SFT steps, 8
+RL steps, one evaluator batch, and two sampled completions. One step of the
+`standard` shape does about ten times the device work of one `demo` step, so a
+local CPU chain still costs tens of seconds.
 
 Each stage function is short and calls one facade:
 
@@ -382,8 +437,21 @@ Each stage function is short and calls one facade:
 | Base | `runtime.MeshTrainConfig(config(job), steps=job.base_steps, ...)` with `train_parquet`, `tokenizer`, `out_dir`, `checkpoint_path` |
 | SFT | `sft.pack(...)` then `sft.run(shard, ckpt, config=config(job), warm_start=base.checkpoint, num_iterations=job.sft_steps)` |
 | RL | `rl.run(reward, prompts, num_samples=..., steps=..., config=config(job), warm_start=sft.checkpoint, checkpoint=rl_ckpt, max_tokens=...)` |
+| Eval | `api.Model.load(checkpoint)` then `api.evaluate(model, corpus, tokenizer, steps=job.eval_batches, batch=1, seed=job.seed)`, once for the base checkpoint and once for the RL one, then `api.Model.generate` for `job.eval_samples` completions |
 
 `config(job)` is `PROFILES[job.profile]`, so the shape has one home.
+
+The eval stage is the one stage with no executable. It runs in the chain's own
+process through the in-process API, so it adds no third stage binary and no new
+build target (P4). It writes no checkpoint: its record names the RL file, so
+`deliver()` still copies `chatrl.ckpt`. The one limit worth knowing is the
+batch: `eval_batches` is 1 and it is not a tunable number in this plan. The
+corpus holds 119 tokens, so one epoch fills one 65-token row, and a batch of two
+rows cannot form. An evaluator that is asked for two rows reports no bytes and
+returns infinity, which is why the module passes `batch=1` by hand: the default
+of `api.evaluate` is 8. A tenfold larger corpus would allow more batches, and
+that corpus needs a producer, which is a separate work item
+([pipeline-scaleup-plan.md](pipeline-scaleup-plan.md) section 6).
 
 The reward is a class with a `reward` method, which `_normalize_task` accepts, so
 no Hub dataset loads. It is graded: 1.0 for the right number, 0.5 for the `####`
@@ -398,13 +466,23 @@ and the report names the root it used.
 
 ## 6. The three hosts
 
+Every host runs the same four stages of the same job file. The job's counts are
+its own: the committed example job of section 5 asks for 200 base steps, 200 SFT
+steps, 8 RL steps, and one evaluator batch, and a test job asks for the `demo`
+shape and whatever schedule the test pins. The measured numbers quoted in this
+section are the 2026-10-31 runs of the `demo` shape at 100, 100, and 5 steps,
+and they stay as recorded.
+
 | Host | Backend | Arch | Sandbox | Build | Gate |
 |---|---|---|---|---|---|
 | Local CPU | `cpu` | none | `train` scope | Bazel | `//python:pipeline_test`, default loop |
 | Local GPU | `cuda` | card | `t1-gpu` queue job | Bazel | `//python:pipeline_gpu_test`, `gpu` tag |
 | Colab | `cuda` | `sm_75` | `none` | bootstrap + Bazel | manual run; owed, and recorded as owed in `docs/host-portability.md` section 9.2 |
-| Modal | `cuda` | `sm_75` | `none` | image build | `modal run ...::pipeline_demo`; owed, with the host block of `docs/host-portability.md` section 9.3 |
+| Modal, T4 leg | `cuda` | `sm_75` | `none` | image build, fp32 | `modal run ...::pipeline_demo`; owed, with the host block of `docs/host-portability.md` section 9.3 |
+| Modal, H100 leg | `cuda` | `sm_90` | `none` | image build, bf16 | the same entry point, gates G1 to G3 |
 | Modal CPU | `cpu` | none | `none` | image build, CPU config | verification only |
+
+The two Modal rows are one run of one job: the T4 leg first, then the H100 leg.
 
 ### 6.1 Local CPU and local GPU
 
@@ -414,19 +492,21 @@ NANOCHAT_CPP_BACKEND=cpu tools/nanochat train -- \
     python -m nanochat_cpp.pipeline /tmp/job.json
 ```
 
-One `train` scope, at 6 GB and 800 % CPU, covers all three stages. B5 keeps the
+One `train` scope, at 6 GB and 800 % CPU, covers all four stages. B5 keeps the
 stage children inside that scope: the entry point already skips its own scope
 under a sentinel, so a facade runs its child directly instead of re-entering the
-entry point, and nothing asks for a second profile (section 3, B5).
+entry point, and nothing asks for a second profile (section 3, B5). The eval
+stage starts no child at all, so the scope covers whatever it reads.
 
 For the local GPU, run the same command with `NANOCHAT_CPP_BACKEND=cuda` under
 `tools/nanochat gpu --profile t1-gpu -- ...`. `tools/nanochat doctor` reports
 the name, driver, memory, use, and utilisation, and no compute capability, so the
 arch comes from `nvidia-smi --query-gpu=compute_cap --format=csv,noheader`.
 
-Acceptance: the chain finishes, `deliver/pipeline_report.json` exists, the three
-stages record `base`@100, `sft`@100, and `rl`@105, and `host.backend` reports
-the backend that ran.
+Acceptance: the chain finishes, `deliver/pipeline_report.json` exists, the four
+stages record the counts the job asked for (the example job: `base`@200,
+`sft`@200, `rl`@8, and `eval` on its one batch), and `host.backend` reports the
+backend that ran.
 
 ### 6.2 Colab with a T4
 
@@ -466,22 +546,67 @@ carries the wheel returns the install root as `repo`. That root has no
 documents name it. A rename is a separate, mechanical change, and it is not part
 of this plan.
 
-Acceptance: `/content/runs/<run_id>/deliver/pipeline_report.json` exists, and
+Acceptance: `/content/runs/<run_id>/deliver/pipeline_report.json` exists, it
+names four stages with the counts the job asked for and one evaluator batch, and
 `host.backend` is `cuda` with `host.arch` equal to the probed value.
 
-### 6.3 Modal with a T4
+### 6.3 Modal: two legs, a T4 at fp32 and an H100 at bf16
 
-`tools/modal/app.py` gains a second function, `pipeline(job_json, run_id,
-stage_json="", publish_json="")`. It mirrors `train`:
+`tools/modal/app.py` gains four functions over two images, and the entry point
+takes both legs of one job.
 
-- it rewrites `out_root` to `/runs/<run_id>`, because the app owns the Volume
-  path;
-- it starts the work as `tools/nanochat client --profile train -- python -m
-  nanochat_cpp.pipeline <job.json>`, which is the container entry of D10;
-- it keeps `max_containers=1`, `_check_cards`, the commit keeper, and the
-  `worker.log`;
-- it reuses `_publish` for the Hub push of the final stage, so the chain gains
-  no second uploader.
+| Leg | Card | Arch | Precision | Build command |
+|---|---|---|---|---|
+| `t4` | `T4` | `sm_75` | `fp32` | `--config=cuda --define=precision=fp32 --@rules_cuda//cuda:archs=sm_75` |
+| `h100` | `H100` | `sm_90` | `bf16` | `--config=cuda --define=precision=bf16 --@rules_cuda//cuda:archs=sm_90` |
+
+A frozen `Leg` record holds the name, the card type, the card count, the
+architecture, the precision, and the build configuration. `image_for(leg)`
+returns one image per leg, and the stage executables, the precision, the
+architecture, and the build call all read the leg. One library per image is
+what keeps the architecture and the precision honest: one Bazel output base
+holds one build of `libnanochat_shared.so` (section 6.4 makes the same argument
+for the CPU leg).
+
+The four functions are `train` and `pipeline` on the T4 leg, and `train_h100`
+and `pipeline_h100` on the H100 leg. The first two keep their names, because
+`notebooks/target.py` looks the name `train` up through
+`modal.Function.from_name`. `notebooks/target.py` also gains a `leg` argument on
+`ModalTarget`, so a notebook selects one leg.
+
+Each leg mirrors what the single leg did:
+
+- `pipeline` and `pipeline_h100` are thin faces of one `_pipeline_on(leg, ...)`,
+  so the two legs cannot drift. The leg selects the image, the card, the
+  precision, the architecture, and the roofline device.
+- Both rewrite `out_root` to `/runs/<run_id>`, because the app owns the Volume
+  path.
+- Both start the work as `tools/nanochat client --profile train -- python -m
+  nanochat_cpp.pipeline <job.json>`, which is the container entry of D10.
+- Both keep `max_containers=1`, `_check_cards(leg, ...)`, the commit keeper, and
+  the `worker.log`, and both reuse `_publish` for the Hub push of the final
+  stage, so the chain gains no second uploader.
+- Both set the same `cpu=` value. Modal sizes the CPU by memory when `cpu=` is
+  absent, so two legs with different memory would get different host budgets,
+  and gate G2 compares the two base step times: the shared `cpu=` is what makes
+  that comparison meaningful.
+- Both legs keep the default collective, `nccl`, because the chain runs
+  `world_size=1`. The H100 leg must not use the `h100` named config, which is the
+  simulator profile and swaps the collective to `native`. The `hopper` config of
+  [build.md](build.md) is the same build as the flag triple of the table above,
+  and the build helper still emits the triple, never a named config.
+- `pipeline_demo` runs the T4 leg first, under the run id `<run_id>-t4`, then
+  the H100 leg under `<run_id>-h100`, so both reports stay on the
+  `nanochat-runs` Volume and the cheap artifact survives a failure of the
+  expensive leg. It prints one document with three keys -- `legs`,
+  `comparison`, and `gates` -- and exits non-zero when a gate fails.
+- The image build of a leg names `//src:roofline_main` beside the library and the
+  two stage executables, so gate G3 runs the tool inside the H100 container and
+  starts no second Bazel build there.
+
+Gates G1 to G3 are section 7.1's subject. Their first two-leg run is row 9 of
+[pipeline-scaleup-plan.md](pipeline-scaleup-plan.md), and it is still owed: no
+leg of the table above has a measured number today.
 
 The client half is `ModalTarget(function="pipeline")`, which needs a `function`
 argument that the class does not have today.
@@ -492,8 +617,10 @@ because the app rewrites `out_root` to `/runs/<run_id>`. `target.map_job` and
 `target.job_paths` need no new field table, because a fixture job holds no input
 path.
 
-Acceptance: `modal run tools/modal/app.py::pipeline_demo` prints a report with
-`host.arch` `sm_75`, and the `nanochat-runs` Volume holds `deliver/`.
+Acceptance: `modal run tools/modal/app.py::pipeline_demo` prints one document
+whose T4 leg names `host.arch` `sm_75` at fp32 and whose H100 leg names `sm_90`
+at bf16, all three gates pass, and the `nanochat-runs` Volume holds `deliver/`
+twice, under `<run_id>-t4` and `<run_id>-h100`.
 
 ### 6.4 The Modal CPU leg is a second image
 
@@ -524,6 +651,10 @@ own the numbers.
 | A7 | `deliver/chatrl.ckpt` equals the RL checkpoint byte for byte, and the report digests match the bytes | A lost artifact |
 | A8 | The report names the stage order, the seeds, and the host facts | An unreviewable run |
 | A9 | The delivered file loads through the public container reader, and its metadata reports `rl` at step 105 | A container only the pipeline can read |
+| A10 | The eval stage ran, both `bpb` values are finite and inside `[0, 8]`, and each sample is non-empty text | A silent eval, and a wrong `eval_batch` |
+| A11 | The RL checkpoint digest is the same before and after the eval stage | An eval that writes |
+| A12 | The report names the evaluated checkpoint, its digest, the corpus path, the batch size, and the batch count | An unreviewable eval |
+| A13 | `deliver/chatrl.ckpt` holds the RL weights, and its metadata reports stage `rl` | A delivery that follows the wrong stage |
 
 A4 does not prove the warm start, because the loaded moments move the weights on
 their own. Read A5 through `rl.run(..., on_step=...)`, which receives the per
@@ -538,14 +669,53 @@ advantage term.
 A5 and A6 fail today. A4 passes today for the wrong reason. A3 and the argv that
 `nc.sft.run` builds are what prove the chain.
 
+A10 to A13 are the eval stage's gate, and they land with the stage
+([pipeline-scaleup-plan.md](pipeline-scaleup-plan.md) section 10). A10 reads the
+two bits-per-byte numbers and the sampled text out of the eval record, so an
+evaluator that reports no bytes, or a batch that cannot form, is a failure and
+not a quiet infinity. A11 compares the digest the report carries against the
+file after the stage, which is how "the eval writes no checkpoint" (section 5)
+stays true. A12 is the reviewability condition: the report names the file it
+scored, that file's digest, the corpus, the batch size, and the batch count. A13
+is the one that guards the decision to name the RL file in the eval record: the
+delivered checkpoint has to be the RL weights at stage `rl`. The batch count of
+A12 is one, and a report that claims eight is wrong for the corpus of this plan.
+
 Two targets, one source:
 
 - `//python:pipeline_test`: the `demo` profile, `size = "medium"`, data
   `//bindings:nanochat_shared`, `//src:sft_main`, `//src:rl_worker`, the parquet
   fixture, and the tokenizer fixture. About 5 s, so it stays in the default
-  loop.
+  loop. It holds A1 to A13: the `demo` shape and a short schedule, so the eval
+  stage runs at the same size as the three training stages.
 - `//python:pipeline_gpu_test`: the same source, `NANOCHAT_CPP_BACKEND=cuda`,
   tags `gpu` and `manual`.
+
+### 7.1 The three gates of the two legs
+
+A1 to A13 are the gate of one chain on one host. The two Modal legs need three
+more, and they live in `tools/modal/app.py` beside the comparison, not in the
+pipeline test: the entry point reads two reports and judges them
+([pipeline-scaleup-plan.md](pipeline-scaleup-plan.md) section 8).
+
+| Gate | Claim | Check |
+|---|---|---|
+| G1 | bf16 ran on the H100 | `host.precision` is `bf16`, the RL checkpoint metadata records `bf16`, and `host.arch` is `sm_90` |
+| G2 | the H100 leg did not regress | the H100 base `step_ms` is at most 1.25 times the T4 base `step_ms` for the same job, and both legs ran with the same `cpu=` |
+| G3 | the run matches the model | the H100 container ran `roofline --device h100 --precision bf16 --json` for the job shape and recorded `predicted_step_ms` and `limit`; the measured ratio is inside the recorded band |
+
+G2 is a smoke check, not a throughput claim. Both legs are bound by the host
+program, so the gate catches a large regression and a broken device path; it
+does not measure the card. G3 starts with the band `[1, 200]` and the first
+two-leg run narrows it to twice the measured ratio, which is row 9 of
+[pipeline-scaleup-plan.md](pipeline-scaleup-plan.md) and is still owed.
+
+The document records two numbers that no gate reads: the MFU, and the cross-leg
+speed ratio. At 64 tokens per step, one row of sequence 64, the device bound is
+about one millisecond inside a step of tens of milliseconds, so the MFU reads
+near 0.01 percent; and the chain is bound by launches, so a speed ratio below one
+is as correct as one above it. Recording them keeps a reader from reading either
+as a pass.
 
 ## 8. The order of work
 
@@ -578,6 +748,30 @@ such compiler. `tools/modal/app.py` copies the tree with an ignore list, so the
 defect is latent there too: a deploy from a host that ran
 `tools/kaggle/bootstrap.sh` builds an image that cannot compile.
 
+### 8.1 The rows that followed
+
+[pipeline-scaleup-plan.md](pipeline-scaleup-plan.md) section 9 carries ten more
+rows, numbered 0 to 9, and they run before the rows above are extended. They are
+what makes the chain bigger and gives it a second leg:
+
+| Row | Work | Gate |
+|---|---|---|
+| 0 | The non-ASCII characters in the tracked C++ comments become ASCII | `tools/nanochat lint` |
+| 1 | The `hopper` named config for a hand run | `//python:build_test` |
+| 2 | The init error names the build precision, not a literal `fp32` | `//bindings:nanochat_capi_test` |
+| 3 | The `standard` profile, the longer schedule, report version 2, and the example job | `//python:pipeline_test` |
+| 4 | The base stage records `step_ms`, `tok/s`, `mfu`, and the hardware-check facts | `//python:pipeline_test` |
+| 5 | The eval stage, and A10 to A13 | `//python:pipeline_test` |
+| 6 | The two legs, the two images, the four functions, the comparison, and G1 to G3 | `//tools/modal:all` |
+| 7 | The client leg argument on `notebooks/target.py` | `//notebooks:all` |
+| 8 | These documents | `tools/nanochat lint` |
+| 9 | Run both legs, record the numbers, and narrow the G3 band | `modal run tools/modal/app.py::pipeline_demo`, manual |
+
+Rows 0 to 8 have landed. Row 9 is still owed, and it is the only row of either
+table that needs a real Hopper card: until it runs, the `standard` step time is
+an assumption, the G3 ratio band stays the wide `[1, 200]` of section 8 in that
+document, and no leg of the two-leg run has a measured number.
+
 ## 9. Risks
 
 - **The seed change moves a sampled baseline.** Any recorded sampled generation
@@ -601,6 +795,13 @@ defect is latent there too: a deploy from a host that ran
   `NANOCHAT_SANDBOX_BACKEND=none` and `RequireSandboxOrDie` does not. That
   difference lets a notebook call the library while a stage executable still
   refuses to start unwrapped. Do not unify them.
+- **The two legs are not bit-identical.** The T4 leg is fp32 and the H100 leg is
+  bf16, and the device kernels reduce in a different order on each card, so the
+  two runs differ. Compare `bpb` and step times with a tolerance, and never
+  compare digests across legs (section 7.1).
+- **The second leg costs a second build and a second cached image.** The first
+  deploy is slow and later deploys use the cache. The chain itself is under a
+  minute on either card, so the cost is the container start, not the training.
 - **CUDA training is not bit-reproducible.** Three T4 runs of one job gave base
   L2 525.0440, 525.0414, and 525.0388. The cause is the reduction order of the
   device kernels, not the seed. A digest comparison belongs on the CPU leg, and
@@ -616,7 +817,10 @@ defect is latent there too: a deploy from a host that ran
 - A binary wheel, and a published CUDA wheel per architecture.
 - Asynchronous rollouts, clipped proximal policy optimization, and a reference
   model. Those stay in `post-training.md` section 9.
-- A performance number. The chain is a correctness and portability gate.
+- A performance number. The chain is a correctness and portability gate. The
+  extension records a step time per leg and gates the two legs against each
+  other (section 7.1), and it still claims no throughput: G2 is a smoke check and
+  the cross-leg ratio is information.
 
 ## 11. Open questions and review decisions
 
@@ -651,18 +855,36 @@ Settled by this plan, and recorded so a later reader does not re-open them:
   that moves is information, not a gate.
 - Five RL steps are enough, with A5 and A6 beside them. A4 proves the parameters
   moved, A5 proves the rollouts differ, and A6 proves the movement came from the
-  advantages.
+  advantages. The extension's job asks for 8; the CPU gate still pins 5.
 - A CPU verification leg is a second image, not a branch in `app.py` (6.4).
 
-Settled by this plan, and recorded so a later reader does not re-open them:
+Settled by the extension, and recorded for the same reason
+([pipeline-scaleup-plan.md](pipeline-scaleup-plan.md) section 4, decisions P1 to
+P9):
 
-- The Colab notebook builds from source (D8).
-- The GPU legs record a host block, not a baseline report. A throughput number
-  that moves is information, not a gate.
-- Five RL steps are enough, with A5 and A6 beside them. A4 proves the parameters
-  moved, A5 proves the rollouts differ, and A6 proves the movement came from the
-  advantages.
-- A CPU verification leg is a second image, not a branch in `app.py` (6.4).
+- A second profile, `standard`, exists, and `Job()` defaults to it. `demo` stays
+  for the CPU test loop, which pins the profile and a short schedule by hand.
+- The sequence length stays 64 and the base batch stays one row. The committed
+  corpus fills one 65-token row per epoch, so the evaluator reads one batch,
+  `eval_batches` is 1, and it is not a tunable number in this plan (section 5).
+- The eval stage runs in process through the API, so it adds no third stage
+  executable (P4). It scores the base checkpoint and the RL checkpoint, and its
+  record names the RL file, so delivery still copies `chatrl.ckpt` (P5).
+- Two legs, not one: T4 first at fp32, then H100 at bf16, each from its own
+  image and each under its own run id (P6). A second leg at fp8 is a non-goal.
+- The H100 leg runs bf16 and not fp8. The build helper supports bf16 today, the
+  chain is launch bound at this shape, and the bf16 leg still runs the fp8
+  operators through the startup hardware check, which keys on the card and not
+  on the build (P3 and
+  [pipeline-scaleup-plan.md](pipeline-scaleup-plan.md) section 4.1).
+- The `hopper` named config is a hand-run shorthand only. The build helper keeps
+  its explicit flag triple, and the H100 leg must never use the `h100` config,
+  which is the simulator (P7 and section 6.3).
+- The gates are G1 to G3 of section 7.1: no gate reads an fp8 speedup and no gate
+  reads the MFU (P8). G3's ratio band stays `[1, 200]` until row 9 of the
+  extension runs on a real H100 and the band narrows to twice the measured ratio.
+- No frozen header changes for the extension. `caps.json` already declares bf16
+  for the H100 (P9).
 
 ## 12. Proven premises
 

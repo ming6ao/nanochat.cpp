@@ -122,8 +122,8 @@ std::int64_t CountValidTargets(const int* targets, std::int64_t rows) {
 // at the end of the scope that owns it.
 // One pointwise call with the parameter block spelled out. The family replaced
 // its scalar argument list with `PointwiseParams` for the row broadcast and the
-// transcendental codes (spec/pointwise_ops.md section 2), so the graph reads one
-// field per meaning instead of a positional argument.
+// transcendental codes (spec/pointwise_ops.md section 2), so the graph reads
+// one field per meaning instead of a positional argument.
 void Pw(PointwiseOp op, int count, const ComputeType* a, const ComputeType* b,
         ComputeType* out, float alpha = 1.0f, float beta = 0.0f) {
   if (count <= 0) return;
@@ -338,8 +338,8 @@ bool TrainModel::BlockHasValueEmbedding(int layer) const {
   // The block list says whether this block consumes a value embedding (the
   // ResFormer value-gated residual); the derived `Config` says which layers the
   // embedding table covers. A block that declares the plain residual has none,
-  // so the two answers cannot drift into a parameter with no gate or a gate with
-  // no parameter.
+  // so the two answers cannot drift into a parameter with no gate or a gate
+  // with no parameter.
   return spec_.blocks[static_cast<std::size_t>(layer)].residual ==
              ResidualKind::kBlend &&
          config_.has_value_embedding(layer);
@@ -349,9 +349,9 @@ int TrainModel::BlockWindowLeft(int layer) const {
   if (layer < 0 || static_cast<std::size_t>(layer) >= spec_.blocks.size()) {
     return -1;
   }
-  // The mask kind is the block's declared meaning: a `sliding_window` block gets
-  // the derived short window, and a `causal` block has no left extent. `-1` is
-  // `Config`'s "full context" spelling.
+  // The mask kind is the block's declared meaning: a `sliding_window` block
+  // gets the derived short window, and a `causal` block has no left extent.
+  // `-1` is `Config`'s "full context" spelling.
   return spec_.blocks[static_cast<std::size_t>(layer)].attention ==
                  AttentionKind::kSlidingWindow
              ? config_.short_window()
@@ -363,12 +363,13 @@ namespace {
 // The ordered block list a caller's own `Config` implies.
 //
 // The historical `Create(config)` entry point reads no spec, so its block list
-// is derived from the same two facts `Config` already carries: the window pattern
+// is derived from the same two facts `Config` already carries: the window
+// pattern
 // ('S' entries are sliding-window blocks, and the final layer is full context,
-// which is exactly `Config::window_left`), and whether value embeddings exist at
-// all (the ResFormer value-gated residual). That keeps the historical meaning of
-// the call while making the graph read a block list: after this, the topology is
-// driven by block kinds and not by an index into a pattern string.
+// which is exactly `Config::window_left`), and whether value embeddings exist
+// at all (the ResFormer value-gated residual). That keeps the historical
+// meaning of the call while making the graph read a block list: after this, the
+// topology is driven by block kinds and not by an index into a pattern string.
 void BlocksFromConfig(const Config& config, std::vector<BlockSpec>* blocks) {
   blocks->clear();
   blocks->reserve(static_cast<std::size_t>(config.num_layers));
@@ -394,8 +395,8 @@ ModelSpec SpecFromConfig(const Config& config) {
   spec.spec_version = kModelSpecVersion;
   spec.name = "config";
   // The mechanisms this Config needs, spelled the way a spec's `requires` is: a
-  // pattern with an 'S' entry needs the windowed mask, and every block needs the
-  // complete primitive tier.
+  // pattern with an 'S' entry needs the windowed mask, and every block needs
+  // the complete primitive tier.
   spec.requires_features = kFeaturePrimitiveTierComplete;
   for (char kind : config.window_pattern) {
     if (kind == 'S') spec.requires_features |= kFeatureSlidingWindow;
@@ -466,7 +467,8 @@ bool ConfigsAgree(const Config& given, const Config& derived,
                     "\"" + given.window_pattern + "\"");
   }
   if (given.value_embedding != derived.value_embedding) {
-    return disagree("value_embedding", derived.value_embedding ? "true" : "false",
+    return disagree("value_embedding",
+                    derived.value_embedding ? "true" : "false",
                     given.value_embedding ? "true" : "false");
   }
   return true;
@@ -478,8 +480,8 @@ bool ConfigsAgree(const Config& given, const Config& derived,
 // composition resolved to without reading source.
 std::string DescribePlan(const Plan& plan) {
   std::string line = std::string("plan: spec \"") + plan.spec_name +
-                     "\", graph " + GraphKindName(plan.graph) +
-                     ", device " + std::to_string(plan.device_index);
+                     "\", graph " + GraphKindName(plan.graph) + ", device " +
+                     std::to_string(plan.device_index);
   for (const CompositionChoice& choice : plan.choices) {
     line += std::string("\n  ") + CompositionName(choice.composition) + ": " +
             choice.implementation + (choice.fused ? " (fused)" : "");
@@ -511,7 +513,8 @@ std::unique_ptr<Model> Model::Create(const Config& config, std::string* error) {
   return std::make_unique<TrainModel>(SpecFromConfig(config), config, Plan());
 }
 
-std::unique_ptr<Model> Model::Create(const Config& config, const char* spec_name,
+std::unique_ptr<Model> Model::Create(const Config& config,
+                                     const char* spec_name,
                                      std::string* error) {
   if (!config.Validate(error)) return nullptr;
   const Caps caps = kernels::GetCaps();
@@ -543,8 +546,8 @@ std::unique_ptr<Model> Model::Create(const Config& config, const char* spec_name
   }
   if (!ConfigsAgree(config, derived, &why)) {
     if (error != nullptr) {
-      *error = "spec \"" + spec.name + "\" disagrees with the given Config: " +
-               why;
+      *error =
+          "spec \"" + spec.name + "\" disagrees with the given Config: " + why;
     }
     return nullptr;
   }
@@ -564,7 +567,8 @@ std::unique_ptr<Model> Model::Create(const Config& config, const char* spec_name
   }
 
   // 4. The choice is observable: one log line per plan, through the logger the
-  // run already writes. (This Plan is unrelated to `python/nanochat_cpp/plan.py`.)
+  // run already writes. (This Plan is unrelated to
+  // `python/nanochat_cpp/plan.py`.)
   Logger logger;
   logger.Info(DescribePlan(plan));
 

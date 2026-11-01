@@ -52,8 +52,8 @@ std::string Quote(const std::string& value) { return "\"" + value + "\""; }
 // Field access
 // ---------------------------------------------------------------------------
 
-// The required member `name` of `object`. A missing field is an error naming the
-// object and the field, so no caller dereferences a null.
+// The required member `name` of `object`. A missing field is an error naming
+// the object and the field, so no caller dereferences a null.
 const json::Value* Member(const json::Value& object, const char* where,
                           const char* name, std::string* error) {
   const json::Value* value = object.Find(name);
@@ -83,9 +83,10 @@ bool RejectUnknownKeys(const json::Value& object, const char* where,
         spelled += name;
       }
       return Fail(error, std::string(where) + " has an unknown field " +
-                            Quote(entry.first) +
-                            "; the field set is closed and this reader "
-                            "implements: " + spelled);
+                             Quote(entry.first) +
+                             "; the field set is closed and this reader "
+                             "implements: " +
+                             spelled);
     }
   }
   return true;
@@ -95,14 +96,14 @@ bool WantObject(const json::Value& value, const char* where,
                 std::string* error) {
   if (value.is_object()) return true;
   return Fail(error, std::string(where) + " must be an object, not " +
-                        value.KindName());
+                         value.KindName());
 }
 
 bool WantString(const json::Value& value, const char* where, std::string* out,
                 std::string* error) {
   if (!value.is_string()) {
     return Fail(error, std::string(where) + " must be a string, not " +
-                          value.KindName());
+                           value.KindName());
   }
   *out = value.string();
   return true;
@@ -112,7 +113,7 @@ bool WantInt(const json::Value& value, const char* where, int* out,
              std::string* error) {
   if (!value.Integer(out)) {
     return Fail(error, std::string(where) + " must be an integer, not " +
-                          value.KindName());
+                           value.KindName());
   }
   return true;
 }
@@ -121,7 +122,7 @@ bool WantFloat(const json::Value& value, const char* where, float* out,
                std::string* error) {
   if (!value.is_number()) {
     return Fail(error, std::string(where) + " must be a number, not " +
-                          value.KindName());
+                           value.KindName());
   }
   *out = static_cast<float>(value.number());
   return true;
@@ -131,7 +132,7 @@ bool WantBool(const json::Value& value, const char* where, bool* out,
               std::string* error) {
   if (!value.is_bool()) {
     return Fail(error, std::string(where) + " must be true or false, not " +
-                          value.KindName());
+                           value.KindName());
   }
   *out = value.boolean();
   return true;
@@ -154,7 +155,8 @@ bool ParseEnum(const json::Value& value, const char* where, const char* what,
     accepted += row.name;
   }
   return Fail(error, std::string(where) + " names an unknown " + what + " " +
-                        Quote(spelling) + "; this reader accepts: " + accepted);
+                         Quote(spelling) +
+                         "; this reader accepts: " + accepted);
 }
 
 // The typed required-field readers: one per scalar type, so a section reads as
@@ -207,48 +209,70 @@ bool NeedEnum(const json::Value& object, const char* where, const char* name,
 
 // Each table is one row per enum value: the JSON spelling, the enum value. The
 // spellings are the ones `models/nanochat-default/spec.json` uses, which are
-// the header's enum names (`include/nanochat/model_spec.h`). `spec/block_kinds.md`
-// spells some of them differently (`gqa_self_attention`, `full`/`sliding`,
-// `plain_residual`/`value_gated_residual`); the header is the field-list
-// authority this reader implements, and the mismatch is recorded in that
-// package's README and in this campaign's node report. An unknown spelling is
-// rejected with the accepted set rather than mapped onto the nearest meaning.
+// the header's enum names (`include/nanochat/model_spec.h`).
+// `spec/block_kinds.md` spells some of them differently (`gqa_self_attention`,
+// `full`/`sliding`, `plain_residual`/`value_gated_residual`); the header is the
+// field-list authority this reader implements, and the mismatch is recorded in
+// that package's README and in this campaign's node report. An unknown spelling
+// is rejected with the accepted set rather than mapped onto the nearest
+// meaning.
 
-struct NormRow { const char* name; NormKind value; };
+struct NormRow {
+  const char* name;
+  NormKind value;
+};
 constexpr NormRow kNormRows[] = {
     {"rms_norm", NormKind::kRmsNorm},
 };
 
-struct AttentionRow { const char* name; AttentionKind value; };
+struct AttentionRow {
+  const char* name;
+  AttentionKind value;
+};
 constexpr AttentionRow kAttentionRows[] = {
     {"causal", AttentionKind::kCausal},
     {"sliding_window", AttentionKind::kSlidingWindow},
 };
 
-struct VariantRow { const char* name; AttentionVariant value; };
+struct VariantRow {
+  const char* name;
+  AttentionVariant value;
+};
 constexpr VariantRow kVariantRows[] = {
     {"mha", AttentionVariant::kMha},
     {"gqa", AttentionVariant::kGqa},
 };
 
-struct PositionRow { const char* name; PositionKind value; };
+struct PositionRow {
+  const char* name;
+  PositionKind value;
+};
 constexpr PositionRow kPositionRows[] = {
     {"none", PositionKind::kNone},
     {"rope", PositionKind::kRope},
 };
 
-struct MlpRow { const char* name; MlpKind value; };
+struct MlpRow {
+  const char* name;
+  MlpKind value;
+};
 constexpr MlpRow kMlpRows[] = {
     {"relu_square", MlpKind::kReluSquare},
 };
 
-struct ResidualRow { const char* name; ResidualKind value; };
+struct ResidualRow {
+  const char* name;
+  ResidualKind value;
+};
 constexpr ResidualRow kResidualRows[] = {
     {"plain", ResidualKind::kPlain},
     {"blend", ResidualKind::kBlend},
 };
 
-struct DTypeRow { const char* name; DTypePolicy value; };
+struct DTypeRow {
+  const char* name;
+  DTypePolicy value;
+};
 constexpr DTypeRow kDTypeRows[] = {
     {"build_default", DTypePolicy::kBuildDefault},
     {"fp32", DTypePolicy::kFp32},
@@ -256,12 +280,18 @@ constexpr DTypeRow kDTypeRows[] = {
     {"fp8", DTypePolicy::kFp8},
 };
 
-struct HeadRow { const char* name; HeadKind value; };
+struct HeadRow {
+  const char* name;
+  HeadKind value;
+};
 constexpr HeadRow kHeadRows[] = {
     {"untied_linear", HeadKind::kUntiedLinear},
 };
 
-struct LossRow { const char* name; LossKind value; };
+struct LossRow {
+  const char* name;
+  LossKind value;
+};
 constexpr LossRow kLossRows[] = {
     {"softcap_cross_entropy", LossKind::kSoftcapCrossEntropy},
 };
@@ -274,8 +304,10 @@ bool ParseRequires(const json::Value& value, ModelSpec* spec,
                    std::string* error) {
   const char* where = "requires";
   if (!value.is_array()) {
-    return Fail(error, std::string(where) + " must be an array of strings, "
-                          "not " + value.KindName());
+    return Fail(error, std::string(where) +
+                           " must be an array of strings, "
+                           "not " +
+                           value.KindName());
   }
   std::uint64_t mask = 0;
   for (const json::Value& entry : value.array()) {
@@ -283,15 +315,16 @@ bool ParseRequires(const json::Value& value, ModelSpec* spec,
     if (!WantString(entry, "a requires entry", &name, error)) return false;
     std::uint64_t bit = 0;
     if (!ParseCapabilityName(name, &bit)) {
-      return Fail(error, "requires names " + Quote(name) +
-                            ", which is not in the capability vocabulary this "
-                            "build defines (spec/capability_bits.md section 3)");
+      return Fail(error,
+                  "requires names " + Quote(name) +
+                      ", which is not in the capability vocabulary this "
+                      "build defines (spec/capability_bits.md section 3)");
     }
     if (IsOverrideCapability(bit)) {
       return Fail(error, "requires names the override bit " + Quote(name) +
-                            "; a model states what its semantics need, and an "
-                            "implementation choice is not a semantic "
-                            "(spec/capability_bits.md section 3)");
+                             "; a model states what its semantics need, and an "
+                             "implementation choice is not a semantic "
+                             "(spec/capability_bits.md section 3)");
     }
     mask |= bit;
   }
@@ -303,10 +336,10 @@ bool ParseDimensions(const json::Value& value, DimensionsSpec* out,
                      std::string* error) {
   const char* where = "dimensions";
   if (!WantObject(value, where, error)) return false;
-  if (!RejectUnknownKeys(value, where,
-                         {"num_heads", "num_kv_heads", "hidden_dim", "seq_len",
-                          "rope_base"},
-                         error)) {
+  if (!RejectUnknownKeys(
+          value, where,
+          {"num_heads", "num_kv_heads", "hidden_dim", "seq_len", "rope_base"},
+          error)) {
     return false;
   }
   return NeedInt(value, where, "num_heads", &out->num_heads, error) &&
@@ -327,7 +360,8 @@ bool ParseBlock(const json::Value& value, int index, BlockSpec* out,
     return false;
   }
   const char* w = where.c_str();
-  return NeedEnum(value, w, "norm", "norm kind", kNormRows, &out->norm, error) &&
+  return NeedEnum(value, w, "norm", "norm kind", kNormRows, &out->norm,
+                  error) &&
          NeedEnum(value, w, "attention", "attention kind", kAttentionRows,
                   &out->attention, error) &&
          NeedEnum(value, w, "attention_variant", "attention variant",
@@ -344,12 +378,13 @@ bool ParseBlock(const json::Value& value, int index, BlockSpec* out,
 bool ParseBlocks(const json::Value& value, ModelSpec* spec,
                  std::string* error) {
   if (!value.is_array()) {
-    return Fail(error, std::string("blocks must be an array, not ") +
-                          value.KindName());
+    return Fail(
+        error, std::string("blocks must be an array, not ") + value.KindName());
   }
   if (value.array().empty()) {
-    return Fail(error, "blocks is empty; its length *is* num_layers and the "
-                       "graph needs at least one block");
+    return Fail(error,
+                "blocks is empty; its length *is* num_layers and the "
+                "graph needs at least one block");
   }
   spec->blocks.clear();
   spec->blocks.reserve(value.array().size());
@@ -375,7 +410,8 @@ bool ParseEmbeddings(const json::Value& value, EmbeddingsSpec* out,
   return NeedInt(value, where, "vocab_size", &out->vocab_size, error) &&
          NeedInt(value, where, "padded_vocab_size", &out->padded_vocab_size,
                  error) &&
-         NeedBool(value, where, "value_embedding", &out->value_embedding, error);
+         NeedBool(value, where, "value_embedding", &out->value_embedding,
+                  error);
 }
 
 bool ParseHead(const json::Value& value, HeadSpec* out, std::string* error) {
@@ -404,10 +440,10 @@ bool ParsePolicy(const json::Value& value, PolicySpec* out,
                  std::string* error) {
   const char* where = "policy";
   if (!WantObject(value, where, error)) return false;
-  if (!RejectUnknownKeys(value, where,
-                         {"dtype", "allow_fused_overrides",
-                          "require_primitive_tier"},
-                         error)) {
+  if (!RejectUnknownKeys(
+          value, where,
+          {"dtype", "allow_fused_overrides", "require_primitive_tier"},
+          error)) {
     return false;
   }
   return NeedEnum(value, where, "dtype", "dtype policy", kDTypeRows,
@@ -570,13 +606,14 @@ bool ValidateModelSpec(const ModelSpec& spec, std::string* error) {
   if (!(dims.rope_base > 0.0f) || !std::isfinite(dims.rope_base)) {
     return Fail(error, "rope_base must be finite and positive");
   }
-  if (!std::isfinite(spec.head.logit_softcap) || spec.head.logit_softcap <= 0.0f) {
+  if (!std::isfinite(spec.head.logit_softcap) ||
+      spec.head.logit_softcap <= 0.0f) {
     return Fail(error, "head.logit_softcap must be finite and positive");
   }
   // The short window `Config` derives for an `S` block: a quarter of the
-  // context rounded up to a 128-token attention tile. It is a derived value, not
-  // a declared one, so a context shorter than one tile is clamped by the graph's
-  // `EffectiveWindow` rather than rejected here.
+  // context rounded up to a 128-token attention tile. It is a derived value,
+  // not a declared one, so a context shorter than one tile is clamped by the
+  // graph's `EffectiveWindow` rather than rejected here.
   const int short_window = ((dims.seq_len / 4 + 127) / 128) * 128;
   (void)short_window;
   for (std::size_t i = 0; i < spec.blocks.size(); ++i) {
@@ -585,30 +622,31 @@ bool ValidateModelSpec(const ModelSpec& spec, std::string* error) {
     if (block.attention_variant == AttentionVariant::kMha &&
         dims.num_heads != dims.num_kv_heads) {
       return Fail(error, at + " declares the mha variant but num_heads (" +
-                            std::to_string(dims.num_heads) +
-                            ") differs from num_kv_heads (" +
-                            std::to_string(dims.num_kv_heads) + ")");
+                             std::to_string(dims.num_heads) +
+                             ") differs from num_kv_heads (" +
+                             std::to_string(dims.num_kv_heads) + ")");
     }
     if (block.attention_variant == AttentionVariant::kGqa &&
         dims.num_kv_heads > dims.num_heads) {
       return Fail(error, at + " declares the gqa variant but num_kv_heads "
-                            "exceeds num_heads");
+                              "exceeds num_heads");
     }
-    if (block.attention == AttentionKind::kSlidingWindow &&
-        dims.seq_len <= 0) {
+    if (block.attention == AttentionKind::kSlidingWindow && dims.seq_len <= 0) {
       return Fail(error, at +
-                            " declares a sliding window inside a non-positive "
-                            "context");
+                             " declares a sliding window inside a non-positive "
+                             "context");
     }
   }
   const std::uint64_t named = AllNamedCapabilityBits();
   if ((spec.requires_features & ~named) != 0) {
-    return Fail(error, "requires_features carries bits this build has no "
-                       "vocabulary entry for");
+    return Fail(error,
+                "requires_features carries bits this build has no "
+                "vocabulary entry for");
   }
   if (IsOverrideCapability(spec.requires_features)) {
-    return Fail(error, "requires_features carries an override bit; a model "
-                       "never requires an implementation choice");
+    return Fail(error,
+                "requires_features carries an override bit; a model "
+                "never requires an implementation choice");
   }
   return true;
 }
@@ -650,8 +688,8 @@ bool ModelSpecToConfig(const ModelSpec& spec, Config* config,
   }
   // `Config::window_pattern` is a pattern, not a per-layer record:
   // `window_left(layer)` indexes it modulo its length. The derived string is
-  // therefore reduced to its shortest repeating unit, which is the same mask for
-  // every layer (`"SSSLSSSLSSSL"` derives the historical `"SSSL"`) and a
+  // therefore reduced to its shortest repeating unit, which is the same mask
+  // for every layer (`"SSSLSSSLSSSL"` derives the historical `"SSSL"`) and a
   // non-periodic block list keeps its full spelling because no unit repeats.
   {
     const std::string full = derived.window_pattern;

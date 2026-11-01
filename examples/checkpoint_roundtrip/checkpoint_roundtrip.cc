@@ -7,7 +7,8 @@
 // section 6, decisions E1-E6, stage B.2).
 //
 // Run it with:
-//   tools/nanochat run t0-cpu -- bazel-bin/examples/checkpoint_roundtrip/checkpoint_roundtrip
+//   tools/nanochat run t0-cpu --
+//   bazel-bin/examples/checkpoint_roundtrip/checkpoint_roundtrip
 //
 // To try a larger config, change this one line in TinyConfig() (keep head_dim
 // even and num_kv_heads a divisor of num_heads):
@@ -90,18 +91,24 @@ std::vector<nanochat::TensorRecord> BuildRecords() {
 
 const char* StageName(nanochat::Stage stage) {
   switch (stage) {
-    case nanochat::Stage::kBase: return "base";
-    case nanochat::Stage::kSft: return "sft";
-    case nanochat::Stage::kRl: return "rl";
+    case nanochat::Stage::kBase:
+      return "base";
+    case nanochat::Stage::kSft:
+      return "sft";
+    case nanochat::Stage::kRl:
+      return "rl";
   }
   return "unknown";
 }
 
 const char* FormatName(nanochat::CheckpointFormat format) {
   switch (format) {
-    case nanochat::CheckpointFormat::kLegacyModel: return "legacy-model";
-    case nanochat::CheckpointFormat::kContainerV0: return "container-v0";
-    case nanochat::CheckpointFormat::kContainerV1: return "container-v1";
+    case nanochat::CheckpointFormat::kLegacyModel:
+      return "legacy-model";
+    case nanochat::CheckpointFormat::kContainerV0:
+      return "container-v0";
+    case nanochat::CheckpointFormat::kContainerV1:
+      return "container-v1";
   }
   return "unknown";
 }
@@ -109,11 +116,16 @@ const char* FormatName(nanochat::CheckpointFormat format) {
 // The three container storage dtypes plus the two GEMM operand tags.
 const char* DTypeName(nanochat::DType dtype) {
   switch (dtype) {
-    case nanochat::DType::kFp32: return "fp32";
-    case nanochat::DType::kBf16: return "bf16";
-    case nanochat::DType::kInt8: return "int8";
-    case nanochat::DType::kFp8E4M3: return "fp8e4m3";
-    case nanochat::DType::kFp8E5M2: return "fp8e5m2";
+    case nanochat::DType::kFp32:
+      return "fp32";
+    case nanochat::DType::kBf16:
+      return "bf16";
+    case nanochat::DType::kInt8:
+      return "int8";
+    case nanochat::DType::kFp8E4M3:
+      return "fp8e4m3";
+    case nanochat::DType::kFp8E5M2:
+      return "fp8e5m2";
   }
   return "unknown";
 }
@@ -195,7 +207,8 @@ int main() {
 
   const std::string path = TempPath("checkpoint_roundtrip.ckpt");
 
-  // The save side: the two records and the run metadata, through the public API.
+  // The save side: the two records and the run metadata, through the public
+  // API.
   nanochat::Checkpoint saved;
   for (nanochat::TensorRecord& record : BuildRecords()) {
     saved.Add(std::move(record));
@@ -249,7 +262,8 @@ int main() {
   failures += read_back.tokenizer_id != metadata.tokenizer_id ? 1 : 0;
   failures += weight == nullptr || weight->data != saved.Find("weight")->data;
   if (failures != 0) {
-    std::fprintf(stderr, "checkpoint_roundtrip: %d check(s) failed\n", failures);
+    std::fprintf(stderr, "checkpoint_roundtrip: %d check(s) failed\n",
+                 failures);
     return 1;
   }
   return 0;

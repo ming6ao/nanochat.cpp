@@ -11,8 +11,8 @@
 //      offers no `override_*` bit: with no fused family declared, the
 //      composition is what runs (`spec/capability_bits.md` section 3, bit 12).
 //   2. A mask missing a bit the model requires is rejected, and the message
-//      carries **both** the missing bit's vocabulary name and the consequence in
-//      the model's own terms - never "unsupported device"
+//      carries **both** the missing bit's vocabulary name and the consequence
+//      in the model's own terms - never "unsupported device"
 //      (`spec/capability_bits.md` section 4).
 //   3. A mask that declares an override bit resolves that composition to the
 //      fused family and records the composition as a declined fallback, so the
@@ -73,8 +73,8 @@ nanochat::Caps FabricatedDevice(std::uint64_t mask) {
   return caps;
 }
 
-const nanochat::CompositionChoice* FindChoice(
-    const nanochat::Plan& plan, nanochat::CompositionKind kind) {
+const nanochat::CompositionChoice* FindChoice(const nanochat::Plan& plan,
+                                              nanochat::CompositionKind kind) {
   for (const nanochat::CompositionChoice& choice : plan.choices) {
     if (choice.composition == kind) return &choice;
   }
@@ -98,13 +98,13 @@ void CheckReferenceMaskBuildsAPlan() {
   request.graph = nanochat::GraphKind::kTrain;
   request.device_index = 0;
   std::string why_not;
-  const nanochat::Plan plan =
-      nanochat::BuildPlanWithDevice(request, FabricatedDevice(ReferenceMask()),
-                                    nullptr, 0, &why_not);
+  const nanochat::Plan plan = nanochat::BuildPlanWithDevice(
+      request, FabricatedDevice(ReferenceMask()), nullptr, 0, &why_not);
   Check(plan.ok, "a complete reference mask builds a plan: " + why_not);
   Check(plan.gaps.empty(), "the reference mask leaves no composition unplaced");
   Check(!plan.choices.empty(), "the plan carries one decision per composition");
-  Check(plan.spec_name == spec.name, "the plan names the spec it was built for");
+  Check(plan.spec_name == spec.name,
+        "the plan names the spec it was built for");
 
   // Every composition resolves to the composition tier: `caps.json` declares no
   // override bit, so the composition path is what runs.
@@ -122,32 +122,30 @@ void CheckReferenceMaskBuildsAPlan() {
   // A forward-only graph runs no optimizer composition.
   nanochat::PlanRequest prefill = request;
   prefill.graph = nanochat::GraphKind::kPrefill;
-  const nanochat::Plan inference =
-      nanochat::BuildPlanWithDevice(prefill, FabricatedDevice(ReferenceMask()),
-                                    nullptr, 0, nullptr);
+  const nanochat::Plan inference = nanochat::BuildPlanWithDevice(
+      prefill, FabricatedDevice(ReferenceMask()), nullptr, 0, nullptr);
   Check(inference.ok, "the prefill graph builds a plan");
   Check(FindChoice(inference, nanochat::CompositionKind::kAdamW) == nullptr,
         "a forward-only graph places no adam_w composition");
 
   // The plan is a pure function of its inputs: two calls agree, decision for
   // decision.
-  const nanochat::Plan again =
-      nanochat::BuildPlanWithDevice(request, FabricatedDevice(ReferenceMask()),
-                                    nullptr, 0, nullptr);
+  const nanochat::Plan again = nanochat::BuildPlanWithDevice(
+      request, FabricatedDevice(ReferenceMask()), nullptr, 0, nullptr);
   Check(again.choices.size() == plan.choices.size(),
         "two calls with equal inputs return the same number of decisions");
   for (std::size_t i = 0; i < again.choices.size() && i < plan.choices.size();
        ++i) {
-    Check(again.choices[i].composition == plan.choices[i].composition &&
-              again.choices[i].implementation ==
-                  plan.choices[i].implementation &&
-              again.choices[i].fused == plan.choices[i].fused,
-          "two calls with equal inputs agree on every decision");
+    Check(
+        again.choices[i].composition == plan.choices[i].composition &&
+            again.choices[i].implementation == plan.choices[i].implementation &&
+            again.choices[i].fused == plan.choices[i].fused,
+        "two calls with equal inputs agree on every decision");
   }
 }
 
-// Case 2: a mask missing a required bit is a named rejection carrying the bit and
-// the consequence.
+// Case 2: a mask missing a required bit is a named rejection carrying the bit
+// and the consequence.
 void CheckMissingBitIsRejected() {
   nanochat::ModelSpec spec = nanochat::DefaultModelSpec();
   spec.name = "requires-bf16";
@@ -172,8 +170,9 @@ void CheckMissingBitIsRejected() {
         "the rejection has the resolution line: " + why_not);
   Check(why_not.find("unsupported device") == std::string::npos,
         "the rejection never says \"unsupported device\"");
-  Check(plan.choices.empty(),
-        "a rejected plan places nothing, because no composition can be trusted");
+  Check(
+      plan.choices.empty(),
+      "a rejected plan places nothing, because no composition can be trusted");
 
   // The same model on the complete mask resolves, so the rejection is about the
   // bit and not about the model.
@@ -199,7 +198,8 @@ void CheckOverrideBitSelectsTheFusedFamily() {
   // (a) The bit is declared: the family wins, the composition is recorded.
   const nanochat::Plan fused = nanochat::BuildPlanWithDevice(
       request,
-      FabricatedDevice(ReferenceMask() | nanochat::kFeatureFusedResidualRmsNorm),
+      FabricatedDevice(ReferenceMask() |
+                       nanochat::kFeatureFusedResidualRmsNorm),
       registrations, 1, nullptr);
   Check(fused.ok, "a mask declaring the override bit builds a plan");
   const nanochat::CompositionChoice* choice =
@@ -207,8 +207,9 @@ void CheckOverrideBitSelectsTheFusedFamily() {
   Check(choice != nullptr, "the plan decides the rms_norm composition");
   if (choice != nullptr) {
     Check(choice->fused, "the declared override bit selects the fused family");
-    Check(choice->implementation == "rms_norm",
-          "the plan names the fused family that won: " + choice->implementation);
+    Check(
+        choice->implementation == "rms_norm",
+        "the plan names the fused family that won: " + choice->implementation);
     Check(Mentions(choice->declined, "composition"),
           "the composition path is recorded as the declined fallback");
     bool names_the_bit = false;
@@ -230,7 +231,8 @@ void CheckOverrideBitSelectsTheFusedFamily() {
   choice = FindChoice(composed, nanochat::CompositionKind::kRmsNorm);
   Check(choice != nullptr, "the plan still decides the rms_norm composition");
   if (choice != nullptr) {
-    Check(!choice->fused, "a clear override bit leaves the composition running");
+    Check(!choice->fused,
+          "a clear override bit leaves the composition running");
     Check(choice->implementation == "composition",
           "the composition path is what runs with no override bit");
     Check(Mentions(choice->declined, "rms_norm"),
@@ -245,7 +247,8 @@ void CheckOverrideBitSelectsTheFusedFamily() {
   strict.model = &policy_off;
   const nanochat::Plan forced = nanochat::BuildPlanWithDevice(
       strict,
-      FabricatedDevice(ReferenceMask() | nanochat::kFeatureFusedResidualRmsNorm),
+      FabricatedDevice(ReferenceMask() |
+                       nanochat::kFeatureFusedResidualRmsNorm),
       registrations, 1, nullptr);
   choice = FindChoice(forced, nanochat::CompositionKind::kRmsNorm);
   Check(choice != nullptr && !choice->fused,

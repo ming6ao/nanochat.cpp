@@ -70,7 +70,8 @@ class Reader {
   }
 
   bool ParseString(std::string* out) {
-    if (pos_ >= text_.size() || text_[pos_] != '"') return Fail("expected a string");
+    if (pos_ >= text_.size() || text_[pos_] != '"')
+      return Fail("expected a string");
     ++pos_;
     out->clear();
     while (true) {
@@ -87,14 +88,30 @@ class Reader {
       if (pos_ >= text_.size()) return Fail("unterminated escape");
       const char esc = text_[pos_++];
       switch (esc) {
-        case '"': out->push_back('"'); break;
-        case '\\': out->push_back('\\'); break;
-        case '/': out->push_back('/'); break;
-        case 'b': out->push_back('\b'); break;
-        case 'f': out->push_back('\f'); break;
-        case 'n': out->push_back('\n'); break;
-        case 'r': out->push_back('\r'); break;
-        case 't': out->push_back('\t'); break;
+        case '"':
+          out->push_back('"');
+          break;
+        case '\\':
+          out->push_back('\\');
+          break;
+        case '/':
+          out->push_back('/');
+          break;
+        case 'b':
+          out->push_back('\b');
+          break;
+        case 'f':
+          out->push_back('\f');
+          break;
+        case 'n':
+          out->push_back('\n');
+          break;
+        case 'r':
+          out->push_back('\r');
+          break;
+        case 't':
+          out->push_back('\t');
+          break;
         case 'u': {
           // The two files this reader parses are ASCII, so a \\u escape is
           // accepted only when it decodes to ASCII. A non-ASCII code point is a
@@ -127,7 +144,8 @@ class Reader {
 
   bool ParseNumber(Value* out) {
     const std::size_t start = pos_;
-    if (pos_ < text_.size() && (text_[pos_] == '-' || text_[pos_] == '+')) ++pos_;
+    if (pos_ < text_.size() && (text_[pos_] == '-' || text_[pos_] == '+'))
+      ++pos_;
     bool digits = false;
     while (pos_ < text_.size() && text_[pos_] >= '0' && text_[pos_] <= '9') {
       ++pos_;
@@ -292,12 +310,18 @@ bool Value::Integer(int* out) const {
 
 const char* Value::KindName() const {
   switch (kind_) {
-    case Kind::kNull: return "null";
-    case Kind::kBool: return "bool";
-    case Kind::kNumber: return "number";
-    case Kind::kString: return "string";
-    case Kind::kArray: return "array";
-    case Kind::kObject: return "object";
+    case Kind::kNull:
+      return "null";
+    case Kind::kBool:
+      return "bool";
+    case Kind::kNumber:
+      return "number";
+    case Kind::kString:
+      return "string";
+    case Kind::kArray:
+      return "array";
+    case Kind::kObject:
+      return "object";
   }
   return "unknown";
 }

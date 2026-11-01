@@ -1,14 +1,21 @@
-"""T0: the one-job chain -- base, then SFT, then RL -- at the demo profile.
+"""T0: the one-job chain -- base, SFT, RL, then eval -- at the demo profile.
 
 The test drives the real chain: :func:`nanochat_cpp.pipeline.run` on
 :data:`nanochat_cpp.pipeline.PROFILES` ``demo``, which runs the mesh training
-driver, the SFT driver, and the RL worker over the committed fixture corpus. The
-runfiles carry the shared library, the two stage executables, the parquet
-document set, and the tokenizer artifact; no stage reads the Hub
-(``docs/pipeline-plan.md`` D4).
+driver, the SFT driver, and the RL worker over the committed fixture corpus and
+then scores the two checkpoints in this process. The runfiles carry the shared
+library, the two stage executables, the parquet document set, and the tokenizer
+artifact; no stage reads the Hub (``docs/pipeline-plan.md`` D4).
+
+The profile is named explicitly, because ``Job()`` defaults to ``standard``
+(8 layers, hidden 512) -- the shape the throughput facts are read at, not the
+shape a CPU gate can run in five seconds. The step counts are named with it, so
+this class keeps the short demo schedule (``docs/pipeline-scaleup-plan.md``
+section 5) whatever the defaults become.
 
 The assertions are the contract of section 7, not the loss numbers: the parity
-rungs own the numbers.
+rungs own the numbers. A10 to A13 are the reviewability of the eval stage
+(``docs/pipeline-scaleup-plan.md`` section 10).
 
 =====  ===================================================================
 A1     each stage returns status 0 with the step count it was asked for
@@ -24,6 +31,15 @@ A7     ``deliver/chatrl.ckpt`` equals the RL checkpoint byte for byte, and
 A8     the report names the stage order, the seeds, and the host facts
 A9     the delivered file loads through the public container reader and
        reports ``rl`` at step 105
+A10    the eval stage ran, both bits-per-byte values are finite and inside
+       [0, 8], and every sample is non-empty text
+A11    the RL checkpoint's digest is the same before and after the eval
+       stage, so an eval pass wrote nothing to the file it read
+A12    the eval record names the evaluated checkpoint, its digest, the
+       corpus, the batch size, and the batch count
+A13    ``deliver/chatrl.ckpt`` carries the RL weights and its metadata
+       reports ``rl``, because the last stage is the eval stage and that
+       stage writes no checkpoint
 =====  ===================================================================
 
 A4 does not prove the warm start, because the loaded moments move the weights
@@ -60,6 +76,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from nanochat_cpp import _build, api, checkpoint, pipeline, rl
 
@@ -74,6 +91,28 @@ OWNED_ENV = ("NANOCHAT_BASE_DIR", "NANOCHAT_RUNS_DIR",
 
 #: The step count the RL stage records: the SFT stage's 100 plus its own 5.
 RL_STEP = 105
+
+#: The schedule of the demo gate: the step counts this gate runs, which are
+#: half the default job's 200/200/8 (``docs/pipeline-scaleup-plan.md`` section
+#: 5). They are passed by hand, so the gate keeps costing about five seconds and
+#: the numbers A1 to A9 assert stay the numbers of the short schedule.
+DEMO_SCHEDULE = {"base_steps": 100, "sft_steps": 100, "rl_steps": 5}
+
+
+def demo_job(run_id: str, out_root, **overrides) -> pipeline.Job:
+    """One job at the ``demo`` profile with the gate's short schedule.
+
+    The profile is named because :class:`nanochat_cpp.pipeline.Job` defaults to
+    ``standard``, the 8-layer shape the throughput facts are read at; a gate
+    that inherited it would either cost minutes or, worse, assert the ``demo``
+    numbers against another shape. ``demo`` is 2 layers of hidden 64, which is
+    about five seconds of CPU for the whole chain.
+    """
+    fields = {"run_id": run_id, "profile": "demo",
+              "out_root": str(out_root)}
+    fields.update(DEMO_SCHEDULE)
+    fields.update(overrides)
+    return pipeline.Job(**fields)
 
 
 class _ConstantReward:
@@ -167,10 +206,14 @@ class PipelineTest(unittest.TestCase):
         os.environ["NANOCHAT_BASE_DIR"] = str(cls.root / "cache")
         os.environ["NANOCHAT_SANDBOX_BACKEND"] = "none"
         os.environ.pop("NANOCHAT_SOURCE_REVISION", None)
-        cls.job = pipeline.Job(run_id="gate", out_root=str(cls.root / "runs"))
+        cls.job = demo_job("gate", cls.root / "runs")
         cls.shape = pipeline.config(cls.job)
         cls.report = pipeline.run(cls.job)
         cls.stages = {stage.name: stage for stage in cls.report.stages}
+        # A11 reads the RL file's digest now, which is after the eval stage
+        # ran: the RL stage recorded the same digest before the eval stage
+        # started, so the two together say the eval wrote nothing.
+        cls.rl_digest_after_eval = digest(cls.stages["rl"].checkpoint)
         cls.run_dir = cls.root / "runs" / cls.job.run_id
         # The two legs of A6. The graded leg is the chain's own reward and the
         # control leg is constant, so the only difference between them is the
@@ -427,7 +470,14 @@ class PipelineTest(unittest.TestCase):
         self.assertEqual(delivered.parent.name, "deliver")
         computed = digest(delivered)
         self.assertEqual(computed, self.stages["rl"].sha256)
+        # The last stage is the eval stage and it writes no checkpoint, so it
+        # names the RL file as its own artifact: the delivered copy follows the
+        # RL weights and not the stage that ran last (section 6).
+        self.assertEqual(self.report.stages[-1].name, "eval")
+        self.assertEqual(self.report.stages[-1].checkpoint,
+                         self.stages["rl"].checkpoint)
         self.assertEqual(self.report.stages[-1].sha256, computed)
+        self.assertEqual(self.stages["rl"].sha256, computed)
         # The report on disk names the same two files, so a reviewer who opens
         # the report finds the bytes beside it.
         on_disk = pipeline.Report.from_json(
@@ -440,10 +490,10 @@ class PipelineTest(unittest.TestCase):
     def test_a8_the_report_names_the_order_the_seeds_and_host(self) -> None:
         """An unreviewable run is a failed run."""
         self.assertEqual([stage.name for stage in self.report.stages],
-                         ["base", "sft", "rl"])
+                         ["base", "sft", "rl", "eval"])
         self.assertEqual([stage.steps for stage in self.report.stages],
                          [self.job.base_steps, self.job.sft_steps,
-                          self.job.rl_steps])
+                          self.job.rl_steps, self.job.eval_batches])
         self.assertEqual(self.report.job.seed, self.job.seed)
         self.assertEqual(self.report.job.to_dict(), self.job.to_dict())
         self.assertEqual(self.report.version, pipeline.REPORT_VERSION)
@@ -466,13 +516,19 @@ class PipelineTest(unittest.TestCase):
         payload = json.loads(
             Path(self.report.report_path).read_text(encoding="utf-8"))
         self.assertEqual([stage["name"] for stage in payload["stages"]],
-                         ["base", "sft", "rl"])
+                         ["base", "sft", "rl", "eval"])
         self.assertEqual(payload["job"]["seed"], self.job.seed)
 
     # -- A9 ----------------------------------------------------------------
 
     def test_a9_the_delivered_file_loads_through_the_reader(self) -> None:
-        """A container only the pipeline can read is not an artifact."""
+        """A container only the pipeline can read is not an artifact.
+
+        The reader is applied to ``deliver/chatrl.ckpt``, the file the *last*
+        stage names as its own artifact and did not write, so a delivery that
+        followed a written eval checkpoint would read a different file or none
+        at all.
+        """
         delivered = self.report.delivered
         parameters = checkpoint.read_checkpoint(delivered)
         self.assertTrue(parameters, "the delivered file holds no parameter")
@@ -482,6 +538,235 @@ class PipelineTest(unittest.TestCase):
         self.assertEqual(metadata["step"], RL_STEP)
         self.assertEqual(metadata["config"]["num_layers"],
                          self.shape.num_layers)
+
+    # -- A10 ---------------------------------------------------------------
+
+    def test_a10_the_eval_stage_scored_both_checkpoints(self) -> None:
+        """A silent eval and a wrong ``eval_batch`` both fail here.
+
+        ``eval_batch`` is 1 because no evaluator call resets the data loader and
+        the committed corpus fills one 65-token row per epoch, so a batch of
+        eight reports no bytes and returns infinity (section 6). The two bits
+        per byte are two different numbers, because the two checkpoints are two
+        different files; an eval wired to one file twice would report one
+        number twice.
+        """
+        stage = self.stages["eval"]
+        self.assertEqual(stage.name, "eval")
+        self.assertEqual(stage.steps, self.job.eval_batches)
+        self.assertEqual(int(stage.extra["eval_batches"]),
+                         int(self.job.eval_batches))
+        self.assertEqual(int(stage.extra["eval_batch"]), 1)
+        self.assertEqual(pipeline.EVAL_BATCH, 1)
+        values = {}
+        for name in ("bpb_base", "bpb_rl"):
+            self.assertIn(name, stage.extra)
+            value = float(stage.extra[name])
+            values[name] = value
+            self.assertTrue(math.isfinite(value), f"{name} is {value}")
+            self.assertGreaterEqual(
+                value, 0.0,
+                f"{name} is {value}, and a bits-per-byte count cannot be "
+                f"negative; the eval scored no byte")
+            self.assertLessEqual(
+                value, 8.0,
+                f"{name} is {value}, which is above the [0, 8] band of "
+                f"section 10: a batch that could not form reports no bytes "
+                f"and an infinity, and a wrong ``eval_batch`` is how that "
+                f"happens (section 6)")
+        self.assertNotEqual(
+            values["bpb_base"], values["bpb_rl"],
+            f"both checkpoints score {values['bpb_base']}, so the eval read "
+            f"one file twice")
+        samples = stage.extra["samples"]
+        self.assertEqual(len(samples), int(self.job.eval_samples),
+                         f"the stage sampled {len(samples)} completions")
+        for index, sample in enumerate(samples):
+            self.assertIsInstance(sample, str, f"sample {index} is {sample!r}")
+            self.assertTrue(sample.strip(),
+                            f"sample {index} is empty text, so the report "
+                            f"names a completion a reader cannot read")
+
+    # -- A11 ---------------------------------------------------------------
+
+    def test_a11_the_eval_stage_wrote_no_checkpoint(self) -> None:
+        """The RL file's digest, before and after the eval stage.
+
+        "Before" is the digest the RL stage recorded when it closed the file:
+        ``stage_rl`` hashes the container it wrote, and the eval stage starts
+        after that. "After" is the digest read once the whole chain finished.
+        A pass that wrote to the container it read would have moved it, which
+        is why the eval record's digest is read back after its own work
+        (section 6).
+        """
+        recorded = self.stages["rl"].sha256
+        self.assertTrue(recorded, "the RL stage recorded no digest")
+        self.assertEqual(
+            self.rl_digest_after_eval, recorded,
+            f"the RL checkpoint {self.stages['rl'].checkpoint} changed between "
+            f"the RL stage and the end of the chain, so a later stage wrote "
+            f"to it")
+        self.assertEqual(digest(self.stages["rl"].checkpoint), recorded)
+        # The eval stage names the RL file and writes nothing of its own, so
+        # there is no eval directory and no second checkpoint (P4).
+        self.assertFalse(
+            (self.run_dir / "eval").exists(),
+            f"the eval stage wrote {self.run_dir / 'eval'}, and the design "
+            f"says it writes no checkpoint")
+
+    # -- A12 ---------------------------------------------------------------
+
+    def test_a12_the_eval_record_names_what_it_evaluated(self) -> None:
+        """An unreviewable eval is a failed eval.
+
+        ``eval_batch`` is asserted against the literal 1: the committed corpus
+        allows one 65-token row per epoch, so the default batch of 8 is exactly
+        the defect section 6 names, and a report that carries it would have
+        recorded an infinity instead of a number.
+        """
+        extra = self.stages["eval"].extra
+        for name in ("evaluated", "evaluated_sha256", "eval_corpus",
+                     "eval_batch", "eval_batches"):
+            self.assertIn(name, extra,
+                          f"the eval record does not name {name}")
+        self.assertEqual(extra["evaluated"], self.stages["rl"].checkpoint,
+                         "the eval record does not name the RL checkpoint")
+        self.assertEqual(extra["eval_corpus"],
+                         self.stages["base"].extra["parquet"],
+                         "the eval read a corpus the base stage did not")
+        self.assertEqual(Path(extra["eval_corpus"]).parent,
+                         self.run_dir / pipeline.CORPUS_DIRNAME)
+        self.assertTrue(Path(extra["eval_corpus"]).is_file(),
+                        f"{extra['eval_corpus']} is missing")
+        self.assertEqual(extra["evaluated_sha256"], digest(extra["evaluated"]))
+        self.assertEqual(extra["evaluated_sha256"], self.stages["rl"].sha256)
+        self.assertEqual(int(extra["eval_batches"]), int(self.job.eval_batches))
+        self.assertEqual(int(extra["eval_batch"]), 1,
+                         "the eval did not name the one batch the corpus "
+                         "fills: 8 is the api default and reports no bytes "
+                         "on this corpus (section 6)")
+
+    # -- A13 ---------------------------------------------------------------
+
+    def test_a13_the_delivered_file_is_still_the_rl_weights(self) -> None:
+        """The last stage is the eval stage, and the delivery follows the
+        record and not the stage order.
+
+        ``deliver()`` copies ``stages[-1].checkpoint``, and the eval stage
+        names the RL file it read, so ``deliver/chatrl.ckpt`` holds the RL
+        weights. The metadata is the proof a reader has: it says ``rl`` at the
+        RL step, whatever ran last.
+        """
+        delivered = Path(self.report.delivered)
+        self.assertTrue(delivered.is_file(), f"{delivered} is missing")
+        self.assertEqual(self.report.stages[-1].name, "eval")
+        self.assertEqual(self.stages["eval"].checkpoint,
+                         self.stages["rl"].checkpoint)
+        self.assertEqual(digest(delivered), self.stages["rl"].sha256)
+        metadata = checkpoint.read_metadata(delivered)
+        self.assertEqual(metadata["stage"], "rl")
+        self.assertEqual(metadata["step"], RL_STEP)
+        self.assertEqual(self.stages["eval"].metadata["stage"], "rl")
+
+
+class JobValidationTest(unittest.TestCase):
+    """The job and profile rules of ``docs/pipeline-scaleup-plan.md`` section 5.
+
+    ``_check`` is the one gate a job passes before a stage starts, so a bad
+    field is a message that names the field and a bad profile is a message that
+    names the ``Config::Validate`` rule -- never a driver failing inside the
+    chain with a C flag on its stderr. Nothing here runs a stage, so the class
+    needs no library, no executable, and no runfiles data.
+    """
+
+    def test_a_non_positive_eval_schedule_is_rejected(self) -> None:
+        """``eval_batches`` and ``eval_samples`` are part of the schedule."""
+        for field in ("eval_batches", "eval_samples"):
+            for value in (0, -1):
+                with self.subTest(field=field, value=value):
+                    with self.assertRaises(pipeline.PipelineError) as caught:
+                        pipeline._check(demo_job("bad", "", **{field: value}))
+                    self.assertIn(field, str(caught.exception))
+
+    def test_a_profile_that_breaks_config_validate_is_rejected(self) -> None:
+        """One case per rule of ``include/nanochat/config.h``.
+
+        The profile is injected into ``PROFILES`` for the length of the case, so
+        the rule is exercised through the same path a named profile takes; a
+        profile that broke a rule otherwise failed inside a stage executable,
+        where the message names the C flag and not the profile (section 5,
+        P1).
+        """
+        cases = (
+            ("hidden_dim not divisible by num_heads",
+             api.Config(num_layers=2, num_heads=3, num_kv_heads=1,
+                        hidden_dim=64, seq_len=64, vocab_size=487,
+                        padded_vocab_size=512, window_pattern="L"),
+             "hidden_dim must be divisible by num_heads"),
+            ("num_heads not divisible by num_kv_heads",
+             api.Config(num_layers=2, num_heads=4, num_kv_heads=3,
+                        hidden_dim=64, seq_len=64, vocab_size=487,
+                        padded_vocab_size=512, window_pattern="L"),
+             "num_heads must be divisible by num_kv_heads"),
+            ("vocab_size above padded_vocab_size",
+             api.Config(num_layers=2, num_heads=4, num_kv_heads=2,
+                        hidden_dim=64, seq_len=64, vocab_size=600,
+                        padded_vocab_size=512, window_pattern="L"),
+             "vocab_size must not be above padded_vocab_size"),
+        )
+        for rule, shape, needle in cases:
+            with self.subTest(rule=rule):
+                with mock.patch.dict(pipeline.PROFILES, {"broken": shape}):
+                    with self.assertRaises(pipeline.PipelineError) as caught:
+                        pipeline._check(pipeline.Job(profile="broken"))
+                message = str(caught.exception)
+                self.assertIn("'broken'", message,
+                              f"the message does not name the profile: "
+                              f"{message}")
+                self.assertIn(needle, message,
+                              f"the message does not name the rule: "
+                              f"{message}")
+
+    def test_the_default_job_is_the_standard_profile(self) -> None:
+        """P1: the default runs the shape a throughput number is read at."""
+        job = pipeline.Job()
+        self.assertEqual(job.profile, "standard")
+        self.assertEqual((job.base_steps, job.sft_steps, job.rl_steps),
+                         (200, 200, 8))
+        self.assertEqual(job.eval_batches, 1)
+        self.assertEqual(job.eval_samples, 2)
+        shape = pipeline.PROFILES[job.profile]
+        self.assertEqual(
+            (shape.num_layers, shape.hidden_dim, shape.num_heads,
+             shape.num_kv_heads, shape.seq_len, shape.vocab_size,
+             shape.padded_vocab_size, shape.window_pattern),
+            (8, 512, 8, 4, 64, 487, 512, "L"),
+            f"the standard profile is {shape}")
+        # The default job passes the gate, so a default that broke a rule would
+        # fail here and not at the first stage (section 5).
+        pipeline._check(job)
+
+    def test_the_demo_profile_keeps_its_short_shape(self) -> None:
+        """``demo`` stays the two-layer shape the CPU gate runs in seconds."""
+        shape = pipeline.PROFILES["demo"]
+        self.assertEqual(
+            (shape.num_layers, shape.hidden_dim, shape.num_heads,
+             shape.num_kv_heads, shape.seq_len, shape.vocab_size,
+             shape.padded_vocab_size, shape.window_pattern),
+            (2, 64, 4, 2, 64, 487, 512, "L"),
+            f"the demo profile is {shape}")
+        # The two batch counts stay at one row: the committed corpus fills one
+        # 65-token row per epoch (P2, section 6).
+        self.assertEqual(pipeline.BASE_BATCH, 1)
+        self.assertEqual(pipeline.EVAL_BATCH, 1)
+        pipeline._check(demo_job("demo", ""))
+
+    def test_the_new_fields_survive_the_json_round_trip(self) -> None:
+        """A job file carries the eval schedule to another host."""
+        job = demo_job("roundtrip", "", eval_batches=2, eval_samples=3)
+        rebuilt = pipeline.Job.from_json(job.to_json())
+        self.assertEqual(rebuilt.to_dict(), job.to_dict())
+        self.assertEqual((rebuilt.eval_batches, rebuilt.eval_samples), (2, 3))
 
 
 #: The documents of the committed parquet, in file order, as
@@ -540,7 +825,7 @@ class CorpusBudgetTest(unittest.TestCase):
         cls.saved = {name: os.environ.get(name) for name in OWNED_ENV}
         os.environ["NANOCHAT_BASE_DIR"] = str(cls.root / "cache")
         os.environ.pop("NANOCHAT_RUNS_DIR", None)
-        cls.job = pipeline.Job(run_id="corpus", out_root=str(cls.root / "runs"))
+        cls.job = demo_job("corpus", cls.root / "runs")
         cls.corpus = pipeline.build_corpus(cls.job)
 
     @classmethod

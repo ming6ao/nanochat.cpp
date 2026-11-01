@@ -2,10 +2,10 @@
 //
 // Why a binary and not a log line. The plan is a decision a user has to be able
 // to *see* before a model loads (`docs/model-and-device-bringup.md` section 9.1
-// rule 3): `tools/nanochat doctor` runs this and shows which implementation each
-// composition resolves to on this device, and why the ones that were declined
-// lost. The plan is pure, so the probe asks for one without a device present, a
-// checkpoint, or a tokenizer.
+// rule 3): `tools/nanochat doctor` runs this and shows which implementation
+// each composition resolves to on this device, and why the ones that were
+// declined lost. The plan is pure, so the probe asks for one without a device
+// present, a checkpoint, or a tokenizer.
 //
 // This file includes the public headers only - `nanochat/plan.h`,
 // `nanochat/model_spec.h` and `nanochat/tensor.h` - so it cannot depend on a
@@ -20,8 +20,8 @@
 //   plan_main [--spec=<name>] [--spec-path=<file>] [--graph=<name>]
 //             [--json] [--text] [--quiet]
 //
-// Without `--spec`/`--spec-path` the probe uses the built-in default spec, which
-// is the one `Model::Create(config)` would use.
+// Without `--spec`/`--spec-path` the probe uses the built-in default spec,
+// which is the one `Model::Create(config)` would use.
 
 #include <cstdio>
 #include <cstdlib>
@@ -66,11 +66,21 @@ std::string EscapeJson(const std::string& value) {
   out.reserve(value.size() + 8);
   for (char c : value) {
     switch (c) {
-      case '"': out += "\\\""; break;
-      case '\\': out += "\\\\"; break;
-      case '\n': out += "\\n"; break;
-      case '\r': out += "\\r"; break;
-      case '\t': out += "\\t"; break;
+      case '"':
+        out += "\\\"";
+        break;
+      case '\\':
+        out += "\\\\";
+        break;
+      case '\n':
+        out += "\\n";
+        break;
+      case '\r':
+        out += "\\r";
+        break;
+      case '\t':
+        out += "\\t";
+        break;
       default:
         if (static_cast<unsigned char>(c) < 0x20) {
           char buffer[8];
@@ -100,15 +110,13 @@ void PrintText(const nanochat::Plan& plan, const std::string& why_not,
   if (!plan.ok) {
     std::printf("%s", why_not.c_str());
     for (const nanochat::PlanGap& gap : plan.gaps) {
-      std::printf("  %s: %s\n",
-                  nanochat::CompositionName(gap.composition),
+      std::printf("  %s: %s\n", nanochat::CompositionName(gap.composition),
                   gap.reason.c_str());
     }
     return;
   }
   for (const nanochat::CompositionChoice& choice : plan.choices) {
-    std::printf("  %-12s %s%s\n",
-                nanochat::CompositionName(choice.composition),
+    std::printf("  %-12s %s%s\n", nanochat::CompositionName(choice.composition),
                 choice.implementation.c_str(), choice.fused ? " (fused)" : "");
     for (const nanochat::DeclinedImpl& declined : choice.declined) {
       std::printf("               declined %s: %s\n",
@@ -122,8 +130,8 @@ void PrintJson(const nanochat::Plan& plan, const std::string& why_not) {
   out += "  \"ok\": ";
   out += plan.ok ? "true" : "false";
   out += ",\n  \"spec\": \"" + EscapeJson(plan.spec_name) + "\",\n";
-  out += "  \"graph\": \"" +
-         EscapeJson(nanochat::GraphKindName(plan.graph)) + "\",\n";
+  out += "  \"graph\": \"" + EscapeJson(nanochat::GraphKindName(plan.graph)) +
+         "\",\n";
   out += "  \"device_index\": " + std::to_string(plan.device_index) + ",\n";
   out += "  \"choices\": [";
   for (std::size_t i = 0; i < plan.choices.size(); ++i) {
@@ -221,8 +229,9 @@ int main(int argc, char** argv) {
   } else if (!spec_name.empty()) {
     const std::string located = Locate(nanochat::ModelSpecPath(spec_name));
     if (located.empty()) {
-      std::fprintf(stderr, "plan_main: no spec for model \"%s\" (%s is not "
-                           "readable)\n",
+      std::fprintf(stderr,
+                   "plan_main: no spec for model \"%s\" (%s is not "
+                   "readable)\n",
                    spec_name.c_str(),
                    nanochat::ModelSpecPath(spec_name).c_str());
       return 1;
@@ -234,8 +243,7 @@ int main(int argc, char** argv) {
   } else {
     const std::string located =
         Locate(nanochat::ModelSpecPath("nanochat-default"));
-    if (!located.empty() &&
-        nanochat::ParseModelSpec(located, &spec, &why)) {
+    if (!located.empty() && nanochat::ParseModelSpec(located, &spec, &why)) {
       // The flagship package's own description, which is the one this tree
       // ships.
     } else {

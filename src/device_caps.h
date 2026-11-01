@@ -11,8 +11,8 @@
 // `src/device_profile.cc` derives two views from the same parsed files: the
 // capability *fields* a profile exposes (`nanochat/device_profile.h`) and the
 // mechanism mask this function returns. The mask is not a field of
-// `DeviceProfile`, because that header is frozen for this campaign and because a
-// profile describes a device's shape while the mask is the device's promise.
+// `DeviceProfile`, because that header is frozen for this campaign and because
+// a profile describes a device's shape while the mask is the device's promise.
 //
 // This is a private `src/` header.
 
