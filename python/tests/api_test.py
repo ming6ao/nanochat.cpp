@@ -150,6 +150,18 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(tokenizer.vocab_size,
                          _int(self.records, "api/config/vocab"))
 
+    def test_a_path_is_not_a_handle(self) -> None:
+        # A path where a handle belongs reaches C as a character pointer, and
+        # ctypes converts the string without complaint. The encoder then reads
+        # the path text as a tokenizer and the process dies with SIGSEGV, on
+        # the CPU as well as on a card. The constructor rejects the mistake.
+        for value in (resolve(TOKENIZER), str(resolve(TOKENIZER)),
+                      bytes(str(resolve(TOKENIZER)), "utf-8")):
+            with self.subTest(value=type(value).__name__):
+                with self.assertRaises(TypeError) as caught:
+                    Tokenizer(value)
+                self.assertIn("Tokenizer.load", str(caught.exception))
+
     def test_trainer_and_evaluator_match_fixture(self) -> None:
         records = self.records
         seed = _int(records, "api/seed")

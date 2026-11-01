@@ -377,6 +377,16 @@ class Tokenizer:
 
     def __init__(self, handle, vocab_size: int | None = None,
                  special_tokens: dict | None = None) -> None:
+        # A path here used to reach C as a character pointer, because ctypes
+        # converts a string for a `c_void_p` parameter without complaint. The
+        # encoder then read the path text as a handle and the process died with
+        # SIGSEGV, on the CPU as well as on a card. Reject the mistake here,
+        # before the library loads, so it is a TypeError that names the fix.
+        if isinstance(handle, (str, bytes, os.PathLike)) or \
+                not isinstance(handle, int):
+            raise TypeError(
+                "Tokenizer takes a C handle, not a path or a file object; use "
+                "Tokenizer.load(path) for a path")
         self._lib = _lib.load()
         self._handle = handle
         self.vocab_size = vocab_size
