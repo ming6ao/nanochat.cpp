@@ -1,10 +1,10 @@
 """T0: the run-host seam of ``target.py``.
 
 The test covers the job translation, the plan, the two job kinds of the Modal
-host, the registry, the two roots, the record parsers, the Modal upload and
-spawn, and the live handle. The Modal SDK is a fake and the Volume is a file
-table, so the test needs no SDK, no account, no card, and no network. See
-``docs/host-portability.md``.
+host, the two legs, the registry, the two roots, the record parsers, the Modal
+upload and spawn, and the live handle. The Modal SDK is a fake and the Volume
+is a file table, so the test needs no SDK, no account, no card, and no network.
+See ``docs/host-portability.md``.
 """
 
 from __future__ import annotations
@@ -54,12 +54,12 @@ def _pipeline_job(stage="/stage") -> dict:
     """A pipeline job: one run root, and no per-stage output directory.
 
     It mirrors the committed example of ``notebooks/pipeline_job.json``, which
-    holds the ``Job()`` defaults; only the root is set here, so the plan has a
-    path to map.
+    holds the ``Job()`` defaults under the ``standard`` profile; only the root
+    is set here, so the plan has a path to map.
     """
     return {
         "run_id": "demo",
-        "profile": "demo",
+        "profile": "standard",
         "out_root": f"{stage}/runs",
     }
 
@@ -365,6 +365,79 @@ class PipelineTargetTest(unittest.TestCase):
         with self.assertRaises(ValueError) as caught:
             target.ModalTarget(job_kind="chain")
         self.assertIn("unknown job kind", str(caught.exception))
+
+
+class LegTest(unittest.TestCase):
+    """A leg names the card, and the (leg, job kind) pair names the function.
+
+    The two legs are the T4 the free notebooks run on and the H100 whose image
+    builds the chain. A leg changes the function name only (design section 9,
+    rows 3 and 7).
+    """
+
+    def test_the_pair_names_the_function(self) -> None:
+        pairs = (
+            (target.LEG_T4, target.JOB_TRAIN, "train"),
+            (target.LEG_T4, target.JOB_PIPELINE, "pipeline"),
+            (target.LEG_H100, target.JOB_TRAIN, "train_h100"),
+            (target.LEG_H100, target.JOB_PIPELINE, "pipeline_h100"),
+        )
+        for leg, kind, name in pairs:
+            with self.subTest(leg=leg, job_kind=kind):
+                host = target.ModalTarget(leg=leg, job_kind=kind)
+                self.assertEqual(host.leg, leg)
+                self.assertEqual(host.job_kind, kind)
+                self.assertEqual(host.function, name)
+                self.assertEqual(target.FUNCTIONS[(leg, kind)], name)
+
+    def test_every_pair_is_in_the_table(self) -> None:
+        self.assertEqual(
+            set(target.FUNCTIONS),
+            {(leg, kind) for leg in target.LEGS for kind in target.JOB_KINDS})
+
+    def test_the_leg_defaults_to_t4(self) -> None:
+        self.assertEqual(target.ModalTarget().leg, target.LEG_T4)
+        self.assertEqual(target.ModalTarget().function, target.FUNCTION)
+
+    def test_an_unknown_leg_raises(self) -> None:
+        with self.assertRaises(ValueError) as caught:
+            target.ModalTarget(leg="a100")
+        message = str(caught.exception)
+        self.assertIn("unknown leg", message)
+        self.assertIn(target.LEG_T4, message)
+        self.assertIn(target.LEG_H100, message)
+
+    def test_an_explicit_function_wins(self) -> None:
+        host = target.ModalTarget(leg=target.LEG_H100, job_kind="pipeline",
+                                  function="pipeline_demo")
+        self.assertEqual(host.function, "pipeline_demo")
+
+    def test_the_leg_reaches_submit(self) -> None:
+        sdk = FakeSDK()
+        host = target.ModalTarget(leg=target.LEG_H100, job_kind="pipeline")
+        config = FakeConfig("/stage/runs", _pipeline_job())
+        plan = host.prepare(config, Path("/stage"))
+        with mock.patch.object(target, "client", lambda: sdk):
+            host.submit(plan, host.uploads(config, Path("/stage")))
+        self.assertEqual(sdk.functions, [(target.APP_NAME, "pipeline_h100")])
+        self.assertEqual(sdk.spawned, [(plan.job_json, "runs", "")])
+
+    def test_the_path_map_is_the_same_on_both_legs(self) -> None:
+        for leg in target.LEGS:
+            with self.subTest(leg=leg):
+                host = target.ModalTarget(leg=leg, job_kind="pipeline")
+                plan = host.prepare(FakeConfig("/stage/runs", _pipeline_job()),
+                                    Path("/stage"))
+                self.assertEqual(plan.out_dir, "/runs/runs")
+                self.assertEqual(plan.job_path, Path("/stage/runs/job.json"))
+                self.assertEqual(json.loads(plan.job_json)["out_root"],
+                                 "/runs/runs")
+                self.assertEqual(host.relative_dir(plan), "runs")
+                # A leg selects the function, not the path map: the field
+                # table of `map_job` is the same one the train kind reads.
+                self.assertEqual(host.uploads(
+                    FakeConfig("/stage/runs", _pipeline_job()),
+                    Path("/stage")), [])
 
 
 class LiveRunTest(unittest.TestCase):

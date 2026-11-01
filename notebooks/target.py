@@ -29,11 +29,15 @@ __all__ = [
     "APP_NAME",
     "DEFAULT",
     "FUNCTION",
+    "FUNCTIONS",
     "INPUT_FIELDS",
     "JOB_KINDS",
     "JOB_PIPELINE",
     "JOB_TRAIN",
     "JobPlan",
+    "LEGS",
+    "LEG_H100",
+    "LEG_T4",
     "LocalTarget",
     "ModalLiveRun",
     "ModalTarget",
@@ -76,8 +80,10 @@ OUTPUT_FIELDS = (
 #: Every job field that holds a path. ``data.parquet`` holds a list of paths.
 PATH_FIELDS = INPUT_FIELDS + OUTPUT_FIELDS
 
-#: The Modal app, its function, the runs Volume it mounts, and the Secret that
-#: holds ``HF_TOKEN`` for a publish inside the container.
+#: The Modal app, the runs Volume it mounts, and the Secret that holds
+#: ``HF_TOKEN`` for a publish inside the container. ``FUNCTION`` is the train
+#: function of the default leg, and the name a caller gets when it names no
+#: leg and no function.
 APP_NAME = "nanochat"
 FUNCTION = "train"
 RUNS_VOLUME = "nanochat-runs"
@@ -92,6 +98,28 @@ SECRET_NAME = "huggingface"
 JOB_TRAIN = "train"
 JOB_PIPELINE = "pipeline"
 JOB_KINDS = (JOB_TRAIN, JOB_PIPELINE)
+
+#: The two cards the app deploys as separate legs (design section 9, rows 3
+#: and 7). A leg is a whole chain on one card: its own image, its own build of
+#: ``libnanochat_shared.so``, and therefore its own function name. ``t4`` is
+#: the free Colab and Kaggle card and keeps the bare names, so a call that
+#: names neither leg nor function reaches ``train``; ``h100`` carries the
+#: suffix.
+LEG_T4 = "t4"
+LEG_H100 = "h100"
+LEGS = (LEG_T4, LEG_H100)
+
+#: The Modal function of each ``(leg, job_kind)`` pair. The leg changes the
+#: function name only: the path map is the same on both legs, because both
+#: mount the runs Volume at ``/runs``. A function the table does not hold is
+#: still reachable through the explicit ``function=`` argument of
+#: :class:`ModalTarget`.
+FUNCTIONS = {
+    (LEG_T4, JOB_TRAIN): FUNCTION,
+    (LEG_T4, JOB_PIPELINE): "pipeline",
+    (LEG_H100, JOB_TRAIN): "train_h100",
+    (LEG_H100, JOB_PIPELINE): "pipeline_h100",
+}
 
 #: The files a run writes. A client pulls the ones it needs back.
 RUN_FILES = (
@@ -259,28 +287,40 @@ class ModalTarget(Target):
     The path map is built per run, because the remote root is a fixed mount
     point and the local root depends on the notebook.
 
-    ``function`` names the Modal function to spawn, and ``job_kind`` names the
-    shape of the job it runs: :data:`JOB_TRAIN` for one stage, whose run
-    directory is ``output.out_dir``, and :data:`JOB_PIPELINE` for the whole
-    chain, whose run root is ``out_root`` (``docs/pipeline-plan.md`` section
-    6.3). The two travel together, because the function and the job shape are
-    the same choice.
+    ``leg`` names the card the app deployed: :data:`LEG_T4`, the free Colab and
+    Kaggle card, or :data:`LEG_H100`. A leg is its own image and its own build,
+    so it is its own pair of functions. ``job_kind`` names the shape of the job
+    it runs: :data:`JOB_TRAIN` for one stage, whose run directory is
+    ``output.out_dir``, and :data:`JOB_PIPELINE` for the whole chain, whose run
+    root is ``out_root`` (``docs/pipeline-plan.md`` section 6.3).
+
+    ``function`` is the Modal function to spawn. It defaults to the name that
+    :data:`FUNCTIONS` holds for the ``(leg, job_kind)`` pair, so a notebook
+    selects a card and a job shape and the function name follows; a caller
+    passes it explicitly only for a name the table does not hold. A leg changes
+    the function name and nothing else: both legs mount the runs Volume at the
+    same root, so one path map serves both.
     """
 
     name = "modal"
     needs_local_devices = False
 
-    def __init__(self, *, app_name=APP_NAME, function=FUNCTION,
+    def __init__(self, *, app_name=APP_NAME, function=None,
                  volume=RUNS_VOLUME, remote_root=REMOTE_ROOT,
-                 job_kind=JOB_TRAIN) -> None:
+                 job_kind=JOB_TRAIN, leg=LEG_T4) -> None:
         if job_kind not in JOB_KINDS:
             raise ValueError(
                 f"unknown job kind {job_kind!r}: {' or '.join(JOB_KINDS)}")
+        if leg not in LEGS:
+            raise ValueError(
+                f"unknown leg {leg!r}: {' or '.join(LEGS)}")
         self.app_name = app_name
-        self.function = function
+        self.function = FUNCTIONS[(leg, job_kind)] \
+            if function is None else function
         self.volume = volume
         self.remote_root = str(remote_root)
         self.job_kind = job_kind
+        self.leg = leg
 
     def local_root(self, stage_root=None) -> Path:
         """The local run root: the caller value, else :meth:`run_root`."""
