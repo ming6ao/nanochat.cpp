@@ -141,8 +141,34 @@ COMMIT_SECONDS = 10
 #: The longest run the deployment allows, in seconds.
 TIMEOUT_SECONDS = 8 * 60 * 60
 
-#: The local repository this file is deployed from.
-REPO = Path(__file__).resolve().parents[2]
+#: The local repository this file is deployed from. `modal run` mounts the
+#: entry module at `/root/app.py`, so `Path(__file__).parents[2]` raised
+#: `IndexError` in the container and the app never started. Resolve the tree
+#: instead of assuming where this file sits (`docs/host-portability.md` row 10).
+def _repo_root() -> Path:
+    """The tree this file belongs to, on the host and inside the image.
+
+    Three sources, in order: `NANOCHAT_REPO`, the nearest ancestor that holds
+    `MODULE.bazel` (the host layout, `tools/modal/app.py`), and the path the
+    image copies the tree to. A layout none of them explain fails here with a
+    message, not with an `IndexError` from `Path.parents`.
+    """
+    override = os.environ.get("NANOCHAT_REPO")
+    if override:
+        return Path(override).expanduser().resolve()
+    here = Path(__file__).resolve()
+    for candidate in here.parents:
+        if (candidate / "MODULE.bazel").is_file():
+            return candidate
+    image_tree = Path(REPO_ROOT)
+    if image_tree.is_dir():
+        return image_tree
+    raise RuntimeError(
+        f"cannot find the repository: no MODULE.bazel above {here} and "
+        f"{REPO_ROOT} is not a directory; set NANOCHAT_REPO")
+
+
+REPO = _repo_root()
 
 
 def gpu_request(kind=GPU_TYPE, count=GPU_COUNT) -> str:
@@ -553,15 +579,19 @@ def chain_dir(run_root, job) -> Path:
 
 
 def read_report(folder) -> dict:
-    """The report the chain delivered, or an empty document.
+    """The report the chain delivered, or raise when it delivered none.
 
     ``deliver()`` writes ``deliver/pipeline_report.json`` beside the delivered
-    checkpoint (design decision D6), so a chain that ran without delivery has
-    no report and reports an empty one.
+    checkpoint (design decision D6). An absent report used to come back as an
+    empty document, so a chain that exited 0 without delivering looked like a
+    successful run with no data. The gate must fail instead: a run is reviewed
+    by the report, and there is nothing to review.
     """
     path = Path(folder) / DELIVER_DIRNAME / REPORT_NAME
     if not path.is_file():
-        return {}
+        raise RuntimeError(
+            f"the chain wrote no {DELIVER_DIRNAME}/{REPORT_NAME} under {folder}, "
+            f"so there is no report to return")
     return json.loads(path.read_text(encoding="utf-8"))
 
 
@@ -672,6 +702,8 @@ def pipeline(job_json: str, run_id: str, stage_json: str = "",
             log_path.read_text(encoding="utf-8").splitlines()[-20:])
         raise RuntimeError(f"the chain exited {result.returncode}:\n{tail}")
     folder = chain_dir(run_dir, job)
+    # A missing report raises here, before the publish. A zero exit with no
+    # delivery is a failed gate, not an empty success.
     report = read_report(folder)
     published = {}
     if publish_json:
