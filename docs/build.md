@@ -265,6 +265,27 @@ dispatch occurs. The fp16 build and its half-storage path are removed
 `--config=h200` are the complete Ampere and Hopper targets; each selects the
 matching architecture, `--config=bf16`, and the CUDA backend.
 
+### `hopper`, beside `h100`
+
+| Config | Arch | Precision | Backend | Simulator | Collective |
+|---|---|---|---|---|---|
+| `h100` | sm_90 | bf16 | cuda | on (`--define=simulator=1`) | `native` |
+| `hopper` | sm_90 | bf16 | cuda | off | default, `nccl` |
+
+The two configs are not the same build. `h100` is the *simulator* profile: it
+compiles in the capability override and answers from the device profile table
+instead of from the card, and it swaps the collective to `native`. `hopper` is
+a real Hopper build for a hand run at bf16, with the simulator off and the
+default `nccl` collective that `world_size=1` expects
+([pipeline-scaleup-plan.md](pipeline-scaleup-plan.md) section 3, trap 1). A
+check that needs a card chooses `hopper`; a report read without a card chooses
+`h100`.
+
+`hopper` is a hand-run shorthand only. `_build._build_command` still emits its
+explicit flag triple, `--config=cuda`, `--define=precision=<p>`, and
+`--@rules_cuda//cuda:archs=<a>`, and never a named config, so the chain's H100
+leg, the build test, and a hand run are the same build.
+
 ## Turing (T4, sm_75)
 
 Design for the Turing target. The T4 card is the second GPU family that
@@ -301,7 +322,8 @@ new backend directory is necessary.
 | `t4` | sm_75 | fp32 | default Kaggle build |
 | `bf16` | default | bf16 | bf16 compute for Ampere and newer |
 | `a100` | sm_80 | bf16 | first Ampere target |
-| `h100`, `h200` | sm_90 | bf16 | Hopper target and compile gate |
+| `h100`, `h200` | sm_90 | bf16 | Hopper simulator profile and compile gate |
+| `hopper` | sm_90 | bf16 | real Hopper build for a hand run (the Precision section) |
 
 The `t4` config includes `--config=cuda`. The `t4` build uses the fp32 GEMM
 path on this card.

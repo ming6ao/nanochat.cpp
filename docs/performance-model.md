@@ -316,6 +316,57 @@ The nanochat reference measured 99 minutes against a bound of about 52 minutes.
 The fraction is about 0.53. The remaining 47 minutes are the row kernels, the
 launch gaps, the imperfect overlap, and the achieved GEMM rate.
 
+### 7.3 The bound at the two chain shapes
+
+The chain of [pipeline-scaleup-plan.md](pipeline-scaleup-plan.md) runs two
+shapes, `demo` (2 layers, hidden 64) and `standard` (8 layers, hidden 512), on
+two cards, a T4 at fp32 and an H100 at bf16. `tools/nanochat roofline` prints the
+bound of each of the four pairs. The command for one row:
+
+```
+tools/nanochat roofline --device h100 --precision bf16 \
+    --layers 8 --heads 8 --kv-heads 4 --hidden 512 --seq 64 \
+    --vocab 487 --padded-vocab 512 --window-pattern L --batch 1 --json
+```
+
+| Shape | Card | Precision | Step bound | Binding row |
+|---|---|---|---:|---|
+| `demo` 2/64 | T4 | fp32 | 0.366 ms | `launch` |
+| `demo` 2/64 | H100 | bf16 | 0.173 ms | `launch` |
+| `standard` 8/512 | T4 | fp32 | 3.600 ms | `compute` |
+| `standard` 8/512 | H100 | bf16 | 0.764 ms | `launch` |
+
+Three results follow.
+
+1. **The chain is bound by launches and by the host program, not by
+   arithmetic.** A step at either shape moves 64 tokens: one row of sequence 64,
+   because `BASE_BATCH` is 1, and the host program around those tokens costs tens
+   of milliseconds. The recorded T4 run of the chain is about 42 ms per step at
+   the `demo` shape (`docs/pipeline-plan.md` section 2). The largest device bound
+   in the table is 3.6 ms, so most of the step time is not device time at all.
+   Every family of the two `demo` rows reads `limit: launch` except the optimizer
+   row of the T4 one, which reads `memory`; the H100 `standard` row answers the
+   same way, launches everywhere but its optimizer row.
+2. **The one compute-bound row is the T4 at fp32, at the standard shape.** The
+   two fp32 GEMM rows carry 0.69 ms and 1.39 ms of the 3.6 ms, because a Turing
+   card at fp32 has no rate to spare for 512 hidden units; the rest of the step
+   is memory-bound work, the optimizer row and the norm-and-pointwise row. It
+   still leaves the step an order of magnitude below the host program, which is
+   why the chain records a step time and gates the two legs against each other
+   instead of claiming a throughput (gates G2 and G3 of
+   [pipeline-scaleup-plan.md](pipeline-scaleup-plan.md) section 8).
+3. **The bf16 precision does not move the step time.** The H100 `standard` bound
+   of 0.764 ms sits inside a step of tens of milliseconds, so a bf16 leg and an
+   fp32 leg of the same job cost the same host time. That is why the second leg
+   buys a second precision and a second architecture for the proof and not for a
+   speedup.
+
+The optimizer row of the `standard` reports reads `limit: memory`: 386 MB of
+optimizer state, 1.21 ms on a T4 at fp32 and 0.118 ms on an H100 at bf16, which
+is 318 GB/s and 3.26 TB/s against the 320 GB/s and 3.35 TB/s peaks of section 6.
+It is the memory-bound family section 7.1 predicts, and its 1.21 ms is the
+second largest term of the T4 step, after the backward GEMM.
+
 ## 8. The work-ratio check
 
 The benchmark report already carries two fields:
@@ -426,6 +477,7 @@ Checks 1 to 5 run in `//tests:performance_model_test`; check 3 also runs in
 | 5 The precision assignment | Implemented (`AssignMatrixPrecision`) |
 | 6 The device limit table | Implemented (fp8 rate and bandwidth in `DeviceProfile`) |
 | 7 The estimator | Implemented (`src/performance_model.cc`) |
+| 7.3 The two chain shapes | Four bounds printed by `tools/nanochat roofline`; the chain's own step time is unmeasured until row 9 of `pipeline-scaleup-plan.md` runs |
 | 8 The work-ratio check | Benchmark side only; the model rows carry the binding limit |
 | 9 The reference points | Reference data, not a computed output |
 | 13 Phases | M0 to M2 complete; M3 awaits a measurement |

@@ -2,8 +2,10 @@
 
 Status: accepted. Stage 1 is complete. Stage 2 is delivered for the C++ and
 CUDA surfaces. This document defines the precision policy for every host. One
-build has one compute type. The tree uses fp32 and bf16 only. It holds no fp16
-code.
+build has one compute type. The production builds use fp32 and bf16 only, and
+the tree holds no fp16 code. The fp8 tier has its own document
+([fp8-training.md](fp8-training.md)), it is opt-in through `--config=fp8`, and
+it computes in bf16.
 
 ## 1. Decision
 
@@ -210,11 +212,42 @@ Delivered:
 11. The simulator and the emulator. The simulated device reports
     `supports_bf16`, the emulator tests bf16 conversion, and the kernel
     emulator tolerance carries the bf16 storage granularity.
+12. The chain as the integration leg. `python/nanochat_cpp/pipeline.py` runs
+    base, SFT, RL, and eval on a bf16 build, and the Modal H100 leg of it runs
+    that chain on real Hopper silicon at `sm_90`. The paragraph of
+    [the integration leg](#the-integration-leg-the-chain-on-two-cards) below
+    states what that proves.
 
 Gate: `tools/nanochat build`, `tools/nanochat build --config=bf16`,
 `tools/nanochat test`, `tools/nanochat test --config=bf16`, and
 `tools/nanochat lint` pass. The compile gate passes for `a100`, `h100`, and
 `h200`. The fp32 build keeps every committed fp32 golden.
+
+#### The integration leg: the chain on two cards
+
+The chain is the tier's integration leg: it is the one place where a bf16 build
+runs a whole workflow, not a single gate. `python/nanochat_cpp/pipeline.py` runs
+base training, SFT, RL, and the in-process evaluation, and the Modal H100 leg of
+`tools/modal/app.py` runs that chain on a real Hopper card: the image builds at
+`bf16` for `sm_90`, and gate G1 of
+[pipeline-scaleup-plan.md](pipeline-scaleup-plan.md) section 8 reads three facts
+that have to agree: `host.precision` is `bf16`, `host.arch` is `sm_90`, and the
+delivered RL checkpoint records `bf16`.
+
+The T4 leg is the fp32 control. It runs the same job at fp32 on `sm_75`, so the
+two reports differ in precision and in nothing else that the job sets: gates G2
+and G3 compare the two base step times, the one against the other and the H100
+one against the roofline prediction. That pair is what a bf16 integration run
+means here. It is not a throughput claim: at 64 tokens per step both legs are
+bound by launches and by the host program, so the step times agree to within a
+smoke-check tolerance and neither says what the card can do
+([performance-model.md](performance-model.md) section 7.3).
+
+The startup hardware check also runs on the H100 leg, and it keys on the card
+and not on the build: under that bf16 build it casts through the shared fp8
+rounding header, runs the scaled fp8 GEMM cases, and runs the attention tile. So
+the leg proves the bf16 chain and the fp8 operators below it, and it proves
+nothing about the fp8 training graph ([fp8-training.md](fp8-training.md)).
 
 #### What the bf16 leg does not cover yet
 

@@ -36,6 +36,7 @@ detailed reference that the design points at.
 | [training-seam.md](training-seam.md) | The Python and C++ boundary for training: the seam rule, the current defects, the mesh driver, and the target interface |
 | [rl-notebook.md](rl-notebook.md) | Reinforcement learning in a notebook: the hand-rolled loop, the `nc.rl` worker bridge, and the open items |
 | [pipeline-plan.md](pipeline-plan.md) | The plan for one chain on three hosts: base, then SFT, then RL, with the six blockers and the host matrix |
+| [pipeline-scaleup-plan.md](pipeline-scaleup-plan.md) | The scale-up of that chain: the `standard` profile, the eval stage, the two Modal legs (T4 at fp32, H100 at bf16), gates G1 to G3, and the ten work rows |
 | [self-evolution.md](self-evolution.md) | The self-evolution loop: the goal intake, the stuck detector, the human escalation, the intervention dataset, the training round, and the Hub transport |
 | [python.md](python.md) | The single Python surface: in-process compute API, planning, chat evaluation, and the `tools/nanochat` toolchain |
 | [sandbox.md](sandbox.md) | Execution sandbox and host resource governance |

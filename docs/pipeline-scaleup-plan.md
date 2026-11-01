@@ -1,9 +1,14 @@
 # The pipeline scale-up plan: a bigger chain and two Modal legs
 
-Status: ready to execute. An oracle review corrected six defects in an earlier
-draft, and this version carries the corrections. The corrections are the eval
-batch, the eval count, the Modal function names, the build flags, the roofline
-target, and the hardware-check claim. Section 9 lists the work.
+Status: rows 0 to 8 have landed. Row 9, the first two-leg run on a real Hopper
+card, is still owed, so the G3 ratio band stays the wide `[1, 200]` and this
+document holds no measured step time for either leg. Section 9.1 records what
+landed and where it differs from the forecast below.
+
+An oracle review corrected six defects in an earlier draft, and this version
+carries the corrections. The corrections are the eval batch, the eval count, the
+Modal function names, the build flags, the roofline target, and the
+hardware-check claim. Section 9 lists the work.
 
 This plan extends [pipeline-plan.md](pipeline-plan.md), which delivers the chain
 itself: base training, supervised fine-tuning (SFT), then reinforcement learning
@@ -55,13 +60,22 @@ in the worktree `.sliceme/worktrees/campaign-feat--pipeline-plan`.
 | Device table | the `h100` row declares bf16 and fp8 | `backends/cuda/caps.json` |
 | Measured chain | about 42 ms per step on a T4, for the `demo` shape | section 14 |
 
+The table is the tree as this plan was written, not as it stands. Every row has
+since changed, and section 9.1 records what each one became: the fourth stage,
+the `standard` profile as the default, and the two legs over two images.
+
 Four facts come from `tools/nanochat roofline`:
 
 - The demo shape has a 0.366 ms step bound on a T4 at fp32.
 - The standard shape has a 3.600 ms step bound on a T4 at fp32.
 - The standard shape has a 0.764 ms step bound on an H100 at bf16.
-- Every row of those reports reads `limit: launch`. The chain is bound by
-  launches and by the host program, not by arithmetic.
+- The binding row of every report reads `limit: launch`, except the standard
+  shape on a T4 at fp32, whose binding row is the fp32 GEMM pair and reads
+  `compute`. The step is still bound by the host program, not by arithmetic:
+  the recorded T4 step is about 42 ms, an order of magnitude above the largest
+  device bound of the table. Section 14 and
+  [performance-model.md](performance-model.md) section 7.3 carry the per-row
+  limits.
 
 ## 3. The three traps
 
@@ -245,9 +259,10 @@ ratio in section 14. The row then narrows the band to twice the measured value.
 
 The report records two numbers, and no gate reads them:
 
-- MFU. At 256 tokens per step, the device bound is about 1 ms inside a step of
-  tens of milliseconds. MFU therefore reads near 0.01 percent. The step time of
-  section 14 is an assumption until row 9 measures it.
+- MFU. At 64 tokens per step, one row of sequence 64 at `BASE_BATCH` 1, the
+  device bound is about 1 ms inside a step of tens of milliseconds. MFU
+  therefore reads near 0.01 percent. The step time of section 14 is an
+  assumption until row 9 measures it.
 - The cross-leg speed ratio. The chain is bound by launches at this shape, so a
   ratio below one is correct and a ratio above one is also correct.
 
@@ -261,11 +276,21 @@ attention cases.
 Each row ends with `tools/nanochat check` green. Rows 1 and 2 are independent,
 and both can land before the chain branch.
 
-Row 0 is not part of the change. The lint gate fails on the branch today, with
-448 non-ASCII characters in 20 tracked C++ files. The characters are em dashes
-in comments, and `tools/nanochat lint` reports them. The merge gate of
-`AGENTS.md` section 5.5 runs that command, so a merge needs row 0 first. Row 0
-changes comments only and moves no arithmetic.
+Row 0 is not part of the change. The lint gate failed on the branch when this
+plan was written, and the draft counted 448 non-ASCII characters in 20 tracked
+C++ files. Row 0 landed and the count was wrong by two orders of magnitude: the
+tree held **nine** em dashes in **four** files, `backends/cuda/caps_names.h`,
+`backends/cuda/fused_override_trace_test.cc`,
+`backends/cuda/fused_overrides.cc`, and `backends/cuda/row_reduce.cu`. The row 0
+commit is how a reader checks it: it changes 25 lines in and 23 out, adds no
+non-ASCII character, and removes nine. The non-ASCII check of
+`tools/nanochat lint` is clean on the tracked C++ tree today, and `AGENTS.md`
+section 5.5 runs that command, so row 0's part of the merge gate is clear. The
+command as a whole is not green on this host: its second check runs
+`clang-format --dry-run --Werror` over the same files and reports differences in
+16 C++ files outside `docs/`, none of them touched by this plan. That is a
+host-tool finding (the workstation carries clang-format 23) and not a character
+in a comment. Row 0 changed comments only and moved no arithmetic.
 
 | # | Work | Files | Gate | Size |
 |---|---|---|---|---|
@@ -282,6 +307,33 @@ changes comments only and moves no arithmetic.
 
 Row 1 carries one unproven step. This host has no `sm_90` card, so the row proves
 the build only. Row 9 is the first run on a real H100.
+
+### 9.1 What landed, and where it differs from this document
+
+Rows 0 to 8 are in the tree. Four things a reader should not re-measure:
+
+- **Row 0 found nine non-ASCII characters in four files, not 448 in twenty.**
+  The paragraph above records the files. The tracked C++ tree is ASCII today,
+  and the non-ASCII check of `tools/nanochat lint` is the gate that says so. The
+  forecast was written from a branch whose comments had accumulated em dashes;
+  the arithmetic in the tree was never affected.
+- **Row 9 is still owed, and it stays manual.** Nothing in rows 0 to 8 runs
+  either leg of the two-leg path on a card: row 1 built `hopper` for `sm_90`
+  without a Hopper card to run it on, and row 6's tests exercise the gate
+  functions on recorded documents. So the measured step time of section 14 is
+  still an assumption, the MFU of section 8 still reads near 0.01 percent
+  without a run, and the G3 ratio band is still `[1, 200]`.
+- **The roofline limit column is not uniformly `launch`.** Section 14 printed
+  `launch` for all four rows. The tool prints `launch` for the binding row of
+  three of them, and the standard shape on a T4 at fp32 binds on `compute`: two
+  fp32 GEMM rows carry 2.08 ms of its 3.6 ms, and the memory-bound optimizer row
+  carries 1.21 ms. Section 14 and [performance-model.md](performance-model.md)
+  section 7.3 hold the corrected label and the per-row numbers.
+- **A step moves 64 tokens, not 256.** `BASE_BATCH` is 1 and `seq_len` is 64 at
+  both profiles, so the batch of one step is one row of 64 tokens, and
+  `pipeline.py` reads `tokens_per_sec` from exactly that product. The device
+  bound of section 14 is the bound of those 64 tokens, and the MFU of section 8
+  is the MFU of those 64 tokens.
 
 ## 10. New assertions
 
@@ -336,8 +388,11 @@ A13 guards the decision in section 6.
   finding about the card or the build, not a defect of the chain.
 - A bf16 leg on an H100 proves the Hopper path and the fp8 operators. It does not
   prove the fp8 training graph.
-- The merge gate fails on the branch today, for reasons that predate this plan.
-  Row 0 clears it, and row 0 touches comments only.
+- The merge gate failed on the branch when this plan was written, for reasons
+  that predate it. Row 0 clears the non-ASCII half of it and touches comments
+  only. The `clang-format` half still reports differences in 16 C++ files on this
+  workstation, which its clang-format 23 explains and no row of this plan owns;
+  section 9.1 records the count.
 
 ## 13. Non-goals
 
@@ -363,8 +418,15 @@ tools/nanochat roofline --device h100 --precision bf16 \
 |---|---|---|---|---|
 | `demo` 2/64 | T4 | fp32 | 0.366 ms | launch |
 | `demo` 2/64 | H100 | bf16 | 0.173 ms | launch |
-| `standard` 8/512 | T4 | fp32 | 3.600 ms | launch |
+| `standard` 8/512 | T4 | fp32 | 3.600 ms | compute |
 | `standard` 8/512 | H100 | bf16 | 0.764 ms | launch |
+
+All four bounds reproduce on the tree as it stands, and the `Limit` column is the
+limit of the binding row. The standard shape on a T4 at fp32 is the one row whose
+binding row is arithmetic and not a launch: its two fp32 GEMM rows carry 0.69 ms
+and 1.39 ms, and its memory-bound optimizer row carries a further 1.21 ms. Even
+there the bound is an order of magnitude under the measured step, which is why
+the chain's own numbers of gate G3 read the H100 row.
 
 The measured chain of section 2 comes from the two-host harness of
 `pipeline-plan.md` section 2. That run did 205 steps in 8.60 seconds on a T4,
