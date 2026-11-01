@@ -5,14 +5,14 @@
 // first, each `count` elements wide with an element `stride`, so the descriptor
 // covers both shapes its three consumers need:
 //
-//   * RmsNorm   — one contiguous row: `count` = row width, `stride` = 1,
-//                 `n_out` = rows.
-//   * QkPrep    — a `head_dim` slice of a wider, densely packed row:
-//                 `count` = head_dim, `stride` = 1, `n_out` = rows * heads
-//                 (the packed heads make the segments consecutive).
-//   * Classifier — one row of the vocabulary slice with an offset:
-//                 `count` = vocab slice, `stride` = 1, `offset` = the slice's
-//                 first column, `n_out` = rows.
+//   * RmsNorm   -- one contiguous row: `count` = row width, `stride` = 1,
+//                  `n_out` = rows.
+//   * QkPrep    -- a `head_dim` slice of a wider, densely packed row:
+//                  `count` = head_dim, `stride` = 1, `n_out` = rows * heads
+//                  (the packed heads make the segments consecutive).
+//   * Classifier -- one row of the vocabulary slice with an offset:
+//                  `count` = vocab slice, `stride` = 1, `offset` = the slice's
+//                  first column, `n_out` = rows.
 //
 // A non-unit `stride` is the interleaved case the descriptor also allows, and
 // it is the only thing that makes the two shapes above different code.

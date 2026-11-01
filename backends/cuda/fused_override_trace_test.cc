@@ -9,8 +9,9 @@
 // runs the composition's arithmetic on the host, and it compares the two traces
 // element by element. A family may not be promoted to an override until this
 // comparison holds, and a fused family may not be *removed* until the
-// composition's backward matches the fused backward's trace — which is the gate
-// section 7.6 requires, written down as a test rather than as an intention.
+// composition's backward matches the fused backward's trace -- which is the
+// gate section 7.6 requires, written down as a test rather than as an
+// intention.
 //
 // The trace of a family is three things, not one, because a backward that reads
 // a saved slot can be right about the gradients while the slot it saved is
@@ -401,8 +402,9 @@ void TraceValueGate(const char* name) {
 //
 // Composition: `SpanReduce` across several spans. There is no fused *override*
 // bit for it in vocabulary 1 (`spec/capability_bits.md` section 5), so nothing
-// is registered — but the trace comparison lives here all the same, so that the
-// day the family is removed the composition's answer is already the pinned one.
+// is registered -- but the trace comparison lives here all the same, so that
+// the day the family is removed the composition's answer is already the pinned
+// one.
 void TraceGradNorm(const char* name) {
   Rng rng;
   const std::vector<std::vector<float>> spans = {

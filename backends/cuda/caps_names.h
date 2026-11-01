@@ -8,8 +8,8 @@
 // `include/nanochat/tensor.h` is `kFeature` + upper camel case of the same
 // name. The two lists are written by different owners, and a one-character
 // difference is a silent lie: the header's bit is never set and nobody
-// notices. This file therefore holds the mapping as *data* — one row per bit,
-// both spellings on the row — so `backends/cuda/caps.json` can be checked
+// notices. This file therefore holds the mapping as *data* -- one row per bit,
+// both spellings on the row -- so `backends/cuda/caps.json` can be checked
 // against the header instead of trusted, and so an unmapped name fails loudly
 // instead of being dropped.
 //
