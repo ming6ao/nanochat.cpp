@@ -406,8 +406,18 @@ RuntimeHandle = ctypes.c_void_p
 CheckpointHandle = ctypes.c_void_p
 
 
+#: The kind tag of a tokenizer handle. The mint site and the check read
+#: this one name, so a typo cannot mint a handle no consumer accepts.
+KIND_TOKENIZER = "tokenizer"
+KIND_MODEL = "model"
+KIND_OPTIMIZER = "optimizer"
+KIND_LOADER = "loader"
+KIND_MESH = "mesh"
+KIND_RUNTIME = "runtime"
+
+
 class Handle(int):
-    """A C handle that only this module can mint, tagged with its kind.
+    """A C handle that `_core` mints, tagged with its kind.
 
     An opaque pointer is an ``int`` in Python, so every int looked like a
     handle: a path string reached C as a character pointer and the encoder
@@ -418,6 +428,11 @@ class Handle(int):
     ``c_void_p`` argument already accepts an int. ``kind`` is checked by the
     constructor that takes a handle from a caller, and ``owner`` makes a second
     claim a failure instead of a double free.
+
+    The tag is a guard against pointer-shaped mistakes, not a capability
+    boundary: ``_core`` is importable, so a forged ``Handle(42, "tokenizer")``
+    still passes the tag check. It cannot prevent a caller who reaches for the
+    private module on purpose; it prevents the accident.
     """
 
     def __new__(cls, raw, kind: str):
@@ -426,6 +441,20 @@ class Handle(int):
         handle.owner = None
         handle.freed = False
         return handle
+
+    def __repr__(self) -> str:
+        # The raw address stays out of logs on purpose: it is an ASLR leak, and
+        # the tag and the owner are what a reader needs.
+        state = "freed" if self.freed else (self.owner or "unowned")
+        return f"Handle(kind={self.kind!r}, {state})"
+
+    def __copy__(self) -> "Handle":
+        # A copy must share one `freed` flag, or two Python objects would free
+        # the same address.
+        return self
+
+    def __deepcopy__(self, memo) -> "Handle":
+        return self
 
     def claim(self, owner: str) -> "Handle":
         """Take ownership. A second claim, or a freed handle, is a failure.
@@ -445,6 +474,8 @@ class Handle(int):
 
     def detach(self) -> int:
         """Give up the raw pointer, so a second free cannot reach it."""
+        if self.freed:
+            raise TypeError(f"this {self.kind} handle was already freed")
         raw = int(self)
         self.owner = None
         self.freed = True

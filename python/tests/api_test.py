@@ -10,6 +10,7 @@ docs/python.md section 11.
 from __future__ import annotations
 
 import array
+import copy
 import sys
 import unittest
 from pathlib import Path
@@ -189,10 +190,54 @@ class ApiTest(unittest.TestCase):
     def test_a_closed_tokenizer_raises_instead_of_calling_c(self) -> None:
         # A freed handle must not reach C: the address may be reused.
         tokenizer = Tokenizer.load(resolve(TOKENIZER))
-        tokenizer.__del__()
-        with self.assertRaises(nc.NanochatError) as caught:
+        tokenizer.close()
+        for call in (lambda: tokenizer.encode("hi"),
+                     lambda: tokenizer.decode([1, 2]),
+                     lambda: tokenizer.handle):
+            with self.subTest(call=call):
+                with self.assertRaises(ValueError) as caught:
+                    call()
+                self.assertIn("closed", str(caught.exception))
+
+    def test_close_is_safe_twice(self) -> None:
+        tokenizer = Tokenizer.load(resolve(TOKENIZER))
+        tokenizer.close()
+        tokenizer.close()
+        self.assertIsNone(tokenizer._handle)
+
+    def test_a_shallow_copy_shares_one_freed_flag(self) -> None:
+        # A copy holds the same Handle, so the second close must not free the
+        # address again, and the copy must not look alive after the first one.
+        tokenizer = Tokenizer.load(resolve(TOKENIZER))
+        twin = copy.copy(tokenizer)
+        self.assertIs(twin._handle, tokenizer._handle)
+        twin.close()
+        tokenizer.close()  # the second close frees nothing
+        self.assertEqual(tokenizer._handle, None)
+        with self.assertRaises(ValueError):
             tokenizer.encode("hi")
-        self.assertIn("closed", str(caught.exception))
+
+    def test_a_deep_copy_is_refused(self) -> None:
+        # A deep copy would pickle the ctypes library and could hand a second
+        # object an independent, dead pointer. Refusing is the safe answer.
+        tokenizer = Tokenizer.load(resolve(TOKENIZER))
+        with self.assertRaises(TypeError) as caught:
+            copy.deepcopy(tokenizer)
+        self.assertIn("cannot be deep-copied", str(caught.exception))
+
+    def test_a_freed_handle_is_refused(self) -> None:
+        tokenizer = Tokenizer.load(resolve(TOKENIZER))
+        handle = tokenizer._handle
+        tokenizer.close()
+        with self.assertRaises(TypeError) as caught:
+            Tokenizer(handle)
+        self.assertIn("freed", str(caught.exception))
+
+    def test_the_context_manager_closes(self) -> None:
+        with Tokenizer.load(resolve(TOKENIZER)) as tokenizer:
+            self.assertTrue(tokenizer.encode("hi"))
+        with self.assertRaises(ValueError):
+            tokenizer.encode("hi")
 
     def test_trainer_and_evaluator_match_fixture(self) -> None:
         records = self.records

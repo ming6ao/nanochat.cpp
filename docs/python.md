@@ -46,7 +46,7 @@ python/nanochat_cpp/
 
 ## 3. Compute layer
 
-The compute layer does not change. It holds `Config`, `Tokenizer`, `Model`,
+The compute layer holds `Config`, `Tokenizer`, `Model`,
 `Optimizer`, `TokenData`, `Trainer`, `Evaluator`, `no_grad`, and `build`. It
 loads the shared library with `ctypes`. It never imports `torch`.
 
@@ -212,6 +212,26 @@ Both facades resolve their child with `_build.stage_binary`, in the order of
 section 3.2, so a tree checkout, a runfiles tree, and a future wheel are one
 rule. `binary=` and `worker=` override the resolver, and `toolchain=` injects the
 orchestration object, so a test pins the argv with a fake.
+
+### 3.5 Tokenizer handles
+
+A tokenizer is a C resource, and the Python object owns one handle. Two doors
+produce it: `nanochat_cpp.tokenizer(path)` and `Tokenizer.load(path)`. Both
+return a `Tokenizer` that closes itself, and both are fine to use, because
+`pipeline` hands out a tokenizer as a path.
+
+The constructor is not a door. It accepts only the handle that
+`nanochat_cpp._core` mints, because an opaque pointer is an `int` in Python and
+`ctypes` converts a string for a `c_void_p` argument without complaint. A path
+in that position reached the encoder as a character pointer and killed the
+process with `SIGSEGV`. A plain integer is worse, because two objects would own
+one pointer and free it twice. A path, an integer, another object's handle, and
+a freed handle all raise `TypeError`, and the message names the door to use.
+
+`close()` releases the tokenizer and is safe to call twice. `Tokenizer` is also
+a context manager. `encode`, `decode`, and the `handle` property raise
+`ValueError` after a close, before any C call runs, because a freed address may
+already belong to another object.
 
 ## 4. Planning layer
 
@@ -651,7 +671,7 @@ Steps 1 to 4 add the replacement. Steps 6 and 7 remove the old surface.
 | `python/tests/build_test.py` | `_build.stage_binary` over a fake tree, and the one `build_stages` command line. |
 | `python/tests/pipeline_test.py` | The base, SFT, and RL chain over the `demo` profile: assertions A1 to A9 of `docs/pipeline-plan.md` section 7. |
 | `python/tests/toolchain_test.py` | The argv for every command, against a fake entry script. |
-| `python/tests/api_test.py` | Unchanged. |
+| `python/tests/api_test.py` | The tokenizer handle guard, the two doors, and the closed-tokenizer error. |
 | `python/tests/core_test.py` | Unchanged. |
 
 ### 11.1 Coverage from the removed self-test

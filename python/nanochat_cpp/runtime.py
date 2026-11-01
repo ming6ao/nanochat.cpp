@@ -190,7 +190,7 @@ class MeshRuntime:
         self._mesh_handle = _core.check_handle(
             library,
             library.nanochat_mesh_create(indices_buffer, len(indices)),
-            "nanochat_mesh_create", "mesh")
+            "nanochat_mesh_create", _core.KIND_MESH)
         optim_pointer = (
             ctypes.byref(core_optimizer)
             if core_optimizer is not None
@@ -206,7 +206,8 @@ class MeshRuntime:
             int(seed),
         )
         self._handle = _core.check_handle(
-            library, self._handle, "nanochat_runtime_create", "runtime")
+            library, self._handle, "nanochat_runtime_create",
+            _core.KIND_RUNTIME)
         self._world_size = int(
             library.nanochat_runtime_world_size(self._handle))
 
@@ -573,7 +574,7 @@ class MeshTrainConfig:
         self._keepalive.append(indices)
         self._mesh = _core.check_handle(
             self._lib, self._lib.nanochat_mesh_create(indices, count),
-            "nanochat_mesh_create", "mesh")
+            "nanochat_mesh_create", _core.KIND_MESH)
         core.mesh = self._mesh
         data = job["data"]
         self._set_string(core.data, "tokenizer_path", data["tokenizer_path"])
