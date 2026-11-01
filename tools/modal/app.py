@@ -141,8 +141,34 @@ COMMIT_SECONDS = 10
 #: The longest run the deployment allows, in seconds.
 TIMEOUT_SECONDS = 8 * 60 * 60
 
-#: The local repository this file is deployed from.
-REPO = Path(__file__).resolve().parents[2]
+#: The local repository this file is deployed from. `modal run` mounts the
+#: entry module at `/root/app.py`, so `Path(__file__).parents[2]` raised
+#: `IndexError` in the container and the app never started. Resolve the tree
+#: instead of assuming where this file sits (`docs/host-portability.md` row 10).
+def _repo_root() -> Path:
+    """The tree this file belongs to, on the host and inside the image.
+
+    Three sources, in order: `NANOCHAT_REPO`, the nearest ancestor that holds
+    `MODULE.bazel` (the host layout, `tools/modal/app.py`), and the path the
+    image copies the tree to. A layout none of them explain fails here with a
+    message, not with an `IndexError` from `Path.parents`.
+    """
+    override = os.environ.get("NANOCHAT_REPO")
+    if override:
+        return Path(override).expanduser().resolve()
+    here = Path(__file__).resolve()
+    for candidate in here.parents:
+        if (candidate / "MODULE.bazel").is_file():
+            return candidate
+    image_tree = Path(REPO_ROOT)
+    if image_tree.is_dir():
+        return image_tree
+    raise RuntimeError(
+        f"cannot find the repository: no MODULE.bazel above {here} and "
+        f"{REPO_ROOT} is not a directory; set NANOCHAT_REPO")
+
+
+REPO = _repo_root()
 
 
 def gpu_request(kind=GPU_TYPE, count=GPU_COUNT) -> str:
