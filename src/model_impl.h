@@ -105,11 +105,11 @@ class TrainModel final : public Model {
 
   Param& AddParam(const std::string& name, std::int64_t count, int rows,
                   int cols);
-  // True when `layer` carries the ResFormer value embedding: the block list says
-  // whether the block consumes one (the value-gated residual), and the derived
-  // `Config` says which layers carry the table. Two questions, one answer each,
-  // so a block that declares the plain residual has no value embedding
-  // regardless of the table.
+  // True when `layer` carries the ResFormer value embedding: the block list
+  // says whether the block consumes one (the value-gated residual), and the
+  // derived `Config` says which layers carry the table. Two questions, one
+  // answer each, so a block that declares the plain residual has no value
+  // embedding regardless of the table.
   bool BlockHasValueEmbedding(int layer) const;
   // The left extent of `layer`'s attention window, from the block's declared
   // mask kind: a sliding-window block gets the derived short window and a

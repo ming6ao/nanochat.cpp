@@ -169,12 +169,13 @@ void CopyCompute(const T* src, std::int64_t count, std::vector<float>* out) {
 }
 
 // This test is also the composition trace gate
-// (docs/model-and-device-bringup.md section 7.4): the graph it drives runs every
-// composition `src/ops.cc` defines - the norm, the qk prep, the value gate, the
-// relu^2 MLP, attention, and the classifier - and the comparison below is against
-// the committed fixture at the bounds `models/nanochat-default/tolerances.json`
-// records for this file. A composition whose trace left those bounds fails here,
-// which is the section 7.6 condition for touching either path.
+// (docs/model-and-device-bringup.md section 7.4): the graph it drives runs
+// every composition `src/ops.cc` defines - the norm, the qk prep, the value
+// gate, the relu^2 MLP, attention, and the classifier - and the comparison
+// below is against the committed fixture at the bounds
+// `models/nanochat-default/tolerances.json` records for this file. A
+// composition whose trace left those bounds fails here, which is the
+// section 7.6 condition for touching either path.
 void RunChecks(const Fixture& fixture) {
   const int batch = static_cast<int>(fixture.Get("config/batch").scalar_int());
   const int seq = static_cast<int>(fixture.Get("config/seq").scalar_int());
@@ -185,8 +186,8 @@ void RunChecks(const Fixture& fixture) {
 
   const Config config = ConfigFromFixture(fixture);
   // The historical `Create(config)` entry point: the caller's `Config` is the
-  // authority, so the block list is derived from it and no plan is read or built
-  // (a plan is the spec selector's property). The graph still runs the
+  // authority, so the block list is derived from it and no plan is read or
+  // built (a plan is the spec selector's property). The graph still runs the
   // composition tier for every piece.
   std::unique_ptr<Model> model = Model::Create(config);
   auto* impl = static_cast<TrainModel*>(model.get());

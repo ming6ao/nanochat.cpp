@@ -3,10 +3,10 @@
 // The plan is where a model and a device meet, and it is the *only* place they
 // meet (`spec/decisions.md` D-005). It is pure: it reads the `ModelSpec`, the
 // graph kind, the device's capability answer and the backend's registration
-// table, and it touches nothing else. It allocates no device memory, launches no
-// kernel, warms no cache, and mutates no global state, so a bring-up check and a
-// test can build a plan for a device that does not exist yet, and two calls with
-// equal inputs return the same plan.
+// table, and it touches nothing else. It allocates no device memory, launches
+// no kernel, warms no cache, and mutates no global state, so a bring-up check
+// and a test can build a plan for a device that does not exist yet, and two
+// calls with equal inputs return the same plan.
 //
 // Three rules shape every decision below.
 //
@@ -117,9 +117,8 @@ bool GraphRunsComposition(GraphKind graph, CompositionKind composition,
 // composition is built over the primitives, so an incomplete tier places
 // nothing. The rest are the semantic bits the composition's arithmetic implies.
 std::uint64_t RequiredBits(CompositionKind composition, const ModelSpec& spec) {
-  const std::uint64_t tier = spec.policy.require_primitive_tier
-                                 ? kFeaturePrimitiveTierComplete
-                                 : 0;
+  const std::uint64_t tier =
+      spec.policy.require_primitive_tier ? kFeaturePrimitiveTierComplete : 0;
   switch (composition) {
     case CompositionKind::kQkPrep:
       return tier | kFeatureRope;
@@ -200,11 +199,16 @@ std::string RejectionText(const ModelSpec& spec, const Caps& device,
 
 const char* GraphKindName(GraphKind kind) {
   switch (kind) {
-    case GraphKind::kTrain: return "train";
-    case GraphKind::kPrefill: return "prefill";
-    case GraphKind::kDecode: return "decode";
-    case GraphKind::kEval: return "eval";
-    case GraphKind::kGenerate: return "generate";
+    case GraphKind::kTrain:
+      return "train";
+    case GraphKind::kPrefill:
+      return "prefill";
+    case GraphKind::kDecode:
+      return "decode";
+    case GraphKind::kEval:
+      return "eval";
+    case GraphKind::kGenerate:
+      return "generate";
   }
   return "unknown";
 }
@@ -297,9 +301,9 @@ Plan BuildPlanWithDevice(const PlanRequest& request, const Caps& device,
     choice.fused = false;
 
     // The device bits this composition's arithmetic needs. The tier is implied
-    // by the requires check above when the policy asks for it; the semantic bits
-    // are repeated here so a per-graph composition (the optimizer entries) is
-    // placed or reported on its own terms.
+    // by the requires check above when the policy asks for it; the semantic
+    // bits are repeated here so a per-graph composition (the optimizer entries)
+    // is placed or reported on its own terms.
     const std::uint64_t need = RequiredBits(composition, spec);
     const std::uint64_t need_missing = need & ~mask;
     if (need_missing != 0) {
@@ -307,13 +311,15 @@ Plan BuildPlanWithDevice(const PlanRequest& request, const Caps& device,
       gap.composition = composition;
       gap.reason = std::string("\"") + row.name +
                    "\" is not placed: this device does not declare " +
-                   FormatCapabilityList(need_missing) + ", and the composition "
+                   FormatCapabilityList(need_missing) +
+                   ", and the composition "
                    "cannot be built over a primitive the device lacks";
       for (int i = 0; i < kCapabilityNameCount; ++i) {
         const std::uint64_t bit = kCapabilityNames[i].bit;
         if ((need_missing & bit) == 0) continue;
         const char* consequence = CapabilityConsequence(bit);
-        if (consequence != nullptr) gap.reason += std::string("; ") + consequence;
+        if (consequence != nullptr)
+          gap.reason += std::string("; ") + consequence;
       }
       plan.gaps.push_back(gap);
       continue;
@@ -332,29 +338,28 @@ Plan BuildPlanWithDevice(const PlanRequest& request, const Caps& device,
       if (!spec.policy.allow_fused_overrides) {
         DeclinedImpl declined;
         declined.implementation = registration->family;
-        declined.reason = "the spec's policy.allow_fused_overrides is false and "
-                          "an implementation choice is not a semantic";
+        declined.reason =
+            "the spec's policy.allow_fused_overrides is false and "
+            "an implementation choice is not a semantic";
         choice.declined.push_back(declined);
       } else if (registration->capability == 0 ||
                  (registration->capability & mask) !=
                      registration->capability) {
         DeclinedImpl declined;
         declined.implementation = registration->family;
-        declined.reason =
-            std::string("the device does not declare ") +
-            FormatCapabilityList(registration->capability) +
-            ", so this fused family is not offered here";
+        declined.reason = std::string("the device does not declare ") +
+                          FormatCapabilityList(registration->capability) +
+                          ", so this fused family is not offered here";
         choice.declined.push_back(declined);
       } else {
         // The family wins; the composition is the fallback that lost because a
         // faster implementation of the same meaning is available.
         DeclinedImpl declined;
         declined.implementation = kCompositionImplementation;
-        declined.reason =
-            std::string("the device declares ") +
-            FormatCapabilityList(registration->capability) +
-            " and the fused family \"" + registration->family +
-            "\" implements the same composition faster";
+        declined.reason = std::string("the device declares ") +
+                          FormatCapabilityList(registration->capability) +
+                          " and the fused family \"" + registration->family +
+                          "\" implements the same composition faster";
         choice.declined.push_back(declined);
         choice.implementation = registration->family;
         choice.fused = true;
@@ -391,9 +396,9 @@ Plan BuildPlanWithDevice(const PlanRequest& request, const Caps& device,
 // - the reference CPU backend today - defines nothing, which would leave the
 // symbol undefined for every host binary that links the workflow. This weak
 // definition is that answer: a build that links a backend's strong definition
-// uses it instead, and a build that does not reports "no fused family", which is
-// exactly what "compiles and links with no override code at all" means in the
-// header comment.
+// uses it instead, and a build that does not reports "no fused family", which
+// is exactly what "compiles and links with no override code at all" means in
+// the header comment.
 #if defined(__GNUC__) || defined(__clang__)
 __attribute__((weak))
 #endif

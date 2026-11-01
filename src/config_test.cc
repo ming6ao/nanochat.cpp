@@ -103,14 +103,13 @@ void CheckInvalidMetadata() {
   ExpectInvalid(config, "window_pattern can contain only");
 }
 
-
 // ---------------------------------------------------------------------------
 // The spec reader and the derivation (model-and-device-bringup section 8, and
-// the P2 gate of section 16): the first model's spec must derive exactly today's
-// `Config`, field by field, with no numeric change. This one equality is the
-// whole migration cost of the first model - a spec that derived one field
-// differently would be a second definition of the model, and the oracle fixture
-// would be comparing against two.
+// the P2 gate of section 16): the first model's spec must derive exactly
+// today's `Config`, field by field, with no numeric change. This one equality
+// is the whole migration cost of the first model - a spec that derived one
+// field differently would be a second definition of the model, and the oracle
+// fixture would be comparing against two.
 // ---------------------------------------------------------------------------
 
 // The spec's path, from the Bazel runfiles first and the source tree second, so
@@ -152,8 +151,7 @@ void WriteTemp(const std::string& path, const std::string& text) {
 }
 
 void CheckSpecDerivesTodaysConfig() {
-  const std::string path =
-      LocateSpec("models/nanochat-default/spec.json");
+  const std::string path = LocateSpec("models/nanochat-default/spec.json");
   if (path.empty()) {
     Fail("models/nanochat-default/spec.json is not reachable");
     return;
@@ -204,8 +202,8 @@ void CheckSpecDerivesTodaysConfig() {
              today.window_left(today.num_layers - 1));
   expect("has_value_embedding() at layer 1",
          derived.has_value_embedding(1) == today.has_value_embedding(1));
-  expect("the block count", spec.blocks.size() ==
-                                 static_cast<std::size_t>(today.num_layers));
+  expect("the block count",
+         spec.blocks.size() == static_cast<std::size_t>(today.num_layers));
 }
 
 void CheckReaderRefusesWhatItDoesNotImplement() {
@@ -222,7 +220,7 @@ void CheckReaderRefusesWhatItDoesNotImplement() {
       SpecWithEdit(path, "\"spec_version\": 1", "\"spec_version\": 2");
   WriteTemp("/tmp/nanochat_spec_version.json", versioned);
   if (nanochat::ParseModelSpec("/tmp/nanochat_spec_version.json", &spec,
-                              &error)) {
+                               &error)) {
     Fail("the reader accepted an unknown spec_version");
   } else if (error.find("spec_version") == std::string::npos ||
              error.find("2") == std::string::npos) {
@@ -261,10 +259,10 @@ void CheckReaderRefusesWhatItDoesNotImplement() {
 // The composition path is what runs on a device whose declaration offers no
 // override bit. The reference backend's `caps.json` declares none on purpose
 // (`backends/cpu/caps.json`: "with no fused override declared, the planner
-// resolves every composition to the composition path"), so a plan built from the
-// live capability answer is the check: every composition must resolve to the
-// composition tier, which is the definition of the semantics, and no decision may
-// claim a fused family.
+// resolves every composition to the composition path"), so a plan built from
+// the live capability answer is the check: every composition must resolve to
+// the composition tier, which is the definition of the semantics, and no
+// decision may claim a fused family.
 void CheckPlanRunsTheCompositionPath() {
   const std::string path = LocateSpec("models/nanochat-default/spec.json");
   if (path.empty()) {

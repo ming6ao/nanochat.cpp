@@ -12,10 +12,10 @@
 // `spec/capability_bits.md` section 2 states the naming rule: the vocabulary
 // name is the string a `caps.json` and a model's `requires` carry, and the C++
 // constant lives in `include/nanochat/tensor.h`. A backend owns its own copy of
-// the mapping (`backends/<name>/caps_names.h`, backend-internal, checked by that
-// backend's caps test). This table is the copy the *workflow* needs, and it
-// cannot borrow one from a backend: `src/` compiles against either backend, so
-// including `backends/cuda/caps_names.h` would point the workflow at one of
+// the mapping (`backends/<name>/caps_names.h`, backend-internal, checked by
+// that backend's caps test). This table is the copy the *workflow* needs, and
+// it cannot borrow one from a backend: `src/` compiles against either backend,
+// so including `backends/cuda/caps_names.h` would point the workflow at one of
 // them and would break the backend-selection boundary in `nanochat.bzl`.
 //
 // The two consumers are the ones that read a *string* rather than a constant:
@@ -36,9 +36,9 @@
 namespace nanochat {
 
 struct CapabilityNameEntry {
-  const char* name;         // the vocabulary spelling, verbatim
-  std::uint64_t bit;        // the kFeature* constant
-  const char* constant;     // the header spelling, for diagnostics only
+  const char* name;      // the vocabulary spelling, verbatim
+  std::uint64_t bit;     // the kFeature* constant
+  const char* constant;  // the header spelling, for diagnostics only
   // The consequence of the model requiring this bit on a device that does not
   // declare it, in the model's own terms (`spec/capability_bits.md` section 4).
   // A rejection names the missing bit and this sentence, and never says

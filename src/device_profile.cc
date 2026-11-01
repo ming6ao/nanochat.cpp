@@ -48,8 +48,8 @@ namespace nanochat {
 namespace {
 
 // The backends whose declarations are read. A new backend adds one entry here
-// and one file label to this target's `data` in `src/BUILD.bazel`; a new *device*
-// adds nothing but a `devices[]` entry in a caps file.
+// and one file label to this target's `data` in `src/BUILD.bazel`; a new
+// *device* adds nothing but a `devices[]` entry in a caps file.
 constexpr const char* kBackendNames[] = {"cpu", "cuda"};
 constexpr int kBackendCount =
     static_cast<int>(sizeof(kBackendNames) / sizeof(kBackendNames[0]));
@@ -85,19 +85,21 @@ bool FileExists(const std::string& path) {
 // The declaration's path, from the Bazel runfiles first and from the source
 // tree second, so a simulated run and a test agree on the bytes.
 std::string LocateCaps(const char* backend) {
-  const std::string relative = std::string("backends/") + backend + "/caps.json";
+  const std::string relative =
+      std::string("backends/") + backend + "/caps.json";
   std::vector<std::string> candidates;
   if (const char* src_dir = std::getenv("TEST_SRCDIR")) {
     if (const char* workspace = std::getenv("TEST_WORKSPACE")) {
-      candidates.push_back(std::string(src_dir) + "/" + workspace + "/" + relative);
+      candidates.push_back(std::string(src_dir) + "/" + workspace + "/" +
+                           relative);
     }
     candidates.push_back(std::string(src_dir) + "/_main/" + relative);
   }
   candidates.push_back(relative);
-  // Walk up from the working directory as well, because a binary launched from a
-  // subdirectory (`bazel-bin`, a checkpoint directory) still has the tree above
-  // it. The search is a path lookup, not a second source of truth: the first file
-  // that exists is the declaration.
+  // Walk up from the working directory as well, because a binary launched from
+  // a subdirectory (`bazel-bin`, a checkpoint directory) still has the tree
+  // above it. The search is a path lookup, not a second source of truth: the
+  // first file that exists is the declaration.
   std::string prefix;
   for (int level = 0; level < 4; ++level) {
     prefix += "../";
@@ -194,13 +196,17 @@ void ReadDeclaration(const char* backend, std::vector<DeclaredDevice>* out) {
       profile.total_memory_bytes = static_cast<std::size_t>(memory);
     }
     bool flag = false;
-    if (WantBool(entry, "has_tensor_cores", &flag)) profile.has_tensor_cores = flag;
+    if (WantBool(entry, "has_tensor_cores", &flag))
+      profile.has_tensor_cores = flag;
     if (WantBool(entry, "supports_bf16", &flag)) profile.supports_bf16 = flag;
     if (WantBool(entry, "supports_fp8", &flag)) profile.supports_fp8 = flag;
     double rate = 0.0;
-    if (WantNumber(entry, "peak_fp32_flops", &rate)) profile.peak_fp32_flops = rate;
-    if (WantNumber(entry, "peak_bf16_flops", &rate)) profile.peak_bf16_flops = rate;
-    if (WantNumber(entry, "peak_fp8_flops", &rate)) profile.peak_fp8_flops = rate;
+    if (WantNumber(entry, "peak_fp32_flops", &rate))
+      profile.peak_fp32_flops = rate;
+    if (WantNumber(entry, "peak_bf16_flops", &rate))
+      profile.peak_bf16_flops = rate;
+    if (WantNumber(entry, "peak_fp8_flops", &rate))
+      profile.peak_fp8_flops = rate;
     if (WantNumber(entry, "peak_bandwidth_bytes_per_second", &rate)) {
       profile.peak_bandwidth_bytes_per_second = rate;
     }
@@ -218,9 +224,10 @@ void ReadDeclaration(const char* backend, std::vector<DeclaredDevice>* out) {
 }
 
 // The whole derived table, built once. The name strings live in `names`, which
-// is filled before any profile points at it and is never modified afterwards, so
-// `DeviceProfile::name` stays valid for the life of the process (the contract
-// `nanochat/device_profile.h` states and `Caps::device_name` relies on).
+// is filled before any profile points at it and is never modified afterwards,
+// so `DeviceProfile::name` stays valid for the life of the process (the
+// contract `nanochat/device_profile.h` states and `Caps::device_name` relies
+// on).
 struct DerivedTable {
   std::vector<std::string> names;
   std::vector<DeviceProfile> rows;
@@ -245,26 +252,26 @@ const DerivedTable& Table() {
     }
     // Ordered by descending capability, which is what the header promises: the
     // newest compute capability first, and the faster card first within one.
-    std::sort(table.names.begin(), table.names.end(),
-              [&declared](const std::string& a, const std::string& b) {
-                const auto find = [&declared](const std::string& name) {
-                  for (const DeclaredDevice& device : declared) {
-                    if (device.name == name) return &device;
-                  }
-                  return static_cast<const DeclaredDevice*>(nullptr);
-                };
-                const DeclaredDevice* left = find(a);
-                const DeclaredDevice* right = find(b);
-                if (left == nullptr || right == nullptr) return a < b;
-                if (left->profile.compute_major != right->profile.compute_major) {
-                  return left->profile.compute_major > right->profile.compute_major;
-                }
-                if (left->profile.compute_minor != right->profile.compute_minor) {
-                  return left->profile.compute_minor > right->profile.compute_minor;
-                }
-                return left->profile.peak_fp32_flops >
-                       right->profile.peak_fp32_flops;
-              });
+    std::sort(
+        table.names.begin(), table.names.end(),
+        [&declared](const std::string& a, const std::string& b) {
+          const auto find = [&declared](const std::string& name) {
+            for (const DeclaredDevice& device : declared) {
+              if (device.name == name) return &device;
+            }
+            return static_cast<const DeclaredDevice*>(nullptr);
+          };
+          const DeclaredDevice* left = find(a);
+          const DeclaredDevice* right = find(b);
+          if (left == nullptr || right == nullptr) return a < b;
+          if (left->profile.compute_major != right->profile.compute_major) {
+            return left->profile.compute_major > right->profile.compute_major;
+          }
+          if (left->profile.compute_minor != right->profile.compute_minor) {
+            return left->profile.compute_minor > right->profile.compute_minor;
+          }
+          return left->profile.peak_fp32_flops > right->profile.peak_fp32_flops;
+        });
     table.rows.reserve(table.names.size());
     for (std::size_t i = 0; i < table.names.size(); ++i) {
       DeviceProfile profile;

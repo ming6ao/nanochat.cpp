@@ -84,7 +84,8 @@ void ExpectNear(double actual, double expected, double tolerance,
 // to the working directory, the same order `src/device_profile.cc` uses, so the
 // test and the derivation read the same bytes.
 std::string LocateCaps(const char* backend) {
-  const std::string relative = std::string("backends/") + backend + "/caps.json";
+  const std::string relative =
+      std::string("backends/") + backend + "/caps.json";
   std::vector<std::string> candidates;
   if (const char* src_dir = std::getenv("TEST_SRCDIR")) {
     if (const char* workspace = std::getenv("TEST_WORKSPACE")) {
@@ -360,9 +361,10 @@ bool NeedBool(const nanochat::json::Value& entry, const char* key,
 bool ReadDeclaredEntries(const char* backend, std::vector<DeclaredEntry>* out) {
   const std::string path = LocateCaps(backend);
   if (path.empty()) {
-    Fail(Format("backends/%s/caps.json is not in the runfiles: the derivation "
-                "has no declaration to read",
-                backend));
+    Fail(
+        Format("backends/%s/caps.json is not in the runfiles: the derivation "
+               "has no declaration to read",
+               backend));
     return false;
   }
   nanochat::json::Value root;
@@ -384,8 +386,7 @@ bool ReadDeclaredEntries(const char* backend, std::vector<DeclaredEntry>* out) {
     }
     DeclaredEntry declared;
     declared.name = name->string();
-    const std::string where =
-        path + ": device \"" + declared.name + "\"";
+    const std::string where = path + ": device \"" + declared.name + "\"";
     if (!NeedBool(entry, "is_device", where, &declared.is_device)) continue;
     if (!NeedInt(entry, "compute_major", where, &declared.compute_major)) {
       continue;
@@ -443,7 +444,8 @@ std::string NormalizeName(const std::string& value) {
   out.reserve(value.size());
   for (char c : value) {
     if (c == ' ' || c == '\t' || c == '\n' || c == '\r') continue;
-    out.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+    out.push_back(
+        static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
   }
   return out;
 }
@@ -475,9 +477,9 @@ void TestDeclarationsDeriveTheTable() {
     // Rule 5: every declared field appears in the derived row, so a
     // declaration cannot drift from the table.
     declared_devices.push_back(name);
-    ExpectTrue(profile != nullptr,
-               Format("the declared device \"%s\" has a derived row",
-                      name.c_str()));
+    ExpectTrue(
+        profile != nullptr,
+        Format("the declared device \"%s\" has a derived row", name.c_str()));
     if (profile == nullptr) continue;
     ExpectTrue(profile->name == name,
                Format("the row for \"%s\" carries the declaration's name",
@@ -494,28 +496,28 @@ void TestDeclarationsDeriveTheTable() {
     ExpectTrue(profile->has_tensor_cores == entry.has_tensor_cores,
                Format("%s: has_tensor_cores derives from the declaration",
                       name.c_str()));
-    ExpectTrue(profile->supports_bf16 == entry.supports_bf16,
-               Format("%s: supports_bf16 derives from the declaration",
-                      name.c_str()));
-    ExpectTrue(profile->supports_fp8 == entry.supports_fp8,
-               Format("%s: supports_fp8 derives from the declaration",
-                      name.c_str()));
-    ExpectNear(profile->peak_fp32_flops, entry.peak_fp32_flops, 1.0,
-               Format("%s: the fp32 peak derives from the declaration",
-                      name.c_str()));
-    ExpectNear(profile->peak_bf16_flops, entry.peak_bf16_flops, 1.0,
-               Format("%s: the bf16 peak derives from the declaration",
-                      name.c_str()));
-    ExpectNear(profile->peak_fp8_flops, entry.peak_fp8_flops, 1.0,
-               Format("%s: the fp8 peak derives from the declaration",
-                      name.c_str()));
-    ExpectNear(profile->peak_bandwidth_bytes_per_second,
-               entry.peak_bandwidth_bytes_per_second, 1.0,
-               Format("%s: the bandwidth derives from the declaration",
-                      name.c_str()));
-    ExpectTrue(profile->warp_size == entry.warp_size,
-               Format("%s: the warp size derives from the declaration",
-                      name.c_str()));
+    ExpectTrue(
+        profile->supports_bf16 == entry.supports_bf16,
+        Format("%s: supports_bf16 derives from the declaration", name.c_str()));
+    ExpectTrue(
+        profile->supports_fp8 == entry.supports_fp8,
+        Format("%s: supports_fp8 derives from the declaration", name.c_str()));
+    ExpectNear(
+        profile->peak_fp32_flops, entry.peak_fp32_flops, 1.0,
+        Format("%s: the fp32 peak derives from the declaration", name.c_str()));
+    ExpectNear(
+        profile->peak_bf16_flops, entry.peak_bf16_flops, 1.0,
+        Format("%s: the bf16 peak derives from the declaration", name.c_str()));
+    ExpectNear(
+        profile->peak_fp8_flops, entry.peak_fp8_flops, 1.0,
+        Format("%s: the fp8 peak derives from the declaration", name.c_str()));
+    ExpectNear(
+        profile->peak_bandwidth_bytes_per_second,
+        entry.peak_bandwidth_bytes_per_second, 1.0,
+        Format("%s: the bandwidth derives from the declaration", name.c_str()));
+    ExpectTrue(
+        profile->warp_size == entry.warp_size,
+        Format("%s: the warp size derives from the declaration", name.c_str()));
     ExpectTrue(profile->max_threads_per_block == entry.max_threads_per_block,
                Format("%s: the thread bound derives from the declaration",
                       name.c_str()));

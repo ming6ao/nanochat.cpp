@@ -16,7 +16,8 @@
 // (`spec/versions.md` section 3.1):
 //
 //   * a duplicated key is an error, not a last-one-wins;
-//   * a trailing comma, a comment, an unquoted key, and a bare value are errors;
+//   * a trailing comma, a comment, an unquoted key, and a bare value are
+//   errors;
 //   * the nesting depth is bounded (`kMaxDepth`);
 //   * every value is one of the six JSON types, and a caller that asks for the
 //     wrong type gets null back rather than a coercion.
@@ -30,8 +31,14 @@
 namespace nanochat {
 namespace json {
 
-enum class Kind { kNull = 0, kBool = 1, kNumber = 2, kString = 3,
-                  kArray = 4, kObject = 5 };
+enum class Kind {
+  kNull = 0,
+  kBool = 1,
+  kNumber = 2,
+  kString = 3,
+  kArray = 4,
+  kObject = 5
+};
 
 // The largest accepted nesting depth. A spec and a caps file are shallow; the
 // bound keeps a hostile file from exhausting the stack.
