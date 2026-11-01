@@ -629,11 +629,31 @@ def pipeline(job_json, run_id, stage_json="", publish_json="") -> str
   point at.
 
 The gate is `modal run tools/modal/app.py::pipeline_demo`, which runs the demo
-job in the image and prints the report. It is owed in the same way as the Colab
-gate of section 9.2: this campaign wrote the function and its contract test and
-ran no `modal run`, so the record is the procedure and the host facts, and a
-passing run must show the four items of the checklist there with `host.arch` of
-`sm_75`.
+job in the image and prints the report. It ran on 2026-10-31 on a T4. This is
+the host block and the outcome of the report it delivered:
+
+| Item | Value |
+|---|---|
+| `host.backend` | `cuda` |
+| `host.arch` | `sm_75` |
+| `host.precision` | `fp32` |
+| run directory | `/runs/pipeline-demo/demo` |
+| delivered | `deliver/chatrl.ckpt` and `deliver/pipeline_report.json` |
+| stages | `base` at 100, `sft` at 100, `rl` at 105 |
+| base loss | 6.1874 to 0.0049 |
+| `total_seconds` | 4.46 |
+
+The image work is not what it looks like. The layer chain takes 49 seconds on
+a cached base image: copy 2.1 s, install 6.6 s, environment 1.6 s, and the
+Bazel CUDA build 36.8 s. The first build cost about 25 minutes, almost all of
+it pulling the 4.11 GB CUDA devel base and installing `build-essential`.
+
+Two app defects surfaced only when the gate ran, and both are fixed in the
+follow-up pull request. The module derived the repository from its own path,
+which `modal run` mounts at `/root/app.py`, so `Path(__file__).parents[2]`
+raised `IndexError`. And the chain wrote `deliver/` one directory above the run
+folder, because `run()` passed the run root to `deliver()`, which names that
+argument the run directory. The Colab gate of section 9.2 is still owed.
 
 ### 9.4 The Modal CPU leg is a second image
 

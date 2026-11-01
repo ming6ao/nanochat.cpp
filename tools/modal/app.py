@@ -579,15 +579,19 @@ def chain_dir(run_root, job) -> Path:
 
 
 def read_report(folder) -> dict:
-    """The report the chain delivered, or an empty document.
+    """The report the chain delivered, or raise when it delivered none.
 
     ``deliver()`` writes ``deliver/pipeline_report.json`` beside the delivered
-    checkpoint (design decision D6), so a chain that ran without delivery has
-    no report and reports an empty one.
+    checkpoint (design decision D6). An absent report used to come back as an
+    empty document, so a chain that exited 0 without delivering looked like a
+    successful run with no data. The gate must fail instead: a run is reviewed
+    by the report, and there is nothing to review.
     """
     path = Path(folder) / DELIVER_DIRNAME / REPORT_NAME
     if not path.is_file():
-        return {}
+        raise RuntimeError(
+            f"the chain wrote no {DELIVER_DIRNAME}/{REPORT_NAME} under {folder}, "
+            f"so there is no report to return")
     return json.loads(path.read_text(encoding="utf-8"))
 
 
@@ -698,6 +702,8 @@ def pipeline(job_json: str, run_id: str, stage_json: str = "",
             log_path.read_text(encoding="utf-8").splitlines()[-20:])
         raise RuntimeError(f"the chain exited {result.returncode}:\n{tail}")
     folder = chain_dir(run_dir, job)
+    # A missing report raises here, before the publish. A zero exit with no
+    # delivery is a failed gate, not an empty success.
     report = read_report(folder)
     published = {}
     if publish_json:

@@ -395,11 +395,15 @@ class PipelineTest(unittest.TestCase):
         self.assertEqual(answer["source"], "repository")
         self.assertEqual(answer["publish"], {})
 
-    def test_an_undelivered_chain_reports_an_empty_document(self) -> None:
+    def test_an_undelivered_chain_fails_the_call(self) -> None:
+        # A zero exit with no delivery is a failed gate. This case used to
+        # return an empty document, so a chain that wrote nothing looked like a
+        # successful run with no data, and the empty report reached the caller.
         self.report = None
-        answer = json.loads(self.app.pipeline(json.dumps({"run_id": "demo"}),
-                                              "run-1"))
-        self.assertEqual(answer["report"], {})
+        with self.assertRaises(RuntimeError) as caught:
+            self.app.pipeline(json.dumps({"run_id": "demo"}), "run-1")
+        self.assertIn("wrote no deliver/pipeline_report.json",
+                      str(caught.exception))
 
     def test_a_failed_chain_stops_the_function(self) -> None:
         self.returncode = 2

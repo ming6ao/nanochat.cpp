@@ -412,6 +412,15 @@ class PipelineTest(unittest.TestCase):
         """A lost artifact is a failed delivery, not a warning."""
         delivered = Path(self.report.delivered)
         self.assertTrue(delivered.is_file(), f"{delivered} is missing")
+        # D6 names the folder, so assert the layout and not only the path the
+        # report carries: the chain once wrote `<run_root>/deliver` while every
+        # stage wrote `<run_root>/<run_id>/`, and only the Modal app read the
+        # design's folder, so every local assertion still passed.
+        run_dir = Path(self.job.out_root) / self.job.run_id
+        self.assertEqual(delivered.parent, run_dir / "deliver",
+                         f"the delivery is not under {run_dir / 'deliver'}")
+        self.assertEqual(Path(self.report.report_path).parent,
+                         run_dir / "deliver")
         self.assertEqual(delivered.read_bytes(),
                          Path(self.stages["rl"].checkpoint).read_bytes())
         self.assertEqual(delivered.name, "chatrl.ckpt")

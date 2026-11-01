@@ -899,8 +899,12 @@ def run(job: "Job", *, out_root: str | os.PathLike | None = None) -> Report:
     stages = (base, sft_stage, rl_stage)
     if not job.deliver:
         return _report(job, stages)
-    _delivered, report_path = deliver(job, stages,
-                                      out_root=str(_runs_dir(job)))
+    # `deliver` names its `out_root` the run directory, not the root that
+    # holds one directory per run, so the call takes its default. Passing the
+    # root here wrote `<run_root>/deliver` while every stage wrote
+    # `<run_root>/<run_id>/`, and the Modal app and the notebook collect cell
+    # read the folder the design names (D6).
+    _delivered, report_path = deliver(job, stages)
     return Report.from_json(Path(report_path).read_text(encoding="utf-8"))
 
 
