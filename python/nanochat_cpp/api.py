@@ -373,20 +373,28 @@ def model_flags(config: Config | None = None) -> list[str]:
 
 
 class Tokenizer:
-    """The native ``NCTOKEN1`` tokenizer."""
+    """The native ``NCTOKEN1`` tokenizer.
+
+    ``Tokenizer.load(path)`` and ``nanochat_cpp.tokenizer(path)`` are the two
+    doors. The constructor takes a handle that ``nanochat_cpp._core`` minted,
+    so a path, a plain int, or a pointer borrowed from another object fails
+    before the library is called.
+    """
 
     def __init__(self, handle, vocab_size: int | None = None,
                  special_tokens: dict | None = None) -> None:
-        # A path here used to reach C as a character pointer, because ctypes
-        # converts a string for a `c_void_p` parameter without complaint. The
-        # encoder then read the path text as a handle and the process died with
-        # SIGSEGV, on the CPU as well as on a card. Reject the mistake here,
-        # before the library loads, so it is a TypeError that names the fix.
-        if isinstance(handle, (str, bytes, os.PathLike)) or \
-                not isinstance(handle, int):
+        # An opaque C pointer is an int in Python, and ctypes converts a string
+        # for a `c_void_p` argument without complaint. A path in this position
+        # therefore reached the encoder as a character pointer and the process
+        # died with SIGSEGV. A plain int is worse: two objects would own one
+        # pointer and free it twice. Only a handle minted by `_core`, claimed
+        # once, is accepted.
+        if not isinstance(handle, _core.Handle) or handle.kind != "tokenizer":
             raise TypeError(
-                "Tokenizer takes a C handle, not a path or a file object; use "
-                "Tokenizer.load(path) for a path")
+                "Tokenizer takes the handle that _core mints, not a path, an "
+                "int, or another object's handle; use Tokenizer.load(path) "
+                "or nanochat_cpp.tokenizer(path)")
+        handle.claim("Tokenizer")
         self._lib = _lib.load()
         self._handle = handle
         self.vocab_size = vocab_size
@@ -398,7 +406,7 @@ class Tokenizer:
         encoded = str(path).encode("utf-8")
         handle = _core.check_handle(
             library, library.nanochat_tokenizer_load(encoded),
-            "nanochat_tokenizer_load")
+            "nanochat_tokenizer_load", "tokenizer")
         vocab_size = None
         special_tokens: dict[str, int] = {}
         try:
@@ -429,6 +437,7 @@ class Tokenizer:
 
     def _encode_one(self, text: str) -> list[int]:
         library = self._lib
+        self._live("nanochat_encode")
         raw = text.encode("utf-8")
         needed = _core.check_code(
             library, library.nanochat_encode(self._handle, raw, None, 0),
@@ -445,6 +454,7 @@ class Tokenizer:
         """Decode a sequence of token ids into text."""
         flat = _flatten_ints(ids)
         library = self._lib
+        self._live("nanochat_decode")
         if flat:
             buffer_ids = (ctypes.c_int * len(flat))(*flat)
         else:
@@ -463,15 +473,35 @@ class Tokenizer:
             "nanochat_decode")
         return output.value.decode("utf-8", "replace")
 
+    def _live(self, function: str) -> None:
+        """Raise when this tokenizer is closed, before the library is called."""
+        handle = getattr(self, "_handle", None)
+        if not isinstance(handle, _core.Handle):
+            raise _core.NanochatError(
+                function, "this tokenizer is closed; load a new one")
+
     def __del__(self) -> None:
         handle = getattr(self, "_handle", None)
         library = getattr(self, "_lib", None)
-        if handle and library is not None:
+        if isinstance(handle, _core.Handle) and library is not None:
+            self._handle = None
             try:
-                library.nanochat_tokenizer_free(handle)
+                # `detach` gives up the pointer first, so a second destructor
+                # cannot free the same address.
+                library.nanochat_tokenizer_free(handle.detach())
             except Exception:  # noqa: BLE001 - never raise in a destructor
                 pass
             self._handle = None
+
+
+def tokenizer(path) -> Tokenizer:
+    """Load the ``NCTOKEN1`` tokenizer at ``path``.
+
+    This is the public door. ``pipeline`` hands out a tokenizer as a path, so
+    ``nanochat_cpp.tokenizer(path)`` is the call that reads correctly, and
+    ``Tokenizer`` refuses anything but the handle its loader minted.
+    """
+    return Tokenizer.load(path)
 
 
 class Model:
@@ -501,7 +531,7 @@ class Model:
         handle = self._lib.nanochat_model_create(
             ctypes.byref(self._c_config), ctypes.c_uint64(self.seed))
         self._handle = _core.check_handle(self._lib, handle,
-                                          "nanochat_model_create")
+                                          "nanochat_model_create", "model")
 
     def forward_loss(self, tokens, targets, batch: int | None = None,
                      seq: int | None = None) -> float:
@@ -768,7 +798,7 @@ class Optimizer:
         handle = self._lib.nanochat_optim_create(
             model._handle, ctypes.byref(config))
         self._handle = _core.check_handle(self._lib, handle,
-                                          "nanochat_optim_create")
+                                          "nanochat_optim_create", "optimizer")
 
     def step(self, step: int) -> None:
         """Apply one 1-based optimizer step."""
@@ -825,7 +855,7 @@ class TokenData:
             self._batch, self._seq, ctypes.c_uint64(self._seed),
             self._threads, self._document_buffer)
         return _core.check_handle(self._lib, handle,
-                                  "nanochat_loader_create")
+                                  "nanochat_loader_create", "loader")
 
     def reset(self) -> None:
         """Restart the document stream from the first batch.

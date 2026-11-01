@@ -405,6 +405,51 @@ MeshHandle = ctypes.c_void_p
 RuntimeHandle = ctypes.c_void_p
 CheckpointHandle = ctypes.c_void_p
 
+
+class Handle(int):
+    """A C handle that only this module can mint, tagged with its kind.
+
+    An opaque pointer is an ``int`` in Python, so every int looked like a
+    handle: a path string reached C as a character pointer and the encoder
+    dereferenced it, which killed the process with SIGSEGV. A plain int for a
+    handle would also let two objects own one pointer, and then free it twice.
+
+    Subclassing ``int`` keeps every ctypes call working unchanged, because a
+    ``c_void_p`` argument already accepts an int. ``kind`` is checked by the
+    constructor that takes a handle from a caller, and ``owner`` makes a second
+    claim a failure instead of a double free.
+    """
+
+    def __new__(cls, raw, kind: str):
+        handle = int.__new__(cls, int(raw))
+        handle.kind = str(kind)
+        handle.owner = None
+        handle.freed = False
+        return handle
+
+    def claim(self, owner: str) -> "Handle":
+        """Take ownership. A second claim, or a freed handle, is a failure.
+
+        Strict, because a second owner would free the pointer a second time,
+        and a freed pointer may already name someone else's memory.
+        """
+        if self.freed:
+            raise TypeError(
+                f"this {self.kind} handle was freed; load or create a new one")
+        if self.owner is not None:
+            raise TypeError(
+                f"this {self.kind} handle already belongs to {self.owner}; "
+                "load or create a second one instead of sharing this one")
+        self.owner = owner
+        return self
+
+    def detach(self) -> int:
+        """Give up the raw pointer, so a second free cannot reach it."""
+        raw = int(self)
+        self.owner = None
+        self.freed = True
+        return raw
+
 # The function table: name, argument types, result type. Every entry in
 # include/nanochat/capi.h is here.
 _SIGNATURES = (
@@ -682,11 +727,16 @@ def check_status(library, status: int, function: str) -> int:
     return status
 
 
-def check_handle(library, handle, function: str):
-    """Raise ``NanochatError`` when a ``create`` function returned null."""
+def check_handle(library, handle, function: str, kind: str = "handle"):
+    """Raise ``NanochatError`` when a ``create`` function returned null.
+
+    Otherwise mint the :class:`Handle` that the callers pass around, so a
+    handle is always a value this module produced and never a bare int, a path,
+    or a pointer borrowed from another object.
+    """
     if not handle:
         raise NanochatError(function, last_error(library))
-    return handle
+    return Handle(handle, kind)
 
 
 def check_code(library, code: int, function: str) -> int:
