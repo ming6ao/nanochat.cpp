@@ -3,7 +3,8 @@
 # Layering:
 #   * toolchain: the C++ standard here; the host compiler is host-local;
 #   * arch:      Pascal sm_61 is the default; --config=sm_75 and --config=t4
-#                select Turing (T4);
+#                select Turing (T4), and --config=hopper selects Hopper
+#                (H100) for a hand run;
 #   * precision: fp32 or bf16 (docs/precision.md), selected by a build define;
 #   * resources: cap the Bazel server and per-server action fan-out so several
 #                agent worktrees cannot exhaust the small shared host.
@@ -102,10 +103,25 @@ build:h200 --define=simulator=1
 # --- Host targets -----------------------------------------------------------
 #
 # A complete named target for one host. `t4` is the Turing CUDA build for a
-# Kaggle Notebook (sm_75), at fp32. See docs/precision.md.
+# Kaggle Notebook (sm_75), at fp32. `hopper` is the Hopper build (sm_90), at
+# bf16. See docs/precision.md.
 build:t4 --@rules_cuda//cuda:archs=sm_75
 build:t4 --define=precision=fp32
 build:t4 --define=backend=cuda
+
+# `hopper` is not `h100`. The `h100` config above is the simulator profile: it
+# sets `--define=simulator=1`, which compiles in the capability override and
+# answers from the device profile table, and it swaps the collective to
+# `native`. `hopper` sets neither, so a hand run builds the real CUDA backend
+# for Hopper at bf16 and keeps the default `nccl` collective, which is what the
+# chain's `world_size=1` expects (docs/pipeline-scaleup-plan.md section 3,
+# trap 1, and section 7). `hopper` is a hand-run shorthand only: the build
+# helper `_build._build_command` still emits its explicit flag triple,
+# `--config=cuda --define=precision=<p> --@rules_cuda//cuda:archs=<a>`, and
+# never a named config, so the Modal H100 leg is the same build either way.
+build:hopper --@rules_cuda//cuda:archs=sm_90
+build:hopper --define=precision=bf16
+build:hopper --define=backend=cuda
 
 # --- Resources --------------------------------------------------------------
 #
