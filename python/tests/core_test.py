@@ -55,6 +55,48 @@ class CoreTest(unittest.TestCase):
         self.assertEqual(_core.OptimizerConfig.muon_ns_steps.offset, 5 * 4)
         self.assertEqual(_core.OptimizerConfig.num_iterations.offset, 9 * 4)
 
+    def test_check_handle_mints_a_tagged_handle(self) -> None:
+        # The mint is the one door: a raw pointer becomes a Handle that carries
+        # the kind the consumers check.
+        # A `c_void_p` restype arrives as a plain int, which is what the C
+        # create functions hand back.
+        handle = _core.check_handle(self.lib, 4096, "mint", _core.KIND_MODEL)
+        self.assertIsInstance(handle, _core.Handle)
+        self.assertEqual(handle.kind, _core.KIND_MODEL)
+        self.assertIsNone(handle.owner)
+        self.assertFalse(handle.freed)
+
+    def test_a_handle_has_one_owner(self) -> None:
+        handle = _core.Handle(4096, _core.KIND_TOKENIZER)
+        handle.claim("first")
+        with self.assertRaises(TypeError) as caught:
+            handle.claim("second")
+        self.assertIn("already belongs to first", str(caught.exception))
+
+    def test_a_detached_handle_cannot_be_claimed_or_detached_again(self) -> None:
+        # A second detach would hand the same address out for a second free.
+        handle = _core.Handle(4096, _core.KIND_TOKENIZER).claim("first")
+        self.assertEqual(handle.detach(), 4096)
+        self.assertTrue(handle.freed)
+        with self.assertRaises(TypeError):
+            handle.detach()
+        with self.assertRaises(TypeError) as caught:
+            handle.claim("second")
+        self.assertIn("was freed", str(caught.exception))
+
+    def test_a_copy_of_a_handle_shares_its_flag(self) -> None:
+        import copy
+        handle = _core.Handle(4096, _core.KIND_TOKENIZER).claim("first")
+        for copier in (copy.copy, copy.deepcopy):
+            with self.subTest(copier=copier.__name__):
+                twin = copier(handle)
+                self.assertIs(twin, handle)
+
+    def test_a_handle_repr_keeps_the_address_out(self) -> None:
+        handle = _core.Handle(4096, _core.KIND_TOKENIZER).claim("Tokenizer")
+        self.assertNotIn("4096", repr(handle))
+        self.assertIn("tokenizer", repr(handle))
+
     def test_null_config_raises(self) -> None:
         with self.assertRaises(_core.NanochatError):
             handle = self.lib.nanochat_model_create(None, 0)

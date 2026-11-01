@@ -10,6 +10,7 @@ docs/python.md section 11.
 from __future__ import annotations
 
 import array
+import copy
 import sys
 import unittest
 from pathlib import Path
@@ -25,7 +26,8 @@ from nanochat_cpp import (
     evaluate,
     no_grad,
 )
-from nanochat_cpp import _build, _lib
+from nanochat_cpp import _build, _core, _lib
+import nanochat_cpp as nc
 from nanochat_cpp.eval_fixture import read as read_fixture
 
 FIXTURE = "tests/data/api_fixture.bin"
@@ -149,6 +151,93 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(tokenizer.decode(ids), text)
         self.assertEqual(tokenizer.vocab_size,
                          _int(self.records, "api/config/vocab"))
+
+    def test_a_path_is_not_a_handle(self) -> None:
+        # A path where a handle belongs reaches C as a character pointer, and
+        # ctypes converts the string without complaint. The encoder then reads
+        # the path text as a tokenizer and the process dies with SIGSEGV, on
+        # the CPU as well as on a card. The constructor rejects the mistake.
+        for value in (resolve(TOKENIZER), str(resolve(TOKENIZER)),
+                      bytes(str(resolve(TOKENIZER)), "utf-8")):
+            with self.subTest(value=type(value).__name__):
+                with self.assertRaises(TypeError) as caught:
+                    Tokenizer(value)
+                self.assertIn("Tokenizer.load", str(caught.exception))
+
+    def test_a_plain_int_is_not_a_handle(self) -> None:
+        # Any int used to be accepted, so a stray number reached C as a pointer.
+        with self.assertRaises(TypeError):
+            Tokenizer(42)
+
+    def test_a_handle_of_another_kind_is_refused(self) -> None:
+        # Only this module mints handles, and the tag keeps a model handle out
+        # of a tokenizer slot.
+        with self.assertRaises(TypeError):
+            Tokenizer(_core.Handle(42, "model"))
+
+    def test_one_handle_has_one_owner(self) -> None:
+        # A second object sharing the pointer would free it a second time.
+        tokenizer = Tokenizer.load(resolve(TOKENIZER))
+        with self.assertRaises(TypeError) as caught:
+            Tokenizer(tokenizer._handle)
+        self.assertIn("already belongs to", str(caught.exception))
+
+    def test_the_factory_is_the_public_door(self) -> None:
+        tokenizer = nc.tokenizer(resolve(TOKENIZER))
+        ids = tokenizer.encode("The capital of France is")
+        self.assertEqual(tokenizer.decode(ids), "The capital of France is")
+
+    def test_a_closed_tokenizer_raises_instead_of_calling_c(self) -> None:
+        # A freed handle must not reach C: the address may be reused.
+        tokenizer = Tokenizer.load(resolve(TOKENIZER))
+        tokenizer.close()
+        for call in (lambda: tokenizer.encode("hi"),
+                     lambda: tokenizer.decode([1, 2]),
+                     lambda: tokenizer.handle):
+            with self.subTest(call=call):
+                with self.assertRaises(ValueError) as caught:
+                    call()
+                self.assertIn("closed", str(caught.exception))
+
+    def test_close_is_safe_twice(self) -> None:
+        tokenizer = Tokenizer.load(resolve(TOKENIZER))
+        tokenizer.close()
+        tokenizer.close()
+        self.assertIsNone(tokenizer._handle)
+
+    def test_a_shallow_copy_shares_one_freed_flag(self) -> None:
+        # A copy holds the same Handle, so the second close must not free the
+        # address again, and the copy must not look alive after the first one.
+        tokenizer = Tokenizer.load(resolve(TOKENIZER))
+        twin = copy.copy(tokenizer)
+        self.assertIs(twin._handle, tokenizer._handle)
+        twin.close()
+        tokenizer.close()  # the second close frees nothing
+        self.assertEqual(tokenizer._handle, None)
+        with self.assertRaises(ValueError):
+            tokenizer.encode("hi")
+
+    def test_a_deep_copy_is_refused(self) -> None:
+        # A deep copy would pickle the ctypes library and could hand a second
+        # object an independent, dead pointer. Refusing is the safe answer.
+        tokenizer = Tokenizer.load(resolve(TOKENIZER))
+        with self.assertRaises(TypeError) as caught:
+            copy.deepcopy(tokenizer)
+        self.assertIn("cannot be deep-copied", str(caught.exception))
+
+    def test_a_freed_handle_is_refused(self) -> None:
+        tokenizer = Tokenizer.load(resolve(TOKENIZER))
+        handle = tokenizer._handle
+        tokenizer.close()
+        with self.assertRaises(TypeError) as caught:
+            Tokenizer(handle)
+        self.assertIn("freed", str(caught.exception))
+
+    def test_the_context_manager_closes(self) -> None:
+        with Tokenizer.load(resolve(TOKENIZER)) as tokenizer:
+            self.assertTrue(tokenizer.encode("hi"))
+        with self.assertRaises(ValueError):
+            tokenizer.encode("hi")
 
     def test_trainer_and_evaluator_match_fixture(self) -> None:
         records = self.records
