@@ -125,11 +125,6 @@ BASE_BATCH = 1
 #: (docs/pipeline-scaleup-plan.md section 6).
 EVAL_BATCH = 1
 
-#: The capability the hardware gate's fp8 group needs, as ``(major, minor)``:
-#: the scaled fp8 GEMM is an Ada and Hopper tensor-core path
-#: (``src/hw_gate.cc``, ``docs/fp8-training.md`` section 5.3).
-FP8_COMPUTE_CAPABILITY = (8, 9)
-
 #: The micro-batch of the SFT stage.
 SFT_BATCH = 2
 
@@ -567,72 +562,37 @@ def _rates(records: Sequence[Mapping], seconds: float, steps_ran: int,
     }
 
 
-def _capability(arch: str) -> tuple[int, int] | None:
-    """The compute capability an architecture name states, or ``None``.
-
-    ``sm_75``, ``sm90``, ``sm_90a``, and ``9.0`` all name a capability. An
-    empty name leaves the choice to the builder, so the answer is ``None`` and
-    the caller says the fact is unknown rather than inventing one.
-    """
-    text = str(arch or "").strip().lower()
-    if text.startswith("sm"):
-        text = text[2:].lstrip("_- ")
-    if not text:
-        return None
-    if "." in text:
-        major, _, minor = text.partition(".")
-        minor = minor.rstrip("a")
-        if major.isdigit() and minor.isdigit():
-            return int(major), int(minor)
-        return None
-    digits = text.rstrip("a")
-    if len(digits) == 2 and digits.isdigit():
-        return int(digits[0]), int(digits[1])
-    return None
-
-
 def _hardware() -> dict:
     """The hardware-check facts of the base stage.
 
     ``backend``, ``arch``, and ``precision`` are the build's own facts, the
     same three the report's ``host`` block carries. ``startup_check`` and
-    ``fp8_cases`` say which branch of the hardware correctness gate this host
-    takes (``src/hw_gate.cc``, ``docs/correctness-gates.md`` section 4): the
-    gate runs only on a device, so the CPU reference skips it, and its fp8
-    group runs only on compute capability 8.9 or above, so a T4 leg reports a
-    skip of the fp8 cases where an H100 leg runs them
-    (``docs/pipeline-scaleup-plan.md`` section 8).
+    ``fp8_cases`` say whether the hardware correctness gate ran
+    (``src/hw_gate.cc``, ``docs/correctness-gates.md`` section 4).
 
-    Nothing here is guessed: a fact the host cannot state stays out of the
-    report, and an architecture the builder chose (an empty ``arch``) reports
-    the fp8 group as unknown. The fp8 group of a host whose gate is skipped is
-    ``not_run`` and not ``skipped``, because no case was asked at all.
+    The chain's base stage is the mesh trainer. That driver builds its own
+    runtime and does not call ``RunHardwareCorrectnessGate``, which is a
+    start-up step of the single-device ``TrainRunner`` only. A device report
+    therefore says ``not_run`` for both fields and names the reason. Do not
+    report ``ran`` from the build facts: the build is not the check.
     """
     backend = _build.backend()
     arch = _build.architecture()
-    capability = _capability(arch)
     if backend != "cuda":
         startup = "skipped"
         reason = ("the hardware correctness gate runs only on a device, and "
                   f"this build runs on the {backend or 'unknown'} backend")
-        fp8 = "not_run"
     else:
-        startup = "ran"
-        reason = ("the hardware correctness gate runs on a device at "
-                  "hw_check=auto")
-        if capability is None:
-            fp8 = "unknown"
-        elif capability >= FP8_COMPUTE_CAPABILITY:
-            fp8 = "ran"
-        else:
-            fp8 = "skipped"
+        startup = "not_run"
+        reason = ("the chain runs the mesh trainer, which does not call the "
+                  "hardware correctness gate")
     return {
         "backend": backend,
         "arch": arch,
         "precision": _build.precision(),
         "startup_check": startup,
         "startup_check_reason": reason,
-        "fp8_cases": fp8,
+        "fp8_cases": "not_run",
     }
 
 

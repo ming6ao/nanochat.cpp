@@ -1,9 +1,10 @@
 # The pipeline scale-up plan: a bigger chain and two Modal legs
 
-Status: rows 0 to 8 have landed. Row 9, the first two-leg run on a real Hopper
-card, is still owed, so the G3 ratio band stays the wide `[1, 200]` and this
-document holds no measured step time for either leg. Section 9.1 records what
-landed and where it differs from the forecast below.
+Status: rows 0 to 9 have landed. Row 9, the first two-leg run on a real Hopper
+card, ran on 2026-10-31 and section 14 records its numbers. Gates G1 to G3 pass,
+and the G3 ratio band stays `[1, 200]` because twice the measured ratio is wider
+than the band. The run also found two device defects, both fixed. Section 9.1
+records what landed and where it differs from the forecast below.
 
 An oracle review corrected six defects in an earlier draft, and this version
 carries the corrections. The corrections are the eval batch, the eval count, the
@@ -111,9 +112,12 @@ bf16 and fp8. This plan takes bf16 for three reasons:
 - The chain is bound by launches at this shape. Section 14 gives a 0.76 ms device
   bound inside a step of tens of milliseconds, so the precision does not change
   the measured time.
-- The bf16 leg on an H100 still runs the fp8 operators. The startup hardware
-  check keys on the card, not on the build. So the leg proves the fp8
-  conversion, the scaled fp8 GEMM, and the attention tile on Hopper silicon.
+- The bf16 leg on an H100 runs the fp8 operators only when the chain runs the
+  hardware correctness gate. The chain's base stage is the mesh trainer, and it
+  does not call `RunHardwareCorrectnessGate`, so the first H100 run reported
+  `startup_check: not_run`. A hand-wired gate then failed in
+  `cublasLtMatmulAlgoGetHeuristic` with status 15 on Hopper (section 14). The
+  bf16 leg therefore proves the bf16 training path, not the fp8 operators.
 
 What the leg does not prove is the fp8 training graph and the fp8 planner rule.
 Those belong to a later row, and the row needs a Hopper benchmark first.
@@ -254,22 +258,27 @@ G2 is a smoke check, not a throughput claim. Both legs are bound by the host
 program, so the gate catches a large regression and a broken device path. It does
 not measure the card.
 
-G3 starts with the band `[1, 200]`. The first two-leg run records the measured
-ratio in section 14. The row then narrows the band to twice the measured value.
+G3 starts with the band `[1, 200]`. The first two-leg run measured a ratio of
+about 163 (section 14). Twice the measured value is wider than 200, so the band
+stays `[1, 200]`. The reason is the host program: a measured step of about
+125 ms sits against a 0.764 ms device prediction.
 
 The report records two numbers, and no gate reads them:
 
 - MFU. At 64 tokens per step, one row of sequence 64 at `BASE_BATCH` 1, the
   device bound is about 1 ms inside a step of tens of milliseconds. MFU
-  therefore reads near 0.01 percent. The step time of section 14 is an
-  assumption until row 9 measures it.
+  therefore reads near 0.01 percent. Section 14 records the measured step time.
 - The cross-leg speed ratio. The chain is bound by launches at this shape, so a
   ratio below one is correct and a ratio above one is also correct.
 
-The two legs exercise different branches of the startup hardware check. The
-check keys on the device capability (`src/hw_gate.cc`), so the T4 leg reports a
-skip and the H100 leg runs the fp8 conversion, the scaled fp8 GEMM, and the
-attention cases.
+The two legs report the startup hardware check as `not_run`. The check is a
+start-up step of the single-device `TrainRunner`, and the chain's base stage is
+the mesh trainer, which builds its own runtime and never calls it. A hand-wired
+call on the H100 failed: `cublasLtMatmulAlgoGetHeuristic` returned status 15 for
+the scaled fp8 GEMM at the gate's shapes. The fp8 fast-accumulate attribute is
+an Ada (8.9) feature, and Hopper (9.0) rejects it with status 7. Both defects are
+now guarded (`backends/cuda/gemm.cu`, `src/hw_gate.cc`, `src/ops.cc`), and the
+gate stays out of the chain until the Hopper fp8 path has its own row.
 
 ## 9. Work rows
 
@@ -317,12 +326,10 @@ Rows 0 to 8 are in the tree. Four things a reader should not re-measure:
   and the non-ASCII check of `tools/nanochat lint` is the gate that says so. The
   forecast was written from a branch whose comments had accumulated em dashes;
   the arithmetic in the tree was never affected.
-- **Row 9 is still owed, and it stays manual.** Nothing in rows 0 to 8 runs
-  either leg of the two-leg path on a card: row 1 built `hopper` for `sm_90`
-  without a Hopper card to run it on, and row 6's tests exercise the gate
-  functions on recorded documents. So the measured step time of section 14 is
-  still an assumption, the MFU of section 8 still reads near 0.01 percent
-  without a run, and the G3 ratio band is still `[1, 200]`.
+- **Row 9 ran on 2026-10-31, and it stays manual.** Section 14 records the
+  measured step time, the MFU, and the G3 ratio. The chain reports the hardware
+  check as `not_run`, and a hand-wired gate failed in the Hopper fp8 GEMM, so the
+  fp8 operators need their own row.
 - **The roofline limit column is not uniformly `launch`.** Section 14 printed
   `launch` for all four rows. The tool prints `launch` for the binding row of
   three of them, and the standard shape on a T4 at fp32 binds on `compute`: two
@@ -370,8 +377,8 @@ A13 guards the decision in section 6.
 
 ## 12. Risks
 
-- No row proves the `sm_90` bf16 build until row 1 runs here and row 9 runs on
-  Modal. Row 1 catches a compile error on this host.
+- Row 9 ran the `sm_90` bf16 build on Modal, so the build is proven on the
+  card. Row 1 still catches a compile error on this host.
 - The H100 image adds a second build and a second cached image. The first deploy
   is slow, and later deploys use the cache.
 - Two legs double the run time. Each chain is under one minute, so the cost is
@@ -432,5 +439,28 @@ The measured chain of section 2 comes from the two-host harness of
 `pipeline-plan.md` section 2. That run did 205 steps in 8.60 seconds on a T4,
 or about 42 ms per step, at the `demo` shape.
 
-Row 9 supplies the measured step time for the `standard` shape on both legs. This
-document holds no fitted value.
+Row 9 ran on 2026-10-31 with `modal run tools/modal/app.py::pipeline_demo --job
+notebooks/pipeline_job.json`, at the `standard` job:
+
+| Leg | Precision | Base `step_ms` | Tokens per second | MFU | `total_seconds` |
+|---|---|---|---|---|---|
+| `t4` | fp32 | 128.74 | 497 | 0.93 % | 60.18 |
+| `h100` | bf16 | 124.39 | 446 | 0.008 % | 59.94 |
+
+The H100 base step is 0.966 times the T4 one, so G2 passes. The G3 ratio is
+162.8 against the 0.764 ms prediction, and G1 passes. Both legs delivered
+`deliver/chatrl.ckpt` at `stage=rl`, and the base loss fell from 6.1908 to
+0.0003 on the H100.
+
+The eval numbers do not match the `[0, 8]` band of A10. The base scores about
+0.0003 bits per byte and the RL checkpoint scores 11.8 on the H100 and 14.9 on
+the T4. The corpus holds 119 tokens and the chain overfits it, so A10 describes
+the CPU `demo` run and not this schedule.
+
+`startup_check` and `fp8_cases` read `not_run` in both reports, because the mesh
+trainer does not run the hardware correctness gate. Wiring the gate into the
+mesh driver made the H100 leg fail in `cublasLtMatmulAlgoGetHeuristic` (status
+15) for the scaled fp8 GEMM at the gate's 32x32 and 16x48 shapes. The
+fast-accumulate attribute failed earlier with status 7, because it is an Ada
+feature. The chain therefore proves bf16 training on Hopper, and the fp8 path on
+Hopper needs its own work item.

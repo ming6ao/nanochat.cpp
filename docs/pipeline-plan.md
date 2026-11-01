@@ -478,8 +478,8 @@ and they stay as recorded.
 | Local CPU | `cpu` | none | `train` scope | Bazel | `//python:pipeline_test`, default loop |
 | Local GPU | `cuda` | card | `t1-gpu` queue job | Bazel | `//python:pipeline_gpu_test`, `gpu` tag |
 | Colab | `cuda` | `sm_75` | `none` | bootstrap + Bazel | manual run; owed, and recorded as owed in `docs/host-portability.md` section 9.2 |
-| Modal, T4 leg | `cuda` | `sm_75` | `none` | image build, fp32 | `modal run ...::pipeline_demo`; owed, with the host block of `docs/host-portability.md` section 9.3 |
-| Modal, H100 leg | `cuda` | `sm_90` | `none` | image build, bf16 | the same entry point, gates G1 to G3 |
+| Modal, T4 leg | `cuda` | `sm_75` | `none` | image build, fp32 | `modal run ...::pipeline_demo`; recorded on 2026-10-31, with the host block of `docs/host-portability.md` section 9.3 |
+| Modal, H100 leg | `cuda` | `sm_90` | `none` | image build, bf16 | the same entry point; G1 to G3 pass, with the host block of `docs/host-portability.md` section 9.3 |
 | Modal CPU | `cpu` | none | `none` | image build, CPU config | verification only |
 
 The two Modal rows are one run of one job: the T4 leg first, then the H100 leg.
@@ -605,8 +605,11 @@ Each leg mirrors what the single leg did:
   starts no second Bazel build there.
 
 Gates G1 to G3 are section 7.1's subject. Their first two-leg run is row 9 of
-[pipeline-scaleup-plan.md](pipeline-scaleup-plan.md), and it is still owed: no
-leg of the table above has a measured number today.
+[pipeline-scaleup-plan.md](pipeline-scaleup-plan.md), and it ran on 2026-10-31:
+the T4 leg measured 128.74 ms per base step and the H100 leg 124.39 ms, and all
+three gates passed. The chain reports `startup_check: not_run`, because the mesh
+trainer does not call the hardware correctness gate; the fp8 path on Hopper needs
+its own row.
 
 The client half is `ModalTarget(function="pipeline")`, which needs a `function`
 argument that the class does not have today.
@@ -706,9 +709,10 @@ pipeline test: the entry point reads two reports and judges them
 
 G2 is a smoke check, not a throughput claim. Both legs are bound by the host
 program, so the gate catches a large regression and a broken device path; it
-does not measure the card. G3 starts with the band `[1, 200]` and the first
-two-leg run narrows it to twice the measured ratio, which is row 9 of
-[pipeline-scaleup-plan.md](pipeline-scaleup-plan.md) and is still owed.
+does not measure the card. G3 starts with the band `[1, 200]`, and the first
+two-leg run measured a ratio of 162.8. Twice the measured value is wider than
+200, so the band stays `[1, 200]` (row 9 of
+[pipeline-scaleup-plan.md](pipeline-scaleup-plan.md)).
 
 The document records two numbers that no gate reads: the MFU, and the cross-leg
 speed ratio. At 64 tokens per step, one row of sequence 64, the device bound is
@@ -767,10 +771,10 @@ what makes the chain bigger and gives it a second leg:
 | 8 | These documents | `tools/nanochat lint` |
 | 9 | Run both legs, record the numbers, and narrow the G3 band | `modal run tools/modal/app.py::pipeline_demo`, manual |
 
-Rows 0 to 8 have landed. Row 9 is still owed, and it is the only row of either
-table that needs a real Hopper card: until it runs, the `standard` step time is
-an assumption, the G3 ratio band stays the wide `[1, 200]` of section 8 in that
-document, and no leg of the two-leg run has a measured number.
+Rows 0 to 9 have landed. Row 9 ran on 2026-10-31: the `standard` step time is
+measured, the G3 ratio is 162.8, and all three gates pass. The band stays
+`[1, 200]` because twice the measured ratio is wider. The run also found two
+Hopper defects, both fixed (section 7.1 of that document).
 
 ## 9. Risks
 
@@ -881,8 +885,8 @@ P9):
   its explicit flag triple, and the H100 leg must never use the `h100` config,
   which is the simulator (P7 and section 6.3).
 - The gates are G1 to G3 of section 7.1: no gate reads an fp8 speedup and no gate
-  reads the MFU (P8). G3's ratio band stays `[1, 200]` until row 9 of the
-  extension runs on a real H100 and the band narrows to twice the measured ratio.
+  reads the MFU (P8). G3's ratio band stays `[1, 200]`, because the first H100
+  run measured a ratio of 162.8 and twice that value is wider than the band.
 - No frozen header changes for the extension. `caps.json` already declares bf16
   for the H100 (P9).
 
