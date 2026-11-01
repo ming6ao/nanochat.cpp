@@ -330,7 +330,12 @@ int RunEagerSeam(DecodeModel* m, int token_host, int pos) {
   auto point = [](nanochat::PointwiseOp op, int n, const ComputeType* a,
                   const ComputeType* b, float alpha, float beta,
                   ComputeType* out) {
-    nanochat::kernels::PointwiseForward(op, n, a, b, alpha, beta, out);
+    nanochat::PointwiseParams params;
+    params.op = op;
+    params.count = n;
+    params.alpha = alpha;
+    params.beta = beta;
+    nanochat::kernels::PointwiseForward(params, a, b, out);
   };
   auto embed = [&](int token, ComputeType* out) {
     nanochat::kernels::EmbeddingForward(1, c.d_model, &token, m->emb.ptr, out);

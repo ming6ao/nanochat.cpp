@@ -536,8 +536,15 @@ void LinearForward(const ComputeType* x, const ComputeType* w, ComputeType* y,
       // The weight is stored [out, in] (PyTorch's Linear convention).
       scaled.transpose_b = true;
       // The forward uses the reduced-precision reduction
-      // (docs/fp8-training.md section 5.2).
-      scaled.fast_accum = true;
+      // (docs/fp8-training.md section 5.2). Fast accumulation is an Ada (8.9)
+      // feature: Hopper (9.0) rejects the descriptor attribute, and
+      // `backends/cuda/gemm.cu` exits when it is asked for the flag there.
+      // Ask for it only where the device accepts it.
+      static const bool kFastAccum = [] {
+        const Caps caps = kernels::GetCaps();
+        return caps.compute_major == 8 && caps.compute_minor == 9;
+      }();
+      scaled.fast_accum = kFastAccum;
       scaled.format_a = Fp8Format::kE4M3;
       scaled.format_b = Fp8Format::kE4M3;
       scaled.scale_a = fp8->a_scale;
@@ -1135,9 +1142,14 @@ void ClassifierForward(const ClassifierShape& shape, const ComputeType* logits,
     if (targets[r] >= 0 && targets[r] < vocab) {
       kernels::EmbeddingForward(1, 1, targets + r, row_buffer.data(),
                                 gathered.data());
-      kernels::Memcpy(&target_value, gathered.data(), sizeof(ComputeType),
+      // Stage the gathered element at the compute type's own width. A copy of
+      // `sizeof(ComputeType)` bytes into a `float` leaves the high bytes of
+      // the value stale in a bf16 build, so the loss reads `lse` minus a wrong
+      // number.
+      ComputeType staged{};
+      kernels::Memcpy(&staged, gathered.data(), sizeof(ComputeType),
                       CopyDir::kDeviceToHost);
-      target_value = AsF(ToC(target_value));
+      target_value = AsF(staged);
     }
     // 4. loss = log-sum-exp - z[target], the same order the fused family uses.
     StoreScalar(losses + r, StageScalar(lse.data()) - target_value);
@@ -1198,14 +1210,15 @@ void ClassifierBackward(const ClassifierShape& shape, const ComputeType* logits,
     if (targets[r] >= 0 && targets[r] < vocab) {
       kernels::EmbeddingForward(1, 1, targets + r, sech2.data(),
                                 gathered.data());
-      kernels::Memcpy(&sech_target, gathered.data(), sizeof(ComputeType),
+      ComputeType staged{};
+      kernels::Memcpy(&staged, gathered.data(), sizeof(ComputeType),
                       CopyDir::kDeviceToHost);
-      sech_target = AsF(ToC(sech_target));
+      sech_target = AsF(staged);
     }
-    float current = 0.0f;
-    kernels::Memcpy(&current, u.data() + targets[r], sizeof(ComputeType),
+    ComputeType staged_current{};
+    kernels::Memcpy(&staged_current, u.data() + targets[r], sizeof(ComputeType),
                     CopyDir::kDeviceToHost);
-    current = AsF(ToC(current)) - sech_target * scale;
+    const float current = AsF(staged_current) - sech_target * scale;
     const ComputeType corrected = ToC(current);
     kernels::Memcpy(u.data() + targets[r], &corrected, sizeof(ComputeType),
                     CopyDir::kHostToDevice);
@@ -1270,11 +1283,24 @@ void GradNormForward(const float* const* grads, const int* counts,
     // here. This is the composition's second staging helper; the node report
     // records the missing primitive (a reduction whose operand is the
     // persistent fp32 type, or a cast entry in the utilities).
+    //
+    // The span table and the count table are device memory: the optimizer
+    // builds both once with `kernels::Alloc` (`NanochatOptimizer::Build`).
+    // Stage the two tables before the host loop, because a host read of a
+    // device pointer faults on the first span. The fp32 build passes the same
+    // two tables to `SpanReduce`, which reads them on the device.
+    std::vector<const float*> host_grads(static_cast<std::size_t>(num_spans));
+    std::vector<int> host_counts(static_cast<std::size_t>(num_spans));
+    kernels::Memcpy(host_grads.data(), grads,
+                    host_grads.size() * sizeof(const float*),
+                    CopyDir::kDeviceToHost);
+    kernels::Memcpy(host_counts.data(), counts,
+                    host_counts.size() * sizeof(int), CopyDir::kDeviceToHost);
     double acc = 0.0;
     for (int s = 0; s < num_spans; ++s) {
-      if (grads[s] == nullptr || counts[s] <= 0) continue;
-      std::vector<float> span(static_cast<std::size_t>(counts[s]));
-      kernels::Memcpy(span.data(), grads[s], span.size() * sizeof(float),
+      if (host_grads[s] == nullptr || host_counts[s] <= 0) continue;
+      std::vector<float> span(static_cast<std::size_t>(host_counts[s]));
+      kernels::Memcpy(span.data(), host_grads[s], span.size() * sizeof(float),
                       CopyDir::kDeviceToHost);
       for (float value : span) acc += static_cast<double>(value) * value;
     }

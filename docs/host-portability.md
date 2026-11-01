@@ -690,7 +690,7 @@ What only the entry point does:
   `docs/pipeline-scaleup-plan.md` narrows it. No gate reads the MFU or the speed
   ratio.
 
-The T4 leg has one recorded run. `modal run tools/modal/app.py::pipeline_demo`
+The T4 leg has a recorded run. `modal run tools/modal/app.py::pipeline_demo`
 ran on 2026-10-31, before the second leg existed, on a T4 and at the demo job of
 that day. This is the host block and the outcome of the report it delivered:
 
@@ -705,10 +705,25 @@ that day. This is the host block and the outcome of the report it delivered:
 | base loss | 6.1874 to 0.0049 |
 | `total_seconds` | 4.46 |
 
-The H100 leg has no recorded run. The first two-leg run is row 9 of
-`docs/pipeline-scaleup-plan.md`, and it is still owed: a row appears above only
-after a run produces one, and no number of the H100 leg is a forecast in a
-table that reads as a measurement.
+The two-leg run is row 9 of `docs/pipeline-scaleup-plan.md`. It ran on 2026-10-31
+at the `standard` job and recorded both legs:
+
+| Item | T4 leg | H100 leg |
+|---|---|---|
+| `host.arch` | `sm_75` | `sm_90` |
+| `host.precision` | `fp32` | `bf16` |
+| base `step_ms` | 128.74 | 124.39 |
+| MFU | 0.93 % | 0.008 % |
+| `total_seconds` | 60.18 | 59.94 |
+| delivered | `deliver/chatrl.ckpt` | `deliver/chatrl.ckpt` |
+| gates G1 to G3 | pass | pass |
+
+`startup_check` reads `not_run` in both reports: the chain's mesh trainer does
+not call the hardware correctness gate. A hand-wired gate failed on the H100 in
+the scaled fp8 GEMM (`cublasLtMatmulAlgoGetHeuristic`, status 15), and the fp8
+fast-accumulate attribute is an Ada feature that Hopper rejects. Both Hopper
+defects are guarded in `backends/cuda/gemm.cu`, `src/hw_gate.cc`, and
+`src/ops.cc`.
 
 The image work is not what it looks like. The layer chain takes 49 seconds on
 a cached base image: copy 2.1 s, install 6.6 s, environment 1.6 s, and the

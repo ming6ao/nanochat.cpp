@@ -314,9 +314,14 @@ void CheckScaledGemm(const std::string& name, int m, int n, int k,
 // Cases 2 to 6: the three operand roles, the three layouts, and the
 // fast-accumulation flag.
 void CheckScaledGemmCases() {
+  // Fast accumulation is an Ada (8.9) feature. Hopper (9.0) supports the
+  // scaled fp8 GEMM but rejects the descriptor attribute, so ask for it only
+  // where the driver accepts it (`backends/cuda/gemm.cu`).
+  const Caps caps = kernels::GetCaps();
+  const bool fast_accum = caps.compute_major == 8 && caps.compute_minor == 9;
   CheckScaledGemm("forward E4M3", 32, 32, 32, /*transpose_a=*/false,
                   /*transpose_b=*/true, Fp8Format::kE4M3, Fp8Format::kE4M3,
-                  /*beta=*/0.0f, /*fast_accum=*/true, /*fp32_output=*/false);
+                  /*beta=*/0.0f, fast_accum, /*fp32_output=*/false);
   CheckScaledGemm("dgrad E5M2/E4M3", 32, 32, 32, false, false, Fp8Format::kE5M2,
                   Fp8Format::kE4M3, 0.0f, false, false);
   CheckScaledGemm("wgrad E5M2/E4M3", 32, 32, 32, /*transpose_a=*/true, false,
@@ -324,11 +329,11 @@ void CheckScaledGemmCases() {
                   /*fp32_output=*/true);
   // A non-square layout, so a wrong stride shows.
   CheckScaledGemm("layout non-square", 16, 48, 32, false, true,
-                  Fp8Format::kE4M3, Fp8Format::kE4M3, 0.0f, true, false);
+                  Fp8Format::kE4M3, Fp8Format::kE4M3, 0.0f, fast_accum, false);
   // The fast-accumulation pair. The flag changes the reduction, and both
   // results stay inside the bound.
   CheckScaledGemm("fast accum on", 16, 64, 32, false, true, Fp8Format::kE4M3,
-                  Fp8Format::kE4M3, 0.0f, true, false);
+                  Fp8Format::kE4M3, 0.0f, fast_accum, false);
   CheckScaledGemm("fast accum off", 16, 64, 32, false, true, Fp8Format::kE4M3,
                   Fp8Format::kE4M3, 0.0f, false, false);
 }
