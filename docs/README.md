@@ -24,8 +24,6 @@ detailed reference that the design points at.
 | [client-runtime-design.md](client-runtime-design.md) | The single-client multi-device runtime: one program, a device mesh, placement, the in-process collective, the C++ mesh training driver, and the compatibility process runtime |
 | [performance.md](performance.md) | Performance measurement protocol and the debugging interface |
 | [performance-model.md](performance-model.md) | The analytic throughput model: the operation counters, the device rates, the roofline, and the prediction record |
-| [r1-fused-rotary.md](r1-fused-rotary.md) | The fused rotary leg: the parity gap in its backward, the measured host cost, and the rows that close it |
-| [r2-muon-step.md](r2-muon-step.md) | One efficient Muon step: the measured optimizer share, the reference's compiled bf16 graph, and the rows that match it |
 | [cpu-performance.md](cpu-performance.md) | CPU backend baseline, cause, design, and phase results |
 | [attention.md](attention.md) | Attention baseline, Pascal feasibility, the fused window, results |
 | [attention-tensor-core.md](attention-tensor-core.md) | Tensor-core attention: the fused tile in a bf16 or fp8 build, and the fp8 coupling |

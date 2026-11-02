@@ -3,8 +3,7 @@
 // head_dim=4, num_heads=2, plus a grouped-query variant -- and one model shape:
 // head_dim 128, seq 64, batch 2, the real rotary base 100000, scale 1.2, with
 // the grouped-query geometry the 20-layer shape runs. Every case compares at
-// kQkPrepPathAtol. See docs/testing.md and docs/r1-fused-rotary.md sections 3,
-// 5.2, and 8.
+// kQkPrepPathAtol. See docs/testing.md.
 
 #include <cmath>
 #include <cstdio>
@@ -159,7 +158,7 @@ int main() {
   // They now compare at kQkPrepPathAtol too: against the composition's
   // arithmetic the backward is bit-identical at this size and the forward is
   // 3.6e-07 away, so 1e-4 was the bound of that first row and not a measured
-  // floor. Tightening a bound is allowed; widening never is (R1-T4, R1-D2).
+  // floor. Tightening a bound is allowed; widening never is.
   constexpr int kTinySeq = 8;
   constexpr int kTinyHeadDim = 4;
   std::vector<float> tiny_cos;
@@ -181,7 +180,7 @@ int main() {
   gqa.num_kv_heads = 1;
   RunCase(gqa, kQkPrepPathAtol, tiny_cos, tiny_sin, /*check_grad=*/true);
 
-  // The model shape (R1.2): head_dim 128, seq 64, batch 2, the real rotary base
+  // The model shape: head_dim 128, seq 64, batch 2, the real rotary base
   // 100000, scale 1.2, and the grouped-query geometry the 20-layer shape runs.
   constexpr int kModelHeadDim = 128;
   constexpr int kModelSeq = 64;
@@ -204,7 +203,7 @@ int main() {
   // it does that at four bounds (forward q and k, backward dq and dk). Measured
   // on this case at kQkPrepPathAtol: forward 7.15e-07, backward 0.00, the
   // backward being bit-identical once its two row statistics accumulate in
-  // double (docs/r1-fused-rotary.md section 5.2).
+  // double.
   RunCase(model, kQkPrepPathAtol, model_cos, model_sin, /*check_grad=*/false);
 
   if (Failures() != 0) {
