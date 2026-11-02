@@ -94,6 +94,11 @@ COMMANDS = (
         "                             CPU only, no GPU queue; see",
         "                             docs/performance-model.md",
     )),
+    Command("pgo", (
+        "  pgo <action> [opts]        the profile-guided optimization loop:",
+        "                             measure, trace, analyze, compare, status;",
+        "                             see docs/profile-guided-optimization.md",
+    )),
     Command("doctor", (
         "  doctor [--json]            print environment, device, sandbox, and queue state",
     )),

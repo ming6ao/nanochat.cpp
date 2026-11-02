@@ -522,6 +522,18 @@ def _tempdir(prefix: str) -> str:
     return tempfile.mkdtemp(prefix=prefix, dir="/tmp")
 
 
+def cmd_pgo(argv: list[str], ctx: Context) -> int:
+    """The profile-guided loop (docs/profile-guided-optimization.md).
+
+    The loop is Python and the host tool is Python, so the command forwards to
+    the module instead of starting a process. The Modal SDK is the one thing the
+    loop needs that this tool does not, and ``NANOCHAT_MODAL`` names its
+    executable when the host keeps it outside ``PATH``.
+    """
+    from . import pgo
+    return pgo.main(argv)
+
+
 def cmd_doctor(argv: list[str], ctx: Context) -> int:
     as_json = argv[:1] == ["--json"]
     values = _doctor_values()
@@ -1012,6 +1024,7 @@ COMMANDS = {
     "bench": _alias("t3-bench"),
     "profile": cmd_profile,
     "roofline": cmd_roofline,
+    "pgo": cmd_pgo,
     "doctor": cmd_doctor,
     "simulate": cmd_simulate,
     "verify": _alias("t2-parity"),

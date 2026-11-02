@@ -1,8 +1,11 @@
 """Attribute an Nsight Systems trace of the nanochat.cpp base stage.
 
-The input is the directory ``tools/modal/app.py::profile_h100`` writes on the
-runs Volume. The tool answers three questions from the trace bytes and never
-from a stopwatch:
+The input is the directory ``tools/modal/app.py::profile_stage`` writes on the
+runs Volume. ``nanochat_cpp.pgo analyze`` is the tested instrument, and this is
+the standalone form that came first; the skill's ``analyze.py`` calls that one.
+
+The tool answers three questions from the trace bytes and never from a
+stopwatch:
 
 * how much of the wall time the device was busy, and how much it was idle;
 * where each idle stretch comes from, by naming the driver call that was in
@@ -13,7 +16,7 @@ from a stopwatch:
 It also writes a Chrome trace JSON, the format ``torch.profiler`` emits, so the
 timeline opens in Perfetto or ``chrome://tracing``.
 
-    python profiles/h100-base-20step/summarize_trace.py \
+    python .agents/skills/pgo/scripts/summarize_trace.py \
         --dir /path/to/trace_dir --steps 20 --json trace.json
 """
 

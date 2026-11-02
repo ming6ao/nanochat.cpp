@@ -6,7 +6,11 @@ step, and a step window runs from one cluster midpoint to the next. That needs n
 gradient-norm burst, so the same script measures a run whose step stages its
 gradients and one whose step does not.
 
-    python analyze.py <trace_dir> [steps]
+    python .agents/skills/pgo/scripts/analyze_step.py <trace_dir> [steps]
+
+Use it for a stage whose step no loss copy marks: it cuts at the optimizer
+kernel cluster instead, so it also measures the stages that ``pgo.py analyze``
+cannot segment yet.
 """
 
 import bisect
@@ -200,9 +204,12 @@ def main(directory, steps=20):
     for key in sorted(keys, key=lambda k: -mean_breakdown(steady, k)):
         print(f"  {key:<22}{mean_breakdown(steady, key):>9.1f} ms")
     print()
-    print(f"launches/step            {statistics.median(w['launches'] for w in steady):>9.0f}")
-    print(f"D2H copies/step          {statistics.median(w['d2h_count'] for w in steady):>9.0f}")
-    print(f"D2H bytes/step           {statistics.median(w['d2h_bytes'] for w in steady):>9.0f} MB")
+    launches = statistics.median(w["launches"] for w in steady)
+    copies = statistics.median(w["d2h_count"] for w in steady)
+    megabytes = statistics.median(w["d2h_bytes"] for w in steady)
+    print(f"launches/step            {launches:>9.0f}")
+    print(f"D2H copies/step          {copies:>9.0f}")
+    print(f"D2H bytes/step           {megabytes:>9.0f} MB")
 
 
 def mean_breakdown(steady, key):
@@ -210,4 +217,7 @@ def mean_breakdown(steady, key):
 
 
 if __name__ == "__main__":
+    if len(sys.argv) < 2:
+        print("usage: analyze_step.py <trace_dir> [steps]", file=sys.stderr)
+        raise SystemExit(2)
     main(sys.argv[1], int(sys.argv[2]) if len(sys.argv) > 2 else 20)

@@ -10,12 +10,17 @@ package(default_visibility = ["//visibility:public"])
 
 exports_files(["app.py"])
 
+# The loop's commands name an entry point of this app, so the test reads both
+# sides: the app, and `nanochat_cpp.pgo`.
 py_test(
     name = "modal_app_test",
     srcs = ["modal_app_test.py"],
     data = ["app.py"],
     size = "small",
-    deps = ["//notebooks:target"],
+    deps = [
+        "//notebooks:target",
+        "//python:nanochat_cpp",
+    ],
 )
 
 test_suite(

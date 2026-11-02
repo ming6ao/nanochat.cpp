@@ -88,9 +88,11 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import signal
 import subprocess
 import sys
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping, Sequence
@@ -414,6 +416,12 @@ def _build_image(leg: Leg):
         )
         .add_local_dir(str(REPO), remote_path=REPO_ROOT, copy=True,
                        ignore=[".git", "bazel-*", "**/__pycache__",
+                               # The profile artifacts of
+                               # `docs/profile-guided-optimization.md` are local
+                               # measurements, and one trace is hundreds of
+                               # megabytes. The loop passes its job file as a
+                               # JSON string, so the image never reads them.
+                               "profiles",
                                # The host file of `docs/host-portability.md`
                                # section 8.3 pins the compiler and the budget of
                                # the workstation, such as /usr/bin/gcc-12, which
@@ -1678,6 +1686,366 @@ def profile_h100(job_json: str, run_id: str, steps: int = 20,
 
 
 # ---------------------------------------------------------------------------
+# The optimization loop: one stage, one device, one trace or one measurement
+# ---------------------------------------------------------------------------
+
+#: The stages the loop targets. Three of them train and one only measures, so
+#: ``eval`` reports a throughput and no MFU.
+PGO_STAGES = ("base", "sft", "rl", "eval")
+
+#: One driver module for all four stages, so a stage costs a branch and not a
+#: second file. It runs the chain's own stage function where the chain has one,
+#: and it prints one JSON document whatever the stage: the loop reads that
+#: document, so a stage that reports nothing is a fault the loop sees at once.
+#:
+#: A stage that the chain always runs after another one runs here on a fresh
+#: model. The trace measures a throughput, and the shapes are the same whether
+#: the weights came from a checkpoint or from the initializer.
+PGO_DRIVER = (
+    '"""Run one stage of one job file for the optimization loop."""\n'
+    "import dataclasses, json, sys, time\n"
+    "from pathlib import Path\n"
+    "from nanochat_cpp import api, pipeline as pl, rl, sft\n"
+    "\n"
+    "\n"
+    "def metric_times(path):\n"
+    "    \"\"\"The per-step seconds a driver wrote, in milliseconds.\"\"\"\n"
+    "    times = []\n"
+    "    if not path or not Path(path).is_file():\n"
+    "        return times\n"
+    "    for line in Path(path).read_text(encoding='utf-8').splitlines():\n"
+    "        line = line.strip()\n"
+    "        if not line:\n"
+    "            continue\n"
+    "        try:\n"
+    "            record = json.loads(line)\n"
+    "        except ValueError:\n"
+    "            continue\n"
+    "        value = record.get('step_seconds')\n"
+    "        if value:\n"
+    "            times.append(1000.0 * float(value))\n"
+    "    return times\n"
+    "\n"
+    "\n"
+    "def deltas(marks):\n"
+    "    \"\"\"The gap between successive timestamps, in milliseconds.\"\"\"\n"
+    "    return [1000.0 * (after - before)\n"
+    "            for before, after in zip(marks, marks[1:])]\n"
+    "\n"
+    "\n"
+    "def run(stage, job, steps):\n"
+    "    \"\"\"One stage of one job at a step budget.\"\"\"\n"
+    "    shape = pl.config(job)\n"
+    "    corpus = pl.build_corpus(job)\n"
+    "    answer = {'stage': stage, 'steps': int(steps)}\n"
+    "    if stage == 'base':\n"
+    "        record = pl.stage_base(dataclasses.replace(job, base_steps=steps))\n"
+    "        answer['stage_seconds'] = float(record.seconds)\n"
+    "        answer['step_ms'] = metric_times(record.extra.get('metrics'))\n"
+    "        answer['mfu'] = record.extra.get('mfu')\n"
+    "        answer['tokens_per_second'] = record.extra.get('tokens_per_sec')\n"
+    "        return answer\n"
+    "    tokenizer = api.Tokenizer.load(corpus['tokenizer'])\n"
+    "    if stage == 'sft':\n"
+    "        folder = Path(str(pl._run_dir(job))) / 'sft'\n"
+    "        folder.mkdir(parents=True, exist_ok=True)\n"
+    "        shard = folder / 'pgo_rows.nchsft'\n"
+    "        sft.pack(shard, pl._conversations(corpus), tokenizer, shape.seq_len)\n"
+    "        started = time.monotonic()\n"
+    "        status = sft.run(shard, folder / 'pgo.ckpt', config=shape,\n"
+    "                         num_iterations=int(steps), batch=pl.SFT_BATCH,\n"
+    "                         seq_len=shape.seq_len, seed=int(job.seed))\n"
+    "        answer['stage_seconds'] = time.monotonic() - started\n"
+    "        answer['status'] = int(status)\n"
+    "        return answer\n"
+    "    if stage == 'rl':\n"
+    "        prompts = pl._conversations(corpus)[:int(job.num_prompts)]\n"
+    "        marks = [time.monotonic()]\n"
+    "\n"
+    "        def on_step(step, loss, grad_norm, rewards):\n"
+    "            marks.append(time.monotonic())\n"
+    "\n"
+    "        report = rl.run(pl.GradedReward(), prompts,\n"
+    "                        num_samples=int(job.num_samples), steps=int(steps),\n"
+    "                        config=shape, max_tokens=int(job.max_tokens),\n"
+    "                        temperature=float(job.temperature),\n"
+    "                        top_k=int(job.top_k), seed=int(job.seed),\n"
+    "                        on_step=on_step, save_final=False)\n"
+    "        answer['step_ms'] = deltas(marks)\n"
+    "        answer['stage_seconds'] = sum(answer['step_ms']) / 1000.0\n"
+    "        answer['mean_rewards'] = [float(value)\n"
+    "                                  for value in report.mean_rewards]\n"
+    "        return answer\n"
+    "    model = api.Model(shape)\n"
+    "    started = time.monotonic()\n"
+    "    report = api.evaluate(model, corpus['parquet'], tokenizer,\n"
+    "                          steps=int(steps), batch=pl.EVAL_BATCH,\n"
+    "                          seed=int(job.seed))\n"
+    "    answer['stage_seconds'] = max(time.monotonic() - started, 1e-9)\n"
+    "    answer['samples_per_second'] = float(steps) / answer['stage_seconds']\n"
+    "    answer['bpb'] = float(report.bpb)\n"
+    "    return answer\n"
+    "\n"
+    "\n"
+    "def main():\n"
+    "    stage, job_path, steps = sys.argv[1], sys.argv[2], int(sys.argv[3])\n"
+    "    job = pl.Job.read(job_path)\n"
+    "    print(json.dumps(run(stage, job, steps), sort_keys=True), flush=True)\n"
+    "\n"
+    "\n"
+    "main()\n"
+)
+
+
+def pgo_driver_argv(driver_path, stage, job_path, steps) -> list:
+    """The command the container runs for one stage of one job."""
+    return [sys.executable, str(driver_path), str(stage), str(job_path),
+            str(int(steps))]
+
+
+def _timeout_run(argv, env, log, seconds: int) -> int:
+    """Run one command with a wall-clock cap, and stop it politely.
+
+    Nsight Systems writes its report when the application exits, so the cap
+    sends ``SIGINT`` to the process group first. That is the signal the driver
+    already handles: it saves its checkpoint and returns. A process still alive
+    after the grace period is killed, and the answer says which happened.
+    """
+    log.write(f"$ {' '.join(str(item) for item in argv)}\n")
+    log.flush()
+    try:
+        started = time.monotonic()
+        process = subprocess.Popen(argv, env=env, stdout=log,
+                                   stderr=subprocess.STDOUT,
+                                   start_new_session=True)
+    except OSError as error:
+        log.write(f"modal: {error}\n")
+        return 127
+    try:
+        return int(process.wait(timeout=max(30, int(seconds))))
+    except subprocess.TimeoutExpired:
+        log.write(f"modal: the cap of {seconds} s reached; sending SIGINT\n")
+        log.flush()
+        for signal_number, grace in ((signal.SIGINT, 60), (signal.SIGKILL, 15)):
+            try:
+                os.killpg(os.getpgid(process.pid), signal_number)
+            except OSError:
+                break
+            try:
+                return int(process.wait(timeout=grace))
+            except subprocess.TimeoutExpired:
+                continue
+        return -int(time.monotonic() - started)
+
+
+def _pgo_paths(job: dict, run_id: str, leg: Leg, stage: str, steps: int):
+    """The run directory, the job file it froze, and the driver it runs."""
+    job["out_root"] = str(Path(REMOTE_ROOT) / str(run_id))
+    run_dir = Path(REMOTE_ROOT) / str(run_id)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    job_path = run_dir / "job.json"
+    job_path.write_text(json.dumps(job, sort_keys=True) + "\n",
+                        encoding="utf-8")
+    driver_path = run_dir / "pgo_driver.py"
+    driver_path.write_text(PGO_DRIVER, encoding="utf-8")
+    return run_dir, job_path, driver_path
+
+
+def _trace_on(leg: Leg, stage: str, job_json: str, run_id: str,
+              steps: int, seconds: int, domains: str = NSYS_TRACE_DOMAINS,
+              sample: str = NSYS_SAMPLE) -> str:
+    """Trace one stage of one job file on one leg and return the artifacts.
+
+    The driver is the chain's own stage function, so the trace belongs to the
+    run the report describes. The cap of ``seconds`` arrives as a signal and not
+    as a kill, so a run that the cap stops still writes its report.
+    """
+    if stage not in PGO_STAGES:
+        raise ValueError(f"unknown stage {stage!r}")
+    source = package_source()
+    job = json.loads(job_json)
+    _check_cards(leg, json.dumps(job, sort_keys=True))
+    run_dir, job_path, driver_path = _pgo_paths(job, run_id, leg, stage, steps)
+    trace_dir = run_dir / PROFILE_DIRNAME
+    trace_dir.mkdir(parents=True, exist_ok=True)
+    report = trace_dir / f"{stage}.nsys-rep"
+    env = worker_env(source)
+    log_path = run_dir / "profile.log"
+    status = {}
+    sums = list(NSYS_SUM_REPORTS)
+    if "cublas" in str(domains):
+        sums.append("cublas_api_sum")
+    stop = threading.Event()
+    keeper = threading.Thread(target=_commit_loop,
+                              args=(runs, stop, COMMIT_SECONDS), daemon=True)
+    keeper.start()
+    try:
+        with log_path.open("w", encoding="utf-8") as log:
+            status["profile"] = _timeout_run(
+                nsys_argv(trace_dir / stage,
+                          pgo_driver_argv(driver_path, stage, job_path, steps),
+                          domains, sample), env, log, seconds)
+            if report.is_file():
+                status["sqlite"] = _run_step(
+                    nsys_export_argv(report, trace_dir / stage), env, log)
+                status["sums"] = _run_step(
+                    nsys_stats_argv(report, trace_dir / stage, sums), env, log)
+                status["traces"] = _run_step(
+                    nsys_stats_argv(report, trace_dir / "timeline",
+                                    NSYS_TRACE_REPORTS), env, log)
+    finally:
+        stop.set()
+        runs.commit()
+    files = [{"name": path.name, "bytes": path.stat().st_size}
+             for path in sorted(trace_dir.iterdir())]
+    answer = {"leg": leg.name, "stage": stage, "steps": int(steps),
+              "seconds": int(seconds), "domains": str(domains),
+              "sample": str(sample), "source": source,
+              "run_dir": str(run_dir), "trace_dir": str(trace_dir),
+              "report": str(report), "status": status, "files": files,
+              "kernel_sum": _csv_rows(trace_dir / f"{stage}_cuda_gpu_kern_sum.csv"),
+              "api_sum": _csv_rows(trace_dir / f"{stage}_cuda_api_sum.csv"),
+              "log_tail": "\n".join(
+                  log_path.read_text(encoding="utf-8").splitlines()[-20:])}
+    return json.dumps(answer, sort_keys=True)
+
+
+def _measure_on(leg: Leg, stage: str, job_json: str, run_id: str,
+                steps: int, seconds: int, times: int = 2) -> str:
+    """Run one stage untraced, ``times`` times, and return what it reported.
+
+    The profiler costs about 28 percent of the step rate, so the loop scores
+    this answer and never the trace. Each run gets its own output root, so a
+    metric file of one run cannot be read as the metric file of the next.
+    """
+    if stage not in PGO_STAGES:
+        raise ValueError(f"unknown stage {stage!r}")
+    source = package_source()
+    base_job = json.loads(job_json)
+    _check_cards(leg, json.dumps(base_job, sort_keys=True))
+    env = worker_env(source)
+    run_dir = Path(REMOTE_ROOT) / str(run_id)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    log_path = run_dir / "measure.log"
+    results = []
+    stop = threading.Event()
+    keeper = threading.Thread(target=_commit_loop,
+                              args=(runs, stop, COMMIT_SECONDS), daemon=True)
+    keeper.start()
+    try:
+        with log_path.open("w", encoding="utf-8") as log:
+            for index in range(max(1, int(times))):
+                job = dict(base_job)
+                driver_path = run_dir / f"pgo_driver_{index}.py"
+                driver_path.write_text(PGO_DRIVER, encoding="utf-8")
+                job["out_root"] = str(run_dir / f"run-{index}")
+                job_path = run_dir / f"job-{index}.json"
+                job_path.write_text(json.dumps(job, sort_keys=True) + "\n",
+                                    encoding="utf-8")
+                code = _timeout_run(
+                    pgo_driver_argv(driver_path, stage, job_path, steps),
+                    env, log, seconds)
+                answer = _last_json_block(
+                    log_path.read_text(encoding="utf-8"))
+                results.append({"run": index, "status": int(code),
+                                **(answer or {})})
+    finally:
+        stop.set()
+        runs.commit()
+    document = {"leg": leg.name, "stage": stage, "steps": int(steps),
+                "seconds": int(seconds), "source": source,
+                "run_dir": str(run_dir), "runs": results,
+                "log_tail": "\n".join(
+                    log_path.read_text(encoding="utf-8").splitlines()[-20:])}
+    return json.dumps(document, sort_keys=True)
+
+
+def _last_json_block(text: str):
+    """The last JSON object on one or more lines of a log."""
+    for line in reversed(str(text or "").splitlines()):
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            value = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(value, dict):
+            return value
+    return None
+
+
+@app.function(
+    image=profile_image_for(H100),
+    gpu=H100.gpu,
+    cpu=CPU_CORES,
+    volumes={REMOTE_ROOT: runs},
+    secrets=_secrets(),
+    timeout=TIMEOUT_SECONDS,
+    max_containers=1,
+)
+def profile_stage_h100(stage: str, job_json: str, run_id: str, steps: int = 50,
+                       seconds: int = 180, domains: str = NSYS_TRACE_DOMAINS,
+                       sample: str = NSYS_SAMPLE) -> str:
+    """Trace one stage of one job file on the H100 leg."""
+    return _trace_on(H100, stage, job_json, run_id, steps, seconds, domains,
+                     sample)
+
+
+@app.function(
+    image=profile_image_for(T4),
+    gpu=T4.gpu,
+    cpu=CPU_CORES,
+    volumes={REMOTE_ROOT: runs},
+    secrets=_secrets(),
+    timeout=TIMEOUT_SECONDS,
+    max_containers=1,
+)
+def profile_stage_t4(stage: str, job_json: str, run_id: str, steps: int = 50,
+                     seconds: int = 180, domains: str = NSYS_TRACE_DOMAINS,
+                     sample: str = NSYS_SAMPLE) -> str:
+    """Trace one stage of one job file on the T4 leg."""
+    return _trace_on(T4, stage, job_json, run_id, steps, seconds, domains,
+                     sample)
+
+
+@app.function(
+    image=profile_image_for(H100),
+    gpu=H100.gpu,
+    cpu=CPU_CORES,
+    volumes={REMOTE_ROOT: runs},
+    secrets=_secrets(),
+    timeout=TIMEOUT_SECONDS,
+    max_containers=1,
+)
+def measure_stage_h100(stage: str, job_json: str, run_id: str,
+                       steps: int = 50, seconds: int = 180,
+                       times: int = 2) -> str:
+    """Measure one stage of one job file on the H100 leg, untraced.
+
+    It takes the profile image so one iteration builds one image: the tree hash
+    decides the build, and a second image would double it for no gain.
+    """
+    return _measure_on(H100, stage, job_json, run_id, steps, seconds, times)
+
+
+@app.function(
+    image=profile_image_for(T4),
+    gpu=T4.gpu,
+    cpu=CPU_CORES,
+    volumes={REMOTE_ROOT: runs},
+    secrets=_secrets(),
+    timeout=TIMEOUT_SECONDS,
+    max_containers=1,
+)
+def measure_stage_t4(stage: str, job_json: str, run_id: str,
+                     steps: int = 50, seconds: int = 180,
+                     times: int = 2) -> str:
+    """Measure one stage of one job file on the T4 leg, untraced."""
+    return _measure_on(T4, stage, job_json, run_id, steps, seconds, times)
+
+
+# ---------------------------------------------------------------------------
 # The two-leg document: the summaries, the comparison, and the gates
 # ---------------------------------------------------------------------------
 
@@ -2026,6 +2394,60 @@ def demo_job(run_id: str = "demo") -> dict:
     except Exception:  # noqa: BLE001 - a host without the package falls back
         return dict(DEMO_JOB, run_id=str(run_id))
     return dict(Job(run_id=str(run_id)).to_dict())
+
+
+@app.local_entrypoint()
+def profile_stage(stage: str = "base", device: str = "h100",
+                  run_id: str = "", job: str = "", steps: int = 50,
+                  seconds: int = 180, domains: str = NSYS_TRACE_DOMAINS,
+                  sample: str = NSYS_SAMPLE) -> None:
+    """Trace one stage of one job file on one device and print the answer.
+
+        modal run tools/modal/app.py::profile_stage --stage base \\
+            --device h100 --job job.json --steps 50 --seconds 180
+
+    One Nsight Systems container writes the report, its SQLite copy, the sum
+    CSVs, and the two timeline CSVs to ``/runs/<run_id>/profile``. Copy them
+    with ``modal volume get nanochat-runs <run_id>/profile ./trace``, or let
+    ``python -m nanochat_cpp.pgo trace`` do it.
+    """
+    payload = (json.loads(Path(job).read_text(encoding="utf-8"))
+               if job else demo_job())
+    tag = str(run_id or f"pgo-{stage}-{device}")
+    function = {"h100": profile_stage_h100, "t4": profile_stage_t4}
+    if device not in function:
+        raise SystemExit(f"unknown device {device!r}; use h100 or t4")
+    answer = json.loads(function[device].remote(
+        str(stage), json.dumps(payload, sort_keys=True), tag, int(steps),
+        int(seconds), str(domains), str(sample)))
+    print(json.dumps(answer, indent=1, sort_keys=True))
+    if any(code != 0 for code in (answer.get("status") or {}).values()):
+        print("modal: one profile step did not finish", file=sys.stderr)
+        raise SystemExit(1)
+
+
+@app.local_entrypoint()
+def measure_stage(stage: str = "base", device: str = "h100",
+                  run_id: str = "", job: str = "", steps: int = 50,
+                  seconds: int = 180, runs: int = 2) -> None:
+    """Measure one stage of one job file untraced and print the answer.
+
+        modal run tools/modal/app.py::measure_stage --stage base \\
+            --device h100 --job job.json --runs 2
+
+    The answer holds one entry per run. ``nanochat_cpp.pgo measure`` scores the
+    better of them, because interference only ever slows a run.
+    """
+    payload = (json.loads(Path(job).read_text(encoding="utf-8"))
+               if job else demo_job())
+    tag = str(run_id or f"pgo-{stage}-{device}-measure")
+    function = {"h100": measure_stage_h100, "t4": measure_stage_t4}
+    if device not in function:
+        raise SystemExit(f"unknown device {device!r}; use h100 or t4")
+    answer = json.loads(function[device].remote(
+        str(stage), json.dumps(payload, sort_keys=True), tag, int(steps),
+        int(seconds), int(runs)))
+    print(json.dumps(answer, indent=1, sort_keys=True))
 
 
 @app.local_entrypoint()

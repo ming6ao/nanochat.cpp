@@ -5,7 +5,12 @@ The comparison is the numeric gate for a change that touches the optimizer: the
 loss and the pre-clip gradient norm must agree, and the step time is what the
 change is for.
 
-    python compare.py <before.jsonl> <after.jsonl>
+    python .agents/skills/pgo/scripts/compare_runs.py <before.jsonl> <after.jsonl>
+
+The result is ``gate.json``'s numeric leg. Read ``references/gates.md`` before
+you call a difference a regression: the tree differs from itself by about 9e-4
+on the loss over 200 steps, because the cublasLt plan cache picks its algorithm
+by timing.
 """
 
 import json
@@ -63,4 +68,8 @@ def main(before_path, after_path):
 
 
 if __name__ == "__main__":
+    if len(sys.argv) < 3:
+        print("usage: compare_runs.py <before.jsonl> <after.jsonl>",
+              file=sys.stderr)
+        raise SystemExit(2)
     main(sys.argv[1], sys.argv[2])

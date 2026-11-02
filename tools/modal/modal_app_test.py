@@ -152,13 +152,40 @@ class AppTest(unittest.TestCase):
     def test_the_four_functions_and_the_entry_points_exist(self) -> None:
         for name in ("doctor", "train", "train_h100", "pipeline",
                      "pipeline_h100", "pipeline_demo", "profile_h100",
-                     "profile_demo"):
+                     "profile_demo", "profile_stage", "measure_stage",
+                     "profile_stage_h100", "profile_stage_t4",
+                     "measure_stage_h100", "measure_stage_t4"):
             self.assertTrue(callable(getattr(self.app, name)), name)
+
+    def test_the_pgo_driver_reads_the_keys_the_chain_writes(self) -> None:
+        # `pipeline._rates` writes `tokens_per_sec`, and a driver that reads
+        # `tokens_per_second` reports a null throughput with no error.
+        self.assertIn("record.extra.get('tokens_per_sec')",
+                      self.app.PGO_DRIVER)
+        self.assertIn("record.extra.get('mfu')", self.app.PGO_DRIVER)
+        self.assertIn("record.extra.get('metrics')", self.app.PGO_DRIVER)
+
+    def test_the_pgo_commands_name_a_real_entry_point(self) -> None:
+        # The loop shells out to `modal run <file>::<entry point>`, so a renamed
+        # entry point breaks it at run time and not at import time.
+        from nanochat_cpp import pgo
+
+        _module, sdk = _load_app(with_sdk=True)
+        for argv in (pgo.trace_command(stage="base", device="h100", run_id="r",
+                                       job_path="job.json", steps=50,
+                                       seconds=180),
+                     pgo.measure_command(stage="base", device="h100",
+                                         run_id="r", job_path="job.json",
+                                         steps=50, seconds=180, runs=2)):
+            target, entry = argv[2].split("::")
+            self.assertEqual(target, "tools/modal/app.py")
+            self.assertIn(entry, sdk.local_entrypoints)
 
     def test_the_demo_is_a_local_entry_point(self) -> None:
         _module, sdk = _load_app(with_sdk=True)
         self.assertEqual(sdk.local_entrypoints,
-                         ["profile_demo", "pipeline_demo"])
+                         ["profile_stage", "measure_stage", "profile_demo",
+                          "pipeline_demo"])
 
     def test_the_contract_names_match_the_client(self) -> None:
         import target
@@ -718,9 +745,13 @@ class PipelineTest(_RemoteFixture):
     def test_the_functions_are_declared(self) -> None:
         names = [keywords["name"] for keywords in self.sdk.function_calls]
         self.assertEqual(sorted(names), ["bench_h100", "corpus", "doctor",
-                                         "pipeline", "pipeline_h100",
-                                         "profile_h100", "step_split",
-                                         "train", "train_h100"])
+                                         "measure_stage_h100",
+                                         "measure_stage_t4", "pipeline",
+                                         "pipeline_h100", "profile_h100",
+                                         "profile_stage_h100",
+                                         "profile_stage_t4",
+                                         "step_split", "train",
+                                         "train_h100"])
 
     def test_the_chain_runs_from_the_one_source_environment(self) -> None:
         self.run_once()
@@ -1412,8 +1443,11 @@ class WeightsTest(unittest.TestCase):
     def test_both_volumes_are_mounted_on_the_worker(self) -> None:
         mounted = {call["name"]: call["volumes"]
                    for call in self.sdk.function_calls if "volumes" in call}
-        self.assertEqual(sorted(mounted), ["corpus", "pipeline",
+        self.assertEqual(sorted(mounted), ["corpus", "measure_stage_h100",
+                                           "measure_stage_t4", "pipeline",
                                            "pipeline_h100", "profile_h100",
+                                           "profile_stage_h100",
+                                           "profile_stage_t4",
                                            "step_split", "train",
                                            "train_h100"])
         for name in ("train", "train_h100"):
@@ -1426,7 +1460,9 @@ class WeightsTest(unittest.TestCase):
         # outlives one run, and no stage cache holds it (section 9 row 3). The
         # profile writes its trace beside the run it traced, so it takes the
         # run root as well and never the stage cache.
-        for name in ("corpus", "pipeline", "pipeline_h100", "profile_h100",
+        for name in ("corpus", "measure_stage_h100", "measure_stage_t4",
+                     "pipeline", "pipeline_h100", "profile_h100",
+                     "profile_stage_h100", "profile_stage_t4",
                      "step_split"):
             self.assertEqual(sorted(mounted[name]), ["/runs"])
             self.assertIs(mounted[name]["/runs"], self.app.runs)
