@@ -1034,54 +1034,69 @@ void AttentionBackward(const AttentionParams& params, const ComputeType* q,
     return;
   }
 
-  // Grouped-query fallback: one GEMM per (b, h), accumulating the shared
-  // key/value gradients, so the key/value buffers start at zero.
+  // Grouped-query fallback: one batched GEMM per head, with the batch rows as
+  // the batch. A head's operands are slices of a `[batch, seq, heads, dim]`
+  // buffer, so the stride between two batch entries is a whole sequence of
+  // heads and not the head slice. One call per head replaces one call per
+  // (batch, head): eight calls where the loop made 128, for the same 128
+  // products. The key/value buffers still start at zero, because every head
+  // accumulates into the key/value head it shares.
   const std::size_t kv_count =
       static_cast<std::size_t>(params.batch) * kv_len * kv_heads * dim;
   Memset(dk, 0, kv_count * sizeof(ComputeType));
   Memset(dv, 0, kv_count * sizeof(ComputeType));
-  for (int b = 0; b < params.batch; ++b) {
-    for (int h = 0; h < heads; ++h) {
-      const int kvh = KvHeadDev(h, params.num_heads, params.num_kv_heads);
-      GemmScores(params, b, h, scale, q, k, scores);
-      StridedGemm(params.seq, kv_len, dim, 1.0f, 0.0f, /*transpose_a=*/false,
-                  /*transpose_b=*/true, params.num_heads * dim, kv_heads * dim,
-                  kv_len,
-                  dout + HeadBase(b, params.seq, params.num_heads, h, dim),
-                  v + HeadBase(b, kv_len, kv_heads, kvh, dim),
-                  dprobs + ScoreBase(params, b, h));
-    }
+  const std::int64_t q_batch =
+      static_cast<std::int64_t>(params.seq) * heads * dim;
+  const std::int64_t kv_batch =
+      static_cast<std::int64_t>(kv_len) * kv_heads * dim;
+  const std::int64_t score_batch =
+      static_cast<std::int64_t>(heads) * params.seq * kv_len;
+  for (int h = 0; h < heads; ++h) {
+    const int kvh = KvHeadDev(h, params.num_heads, params.num_kv_heads);
+    const ComputeType* qh = q + HeadBase(0, params.seq, heads, h, dim);
+    const ComputeType* kh = k + HeadBase(0, kv_len, kv_heads, kvh, dim);
+    // scores = Q @ K^T * scale.
+    BatchedGemmStrided(params.seq, kv_len, dim, params.batch, scale, 0.0f,
+                       /*transpose_a=*/false, /*transpose_b=*/true, qh, kh,
+                       scores + ScoreBase(params, 0, h), heads * dim, q_batch,
+                       kv_heads * dim, kv_batch, kv_len, score_batch);
+    // dprobs = dOut @ V^T.
+    BatchedGemmStrided(params.seq, kv_len, dim, params.batch, 1.0f, 0.0f,
+                       /*transpose_a=*/false, /*transpose_b=*/true,
+                       dout + HeadBase(0, params.seq, heads, h, dim),
+                       v + HeadBase(0, kv_len, kv_heads, kvh, dim),
+                       dprobs + ScoreBase(params, 0, h), heads * dim, q_batch,
+                       kv_heads * dim, kv_batch, kv_len, score_batch);
   }
   cuda_backend::Launch(AttentionSoftmaxBackwardKernel, dim3(rows),
                        dim3(kSoftmaxThreads), 0, params, scores, stats, probs,
                        dprobs);
 
-  for (int b = 0; b < params.batch; ++b) {
-    for (int h = 0; h < heads; ++h) {
-      const int kvh = KvHeadDev(h, params.num_heads, params.num_kv_heads);
-      const ComputeType* ds = dprobs + ScoreBase(params, b, h);
-      const ComputeType* qh =
-          q + HeadBase(b, params.seq, params.num_heads, h, dim);
-      const ComputeType* kh = k + HeadBase(b, kv_len, kv_heads, kvh, dim);
-      ComputeType* dqh = dq + HeadBase(b, params.seq, params.num_heads, h, dim);
-      ComputeType* dkh = dk + HeadBase(b, kv_len, kv_heads, kvh, dim);
-      ComputeType* dvh = dv + HeadBase(b, kv_len, kv_heads, kvh, dim);
-
-      // dQ = dS @ K * scale.
-      StridedGemm(params.seq, dim, kv_len, scale, 0.0f, /*transpose_a=*/false,
-                  /*transpose_b=*/false, kv_len, kv_heads * dim,
-                  params.num_heads * dim, ds, kh, dqh);
-      // dK += dS^T @ Q * scale.
-      StridedGemm(kv_len, dim, params.seq, scale, 1.0f, /*transpose_a=*/true,
-                  /*transpose_b=*/false, kv_len, params.num_heads * dim,
-                  kv_heads * dim, ds, qh, dkh);
-      // dV += P^T @ dOut.
-      StridedGemm(kv_len, dim, params.seq, 1.0f, 1.0f, /*transpose_a=*/true,
-                  /*transpose_b=*/false, kv_len, params.num_heads * dim,
-                  kv_heads * dim, probs + ScoreBase(params, b, h),
-                  dout + HeadBase(b, params.seq, params.num_heads, h, dim),
-                  dvh);
-    }
+  for (int h = 0; h < heads; ++h) {
+    const int kvh = KvHeadDev(h, params.num_heads, params.num_kv_heads);
+    const ComputeType* dsh = dprobs + ScoreBase(params, 0, h);
+    const ComputeType* qh = q + HeadBase(0, params.seq, heads, h, dim);
+    const ComputeType* kh = k + HeadBase(0, kv_len, kv_heads, kvh, dim);
+    const ComputeType* douth = dout + HeadBase(0, params.seq, heads, h, dim);
+    const ComputeType* probsh = probs + ScoreBase(params, 0, h);
+    // dQ = dS @ K * scale.
+    BatchedGemmStrided(params.seq, dim, kv_len, params.batch, scale, 0.0f,
+                       /*transpose_a=*/false, /*transpose_b=*/false, dsh, kh,
+                       dq + HeadBase(0, params.seq, heads, h, dim), kv_len,
+                       score_batch, kv_heads * dim, kv_batch, heads * dim,
+                       q_batch);
+    // dK += dS^T @ Q * scale.
+    BatchedGemmStrided(kv_len, dim, params.seq, params.batch, scale, 1.0f,
+                       /*transpose_a=*/true, /*transpose_b=*/false, dsh, qh,
+                       dk + HeadBase(0, kv_len, kv_heads, kvh, dim), kv_len,
+                       score_batch, heads * dim, q_batch, kv_heads * dim,
+                       kv_batch);
+    // dV += P^T @ dOut.
+    BatchedGemmStrided(kv_len, dim, params.seq, params.batch, 1.0f, 1.0f,
+                       /*transpose_a=*/true, /*transpose_b=*/false, probsh,
+                       douth, dv + HeadBase(0, kv_len, kv_heads, kvh, dim),
+                       kv_len, score_batch, heads * dim, q_batch,
+                       kv_heads * dim, kv_batch);
   }
 }
 
