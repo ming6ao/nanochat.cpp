@@ -8,9 +8,13 @@
 // are header-only so they inline into every caller.
 //
 // The arithmetic mirrors backends/cpu/kernels.cc exactly: storage is
-// ComputeType (float), the working type is always float, and the reduction
-// runs in float. The CPU reference accumulates in double; the device uses
-// float, which is well inside the fp32 oracle tolerance (docs/testing.md).
+// ComputeType (float), and the working type is float. The reduction runs in
+// float too, which is well inside the fp32 oracle tolerance (docs/testing.md),
+// with one deliberate exception: `BlockReduceSum` is a template, and the QkPrep
+// backward instantiates it for `double` because the composition it must match
+// (`RopeNormBackwardHost` in src/ops.cc) accumulates that row's two statistics
+// in double. A caller asks for the wider sum by choosing the argument type; no
+// second reduction path exists.
 //
 // See docs/kernels.md ("Shared device helpers") and docs/build.md.
 
@@ -67,7 +71,12 @@ __device__ __forceinline__ void AtomicAddDev(Bf16* addr, float value) {
 
 // Block-wide sum over `val`. Every thread in the block must call it, and the
 // result is broadcast back to every thread through shared memory. `blockDim.x`
-// must be a power of two and at most kMaxBlockThreads.
+// must be a power of two and at most kMaxBlockThreads. `T` is the accumulator
+// type: `float` by default, `double` for a caller that has to reproduce a
+// double-accumulating reference (the QkPrep backward). The shared array is
+// typed `T`, so a double reduction takes kMaxBlockThreads * sizeof(double) = 8
+// KiB of static shared memory, which stays inside the 48 KiB budget a block
+// has.
 template <typename T>
 __device__ __forceinline__ T BlockReduceSum(T val) {
   __shared__ T shared[kMaxBlockThreads];
@@ -75,7 +84,9 @@ __device__ __forceinline__ T BlockReduceSum(T val) {
   // The array is reused by every call in the kernel. Barrier before writing so
   // a second reduction cannot overwrite `shared[0]` before every thread has
   // consumed the previous result (a real, nondeterministic race observed in
-  // QkPrep backward, which reduces `sum_sq` and then `dot`).
+  // QkPrep backward, which reduces `sum_sq` and then `dot`). Both of those
+  // calls now take the `double` instantiation, and they still share this one
+  // array.
   __syncthreads();
   shared[tid] = val;
   __syncthreads();

@@ -60,26 +60,6 @@ bool Fused(std::uint64_t feature) {
 // base, SFT, and eval calls, which pass none, keep the fused path.
 constexpr bool kFusedClassifierTakesRowScale = false;
 
-// The fused rotary leg is not yet the composition's arithmetic, so it is not
-// the executed path.  `backends/cuda/kernels/qk_prep.cu` keeps the normalized
-// value in fp32 across the rotation and rounds once, at the store. The
-// composition rounds it to `ComputeType` when `NormForward` writes the row,
-// then rotates the rounded value, and that is what the reference does too. The
-// fused kernel is therefore the more accurate of the two, and the two disagree
-// by 1.22e-4 on `backout_lambda` after three optimizer steps, over the 1e-4
-// trajectory tolerance of `//tests:oracle_cuda_test`. A parity gate is not
-// widened to fit a kernel, so the composition stays the executed path until the
-// kernel matches the reference (`docs/parity.md`).  Rounding the forward's
-// normalized value at the composition's point was tried and changed the
-// trajectory error by nothing at all: 1.22e-4 before and after. The remaining
-// difference is therefore elsewhere, and the backward is the next place to
-// look: it recounts the normalization statistics from the *scaled* saved
-// output, where the composition recounts them from the same values but with the
-// scale already divided out.  The classifier and the norm families carry the
-// same golden trace as their compositions, so their dispatches above are
-// unconditional on the capability bit.
-constexpr bool kFusedQkPrepMatchesComposition = false;
-
 // ---------------------------------------------------------------------------
 // Staging helpers
 // ---------------------------------------------------------------------------
@@ -748,7 +728,7 @@ void QkPrepForward(int batch, int seq, int num_heads, int num_kv_heads,
                    int head_dim, float eps, float scale, const float* cos,
                    const float* sin, ComputeType* q, ComputeType* k) {
   if (batch <= 0 || seq <= 0 || head_dim <= 0) return;
-  if (kFusedQkPrepMatchesComposition && Fused(kFeatureFusedQkPrep)) {
+  if (Fused(kFeatureFusedQkPrep)) {
     QkPrepParams params;
     params.batch = batch;
     params.seq = seq;
@@ -790,7 +770,7 @@ void QkPrepBackward(int batch, int seq, int num_heads, int num_kv_heads,
                     const float* sin, const ComputeType* dq,
                     const ComputeType* dk, ComputeType* q, ComputeType* k) {
   if (batch <= 0 || seq <= 0 || head_dim <= 0) return;
-  if (kFusedQkPrepMatchesComposition && Fused(kFeatureFusedQkPrep)) {
+  if (Fused(kFeatureFusedQkPrep)) {
     QkPrepParams params;
     params.batch = batch;
     params.seq = seq;
