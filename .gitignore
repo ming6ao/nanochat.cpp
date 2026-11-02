@@ -6,6 +6,10 @@
 /.bazelrc.local
 # Kaggle session scratch.
 /.nanochat.env
+# Profile artifacts: traces, measurements, and the reports of a loop run. They
+# are measurements of one host on one day, not source, and a trace is hundreds
+# of megabytes. docs/profile-guided-optimization.md says how to regenerate them.
+/profiles/
 
 # Python bytecode caches from the tool and test scripts.
 __pycache__/

@@ -1,96 +1,0 @@
-$ nsys profile --force-overwrite=true --output=/runs/profile-base/profile/base --trace=cuda,osrt --sample=none --cpuctxsw=none --cuda-memory-usage=false --stats=false /usr/local/bin/python /runs/profile-base/profile_driver.py /runs/profile-base/job.json 20
-[    1/20] loss 10.3972  grad_norm 0.5063  step 1.052s (compute 0.844s, data 0.208s)  3893 tok/s  mfu 0.10%  model 0.980 TFLOP/s  optim 0.258 TFLOP/s
-[    2/20] loss 10.2672  grad_norm 0.6176  step 0.418s (compute 0.417s, data 0.000s)  9795 tok/s  mfu 0.25%  model 2.465 TFLOP/s  optim 0.648 TFLOP/s
-[    3/20] loss 9.6327  grad_norm 0.9276  step 0.411s (compute 0.410s, data 0.000s)  9963 tok/s  mfu 0.25%  model 2.507 TFLOP/s  optim 0.659 TFLOP/s
-[    4/20] loss 8.9004  grad_norm 1.371  step 0.407s (compute 0.406s, data 0.000s)  10068 tok/s  mfu 0.26%  model 2.534 TFLOP/s  optim 0.666 TFLOP/s
-[    5/20] loss 8.4719  grad_norm 0.9504  step 0.414s (compute 0.413s, data 0.000s)  9897 tok/s  mfu 0.25%  model 2.491 TFLOP/s  optim 0.655 TFLOP/s
-[    6/20] loss 8.3490  grad_norm 2.266  step 0.415s (compute 0.414s, data 0.000s)  9860 tok/s  mfu 0.25%  model 2.481 TFLOP/s  optim 0.653 TFLOP/s
-[    7/20] loss 8.3065  grad_norm 2.16  step 0.416s (compute 0.415s, data 0.000s)  9858 tok/s  mfu 0.25%  model 2.481 TFLOP/s  optim 0.652 TFLOP/s
-[    8/20] loss 7.8467  grad_norm 1.124  step 0.410s (compute 0.409s, data 0.000s)  9979 tok/s  mfu 0.25%  model 2.511 TFLOP/s  optim 0.661 TFLOP/s
-[    9/20] loss 7.6940  grad_norm 1.215  step 0.443s (compute 0.414s, data 0.028s)  9256 tok/s  mfu 0.24%  model 2.329 TFLOP/s  optim 0.613 TFLOP/s
-[   10/20] loss 7.7429  grad_norm 0.7957  step 0.397s (compute 0.397s, data 0.000s)  10312 tok/s  mfu 0.26%  model 2.595 TFLOP/s  optim 0.683 TFLOP/s
-[   11/20] loss 7.6842  grad_norm 1.287  step 0.405s (compute 0.404s, data 0.000s)  10120 tok/s  mfu 0.26%  model 2.547 TFLOP/s  optim 0.670 TFLOP/s
-[   12/20] loss 7.5480  grad_norm 1.359  step 0.421s (compute 0.419s, data 0.000s)  9738 tok/s  mfu 0.25%  model 2.451 TFLOP/s  optim 0.645 TFLOP/s
-[   13/20] loss 7.4325  grad_norm 0.7888  step 0.406s (compute 0.405s, data 0.000s)  10093 tok/s  mfu 0.26%  model 2.540 TFLOP/s  optim 0.668 TFLOP/s
-[   14/20] loss 7.3053  grad_norm 1.168  step 0.421s (compute 0.420s, data 0.000s)  9720 tok/s  mfu 0.25%  model 2.446 TFLOP/s  optim 0.643 TFLOP/s
-[   15/20] loss 7.4745  grad_norm 1.112  step 0.410s (compute 0.409s, data 0.000s)  9980 tok/s  mfu 0.25%  model 2.511 TFLOP/s  optim 0.661 TFLOP/s
-[   16/20] loss 7.5390  grad_norm 0.7658  step 0.412s (compute 0.411s, data 0.000s)  9939 tok/s  mfu 0.25%  model 2.501 TFLOP/s  optim 0.658 TFLOP/s
-[   17/20] loss 7.2717  grad_norm 0.8606  step 0.410s (compute 0.409s, data 0.000s)  9983 tok/s  mfu 0.25%  model 2.512 TFLOP/s  optim 0.661 TFLOP/s
-[   18/20] loss 7.2812  grad_norm 0.6993  step 0.426s (compute 0.424s, data 0.000s)  9626 tok/s  mfu 0.24%  model 2.422 TFLOP/s  optim 0.637 TFLOP/s
-[   19/20] loss 7.1329  grad_norm 0.6219  step 0.429s (compute 0.428s, data 0.000s)  9547 tok/s  mfu 0.24%  model 2.403 TFLOP/s  optim 0.632 TFLOP/s
-[   20/20] loss 7.4616  grad_norm 1.263  step 0.422s (compute 0.421s, data 0.000s)  9706 tok/s  mfu 0.25%  model 2.443 TFLOP/s  optim 0.642 TFLOP/s
-{
- "batch": 16,
- "compute_ms": 414.01728987693787,
- "corpus": "files",
- "data_ms": 0.250895,
- "devices": 1,
- "dir": "/runs/profile-base/demo/corpus",
- "grad_accum": 1,
- "hardware": {
-  "arch": "sm_90",
-  "backend": "cuda",
-  "fp8_cases": "not_run",
-  "precision": "bf16",
-  "startup_check": "not_run",
-  "startup_check_reason": "the chain runs the mesh trainer, which does not call the hardware correctness gate"
- },
- "interrupted": false,
- "mean_loss": 8.086975169181823,
- "metrics": "/runs/profile-base/demo/base/metrics.jsonl",
- "mfu": 0.0025058668321464484,
- "other_ms": 1.13790112306215,
- "parquet": "/runs/corpus/h100-42ff097e4481/00_shard_00000.parquet",
- "parquet_bytes": [
-  92291918
- ],
- "parquets": [
-  "/runs/corpus/h100-42ff097e4481/00_shard_00000.parquet"
- ],
- "published": "/root/.cache/nanochat/tokenizer/tokenizer.nctoken",
- "seq_len": 256,
- "step_ms": 415.406086,
- "steps_ran": 20,
- "tokenizer": "/runs/profile-base/demo/corpus/tokenizer.nctoken",
- "tokenizer_id": "tokenizer.nctoken",
- "tokenizer_sha256": "16eb929c24e35f78f839c3eb36a3c6dd27b20422b5f4c22de54aac030d391f41",
- "tokens_per_sec": 9860.231080003965,
- "tokens_per_step": 4096,
- "warmup_steps": 5,
- "window_steps": 15
-}
-profile: checkpoint /runs/profile-base/demo/base/checkpoint.ckpt
-Generating '/tmp/nsys-report-d472.qdstrm'
-[1/1] [0%                          ] base.nsys-rep[1/1] [0%                          ] base.nsys-rep[1/1] [6%                          ] base.nsys-rep[1/1] [5%                          ] base.nsys-rep[1/1] [9%                          ] base.nsys-rep[1/1] [8%                          ] base.nsys-rep[1/1] [7%                          ] base.nsys-rep[1/1] [6%                          ] base.nsys-rep[1/1] [9%                          ] base.nsys-rep[1/1] [12%                         ] base.nsys-rep[1/1] [=15%                        ] base.nsys-rep[1/1] [==18%                       ] base.nsys-rep[1/1] [==21%                       ] base.nsys-rep[1/1] [===24%                      ] base.nsys-rep[1/1] [====27%                     ] base.nsys-rep[1/1] [=====29%                    ] base.nsys-rep[1/1] [=====32%                    ] base.nsys-rep[1/1] [======35%                   ] base.nsys-rep[1/1] [=======38%                  ] base.nsys-rep[1/1] [========41%                 ] base.nsys-rep[1/1] [=========44%                ] base.nsys-rep[1/1] [==========47%               ] base.nsys-rep[1/1] [===========50%              ] base.nsys-rep[1/1] [===========53%              ] base.nsys-rep[1/1] [============56%             ] base.nsys-rep[1/1] [=============59%            ] base.nsys-rep[1/1] [==============62%           ] base.nsys-rep[1/1] [===============65%          ] base.nsys-rep[1/1] [================68%         ] base.nsys-rep[1/1] [================71%         ] base.nsys-rep[1/1] [=================74%        ] base.nsys-rep[1/1] [==================77%       ] base.nsys-rep[1/1] [===================79%      ] base.nsys-rep[1/1] [===================82%      ] base.nsys-rep[1/1] [========================100%] base.nsys-rep[1/1] [========================100%] base.nsys-rep
-Generated:
-    /runs/profile-base/profile/base.nsys-rep
-modal: exit 0
-$ nsys export --force-overwrite=true --type=sqlite --output=/runs/profile-base/profile/base.sqlite /runs/profile-base/profile/base.nsys-rep
-Processing 560297 events: [1%                                                  ]Processing 560297 events: [2%                                                  ]Processing 560297 events: [3%                                                  ]Processing 560297 events: [4%                                                  ]Processing 560297 events: [5%                                                  ]Processing 560297 events: [=6%                                                 ]Processing 560297 events: [=7%                                                 ]Processing 560297 events: [==8%                                                ]Processing 560297 events: [==9%                                                ]Processing 560297 events: [==10%                                               ]Processing 560297 events: [==11%                                               ]Processing 560297 events: [===12%                                              ]Processing 560297 events: [===13%                                              ]Processing 560297 events: [====14%                                             ]Processing 560297 events: [====15%                                             ]Processing 560297 events: [=====16%                                            ]Processing 560297 events: [=====17%                                            ]Processing 560297 events: [======18%                                           ]Processing 560297 events: [======19%                                           ]Processing 560297 events: [=======20%                                          ]Processing 560297 events: [=======21%                                          ]Processing 560297 events: [========22%                                         ]Processing 560297 events: [========23%                                         ]Processing 560297 events: [=========24%                                        ]Processing 560297 events: [==========25%                                       ]Processing 560297 events: [==========26%                                       ]Processing 560297 events: [===========27%                                      ]Processing 560297 events: [===========28%                                      ]Processing 560297 events: [============29%                                     ]Processing 560297 events: [============30%                                     ]Processing 560297 events: [=============31%                                    ]Processing 560297 events: [=============32%                                    ]Processing 560297 events: [==============33%                                   ]Processing 560297 events: [==============34%                                   ]Processing 560297 events: [===============35%                                  ]Processing 560297 events: [===============36%                                  ]Processing 560297 events: [================37%                                 ]Processing 560297 events: [================38%                                 ]Processing 560297 events: [=================39%                                ]Processing 560297 events: [=================40%                                ]Processing 560297 events: [==================41%                               ]Processing 560297 events: [==================42%                               ]Processing 560297 events: [===================43%                              ]Processing 560297 events: [===================44%                              ]Processing 560297 events: [====================45%                             ]Processing 560297 events: [====================46%                             ]Processing 560297 events: [=====================47%                            ]Processing 560297 events: [=====================48%                            ]Processing 560297 events: [======================49%                           ]Processing 560297 events: [=======================50%                          ]Processing 560297 events: [=======================51%                          ]Processing 560297 events: [========================52%                         ]Processing 560297 events: [========================53%                         ]Processing 560297 events: [=========================54%                        ]Processing 560297 events: [=========================55%                        ]Processing 560297 events: [==========================56%                       ]Processing 560297 events: [==========================57%                       ]Processing 560297 events: [===========================58%                      ]Processing 560297 events: [===========================59%                      ]Processing 560297 events: [============================60%                     ]Processing 560297 events: [============================61%                     ]Processing 560297 events: [=============================62%                    ]Processing 560297 events: [=============================63%                    ]Processing 560297 events: [==============================64%                   ]Processing 560297 events: [==============================65%                   ]Processing 560297 events: [===============================66%                  ]Processing 560297 events: [===============================67%                  ]Processing 560297 events: [================================68%                 ]Processing 560297 events: [================================69%                 ]Processing 560297 events: [=================================70%                ]Processing 560297 events: [=================================71%                ]Processing 560297 events: [==================================72%               ]Processing 560297 events: [==================================73%               ]Processing 560297 events: [===================================74%              ]Processing 560297 events: [====================================75%             ]Processing 560297 events: [====================================76%             ]Processing 560297 events: [=====================================77%            ]Processing 560297 events: [=====================================78%            ]Processing 560297 events: [======================================79%           ]Processing 560297 events: [======================================80%           ]Processing 560297 events: [=======================================81%          ]Processing 560297 events: [=======================================82%          ]Processing 560297 events: [========================================83%         ]Processing 560297 events: [========================================84%         ]Processing 560297 events: [=========================================85%        ]Processing 560297 events: [=========================================86%        ]Processing 560297 events: [==========================================87%       ]Processing 560297 events: [==========================================88%       ]Processing 560297 events: [===========================================89%      ]Processing 560297 events: [===========================================90%      ]Processing 560297 events: [============================================91%     ]Processing 560297 events: [============================================92%     ]Processing 560297 events: [=============================================93%    ]Processing 560297 events: [=============================================94%    ]Processing 560297 events: [==============================================95%   ]Processing 560297 events: [==============================================96%   ]Processing 560297 events: [===============================================97%  ]Processing 560297 events: [===============================================98%  ]Processing 560297 events: [================================================99% ]Processing 560297 events: [================================================100%]
-modal: exit 0
-$ nsys stats --force-overwrite=true --format=csv --report=cuda_gpu_kern_sum,cuda_api_sum,osrt_sum,cuda_gpu_mem_time_sum --output=/runs/profile-base/profile/base /runs/profile-base/profile/base.nsys-rep
-
-NOTICE: Existing SQLite export found: /runs/profile-base/profile/base.sqlite
-        It is assumed file was previously exported from: /runs/profile-base/profile/base.nsys-rep
-        Consider using --force-export=true if needed.
-
-Processing [/runs/profile-base/profile/base.sqlite] with [/opt/nvidia/nsight-systems/2023.4.4/host-linux-x64/reports/cuda_gpu_kern_sum.py] to [/runs/profile-base/profile/base_cuda_gpu_kern_sum.csv]... PROCESSED
-
-Processing [/runs/profile-base/profile/base.sqlite] with [/opt/nvidia/nsight-systems/2023.4.4/host-linux-x64/reports/cuda_api_sum.py] to [/runs/profile-base/profile/base_cuda_api_sum.csv]... PROCESSED
-
-Processing [/runs/profile-base/profile/base.sqlite] with [/opt/nvidia/nsight-systems/2023.4.4/host-linux-x64/reports/osrt_sum.py] to [/runs/profile-base/profile/base_osrt_sum.csv]... PROCESSED
-
-Processing [/runs/profile-base/profile/base.sqlite] with [/opt/nvidia/nsight-systems/2023.4.4/host-linux-x64/reports/cuda_gpu_mem_time_sum.py] to [/runs/profile-base/profile/base_cuda_gpu_mem_time_sum.csv]... PROCESSED
-
-modal: exit 0
-$ nsys stats --force-overwrite=true --format=csv --report=cuda_gpu_trace,cuda_api_trace --output=/runs/profile-base/profile/timeline /runs/profile-base/profile/base.nsys-rep
-
-NOTICE: Existing SQLite export found: /runs/profile-base/profile/base.sqlite
-        It is assumed file was previously exported from: /runs/profile-base/profile/base.nsys-rep
-        Consider using --force-export=true if needed.
-
-Processing [/runs/profile-base/profile/base.sqlite] with [/opt/nvidia/nsight-systems/2023.4.4/host-linux-x64/reports/cuda_gpu_trace.py] to [/runs/profile-base/profile/timeline_cuda_gpu_trace.csv]... PROCESSED
-
-Processing [/runs/profile-base/profile/base.sqlite] with [/opt/nvidia/nsight-systems/2023.4.4/host-linux-x64/reports/cuda_api_trace.py] to [/runs/profile-base/profile/timeline_cuda_api_trace.csv]... PROCESSED
-
-modal: exit 0
