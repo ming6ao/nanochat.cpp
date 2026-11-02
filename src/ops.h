@@ -63,6 +63,15 @@ inline float Sigmoid(float x) { return 1.0f / (1.0f + std::exp(-x)); }
 
 namespace ops {
 
+// The device form of one scalar argument, for a caller that keeps the value in
+// device memory (docs/scalar-arguments.md). A plain float converts implicitly,
+// so a caller that holds the value passes it unchanged.
+inline ScalarArg DevScalar(const float* p) {
+  ScalarArg arg;
+  arg.dev = p;
+  return arg;
+}
+
 // ---------------------------------------------------------------------------
 // Linear: y = x @ w^T (PyTorch's `nn.Linear` weight layout).
 // ---------------------------------------------------------------------------
@@ -364,15 +373,15 @@ struct BlockScratch {
 void BlockForward(const BlockShape& shape, const BlockWeights& weights,
                   const BlockActivations& acts, const int* tokens,
                   const float* cos, const float* sin, const ComputeType* x,
-                  const ComputeType* x0, float resid, float x0_lambda);
+                  const ComputeType* x0, ScalarArg resid, ScalarArg x0_lambda);
 
 // Runs one block backward and accumulates into `x0_acc`. `dout` is the
 // upstream gradient; `dx_in` receives the gradient w.r.t. the block input.
 void BlockBackward(const BlockShape& shape, const BlockWeights& weights,
                    const BlockActivations& acts, const BlockGrads& grads,
                    const BlockScratch& scratch, const int* tokens,
-                   const float* cos, const float* sin, float resid,
-                   float x0_lambda, const ComputeType* x_in,
+                   const float* cos, const float* sin, ScalarArg resid,
+                   ScalarArg x0_lambda, const ComputeType* x_in,
                    const ComputeType* x0, const ComputeType* dout,
                    ComputeType* dx_in, ComputeType* x0_acc, float* resid_grad,
                    float* x0_lambda_grad);

@@ -105,6 +105,34 @@ float ReadHost(const ComputeType* p) {
   return AsF(raw);
 }
 
+// The fp32 view of one scalar parameter, for a kernel that reads it on the
+// device. In a bf16 build this is the master copy, which the optimizer keeps
+// current. In an fp32 build the compute buffer already holds fp32.
+//
+// `docs/scalar-arguments.md` is the reason this exists: a scalar the optimizer
+// owns belongs in device memory, and the host never needs it.
+// The fp32 view of one scalar parameter, chosen by the build's compute type.
+//
+// An fp32 build keeps the value in its compute buffer, so the master copy is
+// only one option. A reduced-precision build reads the master copy, and a null
+// one would make every kernel read the default host value instead of the
+// parameter: fail here rather than train on zeros.
+const float* ScalarFloatView(const float* value, const float* master,
+                             const char* name) {
+  if (master != nullptr) return master;
+  return value;
+}
+
+const float* ScalarFloatView(const Bf16* /*value*/, const float* master,
+                             const char* name) {
+  if (master != nullptr) return master;
+  std::fprintf(stderr,
+               "nanochat: %s has no fp32 master copy, and this build reads its "
+               "scalars there.\n",
+               name);
+  std::abort();
+}
+
 // Number of targets that are not the ignore index (-1). The classifier writes
 // a zero loss for an ignored row and the backward zeroes its gradient, so
 // these rows do not enter the mean (docs/post-training.md section 2.1).
@@ -211,11 +239,13 @@ TrainModel::TrainModel(const ModelSpec& spec, const Config& config,
     const Param& p = AddParam("resid_lambdas", layers, 0, 0);
     resid_ = p.value;
     resid_grad_ = p.grad;
+    resid_f32_ = ScalarSource(p);
   }
   {
     const Param& p = AddParam("x0_lambdas", layers, 0, 0);
     x0_lambda_ = p.value;
     x0_lambda_grad_ = p.grad;
+    x0_lambda_f32_ = ScalarSource(p);
   }
   {
     const Param& p =
@@ -1058,13 +1088,15 @@ void TrainModel::RunForward(const int* tokens, const int* targets, int batch,
   shape.causal = true;
 
   const ComputeType* x = x0;
+  // One read per step for the per-layer scalars, not two per layer.
   for (int i = 0; i < layers; ++i) {
     shape.window_left = BlockWindowLeft(i);
     ops::BlockActivations& acts =
         save_for_backward ? lacts_[static_cast<std::size_t>(i)] : eval_block_;
     ops::BlockForward(shape, lweights_[static_cast<std::size_t>(i)], acts,
                       tokens, cos_table(), sin_table(), x, x0,
-                      ReadHost(resid_ + i), ReadHost(x0_lambda_ + i));
+                      ops::DevScalar(resid_f32_ + i),
+                      ops::DevScalar(x0_lambda_f32_ + i));
     // Capture the mid-layer backout activation in both modes: the eval path
     // reads the buffer too, so gating the copy on `save_for_backward` made the
     // forward read uninitialized memory and moved the bits-per-byte result.
@@ -1245,6 +1277,7 @@ void TrainModel::BackwardInternal(const float* row_weights, float scale,
   kernels::Memcpy(dcur, dx_final_pre_,
                   static_cast<std::size_t>(rows * hidden) * sizeof(ComputeType),
                   CopyDir::kDeviceToDevice);
+  // One read per step for the per-layer scalars, not two per layer.
   for (int i = layers - 1; i >= 0; --i) {
     if (i == backout_layer_) {
       Pw(PointwiseOp::kScaleAdd, static_cast<int>(rows * hidden), dcur,
@@ -1254,9 +1287,9 @@ void TrainModel::BackwardInternal(const float* row_weights, float scale,
     const ComputeType* x_in = (i == 0) ? x0_ : lacts_[i - 1].x_out;
     ops::BlockBackward(shape, lweights_[i], lacts_[i], lgrads_[i],
                        block_scratch_, tokens_.data(), cos_table(), sin_table(),
-                       ReadHost(resid_ + i), ReadHost(x0_lambda_ + i), x_in,
-                       x0_, dcur, dnext, x0_acc_, resid_grad_ + i,
-                       x0_lambda_grad_ + i);
+                       ops::DevScalar(resid_f32_ + i),
+                       ops::DevScalar(x0_lambda_f32_ + i), x_in, x0_, dcur,
+                       dnext, x0_acc_, resid_grad_ + i, x0_lambda_grad_ + i);
     std::swap(dcur, dnext);
   }
 
@@ -1306,6 +1339,10 @@ std::vector<ParamView> TrainModel::params() const {
     views.push_back(view);
   }
   return views;
+}
+
+const float* TrainModel::ScalarSource(const Param& p) {
+  return ScalarFloatView(p.value, p.master, p.name.c_str());
 }
 
 void TrainModel::SyncMaster() {

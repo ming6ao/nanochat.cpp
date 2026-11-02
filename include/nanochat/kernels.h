@@ -294,12 +294,42 @@ struct AttentionParams {
 // lives in spec/pointwise_ops.md, which is the authority for the bounds; this
 // header is the authority for the code list. A code with no declared bound
 // there does not ship.
+// One scalar argument to a kernel family (docs/scalar-arguments.md).
+//
+// `value` is a host copy. When `dev` is not null the kernel loads the value
+// there instead, once, before its loop, and ignores `value`. A null pointer,
+// the default, keeps the host value, so a call site that passes a float is
+// unchanged and bit-identical.
+//
+// Use it for a scalar the optimizer owns: a parameter lives in device memory
+// and the host never needs it. A constant or a schedule value stays a plain
+// `float` in its parameter struct, because there is nothing to read.
+struct ScalarArg {
+  ScalarArg() = default;
+  // Implicit on purpose: `params.alpha = 2.0f` and an aggregate initialiser of
+  // the owning struct both keep working.
+  ScalarArg(float host) : value(host) {}  // NOLINT(google-explicit-constructor)
+
+  float value = 0.0f;
+  const float* dev = nullptr;
+
+  // The value to use. A device kernel calls this once in its prologue and keeps
+  // the result in a register, so the load happens once and not per element.
+  // The attribute is spelled here because `tensor.h` undefines its macro.
+#if defined(__CUDACC__)
+  __host__ __device__
+#endif
+      float host() const {
+    return dev != nullptr ? *dev : value;
+  }
+};
+
 struct PointwiseParams {
   PointwiseOp op = PointwiseOp::kScale;
   int count = 0;      // elements in `a`, in `out`, and in `dy` on the backward
   int row_width = 0;  // width of the row a broadcast reads; 0 => count
-  float alpha = 1.0f;
-  float beta = 0.0f;
+  ScalarArg alpha{1.0f};
+  ScalarArg beta{0.0f};
 };
 
 // Logit softcap + cross-entropy + unpadded-vocab slice (docs/kernels.md and
@@ -327,13 +357,9 @@ struct AdamWParams {
   float weight_decay = 0.0f;
   int step = 1;  // 1-based, for bias correction
   // The gradient clip scale, folded into the gradient read. One when the clip
-  // is disabled or inactive, so an unscaled read is bit-identical.
-  float grad_scale = 1.0f;
-  // The same scale as a device scalar. When it is not null the kernel reads it
-  // and ignores `grad_scale`, so the caller keeps the norm on the device and
-  // the step needs no host read of the clip. A null pointer, the default,
-  // keeps the host value.
-  const float* grad_scale_dev = nullptr;
+  // is disabled or inactive, so an unscaled read is bit-identical. A caller
+  // that keeps the norm on the device sets `dev` and never reads it back.
+  ScalarArg grad_scale{1.0f};
 };
 
 struct MuonParams {
@@ -347,10 +373,8 @@ struct MuonParams {
   int ns_steps = 5;
   int red_dim = -1;  // variance reduction axis: -1 (columns) or -2 (rows)
   bool nesterov = true;
-  // The gradient clip scale, folded into the gradient read (see AdamWParams),
-  // and its device-resident form, which wins when it is not null.
-  float grad_scale = 1.0f;
-  const float* grad_scale_dev = nullptr;
+  // The gradient clip scale, folded into the gradient read (see AdamWParams).
+  ScalarArg grad_scale{1.0f};
 };
 
 // Softmax statistics saved by attention forward and consumed by its backward.

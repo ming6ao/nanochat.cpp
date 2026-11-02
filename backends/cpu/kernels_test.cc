@@ -621,8 +621,9 @@ void TestPointwiseRowScale() {
   std::vector<ComputeType> out(n);
   kernels::PointwiseForward(p, a.data(), b.data(), out.data());
   for (int i = 0; i < n; ++i) {
-    const double want = ReferencePointwise(
-        PointwiseOp::kRowScale, U(a[i / width]), U(b[i]), p.alpha, p.beta);
+    const double want =
+        ReferencePointwise(PointwiseOp::kRowScale, U(a[i / width]), U(b[i]),
+                           p.alpha.host(), p.beta.host());
     const double got = U(out[i]);
     if (std::fabs(got - want) > 8e-6) {
       std::printf("FAIL: kRowScale [%d] (got %.9g want %.9g)\n", i, got, want);

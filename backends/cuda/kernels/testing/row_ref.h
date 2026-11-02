@@ -207,8 +207,8 @@ inline std::vector<float> PointwiseForward(const PointwiseParams& p,
                                            const std::vector<float>& b) {
   const int n = p.count;
   std::vector<float> out(static_cast<std::size_t>(n), 0.0f);
-  const float alpha = p.alpha;
-  const float beta = p.beta;
+  const float alpha = p.alpha.host();
+  const float beta = p.beta.host();
   if (p.op == PointwiseOp::kRowScale) {
     for (int i = 0; i < n; ++i) {
       out[i] = a[i / p.row_width] * b[i];
@@ -263,8 +263,8 @@ inline void PointwiseBackward(const PointwiseParams& p,
                               const std::vector<float>& dy,
                               std::vector<float>* da, std::vector<float>* db) {
   const int n = p.count;
-  const float alpha = p.alpha;
-  const float beta = p.beta;
+  const float alpha = p.alpha.host();
+  const float beta = p.beta.host();
   if (p.op == PointwiseOp::kRowScale) {
     const int row_width = p.row_width;
     if (row_width <= 0 || row_width > n || n % row_width != 0) return;

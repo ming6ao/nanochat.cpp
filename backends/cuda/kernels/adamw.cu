@@ -27,12 +27,11 @@ using cuda_kernels::ToComputeDev;
 
 __global__ void AdamWUpdateKernel(
     long long n, float lr, float beta1, float beta2, float eps,
-    float weight_decay, float step_size, float bias2, float grad_scale,
-    bool scale_on_device, const float* __restrict__ grad_scale_dev,
+    float weight_decay, float step_size, float bias2, ScalarArg grad_scale,
     float* __restrict__ master, ComputeType* __restrict__ value,
     const float* __restrict__ g, float* __restrict__ m, float* __restrict__ v) {
   const long long stride = static_cast<long long>(gridDim.x) * blockDim.x;
-  const float scale = scale_on_device ? *grad_scale_dev : grad_scale;
+  const float scale = grad_scale.host();
   for (long long i =
            static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x;
        i < n; i += stride) {
@@ -73,12 +72,10 @@ void AdamWUpdate(int n, const AdamWParams& params, float* master,
   // The clip scale is either the host value or a device scalar the reduction
   // wrote; the kernel dereferences the device one per pass, so a step that
   // keeps the norm on the device reads the host never.
-  const bool scale_on_device = params.grad_scale_dev != nullptr;
   cuda_backend::Launch(AdamWUpdateKernel, dim3(grid), dim3(kThreads), 0,
                        static_cast<long long>(n), params.lr, params.beta1,
                        params.beta2, params.eps, params.weight_decay, step_size,
-                       bias2, params.grad_scale, scale_on_device,
-                       params.grad_scale_dev, master, value, g, m, v);
+                       bias2, params.grad_scale, master, value, g, m, v);
 }
 
 }  // namespace kernels

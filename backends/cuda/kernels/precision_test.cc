@@ -196,7 +196,7 @@ void TestPointwise() {
   PointwiseForward(scale_add, da.ptr, db.ptr, dout.ptr);
   Synchronize();
   for (int i = 0; i < n; ++i) {
-    ref[i] = scale_add.alpha * af[i] + scale_add.beta * bf[i];
+    ref[i] = scale_add.alpha.host() * af[i] + scale_add.beta.host() * bf[i];
   }
   CheckVectorClose(FromStorage(dout.Download()), ref, "pointwise scale-add");
 }

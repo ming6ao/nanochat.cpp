@@ -1029,8 +1029,8 @@ void PointwiseForward(const PointwiseParams& params, const ComputeType* a,
                       const ComputeType* b, ComputeType* out) {
   const int n = params.count;
   if (n <= 0 || a == nullptr || out == nullptr) return;
-  const float alpha = params.alpha;
-  const float beta = params.beta;
+  const float alpha = params.alpha.host();
+  const float beta = params.beta.host();
 
   if (params.op == PointwiseOp::kRowScale) {
     const int row_width = params.row_width;
@@ -1097,8 +1097,8 @@ void PointwiseBackward(const PointwiseParams& params, const ComputeType* a,
                        ComputeType* da, ComputeType* db) {
   const int n = params.count;
   if (n <= 0 || a == nullptr || dy == nullptr) return;
-  const float alpha = params.alpha;
-  const float beta = params.beta;
+  const float alpha = params.alpha.host();
+  const float beta = params.beta.host();
 
   if (params.op == PointwiseOp::kRowScale) {
     const int row_width = params.row_width;
@@ -1342,13 +1342,11 @@ namespace {
 // memory, so the device scalar is an ordinary pointer. Both forms stay here,
 // so the two optimizer families cannot drift.
 inline float GradScale(const AdamWParams& params) {
-  return params.grad_scale_dev != nullptr ? *params.grad_scale_dev
-                                          : params.grad_scale;
+  return params.grad_scale.host();
 }
 
 inline float GradScale(const MuonParams& params) {
-  return params.grad_scale_dev != nullptr ? *params.grad_scale_dev
-                                          : params.grad_scale;
+  return params.grad_scale.host();
 }
 
 }  // namespace

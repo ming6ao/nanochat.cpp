@@ -191,8 +191,7 @@ class NanochatOptimizer final : public Optimizer {
         params.eps = group.eps;
         params.weight_decay = group.weight_decay;
         params.step = step;
-        params.grad_scale = 1.0f;
-        params.grad_scale_dev = grad_scale_dev;
+        params.grad_scale.dev = grad_scale_dev;
         kernels::AdamWUpdate(static_cast<int>(group.params[i].count), params,
                              group.params[i].master, group.params[i].value,
                              group.params[i].grad,
@@ -221,8 +220,7 @@ class NanochatOptimizer final : public Optimizer {
       params.ns_steps = config_.muon_ns_steps;
       params.red_dim = group.red_dim;
       params.nesterov = true;
-      params.grad_scale = 1.0f;
-      params.grad_scale_dev = grad_scale_dev;
+      params.grad_scale.dev = grad_scale_dev;
       kernels::MuonUpdate(params, muon_stack_, group.stacked_master,
                           group.stacked_values, group.buf1, group.buf2);
       ScatterStacked(group);

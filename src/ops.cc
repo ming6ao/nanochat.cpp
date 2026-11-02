@@ -108,6 +108,20 @@ void StoreScalar(float* device, float value) {
 // The pointwise family, one call per composition step
 // ---------------------------------------------------------------------------
 
+// One pointwise call whose coefficients are scalar arguments, so a caller that
+// keeps them on the device reads them there (docs/scalar-arguments.md).
+void PwScalars(PointwiseOp op, int count, const ComputeType* a,
+               const ComputeType* b, ComputeType* out, ScalarArg alpha,
+               ScalarArg beta) {
+  if (count <= 0) return;
+  PointwiseParams params;
+  params.op = op;
+  params.count = count;
+  params.alpha = alpha;
+  params.beta = beta;
+  kernels::PointwiseForward(params, a, b, out);
+}
+
 void Pw(PointwiseOp op, int count, const ComputeType* a, const ComputeType* b,
         ComputeType* out, float alpha = 1.0f, float beta = 0.0f,
         int row_width = 0) {
@@ -1343,7 +1357,7 @@ void GradNormForward(const float* const* grads, const int* counts,
 void BlockForward(const BlockShape& shape, const BlockWeights& weights,
                   const BlockActivations& acts, const int* tokens,
                   const float* cos, const float* sin, const ComputeType* x,
-                  const ComputeType* x0, float resid, float x0_lambda) {
+                  const ComputeType* x0, ScalarArg resid, ScalarArg x0_lambda) {
   const std::int64_t rows = static_cast<std::int64_t>(shape.batch) * shape.seq;
   const int hidden = shape.hidden;
   const int heads = shape.num_heads;
@@ -1355,8 +1369,8 @@ void BlockForward(const BlockShape& shape, const BlockWeights& weights,
   if (rows <= 0 || hidden <= 0 || heads <= 0 || head_dim <= 0) return;
 
   // Residual blend, pre-attention norm, then q/k/v projections.
-  Pw(PointwiseOp::kScaleAdd, static_cast<int>(rows * hidden), x, x0, acts.xr,
-     resid, x0_lambda);
+  PwScalars(PointwiseOp::kScaleAdd, static_cast<int>(rows * hidden), x, x0,
+            acts.xr, resid, x0_lambda);
   RmsNormForward(rows, hidden, shape.rms_eps, acts.xr, acts.h, acts.rstd1);
 
   LinearForward(acts.h, weights.c_q, acts.q_final, rows, hidden, query_dim,
@@ -1447,8 +1461,8 @@ void BlockForward(const BlockShape& shape, const BlockWeights& weights,
 void BlockBackward(const BlockShape& shape, const BlockWeights& weights,
                    const BlockActivations& acts, const BlockGrads& grads,
                    const BlockScratch& scratch, const int* tokens,
-                   const float* cos, const float* sin, float resid,
-                   float x0_lambda, const ComputeType* x_in,
+                   const float* cos, const float* sin, ScalarArg resid,
+                   ScalarArg x0_lambda, const ComputeType* x_in,
                    const ComputeType* x0, const ComputeType* dout,
                    ComputeType* dx_in, ComputeType* x0_acc, float* resid_grad,
                    float* x0_lambda_grad) {
@@ -1528,10 +1542,10 @@ void BlockBackward(const BlockShape& shape, const BlockWeights& weights,
   // dx_in = resid * dxr; x0_acc += x0_lambda * dxr. Both are elementwise on
   // the device. The two scalar gradients are device reductions, so the block
   // backward stays entirely on the GPU.
-  Pw(PointwiseOp::kScale, static_cast<int>(rows * hidden), scratch.dxr, nullptr,
-     dx_in, resid);
-  Pw(PointwiseOp::kScaleAdd, static_cast<int>(rows * hidden), x0_acc,
-     scratch.dxr, x0_acc, 1.0f, x0_lambda);
+  PwScalars(PointwiseOp::kScale, static_cast<int>(rows * hidden), scratch.dxr,
+            nullptr, dx_in, resid, ScalarArg(0.0f));
+  PwScalars(PointwiseOp::kScaleAdd, static_cast<int>(rows * hidden), x0_acc,
+            scratch.dxr, x0_acc, ScalarArg(1.0f), x0_lambda);
   {
     const ComputeType* spans[1] = {scratch.dxr};
     const ComputeType* other[1] = {x_in};

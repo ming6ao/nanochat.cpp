@@ -78,14 +78,17 @@ __global__ void PointwiseForwardKernel(PointwiseParams p,
                                        ComputeType* __restrict__ out) {
   const int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= p.count) return;
+  // One load per thread from a uniform address, which the hardware broadcasts.
+  const float alpha = p.alpha.host();
+  const float beta = p.beta.host();
   const float av = AsFloatDev(a[i]);
   float result = 0.0f;
   switch (p.op) {
     case PointwiseOp::kScale:
-      result = p.alpha * av;
+      result = alpha * av;
       break;
     case PointwiseOp::kScaleAdd:
-      result = p.alpha * av + p.beta * AsFloatDev(b[i]);
+      result = alpha * av + beta * AsFloatDev(b[i]);
       break;
     case PointwiseOp::kGateMul:
       result = SigmoidDev(av) * AsFloatDev(b[i]);
@@ -96,7 +99,7 @@ __global__ void PointwiseForwardKernel(PointwiseParams p,
       break;
     }
     case PointwiseOp::kSoftcap: {
-      const float cap = p.alpha;
+      const float cap = alpha;
       result = cap * tanhf(av / cap);
       break;
     }
@@ -129,15 +132,17 @@ __global__ void PointwiseBackwardKernel(PointwiseParams p,
                                         ComputeType* __restrict__ db) {
   const int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= p.count) return;
+  const float alpha = p.alpha.host();
+  const float beta = p.beta.host();
   const float av = AsFloatDev(a[i]);
   const float dyv = AsFloatDev(dy[i]);
   switch (p.op) {
     case PointwiseOp::kScale:
-      if (da != nullptr) da[i] = ToComputeDev(p.alpha * dyv);
+      if (da != nullptr) da[i] = ToComputeDev(alpha * dyv);
       break;
     case PointwiseOp::kScaleAdd:
-      if (da != nullptr) da[i] = ToComputeDev(p.alpha * dyv);
-      if (db != nullptr) db[i] = ToComputeDev(p.beta * dyv);
+      if (da != nullptr) da[i] = ToComputeDev(alpha * dyv);
+      if (db != nullptr) db[i] = ToComputeDev(beta * dyv);
       break;
     case PointwiseOp::kGateMul: {
       const float sig = SigmoidDev(av);
@@ -153,7 +158,7 @@ __global__ void PointwiseBackwardKernel(PointwiseParams p,
       break;
     case PointwiseOp::kSoftcap: {
       if (da != nullptr) {
-        const float cap = p.alpha;
+        const float cap = alpha;
         const float t = tanhf(av / cap);
         da[i] = ToComputeDev(dyv * (1.0f - t * t));
       }

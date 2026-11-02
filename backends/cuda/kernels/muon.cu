@@ -55,14 +55,12 @@ constexpr float kPolarCoeffs[5][3] = {
 // Nesterov-accelerated gradient or the plain first moment. `grad_scale` carries
 // the global clip scale (one when the clip is inactive).
 __global__ void MuonMomentumKernel(long long total, float momentum,
-                                   bool nesterov, float grad_scale,
-                                   bool scale_on_device,
-                                   const float* __restrict__ grad_scale_dev,
+                                   bool nesterov, ScalarArg grad_scale,
                                    const float* __restrict__ grads,
                                    float* __restrict__ buf1,
                                    ComputeType* __restrict__ x) {
   const long long stride = static_cast<long long>(gridDim.x) * blockDim.x;
-  const float scale = scale_on_device ? *grad_scale_dev : grad_scale;
+  const float scale = grad_scale.host();
   for (long long i =
            static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x;
        i < total; i += stride) {
@@ -442,11 +440,9 @@ void MuonUpdate(const MuonParams& params, const float* stacked_grads,
 
   // The clip scale is either the host value or a device scalar the reduction
   // wrote, so the optimizer step needs no host read of the clip.
-  const bool scale_on_device = params.grad_scale_dev != nullptr;
   cuda_backend::Launch(MuonMomentumKernel, dim3(elem_grid), dim3(kThreads), 0,
                        total, params.momentum, params.nesterov,
-                       params.grad_scale, scale_on_device,
-                       params.grad_scale_dev, stacked_grads, buf1, x);
+                       params.grad_scale, stacked_grads, buf1, x);
   // MuonEq: each row to the mean row norm, then the matrix to unit Frobenius
   // norm, which is what makes the Polar Express coefficients apply.
   matrix_stat(MatrixStat::kFrobenius, 0.0f);

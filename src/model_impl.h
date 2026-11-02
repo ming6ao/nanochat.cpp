@@ -105,6 +105,9 @@ class TrainModel final : public Model {
 
   Param& AddParam(const std::string& name, std::int64_t count, int rows,
                   int cols);
+  // The fp32 view of one scalar parameter, for a kernel that reads it on the
+  // device (docs/scalar-arguments.md).
+  static const float* ScalarSource(const Param& p);
   // True when `layer` carries the ResFormer value embedding: the block list
   // says whether the block consumes one (the value-gated residual), and the
   // derived `Config` says which layers carry the table. Two questions, one
@@ -155,6 +158,10 @@ class TrainModel final : public Model {
   GradientType* resid_grad_ = nullptr;
   ComputeType* x0_lambda_ = nullptr;
   GradientType* x0_lambda_grad_ = nullptr;
+  // The fp32 view of the two per-layer scalars, for the kernels that read them
+  // on the device (`docs/scalar-arguments.md`).
+  const float* resid_f32_ = nullptr;
+  const float* x0_lambda_f32_ = nullptr;
   ComputeType* smear_gate_ = nullptr;
   GradientType* smear_gate_grad_ = nullptr;
   ComputeType* smear_lambda_ = nullptr;
