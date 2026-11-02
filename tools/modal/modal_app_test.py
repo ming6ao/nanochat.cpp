@@ -109,17 +109,23 @@ def _report_document(*, precision="bf16", arch="sm_90", checkpoint="bf16",
                      step_ms=40.0, mfu=0.0001) -> dict:
     """One chain report, shaped the way ``nanochat_cpp.pipeline`` writes it.
 
-    The base stage carries the rate facts of row 4 (``step_ms``, ``mfu``) and
-    the hardware block, and the RL stage carries the checkpoint metadata the
-    container wrote, so a gate reads exactly what the chain recorded.
+    The base stage carries the rate facts of row 4 (``step_ms``, its split, and
+    ``mfu``) and the hardware block, and the RL stage carries the checkpoint
+    metadata the container wrote, so a gate reads exactly what the chain
+    recorded.
     """
     return {
-        "version": 2,
+        "version": 3,
         "job": {"run_id": "demo", "profile": "standard"},
         "stages": [
             {"name": "base", "steps": 200, "seconds": 30.0,
              "checkpoint": "/runs/x/base/checkpoint.ckpt",
-             "extra": {"step_ms": step_ms, "tokens_per_sec": 1.6,
+             "extra": {"step_ms": step_ms,
+                       "compute_ms": 0.95 * step_ms,
+                       "data_ms": 0.04 * step_ms,
+                       "other_ms": 0.01 * step_ms,
+                       "window_steps": 190,
+                       "tokens_per_sec": 1.6,
                        "mfu": mfu,
                        "hardware": {"backend": "cuda", "arch": arch,
                                     "precision": precision}}},
@@ -1116,6 +1122,17 @@ class GateTest(unittest.TestCase):
         for gate in loud_gates:
             self.assertNotIn("mfu", gate["read"])
             self.assertNotIn("speed_ratio", gate["read"])
+
+    def test_the_base_facts_name_the_step_split(self) -> None:
+        # Row 4 of the plan: the step is attributable, so the two-leg document
+        # carries the split and the window it was read over.
+        facts = self.app.base_facts(self.report(step_ms=40.0))
+        self.assertEqual(facts["step_ms"], 40.0)
+        self.assertAlmostEqual(facts["compute_ms"], 38.0)
+        self.assertAlmostEqual(facts["data_ms"], 1.6)
+        self.assertAlmostEqual(facts["other_ms"], 0.4)
+        self.assertEqual(facts["window_steps"], 190.0)
+        self.assertIsNone(self.app.base_facts({"stages": []})["compute_ms"])
 
     def test_the_comparison_records_what_no_gate_reads(self) -> None:
         legs = {"t4": self.app.leg_summary(self.app.T4, {

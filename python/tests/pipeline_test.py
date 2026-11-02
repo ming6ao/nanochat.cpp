@@ -322,6 +322,40 @@ class PipelineTest(unittest.TestCase):
                         f"the base loss went from {losses[0]} to "
                         f"{losses[-1]}, so the optimizer did nothing")
 
+    # -- A14 ---------------------------------------------------------------
+
+    def test_a14_the_base_rates_are_a_steady_window_a_readable_split(self) \
+            -> None:
+        """A rate is a median over a named window, and the split adds up.
+
+        Version 3 of the report reads the driver's records instead of the stage
+        wall clock, which charged the model build and the corpus copy to every
+        step (``docs/pipeline-scaleup-plan.md`` section 9 row 4). A regression
+        to the wall clock shows up as ``window_steps`` 0, and a record that
+        stops carrying a timing field shows up as a split that cannot cover the
+        step.
+        """
+        extra = self.stages["base"].extra
+        for name in ("step_ms", "compute_ms", "data_ms", "other_ms"):
+            self.assertIn(name, extra, f"the base stage reports no {name}")
+            self.assertGreaterEqual(float(extra[name]), 0.0,
+                                    f"{name} is negative")
+        self.assertGreater(float(extra["step_ms"]), 0.0,
+                           "the steady step time is not positive")
+        self.assertGreater(float(extra["compute_ms"]), 0.0,
+                           "the driver reported no compute time")
+        self.assertGreaterEqual(int(extra["window_steps"]), 1)
+        self.assertLessEqual(int(extra["warmup_steps"]) + int(
+            extra["window_steps"]), int(self.job.base_steps))
+        # The three parts are separate medians, so allow one step of spread.
+        self.assertLessEqual(float(extra["compute_ms"]) + float(
+            extra["data_ms"]), 1.05 * float(extra["step_ms"]),
+            f"compute {extra['compute_ms']} plus data {extra['data_ms']} "
+            f"exceeds the step {extra['step_ms']}")
+        self.assertEqual(int(extra["tokens_per_step"]),
+                         pipeline.BASE_BATCH * int(self.shape.seq_len))
+        self.assertGreater(float(extra["tokens_per_sec"]), 0.0)
+
     # -- A3 ----------------------------------------------------------------
 
     def test_a3_the_metadata_chain(self) -> None:

@@ -173,8 +173,14 @@ void TestDriverWritesRecordAndSummary() {
     Fail("metrics.jsonl must hold three lines, got " +
          std::to_string(CountLines(metrics)));
   }
-  if (metrics.find("\"version\":1") == std::string::npos) {
-    Fail("the record must carry a version");
+  if (metrics.find("\"version\":2") == std::string::npos) {
+    Fail("the record must carry version 2");
+  }
+  if (metrics.find("\"compute_seconds\":") == std::string::npos) {
+    Fail("the record must carry the compute time of the step");
+  }
+  if (metrics.find("\"data_seconds\":") == std::string::npos) {
+    Fail("the record must carry the batch load time");
   }
   if (metrics.find("\"device_loss\":[") == std::string::npos) {
     Fail("the record must carry a per-device loss");

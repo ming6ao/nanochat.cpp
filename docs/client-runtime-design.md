@@ -338,10 +338,18 @@ The driver writes one record shape. The shape follows the `LogRecord` fields in
 `src/train.cc` and adds one loss entry per device:
 
 ```json
-{"version": 1, "step": 1, "loss": 4.1, "grad_norm": 0.9,
+{"version": 2, "step": 1, "loss": 4.1, "grad_norm": 0.9,
  "tokens_per_sec": 12000.0, "mfu": 0.31, "step_seconds": 0.2,
- "compute_seconds": 0.15, "seconds": 0.2, "device_loss": [4.1, 4.1]}
+ "data_seconds": 0.004, "compute_seconds": 0.19, "seconds": 0.2,
+ "device_loss": [4.1, 4.1]}
 ```
+
+Schema 2 adds `data_seconds` and writes `compute_seconds`, which schema 1
+measured and printed only to the human log. The three timing fields split one
+step: `step_seconds` is the wall clock between two step starts, `data_seconds`
+is the batch load, and `compute_seconds` is the training call. The report reads
+them instead of dividing the stage wall clock by the step count, because that
+quotient charges the build and the corpus copy to every step.
 
 The summary holds `version`, `checkpoint`, `steps`, `mean_loss`,
 `steady_mfu`, and `replica_digests`. The driver owns both files. Python reads

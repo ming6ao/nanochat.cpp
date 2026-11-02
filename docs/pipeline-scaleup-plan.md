@@ -341,6 +341,15 @@ Rows 0 to 8 are in the tree. Four things a reader should not re-measure:
   `pipeline.py` reads `tokens_per_sec` from exactly that product. The device
   bound of section 14 is the bound of those 64 tokens, and the MFU of section 8
   is the MFU of those 64 tokens.
+- **The base rate is now a steady window, not a stage quotient.** Schema 2 of
+  the driver record writes `data_seconds` beside `compute_seconds`. Report
+  version 3 medians the driver's own records over a window that drops the
+  warm-up steps. The `step_ms` of the run recorded in section 14 divided the
+  whole base stage by the step count. That stage time holds the model build and
+  the corpus copy, so the number is an upper bound and not a step time. Read a
+  rate from report version 3 or later. The split is what makes the 163 times gap
+  of gate G3 attributable: `compute_ms` names the training call and `data_ms`
+  names the batch load.
 
 ## 10. New assertions
 
@@ -352,8 +361,11 @@ The existing gate keeps A1 to A9 on the `demo` profile.
 | A11 | The RL checkpoint digest is the same before and after the eval stage | An eval that writes |
 | A12 | The report names the evaluated checkpoint, its digest, the corpus path, the batch size, and the batch count | An unreviewable eval |
 | A13 | `deliver/chatrl.ckpt` holds the RL weights, and its metadata reports stage `rl` | A delivery that follows the wrong stage |
+| A14 | The base stage reports `step_ms`, `compute_ms`, `data_ms`, and `other_ms` from one steady window, the window and the warm-up count are named, and compute plus data does not exceed the step | A rate that went back to the stage wall clock, and a record that stopped carrying a timing field |
 
-A13 guards the decision in section 6.
+A13 guards the decision in section 6. A14 guards the decision of section 9
+row 4: a rate is a median over the steps a run repeats. It is not the stage
+wall clock divided by the step count.
 
 ## 11. Documents to update
 

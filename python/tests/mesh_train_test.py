@@ -62,14 +62,19 @@ class MeshTrainClientTest(unittest.TestCase):
                     metrics.read_text(encoding="utf-8").splitlines() if line]
             self.assertEqual(len(rows), 2)
             self.assertEqual(rows[0]["step"], 1)
-            self.assertEqual(rows[0]["version"], 1)
+            # One version covers the job, the record, and the summary, so the
+            # driver's version 2 appears in both files (src/mesh_train.h).
+            self.assertEqual(rows[0]["version"], 2)
             self.assertIn("device_loss", rows[0])
             self.assertEqual(len(rows[0]["device_loss"]), 1)
+            for name in ("step_seconds", "compute_seconds", "data_seconds"):
+                self.assertIn(name, rows[0], f"the record carries no {name}")
+                self.assertGreaterEqual(rows[0][name], 0.0, name)
 
             summary = json.loads(
                 (Path(tmp) / "summary.json").read_text(encoding="utf-8"))
             self.assertEqual(summary["steps"], 2)
-            self.assertEqual(summary["version"], 1)
+            self.assertEqual(summary["version"], 2)
             self.assertEqual(len(summary["replica_digests"]), 1)
 
     def test_job_json_round_trip(self) -> None:

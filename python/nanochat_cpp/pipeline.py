@@ -85,7 +85,13 @@ __all__ = [
 #:    hardware check facts of the base stage (``docs/pipeline-scaleup-plan.md``
 #:    section 9 rows 4 and 5). No fixture moves: the report version is not the
 #:    container version, so an old checkpoint still reads.
-REPORT_VERSION = 2
+#: 3: the base stage reports a steady window instead of a stage wall clock. The
+#:    ``step_ms`` of version 2 divided the whole stage time by the step count,
+#:    so it charged the model build and the corpus copy to every step. Version 3
+#:    reads the driver's own per-step records, splits the step into
+#:    ``step_ms``, ``compute_ms``, ``data_ms``, and ``other_ms``, and names the
+#:    window in ``warmup_steps`` and ``window_steps`` (section 9 row 4).
+REPORT_VERSION = 3
 
 #: The directory the corpus builder fills, under the run directory.
 CORPUS_DIRNAME = "corpus"
@@ -117,6 +123,14 @@ CONVERSATIONS_NAME = "conversations.json"
 #: per step and a fresh epoch always fills one 65-token row
 #: (docs/pipeline-plan.md D5, row 7; docs/pipeline-scaleup-plan.md P2).
 BASE_BATCH = 1
+
+#: The warm-up steps a rate window drops. The first steps of a device run pay
+#: the first cuBLAS handle, the first kernel module load, and the first parquet
+#: read, and a checkpoint write stalls one step, so a steady window must skip
+#: them. The window keeps every record after ``min(WARMUP_STEPS, steps // 4)``,
+#: so a short job still reports a number and a long job reports its settled
+#: steps (docs/pipeline-scaleup-plan.md section 9 row 4).
+WARMUP_STEPS = 10
 
 #: The evaluator batch of the eval stage, in sequences. It is passed by hand
 #: because the default of :func:`nanochat_cpp.api.evaluate` is 8: no evaluator
@@ -485,18 +499,29 @@ def _metric_records(path: str | os.PathLike) -> tuple[dict, ...]:
     return tuple(records)
 
 
+def _metric_values(records: Sequence[Mapping],
+                   key: str) -> tuple[float, ...]:
+    """One numeric field of a driver's metric records, in step order.
+
+    A record that carries no ``key``, or one whose value is not a number, is
+    skipped, so a truncated final line costs one entry and not the trace and a
+    record of an older schema costs only the field it does not hold.
+    """
+    values: list[float] = []
+    for record in records:
+        if not isinstance(record.get(key), (int, float)):
+            continue
+        values.append(float(record[key]))
+    return tuple(values)
+
+
 def _metric_losses(records: Sequence[Mapping]) -> tuple[float, ...]:
     """The per-step losses of a driver's metric records.
 
     A record that carries no ``loss``, or one whose ``loss`` is not a number,
     is skipped, so a truncated final line costs one entry and not the trace.
     """
-    losses: list[float] = []
-    for record in records:
-        if not isinstance(record.get("loss"), (int, float)):
-            continue
-        losses.append(float(record["loss"]))
-    return tuple(losses)
+    return _metric_values(records, "loss")
 
 
 def _mean(values: Sequence[float]) -> float:
@@ -505,6 +530,23 @@ def _mean(values: Sequence[float]) -> float:
     if not numbers:
         return 0.0
     return float(sum(numbers) / len(numbers))
+
+
+def _median(values: Sequence[float]) -> float:
+    """The median of ``values``, or 0.0 when there is none.
+
+    A median and not a mean, because one stall is enough to move a mean of a
+    short run: the first step pays the first cuBLAS handle and the first file
+    read, and a checkpoint write pays the disk. The median of the steady window
+    names the step a run actually repeats (``docs/performance.md`` section 2).
+    """
+    numbers = sorted(float(value) for value in values)
+    if not numbers:
+        return 0.0
+    middle = len(numbers) // 2
+    if len(numbers) % 2 == 1:
+        return numbers[middle]
+    return 0.5 * (numbers[middle - 1] + numbers[middle])
 
 
 def _stage(name: str, steps: int, losses, path: str | os.PathLike,
@@ -531,34 +573,60 @@ def _total_seconds(stages: Sequence[Stage]) -> float:
     return float(sum(stage.seconds for stage in stages))
 
 
-def _rates(records: Sequence[Mapping], seconds: float, steps_ran: int,
-           shape: api.Config, steady_mfu: float = 0.0) -> dict:
-    """The rate facts of the base stage: ``step_ms``, tokens per second, mfu.
+def _rates(records: Sequence[Mapping], steps_ran: int, shape: api.Config,
+           steady_mfu: float = 0.0, warmup: int | None = None) -> dict:
+    """The rate facts of the base stage: the step time and its split.
 
-    ``seconds`` is the stage's own wall clock, the number the stage records, so
-    ``step_ms`` is that time divided by the steps that ran and the throughput
-    is the tokens those steps moved divided by the same time. ``mfu`` is read
-    from what the driver wrote and never computed here from a guessed peak: the
-    driver turns the shape's FLOPs per token
-    (``EstimateFlopsPerToken``) and the measured tokens per second into the
-    number (``ComputeMfu``, ``src/mesh_train.cc``), and an unknown device names
-    no peak and so records 0.0. The per-step values come first and the run
-    summary's steady value is the fallback, so a driver that wrote no metrics
-    still reports the number it recorded (``docs/pipeline-scaleup-plan.md``
+    Every number comes from the driver's own per-step records, and it is a
+    median over one steady window, so no number here is estimated and no
+    startup cost is charged to a step (``docs/pipeline-scaleup-plan.md``
     section 9 row 4).
+
+    ``step_ms`` is the wall clock between two step starts. ``data_ms`` is the
+    batch load, which is the parquet read and the encode or the copy from a
+    packed shard. ``compute_ms`` is the driver's ``TrainStep`` call, which is
+    the host graph and the device work it launches. ``other_ms`` is the
+    remainder: the record write, the flush, and the log line. The three are
+    separate medians, so ``other_ms`` is clamped at zero rather than trusted to
+    a fraction of a millisecond.
+
+    ``tokens_per_sec`` divides the batch of one step by ``step_ms``.
+    ``tokens_per_step`` is that batch, named so a reader does not infer it.
+    ``mfu`` is read from the driver, which turns the shape's FLOPs per token and
+    its own per-step throughput into the number (``ComputeMfu``,
+    ``src/mesh_train.cc``). An unknown device names no peak and records 0.0, and
+    ``steady_mfu`` is the fallback for a driver that wrote no per-step value.
+
+    The window drops ``warmup`` leading steps, which defaults to
+    :data:`WARMUP_STEPS` capped at a quarter of the run, so a short job still
+    reports a number. The record carries the counts, because a rate without them
+    cannot be reviewed. The stage's own wall clock is deliberately not read:
+    it holds the model build, the tokenizer load, and the corpus copy, so
+    dividing it by the step count reports a step time that never happened.
     """
     steps = max(1, int(steps_ran))
-    elapsed = float(seconds)
-    tokens = float(steps) * BASE_BATCH * int(shape.seq_len)
-    step_ms = 1000.0 * elapsed / steps
-    tokens_per_sec = tokens / elapsed if elapsed > 0.0 else 0.0
-    per_step = [float(record["mfu"]) for record in records
-                if isinstance(record.get("mfu"), (int, float))]
-    mfu = _mean(per_step) if per_step else float(steady_mfu)
+    skip = (min(WARMUP_STEPS, steps // 4) if warmup is None
+            else max(0, min(int(warmup), steps - 1)))
+    window = list(records)[skip:]
+    if not window:
+        window = list(records)
+        skip = 0
+    step_ms = 1000.0 * _median(_metric_values(window, "step_seconds"))
+    compute_ms = 1000.0 * _median(_metric_values(window, "compute_seconds"))
+    data_ms = 1000.0 * _median(_metric_values(window, "data_seconds"))
+    tokens_per_step = BASE_BATCH * int(shape.seq_len)
+    per_step_mfu = _metric_values(window, "mfu")
     return {
         "step_ms": step_ms,
-        "tokens_per_sec": tokens_per_sec,
-        "mfu": mfu,
+        "compute_ms": compute_ms,
+        "data_ms": data_ms,
+        "other_ms": max(0.0, step_ms - compute_ms - data_ms),
+        "tokens_per_sec": (1000.0 * tokens_per_step / step_ms
+                           if step_ms > 0.0 else 0.0),
+        "tokens_per_step": tokens_per_step,
+        "mfu": _mean(per_step_mfu) if per_step_mfu else float(steady_mfu),
+        "warmup_steps": skip,
+        "window_steps": len(window),
     }
 
 
@@ -739,11 +807,13 @@ def stage_base(job: "Job") -> Stage:
     One :class:`nanochat_cpp.runtime.MeshTrainConfig` call with a mesh of one
     device. The driver writes ``metrics.jsonl``, ``summary.json``, and the
     checkpoint, so the loss trace of the stage is read back from the metrics
-    file it wrote, and so are the rates: the step time, the tokens per second,
-    and the model FLOPs utilization of every step. The stage's ``extra``
+    file it wrote, and so are the rates. Every rate is a median over one steady
+    window of the driver's own records, and the step is split into
+    ``step_ms``, ``compute_ms``, ``data_ms``, and ``other_ms``, so a reader
+    attributes a slow step instead of guessing at it
+    (``docs/pipeline-scaleup-plan.md`` section 9 row 4). The stage's ``extra``
     therefore holds the rates and the hardware-check facts beside the corpus
-    block (``docs/pipeline-scaleup-plan.md`` section 9 row 4), and no number in
-    it is estimated here.
+    block, and no number in it is estimated here.
     """
     shape = config(job)
     corpus = build_corpus(job)
@@ -775,7 +845,7 @@ def stage_base(job: "Job") -> Stage:
     losses = _metric_losses(records)
     steps_ran = int(summary.steps)
     extra = _corpus_facts(corpus)
-    extra.update(_rates(records, seconds, steps_ran, shape,
+    extra.update(_rates(records, steps_ran, shape,
                         float(summary.steady_mfu)))
     extra.update({
         "mean_loss": float(summary.mean_loss),

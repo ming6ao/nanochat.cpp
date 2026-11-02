@@ -1108,11 +1108,18 @@ def base_facts(report) -> dict:
 
     ``step_ms`` comes from the base stage's ``extra`` block, which row 4 of the
     plan fills from the metrics the driver wrote, so nothing here estimates it.
-    A report without a base stage answers ``None`` for every number, and a gate
+    ``compute_ms``, ``data_ms``, and ``other_ms`` are the split of that step and
+    ``window_steps`` names the steady window it was read over, so a reader of
+    the two-leg document sees where the time went instead of one total. A
+    report without a base stage answers ``None`` for every number, and a gate
     that reads one fails with a reason instead of comparing a guess.
     """
     extra = dict(stage_facts(report, "base").get("extra") or {})
     return {"step_ms": _number(extra.get("step_ms")),
+            "compute_ms": _number(extra.get("compute_ms")),
+            "data_ms": _number(extra.get("data_ms")),
+            "other_ms": _number(extra.get("other_ms")),
+            "window_steps": _number(extra.get("window_steps")),
             "tokens_per_sec": _number(extra.get("tokens_per_sec")),
             "mfu": _number(extra.get("mfu")),
             "hardware": dict(extra.get("hardware") or {})}

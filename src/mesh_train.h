@@ -31,11 +31,35 @@ class MeshRuntime;
 class Tokenizer;
 
 // The schema version of the job, the metric record, and the summary.
-inline constexpr int kMeshTrainSchemaVersion = 1;
+//
+// 2: the record carries `compute_seconds` and `data_seconds`
+//    (docs/pipeline-scaleup-plan.md section 9 row 4). Schema 1 measured
+//    `compute_seconds` and wrote it to the human log only, so a report could
+//    not split a step and could not attribute a slow one. An unknown field is
+//    ignored and an unknown version is rejected (docs/client-runtime-design.md
+//    section 10.1).
+inline constexpr int kMeshTrainSchemaVersion = 2;
 
 // One metric record, written as one JSON line in `metrics.jsonl`
 // (docs/client-runtime-design.md section 10.1). The field set follows
 // `LogRecord` and adds one loss entry per device.
+//
+// The three timing fields split one step, and every one of them is measured,
+// never estimated:
+//
+//   `step_seconds`    the wall clock between two step starts, data included;
+//   `data_seconds`    the batch load, which is the parquet read and the
+//                     encode, or the copy from a packed shard;
+//   `compute_seconds` the `MeshRuntime::TrainStep` call, which is the host
+//                     graph and the device work it launches. The call ends in
+//                     the optimizer, which reads the gradient norm back to the
+//                     host, so the device is drained and the number is not a
+//                     dispatch-only figure.
+//
+// A step is bound by the host program at the chain's shapes, so the split is
+// what a reader needs: `compute_seconds` names the training call and
+// `step_seconds` minus the other two names the record write, the flush, and
+// the log line.
 struct MeshStepRecord {
   int step = 0;
   float loss = 0.0f;
@@ -43,6 +67,7 @@ struct MeshStepRecord {
   double tokens_per_sec = 0.0;
   double mfu = 0.0;
   double step_seconds = 0.0;
+  double data_seconds = 0.0;
   double compute_seconds = 0.0;
   double seconds = 0.0;
   std::vector<float> device_loss;

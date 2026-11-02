@@ -130,6 +130,8 @@ std::string JsonFloatArray(const std::vector<float>& values) {
 // One metric record as one JSON line. The keys are sorted.
 std::string RecordJson(const MeshStepRecord& record) {
   std::string out = "{";
+  out += "\"compute_seconds\":" + JsonDouble(record.compute_seconds) + ",";
+  out += "\"data_seconds\":" + JsonDouble(record.data_seconds) + ",";
   out += "\"device_loss\":" + JsonFloatArray(record.device_loss) + ",";
   out += "\"grad_norm\":" + JsonDouble(record.grad_norm) + ",";
   out += "\"loss\":" + JsonDouble(record.loss) + ",";
@@ -402,15 +404,18 @@ float MeshTrainDriver::Run() {
   const InterruptHandler previous_handler = std::signal(SIGINT, OnInterrupt);
   for (int step = start_step_; step <= steps; ++step) {
     if (g_interrupted) break;
+    const auto step_start = std::chrono::steady_clock::now();
     if (!LoadBatch(&tokens_, &targets_)) {
       std::fprintf(stderr, "mesh_train: the loader returned no batch\n");
       break;
     }
+    const auto loaded = std::chrono::steady_clock::now();
     const float loss = runtime_->TrainStep(tokens_.data(), targets_.data());
     const auto now = std::chrono::steady_clock::now();
     double step_seconds = ElapsedSeconds(previous, now);
     previous = now;
     if (step_seconds < 1e-9) step_seconds = 1e-9;
+    const double data_seconds = ElapsedSeconds(step_start, loaded);
 
     const MeshMetrics& metrics = runtime_->metrics();
     MeshStepRecord record;
@@ -420,6 +425,7 @@ float MeshTrainDriver::Run() {
     record.tokens_per_sec = static_cast<double>(tokens_per_step) / step_seconds;
     record.mfu = MfuOf(record.tokens_per_sec, flops_per_token_, peak_flops_);
     record.step_seconds = step_seconds;
+    record.data_seconds = data_seconds;
     record.compute_seconds = static_cast<double>(metrics.step_seconds);
     record.seconds = ElapsedSeconds(start, now);
     record.device_loss = metrics.loss;
@@ -436,11 +442,12 @@ float MeshTrainDriver::Run() {
         (config_.log_every > 0 && step % std::max(1, config_.log_every) == 0);
     if (show) {
       std::printf(
-          "[%5d/%d] loss %.4f  grad_norm %.4g  step %.2fs (compute %.2fs)  "
-          "%.0f tok/s  mfu %.2f%%\n",
+          "[%5d/%d] loss %.4f  grad_norm %.4g  step %.3fs (compute %.3fs, "
+          "data %.3fs)  %.0f tok/s  mfu %.2f%%\n",
           step, steps, static_cast<double>(record.loss),
           static_cast<double>(record.grad_norm), record.step_seconds,
-          record.compute_seconds, record.tokens_per_sec, record.mfu * 100.0);
+          record.compute_seconds, record.data_seconds, record.tokens_per_sec,
+          record.mfu * 100.0);
       std::fflush(stdout);
     }
   }
