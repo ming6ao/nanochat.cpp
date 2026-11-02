@@ -430,6 +430,23 @@ cc_binary(
     ],
 )
 
+# Muon's Polar Express GEMM shapes and the whole optimizer phase of one step,
+# at the `h100` and `big` profile shapes.
+cuda_binary(
+    name = "muon_benchmark",
+    srcs = ["muon_benchmark.cc"],
+    copts = nanochat_cuda_copts(),
+    host_copts = nanochat_copts(),
+    defines = precision_defines(),
+    host_defines = precision_defines(),
+    deps = [
+        ":optimizer_kernels",
+        "//backends/cuda/kernels/testing:bench_utils",
+        "//backends/cuda/kernels/testing:optim_test_utils",
+        "//include/nanochat:nanochat",
+    ],
+)
+
 # Attention forward/backward device-event timing at `d8_s512`, with a
 # head-dimension sweep. The acceptance binary of `tools/nanochat profile`.
 cuda_binary(

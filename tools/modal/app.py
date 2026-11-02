@@ -161,12 +161,21 @@ TOKENIZER_BIN = f"{REPO_ROOT}/bazel-bin/src/tokenizer/tok_train_main"
 TRAIN_TARGET = "//src:train_main"
 TRAIN_BIN = f"{REPO_ROOT}/bazel-bin/src/train_main"
 
+#: The Bazel label of the Muon optimizer benchmark, and its binary. The
+#: benchmark times the Polar Express GEMM shapes and one whole optimizer phase,
+#: so a card that is slow in the optimizer reports its own rate instead of
+#: hiding inside a step time. It is not a stage executable: only
+#: :func:`bench_h100` runs it.
+BENCH_TARGET = "//backends/cuda/kernels:muon_benchmark"
+BENCH_BIN = f"{REPO_ROOT}/bazel-bin/backends/cuda/kernels/muon_benchmark"
+
 #: The labels the one build of an image names: the shared library, the two
 #: stage executables the chain launches (``docs/pipeline-plan.md`` B6 and D2),
-#: the roofline tool G3 measures with, and the tokenizer trainer the corpus
-#: function runs.
+#: the roofline tool G3 measures with, the tokenizer trainer the corpus
+#: function runs, and the optimizer benchmark :func:`bench_h100` times.
 BUILD_TARGETS = ("//bindings:nanochat_shared", *STAGE_TARGETS,
-                 ROOFLINE_TARGET, TOKENIZER_TARGET, TRAIN_TARGET)
+                 ROOFLINE_TARGET, TOKENIZER_TARGET, TRAIN_TARGET,
+                 BENCH_TARGET)
 
 #: The directory of the image build that holds them, and the variables that
 #: name them. ``nanochat_cpp._build.stage_binary`` prefers the override, and
@@ -824,6 +833,40 @@ def train_h100(job_json: str, run_id: str, publish_json: str = "",
     return _train_on(H100, job_json, run_id, publish_json, stage_json)
 
 
+@app.function(
+    image=image_for(H100),
+    gpu=H100.gpu,
+    cpu=CPU_CORES,
+    timeout=TIMEOUT_SECONDS,
+    max_containers=1,
+)
+def bench_h100(argv_json: str = "[]") -> str:
+    """Time the Muon benchmark on the H100 leg and return what it printed.
+
+    The benchmark runs in the H100 image, so the rate belongs to the library
+    that image built: sm_90 at bf16, the same build the chain runs. ``argv_json``
+    is a JSON list of the benchmark's own arguments, such as
+    ``["--profile", "big", "--muon"]``, so a caller selects the shape without
+    a new deployment.
+
+    It answers one JSON document with the command, the exit status, the
+    benchmark's report lines, and the tail of its output. The benchmark needs
+    no GPU queue in the container: ``NANOCHAT_SANDBOX_BACKEND`` is ``none``
+    there, so ``tools/nanochat bench`` runs the binary in place (section 7).
+    """
+    argv = [str(item) for item in json.loads(argv_json or "[]")]
+    command = ["tools/nanochat", "bench", "--", BENCH_BIN, *argv]
+    result = subprocess.run(command, env=worker_env(package_source()),
+                            capture_output=True, text=True, check=False)
+    measured = [line for line in result.stdout.splitlines()
+                if line.startswith(("polar:", "muon:"))]
+    return json.dumps({"command": command, "status": int(result.returncode),
+                       "rows": measured,
+                       "stdout": result.stdout.strip(),
+                       "tail": process_tail(result, lines=8)},
+                      sort_keys=True)
+
+
 def chain_dir(run_root, job) -> Path:
     """The directory the chain writes: ``<out_root>/<job run_id>``.
 
@@ -1387,6 +1430,254 @@ def step_split(job_json: str, corpus_json: str, steps: int = 6) -> str:
 
 
 # ---------------------------------------------------------------------------
+# The H100 profile: one Nsight Systems trace of the base stage
+# ---------------------------------------------------------------------------
+
+#: The Nsight Systems package the CUDA 12.4.1 image can install. The image
+#: already holds the CUDA apt repository, so the profile image is one small
+#: layer over the built image and never a second build of the library.
+NSYS_PACKAGE = "nsight-systems-2023.4.4"
+
+#: The directory of the trace inside one run directory.
+PROFILE_DIRNAME = "profile"
+
+#: The base stage alone, as one driver module. ``stage_base`` is the chain's
+#: own base stage, so the trace belongs to the run being explained and not to a
+#: copy of it. ``sys.argv`` carries the job file and the step count. It is a
+#: file and not ``-c`` source, so the traced command line is the same shape a
+#: person reads.
+BASE_STAGE_DRIVER = (
+    '"""Trace the base stage of one job file."""\n'
+    "import dataclasses, json, sys\n"
+    "from nanochat_cpp import pipeline as pl\n"
+    "job = pl.Job.read(sys.argv[1])\n"
+    "job = dataclasses.replace(job, base_steps=int(sys.argv[2]))\n"
+    "stage = pl.stage_base(job)\n"
+    "print(json.dumps(stage.extra, indent=1, sort_keys=True))\n"
+    "print('profile: checkpoint', stage.checkpoint)\n"
+)
+
+#: The report names the trace is cut into. The two sums are small and the two
+#: traces are the timeline: the GPU kernels and the CPU driver API calls. The
+#: cuBLAS sum is asked for only when the trace collected that domain, because
+#: the library call is where a small GEMM's host time hides.
+NSYS_SUM_REPORTS = ("cuda_gpu_kern_sum", "cuda_api_sum", "osrt_sum",
+                    "cuda_gpu_mem_time_sum")
+NSYS_TRACE_REPORTS = ("cuda_gpu_trace", "cuda_api_trace")
+
+#: The default trace domains and the default sampling mode. The CUDA activity
+#: and the OS runtime calls answer a device question. A host question takes the
+#: ``cublas`` domain, because a cuBLAS call is not a CUDA runtime call and the
+#: time inside it is invisible to every other domain.
+NSYS_TRACE_DOMAINS = "cuda,osrt"
+NSYS_SAMPLE = "none"
+
+#: The images of the legs with Nsight Systems on top, keyed by leg name. The
+#: cache is separate from :data:`_IMAGES`, so a trace costs one layer and the
+#: training functions keep the image they already build.
+_PROFILE_IMAGES: dict = {}
+
+
+def profile_image_for(leg: Leg):
+    """The image of one leg with Nsight Systems installed.
+
+    The layer sits on top of :func:`image_for`, so the one build of the library
+    is reused and the trace is a measurement of the library the chain ran.
+    """
+    built = _PROFILE_IMAGES.get(leg.name)
+    if built is None:
+        built = _PROFILE_IMAGES[leg.name] = image_for(leg).apt_install(
+            NSYS_PACKAGE)
+    return built
+
+
+def nsys_argv(stem, driver: Sequence[str],
+              domains: str = NSYS_TRACE_DOMAINS,
+              sample: str = NSYS_SAMPLE) -> list:
+    """The ``nsys profile`` line that traces one driver command.
+
+    ``domains`` selects the activity collected: the CUDA activity and the OS
+    runtime calls by default, and ``cublas`` as well when the question is the
+    host time inside a library call. ``sample`` is ``none`` for a device trace
+    and ``cpu`` for a host trace; a CPU sample adds the stack of the thread, so
+    a host cost inside the trainer's own code is attributed to a function.
+
+    ``--force-overwrite`` lets a second trace of the same run replace the first
+    instead of stopping for a question. The application follows the options
+    with no ``--`` separator: version 2023.4.4 reads a bare ``--`` as an empty
+    long option and rejects the whole line as ambiguous.
+    """
+    argv = ["nsys", "profile", "--force-overwrite=true",
+            f"--output={stem}",
+            f"--trace={domains}",
+            f"--sample={sample}",
+            "--cpuctxsw=none",
+            "--cuda-memory-usage=false", "--stats=false"]
+    if str(sample).lower() != "none":
+        # A stack is what turns a host sample into an attribution. The frame
+        # pointer is the cheap method, and a release build keeps enough of it
+        # to name the trainer's own function.
+        argv.append("--backtrace=fp")
+    return [*argv, *driver]
+
+
+def nsys_export_argv(report, stem) -> list:
+    """The ``nsys export`` line that writes the SQLite copy of one trace."""
+    return ["nsys", "export", "--force-overwrite=true", "--type=sqlite",
+            f"--output={stem}.sqlite", str(report)]
+
+
+def nsys_stats_argv(report, stem, reports) -> list:
+    """The ``nsys stats`` line that writes the CSV reports of one trace."""
+    return ["nsys", "stats", "--force-overwrite=true", "--format=csv",
+            f"--report={','.join(reports)}", f"--output={stem}",
+            str(report)]
+
+
+def _run_step(argv, env, log) -> int:
+    """Run one step of the profile and write its output to ``log``.
+
+    A step that fails is recorded and the profile continues, because a missing
+    timeline report costs one fact and never the trace the other steps wrote.
+    """
+    log.write(f"$ {' '.join(str(item) for item in argv)}\n")
+    log.flush()
+    try:
+        result = subprocess.run(argv, env=env, stdout=log,
+                                stderr=subprocess.STDOUT, check=False)
+    except OSError as error:
+        log.write(f"modal: {error}\n")
+        return 127
+    log.write(f"modal: exit {result.returncode}\n")
+    log.flush()
+    return int(result.returncode)
+
+
+def _csv_rows(path, limit: int = 25) -> list:
+    """The rows of one ``nsys stats`` CSV file, the longest first.
+
+    The two sum reports are sorted by their total time column, so a reader sees
+    the cost a kernel or a call owns before the row that is a hundredth of it.
+    """
+    import csv  # noqa: PLC0415 - one small read of one report
+
+    path = Path(path)
+    if not path.is_file():
+        return []
+    with path.open(newline="", encoding="utf-8") as handle:
+        rows = [row for row in csv.DictReader(handle)]
+    total_key = next((name for name in (
+        "Total Time (ns)", "Total Time", "Time (%)", "Total (MB)")
+        if rows and name in rows[0]), None)
+    if total_key is not None:
+        def key(row):
+            try:
+                return float(str(row.get(total_key, 0)).replace(",", ""))
+            except ValueError:
+                return 0.0
+        rows.sort(key=key, reverse=True)
+    return rows[:limit]
+
+
+@app.function(
+    image=profile_image_for(H100),
+    gpu=H100.gpu,
+    cpu=CPU_CORES,
+    volumes={REMOTE_ROOT: runs},
+    secrets=_secrets(),
+    timeout=TIMEOUT_SECONDS,
+    max_containers=1,
+)
+def profile_h100(job_json: str, run_id: str, steps: int = 20,
+                 domains: str = NSYS_TRACE_DOMAINS,
+                 sample: str = NSYS_SAMPLE) -> str:
+    """Trace the base stage of one job file on the H100 leg and return it.
+
+    The base stage is the chain's own :func:`nanochat_cpp.pipeline.stage_base`,
+    so the trace is of the run the report describes: the same shape, the same
+    batch, and the same driver. The trace is cut into the device timeline and
+    the driver's own API calls, which is the one attribution the chain's
+    ``step_ms`` and ``compute_ms`` cannot give.
+
+    The artifacts land in ``/runs/<run_id>/profile``: the ``.nsys-rep`` report,
+    its SQLite copy, the sum CSVs, and the two timeline CSVs. The answer names
+    them with their sizes and carries the first rows of each sum, so a reader
+    with the Volume has the numbers without a second container.
+
+    ``steps`` keeps the trace short: the driver's start-up is one checkpoint
+    write and its steady state is one shape, so twenty steps carry both.
+    """
+    source = package_source()
+    job = json.loads(job_json)
+    job["out_root"] = str(Path(REMOTE_ROOT) / str(run_id))
+    job["base_steps"] = int(steps)
+    job_json = json.dumps(job, sort_keys=True)
+    _check_cards(H100, job_json)
+    run_dir = Path(REMOTE_ROOT) / str(run_id)
+    trace_dir = run_dir / PROFILE_DIRNAME
+    trace_dir.mkdir(parents=True, exist_ok=True)
+    job_path = run_dir / "job.json"
+    job_path.write_text(job_json + "\n", encoding="utf-8")
+    report = trace_dir / "base.nsys-rep"
+    env = worker_env(source)
+
+    stop = threading.Event()
+    keeper = threading.Thread(target=_commit_loop,
+                              args=(runs, stop, COMMIT_SECONDS), daemon=True)
+    keeper.start()
+    log_path = run_dir / "profile.log"
+    driver_path = run_dir / "profile_driver.py"
+    driver_path.write_text(BASE_STAGE_DRIVER, encoding="utf-8")
+    driver = [sys.executable, str(driver_path), str(job_path),
+              str(int(steps))]
+    status = {}
+    sums = list(NSYS_SUM_REPORTS)
+    if "cublas" in str(domains):
+        sums.append("cublas_api_sum")
+    try:
+        with log_path.open("w", encoding="utf-8") as log:
+            status["profile"] = _run_step(
+                nsys_argv(trace_dir / "base", driver, domains, sample),
+                env, log)
+            if report.is_file():
+                status["sqlite"] = _run_step(
+                    nsys_export_argv(report, trace_dir / "base"), env, log)
+                status["sums"] = _run_step(
+                    nsys_stats_argv(report, trace_dir / "base", sums),
+                    env, log)
+                status["traces"] = _run_step(
+                    nsys_stats_argv(report, trace_dir / "timeline",
+                                    NSYS_TRACE_REPORTS), env, log)
+    finally:
+        stop.set()
+        runs.commit()
+
+    files = []
+    for path in sorted(trace_dir.iterdir()):
+        files.append({"name": path.name, "bytes": path.stat().st_size})
+    answer = {
+        "leg": H100.name,
+        "run_dir": str(run_dir),
+        "trace_dir": str(trace_dir),
+        "report": str(report),
+        "steps": int(steps),
+        "domains": str(domains),
+        "sample": str(sample),
+        "source": source,
+        "status": status,
+        "files": files,
+        "kernel_sum": _csv_rows(trace_dir / "base_cuda_gpu_kern_sum.csv"),
+        "api_sum": _csv_rows(trace_dir / "base_cuda_api_sum.csv"),
+        "cublas_sum": _csv_rows(trace_dir / "base_cublas_api_sum.csv"),
+        "osrt_sum": _csv_rows(trace_dir / "base_osrt_sum.csv"),
+        "mem_sum": _csv_rows(trace_dir / "base_cuda_gpu_mem_time_sum.csv"),
+        "log_tail": "\n".join(
+            log_path.read_text(encoding="utf-8").splitlines()[-25:]),
+    }
+    return json.dumps(answer, sort_keys=True)
+
+
+# ---------------------------------------------------------------------------
 # The two-leg document: the summaries, the comparison, and the gates
 # ---------------------------------------------------------------------------
 
@@ -1738,10 +2029,53 @@ def demo_job(run_id: str = "demo") -> dict:
 
 
 @app.local_entrypoint()
+def profile_demo(job: str = "", run_id: str = "profile", steps: int = 20,
+                 profile: str = "", batch: int = 0,
+                 corpus_urls: str = "", domains: str = NSYS_TRACE_DOMAINS,
+                 sample: str = NSYS_SAMPLE) -> None:
+    """Trace the base stage on the H100 leg and print where its time went.
+
+        modal run tools/modal/app.py::profile_demo
+        modal run tools/modal/app.py::profile_demo --job my-job.json
+        modal run tools/modal/app.py::profile_demo --steps 30 \\
+            --profile h100 --batch 16 --corpus-urls "https://..."
+
+    One Nsight Systems container traces the chain's own base stage and writes
+    the artifacts to ``/runs/<run_id>/profile``. The document holds the file
+    list with sizes, the exit status of each profile step, and the first rows
+    of the kernel, API, and memory sums. Copy the artifacts with:
+
+        modal volume get nanochat-runs <run_id>/profile ./profile
+    """
+    payload = (json.loads(Path(job).read_text(encoding="utf-8")) if job
+               else demo_job())
+    if profile:
+        payload["profile"] = str(profile)
+    if int(batch) > 0:
+        payload["batch"] = int(batch)
+    urls = [url.strip() for url in str(corpus_urls).split(",") if url.strip()]
+    if urls:
+        plan = json.loads(corpus.remote(
+            json.dumps(payload, sort_keys=True), json.dumps(urls),
+            str(payload.get("profile") or "h100")))
+        payload["corpus"] = "files"
+        payload["corpus_path"] = plan["dir"]
+        payload["tokenizer_path"] = plan["tokenizer"]
+    answer = json.loads(profile_h100.remote(
+        json.dumps(payload, sort_keys=True), str(run_id), int(steps),
+        str(domains), str(sample)))
+    print(json.dumps(answer, indent=1, sort_keys=True))
+    if any(code != 0 for code in (answer.get("status") or {}).values()):
+        print("modal: one profile step did not finish", file=sys.stderr)
+        raise SystemExit(1)
+
+
+@app.local_entrypoint()
 def pipeline_demo(job: str = "", run_id: str = DEMO_RUN_ID,
                   corpus_urls: str = "", profile: str = "",
                   batch: int = 0, legs: str = "both", split_job: str = "",
-                  split_corpus: str = "", split_steps: int = 6) -> None:
+                  split_corpus: str = "", split_steps: int = 6,
+                  bench: str = "") -> None:
     """Run the selected legs, or one phase split, and print the answer.
 
         modal run tools/modal/app.py::pipeline_demo
@@ -1750,6 +2084,7 @@ def pipeline_demo(job: str = "", run_id: str = DEMO_RUN_ID,
             --legs h100 --corpus-urls "https://.../shard_00000.parquet"
         modal run tools/modal/app.py::pipeline_demo --split-job '{"profile":...}' \\
             --split-corpus '{"files":[...],"tokenizer":"..."}'
+        modal run tools/modal/app.py::pipeline_demo --bench '["--profile","big"]'
 
     ``job`` names a job file on this host; without one, the demo job runs.
     ``profile`` and ``batch`` override that job's shape and its base batch, so
@@ -1763,6 +2098,12 @@ def pipeline_demo(job: str = "", run_id: str = DEMO_RUN_ID,
     A second run with the same URLs reuses the download and the tokenizer, so
     the flag costs nothing after the first call.
 
+    ``bench`` switches to the Muon benchmark and returns it: the argument is a
+    JSON list of the benchmark's own flags, such as
+    ``["--profile", "big", "--muon"]``, and :func:`bench_h100` times it on the
+    H100 leg. The rows it prints are the optimizer's own rates, so a step that
+    is slow in the optimizer is attributed on the card that ran it.
+
     ``split_job`` switches to the phase split and returns it: the single-device
     trainer runs ``split_steps`` steps of that job on the H100 and the answer
     carries ``fwd_ms``, ``bwd_ms``, ``opt_ms``, and ``sync_ms``. The chain
@@ -1772,6 +2113,13 @@ def pipeline_demo(job: str = "", run_id: str = DEMO_RUN_ID,
     The document holds ``legs``, ``comparison``, and ``gates``, and the command
     exits non-zero when any gate fails (section 7 and section 8).
     """
+    if bench:
+        answer = json.loads(bench_h100.remote(bench))
+        print(json.dumps(answer, indent=1, sort_keys=True))
+        if int(answer.get("status") or 0) != 0:
+            print("modal: the benchmark did not finish", file=sys.stderr)
+            raise SystemExit(1)
+        return
     if split_job:
         answer = json.loads(step_split.remote(split_job, split_corpus,
                                               int(split_steps)))

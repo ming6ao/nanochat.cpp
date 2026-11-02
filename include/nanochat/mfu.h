@@ -36,6 +36,19 @@ ParamBreakdown CountParams(const Config& config);
 // Forward + backward FLOPs for one training token.
 double EstimateFlopsPerToken(const Config& config);
 
+// The Muon optimizer's arithmetic for one training step. Every matrix the
+// optimizer owns runs `ns_steps` Polar Express iterations of three GEMMs:
+// `A = X'X` (or `X X'`),
+// `A2 = A A`, and `prod = X B` (or `B X`). The arithmetic is a property of the
+// shape and the iteration count, not of the batch, so it is counted per step.
+// The scalars and the value gate are excluded: their matrices are one row or
+// one column, so their share is zero at this precision.
+//
+// The model's count and this one are reported side by side and never added:
+// the model's MFU divides the model's count by the peak, and a reader who wants
+// the step's total arithmetic adds the two numbers themselves.
+double EstimateMuonFlopsPerStep(const Config& config, int ns_steps);
+
 // Forward FLOPs to prefill `num_tokens` (causal, windowed).
 double EstimatePrefillFlops(const Config& config, int num_tokens);
 

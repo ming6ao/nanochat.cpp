@@ -1335,6 +1335,24 @@ void EmbeddingBackward(int tokens, int dim, const int* ids,
 // AdamW
 // ---------------------------------------------------------------------------
 
+namespace {
+
+// The gradient clip scale of one update. A caller may keep the norm on the
+// "device" instead of reading it back; this backend's device memory is host
+// memory, so the device scalar is an ordinary pointer. Both forms stay here,
+// so the two optimizer families cannot drift.
+inline float GradScale(const AdamWParams& params) {
+  return params.grad_scale_dev != nullptr ? *params.grad_scale_dev
+                                          : params.grad_scale;
+}
+
+inline float GradScale(const MuonParams& params) {
+  return params.grad_scale_dev != nullptr ? *params.grad_scale_dev
+                                          : params.grad_scale;
+}
+
+}  // namespace
+
 void AdamWUpdate(int n, const AdamWParams& params, float* master,
                  ComputeType* value, const float* g, float* m, float* v) {
   if (n <= 0) return;
@@ -1346,7 +1364,7 @@ void AdamWUpdate(int n, const AdamWParams& params, float* master,
   for (int i = 0; i < n; ++i) {
     // The clip scale rides on the gradient read, so the decoupled weight decay
     // below stays unscaled (one when the clip is inactive).
-    const float grad = g[i] * params.grad_scale;
+    const float grad = g[i] * GradScale(params);
     // Decoupled weight decay, applied to the fp32 master before the update.
     float pi = master[i] * (1.0f - params.lr * params.weight_decay);
     const float mi = m[i] + (1.0f - params.beta1) * (grad - m[i]);
@@ -1436,7 +1454,7 @@ void MuonUpdate(const MuonParams& params, const float* stacked_grads,
     // gradient.
 #pragma omp parallel for schedule(static)
     for (std::size_t i = 0; i < mat; ++i) {
-      const float gr = grad[i] * params.grad_scale;
+      const float gr = grad[i] * GradScale(params);
       momentum_buf[i] =
           momentum_buf[i] + (1.0f - params.momentum) * (gr - momentum_buf[i]);
       x[i] = params.nesterov ? (1.0f - params.momentum) * gr +

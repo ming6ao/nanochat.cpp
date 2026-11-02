@@ -154,7 +154,13 @@ class NanochatOptimizer final : public Optimizer {
   void Step(int step) override {
     // One streaming pass over the per-parameter gradients: the norm for the
     // logger and the clip scale for the updates. Nothing is staged.
-    float stats[2] = {0.0f, 1.0f};
+    //
+    // The norm and the clip scale stay on the device for the whole step. Every
+    // update kernel reads the scale there (`grad_scale_dev`), so no host read
+    // stands between the reduction and the updates, and the norm comes back
+    // once at the end of the step, after the last kernel that could still be
+    // outstanding.
+    const float* grad_scale_dev = nullptr;
     if (num_spans_ > 0) {
       // The gradient norm is the `GradNorm` composition, not a fused family: it
       // is one `SpanReduce` over the same ragged list twice (the per-span dot
@@ -163,10 +169,8 @@ class NanochatOptimizer final : public Optimizer {
       // the reduction out of the fused entry is what this call follows.
       ops::GradNormForward(norm_grads_, norm_counts_, num_spans_, config_.clip,
                            norm_dev_, norm_dev_ + 1);
-      kernels::Memcpy(stats, norm_dev_, sizeof(stats), CopyDir::kDeviceToHost);
+      grad_scale_dev = norm_dev_ + 1;
     }
-    grad_norm_ = stats[0];
-    const float grad_scale = stats[1];
 
     // The learning-rate multiplier is the schedule's, and only the schedule's:
     // `group.lr` already carries `init_lr_frac` (applied once in `Build`), so a
@@ -188,7 +192,8 @@ class NanochatOptimizer final : public Optimizer {
         params.eps = group.eps;
         params.weight_decay = group.weight_decay;
         params.step = step;
-        params.grad_scale = grad_scale;
+        params.grad_scale = 1.0f;
+        params.grad_scale_dev = grad_scale_dev;
         kernels::AdamWUpdate(static_cast<int>(group.params[i].count), params,
                              group.params[i].master, group.params[i].value,
                              group.params[i].grad,
@@ -217,11 +222,21 @@ class NanochatOptimizer final : public Optimizer {
       params.ns_steps = config_.muon_ns_steps;
       params.red_dim = group.red_dim;
       params.nesterov = true;
-      params.grad_scale = grad_scale;
+      params.grad_scale = 1.0f;
+      params.grad_scale_dev = grad_scale_dev;
       kernels::MuonUpdate(params, muon_stack_, group.stacked_master,
                           group.stacked_values, group.buf1, group.buf2);
       ScatterStacked(group);
     }
+
+    // The one host read of the step: the pre-clip norm, for the logger. It
+    // lands after every update kernel, so it drains a finished step rather
+    // than stalling a pipeline.
+    float norm = 0.0f;
+    if (grad_scale_dev != nullptr) {
+      kernels::Memcpy(&norm, norm_dev_, sizeof(norm), CopyDir::kDeviceToHost);
+    }
+    grad_norm_ = norm;
   }
 
   float GradNorm() const override { return grad_norm_; }

@@ -4,10 +4,13 @@
 // decoupled weight decay. The math mirrors backends/cpu/kernels.cc exactly.
 //
 // The stacked parameters are [num_params, rows, cols]. The Polar Express
-// iterations are the expensive part and run as strided-batched GEMMs over the
-// whole stack through kernels::Gemm; the reduction stages (equilibration,
-// renorm, NorMuon) run one block per matrix, and the pure elementwise stages
-// run grid-stride over the stack.
+// iterations run as strided-batched GEMMs over the whole stack through
+// kernels::Gemm, one cuBLAS call per GEMM and per group. Every whole-matrix
+// statistic (the Frobenius norm, the equilibration divisor, the renormalisation
+// scale) is reduced by many blocks per matrix, and every per-row or per-column
+// statistic (the row equilibration, the NorMuon mean squares) by one block or
+// one thread per row or column, so no stage serialises a matrix on one block.
+// The pure elementwise stages run grid-stride over the stack.
 //
 // Layout notes for the tall (rows > cols) and wide (rows <= cols) cases:
 //   * tall:  A = X^T X  (cols x cols), prod = X B
@@ -53,44 +56,105 @@ constexpr float kPolarCoeffs[5][3] = {
 // the global clip scale (one when the clip is inactive).
 __global__ void MuonMomentumKernel(long long total, float momentum,
                                    bool nesterov, float grad_scale,
+                                   bool scale_on_device,
+                                   const float* __restrict__ grad_scale_dev,
                                    const float* __restrict__ grads,
                                    float* __restrict__ buf1,
                                    ComputeType* __restrict__ x) {
   const long long stride = static_cast<long long>(gridDim.x) * blockDim.x;
+  const float scale = scale_on_device ? *grad_scale_dev : grad_scale;
   for (long long i =
            static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x;
        i < total; i += stride) {
-    const float gr = grads[i] * grad_scale;
+    const float gr = grads[i] * scale;
     const float b = buf1[i] + (1.0f - momentum) * (gr - buf1[i]);
     buf1[i] = b;
     x[i] = ToComputeDev(nesterov ? (1.0f - momentum) * gr + momentum * b : b);
   }
 }
 
-// --- MuonEq equilibration + Frobenius normalisation ------------------------
+// --- Blocked matrix statistics ---------------------------------------------
+//
+// Every whole-matrix statistic is reduced by many blocks per matrix, not by
+// one. A group is a handful of matrices, so one block per matrix leaves almost
+// the whole card idle: the eight matrices of the 2048x512 group were reduced by
+// eight blocks, and each of them walked a megaelement alone. The stage is
+// therefore one blocked partial pass, one short finish, and one full-grid
+// scale, which is the same arithmetic at the bandwidth the card has.
 
-// Sum of squares of one matrix, reduced across the calling block.
-__device__ __forceinline__ float MatrixSumSq(const ComputeType* xm,
-                                             long long mat) {
-  float local = 0.0f;
-  for (long long i = threadIdx.x; i < mat; i += blockDim.x) {
-    const float v = AsFloatDev(xm[i]);
+// Partials of one matrix, one per block of the `blockIdx.x` dimension of the
+// launch, so a matrix is reduced by `gridDim.x` blocks at once. The partials
+// are double: a four-mega-element sum in float would lose the low bits the
+// reference keeps.
+__global__ void MuonMatrixPartialsKernel(int rows, int cols,
+                                         const ComputeType* __restrict__ x,
+                                         int blocks_per_matrix,
+                                         double* __restrict__ partials) {
+  const long long mat = static_cast<long long>(rows) * cols;
+  const int p = blockIdx.y;
+  const ComputeType* xm = x + static_cast<long long>(p) * mat;
+  const long long chunk = (mat + blocks_per_matrix - 1) / blocks_per_matrix;
+  const long long begin = static_cast<long long>(blockIdx.x) * chunk;
+  const long long end = begin + chunk < mat ? begin + chunk : mat;
+  double local = 0.0;
+  for (long long i = begin + threadIdx.x; i < end; i += blockDim.x) {
+    const double v = AsFloatDev(xm[i]);
     local += v * v;
   }
-  return BlockReduceSum(local);
+  const double sum = BlockReduceSum(local);
+  if (threadIdx.x == 0) {
+    partials[static_cast<long long>(p) * blocks_per_matrix + blockIdx.x] = sum;
+  }
 }
 
-// Frobenius norm of each matrix (one block per matrix), written to `frob`.
-__global__ void MuonFrobKernel(int rows, int cols,
-                               const ComputeType* __restrict__ x,
-                               float* __restrict__ frob) {
-  const long long mat = static_cast<long long>(rows) * cols;
-  const ComputeType* xm = x + static_cast<long long>(blockIdx.x) * mat;
-  const float sum = MatrixSumSq(xm, mat);
-  if (threadIdx.x == 0) frob[blockIdx.x] = sqrtf(sum);
+// Which whole-matrix statistic the finish kernel writes.
+enum class MatrixStat {
+  kFrobenius,  // sqrt(sum of squares): the norm the rows normalise to
+  kEquilibrationDivisor,  // 1.01 * ||X||_F + 1e-6: the MuonEq divisor
+  kRenormScale,           // sqrt(min(rows, cols)) / ||X||_F: the Muon+ scale
+};
+
+// The statistic of every matrix of the group from its partials. One block
+// covers the whole group, because the work is `num_params` short sums.
+__global__ void MuonMatrixStatKernel(int num_params, int blocks_per_matrix,
+                                     MatrixStat mode, float target,
+                                     const double* __restrict__ partials,
+                                     float* __restrict__ out) {
+  for (int p = threadIdx.x; p < num_params; p += blockDim.x) {
+    double sum = 0.0;
+    for (int b = 0; b < blocks_per_matrix; ++b) {
+      sum += partials[static_cast<long long>(p) * blocks_per_matrix + b];
+    }
+    const float norm = sqrtf(static_cast<float>(sum));
+    float value = norm;
+    if (mode == MatrixStat::kEquilibrationDivisor) {
+      value = norm * 1.01f + 1e-6f;
+    } else if (mode == MatrixStat::kRenormScale) {
+      value = target / fmaxf(norm, 1e-6f);
+    }
+    out[p] = value;
+  }
 }
 
-// Rescale each row to the mean row norm (one block per (matrix, row)).
+// Applies one per-matrix factor to every element of the stack, multiplying or
+// dividing, which is the shape of both the equilibration divisor and the
+// renormalisation scale.
+__global__ void MuonScaleMatricesKernel(long long total, long long mat,
+                                        bool divide,
+                                        const float* __restrict__ factor,
+                                        ComputeType* __restrict__ x) {
+  const long long stride = static_cast<long long>(gridDim.x) * blockDim.x;
+  for (long long i =
+           static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x;
+       i < total; i += stride) {
+    const float f = factor[i / mat];
+    const float v = AsFloatDev(x[i]);
+    x[i] = ToComputeDev(divide ? v / f : v * f);
+  }
+}
+
+// Rescale each row to the mean row norm: the MuonEq equilibration. One block
+// per (matrix, row), so the rows of a group are normalised in parallel.
 __global__ void MuonEquilibrateRowKernel(int rows, int cols,
                                          ComputeType* __restrict__ x,
                                          const float* __restrict__ frob) {
@@ -109,17 +173,6 @@ __global__ void MuonEquilibrateRowKernel(int rows, int cols,
   const float s = target / row_norm;
   for (int c = threadIdx.x; c < cols; c += blockDim.x) {
     row[c] = ToComputeDev(AsFloatDev(row[c]) * s);
-  }
-}
-
-// Divide each matrix by 1.01 * ||X||_F + 1e-6 (one block per matrix).
-__global__ void MuonEquilibrateDivKernel(int rows, int cols,
-                                         ComputeType* __restrict__ x) {
-  const long long mat = static_cast<long long>(rows) * cols;
-  ComputeType* xm = x + static_cast<long long>(blockIdx.x) * mat;
-  const float div = sqrtf(MatrixSumSq(xm, mat)) * 1.01f + 1e-6f;
-  for (long long i = threadIdx.x; i < mat; i += blockDim.x) {
-    xm[i] = ToComputeDev(AsFloatDev(xm[i]) / div);
   }
 }
 
@@ -150,103 +203,103 @@ __global__ void MuonAxpbyKernel(long long count, float ca,
   }
 }
 
-// --- Muon+ renormalisation -------------------------------------------------
+// --- NorMuon variance reduction --------------------------------------------
+//
+// The first statistic is one mean square per row or per column, and both are
+// reduced by many blocks: a row by one block per (matrix, row), a column by one
+// thread per column, which keeps the reads of a warp on consecutive columns of
+// the same row. The second moment and the per-index step then run one block per
+// matrix over `red_index` entries, and the scale runs over the whole stack.
 
-// Snap the Frobenius norm of each matrix to sqrt(min(rows, cols)).
-__global__ void MuonRenormKernel(int rows, int cols,
-                                 ComputeType* __restrict__ x) {
+// One mean square per row of every matrix.
+__global__ void MuonRowMeanSquareKernel(int rows, int cols,
+                                        const ComputeType* __restrict__ x,
+                                        float* __restrict__ vmean) {
+  const int p = blockIdx.y;
+  const int r = blockIdx.x;
   const long long mat = static_cast<long long>(rows) * cols;
-  ComputeType* xm = x + static_cast<long long>(blockIdx.x) * mat;
-  const int tid = threadIdx.x;
-
+  const ComputeType* row =
+      x + static_cast<long long>(p) * mat + static_cast<long long>(r) * cols;
   float local = 0.0f;
-  for (long long i = tid; i < mat; i += blockDim.x) {
-    const float v = AsFloatDev(xm[i]);
+  for (int c = threadIdx.x; c < cols; c += blockDim.x) {
+    const float v = AsFloatDev(row[c]);
     local += v * v;
   }
-  const float frob = BlockReduceSum(local);
-  const float target = sqrtf(static_cast<float>(rows < cols ? rows : cols));
-  const float scale = target / fmaxf(sqrtf(frob), 1e-6f);
-  for (long long i = tid; i < mat; i += blockDim.x) {
-    xm[i] = ToComputeDev(AsFloatDev(xm[i]) * scale);
+  const float sum = BlockReduceSum(local);
+  if (threadIdx.x == 0) {
+    vmean[static_cast<long long>(p) * rows + r] =
+        sum / static_cast<float>(cols);
   }
 }
 
-// --- NorMuon variance reduction --------------------------------------------
-
-// One block per matrix. Computes the per-index mean square, updates the
-// factored second moment, and rescales the matrix by the normalized step size.
-// `reduce_cols` selects the reduction axis: rows (one entry per row) or
-// columns (one entry per column), matching the CPU reference's `red_dim`.
-__global__ void MuonNorMuonKernel(int rows, int cols, bool reduce_cols,
-                                  float beta2, ComputeType* __restrict__ x,
-                                  float* __restrict__ buf2,
-                                  float* __restrict__ scratch) {
-  const int p = blockIdx.x;
+// One mean square per column of every matrix. Thread `t` owns column
+// `blockIdx.x * blockDim.x + t` and walks the rows, so the warp's loads are
+// consecutive columns of one row.
+__global__ void MuonColMeanSquareKernel(int rows, int cols,
+                                        const ComputeType* __restrict__ x,
+                                        float* __restrict__ vmean) {
+  const int p = blockIdx.y;
   const long long mat = static_cast<long long>(rows) * cols;
-  ComputeType* xm = x + static_cast<long long>(p) * mat;
-  const int red_index = reduce_cols ? rows : cols;
-  const int red_size = reduce_cols ? cols : rows;
-  float* second = buf2 + static_cast<long long>(p) * red_index;
-  float* vmean = scratch + static_cast<long long>(p) * red_index;
-  const int tid = threadIdx.x;
-
-  // Pass 1: mean square along the reduction axis.
-  for (int i = 0; i < red_index; ++i) {
-    float local = 0.0f;
-    if (reduce_cols) {
-      const ComputeType* row = xm + static_cast<long long>(i) * cols;
-      for (int c = tid; c < cols; c += blockDim.x) {
-        const float v = AsFloatDev(row[c]);
-        local += v * v;
-      }
-    } else {
-      for (int r = tid; r < rows; r += blockDim.x) {
-        const float v = AsFloatDev(xm[static_cast<long long>(r) * cols + i]);
-        local += v * v;
-      }
-    }
-    const float s = BlockReduceSum(local);
-    if (tid == 0) vmean[i] = s / static_cast<float>(red_size);
+  const ComputeType* xm = x + static_cast<long long>(p) * mat;
+  const int c = blockIdx.x * blockDim.x + threadIdx.x;
+  if (c >= cols) return;
+  float local = 0.0f;
+  for (int r = 0; r < rows; ++r) {
+    const float v = AsFloatDev(xm[static_cast<long long>(r) * cols + c]);
+    local += v * v;
   }
-  __syncthreads();
+  vmean[static_cast<long long>(p) * cols + c] =
+      local / static_cast<float>(rows);
+}
+
+// The factored second moment and the per-index step size of one matrix, with
+// the matrix's global scale. One block per matrix over `red_index` entries.
+// The arithmetic is the composition's, in the same order: `v_norm` from the
+// pre-update mean squares, then `sum_scaled` from the same values.
+__global__ void MuonNorMuonMomentsKernel(int red_index, int red_size,
+                                         float beta2, float* __restrict__ vmean,
+                                         float* __restrict__ second,
+                                         float* __restrict__ scale) {
+  const int p = blockIdx.x;
+  float* vm = vmean + static_cast<long long>(p) * red_index;
+  float* sec = second + static_cast<long long>(p) * red_index;
+  const int tid = threadIdx.x;
+  const float size = static_cast<float>(red_size);
 
   float lsum = 0.0f;
-  for (int i = tid; i < red_index; i += blockDim.x) lsum += vmean[i];
+  for (int i = tid; i < red_index; i += blockDim.x) lsum += vm[i];
   const float sum_vmean = BlockReduceSum(lsum);
-  const float v_norm = sqrtf(sum_vmean * static_cast<float>(red_size));
+  const float v_norm = sqrtf(sum_vmean * size);
 
-  // Pass 2: update the second moment and derive the per-index step size.
   float lscaled = 0.0f;
   for (int i = tid; i < red_index; i += blockDim.x) {
-    const float vm = vmean[i];
-    const float sm = second[i] + (1.0f - beta2) * (vm - second[i]);
-    second[i] = sm;
+    const float mean = vm[i];
+    const float sm = sec[i] + (1.0f - beta2) * (mean - sec[i]);
+    sec[i] = sm;
     const float step = 1.0f / sqrtf(fmaxf(sm, 1e-10f));
-    vmean[i] = step;
-    lscaled += (vm * static_cast<float>(red_size)) * step * step;
+    vm[i] = step;
+    lscaled += (mean * size) * step * step;
   }
   const float sum_scaled = BlockReduceSum(lscaled);
   const float denom = fmaxf(sqrtf(sum_scaled), 1e-10f);
-  const float global_scale = v_norm / denom;
+  if (tid == 0) scale[p] = v_norm / denom;
+}
 
-  // Pass 3: apply step_size * (v_norm / denom) along the reduction axis.
-  if (reduce_cols) {
-    for (int r = 0; r < rows; ++r) {
-      const float s = vmean[r] * global_scale;
-      ComputeType* row = xm + static_cast<long long>(r) * cols;
-      for (int c = tid; c < cols; c += blockDim.x) {
-        row[c] = ToComputeDev(AsFloatDev(row[c]) * s);
-      }
-    }
-  } else {
-    for (int c = 0; c < cols; ++c) {
-      const float s = vmean[c] * global_scale;
-      for (int r = tid; r < rows; r += blockDim.x) {
-        const long long idx = static_cast<long long>(r) * cols + c;
-        xm[idx] = ToComputeDev(AsFloatDev(xm[idx]) * s);
-      }
-    }
+// Applies `step_size * global_scale` along the reduction axis.
+__global__ void MuonNorMuonScaleKernel(long long total, long long mat, int cols,
+                                       int red_index, bool reduce_cols,
+                                       const float* __restrict__ vmean,
+                                       const float* __restrict__ scale,
+                                       ComputeType* __restrict__ x) {
+  const long long stride = static_cast<long long>(gridDim.x) * blockDim.x;
+  for (long long i =
+           static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x;
+       i < total; i += stride) {
+    const long long p = i / mat;
+    const long long within = i - p * mat;
+    const long long index = reduce_cols ? within / cols : within % cols;
+    const float s = vmean[p * red_index + index] * scale[p];
+    x[i] = ToComputeDev(AsFloatDev(x[i]) * s);
   }
 }
 
@@ -286,8 +339,24 @@ thread_local ComputeType* g_muon_workspace = nullptr;
 thread_local std::size_t g_muon_workspace_capacity = 0;
 thread_local float* g_muon_scratch = nullptr;
 thread_local std::size_t g_muon_scratch_capacity = 0;
+thread_local double* g_muon_partials = nullptr;
+thread_local std::size_t g_muon_partials_capacity = 0;
 
-void EnsureMuonWorkspace(std::size_t elements, std::size_t scratch_floats) {
+// The most partials one matrix is reduced with. It bounds the double buffer the
+// blocked pass writes and the blocks a matrix is spread over.
+constexpr int kMaxPartialsPerMatrix = 32;
+
+// The blocks one matrix is reduced with: one per eight thousand elements, so a
+// small matrix stays one block and a megaelement matrix fills the card.
+int PartialsPerMatrix(long long mat) {
+  long long blocks = (mat + 8191) / 8192;
+  if (blocks < 1) blocks = 1;
+  if (blocks > kMaxPartialsPerMatrix) blocks = kMaxPartialsPerMatrix;
+  return static_cast<int>(blocks);
+}
+
+void EnsureMuonWorkspace(std::size_t elements, std::size_t scratch_floats,
+                         std::size_t partial_doubles) {
   if (elements > g_muon_workspace_capacity) {
     if (g_muon_workspace != nullptr) Free(g_muon_workspace);
     g_muon_workspace =
@@ -298,6 +367,12 @@ void EnsureMuonWorkspace(std::size_t elements, std::size_t scratch_floats) {
     if (g_muon_scratch != nullptr) Free(g_muon_scratch);
     g_muon_scratch = static_cast<float*>(Alloc(scratch_floats * sizeof(float)));
     g_muon_scratch_capacity = scratch_floats;
+  }
+  if (partial_doubles > g_muon_partials_capacity) {
+    if (g_muon_partials != nullptr) Free(g_muon_partials);
+    g_muon_partials =
+        static_cast<double*>(Alloc(partial_doubles * sizeof(double)));
+    g_muon_partials_capacity = partial_doubles;
   }
 }
 
@@ -328,28 +403,58 @@ void MuonUpdate(const MuonParams& params, const float* stacked_grads,
   // per-matrix GEMM operands. All stay ComputeType so they can feed cuBLAS.
   // The layout is [x | prod | a | a2 | b], from one cached allocation.
   const int red_index = reduce_cols ? rows : cols;
+  const int red_size = reduce_cols ? cols : rows;
+  const int partial_blocks = PartialsPerMatrix(mat);
+  // The scratch holds the per-matrix statistic (`num_params`), then the NorMuon
+  // mean squares (`num_params * red_index`), then the NorMuon global scales
+  // (`num_params`).
+  const std::size_t stat_len = static_cast<std::size_t>(num_params);
+  const std::size_t vmean_len =
+      static_cast<std::size_t>(num_params) * red_index;
   EnsureMuonWorkspace(static_cast<std::size_t>(2 * total + 3 * min_total),
-                      static_cast<std::size_t>(num_params) * red_index);
+                      stat_len + vmean_len + stat_len,
+                      static_cast<std::size_t>(partial_blocks) * num_params);
   ComputeType* x = g_muon_workspace;
   ComputeType* prod = x + total;
   ComputeType* a = prod + total;
   ComputeType* a2 = a + min_total;
   ComputeType* b = a2 + min_total;
-  float* scratch = g_muon_scratch;
+  float* stat = g_muon_scratch;
+  float* vmean = stat + stat_len;
+  float* scale = vmean + vmean_len;
+  double* partials_dev = g_muon_partials;
 
   const int kThreads = 256;
   const int elem_grid = GridSize(total, kThreads);
   const int min_grid = GridSize(min_total, kThreads);
+  const dim3 partial_grid(partial_blocks, num_params);
+  const int col_blocks = (cols + kThreads - 1) / kThreads;
 
+  // The whole-matrix statistic of every matrix of the group, from one blocked
+  // partial pass and one short finish.
+  const auto matrix_stat = [&](MatrixStat mode, float target) {
+    cuda_backend::Launch(MuonMatrixPartialsKernel, partial_grid, dim3(kThreads),
+                         0, rows, cols, x, partial_blocks, partials_dev);
+    cuda_backend::Launch(MuonMatrixStatKernel, dim3(1), dim3(kThreads), 0,
+                         num_params, partial_blocks, mode, target, partials_dev,
+                         stat);
+  };
+
+  // The clip scale is either the host value or a device scalar the reduction
+  // wrote, so the optimizer step needs no host read of the clip.
+  const bool scale_on_device = params.grad_scale_dev != nullptr;
   cuda_backend::Launch(MuonMomentumKernel, dim3(elem_grid), dim3(kThreads), 0,
                        total, params.momentum, params.nesterov,
-                       params.grad_scale, stacked_grads, buf1, x);
-  cuda_backend::Launch(MuonFrobKernel, dim3(num_params), dim3(kThreads), 0,
-                       rows, cols, x, scratch);
+                       params.grad_scale, scale_on_device,
+                       params.grad_scale_dev, stacked_grads, buf1, x);
+  // MuonEq: each row to the mean row norm, then the matrix to unit Frobenius
+  // norm, which is what makes the Polar Express coefficients apply.
+  matrix_stat(MatrixStat::kFrobenius, 0.0f);
   cuda_backend::Launch(MuonEquilibrateRowKernel, dim3(rows, num_params),
-                       dim3(kThreads), 0, rows, cols, x, scratch);
-  cuda_backend::Launch(MuonEquilibrateDivKernel, dim3(num_params),
-                       dim3(kThreads), 0, rows, cols, x);
+                       dim3(kThreads), 0, rows, cols, x, stat);
+  matrix_stat(MatrixStat::kEquilibrationDivisor, 0.0f);
+  cuda_backend::Launch(MuonScaleMatricesKernel, dim3(elem_grid), dim3(kThreads),
+                       0, total, mat, true, stat, x);
 
   for (int it = 0; it < ns_steps; ++it) {
     const float ca = kPolarCoeffs[it][0];
@@ -435,10 +540,27 @@ void MuonUpdate(const MuonParams& params, const float* stacked_grads,
                          total, ca, x, prod);
   }
 
-  cuda_backend::Launch(MuonRenormKernel, dim3(num_params), dim3(kThreads), 0,
-                       rows, cols, x);
-  cuda_backend::Launch(MuonNorMuonKernel, dim3(num_params), dim3(kThreads), 0,
-                       rows, cols, reduce_cols, params.beta2, x, buf2, scratch);
+  // Muon+ renormalisation: the Frobenius norm snaps back to sqrt(min) of the
+  // matrix's extents.
+  matrix_stat(MatrixStat::kRenormScale, sqrtf(static_cast<float>(min_dim)));
+  cuda_backend::Launch(MuonScaleMatricesKernel, dim3(elem_grid), dim3(kThreads),
+                       0, total, mat, false, stat, x);
+
+  // NorMuon: one mean square per row (or per column), the factored second
+  // moment, then the normalized step.
+  if (reduce_cols) {
+    cuda_backend::Launch(MuonRowMeanSquareKernel, dim3(rows, num_params),
+                         dim3(kThreads), 0, rows, cols, x, vmean);
+  } else {
+    cuda_backend::Launch(MuonColMeanSquareKernel, dim3(col_blocks, num_params),
+                         dim3(kThreads), 0, rows, cols, x, vmean);
+  }
+  cuda_backend::Launch(MuonNorMuonMomentsKernel, dim3(num_params),
+                       dim3(kThreads), 0, red_index, red_size, params.beta2,
+                       vmean, buf2, scale);
+  cuda_backend::Launch(MuonNorMuonScaleKernel, dim3(elem_grid), dim3(kThreads),
+                       0, total, mat, cols, red_index, reduce_cols, vmean,
+                       scale, x);
   cuda_backend::Launch(MuonApplyKernel, dim3(elem_grid), dim3(kThreads), 0,
                        total, params.lr, params.weight_decay, stacked_master,
                        stacked_values, x);

@@ -151,12 +151,14 @@ class AppTest(unittest.TestCase):
 
     def test_the_four_functions_and_the_entry_points_exist(self) -> None:
         for name in ("doctor", "train", "train_h100", "pipeline",
-                     "pipeline_h100", "pipeline_demo"):
+                     "pipeline_h100", "pipeline_demo", "profile_h100",
+                     "profile_demo"):
             self.assertTrue(callable(getattr(self.app, name)), name)
 
     def test_the_demo_is_a_local_entry_point(self) -> None:
         _module, sdk = _load_app(with_sdk=True)
-        self.assertEqual(sdk.local_entrypoints, ["pipeline_demo"])
+        self.assertEqual(sdk.local_entrypoints,
+                         ["profile_demo", "pipeline_demo"])
 
     def test_the_contract_names_match_the_client(self) -> None:
         import target
@@ -316,6 +318,16 @@ class ImageTest(unittest.TestCase):
         self.assertEqual(self.app.ROOFLINE_TARGET, "//src:roofline_main")
         for leg in self.app.LEG_ORDER:
             self.assertIn("//src:roofline_main",
+                          self.app.image_build_command(leg))
+
+    def test_the_build_command_names_the_muon_benchmark(self) -> None:
+        # The H100 benchmark runs inside the container, so the one build names
+        # its target beside the library and the stage executables.
+        self.assertEqual(self.app.BENCH_TARGET,
+                         "//backends/cuda/kernels:muon_benchmark")
+        self.assertIn(self.app.BENCH_TARGET, self.app.BUILD_TARGETS)
+        for leg in self.app.LEG_ORDER:
+            self.assertIn(self.app.BENCH_TARGET,
                           self.app.image_build_command(leg))
 
     def test_the_build_names_the_library_and_the_stage_executables(self) -> None:
@@ -705,8 +717,9 @@ class PipelineTest(_RemoteFixture):
 
     def test_the_functions_are_declared(self) -> None:
         names = [keywords["name"] for keywords in self.sdk.function_calls]
-        self.assertEqual(sorted(names), ["corpus", "doctor", "pipeline",
-                                         "pipeline_h100", "step_split",
+        self.assertEqual(sorted(names), ["bench_h100", "corpus", "doctor",
+                                         "pipeline", "pipeline_h100",
+                                         "profile_h100", "step_split",
                                          "train", "train_h100"])
 
     def test_the_chain_runs_from_the_one_source_environment(self) -> None:
@@ -1400,8 +1413,9 @@ class WeightsTest(unittest.TestCase):
         mounted = {call["name"]: call["volumes"]
                    for call in self.sdk.function_calls if "volumes" in call}
         self.assertEqual(sorted(mounted), ["corpus", "pipeline",
-                                           "pipeline_h100", "step_split",
-                                           "train", "train_h100"])
+                                           "pipeline_h100", "profile_h100",
+                                           "step_split", "train",
+                                           "train_h100"])
         for name in ("train", "train_h100"):
             self.assertEqual(sorted(mounted[name]), ["/runs", "/weights"])
             self.assertIs(mounted[name]["/weights"], self.app.weights)
@@ -1409,8 +1423,11 @@ class WeightsTest(unittest.TestCase):
         # The chain reads and writes the run root only: its stages warm start
         # from each other, so it never reads the stage cache of `train`. The
         # corpus function writes the run root too: the corpus is an input that
-        # outlives one run, and no stage cache holds it (section 9 row 3).
-        for name in ("corpus", "pipeline", "pipeline_h100", "step_split"):
+        # outlives one run, and no stage cache holds it (section 9 row 3). The
+        # profile writes its trace beside the run it traced, so it takes the
+        # run root as well and never the stage cache.
+        for name in ("corpus", "pipeline", "pipeline_h100", "profile_h100",
+                     "step_split"):
             self.assertEqual(sorted(mounted[name]), ["/runs"])
             self.assertIs(mounted[name]["/runs"], self.app.runs)
 

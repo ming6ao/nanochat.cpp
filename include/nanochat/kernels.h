@@ -329,6 +329,11 @@ struct AdamWParams {
   // The gradient clip scale, folded into the gradient read. One when the clip
   // is disabled or inactive, so an unscaled read is bit-identical.
   float grad_scale = 1.0f;
+  // The same scale as a device scalar. When it is not null the kernel reads it
+  // and ignores `grad_scale`, so the caller keeps the norm on the device and
+  // the step needs no host read of the clip. A null pointer, the default,
+  // keeps the host value.
+  const float* grad_scale_dev = nullptr;
 };
 
 struct MuonParams {
@@ -342,8 +347,10 @@ struct MuonParams {
   int ns_steps = 5;
   int red_dim = -1;  // variance reduction axis: -1 (columns) or -2 (rows)
   bool nesterov = true;
-  // The gradient clip scale, folded into the gradient read (see AdamWParams).
+  // The gradient clip scale, folded into the gradient read (see AdamWParams),
+  // and its device-resident form, which wins when it is not null.
   float grad_scale = 1.0f;
+  const float* grad_scale_dev = nullptr;
 };
 
 // Softmax statistics saved by attention forward and consumed by its backward.

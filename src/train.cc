@@ -71,17 +71,20 @@ Logger::Logger(const std::string& path) : impl_(std::make_unique<Impl>()) {
 Logger::~Logger() = default;
 
 void Logger::Log(const LogRecord& record) {
-  char buffer[384];
+  char buffer[512];
   std::snprintf(
       buffer, sizeof(buffer),
       "step %06d | loss %.6f | lr %.6g | grad_norm %.6g | "
-      "tok/s %.3f | mfu %.2f%% | step_ms %.3f | data_ms %.3f | "
+      "tok/s %.3f | mfu %.2f%% | model_tflops %.3f | optim_tflops %.3f | "
+      "step_ms %.3f | data_ms %.3f | "
       "fwd_ms %.3f | bwd_ms %.3f | sync_ms %.3f | opt_ms %.3f | "
       "eval_ms %.3f",
       record.step, static_cast<double>(record.loss),
       static_cast<double>(record.lr), static_cast<double>(record.grad_norm),
       static_cast<double>(record.tokens_per_second),
       static_cast<double>(record.mfu) * 100.0,
+      static_cast<double>(record.model_tflops),
+      static_cast<double>(record.optim_tflops),
       static_cast<double>(record.step_ms), static_cast<double>(record.data_ms),
       static_cast<double>(record.forward_ms),
       static_cast<double>(record.backward_ms),
@@ -195,6 +198,32 @@ ParamBreakdown CountParams(const Config& config) {
 
 double EstimateFlopsPerToken(const Config& config) {
   return CountFlopsPerToken(config).total();
+}
+
+double EstimateMuonFlopsPerStep(const Config& config, int ns_steps) {
+  if (ns_steps <= 0) return 0.0;
+  // One matrix's three GEMMs of one iteration: `A = X'X` (or `X X'`), `A2 = A
+  // A`, and `prod = X B` (or `B X`). These are the shapes `MuonUpdate` issues,
+  // so the count is the necessary count of the executed arithmetic.
+  const auto one = [ns_steps](int rows, int cols) {
+    const double r = rows;
+    const double c = cols;
+    const double min_dim = std::min(r, c);
+    const double max_dim = std::max(r, c);
+    const double iteration = 2.0 * min_dim * min_dim * max_dim +
+                             2.0 * min_dim * min_dim * min_dim +
+                             2.0 * r * c * min_dim;
+    return static_cast<double>(ns_steps) * iteration;
+  };
+  const int query_dim = config.query_dim();
+  const int kv_dim = config.kv_dim();
+  const int mlp_dim = config.mlp_dim();
+  const double per_layer =
+      one(query_dim, config.hidden_dim) + one(kv_dim, config.hidden_dim) +
+      one(kv_dim, config.hidden_dim) +
+      one(config.hidden_dim, config.hidden_dim) +
+      one(mlp_dim, config.hidden_dim) + one(config.hidden_dim, mlp_dim);
+  return per_layer * static_cast<double>(config.num_layers);
 }
 
 FlopCounts CountFlopsPerToken(const Config& config) {
@@ -1186,6 +1215,15 @@ float TrainLoop::Run() {
       record.tokens_per_second = static_cast<float>(tokens_per_second);
       record.mfu = static_cast<float>(
           ComputeMfu(config_.model, tokens_per_second, peak_flops_));
+      // The step's arithmetic per part: the model's matmuls and attention at
+      // the step's own throughput, and the Muon orthogonalisation at one step
+      // per call. The two are reported beside `mfu`, never added into it.
+      record.model_tflops = static_cast<float>(
+          tokens_per_second * EstimateFlopsPerToken(config_.model) / 1e12);
+      const double optim_flops = EstimateMuonFlopsPerStep(
+          config_.model, config_.optimizer.muon_ns_steps);
+      record.optim_tflops = static_cast<float>(
+          train_seconds > 0.0 ? optim_flops / train_seconds / 1e12 : 0.0);
       record.step_ms = static_cast<float>(train_seconds * 1000.0);
       record.data_ms = static_cast<float>(data_s * 1000.0);
       record.forward_ms = static_cast<float>(forward_s * 1000.0);

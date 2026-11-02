@@ -114,6 +114,37 @@ void TestMfu() {
              "ComputeMfu unknown device");
 }
 
+void TestMuonFlops() {
+  // The optimizer's arithmetic is a property of the shape and the iteration
+  // count, so it is linear in the count and zero without it.
+  Config config = TinyConfig();
+  const double five = nanochat::EstimateMuonFlopsPerStep(config, 5);
+  ExpectNear(nanochat::EstimateMuonFlopsPerStep(config, 0), 0.0, 1e-12,
+             "Muon FLOPs at zero iterations");
+  ExpectNear(nanochat::EstimateMuonFlopsPerStep(config, 10), 2.0 * five, 1e-9,
+             "Muon FLOPs are linear in the iteration count");
+
+  // The `h100` profile of src/train.cc's chain (docs/pipeline-scaleup-plan.md
+  // section 5), against the independent count of
+  // `backends/cuda/kernels/muon_benchmark.cc`. The benchmark reports
+  // 271119.828 MFLOP per step, of which the 4x12 value gate is 0.018 MFLOP;
+  // this estimator excludes that matrix because its arithmetic is zero at this
+  // precision, so the two agree to 271119.810560 MFLOP. The two code paths
+  // share no arithmetic, so the agreement is a check on both.
+  Config h100;
+  h100.num_layers = 8;
+  h100.num_heads = 8;
+  h100.num_kv_heads = 4;
+  h100.hidden_dim = 512;
+  h100.seq_len = 256;
+  h100.vocab_size = 32768;
+  h100.padded_vocab_size = 32768;
+  h100.window_pattern = "L";
+  // In FLOPs, so the tolerance is one FLOP out of 2.7e11.
+  ExpectNear(nanochat::EstimateMuonFlopsPerStep(h100, 5), 271119810560.0, 1.0,
+             "Muon FLOPs at the h100 profile");
+}
+
 void TestLogger() {
   const std::string path = TempPath("harness.log");
   {
@@ -587,6 +618,7 @@ void TestLegacyCheckpoint() {
 
 int main() {
   TestMfu();
+  TestMuonFlops();
   TestLogger();
   TestModelFlagParsing();
   TestHwCheckParsing();

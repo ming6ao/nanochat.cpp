@@ -136,6 +136,8 @@ std::string RecordJson(const MeshStepRecord& record) {
   out += "\"grad_norm\":" + JsonDouble(record.grad_norm) + ",";
   out += "\"loss\":" + JsonDouble(record.loss) + ",";
   out += "\"mfu\":" + JsonDouble(record.mfu) + ",";
+  out += "\"model_tflops\":" + JsonDouble(record.model_tflops) + ",";
+  out += "\"optim_tflops\":" + JsonDouble(record.optim_tflops) + ",";
   out += "\"seconds\":" + JsonDouble(record.seconds) + ",";
   out += "\"step\":" + std::to_string(record.step) + ",";
   out += "\"step_seconds\":" + JsonDouble(record.step_seconds) + ",";
@@ -237,6 +239,10 @@ MeshTrainDriver::MeshTrainDriver(MeshTrainConfig config)
   MeshRuntimeConfig runtime_config;
   runtime_config.model = model_;
   runtime_config.optimizer = optimizer;
+  // The optimizer's arithmetic per step, from the same resolved optimizer the
+  // runtime builds.
+  muon_flops_per_step_ =
+      EstimateMuonFlopsPerStep(model_, optimizer.muon_ns_steps);
   runtime_config.scheduler = scheduler;
   runtime_config.batch = config_.batch;
   runtime_config.grad_accum = config_.grad_accum;
@@ -433,6 +439,8 @@ float MeshTrainDriver::Run() {
     record.grad_norm = metrics.grad_norm;
     record.tokens_per_sec = static_cast<double>(tokens_per_step) / step_seconds;
     record.mfu = MfuOf(record.tokens_per_sec, flops_per_token_, peak_flops_);
+    record.model_tflops = record.tokens_per_sec * flops_per_token_ / 1e12;
+    record.optim_tflops = muon_flops_per_step_ / step_seconds / 1e12;
     record.step_seconds = step_seconds;
     record.data_seconds = data_seconds;
     record.compute_seconds = static_cast<double>(metrics.step_seconds);
@@ -452,11 +460,12 @@ float MeshTrainDriver::Run() {
     if (show) {
       std::printf(
           "[%5d/%d] loss %.4f  grad_norm %.4g  step %.3fs (compute %.3fs, "
-          "data %.3fs)  %.0f tok/s  mfu %.2f%%\n",
+          "data %.3fs)  %.0f tok/s  mfu %.2f%%  model %.3f TFLOP/s  "
+          "optim %.3f TFLOP/s\n",
           step, steps, static_cast<double>(record.loss),
           static_cast<double>(record.grad_norm), record.step_seconds,
           record.compute_seconds, record.data_seconds, record.tokens_per_sec,
-          record.mfu * 100.0);
+          record.mfu * 100.0, record.model_tflops, record.optim_tflops);
       std::fflush(stdout);
     }
   }

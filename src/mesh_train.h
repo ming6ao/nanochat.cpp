@@ -66,6 +66,12 @@ struct MeshStepRecord {
   float grad_norm = 0.0f;
   double tokens_per_sec = 0.0;
   double mfu = 0.0;
+  // The step's arithmetic per part in TFLOP/s:
+  // the model's matmuls and attention, then the Muon orthogonalisation. `mfu`
+  // divides the model's by the peak, and the two rates are reported side by
+  // side; nothing adds them.
+  double model_tflops = 0.0;
+  double optim_tflops = 0.0;
   double step_seconds = 0.0;
   double data_seconds = 0.0;
   double compute_seconds = 0.0;
@@ -180,6 +186,7 @@ class MeshTrainDriver {
   MeshTrainSummary summary_;
   double flops_per_token_ = 0.0;
   double peak_flops_ = 0.0;
+  double muon_flops_per_step_ = 0.0;
   int start_step_ = 1;
   int last_step_ = 0;
   float last_loss_ = 0.0f;

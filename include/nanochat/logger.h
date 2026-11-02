@@ -18,6 +18,13 @@ struct LogRecord {
   float tokens_per_second = 0.0f;
   float mfu = 0.0f;  // model FLOPs utilization, 0..1
 
+  // The step's arithmetic per part, in TFLOP/s: `model_tflops` is the model's
+  // matmuls and attention, and `optim_tflops` is the Muon orthogonalisation.
+  // `mfu` divides `model_tflops` by the peak; the optimizer's rate is reported
+  // beside it, and no gate reads their sum.
+  float model_tflops = 0.0f;
+  float optim_tflops = 0.0f;
+
   // The phase split of one optimizer step, in milliseconds
   // (docs/distributed-design.md section 6). `step_ms` is the training time:
   // the data fetch, the forward, the backward, the sync, and the optimizer.
