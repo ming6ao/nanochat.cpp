@@ -219,7 +219,8 @@ void BackoutBackward(const ComputeType* d_pre, const ComputeType* x_backout,
 // per row without a second device buffer.
 //
 // The composition is the definition; the fused `ClassifierForward` /
-// `ClassifierBackward` families remain an override behind their capability bit.
+// `ClassifierBackward` families remain an override behind their capability bit,
+// and `ops.cc` calls the fused family on a device that advertises it.
 // ---------------------------------------------------------------------------
 
 struct ClassifierShape {

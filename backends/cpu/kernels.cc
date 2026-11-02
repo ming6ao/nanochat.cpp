@@ -1224,8 +1224,13 @@ void ClassifierForward(const ClassifierParams& params,
       for (int j = 0; j < vocab; ++j) {
         sum_exp += std::exp(static_cast<double>(z[j] - row_max));
       }
+      // An out-of-range target contributes a zero, which is the behavior the
+      // composition defines (`src/ops.cc`, `ClassifierForward`). The read used
+      // to be unguarded, which is undefined for an id the caller should not
+      // produce but the RL stage did.
+      const float target_z = (target >= 0 && target < vocab) ? z[target] : 0.0f;
       const float loss =
-          static_cast<float>(std::log(sum_exp)) + row_max - z[target];
+          static_cast<float>(std::log(sum_exp)) + row_max - target_z;
       losses[r] = loss;
     }
   }

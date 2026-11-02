@@ -406,7 +406,16 @@ float MeshTrainDriver::Run() {
     if (g_interrupted) break;
     const auto step_start = std::chrono::steady_clock::now();
     if (!LoadBatch(&tokens_, &targets_)) {
-      std::fprintf(stderr, "mesh_train: the loader returned no batch\n");
+      // The reader's own reason, when it wrote one. Without it this message is
+      // the same for an exhausted corpus, a shard that cannot be opened, and a
+      // read that failed halfway, and the operator has nowhere to look
+      // (`DataLoader::LastError`).
+      const std::string reason =
+          loader_ != nullptr ? loader_->LastError() : std::string();
+      std::fprintf(stderr, "mesh_train: the loader returned no batch: %s\n",
+                   reason.empty()
+                       ? "the source ended and the row buffer was incomplete"
+                       : reason.c_str());
       break;
     }
     const auto loaded = std::chrono::steady_clock::now();

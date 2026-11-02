@@ -50,8 +50,16 @@ __global__ void QkPrepForwardKernel(const QkPrepParams params,
   const float* srow = sin + static_cast<std::size_t>(t) * half;
 
   for (int d = threadIdx.x; d < half; d += blockDim.x) {
-    float x1 = AsFloatDev(rowp[d]) * r;
-    float x2 = AsFloatDev(rowp[half + d]) * r;
+    // Round the normalized value to the compute type *before* the rotation.
+    // The reference rounds it there: its RMSNorm writes a compute-type tensor,
+    // and the rotation then reads that. Keeping the value in fp32 across the
+    // rotation is the more accurate arithmetic, but it is not the reference's,
+    // and the difference reaches 1.22e-4 on `backout_lambda` after three
+    // optimizer steps, over the 1e-4 trajectory tolerance of
+    // `//tests:oracle_cuda_test` (`src/ops.cc`, the parity note above
+    // `kFusedQkPrepMatchesComposition`).
+    float x1 = AsFloatDev(ToComputeDev(AsFloatDev(rowp[d]) * r));
+    float x2 = AsFloatDev(ToComputeDev(AsFloatDev(rowp[half + d]) * r));
     RotatePairInPlace(x1, x2, crow[d], srow[d]);
     rowp[d] = ToComputeDev(x1 * params.scale);
     rowp[half + d] = ToComputeDev(x2 * params.scale);

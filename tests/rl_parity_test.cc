@@ -234,10 +234,17 @@ std::string LocateFixture(int argc, char** argv) {
       "RL parity fixture not found; pass tests/data/rl_parity.bin as argv[1]");
 }
 
-// Locates the `rl_step` binary next to the test in the runfiles tree. The
-// `//src:rl_step_main` data dependency is what puts it there.
-std::string LocateRlStep() {
+// Locates the `rl_step` binary. The first choice is the path the build passes
+// as `$(rootpath //src:rl_step_main)`, which is a runfiles path and survives a
+// wrapper that drops the test environment: the GPU queue runs the test through
+// `--run_under`, and `TEST_SRCDIR` did not reach it, so the runfiles guesses
+// below all missed. The environment override and the guesses stay for a hand
+// run.
+std::string LocateRlStep(int argc, char** argv) {
   std::vector<std::string> candidates;
+  if (argc > 2 && argv[2] != nullptr && argv[2][0] != '\0') {
+    candidates.emplace_back(argv[2]);
+  }
   const std::string override = Getenv("NANOCHAT_RL_STEP");
   if (!override.empty()) candidates.push_back(override);
   const std::string src_dir = Getenv("TEST_SRCDIR");
@@ -304,7 +311,7 @@ void CheckParamL2(int step, const std::string& name, double got, double want) {
   }
 }
 
-void Run(const std::string& fixture_path) {
+void Run(const std::string& fixture_path, const std::string& step_path) {
   const Fixture fixture = Fixture::Load(fixture_path);
   if (fixture.Get("config/version").scalar_int() != 1) {
     throw std::runtime_error("unsupported RL-parity fixture version");
@@ -371,7 +378,7 @@ void Run(const std::string& fixture_path) {
 
   // --- the same trajectory, through the file-driven binary ---------------
   const std::string out_path = TempDir() + "/rl_parity_result.bin";
-  const std::string binary = LocateRlStep();
+  const std::string binary = step_path;
   const std::string command = ShellQuote(binary) + " --fixture " +
                               ShellQuote(fixture_path) + " --out " +
                               ShellQuote(out_path);
@@ -439,7 +446,7 @@ void Run(const std::string& fixture_path) {
 
 int main(int argc, char** argv) {
   try {
-    Run(LocateFixture(argc, argv));
+    Run(LocateFixture(argc, argv), LocateRlStep(argc, argv));
   } catch (const std::exception& error) {
     std::fprintf(stderr, "rl_parity: %s\n", error.what());
     return 1;

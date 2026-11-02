@@ -85,6 +85,7 @@ starts.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -152,12 +153,20 @@ ROOFLINE_TARGET = "//src:roofline_main"
 TOKENIZER_TARGET = "//src/tokenizer:tok_train_main"
 TOKENIZER_BIN = f"{REPO_ROOT}/bazel-bin/src/tokenizer/tok_train_main"
 
+#: The Bazel label of the single-device trainer, and its binary. The chain runs
+#: the mesh trainer, which reports one number per step. This one reports the
+#: phase split: data, forward, backward, sync, and optimizer. A step that sits
+#: far from its roofline bound is attributed with it, on the card that ran it,
+#: because the split is the only thing that says which phase to fix.
+TRAIN_TARGET = "//src:train_main"
+TRAIN_BIN = f"{REPO_ROOT}/bazel-bin/src/train_main"
+
 #: The labels the one build of an image names: the shared library, the two
 #: stage executables the chain launches (``docs/pipeline-plan.md`` B6 and D2),
 #: the roofline tool G3 measures with, and the tokenizer trainer the corpus
 #: function runs.
 BUILD_TARGETS = ("//bindings:nanochat_shared", *STAGE_TARGETS,
-                 ROOFLINE_TARGET, TOKENIZER_TARGET)
+                 ROOFLINE_TARGET, TOKENIZER_TARGET, TRAIN_TARGET)
 
 #: The directory of the image build that holds them, and the variables that
 #: name them. ``nanochat_cpp._build.stage_binary`` prefers the override, and
@@ -309,6 +318,23 @@ RUN_ID_SEPARATOR = "-"
 def leg_run_id(run_id, leg) -> str:
     """The run id of one leg: ``<run_id>-t4`` or ``<run_id>-h100``."""
     return f"{run_id}{RUN_ID_SEPARATOR}{leg.name}"
+
+
+def selected_legs(name: str) -> tuple:
+    """The legs a run asks for: ``both``, ``t4``, or ``h100``.
+
+    A name the table does not hold is a ValueError that lists the answers, so a
+    typo costs one line here and not a container. One card is the answer when a
+    reader wants one number and gate G2 has nothing to compare (section 8).
+    """
+    wanted = str(name or "both").strip().lower()
+    if wanted in ("", "both", "all"):
+        return tuple(LEG_ORDER)
+    if wanted in LEGS:
+        return (LEGS[wanted],)
+    raise ValueError(
+        f"unknown legs {name!r}; the legs are 'both' (the default), 't4', "
+        f"and 'h100'")
 
 
 app = modal.App(APP_NAME)
@@ -1109,13 +1135,35 @@ def pipeline_h100(job_json: str, run_id: str, stage_json: str = "",
 #: The directory of the runs Volume that holds the corpus of every job. It sits
 #: beside a run directory, not inside one, because the corpus outlives one run
 #: and a second job reads it again (``docs/pipeline-scaleup-plan.md`` section 9
-#: row 3).
-CORPUS_DIRNAME = "corpus"
+#: row 3). It is the same word as the run-level name above and a different
+#: directory, so it has its own name.
+CORPUS_VOLUME_DIRNAME = "corpus"
 
 #: The characters the tokenizer trainer reads by default. A 32768-merge
 #: vocabulary needs tens of millions of characters to use its merges, and 200
 #: million is a few minutes of one core and a bounded first deploy.
 TOKENIZER_CHARS = 200_000_000
+
+
+#: The document one corpus download writes beside its shards. The chain reads
+#: it as the manifest of the directory, so a shard left by an earlier download
+#: cannot join a run (``docs/pipeline-scaleup-plan.md`` section 9 row 3).
+CORPUS_MANIFEST = "corpus.json"
+
+
+def corpus_dir_name(urls: Sequence[str], name: str = "h100") -> str:
+    """The Volume directory of one URL set: the name and a digest of the URLs.
+
+    Two datasets must never share a directory. The FineWeb-Edu shard and the
+    ClimbMix shard were both planned as ``00_<basename>.parquet`` under one
+    directory keyed by the profile name, so the loader read the first in name
+    order and answered ``only a one-column flat schema is supported`` for the
+    other dataset's file. The digest keeps one URL set in one place and makes
+    the download cache exact (section 9 row 3).
+    """
+    digest = hashlib.sha256("\n".join(str(url) for url in urls)
+                            .encode("utf-8")).hexdigest()[:12]
+    return f"{name}-{digest}"
 
 
 def corpus_plan(urls: Sequence[str], root) -> dict:
@@ -1180,6 +1228,20 @@ def tokenizer_ids(path) -> int:
         return 0
 
 
+def process_tail(result, lines: int = 5) -> str:
+    """The last lines a finished process wrote, for a failure message.
+
+    A child that fails in a container writes its reason to stderr, and that
+    stderr is the only place the reason exists. A bare exit status sends the
+    operator to the Modal log for it; the tail puts the reason beside the
+    status (``docs/pipeline-scaleup-plan.md`` section 9 row 3).
+    """
+    text = "\n".join(part for part in (getattr(result, "stdout", ""),
+                                      getattr(result, "stderr", "")) if part)
+    kept = text.strip().splitlines()[-max(1, int(lines)):]
+    return " | ".join(kept)
+
+
 @app.function(
     image=image_for(H100),
     cpu=CPU_CORES,
@@ -1188,8 +1250,8 @@ def tokenizer_ids(path) -> int:
     timeout=TIMEOUT_SECONDS,
     max_containers=1,
 )
-def corpus(urls_json: str, vocab_size: int = 32768,
-           max_chars: int = TOKENIZER_CHARS, name: str = "h100") -> str:
+def corpus(job_json: str, urls_json: str, name: str = "h100",
+           vocab_size: int = 0, max_chars: int = TOKENIZER_CHARS) -> str:
     """Download a parquet corpus to the Volume and train its tokenizer.
 
     The corpus is the input of the H100 leg and it outlives one run, so it
@@ -1199,6 +1261,17 @@ def corpus(urls_json: str, vocab_size: int = 32768,
     returned document is what :func:`pipeline_demo` merges into the job as
     ``corpus_path`` and ``tokenizer_path``.
 
+    ``vocab_size`` 0 reads the job's own profile here, in the container, which
+    holds the installed package. The local entry point therefore needs no
+    package of its own: the vocabulary, the profile, and the shape have one
+    home, and it is the image.
+
+    The parquet must hold one flat column named ``text``. The native reader
+    refuses a multi-column schema, so a public dataset that ships its metadata
+    beside the text must be reshaped first
+    (``docs/parquet-native.md``). ``karpathy/climbmix-400b-shuffle`` is the
+    corpus the tree already names, and ``shard_00000.parquet`` is 92 MB.
+
     This function holds no device. It runs on the H100 image because that image
     holds ``curl`` and the tokenizer trainer, and it commits the Volume so the
     answer survives the container.
@@ -1206,7 +1279,10 @@ def corpus(urls_json: str, vocab_size: int = 32768,
     urls = [str(url) for url in json.loads(urls_json)]
     if not urls:
         raise ValueError("corpus: give at least one parquet URL")
-    plan = corpus_plan(urls, Path(REMOTE_ROOT) / CORPUS_DIRNAME / str(name))
+    if int(vocab_size) <= 0:
+        vocab_size = int(shape_of(json.loads(job_json)).vocab_size)
+    plan = corpus_plan(urls, Path(REMOTE_ROOT) / CORPUS_VOLUME_DIRNAME
+                       / corpus_dir_name(urls, str(name)))
     Path(plan["dir"]).mkdir(parents=True, exist_ok=True)
     for url, target in zip(urls, plan["files"]):
         cached = Path(target)
@@ -1215,10 +1291,12 @@ def corpus(urls_json: str, vocab_size: int = 32768,
                   file=sys.stderr)
             continue
         print(f"corpus: downloading {url}", file=sys.stderr)
-        result = subprocess.run(download_argv(url, target), check=False)
+        result = subprocess.run(download_argv(url, target), check=False,
+                                capture_output=True, text=True)
         if result.returncode != 0:
             raise RuntimeError(
-                f"corpus: curl exited {result.returncode} for {url}")
+                f"corpus: curl exited {result.returncode} for {url}: "
+                f"{process_tail(result)}")
     plan["vocab_size"] = int(vocab_size)
     plan["tokenizer_ids"] = tokenizer_ids(plan["tokenizer"])
     if plan["tokenizer_ids"] != int(vocab_size):
@@ -1227,21 +1305,85 @@ def corpus(urls_json: str, vocab_size: int = 32768,
         argv = tokenizer_argv(plan["files"], plan["tokenizer"], vocab_size,
                               max_chars)
         result = subprocess.run(argv, env=worker_env(package_source()),
-                                check=False)
+                                check=False, capture_output=True, text=True)
         if result.returncode != 0:
             raise RuntimeError(
-                f"corpus: the tokenizer trainer exited {result.returncode}")
+                f"corpus: the tokenizer trainer exited {result.returncode}: "
+                f"{process_tail(result)}")
         plan["tokenizer_ids"] = tokenizer_ids(plan["tokenizer"])
         if plan["tokenizer_ids"] != int(vocab_size):
             raise RuntimeError(
                 f"corpus: the trainer wrote {plan['tokenizer_ids']} identifiers "
                 f"and the job asks for {int(vocab_size)}; raise --max-chars")
     runs.commit()
-    document = Path(plan["dir"]) / "corpus.json"
+    document = Path(plan["dir"]) / CORPUS_MANIFEST
     document.write_text(json.dumps(plan, indent=1, sort_keys=True) + "\n",
                         encoding="utf-8")
     runs.commit()
     return json.dumps(plan, sort_keys=True)
+
+
+def step_split_argv(job: Mapping, corpus: Mapping, steps: int = 6) -> list:
+    """The ``train_main`` line that reports the phase split of one step.
+
+    The trainer is the single-device one, because it is the only entry point
+    that times the phases: ``data_ms``, ``fwd_ms``, ``bwd_ms``, ``sync_ms``, and
+    ``opt_ms``. The shape and the batch come from the job, so the split is the
+    split of the run being explained and not of a copy of it.
+    """
+    batch, grad_accum, devices = base_shape(job)
+    if int(devices) != 1:
+        raise ValueError(
+            f"step_split: one device at a time, and the job names {devices}")
+    files = [str(name) for name in (corpus or {}).get("files") or ()]
+    tokenizer = str((corpus or {}).get("tokenizer") or "")
+    if not files or not tokenizer:
+        raise ValueError(
+            "step_split: the corpus document needs `files` and `tokenizer`")
+    return ["tools/nanochat", "train", "--", TRAIN_BIN,
+            *model_flags(shape_of(job)),
+            "--batch", str(int(batch)),
+            "--grad-accum", str(int(grad_accum)),
+            "--num-iterations", str(int(steps)),
+            "--log-every", "1",
+            "--tokenizer", tokenizer,
+            "--train-parquet", ",".join(files),
+            "--text-column", "text",
+            "--device", H100.device,
+            "--hw-check", "off",
+            "--checkpoint", f"{REMOTE_ROOT}/split/checkpoint.ckpt"]
+
+
+@app.function(
+    image=image_for(H100),
+    gpu=H100.gpu,
+    cpu=CPU_CORES,
+    volumes={REMOTE_ROOT: runs},
+    secrets=_secrets(),
+    timeout=TIMEOUT_SECONDS,
+    max_containers=1,
+)
+def step_split(job_json: str, corpus_json: str, steps: int = 6) -> str:
+    """Run one short training on the H100 and return its phase split.
+
+    The chain reports one number per step, so a step far from its roofline bound
+    cannot be attributed from the chain's report. This function runs the phase
+    timer on the same card, at the same shape and batch, and returns the lines.
+    It reads the corpus the ``corpus`` function left on the Volume, so it costs
+    one container start and a few seconds of training.
+    """
+    job = json.loads(job_json)
+    corpus = json.loads(corpus_json)
+    Path(f"{REMOTE_ROOT}/split").mkdir(parents=True, exist_ok=True)
+    argv = step_split_argv(job, corpus, steps)
+    result = subprocess.run(argv, env=worker_env(package_source()),
+                            capture_output=True, text=True, check=False)
+    measured = [line for line in result.stdout.splitlines()
+                if line.startswith("step ")]
+    runs.commit()
+    return json.dumps({"command": argv, "status": int(result.returncode),
+                       "steps": measured,
+                       "tail": process_tail(result, lines=8)}, sort_keys=True)
 
 
 # ---------------------------------------------------------------------------
@@ -1464,11 +1606,19 @@ def gate_roofline(h100_report, roofline=None,
     return _gate("G3", G3_CLAIM, ok, read, expects, reason)
 
 
-def gates_of(t4_report, h100_report, roofline=None) -> list:
-    """The three gates of section 8, in order: G1, G2, and G3."""
-    return [gate_bf16_ran(h100_report),
-            gate_step_ratio(t4_report, h100_report),
-            gate_roofline(h100_report, roofline)]
+def gates_of(t4_report, h100_report, roofline=None, pair=True) -> list:
+    """The gates of section 8, in order: G1, G2, and G3.
+
+    G2 compares the two legs, so a single-leg run has no G2 to answer. ``pair``
+    names the request and not the data: a two-leg run whose T4 container failed
+    still answers G2 as a failure with its reason, instead of silently dropping
+    the gate that would have caught the regression.
+    """
+    gates = [gate_bf16_ran(h100_report)]
+    if pair:
+        gates.append(gate_step_ratio(t4_report, h100_report))
+    gates.append(gate_roofline(h100_report, roofline))
+    return gates
 
 
 def gate_failures(document: Mapping) -> list:
@@ -1478,7 +1628,7 @@ def gate_failures(document: Mapping) -> list:
             if str(gate.get("status")) != "pass"]
 
 
-def demo_document(answers: Mapping) -> dict:
+def demo_document(answers: Mapping, legs=LEG_ORDER) -> dict:
     """The one document the entry point prints: legs, comparison, and gates.
 
     A leg whose answer carries ``error`` still contributes its summary, so a
@@ -1486,19 +1636,26 @@ def demo_document(answers: Mapping) -> dict:
     reports and the H100 leg's roofline record, and a missing one is a failure
     with a reason rather than a crash, so the document always has its three
     keys (section 7).
+
+    ``legs`` names the legs the run asked for. A single-leg request answers G1
+    and G3 and leaves G2 out, because the gate compares the two legs and a run
+    that started one of them cannot answer it (section 8).
     """
-    legs = {}
-    for leg in LEG_ORDER:
+    selected = tuple(legs)
+    names = {leg.name for leg in selected}
+    summaries = {}
+    for leg in selected:
         answer = dict((answers or {}).get(leg.name) or {})
-        legs[leg.name] = leg_summary(leg, answer,
-                                     error=str(answer.get("error") or ""))
+        summaries[leg.name] = leg_summary(
+            leg, answer, error=str(answer.get("error") or ""))
     t4_report = dict(((answers or {}).get(T4.name) or {}).get("report") or {})
     h100_answer = dict((answers or {}).get(H100.name) or {})
     h100_report = dict(h100_answer.get("report") or {})
-    return {"legs": legs,
-            "comparison": comparison(legs),
+    return {"legs": summaries,
+            "comparison": comparison(summaries),
             "gates": gates_of(t4_report, h100_report,
-                              h100_answer.get("roofline"))}
+                              h100_answer.get("roofline"),
+                              pair=T4.name in names and H100.name in names)}
 
 
 def pipeline_function(leg: Leg):
@@ -1511,8 +1668,8 @@ def run_leg(leg: Leg, job_json: str, run_id: str) -> dict:
     return json.loads(pipeline_function(leg).remote(job_json, str(run_id)))
 
 
-def run_legs(job_json: str, run_id: str, runner=None) -> dict:
-    """Run both legs, T4 first, and return one answer per leg name.
+def run_legs(job_json: str, run_id: str, runner=None, legs=LEG_ORDER) -> dict:
+    """Run the selected legs, T4 first, and return one answer per leg name.
 
     The order is the promise of section 7: the T4 artifact is on the Volume
     before the H100 container starts, so a reviewer reads the cheap leg while
@@ -1520,11 +1677,12 @@ def run_legs(job_json: str, run_id: str, runner=None) -> dict:
     The run ids are ``<run_id>-t4`` and ``<run_id>-h100``, so both reports stay
     on the ``nanochat-runs`` Volume. A leg that raises answers with ``error``
     and the other leg still runs, so one container's failure is a line in the
-    document and not a lost run.
+    document and not a lost run. ``legs`` selects which legs to start, so a
+    throughput run on one card starts one container.
     """
     runner = run_leg if runner is None else runner
     answers = {}
-    for leg in LEG_ORDER:
+    for leg in legs:
         try:
             answers[leg.name] = runner(leg, job_json, leg_run_id(run_id, leg))
         except Exception as error:  # noqa: BLE001 - a leg's failure is a report
@@ -1582,29 +1740,46 @@ def demo_job(run_id: str = "demo") -> dict:
 @app.local_entrypoint()
 def pipeline_demo(job: str = "", run_id: str = DEMO_RUN_ID,
                   corpus_urls: str = "", profile: str = "",
-                  batch: int = 0) -> None:
-    """Run both legs and print the one document: legs, comparison, and gates.
+                  batch: int = 0, legs: str = "both", split_job: str = "",
+                  split_corpus: str = "", split_steps: int = 6) -> None:
+    """Run the selected legs, or one phase split, and print the answer.
 
         modal run tools/modal/app.py::pipeline_demo
         modal run tools/modal/app.py::pipeline_demo --job my-job.json
-        modal run tools/modal/app.py::pipeline_demo --profile h100 --batch 16 \\
-            --corpus-urls "https://.../000_00000.parquet"
+        modal run tools/modal/app.py::pipeline_demo --profile big --batch 16 \\
+            --legs h100 --corpus-urls "https://.../shard_00000.parquet"
+        modal run tools/modal/app.py::pipeline_demo --split-job '{"profile":...}' \\
+            --split-corpus '{"files":[...],"tokenizer":"..."}'
 
     ``job`` names a job file on this host; without one, the demo job runs.
     ``profile`` and ``batch`` override that job's shape and its base batch, so
     the throughput shape of the H100 leg runs without writing a file.
+    ``legs`` chooses the cards: ``both`` (the default), ``t4``, or ``h100``. A
+    single-leg request starts one container and leaves gate G2 out, because G2
+    compares the two legs (section 8).
     ``corpus_urls`` is a comma-separated list of parquet URLs: it calls
     :func:`corpus` first, which downloads and tokenizes on the Volume, and the
     paths it returns become the job's ``corpus_path`` and ``tokenizer_path``.
     A second run with the same URLs reuses the download and the tokenizer, so
     the flag costs nothing after the first call.
 
-    The T4 leg runs first and writes ``<run_id>-t4/<job run_id>/deliver/`` on the
-    ``nanochat-runs`` Volume, then the H100 leg writes ``<run_id>-h100/...``, so
-    both reports stay and a reviewer reads one without waiting for the other.
+    ``split_job`` switches to the phase split and returns it: the single-device
+    trainer runs ``split_steps`` steps of that job on the H100 and the answer
+    carries ``fwd_ms``, ``bwd_ms``, ``opt_ms``, and ``sync_ms``. The chain
+    reports one number per step, so a step far from its roofline bound is
+    attributed this way (section 9).
+
     The document holds ``legs``, ``comparison``, and ``gates``, and the command
     exits non-zero when any gate fails (section 7 and section 8).
     """
+    if split_job:
+        answer = json.loads(step_split.remote(split_job, split_corpus,
+                                              int(split_steps)))
+        print(json.dumps(answer, indent=1, sort_keys=True))
+        if int(answer.get("status") or 0) != 0:
+            print("modal: the trainer did not finish", file=sys.stderr)
+            raise SystemExit(1)
+        return
     payload = (json.loads(Path(job).read_text(encoding="utf-8")) if job
                else demo_job())
     if not payload.get("run_id"):
@@ -1613,19 +1788,23 @@ def pipeline_demo(job: str = "", run_id: str = DEMO_RUN_ID,
         payload["profile"] = str(profile)
     if int(batch) > 0:
         payload["batch"] = int(batch)
+    selected = selected_legs(legs)
     urls = [url.strip() for url in str(corpus_urls).split(",") if url.strip()]
     if urls:
-        shape = shape_of(payload)
+        # The vocabulary comes from the job's profile, and the profile is read
+        # in the container: this host may hold the Modal SDK and not the
+        # package, which is the one thing the entry point must not require.
         plan = json.loads(corpus.remote(
-            json.dumps(urls), int(shape.vocab_size), TOKENIZER_CHARS,
+            json.dumps(payload, sort_keys=True), json.dumps(urls),
             str(payload.get("profile") or "h100")))
         payload["corpus"] = "files"
         payload["corpus_path"] = plan["dir"]
         payload["tokenizer_path"] = plan["tokenizer"]
         print(f"modal: the corpus is {plan['dir']} and the tokenizer is "
               f"{plan['tokenizer']}", file=sys.stderr)
-    answers = run_legs(json.dumps(payload, sort_keys=True), str(run_id))
-    document = demo_document(answers)
+    answers = run_legs(json.dumps(payload, sort_keys=True), str(run_id),
+                       legs=selected)
+    document = demo_document(answers, legs=selected)
     print(json.dumps(document, indent=1, sort_keys=True))
     failed = gate_failures(document)
     if failed:

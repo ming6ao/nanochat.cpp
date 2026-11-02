@@ -70,8 +70,16 @@ __global__ void ClassifierForwardKernel(const ClassifierParams params,
   float sum_exp = 0.0f;
   RowLogSumExp(lrow, params.vocab_size, params.softcap, &row_max, &sum_exp);
   if (threadIdx.x == 0) {
-    const float z_target =
-        params.softcap * tanhf(AsFloatDev(lrow[target]) / params.softcap);
+    // An out-of-range target contributes a zero, which is the behavior the
+    // composition defines (`src/ops.cc`, `ClassifierForward`): the caller
+    // produces the ids, and one defensive branch is cheaper than a device-side
+    // fault. Without it a target outside `[0, vocab_size)` read past the row,
+    // which is what the RL stage hit.
+    float z_target = 0.0f;
+    if (target >= 0 && target < params.vocab_size) {
+      z_target =
+          params.softcap * tanhf(AsFloatDev(lrow[target]) / params.softcap);
+    }
     losses[row] = logf(sum_exp) + row_max - z_target;
   }
 }

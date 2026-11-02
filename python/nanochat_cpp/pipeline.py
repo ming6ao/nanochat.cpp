@@ -114,6 +114,13 @@ FIXTURE_TOKENIZER = Path("tests") / "data" / "loader_tokenizer.nctoken"
 #: The conversations the corpus builder writes beside the fixture data.
 CONVERSATIONS_NAME = "conversations.json"
 
+#: The manifest a corpus download writes beside its shards. A directory that
+#: holds one answers with the files the manifest names, so a shard left by an
+#: earlier download cannot join the run. The Modal app writes it
+#: (``tools/modal/app.py``) and the chain reads it here; the name is the same on
+#: both sides, and a directory without one keeps the name-order rule.
+CORPUS_MANIFEST = "corpus.json"
+
 #: The warm-up steps a rate window drops. The first steps of a device run pay
 #: the first cuBLAS handle, the first kernel module load, and the first parquet
 #: read, and a checkpoint write stalls one step, so a steady window must skip
@@ -163,6 +170,15 @@ PROFILES = {
     "h100": api.Config(num_layers=8, num_heads=8, num_kv_heads=4,
                        hidden_dim=512, seq_len=256, vocab_size=32768,
                        padded_vocab_size=32768, window_pattern="L"),
+    # The throughput shape a bigger model needs (section 4.2). The eight-layer
+    # shape models 38.9 percent of the card's bf16 peak at batch 16, which
+    # leaves no room between the ceiling and a 30 percent target. Twenty layers
+    # of hidden 1280 at sequence 1024 models 53.38 ms and 79.9 percent for 42.2
+    # TFLOPs of arithmetic per step, so a step can pay tens of milliseconds of
+    # host work and still land above 30 percent.
+    "big": api.Config(num_layers=20, num_heads=10, num_kv_heads=5,
+                      hidden_dim=1280, seq_len=1024, vocab_size=32768,
+                      padded_vocab_size=32768, window_pattern="SSL"),
 }
 
 #: The profile a job runs unless it names another one. ``standard`` is the
@@ -693,16 +709,31 @@ def _hardware() -> dict:
 def _corpus_files(path: str | os.PathLike) -> list[Path]:
     """The parquet files of a corpus path: one file, or a directory's own.
 
-    A job names one file or one directory, and the directory is read in name
-    order so a run over several shards is the run the operator listed. An empty
-    answer means the path names nothing, and the caller raises with the path.
+    A job names one file or one directory. A directory that holds a
+    :data:`CORPUS_MANIFEST` answers with the files that manifest names, in its
+    order, because the directory outlives one download and a shard of another
+    dataset must not join the run. A directory without one is read in name
+    order, so a run over several shards is the run the operator listed. An
+    empty answer means the path names nothing, and the caller raises with the
+    path.
     """
     root = Path(path)
-    if root.is_dir():
-        files = sorted(root.glob("*.parquet"))
-    else:
-        files = [root]
-    return [file for file in files if file.is_file()]
+    if not root.is_dir():
+        return [root] if root.is_file() else []
+    manifest = root / CORPUS_MANIFEST
+    if manifest.is_file():
+        named: list[Path] = []
+        try:
+            document = json.loads(manifest.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            document = {}
+        for name in (document or {}).get("files") or ():
+            candidate = Path(str(name))
+            if candidate.is_file():
+                named.append(candidate)
+        if named:
+            return named
+    return [file for file in sorted(root.glob("*.parquet")) if file.is_file()]
 
 
 def _check_vocabulary(job: "Job", tokenizer: Path) -> int:

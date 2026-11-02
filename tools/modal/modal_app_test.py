@@ -706,8 +706,8 @@ class PipelineTest(_RemoteFixture):
     def test_the_functions_are_declared(self) -> None:
         names = [keywords["name"] for keywords in self.sdk.function_calls]
         self.assertEqual(sorted(names), ["corpus", "doctor", "pipeline",
-                                         "pipeline_h100", "train",
-                                         "train_h100"])
+                                         "pipeline_h100", "step_split",
+                                         "train", "train_h100"])
 
     def test_the_chain_runs_from_the_one_source_environment(self) -> None:
         self.run_once()
@@ -1024,6 +1024,19 @@ class CorpusHelpersTest(unittest.TestCase):
         self.assertEqual(plan["tokenizer"], "/runs/c/tokenizer.nctoken")
         self.assertEqual(plan["dir"], "/runs/c")
 
+    def test_two_url_sets_never_share_a_directory(self) -> None:
+        # The FineWeb shard and the ClimbMix shard are both planned as
+        # 00_<basename>.parquet, so one directory for both fed the loader the
+        # wrong dataset (section 9 row 3).
+        fineweb = self.app.corpus_dir_name(
+            ["https://x/fineweb-edu/sample/10BT/000_00000.parquet"])
+        climbmix = self.app.corpus_dir_name(
+            ["https://x/climbmix/shard_00000.parquet"])
+        self.assertNotEqual(fineweb, climbmix)
+        self.assertTrue(fineweb.startswith("h100-"), fineweb)
+        self.assertEqual(fineweb, self.app.corpus_dir_name(
+            ["https://x/fineweb-edu/sample/10BT/000_00000.parquet"]))
+
     def test_a_url_without_a_parquet_name_gets_one(self) -> None:
         plan = self.app.corpus_plan(["https://x/download?id=7"], "/runs/c")
         self.assertEqual(Path(plan["files"][0]).name, "00_shard000.parquet")
@@ -1054,6 +1067,19 @@ class CorpusHelpersTest(unittest.TestCase):
             self.skipTest("nanochat_cpp is not importable here")
         self.assertEqual(
             self.app.tokenizer_ids("/nonexistent/tokenizer.nctoken"), 0)
+
+    def test_a_failure_carries_the_child_s_last_words(self) -> None:
+        # A child that fails in a container writes its reason to stderr, and a
+        # bare exit status sends the operator to the log for it.
+        class Done:
+            returncode = 1
+            stdout = ""
+            stderr = "tok_train_main: line one\nline two\nline three\n"
+
+        tail = self.app.process_tail(Done(), lines=2)
+        self.assertEqual(tail, "line two | line three")
+        self.assertEqual(self.app.process_tail(Done(), lines=0),
+                         "line three")
 
 
 class GateTest(unittest.TestCase):
@@ -1247,6 +1273,45 @@ class DocumentTest(unittest.TestCase):
                          ["G1", "G2", "G3"])
         self.assertEqual(self.app.gate_failures(document), [])
 
+    def test_a_single_leg_run_answers_the_gates_it_can(self) -> None:
+        # A throughput run on one card asks for one container and has no G2 to
+        # answer, because the gate compares the two legs (section 8).
+        document = self.app.demo_document({"h100": self.answer()},
+                                          legs=(self.app.H100,))
+        self.assertEqual(sorted(document["legs"]), ["h100"])
+        self.assertEqual([gate["gate"] for gate in document["gates"]],
+                         ["G1", "G3"])
+        self.assertEqual(self.app.gate_failures(document), [])
+        self.assertIsNone(document["comparison"]["step_ms_ratio"])
+
+    def test_a_single_leg_request_still_fails_g1_when_bf16_did_not_run(self) -> None:
+        document = self.app.demo_document(
+            {"h100": self.answer(precision="fp32")}, legs=(self.app.H100,))
+        self.assertEqual(self.app.gate_failures(document), ["G1"])
+
+    def test_the_leg_selection_names_the_three_answers(self) -> None:
+        self.assertEqual(self.app.selected_legs("both"),
+                         (self.app.T4, self.app.H100))
+        self.assertEqual(self.app.selected_legs(""),
+                         (self.app.T4, self.app.H100))
+        self.assertEqual(self.app.selected_legs("h100"), (self.app.H100,))
+        self.assertEqual(self.app.selected_legs("T4"), (self.app.T4,))
+        with self.assertRaises(ValueError) as caught:
+            self.app.selected_legs("a100")
+        self.assertIn("both", str(caught.exception))
+        self.assertIn("h100", str(caught.exception))
+
+    def test_a_single_leg_run_starts_one_container(self) -> None:
+        started = []
+
+        def runner(leg, job_json, run_id):
+            started.append(leg.name)
+            return {}
+
+        self.app.run_legs("{}", "r", runner=runner,
+                          legs=(self.app.H100,))
+        self.assertEqual(started, ["h100"])
+
     def test_the_leg_summary_names_the_leg_and_its_report(self) -> None:
         summary = self.app.demo_document(self.answers())["legs"]["h100"]
         self.assertEqual((summary["leg"], summary["card"],
@@ -1291,8 +1356,9 @@ class DocumentTest(unittest.TestCase):
         stdout = io.StringIO()
         stderr = io.StringIO()
         with mock.patch.object(self.app, "run_legs",
-                               lambda job_json, run_id: self.answers(
-                                   step_ms=80.0, predicted=0.764)):
+                               lambda job_json, run_id, legs=None:
+                               self.answers(step_ms=80.0,
+                                            predicted=0.764)):
             with mock.patch.object(self.app, "demo_job",
                                    lambda run_id="demo": {"run_id": "demo"}):
                 with contextlib.redirect_stdout(stdout), \
@@ -1307,7 +1373,8 @@ class DocumentTest(unittest.TestCase):
     def test_the_entry_point_passes_when_every_gate_passes(self) -> None:
         stdout = io.StringIO()
         with mock.patch.object(self.app, "run_legs",
-                               lambda job_json, run_id: self.answers()):
+                               lambda job_json, run_id, legs=None:
+                               self.answers()):
             with mock.patch.object(self.app, "demo_job",
                                    lambda run_id="demo": {"run_id": "demo"}):
                 with contextlib.redirect_stdout(stdout):
@@ -1333,8 +1400,8 @@ class WeightsTest(unittest.TestCase):
         mounted = {call["name"]: call["volumes"]
                    for call in self.sdk.function_calls if "volumes" in call}
         self.assertEqual(sorted(mounted), ["corpus", "pipeline",
-                                           "pipeline_h100", "train",
-                                           "train_h100"])
+                                           "pipeline_h100", "step_split",
+                                           "train", "train_h100"])
         for name in ("train", "train_h100"):
             self.assertEqual(sorted(mounted[name]), ["/runs", "/weights"])
             self.assertIs(mounted[name]["/weights"], self.app.weights)
@@ -1343,7 +1410,7 @@ class WeightsTest(unittest.TestCase):
         # from each other, so it never reads the stage cache of `train`. The
         # corpus function writes the run root too: the corpus is an input that
         # outlives one run, and no stage cache holds it (section 9 row 3).
-        for name in ("corpus", "pipeline", "pipeline_h100"):
+        for name in ("corpus", "pipeline", "pipeline_h100", "step_split"):
             self.assertEqual(sorted(mounted[name]), ["/runs"])
             self.assertIs(mounted[name]["/runs"], self.app.runs)
 

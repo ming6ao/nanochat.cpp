@@ -541,6 +541,42 @@ void TestShardedResume() {
 
 }  // namespace
 
+// A loader whose source factory fails reports the factory's own reason, so a
+// caller that prints "no batch" can print why (include/nanochat/dataloader.h).
+void TestLoaderReportsTheSourceError() {
+  const std::string tokenizer_path = TempPath("data_error_tokenizer.nctoken");
+  const std::vector<std::pair<std::string, std::uint32_t>> specials = {
+      {"<|bos|>", 256}};
+  if (!nanochat::SaveTokenizer(tokenizer_path, nanochat::NanochatSplitPattern(),
+                               {}, specials)) {
+    Fail("loader error: SaveTokenizer failed");
+    return;
+  }
+  std::unique_ptr<nanochat::Tokenizer> tokenizer =
+      nanochat::LoadTokenizer(tokenizer_path);
+  if (tokenizer == nullptr) {
+    Fail("loader error: LoadTokenizer failed");
+    return;
+  }
+  nanochat::DocumentSourceFactory factory =
+      [](std::string* error) -> std::unique_ptr<nanochat::DocumentSource> {
+    if (error != nullptr) *error = "the shard holds no text column";
+    return nullptr;
+  };
+  DataLoader loader(factory, tokenizer.get(), /*batch=*/2, /*seq=*/4,
+                    /*seed=*/7, /*tokenizer_threads=*/1,
+                    /*document_buffer=*/16);
+  std::vector<int> tokens(8);
+  std::vector<int> targets(8);
+  if (loader.Next(tokens.data(), targets.data())) {
+    Fail("loader error: Next must fail when the source cannot be opened");
+    return;
+  }
+  if (loader.LastError() != "the shard holds no text column") {
+    Fail("loader error: LastError is '" + loader.LastError() + "'");
+  }
+}
+
 int main() {
   TestCheckpoint();
   TestCheckpointMetadata();
@@ -550,6 +586,7 @@ int main() {
   TestBf16RoundTrip();
   TestTokenizer();
   TestDocumentLoader();
+  TestLoaderReportsTheSourceError();
   TestShardedResume();
   if (g_failures != 0) {
     std::fprintf(stderr, "data_test: %d failure(s)\n", g_failures);

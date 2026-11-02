@@ -523,7 +523,10 @@ cc_test(
         "data/rl_parity.bin",
         "//src:rl_step_main",
     ],
-    args = ["$(rootpath data/rl_parity.bin)"],
+    args = [
+        "$(rootpath data/rl_parity.bin)",
+        "$(rootpath //src:rl_step_main)",
+    ],
     deps = [
         ":oracle_fixture",
         "//include/nanochat:nanochat",
@@ -544,7 +547,10 @@ cc_test(
         "data/rl_parity.bin",
         "//src:rl_step_main",
     ],
-    args = ["$(rootpath data/rl_parity.bin)"],
+    args = [
+        "$(rootpath data/rl_parity.bin)",
+        "$(rootpath //src:rl_step_main)",
+    ],
     deps = [
         ":oracle_fixture",
         "//include/nanochat:nanochat",

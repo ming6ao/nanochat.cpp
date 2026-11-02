@@ -508,6 +508,9 @@ struct DataLoader::Impl {
   bool producer_done = false;
   bool stop = false;
   std::string producer_error;
+  // The reason the consumer's last `Next` failed, written by the consumer
+  // thread only, so it needs no lock.
+  std::string last_error;
 
   ~Impl() { StopProducer(); }
 
@@ -693,6 +696,7 @@ struct DataLoader::Impl {
       documents.clear();
       producer_done = false;
       producer_error.clear();
+      last_error.clear();
       stop = false;
       // A new epoch restarts the cursor
       // (docs/distributed-design.md section 11).
@@ -730,7 +734,14 @@ bool DataLoader::Next(int* tokens, int* targets) {
   if (tokens == nullptr || targets == nullptr || impl_ == nullptr) return false;
   if (batch_ <= 0 || seq_ <= 0) return false;
   std::string error;
-  return impl_->NextDocuments(batch_, seq_, tokens, targets, &error);
+  const bool ok = impl_->NextDocuments(batch_, seq_, tokens, targets, &error);
+  impl_->last_error = ok ? std::string() : error;
+  return ok;
+}
+
+std::string DataLoader::LastError() const {
+  if (impl_ == nullptr) return std::string();
+  return impl_->last_error;
 }
 
 void DataLoader::Reset() {

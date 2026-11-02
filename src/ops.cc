@@ -39,12 +39,73 @@ namespace ops {
 
 namespace {
 
+// True when the device advertises the fused family of one composition.
+//
+// The composition below every call site is the definition: it is written over
+// the primitive tier, so a device that supplies only the primitives runs the
+// whole graph. The fused family is the same arithmetic in one kernel, and the
+// backend registers it beside the capability bit it advertises
+// (`backends/cuda/fused_overrides.cc`). Until this helper existed the bit was
+// declared, planned, and never read, so every device ran the portable
+// fallback: the classifier costs a launch and a blocking device-to-host copy
+// per token position, and the rotary leg copies the activation to the host and
+// back. A training step at 4096 token positions therefore took 2.2 s on an H100
+// at 10 percent device utilization.
+//
+// `GetCaps` is read once: a process owns one device, which is the rule the rest
+// of this file already follows.
+bool Fused(std::uint64_t feature) {
+  static const Caps caps = kernels::GetCaps();
+  return caps.HasFeature(feature);
+}
+
+// The classifier's fused family reads no per-row scale, so a call that carries
+// one keeps the composition.
+//
+// `ClassifierParams::row_scale` is a *host* array of `rows` entries: the
+// composition reads it on the host, one entry per row. The fused CUDA kernel
+// reads `row_scale[row]` in device code, so a host pointer reaches the device
+// and faults. The RL stage passes a scale, which is why the chain's RL stage and
+// `//tests:rl_parity_cuda_test` both died with an illegal memory access. The fix
+// is to upload the scale once and read it on the device; until then a call with
+// a scale stays on the composition, and the base, SFT, and eval calls, which
+// pass none, keep the fused path.
+constexpr bool kFusedClassifierTakesRowScale = false;
+
+// The fused rotary leg is not yet the composition's arithmetic, so it is not
+// the executed path.
+//
+// `backends/cuda/kernels/qk_prep.cu` keeps the normalized value in fp32 across
+// the rotation and rounds once, at the store. The composition rounds it to
+// `ComputeType` when `NormForward` writes the row, then rotates the rounded
+// value, and that is what the reference does too. The fused kernel is therefore
+// the more accurate of the two, and the two disagree by 1.22e-4 on
+// `backout_lambda` after three optimizer steps, over the 1e-4 trajectory
+// tolerance of `//tests:oracle_cuda_test`. A parity gate is not widened to fit
+// a kernel, so the composition stays the executed path until the kernel matches
+// the reference (`docs/parity.md`).
+//
+// Rounding the forward's normalized value at the composition's point was tried
+// and changed the trajectory error by nothing at all: 1.22e-4 before and after.
+// The remaining difference is therefore elsewhere, and the backward is the next
+// place to look: it recounts the normalization statistics from the *scaled*
+// saved output, where the composition recounts them from the same values but
+// with the scale already divided out.
+//
+// The classifier and the norm families carry the same golden trace as their
+// compositions, so their dispatches above are unconditional on the capability
+// bit.
+constexpr bool kFusedQkPrepMatchesComposition = false;
+
 // ---------------------------------------------------------------------------
 // Staging helpers
 // ---------------------------------------------------------------------------
 //
 // Two kinds of host traffic survive in this file, and both are marked where
-// they are used so a later change can delete exactly one of them:
+// they are used so a later change can delete exactly one of them. Neither runs
+// on a device that advertises the fused family of the composition it belongs
+// to: `Fused` above routes those devices to the backend's kernel, and the
+// staging below is the portable fallback a primitive-only device still needs.
 //
 //   * `StageToHost` / `StageToDevice`: the rotary rotation of `QkPrep`. The
 //     primitive set has no operand whose value varies with the row's sequence
@@ -662,6 +723,14 @@ void LinearDgrad(const ComputeType* dy, const ComputeType* w, ComputeType* dx,
 void RmsNormForward(std::int64_t rows, std::int64_t dim, float eps,
                     const ComputeType* x, ComputeType* out, float* rstd) {
   if (rows <= 0 || dim <= 0) return;
+  if (Fused(kFeatureFusedResidualRmsNorm)) {
+    RmsNormParams params;
+    params.rows = static_cast<int>(rows);
+    params.dim = static_cast<int>(dim);
+    params.eps = eps;
+    kernels::RmsNormForward(params, x, out, rstd);
+    return;
+  }
   // The saved slot is the caller's `float* rstd`; the composition keeps a
   // ComputeType view of it for the pointwise steps and copies the answer into
   // the caller's slot at the end.
@@ -677,6 +746,14 @@ void RmsNormBackward(std::int64_t rows, std::int64_t dim, float eps,
                      const ComputeType* x, const ComputeType* dy,
                      const float* rstd, ComputeType* dx) {
   if (rows <= 0 || dim <= 0) return;
+  if (Fused(kFeatureFusedResidualRmsNorm)) {
+    RmsNormParams params;
+    params.rows = static_cast<int>(rows);
+    params.dim = static_cast<int>(dim);
+    params.eps = eps;
+    kernels::RmsNormBackward(params, x, dy, rstd, dx);
+    return;
+  }
   const int n = static_cast<int>(rows);
   // The declared slots are `x` and `rstd`; the pointwise backward reads them
   // through a ComputeType view of the saved statistics.
@@ -697,6 +774,18 @@ void QkPrepForward(int batch, int seq, int num_heads, int num_kv_heads,
                    int head_dim, float eps, float scale, const float* cos,
                    const float* sin, ComputeType* q, ComputeType* k) {
   if (batch <= 0 || seq <= 0 || head_dim <= 0) return;
+  if (kFusedQkPrepMatchesComposition && Fused(kFeatureFusedQkPrep)) {
+    QkPrepParams params;
+    params.batch = batch;
+    params.seq = seq;
+    params.num_heads = num_heads;
+    params.num_kv_heads = num_kv_heads;
+    params.head_dim = head_dim;
+    params.eps = eps;
+    params.scale = scale;
+    kernels::QkPrepForward(params, cos, sin, q, k);
+    return;
+  }
   const int rows = batch * seq;
   struct Pass {
     int heads;
@@ -727,6 +816,18 @@ void QkPrepBackward(int batch, int seq, int num_heads, int num_kv_heads,
                     const float* sin, const ComputeType* dq,
                     const ComputeType* dk, ComputeType* q, ComputeType* k) {
   if (batch <= 0 || seq <= 0 || head_dim <= 0) return;
+  if (kFusedQkPrepMatchesComposition && Fused(kFeatureFusedQkPrep)) {
+    QkPrepParams params;
+    params.batch = batch;
+    params.seq = seq;
+    params.num_heads = num_heads;
+    params.num_kv_heads = num_kv_heads;
+    params.head_dim = head_dim;
+    params.eps = eps;
+    params.scale = scale;
+    kernels::QkPrepBackward(params, cos, sin, dq, dk, q, k);
+    return;
+  }
   struct Pass {
     int heads;
     const ComputeType* grad;
@@ -1120,6 +1221,21 @@ void ClassifierForward(const ClassifierShape& shape, const ComputeType* logits,
       losses == nullptr) {
     return;
   }
+  if (Fused(kFeatureFusedClassifier) &&
+      (shape.row_scale == nullptr || kFusedClassifierTakesRowScale)) {
+    // One kernel over every row. The composition below costs four launches and
+    // two blocking device-to-host copies per row, which is what made a step at
+    // 4096 token positions take seconds while the device sat idle.
+    ClassifierParams params;
+    params.rows = rows;
+    params.vocab_size = vocab;
+    params.padded_vocab_size = padded;
+    params.softcap = shape.softcap;
+    params.ignore_index = shape.ignore_index;
+    params.row_scale = shape.row_scale;
+    kernels::ClassifierForward(params, logits, targets, losses);
+    return;
+  }
   ComputeScratch row_buffer(vocab);  // the softcapped logit row
   ComputeScratch gathered(1);        // the target's softcapped value
   FloatScratch lse(1);               // the row's log-sum-exp
@@ -1164,6 +1280,20 @@ void ClassifierBackward(const ClassifierShape& shape, const ComputeType* logits,
       shape.padded_vocab_size > 0 ? shape.padded_vocab_size : vocab;
   if (rows <= 0 || vocab <= 0 || logits == nullptr || targets == nullptr ||
       dlogits == nullptr) {
+    return;
+  }
+  if (Fused(kFeatureFusedClassifier) &&
+      (shape.row_scale == nullptr || kFusedClassifierTakesRowScale)) {
+    // The fused backward zeroes the padded tail and every ignored row, which is
+    // the same contract the composition keeps.
+    ClassifierParams params;
+    params.rows = rows;
+    params.vocab_size = vocab;
+    params.padded_vocab_size = padded;
+    params.softcap = shape.softcap;
+    params.ignore_index = shape.ignore_index;
+    params.row_scale = shape.row_scale;
+    kernels::ClassifierBackward(params, logits, targets, dlogits);
     return;
   }
   FloatScratch row_max(1);

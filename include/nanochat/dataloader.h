@@ -101,6 +101,13 @@ class DataLoader {
   // when this returns true: a document longer than a row is cropped.
   bool Next(int* tokens, int* targets);
 
+  // The reason the last `Next` returned false, or an empty string when the
+  // stream ended without an error. A source that cannot be opened, a read that
+  // fails halfway, and a tokenizer that rejects a document all land here. A
+  // caller that reports "no batch" without this string sends the reader to a
+  // log for the reason, and the reason may not be in the log at all.
+  std::string LastError() const;
+
   void Reset();
 
   int batch() const { return batch_; }

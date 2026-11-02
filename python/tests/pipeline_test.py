@@ -71,6 +71,7 @@ import hashlib
 import json
 import math
 import os
+import shutil
 import struct
 import sys
 import tempfile
@@ -1033,6 +1034,24 @@ class CorpusFilesTest(unittest.TestCase):
         with self.assertRaises(pipeline.PipelineError) as caught:
             pipeline.build_corpus(self.job(corpus_path=str(empty)))
         self.assertIn("no parquet file", str(caught.exception))
+
+    def test_a_manifest_keeps_a_stale_shard_out_of_the_run(self) -> None:
+        # The directory outlives one download. A shard of another dataset sits
+        # beside the shard the manifest names, and the run must read only the
+        # named one (docs/pipeline-scaleup-plan.md section 9 row 3).
+        folder = self.root / "volume"
+        folder.mkdir()
+        wanted = folder / "00_shard_00000.parquet"
+        stale = folder / "00_000_00000.parquet"
+        shutil.copyfile(self.parquet, wanted)
+        shutil.copyfile(self.parquet, stale)
+        assert stale.name < wanted.name, "the stale shard must sort first"
+        (folder / pipeline.CORPUS_MANIFEST).write_text(
+            json.dumps({"files": [str(wanted)]}), encoding="utf-8")
+        corpus = pipeline.build_corpus(self.job(corpus_path=str(folder)))
+        self.assertEqual([Path(path).name for path in corpus["parquets"]],
+                         [wanted.name])
+        self.assertEqual(Path(corpus["parquet"]).name, wanted.name)
 
 
 if __name__ == "__main__":
