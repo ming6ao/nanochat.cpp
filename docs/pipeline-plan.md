@@ -372,6 +372,9 @@ DEFAULT_PROFILE = "standard"
 class Job:                 # JSON round trip; one file for all three hosts
     run_id: str = "demo"
     profile: str = DEFAULT_PROFILE
+    batch: int = 1               # rows per device; the corpus decides it
+    grad_accum: int = 1
+    devices: int = 1
     base_steps: int = 200
     sft_steps: int = 200
     rl_steps: int = 8
@@ -382,7 +385,9 @@ class Job:                 # JSON round trip; one file for all three hosts
     eval_samples: int = 2
     seed: int = 42
     out_root: str = ""
-    corpus: str = "fixture"      # "fixture" today; "reference" is a follow-on
+    corpus: str = "fixture"      # "fixture" or "files"
+    corpus_path: str = ""        # a parquet file or a directory of them
+    tokenizer_path: str = ""     # the NCTOKEN1 artifact of that corpus
     deliver: bool = True
     temperature: float = 1.5
     top_k: int = 0

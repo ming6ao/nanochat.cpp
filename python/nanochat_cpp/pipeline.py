@@ -114,16 +114,6 @@ FIXTURE_TOKENIZER = Path("tests") / "data" / "loader_tokenizer.nctoken"
 #: The conversations the corpus builder writes beside the fixture data.
 CONVERSATIONS_NAME = "conversations.json"
 
-#: The global batch of the base stage, in sequences. ``world_size`` is 1, so
-#: this is the whole batch of one step. It stays at one row because the
-#: committed corpus is small: ``src/parquet/testdata/text.parquet`` holds 10
-#: documents and 109 bytes, so one epoch is at most 119 tokens with one BOS per
-#: document. A row is ``seq + 1`` = 65 tokens at either profile, so two rows
-#: would need 130 tokens and a batch would never form. The loader resets once
-#: per step and a fresh epoch always fills one 65-token row
-#: (docs/pipeline-plan.md D5, row 7; docs/pipeline-scaleup-plan.md P2).
-BASE_BATCH = 1
-
 #: The warm-up steps a rate window drops. The first steps of a device run pay
 #: the first cuBLAS handle, the first kernel module load, and the first parquet
 #: read, and a checkpoint write stalls one step, so a steady window must skip
@@ -162,6 +152,17 @@ PROFILES = {
     "standard": api.Config(num_layers=8, num_heads=8, num_kv_heads=4,
                            hidden_dim=512, seq_len=64, vocab_size=487,
                            padded_vocab_size=512, window_pattern="L"),
+    # The throughput shape of the H100 leg (docs/pipeline-scaleup-plan.md
+    # section 5). It keeps the 8-layer body of `standard` and grows the two
+    # numbers that decide utilization at a small depth: the sequence and the
+    # vocabulary. A 512-token vocabulary makes the classifier GEMM 64 times
+    # smaller than a real tokenizer's, so the shape could not show a rate a
+    # reader would believe. `tools/nanochat roofline --device h100 --precision
+    # bf16` models this shape at batch 16 as 2.64 ms per step, 39.5 percent of
+    # the card's bf16 peak, where `standard` at batch 1 models 1.21 percent.
+    "h100": api.Config(num_layers=8, num_heads=8, num_kv_heads=4,
+                       hidden_dim=512, seq_len=256, vocab_size=32768,
+                       padded_vocab_size=32768, window_pattern="L"),
 }
 
 #: The profile a job runs unless it names another one. ``standard`` is the
@@ -243,6 +244,17 @@ class Job:
 
     run_id: str = "demo"
     profile: str = DEFAULT_PROFILE
+    # The base stage's batch: `batch` rows per device per micro-batch,
+    # `grad_accum` micro-batches per step, and `devices` replicas. The product
+    # is the global sequence count of one step, and the driver reports the
+    # tokens of exactly that product. The default is one row on one device
+    # because that is all the committed corpus can fill; a job that names a real
+    # corpus raises it (docs/pipeline-scaleup-plan.md section 5). The roofline
+    # gate of the H100 leg reads the same three fields, so a prediction cannot
+    # model a batch the run did not use.
+    batch: int = 1
+    grad_accum: int = 1
+    devices: int = 1
     base_steps: int = 200
     sft_steps: int = 200
     rl_steps: int = 8
@@ -257,7 +269,15 @@ class Job:
     eval_samples: int = 2
     seed: int = 42
     out_root: str = ""
+    # The corpus. `fixture` is the committed ten-document parquet, which fills
+    # one 65-token row per epoch and so pins `batch` to one. `files` reads the
+    # parquet the job names, in place, and the tokenizer the job names, which
+    # is how the H100 leg runs on real text: the Modal image downloads the file
+    # and trains the tokenizer, and the report names both
+    # (docs/pipeline-scaleup-plan.md section 9 row 3).
     corpus: str = "fixture"
+    corpus_path: str = ""
+    tokenizer_path: str = ""
     deliver: bool = True
     # Sampling temperature of the rollouts. It stays above 1.0 because the
     # demo model answers a fixture conversation and emits its stop token, so at
@@ -573,7 +593,7 @@ def _total_seconds(stages: Sequence[Stage]) -> float:
     return float(sum(stage.seconds for stage in stages))
 
 
-def _rates(records: Sequence[Mapping], steps_ran: int, shape: api.Config,
+def _rates(records: Sequence[Mapping], steps_ran: int, tokens_per_step: int,
            steady_mfu: float = 0.0, warmup: int | None = None) -> dict:
     """The rate facts of the base stage: the step time and its split.
 
@@ -591,7 +611,8 @@ def _rates(records: Sequence[Mapping], steps_ran: int, shape: api.Config,
     a fraction of a millisecond.
 
     ``tokens_per_sec`` divides the batch of one step by ``step_ms``.
-    ``tokens_per_step`` is that batch, named so a reader does not infer it.
+    ``tokens_per_step`` is that batch, passed in by the caller from the driver's
+    own product, so the report cannot disagree with the run about it.
     ``mfu`` is read from the driver, which turns the shape's FLOPs per token and
     its own per-step throughput into the number (``ComputeMfu``,
     ``src/mesh_train.cc``). An unknown device names no peak and records 0.0, and
@@ -614,7 +635,7 @@ def _rates(records: Sequence[Mapping], steps_ran: int, shape: api.Config,
     step_ms = 1000.0 * _median(_metric_values(window, "step_seconds"))
     compute_ms = 1000.0 * _median(_metric_values(window, "compute_seconds"))
     data_ms = 1000.0 * _median(_metric_values(window, "data_seconds"))
-    tokens_per_step = BASE_BATCH * int(shape.seq_len)
+    tokens_per_step = max(0, int(tokens_per_step))
     per_step_mfu = _metric_values(window, "mfu")
     return {
         "step_ms": step_ms,
@@ -669,27 +690,44 @@ def _hardware() -> dict:
 # ---------------------------------------------------------------------------
 
 
-def build_corpus(job: "Job") -> dict[str, str]:
-    """Copy the fixture corpus into the run and publish the tokenizer.
+def _corpus_files(path: str | os.PathLike) -> list[Path]:
+    """The parquet files of a corpus path: one file, or a directory's own.
 
-    The corpus is the committed fixture (design decision D4): the parquet and
-    the ``NCTOKEN1`` tokenizer of the tree, copied into
-    ``<run_root>/<run_id>/corpus/``, plus the fixture conversations beside
-    them, so a stage reads only the run directory.
-
-    The tokenizer is also written to the path
-    :func:`nanochat_cpp.data.nctoken1_path` reads, because the RL bridge loads
-    the artifact from there and a stage cannot be told another path. The
-    pipeline never reads ``NANOCHAT_BASE_DIR`` for output: the run root is the
-    one output root, and the report names it.
-
-    Returns the paths a stage needs, under the keys ``dir``, ``parquet``,
-    ``tokenizer``, ``conversations``, and ``published``.
+    A job names one file or one directory, and the directory is read in name
+    order so a run over several shards is the run the operator listed. An empty
+    answer means the path names nothing, and the caller raises with the path.
     """
-    if job.corpus != "fixture":
+    root = Path(path)
+    if root.is_dir():
+        files = sorted(root.glob("*.parquet"))
+    else:
+        files = [root]
+    return [file for file in files if file.is_file()]
+
+
+def _check_vocabulary(job: "Job", tokenizer: Path) -> int:
+    """Reject a tokenizer whose identifier count is not the profile's.
+
+    The model's classifier has ``vocab_size`` rows, so an identifier above that
+    count is out of range at the first embedding lookup and one below it leaves
+    rows that no token reaches. Both are a wrong run, and both fail silently in
+    a loss curve, so the count is checked before any stage starts
+    (``docs/pipeline-scaleup-plan.md`` section 9 row 3).
+    """
+    shape = config(job)
+    ids = len(data.token_byte_lengths(data.read_nctoken1(tokenizer)))
+    wanted = int(shape.vocab_size)
+    if ids != wanted:
         raise PipelineError(
-            f"unknown corpus {job.corpus!r}; the reference corpus is a "
-            f"follow-on and only 'fixture' is available")
+            f"the tokenizer {tokenizer} holds {ids} identifiers and the "
+            f"{job.profile!r} profile declares vocab_size {wanted}; train the "
+            f"tokenizer at the profile's size, or name the profile that "
+            f"matches it")
+    return ids
+
+
+def _fixture_corpus(job: "Job") -> dict:
+    """The committed fixture, copied into the run directory (D4)."""
     root = _run_dir(job) / CORPUS_DIRNAME
     root.mkdir(parents=True, exist_ok=True)
     tree = _build.repo_root()
@@ -705,12 +743,91 @@ def build_corpus(job: "Job") -> dict[str, str]:
     published.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(tokenizer, published)
     return {
+        "kind": "fixture",
         "dir": str(root),
         "parquet": str(parquet),
+        "parquets": [str(parquet)],
         "tokenizer": str(tokenizer),
         "conversations": str(conversations),
         "published": str(published),
     }
+
+
+def _files_corpus(job: "Job") -> dict:
+    """The corpus and the tokenizer a job names, read where they lie.
+
+    A corpus of real text is gigabytes, so it is not copied into the run: the
+    job's paths are inputs and the report names them (``_corpus_facts``). The
+    tokenizer is small, so it is copied into the run and published to the path
+    the RL bridge reads, because the bridge cannot be told another path.
+
+    The SFT stage still trains on the committed conversations: this corpus
+    supplies pretraining text and the instruction set is the one the tree
+    holds, which is what the chain measured before the corpus grew
+    (``docs/pipeline-scaleup-plan.md`` section 6).
+    """
+    parquets = _corpus_files(job.corpus_path)
+    if not parquets:
+        raise PipelineError(
+            f"the job's corpus_path {job.corpus_path!r} holds no parquet file; "
+            f"name one file or a directory of them (docs/pipeline-scaleup-plan"
+            f".md section 9 row 3)")
+    source = Path(job.tokenizer_path)
+    if not source.is_file():
+        raise PipelineError(
+            f"the job's tokenizer_path {job.tokenizer_path!r} is not a file; "
+            f"a 'files' corpus needs the ``NCTOKEN1`` artifact beside it")
+    root = _run_dir(job) / CORPUS_DIRNAME
+    root.mkdir(parents=True, exist_ok=True)
+    tokenizer = root / source.name
+    if source.resolve() != tokenizer.resolve():
+        shutil.copyfile(source, tokenizer)
+    _check_vocabulary(job, tokenizer)
+    conversations = root / CONVERSATIONS_NAME
+    conversations.write_text(
+        _json_text({"conversations": list(DEMO_CONVERSATIONS)}) + "\n",
+        encoding="utf-8")
+    published = _published_tokenizer()
+    published.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(tokenizer, published)
+    return {
+        "kind": "files",
+        "dir": str(root),
+        "parquet": str(parquets[0]),
+        "parquets": [str(path) for path in parquets],
+        "tokenizer": str(tokenizer),
+        "conversations": str(conversations),
+        "published": str(published),
+    }
+
+
+def build_corpus(job: "Job") -> dict[str, str]:
+    """The corpus of one job, as the paths a stage reads.
+
+    Two kinds. ``fixture`` copies the committed parquet and tokenizer of the
+    tree into the run, which is what the CPU gate runs in seconds (D4).
+    ``files`` reads the parquet and the tokenizer the job names, in place, which
+    is how the H100 leg runs on real text (``docs/pipeline-scaleup-plan.md``
+    section 9 row 3).
+
+    The tokenizer is also written to the path
+    :func:`nanochat_cpp.data.nctoken1_path` reads, because the RL bridge loads
+    the artifact from there and a stage cannot be told another path. The
+    pipeline never reads ``NANOCHAT_BASE_DIR`` for output: the run root is the
+    one output root, and the report names it.
+
+    Returns the paths a stage needs, under the keys ``kind``, ``dir``,
+    ``parquet`` (the first file, for an evaluator), ``parquets`` (every file,
+    for the loader), ``tokenizer``, ``conversations``, and ``published``.
+    """
+    if job.corpus == "fixture":
+        return _fixture_corpus(job)
+    if job.corpus == "files":
+        return _files_corpus(job)
+    raise PipelineError(
+        f"unknown corpus {job.corpus!r}; the kinds are 'fixture' (the "
+        f"committed ten-document parquet) and 'files' (the parquet and the "
+        f"tokenizer the job's corpus_path and tokenizer_path name)")
 
 
 def _conversations(corpus: Mapping[str, str]) -> list[dict]:
@@ -723,10 +840,21 @@ def _conversations(corpus: Mapping[str, str]) -> list[dict]:
 
 
 def _corpus_facts(corpus: Mapping[str, str]) -> dict:
-    """The corpus block of a stage's ``extra``: the paths and the digests."""
+    """The corpus block of a stage's ``extra``: the paths and the digests.
+
+    A corpus the job names is read in place and is not hashed: one shard of a
+    public dataset is gigabytes, and a digest of it costs more than a stage. The
+    block names the files and their byte sizes instead, so a reader can confirm
+    the run read the corpus it meant. The tokenizer is small and is hashed.
+    """
+    parquets = [str(path) for path in corpus.get("parquets") or ()]
     return {
         "dir": corpus["dir"],
+        "corpus": str(corpus.get("kind") or "fixture"),
         "parquet": corpus["parquet"],
+        "parquets": parquets,
+        "parquet_bytes": [Path(path).stat().st_size for path in parquets
+                          if Path(path).is_file()],
         "tokenizer": corpus["tokenizer"],
         "tokenizer_id": data.NCTOKEN1_NAME,
         "tokenizer_sha256": _sha256(corpus["tokenizer"]),
@@ -823,12 +951,12 @@ def stage_base(job: "Job") -> Stage:
     started = time.monotonic()
     client = runtime.MeshTrainConfig(
         shape,
-        world_size=1,
-        per_rank_batch=BASE_BATCH,
-        grad_accum=1,
+        world_size=int(job.devices),
+        per_rank_batch=int(job.batch),
+        grad_accum=int(job.grad_accum),
         steps=int(job.base_steps),
         tokenizer=corpus["tokenizer"],
-        train_parquet=[corpus["parquet"]],
+        train_parquet=corpus["parquets"],
         seq=shape.seq_len,
         seed=int(job.seed),
         data_seed=int(job.seed),
@@ -841,11 +969,28 @@ def stage_base(job: "Job") -> Stage:
         summary = client.run()
         records = _metric_records(client.metrics_path())
         metrics_path = client.metrics_path()
+        tokens_per_step = int(client.tokens_per_step)
     seconds = time.monotonic() - started
     losses = _metric_losses(records)
     steps_ran = int(summary.steps)
+    if steps_ran != int(job.base_steps):
+        # The driver stops with "the loader returned no batch" when one epoch
+        # cannot fill one batch, and it writes the steps it ran. A report of a
+        # short schedule is a failure of the corpus, not a faster run, so name
+        # the batch and the corpus here instead of leaving A1 to find it
+        # (docs/pipeline-scaleup-plan.md section 5).
+        raise PipelineError(
+            f"the base stage ran {steps_ran} of {int(job.base_steps)} steps: "
+            f"one epoch of {corpus['parquet']} did not fill a batch of "
+            f"{int(job.batch)} row(s) at sequence {int(shape.seq_len)}. Give "
+            f"the job a corpus whose documents fill that batch, or lower the "
+            f"job's batch")
     extra = _corpus_facts(corpus)
-    extra.update(_rates(records, steps_ran, shape,
+    extra.update({"batch": int(job.batch),
+                  "grad_accum": int(job.grad_accum),
+                  "devices": int(job.devices),
+                  "seq_len": int(shape.seq_len)})
+    extra.update(_rates(records, steps_ran, tokens_per_step,
                         float(summary.steady_mfu)))
     extra.update({
         "mean_loss": float(summary.mean_loss),
@@ -1222,11 +1367,14 @@ def _check(job: "Job") -> None:
     shape = config(job)
     for name in ("base_steps", "sft_steps", "rl_steps", "num_prompts",
                  "num_samples", "max_tokens", "eval_batches",
-                 "eval_samples"):
+                 "eval_samples", "batch", "grad_accum", "devices"):
         if int(getattr(job, name)) < 1:
             raise PipelineError(f"the job's {name} must be positive")
     if int(shape.seq_len) < 1:
         raise PipelineError("the profile's seq_len must be positive")
+    if job.corpus == "files" and not (job.corpus_path and job.tokenizer_path):
+        raise PipelineError(
+            "a 'files' corpus needs the job's corpus_path and tokenizer_path")
     _check_profile(job.profile, shape)
 
 

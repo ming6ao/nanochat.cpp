@@ -144,11 +144,20 @@ STAGE_TARGETS = ("//src:sft_main", "//src:rl_worker")
 #: executable: no stage launches it, and only the gate reads its report.
 ROOFLINE_TARGET = "//src:roofline_main"
 
+#: The Bazel label of the native tokenizer trainer, and the binary it produces.
+#: It is not a stage executable either: only :func:`corpus` calls it, to build
+#: the ``NCTOKEN1`` artifact a ``files`` corpus needs. It sits in its own
+#: directory, so the path is not the ``bazel-bin/src`` one the stage
+#: executables take (``docs/pipeline-scaleup-plan.md`` section 9 row 3).
+TOKENIZER_TARGET = "//src/tokenizer:tok_train_main"
+TOKENIZER_BIN = f"{REPO_ROOT}/bazel-bin/src/tokenizer/tok_train_main"
+
 #: The labels the one build of an image names: the shared library, the two
 #: stage executables the chain launches (``docs/pipeline-plan.md`` B6 and D2),
-#: and the roofline tool G3 measures with.
+#: the roofline tool G3 measures with, and the tokenizer trainer the corpus
+#: function runs.
 BUILD_TARGETS = ("//bindings:nanochat_shared", *STAGE_TARGETS,
-                 ROOFLINE_TARGET)
+                 ROOFLINE_TARGET, TOKENIZER_TARGET)
 
 #: The directory of the image build that holds them, and the variables that
 #: name them. ``nanochat_cpp._build.stage_binary`` prefers the override, and
@@ -868,11 +877,18 @@ def model_flags(shape) -> list:
     return list(api.model_flags(shape))
 
 
-def base_batch() -> int:
-    """The global batch of the base stage, which is the batch of one step."""
+def base_shape(job) -> tuple:
+    """The base stage's batch triple: rows per device, accumulation, devices.
+
+    The three fields have one home, the chain's own
+    :class:`nanochat_cpp.pipeline.Job`, so the roofline command models the batch
+    the stages ran and never a copy of it. One missing field reads as the job's
+    default, which is one row on one device, so an older job file still answers.
+    """
     from nanochat_cpp import pipeline as chain  # noqa: PLC0415 - image only
 
-    return int(chain.BASE_BATCH)
+    job = chain.Job.from_dict(dict(job))
+    return int(job.batch), int(job.grad_accum), int(job.devices)
 
 
 def roofline_argv(leg: Leg, job: Mapping) -> list:
@@ -882,13 +898,16 @@ def roofline_argv(leg: Leg, job: Mapping) -> list:
     the prediction is the bound of the hardware that ran: ``--device h100
     --precision bf16`` for the H100 leg (section 8). The model flags come from
     ``nanochat_cpp.api.model_flags``, the one Python home of the model flag
-    list, and the batch is the chain's own base batch, so the shape the tool
-    models is the shape the stages ran.
+    list, and the batch triple is the chain's own, so the shape the tool models
+    is the shape the stages ran.
     """
+    batch, grad_accum, devices = base_shape(job)
     return ["tools/nanochat", "roofline",
             "--device", leg.device,
             "--precision", leg.precision,
-            "--batch", str(base_batch()),
+            "--batch", str(batch),
+            "--grad-accum", str(grad_accum),
+            "--devices", str(devices),
             *model_flags(shape_of(job)),
             "--json"]
 
@@ -1081,6 +1100,148 @@ def pipeline_h100(job_json: str, run_id: str, stage_json: str = "",
     (section 8).
     """
     return _pipeline_on(H100, job_json, run_id, stage_json, publish_json)
+
+
+# ---------------------------------------------------------------------------
+# The corpus: the download and the tokenizer of the H100 leg
+# ---------------------------------------------------------------------------
+
+#: The directory of the runs Volume that holds the corpus of every job. It sits
+#: beside a run directory, not inside one, because the corpus outlives one run
+#: and a second job reads it again (``docs/pipeline-scaleup-plan.md`` section 9
+#: row 3).
+CORPUS_DIRNAME = "corpus"
+
+#: The characters the tokenizer trainer reads by default. A 32768-merge
+#: vocabulary needs tens of millions of characters to use its merges, and 200
+#: million is a few minutes of one core and a bounded first deploy.
+TOKENIZER_CHARS = 200_000_000
+
+
+def corpus_plan(urls: Sequence[str], root) -> dict:
+    """The file each URL downloads to, and the tokenizer path beside them.
+
+    The index prefix keeps the download order the order of the list, so the
+    loader reads the shards the operator named in the order they named them. A
+    URL whose last segment is not a parquet name takes a generated one, so a
+    presigned link still lands somewhere sensible.
+    """
+    root = Path(root)
+    files = []
+    for index, url in enumerate(urls):
+        name = str(url).rstrip("/").rsplit("/", 1)[-1]
+        if not name.endswith(".parquet"):
+            name = f"shard{index:03d}.parquet"
+        files.append(root / f"{index:02d}_{name}")
+    return {"dir": str(root),
+            "files": [str(path) for path in files],
+            "tokenizer": str(root / "tokenizer.nctoken")}
+
+
+def download_argv(url: str, target) -> list:
+    """The ``curl`` line that writes one corpus file.
+
+    ``-f`` turns an HTTP error into a non-zero status, so a wrong URL fails the
+    function instead of leaving an empty file that the tokenizer trainer then
+    reads. ``-L`` follows the redirect Hugging Face answers with.
+    """
+    return ["curl", "-f", "-L", "--retry", "3", "--create-dirs",
+            "--output", str(target), str(url)]
+
+
+def tokenizer_argv(files: Sequence[str], out, vocab_size: int,
+                   max_chars: int = TOKENIZER_CHARS) -> list:
+    """The ``tok_train_main`` line that writes the ``NCTOKEN1`` artifact.
+
+    The trainer runs through ``tools/nanochat``, which applies the sandbox and
+    sets the sentinel every executable requires, so the corpus function uses
+    the same entry point as the chain.
+    """
+    return ["tools/nanochat", "run", "t0-cpu", "--", TOKENIZER_BIN,
+            "--parquet", ",".join(str(path) for path in files),
+            "--text-column", "text",
+            "--vocab-size", str(int(vocab_size)),
+            "--max-chars", str(int(max_chars)),
+            "--out", str(out)]
+
+
+def tokenizer_ids(path) -> int:
+    """The identifier count of an ``NCTOKEN1`` artifact, or 0 when it is absent.
+
+    The count comes from the tree's own reader (``nanochat_cpp.data``), which
+    needs no third party, so the corpus function can decide whether a cached
+    artifact already matches the vocabulary it was asked for.
+    """
+    from nanochat_cpp import data  # noqa: PLC0415 - image only
+
+    try:
+        return len(data.token_byte_lengths(data.read_nctoken1(path)))
+    except (OSError, ValueError):
+        return 0
+
+
+@app.function(
+    image=image_for(H100),
+    cpu=CPU_CORES,
+    volumes={REMOTE_ROOT: runs},
+    secrets=_secrets(),
+    timeout=TIMEOUT_SECONDS,
+    max_containers=1,
+)
+def corpus(urls_json: str, vocab_size: int = 32768,
+           max_chars: int = TOKENIZER_CHARS, name: str = "h100") -> str:
+    """Download a parquet corpus to the Volume and train its tokenizer.
+
+    The corpus is the input of the H100 leg and it outlives one run, so it
+    lives on the ``nanochat-runs`` Volume and a second job reuses it: a file the
+    function downloaded before is not fetched again, and a tokenizer whose
+    identifier count already matches ``vocab_size`` is not trained again. The
+    returned document is what :func:`pipeline_demo` merges into the job as
+    ``corpus_path`` and ``tokenizer_path``.
+
+    This function holds no device. It runs on the H100 image because that image
+    holds ``curl`` and the tokenizer trainer, and it commits the Volume so the
+    answer survives the container.
+    """
+    urls = [str(url) for url in json.loads(urls_json)]
+    if not urls:
+        raise ValueError("corpus: give at least one parquet URL")
+    plan = corpus_plan(urls, Path(REMOTE_ROOT) / CORPUS_DIRNAME / str(name))
+    Path(plan["dir"]).mkdir(parents=True, exist_ok=True)
+    for url, target in zip(urls, plan["files"]):
+        cached = Path(target)
+        if cached.is_file() and cached.stat().st_size > 0:
+            print(f"corpus: {cached.name} is on the Volume already",
+                  file=sys.stderr)
+            continue
+        print(f"corpus: downloading {url}", file=sys.stderr)
+        result = subprocess.run(download_argv(url, target), check=False)
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"corpus: curl exited {result.returncode} for {url}")
+    plan["vocab_size"] = int(vocab_size)
+    plan["tokenizer_ids"] = tokenizer_ids(plan["tokenizer"])
+    if plan["tokenizer_ids"] != int(vocab_size):
+        print(f"corpus: training a {int(vocab_size)}-identifier tokenizer",
+              file=sys.stderr)
+        argv = tokenizer_argv(plan["files"], plan["tokenizer"], vocab_size,
+                              max_chars)
+        result = subprocess.run(argv, env=worker_env(package_source()),
+                                check=False)
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"corpus: the tokenizer trainer exited {result.returncode}")
+        plan["tokenizer_ids"] = tokenizer_ids(plan["tokenizer"])
+        if plan["tokenizer_ids"] != int(vocab_size):
+            raise RuntimeError(
+                f"corpus: the trainer wrote {plan['tokenizer_ids']} identifiers "
+                f"and the job asks for {int(vocab_size)}; raise --max-chars")
+    runs.commit()
+    document = Path(plan["dir"]) / "corpus.json"
+    document.write_text(json.dumps(plan, indent=1, sort_keys=True) + "\n",
+                        encoding="utf-8")
+    runs.commit()
+    return json.dumps(plan, sort_keys=True)
 
 
 # ---------------------------------------------------------------------------
@@ -1381,6 +1542,9 @@ DEMO_RUN_ID = "pipeline-demo"
 DEMO_JOB = {
     "run_id": "demo",
     "profile": "standard",
+    "batch": 1,
+    "grad_accum": 1,
+    "devices": 1,
     "base_steps": 200,
     "sft_steps": 200,
     "rl_steps": 8,
@@ -1392,6 +1556,8 @@ DEMO_JOB = {
     "seed": 42,
     "out_root": "",
     "corpus": "fixture",
+    "corpus_path": "",
+    "tokenizer_path": "",
     "deliver": True,
     "temperature": 1.5,
     "top_k": 0,
@@ -1414,14 +1580,26 @@ def demo_job(run_id: str = "demo") -> dict:
 
 
 @app.local_entrypoint()
-def pipeline_demo(job: str = "", run_id: str = DEMO_RUN_ID) -> None:
+def pipeline_demo(job: str = "", run_id: str = DEMO_RUN_ID,
+                  corpus_urls: str = "", profile: str = "",
+                  batch: int = 0) -> None:
     """Run both legs and print the one document: legs, comparison, and gates.
 
         modal run tools/modal/app.py::pipeline_demo
         modal run tools/modal/app.py::pipeline_demo --job my-job.json
+        modal run tools/modal/app.py::pipeline_demo --profile h100 --batch 16 \\
+            --corpus-urls "https://.../000_00000.parquet"
 
-    ``job`` names a job file on this host; without one, the demo job runs. The
-    T4 leg runs first and writes ``<run_id>-t4/<job run_id>/deliver/`` on the
+    ``job`` names a job file on this host; without one, the demo job runs.
+    ``profile`` and ``batch`` override that job's shape and its base batch, so
+    the throughput shape of the H100 leg runs without writing a file.
+    ``corpus_urls`` is a comma-separated list of parquet URLs: it calls
+    :func:`corpus` first, which downloads and tokenizes on the Volume, and the
+    paths it returns become the job's ``corpus_path`` and ``tokenizer_path``.
+    A second run with the same URLs reuses the download and the tokenizer, so
+    the flag costs nothing after the first call.
+
+    The T4 leg runs first and writes ``<run_id>-t4/<job run_id>/deliver/`` on the
     ``nanochat-runs`` Volume, then the H100 leg writes ``<run_id>-h100/...``, so
     both reports stay and a reviewer reads one without waiting for the other.
     The document holds ``legs``, ``comparison``, and ``gates``, and the command
@@ -1431,6 +1609,21 @@ def pipeline_demo(job: str = "", run_id: str = DEMO_RUN_ID) -> None:
                else demo_job())
     if not payload.get("run_id"):
         payload["run_id"] = dict(DEMO_JOB)["run_id"]
+    if profile:
+        payload["profile"] = str(profile)
+    if int(batch) > 0:
+        payload["batch"] = int(batch)
+    urls = [url.strip() for url in str(corpus_urls).split(",") if url.strip()]
+    if urls:
+        shape = shape_of(payload)
+        plan = json.loads(corpus.remote(
+            json.dumps(urls), int(shape.vocab_size), TOKENIZER_CHARS,
+            str(payload.get("profile") or "h100")))
+        payload["corpus"] = "files"
+        payload["corpus_path"] = plan["dir"]
+        payload["tokenizer_path"] = plan["tokenizer"]
+        print(f"modal: the corpus is {plan['dir']} and the tokenizer is "
+              f"{plan['tokenizer']}", file=sys.stderr)
     answers = run_legs(json.dumps(payload, sort_keys=True), str(run_id))
     document = demo_document(answers)
     print(json.dumps(document, indent=1, sort_keys=True))

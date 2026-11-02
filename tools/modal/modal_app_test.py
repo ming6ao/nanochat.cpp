@@ -703,10 +703,11 @@ class PipelineTest(_RemoteFixture):
                           "--", sys.executable, "-m", "nanochat_cpp.pipeline",
                           str(Path(self.root) / "run-1" / "job.json")])
 
-    def test_the_four_functions_are_declared(self) -> None:
+    def test_the_functions_are_declared(self) -> None:
         names = [keywords["name"] for keywords in self.sdk.function_calls]
-        self.assertEqual(sorted(names), ["doctor", "pipeline", "pipeline_h100",
-                                         "train", "train_h100"])
+        self.assertEqual(sorted(names), ["corpus", "doctor", "pipeline",
+                                         "pipeline_h100", "train",
+                                         "train_h100"])
 
     def test_the_chain_runs_from_the_one_source_environment(self) -> None:
         self.run_once()
@@ -908,14 +909,30 @@ class RooflineTest(unittest.TestCase):
         with mock.patch.object(self.app, "shape_of", lambda job: "shape"), \
                 mock.patch.object(self.app, "model_flags",
                                   lambda shape: ["--layers", "8"]), \
-                mock.patch.object(self.app, "base_batch", lambda: 1):
+                mock.patch.object(self.app, "base_shape",
+                                  lambda job: (16, 1, 1)):
             return self.app.roofline_argv(leg, {"profile": "standard"})
+
+    def test_the_base_shape_is_the_chain_job_s_own_batch(self) -> None:
+        # One home: the roofline gate reads the job, not a copy of it.
+        try:
+            from nanochat_cpp import pipeline as chain
+        except Exception:  # noqa: BLE001 - the test host may not hold it
+            self.skipTest("nanochat_cpp is not importable here")
+        self.assertEqual(self.app.base_shape({}), (1, 1, 1))
+        self.assertEqual(
+            self.app.base_shape({"batch": 16, "grad_accum": 2,
+                                 "devices": 4}), (16, 2, 4))
+        self.assertEqual(self.app.base_shape(chain.Job().to_dict()),
+                         (chain.Job().batch, chain.Job().grad_accum,
+                          chain.Job().devices))
 
     def test_the_h100_command_names_the_device_and_the_precision(self) -> None:
         self.assertEqual(
             self.argv(self.app.H100),
             ["tools/nanochat", "roofline", "--device", "h100",
-             "--precision", "bf16", "--batch", "1", "--layers", "8", "--json"])
+             "--precision", "bf16", "--batch", "16", "--grad-accum", "1",
+             "--devices", "1", "--layers", "8", "--json"])
 
     def test_the_t4_command_names_its_own_device_and_precision(self) -> None:
         self.assertEqual(
@@ -989,6 +1006,54 @@ class RooflineTest(unittest.TestCase):
                                lambda leg, job: ["tools/nanochat"]):
             record = self.app.measure_roofline(self.app.H100, {}, run=run)
         self.assertIn("did not start", record["error"])
+
+
+class CorpusHelpersTest(unittest.TestCase):
+    """The corpus function's plan, its curl line, and its trainer line."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.app = _load_app()
+
+    def test_the_plan_keeps_the_order_of_the_urls(self) -> None:
+        plan = self.app.corpus_plan(
+            ["https://x/a/000_00000.parquet",
+             "https://x/b/000_00001.parquet"], "/runs/c")
+        self.assertEqual([Path(path).name for path in plan["files"]],
+                         ["00_000_00000.parquet", "01_000_00001.parquet"])
+        self.assertEqual(plan["tokenizer"], "/runs/c/tokenizer.nctoken")
+        self.assertEqual(plan["dir"], "/runs/c")
+
+    def test_a_url_without_a_parquet_name_gets_one(self) -> None:
+        plan = self.app.corpus_plan(["https://x/download?id=7"], "/runs/c")
+        self.assertEqual(Path(plan["files"][0]).name, "00_shard000.parquet")
+
+    def test_the_download_line_fails_on_an_http_error(self) -> None:
+        argv = self.app.download_argv("https://x/a.parquet",
+                                      "/runs/c/a.parquet")
+        self.assertEqual(argv[0], "curl")
+        self.assertIn("-f", argv)
+        self.assertIn("-L", argv)
+        self.assertIn("https://x/a.parquet", argv)
+        self.assertIn("/runs/c/a.parquet", argv)
+    def test_the_trainer_line_names_the_vocabulary(self) -> None:
+        argv = self.app.tokenizer_argv(["/runs/c/a.parquet"],
+                                       "/runs/c/t.nctoken", 32768)
+        self.assertEqual(argv[:4], ["tools/nanochat", "run", "t0-cpu", "--"])
+        self.assertTrue(any(part.endswith("tok_train_main")
+                            for part in argv), argv)
+        self.assertEqual(argv[argv.index("--vocab-size") + 1], "32768")
+        self.assertEqual(argv[argv.index("--parquet") + 1],
+                         "/runs/c/a.parquet")
+        self.assertEqual(argv[-1], "/runs/c/t.nctoken")
+
+    def test_a_missing_tokenizer_reads_zero_identifiers(self) -> None:
+        try:
+            import nanochat_cpp  # noqa: F401 - the reader the app imports
+        except Exception:  # noqa: BLE001 - the test host may not hold it
+            self.skipTest("nanochat_cpp is not importable here")
+        self.assertEqual(
+            self.app.tokenizer_ids("/nonexistent/tokenizer.nctoken"), 0)
 
 
 class GateTest(unittest.TestCase):
@@ -1267,15 +1332,18 @@ class WeightsTest(unittest.TestCase):
     def test_both_volumes_are_mounted_on_the_worker(self) -> None:
         mounted = {call["name"]: call["volumes"]
                    for call in self.sdk.function_calls if "volumes" in call}
-        self.assertEqual(sorted(mounted), ["pipeline", "pipeline_h100",
-                                           "train", "train_h100"])
+        self.assertEqual(sorted(mounted), ["corpus", "pipeline",
+                                           "pipeline_h100", "train",
+                                           "train_h100"])
         for name in ("train", "train_h100"):
             self.assertEqual(sorted(mounted[name]), ["/runs", "/weights"])
             self.assertIs(mounted[name]["/weights"], self.app.weights)
             self.assertIs(mounted[name]["/runs"], self.app.runs)
         # The chain reads and writes the run root only: its stages warm start
-        # from each other, so it never reads the stage cache of `train`.
-        for name in ("pipeline", "pipeline_h100"):
+        # from each other, so it never reads the stage cache of `train`. The
+        # corpus function writes the run root too: the corpus is an input that
+        # outlives one run, and no stage cache holds it (section 9 row 3).
+        for name in ("corpus", "pipeline", "pipeline_h100"):
             self.assertEqual(sorted(mounted[name]), ["/runs"])
             self.assertIs(mounted[name]["/runs"], self.app.runs)
 

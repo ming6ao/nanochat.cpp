@@ -57,7 +57,7 @@ text (``src/parquet/reader_test.cc`` lists them). One epoch therefore yields at
 most 119 tokens -- one BOS per document, and no BPE token shorter than one byte
 -- and a demo row is 65 tokens (sequence 64 plus the target). The loader returns
 no partial row, so a batch of two rows, 130 tokens, cannot form: that is why
-``pipeline.BASE_BATCH`` is 1, and epoch cycling does not help there because a
+``pipeline.Job().batch`` is 1, and epoch cycling does not help there because a
 single batch never fits inside one epoch. Cycling does carry the run to step
 100, since ``src/mesh_train.cc`` calls ``DataLoader::Reset`` when a batch is
 exhausted. ``CorpusBudgetTest`` asserts both numbers independently of the chain,
@@ -353,7 +353,11 @@ class PipelineTest(unittest.TestCase):
             f"compute {extra['compute_ms']} plus data {extra['data_ms']} "
             f"exceeds the step {extra['step_ms']}")
         self.assertEqual(int(extra["tokens_per_step"]),
-                         pipeline.BASE_BATCH * int(self.shape.seq_len))
+                         int(self.job.batch) * int(self.job.grad_accum) *
+                         int(self.job.devices) * int(self.shape.seq_len))
+        self.assertEqual(int(extra["batch"]), int(self.job.batch))
+        self.assertEqual(int(extra["grad_accum"]), int(self.job.grad_accum))
+        self.assertEqual(int(extra["devices"]), int(self.job.devices))
         self.assertGreater(float(extra["tokens_per_sec"]), 0.0)
 
     # -- A3 ----------------------------------------------------------------
@@ -789,9 +793,12 @@ class JobValidationTest(unittest.TestCase):
              shape.padded_vocab_size, shape.window_pattern),
             (2, 64, 4, 2, 64, 487, 512, "L"),
             f"the demo profile is {shape}")
-        # The two batch counts stay at one row: the committed corpus fills one
-        # 65-token row per epoch (P2, section 6).
-        self.assertEqual(pipeline.BASE_BATCH, 1)
+        # The two batch counts stay at one row for the demo job: the committed
+        # corpus fills one 65-token row per epoch (P2, section 6). The batch is
+        # a job field, so a job that names a real corpus raises it.
+        self.assertEqual(pipeline.Job().batch, 1)
+        self.assertEqual(pipeline.Job().grad_accum, 1)
+        self.assertEqual(pipeline.Job().devices, 1)
         self.assertEqual(pipeline.EVAL_BATCH, 1)
         pipeline._check(demo_job("demo", ""))
 
@@ -839,13 +846,13 @@ class CorpusBudgetTest(unittest.TestCase):
       partial row: ``DataLoader::NextDocuments`` gives up when the documents
       run out mid-row. A demo row is ``seq_len + 1`` = 65 tokens, so a batch of
       two rows needs 130 tokens and cannot form from 119 -- and that is why
-      ``pipeline.BASE_BATCH`` is 1. Epoch cycling does not help here: a single
+      ``pipeline.Job().batch`` is 1. Epoch cycling does not help here: a single
       batch never fits inside one epoch, so the driver's Reset-and-retry
       (``src/mesh_train.cc``, ``LoadBatch``) fails twice and the base stage
       writes no checkpoint.
     * the cursor does cycle epochs, so the *number of steps* is not bounded by
       the rows one epoch holds: ``DataLoader::Reset`` restarts the source and
-      ``ResetDocuments`` begins a new epoch. With ``BASE_BATCH`` of 1 one epoch
+      ``ResetDocuments`` begins a new epoch. With a batch of 1 one epoch
       fills one step, and 100 steps take 100 epochs.
 
     The class runs before the chain and independently of it, so a red A1 reads
@@ -905,10 +912,10 @@ class CorpusBudgetTest(unittest.TestCase):
                          109)
 
     def test_row7_a_two_row_batch_cannot_form(self) -> None:
-        """The arithmetic behind ``BASE_BATCH``: 119 tokens, not 130.
+        """The arithmetic behind the demo job's batch: 119 tokens, not 130.
 
         The bound is the document bytes plus one BOS per document, because no
-        BPE token is shorter than one byte; the demand is ``BASE_BATCH`` rows
+        BPE token is shorter than one byte; the demand is ``batch`` rows
         of ``seq_len + 1`` tokens. Both are asserted, so the reason for the
         batch size stays in the tree and not only in a commit message.
         """
@@ -922,12 +929,12 @@ class CorpusBudgetTest(unittest.TestCase):
         self.assertLess(
             budget, 2 * row_width,
             "a two-row batch of 65-token rows would fit one epoch, so the "
-            "reason for BASE_BATCH = 1 no longer holds")
+            "reason for a batch of one no longer holds")
         self.assertGreaterEqual(
-            budget // row_width, pipeline.BASE_BATCH,
+            budget // row_width, self.job.batch,
             f"one epoch holds {budget} tokens at most, which is "
             f"{budget // row_width} row(s) of {row_width}, and the base stage "
-            f"asks for {pipeline.BASE_BATCH} row(s) per step; the loader "
+            f"asks for {self.job.batch} row(s) per step; the loader "
             f"returns no partial row, so the stage would stop with 'the "
             f"loader returned no batch' and write no checkpoint")
 
@@ -936,10 +943,10 @@ class CorpusBudgetTest(unittest.TestCase):
         shape = pipeline.config(self.job)
         rows = self.epoch_rows(int(shape.seq_len))
         self.assertGreaterEqual(
-            rows, pipeline.BASE_BATCH,
+            rows, self.job.batch,
             f"the committed corpus yields {rows} row(s) of "
             f"{shape.seq_len + 1} tokens per epoch, and the base stage asks "
-            f"for {pipeline.BASE_BATCH} row(s) in one step")
+            f"for {self.job.batch} row(s) in one step")
 
     def test_row7_the_cursor_cycles_epochs(self) -> None:
         """100 steps need more epochs than the corpus holds rows for.
@@ -949,11 +956,83 @@ class CorpusBudgetTest(unittest.TestCase):
         """
         shape = pipeline.config(self.job)
         rows = self.epoch_rows(int(shape.seq_len))
-        needed = int(self.job.base_steps) * pipeline.BASE_BATCH
+        needed = int(self.job.base_steps) * int(self.job.batch)
         self.assertLess(
             rows, needed,
             f"one epoch holds {rows} rows and the schedule needs {needed}, "
             f"so the corpus grew and this check can be retired")
+
+
+class CorpusFilesTest(unittest.TestCase):
+    """The ``files`` corpus: a named parquet, a named tokenizer, read in place.
+
+    The kind is what lets the H100 leg run on real text without a second
+    copy of gigabytes on the Volume, and what stops a tokenizer of the wrong
+    size from reaching the embedding lookup
+    (``docs/pipeline-scaleup-plan.md`` section 9 row 3).
+    """
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory(prefix="nanochat_files_")
+        self.root = Path(self.tmp.name)
+        self.saved = {name: os.environ.get(name) for name in OWNED_ENV}
+        os.environ["NANOCHAT_BASE_DIR"] = str(self.root / "cache")
+        os.environ.pop("NANOCHAT_RUNS_DIR", None)
+        tree = pipeline._build.repo_root()
+        self.parquet = tree / pipeline.FIXTURE_PARQUET
+        self.tokenizer = tree / pipeline.FIXTURE_TOKENIZER
+
+    def tearDown(self) -> None:
+        for name, value in self.saved.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+        self.tmp.cleanup()
+
+    def job(self, **overrides) -> pipeline.Job:
+        fields = {"run_id": "files", "profile": "demo",
+                  "out_root": str(self.root / "runs"),
+                  "corpus": "files",
+                  "corpus_path": str(self.parquet.parent),
+                  "tokenizer_path": str(self.tokenizer)}
+        fields.update(overrides)
+        return pipeline.Job(**fields)
+
+    def test_a_named_corpus_is_read_in_place(self) -> None:
+        corpus = pipeline.build_corpus(self.job())
+        self.assertEqual(corpus["kind"], "files")
+        self.assertEqual(Path(corpus["parquet"]).resolve(),
+                         self.parquet.resolve())
+        self.assertEqual([Path(path).name for path in corpus["parquets"]],
+                         [self.parquet.name])
+        # The tokenizer is small, so it is copied into the run and published
+        # where the RL bridge reads it.
+        self.assertEqual(Path(corpus["tokenizer"]).parent,
+                         Path(corpus["dir"]))
+        self.assertTrue(Path(corpus["published"]).is_file())
+
+    def test_a_tokenizer_of_the_wrong_size_is_rejected(self) -> None:
+        # The h100 profile declares vocab_size 32768 and the fixture tokenizer
+        # holds 487 identifiers, so the first embedding lookup would be wrong.
+        with self.assertRaises(pipeline.PipelineError) as caught:
+            pipeline.build_corpus(self.job(profile="h100"))
+        self.assertIn("487", str(caught.exception))
+        self.assertIn("32768", str(caught.exception))
+
+    def test_a_files_job_names_both_paths(self) -> None:
+        with self.assertRaises(pipeline.PipelineError):
+            pipeline._check(self.job(corpus_path=""))
+        with self.assertRaises(pipeline.PipelineError):
+            pipeline._check(self.job(tokenizer_path=""))
+        pipeline._check(self.job())
+
+    def test_an_empty_corpus_path_is_named(self) -> None:
+        empty = self.root / "empty"
+        empty.mkdir()
+        with self.assertRaises(pipeline.PipelineError) as caught:
+            pipeline.build_corpus(self.job(corpus_path=str(empty)))
+        self.assertIn("no parquet file", str(caught.exception))
 
 
 if __name__ == "__main__":

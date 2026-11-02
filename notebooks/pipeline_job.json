@@ -1,6 +1,9 @@
 {
   "run_id": "demo",
   "profile": "standard",
+  "batch": 1,
+  "grad_accum": 1,
+  "devices": 1,
   "base_steps": 200,
   "sft_steps": 200,
   "rl_steps": 8,
@@ -12,6 +15,8 @@
   "seed": 42,
   "out_root": "",
   "corpus": "fixture",
+  "corpus_path": "",
+  "tokenizer_path": "",
   "deliver": true,
   "temperature": 1.5,
   "top_k": 0

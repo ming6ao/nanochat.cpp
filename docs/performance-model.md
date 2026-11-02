@@ -339,11 +339,12 @@ tools/nanochat roofline --device h100 --precision bf16 \
 Three results follow.
 
 1. **The chain is bound by launches and by the host program, not by
-   arithmetic.** A step at either shape moves 64 tokens: one row of sequence 64,
-   because `BASE_BATCH` is 1, and the host program around those tokens costs tens
-   of milliseconds. The recorded T4 run of the chain is about 42 ms per step at
-   the `demo` shape (`docs/pipeline-plan.md` section 2). The largest device bound
-   in the table is 3.6 ms, so most of the step time is not device time at all.
+   arithmetic.** A step at either shape moved 64 tokens: one row of sequence 64,
+   because the recorded job's `batch` field is 1. The host program around those
+   tokens costs tens of milliseconds. The recorded T4 run of the chain is about
+   42 ms per step at the `demo` shape (`docs/pipeline-plan.md` section 2). The
+   largest device bound in the table is 3.6 ms, so most of the step time is not
+   device time at all.
    Every family of the two `demo` rows reads `limit: launch` except the optimizer
    row of the T4 one, which reads `memory`; the H100 `standard` row answers the
    same way, launches everywhere but its optimizer row.

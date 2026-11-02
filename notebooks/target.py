@@ -64,11 +64,16 @@ DEFAULT = "local"
 NOTEBOOK_BASE = Path("/kaggle/working/nanochat-cache")
 
 #: The job fields a run reads. They must reach the host before it starts.
+#: The first four are the train job's; the last three are the pipeline job's,
+#: which names its corpus and its tokenizer at the top level
+#: (``docs/pipeline-scaleup-plan.md`` section 9 rows 2 and 3).
 INPUT_FIELDS = (
     ("data", "parquet"),
     ("data", "packed_rows_path"),
     ("data", "tokenizer_path"),
     ("warm_start_path",),
+    ("corpus_path",),
+    ("tokenizer_path",),
 )
 
 #: The job fields a run writes. They must arrive back on the client.

@@ -55,7 +55,7 @@ in the worktree `.sliceme/worktrees/campaign-feat--pipeline-plan`.
 | Shape | `demo`: 2 layers, hidden 64, sequence 64 | `PROFILES` |
 | Schedule | 100, 100, and 5 steps | `Job` |
 | Corpus | committed fixture, 10 documents, 109 bytes | `build_corpus` |
-| Base batch | one row, because one epoch holds 119 tokens | `BASE_BATCH` |
+| Base batch | one row, because one epoch holds 119 tokens | `Job.batch` |
 | Modal | one image, T4, `sm_75`, fp32 | `tools/modal/app.py` |
 | Build precisions | `fp32` and `bf16` | `python/nanochat_cpp/_build.py` |
 | Device table | the `h100` row declares bf16 and fp8 | `backends/cuda/caps.json` |
@@ -265,7 +265,7 @@ stays `[1, 200]`. The reason is the host program: a measured step of about
 
 The report records two numbers, and no gate reads them:
 
-- MFU. At 64 tokens per step, one row of sequence 64 at `BASE_BATCH` 1, the
+- MFU. At 64 tokens per step, one row of sequence 64 at a `batch` of 1, the
   device bound is about 1 ms inside a step of tens of milliseconds. MFU
   therefore reads near 0.01 percent. Section 14 records the measured step time.
 - The cross-leg speed ratio. The chain is bound by launches at this shape, so a
@@ -336,11 +336,13 @@ Rows 0 to 8 are in the tree. Four things a reader should not re-measure:
   fp32 GEMM rows carry 2.08 ms of its 3.6 ms, and the memory-bound optimizer row
   carries 1.21 ms. Section 14 and [performance-model.md](performance-model.md)
   section 7.3 hold the corrected label and the per-row numbers.
-- **A step moves 64 tokens, not 256.** `BASE_BATCH` is 1 and `seq_len` is 64 at
-  both profiles, so the batch of one step is one row of 64 tokens, and
-  `pipeline.py` reads `tokens_per_sec` from exactly that product. The device
-  bound of section 14 is the bound of those 64 tokens, and the MFU of section 8
-  is the MFU of those 64 tokens.
+- **A step moves 64 tokens, not 256.** The recorded job's `batch` is 1 and
+  `seq_len` is 64 at both of its profiles, so the batch of one step is one row
+  of 64 tokens, and `pipeline.py` reads `tokens_per_sec` from exactly that
+  product. The device bound of section 14 is the bound of those 64 tokens, and
+  the MFU of section 8 is the MFU of those 64 tokens. The follow-on rows of
+  section 4.2 raise both: the `h100` profile sets `seq_len` 256 and the job sets
+  `batch` 16, which is 4096 tokens per step.
 - **The base rate is now a steady window, not a stage quotient.** Schema 2 of
   the driver record writes `data_seconds` beside `compute_seconds`. Report
   version 3 medians the driver's own records over a window that drops the
@@ -350,6 +352,19 @@ Rows 0 to 8 are in the tree. Four things a reader should not re-measure:
   rate from report version 3 or later. The split is what makes the 163 times gap
   of gate G3 attributable: `compute_ms` names the training call and `data_ms`
   names the batch load.
+- **The batch is a job field, and the corpus decides it.** `BASE_BATCH` is gone.
+  `Job.batch`, `Job.grad_accum`, and `Job.devices` hold the base batch, and the
+  roofline gate passes all three to the tool, so a prediction cannot model a
+  batch the run did not use. A job whose corpus cannot fill its batch fails in
+  `stage_base`. The message names the batch, the corpus, and the sequence, so a
+  short run is not mistaken for a fast one.
+- **The corpus has two kinds.** `fixture` copies the committed parquet and
+  tokenizer, which is what the CPU gate runs. `files` reads the parquet and the
+  tokenizer the job names, in place.
+- **The identifier count is checked.** It must equal the profile's
+  `vocab_size`. A 512-identifier artifact therefore cannot reach a 32768-row
+  classifier. On Modal, a run with `--corpus-urls` downloads the shards and
+  trains the tokenizer once, and a second run reuses both.
 
 ## 10. New assertions
 
