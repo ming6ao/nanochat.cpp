@@ -1,5 +1,4 @@
 // Reusable graph pieces shared by the training graph and the inference graphs.
-//
 // This file is the *composition tier* (`spec/block_kinds.md` section 4): every
 // named piece below is written over the primitives of the kernel seam - `Gemm`,
 // `RowReduce`, `SpanReduce`, `Pointwise` (with the kExp, kRsqrt, kLog and
@@ -7,22 +6,16 @@
 // tier can run the whole graph, and a backend's fused family is an optimization
 // behind an `override_*` capability bit rather than a second implementation the
 // tree depends on (`docs/model-and-device-bringup.md` section 7.4 condition 2).
-//
-// Two consequences are worth knowing while reading.
-//
-//   * A composition declares its saved slots and its backward reads only those
-//     (`spec/block_kinds.md` section 3). The slots are the caller's buffers, so
-//     a fused override and this composition can share one workspace: `rstd`,
-//     `q_pre`/`k_pre`, `pre_act`, `ve_values`/`ve_gate` and `attn_stats` are
-//     all named on the way in.
-//   * `Attention` is the documented exception (section 7.2): its iteration
-//   space
-//     is T x T, no composition of the other primitives reproduces its tiling
-//     without materializing a T x T tensor, so the attention kind is served by
-//     the primitive directly. It is the only seam family this file calls that
-//     is not a primitive.
-//
-// `src/ops.h` is the inventory; the topology is in `model.cc` and
+// Two consequences are worth knowing while reading.  * A composition declares
+// its saved slots and its backward reads only those (`spec/block_kinds.md`
+// section 3). The slots are the caller's buffers, so a fused override and this
+// composition can share one workspace: `rstd`, `q_pre`/`k_pre`, `pre_act`,
+// `ve_values`/`ve_gate` and `attn_stats` are all named on the way in. *
+// `Attention` is the documented exception (section 7.2): its iteration space is
+// T x T, no composition of the other primitives reproduces its tiling without
+// materializing a T x T tensor, so the attention kind is served by the
+// primitive directly. It is the only seam family this file calls that is not a
+// primitive.  `src/ops.h` is the inventory; the topology is in `model.cc` and
 // `generate.cc`. See docs/model.md and docs/kernels.md.
 
 #include "src/ops.h"
@@ -39,83 +32,70 @@ namespace ops {
 
 namespace {
 
-// True when the device advertises the fused family of one composition.
-//
-// The composition below every call site is the definition: it is written over
-// the primitive tier, so a device that supplies only the primitives runs the
-// whole graph. The fused family is the same arithmetic in one kernel, and the
-// backend registers it beside the capability bit it advertises
+// True when the device advertises the fused family of one composition.  The
+// composition below every call site is the definition: it is written over the
+// primitive tier, so a device that supplies only the primitives runs the whole
+// graph. The fused family is the same arithmetic in one kernel, and the backend
+// registers it beside the capability bit it advertises
 // (`backends/cuda/fused_overrides.cc`). Until this helper existed the bit was
-// declared, planned, and never read, so every device ran the portable
-// fallback: the classifier costs a launch and a blocking device-to-host copy
-// per token position, and the rotary leg copies the activation to the host and
-// back. A training step at 4096 token positions therefore took 2.2 s on an H100
-// at 10 percent device utilization.
-//
-// `GetCaps` is read once: a process owns one device, which is the rule the rest
-// of this file already follows.
+// declared, planned, and never read, so every device ran the portable fallback:
+// the classifier costs a launch and a blocking device-to-host copy per token
+// position, and the rotary leg copies the activation to the host and back. A
+// training step at 4096 token positions therefore took 2.2 s on an H100 at 10
+// percent device utilization.  `GetCaps` is read once: a process owns one
+// device, which is the rule the rest of this file already follows.
 bool Fused(std::uint64_t feature) {
   static const Caps caps = kernels::GetCaps();
   return caps.HasFeature(feature);
 }
 
 // The classifier's fused family reads no per-row scale, so a call that carries
-// one keeps the composition.
-//
-// `ClassifierParams::row_scale` is a *host* array of `rows` entries: the
-// composition reads it on the host, one entry per row. The fused CUDA kernel
-// reads `row_scale[row]` in device code, so a host pointer reaches the device
-// and faults. The RL stage passes a scale, which is why the chain's RL stage and
-// `//tests:rl_parity_cuda_test` both died with an illegal memory access. The fix
-// is to upload the scale once and read it on the device; until then a call with
-// a scale stays on the composition, and the base, SFT, and eval calls, which
-// pass none, keep the fused path.
+// one keeps the composition.  `ClassifierParams::row_scale` is a *host* array
+// of `rows` entries: the composition reads it on the host, one entry per row.
+// The fused CUDA kernel reads `row_scale[row]` in device code, so a host
+// pointer reaches the device and faults. The RL stage passes a scale, which is
+// why the chain's RL stage and `//tests:rl_parity_cuda_test` both died with an
+// illegal memory access. The fix is to upload the scale once and read it on the
+// device; until then a call with a scale stays on the composition, and the
+// base, SFT, and eval calls, which pass none, keep the fused path.
 constexpr bool kFusedClassifierTakesRowScale = false;
 
 // The fused rotary leg is not yet the composition's arithmetic, so it is not
-// the executed path.
-//
-// `backends/cuda/kernels/qk_prep.cu` keeps the normalized value in fp32 across
-// the rotation and rounds once, at the store. The composition rounds it to
-// `ComputeType` when `NormForward` writes the row, then rotates the rounded
-// value, and that is what the reference does too. The fused kernel is therefore
-// the more accurate of the two, and the two disagree by 1.22e-4 on
-// `backout_lambda` after three optimizer steps, over the 1e-4 trajectory
-// tolerance of `//tests:oracle_cuda_test`. A parity gate is not widened to fit
-// a kernel, so the composition stays the executed path until the kernel matches
-// the reference (`docs/parity.md`).
-//
-// Rounding the forward's normalized value at the composition's point was tried
-// and changed the trajectory error by nothing at all: 1.22e-4 before and after.
-// The remaining difference is therefore elsewhere, and the backward is the next
-// place to look: it recounts the normalization statistics from the *scaled*
-// saved output, where the composition recounts them from the same values but
-// with the scale already divided out.
-//
-// The classifier and the norm families carry the same golden trace as their
-// compositions, so their dispatches above are unconditional on the capability
-// bit.
+// the executed path.  `backends/cuda/kernels/qk_prep.cu` keeps the normalized
+// value in fp32 across the rotation and rounds once, at the store. The
+// composition rounds it to `ComputeType` when `NormForward` writes the row,
+// then rotates the rounded value, and that is what the reference does too. The
+// fused kernel is therefore the more accurate of the two, and the two disagree
+// by 1.22e-4 on `backout_lambda` after three optimizer steps, over the 1e-4
+// trajectory tolerance of `//tests:oracle_cuda_test`. A parity gate is not
+// widened to fit a kernel, so the composition stays the executed path until the
+// kernel matches the reference (`docs/parity.md`).  Rounding the forward's
+// normalized value at the composition's point was tried and changed the
+// trajectory error by nothing at all: 1.22e-4 before and after. The remaining
+// difference is therefore elsewhere, and the backward is the next place to
+// look: it recounts the normalization statistics from the *scaled* saved
+// output, where the composition recounts them from the same values but with the
+// scale already divided out.  The classifier and the norm families carry the
+// same golden trace as their compositions, so their dispatches above are
+// unconditional on the capability bit.
 constexpr bool kFusedQkPrepMatchesComposition = false;
 
 // ---------------------------------------------------------------------------
 // Staging helpers
 // ---------------------------------------------------------------------------
-//
 // Two kinds of host traffic survive in this file, and both are marked where
 // they are used so a later change can delete exactly one of them. Neither runs
 // on a device that advertises the fused family of the composition it belongs
 // to: `Fused` above routes those devices to the backend's kernel, and the
 // staging below is the portable fallback a primitive-only device still needs.
-//
-//   * `StageToHost` / `StageToDevice`: the rotary rotation of `QkPrep`. The
-//     primitive set has no operand whose value varies with the row's sequence
-//     position, so the half-split pair rotation cannot be expressed over
-//     `Pointwise` without materializing a per-element cos/sin operand of the
-//     activation's size. The node report records the missing primitive (a
-//     pointwise code with a periodic table operand, or a `kRotatePair` code).
-//   * `StageScalar` / `StoreScalar`: the classifier's per-row scalar, one float
-//     per row. It is a constant-sized round trip per row, not a staging pass
-//     over an activation.
+// * `StageToHost` / `StageToDevice`: the rotary rotation of `QkPrep`. The
+// primitive set has no operand whose value varies with the row's sequence
+// position, so the half-split pair rotation cannot be expressed over
+// `Pointwise` without materializing a per-element cos/sin operand of the
+// activation's size. The node report records the missing primitive (a pointwise
+// code with a periodic table operand, or a `kRotatePair` code). * `StageScalar`
+// / `StoreScalar`: the classifier's per-row scalar, one float per row. It is a
+// constant-sized round trip per row, not a staging pass over an activation.
 
 std::vector<ComputeType> StageToHost(const ComputeType* src,
                                      std::int64_t count) {
@@ -366,9 +346,9 @@ class RowScalars {
 
 // A device vector holding one value everywhere. The pointwise family has no
 // code that adds or multiplies by a scalar without a second operand
-// (`kScaleAdd` reads `b` per element), so a composition that needs
-// `x + eps`, `x - max`, or `1 - x` materializes it. It is O(rows) here and
-// O(vocab) in the classifier, never O(rows * dim).
+// (`kScaleAdd` reads `b` per element), so a composition that needs `x + eps`,
+// `x - max`, or `1 - x` materializes it. It is O(rows) here and O(vocab) in the
+// classifier, never O(rows * dim).
 class ConstantVector {
  public:
   ConstantVector(float value, int count) : count_(count) {
@@ -395,7 +375,6 @@ class ConstantVector {
 // ---------------------------------------------------------------------------
 // The RMSNorm leg, shared by the norm composition and by `QkPrep`
 // ---------------------------------------------------------------------------
-//
 // `out[r, c] = rstd[r] * x[r, c]` with `rstd[r] = rsqrt(mean_c(x^2) + eps)`.
 // `rows` segments of `dim` elements each, `offset` the first segment's element
 // offset inside the buffer, so one implementation serves the whole residual
@@ -423,17 +402,13 @@ void NormForward(int rows, int dim, int offset, float eps, const ComputeType* x,
 }
 
 // The backward of `NormForward`, reading only its declared slots (`x` and
-// `rstd`):
-//
-//   dot[r] = sum_c x[r,c] * dy[r,c]
-//   dx[r,c] = rstd[r] * dy[r,c] - rstd[r]^3 * dot[r] / dim * x[r,c]
-//           = rstd[r] * (dy[r,c] - c2[r] * x[r,c]),  c2 = rstd^2 * dot / dim
-//
-// The second form is the one the primitive set expresses without a second
-// full-size buffer: `dx` holds the per-row product in turn. The first pass uses
-// `dx` as the product buffer the per-segment dot needs (the seam has no
-// two-operand row reduce; see the node report), and the last pass multiplies by
-// `rstd` in place.
+// `rstd`):  dot[r] = sum_c x[r,c] * dy[r,c] dx[r,c] = rstd[r] * dy[r,c] -
+// rstd[r]^3 * dot[r] / dim * x[r,c] = rstd[r] * (dy[r,c] - c2[r] * x[r,c]),  c2
+// = rstd^2 * dot / dim  The second form is the one the primitive set expresses
+// without a second full-size buffer: `dx` holds the per-row product in turn.
+// The first pass uses `dx` as the product buffer the per-segment dot needs (the
+// seam has no two-operand row reduce; see the node report), and the last pass
+// multiplies by `rstd` in place.
 void NormBackward(int rows, int dim, float /*eps*/, const ComputeType* x,
                   const ComputeType* dy, const ComputeType* rstd,
                   ComputeType* dx) {
@@ -465,7 +440,6 @@ void NormBackward(int rows, int dim, float /*eps*/, const ComputeType* x,
 // this file: the rotation's operand varies with the row's sequence position, so
 // it has no primitive over a flat elementwise family. `heads` is the number of
 // head rows (query or key) and the buffers are `[batch, seq, heads, head_dim]`.
-//
 // `cos` and `sin` are the model's device copies (`src/model_impl.h`,
 // `cos_table()`), because the kernels read them from device memory. This leg
 // runs on the host, so it stages them first; on the CPU backend the staging
@@ -900,20 +874,14 @@ void AttentionBackward(const AttentionShape& shape, const ComputeType* q,
 // ---------------------------------------------------------------------------
 // ResFormer value gate, as a composition
 // ---------------------------------------------------------------------------
-//
-// forward: pre[row, kvh] = h[row, :G] @ gate_w[kvh, :]        (Gemm)
-//          gate[row, kvh] = 3 * sigmoid(pre)                 (kGateMul +
-//          kScale) v[row, kvh, :] += gate[row, kvh] * ve[row, kvh, :]
-//          (kRowScale, the
-//                                                             caller
-//                                                             accumulates)
+// forward: pre[row, kvh] = h[row, :G] @ gate_w[kvh, :]        (Gemm) gate[row,
+// kvh] = 3 * sigmoid(pre)                 (kGateMul + kScale) v[row, kvh, :] +=
+// gate[row, kvh] * ve[row, kvh, :] (kRowScale, the caller accumulates)
 // backward: dve = gate * dv                                  (kRowScale)
-//           dgate[row, kvh] = sum_d dv * ve                  (kRowScale product
-//           +
-//                                                             RowReduce kSum)
-//           dpre = dgate * gate * (1 - gate/3)               (pointwise codes)
-//           gate_w_grad[kvh, :] += dpre^T @ h[:, :G]         (GemmWgrad)
-//           dh[row, :G] += dpre @ gate_w                     (Gemm, accumulate)
+// dgate[row, kvh] = sum_d dv * ve                  (kRowScale product +
+// RowReduce kSum) dpre = dgate * gate * (1 - gate/3)               (pointwise
+// codes) gate_w_grad[kvh, :] += dpre^T @ h[:, :G]         (GemmWgrad) dh[row,
+// :G] += dpre @ gate_w                     (Gemm, accumulate)
 
 void ValueGateForward(std::int64_t rows, int hidden, int num_kv_heads,
                       const ComputeType* h, const ComputeType* gate_w,
@@ -1197,14 +1165,12 @@ void BackoutBackward(const ComputeType* d_pre, const ComputeType* x_backout,
 // ---------------------------------------------------------------------------
 // Classifier
 // ---------------------------------------------------------------------------
-//
 // Per row: the softcapped logit row (`kSoftcap`), its log-sum-exp (`RowReduce`
 // kMax + kExp + kSum), and the target's value (the `Embedding` per-row gather
 // at a width of one, which is the addressable-element primitive the seam
 // already has). The scalars the two need are copied to the host, which is a
-// constant-size round trip per row and not a staging pass over the logits.
-//
-// The row-at-a-time walk is the composition's shape, not a limitation of the
+// constant-size round trip per row and not a staging pass over the logits.  The
+// row-at-a-time walk is the composition's shape, not a limitation of the
 // primitives: the logits rows are `padded_vocab_size` wide and the pointwise
 // family is one flat count, so a row at a time is what keeps the composition
 // inside the caller's stride without a copy of the whole logits buffer. The
@@ -1368,7 +1334,6 @@ void ClassifierBackward(const ClassifierShape& shape, const ComputeType* logits,
 // ---------------------------------------------------------------------------
 // Gradient norm
 // ---------------------------------------------------------------------------
-//
 // `sum_sq = sum over spans of sum of squares` is one `SpanReduce` with the same
 // list as both operands: the entry point's second list makes the per-span
 // reduction a dot, and the dot of a buffer with itself is its sum of squares
