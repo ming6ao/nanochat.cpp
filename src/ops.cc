@@ -1314,78 +1314,26 @@ void ClassifierBackward(const ClassifierShape& shape, const ComputeType* logits,
 // ---------------------------------------------------------------------------
 // Gradient norm
 // ---------------------------------------------------------------------------
-// `sum_sq = sum over spans of sum of squares` is one `SpanReduce` with the same
-// list as both operands: the entry point's second list makes the per-span
-// reduction a dot, and the dot of a buffer with itself is its sum of squares
-// (`include/nanochat/kernels.h`, `SpanReduceParams`). The norm and the clip
-// scale are two scalars, so they are formed once on the host from the single
-// reduced value.
-
-// The ragged sum of squares through `SpanReduce`, in a form that is
-// instantiated only for the build whose compute type is the gradient type: the
-// entry point's span list is `ComputeType`, and the tree's gradients are the
-// persistent fp32 type in every build. A build where the two differ takes the
-// staging branch in `GradNormForward` instead.
-template <typename ReduceType>
-float RaggedSumOfSquares(const float* const* grads, const int* counts,
-                         int num_spans) {
-  FloatScratch total(1);
-  SpanReduceParams params;
-  params.num_spans = num_spans;
-  params.counts = counts;
-  params.scale = 1.0f;
-  params.accumulate = false;
-  const ReduceType* const* spans =
-      reinterpret_cast<const ReduceType* const*>(grads);
-  kernels::SpanReduce(params, spans, spans, total.data());
-  return StageScalar(total.data());
-}
-
+// The reduction is `kernels::GradNorm`, the seam's fp32 span entry: it walks
+// the span table on the device, accumulates in double, and writes the norm and
+// the clip scale to device buffers. `GradientType` is fp32 in every build
+// (`include/nanochat/tensor.h`), and that entry's span list is fp32 by
+// contract, so one call serves both precisions.
+//
+// `SpanReduce` cannot serve this reduction: its operand is `ComputeType`, which
+// is bf16 in a bf16 build. Reducing through it therefore needed the gradient
+// spans on the host, at one blocking copy and one host scalar pass per span;
+// `profiles/h100-base-20step/REPORT.md` section 4.1 measures that cost.
+//
+// The norm and the clip scale stay on the device for the whole step. Every
+// update kernel reads the scale there, so no host read stands between the
+// reduction and the updates, and the norm comes back once at the end of the
+// step.
 void GradNormForward(const float* const* grads, const int* counts,
                      int num_spans, float clip, float* out_norm,
                      float* out_scale) {
   if (grads == nullptr || counts == nullptr || num_spans <= 0) return;
-  float sum_sq = 0.0f;
-  if constexpr (std::is_same_v<ComputeType, float>) {
-    // The ragged reduce over the whole list, with the same list as the second
-    // operand: the entry point's per-span dot of a buffer with itself is the
-    // sum of squares, and the list stays in device memory
-    // (`include/nanochat/kernels.h`, `SpanReduceParams`).
-    sum_sq = RaggedSumOfSquares<ComputeType>(grads, counts, num_spans);
-  } else {
-    // In a bf16 build the ragged reduction's operand is the compute type and
-    // the gradient spans are fp32 (`GradientType`), so the squares are formed
-    // here. This is the composition's second staging helper; the node report
-    // records the missing primitive (a reduction whose operand is the
-    // persistent fp32 type, or a cast entry in the utilities).
-    //
-    // The span table and the count table are device memory: the optimizer
-    // builds both once with `kernels::Alloc` (`NanochatOptimizer::Build`).
-    // Stage the two tables before the host loop, because a host read of a
-    // device pointer faults on the first span. The fp32 build passes the same
-    // two tables to `SpanReduce`, which reads them on the device.
-    std::vector<const float*> host_grads(static_cast<std::size_t>(num_spans));
-    std::vector<int> host_counts(static_cast<std::size_t>(num_spans));
-    kernels::Memcpy(host_grads.data(), grads,
-                    host_grads.size() * sizeof(const float*),
-                    CopyDir::kDeviceToHost);
-    kernels::Memcpy(host_counts.data(), counts,
-                    host_counts.size() * sizeof(int), CopyDir::kDeviceToHost);
-    double acc = 0.0;
-    for (int s = 0; s < num_spans; ++s) {
-      if (host_grads[s] == nullptr || host_counts[s] <= 0) continue;
-      std::vector<float> span(static_cast<std::size_t>(host_counts[s]));
-      kernels::Memcpy(span.data(), host_grads[s], span.size() * sizeof(float),
-                      CopyDir::kDeviceToHost);
-      for (float value : span) acc += static_cast<double>(value) * value;
-    }
-    sum_sq = static_cast<float>(acc);
-  }
-  const float norm = sum_sq > 0.0f ? std::sqrt(sum_sq) : 0.0f;
-  if (out_norm != nullptr) StoreScalar(out_norm, norm);
-  if (out_scale != nullptr) {
-    StoreScalar(out_scale, (clip > 0.0f && norm > clip) ? (clip / norm) : 1.0f);
-  }
+  kernels::GradNorm(grads, counts, num_spans, clip, out_norm, out_scale);
 }
 
 // ---------------------------------------------------------------------------

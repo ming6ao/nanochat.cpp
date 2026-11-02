@@ -1,0 +1,6 @@
+# The trace of record is 96 MB and the Chrome copy is 72 MB. They are a
+# measurement, not source: a reader regenerates both with the command in
+# REPORT.md section 1.
+trace/
+report.json
+h100-base-trace.json

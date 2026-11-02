@@ -1,0 +1,86 @@
+Time (%),Total Time (ns),Instances,Avg (ns),Med (ns),Min (ns),Max (ns),StdDev (ns),Name
+26.4,195101051,40960,4763.2,4768.0,4063,5696,284.7,void cutlass::Kernel2<cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_32x32_128x2_nt_align8>(T1::Params)
+21.4,158053996,61440,2572.5,2623.0,2335,3328,153.2,void cutlass::Kernel2<cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_32x32_128x2_tn_align8>(T1::Params)
+20.7,152517348,40960,3723.6,3776.0,3295,4704,211.8,void cutlass::Kernel2<cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_32x32_128x2_nn_align8>(T1::Params)
+3.4,25361452,1700,14918.5,9856.0,1215,479484,50033.7,"nanochat::kernels::<unnamed>::PointwiseForwardKernel(nanochat::PointwiseParams, const nanochat::Bf16 *, const nanochat::Bf16 *, nanochat::Bf16 *)"
+2.9,21546705,1410,15281.4,13535.0,7263,180703,19431.0,sm90_xmma_gemm_bf16bf16_bf16f32_f32_nn_n_tilesize128x128x64_warpgroupsize1x1x1_execute_segment_k_off_kernel__5x_cublas
+2.3,17295711,20,864785.6,857255.5,853080,892504,12323.2,"nanochat::kernels::<unnamed>::ClassifierBackwardKernel(nanochat::ClassifierParams, const nanochat::Bf16 *, const int *, nanochat::Bf16 *)"
+2.2,16504123,220,75018.7,103775.0,1536,212446,74721.2,"nanochat::kernels::<unnamed>::AdamWUpdateKernel(long long, float, float, float, float, float, float, float, float, bool, const float *, float *, nanochat::Bf16 *, const float *, float *, float *)"
+1.8,13441547,770,17456.6,13631.5,7680,206877,29732.6,sm90_xmma_gemm_bf16bf16_bf16f32_f32_tn_n_tilesize128x128x64_warpgroupsize1x1x1_execute_segment_k_off_kernel__5x_cublas
+1.6,11750038,160,73437.7,73215.0,72607,76415,818.4,"nanochat::kernels::<unnamed>::AttentionSoftmaxForwardKernel(nanochat::AttentionParams, const nanochat::Bf16 *, nanochat::Bf16 *, float *)"
+1.5,10784982,160,67406.1,67264.0,66719,69631,587.0,"nanochat::kernels::<unnamed>::AttentionSoftmaxBackwardKernel(nanochat::AttentionParams, const nanochat::Bf16 *, const float *, nanochat::Bf16 *, nanochat::Bf16 *)"
+1.4,10420063,20,521003.2,515770.5,511930,542299,9434.7,"nanochat::kernels::<unnamed>::ClassifierForwardKernel(nanochat::ClassifierParams, const nanochat::Bf16 *, const int *, float *)"
+1.4,10116132,180,56200.7,31359.0,30335,257790,70632.9,sm90_xmma_gemm_bf16f32_bf16f32_f32_nt_n_tilesize128x128x64_warpgroupsize1x1x1_execute_segment_k_off_kernel__5x_cublas
+1.0,7700430,500,15400.9,10111.5,1152,31711,12511.5,"nanochat::kernels::<unnamed>::MuonAxpbyKernel(long long, float, nanochat::Bf16 *, const nanochat::Bf16 *)"
+1.0,7428887,320,23215.3,23248.0,15904,31775,7088.4,"nanochat::kernels::<unnamed>::QkPrepBackwardKernel(nanochat::QkPrepParams, const float *, const float *, const nanochat::Bf16 *, nanochat::Bf16 *, int)"
+0.7,5504161,320,17200.5,17120.0,12064,22592,5078.8,"nanochat::kernels::<unnamed>::QkPrepForwardKernel(nanochat::QkPrepParams, const float *, const float *, nanochat::Bf16 *, int)"
+0.7,5408168,160,33801.1,33760.0,33216,34591,253.3,"nanochat::kernels::<unnamed>::PointwiseBackwardKernel(nanochat::PointwiseParams, const nanochat::Bf16 *, const nanochat::Bf16 *, const nanochat::Bf16 *, nanochat::Bf16 *, nanochat::Bf16 *)"
+0.7,4990603,640,7797.8,7967.5,5889,9664,1348.9,void cutlass::Kernel2<cutlass_80_tensorop_s16816gemm_bf16_128x64_64x6_nt_align8>(T1::Params)
+0.6,4188709,360,11635.3,11552.0,11104,13153,350.3,"nanochat::kernels::<unnamed>::RmsNormBackwardKernel(nanochat::RmsNormParams, const nanochat::Bf16 *, const nanochat::Bf16 *, const float *, nanochat::Bf16 *)"
+0.5,3614111,160,22588.2,22655.0,21152,24032,572.1,sm90_xmma_gemm_bf16f32_bf16f32_f32_nt_n_tilesize128x64x64_warpgroupsize1x1x1_execute_segment_k_off_kernel__5x_cublas
+0.5,3509145,20,175457.3,175503.0,174302,176669,694.6,"nanochat::kernels::<unnamed>::GradNormPartialKernel(const float *const *, const int *)"
+0.4,3282300,360,9117.5,9088.0,8928,9504,108.4,"nanochat::kernels::<unnamed>::RmsNormForwardKernel(nanochat::RmsNormParams, const nanochat::Bf16 *, nanochat::Bf16 *, float *)"
+0.4,3050393,330,9243.6,9424.5,4543,30785,4110.2,void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_128x64_64x3_nn_align8>(T1::Params)
+0.4,2992864,80,37410.8,37376.0,36799,38463,310.8,void cutlass::Kernel2<cutlass_80_tensorop_s16816gemm_bf16_256x64_32x4_nt_align2>(T1::Params)
+0.4,2982238,100,29822.4,26960.5,1536,54943,21256.4,"nanochat::kernels::<unnamed>::MuonMomentumKernel(long long, float, bool, float, bool, const float *, const float *, float *, nanochat::Bf16 *)"
+0.4,2766981,200,13834.9,12688.5,1280,36128,9157.8,"nanochat::kernels::<unnamed>::MuonScaleMatricesKernel(long long, long long, bool, const float *, nanochat::Bf16 *)"
+0.4,2739908,120,22832.6,23072.0,12159,31391,2883.7,sm90_xmma_gemm_bf16bf16_bf16f32_f32_tn_n_tilesize64x128x64_warpgroupsize1x1x1_execute_segment_k_off_kernel__5x_cublas
+0.3,2571918,100,25719.2,22703.5,1216,47712,18388.1,"nanochat::kernels::<unnamed>::MuonApplyKernel(long long, float, float, float *, nanochat::Bf16 *, const nanochat::Bf16 *)"
+0.3,2566914,110,23335.6,22960.0,22015,30815,1585.4,sm90_xmma_gemm_bf16bf16_bf16f32_f32_nt_n_tilesize64x128x64_warpgroupsize1x1x1_execute_segment_k_off_kernel__5x_cublas
+0.3,2405172,300,8017.2,4480.0,1696,20800,6256.4,"nanochat::kernels::<unnamed>::MuonMatrixPartialsKernel(int, int, const nanochat::Bf16 *, int, double *)"
+0.3,2098926,325,6458.2,6432.0,5824,7264,335.9,void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_128x64_64x6_tn_align8>(T1::Params)
+0.3,2071870,100,20718.7,19455.5,1471,37888,13906.2,"nanochat::kernels::<unnamed>::MuonNorMuonScaleKernel(long long, long long, int, int, bool, const float *, const float *, nanochat::Bf16 *)"
+0.3,1985449,340,5839.6,5952.0,3999,6561,487.4,"nanochat::kernels::<unnamed>::SpanReducePartialKernel(const nanochat::Bf16 *const *, const nanochat::Bf16 *const *, const int *)"
+0.3,1930095,25,77203.8,67551.0,19456,132030,48108.0,void cutlass::Kernel2<cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_32x32_128x1_nn_align8>(T1::Params)
+0.3,1882841,640,2941.9,2944.0,2624,3360,125.0,"void cublasLt::splitKreduce_kernel<(int)32, (int)16, int, float, float, float, float, (bool)1, (bool)0, (bool)0>(cublasLt::cublasSplitKParams<T6>, const T4 *, const T5 *, T5 *, const T6 *, const T6 *, const T7 *, const T4 *, T7 *, void *, long, T6 *, int *)"
+0.2,1774869,500,3549.7,3808.0,1119,6336,1629.2,"nanochat::kernels::<unnamed>::MuonBKernel(long long, float, float, const nanochat::Bf16 *, const nanochat::Bf16 *, nanochat::Bf16 *)"
+0.2,1582359,100,15823.6,16896.0,1888,42176,10297.9,"nanochat::kernels::<unnamed>::MuonEquilibrateRowKernel(int, int, nanochat::Bf16 *, const float *)"
+0.2,1289113,400,3222.8,4128.0,1184,5312,1635.7,"nanochat::kernels::<unnamed>::PointwiseRowScaleForwardKernel(int, int, const nanochat::Bf16 *, const nanochat::Bf16 *, nanochat::Bf16 *)"
+0.1,945427,80,11817.8,11808.0,11744,11968,36.1,"nanochat::kernels::<unnamed>::RowReduceKernel(nanochat::RowReduceParams, const nanochat::Bf16 *, float *)"
+0.1,835060,50,16701.2,15984.0,7328,33760,7533.1,sm90_xmma_gemm_bf16bf16_bf16f32_f32_nn_n_tilesize64x128x64_warpgroupsize1x1x1_execute_segment_k_off_kernel__5x_cublas
+0.1,813473,100,8134.7,7104.0,6880,12864,2109.7,"nanochat::kernels::<unnamed>::EmbeddingForwardKernel(int, int, const int *, const nanochat::Bf16 *, nanochat::Bf16 *)"
+0.1,756705,110,6879.1,6432.0,5984,16768,2077.7,void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_128x64_64x3_tn_align8>(T1::Params)
+0.1,724573,40,18114.3,18351.5,12544,25184,5529.2,"nanochat::kernels::<unnamed>::MuonRowMeanSquareKernel(int, int, const nanochat::Bf16 *, float *)"
+0.1,608220,30,20274.0,16015.5,4832,39232,13999.0,void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_64x64_32x6_nn_align8>(T1::Params)
+0.1,605851,20,30292.6,21377.0,8608,70079,24258.0,sm90_xmma_gemm_bf16bf16_bf16f32_f32_tn_n_tilesize128x64x64_warpgroupsize1x1x1_execute_segment_k_off_kernel__5x_cublas
+0.1,563331,60,9388.9,8736.0,1280,18400,6916.3,"nanochat::kernels::<unnamed>::MuonColMeanSquareKernel(int, int, const nanochat::Bf16 *, float *)"
+0.1,541467,105,5156.8,5152.0,4672,5600,110.5,void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_128x64_64x6_nn_align8>(T1::Params)
+0.1,541397,300,1804.7,1824.0,1151,2752,398.5,"nanochat::kernels::<unnamed>::MuonMatrixStatKernel(int, int, nanochat::kernels::<unnamed>::MatrixStat, float, const double *, float *)"
+0.1,494647,100,4946.5,3488.0,2464,8320,2257.4,"nanochat::kernels::<unnamed>::MuonNorMuonMomentsKernel(int, int, float, float *, float *, float *)"
+0.1,485473,100,4854.7,4416.0,3937,7360,1026.5,"nanochat::kernels::<unnamed>::EmbeddingScatterAddKernel(int, const int *, const nanochat::Bf16 *, float *)"
+0.1,483002,10,48300.2,48639.0,25856,70079,22747.7,sm90_xmma_gemm_bf16bf16_bf16f32_f32_nt_n_tilesize128x64x64_warpgroupsize1x1x1_execute_segment_k_off_kernel__5x_cublas
+0.1,452114,340,1329.7,1312.0,1248,1632,64.6,"nanochat::kernels::<unnamed>::SpanReduceFinalizeKernel(float *, float, bool)"
+0.1,446782,30,14892.7,13456.5,6783,25216,7157.2,sm90_xmma_gemm_bf16bf16_bf16f32_f32_nn_n_tilesize128x64x64_warpgroupsize1x1x1_execute_segment_k_off_kernel__5x_cublas
+0.1,400126,25,16005.0,14624.0,8288,23456,5803.8,sm90_xmma_gemm_bf16bf16_bf16f32_f32_nn_n_tilesize256x64x64_warpgroupsize1x1x1_execute_segment_k_off_kernel__5x_cublas
+0.1,393826,210,1875.4,1856.0,1823,2176,66.7,void cutlass::Kernel2<cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_32x32_32x1_nn_align2>(T1::Params)
+0.0,321407,15,21427.1,20800.0,6944,36991,12353.7,void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_64x64_32x6_tn_align8>(T1::Params)
+0.0,312219,15,20814.6,25663.0,10113,27136,7554.9,sm90_xmma_gemm_bf16bf16_bf16f32_f32_tn_n_tilesize64x64x64_warpgroupsize1x1x1_execute_segment_k_off_kernel__5x_cublas
+0.0,279195,80,3489.9,3487.5,3392,3776,70.3,void cutlass::Kernel2<cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_32x32_128x2_nn_align2>(T1::Params)
+0.0,261246,5,52249.2,52351.0,51872,52384,217.2,void cutlass::Kernel2<cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_32x32_128x1_tn_align8>(T1::Params)
+0.0,255458,80,3193.2,3168.0,3072,3360,75.4,void cutlass::Kernel2<cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_32x32_128x2_tn_align2>(T1::Params)
+0.0,254366,10,25436.6,25392.0,24768,26687,596.8,sm90_xmma_gemm_bf16bf16_bf16f32_f32_nt_n_tilesize64x64x64_warpgroupsize1x1x1_execute_segment_k_off_kernel__5x_cublas
+0.0,241175,105,2296.9,2272.0,2239,2559,60.5,void cutlass::Kernel2<cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_16x16_64x1_tn_align2>(T1::Params)
+0.0,173919,5,34783.8,34623.0,34401,35552,475.0,void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_64x64_64x6_tn_align8>(T1::Params)
+0.0,168702,5,33740.4,33663.0,33569,34112,215.4,void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_64x64_64x6_nt_align8>(T1::Params)
+0.0,160159,5,32031.8,31967.0,31904,32384,198.6,void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_64x64_32x6_nt_align8>(T1::Params)
+0.0,73247,5,14649.4,14463.0,14271,15488,489.9,sm90_xmma_gemm_bf16bf16_bf16f32_f32_tn_n_tilesize256x64x64_warpgroupsize1x1x1_execute_segment_k_off_kernel__5x_cublas
+0.0,59585,10,5958.5,5824.0,5792,6848,340.7,sm90_xmma_gemm_bf16bf16_bf16f32_f32_nn_n_tilesize256x64x64_cgasize1x1x1_warpgroupsize1x1x1_aligna4_alignc4_execute_segment_k_off_kernel__5x_cublas
+0.0,44991,10,4499.1,4448.0,4415,4768,120.9,void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_bf16_64x256_32x4_nn_align2>(T1::Params)
+0.0,43744,5,8748.8,8671.0,8512,9280,304.0,sm90_xmma_gemm_bf16bf16_bf16f32_f32_tn_n_tilesize64x256x64_warpgroupsize1x1x1_execute_segment_k_off_kernel__5x_cublas
+0.0,43136,5,8627.2,8416.0,8352,9281,398.5,sm90_xmma_gemm_bf16bf16_bf16f32_f32_nn_n_tilesize64x64x64_warpgroupsize1x1x1_execute_segment_k_off_kernel__5x_cublas
+0.0,40544,10,4054.4,4000.0,4000,4256,106.7,void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_bf16_128x128_32x4_nn_align2>(T1::Params)
+0.0,35295,5,7059.0,7040.0,6880,7391,197.6,sm90_xmma_gemm_bf16bf16_bf16f32_f32_nn_n_tilesize64x256x64_warpgroupsize1x1x1_execute_segment_k_off_kernel__5x_cublas
+0.0,35203,20,1760.2,1728.5,1664,1952,91.0,"nanochat::kernels::<unnamed>::GradNormFinalizeKernel(float, float *, float *)"
+0.0,32543,5,6508.6,6400.0,6368,6912,228.1,void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_128x64_32x6_tn_align8>(T1::Params)
+0.0,30208,5,6041.6,5824.0,5824,6880,468.9,sm90_xmma_gemm_bf16bf16_bf16f32_f32_tn_n_tilesize256x64x64_cgasize1x1x1_warpgroupsize1x1x1_aligna4_alignc4_execute_segment_k_off_kernel__5x_cublas
+0.0,27425,10,2742.5,2720.5,2688,2848,52.3,void cutlass::Kernel2<cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_32x32_128x1_nn_align2>(T1::Params)
+0.0,24738,10,2473.8,2464.0,2400,2561,52.5,void cutlass::Kernel2<cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_16x16_64x1_nn_align2>(T1::Params)
+0.0,23168,5,4633.6,4512.0,4480,5120,272.8,void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_128x64_32x6_nn_align8>(T1::Params)
+0.0,22336,5,4467.2,4416.0,4416,4640,97.6,void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_bf16_64x256_32x4_tn_align2>(T1::Params)
+0.0,22048,10,2204.8,2176.0,2176,2336,61.2,void cutlass::Kernel2<cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_32x32_64x1_nn_align2>(T1::Params)
+0.0,20032,10,2003.2,1984.0,1952,2112,60.7,void cutlass::Kernel2<cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_16x16_32x1_nn_align2>(T1::Params)
+0.0,19872,5,3974.4,3936.0,3904,4192,122.7,void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_bf16_128x128_32x4_tn_align2>(T1::Params)
+0.0,12544,5,2508.8,2496.0,2464,2592,53.5,void cutlass::Kernel2<cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_32x32_128x1_tn_align2>(T1::Params)
+0.0,10400,5,2080.0,2080.0,2016,2176,59.9,void cutlass::Kernel2<cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_32x32_64x1_tn_align2>(T1::Params)
+0.0,9952,5,1990.4,1984.0,1952,2080,52.6,void cutlass::Kernel2<cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_16x16_32x1_tn_align2>(T1::Params)
+0.0,9536,5,1907.2,1888.0,1888,1984,42.9,void cutlass::Kernel2<cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_32x32_32x1_tn_align2>(T1::Params)

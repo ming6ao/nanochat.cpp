@@ -162,11 +162,10 @@ class NanochatOptimizer final : public Optimizer {
     // outstanding.
     const float* grad_scale_dev = nullptr;
     if (num_spans_ > 0) {
-      // The gradient norm is the `GradNorm` composition, not a fused family: it
-      // is one `SpanReduce` over the same ragged list twice (the per-span dot
-      // of a buffer with itself is its sum of squares) plus the clip scale
-      // (src/ops.cc, spec/block_kinds.md section 6). The seam change that moved
-      // the reduction out of the fused entry is what this call follows.
+      // The gradient norm is one device reduction over the ragged span list:
+      // `kernels::GradNorm` reads the span table on the device, accumulates in
+      // double, and publishes the norm and the clip scale (src/ops.cc). No
+      // gradient span is staged, in any precision.
       ops::GradNormForward(norm_grads_, norm_counts_, num_spans_, config_.clip,
                            norm_dev_, norm_dev_ + 1);
       grad_scale_dev = norm_dev_ + 1;

@@ -239,11 +239,14 @@ void ClassifierBackward(const ClassifierShape& shape, const ComputeType* logits,
                         const int* targets, ComputeType* dlogits);
 
 // ---------------------------------------------------------------------------
-// The global gradient-norm composition: the sum of squares of every gradient
-// span (`SpanReduce` with no second operand and `kSumSq`-equivalent arithmetic
-// over the squares), the norm, and the clip scale. There is no fused family
-// behind it in vocabulary 1: `spec/capability_bits.md` section 5 records that
-// `grad_norm` has no override bit, so this composition IS the implementation.
+// The global gradient norm: the sum of squares of every gradient span, the
+// norm, and the clip scale, all on the device through `kernels::GradNorm`. That
+// entry is fp32 by contract and the persistent gradients are fp32 in every
+// build, so one call serves both precisions and no gradient span leaves the
+// device.
+//
+// `spec/capability_bits.md` section 5 records that `grad_norm` has no override
+// bit, so this call is the implementation and no fused family stands behind it.
 //
 // `grads` and `counts` are device arrays of `num_spans` entries.
 // ---------------------------------------------------------------------------

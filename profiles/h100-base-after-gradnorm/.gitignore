@@ -1,0 +1,4 @@
+# The timelines are a measurement, not source: a reader regenerates them with
+# the command in REPORT.md section 2.
+timeline_cuda_gpu_trace.csv
+timeline_cuda_api_trace.csv
