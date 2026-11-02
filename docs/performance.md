@@ -115,6 +115,12 @@ Split the step before you choose a fix:
 Benchmarks to use: `row_benchmark`, `qk_prep_bench`, `decode_fused_bench`,
 `attention_benchmark`, and `eval_bench`.
 
+The checklist orders the parts by hand. For the loop that measures the split
+from a device trace and lands the two largest items, read
+[profile-guided-optimization.md](profile-guided-optimization.md). The loop writes
+its artifacts under `profiles/`, which git ignores: a trace is a measurement of
+one host on one day, and it is hundreds of megabytes.
+
 ## 5. Profiling limits
 
 CUPTI does not initialize under WSL2. `torch.profiler`, Nsight Systems, and

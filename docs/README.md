@@ -23,6 +23,8 @@ detailed reference that the design points at.
 | [distributed-native-plan.md](distributed-native-plan.md) | The execution plan for a native all-reduce over NVLink and RDMA: the transport interface, the ring schedule, ownership, and the broker |
 | [client-runtime-design.md](client-runtime-design.md) | The single-client multi-device runtime: one program, a device mesh, placement, the in-process collective, the C++ mesh training driver, and the compatibility process runtime |
 | [performance.md](performance.md) | Performance measurement protocol and the debugging interface |
+| [profile-guided-optimization.md](profile-guided-optimization.md) | The optimization loop: a trace per iteration, the two ideas with the largest measured ceiling, the pair bar, the artifacts, and the work rows |
+| [scalar-arguments.md](scalar-arguments.md) | The proposal for a device-resident scalar in the seam: `ScalarArg`, the optimizer migration, the pointwise arms, and the model-side fp32 view |
 | [performance-model.md](performance-model.md) | The analytic throughput model: the operation counters, the device rates, the roofline, and the prediction record |
 | [cpu-performance.md](cpu-performance.md) | CPU backend baseline, cause, design, and phase results |
 | [attention.md](attention.md) | Attention baseline, Pascal feasibility, the fused window, results |
