@@ -266,16 +266,27 @@ def _bucket(duration_ns: float) -> str:
 # ---------------------------------------------------------------------------
 
 
-def step_bounds(kernels: Sequence[Mapping]) -> list[tuple[int, int]]:
+def step_bounds(kernels: Sequence[Mapping],
+                mark_bytes: int | None = None) -> list[tuple[int, int]]:
     """The span of each step, taken from the trace and not from a clock.
 
     The trainer copies its per-row losses to the host once per forward pass, so
     that copy marks a step. Two of them appear per step in this tree, so a step
     starts at one pair and ends at the same position in the next pair.
+
+    That copy is four bytes per row, so its size follows the shape: 16 KB at
+    the 4096-row reference profile, and 64 KB at 16384 rows. ``mark_bytes``
+    names the size when the shape is not the reference one. The trace states a
+    payload in decimal megabytes, so the explicit case allows one percent of
+    rounding.
     """
+    low, high = 15_001, 17_999
+    if mark_bytes is not None:
+        slack = max(1_000, int(mark_bytes) // 100)
+        low, high = int(mark_bytes) - slack, int(mark_bytes) + slack
     marks = [event["start"] for event in kernels
              if _kind(event["name"]) == "Device-to-Host"
-             and 15_000 < event["size"] < 18_000]
+             and low <= event["size"] <= high]
     if len(marks) < 4:
         return []
     return list(zip(marks[2::2], marks[4::2]))
@@ -306,14 +317,15 @@ def _stalls(step: Sequence[Mapping], api: Sequence[Mapping],
 
 
 def step_profile(kernels: Sequence[Mapping], api: Sequence[Mapping],
-                 index: int = 6) -> dict:
+                 index: int = 6, mark_bytes: int | None = None) -> dict:
     """The composition of one steady step: the unit the loop scores.
 
     ``index`` picks the step by number. The first steps of a run carry the
     library load and the first batch, and the last one carries the checkpoint
-    write, so a caller reads the middle.
+    write, so a caller reads the middle. ``mark_bytes`` is the size of the
+    per-row loss copy, or ``None`` for the reference profile's 16 KB.
     """
-    bounds = step_bounds(kernels)
+    bounds = step_bounds(kernels, mark_bytes=mark_bytes)
     if not bounds:
         raise PgoError("no step marks in the GPU trace: the trainer copied no "
                        "per-row losses, so this trace is not a step loop")
@@ -472,7 +484,8 @@ def _api_counts(rows: Sequence[Mapping], limit: int) -> list[dict]:
 
 def analyze_trace(trace_dir, *, stage: str = "base", device: str = "h100",
                   steps: int = DEFAULT_TRACE_STEPS,
-                  step_index: int = 6) -> dict:
+                  step_index: int = 6,
+                  mark_bytes: int | None = None) -> dict:
     """Read one trace directory and return the analysis document.
 
     The document is the only thing an analyst reads about the trace: the whole
@@ -496,7 +509,7 @@ def analyze_trace(trace_dir, *, stage: str = "base", device: str = "h100",
         entry = buckets.setdefault(name, {"kernels": 0, "ns": 0.0})
         entry["kernels"] += 1
         entry["ns"] += event["dur"]
-    step = step_profile(kernels, api, index=step_index)
+    step = step_profile(kernels, api, index=step_index, mark_bytes=mark_bytes)
     return {
         "schema": ANALYSIS_SCHEMA,
         "stage": stage,
@@ -1054,7 +1067,8 @@ def _cmd_analyze(options) -> int:
     analysis = analyze_trace(trace_dir, stage=loop["target"]["stage"],
                              device=loop["target"]["device"],
                              steps=int(loop["budget"]["trace_steps"]),
-                             step_index=int(options.step_index))
+                             step_index=int(options.step_index),
+                             mark_bytes=options.mark_bytes)
     analysis["rank"] = rank(analysis["signatures"], loop.get("rejected") or ())
     trace_json = chrome_trace(trace_dir, current / "before" / "chrome.json")
     path = _write(current / "before" / "analysis.json", analysis)
@@ -1166,6 +1180,9 @@ def _parser() -> argparse.ArgumentParser:
     analyze = command("analyze", help="read the trace and rank")
     analyze.add_argument("--trace", default="")
     analyze.add_argument("--step-index", type=int, default=6)
+    analyze.add_argument("--mark-bytes", type=int, default=None,
+                         help="the size of the per-row loss copy, in bytes, "
+                              "when the shape is not the reference profile")
     analyze.set_defaults(handler=_cmd_analyze)
 
     compare_cmd = command("compare", help="decide the pair and advance")

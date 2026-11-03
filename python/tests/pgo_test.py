@@ -26,7 +26,7 @@ LOSS_BYTES = 16_384
 BULK_BYTES = 70_369_280
 
 
-def _step_layout() -> list[tuple[float, int, str, int]]:
+def _step_layout(loss_bytes: int = LOSS_BYTES) -> list[tuple[float, int, str, int]]:
     """One synthetic step: small kernels, a bulk readback, and one scalar read."""
     layout = []
     for index in range(200):
@@ -47,18 +47,19 @@ def _step_layout() -> list[tuple[float, int, str, int]]:
                    BULK_BYTES))
     # A scalar read that blocks the queue for 5 ms.
     layout.append((300.0, 2_000, "[CUDA memcpy Device-to-Host]", 0))
-    layout.append((350.0, 4_000, "[CUDA memcpy Device-to-Host]", LOSS_BYTES))
+    layout.append((350.0, 4_000, "[CUDA memcpy Device-to-Host]", loss_bytes))
     return layout
 
 
-def _write_trace(folder: Path, steps: int = 6) -> None:
+def _write_trace(folder: Path, steps: int = 6,
+                 loss_bytes: int = LOSS_BYTES) -> None:
     """Write one synthetic trace directory in the ``nsys stats`` CSV shape."""
     folder.mkdir(parents=True, exist_ok=True)
     gpu = ["Start (ns),Duration (ns),GrdX,Strm,Bytes (MB),Name"]
     api = ["Start (ns),Duration (ns),Name,Result,Pid,Tid"]
     for step in range(steps):
         base = step * STEP_MS * 1_000_000
-        for offset_ms, duration_ns, name, size in _step_layout():
+        for offset_ms, duration_ns, name, size in _step_layout(loss_bytes):
             start = base + int(offset_ms * 1_000_000)
             megabytes = f"{size / 1e6:.6f}" if size else ""
             gpu.append(f"{start},{duration_ns},1,7,{megabytes},{name}")
@@ -157,6 +158,19 @@ class AnalyzeTest(unittest.TestCase):
         self.assertEqual(ranked["ids"], ["driver_call_overhead",
                                         "tiny_gemm_tile"])
         self.assertIn("dtoh_bytes", ranked["dropped"])
+
+    def test_the_mark_size_is_the_shape_s_loss_copy(self) -> None:
+        # A shape with four times the rows copies four times the losses, so the
+        # reference profile's 16 KB window finds nothing and the caller has to
+        # name the size its own stage wrote.
+        folder = Path(tempfile.mkdtemp(prefix="pgo-marks-"))
+        _write_trace(folder, loss_bytes=65_536)
+        with self.assertRaises(pgo.PgoError):
+            pgo.analyze_trace(folder, stage="base", device="h100", steps=6)
+        analysis = pgo.analyze_trace(folder, stage="base", device="h100",
+                                     steps=6, step_index=1,
+                                     mark_bytes=65_536)
+        self.assertGreater(analysis["step"]["operations"], 200)
 
     def test_a_trace_without_step_marks_is_a_fault(self) -> None:
         empty = Path(tempfile.mkdtemp(prefix="pgo-empty-"))
