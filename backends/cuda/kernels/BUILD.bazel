@@ -431,7 +431,8 @@ cc_binary(
 )
 
 # Muon's Polar Express GEMM shapes and the whole optimizer phase of one step,
-# at the `h100` and `big` profile shapes.
+# at the `h100` and `big` profile shapes. Every row carries its model FLOPs
+# utilization, which the shared report computes.
 cuda_binary(
     name = "muon_benchmark",
     srcs = ["muon_benchmark.cc"],

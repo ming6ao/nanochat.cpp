@@ -49,5 +49,11 @@ cc_library(
 cc_library(
     name = "bench_utils",
     hdrs = ["bench_utils.h"],
-    deps = ["//include/nanochat:nanochat"],
+    deps = [
+        # The card's declared peak rates, so `BenchReport::UseDevicePeak`
+        # divides by the rate of the device that ran (`docs/precision.md`). The
+        # same leaf the backend's `GetCaps()` links, so the seam holds.
+        "//src:device_profile",
+        "//include/nanochat:nanochat",
+    ],
 )

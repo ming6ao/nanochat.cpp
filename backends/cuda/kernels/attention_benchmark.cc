@@ -228,6 +228,10 @@ int main(int argc, char** argv) {
 
   Rng rng;
   BenchReport report;
+  // Every row states its share of the card's declared peak rate at the build's
+  // compute precision, so a reader sees how far the family sits from the roof
+  // of the unit it runs on.
+  report.UseDevicePeak();
 
   // The production `d8_s512` training shape: 8 layers, batch 8, sequence 512,
   // 4 query heads, full context.

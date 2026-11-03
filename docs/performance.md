@@ -74,6 +74,11 @@ Follow `backends/cuda/kernels/README.md`. Use
 - `EventTimer::Time` returns the best mean milliseconds per call. It uses
   device events on the default stream.
 - `BenchReport::Add` collects a row.
+- `BenchReport::UseDevicePeak` states the denominator of the model FLOPs
+  utilization of every row: the running card's declared rate at a precision.
+  One call, and no benchmark names a device or a table.
+- `BenchReport::SetPeakFlops` states the denominator by hand, in FLOP/s, for a
+  card the table does not hold.
 - `BenchReport::Print` prints a table. It writes JSON to `options.out` when
   set.
 
@@ -87,15 +92,26 @@ benchmark to the `all` test suite.
 ```json
 {
   "schema": "nanochat.bench.v1",
+  "device": "NVIDIA H100 80GB HBM3",
+  "peak_flops": 989000000000000.0,
   "rows": [
-    {"name": "attention_fwd:d8_s512", "shape": "B=8 T=512 H=4 KV=4 D=128 wl=-1", "ms": 12.3, "gflops": 45.6, "work_ratio": 2.0}
+    {"name": "attention_fwd:d8_s512", "shape": "B=8 T=512 H=4 KV=4 D=128 wl=-1", "ms": 12.3, "gflops": 45.6, "work_ratio": 2.0, "mfu": 0.33}
   ]
 }
 ```
 
 `gflops` is the rate against the necessary operation count. `work_ratio` is the
-issued work over the necessary work. Feed the file to the skill's
-`summarize_times.py`.
+issued work over the necessary work. `device` and `peak_flops` appear only
+when the report states a denominator, and `mfu` is the row's `gflops` over that
+`peak_flops`, clamped to `[0, 1]`. The share belongs to the precision the
+benchmark names, so a bf16 build divides by the tensor-core rate and an fp32
+build by the CUDA-core rate ([precision.md](precision.md)). A row that issues
+no arithmetic states `0`, and the table prints `-` for it.
+
+In the table, the denominator stands above the header as one comment line, and
+the `MFU` column appears only when a row reports a share. A benchmark that
+states no peak prints the three-column table of the earlier reports. Feed the
+file to the skill's `summarize_times.py`.
 
 ## 4. Root-cause checklist
 

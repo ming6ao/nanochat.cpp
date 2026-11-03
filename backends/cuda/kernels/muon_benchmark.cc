@@ -13,6 +13,12 @@
 //       the arithmetic, so the difference against five is the loop's own
 //       cost.
 //
+// Every row also carries its model FLOPs utilization: the achieved rate over
+// the peak dense rate of the running card at the build's compute precision
+// (`docs/precision.md`). The report supplies it, so this file names no device
+// and no rate: `BenchReport::UseDevicePeak` reads the card, and `--peak
+// GFLOP/s` overrides it when the table does not hold the card.
+//
 // The shapes default to the two profiles the plan measures
 // (docs/pipeline-scaleup-plan.md section 5): `h100` (8 layers, hidden 512,
 // eight heads, four key/value heads) and `big` (20 layers, hidden 1280, ten
@@ -382,6 +388,9 @@ int main(int argc, char** argv) {
   Profile custom = {"custom", 0, 0, 0, 0};
   bool muon = false;
   bool verbose = true;
+  // The peak rate the MFU column divides by, in GFLOP/s: zero until the card's
+  // own entry is read, or until `--peak` names one.
+  double peak_gflops = 0.0;
 
   for (int i = 1; i < argc; ++i) {
     const std::string arg(argv[i]);
@@ -409,6 +418,8 @@ int main(int argc, char** argv) {
       verbose = false;
     } else if (arg == "--out" && i + 1 < argc) {
       opt.out = argv[++i];
+    } else if (arg == "--peak" && i + 1 < argc) {
+      peak_gflops = std::atof(argv[++i]);
     } else if (arg == "--muon") {
       muon = true;
     } else {
@@ -416,7 +427,7 @@ int main(int argc, char** argv) {
                    "usage: %s [--profile h100|big] [--layers N "
                    "--hidden N --heads N --kv-heads N] [--iters N] "
                    "[--rounds N] [--warmup N] [--muon] [--json] "
-                   "[--out PATH]\n",
+                   "[--peak GFLOP/s] [--out PATH]\n",
                    argv[0]);
       return 2;
     }
@@ -426,9 +437,8 @@ int main(int argc, char** argv) {
     wanted = {"custom"};
   }
 
-  std::printf(
-      "muon benchmark: compute dtype %s, %d Polar Express iterations\n\n",
-      nanochat::kComputeIsBf16 ? "bf16" : "fp32", kPolarIters);
+  std::printf("muon benchmark: compute dtype %s, %d Polar Express iterations\n",
+              nanochat::kComputeIsBf16 ? "bf16" : "fp32", kPolarIters);
 
   for (const std::string& name : wanted) {
     const Profile* profile = name == "custom" ? &custom : FindProfile(name);
@@ -451,6 +461,11 @@ int main(int argc, char** argv) {
     if (verbose) PrintGroups(bench);
 
     BenchReport report;
+    // The share of every row is the card's own declared rate, and `--peak`
+    // overrides it. The report reads the card and the precision, so this file
+    // names neither.
+    report.UseDevicePeak();
+    if (peak_gflops > 0.0) report.SetPeakFlops(peak_gflops * 1e9);
     const std::string shape = ShapeLabel(bench.profile);
     for (std::size_t i = 0; i < bench.groups.size(); ++i) {
       const Group& group = bench.groups[i];
@@ -463,33 +478,34 @@ int main(int argc, char** argv) {
             PolarIteration(group, x, prod, a, a2, b);
           },
           opt);
+      const double gflops = 1e-9 * flops / (ms * 1e-3);
       report.Add("polar:" + shape + ":" + GroupLabel(group),
-                 "batch=" + std::to_string(group.num_params), ms,
-                 1e-9 * flops / (ms * 1e-3));
+                 "batch=" + std::to_string(group.num_params), ms, gflops);
     }
 
     const double step_flops = StepFlops(bench.groups);
     const double polar_ms = bench.PolarStepMs(opt);
+    const double polar_gflops = 1e-9 * step_flops / (polar_ms * 1e-3);
     report.Add("polar:" + shape + ":step",
                std::to_string(bench.groups.size()) + " groups", polar_ms,
-               1e-9 * step_flops / (polar_ms * 1e-3));
+               polar_gflops);
     if (muon) {
       for (std::size_t i = 0; i < bench.groups.size(); ++i) {
         const Group& group = bench.groups[i];
         const double one_flops = IterationFlops(group) * kPolarIters;
         const double ms = bench.MuonGroupMs(opt, i, kPolarIters);
+        const double gflops = 1e-9 * one_flops / (ms * 1e-3);
         report.Add("muon:" + shape + ":" + GroupLabel(group),
-                   "batch=" + std::to_string(group.num_params), ms,
-                   1e-9 * one_flops / (ms * 1e-3));
+                   "batch=" + std::to_string(group.num_params), ms, gflops);
       }
       for (int ns_steps : {0, 1, kPolarIters}) {
         const double muon_ms = bench.MuonStepMs(opt, ns_steps);
-        report.Add(
-            "muon:" + shape + ":step",
-            std::to_string(bench.groups.size()) +
-                " groups, ns=" + std::to_string(ns_steps),
-            muon_ms,
-            1e-9 * step_flops * ns_steps / kPolarIters / (muon_ms * 1e-3));
+        const double gflops =
+            1e-9 * step_flops * ns_steps / kPolarIters / (muon_ms * 1e-3);
+        report.Add("muon:" + shape + ":step",
+                   std::to_string(bench.groups.size()) +
+                       " groups, ns=" + std::to_string(ns_steps),
+                   muon_ms, gflops);
       }
     }
     report.Print(opt);
