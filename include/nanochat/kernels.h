@@ -546,6 +546,40 @@ void ValueGateBackward(int rows, int hidden, int num_kv_heads, int head_dim,
                        const ComputeType* dv, float* gate_w_grad,
                        ComputeType* dh, ComputeType* dve);
 
+// Smear: the learned bigram residual on the token embedding. For each row `r`
+// of a `[batch, seq, hidden]` activation, with `t = r % seq`,
+//   gate[r] = lambda * sigmoid(dot(emb_norm[r, :channels], gate_w))
+//   x0[r]   = emb_norm[r] + gate[r] * emb_norm[r - 1]
+// Position 0 of a sequence has no previous token, so its gate is zero and its
+// row of `x0` is a copy of `emb_norm`. Only the leading `channels` feed the
+// gate; the whole row moves. `sig` is a device buffer of `rows` floats and
+// holds the sigmoid, so the backward reads one scalar per row instead of
+// rebuilding the gate.
+//
+// The backward writes `de`, accumulates `gate_w_grad` and `lambda_grad`, and
+// reduces nothing else. Every row owns one output row and one halo row of the
+// input, so a device may run the whole family without a cross-row barrier.
+struct SmearParams {
+  int batch = 0;
+  int seq = 0;
+  int hidden = 0;
+  int channels = 0;  // leading channels of a row that feed the gate
+  float lambda = 0.0f;
+  int rows() const { return batch * seq; }
+};
+
+void SmearForward(const SmearParams& params, const ComputeType* emb_norm,
+                  const ComputeType* gate_w, ComputeType* x0, float* sig);
+
+// `d_x0` is the gradient w.r.t. `x0` and `de` the gradient w.r.t. `emb_norm`.
+// `sig` is what SmearForward saved. `gate_w_grad` (`channels`) and
+// `lambda_grad` (one) accumulate, because the chain reduces them out of order
+// across rows.
+void SmearBackward(const SmearParams& params, const ComputeType* emb_norm,
+                   const ComputeType* gate_w, const float* sig,
+                   const ComputeType* d_x0, float* gate_w_grad,
+                   float* lambda_grad, ComputeType* de);
+
 }  // namespace kernels
 }  // namespace nanochat
 

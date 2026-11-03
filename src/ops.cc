@@ -1147,46 +1147,31 @@ void MlpBackward(const ComputeType* h, const ComputeType* c_fc,
 // ---------------------------------------------------------------------------
 // Smear
 // ---------------------------------------------------------------------------
+// The family is the seam's: a device kernel owns a row, a host loop walks rows
+// in order, and this file only names the shape. There is no second
+// implementation here (`docs/kernels.md`, the smear row).
+namespace {
+
+kernels::SmearParams SmearParamsOf(std::int64_t batch, std::int64_t seq,
+                                   std::int64_t hidden, float lambda) {
+  kernels::SmearParams params;
+  params.batch = static_cast<int>(batch);
+  params.seq = static_cast<int>(seq);
+  params.hidden = static_cast<int>(hidden);
+  params.channels = kSmearChannels;
+  params.lambda = lambda;
+  return params;
+}
+
+}  // namespace
 
 void SmearForward(std::int64_t batch, std::int64_t seq, std::int64_t hidden,
                   const ComputeType* emb_norm, const ComputeType* gate_w,
                   float lambda, ComputeType* x0, float* sig) {
   if (batch <= 0 || seq <= 0 || hidden <= 0) return;
-  const std::int64_t rows = batch * seq;
-  const std::int64_t count = rows * hidden;
-  std::vector<ComputeType> ee = StageToHost(emb_norm, count);
-  std::vector<ComputeType> wh = StageToHost(gate_w, kSmearChannels);
-  std::vector<ComputeType> xh(static_cast<std::size_t>(count));
-  std::vector<float> sh(static_cast<std::size_t>(rows), 0.0f);
-  for (std::int64_t b = 0; b < batch; ++b) {
-    for (std::int64_t t = 0; t < seq; ++t) {
-      const std::int64_t dst = (b * seq + t) * hidden;
-      if (t == 0) {
-        std::memcpy(xh.data() + dst, ee.data() + dst,
-                    static_cast<std::size_t>(hidden) * sizeof(ComputeType));
-        sh[static_cast<std::size_t>(b * seq + t)] = 0.0f;
-        continue;
-      }
-      const std::int64_t src = (b * seq + t - 1) * hidden;
-      float pre = 0.0f;
-      for (int j = 0; j < kSmearChannels; ++j) {
-        pre += AsF(ee[static_cast<std::size_t>(dst + j)]) *
-               AsF(wh[static_cast<std::size_t>(j)]);
-      }
-      const float s = Sigmoid(pre);
-      sh[static_cast<std::size_t>(b * seq + t)] = s;
-      const float gate = lambda * s;
-      for (std::int64_t j = 0; j < hidden; ++j) {
-        xh[static_cast<std::size_t>(dst + j)] =
-            ToC(AsF(ee[static_cast<std::size_t>(dst + j)]) +
-                gate * AsF(ee[static_cast<std::size_t>(src + j)]));
-      }
-    }
-  }
-  StageToDevice(x0, xh);
-  kernels::Memcpy(sig, sh.data(),
-                  static_cast<std::size_t>(rows) * sizeof(float),
-                  CopyDir::kHostToDevice);
+  NANOCHAT_CHECK_KERNEL_PARAMS("smear", hidden >= kSmearChannels);
+  kernels::SmearForward(SmearParamsOf(batch, seq, hidden, lambda), emb_norm,
+                        gate_w, x0, sig);
 }
 
 void SmearBackward(std::int64_t batch, std::int64_t seq, std::int64_t hidden,
@@ -1194,63 +1179,9 @@ void SmearBackward(std::int64_t batch, std::int64_t seq, std::int64_t hidden,
                    const float* sig, float lambda, const ComputeType* d_x0,
                    float* gate_w_grad, float* lambda_grad, ComputeType* de) {
   if (batch <= 0 || seq <= 0 || hidden <= 0) return;
-  const std::int64_t rows = batch * seq;
-  const std::int64_t count = rows * hidden;
-  std::vector<ComputeType> ee = StageToHost(emb_norm, count);
-  std::vector<ComputeType> wh = StageToHost(gate_w, kSmearChannels);
-  std::vector<float> sh(static_cast<std::size_t>(rows));
-  kernels::Memcpy(sh.data(), sig,
-                  static_cast<std::size_t>(rows) * sizeof(float),
-                  CopyDir::kDeviceToHost);
-  std::vector<ComputeType> dxh = StageToHost(d_x0, count);
-  std::vector<ComputeType> deh = dxh;
-  std::vector<float> wgh(kSmearChannels);
-  std::vector<float> lgh(1);
-  kernels::Memcpy(wgh.data(), gate_w_grad, wgh.size() * sizeof(float),
-                  CopyDir::kDeviceToHost);
-  kernels::Memcpy(lgh.data(), lambda_grad, sizeof(float),
-                  CopyDir::kDeviceToHost);
-  double dlambda = 0.0;
-  for (std::int64_t b = 0; b < batch; ++b) {
-    for (std::int64_t t = 1; t < seq; ++t) {
-      const std::int64_t m = (b * seq + t) * hidden;
-      const std::int64_t prev = (b * seq + t - 1) * hidden;
-      const float s = sh[static_cast<std::size_t>(b * seq + t)];
-      const float gate = lambda * s;
-
-      double dgate = 0.0;
-      for (std::int64_t j = 0; j < hidden; ++j) {
-        dgate +=
-            static_cast<double>(AsF(dxh[static_cast<std::size_t>(m + j)])) *
-            static_cast<double>(AsF(ee[static_cast<std::size_t>(prev + j)]));
-      }
-      const float dgate_f = static_cast<float>(dgate);
-      // x0[t] = e[t] + gate[t] * e[t-1], so the gradient w.r.t. the previous
-      // position is elementwise `dx0[t, j] * gate[t]`, not the scalar
-      // `dgate * gate` (which is the gate's own gradient, used below for
-      // lambda and the gate weights).
-      for (std::int64_t j = 0; j < hidden; ++j) {
-        deh[static_cast<std::size_t>(prev + j)] =
-            ToC(AsF(deh[static_cast<std::size_t>(prev + j)]) +
-                AsF(dxh[static_cast<std::size_t>(m + j)]) * gate);
-      }
-      dlambda += static_cast<double>(dgate_f) * s;
-      const float dpre = dgate_f * lambda * s * (1.0f - s);
-      for (int j = 0; j < kSmearChannels; ++j) {
-        wgh[static_cast<std::size_t>(j)] +=
-            dpre * AsF(ee[static_cast<std::size_t>(m + j)]);
-        deh[static_cast<std::size_t>(m + j)] =
-            ToC(AsF(deh[static_cast<std::size_t>(m + j)]) +
-                dpre * AsF(wh[static_cast<std::size_t>(j)]));
-      }
-    }
-  }
-  lgh[0] += static_cast<float>(dlambda);
-  StageToDevice(de, deh);
-  kernels::Memcpy(gate_w_grad, wgh.data(), wgh.size() * sizeof(float),
-                  CopyDir::kHostToDevice);
-  kernels::Memcpy(lambda_grad, lgh.data(), sizeof(float),
-                  CopyDir::kHostToDevice);
+  NANOCHAT_CHECK_KERNEL_PARAMS("smear", hidden >= kSmearChannels);
+  kernels::SmearBackward(SmearParamsOf(batch, seq, hidden, lambda), emb_norm,
+                         gate_w, sig, d_x0, gate_w_grad, lambda_grad, de);
 }
 
 // ---------------------------------------------------------------------------

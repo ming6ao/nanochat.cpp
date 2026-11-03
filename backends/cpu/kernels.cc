@@ -1843,6 +1843,80 @@ void ValueGateBackward(int rows, int hidden, int num_kv_heads, int head_dim,
   }
 }
 
+// The smear, the reference form of the family. It walks rows in order, so the
+// two parameter gradients and the input gradient come out in the order the
+// model's arithmetic was defined in (`docs/model.md`). A device that runs the
+// family in parallel keeps that order where the contract can see it.
+void SmearForward(const SmearParams& params, const ComputeType* emb_norm,
+                  const ComputeType* gate_w, ComputeType* x0, float* sig) {
+  if (params.batch <= 0 || params.seq <= 0 || params.hidden <= 0) return;
+  if (params.hidden < params.channels || params.channels <= 0) return;
+  const std::int64_t rows = params.rows();
+  const std::int64_t hidden = params.hidden;
+  for (std::int64_t row = 0; row < rows; ++row) {
+    const std::int64_t base = row * hidden;
+    const bool first = row % params.seq == 0;
+    float pre = 0.0f;
+    if (!first) {
+      for (int j = 0; j < params.channels; ++j) {
+        pre += AsFloat(emb_norm[base + j]) * AsFloat(gate_w[j]);
+      }
+    }
+    const float s = first ? 0.0f : 1.0f / (1.0f + std::exp(-pre));
+    if (sig != nullptr) sig[row] = s;
+    const float gate = params.lambda * s;
+    for (std::int64_t j = 0; j < hidden; ++j) {
+      const float previous =
+          first ? 0.0f : AsFloat(emb_norm[base - hidden + j]);
+      x0[base + j] = ToCompute(AsFloat(emb_norm[base + j]) + gate * previous);
+    }
+  }
+}
+
+void SmearBackward(const SmearParams& params, const ComputeType* emb_norm,
+                   const ComputeType* gate_w, const float* sig,
+                   const ComputeType* d_x0, float* gate_w_grad,
+                   float* lambda_grad, ComputeType* de) {
+  if (params.batch <= 0 || params.seq <= 0 || params.hidden <= 0) return;
+  if (params.hidden < params.channels || params.channels <= 0) return;
+  const std::int64_t rows = params.rows();
+  const std::int64_t hidden = params.hidden;
+  double dlambda = 0.0;
+  for (std::int64_t row = 0; row < rows; ++row) {
+    const std::int64_t base = row * hidden;
+    const bool first = row % params.seq == 0;
+    const bool tail = row % params.seq == params.seq - 1;
+    // de starts as d_x0, then takes the gate term of this row and, last, the
+    // gate term the following row points back with. The order is the order the
+    // graph adds them in, so the bytes match the tree this replaced.
+    for (std::int64_t j = 0; j < hidden; ++j) de[base + j] = d_x0[base + j];
+    const float s = first ? 0.0f : sig[row];
+    if (!first) {
+      double dgate = 0.0;
+      for (std::int64_t j = 0; j < hidden; ++j) {
+        dgate += static_cast<double>(AsFloat(d_x0[base + j])) *
+                 static_cast<double>(AsFloat(emb_norm[base - hidden + j]));
+      }
+      const float dgate_f = static_cast<float>(dgate);
+      dlambda += static_cast<double>(dgate_f) * s;
+      const float dpre = dgate_f * params.lambda * s * (1.0f - s);
+      for (int j = 0; j < params.channels; ++j) {
+        gate_w_grad[j] += dpre * AsFloat(emb_norm[base + j]);
+        de[base + j] =
+            ToCompute(AsFloat(de[base + j]) + dpre * AsFloat(gate_w[j]));
+      }
+    }
+    if (!tail) {
+      const float gate_next = params.lambda * sig[row + 1];
+      for (std::int64_t j = 0; j < hidden; ++j) {
+        de[base + j] = ToCompute(AsFloat(de[base + j]) +
+                                 gate_next * AsFloat(d_x0[base + hidden + j]));
+      }
+    }
+  }
+  *lambda_grad += static_cast<float>(dlambda);
+}
+
 }  // namespace kernels
 
 std::vector<DeviceInfo> EnumerateDevices() {

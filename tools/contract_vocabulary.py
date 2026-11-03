@@ -217,6 +217,8 @@ SEAM_TIERS: dict[str, tuple[str, str]] = {
     "PointwiseBackward": ("primitives", "their backward"),
     "EmbeddingForward": ("primitives", "the gather"),
     "EmbeddingBackward": ("primitives", "the scatter-add"),
+    "SmearForward": ("primitives", "the bigram residual"),
+    "SmearBackward": ("primitives", "its backward"),
     # `stateful[]`: the two training updates.
     "AdamWUpdate": ("stateful", "the `stateful_adamw` bit"),
     "MuonUpdate": ("stateful", "the `stateful_muon` bit"),
@@ -243,6 +245,7 @@ SEAM_TIERS: dict[str, tuple[str, str]] = {
 #: the seam's own spelling and not `GemmBackward`).
 PRIMITIVE_FAMILIES = {
     "pointwise": ("PointwiseForward", "PointwiseBackward"),
+    "smear": ("SmearForward", "SmearBackward"),
 }
 
 

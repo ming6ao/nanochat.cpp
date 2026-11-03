@@ -33,6 +33,17 @@ cc_library(
     deps = ["//include/nanochat:nanochat"],
 )
 
+# Host-only scaffolding for the smear family: the host reference of the bigram
+# residual plus the same helpers.
+cc_library(
+    name = "smear_test_utils",
+    hdrs = [
+        "gpu_test_utils.h",
+        "smear_ref.h",
+    ],
+    deps = ["//include/nanochat:nanochat"],
+)
+
 # Host-only scaffolding shared by the optimizer GPU tests: the reference port
 # of AdamW and Muon plus the same helpers.
 cc_library(

@@ -27,6 +27,7 @@ records in [../spec/decisions.md](../spec/decisions.md).
 | 8 | `Muon` | stateful + batched GEMM | matrix params (Polar Express via cuBLAS) | yes |
 | 10 | `GradNorm` | multi-span full reduction | gradient norm and the clip scale | yes |
 | 11 | `ValueGate` | row gate + per-head projection | value residual gate | yes/yes |
+| 12 | `Smear` | row gate + previous-row mix | learned bigram residual on the token embedding | yes/yes |
 
 Library-backed (not hand-written kernels):
 
@@ -37,7 +38,7 @@ Helper: `ScalarDot`, a dot product over two buffers.
 Device utilities: `Alloc`, `Free`, `Memcpy(direction)`, `Memset`, `Synchronize`,
 `GetCaps`.
 
-The table above is the **family** view: it names the eleven compute families and
+The table above is the **family** view: it names the twelve compute families and
 says which ones a backend may serve with a fused kernel. Which *entry point* of
 each family a device must supply is the tier question, and the answer differs
 per family: a family in the composition tier is supplied once, above the seam,
@@ -62,6 +63,7 @@ which this table cites and does not restate.
 | `PointwiseForward`, `PointwiseBackward` | primitive | required | The nine op codes, elementwise; one of them broadcasts a per-row vector |
 | `EmbeddingForward` | primitive | required | The gather over `wte` and every `value_embeds[i]` |
 | `EmbeddingBackward` | primitive | required | The scatter-add into the dense gradient buffer |
+| `SmearForward`, `SmearBackward` | primitive | required | The bigram residual, one launch per direction on a device; the backward reduces its two parameter gradients at a phase boundary in the same launch |
 | `QuantizeFp8`, `GemmScaledFp8` | primitive | optional, bits `fp8_storage` and `fp8_gemm` | The fp8 tier, [fp8-training.md](fp8-training.md) |
 | `AdamWUpdate`, `MuonUpdate` | stateful | required for training, bits `stateful_adamw` and `stateful_muon` | The optimizer, [model.md](model.md) |
 | `RmsNormForward`, `RmsNormBackward` | composition, plus fused override | — | `src/ops.cc`; a backend's single-kernel version is gated by `override_rms_norm` |
@@ -71,7 +73,7 @@ which this table cites and does not restate.
 | `GradNorm` | composition | — | `SpanReduce` across several spans |
 | `ScalarDot` | composition | — | `SpanReduce` over two buffers, or the backend's dot |
 
-30 entry points: six utilities and 24 arithmetic entries. A composition
+32 entry points: six utilities and 26 arithmetic entries. A composition
 supplies its own backward as one unit, because [DESIGN.md §5](../DESIGN.md)
 requires a fused backward to be derived and tested as a unit.
 
@@ -89,10 +91,10 @@ a third entry point is [D-002](../spec/decisions.md); that the accuracy bound is
 per code and lives in [pointwise_ops.md](../spec/pointwise_ops.md) is
 [D-003](../spec/decisions.md).
 
-**Required bring-up cost: 16 of the 30 entry points** — the six utilities and
-ten arithmetic primitives. A device at that tier runs every graph in
+**Required bring-up cost: 18 of the 32 entry points** — the six utilities and
+twelve arithmetic primitives. A device at that tier runs every graph in
 [model.md](model.md) on the composition path without writing one fused kernel.
-Training adds the two stateful entries, for 18. The two fp8 entries are
+Training adds the two stateful entries, for 20. The two fp8 entries are
 declared and never assumed: a `caps.json` carries `fp8_storage` and `fp8_gemm`
 only where the silicon has the formats, and the model then either runs the dense
 path or fails with the missing bit named. Before this partition, a device

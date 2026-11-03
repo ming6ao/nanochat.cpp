@@ -3,7 +3,7 @@
   "capability_vocabulary": 1,
   "backend": "cuda",
   "vendor": "nvidia",
-  "note": "The declaration of this device axis (docs/model-and-device-bringup.md section 6): one entry per NVIDIA device this backend supports, in the shape nanochat/device_profile.h declares, so src/device_profile.cc derives its table from this file and from the sibling caps files and no header holds a row. 'features' holds spec/capability_bits.md vocabulary names verbatim, lower_snake_case, one string per bit, and lists only the bits this backend honours on that device: the fp8 pair appears only where the silicon has the E4M3/E5M2 tensor core and bf16 only where bf16 arithmetic exists, because a declaration may not grant a precision the card lacks (section 4 of the bit file). The primitive tier is complete on every entry: both reductions, the pointwise family with all nine op codes, gather and scatter-add, and causal group-query attention in the full and the sliding variant at one tile size. The three override_* bits are promises about this backend's fused families and hold on every device, so every entry declares them; override_value_gate is absent because include/nanochat/tensor.h has no constant for it, and a declared name with no constant is a run-time lie the planner can never see.",
+  "note": "The declaration of this device axis (docs/model-and-device-bringup.md section 6): one entry per NVIDIA device this backend supports, in the shape nanochat/device_profile.h declares, so src/device_profile.cc derives its table from this file and from the sibling caps files and no header holds a row. 'features' holds spec/capability_bits.md vocabulary names verbatim, lower_snake_case, one string per bit, and lists only the bits this backend honours on that device: the fp8 pair appears only where the silicon has the E4M3/E5M2 tensor core and bf16 only where bf16 arithmetic exists, because a declaration may not grant a precision the card lacks (section 4 of the bit file). The primitive tier is complete on every entry: both reductions, the pointwise family with all nine op codes, gather and scatter-add, causal group-query attention in the full and the sliding variant at one tile size, and the smear. The three override_* bits are promises about this backend's fused families and hold on every device, so every entry declares them; override_value_gate is absent because include/nanochat/tensor.h has no constant for it, and a declared name with no constant is a run-time lie the planner can never see.",
   "devices": [
     {
       "name": "h100",
@@ -42,7 +42,8 @@
         "embedding_forward",
         "embedding_backward",
         "attention_forward",
-        "attention_backward"
+        "attention_backward",
+        "smear"
       ],
       "pointwise_codes": [
         "kScale",
@@ -126,7 +127,8 @@
         "embedding_forward",
         "embedding_backward",
         "attention_forward",
-        "attention_backward"
+        "attention_backward",
+        "smear"
       ],
       "pointwise_codes": [
         "kScale",
@@ -210,7 +212,8 @@
         "embedding_forward",
         "embedding_backward",
         "attention_forward",
-        "attention_backward"
+        "attention_backward",
+        "smear"
       ],
       "pointwise_codes": [
         "kScale",
@@ -292,7 +295,8 @@
         "embedding_forward",
         "embedding_backward",
         "attention_forward",
-        "attention_backward"
+        "attention_backward",
+        "smear"
       ],
       "pointwise_codes": [
         "kScale",
@@ -373,7 +377,8 @@
         "embedding_forward",
         "embedding_backward",
         "attention_forward",
-        "attention_backward"
+        "attention_backward",
+        "smear"
       ],
       "pointwise_codes": [
         "kScale",
