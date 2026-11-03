@@ -186,7 +186,7 @@ void CheckMissingBitIsRejected() {
 // composition as the declined fallback.
 void CheckOverrideBitSelectsTheFusedFamily() {
   const nanochat::FusedOverride registrations[] = {
-      {"rms_norm", "rms_norm", nanochat::kFeatureFusedResidualRmsNorm},
+      {"rms_norm", "rms_norm", nanochat::kFeatureOverrideRmsNorm},
   };
   nanochat::ModelSpec spec = nanochat::DefaultModelSpec();
   spec.name = "override-probe";
@@ -198,8 +198,7 @@ void CheckOverrideBitSelectsTheFusedFamily() {
   // (a) The bit is declared: the family wins, the composition is recorded.
   const nanochat::Plan fused = nanochat::BuildPlanWithDevice(
       request,
-      FabricatedDevice(ReferenceMask() |
-                       nanochat::kFeatureFusedResidualRmsNorm),
+      FabricatedDevice(ReferenceMask() | nanochat::kFeatureOverrideRmsNorm),
       registrations, 1, nullptr);
   Check(fused.ok, "a mask declaring the override bit builds a plan");
   const nanochat::CompositionChoice* choice =
@@ -247,8 +246,7 @@ void CheckOverrideBitSelectsTheFusedFamily() {
   strict.model = &policy_off;
   const nanochat::Plan forced = nanochat::BuildPlanWithDevice(
       strict,
-      FabricatedDevice(ReferenceMask() |
-                       nanochat::kFeatureFusedResidualRmsNorm),
+      FabricatedDevice(ReferenceMask() | nanochat::kFeatureOverrideRmsNorm),
       registrations, 1, nullptr);
   choice = FindChoice(forced, nanochat::CompositionKind::kRmsNorm);
   Check(choice != nullptr && !choice->fused,

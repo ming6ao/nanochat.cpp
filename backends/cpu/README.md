@@ -71,11 +71,13 @@ list, is the promise the planner reads.
 drift, so `caps_names.h` holds the mapping as data - one row per name, carrying
 the `kFeature*` constant `include/nanochat/tensor.h` actually defines - and
 `caps_test.cc` looks every declared string up through it. A declared string with
-no constant is a hard failure naming the string, never a silent drop. The frozen
-header is the authority here, so five rows carry its spelling and add no alias:
-`kFeatureAdamW` and `kFeatureMuon` for `stateful_adamw`/`stateful_muon`, and
-`kFeatureFusedResidualRmsNorm`, `kFeatureFusedQkPrep`, `kFeatureFusedClassifier`
-for `override_rms_norm`/`override_qk_prep`/`override_classifier`.
+no constant is a hard failure naming the string, never a silent drop. The header
+is the authority here, so two rows carry a non-mechanical spelling:
+`kFeatureAdamW` and `kFeatureMuon` for `stateful_adamw`/`stateful_muon`. The
+three `override_*` rows carry the mechanical spelling
+(`kFeatureOverrideRmsNorm`, `kFeatureOverrideQkPrep`,
+`kFeatureOverrideClassifier`); the pre-rename `kFeatureFused*` spellings survive
+in the header as one-cycle aliases of the same values.
 `override_value_gate` has no constant in this build, so the table has no row for
 it and this declaration must never name it; `kFeatureFusedAttention` has a
 constant but no vocabulary name and no row either. `backends/cuda/caps_names.h`

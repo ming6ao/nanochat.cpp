@@ -6,7 +6,7 @@
 // exposes the fabricated-device seam: a plan can be decided before the silicon
 // exists, and a *rejection* can be read before it costs a queue slot.
 //
-// Four things are asserted here, each with a fabricated capability mask and a
+// Five things are asserted here, each with a fabricated capability mask and a
 // fabricated registration table. No device is opened, no checkpoint is read,
 // and no kernel runs.
 //
@@ -26,6 +26,9 @@
 //   4. A mask that declares an override bit resolves that composition to the
 //      fused family and records the composition as the declined fallback, so
 //      the report explains the choice whether the resolution succeeded or not.
+//   5. A zero mask is a device that declares nothing: the plan is rejected and
+//      the missing tier bit is named. `GetCaps()` is now the only producer of
+//      the mask, so nothing answers behind a backend that stayed silent.
 //
 // The fabricated device answers are passed through `BuildPlanWithDevice`
 // (`src/plan_internal.h`), which is the same pure function `BuildPlan` calls
@@ -272,7 +275,7 @@ void CheckUnplacedCompositionNamesItsGap() {
 // composition as the declined fallback.
 void CheckOverrideBitSelectsTheFusedFamily() {
   const nanochat::FusedOverride registrations[] = {
-      {"rms_norm", "rms_norm", nanochat::kFeatureFusedResidualRmsNorm},
+      {"rms_norm", "rms_norm", nanochat::kFeatureOverrideRmsNorm},
   };
   nanochat::ModelSpec spec = nanochat::DefaultModelSpec();
   spec.name = "override-probe";
@@ -284,8 +287,7 @@ void CheckOverrideBitSelectsTheFusedFamily() {
   // (a) The bit is declared: the family wins, the composition is recorded.
   const nanochat::Plan fused = nanochat::BuildPlanWithDevice(
       request,
-      FabricatedDevice(ReferenceMask() |
-                       nanochat::kFeatureFusedResidualRmsNorm),
+      FabricatedDevice(ReferenceMask() | nanochat::kFeatureOverrideRmsNorm),
       registrations, 1, nullptr);
   Check(fused.ok, "a mask declaring the override bit builds a plan");
   const nanochat::CompositionChoice* choice =
@@ -334,8 +336,7 @@ void CheckOverrideBitSelectsTheFusedFamily() {
   strict.model = &policy_off;
   const nanochat::Plan forced = nanochat::BuildPlanWithDevice(
       strict,
-      FabricatedDevice(ReferenceMask() |
-                       nanochat::kFeatureFusedResidualRmsNorm),
+      FabricatedDevice(ReferenceMask() | nanochat::kFeatureOverrideRmsNorm),
       registrations, 1, nullptr);
   Check(forced.ok, "the policy-off spec still builds a plan");
   choice = FindChoice(forced, nanochat::CompositionKind::kRmsNorm);
@@ -343,28 +344,28 @@ void CheckOverrideBitSelectsTheFusedFamily() {
         "policy.allow_fused_overrides = false keeps the composition");
 }
 
-// 5. A device that reports no mask at all is read through its declaration: the
-// reference backend reports the host and zero bits, and silence is not a
-// statement that the device offers nothing.
-void CheckSilentDeviceReadsItsDeclaration() {
+// 5. A zero mask is a device that declares nothing, and the planner reads it
+// that way: `GetCaps()` is the only producer of the mask, so there is no second
+// lookup behind it that could answer for a backend that stayed silent.
+void CheckZeroMaskDeclaresNothing() {
   const nanochat::ModelSpec spec = nanochat::DefaultModelSpec();
   nanochat::PlanRequest request;
   request.model = &spec;
   request.graph = nanochat::GraphKind::kTrain;
 
-  // A zero mask with the reference device's name: the declaration in
-  // `backends/cpu/caps.json` is the answer.
-  const nanochat::Plan declared = nanochat::BuildPlanWithDevice(
-      request, FabricatedDevice(0), nullptr, 0, nullptr);
-  Check(
-      declared.ok,
-      "a device that declares no mask is read through backends/cpu/caps.json");
-  Check(nanochat::EffectiveDeviceMask(FabricatedDevice(0)) != 0,
-        "the effective mask falls back to the declaration rather than to zero");
-
-  // A device with no name and no mask has declared nothing, and the tier bit it
-  // is missing is named.
+  // A named device with a zero mask: the name is not an answer, and the tier
+  // bit the plan needs is the one it names.
   std::string why_not;
+  const nanochat::Plan silent = nanochat::BuildPlanWithDevice(
+      request, FabricatedDevice(0), nullptr, 0, &why_not);
+  Check(!silent.ok,
+        "a device that reports a zero mask cannot build a plan, whatever it "
+        "is called");
+  Check(Contains(why_not, "primitive_tier_complete"),
+        "the rejection names the missing tier bit: " + why_not);
+
+  // A device with no name and no mask has declared nothing either.
+  why_not.clear();
   const nanochat::Plan anonymous = nanochat::BuildPlanWithDevice(
       request, FabricatedDevice(0, nullptr), nullptr, 0, &why_not);
   Check(!anonymous.ok,
@@ -405,7 +406,7 @@ int main() {
   CheckMissingBitIsRejected();
   CheckUnplacedCompositionNamesItsGap();
   CheckOverrideBitSelectsTheFusedFamily();
-  CheckSilentDeviceReadsItsDeclaration();
+  CheckZeroMaskDeclaresNothing();
   CheckCompositionNames();
 
   if (g_failures != 0) {

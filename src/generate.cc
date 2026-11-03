@@ -6,8 +6,6 @@
 // The public `KvCache` type hides the concrete layout, so callers only create a
 // cache, hand it to Prefill/Decode, and read its position.
 
-#include "src/model_impl.h"
-
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -18,11 +16,11 @@
 #include <limits>
 #include <vector>
 
-#include "nanochat/dataloader.h"
 #include "nanochat/kernels.h"
 #include "nanochat/rand.h"
 #include "nanochat/sampler.h"
 #include "src/generate.h"
+#include "src/inference_view.h"
 #include "src/ops.h"
 #include "src/workspace.h"
 
@@ -261,16 +259,22 @@ class KvCacheImpl final : public KvCache {
 // The single inference forward, shared by prefill (T > 1) and decode (T == 1).
 // It appends the current key/value rows to `kv`, attends against the whole
 // cache, and (optionally) writes the soft-capped last-position logits.
-void RunInference(TrainModel* model, const int* tokens, int num_tokens,
+//
+// `view` is the read-only view of the model (`src/inference_view.h`): every
+// weight, table, and mix scalar below comes from it, so this graph never sees
+// the training model. `model` is the owner those readers apply to.
+void RunInference(const InferenceView& view, const int* tokens, int num_tokens,
                   KvCacheImpl* kv, float* logits_out) {
-  const Config& config = model->config();
+  Model& model = *view.model;
+  const Config& config = *view.config;
   const int hidden = config.hidden_dim;
   const int heads = config.num_heads;
   const int kv_heads = config.num_kv_heads;
   const int head_dim = config.head_dim();
   const int padded = config.padded_vocab_size;
   const int vocab = config.vocab_size;
-  const int layers = config.num_layers;
+  // The layer count comes from the view, beside the block array it bounds.
+  const int layers = view.num_layers;
   const int half = head_dim / 2;
 
   const int t0 = kv->pos();
@@ -288,7 +292,7 @@ void RunInference(TrainModel* model, const int* tokens, int num_tokens,
   InferenceWorkspace& ws = kv->workspace();
 
   // Embedding -> norm.
-  kernels::EmbeddingForward(t, hidden, tokens, model->wte(), ws.emb_raw);
+  kernels::EmbeddingForward(t, hidden, tokens, view.wte, ws.emb_raw);
   ops::RmsNormForward(rows, hidden, kRmsEps, ws.emb_raw, ws.emb_norm,
                       ws.rstd_emb);
 
@@ -297,8 +301,8 @@ void RunInference(TrainModel* model, const int* tokens, int num_tokens,
   // sequence has no previous token.
   const ComputeType* emb_norm = ws.emb_norm;
   if (t > 1) {
-    ops::SmearForward(1, t, hidden, emb_norm, model->smear_gate(),
-                      model->smear_lambda(), ws.x0, ws.smear_sig);
+    ops::SmearForward(1, t, hidden, emb_norm, view.smear_gate,
+                      view.smear_lambda(model), ws.x0, ws.smear_sig);
     kernels::Memcpy(kv->prev(), emb_norm + (rows - 1) * hidden,
                     static_cast<std::size_t>(hidden) * sizeof(ComputeType),
                     CopyDir::kDeviceToDevice);
@@ -308,8 +312,7 @@ void RunInference(TrainModel* model, const int* tokens, int num_tokens,
     const ComputeType* prev = kv->prev();
     std::vector<ComputeType> eh = StageToHost(emb_norm, hidden);
     std::vector<ComputeType> ph = StageToHost(prev, hidden);
-    std::vector<ComputeType> wh =
-        StageToHost(model->smear_gate(), kSmearChannels);
+    std::vector<ComputeType> wh = StageToHost(view.smear_gate, kSmearChannels);
     std::vector<ComputeType> xh(static_cast<std::size_t>(hidden));
     float pre = 0.0f;
     for (int j = 0; j < kSmearChannels; ++j) {
@@ -317,7 +320,7 @@ void RunInference(TrainModel* model, const int* tokens, int num_tokens,
              AsF(wh[static_cast<std::size_t>(j)]);
     }
     const float s = Sigmoid(pre);
-    const float gate = model->smear_lambda() * s;
+    const float gate = view.smear_lambda(model) * s;
     for (int j = 0; j < hidden; ++j) {
       xh[static_cast<std::size_t>(j)] =
           ToC(AsF(eh[static_cast<std::size_t>(j)]) +
@@ -344,7 +347,7 @@ void RunInference(TrainModel* model, const int* tokens, int num_tokens,
   // Trunk. The rotary tables are offset to the cache position so a decode token
   // is rotated at its absolute position. Grow the table if inference runs past
   // the last training sequence length.
-  model->EnsureRopeCapacity(t0 + t);
+  view.ensure_rope_capacity(model, t0 + t);
   ops::BlockShape shape;
   shape.batch = 1;
   shape.seq = t;
@@ -359,8 +362,10 @@ void RunInference(TrainModel* model, const int* tokens, int num_tokens,
   shape.attn_scale = 0.0f;
   shape.causal = true;
 
-  const float* cos = model->cos_table() + static_cast<std::size_t>(t0) * half;
-  const float* sin = model->sin_table() + static_cast<std::size_t>(t0) * half;
+  const float* cos =
+      view.cos_table(model) + static_cast<std::size_t>(t0) * half;
+  const float* sin =
+      view.sin_table(model) + static_cast<std::size_t>(t0) * half;
 
   ops::BlockActivations& a = ws.block;
   const ComputeType* x = ws.x0;
@@ -371,8 +376,8 @@ void RunInference(TrainModel* model, const int* tokens, int num_tokens,
     a.cache_offset = t0;
     a.attn_k = a.cache_k;
     a.attn_v = a.cache_v;
-    ops::BlockForward(shape, model->layer_weights(i), a, tokens, cos, sin, x,
-                      ws.x0, model->resid(i), model->x0_lambda(i));
+    ops::BlockForward(shape, view.layer_weights[i], a, tokens, cos, sin, x,
+                      ws.x0, view.resid(model, i), view.x0_lambda(model, i));
     if (i == layers / 2) {
       kernels::Memcpy(
           ws.x_backout, a.x_out,
@@ -383,12 +388,12 @@ void RunInference(TrainModel* model, const int* tokens, int num_tokens,
   }
 
   // Backout, final norm, classifier.
-  ops::BackoutForward(x, ws.x_backout, model->backout_lambda(), ws.x_final_pre,
-                      rows * hidden);
+  ops::BackoutForward(x, ws.x_backout, view.backout_lambda(model),
+                      ws.x_final_pre, rows * hidden);
   ops::RmsNormForward(rows, hidden, kRmsEps, ws.x_final_pre, ws.x_final_norm,
                       ws.rstd_final);
-  ops::LinearForward(ws.x_final_norm, model->lm_head(), ws.raw_logits, rows,
-                     hidden, padded);
+  ops::LinearForward(ws.x_final_norm, view.lm_head, ws.raw_logits, rows, hidden,
+                     padded);
 
   kv->set_pos(t0 + t);
 
@@ -412,18 +417,18 @@ std::unique_ptr<KvCache> CreateKvCache(const Config& config, int max_seq) {
 
 void Prefill(Model* model, const int* tokens, int num_tokens, KvCache* kv) {
   if (model == nullptr || kv == nullptr || tokens == nullptr) return;
-  RunInference(static_cast<TrainModel*>(model), tokens, num_tokens,
+  RunInference(ViewForInference(*model), tokens, num_tokens,
                static_cast<KvCacheImpl*>(kv), nullptr);
 }
 
 int Decode(Model* model, int token, KvCache* kv, const SampleParams& params) {
   if (model == nullptr || kv == nullptr) return -1;
-  auto* impl = static_cast<TrainModel*>(model);
+  const InferenceView view = ViewForInference(*model);
   auto* cache = static_cast<KvCacheImpl*>(kv);
-  std::vector<float> logits(
-      static_cast<std::size_t>(impl->config().vocab_size));
-  RunInference(impl, &token, 1, cache, logits.data());
-  return SampleToken(logits.data(), impl->config().vocab_size, params, nullptr);
+  const int vocab = view.config->vocab_size;
+  std::vector<float> logits(static_cast<std::size_t>(vocab));
+  RunInference(view, &token, 1, cache, logits.data());
+  return SampleToken(logits.data(), vocab, params, nullptr);
 }
 
 void PrefillLogits(Model* model, const int* tokens, int num_tokens, KvCache* kv,
@@ -432,13 +437,13 @@ void PrefillLogits(Model* model, const int* tokens, int num_tokens, KvCache* kv,
       logits_out == nullptr) {
     return;
   }
-  RunInference(static_cast<TrainModel*>(model), tokens, num_tokens,
+  RunInference(ViewForInference(*model), tokens, num_tokens,
                static_cast<KvCacheImpl*>(kv), logits_out);
 }
 
 void DecodeLogits(Model* model, int token, KvCache* kv, float* logits_out) {
   if (model == nullptr || kv == nullptr || logits_out == nullptr) return;
-  RunInference(static_cast<TrainModel*>(model), &token, 1,
+  RunInference(ViewForInference(*model), &token, 1,
                static_cast<KvCacheImpl*>(kv), logits_out);
 }
 
@@ -459,7 +464,8 @@ void GenerateBatchWithHook(Model* model, const int* prompt, int prompt_len,
   if (num_samples == 0) return;
   out->resize(static_cast<std::size_t>(num_samples));
 
-  const Config& config = model->config();
+  const InferenceView view = ViewForInference(*model);
+  const Config& config = *view.config;
 
   // The effective prompt is an optional prepended beginning-of-sequence id
   // followed by the caller's ids. Every row shares it, so the whole batch can
@@ -479,8 +485,7 @@ void GenerateBatchWithHook(Model* model, const int* prompt, int prompt_len,
       std::make_unique<KvCacheImpl>(config, capacity);
   const int prefill_len = static_cast<int>(effective.size()) - 1;
   if (prefill_len > 0) {
-    RunInference(static_cast<TrainModel*>(model), effective.data(), prefill_len,
-                 base.get(), nullptr);
+    RunInference(view, effective.data(), prefill_len, base.get(), nullptr);
   }
 
   // One independent cache per row; the clones inherit the prefilled state and

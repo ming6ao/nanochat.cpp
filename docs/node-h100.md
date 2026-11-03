@@ -97,8 +97,9 @@ result is 1,048,576 for both horizons below.
 | 8:1 | 5.84 billion | 5,570 | 2.79 times 10^19 FLOPs |
 | 12:1 | 8.76 billion | 8,356 | 4.18 times 10^19 FLOPs |
 
-The arithmetic count comes from `EstimateFlopsPerToken` in `src/train.cc`, which
-returns 4.775 billion FLOPs per token for this configuration.
+The arithmetic count comes from `EstimateFlopsPerToken` in
+`src/performance_model.cc`, which returns 4.775 billion FLOPs per token for this
+configuration.
 
 Use the 8:1 ratio for the GPT-2 comparison. The reference uses ratio 8 for the
 same target, and a 12:1 run needs about 50 percent more time.

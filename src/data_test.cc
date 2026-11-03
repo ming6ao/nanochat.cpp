@@ -13,6 +13,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <iterator>
 #include <memory>
 #include <string>
 #include <utility>
@@ -22,6 +23,7 @@
 #include "nanochat/dataloader.h"
 #include "nanochat/tensor.h"
 #include "nanochat/tokenizer.h"
+#include "src/data_cursor.h"
 #include "src/tokenizer/split_pattern.h"
 #include "src/tokenizer/tokenizer_internal.h"
 
@@ -465,6 +467,69 @@ void TestDocumentLoader() {
   }
 }
 
+// The data-cursor sidecar's layout, pinned byte for byte. Both distribution
+// drivers write it through one unit, and checkpoints written before that unit
+// existed still resume, so the bytes may not drift
+// (docs/api-surface.md R13, docs/distributed-design.md section 11).
+void TestDataCursorSidecar() {
+  nanochat::DataLoaderState state;
+  state.epoch = 2;
+  state.source_position = 5;
+  state.documents = {{1, 2, 3}, {70000}};
+  const std::string checkpoint = TempPath("data_cursor.nchkpt01");
+  Expect(nanochat::WriteDataCursor(checkpoint, state),
+         "the cursor write failed");
+  const std::string path = nanochat::DataCursorPath(checkpoint);
+  Expect(path == checkpoint + ".cursor", "the sidecar path is wrong");
+
+  // Three little-endian 64-bit header words (the epoch, the source position,
+  // the document count), then one length word and one word per token for each
+  // document.
+  const std::vector<std::uint64_t> words = {2, 5, 2, 3, 1, 2, 3, 1, 70000};
+  std::string expected;
+  for (const std::uint64_t word : words) {
+    for (int i = 0; i < 8; ++i) {
+      expected.push_back(static_cast<char>((word >> (8 * i)) & 0xffu));
+    }
+  }
+  std::ifstream in(path, std::ios::binary);
+  const std::string bytes((std::istreambuf_iterator<char>(in)),
+                          std::istreambuf_iterator<char>());
+  Expect(bytes == expected,
+         "the sidecar bytes changed: " + std::to_string(bytes.size()) +
+             " against " + std::to_string(expected.size()));
+
+  nanochat::DataLoaderState loaded;
+  Expect(nanochat::ReadDataCursor(checkpoint, &loaded),
+         "the cursor read failed");
+  Expect(loaded.epoch == state.epoch, "the epoch did not round-trip");
+  Expect(loaded.source_position == state.source_position,
+         "the source position did not round-trip");
+  Expect(loaded.documents == state.documents,
+         "the buffered documents did not round-trip");
+
+  // A missing or truncated sidecar reads as the start of the stream and leaves
+  // the caller's state alone, so a driver replays instead of failing.
+  nanochat::DataLoaderState absent;
+  Expect(!nanochat::ReadDataCursor(TempPath("data_cursor_absent"), &absent),
+         "a missing sidecar must not read");
+  Expect(absent.epoch == 0 && absent.source_position == 0 &&
+             absent.documents.empty(),
+         "a missing sidecar must leave the cursor at the start of the stream");
+  const std::string truncated_path = TempPath("data_cursor_truncated.nchkpt01");
+  {
+    std::ofstream out(nanochat::DataCursorPath(truncated_path),
+                      std::ios::binary);
+    out << "abc";
+  }
+  nanochat::DataLoaderState truncated;
+  Expect(!nanochat::ReadDataCursor(truncated_path, &truncated),
+         "a truncated sidecar must not read");
+  Expect(
+      truncated.source_position == 0,
+      "a truncated sidecar must leave the cursor at the start of the stream");
+}
+
 // The data cursor resumes the exact document stream
 // (docs/distributed-design.md section 11). A loader consumes two batches and
 // records its cursor. A second loader, built with the sharded start that the
@@ -501,8 +566,7 @@ void TestShardedResume() {
   const std::size_t rows = static_cast<std::size_t>(batch) * seq;
 
   nanochat::DocumentSourceFactory sharded =
-      nanochat::ShardDocumentSourceFactory(base, rank, world, /*start=*/0,
-                                           /*start_on_creation=*/0);
+      nanochat::ShardDocumentSourceFactory(base, rank, world, /*start=*/0);
   DataLoader first(sharded, tokenizer.get(), batch, seq, /*seed=*/7,
                    /*tokenizer_threads=*/1, /*document_buffer=*/16);
   std::vector<int> tokens(rows);
@@ -521,10 +585,11 @@ void TestShardedResume() {
     return;
   }
 
+  // The resume seeks the loader's first source, the one the constructor makes,
+  // and primes the buffer from the cursor (include/nanochat/dataloader.h).
   nanochat::DocumentSourceFactory resumed =
       nanochat::ShardDocumentSourceFactory(base, rank, world,
-                                           state.source_position,
-                                           static_cast<int>(state.epoch));
+                                           state.source_position);
   DataLoader second(resumed, tokenizer.get(), batch, seq, /*seed=*/7,
                     /*tokenizer_threads=*/1, /*document_buffer=*/16, &state);
   std::vector<int> got_tokens(rows);
@@ -587,6 +652,7 @@ int main() {
   TestDocumentLoader();
   TestLoaderReportsTheSourceError();
   TestShardedResume();
+  TestDataCursorSidecar();
   if (g_failures != 0) {
     std::fprintf(stderr, "data_test: %d failure(s)\n", g_failures);
     return 1;

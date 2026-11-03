@@ -50,18 +50,17 @@ using DocumentSourceFactory =
 //
 // `start` is a global source position (docs/distributed-design.md section 11).
 // The wrapper drops every document before `start` and then resumes the stride
-// filter. It applies `start` on the creation whose 0-based ordinal is
-// `start_on_creation`; every other creation begins at 0. A resume passes the
-// stored epoch as `start_on_creation`, so earlier epochs are skipped without a
-// full replay. `start` of 0 and `start_on_creation` of 0 keep the
-// single-process behavior.
+// filter. It applies `start` to the source the loader's constructor creates,
+// which is the stored epoch's; the buffer the loader primes from the cursor
+// holds the documents read before `start`, so the packing continues where it
+// stopped. A later source, which a `Reset` makes, begins at 0 and so opens the
+// next epoch. A `start` of 0 keeps the single-process behavior.
 //
 // The wrapper always tracks `position()`, even when `world_size` is 1, because
 // the data cursor needs the underlying read position to resume exactly.
 DocumentSourceFactory ShardDocumentSourceFactory(DocumentSourceFactory factory,
                                                  int rank, int world_size,
-                                                 std::int64_t start = 0,
-                                                 int start_on_creation = 0);
+                                                 std::int64_t start = 0);
 
 // The serializable data cursor (docs/distributed-design.md section 11).
 // `epoch` is the number of `Reset` calls. `source_position` is the read

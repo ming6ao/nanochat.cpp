@@ -7,6 +7,18 @@ load("@rules_cc//cc:defs.bzl", "cc_library")
 
 package(default_visibility = ["//visibility:public"])
 
+# The two headers a check reads as text rather than compiles:
+# `tools/contract_vocabulary.py --check` compares the capability rows of
+# `src/capability_names.h` and the `features[]` of every `caps.json` against the
+# `kFeature*` constants of `tensor.h`, and compares every `caps.json`
+# `primitives[]` entry against the seam symbols of `kernels.h`. A Bazel test
+# sees only its runfiles, so the file needs a label to travel as `data`. The
+# library below globs the same headers, so the export adds a label and no copy.
+exports_files([
+    "kernels.h",
+    "tensor.h",
+])
+
 cc_library(
     name = "nanochat",
     hdrs = glob(["*.h"]),

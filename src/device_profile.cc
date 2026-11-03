@@ -11,17 +11,19 @@
 // `//tests:device_profile_test` holds the two consistent: it resolves every
 // derived profile through the MFU table and compares the rates.
 //
-// Two views come out of the same parse:
+// Two views come out of the same parse, and `include/nanochat/device_profile.h`
+// declares both:
 //
-//   * `AllDeviceProfiles` / `FindDeviceProfile` / `CapsFromProfile`, the shape
-//     `include/nanochat/device_profile.h` declares. A caps entry that is not an
-//     accelerator (`"is_device": false`, the reference host) declares no row:
-//     it has no launch cost, no HBM rate and no tensor cores, and the MFU table
-//     has no rate for it.
-//   * `DeclaredFeatureMaskForDevice` (`src/device_caps.h`), the mechanism mask
-//     the same entry declares. It lives beside the profile instead of inside it
-//     because `DeviceProfile` has no mask field and that header is frozen for
-//     this campaign; the planner is its consumer.
+//   * `AllDeviceProfiles` / `FindDeviceProfile` / `CapsFromProfile`, the
+//     profile rows. A caps entry that is not an accelerator
+//     (`"is_device": false`, the reference host) declares no row: it has no
+//     launch cost, no HBM rate and no tensor cores, and the MFU table has no
+//     rate for it.
+//   * `DeclaredFeatureMask`, the mechanism mask the same entry declares. It is
+//     a lookup rather than a `DeviceProfile` field because `DeviceProfile`
+//     describes a device's shape and the mask is a separate promise, and
+//     because a reference backend declares bits without contributing a row.
+//     The planner and the reference backend's `GetCaps()` are its consumers.
 //
 // The unit is deliberately a leaf: it depends only on `nanochat/tensor.h` plus
 // the two `src/` helpers that read the files (the small JSON reader and the
@@ -41,7 +43,6 @@
 
 #include "nanochat/tensor.h"
 #include "src/capability_names.h"
-#include "src/device_caps.h"
 #include "src/json.h"
 
 namespace nanochat {
@@ -50,7 +51,11 @@ namespace {
 // The backends whose declarations are read. A new backend adds one entry here
 // and one file label to this target's `data` in `src/BUILD.bazel`; a new
 // *device* adds nothing but a `devices[]` entry in a caps file.
+// BEGIN GENERATED (tools/contract_vocabulary.py --write)
+// clang-format off
 constexpr const char* kBackendNames[] = {"cpu", "cuda"};
+// clang-format on
+// END GENERATED (tools/contract_vocabulary.py --write)
 constexpr int kBackendCount =
     static_cast<int>(sizeof(kBackendNames) / sizeof(kBackendNames[0]));
 
@@ -316,7 +321,7 @@ const DeviceProfile* FindDeviceProfile(const std::string& name) {
   return nullptr;
 }
 
-std::uint64_t DeclaredFeatureMaskForDevice(const std::string& device_name) {
+std::uint64_t DeclaredFeatureMask(const std::string& device_name) {
   const DerivedTable& table = Table();
   const std::string wanted = Normalize(device_name);
   if (wanted.empty()) return 0;
@@ -350,7 +355,7 @@ Caps CapsFromProfile(const DeviceProfile& profile) {
   // The mechanism mask comes from the same declaration the profile does, so a
   // simulated device reports the bits its caps file names rather than a second
   // hand-written list (`spec/capability_bits.md` section 1).
-  caps.feature_mask = DeclaredFeatureMaskForDevice(profile.name);
+  caps.feature_mask = DeclaredFeatureMask(profile.name);
   return caps;
 }
 

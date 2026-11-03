@@ -65,7 +65,7 @@ The model has three inputs. Each one has one owner and one stored form.
 
 | Input | Source | Stored in |
 |---|---|---|
-| The operation counters | The model configuration | A counter struct in `src/train.cc` |
+| The operation counters | The model configuration | A counter struct in `src/performance_model.cc` |
 | The precision assignment | The fp8 rule and the layer set | `docs/fp8-training.md` |
 | The device limits | The device profile table | `include/nanochat/device_profile.h` |
 | The launch cost | A device property | The device profile table |
@@ -76,8 +76,8 @@ in the attainment record only, and never in the estimator.
 ## 4. The operation counter table
 
 The tree counts the total arithmetic today. `EstimateFlopsPerToken` in
-`src/train.cc` returns one number. The model needs the parts, each with its
-precision.
+`src/performance_model.cc` returns one number. The model needs the parts, each
+with its precision.
 
 Add one struct beside `NumMatmulParams` and `CountParams`:
 
@@ -434,7 +434,7 @@ the document must say so.
 
 | Deliverable | Path | Owner |
 |---|---|---|
-| The counter struct, with the precision per row | `include/nanochat/mfu.h`, `src/train.cc` | Harness |
+| The counter struct, with the precision per row | `include/nanochat/mfu.h`, `src/performance_model.cc` | Harness |
 | The precision assignment | `src/performance_model.cc`, from `docs/fp8-training.md` | Harness |
 | The fp8 rate and the bandwidth column | `include/nanochat/device_profile.h`, `src/device_profile.cc` | Architect |
 | The explicit-precision rate selection | `src/train.cc` | Harness |
@@ -504,7 +504,8 @@ Checks 1 to 5 run in `//tests:performance_model_test`; check 3 also runs in
 
 ## 16. Open questions
 
-1. The counter struct lives beside `NumMatmulParams` in `src/train.cc`. The
+1. The counter struct lives beside `NumMatmulParams` in
+   `src/performance_model.cc`, next to the estimator that reads it. The
    declaration is in `include/nanochat/mfu.h`.
 2. The estimator lives in the C library, in `src/performance_model.cc`.
 3. The report goes to the training log, and `roofline_main` also writes the

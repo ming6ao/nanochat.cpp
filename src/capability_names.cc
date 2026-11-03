@@ -60,8 +60,8 @@ const char* CapabilityConsequence(std::uint64_t bit) {
 }
 
 bool IsOverrideCapability(std::uint64_t bit) {
-  return bit == kFeatureFusedResidualRmsNorm || bit == kFeatureFusedQkPrep ||
-         bit == kFeatureFusedClassifier || bit == kFeatureFusedAttention;
+  return bit == kFeatureOverrideRmsNorm || bit == kFeatureOverrideQkPrep ||
+         bit == kFeatureOverrideClassifier || bit == kFeatureFusedAttention;
 }
 
 bool IsStatefulCapability(std::uint64_t bit) {

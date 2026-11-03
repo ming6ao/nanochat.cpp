@@ -13,16 +13,19 @@
 # `python/nanochat_cpp/checkpoint.py`. The native-tokenizer tools are described
 # in `docs/tokenizer.md`.
 
+load("@rules_python//python:defs.bzl", "py_test")
 load("@rules_shell//shell:sh_test.bzl", "sh_test")
 
 package(default_visibility = ["//visibility:public"])
 
 exports_files([
     "check_tokenizer_parity.py",
+    "contract_vocabulary.py",
     "convert_checkpoint.py",
     "dump_fixtures.py",
     "fixture_common.py",
     "fixture_format.py",
+    "gen_capi_mirrors.py",
     "gen_matrix.py",
     "gen_unicode_tables.py",
     "isolation_gate.py",
@@ -63,6 +66,27 @@ filegroup(
 filegroup(
     name = "matrix",
     srcs = ["gen_matrix.py"],
+)
+
+# The capability vocabulary generator and checker (docs/api-surface.md R4a).
+# `--write` owns the rows that hold a name, a bit, and a position; `--check`
+# compares the rows that also carry prose. It reads spec/capability_bits.md,
+# include/nanochat/tensor.h, src/capability_names.h, and the two caps.json
+# declarations, so a test that consumes this group lists those as data.
+filegroup(
+    name = "contract_vocabulary",
+    srcs = ["contract_vocabulary.py"],
+)
+
+# The C ABI mirror generator (docs/api-surface.md R11b, R20). `--write` owns the
+# `_SIGNATURES` table of `python/nanochat_cpp/_core.py` and the `static_assert`
+# block of `bindings/nanochat_capi_test.cc`. `--check` compares the hand-written
+# `_LAYOUT` table in `_core.py` against include/nanochat/capi.h as well, in both
+# directions. It is standard-library only, so a test that consumes this group
+# lists the two written files and the header as data.
+filegroup(
+    name = "gen_capi_mirrors",
+    srcs = ["gen_capi_mirrors.py"],
 )
 
 # The section 10.4 regenerate-and-diff gate. It drives dump_fixtures.py, so
@@ -122,10 +146,58 @@ sh_test(
     size = "small",
 )
 
+# T0 gate for the capability vocabulary and the seam inventory
+# (docs/api-surface.md R4a and R14). `--check` compares the hand-written rows of
+# src/capability_names.h and every caps.json `features[]` array against
+# spec/capability_bits.md section 3 and include/nanochat/tensor.h, the kinds of
+# spec/block_kinds.md section 2 against the spellings src/model_spec.cc accepts,
+# and every caps.json `primitives[]` entry against the seam symbols of
+# include/nanochat/kernels.h. The mutation cases prove each direction fails with
+# the file and the row named. Hermetic and CPU-only: the standard library, no
+# torch, no GPU, no CUDA toolchain, so it rides the default `-gpu` test leg.
+py_test(
+    name = "contract_vocabulary_test",
+    srcs = ["contract_vocabulary_test.py"],
+    data = [
+        ":contract_vocabulary",
+        "//backends/cpu:caps_json",
+        "//backends/cuda:caps_json",
+        "//include/nanochat:kernels.h",
+        "//include/nanochat:tensor.h",
+        "//spec:block_kinds.md",
+        "//spec:capability_bits.md",
+        "//src:capability_names.h",
+        "//src:model_spec.cc",
+    ],
+    size = "small",
+)
+
+# T0 gate for the three C ABI mirrors (docs/api-surface.md R11b). `--check`
+# compares the ctypes structures, the signature table, and the `static_assert`
+# block against include/nanochat/capi.h, naming the file, the structure, and the
+# field on a disagreement in either direction. The mutation cases prove each
+# direction fails, and one case proves a header form the parser does not know
+# stops the run with the offending line. The fixed-point case proves a second
+# `--write` changes no byte. Hermetic and CPU-only: the standard library, no
+# torch, no GPU, so it rides the default `-gpu` test leg.
+py_test(
+    name = "gen_capi_mirrors_test",
+    srcs = ["gen_capi_mirrors_test.py"],
+    data = [
+        ":gen_capi_mirrors",
+        "//bindings:nanochat_capi_test.cc",
+        "//include/nanochat:capi.h",
+        "//python:nanochat_cpp/_core.py",
+    ],
+    size = "small",
+)
+
 # Aggregation point consumed by //:all_tests.
 test_suite(
     name = "all",
     tests = [
+        ":contract_vocabulary_test",
+        ":gen_capi_mirrors_test",
         ":kaggle_scripts_test",
     ],
 )

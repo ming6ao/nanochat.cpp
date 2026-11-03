@@ -26,6 +26,7 @@
 // without reaching above the kernel seam (DESIGN.md section 2.1).
 
 #include <cstddef>
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -82,6 +83,15 @@ const std::vector<const DeviceProfile*>& AllDeviceProfiles();
 // spelling and the join key resolve to the same entry. Returns null when
 // nothing matches.
 const DeviceProfile* FindDeviceProfile(const std::string& name);
+
+// The capability mask a declaration carries: the bits from
+// `backends/<name>/caps.json`, `devices[].features`, as `kFeature*` values.
+// Returns 0 when no declaration names the device, or when the declaration file
+// is unreachable (a bare binary outside the runfiles tree). It is the declared
+// promise, not a field of `DeviceProfile`: a reference backend declares bits
+// without contributing a profile row, so this lookup answers for a device whose
+// profile the table does not hold.
+std::uint64_t DeclaredFeatureMask(const std::string& device_name);
 
 // Projects a profile onto the vendor-free capability struct the kernel seam
 // reports. The result describes a *device*: `is_device` and `has_cublas` are

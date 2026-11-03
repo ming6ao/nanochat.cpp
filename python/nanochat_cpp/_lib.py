@@ -1,7 +1,9 @@
 """Load the nanochat shared library once.
 
 ``load`` finds the library, declares the ctypes function table, applies the
-``nanochat_init`` sandbox check, and caches the loaded library for the process.
+``nanochat_init`` sandbox check, compares ``nanochat_optim_config_size`` with
+the Python mirror of the optimizer struct, and caches the loaded library for
+the process.
 
 The search order follows docs/python.md sections 5.1 and 8.3, with the
 installed-wheel entry of ``docs/dependency-layering-plan.md`` section 6.3 as
@@ -378,9 +380,12 @@ def load(device=None):
     """Load the shared library once and return the declared handle.
 
     The first call applies ``nanochat_init``. A nonzero status becomes a
-    ``NanochatError`` with the ``nanochat_last_error`` message. ``device``
-    selects the backend on the first call and is checked on every later call,
-    so a CPU process cannot silently create a CUDA model.
+    ``NanochatError`` with the ``nanochat_last_error`` message. It then
+    compares ``nanochat_optim_config_size`` with the ``ctypes`` mirror of
+    ``nanochat_optim_config``, so a library built from another layout fails
+    here instead of misreading every optimizer field after the change.
+    ``device`` selects the backend on the first call and is checked on every
+    later call, so a CPU process cannot silently create a CUDA model.
     """
     global _library, _library_path, _library_backend
     want = _wanted_backend(device)
@@ -396,6 +401,7 @@ def load(device=None):
             _core.declare(library)
             _core.check_status(library, library.nanochat_init(),
                                "nanochat_init")
+            _core.check_optim_config_size(library)
             actual = _core.backend_name(library)
             if want is not None and actual and actual != want:
                 raise _core.NanochatError(

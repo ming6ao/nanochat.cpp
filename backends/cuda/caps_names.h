@@ -59,12 +59,14 @@ struct CapabilityNameEntry {
 // with the one-line header addition `kFeatureOverrideValueGate`; nothing else
 // in this file changes when it does.
 //
-// Two further facts about the frozen header are recorded at the bottom of this
-// file rather than here: the extra `kFeatureFusedAttention` constant, which has
-// no vocabulary name in version 1, and the five constants whose spelling is not
-// the mechanical `kFeature` + upper camel case form.
+// Two further facts are recorded at the bottom of this file rather than here:
+// the extra `kFeatureFusedAttention` constant, which has no vocabulary name in
+// version 1, and the two constants whose spelling is not the mechanical
+// `kFeature` + upper camel case form.
+// BEGIN GENERATED (tools/contract_vocabulary.py --write)
+// clang-format off
 inline constexpr CapabilityNameEntry kCapabilityNames[] = {
-    // Architecture (spec/capability_bits.md bits 1 to 4).
+    // Architecture (bits 1 to 4).
     {"gqa", kFeatureGqa, "kFeatureGqa"},
     {"rope", kFeatureRope, "kFeatureRope"},
     {"sliding_window", kFeatureSlidingWindow, "kFeatureSlidingWindow"},
@@ -77,36 +79,38 @@ inline constexpr CapabilityNameEntry kCapabilityNames[] = {
     // Tier (bit 9).
     {"primitive_tier_complete", kFeaturePrimitiveTierComplete,
      "kFeaturePrimitiveTierComplete"},
-    // Stateful (bits 10 and 11). The header spells these `kFeatureAdamW` and
-    // `kFeatureMuon`; the vocabulary names are `stateful_adamw` and
-    // `stateful_muon`. Same bits, different spelling, and the row says so.
+    // Stateful (bits 10 and 11).
     {"stateful_adamw", kFeatureAdamW, "kFeatureAdamW"},
     {"stateful_muon", kFeatureMuon, "kFeatureMuon"},
-    // Fused override (bits 12 to 14). The header spells these
-    // `kFeatureFusedResidualRmsNorm`, `kFeatureFusedQkPrep` and
-    // `kFeatureFusedClassifier`; the vocabulary names are `override_rms_norm`,
-    // `override_qk_prep` and `override_classifier`.
-    {"override_rms_norm", kFeatureFusedResidualRmsNorm,
-     "kFeatureFusedResidualRmsNorm"},
-    {"override_qk_prep", kFeatureFusedQkPrep, "kFeatureFusedQkPrep"},
-    {"override_classifier", kFeatureFusedClassifier, "kFeatureFusedClassifier"},
+    // Override (bits 12 to 14).
+    {"override_rms_norm", kFeatureOverrideRmsNorm, "kFeatureOverrideRmsNorm"},
+    {"override_qk_prep", kFeatureOverrideQkPrep, "kFeatureOverrideQkPrep"},
+    {"override_classifier", kFeatureOverrideClassifier,
+     "kFeatureOverrideClassifier"},
 };
+// clang-format on
+// END GENERATED (tools/contract_vocabulary.py --write)
 
-// The constants above are the five whose header spelling differs from the
-// mechanical rule. Listed once, as a comment, because the repair pass that
-// renames them must edit `include/nanochat/tensor.h` and this table together:
-//   stateful_adamw          kFeatureAdamW                  ->
-//   kFeatureStatefulAdamw stateful_muon           kFeatureMuon ->
-//   kFeatureStatefulMuon override_rms_norm       kFeatureFusedResidualRmsNorm
-//   -> kFeatureOverrideRmsNorm override_qk_prep        kFeatureFusedQkPrep ->
-//   kFeatureOverrideQkPrep override_classifier     kFeatureFusedClassifier ->
-//   kFeatureOverrideClassifier
+// The constants above are the two whose header spelling differs from the
+// mechanical rule, and the four whose spelling the header now matches:
 //
-// `kFeatureFusedAttention` is a seventh divergence in the other direction: the
-// header declares the bit and `spec/capability_bits.md` version 1 has no name
-// for it, so no caps file may declare it and this backend registers no
-// `attention` override. It is deliberately absent from the table above; the
-// check below fails loudly if it ever reaches a device mask.
+//   stateful_adamw          kFeatureAdamW                   (not mechanical)
+//   stateful_muon           kFeatureMuon                    (not mechanical)
+//   override_rms_norm       kFeatureOverrideRmsNorm
+//   override_qk_prep        kFeatureOverrideQkPrep
+//   override_classifier     kFeatureOverrideClassifier
+//
+// The header also keeps the three pre-rename spellings
+// (`kFeatureFusedResidualRmsNorm`, `kFeatureFusedQkPrep`,
+// `kFeatureFusedClassifier`) as one-cycle aliases of the same values, so a
+// caller outside this tree still compiles. This table spells the new form, the
+// one the vocabulary rule produces.
+//
+// `kFeatureFusedAttention` is a divergence in the other direction: the header
+// declares the bit and `spec/capability_bits.md` version 1 has no name for it,
+// so no caps file may declare it and this backend registers no `attention`
+// override. It is deliberately absent from the table above; the check below
+// fails loudly if it ever reaches a device mask.
 
 inline constexpr int kCapabilityNameCount =
     static_cast<int>(sizeof(kCapabilityNames) / sizeof(kCapabilityNames[0]));

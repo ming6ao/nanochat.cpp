@@ -16,6 +16,14 @@ namespace cuda_kernels {
 // residual; on return it holds the summed residual `x + residual`, and `out`
 // holds `rmsnorm(x + residual)`. `rstd` receives the per-row reciprocal
 // standard deviation, exactly like RmsNormForward.
+//
+// Test-only helper: its callers are `TestFusedResidual` in
+// `rms_norm_test.cc` and the fused-residual block of `row_kernels_test.cc`, and
+// no non-test translation unit references it. The production path is the seam
+// entry `kernels::RmsNormForward`, which `src/ops.cc` calls when the
+// `override_rms_norm` capability bit is set. The residual blend is a
+// `PointwiseForward` in the same graph (`src/ops.cc`, `BlockForward`), so the
+// seam carries no fused variant.
 void RmsNormForwardFusedResidual(const RmsNormParams& params,
                                  const ComputeType* x, ComputeType* residual,
                                  ComputeType* out, float* rstd);

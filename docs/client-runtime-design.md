@@ -528,7 +528,7 @@ checkpoint exists after an interrupt.
 |---|---|---|
 | T0 CPU | `//src:mesh_test` | Device enumeration and mesh construction |
 | T0 CPU | `//src:runtime_test` | Two CPU devices equal one CPU device |
-| T0 CPU | `//src:mesh_train_test` | The driver record, the summary, the resume, and the interrupt save |
+| T0 CPU | `//src:mesh_train_test` | The driver record, the summary, the resume, the interrupt save, and the data-cursor resume |
 | T0 CPU | `//backends/host/collective:inproc_sync_test` | The in-process sum matches the host reference |
 | T0 CPU | `//python:mesh_test` | The mesh, the placement, and the rejection of a bad placement |
 | T0 CPU | `//python:runtime_test` | The mesh runtime client over the C application binary interface |

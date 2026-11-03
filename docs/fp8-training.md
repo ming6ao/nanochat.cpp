@@ -70,15 +70,15 @@ optimizer state and the loss in fp32.
 | GEMM seam | `Gemm` and `GemmWgrad` take `ComputeType` pointers | `include/nanochat/kernels.h:197`, `:202` |
 | GEMM engine | `cublasSgemm` and `cublasGemmEx` | `backends/cuda/gemm.cu` |
 | Precision assignment | `AssignMatrixPrecision` applies the fp8 rule | `src/performance_model.cc:185-197` |
-| Peak for the MFU line | `PeakFlopsForCompute` knows the fp8 rate | `src/train.cc:325-340` |
+| Peak for the MFU line | `PeakFlopsForCompute` knows the fp8 rate | `src/performance_model.cc` |
 | Roofline | The fp8 build and the fp8 rates are reportable | `src/roofline_main.cc` |
 | fp8 arithmetic | The shared rounding rule, the device quantization kernel, and the scaled GEMM, wired into the graph's linear forward and backward under `if constexpr (kFp8Build)` | `include/nanochat/fp8.h`, `backends/cuda/kernels/fp8.cu`, `include/nanochat/kernels.h:380-390`, `src/ops.cc:518`, `:567`, `:611` |
 | fp8 build define | `--config=fp8` selects `--define=precision=fp8`, which computes in bf16 and quantizes the eligible matmuls | `.bazelrc:42`, `include/nanochat/tensor.h:138-140` |
 | fp8 test gates | Three: the shared rounding, the scaled seam, and the eligible-shape graph plumbing | `//tests:fp8_rounding_test`, `//tests:fp8_gemm_test`, `//tests:fp8_graph_test` |
 
 The estimator already counts the arithmetic correctly for the new path.
-`EstimateFlopsPerToken` in `src/train.cc` counts six operations per matmul
-parameter and the attention terms. fp8 changes the rate, not the count.
+`EstimateFlopsPerToken` in `src/performance_model.cc` counts six operations per
+matmul parameter and the attention terms. fp8 changes the rate, not the count.
 
 **The revision rule.** `docs/performance-model.md` section 5 owns the precision
 rule, and `src/performance_model.cc` implements it. This review aligned this
@@ -585,7 +585,7 @@ so the forward work has a gate.
 |---|---|
 | 3 Precision tier | The tags, the formats, and `supports_fp8` are in the tree; the tier is a build define, `--config=fp8` |
 | 4 Scaling | Decided: dynamic tensorwise scaling (section 4.2), and the kernel implements it |
-| 5 Seam change | Landed: `QuantizeFp8` and `GemmScaledFp8` are seam entries (`include/nanochat/kernels.h`), and the graph calls them under `if constexpr (kFp8Build)` behind the eligibility rule of `src/ops.h:51` |
+| 5 Seam change | Landed: `QuantizeFp8` and `GemmScaledFp8` are seam entries (`include/nanochat/kernels.h`), and the graph calls them under `if constexpr (kFp8Build)` behind the eligibility rule of `src/fp8_policy.h` |
 | 6 Layer set | Decided; aligned with `src/performance_model.cc`. The graph reads a shape eligibility rule, not yet a named layer set |
 | 7 Backward pass | Decided; the format table matches `src/performance_model.cc`, and the mixed E5M2/E4M3 weight-gradient call is in `src/ops.cc` |
 | 8 Optimizer and checkpoint | No work needed (section 8) |

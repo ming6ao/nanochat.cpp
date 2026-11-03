@@ -31,6 +31,7 @@
 #include "nanochat/scheduler.h"
 #include "nanochat/tensor.h"
 #include "nanochat/tokenizer.h"
+#include "src/data_cursor.h"
 #include "src/distributed.h"
 #include "src/ops.h"
 #include "src/tokenizer/split_pattern.h"
@@ -358,6 +359,118 @@ void TestTrainLoopResume() {
                     1e-4);
 }
 
+// A resume whose cursor sits in the second epoch keeps the stored epoch and the
+// restored buffer, and the resumed run consumes the batch the uninterrupted run
+// would have consumed next (docs/distributed-design.md section 11). The mesh
+// driver is the reference: it primes the loader the constructor builds from the
+// cursor and never re-opens the epochs before the stored one.
+void TestResumeKeepsTheEpochAndTheBuffer() {
+  Config config = TinyConfig();
+  config.vocab_size = 512;
+  config.padded_vocab_size = 512;
+  const int batch = 2;
+  const int seq = 8;
+  const std::size_t rows = static_cast<std::size_t>(batch) * seq;
+  const std::string tokenizer_path = TempPath("train_epoch_resume.nctoken");
+  if (!nanochat::SaveTokenizer(tokenizer_path, nanochat::NanochatSplitPattern(),
+                               {}, {{"<|bos|>", 256}})) {
+    Fail("epoch resume: SaveTokenizer failed");
+    return;
+  }
+  // Every document is longer than a row, so a row is one cropped document and a
+  // step consumes exactly two documents. Forty documents and two per step make
+  // an epoch twenty steps long, so step 21 crosses into the second epoch.
+  auto documents = std::make_shared<std::vector<std::string>>();
+  for (int i = 0; i < 40; ++i) {
+    std::string text = "d";
+    text += static_cast<char>('a' + i / 10);
+    text += static_cast<char>('a' + i % 10);
+    text += std::string(20, 'x');
+    documents->push_back(text);
+  }
+  DocumentSourceFactory factory =
+      [documents](std::string*) -> std::unique_ptr<DocumentSource> {
+    return std::make_unique<VectorSource>(*documents, 2);
+  };
+
+  TrainConfig base;
+  base.model = config;
+  base.batch = batch;
+  base.seq = seq;
+  base.log_every = 0;
+  base.seed = kSeed;
+  base.tokenizer_path = tokenizer_path;
+  base.train_source = factory;
+  base.tokenizer_threads = 1;
+  base.document_buffer = 16;
+  base.scheduler.num_iterations = 23;
+
+  const std::string checkpoint = TempPath("train_epoch_resume.nchkpt01");
+  TrainConfig leg1 = base;
+  leg1.num_iterations = 23;
+  leg1.checkpoint_path = checkpoint;
+  TrainLoop stopped(std::move(leg1));
+  stopped.Run();
+
+  nanochat::DataLoaderState stored;
+  if (!nanochat::ReadDataCursor(checkpoint, &stored)) {
+    Fail("epoch resume: the first leg wrote no data cursor");
+    return;
+  }
+  if (stored.epoch != 1) {
+    Fail("epoch resume: the first leg stopped in epoch " +
+         std::to_string(stored.epoch) + ", so it did not cross an epoch");
+    return;
+  }
+  if (stored.documents.empty()) {
+    Fail("epoch resume: the first leg stopped with an empty document buffer");
+    return;
+  }
+
+  TrainConfig leg2 = base;
+  leg2.num_iterations = 23;
+  leg2.resume_path = checkpoint;
+  TrainLoop resumed(std::move(leg2));
+  const nanochat::DataLoaderState after = resumed.train_loader()->State();
+  if (after.epoch != stored.epoch) {
+    Fail("epoch resume: the resumed loader is in epoch " +
+         std::to_string(after.epoch) + ", the cursor stored " +
+         std::to_string(stored.epoch));
+  }
+  if (after.documents != stored.documents) {
+    Fail("epoch resume: the resumed loader holds " +
+         std::to_string(after.documents.size()) +
+         " buffered documents, the cursor stored " +
+         std::to_string(stored.documents.size()));
+  }
+
+  // The batch the uninterrupted run consumes at this point is the batch the
+  // resumed run must consume: the restored buffer packs first, then the source
+  // continues from the stored position.
+  TrainConfig reference = base;
+  reference.num_iterations = 23;
+  TrainLoop uninterrupted(std::move(reference));
+  uninterrupted.Run();
+  std::vector<int> expected_tokens(rows);
+  std::vector<int> expected_targets(rows);
+  if (!uninterrupted.train_loader()->Next(expected_tokens.data(),
+                                          expected_targets.data())) {
+    Fail("epoch resume: the uninterrupted run has no next batch");
+    return;
+  }
+  std::vector<int> got_tokens(rows);
+  std::vector<int> got_targets(rows);
+  if (!resumed.train_loader()->Next(got_tokens.data(), got_targets.data())) {
+    Fail("epoch resume: the resumed run has no next batch");
+    return;
+  }
+  if (got_tokens != expected_tokens || got_targets != expected_targets) {
+    Fail(
+        "epoch resume: the first batch after the resume is not the batch the "
+        "uninterrupted run would have consumed");
+  }
+}
+
 void TestBackwardScale() {
   // The micro-batch sum and the all-reduce sum give the global mean when the
   // backward carries 1/(grad_accum * world_size)
@@ -384,6 +497,7 @@ int main() {
   TestTwoRanksEqualOneRank();
   TestTrainLoopRanksAgree();
   TestTrainLoopResume();
+  TestResumeKeepsTheEpochAndTheBuffer();
   if (g_failures != 0) {
     std::fprintf(stderr, "train_parallel_test: %d failure(s)\n", g_failures);
     return 1;

@@ -1,4 +1,11 @@
-// The roofline estimator of docs/performance-model.md section 7.
+// The performance model of docs/performance-model.md: the operation counters
+// of section 4 and the roofline estimator of section 7.
+//
+// The counters are the operation table the estimator reads, and `mfu.h` is
+// their only declaration: `CountParams`, `CountFlopsPerToken`,
+// `EstimateFlopsPerToken`, `EstimateMuonFlopsPerStep`, `EstimatePrefillFlops`,
+// and `EstimateDecodeFlops` live here rather than in the harness, so the
+// accounting of a step has one home.
 //
 // The estimator uses the device peaks directly. It holds no fitted value and
 // no measured correction: every term comes from the operation counters, the
@@ -23,7 +30,8 @@
 
 #include "nanochat/config.h"
 #include "nanochat/device_profile.h"
-#include "src/ops.h"
+#include "src/ops.h"  // `kVeGateChannels` and `kSmearChannels`,
+                      // the two gate widths the counters add.
 
 namespace nanochat {
 namespace {
@@ -161,7 +169,158 @@ std::string JsonDouble(double value) {
   return std::string(buffer);
 }
 
+// Number of parameters that participate in matmuls with the token stream. The
+// token embedding and value embeddings are lookups and are not counted; every
+// `Linear` (lm_head, the attention/MLP projections, the value gate, and the
+// smear gate) is. This mirrors `GPT.num_matmul_params` structurally.
+double NumMatmulParams(const Config& config) {
+  double total =
+      static_cast<double>(config.padded_vocab_size) * config.hidden_dim;
+  for (int i = 0; i < config.num_layers; ++i) {
+    total += static_cast<double>(config.query_dim()) * config.hidden_dim;
+    total += static_cast<double>(config.kv_dim()) * config.hidden_dim;
+    total += static_cast<double>(config.kv_dim()) * config.hidden_dim;
+    total += static_cast<double>(config.hidden_dim) * config.hidden_dim;
+    if (config.has_value_embedding(i)) {
+      total += static_cast<double>(config.num_kv_heads) * kVeGateChannels;
+    }
+    total += static_cast<double>(config.mlp_dim()) * config.hidden_dim;
+    total += static_cast<double>(config.hidden_dim) * config.mlp_dim();
+  }
+  total += kSmearChannels;
+  return total;
+}
+
 }  // namespace
+
+// ---------------------------------------------------------------------------
+// The operation counters (docs/performance-model.md section 4)
+// ---------------------------------------------------------------------------
+
+ParamBreakdown CountParams(const Config& config) {
+  const int64_t hidden = config.hidden_dim;
+  const int64_t padded_vocab = config.padded_vocab_size;
+  const int64_t query_dim = config.query_dim();
+  const int64_t kv_dim = config.kv_dim();
+  const int64_t mlp_dim = config.mlp_dim();
+
+  int64_t matrices = 0;
+  // transformer.wte.weight is a lookup, so it belongs to embeddings.
+  int64_t embeddings = padded_vocab * hidden;
+  for (int i = 0; i < config.num_layers; ++i) {
+    matrices += query_dim * hidden;  // attn.c_q.weight
+    matrices += kv_dim * hidden;     // attn.c_k.weight
+    matrices += kv_dim * hidden;     // attn.c_v.weight
+    matrices += hidden * hidden;     // attn.c_proj.weight
+    if (config.has_value_embedding(i)) {
+      // attn.ve_gate.weight sits inside transformer.h, so it counts as a
+      // matrix, not as a scalar.
+      matrices += static_cast<int64_t>(config.num_kv_heads) * kVeGateChannels;
+      embeddings += padded_vocab * kv_dim;  // value_embeds.i.weight
+    }
+    matrices += mlp_dim * hidden;  // mlp.c_fc.weight
+    matrices += hidden * mlp_dim;  // mlp.c_proj.weight
+  }
+
+  const int64_t lm_head = padded_vocab * hidden;
+  // resid_lambdas and x0_lambdas hold one value per layer. The top-level
+  // smear_gate is a Linear, but `num_scaling_params` groups it with the
+  // scalars, so CountParams does too.
+  const int64_t scalars =
+      2 * static_cast<int64_t>(config.num_layers) + kSmearChannels + 1 + 1;
+
+  ParamBreakdown counts{};
+  counts.transformer_matrices = matrices;
+  counts.lm_head = lm_head;
+  counts.embeddings = embeddings;
+  counts.scalars = scalars;
+  counts.total = matrices + lm_head + embeddings + scalars;
+  return counts;
+}
+
+double EstimateFlopsPerToken(const Config& config) {
+  return CountFlopsPerToken(config).total();
+}
+
+double EstimateMuonFlopsPerStep(const Config& config, int ns_steps) {
+  if (ns_steps <= 0) return 0.0;
+  // One matrix's three GEMMs of one iteration: `A = X'X` (or `X X'`), `A2 = A
+  // A`, and `prod = X B` (or `B X`). These are the shapes `MuonUpdate` issues,
+  // so the count is the necessary count of the executed arithmetic.
+  const auto one = [ns_steps](int rows, int cols) {
+    const double r = rows;
+    const double c = cols;
+    const double min_dim = std::min(r, c);
+    const double max_dim = std::max(r, c);
+    const double iteration = 2.0 * min_dim * min_dim * max_dim +
+                             2.0 * min_dim * min_dim * min_dim +
+                             2.0 * r * c * min_dim;
+    return static_cast<double>(ns_steps) * iteration;
+  };
+  const int query_dim = config.query_dim();
+  const int kv_dim = config.kv_dim();
+  const int mlp_dim = config.mlp_dim();
+  const double per_layer =
+      one(query_dim, config.hidden_dim) + one(kv_dim, config.hidden_dim) +
+      one(kv_dim, config.hidden_dim) +
+      one(config.hidden_dim, config.hidden_dim) +
+      one(mlp_dim, config.hidden_dim) + one(config.hidden_dim, mlp_dim);
+  return per_layer * static_cast<double>(config.num_layers);
+}
+
+FlopCounts CountFlopsPerToken(const Config& config) {
+  const int heads = config.num_heads;
+  const int head_dim = config.head_dim();
+  const int seq = config.seq_len;
+  double attention_forward = 0.0;
+  double attention_backward = 0.0;
+  for (int i = 0; i < config.num_layers; ++i) {
+    const int left = config.window_left(i);
+    const int effective = left < 0 ? seq : std::min(left, seq);
+    // The scores and the output GEMMs are the forward pass; the backward pass
+    // is twice the forward work. The two rows sum to the 12 FLOPs per head,
+    // head dimension, and window that `EstimateFlopsPerToken` counts.
+    attention_forward += 4.0 * heads * head_dim * effective;
+    attention_backward += 8.0 * heads * head_dim * effective;
+  }
+  const double matmul = NumMatmulParams(config);
+  FlopCounts counts;
+  counts.gemm_forward = 2.0 * matmul;
+  counts.gemm_backward = 4.0 * matmul;
+  counts.attention_forward = attention_forward;
+  counts.attention_backward = attention_backward;
+  return counts;
+}
+
+double EstimatePrefillFlops(const Config& config, int num_tokens) {
+  if (num_tokens <= 0) return 0.0;
+  const int heads = config.num_heads;
+  const int head_dim = config.head_dim();
+  double attention = 0.0;
+  for (int i = 0; i < config.num_layers; ++i) {
+    const int left = config.window_left(i);
+    const int window = left < 0 ? num_tokens : std::min(left, num_tokens);
+    if (window <= 0) continue;
+    // Ramp up to the window, then attend a flat `window` per new token.
+    const double attended = static_cast<double>(window) * (window + 1) / 2.0 +
+                            static_cast<double>(num_tokens - window) * window;
+    attention += 4.0 * heads * head_dim * attended;
+  }
+  return 2.0 * NumMatmulParams(config) * num_tokens + attention;
+}
+
+double EstimateDecodeFlops(const Config& config, int context_len) {
+  if (context_len <= 0) return 0.0;
+  const int heads = config.num_heads;
+  const int head_dim = config.head_dim();
+  double attention = 0.0;
+  for (int i = 0; i < config.num_layers; ++i) {
+    const int left = config.window_left(i);
+    const int window = left < 0 ? context_len : std::min(left, context_len);
+    attention += 4.0 * heads * head_dim * window;
+  }
+  return 2.0 * NumMatmulParams(config) + attention;
+}
 
 double FlopCounts::total() const {
   return gemm_forward + gemm_backward + attention_forward + attention_backward +

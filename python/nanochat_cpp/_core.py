@@ -30,6 +30,7 @@ __all__ = [
     "ScoreResult",
     "GenerateParams",
     "Sequences",
+    "GenerateMultiParams",
     "OptimizerConfig",
     "Metrics",
     "MeshTrainConfig",
@@ -62,6 +63,8 @@ __all__ = [
     "check_status",
     "check_handle",
     "check_code",
+    "check_optim_config_size",
+    "layout",
     "record_view",
     "set_grad_enabled",
 ]
@@ -109,25 +112,15 @@ class NanochatError(RuntimeError):
 
 
 # ---------------------------------------------------------------------------
-# Plain C structs, a field-for-field mirror of include/nanochat/capi.h
+# Plain C structs, a field-for-field mirror of include/nanochat/capi.h. Each
+# class carries its name and its docstring; its fields live in `_LAYOUT`
+# below, because one table with the real ctypes types in it reads as a layout
+# and type-checks as one, where a list inside a class body does neither.
 # ---------------------------------------------------------------------------
 
 
 class Config(ctypes.Structure):
     """A mirror of ``nanochat::Config`` (``nanochat_config``)."""
-
-    _fields_ = [
-        ("num_layers", ctypes.c_int),
-        ("num_heads", ctypes.c_int),
-        ("num_kv_heads", ctypes.c_int),
-        ("hidden_dim", ctypes.c_int),
-        ("seq_len", ctypes.c_int),
-        ("vocab_size", ctypes.c_int),
-        ("padded_vocab_size", ctypes.c_int),
-        ("rope_base", ctypes.c_float),
-        ("window_pattern", ctypes.c_char_p),
-        ("value_embedding", ctypes.c_int),
-    ]
 
 
 class Params(ctypes.Structure):
@@ -138,27 +131,9 @@ class Params(ctypes.Structure):
     the scaling-parameter count that sets the training horizon.
     """
 
-    _fields_ = [
-        ("total", ctypes.c_int64),
-        ("transformer_matrices", ctypes.c_int64),
-        ("lm_head", ctypes.c_int64),
-        ("embeddings", ctypes.c_int64),
-        ("scalars", ctypes.c_int64),
-        ("flops_per_token", ctypes.c_double),
-    ]
-
 
 class Param(ctypes.Structure):
     """A mirror of ``nanochat::ParamView`` (``nanochat_param``)."""
-
-    _fields_ = [
-        ("name", ctypes.c_char_p),
-        ("value", ctypes.c_void_p),
-        ("grad", ctypes.c_void_p),
-        ("count", ctypes.c_int64),
-        ("rows", ctypes.c_int),
-        ("cols", ctypes.c_int),
-    ]
 
 
 class Device(ctypes.Structure):
@@ -168,60 +143,33 @@ class Device(ctypes.Structure):
     the device index and diagnostics.
     """
 
-    _fields_ = [
-        ("device_index", ctypes.c_int),
-        ("compute_major", ctypes.c_int),
-        ("compute_minor", ctypes.c_int),
-        ("total_memory_bytes", ctypes.c_int64),
-        ("device_name", ctypes.c_char_p),
-    ]
-
 
 class Focus(ctypes.Structure):
     """A mirror of ``nanochat::ScoreFocus`` (``nanochat_focus``)."""
-
-    _fields_ = [
-        ("position", ctypes.c_int),
-        ("ids", ctypes.POINTER(ctypes.c_int)),
-        ("count", ctypes.c_int),
-    ]
 
 
 class ScoreResult(ctypes.Structure):
     """A mirror of ``nanochat::ScoreResult`` (``nanochat_score_result``)."""
 
-    _fields_ = [
-        ("nll", ctypes.POINTER(ctypes.c_float)),
-        ("argmax", ctypes.POINTER(ctypes.c_int)),
-        ("focus_logits", ctypes.POINTER(ctypes.c_float)),
-    ]
-
 
 class GenerateParams(ctypes.Structure):
     """A mirror of ``nanochat::GenerateParams`` (``nanochat_generate_params``)."""
-
-    _fields_ = [
-        ("num_samples", ctypes.c_int),
-        ("max_tokens", ctypes.c_int),
-        ("temperature", ctypes.c_float),
-        ("top_k", ctypes.c_int),
-        ("seed", ctypes.c_uint64),
-        ("stop_id", ctypes.c_int),
-        ("bos_id", ctypes.c_int),
-        ("stop_ids", ctypes.POINTER(ctypes.c_int)),
-    ]
 
 
 class Sequences(ctypes.Structure):
     """A mirror of ``nanochat_sequences``, the generated rows."""
 
-    _fields_ = [
-        ("count", ctypes.c_int),
-        ("tokens", ctypes.POINTER(ctypes.c_int)),
-        ("mask", ctypes.POINTER(ctypes.c_uint8)),
-        ("lengths", ctypes.POINTER(ctypes.c_int)),
-        ("offsets", ctypes.POINTER(ctypes.c_int)),
-    ]
+
+class GenerateMultiParams(ctypes.Structure):
+    """A mirror of ``nanochat::GenerateMultiPrompt``
+    (``nanochat_generate_multi_params``).
+
+    ``num_prompts`` prompts of ``prompt_len`` ids each produce
+    ``params.num_samples`` rows, so the output holds ``num_prompts *
+    params.num_samples`` rows in prompt-major order. ``row_stops`` optionally
+    holds one terminal id per output row; null reuses the ``stop_id`` and
+    ``stop_ids`` fields of ``params`` for every prompt.
+    """
 
 
 class OptimizerConfig(ctypes.Structure):
@@ -232,7 +180,152 @@ class OptimizerConfig(ctypes.Structure):
     ``nanochat::SchedulerConfig`` group.
     """
 
-    _fields_ = [
+
+class Metrics(ctypes.Structure):
+    """A mirror of ``nanochat::MeshMetrics`` (``nanochat_metrics``).
+
+    ``loss`` points to ``device_count`` per-replica losses. The buffer belongs
+    to the runtime and stays valid until the next step or the next call to
+    ``nanochat_runtime_metrics``.
+    """
+
+
+class MeshTrainDataConfig(ctypes.Structure):
+    """A mirror of ``nanochat_mesh_data_config``: the dataset and the
+    tokenizer (docs/client-runtime-design.md section 10.1).
+    """
+
+
+class MeshTrainRunConfig(ctypes.Structure):
+    """A mirror of ``nanochat_mesh_run_config``: the step loop
+    (docs/client-runtime-design.md section 10.1).
+    """
+
+
+class MeshTrainOutputConfig(ctypes.Structure):
+    """A mirror of ``nanochat_mesh_output_config``: the written artifacts
+    (docs/client-runtime-design.md section 10.1).
+    """
+
+
+class MeshTrainConfig(ctypes.Structure):
+    """A mirror of ``nanochat_mesh_train_config``
+    (docs/client-runtime-design.md section 10.1). The caller owns every
+    pointer, the mesh handle, and the struct, so the C call reads it only.
+    """
+
+
+class MeshTrainSummary(ctypes.Structure):
+    """A mirror of ``nanochat_mesh_train_summary``
+    (docs/client-runtime-design.md section 10.1). The caller owns the struct,
+    so ``checkpoint`` is a fixed buffer and not an owned pointer.
+    """
+
+
+class Record(ctypes.Structure):
+    """A mirror of ``nanochat_record``.
+
+    ``dims`` holds ``ndim`` extents, ``data`` holds ``bytes`` payload bytes,
+    and ``attributes`` points to ``attribute_count`` records. Every pointer
+    belongs to the checkpoint owner, or to the caller of the write call.
+    """
+
+
+class CheckpointMetadata(ctypes.Structure):
+    """A mirror of ``nanochat_checkpoint_metadata``.
+
+    ``schema`` is the metadata schema, not the container version, and ``stage``
+    and ``precision`` hold a ``nanochat_stage`` and a ``nanochat_precision``
+    code. Every string pointer belongs to the checkpoint handle that the read
+    returned, ``notes`` points to ``note_count`` entries, and the caller must
+    free neither.
+    """
+
+
+# The layout of every class above, keyed by the class object so that a reader
+# sees the real ctypes type of each field and Python type-checks it.
+# ``include/nanochat/capi.h`` is the authority for every row: the field name,
+# the type, and the order here must match the header, and
+# ``tools/gen_capi_mirrors.py --check`` compares this table with the header in
+# both directions. A field the header declares and this table lacks, a field
+# this table carries and the header dropped, a wrong type, and a wrong order
+# each fail there, naming the structure and the field.
+#
+# The table is ordered, not a set: the loop below installs the rows in this
+# order, so a structure that another one holds by value comes first. ``Config``
+# and the three ``MeshTrain*Config`` halves precede ``MeshTrainConfig``, and
+# ``GenerateParams`` precedes ``GenerateMultiParams``. A pointer carries no
+# such rule, so ``Record`` may point at itself.
+_LAYOUT = {
+    Config: [
+        ("num_layers", ctypes.c_int),
+        ("num_heads", ctypes.c_int),
+        ("num_kv_heads", ctypes.c_int),
+        ("hidden_dim", ctypes.c_int),
+        ("seq_len", ctypes.c_int),
+        ("vocab_size", ctypes.c_int),
+        ("padded_vocab_size", ctypes.c_int),
+        ("rope_base", ctypes.c_float),
+        ("window_pattern", ctypes.c_char_p),
+        ("value_embedding", ctypes.c_int),
+    ],
+    Params: [
+        ("total", ctypes.c_int64),
+        ("transformer_matrices", ctypes.c_int64),
+        ("lm_head", ctypes.c_int64),
+        ("embeddings", ctypes.c_int64),
+        ("scalars", ctypes.c_int64),
+        ("flops_per_token", ctypes.c_double),
+    ],
+    Param: [
+        ("name", ctypes.c_char_p),
+        ("value", ctypes.c_void_p),
+        ("grad", ctypes.c_void_p),
+        ("count", ctypes.c_int64),
+        ("rows", ctypes.c_int),
+        ("cols", ctypes.c_int),
+    ],
+    Device: [
+        ("device_index", ctypes.c_int),
+        ("compute_major", ctypes.c_int),
+        ("compute_minor", ctypes.c_int),
+        ("total_memory_bytes", ctypes.c_int64),
+        ("device_name", ctypes.c_char_p),
+    ],
+    Focus: [
+        ("position", ctypes.c_int),
+        ("ids", ctypes.POINTER(ctypes.c_int)),
+        ("count", ctypes.c_int),
+    ],
+    ScoreResult: [
+        ("nll", ctypes.POINTER(ctypes.c_float)),
+        ("argmax", ctypes.POINTER(ctypes.c_int)),
+        ("focus_logits", ctypes.POINTER(ctypes.c_float)),
+    ],
+    GenerateParams: [
+        ("num_samples", ctypes.c_int),
+        ("max_tokens", ctypes.c_int),
+        ("temperature", ctypes.c_float),
+        ("top_k", ctypes.c_int),
+        ("seed", ctypes.c_uint64),
+        ("stop_id", ctypes.c_int),
+        ("bos_id", ctypes.c_int),
+        ("stop_ids", ctypes.POINTER(ctypes.c_int)),
+    ],
+    Sequences: [
+        ("count", ctypes.c_int),
+        ("tokens", ctypes.POINTER(ctypes.c_int)),
+        ("mask", ctypes.POINTER(ctypes.c_uint8)),
+        ("lengths", ctypes.POINTER(ctypes.c_int)),
+        ("offsets", ctypes.POINTER(ctypes.c_int)),
+    ],
+    GenerateMultiParams: [
+        ("num_prompts", ctypes.c_int),
+        ("prompt_len", ctypes.c_int),
+        ("row_stops", ctypes.POINTER(ctypes.c_int)),
+        ("params", GenerateParams),
+    ],
+    OptimizerConfig: [
         ("unembedding_lr", ctypes.c_float),
         ("embedding_lr", ctypes.c_float),
         ("matrix_lr", ctypes.c_float),
@@ -251,45 +344,21 @@ class OptimizerConfig(ctypes.Structure):
         ("muon_momentum_start", ctypes.c_float),
         ("muon_momentum_peak", ctypes.c_float),
         ("muon_momentum_final", ctypes.c_float),
-    ]
-
-
-class Metrics(ctypes.Structure):
-    """A mirror of ``nanochat::MeshMetrics`` (``nanochat_metrics``).
-
-    ``loss`` points to ``device_count`` per-replica losses. The buffer belongs
-    to the runtime and stays valid until the next step or the next call to
-    ``nanochat_runtime_metrics``.
-    """
-
-    _fields_ = [
+    ],
+    Metrics: [
         ("device_count", ctypes.c_int),
         ("loss", ctypes.POINTER(ctypes.c_float)),
         ("grad_norm", ctypes.c_float),
         ("step_seconds", ctypes.c_float),
-    ]
-
-
-class MeshTrainDataConfig(ctypes.Structure):
-    """A mirror of ``nanochat_mesh_data_config``: the dataset and the
-    tokenizer (docs/client-runtime-design.md section 10.1).
-    """
-
-    _fields_ = [
+    ],
+    MeshTrainDataConfig: [
         ("parquet", ctypes.POINTER(ctypes.c_char_p)),
         ("parquet_count", ctypes.c_int),
         ("tokenizer_path", ctypes.c_char_p),
         ("packed_rows_path", ctypes.c_char_p),
         ("data_seed", ctypes.c_uint64),
-    ]
-
-
-class MeshTrainRunConfig(ctypes.Structure):
-    """A mirror of ``nanochat_mesh_run_config``: the step loop
-    (docs/client-runtime-design.md section 10.1).
-    """
-
-    _fields_ = [
+    ],
+    MeshTrainRunConfig: [
         ("batch", ctypes.c_int),
         ("grad_accum", ctypes.c_int),
         ("seq", ctypes.c_int),
@@ -298,27 +367,12 @@ class MeshTrainRunConfig(ctypes.Structure):
         ("log_every", ctypes.c_int),
         ("save_every", ctypes.c_int),
         ("resume", ctypes.c_int),
-    ]
-
-
-class MeshTrainOutputConfig(ctypes.Structure):
-    """A mirror of ``nanochat_mesh_output_config``: the written artifacts
-    (docs/client-runtime-design.md section 10.1).
-    """
-
-    _fields_ = [
+    ],
+    MeshTrainOutputConfig: [
         ("out_dir", ctypes.c_char_p),
         ("checkpoint_path", ctypes.c_char_p),
-    ]
-
-
-class MeshTrainConfig(ctypes.Structure):
-    """A mirror of ``nanochat_mesh_train_config``
-    (docs/client-runtime-design.md section 10.1). The caller owns every
-    pointer, the mesh handle, and the struct, so the C call reads it only.
-    """
-
-    _fields_ = [
+    ],
+    MeshTrainConfig: [
         ("model", Config),
         ("mesh", ctypes.c_void_p),
         ("preset", ctypes.c_char_p),
@@ -329,58 +383,25 @@ class MeshTrainConfig(ctypes.Structure):
         ("data", MeshTrainDataConfig),
         ("run", MeshTrainRunConfig),
         ("output", MeshTrainOutputConfig),
-    ]
-
-
-class MeshTrainSummary(ctypes.Structure):
-    """A mirror of ``nanochat_mesh_train_summary``
-    (docs/client-runtime-design.md section 10.1). The caller owns the struct,
-    so ``checkpoint`` is a fixed buffer and not an owned pointer.
-    """
-
-    _fields_ = [
+    ],
+    MeshTrainSummary: [
         ("steps", ctypes.c_int),
         ("interrupted", ctypes.c_int),
         ("mean_loss", ctypes.c_double),
         ("steady_mfu", ctypes.c_double),
         ("checkpoint", ctypes.c_char * 4096),
-    ]
-
-
-class Record(ctypes.Structure):
-    """A mirror of ``nanochat_record``.
-
-    ``dims`` holds ``ndim`` extents, ``data`` holds ``bytes`` payload bytes,
-    and ``attributes`` points to ``attribute_count`` records. Every pointer
-    belongs to the checkpoint owner, or to the caller of the write call.
-    """
-
-    pass
-
-
-Record._fields_ = [
-    ("name", ctypes.c_char_p),
-    ("dtype", ctypes.c_int32),
-    ("ndim", ctypes.c_int32),
-    ("dims", ctypes.POINTER(ctypes.c_int64)),
-    ("data", ctypes.c_void_p),
-    ("bytes", ctypes.c_int64),
-    ("attribute_count", ctypes.c_int64),
-    ("attributes", ctypes.POINTER(Record)),
-]
-
-
-class CheckpointMetadata(ctypes.Structure):
-    """A mirror of ``nanochat_checkpoint_metadata``.
-
-    ``schema`` is the metadata schema, not the container version, and ``stage``
-    and ``precision`` hold a ``nanochat_stage`` and a ``nanochat_precision``
-    code. Every string pointer belongs to the checkpoint handle that the read
-    returned, ``notes`` points to ``note_count`` entries, and the caller must
-    free neither.
-    """
-
-    _fields_ = [
+    ],
+    Record: [
+        ("name", ctypes.c_char_p),
+        ("dtype", ctypes.c_int32),
+        ("ndim", ctypes.c_int32),
+        ("dims", ctypes.POINTER(ctypes.c_int64)),
+        ("data", ctypes.c_void_p),
+        ("bytes", ctypes.c_int64),
+        ("attribute_count", ctypes.c_int64),
+        ("attributes", ctypes.POINTER(Record)),
+    ],
+    CheckpointMetadata: [
         ("schema", ctypes.c_int32),
         ("stage", ctypes.c_int32),
         ("step", ctypes.c_int64),
@@ -392,7 +413,73 @@ class CheckpointMetadata(ctypes.Structure):
         ("created_utc", ctypes.c_char_p),
         ("notes", ctypes.POINTER(ctypes.c_char_p)),
         ("note_count", ctypes.c_int32),
-    ]
+    ],
+}
+
+for _class, _fields in _LAYOUT.items():
+    _class._fields_ = _fields
+
+#: The C structure name of every class in `_LAYOUT`, so `layout` spells a
+#: nested structure the way the header names it and not by its Python class.
+#: It stays beside the table so that the two cannot drift.
+_C_STRUCT_NAMES = {
+    Config: "nanochat_config",
+    Params: "nanochat_params",
+    Param: "nanochat_param",
+    Device: "nanochat_device",
+    Focus: "nanochat_focus",
+    ScoreResult: "nanochat_score_result",
+    GenerateParams: "nanochat_generate_params",
+    Sequences: "nanochat_sequences",
+    GenerateMultiParams: "nanochat_generate_multi_params",
+    OptimizerConfig: "nanochat_optim_config",
+    Metrics: "nanochat_metrics",
+    MeshTrainDataConfig: "nanochat_mesh_data_config",
+    MeshTrainRunConfig: "nanochat_mesh_run_config",
+    MeshTrainOutputConfig: "nanochat_mesh_output_config",
+    MeshTrainConfig: "nanochat_mesh_train_config",
+    MeshTrainSummary: "nanochat_mesh_train_summary",
+    Record: "nanochat_record",
+    CheckpointMetadata: "nanochat_checkpoint_metadata",
+}
+
+
+def _spelling(mirror) -> str:
+    """The canonical spelling of one field type of `_LAYOUT`.
+
+    A scalar is spelled by its ``ctypes`` class name, a mirrored structure by
+    its C name, and a pointer or an array by its element, so a reader sees
+    ``POINTER(nanochat_record)`` where `_LAYOUT` holds
+    ``ctypes.POINTER(Record)``. A pointer and an array carry their element in
+    ``_type_``; a scalar carries a code there, as a string.
+    """
+    if mirror in _C_STRUCT_NAMES:
+        return _C_STRUCT_NAMES[mirror]
+    element = getattr(mirror, "_type_", None)
+    if isinstance(element, str):
+        return mirror.__name__
+    if element is not None:
+        length = getattr(mirror, "_length_", None)
+        if length is not None:
+            return f"{_spelling(element)} * {length}"
+        return f"POINTER({_spelling(element)})"
+    raise TypeError(f"no canonical spelling for the field type {mirror!r}")
+
+
+def layout() -> dict[str, list[tuple[str, str]]]:
+    """The mirrored layout in canonical form, for the header checker.
+
+    The result is ``{C structure name: [(field, canonical ctypes spelling),
+    ...]}``, in the header's order. ``tools/gen_capi_mirrors.py --check``
+    compares it with ``include/nanochat/capi.h`` in both directions, so this
+    function is what keeps the table's parity guarantee reachable without a
+    loaded library.
+    """
+    return {
+        _C_STRUCT_NAMES[class_]: [(field, _spelling(mirror))
+                                  for field, mirror in fields]
+        for class_, fields in _LAYOUT.items()
+    }
 
 
 # Opaque handles. The C declarations use ``struct nanochat_model *`` and
@@ -481,9 +568,22 @@ class Handle(int):
         self.freed = True
         return raw
 
-# The function table: name, argument types, result type. Every entry in
-# include/nanochat/capi.h is here.
+# The function table: name, argument types, result type. Each row is one
+# function of include/nanochat/capi.h under the header's own name, so `declare`
+# applies that signature to the symbol the header declares. What keeps the table
+# honest is calling the symbols it lists: `python/tests/capi_test.py` calls the
+# three rows the table lacked -- `nanochat_generate_multi`, `nanochat_rl_step`,
+# and `nanochat_optim_config_size` (`docs/api-surface.md` R11a) -- against the
+# loaded library, and `nanochat_cpp._lib.load` runs the size query on every
+# load, so a row that goes missing again fails a test instead of surfacing as an
+# untyped call.
+#
+# The rows are generated from include/nanochat/capi.h by
+# `tools/gen_capi_mirrors.py --write` (docs/api-surface.md R11b), in the
+# header's own order, so a function the header adds needs no hand edit here.
+# BEGIN GENERATED (tools/gen_capi_mirrors.py --write) _SIGNATURES
 _SIGNATURES = (
+    ("nanochat_optim_config_size", (), ctypes.c_size_t),
     ("nanochat_init", (), ctypes.c_int),
     ("nanochat_last_error", (), ctypes.c_char_p),
     ("nanochat_version", (), ctypes.c_char_p),
@@ -491,138 +591,169 @@ _SIGNATURES = (
     ("nanochat_compute_type_size", (), ctypes.c_int),
     ("nanochat_device_info", (ctypes.POINTER(Device),), None),
     ("nanochat_device_count", (), ctypes.c_int),
-    ("nanochat_device_at", (ctypes.c_int, ctypes.POINTER(Device)),
-     ctypes.c_int),
+    ("nanochat_device_at",
+        (ctypes.c_int, ctypes.POINTER(Device)),
+        ctypes.c_int),
     ("nanochat_mesh_create",
-     (ctypes.POINTER(ctypes.c_int), ctypes.c_int), MeshHandle),
+        (ctypes.POINTER(ctypes.c_int), ctypes.c_int),
+        MeshHandle),
     ("nanochat_mesh_free", (MeshHandle,), None),
     ("nanochat_mesh_size", (MeshHandle,), ctypes.c_int),
     ("nanochat_runtime_create",
-     (MeshHandle, ctypes.POINTER(Config),
-      ctypes.POINTER(OptimizerConfig), ctypes.c_int, ctypes.c_int,
-      ctypes.c_int, ctypes.c_uint64), RuntimeHandle),
+        (MeshHandle, ctypes.POINTER(Config), ctypes.POINTER(OptimizerConfig),
+         ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_uint64),
+        RuntimeHandle),
     ("nanochat_runtime_free", (RuntimeHandle,), None),
     ("nanochat_runtime_world_size", (RuntimeHandle,), ctypes.c_int),
-    ("nanochat_runtime_step", (RuntimeHandle,), ctypes.c_int),
     ("nanochat_runtime_train_step",
-     (RuntimeHandle, ctypes.POINTER(ctypes.c_int),
-      ctypes.POINTER(ctypes.c_int)), ctypes.c_float),
+        (RuntimeHandle, ctypes.POINTER(ctypes.c_int),
+         ctypes.POINTER(ctypes.c_int)),
+        ctypes.c_float),
     ("nanochat_runtime_metrics",
-     (RuntimeHandle, ctypes.POINTER(Metrics)), ctypes.c_int),
+        (RuntimeHandle, ctypes.POINTER(Metrics)),
+        ctypes.c_int),
     ("nanochat_runtime_param_count",
-     (RuntimeHandle, ctypes.c_int), ctypes.c_int),
+        (RuntimeHandle, ctypes.c_int),
+        ctypes.c_int),
     ("nanochat_runtime_param_info",
-     (RuntimeHandle, ctypes.c_int, ctypes.c_int, ctypes.POINTER(Param)),
-     ctypes.c_int),
+        (RuntimeHandle, ctypes.c_int, ctypes.c_int, ctypes.POINTER(Param)),
+        ctypes.c_int),
     ("nanochat_runtime_param_read",
-     (RuntimeHandle, ctypes.c_int, ctypes.c_int, ctypes.c_int,
-      ctypes.c_int64, ctypes.c_int64, ctypes.c_void_p), ctypes.c_int64),
+        (RuntimeHandle, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+         ctypes.c_int64, ctypes.c_int64, ctypes.c_void_p),
+        ctypes.c_int64),
     ("nanochat_runtime_param_digest",
-     (RuntimeHandle, ctypes.c_int, ctypes.POINTER(ctypes.c_uint64)),
-     ctypes.c_int),
+        (RuntimeHandle, ctypes.c_int, ctypes.POINTER(ctypes.c_uint64)),
+        ctypes.c_int),
     ("nanochat_runtime_save", (RuntimeHandle, ctypes.c_char_p), None),
     ("nanochat_runtime_load", (RuntimeHandle, ctypes.c_char_p), None),
-    ("nanochat_runtime_load_weights", (RuntimeHandle, ctypes.c_char_p),
-     None),
+    ("nanochat_runtime_load_weights", (RuntimeHandle, ctypes.c_char_p), None),
+    ("nanochat_runtime_step", (RuntimeHandle,), ctypes.c_int),
     ("nanochat_mesh_train_run",
-     (ctypes.POINTER(MeshTrainConfig), ctypes.POINTER(MeshTrainSummary)),
-     ctypes.c_float),
+        (ctypes.POINTER(MeshTrainConfig), ctypes.POINTER(MeshTrainSummary)),
+        ctypes.c_float),
     ("nanochat_params_get",
-     (ctypes.POINTER(Config), ctypes.POINTER(Params)), ctypes.c_int),
+        (ctypes.POINTER(Config), ctypes.POINTER(Params)),
+        ctypes.c_int),
     ("nanochat_model_create",
-     (ctypes.POINTER(Config), ctypes.c_uint64), ModelHandle),
+        (ctypes.POINTER(Config), ctypes.c_uint64),
+        ModelHandle),
     ("nanochat_model_free", (ModelHandle,), None),
     ("nanochat_forward_loss",
-     (ModelHandle, ctypes.POINTER(ctypes.c_int),
-      ctypes.POINTER(ctypes.c_int), ctypes.c_int, ctypes.c_int),
-     ctypes.c_float),
+        (ModelHandle, ctypes.POINTER(ctypes.c_int),
+         ctypes.POINTER(ctypes.c_int), ctypes.c_int, ctypes.c_int),
+        ctypes.c_float),
     ("nanochat_backward", (ModelHandle,), None),
     ("nanochat_backward_weighted",
-     (ModelHandle, ctypes.POINTER(ctypes.c_float), ctypes.c_float), None),
+        (ModelHandle, ctypes.POINTER(ctypes.c_float), ctypes.c_float),
+        None),
     ("nanochat_backward_accumulate", (ModelHandle, ctypes.c_float), None),
     ("nanochat_train_step",
-     (ModelHandle, OptimHandle, ctypes.POINTER(ctypes.c_int),
-      ctypes.POINTER(ctypes.c_int), ctypes.c_int, ctypes.c_int),
-     ctypes.c_float),
+        (ModelHandle, OptimHandle, ctypes.POINTER(ctypes.c_int),
+         ctypes.POINTER(ctypes.c_int), ctypes.c_int, ctypes.c_int),
+        ctypes.c_float),
+    ("nanochat_rl_step",
+        (ModelHandle, OptimHandle, ctypes.POINTER(ctypes.c_int),
+         ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_float),
+         ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int),
+        ctypes.c_float),
     ("nanochat_zero_grad", (ModelHandle,), None),
     ("nanochat_param_count", (ModelHandle,), ctypes.c_int),
     ("nanochat_param_info",
-     (ModelHandle, ctypes.c_int, ctypes.POINTER(Param)), ctypes.c_int),
+        (ModelHandle, ctypes.c_int, ctypes.POINTER(Param)),
+        ctypes.c_int),
     ("nanochat_param_read",
-     (ModelHandle, ctypes.c_int, ctypes.c_int, ctypes.c_int64,
-      ctypes.c_int64, ctypes.c_void_p), ctypes.c_int64),
+        (ModelHandle, ctypes.c_int, ctypes.c_int, ctypes.c_int64,
+         ctypes.c_int64, ctypes.c_void_p),
+        ctypes.c_int64),
     ("nanochat_param_write",
-     (ModelHandle, ctypes.c_int, ctypes.c_int, ctypes.c_int64,
-      ctypes.c_int64, ctypes.c_void_p), ctypes.c_int64),
+        (ModelHandle, ctypes.c_int, ctypes.c_int, ctypes.c_int64,
+         ctypes.c_int64, ctypes.c_void_p),
+        ctypes.c_int64),
     ("nanochat_save", (ModelHandle, ctypes.c_char_p), None),
     ("nanochat_load", (ModelHandle, ctypes.c_char_p), None),
-    ("nanochat_optim_create",
-     (ModelHandle, ctypes.POINTER(OptimizerConfig)), OptimHandle),
+    ("nanochat_checkpoint_dtype",
+        (ctypes.c_int32, ctypes.POINTER(ctypes.c_char_p),
+         ctypes.POINTER(ctypes.c_int32), ctypes.POINTER(ctypes.c_int32)),
+        ctypes.c_int),
+    ("nanochat_checkpoint_write",
+        (ctypes.c_char_p, ctypes.POINTER(Record), ctypes.c_int64,
+         ctypes.POINTER(Record), ctypes.c_int64),
+        ctypes.c_int),
+    ("nanochat_checkpoint_read",
+        (ctypes.c_char_p, ctypes.POINTER(CheckpointHandle),
+         ctypes.POINTER(ctypes.POINTER(Record)),
+         ctypes.POINTER(ctypes.c_int64),
+         ctypes.POINTER(ctypes.POINTER(Record)),
+         ctypes.POINTER(ctypes.c_int64)),
+        ctypes.c_int),
+    ("nanochat_checkpoint_free", (CheckpointHandle,), None),
+    ("nanochat_checkpoint_metadata_read",
+        (ctypes.c_char_p, ctypes.POINTER(CheckpointHandle),
+         ctypes.POINTER(CheckpointMetadata)),
+        ctypes.c_int),
+    ("nanochat_checkpoint_metadata_stage",
+        (ctypes.POINTER(CheckpointMetadata),),
+        ctypes.c_int32),
+    ("nanochat_checkpoint_metadata_step",
+        (ctypes.POINTER(CheckpointMetadata),),
+        ctypes.c_int64),
+    ("nanochat_checkpoint_metadata_world_size",
+        (ctypes.POINTER(CheckpointMetadata),),
+        ctypes.c_int64),
+    ("nanochat_checkpoint_metadata_config_json",
+        (ctypes.POINTER(CheckpointMetadata),),
+        ctypes.c_char_p),
     ("nanochat_optim_config_preset",
-     (ctypes.c_char_p, ctypes.POINTER(OptimizerConfig)), ctypes.c_int),
+        (ctypes.c_char_p, ctypes.POINTER(OptimizerConfig)),
+        ctypes.c_int),
+    ("nanochat_optim_create",
+        (ModelHandle, ctypes.POINTER(OptimizerConfig)),
+        OptimHandle),
     ("nanochat_optim_step", (OptimHandle, ctypes.c_int), None),
     ("nanochat_optim_grad_norm", (OptimHandle,), ctypes.c_float),
     ("nanochat_optim_free", (OptimHandle,), None),
     ("nanochat_loader_create",
-     (ctypes.POINTER(ctypes.c_char_p), ctypes.c_int, ctypes.c_char_p,
-      TokenizerHandle, ctypes.c_int, ctypes.c_int, ctypes.c_uint64,
-      ctypes.c_int, ctypes.c_size_t),
-     LoaderHandle),
+        (ctypes.POINTER(ctypes.c_char_p), ctypes.c_int, ctypes.c_char_p,
+         TokenizerHandle, ctypes.c_int, ctypes.c_int, ctypes.c_uint64,
+         ctypes.c_int, ctypes.c_size_t),
+        LoaderHandle),
     ("nanochat_loader_next",
-     (LoaderHandle, ctypes.POINTER(ctypes.c_int),
-      ctypes.POINTER(ctypes.c_int)), ctypes.c_int),
+        (LoaderHandle, ctypes.POINTER(ctypes.c_int),
+         ctypes.POINTER(ctypes.c_int)),
+        ctypes.c_int),
     ("nanochat_loader_token_bytes",
-     (LoaderHandle, ctypes.POINTER(ctypes.c_int)),
-     ctypes.POINTER(ctypes.c_uint8)),
+        (LoaderHandle, ctypes.POINTER(ctypes.c_int)),
+        ctypes.POINTER(ctypes.c_uint8)),
     ("nanochat_loader_free", (LoaderHandle,), None),
     ("nanochat_score_batch",
-     (ModelHandle, ctypes.POINTER(ctypes.c_int), ctypes.c_int, ctypes.c_int,
-      ctypes.POINTER(ctypes.c_int), ctypes.POINTER(Focus),
-      ctypes.POINTER(ScoreResult)),
-     None),
+        (ModelHandle, ctypes.POINTER(ctypes.c_int), ctypes.c_int, ctypes.c_int,
+         ctypes.POINTER(ctypes.c_int), ctypes.POINTER(Focus),
+         ctypes.POINTER(ScoreResult)),
+        None),
     ("nanochat_generate",
-     (ModelHandle, ctypes.POINTER(ctypes.c_int), ctypes.c_int,
-      ctypes.POINTER(GenerateParams), ctypes.POINTER(Sequences)),
-     None),
+        (ModelHandle, ctypes.POINTER(ctypes.c_int), ctypes.c_int,
+         ctypes.POINTER(GenerateParams), ctypes.POINTER(Sequences)),
+        None),
+    ("nanochat_generate_multi",
+        (ModelHandle, ctypes.POINTER(ctypes.c_int),
+         ctypes.POINTER(GenerateMultiParams), ctypes.POINTER(Sequences)),
+        None),
     ("nanochat_eval_bpb",
-     (ModelHandle, LoaderHandle, ctypes.c_int), ctypes.c_float),
+        (ModelHandle, LoaderHandle, ctypes.c_int),
+        ctypes.c_float),
     ("nanochat_tokenizer_load", (ctypes.c_char_p,), TokenizerHandle),
     ("nanochat_encode",
-     (TokenizerHandle, ctypes.c_char_p, ctypes.POINTER(ctypes.c_int),
-      ctypes.c_int),
-     ctypes.c_int),
+        (TokenizerHandle, ctypes.c_char_p, ctypes.POINTER(ctypes.c_int),
+         ctypes.c_int),
+        ctypes.c_int),
     ("nanochat_decode",
-     (TokenizerHandle, ctypes.POINTER(ctypes.c_int), ctypes.c_int,
-      ctypes.c_void_p, ctypes.c_int),
-     ctypes.c_int),
+        (TokenizerHandle, ctypes.POINTER(ctypes.c_int), ctypes.c_int,
+         ctypes.c_void_p, ctypes.c_int),
+        ctypes.c_int),
     ("nanochat_tokenizer_free", (TokenizerHandle,), None),
-    ("nanochat_checkpoint_dtype",
-     (ctypes.c_int32, ctypes.POINTER(ctypes.c_char_p),
-      ctypes.POINTER(ctypes.c_int32), ctypes.POINTER(ctypes.c_int32)),
-     ctypes.c_int),
-    ("nanochat_checkpoint_write",
-     (ctypes.c_char_p, ctypes.POINTER(Record), ctypes.c_int64,
-      ctypes.POINTER(Record), ctypes.c_int64),
-     ctypes.c_int),
-    ("nanochat_checkpoint_read",
-     (ctypes.c_char_p, ctypes.POINTER(CheckpointHandle),
-      ctypes.POINTER(ctypes.POINTER(Record)), ctypes.POINTER(ctypes.c_int64),
-      ctypes.POINTER(ctypes.POINTER(Record)), ctypes.POINTER(ctypes.c_int64)),
-     ctypes.c_int),
-    ("nanochat_checkpoint_free", (CheckpointHandle,), None),
-    ("nanochat_checkpoint_metadata_read",
-     (ctypes.c_char_p, ctypes.POINTER(CheckpointHandle),
-      ctypes.POINTER(CheckpointMetadata)),
-     ctypes.c_int),
-    ("nanochat_checkpoint_metadata_stage",
-     (ctypes.POINTER(CheckpointMetadata),), ctypes.c_int32),
-    ("nanochat_checkpoint_metadata_step",
-     (ctypes.POINTER(CheckpointMetadata),), ctypes.c_int64),
-    ("nanochat_checkpoint_metadata_world_size",
-     (ctypes.POINTER(CheckpointMetadata),), ctypes.c_int64),
-    ("nanochat_checkpoint_metadata_config_json",
-     (ctypes.POINTER(CheckpointMetadata),), ctypes.c_char_p),
 )
+# END GENERATED (tools/gen_capi_mirrors.py --write)
 
 
 def declare(library) -> None:
@@ -775,6 +906,37 @@ def check_code(library, code: int, function: str) -> int:
     if code < 0:
         raise NanochatError(function, last_error(library))
     return code
+
+
+def check_optim_config_size(library) -> int:
+    """Refuse a library whose ``nanochat_optim_config`` is another size.
+
+    The Python mirror is a ``ctypes`` ``_fields_`` list, so a library built
+    from a different layout would reinterpret every optimizer field after the
+    one that moved, and the run would train with numbers nobody chose. The
+    query answers ``sizeof`` of the struct as the library was compiled, and
+    ``nanochat_cpp._lib.load`` runs this check once, beside the library load,
+    so a stale extension fails at import instead.
+
+    Returns the reported size, which equals the mirror's size on success.
+    """
+    mirrored = ctypes.sizeof(OptimizerConfig)
+    query = getattr(library, "nanochat_optim_config_size", None)
+    if query is None:
+        raise NanochatError(
+            "nanochat_optim_config_size",
+            "the library does not export nanochat_optim_config_size, so the "
+            f"{mirrored}-byte Python mirror of nanochat_optim_config cannot "
+            "be checked; rebuild the extension")
+    reported = int(query())
+    if reported != mirrored:
+        raise NanochatError(
+            "nanochat_optim_config_size",
+            f"the library was compiled with a {reported}-byte "
+            f"nanochat_optim_config, but the Python mirror holds "
+            f"{mirrored} bytes, so every optimizer field after the change "
+            "would be misread; rebuild the extension")
+    return reported
 
 
 def record_view(view: "Record") -> tuple[str, int, tuple[int, ...], bytes]:

@@ -51,6 +51,19 @@ py_test(
     size = "small",
 )
 
+# T0: the three C entry points of `docs/api-surface.md` R11a that the ctypes
+# table did not declare: `nanochat_generate_multi` with its 18th struct,
+# `nanochat_rl_step`, and `nanochat_optim_config_size`. Each test calls one of
+# them against the loaded library, including the size guard that `_lib.load`
+# applies, so the runfiles carry the shared library.
+py_test(
+    name = "capi_test",
+    srcs = ["tests/capi_test.py"],
+    data = ["//bindings:nanochat_shared"],
+    deps = [":nanochat_cpp"],
+    size = "small",
+)
+
 # T0: the on-demand builder key and the library search order. Hermetic: it
 # never compiles and needs no library.
 py_test(
@@ -86,6 +99,23 @@ py_test(
         ":nanochat_cpp",
         ":nanochat_cpp_bridge",
     ],
+    size = "small",
+)
+
+# T0: the parity gate of `docs/api-surface.md` R12. `data.py` stays standard
+# library only, so this test is what keeps it honest against the C reader: it
+# loads `//tests:data/loader_tokenizer.nctoken` through the C ABI and through
+# `nanochat_cpp.data`, and compares the mergeable ranks, the token byte
+# lengths, and the encode result of a small corpus. It needs the shared
+# library, so it stays out of `data_test`, which must run without one.
+py_test(
+    name = "tokenizer_parity_test",
+    srcs = ["tests/tokenizer_parity_test.py"],
+    data = [
+        "//bindings:nanochat_shared",
+        "//tests:data/loader_tokenizer.nctoken",
+    ],
+    deps = [":nanochat_cpp"],
     size = "small",
 )
 
@@ -504,9 +534,11 @@ test_suite(
     name = "all",
     tests = [
         ":core_test",
+        ":capi_test",
         ":build_test",
         ":api_test",
         ":data_test",
+        ":tokenizer_parity_test",
         ":checkpoint_test",
         ":eval_fixture_test",
         ":plan_test",

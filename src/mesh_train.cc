@@ -3,9 +3,9 @@
 // section 6.6).
 //
 // The driver owns the step loop, the metric record, the summary, the
-// checkpoint interval, and the resume. It drives one `MeshRuntime` and one
-// `DataLoader`. The JSON serializer owns the job file, so Python does not own
-// a second schema.
+// checkpoint interval, the resume, and the data cursor beside the checkpoint.
+// It drives one `MeshRuntime` and one `DataLoader`. The JSON serializer owns
+// the job file, so Python does not own a second schema.
 //
 // This translation unit is CPU-safe: no vendor header and no CUDA call.
 
@@ -29,6 +29,7 @@
 #include "nanochat/mesh.h"
 #include "nanochat/mfu.h"
 #include "nanochat/tokenizer.h"
+#include "src/data_cursor.h"
 #include "src/mesh_runtime.h"
 #include "src/parquet/reader.h"
 #include "src/train.h"
@@ -251,6 +252,39 @@ MeshTrainDriver::MeshTrainDriver(MeshTrainConfig config)
   runtime_ =
       std::make_unique<MeshRuntime>(config_.mesh, std::move(runtime_config));
 
+  // A weights-only warm start, then a full resume. The driver loads the
+  // parameters from the warm start and keeps the fresh optimizer state, so a
+  // fine-tuning run does not inherit the pretraining moments
+  // (docs/checkpoint-format.md section 9.1).
+  if (!config_.warm_start_path.empty()) {
+    runtime_->LoadWeights(config_.warm_start_path);
+  }
+
+  // A resume loads the parameters, the optimizer state, and the step, then
+  // continues the data stream from the cursor beside the checkpoint
+  // (docs/client-runtime-design.md section 10.1). A missing or unreadable
+  // cursor is not an error: the run replays the consumed batches below.
+  DataLoaderState cursor;
+  bool cursor_restored = false;
+  if (config_.resume) {
+    std::ifstream probe(config_.checkpoint(), std::ios::binary);
+    if (probe.good()) {
+      bool loaded = true;
+      try {
+        runtime_->Load(config_.checkpoint());
+      } catch (const std::exception&) {
+        loaded = false;
+      }
+      if (loaded) {
+        start_step_ = runtime_->step() + 1;
+        // The packed-row path keeps its own row index and has no loader
+        // cursor, so it always replays.
+        cursor_restored = config_.packed_rows_path.empty() &&
+                          ReadDataCursor(config_.checkpoint(), &cursor);
+      }
+    }
+  }
+
   if (config_.packed_rows_path.empty()) {
     tokenizer_ = LoadTokenizer(config_.tokenizer_path);
     if (tokenizer_ == nullptr) {
@@ -261,10 +295,18 @@ MeshTrainDriver::MeshTrainDriver(MeshTrainConfig config)
         config_.train_source
             ? config_.train_source
             : MakeParquetFactory(config_.train_parquet, config_.text_column);
+    // The wrapper reports the source position the cursor records, even at one
+    // rank, and a restored cursor seeks the first source to the stored
+    // position (docs/distributed-design.md sections 7 and 11). The driver feeds
+    // one global batch to one loader, so the wrapper applies no stride.
+    factory = ShardDocumentSourceFactory(
+        std::move(factory), /*rank=*/0, /*world_size=*/1,
+        cursor_restored ? cursor.source_position : 0);
     loader_ = std::make_unique<DataLoader>(
         std::move(factory), tokenizer_.get(), config_.batch,
         config_.effective_seq(), config_.data_seed, config_.tokenizer_threads,
-        static_cast<std::size_t>(config_.document_buffer));
+        static_cast<std::size_t>(config_.document_buffer),
+        cursor_restored ? &cursor : nullptr);
   }
 
   // The MFU inputs. A zero override selects the model estimate and the active
@@ -287,32 +329,15 @@ MeshTrainDriver::MeshTrainDriver(MeshTrainConfig config)
                  0);
   targets_.assign(tokens_.size(), 0);
 
-  // A weights-only warm start, then a full resume. The driver loads the
-  // parameters from the warm start and keeps the fresh optimizer state, so a
-  // fine-tuning run does not inherit the pretraining moments
-  // (docs/checkpoint-format.md section 9.1).
-  if (!config_.warm_start_path.empty()) {
-    runtime_->LoadWeights(config_.warm_start_path);
-  }
-
-  // A resume loads the parameters, the optimizer state, and the step, then
-  // replays the consumed batches, so the data stream also continues
-  // (docs/client-runtime-design.md section 10.1).
-  if (config_.resume) {
-    std::ifstream probe(config_.checkpoint(), std::ios::binary);
-    if (probe.good()) {
-      bool loaded = true;
-      try {
-        runtime_->Load(config_.checkpoint());
-      } catch (const std::exception&) {
-        loaded = false;
-      }
-      if (loaded) {
-        start_step_ = runtime_->step() + 1;
-        for (int step = 1; step < start_step_; ++step) {
-          if (!LoadBatch(&tokens_, &targets_)) break;
-        }
-      }
+  // The fallback a cursor-less resume uses: replay the consumed batches, so the
+  // stream still continues. Every replay reads the stream again from its start
+  // and costs one read per stored step, and it lands on the same documents only
+  // while the reader is deterministic; the cursor is the exact route
+  // (docs/distributed-design.md section 11). The packed-row path keeps its own
+  // row index and is always replayed.
+  if (!cursor_restored) {
+    for (int step = 1; step < start_step_; ++step) {
+      if (!LoadBatch(&tokens_, &targets_)) break;
     }
   }
 }
@@ -347,6 +372,14 @@ void MeshTrainDriver::Save(int step) {
     runtime_->Save(config_.checkpoint());
   } catch (const std::exception& error) {
     std::fprintf(stderr, "mesh_train: save failed: %s\n", error.what());
+    return;
+  }
+  // The data cursor rides beside the checkpoint, in the same file the
+  // multi-process driver writes, so a resume continues the token stream instead
+  // of replaying it (docs/distributed-design.md section 11,
+  // docs/api-surface.md R13). A checkpoint that failed to save gets no cursor.
+  if (loader_ != nullptr) {
+    WriteDataCursor(config_.checkpoint(), loader_->State());
   }
 }
 

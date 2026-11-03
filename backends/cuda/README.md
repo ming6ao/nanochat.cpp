@@ -132,9 +132,9 @@ registered:
 
 | Composition | Family | Capability bit |
 |---|---|---|
-| `rms_norm` | `rms_norm` (with the fused residual variant) | `kFeatureFusedResidualRmsNorm` |
-| `qk_prep` | `qk_prep` | `kFeatureFusedQkPrep` |
-| `classifier` | `classifier` | `kFeatureFusedClassifier` |
+| `rms_norm` | `rms_norm` (with the fused residual variant) | `kFeatureOverrideRmsNorm` |
+| `qk_prep` | `qk_prep` | `kFeatureOverrideQkPrep` |
+| `classifier` | `classifier` | `kFeatureOverrideClassifier` |
 
 Two are not, and the reason is the vocabulary rather than the code:
 

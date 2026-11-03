@@ -18,8 +18,9 @@
 //
 // This header is private to `src/`: the rest of the tree talks to `Model`. It
 // is public here only so the oracle/gradient tests under `src/` can read the
-// saved logits, inspect the parameter views, and so `generate.cc` can reach the
-// frozen weights and rotary tables for the inference graphs.
+// saved logits, inspect the parameter views, and so `src/inference_view.cc` can
+// fill the read-only view the inference graphs read (`src/inference_view.h`,
+// docs/api-surface.md R9).
 
 namespace nanochat {
 
@@ -73,12 +74,15 @@ class TrainModel final : public Model {
     eval_logits_budget_ = bytes;
   }
 
-  // --- inference accessors (generate.cc) -------------------------------------
+  // --- inference accessors (src/inference_view.cc) ---------------------------
   // The prefill/decode topology lives in generate.cc; these expose only the
   // frozen weights, scalars, and rotary tables it needs. No topology leaks in.
   const ComputeType* wte() const { return wte_; }
   const ComputeType* lm_head() const { return lm_head_; }
   const ComputeType* smear_gate() const { return smear_gate_; }
+  // The per-layer weight blocks, one per layer in block order. The array form
+  // is what `src/inference_view.h` carries (raw pointer plus count).
+  const ops::BlockWeights* layer_weights() const { return lweights_.data(); }
   const ops::BlockWeights& layer_weights(int layer) const {
     return lweights_[static_cast<std::size_t>(layer)];
   }

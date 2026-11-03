@@ -24,6 +24,7 @@
 #include "nanochat/optim.h"
 #include "nanochat/scheduler.h"
 #include "nanochat/tokenizer.h"
+#include "src/data_cursor.h"
 #include "src/mesh_runtime.h"
 #include "src/mesh_train.h"
 #include "src/record_file.h"
@@ -134,8 +135,9 @@ Fixture MakeFixture() {
   return fixture;
 }
 
-MeshTrainConfig TinyDriverConfig(const Fixture& fixture, const std::string& out,
-                                 int steps) {
+MeshTrainConfig DriverConfig(const std::string& tokenizer_path,
+                             const DocumentSourceFactory& factory,
+                             const std::string& out, int steps) {
   MeshTrainConfig config;
   config.mesh = MeshSpec::Data(2);
   config.model = TinyConfig();
@@ -148,12 +150,59 @@ MeshTrainConfig TinyDriverConfig(const Fixture& fixture, const std::string& out,
   config.log_every = 0;
   config.save_every = 0;
   config.out_dir = out;
-  config.tokenizer_path = fixture.tokenizer_path;
-  config.train_source = fixture.factory;
+  config.tokenizer_path = tokenizer_path;
+  config.train_source = factory;
   config.tokenizer_threads = 1;
   config.document_buffer = 16;
   config.flops_per_token = 2.0;
   config.peak_flops = 1000.0;
+  return config;
+}
+
+MeshTrainConfig TinyDriverConfig(const Fixture& fixture, const std::string& out,
+                                 int steps) {
+  return DriverConfig(fixture.tokenizer_path, fixture.factory, out, steps);
+}
+
+// A fixture with enough documents that a checkpoint lands well past the start
+// of the stream, so a resume that restarts the stream is visible.
+struct CursorFixture {
+  std::filesystem::path root;
+  std::string tokenizer_path;
+  DocumentSourceFactory factory;
+};
+
+CursorFixture MakeCursorFixture() {
+  CursorFixture fixture;
+  fixture.root =
+      std::filesystem::temp_directory_path() / ("mesh_cursor_" + UniqueToken());
+  // The temporary root outlives one test run, so start from an empty one and a
+  // sidecar from an earlier run cannot answer for this one.
+  std::filesystem::remove_all(fixture.root);
+  std::filesystem::create_directories(fixture.root);
+  fixture.tokenizer_path = (fixture.root / "tiny.nctoken").string();
+  if (!nanochat::SaveTokenizer(fixture.tokenizer_path,
+                               nanochat::NanochatSplitPattern(), {},
+                               {{"<|bos|>", 256}})) {
+    Fail("SaveTokenizer failed");
+  }
+  auto documents = std::make_shared<std::vector<std::string>>();
+  for (int i = 0; i < 96; ++i) {
+    documents->push_back("word" + std::to_string(i) + " tail");
+  }
+  fixture.factory =
+      [documents](std::string* error) -> std::unique_ptr<DocumentSource> {
+    (void)error;
+    return std::make_unique<VectorSource>(*documents, 4);
+  };
+  return fixture;
+}
+
+MeshTrainConfig CursorDriverConfig(const CursorFixture& fixture,
+                                   const std::string& out, int steps) {
+  MeshTrainConfig config =
+      DriverConfig(fixture.tokenizer_path, fixture.factory, out, steps);
+  config.document_buffer = 128;
   return config;
 }
 
@@ -193,6 +242,164 @@ void TestDriverWritesRecordAndSummary() {
     Fail("summary.json must carry the replica digests");
   }
   if (driver.last_step() != 3) Fail("last_step must be 3");
+}
+
+// The driver writes the data cursor beside its checkpoint: the sidecar holds
+// the cursor of the stream the checkpoint consumed
+// (docs/distributed-design.md section 11).
+void TestDriverWritesTheDataCursor() {
+  const CursorFixture fixture = MakeCursorFixture();
+  const std::string out = (fixture.root / "writes").string();
+  MeshTrainConfig config = CursorDriverConfig(fixture, out, 4);
+  config.save_every = 1;
+  MeshTrainDriver driver(std::move(config));
+  driver.Run();
+
+  const std::string checkpoint = out + "/checkpoint.ckpt";
+  nanochat::DataLoaderState saved;
+  if (!nanochat::ReadDataCursor(checkpoint, &saved)) {
+    Fail("the driver must write the data-cursor sidecar beside the checkpoint");
+    return;
+  }
+  if (saved.source_position <= 0) {
+    Fail("the stored cursor must name a source position past the shard start");
+  }
+
+  // The same four batches, packed by an independent loader, produce the same
+  // cursor: the driver stored the stream it consumed and not another one.
+  std::unique_ptr<nanochat::Tokenizer> tokenizer =
+      nanochat::LoadTokenizer(fixture.tokenizer_path);
+  if (tokenizer == nullptr) {
+    Fail("LoadTokenizer failed");
+    return;
+  }
+  const DocumentSourceFactory factory = nanochat::ShardDocumentSourceFactory(
+      fixture.factory, /*rank=*/0, /*world_size=*/1);
+  nanochat::DataLoader loader(factory, tokenizer.get(), 4, 8,
+                              /*seed=*/42, /*tokenizer_threads=*/1,
+                              /*document_buffer=*/128);
+  std::vector<int> tokens(4 * 8);
+  std::vector<int> targets(4 * 8);
+  for (int step = 0; step < 4; ++step) {
+    if (!loader.Next(tokens.data(), targets.data())) {
+      Fail("the reference loader ended after " + std::to_string(step) +
+           " batches");
+      return;
+    }
+  }
+  const nanochat::DataLoaderState expected = loader.State();
+  if (saved.epoch != expected.epoch ||
+      saved.source_position != expected.source_position ||
+      saved.documents != expected.documents) {
+    Fail("the stored cursor is not the cursor of the consumed stream");
+  }
+}
+
+// A resume continues the token stream from the cursor beside the checkpoint
+// instead of replaying the shard from its start
+// (docs/api-surface.md R13, docs/distributed-design.md section 11).
+//
+// The sidecar is rewritten to the cursor of the stream start while the
+// checkpoint keeps its step, so the two behaviours separate: a resume that
+// reads the file consumes one batch, and a resume that replays consumes five.
+void TestResumeFollowsTheDataCursor() {
+  const CursorFixture fixture = MakeCursorFixture();
+  const std::string out = (fixture.root / "follow").string();
+  {
+    MeshTrainConfig config = CursorDriverConfig(fixture, out, 4);
+    config.save_every = 1;
+    MeshTrainDriver driver(std::move(config));
+    driver.Run();
+  }
+  const std::string checkpoint = out + "/checkpoint.ckpt";
+  const nanochat::DataLoaderState restarted;
+  if (!nanochat::WriteDataCursor(checkpoint, restarted)) {
+    Fail("the test could not rewrite the data cursor");
+    return;
+  }
+
+  MeshTrainConfig second = CursorDriverConfig(fixture, out, 5);
+  second.resume = true;
+  MeshTrainDriver resumed(std::move(second));
+  resumed.Run();
+  if (resumed.records().size() != 1 || resumed.records()[0].step != 5) {
+    Fail("the resume must run step 5");
+    return;
+  }
+
+  nanochat::DataLoaderState got;
+  if (!nanochat::ReadDataCursor(checkpoint, &got)) {
+    Fail("the resumed run must store the data cursor of its last step");
+    return;
+  }
+  // One batch is all the stream after the stored cursor holds at this point.
+  std::unique_ptr<nanochat::Tokenizer> tokenizer =
+      nanochat::LoadTokenizer(fixture.tokenizer_path);
+  if (tokenizer == nullptr) {
+    Fail("LoadTokenizer failed");
+    return;
+  }
+  const DocumentSourceFactory factory = nanochat::ShardDocumentSourceFactory(
+      fixture.factory, /*rank=*/0, /*world_size=*/1, restarted.source_position);
+  nanochat::DataLoader loader(factory, tokenizer.get(), 4, 8,
+                              /*seed=*/42, /*tokenizer_threads=*/1,
+                              /*document_buffer=*/128, &restarted);
+  std::vector<int> tokens(4 * 8);
+  std::vector<int> targets(4 * 8);
+  if (!loader.Next(tokens.data(), targets.data())) {
+    Fail("the reference loader has no batch after the stored cursor");
+    return;
+  }
+  const nanochat::DataLoaderState expected = loader.State();
+  if (got.epoch != expected.epoch ||
+      got.source_position != expected.source_position ||
+      got.documents != expected.documents) {
+    Fail(
+        "the resume ignored the data cursor beside the checkpoint: its last "
+        "step stores source position " +
+        std::to_string(got.source_position) +
+        " where the stored cursor leads to " +
+        std::to_string(expected.source_position));
+  }
+}
+
+// A missing or unreadable sidecar is not an error: the run replays the consumed
+// batches and still completes, so a checkpoint from an older build resumes
+// (docs/distributed-design.md section 11).
+void TestResumeWithoutACursorCompletes() {
+  const CursorFixture fixture = MakeCursorFixture();
+  const std::string out = (fixture.root / "no_cursor").string();
+  {
+    MeshTrainConfig config = CursorDriverConfig(fixture, out, 4);
+    config.save_every = 1;
+    MeshTrainDriver driver(std::move(config));
+    driver.Run();
+  }
+  const std::string checkpoint = out + "/checkpoint.ckpt";
+  {
+    std::ofstream truncated(nanochat::DataCursorPath(checkpoint),
+                            std::ios::binary | std::ios::trunc);
+    truncated << "abc";
+  }
+  MeshTrainConfig second = CursorDriverConfig(fixture, out, 5);
+  second.resume = true;
+  MeshTrainDriver resumed(std::move(second));
+  resumed.Run();
+  if (resumed.records().size() != 1 || resumed.records()[0].step != 5) {
+    Fail("a resume with a truncated cursor must still run step 5");
+  }
+
+  std::filesystem::remove(nanochat::DataCursorPath(checkpoint));
+  MeshTrainConfig third = CursorDriverConfig(fixture, out, 6);
+  third.resume = true;
+  MeshTrainDriver again(std::move(third));
+  again.Run();
+  if (again.records().size() != 1 || again.records()[0].step != 6) {
+    Fail("a resume with no cursor must still run step 6");
+  }
+  if (!std::filesystem::exists(nanochat::DataCursorPath(checkpoint))) {
+    Fail("a resume without a cursor must store one at its own step");
+  }
 }
 
 // A resume continues the counter and appends to the metrics file.
@@ -308,6 +515,9 @@ void TestDriverRunsPackedRows() {
 
 int main() {
   TestDriverWritesRecordAndSummary();
+  TestDriverWritesTheDataCursor();
+  TestResumeFollowsTheDataCursor();
+  TestResumeWithoutACursorCompletes();
   TestResumeContinues();
   TestDriverMatchesHandRun();
   TestDriverRunsPackedRows();

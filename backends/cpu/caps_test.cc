@@ -95,6 +95,8 @@ bool Contains(const std::vector<std::string>& list, const std::string& name) {
 // The vocabulary of `spec/capability_bits.md` section 3, in declaration order.
 // The test carries the list because `spec/` is prose and the backend may not
 // reach into it.
+// BEGIN GENERATED (tools/contract_vocabulary.py --write)
+// clang-format off
 const char* const kVocabulary[] = {
     "gqa",
     "rope",
@@ -112,6 +114,8 @@ const char* const kVocabulary[] = {
     "override_classifier",
     "override_value_gate",
 };
+// clang-format on
+// END GENERATED (tools/contract_vocabulary.py --write)
 
 // The feature set the reference declaration states: every mechanism of the
 // vocabulary except the four fused overrides and the fp8 pair. A device that
@@ -120,41 +124,74 @@ const char* const kVocabulary[] = {
 // path here. The fp8 pair is absent because this backend has no tensor-core fp8
 // path (`supports_fp8` is false): its fp8 emulation is the oracle a GPU's fp8
 // bits are measured against, not a mechanism this device claims to run.
+// BEGIN GENERATED (tools/contract_vocabulary.py --write)
+// clang-format off
 const char* const kReferenceFeatures[] = {
-    "gqa",           "rope", "sliding_window",          "value_gate",
-    "fp32",          "bf16", "primitive_tier_complete", "stateful_adamw",
+    "gqa",
+    "rope",
+    "sliding_window",
+    "value_gate",
+    "fp32",
+    "bf16",
+    "primitive_tier_complete",
+    "stateful_adamw",
     "stateful_muon",
 };
+// clang-format on
+// END GENERATED (tools/contract_vocabulary.py --write)
 
 // The six device utilities (`docs/kernels.md`: Alloc, Free, Memcpy, Memset,
 // Synchronize, GetCaps).
+// BEGIN GENERATED (tools/contract_vocabulary.py --write)
+// clang-format off
 const char* const kUtilities[] = {
-    "alloc", "free", "memcpy", "memset", "synchronize", "get_caps",
+    "alloc",
+    "free",
+    "memcpy",
+    "memset",
+    "synchronize",
+    "get_caps",
 };
+// clang-format on
+// END GENERATED (tools/contract_vocabulary.py --write)
 
 // The nine op codes of `spec/pointwise_ops.md` section 3.
+// BEGIN GENERATED (tools/contract_vocabulary.py --write)
+// clang-format off
 const char* const kPointwiseCodes[] = {
-    "kScale", "kScaleAdd", "kGateMul", "kReluSquare", "kSoftcap",
-    "kExp",   "kRsqrt",    "kLog",     "kRowScale",
+    "kScale",
+    "kScaleAdd",
+    "kGateMul",
+    "kReluSquare",
+    "kSoftcap",
+    "kExp",
+    "kRsqrt",
+    "kLog",
+    "kRowScale",
 };
+// clang-format on
+// END GENERATED (tools/contract_vocabulary.py --write)
 
 // The four combine ops of `ReduceOp` (`include/nanochat/kernels.h`).
-const char* const kReduceOps[] = {
-    "kSumSq",
-    "kSum",
-    "kMax",
-    "kLogSumExp",
-};
+// BEGIN GENERATED (tools/contract_vocabulary.py --write)
+// clang-format off
+const char* const kReduceOps[] = {"kSumSq", "kSum", "kMax", "kLogSumExp"};
+// clang-format on
+// END GENERATED (tools/contract_vocabulary.py --write)
 
 // The four families that are compositions on this backend. None of them may be
 // declared as a primitive: a primitive is what a composition is built from, and
 // these are what the composition tier builds.
+// BEGIN GENERATED (tools/contract_vocabulary.py --write)
+// clang-format off
 const char* const kCompositionFamilies[] = {
     "rms_norm",
     "qk_prep",
     "classifier",
     "value_gate",
 };
+// clang-format on
+// END GENERATED (tools/contract_vocabulary.py --write)
 
 void CheckBits(const std::vector<std::string>& features) {
   Check(!features.empty(), "caps.json declares a features array");

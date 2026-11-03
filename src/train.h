@@ -214,6 +214,9 @@ class TrainLoop {
 
   Model* model() { return model_.get(); }
   Optimizer* optimizer() { return optimizer_.get(); }
+  // The training loader, so a test can read the cursor a resume restored and
+  // the batch the run consumes next (docs/distributed-design.md section 11).
+  DataLoader* train_loader() { return train_loader_.get(); }
   const Scheduler& scheduler() const { return *scheduler_; }
   float last_loss() const { return last_loss_; }
   int last_step() const { return last_step_; }

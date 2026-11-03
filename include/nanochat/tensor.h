@@ -256,22 +256,40 @@ inline constexpr std::uint64_t kFeaturePrimitiveTierComplete = CapabilityBit(8);
 inline constexpr std::uint64_t kFeatureAdamW = CapabilityBit(9);
 inline constexpr std::uint64_t kFeatureMuon = CapabilityBit(10);
 
-// One fused-override bit per composition whose fusion is legal under the
-// boundary rule, that is per composition a backend may substitute with a
-// registered fused family (nanochat/plan.h). Each bit is set only when that
-// family exists *and* passed its gate; the plan reads it to decide whether the
-// override competes with the primitive implementation.
+// One override bit per composition whose fusion is legal under the boundary
+// rule, that is per composition a backend may substitute with a registered
+// fused family (nanochat/plan.h). Each bit is set only when that family exists
+// *and* passed its gate; the plan reads it to decide whether the override
+// competes with the primitive implementation. Three of the four spell the
+// vocabulary name of `spec/capability_bits.md` section 3; the fourth,
+// `kFeatureFusedAttention`, has no vocabulary row, so it keeps its own
+// spelling.
 //
-//   kFeatureFusedResidualRmsNorm   residual add + RmsNorm, for `rms_norm`
-//   kFeatureFusedQkPrep            norm + rope + scale, for `qk_prep`
+//   kFeatureOverrideRmsNorm        residual add + RmsNorm, for `rms_norm`
+//   kFeatureOverrideQkPrep         norm + rope + scale, for `qk_prep`
 //   kFeatureFusedAttention         attention with qk_prep folded in, for
 //                                  `attention` (the v2 candidate)
-//   kFeatureFusedClassifier        softcap + cross-entropy + the logits scale,
+//   kFeatureOverrideClassifier     softcap + cross-entropy + the logits scale,
 //                                  for `classifier`
-inline constexpr std::uint64_t kFeatureFusedResidualRmsNorm = CapabilityBit(11);
-inline constexpr std::uint64_t kFeatureFusedQkPrep = CapabilityBit(12);
+inline constexpr std::uint64_t kFeatureOverrideRmsNorm = CapabilityBit(11);
+inline constexpr std::uint64_t kFeatureOverrideQkPrep = CapabilityBit(12);
 inline constexpr std::uint64_t kFeatureFusedAttention = CapabilityBit(13);
-inline constexpr std::uint64_t kFeatureFusedClassifier = CapabilityBit(14);
+inline constexpr std::uint64_t kFeatureOverrideClassifier = CapabilityBit(14);
+
+// One-cycle aliases for the three constants above this rename introduced. The
+// old spelling stays a plain `constexpr` so a caller outside this tree still
+// compiles for one cycle; the new spelling is `kFeatureOverride*`. No
+// `[[deprecated]]`: this tree builds with warnings as errors in some
+// configurations.
+//
+//   kFeatureFusedResidualRmsNorm   -> kFeatureOverrideRmsNorm
+//   kFeatureFusedQkPrep            -> kFeatureOverrideQkPrep
+//   kFeatureFusedClassifier        -> kFeatureOverrideClassifier
+inline constexpr std::uint64_t kFeatureFusedResidualRmsNorm =
+    kFeatureOverrideRmsNorm;
+inline constexpr std::uint64_t kFeatureFusedQkPrep = kFeatureOverrideQkPrep;
+inline constexpr std::uint64_t kFeatureFusedClassifier =
+    kFeatureOverrideClassifier;
 
 // A vendor-free description of the active device. `kernels::GetCaps()` returns
 // one of these; the host fails fast at startup when the build's precision is

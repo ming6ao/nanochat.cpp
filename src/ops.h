@@ -6,6 +6,7 @@
 
 #include "nanochat/kernels.h"
 #include "nanochat/tensor.h"
+#include "src/fp8_policy.h"
 
 // Reusable, backend-agnostic graph pieces shared by the training graph
 // (`model.cc`) and the inference graphs (`generate.cc`). Every function here is
@@ -29,29 +30,6 @@ constexpr float kLogitSoftcap = 15.0f;
 constexpr float kQkScale = 1.2f;
 constexpr int kVeGateChannels = 12;
 constexpr int kSmearChannels = 24;
-
-// The fp8 scratch for one linear call: the two byte operands and the two
-// dequantization scales (docs/fp8-training.md sections 4.3 and 6.3). The
-// workspace owns the memory. A caller that passes a null scratch, or a scratch
-// whose pointers are null, uses the dense compute-type path.
-struct Fp8Scratch {
-  std::uint8_t* a_bytes = nullptr;  // the activation operand
-  std::uint8_t* b_bytes = nullptr;  // the weight operand
-  float* a_scale = nullptr;
-  float* b_scale = nullptr;
-
-  bool ready() const {
-    return a_bytes != nullptr && b_bytes != nullptr && a_scale != nullptr &&
-           b_scale != nullptr;
-  }
-};
-
-// The fp8 eligibility rule (docs/performance-model.md section 5.2): both
-// dimensions are divisible by 16, and the smaller dimension is at least 128.
-inline bool Fp8Eligible(std::int64_t rows, std::int64_t cols) {
-  return rows > 0 && cols > 0 && rows % 16 == 0 && cols % 16 == 0 &&
-         std::min(rows, cols) >= 128;
-}
 
 // The storage <-> float boundary for the compute type. fp32 is the only
 // compute type today, so both directions are the identity.

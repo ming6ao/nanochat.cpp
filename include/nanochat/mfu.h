@@ -28,7 +28,8 @@ struct ParamBreakdown {
 
 // Counts the parameters of `config` by group. This is a structural count of
 // `Config`, not a walk of runtime parameter names. It lands beside
-// `NumMatmulParams` in src/train.cc and mirrors `GPT.num_scaling_params()`.
+// `NumMatmulParams` in `src/performance_model.cc` and mirrors
+// `GPT.num_scaling_params()`.
 // `NumMatmulParams` mirrors `GPT.num_matmul_params()`; the two differ, so use
 // the right one.
 ParamBreakdown CountParams(const Config& config);

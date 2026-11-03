@@ -338,8 +338,13 @@ document that fits, so it reorders documents inside the buffer. A document
 index alone cannot reproduce it. A snapshot takes the producer gate, so it
 never records a read that has not reached the buffer.
 
-A resumed run applies the stored source position on the stored epoch's source
-creation. The loader skips earlier epochs without a full replay. The sidecar
+A resumed run applies the stored source position on the source the loader's
+constructor creates, and the constructor primes the epoch and the buffer from
+the sidecar. The packing then continues where it stopped, so the documents that
+were packed but not consumed are not skipped. The epochs before the stored one
+are never opened, so a resume costs no replay. A `Reset` after that opens the
+next epoch, and it starts at position 0. Both drivers resume this way: the
+in-process `MeshTrainDriver` and the multi-process `TrainLoop`. The sidecar
 keeps the main checkpoint byte-identical across ranks, so the checkpoint hash
 check stays valid, and `//src:train_parallel_test` pins the exact resume.
 

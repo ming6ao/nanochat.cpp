@@ -1,0 +1,20 @@
+# spec/ — the contract documents. This package exists so a check can read them.
+#
+# The five files are the prose authorities the tooling derives from:
+# `capability_bits.md` section 3 for the fifteen capability names and their
+# order, `block_kinds.md` section 2 for the block kinds, `pointwise_ops.md` for
+# the accuracy bound of each op code, and `versions.md` and `decisions.md` for
+# the contract numbers and the records behind them. They were files of the root
+# package until a test needed one: a Bazel test reads only its runfiles, so a
+# file with no label cannot be data. The export is the whole change; no document
+# is edited or moved.
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files([
+    "block_kinds.md",
+    "capability_bits.md",
+    "decisions.md",
+    "pointwise_ops.md",
+    "versions.md",
+])

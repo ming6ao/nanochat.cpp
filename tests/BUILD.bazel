@@ -640,17 +640,15 @@ cc_test(
 # its consequence named; a mask that satisfies `requires` but lacks a
 # composition's own bit leaves that composition unplaced and names the gap; and
 # a mask declaring an override bit selects the fused family and records the
-# composition as the declined fallback. No device is opened, no checkpoint is
-# read, and no kernel runs.
+# composition as the declined fallback; and a zero mask is a device that
+# declares nothing, so the plan names the missing tier bit instead of resolving
+# one behind the backend. No device is opened, no checkpoint is read, and no
+# kernel runs.
 cc_test(
     name = "plan_gate_test",
     srcs = ["plan_gate_test.cc"],
     copts = nanochat_copts(),
     defines = precision_defines(),
-    # The reference declaration is what a device that reports no mask is read
-    # through, so the fabricated device answers are compared with the same file
-    # a launch reads.
-    data = ["//backends/cpu:caps_json"],
     deps = [
         "//include/nanochat:nanochat",
         "//src:model_spec",

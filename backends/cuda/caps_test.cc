@@ -374,9 +374,9 @@ int main(int argc, char** argv) {
            "\" is gated on a capability bit with no vocabulary name");
     }
   }
-  const std::uint64_t override_bits = nanochat::kFeatureFusedResidualRmsNorm |
-                                      nanochat::kFeatureFusedQkPrep |
-                                      nanochat::kFeatureFusedClassifier;
+  const std::uint64_t override_bits = nanochat::kFeatureOverrideRmsNorm |
+                                      nanochat::kFeatureOverrideQkPrep |
+                                      nanochat::kFeatureOverrideClassifier;
   const std::uint64_t claimed_unregistered =
       caps.feature_mask & override_bits & ~registered_bits;
   if (claimed_unregistered != 0) {

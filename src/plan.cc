@@ -43,7 +43,6 @@
 
 #include "nanochat/kernels.h"
 #include "src/capability_names.h"
-#include "src/device_caps.h"
 #include "src/plan_internal.h"
 
 namespace nanochat {
@@ -232,20 +231,6 @@ bool ParseCompositionName(const char* name, CompositionKind* out) {
 }
 
 // ---------------------------------------------------------------------------
-// The device's answer
-// ---------------------------------------------------------------------------
-
-std::uint64_t EffectiveDeviceMask(const Caps& device) {
-  if (device.feature_mask != 0) return device.feature_mask;
-  // The reference backend reports the host and no mask; its declaration is
-  // `backends/cpu/caps.json`, which is the single source for what it offers.
-  if (device.device_name != nullptr) {
-    return DeclaredFeatureMaskForDevice(device.device_name);
-  }
-  return 0;
-}
-
-// ---------------------------------------------------------------------------
 // BuildPlan
 // ---------------------------------------------------------------------------
 
@@ -274,7 +259,7 @@ Plan BuildPlanWithDevice(const PlanRequest& request, const Caps& device,
     return plan;
   }
 
-  const std::uint64_t mask = EffectiveDeviceMask(device);
+  const std::uint64_t mask = device.feature_mask;
   std::uint64_t required = spec.requires_features;
   if (spec.policy.require_primitive_tier) {
     required |= kFeaturePrimitiveTierComplete;

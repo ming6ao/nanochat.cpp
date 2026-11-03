@@ -821,19 +821,18 @@ class ShardedDocumentSource final : public DocumentSource {
 
 DocumentSourceFactory ShardDocumentSourceFactory(DocumentSourceFactory factory,
                                                  int rank, int world_size,
-                                                 std::int64_t start,
-                                                 int start_on_creation) {
-  auto creation = std::make_shared<int>(0);
+                                                 std::int64_t start) {
+  // Only the source the loader's constructor makes carries the resume offset;
+  // a source that a later `Reset` makes begins at 0, which is where a new epoch
+  // starts (docs/distributed-design.md section 11).
+  auto first_creation = std::make_shared<bool>(true);
   return
-      [factory = std::move(factory), rank, world_size, start, start_on_creation,
-       creation](std::string* error) -> std::unique_ptr<DocumentSource> {
+      [factory = std::move(factory), rank, world_size, start,
+       first_creation](std::string* error) -> std::unique_ptr<DocumentSource> {
         std::unique_ptr<DocumentSource> source = factory(error);
         if (source == nullptr) return nullptr;
-        // The stored epoch selects the creation that carries the resume offset.
-        // An earlier creation begins at 0, so the earlier epochs are skipped
-        // without a full replay (docs/distributed-design.md section 11).
-        const std::int64_t begin = (*creation == start_on_creation) ? start : 0;
-        ++*creation;
+        const std::int64_t begin = *first_creation ? start : 0;
+        *first_creation = false;
         return std::make_unique<ShardedDocumentSource>(std::move(source), rank,
                                                        world_size, begin);
       };

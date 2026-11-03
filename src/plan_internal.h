@@ -28,17 +28,6 @@
 
 namespace nanochat {
 
-// The capability mask a plan treats as the device's answer.
-//
-// `Caps::feature_mask` is the authority when it is non-empty. When a backend
-// reports no mask at all - the reference backend today, whose declaration lives
-// in `backends/cpu/caps.json` and is not yet wired into `GetCaps()` - the plan
-// reads that declaration through the device-profile derivation instead, because
-// silence is not a statement that a device offers nothing, and treating it as
-// one would reject every plan on the reference backend. A mask that reports the
-// host with zero bits is exactly the case this resolves.
-std::uint64_t EffectiveDeviceMask(const Caps& device);
-
 // `BuildPlan`, with the device's answer and the registration list supplied by
 // the caller. `registrations` may be null when `count` is 0.
 Plan BuildPlanWithDevice(const PlanRequest& request, const Caps& device,

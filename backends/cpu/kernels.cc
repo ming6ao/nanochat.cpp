@@ -204,10 +204,38 @@ Caps GetCaps() {
   caps.is_device = false;
   caps.has_cublas = false;
   caps.has_tensor_cores = false;
-  // The CPU reference implements the build precision. The host fails fast on a
-  // build whose precision is not in this set.
-  caps.supports_fp32 = true;
-  caps.supports_bf16 = true;
+  // The mechanism bits are the ones `backends/cpu/caps.json` declares for the
+  // `cpu` entry, read through the leaf `nanochat/device_profile.h`. The
+  // declaration is the single source (`spec/capability_bits.md` section 1), so
+  // this backend reports the nine bits it promises rather than a second
+  // hand-written list. A declaration that cannot be found - a bare binary
+  // outside the runfiles tree - leaves the mask at zero, which claims nothing
+  // and is what every bare run reported before this lookup existed.
+  caps.feature_mask = DeclaredFeatureMask("cpu");
+  if (caps.feature_mask == 0) {
+    // No declaration was found - a bare binary outside the runfiles tree - so
+    // the mask claims nothing and the host answer stays the one this backend
+    // reported before the lookup existed: the CPU reference implements the
+    // build precision, and the host fails fast on a build whose precision is
+    // not in this set.
+    caps.supports_fp32 = true;
+    caps.supports_bf16 = true;
+    caps.supports_fp8 = false;
+    caps.device_name = "cpu";
+    return caps;
+  }
+  // The three flags and `Supports(DType)` are one answer spelled twice, so they
+  // are read off the mask rather than recomputed: a caller that asks
+  // `supports_bf16` and a caller that asks `HasFeature(kFeatureBf16)` cannot
+  // disagree (`backends/cuda/device.cu` does the same). `supports_fp8` stays
+  // false because the reference declaration carries neither fp8 bit: its fp8
+  // emulation is the oracle a GPU's fp8 bits are measured against, not a
+  // mechanism this device claims to run.
+  caps.supports_fp32 = (caps.feature_mask & kFeatureFp32) != 0;
+  caps.supports_bf16 = (caps.feature_mask & kFeatureBf16) != 0;
+  caps.supports_fp8 =
+      (caps.feature_mask & (kFeatureFp8Storage | kFeatureFp8Gemm)) ==
+      (kFeatureFp8Storage | kFeatureFp8Gemm);
   caps.device_name = "cpu";
   return caps;
 }

@@ -114,6 +114,10 @@ struct MeshTrainConfig {
   int num_iterations = 100;
   int log_every = 1;
   int save_every = 0;  // 0 disables the interval; the final save always runs
+  // A resume continues the token stream from the data cursor beside the
+  // checkpoint (docs/distributed-design.md section 11). A missing or unreadable
+  // cursor replays the consumed batches from the start of the stream, which is
+  // the same rule the multi-process driver follows (docs/api-surface.md R13).
   bool resume = false;
 
   // The MFU inputs (docs/client-runtime-design.md section 20.5). A zero
@@ -148,7 +152,7 @@ struct MeshTrainConfig {
 
 // The driver. The constructor builds the runtime, the tokenizer, and the
 // loader. `Run` runs the loop and writes the record, the summary, and the
-// checkpoint.
+// checkpoint with its data cursor.
 class MeshTrainDriver {
  public:
   explicit MeshTrainDriver(MeshTrainConfig config);

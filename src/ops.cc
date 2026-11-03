@@ -26,11 +26,23 @@
 #include <vector>
 
 #include "nanochat/kernels.h"
+#include "src/kernel_params_check.h"
 
 namespace nanochat {
 namespace ops {
 
 namespace {
+
+// The value of a scalar argument whose host copy is the one to check. A
+// coefficient the caller keeps on device (`ScalarArg::dev`, docs/scalar-
+// arguments.md) is read by the kernel, so reading it here would be the host
+// round trip `docs/api-surface.md` R3 rules out; that case passes unchecked.
+// It exists only in a debug build, where the checks below are the only callers.
+#ifndef NDEBUG
+bool FiniteArg(ScalarArg arg) {
+  return arg.dev != nullptr || std::isfinite(arg.value);
+}
+#endif
 
 // True when the device advertises the fused family of one composition.  The
 // composition below every call site is the definition: it is written over the
@@ -113,7 +125,15 @@ void StoreScalar(float* device, float value) {
 void PwScalars(PointwiseOp op, int count, const ComputeType* a,
                const ComputeType* b, ComputeType* out, ScalarArg alpha,
                ScalarArg beta) {
+  NANOCHAT_CHECK_KERNEL_PARAMS("pointwise", count >= 0);
+  NANOCHAT_CHECK_KERNEL_PARAMS("pointwise", FiniteArg(alpha));
+  NANOCHAT_CHECK_KERNEL_PARAMS("pointwise", FiniteArg(beta));
   if (count <= 0) return;
+  NANOCHAT_CHECK_KERNEL_PARAMS("pointwise", a != nullptr && out != nullptr);
+  NANOCHAT_CHECK_KERNEL_PARAMS("pointwise",
+                               b != nullptr || (op != PointwiseOp::kScaleAdd &&
+                                                op != PointwiseOp::kGateMul &&
+                                                op != PointwiseOp::kRowScale));
   PointwiseParams params;
   params.op = op;
   params.count = count;
@@ -125,7 +145,21 @@ void PwScalars(PointwiseOp op, int count, const ComputeType* a,
 void Pw(PointwiseOp op, int count, const ComputeType* a, const ComputeType* b,
         ComputeType* out, float alpha = 1.0f, float beta = 0.0f,
         int row_width = 0) {
+  NANOCHAT_CHECK_KERNEL_PARAMS("pointwise", count >= 0);
+  NANOCHAT_CHECK_KERNEL_PARAMS("pointwise", row_width >= 0);
+  NANOCHAT_CHECK_KERNEL_PARAMS("pointwise",
+                               std::isfinite(alpha) && std::isfinite(beta));
+  // A broadcast reads one row of `row_width` entries and replicates it down
+  // the rows of `a`, so a width that does not divide the count would read a
+  // fraction of a row off the end of `b`.
+  NANOCHAT_CHECK_KERNEL_PARAMS("pointwise",
+                               row_width == 0 || count % row_width == 0);
   if (count <= 0) return;
+  NANOCHAT_CHECK_KERNEL_PARAMS("pointwise", a != nullptr && out != nullptr);
+  NANOCHAT_CHECK_KERNEL_PARAMS("pointwise",
+                               b != nullptr || (op != PointwiseOp::kScaleAdd &&
+                                                op != PointwiseOp::kGateMul &&
+                                                op != PointwiseOp::kRowScale));
   PointwiseParams params;
   params.op = op;
   params.count = count;
@@ -139,7 +173,15 @@ void PwBack(PointwiseOp op, int count, const ComputeType* a,
             const ComputeType* b, const ComputeType* dy, ComputeType* da,
             ComputeType* db, float alpha = 1.0f, float beta = 0.0f,
             int row_width = 0) {
+  NANOCHAT_CHECK_KERNEL_PARAMS("pointwise", count >= 0);
+  NANOCHAT_CHECK_KERNEL_PARAMS("pointwise", row_width >= 0);
+  NANOCHAT_CHECK_KERNEL_PARAMS("pointwise",
+                               std::isfinite(alpha) && std::isfinite(beta));
+  NANOCHAT_CHECK_KERNEL_PARAMS("pointwise",
+                               row_width == 0 || count % row_width == 0);
   if (count <= 0) return;
+  NANOCHAT_CHECK_KERNEL_PARAMS("pointwise",
+                               a != nullptr && dy != nullptr && da != nullptr);
   PointwiseParams params;
   params.op = op;
   params.count = count;
@@ -163,7 +205,10 @@ void Mul(const ComputeType* a, const ComputeType* b, ComputeType* out,
 // fields are spelled once per combine op.
 void RowReduce(ReduceOp op, int n_out, int count, const ComputeType* a,
                float* out, std::int64_t offset = 0) {
+  NANOCHAT_CHECK_KERNEL_PARAMS("reductions", n_out >= 0 && count >= 0);
+  NANOCHAT_CHECK_KERNEL_PARAMS("reductions", offset >= 0);
   if (n_out <= 0 || count <= 0) return;
+  NANOCHAT_CHECK_KERNEL_PARAMS("reductions", a != nullptr && out != nullptr);
   RowReduceParams params;
   params.n_out = n_out;
   params.count = count;
@@ -542,7 +587,10 @@ void RopeNormBackwardHost(int batch, int seq, int heads, int head_dim,
 void LinearForward(const ComputeType* x, const ComputeType* w, ComputeType* y,
                    std::int64_t rows, std::int64_t in, std::int64_t out,
                    bool accumulate, const Fp8Scratch* fp8) {
+  NANOCHAT_CHECK_KERNEL_PARAMS("gemm", rows >= 0 && in >= 0 && out >= 0);
   if (rows <= 0 || in <= 0 || out <= 0) return;
+  NANOCHAT_CHECK_KERNEL_PARAMS("gemm",
+                               x != nullptr && w != nullptr && y != nullptr);
   (void)fp8;  // unused in a dense build
   if constexpr (kFp8Build) {
     // The eligible matmuls take fp8 operands with an fp32 accumulator
@@ -598,7 +646,10 @@ void LinearForward(const ComputeType* x, const ComputeType* w, ComputeType* y,
 void LinearWgrad(const ComputeType* x, const ComputeType* dy, float* dw,
                  std::int64_t rows, std::int64_t in, std::int64_t out,
                  const Fp8Scratch* fp8) {
+  NANOCHAT_CHECK_KERNEL_PARAMS("gemm", rows >= 0 && in >= 0 && out >= 0);
   if (rows <= 0 || in <= 0 || out <= 0) return;
+  NANOCHAT_CHECK_KERNEL_PARAMS("gemm",
+                               x != nullptr && dy != nullptr && dw != nullptr);
   (void)fp8;  // unused in a dense build
   if constexpr (kFp8Build) {
     // A = the output gradient (E5M2), B = the saved activation (E4M3). The
@@ -642,7 +693,10 @@ void LinearWgrad(const ComputeType* x, const ComputeType* dy, float* dw,
 void LinearDgrad(const ComputeType* dy, const ComputeType* w, ComputeType* dx,
                  std::int64_t rows, std::int64_t in, std::int64_t out,
                  bool accumulate, const Fp8Scratch* fp8) {
+  NANOCHAT_CHECK_KERNEL_PARAMS("gemm", rows >= 0 && in >= 0 && out >= 0);
   if (rows <= 0 || in <= 0 || out <= 0) return;
+  NANOCHAT_CHECK_KERNEL_PARAMS("gemm",
+                               dy != nullptr && w != nullptr && dx != nullptr);
   (void)fp8;  // unused in a dense build
   if constexpr (kFp8Build) {
     // A = the output gradient (E5M2), B = the weight (E4M3). The output is an
@@ -690,8 +744,12 @@ void LinearDgrad(const ComputeType* dy, const ComputeType* w, ComputeType* dx,
 
 void RmsNormForward(std::int64_t rows, std::int64_t dim, float eps,
                     const ComputeType* x, ComputeType* out, float* rstd) {
+  NANOCHAT_CHECK_KERNEL_PARAMS("rms_norm", rows >= 0 && dim >= 0);
+  NANOCHAT_CHECK_KERNEL_PARAMS("rms_norm", std::isfinite(eps));
   if (rows <= 0 || dim <= 0) return;
-  if (Fused(kFeatureFusedResidualRmsNorm)) {
+  NANOCHAT_CHECK_KERNEL_PARAMS(
+      "rms_norm", x != nullptr && out != nullptr && rstd != nullptr);
+  if (Fused(kFeatureOverrideRmsNorm)) {
     RmsNormParams params;
     params.rows = static_cast<int>(rows);
     params.dim = static_cast<int>(dim);
@@ -713,8 +771,13 @@ void RmsNormForward(std::int64_t rows, std::int64_t dim, float eps,
 void RmsNormBackward(std::int64_t rows, std::int64_t dim, float eps,
                      const ComputeType* x, const ComputeType* dy,
                      const float* rstd, ComputeType* dx) {
+  NANOCHAT_CHECK_KERNEL_PARAMS("rms_norm", rows >= 0 && dim >= 0);
+  NANOCHAT_CHECK_KERNEL_PARAMS("rms_norm", std::isfinite(eps));
   if (rows <= 0 || dim <= 0) return;
-  if (Fused(kFeatureFusedResidualRmsNorm)) {
+  NANOCHAT_CHECK_KERNEL_PARAMS("rms_norm", x != nullptr && dy != nullptr &&
+                                               rstd != nullptr &&
+                                               dx != nullptr);
+  if (Fused(kFeatureOverrideRmsNorm)) {
     RmsNormParams params;
     params.rows = static_cast<int>(rows);
     params.dim = static_cast<int>(dim);
@@ -741,8 +804,18 @@ void RmsNormBackward(std::int64_t rows, std::int64_t dim, float eps,
 void QkPrepForward(int batch, int seq, int num_heads, int num_kv_heads,
                    int head_dim, float eps, float scale, const float* cos,
                    const float* sin, ComputeType* q, ComputeType* k) {
+  NANOCHAT_CHECK_KERNEL_PARAMS("qk_prep",
+                               batch >= 0 && seq >= 0 && num_heads >= 0 &&
+                                   num_kv_heads >= 0 && head_dim >= 0);
+  NANOCHAT_CHECK_KERNEL_PARAMS("qk_prep",
+                               std::isfinite(eps) && std::isfinite(scale));
+  // The rotation is a half-split pair rotation, so the head width is even.
+  NANOCHAT_CHECK_KERNEL_PARAMS("qk_prep", head_dim % 2 == 0);
   if (batch <= 0 || seq <= 0 || head_dim <= 0) return;
-  if (Fused(kFeatureFusedQkPrep)) {
+  NANOCHAT_CHECK_KERNEL_PARAMS("qk_prep", cos != nullptr && sin != nullptr);
+  NANOCHAT_CHECK_KERNEL_PARAMS("qk_prep", num_heads == 0 || q != nullptr);
+  NANOCHAT_CHECK_KERNEL_PARAMS("qk_prep", num_kv_heads == 0 || k != nullptr);
+  if (Fused(kFeatureOverrideQkPrep)) {
     QkPrepParams params;
     params.batch = batch;
     params.seq = seq;
@@ -783,8 +856,19 @@ void QkPrepBackward(int batch, int seq, int num_heads, int num_kv_heads,
                     int head_dim, float eps, float scale, const float* cos,
                     const float* sin, const ComputeType* dq,
                     const ComputeType* dk, ComputeType* q, ComputeType* k) {
+  NANOCHAT_CHECK_KERNEL_PARAMS("qk_prep",
+                               batch >= 0 && seq >= 0 && num_heads >= 0 &&
+                                   num_kv_heads >= 0 && head_dim >= 0);
+  NANOCHAT_CHECK_KERNEL_PARAMS("qk_prep",
+                               std::isfinite(eps) && std::isfinite(scale));
+  NANOCHAT_CHECK_KERNEL_PARAMS("qk_prep", head_dim % 2 == 0);
   if (batch <= 0 || seq <= 0 || head_dim <= 0) return;
-  if (Fused(kFeatureFusedQkPrep)) {
+  NANOCHAT_CHECK_KERNEL_PARAMS("qk_prep", cos != nullptr && sin != nullptr);
+  NANOCHAT_CHECK_KERNEL_PARAMS(
+      "qk_prep", num_heads == 0 || (q != nullptr && dq != nullptr));
+  NANOCHAT_CHECK_KERNEL_PARAMS(
+      "qk_prep", num_kv_heads == 0 || (k != nullptr && dk != nullptr));
+  if (Fused(kFeatureOverrideQkPrep)) {
     QkPrepParams params;
     params.batch = batch;
     params.seq = seq;
@@ -845,10 +929,25 @@ AttentionParams ToParams(const AttentionShape& shape) {
 void AttentionForward(const AttentionShape& shape, const ComputeType* q,
                       const ComputeType* k, const ComputeType* v,
                       ComputeType* out, float* stats) {
+  NANOCHAT_CHECK_KERNEL_PARAMS(
+      "attention", shape.batch >= 0 && shape.seq >= 0 && shape.num_heads >= 0 &&
+                       shape.num_kv_heads >= 0 && shape.head_dim >= 0 &&
+                       shape.kv_len >= 0);
+  NANOCHAT_CHECK_KERNEL_PARAMS(
+      "attention", shape.window_left >= -1 && shape.window_right >= 0);
+  NANOCHAT_CHECK_KERNEL_PARAMS("attention", std::isfinite(shape.scale));
   if (shape.batch <= 0 || shape.seq <= 0 || shape.num_heads <= 0 ||
       shape.head_dim <= 0) {
     return;
   }
+  // One key/value head serves `num_heads / num_kv_heads` query heads, so the
+  // group count must divide evenly.
+  NANOCHAT_CHECK_KERNEL_PARAMS(
+      "attention",
+      shape.num_kv_heads > 0 && shape.num_heads % shape.num_kv_heads == 0);
+  NANOCHAT_CHECK_KERNEL_PARAMS("attention",
+                               q != nullptr && k != nullptr && v != nullptr &&
+                                   out != nullptr && stats != nullptr);
   const AttentionParams params = ToParams(shape);
   kernels::AttentionForward(params, q, k, v, out, stats);
 }
@@ -857,10 +956,24 @@ void AttentionBackward(const AttentionShape& shape, const ComputeType* q,
                        const ComputeType* k, const ComputeType* v,
                        const float* stats, const ComputeType* dout,
                        ComputeType* dq, ComputeType* dk, ComputeType* dv) {
+  NANOCHAT_CHECK_KERNEL_PARAMS(
+      "attention", shape.batch >= 0 && shape.seq >= 0 && shape.num_heads >= 0 &&
+                       shape.num_kv_heads >= 0 && shape.head_dim >= 0 &&
+                       shape.kv_len >= 0);
+  NANOCHAT_CHECK_KERNEL_PARAMS(
+      "attention", shape.window_left >= -1 && shape.window_right >= 0);
+  NANOCHAT_CHECK_KERNEL_PARAMS("attention", std::isfinite(shape.scale));
   if (shape.batch <= 0 || shape.seq <= 0 || shape.num_heads <= 0 ||
       shape.head_dim <= 0) {
     return;
   }
+  NANOCHAT_CHECK_KERNEL_PARAMS(
+      "attention",
+      shape.num_kv_heads > 0 && shape.num_heads % shape.num_kv_heads == 0);
+  NANOCHAT_CHECK_KERNEL_PARAMS(
+      "attention", q != nullptr && k != nullptr && v != nullptr &&
+                       stats != nullptr && dout != nullptr && dq != nullptr &&
+                       dk != nullptr && dv != nullptr);
   const AttentionParams params = ToParams(shape);
   kernels::AttentionBackward(params, q, k, v, stats, dout, dq, dk, dv);
 }
@@ -881,7 +994,11 @@ void ValueGateForward(std::int64_t rows, int hidden, int num_kv_heads,
                       const ComputeType* h, const ComputeType* gate_w,
                       ComputeType* gate_out) {
   constexpr int kChannels = kVeGateChannels;
+  NANOCHAT_CHECK_KERNEL_PARAMS("value_gate",
+                               rows >= 0 && hidden >= 0 && num_kv_heads >= 0);
   if (rows <= 0 || hidden < kChannels || num_kv_heads <= 0) return;
+  NANOCHAT_CHECK_KERNEL_PARAMS(
+      "value_gate", h != nullptr && gate_w != nullptr && gate_out != nullptr);
   const int n = static_cast<int>(rows);
   // The gate dot: one GEMM over the leading `G` channels of every hidden row.
   // `lda = hidden` because the rows of `h` are `hidden` wide and only their
@@ -912,7 +1029,11 @@ void ValueGateForward(std::int64_t rows, int hidden, int num_kv_heads,
 void ValueGateApply(std::int64_t rows, int num_kv_heads, int head_dim,
                     const ComputeType* gate, const ComputeType* ve,
                     ComputeType* v) {
+  NANOCHAT_CHECK_KERNEL_PARAMS("value_gate",
+                               rows >= 0 && num_kv_heads >= 0 && head_dim >= 0);
   if (rows <= 0 || num_kv_heads <= 0 || head_dim <= 0) return;
+  NANOCHAT_CHECK_KERNEL_PARAMS(
+      "value_gate", gate != nullptr && ve != nullptr && v != nullptr);
   const int count = static_cast<int>(rows) * num_kv_heads * head_dim;
   // The per-head broadcast: `gate` holds one scalar per (row, key/value head)
   // and `ve` is the dense operand, so the row width is the head width.
@@ -926,9 +1047,17 @@ void ValueGateBackward(std::int64_t rows, int hidden, int num_kv_heads,
                        const ComputeType* gate, const ComputeType* dv,
                        float* gate_w_grad, ComputeType* dh, ComputeType* dve) {
   constexpr int kChannels = kVeGateChannels;
+  NANOCHAT_CHECK_KERNEL_PARAMS("value_gate", rows >= 0 && hidden >= 0 &&
+                                                 num_kv_heads >= 0 &&
+                                                 head_dim >= 0);
   if (rows <= 0 || hidden < kChannels || num_kv_heads <= 0 || head_dim <= 0) {
     return;
   }
+  NANOCHAT_CHECK_KERNEL_PARAMS(
+      "value_gate", h != nullptr && ve != nullptr && gate_w != nullptr &&
+                        gate != nullptr && dv != nullptr &&
+                        gate_w_grad != nullptr && dh != nullptr &&
+                        dve != nullptr);
   const int n = static_cast<int>(rows);
   const int count = n * num_kv_heads * head_dim;
   // dve = gate * dv, and the same product feeds the gate's own gradient, so it
@@ -1144,6 +1273,9 @@ void BackoutBackward(const ComputeType* d_pre, const ComputeType* x_backout,
   // one span each, which is the composition `GradNorm` and `ScalarDot` share.
   Pw(PointwiseOp::kScale, static_cast<int>(n), d_pre, nullptr, dbackout,
      -lambda);
+  NANOCHAT_CHECK_KERNEL_PARAMS("reductions", d_pre != nullptr &&
+                                                 x_backout != nullptr &&
+                                                 lambda_grad != nullptr);
   const ComputeType* spans[1] = {d_pre};
   const ComputeType* other[1] = {x_backout};
   const int counts[1] = {static_cast<int>(n)};
@@ -1177,11 +1309,15 @@ void ClassifierForward(const ClassifierShape& shape, const ComputeType* logits,
   const int vocab = shape.vocab_size;
   const int padded =
       shape.padded_vocab_size > 0 ? shape.padded_vocab_size : vocab;
+  NANOCHAT_CHECK_KERNEL_PARAMS("classifier", rows >= 0 && vocab >= 0);
+  NANOCHAT_CHECK_KERNEL_PARAMS("classifier", padded >= vocab);
+  NANOCHAT_CHECK_KERNEL_PARAMS(
+      "classifier", std::isfinite(shape.softcap) && shape.softcap > 0.0f);
   if (rows <= 0 || vocab <= 0 || logits == nullptr || targets == nullptr ||
       losses == nullptr) {
     return;
   }
-  if (Fused(kFeatureFusedClassifier) &&
+  if (Fused(kFeatureOverrideClassifier) &&
       (shape.row_scale == nullptr || kFusedClassifierTakesRowScale)) {
     // One kernel over every row. The composition below costs four launches and
     // two blocking device-to-host copies per row, which is what made a step at
@@ -1216,6 +1352,9 @@ void ClassifierForward(const ClassifierShape& shape, const ComputeType* logits,
     // branch rather than a documented mode.
     float target_value = 0.0f;
     if (targets[r] >= 0 && targets[r] < vocab) {
+      NANOCHAT_CHECK_KERNEL_PARAMS(
+          "embedding", targets + r != nullptr && row_buffer.data() != nullptr &&
+                           gathered.data() != nullptr);
       kernels::EmbeddingForward(1, 1, targets + r, row_buffer.data(),
                                 gathered.data());
       // Stage the gathered element at the compute type's own width. A copy of
@@ -1238,11 +1377,15 @@ void ClassifierBackward(const ClassifierShape& shape, const ComputeType* logits,
   const int vocab = shape.vocab_size;
   const int padded =
       shape.padded_vocab_size > 0 ? shape.padded_vocab_size : vocab;
+  NANOCHAT_CHECK_KERNEL_PARAMS("classifier", rows >= 0 && vocab >= 0);
+  NANOCHAT_CHECK_KERNEL_PARAMS("classifier", padded >= vocab);
+  NANOCHAT_CHECK_KERNEL_PARAMS(
+      "classifier", std::isfinite(shape.softcap) && shape.softcap > 0.0f);
   if (rows <= 0 || vocab <= 0 || logits == nullptr || targets == nullptr ||
       dlogits == nullptr) {
     return;
   }
-  if (Fused(kFeatureFusedClassifier) &&
+  if (Fused(kFeatureOverrideClassifier) &&
       (shape.row_scale == nullptr || kFusedClassifierTakesRowScale)) {
     // The fused backward zeroes the padded tail and every ignored row, which is
     // the same contract the composition keeps.
@@ -1298,6 +1441,9 @@ void ClassifierBackward(const ClassifierShape& shape, const ComputeType* logits,
     // The element is addressed by the same per-row gather the forward uses.
     float sech_target = 0.0f;
     if (targets[r] >= 0 && targets[r] < vocab) {
+      NANOCHAT_CHECK_KERNEL_PARAMS("embedding", targets + r != nullptr &&
+                                                    sech2.data() != nullptr &&
+                                                    gathered.data() != nullptr);
       kernels::EmbeddingForward(1, 1, targets + r, sech2.data(),
                                 gathered.data());
       ComputeType staged{};
@@ -1346,6 +1492,8 @@ void ClassifierBackward(const ClassifierShape& shape, const ComputeType* logits,
 void GradNormForward(const float* const* grads, const int* counts,
                      int num_spans, float clip, float* out_norm,
                      float* out_scale) {
+  NANOCHAT_CHECK_KERNEL_PARAMS("reductions", num_spans >= 0);
+  NANOCHAT_CHECK_KERNEL_PARAMS("reductions", std::isfinite(clip));
   if (grads == nullptr || counts == nullptr || num_spans <= 0) return;
   kernels::GradNorm(grads, counts, num_spans, clip, out_norm, out_scale);
 }

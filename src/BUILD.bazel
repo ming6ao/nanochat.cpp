@@ -7,6 +7,18 @@ load("//:nanochat.bzl", "nanochat_copts", "precision_defines")
 
 package(default_visibility = ["//visibility:public"])
 
+# The two files a check reads as text rather than compiles:
+# `tools/contract_vocabulary.py --check` compares the capability rows of
+# `capability_names.h` against `spec/capability_bits.md` and
+# `include/nanochat/tensor.h`, and the block kinds of `spec/block_kinds.md`
+# against the spellings `model_spec.cc` accepts. A Bazel test sees only its
+# runfiles, so the file needs a label to travel as `data`; the export adds a
+# label and no copy.
+exports_files([
+    "capability_names.h",
+    "model_spec.cc",
+])
+
 # The device capability table the simulator reads (docs/simulator.md section 7).
 # It is a leaf: it depends only on `nanochat/tensor.h`, so the CPU reference
 # backend can link it to answer `GetCaps()` under `--config=sim` without
@@ -17,11 +29,6 @@ cc_library(
     name = "device_profile",
     srcs = [
         "device_profile.cc",
-    ],
-    hdrs = [
-        # The declared mask view of the same parse (`src/device_caps.h`) and the
-        # two leaf helpers the derivation reads its files with.
-        "device_caps.h",
     ],
     copts = nanochat_copts(),
     defines = precision_defines(),
@@ -91,17 +98,11 @@ cc_library(
 cc_library(
     name = "plan",
     srcs = ["plan.cc"],
-    hdrs = [
-        "device_caps.h",
-        "plan_internal.h",
-    ],
+    hdrs = ["plan_internal.h"],
     copts = nanochat_copts(),
     defines = precision_defines(),
     deps = [
         ":capability_names",
-        # `EffectiveDeviceMask` falls back to the device's own declaration when a
-        # backend reports no mask, so the planner reads the same single source.
-        ":device_profile",
         ":model_spec",
         "//include/nanochat:nanochat",
     ] + select({
@@ -138,6 +139,27 @@ cc_test(
     srcs = ["plan_test.cc"],
     copts = nanochat_copts(),
     defines = precision_defines(),
+    deps = [
+        ":capability_names",
+        ":model_spec",
+        ":plan",
+        "//include/nanochat:nanochat",
+    ],
+    size = "small",
+)
+
+# The reference backend's capability report (`docs/api-surface.md` R4b). The
+# plan test above supplies a *fabricated* mask; this one reads the mask the
+# reference backend actually reports, so the declaration in
+# `backends/cpu/caps.json` and `GetCaps()` cannot drift apart, and so the
+# `override_*` bits stay clear and the composition keeps running on the CPU leg.
+cc_test(
+    name = "reference_caps_test",
+    srcs = ["reference_caps_test.cc"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    # The declaration `GetCaps()` reads, so the lookup resolves in the runfiles.
+    data = ["//backends/cpu:caps_json"],
     deps = [
         ":capability_names",
         ":model_spec",
@@ -214,8 +236,12 @@ cc_library(
 cc_library(
     name = "distributed_host",
     srcs = ["distributed.cc"],
-    # `distributed.cc` uses the `AsF`/`ToC` conversion helpers from `ops.h`.
-    hdrs = ["ops.h"],
+    # `distributed.cc` uses the `AsF`/`ToC` conversion helpers from `ops.h`,
+    # which declares the fp8 policy header beside it.
+    hdrs = [
+        "fp8_policy.h",
+        "ops.h",
+    ],
     copts = nanochat_copts(),
     defines = precision_defines(),
     deps = [
@@ -230,19 +256,33 @@ cc_library(
 # (`model.cc`), the two inference graphs (`generate.cc`), and the harness
 # (`data.cc`, `eval.cc`, `train.cc`). It is a kernel-sequence graph, not an
 # autograd engine (DESIGN.md section 6).
+#
+# `model_factory.cc` sits in this target rather than in one of its own, because
+# it is the body of the two public `Model::Create` overloads (docs/api-surface.md
+# R8): it constructs `TrainModel`, and `model.cc` calls it, so a separate library
+# would be a cycle. It is the same layer as `model.cc` and adds no dependency the
+# graph does not already have - the spec reader and the planner are below it.
+#
+# `inference_view.cc` is here for the same reason (docs/api-surface.md R9): it
+# builds the read-only view `generate.cc` reads the weights through, and it is
+# the one source file that pairs that view with `model_impl.h`, so the inference
+# graph itself names no training type.
 cc_library(
     name = "model",
     srcs = [
         "data.cc",
+        "data_cursor.cc",
         "eval.cc",
         "generate.cc",
         "hw_gate.cc",
+        "inference_view.cc",
         "mesh.cc",
         "mesh_collective.cc",
         "mesh_runtime.cc",
         "mesh_train.cc",
         "sft_shard.cc",
         "model.cc",
+        "model_factory.cc",
         "ops.cc",
         "optim.cc",
         "performance_model.cc",
@@ -251,13 +291,25 @@ cc_library(
     ],
     hdrs = [
         "cli.h",
+        # The data-cursor sidecar both distribution drivers resume through
+        # (docs/api-surface.md R13).
+        "data_cursor.h",
         "eval.h",
+        # The fp8 eligibility policy, beside the performance model that prices
+        # the same rule. `ops.h` includes it, so the graph and the counter table
+        # read one policy.
+        "fp8_policy.h",
         "generate.h",
         "hw_gate.h",
+        # The debug-only seam precondition check `ops.cc` calls at each family
+        # boundary (docs/api-surface.md R3).
+        "kernel_params_check.h",
+        "inference_view.h",
         "mesh_collective.h",
         "mesh_runtime.h",
         "mesh_train.h",
         "sft_shard.h",
+        "model_factory.h",
         "model_impl.h",
         "ops.h",
         "optim_state.h",
@@ -283,9 +335,9 @@ cc_library(
     }) + [
         ":checkpoint_metadata",
         ":distributed_seam",
-        # `model.cc` reads `models/<name>/spec.json` through the selector,
-        # derives the `Config`, and builds the device-and-graph plan once
-        # (`nanochat/model_spec.h`, `nanochat/plan.h`).
+        # `model_factory.cc` reads `models/<name>/spec.json` through the
+        # selector, derives the `Config`, and builds the device-and-graph plan
+        # once (`nanochat/model_spec.h`, `nanochat/plan.h`).
         ":model_spec",
         ":plan",
         # `data.cc` reads and writes the metadata block through the field
@@ -437,6 +489,22 @@ cc_test(
     # package's files are this test's data. It is the P2 gate of section 16: the
     # spec must derive today's `Config` field by field.
     data = ["//models/nanochat-default:files"],
+    deps = [
+        ":model",
+        "//include/nanochat:nanochat",
+    ],
+    size = "small",
+)
+
+# The model factory's three-state selector (docs/api-surface.md R8): the
+# plan-less `Create(config)` builds a model with no plan, and the named selector
+# reads a spec - a null name selects the built-in default one - so the same
+# `Config` is accepted by one source and rejected by the other. CPU only.
+cc_test(
+    name = "model_factory_test",
+    srcs = ["model_factory_test.cc"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
     deps = [
         ":model",
         "//include/nanochat:nanochat",

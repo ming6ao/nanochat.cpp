@@ -61,14 +61,14 @@ constexpr FusedOverride kFusedOverrides[] = {
     // residual add + RmsNorm, for the `rms_norm` composition. The fused kernel
     // is `backends/cuda/kernels/rms_norm.cu`, which also carries the fused
     // residual variant (`backends/cuda/kernels/rms_norm.h`).
-    {"rms_norm", "rms_norm", kFeatureFusedResidualRmsNorm},
+    {"rms_norm", "rms_norm", kFeatureOverrideRmsNorm},
     // norm on head_dim + rope + scale, for the `qk_prep` composition. This is
     // the reference case DESIGN.md section 3.1 already requires the fused pair
     // to carry the same golden trace as.
-    {"qk_prep", "qk_prep", kFeatureFusedQkPrep},
+    {"qk_prep", "qk_prep", kFeatureOverrideQkPrep},
     // logit softcap + cross-entropy + the unpadded-vocabulary slice, for the
     // `classifier` composition.
-    {"classifier", "classifier", kFeatureFusedClassifier},
+    {"classifier", "classifier", kFeatureOverrideClassifier},
 };
 
 constexpr int kFusedOverrideCount =

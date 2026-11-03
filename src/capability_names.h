@@ -24,12 +24,12 @@
 // missing bits by their vocabulary spelling and state the consequence in the
 // model's own terms (`src/plan.cc`).
 //
-// The header's spelling is not mechanical for five rows (`kFeatureAdamW`,
-// `kFeatureMuon`, `kFeatureFusedResidualRmsNorm`, `kFeatureFusedQkPrep`,
-// `kFeatureFusedClassifier`), and `override_value_gate` has no constant at all
-// in the frozen header. Both facts are recorded on the row rather than papered
-// over: the table spells the header's constants, and the missing constant is
-// one line of header addition reported by this campaign's node report.
+// The header's spelling is not mechanical for two rows (`kFeatureAdamW` and
+// `kFeatureMuon`, which carry `stateful_adamw` and `stateful_muon`), and
+// `override_value_gate` has no constant at all in the header. Both facts are
+// recorded on the row rather than papered over: the table spells the header's
+// constants, and the missing constant is one line of header addition reported
+// by this campaign's node report.
 //
 // This header is private to `src/`.
 
@@ -83,16 +83,16 @@ inline constexpr CapabilityNameEntry kCapabilityNames[] = {
     {"stateful_muon", kFeatureMuon, "kFeatureMuon",
      "the training graph has no stateful Muon update on this device, so the "
      "matrix parameters cannot be trained"},
-    {"override_rms_norm", kFeatureFusedResidualRmsNorm,
-     "kFeatureFusedResidualRmsNorm",
+    {"override_rms_norm", kFeatureOverrideRmsNorm, "kFeatureOverrideRmsNorm",
      "the fused residual-plus-norm family is not offered; the rms_norm "
      "composition runs instead, which is the same meaning at a different "
      "speed"},
-    {"override_qk_prep", kFeatureFusedQkPrep, "kFeatureFusedQkPrep",
+    {"override_qk_prep", kFeatureOverrideQkPrep, "kFeatureOverrideQkPrep",
      "the fused norm-rotate-scale family is not offered; the qk_prep "
      "composition runs instead, which is the same meaning at a different "
      "speed"},
-    {"override_classifier", kFeatureFusedClassifier, "kFeatureFusedClassifier",
+    {"override_classifier", kFeatureOverrideClassifier,
+     "kFeatureOverrideClassifier",
      "the fused classifier family is not offered; the classifier composition "
      "runs instead, which is the same meaning at a different speed"},
 };

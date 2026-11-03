@@ -33,6 +33,21 @@ namespace {
 
 // --- Drift checks against the C++ structs --------------------------------
 
+// The assertions below compare each flat C mirror struct to the C++ struct in
+// `nanochat/model.h` that it copies. A type change in the C++ struct stops this
+// test at compile time, so an ABI drift cannot pass silently (docs/python.md
+// section 13). A scalar is a size equality; a C mirror that carries a wider
+// type than its C++ field -- the `bool`-to-`int` widening of
+// `value_embedding`, and the `uint32_t`-to-`int64_t` of `world_size` -- is a
+// size floor; and a pointer is a `decltype` equality. The C enums spell the
+// stored values out, so a renumbered enumerator would change the container
+// format in silence (docs/checkpoint-format.md sections 5.3 and 9).
+//
+// The block is generated from include/nanochat/capi.h by
+// `tools/gen_capi_mirrors.py --write` (docs/api-surface.md R11b), so the rows
+// follow the header's order and a hand does not type them.
+// BEGIN GENERATED (tools/gen_capi_mirrors.py --write) static_assert
+// clang-format off
 static_assert(sizeof(nanochat_config::num_layers) ==
                   sizeof(nanochat::Config::num_layers),
               "nanochat_config.num_layers drifted from nanochat::Config");
@@ -51,34 +66,31 @@ static_assert(sizeof(nanochat_config::seq_len) ==
 static_assert(sizeof(nanochat_config::vocab_size) ==
                   sizeof(nanochat::Config::vocab_size),
               "nanochat_config.vocab_size drifted from nanochat::Config");
-static_assert(
-    sizeof(nanochat_config::padded_vocab_size) ==
-        sizeof(nanochat::Config::padded_vocab_size),
-    "nanochat_config.padded_vocab_size drifted from nanochat::Config");
+static_assert(sizeof(nanochat_config::padded_vocab_size) ==
+                  sizeof(nanochat::Config::padded_vocab_size),
+              "nanochat_config.padded_vocab_size drifted from "
+              "nanochat::Config");
 static_assert(sizeof(nanochat_config::rope_base) ==
                   sizeof(nanochat::Config::rope_base),
               "nanochat_config.rope_base drifted from nanochat::Config");
-// The C mirror widens the C++ `bool` to an `int`, so this is a size floor
-// rather than an equality, the same rule the other scalar mirrors use.
 static_assert(sizeof(nanochat_config::value_embedding) >=
                   sizeof(nanochat::Config::value_embedding),
               "nanochat_config.value_embedding drifted from nanochat::Config");
-
-static_assert(sizeof(nanochat_param::count) ==
-                  sizeof(nanochat::ParamView::count),
-              "nanochat_param.count drifted from nanochat::ParamView");
-static_assert(sizeof(nanochat_param::rows) == sizeof(nanochat::ParamView::rows),
-              "nanochat_param.rows drifted from nanochat::ParamView");
-static_assert(sizeof(nanochat_param::cols) == sizeof(nanochat::ParamView::cols),
-              "nanochat_param.cols drifted from nanochat::ParamView");
-
 static_assert(sizeof(nanochat_device::total_memory_bytes) ==
                   sizeof(nanochat::Caps::total_memory_bytes),
               "nanochat_device.total_memory_bytes drifted from nanochat::Caps");
 static_assert(std::is_same<decltype(nanochat_device::device_name),
                            decltype(nanochat::Caps::device_name)>::value,
               "nanochat_device.device_name drifted from nanochat::Caps");
-
+static_assert(sizeof(nanochat_param::count) ==
+                  sizeof(nanochat::ParamView::count),
+              "nanochat_param.count drifted from nanochat::ParamView");
+static_assert(sizeof(nanochat_param::rows) ==
+                  sizeof(nanochat::ParamView::rows),
+              "nanochat_param.rows drifted from nanochat::ParamView");
+static_assert(sizeof(nanochat_param::cols) ==
+                  sizeof(nanochat::ParamView::cols),
+              "nanochat_param.cols drifted from nanochat::ParamView");
 static_assert(std::is_same<decltype(nanochat_focus::position),
                            decltype(nanochat::ScoreFocus::position)>::value,
               "nanochat_focus.position drifted from nanochat::ScoreFocus");
@@ -88,70 +100,81 @@ static_assert(std::is_same<decltype(nanochat_focus::ids),
 static_assert(std::is_same<decltype(nanochat_focus::count),
                            decltype(nanochat::ScoreFocus::count)>::value,
               "nanochat_focus.count drifted from nanochat::ScoreFocus");
-
 static_assert(
     std::is_same<decltype(nanochat_generate_params::num_samples),
                  decltype(nanochat::GenerateParams::num_samples)>::value,
-    "nanochat_generate_params.num_samples drifted");
+    "nanochat_generate_params.num_samples drifted from "
+    "nanochat::GenerateParams");
 static_assert(
     std::is_same<decltype(nanochat_generate_params::max_tokens),
                  decltype(nanochat::GenerateParams::max_tokens)>::value,
-    "nanochat_generate_params.max_tokens drifted");
+    "nanochat_generate_params.max_tokens drifted from "
+    "nanochat::GenerateParams");
 static_assert(
     std::is_same<decltype(nanochat_generate_params::temperature),
                  decltype(nanochat::GenerateParams::temperature)>::value,
-    "nanochat_generate_params.temperature drifted");
+    "nanochat_generate_params.temperature drifted from "
+    "nanochat::GenerateParams");
 static_assert(std::is_same<decltype(nanochat_generate_params::top_k),
                            decltype(nanochat::GenerateParams::top_k)>::value,
-              "nanochat_generate_params.top_k drifted");
+              "nanochat_generate_params.top_k drifted from "
+              "nanochat::GenerateParams");
 static_assert(std::is_same<decltype(nanochat_generate_params::seed),
                            decltype(nanochat::GenerateParams::seed)>::value,
-              "nanochat_generate_params.seed drifted");
+              "nanochat_generate_params.seed drifted from "
+              "nanochat::GenerateParams");
 static_assert(std::is_same<decltype(nanochat_generate_params::stop_id),
                            decltype(nanochat::GenerateParams::stop_id)>::value,
-              "nanochat_generate_params.stop_id drifted");
+              "nanochat_generate_params.stop_id drifted from "
+              "nanochat::GenerateParams");
 static_assert(std::is_same<decltype(nanochat_generate_params::bos_id),
                            decltype(nanochat::GenerateParams::bos_id)>::value,
-              "nanochat_generate_params.bos_id drifted");
+              "nanochat_generate_params.bos_id drifted from "
+              "nanochat::GenerateParams");
 static_assert(std::is_same<decltype(nanochat_generate_params::stop_ids),
                            decltype(nanochat::GenerateParams::stop_ids)>::value,
-              "nanochat_generate_params.stop_ids drifted");
-
-// The metadata mirror (docs/checkpoint-format.md sections 5.3 and 9). The C
-// enums spell the stored values out, so a renumbered enumerator
-// would change the container format in silence; the assertions below stop that
-// at compile time. A widened scalar follows the same rule as the `bool` above:
-// a size floor rather than an equality.
+              "nanochat_generate_params.stop_ids drifted from "
+              "nanochat::GenerateParams");
+static_assert(sizeof(nanochat_checkpoint_metadata::schema) ==
+                  sizeof(nanochat::CheckpointMetadata::schema),
+              "nanochat_checkpoint_metadata.schema drifted from "
+              "nanochat::CheckpointMetadata");
+static_assert(sizeof(nanochat_checkpoint_metadata::stage) ==
+                  sizeof(nanochat::CheckpointMetadata::stage),
+              "nanochat_checkpoint_metadata.stage drifted from "
+              "nanochat::CheckpointMetadata");
+static_assert(sizeof(nanochat_checkpoint_metadata::step) ==
+                  sizeof(nanochat::CheckpointMetadata::step),
+              "nanochat_checkpoint_metadata.step drifted from "
+              "nanochat::CheckpointMetadata");
+static_assert(sizeof(nanochat_checkpoint_metadata::world_size) >=
+                  sizeof(nanochat::CheckpointMetadata::world_size),
+              "nanochat_checkpoint_metadata.world_size drifted from "
+              "nanochat::CheckpointMetadata");
+static_assert(sizeof(nanochat_checkpoint_metadata::precision) ==
+                  sizeof(nanochat::CheckpointMetadata::precision),
+              "nanochat_checkpoint_metadata.precision drifted from "
+              "nanochat::CheckpointMetadata");
 static_assert(static_cast<int>(nanochat::Stage::kBase) == NANOCHAT_STAGE_BASE,
               "NANOCHAT_STAGE_BASE drifted from nanochat::Stage");
 static_assert(static_cast<int>(nanochat::Stage::kSft) == NANOCHAT_STAGE_SFT,
               "NANOCHAT_STAGE_SFT drifted from nanochat::Stage");
 static_assert(static_cast<int>(nanochat::Stage::kRl) == NANOCHAT_STAGE_RL,
               "NANOCHAT_STAGE_RL drifted from nanochat::Stage");
-static_assert(static_cast<int>(nanochat::ComputePrecision::kFp32) ==
-                  NANOCHAT_PRECISION_FP32,
-              "NANOCHAT_PRECISION_FP32 drifted from ComputePrecision");
-static_assert(static_cast<int>(nanochat::ComputePrecision::kBf16) ==
-                  NANOCHAT_PRECISION_BF16,
-              "NANOCHAT_PRECISION_BF16 drifted from ComputePrecision");
-static_assert(static_cast<int>(nanochat::ComputePrecision::kFp8) ==
-                  NANOCHAT_PRECISION_FP8,
-              "NANOCHAT_PRECISION_FP8 drifted from ComputePrecision");
-static_assert(sizeof(nanochat_checkpoint_metadata::schema) ==
-                  sizeof(nanochat::CheckpointMetadata::schema),
-              "nanochat_checkpoint_metadata.schema drifted");
-static_assert(sizeof(nanochat_checkpoint_metadata::stage) ==
-                  sizeof(nanochat::CheckpointMetadata::stage),
-              "nanochat_checkpoint_metadata.stage drifted");
-static_assert(sizeof(nanochat_checkpoint_metadata::step) ==
-                  sizeof(nanochat::CheckpointMetadata::step),
-              "nanochat_checkpoint_metadata.step drifted");
-static_assert(sizeof(nanochat_checkpoint_metadata::world_size) >=
-                  sizeof(nanochat::CheckpointMetadata::world_size),
-              "nanochat_checkpoint_metadata.world_size drifted");
-static_assert(sizeof(nanochat_checkpoint_metadata::precision) ==
-                  sizeof(nanochat::CheckpointMetadata::precision),
-              "nanochat_checkpoint_metadata.precision drifted");
+static_assert(
+    static_cast<int>(nanochat::ComputePrecision::kFp32) ==
+        NANOCHAT_PRECISION_FP32,
+    "NANOCHAT_PRECISION_FP32 drifted from nanochat::ComputePrecision");
+static_assert(
+    static_cast<int>(nanochat::ComputePrecision::kBf16) ==
+        NANOCHAT_PRECISION_BF16,
+    "NANOCHAT_PRECISION_BF16 drifted from nanochat::ComputePrecision");
+static_assert(
+    static_cast<int>(nanochat::ComputePrecision::kFp8) ==
+        NANOCHAT_PRECISION_FP8,
+    "NANOCHAT_PRECISION_FP8 drifted from nanochat::ComputePrecision");
+// clang-format on
+// END GENERATED (tools/gen_capi_mirrors.py --write)
 
 // --- Test harness ---------------------------------------------------------
 

@@ -14,17 +14,15 @@
 // This header therefore holds the mapping as *data* - one row per bit, both
 // spellings on the row - so `backends/cpu/caps.json` is checked against the
 // header rather than trusted, and so a declared string with no constant fails
-// loudly instead of being dropped. `include/nanochat/tensor.h` is frozen for
-// this campaign: the table records what the header spells, not what the rule
-// would prefer, and it adds no alias.
+// loudly instead of being dropped. The table records what the header spells,
+// not what the rule would prefer.
 //
-// Two facts about the frozen header are recorded here rather than papered over:
+// Two facts about the header are recorded here rather than papered over:
 //
-//   * Five rows use the header's spelling, not the mechanical one:
+//   * Two rows use the header's spelling, not the mechanical one:
 //     `kFeatureAdamW` and `kFeatureMuon` carry `stateful_adamw` and
-//     `stateful_muon`, and `kFeatureFusedResidualRmsNorm`,
-//     `kFeatureFusedQkPrep` and `kFeatureFusedClassifier` carry
-//     `override_rms_norm`, `override_qk_prep` and `override_classifier`.
+//     `stateful_muon`. The three `override_*` rows spell the mechanical form,
+//     because `include/nanochat/tensor.h` renamed them to match the vocabulary.
 //   * `override_value_gate` has no constant at all, so it has no row: a string
 //     without a constant would be a promise the planner can never see. The row
 //     arrives with the header addition `kFeatureOverrideValueGate`, and no
@@ -62,6 +60,8 @@ struct CapabilityNameEntry {
 
 // The fourteen bits this backend can name today, in the order
 // `spec/capability_bits.md` section 3 lists them.
+// BEGIN GENERATED (tools/contract_vocabulary.py --write)
+// clang-format off
 inline constexpr CapabilityNameEntry kCapabilityNames[] = {
     // Architecture (bits 1 to 4).
     {"gqa", kFeatureGqa, "kFeatureGqa"},
@@ -76,18 +76,17 @@ inline constexpr CapabilityNameEntry kCapabilityNames[] = {
     // Tier (bit 9).
     {"primitive_tier_complete", kFeaturePrimitiveTierComplete,
      "kFeaturePrimitiveTierComplete"},
-    // Stateful (bits 10 and 11). The header spells these `kFeatureAdamW` and
-    // `kFeatureMuon`; those constants are the ones used, with no alias added.
+    // Stateful (bits 10 and 11).
     {"stateful_adamw", kFeatureAdamW, "kFeatureAdamW"},
     {"stateful_muon", kFeatureMuon, "kFeatureMuon"},
-    // Override (bits 12 to 14). The header spells these `kFeatureFused*`; the
-    // reference declares none of them, and the rows exist so the drift is
-    // visible and so a future declaration cannot invent a third spelling.
-    {"override_rms_norm", kFeatureFusedResidualRmsNorm,
-     "kFeatureFusedResidualRmsNorm"},
-    {"override_qk_prep", kFeatureFusedQkPrep, "kFeatureFusedQkPrep"},
-    {"override_classifier", kFeatureFusedClassifier, "kFeatureFusedClassifier"},
+    // Override (bits 12 to 14).
+    {"override_rms_norm", kFeatureOverrideRmsNorm, "kFeatureOverrideRmsNorm"},
+    {"override_qk_prep", kFeatureOverrideQkPrep, "kFeatureOverrideQkPrep"},
+    {"override_classifier", kFeatureOverrideClassifier,
+     "kFeatureOverrideClassifier"},
 };
+// clang-format on
+// END GENERATED (tools/contract_vocabulary.py --write)
 
 // The number of rows, for a consumer that wants to report the size of the
 // vocabulary it knows.

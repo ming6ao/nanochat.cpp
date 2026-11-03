@@ -2,8 +2,9 @@
 //
 //   * `Logger` -- one structured `LogRecord` per step to stdout and an optional
 //     run file;
-//   * the `mfu.h` FLOP accounting -- the same `estimate_flops` /
-//     `get_peak_flops` contract as nanochat;
+//   * the `mfu.h` peak table and `ComputeMfu` -- the same `get_peak_flops`
+//     contract as nanochat (the operation counters themselves live beside the
+//     estimator, in `performance_model.cc`);
 //   * `Checkpointer` -- save/load through the self-describing `Checkpoint`
 //     container;
 //   * `TrainLoop` -- the `ForwardLoss` -> `Backward` -> `Optimizer::Step` loop
@@ -41,8 +42,8 @@
 #include "nanochat/scheduler.h"
 #include "nanochat/tensor.h"
 #include "nanochat/tokenizer.h"
+#include "src/data_cursor.h"
 #include "src/hw_gate.h"
-#include "src/ops.h"
 #include "src/optim_state.h"
 #include "src/parquet/reader.h"
 
@@ -123,28 +124,6 @@ void Logger::Close() {
 
 namespace {
 
-// Number of parameters that participate in matmuls with the token stream. The
-// token embedding and value embeddings are lookups and are not counted; every
-// `Linear` (lm_head, the attention/MLP projections, the value gate, and the
-// smear gate) is. This mirrors `GPT.num_matmul_params` structurally.
-double NumMatmulParams(const Config& config) {
-  double total =
-      static_cast<double>(config.padded_vocab_size) * config.hidden_dim;
-  for (int i = 0; i < config.num_layers; ++i) {
-    total += static_cast<double>(config.query_dim()) * config.hidden_dim;
-    total += static_cast<double>(config.kv_dim()) * config.hidden_dim;
-    total += static_cast<double>(config.kv_dim()) * config.hidden_dim;
-    total += static_cast<double>(config.hidden_dim) * config.hidden_dim;
-    if (config.has_value_embedding(i)) {
-      total += static_cast<double>(config.num_kv_heads) * kVeGateChannels;
-    }
-    total += static_cast<double>(config.mlp_dim()) * config.hidden_dim;
-    total += static_cast<double>(config.hidden_dim) * config.mlp_dim();
-  }
-  total += kSmearChannels;
-  return total;
-}
-
 std::string ToLower(const std::string& value) {
   std::string result = value;
   for (char& c : result) {
@@ -154,131 +133,6 @@ std::string ToLower(const std::string& value) {
 }
 
 }  // namespace
-
-ParamBreakdown CountParams(const Config& config) {
-  const int64_t hidden = config.hidden_dim;
-  const int64_t padded_vocab = config.padded_vocab_size;
-  const int64_t query_dim = config.query_dim();
-  const int64_t kv_dim = config.kv_dim();
-  const int64_t mlp_dim = config.mlp_dim();
-
-  int64_t matrices = 0;
-  // transformer.wte.weight is a lookup, so it belongs to embeddings.
-  int64_t embeddings = padded_vocab * hidden;
-  for (int i = 0; i < config.num_layers; ++i) {
-    matrices += query_dim * hidden;  // attn.c_q.weight
-    matrices += kv_dim * hidden;     // attn.c_k.weight
-    matrices += kv_dim * hidden;     // attn.c_v.weight
-    matrices += hidden * hidden;     // attn.c_proj.weight
-    if (config.has_value_embedding(i)) {
-      // attn.ve_gate.weight sits inside transformer.h, so it counts as a
-      // matrix, not as a scalar.
-      matrices += static_cast<int64_t>(config.num_kv_heads) * kVeGateChannels;
-      embeddings += padded_vocab * kv_dim;  // value_embeds.i.weight
-    }
-    matrices += mlp_dim * hidden;  // mlp.c_fc.weight
-    matrices += hidden * mlp_dim;  // mlp.c_proj.weight
-  }
-
-  const int64_t lm_head = padded_vocab * hidden;
-  // resid_lambdas and x0_lambdas hold one value per layer. The top-level
-  // smear_gate is a Linear, but `num_scaling_params` groups it with the
-  // scalars, so CountParams does too.
-  const int64_t scalars =
-      2 * static_cast<int64_t>(config.num_layers) + kSmearChannels + 1 + 1;
-
-  ParamBreakdown counts{};
-  counts.transformer_matrices = matrices;
-  counts.lm_head = lm_head;
-  counts.embeddings = embeddings;
-  counts.scalars = scalars;
-  counts.total = matrices + lm_head + embeddings + scalars;
-  return counts;
-}
-
-double EstimateFlopsPerToken(const Config& config) {
-  return CountFlopsPerToken(config).total();
-}
-
-double EstimateMuonFlopsPerStep(const Config& config, int ns_steps) {
-  if (ns_steps <= 0) return 0.0;
-  // One matrix's three GEMMs of one iteration: `A = X'X` (or `X X'`), `A2 = A
-  // A`, and `prod = X B` (or `B X`). These are the shapes `MuonUpdate` issues,
-  // so the count is the necessary count of the executed arithmetic.
-  const auto one = [ns_steps](int rows, int cols) {
-    const double r = rows;
-    const double c = cols;
-    const double min_dim = std::min(r, c);
-    const double max_dim = std::max(r, c);
-    const double iteration = 2.0 * min_dim * min_dim * max_dim +
-                             2.0 * min_dim * min_dim * min_dim +
-                             2.0 * r * c * min_dim;
-    return static_cast<double>(ns_steps) * iteration;
-  };
-  const int query_dim = config.query_dim();
-  const int kv_dim = config.kv_dim();
-  const int mlp_dim = config.mlp_dim();
-  const double per_layer =
-      one(query_dim, config.hidden_dim) + one(kv_dim, config.hidden_dim) +
-      one(kv_dim, config.hidden_dim) +
-      one(config.hidden_dim, config.hidden_dim) +
-      one(mlp_dim, config.hidden_dim) + one(config.hidden_dim, mlp_dim);
-  return per_layer * static_cast<double>(config.num_layers);
-}
-
-FlopCounts CountFlopsPerToken(const Config& config) {
-  const int heads = config.num_heads;
-  const int head_dim = config.head_dim();
-  const int seq = config.seq_len;
-  double attention_forward = 0.0;
-  double attention_backward = 0.0;
-  for (int i = 0; i < config.num_layers; ++i) {
-    const int left = config.window_left(i);
-    const int effective = left < 0 ? seq : std::min(left, seq);
-    // The scores and the output GEMMs are the forward pass; the backward pass
-    // is twice the forward work. The two rows sum to the 12 FLOPs per head,
-    // head dimension, and window that `EstimateFlopsPerToken` counts.
-    attention_forward += 4.0 * heads * head_dim * effective;
-    attention_backward += 8.0 * heads * head_dim * effective;
-  }
-  const double matmul = NumMatmulParams(config);
-  FlopCounts counts;
-  counts.gemm_forward = 2.0 * matmul;
-  counts.gemm_backward = 4.0 * matmul;
-  counts.attention_forward = attention_forward;
-  counts.attention_backward = attention_backward;
-  return counts;
-}
-
-double EstimatePrefillFlops(const Config& config, int num_tokens) {
-  if (num_tokens <= 0) return 0.0;
-  const int heads = config.num_heads;
-  const int head_dim = config.head_dim();
-  double attention = 0.0;
-  for (int i = 0; i < config.num_layers; ++i) {
-    const int left = config.window_left(i);
-    const int window = left < 0 ? num_tokens : std::min(left, num_tokens);
-    if (window <= 0) continue;
-    // Ramp up to the window, then attend a flat `window` per new token.
-    const double attended = static_cast<double>(window) * (window + 1) / 2.0 +
-                            static_cast<double>(num_tokens - window) * window;
-    attention += 4.0 * heads * head_dim * attended;
-  }
-  return 2.0 * NumMatmulParams(config) * num_tokens + attention;
-}
-
-double EstimateDecodeFlops(const Config& config, int context_len) {
-  if (context_len <= 0) return 0.0;
-  const int heads = config.num_heads;
-  const int head_dim = config.head_dim();
-  double attention = 0.0;
-  for (int i = 0; i < config.num_layers; ++i) {
-    const int left = config.window_left(i);
-    const int window = left < 0 ? context_len : std::min(left, context_len);
-    attention += 4.0 * heads * head_dim * window;
-  }
-  return 2.0 * NumMatmulParams(config) + attention;
-}
 
 double PeakFlopsForDevice(const std::string& device_name) {
   struct Entry {
@@ -713,17 +567,6 @@ DocumentSourceFactory MakeParquetFactory(std::vector<std::string> files,
 
 }  // namespace
 
-namespace {
-
-// Defined beside `TrainLoop::Save`. Declared here so the constructor can read
-// the sidecar before the loader is built
-// (docs/distributed-design.md section 11).
-bool WriteDataState(const std::string& checkpoint_path,
-                    const DataLoaderState& state);
-bool ReadDataState(const std::string& checkpoint_path, DataLoaderState* state);
-
-}  // namespace
-
 TrainLoop::TrainLoop(TrainConfig config) : config_(std::move(config)) {
   if (config_.seq > 0) {
     config_.model.seq_len = config_.seq;
@@ -772,7 +615,7 @@ TrainLoop::TrainLoop(TrainConfig config) : config_(std::move(config)) {
   // (docs/distributed-design.md section 11). A missing sidecar leaves both at
   // 0, so the run starts the epoch from the beginning.
   if (resumed) {
-    ReadDataState(config_.resume_path, &resume_state_);
+    ReadDataCursor(config_.resume_path, &resume_state_);
   }
 
   logger_ = std::make_unique<Logger>(config_.log_path);
@@ -809,13 +652,16 @@ TrainLoop::TrainLoop(TrainConfig config) : config_(std::move(config)) {
         config_.train_source
             ? config_.train_source
             : MakeParquetFactory(config_.train_parquet, config_.text_column);
-    // Shard documents by rank (docs/distributed-design.md section 7). The
-    // resume source position applies on the stored epoch's creation, so earlier
-    // epochs are skipped without a full replay
-    // (docs/distributed-design.md section 11).
-    train_source = ShardDocumentSourceFactory(
-        std::move(train_source), config_.rank, config_.world_size,
-        resume_state_.source_position, static_cast<int>(resume_state_.epoch));
+    // Shard documents by rank (docs/distributed-design.md section 7). A resume
+    // hands the stored source position to the loader's first source, which is
+    // the stored epoch's: the constructor primes the epoch and the encoded
+    // buffer from the cursor, so the packing continues where it stopped. The
+    // in-process driver resumes the same way, and the two may not disagree
+    // (docs/api-surface.md F18). A `Reset` after that opens the next epoch and
+    // starts at position 0.
+    train_source = ShardDocumentSourceFactory(std::move(train_source),
+                                              config_.rank, config_.world_size,
+                                              resume_state_.source_position);
     DocumentSourceFactory val_source =
         config_.val_source
             ? config_.val_source
@@ -828,12 +674,6 @@ TrainLoop::TrainLoop(TrainConfig config) : config_(std::move(config)) {
           val_source, tokenizer_.get(), config_.batch, seq, config_.seed + 1,
           config_.tokenizer_threads, config_.document_buffer);
     }
-    // Advance to the resumed epoch. Each Reset opens the next epoch's source,
-    // and the stored position applies on that creation
-    // (docs/distributed-design.md section 11).
-    for (std::int64_t e = 0; e < resume_state_.epoch; ++e) {
-      train_loader_->Reset();
-    }
   }
 
   tokens_.assign(static_cast<std::size_t>(config_.batch) *
@@ -845,92 +685,6 @@ TrainLoop::TrainLoop(TrainConfig config) : config_(std::move(config)) {
 
 TrainLoop::~TrainLoop() = default;
 
-namespace {
-
-// The data-cursor sidecar (docs/distributed-design.md section 11). The cursor
-// lives beside the checkpoint, not inside it, so the parameter and optimizer
-// records stay byte-identical across ranks and the smoke test keeps its hash
-// check. The file holds the epoch, the source position, and the encoded, not
-// yet packed buffer. The buffer is part of the cursor, because the reference
-// best-fit packing reorders documents inside it.
-constexpr char kDataCursorSuffix[] = ".cursor";
-
-void AppendLE64(std::vector<std::byte>* out, std::uint64_t value) {
-  for (int i = 0; i < 8; ++i) {
-    out->push_back(static_cast<std::byte>((value >> (8 * i)) & 0xffu));
-  }
-}
-
-bool ReadLE64(std::istream& in, std::uint64_t* value) {
-  std::byte bytes[8];
-  in.read(reinterpret_cast<char*>(bytes), sizeof(bytes));
-  if (in.gcount() != static_cast<std::streamsize>(sizeof(bytes))) {
-    return false;
-  }
-  std::uint64_t result = 0;
-  for (int i = 0; i < 8; ++i) {
-    result |= static_cast<std::uint64_t>(bytes[i]) << (8 * i);
-  }
-  *value = result;
-  return true;
-}
-
-bool WriteDataState(const std::string& checkpoint_path,
-                    const DataLoaderState& state) {
-  if (checkpoint_path.empty()) return false;
-  std::vector<std::byte> bytes;
-  bytes.reserve(24 + state.documents.size() * 8);
-  AppendLE64(&bytes, static_cast<std::uint64_t>(state.epoch));
-  AppendLE64(&bytes, static_cast<std::uint64_t>(state.source_position));
-  AppendLE64(&bytes, static_cast<std::uint64_t>(state.documents.size()));
-  for (const std::vector<int>& document : state.documents) {
-    AppendLE64(&bytes, static_cast<std::uint64_t>(document.size()));
-    for (int token : document) {
-      AppendLE64(&bytes,
-                 static_cast<std::uint64_t>(static_cast<std::int64_t>(token)));
-    }
-  }
-  std::ofstream out(checkpoint_path + kDataCursorSuffix,
-                    std::ios::binary | std::ios::trunc);
-  if (!out) return false;
-  out.write(reinterpret_cast<const char*>(bytes.data()),
-            static_cast<std::streamsize>(bytes.size()));
-  return static_cast<bool>(out);
-}
-
-bool ReadDataState(const std::string& checkpoint_path, DataLoaderState* state) {
-  if (checkpoint_path.empty() || state == nullptr) return false;
-  std::ifstream in(checkpoint_path + kDataCursorSuffix, std::ios::binary);
-  if (!in) return false;
-  std::uint64_t epoch = 0;
-  std::uint64_t position = 0;
-  std::uint64_t count = 0;
-  if (!ReadLE64(in, &epoch) || !ReadLE64(in, &position) ||
-      !ReadLE64(in, &count)) {
-    return false;
-  }
-  // A badly large count must not allocate without bound.
-  if (count > (1ull << 30)) return false;
-  std::vector<std::vector<int>> documents(static_cast<std::size_t>(count));
-  for (std::vector<int>& document : documents) {
-    std::uint64_t tokens = 0;
-    if (!ReadLE64(in, &tokens)) return false;
-    if (tokens > (1ull << 30)) return false;
-    document.resize(static_cast<std::size_t>(tokens));
-    for (int& token : document) {
-      std::uint64_t raw = 0;
-      if (!ReadLE64(in, &raw)) return false;
-      token = static_cast<int>(static_cast<std::int64_t>(raw));
-    }
-  }
-  state->epoch = static_cast<std::int64_t>(epoch);
-  state->source_position = static_cast<std::int64_t>(position);
-  state->documents = std::move(documents);
-  return true;
-}
-
-}  // namespace
-
 void TrainLoop::Save(int step) {
   if (config_.checkpoint_path.empty()) return;
   // One canonical checkpoint from rank 0. A data-parallel run keeps a full
@@ -941,7 +695,7 @@ void TrainLoop::Save(int step) {
                               config_.checkpoint_path)) {
     const DataLoaderState state =
         train_loader_ ? train_loader_->State() : DataLoaderState();
-    WriteDataState(config_.checkpoint_path, state);
+    WriteDataCursor(config_.checkpoint_path, state);
     logger_->Info("saved checkpoint at step " + std::to_string(step));
   } else {
     logger_->Info("failed to save checkpoint at step " + std::to_string(step));
