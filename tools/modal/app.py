@@ -422,6 +422,9 @@ def _build_image(leg: Leg):
                                # megabytes. The loop passes its job file as a
                                # JSON string, so the image never reads them.
                                "profiles",
+                               # The coding agent logs into `.pi`, and a file
+                               # that changes under the build fails it.
+                               ".pi",
                                # The host file of `docs/host-portability.md`
                                # section 8.3 pins the compiler and the budget of
                                # the workstation, such as /usr/bin/gcc-12, which
