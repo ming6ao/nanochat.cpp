@@ -1,7 +1,9 @@
 // CUDA Embedding family: an indexed gather forward and a scatter-add backward
 // over a persistent dense gradient buffer. The token ids are `int` on the host
-// (the frozen seam's convention), so the entry points stage them into device
-// memory.
+// (the frozen seam's convention), so the entry points stage them through the
+// one reusable per-thread buffer of `device_utils.cuh`. A launch may still read
+// that buffer when the entry point returns, which is safe: the next staging
+// copy is synchronous and waits for every queued launch before it writes.
 //
 // The backward contract is the CPU reference's: add each token row to the
 // gradient buffer. The caller clears the buffer once with ZeroGrad, so repeated
@@ -25,27 +27,6 @@ namespace {
 
 using cuda_kernels::AsFloatDev;
 using cuda_kernels::AtomicAddDev;
-
-// Stage the host-side token ids into device memory for the kernel's lifetime.
-struct DeviceIds {
-  int* ptr = nullptr;
-  DeviceIds(const int* host, int count) {
-    if (count > 0 && host != nullptr) {
-      ptr = static_cast<int*>(
-          Alloc(sizeof(int) * static_cast<std::size_t>(count)));
-      Memcpy(ptr, host, sizeof(int) * static_cast<std::size_t>(count),
-             CopyDir::kHostToDevice);
-    }
-  }
-  ~DeviceIds() {
-    if (ptr != nullptr) {
-      Synchronize();
-      Free(ptr);
-    }
-  }
-  DeviceIds(const DeviceIds&) = delete;
-  DeviceIds& operator=(const DeviceIds&) = delete;
-};
 
 __global__ void EmbeddingForwardKernel(int tokens, int dim,
                                        const int* __restrict__ ids,
@@ -79,21 +60,21 @@ __global__ void EmbeddingScatterAddKernel(int dim, const int* __restrict__ ids,
 void EmbeddingForward(int tokens, int dim, const int* ids,
                       const ComputeType* table, ComputeType* out) {
   if (tokens <= 0 || dim <= 0) return;
-  const DeviceIds device_ids(ids, tokens);
+  const int* device_ids = cuda_kernels::StageIndices(ids, tokens);
   constexpr int kThreads = 256;
   const long long n = static_cast<long long>(tokens) * dim;
   const int blocks = static_cast<int>((n + kThreads - 1) / kThreads);
   cuda_backend::Launch(EmbeddingForwardKernel, dim3(blocks), dim3(kThreads), 0,
-                       tokens, dim, device_ids.ptr, table, out);
+                       tokens, dim, device_ids, table, out);
 }
 
 void EmbeddingBackward(int tokens, int dim, const int* ids,
                        const ComputeType* dout, float* dtable) {
   if (tokens <= 0 || dim <= 0) return;
-  const DeviceIds device_ids(ids, tokens);
+  const int* device_ids = cuda_kernels::StageIndices(ids, tokens);
   const int block = cuda_kernels::BlockSizeForDim(dim);
   cuda_backend::Launch(EmbeddingScatterAddKernel, dim3(tokens), dim3(block), 0,
-                       dim, device_ids.ptr, dout, dtable);
+                       dim, device_ids, dout, dtable);
 }
 
 }  // namespace kernels

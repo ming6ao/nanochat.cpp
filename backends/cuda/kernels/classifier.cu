@@ -4,8 +4,11 @@
 // the backward zeroes the padded tail, matching the CPU reference.
 //
 // The `targets` are `int` on the host (the frozen seam's convention), so the
-// entry point stages them into device memory for the kernels. One block per
-// row, reduced cooperatively through the shared RowLogSumExp helper.
+// entry point stages them through the one reusable per-thread buffer of
+// `device_utils.cuh`. A launch may still read that buffer when the entry point
+// returns, which is safe: the next staging copy is synchronous and waits for
+// every queued launch before it writes. One block per row, reduced
+// cooperatively through the shared RowLogSumExp helper.
 //
 // See docs/kernels.md.
 
@@ -26,28 +29,9 @@ using cuda_kernels::AsFloatDev;
 using cuda_kernels::RowLogSumExp;
 using cuda_kernels::ToComputeDev;
 
-// Stage the host-side target ids into device memory for the kernel's lifetime.
-// Copies are synchronous on the backend stream, so the launch that follows
-// already sees the data.
-struct DeviceTargets {
-  int* ptr = nullptr;
-  DeviceTargets(const int* host, int count) {
-    if (count > 0 && host != nullptr) {
-      ptr = static_cast<int*>(
-          Alloc(sizeof(int) * static_cast<std::size_t>(count)));
-      Memcpy(ptr, host, sizeof(int) * static_cast<std::size_t>(count),
-             CopyDir::kHostToDevice);
-    }
-  }
-  ~DeviceTargets() {
-    if (ptr != nullptr) {
-      Synchronize();
-      Free(ptr);
-    }
-  }
-  DeviceTargets(const DeviceTargets&) = delete;
-  DeviceTargets& operator=(const DeviceTargets&) = delete;
-};
+// The staged target ids are read by a launch, so that kernel may still be in
+// flight when the entry point returns. That is correct: the next staging copy
+// is synchronous, and it waits for every queued launch before it writes.
 
 __host__ __device__ inline int PaddedVocab(const ClassifierParams& params) {
   return params.padded_vocab_size > 0 ? params.padded_vocab_size
@@ -128,10 +112,10 @@ void ClassifierForward(const ClassifierParams& params,
                        const ComputeType* logits, const int* targets,
                        float* losses) {
   if (params.rows <= 0 || params.vocab_size <= 0) return;
-  const DeviceTargets device_targets(targets, params.rows);
+  const int* device_targets = cuda_kernels::StageIndices(targets, params.rows);
   constexpr int kThreads = 256;
   cuda_backend::Launch(ClassifierForwardKernel, dim3(params.rows),
-                       dim3(kThreads), 0, params, logits, device_targets.ptr,
+                       dim3(kThreads), 0, params, logits, device_targets,
                        losses);
 }
 
@@ -139,10 +123,10 @@ void ClassifierBackward(const ClassifierParams& params,
                         const ComputeType* logits, const int* targets,
                         ComputeType* dlogits) {
   if (params.rows <= 0 || params.vocab_size <= 0) return;
-  const DeviceTargets device_targets(targets, params.rows);
+  const int* device_targets = cuda_kernels::StageIndices(targets, params.rows);
   constexpr int kThreads = 256;
   cuda_backend::Launch(ClassifierBackwardKernel, dim3(params.rows),
-                       dim3(kThreads), 0, params, logits, device_targets.ptr,
+                       dim3(kThreads), 0, params, logits, device_targets,
                        dlogits);
 }
 

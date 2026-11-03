@@ -388,6 +388,34 @@ inline int BlockSizeForDim(int dim) {
   return block;
 }
 
+// ---------------------------------------------------------------------------
+// Host-side index staging
+// ---------------------------------------------------------------------------
+
+// One reusable device copy of a host-side index array. The frozen seam takes
+// the ids as a host pointer, so the embedding and classifier entries must stage
+// them. One training step calls those entries twelve times with the same array,
+// and a fresh allocation, copy, and free per call cost more than the kernels
+// they feed: `cudaFree` also synchronizes the device. One buffer is therefore
+// allocated per device thread and grown on demand. It belongs to the thread and
+// lives until the process ends.
+//
+// The copy stays synchronous, so the launch that follows reads the values just
+// written, and two families that share one buffer cannot race a third launch.
+inline int* StageIndices(const int* host, int count) {
+  thread_local int* buffer = nullptr;
+  thread_local std::size_t capacity = 0;
+  if (count <= 0 || host == nullptr) return nullptr;
+  const std::size_t wanted = static_cast<std::size_t>(count);
+  if (wanted > capacity) {
+    if (buffer != nullptr) kernels::Free(buffer);
+    buffer = static_cast<int*>(kernels::Alloc(wanted * sizeof(int)));
+    capacity = wanted;
+  }
+  kernels::Memcpy(buffer, host, wanted * sizeof(int), CopyDir::kHostToDevice);
+  return buffer;
+}
+
 }  // namespace cuda_kernels
 }  // namespace nanochat
 
