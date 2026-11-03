@@ -641,11 +641,16 @@ void LaunchFusedAttention(const AttentionParams& params, const ComputeType* q,
 
 }  // namespace
 
-// Whether the fused tiled forward covers this shape. Only the sliding-window
-// path is promoted: the full-causal tile lost the Phase 1 gate to cuBLAS, and
-// the tile register block covers only `head_dim` 128.
+// Whether the fused tiled forward covers this shape. The tile computes the
+// query-key product with a scalar FMA loop, so it belongs on a card whose
+// matmuls have no tensor cores to lose to: it took the Phase 1 gate on the
+// GTX 1080 Ti. A bf16 build is a tensor-core build, because bf16 arithmetic
+// needs the units, and there the tile loses: the 13 sliding-window layers of
+// the `big` profile take 34.6 ms through it, against a 1.06 ms roofline bound
+// for all 20 layers. The tile also covers only `head_dim` 128, and only a
+// windowed shape, because the full-causal tile lost its gate to cuBLAS.
 bool UseFusedAttention(const AttentionParams& p) {
-  return p.window_left >= 0 && p.head_dim == 128;
+  return !kComputeIsBf16 && p.window_left >= 0 && p.head_dim == 128;
 }
 
 void AttentionForward(const AttentionParams& params, const ComputeType* q,
