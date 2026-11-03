@@ -139,11 +139,17 @@ int main() {
   window.window_left = 3;
   RunCase(window, "sliding-window");
 
-  // Grouped-query attention with a sliding window exercises the banded GQA
-  // backward (the shared key/value gradient accumulation).
+  // Grouped-query attention with a sliding window exercises the banded
+  // backward, where the fold must still land in the model's key/value order.
   AttentionParams gqa_window = gqa;
   gqa_window.window_left = 3;
   RunCase(gqa_window, "gqa-sliding-window");
+
+  // The same banded shape with two key/value heads, so the fold's two leading
+  // indices cannot collapse into one another.
+  AttentionParams gqa_pair_window = gqa_pair;
+  gqa_pair_window.window_left = 3;
+  RunCase(gqa_pair_window, "gqa-two-kv-heads-sliding-window");
 
   AttentionParams noncausal = base;
   noncausal.causal = false;

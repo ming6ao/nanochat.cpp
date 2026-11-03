@@ -58,11 +58,6 @@ using cuda_kernels::ToComputeDev;
 constexpr int kSoftmaxThreads = 128;
 constexpr int kTransposeThreads = 256;
 
-// Base of head `h` in a `[batch, rows, heads, head_dim]` buffer.
-inline std::int64_t HeadBase(int b, int rows, int heads, int h, int head_dim) {
-  return (static_cast<std::int64_t>(b) * rows * heads + h) * head_dim;
-}
-
 // Base of head `h` in the `[batch, heads, seq, kv_len]` score scratch.
 __host__ __device__ inline std::int64_t ScoreBase(const AttentionParams& p,
                                                   int b, int h) {
@@ -114,26 +109,6 @@ void BatchedGemmStrided(int m, int n, int k, int batch_count, float alpha,
   gp.stride_b = stride_b;
   gp.ldc = ldc;
   gp.stride_c = stride_c;
-  Gemm(GemmMode::kForward, gp, a, b, c);
-}
-
-// One `C = alpha * op(A) * op(B) + beta * C` with explicit row strides, for the
-// grouped-query fallback whose operands are rows of the model's
-// `[batch, seq, heads, dim]` buffers (row stride `heads * dim`, not `dim`).
-void StridedGemm(int m, int n, int k, float alpha, float beta, bool transpose_a,
-                 bool transpose_b, int lda, int ldb, int ldc,
-                 const ComputeType* a, const ComputeType* b, ComputeType* c) {
-  GemmParams gp;
-  gp.m = m;
-  gp.n = n;
-  gp.k = k;
-  gp.alpha = alpha;
-  gp.beta = beta;
-  gp.transpose_a = transpose_a;
-  gp.transpose_b = transpose_b;
-  gp.lda = lda;
-  gp.ldb = ldb;
-  gp.ldc = ldc;
   Gemm(GemmMode::kForward, gp, a, b, c);
 }
 
@@ -352,13 +327,6 @@ void TransposeFromHeads(int batch, int rows, int heads, int kv_heads, int dim,
   cuda_backend::Launch(TransposeFromHeadsKernel, dim3(grid),
                        dim3(kTransposeThreads), 0, total, rows, heads, kv_heads,
                        dim, in, out);
-}
-
-// Whether the windowed backward can use the batched multi-head schedule.
-// Grouped-query attention takes `AttentionBackwardWindowedGqa` instead, whose
-// per-head loop accumulates the key and value gradients that the heads share.
-bool BatchedWindowedBackward(const AttentionParams& p) {
-  return p.num_kv_heads <= 0 || p.num_kv_heads == p.num_heads;
 }
 
 // --- Fused tiled forward (windowed shapes) ---------------------------------
@@ -748,6 +716,12 @@ bool UseWindowedBackward(const AttentionParams& p) {
 // share keys, so `dK`/`dV` accumulate over the zeroed buffers. The saved
 // forward statistics are shared through `stats_row_stride` and the query
 // offset. See `docs/attention.md` Part 2.
+//
+// Every product is one batched call over `batch * heads`, which needs the
+// operands in head-major order and, for grouped-query attention, needs the key
+// and value heads widened to the query head count first. The fold at the end
+// then sums the heads that share a key or value head, the same way the dense
+// backward does.
 void AttentionBackwardWindowed(const AttentionParams& params,
                                const ComputeType* q, const ComputeType* k,
                                const ComputeType* v, const float* stats,
@@ -756,6 +730,7 @@ void AttentionBackwardWindowed(const AttentionParams& params,
   const int batch = params.batch;
   const int seq = params.seq;
   const int heads = params.num_heads;
+  const int kv_heads = KvHeadCountDev(params);
   const int dim = params.head_dim;
   const int window = params.window_left;
   const int Bq = window;
@@ -776,8 +751,8 @@ void AttentionBackwardWindowed(const AttentionParams& params,
   ComputeType* dkT = dqT + q_elems;
   ComputeType* dvT = dkT + q_elems;
   TransposeToHeads(batch, seq, heads, heads, dim, q, qT);
-  TransposeToHeads(batch, seq, heads, heads, dim, k, kT);
-  TransposeToHeads(batch, seq, heads, heads, dim, v, vT);
+  TransposeToHeads(batch, seq, heads, kv_heads, dim, k, kT);
+  TransposeToHeads(batch, seq, heads, kv_heads, dim, v, vT);
   TransposeToHeads(batch, seq, heads, heads, dim, dout, doutT);
   Memset(dqT, 0, q_elems * sizeof(ComputeType));
   Memset(dkT, 0, q_elems * sizeof(ComputeType));
@@ -849,99 +824,8 @@ void AttentionBackwardWindowed(const AttentionParams& params,
   }
 
   TransposeFromHeads(batch, seq, heads, heads, dim, dqT, dq);
-  TransposeFromHeads(batch, seq, heads, heads, dim, dkT, dk);
-  TransposeFromHeads(batch, seq, heads, heads, dim, dvT, dv);
-}
-
-// The same banded schedule for grouped-query attention, where several query
-// heads share one key/value head. It mirrors the per-head fallback and
-// accumulates `dK`/`dV` across the query heads. One block scratch is reused for
-// every `(batch, head, block)`, so the device memory stays small.
-void AttentionBackwardWindowedGqa(const AttentionParams& params,
-                                  const ComputeType* q, const ComputeType* k,
-                                  const ComputeType* v, const float* stats,
-                                  const ComputeType* dout, ComputeType* dq,
-                                  ComputeType* dk, ComputeType* dv) {
-  const int batch = params.batch;
-  const int seq = params.seq;
-  const int heads = params.num_heads;
-  const int kv_heads = KvHeadCountDev(params);
-  const int dim = params.head_dim;
-  const int window = params.window_left;
-  const int Bq = window;
-  const float scale = params.scale > 0.0f
-                          ? params.scale
-                          : 1.0f / sqrtf(static_cast<float>(dim));
-
-  const int key_max = window + Bq;
-  const std::size_t block_matrix = static_cast<std::size_t>(Bq) * key_max;
-  ComputeType* scores = CachedBuffer(0, 3 * block_matrix);
-  ComputeType* probs = scores + block_matrix;
-  ComputeType* dprobs = probs + block_matrix;
-
-  // The model's head layout is `[batch, seq, heads, dim]`, so one head's rows
-  // are strided by the full head count. The leading dimensions below carry
-  // that stride; `HeadBase` supplies only the base offset.
-  const int q_ld = heads * dim;
-  const int kv_ld = kv_heads * dim;
-
-  const std::size_t kv_count =
-      static_cast<std::size_t>(batch) * seq * kv_heads * dim;
-  Memset(dk, 0, kv_count * sizeof(ComputeType));
-  Memset(dv, 0, kv_count * sizeof(ComputeType));
-
-  for (int b = 0; b < batch; ++b) {
-    for (int h = 0; h < heads; ++h) {
-      const int kvh = KvHeadDev(h, params.num_heads, params.num_kv_heads);
-      for (int q0 = 0; q0 < seq; q0 += Bq) {
-        const int q_len = std::min(Bq, seq - q0);
-        const int k0 = std::max(0, q0 - window);
-        const int k_len = std::min(seq, q0 + q_len) - k0;
-        const ComputeType* qh = q + HeadBase(b, seq, heads, h, dim) +
-                                static_cast<std::int64_t>(q0) * q_ld;
-        const ComputeType* kh = k + HeadBase(b, seq, kv_heads, kvh, dim) +
-                                static_cast<std::int64_t>(k0) * kv_ld;
-        const ComputeType* vh = v + HeadBase(b, seq, kv_heads, kvh, dim) +
-                                static_cast<std::int64_t>(k0) * kv_ld;
-        const ComputeType* douth = dout + HeadBase(b, seq, heads, h, dim) +
-                                   static_cast<std::int64_t>(q0) * q_ld;
-        ComputeType* dqh = dq + HeadBase(b, seq, heads, h, dim) +
-                           static_cast<std::int64_t>(q0) * q_ld;
-        ComputeType* dkh = dk + HeadBase(b, seq, kv_heads, kvh, dim) +
-                           static_cast<std::int64_t>(k0) * kv_ld;
-        ComputeType* dvh = dv + HeadBase(b, seq, kv_heads, kvh, dim) +
-                           static_cast<std::int64_t>(k0) * kv_ld;
-
-        StridedGemm(q_len, k_len, dim, scale, 0.0f, /*transpose_a=*/false,
-                    /*transpose_b=*/true, /*lda=*/q_ld, /*ldb=*/kv_ld,
-                    /*ldc=*/k_len, qh, kh, scores);
-        StridedGemm(q_len, k_len, dim, 1.0f, 0.0f, /*transpose_a=*/false,
-                    /*transpose_b=*/true, q_ld, kv_ld, k_len, douth, vh,
-                    dprobs);
-
-        AttentionParams sub = params;
-        sub.batch = 1;
-        sub.num_heads = 1;
-        sub.num_kv_heads = 1;
-        sub.seq = q_len;
-        sub.kv_len = k_len;
-        sub.stats_row_stride = seq;
-        const std::int64_t stats_offset =
-            (static_cast<std::int64_t>(b) * heads + h) * seq + q0;
-        cuda_backend::Launch(AttentionSoftmaxBackwardKernel, dim3(q_len),
-                             dim3(kSoftmaxThreads), 0, sub, scores,
-                             stats + stats_offset * 2, probs, dprobs);
-
-        StridedGemm(q_len, dim, k_len, scale, 0.0f, /*transpose_a=*/false,
-                    /*transpose_b=*/false, k_len, kv_ld, q_ld, dprobs, kh, dqh);
-        StridedGemm(k_len, dim, q_len, scale, 1.0f, /*transpose_a=*/true,
-                    /*transpose_b=*/false, k_len, q_ld, kv_ld, dprobs, qh, dkh);
-        StridedGemm(k_len, dim, q_len, 1.0f, 1.0f, /*transpose_a=*/true,
-                    /*transpose_b=*/false, k_len, q_ld, kv_ld, probs, douth,
-                    dvh);
-      }
-    }
-  }
+  TransposeFromHeads(batch, seq, heads, kv_heads, dim, dkT, dk);
+  TransposeFromHeads(batch, seq, heads, kv_heads, dim, dvT, dv);
 }
 
 void AttentionBackward(const AttentionParams& params, const ComputeType* q,
@@ -965,11 +849,7 @@ void AttentionBackward(const AttentionParams& params, const ComputeType* q,
   // The banded backward never builds the dense `seq x seq` score matrix, so it
   // dispatches before that scratch is requested (docs/attention.md Part 2).
   if (UseWindowedBackward(params)) {
-    if (BatchedWindowedBackward(params)) {
-      AttentionBackwardWindowed(params, q, k, v, stats, dout, dq, dk, dv);
-    } else {
-      AttentionBackwardWindowedGqa(params, q, k, v, stats, dout, dq, dk, dv);
-    }
+    AttentionBackwardWindowed(params, q, k, v, stats, dout, dq, dk, dv);
     return;
   }
 
