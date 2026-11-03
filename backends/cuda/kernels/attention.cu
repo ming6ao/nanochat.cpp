@@ -35,6 +35,8 @@
 // for every shape. See `docs/attention.md` Part 2, section 5.
 
 #include <cstddef>
+#include <cstdint>
+#include <cstring>
 
 #include <cuda_runtime.h>
 
@@ -271,13 +273,113 @@ __global__ void TransposeToHeadsKernel(long long total, int rows, int heads,
       in[((static_cast<long long>(b) * rows + r) * kv_heads + kvh) * dim + d];
 }
 
+// One 16-byte group of `ComputeType` values: four 32-bit words, aligned so the
+// copy is one wide access. It is a plain aggregate rather than `uint4`, because
+// the simulator compiles this same source as host C++ and its compatibility
+// header carries no vector types.
+struct alignas(16) TransposeVector {
+  std::uint32_t words[4];
+};
+
+// The two transposes move one 16-byte vector per thread instead of one element.
+// Both sides of the copy are contiguous along `dim`, which is 64 or 128 on
+// every shape that reaches the batched path, so a vector stays inside one row.
+// A shape whose `dim` is not a multiple of the vector width, or a pointer that
+// is not 16-byte aligned, takes the scalar kernel below; `kernels::Alloc`
+// returns an aligned pointer, so the second condition costs one test.
+constexpr int kVectorBytes = 16;
+constexpr int kVectorElems =
+    kVectorBytes / static_cast<int>(sizeof(ComputeType));
+
+// One block per `kTransposeThreads` entries, rounded up.
+int Grid(long long entries) {
+  return static_cast<int>((entries + kTransposeThreads - 1) /
+                          kTransposeThreads);
+}
+
+bool VectorTranspose(int dim, const ComputeType* in, const ComputeType* out) {
+  if (kVectorElems <= 1 || dim % kVectorElems != 0) return false;
+  const std::uintptr_t bits = reinterpret_cast<std::uintptr_t>(in) |
+                              reinterpret_cast<std::uintptr_t>(out);
+  return bits % kVectorBytes == 0;
+}
+
+// One 16-byte group of `ComputeType` values, read from a vector and unpacked by
+// a byte copy. A union of the vector and the elements would be the direct
+// spelling, but `ComputeType` carries a defaulted constructor, so a union of
+// the two has a deleted default constructor on a recent nvcc.
+
+// `[batch, rows, kv_heads, dim]` -> `[batch, heads, rows, dim]`, one vector at
+// a time. The output nests as head outside row, so the flat vector index
+// decodes to `(b, h, r, vector)` in that order.
+__global__ void TransposeToHeadsVectorKernel(
+    long long vectors_per_row, long long total_vectors, int rows, int heads,
+    int kv_heads, const TransposeVector* __restrict__ in,
+    TransposeVector* __restrict__ out) {
+  const long long v =
+      static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (v >= total_vectors) return;
+  const int vd = static_cast<int>(v % vectors_per_row);
+  const long long row = v / vectors_per_row;
+  const int r = static_cast<int>(row % rows);
+  const long long bh = row / rows;
+  const int h = static_cast<int>(bh % heads);
+  const long long b = bh / heads;
+  const int kvh = KvHeadDev(h, heads, kv_heads);
+  const long long src =
+      ((b * rows + r) * kv_heads + kvh) * vectors_per_row + vd;
+  out[v] = in[src];
+}
+
+// The fold of `TransposeFromHeadsKernel`, one vector at a time. The heads of a
+// key/value group are summed in ascending order in fp32 and rounded once, which
+// is the order the scalar kernel keeps.
+__global__ void TransposeFromHeadsVectorKernel(
+    long long vectors_per_row, long long total_vectors, int rows, int heads,
+    int kv_heads, const TransposeVector* __restrict__ in,
+    TransposeVector* __restrict__ out) {
+  const long long v =
+      static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (v >= total_vectors) return;
+  const int vd = static_cast<int>(v % vectors_per_row);
+  const long long row_head = v / vectors_per_row;
+  const int kvh = static_cast<int>(row_head % kv_heads);
+  const long long br = row_head / kv_heads;
+  const int r = static_cast<int>(br % rows);
+  const long long b = br / rows;
+  const int group = heads / kv_heads > 0 ? heads / kv_heads : 1;
+  const int first = kvh * group;
+  const int last = kvh == kv_heads - 1 ? heads : (kvh + 1) * group;
+  const long long base = (b * heads * rows + r) * vectors_per_row + vd;
+  const long long stride = static_cast<long long>(rows) * vectors_per_row;
+  float acc[kVectorElems];
+  for (int j = 0; j < kVectorElems; ++j) acc[j] = 0.0f;
+  for (int h = first; h < last; ++h) {
+    ComputeType values[kVectorElems];
+    std::memcpy(values, in + base + static_cast<long long>(h) * stride,
+                kVectorBytes);
+    for (int j = 0; j < kVectorElems; ++j) acc[j] += AsFloatDev(values[j]);
+  }
+  ComputeType folded[kVectorElems];
+  for (int j = 0; j < kVectorElems; ++j) folded[j] = ToComputeDev(acc[j]);
+  std::memcpy(out + v, folded, kVectorBytes);
+}
+
 void TransposeToHeads(int batch, int rows, int heads, int kv_heads, int dim,
                       const ComputeType* in, ComputeType* out) {
   const long long total = static_cast<long long>(batch) * heads * rows * dim;
   if (total <= 0) return;
-  const int grid =
-      static_cast<int>((total + kTransposeThreads - 1) / kTransposeThreads);
-  cuda_backend::Launch(TransposeToHeadsKernel, dim3(grid),
+  if (VectorTranspose(dim, in, out)) {
+    const long long per_row = dim / kVectorElems;
+    const long long vectors = total / kVectorElems;
+    cuda_backend::Launch(TransposeToHeadsVectorKernel, dim3(Grid(vectors)),
+                         dim3(kTransposeThreads), 0, per_row, vectors, rows,
+                         heads, kv_heads,
+                         reinterpret_cast<const TransposeVector*>(in),
+                         reinterpret_cast<TransposeVector*>(out));
+    return;
+  }
+  cuda_backend::Launch(TransposeToHeadsKernel, dim3(Grid(total)),
                        dim3(kTransposeThreads), 0, total, rows, heads, kv_heads,
                        dim, in, out);
 }
@@ -322,9 +424,17 @@ void TransposeFromHeads(int batch, int rows, int heads, int kv_heads, int dim,
                         const ComputeType* in, ComputeType* out) {
   const long long total = static_cast<long long>(batch) * kv_heads * rows * dim;
   if (total <= 0 || heads <= 0 || kv_heads <= 0) return;
-  const int grid =
-      static_cast<int>((total + kTransposeThreads - 1) / kTransposeThreads);
-  cuda_backend::Launch(TransposeFromHeadsKernel, dim3(grid),
+  if (VectorTranspose(dim, in, out)) {
+    const long long per_row = dim / kVectorElems;
+    const long long vectors = total / kVectorElems;
+    cuda_backend::Launch(TransposeFromHeadsVectorKernel, dim3(Grid(vectors)),
+                         dim3(kTransposeThreads), 0, per_row, vectors, rows,
+                         heads, kv_heads,
+                         reinterpret_cast<const TransposeVector*>(in),
+                         reinterpret_cast<TransposeVector*>(out));
+    return;
+  }
+  cuda_backend::Launch(TransposeFromHeadsKernel, dim3(Grid(total)),
                        dim3(kTransposeThreads), 0, total, rows, heads, kv_heads,
                        dim, in, out);
 }
