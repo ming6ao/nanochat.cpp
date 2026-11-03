@@ -1,7 +1,8 @@
 // T1 GPU correctness + finite-difference test for the Attention family:
 // causal / sliding-window / grouped-query attention, forward and backward,
 // with the saved softmax statistics. Tiny attention shapes only
-// (B=2, T=8, head_dim=4, num_heads=2). See docs/testing.md.
+// (B=2, T=8, head_dim=4, num_heads=2, and four query heads over two key/value
+// heads for the group fold). See docs/testing.md.
 
 #include <cmath>
 #include <cstdio>
@@ -124,6 +125,15 @@ int main() {
   AttentionParams gqa = base;
   gqa.num_kv_heads = 1;
   RunCase(gqa, "gqa-causal");
+
+  // Four query heads over two key/value heads. The forward widens both shared
+  // heads into one batched call, and the backward folds each pair back. One
+  // key/value head cannot check the fold's key/value row order, because that
+  // order collapses to the same index when there is one head.
+  AttentionParams gqa_pair = base;
+  gqa_pair.num_heads = 4;
+  gqa_pair.num_kv_heads = 2;
+  RunCase(gqa_pair, "gqa-two-kv-heads");
 
   AttentionParams window = base;
   window.window_left = 3;
