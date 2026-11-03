@@ -124,7 +124,7 @@ filegroup(
 # The version 0 checkpoint fixture, `tests/data/checkpoint_v0.ckpt`, produced by
 # `tools/dump_fixtures.py checkpoint` from the writer before the metadata work
 # moved it, so the bytes are the ones a Hub artifact already carries
-# (docs/checkpoint-metadata-and-examples-plan.md stage A.2).
+# (docs/checkpoint-format.md section 10).
 # `//tests:checkpoint_compat_test` reads it with the shipped reader; the note
 # `tests/data/checkpoint_v0.txt` is the durable record this summary cites:
 #
@@ -168,8 +168,8 @@ cc_test(
 )
 
 # The version 0/1 checkpoint compatibility guard
-# (docs/checkpoint-metadata-and-examples-plan.md stage A.4 and section 5's case
-# table): the release gate that keeps the artifacts already on the Hub loading.
+# (docs/checkpoint-format.md section 10's case table): the release gate that
+# keeps the artifacts already on the Hub loading.
 # It reads the pinned version 0 fixture and asserts its record names, storage
 # dtypes, shapes, payload bytes, and checksums, that a version 1 file round-trips
 # every field, that both drift directions are accepted and counted (`extra_u32`

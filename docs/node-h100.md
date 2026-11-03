@@ -1,8 +1,10 @@
 # The H100 node: the d24 run book
 
-Status: proposed. No H100 run has happened. This document is the run book that
-`docs/distributed-native-plan.md` section 11 asks for, plus the acceptance
-criteria for the depth-24 pretraining run.
+Status: proposed. The depth-24 run on eight cards has not happened. One H100 has
+run the demo pipeline at bf16, as row 9 of
+[pipeline-scaleup-plan.md](pipeline-scaleup-plan.md) records. This document is
+the run book that `docs/distributed-native-plan.md` section 11 asks for, plus
+the acceptance criteria for the depth-24 pretraining run.
 
 This is a run book, not a design. The designs are in
 [fp8-training.md](fp8-training.md), [attention-tensor-core.md](attention-tensor-core.md),

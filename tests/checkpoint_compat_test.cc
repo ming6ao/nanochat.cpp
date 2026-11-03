@@ -1,5 +1,5 @@
 // tests/checkpoint_compat_test.cc -- the version 0/1 checkpoint compatibility
-// guard (docs/checkpoint-metadata-and-examples-plan.md stage A.4 and section 5;
+// guard (docs/checkpoint-format.md section 10;
 // the "a checkpoint that already sits on the Hub keeps loading" rule of
 // docs/checkpoint-format.md).
 //
@@ -111,7 +111,7 @@ std::string Count(std::uint32_t value) { return std::to_string(value); }
 //
 // The header every container version shares: 8 magic bytes and the `version`
 // word, and for version 1 the metadata word count directly after it
-// (docs/checkpoint-format.md section 2.1, and section 2.1 of the plan). The
+// (docs/checkpoint-format.md section 5.1). The
 // test needs these three offsets to splice a metadata block into a file
 // `Checkpoint::Save` wrote. They are the format's own header, not a copy of the
 // record framing: everything after the block is carried through verbatim.
@@ -121,7 +121,7 @@ constexpr std::size_t kWholeHeaderSize = kMagicSize + 8;
 constexpr std::uint32_t kContainerVersion0 = 0;
 constexpr std::uint32_t kContainerVersion1 = 1;
 // The magic word itself, eight bytes. A code constant keeps the magic; the
-// prose in this file says "the container magic" (stage A.6's sweep rule).
+// prose in this file says "the container magic".
 constexpr char kContainerMagic[] = "NCHKPT01";
 
 // The payload bytes of the version 0 fixture, from `tests/data/

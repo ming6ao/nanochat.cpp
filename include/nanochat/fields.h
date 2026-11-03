@@ -10,8 +10,7 @@
 
 // The field visitor: forward- and backward-compatible serialization for the
 // run metadata block of the checkpoint container
-// (docs/checkpoint-metadata-and-examples-plan.md stage A.1, and
-// docs/checkpoint-format.md section 2.1).
+// (docs/checkpoint-format.md section 6).
 //
 // This is a port of `gemma.cpp` `io/fields.h`, which follows the libjxl
 // `lib/jxl/fields.h` design. The contract names are kept verbatim so a reviewer
@@ -45,7 +44,7 @@
 //   travels as its bit pattern (`std::bit_cast`), so a read never converts a
 //   value.
 // - `std::uint64_t` takes two words, the low 32 bits first and then bits 32-63
-//   (open decision O6). Section 3 of the plan declares `std::uint64_t step`, so
+//   (open decision O6). The metadata schema declares `std::uint64_t step`, so
 //   the stream has to say how a 64-bit value is carried. The port keeps the
 //   32-bit word stream and the full range: capping the step at `2^32 - 1` loses
 //   a long run, and one word cannot hold it. The order is part of the contract,

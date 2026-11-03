@@ -4,7 +4,7 @@
 // the `DataLoader` batch shape and the one-token targets shift, verifies the
 // `Checkpoint` container round-trips name/dtype/shape/payload, checks the
 // version 1 metadata block and the version 0 read path
-// (docs/checkpoint-metadata-and-examples-plan.md sections 2.1, 2.2, and 4), and
+// (docs/checkpoint-format.md sections 5, 5.4, and 9), and
 // checks the `LoadTokenizer` contract (a valid artifact loads, a bad file
 // returns null).
 
@@ -167,8 +167,7 @@ nanochat::Config TinyRunConfig() {
 }
 
 // The version 1 metadata block round-trips every field, and the file is a
-// version 1 container (docs/checkpoint-metadata-and-examples-plan.md sections
-// 2.1, 2.2, and 4).
+// version 1 container (docs/checkpoint-format.md sections 5, 5.4, and 9).
 void TestCheckpointMetadata() {
   Checkpoint checkpoint;
   {

@@ -13,9 +13,8 @@ detailed reference that the design points at.
 | [model.md](model.md) | Model API, graphs, the model description and its block kinds, optimizer, data and checkpoints, workspace |
 | [model-and-device-bringup.md](model-and-device-bringup.md) | The two axes: the directory contract, the kernel tiers, the model description, the planner, isolation, the conformance matrix, the checklists, and the open questions with their decision records |
 | [conformance-matrix.md](conformance-matrix.md) | The model/device/tier/graph matrix. **Generated** by `tools/gen_matrix.py`; do not edit a row |
-| [examples.md](examples.md) | The two smallest examples of the public API: what each one shows, how to run it, and its line budget |
-| [checkpoint-format.md](checkpoint-format.md) | The checkpoint container: the version 1 layout and the version 0 layout, the compatibility rules, the parameter-only read, and the three pipeline notebooks |
-| [checkpoint-metadata-and-examples-plan.md](checkpoint-metadata-and-examples-plan.md) | The plan for versioned run metadata in the container and the two smallest examples of the public API |
+| [examples.md](examples.md) | The two smallest examples of the public API: what each one shows, how to run it, the six design decisions, and its line budget |
+| [checkpoint-format.md](checkpoint-format.md) | The checkpoint container: the version 1 layout and the version 0 layout, the eight run-metadata decisions, the compatibility rules, the parameter-only read, and the three pipeline notebooks |
 | [testing.md](testing.md) | Test tiers, oracle harness, finite-difference checks |
 | [parity.md](parity.md) | Known differences from the PyTorch reference, with status |
 | [distributed-design.md](distributed-design.md) | Data-parallel training on two devices: the gradient-sync seam, sharding, the data cursor, and the launch |

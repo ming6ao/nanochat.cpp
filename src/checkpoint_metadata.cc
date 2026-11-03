@@ -1,5 +1,5 @@
 // src/checkpoint_metadata.cc -- the run metadata block of the checkpoint
-// container (docs/checkpoint-metadata-and-examples-plan.md sections 3 and 4).
+// container (docs/checkpoint-format.md sections 5.3 and 9).
 //
 // The block itself, its field order, and its rules are declared in
 // `nanochat/checkpoint_metadata.h`, which is the one declaration of

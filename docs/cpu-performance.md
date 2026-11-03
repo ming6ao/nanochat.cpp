@@ -180,8 +180,8 @@ This document turns the CPU gap analysis into a work order. It states the
 measured problem, the design of the fix, the work phases, the owner of each
 phase, and the numeric gate that closes it.
 
-Status: proposal. No code change exists yet. The analysis has measurements.
-The predictions do not.
+Status at writing: a proposal. No code change existed then, and the analysis had
+measurements but no measured predictions. Part 3 records the results.
 
 Related documents:
 

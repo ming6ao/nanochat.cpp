@@ -612,15 +612,17 @@ The predicate lives in `backends/cuda/kernels/attention.cu`:
 
 ```c
 bool UseFusedAttention(const AttentionParams& p) {
-  return p.window_left >= 0 && p.head_dim == 128;
+  return !kComputeIsBf16 && p.window_left >= 0 && p.head_dim == 128;
 }
 ```
 
-The fused tile covers two conditions. The first condition is
-`window_left >= 0`, which is a sliding-window shape. The second condition is
-`head_dim == 128`. Full-causal attention has `window_left < 0`, so it stays on
-cuBLAS. Every other head dimension stays on cuBLAS. Every backward call stays
-on cuBLAS.
+The fused tile covers three conditions. `window_left >= 0` is a
+sliding-window shape. `head_dim == 128` is the one head dimension the tile
+handles. `!kComputeIsBf16` keeps the tile out of a tensor-core build, where the
+scalar FMA tile loses to cuBLAS
+([attention-tensor-core.md](attention-tensor-core.md)). Full-causal attention
+has `window_left < 0`, so it stays on cuBLAS. Every other head dimension stays
+on cuBLAS. Every backward call stays on cuBLAS.
 
 The kernel seam does not change. `include/nanochat/kernels.h` stays byte for
 byte.

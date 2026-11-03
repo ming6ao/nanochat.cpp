@@ -167,14 +167,16 @@ in `backends/cuda/kernels/attention.cu`:
 
 ```c
 bool UseFusedAttention(const AttentionParams& p) {
-  return p.window_left >= 0 && p.head_dim == 128;
+  return !kComputeIsBf16 && p.window_left >= 0 && p.head_dim == 128;
 }
 ```
 
 The fused tiled forward serves a sliding-window shape when the head dimension
 is 128. Full-causal attention (`window_left < 0`) and every other head
-dimension stay on the cuBLAS path. Every backward call stays on the cuBLAS
-path.
+dimension stay on the cuBLAS path. A bf16 build stays on the cuBLAS path too,
+because the scalar FMA tile loses to the tensor cores there
+([../../docs/attention-tensor-core.md](../../docs/attention-tensor-core.md)). Every
+backward call stays on the cuBLAS path.
 
 The measurement command is:
 

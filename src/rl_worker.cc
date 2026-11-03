@@ -379,8 +379,8 @@ void RlWorker::Generate(const std::vector<int>& prompts, int num_prompts,
 
 bool RlWorker::SaveCheckpoint(const std::string& path, std::string* error) {
   // The worker records the stage and the step it knows, so an RL checkpoint
-  // says what produced it and a resumed run continues the schedule (stage A.6,
-  // open decision O3).
+  // says what produced it and a resumed run continues the schedule
+  // (open decision O3).
   CheckpointSaveOptions options;
   options.stage = Stage::kRl;
   options.step = step_ > 0 ? static_cast<std::uint64_t>(step_) : 0;

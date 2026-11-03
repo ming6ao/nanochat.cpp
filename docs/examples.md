@@ -90,6 +90,20 @@ same order, with the stage mapping of open decision O3. `TEST_TMPDIR` is set
 under `tools/nanochat test`, so the write stays inside the sandbox; the file is
 removed before exit either way.
 
+## Design decisions
+
+Six decisions fix the shape of both examples. The code and the `BUILD.bazel`
+comments cite an answer by its ID.
+
+| ID | Question | Answer |
+|---|---|---|
+| E1 | How many examples? | Two C++ examples. A Python mirror comes later. |
+| E2 | Which two? | `hello_world` for inference, and `checkpoint_roundtrip` for the container. |
+| E3 | Do they need model files? | No. Both use a tiny config and a fixed seed. |
+| E4 | Do they become tests? | Yes. One source file builds as a `cc_binary` and as a `cc_test`. |
+| E5 | Do they call the sandbox guard? | Yes. `RequireSandboxOrDie("example")`, like every other entry point. |
+| E6 | Where do they live? | A top-level `examples/` directory, with one package per example. |
+
 ## Line budget
 
 An example stays small enough to read in one sitting. The budget is a ceiling on

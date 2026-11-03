@@ -228,7 +228,7 @@ bool ReadRecord(std::istream& in, TensorRecord* record, std::string* error) {
 constexpr char kCheckpointMagic[8] = {'N', 'C', 'H', 'K', 'P', 'T', '0', '1'};
 
 // The version word names the layout inside the magic's layout family
-// (docs/checkpoint-metadata-and-examples-plan.md section 2.2). Version 0 is the
+// (docs/checkpoint-format.md section 5.4). Version 0 is the
 // container with no metadata section; version 1 adds it between the header and
 // the parameter count. The magic stays `NCHKPT01` for both (open decision O5),
 // so a mismatched pair can only be a legacy magic beside a container version
@@ -282,7 +282,7 @@ bool ReadMetadata(std::istream& in, CheckpointMetadata* metadata,
          " metadata word(s) this build does not know; loading anyway");
   }
   // The recorded config is the run config, so an impossible one is a hard
-  // error at the load and not a surprise at the first GEMM (stage A.6).
+  // error at the load and not a surprise at the first GEMM.
   std::string config_error;
   if (!metadata->config.Validate(&config_error)) {
     return bad("checkpoint metadata config is invalid (" + config_error + ")");
@@ -336,7 +336,7 @@ bool Checkpoint::Load(const std::string& path, std::string* error,
   };
 
   // The layout is chosen by one value, not by a bool
-  // (docs/checkpoint-metadata-and-examples-plan.md section 2.2).
+  // (docs/checkpoint-format.md section 5.4).
   const CheckpointFormat format = DetectFormat(path);
   if (format == CheckpointFormat::kLegacyModel) {
     return fail("bad checkpoint magic: " + path);
@@ -431,7 +431,7 @@ bool Checkpoint::Save(const std::string& path) const {
     return false;
   }
   // The recorded config is the run config, so an impossible one fails before
-  // the write and not at the first GEMM after a load (stage A.6).
+  // the write and not at the first GEMM after a load.
   std::string config_error;
   if (!metadata_.config.Validate(&config_error)) return false;
 
@@ -439,7 +439,7 @@ bool Checkpoint::Save(const std::string& path) const {
   if (!out) return false;
 
   // The header, then the metadata block, then the version 0 record stream
-  // unchanged (docs/checkpoint-format.md section 2.1). The record framing is
+  // unchanged (docs/checkpoint-format.md section 5.1). The record framing is
   // byte identical in both versions, so nothing below this line moved.
   out.write(kCheckpointMagic, sizeof(kCheckpointMagic));
   WriteU32(out, kContainerVersion1);

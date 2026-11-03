@@ -3,8 +3,7 @@
 // the record table. It proves the container works outside src/ through the
 // public headers alone, and it is executable documentation for the metadata
 // work, because it fills `CheckpointMetadata` through the same struct `Save`
-// takes rather than a shortcut (docs/checkpoint-metadata-and-examples-plan.md
-// section 6, decisions E1-E6, stage B.2).
+// takes rather than a shortcut (docs/examples.md, decisions E1-E6).
 //
 // Run it with:
 //   tools/nanochat run t0-cpu --
@@ -17,7 +16,7 @@
 // The same source is also `//examples/checkpoint_roundtrip:roundtrip_test`. For
 // the two fixed records it pins the record count and the presence of both the
 // metadata block and the record table; the exact text stays unpinned, because
-// a formatting change may move it (stage B.4).
+// a formatting change may move it.
 
 #include <cstdarg>
 #include <cstddef>
@@ -249,7 +248,7 @@ int main() {
   std::fputs(report.c_str(), stdout);
   std::remove(path.c_str());
 
-  // The stage B.4 guard: a fixed record count for the fixed records, both
+  // The example guard: a fixed record count for the fixed records, both
   // sections present, and the values that came back are the ones written.
   const nanochat::CheckpointMetadata read_back = loaded.metadata();
   const nanochat::TensorRecord* weight = loaded.Find("weight");

@@ -117,8 +117,8 @@ static_assert(std::is_same<decltype(nanochat_generate_params::stop_ids),
                            decltype(nanochat::GenerateParams::stop_ids)>::value,
               "nanochat_generate_params.stop_ids drifted");
 
-// The metadata mirror (docs/checkpoint-metadata-and-examples-plan.md sections 3
-// and 4). The C enums spell the stored values out, so a renumbered enumerator
+// The metadata mirror (docs/checkpoint-format.md sections 5.3 and 9). The C
+// enums spell the stored values out, so a renumbered enumerator
 // would change the container format in silence; the assertions below stop that
 // at compile time. A widened scalar follows the same rule as the `bool` above:
 // a size floor rather than an equality.
@@ -1202,8 +1202,8 @@ void CheckCheckpointRejectsTruncatedVersionOne() {
   nanochat_checkpoint_free(owner);
 }
 
-// The metadata surface (docs/checkpoint-metadata-and-examples-plan.md section
-// 4). A version 0 file reads as the defaults of `CheckpointMetadata`, so a
+// The metadata surface (docs/checkpoint-format.md section 9). A version 0 file
+// reads as the defaults of `CheckpointMetadata`, so a
 // caller needs no presence test; a version 1 file carries the block, and every
 // field reaches the flat struct and the flat accessors. An unreadable path and
 // a malformed file return the failure status without filling any field.
@@ -1221,8 +1221,7 @@ void CheckCheckpointMetadata() {
   // A version 0 container: the magic, the version word 0, and an empty
   // parameter list. Nothing follows, and the parameter-only read stops at the
   // end of the file, so these 16 bytes are a complete version 0 file
-  // (docs/checkpoint-metadata-and-examples-plan.md section 2.1 with no metadata
-  // section).
+  // (docs/checkpoint-format.md section 5, with no metadata section).
   const std::string v0_path = TempPath("capi_metadata_v0.ckpt");
   std::FILE* v0_file = std::fopen(v0_path.c_str(), "wb");
   Check("metadata v0: file opens", v0_file != nullptr);

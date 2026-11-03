@@ -6,9 +6,9 @@ What this file is
 
 `tests/data/checkpoint_v0.ckpt` holds the bytes the *unchanged* version 0
 writer produced, captured before anything moved `Checkpoint::Save` in
-`src/data.cc`. It is stage A.2 of
-`docs/checkpoint-metadata-and-examples-plan.md`: the compatibility guard needs
-a version 0 container that came from the old code path, not from the new one.
+`src/data.cc`. `docs/checkpoint-format.md` section 10 records the version 0
+layout: the compatibility guard needs a version 0 container that came from the
+old code path, not from the new one.
 `//tests:checkpoint_compat_test` reads this file with the shipped reader and
 asserts the table below, so a change that moves a version 0 byte fails in the
 tree instead of on a Hub artifact.

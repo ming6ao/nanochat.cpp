@@ -1,5 +1,5 @@
 // src/fields_test.cc -- the field visitor of `nanochat/fields.h`
-// (docs/checkpoint-metadata-and-examples-plan.md stage A.1).
+// (docs/checkpoint-format.md section 6).
 //
 // This is the port of `gemma.cpp` `io/fields_test.cc`, and it keeps the case
 // table of the upstream suite: the round trip, new code reading old data, old
@@ -517,8 +517,7 @@ void TestNestedBlock() {
 }
 
 // The real metadata block round-trips, and an older view of it reads the
-// prefix and counts the tail (docs/checkpoint-metadata-and-examples-plan.md
-// sections 3 and 4).
+// prefix and counts the tail (docs/checkpoint-format.md sections 5.3 and 9).
 void TestMetadataBlock() {
   CheckpointMetadata written;
   written.stage = Stage::kRl;

@@ -591,7 +591,7 @@ int main(int argc, char** argv) {
 
   if (!config.checkpoint_path.empty()) {
     // The finetune records its stage, so a reader can tell an SFT checkpoint
-    // from a base or RL one without a side file (stage A.6, open decision O3),
+    // from a base or RL one without a side file (open decision O3),
     // and its recipe, so a later finetune inherits the batch shape and the
     // rates (design decision D7).
     nanochat::CheckpointSaveOptions options;

@@ -492,7 +492,7 @@ nanochat_status nanochat_checkpoint_read(const char* path,
 void nanochat_checkpoint_free(nanochat_checkpoint* owner);
 
 // The run metadata block of the container
-// (docs/checkpoint-metadata-and-examples-plan.md section 4). A version 1 file
+// (docs/checkpoint-format.md sections 5.3 and 9). A version 1 file
 // carries it; a version 0 file reads as the defaults, so every field is always
 // defined and a caller needs no presence test.
 //

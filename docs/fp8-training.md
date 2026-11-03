@@ -1,8 +1,9 @@
 # The fp8 training path
 
-Status: proposed, after a review and a decision pass. The seam and the kernels
-have landed; the training graph has not. What the tree holds today is the
-shared rounding rule (`include/nanochat/fp8.h`), the device quantization kernel
+Status: partly delivered. Section 13 states each part, and the phases F3 to F7
+stay open. The seam and the kernels have landed; the training graph has not.
+What the tree holds today is the shared rounding rule
+(`include/nanochat/fp8.h`), the device quantization kernel
 (`backends/cuda/kernels/fp8.cu`), the two seam entries `QuantizeFp8` and
 `GemmScaledFp8` (`include/nanochat/kernels.h`), the `--config=fp8` build define,
 and three fp8 tests (`//tests:fp8_rounding_test`, `//tests:fp8_gemm_test`, and
@@ -528,14 +529,15 @@ Run every check below. The first six need no GPU.
 
 1. The shared fp8 rounding rule, which covers the saturation, the floor, and
    the round-to-nearest-even rule. The CPU emulation and the simulator share
-   one function, so one fixture proves both. Fixture
-   `tests/data/fp8_round_fixture.bin`, gate `//tests:fp8_round_test`.
+   one function, so one test proves both. Gate `//tests:fp8_rounding_test`,
+   which is a T0 CPU test and needs no fixture.
 2. The emulated scaled GEMM against the CPU fp32 reference, at the shapes in
-   the model. Fixture `tests/data/fp8_gemm_fixture.bin`, gate
-   `//tests:fp8_gemm_test`, plus the fp8 leg of `//tests:kernel_emu_test`.
+   the model. Gate `//tests:fp8_gemm_test`, which compares against a direct
+   three-loop reference, plus the fp8 leg of `//tests:kernel_emu_test`.
 3. The finite-difference check for the fp8 attention and MLP backward.
-4. One fp8 forward and one training step against the reference trajectory.
-   Fixture `tests/data/fp8_step_fixture.bin`, gate `//tests:fp8_step_test`.
+4. One fp8 forward and one training step against the reference trajectory. The
+   fp8 golden is `tests/data/numerics_golden_10l_fp8.bin`, and item 6 is the
+   gate that reads it.
 5. The API interposer accepts the `cublasLtMatmul` shape with both scale
    pointers, and it rejects a null scale pointer. Gate:
    `tools/nanochat simulate --suite api`, and `//tests:cuda_sim_preload_test`.

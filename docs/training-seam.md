@@ -1,10 +1,10 @@
 # The training seam between Python and C++
 
-Status: proposed. This document specifies the boundary between the Python
-surface and the C++ training driver. It also records the defects in the current
-boundary. The project completed the first increment of section 8, and section 5
-marks the fixed defects. Section 6.6 extends the boundary to the mesh training
-driver, and phase 6 of section 8 delivers it.
+Status: partly delivered. The project completed the first increment of section
+8, and section 5 marks the fixed defects. This document specifies the boundary
+between the Python surface and the C++ training driver. It also records the
+defects in the current boundary. Section 6.6 extends the boundary to the mesh
+training driver, and phase 6 of section 8 delivers it.
 
 `post-training.md` section 11 stays the status of record for the post-training
 features. This document is the authority for the Python and C++ boundary. It

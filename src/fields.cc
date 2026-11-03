@@ -1,6 +1,5 @@
 // src/fields.cc -- the forward- and backward-compatible field visitor
-// (docs/checkpoint-metadata-and-examples-plan.md stage A.1,
-// docs/checkpoint-format.md section 2.1).
+// (docs/checkpoint-format.md section 6).
 //
 // This is the port of `gemma.cpp` `io/fields.cc`: the word stream, the reader,
 // and the writer behind `nanochat/fields.h`. The header carries the contract

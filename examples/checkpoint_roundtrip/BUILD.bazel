@@ -1,7 +1,6 @@
 # examples/checkpoint_roundtrip — the smallest checkpoint container example
-# (docs/checkpoint-metadata-and-examples-plan.md section 6, decisions E1-E6,
-# and stage B.2). One source builds as both a binary and a test, so the
-# documented run command and the guard rail cannot drift apart (stage B.4).
+# (docs/examples.md, decisions E1-E6). One source builds as both a binary and
+# a test, so the documented run command and the guard rail cannot drift apart.
 
 load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_test")
 load("//:nanochat.bzl", "nanochat_copts", "precision_defines")

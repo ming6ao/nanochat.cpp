@@ -1,8 +1,7 @@
 // The smallest end-to-end inference example: a tiny model, a fixed seed, and
 // no model file. It proves the public API works outside src/:
 // RequireSandboxOrDie, Config, Model::Create, InitWeights, GenerateParams, and
-// GenerateBatch (docs/checkpoint-metadata-and-examples-plan.md section 6,
-// decisions E1-E5, stage B.1).
+// GenerateBatch (docs/examples.md, decisions E1-E5).
 //
 // Run it with:
 //   tools/nanochat run t0-cpu -- bazel-bin/examples/hello_world/hello_world
@@ -13,7 +12,7 @@
 //
 // The same source is also `//examples/hello_world:hello_world_test`. For the
 // fixed seed it pins the row count, the shape, and the mask, but not the token
-// ids, which a legitimate kernel change may move (stage B.4).
+// ids, which a legitimate kernel change may move.
 
 #include <cstdint>
 #include <cstdio>
@@ -79,7 +78,7 @@ int main() {
     std::printf("row:");
     for (int id : row.tokens) std::printf(" %d", id);
     std::printf("\n");
-    // The stage B.4 guard: pin the shape and the mask, never the ids.
+    // The example guard: pin the shape and the mask, never the ids.
     const int tokens = static_cast<int>(row.tokens.size());
     if (tokens != kRowLen || static_cast<int>(row.mask.size()) != kRowLen) {
       ++failures;

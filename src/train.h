@@ -120,9 +120,9 @@ TrainConfig TrackThreeBaseline();
 // one-rank update. A `world_size` of 1 leaves the accumulation scale unchanged.
 float DistributedBackwardScale(int grad_accum, int world_size);
 
-// What a save records beside the parameters
-// (docs/checkpoint-metadata-and-examples-plan.md sections 3 and 4, open
-// decision O1). The three `SaveModel` overloads that already existed fill this
+// What a save records beside the parameters (docs/checkpoint-format.md sections
+// 5.3 and 9, open decision O1). The three `SaveModel` overloads that already
+// existed fill this
 // with defaults, so no call site changes; a caller that knows more than a path
 // passes the full form instead. `config` is not here: `SaveModel` always
 // records `model.config()`, because the run config is the model's, and a
@@ -176,7 +176,7 @@ class Checkpointer {
   // null for a parameter-only file, and `options` carries the run facts only
   // the caller knows (open decision O1). `SaveModel` fills the step, the
   // precision, the world size, and the config, so the metadata block is
-  // complete without a second call (stage A.6). On failure `*error` names the
+  // complete without a second call. On failure `*error` names the
   // reason when it is not null.
   static bool SaveModel(const Model& model, const Optimizer* optimizer,
                         const CheckpointSaveOptions& options,
@@ -185,7 +185,7 @@ class Checkpointer {
   // Loads `path` and copies every matching record into the model parameters.
   // Returns false when the file is missing or malformed, and when a version 1
   // file recorded a run config that differs from `model->config()`: a mismatch
-  // fails here with a message instead of at the first GEMM (stage A.6).
+  // fails here with a message instead of at the first GEMM.
   static bool LoadModel(Model* model, const std::string& path);
 
   // Also restores the optimizer state when the file carries it. A

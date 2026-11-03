@@ -1,8 +1,9 @@
 # Correctness gates: the simulator and the Hopper startup check
 
-Status: proposed. This document is Part 8 of the simulator work. Parts 1 to 6
-are in [simulator.md](simulator.md). Part 7 is
-[simulator-precision.md](simulator-precision.md).
+Status: partly delivered. Section 6 lists the phases that are complete and the
+three open items, and section 9 lists the open questions. This document is Part
+8 of the simulator work. Parts 1 to 6 are in [simulator.md](simulator.md). Part
+7 is [simulator-precision.md](simulator-precision.md).
 
 This document answers three questions:
 
@@ -241,8 +242,9 @@ Step 5 uses a non-square matrix, so a wrong stride shows. Step 6 is the
 fast-accumulation contract. Step 7 is the tensor-core attention. Step 8 ties the
 graph to the device.
 
-The golden values come from the CPU reference with a fixed seed. Commit them as
-one fixture, `tests/data/hw_gate.bin`. The gate then needs no torch at run time.
+The golden values come from the CPU reference with a fixed seed. They live in
+`src/hw_gate.cc`, not in a committed fixture, so the gate needs no torch at run
+time.
 
 ### 4.3 The integration into training
 

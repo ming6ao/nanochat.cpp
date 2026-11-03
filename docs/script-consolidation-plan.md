@@ -19,7 +19,7 @@ four stages. See section 12 for what landed.
 
 A later change moves the resource launcher, the limit verifier, the style gate,
 and the symbol gate to Python. It removes the shell trust boundary that this
-plan kept. See [python-sandbox-plan.md](python-sandbox-plan.md).
+plan kept. See [sandbox.md](sandbox.md) and [python.md](python.md).
 
 These decisions are superseded.
 
@@ -183,8 +183,8 @@ with_build_lock() { exec 9>"$build_lock"; flock 9; "$@" 9>&-; }
   change the `/tmp/nanochat-sandbox.log` line that decision 4 freezes.
 
 Both bullets above are superseded by section 0 and by
-[python-sandbox-plan.md](python-sandbox-plan.md). The verifier stays a separate
-process, so the log line does not change.
+[sandbox.md](sandbox.md). The verifier stays a separate process, so the log line
+does not change.
 - Do not convert the Kaggle scripts. They install packages and edit `PATH`.
 - Do not change a fixture subcommand name or a fixture binary format.
 - Keep the `Makefile`, which is the non-Bazel fallback.

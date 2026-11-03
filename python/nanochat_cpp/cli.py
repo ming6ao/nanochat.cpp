@@ -5,7 +5,7 @@ command table,
 the argument assembly, the Bazel wiring, the build lock, and the sandbox and
 queue routing live here. The resource launcher is
 ``python/nanochat_cpp/sandbox.py``. See ``docs/script-consolidation-plan.md``
-and ``docs/python-sandbox-plan.md``.
+and ``docs/sandbox.md``.
 
 The observable contract is frozen (decision 4 of the plan): the environment
 variable names, the two log paths and their line formats, the exit codes, the

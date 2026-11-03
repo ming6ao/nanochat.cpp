@@ -14,7 +14,7 @@ path, which is the boundary the two halves meet at.
 This replaces the removed self-test checks and is hermetic: the standard
 library plus the loaded shared library, no third-party import and no network.
 See docs/python.md section 11.1 and
-`docs/checkpoint-metadata-and-examples-plan.md` stage A.5.
+`docs/checkpoint-format.md` section 9.
 """
 
 from __future__ import annotations
@@ -43,7 +43,7 @@ INT8 = checkpoint.dtype_code("int8")
 
 #: The committed version 0 container (`//tests:checkpoint_v0_fixture`). It was
 #: written before the metadata section existed, so it carries no block and its
-#: run facts read as the defaults of one (stage A.2).
+#: run facts read as the defaults of one.
 FIXTURE = "tests/data/checkpoint_v0.ckpt"
 
 

@@ -1432,7 +1432,7 @@ void AppendJsonKey(std::string* out, const char* key, bool first) {
 
 // The nested run config of a metadata block as one JSON object. A binding
 // decodes it with the JSON parser it already has, so a new `Config` field needs
-// no new C function (docs/checkpoint-metadata-and-examples-plan.md section 4).
+// no new C function (docs/checkpoint-format.md section 9).
 //
 // The shape is `nanochat.config.v1`: one key per `nanochat::Config` member, in
 // the declaration order of `include/nanochat/config.h`, and nothing else. There
@@ -1558,7 +1558,7 @@ nanochat_status nanochat_checkpoint_read(const char* path,
 void nanochat_checkpoint_free(nanochat_checkpoint* owner) { delete owner; }
 
 // The metadata block of the container
-// (docs/checkpoint-metadata-and-examples-plan.md sections 4 and 5). The read
+// (docs/checkpoint-format.md sections 9 and 10). The read
 // takes the parameter-only mode of `Checkpoint::Load`, so the optimizer records
 // are never parsed, and it drops the parameter payloads once the block is
 // copied, because a caller that asks for the run facts keeps nothing else.

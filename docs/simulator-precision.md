@@ -1,14 +1,16 @@
 # The simulator at bf16 and fp8
 
-Status: proposed. This document is Part 7 of the simulator work. Parts 1 to 6
+Status: partly delivered. Section 13 states each part, and
+[correctness-gates.md](correctness-gates.md) section 6 holds the phase record.
+This document is Part 7 of the simulator work. Parts 1 to 6
 are in [simulator.md](simulator.md): the reference engine, the API interposer,
 the collective mock, the device profile table, the compile gate, and the
 emulation engine.
 
 The subject of this document is the precision coverage. The S0 tier runs the
 fp32 build, and Stage 2 of [precision.md](precision.md) adds the bf16 build.
-The fp8 work and the bf16 leg of the numeric trace stay open: the table below
-records which surface covers what today.
+The fp8 path and the bf16 leg of the numeric trace are in the tree, except the
+open items of section 13. The table below records which surface covers what.
 
 - [simulator.md](simulator.md) — the three engines and the S0 tier.
 - [fp8-training.md](fp8-training.md) — the fp8 design this document supports.
@@ -303,12 +305,12 @@ Checks 1 to 5 need no GPU.
 
 | Section | Status |
 |---|---|
-| 3 The profile table | Proposed |
-| 4 The reference engine | Proposed |
-| 5 The API interposer | Proposed |
-| 6 The emulation engine | Proposed |
-| 7 The numeric trace | Proposed |
-| 12 Phases | Not started |
+| 3 The profile table | Delivered. `include/nanochat/device_profile.h` carries `supports_fp8`, `supports_bf16`, and the two peak rates |
+| 4 The reference engine | Delivered. The shared rounding header is `include/nanochat/fp8.h` |
+| 5 The API interposer | Delivered. `tools/cuda_sim/cuda_sim.map` and `tools/cuda_sim/check_symbols.py` gate it |
+| 6 The emulation engine | Delivered, except the `mma` scalar loop |
+| 7 The numeric trace | Delivered for the CPU and the simulator legs. The external fp8 golden is open |
+| 12 Phases | Partly complete. See [correctness-gates.md](correctness-gates.md) section 6 |
 
 ## 14. Risks and non-goals
 

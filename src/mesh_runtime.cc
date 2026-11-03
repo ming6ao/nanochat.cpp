@@ -279,7 +279,7 @@ void MeshRuntime::Save(const std::string& path) {
   // The harness container carries the optimizer state and the step beside the
   // parameters, so a resume continues the schedule (docs/training-seam.md
   // section 10). The mesh is the one caller that knows its data-parallel
-  // width, so it records that too (stage A.6).
+  // width, so it records that too.
   CheckpointSaveOptions options;
   options.step = step_ > 0 ? static_cast<std::uint64_t>(step_) : 0;
   options.world_size = world_size();

@@ -54,6 +54,23 @@ the reader detects the container by the eight magic bytes. `nc.Model.save`
 writes a parameter-only `NCHKPT01` file, so every writer uses one format. See
 section 4.
 
+### 2.1 Run metadata decisions
+
+These eight decisions shaped the run metadata block. Each answer is the one the
+implementers took, and the code that carries it is named. The prefix `O` means
+open decision, and the code cites an answer by its ID.
+
+| ID | Question | Answer |
+|---|---|---|
+| O1 | How does `Checkpointer::SaveModel` learn the run facts? | A `CheckpointSaveOptions` struct in `src/train.h`, carrying `stage`, `step`, `world_size`, `precision`, `tokenizer_id`, `git_revision`, and `notes`. The config is not in it: `SaveModel` always records `model.config()`, and a second copy could drift. The three older overloads are thin wrappers over `SaveModel(model, optimizer, options, path, error)`, so no call site changed. |
+| O2 | Is `Precision` a new enum? | No. The block records `ComputePrecision` (`include/nanochat/mfu.h`), with `EnumValid` beside it in `src/checkpoint_metadata.cc`. One precision enum stays the source of truth, and the recorded value is informational: it never changes a load decision. |
+| O3 | What are the `Stage` values? | `Stage::kBase`, `Stage::kSft`, and `Stage::kRl`, stored as 0, 1, and 2. There is no `kPretrain`. `src/sft_main.cc` records `kSft`, and `RlWorker::SaveCheckpoint` records `kRl`. |
+| O4 | Is a `ConfigFields` mirror the right shape? | No mirror. One host-only `VisitConfig(Config&, IFieldsVisitor&)` in `src/checkpoint_metadata.cc`, visited through the `ConfigBlock` wrapper that carries the block's size word. No `Config` field is duplicated, so the drift test is unnecessary. |
+| O5 | New magic `NCHKPT02`, or version 1 only? | Version 1 only, with the existing `NCHKPT01` magic. `DetectFormat` reads the magic and then the version word. An unknown version word is the hard error `unsupported checkpoint version`. |
+| O6 | How does a 64-bit `step` fit the 32-bit word stream? | Two words, the low 32 bits first and then bits 32-63. The order is part of the contract, and the word-stream comment of `include/nanochat/fields.h` states it. The full range is kept, because a capped step loses a long run that a resume schedule needs. |
+| O7 | What does the Python surface return? | `checkpoint.parse_checkpoint` keeps its two-element tuple, and `read_metadata(path)` is added in `python/nanochat_cpp/checkpoint.py`. It returns one mapping keyed by `METADATA_KEYS`, and a version 0 file reports the defaults, so no caller breaks. |
+| O8 | How does the release check old-code rejection? | One command against a fixed parent commit, as a release gate. It is not an automated test in this tree. Section 10 records it. |
+
 ---
 
 # Part A: the checkpoint container

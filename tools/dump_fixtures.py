@@ -3467,7 +3467,7 @@ if _command == 'checkpoint':
         The fixture is the *version 0 pin* for the metadata work: it records the
         bytes the current C writer (``src/data.cc``) produces, taken before
         anything changes that writer
-        (docs/checkpoint-metadata-and-examples-plan.md stage A.2).
+        (docs/checkpoint-format.md section 10).
         ``//tests:checkpoint_compat_test`` reads this file with the current reader
         and asserts the table below, so a change that moves a version 0 byte fails
         in the tree instead of on a Hub artifact.

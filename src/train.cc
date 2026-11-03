@@ -528,7 +528,7 @@ bool Checkpointer::SaveModel(const Model& model, const Optimizer* optimizer,
   }
 
   // Fill the metadata block from what the model and the build know, plus what
-  // only the caller knows (stage A.6, open decision O1).
+  // only the caller knows (open decision O1).
   CheckpointMetadata metadata;
   metadata.stage = options.stage;
   metadata.step = options.step;
@@ -570,8 +570,8 @@ bool Checkpointer::LoadModel(Model* model, Optimizer* optimizer,
 bool Checkpointer::LoadModel(Model* model, Optimizer* optimizer, int* step,
                              const std::string& path) {
   if (model == nullptr) return false;
-  // One value routes the read (docs/checkpoint-metadata-and-examples-plan.md
-  // section 2.2). A legacy `NCMDL001` file holds parameters only, so the
+  // One value routes the read (docs/checkpoint-format.md section 5.4). A legacy
+  // `NCMDL001` file holds parameters only, so the
   // optimizer state and the step stay unchanged (docs/model.md).
   const CheckpointFormat format = DetectFormat(path);
   if (format == CheckpointFormat::kLegacyModel) {
@@ -586,7 +586,7 @@ bool Checkpointer::LoadModel(Model* model, Optimizer* optimizer, int* step,
   if (!checkpoint.Load(path, &error, with_optimizer_state)) return false;
   // A version 1 file records the run config it was written with, so a mismatch
   // with the runtime model fails here, before a kernel reads a wrong-shape
-  // weight (stage A.6). A version 0 file carries no config, so it cannot be
+  // weight. A version 0 file carries no config, so it cannot be
   // compared and loads as before.
   if (format == CheckpointFormat::kContainerV1 &&
       !SameConfig(checkpoint.metadata().config, model->config())) {

@@ -11,7 +11,7 @@
 
 // The run metadata block of the checkpoint container: one `IFields` block that
 // sits between the header and the parameter count of a version 1 file
-// (docs/checkpoint-metadata-and-examples-plan.md sections 2.1, 3, and 4). The
+// (docs/checkpoint-format.md sections 5, 5.3, and 9). The
 // container writes the block's word count as one `uint32` before the words, so
 // a reader bounds the block without parsing it and a block above
 // `kMaxBlockWords` is a hard error before any field is visited.

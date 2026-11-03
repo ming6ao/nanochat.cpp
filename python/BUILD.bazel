@@ -95,7 +95,7 @@ py_test(
 # bytes a Hub artifact already carries) and `//bindings:nanochat_shared`, whose
 # C writer fills the metadata. The version 1 file is written at test time into a
 # temporary directory, so no second fixture is committed here
-# (docs/checkpoint-metadata-and-examples-plan.md stages A.2 and A.5). The torch
+# (docs/checkpoint-format.md sections 9 and 10). The torch
 # half of the conversion lives in `nanochat_cpp_bridge.torch_checkpoint`, so
 # the test depends on the Z2 library; it drives that builder with fake tensors
 # and still needs no torch.
@@ -250,7 +250,7 @@ py_test(
 # T0: the resource sandbox launcher and the limit verifier. The launcher runs
 # as `--run_under` for every CPU test action, so this suite covers the trust
 # path. Hermetic and CPU-only: it reads the profile table and runs the `none`
-# backend. See docs/sandbox.md and docs/python-sandbox-plan.md.
+# backend. See docs/sandbox.md.
 py_test(
     name = "sandbox_test",
     srcs = ["tests/sandbox_test.py"],
@@ -259,8 +259,7 @@ py_test(
 )
 
 # T0: the style gate. Hermetic and CPU-only: a fake `clang-format` on PATH and
-# one file per violation. See docs/testing.md and
-# docs/python-sandbox-plan.md.
+# one file per violation. See docs/testing.md.
 py_test(
     name = "lint_test",
     srcs = ["tests/lint_test.py"],
@@ -270,8 +269,7 @@ py_test(
 
 # T0: the symbol gate for the S0 API interposer. Hermetic and CPU-only: fake
 # `nm` and `readelf` on PATH feed it canned output. The real mock is checked by
-# `tools/nanochat simulate --suite api`. See docs/simulator.md and
-# docs/python-sandbox-plan.md.
+# `tools/nanochat simulate --suite api`. See docs/simulator.md.
 py_test(
     name = "cuda_sim_symbols_test",
     srcs = ["tests/cuda_sim_symbols_test.py"],

@@ -7,7 +7,7 @@ The `none` backend needs no cgroup and no systemd, so most cases run there. The
 limit comparison is tested through its pure function, because a real cgroup
 read needs a scope. The contract suite runs the two real modes.
 
-See docs/sandbox.md and docs/python-sandbox-plan.md.
+See docs/sandbox.md.
 """
 
 from __future__ import annotations

@@ -159,8 +159,7 @@ cc_library(
 )
 
 # The field visitor of the checkpoint metadata block
-# (docs/checkpoint-metadata-and-examples-plan.md stage A.1,
-# docs/checkpoint-format.md section 2.1). It is a leaf like `record_file`: the
+# (docs/checkpoint-format.md section 6). It is a leaf like `record_file`: the
 # standard library and the public headers only, so no kernel and no backend
 # links it, and a second container reader could reuse it unchanged.
 cc_library(
@@ -173,7 +172,7 @@ cc_library(
 
 # The run metadata block as a serializable struct: the `VisitConfig` field
 # order and the enum range checks of `nanochat/checkpoint_metadata.h`
-# (docs/checkpoint-metadata-and-examples-plan.md sections 3 and 4). Host-only,
+# (docs/checkpoint-format.md sections 5.3 and 9). Host-only,
 # and it lists no `Config` field of its own, so the visitor stays the one place
 # the config's word stream is written (open decision O4).
 cc_library(
@@ -290,7 +289,7 @@ cc_library(
         ":model_spec",
         ":plan",
         # `data.cc` reads and writes the metadata block through the field
-        # visitor (docs/checkpoint-metadata-and-examples-plan.md section 2.1).
+        # visitor (docs/checkpoint-format.md section 5).
         ":fields",
         # `train.cc` reads the device capability table for the precision-aware
         # MFU peak (docs/precision.md).
@@ -529,7 +528,7 @@ cc_test(
     size = "small",
 )
 
-# The field visitor (docs/checkpoint-metadata-and-examples-plan.md stage A.1):
+# The field visitor (docs/checkpoint-format.md section 6):
 # the upstream suite of `gemma.cpp` `io/fields_test.cc` -- round trip, new code
 # with old data, old code with new data, an invalid float, an invalid string,
 # back-to-back writes, the vector cap, and enum validity. It is host-only and

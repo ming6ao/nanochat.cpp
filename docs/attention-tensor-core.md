@@ -1,8 +1,11 @@
 # Tensor-core attention
 
-Status: proposed. This document is Part 5 of the attention work. Parts 1 to 4
-are in [attention.md](attention.md): the Pascal baseline, the feasibility
-study, the windowed-forward promotion, and the promotion results.
+Status: delivered for the decision and for option B. A non-fp32 build retires
+the fp32 tile, so every shape takes the cuBLAS forward there. Option A, the
+tensor-core tile, is still a proposal, and section 5 describes it. This document
+is Part 5 of the attention work. Parts 1 to 4 are in [attention.md](attention.md):
+the Pascal baseline, the feasibility study, the windowed-forward promotion, and
+the promotion results.
 
 The subject of this document is the next step. The promoted fused forward is an
 fp32 tile. It runs on the CUDA cores. The bf16 and fp8 builds move every other
@@ -41,14 +44,14 @@ The forward path has two branches, selected by
 
 ```c
 bool UseFusedAttention(const AttentionParams& p) {
-  return p.window_left >= 0 && p.head_dim == 128;
+  return !kComputeIsBf16 && p.window_left >= 0 && p.head_dim == 128;
 }
 ```
 
 | Branch | Shape | Engine |
 |---|---|---|
-| Fused windowed forward | `window_left >= 0` and `head_dim == 128` | An fp32 FMA tile on the CUDA cores |
-| cuBLAS forward | full-causal, and every other shape | Batched cuBLAS GEMMs plus a row softmax |
+| Fused windowed forward | an fp32 build, `window_left >= 0`, and `head_dim == 128` | An fp32 FMA tile on the CUDA cores |
+| cuBLAS forward | a non-fp32 build, full-causal, and every other shape | Batched cuBLAS GEMMs plus a row softmax |
 | Backward, windowed | `window_left > 0` and a causal mask | A banded query-block loop, on the CUDA cores |
 | Backward, other | every other shape | Four batched cuBLAS GEMMs |
 
@@ -261,11 +264,11 @@ option B and delete the prototype.
 
 | Section | Status |
 |---|---|
-| 3 The value change | Proposed, with an estimate |
-| 4 The options | Proposed |
+| 3 The value change | Delivered as the analysis that orders the options |
+| 4 The options | Decided. Option B is in the tree: `UseFusedAttention` returns false in a non-fp32 build. Option A waits on a measurement |
 | 5 The option A design | Proposed |
 | 6 The fp8 coupling | Proposed |
-| 10 Phases | Not started |
+| 10 Phases | Option B landed. The option A phases have not started |
 
 ## 12. Risks and non-goals
 
