@@ -115,6 +115,5 @@ exports_files([
     "MODULE.bazel.lock",
     ".bazelrc",
     ".clang-format",
-    "Makefile",
     "duckdb.BUILD",
 ])

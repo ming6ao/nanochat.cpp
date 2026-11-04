@@ -25,8 +25,7 @@ cuda_test = _cuda_test
 #
 # `-O2` is explicit: Bazel's default `fastbuild` mode adds no optimization
 # flag, so without it the host code (the whole workflow, the data loader, and
-# the host-side reductions) is compiled at `-O0`. The Makefile fallback already
-# uses `-O2`; this keeps the Bazel path equivalent. See docs/performance.md.
+# the host-side reductions) is compiled at `-O0`. See docs/performance.md.
 NANOCHAT_COPTS = [
     "-O2",
     "-Wall",
