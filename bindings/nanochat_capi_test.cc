@@ -205,10 +205,10 @@ std::string TempPath(const std::string& name) {
 void ClearSandboxEnv() {
   unsetenv("NANOCHAT_SANDBOX");
   unsetenv("NANOCHAT_SANDBOX_BACKEND");
-  unsetenv("NANOCHAT_ALLOW_UNSANDBOXED");
 }
 
-// The sandbox rule of docs/python.md section 2.1, in each branch.
+// The sandbox rule of docs/python.md section 3.1: the sentinel, or the `none`
+// backend record for a host with no launcher.
 void CheckSandboxRule() {
   ClearSandboxEnv();
   Check("sandbox: rejects an unsandboxed process",
@@ -222,14 +222,20 @@ void CheckSandboxRule() {
         nanochat_init() == NANOCHAT_STATUS_OK);
 
   ClearSandboxEnv();
+  setenv("NANOCHAT_SANDBOX", "off", 1);
+  Check("sandbox: accepts the off sentinel",
+        nanochat_init() == NANOCHAT_STATUS_OK);
+
+  ClearSandboxEnv();
   setenv("NANOCHAT_SANDBOX_BACKEND", "none", 1);
   Check("sandbox: accepts the none backend",
         nanochat_init() == NANOCHAT_STATUS_OK);
 
+  // The removed bypass stays removed: an old invocation must not pass.
   ClearSandboxEnv();
   setenv("NANOCHAT_ALLOW_UNSANDBOXED", "1", 1);
-  Check("sandbox: accepts the explicit override",
-        nanochat_init() == NANOCHAT_STATUS_OK);
+  Check("sandbox: ignores the removed unsandboxed override",
+        nanochat_init() != NANOCHAT_STATUS_OK);
 
   // Leave the process in the accepted state for the remaining calls.
   ClearSandboxEnv();

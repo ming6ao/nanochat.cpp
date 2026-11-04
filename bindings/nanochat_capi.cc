@@ -98,13 +98,12 @@ void GuardVoid(const char* function, F&& body) {
 }
 
 // True when the environment satisfies the sandbox rule of
-// docs/python.md section 2.1: a defined `NANOCHAT_SANDBOX`, a
-// `NANOCHAT_SANDBOX_BACKEND` of `none`, or a true `NANOCHAT_ALLOW_UNSANDBOXED`.
+// docs/python.md section 3.1: the launcher set `NANOCHAT_SANDBOX`, or it
+// recorded a `none` backend for a host with no cgroup v2.
 bool SandboxAllowed() {
   if (*nanochat::SandboxProfile() != '\0') return true;
   const char* backend = std::getenv("NANOCHAT_SANDBOX_BACKEND");
-  if (backend != nullptr && std::strcmp(backend, "none") == 0) return true;
-  return nanochat::SandboxOverrideSet();
+  return backend != nullptr && std::strcmp(backend, "none") == 0;
 }
 
 // Converts the flat C config to `nanochat::Config`. This is the one place the
@@ -325,8 +324,8 @@ nanochat_status nanochat_init(void) {
       SetLastError(
           "nanochat_init",
           "the library must run inside the sandbox; set "
-          "NANOCHAT_SANDBOX_BACKEND=none, or NANOCHAT_SANDBOX=<profile>, or "
-          "NANOCHAT_ALLOW_UNSANDBOXED=1 (docs/python.md section 2.1)");
+          "NANOCHAT_SANDBOX=<profile>, or NANOCHAT_SANDBOX_BACKEND=none on a "
+          "host with no launcher (docs/python.md section 3.1)");
       return NANOCHAT_STATUS_ERROR;
     }
     // The build fixes the precision. Fail fast when the device cannot run it,

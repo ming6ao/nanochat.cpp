@@ -53,14 +53,14 @@ loads the shared library with `ctypes`. It never imports `torch`.
 ### 3.1 Sandbox rule
 
 The C entry points call `nanochat::RequireSandboxOrDie`. The shared library
-keeps the same guarantee. `nanochat_init` checks three conditions at start:
+keeps the same guarantee. `nanochat_init` checks two conditions at start:
 
-- The environment defines `NANOCHAT_SANDBOX`, or
-- `NANOCHAT_SANDBOX_BACKEND` holds the value `none`, or
-- `NANOCHAT_ALLOW_UNSANDBOXED` holds a true value.
+- The launcher defines `NANOCHAT_SANDBOX`, or
+- the launcher records `NANOCHAT_SANDBOX_BACKEND` as `none`.
 
-The library stops with a corrective message when the three checks fail. A
-Kaggle Notebook sets the `none` backend. A workstation run goes through
+The second condition serves a wheel that a notebook loads with no launcher.
+The library stops with a corrective message when neither holds. A Kaggle
+Notebook records the `none` backend. A workstation run goes through
 `tools/nanochat`. Section 5.4 gives the chat evaluation route.
 
 The same rule holds one level up, at the facades. A facade that launches a

@@ -1086,10 +1086,10 @@ New `notebooks/colab_pipeline.ipynb`, four cells:
 
 Cell 3 must wrap the module. The backend value satisfies the library check in
 `nanochat_init` only: both stage executables call `RequireSandboxOrDie`, which
-accepts `NANOCHAT_SANDBOX` or the override and not the backend value. So the
-entry is the tool, which sets the sentinel to `off` on a host without systemd.
-Do not set `NANOCHAT_ALLOW_UNSANDBOXED` in the notebook: `docs/sandbox.md` and
-`docs/host-portability.md` forbid it, and the image has the same boundary.
+reads `NANOCHAT_SANDBOX` and not the backend value. So the entry is the tool,
+which sets the sentinel to `off` on a host without systemd. Do not set the
+sentinel in the notebook: `docs/sandbox.md` and `docs/host-portability.md`
+forbid it, and the image has the same boundary.
 
 `probe()` maps the output of `nvidia-smi --query-gpu=compute_cap` to
 `sm_<major><minor>`. Free Colab gives a T4, so `sm_75`. A paid session can give

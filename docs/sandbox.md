@@ -135,12 +135,12 @@ python/nanochat_cpp/sandbox.py --no-slice --profile=t3-bench -- ./bench
 
 ## Runtime guard
 
-`python/nanochat_cpp/sandbox.py` exports `NANOCHAT_SANDBOX=<profile>`. Executables call
+`python/nanochat_cpp/sandbox.py` exports `NANOCHAT_SANDBOX=<profile>`, or
+`NANOCHAT_SANDBOX=off` on the `none` backend. Executables call
 `nanochat::RequireSandboxOrDie(<task>)` at startup; if the sentinel is absent
-and `NANOCHAT_ALLOW_UNSANDBOXED` is not set, they print the corrective command
-and exit non-zero. This is the guarantee: a binary launched outside the entry
-point fails instead of running unbounded. The guard is declared in
-`include/nanochat/sandbox.h`.
+they print the corrective command and exit non-zero. This is the guarantee: a
+binary launched outside the entry point fails instead of running unbounded. The
+guard is declared in `include/nanochat/sandbox.h`.
 
 ## Verification
 

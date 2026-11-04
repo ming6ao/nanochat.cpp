@@ -240,8 +240,8 @@ container is the resource boundary, and the notebook quota is the ceiling.
 The `none` backend still keeps the entry-point guarantee. A binary outside
 `tools/nanochat` still fails.
 
-Do not set `NANOCHAT_ALLOW_UNSANDBOXED`. The entry point handles the
-configuration. The override is only for a manual one-off run.
+Do not set `NANOCHAT_SANDBOX` by hand. The entry point handles the
+configuration. The sentinel is only for a manual one-off run.
 
 ### 3. Setup
 
@@ -591,9 +591,8 @@ The procedure, which is the record until a run exists:
    `NANOCHAT_CUDA_ARCH=probe()`, and `NANOCHAT_SANDBOX_BACKEND=none`. The cell
    also puts the tree's `python/` on `PYTHONPATH`, because the tool replaces
    itself with the command it wraps and the child starts in the notebook's
-   directory. It never sets `NANOCHAT_ALLOW_UNSANDBOXED`: section 4 and
-   `docs/sandbox.md` forbid the override, and the container quota is the only
-   bound here.
+   directory. It never sets `NANOCHAT_SANDBOX` by hand: section 4 and
+   `docs/sandbox.md` forbid it, and the container quota is the only bound here.
 3. **Run.** `tools/nanochat train -- python -m nanochat_cpp.pipeline
    /content/runs/job.json`. Cell 3 must wrap the module, because the backend
    value satisfies `nanochat_init` only: a bare module starts the chain and then

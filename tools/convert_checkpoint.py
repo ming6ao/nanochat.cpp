@@ -34,8 +34,8 @@ sandbox (``docs/sandbox.md``).
 
 The conversion needs the reference virtual environment (torch + numpy), which
 ``pip install 'nanochat-cpp[reference]'`` supplies; run it with ``python3``
-from that environment. Set ``NANOCHAT_ALLOW_UNSANDBOXED=1`` for a pure
-host-side run that touches no device. ``--print-path`` and ``--help`` work
+from that environment. Set ``NANOCHAT_SANDBOX=off`` for a pure host-side run
+that touches no device. ``--print-path`` and ``--help`` work
 without torch and without the library, because the module imports torch inside
 the functions that need it::
 
