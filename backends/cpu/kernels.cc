@@ -103,6 +103,29 @@ inline void RejectRowScaleWidth(const char* entry, int count, int row_width) {
                entry, count, row_width);
 }
 
+// The `kRotatePair` guard (spec/pointwise_ops.md section 3.2). The head width
+// must be even and must tile the count, and the head rows must tile the table
+// positions, because a wrong `heads` or `seq` reads the wrong table position
+// for every row and the activation still looks plausible. Same contract as the
+// row-broadcast guard: a named message and no write at all.
+inline bool ValidRotate(int count, const PointwiseParams& p) {
+  if (p.row_width < 2 || p.row_width % 2 != 0 || p.row_width > count) {
+    return false;
+  }
+  if (count % p.row_width != 0) return false;
+  if (p.heads <= 0 || p.seq <= 0) return false;
+  return (count / p.row_width) % p.heads == 0;
+}
+
+inline void RejectRotate(const char* entry, const PointwiseParams& p) {
+  std::fprintf(stderr,
+               "pointwise: %s: kRotatePair needs an even row_width in "
+               "[2, count], count %% row_width == 0, (count / row_width) %% "
+               "heads == 0, and heads and seq both positive "
+               "(count %d, row_width %d, heads %d, seq %d)\n",
+               entry, p.count, p.row_width, p.heads, p.seq);
+}
+
 // Zero a typed ComputeType range.
 inline void ZeroFill(ComputeType* ptr, std::size_t count) {
   std::fill(ptr, ptr + count, ToCompute(0.0f));
@@ -1078,6 +1101,32 @@ void PointwiseForward(const PointwiseParams& params, const ComputeType* a,
     return;
   }
 
+  if (params.op == PointwiseOp::kRotatePair) {
+    if (params.cos_table == nullptr || params.sin_table == nullptr) return;
+    if (!ValidRotate(n, params)) {
+      RejectRotate("PointwiseForward", params);
+      return;
+    }
+    const int width = params.row_width;
+    const int half = width / 2;
+    const int rows = n / width;
+    for (int r = 0; r < rows; ++r) {
+      const std::int64_t base = static_cast<std::int64_t>(r) * width;
+      const std::int64_t t = static_cast<std::int64_t>(r / params.heads) %
+                             static_cast<std::int64_t>(params.seq);
+      const std::int64_t table_base = t * half;
+      for (int d = 0; d < half; ++d) {
+        const float c = params.cos_table[table_base + d];
+        const float s = params.sin_table[table_base + d];
+        const float x1 = AsFloat(a[base + d]);
+        const float x2 = AsFloat(a[base + half + d]);
+        out[base + d] = ToCompute(alpha * (x1 * c + x2 * s));
+        out[base + half + d] = ToCompute(alpha * (-x1 * s + x2 * c));
+      }
+    }
+    return;
+  }
+
   for (int i = 0; i < n; ++i) {
     const float av = AsFloat(a[i]);
     float result = 0.0f;
@@ -1114,6 +1163,17 @@ void PointwiseForward(const PointwiseParams& params, const ComputeType* a,
         // Unreachable: the row broadcast is handled above, before the loop,
         // because its index expression is not `i`. Named here so the switch
         // stays exhaustive with no `default` arm.
+        break;
+      case PointwiseOp::kAffine:
+        result = alpha * (av - beta);
+        break;
+      case PointwiseOp::kSigmoid:
+        result = Sigmoid(av);
+        break;
+      case PointwiseOp::kRotatePair:
+        // Unreachable: the pair rotation is handled above, where one pass
+        // owns both elements of a pair. Named here so the switch stays
+        // exhaustive with no `default` arm.
         break;
     }
     out[i] = ToCompute(result);
@@ -1153,6 +1213,35 @@ void PointwiseBackward(const PointwiseParams& params, const ComputeType* a,
     if (db != nullptr) {
       for (int i = 0; i < n; ++i) {
         db[i] = ToCompute(AsFloat(a[i / row_width]) * AsFloat(dy[i]));
+      }
+    }
+    return;
+  }
+
+  if (params.op == PointwiseOp::kRotatePair) {
+    if (params.cos_table == nullptr || params.sin_table == nullptr) return;
+    if (!ValidRotate(n, params)) {
+      RejectRotate("PointwiseBackward", params);
+      return;
+    }
+    if (da == nullptr) return;
+    // The transposed rotation: the rotation is linear, so the backward reads
+    // `dy` and never `a` (spec/pointwise_ops.md section 3.2).
+    const int width = params.row_width;
+    const int half = width / 2;
+    const int rows = n / width;
+    for (int r = 0; r < rows; ++r) {
+      const std::int64_t base = static_cast<std::int64_t>(r) * width;
+      const std::int64_t t = static_cast<std::int64_t>(r / params.heads) %
+                             static_cast<std::int64_t>(params.seq);
+      const std::int64_t table_base = t * half;
+      for (int d = 0; d < half; ++d) {
+        const float c = params.cos_table[table_base + d];
+        const float s = params.sin_table[table_base + d];
+        const float g1 = AsFloat(dy[base + d]);
+        const float g2 = AsFloat(dy[base + half + d]);
+        da[base + d] = ToCompute(alpha * (g1 * c - g2 * s));
+        da[base + half + d] = ToCompute(alpha * (g1 * s + g2 * c));
       }
     }
     return;
@@ -1208,6 +1297,17 @@ void PointwiseBackward(const PointwiseParams& params, const ComputeType* a,
         if (da != nullptr) da[i] = ToCompute(dyv / av);
         break;
       case PointwiseOp::kRowScale:
+        // Unreachable: handled above, as in the forward.
+        break;
+      case PointwiseOp::kAffine:
+        if (da != nullptr) da[i] = ToCompute(alpha * dyv);
+        break;
+      case PointwiseOp::kSigmoid: {
+        const float sig = Sigmoid(av);
+        if (da != nullptr) da[i] = ToCompute(dyv * sig * (1.0f - sig));
+        break;
+      }
+      case PointwiseOp::kRotatePair:
         // Unreachable: handled above, as in the forward.
         break;
     }

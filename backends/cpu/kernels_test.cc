@@ -486,6 +486,15 @@ double ReferencePointwise(PointwiseOp op, double a, double b, double alpha,
       // No alpha: the code's field list is `row_width` alone
       // (spec/pointwise_ops.md section 3).
       return a * b;
+    case PointwiseOp::kAffine:
+      return alpha * (a - beta);
+    case PointwiseOp::kSigmoid:
+      return 1.0 / (1.0 + std::exp(-a));
+    case PointwiseOp::kRotatePair:
+      // Not a single-element code: it reads the pair partner and a table entry
+      // (spec/pointwise_ops.md section 3.2), so the bound is asserted by
+      // TestPointwiseRotateBound instead.
+      return 0.0;
   }
   return 0.0;
 }
@@ -692,6 +701,237 @@ void TestPointwiseRowScale() {
   }
   for (int i = 0; i < n; ++i) {
     CheckClose(U(db[i]), U(dy[i]) * U(a[i / width]), 1e-6, "kRowScale db");
+  }
+}
+
+// kAffine: out = alpha * (a - beta), declared bound 8e-6 over abs(alpha) <= 4,
+// abs(a) <= 8 and abs(beta) <= 8 (spec/pointwise_ops.md sections 3 and 4). The
+// code is what replaced the constant vectors a composition used to upload for
+// `x + eps`, `x - max` and `1 - x`, so the three forms those call sites use are
+// the ones asserted here, including the device-resident `beta` form.
+void TestPointwiseAffine() {
+  Rng rng;
+  for (int i = 0; i < 32; ++i) {
+    const float av = 8.0f * rng.Next();
+    const float beta = 8.0f * rng.Next();
+    // The three shapes the composition tier passes: `x + eps` (alpha 1, negated
+    // beta), `x - max` (alpha 1, the maximum as beta) and `1 - x` (alpha -1).
+    CheckCodeBound(PointwiseOp::kAffine, 8e-6, "kAffine +eps", av, 0.0f, 1.0f,
+                   -1e-6f);
+    CheckCodeBound(PointwiseOp::kAffine, 8e-6, "kAffine -max", av, 0.0f, 1.0f,
+                   beta);
+    CheckCodeBound(PointwiseOp::kAffine, 8e-6, "kAffine 1-x", av, 0.0f, -1.0f,
+                   1.0f);
+  }
+
+  // `beta` may live on the device and it is one value, not an array
+  // (docs/scalar-arguments.md), which is how the classifier's `z - max` stays
+  // off the host: the row maximum is one scalar and the call is per row.
+  const int n = 4;
+  std::vector<float> values(n);
+  for (int i = 0; i < n; ++i) values[i] = 8.0f * rng.Next();
+  std::vector<ComputeType> a = ToStorage(values);
+  const float row_max = 2.5f;
+  std::vector<ComputeType> dev_beta = ToStorage({row_max});
+  std::vector<ComputeType> dev_out(n);
+  PointwiseParams p;
+  p.op = PointwiseOp::kAffine;
+  p.count = n;
+  p.alpha = 1.0f;
+  p.beta.dev = dev_beta.data();
+  kernels::PointwiseForward(p, a.data(), nullptr, dev_out.data());
+  for (int i = 0; i < n; ++i) {
+    CheckClose(U(dev_out[i]), static_cast<double>(U(a[i])) - row_max, 8e-6,
+               "kAffine device beta");
+  }
+
+  // The backward is the scale alone: the code is linear in `a`.
+  std::vector<ComputeType> dy = ToStorage(std::vector<float>(n, 1.0f));
+  std::vector<ComputeType> da(n);
+  kernels::PointwiseBackward(p, a.data(), nullptr, dy.data(), da.data(),
+                             nullptr);
+  for (int i = 0; i < n; ++i) {
+    CheckClose(U(da[i]), 1.0, 1e-6, "kAffine da");
+  }
+}
+
+// kSigmoid: out = sigmoid(a), declared bound 4e-6 over abs(a) <= 40
+// (spec/pointwise_ops.md sections 3 and 4). It replaced the unit vector the
+// value gate uploaded so `kGateMul` could compute a bare sigmoid.
+void TestPointwiseSigmoid() {
+  Rng rng;
+  for (float v : {0.0f, 0.5f, -0.5f, 10.0f, -10.0f, 40.0f, -40.0f}) {
+    CheckCodeBound(PointwiseOp::kSigmoid, 4e-6, "kSigmoid envelope edge", v,
+                   0.0f, 1.0f, 0.0f);
+  }
+  for (int i = 0; i < 32; ++i) {
+    CheckCodeBound(PointwiseOp::kSigmoid, 4e-6, "kSigmoid envelope",
+                   40.0f * rng.Next(), 0.0f, 1.0f, 0.0f);
+  }
+
+  // It reads no scalar of the parameter block, so a stale alpha and beta must
+  // not move the answer.
+  const int n = 3;
+  std::vector<float> values;
+  for (int i = 0; i < n; ++i) values.push_back(4.0f * rng.Next());
+  std::vector<ComputeType> a = ToStorage(values);
+  PointwiseParams p;
+  p.op = PointwiseOp::kSigmoid;
+  p.count = n;
+  std::vector<ComputeType> out(n);
+  kernels::PointwiseForward(p, a.data(), nullptr, out.data());
+  PointwiseParams stale = p;
+  stale.alpha = 3.5f;
+  stale.beta = 2.0f;
+  std::vector<ComputeType> stale_out(n);
+  kernels::PointwiseForward(stale, a.data(), nullptr, stale_out.data());
+  for (int i = 0; i < n; ++i) {
+    CheckClose(U(stale_out[i]), U(out[i]), 0.0, "kSigmoid ignores alpha");
+  }
+}
+
+// kRotatePair: the half-split pair rotation of spec/pointwise_ops.md section
+// 3.2, declared bound 1e-5. The shape is the tier's: batch 2, seq 8, 2 heads,
+// head width 4, so 32 head rows over a 16-entry table. The forward, the
+// transposed backward, the in-place alias the composition relies on, the
+// ignored `beta`, and the rejected geometries are asserted here, and the
+// adjoint is proved by a finite difference of the forward.
+void TestPointwiseRotatePair() {
+  Rng rng;
+  const int batch = 2, seq = 8, heads = 2, width = 4;
+  const int half = width / 2;
+  const int rows = batch * seq * heads;
+  const int n = rows * width;
+  std::vector<float> cos_table(seq * half), sin_table(seq * half);
+  std::vector<float> values(n), dyv(n);
+  for (float& v : cos_table) v = 2.0f * rng.Next() - 1.0f;
+  for (float& v : sin_table) v = 2.0f * rng.Next() - 1.0f;
+  for (float& v : values) v = 8.0f * (2.0f * rng.Next() - 1.0f);
+  for (float& v : dyv) v = 2.0f * rng.Next() - 1.0f;
+
+  std::vector<ComputeType> a = ToStorage(values);
+  std::vector<ComputeType> dy = ToStorage(dyv);
+  const double alpha = 1.5;
+
+  PointwiseParams p;
+  p.op = PointwiseOp::kRotatePair;
+  p.count = n;
+  p.row_width = width;
+  p.alpha = static_cast<float>(alpha);
+  p.beta = 0.5f;  // not a field of this code
+  p.heads = heads;
+  p.seq = seq;
+  p.cos_table = cos_table.data();
+  p.sin_table = sin_table.data();
+
+  // The forward: out = alpha * R(a) with the table position of each head row.
+  std::vector<ComputeType> out(n);
+  kernels::PointwiseForward(p, a.data(), nullptr, out.data());
+  for (int r = 0; r < rows; ++r) {
+    const int t = (r / heads) % seq;
+    for (int d = 0; d < half; ++d) {
+      const std::size_t i = static_cast<std::size_t>(r) * width + d;
+      const double c = cos_table[static_cast<std::size_t>(t) * half + d];
+      const double s = sin_table[static_cast<std::size_t>(t) * half + d];
+      const double x1 = U(a[i]);
+      const double x2 = U(a[i + half]);
+      CheckClose(U(out[i]), alpha * (x1 * c + x2 * s), 1e-5,
+                 "kRotatePair forward first");
+      CheckClose(U(out[i + half]), alpha * (-x1 * s + x2 * c), 1e-5,
+                 "kRotatePair forward second");
+    }
+  }
+
+  // `out` may alias `a` (spec/pointwise_ops.md section 2): one thread owns both
+  // elements of a pair, which is what makes the in-place call the composition
+  // performs safe.
+  std::vector<ComputeType> aliased = a;
+  kernels::PointwiseForward(p, aliased.data(), nullptr, aliased.data());
+  for (int i = 0; i < n; ++i) {
+    CheckClose(U(aliased[i]), U(out[i]), 0.0, "kRotatePair aliased out");
+  }
+
+  // `beta` is not a field of this code, so a wild value must not move the
+  // answer.
+  PointwiseParams stale = p;
+  stale.beta = -7.5f;
+  std::vector<ComputeType> stale_out(n);
+  kernels::PointwiseForward(stale, a.data(), nullptr, stale_out.data());
+  for (int i = 0; i < n; ++i) {
+    CheckClose(U(stale_out[i]), U(out[i]), 0.0, "kRotatePair ignores beta");
+  }
+
+  // The backward is the transposed rotation, and it never writes `db`.
+  std::vector<ComputeType> da(n), db(n, C(42.0f));
+  kernels::PointwiseBackward(p, a.data(), nullptr, dy.data(), da.data(),
+                             db.data());
+  for (int r = 0; r < rows; ++r) {
+    const int t = (r / heads) % seq;
+    for (int d = 0; d < half; ++d) {
+      const std::size_t i = static_cast<std::size_t>(r) * width + d;
+      const double c = cos_table[static_cast<std::size_t>(t) * half + d];
+      const double s = sin_table[static_cast<std::size_t>(t) * half + d];
+      const double g1 = U(dy[i]);
+      const double g2 = U(dy[i + half]);
+      CheckClose(U(da[i]), alpha * (g1 * c - g2 * s), 1e-5,
+                 "kRotatePair backward first");
+      CheckClose(U(da[i + half]), alpha * (g1 * s + g2 * c), 1e-5,
+                 "kRotatePair backward second");
+    }
+  }
+  for (int i = 0; i < n; ++i) {
+    CheckClose(U(db[i]), 42.0, 0.0, "kRotatePair leaves db alone");
+  }
+
+  // The adjoint: a central finite difference of the forward's weighted sum.
+  auto loss_at = [&](const std::vector<float>& xv) {
+    std::vector<ComputeType> stored = ToStorage(xv);
+    std::vector<ComputeType> got(n);
+    kernels::PointwiseForward(p, stored.data(), nullptr, got.data());
+    double loss = 0.0;
+    for (int i = 0; i < n; ++i) loss += U(got[i]) * dyv[i];
+    return loss;
+  };
+  std::vector<float> analytic(n);
+  for (int i = 0; i < n; ++i) analytic[i] = U(da[i]);
+  CheckFiniteDifference(values, analytic, loss_at, 2e-3, "kRotatePair adjoint");
+
+  // A width that is odd, too large, or does not tile the count, a non-positive
+  // `heads` or `seq`, head rows that do not tile the positions, and a null
+  // table are declared errors: a message naming the values and no write at all.
+  struct Bad {
+    int width;
+    int heads;
+    int seq;
+    bool null_table;
+  };
+  const Bad bad[] = {{0, heads, seq, false},   {5, heads, seq, false},
+                     {7, heads, seq, false},   {width, 0, seq, false},
+                     {width, heads, 0, false}, {width, 3, seq, false},
+                     {width, heads, seq, true}};
+  for (const Bad& b : bad) {
+    PointwiseParams reject = p;
+    reject.row_width = b.width;
+    reject.heads = b.heads;
+    reject.seq = b.seq;
+    reject.cos_table = b.null_table ? nullptr : cos_table.data();
+    reject.sin_table = b.null_table ? nullptr : sin_table.data();
+    std::vector<ComputeType> untouched(n, C(42.0f));
+    kernels::PointwiseForward(reject, a.data(), nullptr, untouched.data());
+    bool unchanged = true;
+    for (int i = 0; i < n; ++i) {
+      if (U(untouched[i]) != 42.0f) unchanged = false;
+    }
+    Check(unchanged, "kRotatePair rejects a bad geometry without writing");
+
+    std::vector<ComputeType> da_reject(n, C(42.0f));
+    kernels::PointwiseBackward(reject, a.data(), nullptr, dy.data(),
+                               da_reject.data(), nullptr);
+    unchanged = true;
+    for (int i = 0; i < n; ++i) {
+      if (U(da_reject[i]) != 42.0f) unchanged = false;
+    }
+    Check(unchanged, "kRotatePair backward rejects a bad geometry");
   }
 }
 
@@ -1420,6 +1660,9 @@ int main() {
     TestPointwiseLogBound();
     TestPointwiseGateMulBound();
     TestPointwiseRowScale();
+    TestPointwiseAffine();
+    TestPointwiseSigmoid();
+    TestPointwiseRotatePair();
     TestPointwiseTranscendentalBackward();
     // The section 17 experiment: the composition against the fused family.
     TestRmsNormComposition();

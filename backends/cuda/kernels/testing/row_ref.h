@@ -193,7 +193,7 @@ inline void QkPrepBackward(const QkPrepParams& p, const std::vector<float>& cos,
 
 // --- Pointwise ------------------------------------------------------------
 
-// The host reference for the nine codes of spec/pointwise_ops.md, one arm per
+// The host reference for the twelve codes of spec/pointwise_ops.md, one arm per
 // code and no `default`, matching backends/cpu/kernels.cc and the device. It
 // takes the same `PointwiseParams` block as the seam so the reference cannot
 // drift from the meaning of a field.
@@ -201,7 +201,10 @@ inline void QkPrepBackward(const QkPrepParams& p, const std::vector<float>& cos,
 // `kRowScale` is the row broadcast: `a` holds `count / row_width` row scalars,
 // `b` and `out` hold `count` values, and `out[i] = a[i / row_width] * b[i]`. It
 // reads neither `alpha` nor `beta`, and it does not reject an invalid width --
-// the test only calls it with a valid one.
+// the test only calls it with a valid one. `kRotatePair` needs both tables and
+// runs one thread per pair, so it has its own reference below
+// (`RotatePairForward`, `RotatePairBackward`) and the arms here are
+// unreachable.
 inline std::vector<float> PointwiseForward(const PointwiseParams& p,
                                            const std::vector<float>& a,
                                            const std::vector<float>& b) {
@@ -247,6 +250,15 @@ inline std::vector<float> PointwiseForward(const PointwiseParams& p,
         break;
       case PointwiseOp::kRowScale:
         // Unreachable: the row broadcast is handled above.
+        break;
+      case PointwiseOp::kAffine:
+        result = alpha * (av - beta);
+        break;
+      case PointwiseOp::kSigmoid:
+        result = Sigmoid(av);
+        break;
+      case PointwiseOp::kRotatePair:
+        // Unreachable: `RotatePairForward` is the reference for this code.
         break;
     }
     out[i] = result;
@@ -328,8 +340,80 @@ inline void PointwiseBackward(const PointwiseParams& p,
       case PointwiseOp::kRowScale:
         // Unreachable: handled above.
         break;
+      case PointwiseOp::kAffine:
+        if (da != nullptr) (*da)[i] = alpha * dyv;
+        break;
+      case PointwiseOp::kSigmoid: {
+        const float sig = Sigmoid(av);
+        if (da != nullptr) (*da)[i] = dyv * sig * (1.0f - sig);
+        break;
+      }
+      case PointwiseOp::kRotatePair:
+        // Unreachable: `RotatePairBackward` is the reference for this code.
+        break;
     }
   }
+}
+
+// The `kRotatePair` reference: the half-split pair rotation of
+// spec/pointwise_ops.md section 3.2, in double precision so the gate measures
+// the implementation and not the reference's rounding. `cos` and `sin` hold the
+// whole tables, `[seq, half]`, and `heads`/`seq` select the position of each
+// row. An invalid geometry leaves `out` alone, as the device does.
+inline std::vector<float> RotatePairForward(const PointwiseParams& p,
+                                            const std::vector<float>& a,
+                                            const std::vector<float>& cos,
+                                            const std::vector<float>& sin) {
+  const int n = p.count;
+  std::vector<float> out(static_cast<std::size_t>(n), 0.0f);
+  const int width = p.row_width;
+  const int half = width / 2;
+  if (width < 2 || width % 2 != 0 || width > n || n % width != 0) return out;
+  if (p.heads <= 0 || p.seq <= 0) return out;
+  const double alpha = p.alpha.host();
+  for (int row = 0; row < n / width; ++row) {
+    const std::int64_t base = static_cast<std::int64_t>(row) * width;
+    const std::int64_t t = static_cast<std::int64_t>(row / p.heads) % p.seq;
+    const std::int64_t table_base = t * half;
+    for (int d = 0; d < half; ++d) {
+      const double c = cos[table_base + d];
+      const double s = sin[table_base + d];
+      const double x1 = a[base + d];
+      const double x2 = a[base + half + d];
+      out[base + d] = static_cast<float>(alpha * (x1 * c + x2 * s));
+      out[base + half + d] = static_cast<float>(alpha * (-x1 * s + x2 * c));
+    }
+  }
+  return out;
+}
+
+// The transposed rotation. `dy` is the upstream gradient and the result is the
+// input gradient; the code never reads `a`.
+inline std::vector<float> RotatePairBackward(const PointwiseParams& p,
+                                             const std::vector<float>& dy,
+                                             const std::vector<float>& cos,
+                                             const std::vector<float>& sin) {
+  const int n = p.count;
+  std::vector<float> da(static_cast<std::size_t>(n), 0.0f);
+  const int width = p.row_width;
+  const int half = width / 2;
+  if (width < 2 || width % 2 != 0 || width > n || n % width != 0) return da;
+  if (p.heads <= 0 || p.seq <= 0) return da;
+  const double alpha = p.alpha.host();
+  for (int row = 0; row < n / width; ++row) {
+    const std::int64_t base = static_cast<std::int64_t>(row) * width;
+    const std::int64_t t = static_cast<std::int64_t>(row / p.heads) % p.seq;
+    const std::int64_t table_base = t * half;
+    for (int d = 0; d < half; ++d) {
+      const double c = cos[table_base + d];
+      const double s = sin[table_base + d];
+      const double g1 = dy[base + d];
+      const double g2 = dy[base + half + d];
+      da[base + d] = static_cast<float>(alpha * (g1 * c - g2 * s));
+      da[base + half + d] = static_cast<float>(alpha * (g1 * s + g2 * c));
+    }
+  }
+  return da;
 }
 
 // --- GradNorm -------------------------------------------------------------

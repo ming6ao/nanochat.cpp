@@ -506,9 +506,13 @@ int main() {
   CheckRmsNormBackward(3, 128);
 
   // A single block for a short vector, and a grid-strided walk for a long one.
+  // The flat codes: the emulated kernel and the CPU reference must agree on
+  // every one of them. `kRowScale` and `kRotatePair` carry a geometry and are
+  // gated by the per-family tests instead.
   for (PointwiseOp op :
        {PointwiseOp::kScale, PointwiseOp::kScaleAdd, PointwiseOp::kGateMul,
-        PointwiseOp::kReluSquare, PointwiseOp::kSoftcap}) {
+        PointwiseOp::kReluSquare, PointwiseOp::kSoftcap, PointwiseOp::kAffine,
+        PointwiseOp::kSigmoid}) {
     CheckPointwiseForward(op, 7);
     CheckPointwiseForward(op, 64);
     CheckPointwiseForward(op, 1000);

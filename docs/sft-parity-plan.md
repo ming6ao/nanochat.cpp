@@ -562,7 +562,13 @@ the problem.
    evidence is `//tests:sft_step_parity_test`. `//tests:numerics_trace_test`
    already fails on the base commit for this reason alone (863 records, and the
    greedy identifiers among them). The target carries the `manual` tag, so the
-   default `tools/nanochat test` loop does not run it.
+   default `tools/nanochat test` loop does not run it. One later change widens
+   the same gap: the seam-3 pointwise codes replace the host staging of
+   `src/ops.cc`, so the `qk_prep` composition now reduces through `RowReduce`
+   rather than a pair-ordered host loop. On this host that moves the plain leg
+   from 863 to 859 differing records and leaves the `--config=sim` leg at 762,
+   so the same reference-builder run has to re-emit both goldens; a local
+   regeneration would only re-pin the trace here.
 2. **The base fixture records the wrong run config.**
    `tests/data/sft_base_fixture.ckpt` holds the section 5.5 tiny model in its
    tensors, but its metadata block is the Python writer's default run facts (12

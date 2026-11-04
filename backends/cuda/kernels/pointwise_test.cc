@@ -35,6 +35,8 @@ using nanochat::dev::Rng;
 using nanochat::dev::ToStorage;
 using nanochat::dev::rowref::PointwiseBackward;
 using nanochat::dev::rowref::PointwiseForward;
+using nanochat::dev::rowref::RotatePairBackward;
+using nanochat::dev::rowref::RotatePairForward;
 
 constexpr float kAlpha = 1.5f;
 constexpr float kBeta = 0.5f;
@@ -50,6 +52,9 @@ constexpr double kExpBound = 3e-7;
 constexpr double kRsqrtBound = 1e-6;
 constexpr double kLogBound = 2e-5;
 constexpr double kRowScaleBound = 8e-6;
+constexpr double kAffineBound = 8e-6;
+constexpr double kSigmoidBound = 4e-6;
+constexpr double kRotatePairBound = 1e-5;
 
 // The fp32 oracle gate for a gradient, scaled by (1 + |want|). The spec's bound
 // is stated for the code's output, so the gradient is compared at the tier's
@@ -169,6 +174,131 @@ std::vector<float> Ranged(const std::vector<float>& signed_set, float lo,
   return out;
 }
 
+// `kRotatePair` end to end (spec/pointwise_ops.md section 3.2): the forward
+// against its declared bound, the backward against the reference, a central
+// finite difference that proves the two are adjoint, the in-place alias the
+// composition relies on, the ignored `beta`, and the rejected geometries. Shape
+// is the T1 shape: batch 2, seq 8, 2 heads, head width 4, so 32 head rows of 4
+// elements over a 16-entry table.
+void TestRotatePair(Rng* rng) {
+  const int batch = 2;
+  const int seq = 8;
+  const int heads = 2;
+  const int width = 4;
+  const int half = width / 2;
+  const int rows = batch * seq * heads;
+  const int count = rows * width;
+
+  const std::vector<float> cos_table = Ranged(Signed(seq * half, rng), -1, 1);
+  const std::vector<float> sin_table = Ranged(Signed(seq * half, rng), -1, 1);
+  const std::vector<float> x = Ranged(Signed(count, rng), -8.0f, 8.0f);
+  const std::vector<float> g = Ranged(Signed(count, rng), -1.0f, 1.0f);
+
+  PointwiseParams p;
+  p.op = PointwiseOp::kRotatePair;
+  p.count = count;
+  p.row_width = width;
+  p.alpha = 1.5f;
+  p.beta = 0.5f;
+  p.heads = heads;
+  p.seq = seq;
+
+  DevBuf<ComputeType> a(ToStorage(x));
+  DevBuf<float> cos_dev(cos_table);
+  DevBuf<float> sin_dev(sin_table);
+  p.cos_table = cos_dev.ptr;
+  p.sin_table = sin_dev.ptr;
+
+  DevBuf<ComputeType> out(count);
+  nanochat::kernels::PointwiseForward(p, a.ptr, nullptr, out.ptr);
+  nanochat::kernels::Synchronize();
+  const std::vector<float> got = FromStorage(out.Download());
+  CheckWithinBound(got, RotatePairForward(p, x, cos_table, sin_table),
+                   kRotatePairBound, "rotate-pair");
+
+  // `out` may alias `a` (section 2), and a pair-indexed grid is what makes that
+  // safe: one thread owns both elements of its pair. The answer must be the one
+  // the out-of-place call produced, exactly.
+  DevBuf<ComputeType> aliased(ToStorage(x));
+  nanochat::kernels::PointwiseForward(p, aliased.ptr, nullptr, aliased.ptr);
+  nanochat::kernels::Synchronize();
+  CheckWithinBound(FromStorage(aliased.Download()), got, 0.0,
+                   "rotate-pair aliased out");
+
+  // `beta` is not a field of this code, so a wild value must not move the
+  // answer (section 3: an unused value is ignored, not asserted).
+  PointwiseParams stale = p;
+  stale.beta = -7.5f;
+  DevBuf<ComputeType> stale_out(count);
+  nanochat::kernels::PointwiseForward(stale, a.ptr, nullptr, stale_out.ptr);
+  nanochat::kernels::Synchronize();
+  CheckWithinBound(FromStorage(stale_out.Download()), got, 0.0,
+                   "rotate-pair ignores beta");
+
+  // The backward is the adjoint of the forward.
+  DevBuf<ComputeType> dy(ToStorage(g));
+  DevBuf<ComputeType> da(count);
+  DevBuf<ComputeType> db(count);
+  nanochat::kernels::PointwiseBackward(p, a.ptr, nullptr, dy.ptr, da.ptr,
+                                       db.ptr);
+  nanochat::kernels::Synchronize();
+  CheckVectorClose(FromStorage(da.Download()),
+                   RotatePairBackward(p, g, cos_table, sin_table), kGradTol,
+                   "rotate-pair da");
+  // The tables are constants of the graph, so the backward never writes `db`.
+  bool db_untouched = true;
+  for (float v : FromStorage(db.Download())) {
+    if (v != 0.0f) db_untouched = false;
+  }
+  Check(db_untouched, "rotate-pair leaves db alone");
+
+  auto loss_at = [&](const std::vector<float>& xv) {
+    const std::vector<float> o = RotatePairForward(p, xv, cos_table, sin_table);
+    double loss = 0.0;
+    for (int i = 0; i < count; ++i) loss += static_cast<double>(o[i]) * g[i];
+    return loss;
+  };
+  CheckFiniteDifference(x, RotatePairBackward(p, g, cos_table, sin_table),
+                        loss_at, 2e-3, "rotate-pair adjoint");
+
+  // A geometry that does not tile the count, a non-positive `heads` or `seq`,
+  // and a null table are declared errors: a message naming the values and no
+  // write at all.
+  const int bad_geometries[][3] = {
+      {0, heads, seq}, {5, heads, seq},   {7, heads, seq},
+      {width, 0, seq}, {width, heads, 0}, {width, 3, seq},
+  };
+  for (const auto& bad : bad_geometries) {
+    PointwiseParams reject = p;
+    reject.row_width = bad[0];
+    reject.heads = bad[1];
+    reject.seq = bad[2];
+    DevBuf<ComputeType> untouched(ToStorage(std::vector<float>(count, 42.0f)));
+    nanochat::kernels::PointwiseForward(reject, a.ptr, nullptr, untouched.ptr);
+    nanochat::kernels::Synchronize();
+    bool unchanged = true;
+    const std::vector<float> got = FromStorage(untouched.Download());
+    for (float v : got) {
+      if (v != 42.0f) unchanged = false;
+    }
+    Check(unchanged, "rotate-pair rejects a bad geometry without writing");
+  }
+
+  {
+    PointwiseParams no_table = p;
+    no_table.sin_table = nullptr;
+    DevBuf<ComputeType> untouched(ToStorage(std::vector<float>(count, 42.0f)));
+    nanochat::kernels::PointwiseForward(no_table, a.ptr, nullptr,
+                                        untouched.ptr);
+    nanochat::kernels::Synchronize();
+    bool unchanged = true;
+    for (float v : FromStorage(untouched.Download())) {
+      if (v != 42.0f) unchanged = false;
+    }
+    Check(unchanged, "rotate-pair rejects a null table without writing");
+  }
+}
+
 }  // namespace
 
 int main() {
@@ -280,6 +410,19 @@ int main() {
       Check(unchanged, "row-scale backward rejects a bad width");
     }
   }
+
+  // --- The seam-3 codes --------------------------------------------------
+  // `kAffine` is a bit-exact arithmetic code and `kSigmoid` is a bounded one,
+  // so each is fed the operand set its envelope states and gated at its own
+  // bound. `Make` sets alpha and beta, which is what `kAffine` reads.
+  TestOp(Make(PointwiseOp::kAffine, n), "affine", a0, b0, w, kAffineBound);
+  {
+    const std::vector<float> sigmoid_a = Ranged(a0, -40.0f, 40.0f);
+    TestOp(Make(PointwiseOp::kSigmoid, n), "sigmoid", sigmoid_a, b0, w,
+           kSigmoidBound);
+  }
+
+  TestRotatePair(&rng);
 
   if (Failures() != 0) {
     std::printf("pointwise: %d check(s) failed\n", Failures());

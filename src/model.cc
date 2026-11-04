@@ -607,6 +607,7 @@ void TrainModel::BuildTrainWorkspace(int batch, int seq) {
   }
   c(&dlogits_, rows * padded_vocab);
   f(&losses_, rows);
+  f(&row_scale_dev_, rows);
   c(&dx_final_norm_, rows * hidden);
   c(&dx_final_pre_, rows * hidden);
   c(&dbackout_, rows * hidden);
@@ -1028,10 +1029,15 @@ void TrainModel::BackwardInternal(const float* row_weights, float scale,
       effective[static_cast<std::size_t>(m)] = row_weights[m] * scale / divisor;
     }
     host_row_scale = effective.data();
+    // One upload per call. The fused classifier reads the weight in device code
+    // (`ops::ClassifierShape::row_scale_dev`), and the composition reads the
+    // host array, so both forms are supplied.
+    kernels::Memcpy(row_scale_dev_, host_row_scale,
+                    static_cast<std::size_t>(rows) * sizeof(float),
+                    CopyDir::kHostToDevice);
   }
-  // The composition reads the per-row weight on the host, where the caller
-  // already computed it, so no device copy is needed.
   classifier.row_scale = host_row_scale;
+  classifier.row_scale_dev = row_weights != nullptr ? row_scale_dev_ : nullptr;
 
   ops::ClassifierBackward(classifier, raw_logits_, targets_.data(), dlogits_);
   if (row_weights == nullptr) {

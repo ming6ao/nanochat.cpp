@@ -357,6 +357,25 @@ NANOCHAT_EMU_SHUFFLE_OVERLOADS(__shfl_sync, lane)
 #undef NANOCHAT_EMU_SHUFFLE_OVERLOADS
 
 // ---------------------------------------------------------------------------
+// The round-to-nearest float intrinsics
+// ---------------------------------------------------------------------------
+//
+// `__fmul_rn`, `__fadd_rn` and `__fsub_rn` are `device_functions.h` forms that
+// forbid the compiler from contracting a multiply and an add into one FMA. The
+// kernel sources pin the arithmetic a composition defines with them, because
+// nvcc contracts `x1 * c + x2 * s` by default and leaves one product unrounded
+// (`backends/cuda/kernels/pointwise.cu`, `qk_prep.cu`).
+//
+// On the host each is the plain operation: gcc and clang round both the product
+// and the sum to nearest at the default settings, and an explicitly separate
+// multiply is exactly what the intrinsic asks the device for. Nothing here
+// relaxes rounding, so the emulated kernel computes the arithmetic the spec
+// states.
+inline float __fmul_rn(float a, float b) { return a * b; }
+inline float __fadd_rn(float a, float b) { return a + b; }
+inline float __fsub_rn(float a, float b) { return a - b; }
+
+// ---------------------------------------------------------------------------
 // The launcher
 // ---------------------------------------------------------------------------
 //

@@ -168,6 +168,9 @@ const char* const kPointwiseCodes[] = {
     "kRsqrt",
     "kLog",
     "kRowScale",
+    "kAffine",
+    "kSigmoid",
+    "kRotatePair",
 };
 // clang-format on
 // END GENERATED (tools/contract_vocabulary.py --write)

@@ -201,13 +201,17 @@ void BackoutBackward(const ComputeType* d_pre, const ComputeType* x_backout,
 // built from `Pointwise` (kSoftcap, kExp, kScale, kRowScale), `RowReduce`
 // (kMax, kSum, kLogSumExp) and `Embedding` (the per-row target gather).
 //
-// `row_scale` is a *host* array of `rows` entries: it is an input to this call
-// and never a device operand, which is why the composition can multiply by it
-// per row without a second device buffer.
+// The per-row weight has two forms, one per implementation. `row_scale` is the
+// *host* array of `rows` entries, and it is what the composition reads: the
+// composition multiplies row `r` by `row_scale[r]` in host code, so it needs no
+// device buffer. `row_scale_dev` is the same array on the device, and it is
+// what the fused family reads. The fused backward loads one entry per row in
+// device code, so a host pointer there is an illegal memory access.
 //
 // The composition is the definition; the fused `ClassifierForward` /
 // `ClassifierBackward` families remain an override behind their capability bit,
-// and `ops.cc` calls the fused family on a device that advertises it.
+// and `ops.cc` calls the fused family on a device that advertises it. A call
+// that carries the host array alone therefore stays on the composition.
 // ---------------------------------------------------------------------------
 
 struct ClassifierShape {
@@ -217,6 +221,8 @@ struct ClassifierShape {
   float softcap = kLogitSoftcap;
   int ignore_index = -1;
   const float* row_scale = nullptr;  // host array of `rows` weights, or null
+  const float* row_scale_dev =
+      nullptr;  // the same array on the device, or null
 };
 
 void ClassifierForward(const ClassifierShape& shape, const ComputeType* logits,

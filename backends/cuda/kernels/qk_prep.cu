@@ -37,11 +37,12 @@ using cuda_kernels::RowReduceSumSq;
 using cuda_kernels::ToComputeDev;
 
 // The forward's pair rotation, with every float operation rounded to nearest.
-// `RopeForwardHost` in src/ops.cc writes `(x1 * c + x2 * s) * scale` and
-// `(-x1 * s + x2 * c) * scale` as plain expressions, so it rounds both products
-// before it adds them. nvcc contracts `x1 * c + x2 * s` into an FMA by default,
-// which leaves one product unrounded, and that alone puts the fused forward an
-// ulp from the composition at every pair. The ulp is not cosmetic: AdamW's
+// The composition is the `kRotatePair` pointwise code, whose definition is
+// `alpha * (x1 * c + x2 * s)` and `alpha * (-x1 * s + x2 * c)` with every
+// multiply and the add rounded separately (spec/pointwise_ops.md section 3.2).
+// nvcc contracts `x1 * c + x2 * s` into an FMA by default, which leaves one
+// product unrounded, and that alone puts the fused forward an ulp from the
+// composition at every pair. The ulp is not cosmetic: AdamW's
 // `adam_eps` amplifies one ulp on `backout_lambda` into 1.23e-4 of parameter
 // error, over the 1e-4 trajectory tolerance of `//tests:oracle_cuda_test`. The
 // intrinsics hold the source form to one rounding per operation, because the
@@ -58,10 +59,10 @@ __device__ __forceinline__ void RotateForwardPair(float& x1, float& x2, float c,
 }
 
 // The backward's rotation and combine, with every float operation rounded to
-// nearest. `QkPrepBackwardKernel` has to reproduce the composition's arithmetic
-// (`RopeNormBackwardHost` in src/ops.cc) exactly, and that host code rounds
-// each float operation: `scale * (g1 * c - g2 * s)` rounds the two products
-// before it subtracts. nvcc contracts the same expression into an FMA by
+// nearest. `QkPrepBackwardKernel` reproduces the composition's arithmetic, and
+// the composition rounds each float operation: the transposed rotation of
+// `kRotatePair` is `alpha * (g1 * c - g2 * s)` with the two products rounded
+// before the subtract. nvcc contracts the same expression into an FMA by
 // default, which keeps the product unrounded, and that alone leaves the fused
 // pair 1 or 2 ulp from the composition at every element of the model shape. The
 // intrinsics hold the source form to the composition's rounding. The forward's
@@ -146,15 +147,18 @@ __global__ void QkPrepBackwardKernel(const QkPrepParams params,
   const float* srow = sin + static_cast<std::size_t>(t) * half;
 
   // Pull the upstream gradient back through the scale and the rotation, and
-  // accumulate the two statistics the RMSNorm backward needs. The accumulators
-  // are double, the norm scale is `1.0f / std::sqrt` of the float sum, and the
-  // reciprocal is multiplied in rather than divided: line for line what
-  // `RopeNormBackwardHost` does in src/ops.cc (and what the CPU backend does in
-  // `backends/cpu/kernels.cc`). A float accumulator with `rsqrtf` left `r` one
-  // ulp away from the composition on every row, which AdamW's `adam_eps`
-  // amplifies past the trajectory tolerance. The rotation itself stays float
-  // and stays rounded to nearest, as the
-  // composition's host ops are.
+  // accumulate the two statistics the RMSNorm backward needs. The norm scale is
+  // `1.0f / std::sqrt` of the float sum and the reciprocal is multiplied in
+  // rather than divided, which is how the composition's `kRsqrt` step reads: a
+  // `rsqrtf` would leave `r` one ulp away on every row, and AdamW's `adam_eps`
+  // amplifies that past the trajectory tolerance.
+  //
+  // The two accumulators stay double here. The composition reduces through
+  // `RowReduce`, whose device form accumulates in float, so the two agree to
+  // within the declared bound rather than bit for bit; keeping double on the
+  // fused side is the more accurate of the two and stays inside that bound. The
+  // rotation itself stays float and rounded to nearest, as `kRotatePair`
+  // defines it.
   double sum_sq = 0.0;
   double dot = 0.0;
   for (int d = threadIdx.x; d < half; d += blockDim.x) {

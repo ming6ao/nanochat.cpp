@@ -60,7 +60,7 @@ which this table cites and does not restate.
 | `RowReduce` | primitive | required | `RmsNorm`, `QkPrep`, and the `Classifier`'s per-row reduction. Additive at seam 1 → 2 |
 | `SpanReduce` | primitive | required | `GradNorm`, `ScalarDot`, the loss reduction. Additive at seam 1 → 2 |
 | `AttentionForward`, `AttentionBackward` | primitive | required | The attention graph; causal, group-query, full context and sliding window |
-| `PointwiseForward`, `PointwiseBackward` | primitive | required | The nine op codes, elementwise; one of them broadcasts a per-row vector |
+| `PointwiseForward`, `PointwiseBackward` | primitive | required | The twelve op codes, elementwise; one broadcasts a per-row vector and one applies the half-split pair rotation. Three codes are additive at seam 2 → 3 |
 | `EmbeddingForward` | primitive | required | The gather over `wte` and every `value_embeds[i]` |
 | `EmbeddingBackward` | primitive | required | The scatter-add into the dense gradient buffer |
 | `SmearForward`, `SmearBackward` | primitive | required | The bigram residual, one launch per direction on a device; the backward reduces its two parameter gradients at a phase boundary in the same launch |

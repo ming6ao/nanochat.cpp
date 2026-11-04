@@ -178,7 +178,7 @@ constant of the flagship model. The contract does not know the model (Rule 1).
 | | |
 |---|---|
 | **Name** | `primitive_tier_complete` — `Caps::kFeaturePrimitiveTierComplete` |
-| **Meaning** | The device supplies every required primitive of §7.2 of `docs/model-and-device-bringup.md` — the six utilities, both GEMM entries, both reductions, the pointwise family with all nine op codes, gather and scatter-add, and causal group-query attention in both the full and the sliding variant at one tile size. The inventory is [docs/kernels.md](../docs/kernels.md); this file does not restate it |
+| **Meaning** | The device supplies every required primitive of §7.2 of `docs/model-and-device-bringup.md` — the six utilities, both GEMM entries, both reductions, the pointwise family with all twelve op codes, gather and scatter-add, and causal group-query attention in both the full and the sliding variant at one tile size. The inventory is [docs/kernels.md](../docs/kernels.md); this file does not restate it |
 | **Numeric obligation** | Every primitive passes its own correctness test at the tier the device claims (`T0 CPU`, `S0 simulator`, or `T1 GPU correctness`), and the composition tier built over those primitives passes the five graphs of `docs/model.md`. A device that omits one required primitive declares **no** bit of this name: the tier is complete or it is absent, and there is no partial claim. Its absence is a named plan rejection, because no plan can be built at all — the planner cannot resolve a composition to a primitive it does not have |
 | **Owning layer** | Backend, and the planner that reads it |
 | **Declared by** | device `caps.json` |
@@ -282,8 +282,8 @@ resolution succeeded or failed.
 - **A numeric obligation of an op code.** The declared accuracy bound of
   `kExp`, `kRsqrt`, `kLog`, and the rest lives in
   [pointwise_ops.md](pointwise_ops.md), one bound per code. The pointwise
-  primitive is one bit (`primitive_tier_complete`), and its nine codes carry
-  nine obligations in that file. This split is deliberate: a bound changes far
+  primitive is one bit (`primitive_tier_complete`), and its twelve codes carry
+  twelve obligations in that file. This split is deliberate: a bound changes far
   more often than a bit does, and a bound is read per code while a bit is read
   per device.
 - **A fact about the device.** `total_memory_bytes`, `compute_major`,

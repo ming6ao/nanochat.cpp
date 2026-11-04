@@ -38,7 +38,7 @@ HBM rate and no tensor cores, and `is_device` is false for the same reason.
 **What the entry declares.** The six device utilities (`Alloc`, `Free`, `Memcpy`,
 `Memset`, `Synchronize`, `GetCaps`), the arithmetic primitives with both
 reductions (`row_reduce`, `span_reduce`) and both attention variants at one tile
-size, the nine pointwise op codes, the four combine ops, the two stateful entries
+size, the twelve pointwise op codes, the four combine ops, the two stateful entries
 (`adamw`, `muon`), and the capability bits in the spelling of
 `spec/capability_bits.md` — nine of the fifteen:
 
@@ -143,7 +143,7 @@ a `scale`, and an `accumulate` flag. Both are plain loops: no host round trip, n
 hidden allocation, and the span list is read where the caller put it.
 
 **The pointwise block (D-003).** `PointwiseForward`/`PointwiseBackward` take a
-`PointwiseParams` block and cover all nine codes. `kRowScale` is the row
+`PointwiseParams` block and cover all twelve codes. `kRowScale` is the row
 broadcast, and it follows `spec/pointwise_ops.md` section 3.1 exactly: `a` holds
 the `count / row_width` per-row scalars, `b` and `out` hold `count` values,
 `out[r, c] = a[r] * b[r, c]`, and the code reads no scalar of the parameter block

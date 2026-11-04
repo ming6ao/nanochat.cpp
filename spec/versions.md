@@ -49,8 +49,36 @@ meet only through [capability_bits.md](capability_bits.md).
 |---|---|---|---|
 | Spec format | 1 | — (no earlier number was ever written) | A reader accepts spec format 1 and refuses any other number with a named error. There is no previous version to accept yet, because `models/nanochat-default/spec.json` is the first file in the format |
 | Capability vocabulary | 1 | — (the boolean fields on `Caps` carried no number) | A backend declares vocabulary 1 in its `caps.json`. A declaration with a number this build does not know is rejected by name, not by guessing |
-| Kernel seam | 1 | 0 | A backend accepts seam 1 and seam 0. Seam 1 is the numbered header; seam 0 is the unnumbered header that preceded it, whose entry-point set is the inventory in [docs/kernels.md](../docs/kernels.md) before this campaign's addition |
+| Kernel seam | 3 | 2 | A backend accepts seam 3, seam 2 and seam 1. Seam 3 adds the `kAffine`, `kSigmoid` and `kRotatePair` op codes and the `table`, `heads` and `seq` fields of `PointwiseParams`. Seam 2 added the two reductions and the `PointwiseParams` block. Seam 1 is the numbered header before that |
 | Fixture format | 1 | — (version 1 is the only number ever written) | A reader accepts fixture format 1. The first bump makes 1 the previous version and the acceptance set becomes {2, 1} |
+
+### 2.1 Seam 3: the three op codes that end the host staging
+
+Seam 3 adds three op codes to the closed `PointwiseOp` list and three fields to
+`PointwiseParams`. It adds no entry point, so the required bring-up cost stays
+at 16 entry points for inference and 18 for training
+([docs/model-and-device-bringup.md §7.5](../docs/model-and-device-bringup.md)).
+
+- **`kAffine`.** `out = alpha * (a - beta)`. It replaces the per-call
+  `ConstantVector` upload, which was the only way a composition could add a
+  scalar constant without a second operand.
+- **`kSigmoid`.** `out = sigmoid(a)`. It replaces the unit vector the value gate
+  uploaded so that `kGateMul` could compute a bare sigmoid.
+- **`kRotatePair`.** The half-split pair rotation, with `b` as the cosine table
+  and `table` as the sine table. It replaces the host rotary legs of the
+  `qk_prep` composition, which staged the whole activation in each direction
+  through a synchronous copy.
+
+The reason is [docs/model-and-device-bringup.md §7.6](../docs/model-and-device-bringup.md):
+when a composition needs an operation the primitive set lacks, the answer is the
+missing primitive and not a host leg. The measured cost of the host legs is in
+[pointwise_ops.md](pointwise_ops.md) §3.2 and in the note at the top of
+`src/ops.cc`.
+
+The two bounds these codes add are `8e-6` for `kAffine`, `4e-6` for `kSigmoid`,
+and `1e-5` for `kRotatePair`, each over the envelope
+[pointwise_ops.md](pointwise_ops.md) §4 states. They are new bounds beside the
+existing rows, so no earlier bound moves.
 
 **The seam version this campaign bumps is 1.** The header preamble of
 `include/nanochat/kernels.h` states the version, and the one bump covers the
@@ -202,6 +230,7 @@ movement that was not reviewed.
 | P0 | Kernel seam | 0 → 1 | `RowReduce` and `SpanReduce` added; `PointwiseForward`/`PointwiseBackward` take a `PointwiseParams` block instead of a scalar argument list; `kExp`, `kRsqrt`, `kLog`, `kRowScale` added to the closed `PointwiseOp`; the accuracy bound per code becomes a seam obligation | D-001, D-002, D-003 |
 | P0 | Capability vocabulary | — → 1 | The fifteen bit names of [capability_bits.md](capability_bits.md) replace the ad-hoc booleans on `Caps` | §9 rules 1 to 3: the mask, the declaration, the named rejection |
 | P2 | Spec format | — → 1 | The first `models/nanochat-default/spec.json`: the closed `ModelSpec` field list (§8) and the block kind names of [block_kinds.md](block_kinds.md) | §8, and D-009 for where a kind's implementation lives |
+| after P2 | Kernel seam | 2 → 3 | `kAffine`, `kSigmoid` and `kRotatePair` added to the closed `PointwiseOp`; `table`, `heads` and `seq` added to `PointwiseParams`; three new accuracy bounds in [pointwise_ops.md](pointwise_ops.md) §4. No entry point moves | §7.6 of the design: when a composition needs an operation the primitive set lacks, add the primitive and do not keep a host leg. An addition under §3.1, so no deprecation release and no decision record beyond this row |
 | — | Fixture format | 1 (unchanged) | This campaign changes no fixture byte. If a reader change needs a bump, the Oracle node implements the current-and-previous acceptance and reports the row for §2 and §6 rather than editing this directory | — |
 
 The seam row is deliberately one row, not two. §10.3 of the design puts one

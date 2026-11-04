@@ -1,11 +1,15 @@
 // Reusable graph pieces shared by the training graph and the inference graphs.
 // This file is the *composition tier* (`spec/block_kinds.md` section 4): every
 // named piece below is written over the primitives of the kernel seam - `Gemm`,
-// `RowReduce`, `SpanReduce`, `Pointwise` (with the kExp, kRsqrt, kLog and
-// kRowScale codes) and `Embedding` - so a device that supplies the primitive
-// tier can run the whole graph, and a backend's fused family is an optimization
-// behind an `override_*` capability bit rather than a second implementation the
-// tree depends on (`docs/model-and-device-bringup.md` section 7.4 condition 2).
+// `RowReduce`, `SpanReduce`, `Pointwise` (with all twelve codes of
+// `spec/pointwise_ops.md`, among them kAffine, kSigmoid and the kRotatePair
+// rotation) and `Embedding` - so a device that supplies the primitive tier can
+// run the whole graph, and a backend's fused family is an optimization behind
+// an `override_*` capability bit rather than a second implementation the tree
+// depends on (`docs/model-and-device-bringup.md` section 7.4 condition 2). No
+// composition here stages an activation through the host: the rotary leg, the
+// norm's epsilon and the value gate's unit operand all have a code, which is
+// what `docs/model-and-device-bringup.md` section 7.6 asks for.
 // Two consequences are worth knowing while reading.  * A composition declares
 // its saved slots and its backward reads only those (`spec/block_kinds.md`
 // section 3). The slots are the caller's buffers, so a fused override and this
@@ -20,6 +24,7 @@
 
 #include "src/ops.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <cstring>
 #include <type_traits>
@@ -51,8 +56,8 @@ bool FiniteArg(ScalarArg arg) {
 // registers it beside the capability bit it advertises
 // (`backends/cuda/fused_overrides.cc`). Until this helper existed the bit was
 // declared, planned, and never read, so every device ran the portable fallback:
-// the classifier costs a launch and a blocking device-to-host copy per token
-// position, and the rotary leg copies the activation to the host and back. A
+// the classifier cost a launch and a blocking device-to-host copy per token
+// position, and the composition tier cycled activations through the host. A
 // training step at 4096 token positions therefore took 2.2 s on an H100 at 10
 // percent device utilization.  `GetCaps` is read once: a process owns one
 // device, which is the rule the rest of this file already follows.
@@ -61,50 +66,30 @@ bool Fused(std::uint64_t feature) {
   return caps.HasFeature(feature);
 }
 
-// The classifier's fused family reads no per-row scale, so a call that carries
-// one keeps the composition.  `ClassifierParams::row_scale` is a *host* array
-// of `rows` entries: the composition reads it on the host, one entry per row.
-// The fused CUDA kernel reads `row_scale[row]` in device code, so a host
-// pointer reaches the device and faults. The RL stage passes a scale, which is
-// why the chain's RL stage and `//tests:rl_parity_cuda_test` both died with an
-// illegal memory access. The fix is to upload the scale once and read it on the
-// device; until then a call with a scale stays on the composition, and the
-// base, SFT, and eval calls, which pass none, keep the fused path.
-constexpr bool kFusedClassifierTakesRowScale = false;
-
-// ---------------------------------------------------------------------------
-// Staging helpers
-// ---------------------------------------------------------------------------
-// Two kinds of host traffic survive in this file, and both are marked where
-// they are used so a later change can delete exactly one of them. Neither runs
-// on a device that advertises the fused family of the composition it belongs
-// to: `Fused` above routes those devices to the backend's kernel, and the
-// staging below is the portable fallback a primitive-only device still needs.
-// * `StageToHost` / `StageToDevice`: the rotary rotation of `QkPrep`. The
-// primitive set has no operand whose value varies with the row's sequence
-// position, so the half-split pair rotation cannot be expressed over
-// `Pointwise` without materializing a per-element cos/sin operand of the
-// activation's size. The node report records the missing primitive (a pointwise
-// code with a periodic table operand, or a `kRotatePair` code). * `StageScalar`
-// / `StoreScalar`: the classifier's per-row scalar, one float per row. It is a
-// constant-sized round trip per row, not a staging pass over an activation.
-
-std::vector<ComputeType> StageToHost(const ComputeType* src,
-                                     std::int64_t count) {
-  std::vector<ComputeType> host(static_cast<std::size_t>(count));
-  if (count > 0) {
-    kernels::Memcpy(host.data(), src,
-                    static_cast<std::size_t>(count) * sizeof(ComputeType),
-                    CopyDir::kDeviceToHost);
-  }
-  return host;
+// The classifier's fused family reads `row_scale` in device code, one entry per
+// row (`backends/cuda/kernels/classifier.cu`, `params.row_scale[row]`). A host
+// pointer there faults, which is why this call once kept the whole classifier
+// on the composition and paid a blocking device-to-host copy for every row of
+// every step. The caller now keeps a device copy beside the host array, so the
+// fused family serves the weighted call and the per-row round trip is gone.
+//
+// A caller that supplies only the host array still takes the composition, which
+// reads that array in host code. The check keeps the trap closed rather than
+// trusting every caller.
+bool FusedClassifierTakesScale(const ClassifierShape& shape) {
+  return shape.row_scale == nullptr || shape.row_scale_dev != nullptr;
 }
 
-void StageToDevice(ComputeType* dst, const std::vector<ComputeType>& host) {
-  if (host.empty()) return;
-  kernels::Memcpy(dst, host.data(), host.size() * sizeof(ComputeType),
-                  CopyDir::kHostToDevice);
-}
+// ---------------------------------------------------------------------------
+// Scalar host traffic
+// ---------------------------------------------------------------------------
+// One kind of host traffic survives in this file, and it is the classifier's
+// per-row scalar: one float per row, a constant-sized round trip per row and
+// not a staging pass over an activation. It is marked where it is used so a
+// later change can delete exactly that. The activation staging that used to sit
+// beside it is gone: `kRotatePair` rotates on the device and `kAffine` adds a
+// scalar without a constant vector, so neither the rotary leg nor the norm's
+// epsilon moves a buffer through the host any more.
 
 float StageScalar(const float* device) {
   float value = 0.0f;
@@ -353,6 +338,14 @@ class RowScalars {
   int count() const { return count_; }
 
   // float -> ComputeType (a no-op when the two are one buffer).
+  //
+  // A bf16 build needs both narrowings, and no code in the seam states them:
+  // the pointwise family is typed on `ComputeType` for both operands, so it
+  // cannot convert its own operand, and `RowReduce` writes `float` because the
+  // norm statistic is a divisor and the tree keeps it in fp32. The conversion
+  // therefore stays here, in the one class that owns both buffers, and the fp32
+  // build never compiles it. Swapping `--precision=bf16` is the only way a
+  // composition reaches these two calls.
   void ToCompute() {
     if constexpr (!std::is_same_v<ComputeType, float>) {
       std::vector<float> host(static_cast<std::size_t>(count_));
@@ -362,14 +355,17 @@ class RowScalars {
       for (std::size_t i = 0; i < host.size(); ++i) {
         wide[i] = ToC(host[i]);
       }
-      StageToDevice(compute_, wide);
+      kernels::Memcpy(compute_, wide.data(), wide.size() * sizeof(ComputeType),
+                      CopyDir::kHostToDevice);
     }
   }
 
   // ComputeType -> float (a no-op when the two are one buffer).
   void ToFloat() {
     if constexpr (!std::is_same_v<ComputeType, float>) {
-      const std::vector<ComputeType> wide = StageToHost(compute_, count_);
+      std::vector<ComputeType> wide(static_cast<std::size_t>(count_));
+      kernels::Memcpy(wide.data(), compute_, wide.size() * sizeof(ComputeType),
+                      CopyDir::kDeviceToHost);
       std::vector<float> host(wide.size());
       for (std::size_t i = 0; i < wide.size(); ++i) host[i] = AsF(wide[i]);
       kernels::Memcpy(floats_.data(), host.data(), host.size() * sizeof(float),
@@ -381,34 +377,6 @@ class RowScalars {
   int count_ = 0;
   FloatScratch floats_;
   ComputeType* compute_ = nullptr;
-};
-
-// A device vector holding one value everywhere. The pointwise family has no
-// code that adds or multiplies by a scalar without a second operand
-// (`kScaleAdd` reads `b` per element), so a composition that needs `x + eps`,
-// `x - max`, or `1 - x` materializes it. It is O(rows) here and O(vocab) in the
-// classifier, never O(rows * dim).
-class ConstantVector {
- public:
-  ConstantVector(float value, int count) : count_(count) {
-    if (count_ <= 0) return;
-    data_ = static_cast<ComputeType*>(
-        kernels::Alloc(static_cast<std::size_t>(count_) * sizeof(ComputeType)));
-    std::vector<ComputeType> host(static_cast<std::size_t>(count_), ToC(value));
-    StageToDevice(data_, host);
-  }
-  ~ConstantVector() {
-    if (data_ != nullptr) kernels::Free(data_);
-  }
-  ConstantVector(const ConstantVector&) = delete;
-  ConstantVector& operator=(const ConstantVector&) = delete;
-
-  const ComputeType* data() const { return data_; }
-  int count() const { return count_; }
-
- private:
-  int count_ = 0;
-  ComputeType* data_ = nullptr;
 };
 
 // ---------------------------------------------------------------------------
@@ -426,12 +394,10 @@ void NormForward(int rows, int dim, int offset, float eps, const ComputeType* x,
   // 2. mean square.
   Pw(PointwiseOp::kScale, rows, rstd->compute(), nullptr, rstd->compute(),
      1.0f / static_cast<float>(dim));
-  // 3. + eps. There is no scalar-add code, so the epsilon is a constant vector.
-  {
-    const ConstantVector epsilon(eps, rows);
-    Pw(PointwiseOp::kScaleAdd, rows, rstd->compute(), epsilon.data(),
-       rstd->compute(), 1.0f, 1.0f);
-  }
+  // 3. + eps, on the scalar. `kAffine` is `alpha * (a - beta)`, so a negated
+  // epsilon is the exact `a + eps` and no constant vector is uploaded.
+  Pw(PointwiseOp::kAffine, rows, rstd->compute(), nullptr, rstd->compute(),
+     1.0f, -eps);
   // 4. reciprocal square root: one declared bound for the code, one rounding.
   Pw(PointwiseOp::kRsqrt, rows, rstd->compute(), nullptr, rstd->compute());
   rstd->ToFloat();
@@ -475,107 +441,105 @@ void NormBackward(int rows, int dim, float /*eps*/, const ComputeType* x,
      /*row_width=*/dim);
 }
 
-// The rotary leg of `QkPrep`, on the host. See the staging note at the top of
-// this file: the rotation's operand varies with the row's sequence position, so
-// it has no primitive over a flat elementwise family. `heads` is the number of
-// head rows (query or key) and the buffers are `[batch, seq, heads, head_dim]`.
-// `cos` and `sin` are the model's device copies (`src/model_impl.h`,
-// `cos_table()`), because the kernels read them from device memory. This leg
-// runs on the host, so it stages them first; on the CPU backend the staging
-// copy is a memcpy.
-std::vector<float> HostTable(const float* table, std::size_t count) {
-  std::vector<float> host(count);
-  if (count > 0) {
-    kernels::Memcpy(host.data(), table, count * sizeof(float),
-                    CopyDir::kDeviceToHost);
-  }
-  return host;
+// The rotary leg of `QkPrep`: the half-split pair rotation about the model's
+// two tables, and the qk scale, in one `kRotatePair` pass over the head rows of
+// `tensor` in place. `heads` is the number of head rows (query or key) and the
+// buffers are `[batch, seq, heads, head_dim]`. `cos` and `sin` are the model's
+// device tables (`src/model_impl.h`, `cos_table()`), which are already
+// `[seq, head_dim / 2]`, so this composes with nothing staged.
+void RotatePairs(int count, int head_dim, int heads, int seq, float scale,
+                 const float* cos, const float* sin, ComputeType* tensor) {
+  NANOCHAT_CHECK_KERNEL_PARAMS("pointwise", count >= 0);
+  if (count <= 0) return;
+  NANOCHAT_CHECK_KERNEL_PARAMS(
+      "pointwise", cos != nullptr && sin != nullptr && tensor != nullptr);
+  PointwiseParams params;
+  params.op = PointwiseOp::kRotatePair;
+  params.count = count;
+  params.row_width = head_dim;
+  params.alpha = scale;
+  params.heads = heads;
+  params.seq = seq;
+  params.cos_table = cos;
+  params.sin_table = sin;
+  kernels::PointwiseForward(params, tensor, /*b=*/nullptr, tensor);
 }
 
-void RopeForwardHost(int batch, int seq, int heads, int head_dim, float scale,
-                     const float* cos, const float* sin, ComputeType* tensor) {
-  if (batch <= 0 || seq <= 0 || heads <= 0 || head_dim <= 0) return;
-  const int half = head_dim / 2;
-  std::vector<ComputeType> host = StageToHost(
-      tensor, static_cast<std::int64_t>(batch) * seq * heads * head_dim);
-  for (int b = 0; b < batch; ++b) {
-    for (int t = 0; t < seq; ++t) {
-      const std::int64_t row_cos = static_cast<std::int64_t>(t) * half;
-      for (int h = 0; h < heads; ++h) {
-        const std::int64_t base =
-            ((static_cast<std::int64_t>(b) * seq + t) * heads + h) * head_dim;
-        for (int d = 0; d < half; ++d) {
-          const float c = cos[row_cos + d];
-          const float s = sin[row_cos + d];
-          const float x1 = AsF(host[static_cast<std::size_t>(base + d)]);
-          const float x2 = AsF(host[static_cast<std::size_t>(base + half + d)]);
-          host[static_cast<std::size_t>(base + d)] =
-              ToC((x1 * c + x2 * s) * scale);
-          host[static_cast<std::size_t>(base + half + d)] =
-              ToC((-x1 * s + x2 * c) * scale);
-        }
-      }
-    }
-  }
-  StageToDevice(tensor, host);
+// The transposed rotation: the gradient through the rotation and the scale,
+// written to `out` from `grad`. The rotation is linear, so this reads no saved
+// activation. `out` may alias `grad`: one thread owns both elements of a pair.
+void RotatePairsBackward(int count, int head_dim, int heads, int seq,
+                         float scale, const float* cos, const float* sin,
+                         const ComputeType* grad, ComputeType* out) {
+  NANOCHAT_CHECK_KERNEL_PARAMS("pointwise", count >= 0);
+  if (count <= 0) return;
+  NANOCHAT_CHECK_KERNEL_PARAMS("pointwise", cos != nullptr && sin != nullptr &&
+                                                grad != nullptr &&
+                                                out != nullptr);
+  PointwiseParams params;
+  params.op = PointwiseOp::kRotatePair;
+  params.count = count;
+  params.row_width = head_dim;
+  params.alpha = scale;
+  params.heads = heads;
+  params.seq = seq;
+  params.cos_table = cos;
+  params.sin_table = sin;
+  // `a` is the saved slot of a pointwise leg and this code does not read it,
+  // and the tables come from the parameter block, so `b` is null.
+  kernels::PointwiseBackward(params, grad, /*b=*/nullptr, grad, out, nullptr);
 }
 
-// The backward rotary leg and the norm leg it feeds, on the host. `saved` holds
-// the pre-QkPrep rows on entry and the input gradients on return (the seam's
-// `QkPrepBackward` contract, and the reason `q_pre`/`k_pre` are saved slots);
-// `grad` is the upstream gradient.
-void RopeNormBackwardHost(int batch, int seq, int heads, int head_dim,
-                          float eps, float scale, const float* cos,
-                          const float* sin, const ComputeType* grad,
-                          ComputeType* saved) {
-  if (batch <= 0 || seq <= 0 || heads <= 0 || head_dim <= 0) return;
-  const int half = head_dim / 2;
-  const float inv_dim = 1.0f / static_cast<float>(head_dim);
-  const std::int64_t total =
-      static_cast<std::int64_t>(batch) * seq * heads * head_dim;
-  std::vector<ComputeType> xhost = StageToHost(saved, total);
-  const std::vector<ComputeType> ghost = StageToHost(grad, total);
-  std::vector<float> g(static_cast<std::size_t>(head_dim));
-  for (int b = 0; b < batch; ++b) {
-    for (int t = 0; t < seq; ++t) {
-      const std::int64_t row_cos = static_cast<std::int64_t>(t) * half;
-      for (int h = 0; h < heads; ++h) {
-        const std::int64_t base =
-            ((static_cast<std::int64_t>(b) * seq + t) * heads + h) * head_dim;
-        // Pull the upstream gradient back through the scale and the rotation:
-        // dL/d(normed) = scale * R^T(dL/d(final)).
-        double sum_sq = 0.0;
-        double dot = 0.0;
-        for (int d = 0; d < half; ++d) {
-          const float c = cos[row_cos + d];
-          const float s = sin[row_cos + d];
-          const float x1 = AsF(xhost[static_cast<std::size_t>(base + d)]);
-          const float x2 =
-              AsF(xhost[static_cast<std::size_t>(base + half + d)]);
-          const float g1 = AsF(ghost[static_cast<std::size_t>(base + d)]);
-          const float g2 =
-              AsF(ghost[static_cast<std::size_t>(base + half + d)]);
-          g[static_cast<std::size_t>(d)] = scale * (g1 * c - g2 * s);
-          g[static_cast<std::size_t>(half + d)] = scale * (g1 * s + g2 * c);
-          sum_sq += static_cast<double>(x1) * x1 + static_cast<double>(x2) * x2;
-          dot +=
-              static_cast<double>(x1) * g[static_cast<std::size_t>(d)] +
-              static_cast<double>(x2) * g[static_cast<std::size_t>(half + d)];
-        }
-        // The normalization statistic recovered from the saved rows, then the
-        // same backward the norm composition applies.
-        const float r =
-            1.0f / std::sqrt(static_cast<float>(sum_sq) * inv_dim + eps);
-        const float coeff = r * r * r * static_cast<float>(dot) * inv_dim;
-        for (int d = 0; d < head_dim; ++d) {
-          const float xv = AsF(xhost[static_cast<std::size_t>(base + d)]);
-          xhost[static_cast<std::size_t>(base + d)] =
-              ToC(r * g[static_cast<std::size_t>(d)] - coeff * xv);
-        }
-      }
-    }
-  }
-  StageToDevice(saved, xhost);
+// The backward of `QkPrep`, over primitives only. `saved` holds the pre-QkPrep
+// rows on entry and the input gradients on return (the seam's `QkPrepBackward`
+// contract, and the reason `q_pre`/`k_pre` are saved slots); `grad` is the
+// upstream gradient. `rot` and `prod` are scratch of `count` elements each.
+//
+// The arithmetic follows the four steps the fused family performs: the norm
+// statistic recomputed from the saved rows exactly as `NormForward` computes
+// it, the transposed rotation, the per-row dot of the saved row with the
+// rotated gradient, and `dx = rstd * g - coeff * x` with `coeff = rstd^3 * dot
+// / dim`. The multiplications keep that order so the value matches the
+// definition.
+void QkPrepApplyBackward(int count, int segments, int head_dim, int heads,
+                         int seq, float eps, float scale, const float* cos,
+                         const float* sin, const ComputeType* grad,
+                         ComputeType* saved, ComputeType* rot,
+                         ComputeType* prod) {
+  // 1. the statistic, from the saved rows.
+  RowScalars rstd(segments);
+  RowReduce(ReduceOp::kSumSq, segments, head_dim, saved, rstd.floats());
+  rstd.ToCompute();
+  Pw(PointwiseOp::kScale, segments, rstd.compute(), nullptr, rstd.compute(),
+     1.0f / static_cast<float>(head_dim));
+  Pw(PointwiseOp::kAffine, segments, rstd.compute(), nullptr, rstd.compute(),
+     1.0f, -eps);
+  Pw(PointwiseOp::kRsqrt, segments, rstd.compute(), nullptr, rstd.compute());
+  rstd.ToFloat();
+  // 2. the transposed rotation and the qk scale.
+  RotatePairsBackward(count, head_dim, heads, seq, scale, cos, sin, grad, rot);
+  // 3. dot[r] = sum_c saved[r,c] * rot[r,c]. The seam has no two-operand
+  // per-row reduce, so the product is materialized first; `prod` is reused
+  // below once the reduction has read it.
+  Mul(saved, rot, prod, count);
+  RowScalars dot(segments);
+  RowReduce(ReduceOp::kSum, segments, head_dim, prod, dot.floats());
+  dot.ToCompute();
+  // 4. coeff = rstd^3 * dot / dim, in the same order the fused family uses.
+  RowScalars coeff(segments);
+  Pw(PointwiseOp::kScale, segments, rstd.compute(), nullptr, coeff.compute(),
+     1.0f);
+  Mul(coeff.compute(), rstd.compute(), coeff.compute(), segments);
+  Mul(coeff.compute(), rstd.compute(), coeff.compute(), segments);
+  Mul(coeff.compute(), dot.compute(), coeff.compute(), segments);
+  Pw(PointwiseOp::kScale, segments, coeff.compute(), nullptr, coeff.compute(),
+     1.0f / static_cast<float>(head_dim));
+  // 5. dx = rstd * g - coeff * x, into the caller's saved slot.
+  Pw(PointwiseOp::kRowScale, count, rstd.compute(), rot, rot, 1.0f, 0.0f,
+     /*row_width=*/head_dim);
+  Pw(PointwiseOp::kRowScale, count, coeff.compute(), saved, prod, 1.0f, 0.0f,
+     /*row_width=*/head_dim);
+  Pw(PointwiseOp::kScaleAdd, count, rot, prod, saved, 1.0f, -1.0f);
 }
 
 }  // namespace
@@ -797,8 +761,9 @@ void RmsNormBackward(std::int64_t rows, std::int64_t dim, float eps,
 }
 
 // ---------------------------------------------------------------------------
-// QK-norm + RoPE + scale: the norm leg over primitives, the rotation leg
-// staged. See the staging note at the top of this file.
+// QK-norm + RoPE + scale: both legs over primitives. The rotation is
+// `kRotatePair` about the model's two tables, so this composition runs entirely
+// on the device and moves nothing to the host.
 // ---------------------------------------------------------------------------
 
 void QkPrepForward(int batch, int seq, int num_heads, int num_kv_heads,
@@ -833,11 +798,6 @@ void QkPrepForward(int batch, int seq, int num_heads, int num_kv_heads,
     ComputeType* tensor;
   };
   const Pass passes[2] = {{num_heads, q}, {num_kv_heads, k}};
-  const std::size_t table_count =
-      static_cast<std::size_t>(seq) * static_cast<std::size_t>(head_dim / 2);
-  // One staging copy per call, shared by the query and key passes.
-  const std::vector<float> host_cos = HostTable(cos, table_count);
-  const std::vector<float> host_sin = HostTable(sin, table_count);
   for (const Pass& pass : passes) {
     if (pass.tensor == nullptr || pass.heads <= 0) continue;
     // The norm leg: one reduction over each head row, then the per-row
@@ -846,9 +806,10 @@ void QkPrepForward(int batch, int seq, int num_heads, int num_kv_heads,
     RowScalars rstd(rows * pass.heads);
     NormForward(rows * pass.heads, head_dim, 0, eps, pass.tensor, pass.tensor,
                 &rstd);
-    // The rotation leg: rotate, then the qk scale, in one rotation pass.
-    RopeForwardHost(batch, seq, pass.heads, head_dim, scale, host_cos.data(),
-                    host_sin.data(), pass.tensor);
+    // The rotation leg: the pair rotation and the qk scale in one pass, on the
+    // device, about the model's own tables. Nothing is staged.
+    RotatePairs(rows * pass.heads * head_dim, head_dim, pass.heads, seq, scale,
+                cos, sin, pass.tensor);
   }
 }
 
@@ -886,17 +847,23 @@ void QkPrepBackward(int batch, int seq, int num_heads, int num_kv_heads,
     ComputeType* saved;
   };
   const Pass passes[2] = {{num_heads, dq, q}, {num_kv_heads, dk, k}};
-  const std::size_t table_count =
-      static_cast<std::size_t>(seq) * static_cast<std::size_t>(head_dim / 2);
-  const std::vector<float> host_cos = HostTable(cos, table_count);
-  const std::vector<float> host_sin = HostTable(sin, table_count);
+  const int rows = batch * seq;
+  // One scratch pair, wide enough for the larger of the query and key passes,
+  // and reused by both. The transposed rotation needs a buffer of its own
+  // because `grad` is const, and the row dot needs a product buffer because the
+  // seam has no two-operand per-row reduce; neither is host traffic.
+  const int widest = std::max(num_heads, num_kv_heads);
+  const int scratch_count = rows * widest * head_dim;
+  ComputeScratch scratch(2 * scratch_count);
+  ComputeType* rot = scratch.data();
+  ComputeType* prod = scratch.data() + scratch_count;
   for (const Pass& pass : passes) {
     if (pass.saved == nullptr || pass.grad == nullptr || pass.heads <= 0) {
       continue;
     }
-    RopeNormBackwardHost(batch, seq, pass.heads, head_dim, eps, scale,
-                         host_cos.data(), host_sin.data(), pass.grad,
-                         pass.saved);
+    const int count = rows * pass.heads * head_dim;
+    QkPrepApplyBackward(count, rows * pass.heads, head_dim, pass.heads, seq,
+                        eps, scale, cos, sin, pass.grad, pass.saved, rot, prod);
   }
 }
 
@@ -1015,14 +982,10 @@ void ValueGateForward(std::int64_t rows, int hidden, int num_kv_heads,
     params.beta = 0.0f;
     kernels::Gemm(GemmMode::kForward, params, h, gate_w, pre.compute());
   }
-  // gate = 3 * sigmoid(pre): `kGateMul` with a unit operand is the sigmoid, and
-  // the gate factor `m` is the following `kScale` rather than a third meaning
-  // for the code's alpha (`spec/pointwise_ops.md` section 3).
-  {
-    const ConstantVector ones(1.0f, n * num_kv_heads);
-    Pw(PointwiseOp::kGateMul, n * num_kv_heads, pre.compute(), ones.data(),
-       gate_out);
-  }
+  // gate = 3 * sigmoid(pre): `kSigmoid` is the bare sigmoid, and the gate
+  // factor `m` is the following `kScale` rather than a third meaning for a
+  // code's alpha (`spec/pointwise_ops.md` section 3).
+  Pw(PointwiseOp::kSigmoid, n * num_kv_heads, pre.compute(), nullptr, gate_out);
   Pw(PointwiseOp::kScale, n * num_kv_heads, gate_out, nullptr, gate_out, 3.0f);
 }
 
@@ -1070,15 +1033,13 @@ void ValueGateBackward(std::int64_t rows, int hidden, int num_kv_heads,
   Pw(PointwiseOp::kRowScale, count, gate, dv, dve, 1.0f, 0.0f,
      /*row_width=*/head_dim);
 
-  // dpre = dgate * gate * (1 - gate/3).
+  // dpre = dgate * gate * (1 - gate/3). The `1 - x` is `kAffine` with a
+  // negated alpha, so no unit vector is uploaded.
   RowScalars dpre(n * num_kv_heads);
   Pw(PointwiseOp::kScale, n * num_kv_heads, gate, nullptr, dpre.compute(),
      1.0f / 3.0f);
-  {
-    const ConstantVector ones(1.0f, n * num_kv_heads);
-    Pw(PointwiseOp::kScaleAdd, n * num_kv_heads, dpre.compute(), ones.data(),
-       dpre.compute(), -1.0f, 1.0f);
-  }
+  Pw(PointwiseOp::kAffine, n * num_kv_heads, dpre.compute(), nullptr,
+     dpre.compute(), -1.0f, 1.0f);
   Mul(dpre.compute(), gate, dpre.compute(), n * num_kv_heads);
   Mul(dpre.compute(), dgate.compute(), dpre.compute(), n * num_kv_heads);
 
@@ -1248,8 +1209,7 @@ void ClassifierForward(const ClassifierShape& shape, const ComputeType* logits,
       losses == nullptr) {
     return;
   }
-  if (Fused(kFeatureOverrideClassifier) &&
-      (shape.row_scale == nullptr || kFusedClassifierTakesRowScale)) {
+  if (Fused(kFeatureOverrideClassifier) && FusedClassifierTakesScale(shape)) {
     // One kernel over every row. The composition below costs four launches and
     // two blocking device-to-host copies per row, which is what made a step at
     // 4096 token positions take seconds while the device sat idle.
@@ -1259,7 +1219,7 @@ void ClassifierForward(const ClassifierShape& shape, const ComputeType* logits,
     params.padded_vocab_size = padded;
     params.softcap = shape.softcap;
     params.ignore_index = shape.ignore_index;
-    params.row_scale = shape.row_scale;
+    params.row_scale = shape.row_scale_dev;
     kernels::ClassifierForward(params, logits, targets, losses);
     return;
   }
@@ -1316,8 +1276,7 @@ void ClassifierBackward(const ClassifierShape& shape, const ComputeType* logits,
       dlogits == nullptr) {
     return;
   }
-  if (Fused(kFeatureOverrideClassifier) &&
-      (shape.row_scale == nullptr || kFusedClassifierTakesRowScale)) {
+  if (Fused(kFeatureOverrideClassifier) && FusedClassifierTakesScale(shape)) {
     // The fused backward zeroes the padded tail and every ignored row, which is
     // the same contract the composition keeps.
     ClassifierParams params;
@@ -1326,7 +1285,7 @@ void ClassifierBackward(const ClassifierShape& shape, const ComputeType* logits,
     params.padded_vocab_size = padded;
     params.softcap = shape.softcap;
     params.ignore_index = shape.ignore_index;
-    params.row_scale = shape.row_scale;
+    params.row_scale = shape.row_scale_dev;
     kernels::ClassifierBackward(params, logits, targets, dlogits);
     return;
   }
@@ -1337,7 +1296,11 @@ void ClassifierBackward(const ClassifierShape& shape, const ComputeType* logits,
   ComputeScratch sech2(vocab);  // 1 - (z / cap)^2, the softcap's derivative
   ComputeScratch u(vocab);      // (p - onehot) * sech2 * row_scale
   ComputeScratch gathered(1);   // the target's sech2
-  const ConstantVector ones(1.0f, vocab);
+  // `kAffine` reads `beta` through `ScalarArg`, so the row maximum stays on the
+  // device: `alpha * (a - beta)` is `z - max` with no host read of the
+  // reduction's result.
+  ScalarArg row_max_arg;
+  row_max_arg.dev = row_max.data();
   for (int r = 0; r < rows; ++r) {
     const std::int64_t base = static_cast<std::int64_t>(r) * padded;
     if (targets[r] == shape.ignore_index) {
@@ -1351,13 +1314,13 @@ void ClassifierBackward(const ClassifierShape& shape, const ComputeType* logits,
     Pw(PointwiseOp::kScale, vocab, z.data(), nullptr, sech2.data(),
        1.0f / shape.softcap);
     Mul(sech2.data(), sech2.data(), sech2.data(), vocab);
-    Pw(PointwiseOp::kScaleAdd, vocab, sech2.data(), ones.data(), sech2.data(),
-       -1.0f, 1.0f);
-    // max, then e = exp(z - max) through the constant vector.
+    Pw(PointwiseOp::kAffine, vocab, sech2.data(), nullptr, sech2.data(), -1.0f,
+       1.0f);
+    // max, then e = exp(z - max). The shift is `kAffine` with the maximum as a
+    // device scalar argument, which is what the stable log-sum-exp needs.
     RowReduce(ReduceOp::kMax, 1, vocab, z.data(), row_max.data());
-    const float row_max_host = StageScalar(row_max.data());
-    Pw(PointwiseOp::kScaleAdd, vocab, z.data(), ones.data(), e.data(), 1.0f,
-       -row_max_host);
+    PwScalars(PointwiseOp::kAffine, vocab, z.data(), nullptr, e.data(),
+              ScalarArg(1.0f), row_max_arg);
     Pw(PointwiseOp::kExp, vocab, e.data(), nullptr, e.data());
     RowReduce(ReduceOp::kSum, 1, vocab, e.data(), sum_exp.data());
     const float inv = 1.0f / StageScalar(sum_exp.data());

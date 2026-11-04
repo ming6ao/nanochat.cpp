@@ -1,15 +1,15 @@
 # Pointwise op codes
 
 `PointwiseOp` is one closed C++ enum, one entry point pair, and one declared
-accuracy bound per code. The codes are the transcendental legs of the
-composition tier: without them `RmsNorm`, `QkPrep`, `Classifier`, and
-`ValueGate` cannot be written over primitives, and with them they can
-(`docs/model-and-device-bringup.md` §7.2, §7.7).
+accuracy bound per code. The codes are the legs of the composition tier that the
+primitive set cannot express otherwise: without them `RmsNorm`, `QkPrep`,
+`Classifier`, and `ValueGate` cannot be written over primitives, and with them
+they can (`docs/model-and-device-bringup.md` §7.2, §7.7).
 
 This file is the authority for the code meanings and for the accuracy bounds.
 The code names live in `include/nanochat/kernels.h` and must match this table
 name for name; the parameter block lives beside them. The version this table
-belongs to is **kernel seam 1** ([versions.md](versions.md)).
+belongs to is **kernel seam 3** ([versions.md](versions.md)).
 
 Related material:
 
@@ -35,7 +35,7 @@ A stable numeric table would be needed only if a program carrying an op code
 could arrive from a different build than the runtime — a serialized kernel
 descriptor, an executable format, a plugin boundary. That belongs to the
 executable container, which is out of scope (`docs/model-and-device-bringup.md`
-§2). The enum's underlying values (0 to 8 in declaration order) are therefore
+§2). The enum's underlying values (0 to 11 in declaration order) are therefore
 **not** a contract: no file, fixture, or `caps.json` records one, and a reader
 must never compare a stored integer against a code. What is a contract is the
 name and the meaning.
@@ -52,9 +52,13 @@ instead of the scalar argument list they take today. The block is:
 |---|---|
 | `op` | The code. Closed enum, above |
 | `count` | The number of elements in `a`, `b`, `out`, and in the gradient tensors. One flat count: the family is elementwise and never sees a shape |
-| `row_width` | The number of elements per row, for the codes that read a per-row operand. **Read only by `kRowScale`**; every other code ignores it, and 0 means "not a row-broadcast call" |
-| `alpha` | The first scalar. Its meaning is per code: the multiplier for `kScale`/`kScaleAdd`, the cap for `kSoftcap`. Unused by the codes that read no scalar |
-| `beta` | The second scalar. Its meaning is per code: the second multiplier for `kScaleAdd`. Unused elsewhere |
+| `row_width` | The number of elements per row, for the codes that read a shaped operand. **Read by `kRowScale`** as the width of the dense row, and **by `kRotatePair`** as the width of one head. 0 means "not a shaped call" |
+| `alpha` | The first scalar. Its meaning is per code: the multiplier for `kScale`/`kScaleAdd`/`kAffine`/`kRotatePair`, the cap for `kSoftcap`. Unused by the codes that read no scalar |
+| `beta` | The second scalar. Its meaning is per code: the second multiplier for `kScaleAdd`, the subtrahend for `kAffine`. Unused elsewhere |
+| `cos_table` | The cosine table, read only by `kRotatePair`. A `float` array on every device, so a bf16 build does not narrow it |
+| `sin_table` | The sine table, the same shape and the same `float` type |
+| `heads` | Read only by `kRotatePair`: the number of head rows that share one table position |
+| `seq` | Read only by `kRotatePair`: the number of table positions before the pattern repeats |
 
 The block exists because the argument list had already grown one scalar beyond
 its meaning: `kSoftcap` reads its cap from `alpha`, so `alpha` carries three
@@ -76,11 +80,13 @@ Rules that apply to every code:
   composition's declared saved slot for a pointwise leg is its input `a`
   ([block_kinds.md](block_kinds.md) §3). A backend that wants to reconstruct
   from `out` may, but the declaration stays `a`, so a fused override and a
-  composition can share one workspace.
+  composition can share one workspace. A code that is linear in `a` reads only
+  `dy`, which is what `kScale` and `kRotatePair` do.
 
 ## 3. The codes
 
-Nine codes: five that exist today, four added by this contract extension.
+Twelve codes: nine that exist today, three added by the seam-3 contract
+extension.
 
 | Code | Forward | Backward (`da`, `db`) | `PointwiseParams` fields read |
 |---|---|---|---|
@@ -93,6 +99,9 @@ Nine codes: five that exist today, four added by this contract extension.
 | `kRsqrt` | `out = 1 / sqrt(a)`, `a > 0` | `da = -0.5 * dy * out^3` (recomputed from `a`) | none |
 | `kLog` | `out = log(a)`, `a > 0` | `da = dy / a` | none |
 | `kRowScale` | `out[i] = a[i / row_width] * b[i]` | `da[r] = sum_c dy[r,c] * b[r,c]`, `db[i] = dy[i] * a[i / row_width]` | `row_width` |
+| `kAffine` | `out[i] = alpha * (a[i] - beta)` | `da = alpha * dy` | `alpha`, `beta` |
+| `kSigmoid` | `out[i] = sigmoid(a[i])` | `da = dy * s * (1 - s)`, with `s = sigmoid(a)` | none |
+| `kRotatePair` | The half-split pair rotation, §3.2 | The transposed rotation of `dy`, §3.2 | `alpha`, `row_width`, `cos_table`, `sin_table`, `heads`, `seq`. It reads no element operand `b` |
 
 `kGateMul` reads no scalar on purpose. The ResFormer value gate multiplies by a
 gate factor `m` (`gate = m * sigmoid(dot)`, [block_kinds.md](block_kinds.md) §2),
@@ -126,7 +135,8 @@ The code computes `out[r, c] = a[r] * b[r, c]` with no materialized
 2. **`ValueGate`.** The saved gate is `[rows, num_kv_heads]` and the value rows
    are `[rows, num_kv_heads, head_dim]`, so `gate * ve` is the same broadcast
    with `row_width = head_dim`. Without it the gate is expanded by hand, which
-   the CPU backend does today through a host staging helper.
+   the CPU backend expanded by hand, through a host staging helper, before the
+   code existed.
 
 **Why it is an op code and not a new entry point.**
 
@@ -150,8 +160,62 @@ The code computes `out[r, c] = a[r] * b[r, c]` with no materialized
   reuses the primitive the tier already gained, and it is a third piece of
   evidence for the descriptor question in D-006.
 
-## 4. The accuracy bounds
+### 3.2 `kRotatePair`: the half-split pair rotation
 
+The code applies the rotary rotation (`RoPE`) to one tensor of head rows, and
+its backward applies the transposed rotation. Its operand and its iteration
+space differ from the flat codes in one way each, and both are stated here.
+
+**The layout.** `a`, `out` and `dy` hold head rows of `row_width` elements, in
+the order `[batch, seq, heads, row_width]`. `row_width` is even, and `h` is
+`row_width / 2`. Rows are grouped `heads` at a time, and the group index repeats
+every `seq` rows: for head row `r`, the table position is
+`t = (r / heads) % seq`.
+
+**The tables.** `cos_table` and `sin_table` are each `[seq, h]`, one row per
+position, so the entry of a pair is `cos_table[t * h + d]` and
+`sin_table[t * h + d]` for `d` in `[0, h)`. This is the layout of the model's
+own tables, so a caller passes them through and copies nothing. Both are
+`float` on every device: a rotary table is a constant of the graph, in the same
+family as `rstd` and the master weights, so a bf16 build does not narrow it and
+the code does not read them through `b`.
+
+**The iteration space.** The family's flat codes run one thread per element.
+This code runs **one thread per pair**: the pair `(base + d, base + h + d)` of
+row `r = j / h`, column `d = j % h`, with `base = r * row_width`. A pair is one
+thread's whole job, and that is what keeps `out` allowed to alias `a`: an
+element-flat grid would let one thread overwrite the pair half that another
+thread is still reading.
+
+The arithmetic, with every operation rounded separately and no contraction:
+
+| | Forward | Backward |
+|---|---|---|
+| `[base + d]` | `alpha * (a1*c + a2*s)` | `alpha * (dy1*c - dy2*s)` |
+| `[base + h + d]` | `alpha * (-a1*s + a2*c)` | `alpha * (dy1*s + dy2*c)` |
+
+`db` is never written: the tables are constants of the graph and not operands
+with a gradient. The rotation is linear, so the backward reads `dy` and never
+`a`, exactly as `kScale` does.
+
+The code exists because no combination of the flat codes and the row broadcast
+expresses it. A pair rotation reads two elements `h` apart, and its multiplier
+varies with the table position and not with the row, so neither `out[i] = f(a[i])`
+nor `out[i] = a[i / row_width] * b[i]` can state it. The only other expression
+was a host loop, which cost a blocking copy of the whole activation in each
+direction (`docs/model-and-device-bringup.md` §7.6, which asks for the missing
+primitive instead).
+
+**Degenerate and rejected calls.** `row_width < 2`, an odd `row_width`, a
+`row_width` larger than `count`, a `count` that is not a multiple of
+`row_width`, a `count / row_width` that is not a multiple of `heads`, a
+non-positive `heads` or `seq`, or a null `cos_table` or `sin_table` is a
+**declared error**.
+The call rejects with a message naming the values and writes nothing, as
+`kRowScale` does. A wrong `heads` or `seq` reads the wrong table position for
+every row and every number downstream still looks plausible.
+
+## 4. The accuracy bounds
 Every code carries **one declared absolute bound per element**, asserted over a
 stated operand envelope. This is the absolute-per-code form, taken as the working
 answer to `docs/model-and-device-bringup.md` §17 open question 2 (record D-007).
@@ -167,6 +231,9 @@ answer to `docs/model-and-device-bringup.md` §17 open question 2 (record D-007)
 | `kRsqrt` | `1e-6` | `a` in `[0.25, 4]` |
 | `kLog` | `2e-5` | `a` in `[1e-30, 1e6]` |
 | `kRowScale` | `8e-6` | `abs(a) <= 4` per row scalar, `abs(b) <= 8` |
+| `kAffine` | `8e-6` | `abs(alpha) <= 4`, `abs(a) <= 8`, `abs(beta) <= 8` |
+| `kSigmoid` | `4e-6` | `abs(a) <= 40`, so the output is in `(0, 1)` |
+| `kRotatePair` | `1e-5` | `abs(c), abs(s) <= 1`, `abs(a) <= 8`, `abs(alpha) <= 4` |
 
 Each bound is roughly two units in the last place at the envelope's largest
 magnitude, which is what one correctly rounded arithmetic step costs plus the
@@ -208,7 +275,8 @@ and the tier's shapes:
 Bit equality is the wrong gate for a transcendental: a device `expf` and a CPU
 `std::exp` are both correct and disagree in the last place. It is the right gate
 for the codes that contain no transcendental (`kScale`, `kScaleAdd`,
-`kReluSquare`, `kRowScale` contain only multiplies and adds), and the table above
+`kReluSquare`, `kRowScale`, `kAffine` and `kRotatePair` contain only multiplies
+and adds), and the table above
 is loose enough to admit both a contracted and an uncontracted implementation of
 them, which is deliberate: the gate is a numeric contract, not a build flag.
 

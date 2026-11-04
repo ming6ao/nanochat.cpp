@@ -11,7 +11,7 @@
 // vendor-free: it never includes a CUDA/HIP header, pointers are always
 // `ComputeType*`, and device streams are opaque. See docs/kernels.md.
 //
-// Seam version: 2. The version lives in this header comment rather than in one
+// Seam version: 3. The version lives in this header comment rather than in one
 // symbol (DESIGN.md section 10.3), because a backend implements the header as
 // one contract: it is bumped once per change set, under the evolution rules in
 // DESIGN.md section 7, and a bring-up pins the number it implements.
@@ -24,6 +24,13 @@
 //      kRowScale codes. The reductions are new symbols; the pointwise pair
 //      keeps its name and its arithmetic, and the runtime updates those call
 //      sites in the same change set.
+//   3  adds the kAffine, kSigmoid and kRotatePair pointwise codes and the
+//      `cos_table`, `sin_table`, `heads` and `seq` fields of
+//      `PointwiseParams`. No entry point
+//      moves and no pointer changes type. The three codes exist so the
+//      `qk_prep` composition can rotate on the device and so a composition can
+//      add a scalar without uploading a constant vector; both were the last
+//      host staging in `src/ops.cc`.
 // One bump covers one change set, however many symbols that set adds. A worker
 // who later wants a second header edit reports it instead of making it.
 //
@@ -38,7 +45,7 @@ namespace nanochat {
 // The seam version this header declares. A backend pins the number it
 // implements, so an out-of-tree backend cannot bind an older contract by
 // accident. See the header comment for what each version covers.
-inline constexpr int kKernelSeamVersion = 2;
+inline constexpr int kKernelSeamVersion = 3;
 
 enum class CopyDir {
   kHostToDevice = 0,
@@ -56,8 +63,9 @@ enum class GemmMode {
 };
 
 // Pointwise op codes: the five arithmetic codes (four plain, one with a row
-// broadcast), the softcap, and the three transcendental codes. The same code
-// drives forward and backward so the pair cannot drift apart (DESIGN.md
+// broadcast), the softcap, the three transcendental codes, and the three codes
+// of seam 3 (a scalar affine, a bare sigmoid, and the pair rotation). The same
+// code drives forward and backward so the pair cannot drift apart (DESIGN.md
 // section 5).
 //
 // The enum is closed. One build links the runtime and every backend, so a
@@ -65,15 +73,18 @@ enum class GemmMode {
 // compile error, never a silent run-time fallthrough. The per-code arithmetic
 // and the meaning of alpha and beta are in `PointwiseParams` below.
 enum class PointwiseOp {
-  kScale = 0,       // out = alpha * a
-  kScaleAdd = 1,    // out = alpha * a + beta * b
-  kGateMul = 2,     // out = sigmoid(a) * b
-  kReluSquare = 3,  // out = relu(a)^2
-  kSoftcap = 4,     // out = cap * tanh(a / cap), with cap read from alpha
-  kExp = 5,         // out = exp(a)
-  kRsqrt = 6,       // out = 1 / sqrt(a)
-  kLog = 7,         // out = log(a)
-  kRowScale = 8,    // out[i] = alpha * a[i] * b[i % row_width]
+  kScale = 0,        // out = alpha * a
+  kScaleAdd = 1,     // out = alpha * a + beta * b
+  kGateMul = 2,      // out = sigmoid(a) * b
+  kReluSquare = 3,   // out = relu(a)^2
+  kSoftcap = 4,      // out = cap * tanh(a / cap), with cap read from alpha
+  kExp = 5,          // out = exp(a)
+  kRsqrt = 6,        // out = 1 / sqrt(a)
+  kLog = 7,          // out = log(a)
+  kRowScale = 8,     // out[i] = alpha * a[i] * b[i % row_width]
+  kAffine = 9,       // out = alpha * (a - beta), with beta a scalar argument
+  kSigmoid = 10,     // out = sigmoid(a)
+  kRotatePair = 11,  // the half-split pair rotation, about two float tables
 };
 
 // The combine op of a reduction. Closed for the same reason as `PointwiseOp`:
@@ -276,6 +287,10 @@ struct AttentionParams {
 //   kRsqrt       out = 1 / sqrt(a)                   (alpha, beta unused)
 //   kLog         out = log(a)                        (alpha, beta unused)
 //   kRowScale    out[i] = alpha * a[i] * b[i % row_width]     (beta unused)
+//   kAffine      out = alpha * (a - beta)
+//   kSigmoid     out = sigmoid(a)                    (alpha, beta unused)
+//   kRotatePair  the half-split pair rotation of `a` about `cos_table` and
+//                `sin_table`
 // An unused value is ignored, not asserted: a stale alpha or beta cannot change
 // a result the code does not read.
 //
@@ -283,7 +298,24 @@ struct AttentionParams {
 // `row_width` entries, replicated down the `count / row_width` rows of `a`; 0
 // means `count`, which is the whole-buffer case. The backward writes `da` and
 // accumulates the per-row-element sum into the `row_width` entries of `db`, so
-// the caller treats `db` as an accumulation buffer.
+// the caller treats `db` as an accumulation buffer. `kRotatePair` reads
+// `row_width` as the width of one head row instead, and its backward leaves
+// `db` alone.
+//
+// `kAffine` reads `beta` as a scalar and as nothing else, which is what removes
+// the unit and epsilon vectors a composition used to upload. A caller that
+// keeps the scalar on the device sets `beta.dev`, and no host read occurs
+// (docs/scalar-arguments.md).
+//
+// `kRotatePair` is the only code with table operands, and both are `float` on
+// every device: the rotary tables are a constant of the graph in the same
+// family as `rstd` and the master weights, so a bf16 build does not narrow
+// them. `cos_table` and `sin_table` are each `[seq, row_width / 2]`, which is
+// already the layout of a model's tables. `heads` is the number of head rows
+// that share one table position, so head row `r` reads position
+// `t = (r / heads) % seq`. The code runs one thread per pair, which is what
+// keeps `out` allowed to alias `a`. spec/pointwise_ops.md section 3.2 states
+// the arithmetic and the rejected calls.
 //
 // Accuracy. The arithmetic codes (kScale, kScaleAdd, kGateMul, kReluSquare,
 // kRowScale) are bit-exact across devices and the pointwise gate compares them
@@ -327,9 +359,17 @@ struct ScalarArg {
 struct PointwiseParams {
   PointwiseOp op = PointwiseOp::kScale;
   int count = 0;      // elements in `a`, in `out`, and in `dy` on the backward
-  int row_width = 0;  // width of the row a broadcast reads; 0 => count
+  int row_width = 0;  // width of the row a shaped code reads; 0 => count
   ScalarArg alpha{1.0f};
   ScalarArg beta{0.0f};
+  // Additive at seam 3. Read only by `kRotatePair`, which is why they default
+  // to values every other code ignores. The two tables are `float` on every
+  // device and are not `ComputeType`: a bf16 build does not narrow a constant
+  // of the graph.
+  const float* cos_table = nullptr;  // [seq, row_width / 2]
+  const float* sin_table = nullptr;  // the same shape
+  int heads = 0;                     // head rows that share one table position
+  int seq = 0;                       // table positions before the repeat
 };
 
 // Logit softcap + cross-entropy + unpadded-vocab slice (docs/kernels.md and
@@ -449,8 +489,9 @@ void AttentionBackward(const AttentionParams& params, const ComputeType* q,
                        const float* stats, const ComputeType* dout,
                        ComputeType* dq, ComputeType* dk, ComputeType* dv);
 
-// `b` is read by kScaleAdd and kGateMul and is the broadcast table for
-// kRowScale; the codes that do not read it accept null.
+// `b` is read by kScaleAdd and kGateMul and is the dense operand of kRowScale;
+// the codes that do not read it accept null, and `kRotatePair` reads its two
+// tables from the parameter block instead.
 void PointwiseForward(const PointwiseParams& params, const ComputeType* a,
                       const ComputeType* b, ComputeType* out);
 

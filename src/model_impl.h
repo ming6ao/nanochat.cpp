@@ -241,6 +241,12 @@ class TrainModel final : public Model {
   // without dereferencing device memory.
   std::vector<float> losses_host_;
 
+  // The device copy of the per-row weights a weighted backward carries. The
+  // fused classifier reads one entry per row in device code, so the array is
+  // uploaded once per call to `BackwardWeighted` rather than once per row
+  // (`ops::ClassifierShape::row_scale_dev`).
+  float* row_scale_dev_ = nullptr;
+
   // Host copy of the current batch, so Backward() (which takes no arguments)
   // sees exactly the ids ForwardLoss() ran with.
   std::vector<int> tokens_;

@@ -54,7 +54,10 @@
         "kExp",
         "kRsqrt",
         "kLog",
-        "kRowScale"
+        "kRowScale",
+        "kAffine",
+        "kSigmoid",
+        "kRotatePair"
       ],
       "reduce_ops": [
         "kSumSq",
@@ -139,7 +142,10 @@
         "kExp",
         "kRsqrt",
         "kLog",
-        "kRowScale"
+        "kRowScale",
+        "kAffine",
+        "kSigmoid",
+        "kRotatePair"
       ],
       "reduce_ops": [
         "kSumSq",
@@ -224,7 +230,10 @@
         "kExp",
         "kRsqrt",
         "kLog",
-        "kRowScale"
+        "kRowScale",
+        "kAffine",
+        "kSigmoid",
+        "kRotatePair"
       ],
       "reduce_ops": [
         "kSumSq",
@@ -307,7 +316,10 @@
         "kExp",
         "kRsqrt",
         "kLog",
-        "kRowScale"
+        "kRowScale",
+        "kAffine",
+        "kSigmoid",
+        "kRotatePair"
       ],
       "reduce_ops": [
         "kSumSq",
@@ -389,7 +401,10 @@
         "kExp",
         "kRsqrt",
         "kLog",
-        "kRowScale"
+        "kRowScale",
+        "kAffine",
+        "kSigmoid",
+        "kRotatePair"
       ],
       "reduce_ops": [
         "kSumSq",
