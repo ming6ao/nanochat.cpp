@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "nanochat/checkpoint_metadata.h"
@@ -85,7 +86,7 @@ struct TrainConfig {
 // Parses the `--hw-check` value: `auto`, `on`, or `off`. Returns false for any
 // other word, so a caller reports the usage instead of silently choosing a
 // mode.
-inline bool ParseHwCheck(const std::string& text, TrainConfig::HwCheck* mode) {
+inline bool ParseHwCheck(std::string_view text, TrainConfig::HwCheck* mode) {
   if (text == "auto") {
     *mode = TrainConfig::HwCheck::kAuto;
     return true;

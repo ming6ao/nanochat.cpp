@@ -435,11 +435,7 @@ cc_binary(
     copts = nanochat_copts(),
     defines = precision_defines(),
     deps = [
-        ":model",
-        ":rl",
-        ":rl_fixture",
-        ":rl_worker_lib",
-        "//include/nanochat:nanochat",
+        ":command",
     ],
 )
 
@@ -819,9 +815,20 @@ cc_binary(
     copts = nanochat_copts(),
     defines = precision_defines(),
     deps = [
-        ":model",
-        "//src/parquet:parquet",
-        "//include/nanochat:nanochat",
+        ":command",
+    ],
+)
+
+# The one stage command binary (docs/build.md). `train_main` and the other old
+# names are thin aliases of a subcommand, so the flag parser, the sandbox
+# guard, and the help text exist once.
+cc_binary(
+    name = "nanochat_cli",
+    srcs = ["nanochat_cli.cc"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    deps = [
+        ":command",
     ],
 )
 
@@ -831,9 +838,7 @@ cc_binary(
     copts = nanochat_copts(),
     defines = precision_defines(),
     deps = [
-        ":model",
-        "//src/parquet:parquet",
-        "//include/nanochat:nanochat",
+        ":command",
     ],
 )
 
@@ -849,8 +854,7 @@ cc_binary(
     copts = nanochat_copts(),
     defines = precision_defines(),
     deps = [
-        ":model",
-        "//include/nanochat:nanochat",
+        ":command",
     ],
 )
 
@@ -864,9 +868,7 @@ cc_binary(
     copts = nanochat_copts(),
     defines = precision_defines(),
     deps = [
-        ":cli",
-        ":model",
-        "//include/nanochat:nanochat",
+        ":command",
     ],
 )
 
@@ -880,9 +882,7 @@ cc_binary(
     copts = nanochat_copts(),
     defines = precision_defines(),
     deps = [
-        ":model",
-        ":record_file",
-        "//include/nanochat:nanochat",
+        ":command",
     ],
 )
 
@@ -892,9 +892,7 @@ cc_binary(
     copts = nanochat_copts(),
     defines = precision_defines(),
     deps = [
-        ":model",
-        "//src/tokenizer:tokenizer",
-        "//include/nanochat:nanochat",
+        ":command",
     ],
 )
 
@@ -910,10 +908,7 @@ cc_binary(
     copts = nanochat_copts(),
     defines = precision_defines(),
     deps = [
-        ":model",
-        ":rl",
-        ":rl_fixture",
-        "//include/nanochat:nanochat",
+        ":command",
     ],
 )
 
@@ -924,23 +919,196 @@ cc_binary(
     copts = nanochat_copts(),
     defines = precision_defines(),
     deps = [
-        # The recipe block's usability rule and the field visitor it sits beside
-        # (design decision D7 of docs/parity.md).
+        ":command",
+    ],
+)
+
+# The tiny CLI helpers shared by the entry points, and the one flag parser of
+# `nanochat_cli` (docs/build.md).
+cc_library(
+    name = "cli",
+    srcs = ["cli.cc"],
+    hdrs = ["cli.h"],
+    copts = nanochat_copts(),
+    deps = ["//include/nanochat:nanochat"],
+)
+
+# The subcommand seam: the table, the one dispatch path, and the sandbox guard.
+cc_library(
+    name = "command",
+    srcs = ["commands.cc"],
+    hdrs = ["command.h"],
+    deps = [
+        ":eval_bench_command",
+        ":eval_command",
+        ":generate_command",
+        ":rl_step_command",
+        ":rl_worker_command",
+        ":roofline_command",
+        ":score_command",
+        ":sft_command",
+        ":train_command",
+        "//include/nanochat:nanochat",
+    ],
+)
+
+# The training command, and the alias `train_main` that calls it. One handler
+# serves both names, so the flag list exists once.
+cc_library(
+    name = "train_command",
+    srcs = ["train_command.cc"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    deps = [
+        ":cli",
+        ":command_hdr",
+        ":model",
+        "//src/parquet:parquet",
+        "//include/nanochat:nanochat",
+    ],
+)
+
+# The evaluation, generation, scoring, finetune, reinforcement-learning, and
+# roofline commands. Each keeps the dependencies its own entry point had, so a
+# command cannot reach a package its predecessor could not.
+cc_library(
+    name = "eval_command",
+    srcs = ["eval_command.cc"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    deps = [
+        ":cli",
+        ":command_hdr",
+        ":model",
+        "//src/parquet:parquet",
+        "//include/nanochat:nanochat",
+    ],
+)
+
+cc_library(
+    name = "generate_command",
+    srcs = ["generate_command.cc"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    deps = [
+        ":cli",
+        ":command_hdr",
+        ":model",
+        "//src/tokenizer:tokenizer",
+        "//include/nanochat:nanochat",
+    ],
+)
+
+cc_library(
+    name = "score_command",
+    srcs = ["score_command.cc"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    deps = [
+        ":cli",
+        ":command_hdr",
+        ":model",
+        ":record_file",
+        "//include/nanochat:nanochat",
+    ],
+)
+
+cc_library(
+    name = "sft_command",
+    srcs = ["sft_command.cc"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    deps = [
         ":checkpoint_metadata",
+        ":cli",
+        ":command_hdr",
         ":model",
         "//include/nanochat:nanochat",
     ],
 )
 
-# The tiny CLI flag helpers shared by the entry points (docs/build.md).
 cc_library(
-    name = "cli",
-    hdrs = ["cli.h"],
-    deps = ["//include/nanochat:nanochat"],
+    name = "rl_worker_command",
+    srcs = ["rl_worker_command.cc"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    deps = [
+        ":cli",
+        ":command_hdr",
+        ":model",
+        ":rl_fixture",
+        ":rl_worker_lib",
+        "//include/nanochat:nanochat",
+    ],
+)
+
+cc_library(
+    name = "rl_step_command",
+    srcs = ["rl_step_command.cc"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    deps = [
+        ":cli",
+        ":command_hdr",
+        ":model",
+        ":rl",
+        ":rl_fixture",
+        "//include/nanochat:nanochat",
+    ],
+)
+
+cc_library(
+    name = "roofline_command",
+    srcs = ["roofline_command.cc"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    deps = [
+        ":cli",
+        ":command_hdr",
+        ":model",
+        "//include/nanochat:nanochat",
+    ],
+)
+
+cc_library(
+    name = "eval_bench_command",
+    srcs = ["eval_bench_command.cc"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    deps = [
+        ":cli",
+        ":command_hdr",
+        ":model",
+        "//include/nanochat:nanochat",
+    ],
+)
+
+# The header-only half of `:command`, so a command library can name its
+# handler's signature without depending on the table that calls it.
+cc_library(
+    name = "command_hdr",
+    hdrs = ["command.h"],
+)
+
+# The one flag parser is on the path of every command line the launcher builds,
+# so its rules are pinned directly: both spellings, the aliases, the model
+# flags, the switches, and the exit status of every failure.
+cc_test(
+    name = "cli_test",
+    srcs = ["cli_test.cc"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    deps = [
+        ":cli",
+        "//include/nanochat:nanochat",
+    ],
+    size = "small",
 )
 
 # Aggregation point consumed by //:all_tests.
 test_suite(name = "all", tests = [
+    # The one flag parser of `nanochat_cli`.
+    ":cli_test",
     ":model_oracle_test",
     ":model_gradient_test",
     ":generate_test",
