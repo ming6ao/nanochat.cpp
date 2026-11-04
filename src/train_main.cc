@@ -63,10 +63,10 @@ int main(int argc, char** argv) {
   nanochat::RequireSandboxOrDie("train");
 
   nanochat::TrainConfig config;
-  // The launcher's environment contract (docs/distributed-launch.md section 4).
-  // A flag parsed below overrides the variable, because the flag loop runs
-  // after this. The names follow `torchrun`, so `train_main` also runs under
-  // `torchrun`, `mpirun`, or a shell loop.
+  // The launcher's environment contract (docs/distributed-design.md Part 1,
+  // section 4). A flag parsed below overrides the variable, because the flag
+  // loop runs after this. The names follow `torchrun`, so `train_main` also
+  // runs under `torchrun`, `mpirun`, or a shell loop.
   config.rank = nanochat::cli::EnvInt("NANOCHAT_RANK", config.rank);
   config.world_size =
       nanochat::cli::EnvInt("NANOCHAT_WORLD_SIZE", config.world_size);

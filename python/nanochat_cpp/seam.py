@@ -1,6 +1,6 @@
 """The registration seam: the two callables the core cannot own.
 
-Rule 1 of ``docs/dependency-layering-plan.md`` section 4 says
+Rule 1 of ``docs/build.md`` section 4 says
 ``python/nanochat_cpp/**`` imports only the standard library. Two jobs still
 need a third-party package, so the core reaches each one by being *handed* a
 callable at run time instead of importing it (rule 5 of section 8, gate G5):

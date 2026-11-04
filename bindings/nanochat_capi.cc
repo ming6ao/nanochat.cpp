@@ -333,7 +333,7 @@ nanochat_status nanochat_init(void) {
     // instead of failing inside the first kernel launch (docs/build.md). The
     // message names the build's own precision, never a literal: a bf16 build
     // must report bf16, or the failure on the device leg would contradict the
-    // build it came from (docs/pipeline-scaleup-plan.md section 3 trap 3).
+    // build it came from (docs/campaigns.md).
     const nanochat::Caps caps = nanochat::kernels::GetCaps();
     if (!caps.Supports(nanochat::kComputeDType)) {
       const std::string precision_name =
@@ -720,7 +720,7 @@ float nanochat_train_step(nanochat_model* model, nanochat_optim* optimizer,
       throw std::invalid_argument("batch and seq must be positive");
     }
     // A null optimizer runs the forward and backward without an update
-    // (docs/training-seam.md section 6.1).
+    // (docs/distributed-design.md Part 2, section 6.1).
     nanochat::Optimizer* raw =
         optimizer != nullptr ? optimizer->optimizer.get() : nullptr;
     return model->model->TrainStep(tokens, targets, batch, seq, raw);
@@ -749,7 +749,7 @@ float nanochat_rl_step(nanochat_model* model, nanochat_optim* optimizer,
     // A null optimizer runs the forward and the weighted backward without an
     // update. The divisor `num_valid * num_passes * examples_per_rank` and the
     // ForwardLoss/BackwardWeighted/Optimizer::Step sequence live in `RlStep`
-    // (docs/training-seam.md section 5.7).
+    // (docs/distributed-design.md Part 2, section 5.7).
     nanochat::Optimizer* raw =
         optimizer != nullptr ? optimizer->optimizer.get() : nullptr;
     return nanochat::RlStep(model->model.get(), raw, tokens, targets,

@@ -1,5 +1,5 @@
 // tests/numerics_trace_test.cc -- the staged numeric-trace replay gate of
-// docs/numerics-integration.md.
+// docs/testing.md.
 //
 // The test computes the whole trace (training, evaluation, greedy generation,
 // the SFT arithmetic, and the RL arithmetic) in process and compares it against
@@ -74,7 +74,7 @@ std::string LocateFile(int argc, char** argv, int index, const char* relative) {
                            "; pass it as argument " + std::to_string(index));
 }
 
-// The tie rule of docs/numerics-integration.md section 6.4: one unit of
+// The tie rule of docs/testing.md Part 2, section 6.4: one unit of
 // roundoff must not be able to flip a greedy identifier, so every recorded
 // logit margin must clear a threshold.
 //

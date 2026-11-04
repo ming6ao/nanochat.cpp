@@ -4,11 +4,11 @@
 #include <string>
 #include <vector>
 
-// The `NCSFT001` SFT shard (docs/training-seam.md section 6.2). The file is a
-// typed-record file with two int32 records, `tokens` and `targets`, each of
-// shape `[rows, seq]`. A target of -1 marks an ignored position. Python writes
-// it with `nanochat_cpp.sft.pack`, and `src/record_file.{h,cc}` owns the
-// layout.
+// The `NCSFT001` SFT shard (docs/distributed-design.md Part 2, section 6.2).
+// The file is a typed-record file with two int32 records, `tokens` and
+// `targets`, each of shape `[rows, seq]`. A target of -1 marks an ignored
+// position. Python writes it with `nanochat_cpp.sft.pack`, and
+// `src/record_file.{h,cc}` owns the layout.
 //
 // This header holds the typed view only. The mesh training driver and
 // `sft_main` share it, so neither copies the record extraction.

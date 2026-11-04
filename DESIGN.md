@@ -121,7 +121,7 @@ wires the Bazel test wrapper. Executables call `nanochat::RequireSandboxOrDie`
 at startup, so a process launched outside the entry point fails loudly instead
 of consuming the host. This is outside L0-L6: it changes neither the kernel seam
 nor the public API. See [docs/sandbox.md](docs/sandbox.md) and
-[docs/gpu-queue-plan.md](docs/gpu-queue-plan.md).
+[docs/sandbox.md](docs/sandbox.md).
 
 The simulator's S0 tier rides the same entry point: `tools/nanochat simulate`
 runs the CPU-only capability, API, collective, and emulation checks with no GPU

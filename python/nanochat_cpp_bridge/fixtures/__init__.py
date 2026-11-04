@@ -1,7 +1,7 @@
 """The offline parity producers of D11: a fixture is a file, not an import.
 
 A comparison with the PyTorch world runs in two halves
-(``docs/dependency-layering-plan.md`` section 7.1)::
+(``docs/build.md`` section 7.1)::
 
           producer (Z2, offline)              consumer (Z1, no torch)
     torch nanochat  -->  fixtures/*.bin  -->  tests/

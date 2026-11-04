@@ -2,12 +2,12 @@
 #define NANOCHAT_FP8_H_
 
 // The 8-bit floating point conversion, in one place
-// (docs/fp8-training.md section 4.1, docs/simulator-precision.md section 4).
+// (docs/fp8-training.md section 4.1, docs/simulator.md Part 7, section 4).
 //
 // The CPU reference backend and the emulation engine both include this header,
 // so the two agree by construction. The device kernels use the CUDA conversion
 // intrinsics, which follow the same round-to-nearest-even rule
-// (docs/correctness-gates.md section 3.2).
+// (docs/testing.md Part 1, section 3.2).
 //
 // Two formats:
 //   E4M3  four exponent bits, three mantissa bits, largest value 448. The

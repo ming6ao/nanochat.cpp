@@ -1,5 +1,5 @@
 // The vendor-free control plane for the gradient-sync backends
-// (docs/distributed-native-plan.md section 4). POSIX sockets only; no vendor
+// (docs/distributed-design.md Part 3, section 4). POSIX sockets only; no vendor
 // header is reachable from here.
 
 #include "src/rendezvous.h"

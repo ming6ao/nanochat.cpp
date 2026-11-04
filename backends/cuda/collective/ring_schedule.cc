@@ -1,5 +1,5 @@
 // The ring reduce-scatter + all-gather schedule for the native collective
-// (docs/distributed-native-plan.md section 5). Pure host logic; see
+// (docs/distributed-design.md Part 3, section 5). Pure host logic; see
 // ring_schedule.h.
 
 #include "backends/cuda/collective/ring_schedule.h"

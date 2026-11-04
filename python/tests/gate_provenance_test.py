@@ -1,6 +1,6 @@
 """G4: every fixture record carries its provenance.
 
-Gate G4 of ``docs/dependency-layering-plan.md`` section 8, and the invariant of
+Gate G4 of ``docs/build.md`` section 8, and the invariant of
 section 7.2: a manifest record names the environment that produced the bytes
 (``producer``) and the module or generator that makes them (``generated_by``).
 Without the pair, a parity claim in [parity.md](parity.md) rests on an

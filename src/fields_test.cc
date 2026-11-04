@@ -567,7 +567,7 @@ void TestMetadataBlock() {
          "metadata: the old view changed a shared field");
 }
 
-// The `Recipe` block (design decision D7 of docs/sft-parity-plan.md): the field
+// The `Recipe` block (design decision D7 of docs/parity.md): the field
 // order is the format, the block is visited last, and every member round-trips.
 void TestRecipeBlock() {
   CheckpointMetadata written;

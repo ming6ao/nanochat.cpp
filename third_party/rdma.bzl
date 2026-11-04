@@ -1,4 +1,4 @@
-"""Repository rule for libibverbs (docs/distributed-native-plan.md phase 0).
+"""Repository rule for libibverbs (docs/distributed-design.md Part 3, phase 0).
 
 The RDMA transport is the second transport of the native collective. libibverbs
 is a system library, not a Bazel module, so this rule looks for the header in

@@ -1,8 +1,8 @@
-// The persistent reinforcement-learning worker (docs/rl-notebook.md section 4).
-// It holds the model and the optimizer across steps and speaks the pipe
-// protocol documented in `src/rl_worker.h`. The RL step is the shared
+// The persistent reinforcement-learning worker (docs/post-training.md Part 1,
+// section 4). It holds the model and the optimizer across steps and speaks the
+// pipe protocol documented in `src/rl_worker.h`. The RL step is the shared
 // `nanochat::RlStep`, so the worker and the file-driven `rl_step` binary cannot
-// drift apart (docs/training-seam.md section 6.4).
+// drift apart (docs/distributed-design.md Part 2, section 6.4).
 
 #include "src/rl_worker.h"
 
@@ -372,7 +372,7 @@ void RlWorker::Generate(const std::vector<int>& prompts, int num_prompts,
   // The multi-prompt rollout is one call: the same `num_samples` rows per
   // prompt, with `params` (including any per-sample `stop_ids`) reused for
   // every prompt. It shares the generation compute with the file-driven
-  // binary and the C ABI (docs/rl-notebook.md section 5 phase 5).
+  // binary and the C ABI (docs/post-training.md Part 1, section 5 phase 5).
   GenerateMultiPrompt(model_.get(), prompts.data(), num_prompts, prompt_len,
                       params, nullptr, out);
 }

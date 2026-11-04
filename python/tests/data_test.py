@@ -6,7 +6,7 @@ only. See docs/python.md section 11.1.
 
 The reader stays in the core, because it is the standard library alone. The
 ``tiktoken`` encoding built from it is the Z2 half of
-``docs/dependency-layering-plan.md`` section 2.1, so
+``docs/build.md`` section 2.1, so
 ``build_tiktoken_encoding`` and ``Nctoken1Tokenizer`` now live in
 ``nanochat_cpp_bridge.reference_data`` and the coverage below follows them
 there. A fake ``tiktoken`` module keeps the test hermetic: no wheel, no

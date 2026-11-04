@@ -1,7 +1,7 @@
 """The shared notebook session setup for the three notebooks.
 
 A notebook installs the package with one cell and configures the environment
-with one cell (``docs/dependency-layering-plan.md`` section 6.5). The bodies
+with one cell (``docs/build.md`` section 6.5). The bodies
 live here, so the code has one home and the tests can drive it.
 
 :func:`setup` is the one entry point. It prefers the installed distribution: a
@@ -106,7 +106,7 @@ class Session:
 
         An installed session has no repository to ask, so it records the
         distribution it runs. An unknown version stays empty rather than
-        guessed (``docs/dependency-layering-plan.md`` section 7.2).
+        guessed (``docs/build.md`` section 7.2).
         """
         if self.git_revision:
             return self.git_revision
@@ -164,7 +164,7 @@ def installed_session(package, *, arch="sm_75", devices=1, base=None,
     """Prepare the session from the installed distribution.
 
     No clone and no build run: the library comes from the search order of
-    ``docs/dependency-layering-plan.md`` section 6.3, which ends at the
+    ``docs/build.md`` section 6.3, which ends at the
     installed ``nanochat_cpp_cuda_<arch>`` wheel. ``package`` is the imported
     ``nanochat_cpp`` module. ``base`` becomes ``NANOCHAT_BASE_DIR`` and
     defaults to the staging root of the run host.

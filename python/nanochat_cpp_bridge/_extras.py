@@ -2,7 +2,7 @@
 
 Every module of this package imports its heavy package inside the function
 that needs it, so ``import nanochat_cpp_bridge`` costs nothing and needs no
-extra (sections 4 and 6.1 of ``docs/dependency-layering-plan.md``). When the
+extra (sections 4 and 6.1 of ``docs/build.md``). When the
 import fails, the caller gets :class:`MissingExtra` naming the extra of
 section 6.2 instead of a bare ``ModuleNotFoundError``::
 

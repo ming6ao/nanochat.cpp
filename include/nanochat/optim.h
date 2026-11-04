@@ -26,7 +26,7 @@ struct OptimizerConfig {
   // Global gradient-norm clip; <= 0 disables clipping.
   float clip = 1.0f;
   // The fraction of every group rate that a run starts from (design decision D3
-  // of docs/sft-parity-plan.md): the reference SFT run multiplies each group
+  // of docs/parity.md): the reference SFT run multiplies each group
   // rate by `init_lr_frac = 0.8` once, before the first step, and lets the
   // schedule take it from there.
   //

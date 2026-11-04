@@ -4,7 +4,7 @@
 command table,
 the argument assembly, the Bazel wiring, the build lock, and the sandbox and
 queue routing live here. The resource launcher is
-``python/nanochat_cpp/sandbox.py``. See ``docs/script-consolidation-plan.md``
+``python/nanochat_cpp/sandbox.py``. See ``docs/python.md``
 and ``docs/sandbox.md``.
 
 The observable contract is frozen (decision 4 of the plan): the environment
@@ -523,7 +523,7 @@ def _tempdir(prefix: str) -> str:
 
 
 def cmd_pgo(argv: list[str], ctx: Context) -> int:
-    """The profile-guided loop (docs/profile-guided-optimization.md).
+    """The profile-guided loop (docs/performance.md).
 
     The loop is Python and the host tool is Python, so the command forwards to
     the module instead of starting a process. The Modal SDK is the one thing the

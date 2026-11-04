@@ -1,5 +1,5 @@
 // tests/hw_gate_cuda_test.cc -- the standalone hardware gate
-// (docs/correctness-gates.md section 4.6).
+// (docs/testing.md Part 1, section 4.6).
 //
 // The training path calls `RunHardwareCorrectnessGate` at the start of a fresh
 // run. This target is the same check without a training run around it, so the

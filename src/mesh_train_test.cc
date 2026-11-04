@@ -1,5 +1,5 @@
 // src/mesh_train_test.cc -- the mesh training driver on the CPU backend
-// (docs/client-runtime-design.md section 10.1, docs/training-seam.md
+// (docs/client-runtime-design.md section 10.1, docs/distributed-design.md
 // section 6.6).
 //
 // The gates: the driver writes one record per step and a summary; a resume
@@ -476,7 +476,7 @@ void TestDriverMatchesHandRun() {
 }  // namespace
 
 // The packed `NCSFT001` shard: the driver cycles the rows and writes one record
-// per step (docs/training-seam.md section 6.2).
+// per step (docs/distributed-design.md Part 2, section 6.2).
 void TestDriverRunsPackedRows() {
   const Fixture fixture = MakeFixture();
   const std::string out = (fixture.root / "rows").string();

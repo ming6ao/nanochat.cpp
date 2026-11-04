@@ -1,7 +1,7 @@
 """T0: the observable contract of ``tools/nanochat``.
 
 Pin the behavior that the language move must not change
-(``docs/script-consolidation-plan.md`` section 7, P2). The suite runs the real
+(``docs/python.md`` section 7, P2). The suite runs the real
 entry script and the real sandbox launcher, so it is hermetic but not a fake:
 it needs no library, no Bazel run, no GPU, and no network.
 

@@ -1,5 +1,5 @@
 // backends/cuda/collective/transport_select_test.cc -- the per-neighbor
-// transport selection rule (docs/distributed-native-plan.md section 3.2 and
+// transport selection rule (docs/distributed-design.md Part 3, section 3.2 and
 // section 13, T0 row 2). It checks the pure rule and the mixed group that
 // `RingTransports::Connect` builds.
 

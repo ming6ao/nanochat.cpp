@@ -122,7 +122,7 @@ and then an H100 at bf16, each from its own image;
 [docs/host-portability.md](docs/host-portability.md) section 9 has one row per
 host. `//python:pipeline_test` is the gate of the chain in the default CPU test
 loop and `//python:pipeline_gpu_test` is its CUDA twin
-([docs/pipeline-plan.md](docs/pipeline-plan.md) section 7). Every run is wrapped
+([docs/post-training.md](docs/post-training.md) Part 2, section 7). Every run is wrapped
 by the entry point, because both stage executables refuse to start outside it:
 
 ```bash
@@ -138,7 +138,7 @@ them. `pipeline_demo` runs the T4 leg first and the H100 leg second, prints one
 document with three keys -- `legs` (each leg's report summary), `comparison`
 (the cross-leg step-time ratio beside the recorded MFU and speed ratio), and
 `gates` (G1 to G3, each pass or fail with the numbers it read) -- and exits
-non-zero when a gate fails. [docs/pipeline-plan.md](docs/pipeline-plan.md) has
+non-zero when a gate fails. [docs/post-training.md](docs/post-training.md) has
 the chain and the gates, and
 [docs/host-portability.md](docs/host-portability.md) the two legs, the two
 images, and the two precisions.

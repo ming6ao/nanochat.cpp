@@ -343,7 +343,7 @@ def model_flags(config: Config | None = None) -> list[str]:
     """The model flags of ``config``, as ``nanochat::cli::IsModelFlag`` reads them.
 
     This is the one home of the model flag list on the Python side
-    (docs/pipeline-plan.md B1 and B2). ``nanochat::cli::ApplyModelFlag``
+    (docs/post-training.md B1 and B2). ``nanochat::cli::ApplyModelFlag``
     (``src/cli.h``) is the home on the C++ side, and every binary parses the
     same names, so a stage command line rebuilds the exact shape a stage was
     started with. The two facades (:func:`nanochat_cpp.sft.run` and
@@ -626,7 +626,7 @@ class Model:
 
         The call sums into the parameter gradients without zeroing them, so
         call ``zero_grad`` first and use ``1 / micro_batches`` for gradient
-        accumulation (docs/training-seam.md section 6.1).
+        accumulation (docs/distributed-design.md Part 2, section 6.1).
         """
         _void(self._lib, "nanochat_backward_accumulate", self._handle,
               ctypes.c_float(float(scale)))
@@ -637,7 +637,7 @@ class Model:
 
         ``optimizer`` is an :class:`Optimizer`, or ``None`` for the forward and
         backward only. The model owns the step number internally, so no step
-        argument is passed (docs/training-seam.md section 6.1).
+        argument is passed (docs/distributed-design.md Part 2, section 6.1).
         """
         if optimizer is not None and not isinstance(optimizer, Optimizer):
             raise TypeError(

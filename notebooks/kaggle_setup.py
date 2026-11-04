@@ -2,7 +2,7 @@
 
 A notebook installs the package with one ``pip install`` cell and configures
 the environment with one cell, so this module has two paths and prefers the
-first (``docs/dependency-layering-plan.md`` section 6.5):
+first (``docs/build.md`` section 6.5):
 
 * the installed package. ``pip install "nanochat-cpp[hub]"`` gives the two
   import packages, and the library search order of section 6.3 finds the shared
@@ -157,7 +157,7 @@ def installed_version() -> str:
     """The version of the installed distribution, or ``""`` when unknown.
 
     The version is read from the installed metadata, never from the tree, so an
-    unknown version stays unknown (``docs/dependency-layering-plan.md`` section
+    unknown version stays unknown (``docs/build.md`` section
     7.2).
     """
     try:

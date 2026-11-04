@@ -9,7 +9,7 @@
 #include "nanochat/config.h"
 #include "tests/oracle_fixture.h"
 
-// The staged numeric trace of docs/numerics-integration.md: one 10-layer model,
+// The staged numeric trace of docs/testing.md: one 10-layer model,
 // four phases (training, evaluation, greedy generation, and the SFT and RL
 // arithmetic), recorded as a flat list of named records, so one committed
 // fixture can be replayed on the CPU reference backend, under `--config=sim`,
@@ -44,7 +44,7 @@ namespace numerics {
 // The fixture magic of the numeric trace container.
 inline constexpr char kTraceMagic[] = "NANONUM1";
 
-// The tie rule of docs/numerics-integration.md section 6.4: every logit margin
+// The tie rule of docs/testing.md Part 2, section 6.4: every logit margin
 // the run reports must exceed this value, or a one-unit roundoff difference can
 // flip a greedy identifier. The margin is a diagnostic, not a compared record,
 // so this is the only numeric threshold in the gate.
@@ -81,7 +81,7 @@ std::string BuildName();
 // reads. The order is the vector order.
 std::vector<std::uint8_t> SerializeTrace(const std::vector<Record>& records);
 
-// The reference configuration of docs/numerics-integration.md section 6.2.
+// The reference configuration of docs/testing.md Part 2, section 6.2.
 Config ReferenceConfig();
 
 // The fixed shape of the trace. The defaults are the reference values; a caller

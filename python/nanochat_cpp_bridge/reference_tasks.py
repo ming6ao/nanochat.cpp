@@ -3,7 +3,7 @@
 ``nanochat_cpp.tasks`` (Z1) owns the task classes, the multiple-choice prompt
 renderer, and the answer parsers, all of which are standard-library only. The
 three things it cannot do without an extra live here
-(``docs/dependency-layering-plan.md`` section 2.1):
+(``docs/build.md`` section 2.1):
 
 ``HubDataset`` and ``load_hub_dataset``
     The dataset access of ``tasks.common``: list the parquet shards of a hub

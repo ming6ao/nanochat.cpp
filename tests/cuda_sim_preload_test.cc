@@ -154,7 +154,7 @@ int DriveTheRealBackend(const std::string& profile_name) {
   ExpectTrue(host_c.size() == static_cast<std::size_t>(kM) * kN,
              "the device-to-host copy returned the output");
 
-  // The scaled fp8 path (docs/simulator-precision.md section 5). The mock
+  // The scaled fp8 path (docs/simulator.md Part 7, section 5). The mock
   // records and validates the cublasLt call shape; it does not compute. Only an
   // fp8 profile accepts the call, so the block is guarded by the capability.
   if (caps.supports_fp8) {
@@ -177,7 +177,7 @@ int DriveTheRealBackend(const std::string& profile_name) {
     ExpectTrue(allocated, "the fp8 buffers allocate");
     if (allocated) {
       // A finite, positive scale: the mock checks the range, not the value
-      // (docs/simulator-precision.md section 5.2).
+      // (docs/simulator.md Part 7, section 5.2).
       const float one = 1.0f;
       nanochat::kernels::Memcpy(scale_x, &one, sizeof(float),
                                 nanochat::CopyDir::kHostToDevice);
@@ -260,7 +260,7 @@ void CheckLog(const std::string& log, const std::string& profile,
                "a non-tensor-core profile records no tensor-core GEMM");
   }
 
-  // The scaled fp8 call shape (docs/simulator-precision.md section 5.2).
+  // The scaled fp8 call shape (docs/simulator.md Part 7, section 5.2).
   const nanochat::DeviceProfile* entry = nanochat::FindDeviceProfile(profile);
   if (entry != nullptr && entry->supports_fp8) {
     ExpectTrue(Contains(log, "\"call\":\"cublasLtMatmul\""),

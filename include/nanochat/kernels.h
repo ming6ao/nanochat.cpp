@@ -453,7 +453,7 @@ void GemmWgrad(const GemmParams& params, const ComputeType* a,
 // Quantizes `src` to one byte per element with one tensorwise scale, and writes
 // the dequantization value (`1 / scale`) to `*dequant`. The rounding is shared
 // with the simulator through `nanochat/fp8.h`, so the device and the CPU
-// reference agree (docs/correctness-gates.md section 3.2).
+// reference agree (docs/testing.md Part 1, section 3.2).
 void QuantizeFp8(const QuantizeFp8Params& params, const ComputeType* src,
                  std::uint8_t* dst, float* dequant);
 

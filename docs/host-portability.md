@@ -166,7 +166,7 @@ owned a different one.
 ## 5. GPU queue and device selection
 
 The GPU job queue serializes the heavy GPU jobs
-([gpu-queue-plan.md](gpu-queue-plan.md)). The worker owns the devices and the
+([sandbox.md](sandbox.md)). The worker owns the devices and the
 `nvidia-smi` gate. The client does not name a device.
 
 - The worker reads the pool from `nvidia-smi`, or from `NANOCHAT_GPU_DEVICES`
@@ -479,7 +479,7 @@ The model is single-device. One job uses one card. Two cards give two options.
 
 Option A: two independent jobs. Run one job on device 0 and one on device 1.
 The queue runs one job at a time, so this option needs stage Q6 of
-[gpu-queue-plan.md](gpu-queue-plan.md): one job per free device subset.
+[sandbox.md](sandbox.md): one job per free device subset.
 
 Option B: data-parallel training. One process owns each card. The processes
 all-reduce their gradients with NCCL, then each process steps its optimizer.
@@ -513,10 +513,10 @@ the single-card path is fast.
 ## 9. The pipeline chain on three hosts
 
 One job file runs base training, then SFT, then RL, and each stage reads the
-checkpoint of the stage before it. `docs/rl-notebook.md` section 9 gives the
+checkpoint of the stage before it. `docs/post-training.md` Part 1, section 9 gives the
 chain itself; this section gives what each host contributes and what the run
 records about it. The entry is always the tool (design decision D10 of
-`docs/pipeline-plan.md`), because both stage executables call
+`docs/post-training.md`), because both stage executables call
 `RequireSandboxOrDie`, and a notebook's `NANOCHAT_SANDBOX_BACKEND=none`
 satisfies the library only.
 
@@ -556,7 +556,7 @@ the two functions, the run ids, and the gates that compare the pair.
 
 ### 9.2 Colab with a T4: the gate is owed
 
-Row 9 of `docs/pipeline-plan.md` names a manual Colab run as its gate, and
+Row 9 of `docs/post-training.md` names a manual Colab run as its gate, and
 section 6.2 of that plan gives the four cells. This campaign wrote
 `notebooks/colab_pipeline.ipynb` and `notebooks/colab_setup.py` and ran neither
 on Colab, so the gate stays owed until a session runs the four cells. No leg of
@@ -667,7 +667,7 @@ What the two legs share, so they cannot drift:
   point at.
 - Both functions pass the same `cpu=` value. Modal sizes the CPU by memory when
   `cpu=` is absent, so two legs with different memory would get different host
-  budgets, and gate G2 of `docs/pipeline-scaleup-plan.md` section 8 compares the
+  budgets, and gate G2 of `docs/campaigns.md` compares the
   two base step times: an equal `cpu=` is what makes that comparison mean
   something.
 
@@ -687,7 +687,7 @@ What only the entry point does:
   checkpoint metadata. G2 bounds the H100 base step time at 1.25 times the T4
   one. G3 divides the measured H100 step by the roofline prediction the H100
   container recorded and holds the ratio inside `[1, 200]` until row 9 of
-  `docs/pipeline-scaleup-plan.md` narrows it. No gate reads the MFU or the speed
+  `docs/post-training.md` narrows it. No gate reads the MFU or the speed
   ratio.
 
 The T4 leg has a recorded run. `modal run tools/modal/app.py::pipeline_demo`
@@ -705,7 +705,7 @@ that day. This is the host block and the outcome of the report it delivered:
 | base loss | 6.1874 to 0.0049 |
 | `total_seconds` | 4.46 |
 
-The two-leg run is row 9 of `docs/pipeline-scaleup-plan.md`. It ran on 2026-10-31
+The two-leg run is row 9 of `docs/post-training.md`. It ran on 2026-10-31
 at the `standard` job and recorded both legs:
 
 | Item | T4 leg | H100 leg |

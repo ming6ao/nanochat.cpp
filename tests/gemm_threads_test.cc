@@ -11,7 +11,7 @@
 // weight-gradient GEMMs at one thread and at two, and compares the bytes.
 //
 // CPU only: tier S0. On a build without OpenMP the guard holds trivially.
-// docs/numerics-integration.md section 6.2 owns the trace.
+// docs/testing.md Part 2, section 6.2 owns the trace.
 
 #include <cmath>
 #include <cstdint>

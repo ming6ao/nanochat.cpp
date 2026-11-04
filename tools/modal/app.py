@@ -2,7 +2,7 @@
 
 The image holds the package and the compiled shared library; the weights
 Volume holds the weights. That split is section 6.4 of
-``docs/dependency-layering-plan.md`` and D8: a new checkpoint then costs a
+``docs/build.md`` and D8: a new checkpoint then costs a
 download, not an image build.
 
 - ``nanochat-runs`` at ``/runs`` is the run directory the notebook polls.
@@ -11,7 +11,7 @@ download, not an image build.
   ``.revision``. ``fetch_stage`` downloads a revision it does not hold yet and
   returns the folder, so a warm start is a download and never a rebuild.
 
-Two legs run here, and section 7 of ``docs/pipeline-scaleup-plan.md`` is the
+Two legs run here, and section 7 of ``docs/post-training.md`` is the
 table they follow. A leg is a frozen :class:`Leg` record: a name, a card type,
 a card count, an architecture, a precision, and the flag triple the builder
 emits. ``t4`` is a T4 at ``sm_75`` and fp32, and it runs first so its artifact
@@ -28,7 +28,7 @@ their names, because ``notebooks/target.py`` resolves ``train`` through
 leg and mirror them. ``train`` runs one stage of a job; ``pipeline`` runs the
 whole base, SFT, RL, and eval chain of one job file through
 ``python -m nanochat_cpp.pipeline``, which is the container entry of design
-decision D10 (``docs/pipeline-plan.md`` section 6.3). One build per image
+decision D10 (``docs/post-training.md`` section 6.3). One build per image
 produces the library, the two stage executables the chain launches, and
 ``//src:roofline_main``, so the chain and gate G3 both find a binary already
 built (sections 6.4 and B6).
@@ -134,7 +134,7 @@ REPO_ROOT = "/repo"
 LIBRARY = f"{REPO_ROOT}/bazel-bin/bindings/libnanochat_shared.so"
 
 #: The two stage executables the chain launches, beside the library: the Bazel
-#: labels the one image build names (``docs/pipeline-plan.md`` B6), so a
+#: labels the one image build names (``docs/post-training.md`` B6), so a
 #: container needs no second build and the wheel line below stays a later
 #: one-line change.
 STAGE_NAMES = ("sft_main", "rl_worker")
@@ -143,7 +143,7 @@ STAGE_TARGETS = ("//src:sft_main", "//src:rl_worker")
 #: The Bazel label of the roofline tool. Gate G3 runs
 #: ``tools/nanochat roofline`` inside the container, and the tool must find its
 #: binary already built there instead of starting a second build
-#: (``docs/pipeline-scaleup-plan.md`` sections 7 and 8). It is not a stage
+#: (``docs/post-training.md`` sections 7 and 8). It is not a stage
 #: executable: no stage launches it, and only the gate reads its report.
 ROOFLINE_TARGET = "//src:roofline_main"
 
@@ -151,7 +151,7 @@ ROOFLINE_TARGET = "//src:roofline_main"
 #: It is not a stage executable either: only :func:`corpus` calls it, to build
 #: the ``NCTOKEN1`` artifact a ``files`` corpus needs. It sits in its own
 #: directory, so the path is not the ``bazel-bin/src`` one the stage
-#: executables take (``docs/pipeline-scaleup-plan.md`` section 9 row 3).
+#: executables take (``docs/post-training.md`` section 9 row 3).
 TOKENIZER_TARGET = "//src/tokenizer:tok_train_main"
 TOKENIZER_BIN = f"{REPO_ROOT}/bazel-bin/src/tokenizer/tok_train_main"
 
@@ -172,7 +172,7 @@ BENCH_TARGET = "//backends/cuda/kernels:muon_benchmark"
 BENCH_BIN = f"{REPO_ROOT}/bazel-bin/backends/cuda/kernels/muon_benchmark"
 
 #: The labels the one build of an image names: the shared library, the two
-#: stage executables the chain launches (``docs/pipeline-plan.md`` B6 and D2),
+#: stage executables the chain launches (``docs/post-training.md`` B6 and D2),
 #: the roofline tool G3 measures with, the tokenizer trainer the corpus
 #: function runs, and the optimizer benchmark :func:`bench_h100` times.
 BUILD_TARGETS = ("//bindings:nanochat_shared", *STAGE_TARGETS,
@@ -207,7 +207,7 @@ TIMEOUT_SECONDS = 8 * 60 * 60
 #: The CPU allocation of every leg, in cores. Modal sizes the CPU by memory
 #: when ``cpu=`` is absent, so two legs with different memory would get
 #: different host budgets; gate G2 compares step times across the legs, so both
-#: legs take this one value (``docs/pipeline-scaleup-plan.md`` section 7).
+#: legs take this one value (``docs/post-training.md`` section 7).
 CPU_CORES = 4.0
 
 #: The gate constants of section 8. G2 is a smoke check: the H100 base step
@@ -268,7 +268,7 @@ class Leg:
     image, because the image compiles for exactly one architecture, and
     ``precision`` is the build precision the image sets in the environment, so
     the report's ``host.precision`` and ``host.arch`` are the facts of the
-    library that ran (``docs/pipeline-scaleup-plan.md`` P6 and section 7).
+    library that ran (``docs/post-training.md`` P6 and section 7).
 
     ``build`` is the flag triple the builder emits today
     (``nanochat_cpp._build._build_command``), written out here so a reader sees
@@ -417,7 +417,7 @@ def _build_image(leg: Leg):
         .add_local_dir(str(REPO), remote_path=REPO_ROOT, copy=True,
                        ignore=[".git", "bazel-*", "**/__pycache__",
                                # The profile artifacts of
-                               # `docs/profile-guided-optimization.md` are local
+                               # `docs/performance.md` are local
                                # measurements, and one trace is hundreds of
                                # megabytes. The loop passes its job file as a
                                # JSON string, so the image never reads them.
@@ -431,7 +431,7 @@ def _build_image(leg: Leg):
                                # an Ubuntu 22.04 image does not have. A deploy
                                # from a host that ran `tools/kaggle/bootstrap.sh`
                                # would otherwise build an image that cannot
-                               # compile (`docs/pipeline-plan.md` section 8
+                               # compile (`docs/campaigns.md`
                                # row 10).
                                ".bazelrc.local"])
         # Install the package at image build (section 6.4). The tree install
@@ -556,11 +556,11 @@ def _check_cards(leg: Leg, job_json: str) -> None:
     image compiled for exactly that architecture, so a T4 container checks
     ``sm_75`` at fp32 and an H100 container checks ``sm_90`` at bf16 against
     the same job, and a mismatched deployment stops before the chain starts
-    (``docs/pipeline-scaleup-plan.md`` section 7).
+    (``docs/post-training.md`` section 7).
 
     A train job declares one replica per device in ``mesh.count``. A pipeline
     job declares no mesh, because the chain runs one replica of each stage
-    (``docs/pipeline-plan.md`` B11), so the count the leg declares is the
+    (``docs/post-training.md`` B11), so the count the leg declares is the
     answer. A mismatch fails here, before the upload, not inside the driver.
     """
     expected = leg.capability
@@ -999,7 +999,7 @@ def predicted_step_ms(document: Mapping) -> tuple:
     limit of the row with the largest bound is the limit the step time reads.
     Every row of a report at this shape answers ``launch``, so the chain is
     bound by launches and by the host program, not by arithmetic (section 2 of
-    ``docs/pipeline-scaleup-plan.md``). The step bound answers ``None`` when
+    ``docs/post-training.md``). The step bound answers ``None`` when
     the document carries no positive ``step_seconds``.
     """
     seconds = document.get("step_seconds")
@@ -1057,7 +1057,7 @@ def _pipeline_on(leg: Leg, job_json: str, run_id: str, stage_json: str = "",
     two legs cannot drift: the :class:`Leg` they pass selects the image, the
     card, the precision, the architecture, and the roofline device (section 7).
 
-    One job file runs the stages of ``docs/pipeline-plan.md`` section 1, and
+    One job file runs the stages of ``docs/post-training.md`` section 1, and
     the container entry is the one design decision D10 names:
     ``tools/nanochat client --profile train -- python -m
     nanochat_cpp.pipeline <job.json>``. The function mirrors ``train``:
@@ -1188,7 +1188,7 @@ def pipeline_h100(job_json: str, run_id: str, stage_json: str = "",
 
 #: The directory of the runs Volume that holds the corpus of every job. It sits
 #: beside a run directory, not inside one, because the corpus outlives one run
-#: and a second job reads it again (``docs/pipeline-scaleup-plan.md`` section 9
+#: and a second job reads it again (``docs/post-training.md`` section 9
 #: row 3). It is the same word as the run-level name above and a different
 #: directory, so it has its own name.
 CORPUS_VOLUME_DIRNAME = "corpus"
@@ -1201,7 +1201,7 @@ TOKENIZER_CHARS = 200_000_000
 
 #: The document one corpus download writes beside its shards. The chain reads
 #: it as the manifest of the directory, so a shard left by an earlier download
-#: cannot join a run (``docs/pipeline-scaleup-plan.md`` section 9 row 3).
+#: cannot join a run (``docs/post-training.md`` section 9 row 3).
 CORPUS_MANIFEST = "corpus.json"
 
 
@@ -1288,7 +1288,7 @@ def process_tail(result, lines: int = 5) -> str:
     A child that fails in a container writes its reason to stderr, and that
     stderr is the only place the reason exists. A bare exit status sends the
     operator to the Modal log for it; the tail puts the reason beside the
-    status (``docs/pipeline-scaleup-plan.md`` section 9 row 3).
+    status (``docs/post-training.md`` section 9 row 3).
     """
     text = "\n".join(part for part in (getattr(result, "stdout", ""),
                                       getattr(result, "stderr", "")) if part)

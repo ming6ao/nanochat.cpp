@@ -198,7 +198,7 @@ struct BlockRuntime {
   char* shuffle = nullptr;
   // The block's dynamic shared memory, for an `extern __shared__` declaration.
   // The executed-source rewrite turns the declaration into a pointer to this
-  // buffer (docs/simulator-precision.md section 6.2).
+  // buffer (docs/simulator.md Part 7, section 6.2).
   char* dynamic_shared = nullptr;
   int current = -1;  // the fiber that is running, or -1
   int cursor = 0;    // the scheduler's place in the thread list

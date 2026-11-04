@@ -1,0 +1,275 @@
+{
+  "schema": "nanochat.baselines.v2",
+  "note": "Measured baselines for this repository, one entry per subject. Each entry is the report of the command in its `measurement` field at the revision it names. Update an entry only with a real run. docs/performance.md section 7 gives the rule.",
+  "host": "GTX 1080 Ti (sm_61) under WSL2, 12 vCPU, 7.8 GiB, unless the entry says otherwise",
+  "baselines": {
+    "attention": {
+      "note": "Frozen Phase 0 baseline of the shipped attention path. The d8_s512, window-128, and grouped-query rows are the measured values in docs/attention.md Part 2, section 4 (GTX 1080 Ti, sm_61, fp32). The d8_s512_sssl row is the mean over one SSSL cycle: (3 * window-128 + 1 * full) / 4. The head-dimension sweep is forward-only here, matching the plan table. work_ratio is issued work over necessary work.",
+      "device": "GTX 1080 Ti (sm_61)",
+      "precision": "fp32",
+      "measurement": "tools/nanochat profile --json --out docs/baselines.json",
+      "rows": [
+        {
+          "name": "attention_fwd:d8_s512",
+          "shape": "B=8 T=512 H=4 KV=4 D=128 wl=-1",
+          "ms": 1.586,
+          "gflops": 1356.669579,
+          "work_ratio": 1.996101
+        },
+        {
+          "name": "attention_bwd:d8_s512",
+          "shape": "B=8 T=512 H=4 KV=4 D=128 wl=-1",
+          "ms": 2.857,
+          "gflops": 1506.249879,
+          "work_ratio": 1.996101
+        },
+        {
+          "name": "attention_fwd:d8_s512_win128",
+          "shape": "B=8 T=512 H=4 KV=4 D=128 wl=128",
+          "ms": 1.571,
+          "gflops": 602.714276,
+          "work_ratio": 4.535991
+        },
+        {
+          "name": "attention_bwd:d8_s512_win128",
+          "shape": "B=8 T=512 H=4 KV=4 D=128 wl=128",
+          "ms": 2.806,
+          "gflops": 674.885337,
+          "work_ratio": 4.535991
+        },
+        {
+          "name": "attention_fwd:gqa_b2_t512_h8_kv2",
+          "shape": "B=2 T=512 H=8 KV=2 D=128 wl=-1",
+          "ms": 1.312,
+          "gflops": 819.99922,
+          "work_ratio": 1.996101
+        },
+        {
+          "name": "attention_bwd:gqa_b2_t512_h8_kv2",
+          "shape": "B=2 T=512 H=8 KV=2 D=128 wl=-1",
+          "ms": 3.155,
+          "gflops": 681.989842,
+          "work_ratio": 1.996101
+        },
+        {
+          "name": "attention_fwd:d8_s512_sssl",
+          "shape": "B=8 T=512 H=4 KV=4 D=128 pattern=SSSL",
+          "ms": 1.57475,
+          "gflops": 792.549664,
+          "work_ratio": 3.441294
+        },
+        {
+          "name": "attention_bwd:d8_s512_sssl",
+          "shape": "B=8 T=512 H=4 KV=4 D=128 pattern=SSSL",
+          "ms": 2.81875,
+          "gflops": 885.546845,
+          "work_ratio": 3.441294
+        },
+        {
+          "name": "attention_fwd:dim_sweep_d32",
+          "shape": "B=2 T=128 H=4 KV=4 D=32 wl=-1",
+          "ms": 0.068,
+          "gflops": 124.325647,
+          "work_ratio": 1.984496
+        },
+        {
+          "name": "attention_fwd:dim_sweep_d64",
+          "shape": "B=2 T=128 H=4 KV=4 D=64 wl=-1",
+          "ms": 0.092,
+          "gflops": 183.785739,
+          "work_ratio": 1.984496
+        },
+        {
+          "name": "attention_fwd:dim_sweep_d128",
+          "shape": "B=2 T=128 H=4 KV=4 D=128 wl=-1",
+          "ms": 0.112,
+          "gflops": 301.933714,
+          "work_ratio": 1.984496
+        },
+        {
+          "name": "attention_fwd:dim_sweep_d256",
+          "shape": "B=2 T=128 H=4 KV=4 D=256 wl=-1",
+          "ms": 0.164,
+          "gflops": 412.397268,
+          "work_ratio": 1.984496
+        }
+      ],
+      "origin": "docs/baselines.json"
+    },
+    "attention_e2e": {
+      "note": "Frozen Phase 0 end-to-end baseline for the forward-only evaluation path. Derived by scaling the documented d12 fp32 eval rate (docs/performance.md section 6) to the d8_s512 shape: the model needs about 344.8 GFLOP per forward, and the arena is computed exactly from the eval workspace sizes. Update this file only with a real tools/nanochat bench run at the recorded revision.",
+      "device": "GTX 1080 Ti (sm_61)",
+      "precision": "fp32",
+      "measurement": "tools/nanochat bench -- ./bazel-bin/src/eval_bench --batch 8 --seq 512 --layers 8 --heads 4 --kv-heads 4 --hidden 512 --window-pattern SSSL --json",
+      "rows": [
+        {
+          "name": "eval_forward",
+          "shape": "B=8 T=512 L=8 H=4 KV=4 C=512 V=32768 W=SSSL",
+          "ms": 74.472727,
+          "gflops": 0.0
+        }
+      ],
+      "arena_bytes": 755269888,
+      "tokens_per_second": 55000.0,
+      "batch": 8,
+      "seq": 512,
+      "origin": "docs/baselines.json"
+    },
+    "cpu_train": {
+      "date": "2026-10-04",
+      "nanochat_cpp_revision": "124ceb0",
+      "branch": "sliceme/agent-cpu-backend",
+      "host": {
+        "vcpus": 12,
+        "ram_gib": 7.8,
+        "platform": "WSL2",
+        "gpu": "GTX 1080 Ti (not used)"
+      },
+      "sandbox_profile": "train",
+      "config": {
+        "depth": 4,
+        "model_dim": 256,
+        "heads": 2,
+        "kv_heads": 2,
+        "head_dim": 128,
+        "context": 512,
+        "window_pattern": "L",
+        "device_batch": 2,
+        "total_batch": 1024,
+        "grad_accum": 1,
+        "steps": 10,
+        "warmup_steps": 1,
+        "training_tokens": 10240,
+        "parameters": 36700242,
+        "flops_per_token": 71958960
+      },
+      "promoted_measurement": {
+        "protocol": "docs/performance.md Part 2, section 9",
+        "command": "tools/nanochat run train -- bazel-bin/src/train_main --train-parquet <train-parquet> --tokenizer <tokenizer.nctoken> --layers 4 --heads 4 --kv-heads 4 --hidden 512 --seq 512 --vocab <vocab> --window-pattern L --batch 2 --grad-accum 1 --num-iterations 10 --warmup-steps 1 --eval-every -1 --save-every -1 --checkpoint <checkpoint-dir>/model.ckpt --log <checkpoint-dir>/train.log",
+        "rule": "one warmup run, then the best mean tokens/s over steps 2 to 10 of three measured runs",
+        "threads": 8,
+        "warmup_runs": 1,
+        "measured_runs": 3,
+        "best_run": "run 2",
+        "tokens_per_sec": 591.13,
+        "gflops": 42.54,
+        "seconds_per_10k_tokens": 16.92,
+        "seconds_per_step": 1.7323,
+        "runs_tokens_per_sec": {
+          "warmup": 588.28,
+          "run1": 582.3,
+          "run2": 591.13,
+          "run3": 585.39
+        },
+        "step_time_gate_seconds": 5.0,
+        "step_time_gate_result": "pass",
+        "correctness_gate": "docs/performance.md Part 2, section 8",
+        "correctness_gate_result": "pass"
+      },
+      "runs": [
+        {
+          "name": "pytorch_cpu_8threads",
+          "threads": 8,
+          "tokens_per_sec": 1299.3,
+          "gflops": 93.49,
+          "seconds_per_10k_tokens": 7.7
+        },
+        {
+          "name": "pytorch_cpu_1thread",
+          "threads": 1,
+          "tokens_per_sec": 453.9,
+          "gflops": 32.66,
+          "seconds_per_10k_tokens": 22.0
+        },
+        {
+          "name": "nanochat_cpp_cpu_scalar",
+          "revision": "759083e",
+          "threads": 1,
+          "tokens_per_sec": 7.2,
+          "gflops": 0.51,
+          "seconds_per_10k_tokens": 1398
+        },
+        {
+          "name": "nanochat_cpp_cpu",
+          "revision": "124ceb0",
+          "threads": 8,
+          "tokens_per_sec": 591.13,
+          "gflops": 42.54,
+          "seconds_per_10k_tokens": 16.92,
+          "seconds_per_step": 1.7323
+        }
+      ],
+      "end_to_end": {
+        "revision": "124ceb0",
+        "threads": 8,
+        "tokens_per_sec": 591.13,
+        "seconds_per_step": 1.7323,
+        "speedup_vs_scalar_7_2_tokens_per_sec": 82.1
+      },
+      "origin": "docs/baselines.json"
+    },
+    "cpu_gemm": {
+      "note": "Frozen Phase 0 baseline of the shipped CPU GEMM. The rows are the measured nanochat.bench.v1 report of dev/kernels/cpu_gemm_bench. The shipped kernels::Gemm is a scalar triple loop with a double accumulator, so the run is single-threaded. Compare a later phase against these numbers with the same configuration.",
+      "date": "2026-10-03",
+      "revision": "4133998",
+      "branch": "sliceme/agent-cpu-backend",
+      "threads": 1,
+      "device": "CPU (GTX 1080 Ti present but not used)",
+      "precision": "fp32",
+      "sandbox_profile": "t3-bench",
+      "measurement": "tools/nanochat bench -- ./bazel-bin/dev/kernels/cpu_gemm_bench --rounds 3 --warmup 1 --json --out /tmp/cpu-gap-p0.json",
+      "config": {
+        "depth": 4,
+        "model_dim": 256,
+        "heads": 2,
+        "kv_heads": 2,
+        "head_dim": 128,
+        "context": 512,
+        "window_pattern": "L",
+        "device_batch": 2,
+        "total_batch": 1024,
+        "grad_accum": 1,
+        "tokens_per_step": 1024,
+        "vocab": 32768,
+        "mlp_dim": 1024
+      },
+      "reference_rates_gflops": {
+        "note": "The Part 2, section 2 rates in docs/performance.md. The benchmark must reproduce each rate within 10 percent.",
+        "forward": 0.98,
+        "wgrad": 0.75,
+        "dgrad": 0.24
+      },
+      "rows": [
+        {
+          "name": "gemm_forward",
+          "shape": "M=1024 N=32768 K=256 ta=0",
+          "ms": 17366.477736,
+          "gflops": 0.989255,
+          "work_ratio": 1.0
+        },
+        {
+          "name": "gemm_wgrad",
+          "shape": "M=32768 N=256 K=1024 ta=1",
+          "ms": 23625.108755,
+          "gflops": 0.727187,
+          "work_ratio": 1.0
+        },
+        {
+          "name": "gemm_dgrad",
+          "shape": "M=1024 N=256 K=32768 ta=0",
+          "ms": 71650.412284,
+          "gflops": 0.239773,
+          "work_ratio": 1.0
+        },
+        {
+          "name": "mlp_gemm",
+          "shape": "M=1024 N=1024 K=256 ta=0",
+          "ms": 443.081883,
+          "gflops": 1.211674,
+          "work_ratio": 1.0
+        }
+      ],
+      "origin": "docs/baselines.json"
+    }
+  }
+}

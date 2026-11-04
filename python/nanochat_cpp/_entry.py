@@ -57,7 +57,7 @@ COMMANDS = (
     Command("gpuq", (
         "  gpuq <action> [opts]       the GPU job queue: submit, list, status, wait,",
         "                             logs, cancel, start, stop; see",
-        "                             docs/gpu-queue-plan.md",
+        "                             docs/sandbox.md",
     )),
     Command("run", (
         "  run <profile> -- <cmd...>  run a command under a sandbox profile; a GPU",
@@ -67,7 +67,7 @@ COMMANDS = (
         "  dist [opts] -- <cmd...>    one process per rank; one queue job for the",
         "                             group; sets the NANOCHAT_* rank variables and",
         "                             expands a `{rank}` token in the command. See",
-        "                             docs/distributed-launch.md",
+        "                             docs/distributed-design.md",
     )),
     Command("client", (
         "  client [opts] -- <cmd...>  one client process; one queue job for the full",
@@ -97,7 +97,7 @@ COMMANDS = (
     Command("pgo", (
         "  pgo <action> [opts]        the profile-guided optimization loop:",
         "                             measure, trace, analyze, compare, status;",
-        "                             see docs/profile-guided-optimization.md",
+        "                             see docs/performance.md",
     )),
     Command("doctor", (
         "  doctor [--json]            print environment, device, sandbox, and queue state",
@@ -108,9 +108,9 @@ COMMANDS = (
         "                             docs/simulator.md. Suites: correctness fp8-fast",
         "                             api collective kernel profile all (default all)",
         "                             `correctness` also carries the staged numeric",
-        "                             trace (docs/numerics-integration.md)",
+        "                             trace (docs/testing.md)",
         "                             `fp8-fast` is the fast fp8 core",
-        "                             (docs/correctness-gates.md section 5.1)",
+        "                             (docs/testing.md Part 1, section 5.1)",
         "                             Precision: fp32 (default) bf16 fp8",
     )),
     Command("verify", (

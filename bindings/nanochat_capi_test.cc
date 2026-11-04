@@ -238,7 +238,7 @@ void CheckSandboxRule() {
 }
 
 // The capability gate of `nanochat_init` names the build's own precision
-// (docs/pipeline-scaleup-plan.md section 3 trap 3 and section 9 row 2). The
+// (docs/campaigns.md). The
 // expected name is computed here from the same two helpers the shim calls, not
 // pinned to `fp32`: today's build is fp32, so a literal would pass on the wrong
 // text and then fail to describe a bf16 build.
@@ -838,9 +838,10 @@ void CheckWeightedBackward() {
 }
 
 // The gradient-accumulation and combined-step entry points
-// (docs/training-seam.md section 6.1). `nanochat_backward_accumulate` matches
-// the plain backward on identical models, and `nanochat_train_step` runs
-// forward + backward + one optimizer step; a null optimizer skips the update.
+// (docs/distributed-design.md Part 2, section 6.1).
+// `nanochat_backward_accumulate` matches the plain backward on identical
+// models, and `nanochat_train_step` runs forward + backward + one optimizer
+// step; a null optimizer skips the update.
 void CheckTrainStep() {
   const nanochat_config config = TinyConfig();
   const int batch = 2;
@@ -901,11 +902,11 @@ void CheckTrainStep() {
   }
 }
 
-// The reinforcement-learning step (docs/training-seam.md section 5.7,
-// docs/post-training.md section 5.2). `nanochat_rl_step` runs `ForwardLoss`,
-// then `BackwardWeighted`, then `Optimizer::Step`, and the divisor
-// `num_valid * num_passes * examples_per_rank` is computed in C++. These
-// checks prove the divisor is applied, that the two normalization inputs
+// The reinforcement-learning step (docs/distributed-design.md Part 2,
+// section 5.7, docs/post-training.md section 5.2). `nanochat_rl_step` runs
+// `ForwardLoss`, then `BackwardWeighted`, then `Optimizer::Step`, and the
+// divisor `num_valid * num_passes * examples_per_rank` is computed in C++.
+// These checks prove the divisor is applied, that the two normalization inputs
 // scale the gradient, that the step starts from a fresh gradient, and that the
 // optimizer step runs.
 void CheckRlStep() {

@@ -1,5 +1,5 @@
 // tests/sft_fixture_load_test.cc -- the phase B gate of
-// docs/sft-parity-plan.md section 7.
+// docs/testing.md.
 //
 // The five committed SFT fixtures must be readable with no reference checkout,
 // no torch, no tokenizer artifact, and no network. This test is the proof: it

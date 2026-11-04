@@ -12,7 +12,8 @@
 // The RL fixture is the typed-record file under the `NANOORC1`
 // magic. It holds the model configuration, the optimizer and schedule
 // configuration, the initial parameters, and, per step, one recorded rollout
-// (docs/rl-notebook.md section 4, docs/training-seam.md section 6.4).
+// (docs/post-training.md Part 1, section 4, docs/distributed-design.md Part 2,
+// section 6.4).
 //
 // The layout lives in `src/record_file.{h,cc}`, so the file-driven `rl_step`
 // binary, the persistent worker, and the oracle tests share one reader. This

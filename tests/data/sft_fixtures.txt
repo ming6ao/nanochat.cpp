@@ -4,7 +4,7 @@ the five SFT fixtures -- tests/data/sft_*
 What these files are
 --------------------
 
-`docs/sft-parity-plan.md` section 7 phase B items 4 and 5: one generator run
+`docs/parity.md` Part 1, section 7 phase B items 4 and 5: one generator run
 writes the committed artifacts the SFT rungs read, so no later gate needs the
 reference PyTorch checkout, a torch import, a tokenizer artifact, or a network.
 Each file comes from `tools/dump_fixtures.py`; nothing here was laid out by

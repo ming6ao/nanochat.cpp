@@ -283,10 +283,10 @@ void nanochat_runtime_load_weights(nanochat_runtime* runtime, const char* path);
 int nanochat_runtime_step(nanochat_runtime* runtime);
 
 // The mesh training driver (docs/client-runtime-design.md section 10.1 and
-// docs/training-seam.md section 6.6). The driver owns the step loop, the metric
-// record, the summary, the checkpoint interval, and the resume. It drives one
-// runtime and one data loader, so the client calls one function per run and
-// never steps the optimizer itself.
+// docs/distributed-design.md Part 2, section 6.6). The driver owns the step
+// loop, the metric record, the summary, the checkpoint interval, and the
+// resume. It drives one runtime and one data loader, so the client calls one
+// function per run and never steps the optimizer itself.
 //
 // The caller fills one config and runs it. Python owns the job file for the
 // child process, so this interface carries no serializer and no parser.
@@ -386,18 +386,18 @@ void nanochat_backward(nanochat_model* model);
 // parameter gradients, so call nanochat_zero_grad first for a fresh gradient.
 void nanochat_backward_weighted(nanochat_model* model, const float* row_weights,
                                 float scale);
-// Gradient accumulation (docs/training-seam.md section 6.1). Accumulates the
-// backward pass over the most recent forward into the parameter gradients
-// without zeroing them. `scale` multiplies the loss gradient; use
-// `1 / micro_batches`. A null model is an error.
+// Gradient accumulation (docs/distributed-design.md Part 2, section 6.1).
+// Accumulates the backward pass over the most recent forward into the parameter
+// gradients without zeroing them. `scale` multiplies the loss gradient; use `1
+// / micro_batches`. A null model is an error.
 void nanochat_backward_accumulate(nanochat_model* model, float scale);
-// Forward + backward + one optimizer step (docs/training-seam.md section 6.1).
-// Returns the batch-mean loss over the valid targets. A null `optimizer` runs
-// the forward and backward without an update.
+// Forward + backward + one optimizer step (docs/distributed-design.md Part 2,
+// section 6.1). Returns the batch-mean loss over the valid targets. A null
+// `optimizer` runs the forward and backward without an update.
 float nanochat_train_step(nanochat_model* model, nanochat_optim* optimizer,
                           const int* tokens, const int* targets, int batch,
                           int seq);
-// One reinforcement-learning optimizer step (docs/training-seam.md section
+// One reinforcement-learning optimizer step (docs/distributed-design.md section
 // 5.7, docs/post-training.md section 5.2). It runs ForwardLoss, then
 // BackwardWeighted with `advantages` as the per-row weight, then
 // Optimizer::Step(step). The divisor `num_valid * num_passes *

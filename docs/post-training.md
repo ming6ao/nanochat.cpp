@@ -12,7 +12,7 @@ Section 11 lists the state of each piece and names the file that holds it.
 The companion documents are [eval.md](eval.md) for evaluation,
 [python.md](python.md) for the process seam, [parity.md](parity.md) for the
 known differences, [model.md](model.md) for the model and the data formats, and
-[sft-parity-plan.md](sft-parity-plan.md) for the parity plan.
+[parity.md](parity.md) for the parity plan.
 
 ## 1. Scope
 
@@ -156,7 +156,7 @@ bridge masks the padding targets and the user targets to `-1`.
 The native C++ loader in `src/data.cc` reads parquet documents and tokenizes
 during the run. It uses best-fit packing for pretraining. The bridge owns the
 SFT renderer, the mixture, and the mask. The C++ packed-row loader owns the
-padding and the batching ([training-seam.md](training-seam.md) section 4).
+padding and the batching ([distributed-design.md](distributed-design.md) Part 2, section 4).
 `DataLoader` does not know about chat data.
 
 ### 4.2 Loop
@@ -286,8 +286,8 @@ second landed with B3: the load path and the save path are separate arguments.
   else. The legacy rule that derived a load path from `checkpoint` is removed,
   because a save path must never become a load path: it made an RL stage
   overwrite the checkpoint it warm started from (blocker B3 of
-  `docs/pipeline-plan.md`). A stage therefore needs both arguments whenever it
-  starts from its parent, and the chain of `docs/rl-notebook.md` section 9
+  `docs/post-training.md`). A stage therefore needs both arguments whenever it
+  starts from its parent, and the chain of `docs/post-training.md` Part 1, section 9
   always passes them.
 
 A graded reward and the per-row seed mix of B4 are what make the advantage
@@ -428,7 +428,7 @@ changes.
 | SFT arithmetic parity gate (`P5`, run R2) | Done at T0 | `//tests:sft_step_parity_test` against `tests/data/sft_step_fixture.bin` and `tests/data/sft_base_fixture.ckpt`; the T1 and T2 legs have not run on this host |
 | SFT schedule parity gate (run R3, schedule half) | Done | `//tests:sft_loop_parity_test` against `tests/data/sft_loop_fixture.bin`, T0 |
 | SFT driver parity gate (`P6` and `P7`, runs R3 and R4) | Built, not run | `//tests:sft_parity_test`; T2 and `manual`, so run it at a wave boundary |
-| SFT parity rungs `P4` to `P7` | `P4` `closed`; `P5` `equivalent` on the CPU backend; `P6` and `P7` `open` | `docs/parity.md`; `docs/sft-parity-plan.md` |
+| SFT parity rungs `P4` to `P7` | `P4` `closed`; `P5` `equivalent` on the CPU backend; `P6` and `P7` `open` | `docs/parity.md`; `docs/parity.md` |
 | RL step binary and the RL parity fixture | Done | `src/rl_step_main.cc`, `tools/dump_fixtures.py rl`, `tests/rl_parity_test.cc` |
 | RL orchestration worker | Done | `src/rl_worker_main.cc`, `python/nanochat_cpp/rl.py` |
 | RL warm start: the load path and the save path as two arguments (section 5.6) | Done | `python/nanochat_cpp/rl.py` `run()` and `worker_argv()`; `python/tests/rl_test.py` |
@@ -543,3 +543,944 @@ This phase changes the worker, so it needs its own document. The open items:
 3. A context limit, because the default `seq_len` is 2048 and an agent needs
    more.
 4. A reward that reads the whole conversation, not one completion.
+
+---
+
+## Part 1. Reinforcement learning in a notebook
+
+_Absorbed from the former `rl-notebook.md`. Its section numbers are unchanged,
+so a reference to a section of that document resolves to the same number here.
+The execution record is in [campaigns.md](campaigns.md)._
+
+Status: partly delivered. The hand-rolled loop, the one-call facade, the
+persistent worker, and the three-stage chain of section 9 exist. The
+multi-prompt C ABI binding and the tool-forcing driver are not wired yet.
+
+This document gives the plan to run reinforcement learning (RL) in a notebook.
+`docs/post-training.md` section 12 and `docs/distributed-design.md` Part 2, section 8 hold the
+same plan from the design side. This document is the notebook view. Section 9
+gives the one-job chain that runs this call last, after base training and SFT.
+
+### 1. Purpose
+
+A notebook user must write the data policy and the reward policy. The user must
+not write the training mechanism. One call must start an RL run. The C++ driver
+must hold the model and the optimizer.
+
+### 2. Today: compose it by hand
+
+A user can write an RL loop today with the public API. The loop is long.
+
+```python
+import nanochat_cpp as nc
+from nanochat_cpp import chat
+
+model = nc.Model(nc.Config(...))
+opt = nc.Optimizer(model, num_iterations=steps)
+task = chat.build_task("gsm8k")
+stop = tokenizer.encode_special("<|assistant_end|>")
+
+for step in range(1, steps + 1):
+    ids, targets, weights = [], [], []
+    for conv in prompts:
+        prompt = render_for_completion(conv)
+        rows = model.generate(prompt, num_samples=4, temperature=1.0,
+                              stop_ids=[stop])
+        rew = [task.reward(conv, tokenizer.decode(r.tokens)) for r in rows]
+        mean = sum(rew) / len(rew)
+        for row, r in zip(rows, rew):
+            # Build tokens = prompt + row tokens. Pad to seq_len.
+            # Set targets = -1 on the prompt. Set weight = r - mean.
+            ...
+    model.forward_loss(ids, targets)
+    model.zero_grad()
+    model.backward_weighted(weights, scale=1.0 / valid_tokens)
+    opt.step(step)
+```
+
+The loop has six problems.
+
+1. The user writes the mechanism and duplicates `TrainLoop`.
+2. `render_for_completion` is private (`python/nanochat_cpp/chat.py`).
+3. Only GSM8K has a `reward` method (`python/nanochat_cpp/tasks.py`).
+4. `generate` takes one prompt and many samples. It does not do multi-prompt
+   rollout.
+5. The loop crosses the application binary interface (ABI) every step.
+6. The divisor lives in Python, not C++. This breaks the single-source rule.
+
+### 3. The target: one call
+
+The plan gives the notebook one facade call. The call follows the proposed
+supervised fine-tuning call in `docs/distributed-design.md` Part 2, section 6.5.
+
+```python
+nc.rl.run(
+    task="gsm8k",
+    prompts=conversations,
+    num_samples=4,
+    steps=1000,
+    config=shape,                       # the model shape, as model flags
+    warm_start="chatsft.nchkpt01",      # the load path
+    checkpoint="chatrl.nchkpt01",       # the save path
+    checkpoint_interval=100,
+)
+```
+
+The user writes prompts and selects a task. The user does not write a loop.
+Python still owns the reward, so Python stays in the control loop. The mechanism
+moves into a persistent C++ worker.
+
+Three arguments carry three separate facts, and the second is why the call is
+safe to make at all:
+
+- `warm_start` is the container the worker loads the weights and the optimizer
+  moments from. It reaches the worker as `--checkpoint`.
+- `checkpoint` is the container the worker saves to, and nothing else. A save
+  path never becomes a load path, so a stage that warm starts from the SFT
+  checkpoint and saves to its own file keeps its parent intact (blocker B3 of
+  `docs/post-training.md`). The legacy rule that derived the load path from
+  `checkpoint` is removed, and `docs/python.md` section 3.4 records that as a
+  breaking change.
+- `config` is the model shape. It reaches the worker through
+  `nanochat_cpp.api.model_flags`, the one model flag list on the Python side, so
+  the worker rebuilds the shape of the run it warm starts from and the two
+  stages cannot drift (B1 and B2 of the same plan).
+
+### 4. The worker
+
+A long-lived process holds the model and the optimizer. It speaks a pipe
+protocol with the Python bridge. One step has seven parts.
+
+1. Python renders a batch of prompts.
+2. Python sends a `rollout` message.
+3. The worker generates rows and returns them.
+4. Python scores the rows and computes the advantage.
+5. Python sends an `advantage` message with weights.
+6. The worker runs one RL step. The step is `ForwardLoss`, then
+   `BackwardWeighted`, then `Optimizer::Step`.
+7. The worker returns the loss and the gradient norm.
+
+A `rl_step` binary shares the step logic. It reads a fixture. It is the
+correctness gate. The project trusts the worker only after
+`//tests:rl_parity_test` passes at tier T2.
+
+### 5. The phases, and what shipped
+
+The phases come from `docs/distributed-design.md` Part 2, section 8. The owners follow
+`AGENTS.md` section 1. Phases 1 to 4 are delivered. Phase 5 is delivered in
+C++ but its C ABI binding is not. Phase 6 is delivered in part.
+
+1. **Add `nanochat_rl_step` to the C ABI.** Add the call to
+   `include/nanochat/capi.h` and the binding. It maps to `BackwardWeighted` and
+   the divisor. The divisor moves into C++ per `docs/distributed-design.md` section
+   5.7. Owner: architect for the header, Python surface for the binding.
+2. **Add the `rl_step` binary and the parity fixture.** Add the file-driven
+   binary. Add `tools/dump_fixtures.py rl`. Gate: `//tests:rl_parity_test` at tier
+   T2. Owner: harness for the step, oracle for the fixture.
+3. **Add the persistent worker.** Add the worker binary and the pipe protocol.
+   Gate: an RL smoke run at tier T2. Owner: harness.
+4. **Add the Python bridge.** Add `nc.rl` next to `nc.sft`. Add the RL command
+   to the command table in `python/nanochat_cpp/_entry.py` and `toolchain.py`.
+   Owner: Python surface.
+5. **Add multi-prompt rollout.** Extend the C ABI generation to many prompts
+   with an independent stop for each row. The compute and the header are in
+   place. The C ABI shim in `bindings/` is still owed. Owner: architect for
+   `capi.h`, and the generation owner for the compute.
+6. **Add tool forcing.** Stream the `chat_engine` protocol. Force the
+   tool-output tokens in the generation loop. The C++ hook and the Python
+   driver exist. The driver is not wired to a tested path, so parity item P1
+   stays open in `docs/parity.md`. Owner: workflow and Python surface. This
+   step is optional.
+
+### 6. Notebook concerns
+
+- **Kaggle.** The notebook sets `NANOCHAT_SANDBOX_BACKEND=none`
+  (`docs/python.md` section 3.1). In this mode the facade must start the worker
+  directly. It must not call `tools/nanochat`, because Kaggle has no systemd
+  user manager.
+- **Workstation.** The facade calls `tools/nanochat` with a new profile and
+  command, for example `tools/nanochat train -- rl_worker ...`. The GPU queue
+  and the sandbox apply.
+- **Checkpoints.** The `rl` path already resolves to `chatrl_checkpoints`
+  (`python/nanochat_cpp/checkpoint.py`). A warm start and the optimizer state
+  use the checkpoint container.
+- **Sizes.** A notebook GPU is small. Keep the rollout batch and `num_samples`
+  small. The plan caps the shapes at tier T1 and tier T2.
+
+### 7. Convenience levels
+
+| Level | What the user writes | Available |
+|---|---|---|
+| Hand-rolled | The full loop | Yes, today |
+| Facade | `nc.rl.run(...)`, no loop | Delivered |
+| Batched and fast | The same call, many prompts | Delivered in C++; the C ABI shim is not |
+| Tool-forced parity | The same call | The mechanism exists; not yet wired |
+
+### 8. Open items
+
+Two items stay open.
+
+1. The multi-prompt C ABI call `nanochat_generate_multi` has no binding, so a
+   Python caller cannot reach the batched rollout through the C ABI.
+2. The tool-forcing driver (`ChatEngine` and `use_calculator`) is not wired to
+   a caller or a test, so `docs/parity.md` still records parity item P1 as
+   open.
+
+The discrete side is already gated. The fixture is
+`tests/data/numerics_golden_10l.bin`, which holds the rollout identifiers and
+the valid-target count. The gate is `//tests:numerics_trace_test`. The objective
+is a floating-point result, so `//tests:rl_parity_test` owns it. The correctness
+risk is therefore low. The remaining work is the interface and the
+orchestration.
+
+### 9. The chain: one job file, three stages
+
+`nc.rl.run` is the last of three stages, and one job file drives all three on
+any host. The chain is `python/nanochat_cpp/pipeline.py`, and it holds no
+training logic, no model flag list of its own, and no host name (design decision
+D1 of `docs/post-training.md`). Each stage calls one facade and reads the
+checkpoint of the stage before it:
+
+| Stage | Facade |
+|---|---|
+| base | `runtime.MeshTrainConfig` |
+| SFT | `sft.pack`, then `sft.run` |
+| RL | `rl.run` |
+
+```python
+# base: the mesh driver at world_size = 1, over the fixture corpus.
+runtime.MeshTrainConfig(config(job), steps=job.base_steps, ...)
+# SFT: one packed shard, the base checkpoint as the load path.
+sft.run(shard, ckpt, config=config(job), warm_start=base.checkpoint,
+        num_iterations=job.sft_steps)
+# RL: the SFT checkpoint as the load path, its own file as the save path.
+rl.run(reward, prompts, num_samples=job.num_samples, steps=job.rl_steps,
+       config=config(job), warm_start=sft.checkpoint, checkpoint=rl_ckpt,
+       max_tokens=job.max_tokens)
+```
+
+`config(job)` is `pipeline.PROFILES[job.profile]`, so the shape has one home;
+`PROFILES` holds the `demo` profile of decision D5, and every stage receives it
+as an `nanochat_cpp.api.Config`, which `api.model_flags` turns into the flags
+the stage binaries parse. The load path and the save path stay separate at every
+stage (B3), so each checkpoint survives the stage that reads it.
+
+A job is plain data with a JSON round trip: `run_id`, `profile`, `base_steps`,
+`sft_steps`, `rl_steps`, `num_prompts`, `num_samples`, `max_tokens`, `seed`,
+`out_root`, `corpus`, `deliver`, `temperature`, and `top_k`. `out_root` is empty
+in a committed job, because the host that owns a run root fills it: the Colab
+notebook sets `NANOCHAT_RUNS_DIR`, and the Modal app rewrites it to
+`/runs/<run_id>`.
+
+The reward is a class with a `reward` method, which `rl.run` accepts directly,
+so no Hub dataset loads. It is graded: 1.0 for the right number, 0.5 for the
+`####` marker, and otherwise the character overlap with the reference. A graded
+reward keeps the advantages of a group from collapsing into zeros, and the seed
+mix of B4 makes the four samples of a group differ in the first place, so the
+advantage vector is not zero either.
+
+`pipeline.run(job)` runs the three stages and returns a `Report`, and
+`python -m nanochat_cpp.pipeline <job>` is the same call from a command line.
+`deliver()` writes the two artifacts, and `//python:pipeline_test` asserts A1 to
+A9 of `docs/post-training.md` Part 2, section 7 over the `demo` profile, so the
+assertions and not the loss values are the contract.
+
+#### 9.1 The delivered artifacts
+
+`deliver()` writes the contract of decision D6. Five paths name it:
+
+```
+<run_root>/<run_id>/base/checkpoint.ckpt
+<run_root>/<run_id>/sft/checkpoint.ckpt
+<run_root>/<run_id>/rl/checkpoint.ckpt
+<run_root>/<run_id>/deliver/chatrl.ckpt
+<run_root>/<run_id>/deliver/pipeline_report.json
+```
+
+`deliver/chatrl.ckpt` is the RL checkpoint copied byte for byte, and the report
+is the review artifact: the stage order and the step counts, the loss traces and
+the mean rewards, the checkpoint digests and the metadata blocks, the seconds
+and the seeds, the model shape and the tokenizer digest, and the host block of
+`backend`, `arch`, `precision`, and `revision`. A reviewer reads the report and
+the checkpoint, not the run.
+
+The copy is verified against the digest the stage recorded. One field is empty
+by construction: `nc.sft.run` returns an exit status and not a loss trace, so
+the SFT stage says so in `extra` and the report carries an empty trace for it.
+The RL stage reads its rewards through `on_step`, which receives the per-rollout
+rewards, so it records the mean reward and the count of groups whose advantages
+are all zero.
+
+#### 9.2 The two entry forms
+
+The entry is always the tool, never a bare module (decision D10), because both
+stage executables call `RequireSandboxOrDie`, and a notebook's
+`NANOCHAT_SANDBOX_BACKEND=none` satisfies the library only. Two forms exist:
+
+```
+# The host form: one `train` scope, or the `none` backend of a container.
+tools/nanochat train -- python -m nanochat_cpp.pipeline <job>
+
+# The container form: the owner routes the work through the GPU queue.
+tools/nanochat client --profile train -- python -m nanochat_cpp.pipeline <job>
+```
+
+The first form is the one the Colab notebook and a workstation use; the second
+is the one the Modal `pipeline` function uses. `docs/host-portability.md`
+section 9 gives the three hosts and what each one records.
+
+---
+
+## Part 2. One chain on three hosts
+
+_Absorbed from the former `pipeline-plan.md`. Its section numbers are
+unchanged, so a reference to a section of that document resolves to the same
+number here. The execution record is in [campaigns.md](campaigns.md)._
+
+### 4. Decisions
+
+| # | Decision |
+|---|---|
+| D1 | One orchestration module, `python/nanochat_cpp/pipeline.py`. Each stage calls an existing facade. It holds no training logic, no model flag list of its own, and no host name. |
+| D2 | Every host builds the two stage binaries, through the resolver of B6. A tree build is the only route until the dependency plan publishes a binary wheel. |
+| D3 | The pinned triple is T4, one card, `sm_75`, fp32, and it is the first of two legs: a second leg runs the same job on one H100 card, `sm_90`, at bf16, in its own image and under its own run id. A local card uses its own architecture through `NANOCHAT_CUDA_ARCH`. |
+| D4 | The corpus is the committed fixture. Base reads `src/parquet/testdata/text.parquet` with `tests/data/loader_tokenizer.nctoken`. SFT reads one shard that `nc.sft.pack` writes, and RL reads four of those conversations. No stage reads the Hub. |
+| D5 | The demo shape has 2 layers, hidden 64, 4 heads, 2 key/value heads, sequence 64, and vocabulary 487 padded to 512. It costs about 4 s of CPU for the whole chain. |
+| D6 | `deliver/` is the artifact contract, below. |
+| D7 | No frozen header changes. B2 lands in `src/cli.h`, B4 stays inside `src/generate.cc`, and B1, B3, B5, and B6 are Python. |
+| D8 | Colab builds from source, not from the wheel. A wheel path lands when a binary wheel exists, and B6 makes that a one-line change. |
+| D9 | One owner per file, below. |
+| D10 | The entry is always wrapped by `tools/nanochat`, in two forms. See below. |
+| D11 | A6 compares two runs, and no warm start changes. The optimizer state stays part of what a warm start carries, as `docs/post-training.md` §7 says. Clearing the moments would change the stage for every caller to simplify one test. |
+
+The artifact contract of D6:
+
+```
+<run_root>/<run_id>/base/checkpoint.ckpt
+<run_root>/<run_id>/sft/checkpoint.ckpt
+<run_root>/<run_id>/rl/checkpoint.ckpt
+<run_root>/<run_id>/deliver/chatrl.ckpt
+<run_root>/<run_id>/deliver/pipeline_report.json
+```
+
+The eval stage of section 5 writes no checkpoint and no directory: its whole
+record is one `stage` entry inside `deliver/pipeline_report.json`.
+
+The report is the review artifact. It holds these items:
+
+- the stage order: base, SFT, RL, then eval, with the step counts;
+- the loss traces and the mean rewards;
+- the checkpoint digests and the metadata blocks;
+- the seconds and the seeds;
+- the model shape and the tokenizer digest;
+- the source revision.
+
+D10 has two entry forms. On a host:
+
+```
+tools/nanochat train -- python -m nanochat_cpp.pipeline <job>
+```
+
+In a container:
+
+```
+tools/nanochat client --profile train -- python -m nanochat_cpp.pipeline <job>
+```
+
+Two child executables check the sentinel with `RequireSandboxOrDie`, and no host
+may satisfy that check with the override.
+
+The owners of D9:
+
+| File | Owner |
+|---|---|
+| `python/nanochat_cpp/pipeline.py`, `python/tests/pipeline_test.py` | Python surface |
+| `python/nanochat_cpp/sft.py`, `rl.py`, `api.py`, `toolchain.py`, `_build.py` | Python surface |
+| `src/cli.h` | Harness |
+| `src/generate.cc` | Workflow |
+| `tools/modal/app.py`, `tools/modal/modal_app_test.py` | Python surface |
+| `notebooks/colab_pipeline.ipynb`, `notebooks/colab_setup.py` | Notebooks |
+| `docs/**`, `AGENTS.md`, and the root `BUILD.bazel` files | Architect |
+
+A per-directory `BUILD.bazel` belongs to that directory's owner (`AGENTS.md`
+§6), so `python/BUILD.bazel` is the Python surface's and `src/BUILD.bazel` is
+the owning workstream's.
+
+### 5. The pipeline module
+
+The module as it stands after the extension, whose design is
+[post-training.md](post-training.md) Part 3, sections 5 and 6:
+
+```python
+# python/nanochat_cpp/pipeline.py
+
+PROFILES = {
+    "demo": Config(num_layers=2, num_heads=4, num_kv_heads=2,
+                   hidden_dim=64, seq_len=64, vocab_size=487,
+                   padded_vocab_size=512, window_pattern="L"),
+    "standard": Config(num_layers=8, num_heads=8, num_kv_heads=4,
+                       hidden_dim=512, seq_len=64, vocab_size=487,
+                       padded_vocab_size=512, window_pattern="L"),
+}
+DEFAULT_PROFILE = "standard"
+
+@dataclass(frozen=True)
+class Job:                 # JSON round trip; one file for all three hosts
+    run_id: str = "demo"
+    profile: str = DEFAULT_PROFILE
+    batch: int = 1               # rows per device; the corpus decides it
+    grad_accum: int = 1
+    devices: int = 1
+    base_steps: int = 200
+    sft_steps: int = 200
+    rl_steps: int = 8
+    num_prompts: int = 4
+    num_samples: int = 4
+    max_tokens: int = 32
+    eval_batches: int = 1        # one batch; the corpus allows no more
+    eval_samples: int = 2
+    seed: int = 42
+    out_root: str = ""
+    corpus: str = "fixture"      # "fixture" or "files"
+    corpus_path: str = ""        # a parquet file or a directory of them
+    tokenizer_path: str = ""     # the NCTOKEN1 artifact of that corpus
+    deliver: bool = True
+    temperature: float = 1.5
+    top_k: int = 0
+
+@dataclass(frozen=True)
+class Stage:               # one stage's facts
+    name: str
+    steps: int
+    losses: tuple[float, ...]
+    checkpoint: str
+    sha256: str
+    metadata: dict
+    seconds: float
+    extra: dict = field(default_factory=dict)   # means rewards, dropped groups
+
+@dataclass(frozen=True)
+class Report:
+    version: int               # the report schema, 2 today
+    job: Job
+    stages: tuple[Stage, ...]
+    delivered: str
+    report_path: str
+    total_seconds: float
+    host: dict                 # backend, arch, precision, source revision
+
+def stage_base(job) -> Stage
+def stage_sft(job, base: Stage) -> Stage
+def stage_rl(job, sft: Stage) -> Stage
+def stage_eval(job, base: Stage, rl: Stage) -> Stage
+def deliver(job, stages, *, out_root) -> tuple[str, str]
+def run(job, *, out_root=None) -> Report
+def main(argv=None) -> int        # python -m nanochat_cpp.pipeline job.json
+```
+
+`demo` is the shape of D5 and it stays, because the CPU test loop runs it in
+about five seconds. `standard` is the shape a throughput number is read at, and
+`Job()` defaults to it: 8 layers, hidden 512, 8 heads, 4 key/value heads,
+sequence 64, the same vocabulary 487 padded to 512, and the `L` window pattern.
+The sequence length and the base batch stay where they are, because the
+committed corpus fills exactly one 65-token row per epoch
+([post-training.md](post-training.md) P1, P2 and section 5).
+
+The schedule grows by about a factor of two: 200 base steps, 200 SFT steps, 8
+RL steps, one evaluator batch, and two sampled completions. One step of the
+`standard` shape does about ten times the device work of one `demo` step, so a
+local CPU chain still costs tens of seconds.
+
+Each stage function is short and calls one facade:
+
+| Stage | Call |
+|---|---|
+| Base | `runtime.MeshTrainConfig(config(job), steps=job.base_steps, ...)` with `train_parquet`, `tokenizer`, `out_dir`, `checkpoint_path` |
+| SFT | `sft.pack(...)` then `sft.run(shard, ckpt, config=config(job), warm_start=base.checkpoint, num_iterations=job.sft_steps)` |
+| RL | `rl.run(reward, prompts, num_samples=..., steps=..., config=config(job), warm_start=sft.checkpoint, checkpoint=rl_ckpt, max_tokens=...)` |
+| Eval | `api.Model.load(checkpoint)` then `api.evaluate(model, corpus, tokenizer, steps=job.eval_batches, batch=1, seed=job.seed)`, once for the base checkpoint and once for the RL one, then `api.Model.generate` for `job.eval_samples` completions |
+
+`config(job)` is `PROFILES[job.profile]`, so the shape has one home.
+
+The eval stage is the one stage with no executable. It runs in the chain's own
+process through the in-process API, so it adds no third stage binary and no new
+build target (P4). It writes no checkpoint: its record names the RL file, so
+`deliver()` still copies `chatrl.ckpt`. The one limit worth knowing is the
+batch: `eval_batches` is 1 and it is not a tunable number in this plan. The
+corpus holds 119 tokens, so one epoch fills one 65-token row, and a batch of two
+rows cannot form. An evaluator that is asked for two rows reports no bytes and
+returns infinity, which is why the module passes `batch=1` by hand: the default
+of `api.evaluate` is 8. A tenfold larger corpus would allow more batches, and
+that corpus needs a producer, which is a separate work item
+([post-training.md](post-training.md) Part 3, section 6).
+
+The reward is a class with a `reward` method, which `_normalize_task` accepts, so
+no Hub dataset loads. It is graded: 1.0 for the right number, 0.5 for the `####`
+marker, and otherwise the character overlap with the reference. A graded reward
+keeps the advantages from collapsing (Phase 6 of `post-training.md` §12).
+
+The corpus builder copies the committed parquet and tokenizer into
+`<run_root>/<run_id>/corpus/`, and writes
+`<NANOCHAT_BASE_DIR>/tokenizer/tokenizer.nctoken`, because `data.nctoken1_path()`
+reads that exact path. The pipeline never reads `NANOCHAT_BASE_DIR` for output,
+and the report names the root it used.
+
+### 6. The three hosts
+
+Every host runs the same four stages of the same job file. The job's counts are
+its own: the committed example job of section 5 asks for 200 base steps, 200 SFT
+steps, 8 RL steps, and one evaluator batch, and a test job asks for the `demo`
+shape and whatever schedule the test pins. The measured numbers quoted in this
+section are the 2026-10-31 runs of the `demo` shape at 100, 100, and 5 steps,
+and they stay as recorded.
+
+| Host | Backend | Arch | Sandbox | Build | Gate |
+|---|---|---|---|---|---|
+| Local CPU | `cpu` | none | `train` scope | Bazel | `//python:pipeline_test`, default loop |
+| Local GPU | `cuda` | card | `t1-gpu` queue job | Bazel | `//python:pipeline_gpu_test`, `gpu` tag |
+| Colab | `cuda` | `sm_75` | `none` | bootstrap + Bazel | manual run; owed, and recorded as owed in `docs/host-portability.md` section 9.2 |
+| Modal, T4 leg | `cuda` | `sm_75` | `none` | image build, fp32 | `modal run ...::pipeline_demo`; recorded on 2026-10-31, with the host block of `docs/host-portability.md` section 9.3 |
+| Modal, H100 leg | `cuda` | `sm_90` | `none` | image build, bf16 | the same entry point; G1 to G3 pass, with the host block of `docs/host-portability.md` section 9.3 |
+| Modal CPU | `cpu` | none | `none` | image build, CPU config | verification only |
+
+The two Modal rows are one run of one job: the T4 leg first, then the H100 leg.
+
+#### 6.1 Local CPU and local GPU
+
+```
+tools/nanochat build //src:sft_main //src:rl_worker
+NANOCHAT_CPP_BACKEND=cpu tools/nanochat train -- \
+    python -m nanochat_cpp.pipeline /tmp/job.json
+```
+
+One `train` scope, at 6 GB and 800 % CPU, covers all four stages. B5 keeps the
+stage children inside that scope: the entry point already skips its own scope
+under a sentinel, so a facade runs its child directly instead of re-entering the
+entry point, and nothing asks for a second profile (section 3, B5). The eval
+stage starts no child at all, so the scope covers whatever it reads.
+
+For the local GPU, run the same command with `NANOCHAT_CPP_BACKEND=cuda` under
+`tools/nanochat gpu --profile t1-gpu -- ...`. `tools/nanochat doctor` reports
+the name, driver, memory, use, and utilisation, and no compute capability, so the
+arch comes from `nvidia-smi --query-gpu=compute_cap --format=csv,noheader`.
+
+Acceptance: the chain finishes, `deliver/pipeline_report.json` exists, the four
+stages record the counts the job asked for (the example job: `base`@200,
+`sft`@200, `rl`@8, and `eval` on its one batch), and `host.backend` reports the
+backend that ran.
+
+#### 6.2 Colab with a T4
+
+New `notebooks/colab_pipeline.ipynb`, four cells:
+
+1. Setup: clone the tree, install Bazelisk with `tools/kaggle/bootstrap.sh`, then
+   `notebooks/colab_setup.setup(backend="cuda", arch=probe(),
+   prefer_installed=False)`, then `_build.build_stages()`. Two calls, not one:
+   `setup` resolves the library only.
+2. Environment: `NANOCHAT_BASE_DIR=/content/cache`,
+   `NANOCHAT_RUNS_DIR=/content/runs`, `NANOCHAT_CPP_BACKEND=cuda`,
+   `NANOCHAT_CUDA_ARCH=probe()`, `NANOCHAT_SANDBOX_BACKEND=none`.
+3. Run: `tools/nanochat train -- python -m nanochat_cpp.pipeline
+   /content/runs/job.json`.
+4. Collect: print the report, and offer one download of `deliver/`.
+
+Cell 3 must wrap the module. The backend value satisfies the library check in
+`nanochat_init` only: both stage executables call `RequireSandboxOrDie`, which
+accepts `NANOCHAT_SANDBOX` or the override and not the backend value. So the
+entry is the tool, which sets the sentinel to `off` on a host without systemd.
+Do not set `NANOCHAT_ALLOW_UNSANDBOXED` in the notebook: `docs/sandbox.md` and
+`docs/host-portability.md` forbid it, and the image has the same boundary.
+
+`probe()` maps the output of `nvidia-smi --query-gpu=compute_cap` to
+`sm_<major><minor>`. Free Colab gives a T4, so `sm_75`. A paid session can give
+a V100, `sm_70`, or an A100, `sm_80`, and an `sm_75` build then fails inside
+`nanochat_init` with a message about the architecture, not about the job.
+
+`prefer_installed=False` is required, not optional. `setup` prefers an installed
+distribution by default (`notebooks/kaggle_setup.py`), so a session that already
+carries the wheel returns the install root as `repo`. That root has no
+`tools/nanochat` and no stage binaries, so it contradicts D8 and breaks D10.
+
+`notebooks/colab_setup.py` is additive: a thin module that calls
+`kaggle_setup.setup(...)` with the `/content` defaults, then `build_stages()`.
+`kaggle_setup.py` keeps its name, because `notebooks/session.py` and five
+documents name it. A rename is a separate, mechanical change, and it is not part
+of this plan.
+
+Acceptance: `/content/runs/<run_id>/deliver/pipeline_report.json` exists, it
+names four stages with the counts the job asked for and one evaluator batch, and
+`host.backend` is `cuda` with `host.arch` equal to the probed value.
+
+#### 6.3 Modal: two legs, a T4 at fp32 and an H100 at bf16
+
+`tools/modal/app.py` gains four functions over two images, and the entry point
+takes both legs of one job.
+
+| Leg | Card | Arch | Precision | Build command |
+|---|---|---|---|---|
+| `t4` | `T4` | `sm_75` | `fp32` | `--config=cuda --define=precision=fp32 --@rules_cuda//cuda:archs=sm_75` |
+| `h100` | `H100` | `sm_90` | `bf16` | `--config=cuda --define=precision=bf16 --@rules_cuda//cuda:archs=sm_90` |
+
+A frozen `Leg` record holds the name, the card type, the card count, the
+architecture, the precision, and the build configuration. `image_for(leg)`
+returns one image per leg, and the stage executables, the precision, the
+architecture, and the build call all read the leg. One library per image is
+what keeps the architecture and the precision honest: one Bazel output base
+holds one build of `libnanochat_shared.so` (section 6.4 makes the same argument
+for the CPU leg).
+
+The four functions are `train` and `pipeline` on the T4 leg, and `train_h100`
+and `pipeline_h100` on the H100 leg. The first two keep their names, because
+`notebooks/target.py` looks the name `train` up through
+`modal.Function.from_name`. `notebooks/target.py` also gains a `leg` argument on
+`ModalTarget`, so a notebook selects one leg.
+
+Each leg mirrors what the single leg did:
+
+- `pipeline` and `pipeline_h100` are thin faces of one `_pipeline_on(leg, ...)`,
+  so the two legs cannot drift. The leg selects the image, the card, the
+  precision, the architecture, and the roofline device.
+- Both rewrite `out_root` to `/runs/<run_id>`, because the app owns the Volume
+  path.
+- Both start the work as `tools/nanochat client --profile train -- python -m
+  nanochat_cpp.pipeline <job.json>`, which is the container entry of D10.
+- Both keep `max_containers=1`, `_check_cards(leg, ...)`, the commit keeper, and
+  the `worker.log`, and both reuse `_publish` for the Hub push of the final
+  stage, so the chain gains no second uploader.
+- Both set the same `cpu=` value. Modal sizes the CPU by memory when `cpu=` is
+  absent, so two legs with different memory would get different host budgets,
+  and gate G2 compares the two base step times: the shared `cpu=` is what makes
+  that comparison meaningful.
+- Both legs keep the default collective, `nccl`, because the chain runs
+  `world_size=1`. The H100 leg must not use the `h100` named config, which is the
+  simulator profile and swaps the collective to `native`. The `hopper` config of
+  [build.md](build.md) is the same build as the flag triple of the table above,
+  and the build helper still emits the triple, never a named config.
+- `pipeline_demo` runs the T4 leg first, under the run id `<run_id>-t4`, then
+  the H100 leg under `<run_id>-h100`, so both reports stay on the
+  `nanochat-runs` Volume and the cheap artifact survives a failure of the
+  expensive leg. It prints one document with three keys -- `legs`,
+  `comparison`, and `gates` -- and exits non-zero when a gate fails.
+- The image build of a leg names `//src:roofline_main` beside the library and the
+  two stage executables, so gate G3 runs the tool inside the H100 container and
+  starts no second Bazel build there.
+
+Gates G1 to G3 are section 7.1's subject. Their first two-leg run is row 9 of
+[post-training.md](post-training.md), and it ran on 2026-10-31:
+the T4 leg measured 128.74 ms per base step and the H100 leg 124.39 ms, and all
+three gates passed. The chain reports `startup_check: not_run`, because the mesh
+trainer does not call the hardware correctness gate; the fp8 path on Hopper needs
+its own row.
+
+The client half is `ModalTarget(function="pipeline")`, which needs a `function`
+argument that the class does not have today.
+`ModalTarget.prepare` reads `output.out_dir` and raises without it
+(`notebooks/target.py`), so the target gains one `job_kind` branch whose
+`"pipeline"` case reads `out_root`. The job carries no host path either way,
+because the app rewrites `out_root` to `/runs/<run_id>`. `target.map_job` and
+`target.job_paths` need no new field table, because a fixture job holds no input
+path.
+
+Acceptance: `modal run tools/modal/app.py::pipeline_demo` prints one document
+whose T4 leg names `host.arch` `sm_75` at fp32 and whose H100 leg names `sm_90`
+at bf16, all three gates pass, and the `nanochat-runs` Volume holds `deliver/`
+twice, under `<run_id>-t4` and `<run_id>-h100`.
+
+#### 6.4 The Modal CPU leg is a second image
+
+The Modal image of `tools/modal/app.py` pins one compiled backend:
+`NANOCHAT_CPP_LIB` names the CUDA library and the build passes `--config=cuda`.
+A container with no card therefore fails inside `nanochat_init`, and
+`_check_cards` calls `nvidia-smi`, which does not exist there.
+
+So a CPU leg needs a second image whose build passes `--config=cpu` and whose
+function omits `gpu=`. Do not add a CPU branch to `tools/modal/app.py`. Keep the
+two images apart, because one Bazel output base holds only one build of
+`libnanochat_shared.so`.
+
+### 7. The integration gate
+
+`python/tests/pipeline_test.py` calls `pipeline.run(job)` with the `demo`
+profile. The assertions are the contract, not the loss values. The parity rungs
+own the numbers.
+
+| # | Assertion | Catches |
+|---|---|---|
+| A1 | Each stage returns status 0 with the step count it was asked for | A shortened schedule |
+| A2 | Every loss and reward is finite; the base loss falls from step 1 to step 100 | A dead optimizer |
+| A3 | Metadata chain: `base`@100, `sft`@100, `rl`@105, and every recorded config equals the job's | B1, B2, a wrong warm start |
+| A4 | The parameter L2 norm differs between base and SFT, and between SFT and RL | A stage that only rewrites its file |
+| A5 | One group of rollout rewards holds two distinct values, so its advantages are not all zero | B4 |
+| A6 | Two runs from the same SFT checkpoint and the same seed, one with the graded reward and one with a constant reward, give different final parameters | A gradient path that the inherited moments hide |
+| A7 | `deliver/chatrl.ckpt` equals the RL checkpoint byte for byte, and the report digests match the bytes | A lost artifact |
+| A8 | The report names the stage order, the seeds, and the host facts | An unreviewable run |
+| A9 | The delivered file loads through the public container reader, and its metadata reports `rl` at step 105 | A container only the pipeline can read |
+| A10 | The eval stage ran, both `bpb` values are finite and inside `[0, 8]`, and each sample is non-empty text | A silent eval, and a wrong `eval_batch` |
+| A11 | The RL checkpoint digest is the same before and after the eval stage | An eval that writes |
+| A12 | The report names the evaluated checkpoint, its digest, the corpus path, the batch size, and the batch count | An unreviewable eval |
+| A13 | `deliver/chatrl.ckpt` holds the RL weights, and its metadata reports stage `rl` | A delivery that follows the wrong stage |
+
+A4 does not prove the warm start, because the loaded moments move the weights on
+their own. Read A5 through `rl.run(..., on_step=...)`, which receives the per
+rollout rewards; `RlReport` carries no advantage.
+
+A6 cannot be "a constant reward leaves the parameters unchanged". A warm start
+carries the optimizer state (`docs/post-training.md` §7), so the inherited AdamW
+moments move the weights with an advantage vector of exactly zero. A6 is
+therefore a two-run comparison, and it is the one assertion that isolates the
+advantage term.
+
+A5 and A6 fail today. A4 passes today for the wrong reason. A3 and the argv that
+`nc.sft.run` builds are what prove the chain.
+
+A10 to A13 are the eval stage's gate, and they land with the stage
+([post-training.md](post-training.md) Part 3, section 10). A10 reads the
+two bits-per-byte numbers and the sampled text out of the eval record, so an
+evaluator that reports no bytes, or a batch that cannot form, is a failure and
+not a quiet infinity. A11 compares the digest the report carries against the
+file after the stage, which is how "the eval writes no checkpoint" (section 5)
+stays true. A12 is the reviewability condition: the report names the file it
+scored, that file's digest, the corpus, the batch size, and the batch count. A13
+is the one that guards the decision to name the RL file in the eval record: the
+delivered checkpoint has to be the RL weights at stage `rl`. The batch count of
+A12 is one, and a report that claims eight is wrong for the corpus of this plan.
+
+Two targets, one source:
+
+- `//python:pipeline_test`: the `demo` profile, `size = "medium"`, data
+  `//bindings:nanochat_shared`, `//src:sft_main`, `//src:rl_worker`, the parquet
+  fixture, and the tokenizer fixture. About 5 s, so it stays in the default
+  loop. It holds A1 to A13: the `demo` shape and a short schedule, so the eval
+  stage runs at the same size as the three training stages.
+- `//python:pipeline_gpu_test`: the same source, `NANOCHAT_CPP_BACKEND=cuda`,
+  tags `gpu` and `manual`.
+
+#### 7.1 The three gates of the two legs
+
+A1 to A13 are the gate of one chain on one host. The two Modal legs need three
+more, and they live in `tools/modal/app.py` beside the comparison, not in the
+pipeline test: the entry point reads two reports and judges them
+([post-training.md](post-training.md) Part 3, section 8).
+
+| Gate | Claim | Check |
+|---|---|---|
+| G1 | bf16 ran on the H100 | `host.precision` is `bf16`, the RL checkpoint metadata records `bf16`, and `host.arch` is `sm_90` |
+| G2 | the H100 leg did not regress | the H100 base `step_ms` is at most 1.25 times the T4 base `step_ms` for the same job, and both legs ran with the same `cpu=` |
+| G3 | the run matches the model | the H100 container ran `roofline --device h100 --precision bf16 --json` for the job shape and recorded `predicted_step_ms` and `limit`; the measured ratio is inside the recorded band |
+
+G2 is a smoke check, not a throughput claim. Both legs are bound by the host
+program, so the gate catches a large regression and a broken device path; it
+does not measure the card. G3 starts with the band `[1, 200]`, and the first
+two-leg run measured a ratio of 162.8. Twice the measured value is wider than
+200, so the band stays `[1, 200]` (row 9 of
+[post-training.md](post-training.md)).
+
+The document records two numbers that no gate reads: the MFU, and the cross-leg
+speed ratio. At 64 tokens per step, one row of sequence 64, the device bound is
+about one millisecond inside a step of tens of milliseconds, so the MFU reads
+near 0.01 percent; and the chain is bound by launches, so a speed ratio below one
+is as correct as one above it. Recording them keeps a reader from reading either
+as a pass.
+
+### 12. Proven premises
+
+The harness of section 2 ran before the module exists, so it answers the
+environment questions and not the module questions. Four premises hold:
+
+- The sentinel reaches the children. The harness started under
+  `tools/nanochat train --`, and both stage executables passed
+  `RequireSandboxOrDie` (D10).
+- The chain crosses stages. The driver accepted the base checkpoint as a warm
+  start, and its recorded config matched the SFT argv.
+- The delivery path works. `<out_root>/deliver/` holds the copied checkpoint and
+  the report.
+- The container entry satisfies the child guard.
+  `NANOCHAT_SANDBOX_BACKEND=none tools/nanochat client --profile train -- ...`
+  sets `NANOCHAT_SANDBOX=off`.
+
+The image builds both stage binaries on both backends, so the Modal line of B6 is
+one `run_commands` argument. The GPU leg is green since the B7 to B10 fixes.
+
+Section 13 of the previous version of this plan held the dated measurement log
+and the table of applied review corrections. That history is in the git commits
+of this file, and this version keeps only its conclusions.
+
+
+---
+
+## Part 3. The scale-up of that chain
+
+_Absorbed from the former `pipeline-scaleup-plan.md`. Its section numbers are
+unchanged, so a reference to a section of that document resolves to the same
+number here. The execution record is in [campaigns.md](campaigns.md)._
+
+### 4. Decisions
+
+| # | Decision |
+|---|---|
+| P1 | Add a second profile, `standard`. Keep `demo` for the CPU test loop. `Job()` defaults to `standard`. |
+| P2 | Keep the sequence length at 64 and the base batch at one row. The committed corpus fills one 65-token row per epoch. |
+| P3 | The H100 leg runs at bf16. No leg runs an fp8 training path. |
+| P4 | Add the eval stage in process, through `api.evaluate`, `api.Model.load`, and `api.Tokenizer`. Add no third stage executable. |
+| P5 | The eval stage reads the base checkpoint and the RL checkpoint, so the report holds both numbers. |
+| P6 | Run T4 first, then H100, as four functions over two images. One library per image keeps the architecture and the precision honest. |
+| P7 | Add one named config, `hopper`, for a hand run only. The build helper keeps its explicit flag triple. |
+| P8 | Gate the H100 leg on evidence that bf16 ran, and on a comparison with the T4 leg. Do not gate on an fp8 speedup, and do not gate on MFU. |
+| P9 | Change no frozen header. `caps.json` already declares bf16 for the H100. |
+
+#### 4.1 Why the H100 leg runs at bf16
+
+The T4 has no bf16 and no fp8, so the T4 leg stays at fp32. The H100 declares
+bf16 and fp8. This plan takes bf16 for three reasons:
+
+- The build helper supports bf16 today. The H100 leg therefore adds no new build
+  precision, and no risk to the build path.
+- The chain is bound by launches at this shape. Section 14 gives a 0.76 ms device
+  bound inside a step of tens of milliseconds, so the precision does not change
+  the measured time.
+- The bf16 leg on an H100 runs the fp8 operators only when the chain runs the
+  hardware correctness gate. The chain's base stage is the mesh trainer, and it
+  does not call `RunHardwareCorrectnessGate`, so the first H100 run reported
+  `startup_check: not_run`. A hand-wired gate then failed in
+  `cublasLtMatmulAlgoGetHeuristic` with status 15 on Hopper (section 14). The
+  bf16 leg therefore proves the bf16 training path, not the fp8 operators.
+
+What the leg does not prove is the fp8 training graph and the fp8 planner rule.
+Those belong to a later row, and the row needs a Hopper benchmark first.
+
+### 5. The shape and the schedule
+
+The shape has one home, `PROFILES` in `python/nanochat_cpp/pipeline.py`:
+
+| Field | `demo` | `standard` |
+|---|---|---|
+| `num_layers` | 2 | 8 |
+| `hidden_dim` | 64 | 512 |
+| `num_heads` | 4 | 8 |
+| `num_kv_heads` | 2 | 4 |
+| `seq_len` | 64 | 64 |
+| `vocab_size` | 487 | 487 |
+| `padded_vocab_size` | 512 | 512 |
+| `window_pattern` | `L` | `L` |
+
+The schedule grows by about a factor of two:
+
+| Field | Today | New |
+|---|---|---|
+| `base_steps` | 100 | 200 |
+| `sft_steps` | 100 | 200 |
+| `rl_steps` | 5 | 8 |
+| `num_prompts` | 4 | 4 |
+| `num_samples` | 4 | 4 |
+| `max_tokens` | 32 | 32 |
+| `eval_batches` | none | 1 |
+| `eval_samples` | none | 2 |
+
+`eval_batches` is one, and it is not a tunable number in this plan. The committed
+corpus holds 119 tokens, so one epoch fills one 65-token row and no more. A batch
+of two rows cannot form, and the evaluator then reports no bytes and returns
+infinity (`src/data.cc`, `src/eval.cc`). Section 6 gives the consequence.
+
+The device work of one step grows by about 10 times, and the step count grows by
+about 2 times. The device bound stays far below the host overhead, so a local CPU
+chain costs tens of seconds and the default test loop stays near five seconds.
+
+`_check` rejects a job with a non-positive field in the new list. It also rejects
+a profile that breaks three rules of `Config::Validate`
+(`include/nanochat/config.h`):
+
+- `hidden_dim` must be divisible by `num_heads`;
+- `num_heads` must be divisible by `num_kv_heads`;
+- `vocab_size` must not be above `padded_vocab_size`.
+
+### 6. The eval stage
+
+`stage_eval(job, base, rl)` runs after RL and writes no checkpoint.
+
+- Build the model with `api.Model(config(job))` and load it with
+  `api.Model.load(checkpoint)`.
+- Call
+  `api.evaluate(model, corpus["parquet"], tokenizer, steps=job.eval_batches, batch=1, seed=job.seed)`
+  for the base checkpoint and for the RL checkpoint. Pass `batch=1` by hand,
+  because the default of `api.evaluate` is 8.
+- Call `api.Model.generate(prompt, temperature=0.0, max_tokens=job.max_tokens)`
+  for `eval_samples` completions. Decode them with `api.Tokenizer.decode`.
+- Build the record with `_stage("eval", job.eval_batches, (), rl.checkpoint,
+  seconds, extra)`. The RL checkpoint exists, so `_stage` reads its digest and
+  its metadata block, and A11 can compare the two.
+
+The `checkpoint` field names the RL file on purpose. `deliver()` copies the
+checkpoint of the last stage, so the delivered file stays `chatrl.ckpt`.
+
+The `extra` field holds `bpb_base`, `bpb_rl`, `eval_batches`, `eval_batch`,
+`eval_corpus`, `evaluated`, `evaluated_sha256`, and `samples`.
+
+An evaluator call never calls `DataLoader::Reset`. The trainer resets the loader
+at the start of each step, and the evaluator does not
+(`src/train.cc`, `src/eval.cc`). The report therefore names one batch, not eight.
+A tenfold larger corpus would allow more batches, and that corpus needs a
+producer. The producer is a separate work item, because the image installs the
+`hub` extra and not the `hfdata` extra that holds `pyarrow`
+(`python/pyproject.toml`).
+
+Chat accuracy stays out of this plan. `ChatEvaluator` reads Hub datasets
+([eval.md](eval.md) section 5), and no stage of this chain reads the Hub.
+
+### 7. The Modal legs: T4 first, then H100 at bf16
+
+`tools/modal/app.py` gains one record, `Leg`, with these fields: name, card
+type, card count, architecture, precision, and build configuration.
+
+| Leg | Card | Architecture | Precision | Build command |
+|---|---|---|---|---|
+| `t4` | `T4` | `sm_75` | `fp32` | `--config=cuda --define=precision=fp32 --@rules_cuda//cuda:archs=sm_75` |
+| `h100` | `H100` | `sm_90` | `bf16` | `--config=cuda --define=precision=bf16 --@rules_cuda//cuda:archs=sm_90` |
+
+The build helper emits the flag triple of the table today
+(`_build._build_command`). It never emits a named config. The `hopper` config of
+P7 is a shorthand for a hand run only.
+
+Both legs keep the default collective, `nccl`, because the chain runs
+`world_size=1`. The `h100` simulator config would change the collective to
+native; the hardware leg must not use it.
+
+The rest of the change:
+
+- `image_for(leg)` returns one image for one leg. The stage executables,
+  `NANOCHAT_CPP_PRECISION`, `NANOCHAT_CUDA_ARCH`, and the build call read
+  the leg.
+- `_check_cards(leg, job_json)` reads the leg instead of the module globals.
+- Four functions: `train`, `pipeline`, `train_h100`, and `pipeline_h100`. The
+  first two run the T4 leg, because `notebooks/target.py` looks the name `train`
+  up through `modal.Function.from_name`. Keep the name.
+- `pipeline_demo` runs the T4 leg first, then the H100 leg. The run identifiers
+  are `<run_id>-t4` and `<run_id>-h100`, so both reports stay on the
+  `nanochat-runs` Volume.
+- The entry point prints one document with three keys: `legs`, `comparison`,
+  and `gates`. It exits non-zero when a gate fails.
+- Both functions set the same `cpu=` value, so the two legs get the same host
+  budget. Modal sizes the CPU by memory when `cpu=` is absent.
+- The image build adds `//src:roofline_main`. Gate G3 runs the tool inside the
+  container, and the tool must not start a second Bazel build there.
+
+`notebooks/target.py` gains a `leg` argument on `ModalTarget`, so a notebook
+selects one leg.
+
+The T4 leg runs first. The T4 artifact therefore survives an H100 failure, and a
+reviewer reads the cheap leg while the expensive leg runs.
+
+### 10. New assertions
+
+The existing gate keeps A1 to A9 on the `demo` profile.
+
+| # | Assertion | Catches |
+|---|---|---|
+| A10 | The eval stage ran, both `bpb` values are finite and inside `[0, 8]`, and each sample is non-empty text | A silent eval, and a wrong `eval_batch` |
+| A11 | The RL checkpoint digest is the same before and after the eval stage | An eval that writes |
+| A12 | The report names the evaluated checkpoint, its digest, the corpus path, the batch size, and the batch count | An unreviewable eval |
+| A13 | `deliver/chatrl.ckpt` holds the RL weights, and its metadata reports stage `rl` | A delivery that follows the wrong stage |
+| A14 | The base stage reports `step_ms`, `compute_ms`, `data_ms`, and `other_ms` from one steady window, the window and the warm-up count are named, and compute plus data does not exceed the step | A rate that went back to the stage wall clock, and a record that stopped carrying a timing field |
+
+A13 guards the decision in section 6. A14 guards the decision of section 9
+row 4: a rate is a median over the steps a run repeats. It is not the stage
+wall clock divided by the step count.

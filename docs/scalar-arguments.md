@@ -11,7 +11,7 @@ it. The result is that a scalar the optimizer owns never reaches the host on a
 training step.
 
 Read [performance.md](performance.md) for the measurement protocol and
-[profile-guided-optimization.md](profile-guided-optimization.md) for the loop
+[performance.md](performance.md) for the loop
 that found the cost.
 
 ## 1. The rule this proposal makes explicit
@@ -326,7 +326,7 @@ tree.
 
 The Smear move is its own row, and it needs a second seam decision: a
 pointwise code with a row-shifted operand, or a dedicated family. Section 9 of
-[profile-guided-optimization.md](profile-guided-optimization.md) records it as
+[performance.md](performance.md) records it as
 the next candidate with a ceiling of 0.2726.
 
 ## 9. The numerics: a precision change, and the measurement that found it

@@ -44,7 +44,7 @@ std::vector<ComputeType> StageToHost(const ComputeType* src,
 // seed. `SampleToken` builds a fresh generator from `params.seed` on every
 // call, so without this mix every row of a batch and every step of a row would
 // draw the same quantile: the four samples of one group would hold the same
-// text and every advantage would be zero (docs/pipeline-plan.md section 3, B4).
+// text and every advantage would be zero (docs/campaigns.md, defect B4).
 //
 // The mix is a splitmix64 finalizer over the three coordinates, so it stays a
 // file-local helper: `include/nanochat/model.h` and
@@ -532,7 +532,7 @@ void GenerateBatchWithHook(Model* model, const int* prompt, int prompt_len,
   // `num_samples` independent single-row runs: the row index and the step enter
   // the seed below, so rows differ from each other and a row still reproduces
   // on its own. The greedy path draws no random value, so it ignores the seed
-  // (docs/pipeline-plan.md section 3, B4).
+  // (docs/campaigns.md, defect B4).
   for (int step = 0; step < max_new; ++step) {
     bool any_active = false;
     for (int r = 0; r < num_samples; ++r) {
@@ -597,7 +597,7 @@ void GenerateMultiPrompt(Model* model, const int* prompts, int num_prompts,
     }
     // Mix the prompt index into the seed, so row `r` of one prompt does not
     // draw the quantile of row `r` of the next, the way two rows of one prompt
-    // no longer draw the same one (docs/pipeline-plan.md section 3, B4). The
+    // no longer draw the same one (docs/campaigns.md, defect B4). The
     // inner `GenerateBatch` then mixes the row index and the step into this
     // seed.
     per_prompt.seed =

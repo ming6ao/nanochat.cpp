@@ -6,7 +6,7 @@ the Python mirror of the optimizer struct, and caches the loaded library for
 the process.
 
 The search order follows docs/python.md sections 5.1 and 8.3, with the
-installed-wheel entry of ``docs/dependency-layering-plan.md`` section 6.3 as
+installed-wheel entry of ``docs/build.md`` section 6.3 as
 item 5:
 
 1. the path in ``NANOCHAT_CPP_LIB``;
@@ -22,7 +22,7 @@ and not in the shorter list of ``docs/python.md`` section 3.2 that omits them:
 the override, the runfiles tree, ``bazel-bin/src/<name>``, and the
 ``nanochat-<name>`` entry point of a future wheel. A library and a stage
 executable are then found by one rule, so a reader who trusts one docstring
-trusts the other (``docs/pipeline-plan.md`` B6).
+trusts the other (``docs/post-training.md`` B6).
 
 Item 5 is how a host that installed a binary wheel finds its library without a
 repository clone (section 6.4). A wheel is named for the CUDA architecture it

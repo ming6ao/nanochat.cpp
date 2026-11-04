@@ -14,7 +14,7 @@ The stage executables use the same shape: :func:`stage_binary` resolves the
 environment override, the Bazel runfiles tree, ``bazel-bin/src/<name>``, and
 the ``nanochat-<name>`` entry point of a future wheel before it stops, so the
 library and the two children of the chain are found by one rule
-(docs/pipeline-plan.md B6).
+(docs/post-training.md B6).
 
 The build key is a hash of the source contents, the compiler version, the
 optional CUDA architecture, the precision, and the backend (section 3.3). Two
@@ -66,7 +66,7 @@ LIBRARY_NAME = "libnanochat_shared.so"
 SHARED_TARGET = "//bindings:nanochat_shared"
 
 #: The two stage executables of the chain, in pipeline order
-#: (docs/pipeline-plan.md B6). A name is both the Bazel label under ``//src``
+#: (docs/post-training.md B6). A name is both the Bazel label under ``//src``
 #: and the program name of a future wheel entry point.
 STAGE_NAMES = ("sft_main", "rl_worker")
 
@@ -370,7 +370,7 @@ def stage_override(name: str) -> str:
 
     ``sft_main`` is ``NANOCHAT_SFT_MAIN`` and ``rl_worker`` is
     ``NANOCHAT_RL_WORKER``: the program name upper-cased behind the prefix, so
-    a new stage needs no second table (docs/pipeline-plan.md B6).
+    a new stage needs no second table (docs/post-training.md B6).
     """
     return "NANOCHAT_" + str(name).upper()
 
@@ -453,7 +453,7 @@ def build_stages(options: BuildOptions | None = None,
 
     The chain needs the library and the two children, and one
     ``tools/nanochat build`` command names all three, so a host runs one build
-    instead of three (docs/pipeline-plan.md B6 and D2). ``_build_command``
+    instead of three (docs/post-training.md B6 and D2). ``_build_command``
     stays the one home of the command line: this function adds the two stage
     targets and nothing else.
 

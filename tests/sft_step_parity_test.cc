@@ -1,5 +1,5 @@
 // tests/sft_step_parity_test.cc -- the R2 arithmetic parity gate of
-// docs/sft-parity-plan.md sections 3 and 7 (phase D).
+// docs/parity.md Part 1, sections 3 and 7 (phase D).
 //
 // Reads `tests/data/sft_step_fixture.bin` (the reference trajectory) and stages
 // the initial parameters and the initial optimizer moments from

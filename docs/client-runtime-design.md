@@ -14,7 +14,7 @@ driver function per run. Phase 6 delivers the driver, so
 `notebooks/mesh_train.py` is a thin launcher over it.
 
 Related: [distributed-design.md](distributed-design.md),
-[distributed-launch.md](distributed-launch.md), [python.md](python.md), and
+[distributed-design.md](distributed-design.md), [python.md](python.md), and
 [../DESIGN.md](../DESIGN.md).
 
 ## 1. Purpose
@@ -625,7 +625,7 @@ choice, the tokenizer path, the MFU inputs, and the display.
 
 Reasons:
 
-- `docs/training-seam.md` section 2 already fixes the split. C++ owns mechanism.
+- `docs/distributed-design.md` Part 2, section 2 already fixes the split. C++ owns mechanism.
   Python owns policy and data. Section 9 of that document states the invariant.
 - `notebooks/mesh_train.py` rebuilds the harness layer. It repeats the step
   loop, the MFU, the log format, and the summary.

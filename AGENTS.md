@@ -35,7 +35,7 @@ happen through the integrator.
 | **Kernel agents** (one per family) | `backends/cuda/kernels/<family>.cu` + `<family>_test.cc` + `<family>_benchmark.cc` in the same directory | frozen `kernels.h` |
 | **Kernel agents** (shared) | `backends/cuda/kernels/testing/**` (host test scaffolding), `dev/kernels/**` (unpromoted prototypes) | — |
 | **Collective** | `backends/cuda/collective/**`, `dev/collective/**` | frozen `kernels.h`, `src/rendezvous.h` |
-| **Workflow** | `src/ops.cc`, `src/model.cc`, `src/generate.cc` (the rollout seed mix, B4 of `docs/pipeline-plan.md`), and the private headers those units own: `src/model_factory.{h,cc}`, `src/inference_view.h`, `src/kernel_params_check.h`, `src/fp8_policy.h` | `kernels.h`, CPU backend |
+| **Workflow** | `src/ops.cc`, `src/model.cc`, `src/generate.cc` (the rollout seed mix, B4 of `docs/campaigns.md`), and the private headers those units own: `src/model_factory.{h,cc}`, `src/inference_view.h`, `src/kernel_params_check.h`, `src/fp8_policy.h` | `kernels.h`, CPU backend |
 | **Optimizer** | `src/optim.cc` | `kernels.h` |
 | **Harness** | `src/cli.h`, `src/train.cc`, `src/data.cc`, `src/eval.cc`, `src/performance_model.cc`, `src/*_main.cc` (`src/train_main.cc` among them), `src/device_profile.cc`, `include/nanochat/{data,scheduler,logger,mfu}.h` | Model API |
 | **Python surface** | `python/**` except `cli.py` and `_entry.py` (`pipeline.py` and `tests/pipeline_test.py` are here), `bindings/**`, `tools/modal/app.py`, `tools/modal/modal_app_test.py` | C ABI `capi.h`, Model API |
@@ -45,7 +45,7 @@ happen through the integrator.
 | **Simulator** | `tools/cuda_sim/**` (the API interposer, the emulation engine, the collective mock, `cuda_sim.map`, `check_symbols.py`) | `docs/simulator.md`, frozen `tensor.h` |
 | **Build** | `MODULE.bazel`, `.bazelrc`, `BUILD.bazel` (setup only) | Architect |
 
-The one-job chain of [docs/pipeline-plan.md](docs/pipeline-plan.md) adds no
+The one-job chain of [docs/post-training.md](docs/post-training.md) adds no
 workstream, because decision D9 gives each of its files an owner that already
 exists. `python/nanochat_cpp/pipeline.py` and `python/tests/pipeline_test.py`
 are the Python surface's, as are `tools/modal/app.py` and
@@ -137,9 +137,8 @@ thrashes the 11 GB card and invalidates timings. The second is a runaway test
 that exhausts host RAM or CPU.
 
 The process-launch boundary handles both, through `python/nanochat_cpp/sandbox.py` (limits) and
-the GPU job queue (one worker owns the GPU). See
-[docs/gpu-queue-plan.md](docs/gpu-queue-plan.md) and
-[docs/sandbox.md](docs/sandbox.md).
+the GPU job queue (one worker owns the GPU). See [docs/sandbox.md](docs/sandbox.md)
+for the limits and its Part 1 for the queue.
 
 ### 5.1 Tier the tests
 
@@ -257,7 +256,7 @@ The integrator runs, per merge:
   replays a 10-layer trace, which is too slow for the inner loop; run it
   through the simulator suite below.
 - `//python:pipeline_test` rides that loop too. It is the gate of the whole
-  post-training chain ([docs/pipeline-plan.md](docs/pipeline-plan.md) section
+  post-training chain ([docs/post-training.md](docs/post-training.md) section
   7): one job file, base then SFT then RL at the `demo` profile, over the
   committed fixtures and the real stage executables, about 5 s. Its CUDA twin
   is `//python:pipeline_gpu_test`, the same source with the `gpu` and `manual`
@@ -266,7 +265,7 @@ The integrator runs, per merge:
 - `tools/nanochat simulate --device h100` when the change touches a kernel, the
   backend seam, or the device profile (`docs/simulator.md`). It is still CPU
   only. Its `correctness` suite carries the CPU and simulator legs of the staged
-  numeric trace (`docs/numerics-integration.md`), so that run also gates Path A.
+  numeric trace (`docs/testing.md`), so that run also gates Path A.
 - A single T1 GPU smoke test covering the changed family (`t1-gpu`).
 - T2 parity only at Wave boundaries, not per commit (`t2-parity`).
   `tools/nanochat test --gpu //tests:numerics_trace_cuda_test` is the numeric
@@ -294,6 +293,10 @@ This keeps GPU time bounded and predictable.
   example is in §1 and in `docs/examples.md`.
 - Shared docs (`README.md`, `DESIGN.md`, `AGENTS.md`, `CONTRIBUTING.md`,
   `docs/**`) are architect-owned.
+- One document covers one subject. A campaign plan is not a document: its
+  durable sections move into the reference document when its last row lands,
+  and its outcome goes to `docs/campaigns.md`. The retirement rule is at the
+  end of `docs/README.md`. Do not add a `*-plan.md` file expecting it to stay.
 
 ---
 
@@ -308,7 +311,10 @@ This keeps GPU time bounded and predictable.
 - `docs/performance.md`: the performance measurement protocol, the debugging
   interface (`tools/nanochat doctor` / `profile`), and the benchmark battery.
   Read it before investigating a slowdown. `tools/nanochat doctor` is the
-  first command to run when a timing looks wrong.
+  first command to run when a timing looks wrong. Part 1 holds the
+  profile-guided optimization loop.
+- `docs/baselines.json`: the measured baselines. A performance claim cites one
+  entry, not a number in prose.
 
 ---
 

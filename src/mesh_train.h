@@ -14,9 +14,9 @@
 #include "src/sft_shard.h"
 
 // The mesh training driver (docs/client-runtime-design.md section 10.1 and
-// docs/training-seam.md section 6.6). The driver owns the step loop, the
-// metric record, the summary, the checkpoint interval, and the resume. It runs
-// a `MeshRuntime` one global batch at a time.
+// docs/distributed-design.md Part 2, section 6.6). The driver owns the step
+// loop, the metric record, the summary, the checkpoint interval, and the
+// resume. It runs a `MeshRuntime` one global batch at a time.
 //
 // The client calls one driver function per run. It does not call one function
 // per step. The driver reads parquet through the native reader, or an injected
@@ -33,7 +33,7 @@ class Tokenizer;
 // The schema version of the job, the metric record, and the summary.
 //
 // 2: the record carries `compute_seconds` and `data_seconds`
-//    (docs/pipeline-scaleup-plan.md section 9 row 4). Schema 1 measured
+//    (docs/campaigns.md, work row 4). Schema 1 measured
 //    `compute_seconds` and wrote it to the human log only, so a report could
 //    not split a step and could not attribute a slow one. An unknown field is
 //    ignored and an unknown version is rejected (docs/client-runtime-design.md
@@ -91,8 +91,9 @@ struct MeshTrainSummary {
 };
 
 // The driver inputs. The field shape mirrors `TrainConfig` and
-// `MeshRuntimeConfig` (docs/training-seam.md section 6.6). `preset` selects
-// the optimizer and the schedule; `track3` is the reference recipe.
+// `MeshRuntimeConfig` (docs/distributed-design.md Part 2, section 6.6).
+// `preset` selects the optimizer and the schedule; `track3` is the reference
+// recipe.
 struct MeshTrainConfig {
   MeshSpec mesh;
   Config model;
@@ -134,8 +135,9 @@ struct MeshTrainConfig {
 
   // The data (docs/parquet-native.md). A nonempty `packed_rows_path` selects
   // the packed `NCSFT001` SFT shard and ignores the parquet fields
-  // (docs/training-seam.md section 6.2). `train_source` is empty in production,
-  // so the driver builds the parquet factory. A test injects a source.
+  // (docs/distributed-design.md Part 2, section 6.2). `train_source` is empty
+  // in production, so the driver builds the parquet factory. A test injects a
+  // source.
   std::vector<std::string> train_parquet;
   std::string tokenizer_path;
   std::string packed_rows_path;

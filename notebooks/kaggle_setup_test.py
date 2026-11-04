@@ -1,7 +1,7 @@
 """T0: the helpers of the Kaggle session setup.
 
 The test covers the host contract parser, the environment loader, the ``PATH``
-builder, and the two setup paths of ``docs/dependency-layering-plan.md``
+builder, and the two setup paths of ``docs/build.md``
 section 6.5: the installed package, which clones nothing, and the repository
 fallback. The test needs no shared library and no network. See
 ``docs/host-portability.md``, section 8.

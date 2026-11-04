@@ -4,9 +4,9 @@ Hermetic: a fake tokenizer, a fake task, and an executable Python stand-in for
 the worker replace the C++ library, so the test needs no shared library, no
 Bazel, and no GPU. It checks the renderer, the advantage, the worker argv, the
 direct start, and the ``tools/nanochat train`` start. The two load-path cases
-pin the B3 split of ``docs/pipeline-plan.md``: ``warm_start`` is the worker's
+pin the B3 split of ``docs/post-training.md``: ``warm_start`` is the worker's
 ``--checkpoint`` load flag and ``checkpoint`` is the save target, so a save path
-never becomes a load path. See ``docs/rl-notebook.md`` sections 3 and 4 and
+never becomes a load path. See ``docs/post-training.md`` sections 3 and 4 and
 ``docs/post-training.md`` section 5.
 """
 
@@ -262,7 +262,7 @@ class RlTest(unittest.TestCase):
         The worker's load flag is ``--checkpoint``, so the warm start travels
         there while the save target stays the bridge's own ``checkpoint``. The
         save message names the save path, so a stage that warm starts from its
-        parent keeps the parent intact (docs/pipeline-plan.md B3).
+        parent keeps the parent intact (docs/post-training.md B3).
         """
         warm = Path(self.tmp.name) / "sft.nchkpt01"
         warm.write_text("sft", encoding="utf-8")

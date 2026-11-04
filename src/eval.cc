@@ -195,7 +195,7 @@ void ScoreBatch(Model* model, const int* tokens, int batch, int seq,
 }
 
 // Bits-per-byte over the packed validation rows (design decision D6 of
-// docs/sft-parity-plan.md). The packed-row counterpart of `EvalBpb`: the rows
+// docs/parity.md). The packed-row counterpart of `EvalBpb`: the rows
 // come from an `NCSFT001` shard instead of a document loader, and the byte
 // table is the tokenizer's, as an `int` per token id.
 //

@@ -27,8 +27,8 @@ With no binary arguments only the mock is checked. The mock's path is
 Exit status: 0 when the gate passes, 1 when a required symbol is missing, and 2
 for a missing input.
 
-See docs/simulator.md sections 5.2 and 12.2, docs/correctness-gates.md, and
-docs/simulator-precision.md.
+See docs/simulator.md sections 5.2 and 12.2, docs/testing.md, and
+docs/simulator.md.
 """
 
 from __future__ import annotations

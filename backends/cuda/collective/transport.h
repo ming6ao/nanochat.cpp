@@ -2,7 +2,7 @@
 #define NANOCHAT_BACKENDS_CUDA_COLLECTIVE_TRANSPORT_H_
 
 // The backend-private transport interface for the native collective
-// (docs/distributed-native-plan.md section 3). It is not part of the frozen
+// (docs/distributed-design.md Part 3, section 3). It is not part of the frozen
 // seam, so the CUDA implementations may include CUDA headers. This header
 // itself stays vendor-free so the CPU schedule test can include it.
 //
@@ -85,7 +85,7 @@ class Transport {
 };
 
 // The per-edge capabilities the selection rule consults
-// (docs/distributed-native-plan.md section 3.2).
+// (docs/distributed-design.md Part 3, section 3.2).
 struct PeerCapabilities {
   bool peer_access = false;     // cudaDeviceCanAccessPeer for the pair
   bool rdma_reachable = false;  // an RDMA adapter reaches the peer

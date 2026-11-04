@@ -8,7 +8,7 @@ the per-task failure isolation and the core aggregation. See docs/python.md
 sections 5 and 11.
 
 The task classes read their dataset through the registration seam of
-``docs/dependency-layering-plan.md`` section 4, so they import no dataset
+``docs/build.md`` section 4, so they import no dataset
 library (section 2.1). A fake hub loader keeps that coverage hermetic: no
 network, no ``pyarrow``, and no ``numpy``.
 """

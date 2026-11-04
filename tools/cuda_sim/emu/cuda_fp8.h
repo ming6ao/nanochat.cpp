@@ -1,11 +1,11 @@
 #ifndef NANOCHAT_TOOLS_CUDA_SIM_EMU_CUDA_FP8_H_
 #define NANOCHAT_TOOLS_CUDA_SIM_EMU_CUDA_FP8_H_
 
-// The emulator's `<cuda_fp8.h>` (docs/simulator-precision.md section 6.1).
+// The emulator's `<cuda_fp8.h>` (docs/simulator.md Part 7, section 6.1).
 //
 // The CUDA conversion intrinsics map to the shared rounding header
 // `nanochat/fp8.h`, so the emulated device code and the CPU reference use one
-// implementation (docs/simulator-precision.md invariant 2, docs/correctness-
+// implementation (docs/simulator.md Part 7, invariant 2, docs/correctness-
 // gates.md section 3.2). A second implementation would break the exact
 // simulator leg.
 

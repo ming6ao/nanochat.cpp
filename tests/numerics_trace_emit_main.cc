@@ -14,7 +14,7 @@
 //
 // The emitter pins the host thread count to one, so the file does not depend on
 // the sandbox thread budget. The trace is the reference configuration of
-// docs/numerics-integration.md section 6.2; the emitter writes the section of
+// docs/testing.md Part 2, section 6.2; the emitter writes the section of
 // the build precision it was compiled with.
 
 #include <cstdint>

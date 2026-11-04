@@ -1,6 +1,6 @@
 """Profile-guided optimization: measure, trace, analyze, compare, record.
 
-The loop of ``docs/profile-guided-optimization.md`` has two halves. One half
+The loop of ``docs/performance.md`` has two halves. One half
 needs judgement: which two ideas the trace supports, and how to write them. The
 other half must be exact: the step time, the ceilings, the comparison, and the
 state. This module is the exact half, so no number in a verdict comes from a
@@ -578,7 +578,7 @@ def measurement_report(document: Mapping, *, stage: str,
     ``document`` carries one entry per run. An entry with per-step times is
     reduced to the median of its steady window. An entry with only the stage's
     own seconds is divided by its step count, because SFT and eval report no
-    per-step time yet (``docs/profile-guided-optimization.md`` row PGO.4).
+    per-step time yet (``docs/performance.md`` row PGO.4).
     """
     metric, direction = METRICS[stage]
     runs = []
@@ -1130,7 +1130,7 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python -m nanochat_cpp.pgo",
         description="The deterministic half of the profile-guided "
-                    "optimization loop (docs/profile-guided-optimization.md).")
+                    "optimization loop (docs/performance.md).")
     #: ``--root`` reads before or after the subcommand. The subcommand copy
     #: suppresses its default, so it never overwrites the value the top-level
     #: option already parsed.

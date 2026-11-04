@@ -1,5 +1,5 @@
 // tests/fp8_rounding_test.cc -- the shared fp8 conversion gate
-// (docs/correctness-gates.md section 3.2, docs/simulator-precision.md
+// (docs/testing.md Part 1, section 3.2, docs/simulator.md
 // section 4).
 //
 // The CPU reference backend and the emulation engine share one conversion

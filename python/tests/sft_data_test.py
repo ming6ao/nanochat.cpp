@@ -2,10 +2,10 @@
 
 The test is hermetic. It uses a fake tokenizer and a fake renderer, so it needs
 no hub download, no pyarrow, and no shared library. See docs/post-training.md
-section 4 and docs/training-seam.md section 6.5.
+section 4 and docs/distributed-design.md Part 2, section 6.5.
 
 The mixture builders read their datasets through the registration seam of
-``docs/dependency-layering-plan.md`` section 4, so ``sft_data`` imports no
+``docs/build.md`` section 4, so ``sft_data`` imports no
 dataset library (section 2.1). A fake hub loader exercises that seam, so the
 coverage stays hermetic: no network, no ``pyarrow``, and no ``numpy``.
 

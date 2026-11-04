@@ -1,7 +1,7 @@
 """The shared Hugging Face Hub helper for the three notebooks.
 
 The Hub save and load calls have one home: ``nanochat_cpp_bridge.hf_hub``,
-the adapter zone of ``docs/dependency-layering-plan.md`` section 4, so a
+the adapter zone of ``docs/build.md`` section 4, so a
 notebook, a Modal container, and a script run the same sequence. This module
 is the host's handle on that home. It keeps only what a host owns:
 

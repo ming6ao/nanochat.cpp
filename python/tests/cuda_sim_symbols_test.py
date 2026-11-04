@@ -6,7 +6,7 @@ mock library are involved. The real end-to-end proof is
 `tools/nanochat simulate --suite api`, which builds the mock and runs the gate
 three ways, including the negative self-test.
 
-See docs/simulator.md and docs/correctness-gates.md.
+See docs/simulator.md and docs/testing.md.
 """
 
 from __future__ import annotations

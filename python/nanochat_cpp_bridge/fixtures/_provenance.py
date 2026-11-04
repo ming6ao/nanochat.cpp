@@ -1,7 +1,7 @@
 """The environment record a parity producer stamps into the manifest (7.2).
 
 A parity claim that names no environment rests on an environment a reader
-cannot rebuild. The record of ``docs/dependency-layering-plan.md`` section 7.2
+cannot rebuild. The record of ``docs/build.md`` section 7.2
 names four facts::
 
     "producer": {

@@ -147,7 +147,7 @@ The removal is one change. Keep the fp32 gates green in that change.
 12. `python/nanochat_cpp/_build.py`: delete the fp16 precision mapping.
 13. `notebooks/kaggle_setup.py`: confirm that the default stays fp32.
 14. The documents: update `docs/build.md`, `docs/host-portability.md`,
-    `docs/simulator.md`, `docs/simulator-precision.md`, `docs/testing.md`, and
+    `docs/simulator.md`, `docs/simulator.md`, `docs/testing.md`, and
     `docs/python.md`.
 15. `docs/performance-model.md`: delete the fp16 column, and keep the fp32 and
     bf16 columns.
@@ -230,7 +230,7 @@ runs a whole workflow, not a single gate. `python/nanochat_cpp/pipeline.py` runs
 base training, SFT, RL, and the in-process evaluation, and the Modal H100 leg of
 `tools/modal/app.py` runs that chain on a real Hopper card: the image builds at
 `bf16` for `sm_90`, and gate G1 of
-[pipeline-scaleup-plan.md](pipeline-scaleup-plan.md) section 8 reads three facts
+[post-training.md](post-training.md) Part 3, section 8 reads three facts
 that have to agree: `host.precision` is `bf16`, `host.arch` is `sm_90`, and the
 delivered RL checkpoint records `bf16`.
 

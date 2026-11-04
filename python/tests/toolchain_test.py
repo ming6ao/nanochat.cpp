@@ -6,7 +6,7 @@ for every command in the table, and it gives that script a fake
 ``doctor --json`` report (environment plus the device-and-graph plan) so the
 parser assertions describe a real report. See docs/python.md sections 6 and 11.
 
-Two shapes are covered, because the layer has two (docs/pipeline-plan.md B5).
+Two shapes are covered, because the layer has two (docs/post-training.md B5).
 Outside a scope a command goes through the entry point, which starts the scope;
 inside one (``NANOCHAT_SANDBOX`` or ``NANOCHAT_GPU_QUEUED`` set) a command that
 runs a child executable runs that child directly and never calls the entry
@@ -85,7 +85,7 @@ else:
 #: binary, an evaluation binary, a GPU job). It records its whole argv -- the
 #: program name included -- in ``FAKE_CHILD_LOG`` and echoes it as JSON, so a
 #: case proves the child ran, with the argv the layer reports, and that the entry
-#: point did not (docs/pipeline-plan.md B5).
+#: point did not (docs/post-training.md B5).
 FAKE_CHILD = """#!{python}
 import json
 import os
@@ -143,7 +143,7 @@ class ToolchainTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0)
         self.assertEqual(list(result.argv), expected)
 
-    # -- The two shapes of one command (docs/pipeline-plan.md B5) ----------
+    # -- The two shapes of one command (docs/post-training.md B5) ----------
 
     #: The two sentinels that say a scope or a queued job is already active.
     SENTINELS = (("NANOCHAT_SANDBOX", "t0-cpu"), ("NANOCHAT_GPU_QUEUED", "1"))

@@ -96,7 +96,7 @@ second line is T2 and runs at a wave boundary.
 
 ## The staged numeric-trace contract (Path A)
 
-[numerics-integration.md](numerics-integration.md) defines the staged precision
+[testing.md](testing.md) defines the staged precision
 contract of the numeric integration test. That document calls the design Path A.
 `//tests:numerics_trace_test` and its GPU sibling
 `//tests:numerics_trace_cuda_test` gate the contract against one committed
@@ -185,7 +185,7 @@ The sampled stream is derived per row, per prompt, and per step: `GenerateBatch`
 mixes the row index and the decode step into the seed before each decode call,
 and `GenerateMultiPrompt` mixes the prompt index, so row `r` of a batch draws the
 same quantile as row `r` of a one-row run at that seed and no two rows draw the
-same one (blocker B4 of `docs/pipeline-plan.md`). Every recorded sampled
+same one (blocker B4 of `docs/campaigns.md`). Every recorded sampled
 evaluation number therefore moved once, at that change.
 
 No fixture moved with it. `tests/data/generate_parity.bin` records greedy output
@@ -473,7 +473,7 @@ it will compare against.
 
 **Missing run:** `tools/nanochat test --gpu //tests:sft_parity_test` at a wave
 boundary, and the phase G comparison of section 7 of
-[sft-parity-plan.md](sft-parity-plan.md).
+[parity.md](parity.md).
 
 ### P7 — SFT validation parity
 
@@ -503,7 +503,7 @@ bits-per-byte and the ChatCORE value of the same run as the driver.
 
 ### What the SFT rows do not cover
 
-These are the risks of section 10 of [sft-parity-plan.md](sft-parity-plan.md),
+These are the risks of section 10 of [parity.md](parity.md),
 next to the rows they qualify.
 
 - **The real hub mixture order.** `P4` is closed against the synthetic
@@ -611,3 +611,209 @@ the reference location, the nanochat.cpp location, the observed impact, the
 evidence (which gate does or does not cover it), and the fix direction. Prefer
 `equivalent` only when the two forms are provably the same function; otherwise
 mark it `open` until measured.
+
+---
+
+## Part 1. Supervised fine-tuning reference parity
+
+_Absorbed from the former `sft-parity-plan.md`. Its section numbers are
+unchanged, so a reference to a section of that document resolves to the same
+number here. The execution record is in [campaigns.md](campaigns.md)._
+
+### 2. What the label requires
+
+[docs/parity.md](parity.md) defines a parity claim. Three items are necessary:
+
+1. A row in the parity table with a status. The status is `closed`,
+   `equivalent`, `open`, or `out-of-scope`.
+2. A committed fixture that the PyTorch reference produced.
+3. A gate that compares one backend against that fixture
+   ([testing.md](testing.md)).
+
+The post-training rows are `P4` to `P7`. They cover the SFT data, the SFT
+arithmetic, the SFT loop, and the SFT validation. No other row covers those
+items.
+
+`//tests:numerics_trace_test` is a cross-target regression guard on the exact
+class: configuration, inputs, token ids, masks, greedy identifiers, argmax, and
+valid-target counts. Its fixture comes from the C++ emitter, not from torch.
+It records no floating-point result, so it gives no reference evidence for SFT
+arithmetic. That evidence is `//tests:sft_step_parity_test`.
+
+### 3. The four rungs
+
+| Rung | Claim | Requires | Closeable before the reader and `sft_main`? |
+|---|---|---|---|
+| R1 | SFT data parity. The renderer and the packer match the reference byte for byte. | Reference ids, masks, packed rows, and mixture order. | Yes |
+| R2 | SFT arithmetic parity. Loss, gradient, and an N-step optimizer trajectory match. | The embedded base parameters and moments, the packed rows, the optimizer configuration, and the warm start. | Yes |
+| R3 | SFT loop parity. Loss curve and checkpoints match. | The native packed-row reader, `sft_main`, the progress schedule, and the warm start. | No |
+| R4 | SFT validation parity. Bits-per-byte and ChatCORE match. | The packed validation rows, the evaluation cadence, and the chat task logic. | No |
+
+Do not put one label on the whole path before R4. Add one parity row per rung.
+The map is one to one: `P4` is R1, `P5` is R2, `P6` is R3, and `P7` is R4.
+
+One dependency order applies. R2 consumes the packed rows that R1 produces.
+The warm start leans on entry `P3` and on `LoadOptimizerState`
+(`src/optim.cc`). No dependency forces R3 work earlier.
+
+### 5. Pinned settings
+
+The fixture and the loop share these values.
+
+#### 5.1 Data and shape
+
+- The training mixture: SmolTalk train, MMLU `auxiliary_train` times 3, GSM8K
+  `main` train times 4.
+- The validation mixture: SmolTalk test, MMLU test with `stop=5200`, GSM8K
+  test with `stop=420`.
+- The renderer truncates each conversation to 2048 tokens. The reference calls
+  `render_conversation` with the default, and `scripts/chat_sft.py` never
+  overrides it.
+- The packer buffer holds 100 conversations. It refills the buffer before
+  each largest-fit search.
+- The packer searches the buffer for the largest conversation that fits the
+  row. It pads the remainder with BOS tokens when none fits.
+- The row capacity is `max_seq_len + 1`. The inputs are the first
+  `max_seq_len` positions. The targets are the last `max_seq_len` positions.
+- A masked target and a padding target are `-1`.
+- The cursor advances by `world_size`, and it wraps with an epoch increment.
+  The packer skips a conversation longer than one row at fetch time.
+- The stream ends after the batch in which `consumed >= len(conversations)`.
+  This is the reference `last_step`. One list of conversations yields about
+  one epoch of rows.
+- The inherited shape: `max_seq_len`, `device_batch_size`, and
+  `total_batch_size` from the base checkpoint.
+- The gradient accumulation:
+  `total_batch_size / (device_batch_size * max_seq_len * world_size)`.
+- The precision: fp32 for the T0 and T1 gates, the build precision for T2.
+
+#### 5.2 Schedule and rates
+
+- The initial learning-rate fraction: 0.8. Apply it to every group.
+- The warmup ratio: 0. The warmdown ratio: 0.5. The final rate fraction: 0.
+- The learning rate follows D1 and the reference progress value. The loop takes
+  the running maximum of `approx_progress`.
+- The Muon momentum: 0.85 to 0.95 over 300 steps, then hold at 0.95.
+- The rate scale for the AdamW groups: `(hidden_dim / 768) ** -0.5`.
+- The gradient clip: 0.
+- The per-group settings, before `init_lr_frac`:
+
+| Group | Rate | Betas | Weight decay |
+|---|---|---|---|
+| unembedding | 0.004 × scale | (0.8, 0.96) | 0.01 |
+| embedding | 0.3 × scale | (0.8, 0.995) | 0.001 |
+| value embeddings | 0.15 × scale | (0.8, 0.995) | 0.01 |
+| residual lambdas | 0.005 | (0.8, 0.95) | 0.05 |
+| x0 lambdas | 0.5 | (0.96, 0.95) | 0.0 |
+| smear and backout | 0.2 | (0.8, 0.95) | 0.0 |
+| Muon matrices | 0.02 | beta2 0.9, ns_steps 5 | 0.0 |
+
+- The `eps` is `1e-10` for every AdamW group. The `scale` column is the
+  `hidden_dim` scale of the third bullet.
+
+#### 5.3 Warm start and checkpoint
+
+- The warm start follows D5: weights and moments, fresh rates, step 0.
+- The checkpoint path is `chatsft_checkpoints/<tag>`. It holds the optimizer
+  state and the recipe block (D7).
+- The checkpoint stage is `Stage::kSft`.
+
+#### 5.4 Evaluation
+
+- The evaluation interval: 200 steps.
+- The evaluation tokens: `40 * 524288`.
+- The ChatCORE interval: 200 steps.
+- The ChatCORE categorical cap: -1. The generative cap: 24.
+- The validation metric: bits-per-byte on the packed validation rows, per D6.
+
+#### 5.5 Fixture sizes
+
+Keep every fixture small enough for a fast T0 run. Use one tiny model for the
+step, loop, and shard fixtures:
+
+- Model: 2 layers, `hidden_dim=32`, `num_heads=2`, `num_kv_heads=2`,
+  `vocab_size=256`, `padded_vocab_size=256`, `seq_len=32`,
+  `window_pattern="L"`.
+- Pack fixture: 8 conversations, `seq_len=32`, `buffer_size=100`.
+- Step fixture: 8 steps, `device_batch_size=1`, `grad_accum=2`, `seq_len=32`.
+- Loop fixture: 8 steps, `num_iterations=8`, one evaluation at step 8.
+
+### 6. Fixtures
+
+#### 6.1 `tests/data/sft_pack_fixture.bin`
+
+The file is `NANCHAT1`, one `uint32` version, and UTF-8 JSON. The object holds:
+
+- `settings`: `seq_len`, `buffer_size`, `render_max_tokens`, `rank`,
+  `world_size`, and `stop_rule`.
+- `tokenizer`: the artifact name, its SHA-256, the special-token map, and a
+  `pieces` table from every fixture text fragment to its reference token ids.
+- `conversations`: 8 conversations. Cover a SmolTalk-like conversation, an
+  MMLU multiple-choice question, a GSM8K solution with tool parts, a system
+  message, and one conversation above 2048 tokens.
+- `render`: the reference `ids` and `mask` for each conversation.
+- `pack`: the reference `inputs` and `targets`, one list per row.
+- `mixture`: the synthetic task lengths and the reference index order (D8).
+- `validation_mixture`: the same for the validation task set.
+
+The reference rows come from a transcription of
+`scripts/chat_sft.py:178-300`. Run it with the pinned `seq_len`, the pinned
+`buffer_size`, `rank=0`, `world_size=1`, and the `last_step` stop rule.
+
+#### 6.2 `tests/data/sft_step_fixture.bin`
+
+The file uses `fixture_format.FixtureWriter`. The records are:
+
+- `config/*`: layers, heads, kv_heads, embd, seq, vocab, padded_vocab, and
+  window pattern.
+- `config/opt/*`: the four rates, `init_lr_frac`, `adam_eps`, and `clip`.
+- `config/schedule/*`: the warmup ratio, the warmdown ratio, the final
+  fraction, and the four Muon momentum fields.
+- `data/step/<k>/{tokens,targets}`: the micro-batches of step `k`, shape
+  `[grad_accum, device_batch_size, seq]`.
+- `step/<k>/{loss,grad_norm,param_l2,lr,momentum}` for `k` = 1 to 8.
+- `step/8/param/<name>`: the final parameters.
+
+The test stages the initial parameters and the initial moments from
+`tests/data/sft_base_fixture.ckpt`. The fixture records the reference
+trajectory as data, so the runtime test never reads torch.
+
+#### 6.3 `tests/data/sft_loop_fixture.bin`
+
+The file uses `fixture_format.FixtureWriter`. The records are:
+
+- `config/num_iterations`, `config/rows`, and `config/eval_every`.
+- `loop/<k>/{step,progress,epoch,lr_multiplier,momentum}` for 8 steps.
+- `train/loss/<step>` for 8 steps.
+- `val/bpb/8` and `chatcore/8` for the final evaluation.
+
+#### 6.4 `tests/data/sft_rows_fixture.nchsft` and the base checkpoint
+
+The `sft` kind writes two more files from the same tiny model:
+
+- `tests/data/sft_rows_fixture.nchsft`: the reference packed rows as an
+  `NCSFT001` shard, shape `[rows, 32]`. The rows come from the pack fixture
+  conversations. The writer is `nanochat_cpp.sft.pack`, so the generator adds
+  `python/` to `sys.path`.
+- `tests/data/sft_base_fixture.ckpt`: the reference initial parameters and
+  optimizer moments in the C++ container, with step 0. Once D7 lands, the
+  checkpoint also carries the recipe block.
+  Write it through the path of `tools/convert_checkpoint.py`.
+
+The shard and the checkpoint make R2 and R3 hermetic. Both loops consume the
+same rows from the same start. The real mixture stays an optional check (D8).
+
+### 8. Interim label
+
+Use these names until Phase G closes:
+
+- After Phase C: "SFT data parity" (`P4`). Earned: the R1 gate passes at T0, so
+  `docs/parity.md` sets `P4` to `closed`.
+- After Phase D: "SFT arithmetic parity" (`P5`), with the GPU leg. The T0 leg
+  passes, so `docs/parity.md` sets `P5` to `equivalent` for the CPU backend. The
+  name stays interim because the T1 and T2 legs have not run.
+- Until Phase G: "SFT loop parity" (`P6`) and "SFT validation parity" (`P7`)
+  stay `open`, because their gate is the T2 driver run and it has not happened.
+
+`docs/post-training.md` cites these names with the fixture files
+`tests/data/sft_*_fixture.*` until Phase G closes them.

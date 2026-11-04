@@ -1,7 +1,7 @@
 #ifndef NANOCHAT_SRC_HW_GATE_H_
 #define NANOCHAT_SRC_HW_GATE_H_
 
-// The hardware correctness gate (docs/correctness-gates.md section 4).
+// The hardware correctness gate (docs/testing.md Part 1, section 4).
 //
 // The simulator proves the fp8 graph on the CPU. It cannot prove the
 // tensor-core arithmetic, the `cublasLt` result, the layout, or the fused

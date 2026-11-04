@@ -426,7 +426,7 @@ class NanochatOptimizer final : public Optimizer {
       // it from there. The scaling happens here, where the per-group rate is
       // set, and nowhere else; the smear group is scaled like every other group
       // even though its rate is a constant of the recipe rather than a
-      // configured rate (section 5.2 of docs/sft-parity-plan.md).
+      // configured rate (section 5.2 of docs/parity.md).
       group.lr = specs[i].lr * config_.init_lr_frac;
       group.beta1 = specs[i].beta1;
       group.beta2 = specs[i].beta2;
@@ -694,7 +694,7 @@ float Scheduler::LrMultiplier(int step) const {
 }
 
 // The SFT learning-rate multiplier (design decision D1 of
-// docs/sft-parity-plan.md): the body of `scripts/chat_sft.py:310-317`, in the
+// docs/parity.md): the body of `scripts/chat_sft.py:310-317`, in the
 // same three branches and with the same endpoints. `progress` is the fraction
 // of the run that has happened, not a step count, because an SFT run stops at
 // the end of its data and a step total fixed before the run started does not
@@ -768,7 +768,7 @@ bool LoadOptimizerState(const Checkpoint& checkpoint, Optimizer* optimizer) {
 }
 
 // The progress schedule's entry point (design decision D1 of
-// docs/sft-parity-plan.md). `Optimizer::Step` resolves the learning-rate
+// docs/parity.md). `Optimizer::Step` resolves the learning-rate
 // multiplier from `Scheduler::LrMultiplier`, which is the pretraining curve
 // indexed by a step total. An SFT run follows `LrMultiplierForProgress`
 // instead, and it needs the momentum and weight-decay schedules to keep their
@@ -789,10 +789,10 @@ void ClearOptimizerProgressMultiplier(Optimizer* optimizer) {
   SetOptimizerProgressMultiplier(optimizer, -1.0f);
 }
 
-// The optimizer-step record (docs/training-seam.md section 10). The container
-// has no integer dtype, so one four-byte record carries the little-endian
-// int32 step. `SaveOptimizerState` writes the group buffers; this writes the
-// driver's counter beside them.
+// The optimizer-step record (docs/distributed-design.md Part 2, section 10).
+// The container has no integer dtype, so one four-byte record carries the
+// little-endian int32 step. `SaveOptimizerState` writes the group buffers; this
+// writes the driver's counter beside them.
 void SaveOptimizerStep(int step, Checkpoint* checkpoint) {
   if (checkpoint == nullptr) return;
   TensorRecord record;

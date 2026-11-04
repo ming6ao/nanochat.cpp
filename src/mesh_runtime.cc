@@ -277,7 +277,7 @@ void MeshRuntime::Save(const std::string& path) {
     throw std::runtime_error("the runtime has no replica to save");
   }
   // The harness container carries the optimizer state and the step beside the
-  // parameters, so a resume continues the schedule (docs/training-seam.md
+  // parameters, so a resume continues the schedule (docs/distributed-design.md
   // section 10). The mesh is the one caller that knows its data-parallel
   // width, so it records that too.
   CheckpointSaveOptions options;

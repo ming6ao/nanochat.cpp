@@ -1,11 +1,12 @@
 // `rl_worker` -- the persistent reinforcement-learning worker
-// (docs/rl-notebook.md section 4, docs/training-seam.md section 6.4).
+// (docs/post-training.md Part 1, section 4, docs/distributed-design.md Part 2,
+// section 6.4).
 //
 // The process holds the model and the optimizer across steps and speaks the
 // pipe protocol documented in `src/rl_worker.h`. On a workstation the facade
 // launches it through `tools/nanochat train -- <worker>`; on Kaggle the facade
 // starts it directly under `NANOCHAT_SANDBOX_BACKEND=none`
-// (docs/rl-notebook.md section 6).
+// (docs/post-training.md Part 1, section 6).
 //
 // It also offers a fixture-driven smoke mode so the worker can be gated
 // without the Python bridge:

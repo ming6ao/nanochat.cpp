@@ -2,14 +2,14 @@
 
 Status: proposed. The depth-24 run on eight cards has not happened. One H100 has
 run the demo pipeline at bf16, as row 9 of
-[pipeline-scaleup-plan.md](pipeline-scaleup-plan.md) records. This document is
-the run book that `docs/distributed-native-plan.md` section 11 asks for, plus
+[post-training.md](post-training.md) records. This document is
+the run book that `docs/distributed-design.md` Part 3, section 11 asks for, plus
 the acceptance criteria for the depth-24 pretraining run.
 
 This is a run book, not a design. The designs are in
-[fp8-training.md](fp8-training.md), [attention-tensor-core.md](attention-tensor-core.md),
+[fp8-training.md](fp8-training.md), [attention.md](attention.md),
 [performance-model.md](performance-model.md), and
-[simulator-precision.md](simulator-precision.md).
+[simulator.md](simulator.md).
 
 ## 1. Goal
 
@@ -33,14 +33,14 @@ model with fp8 training, a token-to-parameter ratio of 8, and an average of
 
 Prerequisites:
 
-1. Phases 3 to 6 of [distributed-native-plan.md](distributed-native-plan.md),
+1. Phases 3 to 6 of [distributed-design.md](distributed-design.md),
    or a verified NCCL path.
 2. The bf16 compute path from `docs/precision.md` Stage 2a.
 3. The fp8 path from [fp8-training.md](fp8-training.md), if fp8 is used.
 4. The acceptance criteria in section 8. Agree them before the run starts.
 
 Record the `nvlink` view of the node with `nvidia-smi topo -m`. The
-`docs/distributed-native-plan.md` section 11 discovery step owns the probe list.
+`docs/distributed-design.md` Part 3, section 11 discovery step owns the probe list.
 
 ## 3. The memory plan
 
@@ -152,7 +152,7 @@ variables that `train_main` reads:
 | `NANOCHAT_MASTER_ADDR` | The rank 0 host |
 | `NANOCHAT_MASTER_PORT` | The rank 0 port |
 
-The contract is in [distributed-launch.md](distributed-launch.md). A flag
+The contract is in [distributed-design.md](distributed-design.md). A flag
 overrides a variable.
 
 Run one step first, then check the free memory, then start the full run.
@@ -268,8 +268,8 @@ only durable evidence of the run.
 
 ## See also
 
-- [distributed-launch.md](distributed-launch.md) — the launch contract.
-- [distributed-native-plan.md](distributed-native-plan.md) — the native ring.
+- [distributed-design.md](distributed-design.md) Part 1 — the launch contract,
+  and Part 3 for the native ring.
 - [fp8-training.md](fp8-training.md) — the fp8 path.
 - [performance-model.md](performance-model.md) — the step-time bound.
 - [eval.md](eval.md) — the evaluation bridge.

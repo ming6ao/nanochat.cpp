@@ -6,7 +6,7 @@ path resolution. This module owns the half that needs PyTorch: reading a
 reference ``torch.save`` file, casting its tensors to the container dtype, and
 reassembling the AdamW and Muon optimizer state.
 
-The split is the boundary of ``docs/dependency-layering-plan.md`` section 4.
+The split is the boundary of ``docs/build.md`` section 4.
 A conversion is an adapter in both directions, so the torch code lives here
 and the core stays a standard-library package (section 11). The container
 helpers are imported from the core rather than copied, so the byte layout is

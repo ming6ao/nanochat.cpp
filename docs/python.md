@@ -71,7 +71,7 @@ statement of that rule: when `NANOCHAT_SANDBOX` or `NANOCHAT_GPU_QUEUED` is set
 it runs the child and its arguments as a child of this process, and otherwise it
 runs the command through `tools/nanochat`. `train`, `rl`, `eval`, `bench`,
 `verify`, `gpu`, and `profile` all call it, so a stage of the chain keeps the
-scope it was given (blocker B5 of `docs/pipeline-plan.md`; the comment there
+scope it was given (blocker B5 of `docs/post-training.md`; the comment there
 holds the two commands that show why).
 
 ### 3.2 Kaggle delivery
@@ -101,7 +101,7 @@ The library search order is the one `nanochat_cpp._lib.load` implements:
 4. a library bundled beside the package;
 5. an installed `nanochat_cpp_cuda_<arch>` wheel, which is how a host that
    installed a binary wheel finds its library without a clone
-   (`docs/dependency-layering-plan.md` section 6.3);
+   (`docs/build.md` Part 1, section 6.3);
 6. the cache, or an on-demand build from the sources (section 3.3).
 
 The two stage executables of the chain follow the same shape, through
@@ -167,7 +167,7 @@ build needs no loss scaling ([precision.md](precision.md)).
 Two facades launch a stage executable: `nc.sft.run` and `nc.rl.run`. Each one
 takes the model shape as a `Config`, and each one hands it to
 `api.model_flags(config)`, which is the one model flag list on the Python side
-(blockers B1 and B2 of `docs/pipeline-plan.md`):
+(blockers B1 and B2 of `docs/post-training.md`):
 
 ```python
 def model_flags(config: Config | None = None) -> list[str]:
@@ -206,7 +206,7 @@ change a caller of `nc.rl.run` must act on:
 `checkpoint` remains optional for a run that only reports, and `config` remains
 optional for a caller that owns no shape. A stage that warm starts and saves
 must pass both arguments, which is what `nanochat_cpp.pipeline` does at every
-stage ([rl-notebook.md](rl-notebook.md) section 9).
+stage ([post-training.md](post-training.md) Part 1, section 9).
 
 Both facades resolve their child with `_build.stage_binary`, in the order of
 section 3.2, so a tree checkout, a runfiles tree, and a future wheel are one
@@ -520,7 +520,7 @@ The host tool has two Python layers, and one command table.
 argument assembly, the Bazel wiring, the build lock, and the sandbox and queue
 routing. `tools/nanochat` is the Python entry point that starts it, so the path
 stays stable for the Bazel `--run_under` strings. The resource launcher is
-`python/nanochat_cpp/sandbox.py`. See `docs/script-consolidation-plan.md`
+`python/nanochat_cpp/sandbox.py`. See `docs/python.md`
 (section 4, decisions 1 and 10) and `docs/sandbox.md`.
 
 `nanochat_cpp.toolchain` is the typed client. It exposes every command as a
@@ -632,8 +632,8 @@ Update these references.
 | `docs/parity.md` | Point at `python.md`. |
 | `docs/testing.md` | Point at `python.md`. |
 | `docs/build.md` at line 39 | Remove `base_train.py` and `launcher.py` from the layout list. |
-| `docs/cpu-performance.md` | Repoint the command examples. |
-| `docs/cpu-baseline.json` at line 32 | Repoint the recorded command. |
+| `docs/performance.md` | Repoint the command examples. |
+| `docs/baselines.json` at line 32 | Repoint the recorded command. |
 | `docs/parquet-native.md` at line 219 | Repoint the command. |
 | `README.md` at lines 45 and 54 | Replace the `tools/nanochat_cpp base_train` quickstart. |
 | `tools/check_tokenizer_parity.py` at line 12 | Point at `python.md`. |
@@ -669,7 +669,7 @@ Steps 1 to 4 add the replacement. Steps 6 and 7 remove the old surface.
 | `python/tests/sft_test.py` | `sft.run` pins its argv, including `api.model_flags(config)`, with a fake toolchain. |
 | `python/tests/rl_test.py` | The RL worker argv and the message protocol, including `warm_start` as the load path. |
 | `python/tests/build_test.py` | `_build.stage_binary` over a fake tree, and the one `build_stages` command line. |
-| `python/tests/pipeline_test.py` | The base, SFT, and RL chain over the `demo` profile: assertions A1 to A9 of `docs/pipeline-plan.md` section 7. |
+| `python/tests/pipeline_test.py` | The base, SFT, and RL chain over the `demo` profile: assertions A1 to A9 of `docs/post-training.md` Part 2, section 7. |
 | `python/tests/toolchain_test.py` | The argv for every command, against a fake entry script. |
 | `python/tests/api_test.py` | The tokenizer handle guard, the two doors, and the closed-tokenizer error. |
 | `python/tests/core_test.py` | Unchanged. |
@@ -733,3 +733,94 @@ Owner decisions:
    `tools/dump_fixtures.py plan`.
 5. Decide whether the deferred local HumanEval runner becomes a tracked
    follow-up.
+
+---
+
+## Part 1. Host task consolidation
+
+_Absorbed from the former `script-consolidation-plan.md`. Its section numbers
+are unchanged, so a reference to a section of that document resolves to the
+same number here. The execution record is in [campaigns.md](campaigns.md)._
+
+### 0. Amendment: the sandbox moves to Python
+
+A later change moves the resource launcher, the limit verifier, the style gate,
+and the symbol gate to Python. It removes the shell trust boundary that this
+plan kept. See [sandbox.md](sandbox.md) and [python.md](python.md).
+
+These decisions are superseded.
+
+- Decision 2, "Shell owns the resource launcher". `python/nanochat_cpp/sandbox.py`
+  now holds the launcher.
+- Decision 3, "`tools/sandbox.sh` stays the `--run_under` program". The wrapper
+  for a CPU test action is now
+  `python/nanochat_cpp/sandbox.py --profile=t0-cpu --`.
+- Decision 5, "Keep `profiles.conf` as the only profile source". The single
+  source is now `tools/sandbox/profiles.json`.
+- Decision 7, "Keep `tools/sandbox/verify.sh` as a separate program". The
+  verifier is now the `verify` subcommand of `sandbox.py`. It stays a separate
+  process, because it reads the cgroup of its own process.
+- Decision 9, "Freeze the sandbox interface". The interface stays frozen. Only
+  the program name changed.
+
+Decision 4 still holds. The environment variable names, the two log paths, the
+log line formats, the exit codes, the `NANOCHAT_SANDBOX` sentinel, and the
+`doctor --json` keys do not change. The symbol gate keeps its output and its
+exit codes.
+
+### 4. Locked decisions
+
+Lock these decisions before any code moves.
+
+1. **Python owns the orchestration.** Python holds the command table, the
+   dispatch, the argument assembly, the lock, the reaper, the fixture
+   generators, `doctor`, and `simulate`.
+2. **Shell owns the resource launcher.** `tools/sandbox.sh` keeps the
+   `systemd-run` call, the CPU affinity, the rlimits, and the limit read-back.
+3. **`tools/sandbox.sh` stays the `--run_under` program for a CPU test.** Bazel
+   invokes it once per test action. A GPU test action uses a queue submission in
+   `--run_under` instead, so the worker sandboxes the action and owns the device
+   ([sandbox.md](sandbox.md)). Do not put a GPU lock in
+   `tools/sandbox.sh`.
+4. **Freeze the observable contract.** Keep the environment variable names, the
+   two log paths and their line formats, the exit codes, the two `--run_under`
+   strings, the `NANOCHAT_SANDBOX` sentinel, the `doctor --json` keys, the
+   fixture subcommand names, and the fixture binary layouts.
+5. **Keep `profiles.conf` as the only profile source.** Do not copy the numbers
+   into Python. `tools/sandbox.sh` validates the profile name
+   (`tools/sandbox.sh:65`).
+6. **Land one stage per commit.** Do not mix a code move with a rewrite.
+7. **Keep `tools/sandbox/verify.sh` as a separate program.** It runs inside the
+   scope. Do not merge it into `tools/sandbox.sh`.
+8. **The merged generator is `tools/dump_fixtures.py`.** It keeps every existing
+   subcommand name: `oracle`, `train`, `rl`, `generate`, `eval`, `plan`,
+   `tokenizer`, `loader`, `chat`, `api`, and `numerics`. A later fixture is one
+   new row.
+9. **Freeze the sandbox interface.**
+   `tools/sandbox.sh [--profile NAME] [--backend auto|systemd|none]
+   [--no-slice] [--] <cmd...>`. Both profile forms stay accepted, because
+   `--run_under` needs `--profile=NAME` and `run_profile` uses `--profile NAME`
+   (`tools/sandbox.sh:27-33`). No stage changes this interface.
+10. **The Python layer keeps one rule at a time.** While the dispatch is in
+    shell, the Python layer reaches the host only through
+    `tools/nanochat <subcommand>`. After stage S13, the Python command-line tool
+    calls Bazel, `tools/sandbox.sh`, and the queue directly. The in-process
+    compute API still does not. Stage S13 updates `docs/python.md` sections 6
+    and 12.
+
+### 6. Constraints: do not merge these
+
+- Do not put the GPU queue in `tools/sandbox.sh`. Bazel invokes that script once
+  per test action. The queue belongs to the worker.
+- Do not drop the `nvidia-smi` gate while another job uses the card.
+- Do not convert `tools/sandbox.sh` to Python. `systemd-run`, `taskset`,
+  `prlimit`, and the `--run_under` string are shell work.
+- Do not merge `tools/sandbox/verify.sh` into `tools/sandbox.sh`. A merge would
+  change the `/tmp/nanochat-sandbox.log` line that decision 4 freezes.
+
+Both bullets above are superseded by section 0 and by
+[sandbox.md](sandbox.md). The verifier stays a separate process, so the log line
+does not change.
+- Do not convert the Kaggle scripts. They install packages and edit `PATH`.
+- Do not change a fixture subcommand name or a fixture binary format.
+- Keep the `Makefile`, which is the non-Bazel fallback.

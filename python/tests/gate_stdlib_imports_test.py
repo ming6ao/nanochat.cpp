@@ -1,6 +1,6 @@
 """G2: every import in the core is in the standard library.
 
-Gate G2 of ``docs/dependency-layering-plan.md`` section 8, and the load-bearing
+Gate G2 of ``docs/build.md`` section 8, and the load-bearing
 one: an abstract syntax tree walk over every ``.py`` file under
 ``python/nanochat_cpp``, failing when an absolute import's root name is neither
 in :data:`sys.stdlib_module_names` nor the package itself. Every leak of

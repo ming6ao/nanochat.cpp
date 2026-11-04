@@ -20,7 +20,7 @@
 // GFLOP/s` overrides it when the table does not hold the card.
 //
 // The shapes default to the two profiles the plan measures
-// (docs/pipeline-scaleup-plan.md section 5): `h100` (8 layers, hidden 512,
+// (docs/post-training.md Part 3, section 5): `h100` (8 layers, hidden 512,
 // eight heads, four key/value heads) and `big` (20 layers, hidden 1280, ten
 // heads, five key/value heads). `--profile` selects one of the two, and
 // `--layers`, `--hidden`, `--heads`, and `--kv-heads` build another.

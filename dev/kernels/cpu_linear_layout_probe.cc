@@ -21,7 +21,7 @@
 //   tools/nanochat build //dev/kernels:cpu_linear_layout_probe
 //   tools/nanochat bench -- ./bazel-bin/dev/kernels/cpu_linear_layout_probe
 //
-// See docs/cpu-performance.md.
+// See docs/performance.md.
 
 #include <chrono>
 #include <cstddef>

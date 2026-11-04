@@ -67,7 +67,7 @@ class Rng {
 
 // Frozen Phase 0 end-to-end baseline for the production SSSL shape. The
 // benchmark records the measured rate next to this constant, so one JSON report
-// shows the gate result. The numbers live in docs/attention-baseline-e2e.json.
+// shows the gate result. The numbers live in docs/baselines.json.
 constexpr double kBaselineTokensPerSecond = 55000.0;
 constexpr double kBaselineForwardMs = 74.472727;
 

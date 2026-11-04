@@ -5,7 +5,7 @@ The C++ runtime reads only its own self-describing container and never imports
 PyTorch, so a released base or SFT checkpoint has to be remapped once on the
 host. The container writer stays in ``python/nanochat_cpp/checkpoint.py`` and
 the PyTorch half lives in ``nanochat_cpp_bridge.torch_checkpoint`` (the adapter
-package of ``docs/dependency-layering-plan.md`` section 4); this script only
+package of ``docs/build.md`` section 4); this script only
 puts ``python/`` on the path and forwards to that module's command line, so the
 conversion is importable (and testable without torch) and shares one entry
 point with the ``nanochat-cpp-convert`` console script. See ``docs/python.md``.

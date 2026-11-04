@@ -310,7 +310,7 @@ Three results follow.
 
 The fp32 fused attention tile would change the attention row from 5 minutes to
 120 or 240 minutes. See
-[attention-tensor-core.md](attention-tensor-core.md).
+[attention.md](attention.md).
 
 The nanochat reference measured 99 minutes against a bound of about 52 minutes.
 The fraction is about 0.53. The remaining 47 minutes are the row kernels, the
@@ -318,7 +318,7 @@ launch gaps, the imperfect overlap, and the achieved GEMM rate.
 
 ### 7.3 The bound at the two chain shapes
 
-The chain of [pipeline-scaleup-plan.md](pipeline-scaleup-plan.md) runs two
+The chain of [post-training.md](post-training.md) runs two
 shapes, `demo` (2 layers, hidden 64) and `standard` (8 layers, hidden 512), on
 two cards, a T4 at fp32 and an H100 at bf16. `tools/nanochat roofline` prints the
 bound of each of the four pairs. The command for one row:
@@ -342,7 +342,7 @@ Three results follow.
    arithmetic.** A step at either shape moved 64 tokens: one row of sequence 64,
    because the recorded job's `batch` field is 1. The host program around those
    tokens costs tens of milliseconds. The recorded T4 run of the chain is about
-   42 ms per step at the `demo` shape (`docs/pipeline-plan.md` section 2). The
+   42 ms per step at the `demo` shape (`docs/campaigns.md`). The
    largest device bound in the table is 3.6 ms, so most of the step time is not
    device time at all.
    Every family of the two `demo` rows reads `limit: launch` except the optimizer
@@ -355,7 +355,7 @@ Three results follow.
    still leaves the step an order of magnitude below the host program, which is
    why the chain records a step time and gates the two legs against each other
    instead of claiming a throughput (gates G2 and G3 of
-   [pipeline-scaleup-plan.md](pipeline-scaleup-plan.md) section 8).
+   [post-training.md](post-training.md) Part 3, section 8).
 3. **The bf16 precision does not move the step time.** The H100 `standard` bound
    of 0.764 ms sits inside a step of tens of milliseconds, so a bf16 leg and an
    fp32 leg of the same job cost the same host time. That is why the second leg
@@ -455,7 +455,7 @@ the document must say so.
    matrix multiplies as compute bound.
 5. The estimator reproduces the bound in section 7.2 for the depth-24 shape.
 6. The measured attention rows from phase A0 of
-   [attention-tensor-core.md](attention-tensor-core.md) appear in section 10 with
+   [attention.md](attention.md) appear in section 10 with
    their fractions.
 
 Checks 1 to 5 run in `//tests:performance_model_test`; check 3 also runs in
@@ -478,7 +478,7 @@ Checks 1 to 5 run in `//tests:performance_model_test`; check 3 also runs in
 | 5 The precision assignment | Implemented (`AssignMatrixPrecision`) |
 | 6 The device limit table | Implemented (fp8 rate and bandwidth in `DeviceProfile`) |
 | 7 The estimator | Implemented (`src/performance_model.cc`) |
-| 7.3 The two chain shapes | Four bounds printed by `tools/nanochat roofline`; the chain's own step time is unmeasured until row 9 of `pipeline-scaleup-plan.md` runs |
+| 7.3 The two chain shapes | Four bounds printed by `tools/nanochat roofline`; the chain's own step time is unmeasured until row 9 of `post-training.md` runs |
 | 8 The work-ratio check | Benchmark side only; the model rows carry the binding limit |
 | 9 The reference points | Reference data, not a computed output |
 | 13 Phases | M0 to M2 complete; M3 awaits a measurement |
@@ -520,5 +520,5 @@ Checks 1 to 5 run in `//tests:performance_model_test`; check 3 also runs in
 - [simulator.md](simulator.md) — the S0 engines and their limits.
 - [kernels.md](kernels.md) — the kernel inventory.
 - [fp8-training.md](fp8-training.md) — the fp8 rule and the layer set.
-- [attention-tensor-core.md](attention-tensor-core.md) — the option decision the
+- [attention.md](attention.md) — the option decision the
   model gates.

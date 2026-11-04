@@ -41,7 +41,7 @@
 //    returns false with the field that failed in its error string.
 //
 // The `Recipe` block declared below (design decision D7 of
-// docs/sft-parity-plan.md) is the first field appended after that list was
+// docs/parity.md) is the first field appended after that list was
 // frozen, so it is the worked example of rule 1: a file written before it reads
 // with the member defaults, and a build older than it counts the words it does
 // not know and still loads the file.
@@ -98,7 +98,7 @@ struct ConfigBlock : public IFields {
 };
 
 // The training recipe a checkpoint carries (design decision D7 of
-// docs/sft-parity-plan.md): the C++ equivalent of the reference `user_config`,
+// docs/parity.md): the C++ equivalent of the reference `user_config`,
 // which the reference SFT run reads from its base checkpoint so the finetune
 // uses the batch shape and the learning rates the base run was trained with.
 //

@@ -43,7 +43,7 @@ directory.
 ## CPU GEMM micro-benchmark (Phase 0)
 
 `cpu_gemm_bench.cc` times the four dominant GEMM shapes from
-Part 2, section 2 of [docs/cpu-performance.md](../../docs/cpu-performance.md). The rows are
+Part 2, section 2 of [docs/performance.md](../../docs/performance.md). The rows are
 `gemm_forward`, `gemm_wgrad`, `gemm_dgrad`, and `mlp_gemm`. The benchmark warms
 up, then keeps the best of N rounds. It calls `kernels::Gemm` directly and
 prints the `nanochat.bench.v1` schema on standard output. The shipped CPU GEMM
@@ -78,7 +78,7 @@ contiguous.
 The probe now confirms that the two layouts agree. The model `lm_head` forward
 reaches 19.35 GFLOP/s and the benchmark layout reaches 19.55 GFLOP/s (12
 threads). The Phase 1 gate passes at 22.3 seconds per step. See
-[docs/cpu-performance.md](../../docs/cpu-performance.md).
+[docs/performance.md](../../docs/performance.md).
 
 ```bash
 tools/nanochat build //dev/kernels:cpu_linear_layout_probe
@@ -175,7 +175,7 @@ The fused tiled forward serves a sliding-window shape when the head dimension
 is 128. Full-causal attention (`window_left < 0`) and every other head
 dimension stay on the cuBLAS path. A bf16 build stays on the cuBLAS path too,
 because the scalar FMA tile loses to the tensor cores there
-([../../docs/attention-tensor-core.md](../../docs/attention-tensor-core.md)). Every
+([../../docs/attention.md](../../docs/attention.md)). Every
 backward call stays on the cuBLAS path.
 
 The measurement command is:
@@ -185,7 +185,7 @@ tools/nanochat profile --json --out /tmp/attention-window.json
 ```
 
 The command runs the shipped `attention_benchmark`. The frozen reference is
-`docs/attention-baseline.json`. The promoted kernel uses the Phase 1 tile
+`docs/baselines.json`. The promoted kernel uses the Phase 1 tile
 schedule, so the Phase 1 window-128 row is the promoted forward row.
 
 | Row | Frozen baseline (ms) | Promoted path (ms) | Verdict |

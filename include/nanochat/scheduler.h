@@ -11,7 +11,7 @@ struct SchedulerConfig {
   int num_iterations = 0;
   int warmup_steps = 0;
   // How much of the run is warmup, as a fraction of `progress` rather than as a
-  // step count (design decision D1 of docs/sft-parity-plan.md). Only
+  // step count (design decision D1 of docs/parity.md). Only
   // `LrMultiplierForProgress` reads it: the pretraining entry point
   // `LrMultiplier(int step)` keeps `warmup_steps`, because a pretraining run
   // knows its total before it starts and an SFT run may stop at the end of its
@@ -38,7 +38,7 @@ class Scheduler {
   // `warmdown_ratio` of the run, ending at `final_lr_frac` (mirrors nanochat's
   // `get_lr_multiplier`). `step` is 1-based and the schedule is evaluated at
   // `step - 1`, because the reference loop counter is 0-based. That convention
-  // does not change (design decision D2 of docs/sft-parity-plan.md), so this
+  // does not change (design decision D2 of docs/parity.md), so this
   // entry point and `MuonMomentum(int step)` keep their indexing and the SFT
   // driver restarts its counter at 1 after the warm start.
   //
@@ -67,7 +67,7 @@ class Scheduler {
   // explicit `warmup_ratio > 0` guard so no input can divide by zero.
   //
   // The caller feeds the running maximum of the reference `approx_progress`
-  // (section 5.2 of docs/sft-parity-plan.md), so `progress` is monotone
+  // (section 5.2 of docs/parity.md), so `progress` is monotone
   // non-decreasing within one run. `src/optim.cc` implements this beside
   // `LrMultiplier`, and nothing else defines the curve.
   float LrMultiplierForProgress(float progress) const;

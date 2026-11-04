@@ -16,7 +16,7 @@
 // `TokenStreamDecoder`, which holds the incomplete suffix for the next token.
 //
 // `EvaluatePackedRows` is the supervised-fine-tuning validation metric (design
-// decision D6 of docs/sft-parity-plan.md): bits-per-byte over the packed
+// decision D6 of docs/parity.md): bits-per-byte over the packed
 // `NCSFT001` rows, which is what the reference `evaluate_bpb` reports for a
 // finetune.
 
@@ -48,7 +48,7 @@ struct PackedBpb {
 };
 
 // Bits-per-byte over one pass of the packed validation rows (design decision
-// D6 of docs/sft-parity-plan.md), forward-only.
+// D6 of docs/parity.md), forward-only.
 //
 // `shard` is an `NCSFT001` shard, `token_bytes` holds one entry per token id
 // (the number of source bytes the id represents, as `Tokenizer::TokenBytes`

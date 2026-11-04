@@ -13,7 +13,7 @@
 //      precision the MFU table models: the bf16 tensor-core rate on a device
 //      with bf16, the fp32 CUDA-core rate otherwise.
 //   4. The fp8 rate and the fp8 flag agree, and an fp8 device reports compute
-//      capability 8.9 or higher (docs/correctness-gates.md section 3.1).
+//      capability 8.9 or higher (docs/testing.md Part 1, section 3.1).
 //
 // The table itself is derived, not maintained: every row comes from a
 // `devices[]` entry in `backends/<name>/caps.json` through
@@ -255,8 +255,8 @@ void TestCapsProjection() {
 }
 
 void TestFp8Capability() {
-  // The fp8 rows (docs/simulator-precision.md section 3,
-  // docs/correctness-gates.md section 3.1). Three rules hold:
+  // The fp8 rows (docs/simulator.md Part 7, section 3,
+  // docs/testing.md Part 1, section 3.1). Three rules hold:
   //   1. A nonzero fp8 rate means `supports_fp8` is true, and the opposite.
   //   2. An fp8 device reports compute capability 8.9 or higher.
   //   3. The `Caps` projection carries the flag, and `Supports` answers for

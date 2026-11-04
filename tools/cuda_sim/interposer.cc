@@ -796,7 +796,7 @@ cublasStatus_t cublasGemmEx(cublasHandle_t handle, cublasOperation_t transa,
 }
 
 // ---------------------------------------------------------------------------
-// cublasLt (docs/simulator-precision.md section 5)
+// cublasLt (docs/simulator.md Part 7, section 5)
 // ---------------------------------------------------------------------------
 
 namespace {

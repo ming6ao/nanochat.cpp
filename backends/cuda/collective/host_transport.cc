@@ -1,5 +1,5 @@
 // The host-staged transport for the native collective
-// (docs/distributed-native-plan.md sections 3.2 and 5.4). See
+// (docs/distributed-design.md Part 3, sections 3.2 and 5.4). See
 // host_transport.h.
 
 #include "backends/cuda/collective/host_transport.h"

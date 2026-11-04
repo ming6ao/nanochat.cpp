@@ -1,4 +1,4 @@
-"""Repository rule for NCCL (docs/distributed-plan.md phase 1).
+"""Repository rule for NCCL (docs/distributed-design.md Part 3, phase 1).
 
 NCCL is a system library, not a Bazel module. The rule looks for the headers in
 `NANOCHAT_NCCL_PATH`, then in a few standard prefixes. It copies the header and
@@ -9,7 +9,7 @@ The generated BUILD defines `nccl`. When the library is present it uses a
 entry. When NCCL is absent, the rule writes a stub header whose `#error` names
 the fix, so the failure happens at the compile with a clear message instead of a
 confusing analysis error. The CPU build never reaches the target, because the
-CUDA backend selects it away (docs/distributed-plan.md phase 0).
+CUDA backend selects it away (docs/distributed-design.md Part 3, phase 0).
 """
 
 def _nccl_repo_impl(repository_ctx):
@@ -59,7 +59,7 @@ def _nccl_repo_impl(repository_ctx):
             "#error \"NCCL is not installed. Set NANOCHAT_NCCL_PATH to its " +
             "prefix, or use the native ring collective: " +
             "tools/nanochat build --config=cuda --config=native. " +
-            "See docs/distributed-native-plan.md section 7.\"\n",
+            "See docs/distributed-design.md Part 3, section 7.\"\n",
         )
 
     lines = [

@@ -39,7 +39,7 @@ def pack(output_path, conversations, tokenizer, seq_len: int,
     The file holds two ``int32`` records, ``tokens`` and ``targets``, each of
     shape ``[rows, seq_len]``. A target of ``-1`` marks an ignored position.
     The C++ mesh training driver and ``sft_main`` read the file through
-    ``src/record_file.h`` (docs/training-seam.md section 6.2).
+    ``src/record_file.h`` (docs/distributed-design.md Part 2, section 6.2).
     """
     seq_len = int(seq_len)
     inputs = array("i")
@@ -82,7 +82,7 @@ def run(shard, checkpoint, *, config: api.Config | None = None,
     :func:`nanochat_cpp.api.model_flags`, the one home of the model flag list,
     so an SFT stage recreates the shape of the run whose weights it warm starts
     from and the driver's ``Checkpointer::LoadModel`` accepts that file
-    (docs/pipeline-plan.md B1). Without ``config`` no model flag is sent and
+    (docs/post-training.md B1). Without ``config`` no model flag is sent and
     the driver's own shape applies.
 
     The shard owns the sequence length, because :func:`pack` wrote rows that
@@ -127,11 +127,11 @@ def run(shard, checkpoint, *, config: api.Config | None = None,
         raise ValueError(
             f"the shard is {int(seq_len)} tokens wide but config.seq_len is "
             f"{int(config.seq_len)}; the shard owns the sequence length "
-            f"(docs/pipeline-plan.md B1)")
+            f"(docs/post-training.md B1)")
     if binary is None:
         # A tree checkout, a runfiles tree, or an installed wheel; a tree with
         # no build raises the resolver's message and not a file-not-found
-        # (docs/pipeline-plan.md B6).
+        # (docs/post-training.md B6).
         binary = _build.stage_binary("sft_main")
     arguments = [
         "--rows", str(shard),

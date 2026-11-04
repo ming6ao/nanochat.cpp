@@ -3,7 +3,7 @@
 The test is hermetic and CPU-only. It uses a temporary queue directory, a fake
 ``nvidia-smi`` that reports no compute processes, and a fake
 ``python/nanochat_cpp/sandbox.py`` that execs the command directly. No GPU and
-no systemd scope are involved. See docs/gpu-queue-plan.md.
+no systemd scope are involved. See docs/sandbox.md.
 """
 
 from __future__ import annotations

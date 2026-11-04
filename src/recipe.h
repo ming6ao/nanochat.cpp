@@ -6,7 +6,7 @@
 #include "nanochat/checkpoint_metadata.h"
 
 // The `Recipe` block of the checkpoint metadata (design decision D7 of
-// docs/sft-parity-plan.md), as the driver sees it.
+// docs/parity.md), as the driver sees it.
 //
 // The block itself, its field order, and its defaults are declared in
 // `nanochat/checkpoint_metadata.h`, and the visitor in `src/fields.cc` is what

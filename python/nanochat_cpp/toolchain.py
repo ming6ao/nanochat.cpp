@@ -119,7 +119,7 @@ class Toolchain:
     :meth:`_dispatch`): through ``tools/nanochat`` when this process holds no
     scope, and as a direct child of this process when it already does. The
     second shape is what keeps the three stages of the chain inside the one
-    scope the run was given (docs/pipeline-plan.md B5).
+    scope the run was given (docs/post-training.md B5).
     """
 
     def __init__(self, entry: str | os.PathLike | None = None,
@@ -212,7 +212,7 @@ class Toolchain:
         sentinel, and ``profile``, whose handler submits a job). This helper is
         the facade-level statement of one rule: a child launched from a
         process that already holds a scope runs in that scope, and nothing
-        asks for a second one (docs/pipeline-plan.md B5).
+        asks for a second one (docs/post-training.md B5).
         """
         if direct is not None and self._in_scope():
             return self._run_direct(direct)
@@ -289,7 +289,7 @@ class Toolchain:
 
         The rank values travel in the ``NANOCHAT_*`` environment, so ``argv``
         is the same for every rank; a ``{rank}`` token in an argument expands
-        to the rank index. See ``docs/distributed-launch.md``.
+        to the rank index. See ``docs/distributed-design.md``.
         """
         return self._run(self.dist_argv(
             argv, nproc_per_node=nproc_per_node, device=device,
@@ -316,7 +316,7 @@ class Toolchain:
 
         Inside a scope or a queued job the child itself runs, so a stage of the
         chain keeps the one scope it was given and starts no second profile
-        (docs/pipeline-plan.md B5).
+        (docs/post-training.md B5).
         """
         arguments = [*(argv or [])]
         return self._dispatch(arguments, ["train", "--", *arguments])
@@ -325,7 +325,7 @@ class Toolchain:
         """Run the persistent RL worker.
 
         The RL entry in :mod:`nanochat_cpp._entry` is an alias of ``train``
-        (``docs/rl-notebook.md`` section 4), and the shell routes the RL worker
+        (``docs/post-training.md`` section 4), and the shell routes the RL worker
         through the ``train`` profile. The method emits that profile so the
         alias works without a separate shell subcommand.
         """
@@ -484,7 +484,7 @@ def rl(argv: Sequence[str] | None = None) -> CommandResult:
     """Run the persistent RL worker through the ``train`` profile.
 
     The RL entry in :mod:`nanochat_cpp._entry` is an alias of ``train``
-    (``docs/rl-notebook.md`` section 4).
+    (``docs/post-training.md`` section 4).
     """
     return _toolchain().rl(argv)
 

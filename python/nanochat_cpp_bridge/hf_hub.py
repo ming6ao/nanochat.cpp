@@ -17,7 +17,7 @@ and a caller that saves a stage needs the same names in one place.
 
 The model-loading wrapper stays with the host: it needs the host's ``args``
 module to rebuild a ``ModelArgs``, and a package must not import a host (rule
-4 of ``docs/dependency-layering-plan.md`` section 4).
+4 of ``docs/build.md`` section 4).
 
 Extras: ``hub`` (``huggingface_hub`` and ``safetensors``).
 """

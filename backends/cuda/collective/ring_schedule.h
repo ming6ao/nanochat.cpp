@@ -2,10 +2,10 @@
 #define NANOCHAT_BACKENDS_CUDA_COLLECTIVE_RING_SCHEDULE_H_
 
 // The ring reduce-scatter + all-gather schedule for the native collective
-// (docs/distributed-native-plan.md section 5). It is pure host logic: it calls
-// only the `Transport` interface (`Send`, `Recv`, `Done`, `Wait`, `Release`)
-// and the caller's elementwise add. A memory transport exercises it exactly,
-// so the algorithm is testable on the CPU.
+// (docs/distributed-design.md Part 3, section 5). It is pure host logic: it
+// calls only the `Transport` interface (`Send`, `Recv`, `Done`, `Wait`,
+// `Release`) and the caller's elementwise add. A memory transport exercises it
+// exactly, so the algorithm is testable on the CPU.
 //
 // The schedule operates on a caller-owned `scratch` region of two chunks. The
 // caller also supplies `add`, which must add `src` into `dst` elementwise. The
@@ -27,7 +27,7 @@ using AddFn = void (*)(GradientType* dst, const GradientType* src,
                        std::int64_t count);
 
 // One recorded schedule operation. The trace is the correctness artifact for
-// the two-stream design (docs/distributed-native-plan.md section 10).
+// the two-stream design (docs/distributed-design.md Part 3, section 10).
 enum class ScheduleOp { kSend, kRecv, kAdd };
 
 const char* ScheduleOpName(ScheduleOp op);

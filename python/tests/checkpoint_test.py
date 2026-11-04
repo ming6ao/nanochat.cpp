@@ -6,7 +6,7 @@ the path resolution, all standard library plus the loaded shared library. The
 torch half -- reading a reference `state_dict`, casting its tensors, and
 reassembling the AdamW and Muon optimizer state -- is
 `nanochat_cpp_bridge.torch_checkpoint`, the Z2 package of
-`docs/dependency-layering-plan.md` section 4. The conversion tests below drive
+`docs/build.md` Part 1, section 4. The conversion tests below drive
 that builder with fake tensors, so this file still needs no torch and no
 network; the container tests feed the records it returns into the core's write
 path, which is the boundary the two halves meet at.

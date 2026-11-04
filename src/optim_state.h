@@ -17,7 +17,7 @@ namespace nanochat {
 
 class Optimizer;
 
-// The stable name of the optimizer-step record (docs/training-seam.md
+// The stable name of the optimizer-step record (docs/distributed-design.md
 // section 10). The record sits in the optimizer-state section beside the
 // moments, so a resume can continue the schedule from the stored step.
 inline constexpr char kOptimizerStepRecordName[] = "optimizer/step";
@@ -44,7 +44,7 @@ void SaveOptimizerState(const Optimizer& optimizer, Checkpoint* checkpoint);
 bool LoadOptimizerState(const Checkpoint& checkpoint, Optimizer* optimizer);
 
 // Sets the learning-rate multiplier the next `Optimizer::Step` calls apply
-// (design decision D1 of docs/sft-parity-plan.md). The SFT driver resolves the
+// (design decision D1 of docs/parity.md). The SFT driver resolves the
 // value from `Scheduler::LrMultiplierForProgress(running max progress)` and the
 // run's recipe, then hands it here; the pretraining loop never calls this and
 // keeps the step-based `Scheduler::LrMultiplier`.

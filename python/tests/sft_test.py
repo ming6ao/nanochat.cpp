@@ -2,7 +2,7 @@
 
 Hermetic: a fake toolchain records the argument list instead of running the
 driver, so the test needs no shared library, no Bazel, no GPU, and no tokenizer
-artifact. It pins the three facts of ``docs/pipeline-plan.md`` B1 and B3 that the
+artifact. It pins the three facts of ``docs/post-training.md`` B1 and B3 that the
 SFT stage of the chain depends on:
 
 * ``config=`` reaches the driver as :func:`nanochat_cpp.api.model_flags`, the one

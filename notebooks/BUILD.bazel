@@ -1,6 +1,6 @@
 # notebooks/ — the Kaggle notebook and the single-client mesh training loop.
 #
-# A notebook is a host (Z3 of docs/dependency-layering-plan.md section 4), so
+# A notebook is a host (Z3 of docs/build.md Part 1, section 4), so
 # its modules import either package of the distribution. The heavy imports stay
 # inside the calls of `nanochat_cpp_bridge`: the modules here import the
 # standard library and the two packages, and the tests therefore run on the

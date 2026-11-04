@@ -1,5 +1,5 @@
 // tests/sft_loop_parity_test.cc -- the R3 schedule gate of
-// docs/sft-parity-plan.md sections 3 and 7 (phase E).
+// docs/parity.md Part 1, sections 3 and 7 (phase E).
 //
 // The loop fixture records what the reference loop *computed* for one
 // eight-step run: the 0-based counter, the rate progress, the epoch, the

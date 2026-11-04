@@ -2,7 +2,7 @@
 #define NANOCHAT_SRC_RENDEZVOUS_H_
 
 // The vendor-free control plane for the gradient-sync backends
-// (docs/distributed-native-plan.md section 4).
+// (docs/distributed-design.md Part 3, section 4).
 //
 // One instance per process. The class carries the opaque control-plane
 // payloads: the CUDA IPC memory handles, the device identifiers, or the RDMA

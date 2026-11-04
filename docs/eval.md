@@ -151,7 +151,7 @@ needs the network or the real bundle.
 GSM8K and HumanEval legs generate, and a generated answer is a sample. The
 base-eval sample mode of section 4.2 and `ChatEvaluator` share one primitive,
 `GenerateBatch` and its multi-prompt sibling, so the seed mix of B4 (see
-`docs/pipeline-plan.md`) reaches both.
+`docs/post-training.md`) reaches both.
 
 The stream is now derived per row, per prompt, and per step instead of one seed
 for every row and every step. So every recorded sampled evaluation number moved

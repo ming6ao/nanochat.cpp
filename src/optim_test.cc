@@ -184,7 +184,7 @@ void TestSchedules() {
   std::printf("optim_test: schedules ok\n");
 }
 
-// The SFT progress schedule (design decision D1 of docs/sft-parity-plan.md):
+// The SFT progress schedule (design decision D1 of docs/parity.md):
 // the three branches of `scripts/chat_sft.py:310-317`, the inclusive right
 // endpoint of the constant segment, the `progress == 1.0` endpoint, and the two
 // guard cases (`warmup_ratio == 0`, `warmdown_ratio == 0`) that must not divide

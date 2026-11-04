@@ -1,6 +1,6 @@
 """The Z2 adapter package: every heavy import of the Python tree has one home.
 
-The tree has four zones (``docs/dependency-layering-plan.md`` section 4), and
+The tree has four zones (``docs/build.md`` section 4), and
 the arrow points down: a zone imports a lower zone and never a higher one.
 
 ````text

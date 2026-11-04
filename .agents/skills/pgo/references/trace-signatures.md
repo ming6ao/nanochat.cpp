@@ -33,7 +33,7 @@ code, and never both. The two ceilings may therefore add, and a pair of one
 of each addresses the whole host side of the step.
 
 The pair of the reference iteration is exactly that, and the measurement of it
-is in `docs/profile-guided-optimization.md` section 8.
+is in `docs/performance.md` Part 1, section 8.
 
 A signature may contain another one. `driver_call_overhead` contains the copy
 calls that `dtoh_bytes` and `blocking_dtoh_scalars` measure, so the ranking drops

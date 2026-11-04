@@ -202,7 +202,7 @@ cc_library(
     srcs = ["checkpoint_metadata.cc"],
     hdrs = [
         # The `Recipe` block's usability rule (design decision D7 of
-        # docs/sft-parity-plan.md): the check the SFT driver runs on the recipe
+        # docs/parity.md): the check the SFT driver runs on the recipe
         # it inherited, beside the word stream that reads it.
         "recipe.h",
     ],
@@ -215,7 +215,7 @@ cc_library(
 )
 
 # The vendor-free control plane shared by every gradient-sync backend
-# (docs/distributed-native-plan.md section 4). POSIX sockets only; no vendor
+# (docs/distributed-design.md Part 3, section 4). POSIX sockets only; no vendor
 # header, so the `src` layer stays vendor-free (DESIGN.md section 2.1).
 cc_library(
     name = "rendezvous",
@@ -353,14 +353,14 @@ cc_library(
         # reader (docs/parquet-native.md), so the workflow links it too.
         "//src/parquet:parquet",
         # `mesh_train.cc` and `sft_shard.cc` read the `NCSFT001` shard through
-        # the shared record file (docs/training-seam.md section 6.2).
+        # the shared record file (docs/distributed-design.md Part 2, section 6.2).
         ":record_file",
         "//include/nanochat:nanochat",
     ],
 )
 
-# The reinforcement-learning optimizer step (docs/rl-notebook.md section 4,
-# docs/training-seam.md section 5.7). One library so the divisor lives in one
+# The reinforcement-learning optimizer step (docs/post-training.md Part 1, section 4,
+# docs/distributed-design.md Part 2, section 5.7). One library so the divisor lives in one
 # place and the file-driven `rl_step` binary, the persistent worker, and the C
 # ABI all share `RlStep` instead of copying it. It links the public headers and
 # the workflow (for `Model`/`Optimizer`), so it adds no vendor dependency.
@@ -376,8 +376,8 @@ cc_library(
     ],
 )
 
-# The shared little-endian typed-record file (docs/rl-notebook.md section
-# 4, docs/training-seam.md section 6.2). One layout backs the oracle fixture,
+# The shared little-endian typed-record file (docs/post-training.md section
+# 4, docs/distributed-design.md Part 2, section 6.2). One layout backs the oracle fixture,
 # the RL fixture, the evaluation fixture, the tokenizer fixture, and the numeric
 # trace, so a test and a production binary read the same records. It is a leaf:
 # the standard library only.
@@ -390,7 +390,7 @@ cc_library(
     deps = ["//include/nanochat:nanochat"],
 )
 
-# The `NANOORC1` RL fixture (docs/rl-notebook.md section 4). It is the shared
+# The `NANOORC1` RL fixture (docs/post-training.md Part 1, section 4). It is the shared
 # record file under the RL magic. The persistent worker reads its configuration
 # and initial parameters from the same fixture the file-driven `rl_step` binary
 # consumes, so the worker has a fixture-driven smoke mode that needs no bridge.
@@ -408,7 +408,7 @@ cc_library(
 )
 
 # The persistent reinforcement-learning worker and its pipe protocol
-# (docs/rl-notebook.md section 4, docs/training-seam.md section 6.4). It holds
+# (docs/post-training.md Part 1, section 4, docs/distributed-design.md Part 2, section 6.4). It holds
 # the model and the optimizer across messages and reaches the shared `RlStep`
 # through `//src:rl`.
 cc_library(
@@ -896,8 +896,8 @@ cc_binary(
     ],
 )
 
-# The file-driven reinforcement-learning step (docs/rl-notebook.md section 4,
-# docs/training-seam.md section 6.4). It reads a fixture with the initial
+# The file-driven reinforcement-learning step (docs/post-training.md Part 1, section 4,
+# docs/distributed-design.md Part 2, section 6.4). It reads a fixture with the initial
 # parameters, the recorded rollouts, the targets, and the advantages, runs the
 # *shared* `RlStep`, and writes the loss, the gradient norm, and the parameter
 # trajectory. It is the RL analog of the training-parity harness, so it is the
@@ -923,7 +923,7 @@ cc_binary(
     defines = precision_defines(),
     deps = [
         # The recipe block's usability rule and the field visitor it sits beside
-        # (design decision D7 of docs/sft-parity-plan.md).
+        # (design decision D7 of docs/parity.md).
         ":checkpoint_metadata",
         ":model",
         "//include/nanochat:nanochat",

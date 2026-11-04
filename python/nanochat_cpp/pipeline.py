@@ -1,7 +1,7 @@
 """The one-job chain: base training, then SFT, then RL, then eval.
 
 One job file runs the whole chain on any host: a local CPU, a Colab T4, or a
-Modal T4 (``docs/pipeline-plan.md`` section 1). Each stage calls one existing
+Modal T4 (``docs/post-training.md`` section 1). Each stage calls one existing
 facade and reads the checkpoint of the stage before it:
 
 ============================  =========================================
@@ -18,7 +18,7 @@ stage                         call
 The eval stage is the one stage with no executable and no checkpoint: it runs
 in this process over the base checkpoint and the RL checkpoint, so the report
 holds both numbers and a reader sees the two bits per byte side by side
-(design decisions P4 and P5 of ``docs/pipeline-scaleup-plan.md``).
+(design decisions P4 and P5 of ``docs/post-training.md``).
 
 The module holds no training logic, no model flag list of its own, and no host
 name (design decision D1). The model shape has one home here, :data:`PROFILES`,
@@ -82,7 +82,7 @@ __all__ = [
 #: and it is not the checkpoint container version.
 #:
 #: 2: the eval stage, and the ``step_ms``, tokens per second, ``mfu``, and
-#:    hardware check facts of the base stage (``docs/pipeline-scaleup-plan.md``
+#:    hardware check facts of the base stage (``docs/post-training.md``
 #:    section 9 rows 4 and 5). No fixture moves: the report version is not the
 #:    container version, so an old checkpoint still reads.
 #: 3: the base stage reports a steady window instead of a stage wall clock. The
@@ -126,14 +126,14 @@ CORPUS_MANIFEST = "corpus.json"
 #: read, and a checkpoint write stalls one step, so a steady window must skip
 #: them. The window keeps every record after ``min(WARMUP_STEPS, steps // 4)``,
 #: so a short job still reports a number and a long job reports its settled
-#: steps (docs/pipeline-scaleup-plan.md section 9 row 4).
+#: steps (docs/campaigns.md, work row 4).
 WARMUP_STEPS = 10
 
 #: The evaluator batch of the eval stage, in sequences. It is passed by hand
 #: because the default of :func:`nanochat_cpp.api.evaluate` is 8: no evaluator
 #: call resets the data loader, a fresh epoch fills one 65-token row, and a
 #: batch of eight would report no bytes and return infinity
-#: (docs/pipeline-scaleup-plan.md section 6).
+#: (docs/post-training.md Part 3, section 6).
 EVAL_BATCH = 1
 
 #: The micro-batch of the SFT stage.
@@ -148,7 +148,7 @@ SFT_BATCH = 2
 #:
 #: ``standard`` is 8 layers, hidden 512, 8 heads, 4 key/value heads, sequence
 #: 64, and the same vocabulary 487 padded to 512
-#: (``docs/pipeline-scaleup-plan`` P1 and section 5). The sequence length and
+#: (``docs/post-training.md`` Part 3, P1 and section 5). The sequence length and
 #: the base batch stay where they are, because the committed corpus fills
 #: exactly one 65-token row per epoch (P2). The window pattern is ``L`` -- one
 #: full-attention pass at this length -- at both shapes.
@@ -159,7 +159,7 @@ PROFILES = {
     "standard": api.Config(num_layers=8, num_heads=8, num_kv_heads=4,
                            hidden_dim=512, seq_len=64, vocab_size=487,
                            padded_vocab_size=512, window_pattern="L"),
-    # The throughput shape of the H100 leg (docs/pipeline-scaleup-plan.md
+    # The throughput shape of the H100 leg (docs/post-training.md
     # section 5). It keeps the 8-layer body of `standard` and grows the two
     # numbers that decide utilization at a small depth: the sequence and the
     # vocabulary. A 512-token vocabulary makes the classifier GEMM 64 times
@@ -252,7 +252,7 @@ class Job:
     empty on a host that rewrites it, and the app or the notebook fills it
     (design decision D10). ``run_id`` names the directory under ``out_root``.
 
-    The schedule is the one of ``docs/pipeline-scaleup-plan.md`` section 5:
+    The schedule is the one of ``docs/post-training.md`` section 5:
     200 base steps, 200 SFT steps, 8 RL steps, one evaluator batch, and two
     sampled completions. The profile defaults to ``standard``, so a job file
     that names nothing runs the shape a throughput number can be read at.
@@ -265,7 +265,7 @@ class Job:
     # is the global sequence count of one step, and the driver reports the
     # tokens of exactly that product. The default is one row on one device
     # because that is all the committed corpus can fill; a job that names a real
-    # corpus raises it (docs/pipeline-scaleup-plan.md section 5). The roofline
+    # corpus raises it (docs/post-training.md Part 3, section 5). The roofline
     # gate of the H100 leg reads the same three fields, so a prediction cannot
     # model a batch the run did not use.
     batch: int = 1
@@ -290,7 +290,7 @@ class Job:
     # parquet the job names, in place, and the tokenizer the job names, which
     # is how the H100 leg runs on real text: the Modal image downloads the file
     # and trains the tokenizer, and the report names both
-    # (docs/pipeline-scaleup-plan.md section 9 row 3).
+    # (docs/campaigns.md, work row 3).
     corpus: str = "fixture"
     corpus_path: str = ""
     tokenizer_path: str = ""
@@ -298,7 +298,7 @@ class Job:
     # Sampling temperature of the rollouts. It stays above 1.0 because the
     # demo model answers a fixture conversation and emits its stop token, so at
     # 1.0 every rollout of a group scores the same text and every advantage is
-    # zero (docs/pipeline-plan.md B4 and section 7 A5). Measured on the local
+    # zero (docs/post-training.md B4 and section 7 A5). Measured on the local
     # CUDA card: 1.0 and 1.2 give one distinct reward per group, 1.5 gives three
     # of four, and 2.0 gives four of four at the cost of unreadable text.
     temperature: float = 1.5
@@ -615,7 +615,7 @@ def _rates(records: Sequence[Mapping], steps_ran: int, tokens_per_step: int,
 
     Every number comes from the driver's own per-step records, and it is a
     median over one steady window, so no number here is estimated and no
-    startup cost is charged to a step (``docs/pipeline-scaleup-plan.md``
+    startup cost is charged to a step (``docs/post-training.md``
     section 9 row 4).
 
     ``step_ms`` is the wall clock between two step starts. ``data_ms`` is the
@@ -673,7 +673,7 @@ def _hardware() -> dict:
     ``backend``, ``arch``, and ``precision`` are the build's own facts, the
     same three the report's ``host`` block carries. ``startup_check`` and
     ``fp8_cases`` say whether the hardware correctness gate ran
-    (``src/hw_gate.cc``, ``docs/correctness-gates.md`` section 4).
+    (``src/hw_gate.cc``, ``docs/testing.md`` section 4).
 
     The chain's base stage is the mesh trainer. That driver builds its own
     runtime and does not call ``RunHardwareCorrectnessGate``, which is a
@@ -743,7 +743,7 @@ def _check_vocabulary(job: "Job", tokenizer: Path) -> int:
     count is out of range at the first embedding lookup and one below it leaves
     rows that no token reaches. Both are a wrong run, and both fail silently in
     a loss curve, so the count is checked before any stage starts
-    (``docs/pipeline-scaleup-plan.md`` section 9 row 3).
+    (``docs/post-training.md`` section 9 row 3).
     """
     shape = config(job)
     ids = len(data.token_byte_lengths(data.read_nctoken1(tokenizer)))
@@ -795,14 +795,13 @@ def _files_corpus(job: "Job") -> dict:
     The SFT stage still trains on the committed conversations: this corpus
     supplies pretraining text and the instruction set is the one the tree
     holds, which is what the chain measured before the corpus grew
-    (``docs/pipeline-scaleup-plan.md`` section 6).
+    (``docs/post-training.md`` section 6).
     """
     parquets = _corpus_files(job.corpus_path)
     if not parquets:
         raise PipelineError(
             f"the job's corpus_path {job.corpus_path!r} holds no parquet file; "
-            f"name one file or a directory of them (docs/pipeline-scaleup-plan"
-            f".md section 9 row 3)")
+            f"name one file or a directory of them (docs/campaigns.md, work row 3)")
     source = Path(job.tokenizer_path)
     if not source.is_file():
         raise PipelineError(
@@ -838,7 +837,7 @@ def build_corpus(job: "Job") -> dict[str, str]:
     Two kinds. ``fixture`` copies the committed parquet and tokenizer of the
     tree into the run, which is what the CPU gate runs in seconds (D4).
     ``files`` reads the parquet and the tokenizer the job names, in place, which
-    is how the H100 leg runs on real text (``docs/pipeline-scaleup-plan.md``
+    is how the H100 leg runs on real text (``docs/post-training.md``
     section 9 row 3).
 
     The tokenizer is also written to the path
@@ -926,7 +925,7 @@ def _overlap(reference: str, completion: str) -> float:
 
 
 class GradedReward:
-    """The graded reward of the chain (``docs/pipeline-plan.md`` section 5).
+    """The graded reward of the chain (``docs/post-training.md`` section 5).
 
     A constant reward makes every advantage of a rollout group zero, and so
     does an all-or-nothing reward when no rollout is right. This one is graded:
@@ -970,7 +969,7 @@ def stage_base(job: "Job") -> Stage:
     window of the driver's own records, and the step is split into
     ``step_ms``, ``compute_ms``, ``data_ms``, and ``other_ms``, so a reader
     attributes a slow step instead of guessing at it
-    (``docs/pipeline-scaleup-plan.md`` section 9 row 4). The stage's ``extra``
+    (``docs/post-training.md`` section 9 row 4). The stage's ``extra``
     therefore holds the rates and the hardware-check facts beside the corpus
     block, and no number in it is estimated here.
     """
@@ -1009,7 +1008,7 @@ def stage_base(job: "Job") -> Stage:
         # cannot fill one batch, and it writes the steps it ran. A report of a
         # short schedule is a failure of the corpus, not a faster run, so name
         # the batch and the corpus here instead of leaving A1 to find it
-        # (docs/pipeline-scaleup-plan.md section 5).
+        # (docs/post-training.md Part 3, section 5).
         raise PipelineError(
             f"the base stage ran {steps_ran} of {int(job.base_steps)} steps: "
             f"one epoch of {corpus['parquet']} did not fill a batch of "
@@ -1365,7 +1364,7 @@ def _check_profile(name: str, shape: api.Config) -> None:
     The rules are the ones ``include/nanochat/config.h`` states, and a
     profile that breaks one otherwise fails inside a stage executable, where
     the message names the C flag and not the profile. Each message here names
-    the rule and the profile (``docs/pipeline-scaleup-plan.md`` section 5).
+    the rule and the profile (``docs/post-training.md`` section 5).
     """
     heads = int(shape.num_heads)
     kv_heads = int(shape.num_kv_heads)
@@ -1420,7 +1419,7 @@ def run(job: "Job", *, out_root: str | os.PathLike | None = None) -> Report:
     The eval stage comes last and writes no checkpoint, so it names the RL
     file as its own artifact: ``deliver()`` copies the checkpoint of the last
     stage and the delivered file stays ``deliver/chatrl.ckpt`` carrying the RL
-    weights (``docs/pipeline-scaleup-plan.md`` section 6).
+    weights (``docs/post-training.md`` section 6).
 
     With ``job.deliver`` the two deliverable files are written and the report
     that is returned is the report that was written, read back from the file.

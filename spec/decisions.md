@@ -171,7 +171,7 @@ a device's numeric obligation for a code?
   container's problem and it is out of scope (§2).
 - `exp`, `tanh`, and `rsqrt` are not bit-exact across devices, so without a
   declared bound a device's fast `expf` shifts the loss and the tolerance gate
-  blames the wrong layer (§7.7 decision 4). `docs/correctness-gates.md` §3.2 is
+  blames the wrong layer (§7.7 decision 4). `docs/testing.md` Part 1, §3.2 is
   the precedent: share the rule, not the implementation.
 - `alpha` and `beta` already carry three meanings across five codes, and the row
   broadcast needs a width, so the scalar argument list has to become a block

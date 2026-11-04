@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The GPU job queue for nanochat.cpp (docs/gpu-queue-plan.md).
+"""The GPU job queue for nanochat.cpp (docs/sandbox.md).
 
 One worker process owns the GPU. A client submits a job, and the worker runs
 the jobs in first-in, first-out order. A SQLite database holds the job records
@@ -639,7 +639,7 @@ def wait_and_follow(conn: sqlite3.Connection, base: Path, job_id: str,
     """Block until the job is terminal, follow the logs, return its code.
 
     A queued job with no live worker means the worker died. Start a new worker
-    so the queue does not stall (docs/gpu-queue-plan.md section 4.1).
+    so the queue does not stall (docs/sandbox.md Part 1, section 4.1).
     """
     out_offset = 0
     err_offset = 0
@@ -874,7 +874,7 @@ def build_parser() -> argparse.ArgumentParser:
     """The argument parser for every action."""
     parser = argparse.ArgumentParser(
         prog="tools/nanochat gpuq",
-        description="The nanochat GPU job queue (docs/gpu-queue-plan.md).")
+        description="The nanochat GPU job queue (docs/sandbox.md).")
     sub = parser.add_subparsers(dest="action", required=True)
 
     def add(name: str, help_text: str) -> argparse.ArgumentParser:

@@ -28,11 +28,11 @@ evaluation exclusion. This repository is at `../nanochat`.
 
 - [precision.md](precision.md) — the precision policy and the storage rule.
 - [kernels.md](kernels.md) — the backend seam.
-- [simulator-precision.md](simulator-precision.md) — the fp8 simulator engines.
+- [simulator.md](simulator.md) — the fp8 simulator engines.
 - [performance-model.md](performance-model.md) — the bound and the precision
   rule.
-- [attention-tensor-core.md](attention-tensor-core.md) — the attention coupling.
-- [numerics-integration.md](numerics-integration.md) — the numeric trace fixture.
+- [attention.md](attention.md) — the attention coupling.
+- [testing.md](testing.md) — the numeric trace fixture.
 
 ## 1. Goal and scope
 
@@ -560,7 +560,7 @@ Two prerequisites gate the list.
    See [precision.md](precision.md) section 6.
 
 Gate 8 is the only check that needs a Hopper-class card. Section 6 of
-[numerics-integration.md](numerics-integration.md) owns the trace.
+[testing.md](testing.md) owns the trace.
 
 ## 12. Phases
 
@@ -670,8 +670,8 @@ One item stays a later option, and it is not a decision today.
 ## See also
 
 - [precision.md](precision.md) — the precision policy.
-- [simulator-precision.md](simulator-precision.md) — the fp8 simulator engines.
+- [simulator.md](simulator.md) — the fp8 simulator engines.
 - [performance-model.md](performance-model.md) — the bound and the rule.
-- [attention-tensor-core.md](attention-tensor-core.md) — the attention coupling.
-- [numerics-integration.md](numerics-integration.md) — the numeric trace fixture.
+- [attention.md](attention.md) — the attention coupling.
+- [testing.md](testing.md) — the numeric trace fixture.
 - [node-h100.md](node-h100.md) — the H100 run book and the memory plan.

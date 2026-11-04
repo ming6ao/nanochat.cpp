@@ -90,7 +90,7 @@ constexpr cublasDataType_t kCudaR16F = 2;
 constexpr cublasDataType_t kCudaR32F = 0;
 
 // ---------------------------------------------------------------------------
-// The cublasLt subset (docs/simulator-precision.md section 5)
+// The cublasLt subset (docs/simulator.md Part 7, section 5)
 // ---------------------------------------------------------------------------
 
 using cublasLtHandle_t = void*;

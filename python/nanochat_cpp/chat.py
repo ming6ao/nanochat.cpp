@@ -7,7 +7,7 @@ the split of the removed ``chat_eval.py``, moved under the in-process API.
 Every task reads a hub dataset, so the dataset loader and the code executor
 of HumanEval arrive through the registration seam of
 :mod:`nanochat_cpp.seam`; this module imports only the standard library and
-names no third-party package (rule 1 of ``docs/dependency-layering-plan.md``
+names no third-party package (rule 1 of ``docs/build.md``
 section 4, gate G5).
 
 Two task paths:
@@ -157,14 +157,14 @@ def render_conversation(conversation, tokenizer,
 
     ``mask`` is 1 over the assistant text, the assistant end token, and the
     python tool-call tokens, and 0 over BOS, the user text, and the tool-output
-    tokens (docs/training-seam.md section 6.5). This mirrors the packing path
+    tokens (docs/distributed-design.md Part 2, section 6.5). This mirrors the packing path
     in ``notebooks/posttrain.ipynb`` so the packed rows and the reference
     renderer agree.
 
     ``max_tokens`` truncates the result to that many tokens, ids and mask
     together. The reference ``Tokenizer.render_conversation`` defaults to
     2048, and ``scripts/chat_sft.py`` never overrides it, so this default is
-    part of the SFT data contract (docs/sft-parity-plan.md section 5.1).
+    part of the SFT data contract (docs/parity.md Part 1, section 5.1).
     """
     specials = _specials(tokenizer)
     missing = [name for name in ("<|bos|>", "<|user_start|>",
@@ -426,7 +426,7 @@ class ChatEngine:
     The C++ engine exposes the same seam (``src/generate.h``), with the forced
     ids fed through the KV cache. Until the C ABI surfaces it, this driver
     steps the model one token at a time, so keep the rollout shapes small
-    (docs/rl-notebook.md section 6): each step re-prefills the row.
+    (docs/post-training.md Part 1, section 6): each step re-prefills the row.
     """
 
     def __init__(self, model: Model, tokenizer: Tokenizer) -> None:
@@ -533,7 +533,7 @@ class ChatEngine:
 class ChatEvaluator:
     """Run the chat tasks against one model, with per-task isolation.
 
-    The five task names and the per-task isolation of ``docs/rl-notebook.md``
+    The five task names and the per-task isolation of ``docs/post-training.md``
     stay. A hub-backed task (every task here reads a hub dataset, and HumanEval
     runs generated code) arrives through the registration seam of
     :mod:`nanochat_cpp.seam`, so a host hands its loader and its executor in

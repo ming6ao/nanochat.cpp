@@ -1,5 +1,5 @@
 // tests/fp8_graph_test.cc -- the fp8 graph plumbing gate
-// (docs/correctness-gates.md sections 3.3 and 5.1).
+// (docs/testing.md Part 1, sections 3.3 and 5.1).
 //
 // The small model tests use shapes below the fp8 threshold, so they never
 // exercise the fp8 branch of `ops::LinearForward`. This test uses an eligible
@@ -144,7 +144,7 @@ void TestLinearFp8AgainstDense() {
     }
     // A single E4M3 matmul carries the raw 3-mantissa-bit error, which is wider
     // than the 1e-2 graph bound the loss aggregates to
-    // (docs/simulator-precision.md section 7).
+    // (docs/simulator.md Part 7, section 7).
     ExpectTrue(
         worst <= 5e-2,
         Format("the fp8 linear matches the dense path (worst %.3g)", worst));

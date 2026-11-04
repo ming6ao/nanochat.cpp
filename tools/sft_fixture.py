@@ -1,7 +1,7 @@
 """Shared machinery for the two supervised fine-tuning fixture kinds.
 
 ``tools/dump_fixtures.py`` keeps one block per fixture kind. The ``sft`` and
-``sft_loop`` kinds of ``docs/sft-parity-plan.md`` section 6 share the pinned
+``sft_loop`` kinds of ``docs/parity.md`` section 6 share the pinned
 settings of section 5, the tiny model of section 5.5, the fixture tokenizer,
 the conversation corpus, the reference optimizer and schedule, and the two small
 containers they write. This module holds that shared code once, so the two kinds
@@ -13,7 +13,7 @@ functions that need them, so a ``--help`` run imports neither torch nor the C
 library.
 
 The fixtures are *data*: they are produced once, offline, and committed. A
-runtime test reads them and never imports torch (``docs/sft-parity-plan.md``
+runtime test reads them and never imports torch (``docs/parity.md``
 section 7, phase B gate).
 """
 
@@ -86,7 +86,7 @@ __all__ = [
     "write_json_fixture",
 ]
 
-# --- the pinned settings (docs/sft-parity-plan.md section 5) ----------------
+# --- the pinned settings (docs/parity.md Part 1, section 5) ----------------
 
 #: The tiny model of section 5.5. One model serves the step fixture, the loop
 #: fixture, and the packed shard, so the three describe the same run.
@@ -626,7 +626,7 @@ def build_mixture_records(seed=42, real=False) -> tuple[dict, dict]:
     ``real`` replaces the synthetic task set with the reference hub tasks:
     that path downloads SmolTalk, MMLU, and GSM8K and needs ``datasets`` and
     ``pyarrow``. It exists so a reviewer can verify the real order by hand once
-    (docs/sft-parity-plan.md section 10) and is not part of any gate.
+    (docs/campaigns.md) and is not part of any gate.
     """
     if not real:
         return _mixture_record(MIXTURE, seed), _mixture_record(

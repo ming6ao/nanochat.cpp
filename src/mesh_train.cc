@@ -1,5 +1,5 @@
 // src/mesh_train.cc -- the mesh training driver
-// (docs/client-runtime-design.md section 10.1 and docs/training-seam.md
+// (docs/client-runtime-design.md section 10.1 and docs/distributed-design.md
 // section 6.6).
 //
 // The driver owns the step loop, the metric record, the summary, the
@@ -223,7 +223,7 @@ MeshTrainDriver::MeshTrainDriver(MeshTrainConfig config)
 
   // An explicit optimizer wins. Otherwise the preset owns the optimizer and
   // the schedule. The run length is absolute, so a resume continues the
-  // schedule (docs/training-seam.md section 10).
+  // schedule (docs/distributed-design.md Part 2, section 10).
   OptimizerConfig optimizer = config_.optimizer;
   SchedulerConfig scheduler = config_.scheduler;
   if (config_.use_preset) {

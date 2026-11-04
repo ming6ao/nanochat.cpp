@@ -3,7 +3,7 @@
 The test imports the app with a stub Modal SDK, so it needs no SDK, no account,
 and no network. It gates what a client cannot see:
 
-- the two legs of ``docs/pipeline-scaleup-plan.md`` section 7 -- one card, one
+- the two legs of ``docs/post-training.md`` section 7 -- one card, one
   architecture, one precision, and the flag triple each build passes;
 - one image per leg, so a T4 container declares ``sm_75`` at fp32 and an H100
   container declares ``sm_90`` at bf16;
@@ -202,7 +202,7 @@ class AppTest(unittest.TestCase):
 
     def test_the_image_carries_the_two_stage_executables(self) -> None:
         # The chain launches both children, and one build produces all three
-        # outputs (docs/pipeline-plan.md B6 and D2).
+        # outputs (docs/post-training.md B6 and D2).
         self.assertEqual(self.app.STAGE_TARGETS,
                          ("//src:sft_main", "//src:rl_worker"))
         self.assertEqual(
@@ -454,7 +454,7 @@ class CheckCardsTest(unittest.TestCase):
 
     def test_a_job_without_a_mesh_is_the_leg_count(self) -> None:
         # A pipeline job declares no mesh: the chain runs one replica of each
-        # stage (docs/pipeline-plan.md B11), so the leg's count governs.
+        # stage (docs/post-training.md B11), so the leg's count governs.
         self.app._check_cards(self.app.T4, json.dumps({"run_id": "demo",
                                                        "profile": "demo"}))
 

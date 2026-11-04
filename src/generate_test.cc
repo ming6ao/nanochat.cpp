@@ -72,7 +72,7 @@ double MaxDiff(const std::vector<float>& got, const std::vector<float>& want) {
   return worst;
 }
 
-// The file-local `MixSeed` of generate.cc (docs/pipeline-plan.md section 3, B4)
+// The file-local `MixSeed` of generate.cc (docs/campaigns.md, defect B4)
 // mixes the row index, the prompt index, and the decode step into the sampler
 // seed. The single-row reference below has to mix the seed the same way, or it
 // would compare a batched row against a run that re-draws the first step's
@@ -144,7 +144,7 @@ NaiveRow NaiveGenerate(Model* model, const Config& config, const int* prompt,
 // including the 1/0 mask (0 for prompt ids, 1 for sampled ids) and the
 // invariant that a terminal id is never emitted. Row `r` of the batch is
 // compared against row `r` of the naive loop, since the row index is part of
-// the sampler seed (docs/pipeline-plan.md section 3, B4).
+// the sampler seed (docs/campaigns.md, defect B4).
 void CheckBatchMatchesNaive(Model* model, const Config& config,
                             const int* prompt, int prompt_len,
                             const nanochat::GenerateParams& params,
@@ -250,7 +250,7 @@ void CheckMultiPromptMatchesNaive(Model* model, const Config& config,
               label.c_str());
 }
 
-// The three properties of the seed mix (docs/pipeline-plan.md section 3, B4):
+// The three properties of the seed mix (docs/campaigns.md, defect B4):
 // four rows of one prompt at one seed draw four distinct streams, row 0 of a
 // one-row batch equals row 0 of a four-row batch at the same seed, and two
 // prompts at one seed give different first rows. Before the mix every row at
@@ -728,7 +728,7 @@ void Run() {
     }
   }
 
-  // --- The seed mix of B4 (docs/pipeline-plan.md section 3). ---
+  // --- The seed mix of B4 (docs/campaigns.md, the six blockers). ---
   CheckSeedMix(model.get(), config, batched_prompt);
 
   // --- Multi-prompt rollout: many prompts in one call, one stop per row. ---

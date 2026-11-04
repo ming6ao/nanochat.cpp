@@ -13,7 +13,7 @@ T4: base training, then SFT, then RL, from one job file. It clones the tree and
 builds from source, because the install root carries no `tools/nanochat` and no
 stage binary. Its four cells are setup, environment, run, and collect, and
 `colab_setup.py` holds the two calls they make. `pipeline_job.json` is the
-committed example job. See `docs/pipeline-plan.md` section 6.2.
+committed example job. See `docs/post-training.md` Part 2, section 6.2.
 
 ## Run order
 
@@ -45,7 +45,7 @@ driver warm start uses the same parameter-only read.
 
 The C++ mesh training driver writes `metrics.jsonl` and `summary.json` in the
 run directory. The notebook polls the two files, so a cell never blocks on the
-training loop. See `docs/training-seam.md` section 6.6.
+training loop. See `docs/distributed-design.md` Part 2, section 6.6.
 
 ## Hugging Face Hub layout
 
@@ -79,7 +79,7 @@ example `vocab-32768.nctoken`.
 distribution with one cell and configures the environment with one cell, then
 calls `session.setup`. The call prefers the installed package: the shared
 library comes from the search order of
-`docs/dependency-layering-plan.md` section 6.3, so nothing is cloned and
+`docs/build.md` Part 1, section 6.3, so nothing is cloned and
 nothing is built. When the package is absent it falls back to
 `session.clone_and_build`, which fetches the repository, runs the bootstrap,
 and builds the library. The returned session says which path ran. The call

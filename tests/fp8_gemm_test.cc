@@ -1,5 +1,5 @@
 // tests/fp8_gemm_test.cc -- the scaled fp8 seam gate
-// (docs/correctness-gates.md section 3.3, docs/fp8-training.md sections 4-5).
+// (docs/testing.md Part 1, section 3.3, docs/fp8-training.md sections 4-5).
 //
 // The test drives the two new seam entry points, `QuantizeFp8` and
 // `GemmScaledFp8`, on the CPU reference backend and compares them against an
@@ -216,7 +216,7 @@ void CheckGemm(const std::string& name, GemmMode mode, int m, int n, int k,
       if (relative > worst) worst = relative;
     }
   }
-  // The fp8 relative tolerance (docs/simulator-precision.md section 7).
+  // The fp8 relative tolerance (docs/simulator.md Part 7, section 7).
   ExpectTrue(worst <= 1e-2, Format("%s relative error %.3g is within 1e-2",
                                    name.c_str(), worst));
 }

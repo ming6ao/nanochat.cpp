@@ -51,7 +51,7 @@ Related material:
   bring-up without silicon.
 - [precision.md](precision.md) and [fp8-training.md](fp8-training.md) — the
   precision and fp8 tier.
-- [correctness-gates.md](correctness-gates.md) and [parity.md](parity.md) — the
+- [testing.md](testing.md) and [parity.md](parity.md) — the
   fixtures and the known-difference register.
 
 ## 1. Purpose
@@ -314,7 +314,7 @@ Three conditions keep this honest:
 
 1. **The composition defines the semantics.** A fused override is an
    optimization. Both paths must satisfy the same fixture, within the record
-   classes of [numerics-integration.md](numerics-integration.md) section 4.
+   classes of [testing.md](testing.md) Part 2, section 4.
 2. **`src/ops.cc` is the composition tier.** It already claims this role. The
    work is to make every function there expressible over primitives alone, and
    to move each fused family down into the backend as an override.
@@ -392,7 +392,7 @@ Decisions:
    the last place or in absolute terms. `exp`, `tanh`, and `rsqrt` are not
    bit-exact across devices. Without a bound, a device's fast `expf` shifts the
    loss and the tolerance gate blames the wrong layer. The fp8 rounding rule in
-   `docs/correctness-gates.md` §3.2 is the precedent: share the rule, not the
+   `docs/testing.md` Part 1, §3.2 is the precedent: share the rule, not the
    implementation.
 
 ## 8. Model description

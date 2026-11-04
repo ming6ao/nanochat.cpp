@@ -1,4 +1,4 @@
-"""The reinforcement-learning bridge (docs/rl-notebook.md sections 3 and 4).
+"""The reinforcement-learning bridge (docs/post-training.md Part 1, sections 3 and 4).
 
 ``nc.rl`` sits beside the other facades. One call starts an RL run::
 
@@ -13,13 +13,13 @@
 
 Python owns the prompts and the reward only. It renders a batch of
 conversations, starts the persistent C++ worker
-(``docs/rl-notebook.md`` section 4 and ``docs/training-seam.md`` section 6.4),
+(``docs/post-training.md`` section 4 and ``docs/distributed-design.md`` section 6.4),
 speaks the worker's pipe protocol, scores each rollout with the task reward,
 and forms the advantage. It never steps the optimizer and never imports
 ``torch``: the worker holds the model and the optimizer, and the RL step and
 its divisor live in C++.
 
-One step has the seven parts of ``docs/rl-notebook.md`` section 4. The
+One step has the seven parts of ``docs/post-training.md`` section 4. The
 bridge sends a ``rollout`` message, receives the generated rows, scores them
 and computes ``advantage = reward - mean(reward)`` per example, then sends an
 ``advantage`` message. The worker returns the loss and the gradient norm.
@@ -27,7 +27,7 @@ and computes ``advantage = reward - mean(reward)`` per example, then sends an
 The worker is started directly when ``NANOCHAT_SANDBOX_BACKEND`` is ``none``
 (the Kaggle notebook, ``docs/python.md`` section 3.1). Otherwise it is started
 through ``tools/nanochat train -- <worker>`` so the GPU queue and the resource
-sandbox apply (``docs/rl-notebook.md`` section 6).
+sandbox apply (``docs/post-training.md`` section 6).
 
 This module imports only the Python standard library and the sibling
 ``nanochat_cpp`` modules.
@@ -58,13 +58,13 @@ DIRECT_BACKEND = "none"
 
 #: The worker executable name the resolver of ``_build`` knows. The
 #: ``NANOCHAT_RL_WORKER`` override belongs to ``_build.stage_binary``, so the
-#: bridge holds no path of its own (docs/pipeline-plan.md B6).
+#: bridge holds no path of its own (docs/post-training.md B6).
 WORKER_NAME = "rl_worker"
 
 #: The ``NANOCHAT_SANDBOX_BACKEND`` variable (docs/python.md section 3.1).
 BACKEND_ENV = "NANOCHAT_SANDBOX_BACKEND"
 
-#: The default rollout shape (docs/rl-notebook.md section 6).
+#: The default rollout shape (docs/post-training.md Part 1, section 6).
 DEFAULT_NUM_SAMPLES = 4
 DEFAULT_MAX_TOKENS = 256
 DEFAULT_SEED = 42
@@ -166,7 +166,7 @@ def worker_argv(worker, config: Config | None = None,
     The flags come from :func:`nanochat_cpp.api.model_flags`, the one home of
     the model flag list, so the worker recreates the exact model shape the
     bridge used to render the prompts and the two stages cannot drift
-    (docs/pipeline-plan.md B1). ``load`` is a checkpoint container path to warm
+    (docs/post-training.md B1). ``load`` is a checkpoint container path to warm
     start the model and the optimizer state from, and it reaches the worker as
     ``--checkpoint``, which is the worker's load flag.
     """
@@ -451,7 +451,7 @@ def run(task, prompts: Sequence[dict], num_samples: int = DEFAULT_NUM_SAMPLES,
     container the worker loads the weights and optimizer moments from, and it
     reaches the worker as ``--checkpoint``. A stage that warm starts from the
     SFT checkpoint and saves to its own file therefore keeps its parent intact
-    (docs/pipeline-plan.md B3). ``checkpoint_interval`` saves every
+    (docs/post-training.md B3). ``checkpoint_interval`` saves every
     ``checkpoint_interval`` steps. ``config`` (or ``model.config``) gives the
     worker the model shape, through :func:`nanochat_cpp.api.model_flags`.
     ``tokenizer`` defaults to the ``NCTOKEN1`` artifact.

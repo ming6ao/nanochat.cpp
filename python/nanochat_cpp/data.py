@@ -11,7 +11,7 @@ shards. This module supplies the two things the runtime still needs:
 The ``tiktoken`` encoding built from the merge list, the reference tokenizer
 interface over it, and the parquet path listing of a split all need a
 third-party package, so they are **not** here: they live in the Z2 package of
-``docs/dependency-layering-plan.md`` section 5, behind a function the caller is
+``docs/build.md`` section 5, behind a function the caller is
 handed. This module imports only the standard library, so the torch-free
 self-test can import it anywhere.
 """

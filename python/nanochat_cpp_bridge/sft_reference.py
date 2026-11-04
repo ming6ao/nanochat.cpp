@@ -4,7 +4,7 @@
 they stay importable with no extra installed. What they cannot do is reach the
 Hub, so the reference mixture -- the counterpart of the core's
 ``build_train_mixture`` and ``build_val_mixture`` -- lives here
-(``docs/dependency-layering-plan.md`` section 11):
+(``docs/build.md`` section 11):
 
 * SmolTalk (``HuggingFaceTB/smol-smoltalk``), the train split, about 460K
   general conversations;

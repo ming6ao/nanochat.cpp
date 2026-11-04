@@ -8,7 +8,7 @@
 //
 // The cast uses the CUDA conversion intrinsic. It follows the same
 // round-to-nearest-even rule as `nanochat/fp8.h`, which the CPU reference and
-// the emulation engine share (docs/correctness-gates.md section 3.2).
+// the emulation engine share (docs/testing.md Part 1, section 3.2).
 
 #include <cuda_fp8.h>
 #include <cuda_runtime.h>

@@ -74,7 +74,7 @@ filegroup(
     srcs = ["data/chat_fixture.bin"],
 )
 
-# The five SFT fixtures of docs/sft-parity-plan.md sections 6.1 to 6.4, one
+# The five SFT fixtures of docs/parity.md Part 1, sections 6.1 to 6.4, one
 # filegroup each so a test takes only the bytes it reads. Every one comes from
 # `tools/dump_fixtures.py sft` or `tools/dump_fixtures.py sft_loop`; the durable
 # record of what each file holds is `tests/data/sft_fixtures.txt`. Together they
@@ -273,7 +273,7 @@ cc_test(
     tags = ["gpu"],
 )
 
-# --- the supervised-fine-tuning gates (docs/sft-parity-plan.md section 7) ---
+# --- the supervised-fine-tuning gates (docs/testing.md) ---
 
 # The phase B gate: the five SFT fixtures load with no reference checkout, no
 # torch, and no network. It opens the two record fixtures through
@@ -716,7 +716,7 @@ py_test(
     size = "small",
 )
 
-# The shared fp8 conversion gate (docs/correctness-gates.md section 3.2). The CPU
+# The shared fp8 conversion gate (docs/testing.md Part 1, section 3.2). The CPU
 # reference backend and the emulation engine share `nanochat/fp8.h`, so this test
 # pins the header against the format definition: known encodings, the round trip,
 # the tie rule, saturation, and the sign. Vendor-free and GPU-free, so it runs in
@@ -730,7 +730,7 @@ cc_test(
     tags = ["sim"],
 )
 
-# The scaled fp8 seam gate (docs/correctness-gates.md section 3.3). It drives
+# The scaled fp8 seam gate (docs/testing.md Part 1, section 3.3). It drives
 # `QuantizeFp8` and `GemmScaledFp8` on the CPU reference backend against an
 # independent triple-loop reference, for the forward, dgrad, and wgrad operand
 # roles. It links the CPU backend directly so it needs no GPU and no broker.
@@ -746,7 +746,7 @@ cc_test(
     tags = ["sim"],
 )
 
-# The CPU GEMM thread-independence guard (docs/numerics-integration.md section
+# The CPU GEMM thread-independence guard (docs/testing.md section
 # 6.2). The numeric trace pins the kernel reductions to one thread for a stable
 # golden and lets the GEMM use the granted CPUs. This test pins that the GEMM
 # bytes do not depend on the thread count. CPU only.
@@ -762,7 +762,7 @@ cc_test(
     tags = ["sim"],
 )
 
-# The fp8 graph plumbing gate (docs/correctness-gates.md sections 3.3 and 5.1).
+# The fp8 graph plumbing gate (docs/testing.md Part 1, sections 3.3 and 5.1).
 # The eligible forward and backward matmuls take the fp8 path and are compared
 # against the dense path in the same build. `precision_defines` gives the source
 # the `NANOCHAT_PRECISION` value that `kFp8Build` comes from.
@@ -779,7 +779,7 @@ cc_test(
     tags = ["sim"],
 )
 
-# The standalone hardware correctness gate (docs/correctness-gates.md section
+# The standalone hardware correctness gate (docs/testing.md section
 # 4.6). `manual` keeps it out of the default run; `gpu` selects the broker.
 # `tools/nanochat test --gpu //tests:hw_gate_cuda_test` runs it against a real
 # device. It prints a skip line on a host with no accelerator.
@@ -931,7 +931,7 @@ cc_test(
     ],
 )
 
-# The staged numeric trace of docs/numerics-integration.md. One source computes
+# The staged numeric trace of docs/testing.md. One source computes
 # the whole trace (training, evaluation, greedy generation, the SFT arithmetic,
 # and the RL arithmetic) as a flat list of named records; the emitter writes one
 # precision section, the generator bundles the three sections, and the two tests
@@ -967,7 +967,7 @@ cc_binary(
     ],
 )
 
-# The numeric-trace replay gate (docs/numerics-integration.md): the trace must
+# The numeric-trace replay gate (docs/testing.md): the trace must
 # equal its fixture section byte for byte on every backend and every precision,
 # and `tools/nanochat simulate --suite correctness` runs this same target under
 # `--config=sim` as the regression guard (section 2.2). A 10-layer run with

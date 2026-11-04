@@ -4,52 +4,72 @@ Reference and how-to material for `nanochat.cpp`. Design rationale, invariants,
 and evolution rules live in [../DESIGN.md](../DESIGN.md); this directory is the
 detailed reference that the design points at.
 
+One document covers one subject. When a subject needs a campaign plan, the plan
+is absorbed by the reference document when its last row lands, and the outcome
+goes to [campaigns.md](campaigns.md). The rule is at the end of this page.
+
+## Seams, build, and models
+
 | Document | Contents |
 |---|---|
-| [build.md](build.md) | File layout, Bazel, Makefile fallback, backends, precision, Turing |
-| [precision.md](precision.md) | The precision policy: fp32 on Pascal, Turing, and the CPU; bf16 on Ampere and newer; fp16 removed from the tree |
-| [fp8-training.md](fp8-training.md) | The fp8 tier: the storage tags, the scale rule, the scaled GEMM, the layer set, and the backward pass |
+| [build.md](build.md) | File layout, Bazel, Makefile fallback, backends, precision, Turing, and Part 1: the dependency zones and the host packaging |
 | [kernels.md](kernels.md) | The backend seam: kernel inventory, **the tier column and the 16-of-30 bring-up cost**, API, device helpers |
 | [model.md](model.md) | Model API, graphs, the model description and its block kinds, optimizer, data and checkpoints, workspace |
 | [model-and-device-bringup.md](model-and-device-bringup.md) | The two axes: the directory contract, the kernel tiers, the model description, the planner, isolation, the conformance matrix, the checklists, and the open questions with their decision records |
 | [conformance-matrix.md](conformance-matrix.md) | The model/device/tier/graph matrix. **Generated** by `tools/gen_matrix.py`; do not edit a row |
 | [examples.md](examples.md) | The two smallest examples of the public API: what each one shows, how to run it, the six design decisions, and its line budget |
-| [checkpoint-format.md](checkpoint-format.md) | The checkpoint container: the version 1 layout and the version 0 layout, the eight run-metadata decisions, the compatibility rules, the parameter-only read, and the three pipeline notebooks |
-| [testing.md](testing.md) | Test tiers, oracle harness, finite-difference checks |
-| [parity.md](parity.md) | Known differences from the PyTorch reference, with status |
-| [distributed-design.md](distributed-design.md) | Data-parallel training on two devices: the gradient-sync seam, sharding, the data cursor, and the launch |
-| [distributed-launch.md](distributed-launch.md) | The launch of a data-parallel run: the rank contract, the `tools/nanochat dist` command, and the Python helper |
-| [distributed-native-plan.md](distributed-native-plan.md) | The execution plan for a native all-reduce over NVLink and RDMA: the transport interface, the ring schedule, ownership, and the broker |
+| [checkpoint-format.md](checkpoint-format.md) | The checkpoint container: the version 1 layout and the version 0 layout, the eight run-metadata decisions, the compatibility rules, and the parameter-only read |
+| [api-surface.md](api-surface.md) | The API of each component at HEAD, the smaller API proposed for each one, and the review rows `R1` to `R14` that the code cites |
+
+## Precision and numerics
+
+| Document | Contents |
+|---|---|
+| [precision.md](precision.md) | The precision policy: fp32 on Pascal, Turing, and the CPU; bf16 on Ampere and newer; fp16 removed from the tree |
+| [fp8-training.md](fp8-training.md) | The fp8 tier: the storage tags, the scale rule, the scaled GEMM, the layer set, and the backward pass |
+| [testing.md](testing.md) | Test tiers, oracle harness, finite-difference checks, and Part 1: the correctness gates. Part 2: the numerics integration test |
+| [simulator.md](simulator.md) | The S0 simulator: device profiles, the reference engine, the emulation engine, the API interposer, and the collective mock. Part 7: the simulator at bf16 and fp8 |
+| [parity.md](parity.md) | Known differences from the PyTorch reference, with status. Part 1: supervised fine-tuning reference parity |
+
+## Training and the pipeline
+
+| Document | Contents |
+|---|---|
+| [post-training.md](post-training.md) | Supervised fine-tuning and reinforcement learning. Part 1: reinforcement learning in a notebook. Part 2: one chain on three hosts. Part 3: the scale-up of that chain |
+| [distributed-design.md](distributed-design.md) | Data-parallel training on two devices: the gradient-sync seam, sharding, and the data cursor. Part 1: the launch. Part 2: the Python and C++ seam. Part 3: native collectives over NVLink and RDMA |
 | [client-runtime-design.md](client-runtime-design.md) | The single-client multi-device runtime: one program, a device mesh, placement, the in-process collective, the C++ mesh training driver, and the compatibility process runtime |
-| [performance.md](performance.md) | Performance measurement protocol and the debugging interface |
-| [profile-guided-optimization.md](profile-guided-optimization.md) | The optimization loop: a trace per iteration, the two ideas with the largest measured ceiling, the pair bar, the artifacts, and the work rows |
-| [scalar-arguments.md](scalar-arguments.md) | The proposal for a device-resident scalar in the seam: `ScalarArg`, the optimizer migration, the pointwise arms, and the model-side fp32 view |
-| [performance-model.md](performance-model.md) | The analytic throughput model: the operation counters, the device rates, the roofline, and the prediction record |
-| [cpu-performance.md](cpu-performance.md) | CPU backend baseline, cause, design, and phase results |
-| [attention.md](attention.md) | Attention baseline, Pascal feasibility, the fused window, results |
-| [attention-tensor-core.md](attention-tensor-core.md) | Tensor-core attention: the fused tile in a bf16 or fp8 build, and the fp8 coupling |
-| [optimizations.md](optimizations.md) | Planned recompute, fused-classifier, and row-kernel work |
-| [eval.md](eval.md) | Base and chat evaluation, and the forward-only workspace |
-| [tokenizer.md](tokenizer.md) | The native BPE tokenizer: design, artifacts, training, and status |
-| [parquet-native.md](parquet-native.md) | The native parquet reader and on-the-fly tokenization plan |
-| [post-training.md](post-training.md) | Design and status: supervised fine-tuning and reinforcement learning |
-| [sft-parity-plan.md](sft-parity-plan.md) | Earning reference parity for supervised fine-tuning: the four rungs, the fixtures, and the phases |
-| [training-seam.md](training-seam.md) | The Python and C++ boundary for training: the seam rule, the current defects, the mesh driver, and the target interface |
-| [rl-notebook.md](rl-notebook.md) | Reinforcement learning in a notebook: the hand-rolled loop, the `nc.rl` worker bridge, and the open items |
-| [pipeline-plan.md](pipeline-plan.md) | The plan for one chain on three hosts: base, then SFT, then RL, with the six blockers and the host matrix |
-| [pipeline-scaleup-plan.md](pipeline-scaleup-plan.md) | The scale-up of that chain: the `standard` profile, the eval stage, the two Modal legs (T4 at fp32, H100 at bf16), gates G1 to G3, and the ten work rows |
-| [self-evolution.md](self-evolution.md) | The self-evolution loop: the goal intake, the stuck detector, the human escalation, the intervention dataset, the training round, and the Hub transport |
-| [python.md](python.md) | The single Python surface: in-process compute API, planning, chat evaluation, and the `tools/nanochat` toolchain |
-| [sandbox.md](sandbox.md) | Execution sandbox and host resource governance |
-| [host-portability.md](host-portability.md) | Toolchain, optional sandbox, devices, and Kaggle |
-| [script-consolidation-plan.md](script-consolidation-plan.md) | The plan to give each host task one home: the command table, the fixture generators, and the Python dispatch |
-| [dependency-layering-plan.md](dependency-layering-plan.md) | The plan to keep the core free of third-party packages: the four zones, the packaging, the binary wheels, and the fixture provenance |
-| [gpu-queue-plan.md](gpu-queue-plan.md) | The GPU job queue: one worker owns the GPU, a SQLite store holds the jobs, and `tools/nanochat gpuq` submits them |
 | [node-h100.md](node-h100.md) | The H100 node run book: the memory plan, the batch plan, the launch, and the acceptance run |
-| [simulator.md](simulator.md) | The S0 simulator: device profiles, the reference engine, the emulation engine, the API interposer, and the collective mock |
-| [simulator-precision.md](simulator-precision.md) | The simulator at bf16 and fp8: the profile rows, the fp8 rounding, the cuBLASLt coverage, the emulator intrinsics, and the trace leg |
-| [correctness-gates.md](correctness-gates.md) | The correctness split: what the simulator proves, the Hopper startup gate, and the speed budget |
-| [numerics-integration.md](numerics-integration.md) | The staged numeric trace: CPU, simulator, and Pascal GPU agreement |
+| [tokenizer.md](tokenizer.md) | The native BPE tokenizer: design, artifacts, training, and status |
+| [parquet-native.md](parquet-native.md) | The native parquet reader and on-the-fly tokenization |
+| [eval.md](eval.md) | Base and chat evaluation, and the forward-only workspace |
+
+## Performance
+
+| Document | Contents |
+|---|---|
+| [performance.md](performance.md) | How to measure, and the debugging interface. Part 1: the profile-guided optimization loop. Part 2: the CPU backend record |
+| [performance-model.md](performance-model.md) | The analytic throughput model: the operation counters, the device rates, the roofline, and the prediction record |
+| [attention.md](attention.md) | Attention baseline, Pascal feasibility, the fused window, and the results. Part 5: tensor-core attention |
+| [scalar-arguments.md](scalar-arguments.md) | The device-resident scalar in the seam: `ScalarArg`, the optimizer migration, the pointwise arms, and the model-side fp32 view |
+| [backlog.md](backlog.md) | Work that is designed and not implemented: Part 1 the training optimizations, Part 2 the self-evolution loop |
+
+## Hosts and tools
+
+| Document | Contents |
+|---|---|
+| [python.md](python.md) | The single Python surface: in-process compute API, planning, chat evaluation, and the `tools/nanochat` toolchain. Part 1: host task consolidation |
+| [sandbox.md](sandbox.md) | Execution sandbox and host resource governance. Part 1: the GPU job queue |
+| [host-portability.md](host-portability.md) | Toolchain, optional sandbox, devices, and Kaggle |
+
+## The records
+
+Two files hold the history. Neither is a reference for how the tree behaves
+today.
+
+| File | Contents |
+|---|---|
+| [campaigns.md](campaigns.md) | One section per finished campaign: the dates, the outcome, the defects it found, the open items, and the evidence path. Read it before you reopen a settled question |
+| [baselines.json](baselines.json) | The measured baselines: `attention`, `attention_e2e`, `cpu_train`, and `cpu_gemm`. Each entry names the command that produced it and the revision. Update an entry only with a real run |
 
 ## The contract vocabulary, `spec/`
 
@@ -74,6 +94,21 @@ and not in `spec/`; the block kinds and their slots are
 [model.md](model.md) § The model description and
 [../spec/block_kinds.md](../spec/block_kinds.md); the matrix is
 [conformance-matrix.md](conformance-matrix.md).
+
+## How to add a document, and how to retire one
+
+Add a document only when a subject has no home. A new subject earns a new file;
+a new campaign does not, because a campaign is a record and not a reference.
+
+A plan is retired as soon as its last row lands:
+
+1. The evidence goes to `.sliceme/feat--<campaign>.evidence.md`.
+2. The durable sections move into the reference document, under a part heading.
+   The section numbers of an absorbed document do not change, so every existing
+   reference still resolves. A reference then reads "Part N, section K".
+3. The outcome, the defect list, and the open items go to
+   [campaigns.md](campaigns.md).
+4. The plan file is deleted, and every reference to it is retargeted.
 
 New here? Start with [../README.md](../README.md) for the quickstart, then
 [../DESIGN.md](../DESIGN.md) for the shape of the system.

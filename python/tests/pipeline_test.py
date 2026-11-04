@@ -5,17 +5,17 @@ The test drives the real chain: :func:`nanochat_cpp.pipeline.run` on
 driver, the SFT driver, and the RL worker over the committed fixture corpus and
 then scores the two checkpoints in this process. The runfiles carry the shared
 library, the two stage executables, the parquet document set, and the tokenizer
-artifact; no stage reads the Hub (``docs/pipeline-plan.md`` D4).
+artifact; no stage reads the Hub (``docs/post-training.md`` D4).
 
 The profile is named explicitly, because ``Job()`` defaults to ``standard``
 (8 layers, hidden 512) -- the shape the throughput facts are read at, not the
 shape a CPU gate can run in five seconds. The step counts are named with it, so
-this class keeps the short demo schedule (``docs/pipeline-scaleup-plan.md``
+this class keeps the short demo schedule (``docs/post-training.md``
 section 5) whatever the defaults become.
 
 The assertions are the contract of section 7, not the loss numbers: the parity
 rungs own the numbers. A10 to A13 are the reviewability of the eval stage
-(``docs/pipeline-scaleup-plan.md`` section 10).
+(``docs/post-training.md`` section 10).
 
 =====  ===================================================================
 A1     each stage returns status 0 with the step count it was asked for
@@ -49,7 +49,7 @@ rewards, because :class:`nanochat_cpp.rl.RlReport` carries no advantage. A6 is a
 two-run comparison and not "a constant reward leaves the parameters unchanged":
 a warm start carries the optimizer state (``docs/post-training.md`` section 7),
 so the inherited AdamW moments move the weights even with an advantage vector of
-exactly zero (``docs/pipeline-plan.md`` D11).
+exactly zero (``docs/post-training.md`` D11).
 
 Row 7's open check, settled by measurement. The plan's premise was 9 rows and
 about 530 characters; the committed parquet holds ten documents and 109 bytes of
@@ -86,7 +86,7 @@ from nanochat_cpp import _build, api, checkpoint, pipeline, rl
 #: makes the RL stage start the worker itself: a ``py_test``'s runfiles carry no
 #: ``tools/nanochat``, and the sentinel the child's ``RequireSandboxOrDie``
 #: reads is ``NANOCHAT_SANDBOX``, which the sandbox wrapper sets for every test
-#: action (``docs/pipeline-plan.md`` D10 and section 7).
+#: action (``docs/post-training.md`` D10 and section 7).
 OWNED_ENV = ("NANOCHAT_BASE_DIR", "NANOCHAT_RUNS_DIR",
              "NANOCHAT_SANDBOX_BACKEND", "NANOCHAT_SOURCE_REVISION")
 
@@ -94,7 +94,7 @@ OWNED_ENV = ("NANOCHAT_BASE_DIR", "NANOCHAT_RUNS_DIR",
 RL_STEP = 105
 
 #: The schedule of the demo gate: the step counts this gate runs, which are
-#: half the default job's 200/200/8 (``docs/pipeline-scaleup-plan.md`` section
+#: half the default job's 200/200/8 (``docs/post-training.md`` section
 #: 5). They are passed by hand, so the gate keeps costing about five seconds and
 #: the numbers A1 to A9 assert stay the numbers of the short schedule.
 DEMO_SCHEDULE = {"base_steps": 100, "sft_steps": 100, "rl_steps": 5}
@@ -197,7 +197,7 @@ def recorded_config(shape) -> dict:
 
 
 class PipelineTest(unittest.TestCase):
-    """The integration gate of ``docs/pipeline-plan.md`` section 7."""
+    """The integration gate of ``docs/post-training.md`` section 7."""
 
     @classmethod
     def setUpClass(cls) -> None:
@@ -331,7 +331,7 @@ class PipelineTest(unittest.TestCase):
 
         Version 3 of the report reads the driver's records instead of the stage
         wall clock, which charged the model build and the corpus copy to every
-        step (``docs/pipeline-scaleup-plan.md`` section 9 row 4). A regression
+        step (``docs/post-training.md`` section 9 row 4). A regression
         to the wall clock shows up as ``window_steps`` 0, and a record that
         stops carrying a timing field shows up as a split that cannot cover the
         step.
@@ -453,7 +453,7 @@ class PipelineTest(unittest.TestCase):
         vector of exactly zero, so "the parameters changed" is not the
         assertion; the assertion is that the graded run and the constant run
         end in different parameters, which isolates the advantage term
-        (``docs/pipeline-plan.md`` D11).
+        (``docs/post-training.md`` D11).
         """
         self.assertEqual(
             (self.job.num_samples, self.job.max_tokens, self.job.temperature,
@@ -709,7 +709,7 @@ class PipelineTest(unittest.TestCase):
 
 
 class JobValidationTest(unittest.TestCase):
-    """The job and profile rules of ``docs/pipeline-scaleup-plan.md`` section 5.
+    """The job and profile rules of ``docs/post-training.md`` section 5.
 
     ``_check`` is the one gate a job passes before a stage starts, so a bad
     field is a message that names the field and a bad profile is a message that
@@ -970,7 +970,7 @@ class CorpusFilesTest(unittest.TestCase):
     The kind is what lets the H100 leg run on real text without a second
     copy of gigabytes on the Volume, and what stops a tokenizer of the wrong
     size from reaching the embedding lookup
-    (``docs/pipeline-scaleup-plan.md`` section 9 row 3).
+    (``docs/post-training.md`` section 9 row 3).
     """
 
     def setUp(self) -> None:
@@ -1038,7 +1038,7 @@ class CorpusFilesTest(unittest.TestCase):
     def test_a_manifest_keeps_a_stale_shard_out_of_the_run(self) -> None:
         # The directory outlives one download. A shard of another dataset sits
         # beside the shard the manifest names, and the run must read only the
-        # named one (docs/pipeline-scaleup-plan.md section 9 row 3).
+        # named one (docs/campaigns.md, work row 3).
         folder = self.root / "volume"
         folder.mkdir()
         wanted = folder / "00_shard_00000.parquet"

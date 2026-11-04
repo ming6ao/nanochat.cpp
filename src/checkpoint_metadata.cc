@@ -83,7 +83,7 @@ bool EnumValid(ComputePrecision precision) {
 }
 
 // The `Recipe` block's usability rule (design decision D7 of
-// docs/sft-parity-plan.md). The visitor above is the only code that touches the
+// docs/parity.md). The visitor above is the only code that touches the
 // block's words, and it is deliberately word-shape-only: it cannot know that a
 // ratio is a fraction of the run. This function is the second half of "reject a
 // malformed block" -- the half that reads like the schedule -- and the SFT

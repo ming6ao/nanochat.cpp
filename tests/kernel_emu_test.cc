@@ -365,7 +365,7 @@ void CheckRmsNormFusedResidualBackward(int rows, int dim) {
 
 // The emulated fp8 cast against the CPU reference. Both use the shared rounding
 // header, so the bytes and the dequantization value must match exactly
-// (docs/simulator-precision.md invariants 2 and 13).
+// (docs/simulator.md Part 7, invariants 2 and 13).
 void CheckQuantizeFp8() {
   constexpr int kCount = 64;
   const std::vector<float> source =
@@ -402,7 +402,7 @@ void CheckQuantizeFp8() {
 
 // The value gate: the emulated kernel against the CPU reference. This is the
 // `extern __shared__` path the executed-source rewrite covers
-// (docs/simulator-precision.md section 6.2).
+// (docs/simulator.md Part 7, section 6.2).
 void CheckValueGate(int rows, int kv_heads, int head_dim) {
   const int hidden = 32;
   const int gate_channels = 12;
@@ -462,7 +462,7 @@ void CheckValueGate(int rows, int kv_heads, int head_dim) {
 
 // Attention: the emulated kernels against the CPU reference. The fused
 // windowed forward uses `extern __shared__`, which the executed-source rewrite
-// covers (docs/simulator-precision.md section 6.2).
+// covers (docs/simulator.md Part 7, section 6.2).
 void CheckAttention(const nanochat::AttentionParams& params) {
   const int dim = params.head_dim;
   const int kv_len = params.kv_len > 0 ? params.kv_len : params.seq;

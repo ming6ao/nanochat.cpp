@@ -159,7 +159,7 @@ constant of the flagship model. The contract does not know the model (Rule 1).
 |---|---|
 | **Name** | `fp8_storage` — `Caps::kFeatureFp8Storage` |
 | **Meaning** | The device can quantize a tensor to one byte per element with one tensorwise scale and report the dequantization value: `QuantizeFp8` with E4M3 for forward operands and E5M2 for backward operands |
-| **Numeric obligation** | The rounding is the shared header `include/nanochat/fp8.h`, so the device and the CPU emulator agree **exactly** and not within a tolerance (`docs/correctness-gates.md` §3.2: share the rule, not the implementation). The amax floor applies, because an all-zero tensor would otherwise produce an infinite scale. The declared dequantization value is the reciprocal of the scale the quantizer chose. The quantization bytes match the emulator bit for bit |
+| **Numeric obligation** | The rounding is the shared header `include/nanochat/fp8.h`, so the device and the CPU emulator agree **exactly** and not within a tolerance (`docs/testing.md` Part 1, §3.2: share the rule, not the implementation). The amax floor applies, because an all-zero tensor would otherwise produce an infinite scale. The declared dequantization value is the reciprocal of the scale the quantizer chose. The quantization bytes match the emulator bit for bit |
 | **Owning layer** | Backend — `QuantizeFp8`, the optional half of the fp8 pair |
 | **Declared by** | device `caps.json`; model `requires` only when the model's numeric contract is an fp8 contract |
 
@@ -169,7 +169,7 @@ constant of the flagship model. The contract does not know the model (Rule 1).
 |---|---|
 | **Name** | `fp8_gemm` — `Caps::kFeatureFp8Gemm` |
 | **Meaning** | A scaled fp8 matrix multiply, `C = alpha * op(A) * op(B) + beta * C`, with one-byte operands, per-operand dequantization values, and an fp32 accumulator |
-| **Numeric obligation** | The accumulator is fp32. A device that reduces in lower precision declares it through `fast_accum`, which is forward only, and must then still hold the graph leg at the fp8 tolerance the trace table commits (`docs/correctness-gates.md` §2: 1e-2 on the loss and gradient leg). `fp8_gemm` implies `fp8_storage`: a device that can multiply fp8 but cannot produce it declares neither bit |
+| **Numeric obligation** | The accumulator is fp32. A device that reduces in lower precision declares it through `fast_accum`, which is forward only, and must then still hold the graph leg at the fp8 tolerance the trace table commits (`docs/testing.md` Part 1, §2: 1e-2 on the loss and gradient leg). `fp8_gemm` implies `fp8_storage`: a device that can multiply fp8 but cannot produce it declares neither bit |
 | **Owning layer** | Backend — `GemmScaledFp8` |
 | **Declared by** | device `caps.json` |
 

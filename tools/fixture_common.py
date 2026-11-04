@@ -2,7 +2,7 @@
 """Shared helpers for the offline fixture generators.
 
 The merged generator ``tools/dump_fixtures.py`` keeps one dispatch and one
-usage line for every fixture kind (``docs/script-consolidation-plan.md``
+usage line for every fixture kind (``docs/python.md``
 section 7, P4). This module holds the code that the kinds used to repeat:
 the subcommand selection, the ``--model`` selector of
 ``docs/model-and-device-bringup.md`` section 12.2, and the small value
@@ -15,7 +15,7 @@ fast. The ``--model`` path helpers use only ``hashlib``, ``importlib.util``,
 fallback runs in a tree with no torch installed.
 
 A new parity fixture is not added here. The producers whose environment a model
-manifest records (``docs/dependency-layering-plan.md`` section 7.2) run through
+manifest records (``docs/build.md`` section 7.2) run through
 ``tools/nanochat parity produce <kind>`` and live in the adapter package
 (``nanochat_cpp_bridge.fixtures``, section 7.3); the kinds below are the
 generator this tree already has, and its ``--model``/``--check`` surface is

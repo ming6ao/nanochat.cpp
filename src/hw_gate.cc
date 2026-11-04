@@ -1,5 +1,5 @@
 // src/hw_gate.cc -- the hardware correctness gate
-// (docs/correctness-gates.md section 4).
+// (docs/testing.md Part 1, section 4).
 //
 // The simulator cannot prove the tensor-core arithmetic, the `cublasLt` result,
 // the operand layout, or the fused attention tile. This gate runs those cases

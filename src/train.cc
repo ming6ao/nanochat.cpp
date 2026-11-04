@@ -371,8 +371,8 @@ bool Checkpointer::SaveModel(const Model& model, const Optimizer* optimizer,
   if (optimizer != nullptr) SaveOptimizerState(*optimizer, &checkpoint);
   // The step also rides in the optimizer section, so a resume continues the
   // schedule from it instead of restarting the warmup
-  // (docs/training-seam.md section 10). A step of zero means no step is known;
-  // the record and the metadata field are then both omitted.
+  // (docs/distributed-design.md Part 2, section 10). A step of zero means no
+  // step is known; the record and the metadata field are then both omitted.
   if (options.step > 0) {
     if (options.step >
         static_cast<std::uint64_t>(std::numeric_limits<int>::max())) {
@@ -395,7 +395,7 @@ bool Checkpointer::SaveModel(const Model& model, const Optimizer* optimizer,
   metadata.git_revision = options.git_revision;
   metadata.notes = options.notes;
   // The recipe rides in the metadata block (design decision D7 of
-  // docs/sft-parity-plan.md), so a later finetune inherits the batch shape and
+  // docs/parity.md), so a later finetune inherits the batch shape and
   // the rates from the file instead of being told them again.
   metadata.recipe = options.recipe;
   // `created_utc` stays empty: a save has to be reproducible, and rule 4 of
@@ -608,7 +608,7 @@ TrainLoop::TrainLoop(TrainConfig config) : config_(std::move(config)) {
   }
   resume_step_ = resume_step;
   // Start the terminal-save counter at the resumed step, so a run that
-  // performs no step keeps the stored step record (docs/training-seam.md
+  // performs no step keeps the stored step record (docs/distributed-design.md
   // section 10).
   last_step_ = resume_step;
   // The data cursor rides beside the checkpoint
@@ -835,7 +835,7 @@ float TrainLoop::Run() {
     logger_->Info("\n" + FormatPerformanceReport(bound));
   }
 
-  // The hardware correctness gate (docs/correctness-gates.md section 4). Run
+  // The hardware correctness gate (docs/testing.md Part 1, section 4). Run
   // it once, before the first step, so a bad fp8 or tensor-core result aborts
   // the run instead of wasting device time. `kAuto` runs it on a real device
   // and skips it on the CPU reference.
@@ -864,8 +864,8 @@ float TrainLoop::Run() {
   }
 
   // A resume continues the schedule from the stored step, so the learning-rate
-  // warmup does not replay (docs/training-seam.md section 10). `num_iterations`
-  // is absolute.
+  // warmup does not replay (docs/distributed-design.md Part 2, section 10).
+  // `num_iterations` is absolute.
   for (int step = first_step; step <= config_.num_iterations; ++step) {
     // Gradient accumulation: sum `grad_accum` micro-batch gradients (each
     // scaled by 1/grad_accum) before one optimizer step. Mirrors nanochat's

@@ -6,7 +6,7 @@ that ``NANOCHAT_CPP_CACHE`` selects the cache, that an explicit
 ``NANOCHAT_CPP_LIB`` wins, and that ``NANOCHAT_CPP_PREBUILT`` forbids a build.
 See docs/python.md sections 3.2 and 3.3.
 
-The stage half is the resolver of ``docs/pipeline-plan.md`` B6: one function
+The stage half is the resolver of ``docs/post-training.md`` B6: one function
 finds ``sft_main`` and ``rl_worker`` in the order the library uses -- the
 environment override, the runfiles tree, ``bazel-bin/src/<name>``, and the
 ``nanochat-<name>`` entry point of a future wheel -- and one builder builds the
@@ -14,7 +14,7 @@ library and both children with one ``tools/nanochat build`` line. Both are
 covered over a fake tree: a directory, a runfiles root, a fake
 ``tools/nanochat`` script, and a temporary ``PATH``, so no Bazel run happens.
 
-The last class is row 1 of ``docs/pipeline-scaleup-plan.md``: the named
+The last class is row 1 of ``docs/post-training.md``: the named
 ``hopper`` config of ``.bazelrc``, asserted beside the ``h100`` stanza so the
 hand-run Hopper build and the H100 *simulator* profile cannot be confused
 again, and the explicit flag triple the build helper emits instead of either
@@ -240,7 +240,7 @@ class BuildCommandTest(unittest.TestCase):
     def test_the_leg_triple_and_never_a_named_config(self) -> None:
         """The helper emits the explicit triple, not ``--config=hopper``.
 
-        Row 1 of ``docs/pipeline-scaleup-plan.md`` adds the ``hopper`` name for
+        Row 1 of ``docs/post-training.md`` adds the ``hopper`` name for
         a hand run only; the H100 leg of the Modal app keeps the triple of
         section 7, so a card build and its report name the same three flags. A
         helper that started emitting a named config would inherit whatever that
@@ -270,7 +270,7 @@ class BazelConfigTest(unittest.TestCase):
     swaps the collective to ``native``. ``--config=hopper`` is the hand-run
     build for a real Hopper card, so it must set neither: the chain runs
     ``world_size=1`` and keeps the default ``nccl`` collective
-    (``docs/pipeline-scaleup-plan.md`` section 3 trap 1, P7, and section 7).
+    (``docs/post-training.md`` section 3 trap 1, P7, and section 7).
     The two stanzas are read in one class, so the pair cannot drift apart
     without a red test.
     """

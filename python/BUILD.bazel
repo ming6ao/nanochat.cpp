@@ -7,7 +7,7 @@
 # registered local `python3` toolchain and need no third-party wheel. Every
 # third-party import has one home: `nanochat_cpp_bridge`, the second import
 # package of the one distribution declared in pyproject.toml
-# (docs/dependency-layering-plan.md sections 4 and 6.1).
+# (docs/build.md Part 1, sections 4 and 6.1).
 
 load("@rules_python//python:defs.bzl", "py_library", "py_test")
 
@@ -187,7 +187,7 @@ py_test(
     size = "small",
 )
 
-# T0: the R1 (P4) data parity gate the docs cite, `docs/sft-parity-plan.md`
+# T0: the R1 (P4) data parity gate the docs cite, `docs/parity.md`
 # section 7 phase C.1 and `docs/parity.md`: the reference render, pack, and
 # mixture order reproduced from the committed pack fixture
 # (`//tests:sft_pack_fixture`, `tests/data/sft_pack_fixture.bin`). It reads
@@ -203,7 +203,7 @@ py_test(
 )
 
 # T0: the SFT bridge builds the driver argv the driver reads (B1 and B3 of
-# `docs/pipeline-plan.md` section 3). Hermetic: a fake toolchain records the
+# `docs/campaigns.md`, the six blockers). Hermetic: a fake toolchain records the
 # argument list instead of running the driver, so it needs no library, no
 # Bazel, and no GPU.
 py_test(
@@ -214,7 +214,7 @@ py_test(
 )
 
 # T0: the one-job chain -- base, then SFT, then RL -- at the `demo` profile.
-# This is the integration gate of `docs/pipeline-plan.md` section 7: the chain
+# This is the integration gate of `docs/post-training.md` Part 2, section 7: the chain
 # runs the real stage executables over the committed fixture corpus, so the
 # runfiles carry the shared library, `//src:sft_main`, `//src:rl_worker`, the
 # parquet document set, and the NCTOKEN1 tokenizer artifact. About 5 s at the
@@ -235,7 +235,7 @@ py_test(
 
 # T0: the deterministic half of the optimization loop. Hermetic: a synthetic
 # pair of nsys CSV reports, so no GPU, no Modal account, and no large artifact
-# (docs/profile-guided-optimization.md row PGO.1).
+# (docs/performance.md row PGO.1).
 py_test(
     name = "pgo_test",
     srcs = ["tests/pgo_test.py"],
@@ -262,7 +262,7 @@ py_test(
 )
 
 # T0: the observable contract of `tools/nanochat` before the language move
-# (docs/script-consolidation-plan.md section 7, P2). It runs the real entry
+# (docs/post-training.md Part 3). It runs the real entry
 # script and the real sandbox launcher, so the runfiles carry both. A fake
 # `bazelisk` on PATH keeps the startup lookup happy without a Bazel run.
 py_test(
@@ -309,7 +309,7 @@ py_test(
 
 # T0: the GPU job queue store, worker, and state machine. Hermetic and
 # CPU-only: a temporary queue directory, a fake `nvidia-smi`, and a fake
-# `python/nanochat_cpp/sandbox.py`. See docs/gpu-queue-plan.md.
+# `python/nanochat_cpp/sandbox.py`. See docs/sandbox.md.
 py_test(
     name = "gpu_queue_test",
     srcs = ["tests/gpu_queue_test.py"],
@@ -319,7 +319,7 @@ py_test(
 
 # T0: the distributed launch plan, the launcher JSON summary, and the log
 # parser. Hermetic: a fake `tools/nanochat`, so it needs no library, no Bazel,
-# and no GPU. See docs/distributed-launch.md section 6.
+# and no GPU. See docs/distributed-design.md Part 1, section 6.
 py_test(
     name = "distributed_test",
     srcs = ["tests/distributed_test.py"],
@@ -390,7 +390,7 @@ py_test(
 # set so the ctypes core loads the CUDA library. `tools/nanochat test --gpu`
 # builds it under `--config=cuda` and selects it by the `gpu` tag; the `-gpu`
 # filter of the CPU loop keeps the same source out of the default run
-# (`docs/pipeline-plan.md` section 7).
+# (`docs/post-training.md` Part 2, section 7).
 py_test(
     name = "pipeline_gpu_test",
     srcs = ["tests/pipeline_test.py"],
@@ -436,7 +436,7 @@ py_test(
 )
 
 # T0: the Python client of the C++ mesh training driver
-# (docs/client-runtime-design.md section 10.1, docs/training-seam.md
+# (docs/client-runtime-design.md section 10.1, docs/distributed-design.md
 # section 6.6). One driver call runs a two-step job and writes the record and
 # the summary. The runfiles carry the shared library, the parquet document set,
 # and the tokenizer artifact.
@@ -462,7 +462,7 @@ py_test(
     size = "small",
 )
 
-# The five boundary gates of docs/dependency-layering-plan.md section 8. A
+# The five boundary gates of docs/build.md Part 1, section 8. A
 # boundary that no test reads is a comment, so each gate is a self-contained
 # unittest module that needs no wheel, no library, and no network.
 

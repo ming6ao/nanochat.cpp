@@ -1,8 +1,9 @@
 #ifndef NANOCHAT_SRC_RL_WORKER_H_
 #define NANOCHAT_SRC_RL_WORKER_H_
 
-// The persistent reinforcement-learning worker (docs/rl-notebook.md section 4,
-// docs/training-seam.md section 6.4, docs/post-training.md section 8).
+// The persistent reinforcement-learning worker (docs/post-training.md Part 1,
+// section 4, docs/distributed-design.md Part 2, section 6.4,
+// docs/post-training.md section 8).
 //
 // One long-lived process holds the `Model` and the `Optimizer` across steps, so
 // the optimizer moments and the step counter stay alive and no step crosses the
@@ -30,7 +31,7 @@
 //     prompt is the same length and the caller pads). The worker generates
 //     `num_samples` rows per prompt in one `GenerateMultiPrompt` call, so a
 //     rollout does not cross the ABI once per prompt
-//     (docs/rl-notebook.md section 5 phase 5).
+//     (docs/post-training.md Part 1, section 5 phase 5).
 //
 //   `advantage batch=<int> seq=<int> num_passes=<int>
 //              examples_per_rank=<int> tokens=<ids> targets=<ids>

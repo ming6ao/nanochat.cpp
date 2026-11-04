@@ -264,7 +264,7 @@
           "match": "*",
           "bound": {
             "mode": "exact",
-            "source": "docs/numerics-integration.md section 4: the fixture holds the exact class only, so every record compares byte for byte on every backend and every precision"
+            "source": "docs/testing.md Part 2, section 4: the fixture holds the exact class only, so every record compares byte for byte on every backend and every precision"
           }
         }
       ]

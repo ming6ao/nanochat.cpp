@@ -36,7 +36,7 @@ struct TrainConfig {
   OptimizerConfig optimizer;
   SchedulerConfig scheduler;
 
-  // The hardware correctness gate (docs/correctness-gates.md section 4).
+  // The hardware correctness gate (docs/testing.md Part 1, section 4).
   // `kAuto` runs it on a real device and skips it on the CPU reference.
   enum class HwCheck {
     kAuto = 0,
@@ -142,7 +142,7 @@ struct CheckpointSaveOptions {
   std::string git_revision;  // Informational only.
   std::vector<std::string> notes;
   // The training recipe the run followed (design decision D7 of
-  // docs/sft-parity-plan.md): the batch shape, the per-group rates, and the
+  // docs/parity.md): the batch shape, the per-group rates, and the
   // schedule a finetune inherits from this file. A caller that does not know
   // one leaves the defaults, which are the values the base training loop uses,
   // so the block is written either way and an older reader counts it as
@@ -168,7 +168,7 @@ class Checkpointer {
 
   // Also writes the 1-based optimizer step beside the optimizer state, so a
   // resume continues the schedule instead of restarting the warmup
-  // (docs/training-seam.md section 10).
+  // (docs/distributed-design.md Part 2, section 10).
   static bool SaveModel(const Model& model, const Optimizer& optimizer,
                         int step, const std::string& path);
 
@@ -247,7 +247,7 @@ class TrainLoop {
   int last_step_ = 0;
   // The step restored from `resume_path`, or 0 for a fresh run. `Run` starts
   // at `resume_step_ + 1`, so a resume continues the schedule
-  // (docs/training-seam.md section 10).
+  // (docs/distributed-design.md Part 2, section 10).
   int resume_step_ = 0;
   // The data cursor restored beside the checkpoint
   // (docs/distributed-design.md section 11). The default state is a fresh run

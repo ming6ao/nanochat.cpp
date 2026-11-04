@@ -4,7 +4,7 @@ The test builds the driver config through the C application binary interface,
 runs a two-step job on the CPU backend, and checks that the driver wrote the
 record and the summary. It needs the shared library, the committed parquet
 document set, and the committed tokenizer artifact
-(docs/client-runtime-design.md section 10.1, docs/training-seam.md
+(docs/client-runtime-design.md section 10.1, docs/distributed-design.md
 section 6.6).
 """
 

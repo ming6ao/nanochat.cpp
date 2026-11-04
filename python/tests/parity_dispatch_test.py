@@ -13,7 +13,7 @@ covers the first half: the usage, the argument errors, and the producer's own
 no ``torch`` is importable, an exit code of 0 proves the help path reached the
 producer without importing it.
 
-See ``docs/dependency-layering-plan.md`` section 7.3 and section 8.
+See ``docs/build.md`` section 7.3 and section 8.
 """
 
 from __future__ import annotations

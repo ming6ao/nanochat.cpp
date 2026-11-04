@@ -1,6 +1,6 @@
 """G3: the base install carries no third-party dependency.
 
-Gate G3 of ``docs/dependency-layering-plan.md`` section 8:
+Gate G3 of ``docs/build.md`` section 8:
 ``python/pyproject.toml`` declares ``dependencies = []`` (the line of section
 6.1), so ``pip install nanochat-cpp`` pulls no third-party package and the
 wheel stays pure (rule 1 of section 4). The optional dependencies below that

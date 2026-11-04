@@ -2,7 +2,7 @@
 
 Hermetic: it needs no library, no Bazel, and no GPU. It writes a fake
 ``tools/nanochat`` entry that emits the launcher's JSON summary, then checks the
-plan, the launch result, and the log parser. See ``docs/distributed-launch.md``
+plan, the launch result, and the log parser. See ``docs/distributed-design.md``
 section 6.
 """
 

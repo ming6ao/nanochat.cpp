@@ -19,7 +19,7 @@ Dtype codes are shared with the C++ reader (``tests/oracle_fixture.h``):
 
 The layout is single-sourced in ``tools/fixture_format.py``, which a host
 reads. A package must not import a host (rule 4 of
-``docs/dependency-layering-plan.md`` section 4), so this module is a pinned
+``docs/build.md`` section 4), so this module is a pinned
 copy of that writer: the same header, the same record framing, and the same
 dtype table, so a producer here writes the bytes a host writes. A change to
 the container belongs in both files in the same commit; the fixture hashes of

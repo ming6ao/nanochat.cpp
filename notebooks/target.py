@@ -66,7 +66,7 @@ NOTEBOOK_BASE = Path("/kaggle/working/nanochat-cache")
 #: The job fields a run reads. They must reach the host before it starts.
 #: The first four are the train job's; the last three are the pipeline job's,
 #: which names its corpus and its tokenizer at the top level
-#: (``docs/pipeline-scaleup-plan.md`` section 9 rows 2 and 3).
+#: (``docs/post-training.md`` section 9 rows 2 and 3).
 INPUT_FIELDS = (
     ("data", "parquet"),
     ("data", "packed_rows_path"),
@@ -95,7 +95,7 @@ RUNS_VOLUME = "nanochat-runs"
 REMOTE_ROOT = "/runs"
 SECRET_NAME = "huggingface"
 
-#: The two kinds of job a Modal function runs (``docs/pipeline-plan.md``
+#: The two kinds of job a Modal function runs (``docs/post-training.md``
 #: section 6.3). A ``train`` job is one stage and names its run directory in
 #: ``output.out_dir``. A ``pipeline`` job is the whole chain and names the root
 #: it writes under in ``out_root``, because one job runs three stages and no
@@ -297,7 +297,7 @@ class ModalTarget(Target):
     so it is its own pair of functions. ``job_kind`` names the shape of the job
     it runs: :data:`JOB_TRAIN` for one stage, whose run directory is
     ``output.out_dir``, and :data:`JOB_PIPELINE` for the whole chain, whose run
-    root is ``out_root`` (``docs/pipeline-plan.md`` section 6.3).
+    root is ``out_root`` (``docs/post-training.md`` section 6.3).
 
     ``function`` is the Modal function to spawn. It defaults to the name that
     :data:`FUNCTIONS` holds for the ``(leg, job_kind)`` pair, so a notebook

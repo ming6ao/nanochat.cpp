@@ -3,12 +3,12 @@
 // This is the only translation unit that includes `nccl.h`. The factory
 // `CreateGradientSync` here replaces the host reference on a CUDA build,
 // because `//src:model` selects this library for `//:backend_cuda`
-// (docs/distributed-plan.md phase 0).
+// (docs/distributed-design.md Part 3, phase 0).
 //
 // The ranks rendezvous over the `master`:`port` pair that the command line
 // supplies. Rank 0 generates the `ncclUniqueId` and broadcasts it to the peers
 // through the vendor-free `Rendezvous` all-gather
-// (docs/distributed-native-plan.md section 4). Every rank then calls
+// (docs/distributed-design.md Part 3, section 4). Every rank then calls
 // `ncclCommInitRank`.
 //
 // The launch sets `CUDA_VISIBLE_DEVICES` to the rank, so each process sees one
@@ -106,9 +106,9 @@ class NcclGradientSync final : public GradientSync {
   }
 
   // The reduction runs on a side stream, so the pack copy of the next bucket
-  // on the main stream overlaps it (docs/distributed-plan.md phase 2). The
-  // side stream waits on an event recorded after the caller produced `buffer`
-  // on the main stream.
+  // on the main stream overlaps it (docs/distributed-design.md Part 3, phase
+  // 2). The side stream waits on an event recorded after the caller produced
+  // `buffer` on the main stream.
   void AllReduceSumAsync(GradientType* buffer, std::int64_t count) override {
     if (buffer == nullptr || count <= 0) return;
     cuda_backend::CheckCuda(

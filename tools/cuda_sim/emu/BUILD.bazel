@@ -61,7 +61,7 @@ genrule(
 # The macro-based emulator cannot express `extern __shared__ T name[];`, because
 # `__shared__` maps to `static`. The executed-source rewrite turns the one
 # declaration into a pointer to the block's dynamic shared buffer
-# (docs/simulator-precision.md section 6.2). The device source itself does not
+# (docs/simulator.md Part 7, section 6.2). The device source itself does not
 # change; only this copy does.
 genrule(
     name = "value_gate_emulated_source",

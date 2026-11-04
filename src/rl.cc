@@ -1,10 +1,10 @@
-// The reinforcement-learning optimizer step (docs/rl-notebook.md section 4,
-// docs/training-seam.md sections 5.7 and 6.4, docs/post-training.md section
-// 5.2).
+// The reinforcement-learning optimizer step (docs/post-training.md Part 1,
+// section 4, docs/distributed-design.md Part 2, sections 5.7 and 6.4,
+// docs/post-training.md section 5.2).
 //
 // This translation unit is the single source of truth for the RL
 // normalization. The divisor `num_valid * num_passes * examples_per_rank` is
-// computed here, in C++, so no caller computes it (docs/training-seam.md
+// computed here, in C++, so no caller computes it (docs/distributed-design.md
 // section 5.7). The step itself is `ForwardLoss`, then `BackwardWeighted`,
 // then `Optimizer::Step`.
 //
@@ -44,8 +44,9 @@ std::int64_t CountValidTargets(const int* targets, std::int64_t rows) {
 // `num_valid * num_passes * examples_per_rank` (docs/post-training.md section
 // 5.2). `BackwardWeighted` already divides by `num_valid` on its own, so the
 // scale that reaches the full divisor is `num_valid / divisor`. Forming the
-// full divisor here, in C++, is the point of docs/training-seam.md section 5.7:
-// the normalization has a single source of truth and Python never computes it.
+// full divisor here, in C++, is the point of docs/distributed-design.md Part 2,
+// section 5.7: the normalization has a single source of truth and Python never
+// computes it.
 float RlStep(Model* model, Optimizer* optimizer, const int* tokens,
              const int* targets, const float* advantages, int batch, int seq,
              int num_passes, int examples_per_rank, int step) {

@@ -2,7 +2,7 @@
 #define NANOCHAT_BACKENDS_CUDA_COLLECTIVE_MEMORY_TRANSPORT_H_
 
 // An in-process memory transport for the CPU schedule test
-// (docs/distributed-native-plan.md section 3). It is not a device transport:
+// (docs/distributed-design.md Part 3, section 3). It is not a device transport:
 // it carries chunks between logical ranks that share one process, so the ring
 // schedule can be exercised exactly (including the missing-peer timeout) with
 // no GPU and no broker.

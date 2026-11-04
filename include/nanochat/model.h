@@ -267,7 +267,7 @@ void GenerateBatch(Model* model, const int* prompt, int prompt_len,
                    std::vector<GeneratedSequence>* out);
 
 // Multi-prompt batched sampling: the whole rollout in one call
-// (docs/rl-notebook.md section 5 phase 5). `prompts` holds
+// (docs/post-training.md Part 1, section 5 phase 5). `prompts` holds
 // `num_prompts * prompt_len` row-major prompt ids and every prompt has the same
 // length; the call samples `params.num_samples` rows per prompt, so `out` is
 // resized to `num_prompts * params.num_samples` rows in prompt-major order

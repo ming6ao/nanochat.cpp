@@ -10,10 +10,10 @@ One Python surface with three layers:
   for build, test, lint, and doctor.
 
 The package imports only the Python standard library (rule 1 of
-``docs/dependency-layering-plan.md`` section 4), and the compute layer never
+``docs/build.md`` section 4), and the compute layer never
 imports ``torch``. ``chat`` owns the chat evaluation front end. ``rl`` owns
 the reinforcement-learning bridge: it renders the prompts, drives the
-persistent C++ worker, and scores the rollouts (docs/rl-notebook.md).
+persistent C++ worker, and scores the rollouts (docs/post-training.md).
 
 Importing the package loads **no** submodule (section 2.3). Every name below --
 a submodule and a public class or function -- resolves on first access through

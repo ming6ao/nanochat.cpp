@@ -28,7 +28,7 @@ namespace {
 
 using oracle::DType;
 
-// The reference batch of docs/numerics-integration.md section 6.2. `Config`
+// The reference batch of docs/testing.md Part 2, section 6.2. `Config`
 // carries the sequence length but not the batch, so the trace fixes it here.
 constexpr int kTraceBatch = 4;
 
@@ -524,7 +524,7 @@ std::vector<Record> RunTrace(const Config& config, const TraceShape& shape,
   }
   loader.Reset();
   // `EvalBpb` installs its own `NoGradGuard`
-  // (docs/numerics-integration.md section 7, phase 2).
+  // (docs/testing.md Part 2, section 7, phase 2).
   const float bpb = EvalBpb(model.get(), &loader, shape.eval_steps);
   if (!std::isfinite(bpb)) {
     throw std::runtime_error("the evaluation produced no bits-per-byte");

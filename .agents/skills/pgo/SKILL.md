@@ -10,7 +10,7 @@ or `t4`. The loop measures the stage, collects a CUDA activity trace, ranks the
 costs the trace measured, lands the two largest, and measures the pair.
 
 The design, the work rows, and the reasoning are in
-[`docs/profile-guided-optimization.md`](../../../docs/profile-guided-optimization.md).
+[`docs/performance.md`](../../../docs/performance.md) Part 1.
 Read it before the first iteration of a new target.
 
 ## When to use it

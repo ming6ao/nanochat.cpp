@@ -3,8 +3,8 @@
 # The offline fixture generators are one grouped script, `dump_fixtures.py`,
 # with the shared helpers in `fixture_common.py` and the shared SFT machinery in
 # `sft_fixture.py`. The scripts run on the host and are source files, not build
-# targets. See docs/script-consolidation-plan.md. A new parity fixture is not
-# added here: the producers of docs/dependency-layering-plan.md section 7.3 run
+# targets. See docs/python.md. A new parity fixture is not
+# added here: the producers of docs/build.md Part 1, section 7.3 run
 # through `tools/nanochat parity produce <kind>` and live in
 # `python/nanochat_cpp_bridge`.
 #

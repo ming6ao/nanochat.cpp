@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Generate the offline fixtures for every parity gate.
 
-One module holds every fixture kind (``docs/script-consolidation-plan.md``
+One module holds every fixture kind (``docs/python.md``
 section 7, P4). The kinds are ``oracle``, ``train``, ``rl``, ``generate``,
 ``eval``, ``plan``, ``tokenizer``, ``loader``, ``chat``, ``api``, ``numerics``,
 ``checkpoint``, ``sft``, and ``sft_loop``. Run
@@ -24,12 +24,12 @@ reference checkout, no network, and no torch. ``sft`` writes the pack fixture,
 the packed shard, the base checkpoint, and the eight-step trajectory;
 ``sft_loop`` reads the shard and the checkpoint and writes the loop trace. The
 pinned settings and the shared model live in ``tools/sft_fixture.py``, so the
-two kinds cannot drift apart (``docs/sft-parity-plan.md`` sections 5 to 7).
+two kinds cannot drift apart (``docs/parity.md`` sections 5 to 7).
 
 The module imports no third-party package at import time. Each kind imports
 its own reference package, so a kind that does not touch PyTorch stays fast.
 The helpers that need one of those packages live in the adapter package
-``nanochat_cpp_bridge`` (``docs/dependency-layering-plan.md`` section 5): a
+``nanochat_cpp_bridge`` (``docs/build.md`` section 5): a
 kind imports ``reference_data`` for the ``tiktoken`` encoding and the
 reference tokenizer, and the core keeps the ``NCTOKEN1`` reader and the
 container writer.
@@ -765,7 +765,7 @@ if _command == 'rl':
         * the model-independent normalization the RL step must use, computed by the
           pure-Python reference below: ``ref/<step>/valid_targets`` and
           ``ref/<step>/divisor`` = ``valid * num_passes * examples_per_rank``
-          (docs/training-seam.md section 5.7).
+          (docs/distributed-design.md Part 2, section 5.7).
 
         The reference side of a full parity run is the PyTorch ``scripts/chat_rl.py``
         rollout and objective. **This host has neither torch nor numpy installed**, so
@@ -2599,7 +2599,7 @@ if _command == 'loader':
         from nanochat import dataloader
         # The ``tiktoken`` tokenizer over an NCTOKEN1 artifact lives in the
         # adapter package; the core's reader, ``nanochat_cpp.data.read_nctoken1``,
-        # stays in the standard library only (docs/dependency-layering-plan.md
+        # stays in the standard library only (docs/build.md
         # sections 2.1 and 5).
         from nanochat_cpp_bridge.reference_data import load_nctoken1
 
@@ -3615,7 +3615,7 @@ if _command == 'checkpoint':
 if _command == 'sft':
     __doc__ = textwrap.dedent("""\
         Generate the supervised fine-tuning fixtures of
-        ``docs/sft-parity-plan.md`` section 6, phase B items 1 to 3.
+        ``docs/parity.md`` section 6, phase B items 1 to 3.
 
         One run writes four committed files from one pinned tiny model and one
         pinned conversation corpus. They make the SFT rungs ``R1`` and ``R2``
@@ -4017,7 +4017,7 @@ if _command == 'sft':
 if _command == 'sft_loop':
     __doc__ = textwrap.dedent("""\
         Generate the supervised fine-tuning loop fixture,
-        ``tests/data/sft_loop_fixture.bin`` (``docs/sft-parity-plan.md`` section 6.3,
+        ``tests/data/sft_loop_fixture.bin`` (``docs/parity.md`` section 6.3,
         phase B item 3).
 
         The kind reads the two files the ``sft`` kind writes — the packed shard

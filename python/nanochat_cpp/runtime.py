@@ -410,7 +410,7 @@ class MeshTrainResult:
 
 class MeshTrainConfig:
     """The C++ mesh training driver config, the coarse client
-    (docs/client-runtime-design.md section 10.1 and docs/training-seam.md
+    (docs/client-runtime-design.md section 10.1 and docs/distributed-design.md
     section 6.6).
 
     The driver owns the step loop, the metric record, the summary, the

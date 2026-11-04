@@ -142,7 +142,7 @@ Design points:
   the config and `(batch, seq)`. One `Alloc`, bump-pointer assignment. This is
   the llm.c `ActivationTensors` pattern.
 - Recompute is not implemented. The proposals are in
-  [optimizations.md](optimizations.md).
+  [backlog.md](backlog.md).
 - Norm statistics (`rstd`), optimizer moments, and master weights stay `float`.
 - `EmbeddingBackward` uses a **persistent** dense gradient buffer and zeroes only
   the touched rows (targets the largest measured hotspot).

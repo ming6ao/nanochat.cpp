@@ -3,7 +3,7 @@
 // Python writes the shard with `nanochat_cpp.sft.pack`. This binary reads the
 // rows and runs the shared `Model::ForwardLoss`/`Backward`/`Optimizer::Step`
 // path. The optimizer, the schedule, and the evaluation cadence follow the SFT
-// recipe of `docs/sft-parity-plan.md` sections 5.1 to 5.4:
+// recipe of `docs/parity.md` Part 1, sections 5.1 to 5.4:
 //
 //   * the six AdamW groups and the Muon matrices of section 5.2, each rate
 //     scaled once by `init_lr_frac = 0.8` (design decision D3), and no gradient
@@ -56,7 +56,7 @@
 
 namespace {
 
-// The pinned SFT settings of `docs/sft-parity-plan.md` section 5, which a
+// The pinned SFT settings of `docs/parity.md` Part 1, section 5, which a
 // checkpoint without a recipe block falls back to. Every one of them repeats a
 // `Recipe` initializer, so the two sources agree by construction.
 constexpr float kSftEmbeddingLr = 0.3f;

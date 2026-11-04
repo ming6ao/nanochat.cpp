@@ -124,7 +124,7 @@ void TestMuonFlops() {
   ExpectNear(nanochat::EstimateMuonFlopsPerStep(config, 10), 2.0 * five, 1e-9,
              "Muon FLOPs are linear in the iteration count");
 
-  // The `h100` profile of src/train.cc's chain (docs/pipeline-scaleup-plan.md
+  // The `h100` profile of src/train.cc's chain (docs/post-training.md
   // section 5), against the independent count of
   // `backends/cuda/kernels/muon_benchmark.cc`. The benchmark reports
   // 271119.828 MFLOP per step, of which the 4x12 value gate is 0.018 MFLOP;
@@ -433,7 +433,7 @@ void TestModelFlagParsing() {
 
   // `--value-embedding` is the model field that had no flag, so no stage
   // command line could reproduce a base run with value embeddings off
-  // (docs/pipeline-plan.md section 3, B2). A boolean field takes exactly 0 or
+  // (docs/campaigns.md, defect B2). A boolean field takes exactly 0 or
   // 1; a start value opposite to the one under test proves the write and not
   // only the return value.
   Config embedding;
