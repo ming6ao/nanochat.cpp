@@ -23,6 +23,8 @@ The evidence of each campaign is in `.sliceme/`, which is not tracked:
 | The pipeline scale-up | 2026-11-01 | Rows 0 to 9, gates G1 to G3 pass | [post-training.md](post-training.md) Part 3 |
 | Host task consolidation | 2026-11-02 | Implemented | [python.md](python.md) Part 1 |
 | Supervised fine-tuning reference parity | 2026-11-03 | Phases A to F, phase G open | [parity.md](parity.md) Part 1 |
+| The big-shape profile on H100 | 2026-11-03 | One iteration, kept | [performance.md](performance.md) Part 1 |
+| The smear becomes a seam family | 2026-11-03 | Landed in `425546f` | [kernels.md](kernels.md) |
 
 ## Dependency layering and host packaging
 
@@ -150,6 +152,83 @@ The four rungs, the pinned settings, and the fixture rules are in Part 1 of
 [parity.md](parity.md).
 
 Evidence: `.sliceme/feat--sft-parity-plan.evidence.md`.
+
+## The big-shape profile on H100
+
+The earlier `base`/`h100` campaign used the `h100` shape: 8 layers, hidden 512,
+sequence 256. The roofline models that shape at 39.5 percent of the card, and it
+measured 2.35 percent MFU, because the step was host bound. No amount of host
+work could have taken it near the card.
+
+This campaign took the largest shape in the tree, `big`: 20 layers, hidden 1280,
+10 heads over 5 key/value heads, sequence 1024, vocabulary 32768, window `SSL`,
+and batch 16. The roofline models it at 53.4 ms and 79.9 percent for 42.2 TFLOP
+of arithmetic per step.
+
+One iteration, cap one, decision kept. The pair gained 24.76 percent of the step
+time and 32.1 percent of the MFU, and the two points do not overlap.
+
+| Point | Step time | Throughput | MFU |
+|---|---:|---:|---:|
+| Before | 425.94 ms | 38,459 tokens/s | 9.90 percent |
+| After | 320.47 ms | 51,065 tokens/s | 13.08 percent |
+
+The trace named the cause. One steady step was 411.4 ms, with 269.3 ms of device
+busy time, 1826 kernels, and 24 device-to-host copies. The host side held 133.3
+ms of stalls, and three of them followed a copy: 52.1, 38.0, and 15.5 ms, of
+which 48.7, 34.7, and 11.6 ms ran as host code in `SmearForward` and
+`SmearBackward`.
+
+The pair split the smear host loops by row, and gave the two head transposes one
+16-byte vector per thread in place of three 64-bit divides per element. The
+ceiling forecast was 0.34 and the measured gain was 0.2476.
+
+The reference `nanochat` trainer ran this shape at 20.00 percent. The gap fell
+from 3.43 times before the earlier rounds, to 1.97 times, to 1.53 times.
+
+## The smear becomes a seam family
+
+The learned bigram residual was the one composition on the H100 path with no
+device branch. `ops::SmearForward` and `ops::SmearBackward` staged the whole
+42 MB activation to the host twice per step and walked it one element at a time,
+for 113.0 ms of the 133.3 ms of stall time in the traced step.
+
+Commit `425546f` moved the family into the seam: `SmearParams` beside
+`ValueGateParams` in `include/nanochat/kernels.h`, the row loop in the CPU
+backend as the definition, one kernel per direction in
+`backends/cuda/kernels/smear.cu`, and a finite-difference gate against a host
+reference. The tier row and the `smear` declaration in both `caps.json` files
+came with it.
+
+One iteration on one H100 at the `big` shape, batch 16, decision kept:
+
+| Point | Step time | Throughput | MFU |
+|---|---:|---:|---:|
+| Before | 403.62 ms | 40,579 tokens/s | 10.50 percent |
+| After | 231.24 ms | 70,849 tokens/s | 18.11 percent |
+
+That is 42.7 percent of the step time and 72.5 percent of the MFU, against the
+compiled reference trainer at 20.00 percent for the same shape.
+
+The scheme is one launch per direction. Every row owns its output row and one
+halo row of the input, so no barrier sits inside a row pass and no two blocks
+write one row. The only state that crosses rows is the 25 floats of parameter
+gradient: each block writes its own partial, and the last block to arrive
+combines every partial in ascending block order after a `__threadfence`. No
+atomic touches the data, so two runs of one job give identical bits. That
+combine is a phase boundary, which is what a training megakernel needs.
+
+The reduction order follows the reference. The gate gradient accumulates in
+double in ascending column order on one lane, because the parallelism is across
+rows and the dot costs microseconds. The lambda gradient reduces over rows in
+ascending order in double, and the gate weight gradient accumulates in float in
+row order.
+
+The device agrees with the committed reference at rounding level: forward
+3.73e-09, backward 5.96e-08, optimizer step 1 2.38e-07, trajectory loss
+2.38e-07, trajectory parameter 1.67e-05. The CPU path is bit identical to the
+tree it replaces, and the failing set of `//tests:numerics_trace_test` is byte
+identical before and after.
 
 ## How a plan retires
 
