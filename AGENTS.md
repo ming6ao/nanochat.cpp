@@ -179,7 +179,7 @@ verifies the limits. It needs no root and no container runtime. Full sources:
 - GPU suites: `tools/nanochat test --gpu <target>` submits one job per test
   action; a bare GPU binary runs as `tools/nanochat gpu -- <binary>`.
 - The queue: `tools/nanochat gpuq list`, `gpuq status`, `gpuq logs <id>`,
-  `gpuq cancel <id>`, `gpuq stop`.
+  `gpuq cancel <id>`, `gpuq stop`, `gpuq prune`.
 - A bare CPU test or binary: `tools/nanochat run t0-cpu -- <binary>`.
 - Keep a log (`/tmp/nanochat-gpu.log`) so agents can see who used the GPU, and
   `/tmp/nanochat-sandbox.log` for the per-launch limits.

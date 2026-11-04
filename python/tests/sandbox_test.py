@@ -18,6 +18,7 @@ import subprocess
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from nanochat_cpp import sandbox
 
@@ -190,7 +191,9 @@ class SandboxTest(unittest.TestCase):
             "quota": "200%", "mem_high": "1536M", "mem_max": "2G",
             # 512 tasks: a cold Bazel server starts about one hundred skyframe
             # threads, and 128 killed that start (docs/sandbox.md).
-            "pids": "512", "cpus": "0-1", "runtime": None})
+            # 3600 s: the wall clock is a backstop, not a policy, so a cold
+            # tree build plus a suite still fits.
+            "pids": "512", "cpus": "0-1", "runtime": "3600"})
         self.assertEqual(sandbox.load_profiles()["slice"], "nanochat.slice")
 
     def test_an_unknown_profile_raises(self) -> None:
@@ -228,6 +231,31 @@ class SandboxTest(unittest.TestCase):
                                        "pids": good["pids"],
                                        "cpus": good["cpus"]}),
             " memory.max=max(want 2)")
+
+    def test_every_profile_has_a_wall_clock(self) -> None:
+        """A profile with no runtime would let a job run forever."""
+        for name, values in sandbox.load_profiles()["profiles"].items():
+            self.assertGreater(int(values["runtime"]), 0, name)
+
+    def test_run_in_scope_sets_a_wall_clock_backstop(self) -> None:
+        """The scope outlives the queue timeout, so the queue record wins."""
+        profiles = sandbox.load_profiles()
+        values = sandbox.profile_values(profiles, "t0-cpu")
+        recorded: dict[str, list[str]] = {}
+
+        def record(argv: list[str]) -> int:
+            recorded["argv"] = argv
+            return 0
+
+        with mock.patch.dict(os.environ), \
+                mock.patch.object(sandbox, "exec_replace", side_effect=record):
+            sandbox.run_in_scope(profiles, "t0-cpu", values, False, ["true"])
+
+        argv = recorded["argv"]
+        backstop = int(values["runtime"]) + sandbox.RUNTIME_GRACE_SEC
+        self.assertIn(f"RuntimeMaxSec={backstop}", argv)
+        self.assertIn(f"MemoryMax={values['mem_max']}", argv)
+        self.assertIn(f"TasksMax={values['pids']}", argv)
 
     def test_the_launcher_is_executable(self) -> None:
         """The `--run_under` string names this file, so the bit must be set."""

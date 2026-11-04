@@ -746,6 +746,9 @@ def _print_doctor(values: dict) -> None:
               f"running {queue.get('running_job') or '-'}")
     else:
         print("gpu queue: idle (no worker)")
+    if queue:
+        print(f"gpu logs:  {queue.get('log_files', 0)} files, "
+              f"{queue.get('log_bytes', 0)} bytes")
     _print_plan(values["plan"])
     for log in ("/tmp/nanochat-gpu.log", "/tmp/nanochat-sandbox.log"):
         if not os.path.isfile(log):

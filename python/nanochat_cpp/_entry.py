@@ -56,7 +56,7 @@ COMMANDS = (
     )),
     Command("gpuq", (
         "  gpuq <action> [opts]       the GPU job queue: submit, list, status, wait,",
-        "                             logs, cancel, start, stop; see",
+        "                             logs, cancel, start, stop, prune; see",
         "                             docs/sandbox.md",
     )),
     Command("run", (

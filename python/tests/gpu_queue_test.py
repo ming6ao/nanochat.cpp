@@ -9,8 +9,12 @@ no systemd scope are involved. See docs/sandbox.md.
 from __future__ import annotations
 
 import contextlib
+import io
+import json
 import os
 import signal
+import sqlite3
+import subprocess
 import sys
 import tempfile
 import time
@@ -221,6 +225,144 @@ class GpuQueueTest(unittest.TestCase):
         self.wait_state(first, ("running",))
         self.assertGreaterEqual(gpu_queue.queue_position(self.conn, second), 1)
         self.assertEqual(gpu_queue.queue_position(self.conn, first), 0)
+
+    # -- The lease, the claim lock, and retention ------------------------
+
+    def test_heartbeat_reports_a_lost_lease(self) -> None:
+        """A missing lease row is a lost lease, not a silent no-op."""
+        self.assertFalse(gpu_queue.heartbeat(self.conn, "nobody"))
+
+    def test_a_locked_database_is_reported_not_raised(self) -> None:
+        """A lease write that cannot land returns False instead of raising."""
+        gpu_queue.register_worker(self.conn, "w-lock", 999999, "0")
+        holder = sqlite3.connect(str(self.base / "queue.db"), timeout=5.0)
+        holder.execute("BEGIN EXCLUSIVE")
+        blocked = sqlite3.connect(str(self.base / "queue.db"), timeout=0.1)
+        blocked.execute("PRAGMA busy_timeout=100")
+        try:
+            self.assertFalse(gpu_queue.heartbeat(blocked, "w-lock"))
+        finally:
+            blocked.close()
+            holder.rollback()
+            holder.close()
+            self.conn.execute("DELETE FROM workers WHERE id='w-lock'")
+            self.conn.commit()
+
+    def test_retire_stale_workers_never_signals_this_process(self) -> None:
+        """A stale row that names this process must not stop the client."""
+        self.conn.execute(
+            "INSERT INTO workers (id, pid, devices, started, heartbeat)"
+            " VALUES ('self', ?, '0', 0, 0)", (os.getpid(),))
+        self.conn.commit()
+        self.assertEqual(gpu_queue.retire_stale_workers(self.conn), [])
+        self.assertEqual(self.conn.execute(
+            "SELECT COUNT(*) FROM workers").fetchone()[0], 0)
+
+    def test_claim_takes_no_write_lock_when_idle(self) -> None:
+        """An idle poll must not hold the writer five times a second."""
+        self.assertIsNone(gpu_queue.claim(self.conn, "w-idle", "0"))
+        self.assertFalse(self.conn.in_transaction)
+
+    def test_retire_stale_workers_stops_the_orphan(self) -> None:
+        """A live process with a stale lease is stopped, not left to compete."""
+        orphan = subprocess.Popen(["/bin/sh", "-c", "sleep 30"])
+        try:
+            self.conn.execute(
+                "INSERT INTO workers (id, pid, devices, started, heartbeat)"
+                " VALUES ('ghost', ?, '0', 0, 0)", (orphan.pid,))
+            self.conn.commit()
+            retired = gpu_queue.retire_stale_workers(self.conn)
+            self.assertEqual(retired, [orphan.pid])
+            self.assertEqual(self.conn.execute(
+                "SELECT COUNT(*) FROM workers").fetchone()[0], 0)
+            deadline = time.monotonic() + 10.0
+            while time.monotonic() < deadline and orphan.poll() is None:
+                time.sleep(0.05)
+            self.assertIsNotNone(orphan.poll(), "the orphan kept running")
+        finally:
+            with contextlib.suppress(OSError):
+                orphan.kill()
+            orphan.wait()
+
+    def test_worker_exits_when_its_lease_row_disappears(self) -> None:
+        """An orphan must step down instead of polling beside a replacement."""
+        worker = gpu_queue.ensure_worker(self.conn, self.base)
+        self.assertIsNotNone(worker)
+        pid = int(worker["pid"])
+        self.assertNotEqual(pid, os.getpid())
+        try:
+            self.conn.execute("DELETE FROM workers WHERE id=?",
+                              (worker["id"],))
+            self.conn.commit()
+            deadline = time.monotonic() + 20.0
+            while time.monotonic() < deadline and gpu_queue._pid_alive(pid):
+                time.sleep(0.05)
+            self.assertFalse(gpu_queue._pid_alive(pid),
+                             "the worker kept polling after losing its lease")
+        finally:
+            with contextlib.suppress(OSError):
+                os.kill(pid, signal.SIGKILL)
+
+    def test_submit_inherits_the_profile_wall_clock(self) -> None:
+        """A job with no explicit timeout gets the profile backstop."""
+        args = gpu_queue.build_parser().parse_args(
+            ["submit", "--profile", "t0-cpu", "--directory", str(self.work),
+             "--timeout", "0", "--", "/bin/true"])
+        gpu_queue.cmd_submit(args)
+        zero = self.conn.execute(
+            "SELECT timeout FROM jobs ORDER BY submitted DESC LIMIT 1"
+        ).fetchone()["timeout"]
+        self.assertEqual(int(zero), 0)
+
+        args = gpu_queue.build_parser().parse_args(
+            ["submit", "--profile", "t0-cpu", "--directory", str(self.work),
+             "--", "/bin/true"])
+        gpu_queue.cmd_submit(args)
+        inherited = self.conn.execute(
+            "SELECT timeout FROM jobs ORDER BY submitted DESC LIMIT 1"
+        ).fetchone()["timeout"]
+        self.assertEqual(int(inherited), gpu_queue.profile_runtime("t0-cpu"))
+        self.assertGreater(int(inherited), 0)
+
+    def test_prune_reaps_old_logs_and_keeps_the_records(self) -> None:
+        """The logs are reaped; the job rows are the record and stay."""
+        logs = self.base / "logs"
+        job_id = gpu_queue.insert_job(
+            self.conn, command=["/bin/true"], directory=str(self.work),
+            profile="t0-cpu", env={}, timeout=0, submitter="tester")
+        fresh = logs / f"{job_id}.stdout"
+        fresh.write_text("fresh\n", encoding="utf-8")
+        old = logs / "20200101-000000-aaaaaa.stdout"
+        old.write_text("old\n", encoding="utf-8")
+        stale = time.time() - 40 * 86400
+        os.utime(old, (stale, stale))
+
+        removed, freed = gpu_queue.prune_logs(
+            self.conn, self.base, gpu_queue.LOG_KEEP_DAYS)
+        self.assertEqual(removed, 1)
+        self.assertEqual(freed, len("old\n"))
+        self.assertFalse(old.exists())
+        self.assertIsNotNone(gpu_queue.fetch_job(self.conn, job_id))
+
+        # A queued job keeps its logs whatever their age.
+        os.utime(fresh, (stale, stale))
+        removed, _ = gpu_queue.prune_logs(self.conn, self.base, 1)
+        self.assertEqual(removed, 0)
+        self.assertTrue(fresh.exists())
+
+    def test_status_reports_the_log_footprint(self) -> None:
+        """The log footprint is visible before it becomes a problem."""
+        logs = self.base / "logs"
+        (logs / "20200101-000000-aaaaaa.stderr").write_text(
+            "x" * 32, encoding="utf-8")
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            self.assertEqual(gpu_queue.cmd_status(
+                gpu_queue.build_parser().parse_args(
+                    ["status", "--json"])), 0)
+        payload = json.loads(buffer.getvalue())
+        self.assertEqual(payload["log_files"], 1)
+        self.assertEqual(payload["log_bytes"], 32)
 
 
 if __name__ == "__main__":

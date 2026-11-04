@@ -51,6 +51,10 @@ MAX_QUEUE = 64
 #: The default idle exit, in seconds.
 DEFAULT_IDLE_SEC = 1800
 
+#: The retention window for job logs, in days. Only the logs grow without
+#: bound; the job records stay. See :func:`prune_logs`.
+LOG_KEEP_DAYS = 14
+
 #: The shared GPU log. The contract test pins its line format. Override the
 #: path with ``NANOCHAT_GPU_LOG`` for a test or a second host.
 GPU_LOG = Path("/tmp/nanochat-gpu.log")
@@ -102,6 +106,89 @@ def queue_base() -> Path:
 def logs_dir(base: Path) -> Path:
     """The log directory inside the queue directory."""
     return base / "logs"
+
+
+def profiles_file() -> Path:
+    """The sandbox profile table the launcher applies."""
+    return repo_root() / "tools" / "sandbox" / "profiles.json"
+
+
+def profile_runtime(profile: str) -> int:
+    """The wall-clock backstop of a profile, in seconds.
+
+    A profile that names no runtime returns ``0``. The queue uses the value as
+    the default job timeout, so a submitted job always has a bound. Read the
+    table directly: this module must run as a script, and an import of the
+    launcher package would not resolve there.
+    """
+    try:
+        with open(profiles_file(), encoding="utf-8") as handle:
+            table = json.load(handle)
+    except (OSError, ValueError):
+        return 0
+    values = table.get("profiles", {}).get(profile) or {}
+    try:
+        return int(values.get("runtime") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def log_usage(base: Path) -> tuple[int, int]:
+    """The number of job log files and their total size, in bytes."""
+    files = total = 0
+    try:
+        entries = list(logs_dir(base).iterdir())
+    except OSError:
+        return 0, 0
+    for entry in entries:
+        try:
+            if entry.is_file():
+                files += 1
+                total += entry.stat().st_size
+        except OSError:
+            continue
+    return files, total
+
+
+def prune_logs(conn: sqlite3.Connection, base: Path,
+               keep_days: int) -> tuple[int, int]:
+    """Remove job logs older than ``keep_days``. Return the count and bytes.
+
+    The job records stay, because a row is a few hundred bytes and it is the
+    diagnostic history. The logs are the part that grows without bound. A job
+    that is queued or running keeps its logs whatever their age.
+    """
+    if keep_days <= 0:
+        return 0, 0
+    cutoff = time.time() - keep_days * 86400
+    active = {str(row["id"]) for row in conn.execute(
+        "SELECT id FROM jobs WHERE state IN ('queued', 'running')")}
+    removed = freed = 0
+    try:
+        entries = list(logs_dir(base).iterdir())
+    except OSError:
+        return 0, 0
+    for entry in entries:
+        job_id, _, suffix = entry.name.partition(".")
+        if suffix not in ("stdout", "stderr", "cancel"):
+            continue
+        if job_id in active:
+            continue
+        try:
+            if not entry.is_file():
+                continue
+            stat = entry.stat()
+        except OSError:
+            continue
+        if stat.st_mtime >= cutoff:
+            continue
+        try:
+            entry.unlink()
+        except OSError:
+            continue
+        removed += 1
+        freed += stat.st_size
+    return removed, freed
 
 
 def _now_ns() -> int:
@@ -262,17 +349,39 @@ def register_worker(conn: sqlite3.Connection, worker_id: str, pid: int,
     conn.commit()
 
 
-def heartbeat(conn: sqlite3.Connection, worker_id: str) -> None:
-    """Refresh one worker lease."""
-    conn.execute("UPDATE workers SET heartbeat=? WHERE id=?",
-                 (_now_ns(), worker_id))
-    conn.commit()
+def heartbeat(conn: sqlite3.Connection, worker_id: str) -> bool:
+    """Refresh one worker lease. False when the lease did not land.
+
+    A write that fails, and a lease row that a client already removed, both
+    mean one thing: this worker no longer owns the queue. The caller stops
+    instead of polling beside the worker that replaced it.
+    """
+    try:
+        cursor = conn.execute("UPDATE workers SET heartbeat=? WHERE id=?",
+                              (_now_ns(), worker_id))
+        conn.commit()
+    except sqlite3.Error as error:
+        _log(f"lease write failed: {error}")
+        return False
+    return cursor.rowcount == 1
+
+
+def lease_alive(conn: sqlite3.Connection, worker_id: str) -> bool:
+    """True when this worker still holds a fresh lease row."""
+    row = conn.execute("SELECT heartbeat FROM workers WHERE id=?",
+                       (worker_id,)).fetchone()
+    if row is None:
+        return False
+    return int(row["heartbeat"]) >= _now_ns() - int(LEASE_SEC * 1e9)
 
 
 def unregister_worker(conn: sqlite3.Connection, worker_id: str) -> None:
-    """Delete one worker lease row."""
-    conn.execute("DELETE FROM workers WHERE id=?", (worker_id,))
-    conn.commit()
+    """Delete one worker lease row. A release must not fail a finished run."""
+    try:
+        conn.execute("DELETE FROM workers WHERE id=?", (worker_id,))
+        conn.commit()
+    except sqlite3.Error as error:
+        _log(f"cannot release the lease: {error}")
 
 
 def kill_orphans(job_id: str) -> int:
@@ -319,6 +428,50 @@ def reconcile(conn: sqlite3.Connection) -> list[str]:
             conn.execute("DELETE FROM workers WHERE id=?", (row["id"],))
     conn.commit()
     return failed
+
+
+def retire_stale_workers(conn: sqlite3.Connection) -> list[int]:
+    """Stop a worker whose process lives but whose lease went stale.
+
+    A stale lease with a live process is the one state that lets two workers
+    run at once. The client stops the orphan, and any job it owned, before it
+    starts a replacement. The queue then repairs itself instead of splitting
+    (docs/sandbox.md Part 1, section 5).
+    """
+    cutoff = _now_ns() - int(LEASE_SEC * 1e9)
+    stale = [row for row in conn.execute("SELECT * FROM workers").fetchall()
+             if int(row["heartbeat"]) < cutoff]
+    retired: list[int] = []
+    for row in stale:
+        worker_id = str(row["id"])
+        pid = int(row["pid"])
+        for job in conn.execute(
+                "SELECT id FROM jobs WHERE state='running'"
+                " AND worker=?", (worker_id,)).fetchall():
+            if kill_orphans(job["id"]):
+                _log(f"stopped job {job['id']} of worker {worker_id}")
+        # Never signal this process, and never a pid that names a group. Only a
+        # peer worker writes this column, so our own pid or a value below 2 is
+        # a corrupt row, not a worker to stop.
+        if pid > 1 and pid != os.getpid() and _pid_alive(pid):
+            _log(f"worker {worker_id} keeps pid {pid} with a stale lease; "
+                 "stopping it")
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except OSError:
+                pass
+            deadline = time.monotonic() + KILL_GRACE_SEC
+            while time.monotonic() < deadline and _pid_alive(pid):
+                time.sleep(POLL_SEC)
+            if _pid_alive(pid):
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except OSError:
+                    pass
+            retired.append(pid)
+        conn.execute("DELETE FROM workers WHERE id=?", (worker_id,))
+    conn.commit()
+    return retired
 
 
 # -- Devices -----------------------------------------------------------------
@@ -469,19 +622,38 @@ def run_job(conn: sqlite3.Connection, base: Path, job: sqlite3.Row,
 # -- The worker --------------------------------------------------------------
 
 
+def queued_candidate(conn: sqlite3.Connection) -> str | None:
+    """The oldest queued job identifier, without taking the write lock."""
+    row = conn.execute(
+        "SELECT id FROM jobs WHERE state='queued'"
+        " ORDER BY submitted LIMIT 1").fetchone()
+    return str(row["id"]) if row is not None else None
+
+
 def claim(conn: sqlite3.Connection, worker_id: str,
           devices: str) -> sqlite3.Row | None:
-    """Claim the oldest queued job in one transaction, or return None."""
+    """Claim the oldest queued job in one transaction, or return None.
+
+    The read comes first, so an idle poll takes no write lock. A non-empty
+    queue still serializes on ``BEGIN IMMEDIATE``, which is what makes the
+    claim atomic.
+    """
+    if queued_candidate(conn) is None:
+        return None
     now = _now_ns()
     conn.execute("BEGIN IMMEDIATE")
-    cursor = conn.execute(
-        "UPDATE jobs SET state='running', started=?, worker=?, devices=?"
-        " WHERE id = (SELECT id FROM jobs WHERE state='queued'"
-        "              ORDER BY submitted LIMIT 1)"
-        " AND state='queued'",
-        (now, worker_id, devices))
-    changed = cursor.rowcount
-    conn.commit()
+    try:
+        cursor = conn.execute(
+            "UPDATE jobs SET state='running', started=?, worker=?, devices=?"
+            " WHERE id = (SELECT id FROM jobs WHERE state='queued'"
+            "              ORDER BY submitted LIMIT 1)"
+            " AND state='queued'",
+            (now, worker_id, devices))
+        changed = cursor.rowcount
+        conn.commit()
+    except sqlite3.Error:
+        conn.rollback()
+        raise
     if changed != 1:
         return None
     return conn.execute(
@@ -497,6 +669,11 @@ def run_worker(idle_sec: int, force: bool) -> int:
     worker_id = new_worker_id()
     force = force or os.environ.get("NANOCHAT_GPU_QUEUE_FORCE") == "1"
 
+    reaped, freed = prune_logs(conn, base, LOG_KEEP_DAYS)
+    if reaped:
+        _log(f"reaped {reaped} log files ({freed} bytes) older than "
+             f"{LOG_KEEP_DAYS} days")
+
     failed = reconcile(conn)
     for job_id in failed:
         _log(f"reconciled {job_id} to failed (worker died)")
@@ -510,10 +687,12 @@ def run_worker(idle_sec: int, force: bool) -> int:
     def beat() -> None:
         while not stop["stop"]:
             time.sleep(HEARTBEAT_SEC)
-            try:
-                heartbeat(lease_conn, worker_id)
-            except sqlite3.Error:
-                pass
+            if stop["stop"]:
+                break
+            if not heartbeat(lease_conn, worker_id):
+                _log("the lease did not land; stopping so one worker owns "
+                     "the queue")
+                stop["stop"] = True
 
     thread = threading.Thread(target=beat, daemon=True)
     thread.start()
@@ -526,12 +705,24 @@ def run_worker(idle_sec: int, force: bool) -> int:
     signal.signal(signal.SIGINT, on_term)
 
     idle_since = time.monotonic()
+    next_lease_check = idle_since
     try:
         while True:
-            job = claim(conn, worker_id, devices)
+            try:
+                job = claim(conn, worker_id, devices)
+            except sqlite3.Error as error:
+                _log(f"claim failed: {error}; retrying")
+                time.sleep(1.0)
+                continue
             if job is None:
                 if stop["stop"]:
                     break
+                if time.monotonic() >= next_lease_check:
+                    next_lease_check = time.monotonic() + HEARTBEAT_SEC
+                    if not lease_alive(conn, worker_id):
+                        _log("the lease is gone; stopping so one worker "
+                             "owns the queue")
+                        break
                 if time.monotonic() - idle_since >= idle_sec:
                     _log(f"idle for {idle_sec}s; exiting")
                     break
@@ -564,6 +755,13 @@ def ensure_worker(conn: sqlite3.Connection, base: Path,
     live = live_workers(conn)
     if live:
         return live[0]
+
+    # Repair a split: a worker with a stale lease but a live process would run
+    # beside its replacement, so stop it before this client starts one.
+    if retire_stale_workers(conn):
+        live = live_workers(conn)
+        if live:
+            return live[0]
 
     guard = _guard(base)
     for _ in range(2):
@@ -675,6 +873,10 @@ def cmd_submit(args: argparse.Namespace) -> int:
     if queue_depth(conn) >= MAX_QUEUE:
         sys.stderr.write(f"gpuq: the queue is full ({MAX_QUEUE} jobs)\n")
         return 2
+    # A job with no explicit timeout inherits the profile wall clock, so a
+    # forgotten job cannot hold the device. ``--timeout 0`` asks for no cap.
+    timeout = (args.timeout if args.timeout is not None
+               else profile_runtime(args.profile))
     if not ensure_worker(conn, base, args.idle, args.force):
         sys.stderr.write("gpuq: cannot start the worker\n")
         return 1
@@ -682,7 +884,7 @@ def cmd_submit(args: argparse.Namespace) -> int:
         or getpass.getuser()
     job_id = insert_job(
         conn, command=command, directory=args.directory or os.getcwd(),
-        profile=args.profile, env={}, timeout=args.timeout,
+        profile=args.profile, env={}, timeout=timeout,
         submitter=submitter)
     gpu_log(f"gpuq: queued {job_id} ({args.profile}) {submitter}: "
             f"{' '.join(command)}")
@@ -697,6 +899,9 @@ def cmd_submit(args: argparse.Namespace) -> int:
         position = queue_position(conn, job_id)
         print(f"gpuq: job {job_id} queued ({position} ahead, "
               f"profile {args.profile})", file=sys.stderr)
+        if args.timeout is None and timeout:
+            print(f"gpuq: profile {args.profile} caps the job at {timeout}s; "
+                  f"pass --timeout N to change it", file=sys.stderr)
     code = wait_and_follow(conn, base, job_id, follow=not args.json)
     if args.json:
         job = fetch_job(conn, job_id)
@@ -831,11 +1036,13 @@ def cmd_list(args: argparse.Namespace) -> int:
 
 def cmd_status(args: argparse.Namespace) -> int:
     """Show the queue depth, the worker lease, and one job."""
-    conn = open_db()
+    base = queue_base()
+    conn = open_db(base)
     live = live_workers(conn)
     worker = live[0] if live else None
     running = conn.execute(
         "SELECT id FROM jobs WHERE state='running'").fetchone()
+    log_files, log_bytes = log_usage(base)
     payload = {
         "worker_id": worker["id"] if worker else "",
         "alive": worker is not None,
@@ -844,6 +1051,8 @@ def cmd_status(args: argparse.Namespace) -> int:
         "depth": queue_depth(conn),
         "running_job": running["id"] if running else None,
         "queued": queue_depth(conn),
+        "log_files": log_files,
+        "log_bytes": log_bytes,
     }
     if args.job:
         job = fetch_job(conn, args.job)
@@ -867,6 +1076,20 @@ def cmd_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_prune(args: argparse.Namespace) -> int:
+    """Reap job logs older than the retention window."""
+    base = queue_base()
+    conn = open_db(base)
+    removed, freed = prune_logs(conn, base, args.keep_days)
+    if args.json:
+        print(json.dumps({"files": removed, "bytes": freed,
+                          "keep_days": args.keep_days}))
+    else:
+        print(f"gpuq: reaped {removed} log files ({freed} bytes) older than "
+              f"{args.keep_days} days")
+    return 0
+
+
 # -- Entry point -------------------------------------------------------------
 
 
@@ -882,7 +1105,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = add("submit", "enqueue a job and wait for it")
     p.add_argument("--profile", default="t1-gpu")
-    p.add_argument("--timeout", type=int, default=0)
+    p.add_argument("--timeout", type=int, default=None)
     p.add_argument("--directory", default="")
     p.add_argument("--submitter", default="")
     p.add_argument("--idle", type=int, default=DEFAULT_IDLE_SEC)
@@ -927,6 +1150,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("job", nargs="?")
     p.add_argument("--json", action="store_true")
     p.set_defaults(func=cmd_status)
+
+    p = add("prune", "reap job logs older than the retention window")
+    p.add_argument("--keep-days", type=int, default=LOG_KEEP_DAYS)
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(func=cmd_prune)
 
     p = add("worker", "run the worker loop (internal)")
     p.add_argument("--idle", type=int, default=DEFAULT_IDLE_SEC)

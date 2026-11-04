@@ -21,7 +21,8 @@ directly and keeps the entry-point guard. See
   **not** delegated to the user manager on this WSL image, so `AllowedCPUs=` is
   silently ignored and must not be relied on.
 - **Hard backstops:** the verifier clears the core limit
-  (`resource.RLIMIT_CORE`), and a profile may set `RuntimeMaxSec`.
+  (`resource.RLIMIT_CORE`), and every launch sets `RuntimeMaxSec` from the
+  profile wall clock.
   `RLIMIT_NPROC` is deliberately left alone — it is per-UID host-wide and would
   break unrelated agent processes; `TasksMax` is the per-cgroup fork-bomb
   guard instead.
@@ -63,14 +64,14 @@ falls back to a system `bazel`.
 
 ## Profiles
 
-| Profile | CPUQuota | Mem high/max | pids | affinity | notes |
-|---|---|---|---|---|---|
-| `t0-cpu` | 200% | 1.5G / 2G | 512 | 0-1 | default CPU tests, oracle-on-CPU |
-| `t1-gpu` | 200% | 2G / 3G | 512 | 0-1 | tiny kernel tests, `B=2,T=8` |
-| `t2-parity` | 800% | 5G / 6G | 256 | 0-7 | exclusive, GPU queue held |
-| `t3-bench` | 1000% | 5G / 6G | 256 | 0-11 | exclusive, native Linux for Nsight |
-| `train` | 800% | 5G / 6G | 512 | 0-7 | `RuntimeMaxSec` optional |
-| `eval` | 400% | 3G / 4G | 512 | 0-3 | forward only |
+| Profile | CPUQuota | Mem high/max | pids | affinity | Wall clock | notes |
+|---|---|---|---|---|---|---|
+| `t0-cpu` | 200% | 1.5G / 2G | 512 | 0-1 | 3600 s | default CPU tests, oracle-on-CPU |
+| `t1-gpu` | 200% | 2G / 3G | 512 | 0-1 | 900 s | tiny kernel tests, `B=2,T=8` |
+| `t2-parity` | 800% | 5G / 6G | 256 | 0-7 | 7200 s | exclusive, GPU queue held |
+| `t3-bench` | 1000% | 5G / 6G | 256 | 0-11 | 1800 s | exclusive, native Linux for Nsight |
+| `train` | 800% | 5G / 6G | 512 | 0-7 | 43200 s | training runs |
+| `eval` | 400% | 3G / 4G | 512 | 0-3 | 7200 s | forward only |
 
 A profile that hosts a Bazel server needs a large `pids` value. On a cold
 output base the Bazel server starts about one hundred `skyframe` threads before
@@ -84,6 +85,14 @@ The profile also exports thread-count env (`OMP_NUM_THREADS`,
 backend otherwise spawn 12 workers and thrash. The cgroup is the ceiling; the
 env is the polite hint. The defaults assume the 12 vCPU / 7.7 GiB host; edit
 `tools/sandbox/profiles.json` for other machines.
+
+Every profile carries a wall clock. The launcher passes `RuntimeMaxSec` at the
+profile value plus 60 seconds. `gpuq submit` uses the profile value as the
+default job timeout, so one number bounds both layers. The worker kills a long
+job at the profile runtime and writes a note. The scope stops only a job that
+escaped the worker, so the record wins. `verify` cannot read the wall clock
+back, because no cgroup file exposes it. Set the value as a backstop, not as a
+policy: a cold tree build plus a suite must still fit inside it.
 
 ## Entry point
 
@@ -339,6 +348,7 @@ CREATE TABLE jobs (
   profile   TEXT NOT NULL,         -- the sandbox profile
   env       TEXT NOT NULL,         -- JSON object: the selected variables
   timeout   INTEGER NOT NULL DEFAULT 0,   -- seconds; 0 means no cap
+                                          -- (submit defaults to the wall clock)
   submitter TEXT,
   submitted INTEGER NOT NULL,      -- nanoseconds; the queue order
   started   INTEGER,
@@ -463,6 +473,11 @@ The worker holds its phase in memory: `starting`, `idle`, `running`,
 `draining`, `stopped`. The table needs only the lease fields. The worker
 process needs no durable state.
 
+The lease is also a step-down signal. A worker that cannot write its heartbeat,
+or whose row another worker removed, stops after the current job. Without that
+rule an orphan polls beside its replacement, and `gpuq status` reports no worker
+while two of them run.
+
 #### 4.2 Device ownership
 
 The worker is the resource manager. It owns the devices, and the client does
@@ -554,10 +569,13 @@ Two workers must not run at the same time. Use the lease and one atomic
 directory create. `mkdir` is atomic on a local filesystem.
 
 1. Read the `workers` table. When a live row exists, reuse that worker.
-2. Otherwise `mkdir <base>/worker.starting`. The call fails when another client
+2. Stop a worker whose process lives but whose lease went stale, then delete
+   its row. Such an orphan would poll beside the new worker, so the client
+   repairs a split instead of doubling it.
+3. Otherwise `mkdir <base>/worker.starting`. The call fails when another client
    is already starting a worker.
-3. Start the worker and wait for the first heartbeat.
-4. Remove `<base>/worker.starting`.
+4. Start the worker and wait for the first heartbeat.
+5. Remove `<base>/worker.starting`.
 
 This guard is not a GPU lock. It protects one process identity. The optional
 systemd unit in section 8 enforces the same rule.
@@ -576,10 +594,12 @@ Add a subcommand group: `tools/nanochat gpuq <action>`.
 | `cancel <job>` | request cancellation |
 | `start` | start the worker |
 | `stop` | stop the worker after the current job |
+| `prune [--keep-days N]` | reap job logs older than the retention window |
 
 `submit` options: `--profile NAME`, `--timeout SECONDS`, `--directory DIR`,
 `--submitter NAME`, `--no-wait`, `--json`. There is no `--device` option. The
-worker owns the devices and assigns them.
+worker owns the devices and assigns them. `--timeout` defaults to the profile
+wall clock; `--timeout 0` asks for no cap.
 
 `submit` waits by default. It prints the queue position, follows the logs, and
 exits with the job exit code. The agent experience matches a direct call. With
@@ -632,7 +652,8 @@ low.
 - `gpuq status` shows the worker identifier, the heartbeat age, the owned
   device pool, the queue depth, and the running job.
 - `tools/nanochat doctor --json` replaces the `gpu_lock` key with a `gpu_queue`
-  object: `worker_id`, `alive`, `devices`, `depth`, `running_job`, and `queued`.
+  object: `worker_id`, `alive`, `devices`, `depth`, `running_job`, `queued`,
+  `log_files`, and `log_bytes`.
 - `/tmp/nanochat-gpu.log` keeps its path. Each line gains the job identifier.
   Keep the existing start line, and add `queued`, `started`, and `finished`
   lines. Update the contract test in the same commit.
@@ -640,7 +661,10 @@ low.
 ### 10. Limits and safety
 
 - Every job runs under `python/nanochat_cpp/sandbox.py`, so no mode is exempt.
-- The worker enforces `timeout` and kills the process group.
+- The worker enforces `timeout` and kills the process group. A job with no
+  explicit timeout inherits the profile wall clock.
+- The worker reaps job logs older than 14 days at start, and keeps every job
+  record. `gpuq prune --keep-days N` applies the same rule by hand.
 - The queue directory has mode `0700`. The database and the logs are readable
   only by the user.
 - The worker refuses a job when a foreign process owns the device.
@@ -684,9 +708,10 @@ A stage is not done until the default loop passes and the queue tests pass.
 
 | Risk | Control |
 |---|---|
-| The worker dies during a job | The lease goes stale; the next start marks the job `failed` |
-| A job hangs forever | Per-job `timeout`, `RuntimeMaxSec`, and `gpuq cancel` |
-| Two workers start at once | The `workers` lease plus an atomic directory create, or the systemd unit |
+| The worker dies during a job | The worker stops when its lease write fails; the next start marks the job `failed` and kills its orphans |
+| A job hangs forever | The profile wall clock is the default job timeout, the scope backstop is 60 s longer, and `gpuq cancel` stops it |
+| Two workers start at once | The lease, an atomic directory create, and a client that retires a stale-lease orphan before it starts a replacement |
+| The logs grow without bound | 14 day retention at worker start, `gpuq prune`, and a footprint line in `doctor` |
 | A stale job blocks the queue | Reconciliation at worker start moves a dead `running` job to `failed` |
 | Two jobs fight for the device | The worker owns the pool and assigns devices; one job at a time |
 | The database is locked | `busy_timeout=5000`; short transactions; one writer at a time |
@@ -712,6 +737,15 @@ A stage is not done until the default loop passes and the queue tests pass.
 7. `/tmp/nanochat-gpu.log`: keep the current line and add fields. Add the job
    identifier and the `queued`, `started`, and `finished` lines. Update the
    contract test in the same commit.
+8. Wall clock: every profile carries a `runtime`. The scope receives it plus
+   60 seconds, and `gpuq submit` uses it as the default job timeout. The value
+   is a backstop, so a cold build plus a suite must still fit inside it.
+9. Retention: the worker reaps job logs older than 14 days at start, and
+   `gpuq prune --keep-days N` applies the same rule by hand. A job record is
+   never reaped, because a row is a few hundred bytes and it is the history.
+10. The lease is a step-down signal. A worker whose lease write fails, or
+    whose row another worker removed, stops after the current job. A client
+    retires a stale-lease orphan before it starts a replacement.
 
 ### 15. Boundary with sliceme
 

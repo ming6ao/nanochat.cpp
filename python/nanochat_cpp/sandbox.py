@@ -20,6 +20,8 @@ of its own process, so a merged program would read the parent cgroup, which
 sits outside the scope. ``taskset`` stays external for the same reason: it sets
 the affinity mask, and a verifier that sets its own mask cannot check it. The
 core limit uses ``resource.setrlimit``, because no read-back check covers it.
+The wall clock uses ``RuntimeMaxSec``, which no cgroup file exposes, so the
+queue timeout is what leaves a record when a job runs too long.
 
 The observable contract is frozen and ``python/tests/contract_test.py`` pins it:
 the environment variable names, the ``/tmp/nanochat-sandbox.log`` line formats,
@@ -58,6 +60,11 @@ PROC_SELF_STATUS = Path("/proc/self/status")
 
 #: The default profile, and the profile for a CPU test action.
 DEFAULT_PROFILE = "t0-cpu"
+
+#: How much longer the scope may run than the profile wall clock. The worker
+#: stops a job at the profile runtime and writes the note; the scope is the
+#: backstop for a job that escaped the worker, so it must never fire first.
+RUNTIME_GRACE_SEC = 60
 
 
 class UnknownProfile(Exception):
@@ -343,8 +350,13 @@ def run_in_scope(profiles: dict, profile: str, values: dict,
         "-p", f"CPUQuota={values['quota']}",
         "-p", f"TasksMax={values['pids']}",
     ]
-    if values.get("runtime"):
-        properties += ["-p", f"RuntimeMaxSec={values['runtime']}"]
+    runtime = values.get("runtime")
+    try:
+        backstop = int(runtime) + RUNTIME_GRACE_SEC if runtime else 0
+    except (TypeError, ValueError):
+        backstop = 0
+    if backstop:
+        properties += ["-p", f"RuntimeMaxSec={backstop}"]
     if use_slice:
         properties.append(f"--slice={profiles['slice']}")
     # Match the library thread pools to the CPU budget. The cgroup is the hard
