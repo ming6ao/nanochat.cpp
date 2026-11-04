@@ -116,7 +116,8 @@ struct BenchRow {
 class BenchReport {
  public:
   // Appends one row. The identity set by `SetRowIdentity` and the report's
-  // precision are inherited, so a loop over rows of one family states them once.
+  // precision are inherited, so a loop over rows of one family states them
+  // once.
   void Add(const std::string& name, const std::string& shape, double ms,
            double gflops = 0.0, double work_ratio = 0.0) {
     BenchRow row;
@@ -148,8 +149,8 @@ class BenchReport {
     phase_ = phase;
   }
 
-  // The precision every later row inherits, and the one the report states. A row
-  // that already carries a precision keeps it, because the row stated it.
+  // The precision every later row inherits, and the one the report states. A
+  // row that already carries a precision keeps it, because the row stated it.
   void SetPrecision(BuildPrecision precision) {
     precision_ = BenchPrecisionName(precision);
   }
@@ -207,10 +208,10 @@ class BenchReport {
                     "no declared peak rate for %s, MFU is not reported",
                     device);
     } else {
-      std::snprintf(buffer, sizeof(buffer), "MFU peak %.1f GFLOP/s on %s (%s)",
-                    peak_flops_ * 1e-9, device,
-                    precision_.empty() ? "build precision"
-                                       : precision_.c_str());
+      std::snprintf(
+          buffer, sizeof(buffer), "MFU peak %.1f GFLOP/s on %s (%s)",
+          peak_flops_ * 1e-9, device,
+          precision_.empty() ? "build precision" : precision_.c_str());
     }
     return std::string(buffer);
   }
