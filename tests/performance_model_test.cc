@@ -11,6 +11,9 @@
 //      and the matrix multiplies as compute bound.
 //   4. The estimator reproduces the bound in section 7.2 for the depth-24
 //      shape.
+//   5. The report numbers of section 7.4: the phase split sums to the step
+//      bound, and the tokens per second and the two utilization numbers match
+//      the recorded depth-24 values.
 //
 // It is tier S0: a plain T0 CPU test, no fixture and no broker.
 
@@ -198,7 +201,7 @@ void TestRooflineLabels() {
       ExpectTrue(row.limit == "compute", "the matrix row is compute bound");
       saw_compute = true;
     }
-    if (row.name == "quantization_cast") {
+    if (row.name.rfind("quantization_cast", 0) == 0) {
       ExpectTrue(row.limit == "memory", "the cast row is memory bound");
       saw_memory = true;
     }
@@ -260,6 +263,77 @@ void TestDepth24Bound() {
   ExpectNear(bf16_min, 61.0, 3.0, "depth-24 bf16 subtotal");
 }
 
+// The numbers a benchmark reports, evaluated at the bound
+// (docs/performance-model.md section 7.4).
+void TestReportNumbers() {
+  Config config = D24Config();
+  const PerformanceLimits limits = nanochat::LimitsForDevice("h100");
+  ModelPlan plan;
+  plan.batch = 16;
+  plan.grad_accum = 4;
+  plan.world_size = 8;
+  plan.link_bandwidth_bytes_per_second = 600e9;
+  plan.build = ComputePrecision::kFp8;
+  plan.muon_ns_steps = 5;
+  const PerformanceEstimate estimate =
+      nanochat::EstimatePerformance(config, limits, plan);
+
+  // The phase split is an attribution of the row bounds, so it sums to the
+  // step bound.
+  const double split = estimate.forward_seconds + estimate.backward_seconds +
+                       estimate.optimizer_seconds + estimate.sync_seconds;
+  ExpectNear(split, estimate.step_seconds, 1e-9,
+             "the phase split sums to the step bound");
+  ExpectTrue(estimate.forward_seconds > 0.0 && estimate.backward_seconds > 0.0,
+             "the report has a forward and a backward phase");
+  ExpectTrue(estimate.backward_seconds > estimate.forward_seconds,
+             "the backward phase exceeds the forward phase");
+
+  // 16 x 2048 x 4 micro-batches x 8 devices.
+  ExpectTrue(estimate.tokens_per_step == 1048576,
+             "the depth-24 step moves 1048576 tokens");
+  ExpectNear(estimate.tokens_per_second, 1727927.0, 5000.0,
+             "the tokens per second at the bound");
+  ExpectNear(estimate.weighted_peak_flops, 1827.2e12, 1.0e12,
+             "the precision-weighted peak");
+  ExpectNear(estimate.model_mfu, 0.5645, 0.002, "the model MFU at the bound");
+
+  // The optimizer state is replicated, so it travels in full on every device.
+  const nanochat::ParamBreakdown params = nanochat::CountParams(config);
+  double optimizer_memory = 0.0;
+  bool saw_muon = false;
+  for (const RooflineRow& row : estimate.rows) {
+    if (row.name == "optimizer") optimizer_memory = row.memory_seconds;
+    if (row.name == "muon_orthogonalisation") {
+      saw_muon = true;
+      ExpectTrue(row.limit == "compute", "the Muon row is compute bound");
+      ExpectNear(row.mfu, 1.0, 1e-3, "the Muon row runs at its own peak");
+    }
+  }
+  ExpectTrue(saw_muon, "the plan's Muon steps add a row");
+  ExpectNear(optimizer_memory,
+             16.0 * static_cast<double>(params.total) / 3.35e12, 1e-6,
+             "the optimizer state is not divided by the world size");
+  ExpectTrue(estimate.optimizer_flops > 0.0, "the Muon arithmetic is counted");
+  ExpectTrue(estimate.optim_mfu > 0.0 && estimate.optim_mfu < 1.0,
+             "the Muon MFU is a share of the step");
+
+  // Without Muon steps, the optimizer row keeps its memory-only bound.
+  ModelPlan no_muon = plan;
+  no_muon.muon_ns_steps = 0;
+  const PerformanceEstimate plain =
+      nanochat::EstimatePerformance(config, limits, no_muon);
+  ExpectNear(plain.optimizer_flops, 0.0, 0.0,
+             "no Muon steps count no Muon arithmetic");
+  bool plain_muon_row = false;
+  for (const RooflineRow& row : plain.rows) {
+    if (row.name == "muon_orthogonalisation") plain_muon_row = true;
+  }
+  ExpectTrue(!plain_muon_row, "no Muon steps add no row");
+  ExpectTrue(plain.step_seconds < estimate.step_seconds,
+             "the Muon row raises the step bound");
+}
+
 }  // namespace
 
 int main() {
@@ -268,6 +342,7 @@ int main() {
   TestPrecisionAssignment();
   TestRooflineLabels();
   TestDepth24Bound();
+  TestReportNumbers();
   if (g_failures != 0) {
     std::printf("%d check(s) failed\n", g_failures);
     return 1;

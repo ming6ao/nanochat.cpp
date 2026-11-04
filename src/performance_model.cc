@@ -119,27 +119,42 @@ const char* BindingLimit(double compute_seconds, double memory_seconds,
   return compute_seconds >= memory_seconds ? "compute" : "memory";
 }
 
-RooflineRow MakeRow(const std::string& name, ComputePrecision precision,
-                    double flops, double bytes, int launches,
-                    const PerformanceLimits& limits, int world_size) {
+RooflineRow MakeRow(const std::string& name, StepPhase phase,
+                    ComputePrecision precision, double flops, double bytes,
+                    int launches, const PerformanceLimits& limits, int world,
+                    bool replicated) {
   RooflineRow row;
   row.name = name;
+  row.phase = phase;
   row.precision = precision;
   row.flops = flops;
   row.bytes = bytes;
   row.launches = launches;
+  // A row that scales with the token count carries a world-wide count, so the
+  // division by the world size leaves the per-device time. A replicated row
+  // does not: every device reads and writes the whole payload, so its rate and
+  // its bandwidth stay at one device.
+  const double scale = replicated ? 1.0 : static_cast<double>(world);
   const double peak = limits.PeakFlops(precision);
-  const double rate = peak > 0.0 ? peak * world_size : 0.0;
+  const double rate = peak > 0.0 ? peak * scale : 0.0;
   row.compute_seconds = rate > 0.0 ? flops / rate : 0.0;
-  row.memory_seconds =
-      limits.bandwidth_bytes_per_second > 0.0
-          ? bytes / (limits.bandwidth_bytes_per_second * world_size)
-          : 0.0;
+  row.memory_seconds = limits.bandwidth_bytes_per_second > 0.0
+                           ? bytes / (limits.bandwidth_bytes_per_second * scale)
+                           : 0.0;
   row.launch_seconds = launches * limits.launch_us * 1e-6;
   row.bound_seconds =
       std::max(row.compute_seconds, row.memory_seconds) + row.launch_seconds;
   row.limit =
       BindingLimit(row.compute_seconds, row.memory_seconds, row.launch_seconds);
+  // The per-device rate the bound implies, and its share of the row's own peak.
+  // It uses the same convention as a benchmark row, so the two join
+  // (docs/performance-model.md section 7.4).
+  row.flops_per_second =
+      row.bound_seconds > 0.0 ? flops / (row.bound_seconds * scale) : 0.0;
+  if (peak > 0.0) {
+    const double mfu = row.flops_per_second / peak;
+    row.mfu = mfu > 1.0 ? 1.0 : mfu;
+  }
   return row;
 }
 
@@ -339,6 +354,18 @@ const char* PrecisionName(ComputePrecision precision) {
   return "unknown";
 }
 
+const char* PhaseName(StepPhase phase) {
+  switch (phase) {
+    case StepPhase::kForward:
+      return "forward";
+    case StepPhase::kBackward:
+      return "backward";
+    case StepPhase::kOptimizer:
+      return "optimizer";
+  }
+  return "unknown";
+}
+
 ComputePrecision BuildComputePrecision() {
   switch (kBuildPrecision) {
     case BuildPrecision::kBf16:
@@ -429,30 +456,41 @@ PerformanceEstimate EstimatePerformance(const Config& config,
     const double forward_bytes =
         elem * (tokens * group.sum_k + group.params + tokens * group.sum_n);
     const int launches = group.count * accum;
-    estimate.rows.push_back(
-        MakeRow("gemm_forward:" + std::string(PrecisionName(group.precision)),
-                group.precision, 2.0 * group.params * tokens, forward_bytes,
-                launches, limits, world));
-    estimate.rows.push_back(
-        MakeRow("gemm_backward:" + std::string(PrecisionName(group.precision)),
-                group.precision, 4.0 * group.params * tokens,
-                2.0 * forward_bytes, 2 * launches, limits, world));
+    estimate.rows.push_back(MakeRow(
+        "gemm_forward:" + std::string(PrecisionName(group.precision)),
+        StepPhase::kForward, group.precision, 2.0 * group.params * tokens,
+        forward_bytes, launches, limits, world, false));
+    estimate.rows.push_back(MakeRow(
+        "gemm_backward:" + std::string(PrecisionName(group.precision)),
+        StepPhase::kBackward, group.precision, 4.0 * group.params * tokens,
+        2.0 * forward_bytes, 2 * launches, limits, world, false));
   }
 
   // The quantization cast: one fused kernel per operand, five bytes of traffic
   // per element (measure, then read and write). It only exists in the fp8
-  // build, and it covers the fp8 operands.
-  double cast_elements = 0.0;
+  // build. The forward casts the activation and the backward casts the output
+  // gradient, so the traffic splits by operand role and the total equals the
+  // one-row count of section 4.
+  double cast_forward_elements = 0.0;
+  double cast_backward_elements = 0.0;
   int cast_launches = 0;
   for (const MatrixGroup& group : groups) {
     if (group.precision != ComputePrecision::kFp8) continue;
-    cast_elements += tokens * (group.sum_n + group.sum_k);
-    cast_launches += 2 * group.count * accum;
+    cast_forward_elements += tokens * group.sum_k;
+    cast_backward_elements += tokens * group.sum_n;
+    cast_launches += group.count * accum;
   }
-  if (cast_elements > 0.0) {
-    estimate.rows.push_back(MakeRow("quantization_cast", ComputePrecision::kFp8,
-                                    0.0, 5.0 * cast_elements, cast_launches,
-                                    limits, world));
+  if (cast_forward_elements > 0.0) {
+    estimate.rows.push_back(MakeRow("quantization_cast:forward",
+                                    StepPhase::kForward, ComputePrecision::kFp8,
+                                    0.0, 5.0 * cast_forward_elements,
+                                    cast_launches, limits, world, false));
+  }
+  if (cast_backward_elements > 0.0) {
+    estimate.rows.push_back(
+        MakeRow("quantization_cast:backward", StepPhase::kBackward,
+                ComputePrecision::kFp8, 0.0, 5.0 * cast_backward_elements,
+                cast_launches, limits, world, false));
   }
 
   // The layout copies. The target stores the weight in the layout the fp8 GEMM
@@ -467,9 +505,9 @@ PerformanceEstimate EstimatePerformance(const Config& config,
       copy_launches += 3 * group.count * accum;
     }
     if (weight_elements > 0.0) {
-      estimate.rows.push_back(
-          MakeRow("fp8_layout_copies", ComputePrecision::kFp8, 0.0,
-                  2.0 * weight_elements, copy_launches, limits, world));
+      estimate.rows.push_back(MakeRow(
+          "fp8_layout_copies", StepPhase::kBackward, ComputePrecision::kFp8,
+          0.0, 2.0 * weight_elements, copy_launches, limits, world, false));
     }
   }
 
@@ -492,33 +530,69 @@ PerformanceEstimate EstimatePerformance(const Config& config,
   const double attention_bytes = row_elem * tokens * 4.0 * config.num_heads *
                                  config.head_dim() * config.num_layers;
   const int attention_launches = config.num_layers * accum;
-  estimate.rows.push_back(MakeRow("attention_forward", row_precision,
-                                  attention_forward, attention_bytes,
-                                  attention_launches, limits, world));
-  estimate.rows.push_back(MakeRow("attention_backward", row_precision,
-                                  attention_backward, 2.0 * attention_bytes,
-                                  2 * attention_launches, limits, world));
+  estimate.rows.push_back(MakeRow("attention_forward", StepPhase::kForward,
+                                  row_precision, attention_forward,
+                                  attention_bytes, attention_launches, limits,
+                                  world, false));
+  estimate.rows.push_back(MakeRow("attention_backward", StepPhase::kBackward,
+                                  row_precision, attention_backward,
+                                  2.0 * attention_bytes, 2 * attention_launches,
+                                  limits, world, false));
 
   // The row kernels, the classifier, the embedding, and the optimizer. They
-  // carry no counted arithmetic; their bound is the memory term.
+  // carry no counted arithmetic; their bound is the memory term. A row kernel
+  // runs once in the forward pass and once in the backward pass, so each of
+  // these rows becomes a forward row and a backward row of equal traffic. The
+  // total is unchanged: a row with no counted arithmetic splits linearly
+  // through the `max` of the estimator.
   const double row_width =
       config.num_layers *
       (6.0 * config.hidden_dim + 2.0 * config.query_dim() +
        4.0 * config.kv_dim() + 2.0 * config.mlp_dim() + config.num_kv_heads);
-  estimate.rows.push_back(MakeRow("norms_and_pointwise", row_precision, 0.0,
-                                  row_elem * tokens * row_width,
-                                  config.num_layers * accum, limits, world));
-  estimate.rows.push_back(MakeRow("classifier", ComputePrecision::kFp32, 0.0,
-                                  2.0 * 4.0 * tokens * config.padded_vocab_size,
-                                  accum, limits, world));
-  estimate.rows.push_back(MakeRow("embedding", row_precision, 0.0,
-                                  2.0 * row_elem * tokens * config.hidden_dim,
-                                  2 * accum, limits, world));
+  const double pointwise_bytes = row_elem * tokens * row_width;
+  const int pointwise_launches = config.num_layers * accum;
+  estimate.rows.push_back(MakeRow(
+      "norms_and_pointwise:forward", StepPhase::kForward, row_precision, 0.0,
+      pointwise_bytes / 2.0, pointwise_launches / 2, limits, world, false));
+  estimate.rows.push_back(MakeRow(
+      "norms_and_pointwise:backward", StepPhase::kBackward, row_precision, 0.0,
+      pointwise_bytes / 2.0, pointwise_launches - pointwise_launches / 2,
+      limits, world, false));
+
+  const double classifier_bytes = 2.0 * 4.0 * tokens * config.padded_vocab_size;
+  estimate.rows.push_back(MakeRow(
+      "classifier:forward", StepPhase::kForward, ComputePrecision::kFp32, 0.0,
+      classifier_bytes / 2.0, accum / 2, limits, world, false));
+  estimate.rows.push_back(MakeRow(
+      "classifier:backward", StepPhase::kBackward, ComputePrecision::kFp32, 0.0,
+      classifier_bytes / 2.0, accum - accum / 2, limits, world, false));
+
+  const double embedding_bytes = 2.0 * row_elem * tokens * config.hidden_dim;
+  estimate.rows.push_back(MakeRow("embedding:forward", StepPhase::kForward,
+                                  row_precision, 0.0, embedding_bytes / 2.0, 1,
+                                  limits, world, false));
+  estimate.rows.push_back(MakeRow("embedding:backward", StepPhase::kBackward,
+                                  row_precision, 0.0, embedding_bytes / 2.0, 1,
+                                  limits, world, false));
 
   const ParamBreakdown params = CountParams(config);
-  estimate.rows.push_back(MakeRow("optimizer", ComputePrecision::kFp32, 0.0,
-                                  4.0 * 4.0 * static_cast<double>(params.total),
-                                  1, limits, world));
+  // The parameters are replicated on every device, so the optimizer state
+  // travels in full on each rank and the row does not divide by the world
+  // size.
+  estimate.rows.push_back(MakeRow(
+      "optimizer", StepPhase::kOptimizer, ComputePrecision::kFp32, 0.0,
+      4.0 * 4.0 * static_cast<double>(params.total), 1, limits, world, true));
+  // The Muon orthogonalisation. Its GEMMs run at the compute type, and its
+  // state stays in the fp32 traffic of the row above. It gets its own row, so
+  // the model count and the optimizer count stay apart (`mfu.h`).
+  const double muon_flops =
+      EstimateMuonFlopsPerStep(config, plan.muon_ns_steps);
+  if (muon_flops > 0.0) {
+    estimate.optimizer_flops = muon_flops;
+    estimate.rows.push_back(MakeRow("muon_orthogonalisation",
+                                    StepPhase::kOptimizer, row_precision,
+                                    muon_flops, 0.0, 1, limits, world, true));
+  }
 
   // The gradient reduction, once per optimizer step (docs/performance-model.md
   // section 7). The payload is the fp32 gradient of every parameter.
@@ -533,6 +607,17 @@ PerformanceEstimate EstimatePerformance(const Config& config,
 
   for (const RooflineRow& row : estimate.rows) {
     estimate.step_seconds += row.bound_seconds;
+    switch (row.phase) {
+      case StepPhase::kForward:
+        estimate.forward_seconds += row.bound_seconds;
+        break;
+      case StepPhase::kBackward:
+        estimate.backward_seconds += row.bound_seconds;
+        break;
+      case StepPhase::kOptimizer:
+        estimate.optimizer_seconds += row.bound_seconds;
+        break;
+    }
   }
   estimate.step_seconds += estimate.sync_seconds;
 
@@ -545,26 +630,72 @@ PerformanceEstimate EstimatePerformance(const Config& config,
     estimate.steps = 1;
   }
   estimate.run_seconds = estimate.step_seconds * estimate.steps;
+
+  // The numbers a benchmark reports, evaluated at the bound
+  // (docs/performance-model.md section 7.4). The tokens per second is the
+  // step's own token count over the step bound.
+  estimate.tokens_per_step = static_cast<std::int64_t>(tokens + 0.5);
+  if (estimate.step_seconds > 0.0) {
+    estimate.tokens_per_second = tokens / estimate.step_seconds;
+  }
+
+  // The precision-weighted peak of the model rows: the harmonic mean of the
+  // row peaks, weighted by the row arithmetic. A step that runs every model
+  // row at its own peak reads 1.0, so a measured MFU and `model_mfu` share one
+  // denominator. The optimizer rows are excluded, because `mfu.h` reports the
+  // Muon count beside the model count and never adds them.
+  double model_flops = 0.0;
+  double model_peak_seconds = 0.0;
+  for (const RooflineRow& row : estimate.rows) {
+    const double peak = limits.PeakFlops(row.precision);
+    if (row.phase == StepPhase::kOptimizer) continue;
+    if (!(row.flops > 0.0) || !(peak > 0.0)) continue;
+    model_flops += row.flops;
+    model_peak_seconds += row.flops / peak;
+  }
+  if (model_peak_seconds > 0.0) {
+    estimate.weighted_peak_flops = model_flops / model_peak_seconds;
+    if (estimate.step_seconds > 0.0) {
+      estimate.model_mfu =
+          (model_flops / static_cast<double>(world)) /
+          (estimate.step_seconds * estimate.weighted_peak_flops);
+    }
+  }
+  if (estimate.optimizer_flops > 0.0 && estimate.step_seconds > 0.0) {
+    const double optim_peak = limits.PeakFlops(row_precision);
+    if (optim_peak > 0.0) {
+      estimate.optim_mfu =
+          estimate.optimizer_flops / (estimate.step_seconds * optim_peak);
+    }
+  }
   return estimate;
 }
 
 std::string FormatPerformanceReport(const PerformanceEstimate& estimate) {
   std::string out;
-  char line[256];
-  std::snprintf(line, sizeof(line), "%-26s %6s %14s %14s %12s %10s\n",
-                "operation", "prec", "compute (ms)", "memory (ms)",
+  char line[320];
+  std::snprintf(line, sizeof(line), "%-30s %-9s %6s %14s %14s %12s %10s\n",
+                "operation", "phase", "prec", "compute (ms)", "memory (ms)",
                 "bound (ms)", "limit");
   out += line;
   for (const RooflineRow& row : estimate.rows) {
-    std::snprintf(line, sizeof(line), "%-26s %6s %14.3f %14.3f %12.3f %10s\n",
-                  row.name.c_str(), PrecisionName(row.precision),
-                  row.compute_seconds * 1000.0, row.memory_seconds * 1000.0,
-                  row.bound_seconds * 1000.0, row.limit.c_str());
+    std::snprintf(
+        line, sizeof(line), "%-30s %-9s %6s %14.3f %14.3f %12.3f %10s\n",
+        row.name.c_str(), PhaseName(row.phase), PrecisionName(row.precision),
+        row.compute_seconds * 1000.0, row.memory_seconds * 1000.0,
+        row.bound_seconds * 1000.0, row.limit.c_str());
     out += line;
   }
-  std::snprintf(line, sizeof(line), "%-26s %6s %14s %14s %12.3f %10s\n",
-                "gradient_sync", "-", "-", "-", estimate.sync_seconds * 1000.0,
-                "sync");
+  std::snprintf(line, sizeof(line), "%-30s %-9s %6s %14s %14s %12.3f %10s\n",
+                "gradient_sync", "sync", "-", "-", "-",
+                estimate.sync_seconds * 1000.0, "sync");
+  out += line;
+  std::snprintf(
+      line, sizeof(line),
+      "phases: forward %.3f | backward %.3f | optimizer %.3f | "
+      "sync %.3f (ms)\n",
+      estimate.forward_seconds * 1000.0, estimate.backward_seconds * 1000.0,
+      estimate.optimizer_seconds * 1000.0, estimate.sync_seconds * 1000.0);
   out += line;
   std::snprintf(line, sizeof(line),
                 "step bound %.3f ms  (%s s over %lld steps)\n",
@@ -572,15 +703,23 @@ std::string FormatPerformanceReport(const PerformanceEstimate& estimate) {
                 FormatSeconds(estimate.run_seconds).c_str(),
                 static_cast<long long>(estimate.steps));
   out += line;
+  std::snprintf(line, sizeof(line),
+                "at the bound: %.0f tokens/s | model_mfu %.1f%% | "
+                "optim_mfu %.1f%% | weighted peak %.1f TFLOP/s\n",
+                estimate.tokens_per_second, estimate.model_mfu * 100.0,
+                estimate.optim_mfu * 100.0,
+                estimate.weighted_peak_flops / 1e12);
+  out += line;
   return out;
 }
 
 std::string PerformanceReportJson(const PerformanceEstimate& estimate) {
-  std::string out = "{\"schema\":\"nanochat.roofline.v1\",\"rows\":[";
+  std::string out = "{\"schema\":\"nanochat.roofline.v2\",\"rows\":[";
   for (std::size_t i = 0; i < estimate.rows.size(); ++i) {
     const RooflineRow& row = estimate.rows[i];
     if (i != 0) out += ",";
     out += "{\"name\":" + JsonString(row.name) +
+           ",\"phase\":" + JsonString(PhaseName(row.phase)) +
            ",\"precision\":" + JsonString(PrecisionName(row.precision)) +
            ",\"flops\":" + JsonDouble(row.flops) +
            ",\"bytes\":" + JsonDouble(row.bytes) +
@@ -588,12 +727,24 @@ std::string PerformanceReportJson(const PerformanceEstimate& estimate) {
            ",\"compute_seconds\":" + JsonDouble(row.compute_seconds) +
            ",\"memory_seconds\":" + JsonDouble(row.memory_seconds) +
            ",\"bound_seconds\":" + JsonDouble(row.bound_seconds) +
-           ",\"limit\":" + JsonString(row.limit) + "}";
+           ",\"limit\":" + JsonString(row.limit) +
+           ",\"gflops\":" + JsonDouble(row.flops_per_second / 1e9) +
+           ",\"mfu\":" + JsonDouble(row.mfu) + "}";
   }
-  out += "],\"sync_seconds\":" + JsonDouble(estimate.sync_seconds) +
-         ",\"step_seconds\":" + JsonDouble(estimate.step_seconds) +
-         ",\"steps\":" + std::to_string(estimate.steps) +
-         ",\"run_seconds\":" + JsonDouble(estimate.run_seconds) + "}\n";
+  out +=
+      "],\"forward_seconds\":" + JsonDouble(estimate.forward_seconds) +
+      ",\"backward_seconds\":" + JsonDouble(estimate.backward_seconds) +
+      ",\"sync_seconds\":" + JsonDouble(estimate.sync_seconds) +
+      ",\"optimizer_seconds\":" + JsonDouble(estimate.optimizer_seconds) +
+      ",\"step_seconds\":" + JsonDouble(estimate.step_seconds) +
+      ",\"steps\":" + std::to_string(estimate.steps) +
+      ",\"run_seconds\":" + JsonDouble(estimate.run_seconds) +
+      ",\"tokens_per_step\":" + std::to_string(estimate.tokens_per_step) +
+      ",\"tokens_per_second\":" + JsonDouble(estimate.tokens_per_second) +
+      ",\"weighted_peak_flops\":" + JsonDouble(estimate.weighted_peak_flops) +
+      ",\"model_mfu\":" + JsonDouble(estimate.model_mfu) +
+      ",\"optim_mfu\":" + JsonDouble(estimate.optim_mfu) +
+      ",\"optimizer_flops\":" + JsonDouble(estimate.optimizer_flops) + "}\n";
   return out;
 }
 

@@ -1,10 +1,12 @@
 // `roofline_main` -- the performance-model report
 // (docs/performance-model.md).
 //
-// It prints the operation counter table, the roofline result, and the step and
-// run bound for one configuration and one device. Every term comes from the
-// device limit table and the counter table; the tool holds no fitted value and
-// no measurement.
+// It prints the operation counter table, the roofline result, the phase split,
+// and the step and run bound for one configuration and one device. Every term
+// comes from the device limit table and the counter table; the tool holds no
+// fitted value and no measurement. The phase split and the two utilization
+// numbers are the predicted counterparts of the training log's phase fields
+// (docs/performance-model.md section 7.4).
 //
 // The tool is CPU-only. It reads no fixture, allocates no device memory, and
 // needs no GPU broker. Run it through the entry point:
@@ -42,7 +44,8 @@ void Usage() {
       "  --latency-us N         link latency in microseconds (default 5)\n"
       "  --overlap F            fraction of the sync hidden (default 0)\n"
       "  --reference-copies     model the reference per-step weight copies\n"
-      "  --json                 write nanochat.roofline.v1 JSON\n"
+      "  --muon-ns-steps N      Muon iteration count; 0 keeps it memory bound\n"
+      "  --json                 write nanochat.roofline.v2 JSON\n"
       "  --help                 this message\n"
       "  [model flags: --layers --heads --kv-heads --hidden --seq\n"
       "   --vocab --padded-vocab --window-pattern --rope-base\n"
@@ -120,6 +123,12 @@ int main(int argc, char** argv) {
       if (!value(&text) || !nanochat::cli::ParseInt(text, &plan.grad_accum)) {
         return 2;
       }
+    } else if (flag == "--muon-ns-steps") {
+      if (!value(&text) ||
+          !nanochat::cli::ParseInt(text, &plan.muon_ns_steps) ||
+          plan.muon_ns_steps < 0) {
+        return 2;
+      }
     } else if (flag == "--devices") {
       if (!value(&text) || !nanochat::cli::ParseInt(text, &plan.world_size)) {
         return 2;
@@ -175,9 +184,10 @@ int main(int argc, char** argv) {
       config.num_layers, config.num_heads, config.num_kv_heads,
       config.hidden_dim, config.seq_len, config.padded_vocab_size,
       config.window_pattern.c_str());
-  std::printf("plan: batch %d grad-accum %d devices %d tokens %lld\n",
-              plan.batch, plan.grad_accum, plan.world_size,
-              static_cast<long long>(plan.total_tokens));
+  std::printf(
+      "plan: batch %d grad-accum %d devices %d tokens %lld muon-ns %d\n",
+      plan.batch, plan.grad_accum, plan.world_size,
+      static_cast<long long>(plan.total_tokens), plan.muon_ns_steps);
   std::printf(
       "arithmetic: %.6g FLOP/token "
       "(gemm_fwd %.4g, gemm_bwd %.4g, attn_fwd %.4g, attn_bwd %.4g)\n",

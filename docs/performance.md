@@ -114,6 +114,13 @@ the `MFU` column appears only when a row reports a share. A benchmark that
 states no peak prints the three-column table of the earlier reports. Feed the
 file to the skill's `summarize_times.py`.
 
+The performance model predicts the same numbers. `tools/nanochat roofline
+--json` writes a `nanochat.roofline.v2` row with `name`, `bound_seconds`,
+`gflops`, `mfu`, and `phase`, so a predicted row and a measured row compare
+field by field ([performance-model.md](performance-model.md) section 7.4). The
+model names a family (`attention_forward`) and the benchmark adds the shape
+(`attention_fwd:d8_s512`), so the join is on the family prefix.
+
 ## 4. Root-cause checklist
 
 Split the step before you choose a fix:

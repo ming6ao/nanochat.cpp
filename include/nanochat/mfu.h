@@ -156,11 +156,24 @@ struct ModelPlan {
   // True stores the weight in the layout the fp8 GEMM wants, once. False
   // models the reference, which copies the weight per backward call.
   bool transposed_weights = true;
+  // The Muon Newton-Schulz iteration count. Zero keeps the optimizer row
+  // memory bound, and so reproduces a report that does not count the
+  // orthogonalisation (docs/performance-model.md section 4).
+  int muon_ns_steps = 0;
 };
+
+// The phase of one optimizer step that a counter row belongs to
+// (docs/performance-model.md section 7.4). The names match the phase split of
+// the training log, so a bound and a measurement join phase by phase.
+enum class StepPhase { kForward, kBackward, kSync, kOptimizer };
+
+// The short name of `phase`, for a report row.
+const char* PhaseName(StepPhase phase);
 
 // One operation of the counter table, with its roofline result.
 struct RooflineRow {
   std::string name;
+  StepPhase phase = StepPhase::kForward;
   ComputePrecision precision = ComputePrecision::kFp32;
   double flops = 0.0;
   double bytes = 0.0;
@@ -171,16 +184,49 @@ struct RooflineRow {
   double bound_seconds = 0.0;
   // The binding limit: "compute", "memory", or "launch".
   std::string limit;
+  // The rate the row's bound implies, in FLOP/s over the whole world. It is the
+  // predicted counterpart of a benchmark row's `gflops`
+  // (docs/performance.md section 3.1), and `mfu` is that rate over the peak the
+  // row's precision declares. A row with no counted arithmetic reads 0.
+  double flops_per_second = 0.0;
+  double mfu = 0.0;
 };
 
 // The full roofline result. `step_seconds` is the sum of the row bounds plus
 // the gradient sync. `run_seconds` multiplies it by the optimizer steps.
+//
+// The phase fields sum the row bounds by phase, so `forward_seconds` plus
+// `backward_seconds` plus `optimizer_seconds` plus `sync_seconds` equals
+// `step_seconds`. They carry no new physics; they are the attribution the
+// training log reports, so a reader compares (`LogRecord` in
+// `include/nanochat/logger.h`).
 struct PerformanceEstimate {
   std::vector<RooflineRow> rows;
+  double forward_seconds = 0.0;
+  double backward_seconds = 0.0;
   double sync_seconds = 0.0;
+  double optimizer_seconds = 0.0;
   double step_seconds = 0.0;
   std::int64_t steps = 1;
   double run_seconds = 0.0;
+
+  // The numbers a benchmark reports, evaluated at the bound
+  // (docs/performance-model.md section 7.4).
+  std::int64_t tokens_per_step = 0;
+  double tokens_per_second = 0.0;
+  // The precision-weighted peak of the model rows, per device: the harmonic
+  // mean of the row peaks, weighted by the row arithmetic. It reads 1.0 when
+  // every model row runs at its own peak, so a measured MFU and `model_mfu`
+  // share one denominator. Zero when the model rows carry no arithmetic.
+  double weighted_peak_flops = 0.0;
+  // The model arithmetic over the weighted peak, and the Muon arithmetic over
+  // the compute-type peak. The two are never added: `model_mfu` divides the
+  // count that `mfu.h` reports beside the optimizer's, exactly as the training
+  // log does.
+  double model_mfu = 0.0;
+  double optim_mfu = 0.0;
+  // The Muon orthogonalisation arithmetic for one step, over the whole world.
+  double optimizer_flops = 0.0;
 };
 
 // The roofline estimator of docs/performance-model.md section 7. It uses the
@@ -197,7 +243,9 @@ bool IsComputeBound(double flops, double bytes, const PerformanceLimits& limits,
 // A human-readable table of `estimate`, one row per operation, plus the bound.
 std::string FormatPerformanceReport(const PerformanceEstimate& estimate);
 
-// The same table as the `nanochat.roofline.v1` JSON object.
+// The same table as the `nanochat.roofline.v2` JSON object. It carries the row
+// fields, the phase split, the tokens per second, and the two utilization
+// numbers, so a benchmark report and a bound join field by field.
 std::string PerformanceReportJson(const PerformanceEstimate& estimate);
 
 }  // namespace nanochat

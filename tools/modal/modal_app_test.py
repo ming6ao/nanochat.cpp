@@ -985,7 +985,7 @@ class RooflineTest(unittest.TestCase):
              "--precision", "fp32", "--batch"])
 
     def test_the_prediction_and_the_limit_are_read(self) -> None:
-        document = {"schema": "nanochat.roofline.v1",
+        document = {"schema": "nanochat.roofline.v2",
                     "rows": [{"name": "gemm", "bound_seconds": 0.0005,
                               "limit": "launch"},
                              {"name": "attn", "bound_seconds": 0.0002,
@@ -1000,7 +1000,7 @@ class RooflineTest(unittest.TestCase):
                          (None, ""))
 
     def test_the_record_holds_the_prediction_the_limit_and_the_band(self) -> None:
-        document = json.dumps({"schema": "nanochat.roofline.v1",
+        document = json.dumps({"schema": "nanochat.roofline.v2",
                                "rows": [{"name": "gemm",
                                          "bound_seconds": 0.000764,
                                          "limit": "launch"}],

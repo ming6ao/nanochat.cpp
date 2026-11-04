@@ -31,6 +31,8 @@ operation that binds, and the distance from the measured step to the bound.
 - One device limit table: the peak rate per precision, and the peak bandwidth.
 - One roofline estimator that uses the peak limits directly.
 - A work-ratio check that reports redundant issued work.
+- A report that carries the numbers a run reports, so a bound and a measurement
+  join.
 - An attainment record that compares the bound with the measured step.
 
 **Out of scope.**
@@ -117,6 +119,7 @@ Each row of the counter table also carries three non-arithmetic fields:
 | the classifier | A row pass over the vocabulary | fp32 | The logits | One per call |
 | the embedding | A gather and a scatter | The compute precision | The table rows | One per call |
 | the optimizer | A stateful pass | fp32 | Three buffers | One per tensor |
+| the Muon orthogonalisation | Three GEMMs per Newton-Schulz iteration | The compute type | The gradient and the update | One per matrix |
 
 Here `p` is the matrix parameter count, `t` the token count, `h` the head
 count, `d` the head width, and `w` the effective window.
@@ -287,34 +290,43 @@ billion tokens on eight H100 cards.
 
 | Term | bf16 everywhere | The reference fp8 | The C++ fp8 target |
 |---|---:|---:|---:|
-| The matrix multiplies | 54 min | 27 min | 27 min |
+| The matrix multiplies | 54 min | 28 min | 28 min |
 | The quantization cast, fused | — | 13 min | 13 min |
-| The fp8 layout copies | — | 5 min | About 0 |
+| The fp8 layout copies | — | 1 min | About 0 |
 | The attention, bf16 | 5 min | 5 min | 5 min |
-| The gradient sync | 2 min | 2 min | 2 min |
-| **Subtotal** | **61 min** | **52 min** | **47 min** |
-| The row kernels and the optimizer | Memory bound, from the counter table | Same | Same |
+| The gradient sync | 1.5 min | 1.5 min | 1.5 min |
+| **Subtotal** | **61 min** | **48 min** | **47 min** |
+| The row kernels: the norms, the pointwise steps, the classifier, the embedding | 6 min | 6 min | 6 min |
+| The optimizer state and the Muon orthogonalisation | 3 min | 3 min | 3 min |
+| **Step bound** | **70 min** | **57 min** | **56 min** |
+
+Every figure comes from `tools/nanochat roofline` with `--muon-ns-steps 5`, and
+the reference column adds `--reference-copies`. The three columns model one
+step of 757.1 ms, 612.1 ms, and 606.8 ms.
 
 Three results follow.
 
-1. **fp8 is worth about 9 minutes of the bound at this shape.** The GEMM term
-   falls by 27 minutes. The cast and the copies give 18 minutes back. The gain
-   is real, and it is not a factor of two.
+1. **fp8 is worth about 14 minutes of the bound at this shape.** The GEMM term
+   falls by 27 minutes. The cast gives 13 minutes back. The gain is real, and it
+   is not a factor of two.
 2. **The cast must be one fused kernel per operand.** At five bytes per element
    the cast costs 13 minutes. At sixteen bytes it costs 42 minutes, and at
    thirty-two bytes it costs 84 minutes. An unfused cast makes fp8 slower than
    bf16.
-3. **The layout is a design decision.** The reference pays about 5 minutes for
-   per-step copies. Store the weight in the required layout once, and that term
-   disappears.
+3. **The layout is a design decision.** The reference pays about half a minute
+   for its per-step weight copies, and most of that is 1,740 extra launches, not
+   traffic. Store the weight in the required layout once, and the term
+   disappears. The row prices the weight only; the reference also copies
+   activations, which the counter table does not carry.
 
 The fp32 fused attention tile would change the attention row from 5 minutes to
 120 or 240 minutes. See
 [attention.md](attention.md).
 
-The nanochat reference measured 99 minutes against a bound of about 52 minutes.
-The fraction is about 0.53. The remaining 47 minutes are the row kernels, the
-launch gaps, the imperfect overlap, and the achieved GEMM rate.
+The nanochat reference measured 99 minutes against a step bound of about 57
+minutes. The fraction is about 0.57. The remaining 42 minutes are the launch
+gaps, the imperfect overlap, and the achieved GEMM rate. Section 7.4 splits the
+bound by phase and by row, which is where that measurement belongs.
 
 ### 7.3 The bound at the two chain shapes
 
@@ -366,7 +378,94 @@ The optimizer row of the `standard` reports reads `limit: memory`: 386 MB of
 optimizer state, 1.21 ms on a T4 at fp32 and 0.118 ms on an H100 at bf16, which
 is 318 GB/s and 3.26 TB/s against the 320 GB/s and 3.35 TB/s peaks of section 6.
 It is the memory-bound family section 7.1 predicts, and its 1.21 ms is the
-second largest term of the T4 step, after the backward GEMM.
+second largest term of the T4 step, after the backward GEMM. Both figures are
+for one device, because the optimizer row is replicated (section 7.4).
+
+### 7.4 The numbers a benchmark reports
+
+The estimator reports the numbers a run reports, so the two join without a
+conversion step.
+
+| The report field | The bound | The measurement it joins |
+|---|---|---|
+| `tokens_per_second` | The tokens of one step over `step_seconds` | The logger's `tok/s` |
+| `forward_seconds`, `backward_seconds`, `optimizer_seconds`, `sync_seconds` | The row bounds summed by phase | `fwd_ms`, `bwd_ms`, `opt_ms`, `sync_ms` |
+| `model_mfu` | The model arithmetic over the weighted peak | The logger's `mfu` |
+| `optim_mfu` | The Muon arithmetic over the compute-type peak | The logger's `optim_tflops` over the same peak |
+| A row's `gflops` and `mfu` | `RooflineRow::flops_per_second` and `mfu` | A benchmark row's `gflops` and `mfu` |
+
+The phase sum is an attribution, not a new term. Each counter row carries one
+phase, so the four sums add to `step_seconds`. A row that runs in both passes
+becomes two rows of equal traffic. The total does not move, because a row with
+no counted arithmetic splits linearly through the `max` of the estimator. The
+quantization cast splits by operand role instead. The forward pass casts the
+activation, and the backward pass casts the output gradient.
+
+#### 7.4.1 The weighted peak
+
+One peak cannot divide a mixed-precision step. At depth 24 the model rows hold
+fp8 matrices, bf16 attention, and bf16 gates. A single fp8 denominator reads
+low, and a single bf16 denominator reads above 1.0 and clamps. The model
+reports the harmonic mean of the row peaks, weighted by the row arithmetic:
+
+```text
+weighted_peak = sum(flops_i) / sum(flops_i / peak_i)
+```
+
+At the depth-24 fp8 shape it is 1,827 TFLOP/s per device. A step that runs every
+model row at its own peak reads 1.0 against it. So `model_mfu` and a measured
+`mfu` share one denominator, and one fraction compares them.
+
+#### 7.4.2 The two optimizer rows
+
+The optimizer is two rows. `optimizer` is the state pass: fp32, sixteen bytes
+per parameter, memory bound. `muon_orthogonalisation` is the Newton-Schulz work
+of `EstimateMuonFlopsPerStep` at the compute type, and it is compute bound. The
+plan's `muon_ns_steps` selects it, and zero keeps the report memory only.
+
+Both rows are **replicated**. Every rank holds the whole parameter set, so the
+optimizer traffic does not divide by the world size. The token-proportional rows
+do divide, because their counts are world-wide. At the depth-24 shape on eight
+cards the difference is 6.6 ms of optimizer state per step, not 0.8 ms.
+
+The Muon arithmetic is 2.6e13 FLOP per step at depth 24. On eight H100 cards at
+bf16 it is 26.4 ms of the step bound. It is reported beside the model count and
+never added to it, because `mfu.h` keeps the two numerators apart.
+
+#### 7.4.3 At the depth-24 shape
+
+```
+tools/nanochat roofline --devices 8 --device h100 --precision fp8 --layers 24 \
+  --heads 12 --kv-heads 12 --hidden 1536 --seq 2048 --batch 16 --grad-accum 4 \
+  --tokens 5.84e9 --link-gbps 600 --muon-ns-steps 5
+```
+
+| Number | At the bound |
+|---|---:|
+| The forward phase | 217.6 ms |
+| The backward phase | 340.1 ms |
+| The optimizer phase | 33.0 ms |
+| The gradient sync | 16.1 ms |
+| The step bound | 606.8 ms |
+| The run bound over 5,570 steps | 3,380 s (56.3 min) |
+| Tokens per second | 1,727,927 |
+| Model FLOP utilization | 56.4% |
+| Muon FLOP utilization | 4.3% |
+| The weighted peak | 1,827 TFLOP/s |
+
+The forward and the backward phase carry 92% of the step. A measured `fwd_ms`
+plus `bwd_ms` above 558 ms is the first thing to explain. The per-row `mfu`
+column names the family that is short.
+
+#### 7.4.4 The JSON
+
+`--json` writes `nanochat.roofline.v2`. It adds the phase fields, the two
+utilization numbers, the weighted peak, and the row `gflops` and `mfu`. The row
+names changed with the phase split, so the version moved with them.
+
+The chain of [post-training.md](post-training.md) does not pass
+`--muon-ns-steps`, so gate G3 compares its prediction with the model arithmetic
+only, as section 7.3 records.
 
 ## 8. The work-ratio check
 
@@ -403,7 +502,7 @@ with the bound for the same family.
 | The same GEMM in nanochat.cpp, before the call fix | 229.1 ms | 8.1 TFLOP/s | 0.44 |
 | The full d12 forward, `B=16 T=1024`, fp32, T4 | 679 ms | 8.1 TFLOP/s | — |
 | The attention forward, `d8_s512` window 128, fp32, GTX 1080 Ti | 1.087 ms | 11.34 TFLOP/s | — |
-| The depth-24 run, eight H100 cards, fp8 | 99 min | about 52 min | 0.53 |
+| The depth-24 run, eight H100 cards, fp8 | 99 min | about 57 min | 0.57 |
 
 Two lessons come from the table.
 
@@ -415,7 +514,7 @@ Two lessons come from the table.
    defect that the fix in `backends/cuda/gemm.cu` removed. The model points at
    the family; the measurement confirms it.
 
-The d24 fraction of 0.53 is the target to beat. Each of the four gap items in
+The d24 fraction of 0.57 is the target to beat. Each of the four gap items in
 section 7.2 is a separate investigation.
 
 ## 10. The attainment record
@@ -424,8 +523,8 @@ Keep one table. Update it after each measurement.
 
 | Date | Revision | Device | Build | Precision | Configuration | Bound | Measured | Fraction | Gap cause |
 |---|---|---|---|---|---|---|---|---|---|
-| — | reference `a825e63` | 8 x H100 | fp8 | fp8 | d24, batch 16, grad-accum 4, 5.84e9 tokens | 52 min | 99 min | 0.53 | The reference PyTorch run, not this tree (docs/node-h100.md). The in-tree measurement is pending. |
-| — | this tree | 8 x H100 | fp8 | fp8 | d24, batch 16, grad-accum 4, 5.84e9 tokens | 53 min | pending | — | The bound includes the row kernels; the estimator prints it with `tools/nanochat roofline`. |
+| — | reference `a825e63` | 8 x H100 | fp8 | fp8 | d24, batch 16, grad-accum 4, 5.84e9 tokens | 57 min | 99 min | 0.57 | The reference PyTorch run, not this tree (docs/node-h100.md). The in-tree measurement is pending. |
+| — | this tree | 8 x H100 | fp8 | fp8 | d24, batch 16, grad-accum 4, 5.84e9 tokens | 56 min | pending | — | The bound includes the row kernels and the two optimizer rows; the estimator prints it with `tools/nanochat roofline --muon-ns-steps 5`. |
 
 The record is the audit trail. A bound without a measurement is a limit, and
 the document must say so.
@@ -440,6 +539,7 @@ the document must say so.
 | The explicit-precision rate selection | `src/train.cc` | Harness |
 | The estimator | `src/performance_model.cc` | Harness |
 | The roofline report | The estimator, printed with the step summary; `tools/nanochat roofline` | Harness |
+| The report numbers of section 7.4 | `src/performance_model.cc`, `src/roofline_main.cc` | Harness |
 | The consistency test | `tests/device_profile_test.cc` | Oracle |
 | The attainment record | `docs/performance-model.md` | Architect |
 | This document | `docs/performance-model.md` | Architect |
@@ -457,9 +557,11 @@ the document must say so.
 6. The measured attention rows from phase A0 of
    [attention.md](attention.md) appear in section 10 with
    their fractions.
+7. The phase sums equal `step_seconds`, and the depth-24 values of section 7.4
+   are reproduced. A plan without Muon steps adds no Muon row.
 
-Checks 1 to 5 run in `//tests:performance_model_test`; check 3 also runs in
-`//tests:device_profile_test`. Check 6 needs the A0 measurement.
+Checks 1 to 5 and 7 run in `//tests:performance_model_test`; check 3 also runs
+in `//tests:device_profile_test`. Check 6 needs the A0 measurement.
 
 ## 13. Phases
 
@@ -469,6 +571,7 @@ Checks 1 to 5 run in `//tests:performance_model_test`; check 3 also runs in
 | M1 | The fp8 rate, the bandwidth column, and the explicit-precision rate selection | The consistency test passes | no |
 | M2 | The estimator and the roofline report | The bound in section 7.2 is reproduced | no |
 | M3 | The attainment record, and the first depth-24 bound | The table in section 10 holds one row with a measurement | no |
+| M4 | The report numbers: the phase split, the tokens per second, and the two utilization numbers. It does not wait on M3, and it landed first. | The test reproduces section 7.4 | no |
 
 ## 14. Status by section
 
@@ -479,6 +582,7 @@ Checks 1 to 5 run in `//tests:performance_model_test`; check 3 also runs in
 | 6 The device limit table | Implemented (fp8 rate and bandwidth in `DeviceProfile`) |
 | 7 The estimator | Implemented (`src/performance_model.cc`) |
 | 7.3 The two chain shapes | Four bounds printed by `tools/nanochat roofline`; the chain's own step time is unmeasured until row 9 of `post-training.md` runs |
+| 7.4 The report numbers | Implemented (`PerformanceEstimate` phase sums, `tokens_per_second`, `model_mfu`, `optim_mfu`) |
 | 8 The work-ratio check | Benchmark side only; the model rows carry the binding limit |
 | 9 The reference points | Reference data, not a computed output |
 | 13 Phases | M0 to M2 complete; M3 awaits a measurement |
@@ -497,6 +601,12 @@ Checks 1 to 5 run in `//tests:performance_model_test`; check 3 also runs in
   [fp8-training.md](fp8-training.md).
 - **The bandwidth peak is hard to reach.** The memory term is a bound, like
   the compute term.
+- **The phase split is an attribution.** The row kernels split evenly between
+  the two passes. The counter table does not count the extra pass a weight
+  gradient needs, so that term is understated in both phases.
+- **The optimizer rows are replicated.** A sharded optimizer would divide them
+  by the world size. The tree's optimizer holds the whole parameter set on every
+  rank, so the rows do not divide today.
 - **The launch cost is a device property.** Record it in the table. Do not set
   it per shape.
 - **Not a goal:** a fitted correction, a cycle-accurate model, a cache model,
@@ -509,10 +619,12 @@ Checks 1 to 5 run in `//tests:performance_model_test`; check 3 also runs in
    declaration is in `include/nanochat/mfu.h`.
 2. The estimator lives in the C library, in `src/performance_model.cc`.
 3. The report goes to the training log, and `roofline_main` also writes the
-   `nanochat.roofline.v1` JSON.
+   `nanochat.roofline.v2` JSON.
 4. The launch cost lives in `DeviceProfile::launch_us`.
 5. The C++ fp8 path stores the weight transposed. The estimator models the
    reference copies behind `ModelPlan::transposed_weights`.
+6. The Muon iteration count lives in `ModelPlan::muon_ns_steps`, because the
+   estimator has no optimizer configuration of its own.
 
 ## See also
 
