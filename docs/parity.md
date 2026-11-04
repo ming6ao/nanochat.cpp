@@ -351,7 +351,8 @@ The regression test is `TestWarmdownRounding` in `src/optim_test.cc`. Evidence:
 The reference saves checkpoints as torch `.pt` state dictionaries; the C++
 runtime loads only the checkpoint container. `tools/convert_checkpoint.py` and
 `python/nanochat_cpp/checkpoint.py` remap the reference parameter names and
-apply the dtype policy, so `EvalBpb` and `score_main` can load a released base
+apply the dtype policy, so `EvalBpb` and `nanochat_cli score` can load a
+released base
 or SFT checkpoint. The conversion re-lays the reference weight values into the
 container without recomputing them, so the model being evaluated is the
 reference model. The only arithmetic difference is the forward-pass rounding
@@ -362,7 +363,8 @@ checkpoint reproduces the reference bits-per-byte within the T2 tolerance.
 
 The reference computes CORE (`nanochat.core_eval`) and categorical chat scoring
 with the torch forward and keeps every task decision in Python. nanochat.cpp
-runs one `ForwardLoss` over a padded batch in `score_main` (`ScoreBatch`) and
+runs one `ForwardLoss` over a padded batch in `nanochat_cli score`
+(`ScoreBatch`) and
 returns per-position NLL, argmax, and focused logits.
 
 The bridge reproduces the reference task logic unchanged. The logic includes the
@@ -382,13 +384,15 @@ The reference `scripts/chat_sft.py` loads its base model from the reference
 the same base model through the conversion in E3. The conversion re-lays the
 reference weights without recomputation, so the SFT start is the reference
 start. The optimizer-state section carries the reference moments, so the SFT
-warm-start uses the same starting state. The C++ `train_main` can also pretrain
+warm-start uses the same starting state. The C++ `nanochat_cli train` can also
+pretrain
 a native base checkpoint, and that path is not the parity prerequisite.
 
 **Impact:** none. The SFT start is the reference start.
 
 **Evidence:** E3 and `//src:optimizer_state_test`. The SFT loop is in the tree
-(`src/sft_main.cc`, `post-training.md` section 11), and `P5` pins the warm start
+(`src/sft_command.cc`, `post-training.md` section 11), and `P5` pins the warm
+start
 against the reference.
 
 ### P4 — SFT data parity
@@ -452,7 +456,8 @@ claims the CPU backend only.
 
 **Status:** `open`. Run R3 compares the full loss curve and the checkpoints of
 the driver against the reference loop. The driver now has what it needs: the
-native packed-row reader, `sft_main` with a progress schedule and a warm start,
+native packed-row reader, `nanochat_cli sft` with a progress schedule and a warm
+start,
 the accumulation of section 5.1, and the evaluation cadence of section 5.4.
 
 What is pinned: the progress stream, the rate multiplier, the Muon momentum,
@@ -642,11 +647,11 @@ arithmetic. That evidence is `//tests:sft_step_parity_test`.
 
 ### 3. The four rungs
 
-| Rung | Claim | Requires | Closeable before the reader and `sft_main`? |
+| Rung | Claim | Requires | Closeable before the reader and `nanochat_cli sft`? |
 |---|---|---|---|
 | R1 | SFT data parity. The renderer and the packer match the reference byte for byte. | Reference ids, masks, packed rows, and mixture order. | Yes |
 | R2 | SFT arithmetic parity. Loss, gradient, and an N-step optimizer trajectory match. | The embedded base parameters and moments, the packed rows, the optimizer configuration, and the warm start. | Yes |
-| R3 | SFT loop parity. Loss curve and checkpoints match. | The native packed-row reader, `sft_main`, the progress schedule, and the warm start. | No |
+| R3 | SFT loop parity. Loss curve and checkpoints match. | The native packed-row reader, `nanochat_cli sft`, the progress schedule, and the warm start. | No |
 | R4 | SFT validation parity. Bits-per-byte and ChatCORE match. | The packed validation rows, the evaluation cadence, and the chat task logic. | No |
 
 Do not put one label on the whole path before R4. Add one parity row per rung.

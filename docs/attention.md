@@ -112,8 +112,8 @@ tools/nanochat profile --json --out /tmp/attention_p0.json
 Run the end-to-end eval benchmark:
 
 ```bash
-tools/nanochat build --config=cuda //src:eval_bench
-tools/nanochat bench -- ./bazel-bin/src/eval_bench --batch 8 --seq 512 \
+tools/nanochat build --config=cuda //src:nanochat_cli
+tools/nanochat bench -- ./bazel-bin/src/nanochat_cli eval_bench --batch 8 --seq 512 \
   --layers 8 --heads 4 --kv-heads 4 --hidden 512 \
   --window-pattern SSSL --json
 ```
@@ -680,7 +680,7 @@ and does not regress. The backward rows stay on cuBLAS and do not regress.
 The measurement command is:
 
 ```bash
-tools/nanochat bench -- ./bazel-bin/src/eval_bench --batch 8 --seq 512 \
+tools/nanochat bench -- ./bazel-bin/src/nanochat_cli eval_bench --batch 8 --seq 512 \
   --layers 8 --heads 4 --kv-heads 4 --hidden 512 --window-pattern SSSL --json
 ```
 
@@ -713,7 +713,7 @@ Run the two measurements through the project entry point:
 
 ```bash
 tools/nanochat profile --json --out /tmp/attention-window.json
-tools/nanochat bench -- ./bazel-bin/src/eval_bench --batch 8 --seq 512 \
+tools/nanochat bench -- ./bazel-bin/src/nanochat_cli eval_bench --batch 8 --seq 512 \
   --layers 8 --heads 4 --kv-heads 4 --hidden 512 --window-pattern SSSL --json \
   > /tmp/eval-window.json
 ```

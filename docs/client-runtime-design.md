@@ -58,7 +58,7 @@ Out of scope:
 The project uses a single program, multiple data model today.
 `tools/nanochat dist` starts one process per device. The launcher sets
 `CUDA_VISIBLE_DEVICES` and the `NANOCHAT_*` variables for each process.
-`src/train_main.cc` reads those variables. The gradient-sync seam reduces the
+`src/train_command.cc` reads those variables. The gradient-sync seam reduces the
 gradients.
 
 The user pays a cost for this model:

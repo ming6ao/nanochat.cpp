@@ -143,7 +143,7 @@ The removal is one change. Keep the fp32 gates green in that change.
    intrinsics and the half atomic add.
 10. The kernel tests and the fixtures: delete the fp16 legs. Change
     `//backends/cuda/kernels:precision_gpu_test` to a single fp32 build.
-11. `src/roofline_main.cc`: delete the `fp16` precision name.
+11. `src/roofline_command.cc`: delete the `fp16` precision name.
 12. `python/nanochat_cpp/_build.py`: delete the fp16 precision mapping.
 13. `notebooks/kaggle_setup.py`: confirm that the default stays fp32.
 14. The documents: update `docs/build.md`, `docs/host-portability.md`,

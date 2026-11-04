@@ -176,7 +176,7 @@ The SFT loop follows the base training loop with these differences:
 The bridge starts SFT as one job. The loop does not depend on fresh model
 output.
 
-Implementation: `src/sft_main.cc` runs the packed-row loop, the
+Implementation: `src/sft_command.cc` runs the packed-row loop, the
 `LrMultiplierForProgress` schedule, the warm start and the `--resume` path, the
 gradient accumulation, the bits-per-byte evaluation on `--val-rows`, and the
 checkpoint write with the `Recipe` block of D7. `TrainLoop` in `src/train.cc`
@@ -346,7 +346,7 @@ Implementation: `include/nanochat/data.h`; `src/optim_state.h`; `src/optim.cc`;
 
 - **SFT** has two entries. The scripted entry is the bridge. The bridge
   materializes the packed shard, and then it launches the C++ training binary
-  (`sft_main`) under `tools/nanochat train`. The notebook entry is the
+  (`nanochat_cli sft`) under `tools/nanochat train`. The notebook entry is the
   in-process one-device `MeshRuntime` loop in `notebooks/posttrain.ipynb`.
   Both entries use the same loss, gradient, and optimizer code.
 - **RL** is on-policy. Generation and training interleave, and the optimizer
@@ -359,8 +359,8 @@ Implementation: `include/nanochat/data.h`; `src/optim_state.h`; `src/optim.cc`;
 - Every run goes through `tools/nanochat`, so the GPU queue and the resource
   sandbox apply ([sandbox.md](sandbox.md)).
 
-Implementation: `src/sft_main.cc` with `python/nanochat_cpp/sft.py`, and
-`src/rl_worker_main.cc` with `python/nanochat_cpp/rl.py` (section 11).
+Implementation: `src/sft_command.cc` with `python/nanochat_cpp/sft.py`, and
+`src/rl_worker_command.cc` with `python/nanochat_cpp/rl.py` (section 11).
 
 ## 9. Invariants and non-goals
 
@@ -416,9 +416,9 @@ changes.
 | Optimizer-state records in the checkpoint container | Done | `include/nanochat/data.h`; `src/optim_state.h`; `src/optim.cc`; `src/optimizer_state_test.cc` |
 | SFT conversation renderer (`render_conversation`) | Done | `python/nanochat_cpp/chat.py`; truncates at 2048 tokens |
 | SFT mixture and Python packer | Done | `python/nanochat_cpp/sft_data.py`; `PackedRowStream` mirrors the reference buffer and stop rule |
-| Native packed-row reader for SFT | Done | `src/sft_shard.{h,cc}`; `src/mesh_train.cc` and `sft_main` share it |
-| SFT driver on the packed shard | Done | `src/sft_main.cc`: `--warm-start`, `--resume`, `--grad-accum`, `--val-rows`, `--eval-every`, `--eval-tokens`, `--chatcore-every`, and the progress schedule of D1 |
-| SFT loop with a dataset-progress schedule and a warm start | Done | `src/sft_main.cc`: the running maximum of `approx_progress` feeds `LrMultiplierForProgress`; a warm start loads the weights and the moments at step 0 |
+| Native packed-row reader for SFT | Done | `src/sft_shard.{h,cc}`; `src/mesh_train.cc` and `nanochat_cli sft` share it |
+| SFT driver on the packed shard | Done | `src/sft_command.cc`: `--warm-start`, `--resume`, `--grad-accum`, `--val-rows`, `--eval-every`, `--eval-tokens`, `--chatcore-every`, and the progress schedule of D1 |
+| SFT loop with a dataset-progress schedule and a warm start | Done | `src/sft_command.cc`: the running maximum of `approx_progress` feeds `LrMultiplierForProgress`; a warm start loads the weights and the moments at step 0 |
 | Recipe block in the checkpoint metadata | Done | `include/nanochat/checkpoint_metadata.h`; `src/fields.cc`; `//src:fields_test`; design decision D7 |
 | Packed-row validation evaluator | Done | `src/eval.cc` `EvaluatePackedRows`; `src/eval_test.cc`; design decision D6 |
 | SFT bridge flags for the warm start and the evaluation cadence | Done | `python/nanochat_cpp/sft.py` `run()` |
@@ -429,10 +429,10 @@ changes.
 | SFT schedule parity gate (run R3, schedule half) | Done | `//tests:sft_loop_parity_test` against `tests/data/sft_loop_fixture.bin`, T0 |
 | SFT driver parity gate (`P6` and `P7`, runs R3 and R4) | Built, not run | `//tests:sft_parity_test`; T2 and `manual`, so run it at a wave boundary |
 | SFT parity rungs `P4` to `P7` | `P4` `closed`; `P5` `equivalent` on the CPU backend; `P6` and `P7` `open` | `docs/parity.md`; `docs/parity.md` |
-| RL step binary and the RL parity fixture | Done | `src/rl_step_main.cc`, `tools/dump_fixtures.py rl`, `tests/rl_parity_test.cc` |
-| RL orchestration worker | Done | `src/rl_worker_main.cc`, `python/nanochat_cpp/rl.py` |
+| RL step binary and the RL parity fixture | Done | `src/rl_step_command.cc`, `tools/dump_fixtures.py rl`, `tests/rl_parity_test.cc` |
+| RL orchestration worker | Done | `src/rl_worker_command.cc`, `python/nanochat_cpp/rl.py` |
 | RL warm start: the load path and the save path as two arguments (section 5.6) | Done | `python/nanochat_cpp/rl.py` `run()` and `worker_argv()`; `python/tests/rl_test.py` |
-| SFT bridge command | Done | `src/sft_main.cc`; `python/nanochat_cpp/sft.py` |
+| SFT bridge command | Done | `src/sft_command.cc`; `python/nanochat_cpp/sft.py` |
 | RL bridge command | Done | `python/nanochat_cpp/rl.py` |
 
 ## 12. Remaining work
@@ -842,7 +842,7 @@ number here. The execution record is in [campaigns.md](campaigns.md)._
 | # | Decision |
 |---|---|
 | D1 | One orchestration module, `python/nanochat_cpp/pipeline.py`. Each stage calls an existing facade. It holds no training logic, no model flag list of its own, and no host name. |
-| D2 | Every host builds the two stage binaries, through the resolver of B6. A tree build is the only route until the dependency plan publishes a binary wheel. |
+| D2 | Every host builds the one stage binary, through the resolver of B6. A tree build is the only route until the dependency plan publishes a binary wheel. |
 | D3 | The pinned triple is T4, one card, `sm_75`, fp32, and it is the first of two legs: a second leg runs the same job on one H100 card, `sm_90`, at bf16, in its own image and under its own run id. A local card uses its own architecture through `NANOCHAT_CUDA_ARCH`. |
 | D4 | The corpus is the committed fixture. Base reads `src/parquet/testdata/text.parquet` with `tests/data/loader_tokenizer.nctoken`. SFT reads one shard that `nc.sft.pack` writes, and RL reads four of those conversations. No stage reads the Hub. |
 | D5 | The demo shape has 2 layers, hidden 64, 4 heads, 2 key/value heads, sequence 64, and vocabulary 487 padded to 512. It costs about 4 s of CPU for the whole chain. |
@@ -1048,7 +1048,7 @@ The two Modal rows are one run of one job: the T4 leg first, then the H100 leg.
 #### 6.1 Local CPU and local GPU
 
 ```
-tools/nanochat build //src:sft_main //src:rl_worker
+tools/nanochat build //src:nanochat_cli
 NANOCHAT_CPP_BACKEND=cpu tools/nanochat train -- \
     python -m nanochat_cpp.pipeline /tmp/job.json
 ```
@@ -1085,7 +1085,7 @@ New `notebooks/colab_pipeline.ipynb`, four cells:
 4. Collect: print the report, and offer one download of `deliver/`.
 
 Cell 3 must wrap the module. The backend value satisfies the library check in
-`nanochat_init` only: both stage executables call `RequireSandboxOrDie`, which
+`nanochat_init` only: every stage subcommand calls `RequireSandboxOrDie`, which
 reads `NANOCHAT_SANDBOX` and not the backend value. So the entry is the tool,
 which sets the sentinel to `off` on a host without systemd. Do not set the
 sentinel in the notebook: `docs/sandbox.md` and `docs/host-portability.md`
@@ -1161,7 +1161,7 @@ Each leg mirrors what the single leg did:
   `nanochat-runs` Volume and the cheap artifact survives a failure of the
   expensive leg. It prints one document with three keys -- `legs`,
   `comparison`, and `gates` -- and exits non-zero when a gate fails.
-- The image build of a leg names `//src:roofline_main` beside the library and the
+- The image build of a leg names `//src:nanochat_cli` beside the library and the
   two stage executables, so gate G3 runs the tool inside the H100 container and
   starts no second Bazel build there.
 
@@ -1248,7 +1248,7 @@ A12 is one, and a report that claims eight is wrong for the corpus of this plan.
 Two targets, one source:
 
 - `//python:pipeline_test`: the `demo` profile, `size = "medium"`, data
-  `//bindings:nanochat_shared`, `//src:sft_main`, `//src:rl_worker`, the parquet
+  `//bindings:nanochat_shared`, `//src:nanochat_cli`, the parquet
   fixture, and the tokenizer fixture. About 5 s, so it stays in the default
   loop. It holds A1 to A13: the `demo` shape and a short schedule, so the eval
   stage runs at the same size as the three training stages.
@@ -1288,7 +1288,7 @@ The harness of section 2 ran before the module exists, so it answers the
 environment questions and not the module questions. Four premises hold:
 
 - The sentinel reaches the children. The harness started under
-  `tools/nanochat train --`, and both stage executables passed
+  `tools/nanochat train --`, and both stage subcommands passed
   `RequireSandboxOrDie` (D10).
 - The chain crosses stages. The driver accepted the base checkpoint as a warm
   start, and its recorded config matched the SFT argv.
@@ -1460,7 +1460,7 @@ The rest of the change:
   and `gates`. It exits non-zero when a gate fails.
 - Both functions set the same `cpu=` value, so the two legs get the same host
   budget. Modal sizes the CPU by memory when `cpu=` is absent.
-- The image build adds `//src:roofline_main`. Gate G3 runs the tool inside the
+- The image build adds `//src:nanochat_cli`. Gate G3 runs the tool inside the
   container, and the tool must not start a second Bazel build there.
 
 `notebooks/target.py` gains a `leg` argument on `ModalTarget`, so a notebook

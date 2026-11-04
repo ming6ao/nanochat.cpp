@@ -18,7 +18,8 @@ transport; the NVLink and RDMA transports await the H100 node.
 reductions with the pack copies on a side stream. Documents shard by a stride.
 A sidecar beside the checkpoint stores the data cursor for an exact resume.
 
-`train_main` accepts `--preset track3`. The CPU gates `//src:distributed_test`,
+`nanochat_cli train` accepts `--preset track3`. The CPU gates
+`//src:distributed_test`,
 `//src:train_parallel_test`, and `//src:data_test` pass. The NCCL gate and the
 two-rank parity gate run on Kaggle (see section 12).
 
@@ -274,7 +275,8 @@ generator. This difference changes the loss curve.
 
 ## 10. Launch
 
-`train_main` gains five options: `--preset track3`, `--rank`, `--world-size`,
+`nanochat_cli train` gains five options: `--preset track3`, `--rank`,
+`--world-size`,
 `--master`, and `--port`. The preset sets the Track 3 model, optimizer, and
 scheduler fields. Pass `--preset track3` before the other flags, so a later
 flag can override one field.
@@ -477,14 +479,14 @@ Non-goals:
 
 ### 3. Position in the architecture
 
-`train_main` owns one rank. The rank values configure training, so C++
+`nanochat_cli train` owns one rank. The rank values configure training, so C++
 owns their defaults. The launch, the queue, and the sandbox are host tooling.
 [sandbox.md](sandbox.md) § Entry point and [../README.md](../README.md)
 § What this is not put them there.
 
 | Task | Owner | File |
 |---|---|---|
-| Rank and group values | C++ at L6 | `src/train_main.cc` |
+| Rank and group values | C++ at L6 | `src/train_command.cc` |
 | Gradient sum | C++ | `src/distributed.cc`, `backends/cuda/nccl_sync.cu` |
 | Process start | Host tooling | `tools/nanochat` |
 | GPU queue job | Host tooling | `python/nanochat_cpp/gpu_queue.py` |
@@ -497,7 +499,8 @@ add it.
 
 ### 4. The environment contract
 
-`train_main` reads five variables. The launcher sets them. A flag overrides
+`nanochat_cli train` reads five variables. The launcher sets them. A flag
+overrides
 the variable.
 
 | Variable | Meaning | Flag |
@@ -510,7 +513,8 @@ the variable.
 
 The resolution order is the flag, then the `NANOCHAT_*` variable, then the
 default. The prefix `NANOCHAT_` prevents a clash with another tool. The names
-follow `torchrun`, so `train_main` can also run under `torchrun`, `mpirun`, or
+follow `torchrun`, so `nanochat_cli train` also runs under `torchrun`,
+`mpirun`, or
 a shell loop.
 
 On one node, `NANOCHAT_LOCAL_RANK` equals `NANOCHAT_RANK`. The variable exists
@@ -613,7 +617,7 @@ Gate: the architect approves the variable names and the `dist` command line.
 #### Phase 1 — The environment contract
 
 1. Add `EnvInt` and `EnvString` to `src/cli.h`.
-2. Set the five defaults in `src/train_main.cc`.
+2. Set the five defaults in `src/train_command.cc`.
 
 Gate: a CPU test covers the flag-over-variable order.
 
@@ -671,7 +675,7 @@ Gate: one short two-rank Kaggle run passes the checkpoint hash check.
 | Phase | Owner | Files |
 |---|---|---|
 | 0 | Architect | `docs/**` |
-| 1 | Harness | `src/train_main.cc`, `src/cli.h` |
+| 1 | Harness | `src/train_command.cc`, `src/cli.h` |
 | 2 | Architect | `tools/nanochat`, `tools/sandbox/profiles.json` |
 | 3 | Python surface | `python/nanochat_cpp/**` |
 | 4 | Notebooks | `notebooks/**` |
@@ -830,8 +834,8 @@ The loop structure can still drift.
 
 `Trainer` takes `TokenData`, which reads parquet. The mesh driver now reads a
 packed `NCSFT001` shard and does a weights-only warm start, so `posttrain.ipynb`
-runs through the C++ driver (section 6.2). There is still no `SftTrainer` or
-`sft_main` binary, and no `RlTrainer`. The user writes mechanism for the
+runs through the C++ driver (section 6.2). There is still no `SftTrainer`, no
+`nanochat_cli sft` stage, and no `RlTrainer`. The user writes mechanism for the
 reinforcement-learning path. Section 11 of
 [post-training.md](post-training.md) lists the missing parts.
 
@@ -912,8 +916,8 @@ with `nanochat_cpp.sft.pack`. The shard is a typed-record file
 (`src/record_file.h`) with two `int32` records, `tokens` and `targets`, each of
 shape `[rows, seq]`. A target of `-1` marks an ignored position. The file is
 self-describing and versioned, so `src/sft_shard.h` holds only the typed view,
-and `sft_main` and the mesh driver share one loader. The driver loads the shard
-and cycles the rows, so it needs no reader thread.
+and the `nanochat_cli sft` stage and the mesh driver share one loader. The
+driver loads the shard and cycles the rows, so it needs no reader thread.
 
 `TrainLoop` still reads parquet only. A packed-row source beside
 `DocumentSource` in `include/nanochat/dataloader.h` remains open, so a
@@ -978,7 +982,8 @@ shard = nc.sft.pack("chatsft.nchsft", conversations, tokenizer, seq_len=512)
 nc.sft.run(shard, "chatsft.nchkpt01", num_iterations=1000)
 ```
 
-`nc.sft.run` calls the toolchain, which runs `tools/nanochat train -- sft_main
+`nc.sft.run` calls the toolchain, which runs
+`tools/nanochat train -- nanochat_cli sft
 ...`. It does not run an in-process loop.
 
 A workstation run therefore obeys the entry-point rule in `AGENTS.md` section
@@ -1041,7 +1046,7 @@ interface work.
 |---|---|---|
 | 1. Expose the existing step. Add `nanochat_train_step` and `nanochat_backward_accumulate`, use `backward_accumulate` in `Trainer`, and persist the optimizer step. (Done.) | Architect for `capi.h`; Python surface for `bindings/` and `api.py`; Harness for `src/train.cc` | The Python tests and `//bindings:nanochat_capi_test` |
 | 2. Add the packed-row source and the reader. Add `render_conversation`. (Partly done: the renderer, the Python packer, and the mesh driver shard reader exist. The `TrainLoop` packed-row source remains.) | Harness for the loader; Python surface for the renderer | A packer test and a mask-shift test |
-| 3. Add the supervised fine-tuning driver and `sft_main`. (Partly done: the mesh driver runs the SFT loop from a shard. The standalone `sft_main` remains.) | Harness for `src/`; Python surface for the facade | A short run at tier T2 against the reference loss curve |
+| 3. Add the supervised fine-tuning driver and `nanochat_cli sft`. (Partly done: the mesh driver runs the SFT loop from a shard. The standalone `nanochat_cli sft` remains.) | Harness for `src/`; Python surface for the facade | A short run at tier T2 against the reference loss curve |
 | 4. Add `nanochat_rl_step` and the parity fixture. | Harness for the step; Oracle for the fixture and the test | `//tests:rl_parity_test` at tier T2 |
 | 5. Add the reinforcement-learning worker. | Harness for the worker; Python surface for the bridge | An RL smoke run at tier T2 |
 | 6. Add the mesh training driver. Add `src/mesh_train.cc` and the driver calls in `capi.h`. Use the Python driver config directly. (Done.) | Harness for `src/**`; Architect for `capi.h`; Python surface for the client; Notebooks for the launcher | The CPU driver loss sequence equals the old Python loop. The resume and the interrupt save work |

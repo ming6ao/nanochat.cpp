@@ -133,7 +133,8 @@ resources.
 
 ```bash
 # A single binary under a profile.
-python/nanochat_cpp/sandbox.py --profile=train -- ./bazel-bin/train/train_main --config d8
+python/nanochat_cpp/sandbox.py --profile=train -- \
+    ./bazel-bin/src/nanochat_cli train --config d8
 
 # GPU binary: submit one job to the queue and wait for it.
 tools/nanochat gpu --profile=t1-gpu -- ./bazel-bin/.../rms_norm_dev

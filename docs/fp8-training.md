@@ -72,7 +72,7 @@ optimizer state and the loss in fp32.
 | GEMM engine | `cublasSgemm` and `cublasGemmEx` | `backends/cuda/gemm.cu` |
 | Precision assignment | `AssignMatrixPrecision` applies the fp8 rule | `src/performance_model.cc:185-197` |
 | Peak for the MFU line | `PeakFlopsForCompute` knows the fp8 rate | `src/performance_model.cc` |
-| Roofline | The fp8 build and the fp8 rates are reportable | `src/roofline_main.cc` |
+| Roofline | The fp8 build and the fp8 rates are reportable | `src/roofline_command.cc` |
 | fp8 arithmetic | The shared rounding rule, the device quantization kernel, and the scaled GEMM, wired into the graph's linear forward and backward under `if constexpr (kFp8Build)` | `include/nanochat/fp8.h`, `backends/cuda/kernels/fp8.cu`, `include/nanochat/kernels.h:380-390`, `src/ops.cc:518`, `:567`, `:611` |
 | fp8 build define | `--config=fp8` selects `--define=precision=fp8`, which computes in bf16 and quantizes the eligible matmuls | `.bazelrc:42`, `include/nanochat/tensor.h:138-140` |
 | fp8 test gates | Three: the shared rounding, the scaled seam, and the eligible-shape graph plumbing | `//tests:fp8_rounding_test`, `//tests:fp8_gemm_test`, `//tests:fp8_graph_test` |

@@ -64,7 +64,7 @@ open decision, and the code cites an answer by its ID.
 |---|---|---|
 | O1 | How does `Checkpointer::SaveModel` learn the run facts? | A `CheckpointSaveOptions` struct in `src/train.h`, carrying `stage`, `step`, `world_size`, `precision`, `tokenizer_id`, `git_revision`, and `notes`. The config is not in it: `SaveModel` always records `model.config()`, and a second copy could drift. The three older overloads are thin wrappers over `SaveModel(model, optimizer, options, path, error)`, so no call site changed. |
 | O2 | Is `Precision` a new enum? | No. The block records `ComputePrecision` (`include/nanochat/mfu.h`), with `EnumValid` beside it in `src/checkpoint_metadata.cc`. One precision enum stays the source of truth, and the recorded value is informational: it never changes a load decision. |
-| O3 | What are the `Stage` values? | `Stage::kBase`, `Stage::kSft`, and `Stage::kRl`, stored as 0, 1, and 2. There is no `kPretrain`. `src/sft_main.cc` records `kSft`, and `RlWorker::SaveCheckpoint` records `kRl`. |
+| O3 | What are the `Stage` values? | `Stage::kBase`, `Stage::kSft`, and `Stage::kRl`, stored as 0, 1, and 2. There is no `kPretrain`. `src/sft_command.cc` records `kSft`, and `RlWorker::SaveCheckpoint` records `kRl`. |
 | O4 | Is a `ConfigFields` mirror the right shape? | No mirror. One host-only `VisitConfig(Config&, IFieldsVisitor&)` in `src/checkpoint_metadata.cc`, visited through the `ConfigBlock` wrapper that carries the block's size word. No `Config` field is duplicated, so the drift test is unnecessary. |
 | O5 | New magic `NCHKPT02`, or version 1 only? | Version 1 only, with the existing `NCHKPT01` magic. `DetectFormat` reads the magic and then the version word. An unknown version word is the hard error `unsupported checkpoint version`. |
 | O6 | How does a 64-bit `step` fit the 32-bit word stream? | Two words, the low 32 bits first and then bits 32-63. The order is part of the contract, and the word-stream comment of `include/nanochat/fields.h` states it. The full range is kept, because a capped step loses a long run that a resume schedule needs. |
@@ -107,7 +107,7 @@ they all use the one container.
 config before the write, so an impossible config fails at the save and at the
 load instead of at the first GEMM. `created_utc` stays empty: a save has to be
 reproducible, and the field is informational, so a tool that wants a timestamp
-writes one. `src/sft_main.cc` records `Stage::kSft` and
+writes one. `src/sft_command.cc` records `Stage::kSft` and
 `RlWorker::SaveCheckpoint` records `Stage::kRl`, so a reader tells the stages
 apart without a side file.
 
@@ -1059,7 +1059,7 @@ The save writes the parameters plus the SFT optimizer state, so the SFT run can
 resume. The base load reads the parameter section only. The full chat
 evaluation stays in `eval.ipynb` with `STAGE = "sft"`.
 
-The scripted `nc.sft.run` bridge and `sft_main` stay for a one-shot job.
+The scripted `nc.sft.run` bridge and `nanochat_cli sft` stay for a one-shot job.
 `docs/post-training.md` section 8 already names both entries: the bridge and
 the in-process one-device `MeshRuntime` loop in `notebooks/posttrain.ipynb`.
 Keep the section as it stands. The notebook entry is now in the tree, so the
@@ -1198,7 +1198,8 @@ thereafter.
    `src/mesh_runtime_test.cc` (`TestMaskedTargetsIgnoreLoss`), so the runtime
    loop is the fine-tuning path. `nc.Model` plus `nc.Optimizer` is not needed.
 2. `docs/post-training.md` section 8 already records the in-process notebook
-   entry beside the `sft_main` bridge. No further revision to section 8 is
+   entry beside the `nanochat_cli sft` bridge. Section 8 needs no further
+   revision to
    needed. The architect should add the notebook entry to the status table in
    section 11.
 3. The model card template needs a final list of fields.

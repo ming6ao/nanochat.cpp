@@ -6,7 +6,7 @@ Dependencies point strictly downward. There is exactly one interchangeable
 seam, and it is the kernel API at L1.
 
 ```text
-L6  App / CLI        nine *_main.cc programs             src/*_main.cc
+L6  App / CLI        one binary, nine subcommands        nanochat_cli.cc
 L5  Train driver     TrainLoop Checkpointer Logger Mfu   train.cc
 L4  Optim            AdamW Muon Scheduler param groups   optim.cc
 L3  Model / graphs   Model, Prefill, Decode, KvCache     model.cc generate.cc
@@ -92,7 +92,12 @@ nanochat.cpp/
     device_profile.cc          # derives the device table from backends/*/caps.json
     fields.cc  checkpoint_metadata.cc  # the visitor and the metadata block
     fields_test.cc                # the ported visitor tests
-    *_main.cc
+    # The one stage binary. `nanochat_cli.cc` is the entry point, `command.h`
+    # and `commands.cc` are the subcommand seam, and each `<name>_command.cc`
+    # holds one handler. `cli.{h,cc}` is the one flag parser.
+    nanochat_cli.cc  command.h  commands.cc  cli.h  cli.cc
+    *_command.cc
+    plan_main.cc               # the probe `doctor` prints; alone on purpose
     parquet/                   # the native parquet reader (docs/parquet-native.md)
       thrift.{h,cc}  format.{h,cc}  levels.{h,cc}  reader.{h,cc}
       *_test.cc  testdata/text.parquet
@@ -692,7 +697,7 @@ A comparison with the PyTorch world is a file, not an import.
 ```text
       producer (Z2, offline)              consumer (Z1, no torch)
 torch nanochat  -->  fixtures/*.bin  -->  tests/
-HF datasets     -->  packed rows     -->  src/sft_main
+HF datasets     -->  packed rows     -->  nanochat_cli sft
 ```
 
 The producer runs in a virtual environment with the reference checkout. The

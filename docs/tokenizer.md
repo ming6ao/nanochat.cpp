@@ -349,10 +349,11 @@ returns an error.
 calls `BpeTrainer::AddDocument`. The `--text <file>` mode stays for one document
 per line.
 
-`train_main` and `eval_main` read parquet directly and tokenize during the run
-(docs/parquet-native.md). They take `--train-parquet`/`--val-parquet` and
-`--tokenizer`, so no shard pre-pass is necessary. The shard producer
-(`tok_shard_main`), its writer, and the `NANO` shard reader are gone.
+`nanochat_cli train` and `nanochat_cli eval` read parquet directly and tokenize
+during the run (docs/parquet-native.md). They take `--train-parquet`,
+`--val-parquet`, and `--tokenizer`, so no shard pre-pass is necessary. The
+shard producer (`tok_shard_main`), its writer, and the `NANO` shard reader are
+gone.
 
 ZSTD is the only decompressor the reader needs. It comes from the Bazel Central
 Registry (`@zstd//:zstd`), and `src/parquet/BUILD.bazel` links it into the
@@ -361,8 +362,8 @@ DuckDB.
 
 ## 11. Integration
 
-- `generate_main`: accept a text prompt, encode it with a leading BOS, and
-  stream the decoded output. This changes the current token-id-only contract.
+- `nanochat_cli generate`: accept a text prompt, encode it with a leading BOS,
+  and stream the decoded output. This changes the token-id-only contract.
 - `eval`: decode the sample rows for base evaluation.
 - `tests`: the parity test uses the fixture, so it needs no Python.
 - The bridge: `python/nanochat_cpp/data.py` can build a `tiktoken` encoding from
@@ -462,7 +463,7 @@ The table lists the landed files.
 
 Integration changes:
 
-- `src/generate_main.cc` streams a text prompt and the decoded output.
+- `src/generate_command.cc` streams a text prompt and the decoded output.
 - `src/eval.cc` and `src/eval.h` decode the generated rows.
 - `src/data.cc` and `src/data_test.cc` carry the new `LoadTokenizer` contract.
 - `src/tokenizer/BUILD.bazel` and `tests/BUILD.bazel` hold the targets.

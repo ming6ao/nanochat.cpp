@@ -306,7 +306,7 @@ gate each. Every one compares one backend against one committed fixture, as
 | `//tests:sft_step_parity_gpu_test` | T1 GPU | The same two files | The same eight-step trajectory on the CUDA backend |
 | `//tests:sft_step_parity` | T2 | A fixture named on the command line | A larger trajectory through the standalone binary |
 | `//tests:sft_loop_parity_test` | T0 CPU | `sft_loop_fixture.bin`, `sft_step_fixture.bin` | `LrMultiplierForProgress`, the momentum, the epoch, and the packed bits-per-byte |
-| `//tests:sft_parity_test` | T2 GPU | The loop, step, rows, and base fixtures | The real `sft_main` output lines and the checkpoint it writes |
+| `//tests:sft_parity_test` | T2 GPU | The loop, step, rows, and base fixtures | The real `nanochat_cli sft` output lines and the checkpoint it writes |
 
 Every fixture name above is under `tests/data/`. The gates compare against the
 recorded values, not against each other:
@@ -698,7 +698,8 @@ precision branch.
 
 Status: delivered. `src/hw_gate.cc` implements the cases and a host reference.
 `src/train.cc` runs it before the first step when the device is real, and exits
-with code 2 on a mismatch. `train_main --hw-check {auto,on,off}` selects the
+with code 2 on a mismatch. `nanochat_cli train --hw-check {auto,on,off}` selects
+the
 behaviour. `//tests:hw_gate_cuda_test` is the standalone twin. There is no
 stamp, by decision: the gate always runs on a fresh run.
 
@@ -732,7 +733,7 @@ time.
 
 #### 4.3 The integration into training
 
-`train_main` gains `--hw-check {auto,on,off}`. The default is `auto`.
+`nanochat_cli train` gains `--hw-check {auto,on,off}`. The default is `auto`.
 
 `auto` runs the gate when three conditions hold:
 
@@ -850,7 +851,7 @@ checks move to the merge gate.
 | A5 | The emulator fp8 header and `extern __shared__` | Simulator | `kernel_emu_test` |
 | A6 | The fp8 trace leg and the tolerance rows | Oracle, Architect | The exact CPU and simulator legs |
 | B1 | The hardware startup gate | Harness | `hw_gate_cuda_test` |
-| B2 | The integration into `train_main` | Harness | A live run. There is no stamp. |
+| B2 | The integration into `nanochat_cli train` | Harness | A live run. There is no stamp. |
 
 Do A1, A2, A3, and C1 first, so the fast gate exists early. Then do A4, A5, and
 A6. Then do B1 and B2.
@@ -1255,8 +1256,9 @@ its bound.
    of `tools/nanochat simulate`.
 2. The Architect adds the test to the merge-gate GPU budget in
    [AGENTS.md](../AGENTS.md) section 5.5 as a `t2-parity` gate.
-3. The Harness adds a `--trace <path>` option to `train_main` and `eval_main`
-   if full harness coverage is necessary. This step is optional.
+3. The Harness adds a `--trace <path>` option to `nanochat_cli train` and
+   `nanochat_cli eval`, if full harness coverage is necessary. This step is
+   optional.
 
 Gate: two commands run every leg. `tools/nanochat simulate --device
 gtx1080ti --suite correctness` runs the CPU leg and the simulator leg.

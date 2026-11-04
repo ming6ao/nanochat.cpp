@@ -78,8 +78,8 @@ Design constraints:
 - Output is per-position NLL and argmax, plus the focused logits when the caller
   gives a focus set (categorical chat only reads the letter tokens at the answer
   position).
-- The binary is `score_main`; it is stateless and writes a result file. The
-  layout lives in `src/record_file.h`. `python/nanochat_cpp/eval_fixture.py`
+- The command is `nanochat_cli score`; it is stateless and writes a result file.
+  The layout lives in `src/record_file.h`. `python/nanochat_cpp/eval_fixture.py`
   writes the `NANOEVL1` file, and the test dumper mirrors it.
 
 The reduction is deliberately *not* in C++. Whether a CORE example is correct is
@@ -98,7 +98,8 @@ deterministic metrics and a fixed seed for samples.
 ## 4. Base evaluation
 
 This section describes the target design. The shipped tree implements only the
-bits-per-byte mode: `nanochat_cpp.api.evaluate` returns bpb, and `//src:eval_main`
+bits-per-byte mode: `nanochat_cpp.api.evaluate` returns bpb, and
+`//src:nanochat_cli`
 has no `--eval`, CORE, or sample flag. The remaining modes are not implemented.
 
 ### 4.1 Bits per byte
@@ -136,7 +137,7 @@ the forward pass is C++.
    The bridge tokenizes each candidate and computes the candidate span from the
    common prefix or suffix.
 5. **Score.** Pack the sequences into a `ScoreBatch` fixture and run
-   `score_main`.
+   `nanochat_cli score`.
 6. **Reduce.** MC and schema pick the candidate with the lowest mean NLL over
    the span; LM requires every argmax prediction in the span to match. Center
    with `(accuracy - 0.01 * baseline) / (1 - 0.01 * baseline)`; CORE is the mean
@@ -239,12 +240,12 @@ subset separately, mirroring the post-training loop's logging.
 The project has shipped most of the evaluation workstream in this document:
 
 1. A `checkpoint.py` converter that loads a reference checkpoint.
-2. `ScoreBatch` + `score_main` + the fixture format.
+2. `ScoreBatch` + `nanochat_cli score` + the fixture format.
 3. `GenerateBatch` ([model.md](model.md)).
-4. `nanochat_cpp.api.evaluate` (bpb) and `//src:eval_main` (bpb only).
+4. `nanochat_cpp.api.evaluate` (bpb) and `//src:nanochat_cli` (bpb only).
 5. `nanochat_cpp.chat.ChatEvaluator` (categorical, generative, ChatCORE).
 
-The base CORE and sample modes are not wired into `eval_main` or
+The base CORE and sample modes are not wired into `nanochat_cli eval` or
 `api.evaluate` yet.
 
 The project tracks the differences that remain in [parity.md](parity.md). E3
@@ -459,12 +460,13 @@ reference batch size.
 
 ### 12. Reproduction
 
-The `src/eval_bench.cc` binary reproduces the last row. Build it and run it
-through the entry point:
+The `nanochat_cli eval_bench` subcommand reproduces the last row. Build it
+and run it through the entry point:
 
 ```bash
-tools/nanochat build --config=cuda //src:eval_bench
-tools/nanochat bench -- bazel-bin/src/eval_bench --batch 32 --seq 1024
+tools/nanochat build --config=cuda //src:nanochat_cli
+tools/nanochat bench -- bazel-bin/src/nanochat_cli eval_bench \
+    --batch 32 --seq 1024
 ```
 
 The binary prints the eval arena bytes and the token rate. It uses random

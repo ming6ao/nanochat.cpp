@@ -73,10 +73,10 @@ tools/nanochat build --config=cuda
 tools/nanochat build --config=t4
 
 # One target.
-tools/nanochat build //src:train_main //src:generate_main
+tools/nanochat build //src:nanochat_cli
 ```
 
-The static library and the stage binaries land in `bazel-bin/`. The entry
+The static library and the stage binary land in `bazel-bin/`. The entry
 point serializes builds, caps the Bazel heap, and applies the host budget.
 [docs/build.md](docs/build.md) gives the layers and the dependency rules.
 
@@ -112,7 +112,7 @@ The training path reads parquet documents and tokenizes during the run. Train
 the tokenizer on the same corpus first.
 
 ```bash
-tools/nanochat build //src/tokenizer:tok_train_main //src:train_main
+tools/nanochat build //src/tokenizer:tok_train_main //src:nanochat_cli
 
 # Write an NCTOKEN1 tokenizer.
 tools/nanochat run t0-cpu -- \
@@ -122,7 +122,7 @@ tools/nanochat run t0-cpu -- \
 
 # Train the base model.
 tools/nanochat train -- \
-    bazel-bin/src/train_main \
+    bazel-bin/src/nanochat_cli train \
     --train-parquet 'data/*.parquet' \
     --val-parquet 'data/val-*.parquet' \
     --tokenizer tokenizer.nctoken \
@@ -140,7 +140,7 @@ For two cards on one host, start one process per rank:
 
 ```bash
 tools/nanochat dist --nproc-per-node 2 -- \
-    bazel-bin/src/train_main --train-parquet 'data/*.parquet' ...
+    bazel-bin/src/nanochat_cli train --train-parquet 'data/*.parquet' ...
 ```
 
 `dist` sets the rank variables and submits one queue job for the group. See
@@ -166,7 +166,7 @@ cat > /tmp/job.json <<'JSON'
 }
 JSON
 
-tools/nanochat build //src:sft_main //src:rl_worker
+tools/nanochat build //src:nanochat_cli
 PYTHONPATH=python tools/nanochat train -- \
     python3 -m nanochat_cpp.pipeline /tmp/job.json
 ```
@@ -178,8 +178,8 @@ check, not a quality result.
 
 `out_root` comes from the job, then `NANOCHAT_RUNS_DIR`, then the system
 temporary directory. The report records the stage order, the step counts, the
-loss traces, the metadata, and the file digests. `//src:sft_main` and
-`//src:rl_worker` are the two stage binaries.
+loss traces, the metadata, and the file digests. `//src:nanochat_cli` is the
+one stage binary, and a subcommand names the stage.
 
 [docs/post-training.md](docs/post-training.md) gives the design, and section
 11 gives the state of each piece.
@@ -191,10 +191,10 @@ match the checkpoint. A mismatch fails at load, before a kernel reads a wrong
 shape.
 
 ```bash
-tools/nanochat build //src:generate_main
+tools/nanochat build //src:nanochat_cli
 
 tools/nanochat eval -- \
-    bazel-bin/src/generate_main \
+    bazel-bin/src/nanochat_cli generate \
     --model base.ckpt --tokenizer tokenizer.nctoken \
     --prompt "Name a prime number." \
     --max-tokens 64 --temperature 0.8 --top-k 50 \
@@ -250,12 +250,12 @@ it.
 
 ## Evaluate
 
-`eval_main` computes bits per byte on the validation split. Pass the model
-flags that match the checkpoint:
+`nanochat_cli eval` computes bits per byte on the validation split. Pass the
+model flags that match the checkpoint:
 
 ```bash
 tools/nanochat eval -- \
-    bazel-bin/src/eval_main \
+    bazel-bin/src/nanochat_cli eval \
     --model base.ckpt \
     --val-parquet 'data/val-*.parquet' \
     --tokenizer tokenizer.nctoken \

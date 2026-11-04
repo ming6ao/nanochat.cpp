@@ -118,9 +118,9 @@ calls:
 
 A wheel install has no `bazel-bin`, so a facade fails at item 5 with that
 message and not with a file-not-found from the launcher (decision D8).
-`_build.build_stages(options)` builds the library and both children in one
-`tools/nanochat build` call, so `_build._build_command` keeps one home for the
-command line (B6).
+`_build.build_stages(options)` builds the library and the one stage binary in
+one `tools/nanochat build` call, so `_build._build_command` keeps one home for
+the command line (B6).
 
 ### 3.3 On-demand build
 

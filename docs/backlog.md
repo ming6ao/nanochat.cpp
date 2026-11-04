@@ -154,7 +154,8 @@ behavior, so the kernel tests compare the two paths.
 
 **Tests.** The classifier and oracle tests prove correctness and finite
 differences, `harness_test.cc` is the gate for the rejected option, and
-`train_parity_test.cc` plus `eval_bench` cover the trajectory and the timing.
+`train_parity_test.cc` plus `nanochat_cli eval_bench` cover the trajectory and
+the timing.
 
 **Reproduction.**
 
@@ -162,7 +163,7 @@ differences, `harness_test.cc` is the gate for the rejected option, and
 tools/nanochat build
 tools/nanochat test
 tools/nanochat test --gpu //backends/cuda/kernels:classifier_gpu_test
-tools/nanochat bench -- ./bazel-bin/src/eval_bench --batch 16 --seq 1024 \
+tools/nanochat bench -- ./bazel-bin/src/nanochat_cli eval_bench --batch 16 --seq 1024 \
   --layers 12 --heads 6 --kv-heads 6 --hidden 768 \
   --vocab 32768 --padded-vocab 32768
 ```

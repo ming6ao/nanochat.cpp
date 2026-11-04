@@ -14,7 +14,7 @@ The tokenizer work is in [tokenizer.md](tokenizer.md). The data format is in
 Today the data path has three stages:
 
 ```
-parquet -> tok_shard_main -> NANO shard -> train_main
+parquet -> tok_shard_main -> NANO shard -> nanochat_cli train
 ```
 
 Two problems follow from the stage two and stage three split:
@@ -159,8 +159,9 @@ not from the `<shard>.bytes` sidecar.
 
 - `TrainConfig` gains a tokenizer path, a source factory, a thread count, and
   a document buffer size.
-- `train_main` and `eval_main` gain `--tokenizer`, `--train-parquet`,
-  `--val-parquet`, `--tokenizer-threads`, and `--buffer-docs`.
+- `nanochat_cli train` and `nanochat_cli eval` gain `--tokenizer`,
+  `--train-parquet`, `--val-parquet`, `--tokenizer-threads`, and
+  `--buffer-docs`.
 - `eval.cc` reads token bytes from the tokenizer.
 
 ### Phase 6 -- Bridge

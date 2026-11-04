@@ -130,7 +130,7 @@ One process per rank, one queue job for the group:
 
 ```bash
 tools/nanochat dist --nproc-per-node 8 --profile train \
-    --device 0,1,2,3,4,5,6,7 -- <train_main> \
+    --device 0,1,2,3,4,5,6,7 -- <nanochat_cli> train \
     --layers 24 --heads 12 --kv-heads 12 --hidden 1536 --seq 2048 \
     --vocab 32768 --window-pattern SSSL \
     --batch 16 --grad-accum 4 --num-iterations 5570 \
@@ -142,7 +142,7 @@ tools/nanochat dist --nproc-per-node 8 --profile train \
 
 `tools/nanochat dist` starts one process per rank. It submits one queue job
 for the group, applies the `train` sandbox profile, and sets the five rank
-variables that `train_main` reads:
+variables that `nanochat_cli train` reads:
 
 | Variable | Meaning |
 |---|---|
@@ -205,7 +205,7 @@ Run the pipeline in this order:
 | Metric | Tool | Side |
 |---|---|---|
 | Bits per byte | The validation loop, on the validation shard | The C++ harness |
-| CORE | `score_main` plus the Python reduction | Split |
+| CORE | `nanochat_cli score` plus the Python reduction | Split |
 | Samples | The generate path | The C++ harness |
 
 The C++ side computes the logits. The Python side owns the task data and the

@@ -115,9 +115,9 @@ arithmetic states `0`, and the table prints `-` for it.
 
 One header writes the document for every benchmark, whether it links the CUDA
 runtime (`backends/cuda/kernels/testing/bench_utils.h`) or a host clock
-(`src/eval_bench.cc`, `dev/kernels/`). A benchmark adds rows and, where its
-report carries a field that is not a row, one extra top-level field with
-`SetExtra`. It does not format JSON itself.
+(`src/eval_bench_command.cc`, `dev/kernels/`). A benchmark adds rows. Where
+its report carries a field that is not a row, the benchmark adds one extra
+top-level field with `SetExtra`. It does not format JSON itself.
 
 In the table, the denominator stands above the header as one comment line, and
 the `MFU` column appears only when a row reports a share. A benchmark that
@@ -157,7 +157,7 @@ Split the step before you choose a fix:
 - Host-side gaps: data loading, logging, checkpointing, and evaluation.
 
 Benchmarks to use: `row_benchmark`, `qk_prep_bench`, `decode_fused_bench`,
-`attention_benchmark`, and `eval_bench`.
+`attention_benchmark`, and `nanochat_cli eval_bench`.
 
 The checklist orders the parts by hand. For the loop that measures the split
 from a device trace and lands the two largest items, read
@@ -194,11 +194,11 @@ same flags.
 
 `backends/cuda/gemm.cu` now uses `cublasSgemm` for a single fp32 GEMM. The full
 forward dropped to 679 ms. The reference is 687 ms. Reproduce the numbers with
-`eval_bench`:
+`nanochat_cli eval_bench`:
 
 ```bash
-tools/nanochat build --config=cuda //src:eval_bench
-tools/nanochat bench -- bazel-bin/src/eval_bench --batch 16 --seq 1024 \
+tools/nanochat build --config=cuda //src:nanochat_cli
+tools/nanochat bench -- bazel-bin/src/nanochat_cli eval_bench --batch 16 --seq 1024 \
   --layers 12 --heads 6 --kv-heads 6 --hidden 768 \
   --vocab 32768 --padded-vocab 32768
 ```
@@ -268,7 +268,7 @@ bar.
 | The Modal function that produced it | `tools/modal/app.py`, `profile_h100` | Done for `base` on `h100` only |
 | The uniform step record | `include/nanochat/logger.h`, `LogRecord` | Done. `step_ms`, `mfu`, `forward_ms`, `backward_ms`, `optim_ms`, `sync_ms`, `data_ms` |
 | The predicted step time | `tools/nanochat roofline` | Done. CPU only, no queue |
-| The stage loggers | `src/sft_main.cc`, `src/rl_worker_main.cc` | **Gap.** Both print free text, so only `base` writes `metrics.jsonl` |
+| The stage loggers | `src/sft_command.cc`, `src/rl_worker_command.cc` | **Gap.** Both print free text, so only `base` writes `metrics.jsonl` |
 | The deterministic loop | `python/nanochat_cpp/pgo.py`, `python/tests/pgo_test.py` | Done. Five commands, five schemas, 29 T0 tests |
 | The stage-generic tracer and measurer | `tools/modal/app.py`, `profile_stage` and `measure_stage` | Done. Four stages, both devices, the 180 second cap, one driver |
 | The procedure | `.agents/skills/pgo/` | Done. `SKILL.md`, three references, four wrappers, one wrapper test |
@@ -557,7 +557,7 @@ enter the loop.
 | PGO.1 | `python/nanochat_cpp/pgo.py` with `measure`, `analyze`, `compare`, `record`, and the four schemas, plus `python/tests/pgo_test.py` over a synthetic trace | the test passes under `tools/nanochat test`, and the analyzer reproduces the numbers of a trace the loop wrote | Python surface. **Landed** |
 | PGO.2 | `profile_stage(stage, device, steps, seconds)` in `tools/modal/app.py`, one image per device, the Chrome trace export, and the 180 second cap | `modal_app_test` passes, and one `base`/`h100` call writes the eight artifacts the analyzer reads | Python surface. **Landed**, for four stages and two devices |
 | PGO.3 | The skill: `SKILL.md`, `references/trace-signatures.md`, `references/metrics.md`, `references/gates.md`, and the four thin CLIs | the skill runs one full iteration from a clean checkout | architect. **Landed** |
-| PGO.4 | A `LogRecord` per step from `sft_main` and `rl_worker_main`, so all four stages share one metric source | `metrics.jsonl` holds `step_ms` and `mfu` for both, and `//src:harness_test` passes | Harness. **Open.** Until it lands, `sft` is measured by its own seconds and `rl` by its step callbacks |
+| PGO.4 | A `LogRecord` per step from `nanochat_cli sft` and `nanochat_cli rl_worker`, so all four stages share one metric source | `metrics.jsonl` holds `step_ms` and `mfu` for both, and `//src:harness_test` passes | Harness. **Open.** Until it lands, `sft` is measured by its own seconds and `rl` by its step callbacks |
 | PGO.5 | A Bazel disk cache. Modal builds an image without a Volume, so the achievable half is a run-time cache under `--disk_cache` | a one-line source change costs seconds of build inside a function, and the doc records why the image half is out of reach | build, architect. **Open**, and narrowed |
 | PGO.6 | `tools/nanochat pgo <action>`, a forwarder to `nanochat_cpp.pgo` | the entry point runs every phase, and a bare `python -m` still works | architect. **Landed** |
 | PGO.7 | The first full iteration on `base`/`h100`: the gradient norm on the device, and the blocking scalar reads | the pair gains at least 5 percent on `step_ms`, the gate passes, and `REPORT.md` holds both numbers | the operator. **Half landed:** the gradient norm landed as `8b71b0c`, the scalar reads are open |
@@ -807,14 +807,14 @@ families. The scalar baseline and the promoted baseline are both below.
        --sample-every=-1 --save-every=-1 --run=dummy --model-tag=cpu_bench_torch'
    ```
 
-4. Run the `nanochat.cpp` CPU backend. Build `//src:train_main` and run the
+4. Run the `nanochat.cpp` CPU backend. Build `//src:nanochat_cli` and run the
    binary under the sandbox. Derive the model shape and the horizon with
    `nanochat_cpp.plan` ([python.md](python.md) section 4).
 
    ```bash
    cd ~/repos/nanochat.cpp
-   tools/nanochat build //src:train_main
-   tools/nanochat run train -- bazel-bin/src/train_main \
+   tools/nanochat build //src:nanochat_cli
+   tools/nanochat run train -- bazel-bin/src/nanochat_cli train \
      --train-parquet <train-parquet> --tokenizer <tokenizer.nctoken> \
      --layers 4 --heads 4 --kv-heads 4 --hidden 512 --seq 512 --vocab <vocab> \
      --window-pattern L --batch 2 --grad-accum 1 --num-iterations 10 \
@@ -1329,7 +1329,7 @@ The header `include/nanochat/kernels.h` is unchanged. The read-only check
 Command (the bridge in The measured baseline, step 4):
 
 ```bash
-tools/nanochat run train -- bazel-bin/src/train_main \
+tools/nanochat run train -- bazel-bin/src/nanochat_cli train \
   --train-parquet <train-parquet> --tokenizer <tokenizer.nctoken> \
   --layers 4 --heads 4 --kv-heads 4 --hidden 512 --seq 512 --vocab <vocab> \
   --window-pattern L --batch 2 --grad-accum 1 --num-iterations 10 \
@@ -1489,7 +1489,7 @@ threads and vectorizes `MuonUpdate`, `ClassifierForward`,
 Command (the bridge in The measured baseline, step 4):
 
 ```bash
-tools/nanochat run train -- bazel-bin/src/train_main \
+tools/nanochat run train -- bazel-bin/src/nanochat_cli train \
   --train-parquet <train-parquet> --tokenizer <tokenizer.nctoken> \
   --layers 4 --heads 4 --kv-heads 4 --hidden 512 --seq 512 --vocab <vocab> \
   --window-pattern L --batch 2 --grad-accum 1 --num-iterations 10 \

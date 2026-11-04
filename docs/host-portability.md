@@ -516,7 +516,7 @@ One job file runs base training, then SFT, then RL, and each stage reads the
 checkpoint of the stage before it. `docs/post-training.md` Part 1, section 9 gives the
 chain itself; this section gives what each host contributes and what the run
 records about it. The entry is always the tool (design decision D10 of
-`docs/post-training.md`), because both stage executables call
+`docs/post-training.md`), because every stage subcommand calls
 `RequireSandboxOrDie`, and a notebook's `NANOCHAT_SANDBOX_BACKEND=none`
 satisfies the library only.
 
@@ -644,10 +644,10 @@ def pipeline_h100(job_json, run_id, stage_json="", publish_json="") -> str
 What the two legs share, so they cannot drift:
 
 - `pipeline` and `pipeline_h100` are thin faces of one `_pipeline_on(leg, ...)`.
-- The image builds the library, both stage executables, and `//src:roofline_main`
-  in one call, so a container needs no second build. It names the two binaries
-  through the `NANOCHAT_SFT_MAIN` and `NANOCHAT_RL_WORKER` overrides, because
-  the installed distribution's `repo_root()` is not the image tree (B6).
+- The image builds the library and `//src:nanochat_cli` in one call, so a
+  container needs no second build. It names the one binary through the
+  `NANOCHAT_SFT_MAIN` and `NANOCHAT_RL_WORKER` overrides, because the installed
+  distribution's `repo_root()` is not the image tree (B6).
 - `_check_cards(leg, ...)` stops a container whose card does not match the
   leg's type, count, and architecture, and `max_containers=1` keeps one chain at
   a time.

@@ -451,9 +451,9 @@ def _build_image(leg: Leg):
         #                "https://.../nanochat_cpp_cuda_sm75-0.1.0.whl")
         .pip_install(f"{REPO_ROOT}/python[hub]")
         .env(image_env(leg))
-        # One build names the library, the two stage executables, and the
-        # roofline tool, so the image satisfies D2, the chain finds both
-        # children (B6), and gate G3 measures without a second build.
+        # One build names the library and the one stage binary, which runs
+        # every stage subcommand and the roofline gate, so the image satisfies
+        # D2, the chain finds its binary (B6), and G3 needs no second build.
         .run_commands(image_build_command(leg))
         .workdir(REPO_ROOT)
     )
