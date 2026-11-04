@@ -732,7 +732,9 @@ void TestPointwiseAffine() {
   for (int i = 0; i < n; ++i) values[i] = 8.0f * rng.Next();
   std::vector<ComputeType> a = ToStorage(values);
   const float row_max = 2.5f;
-  std::vector<ComputeType> dev_beta = ToStorage({row_max});
+  // `ScalarArg::dev` is `const float*` in every build: a device scalar is not
+  // `ComputeType`, and a bf16 build does not narrow it (see `ScalarArg`).
+  std::vector<float> dev_beta = {row_max};
   std::vector<ComputeType> dev_out(n);
   PointwiseParams p;
   p.op = PointwiseOp::kAffine;

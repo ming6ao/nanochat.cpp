@@ -362,12 +362,12 @@ void TraceValueGate(const char* name) {
                       &ref_gate);
   CheckVectorClose(FromStorage(v_dev.Download()), ref_v, kTraceTol,
                    (std::string(name) + " fwd v").c_str());
-  CheckVectorClose(gate_dev.Download(), ref_gate, kTraceTol,
+  CheckVectorClose(FromStorage(gate_dev.Download()), ref_gate, kTraceTol,
                    (std::string(name) + " ve_gate slot").c_str());
 
   // The saved gate is what the backward reads, so the backward runs against the
   // device's own gate, not against the reference one.
-  const std::vector<float> gate_seen = gate_dev.Download();
+  const std::vector<float> gate_seen = FromStorage(gate_dev.Download());
   DevBuf<ComputeType> dv_dev(ToStorage(dv));
   DevBuf<float> gate_w_grad_dev(kv_heads * kVeGateChannels);
   DevBuf<ComputeType> dh_dev(rows * hidden);
@@ -415,16 +415,19 @@ void TraceGradNorm(const char* name) {
   };
   const float clip = 0.05f;  // below the norm, so the scale path is exercised
 
-  std::vector<DevBuf<ComputeType>*> buffers;
-  std::vector<const ComputeType*> pointers;
+  // `GradNorm` takes `const float* const*`: a gradient span is fp32 in every
+  // build (`using GradientType = float`), so these buffers are not
+  // `ComputeType`, and a bf16 build does not narrow them (`kernels.h`).
+  std::vector<DevBuf<float>*> buffers;
+  std::vector<const float*> pointers;
   std::vector<int> counts;
   for (const std::vector<float>& span : spans) {
-    auto* buffer = new DevBuf<ComputeType>(ToStorage(span));
+    auto* buffer = new DevBuf<float>(span);
     buffers.push_back(buffer);
     pointers.push_back(buffer->ptr);
     counts.push_back(static_cast<int>(span.size()));
   }
-  DevBuf<const ComputeType*> table(pointers);
+  DevBuf<const float*> table(pointers);
   DevBuf<int> count_table(counts);
   DevBuf<float> norm_dev(1);
   DevBuf<float> scale_dev(1);
