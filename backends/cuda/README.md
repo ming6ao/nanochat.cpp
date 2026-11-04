@@ -6,7 +6,8 @@ primitive tier, and the backend's fused-override registrations. The per-family
 compute kernels live in [`kernels/`](kernels/README.md); the collectives live in
 [`collective/`](collective) and belong to the Collective workstream.
 
-The layering rule is [DESIGN.md](../../DESIGN.md) §2.1: nothing here includes a
+The layering rule is the [dependency
+invariants](../../docs/build.md#dependency-invariants): nothing here includes a
 model header, and above the seam nothing includes a CUDA header.
 
 ## `caps.json` — the single source of the declaration
@@ -122,7 +123,8 @@ label name `//backends/cpu` uses, for the derivation and for `caps_gpu_test`.
 
 A fused override is a single-kernel replacement for one composition; the
 composition defines the semantics and the override is an optimization
-(`DESIGN.md` §3.1, `docs/model-and-device-bringup.md` §7.4 condition 1). The
+([the fusion boundary rule](../../docs/kernels.md),
+`docs/model-and-device-bringup.md` §7.4 condition 1). The
 registration names a composition, a family, and a capability bit — never a graph,
 a block index, or a kernel symbol, which is what stops a backend from adding
 topology through the back door.
@@ -148,8 +150,9 @@ Two are not, and the reason is the vocabulary rather than the code:
   §7.3, `spec/capability_bits.md` §5).
 
 `attention` is not registered either: `kFeatureFusedAttention` exists in the
-header (the v2 candidate of `DESIGN.md` §3.1) and has no vocabulary name, so no
-caps file declares it.
+header (the v2 candidate of the
+[fusion boundary rule](../../docs/kernels.md)), and no vocabulary name is
+declared, so no caps file declares it.
 
 Every family, registered or not, carries a trace comparison at the T1 tiny
 shapes in `fused_override_trace_test.cc`: the fused forward, its saved slots,

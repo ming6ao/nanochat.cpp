@@ -910,7 +910,7 @@ Related documents:
 - Sections 1 to 7 above: the measurement protocol.
 - [testing.md](testing.md): the test tiers and the definition of done.
 - [build.md](build.md): backend selection.
-- [DESIGN.md](../DESIGN.md) section 2: the dependency rules.
+- [build.md](build.md) § Dependency invariants: the dependency rules.
 - [AGENTS.md](../AGENTS.md): the ownership map.
 
 ---
@@ -1209,7 +1209,7 @@ The end-to-end run is the bridge command in The measured baseline, step 4.
 - The kernel seam: `include/nanochat/kernels.h`, function `Gemm`.
 - The measurement protocol: [performance.md](performance.md).
 - The test tiers: [testing.md](testing.md).
-- The backend rules: [build.md](build.md), [DESIGN.md](../DESIGN.md).
+- The backend rules: [build.md](build.md), [kernels.md](kernels.md).
 - The ownership map: [AGENTS.md](../AGENTS.md).
 - The measured baseline, above.
 

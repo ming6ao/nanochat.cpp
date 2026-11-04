@@ -13,8 +13,9 @@
 // derivation: a device bring-up adds one file under `backends/` and no row, in
 // this header or in the table it declares. The header declares the shape of a
 // profile and the lookups over the derived list, and it holds no
-// device-specific row and no device-specific branch, which keeps DESIGN.md
-// section 7's "add hardware" rule true for the table as well as for the seam.
+// device-specific row and no device-specific branch, which keeps the "add
+// hardware" evolution rule true for the table as well as for the seam
+// (docs/model-and-device-bringup.md section 18).
 //
 // This header is additive and architect-owned. It stays *beside*
 // `PeakFlopsForDevice` in `src/train.cc`: that function remains the authority
@@ -23,7 +24,8 @@
 // `//tests:device_profile_test`.
 //
 // The header includes only `nanochat/tensor.h`, so a backend may include it
-// without reaching above the kernel seam (DESIGN.md section 2.1).
+// without reaching above the kernel seam (docs/build.md, dependency
+// invariants).
 
 #include <cstddef>
 #include <cstdint>

@@ -1,5 +1,5 @@
 // CUDA device runtime: allocation, copies, memset, synchronization, and the
-// capability report. This is the L0 backend layer (DESIGN.md section 2): it
+// capability report. This is the L0 backend layer (docs/build.md, layers): it
 // implements the device/memory half of nanochat/kernels.h and knows nothing
 // about the model. See docs/build.md and docs/kernels.md.
 

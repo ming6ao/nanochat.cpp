@@ -14,6 +14,34 @@ The topology lives in exactly two files: `model.cc` (train forward + backward)
 and `generate.cc` (prefill + decode + generate). No other file knows the
 architecture.
 
+### No autograd engine
+
+There is no autograd engine: no tape, no source-to-source automatic
+differentiation pass, and no reverse-mode template metaprogramming.
+
+- The graphs are fixed, so a backward pass is a fixed program that an author
+  writes.
+- A runtime engine would add the per-operation bookkeeping that a fixed topology
+  does not need.
+- A fused kernel must have its backward derived as one unit, and a
+  per-operation engine cannot differentiate through the fusion.
+
+How the tree works without an engine:
+
+- **Save-for-backward workspace.** Each forward kernel writes exactly the
+  tensors that its backward reads into a named workspace slot: `rstd` for the
+  norm, the softmax statistics `(m, l)` for attention, and the pre-activation
+  for the pointwise family. The slot set is static. The slots are in
+  [Workspace and memory](#workspace-and-memory) and
+  [../spec/block_kinds.md](../spec/block_kinds.md).
+- **`Model::Backward()`** is a hand-written sequence of kernel backward calls in
+  reverse order. The graph is the code.
+- **A macro or a template covers a trivial pointwise forward and backward pair
+  only.** Do not generalize it further.
+- **Validation** is a finite-difference gradient check per kernel in
+  `backends/cuda/kernels/`, plus the torch oracle in `tests/`
+  ([testing.md](testing.md)).
+
 ## The model description
 
 The architecture is data. `models/<name>/spec.json` is the description, parsed by
@@ -147,8 +175,8 @@ Design points:
 - `EmbeddingBackward` uses a **persistent** dense gradient buffer and zeroes only
   the touched rows (targets the largest measured hotspot).
 
-The save-for-backward workspace described here is what replaces an autograd
-engine; see [DESIGN.md §5](../DESIGN.md).
+The save-for-backward workspace described here replaces an autograd engine; see
+[No autograd engine](#no-autograd-engine).
 
 ## Public API
 
@@ -199,7 +227,8 @@ float EvalBpb(Model* model, DataLoader* loader, int steps);
 ```
 
 `Config` and `Model` are frozen headers; treat them as stable by default and
-prefer additive changes. See [DESIGN.md §7](../DESIGN.md). The spec selector is
+prefer additive changes. See [§18 of
+model-and-device-bringup.md](model-and-device-bringup.md). The spec selector is
 such an addition: it is a sibling overload, so `Create(config)` and
 `Create(config, &error)` keep resolving to the original declaration and every
 existing call site compiles unchanged.

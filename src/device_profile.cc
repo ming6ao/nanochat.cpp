@@ -119,7 +119,7 @@ std::string LocateCaps(const char* backend) {
 // The mechanism mask of one `devices[]` entry's `features` array. A name this
 // build cannot spell contributes no bit; the backend's own caps test is what
 // rejects an unnameable declaration, because a backend may be built and tested
-// without `src/` (DESIGN.md section 2.1).
+// without `src/` (docs/build.md, dependency invariants).
 std::uint64_t FeaturesMask(const json::Value& device) {
   const json::Value* features = device.Find("features");
   if (features == nullptr || !features->is_array()) return 0;

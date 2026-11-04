@@ -4,7 +4,7 @@
 #
 # The parquet reader moved to //src/parquet (docs/parquet-native.md). That
 # package owns the only ZSTD header; this package and the training runtime no
-# longer link DuckDB (DESIGN.md section 2.1, invariant 1).
+# longer link DuckDB (docs/build.md, dependency invariants rule 1).
 
 load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library", "cc_test")
 load("//:nanochat.bzl", "nanochat_copts", "precision_defines")

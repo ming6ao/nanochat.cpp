@@ -8,7 +8,7 @@
 //
 // These are prototypes, not promoted kernels: they reproduce the backend math
 // so the graph result can be checked against the seam result. See
-// dev/kernels/README.md and DESIGN.md section 4.3.
+// dev/kernels/README.md and docs/kernels.md, compute strategy.
 
 #include <cuda_runtime.h>
 

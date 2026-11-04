@@ -2,8 +2,9 @@
 //
 // A fused override is a single-kernel replacement for one composition. The
 // composition defines the semantics and the override is an optimization
-// (DESIGN.md section 3.1, docs/model-and-device-bringup.md section 7.4
-// condition 1), so the two must satisfy the same golden trace within the
+// (docs/kernels.md, fusion boundary rule, and
+// docs/model-and-device-bringup.md section 7.4 condition 1), so the two must
+// satisfy the same golden trace within the
 // committed tolerance. `backends/cuda/fused_override_trace_test.cc` is that
 // gate: one trace comparison per family below, at the T1 tiny shapes, and the
 // comparison has to survive before the fused family may be removed
@@ -37,7 +38,8 @@
 //     requires.
 //
 // `attention` is deliberately unregistered too: `include/nanochat/tensor.h`
-// declares `kFeatureFusedAttention` (the v2 candidate of DESIGN.md section 3.1)
+// declares `kFeatureFusedAttention` (the v2 candidate of the fusion rule in
+// docs/kernels.md)
 // and `spec/capability_bits.md` version 1 gives it no name, so no device could
 // declare it and no caps file here does.
 //
@@ -63,8 +65,8 @@ constexpr FusedOverride kFusedOverrides[] = {
     // residual variant (`backends/cuda/kernels/rms_norm.h`).
     {"rms_norm", "rms_norm", kFeatureOverrideRmsNorm},
     // norm on head_dim + rope + scale, for the `qk_prep` composition. This is
-    // the reference case DESIGN.md section 3.1 already requires the fused pair
-    // to carry the same golden trace as.
+    // the reference case the fusion boundary rule already requires the fused
+    // pair to carry the same golden trace as (docs/kernels.md).
     {"qk_prep", "qk_prep", kFeatureOverrideQkPrep},
     // logit softcap + cross-entropy + the unpadded-vocabulary slice, for the
     // `classifier` composition.

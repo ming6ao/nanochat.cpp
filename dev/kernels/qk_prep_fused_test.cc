@@ -3,8 +3,8 @@
 // path against the host reference in row_ref.h, cross-checks the prototype
 // against the seam `kernels::QkPrepForward`/`Backward`, and finite-differences
 // the fused backward. Tiny attention shape: B=2, T=8, head_dim=4, num_heads=2,
-// plus a grouped-query variant. See dev/kernels/README.md and DESIGN.md
-// section 3.
+// plus a grouped-query variant. See dev/kernels/README.md and docs/kernels.md,
+// fusion boundary rule.
 
 #include <cmath>
 #include <cstdio>

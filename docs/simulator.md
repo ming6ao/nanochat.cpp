@@ -18,7 +18,7 @@ that the reference engine cannot.
 
 The project supports Pascal `sm_61` and Turing `sm_75` today. Hopper appears
 only in the peak-FLOPS table of `src/train.cc` and as a design reference in
-`DESIGN.md`.
+[kernels.md](kernels.md) § Direct-MMA and persistent kernels.
 
 The simulator has two jobs:
 
@@ -530,7 +530,7 @@ the Architect / Integrator row.
 | `doctor` profile line | `tools/nanochat` | Architect |
 | Design document | `docs/simulator.md` | Architect |
 | Documentation index | `docs/README.md` | Architect |
-| Design invariants citation | `DESIGN.md` | Architect |
+| Design invariants citation | `docs/build.md` | Architect |
 | Testing and portability updates | `docs/testing.md`, `docs/host-portability.md` | Architect |
 
 ## 12. Validation of the simulator

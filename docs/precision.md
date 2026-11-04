@@ -131,7 +131,7 @@ The removal is one change. Keep the fp32 gates green in that change.
    `ComputePrecision::kFp16` and the fp16 rows of the estimate.
 4. `include/nanochat/kernels.h`: update the two comments that name an fp16
    build.
-5. `.bazelrc`, `BUILD.bazel`, `nanochat.bzl`, and `Makefile`: delete the
+5. `.bazelrc`, `BUILD.bazel`, and `nanochat.bzl`: delete the
    `--config=fp16` setting, the `//:fp16` config, and the `PRECISION=fp16`
    branch.
 6. `backends/cuda/gemm.cu`: delete the fp16 branch, the `HasTensorCores`

@@ -38,12 +38,26 @@ end to end ([the one-job chain](#the-one-job-chain)).
 - **A Python surface** for in-process compute, planning, chat evaluation, and
   the `tools/nanochat` toolchain.
 - Every operator independently testable against a fixed oracle.
+- A mainline small and readable enough to audit in one sitting.
 
 ## What this is not
 
 - A general-purpose tensor library or model framework.
-- An autograd engine, graph IR, or compiler.
+- An autograd engine, graph IR, or compiler
+  ([docs/model.md](docs/model.md) § No autograd engine).
 - A home for dynamic shapes or runtime kernel selection.
+- A runtime precision switch. The precision is a build and link decision
+  ([docs/precision.md](docs/precision.md)).
+- A runtime kernel registry, a virtual dispatch table, or a memory planner.
+- A user of a third-party runtime library beyond CUDA, cuBLAS, and the ZSTD
+  decompressor in `src/parquet/`
+  ([docs/build.md](docs/build.md#dependency-invariants)).
+- A tensor-processing-unit or systolic-array backend. ROCm and Metal would be
+  new `backends/<x>/` packages.
+- Whole-block megakernels or persistent direct-MMA kernels for training
+  ([docs/kernels.md](docs/kernels.md) § Compute strategy).
+- A container runtime or a sandboxing daemon. The sandbox is host control
+  groups plus user namespaces ([docs/sandbox.md](docs/sandbox.md)).
 - A finished post-training product. The supervised fine-tuning and
   reinforcement learning loops are incomplete.
 - A distributed-training product beyond the host reference. The NCCL transport
@@ -235,12 +249,22 @@ tools/kaggle/       Kaggle Notebook bootstrap
 docs/               reference and how-to
 ```
 
+## Prior art
+
+- [llm.c](https://github.com/karpathy/llm.c) — one translation unit per backend,
+  pre-tokenized `.bin` data, the `debug_state.bin` oracle, a bump-allocator
+  workspace, and Makefile autodetection. This project uses Bazel for the build.
+- [llama.cpp](https://github.com/ggml-org/llama.cpp) and ggml — the backend as a
+  swappable implementation, with operation-level capability fallback.
+- Mirage MPK — why a whole-model persistent or direct-MMA kernel pays off for
+  latency-bound inference on Hopper, and why it does not apply here
+  ([docs/kernels.md](docs/kernels.md) § Direct-MMA and persistent kernels).
+
 ## Documentation
 
-- [DESIGN.md](DESIGN.md) — design rationale, invariants, and evolution rules.
 - [docs/](docs/README.md) — reference and how-to. Start with
-  [build.md](docs/build.md), [testing.md](docs/testing.md), and
-  [sandbox.md](docs/sandbox.md).
+  [build.md](docs/build.md) for the layers and the dependency invariants, then
+  [testing.md](docs/testing.md) and [sandbox.md](docs/sandbox.md).
 - [docs/parity.md](docs/parity.md) — known differences from the PyTorch
   reference.
 - [docs/examples.md](docs/examples.md) — the two smallest examples of the

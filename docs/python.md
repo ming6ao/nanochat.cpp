@@ -823,4 +823,3 @@ Both bullets above are superseded by section 0 and by
 does not change.
 - Do not convert the Kaggle scripts. They install packages and edit `PATH`.
 - Do not change a fixture subcommand name or a fixture binary format.
-- Keep the `Makefile`, which is the non-Bazel fallback.

@@ -8,11 +8,11 @@ Status: **phases P0 to P4 have landed; P5 has not.** What is in the tree, by
 section, so a reader can check a claim against a file:
 
 - **§7, the kernel tiers (P0, P1).** `RowReduce` and `SpanReduce` are in the
-  seam at version 2, with `PointwiseParams` and the `kExp`, `kRsqrt`, `kLog` and
-  `kRowScale` codes; the tier column is in [kernels.md](kernels.md) and the
-  required bring-up cost is 16 of the 30 entry points. `src/ops.cc` is the
-  composition tier over primitives, and the CUDA fused families are registered
-  overrides in `backends/cuda/fused_overrides.cc`.
+  seam, with `PointwiseParams` and the `kExp`, `kRsqrt`, `kLog` and `kRowScale`
+  codes; the tier column is in [kernels.md](kernels.md), and it names the
+  required bring-up cost. `src/ops.cc` is the composition tier over primitives,
+  and the CUDA fused families are registered overrides in
+  `backends/cuda/fused_overrides.cc`.
 - **§8, the model description (P2).** `models/nanochat-default/spec.json`,
   `include/nanochat/model_spec.h`, `ModelSpecToConfig`, and the spec selector on
   `Model::Create`.
@@ -32,8 +32,8 @@ and the `AGENTS.md` §1 amendment §14.1 describes.
 
 Related material:
 
-- [../DESIGN.md](../DESIGN.md) §2.1 — the dependency invariants that this
-  document extends.
+- [build.md](build.md) § Dependency invariants — the dependency invariants that
+  this document extends.
 - [../spec/decisions.md](../spec/decisions.md) — the decision records this
   document refers to as D-0NN. A decided question lives there and is not
   restated here.
@@ -126,7 +126,7 @@ extends it once for every future bring-up. That extension is additive (§10.3).
 | Coupling point | Evidence | Effect on the second model or second device |
 |---|---|---|
 | `include/nanochat/config.h` | One struct holds the flagship model's flags: `window_pattern = "SSSL"` (line 21), `value_embedding`, `has_value_embedding()`. | The struct becomes the union of every model's quirks. Every model carries every other model's fields. |
-| `include/nanochat/kernels.h` | 28 entry points in one frozen, architect-owned header, and 30 after P0. | A new family edits a header that every target compiles, and every backend must then implement it. |
+| `include/nanochat/kernels.h` | Every entry point lives in one frozen, architect-owned header. | A new family edits a header that every target compiles, and every backend must then implement it. |
 | `src/model.cc`, `src/model_impl.h` | One class owns the topology. `TrainModel` builds the graph as a plain sequence of `ops` calls. | A second model edits shared graph code, so every user of the first model rebuilds and reruns every gate. |
 | `src/ops.cc` | A composition layer that calls the fused family symbols directly. | A device that lacks one fused family cannot run the graph at all. There is no fallback. |
 | `include/nanochat/device_profile.h` | One hand-written table describes every target device. | A new device adds a row to a shared header, so every device bring-up touches the same file. |
@@ -221,7 +221,7 @@ entries.
 | `Gather`, `ScatterAdd` | `EmbeddingForward`, `EmbeddingBackward` | Indexed read and indexed accumulate | Token and value embeddings |
 | `Attention` | `AttentionForward`, `AttentionBackward` | T × T pairwise plus softmax | The attention graph |
 
-The seam gained `RowReduce` and `SpanReduce` at P0, in seam version 1 → 2
+The seam gained `RowReduce` and `SpanReduce` at P0, with a seam version bump
 (§10.3). Before them, no entry point reduced one segment to per-segment scalars.
 `RmsNorm`, `QkPrep`, and `Classifier` all depend on that shape, so without
 `RowReduce` the composition tier cannot express them, and the tier claim in
@@ -258,8 +258,8 @@ implements full-context attention only cannot run `models/nanochat-default`, so
 it is non-conformant, not partially conformant. `docs/kernels.md` family 3
 already records the sliding window as part of the family.
 
-Required bring-up cost: **16 of the 30 entry points**. Training adds the two
-stateful entries.
+Required bring-up cost: **the primitive tier**. Training adds the two stateful
+entries.
 
 `RowReduce` is the highest-risk line in this table, because one reduction must
 serve three call sites with different combine ops and offsets. §17 records the
@@ -293,9 +293,11 @@ it.
 | `GradNorm` | composition | | `SpanReduce` across several spans |
 | `ScalarDot` | composition | | `SpanReduce` with a second operand |
 
-Total: 30 entry points after P0. Six utilities and 24 arithmetic entries. A
-composition supplies its own backward as one unit, because `DESIGN.md` §5
-requires a fused backward to be derived and tested as a unit. The rule that
+The seam holds the six utilities and the arithmetic entries that the primitive
+tier names. A composition supplies its own backward as one unit, because
+[model.md](model.md)
+§ No autograd engine requires a fused backward to be derived and tested as one
+unit. The rule that
 keeps a wrong composition out of the tier is in §7.6.
 
 ### 7.4 The fallback chain
@@ -334,10 +336,10 @@ tolerance, and `TestRmsNormComposition` compares the two paths in the same test.
 
 ### 7.5 Why this reduces effort
 
-| Bring-up | Entry points before P0 (seam 1) | Entry points now (seam 2) |
+| Bring-up | Before the tier partition | Now |
 |---|---|---|
-| New device, inference | 28, plus every fused family as it appeared | 16 |
-| New device, training | 28 | 18 |
+| New device, inference | Every fused family, as each one appeared | The primitive tier only |
+| New device, training | Every fused family, as each one appeared | The primitive and stateful tiers |
 | Each later fused family | A new frozen-header entry point that every device must then implement | One optional override, behind a bit |
 
 A new device reaches a full training step at the primitive and stateful tiers.
@@ -422,7 +424,7 @@ The split:
 The field list is closed. It grows only by a version bump in
 `spec/versions.md`, and a new field needs a stated meaning that the existing
 blocks cannot express. This is the guard against drift toward the graph
-Intermediate Representation that `DESIGN.md` §6 rejects.
+Intermediate Representation that `README.md` § What this is not rejects.
 
 The block list is the topological part. A block kind is a named meaning, not a
 code path: `spec/block_kinds.md` defines what each kind computes, and the model
@@ -539,8 +541,8 @@ Isolation has four parts. Each needs a gate, because each is otherwise a claim.
 
 A model package exports exactly one symbol: its factory (§8.2). The runtime
 never includes a model header. A backend never includes a model header. The
-build graph enforces both with visibility rules, the same mechanism
-`DESIGN.md` §2.1 already uses.
+build graph enforces both with visibility rules, the same mechanism that
+[build.md](build.md) § Dependency invariants already uses.
 
 ### 10.2 Build and test isolation
 
@@ -629,16 +631,16 @@ it move in the diff.
 
 1. Write `backends/<name>/caps.json`. Declare the primitive tier complete and
    name the precision bits this device supports.
-2. Implement the six utilities and the ten arithmetic primitives, including
-   the sliding-window attention variant and the two reductions.
+2. Implement the six utilities and the arithmetic primitives, including the
+   sliding-window attention variant and the two reductions.
 3. Reach `tools/nanochat simulate --suite correctness` with the CPU reference
    values, and `--suite kernel` with the emulated values.
 4. Reach `T1 GPU correctness` on one tiny shape per primitive.
 5. Add the two stateful entries if the device claims training.
 6. Add the fp8 pair only if `caps.json` declares the fp8 bits.
 7. Add fused overrides one at a time. Each needs a benchmark and the same
-   trace as the composition it replaces, within the committed tolerance, as
-   `DESIGN.md` §3.1 requires for `QkPrep`.
+   trace as the composition it replaces, within the committed tolerance, as the
+   [fusion boundary rule](kernels.md) requires for `QkPrep`.
 8. Add the matrix rows for this device, with their graph coverage. Do not touch
    another backend's directory.
 
@@ -729,7 +731,7 @@ workstreams named above.
 
 | Phase | Work | Owner | Gate |
 |---|---|---|---|
-| P0 | Classify all 30 entry points into a tier. Add `RowReduce` and `SpanReduce` with a seam version bump. Publish the tier column in [kernels.md](kernels.md). Start `spec/decisions.md`. Amend `AGENTS.md` §1. | Contract | Review only |
+| P0 | Classify every entry point into a tier. Add `RowReduce` and `SpanReduce` with a seam version bump. Publish the tier column in [kernels.md](kernels.md). Start `spec/decisions.md`. Amend `AGENTS.md` §1. | Contract | Review only |
 | P1 | Make every composition in `src/ops.cc` expressible over primitives. Add `kExp`, `kRsqrt`, `kLog`, `kRowScale` and the `PointwiseParams` block. Write `spec/pointwise_ops.md`. Move fused families into the CUDA backend as overrides. | Workflow, Backend | The parity tests pass at the committed tolerance |
 | P2 | Write `models/nanochat-default/spec.json`, add the selector on `Model::Create`, add `ModelSpec -> Config`, prove the defaults match. | Contract, Workflow | One equality test |
 | P3 | Derive `device_profile.h` from `caps.json`. Add `plan.h` and the pure `BuildPlan`, and the capability mask. Log the plan, print it in `doctor`. | Contract, Harness, Backend | A rejection test names its gap, and a fabricated capability mask builds a plan under `T0 CPU` |
@@ -750,7 +752,7 @@ it produced.
 | Risk | Effect | Response |
 |---|---|---|
 | The composition path is slower than a fused family on the CPU backend. | The oracle slows down. | Accepted. The oracle trades speed for clarity. Keep one benchmark to track it. |
-| `ModelSpec` grows into a general graph language. | The tree drifts toward the graph Intermediate Representation that `DESIGN.md` §6 rejects. | The field list and the block kind list are closed (§8). |
+| `ModelSpec` grows into a general graph language. | The tree drifts toward the graph Intermediate Representation that `README.md` § What this is not rejects. | The field list and the block kind list are closed (§8). |
 | The matrix grows as models × tiers × graphs. | Slow gates. | Tiers per device (§11), `manual` for flagship rows. |
 | Two models share a block kind and then diverge. | A shared fixture becomes ambiguous. | A block kind has one meaning. A divergence is a new kind. |
 | The primitive tier turns out to be under-specified. | A device needs an extra primitive, so `kernels.h` changes. | Expected. The tier is a target, reviewed at P0. The change is additive and lands once. |
@@ -807,6 +809,24 @@ Order the remaining work by dependency. The `RowReduce` descriptor test comes
 first, because §7.6 and §7.7 depend on the primitive set it produces. The
 planner comes last, because it consumes the interfaces of the other three.
 
+## 18. Evolution rules
+
+The public API (`model.h`, `config.h`, `tensor.h`, `kernels.h`) is stable by
+default. Prefer an additive change. Keep an edit to a frozen header
+architect-owned and local to the seam, as `AGENTS.md` §1 requires.
+
+- **Add hardware**: add `backends/<x>/` that implements `kernels.h`. No layer
+  above it changes. See [build.md](build.md) § Adding a backend.
+- **Fuse more**: only when the [fusion boundary rule](kernels.md) holds and the
+  fused backward is derivable. Develop in `dev/kernels/`, prove the change with
+  a benchmark, then promote it.
+- **Add a training stage**: reuse the fixed graph and the weighted classifier
+  backward. Keep the stage logic in the harness and the Python bridge. No new
+  graph topology is needed.
+- **Optimize**: profile on native Linux, because CUPTI is unavailable under
+  WSL2. Priority order: attention forward and backward, Muon, `QkPrep`, and the
+  sparse embedding backward ([performance.md](performance.md)).
+
 ## Appendix A. The bring-up contract in one page
 
 A model brings:
@@ -819,8 +839,7 @@ A model brings:
 A device brings:
 
 - `backends/<name>/caps.json` with its precision bits
-- the six utilities and the ten arithmetic primitives, sliding window
-  included
+- the six utilities and the arithmetic primitives, sliding window included
 - the two stateful entries, if it claims training
 - `backends/<name>/BUILD.bazel`
 

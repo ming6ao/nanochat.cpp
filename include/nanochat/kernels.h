@@ -6,15 +6,16 @@
 
 #include "nanochat/tensor.h"
 
-// The backend seam (L1 in DESIGN.md section 2). A backend is complete when
+// The backend seam (L1 in docs/build.md, layers). A backend is complete when
 // every symbol below resolves and passes the oracle. This header is closed and
 // vendor-free: it never includes a CUDA/HIP header, pointers are always
 // `ComputeType*`, and device streams are opaque. See docs/kernels.md.
 //
 // Seam version: 3. The version lives in this header comment rather than in one
-// symbol (DESIGN.md section 10.3), because a backend implements the header as
-// one contract: it is bumped once per change set, under the evolution rules in
-// DESIGN.md section 7, and a bring-up pins the number it implements.
+// symbol (docs/model-and-device-bringup.md section 10.3), because a backend
+// implements the header as one contract: it is bumped once per change set,
+// under the evolution rules in section 18 of the same document, and a bring-up
+// pins the number it implements.
 //   1  the seam as it stood: the GEMM entry, the scaled fp8 GEMM, the compute
 //      families (RmsNorm, QkPrep, Attention, Classifier, Embedding, ValueGate),
 //      the two stateful training entries (AdamW, Muon), GradNorm, ScalarDot,
@@ -65,8 +66,8 @@ enum class GemmMode {
 // Pointwise op codes: the five arithmetic codes (four plain, one with a row
 // broadcast), the softcap, the three transcendental codes, and the three codes
 // of seam 3 (a scalar affine, a bare sigmoid, and the pair rotation). The same
-// code drives forward and backward so the pair cannot drift apart (DESIGN.md
-// section 5).
+// code drives forward and backward so the pair cannot drift apart
+// (docs/model.md, no autograd engine).
 //
 // The enum is closed. One build links the runtime and every backend, so a
 // backend's switch covers every code with no `default` arm: a missing code is a

@@ -3,7 +3,8 @@
 How several coding agents work on `nanochat.cpp` in parallel without conflicting
 edits, and how they share the single local GPU for tests.
 
-See `DESIGN.md` for the architecture. This file is about process.
+See `docs/build.md` for the layers and `docs/README.md` for the reference set.
+This file is about process.
 
 > **Run everything through `tools/nanochat`.** Do not call `bazel test`,
 > `train_main`, `eval_main`, or any `*_test`/`*_dev` binary directly. The entry
@@ -27,7 +28,7 @@ happen through the integrator.
 
 | Workstream | Owns | Depends on |
 |---|---|---|
-| **Architect / Integrator** | `include/nanochat/*.h`, `MODULE.bazel`, `.bazelrc`, top-level `BUILD` files, `tools/nanochat`, `python/nanochat_cpp/cli.py`, `python/nanochat_cpp/_entry.py`, `README.md`, `DESIGN.md`, `AGENTS.md`, `CONTRIBUTING.md`, `docs/**` | — |
+| **Architect / Integrator** | `include/nanochat/*.h`, `MODULE.bazel`, `.bazelrc`, top-level `BUILD` files, `tools/nanochat`, `python/nanochat_cpp/cli.py`, `python/nanochat_cpp/_entry.py`, `README.md`, `AGENTS.md`, `CONTRIBUTING.md`, `docs/**` | — |
 | **Contract** (the architect) | `spec/**`, the frozen headers below, and this document | — |
 | **Model owners** (one per model) | `models/<name>/**` | `spec/**`, the frozen headers |
 | **Runtime** | `include/nanochat/tensor.h`, `src/tensor.cc`, `backends/cpu/` (`caps.json` is the device's single declaration; no header row is added per device) | frozen `kernels.h` |
@@ -101,7 +102,7 @@ Parallelism is gated on interface readiness, not on agent availability.
 **Wave 0 (serial, blocking) — do not parallelize before this**
 
 1. `MODULE.bazel` + `.bazelrc` + Bazel/CUDA spike (`sm_61`, one kernel, one
-   `gpu` test). Fall back to a Makefile if `rules_cuda` blocks.
+   `gpu` test).
 2. Freeze `kernels.h`, `tensor.h`, `config.h`, `model.h`.
 3. CPU reference backend: every kernel as a naive loop.
 4. `tools/dump_fixtures.py oracle` + `tests/data/debug_state.bin` fixtures.
@@ -283,8 +284,8 @@ This keeps GPU time bounded and predictable.
 ## 6. Conflict avoidance checklist
 
 - One directory, one owner; frozen headers touched only by the architect.
-- Bazel dependency edges enforce §2.1 of `DESIGN.md`; an agent literally cannot
-  reach across a layer.
+- Bazel dependency edges enforce the dependency invariants in `docs/build.md`;
+  an agent literally cannot reach across a layer.
 - Stubs exist from Wave 0, so the tree always builds and links.
 - New files go under the agent's own directory; never append to another agent's
   file.
@@ -295,8 +296,8 @@ This keeps GPU time bounded and predictable.
   root file: the build agent adds the label, so the two examples cannot fight
   each other or the build agent over one shared file. The include rule for an
   example is in §1 and in `docs/examples.md`.
-- Shared docs (`README.md`, `DESIGN.md`, `AGENTS.md`, `CONTRIBUTING.md`,
-  `docs/**`) are architect-owned.
+- Shared docs (`README.md`, `AGENTS.md`, `CONTRIBUTING.md`, `docs/**`) are
+  architect-owned.
 - One document covers one subject. A campaign plan is not a document: its
   durable sections move into the reference document when its last row lands,
   and its outcome goes to `docs/campaigns.md`. The retirement rule is at the
@@ -332,4 +333,4 @@ This keeps GPU time bounded and predictable.
 - Using the GPU as the first place to test logic instead of the CPU reference.
 - Two agents editing the same file "because it was small".
 - Adding a third-party runtime dependency without architect sign-off.
-- Building a compiler/IR/autograd engine — see `DESIGN.md` §6.
+- Building a compiler/IR/autograd engine — see `README.md` § What this is not.

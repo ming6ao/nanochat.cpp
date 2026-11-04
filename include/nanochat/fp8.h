@@ -20,8 +20,9 @@
 // clamps the scaled operand first, and the saturation keeps a later overflow
 // safe.
 //
-// This header is host-only and vendor-free (DESIGN.md section 2.1 rule 3), so a
-// backend may include it without reaching above the kernel seam.
+// This header is host-only and vendor-free (docs/build.md, dependency
+// invariants rule 3), so a backend may include it without reaching above the
+// kernel seam.
 
 #include <cmath>
 #include <cstdint>

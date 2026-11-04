@@ -248,7 +248,7 @@ through `tools/nanochat`, and the loop uses [python.md](python.md),
 [post-training.md](post-training.md), and [sandbox.md](sandbox.md).
 
 **The layers.** Four layers sit above the L0 to L6 stack of
-[../DESIGN.md](../DESIGN.md) section 2, and they do not renumber it. E4 is the
+[build.md](build.md) § Layers, and they do not renumber it. E4 is the
 human surface: goal intake, approvals, answers, and stop. E3 is the loop:
 controller, stuck detector, and safety gate. E2 holds the services: teacher
 gateway, trajectory store, dataset builder, checkpoint registry, verifier, and

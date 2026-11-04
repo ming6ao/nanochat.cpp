@@ -81,7 +81,7 @@ handle is cheap. The policy around it is not.
 | Option | Removes the host read | Cost here |
 |---|---|---|
 | a copy of `c10::Scalar` | no | an eight-way tag, complex and symint payloads, implicit conversions |
-| a `Tensor` object | yes, through an impl allocation | refcounting, per-use dtype and device validation, a dispatch layer; `DESIGN.md` section 6 forbids a tensor engine |
+| a `Tensor` object | yes, through an impl allocation | refcounting, per-use dtype and device validation, a dispatch layer; [../README.md](../README.md) § What this is not forbids a tensor engine |
 | **`ScalarArg`** | yes | two fields, one branch per kernel |
 
 The loop issues about 16100 driver calls per step at 2 to 3 microseconds each.

@@ -56,7 +56,8 @@ cc_library(
     deps = [
         "//include/nanochat:nanochat",
         # The device profile table the override reads. It is a leaf library, so
-        # this does not point a backend at the workflow layer (DESIGN.md 2.1).
+        # this does not point a backend at the workflow layer
+        # (docs/build.md, dependency invariants).
         "//src:device_profile",
     ],
 )

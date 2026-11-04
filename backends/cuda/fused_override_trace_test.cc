@@ -128,8 +128,9 @@ void TraceRmsNorm(const char* name) {
 // (the backward recovers the statistics from the saved rows) and the cos/sin
 // tables, which are device memory.
 //
-// This is the reference case DESIGN.md section 3.1 names: the fused pair must
-// carry the same golden trace as the composition.
+// This is the reference case the fusion boundary rule names
+// (docs/kernels.md): the fused pair must carry the same golden trace as the
+// composition.
 void TraceQkPrep(const char* name) {
   Rng rng;
   QkPrepParams p;

@@ -20,9 +20,9 @@ parquet -> tok_shard_main -> NANO shard -> train_main
 Two problems follow from the stage two and stage three split:
 
 - The training runtime reads only a pre-tokenized shard, so a pre-pass is
-  mandatory.
-- The parquet reader needs DuckDB, a 78 MB static library. `DESIGN.md`
-  section 2.1 carries a special exception for it.
+  mandatory. - The parquet reader needs DuckDB, a 78 MB static library. The
+  [dependency invariants](build.md#dependency-invariants) carried a special
+  exception for it.
 
 The target data path is:
 
@@ -58,12 +58,12 @@ compact footer, page headers, RLE bit-packed levels, and ZSTD frames.
 
 ## 3. Dependency decision
 
-- ZSTD comes from the Bazel Central Registry: `bazel_dep(name = "zstd",
-  version = "1.5.7")`, target `@zstd//:zstd`.
-- DuckDB is removed: the `http_archive` in `MODULE.bazel`, `duckdb.BUILD`, and
-  `duckdb_static_loader.cc` all go away.
-- `DESIGN.md` section 2.1 changes: `src/parquet/` is the one host package that
-  may include the ZSTD header. The model and kernel libraries stay vendor-free.
+- ZSTD comes from the Bazel Central Registry: `bazel_dep(name = "zstd", version
+  = "1.5.7")`, target `@zstd//:zstd`. - DuckDB is removed: the `http_archive` in
+  `MODULE.bazel`, `duckdb.BUILD`, and `duckdb_static_loader.cc` all go away. -
+  The [dependency invariants](build.md#dependency-invariants) change:
+  `src/parquet/` is the one host package that may include the ZSTD header. The
+  model and kernel libraries stay vendor-free.
 
 ZSTD is about 1 MB. DuckDB is about 78 MB.
 
@@ -128,7 +128,7 @@ not from the `<shard>.bytes` sidecar.
 ### Phase 0 -- Freeze and design
 
 - Freeze `DocumentSource` and the new `DataLoader` constructor.
-- Update `DESIGN.md` section 2.1 and `docs/build.md`.
+- Update the dependency invariants in `docs/build.md`.
 - Create `src/parquet/`.
 
 ### Phase 1 -- Native parquet reader
@@ -210,7 +210,7 @@ The project completed all phases. The native reader replaces DuckDB,
 
 | Phase | State | Notes |
 |---|---|---|
-| 0 Design | done | `DESIGN.md` section 2.1 and `docs/build.md` updated |
+| 0 Design | done | The dependency invariants in `docs/build.md` were updated |
 | 1 Reader | done | `//src/parquet:all` passes; ZSTD comes from the registry |
 | 2 DuckDB removal | done | `tok_train_main` uses the native reader |
 | 3 Document source | done | `DocumentSource` in `nanochat/dataloader.h` |

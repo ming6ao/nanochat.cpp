@@ -288,9 +288,9 @@ void AttentionBackward(const AttentionParams& p, /* ... */);
 ```
 
 Then a backend declares the families it implements, and the build links a
-composition fallback for the rest. This keeps the design decision in `DESIGN.md`
-section 6: there is still no runtime registry, because the choice is a link
-decision.
+composition fallback for the rest. This keeps the non-goal in
+`README.md` § What this is not: there is still no runtime registry, because the
+choice is a link decision.
 
 This item revises `kernels.h:13-19`, which states that the version lives in the
 preamble because one backend implements the header as one contract. Per-family
@@ -304,10 +304,10 @@ bring-up cost in `docs/kernels.md` becomes a per-family number.
 ### R2. (cut) Introduce a value-type `Tensor`  (moved to section 8)
 
 Cut from the plan. The benefit is ergonomic, not structural. A `memory.h` that a
-backend includes is a third layering edge, and `DESIGN.md` section 2.1 rule 2
-requires the same review for any new edge. A `int device` field in `Tensor` also
-contradicts the one-device rule at `src/ops.cc:47` and the mesh runtime's
-thread-per-device model. Keep it as question 2 in section 8.
+backend includes is a third layering edge, and the dependency invariants in
+`docs/build.md` require the same review for any new edge. A `int device` field
+in `Tensor` also contradicts the one-device rule at `src/ops.cc:47` and the mesh
+runtime's thread-per-device model. Keep it as question 2 in section 8.
 
 ### R3. Validate seam parameters in a debug wrapper  (done in step 2, cost small, risk low)
 
@@ -786,7 +786,8 @@ rows meaningful again. R17 needs R16 to justify it.
 These decisions are load-bearing, and a simplification must not trade them
 away.
 
-- No autograd engine and no graph IR (`DESIGN.md` section 5 and 6).
+- No autograd engine and no graph IR (`README.md` § What this is not, and
+  `docs/model.md` § No autograd engine).
 - The backend is a link decision, not a runtime registry.
 - One binary runs one backend.
 - The closed-field rule for `model_spec.h` and the closed `PointwiseOp` and

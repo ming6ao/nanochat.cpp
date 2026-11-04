@@ -4,7 +4,8 @@
 // Backend-internal host helpers shared by every CUDA translation unit. This
 // header is deliberately *not* part of the frozen seam: it may include CUDA
 // headers, because only code under backends/cuda includes it. Code above the
-// seam (src/**, kernels.h) never sees it. See DESIGN.md section 2.1.
+// seam (src/**, kernels.h) never sees it. See docs/build.md, dependency
+// invariants.
 
 #include <cuda_runtime.h>
 

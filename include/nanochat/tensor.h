@@ -8,7 +8,7 @@
 
 // Core value types shared by every layer: the precision alias, the storage
 // dtype tags, and the backend capability report. This header is vendor-free
-// on purpose (DESIGN.md section 2.1): no
+// on purpose (docs/build.md, dependency invariants): no
 // CUDA/HIP header is ever reachable from it, so a backend can be replaced as a
 // build/link decision. See docs/build.md.
 

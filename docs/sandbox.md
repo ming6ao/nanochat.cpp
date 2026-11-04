@@ -104,7 +104,15 @@ tools/nanochat gpuq status            # the queue depth and the worker
 ```
 
 `tools/nanochat help` lists the commands. The GPU job queue is described in
-[docs/sandbox.md](sandbox.md).
+[this document](sandbox.md) Part 1.
+
+The entry point sits outside the model layers L0 to L6 in
+[build.md](build.md) § Layers, and it changes neither the kernel seam nor the
+public API. The simulator's S0 tier rides the same entry point:
+`tools/nanochat simulate` runs the CPU-only capability, API, collective, and
+emulation checks with no GPU broker ([simulator.md](simulator.md)). The one
+layering exception that the S0 tier needs is in
+[build.md](build.md#dependency-invariants) rule 2.
 
 ### Lower-level scripts
 

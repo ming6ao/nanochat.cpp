@@ -55,9 +55,9 @@ meet only through [capability_bits.md](capability_bits.md).
 ### 2.1 Seam 3: the three op codes that end the host staging
 
 Seam 3 adds three op codes to the closed `PointwiseOp` list and three fields to
-`PointwiseParams`. It adds no entry point, so the required bring-up cost stays
-at 16 entry points for inference and 18 for training
-([docs/model-and-device-bringup.md §7.5](../docs/model-and-device-bringup.md)).
+`PointwiseParams`. It adds no entry point, so the required bring-up cost does
+not change (see [docs/model-and-device-bringup.md
+§7.5](../docs/model-and-device-bringup.md)).
 
 - **`kAffine`.** `out = alpha * (a - beta)`. It replaces the per-call
   `ConstantVector` upload, which was the only way a composition could add a

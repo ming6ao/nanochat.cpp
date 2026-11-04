@@ -7,7 +7,8 @@
 // One instance per process. The class carries the opaque control-plane
 // payloads: the CUDA IPC memory handles, the device identifiers, or the RDMA
 // queue-pair numbers. It includes POSIX sockets only, so the `src` layer stays
-// vendor-free (DESIGN.md section 2.1) and the above-seam code never sees a
+// vendor-free (docs/build.md, dependency invariants) and the above-seam code
+// never sees a
 // vendor header.
 //
 // `ExchangeBytes` is an all-gather: every rank contributes `bytes` and every

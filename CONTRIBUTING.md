@@ -61,7 +61,8 @@ directly; the entry point is what applies the sandbox. See
   `cc_test`s, so `tools/nanochat check` covers them; see
   [docs/examples.md](docs/examples.md).
 - Design decisions and the invariants that constrain them live in
-  [DESIGN.md](DESIGN.md). Keep frozen headers `nanochat/{kernels,tensor,config,
+  [docs/build.md](docs/build.md) and the reference set under
+  [docs/](docs/README.md). Keep frozen headers `nanochat/{kernels,tensor,config,
   model,plan,model_spec}.h` architect-owned, and prefer additive changes.
 
 ## Reviewing a model or device bring-up

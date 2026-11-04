@@ -4,7 +4,7 @@
 #
 # This is the one host package that may include the ZSTD header. The model, the
 # kernels, and the training runtime link this library but never DuckDB
-# (DESIGN.md section 2.1, invariant 1).
+# (docs/build.md, dependency invariants rule 1).
 
 load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
 load("//:nanochat.bzl", "nanochat_copts")

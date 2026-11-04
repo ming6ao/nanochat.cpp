@@ -18,18 +18,18 @@
 // chooses learning rates, batch sizes and schedules, never an implementation.
 // The two do not call each other and the names are not synonyms.
 //
-// Purity (DESIGN.md section 9.1). `BuildPlan` is pure: it reads the spec, the
-// graph kind, the device index and `kernels::GetCaps()`, and it touches nothing
-// else on the device. It allocates no device memory, launches no kernel, warms
-// no cache, and mutates no global state, so a bring-up check and a test can
-// call it without a device side effect, and two calls with equal inputs return
-// the same plan.
+// Purity (docs/model-and-device-bringup.md section 9.1). `BuildPlan` is pure:
+// it reads the spec, the graph kind, the device index and `kernels::GetCaps()`,
+// and it touches nothing else on the device. It allocates no device memory,
+// launches no kernel, warms no cache, and mutates no global state, so a
+// bring-up check and a test can call it without a device side effect, and two
+// calls with equal inputs return the same plan.
 //
 // A plan never changes the graph. It chooses an implementation for pieces the
 // graph already has, so a backend cannot add a composition, reorder a block, or
 // name a graph: it registers a fused family against a composition name and a
 // capability bit (`FusedOverride` below), and the plan decides whether that
-// entry wins or is declined (DESIGN.md section 6).
+// entry wins or is declined (the non-goals in README.md).
 
 namespace nanochat {
 
@@ -81,14 +81,14 @@ bool ParseCompositionName(const char* name, CompositionKind* out);
 //
 // The entry names a *composition*, a family and a capability bit. It never
 // names a graph, a block index, an edge or a kernel symbol, which is what stops
-// a backend from adding topology through the back door (DESIGN.md section 6). A
-// registration whose capability bit is clear is ignored rather than rejected,
-// so a backend can land the entry before the family passes its gate; the bit,
-// not the entry, is the switch.
+// a backend from adding topology through the back door (the non-goals in
+// README.md). A registration whose capability bit is clear is ignored rather
+// than rejected, so a backend can land the entry before the family passes its
+// gate; the bit, not the entry, is the switch.
 //
 // The bits a registration may take are the kFeatureFused* constants in
 // nanochat/tensor.h; there is one per composition whose fusion is legal under
-// the boundary rule (DESIGN.md section 3): `rms_norm` (residual add + norm),
+// the boundary rule (docs/kernels.md): `rms_norm` (residual add + norm),
 // `qk_prep` (norm + rope + scale), `attention` (its v2 form folds qk_prep in),
 // and `classifier` (softcap + cross-entropy + the logits scale).
 struct FusedOverride {

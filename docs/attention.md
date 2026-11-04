@@ -142,9 +142,9 @@ non-windowed backward stay on cuBLAS. The project removed the Phase 1 prototype
 after promotion.
 
 Related: [performance.md](performance.md) (measurement protocol, the attention
-benchmark), [kernels.md](kernels.md) (the `Attention` family), [DESIGN.md](../DESIGN.md)
-section 4 (Pascal constraints, no megakernels), [parity.md](parity.md) (D3,
-attention parity).
+benchmark), [kernels.md](kernels.md) (the `Attention` family),
+[kernels.md](kernels.md) § Compute strategy (Pascal constraints, no
+megakernels), [parity.md](parity.md) (D3, attention parity).
 
 ---
 
@@ -453,9 +453,9 @@ not promote the full-causal case.
 
 - On sm_75 a tensor-core flash attention in a bf16 build is possible, but there
   is no Turing device on this host, so it is
-  compile-only and the project cannot benchmark it here. Keep it out of this effort; the
-  DESIGN already defers the decode/MMA path to Turing. See
-  [attention.md](attention.md).
+  compile-only and the project cannot benchmark it here. Keep it out of this
+  effort; [kernels.md](kernels.md) § Direct-MMA and persistent kernels already
+  defers the decode and MMA path to Turing.
 
 ---
 
@@ -486,7 +486,7 @@ not promote the full-causal case.
   decode-path helper.
 - **Enable `torch.compile` or another framework for the reference.** Pascal is
   unsupported by Triton, and this project has no framework dependency
-  (DESIGN.md section 6).
+  ([../README.md](../README.md) § What this is not).
 
 ---
 

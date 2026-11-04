@@ -18,7 +18,7 @@
 // `kModelSpecVersion`, and only when a bring-up needs it; a field is never
 // added because one particular model wanted one, and there is no free-form or
 // string-keyed part of the description. This is the guard against the spec
-// drifting into a graph IR (DESIGN.md section 6): the description holds
+// drifting into a graph IR (the non-goals in README.md): the description holds
 // identity, dimensions, one ordered block list, and policy. It holds no
 // operations, no edges, no per-op shapes, no scheduling, and no fusion
 // decisions. How a declared block actually runs is `nanochat/plan.h`'s

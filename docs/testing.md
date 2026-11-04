@@ -462,7 +462,7 @@ committed fixtures offline.
 
 Kernel families with a backward are checked with a finite-difference gradient
 test next to the kernel in `backends/cuda/kernels/`. The fused backward is
-derived and tested as a unit; see [DESIGN.md §5](../DESIGN.md).
+derived and tested as a unit; see [model.md](model.md) § No autograd engine.
 `backends/cuda/kernels/README.md` describes the per-kernel test and benchmark
 convention.
 
@@ -693,7 +693,8 @@ Gate: every leg compares its own section byte for byte.
 
 Prove, once per fresh run on the real card, the four things that the simulator
 cannot. Abort before the first optimizer step on a mismatch. Do not fall back to
-bf16, because `DESIGN.md` section 6 forbids a runtime precision branch.
+bf16, because [../README.md](../README.md) § What this is not forbids a runtime
+precision branch.
 
 Status: delivered. `src/hw_gate.cc` implements the cases and a host reference.
 `src/train.cc` runs it before the first step when the device is real, and exits

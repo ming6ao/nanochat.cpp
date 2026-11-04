@@ -14,7 +14,8 @@
 // This header is a leaf: it includes only `nanochat/tensor.h` and the standard
 // library, and it carries host metadata only. The active backend implements
 // `EnumerateDevices`, so a backend may include this header for that one symbol
-// without reaching above the kernel seam. See DESIGN.md section 2.1.
+// without reaching above the kernel seam. See docs/build.md, dependency
+// invariants.
 
 namespace nanochat {
 

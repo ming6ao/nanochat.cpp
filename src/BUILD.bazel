@@ -51,7 +51,8 @@ cc_library(
 
 # The small strict JSON reader the two data files of this campaign are read with
 # (`models/<name>/spec.json`, `backends/<name>/caps.json`). Standard library only,
-# so any layer may use it without reaching above the seam (DESIGN.md section 2.1).
+# so any layer may use it without reaching above the seam
+# (docs/build.md, dependency invariants).
 cc_library(
     name = "json",
     srcs = ["json.cc"],
@@ -216,7 +217,8 @@ cc_library(
 
 # The vendor-free control plane shared by every gradient-sync backend
 # (docs/distributed-design.md Part 3, section 4). POSIX sockets only; no vendor
-# header, so the `src` layer stays vendor-free (DESIGN.md section 2.1).
+# header, so the `src` layer stays vendor-free
+# (docs/build.md, dependency invariants).
 cc_library(
     name = "rendezvous",
     srcs = ["rendezvous.cc"],
@@ -255,7 +257,7 @@ cc_library(
 # `workspace.h`), the reusable graph pieces (`ops.cc`), the fixed train graph
 # (`model.cc`), the two inference graphs (`generate.cc`), and the harness
 # (`data.cc`, `eval.cc`, `train.cc`). It is a kernel-sequence graph, not an
-# autograd engine (DESIGN.md section 6).
+# autograd engine (the non-goals in README.md).
 #
 # `model_factory.cc` sits in this target rather than in one of its own, because
 # it is the body of the two public `Model::Create` overloads (spec/api-surface.md

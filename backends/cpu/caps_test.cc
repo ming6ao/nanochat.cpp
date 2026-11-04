@@ -11,8 +11,8 @@
 // all present.
 //
 // The file is a flat object of scalars and arrays, so a scan is enough to read
-// it and the backend gains no JSON dependency (DESIGN.md section 2.1: a backend
-// depends on the seam and nothing above it).
+// it and the backend gains no JSON dependency (docs/build.md, dependency
+// invariants: a backend depends on the seam and nothing above it).
 //
 // Run with `tools/nanochat test //backends/cpu:caps_test`.
 

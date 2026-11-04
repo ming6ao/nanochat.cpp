@@ -11,7 +11,7 @@ C++ binaries accept text and print text. The generation loop decodes each
 sampled token immediately, the same way `nanochat/engine.py` does.
 
 The tokenizer stays a host utility beside `DataLoader`. It sits below the model
-API, and it has no kernel dependency ([DESIGN.md](../DESIGN.md) section 2).
+API, and it has no kernel dependency ([build.md](build.md) § Layers).
 
 The training data format is in [model.md](model.md). Known divergences are in
 [parity.md](parity.md). The chat template stays in the bridge
@@ -125,7 +125,7 @@ quantifiers (`?+`, `++`) and the lookahead (`(?!\S)`) in the pattern.
 | D3 | A new `NCTOKEN1` artifact. | The reference pickle and `torch` files are not portable. |
 | D4 | An exact port of the reference merge loop. | The merge order defines the vocabulary. |
 | D5 | `int64` pair counts. | The reference uses `int32`; the wider type avoids overflow. |
-| D6 | The tokenizer is a host utility. | [DESIGN.md](../DESIGN.md) section 2 places it beside `DataLoader`. |
+| D6 | The tokenizer is a host utility. | [build.md](build.md) § Layers places it beside `DataLoader`. |
 | D7 | A native parquet reader for the input. | Reads the `text` column in dataset order without `pyarrow` or DuckDB. |
 
 D1 rejects an unknown pattern at load time. The C++ splitter supports the

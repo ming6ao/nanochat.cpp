@@ -45,7 +45,7 @@ cc_library(
 #
 # `GetCaps()` fills `Caps::feature_mask` from two inputs and no third one: the
 # caps.json-derived profile entry (`//src:device_profile`, the same leaf the CPU
-# backend links for the simulator, DESIGN.md section 2.1) and the precision
+# backend links for the simulator, docs/build.md, dependency invariants) and the precision
 # facts `cudaDeviceProp` reports. The mask is checked against the vocabulary
 # before it is returned.
 cuda_library(

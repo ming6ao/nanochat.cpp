@@ -5,7 +5,7 @@
 //
 //   tools/nanochat bench -- <qk_prep_bench binary>
 //
-// See dev/kernels/README.md and DESIGN.md section 3.
+// See dev/kernels/README.md and docs/kernels.md, fusion boundary rule.
 
 #include <chrono>
 #include <cstdio>

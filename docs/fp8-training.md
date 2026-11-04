@@ -50,7 +50,8 @@ optimizer state and the loss in fp32.
 
 **Out of scope.**
 
-- A runtime precision switch. `DESIGN.md` section 6 forbids one. The precision
+- A runtime precision switch. [../README.md](../README.md) § What this is not
+  forbids one. The precision
   stays a build decision.
 - Loss scaling. `docs/precision.md` section 1 rejects it for fp32 and bf16.
   fp8 uses a scale, but the scale is not a loss scale.
@@ -266,15 +267,16 @@ Four design points matter:
 
 1. The accumulator and the output stay fp32. `C` is `float*`.
 2. The operand type is `std::uint8_t*`, not `ComputeType*`. The byte carries an
-   E4M3 or an E5M2 value. Keep the vendor type out of the header, as
-   `DESIGN.md` section 2.1 rule 3 requires.
+   E4M3 or an E5M2 value. Keep the vendor type out of the header, as the
+   [dependency invariants](build.md#dependency-invariants) rule 3 requires.
 3. There is no C scale. The caller passes `beta = 0` for a pure overwrite. The
    reference has no C scale, and the design does not add one.
 4. The `transpose_a` and `transpose_b` flags describe the logical layout. The
    backend maps them to the `cublasLt` stride triplets.
 
 `include/nanochat/kernels.h` is frozen and architect-owned. This change is
-additive, so it obeys the evolution rule in `DESIGN.md` section 7.
+additive, so it obeys the [evolution
+rules](model-and-device-bringup.md) §18.
 
 ### 5.2 The cuBLASLt call
 
@@ -309,8 +311,9 @@ A reduced-precision reduction in the forward adds a small error that the
 backward does not have.
 
 `cublasLt` ships with the CUDA toolkit. It is not a new third-party dependency,
-so `DESIGN.md` section 6 stays satisfied. The backend build gains one link
-edge, `@cuda//:cublasLt`, which the build agent owns.
+so [../README.md](../README.md) § What this is not stays satisfied. The
+backend build gains one link edge, `@cuda//:cublasLt`, which the build agent
+owns.
 
 Keep the workspace. `cublasLtMatmul` needs a workspace for some algorithms. Use
 the existing workspace allocator, and size the request from the heuristic.
@@ -333,8 +336,9 @@ the fp8 training graph rather than with the seam: a build that has no layer set
 has nothing for a model-creation check to refuse.
 
 A build with fp8 on a device without support must fail when the model is
-created. Do not fall back at runtime, because `DESIGN.md` section 6 forbids a
-runtime precision branch.
+created. Do not fall back at runtime, because
+[../README.md](../README.md) § What this is not forbids a runtime precision
+branch.
 
 The host toolkit must be CUDA 11.8 or newer. The pinned host toolkit is CUDA
 12.0, so the pinned host is enough. The H100 node records its own version

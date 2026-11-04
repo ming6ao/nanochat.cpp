@@ -1,8 +1,11 @@
 # Documentation
 
-Reference and how-to material for `nanochat.cpp`. Design rationale, invariants,
-and evolution rules live in [../DESIGN.md](../DESIGN.md); this directory is the
-detailed reference that the design points at.
+Reference and how-to material for `nanochat.cpp`. Each subject document carries
+its own rationale and invariants: the layers and the dependency invariants in
+[build.md](build.md), the fusion rule and the compute strategy in
+[kernels.md](kernels.md), the autograd policy in [model.md](model.md), and the
+evolution rules in [model-and-device-bringup.md](model-and-device-bringup.md).
+This directory is the whole reference.
 
 One document covers one subject. When a subject needs a campaign plan, the plan
 is absorbed by the reference document when its last row lands, and the outcome
@@ -12,10 +15,10 @@ goes to [campaigns.md](campaigns.md). The rule is at the end of this page.
 
 | Document | Contents |
 |---|---|
-| [build.md](build.md) | File layout, Bazel, Makefile fallback, backends, precision, Turing, and Part 1: the dependency zones and the host packaging |
-| [kernels.md](kernels.md) | The backend seam: kernel inventory, **the tier column and the 16-of-30 bring-up cost**, API, device helpers |
-| [model.md](model.md) | Model API, graphs, the model description and its block kinds, optimizer, data and checkpoints, workspace |
-| [model-and-device-bringup.md](model-and-device-bringup.md) | The two axes: the directory contract, the kernel tiers, the model description, the planner, isolation, the conformance matrix, the checklists, and the open questions with their decision records |
+| [build.md](build.md) | The layers and the dependency invariants, the file layout, Bazel, backends, precision, Turing, and Part 1: the dependency zones and the host packaging |
+| [kernels.md](kernels.md) | The backend seam: kernel inventory, **the tier column and the bring-up cost**, the fusion boundary rule, the compute strategy, the API, and the device helpers |
+| [model.md](model.md) | Model API, graphs and the autograd policy, the model description and its block kinds, optimizer, data and checkpoints, workspace |
+| [model-and-device-bringup.md](model-and-device-bringup.md) | The two axes: the directory contract, the kernel tiers, the model description, the planner, isolation, the conformance matrix, the checklists, the open questions with their decision records, and §18 the evolution rules |
 | [conformance-matrix.md](conformance-matrix.md) | The model/device/tier/graph matrix. **Generated** by `tools/gen_matrix.py`; do not edit a row |
 | [examples.md](examples.md) | The two smallest examples of the public API: what each one shows, how to run it, the six design decisions, and its line budget |
 | [checkpoint-format.md](checkpoint-format.md) | The checkpoint container: the version 1 layout and the version 0 layout, the eight run-metadata decisions, the compatibility rules, and the parameter-only read |
@@ -85,7 +88,7 @@ the table. A second copy of a closed list is the drift the design warns about
 | [../spec/versions.md](../spec/versions.md) | The four contract versions and the rules that move them: additions are free, a removal needs a deprecation release, a meaning change needs a new name |
 | [../spec/capability_bits.md](../spec/capability_bits.md) | The fifteen capability bits, their meanings, their obligations, and the one spelling rule |
 | [../spec/block_kinds.md](../spec/block_kinds.md) | The block kinds, what each computes, the saved slots its backward reads, and the workspace-sharing rule |
-| [../spec/pointwise_ops.md](../spec/pointwise_ops.md) | The nine pointwise op codes and the declared accuracy bound of each |
+| [../spec/pointwise_ops.md](../spec/pointwise_ops.md) | The pointwise op codes and the declared accuracy bound of each |
 | [../spec/decisions.md](../spec/decisions.md) | The nine decision records D-001 to D-009 that the bring-up document cites |
 | [../spec/api-surface.md](../spec/api-surface.md) | The API of each component at HEAD, the smaller API proposed for each one, and the review rows `R1` to `R20` that the code and the generators cite |
 
@@ -111,4 +114,4 @@ A plan is retired as soon as its last row lands:
 4. The plan file is deleted, and every reference to it is retargeted.
 
 New here? Start with [../README.md](../README.md) for the quickstart, then
-[../DESIGN.md](../DESIGN.md) for the shape of the system.
+[build.md](build.md) § Layers for the shape of the system.

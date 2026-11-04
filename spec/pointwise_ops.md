@@ -41,7 +41,7 @@ must never compare a stored integer against a code. What is a contract is the
 name and the meaning.
 
 The same code drives forward and backward, so the two cannot drift apart
-(`DESIGN.md` §5).
+(`docs/model.md` § No autograd engine).
 
 ## 2. The parameter block
 
@@ -85,8 +85,7 @@ Rules that apply to every code:
 
 ## 3. The codes
 
-Twelve codes: nine that exist today, three added by the seam-3 contract
-extension.
+The list is closed. Three codes arrived with the seam-3 contract extension.
 
 | Code | Forward | Backward (`da`, `db`) | `PointwiseParams` fields read |
 |---|---|---|---|
@@ -143,8 +142,8 @@ The code computes `out[r, c] = a[r] * b[r, c]` with no materialized
 - The access pattern is the one the family already implements: one elementwise
   loop over `count` elements, with a shape parameter. A primitive tier is
   counted in entry points, and every entry point is a thing every device must
-  implement forever (§7.5: the required bring-up cost is 16 entry points, and
-  each new one raises it for inference and for training).
+  implement forever (§7.5: the required bring-up cost is the primitive tier,
+  and each new entry point raises it).
 - The row broadcast is one multiplicand's index expression. It needs no
   different units, no different accumulation, and no different correctness
   argument, which is the test §7.2 uses to decide that the two reductions are

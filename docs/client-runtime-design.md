@@ -14,8 +14,9 @@ driver function per run. Phase 6 delivers the driver, so
 `notebooks/mesh_train.py` is a thin launcher over it.
 
 Related: [distributed-design.md](distributed-design.md),
-[distributed-design.md](distributed-design.md), [python.md](python.md), and
-[../DESIGN.md](../DESIGN.md).
+[distributed-design.md](distributed-design.md), [python.md](python.md),
+[build.md](build.md) § Layers, and
+[model-and-device-bringup.md](model-and-device-bringup.md) §18.
 
 ## 1. Purpose
 
@@ -265,8 +266,9 @@ device, so the order is safe.
 ### 8.2 The seam stays frozen
 
 A thread-local change is invisible above the seam. The `src/**` layer sees no
-change. The `kernels.h` contract is unchanged. `DESIGN.md` section 7 permits
-this class of change.
+change. The `kernels.h` contract is unchanged. The evolution rules in
+[model-and-device-bringup.md](model-and-device-bringup.md) §18 permit this class
+of change.
 
 ## 9. The in-process collective
 
@@ -538,8 +540,8 @@ checkpoint exists after an interrupt.
 | T2 GPU | A two-device run versus one device | The validation loss matches one device |
 
 The CPU tests carry the mesh logic. The development host has one card, so the
-CPU path is the main gate. This matches `DESIGN.md` section 4 and `AGENTS.md`
-section 5.1.
+CPU path is the main gate. This matches [kernels.md](kernels.md) § Compute
+strategy and `AGENTS.md` section 5.1.
 
 ## 19. Risks
 

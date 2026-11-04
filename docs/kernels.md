@@ -1,17 +1,17 @@
 # The kernel seam (L1)
 
-The backend contract is a fixed set of host-callable functions. Thirty entry
-points at **seam version 2**: six device utilities and 24 arithmetic entries. A
-backend is complete when every symbol it is required to supply resolves and
-passes the oracle — 16 of the 30 for inference and evaluation, 18 for training
-(see [Kernel tiers](#kernel-tiers) below).
+The backend contract is a fixed set of host-callable functions: device
+utilities, arithmetic primitives, and stateful entries. A backend is complete
+when every symbol it is required to supply resolves and passes the oracle. The
+next section says which symbols a bring-up owes ([Kernel tiers](#kernel-tiers)).
 
-The rules that keep this seam vendor-free are in
-[DESIGN.md §2](../DESIGN.md); the fusion rule that constrains what may be one
-kernel is in [DESIGN.md §3](../DESIGN.md). A backend supplies this header; see
-[build.md](build.md). Which entry point each tier holds, and why, is
-[model-and-device-bringup.md §7](model-and-device-bringup.md) with its decision
-records in [../spec/decisions.md](../spec/decisions.md).
+The rules that keep this seam vendor-free are the [dependency
+invariants](build.md#dependency-invariants). The fusion rule that constrains
+what may be one kernel, and the compute strategy that follows from it, are the
+two sections below. A backend supplies this header; see [build.md](build.md).
+Which entry point each tier holds, and why, is
+[model-and-device-bringup.md §7](model-and-device-bringup.md) with its
+decision records in [../spec/decisions.md](../spec/decisions.md).
 
 ## Kernel inventory
 
@@ -60,7 +60,7 @@ which this table cites and does not restate.
 | `RowReduce` | primitive | required | `RmsNorm`, `QkPrep`, and the `Classifier`'s per-row reduction. Additive at seam 1 → 2 |
 | `SpanReduce` | primitive | required | `GradNorm`, `ScalarDot`, the loss reduction. Additive at seam 1 → 2 |
 | `AttentionForward`, `AttentionBackward` | primitive | required | The attention graph; causal, group-query, full context and sliding window |
-| `PointwiseForward`, `PointwiseBackward` | primitive | required | The twelve op codes, elementwise; one broadcasts a per-row vector and one applies the half-split pair rotation. Three codes are additive at seam 2 → 3 |
+| `PointwiseForward`, `PointwiseBackward` | primitive | required | The op codes, elementwise; one broadcasts a per-row vector and one applies the half-split pair rotation. Three codes are additive at seam 2 → 3 |
 | `EmbeddingForward` | primitive | required | The gather over `wte` and every `value_embeds[i]` |
 | `EmbeddingBackward` | primitive | required | The scatter-add into the dense gradient buffer |
 | `SmearForward`, `SmearBackward` | primitive | required | The bigram residual, one launch per direction on a device; the backward reduces its two parameter gradients at a phase boundary in the same launch |
@@ -73,33 +73,32 @@ which this table cites and does not restate.
 | `GradNorm` | composition | — | `SpanReduce` across several spans |
 | `ScalarDot` | composition | — | `SpanReduce` over two buffers, or the backend's dot |
 
-32 entry points: six utilities and 26 arithmetic entries. A composition
-supplies its own backward as one unit, because [DESIGN.md §5](../DESIGN.md)
-requires a fused backward to be derived and tested as a unit.
+A composition supplies its own backward as one unit, because
+[model.md](model.md) § No autograd engine requires a fused backward to be
+derived and tested as one unit.
 
-**The two reductions are additive, with a seam version bump.**
-`RowReduce` and `SpanReduce` are new symbols at seam version 2, and
-`kKernelSeamVersion` in the header declares 2. The header preamble's changelog
-names exactly what the rise covers: the two reductions, and the pointwise
-argument list becoming `PointwiseParams` with the `kExp`, `kRsqrt`, `kLog` and
-`kRowScale` codes. No symbol was retracted and no symbol changed meaning, so a
-seam-1 backend adds the two reductions and updates its two pointwise signatures,
-and nothing else. That the
-tier gained two entries instead of one descriptor with three modes is
+**The two reductions are additive, and they raise the seam version.**
+`RowReduce` and `SpanReduce` are new symbols, and `kKernelSeamVersion` in the
+header records the rise. The header preamble's changelog names exactly what the
+rise covers: the two reductions, and the pointwise argument list becoming
+`PointwiseParams` with the `kExp`, `kRsqrt`, `kLog` and `kRowScale` codes. No
+symbol was retracted and no symbol changed meaning, so an older backend adds the
+two reductions and updates its two pointwise signatures, and nothing else. That
+the tier gained two entries instead of one descriptor with three modes is
 [D-001](../spec/decisions.md); that the per-row broadcast is an op code and not
 a third entry point is [D-002](../spec/decisions.md); that the accuracy bound is
 per code and lives in [pointwise_ops.md](../spec/pointwise_ops.md) is
 [D-003](../spec/decisions.md).
 
-**Required bring-up cost: 18 of the 32 entry points** — the six utilities and
-twelve arithmetic primitives. A device at that tier runs every graph in
-[model.md](model.md) on the composition path without writing one fused kernel.
-Training adds the two stateful entries, for 20. The two fp8 entries are
-declared and never assumed: a `caps.json` carries `fp8_storage` and `fp8_gemm`
-only where the silicon has the formats, and the model then either runs the dense
-path or fails with the missing bit named. Before this partition, a device
-implemented all 28 entry points of seam 1, and every later fused family added a
-frozen-header entry point that every device then owed.
+**Required bring-up cost: the six utilities and every arithmetic primitive.** A
+device at that tier runs every graph in [model.md](model.md) on the composition
+path without writing one fused kernel. Training adds the two stateful entries.
+The two fp8 entries are declared and never assumed: a `caps.json` carries
+`fp8_storage` and `fp8_gemm` only where the silicon has the formats, and the
+model then either runs the dense path or fails with the missing bit named.
+Before this partition, a device implemented every entry point of the seam, and
+every later fused family added a frozen-header entry point that every device
+then owed.
 
 **The required `Attention` variant is causal, group-query, full context *and*
 sliding window, at one tile size.** Sliding window is required and not optional:
@@ -114,6 +113,85 @@ both and the window is a parameter. *One tile size* bounds the obligation: the
 tier promises the primitives at one tiling, not every tiling a future shape
 might prefer, and a second tile size is device tuning rather than a contract
 ([capability_bits.md](../spec/capability_bits.md) §5).
+
+## The fusion boundary rule
+
+Fuse the ops `A -> B` with the intermediate `Y` only when all five conditions
+hold:
+
+1. **Decomposition match** — one (grid, block) configuration covers both ops,
+   and the two iteration spaces map onto the same CTA and thread ownership.
+2. **Residency** — the part of `Y` that `B` needs fits in registers and shared
+   memory at that configuration, so the HBM round trip is really avoided.
+3. **No library displacement** — neither `A` nor `B` is better served by cuBLAS
+   or cuDNN, which cannot join the fusion.
+4. **Occupancy survives** — the register and shared usage of the fused kernel
+   does not drop occupancy past the break-even point.
+5. **Derivable backward** — the fused backward is derivable and testable, under
+   the policy in [model.md](model.md) § No autograd engine.
+
+Consequences for the one model in the tree:
+
+| Boundary | Fuse? | Reason |
+|---|---|---|
+| `RmsNorm -> RoPE -> scale` on q and k | **yes** (`QkPrep`) | row-local, on-chip, no library |
+| `residual add -> RmsNorm` | **yes** | row-local, on-chip |
+| `softcap -> cross-entropy` | **yes** (`Classifier`) | row-local over the vocabulary |
+| `relu^2 -> c_proj` GEMM | no | a cuBLASLt epilogue cannot express relu^2 |
+| `c_q` GEMM -> `RmsNorm(q)` | no | GEMM tiles against a whole-row reduction |
+| `attention` | separate | own T x T pattern |
+| `embedding gather` | separate | indexed access |
+| GEMM -> GEMM | no | cuBLAS owns both |
+
+Performance **validates** a boundary. Performance does not choose a boundary.
+Structure decides which boundaries are legal: the decomposition, the residency,
+and the library ownership.
+
+### Candidate v2 fusion
+
+`QkPrep` can fold into the `Attention` kernel, because the RMSNorm reduction
+runs over `head_dim`, which one tile row holds. The reduction does not span
+CTAs, so the rule permits the fold. Defer it to v2, because the fold couples the
+attention backward to the norm and rope backward.
+`backends/cuda/fused_overrides.cc` already declares `kFeatureFusedAttention` as
+the v2 candidate, and `backends/cuda/fused_override_trace_test.cc` holds the
+reference case.
+
+## Compute strategy
+
+### GEMM
+
+Keep cuBLAS as the GEMM engine. It is near peak on GP102 (11.34 TFLOPS fp32), it
+is tuned per shape, and it is portable across generations. Do not hand-write a
+GEMM.
+
+### Launch overhead
+
+At `d8_s512` a full step takes about 0.9 s, and kernel launches stay under 1% of
+that time. CUDA Graphs are therefore an optional internal optimization of the
+CUDA backend and not an architectural element. Add them only when a profile
+demands them ([performance.md](performance.md)).
+
+### No megakernels for training
+
+A whole-block megakernel needs a hand-written GEMM, because a device-side kernel
+cannot call cuBLAS. It also collapses occupancy, it serializes the phases behind
+a grid barrier, and it still pays the HBM round trip across a tile boundary.
+That is the wrong trade for throughput-bound training.
+
+**Exception:** the decode graph is batch-1 and latency-bound. A fused persistent
+decode kernel is therefore a legitimate `dev/kernels/` experiment, on hardware
+with matrix-multiply instructions (Turing and newer). It must beat a
+`cuBLAS + CUDA Graphs` baseline before promotion, and it does not apply to
+Pascal, which has no `mma` instruction.
+
+### Direct-MMA and persistent kernels
+
+A direct `mma` kernel and a persistent kernel do not apply to Pascal, because
+sm_61 has no tensor core and no `mma` or `wmma` instruction. The gain in a
+system such as Mirage MPK is whole-model inference fusion on Hopper, and not
+GEMM throughput. Keep cuBLAS, and revisit this only for decode on sm_75 and
+newer.
 
 ## Kernel API sketch
 
@@ -219,7 +297,7 @@ void MuonUpdate(const MuonParams&, const float* stacked_grads,
 void GradNorm(const float* const* grads, const int* counts, int num_spans,
               float clip, float* out_norm, float* out_scale);
 
-// The two reductions (seam version 2).
+// The two reductions.
 void RowReduce(const RowReduceParams&, const ComputeType* a, float* out);
 void SpanReduce(const SpanReduceParams&, const ComputeType* const* spans,
                 const ComputeType* const* other, float* out);

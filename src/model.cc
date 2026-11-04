@@ -1,6 +1,7 @@
 // The train graph: a fixed forward pass, a hand-written reverse-order backward
 // pass over the saved activations, and one optimizer step. There is no
-// autograd engine and no graph IR (DESIGN.md section 6); the topology lives
+// autograd engine and no graph IR (the non-goals in README.md); the topology
+// lives
 // here and nowhere else. See docs/model.md and docs/kernels.md.
 //
 // The forward and backward mirror nanochat's gpt.py exactly:

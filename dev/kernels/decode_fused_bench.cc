@@ -9,9 +9,9 @@
 //      in decode_kernels.cu.
 //
 // This is the baseline a fused persistent decode megakernel would have to beat
-// (DESIGN.md section 4.3). The MMA/persistent variant is explicitly a Turing+
-// (sm_75) experiment: this host is a GTX 1080 Ti at sm_61, which has no
-// `mma`/`wmma`, so only the baseline is reported here.
+// (docs/kernels.md, compute strategy). The MMA/persistent variant is explicitly
+// a Turing+ (sm_75) experiment: this host is a GTX 1080 Ti at sm_61, which has
+// no `mma`/`wmma`, so only the baseline is reported here.
 //
 // Because backends/cuda hardcodes the legacy default stream, the seam kernels
 // are *not* CUDA-graph capturable; the graph path therefore uses the local
@@ -20,7 +20,7 @@
 //
 //   tools/nanochat bench -- <decode_fused_bench binary>
 //
-// See dev/kernels/README.md and DESIGN.md section 4.
+// See dev/kernels/README.md and docs/kernels.md, compute strategy.
 
 #include <cublas_v2.h>
 #include <cuda_runtime.h>

@@ -12,8 +12,8 @@
 //     against a real decomposition rather than against nothing.
 //
 // Everything here is dev-only scaffolding: nothing in this header is part of
-// the frozen seam, and the CUDA backend is unchanged. See DESIGN.md section 3
-// and dev/kernels/README.md.
+// the frozen seam, and the CUDA backend is unchanged. See docs/kernels.md,
+// fusion boundary rule, and dev/kernels/README.md.
 
 #include "nanochat/kernels.h"
 

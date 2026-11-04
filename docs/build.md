@@ -1,12 +1,74 @@
 # Build
 
+## Layers
+
+Dependencies point strictly downward. There is exactly one interchangeable
+seam, and it is the kernel API at L1.
+
+```text
+L6  App / CLI        nine *_main.cc programs             src/*_main.cc
+L5  Train driver     TrainLoop Checkpointer Logger Mfu   train.cc
+L4  Optim            AdamW Muon Scheduler param groups   optim.cc
+L3  Model / graphs   Model, Prefill, Decode, KvCache     model.cc generate.cc
+L2  Ops (internal)   Linear Block Mlp ValueResidual      ops.cc
+L1  KERNEL API       <-- THE BACKEND SEAM          nanochat/kernels.h
+L0  Backend          alloc stream launch           backends/cpu/ backends/cuda/
+    Vendor           libm / OpenMP | cudart + cuBLAS
+```
+
+Host utilities sit beside L2 to L5 and never above the kernel API: `Tokenizer`,
+`DataLoader`, `Rand` (xorshift), `Sampler`, `Scheduler`, `Logger`, and `Mfu`.
+The seam itself is [kernels.md](kernels.md) § Kernel API sketch.
+
+### Dependency invariants
+
+The build graph enforces these five rules.
+
+1. `src/**` includes only `nanochat/**`. **No vendor header appears outside
+   `backends/`, with one exception: `src/parquet/` is the one host package that
+   may include the host-only ZSTD header.** The model, the kernels, and the
+   training runtime never link DuckDB. Parquet input uses the native reader
+   ([parquet-native.md](parquet-native.md)).
+2. `backends/**` includes only `nanochat/kernels.h` and `nanochat/tensor.h`.
+   **A kernel knows nothing about the model.** One additive exception exists for
+   the simulator: a backend may include `nanochat/device_profile.h`, a leaf
+   header that declares only the simulated capability table and itself depends
+   only on `nanochat/tensor.h` ([simulator.md](simulator.md), tier S0). That is
+   what lets `GetCaps()` answer from a simulated profile. `backends/cpu/` links
+   the matching leaf unit `//src:device_profile` for it. The edge points *down*
+   to a leaf and not up into the workflow layer. The leaf carries no model code
+   and no kernel arithmetic, so the seam stays vendor-free and the reference
+   backend still computes every value. `nanochat/mesh.h` is a second leaf of the
+   same shape: it declares the local device list and the mesh spec, and it
+   depends only on `nanochat/tensor.h`. A backend implements `EnumerateDevices`
+   there, so the multi-device runtime can enumerate devices without a change to
+   `kernels.h`. A new edge of this shape needs the same review as any other
+   change to the layering rule.
+3. `kernels.h` contains no vendor type: pointers are `ComputeType*`, streams are
+   opaque, and no CUDA header is ever included from it.
+4. **No cross naming.** Nothing above the kernel seam names a specific model or
+   a specific device, and nothing below it names a graph. The seam names
+   neither.
+5. **A bring-up adds a directory.** A model bring-up edits only
+   `models/<name>/**`; a device bring-up edits only `backends/<name>/**`.
+   Neither edits a frozen header, a shared build file, or another package
+   without a contract extension first.
+
+The first three rules are the load-bearing invariants: they let a backend be
+replaced as a build and link decision rather than as a source change. Stable API
+is therefore the default and cheap by construction, and not a promise that the
+API cannot move. When it must move, see
+[model-and-device-bringup.md](model-and-device-bringup.md) §18. Rules 4 and 5
+are the isolation promise. The bring-up contract that makes them operational is
+[model-and-device-bringup.md](model-and-device-bringup.md) §4 and §13.
+
 ## File layout
 
 ```
 nanochat.cpp/
   .clang-format
   MODULE.bazel  .bazelrc
-  README.md  DESIGN.md  AGENTS.md  CONTRIBUTING.md
+  README.md  AGENTS.md  CONTRIBUTING.md
   docs/                        # reference and how-to
   spec/                        # the contract vocabulary: prose and data, no code
     versions.md  capability_bits.md  block_kinds.md  pointwise_ops.md  decisions.md
@@ -202,11 +264,10 @@ resolves `python3` through `PATH` (`local_runtime_repo` above). An active
 environment therefore becomes the test interpreter. Its site-packages can then
 hide an import that breaks the layering rule.
 
-## Makefile fallback
+## Link dependencies
 
-A single Makefile builds the P0 toolchain spike for an environment where
-`rules_cuda` is unavailable. It autodetects nvcc and the architecture in the
-spirit of llm.c. It does not build the kernel families.
+Bazel is the only supported build. The P0 toolchain spike is
+`//dev/kernels:pascal_spike_gpu_test`.
 
 The CUDA build links `cudart` and cuBLAS. The CPU build links `libm`. Neither
 links cuDNN or NCCL.
@@ -236,13 +297,15 @@ improvement over llm.c, which duplicates its top-level files per backend.
 
 Adding hardware = add `backends/<x>/` implementing `kernels.h` plus a config
 value. `src/` and `include/` normally need no changes; a new kernel family
-(below the replacement boundary) does touch the frozen headers, under
-[DESIGN.md §7](../DESIGN.md).
+(below the replacement boundary) does touch the frozen headers, under the
+evolution rules in [model-and-device-bringup.md](model-and-device-bringup.md)
+§18.
 
 The interface to implement is [kernels.md](kernels.md). The dependency rules a
-backend must respect are in [DESIGN.md §2](../DESIGN.md): `backends/**` includes
-only `nanochat/kernels.h` and `nanochat/tensor.h`, and a kernel knows nothing
-about GPT.
+backend must respect are the
+[dependency invariants](#dependency-invariants):
+`backends/**` includes only `nanochat/kernels.h` and `nanochat/tensor.h`, and a
+kernel knows nothing about the model.
 
 ## Precision
 
@@ -345,10 +408,10 @@ it. See the precision section above.
 
 ### 5. Attention
 
-The current attention kernel uses fp32 statistics and an online softmax. It
-does not use tensor cores. A `mma` variant is later work under
-[DESIGN.md §3](../DESIGN.md). A candidate belongs in `dev/kernels` first, and
-it must beat the current kernel at the training shape.
+The current attention kernel uses fp32 statistics and an online softmax. It does
+not use tensor cores. A `mma` variant is later work under
+[kernels.md](kernels.md) § Compute strategy. A candidate belongs in
+`dev/kernels/` first, and it must beat the current kernel at the training shape.
 
 ### 6. Correctness gates
 
@@ -419,9 +482,10 @@ same number here. The execution record is in [campaigns.md](campaigns.md)._
 
 ### 2. The defect
 
-The C++ core is already lean. `DESIGN.md` section 2.1 enforces the layering, and
-`backends/**` links no vendor library beyond CUDA. The leak is in the Python
-tree.
+The C++ core is already lean. The
+[dependency invariants](#dependency-invariants)
+enforce the layering, and `backends/**` links no vendor library beyond CUDA. The
+leak is in the Python tree.
 
 #### 2.1 Leak one: lazy third-party imports in core modules
 

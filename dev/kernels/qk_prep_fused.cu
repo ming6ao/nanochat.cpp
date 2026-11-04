@@ -5,7 +5,7 @@
 // decomposed baseline uses the seam `RmsNormForward` plus a standalone
 // RoPE-then-scale kernel, which is the honest alternative a fusion has to beat.
 //
-// See dev/kernels/qk_prep_fused.h and DESIGN.md section 3.
+// See dev/kernels/qk_prep_fused.h and docs/kernels.md, fusion boundary rule.
 
 #include "dev/kernels/qk_prep_fused.h"
 

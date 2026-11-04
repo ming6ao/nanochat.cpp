@@ -127,8 +127,9 @@ the 8x H100 node.
 The host reference uses a TCP exchange. Rank 0 receives each rank's buffer, sums
 the buffers, and broadcasts the result. This parameter server is enough for a
 small rank count. The code includes POSIX sockets and the standard library
-only. `DESIGN.md` section 2.1 permits host POSIX headers in `src`; the rule
-forbids vendor headers.
+only. The [dependency
+invariants](build.md#dependency-invariants) permit
+host POSIX headers in `src`; the rule forbids vendor headers.
 
 The NCCL implementation calls `ncclAllReduce` with `ncclSum`. Rank 0 generates
 the `ncclUniqueId` and broadcasts it to the peers over a one-shot TCP exchange;
@@ -397,8 +398,8 @@ the data cursor.
 
 The NCCL gate and the two-rank parity gate run on Kaggle (section 15).
 
-The CPU path keeps the GPU off the correctness path, as `DESIGN.md` section 4
-requires.
+The CPU path keeps the GPU off the correctness path, as
+[kernels.md](kernels.md) § Compute strategy requires.
 
 ## 15. Risks
 
@@ -445,7 +446,8 @@ This document is the authority for the launch.
 train` for each rank. Two faults follow.
 
 The first fault is the layer. The file is process orchestration.
-`DESIGN.md` section 2.2 puts the process entry point outside the model layers.
+[sandbox.md](sandbox.md) § Entry point puts the process entry point outside the
+model layers ([build.md](build.md) § Layers).
 The notebooks directory ([../notebooks](../notebooks)) holds
 presentation, not orchestration.
 
@@ -477,7 +479,8 @@ Non-goals:
 
 `train_main` owns one rank. The rank values configure training, so C++
 owns their defaults. The launch, the queue, and the sandbox are host tooling.
-`DESIGN.md` section 2.2 and section 6 put them there.
+[sandbox.md](sandbox.md) § Entry point and [../README.md](../README.md)
+§ What this is not put them there.
 
 | Task | Owner | File |
 |---|---|---|
@@ -709,9 +712,9 @@ The companion documents are:
 
 ### 1. Purpose
 
-`DESIGN.md` section 2 puts the training driver at level L5. Level L5 holds
-`TrainLoop`, `Scheduler`, `Checkpointer`, `Logger`, and the MFU accounting. The
-driver is C++ by design.
+[build.md](build.md) § Layers puts the training driver at level L5. Level L5
+holds `TrainLoop`, `Scheduler`, `Checkpointer`, `Logger`, and the MFU
+accounting. The driver is C++ by design.
 
 The Python surface must not rebuild that driver. Today it does.
 
@@ -1025,7 +1028,8 @@ section 7 states.
   tokenizer-agnostic ([post-training.md](post-training.md) section 9).
 - A callback from C++ into Python. The C interface carries data only. The
   reinforcement-learning worker uses a message protocol instead.
-- Autograd. The graph stays fixed ([DESIGN.md](../DESIGN.md) section 5).
+- Autograd. The graph stays fixed ([model.md](model.md)
+  § No autograd engine).
 
 ### 8. Migration plan
 
@@ -1104,8 +1108,10 @@ interface work.
 - [eval.md](eval.md): the evaluation seam and the "metric in Python, compute in
   C++" rule.
 - [model.md](model.md): the model interface and the graphs.
-- [../DESIGN.md](../DESIGN.md): section 2 for the layers, section 5 for the
-  autograd policy, and section 7 for the evolution rules.
+- [build.md](build.md) § Layers for the layers, [model.md](model.md)
+  § No autograd engine for the autograd policy, and
+  [model-and-device-bringup.md](model-and-device-bringup.md) §18 for the
+  evolution rules.
 
 
 ---
