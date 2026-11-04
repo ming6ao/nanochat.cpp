@@ -10,7 +10,7 @@ SFT stage of the chain depends on:
   SFT stage rebuilds the shape its warm start records and
   ``Checkpointer::LoadModel`` accepts that file;
 * ``warm_start`` arrives as ``--warm-start`` and ``checkpoint`` stays the
-  ``--checkpoint`` save target, because ``src/sft_main.cc`` loads only from
+  ``--checkpoint`` save target, because ``src/sft_command.cc`` loads only from
   ``--warm-start`` and would overwrite the base checkpoint otherwise;
 * a ``config`` whose ``seq_len`` disagrees with the shard raises, because the
   packed rows own the sequence length.
@@ -121,7 +121,7 @@ class SftRunTest(unittest.TestCase):
     def test_warm_start_and_checkpoint_are_two_arguments(self) -> None:
         """``warm_start`` loads and ``checkpoint`` saves, as separate flags.
 
-        ``src/sft_main.cc`` loads only from ``--warm-start``, so a facade that
+        ``src/sft_command.cc`` loads only from ``--warm-start``, so a facade that
         sent the warm start as ``--checkpoint`` would overwrite the base
         checkpoint of the chain (B3).
         """

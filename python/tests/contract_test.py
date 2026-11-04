@@ -196,7 +196,7 @@ class ContractTest(unittest.TestCase):
                 return toolchain.CommandResult(arguments, 0, "", "", 0.0)
 
         tool = Recorder(entry=self.entry, repo_root=self.root, env=self.env)
-        tool.build(["//src:train_main"])
+        tool.build(["//src:nanochat_cli"])
         tool.test(["//bindings:all"], gpu=True)
         tool.check(gpu=True)
         tool.run("t2-parity", ["binary"])

@@ -2808,10 +2808,12 @@ if _command == 'api':
         evaluator. This script records the reference values for that check. It runs
         the committed CPU binaries through ``tools/nanochat``:
 
-        * ``train_main`` trains a tiny model on the committed document set
-          ``src/parquet/testdata/text.parquet`` with the committed tokenizer
-          ``tests/data/loader_tokenizer.nctoken``, and writes a checkpoint;
-        * ``eval_main`` loads that checkpoint and prints the bits-per-byte result.
+        * ``nanochat_cli train`` trains a tiny model on the committed document
+          set ``src/parquet/testdata/text.parquet`` with the committed
+          tokenizer ``tests/data/loader_tokenizer.nctoken``, and writes a
+          checkpoint;
+        * ``nanochat_cli eval`` loads that checkpoint and prints the
+          bits-per-byte result.
 
         The script records the model config, the optimizer config, the scheduler
         config, the seed, the data paths, the per-step loss, and the bits-per-byte
@@ -2831,7 +2833,7 @@ if _command == 'api':
 
         Run the generator from the repository root::
 
-            tools/nanochat build //src:train_main //src:eval_main
+            tools/nanochat build //src:nanochat_cli
             python3 tools/dump_runtime_fixtures.py api --out tests/data/api_fixture.bin
 
         Read the file with ``nanochat_cpp.eval_fixture.read`` and index the records by
@@ -2985,15 +2987,16 @@ if _command == 'api':
 
     def build_binaries(repo_root: Path, build: bool) -> None:
         if build:
-            run_nanochat(repo_root, ["build", "//src:train_main", "//src:eval_main"])
+            run_nanochat(repo_root, ["build", "//src:nanochat_cli"])
 
 
-    def binary_path(repo_root: Path, name: str) -> Path:
-        path = repo_root / "bazel-bin" / "src" / name
+    def binary_path(repo_root: Path) -> Path:
+        """The one stage binary. A subcommand, not a program, names a stage."""
+        path = repo_root / "bazel-bin" / "src" / "nanochat_cli"
         if not path.is_file():
             raise SystemExit(
                 f"missing built binary {path}; run "
-                "tools/nanochat build //src:train_main //src:eval_main")
+                "tools/nanochat build //src:nanochat_cli")
         return path
 
 
@@ -3029,7 +3032,7 @@ if _command == 'api':
         return flags
 
 
-    def run_train(repo_root: Path, train_main: Path, parquet: Path,
+    def run_train(repo_root: Path, program: Path, parquet: Path,
                   tokenizer: Path, args: argparse.Namespace, vocab: int,
                   checkpoint: Path) -> tuple[list[tuple[int, float]], int, float]:
         """Train the tiny model and return the per-step losses and the final loss."""
@@ -3050,8 +3053,8 @@ if _command == 'api':
             "--seed", str(args.seed),
             "--checkpoint", str(checkpoint),
         ]
-        result = run_nanochat(repo_root, ["run", "t0-cpu", "--", str(train_main),
-                                          *train_args])
+        result = run_nanochat(repo_root, ["run", "t0-cpu", "--", str(program),
+                                          "train", *train_args])
         steps: list[tuple[int, float]] = []
         for line in result.stdout.splitlines():
             step_match = _STEP_LOSS.match(line)
@@ -3070,7 +3073,7 @@ if _command == 'api':
         return steps, final_step, final_loss
 
 
-    def run_eval(repo_root: Path, eval_main: Path, parquet: Path,
+    def run_eval(repo_root: Path, program: Path, parquet: Path,
                  tokenizer: Path, args: argparse.Namespace, vocab: int,
                  checkpoint: Path) -> dict[str, float]:
         """Evaluate the checkpoint and return the bits-per-byte for each split."""
@@ -3086,8 +3089,8 @@ if _command == 'api':
             "--model", str(checkpoint),
             "--seed", str(args.seed),
         ]
-        result = run_nanochat(repo_root, ["run", "t0-cpu", "--", str(eval_main),
-                                          *eval_args])
+        result = run_nanochat(repo_root, ["run", "t0-cpu", "--", str(program),
+                                          "eval", *eval_args])
         values: dict[str, float] = {}
         for line in result.stdout.splitlines():
             match = _BPB.match(line)
@@ -3206,14 +3209,14 @@ if _command == 'api':
 
         vocab = vocab_size(tokenizer)
         build_binaries(repo_root, build=not args.no_build)
-        train_main = binary_path(repo_root, "train_main")
-        eval_main = binary_path(repo_root, "eval_main")
+        # One program runs both stages; a subcommand names the stage.
+        program = binary_path(repo_root)
 
         with tempfile.TemporaryDirectory(prefix="api_fixture_") as workdir:
             checkpoint = Path(workdir) / "model.nchkpt"
             steps, final_step, final_loss = run_train(
-                repo_root, train_main, parquet, tokenizer, args, vocab, checkpoint)
-            bpb = run_eval(repo_root, eval_main, parquet, tokenizer, args, vocab,
+                repo_root, program, parquet, tokenizer, args, vocab, checkpoint)
+            bpb = run_eval(repo_root, program, parquet, tokenizer, args, vocab,
                            checkpoint)
 
         train_parquet = _relative(repo_root, parquet)

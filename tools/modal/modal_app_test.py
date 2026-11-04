@@ -203,21 +203,21 @@ class AppTest(unittest.TestCase):
     def test_the_image_carries_the_two_stage_executables(self) -> None:
         # The chain launches both children, and one build produces all three
         # outputs (docs/post-training.md B6 and D2).
-        self.assertEqual(self.app.STAGE_TARGETS,
-                         ("//src:sft_main", "//src:rl_worker"))
-        self.assertEqual(
-            self.app.STAGE_TARGETS,
-            tuple(f"//src:{name}" for name in self.app.STAGE_NAMES))
+        # One program runs every stage, so one label builds it.
+        self.assertEqual(self.app.STAGE_TARGETS, ("//src:nanochat_cli",))
+        self.assertEqual(self.app.STAGE_TARGETS, (self.app.CLI_TARGET,))
+        self.assertEqual(self.app.STAGE_NAMES, ("sft_main", "rl_worker"))
 
     def test_the_image_names_the_two_stage_executables(self) -> None:
         # The environment override wins in `_build.stage_binary`, which is what
         # makes them findable when the install, and not the tree, answers
         # `import nanochat_cpp` (section 6.4).
         root = self.app.REPO_ROOT
+        # Both overrides name the one program; the subcommand picks the stage.
         self.assertEqual(
             self.app.STAGE_ENV,
-            {"NANOCHAT_SFT_MAIN": f"{root}/bazel-bin/src/sft_main",
-             "NANOCHAT_RL_WORKER": f"{root}/bazel-bin/src/rl_worker"})
+            {"NANOCHAT_SFT_MAIN": f"{root}/bazel-bin/src/nanochat_cli",
+             "NANOCHAT_RL_WORKER": f"{root}/bazel-bin/src/nanochat_cli"})
 
 
 class LegTest(unittest.TestCase):
@@ -341,10 +341,10 @@ class ImageTest(unittest.TestCase):
     def test_the_build_command_names_the_roofline_tool(self) -> None:
         # Gate G3 runs the tool inside the container, so the image build names
         # it beside the library and the two stage executables (sections 7, 8).
-        self.assertIn("//src:roofline_main", self.app.BUILD_TARGETS)
-        self.assertEqual(self.app.ROOFLINE_TARGET, "//src:roofline_main")
+        self.assertIn(self.app.CLI_TARGET, self.app.BUILD_TARGETS)
+        self.assertEqual(self.app.ROOFLINE_TARGET, self.app.CLI_TARGET)
         for leg in self.app.LEG_ORDER:
-            self.assertIn("//src:roofline_main",
+            self.assertIn(self.app.CLI_TARGET,
                           self.app.image_build_command(leg))
 
     def test_the_build_command_names_the_muon_benchmark(self) -> None:

@@ -161,7 +161,12 @@ def render_prompts(conversations: Sequence[dict], tokenizer) -> list[list[int]]:
 
 def worker_argv(worker, config: Config | None = None,
                 load: str | os.PathLike | None = None) -> list[str]:
-    """The worker argument list: the binary, the model flags, and the load.
+    """The worker argument list: the program, the subcommand, the model flags
+    and the load.
+
+    The program runs the ``rl_worker`` subcommand, because one binary serves
+    every stage. The subcommand word is added here, so a caller passes the
+    program and nothing else.
 
     The flags come from :func:`nanochat_cpp.api.model_flags`, the one home of
     the model flag list, so the worker recreates the exact model shape the
@@ -170,7 +175,7 @@ def worker_argv(worker, config: Config | None = None,
     start the model and the optimizer state from, and it reaches the worker as
     ``--checkpoint``, which is the worker's load flag.
     """
-    argv = [str(worker)]
+    argv = [str(worker), _build.STAGE_COMMANDS[WORKER_NAME]]
     argv.extend(api.model_flags(config))
     if load is not None:
         argv.extend(["--checkpoint", str(load)])

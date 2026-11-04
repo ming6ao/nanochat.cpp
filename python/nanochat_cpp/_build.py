@@ -11,10 +11,13 @@ left here is
 4. a stop with a clear message when no compiler and no prebuilt library exist.
 
 The stage executables use the same shape: :func:`stage_binary` resolves the
-environment override, the Bazel runfiles tree, ``bazel-bin/src/<name>``, and
-the ``nanochat-<name>`` entry point of a future wheel before it stops, so the
-library and the two children of the chain are found by one rule
-(docs/post-training.md B6).
+environment override, the Bazel runfiles tree, ``bazel-bin/src/nanochat_cli``,
+and the installed entry point before it stops, so the library and the one
+stage binary are found by one rule (docs/post-training.md B6).
+
+One binary runs every stage: :func:`stage_argv` returns the program and the
+subcommand word together, so a caller never has to know which word belongs to
+which stage.
 
 The build key is a hash of the source contents, the compiler version, the
 optional CUDA architecture, the precision, and the backend (section 3.3). Two
@@ -37,6 +40,9 @@ from typing import Sequence
 __all__ = [
     "BuildError",
     "BuildOptions",
+    "CLI_NAME",
+    "CLI_TARGET",
+    "STAGE_COMMANDS",
     "STAGE_NAMES",
     "SUPPORTED_PRECISIONS",
     "architecture",
@@ -53,7 +59,9 @@ __all__ = [
     "precision",
     "repo_root",
     "source_hash",
+    "stage_argv",
     "stage_binary",
+    "stage_target",
 ]
 
 #: The cache directory name under the user cache home.
@@ -65,10 +73,18 @@ LIBRARY_NAME = "libnanochat_shared.so"
 #: The Bazel target that builds the shared library.
 SHARED_TARGET = "//bindings:nanochat_shared"
 
-#: The two stage executables of the chain, in pipeline order
-#: (docs/post-training.md B6). A name is both the Bazel label under ``//src``
-#: and the program name of a future wheel entry point.
+#: The one stage command binary, its Bazel label, and its installed name.
+#: Every stage subcommand lives in it (docs/build.md).
+CLI_NAME = "nanochat_cli"
+CLI_TARGET = "//src:nanochat_cli"
+
+#: The two stages of the chain, in pipeline order (docs/post-training.md B6).
+#: A name is the stage identifier and the stem of its environment override; the
+#: subcommand it runs is the second table, so a new stage adds one row to each.
 STAGE_NAMES = ("sft_main", "rl_worker")
+
+#: The ``nanochat_cli`` subcommand each stage runs.
+STAGE_COMMANDS = {"sft_main": "sft", "rl_worker": "rl_worker"}
 
 #: Source directories whose contents change the compiled library.
 _SOURCE_DIRS = ("bindings", "src", "include", "backends")
@@ -376,29 +392,35 @@ def stage_override(name: str) -> str:
 
 
 def stage_target(name: str) -> str:
-    """The Bazel label of the stage executable ``name``: ``//src:<name>``."""
-    return f"//src:{name}"
+    """The Bazel label that builds the stage ``name``.
+
+    Every stage comes from the one ``nanochat_cli`` binary, so the label does
+    not depend on ``name``; the argument stays so a caller reads as it did.
+    """
+    del name
+    return CLI_TARGET
 
 
 def _stages_command(entry: Path, options: BuildOptions) -> list[str]:
     """The one ``tools/nanochat build`` command of :func:`build_stages`."""
-    targets = (SHARED_TARGET, *(stage_target(name) for name in STAGE_NAMES))
-    return _build_command(entry, options, targets)
+    return _build_command(entry, options, (SHARED_TARGET, CLI_TARGET))
 
 
 def stage_binary(name: str, options: BuildOptions | None = None,
                  root: Path | None = None) -> Path:
-    """Resolve one stage executable, or raise :class:`BuildError`.
+    """Resolve the stage binary, or raise :class:`BuildError`.
 
-    The order is the one B6 fixes, which is the order of ``nanochat_cpp._lib``
-    rather than the shorter list of ``docs/python.md`` section 3.2:
+    Every stage runs the one ``nanochat_cli`` program, so ``name`` only selects
+    the environment override that a container sets. The order is the one B6
+    fixes, which is the order of ``nanochat_cpp._lib`` rather than the shorter
+    list of ``docs/python.md`` section 3.2:
 
     1. the ``NANOCHAT_SFT_MAIN`` or ``NANOCHAT_RL_WORKER`` override, which wins
        even when the file is absent, because the caller named it;
     2. the Bazel runfiles tree, so a ``py_test`` or a ``bazel run`` finds the
        executable its data dependencies carry;
-    3. ``bazel-bin/src/<name>``, the development tree;
-    4. ``shutil.which("nanochat-" + name)``, the entry point of a future wheel;
+    3. ``bazel-bin/src/nanochat_cli``, the development tree;
+    4. ``shutil.which("nanochat_cli")``, the entry point of a future wheel;
     5. an error that names the build command, so a tree with no build fails
        with one line a reader can paste.
 
@@ -416,19 +438,19 @@ def stage_binary(name: str, options: BuildOptions | None = None,
 
     # The runfiles search lives in ``_lib``, which imports this module, so the
     # import is local: one runfiles implementation for the library and for the
-    # stage executables.
+    # stage binary.
     from . import _lib
 
-    runfiles = _lib.find_in_runfiles(f"src/{name}")
+    runfiles = _lib.find_in_runfiles(f"src/{CLI_NAME}")
     if runfiles is not None:
         return runfiles
 
     tree = Path(root) if root is not None else repo_root()
-    development = tree / "bazel-bin" / "src" / str(name)
+    development = tree / "bazel-bin" / "src" / CLI_NAME
     if development.is_file():
         return development
 
-    installed = shutil.which("nanochat-" + str(name))
+    installed = shutil.which(CLI_NAME)
     if installed:
         return Path(installed)
 
@@ -437,9 +459,20 @@ def stage_binary(name: str, options: BuildOptions | None = None,
     command = _command_text(_stages_command(
         tree / "tools" / "nanochat", options))
     raise BuildError(
-        f"cannot find the {name} executable: {stage_override(name)} is unset, "
-        f"there is no runfiles entry, {development} does not exist, and "
-        f"nanochat-{name} is not on PATH; build it with: {command}")
+        f"cannot find the {name} stage binary: {stage_override(name)} is "
+        f"unset, there is no runfiles entry, {development} does not exist, "
+        f"and {CLI_NAME} is not on PATH; build it with: {command}")
+
+
+def stage_argv(name: str, options: BuildOptions | None = None,
+               root: Path | None = None) -> list[str]:
+    """The program and the subcommand word of the stage ``name``.
+
+    The one binary runs every stage, so a caller that runs a stage needs two
+    words, not one. Keeping the pair here means ``sft.run`` and ``rl.run``
+    cannot disagree about which word belongs to which stage.
+    """
+    return [str(stage_binary(name, options, root)), STAGE_COMMANDS[name]]
 
 
 def _command_text(command: Sequence[str]) -> str:
@@ -448,18 +481,18 @@ def _command_text(command: Sequence[str]) -> str:
 
 
 def build_stages(options: BuildOptions | None = None,
-                 root: Path | None = None) -> tuple[Path, Path, Path]:
-    """Build the shared library and both stage executables in one call.
+                 root: Path | None = None) -> tuple[Path, Path]:
+    """Build the shared library and the stage binary in one call.
 
-    The chain needs the library and the two children, and one
-    ``tools/nanochat build`` command names all three, so a host runs one build
-    instead of three (docs/post-training.md B6 and D2). ``_build_command``
-    stays the one home of the command line: this function adds the two stage
-    targets and nothing else.
+    The chain needs the library and the one binary that runs every stage, and
+    one ``tools/nanochat build`` command names both, so a host runs one build
+    instead of two (docs/post-training.md B6 and D2). ``_build_command`` stays
+    the one home of the command line: this function adds the stage target and
+    nothing else.
 
-    Returns ``(library, sft_main, rl_worker)``, resolved the way the rest of
-    the package resolves them. Raises :class:`BuildError` when the entry point
-    is missing, the build fails, or an output is absent afterwards.
+    Returns ``(library, stage_binary)``, resolved the way the rest of the
+    package resolves them. Raises :class:`BuildError` when the entry point is
+    missing, the build fails, or an output is absent afterwards.
     """
     if options is None:
         options = BuildOptions.from_env()
@@ -483,15 +516,17 @@ def build_stages(options: BuildOptions | None = None,
             f"the stage build failed ({result.returncode}): "
             f"{_command_text(command)}\n{detail}")
     library = root / "bazel-bin" / "bindings" / LIBRARY_NAME
-    stages = tuple(root / "bazel-bin" / "src" / name for name in STAGE_NAMES)
-    missing = [str(path) for path in (library, *stages) if not path.is_file()]
+    development = root / "bazel-bin" / "src" / CLI_NAME
+    missing = [str(path) for path in (library, development)
+               if not path.is_file()]
     if missing:
         verb = "are" if len(missing) > 1 else "is"
         raise BuildError(
             f"the stage build reported success but {', '.join(missing)} "
             f"{verb} missing; the command was {_command_text(command)}")
-    return (library,
-            *(stage_binary(name, options, root) for name in STAGE_NAMES))
+    # The library is checked as the built file; the binary is resolved so an
+    # environment override still wins.
+    return (library, stage_binary(STAGE_NAMES[0], options, root))
 
 
 def ensure_library(root: Path | None = None,

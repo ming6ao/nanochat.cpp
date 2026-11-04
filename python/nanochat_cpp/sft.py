@@ -118,7 +118,9 @@ def run(shard, checkpoint, *, config: api.Config | None = None,
 
     ``binary`` defaults to :func:`nanochat_cpp._build.stage_binary`, and
     ``toolchain`` injects the orchestration object, in the style of
-    :func:`nanochat_cpp.rl.run`, so a test can pin the argv with a fake.
+    :func:`nanochat_cpp.rl.run`, so a test can pin the argv with a fake. The
+    program runs the ``sft`` subcommand, which this function adds, so a caller
+    passes the program and not the subcommand.
 
     Returns the driver's exit status.
     """
@@ -167,7 +169,7 @@ def run(shard, checkpoint, *, config: api.Config | None = None,
         arguments.extend(["--eval-tokens", str(int(eval_tokens))])
     if chatcore_every is not None:
         arguments.extend(["--chatcore-every", str(int(chatcore_every))])
-    argv = [str(binary), *arguments]
+    argv = [str(binary), _build.STAGE_COMMANDS["sft_main"], *arguments]
     runner = _toolchain if toolchain is None else toolchain
     result = runner.train(argv)
     return result.returncode

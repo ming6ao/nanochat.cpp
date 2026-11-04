@@ -158,8 +158,8 @@ std::string LocateFixture(int argc, char** argv) {
       "score fixture not found; pass tests/data/core_eval.bin as argv[1]");
 }
 
-// Locates the `score_main` binary next to the test in the runfiles tree. The
-// `//src:score_main` data dependency is what puts it there.
+// Locates the stage binary next to the test in the runfiles tree. The
+// `//src:nanochat_cli` data dependency is what puts it there.
 std::string LocateScoreMain() {
   std::vector<std::string> candidates;
   const std::string override = Getenv("NANOCHAT_SCORE_MAIN");
@@ -168,19 +168,19 @@ std::string LocateScoreMain() {
   const std::string workspace = Getenv("TEST_WORKSPACE");
   if (!src_dir.empty()) {
     if (!workspace.empty()) {
-      candidates.push_back(src_dir + "/" + workspace + "/src/score_main");
+      candidates.push_back(src_dir + "/" + workspace + "/src/nanochat_cli");
     }
-    candidates.push_back(src_dir + "/_main/src/score_main");
+    candidates.push_back(src_dir + "/_main/src/nanochat_cli");
   }
-  candidates.emplace_back("bazel-bin/src/score_main");
-  candidates.emplace_back("../bazel-bin/src/score_main");
+  candidates.emplace_back("bazel-bin/src/nanochat_cli");
+  candidates.emplace_back("../bazel-bin/src/nanochat_cli");
   for (const std::string& candidate : candidates) {
     std::ifstream in(candidate, std::ios::binary);
     if (in.good()) return candidate;
   }
   throw std::runtime_error(
-      "score_main not found in the runfiles tree; add //src:score_main to the "
-      "test data or set NANOCHAT_SCORE_MAIN");
+      "nanochat_cli not found in the runfiles tree; add //src:nanochat_cli to "
+      "the test data or set NANOCHAT_SCORE_MAIN");
 }
 
 std::string ShellQuote(const std::string& text) {
@@ -345,8 +345,9 @@ void Run(const std::string& fixture_path) {
 
   const std::string out_path = TempDir() + "/core_eval_result.bin";
   const std::string binary = LocateScoreMain();
+  // One binary runs every stage, so the subcommand names this one.
   std::string command =
-      ShellQuote(binary) + " --fixture " + ShellQuote(fixture_path) +
+      ShellQuote(binary) + " score --fixture " + ShellQuote(fixture_path) +
       " --out " + ShellQuote(out_path) + " --model " + ShellQuote(checkpoint) +
       " --layers " + std::to_string(config.num_layers) + " --heads " +
       std::to_string(config.num_heads) + " --kv-heads " +
@@ -358,8 +359,8 @@ void Run(const std::string& fixture_path) {
       ShellQuote(config.window_pattern);
   const int status = std::system(command.c_str());
   if (status == -1 || !WIFEXITED(status) || WEXITSTATUS(status) != 0) {
-    Fail("score_main did not run successfully (exit " + std::to_string(status) +
-         ")");
+    Fail("nanochat_cli score did not run successfully (exit " +
+         std::to_string(status) + ")");
     return;
   }
 

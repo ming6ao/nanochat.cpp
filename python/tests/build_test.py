@@ -7,10 +7,11 @@ that ``NANOCHAT_CPP_CACHE`` selects the cache, that an explicit
 See docs/python.md sections 3.2 and 3.3.
 
 The stage half is the resolver of ``docs/post-training.md`` B6: one function
-finds ``sft_main`` and ``rl_worker`` in the order the library uses -- the
-environment override, the runfiles tree, ``bazel-bin/src/<name>``, and the
-``nanochat-<name>`` entry point of a future wheel -- and one builder builds the
-library and both children with one ``tools/nanochat build`` line. Both are
+finds the stage binary in the order the library uses -- the environment
+override, the runfiles tree, ``bazel-bin/src/nanochat_cli``, and the installed
+entry point of a future wheel -- and one builder builds the library and that
+binary with one ``tools/nanochat build`` line. One program runs every stage, so
+a stage name selects the override and the subcommand, never a path. Both are
 covered over a fake tree: a directory, a runfiles root, a fake
 ``tools/nanochat`` script, and a temporary ``PATH``, so no Bazel run happens.
 
@@ -98,8 +99,7 @@ if status:
 wanted = [
     ("//bindings:nanochat_shared", os.path.join("bazel-bin", "bindings",
                                                 library)),
-    ("//src:sft_main", os.path.join("bazel-bin", "src", "sft_main")),
-    ("//src:rl_worker", os.path.join("bazel-bin", "src", "rl_worker")),
+    ("//src:nanochat_cli", os.path.join("bazel-bin", "src", "nanochat_cli")),
 ]
 for target, path in wanted:
     if target in argv:
@@ -398,14 +398,15 @@ class BackendTest(unittest.TestCase):
 
 
 class StageBinaryTest(unittest.TestCase):
-    """B6: one resolver finds the two stage executables of the chain.
+    """B6: one resolver finds the stage binary of the chain.
 
-    The order is the order of ``nanochat_cpp._lib`` and not the shorter list of
-    ``docs/python.md`` section 3.2: the environment override, the runfiles
-    tree, ``bazel-bin/src/<name>``, the ``nanochat-<name>`` entry point of a
-    future wheel, then an error that names the build command. Every case runs
-    over a temporary tree, so nothing is built and no real runfiles tree is
-    read.
+    One program runs every stage, so a stage name selects the environment
+    override and the subcommand, and never a path. The order is the order of
+    ``nanochat_cpp._lib`` and not the shorter list of ``docs/python.md``
+    section 3.2: the environment override, the runfiles tree,
+    ``bazel-bin/src/nanochat_cli``, the installed entry point of a future
+    wheel, then an error that names the build command. Every case runs over a
+    temporary tree, so nothing is built and no real runfiles tree is read.
     """
 
     NAMES = ("NANOCHAT_SFT_MAIN", "NANOCHAT_RL_WORKER", "RUNFILES_DIR",
@@ -443,14 +444,28 @@ class StageBinaryTest(unittest.TestCase):
                          "NANOCHAT_SFT_MAIN")
         self.assertEqual(_build.stage_override("rl_worker"),
                          "NANOCHAT_RL_WORKER")
-        self.assertEqual(_build.stage_target("sft_main"), "//src:sft_main")
-        self.assertEqual(_build.stage_target("rl_worker"), "//src:rl_worker")
+        # One binary serves every stage, so both stages name one label.
+        self.assertEqual(_build.STAGE_COMMANDS,
+                         {"sft_main": "sft", "rl_worker": "rl_worker"})
+        self.assertEqual(_build.stage_target("sft_main"), "//src:nanochat_cli")
+        self.assertEqual(_build.stage_target("rl_worker"), "//src:nanochat_cli")
+
+    def test_the_stage_argv_pairs_the_program_with_its_subcommand(self) -> None:
+        """A caller gets both words, so the two facades cannot disagree."""
+        self._executable(self.root / "bazel-bin" / "src" / "nanochat_cli")
+        self.assertEqual(
+            _build.stage_argv("sft_main", root=self.root),
+            [str(self.root / "bazel-bin" / "src" / "nanochat_cli"), "sft"])
+        self.assertEqual(
+            _build.stage_argv("rl_worker", root=self.root),
+            [str(self.root / "bazel-bin" / "src" / "nanochat_cli"),
+             "rl_worker"])
 
     def test_the_environment_override_wins(self) -> None:
         """The caller named the file, so it wins even when it is absent."""
         override = self.root / "named" / "sft_main"
         os.environ["NANOCHAT_SFT_MAIN"] = str(override)
-        self._executable(self.runfiles / "src" / "sft_main")
+        self._executable(self.runfiles / "src" / "nanochat_cli")
         self.assertEqual(_build.stage_binary("sft_main", root=self.root),
                          override)
         worker = self.root / "named" / "rl_worker"
@@ -460,23 +475,23 @@ class StageBinaryTest(unittest.TestCase):
 
     def test_the_runfiles_tree_wins_over_the_development_tree(self) -> None:
         """A ``py_test`` or a ``bazel run`` finds the data dependency."""
-        runfiles = self._executable(self.runfiles / "src" / "sft_main")
+        runfiles = self._executable(self.runfiles / "src" / "nanochat_cli")
         development = self._executable(self.root / "bazel-bin" / "src" /
-                                       "sft_main")
+                                       "nanochat_cli")
         self.assertNotEqual(runfiles, development)
         self.assertEqual(_build.stage_binary("sft_main", root=self.root),
                          runfiles)
 
     def test_a_runfiles_miss_falls_through_to_bazel_bin(self) -> None:
         development = self._executable(self.root / "bazel-bin" / "src" /
-                                       "rl_worker")
+                                       "nanochat_cli")
         self.assertEqual(_build.stage_binary("rl_worker", root=self.root),
                          development)
 
     def test_the_wheel_entry_point_is_the_last_source(self) -> None:
-        """A wheel install resolves ``nanochat-<name>`` from ``PATH``."""
+        """A wheel install resolves ``nanochat_cli`` from ``PATH``."""
         bindir = self.root / "bin"
-        installed = self._executable(bindir / "nanochat-rl_worker")
+        installed = self._executable(bindir / "nanochat_cli")
         with mock.patch.dict(os.environ,
                              {"PATH": str(bindir)}):
             self.assertEqual(_build.stage_binary("rl_worker", root=self.root),
@@ -490,22 +505,21 @@ class StageBinaryTest(unittest.TestCase):
         message = str(caught.exception)
         self.assertIn("NANOCHAT_SFT_MAIN is unset", message)
         self.assertIn("there is no runfiles entry", message)
-        self.assertIn(str(self.root / "bazel-bin" / "src" / "sft_main"),
+        self.assertIn(str(self.root / "bazel-bin" / "src" / "nanochat_cli"),
                       message)
-        self.assertIn("nanochat-sft_main is not on PATH", message)
+        self.assertIn("nanochat_cli is not on PATH", message)
         self.assertIn("build it with:", message)
-        for part in ("build", "//bindings:nanochat_shared", "//src:sft_main",
-                     "//src:rl_worker"):
+        for part in ("build", "//bindings:nanochat_shared", "//src:nanochat_cli"):
             self.assertIn(part, message)
 
 
 class BuildStagesTest(unittest.TestCase):
-    """B6: one ``tools/nanochat build`` line builds the library and both
-    children.
+    """B6: one ``tools/nanochat build`` line builds the library and the stage
+    binary.
 
     ``_build_command`` stays the one home of the command line, so this class
-    checks that :func:`nanochat_cpp._build.build_stages` adds the two stage
-    targets and nothing else, and that it reports the three outputs.
+    checks that :func:`nanochat_cpp._build.build_stages` adds the stage target
+    and nothing else, and that it reports both outputs.
     """
 
     NAMES = ("NANOCHAT_SFT_MAIN", "NANOCHAT_RL_WORKER", "RUNFILES_DIR",
@@ -539,21 +553,17 @@ class BuildStagesTest(unittest.TestCase):
                 os.environ[name] = value
         self.tmp.cleanup()
 
-    def test_one_build_line_names_the_library_and_both_stages(self) -> None:
-        library, sft_main, rl_worker = _build.build_stages(
-            self.options, root=self.root)
+    def test_one_build_line_names_the_library_and_the_stage(self) -> None:
+        library, stage = _build.build_stages(self.options, root=self.root)
         self.assertEqual(library, self.root / "bazel-bin" / "bindings" /
                          _build.LIBRARY_NAME)
-        self.assertEqual(sft_main, self.root / "bazel-bin" / "src" /
-                         "sft_main")
-        self.assertEqual(rl_worker, self.root / "bazel-bin" / "src" /
-                         "rl_worker")
+        self.assertEqual(stage, self.root / "bazel-bin" / "src" /
+                         "nanochat_cli")
         lines = self.log.read_text(encoding="utf-8").strip().splitlines()
         self.assertEqual(len(lines), 1, "the builder ran more than one build")
         argv = json.loads(lines[0])
         self.assertEqual(argv[0], "build")
-        for target in ("//bindings:nanochat_shared", "//src:sft_main",
-                       "//src:rl_worker"):
+        for target in ("//bindings:nanochat_shared", "//src:nanochat_cli"):
             self.assertIn(target, argv)
         self.assertIn("--config=cpu", argv)
         self.assertIn("--define=precision=fp32", argv)
@@ -567,7 +577,7 @@ class BuildStagesTest(unittest.TestCase):
             os.environ.pop("FAKE_BUILD_STATUS", None)
         message = str(caught.exception)
         self.assertIn("the stage build failed (3)", message)
-        self.assertIn("//src:rl_worker", message)
+        self.assertIn("//src:nanochat_cli", message)
         self.assertIn("the fake build failed", message)
 
     def test_a_tree_without_the_entry_point_raises(self) -> None:

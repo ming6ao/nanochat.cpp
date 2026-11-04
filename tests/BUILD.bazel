@@ -432,7 +432,7 @@ cc_test(
         # The driver itself: the test launches it as a subprocess from the
         # runfiles tree, so the gate exercises the real flags and the real
         # progress stream.
-        "//src:sft_main",
+        "//src:nanochat_cli",
     ],
     args = [
         "$(rootpath data/sft_loop_fixture.bin)",
@@ -508,7 +508,7 @@ cc_test(
 
 # RL parity: drives the shared `RlStep` over the rollouts, the targets, and the
 # advantages recorded by `tools/dump_fixtures.py rl`, then runs the file-driven
-# `//src:rl_step_main` on the same fixture and compares the loss, the gradient
+# `nanochat_cli rl_step` on the same fixture and compares the loss, the gradient
 # norm, and the parameter trajectory. The fixture records the model-independent
 # normalization reference (the valid-target count and the divisor
 # `num_valid * num_passes * examples_per_rank`), which the test also checks.
@@ -521,11 +521,11 @@ cc_test(
     defines = precision_defines(),
     data = [
         "data/rl_parity.bin",
-        "//src:rl_step_main",
+        "//src:nanochat_cli",
     ],
     args = [
         "$(rootpath data/rl_parity.bin)",
-        "$(rootpath //src:rl_step_main)",
+        "$(rootpath //src:nanochat_cli)",
     ],
     deps = [
         ":oracle_fixture",
@@ -545,11 +545,11 @@ cc_test(
     defines = precision_defines(),
     data = [
         "data/rl_parity.bin",
-        "//src:rl_step_main",
+        "//src:nanochat_cli",
     ],
     args = [
         "$(rootpath data/rl_parity.bin)",
-        "$(rootpath //src:rl_step_main)",
+        "$(rootpath //src:nanochat_cli)",
     ],
     deps = [
         ":oracle_fixture",
@@ -561,7 +561,7 @@ cc_test(
     tags = ["gpu"],
 )
 
-# Score parity: runs the real `score_main` on the synthetic CORE fixture from
+# Score parity: runs the real `nanochat_cli score` on the synthetic CORE fixture from
 # `tools/dump_fixtures.py eval` and compares its per-position NLL, argmax, and
 # focused logits against the recorded PyTorch reference. The fixture carries
 # the model parameters, so the test rebuilds the reference model and writes the
@@ -575,7 +575,7 @@ cc_test(
     defines = precision_defines(),
     data = [
         "data/core_eval.bin",
-        "//src:score_main",
+        "//src:nanochat_cli",
     ],
     args = ["$(rootpath data/core_eval.bin)"],
     deps = [

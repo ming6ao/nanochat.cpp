@@ -133,7 +133,7 @@ SchedulerConfig SchedulerFromStepFixture(const Fixture& step_fixture,
   SchedulerConfig sched;
   sched.num_iterations = num_iterations;
   // An SFT run follows the progress curve, so the step-count warmup is off
-  // (design decision D1); `src/sft_main.cc` sets the same value.
+  // (design decision D1); `src/sft_command.cc` sets the same value.
   sched.warmup_steps = 0;
   sched.warmup_ratio =
       step_fixture.Get("config/schedule/warmup_ratio").scalar_f32();
@@ -262,7 +262,7 @@ void Run(const std::string& loop_path, const std::string& step_path,
                   ScalarF32(loop, prefix + "/momentum"));
 
     // The logged loss of the step: the last micro-batch loss of the step, which
-    // is what the reference logs and what `src/sft_main.cc` prints.
+    // is what the reference logs and what `src/sft_command.cc` prints.
     const double loss = ScalarF32(loop, "train/loss/" + std::to_string(k));
     if (!std::isfinite(loss) || loss <= 0.0) {
       Fail(Format("train/loss/%d is not a positive finite loss", k));

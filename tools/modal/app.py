@@ -29,9 +29,9 @@ leg and mirror them. ``train`` runs one stage of a job; ``pipeline`` runs the
 whole base, SFT, RL, and eval chain of one job file through
 ``python -m nanochat_cpp.pipeline``, which is the container entry of design
 decision D10 (``docs/post-training.md`` section 6.3). One build per image
-produces the library, the two stage executables the chain launches, and
-``//src:roofline_main``, so the chain and gate G3 both find a binary already
-built (sections 6.4 and B6).
+produces the library and ``//src:nanochat_cli``, the one program every stage
+subcommand and the roofline gate run, so the chain and gate G3 both find a
+binary already built (sections 6.4 and B6).
 
 Both legs keep the default collective, ``nccl``, because the chain runs
 ``world_size=1``, and no leg builds a simulator: the ``h100`` entry of
@@ -133,19 +133,25 @@ REPO_ROOT = "/repo"
 #: The shared library that the image build produces.
 LIBRARY = f"{REPO_ROOT}/bazel-bin/bindings/libnanochat_shared.so"
 
-#: The two stage executables the chain launches, beside the library: the Bazel
-#: labels the one image build names (``docs/post-training.md`` B6), so a
+#: The one stage command binary the chain launches, beside the library: the
+#: Bazel label the one image build names (``docs/post-training.md`` B6), so a
 #: container needs no second build and the wheel line below stays a later
-#: one-line change.
+#: one-line change. One program runs every stage, so the subcommands are a
+#: table rather than a target each.
+#: The stage names of the chain, in pipeline order. A name is the stage
+#: identifier and the stem of its environment override, not a Bazel target:
+#: one program runs every stage (``docs/post-training.md`` B6).
 STAGE_NAMES = ("sft_main", "rl_worker")
-STAGE_TARGETS = ("//src:sft_main", "//src:rl_worker")
+
+CLI_TARGET = "//src:nanochat_cli"
+STAGE_TARGETS = (CLI_TARGET,)
 
 #: The Bazel label of the roofline tool. Gate G3 runs
 #: ``tools/nanochat roofline`` inside the container, and the tool must find its
 #: binary already built there instead of starting a second build
-#: (``docs/post-training.md`` sections 7 and 8). It is not a stage
-#: executable: no stage launches it, and only the gate reads its report.
-ROOFLINE_TARGET = "//src:roofline_main"
+#: (``docs/post-training.md`` sections 7 and 8). It is not a stage:
+#: no stage launches it, and only the gate reads its report.
+ROOFLINE_TARGET = CLI_TARGET
 
 #: The Bazel label of the native tokenizer trainer, and the binary it produces.
 #: It is not a stage executable either: only :func:`corpus` calls it, to build
@@ -160,8 +166,8 @@ TOKENIZER_BIN = f"{REPO_ROOT}/bazel-bin/src/tokenizer/tok_train_main"
 #: phase split: data, forward, backward, sync, and optimizer. A step that sits
 #: far from its roofline bound is attributed with it, on the card that ran it,
 #: because the split is the only thing that says which phase to fix.
-TRAIN_TARGET = "//src:train_main"
-TRAIN_BIN = f"{REPO_ROOT}/bazel-bin/src/train_main"
+TRAIN_TARGET = CLI_TARGET
+TRAIN_BIN = f"{REPO_ROOT}/bazel-bin/src/nanochat_cli"
 
 #: The Bazel label of the Muon optimizer benchmark, and its binary. The
 #: benchmark times the Polar Express GEMM shapes and one whole optimizer phase,
@@ -171,22 +177,22 @@ TRAIN_BIN = f"{REPO_ROOT}/bazel-bin/src/train_main"
 BENCH_TARGET = "//backends/cuda/kernels:muon_benchmark"
 BENCH_BIN = f"{REPO_ROOT}/bazel-bin/backends/cuda/kernels/muon_benchmark"
 
-#: The labels the one build of an image names: the shared library, the two
-#: stage executables the chain launches (``docs/post-training.md`` B6 and D2),
-#: the roofline tool G3 measures with, the tokenizer trainer the corpus
-#: function runs, and the optimizer benchmark :func:`bench_h100` times.
+#: The labels the one build of an image names: the shared library, the stage
+#: binary the chain launches (``docs/post-training.md`` B6 and D2), the
+#: tokenizer trainer the corpus function runs, and the optimizer benchmark
+#: :func:`bench_h100` times. The roofline tool and the trainer are the same
+#: program and the same label, so each appears once.
 BUILD_TARGETS = ("//bindings:nanochat_shared", *STAGE_TARGETS,
-                 ROOFLINE_TARGET, TOKENIZER_TARGET, TRAIN_TARGET,
-                 BENCH_TARGET)
+                 TOKENIZER_TARGET, BENCH_TARGET)
 
 #: The directory of the image build that holds them, and the variables that
 #: name them. ``nanochat_cpp._build.stage_binary`` prefers the override, and
 #: the image sets it because the installed distribution answers ``import
 #: nanochat_cpp`` from site-packages, where ``repo_root()`` is not the image
-#: tree (section 6.4). The names follow ``_build.stage_override``: the program
-#: name upper-cased behind the prefix.
+#: tree (section 6.4). The names follow ``_build.stage_override``: the stage
+#: name upper-cased behind the prefix, and both name the one program.
 STAGE_BIN = f"{REPO_ROOT}/bazel-bin/src"
-STAGE_ENV = {f"NANOCHAT_{name.upper()}": f"{STAGE_BIN}/{name}"
+STAGE_ENV = {f"NANOCHAT_{name.upper()}": f"{STAGE_BIN}/nanochat_cli"
              for name in STAGE_NAMES}
 
 #: The directory the chain delivers into, the report it writes, and the corpus
@@ -384,9 +390,9 @@ def image_build_command(leg: Leg, targets: Sequence[str] = BUILD_TARGETS,
     The command is a one-liner that calls ``_build._build_command``, so the
     builder stays the one home of the flag line and the image passes the leg's
     precision and architecture through ``BuildOptions.resolve`` (section 7).
-    The targets are the library, the two stage executables the chain launches,
-    and ``//src:roofline_main``, so gate G3 finds the tool already built inside
-    the container.
+    The targets are the library and ``//src:nanochat_cli``, which runs every
+    stage subcommand and the roofline gate, so gate G3 finds the tool already
+    built inside the container.
 
     The command names no Bazel config. The ``h100`` entry of ``.bazelrc`` is
     the simulator, and it also sets the native collective, so the hardware leg
@@ -1394,7 +1400,7 @@ def step_split_argv(job: Mapping, corpus: Mapping, steps: int = 6) -> list:
     if not files or not tokenizer:
         raise ValueError(
             "step_split: the corpus document needs `files` and `tokenizer`")
-    return ["tools/nanochat", "train", "--", TRAIN_BIN,
+    return ["tools/nanochat", "train", "--", TRAIN_BIN, "train",
             *model_flags(shape_of(job)),
             "--batch", str(int(batch)),
             "--grad-accum", str(int(grad_accum)),

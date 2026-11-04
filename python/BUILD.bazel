@@ -216,7 +216,7 @@ py_test(
 # T0: the one-job chain -- base, then SFT, then RL -- at the `demo` profile.
 # This is the integration gate of `docs/post-training.md` Part 2, section 7: the chain
 # runs the real stage executables over the committed fixture corpus, so the
-# runfiles carry the shared library, `//src:sft_main`, `//src:rl_worker`, the
+# runfiles carry the shared library, `//src:nanochat_cli`, the
 # parquet document set, and the NCTOKEN1 tokenizer artifact. About 5 s at the
 # demo shape, so it stays in the default T0 loop.
 py_test(
@@ -224,8 +224,7 @@ py_test(
     srcs = ["tests/pipeline_test.py"],
     data = [
         "//bindings:nanochat_shared",
-        "//src:sft_main",
-        "//src:rl_worker",
+        "//src:nanochat_cli",
         "//src/parquet:testdata/text.parquet",
         "//tests:data/loader_tokenizer.nctoken",
     ],
@@ -423,8 +422,7 @@ py_test(
     main = "tests/pipeline_test.py",
     data = [
         "//bindings:nanochat_shared",
-        "//src:sft_main",
-        "//src:rl_worker",
+        "//src:nanochat_cli",
         "//src/parquet:testdata/text.parquet",
         "//tests:data/loader_tokenizer.nctoken",
     ],

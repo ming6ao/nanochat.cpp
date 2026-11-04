@@ -509,12 +509,12 @@ def cmd_profile(argv: list[str], ctx: Context) -> int:
 
 
 def cmd_roofline(argv: list[str], ctx: Context) -> int:
-    code = ctx.bazel(["build", "//src:roofline_main"])
+    code = ctx.bazel(["build", "//src:nanochat_cli"])
     if code != 0:
         return code
-    binary = BAZEL_BIN / "src" / "roofline_main"
+    binary = BAZEL_BIN / "src" / "nanochat_cli"
     return exec_replace([str(SANDBOX), "--profile", "t0-cpu", "--",
-                         str(binary), *argv])
+                         str(binary), "roofline", *argv])
 
 
 def cmd_attain(argv: list[str], ctx: Context) -> int:
@@ -780,7 +780,7 @@ def _print_doctor(values: dict) -> None:
         print(f"--- tail {log} ---")
         for line in _tail(log, 5):
             print(line)
-    for binary in (BAZEL_BIN / "src" / "train_main",
+    for binary in (BAZEL_BIN / "src" / "nanochat_cli",
                    BAZEL_BIN / "backends" / "cuda" / "kernels"
                    / "attention_benchmark"):
         if not binary.exists():

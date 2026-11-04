@@ -3,13 +3,13 @@
 // Reads the fixture produced by `tools/dump_fixtures.py rl` and drives
 // the RL step over the recorded rollouts from the recorded initial parameters.
 // The step is the shared `nanochat::RlStep` (docs/distributed-design.md
-// section 5.7), so the test and the file-driven `rl_step` binary cannot drift
+// section 5.7), so the test and the file-driven `rl_step` command cannot drift
 // apart.
 //
 // The gate runs the same step two ways and compares them:
 //
 //   * in process, over the fixture's parameters and rollouts, and
-//   * through the `//src:rl_step_main` binary, launched as a subprocess on the
+//   * through `//src:nanochat_cli rl_step`, launched as a subprocess on the
 //     same fixture.
 //
 // It compares the loss, the global gradient norm, and the L2 norm of every
@@ -235,7 +235,7 @@ std::string LocateFixture(int argc, char** argv) {
 }
 
 // Locates the `rl_step` binary. The first choice is the path the build passes
-// as `$(rootpath //src:rl_step_main)`, which is a runfiles path and survives a
+// as `$(rootpath //src:nanochat_cli)`, which is a runfiles path and survives a
 // wrapper that drops the test environment: the GPU queue runs the test through
 // `--run_under`, and `TEST_SRCDIR` did not reach it, so the runfiles guesses
 // below all missed. The environment override and the guesses stay for a hand
@@ -251,18 +251,18 @@ std::string LocateRlStep(int argc, char** argv) {
   const std::string workspace = Getenv("TEST_WORKSPACE");
   if (!src_dir.empty()) {
     if (!workspace.empty()) {
-      candidates.push_back(src_dir + "/" + workspace + "/src/rl_step_main");
+      candidates.push_back(src_dir + "/" + workspace + "/src/nanochat_cli");
     }
-    candidates.push_back(src_dir + "/_main/src/rl_step_main");
+    candidates.push_back(src_dir + "/_main/src/nanochat_cli");
   }
-  candidates.emplace_back("bazel-bin/src/rl_step_main");
-  candidates.emplace_back("../bazel-bin/src/rl_step_main");
+  candidates.emplace_back("bazel-bin/src/nanochat_cli");
+  candidates.emplace_back("../bazel-bin/src/nanochat_cli");
   for (const std::string& candidate : candidates) {
     std::ifstream in(candidate, std::ios::binary);
     if (in.good()) return candidate;
   }
   throw std::runtime_error(
-      "rl_step_main not found in the runfiles tree; add //src:rl_step_main to "
+      "nanochat_cli not found in the runfiles tree; add //src:nanochat_cli to "
       "the test data or set NANOCHAT_RL_STEP");
 }
 
@@ -379,24 +379,25 @@ void Run(const std::string& fixture_path, const std::string& step_path) {
   // --- the same trajectory, through the file-driven binary ---------------
   const std::string out_path = TempDir() + "/rl_parity_result.bin";
   const std::string binary = step_path;
-  const std::string command = ShellQuote(binary) + " --fixture " +
+  // One binary runs every stage, so the subcommand names this one.
+  const std::string command = ShellQuote(binary) + " rl_step --fixture " +
                               ShellQuote(fixture_path) + " --out " +
                               ShellQuote(out_path);
   const int status = std::system(command.c_str());
   if (status == -1 || !WIFEXITED(status) || WEXITSTATUS(status) != 0) {
-    Fail("rl_step_main did not run successfully (exit " +
+    Fail("nanochat_cli rl_step did not run successfully (exit " +
          std::to_string(status) + ")");
     return;
   }
   const Fixture actual = Fixture::Load(out_path);
   if (actual.Get("result/version").scalar_int() != 1) {
-    Fail("rl_step_main wrote an unsupported result version");
+    Fail("nanochat_cli rl_step wrote an unsupported result version");
     return;
   }
   if (actual.Get("result/batch").scalar_int() != batch ||
       actual.Get("result/seq").scalar_int() != seq ||
       actual.Get("result/steps").scalar_int() != steps) {
-    Fail("rl_step_main wrote the wrong result shape");
+    Fail("nanochat_cli rl_step wrote the wrong result shape");
     return;
   }
 

@@ -187,8 +187,8 @@ class ToolchainTest(unittest.TestCase):
 
     def test_build(self) -> None:
         self.check(self.toolchain.build(), ["build"])
-        self.check(self.toolchain.build(["//src:train_main"]),
-                   ["build", "//src:train_main"])
+        self.check(self.toolchain.build(["//src:nanochat_cli"]),
+                   ["build", "//src:nanochat_cli"])
 
     def test_test(self) -> None:
         self.check(self.toolchain.test(), ["test"])

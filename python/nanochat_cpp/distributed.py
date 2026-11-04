@@ -37,6 +37,10 @@ __all__ = [
     "parse_log",
 ]
 
+#: The ``nanochat_cli`` subcommand this module launches. One binary runs every
+#: stage, so the word travels beside the program (``_build.STAGE_COMMANDS``).
+SUBCOMMAND = "train"
+
 #: The one log line that ``Logger::Log`` writes (``src/train.cc``). The phase
 #: fields after ``mfu`` are optional, so an older log still parses.
 _LOG_LINE = re.compile(
@@ -78,7 +82,7 @@ class DistributedPlan:
     grad_accum: int = 1
     num_iterations: int = 50
     entry: str = "tools/nanochat"
-    binary: str = "bazel-bin/src/train_main"
+    binary: str = "bazel-bin/src/nanochat_cli"
     preset: str | None = "track3"
     flags: tuple[str, ...] = ()
     seed: int = 42
@@ -155,7 +159,7 @@ def command_for(rank: int, plan: DistributedPlan) -> list[str]:
     if plan.batch < 1 or plan.grad_accum < 1:
         raise ValueError("batch and grad_accum must be positive")
 
-    argv = [plan.entry, "train", "--", plan.binary,
+    argv = [plan.entry, "train", "--", plan.binary, SUBCOMMAND,
             "--train-parquet", str(plan.train_parquet),
             "--tokenizer", str(plan.tokenizer)]
     if plan.val_parquet:
@@ -182,13 +186,14 @@ def command_for(rank: int, plan: DistributedPlan) -> list[str]:
 
 
 def _shared_argv(plan: DistributedPlan) -> list[str]:
-    """The ``train_main`` argument list, with ``{rank}`` in the per-rank paths.
+    """The ``train`` argument list, with ``{rank}`` in the per-rank paths.
 
     ``tools/nanochat dist`` expands ``{rank}`` per process, so one command
     serves every rank. The rank values themselves travel in the ``NANOCHAT_*``
-    environment.
+    environment. The binary is one program for every stage, so ``SUBCOMMAND``
+    names the training stage.
     """
-    argv = [plan.binary,
+    argv = [plan.binary, SUBCOMMAND,
             "--train-parquet", str(plan.train_parquet),
             "--tokenizer", str(plan.tokenizer)]
     if plan.val_parquet:
