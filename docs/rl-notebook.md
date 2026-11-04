@@ -174,10 +174,12 @@ Two items stay open.
    a caller or a test, so `docs/parity.md` still records parity item P1 as
    open.
 
-The objective is already golden-gated. The fixture is
-`tests/data/numerics_golden_10l.bin`. The gate is `//tests:numerics_trace_test`.
-The correctness risk is therefore low. The remaining work is the interface and
-the orchestration.
+The discrete side is already gated. The fixture is
+`tests/data/numerics_golden_10l.bin`, which holds the rollout identifiers and
+the valid-target count. The gate is `//tests:numerics_trace_test`. The objective
+is a floating-point result, so `//tests:rl_parity_test` owns it. The correctness
+risk is therefore low. The remaining work is the interface and the
+orchestration.
 
 ## 9. The chain: one job file, three stages
 

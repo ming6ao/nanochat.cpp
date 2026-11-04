@@ -100,7 +100,7 @@ MODEL_FIXTURES = {
     "rl": ("rl_parity.bin",),
     "generate": ("generate_parity.bin",),
     "eval": ("core_eval.bin",),
-    "numerics": ("numerics_golden_10l.bin", "numerics_golden_10l_fp8.bin"),
+    "numerics": ("numerics_golden_10l.bin",),
 }
 
 

@@ -163,8 +163,8 @@ design:
 
 `src/ops.cc` is the composition tier and the default implementation of every
 declared kind. A backend's fused override is an optimization that must satisfy
-the same golden trace at the tolerances below. Nothing in this package names an
-implementation, and nothing here branches on a backend, a device, or a model
+the same golden trace at the record classes below. Nothing in this package names
+an implementation, and nothing here branches on a backend, a device, or a model
 name in a preprocessor condition.
 
 There is no graph builder and no hand-written fast path in this package. A
@@ -185,17 +185,15 @@ copied, not regenerated: no torch-dependent command was run here, and
 | `fixtures/train_parity.bin` | `tests/data/train_parity.bin` | 993 | 161760 | `006d6aaa62393cb95e641765d954e45950653f45082a644a62c5b75cf8caca23` | `0xbaee7504867988fb` |
 | `fixtures/generate_parity.bin` | `tests/data/generate_parity.bin` | 39 | 106368 | `65af290d95eeaeefcc60fbb7ec8c75b3fa274a22cd8808d1c5199354bf092db3` | `0x6089b933917d2abb` |
 | `fixtures/rl_parity.bin` | `tests/data/rl_parity.bin` | 69 | 108062 | `42735fc17fcea63ac6335ef78b952ba8ed83ee30fabf59335f39406debed12f2` | `0xfbc260e97c743092` |
-| `fixtures/numerics_golden_10l.bin` | `tests/data/numerics_golden_10l.bin` | 1500 | 118370 | `2af2a12c26b8b9bbf76eb70e40afa3b3c0f1306b8a4aa58150ccbe630705edad` | `0xd7be5aebca44d775` |
-| `fixtures/numerics_golden_10l_fp8.bin` | `tests/data/numerics_golden_10l_fp8.bin` | 1500 | 118368 | `5b30b15f05c027e0780d9d69f960977ff76167af2402d646097f368a37d8cfa8` | `0x06a057c9a57237a8` |
+| `fixtures/numerics_golden_10l.bin` | `tests/data/numerics_golden_10l.bin` | 189 | 58519 | `e1b9fd957c81164af5382cf5bbddf5dca1d9d19fd5bf877d78e65081ce9e4498` | `0x9be078e335167836` |
 
 These are the model-dependent reference fixtures the tree already uses: the
 PyTorch oracle (`debug_state.bin`), the evaluation/score reference
 (`core_eval.bin`), the training trajectory (`train_parity.bin`), the greedy
 generation fixture (`generate_parity.bin`), the RL rollout fixture
-(`rl_parity.bin`), and the fp32 and fp8 legs of the staged golden trace
-(`numerics_golden_10l*.bin`). The tokenizer, loader, chat, plan, API, and
-checkpoint fixtures are not model definitions and stay in `tests/data/` with
-their owning harnesses.
+(`rl_parity.bin`), and the staged numeric trace (`numerics_golden_10l.bin`).
+The tokenizer, loader, chat, plan, API, and checkpoint fixtures are not model
+definitions and stay in `tests/data/` with their owning harnesses.
 
 `fixtures/manifest.json` records, per file, every record name in container
 order, the source path it was copied from, the magic and format version, the
@@ -207,22 +205,18 @@ above exactly.
 ### `tolerances.json`
 
 `tolerances.json` gives one bound per fixture record, for every one of the
-seven files above. Because the trace files have 1500 records per precision and
-the records repeat by step and parameter name, the file states the bounds as
-ordered record-name selectors: the first selector that matches a record name is
-that record's bound, and the file's `coverage` note says every record in
+six files above. For the parity fixtures the file states the bounds as ordered
+record-name selectors: the first selector that matches a record name is that
+record's bound, and the file's `coverage` note says every record in
 `fixtures/manifest.json` resolves to exactly one selector. The selectors cover
 every record; none falls through.
 
-The golden-trace fp32 bounds are the tolerance table of
-`docs/numerics-integration.md` §4: loss and gradient norm `1e-5` relative,
-parameter L2 `1e-4` relative, evaluation bits per byte and per-batch loss `1e-5`
-relative, logit margins `1e-5` absolute, integer identifiers and masks exact.
-The parameter and gradient hash records are exact on the CPU and simulator legs
-and skipped on the device leg, where atomic scatter-adds change the bytes by
-design. The fp8 file has its own golden and its own `1e-2` bounds, as the fp8
-rows of the same section say; its margins are reported and its greedy
-identifiers are exact.
+The numeric trace has one bound for every record: `exact`. The fixture holds the
+exact class only, so every record compares byte for byte on every backend and
+every precision. There is no tolerance mode and no skipped record. The fixture
+carries one section per precision (`fp32/`, `bf16/`, `fp8/`), and each build
+compares its own section. The floating-point contract is the per-stage parity
+tests of `docs/testing.md`, not this fixture.
 
 The parity fixtures carry the bounds their existing tests already enforce:
 `tests/oracle_test.cc` for `debug_state.bin` (forward and backward `1e-5`

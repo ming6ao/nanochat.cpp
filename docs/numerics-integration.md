@@ -10,30 +10,38 @@ also records what Path A does not do.
 
 Status: phases 0 to 5 are complete. Phase 6 steps 1 and 2 are complete. Phase 6
 step 3 stays open: the optional `--trace` option of the harness. The trace
-library, the emitter, the two Bazel targets, the golden file, the simulator
-wiring, and the merge-gate entry are present. Section 4 records the measured
-GPU maxima.
+library, the emitter, the two Bazel targets, the fixture, the simulator wiring,
+and the merge-gate entry are present. The fixture holds one section per
+precision.
 
 ## 1. The reduction, stated first
 
-Path A does not give bit-exact agreement across all three targets. It gives
-four weaker results. State them before the design.
+Path A does not compare floating-point results across targets. It compares the
+results that two arithmetic implementations can agree on. State them before the
+design.
 
-1. The CPU trace and the simulator trace are bit-identical. The two targets
-   share one code path. Only `GetCaps()` changes.
-2. The CPU target and the simulator target are deterministic across runs. The
-   GPU target is reproducible within a tolerance, not bit-identical. The device
-   kernels use atomic scatter-add operations.
-3. The Pascal GPU trace agrees with the CPU golden trace within a tolerance.
-4. Greedy token identifiers agree exactly on all three targets when the argmax
-   margin is large.
+1. Every leg compares the fixture byte for byte. There is one comparison mode,
+   and a difference is a failure.
+2. The fixture holds the **exact class** only: configuration, inputs, token ids,
+   masks, greedy identifiers, argmax, and valid-target counts. Every one of them
+   is an integer or a fixed constant.
+3. The fixture carries one section per precision (`fp32/`, `bf16/`, `fp8/`), and
+   each build compares the section that names its own precision.
+4. The caps invariant is exact, and `//tests:sim_numerics_test` proves it in one
+   process. That test changes `NANOCHAT_SIM_PROFILE` and requires every recorded
+   value to be bit-identical. It is the guard that no numeric path reads
+   `GetCaps()`.
+5. Floating-point results are not records. Their contract is the per-stage
+   parity tests of [testing.md](testing.md), each with one bound and one
+   committed fixture.
+6. The device leg repeats across two runs and compares the discrete records
+   again. The device kernels use atomic scatter-add operations, so a byte order
+   is not a contract, but a discrete result is.
 
-The status table in [post-training.md](post-training.md) now marks the SFT
-renderer, the SFT packer, the SFT loop, the `rl_step` binary, and the RL fixture
-as **Done**. This trace still gives kernel-level coverage only: the SFT leg is
-one masked loss and one gradient norm with no optimizer step, and the RL leg is
-one advantage-weighted step. `docs/parity.md` `P5` cites
-`//tests:sft_step_parity_test`, not this table.
+The status table in [post-training.md](post-training.md) marks the SFT renderer,
+the SFT packer, the SFT loop, the `rl_step` binary, and the RL fixture as
+**Done**. This trace gives kernel-level coverage of the discrete results only.
+The SFT arithmetic evidence is `//tests:sft_step_parity_test`, not this test.
 
 ## 2. What the recon established
 
@@ -52,181 +60,134 @@ Five facts shape the design.
 4. The CUDA device kernels use atomic operations. The attention key and value
    gradients, the embedding scatter-add, the value-gate weight gradient, and
    the block combine all use atomics. Atomic order is not a contract.
-5. The committed trace is an fp32 golden. A bf16 build (`--config=bf16`) rounds
-   every stored activation and weight to 7 mantissa bits, so it cannot reproduce
-   the golden. The bf16 numeric trace in
-   [precision.md](precision.md) section 6 is the remaining bf16 leg. Until it
-   lands, the trace runs in the fp32 build and a bf16 build reports the skip.
+5. A bf16 or fp8 build rounds the logits to 7 mantissa bits, so the top two
+   logits can tie exactly. The fixture therefore carries one section per
+   precision, and each build compares its own section.
 
 One more fact fixes the architecture. Bazel selects the backend at link time
 (see `src/BUILD.bazel`). The CPU backend and the CUDA backend define the same
-`nanochat::kernels::*` symbols. One process cannot hold both. The test compares
-each backend against one committed golden file.
+`nanochat::kernels::*` symbols. One process cannot hold both. Each leg compares
+its own section of one committed fixture.
 
-## 3. The precision contract
+## 3. The contract
 
 The contract has four clauses.
 
-1. The CPU trace equals the golden trace, byte for byte.
-2. The simulator trace equals the golden trace, byte for byte.
-3. The GPU trace reproduces the golden trace within the tolerance table in
-   section 4. The GPU trace must also reproduce itself within the same
-   tolerances across two runs.
-4. The greedy token identifiers equal the golden identifiers on all three
-   targets.
+1. Each leg equals its fixture section, byte for byte.
+2. The device leg reproduces its section across two runs.
+3. The greedy token identifiers and the argmax equal the section on every
+   target.
+4. The caps invariant is exact: a simulated profile changes no value.
 
-Clause 4 uses parity entry `E1`. [parity.md](parity.md) records greedy
-generation as bit-identical. Clause 4 holds only for a peaked model head.
-Section 6.4 defines the tie rule.
+Clause 3 uses parity entry `E1`. [parity.md](parity.md) records greedy
+generation as bit-identical. Clause 3 holds only for a peaked model head.
+Section 6.3 defines the tie rule.
 
-## 4. Tolerance table
+## 4. Record classes and where the bounds live
 
-The table holds the applied tolerance and the maxima measured on the GTX 1080
-Ti. The measurement is the CPU golden replay and the GPU run of
-`//tests:numerics_trace_cuda_test`. The precedent is `tests/oracle_test.cc` for
-the tight bounds and `tests/train_parity_test.cc` for the trajectory bounds.
+The fixture has one class of record, and two kinds of value that are not
+records.
 
-| Stage | Artifact | CPU vs simulator (regression guard) | GPU vs CPU golden | Measured GPU maximum |
-|---|---|---|---|---|
-| Train | loss | exact | 1e-5 relative | 7.6e-8 relative |
-| Train | gradient norm | exact | 1e-5 relative | 9.8e-8 relative |
-| Train | parameter L2 after five steps | exact | 1e-4 relative | 2.6e-5 relative |
-| Eval | bits per byte, per-batch loss | exact | 1e-5 relative | 0 |
-| Eval | greedy argmax identifiers | exact | exact | exact |
-| Eval | logit margin | exact | 1e-5 absolute | 1.4e-6 absolute |
-| Generate | greedy identifiers and mask | exact | exact | exact |
-| Generate | logit margin | exact | 1e-5 absolute | 4.8e-7 absolute |
-| SFT | masked weighted loss, gradient norm | exact | 1e-5 relative | 0 |
-| RL | greedy generated token identifiers | exact | exact | exact |
-| RL | advantage-weighted loss | exact | 1e-5 relative | 1.3e-6 relative |
-| RL | gradient norm | exact | 1e-5 relative | 6.9e-8 relative |
-| RL | reward and advantage | exact | 1e-5 relative | 0 |
-| RL | logit margin | exact | 1e-5 absolute | 2.4e-7 absolute |
-
-The fp8 leg has its own golden, `tests/data/numerics_golden_10l_fp8.bin`, and
-its own bounds. The fp8 CPU leg is exact against that golden, and the fp8
-simulator leg equals the CPU leg. The fp8 device leg compares as follows. The
-values are the design start; replace them from the first device measurement.
-
-Two notes on the table. The `SFT` row is the masked weighted loss and the
-gradient norm of one forward and one backward pass over a synthetic mask. It
-takes no optimizer step, so it does not pin the SFT optimizer arithmetic. The
-SFT optimizer step row (the post-step loss and the gradient norm) is deferred.
-The committed golden is host-pinned: its mirror under
-`models/nanochat-default/fixtures/` carries a digest that
-`//tests:model_isolation_test` pins, so extending the trace takes one
-reference-builder run that updates the golden, the mirror, and the manifest
-together. Section 10 of [sft-parity-plan.md](sft-parity-plan.md) records it as a
-campaign risk. Until that run, the SFT arithmetic evidence is
-`//tests:sft_step_parity_test` against a committed fixture and not this table.
-
-| Stage | Artifact | GPU against the fp8 CPU golden |
+| Value | Where it lives | Comparison |
 |---|---|---|
-| Train | loss | 1e-2 relative |
-| Train | gradient norm | 1e-2 relative |
-| Train | parameter L2 after five steps | 1e-2 relative |
-| Eval | bits per byte | 1e-2 relative |
-| Eval | greedy argmax identifiers | exact |
+| Configuration, inputs, token ids, masks, greedy identifiers, argmax, valid-target counts | The fixture | Byte for byte, on every backend and every precision |
+| Logit margins | The run, printed | The tie rule of section 6.3. The fp32 leg fails below `1e-5` |
+| Loss, gradient norm, parameter L2, bits per byte, reward, advantage | The parity fixtures | One bound per test, below |
 
-The fp8 tolerance is wide, because fp8 carries three mantissa bits
-([simulator-precision.md](simulator-precision.md) section 7). Do not tighten it
-without evidence.
+| Artifact | Test | Bound |
+|---|---|---|
+| Train loss, gradient norm, parameter L2 | `//tests:train_parity_test` | [testing.md](testing.md) |
+| The same on the device | `//tests:train_parity_cuda_test` | [testing.md](testing.md) |
+| Evaluation bits per byte and per-batch loss | `//tests:score_parity_test` | [testing.md](testing.md) |
+| SFT loss, gradient norm, parameter L2, learning rate, momentum | `//tests:sft_step_parity_test` | [testing.md](testing.md) |
+| RL reward, advantage, loss, gradient norm | `//tests:rl_parity_test` | Exact against `tests/data/rl_parity.bin` |
+| The fp8 floating-point bounds | The fp8 parity tests | [simulator-precision.md](simulator-precision.md) section 7 |
 
-The tie rule of section 6.4 guards the fp32 leg. A bf16 or fp8 build resolves
-the logits at eight mantissa bits. The top two logits can tie, and the recorded
-margin is a multiple of the bf16 unit at the logit magnitude. The fp8 leg
-reports the margin and compares the greedy identifiers exactly against its own
-golden.
+This gate applies no numeric tolerance. It has no per-group table, no skip, no
+warning path, and no host pin. A record mismatch is a failure.
 
-The "CPU vs simulator" column is exact by construction. The simulator leg is
-the CPU backend under `--config=sim` (section 2.2). The two runs share one code
-path.
-
-The column is a regression guard. It catches a future numeric path that starts
-to read `GetCaps()`. It is not an independent measurement of a device. The
-"GPU vs CPU golden" column is the only cross-target check. The measured maxima
-leave headroom above the applied tolerances; the smallest one is the parameter
-L2 column at 2.6e-5 measured against 1e-4 applied.
-
-## 5. Test architecture: golden replay
+## 5. Test architecture: fixture replay
 
 The test follows the existing `oracle_test` pattern. One source file builds as
-two Bazel targets. One committed golden file is the reference.
+two Bazel targets. One committed fixture is the reference.
 
-- The **golden file** `tests/data/numerics_golden_10l.bin` comes from the CPU
+- The **fixture** `tests/data/numerics_golden_10l.bin` comes from the CPU
   emitter. A reviewer checks the file. A developer commits the file. The file
   does not need PyTorch at runtime.
 - The **CPU target** `//tests:numerics_trace_test` runs the model, then
-  compares the result against the golden in process. The comparison is exact.
-- The **simulator leg** runs the same target under `--config=sim`. The
-  comparison is exact. This leg is a regression guard, not a third numeric
-  implementation.
+  compares its section against the fixture in process.
+- The **simulator leg** runs the same target under `--config=sim`.
 - The **CUDA target** `//tests:numerics_trace_cuda_test` shares the source and
-  carries the tag `gpu`. The comparison uses the tolerance table.
-- The **comparison runs in process.** CPU equals golden and simulator equals
-  golden implies CPU equals simulator. No second binary and no file passing
-  between builds are necessary.
+  carries the tag `gpu`.
+- The **comparison runs in process**, by record name.
 
-The test reuses the shared container reader, `src/container.h`, through
-`tests/oracle_fixture.h`. That reader already stores named float tensors and
-scalars. Phase 0 added one magic string and no record sequence, because the
-flat layout holds the trace.
+The fixture is portable by construction. Every record is an integer or a fixed
+constant, so the same bytes come out of any host. A re-emission that differs is
+a real change, not a host difference. The generator checks this: a re-emission
+on this host reproduced the committed sha256 byte for byte.
 
-### 5.1 Trace format
+### 5.1 Fixture format
 
-The trace reuses the little-endian record layout of `src/container.h` under its
-own magic `NANONUM1`. The phase, the step, and the parameter name live in the
-record name. The container is `[8-byte magic][u32 version][u32 count]`, then one
-record per
-`[u16 name length][name][u8 dtype][u8 width][u64 shape...][payload]`.
+The fixture reuses the little-endian record layout of `src/container.h` under
+its own magic `NANONUM1`. The container is `[8-byte magic][u32 version][u32
+count]`, then one record per `[u16 name length][name][u8 dtype][u8 width][u64
+shape...][payload]`.
+
+Every record name carries its section as a prefix. The fixture holds the
+sections in the order `fp32`, `bf16`, `fp8`, and each section carries the same
+63 names in the same order.
 
 | Record group | Names |
 |---|---|
-| Identity | `header/version`, `header/magic`, `header/backend`, `header/precision`, `header/build`, `header/seed`, `header/steps` |
+| Identity | `header/version`, `header/magic`, `header/seed`, `header/steps` |
 | Configuration | `config/layers`, `config/heads`, `config/kv_heads`, `config/hidden`, `config/seq`, `config/batch`, `config/vocab`, `config/padded_vocab`, `config/window_pattern`, `config/value_embedding`, `config/rope_base`, `config/parameters` |
-| Optimizer and schedule | `opt/unembedding_lr`, `opt/embedding_lr`, `opt/matrix_lr`, `opt/scalar_lr`, `opt/weight_decay`, `opt/clip`, `opt/adam_eps`, `opt/muon_ns_steps`, `opt/muon_beta2`, `sched/*` |
+| Optimizer and schedule | `opt/*`, `sched/*` |
 | Phase inputs | `train/batches`, `eval/steps`, `gen/prompt_len`, `gen/tokens`, `gen/num_samples`, `sft/ignore_every`, `rl/num_samples`, `rl/prompt_len`, `rl/tokens`, `rl/num_passes`, `rl/examples_per_rank`, `rl/reward_rule` |
-| Training | `train/step<N>/loss`, `train/step<N>/grad_norm`, `train/step<N>/param_l2/<name>`, `train/step<N>/param_hash/<name>`, `train/step<N>/grad_hash/<name>` |
-| Evaluation | `eval/tokens/<b>`, `eval/bpb`, `eval/loss/<b>`, `eval/argmax/<b>`, `eval/logits_hash`, `eval/margin_min` |
-| Generation | `gen/prompt`, `gen/ids`, `gen/mask`, `gen/margin/<i>`, `gen/margin_min` |
-| SFT | `sft/valid_targets`, `sft/zero_weights`, `sft/loss`, `sft/grad_norm` |
-| RL | `rl/prompt/<r>`, `rl/ids/<r>`, `rl/reward/<r>`, `rl/advantage/<r>`, `rl/mean_reward`, `rl/valid_targets`, `rl/loss`, `rl/grad_norm`, `rl/margin_min` |
-
-The `sched/*` group records the AdamW and Muon fields of the reference
-configuration.
-
-The trace stores the two hashes as 64-bit integers. The hash is FNV-1a over the
-staged host float bytes of one parameter buffer or one gradient buffer. The
-backend name, the precision, and the build name identify the producer. The
-simulator leg keeps the name `cpu`, because it shares the code path.
+| Evaluation | `eval/tokens/<b>`, `eval/argmax/<b>` |
+| Generation | `gen/prompt`, `gen/ids`, `gen/mask` |
+| SFT | `sft/valid_targets`, `sft/zero_weights` |
+| RL | `rl/prompt/<r>`, `rl/ids/<r>`, `rl/valid_targets` |
 
 The trace pins the host thread count to one. The CPU reference reductions depend
-on the thread count, so the pin makes the golden file independent of the sandbox
-thread budget.
+on the thread count, and a pinned count keeps a re-emission stable.
 
-The CPU target carries `-DNANOCHAT_TRACE_EXACT`. The intent to compare byte for
-byte therefore belongs to the target, not to a backend define. One source
-builds both targets, and Bazel shares one output path across the `--define`
-configurations.
+The schema check runs before any value is compared. It requires all three
+sections to exist, requires the three suffix lists to be identical, and requires
+the dtype and the shape of every record to match the run.
+
+### 5.2 Re-emission
+
+One command builds the emitter under each precision and writes the single file.
+
+```bash
+python3 tools/dump_fixtures.py numerics
+```
+
+The generator runs the emitter through `tools/nanochat run t0-cpu --`, prefixes
+each record name with its section, and writes the container. `--check`
+regenerates into a temporary directory and compares the bytes with the committed
+file. The manifest records the size, the SHA-256, the FNV-1a digest, the record
+count, the record names, and the producer facts.
+
+A change to the graph, the configuration, the seed, or the tokenizer changes the
+fixture. Re-emit it in the same change, and update the manifest and
+`tolerances.json` with it. A change that moves only the floating-point results
+does not touch this fixture.
 
 ## 6. Trace contents and model configuration
 
 ### 6.1 Trace contents
 
-The trace holds the header fields and the record fields.
+The trace drives five optimizer steps, then records the discrete results of the
+four phases.
 
-- The header holds the magic string, the backend identifier, the precision, the
-  build configuration name, the `Config` values, and the seed.
-- Each record holds the step index, the loss, the gradient norm, and the L2
-  norm of each parameter.
-- Each record also holds a 64-bit hash of the parameter bytes and a 64-bit hash
-  of the gradient bytes.
-- The evaluation section adds the bits per byte, the per-batch loss, the logits
-  hash, and the greedy argmax identifiers.
-
-The hash is valid for the exact clauses only. The hash is meaningless for the
-GPU leg, because the bytes differ by design. The GPU leg checks the scalars by
-tolerance and the greedy identifiers exactly.
+- The header holds the magic string, the seed, and the step count.
+- The configuration holds the `Config` values and the parameter count.
+- The optimizer and schedule groups hold the reference recipe as data.
+- The evaluation section holds the token ids of two batches and their argmax.
+- The generation section holds the prompt, the greedy identifiers, and the mask.
+- The SFT section holds the valid-target count and the zero-weight count.
+- The RL section holds four rollouts and the valid-target count.
 
 ### 6.2 Reference configuration
 
@@ -255,29 +216,30 @@ the logits use about 268 MB.
 
 Use `fp32` only. Keep the shapes small. The test measures agreement, not speed.
 
-### 6.3 Determinism notes
-
-The grouped-query attention path and the value-embedding path use atomics. Set
-`num_kv_heads = num_heads` and `value_embedding = false` for the strictest
-reproducibility, if the operator accepts a less representative model. Keep the
-representative configuration and use a reproducibility tolerance otherwise.
-
-### 6.4 Greedy tie rule
+### 6.3 Greedy tie rule
 
 A random 10-layer model can produce near-ties at the argmax. One unit of
-roundoff can flip the result. Phase 3 tests the model head for peakedness. The
-test records the logit margin and requires the margin to exceed a threshold.
-The test uses a briefly trained fixture otherwise. See the generate-parity
-fixture note in `tests/BUILD.bazel`.
+roundoff can flip the result. The test records the logit margin and requires the
+margin to exceed a threshold.
 
 The implementation measures the margin at the position that predicts each
 sampled token. It reads the logits from the training graph over the whole row,
 so one forward covers every step of a rollout. The threshold is `1e-5`. The
-smallest recorded margin of the committed fixture is `3.7e-3` for the
-evaluation section, `5.8e-2` for generation, and `3.7e-2` for RL. The head is
-therefore peaked enough on all three targets, and the identifiers agree exactly.
+measured minima of the committed fixture are:
 
-### 6.5 Trace inputs
+| Section | Evaluation | Generation | RL |
+|---|---|---|---|
+| fp32 | `3.73e-3` | `5.75e-2` | `3.73e-2` |
+| bf16 | `0` | `4.69e-2` | `1.56e-2` |
+| fp8 | `0` | `6.25e-2` | `0` |
+
+The fp32 head is peaked, so the rule passes. A bf16 or fp8 build rounds the
+logits to 7 mantissa bits, so the top two logits can be exactly equal and the
+margin is exactly zero. The test prints the margin for those builds and does not
+fail on it. The discrete records still compare byte for byte, and the committed
+sections are stable.
+
+### 6.4 Trace inputs
 
 Every input comes from the seed 42 and the committed tokenizer, so the fixture
 needs no data file. The trace records no batch and no weight vector.
@@ -293,24 +255,21 @@ needs no data file. The trace records no batch and no weight vector.
   `seed ^ 0x2545f4914f6cdd1d`. Greedy decoding adds 16 ids and no stop token.
 - The RL rollout uses four prompts of 16 ids each, from a source seeded with
   `seed ^ 0x5bf03635ef1b0a0d`. Greedy decoding adds 32 ids per row. The reward
-  is a weighted mean of the generated ids, mapped to `[0, 1]`. The advantage is
-  the reward minus the mean reward over the four rows.
+  rule is a weighted mean of the generated ids, mapped to `[0, 1]`. The
+  advantage is the reward minus the mean reward over the four rows.
 - The SFT section reuses the first evaluation batch. The weight is 1 on the
   second half of each row and 0 on the first half, and every fifth target is the
-  ignore index. The normalizer is the valid-target count.
+  ignore index. The recorded normalizer is the valid-target count.
 - The RL section takes the weights from the advantages on the sampled positions
-  and 0 elsewhere. The trace indexes the weight vector like the targets. The
-  loss that predicts the first sampled token is therefore 0, because the mask
-  applies to the shifted targets. The scale is
-  `1 / (num_passes * examples_per_rank)`, so the normalizer is `num_valid *
-  num_passes * examples_per_rank`.
+  and 0 elsewhere. The scale is `1 / (num_passes * examples_per_rank)`, so the
+  normalizer is `num_valid * num_passes * examples_per_rank`.
 
 ## 7. Phase plan
 
 Status: the tree holds phases 0 to 5. Phase 6 holds steps 1 and 2. Step 3
 stays open. The names below match the tree:
-`tests/numerics_trace.{h,cc}` holds the trace, the hash helper, and the
-comparison; `tests/numerics_trace_emit_main.cc` holds the emitter; and
+`tests/numerics_trace.{h,cc}` holds the trace and the comparison,
+`tests/numerics_trace_emit_main.cc` holds the emitter, and
 `tests/numerics_trace_test.cc` holds the replay gate.
 
 Owners follow the ownership map in [AGENTS.md](../AGENTS.md). The Oracle
@@ -318,86 +277,64 @@ workstream owns `tests/**` and `tools/dump_*.py`. The Harness workstream owns
 `src/**`. The Architect owns the frozen headers, the root build files, and
 `docs/**`.
 
-### Phase 0: precision contract and trace format
-
-This phase blocks all other phases. The Architect and the Oracle deliver one
-approval together.
+### Phase 0: contract and fixture format
 
 1. The Architect records the contract in [parity.md](parity.md).
-2. The Oracle extends `src/container.h` with the `NANONUM1` magic. The flat
-   record layout holds the trace, so no record sequence is necessary.
+2. The Oracle extends `src/container.h` with the `NANONUM1` magic.
 3. The Architect freezes the format.
 
-Gate: a reviewer approves the contract and the format. Phase 1 does not start
-before this gate.
+Gate: a reviewer approves the contract and the format.
 
-### Phase 1: trace primitives, training trace, and tolerance calibration
+### Phase 1: trace primitives and the training trace
 
 1. The Oracle writes `tools/dump_fixtures.py numerics`.
-2. The Oracle adds the trace writer and the hash helper.
-3. The Oracle writes the training emitter. The emitter builds the model with
-   `Model::Create` and calls `InitWeights(seed)`. The emitter then drives
-   `ForwardLoss`, `BackwardAccumulate`, and `Optimizer::Step` for five steps.
-   The emitter follows `tests/train_parity_test.cc`. It needs no harness change.
-4. The Oracle writes the CPU golden file.
-5. The Oracle runs the GPU target twice. The Oracle records the observed maxima
-   for each scalar beside the applied tolerances in section 4.
-6. The Oracle adds the two targets to `tests/BUILD.bazel`.
+2. The Oracle writes the emitter. It builds the model with `Model::Create`,
+   calls `InitWeights(seed)`, and drives `ForwardLoss`, `BackwardAccumulate`,
+   and `Optimizer::Step` for five steps.
+3. The Oracle writes the fixture.
+4. The Oracle adds the two targets to `tests/BUILD.bazel`.
 
-Gate: the CPU trace and the simulator trace equal the golden byte for byte. The
-GPU trace passes the measured tolerance table.
+Gate: every leg equals its section byte for byte.
 
 ### Phase 2: evaluation trace
 
 1. The Oracle adds an evaluation section to the emitter.
 2. The emitter calls `EvalBpb` inside a `NoGradGuard`.
 3. The emitter calls `ScoreBatch` on a fixed batch.
-4. The emitter records the bits per byte, the per-batch loss, the logits hash,
-   and the greedy argmax identifiers.
+4. The emitter records the token ids and the greedy argmax identifiers.
 
-Gate: the bits per byte and the loss agree within tolerance. The argmax
-identifiers agree exactly on all three targets.
+Gate: the argmax identifiers agree on all three targets.
 
 ### Phase 3: greedy generation spike and trace
 
-This phase supplies the rollout primitive for RL. This phase also resolves the
-greedy tie risk. Run this phase before the RL phase.
+1. The Oracle records the greedy `GenerateBatch` identifiers for a fixed prompt
+   and a fixed mask.
+2. The Oracle measures the logit margin of each step and applies the tie rule.
 
-1. The Oracle records greedy `GenerateBatch` token identifiers for a fixed
-   prompt and a fixed mask.
-2. The Oracle records the logit margin for each step.
-3. The Oracle applies the tie rule from section 6.4.
+Gate: the generated identifiers are identical on all three targets, and the
+margin exceeds the threshold at each step.
 
-Gate: the generated token identifiers are identical on all three targets. The
-logit margin exceeds the threshold at each step.
+### Phase 4: SFT arithmetic
 
-### Phase 4: SFT arithmetic trace
+The SFT arithmetic is a floating-point result, so it is not a trace record.
 
-This phase covers the SFT arithmetic kernel only. The full SFT loop needs
-Phase 1 and Phase 2 of [post-training.md](post-training.md).
+1. The Oracle adds one masked SFT step to `//tests:sft_step_parity_test`.
+2. The test records the post-step loss and the gradient norm in its trajectory.
 
-1. The Oracle drives the masked weighted cross-entropy with `BackwardWeighted`
-   and per-row weights.
-2. The Oracle records the masked weighted loss and the gradient norm.
+Gate: the SFT loss and the gradient norm agree within the bound of
+[testing.md](testing.md).
 
-Gate for this phase: the masked weighted loss and the gradient norm agree
-within tolerance. Gate for full SFT: the SFT loss curve agrees at the
-`t2-parity` tier, after the SFT loop lands.
+### Phase 5: RL arithmetic
 
-### Phase 5: RL arithmetic trace
+The RL arithmetic is a floating-point result, so it is not a trace record.
 
-This phase covers the RL arithmetic kernel only. The full RL objective needs
-Phase 3 of [post-training.md](post-training.md).
+1. The Oracle records the rollout identifiers and the valid-target count in the
+   trace.
+2. The Oracle records the reward, the advantage, and the objective in
+   `//tests:rl_parity_test`.
 
-1. The Oracle rolls out with greedy `GenerateBatch`.
-2. The Oracle computes the advantage as the reward minus the mean reward.
-3. The Oracle normalizes by `num_valid * num_passes * examples_per_rank`.
-4. The Oracle calls `BackwardWeighted`.
-5. The Oracle records the advantage-weighted loss and the gradient norm.
-
-Gate for this phase: the advantage-weighted loss and the gradient norm agree
-within tolerance. The rollout identifiers agree exactly. Gate for full RL:
-`//tests:rl_parity_test` passes at the `t2-parity` tier, after `rl_step` lands.
+Gate: the rollout identifiers are identical, and the RL arithmetic agrees within
+its bound.
 
 ### Phase 6: wiring and gates
 
@@ -408,12 +345,9 @@ within tolerance. The rollout identifiers agree exactly. Gate for full RL:
 3. The Harness adds a `--trace <path>` option to `train_main` and `eval_main`
    if full harness coverage is necessary. This step is optional.
 
-Gate: two commands run all three legs. `tools/nanochat simulate --device
+Gate: two commands run every leg. `tools/nanochat simulate --device
 gtx1080ti --suite correctness` runs the CPU leg and the simulator leg.
 `tools/nanochat test --gpu //tests:numerics_trace_cuda_test` runs the GPU leg.
-The test writes the observed delta for each group to its log. The repository
-sets `--test_output=errors`, so a passing run keeps the table in
-`bazel-testlogs/`.
 
 ## 8. Commands and wall-clock budget
 
@@ -424,8 +358,8 @@ tools/nanochat simulate --device gtx1080ti --suite correctness
 ```
 
 A 10-layer CPU run with `double` GEMM over five steps is the slow part. It takes
-about 85 seconds under the `t0-cpu` profile, and the simulator leg repeats it.
-The GPU leg takes about 10 seconds, including the repeat run of clause 3.
+about 60 seconds under the `t0-cpu` profile. The GPU leg takes about 10 seconds,
+including the repeat run of clause 2.
 
 The CPU target carries the `manual` tag, so it stays out of the default test
 loop. `tools/nanochat simulate --suite correctness` runs it, and
@@ -434,37 +368,28 @@ per-merge GPU budget in [AGENTS.md](../AGENTS.md) section 5.5.
 
 ## 9. Risks
 
-- Path A does not give bit equality on the GPU leg. Path B is the prerequisite
-  for that goal. Path B changes the CPU GEMM accumulation and the CUDA GEMM
-  kernel.
-- The CUDA determinism clause is impossible to guarantee with atomics. The
-  contract scopes the determinism clause to the CPU and the simulator.
-- The simulator is not an independent implementation. The exact check is a
-  regression guard.
-- A cuBLAS version change can change the reduction order. `backends/cuda/gemm.cu`
-  uses `CUBLAS_GEMM_DEFAULT`, which is a heuristic. Pin the CUDA toolkit version
-  and the cuBLAS version in the tolerance record.
-- Missing code blocks full SFT and full RL coverage. The SFT leg takes no
-  optimizer step, so the post-step loss and gradient norm are not recorded. The
-  extension is deferred until one reference-builder run can update the golden,
-  the mirror under `models/nanochat-default/fixtures/`, and its manifest
-  together; see `docs/sft-parity-plan.md` section 10.
+- The discrete results are derived from floats, so a change that flips one
+  argmax changes the fixture. That is a real change and a re-emission, not a
+  host difference.
+- A low-precision build can tie at the argmax. Section 6.3 records the measured
+  margins. If a tie becomes unstable, the fixture is not usable for that
+  section.
+- A cuBLAS version change can change the device floating-point results. The
+  device floating-point contract is `//tests:train_parity_cuda_test`, and the
+  tolerance record pins the CUDA and cuBLAS versions.
+- The fixture depends on the pinned host thread count and on the tokenizer
+  artifact of the evaluation phase. Regenerate it after a change to either.
+- The trace covers the discrete results only. A pure floating-point drift that
+  flips no identifier is caught by the parity tests, not here.
 - The 11 GB card and the 5 GiB sandbox cap bound the sequence length and the
   vocabulary. Keep `seq_len` at or below 256.
-- The golden file depends on the pinned host thread count, on the tokenizer
-  artifact of the evaluation phase, and on the eval forward path. Regenerate it
-  with `python3 tools/dump_fixtures.py numerics` after a change to any
-  one of them.
-- The trace covers fp32 only, the only build precision (docs/precision.md).
 
 ## 10. Open questions
 
-1. Does clause 4 of the contract hold on the Pascal GPU for a 10-layer model?
-   Resolved by Phase 3: the smallest recorded margins are 3.7e-3, 5.8e-2, and
-   3.7e-2 against the 1e-5 threshold, and the identifiers agree exactly on all
-   three targets.
+1. Does clause 3 hold on the Pascal GPU for a 10-layer model? Resolved by
+   Phase 3: the identifiers agree on all three targets.
 2. Does the operator accept the reduction in section 1? If the operator needs
-   bit equality on the GPU leg, choose Path B.
+   bit equality on the device leg, choose Path B.
 3. Should the comparison run in continuous integration, or only at merge? The
    GPU tier suggests merge only, and section 5.5 settles it. The `manual` tag
    keeps the CPU target out of the inner loop.

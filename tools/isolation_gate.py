@@ -10,9 +10,8 @@ For a diff that touches ``models/<name>/**`` the gate:
    manifests.
 
 Step 3 is the isolation proof (``docs/model-and-device-bringup.md`` section
-10.4), and it costs nothing: the fixture comparison and the reference trace run
-on the CPU.  A failure names the offending fixture and record, so the log is
-enough to diagnose it.
+10.4), and it costs nothing: the fixture comparison runs on the CPU.  A failure
+names the offending fixture and record, so the log is enough to diagnose it.
 
 Usage::
 
@@ -29,13 +28,10 @@ torch-backed kinds fall back to verifying the committed bytes against the model
 manifest and say so.  Pass ``--strict`` to make an unavailable regeneration a
 failure instead.
 
-The three numeric goldens are recorded on the reference trace host.  A
-re-emission on another host changes the low-order summation order, so a record
-mismatch in one of those files is reported as a reproducibility warning and
-fails only under ``--strict``.  The committed bytes stay pinned: the manifest
-checksum is always verified, and ``tolerances.json`` carries the same sha256.
-The functional fixtures (oracle, eval, train, generate, rl) keep the strict
-comparison in every mode.
+The functional fixtures (oracle, eval, train, generate, rl) and the numeric
+fixture compare exactly. A record mismatch is a failure in every mode. Pass
+``--strict`` to make an unavailable *regeneration* a failure too, which is what
+a host without torch/numpy needs to prove the torch-backed kinds.
 """
 
 from __future__ import annotations
@@ -59,15 +55,6 @@ import fixture_common  # noqa: E402
 REPO_ROOT = fixture_common.REPO_ROOT
 DEFAULT_MODEL = fixture_common.DEFAULT_MODEL
 
-#: The fixtures whose golden is recorded on the reference numeric-trace host.
-#: Their low-order bits depend on the summation order of the recording host, so
-#: a re-emission here is a warning by default and a failure under --strict.
-REFERENCE_HOST_FIXTURES = frozenset({
-    "numerics_golden_10l.bin",
-    "numerics_golden_10l_bf16.bin",
-    "numerics_golden_10l_fp8.bin",
-})
-
 #: The generator kind (and, for numerics, the precision) that produces each
 #: model-scoped fixture file.
 GENERATOR_FOR = {
@@ -76,9 +63,7 @@ GENERATOR_FOR = {
     "train_parity.bin": ("train", None),
     "generate_parity.bin": ("generate", None),
     "rl_parity.bin": ("rl", None),
-    "numerics_golden_10l.bin": ("numerics", "fp32"),
-    "numerics_golden_10l_bf16.bin": ("numerics", "bf16"),
-    "numerics_golden_10l_fp8.bin": ("numerics", "fp8"),
+    "numerics_golden_10l.bin": ("numerics", None),
 }
 
 #: The record container is the same little-endian framing for every magic the
@@ -377,8 +362,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help="do not regenerate; verify committed manifests only")
     parser.add_argument("--strict", action="store_true",
                         help="fail when a fixture cannot be regenerated instead "
-                             "of falling back to its manifest, and compare the "
-                             "numeric goldens on this host as well")
+                             "of falling back to its manifest")
     return parser.parse_args(argv)
 
 
@@ -437,19 +421,7 @@ def main(argv: list[str] | None = None) -> int:
         if name in produced:
             mismatches = compare_fixture(model_dir / entry["file"], committed,
                                          produced[name], entry)
-            if mismatches and name in REFERENCE_HOST_FIXTURES:
-                message = (f"{committed}: {len(mismatches)} record(s) differ "
-                           "from a re-emission on this host; the golden is "
-                           "recorded on the reference trace host, so the "
-                           "committed bytes are verified against the "
-                           "manifest only")
-                if args.strict:
-                    problems.extend(mismatches)
-                else:
-                    print(f"check: {message}", file=sys.stderr)
-                    fallback_used = True
-            else:
-                problems.extend(mismatches)
+            problems.extend(mismatches)
         elif args.generated_dir:
             problems.append(
                 f"{generated_dir / name}: missing from --generated-dir; "

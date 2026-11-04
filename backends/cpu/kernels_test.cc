@@ -1354,9 +1354,8 @@ void TestRmsNormComposition() {
   p.dim = dim;
   p.eps = nanochat::kDefaultRmsNormEps;
 
-  // The committed tolerance of the fp32 trace (tests/numerics_trace.h:
-  // kLossRtol = 1e-5; the parameter-norm tolerance kParamL2Rtol = 1e-4 is
-  // looser, so one bound covers both records).
+  // The fp32 parity bound of docs/testing.md, used here for the
+  // fused-versus-composed comparison.
   constexpr double kTol = 1e-5;
 
   std::vector<ComputeType> fused_out(n), composed_out(n);

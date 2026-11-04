@@ -1,19 +1,21 @@
-// tests/numerics_trace_emit_main.cc -- the golden-trace emitter.
+// tests/numerics_trace_emit_main.cc -- the numeric-trace emitter.
 //
-// Runs the whole staged trace once on the CPU reference backend and writes the
-// committed golden file, in the container that `src/container.h` owns.
-// `tools/dump_fixtures.py numerics` builds this binary, runs it through
-// `tools/nanochat`, and records the summary. Run it from the repository root:
+// Runs the whole staged trace once and writes one section of the committed
+// fixture, in the container that `src/container.h` owns.
+// `tools/dump_fixtures.py numerics` builds this binary under each precision,
+// runs it through `tools/nanochat`, prefixes the record names with the
+// precision, and writes the single committed file. Run it from the repository
+// root:
 //
 //   tools/nanochat build //tests:numerics_trace_emit
 //   tools/nanochat run t0-cpu -- ./bazel-bin/tests/numerics_trace_emit
-//       --out tests/data/numerics_golden_10l.bin
+//       --out /tmp/fp32.bin
 //       --tokenizer tests/data/loader_tokenizer.nctoken
 //
 // The emitter pins the host thread count to one, so the file does not depend on
 // the sandbox thread budget. The trace is the reference configuration of
-// docs/numerics-integration.md section 6.2; the emitter writes the CPU
-// reference build only.
+// docs/numerics-integration.md section 6.2; the emitter writes the section of
+// the build precision it was compiled with.
 
 #include <cstdint>
 #include <cstdio>

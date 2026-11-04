@@ -313,8 +313,8 @@ else:
 Three conditions keep this honest:
 
 1. **The composition defines the semantics.** A fused override is an
-   optimization. Both paths must satisfy the same golden trace within the
-   committed tolerance.
+   optimization. Both paths must satisfy the same fixture, within the record
+   classes of [numerics-integration.md](numerics-integration.md) section 4.
 2. **`src/ops.cc` is the composition tier.** It already claims this role. The
    work is to make every function there expressible over primitives alone, and
    to move each fused family down into the backend as an override.

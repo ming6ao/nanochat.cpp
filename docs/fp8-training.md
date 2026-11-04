@@ -32,7 +32,7 @@ evaluation exclusion. This repository is at `../nanochat`.
 - [performance-model.md](performance-model.md) — the bound and the precision
   rule.
 - [attention-tensor-core.md](attention-tensor-core.md) — the attention coupling.
-- [numerics-integration.md](numerics-integration.md) — the tolerance table.
+- [numerics-integration.md](numerics-integration.md) — the numeric trace fixture.
 
 ## 1. Goal and scope
 
@@ -303,8 +303,8 @@ Set these values:
 
 The fast accumulation setting changes the numerics. The reference sets
 `use_fast_accum=True` in the forward and `False` in the two backward GEMMs
-(`nanochat/fp8.py:152`, `:173`, `:189`). Match it, and record the setting in
-the tolerance table.
+(`nanochat/fp8.py:152`, `:173`, `:189`). Match it, and record the setting beside
+the fp8 parity bounds.
 A reduced-precision reduction in the forward adds a small error that the
 backward does not have.
 
@@ -536,8 +536,8 @@ Run every check below. The first six need no GPU.
    three-loop reference, plus the fp8 leg of `//tests:kernel_emu_test`.
 3. The finite-difference check for the fp8 attention and MLP backward.
 4. One fp8 forward and one training step against the reference trajectory. The
-   fp8 golden is `tests/data/numerics_golden_10l_fp8.bin`, and item 6 is the
-   gate that reads it.
+   fp8 section of `tests/data/numerics_golden_10l.bin` carries the discrete
+   records, and item 6 is the gate that reads it.
 5. The API interposer accepts the `cublasLtMatmul` shape with both scale
    pointers, and it rejects a null scale pointer. Gate:
    `tools/nanochat simulate --suite api`, and `//tests:cuda_sim_preload_test`.
@@ -551,14 +551,13 @@ Run every check below. The first six need no GPU.
 
 Two prerequisites gate the list.
 
-1. **The tolerance table.** `docs/numerics-integration.md` section 4 needs fp8
-   rows before the trace can be required: the fp8 loss, the fp8 gradient norm,
-   and the fp8 parameter L2. The fast accumulation changes the forward
-   numerics, so record it with the rows.
-2. **The bf16 trace leg.** The fp8 trace needs a stored golden from its own
-   precision family. The bf16 trace machinery is the first instance, and it is
-   still open (`docs/precision.md` section 6, "What the bf16 leg does not cover
-   yet"). Do not schedule the fp8 trace before the bf16 trace.
+1. **The fp8 parity bounds.** The trace compares the fp8 discrete results byte
+   for byte, so it needs no numeric row. The fp8 floating-point bounds are the
+   parity tests of [testing.md](testing.md), and the fast accumulation changes
+   the forward numerics, so record it beside them.
+2. **The bf16 trace leg.** The fixture carries an fp32, a bf16, and an fp8
+   section, so the fp8 trace reads the section of its own precision family.
+   See [precision.md](precision.md) section 6.
 
 Gate 8 is the only check that needs a Hopper-class card. Section 6 of
 [numerics-integration.md](numerics-integration.md) owns the trace.
@@ -674,5 +673,5 @@ One item stays a later option, and it is not a decision today.
 - [simulator-precision.md](simulator-precision.md) — the fp8 simulator engines.
 - [performance-model.md](performance-model.md) — the bound and the rule.
 - [attention-tensor-core.md](attention-tensor-core.md) — the attention coupling.
-- [numerics-integration.md](numerics-integration.md) — the tolerance table.
+- [numerics-integration.md](numerics-integration.md) — the numeric trace fixture.
 - [node-h100.md](node-h100.md) — the H100 run book and the memory plan.

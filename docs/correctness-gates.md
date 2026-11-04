@@ -179,30 +179,22 @@ CPU reference. All three hold today.
 
 ### 3.6 The fp8 trace leg
 
-Add the fp8 rows to the tolerance table in
-[numerics-integration.md](numerics-integration.md) section 4. Use the 1e-2
-relative bound from [simulator-precision.md](simulator-precision.md) section 7.
-Keep the greedy-identifier row exact.
+The fixture carries an fp8 section beside the fp32 and bf16 sections, so the fp8
+build compares the discrete records byte for byte. The section is produced by the
+CPU emitter under `--config=fp8`, through `tools/dump_fixtures.py numerics`.
 
-Status: delivered for the CPU and simulator legs. The fp8 golden is
-`tests/data/numerics_golden_10l_fp8.bin`, produced by the CPU emitter under
-`--config=fp8`, through
-`tools/dump_fixtures.py numerics --precision fp8`. The test picks the
-golden by the build precision and prints a skip when a precision has no golden.
-The fp8 rows are in [numerics-integration.md](numerics-integration.md)
-section 4.
-
-The golden is the **CPU emitter's output**, not a PyTorch fixture. The trace
-compares the device against the CPU reference; the PyTorch parity gates are the
-oracle and the training parity. The device leg waits for a Hopper measurement
-to confirm the 1e-2 bounds.
+The fixture is the **CPU emitter's output**, not a PyTorch fixture. The trace
+compares the discrete results across targets; the PyTorch parity gates are the
+oracle and the training parity. The floating-point fp8 bound is
+[simulator-precision.md](simulator-precision.md) section 7, applied by the fp8
+parity tests, not by this gate.
 
 The tie rule of [numerics-integration.md](numerics-integration.md) section 6.4
 guards the fp32 leg. A bf16 or fp8 build has ties at the bf16 resolution. The
-fp8 leg reports the margin and does not fail on it. The greedy identifiers are
-still compared exactly against the fp8 golden.
+test prints the margin and does not fail on it for a bf16 or fp8 build. The
+greedy identifiers are still compared exactly against the fp8 section.
 
-Gate: the CPU leg is exact, and the simulator leg equals the CPU leg.
+Gate: every leg compares its own section byte for byte.
 
 ## 4. Part 2: the Hopper startup gate
 
@@ -333,8 +325,8 @@ by cost.
    trace config in [numerics-integration.md](numerics-integration.md) section
    6.2 is 10 layers, hidden 384, sequence 256, and batch 4. That config is too
    slow for the inner loop, so it stays `manual`.
-3. **Committed, hashed goldens.** Compare a 64-bit hash for the exact legs, not
-   a value dump. The trace already uses FNV-1a hashes.
+3. **Committed, exact goldens.** Compare the discrete results byte for byte.
+   The trace holds the exact class only, so it needs no hash and no tolerance.
 4. **No torch at run time.** The fixtures are data.
 5. **Pin the reference thread count to one.** The CPU reductions depend on the
    thread count. The pin also removes contention.

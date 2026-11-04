@@ -356,9 +356,9 @@ full-size step. The pretraining oracle fixture avoids this by pinning `1e-4`
 
 | Quantity | Bound | Where it applies |
 |---|---|---|
-| Loss | `1e-5` absolute and relative | The pretraining fixture (`//tests:oracle_test`, `//tests:train_parity_test`) and the numeric trace (`//tests:numerics_trace_test`) |
-| Parameter L2 | `1e-4` relative | The pretraining trajectory and the numeric trace |
-| fp32 CUDA | about `1e-5` relative | The GPU leg of a pretraining or numeric-trace gate |
+| Loss | `1e-5` absolute and relative | The pretraining fixture (`//tests:oracle_test`, `//tests:train_parity_test`) |
+| Parameter L2 | `1e-4` relative | The pretraining trajectory (`//tests:train_parity_test`) |
+| fp32 CUDA | about `1e-5` relative | The GPU leg of a pretraining parity gate (`//tests:train_parity_cuda_test`) |
 | Schedule values (`lr`, momentum, progress) | `1e-6` absolute and relative | Every SFT gate. These are exact settings, so only the fp32 round trip separates the two sides |
 | SFT loss, per step | `2e-3` absolute and relative | `//tests:sft_step_parity_test`, `//tests:sft_parity_test` |
 | SFT gradient norm, per step | `1e-3` absolute, `2e-2` relative | The same two gates |

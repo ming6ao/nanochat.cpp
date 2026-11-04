@@ -3233,35 +3233,36 @@ if _command == 'api':
 
 if _command == 'numerics':
     __doc__ = textwrap.dedent("""\
-        Generate the staged numeric golden trace. The default output is
-        ``models/<name>/fixtures/numerics_golden_10l.bin`` at fp32;
-        ``--precision fp8`` writes
-        ``models/<name>/fixtures/numerics_golden_10l_fp8.bin`` from the fp8 CPU build.
+        Generate the staged numeric trace. The output is one fixture,
+        ``models/<name>/fixtures/numerics_golden_10l.bin``, which carries one
+        section per precision (``fp32/``, ``bf16/``, ``fp8/``). The script builds
+        the emitter under each precision, runs it once through ``tools/nanochat``
+        under the ``t0-cpu`` sandbox profile, prefixes every record name with the
+        section, and writes the single container. The emitter pins the host
+        thread count to one, so the file does not depend on the sandbox thread
+        budget.
 
-        The trace of ``docs/numerics-integration.md`` is one flat list of named records
-        in the little-endian container that ``tests/oracle_fixture.h`` reads, under the
-        magic ``NANONUM1``. The C++ emitter owns the exact bytes, because it computes
-        the values; this script builds the emitter, runs it once through
-        ``tools/nanochat`` under the ``t0-cpu`` sandbox profile, verifies the container,
-        and moves the file into place. The emitter pins the host thread count to one, so
-        the file does not depend on the sandbox thread budget.
+        The fixture holds the exact class only: the configuration, the phase
+        inputs, the token ids, the masks, the greedy identifiers, the argmax, and
+        the valid-target counts. Every one of them is an integer or a fixed
+        constant, so the replay gate compares byte for byte on every backend and
+        every precision. Floating-point results are not records; their contract
+        is the per-stage parity tests of ``docs/testing.md``.
 
-        The fixture is the fp32 CPU reference of section 6.2: 10 layers, 6 heads, 3 KV
-        heads, hidden dimension 384, sequence length 256, batch 4, vocabulary 512, the
-        window pattern ``SSSL``, value embeddings on, seed 42, and five optimizer steps.
-        The trace holds the training trajectory (loss, gradient norm, and the L2 norm
-        and byte hash of every parameter and gradient at every step), the evaluation
-        section (bits per byte, per-batch loss, logits hash, greedy argmax identifiers),
-        the greedy generation section (identifiers, mask, and logit margins), the SFT
-        arithmetic, and the RL arithmetic.
+        The fixture is the fp32 CPU reference of section 6.2: 10 layers, 6 heads,
+        3 KV heads, hidden dimension 384, sequence length 256, batch 4,
+        vocabulary 512, the window pattern ``SSSL``, value embeddings on, seed
+        42, and five optimizer steps. The trace holds the training trajectory
+        that drives the optimizer, the evaluation section (token ids and greedy
+        argmax), the greedy generation section (prompt, identifiers, mask), the
+        SFT arithmetic inputs, and the RL rollouts and normalization counts.
 
         Run the generator from the repository root::
 
-            python3 tools/dump_runtime_fixtures.py numerics
+            python3 tools/dump_fixtures.py numerics
 
-        Then read the file with ``tests/numerics_trace_test.cc`` (the CPU and simulator
-        legs compare byte for byte; the GPU leg compares within the tolerance table) or
-        with ``read_records`` below.
+        Then read the file with ``tests/numerics_trace_test.cc`` (every leg
+        compares its own section byte for byte) or with ``read_records`` below.
 
     """)
     import argparse
@@ -3283,14 +3284,10 @@ if _command == 'numerics':
     #: One element size per dtype code (`tests/oracle_fixture.h`).
     _ELEM_SIZE = {0: 4, 1: 4, 2: 8, 3: 8, 4: 1}
 
-    # The fp32 golden keeps the original name. Each other precision has its own
-    # file, because a bf16 or fp8 build cannot reproduce the fp32 golden
-    # (docs/precision.md section 6).
-    DEFAULT_OUT_BY_PRECISION = {
-        "fp32": "tests/data/numerics_golden_10l.bin",
-        "bf16": "tests/data/numerics_golden_10l_bf16.bin",
-        "fp8": "tests/data/numerics_golden_10l_fp8.bin",
-    }
+    #: The one committed fixture. It carries one section per precision, in this
+    #: order, and every record name inside a section carries the section prefix.
+    OUTPUT_NAME = "numerics_golden_10l.bin"
+    SECTIONS = ("fp32", "bf16", "fp8")
     DEFAULT_TOKENIZER = "tests/data/loader_tokenizer.nctoken"
     EMIT_TARGET = "//tests:numerics_trace_emit"
     EMIT_BINARY = "bazel-bin/tests/numerics_trace_emit"
@@ -3328,6 +3325,21 @@ if _command == 'numerics':
         return records
 
 
+    def write_container(path: Path, records) -> None:
+        """Writes the flat record container: magic, version, count, records."""
+        out = bytearray(MAGIC)
+        out += struct.pack("<II", VERSION, len(records))
+        for name, dtype, shape, payload in records:
+            encoded = name.encode("utf-8")
+            out += struct.pack("<H", len(encoded))
+            out += encoded
+            out += struct.pack("<BB", dtype, len(shape))
+            for extent in shape:
+                out += struct.pack("<q", extent)
+            out += payload
+        path.write_bytes(bytes(out))
+
+
     def scalar(values: dict[str, tuple], name: str) -> float:
         dtype, _shape, payload = values[name]
         if dtype == 0:
@@ -3352,40 +3364,22 @@ if _command == 'numerics':
         return result
 
 
-    def summarize(records, out: Path, expected_precision: str) -> None:
-        """Prints the fixture summary and the checks a reviewer needs."""
+    def summarize(records, section: str) -> None:
+        """Prints one section's summary and the checks a reviewer needs."""
         values = {name: (dtype, shape, payload)
                   for name, dtype, shape, payload in records}
-        backend = values["header/backend"][2].decode()
-        precision = values["header/precision"][2].decode()
-        steps = int(scalar(values, "header/steps"))
-        print(f"wrote {out} ({out.stat().st_size} bytes, {len(records)} records, "
-              f"sha256 {hashlib.sha256(out.read_bytes()).hexdigest()[:16]})")
-        print(f"identity: backend {backend}, precision {precision}, "
+
+        def elements(name: str) -> int:
+            return len(values[name][2]) // 4
+
+        print(f"section {section}: {len(records)} records, "
               f"seed {int(scalar(values, 'header/seed'))}, "
+              f"steps {int(scalar(values, 'header/steps'))}, "
               f"parameters {int(scalar(values, 'config/parameters'))}")
-        losses = [scalar(values, f"train/step{step}/loss") for step in range(steps + 1)]
-        print("train loss: " + ", ".join(f"{loss:.6f}" for loss in losses))
-        print("train gradient norm: %.6f" % scalar(values, "train/step1/grad_norm"))
-        print("eval: bpb %.6f, loss %.6f, min logit margin %.6g"
-              % (scalar(values, "eval/bpb"), scalar(values, "eval/loss/0"),
-                 scalar(values, "eval/margin_min")))
-        print("generation: min logit margin %.6g"
-              % scalar(values, "gen/margin_min"))
-        print("sft: loss %.6f, gradient norm %.6f, valid targets %d"
-              % (scalar(values, "sft/loss"), scalar(values, "sft/grad_norm"),
-                 int(scalar(values, "sft/valid_targets"))))
-        print("rl: loss %.6g, gradient norm %.6g, mean reward %.6f, "
-              "min logit margin %.6g"
-              % (scalar(values, "rl/loss"), scalar(values, "rl/grad_norm"),
-                 scalar(values, "rl/mean_reward"), scalar(values, "rl/margin_min")))
-        for row in range(4):
-            print("rl row %d: reward %.6f, advantage %.6g"
-                  % (row, scalar(values, f"rl/reward/{row}"),
-                     scalar(values, f"rl/advantage/{row}")))
-        if backend != "cpu" or precision != expected_precision:
-            raise SystemExit("the golden trace must come from the "
-                             + expected_precision + " CPU build")
+        print(f"  sft valid targets {int(scalar(values, 'sft/valid_targets'))}, "
+              f"rl valid targets {int(scalar(values, 'rl/valid_targets'))}, "
+              f"gen ids {elements('gen/ids')}, "
+              f"eval argmax {elements('eval/argmax/0')}")
 
 
     def parse_args(argv) -> argparse.Namespace:
@@ -3394,10 +3388,7 @@ if _command == 'numerics':
         add_check_argument(parser)
         parser.add_argument("--out", default=None,
                             help="output fixture path (default: "
-                                 "models/<model>/fixtures/<precision name>)")
-        parser.add_argument("--precision", default="fp32",
-                            choices=("fp32", "bf16", "fp8"),
-                            help="the build precision of the golden")
+                                 "models/<model>/fixtures/" + OUTPUT_NAME + ")")
         parser.add_argument("--tokenizer", default=DEFAULT_TOKENIZER,
                             help="the committed NCTOKEN1 artifact of the eval phase")
         parser.add_argument("--no-build", action="store_true",
@@ -3410,50 +3401,54 @@ if _command == 'numerics':
         # The fixture is the CPU reference. Keep the shared GPU free.
         os.environ["CUDA_VISIBLE_DEVICES"] = ""
         repo_root = _REPO_ROOT
-        committed_dir = model_fixtures_dir(args.model)
-        default_name = DEFAULT_OUT_BY_PRECISION[args.precision]
-        committed = committed_dir / Path(default_name).name
+        committed = model_fixtures_dir(args.model) / OUTPUT_NAME
         if args.out is None:
             out = committed
         else:
             out = Path(args.out)
             if not out.is_absolute():
                 out = repo_root / out
-        if args.check:
-            check_dir_obj = tempfile.TemporaryDirectory(
-                prefix="nanochat-numerics-check-")
-            out = Path(check_dir_obj.name) / committed.name
         tokenizer = Path(args.tokenizer)
         if not tokenizer.is_absolute():
             tokenizer = repo_root / tokenizer
         if not tokenizer.is_file():
             raise SystemExit(f"missing tokenizer file: {tokenizer}")
-        if not args.no_build:
-            config = [] if args.precision == "fp32" else ["--config=" + args.precision]
-            run_nanochat(repo_root, ["build", *config, EMIT_TARGET])
         emitter = repo_root / EMIT_BINARY
-        if not emitter.is_file():
+        if args.no_build and not emitter.is_file():
             raise SystemExit(f"missing emitter {emitter}; run "
                              f"tools/nanochat build {EMIT_TARGET}")
 
+        records = []
         with tempfile.TemporaryDirectory(prefix="numerics_golden_") as workdir:
-            staged = Path(workdir) / "numerics_golden_10l.bin"
-            result = run_nanochat(repo_root, [
-                "run", "t0-cpu", "--", str(emitter),
-                "--out", str(staged),
-                "--tokenizer", str(tokenizer),
-            ])
-            sys.stdout.write(result.stdout)
-            records = read_records(staged)
-            out.parent.mkdir(parents=True, exist_ok=True)
-            # The temporary directory may live on another filesystem, so stage
-            # beside the target and replace inside one directory.
-            beside = out.parent / (out.name + ".tmp")
-            beside.write_bytes(staged.read_bytes())
-            os.replace(beside, out)
+            for section in SECTIONS:
+                if not args.no_build:
+                    config = [] if section == "fp32" else ["--config=" + section]
+                    run_nanochat(repo_root, ["build", *config, EMIT_TARGET])
+                staged = Path(workdir) / (section + ".bin")
+                result = run_nanochat(repo_root, [
+                    "run", "t0-cpu", "--", str(emitter),
+                    "--out", str(staged),
+                    "--tokenizer", str(tokenizer),
+                ])
+                sys.stdout.write(result.stdout)
+                section_records = read_records(staged)
+                summarize(section_records, section)
+                for name, dtype, shape, payload in section_records:
+                    records.append((section + "/" + name, dtype, shape, payload))
 
-        # Re-read the committed path, so the summary describes the file on disk.
-        summarize(read_records(out), out, args.precision)
+        check_dir = None
+        if args.check:
+            check_dir = tempfile.TemporaryDirectory(
+                prefix="nanochat-numerics-check-")
+            out = Path(check_dir.name) / OUTPUT_NAME
+        out.parent.mkdir(parents=True, exist_ok=True)
+        # The temporary directory may live on another filesystem, so stage
+        # beside the target and replace inside one directory.
+        beside = out.parent / (out.name + ".tmp")
+        write_container(beside, records)
+        os.replace(beside, out)
+        print(f"wrote {out} ({out.stat().st_size} bytes, {len(records)} records, "
+              f"sha256 {hashlib.sha256(out.read_bytes()).hexdigest()})")
         if args.check:
             if not compare_fixture_bytes(out, committed):
                 return 1

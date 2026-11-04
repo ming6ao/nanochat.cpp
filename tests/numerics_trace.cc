@@ -49,10 +49,6 @@ constexpr int kSftIgnoreEvery = 5;
 // give four distinct rewards.
 constexpr char kRlRewardRule[] = "weighted-mean-id";
 
-std::uint64_t HashFloats(const std::vector<float>& values) {
-  return HashBytes(values.data(), values.size() * sizeof(float));
-}
-
 void AppendU16(std::vector<std::uint8_t>* out, std::uint16_t value) {
   out->push_back(static_cast<std::uint8_t>(value & 0xffu));
   out->push_back(static_cast<std::uint8_t>((value >> 8) & 0xffu));
@@ -96,42 +92,6 @@ std::vector<float> ReadFloats(const T* src, std::int64_t count) {
         static_cast<float>(host[static_cast<std::size_t>(i)]);
   }
   return out;
-}
-
-// The L2 norm and the byte hash of one parameter or gradient buffer. `l2` is
-// summed in double on the host in a fixed order, so it does not depend on the
-// backend's own reduction order.
-struct Digest {
-  double l2 = 0.0;
-  std::uint64_t hash = 0;
-};
-
-Digest DigestOf(const ComputeType* data, std::int64_t count) {
-  const std::vector<float> values = ReadFloats(data, count);
-  double sum = 0.0;
-  for (float value : values) {
-    sum += static_cast<double>(value) * static_cast<double>(value);
-  }
-  Digest digest;
-  digest.l2 = std::sqrt(sum);
-  digest.hash = HashFloats(values);
-  return digest;
-}
-
-// The global L2 norm of every parameter gradient, summed in double on the host.
-// The trace records this value instead of `Optimizer::GradNorm()` because the
-// SFT and RL phases take no optimizer step, so one definition must cover every
-// phase. `Model::params()` always provides a gradient buffer with a positive
-// count.
-double HostGradNorm(const std::vector<ParamView>& params) {
-  double sum = 0.0;
-  for (const ParamView& view : params) {
-    const std::vector<float> values = ReadFloats(view.grad, view.count);
-    for (float value : values) {
-      sum += static_cast<double>(value) * static_cast<double>(value);
-    }
-  }
-  return std::sqrt(sum);
 }
 
 // A deterministic pretraining-style batch: one row of `seq + 1` ids per row,
@@ -262,144 +222,36 @@ Margin MarginOf(const float* row, int vocab) {
   return margin;
 }
 
-// --- comparison ----------------------------------------------------------
-
-struct GroupSpec {
-  const char* name;
-  double rtol;
-  double atol;
-  bool (*match)(const std::string& name);
-};
-
-bool MatchTrainLoss(const std::string& name) {
-  return name.rfind("train/", 0) == 0 && name.size() > 6 &&
-         name.compare(name.size() - 5, 5, "/loss") == 0;
-}
-
-bool MatchTrainGradNorm(const std::string& name) {
-  return name.rfind("train/", 0) == 0 && name.size() > 10 &&
-         name.compare(name.size() - 10, 10, "/grad_norm") == 0;
-}
-
-bool MatchParamL2(const std::string& name) {
-  return name.find("/param_l2/") != std::string::npos;
-}
-
-bool MatchEvalBpb(const std::string& name) { return name == "eval/bpb"; }
-
-bool MatchEvalLoss(const std::string& name) {
-  return name.rfind("eval/loss/", 0) == 0;
-}
-
-bool MatchEvalMargin(const std::string& name) {
-  return name == "eval/margin_min";
-}
-
-bool MatchGenMargin(const std::string& name) {
-  return name == "gen/margin_min" || name.rfind("gen/margin/", 0) == 0;
-}
-
-bool MatchSftLoss(const std::string& name) { return name == "sft/loss"; }
-
-bool MatchSftGradNorm(const std::string& name) {
-  return name == "sft/grad_norm";
-}
-
-bool MatchRlLoss(const std::string& name) { return name == "rl/loss"; }
-
-bool MatchRlGradNorm(const std::string& name) { return name == "rl/grad_norm"; }
-
-bool MatchRlReward(const std::string& name) {
-  return name.rfind("rl/reward/", 0) == 0 || name == "rl/mean_reward" ||
-         name.rfind("rl/advantage/", 0) == 0;
-}
-
-bool MatchRlMargin(const std::string& name) { return name == "rl/margin_min"; }
-
-// The last entry catches every remaining float record (the configuration and
-// schedule scalars), which the legs compare within the scalar tolerance.
-bool MatchAny(const std::string& name) {
-  (void)name;
-  return true;
-}
-
-const GroupSpec kGroups[] = {
-    {"train_loss", kLossRtol, 1e-9, &MatchTrainLoss},
-    {"train_grad_norm", kLossRtol, 1e-9, &MatchTrainGradNorm},
-    {"param_l2", kParamL2Rtol, 1e-12, &MatchParamL2},
-    {"eval_bpb", kLossRtol, 1e-9, &MatchEvalBpb},
-    {"eval_loss", kLossRtol, 1e-9, &MatchEvalLoss},
-    {"eval_margin", 0.0, kMarginAtol, &MatchEvalMargin},
-    {"gen_margin", 0.0, kMarginAtol, &MatchGenMargin},
-    {"sft_loss", kLossRtol, 1e-9, &MatchSftLoss},
-    {"sft_grad_norm", kLossRtol, 1e-9, &MatchSftGradNorm},
-    {"rl_loss", kLossRtol, 1e-9, &MatchRlLoss},
-    {"rl_grad_norm", kLossRtol, 1e-9, &MatchRlGradNorm},
-    {"rl_reward", kLossRtol, 1e-9, &MatchRlReward},
-    {"rl_margin", 0.0, kMarginAtol, &MatchRlMargin},
-    {"scalar", kLossRtol, 1e-9, &MatchAny},
-};
-
-constexpr int kGroupCount =
-    static_cast<int>(sizeof(kGroups) / sizeof(kGroups[0]));
-
-// The index of the comparison group of one float record. The last group matches
-// every name, so the loop always returns.
-int GroupOf(const std::string& name) {
-  for (int i = 0; i < kGroupCount; ++i) {
-    if (kGroups[i].match(name)) return i;
-  }
-  return kGroupCount - 1;
-}
-
-bool IsHashRecord(const std::string& name) {
-  return name.find("/param_hash/") != std::string::npos ||
-         name.find("/grad_hash/") != std::string::npos ||
-         name == "eval/logits_hash";
-}
-
-bool IsHeaderString(const std::string& name) {
-  return name.rfind("header/", 0) == 0;
-}
-
-std::int64_t PayloadCount(const Record& record) {
-  std::int64_t count = 1;
-  for (std::int64_t extent : record.shape) count *= extent;
-  return count;
-}
-
 void Report(const std::string& label, const std::string& message) {
   std::fprintf(stderr, "FAIL: %s: %s\n", label.c_str(), message.c_str());
 }
 
-// Checks that the computed trace and the golden share one schema, so a
-// name-driven comparison is meaningful. The header identity strings differ by
-// design on the GPU leg ("cpu" against "cuda", and the build name with them),
-// so a name-driven comparison checks only their dtype.
+// Checks the fixture layout before any value is compared. The fixture holds the
+// three sections in a fixed order, each with the same records in the same order
+// as the trace this build computed. A missing section, a lost record, or a
+// changed shape fails here.
 bool SameSchema(const std::vector<Record>& got, const oracle::Fixture& golden,
-                const std::string& label, bool exact) {
-  if (got.size() != golden.size()) {
-    Report(label, "record count " + std::to_string(got.size()) +
-                      " differs from the golden count " +
-                      std::to_string(golden.size()));
+                const std::string& label) {
+  const std::vector<std::string>& names = golden.names();
+  const std::size_t sections = TraceSections().size();
+  if (names.size() != got.size() * sections) {
+    Report(label, "the fixture carries " + std::to_string(names.size()) +
+                      " records and this build computed " +
+                      std::to_string(got.size()) + " in " +
+                      std::to_string(sections) + " sections");
     return false;
   }
-  const std::vector<std::string>& names = golden.names();
-  for (std::size_t i = 0; i < got.size(); ++i) {
-    if (got[i].name != names[i]) {
-      Report(label, "record " + std::to_string(i) + " is '" + got[i].name +
-                        "', the golden record is '" + names[i] + "'");
-      return false;
-    }
-    const oracle::Tensor& want = golden.Get(names[i]);
-    if (got[i].dtype != want.dtype) {
-      Report(label, "record '" + names[i] + "' has a different dtype");
-      return false;
-    }
-    if (!exact && IsHeaderString(names[i])) continue;
-    if (got[i].shape != want.shape) {
-      Report(label, "record '" + names[i] + "' has a different shape");
-      return false;
+  for (std::size_t section = 0; section < sections; ++section) {
+    const std::string prefix = TraceSections()[section] + "/";
+    for (std::size_t i = 0; i < got.size(); ++i) {
+      const std::string& name = names[section * got.size() + i];
+      const oracle::Tensor& want = golden.Get(name);
+      if (name != prefix + got[i].name || want.dtype != got[i].dtype ||
+          want.shape != got[i].shape) {
+        Report(label, "record '" + name + "' does not match this build's '" +
+                          got[i].name + "'");
+        return false;
+      }
     }
   }
   return true;
@@ -429,21 +281,17 @@ std::string PrecisionName() {
 
 std::string BuildName() { return BackendName() + "-" + PrecisionName(); }
 
+const std::vector<std::string>& TraceSections() {
+  static const std::vector<std::string> sections = {"fp32", "bf16", "fp8"};
+  return sections;
+}
+
+std::string SectionPrefix() { return PrecisionName() + "/"; }
+
 Record Fp32Record(const std::string& name, float value) {
   std::vector<std::uint8_t> payload(4);
   std::memcpy(payload.data(), &value, 4);
   return MakeRecord(name, DType::kFp32, {1}, std::move(payload));
-}
-
-Record Fp32VectorRecord(const std::string& name, const float* values,
-                        std::int64_t count) {
-  std::vector<std::uint8_t> payload(static_cast<std::size_t>(count) *
-                                    sizeof(float));
-  if (count > 0) {
-    std::memcpy(payload.data(), values,
-                static_cast<std::size_t>(count) * sizeof(float));
-  }
-  return MakeRecord(name, DType::kFp32, {count}, std::move(payload));
 }
 
 Record Int32Record(const std::string& name, std::int32_t value) {
@@ -567,9 +415,6 @@ std::vector<Record> RunTrace(const Config& config, const TraceShape& shape,
   // --- header ------------------------------------------------------------
   records.push_back(Int32Record("header/version", 1));
   records.push_back(BytesRecord("header/magic", kTraceMagic));
-  records.push_back(BytesRecord("header/backend", BackendName()));
-  records.push_back(BytesRecord("header/precision", PrecisionName()));
-  records.push_back(BytesRecord("header/build", BuildName()));
   records.push_back(
       Int64Record("header/seed", static_cast<std::int64_t>(shape.seed)));
   records.push_back(Int32Record("header/steps", shape.steps));
@@ -653,21 +498,7 @@ std::vector<Record> RunTrace(const Config& config, const TraceShape& shape,
     const float loss =
         model->ForwardLoss(step_tokens.data(), step_targets.data(), batch, seq);
     model->BackwardAccumulate(1.0f);
-    const std::string prefix = "train/step" + std::to_string(step);
-    records.push_back(Fp32Record(prefix + "/loss", loss));
-    records.push_back(Fp32Record(prefix + "/grad_norm",
-                                 static_cast<float>(HostGradNorm(params))));
     out->train_loss.push_back(static_cast<double>(loss));
-    for (const ParamView& view : params) {
-      const Digest value = DigestOf(view.value, view.count);
-      records.push_back(Fp32Record(prefix + "/param_l2/" + view.name,
-                                   static_cast<float>(value.l2)));
-      records.push_back(Int64Record(prefix + "/param_hash/" + view.name,
-                                    static_cast<std::int64_t>(value.hash)));
-      records.push_back(Int64Record(prefix + "/grad_hash/" + view.name,
-                                    static_cast<std::int64_t>(HashFloats(
-                                        ReadFloats(view.grad, view.count)))));
-    }
   }
 
   // --- evaluation phase --------------------------------------------------
@@ -699,7 +530,6 @@ std::vector<Record> RunTrace(const Config& config, const TraceShape& shape,
     throw std::runtime_error("the evaluation produced no bits-per-byte");
   }
   out->eval_bpb = static_cast<double>(bpb);
-  records.push_back(Fp32Record("eval/bpb", bpb));
 
   double min_eval_margin = std::numeric_limits<double>::infinity();
   for (int b = 0; b < shape.eval_steps; ++b) {
@@ -710,26 +540,18 @@ std::vector<Record> RunTrace(const Config& config, const TraceShape& shape,
       throw std::runtime_error("ScoreBatch did not score the evaluation batch");
     }
     std::vector<int> argmax(static_cast<std::size_t>(rows), -1);
-    double loss_sum = 0.0;
-    int loss_count = 0;
     for (int r = 0; r < batch; ++r) {
       const ScoreResult& result = results[static_cast<std::size_t>(r)];
       for (int p = 0; p < seq; ++p) {
         argmax[static_cast<std::size_t>(r) * seq + p] =
             result.argmax[static_cast<std::size_t>(p)];
-        if (result.argmax[static_cast<std::size_t>(p)] < 0) continue;
-        loss_sum +=
-            static_cast<double>(result.nll[static_cast<std::size_t>(p)]);
-        ++loss_count;
       }
     }
-    records.push_back(Fp32Record("eval/loss/" + std::to_string(b),
-                                 static_cast<float>(loss_sum / loss_count)));
     records.push_back(Int32VectorRecord("eval/argmax/" + std::to_string(b),
                                         argmax.data(), rows));
-    // The margins and the logits hash read the same buffer ScoreBatch scores,
-    // so the recorded argmax and margin describe one forward. ScoreBatch scores
-    // the training graph, so grad mode stays on for the call.
+    // The margins read the same buffer ScoreBatch scores, so the recorded
+    // argmax and the margin describe one forward. ScoreBatch scores the
+    // training graph, so grad mode stays on for the call.
     auto* impl = static_cast<TrainModel*>(model.get());
     const std::int64_t logits_count =
         static_cast<std::int64_t>(rows) * padded_vocab;
@@ -742,14 +564,8 @@ std::vector<Record> RunTrace(const Config& config, const TraceShape& shape,
       min_eval_margin =
           std::min(min_eval_margin, static_cast<double>(margin.value));
     }
-    if (b == 0) {
-      records.push_back(Int64Record(
-          "eval/logits_hash", static_cast<std::int64_t>(HashFloats(logits))));
-    }
   }
   out->min_eval_margin = min_eval_margin;
-  records.push_back(
-      Fp32Record("eval/margin_min", static_cast<float>(min_eval_margin)));
 
   // --- greedy generation phase -------------------------------------------
   Rand gen_rand(shape.seed ^ 0x2545f4914f6cdd1dULL);
@@ -799,16 +615,12 @@ std::vector<Record> RunTrace(const Config& config, const TraceShape& shape,
       const Margin margin = MarginOf(
           logits.data() + static_cast<std::size_t>(position) * padded_vocab,
           vocab);
-      records.push_back(
-          Fp32Record("gen/margin/" + std::to_string(i), margin.value));
       if (margin.argmax != gen_ids[static_cast<std::size_t>(i)]) {
         ++out->gen_path_mismatch;
       }
       min_margin = std::min(min_margin, static_cast<double>(margin.value));
     }
     out->min_gen_margin = min_margin;
-    records.push_back(
-        Fp32Record("gen/margin_min", static_cast<float>(min_margin)));
   }
 
   // --- SFT arithmetic phase ---------------------------------------------
@@ -851,9 +663,6 @@ std::vector<Record> RunTrace(const Config& config, const TraceShape& shape,
         Int32Record("sft/valid_targets", static_cast<std::int32_t>(valid)));
     records.push_back(Int32Record("sft/zero_weights",
                                   static_cast<std::int32_t>(zero_weights)));
-    records.push_back(Fp32Record("sft/loss", static_cast<float>(masked_loss)));
-    records.push_back(
-        Fp32Record("sft/grad_norm", static_cast<float>(HostGradNorm(params))));
     out->sft_loss = masked_loss;
   }
 
@@ -908,14 +717,7 @@ std::vector<Record> RunTrace(const Config& config, const TraceShape& shape,
     for (int r = 0; r < shape.rl_samples; ++r) {
       advantages[static_cast<std::size_t>(r)] = static_cast<float>(
           rewards[static_cast<std::size_t>(r)] - mean_reward);
-      records.push_back(
-          Fp32Record("rl/reward/" + std::to_string(r),
-                     static_cast<float>(rewards[static_cast<std::size_t>(r)])));
-      records.push_back(Fp32Record("rl/advantage/" + std::to_string(r),
-                                   advantages[static_cast<std::size_t>(r)]));
     }
-    records.push_back(
-        Fp32Record("rl/mean_reward", static_cast<float>(mean_reward)));
 
     // Tokens, targets, and row weights of the rollout batch: weight 0 on the
     // prompt and on the final position, the advantage elsewhere.
@@ -958,9 +760,6 @@ std::vector<Record> RunTrace(const Config& config, const TraceShape& shape,
     model->BackwardWeighted(weights.data(), static_cast<float>(1.0 / passes));
     records.push_back(
         Int32Record("rl/valid_targets", static_cast<std::int32_t>(valid)));
-    records.push_back(Fp32Record("rl/loss", static_cast<float>(objective)));
-    records.push_back(
-        Fp32Record("rl/grad_norm", static_cast<float>(HostGradNorm(params))));
     out->rl_loss = objective;
 
     // The logit margin of every sampled step, from the full-row forward over
@@ -990,8 +789,6 @@ std::vector<Record> RunTrace(const Config& config, const TraceShape& shape,
       }
     }
     out->min_rl_margin = min_margin;
-    records.push_back(
-        Fp32Record("rl/margin_min", static_cast<float>(min_margin)));
   }
 
   out->records = static_cast<int>(records.size());
@@ -1000,90 +797,21 @@ std::vector<Record> RunTrace(const Config& config, const TraceShape& shape,
 }
 
 TraceComparison CompareTraces(const std::vector<Record>& got,
-                              const oracle::Fixture& golden, bool exact,
+                              const oracle::Fixture& golden,
                               const std::string& label) {
   TraceComparison comparison;
-  comparison.groups.resize(static_cast<std::size_t>(kGroupCount));
-  for (int i = 0; i < kGroupCount; ++i) {
-    comparison.groups[static_cast<std::size_t>(i)].name = kGroups[i].name;
-  }
-  if (!SameSchema(got, golden, label, exact)) {
+  if (!SameSchema(got, golden, label)) {
     comparison.failures = 1;
     return comparison;
   }
-  const std::vector<std::string>& names = golden.names();
-  // Compares one record against the golden byte for byte and advances the
-  // counters. `prefix` names the record class in the failure message.
-  auto compare_bytes = [&](const std::string& name, const Record& record,
-                           const oracle::Tensor& want, const char* prefix) {
+  const std::string prefix = SectionPrefix();
+  for (const Record& record : got) {
+    const std::string name = prefix + record.name;
+    const oracle::Tensor& want = golden.Get(name);
     if (record.payload.size() != want.bytes ||
         std::memcmp(record.payload.data(), want.data, want.bytes) != 0) {
-      Report(label, std::string(prefix) + "record '" + name +
-                        "' differs from the golden");
+      Report(label, "record '" + name + "' differs from the fixture");
       ++comparison.failures;
-    }
-    ++comparison.compared;
-  };
-  for (std::size_t i = 0; i < got.size(); ++i) {
-    const Record& record = got[i];
-    const oracle::Tensor& want = golden.Get(names[i]);
-    if (exact) {
-      compare_bytes(names[i], record, want, "");
-      continue;
-    }
-    if (record.dtype == DType::kUInt8) {
-      if (IsHeaderString(names[i])) {
-        // The producer identity must match the compiled backend. The build name
-        // differs by design on the GPU leg, so it is skipped.
-        if (names[i] == "header/backend" || names[i] == "header/precision") {
-          const std::string produced(record.payload.begin(),
-                                     record.payload.end());
-          const std::string expected =
-              names[i] == "header/backend" ? BackendName() : PrecisionName();
-          if (produced != expected) {
-            Report(label, "record '" + names[i] + "' is '" + produced +
-                              "', the compiled backend is '" + expected + "'");
-            ++comparison.failures;
-          }
-          ++comparison.compared;
-          continue;
-        }
-        ++comparison.skipped;
-        continue;
-      }
-      compare_bytes(names[i], record, want, "");
-      continue;
-    }
-    if (record.dtype == DType::kInt32 || record.dtype == DType::kInt64) {
-      if (IsHashRecord(names[i])) {
-        // The bytes differ by design on the GPU leg; the hash is meaningless
-        // there.
-        ++comparison.skipped;
-        continue;
-      }
-      compare_bytes(names[i], record, want, "integer ");
-      continue;
-    }
-    const int group = GroupOf(names[i]);
-    for (std::int64_t e = 0; e < PayloadCount(record); ++e) {
-      const float value =
-          reinterpret_cast<const float*>(record.payload.data())[e];
-      const float expected = want.f32()[e];
-      const double diff =
-          std::fabs(static_cast<double>(value) - static_cast<double>(expected));
-      GroupStat& stat = comparison.groups[static_cast<std::size_t>(group)];
-      stat.max_abs_diff = std::max(stat.max_abs_diff, diff);
-      const double scale =
-          std::max(std::fabs(static_cast<double>(expected)), 1e-12);
-      stat.max_rel_diff = std::max(stat.max_rel_diff, diff / scale);
-      const double limit = kGroups[group].atol + kGroups[group].rtol * scale;
-      if (diff > limit) {
-        Report(label, "record '" + names[i] + "'[" + std::to_string(e) +
-                          "] is " + std::to_string(value) + ", the golden is " +
-                          std::to_string(expected));
-        ++comparison.failures;
-      }
-      ++stat.count;
     }
     ++comparison.compared;
   }

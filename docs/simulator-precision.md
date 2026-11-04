@@ -46,7 +46,7 @@ without a GPU.
 | Reference engine | `backends/cpu/kernels.cc` under `--config=sim` | fp32, and bf16 under `--config=bf16` |
 | API interposer | `tools/cuda_sim/cuda_sim.map`, `interposer.cc` | The CUDA runtime, and four cuBLAS calls |
 | Emulation engine | `tools/cuda_sim/emu/` | `RmsNorm` and `Pointwise`, in fp32 and bf16 |
-| Numeric trace | `tests/numerics_trace*` | fp32 on the CPU, the simulator, and the GPU |
+| Numeric trace | `tests/numerics_trace*` | The exact class, on fp32, bf16, and fp8, on the CPU, the simulator, and the GPU |
 
 ## 3. Part 1: the device profile table
 
@@ -213,18 +213,20 @@ that family is small.
 
 ## 7. Part 5: the numeric trace
 
-The trace has one golden file and four consumers: the CPU leg, the simulator
-leg, the CUDA leg, and the comparison. Add an fp8 leg.
+The trace has one fixture with three sections and four consumers: the CPU leg,
+the simulator leg, the CUDA leg, and the comparison. The fp8 leg reads the fp8
+section.
 
 | Leg | Comparison | Needs a GPU |
 |---|---|---|
-| CPU, fp8 emulation | Exact against the golden | no |
-| Simulator, fp8 profile | Exact against the CPU leg | no |
-| CUDA, fp8 | Within the fp8 tolerance | yes |
+| CPU, fp8 emulation | Exact against the fp8 section | no |
+| Simulator, fp8 profile | Exact against the fp8 section | no |
+| CUDA, fp8 | Exact against the fp8 section, on the discrete records | yes |
 
-Add one row per stage to the tolerance table in
-`docs/numerics-integration.md` section 4. Start with these values, and correct
-them from the first measurement.
+Add one row per stage to the fp8 parity bounds in
+[testing.md](testing.md). The trace compares the fp8 discrete results byte for
+byte, so it carries no numeric row. Start with these values, and correct them
+from the first measurement.
 
 | Stage | Artifact | GPU against the CPU golden |
 |---|---|---|

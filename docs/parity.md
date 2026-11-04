@@ -100,30 +100,28 @@ second line is T2 and runs at a wave boundary.
 contract of the numeric integration test. That document calls the design Path A.
 `//tests:numerics_trace_test` and its GPU sibling
 `//tests:numerics_trace_cuda_test` gate the contract against one committed
-golden file, `tests/data/numerics_golden_10l.bin`.
+fixture, `tests/data/numerics_golden_10l.bin`.
 
-The plan states the reduction in section 1 and the four clauses in section 3.
-The gate applies them as follows:
+The fixture holds the exact class only: configuration, inputs, token ids, masks,
+greedy identifiers, argmax, and valid-target counts. It carries one section per
+precision, and each build compares its own section. The gate applies the plan as
+follows:
 
-1. The CPU leg and the simulator leg compare byte for byte.
-2. The CPU leg and the simulator leg repeat across runs. The GPU leg repeats
-   within the tolerance table, because the atomic scatter-adds make the byte
-   order a non-contract.
-3. The GPU leg compares the scalars within the tolerance table of section 4.
-   It skips the parameter hashes and the gradient hashes.
-4. The GPU leg compares the greedy identifiers exactly, and every recorded
-   logit margin must stay above the tie threshold of section 6.4.
-
-The GPU leg also runs the trace twice and compares the two runs, which gates
-the determinism clause.
+1. Every leg compares byte for byte. There is no tolerance mode.
+2. The GPU leg repeats across two runs and compares the discrete records again,
+   because the atomic scatter-adds make the byte order a non-contract.
+3. The floating-point contract is not here. It is the per-stage parity tests of
+   [testing.md](testing.md), each with one bound and one fixture.
+4. Every reported margin must clear the tie rule of section 6.3, or the run
+   fails and says the fixture is not usable for that section.
 
 The contract does not cover the SFT loop or the RL loop. It covers the SFT
-arithmetic and the RL arithmetic only, as the plan states. The SFT arithmetic
-leg of the trace is the masked weighted loss and the gradient norm of that one
-forward and backward pass; it takes no optimizer step, so it is not the `P5`
-evidence. That row comes from `//tests:sft_step_parity_test` against a fixture.
-See section 10 of [sft-parity-plan.md](sft-parity-plan.md) for why the trace was
-not extended in this campaign.
+arithmetic and the RL arithmetic only, and it covers them in the parity tests.
+The trace records the SFT valid-target and zero-weight counts and the RL rollout
+identifiers and valid-target count. The SFT loss and gradient norm, and the RL
+reward, advantage, and objective, are floating-point results, so
+`//tests:sft_step_parity_test` and `//tests:rl_parity_test` own them. That is the
+`P5` evidence.
 
 ## Open differences
 

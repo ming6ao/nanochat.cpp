@@ -178,9 +178,8 @@ decimal digits of its own and cannot hold an absolute bound of `1e-6`.
 
 `TestRmsNormComposition` writes `RmsNorm` forward and backward as compositions
 over `RowReduce` and `Pointwise` alone, at `B=2, T=8`, and compares them with the
-fused family at the committed fp32 tolerance (`tests/numerics_trace.h`:
-`kLossRtol = 1e-5`, and `kParamL2Rtol = 1e-4` is looser, so one bound covers both
-records). What it found, per call site:
+fused family at `1e-5` relative, the bound of the fp32 parity gates
+(`docs/testing.md`). What it found, per call site:
 
 | Call site | Fields needed | Fields untouched | Worked around |
 |---|---|---|---|

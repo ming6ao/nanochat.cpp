@@ -12,47 +12,42 @@
 // The staged numeric trace of docs/numerics-integration.md: one 10-layer model,
 // four phases (training, evaluation, greedy generation, and the SFT and RL
 // arithmetic), recorded as a flat list of named records, so one committed
-// golden file can be replayed on the CPU reference backend, under
-// `--config=sim`, and on the Pascal GPU.
+// fixture can be replayed on the CPU reference backend, under `--config=sim`,
+// and on the Pascal GPU.
+//
+// The fixture holds the **exact class** only: configuration, inputs, token ids,
+// masks, greedy identifiers, argmax, and valid-target counts. Every one of them
+// is an integer or a fixed constant, so two arithmetic implementations either
+// agree byte for byte or one of them is wrong. Floating-point results are not
+// records: their contract is the per-stage parity tests of
+// docs/testing.md, which own a bound each.
 //
 // Container. The trace reuses the little-endian record layout that
-// `src/container.h` owns, under its own 8-byte magic `NANONUM1`. The
-// layout is unchanged, so Phase 0 added one magic string and no record
-// sequence: `[magic][u32 version][u32 count]`, then one
+// `src/container.h` owns, under its own 8-byte magic `NANONUM1`:
+// `[magic][u32 version][u32 count]`, then one
 // `[u16 name_len][name][u8 dtype][u8 ndim][u64 shape...][payload]` per record.
-// The two 64-bit hashes travel as `kInt64` bit patterns, and the strings travel
-// as `kUInt8` byte payloads.
+// The strings travel as `kUInt8` byte payloads.
 //
 // Record names. The header and the run parameters start with `header/`,
-// `config/`, `opt/`, or `sched/`. The phases add `train/`, `eval/`, `gen/`,
-// `sft/`, and `rl/`. A parameter record is `train/step<N>/param_l2/<name>`,
-// `train/step<N>/param_hash/<name>`, or `train/step<N>/grad_hash/<name>`, with
-// the model's own parameter names from `Model::params()`.
+// `config/`, `opt/`, or `sched/`. The phases add `eval/`, `gen/`, `sft/`, and
+// `rl/`. In the committed fixture every name carries a precision prefix, so one
+// file holds all three sections: `fp32/gen/ids`, `bf16/gen/ids`, and
+// `fp8/gen/ids`. A build compares its own section.
 //
 // Determinism. Every value comes from the model, the seed, and the committed
 // tokenizer; nothing reads the clock or an entropy source. The trace pins the
-// host thread count to one (`PinSingleThreaded`), so the golden file does not
-// depend on the sandbox thread budget. The hashes are valid only for the exact
-// legs: they are meaningless on the GPU leg, where the atomic scatter-adds
-// change the bytes by design.
+// host thread count to one (`PinSingleThreaded`), so the fixture does not
+// depend on the sandbox thread budget.
 namespace nanochat {
 namespace numerics {
 
 // The fixture magic of the numeric trace container.
 inline constexpr char kTraceMagic[] = "NANONUM1";
 
-// The tolerance table of docs/numerics-integration.md section 4.
-// `kLossRtol` covers every scalar that is not a parameter norm: the train loss
-// and gradient norm, the evaluation bits per byte and losses, the SFT
-// arithmetic, and the RL arithmetic. `kParamL2Rtol` covers the parameter L2
-// norms. `kMarginAtol` compares the recorded logit margins, which are
-// differences of two logits and can sit near zero. `kMinMargin` is the tie rule
-// of section 6.4: every recorded margin must exceed it, or a one-unit roundoff
-// difference can flip a greedy identifier. The measured maxima are in the
-// section 4 table.
-inline constexpr double kLossRtol = 1e-5;
-inline constexpr double kParamL2Rtol = 1e-4;
-inline constexpr double kMarginAtol = 1e-5;
+// The tie rule of docs/numerics-integration.md section 6.4: every logit margin
+// the run reports must exceed this value, or a one-unit roundoff difference can
+// flip a greedy identifier. The margin is a diagnostic, not a compared record,
+// so this is the only numeric threshold in the gate.
 inline constexpr double kMinMargin = 1e-5;
 
 // One record of the trace, in the container's encoding.
@@ -64,16 +59,14 @@ struct Record {
 };
 
 Record Fp32Record(const std::string& name, float value);
-Record Fp32VectorRecord(const std::string& name, const float* values,
-                        std::int64_t count);
 Record Int32Record(const std::string& name, std::int32_t value);
 Record Int32VectorRecord(const std::string& name, const int* values,
                          std::int64_t count);
 Record Int64Record(const std::string& name, std::int64_t value);
 Record BytesRecord(const std::string& name, const std::string& text);
 
-// FNV-1a over the raw bytes, 64 bit. The hash is a bit-pattern checksum of the
-// staged host bytes, so it is exact on the CPU legs and skipped on the GPU leg.
+// FNV-1a over the raw bytes, 64 bit. The emitter uses it to print a checksum of
+// the container it writes.
 std::uint64_t HashBytes(const void* data, std::size_t bytes);
 
 // The compile-time identity of the running build. `BackendName` is "cpu" for
@@ -131,28 +124,25 @@ std::vector<Record> RunTrace(const Config& config, const TraceShape& shape,
                              const std::string& tokenizer_path,
                              TraceStats* stats);
 
-// One comparison group: the records that share a tolerance.
-struct GroupStat {
-  std::string name;
-  double max_abs_diff = 0.0;
-  double max_rel_diff = 0.0;
-  int count = 0;
-};
-
 // The verdict of one comparison.
 struct TraceComparison {
   int failures = 0;
   int compared = 0;
-  int skipped = 0;
-  std::vector<GroupStat> groups;
 };
 
-// Compares `got` against the golden records. `exact` requires identical bytes
-// (the CPU and simulator legs); otherwise the float records use the tolerance
-// table, the integer records compare exactly, and the hash records are skipped
-// (the GPU leg). Failures are written to stderr with the record name.
+// The three sections a committed fixture carries, in file order.
+const std::vector<std::string>& TraceSections();
+
+// The prefix a record name carries in the fixture: "<precision>/".
+std::string SectionPrefix();
+
+// Compares `got` (unprefixed names) against the section of the golden that
+// belongs to the running build. The comparison is byte for byte: a difference
+// is a failure, and there is no tolerance mode. The schema check requires all
+// three sections to exist and to carry the same record names in the same order,
+// so a section cannot silently lose a record.
 TraceComparison CompareTraces(const std::vector<Record>& got,
-                              const oracle::Fixture& golden, bool exact,
+                              const oracle::Fixture& golden,
                               const std::string& label);
 
 // Pins the host thread count to one before the first kernel call, so the CPU

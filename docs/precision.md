@@ -259,9 +259,10 @@ fixtures. A bf16 build still runs every one of those code paths through the
 tests that do not compare against a golden. The in-build two-path checks run in
 both builds with a precision-aware bound.
 
-The bf16 numeric trace is the remaining work. It needs its own committed golden,
-produced by the bf16 CPU emitter, and its own tolerance table. The fp32 trace and
-its tolerances stay unchanged. Other documents call this stage "Stage 2a".
+The bf16 trace leg now runs. The fixture carries an fp32, a bf16, and an fp8
+section, and a bf16 build compares its own section byte for byte. The section is
+produced by the bf16 CPU emitter through `tools/dump_fixtures.py numerics`. The
+fp32 trace stays unchanged. Other documents call this stage "Stage 2a".
 
 ## 7. What this avoids
 

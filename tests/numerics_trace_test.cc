@@ -3,19 +3,20 @@
 //
 // The test computes the whole trace (training, evaluation, greedy generation,
 // the SFT arithmetic, and the RL arithmetic) in process and compares it against
-// the committed golden file `tests/data/numerics_golden_10l.bin`:
+// one section of the committed fixture `tests/data/numerics_golden_10l.bin`:
 //
-//   * the CPU reference backend and the `--config=sim` reference engine must
-//     reproduce the golden byte for byte (one source, two build configs); and
-//   * the CUDA backend must reproduce every scalar within the tolerance table
-//     of section 4 and every greedy identifier exactly. The parameter and
-//     gradient hashes are skipped there, because the device kernels use atomic
-//     scatter-adds and the bytes differ by design.
+//   * the fixture holds the exact class only -- configuration, inputs, token
+//     ids, masks, greedy identifiers, argmax, and valid-target counts -- so the
+//     comparison is byte for byte on every backend and every precision;
+//   * the fixture carries one section per precision (`fp32/`, `bf16/`, `fp8/`),
+//     and this build compares the section that names its own precision;
+//   * the floating-point contract is the per-stage parity tests of
+//     docs/testing.md, not this one. This gate never applies a tolerance.
 //
 // The same source builds as `//tests:numerics_trace_test` (CPU),
 // `//tests:numerics_trace_cuda_test` (GPU), and the simulator leg runs the CPU
-// target under `--config=sim`. See `tools/dump_fixtures.py numerics`
-// for the generator and `tests/numerics_trace.h` for the record format.
+// target under `--config=sim`. See `tools/dump_fixtures.py numerics` for the
+// generator and `tests/numerics_trace.h` for the record format.
 
 #include <cstdint>
 #include <cstdio>
@@ -40,21 +41,9 @@ using nanochat::numerics::PrecisionName;
 using nanochat::numerics::Record;
 using nanochat::numerics::ReferenceConfig;
 using nanochat::numerics::RunTrace;
-using nanochat::numerics::SerializeTrace;
 using nanochat::numerics::TraceShape;
 using nanochat::numerics::TraceStats;
 using nanochat::oracle::Fixture;
-
-// The comparison mode. The CPU target and the simulator leg must reproduce the
-// golden byte for byte; the device target compares within the tolerance table
-// and skips the hashes. The intent belongs to the target definition in
-// `tests/BUILD.bazel` and not to a backend define, because one source builds
-// both targets.
-#if defined(NANOCHAT_TRACE_EXACT)
-constexpr bool kExactTrace = true;
-#else
-constexpr bool kExactTrace = false;
-#endif
 
 int g_failures = 0;
 
@@ -89,11 +78,11 @@ std::string LocateFile(int argc, char** argv, int index, const char* relative) {
 // roundoff must not be able to flip a greedy identifier, so every recorded
 // logit margin must clear a threshold.
 //
-// The rule guards the fp32 leg. A bf16 or fp8 build resolves the logits at 8
-// mantissa bits, so the top two logits can tie, and the margin is a multiple of
-// the bf16 unit at the logit magnitude. The test still prints the margin, and
-// it still compares the identifiers exactly against the golden of the same
-// build.
+// The margin is a diagnostic, not a fixture record. The rule guards the fp32
+// leg. A bf16 or fp8 build resolves the logits at 8 mantissa bits, so the top
+// two logits can tie, and the margin is a multiple of the bf16 unit at the
+// logit magnitude. The test still prints the margin, and it still compares the
+// identifiers exactly against the section of its own build.
 void CheckMargin(const std::string& what, double margin) {
   const bool peaked = nanochat::kComputeIsBf16 || margin > kMinMargin;
   if (!peaked) {
@@ -105,13 +94,27 @@ void CheckMargin(const std::string& what, double margin) {
               margin, kMinMargin);
 }
 
-void ReportGroups(const nanochat::numerics::TraceComparison& comparison) {
-  for (const nanochat::numerics::GroupStat& group : comparison.groups) {
-    if (group.count == 0) continue;
-    std::printf("  %-16s n=%-6d max |diff| %.3g  max rel %.3g\n",
-                group.name.c_str(), group.count, group.max_abs_diff,
-                group.max_rel_diff);
+// Compares two runs of the same build, record by record. The device kernels use
+// atomic scatter-adds, so this is the device determinism clause: the discrete
+// records must not move between two runs of one binary.
+int CompareRuns(const std::vector<Record>& first,
+                const std::vector<Record>& second, const std::string& label) {
+  if (first.size() != second.size()) {
+    Fail(label + ": record count " + std::to_string(first.size()) +
+         " differs from " + std::to_string(second.size()));
+    return 1;
   }
+  int failures = 0;
+  for (std::size_t i = 0; i < first.size(); ++i) {
+    const Record& a = first[i];
+    const Record& b = second[i];
+    if (a.name != b.name || a.dtype != b.dtype || a.shape != b.shape ||
+        a.payload != b.payload) {
+      Fail(label + ": record '" + a.name + "' differs between two runs");
+      ++failures;
+    }
+  }
+  return failures;
 }
 
 int Run(int argc, char** argv) {
@@ -121,27 +124,11 @@ int Run(int argc, char** argv) {
       LocateFile(argc, argv, 2, "tests/data/loader_tokenizer.nctoken");
 
   const Fixture golden = Fixture::Load(golden_path);
-  // A build whose precision differs from the golden prints a skip and returns
-  // success, the way a bf16 build skips the fp32 goldens
-  // (docs/precision.md section 6). The target passes the golden for the build.
-  {
-    const nanochat::oracle::Tensor& stored = golden.Get("header/precision");
-    const std::string stored_name(reinterpret_cast<const char*>(stored.data),
-                                  stored.bytes);
-    if (stored_name != PrecisionName()) {
-      std::printf("numerics_trace: skipped (golden precision %s, build %s)\n",
-                  stored_name.c_str(), PrecisionName().c_str());
-      return 0;
-    }
-  }
-
   const Config config = ReferenceConfig();
   const TraceShape& shape = DefaultShape();
-  const bool exact = kExactTrace;
-  std::printf("numerics_trace: backend %s precision %s build %s %s golden %s\n",
+  std::printf("numerics_trace: backend %s precision %s build %s fixture %s\n",
               BackendName().c_str(), PrecisionName().c_str(),
-              BuildName().c_str(), exact ? "(exact)" : "(tolerance)",
-              golden_path.c_str());
+              BuildName().c_str(), golden_path.c_str());
 
   TraceStats stats;
   const std::vector<Record> records =
@@ -150,11 +137,10 @@ int Run(int argc, char** argv) {
               stats.records, stats.parameters, shape.steps);
 
   const nanochat::numerics::TraceComparison comparison =
-      CompareTraces(records, golden, exact, "numerics_trace");
+      CompareTraces(records, golden, "numerics_trace");
   g_failures += comparison.failures;
-  std::printf("numerics_trace: compared %d records, skipped %d\n",
-              comparison.compared, comparison.skipped);
-  ReportGroups(comparison);
+  std::printf("numerics_trace: compared %d records in section %s\n",
+              comparison.compared, PrecisionName().c_str());
 
   if (stats.gen_path_mismatch != 0 || stats.rl_path_mismatch != 0) {
     // A diagnostic, not a gate: the greedy decode path and the full-row
@@ -166,37 +152,14 @@ int Run(int argc, char** argv) {
   CheckMargin("eval/margin_min", stats.min_eval_margin);
   CheckMargin("rl/margin_min", stats.min_rl_margin);
 
-  if (!exact) {
-    // Clause 3 of the contract: the device trace must also reproduce itself
-    // within the same tolerances across two runs, because the CUDA kernels use
-    // atomic scatter-adds. The first run is the reference of the comparison.
+  if (BackendName() != "cpu") {
+    // The device determinism clause: two runs of one binary must produce the
+    // same discrete records, because the CUDA kernels use atomic scatter-adds.
     const std::vector<Record> repeat =
         RunTrace(config, shape, tokenizer_path, nullptr);
-    const Fixture first = Fixture::Parse(SerializeTrace(records));
-    const auto again =
-        CompareTraces(repeat, first, /*exact=*/false, "numerics_trace/repeat");
-    g_failures += again.failures;
-    double worst_rel = 0.0;
-    double worst_abs = 0.0;
-    std::string worst_name;
-    for (const nanochat::numerics::GroupStat& group : again.groups) {
-      if (group.count == 0) continue;
-      // The margin groups set the relative tolerance to zero, so a relative
-      // difference carries no meaning for them.
-      if (group.name.find("margin") == std::string::npos &&
-          group.max_rel_diff > worst_rel) {
-        worst_rel = group.max_rel_diff;
-      }
-      if (group.max_abs_diff > worst_abs) {
-        worst_abs = group.max_abs_diff;
-        worst_name = group.name;
-      }
-    }
-    std::printf(
-        "numerics_trace: repeat: compared %d records, skipped %d, worst "
-        "relative %.3g, worst absolute %.3g (%s)\n",
-        again.compared, again.skipped, worst_rel, worst_abs,
-        worst_name.empty() ? "none" : worst_name.c_str());
+    g_failures += CompareRuns(records, repeat, "numerics_trace/repeat");
+    std::printf("numerics_trace: repeat: compared %d records\n",
+                static_cast<int>(repeat.size()));
   }
 
   if (g_failures == 0) {

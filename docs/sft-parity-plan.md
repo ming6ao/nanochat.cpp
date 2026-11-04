@@ -32,11 +32,11 @@ The post-training rows are `P4` to `P7`. They cover the SFT data, the SFT
 arithmetic, the SFT loop, and the SFT validation. No other row covers those
 items.
 
-`//tests:numerics_trace_test` records an SFT masked loss and an SFT gradient
-norm (`tests/numerics_trace.cc`). That trace is a cross-target regression
-guard. Its golden file comes from the C++ emitter, not from torch. It uses a
-synthetic mask and takes no optimizer step. It gives no reference evidence for
-SFT arithmetic.
+`//tests:numerics_trace_test` is a cross-target regression guard on the exact
+class: configuration, inputs, token ids, masks, greedy identifiers, argmax, and
+valid-target counts. Its fixture comes from the C++ emitter, not from torch.
+It records no floating-point result, so it gives no reference evidence for SFT
+arithmetic. That evidence is `//tests:sft_step_parity_test`.
 
 ## 3. The four rungs
 
@@ -429,12 +429,12 @@ Gate: `tools/nanochat test //python:sft_data_parity_test`, then
    `//tests:sft_step_parity_test` (T0, CPU), `//tests:sft_step_parity_gpu_test`
    (T1, `gpu` and `manual` tags), and `//tests:sft_step_parity` (T2,
    standalone binary).
-4. Extend `tests/numerics_trace.cc` with one SFT optimizer step, and record
-   the post-step loss and gradient norm. Regenerate
-   `tests/data/numerics_golden_10l.bin` and
-   `tests/data/numerics_golden_10l_fp8.bin` with
-   `//tests:numerics_trace_emit`. Update the tolerance table in
-   `docs/numerics-integration.md` section 4.
+4. Extend `tests/sft_step_parity_test.cc` with one SFT optimizer step, and
+   record the post-step loss and the gradient norm in its committed
+   trajectory. The numeric trace does not carry floating-point records
+   ([numerics-integration.md](numerics-integration.md) section 4), so this
+   arithmetic belongs to the parity test that already owns the SFT loss, the
+   gradient norm, the parameter L2, the learning rate, and the momentum.
 
 Gate: `tools/nanochat test //tests:sft_step_parity_test` at T0, then
 `tools/nanochat test --gpu //tests:sft_step_parity_gpu_test` at T1, then
@@ -545,30 +545,21 @@ Use these names until Phase G closes:
 
 ### Risks this campaign carries
 
-These three are open when the campaign ends. Each one names the fix, not just
-the problem.
+Items 2 and 3 are open when the campaign ends. Each one names the fix, not just
+the problem. Item 1 closed in this release.
 
-1. **The numerics-trace extension is deferred.** Phase D item 4 asked for one
-   SFT optimizer step in `tests/numerics_trace.cc`, with the post-step loss and
-   gradient norm. The extension is not in the tree. The reason is that the
-   committed golden is host-pinned: `tests/data/numerics_golden_10l.bin` is
-   mirrored under `models/nanochat-default/fixtures/`, and
-   `//tests:model_isolation_test` pins the digest of that manifest. This host
-   reproduces the floats but not the recorded hashes, so a local regeneration
-   would re-pin the trace to this machine. The fix is one reference-builder run
-   that extends the trace and updates the golden, the mirror, and the manifest
-   in the same change. Until then `docs/numerics-integration.md` section 4 keeps
-   the SFT row at the masked loss and the gradient norm, and the SFT arithmetic
-   evidence is `//tests:sft_step_parity_test`. `//tests:numerics_trace_test`
-   already fails on the base commit for this reason alone (863 records, and the
-   greedy identifiers among them). The target carries the `manual` tag, so the
-   default `tools/nanochat test` loop does not run it. One later change widens
-   the same gap: the seam-3 pointwise codes replace the host staging of
-   `src/ops.cc`, so the `qk_prep` composition now reduces through `RowReduce`
-   rather than a pair-ordered host loop. On this host that moves the plain leg
-   from 863 to 859 differing records and leaves the `--config=sim` leg at 762,
-   so the same reference-builder run has to re-emit both goldens; a local
-   regeneration would only re-pin the trace here.
+1. **The numerics-trace extension moved to the SFT parity test. Closed.**
+   Phase D item 4 asked for one SFT optimizer step in `tests/numerics_trace.cc`.
+   That is not where it belongs. The trace now carries the exact class only:
+   configuration, inputs, token ids, masks, greedy identifiers, argmax, and
+   valid-target counts. A post-step loss and a gradient norm are
+   floating-point results, and the trace applies no tolerance. The step lands
+   in `//tests:sft_step_parity_test` instead, beside the loss, the gradient
+   norm, the parameter L2, the learning rate, and the momentum it already
+   compares. The old blocker is gone with the tolerance table: the trace needs
+   no reference-builder run, because every record it carries is an integer or a
+   fixed constant. See [numerics-integration.md](numerics-integration.md)
+   sections 4 and 5.
 2. **The base fixture records the wrong run config.**
    `tests/data/sft_base_fixture.ckpt` holds the section 5.5 tiny model in its
    tensors, but its metadata block is the Python writer's default run facts (12
