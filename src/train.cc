@@ -811,6 +811,16 @@ float TrainLoop::Run() {
                           const std::chrono::steady_clock::time_point& b) {
       return std::chrono::duration<double>(b - a).count();
     };
+    // The phase split is read once per logged step, so the boundary drains run
+    // on that step only. A drain empties the whole queue, so one at every
+    // boundary of every step stops the host running ahead into the next step's
+    // data load. On any other step the marks still accumulate, and they measure
+    // host issue time that nothing reads.
+    const bool logging_step =
+        config_.log_every > 0 && step % config_.log_every == 0;
+    const auto phase_end = [logging_step] {
+      if (logging_step) kernels::Synchronize();
+    };
     double data_s = 0.0;
     double forward_s = 0.0;
     double backward_s = 0.0;
@@ -819,27 +829,32 @@ float TrainLoop::Run() {
 
     const auto optim_start = mark();
     model_->ZeroGrad();
-    kernels::Synchronize();
+    phase_end();
     optim_s += since(optim_start, mark());
 
     float loss_sum = 0.0f;
+    int micro_batches = 0;
     for (int micro = 0; micro < accum; ++micro) {
       const auto data_start = mark();
       if (!train_loader_->Next(tokens_.data(), targets_.data())) {
         train_loader_->Reset();
         if (!train_loader_->Next(tokens_.data(), targets_.data())) break;
       }
+      micro_batches = micro + 1;
       const auto data_end = mark();
       data_s += since(data_start, data_end);
 
-      loss_sum +=
-          model_->ForwardLoss(tokens_.data(), targets_.data(), batch, seq);
-      kernels::Synchronize();
+      // The loss stays on the device: this micro-batch's mean adds to a device
+      // total and the call empties no queue. The first micro-batch replaces the
+      // previous step's total.
+      model_->ForwardLossAccumulate(tokens_.data(), targets_.data(), batch, seq,
+                                    micro > 0);
+      phase_end();
       const auto forward_end = mark();
       forward_s += since(data_end, forward_end);
 
       model_->BackwardAccumulate(backward_scale);
-      kernels::Synchronize();
+      phase_end();
       const auto backward_end = mark();
       backward_s += since(forward_end, backward_end);
     }
@@ -852,9 +867,17 @@ float TrainLoop::Run() {
     sync_s += since(sync_start, sync_end);
 
     optimizer_->Step(step);
-    kernels::Synchronize();
+    phase_end();
     const auto optim_end = mark();
     optim_s += since(sync_end, optim_end);
+
+    // The one read of the loss, and only a step that records it takes it. The
+    // read empties the queue, so a step that does not log pays neither. The
+    // last step reads it for the run summary.
+    if (micro_batches > 0 && (logging_step || step == config_.num_iterations)) {
+      loss_sum = model_->ConsumeLossSum();
+      last_loss_ = loss_sum * inv_accum;
+    }
 
     const float loss = loss_sum * inv_accum;
 
@@ -867,7 +890,6 @@ float TrainLoop::Run() {
             ? static_cast<double>(tokens_per_step) / train_seconds
             : 0.0;
 
-    last_loss_ = loss;
     last_step_ = step;
 
     // Evaluation runs before the step is logged, so its milliseconds ride in
@@ -883,7 +905,7 @@ float TrainLoop::Run() {
                     std::to_string(bpb));
     }
 
-    if (config_.log_every > 0 && step % config_.log_every == 0) {
+    if (logging_step) {
       LogRecord record;
       record.step = step;
       record.loss = loss;

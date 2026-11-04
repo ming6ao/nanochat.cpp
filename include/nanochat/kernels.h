@@ -11,7 +11,7 @@
 // vendor-free: it never includes a CUDA/HIP header, pointers are always
 // `ComputeType*`, and device streams are opaque. See docs/kernels.md.
 //
-// Seam version: 3. The version lives in this header comment rather than in one
+// Seam version: 4. The version lives in this header comment rather than in one
 // symbol (docs/model-and-device-bringup.md section 10.3), because a backend
 // implements the header as one contract: it is bumped once per change set,
 // under the evolution rules in section 18 of the same document, and a bring-up
@@ -32,6 +32,11 @@
 //      `qk_prep` composition can rotate on the device and so a composition can
 //      add a scalar without uploading a constant vector; both were the last
 //      host staging in `src/ops.cc`.
+//   4  adds `SumFp32` and turns `SmearParams::lambda` into a `ScalarArg`. Both
+//      close the last blocking host traffic of a training step: the per-row
+//      losses sum on the device, and the smear reads its coefficient where the
+//      optimizer writes it. No pointer changes type, no entry point moves, and
+//      no composition's arithmetic changes.
 // One bump covers one change set, however many symbols that set adds. A worker
 // who later wants a second header edit reports it instead of making it.
 //
@@ -570,6 +575,14 @@ void GradNorm(const float* const* grads, const int* counts, int num_spans,
 void ScalarDot(const ComputeType* a, const ComputeType* b, int n, float* out,
                float scale, bool accumulate);
 
+// Reduces the sum of the fp32 buffer `src[0..n)` into the single-element buffer
+// `out`: `out = scale * sum`, or `out += scale * sum` when `accumulate`. The
+// accumulation runs in double, and the operand is `float` in every build, which
+// is why this exists beside `ScalarDot` and `SpanReduce` rather than using
+// them: the per-row training losses are fp32 in a bf16 build too.
+void SumFp32(const float* src, int n, float* out, double scale,
+             bool accumulate);
+
 // ResFormer value gate. For each row and key/value head,
 //   gate = 3 * sigmoid(dot(h[row, :12], gate_w[kvh, :]))
 //   v[row, kvh, :] += gate * ve[row, kvh, :]
@@ -606,7 +619,10 @@ struct SmearParams {
   int seq = 0;
   int hidden = 0;
   int channels = 0;  // leading channels of a row that feed the gate
-  float lambda = 0.0f;
+  // A host value and a device view, the pair `PointwiseParams` carries. A
+  // training step passes `dev`, so the update kernel and the smear read the
+  // same memory and no device-to-host copy stands between them.
+  ScalarArg lambda{0.0f};
   int rows() const { return batch * seq; }
 };
 

@@ -226,17 +226,19 @@ class NanochatOptimizer final : public Optimizer {
       ScatterStacked(group);
     }
 
-    // The one host read of the step: the pre-clip norm, for the logger. It
-    // lands after every update kernel, so it drains a finished step rather
-    // than stalling a pipeline.
-    float norm = 0.0f;
-    if (grad_scale_dev != nullptr) {
-      kernels::Memcpy(&norm, norm_dev_, sizeof(norm), CopyDir::kDeviceToHost);
-    }
-    grad_norm_ = norm;
+    // The pre-clip norm stays on the device; the accessor copies it back. A
+    // caller that does not read it therefore pays neither a copy nor a drain.
+    norm_stale_ = grad_scale_dev != nullptr;
   }
 
-  float GradNorm() const override { return grad_norm_; }
+  float GradNorm() const override {
+    if (norm_stale_) {
+      kernels::Memcpy(&grad_norm_, norm_dev_, sizeof(grad_norm_),
+                      CopyDir::kDeviceToHost);
+      norm_stale_ = false;
+    }
+    return grad_norm_;
+  }
 
   // Overrides the learning-rate multiplier of the next `Step` calls, or returns
   // to the scheduler's own curve for a negative value (design decision D1). The
@@ -657,7 +659,10 @@ class NanochatOptimizer final : public Optimizer {
   GradientType* muon_stack_ = nullptr;
   float* norm_dev_ = nullptr;
   std::int64_t total_count_ = 0;
-  float grad_norm_ = 0.0f;
+  // The norm, and whether the device holds a newer one. The accessor is
+  // `const`, so both members are `mutable`.
+  mutable float grad_norm_ = 0.0f;
+  mutable bool norm_stale_ = false;
   // A negative value means "no override": `Step` uses `LrMultiplier(step)`.
   float lr_multiplier_override_ = -1.0f;
 };

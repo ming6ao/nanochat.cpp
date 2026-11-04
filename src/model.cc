@@ -257,12 +257,26 @@ TrainModel::TrainModel(const ModelSpec& spec, const Config& config,
     const Param& p = AddParam("smear_lambda", 1, 0, 0);
     smear_lambda_ = p.value;
     smear_lambda_grad_ = p.grad;
+    smear_lambda_f32_ = ScalarSource(p);
   }
   {
     const Param& p = AddParam("backout_lambda", 1, 0, 0);
     backout_lambda_ = p.value;
     backout_lambda_grad_ = p.grad;
+    backout_lambda_f32_ = ScalarSource(p);
+    // The pointwise family has no negation code, and both backout legs
+    // multiply by `-backout_lambda`. One element of device memory holds that
+    // value, so neither leg reads the host: one 1-element pointwise call per
+    // forward refreshes it, in place of two blocking device-to-host copies per
+    // step (docs/scalar-arguments.md section 2).
+    neg_backout_dev_ = static_cast<float*>(kernels::Alloc(sizeof(float)));
+    kernels::Memset(neg_backout_dev_, 0, sizeof(float));
   }
+  // The running total of the per-micro-batch means, and the one buffer
+  // `SumFp32` folds each micro-batch into (`docs/scalar-arguments.md` section
+  // 15). Four bytes that a step reads once instead of one row per micro-batch.
+  loss_sum_dev_ = static_cast<float*>(kernels::Alloc(sizeof(float)));
+  kernels::Memset(loss_sum_dev_, 0, sizeof(float));
 
   for (int i = 0; i < layers; ++i) {
     ops::BlockWeights& w = lweights_[i];
@@ -332,6 +346,8 @@ TrainModel::~TrainModel() {
   }
   if (cos_table_dev_ != nullptr) kernels::Free(cos_table_dev_);
   if (sin_table_dev_ != nullptr) kernels::Free(sin_table_dev_);
+  if (neg_backout_dev_ != nullptr) kernels::Free(neg_backout_dev_);
+  if (loss_sum_dev_ != nullptr) kernels::Free(loss_sum_dev_);
 }
 
 TrainModel::Param& TrainModel::AddParam(const std::string& name,
@@ -802,6 +818,41 @@ void TrainModel::BuildEvalWorkspace(int batch, int seq) {
 float TrainModel::ForwardLoss(const int* tokens, const int* targets, int batch,
                               int seq) {
   if (batch <= 0 || seq <= 0) return 0.0f;
+  const std::int64_t rows = static_cast<std::int64_t>(batch) * seq;
+  const std::int64_t valid = PrepareLoss(tokens, targets, batch, seq);
+  const float* losses = ActiveLosses();
+  losses_host_.resize(static_cast<std::size_t>(rows));
+  kernels::Memcpy(losses_host_.data(), losses,
+                  static_cast<std::size_t>(rows) * sizeof(float),
+                  CopyDir::kDeviceToHost);
+  double total = 0.0;
+  for (std::int64_t m = 0; m < rows; ++m) {
+    total += static_cast<double>(losses_host_[static_cast<std::size_t>(m)]);
+  }
+  if (valid == 0) return 0.0f;
+  return static_cast<float>(total / static_cast<double>(valid));
+}
+
+void TrainModel::ForwardLossAccumulate(const int* tokens, const int* targets,
+                                       int batch, int seq, bool accumulate) {
+  if (batch <= 0 || seq <= 0) return;
+  const std::int64_t rows = static_cast<std::int64_t>(batch) * seq;
+  const std::int64_t valid = PrepareLoss(tokens, targets, batch, seq);
+  // A micro-batch with no valid target contributes nothing, because the
+  // classifier writes a zero for an ignored row. A divisor of one keeps the
+  // accumulator's arithmetic valid and still clears a previous total.
+  const std::int64_t divisor = valid > 0 ? valid : 1;
+  ops::LossSumForward(ActiveLosses(), rows, divisor, accumulate, loss_sum_dev_);
+}
+
+float TrainModel::ConsumeLossSum() {
+  float value = 0.0f;
+  kernels::Memcpy(&value, loss_sum_dev_, sizeof(value), CopyDir::kDeviceToHost);
+  return value;
+}
+
+std::int64_t TrainModel::PrepareLoss(const int* tokens, const int* targets,
+                                     int batch, int seq) {
   const bool save_for_backward = grad_enabled_;
   if (save_for_backward) {
     if (batch != batch_ || seq != seq_ || workspace_.bytes_reserved() == 0) {
@@ -822,23 +873,12 @@ float TrainModel::ForwardLoss(const int* tokens, const int* targets, int batch,
 
   RunForward(tokens, targets, batch, seq, save_for_backward);
 
-  const std::int64_t rows = static_cast<std::int64_t>(batch) * seq;
   // The reference reduces with `F.cross_entropy(..., ignore_index=-1)` and the
   // default mean, which divides by the non-ignored targets. Pretraining has no
   // ignored target, so the divisor is `rows` there and the numbers are
-  // unchanged (docs/post-training.md section 2.1).
-  const std::int64_t valid = CountValidTargets(targets, rows);
-  const float* losses = ActiveLosses();
-  losses_host_.resize(static_cast<std::size_t>(rows));
-  kernels::Memcpy(losses_host_.data(), losses,
-                  static_cast<std::size_t>(rows) * sizeof(float),
-                  CopyDir::kDeviceToHost);
-  double total = 0.0;
-  for (std::int64_t m = 0; m < rows; ++m) {
-    total += static_cast<double>(losses_host_[static_cast<std::size_t>(m)]);
-  }
-  if (valid == 0) return 0.0f;
-  return static_cast<float>(total / static_cast<double>(valid));
+  // unchanged (docs/post-training.md section 2.1). The count is a host scan of
+  // the ids the caller handed in; it never reaches the device.
+  return CountValidTargets(targets, static_cast<std::int64_t>(batch) * seq);
 }
 
 void TrainModel::RunForward(const int* tokens, const int* targets, int batch,
@@ -848,6 +888,14 @@ void TrainModel::RunForward(const int* tokens, const int* targets, int batch,
   const int padded_vocab = config_.padded_vocab_size;
   const int vocab = config_.vocab_size;
   const std::int64_t rows = static_cast<std::int64_t>(batch) * seq;
+
+  // Refresh the negated backout coefficient before either backout leg reads it.
+  // One fp32 element replaces the blocking host read the forward and the
+  // backward each made, and the coefficient cannot change inside a micro-batch.
+  // It goes through the fp32 entry because a device scalar the kernels read is
+  // fp32, and the pointwise family writes `ComputeType`.
+  kernels::SumFp32(backout_lambda_f32_, 1, neg_backout_dev_, -1.0,
+                   /*accumulate=*/false);
 
   // Select the arena set. The training set saves every layer for Backward; the
   // evaluation set reuses one block.
@@ -868,7 +916,7 @@ void TrainModel::RunForward(const int* tokens, const int* targets, int batch,
                             emb_raw);
   ops::RmsNormForward(rows, hidden, kRmsEps, emb_raw, emb_norm, rstd_emb);
   ops::SmearForward(batch, seq, hidden, emb_norm, smear_gate_,
-                    ReadHost(smear_lambda_), x0, smear_sig);
+                    ops::DevScalar(smear_lambda_f32_), x0, smear_sig);
 
   ops::BlockShape shape;
   shape.batch = batch;
@@ -907,8 +955,8 @@ void TrainModel::RunForward(const int* tokens, const int* targets, int batch,
   }
 
   // Mid-layer backout, final norm, classifier, softcap, cross-entropy.
-  ops::BackoutForward(x, x_backout, ReadHost(backout_lambda_), x_final_pre,
-                      rows * hidden);
+  ops::BackoutForward(x, x_backout, ops::DevScalar(neg_backout_dev_),
+                      x_final_pre, rows * hidden);
   ops::RmsNormForward(rows, hidden, kRmsEps, x_final_pre, x_final_norm,
                       rstd_final);
 
@@ -1054,8 +1102,9 @@ void TrainModel::BackwardInternal(const float* row_weights, float scale,
                        rstd_final_, dx_final_pre_);
 
   // Backout: x_final_pre = x_{L-1} - backout * x_backout.
-  ops::BackoutBackward(dx_final_pre_, x_backout_, ReadHost(backout_lambda_),
-                       dbackout_, backout_lambda_grad_, rows * hidden);
+  ops::BackoutBackward(dx_final_pre_, x_backout_,
+                       ops::DevScalar(neg_backout_dev_), dbackout_,
+                       backout_lambda_grad_, rows * hidden);
 
   // Reverse the blocks. g_a_/g_b_ ping-pong: dcur is the gradient w.r.t. the
   // output of the block about to be differentiated, dnext becomes its input
@@ -1100,7 +1149,7 @@ void TrainModel::BackwardInternal(const float* row_weights, float scale,
   Pw(PointwiseOp::kScaleAdd, static_cast<int>(rows * hidden), dcur, x0_acc_,
      dcur, 1.0f, 1.0f);
   ops::SmearBackward(batch_, seq_, hidden, emb_norm_, smear_gate_, smear_sig_,
-                     ReadHost(smear_lambda_), dcur, smear_gate_grad_,
+                     ops::DevScalar(smear_lambda_f32_), dcur, smear_gate_grad_,
                      smear_lambda_grad_, de_);
   ops::RmsNormBackward(rows, hidden, kRmsEps, emb_raw_, de_, rstd_emb_, demb_);
   kernels::EmbeddingBackward(static_cast<int>(rows), hidden, tokens_.data(),

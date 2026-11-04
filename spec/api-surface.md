@@ -15,8 +15,8 @@ anchors name the file and the line.
 
 | Component | Main files | Lines | Public entry points | Owner |
 |---|---|---|---|---|
-| Contract headers | `include/nanochat/{tensor,kernels,config,model,model_spec,plan,capi}.h` | 2,289 | 30 seam symbols, 1 model factory, 68 C functions | Architect |
-| CPU backend | `backends/cpu/kernels.cc` | 1,839 | 30 seam symbols + 2 mesh symbols | Runtime |
+| Contract headers | `include/nanochat/{tensor,kernels,config,model,model_spec,plan,capi}.h` | 2,289 | 31 seam symbols, 1 model factory, 68 C functions | Architect |
+| CPU backend | `backends/cpu/kernels.cc` | 1,839 | 31 seam symbols + 2 mesh symbols | Runtime |
 | CUDA backend | `backends/cuda/{device,gemm,row_reduce,span_reduce,nccl_sync}.cu`, `kernels/*.cu` (11 families), `collective/` | — | the same 30 + 2, plus 1 grad-sync factory | Kernel agents |
 | Capability data | `backends/{cpu,cuda}/caps.json`, `src/device_profile.cc`, `src/capability_names.*`, `backends/*/caps_names.*` | — | `FindDeviceProfile`, `CapsFromProfile`, `DeclaredFeatureMask` | Runtime |
 | Engine | `src/model.cc` 1,381, `src/ops.cc` 1,568, `src/generate.cc` 666, `src/optim.cc` 839, `src/model_impl.h`, `src/workspace.h` | 4,454 | 2 `Model::Create`, 12 virtuals, 7 free functions, 23 `ops::` functions | Workflow, Optimizer |
@@ -81,9 +81,9 @@ defines `config_setting` values for `backend=cpu` and `backend=cuda`.
 `src/BUILD.bazel` selects the backend archive. Two backends cannot link into
 one binary, because both define the same strong symbols.
 
-A device backend implements 33 symbols: the 30 seam functions,
+A device backend implements 34 symbols: the 31 seam functions,
 `EnumerateDevices` and `SelectDevice` from `mesh.h`, and `CreateGradientSync`
-from `distributed.h`. The CPU backend implements 32, because it takes
+from `distributed.h`. The CPU backend implements 33, because it takes
 `CreateGradientSync` from `src/distributed.cc:141`. CUDA overrides that factory
 in `backends/cuda/nccl_sync.cu:144`. There is no partial backend. A missing
 symbol fails the link.

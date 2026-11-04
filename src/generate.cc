@@ -387,8 +387,10 @@ void RunInference(const InferenceView& view, const int* tokens, int num_tokens,
     x = a.x_out;
   }
 
-  // Backout, final norm, classifier.
-  ops::BackoutForward(x, ws.x_backout, view.backout_lambda(model),
+  // Backout, final norm, classifier. The op takes the negated coefficient:
+  // the pointwise family has no negation code, so a caller that holds the host
+  // value negates it here.
+  ops::BackoutForward(x, ws.x_backout, -view.backout_lambda(model),
                       ws.x_final_pre, rows * hidden);
   ops::RmsNormForward(rows, hidden, kRmsEps, ws.x_final_pre, ws.x_final_norm,
                       ws.rstd_final);

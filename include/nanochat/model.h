@@ -76,6 +76,19 @@ class Model {
   virtual float ForwardLoss(const int* tokens, const int* targets, int batch,
                             int seq) = 0;
 
+  // The same forward as `ForwardLoss`, with the mean left on the device: it is
+  // added to a device accumulator, so the call copies nothing back and empties
+  // no queue. `accumulate` is false for a step's first micro-batch, which
+  // replaces the previous total, so a loop that never reads the loss pays
+  // nothing. Read it with `ConsumeLossSum`.
+  virtual void ForwardLossAccumulate(const int* tokens, const int* targets,
+                                     int batch, int seq, bool accumulate) = 0;
+
+  // The sum of the per-micro-batch means accumulated since the last
+  // `accumulate = false` call: one four-byte read, so a caller that averages
+  // over `micro_batches` divides by that count.
+  virtual float ConsumeLossSum() = 0;
+
   // Runs the hand-written backward pass over the saved activations.
   virtual void Backward() = 0;
 

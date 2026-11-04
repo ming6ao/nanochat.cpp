@@ -320,14 +320,16 @@ tree.
 | Read | After this change |
 |---|---|
 | `resid_lambdas[i]`, `x0_lambdas[i]` | **gone**, 32 synchronous copies per step to zero |
-| `smear_lambda` | stays. `SmearForward` and `SmearBackward` are host implementations that stage the whole activation, so they need a host value until Smear moves to the device |
-| `backout_lambda` | stays, until `BackoutForward` stops staging |
+| `smear_lambda` | **gone** once `SmearParams` carries `ScalarArg lambda`, section 15 |
+| `backout_lambda` | **gone** once the two backout legs take a `ScalarArg`, section 15 |
 | the gradient clip scale | **no traffic change.** `R2-D5` already keeps it on the device; rows S.1 to S.4 change its form and delete two duplicated helpers |
 
-The Smear move is its own row, and it needs a second seam decision: a
+The Smear move is its own row, and it needed a second seam decision: a
 pointwise code with a row-shifted operand, or a dedicated family. Section 9 of
 [performance.md](performance.md) records it as
-the next candidate with a ceiling of 0.2726.
+the next candidate with a ceiling of 0.2726. It landed as a family of its own
+(`backends/cuda/kernels/smear.cu`), and section 15 below closes the two scalar
+reads it left behind.
 
 ## 9. The numerics: a precision change, and the measurement that found it
 
@@ -463,7 +465,8 @@ Measured on `base` on the H100, two untraced runs of 200 steps:
 The step fell 2.1 percent and the MFU rose 1.4 percent. The two points overlap,
 so the loop recorded the pair as reverted, and the 2.1 percent is inside the
 noise of this card. Four of the eight synchronous scalar copies left the step:
-`smear_lambda` and `backout_lambda` remain, as section 8 predicted.
+`smear_lambda` and `backout_lambda` remained at that point, as section 8
+predicted. Section 15 closes both.
 
 The operator kept the change anyway, and the numbers do not express why. It is
 the seam that the Smear work needs. It deletes two duplicated fields and two
@@ -471,3 +474,42 @@ duplicated helpers. And the precision change is the more correct behaviour.
 
 `profiles/pgo/base-h100/iter-02/DECISION.md` records that decision beside the
 measurement that argues against it.
+
+## 15. The last two coefficients, the loss, and the boundary drains
+
+Section 8 left `smear_lambda` and `backout_lambda` as blocking reads. Both are
+gone, the per-row loss no longer leaves the device, and a step that does not log
+drains nothing.
+
+- **The smear coefficient.** `SmearParams::lambda` is a `ScalarArg`, the pair
+  `PointwiseParams` carries. The CPU reference, the CUDA family, and the host
+  test reference read it through `host()` once, in the prologue.
+  `src/model.cc` passes `ops::DevScalar(smear_lambda_f32_)`, so two reads left
+  the step and no launch joined it.
+- **The backout coefficient.** Both backout legs multiply by `-backout_lambda`,
+  and the pointwise family has no negation code, so `TrainModel` keeps the
+  negated value in one fp32 device element, `neg_backout_dev_`. `RunForward`
+  refreshes it through `kernels::SumFp32` with a `scale` of minus one. That goes
+  through the fp32 entry because a device scalar a kernel reads is fp32, and the
+  pointwise family writes `ComputeType`.
+- **The loss.** `ForwardLoss` returns a host float, so a step copied one row per
+  token position back and drained the queue to read it. The loop now calls
+  `ForwardLossAccumulate`, which adds the micro-batch mean to a device total
+  through `kernels::SumFp32`, and `ConsumeLossSum`, which reads four bytes on a
+  step that records the loss. The sum accumulates in double, so it agrees with
+  the host sum the tree used before.
+- **The drains.** `src/train.cc` called `kernels::Synchronize()` at each phase
+  boundary of every step, for the log line's phase split. Those boundaries now
+  run only on a step that logs, and `Optimizer::GradNorm()` reads the gradient
+  norm on demand instead of at the end of every `Step`.
+
+Two host round trips remain in a base step: the staged token and target indexes,
+because the seam takes host pointers, and the checkpoint records, which a save
+reaches on `save_every` only.
+
+**The measurement.** On one H100, the `big` profile, bf16, 60 steps and two runs
+each, `profiles/pgo-big/base-h100` holds the pair: 229.93 ms per step and 18.161
+percent Model FLOPs Utilization before, 229.86 ms and 18.167 percent after. The
+two points overlap, so the change is not visible at that shape: its device work
+is 230 ms, and the host traffic this section removes was under 1 ms. The value is
+the mechanism, and a step at the 31.9 ms shape would show it.

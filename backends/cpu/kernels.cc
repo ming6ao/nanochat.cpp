@@ -1877,6 +1877,15 @@ void ScalarDot(const ComputeType* a, const ComputeType* b, int n, float* out,
   out[0] = accumulate ? out[0] + value : value;
 }
 
+void SumFp32(const float* src, int n, float* out, double scale,
+             bool accumulate) {
+  if (n <= 0 || src == nullptr || out == nullptr) return;
+  double sum = 0.0;
+  for (int i = 0; i < n; ++i) sum += static_cast<double>(src[i]);
+  const float value = static_cast<float>(scale * sum);
+  out[0] = accumulate ? out[0] + value : value;
+}
+
 void ValueGateForward(int rows, int hidden, int num_kv_heads, int head_dim,
                       const ComputeType* h, const ComputeType* ve,
                       const ComputeType* gate_w, ComputeType* v,
@@ -1953,6 +1962,9 @@ void SmearForward(const SmearParams& params, const ComputeType* emb_norm,
   if (params.hidden < params.channels || params.channels <= 0) return;
   const std::int64_t rows = params.rows();
   const std::int64_t hidden = params.hidden;
+  // Resolved once, outside the row loop: the coefficient is either a host
+  // scalar or a device view, and `host()` reads `*dev` when it is the latter.
+  const float lambda = params.lambda.host();
   for (std::int64_t row = 0; row < rows; ++row) {
     const std::int64_t base = row * hidden;
     const bool first = row % params.seq == 0;
@@ -1964,7 +1976,7 @@ void SmearForward(const SmearParams& params, const ComputeType* emb_norm,
     }
     const float s = first ? 0.0f : 1.0f / (1.0f + std::exp(-pre));
     if (sig != nullptr) sig[row] = s;
-    const float gate = params.lambda * s;
+    const float gate = lambda * s;
     for (std::int64_t j = 0; j < hidden; ++j) {
       const float previous =
           first ? 0.0f : AsFloat(emb_norm[base - hidden + j]);
@@ -1981,6 +1993,7 @@ void SmearBackward(const SmearParams& params, const ComputeType* emb_norm,
   if (params.hidden < params.channels || params.channels <= 0) return;
   const std::int64_t rows = params.rows();
   const std::int64_t hidden = params.hidden;
+  const float lambda = params.lambda.host();
   double dlambda = 0.0;
   for (std::int64_t row = 0; row < rows; ++row) {
     const std::int64_t base = row * hidden;
@@ -1999,7 +2012,7 @@ void SmearBackward(const SmearParams& params, const ComputeType* emb_norm,
       }
       const float dgate_f = static_cast<float>(dgate);
       dlambda += static_cast<double>(dgate_f) * s;
-      const float dpre = dgate_f * params.lambda * s * (1.0f - s);
+      const float dpre = dgate_f * lambda * s * (1.0f - s);
       for (int j = 0; j < params.channels; ++j) {
         gate_w_grad[j] += dpre * AsFloat(emb_norm[base + j]);
         de[base + j] =
@@ -2007,7 +2020,7 @@ void SmearBackward(const SmearParams& params, const ComputeType* emb_norm,
       }
     }
     if (!tail) {
-      const float gate_next = params.lambda * sig[row + 1];
+      const float gate_next = lambda * sig[row + 1];
       for (std::int64_t j = 0; j < hidden; ++j) {
         de[base + j] = ToCompute(AsFloat(de[base + j]) +
                                  gate_next * AsFloat(d_x0[base + hidden + j]));

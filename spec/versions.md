@@ -49,7 +49,7 @@ meet only through [capability_bits.md](capability_bits.md).
 |---|---|---|---|
 | Spec format | 1 | — (no earlier number was ever written) | A reader accepts spec format 1 and refuses any other number with a named error. There is no previous version to accept yet, because `models/nanochat-default/spec.json` is the first file in the format |
 | Capability vocabulary | 1 | — (the boolean fields on `Caps` carried no number) | A backend declares vocabulary 1 in its `caps.json`. A declaration with a number this build does not know is rejected by name, not by guessing |
-| Kernel seam | 3 | 2 | A backend accepts seam 3, seam 2 and seam 1. Seam 3 adds the `kAffine`, `kSigmoid` and `kRotatePair` op codes and the `table`, `heads` and `seq` fields of `PointwiseParams`. Seam 2 added the two reductions and the `PointwiseParams` block. Seam 1 is the numbered header before that |
+| Kernel seam | 4 | 3 | A backend accepts seam 4, seam 3, seam 2 and seam 1. Seam 4 adds `SumFp32` and makes `SmearParams::lambda` a `ScalarArg`. Seam 3 adds the `kAffine`, `kSigmoid` and `kRotatePair` op codes and the `table`, `heads` and `seq` fields of `PointwiseParams`. Seam 2 added the two reductions and the `PointwiseParams` block. Seam 1 is the numbered header before that |
 | Fixture format | 1 | — (version 1 is the only number ever written) | A reader accepts fixture format 1. The first bump makes 1 the previous version and the acceptance set becomes {2, 1} |
 
 ### 2.1 Seam 3: the three op codes that end the host staging
@@ -99,6 +99,25 @@ declares seam 0 after this campaign, so the acceptance set is stated for the
 benefit of an out-of-tree backend and of a downstream fork, exactly as
 [docs/checkpoint-format.md](../docs/checkpoint-format.md) keeps accepting
 `NCHKPT01` version 0 after every in-tree writer moved to version 1.
+
+### 2.2 Seam 4: the loss sum, and the smear coefficient
+
+Seam 4 adds one entry point and changes one field's type. Both close the last
+blocking host traffic of a training step
+([docs/scalar-arguments.md](../docs/scalar-arguments.md) section 15).
+
+- **`SumFp32`.** `out = scale * sum(src[0..n))`, or `out += scale * sum` when
+  `accumulate`, accumulated in double. Its operand is `float` in every build, so
+  `ScalarDot` and `SpanReduce`, whose operands are `ComputeType`, could not
+  serve it. The per-row training losses are `float` in a bf16 build too, and the
+  alternative was a blocking copy of them, once per micro-batch.
+- **`SmearParams::lambda` is a `ScalarArg`.** The field keeps its name and its
+  meaning, and every existing assignment compiles through the converting
+  constructor. A training step now hands the kernel the device buffer the
+  optimizer writes instead of reading the value back first.
+
+Neither change moves a pointer's type or alters a composition's arithmetic. A
+seam-3 backend still resolves, and one without `SumFp32` fails to link.
 
 ## 3. The rules
 

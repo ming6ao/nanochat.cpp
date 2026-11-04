@@ -38,6 +38,9 @@ __device__ double g_grad_norm_sum = 0.0;
 // finalize kernel, so the two reductions cannot interfere.
 __device__ double g_scalar_dot_sum = 0.0;
 
+// Accumulator for SumFp32, kept apart from the other two for the same reason.
+__device__ double g_sum_fp32_sum = 0.0;
+
 // One z index per span. A span narrower than the x grid leaves the surplus
 // blocks with no elements; they still reach the block reduction and contribute
 // zero, which keeps the kernel free of a divergent early exit.
@@ -91,6 +94,27 @@ __global__ void ScalarDotFinalizeKernel(float* __restrict__ out, float scale,
   g_scalar_dot_sum = 0.0;
 }
 
+// Sum of one fp32 buffer, accumulated in double across the grid, then folded
+// into the single-element `out` by the finalize kernel.
+__global__ void SumFp32PartialKernel(int n, const float* __restrict__ src) {
+  double local = 0.0;
+  const int stride = gridDim.x * blockDim.x;
+  for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < n; i += stride) {
+    local += static_cast<double>(src[i]);
+  }
+  const double block_sum = cuda_kernels::BlockReduceSum(local);
+  if (threadIdx.x == 0) atomicAdd(&g_sum_fp32_sum, block_sum);
+}
+
+__global__ void SumFp32FinalizeKernel(float* __restrict__ out, double scale,
+                                      bool accumulate) {
+  if (threadIdx.x != 0 || blockIdx.x != 0) return;
+  const float value = static_cast<float>(scale * g_sum_fp32_sum);
+  out[0] = accumulate ? out[0] + value : value;
+  // Reset for the next invocation; the stream ordering makes this safe.
+  g_sum_fp32_sum = 0.0;
+}
+
 }  // namespace
 
 void GradNorm(const float* const* grads, const int* counts, int num_spans,
@@ -138,6 +162,20 @@ void ScalarDot(const ComputeType* a, const ComputeType* b, int n, float* out,
   cuda_backend::Launch(ScalarDotPartialKernel, dim3(grid), dim3(kThreads), 0, n,
                        a, b);
   cuda_backend::Launch(ScalarDotFinalizeKernel, dim3(1), dim3(1), 0, out, scale,
+                       accumulate);
+}
+
+void SumFp32(const float* src, int n, float* out, double scale,
+             bool accumulate) {
+  if (n <= 0 || src == nullptr || out == nullptr) return;
+  constexpr int kThreads = 256;
+  constexpr int kMaxBlocks = 512;
+  const int blocks = (n + kThreads - 1) / kThreads;
+  const int grid = blocks < kMaxBlocks ? blocks : kMaxBlocks;
+
+  cuda_backend::Launch(SumFp32PartialKernel, dim3(grid), dim3(kThreads), 0, n,
+                       src);
+  cuda_backend::Launch(SumFp32FinalizeKernel, dim3(1), dim3(1), 0, out, scale,
                        accumulate);
 }
 

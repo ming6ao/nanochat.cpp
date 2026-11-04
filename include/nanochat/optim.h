@@ -52,7 +52,9 @@ class Optimizer {
   // Applies one update step; `step` is 1-based and drives the schedules.
   virtual void Step(int step) = 0;
 
-  // Global gradient norm from the most recent step.
+  // Global gradient norm from the most recent step. The value stays on the
+  // device until this accessor is called, so a step whose norm nobody reads
+  // pays no copy and no drain, and a second read is free.
   virtual float GradNorm() const = 0;
 };
 

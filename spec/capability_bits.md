@@ -295,10 +295,11 @@ resolution succeeded or failed.
 - **A model field.** `num_heads`, `window_left`, the softcap constant. A model
   states these in its spec and the planner compares them to the device's bits;
   they are never bits themselves.
-- **`grad_norm` and `scalar_dot`.** Both are compositions with no override bit
-  in vocabulary 1. `docs/model-and-device-bringup.md` §7.3 partitions
-  `GradNorm` and `ScalarDot` as compositions with no fused counterpart, so there
-  is nothing to gate. A backend that wants to fuse either one asks for a bit
+- **`grad_norm`, `scalar_dot` and `sum_fp32`.** All three are compositions with
+  no override bit in vocabulary 1. `docs/model-and-device-bringup.md` §7.3
+  partitions `GradNorm`, `ScalarDot` and `SumFp32` as compositions with no fused
+  counterpart, so there is nothing to gate. A backend that wants to fuse any of
+  them asks for a bit
   through the addition path (a new name here plus the version rise of
   [versions.md](versions.md)); it does not register an override under a bit that
   does not exist, because the planner would never resolve it and the backend

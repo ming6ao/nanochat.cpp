@@ -761,6 +761,23 @@ void RmsNormBackward(std::int64_t rows, std::int64_t dim, float eps,
 }
 
 // ---------------------------------------------------------------------------
+// The training loss, reduced on the device
+// ---------------------------------------------------------------------------
+// One entry, one meaning: add this micro-batch's mean loss to a device scalar.
+// The per-row losses are fp32 in every build, so the fp32 entry serves a bf16
+// build too and the rows never reach the host (`docs/scalar-arguments.md`).
+
+void LossSumForward(const float* losses, std::int64_t rows,
+                    std::int64_t divisor, bool accumulate, float* out) {
+  NANOCHAT_CHECK_KERNEL_PARAMS("reductions", rows >= 0 && divisor >= 0);
+  if (rows <= 0 || divisor <= 0) return;
+  NANOCHAT_CHECK_KERNEL_PARAMS("reductions",
+                               losses != nullptr && out != nullptr);
+  kernels::SumFp32(losses, static_cast<int>(rows), out,
+                   1.0 / static_cast<double>(divisor), accumulate);
+}
+
+// ---------------------------------------------------------------------------
 // QK-norm + RoPE + scale: both legs over primitives. The rotation is
 // `kRotatePair` about the model's two tables, so this composition runs entirely
 // on the device and moves nothing to the host.
@@ -1114,7 +1131,7 @@ void MlpBackward(const ComputeType* h, const ComputeType* c_fc,
 namespace {
 
 kernels::SmearParams SmearParamsOf(std::int64_t batch, std::int64_t seq,
-                                   std::int64_t hidden, float lambda) {
+                                   std::int64_t hidden, ScalarArg lambda) {
   kernels::SmearParams params;
   params.batch = static_cast<int>(batch);
   params.seq = static_cast<int>(seq);
@@ -1128,7 +1145,7 @@ kernels::SmearParams SmearParamsOf(std::int64_t batch, std::int64_t seq,
 
 void SmearForward(std::int64_t batch, std::int64_t seq, std::int64_t hidden,
                   const ComputeType* emb_norm, const ComputeType* gate_w,
-                  float lambda, ComputeType* x0, float* sig) {
+                  ScalarArg lambda, ComputeType* x0, float* sig) {
   if (batch <= 0 || seq <= 0 || hidden <= 0) return;
   NANOCHAT_CHECK_KERNEL_PARAMS("smear", hidden >= kSmearChannels);
   kernels::SmearForward(SmearParamsOf(batch, seq, hidden, lambda), emb_norm,
@@ -1137,7 +1154,7 @@ void SmearForward(std::int64_t batch, std::int64_t seq, std::int64_t hidden,
 
 void SmearBackward(std::int64_t batch, std::int64_t seq, std::int64_t hidden,
                    const ComputeType* emb_norm, const ComputeType* gate_w,
-                   const float* sig, float lambda, const ComputeType* d_x0,
+                   const float* sig, ScalarArg lambda, const ComputeType* d_x0,
                    float* gate_w_grad, float* lambda_grad, ComputeType* de) {
   if (batch <= 0 || seq <= 0 || hidden <= 0) return;
   NANOCHAT_CHECK_KERNEL_PARAMS("smear", hidden >= kSmearChannels);
@@ -1150,21 +1167,23 @@ void SmearBackward(std::int64_t batch, std::int64_t seq, std::int64_t hidden,
 // ---------------------------------------------------------------------------
 
 void BackoutForward(const ComputeType* x, const ComputeType* x_backout,
-                    float lambda, ComputeType* out, std::int64_t n) {
+                    ScalarArg neg_lambda, ComputeType* out, std::int64_t n) {
   if (n <= 0) return;
-  Pw(PointwiseOp::kScaleAdd, static_cast<int>(n), x, x_backout, out, 1.0f,
-     -lambda);
+  PwScalars(PointwiseOp::kScaleAdd, static_cast<int>(n), x, x_backout, out,
+            ScalarArg(1.0f), neg_lambda);
 }
 
 void BackoutBackward(const ComputeType* d_pre, const ComputeType* x_backout,
-                     float lambda, ComputeType* dbackout, float* lambda_grad,
-                     std::int64_t n) {
+                     ScalarArg neg_lambda, ComputeType* dbackout,
+                     float* lambda_grad, std::int64_t n) {
   if (n <= 0) return;
   // The elementwise scale runs through the pointwise family; the scalar dot
   // that the lambda gradient needs is a `SpanReduce` over two ragged lists of
   // one span each, which is the composition `GradNorm` and `ScalarDot` share.
-  Pw(PointwiseOp::kScale, static_cast<int>(n), d_pre, nullptr, dbackout,
-     -lambda);
+  // The reduce's own scale stays a host constant: it is `-1` on every call and
+  // is not the coefficient.
+  PwScalars(PointwiseOp::kScale, static_cast<int>(n), d_pre, nullptr, dbackout,
+            neg_lambda, ScalarArg(0.0f));
   NANOCHAT_CHECK_KERNEL_PARAMS("reductions", d_pre != nullptr &&
                                                  x_backout != nullptr &&
                                                  lambda_grad != nullptr);
@@ -1367,7 +1386,7 @@ void ClassifierBackward(const ClassifierShape& shape, const ComputeType* logits,
 
 // ---------------------------------------------------------------------------
 // Gradient norm
-// ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------//
 // The reduction is `kernels::GradNorm`, the seam's fp32 span entry: it walks
 // the span table on the device, accumulates in double, and writes the norm and
 // the clip scale to device buffers. `GradientType` is fp32 in every build

@@ -34,7 +34,8 @@ The same ``--check`` also runs the two seam inventory checks of
   table with a comment per row rather than a silent rename.
 * **primitive half** -- a ``caps.json`` ``primitives[]`` entry has no symbol in
   ``include/nanochat/kernels.h``, or a primitive-tier seam symbol has no
-  ``primitives[]`` entry. One tier table classifies all thirty seam symbols, so
+  ``primitives[]`` entry. One tier table classifies all thirty-one seam
+  symbols, so
   a symbol added to the seam without a tier row fails here.
 
 Usage::
@@ -237,6 +238,7 @@ SEAM_TIERS: dict[str, tuple[str, str]] = {
     # The two compositions with no fused counterpart and no bit.
     "GradNorm": ("composition", "built from SpanReduce"),
     "ScalarDot": ("composition", "built from SpanReduce"),
+    "SumFp32": ("composition", "the fp32 form of ScalarDot with no second operand"),
 }
 
 #: The `primitives[]` names that do not resolve to one symbol by spelling. The

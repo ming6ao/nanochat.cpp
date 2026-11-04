@@ -38,6 +38,9 @@ class TrainModel final : public Model {
   void InitWeights(std::uint64_t seed) override;
   float ForwardLoss(const int* tokens, const int* targets, int batch,
                     int seq) override;
+  void ForwardLossAccumulate(const int* tokens, const int* targets, int batch,
+                             int seq, bool accumulate) override;
+  float ConsumeLossSum() override;
   void Backward() override;
   void ZeroGrad() override;
   void BackwardAccumulate(float scale) override;
@@ -142,6 +145,12 @@ class TrainModel final : public Model {
   const float* ActiveLosses() const {
     return grad_enabled_ ? losses_ : eval_losses_;
   }
+  // Runs one micro-batch forward under the caller's grad mode and returns the
+  // number of valid target rows. Shared by `ForwardLoss` and
+  // `ForwardLossAccumulate`, which differ only in how the per-row losses leave
+  // the device.
+  std::int64_t PrepareLoss(const int* tokens, const int* targets, int batch,
+                           int seq);
   void BuildRope(int seq);
 
   // The description and the plan, both fixed at construction.
@@ -170,8 +179,18 @@ class TrainModel final : public Model {
   GradientType* smear_gate_grad_ = nullptr;
   ComputeType* smear_lambda_ = nullptr;
   GradientType* smear_lambda_grad_ = nullptr;
+  // The fp32 view of the smear coefficient, for the kernel that reads it on the
+  // device (`docs/scalar-arguments.md`).
+  const float* smear_lambda_f32_ = nullptr;
   ComputeType* backout_lambda_ = nullptr;
   GradientType* backout_lambda_grad_ = nullptr;
+  // The fp32 view of the backout coefficient, which `neg_backout_dev_` is
+  // derived from.
+  const float* backout_lambda_f32_ = nullptr;
+  // `-backout_lambda`, in device memory: the pointwise family has no negation
+  // code and both backout legs multiply by the negated value. `RunForward`
+  // refreshes it before either leg reads it.
+  float* neg_backout_dev_ = nullptr;
 
   // Global activations and gradient scratch, all carved from `workspace_`.
   ComputeType* emb_raw_ = nullptr;
@@ -186,6 +205,8 @@ class TrainModel final : public Model {
   ComputeType* raw_logits_ = nullptr;
   ComputeType* dlogits_ = nullptr;
   float* losses_ = nullptr;
+  // The running total of the per-micro-batch means, in device memory.
+  float* loss_sum_dev_ = nullptr;
   ComputeType* dx_final_norm_ = nullptr;
   ComputeType* dx_final_pre_ = nullptr;
   ComputeType* dbackout_ = nullptr;

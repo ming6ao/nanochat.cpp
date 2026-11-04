@@ -33,7 +33,9 @@ Library-backed (not hand-written kernels):
 
 - `Gemm(mode)` — forward, dgrad, wgrad; cuBLAS on CUDA, reference on CPU.
 
-Helper: `ScalarDot`, a dot product over two buffers.
+Helper: `ScalarDot`, a dot product over two buffers. Helper: `SumFp32`, the
+sum of one fp32 buffer, which is the form the training loss needs because its
+operand is fp32 in a bf16 build too.
 
 Device utilities: `Alloc`, `Free`, `Memcpy(direction)`, `Memset`, `Synchronize`,
 `GetCaps`.
@@ -70,6 +72,7 @@ which this table cites and does not restate.
 | `QkPrepForward`, `QkPrepBackward` | composition, plus fused override | — | `src/ops.cc`; gated by `override_qk_prep` |
 | `ClassifierForward`, `ClassifierBackward` | composition, plus fused override | — | `src/ops.cc`; gated by `override_classifier` |
 | `ValueGateForward`, `ValueGateBackward` | composition, plus fused override | — | `src/ops.cc`; no override bit exists for it yet |
+| `SumFp32` | composition | — | The fp32 form of `ScalarDot` with no second operand; the training loss |
 | `GradNorm` | composition | — | `SpanReduce` across several spans |
 | `ScalarDot` | composition | — | `SpanReduce` over two buffers, or the backend's dot |
 
@@ -303,6 +306,8 @@ void SpanReduce(const SpanReduceParams&, const ComputeType* const* spans,
                 const ComputeType* const* other, float* out);
 void ScalarDot(const ComputeType* a, const ComputeType* b, int n, float* out,
                float scale, bool accumulate);
+void SumFp32(const float* src, int n, float* out, double scale,
+             bool accumulate);
 
 }  // namespace kernels
 }  // namespace nanochat

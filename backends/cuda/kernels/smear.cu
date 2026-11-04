@@ -52,6 +52,9 @@ __global__ void SmearForwardKernel(SmearParams p,
   const bool first = row % p.seq == 0;
   const std::int64_t base = static_cast<std::int64_t>(row) * p.hidden;
   const ComputeType* cur = emb_norm + base;
+  // Resolved once per thread, before its loop: the coefficient is a host value
+  // or a device view, and `host()` loads `*dev` when it is the latter.
+  const float lambda = p.lambda.host();
 
   __shared__ float shared_gate;
   if (threadIdx.x == 0) {
@@ -64,7 +67,7 @@ __global__ void SmearForwardKernel(SmearParams p,
     }
     const float s = first ? 0.0f : 1.0f / (1.0f + expf(-pre));
     if (sig != nullptr) sig[row] = s;
-    shared_gate = p.lambda * s;
+    shared_gate = lambda * s;
   }
   __syncthreads();
 
@@ -88,10 +91,11 @@ __global__ void SmearBackwardKernel(
   const bool first = row % p.seq == 0;
   const bool tail = row % p.seq == p.seq - 1;
   const std::int64_t base = static_cast<std::int64_t>(row) * p.hidden;
+  const float lambda = p.lambda.host();
   const float s = first ? 0.0f : sig[row];
   // The gate the NEXT row applies to this row's gradient. Past the end of a
   // sequence there is no such row, and the term is zero.
-  const float gate_next = tail ? 0.0f : p.lambda * sig[row + 1];
+  const float gate_next = tail ? 0.0f : lambda * sig[row + 1];
 
   // de starts as d_x0, then takes this row's gate term and, last, the gate term
   // the following row points back with. Reading the next row, instead of
@@ -123,7 +127,7 @@ __global__ void SmearBackwardKernel(
   } else if (tid == 0) {
     dgate_rows[row] = 0.0f;  // position 0 of a sequence carries no gate
   }
-  const float dpre = first ? 0.0f : dgate_f * p.lambda * s * (1.0f - s);
+  const float dpre = first ? 0.0f : dgate_f * lambda * s * (1.0f - s);
   for (int j = tid; j < p.channels; j += blockDim.x) {
     partials[static_cast<std::int64_t>(row) * stride + j] =
         dpre * AsFloatDev(emb_norm[base + j]);

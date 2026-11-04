@@ -78,6 +78,17 @@ void RmsNormBackward(std::int64_t rows, std::int64_t dim, float eps,
                      const float* rstd, ComputeType* dx);
 
 // ---------------------------------------------------------------------------
+// The training loss, reduced on the device.
+// ---------------------------------------------------------------------------
+
+// Adds `sum(losses) / divisor` to `*out`. The per-row losses are fp32 in every
+// build, and `kernels::SumFp32` is the fp32 entry, so a bf16 build sums them
+// without staging them. `accumulate` is false for the first micro-batch of a
+// step, which replaces the previous total.
+void LossSumForward(const float* losses, std::int64_t rows,
+                    std::int64_t divisor, bool accumulate, float* out);
+
+// ---------------------------------------------------------------------------
 // QK-norm + RoPE + scale, in place on the query/key projections. `cos`/`sin`
 // are device tables; they point at the first rotary row for this call (the
 // decode path offsets them by the KV-cache position).
@@ -175,25 +186,33 @@ void MlpBackward(const ComputeType* h, const ComputeType* c_fc,
 // with a scalar-gated bigram term. Position 0 has no previous token.
 // ---------------------------------------------------------------------------
 
+// `lambda` is a `ScalarArg` so a caller that keeps the coefficient in device
+// memory hands the kernel a pointer to it (`ops::DevScalar`). A caller that
+// holds a plain float passes it unchanged; the conversion is implicit.
 void SmearForward(std::int64_t batch, std::int64_t seq, std::int64_t hidden,
                   const ComputeType* emb_norm, const ComputeType* gate_w,
-                  float lambda, ComputeType* x0, float* sig);
+                  ScalarArg lambda, ComputeType* x0, float* sig);
 
 void SmearBackward(std::int64_t batch, std::int64_t seq, std::int64_t hidden,
                    const ComputeType* emb_norm, const ComputeType* gate_w,
-                   const float* sig, float lambda, const ComputeType* d_x0,
+                   const float* sig, ScalarArg lambda, const ComputeType* d_x0,
                    float* gate_w_grad, float* lambda_grad, ComputeType* de);
 
 // ---------------------------------------------------------------------------
 // Backout: subtract a scaled mid-layer residual before the final norm.
 // ---------------------------------------------------------------------------
 
+// `neg_lambda` is `-backout_lambda`, not the coefficient itself. Both legs
+// multiply by the negated value: `x_final_pre = x + neg_lambda * x_backout` and
+// `dbackout = neg_lambda * d_pre`. The pointwise family has no negation code,
+// so a caller that holds the coefficient in device memory keeps the negated
+// copy beside it; a caller that holds a plain float passes `-lambda`.
 void BackoutForward(const ComputeType* x, const ComputeType* x_backout,
-                    float lambda, ComputeType* out, std::int64_t n);
+                    ScalarArg neg_lambda, ComputeType* out, std::int64_t n);
 
 void BackoutBackward(const ComputeType* d_pre, const ComputeType* x_backout,
-                     float lambda, ComputeType* dbackout, float* lambda_grad,
-                     std::int64_t n);
+                     ScalarArg neg_lambda, ComputeType* dbackout,
+                     float* lambda_grad, std::int64_t n);
 
 // ---------------------------------------------------------------------------
 // Classifier: the loss composition. Logit softcap, cross-entropy over the

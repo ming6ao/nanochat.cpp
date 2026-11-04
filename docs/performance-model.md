@@ -428,9 +428,16 @@ conversion step. The step fields join the training log:
 | The report field | The bound | The measurement it joins |
 |---|---|---|
 | `tokens_per_second` | The tokens of one step over `step_seconds` | The logger's `tok/s` |
-| `forward_seconds`, `backward_seconds`, `optimizer_seconds`, `sync_seconds` | The row bounds summed by phase | `fwd_ms`, `bwd_ms`, `opt_ms`, `sync_ms` |
+| `forward_seconds`, `backward_seconds`, `optimizer_seconds`, `sync_seconds` | The row bounds summed by phase | `fwd_ms`, `bwd_ms`, `opt_ms`, `sync_ms`, on a logged step |
 | `model_mfu` | The model arithmetic over the weighted peak | The logger's `mfu` |
 | `optim_mfu` | The Muon arithmetic over the compute-type peak | The logger's `optim_tflops` over the same peak |
+
+A measured phase is a device attribution, and it costs a queue drain. The
+harness therefore drains at a phase boundary only on a step that logs
+(`log_every`), so a run pays for the split once per `log_every` steps and never
+on the steps between. The record of a logged step is exact. Section 2 of
+[scalar-arguments.md](scalar-arguments.md) holds the arithmetic; section 15.4
+holds the change.
 
 A *row* joins a benchmark row on four identity keys, and both schemas state
 them with the same spelling:

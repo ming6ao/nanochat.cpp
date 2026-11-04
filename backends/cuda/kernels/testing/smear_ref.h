@@ -34,6 +34,7 @@ inline void SmearForwardRef(const SmearParams& p,
                             float* sig) {
   const std::int64_t hidden = p.hidden;
   const std::int64_t rows = p.rows();
+  const float lambda = p.lambda.host();
   for (std::int64_t row = 0; row < rows; ++row) {
     const std::int64_t base = row * hidden;
     const bool first = row % p.seq == 0;
@@ -46,7 +47,7 @@ inline void SmearForwardRef(const SmearParams& p,
     }
     const float s = first ? 0.0f : 1.0f / (1.0f + std::exp(-pre));
     if (sig != nullptr) sig[row] = s;
-    const float gate = p.lambda * s;
+    const float gate = lambda * s;
     for (std::int64_t j = 0; j < hidden; ++j) {
       const float previous =
           first ? 0.0f : emb_norm[static_cast<std::size_t>(base - hidden + j)];
@@ -63,6 +64,7 @@ inline void SmearBackwardRef(const SmearParams& p,
                              float* lambda_grad, float* de) {
   const std::int64_t hidden = p.hidden;
   const std::int64_t rows = p.rows();
+  const float lambda = p.lambda.host();
   double dlambda = 0.0;
   for (std::int64_t row = 0; row < rows; ++row) {
     const std::int64_t base = row * hidden;
@@ -81,14 +83,14 @@ inline void SmearBackwardRef(const SmearParams& p,
       }
       const float dgate_f = static_cast<float>(dgate);
       dlambda += static_cast<double>(dgate_f) * s;
-      const float dpre = dgate_f * p.lambda * s * (1.0f - s);
+      const float dpre = dgate_f * lambda * s * (1.0f - s);
       for (int j = 0; j < p.channels; ++j) {
         gate_w_grad[j] += dpre * emb_norm[static_cast<std::size_t>(base + j)];
         de[base + j] += dpre * gate_w[static_cast<std::size_t>(j)];
       }
     }
     if (!tail) {
-      const float gate_next = p.lambda * sig[row + 1];
+      const float gate_next = lambda * sig[row + 1];
       for (std::int64_t j = 0; j < hidden; ++j) {
         de[base + j] +=
             gate_next * d_x0[static_cast<std::size_t>(base + hidden + j)];
