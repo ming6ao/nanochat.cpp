@@ -1,277 +1,324 @@
 # nanochat.cpp
 
-A minimal, hardware-portable, from-scratch training and inference stack for the
-nanochat architecture, in the spirit of [llm.c](https://github.com/karpathy/llm.c)
-and [llama.cpp](https://github.com/ggml-org/llama.cpp). No PyTorch, no autograd
-engine, no graph compiler. One model definition, swappable hardware backends.
+A from-scratch training and inference stack for the nanochat language model.
+It uses C++ and CUDA. It needs no PyTorch, no autograd engine, and no graph
+compiler. One model definition runs on a CPU reference backend or a CUDA
+backend. The design follows the small, auditable scope of
+[llm.c](https://github.com/karpathy/llm.c) and
+[llama.cpp](https://github.com/ggml-org/llama.cpp).
 
-Status: implemented and in use. The CPU reference backend and the CUDA backend
-run the full training and inference graph.
-
-The oracle and training-parity fixtures pin the model, the backward pass, and
-the AdamW and Muon optimizers against the PyTorch reference. The tree also
-carries data-parallel training on a host reference. It carries a native byte
-pair encoding tokenizer, a parquet reader, a CPU-only CUDA simulator, and a
-Python surface. Supervised fine-tuning and reinforcement learning are partly
-implemented. At the `demo` scale one job file drives both post-training stages
-end to end ([the one-job chain](#the-one-job-chain)).
-[docs/parity.md](docs/parity.md) lists the remaining known differences.
+Status: the CPU and CUDA backends run the full training and inference graph.
+The post-training chain runs end to end at demo scale. The supervised
+fine-tuning (SFT) and reinforcement learning (RL) loops are not finished.
+[docs/parity.md](docs/parity.md) lists the known differences from the
+reference.
 
 ## What this is
 
-- The **nanochat architecture** (RMSNorm, RoPE, QK-norm, GQA, relu^2 MLP,
-  sliding-window attention, value residual, AdamW, and Muon) with no framework
-  dependency.
-- **Hardware portability by replacement**: adding a backend means adding a
-  directory that implements one header. Public API and model definition are
-  stable by default.
-- **Portable across NVIDIA generations.** The project builds and tests on the
-  GPUs that are available, which today are Pascal (GTX 1080 Ti, sm_61) and
-  Turing (T4, sm_75). The deployment target is Hopper and later. A new
-  generation is a backend variant, not a rewrite.
-- **Data-parallel training** behind a host-reference gradient-sync seam. The
-  NCCL transport remains future work.
-- **A native data path**: a byte pair encoding tokenizer and a parquet reader,
-  with on-the-fly tokenization during training.
-- **A CPU-only CUDA simulator** that checks the backend seam and the staged
-  numeric trace without a GPU.
-- **A Python surface** for in-process compute, planning, chat evaluation, and
-  the `tools/nanochat` toolchain.
-- Every operator independently testable against a fixed oracle.
-- A mainline small and readable enough to audit in one sitting.
+- The nanochat architecture: RMSNorm, rotary position embedding (RoPE),
+  QK-norm, grouped-query attention, a relu squared multilayer perceptron,
+  sliding-window attention, and value residual.
+- AdamW and Muon, with a hand-written backward pass and a fixed workspace.
+- Two backends behind one kernel header: a CPU reference and a CUDA
+  implementation. A backend is a build and link decision.
+- Base pretraining from parquet, with a native tokenizer and on-the-fly
+  tokenization.
+- Data-parallel training on one host, behind a gradient-sync seam.
+- Supervised fine-tuning and reinforcement learning, driven by one job file.
+- Batched inference with a key-value (KV) cache, bits-per-byte and chat
+  evaluation, and a CPU-only CUDA simulator.
+- A Python surface for compute, planning, and orchestration.
 
 ## What this is not
 
-- A general-purpose tensor library or model framework.
-- An autograd engine, graph IR, or compiler
-  ([docs/model.md](docs/model.md) § No autograd engine).
-- A home for dynamic shapes or runtime kernel selection.
-- A runtime precision switch. The precision is a build and link decision
+- A general tensor library, a model framework, or a framework dependency.
+- An autograd engine, a graph intermediate representation, or a compiler.
+- A runtime precision switch. Precision is a build and link decision
   ([docs/precision.md](docs/precision.md)).
 - A runtime kernel registry, a virtual dispatch table, or a memory planner.
-- A user of a third-party runtime library beyond CUDA, cuBLAS, and the ZSTD
-  decompressor in `src/parquet/`
-  ([docs/build.md](docs/build.md#dependency-invariants)).
-- A tensor-processing-unit or systolic-array backend. ROCm and Metal would be
-  new `backends/<x>/` packages.
-- Whole-block megakernels or persistent direct-MMA kernels for training
-  ([docs/kernels.md](docs/kernels.md) § Compute strategy).
-- A container runtime or a sandboxing daemon. The sandbox is host control
-  groups plus user namespaces ([docs/sandbox.md](docs/sandbox.md)).
-- A finished post-training product. The supervised fine-tuning and
-  reinforcement learning loops are incomplete.
-- A distributed-training product beyond the host reference. The NCCL transport
-  is not implemented.
+- A user of a third-party runtime beyond CUDA, cuBLAS, and the ZSTD
+  decompressor in `src/parquet/` ([docs/build.md](docs/build.md)).
+- A multi-node trainer. Data parallel today works inside one host, and the
+  NCCL transport is not complete.
+- A finished post-training product.
+- An HTTP inference server or a serving framework.
 
-## Models and devices
+## Requirements
 
-A model is a package under `models/`, described by `spec.json`; a device is a
-package under `backends/`, declared by `caps.json`. Both sides declare against
-the shared vocabulary in `spec/`, and the plan resolves them. A bring-up adds a
-directory and edits no frozen header. See
-[docs/model-and-device-bringup.md](docs/model-and-device-bringup.md) and the
-flagship package in
-[models/nanochat-default](models/nanochat-default/README.md).
+- Linux, or WSL2 on Windows.
+- GCC 12, or a host compiler that CUDA 12.0 supports. Bazel 9.2.0 arrives
+  through Bazelisk.
+- CUDA 12.0 and an NVIDIA card for the CUDA backend.
+- Python 3.10 or newer for the Python surface.
 
-## Install
+The development host is one GTX 1080 Ti (`sm_61`). The tree also targets the
+T4 (`sm_75`) and Hopper (`sm_90`).
 
-The base install is the whole Python surface with no third-party dependency:
-`pip install nanochat-cpp` carries both import packages, `nanochat_cpp` imports
-only the standard library, and `nanochat_cpp_bridge` imports its heavy package
-inside the function that needs it, so the base stays inert until a task adds one
-extra. `nanochat-cpp[hub]` reads a stage from a notebook,
-`nanochat-cpp[reference,nanochat]` produces a parity fixture, and
-`nanochat-cpp[reference,nanochat,hfdata]` builds SFT data from the Hub; the
-`nanochat-cpp-convert` console script converts a reference checkpoint. The
-per-architecture binary wheel that carries the shared library is not published
-yet, so a host that needs the C++ core builds the source tree below, which is
-also the workstation path.
+The Python package lives in `python/`. Run it from the tree with
+`PYTHONPATH=python`. A binary wheel is not published yet.
 
-## Quickstart
+## Build
+
+Use `tools/nanochat` for every build and every run. The binaries refuse to
+start outside it. `tools/nanochat help` lists every command.
 
 ```bash
-# Build everything.
+# CPU reference backend, the default. This builds all targets.
 tools/nanochat build
 
-# Build, then run every CPU test. Each test runs under the resource sandbox.
+# CUDA backend for the current card.
+tools/nanochat build --config=cuda
+
+# A named target: T4.
+tools/nanochat build --config=t4
+
+# One target.
+tools/nanochat build //src:train_main //src:generate_main
+```
+
+The static library and the stage binaries land in `bazel-bin/`. The entry
+point serializes builds, caps the Bazel heap, and applies the host budget.
+[docs/build.md](docs/build.md) gives the layers and the dependency rules.
+
+## Test
+
+```bash
+# Build, then run every CPU test under the resource sandbox.
 tools/nanochat check
 
-# One GPU correctness test; the broker serializes access to the card.
+# All CPU tests. GPU tests carry the `gpu` tag and stay out.
+tools/nanochat test
+
+# One GPU correctness test. The queue serializes access to the card.
 tools/nanochat test --gpu //backends/cuda/kernels:rms_norm_gpu_test
 
-# Derive a training plan in Python and read the two model-derived numbers.
-PYTHONPATH=python python3 -c "import nanochat_cpp as nc; \
-    print(nc.plan.compute_plan(depth=4, seq_len=512, vocab_size=32768, \
-    device_batch_size=2, window_pattern='L', num_iterations=10))"
+# Style gate.
+tools/nanochat lint
+
+# H100 and H200 behaviour without a Hopper card. CPU only.
+tools/nanochat simulate --device h100
 ```
 
-`tools/nanochat help` lists all commands. Training, evaluation, generation, and
-scoring each have a binary: `//src:train_main`, `//src:eval_main`,
-`//src:generate_main`, and `//src:score_main`. The Python packages
-`nanochat_cpp.api`, `nanochat_cpp.plan`, `nanochat_cpp.chat`, and
-`nanochat_cpp.toolchain` drive them in one process
-([docs/python.md](docs/python.md)).
+`T0 CPU` runs the reference kernels, the workflow, and the oracle checks. It
+is fast and parallel, so use it for the inner loop. `T1 GPU` checks one tiny
+shape per kernel. `T2 GPU` runs the full oracle and a small training run. Both
+use the GPU queue. `S0` is the CPU-only simulator for a device that is not on
+this host. [docs/testing.md](docs/testing.md) gives the Definition of Done and
+the gate list.
 
-- [docs/build.md](docs/build.md) — toolchains and flags.
-- [docs/testing.md](docs/testing.md) — the test tiers and Definition of Done.
-- [docs/sandbox.md](docs/sandbox.md) — the resource budgets every job runs
-  under.
+## Train a base model
 
-## The one-job chain
-
-One job file drives post-training end to end: base training, then supervised
-fine-tuning, then reinforcement learning, each stage warm starting from the
-checkpoint the stage before it wrote. The chain is
-[`python/nanochat_cpp/pipeline.py`](python/nanochat_cpp/pipeline.py), the
-committed example job is
-[`notebooks/pipeline_job.json`](notebooks/pipeline_job.json), and the stages are
-the two binaries `//src:sft_main` and `//src:rl_worker`. A run ends in
-`<out_root>/<run_id>/deliver/`, where `out_root` is the job's own value or
-`$NANOCHAT_RUNS_DIR`: `chatrl.ckpt` beside `pipeline_report.json`, the review
-artifact that carries the stage order, the step counts, the loss traces, the
-metadata blocks, the digests, and the host block. The same job runs on three
-kinds of host: this workstation's CPU under the `train` profile, a Colab T4
-that builds from source, and Modal, where two legs run the job, a T4 at fp32
-and then an H100 at bf16, each from its own image;
-[docs/host-portability.md](docs/host-portability.md) section 9 has one row per
-host. `//python:pipeline_test` is the gate of the chain in the default CPU test
-loop and `//python:pipeline_gpu_test` is its CUDA twin
-([docs/post-training.md](docs/post-training.md) Part 2, section 7). Every run is wrapped
-by the entry point, because both stage executables refuse to start outside it:
+The training path reads parquet documents and tokenizes during the run. Train
+the tokenizer on the same corpus first.
 
 ```bash
-# Build the two stage binaries, then run the example job: base@200, sft@200,
-# rl@8, the in-process eval on one batch, and the two files of deliver/.
+tools/nanochat build //src/tokenizer:tok_train_main //src:train_main
+
+# Write an NCTOKEN1 tokenizer.
+tools/nanochat run t0-cpu -- \
+    bazel-bin/src/tokenizer/tok_train_main \
+    --parquet 'data/*.parquet' --vocab-size 32768 \
+    --out tokenizer.nctoken
+
+# Train the base model.
+tools/nanochat train -- \
+    bazel-bin/src/train_main \
+    --train-parquet 'data/*.parquet' \
+    --val-parquet 'data/val-*.parquet' \
+    --tokenizer tokenizer.nctoken \
+    --layers 12 --heads 6 --kv-heads 6 --hidden 768 --seq 2048 \
+    --vocab 32768 --padded-vocab 32768 --window-pattern SSSL \
+    --batch 8 --grad-accum 4 --num-iterations 1000 \
+    --checkpoint base.ckpt
+```
+
+The `--vocab` value must match the tokenizer artifact. Keep the model flags.
+The inference path uses the same flags to build the model before it loads the
+weights.
+
+For two cards on one host, start one process per rank:
+
+```bash
+tools/nanochat dist --nproc-per-node 2 -- \
+    bazel-bin/src/train_main --train-parquet 'data/*.parquet' ...
+```
+
+`dist` sets the rank variables and submits one queue job for the group. See
+[docs/distributed-design.md](docs/distributed-design.md).
+
+## Post-train: SFT and RL
+
+SFT trains on a packed conversation shard. RL samples rollouts and applies a
+weighted policy-gradient backward pass. The Python facades own the chat
+template and the loss mask.
+
+The one-job chain is the easiest entry. A job file names the profile, the step
+counts, and the output root:
+
+```bash
+cat > /tmp/job.json <<'JSON'
+{
+  "run_id": "demo",
+  "profile": "demo",
+  "base_steps": 100,
+  "sft_steps": 100,
+  "rl_steps": 5
+}
+JSON
+
 tools/nanochat build //src:sft_main //src:rl_worker
 PYTHONPATH=python tools/nanochat train -- \
-    python -m nanochat_cpp.pipeline notebooks/pipeline_job.json
+    python3 -m nanochat_cpp.pipeline /tmp/job.json
 ```
 
-The Modal run repeats that job as two legs, and the entry point is what compares
-them. `pipeline_demo` runs the T4 leg first and the H100 leg second, prints one
-document with three keys -- `legs` (each leg's report summary), `comparison`
-(the cross-leg step-time ratio beside the recorded MFU and speed ratio), and
-`gates` (G1 to G3, each pass or fail with the numbers it read) -- and exits
-non-zero when a gate fails. [docs/post-training.md](docs/post-training.md) has
-the chain and the gates, and
-[docs/host-portability.md](docs/host-portability.md) the two legs, the two
-images, and the two precisions.
+The `standard` profile uses a larger model. The `demo` profile keeps the CPU
+loop short. Each stage warm starts from the checkpoint of the stage before it.
+The run ends in `<out_root>/<run_id>/deliver/`. Treat the demo as a wiring
+check, not a quality result.
+
+`out_root` comes from the job, then `NANOCHAT_RUNS_DIR`, then the system
+temporary directory. The report records the stage order, the step counts, the
+loss traces, the metadata, and the file digests. `//src:sft_main` and
+`//src:rl_worker` are the two stage binaries.
+
+[docs/post-training.md](docs/post-training.md) gives the design, and section
+11 gives the state of each piece.
+
+## Inference and deployment
+
+Inference loads a checkpoint and samples tokens. Pass the model flags that
+match the checkpoint. A mismatch fails at load, before a kernel reads a wrong
+shape.
 
 ```bash
-# Both legs of one job. The T4 leg writes <run_id>-t4 first; the H100 leg
-# writes <run_id>-h100 second, so a failed H100 leg leaves the T4 report
-# readable. Both reports land on the nanochat-runs Volume.
-modal run tools/modal/app.py::pipeline_demo
+tools/nanochat build //src:generate_main
+
+tools/nanochat eval -- \
+    bazel-bin/src/generate_main \
+    --model base.ckpt --tokenizer tokenizer.nctoken \
+    --prompt "Name a prime number." \
+    --max-tokens 64 --temperature 0.8 --top-k 50 \
+    --layers 12 --heads 6 --kv-heads 6 --hidden 768 --seq 2048 \
+    --vocab 32768 --padded-vocab 32768 --window-pattern SSSL
 ```
 
-## Examples
+The same path in Python:
 
-`examples/` carries the two smallest programs that use the public API, and
-[docs/examples.md](docs/examples.md) is their reference. Each one is a whole
-workflow in one file, with a tiny config, a fixed seed, and no model file:
+```python
+import nanochat_cpp as nc
+
+config = nc.Config(num_layers=12, num_heads=6, num_kv_heads=6,
+                   hidden_dim=768, seq_len=2048, vocab_size=32768,
+                   window_pattern="SSSL")
+model = nc.Model(config, device="cuda")  # omit `device` on a CPU host
+model.load("base.ckpt")
+tokenizer = nc.tokenizer("tokenizer.nctoken")
+
+prompt = tokenizer.encode(
+    "<|bos|><|user_start|>Name a prime number.<|user_end|>"
+    "<|assistant_start|>")
+rows = model.generate(prompt, max_tokens=64, temperature=0.8, top_k=50)
+print(tokenizer.decode(rows[0].tokens))
+```
+
+The two smallest complete programs are in `examples/`:
 
 ```bash
-# Inference end to end: config, model, generate, print the ids.
 tools/nanochat run t0-cpu -- bazel-bin/examples/hello_world/hello_world
-
-# The checkpoint container: save, load, print the metadata and records.
 tools/nanochat run t0-cpu -- \
     bazel-bin/examples/checkpoint_roundtrip/checkpoint_roundtrip
 ```
 
-Both are `cc_test`s as well as binaries, so `tools/nanochat test` runs them
-with the rest of the CPU tests. [docs/examples.md](docs/examples.md) says what
-each one proves, the one line to change for a larger model, and the line budget
-that keeps them readable.
+### Deployment hosts
 
-## The performance model
+The tree has no HTTP server. It exposes a batch binary, a Python API, and a
+single-client multi-device runtime. Use one of those as the serving surface,
+and choose a host:
 
-The performance model reports the fastest possible step at one shape. It also
-reports the operation that binds and the distance from the measured step. The
-model uses the device peaks and the operation counters. It holds no fitted
-value. It needs no GPU and no broker.
+- **Modal**: `modal run tools/modal/app.py::pipeline_demo` runs one job on a
+  T4 at fp32 and then on an H100 at bf16. `modal deploy tools/modal/app.py`
+  deploys the app. See [docs/host-portability.md](docs/host-portability.md)
+  section 9.
+- **Kaggle**: two T4 cards, `--config=t4`, and the sandbox backend set to
+  `none`. See [docs/host-portability.md](docs/host-portability.md) section 8.
+- **H100 node**: the memory plan, the batch plan, and the launch are in
+  [docs/node-h100.md](docs/node-h100.md).
 
-The `roofline` command builds the estimator and runs it under the CPU sandbox:
+The design in [docs/client-runtime-design.md](docs/client-runtime-design.md)
+covers replicated inference across local devices. The tree delivers part of
+it.
+
+## Evaluate
+
+`eval_main` computes bits per byte on the validation split. Pass the model
+flags that match the checkpoint:
 
 ```bash
-# The depth-24 H100 bound from docs/performance-model.md section 7.2.
-tools/nanochat roofline --device h100 --precision fp8 \
-    --layers 24 --heads 12 --kv-heads 12 --hidden 1536 --seq 2048 \
-    --batch 16 --grad-accum 4 --devices 8 --tokens 5.84e9 --link-gbps 600
-
-# The same report as `nanochat.roofline.v1` JSON.
-tools/nanochat roofline --json --device h100 --precision fp8 \
-    --layers 24 --heads 12 --kv-heads 12 --hidden 1536 --seq 2048 \
-    --batch 16 --grad-accum 4 --devices 8 --tokens 5.84e9 --link-gbps 600
+tools/nanochat eval -- \
+    bazel-bin/src/eval_main \
+    --model base.ckpt \
+    --val-parquet 'data/val-*.parquet' \
+    --tokenizer tokenizer.nctoken \
+    --layers 12 --heads 6 --kv-heads 6 --hidden 768 --seq 2048 \
+    --vocab 32768 --padded-vocab 32768 --window-pattern SSSL \
+    --steps 20
 ```
 
-The output is one row per operation with the compute time, the memory time,
-the bound, and the binding limit. The last line gives the step bound and the
-run bound.
+Chat evaluation runs in Python and covers ARC, MMLU, GSM8K, and ChatCORE.
+Pass the model shape with the `--layers`, `--aspect-ratio`, `--head-dim`,
+`--max-seq-len`, `--vocab`, and `--window-pattern` flags:
 
-- `--device` selects a device profile: `h100`, `h200`, `a100`, `t4`, or
-  `gtx1080ti`.
-- `--precision` selects the modeled precision: `fp32`, `bf16`, `fp8`, or
-  `auto`. The `fp8` tier applies the fp8 conversion rule in
-  [docs/performance-model.md](docs/performance-model.md) section 5.1.
-- `--batch`, `--grad-accum`, and `--devices` set the training plan.
-- `--tokens` sets the run length. The value `0` models one optimizer step.
-- `--link-gbps` sets the per-rank link bandwidth for the gradient sync.
-- The model flags (`--layers`, `--heads`, `--kv-heads`, `--hidden`, `--seq`,
-  `--vocab`, `--padded-vocab`, `--window-pattern`, `--rope-base`) set the
-  architecture.
+```bash
+PYTHONPATH=python tools/nanochat eval -- \
+    python3 -m nanochat_cpp.chat --model deliver/chatrl.ckpt --tasks arc,gsm8k \
+    --layers 12 --aspect-ratio 64 --head-dim 128 \
+    --max-seq-len 2048 --vocab 32768 --window-pattern SSSL
+```
 
-Run `tools/nanochat roofline --help` for the full option list. See
-[docs/performance-model.md](docs/performance-model.md) for the model, the
-counter table, and the device limit table.
+[docs/eval.md](docs/eval.md) gives the metrics and the compute seam.
+
+## Models and devices
+
+A model is a package under `models/`, described by `spec.json`. A device is a
+package under `backends/`, declared by `caps.json`. Both declare against the
+shared vocabulary in `spec/`, and the planner resolves them. The flagship
+model is `models/nanochat-default/`. `backends/cpu/caps.json` declares the
+reference device, and `backends/cuda/caps.json` declares the served devices.
+
+A bring-up adds a directory. It does not edit a frozen header. See
+[docs/model-and-device-bringup.md](docs/model-and-device-bringup.md) and
+[models/nanochat-default](models/nanochat-default/README.md).
 
 ## Repository layout
 
-```
-include/nanochat/   public headers; the frozen backend seam
-src/                backend-agnostic workflow, model, optimizer, harness, CLI,
-                    distributed sync, tokenizer, parquet reader
+```text
+include/nanochat/   public headers and the frozen kernel seam
+src/                model, workflow, optimizer, training harness, tokenizer,
+                    parquet reader, and the stage binaries
 backends/cpu/       reference implementation of every kernel
-backends/cuda/      CUDA implementation; cuBLAS for GEMM
-backends/cuda/kernels/  kernels, per-family tests, benchmarks, test scaffolding
-dev/kernels/        unpromoted prototypes and the toolchain spike
+backends/cuda/      CUDA kernels, cuBLAS GEMM, per-family tests, benchmarks
+models/             one package per model
+spec/               the contract vocabulary
+tests/              oracle fixtures, parity tests, and the numeric trace
 examples/           the two smallest programs that use the public API
-models/             one package per model: its spec, tolerances, and fixtures
-spec/               the contract vocabulary both axes declare against
-tests/              oracle fixtures, parity tests, and the staged numeric trace
-bindings/           the C ABI for the in-process Python API
-python/             the single Python surface: compute, planning, chat,
-                    orchestration
-notebooks/          the Kaggle setup module, the T4 notebook, the trial runner
-tools/              entry point, GPU job queue, resource sandbox, fixtures
-tools/cuda_sim/     the CPU-only CUDA simulator
-tools/kaggle/       Kaggle Notebook bootstrap
+bindings/           the C ABI for the Python surface
+python/             compute, planning, chat evaluation, and orchestration
+notebooks/          Kaggle setup, the pipeline job, and host helpers
+tools/              entry point, GPU queue, sandbox, fixtures, simulator
 docs/               reference and how-to
 ```
 
-## Prior art
-
-- [llm.c](https://github.com/karpathy/llm.c) — one translation unit per backend,
-  pre-tokenized `.bin` data, the `debug_state.bin` oracle, a bump-allocator
-  workspace, and Makefile autodetection. This project uses Bazel for the build.
-- [llama.cpp](https://github.com/ggml-org/llama.cpp) and ggml — the backend as a
-  swappable implementation, with operation-level capability fallback.
-- Mirage MPK — why a whole-model persistent or direct-MMA kernel pays off for
-  latency-bound inference on Hopper, and why it does not apply here
-  ([docs/kernels.md](docs/kernels.md) § Direct-MMA and persistent kernels).
-
 ## Documentation
 
-- [docs/](docs/README.md) — reference and how-to. Start with
-  [build.md](docs/build.md) for the layers and the dependency invariants, then
-  [testing.md](docs/testing.md) and [sandbox.md](docs/sandbox.md).
-- [docs/parity.md](docs/parity.md) — known differences from the PyTorch
-  reference.
-- [docs/examples.md](docs/examples.md) — the two smallest examples of the
-  public API, and how to run them.
-- [docs/python.md](docs/python.md) — the nanochat-compatible
-  Python entry points.
-- [docs/host-portability.md](docs/host-portability.md) — the second host,
-  including the Kaggle procedure.
-- [CONTRIBUTING.md](CONTRIBUTING.md) — style, definition of done, and workflow.
-- [AGENTS.md](AGENTS.md) — multi-agent coordination on the shared host.
+- [docs/README.md](docs/README.md): the full reference index.
+- [docs/build.md](docs/build.md): the layers, the dependency invariants, and
+  the host packaging.
+- [docs/testing.md](docs/testing.md): test tiers, the oracle, and the gates.
+- [docs/sandbox.md](docs/sandbox.md): the resource budgets and the GPU queue.
+- [docs/post-training.md](docs/post-training.md): SFT, RL, and the chain.
+- [docs/python.md](docs/python.md): the Python API and the toolchain.
+- [docs/host-portability.md](docs/host-portability.md): the second host and
+  the Modal legs.
+- [docs/parity.md](docs/parity.md): the known differences from the reference.
+- [CONTRIBUTING.md](CONTRIBUTING.md): style and the Definition of Done.
+- [AGENTS.md](AGENTS.md): multi-agent coordination on the shared host.
