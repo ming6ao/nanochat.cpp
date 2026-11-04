@@ -88,38 +88,58 @@ benchmark to the `all` test suite.
 
 ### 3.4 Machine-readable output
 
-`BenchReport` emits the `nanochat.bench.v1` schema:
+`BenchReport` in `nanochat/bench.h` is the one writer of the
+`nanochat.bench.v3` schema:
 
 ```json
 {
-  "schema": "nanochat.bench.v1",
-  "device": "NVIDIA H100 80GB HBM3",
+  "schema": "nanochat.bench.v3",
+  "device": "h100",
+  "precision": "bf16",
   "peak_flops": 989000000000000.0,
   "rows": [
-    {"name": "attention_fwd:d8_s512", "shape": "B=8 T=512 H=4 KV=4 D=128 wl=-1", "ms": 12.3, "gflops": 45.6, "work_ratio": 2.0, "mfu": 0.33}
+    {"name": "attention_fwd:d8_s512", "family": "attention", "phase": "forward",
+     "precision": "bf16", "shape": "B=8 T=512 H=4 KV=4 D=128 wl=-1",
+     "ms": 12.3, "gflops": 45.6, "work_ratio": 2.0, "mfu": 0.33}
   ]
 }
 ```
 
 `gflops` is the rate against the necessary operation count. `work_ratio` is the
-issued work over the necessary work. `device` and `peak_flops` appear only
-when the report states a denominator, and `mfu` is the row's `gflops` over that
-`peak_flops`, clamped to `[0, 1]`. The share belongs to the precision the
-benchmark names, so a bf16 build divides by the tensor-core rate and an fp32
-build by the CUDA-core rate ([precision.md](precision.md)). A row that issues
-no arithmetic states `0`, and the table prints `-` for it.
+issued work over the necessary work. `device`, `precision`, and `peak_flops`
+appear only when the report states them, and `mfu` is the row's `gflops` over
+that `peak_flops`, clamped to `[0, 1]`. The share belongs to the precision the
+report names, so a bf16 run divides by the tensor-core rate and an fp32 run by
+the CUDA-core rate ([precision.md](precision.md)). A row that issues no
+arithmetic states `0`, and the table prints `-` for it.
+
+One header writes the document for every benchmark, whether it links the CUDA
+runtime (`backends/cuda/kernels/testing/bench_utils.h`) or a host clock
+(`src/eval_bench.cc`, `dev/kernels/`). A benchmark adds rows and, where its
+report carries a field that is not a row, one extra top-level field with
+`SetExtra`. It does not format JSON itself.
 
 In the table, the denominator stands above the header as one comment line, and
 the `MFU` column appears only when a row reports a share. A benchmark that
 states no peak prints the three-column table of the earlier reports. Feed the
 file to the skill's `summarize_times.py`.
 
-The performance model predicts the same numbers. `tools/nanochat roofline
---json` writes a `nanochat.roofline.v2` row with `name`, `bound_seconds`,
-`gflops`, `mfu`, and `phase`, so a predicted row and a measured row compare
-field by field ([performance-model.md](performance-model.md) section 7.4). The
-model names a family (`attention_forward`) and the benchmark adds the shape
-(`attention_fwd:d8_s512`), so the join is on the family prefix.
+The four identity keys join a measured row to a predicted one: `family`,
+`phase`, `precision`, and `shape`. The model names the family and the phase, and
+the benchmark names the same family and adds the shape
+([performance-model.md](performance-model.md) section 7.4). Both sides state
+`ms` in milliseconds and both state `work_ratio`, so a predicted row and a
+measured row compare field by field with no conversion step:
+
+```bash
+tools/nanochat roofline --device h100 --json > roof.json
+tools/nanochat profile --json --out bench.json
+tools/nanochat attain --bench bench.json --roofline roof.json
+```
+
+`attain` prints the fraction of the bound each family reached, the binding
+limit, and the gap. Its output is the attainment record of
+[performance-model.md](performance-model.md) section 10.
 
 ## 4. Root-cause checklist
 
@@ -185,7 +205,7 @@ tools/nanochat bench -- bazel-bin/src/eval_bench --batch 16 --seq 1024 \
 
 ## 7. Baselines
 
-Keep a committed baseline of the `nanochat.bench.v1` output for the production
+Keep a committed baseline of the `nanochat.bench.v3` output for the production
 shape. Then a regression is visible without a new measurement. Update the
 baseline only with the revision and the configuration that produced it. The
 merge-gate benchmark is one `tools/nanochat profile --json` run at a wave
@@ -1069,7 +1089,7 @@ Benchmarks use the `train` or `t3-bench` profile. See
 ##### Phase 0 — benchmark harness (0.5 session)
 
 - Promote the microbenchmark to `dev/kernels/cpu_gemm_bench.cc`. Time the four
-  dominant shapes. Report the `nanochat.bench.v1` schema.
+  dominant shapes. Report the `nanochat.bench.v3` schema.
 - Add a `cc_binary` target to `dev/kernels/BUILD.bazel`.
 - Record the shipped numbers in the `cpu_train` entry of `docs/baselines.json`.
 - **Gate:** the benchmark reproduces the section 2 numbers within 10%.
@@ -1454,7 +1474,7 @@ GFLOP per second. The parity gate passes.
 ##### Reproduction
 
 The raw benchmark report is `/tmp/cpu-gap-p2.json`. The report uses the
-`nanochat.bench.v1` schema with `threads=12`.
+`nanochat.bench.v3` schema with `threads=12`.
 
 ---
 

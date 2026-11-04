@@ -21,7 +21,7 @@ See [docs/kernels.md](../../../docs/kernels.md) for the kernel inventory and
 | `testing/sequence_ref.h` | Host reference for the attention, classifier, and embedding families. |
 | `testing/optim_ref.h` | Host reference for AdamW and Muon. |
 | `testing/gpu_test_utils.h` | Device buffer, deterministic random source, tolerance check, finite-difference helper. |
-| `testing/bench_utils.h` | CUDA-event timer and the `nanochat.bench.v1` report. |
+| `testing/bench_utils.h` | CUDA-event timer, and the `BenchReport` alias for the `nanochat.bench.v3` report in `nanochat/bench.h`. |
 
 ## Conventions
 

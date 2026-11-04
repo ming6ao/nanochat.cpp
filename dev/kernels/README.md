@@ -27,8 +27,8 @@ tools/nanochat bench -- <benchmark>       # T3-style micro-benchmark under the b
 | `decode_fused_bench.cc` | Batch-1 decode baseline: eager seam path vs `cuBLAS + CUDA Graphs`. |
 | `pascal_spike.cu`, `pascal_spike_test.cc` | The P0 CUDA/Pascal toolchain spike. |
 | `build_config_test.cc` | CPU smoke test for the precision config and the sandbox guard. |
-| `cpu_gemm_bench.cc` | CPU reference GEMM micro-benchmark over the four dominant training shapes plus the model-layout forward shapes; emits `nanochat.bench.v1`. |
-| `cpu_linear_layout_probe.cc` | CPU GEMM probe over the model operand layouts (`transpose_b` true and false); emits `nanochat.bench.v1`. |
+| `cpu_gemm_bench.cc` | CPU reference GEMM micro-benchmark over the four dominant training shapes plus the model-layout forward shapes; emits `nanochat.bench.v3`. |
+| `cpu_linear_layout_probe.cc` | CPU GEMM probe over the model operand layouts (`transpose_b` true and false); emits `nanochat.bench.v3`. |
 
 ## Conventions
 
@@ -46,7 +46,7 @@ directory.
 Part 2, section 2 of [docs/performance.md](../../docs/performance.md). The rows are
 `gemm_forward`, `gemm_wgrad`, `gemm_dgrad`, and `mlp_gemm`. The benchmark warms
 up, then keeps the best of N rounds. It calls `kernels::Gemm` directly and
-prints the `nanochat.bench.v1` schema on standard output. The shipped CPU GEMM
+prints the `nanochat.bench.v3` schema on standard output. The shipped CPU GEMM
 is scalar, so the run is single-threaded until Phase 1 adds OpenMP.
 
 ```bash

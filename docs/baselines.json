@@ -1,11 +1,12 @@
 {
-  "schema": "nanochat.baselines.v2",
-  "note": "Measured baselines for this repository, one entry per subject. Each entry is the report of the command in its `measurement` field at the revision it names. Update an entry only with a real run. docs/performance.md section 7 gives the rule.",
+  "schema": "nanochat.baselines.v3",
+  "note": "Measured baselines for this repository, one entry per subject. Each entry is the report of the command in its `measurement` field at the revision it names, and each names the device that validated it in `validated_on`. Update an entry only with a real run. docs/performance.md section 7 gives the rule. The attainment record of docs/performance-model.md section 10 is a different artifact: `tools/nanochat attain` generates it from a bound and a measurement at one revision.",
   "host": "GTX 1080 Ti (sm_61) under WSL2, 12 vCPU, 7.8 GiB, unless the entry says otherwise",
   "baselines": {
     "attention": {
       "note": "Frozen Phase 0 baseline of the shipped attention path. The d8_s512, window-128, and grouped-query rows are the measured values in docs/attention.md Part 2, section 4 (GTX 1080 Ti, sm_61, fp32). The d8_s512_sssl row is the mean over one SSSL cycle: (3 * window-128 + 1 * full) / 4. The head-dimension sweep is forward-only here, matching the plan table. work_ratio is issued work over necessary work.",
       "device": "GTX 1080 Ti (sm_61)",
+      "validated_on": "GTX 1080 Ti (sm_61)",
       "precision": "fp32",
       "measurement": "tools/nanochat profile --json --out docs/baselines.json",
       "rows": [
@@ -99,6 +100,7 @@
     "attention_e2e": {
       "note": "Frozen Phase 0 end-to-end baseline for the forward-only evaluation path. Derived by scaling the documented d12 fp32 eval rate (docs/performance.md section 6) to the d8_s512 shape: the model needs about 344.8 GFLOP per forward, and the arena is computed exactly from the eval workspace sizes. Update this file only with a real tools/nanochat bench run at the recorded revision.",
       "device": "GTX 1080 Ti (sm_61)",
+      "validated_on": "GTX 1080 Ti (sm_61)",
       "precision": "fp32",
       "measurement": "tools/nanochat bench -- ./bazel-bin/src/eval_bench --batch 8 --seq 512 --layers 8 --heads 4 --kv-heads 4 --hidden 512 --window-pattern SSSL --json",
       "rows": [
@@ -206,15 +208,17 @@
         "seconds_per_step": 1.7323,
         "speedup_vs_scalar_7_2_tokens_per_sec": 82.1
       },
-      "origin": "docs/baselines.json"
+      "origin": "docs/baselines.json",
+      "validated_on": "host CPU (12 vCPU)"
     },
     "cpu_gemm": {
-      "note": "Frozen Phase 0 baseline of the shipped CPU GEMM. The rows are the measured nanochat.bench.v1 report of dev/kernels/cpu_gemm_bench. The shipped kernels::Gemm is a scalar triple loop with a double accumulator, so the run is single-threaded. Compare a later phase against these numbers with the same configuration.",
+      "note": "Frozen Phase 0 baseline of the shipped CPU GEMM. The rows are the measured benchmark report of dev/kernels/cpu_gemm_bench at that revision. The shipped kernels::Gemm is a scalar triple loop with a double accumulator, so the run is single-threaded. Compare a later phase against these numbers with the same configuration.",
       "date": "2026-10-03",
       "revision": "4133998",
       "branch": "sliceme/agent-cpu-backend",
       "threads": 1,
       "device": "CPU (GTX 1080 Ti present but not used)",
+      "validated_on": "CPU (GTX 1080 Ti present but not used)",
       "precision": "fp32",
       "sandbox_profile": "t3-bench",
       "measurement": "tools/nanochat bench -- ./bazel-bin/dev/kernels/cpu_gemm_bench --rounds 3 --warmup 1 --json --out /tmp/cpu-gap-p0.json",

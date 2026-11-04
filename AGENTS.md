@@ -62,8 +62,8 @@ two stage binaries are declared there and the chain's two tests in
 editing):
 
 - `include/nanochat/kernels.h` — the backend seam.
-- `include/nanochat/device_profile.h` — the simulator's capability table
-  (additive; it stays beside `PeakFlopsForDevice`).
+- `include/nanochat/device_profile.h` — the simulator's capability table and
+  the one device rate accessor (additive; `PeakFlopsForDevice` reads it).
 - `include/nanochat/tensor.h` — `Tensor`, `ComputeType`, `DType`, `Caps`.
 - `include/nanochat/config.h` — `Config`.
 - `include/nanochat/model.h` — the public Model API.

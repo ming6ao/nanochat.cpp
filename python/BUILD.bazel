@@ -233,6 +233,29 @@ py_test(
     size = "medium",
 )
 
+# T0: the attainment join (docs/performance-model.md section 10). Hermetic and
+# arithmetic only: two JSON documents and no device, so it rides the same fast
+# loop as the rest of the CPU tests.
+py_test(
+    name = "attain_test",
+    srcs = ["tests/attain_test.py"],
+    deps = [":nanochat_cpp"],
+    size = "small",
+)
+
+# T0: the declared device set has one source (docs/simulator.md section 7). The
+# test reads the real `backends/*/caps.json`, so the runfiles carry them.
+py_test(
+    name = "devices_test",
+    srcs = ["tests/devices_test.py"],
+    data = [
+        "//backends/cpu:caps_json",
+        "//backends/cuda:caps_json",
+    ],
+    deps = [":nanochat_cpp"],
+    size = "small",
+)
+
 # T0: the deterministic half of the optimization loop. Hermetic: a synthetic
 # pair of nsys CSV reports, so no GPU, no Modal account, and no large artifact
 # (docs/performance.md row PGO.1).

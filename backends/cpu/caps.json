@@ -19,6 +19,8 @@
       "peak_bf16_flops": 0.0,
       "peak_fp8_flops": 0.0,
       "peak_bandwidth_bytes_per_second": 0.0,
+      "reference_peak_flops": 0.0,
+      "reference_precision": "fp32",
       "warp_size": 1,
       "max_threads_per_block": 1,
       "max_shared_memory_per_block": 0,

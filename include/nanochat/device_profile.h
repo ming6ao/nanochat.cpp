@@ -17,11 +17,12 @@
 // hardware" evolution rule true for the table as well as for the seam
 // (docs/model-and-device-bringup.md section 18).
 //
-// This header is additive and architect-owned. It stays *beside*
-// `PeakFlopsForDevice` in `src/train.cc`: that function remains the authority
-// for the MFU string patterns, and this table is the authority for the
-// capability fields. The two are kept consistent by
-// `//tests:device_profile_test`.
+// This header is additive and architect-owned. It is the one rate and
+// capability source: `PeakFlopsFor` is the single accessor over a row's rates,
+// and `PeakFlopsForDevice` in `src/train.cc` reads the row's
+// `reference_peak_flops` rather than holding a table of its own
+// (docs/performance-model.md section 6). `//tests:device_profile_test` keeps
+// the two purposes from drifting.
 //
 // The header includes only `nanochat/tensor.h`, so a backend may include it
 // without reaching above the kernel seam (docs/build.md, dependency
@@ -48,6 +49,15 @@ struct DeviceProfile {
 
   bool has_tensor_cores = false;  // fp16/bf16 MMA units
   bool supports_bf16 = false;
+  // The rate the *reference* recipe's Model FLOPs Utilization line divides by,
+  // and the precision it is quoted at. It is a separate field from the three
+  // rates above because the reference counts at one precision per card while
+  // the estimator assigns a precision per operation. Declaring it here keeps a
+  // card's reference rate in the same file as its other rates, so
+  // `PeakFlopsForDevice` reads one number instead of holding a second table
+  // (docs/performance-model.md section 6).
+  double reference_peak_flops = 0.0;
+  BuildPrecision reference_precision = BuildPrecision::kFp32;
   // The E4M3/E5M2 tensor-core path. Ada reports 8.9 and Hopper reports 9.0;
   // Ampere and older have no fp8 mode (docs/fp8-training.md section 5.3).
   bool supports_fp8 = false;
@@ -100,6 +110,32 @@ std::uint64_t DeclaredFeatureMask(const std::string& device_name);
 // true, and the precision flags come from the profile. It changes capabilities,
 // never numerics (docs/simulator.md section 4.4).
 Caps CapsFromProfile(const DeviceProfile& profile);
+
+// The dense peak FLOP/s `profile` declares at `precision`, or 0 when the device
+// has no path at that precision. It is the one rate accessor in the tree: the
+// benchmark's Model FLOPs Utilization share, the training log's Model FLOPs
+// Utilization line, and the roofline estimator all reach a card's rate through
+// it, so one card has one number per precision (docs/performance-model.md
+// section 6). The precision type is `BuildPrecision` from
+// `nanochat/tensor.h`, which is the tree's single precision vocabulary;
+// `ComputePrecision` in `nanochat/mfu.h` is an alias for it.
+double PeakFlopsFor(const DeviceProfile& profile, BuildPrecision precision);
+
+// The same rate for a device named by `name`, resolved through
+// `FindDeviceProfile`. Returns 0 when no declaration names the device.
+double PeakFlopsFor(const std::string& name, BuildPrecision precision);
+
+// The comma-and-space separated list of declared device names, in the table's
+// order. It is the list a command prints with an unknown device, and the list a
+// command validates against, so the accepted set is the declared set and no
+// program holds a second copy of it (docs/simulator.md section 7).
+std::string DeviceNameList();
+
+// The message a command prints before it exits with status 2 when no
+// declaration names `device_name`. It names the rejected string and lists
+// `DeviceNameList()`, so the roofline report, the simulator, and the benchmark
+// tool refuse an unknown device with one text and one status.
+std::string DeviceNameError(const std::string& device_name);
 
 }  // namespace nanochat
 

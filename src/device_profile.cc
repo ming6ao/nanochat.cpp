@@ -6,10 +6,13 @@
 // `include/nanochat/device_profile.h`, or anywhere else
 // (docs/model-and-device-bringup.md section 6: one source; section 16 P3).
 //
-// `PeakFlopsForDevice` in `src/train.cc` stays the authority for the MFU string
-// patterns, and this file is the authority for the capability fields.
-// `//tests:device_profile_test` holds the two consistent: it resolves every
-// derived profile through the MFU table and compares the rates.
+// This file is the authority for every rate and every capability field. The
+// two purposes that read a rate are `PeakFlopsForDevice` (the reference MFU
+// line, from `reference_peak_flops`) and `PeakFlopsForCompute` (the project MFU
+// line, from the declared rate at a precision); both read a row here through
+// `PeakFlopsFor`, so one card has one number per purpose and per precision
+// (docs/performance-model.md section 6). `//tests:device_profile_test` enforces
+// it.
 //
 // Two views come out of the same parse, and `include/nanochat/device_profile.h`
 // declares both:
@@ -152,6 +155,22 @@ bool WantBool(const json::Value& device, const char* name, bool* out) {
   return true;
 }
 
+// The precision a declaration names, so `reference_precision` is spelled the
+// same way as the `--precision` option and the report rows. An unknown spelling
+// keeps the fp32 default rather than failing the whole declaration.
+bool ParsePrecisionName(const std::string& name, BuildPrecision* out) {
+  if (name == "fp32") {
+    *out = BuildPrecision::kFp32;
+  } else if (name == "bf16") {
+    *out = BuildPrecision::kBf16;
+  } else if (name == "fp8") {
+    *out = BuildPrecision::kFp8;
+  } else {
+    return false;
+  }
+  return true;
+}
+
 // One declaration entry, before the capability fields are projected.
 struct DeclaredDevice {
   std::string name;  // normalized join key
@@ -214,6 +233,16 @@ void ReadDeclaration(const char* backend, std::vector<DeclaredDevice>* out) {
       profile.peak_fp8_flops = rate;
     if (WantNumber(entry, "peak_bandwidth_bytes_per_second", &rate)) {
       profile.peak_bandwidth_bytes_per_second = rate;
+    }
+    if (WantNumber(entry, "reference_peak_flops", &rate)) {
+      profile.reference_peak_flops = rate;
+    }
+    const json::Value* reference_precision = entry.Find("reference_precision");
+    if (reference_precision != nullptr && reference_precision->is_string()) {
+      BuildPrecision precision = BuildPrecision::kFp32;
+      if (ParsePrecisionName(reference_precision->string(), &precision)) {
+        profile.reference_precision = precision;
+      }
     }
     int count = 0;
     if (WantInt(entry, "warp_size", &count)) profile.warp_size = count;
@@ -314,11 +343,57 @@ const DeviceProfile* FindDeviceProfile(const std::string& name) {
     if (wanted == profile->name) return profile;
   }
   // Fall back to a substring match so a full device name such as
-  // "NVIDIA H100 80GB HBM3" resolves to its profile.
+  // "NVIDIA H100 80GB HBM3" resolves to its profile. The *longest* declared
+  // name wins, so a vendor spelling that contains two keys resolves the same
+  // way on every build: "NVIDIA H100 NVL" reaches `h100nvl` and not `h100`,
+  // whatever order the table happens to be sorted in.
+  const DeviceProfile* best = nullptr;
   for (const DeviceProfile* profile : AllDeviceProfiles()) {
-    if (wanted.find(profile->name) != std::string::npos) return profile;
+    const std::string key = profile->name;
+    if (wanted.find(key) == std::string::npos) continue;
+    if (best == nullptr || key.size() > std::string(best->name).size()) {
+      best = profile;
+    }
   }
-  return nullptr;
+  return best;
+}
+
+double PeakFlopsFor(const DeviceProfile& profile, BuildPrecision precision) {
+  switch (precision) {
+    case BuildPrecision::kFp32:
+      return profile.peak_fp32_flops;
+    case BuildPrecision::kBf16:
+      return profile.peak_bf16_flops;
+    case BuildPrecision::kFp8:
+      return profile.peak_fp8_flops;
+  }
+  return 0.0;
+}
+
+double PeakFlopsFor(const std::string& name, BuildPrecision precision) {
+  const DeviceProfile* profile = FindDeviceProfile(name);
+  if (profile == nullptr) return 0.0;
+  return PeakFlopsFor(*profile, precision);
+}
+
+std::string DeviceNameList() {
+  std::string out;
+  for (const DeviceProfile* profile : AllDeviceProfiles()) {
+    if (!out.empty()) out += " ";
+    out += profile->name;
+  }
+  return out;
+}
+
+std::string DeviceNameError(const std::string& device_name) {
+  std::string out = "unknown device '" + device_name + "'";
+  const std::string names = DeviceNameList();
+  if (names.empty()) {
+    out += " (no device declaration was reachable)";
+  } else {
+    out += " (" + names + ")";
+  }
+  return out;
 }
 
 std::uint64_t DeclaredFeatureMask(const std::string& device_name) {

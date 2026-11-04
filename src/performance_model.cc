@@ -119,15 +119,26 @@ const char* BindingLimit(double compute_seconds, double memory_seconds,
   return compute_seconds >= memory_seconds ? "compute" : "memory";
 }
 
-RooflineRow MakeRow(const std::string& name, StepPhase phase,
+RooflineRow MakeRow(const std::string& family, StepPhase phase,
                     ComputePrecision precision, double flops, double bytes,
                     int launches, const PerformanceLimits& limits, int world,
                     bool replicated) {
   RooflineRow row;
-  row.name = name;
+  // `name` is the display spelling; `family` is the join key. They are the same
+  // string here because the phase, the precision, and the shape are fields of
+  // the row rather than parts of its name (docs/performance-model.md section
+  // 7.4).
+  row.name = family;
+  row.family = family;
   row.phase = phase;
   row.precision = precision;
   row.flops = flops;
+  // The counter table counts the work the operation must do. The model knows of
+  // no redundant issue, so the issued count starts equal to the necessary one
+  // and the predicted ratio reads 1.0. A measured ratio above 1.0 is then the
+  // kernel's redundancy against a model that assumes none, which is the
+  // comparison docs/performance-model.md section 8 asks for.
+  row.issued_flops = flops;
   row.bytes = bytes;
   row.launches = launches;
   // A row that scales with the token count carries a world-wide count, so the
@@ -156,6 +167,37 @@ RooflineRow MakeRow(const std::string& name, StepPhase phase,
     row.mfu = mfu > 1.0 ? 1.0 : mfu;
   }
   return row;
+}
+
+// The workload key of a run, in the shape spelling the benchmark reports use:
+// `key=value` tokens in one canonical order, separated by single spaces. A
+// layer whose left window is unbounded reads `wl=-1`. A run whose layers
+// disagree on the window states `wl=mixed` and the layer count, because one
+// `wl=` token would name the wrong workload for at least one layer
+// (docs/performance-model.md section 7.4).
+std::string ShapeString(const Config& config, const ModelPlan& plan) {
+  char buffer[256];
+  std::snprintf(buffer, sizeof(buffer), "B=%d T=%d H=%d KV=%d D=%d", plan.batch,
+                config.seq_len, config.num_heads, config.num_kv_heads,
+                config.head_dim());
+  std::string shape = buffer;
+  const int first = config.window_left(0);
+  bool uniform = true;
+  for (int layer = 1; layer < config.num_layers; ++layer) {
+    if (config.window_left(layer) != first) {
+      uniform = false;
+      break;
+    }
+  }
+  if (uniform) {
+    std::snprintf(buffer, sizeof(buffer), " wl=%d", first);
+  } else {
+    std::snprintf(buffer, sizeof(buffer), " wl=mixed");
+  }
+  shape += buffer;
+  std::snprintf(buffer, sizeof(buffer), " L=%d", config.num_layers);
+  shape += buffer;
+  return shape;
 }
 
 std::string FormatSeconds(double seconds) {
@@ -360,6 +402,8 @@ const char* PhaseName(StepPhase phase) {
       return "forward";
     case StepPhase::kBackward:
       return "backward";
+    case StepPhase::kSync:
+      return "sync";
     case StepPhase::kOptimizer:
       return "optimizer";
   }
@@ -367,15 +411,9 @@ const char* PhaseName(StepPhase phase) {
 }
 
 ComputePrecision BuildComputePrecision() {
-  switch (kBuildPrecision) {
-    case BuildPrecision::kBf16:
-      return ComputePrecision::kBf16;
-    case BuildPrecision::kFp8:
-      return ComputePrecision::kFp8;
-    case BuildPrecision::kFp32:
-    default:
-      return ComputePrecision::kFp32;
-  }
+  // The build precision and a compute precision are one type
+  // (`ComputePrecision` aliases `BuildPrecision`), so there is no mapping.
+  return kBuildPrecision;
 }
 
 ComputePrecision AssignMatrixPrecision(int rows, int cols,
@@ -428,9 +466,17 @@ bool IsComputeBound(double flops, double bytes, const PerformanceLimits& limits,
 }
 
 PerformanceEstimate EstimatePerformance(const Config& config,
+                                        const ModelPlan& plan) {
+  return EstimatePerformance(config, LimitsForDevice(plan.device_name), plan);
+}
+
+PerformanceEstimate EstimatePerformance(const Config& config,
                                         const PerformanceLimits& limits,
                                         const ModelPlan& plan) {
   PerformanceEstimate estimate;
+  estimate.device = plan.device_name;
+  estimate.precision = PrecisionName(plan.build);
+  estimate.shape = ShapeString(config, plan);
   const int world = std::max(1, plan.world_size);
   const int batch = std::max(1, plan.batch);
   const int accum = std::max(1, plan.grad_accum);
@@ -456,14 +502,14 @@ PerformanceEstimate EstimatePerformance(const Config& config,
     const double forward_bytes =
         elem * (tokens * group.sum_k + group.params + tokens * group.sum_n);
     const int launches = group.count * accum;
-    estimate.rows.push_back(MakeRow(
-        "gemm_forward:" + std::string(PrecisionName(group.precision)),
-        StepPhase::kForward, group.precision, 2.0 * group.params * tokens,
-        forward_bytes, launches, limits, world, false));
-    estimate.rows.push_back(MakeRow(
-        "gemm_backward:" + std::string(PrecisionName(group.precision)),
-        StepPhase::kBackward, group.precision, 4.0 * group.params * tokens,
-        2.0 * forward_bytes, 2 * launches, limits, world, false));
+    estimate.rows.push_back(MakeRow("gemm", StepPhase::kForward,
+                                    group.precision,
+                                    2.0 * group.params * tokens, forward_bytes,
+                                    launches, limits, world, false));
+    estimate.rows.push_back(
+        MakeRow("gemm", StepPhase::kBackward, group.precision,
+                4.0 * group.params * tokens, 2.0 * forward_bytes, 2 * launches,
+                limits, world, false));
   }
 
   // The quantization cast: one fused kernel per operand, five bytes of traffic
@@ -481,16 +527,14 @@ PerformanceEstimate EstimatePerformance(const Config& config,
     cast_launches += group.count * accum;
   }
   if (cast_forward_elements > 0.0) {
-    estimate.rows.push_back(MakeRow("quantization_cast:forward",
-                                    StepPhase::kForward, ComputePrecision::kFp8,
-                                    0.0, 5.0 * cast_forward_elements,
-                                    cast_launches, limits, world, false));
+    estimate.rows.push_back(MakeRow(
+        "quantization_cast", StepPhase::kForward, ComputePrecision::kFp8, 0.0,
+        5.0 * cast_forward_elements, cast_launches, limits, world, false));
   }
   if (cast_backward_elements > 0.0) {
-    estimate.rows.push_back(
-        MakeRow("quantization_cast:backward", StepPhase::kBackward,
-                ComputePrecision::kFp8, 0.0, 5.0 * cast_backward_elements,
-                cast_launches, limits, world, false));
+    estimate.rows.push_back(MakeRow(
+        "quantization_cast", StepPhase::kBackward, ComputePrecision::kFp8, 0.0,
+        5.0 * cast_backward_elements, cast_launches, limits, world, false));
   }
 
   // The layout copies. The target stores the weight in the layout the fp8 GEMM
@@ -530,14 +574,12 @@ PerformanceEstimate EstimatePerformance(const Config& config,
   const double attention_bytes = row_elem * tokens * 4.0 * config.num_heads *
                                  config.head_dim() * config.num_layers;
   const int attention_launches = config.num_layers * accum;
-  estimate.rows.push_back(MakeRow("attention_forward", StepPhase::kForward,
-                                  row_precision, attention_forward,
-                                  attention_bytes, attention_launches, limits,
-                                  world, false));
-  estimate.rows.push_back(MakeRow("attention_backward", StepPhase::kBackward,
-                                  row_precision, attention_backward,
-                                  2.0 * attention_bytes, 2 * attention_launches,
-                                  limits, world, false));
+  estimate.rows.push_back(MakeRow(
+      "attention", StepPhase::kForward, row_precision, attention_forward,
+      attention_bytes, attention_launches, limits, world, false));
+  estimate.rows.push_back(MakeRow(
+      "attention", StepPhase::kBackward, row_precision, attention_backward,
+      2.0 * attention_bytes, 2 * attention_launches, limits, world, false));
 
   // The row kernels, the classifier, the embedding, and the optimizer. They
   // carry no counted arithmetic; their bound is the memory term. A row kernel
@@ -552,26 +594,26 @@ PerformanceEstimate EstimatePerformance(const Config& config,
   const double pointwise_bytes = row_elem * tokens * row_width;
   const int pointwise_launches = config.num_layers * accum;
   estimate.rows.push_back(MakeRow(
-      "norms_and_pointwise:forward", StepPhase::kForward, row_precision, 0.0,
+      "norms_and_pointwise", StepPhase::kForward, row_precision, 0.0,
       pointwise_bytes / 2.0, pointwise_launches / 2, limits, world, false));
-  estimate.rows.push_back(MakeRow(
-      "norms_and_pointwise:backward", StepPhase::kBackward, row_precision, 0.0,
-      pointwise_bytes / 2.0, pointwise_launches - pointwise_launches / 2,
-      limits, world, false));
+  estimate.rows.push_back(MakeRow("norms_and_pointwise", StepPhase::kBackward,
+                                  row_precision, 0.0, pointwise_bytes / 2.0,
+                                  pointwise_launches - pointwise_launches / 2,
+                                  limits, world, false));
 
   const double classifier_bytes = 2.0 * 4.0 * tokens * config.padded_vocab_size;
-  estimate.rows.push_back(MakeRow(
-      "classifier:forward", StepPhase::kForward, ComputePrecision::kFp32, 0.0,
-      classifier_bytes / 2.0, accum / 2, limits, world, false));
-  estimate.rows.push_back(MakeRow(
-      "classifier:backward", StepPhase::kBackward, ComputePrecision::kFp32, 0.0,
-      classifier_bytes / 2.0, accum - accum / 2, limits, world, false));
+  estimate.rows.push_back(
+      MakeRow("classifier", StepPhase::kForward, ComputePrecision::kFp32, 0.0,
+              classifier_bytes / 2.0, accum / 2, limits, world, false));
+  estimate.rows.push_back(
+      MakeRow("classifier", StepPhase::kBackward, ComputePrecision::kFp32, 0.0,
+              classifier_bytes / 2.0, accum - accum / 2, limits, world, false));
 
   const double embedding_bytes = 2.0 * row_elem * tokens * config.hidden_dim;
-  estimate.rows.push_back(MakeRow("embedding:forward", StepPhase::kForward,
+  estimate.rows.push_back(MakeRow("embedding", StepPhase::kForward,
                                   row_precision, 0.0, embedding_bytes / 2.0, 1,
                                   limits, world, false));
-  estimate.rows.push_back(MakeRow("embedding:backward", StepPhase::kBackward,
+  estimate.rows.push_back(MakeRow("embedding", StepPhase::kBackward,
                                   row_precision, 0.0, embedding_bytes / 2.0, 1,
                                   limits, world, false));
 
@@ -616,6 +658,10 @@ PerformanceEstimate EstimatePerformance(const Config& config,
         break;
       case StepPhase::kOptimizer:
         estimate.optimizer_seconds += row.bound_seconds;
+        break;
+      case StepPhase::kSync:
+        // The gradient reduction is carried by `sync_seconds` and no row of the
+        // counter table owns the sync phase, so a row cannot sum into it.
         break;
     }
   }
@@ -714,21 +760,41 @@ std::string FormatPerformanceReport(const PerformanceEstimate& estimate) {
 }
 
 std::string PerformanceReportJson(const PerformanceEstimate& estimate) {
-  std::string out = "{\"schema\":\"nanochat.roofline.v2\",\"rows\":[";
+  std::string out = "{\"schema\":\"nanochat.roofline.v3\"";
+  if (!estimate.device.empty()) {
+    out += ",\"device\":" + JsonString(estimate.device);
+  }
+  if (!estimate.precision.empty()) {
+    out += ",\"precision\":" + JsonString(estimate.precision);
+  }
+  if (!estimate.shape.empty()) {
+    out += ",\"shape\":" + JsonString(estimate.shape);
+  }
+  out += ",\"rows\":[";
   for (std::size_t i = 0; i < estimate.rows.size(); ++i) {
     const RooflineRow& row = estimate.rows[i];
     if (i != 0) out += ",";
+    // `ms` and `work_ratio` are the two duration-and-redundancy keys a
+    // `nanochat.bench.v3` row also states, so the two reports join on the four
+    // identity keys and compare on those two (docs/performance.md section 3.4).
+    const double work_ratio =
+        row.flops > 0.0 ? row.issued_flops / row.flops : 0.0;
     out += "{\"name\":" + JsonString(row.name) +
+           ",\"family\":" + JsonString(row.family) +
            ",\"phase\":" + JsonString(PhaseName(row.phase)) +
            ",\"precision\":" + JsonString(PrecisionName(row.precision)) +
+           ",\"shape\":" + JsonString(estimate.shape) +
            ",\"flops\":" + JsonDouble(row.flops) +
+           ",\"issued_flops\":" + JsonDouble(row.issued_flops) +
            ",\"bytes\":" + JsonDouble(row.bytes) +
            ",\"launches\":" + std::to_string(row.launches) +
            ",\"compute_seconds\":" + JsonDouble(row.compute_seconds) +
            ",\"memory_seconds\":" + JsonDouble(row.memory_seconds) +
            ",\"bound_seconds\":" + JsonDouble(row.bound_seconds) +
+           ",\"ms\":" + JsonDouble(row.bound_seconds * 1000.0) +
            ",\"limit\":" + JsonString(row.limit) +
            ",\"gflops\":" + JsonDouble(row.flops_per_second / 1e9) +
+           ",\"work_ratio\":" + JsonDouble(work_ratio) +
            ",\"mfu\":" + JsonDouble(row.mfu) + "}";
   }
   out +=

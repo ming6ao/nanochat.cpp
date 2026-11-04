@@ -139,8 +139,13 @@ void BenchShape(BenchReport* report, Rng* rng, const BenchOptions& opt,
                 p.window_left);
   char name[96];
   std::snprintf(name, sizeof(name), "attention_fwd:%s", label);
+  // The join identity of the roofline report's attention rows: one family, one
+  // phase per row, the same shape spelling (docs/performance-model.md section
+  // 7.4).
+  report->SetRowIdentity("attention", "forward");
   report->Add(name, shape, r.fwd_ms, r.fwd_gflop / (r.fwd_ms / 1e3), ratio);
   std::snprintf(name, sizeof(name), "attention_bwd:%s", label);
+  report->SetRowIdentity("attention", "backward");
   report->Add(name, shape, r.bwd_ms, r.bwd_gflop / (r.bwd_ms / 1e3), ratio);
 }
 
@@ -190,8 +195,10 @@ void BenchPattern(BenchReport* report, Rng* rng, const BenchOptions& opt,
                 pattern.c_str());
   char name[96];
   std::snprintf(name, sizeof(name), "attention_fwd:%s", label);
+  report->SetRowIdentity("attention", "forward");
   report->Add(name, shape, fwd_ms, fwd_gflop / (fwd_ms / 1e3), ratio);
   std::snprintf(name, sizeof(name), "attention_bwd:%s", label);
+  report->SetRowIdentity("attention", "backward");
   report->Add(name, shape, bwd_ms, bwd_gflop / (bwd_ms / 1e3), ratio);
 }
 
@@ -231,7 +238,7 @@ int main(int argc, char** argv) {
   // Every row states its share of the card's declared peak rate at the build's
   // compute precision, so a reader sees how far the family sits from the roof
   // of the unit it runs on.
-  report.UseDevicePeak();
+  report.UseDevicePeak(nanochat::dev::BenchDeviceName());
 
   // The production `d8_s512` training shape: 8 layers, batch 8, sequence 512,
   // 4 query heads, full context.

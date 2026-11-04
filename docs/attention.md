@@ -27,7 +27,7 @@ The baseline is one file with three parts:
 
 | Source | Content |
 |---|---|
-| [baselines.json](baselines.json), key `attention` | The `nanochat.bench.v1` report of `attention_benchmark`. |
+| [baselines.json](baselines.json), key `attention` | The `attention_benchmark` report. |
 | [baselines.json](baselines.json), key `attention_e2e` | The forward-only eval report at `d8_s512` with the `SSSL` pattern. |
 | This part | The note that reads them. |
 

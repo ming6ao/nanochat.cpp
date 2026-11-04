@@ -118,89 +118,20 @@ void Logger::Close() {
 }
 
 // ---------------------------------------------------------------------------
-// MFU / FLOP accounting (mirrors nanochat's `estimate_flops` and
-// `get_peak_flops`)
+// MFU / FLOP accounting (mirrors nanochat's `estimate_flops`)
 // ---------------------------------------------------------------------------
 
-namespace {
-
-std::string ToLower(const std::string& value) {
-  std::string result = value;
-  for (char& c : result) {
-    c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-  }
-  return result;
-}
-
-}  // namespace
-
 double PeakFlopsForDevice(const std::string& device_name) {
-  struct Entry {
-    std::vector<const char*> patterns;
-    double flops;
-  };
-  // Order matters: more specific patterns first. Mirrors nanochat's
-  // `get_peak_flops`; unknown devices return 0 so MFU reads 0.
-  static const Entry kTable[] = {
-      // NVIDIA Blackwell
-      {{"gb200"}, 2.5e15},
-      {{"grace blackwell"}, 2.5e15},
-      {{"b200"}, 2.25e15},
-      {{"b100"}, 1.8e15},
-      // NVIDIA Hopper
-      {{"h200", "nvl"}, 836e12},
-      {{"h200", "pcie"}, 836e12},
-      {{"h200"}, 989e12},
-      {{"h100", "nvl"}, 835e12},
-      {{"h100", "pcie"}, 756e12},
-      {{"h100"}, 989e12},
-      {{"h800", "nvl"}, 989e12},
-      {{"h800"}, 756e12},
-      // NVIDIA Turing. The T4 has no bf16 and the build runs fp32, so the MFU
-      // denominator is the fp32 rate (docs/precision.md).
-      {{"t4"}, 8.1e12},
-      // NVIDIA Ampere data center
-      {{"a100"}, 312e12},
-      {{"a800"}, 312e12},
-      {{"a40"}, 149.7e12},
-      {{"a30"}, 165e12},
-      // NVIDIA Ada data center
-      {{"l40s"}, 362e12},
-      {{"l40-s"}, 362e12},
-      {{"l40 s"}, 362e12},
-      {{"l4"}, 121e12},
-      // AMD CDNA accelerators
-      {{"mi355"}, 2.5e15},
-      {{"mi325"}, 1.3074e15},
-      {{"mi300x"}, 1.3074e15},
-      {{"mi300a"}, 980.6e12},
-      {{"mi250x"}, 383e12},
-      {{"mi250"}, 362.1e12},
-      // Consumer RTX
-      {{"5090"}, 209.5e12},
-      {{"4090"}, 165.2e12},
-      {{"3090"}, 71e12},
-      // Pascal (FP32 CUDA-core peak; no tensor cores). Both spellings are
-      // listed because the simulator's profile key is the compact device id
-      // (`gtx1080ti`), while a driver's `cudaDeviceProp.name` is the spaced
-      // marketing name.
-      {{"1080ti"}, 11.34e12},
-      {{"1080 ti"}, 11.34e12},
-  };
-
-  const std::string name = ToLower(device_name);
-  if (name.empty()) return 0.0;
-  for (const Entry& entry : kTable) {
-    bool match = true;
-    for (const char* pattern : entry.patterns) {
-      if (name.find(pattern) == std::string::npos) {
-        match = false;
-        break;
-      }
-    }
-    if (match) return entry.flops;
-  }
-  return 0.0;
+  // The reference rate is declared, not tabulated here. Each device entry in
+  // `backends/<name>/caps.json` states the rate its reference recipe's Model
+  // FLOPs Utilization line divides by and the precision that rate is quoted at
+  // (`reference_peak_flops`, `reference_precision`), so a card has one
+  // reference rate in one file (docs/performance-model.md section 6). A device
+  // with no declaration has no rate: the Model FLOPs Utilization line then
+  // reads 0 rather than a plausible number from a second table.
+  const DeviceProfile* profile = FindDeviceProfile(device_name);
+  if (profile == nullptr) return 0.0;
+  return profile->reference_peak_flops;
 }
 
 double PeakFlopsForCompute(const std::string& device_name) {
@@ -209,17 +140,9 @@ double PeakFlopsForCompute(const std::string& device_name) {
 
 double PeakFlopsForCompute(const std::string& device_name,
                            ComputePrecision precision) {
-  const DeviceProfile* profile = FindDeviceProfile(device_name);
-  if (profile == nullptr) return 0.0;
-  switch (precision) {
-    case ComputePrecision::kFp32:
-      return profile->peak_fp32_flops;
-    case ComputePrecision::kBf16:
-      return profile->peak_bf16_flops;
-    case ComputePrecision::kFp8:
-      return profile->peak_fp8_flops;
-  }
-  return 0.0;
+  // One rate accessor for the whole tree: the declaration's `PeakFlopsFor`,
+  // which the benchmark report and the roofline estimator also call.
+  return PeakFlopsFor(device_name, precision);
 }
 
 double ComputeMfu(const Config& config, double tokens_per_second,

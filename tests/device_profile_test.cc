@@ -107,15 +107,34 @@ std::string LocateCaps(const char* backend) {
   return std::string();
 }
 
-// The rate the MFU table models for this device: the tensor-core bf16 rate when
-// the device has bf16, and the CUDA-core fp32 rate otherwise. The Turing T4 has
-// tensor cores but no bf16, and its build runs fp32, so it reports the fp32
-// rate. See docs/precision.md.
-double MfuPeakFor(const DeviceProfile& profile) {
+// The rate the reference recipe's Model FLOPs Utilization line divides by: the
+// tensor-core bf16 rate on a device with bf16, and the CUDA-core fp32 rate
+// otherwise. The Turing T4 has tensor cores but no bf16, so it reports the fp32
+// rate. See docs/precision.md. A declaration states this rate and the precision
+// it is quoted at, so the table below is a check on the declaration rather than
+// a second copy of it.
+struct ReferenceCandidate {
+  double flops = 0.0;
+  const char* precision = "fp32";
+};
+
+ReferenceCandidate MfuReference(const DeviceProfile& profile) {
   if (profile.supports_bf16 && profile.peak_bf16_flops > 0.0) {
-    return profile.peak_bf16_flops;
+    return {profile.peak_bf16_flops, "bf16"};
   }
-  return profile.peak_fp32_flops;
+  return {profile.peak_fp32_flops, "fp32"};
+}
+
+const char* PrecisionNameOf(nanochat::BuildPrecision precision) {
+  switch (precision) {
+    case nanochat::BuildPrecision::kBf16:
+      return "bf16";
+    case nanochat::BuildPrecision::kFp8:
+      return "fp8";
+    case nanochat::BuildPrecision::kFp32:
+      break;
+  }
+  return "fp32";
 }
 
 void TestJoinKey() {
@@ -138,20 +157,66 @@ void TestJoinKey() {
              "an unknown name has no profile");
   ExpectTrue(nanochat::FindDeviceProfile("") == nullptr,
              "the empty name has no profile");
+  // A vendor spelling that contains one declared key resolves to it, so a run
+  // reports a card the table holds.
+  ExpectTrue(nanochat::FindDeviceProfile("NVIDIA H100 80GB HBM3") ==
+                 nanochat::FindDeviceProfile("h100"),
+             "a card's marketing name resolves to its declared row");
+}
+
+void TestUnknownDeviceRefusal() {
+  // One message and one device list for every command, so the roofline report,
+  // the simulator, and the benchmark tool refuse an unknown device the same way
+  // (docs/performance-model.md section 6).
+  const std::string list = nanochat::DeviceNameList();
+  ExpectTrue(!list.empty(), "the declared device list is not empty");
+  for (const DeviceProfile* profile : nanochat::AllDeviceProfiles()) {
+    ExpectTrue(list.find(profile->name) != std::string::npos,
+               Format("the device list names \"%s\"", profile->name));
+  }
+  const std::string error = nanochat::DeviceNameError("bogus");
+  ExpectTrue(error.find("bogus") != std::string::npos,
+             "the refusal message names the rejected device");
+  ExpectTrue(error.find("h100") != std::string::npos,
+             "the refusal message lists the declared devices");
+  // The list is the declared set: a name it does not carry has no row, so a
+  // command that validates against the list accepts exactly the declared set.
+  for (const DeviceProfile* profile : nanochat::AllDeviceProfiles()) {
+    ExpectTrue(nanochat::FindDeviceProfile(profile->name) != nullptr,
+               Format("\"%s\" from the list resolves", profile->name));
+  }
 }
 
 void TestMfuConsistency() {
   for (const DeviceProfile* profile : nanochat::AllDeviceProfiles()) {
     const std::string name = profile->name;
+    // The reference rate is declared, and `PeakFlopsForDevice` reads the
+    // declaration. These three checks are what keeps a card's reference rate
+    // from drifting away from the card's other rates: the reference rate must
+    // equal one of the declared rates, and it must be the rate the documented
+    // rule selects (docs/performance-model.md section 6).
+    const ReferenceCandidate candidate = MfuReference(*profile);
+    ExpectTrue(
+        profile->reference_peak_flops > 0.0,
+        Format("profile \"%s\" declares a reference peak rate", name.c_str()));
+    ExpectTrue(std::string(PrecisionNameOf(profile->reference_precision)) ==
+                   candidate.precision,
+               Format("profile \"%s\" quotes its reference rate at %s",
+                      name.c_str(), candidate.precision));
+    ExpectNear(
+        profile->reference_peak_flops,
+        nanochat::PeakFlopsFor(*profile, profile->reference_precision), 1.0,
+        Format("profile \"%s\" reference rate is one of its declared rates",
+               name.c_str()));
     const double mfu_peak = nanochat::PeakFlopsForDevice(name);
     ExpectTrue(
         mfu_peak > 0.0,
-        Format("profile \"%s\" resolves to one MFU entry", name.c_str()));
-    ExpectNear(
-        mfu_peak, MfuPeakFor(*profile), 1.0,
-        Format("MFU rate for \"%s\" matches the profile peak", name.c_str()));
+        Format("profile \"%s\" resolves to one reference rate", name.c_str()));
+    ExpectNear(mfu_peak, profile->reference_peak_flops, 1.0,
+               Format("PeakFlopsForDevice(\"%s\") reads the declaration",
+                      name.c_str()));
     // The fp32 rate is always recorded; a bf16 rate is recorded on a device
-    // that has bf16, and it is the rate the MFU table models there.
+    // that has bf16, and it is the rate the reference line models there.
     ExpectTrue(profile->peak_fp32_flops > 0.0,
                Format("profile \"%s\" records an fp32 rate", name.c_str()));
     if (profile->supports_bf16) {
@@ -318,6 +383,11 @@ struct DeclaredEntry {
   double peak_bf16_flops = 0.0;
   double peak_fp8_flops = 0.0;
   double peak_bandwidth_bytes_per_second = 0.0;
+  // The reference recipe's rate and the precision it is quoted at. They are
+  // required fields as well, so a declaration cannot omit the number
+  // `PeakFlopsForDevice` reads.
+  double reference_peak_flops = 0.0;
+  std::string reference_precision;
   int warp_size = 0;
   int max_threads_per_block = 0;
   double max_shared_memory_per_block = 0.0;
@@ -423,6 +493,16 @@ bool ReadDeclaredEntries(const char* backend, std::vector<DeclaredEntry>* out) {
                     &declared.peak_bandwidth_bytes_per_second)) {
       continue;
     }
+    if (!NeedNumber(entry, "reference_peak_flops", where,
+                    &declared.reference_peak_flops)) {
+      continue;
+    }
+    const nanochat::json::Value* precision = entry.Find("reference_precision");
+    if (precision == nullptr || !precision->is_string()) {
+      Fail(where + " declares no string \"reference_precision\"");
+      continue;
+    }
+    declared.reference_precision = precision->string();
     if (!NeedInt(entry, "warp_size", where, &declared.warp_size)) continue;
     if (!NeedInt(entry, "max_threads_per_block", where,
                  &declared.max_threads_per_block)) {
@@ -515,6 +595,14 @@ void TestDeclarationsDeriveTheTable() {
         profile->peak_bandwidth_bytes_per_second,
         entry.peak_bandwidth_bytes_per_second, 1.0,
         Format("%s: the bandwidth derives from the declaration", name.c_str()));
+    ExpectNear(profile->reference_peak_flops, entry.reference_peak_flops, 1.0,
+               Format("%s: the reference rate derives from the declaration",
+                      name.c_str()));
+    ExpectTrue(
+        std::string(PrecisionNameOf(profile->reference_precision)) ==
+            entry.reference_precision,
+        Format("%s: the reference precision derives from the declaration",
+               name.c_str()));
     ExpectTrue(
         profile->warp_size == entry.warp_size,
         Format("%s: the warp size derives from the declaration", name.c_str()));
@@ -572,6 +660,7 @@ void TestDeclarationsDeriveTheTable() {
 int main() {
   nanochat::RequireSandboxOrDie("test");
   TestJoinKey();
+  TestUnknownDeviceRefusal();
   TestMfuConsistency();
   TestLimitTable();
   TestCapsProjection();

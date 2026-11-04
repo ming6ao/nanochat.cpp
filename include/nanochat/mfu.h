@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "nanochat/config.h"
+#include "nanochat/tensor.h"
 
 // Model FLOPs utilization (docs/model.md). The accounting follows nanochat:
 // every matmul parameter contributes 6 FLOPs/token for a training step
@@ -56,16 +57,21 @@ double EstimatePrefillFlops(const Config& config, int num_tokens);
 // Forward FLOPs to decode one token against `context_len` cached tokens.
 double EstimateDecodeFlops(const Config& config, int context_len);
 
-// Peak device FLOPs for a known device name, or 0 when unknown. The table is
-// best-effort and mirrors nanochat's `get_peak_flops`.
+// Peak device FLOPs for a known device name, or 0 when unknown. The rate is the
+// `reference_peak_flops` the device's declaration carries
+// (`backends/<name>/caps.json`), so a card's reference rate lives beside its
+// other rates and this function holds no table of its own. It is the
+// denominator of the reference Model FLOPs Utilization line, which counts at
+// one precision per card.
 double PeakFlopsForDevice(const std::string& device_name);
 
 // Peak dense FLOPs for `device_name` at the build's compute precision
 // (docs/precision.md). fp32 is the only compute type today, so the MFU
 // denominator is the CUDA-core fp32 rate. A future bf16 build reads the
-// tensor-core rate. `PeakFlopsForDevice` keeps the reference tensor-core rate
-// for compatibility, so the two differ on a device whose reference recipe uses
-// tensor cores. Returns 0 for an unknown device.
+// tensor-core rate. `PeakFlopsForDevice` reads the reference rate, which is the
+// tensor-core rate on a device whose reference recipe uses tensor cores, so the
+// two differ on such a device by design. Both read the same declaration.
+// Returns 0 for an unknown device.
 double PeakFlopsForCompute(const std::string& device_name);
 
 // tokens_per_second * flops_per_token / peak_flops, clamped to [0, 1].
@@ -79,14 +85,20 @@ double ComputeMfu(const Config& config, double tokens_per_second,
 // The precision one counter row uses. The model selects a rate per operation
 // from the assignment in docs/performance-model.md section 5; it never derives
 // one rate from the build precision alone.
-enum class ComputePrecision { kFp32, kBf16, kFp8 };
+//
+// It is `BuildPrecision` from `nanochat/tensor.h` rather than an enumeration of
+// its own: the build precision, the benchmark's precision, and a report row's
+// precision are one vocabulary, so no caller maps between two enums that hold
+// the same three values (docs/performance-model.md section 6).
+using ComputePrecision = BuildPrecision;
 
 // The short name of `precision`, for a report row.
 const char* PrecisionName(ComputePrecision precision);
 
 // The build's compute precision, from `kBuildPrecision` in
 // `nanochat/tensor.h`. It is the fallback assignment for an operation that has
-// no fp8 path in the current tree.
+// no fp8 path in the current tree. The two names are one type, so this is the
+// build precision itself.
 ComputePrecision BuildComputePrecision();
 
 // Peak dense FLOPs for `device_name` at an explicit `precision`. It is the
@@ -137,13 +149,20 @@ struct PerformanceLimits {
 };
 
 // Reads the device profile `device_name`. An unknown device yields all-zero
-// limits, and the estimator reports a zero bound. The limit table is a rate
-// table: it does not depend on the build or on the precision assignment.
+// limits, so a caller must resolve the name first: `FindDeviceProfile` in
+// `nanochat/device_profile.h` returns null for a name no declaration owns, and
+// that header's `DeviceNameError` renders the message a command prints before
+// it exits. The limit table is a rate table: it does not depend on the build or
+// on the precision assignment.
 PerformanceLimits LimitsForDevice(const std::string& device_name);
 
 // The plan the estimator needs beyond `Config`: the batch, the topology, and
 // the run length. `total_tokens` 0 models one optimizer step.
 struct ModelPlan {
+  // The device the limit table is read for, and the name the report carries.
+  // Empty means the caller passes the limits itself and the report names no
+  // device.
+  std::string device_name;
   int batch = 1;                  // micro-batch per device
   int grad_accum = 1;             // micro-batches per optimizer step
   int world_size = 1;             // data-parallel device count
@@ -171,11 +190,24 @@ enum class StepPhase { kForward, kBackward, kSync, kOptimizer };
 const char* PhaseName(StepPhase phase);
 
 // One operation of the counter table, with its roofline result.
+//
+// A row carries a join identity so a predicted row and a measured row compare
+// field by field (docs/performance-model.md section 7.4): `family` is the
+// operation, `phase` is the phase of the step it belongs to, `precision` is the
+// rate its arithmetic is charged at, and the run's `shape` is on the estimate.
+// The four are strings on both sides of the join, so a comparison needs no
+// conversion step.
 struct RooflineRow {
-  std::string name;
+  std::string name;    // the display spelling; equal to `family`
+  std::string family;  // the join key: the operation, with no phase in it
   StepPhase phase = StepPhase::kForward;
   ComputePrecision precision = ComputePrecision::kFp32;
   double flops = 0.0;
+  // The work the operation issues, against the `flops` it must do. The counter
+  // table counts necessary work, so this starts equal to `flops` and the
+  // predicted ratio reads 1.0 wherever the model knows of no redundancy
+  // (docs/performance-model.md section 8).
+  double issued_flops = 0.0;
   double bytes = 0.0;
   int launches = 0;
   double compute_seconds = 0.0;
@@ -202,6 +234,13 @@ struct RooflineRow {
 // `include/nanochat/logger.h`).
 struct PerformanceEstimate {
   std::vector<RooflineRow> rows;
+  // The identity of the run the bound describes: the device the limit table was
+  // read for, the build precision, and the workload shape. They are the header
+  // a report states, and the shape is the workload key a measured row carries
+  // (docs/performance-model.md section 7.4).
+  std::string device;
+  std::string precision;
+  std::string shape;
   double forward_seconds = 0.0;
   double backward_seconds = 0.0;
   double sync_seconds = 0.0;
@@ -235,6 +274,13 @@ PerformanceEstimate EstimatePerformance(const Config& config,
                                         const PerformanceLimits& limits,
                                         const ModelPlan& plan);
 
+// The same estimator, with the limits resolved from `plan.device_name` through
+// `LimitsForDevice`. It is the form a command uses: the device the report names
+// and the rate table the bound divides by then come from one lookup, so a
+// report cannot carry one device's name beside another device's rates.
+PerformanceEstimate EstimatePerformance(const Config& config,
+                                        const ModelPlan& plan);
+
 // True when `flops` and `bytes` at `limits` are compute bound, and false when
 // they are memory bound. It is the roofline of section 7.1 without a device.
 bool IsComputeBound(double flops, double bytes, const PerformanceLimits& limits,
@@ -243,9 +289,12 @@ bool IsComputeBound(double flops, double bytes, const PerformanceLimits& limits,
 // A human-readable table of `estimate`, one row per operation, plus the bound.
 std::string FormatPerformanceReport(const PerformanceEstimate& estimate);
 
-// The same table as the `nanochat.roofline.v2` JSON object. It carries the row
-// fields, the phase split, the tokens per second, and the two utilization
-// numbers, so a benchmark report and a bound join field by field.
+// The same table as the `nanochat.roofline.v3` JSON object. It carries the row
+// fields, the identity of the run, the phase split, the tokens per second, and
+// the two utilization numbers. A row states its duration as `ms` and its
+// predicted work ratio, which are the two keys a `nanochat.bench.v3` row also
+// states, so a bound and a measurement join on `family`, `phase`, `precision`,
+// and `shape` (docs/performance.md section 3.4).
 std::string PerformanceReportJson(const PerformanceEstimate& estimate);
 
 }  // namespace nanochat

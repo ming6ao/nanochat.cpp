@@ -71,7 +71,7 @@ today.
 | File | Contents |
 |---|---|
 | [campaigns.md](campaigns.md) | One section per finished campaign: the dates, the outcome, the defects it found, the open items, and the evidence path. Read it before you reopen a settled question |
-| [baselines.json](baselines.json) | The measured baselines: `attention`, `attention_e2e`, `cpu_train`, and `cpu_gemm`. Each entry names the command that produced it and the revision. Update an entry only with a real run |
+| [baselines.json](baselines.json) | The measured baselines: `attention`, `attention_e2e`, `cpu_train`, and `cpu_gemm`. Each entry names the command that produced it and the revision. Update an entry only with a real run, and keep `validated_on` naming the device that measured it |
 
 ## The contract vocabulary, `spec/`
 

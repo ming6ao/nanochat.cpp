@@ -23,8 +23,8 @@ exports_files([
 # It is a leaf: it depends only on `nanochat/tensor.h`, so the CPU reference
 # backend can link it to answer `GetCaps()` under `--config=sim` without
 # gaining a dependency on the workflow layer. `PeakFlopsForDevice` in
-# `train.cc` remains the authority for the MFU string patterns;
-# `//tests:device_profile_test` keeps the two consistent.
+# `train.cc` reads a row's `reference_peak_flops` through this library, so a
+# card's rate is declared once; `//tests:device_profile_test` holds it there.
 cc_library(
     name = "device_profile",
     srcs = [

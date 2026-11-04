@@ -94,6 +94,16 @@ COMMANDS = (
         "                             CPU only, no GPU queue; see",
         "                             docs/performance-model.md",
     )),
+    Command("attain", (
+        "  attain --bench FILE --roofline FILE [--json|--markdown]",
+        "                             join a bound with a measurement; the",
+        "                             attainment record of",
+        "                             docs/performance-model.md section 10",
+    )),
+    Command("devices", (
+        "  devices [--json]           list the declared device names",
+        "                             (backends/*/caps.json)",
+    )),
     Command("pgo", (
         "  pgo <action> [opts]        the profile-guided optimization loop:",
         "                             measure, trace, analyze, compare, status;",

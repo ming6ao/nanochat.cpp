@@ -464,8 +464,13 @@ int main(int argc, char** argv) {
     // The share of every row is the card's own declared rate, and `--peak`
     // overrides it. The report reads the card and the precision, so this file
     // names neither.
-    report.UseDevicePeak();
+    report.UseDevicePeak(nanochat::dev::BenchDeviceName());
     if (peak_gflops > 0.0) report.SetPeakFlops(peak_gflops * 1e9);
+    // The join identity of the roofline report's Muon row: the family the
+    // counter table names and the phase of the step it belongs to
+    // (docs/performance-model.md section 7.4). The shape is the group set, so a
+    // measured row joins the model row only at a matching group set.
+    report.SetRowIdentity("muon_orthogonalisation", "optimizer");
     const std::string shape = ShapeLabel(bench.profile);
     for (std::size_t i = 0; i < bench.groups.size(); ++i) {
       const Group& group = bench.groups[i];

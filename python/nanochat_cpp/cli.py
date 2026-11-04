@@ -517,6 +517,30 @@ def cmd_roofline(argv: list[str], ctx: Context) -> int:
                          str(binary), *argv])
 
 
+def cmd_attain(argv: list[str], ctx: Context) -> int:
+    """Join a bound with a measurement (docs/performance-model.md section 10).
+
+    The record is derived, not transcribed: the two reports the model and the
+    benchmark already write carry the identity keys a join needs, so this
+    command is the only place that puts them side by side.
+    """
+    from . import attain
+
+    del ctx  # A join is arithmetic over two files; it needs no build.
+    return attain.main(argv)
+
+
+def cmd_devices(argv: list[str], ctx: Context) -> int:
+    """Print the declared device names (docs/simulator.md section 7)."""
+    del ctx
+    names = declared_device_names()
+    if argv[:1] == ["--json"]:
+        print(json.dumps({"devices": names}))
+    else:
+        print("\n".join(names))
+    return 0
+
+
 def _tempdir(prefix: str) -> str:
     import tempfile
     return tempfile.mkdtemp(prefix=prefix, dir="/tmp")
@@ -800,7 +824,28 @@ def _tail(path: str, count: int) -> list[str]:
         return [line.rstrip("\n") for line in handle.readlines()[-count:]]
 
 
-SIM_DEVICES = ("h100", "h200", "a100", "t4", "gtx1080ti")
+def declared_device_names() -> list[str]:
+    """The device names the tree declares, read from `backends/*/caps.json`.
+
+    The declaration is the one source of the device set: a simulated run, a
+    roofline report, and a benchmark all name a device this list holds. Reading
+    it here keeps the command line from carrying a second copy that drifts from
+    the declarations, which is what a hard-coded tuple did
+    (docs/simulator.md section 7).
+    """
+    import json
+    names: list[str] = []
+    for path in sorted(REPO_ROOT.glob("backends/*/caps.json")):
+        try:
+            with open(path, encoding="utf-8") as handle:
+                body = json.load(handle)
+        except (OSError, ValueError):
+            continue
+        for device in body.get("devices", []):
+            name = device.get("name")
+            if isinstance(name, str) and name and device.get("is_device"):
+                names.append(name)
+    return names
 SIM_SUITES = {
     "correctness": ["//tests:oracle_test", "//tests:train_parity_test",
                     "//tests:sim_numerics_test", "//tests:numerics_trace_test"],
@@ -855,8 +900,9 @@ def cmd_simulate(argv: list[str], ctx: Context) -> int:
             folded.append(argument)
             index += 1
     mode, device, suite, precision = _simulate_args(folded)
-    if device not in SIM_DEVICES:
-        die(f"simulate: unknown device '{device}' ({' '.join(SIM_DEVICES)})")
+    devices = declared_device_names()
+    if device not in devices:
+        die(f"simulate: unknown device '{device}' ({' '.join(devices)})")
 
     if mode == "compile":
         ptxas_log = os.environ.get(
@@ -1027,6 +1073,8 @@ COMMANDS = {
     "bench": _alias("t3-bench"),
     "profile": cmd_profile,
     "roofline": cmd_roofline,
+    "attain": cmd_attain,
+    "devices": cmd_devices,
     "pgo": cmd_pgo,
     "doctor": cmd_doctor,
     "simulate": cmd_simulate,

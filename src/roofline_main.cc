@@ -24,6 +24,7 @@
 #include <cstring>
 #include <string>
 
+#include "nanochat/device_profile.h"
 #include "nanochat/mfu.h"
 #include "nanochat/sandbox.h"
 #include "src/cli.h"
@@ -35,6 +36,7 @@ void Usage() {
       stderr,
       "usage: roofline_main [options]\n"
       "  --device NAME          device profile (default h100)\n"
+      "  --list-devices         print the declared device names and exit\n"
       "  --precision P          fp32|bf16|fp8, or auto (default auto)\n"
       "  --batch N              micro-batch per device (default 1)\n"
       "  --grad-accum N         micro-batches per step (default 1)\n"
@@ -45,7 +47,7 @@ void Usage() {
       "  --overlap F            fraction of the sync hidden (default 0)\n"
       "  --reference-copies     model the reference per-step weight copies\n"
       "  --muon-ns-steps N      Muon iteration count; 0 keeps it memory bound\n"
-      "  --json                 write nanochat.roofline.v2 JSON\n"
+      "  --json                 write nanochat.roofline.v3 JSON\n"
       "  --help                 this message\n"
       "  [model flags: --layers --heads --kv-heads --hidden --seq\n"
       "   --vocab --padded-vocab --window-pattern --rope-base\n"
@@ -98,6 +100,9 @@ int main(int argc, char** argv) {
     const char* text = nullptr;
     if (flag == "--help" || flag == "-h") {
       Usage();
+      return 0;
+    } else if (flag == "--list-devices") {
+      std::printf("%s\n", nanochat::DeviceNameList().c_str());
       return 0;
     } else if (flag == "--json") {
       json = true;
@@ -166,9 +171,21 @@ int main(int argc, char** argv) {
     return 2;
   }
 
-  const nanochat::PerformanceLimits limits = nanochat::LimitsForDevice(device);
+  // An unknown device is refused, with the declared list in the message. A
+  // zero limit table would produce a report of zeros that reads like a very
+  // fast step, and the simulator refuses the same way with the same text
+  // (docs/performance-model.md section 6).
+  if (nanochat::FindDeviceProfile(device) == nullptr) {
+    std::fprintf(stderr, "roofline: %s\n",
+                 nanochat::DeviceNameError(device).c_str());
+    return 2;
+  }
+
+  // The name the report carries and the rate table the bound divides by come
+  // from one lookup, so the two cannot disagree.
+  plan.device_name = device;
   const nanochat::PerformanceEstimate estimate =
-      nanochat::EstimatePerformance(config, limits, plan);
+      nanochat::EstimatePerformance(config, plan);
 
   if (json) {
     std::fputs(nanochat::PerformanceReportJson(estimate).c_str(), stdout);

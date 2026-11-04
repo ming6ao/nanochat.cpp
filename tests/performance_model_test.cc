@@ -36,6 +36,7 @@ using nanochat::ModelPlan;
 using nanochat::PerformanceEstimate;
 using nanochat::PerformanceLimits;
 using nanochat::RooflineRow;
+using nanochat::StepPhase;
 
 int g_failures = 0;
 
@@ -197,11 +198,15 @@ void TestRooflineLabels() {
   bool saw_compute = false;
   bool saw_memory = false;
   for (const RooflineRow& row : estimate.rows) {
-    if (row.name == "gemm_forward:fp8") {
+    // A matrix row is the `gemm` family at the forward phase and the fp8 rate;
+    // the phase and the precision are fields of the row, not parts of its name
+    // (docs/performance-model.md section 7.4).
+    if (row.family == "gemm" && row.phase == StepPhase::kForward &&
+        row.precision == ComputePrecision::kFp8) {
       ExpectTrue(row.limit == "compute", "the matrix row is compute bound");
       saw_compute = true;
     }
-    if (row.name.rfind("quantization_cast", 0) == 0) {
+    if (row.family == "quantization_cast") {
       ExpectTrue(row.limit == "memory", "the cast row is memory bound");
       saw_memory = true;
     }
@@ -211,12 +216,10 @@ void TestRooflineLabels() {
 }
 
 double RowSeconds(const PerformanceEstimate& estimate,
-                  const std::string& prefix) {
+                  const std::string& family) {
   double total = 0.0;
   for (const RooflineRow& row : estimate.rows) {
-    if (row.name.compare(0, prefix.size(), prefix) == 0) {
-      total += row.bound_seconds;
-    }
+    if (row.family == family) total += row.bound_seconds;
   }
   return total;
 }
@@ -238,9 +241,8 @@ void TestDepth24Bound() {
   // The rows are per optimizer step; the run bound multiplies by the
   // step count.
   const double steps = static_cast<double>(estimate.steps);
-  const double matmul_min = RowSeconds(estimate, "gemm_") * steps / 60.0;
-  const double attention_min =
-      RowSeconds(estimate, "attention_") * steps / 60.0;
+  const double matmul_min = RowSeconds(estimate, "gemm") * steps / 60.0;
+  const double attention_min = RowSeconds(estimate, "attention") * steps / 60.0;
   const double cast_min =
       RowSeconds(estimate, "quantization_cast") * steps / 60.0;
   const double sync_min = estimate.sync_seconds * steps / 60.0;
@@ -257,8 +259,8 @@ void TestDepth24Bound() {
   bf16_plan.build = ComputePrecision::kBf16;
   const PerformanceEstimate bf16 =
       nanochat::EstimatePerformance(config, limits, bf16_plan);
-  const double bf16_min = (RowSeconds(bf16, "gemm_") +
-                           RowSeconds(bf16, "attention_") + bf16.sync_seconds) *
+  const double bf16_min = (RowSeconds(bf16, "gemm") +
+                           RowSeconds(bf16, "attention") + bf16.sync_seconds) *
                           steps / 60.0;
   ExpectNear(bf16_min, 61.0, 3.0, "depth-24 bf16 subtotal");
 }

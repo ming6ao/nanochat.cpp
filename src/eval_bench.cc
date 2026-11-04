@@ -25,6 +25,7 @@
 #include <string>
 #include <vector>
 
+#include "nanochat/bench.h"
 #include "nanochat/kernels.h"
 #include "nanochat/model.h"
 #include "nanochat/sandbox.h"
@@ -34,16 +35,17 @@
 namespace {
 
 void Usage() {
-  std::fprintf(stderr,
-               "usage: eval_bench [options]\n"
-               "  --batch N              batch size (default 32)\n"
-               "  --iters N              timed forwards (default 10)\n"
-               "  --warmup N             warm-up forwards (default 3)\n"
-               "  --seed N               token/weight seed (default 42)\n"
-               "  --json                 write a nanochat.bench.v1 JSON row\n"
-               "  [model flags: --layers --heads --kv-heads --hidden --seq\n"
-               "   --vocab --padded-vocab --window-pattern --rope-base\n"
-               "   --value-embedding <0|1>]\n");
+  std::fprintf(
+      stderr,
+      "usage: eval_bench [options]\n"
+      "  --batch N              batch size (default 32)\n"
+      "  --iters N              timed forwards (default 10)\n"
+      "  --warmup N             warm-up forwards (default 3)\n"
+      "  --seed N               token/weight seed (default 42)\n"
+      "  --json                 write a nanochat.bench.v3 JSON report\n"
+      "  [model flags: --layers --heads --kv-heads --hidden --seq\n"
+      "   --vocab --padded-vocab --window-pattern --rope-base\n"
+      "   --value-embedding <0|1>]\n");
 }
 
 // Deterministic xorshift64* so a run reproduces on any backend.
@@ -173,17 +175,26 @@ int main(int argc, char** argv) {
         model_config.num_kv_heads, model_config.hidden_dim,
         model_config.padded_vocab_size, model_config.window_pattern.c_str());
 
+    // The report is the shared writer (`nanochat/bench.h`), so this file emits
+    // one document for one schema and does not format JSON by hand. The arena,
+    // the token rate, and the baseline are fields beside the row, not rows:
+    // they describe the run rather than one operation of it.
     if (json) {
-      std::printf(
-          "{\"schema\":\"nanochat.bench.v1\",\"rows\":[{\"name\":"
-          "\"eval_forward\",\"shape\":\"%s\",\"ms\":%.6f,\"gflops\":0.0}],"
-          "\"arena_bytes\":%zu,\"tokens_per_second\":%.1f,"
-          "\"forward_ms\":%.6f,\"baseline_tokens_per_second\":%.1f,"
-          "\"baseline_forward_ms\":%.6f,\"speedup_vs_baseline\":%.4f,"
-          "\"batch\":%d,\"seq\":%d}\n",
-          shape, ms_per_forward, arena_bytes, tokens_per_second, ms_per_forward,
-          kBaselineTokensPerSecond, kBaselineForwardMs,
-          tokens_per_second / kBaselineTokensPerSecond, batch, seq);
+      nanochat::BenchReport report;
+      report.SetRowIdentity("eval_forward");
+      report.Add("eval_forward", shape, ms_per_forward, 0.0);
+      report.SetExtraInt("arena_bytes", static_cast<long long>(arena_bytes));
+      report.SetExtra("tokens_per_second", tokens_per_second);
+      report.SetExtra("forward_ms", ms_per_forward);
+      report.SetExtra("baseline_tokens_per_second", kBaselineTokensPerSecond);
+      report.SetExtra("baseline_forward_ms", kBaselineForwardMs);
+      report.SetExtra("speedup_vs_baseline",
+                      tokens_per_second / kBaselineTokensPerSecond);
+      report.SetExtraInt("batch", batch);
+      report.SetExtraInt("seq", seq);
+      nanochat::BenchOptions options;
+      options.json = true;
+      report.Print(options);
     } else {
       std::printf("eval_bench: %s\n", shape);
       std::printf("  arena       : %zu bytes (%.1f MiB)\n", arena_bytes,

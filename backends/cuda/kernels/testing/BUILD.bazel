@@ -55,7 +55,8 @@ cc_library(
     deps = ["//include/nanochat:nanochat"],
 )
 
-# CUDA-event timer and the `nanochat.bench.v1` report used by the benchmarks.
+# CUDA-event timer used by the benchmarks, plus the `nanochat.bench.v3` report
+# writer they share with the host-only harness benchmarks (`nanochat/bench.h`).
 # Header-only: every benchmark compiles it into its own translation unit.
 cc_library(
     name = "bench_utils",

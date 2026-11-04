@@ -12,7 +12,7 @@
 //   * mlp_gemm_tb1 -- the same MLP forward with transpose_b.
 //
 // The body calls kernels::Gemm directly. It warms up, then reports the best of
-// N rounds. The report uses the `nanochat.bench.v1` schema from
+// N rounds. The report uses the `nanochat.bench.v3` schema from
 // docs/performance.md. Phase 1 makes the CPU Gemm reordered and threaded with
 // OpenMP, so the benchmark reports the active OpenMP thread count.
 //
@@ -32,6 +32,7 @@
 
 #include <omp.h>
 
+#include "nanochat/bench.h"
 #include "nanochat/kernels.h"
 #include "nanochat/sandbox.h"
 #include "nanochat/tensor.h"
@@ -147,31 +148,23 @@ void PrintTable(const Shape& shape, const Result& result) {
 
 void PrintJson(const Shape* shapes, const Result* results, std::size_t count,
                int threads, const std::string& out) {
-  std::string json = "{\"schema\":\"nanochat.bench.v1\",\"threads\":";
-  json += std::to_string(threads);
-  json += ",\"rows\":[";
+  // The shared report writer (`nanochat/bench.h`), so this file emits the one
+  // benchmark schema instead of formatting a document of its own
+  // (docs/performance.md section 3.4). The thread count is a field beside the
+  // rows, because it describes the run and not one shape of it.
+  nanochat::BenchReport report;
+  report.SetExtraInt("threads", threads);
+  report.SetRowIdentity("gemm");
   for (std::size_t i = 0; i < count; ++i) {
-    char row[320];
-    std::snprintf(row, sizeof(row),
-                  "%s{\"name\":\"%s\",\"shape\":\"M=%d N=%d K=%d ta=%d tb=%d\","
-                  "\"ms\":%.6f,\"gflops\":%.6f,\"work_ratio\":1.0}",
-                  i == 0 ? "" : ",", shapes[i].name, shapes[i].m, shapes[i].n,
-                  shapes[i].k, shapes[i].transpose_a ? 1 : 0,
-                  shapes[i].transpose_b ? 1 : 0, results[i].ms,
-                  results[i].gflops);
-    json += row;
+    char shape[128];
+    std::snprintf(shape, sizeof(shape), "M=%d N=%d K=%d ta=%d tb=%d",
+                  shapes[i].m, shapes[i].n, shapes[i].k,
+                  shapes[i].transpose_a ? 1 : 0, shapes[i].transpose_b ? 1 : 0);
+    report.Add(shapes[i].name, shape, results[i].ms, results[i].gflops, 1.0);
   }
-  json += "]}";
-  std::printf("%s\n", json.c_str());
-  if (!out.empty()) {
-    std::FILE* file = std::fopen(out.c_str(), "w");
-    if (file == nullptr) {
-      std::fprintf(stderr, "cpu_gemm_bench: cannot write %s\n", out.c_str());
-      return;
-    }
-    std::fprintf(file, "%s\n", json.c_str());
-    std::fclose(file);
-  }
+  nanochat::BenchOptions options;
+  options.out = out;
+  report.Print(options);
 }
 
 void Usage() {
@@ -179,7 +172,7 @@ void Usage() {
                "usage: cpu_gemm_bench [options]\n"
                "  --warmup N   untimed warm-up calls per shape (default 1)\n"
                "  --rounds N   timed best-of-N rounds per shape (default 3)\n"
-               "  --json       emit the nanochat.bench.v1 JSON report\n"
+               "  --json       emit the nanochat.bench.v3 JSON report\n"
                "  --out PATH   also write the JSON report to PATH\n"
                "  --quiet      suppress the human-readable table\n");
 }

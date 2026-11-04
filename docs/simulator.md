@@ -335,26 +335,86 @@ wire protocol that the real pattern must follow.
 
 ## 7. Part 4: device profile table
 
-The profile table holds one entry per target. Each entry records the name, the
-compute capability, the memory size, the tensor-core flag, the bf16 flag, and
-the peak rates.
+The profile table holds one row per declared device. Each row records the name,
+the compute capability, the memory size, the capability flags, the three peak
+rates, the bandwidth, the launch cost, and the reference rate the MFU line
+divides by.
 
-Path: `include/nanochat/device_profile.h` and `src/device_profile.cc`.
-The header is additive and architect-owned.
+Path: `include/nanochat/device_profile.h` and `src/device_profile.cc`. The
+header is additive and architect-owned, and it declares the *shape* of a row and
+the lookups over the derived list. It holds no row.
 
-The table stays **beside** the MFU table in `src/train.cc`, by operator
-decision. The two tables do not merge.
+The rows are not maintained in the header. Every row comes from a `devices[]`
+entry in `backends/<name>/caps.json`, so a device bring-up adds one entry and no
+row: not in the header, not in `src/`, not in a table in a document
+([model-and-device-bringup.md](model-and-device-bringup.md) section 6).
 
-The consistency test is objective:
+The simulator, the reference backend's `GetCaps()`, the API interposer, the
+benchmark report, and the roofline estimator all read this one table. A
+simulated device is therefore described in exactly one place, and a rate the
+simulator reports is the rate the estimator divides by.
 
-- The join key is the lowercased device name.
-- The test matches a profile name against the `PeakFlopsForDevice` patterns.
-- The test asserts that the MFU rate equals the profile peak at the precision
-  the MFU table models.
-- The test asserts that every profile name resolves to one MFU entry.
+### 7.1 One rate table, not two
 
-`PeakFlopsForDevice` stays the authority for the MFU string patterns. The
-profile table is the authority for the capability fields.
+The tree used to hold a second table: a string-pattern list in `src/train.cc`
+that named about thirty cards and one rate each. The two disagreed by design on
+a card whose reference recipe counts at tensor cores, so a run could log an MFU
+line against one number and be compared with a roofline bound computed from
+another.
+
+The declaration now states both numbers, in two fields:
+
+| Field | Meaning |
+|---|---|
+| `reference_peak_flops` | The rate the reference recipe's MFU line divides by |
+| `reference_precision` | The precision that rate is quoted at |
+
+`PeakFlopsForDevice` reads the first field. `PeakFlopsForCompute` reads the
+declared rate at the precision it is asked for. Both go through the one
+accessor, `PeakFlopsFor(profile, precision)`, so a card has one number per
+precision and one reference number. `//tests:device_profile_test` enforces it.
+
+A card with no declaration has no rate. The MFU line then reads 0 and the
+benchmark prints that it states no share, which is the honest answer and the one
+the header's caption reports.
+
+### 7.2 One answer for an unknown device
+
+A name no declaration owns is refused. `DeviceNameError` renders the message and
+`DeviceNameList` gives the declared set, so `tools/nanochat simulate` and
+`tools/nanochat roofline` refuse the same name with the same text.
+
+`tools/nanochat devices` prints the declared set, and the simulator validates
+against it. That is why the command line holds no device tuple: the accepted set
+is the declared set, so a new device needs one `devices[]` entry and no edit to
+the tool.
+
+### 7.3 The lookup is deterministic
+
+`FindDeviceProfile` lowercases and strips the whitespace of a name. It looks for
+an exact match first, then for a declared name inside the given string, and the
+**longest** declared name wins. A vendor spelling such as
+`NVIDIA H100 80GB HBM3` therefore reaches `h100` on every build, whatever order
+the table is sorted in.
+
+A sub-SKU with its own rated peak needs its own `devices[]` entry. The tree
+declares no `h100nvl` row, so an H100 NVL resolves to `h100`.
+
+### 7.4 The consistency test
+
+`//tests:device_profile_test` is a plain CPU test and needs no GPU. It asserts:
+
+- The join key is the lowercased device name, and every declared name resolves.
+- `reference_peak_flops` is positive and equals one of the declared rates.
+- `reference_precision` is the precision the documented rule selects: bf16 when
+  the card has bf16, and fp32 otherwise.
+- `PeakFlopsForDevice` reads exactly the declared reference rate.
+- Every declared field of a declared device appears in its derived row, and the
+  derived table holds exactly one row per declared device.
+- A declaration that is not an accelerator contributes no row, because it has no
+  launch cost, no HBM rate, and no peak rate.
+- An undeclared name has no row, so a device is added by a declaration and never
+  by a table edit.
 
 The bf16 field is device metadata only. No dtype in the tree consumes it.
 The profile records the TF32 gap: the fp32 path uses `CUBLAS_COMPUTE_32F` and
