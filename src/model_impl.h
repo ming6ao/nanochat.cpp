@@ -20,7 +20,7 @@
 // is public here only so the oracle/gradient tests under `src/` can read the
 // saved logits, inspect the parameter views, and so `src/inference_view.cc` can
 // fill the read-only view the inference graphs read (`src/inference_view.h`,
-// docs/api-surface.md R9).
+// spec/api-surface.md R9).
 
 namespace nanochat {
 

@@ -118,7 +118,7 @@ struct MeshTrainConfig {
   // A resume continues the token stream from the data cursor beside the
   // checkpoint (docs/distributed-design.md section 11). A missing or unreadable
   // cursor replays the consumed batches from the start of the stream, which is
-  // the same rule the multi-process driver follows (docs/api-surface.md R13).
+  // the same rule the multi-process driver follows (spec/api-surface.md R13).
   bool resume = false;
 
   // The MFU inputs (docs/client-runtime-design.md section 20.5). A zero

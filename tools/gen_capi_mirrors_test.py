@@ -1,6 +1,6 @@
 """T0: the three C ABI mirrors are generated from one header.
 
-``docs/api-surface.md`` R11b: ``tools/gen_capi_mirrors.py`` reads
+``spec/api-surface.md`` R11b: ``tools/gen_capi_mirrors.py`` reads
 ``include/nanochat/capi.h``, writes the ``_SIGNATURES`` table and the
 ``static_assert`` block, and compares the hand-written ``_LAYOUT`` table of
 ``python/nanochat_cpp/_core.py`` with the header through ``_core.layout()``.

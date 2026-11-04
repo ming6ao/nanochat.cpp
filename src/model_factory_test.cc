@@ -1,4 +1,4 @@
-// The model factory's three-state selector (docs/api-surface.md R8).
+// The model factory's three-state selector (spec/api-surface.md R8).
 //
 // The two public `Model::Create` overloads differ in one way: `Create(config)`
 // reads no spec at all, and `Create(config, spec_name)` reads one, where a null

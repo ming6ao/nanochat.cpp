@@ -377,7 +377,7 @@ void MeshTrainDriver::Save(int step) {
   // The data cursor rides beside the checkpoint, in the same file the
   // multi-process driver writes, so a resume continues the token stream instead
   // of replaying it (docs/distributed-design.md section 11,
-  // docs/api-surface.md R13). A checkpoint that failed to save gets no cursor.
+  // spec/api-surface.md R13). A checkpoint that failed to save gets no cursor.
   if (loader_ != nullptr) {
     WriteDataCursor(config_.checkpoint(), loader_->State());
   }

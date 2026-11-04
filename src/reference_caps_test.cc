@@ -1,4 +1,4 @@
-// The reference backend's capability report (`docs/api-surface.md` R4b).
+// The reference backend's capability report (`spec/api-surface.md` R4b).
 //
 // Two facts, and they are coupled. `kernels::GetCaps()` answers with the nine
 // bits `backends/cpu/caps.json` declares for the `cpu` entry, read through

@@ -470,7 +470,7 @@ void TestDocumentLoader() {
 // The data-cursor sidecar's layout, pinned byte for byte. Both distribution
 // drivers write it through one unit, and checkpoints written before that unit
 // existed still resume, so the bytes may not drift
-// (docs/api-surface.md R13, docs/distributed-design.md section 11).
+// (spec/api-surface.md R13, docs/distributed-design.md section 11).
 void TestDataCursorSidecar() {
   nanochat::DataLoaderState state;
   state.epoch = 2;

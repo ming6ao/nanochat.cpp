@@ -2,7 +2,7 @@
 """Generate the capability rows that are data, and check the rows that are
 prose.
 
-``docs/api-surface.md`` R4a splits the capability vocabulary by *content*.
+``spec/api-surface.md`` R4a splits the capability vocabulary by *content*.
 ``spec/capability_bits.md`` section 3 is the authority for the fifteen names and
 their order, and ``include/nanochat/tensor.h`` is the authority for the values.
 A table that holds nothing but a name, a bit and a position is therefore
@@ -25,7 +25,7 @@ bytes between the markers and touches nothing else; running it twice leaves the
 tree unchanged.
 
 The same ``--check`` also runs the two seam inventory checks of
-``docs/api-surface.md`` R14, because they consume the same parse:
+``spec/api-surface.md`` R14, because they consume the same parse:
 
 * **kind half** -- ``spec/block_kinds.md`` section 2 names a kind that
   ``src/model_spec.cc`` does not accept, or ``src/model_spec.cc`` accepts a
@@ -70,7 +70,7 @@ TENSOR_H = "include/nanochat/tensor.h"
 #: The authority for the seam inventory the six closed lists are read from.
 KERNELS_H = "include/nanochat/kernels.h"
 
-#: The prose authority for the block kinds (`docs/api-surface.md` R14).
+#: The prose authority for the block kinds (`spec/api-surface.md` R14).
 SPEC_KINDS = "spec/block_kinds.md"
 
 #: The reader whose closed block-entry vocabularies the kind half compares.

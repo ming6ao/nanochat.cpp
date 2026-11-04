@@ -68,7 +68,7 @@ filegroup(
     srcs = ["gen_matrix.py"],
 )
 
-# The capability vocabulary generator and checker (docs/api-surface.md R4a).
+# The capability vocabulary generator and checker (spec/api-surface.md R4a).
 # `--write` owns the rows that hold a name, a bit, and a position; `--check`
 # compares the rows that also carry prose. It reads spec/capability_bits.md,
 # include/nanochat/tensor.h, src/capability_names.h, and the two caps.json
@@ -78,7 +78,7 @@ filegroup(
     srcs = ["contract_vocabulary.py"],
 )
 
-# The C ABI mirror generator (docs/api-surface.md R11b, R20). `--write` owns the
+# The C ABI mirror generator (spec/api-surface.md R11b, R20). `--write` owns the
 # `_SIGNATURES` table of `python/nanochat_cpp/_core.py` and the `static_assert`
 # block of `bindings/nanochat_capi_test.cc`. `--check` compares the hand-written
 # `_LAYOUT` table in `_core.py` against include/nanochat/capi.h as well, in both
@@ -147,7 +147,7 @@ sh_test(
 )
 
 # T0 gate for the capability vocabulary and the seam inventory
-# (docs/api-surface.md R4a and R14). `--check` compares the hand-written rows of
+# (spec/api-surface.md R4a and R14). `--check` compares the hand-written rows of
 # src/capability_names.h and every caps.json `features[]` array against
 # spec/capability_bits.md section 3 and include/nanochat/tensor.h, the kinds of
 # spec/block_kinds.md section 2 against the spellings src/model_spec.cc accepts,
@@ -172,7 +172,7 @@ py_test(
     size = "small",
 )
 
-# T0 gate for the three C ABI mirrors (docs/api-surface.md R11b). `--check`
+# T0 gate for the three C ABI mirrors (spec/api-surface.md R11b). `--check`
 # compares the ctypes structures, the signature table, and the `static_assert`
 # block against include/nanochat/capi.h, naming the file, the structure, and the
 # field on a disagreement in either direction. The mutation cases prove each

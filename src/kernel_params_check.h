@@ -1,7 +1,7 @@
 #ifndef NANOCHAT_SRC_KERNEL_PARAMS_CHECK_H_
 #define NANOCHAT_SRC_KERNEL_PARAMS_CHECK_H_
 
-// Debug-only precondition checks at the kernel seam (docs/api-surface.md R3).
+// Debug-only precondition checks at the kernel seam (spec/api-surface.md R3).
 //
 // The seam has no failure channel (`include/nanochat/kernels.h`): a bad
 // parameter is a wrong number, not a status, and the oracle is the release

@@ -297,7 +297,7 @@ void TestDriverWritesTheDataCursor() {
 
 // A resume continues the token stream from the cursor beside the checkpoint
 // instead of replaying the shard from its start
-// (docs/api-surface.md R13, docs/distributed-design.md section 11).
+// (spec/api-surface.md R13, docs/distributed-design.md section 11).
 //
 // The sidecar is rewritten to the cursor of the stream start while the
 // checkpoint keeps its step, so the two behaviours separate: a resume that

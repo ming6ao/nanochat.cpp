@@ -1,17 +1,21 @@
 # spec/ — the contract documents. This package exists so a check can read them.
 #
-# The five files are the prose authorities the tooling derives from:
+# Six files are the prose authorities the tooling derives from:
 # `capability_bits.md` section 3 for the fifteen capability names and their
 # order, `block_kinds.md` section 2 for the block kinds, `pointwise_ops.md` for
-# the accuracy bound of each op code, and `versions.md` and `decisions.md` for
-# the contract numbers and the records behind them. They were files of the root
-# package until a test needed one: a Bazel test reads only its runfiles, so a
-# file with no label cannot be data. The export is the whole change; no document
-# is edited or moved.
+# the accuracy bound of each op code, `versions.md` and `decisions.md` for the
+# contract numbers and the records behind them, and `api-surface.md` for the
+# review rows R3, R4a, R4b, R8, R9, R11a, R11b, R12, R13, and R20 that the
+# generators and the tests cite. They were files of the root package until a
+# test needed one: a Bazel test reads only its runfiles, so a file with no label
+# cannot be data. `api-surface.md` moved here from `docs/` for the same reason:
+# `tools/gen_capi_mirrors.py` and `tools/contract_vocabulary.py` answer to its
+# rows. No document was edited by a move.
 
 package(default_visibility = ["//visibility:public"])
 
 exports_files([
+    "api-surface.md",
     "block_kinds.md",
     "capability_bits.md",
     "decisions.md",

@@ -1,5 +1,5 @@
 // The model factory: the body of the two public `Model::Create` overloads
-// (docs/api-surface.md R8).
+// (spec/api-surface.md R8).
 //
 // The train graph lives in `model.cc`; this file holds everything that turns a
 // `Config` into it, so the graph file reads no spec and builds no plan of its

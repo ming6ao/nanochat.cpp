@@ -1,5 +1,5 @@
 // src/data_cursor.cc -- the data-cursor sidecar
-// (docs/distributed-design.md section 11, docs/api-surface.md R13).
+// (docs/distributed-design.md section 11, spec/api-surface.md R13).
 //
 // The layout moved here unchanged from `src/train.cc`, which wrote it before
 // this unit existed, so a checkpoint written by an older run still resumes. A

@@ -389,7 +389,7 @@ int TrainModel::BlockWindowLeft(int layer) const {
 
 // Both public entry points delegate to the factory in `model_factory.cc`, which
 // owns the shared validation, the spec lookup, the plan, and the plan log line
-// (docs/api-surface.md R8). This file keeps the graph.
+// (spec/api-surface.md R8). This file keeps the graph.
 std::unique_ptr<Model> Model::Create(const Config& config, std::string* error) {
   return CreateTrainModel(config, SpecSource::kConfigOnly, nullptr, error);
 }

@@ -148,7 +148,7 @@ cc_test(
     size = "small",
 )
 
-# The reference backend's capability report (`docs/api-surface.md` R4b). The
+# The reference backend's capability report (`spec/api-surface.md` R4b). The
 # plan test above supplies a *fabricated* mask; this one reads the mask the
 # reference backend actually reports, so the declaration in
 # `backends/cpu/caps.json` and `GetCaps()` cannot drift apart, and so the
@@ -258,12 +258,12 @@ cc_library(
 # autograd engine (DESIGN.md section 6).
 #
 # `model_factory.cc` sits in this target rather than in one of its own, because
-# it is the body of the two public `Model::Create` overloads (docs/api-surface.md
+# it is the body of the two public `Model::Create` overloads (spec/api-surface.md
 # R8): it constructs `TrainModel`, and `model.cc` calls it, so a separate library
 # would be a cycle. It is the same layer as `model.cc` and adds no dependency the
 # graph does not already have - the spec reader and the planner are below it.
 #
-# `inference_view.cc` is here for the same reason (docs/api-surface.md R9): it
+# `inference_view.cc` is here for the same reason (spec/api-surface.md R9): it
 # builds the read-only view `generate.cc` reads the weights through, and it is
 # the one source file that pairs that view with `model_impl.h`, so the inference
 # graph itself names no training type.
@@ -292,7 +292,7 @@ cc_library(
     hdrs = [
         "cli.h",
         # The data-cursor sidecar both distribution drivers resume through
-        # (docs/api-surface.md R13).
+        # (spec/api-surface.md R13).
         "data_cursor.h",
         "eval.h",
         # The fp8 eligibility policy, beside the performance model that prices
@@ -302,7 +302,7 @@ cc_library(
         "generate.h",
         "hw_gate.h",
         # The debug-only seam precondition check `ops.cc` calls at each family
-        # boundary (docs/api-surface.md R3).
+        # boundary (spec/api-surface.md R3).
         "kernel_params_check.h",
         "inference_view.h",
         "mesh_collective.h",
@@ -496,7 +496,7 @@ cc_test(
     size = "small",
 )
 
-# The model factory's three-state selector (docs/api-surface.md R8): the
+# The model factory's three-state selector (spec/api-surface.md R8): the
 # plan-less `Create(config)` builds a model with no plan, and the named selector
 # reads a spec - a null name selects the built-in default one - so the same
 # `Config` is accepted by one source and rejected by the other. CPU only.

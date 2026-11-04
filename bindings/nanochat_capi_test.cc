@@ -44,7 +44,7 @@ namespace {
 // format in silence (docs/checkpoint-format.md sections 5.3 and 9).
 //
 // The block is generated from include/nanochat/capi.h by
-// `tools/gen_capi_mirrors.py --write` (docs/api-surface.md R11b), so the rows
+// `tools/gen_capi_mirrors.py --write` (spec/api-surface.md R11b), so the rows
 // follow the header's order and a hand does not type them.
 // BEGIN GENERATED (tools/gen_capi_mirrors.py --write) static_assert
 // clang-format off

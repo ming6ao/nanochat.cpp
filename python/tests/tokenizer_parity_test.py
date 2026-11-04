@@ -2,7 +2,7 @@
 
 ``nanochat_cpp.data`` stays standard library only, because five callers read
 the ``NCTOKEN1`` artifact where no shared library exists
-(``docs/api-surface.md`` R12). The duplicate reader is therefore deliberate, and
+(``spec/api-surface.md`` R12). The duplicate reader is therefore deliberate, and
 this test is the gate it lacked: it loads one artifact twice, once through the C
 ABI (``nanochat_tokenizer_load`` with ``nanochat_encode`` and
 ``nanochat_decode``) and once through :mod:`nanochat_cpp.data`, then compares

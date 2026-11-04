@@ -657,7 +657,7 @@ TrainLoop::TrainLoop(TrainConfig config) : config_(std::move(config)) {
     // the stored epoch's: the constructor primes the epoch and the encoded
     // buffer from the cursor, so the packing continues where it stopped. The
     // in-process driver resumes the same way, and the two may not disagree
-    // (docs/api-surface.md F18). A `Reset` after that opens the next epoch and
+    // (spec/api-surface.md F18). A `Reset` after that opens the next epoch and
     // starts at position 0.
     train_source = ShardDocumentSourceFactory(std::move(train_source),
                                               config_.rank, config_.world_size,

@@ -399,6 +399,34 @@ profiles/pgo/<stage>-<device>/
 | `pgo compare` | `verdict.json` | `pgo record` |
 | `pgo record` | `loop.json` | the next iteration, and the next session |
 
+#### Retention
+
+A trace is hundreds of megabytes, and it describes one host on one day. Keep
+the argument and drop the trace. The record is a few kilobytes, and it is what
+the next session reads.
+
+- Keep every iteration's `loop.json`, `REPORT.md`, `DECISION.md`, `ideas.json`,
+  `gate.json`, `verdict.json`, `measurement.json`, and `analysis.json`. Never
+  delete a record.
+- Keep the trace of the two latest iterations of a target. Delete the trace of
+  an older iteration: the `before/trace/` and `after/trace/` directories, and
+  `before/chrome.json`.
+- Delete a target that no report cites.
+
+This command keeps the two latest iterations of one target and deletes the
+traces of the others:
+
+```bash
+cd profiles/pgo/<target>
+ls -d iter-* | sort | head -n -2 |
+  xargs -r -I{} rm -rf {}/before/trace {}/before/chrome.json {}/after/trace
+```
+
+The Chrome trace is the largest file: `profiles/pgo/base-h100/iter-01` held
+150 MB in `before/chrome.json`. The directory `profiles/` held 915 MB in three
+targets. The budget for the whole directory is 2 GB. Run the command when the
+directory passes that budget, or when a campaign closes.
+
 The schemas carry a version, and the tests read them:
 
 ```json

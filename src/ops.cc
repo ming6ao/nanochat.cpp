@@ -41,7 +41,7 @@ namespace {
 // The value of a scalar argument whose host copy is the one to check. A
 // coefficient the caller keeps on device (`ScalarArg::dev`, docs/scalar-
 // arguments.md) is read by the kernel, so reading it here would be the host
-// round trip `docs/api-surface.md` R3 rules out; that case passes unchecked.
+// round trip `spec/api-surface.md` R3 rules out; that case passes unchecked.
 // It exists only in a debug build, where the checks below are the only callers.
 #ifndef NDEBUG
 bool FiniteArg(ScalarArg arg) {

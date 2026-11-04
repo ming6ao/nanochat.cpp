@@ -1,7 +1,7 @@
 """T0: the capability vocabulary is generated where it is data, checked where
 it is prose.
 
-``docs/api-surface.md`` R4a splits the capability tables by content, and
+``spec/api-surface.md`` R4a splits the capability tables by content, and
 ``tools/contract_vocabulary.py`` is the one script that does both halves:
 ``--write`` rewrites the rows that hold nothing but a name, a bit, and a
 position, and ``--check`` compares the rows that also carry hand-written prose.

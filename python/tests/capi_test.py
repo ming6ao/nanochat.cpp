@@ -1,4 +1,4 @@
-"""T0: the three C entry points that ``docs/api-surface.md`` R11a found unbound.
+"""T0: the three C entry points that ``spec/api-surface.md`` R11a found unbound.
 
 ``nanochat_generate_multi``, ``nanochat_rl_step``, and
 ``nanochat_optim_config_size`` were declared in ``include/nanochat/capi.h`` and
@@ -145,7 +145,7 @@ class CapiTest(unittest.TestCase):
         self.assertEqual(_core.check_optim_config_size(self.lib), mirrored)
 
     def test_the_size_guard_rejects_a_wrong_size(self) -> None:
-        # The guard is the import-time gate of `docs/api-surface.md` R11a: a
+        # The guard is the import-time gate of `spec/api-surface.md` R11a: a
         # library whose struct is another size must fail before a caller fills
         # the mirror in, because a one-field shift renames every field after it.
         with self.assertRaises(_core.NanochatError) as caught:

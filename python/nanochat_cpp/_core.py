@@ -573,13 +573,13 @@ class Handle(int):
 # applies that signature to the symbol the header declares. What keeps the table
 # honest is calling the symbols it lists: `python/tests/capi_test.py` calls the
 # three rows the table lacked -- `nanochat_generate_multi`, `nanochat_rl_step`,
-# and `nanochat_optim_config_size` (`docs/api-surface.md` R11a) -- against the
+# and `nanochat_optim_config_size` (`spec/api-surface.md` R11a) -- against the
 # loaded library, and `nanochat_cpp._lib.load` runs the size query on every
 # load, so a row that goes missing again fails a test instead of surfacing as an
 # untyped call.
 #
 # The rows are generated from include/nanochat/capi.h by
-# `tools/gen_capi_mirrors.py --write` (docs/api-surface.md R11b), in the
+# `tools/gen_capi_mirrors.py --write` (spec/api-surface.md R11b), in the
 # header's own order, so a function the header adds needs no hand edit here.
 # BEGIN GENERATED (tools/gen_capi_mirrors.py --write) _SIGNATURES
 _SIGNATURES = (

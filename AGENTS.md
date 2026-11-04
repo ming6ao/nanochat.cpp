@@ -237,6 +237,10 @@ cc_test(
 - **Benchmarks are separate from correctness.** A benchmark that runs anytime
   will eventually collide with a test; run benchmarks through the queue and
   record the commit hash.
+- **Profile artifacts are not source.** `profiles/` is ignored by git, and one
+  trace is hundreds of megabytes. Keep every record and the last two traces per
+  target. The retention command is in
+  [docs/performance.md](docs/performance.md) Part 1, section 4.
 - **`CUDA_LAUNCH_BLOCKING=1`** only for debugging, never for timing.
 - **Profile on native Linux.** Under WSL2, CUPTI is unavailable; do not try
   Nsight there.

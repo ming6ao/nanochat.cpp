@@ -1,310 +1,80 @@
 # Backlog: work that is designed and not implemented
 
 This document holds the proposals that the tree does not implement. Each part
-states its goal, its design, and its gates. When the first phase of a part
-lands, move the part into a reference document and record the outcome in
-[campaigns.md](campaigns.md).
+states its goal, its measured problem, its design, and its gates.
 
-No code cites either part today, so nothing here is a promise about the
-current tree.
+When the first phase of a part lands, move the part into a reference document
+and record the outcome in [campaigns.md](campaigns.md). No code cites a part of
+this document today, so nothing here is a promise about the current tree.
 
----
-
-## Part 1. Planned training optimizations
-
-_Absorbed from the former `optimizations.md`. Its section numbers are
-unchanged, so a reference to a section of that document resolves to the same
-number here. The execution record is in [campaigns.md](campaigns.md)._
-
-This document collects the training-memory and kernel-bandwidth proposals that
-are not implemented in the tree. Each part is a design with a plan and gates.
-The result sections stay empty until a phase lands.
-
-- [performance.md](performance.md) — the measurement protocol.
-- [kernels.md](kernels.md) — the kernel seam.
-- [model.md](model.md) — the workspace.
-
-This document replaces the former `recompute.md`, `fused-classifier.md`, and
-`vectorized-row-kernels.md`. The implemented forward-only evaluation path is in
-[eval.md](eval.md).
-
-### Recompute of the row activations
-
-Status: proposal. The analysis has code evidence and the memory figures come
-from [eval.md](eval.md). The savings predictions do not have
-measurements.
-
-The training workspace holds every activation that the backward pass reads. The
-arena does not fit a production batch on the 11 GB card. This document specifies
-a compile-time recompute level that re-derives the cheap row activations in the
-backward pass.
-
-Related documents:
-
-- [eval.md](eval.md): the training and evaluation arena sizes.
-- [model.md](model.md): the graph inventory and the workspace design.
-- [kernels.md](kernels.md): the kernel inventory.
-- [../DESIGN.md](../DESIGN.md) section 5 and section 6.
-- [../AGENTS.md](../AGENTS.md): the ownership map.
+Read [performance.md](performance.md) for the measurement protocol,
+[kernels.md](kernels.md) for the kernel seam, and [model.md](model.md) for the
+workspace.
 
 ---
 
-#### 1. Purpose
+## Part 1. Training memory and kernel bandwidth
 
-The training arena is about 36 GB at `d12_s1024`, batch 32, fp32. The card holds
-11 GB. [eval.md](eval.md) section 11 records the numbers. The
-evaluation path solves its own problem with a small arena and a row-chunked
-classifier. The training path still needs the full arena.
+Three proposals, all unmeasured. The code evidence is in the tree, and the
+memory figures come from [eval.md](eval.md). The savings are predictions.
 
-The backward pass reads a small group of row activations. The forward pass can
-build each of them again from data that the workspace keeps. The rebuild costs
-one extra pass over a row. The arena then drops by the size of the rebuilt
-buffers.
+### 1. Recompute of the row activations
 
-[model.md](model.md) already states the intent: `recompute` is a compile-time
-flag. [../DESIGN.md](../DESIGN.md) section 6 excludes a runtime recompute
-branch. This document makes the intent concrete.
+**The problem.** The training arena is about 36 GB at `d12_s1024`, batch 32,
+fp32, and the card holds 11 GB. The layer activations are about 24 GB
+(`L * 20 * R * hidden`), the classifier buffers about 8.6 GB, and the scratch
+about 3.3 GB.
 
----
+**The cause.** `BuildTrainWorkspace` in `src/model.cc` gives every layer its own
+`ops::BlockActivations` set, and `RunForward` keeps all of them because
+`Backward()` reads them in reverse order. One set is 20 units of `R * hidden`:
+`pre_act` and `act` take 4 units each, and the other twelve slots take 1 unit
+each. `rstd1`, `rstd2`, `ve_gate`, and `attn_stats` are small and stay.
 
-#### 2. The measured problem
+**The design.** A compile-time level in `NANOCHAT_RECOMPUTE_LEVEL`, with 0 as
+the default and the current behavior. A recomputed slot becomes one buffer for
+the whole model, not one per layer: `BlockForward` writes it and uses it at
+once, and `BlockBackward` rebuilds it into the same buffer at the start of the
+layer. The rebuild costs one extra pass over a row.
 
-[eval.md](eval.md) section 2 gives the training arena:
+| Level | Rebuild | Rebuild from | Slots removed |
+|---|---|---|---|
+| 1 | `act` via `kReluSquare` | `pre_act` | 4 of 20, 20% |
+| 2 | `h` and `h2` | `xr`, `x_mid`, `rstd1`, `rstd2` | 6 of 20, 30% |
+| 3 | `xr` via `kScaleAdd`, and `ve_values` | `x_in`, `x0`, the blend scalars, the tokens | 8 of 20, 40% |
 
-| Group | Buffers | Size |
+Nine slots stay saved per layer: `q_pre`, `k_pre`, `q_final`, `k_final`,
+`v_final`, `attn_out`, `x_mid`, `pre_act`, and `x_out`. A rebuild of the first
+five repeats a matrix product or loses data that `QkPrepBackward` overwrites in
+place, and `x_out` is the input of the next layer.
+
+At level 2 the layer term falls from about 24 GB to about 16.8 GB, and the total
+from about 36 GB to about 28.8 GB. The arena still does not fit 11 GB at this
+batch. The win is a larger batch and a smaller peak.
+
+The frozen seam does not change and no kernel is new. Every rebuild uses an
+existing op: `kernels::PointwiseForward(kReluSquare)`, `ops::RmsNormForward`,
+`kernels::PointwiseForward(kScaleAdd)`, and `kernels::EmbeddingForward`. The
+model already passes the input of each block to `BlockBackward`, so the API
+does not change either.
+
+**Plan and gates.** Each phase is one session.
+
+| Phase | Work | Gate |
 |---|---|---|
-| Layer activations | `lacts_[0..L-1]` | `L * 20 * R * hidden` |
-| Classifier | `raw_logits_`, `dlogits_` | `2 * R * padded_vocab` |
-| Backward and global scratch | `dx_*`, `g_a_`, `g_b_`, `block_scratch_` | `33 * R * hidden` |
-
-Here `R` is `batch * seq`. Use `R = 32768`, `hidden = 768`, `L = 12`, and
-`padded_vocab = 32768`. The layer activations are about 24 GB.
-
-The classifier buffers are about 8.6 GB. The scratch is about 3.3 GB.
-
-The layer term is the largest single term that a recompute can shrink. The
-classifier term needs a different change, described in the fused-classifier part below.
-
----
-
-#### 3. The cause
-
-`BuildTrainWorkspace` in `src/model.cc` gives every layer its own
-`ops::BlockActivations` set. `RunForward` keeps all of them, because
-`Backward()` reads them in reverse order. `docs/model.md` states the rule:
-"the loop writes to `lacts_[i]` for each layer."
-
-The per-layer set has 20 units of `R * hidden` size, plus small buffers:
-
-| Slot | Size in `R * hidden` units |
-|---|---:|
-| `xr` | 1 |
-| `h` | 1 |
-| `q_pre` | 1 |
-| `k_pre` | 1 |
-| `q_final` | 1 |
-| `k_final` | 1 |
-| `ve_values` | 1 |
-| `v_final` | 1 |
-| `attn_out` | 1 |
-| `x_mid` | 1 |
-| `h2` | 1 |
-| `pre_act` | 4 |
-| `act` | 4 |
-| `x_out` | 1 |
-| Total | 20 |
-
-`rstd1`, `rstd2`, `ve_gate`, and `attn_stats` are small and stay.
-
----
-
-#### 4. What llm.c does
-
-`llm.c` gives the training run a `recompute` level. The option is `-r` and the
-value is 0, 1, or 2.
-
-- Level 0: save the GeLU activation and the LayerNorm activations.
-- Level 1: rebuild the GeLU activation in the backward pass.
-- Level 2: rebuild the GeLU activation and both LayerNorm activations.
-
-The saved LayerNorm output for every layer becomes one shared buffer. The
-forward pass writes the shared buffer and uses the value at once. The backward
-pass rebuilds the value into the same buffer. `llm.c` calls this buffer
-`acts.lnf`.
-
-The trade is memory against compute. Level 1 removes the `4 * C` GeLU buffer
-from every layer. Level 2 removes two `C` buffers more.
-
----
-
-#### 5. Design
-
-##### 5.1 The compile-time level
-
-The level is a compile-time constant. The build sets
-`NANOCHAT_RECOMPUTE_LEVEL` to 0, 1, 2, or 3. The default is 0, which keeps the
-current behavior.
-
-A runtime branch would add a decision to every block call. The graph topology
-does not change, so the build can fix the level. This rule matches
-[../DESIGN.md](../DESIGN.md) section 6 and [model.md](model.md).
-
-##### 5.2 Level 1 — the relu^2 activation
-
-`BlockBackward` needs `act` for the `c_proj` weight gradient only. The
-`relu^2` derivative comes from `pre_act`, which stays saved.
-
-`MlpBackward` rebuilds `act` from `pre_act` at its start:
-
-```cpp
-kernels::PointwiseForward(PointwiseOp::kReluSquare, n, pre_act, nullptr,
-                          1.0f, 0.0f, act);
-```
-
-The `act` slot becomes shared across the layers. The layer arena loses 4 units
-of 20, or 20%.
-
-##### 5.3 Level 2 — the RMSNorm outputs
-
-`BlockBackward` needs `h` for the `c_q`, `c_k`, and `c_v` weight gradients and
-for the value residual. `BlockBackward` needs `h2` for the MLP. Both values come
-from a saved input and a saved statistic.
-
-- `h = rmsnorm(xr, rstd1)`
-- `h2 = rmsnorm(x_mid, rstd2)`
-
-The `rstd1` and `rstd2` buffers are small and stay saved. The `h` and `h2` slots
-become shared.
-
-Level 2 removes 2 units on top of level 1. The total is 6 of 20, or 30%.
-
-##### 5.4 Level 3 — the residual blend and the value gather
-
-Two more slots come from a cheap rebuild.
-
-- `xr = resid * x_in + x0_lambda * x0`. `BlockBackward` already receives `x_in`
-  and `x0`, and the scalars `resid` and `x0_lambda`.
-- `ve_values` is a gather from `weights.value_embeds` by the saved tokens.
-  `EmbeddingForward` rebuilds it.
-
-Level 3 removes 8 of 20, or 40%.
-
-The `xr` rebuild needs `x_in`. The model passes the input of each block to
-`BlockBackward`, so the API does not change.
-
-##### 5.5 The shared buffers
-
-The recomputed slots become one buffer for the whole model, not one for each
-layer. `BlockForward` writes the shared buffer and uses the value at once.
-`BlockBackward` rebuilds the value into the same buffer at the start of the
-layer.
-
-The layer order does not cause a conflict. The forward pass does not read a slot
-after the block returns. The backward pass processes one layer at a time.
-
-##### 5.6 What stays saved
-
-The following slots stay per layer, because a rebuild needs a full matrix
-product:
-
-- `q_pre` and `k_pre`, because a rebuild repeats the `c_q` and `c_k` products.
-- `q_final` and `k_final`, because `QkPrepBackward` overwrites them in place.
-- `v_final`, because a rebuild repeats the `c_v` product.
-- `attn_out` and `x_mid`, because a rebuild repeats the attention.
-- `pre_act`, because the `relu^2` derivative needs it.
-- `x_out`, because it is the input to the next layer.
-
-##### 5.7 The arena figures
-
-At level 2 the layer term drops by 30%. The layer term falls from about 24 GB to
-about 16.8 GB. The total falls from about 36 GB to about 28.8 GB. The classifier
-term does not change.
-
-The training arena still does not fit 11 GB at this batch. The win is the growth
-of the largest batch that fits, together with a smaller peak. The classifier
-term and the logits chunk are the next step.
-
----
-
-#### 6. Ownership and interfaces
-
-The frozen seam does not change. The change needs no new kernel. Every rebuild
-uses an existing op:
-
-| Rebuild | Op |
-|---|---|
-| `act` | `kernels::PointwiseForward(kReluSquare)` |
-| `h`, `h2` | `ops::RmsNormForward` |
-| `xr` | `kernels::PointwiseForward(kScaleAdd)` |
-| `ve_values` | `kernels::EmbeddingForward` |
-
-| Item | Owner |
-|---|---|
-| `src/model.cc`, `src/model_impl.h`, `src/ops.cc`, `src/ops.h` | Workflow |
-| The build definition for `NANOCHAT_RECOMPUTE_LEVEL` | Build |
-| This document | Architect |
-
----
-
-#### 7. Plan and gates
-
-Run every step through `tools/nanochat`.
-
-##### Phase 0 — the level and the counter (0.5 session)
-
-- Add the `NANOCHAT_RECOMPUTE_LEVEL` build definition with the default 0.
-- Extend `workspace_bytes()` reporting to print the level.
-- Gate: the level-0 build reports the same arena size as today.
-
-##### Phase 1 — level 1 (1 session)
-
-- Share the `act` slot and rebuild it in `MlpBackward`.
-- Gate: `workspace_bytes()` drops by about 20% of the layer term.
-- Gate: the training-parity harness stays green at `1e-5` loss.
-- Gate: the T1 GPU block tests stay green.
-
-##### Phase 2 — level 2 (1 session)
-
-- Share the `h` and `h2` slots and rebuild them in `BlockBackward`.
-- Gate: the arena drops by about 30% of the layer term.
-- Gate: the training-parity harness stays green.
-- Gate: a T3 timing shows the step cost. Report the number.
-
-##### Phase 3 — level 3 (1 session, optional)
-
-- Rebuild `xr` and `ve_values`.
-- Gate: the harness stays green and the timing stays inside the budget.
-
-Stop a phase when its gate fails. Report the negative result.
-
----
-
-#### 8. Tests
-
-- `tests/train_parity_test.cc`: the loss, gradient, and parameter trajectory.
-  This is the main gate. The rebuild reproduces the same value from the same
-  input, so the trajectory should not move.
-- `src/model_gradient_test.cc`: the finite-difference check.
-- `src/grad_mode_test.cc`: the arena comparison. Extend it with the levels.
-- `backends/cuda/kernels/pointwise_test.cc`: the `kReluSquare` op.
-- `backends/cuda/kernels/rms_norm_test.cc`: the norm rebuild.
-
----
-
-#### 9. Result
-
-To fill after the phases. Record the revision and the configuration.
-
-| Level | Layer term | Total arena | Step cost |
-|---|---:|---:|---:|
-| 0 | about 24 GB | about 36 GB | |
-| 1 | | | |
-| 2 | | | |
-| 3 | | | |
-
----
-
-#### 10. Reproduction
+| 0 | The build definition, and `workspace_bytes()` reports the level | The level-0 arena matches today |
+| 1 | Share `act` and rebuild it in `MlpBackward` | The layer term drops near 20%, and train parity stays green at `1e-5` |
+| 2 | Share `h` and `h2` and rebuild them in `BlockBackward` | The layer term drops near 30%, and a T3 timing reports the step cost |
+| 3 | Rebuild `xr` and `ve_values` (optional) | Parity green, and the timing stays inside the budget |
+
+Stop a phase when its gate fails, and report the negative result.
+
+**Tests.** `tests/train_parity_test.cc` is the main gate, because a rebuild
+reproduces the same value from the same input, so the trajectory must not move.
+The finite-difference test, the arena comparison in `src/grad_mode_test.cc`, and
+the `kReluSquare` and RMSNorm kernel tests follow it.
+
+**Reproduction.**
 
 ```bash
 tools/nanochat build --copt=-DNANOCHAT_RECOMPUTE_LEVEL=2
@@ -313,264 +83,80 @@ tools/nanochat gpu --profile t2-parity -- \
   ./bazel-bin/tests/train_parity /tmp/train_parity_d8_s512_50.bin
 ```
 
-### Fused classifier
+### 2. Fused classifier
 
-Status: proposal. The analysis has code evidence. The traffic figures are
-derived from the buffer sizes. The timing gain does not have a measurement.
-
-The classifier touches the largest tensor in the graph. The forward pass and the
-backward pass both read the full logits buffer. The backward pass builds the
-softmax statistics again. A separate pass scales the logits gradient. This
-document specifies a statistics hand-off and a fused scale. Together they remove
-most of the repeated traffic.
-
-Related documents:
-
-- [kernels.md](kernels.md): the kernel inventory and the classifier API.
-- [model.md](model.md): the graph inventory and the workspace.
-- [eval.md](eval.md): the classifier row chunking for evaluation.
-- [performance.md](performance.md): the measurement protocol.
-- [../DESIGN.md](../DESIGN.md) section 3: the fusion boundary rule.
-
----
-
-#### 1. Purpose
-
-The classifier holds `raw_logits_` and `dlogits_`, each `rows * padded_vocab`.
-At `R = 32768` and `padded_vocab = 32768` in fp32, each buffer is about 4.3 GB.
-The two buffers are about 8.6 GB of the 36 GB training arena.
-
-The classifier also moves the logits buffer several times for each step. The
-arithmetic for each byte is small. The traffic dominates the kernel cost. This
-document removes the avoidable passes.
-
----
-
-#### 2. The measured problem
-
-`ClassifierForwardKernel` in `backends/cuda/kernels/classifier.cu` calls
-`RowLogSumExp`. That helper reads the row twice:
-
-1. one pass for `row_max`;
-2. one pass for `sum_exp`.
-
-The kernel then reads the target logit and writes the loss.
-
-`ClassifierBackwardKernel` calls `RowLogSumExp` again. It reads the row twice
-more for the same statistics. It then reads the row a third time to build the
-gradient. The model then runs a separate scale pass:
-
-```cpp
-kernels::ClassifierBackward(classifier, raw_logits_, targets_.data(),
-                            dlogits_);
-kernels::PointwiseForward(PointwiseOp::kScale, rows * padded_vocab, dlogits_,
-                          nullptr, scale / rows, 0.0f, dlogits_);
-```
-
-The scale pass reads and writes the full `dlogits_` buffer.
-
-The traffic for each step, in full-buffer passes:
+**The problem.** The classifier holds `raw_logits_` and `dlogits_`, each 4.3 GB
+at `R = 32768` and `padded_vocab = 32768` in fp32. The arithmetic for each byte
+is small, so the traffic dominates the cost. The logits buffer moves six times
+per step, and two of those passes rebuild statistics that the forward pass
+already had.
 
 | Pass | Count |
 |---|---:|
 | Forward logits reads | 2 |
 | Backward logits reads | 3 |
-| Backward dlogits writes | 1 |
-| Scale dlogits reads | 1 |
-| Scale dlogits writes | 1 |
+| Backward `dlogits_` writes | 1 |
+| Scale pass over `dlogits_` | 1 read, 1 write |
 
-The backward pass builds the same statistics that the forward pass already
-built. The input does not change, so the value is the same.
+**The design.** Two independent changes, bit-identical to the current result.
 
----
+1. **The statistics hand-off.** `ClassifierForward` writes `(row_max, sum_exp)`
+   per row, and `ClassifierBackward` reads the pair. The pair is `2 * rows`
+   floats, about 256 KB. The value is the same bit for bit, because both calls
+   use the same input, the same reduction, and the same order. This removes two
+   logits reads and one `RowLogSumExp` call, which is two `tanh` passes over the
+   row.
+2. **The fused scale.** `ClassifierBackward` takes `dlogit_scale = scale / rows`
+   from `BackwardAccumulate` and writes
+   `dlogits[j] = (p - onehot) * sech2 * dlogit_scale`. The separate
+   `PointwiseForward(kScale)` pass disappears. The order of the arithmetic does
+   not change.
 
-#### 3. What llm.c does
+Together the backward logits reads fall from 3 to 1 and the scale passes from 2
+to 0, which is about 17 GB less traffic per step.
 
-`llm.c` fuses the classifier into one kernel, `fused_classifier_kernel5`. The
-kernel computes the softmax statistics, the loss, and the logit gradients in one
-call. It reads the logits once and overwrites the buffer with the gradients.
-The header comment states the reason: "saves bandwidth from probs during
-training".
+**The rejected option.** `llm.c` overwrites the logits buffer with the gradients,
+which would remove `dlogits_` and 4.3 GB of arena. This tree cannot do it.
+`BackwardAccumulate` may run more than once per forward pass, and
+`src/harness_test.cc` calls it twice with a half scale. The second call would
+read gradients where it expects logits.
 
-`llm.c` can do this because its loss computation lives in the backward call. It
-passes `dloss` into the kernel and never needs the raw logits again.
-
-`nanochat.cpp` computes the loss in `ForwardLoss` and returns it. The backward
-pass runs later. A single kernel cannot cover both calls without a change to the
-`Model` API. This document keeps the API and fuses what it can.
-
----
-
-#### 4. Design
-
-##### 4.1 Option A — the statistics hand-off
-
-The forward pass already computes `(row_max, sum_exp)` for each row. Save the
-pair. The backward pass reads the pair instead of building it again.
-
-The statistics are `2 * rows` floats, or about 256 KB at `R = 32768`. The cost
-is negligible.
-
-The saved value equals the rebuilt value bit for bit. The forward and the
-backward use the same input, the same reduction, and the same order. The parity
-result does not change.
-
-This option removes two logits reads from the backward pass. It also removes one
-`RowLogSumExp` call, which is two `tanh` passes over the row.
-
-##### 4.2 Option B — the fused scale
-
-Pass the loss scale into the backward pass. The classifier writes the scaled
-gradient in one pass:
+**The seam change.** Additive at the parameter level, and the architect owns
+`include/nanochat/kernels.h`.
 
 ```cpp
-dlogits[j] = (p - onehot) * sech2 * dlogit_scale;
-```
-
-The model passes `dlogit_scale = scale / rows` from `BackwardAccumulate`. The
-separate `PointwiseForward(kScale)` call disappears.
-
-The arithmetic keeps the same order. The current code forms `(p - onehot) *
-sech2` and then multiplies by the scale. The fused form does the same. The
-result is bit-identical.
-
-This option removes one read and one write of the full `dlogits_` buffer.
-
-##### 4.3 The combined result
-
-Apply both options. The traffic becomes:
-
-| Pass | Before | After |
-|---|---:|---:|
-| Forward logits reads | 2 | 2 |
-| Backward logits reads | 3 | 1 |
-| Backward dlogits writes | 1 | 1 |
-| Scale dlogits passes | 2 | 0 |
-
-At `R = 32768` and `padded_vocab = 32768` in fp32, the change removes about
-17 GB of traffic for each step.
-
-##### 4.4 The rejected option — the in-place gradient
-
-`llm.c` overwrites the logits buffer with the gradients. That removes the
-`dlogits_` buffer and 4.3 GB of arena.
-
-`nanochat.cpp` cannot do this without a correctness loss. `BackwardAccumulate`
-can run more than once for one forward pass.
-`src/harness_test.cc` calls it twice with a half scale. The second call reads
-the raw logits again. An in-place overwrite destroys the raw logits, so the
-second call reads gradients instead. The test catches this.
-
-The separate `dlogits_` buffer stays. The statistics hand-off and the fused
-scale recover most of the benefit without the risk.
-
----
-
-#### 5. Seam change
-
-The frozen header `include/nanochat/kernels.h` changes. The change is additive
-at the parameter level. The architect owns the header.
-
-```cpp
-// Forward also writes the per-row softmax statistics when `stats` is non-null:
-// stats[2*r] = row_max, stats[2*r+1] = sum_exp. The evaluation path passes null.
+// Forward writes the per-row statistics when `stats` is non-null:
+// stats[2*r] = row_max, stats[2*r+1] = sum_exp. Evaluation passes null.
 void ClassifierForward(const ClassifierParams& params,
                        const ComputeType* logits, const int* targets,
                        ComputeType* losses, float* stats = nullptr);
 
-// Backward consumes the statistics from the matching forward when `stats` is
-// non-null; otherwise it rebuilds them (the current behavior). `dlogit_scale`
-// folds the loss normalization into the gradient write.
+// Backward consumes the statistics when `stats` is non-null, and rebuilds them
+// otherwise. `dlogit_scale` folds the loss normalization into the write.
 void ClassifierBackward(const ClassifierParams& params,
                         const ComputeType* logits, const int* targets,
                         const float* stats, float dlogit_scale,
                         ComputeType* dlogits);
 ```
 
-The default argument keeps the old forward call sites valid at the source level.
-Both backends must still define the new signature.
+The default argument keeps the old call sites valid at the source level, and
+both backends must define the new signature. The null path keeps the current
+behavior, so the kernel tests compare the two paths.
 
-The null `stats` path keeps the current behavior. The per-kernel tests use it to
-compare the two paths.
+**Plan and gates.**
 
----
+| Phase | Work | Gate |
+|---|---|---|
+| 0 | The seam, in both backends | The T1 classifier test passes on both paths, and the results agree bit for bit |
+| 1 | Allocate `classifier_stats_`, wire the model, pass null on eval | Train parity green |
+| 2 | Add `dlogit_scale` and remove the scale pass | `harness_test.cc` green, including the double accumulation |
+| 3 | Time the classifier | The numbers go to [campaigns.md](campaigns.md) |
 
-#### 6. Ownership and interfaces
+**Tests.** The classifier and oracle tests prove correctness and finite
+differences, `harness_test.cc` is the gate for the rejected option, and
+`train_parity_test.cc` plus `eval_bench` cover the trajectory and the timing.
 
-| Item | Owner |
-|---|---|
-| `include/nanochat/kernels.h` | Architect |
-| `backends/cpu/kernels.cc` | Runtime |
-| `backends/cuda/kernels/classifier.cu` | Kernel agents |
-| `src/model.cc`, `src/model_impl.h` | Workflow |
-| This document | Architect |
-
-Coordinate before the header change. See [../AGENTS.md](../AGENTS.md) section 1.
-
----
-
-#### 7. Plan and gates
-
-Run every step through `tools/nanochat`.
-
-##### Phase 0 — the seam and the statistics (1 session)
-
-- Add the `stats` output to `ClassifierForward` and the `stats` input to
-  `ClassifierBackward`.
-- Implement both paths in the CPU backend and the CUDA backend.
-- Gate: the T1 classifier test passes for the null path and the stats path.
-- Gate: the two paths agree to the last bit.
-
-##### Phase 1 — the model wiring (0.5 session)
-
-- Allocate `classifier_stats_` in the training workspace.
-- Pass the statistics from `RunForward` to `BackwardAccumulate`.
-- Pass null on the evaluation path.
-- Gate: the training-parity harness stays green.
-
-##### Phase 2 — the fused scale (0.5 session)
-
-- Add `dlogit_scale` to `ClassifierBackward`.
-- Remove the `PointwiseForward(kScale)` call from `BackwardAccumulate`.
-- Gate: `harness_test.cc` stays green, including the double accumulation case.
-- Gate: the training-parity harness stays green.
-
-##### Phase 3 — measurement (0.5 session)
-
-- Time the classifier before and after with `eval_bench` and a T3 profile.
-- Record the numbers in section 9.
-
-Stop a phase when its gate fails. Report the negative result.
-
----
-
-#### 8. Tests
-
-- `backends/cuda/kernels/classifier_test.cc`: the correctness and finite
-  difference gate. Add a case for the statistics path and the scale.
-- `backends/cuda/kernels/sequence_oracle_test.cc`: the classifier against
-  `tests/data/debug_state.bin`.
-- `src/harness_test.cc`: the double `BackwardAccumulate` case. This is the gate
-  for the rejected in-place option.
-- `tests/train_parity_test.cc`: the end-to-end trajectory.
-- `src/eval_bench.cc`: the forward-only classifier timing.
-
----
-
-#### 9. Result
-
-To fill after the phases. Record the revision and the configuration.
-
-| Metric | Before | After | Change |
-|---|---:|---:|---:|
-| Classifier forward, ms | | | |
-| Classifier backward, ms | | | |
-| Full step, ms | | | |
-| Training arena, GB | | | |
-
----
-
-#### 10. Reproduction
+**Reproduction.**
 
 ```bash
 tools/nanochat build
@@ -581,176 +167,42 @@ tools/nanochat bench -- ./bazel-bin/src/eval_bench --batch 16 --seq 1024 \
   --vocab 32768 --padded-vocab 32768
 ```
 
-### Vectorized row kernels
+### 3. Vectorized row kernels
 
-Status: proposal. The analysis has code evidence. The performance predictions do
-not have measurements.
+**The problem.** Every row kernel in `backends/cuda` uses scalar strided access.
+A search finds no `__ldcs`, `__stcs`, `__ldg`, `int4`, or `float4`, and the
+loops step one element at a time. The GTX 1080 Ti moves about 484 GB/s and
+computes about 11.34 TFLOP/s, so the ridge point is about 23 flop for each byte.
+The row kernels sit far below it and lose their time on memory traffic.
+`row_benchmark.cc` reports milliseconds only, so the first task is to add the
+achieved byte rate.
 
-The row and elementwise families move large tensors through the device. They do
-little arithmetic for each byte. A wider memory access raises the rate. This
-document specifies a shared packed-access helper and its use in the affected
-families.
+**The design.** One header-only helper in
+`backends/cuda/kernels/device_utils.cuh`, which inlines and does not merge a
+kernel boundary. `Packed<T>` is `alignas(16)` and holds `16 / sizeof(T)`
+elements, so the fp32 build packs four. `LoadPacked` and `StorePacked` cast to
+`int4`, and `LoadPackedStreaming` and `StorePackedStreaming` use `__ldcs` and
+`__stcs`.
 
-Related documents:
+The streaming choice is per kernel. `RmsNormForward` streams `x` and `out`.
+`RmsNormBackward` streams `x`, `dy`, and `dx`. Both pointwise passes stream
+every operand. The classifier streams `logits`. `EmbeddingForward` streams the
+output and keeps the table gather scalar, because it indexes the rows.
+`GradNorm` streams each span. The attention softmax rows stream `scores`,
+`probs`, and `dprobs`.
 
-- [performance.md](performance.md): the measurement protocol and the benchmarks.
-- [kernels.md](kernels.md): the kernel inventory and the shared device helpers.
-- [build.md](build.md): the backend layout and ownership.
-- [../AGENTS.md](../AGENTS.md): the ownership map.
-- [../DESIGN.md](../DESIGN.md) section 3: the fusion boundary rule.
+A kernel takes the packed loop only when three conditions hold: the pointer is
+16-byte aligned, the row width divides by the packed count, and the row count
+divides by the block stride. Otherwise it takes the scalar loop. The two loops
+produce the same arithmetic, and the kernel checks the conditions once at the
+start. The workspace aligns the arena to 64 bytes, and `Workspace::Reserve`
+gains 16-byte alignment for the slots that the packed kernels read.
 
----
-
-#### 1. Purpose
-
-The row kernels are bandwidth-bound. `RmsNormForward` reads one tensor and
-writes one tensor. `PointwiseForward` reads two and writes one. The classifier
-reads the largest tensor in the graph. A packed access lets the compiler emit a
-128-bit `LDG`/`STS` pair. The streaming hint keeps the reused data in cache.
-
-`llm.c` proves the idea on the same architecture class. `nanochat.cpp` does not
-use it. This document closes that difference.
-
----
-
-#### 2. The measured problem
-
-The CUDA backend uses scalar strided access in every row kernel. A search of
-`backends/cuda` finds no use of `__ldcs`, `__stcs`, `__ldg`, `int4`, or
-`float4`. The loops step one element at a time:
-
-```cpp
-for (int d = threadIdx.x; d < params.dim; d += blockDim.x) {
-  orow[d] = ToComputeDev(AsFloatDev(xr[d]) * r);
-}
-```
-
-The same shape appears in `rms_norm.cu`, `pointwise.cu`, `embedding.cu`,
-`classifier.cu`, and `device_utils.cuh`.
-
-`row_benchmark.cc` times these families. It reports milliseconds only. It does
-not report the achieved byte rate or the fraction of the device peak. The first
-task is to add that figure.
-
-The GTX 1080 Ti moves about 484 GB/s at the peak. The fp32 engine runs at about
-11.34 TFLOP/s. The ridge point is about 23 flop for each byte. The row kernels
-sit far below that point, so they lose time on memory traffic.
-
-A scalar 32-bit load asks the memory system for one value. A 128-bit load asks
-for four values in one transaction. Coalesced scalar access also reaches one
-transaction per warp, so the win is not free. The win comes from fewer
-instructions, more work in flight, and the streaming hint. The measurement
-decides the size of the win.
-
----
-
-#### 3. What llm.c does
-
-`llmc/cuda_utils.cuh` defines the pattern. The comment states the reason: the
-compiler must emit `LDG.128` and `STS.128`.
-
-```cpp
-template<class ElementType>
-struct alignas(16) Packed128 {
-  ElementType payload[sizeof(int4) / sizeof(ElementType)];
-};
-template<class ElementType>
-__device__ Packed128<ElementType> load128(const ElementType* address) {
-  return Packed128<ElementType>{*reinterpret_cast<const int4*>(address)};
-}
-template<class ElementType>
-__device__ Packed128<ElementType> load128cs(const ElementType* address) {
-  return Packed128<ElementType>{__ldcs(reinterpret_cast<const int4*>(address))};
-}
-```
-
-`store128`, `store128cs`, and `store128cg` complete the set. The `cs` suffix
-streams the data through the cache. The `cg` suffix caches in L2 only.
-
-The kernels use the helper everywhere. `layernorm_forward_kernel6` keeps the
-weights in shared memory and streams the activations. `fused_residual_forward_kernel5`
-does the same for the residual add. `fused_classifier` streams the logits.
-
----
-
-#### 4. Design
-
-##### 4.1 The packed helper
-
-Add one helper to `backends/cuda/kernels/device_utils.cuh`. The helper is
-header-only, so it inlines into every caller. It does not merge kernel
-boundaries.
-
-```cpp
-template <typename T>
-struct alignas(16) Packed {
-  static constexpr int kCount = static_cast<int>(16 / sizeof(T));
-  T elem[kCount];
-};
-
-template <typename T>
-__device__ __forceinline__ Packed<T> LoadPacked(const T* p);
-template <typename T>
-__device__ __forceinline__ Packed<T> LoadPackedStreaming(const T* p);
-template <typename T>
-__device__ __forceinline__ void StorePacked(T* p, Packed<T> v);
-template <typename T>
-__device__ __forceinline__ void StorePackedStreaming(T* p, Packed<T> v);
-```
-
-The fp32 build packs four elements. The load and the store use a
-`reinterpret_cast` to `int4`, as `llm.c` does.
-
-##### 4.2 The streaming hint
-
-Use `__ldcs` and `__stcs` for the streamed operand. Use the plain load for the
-operand that sees reuse. The choice is per kernel:
-
-- `RmsNormForward`: stream `x` and `out`.
-- `RmsNormBackward`: stream `x`, `dy`, and `dx`.
-- `PointwiseForward` and `PointwiseBackward`: stream every operand.
-- `ClassifierForward` and `ClassifierBackward`: stream `logits`.
-- `EmbeddingForward`: stream the output. Keep the table gather scalar, because
-  the kernel indexes the rows.
-- `GradNorm`: stream each span in `grads`.
-- The attention softmax row kernels: stream `scores`, `probs`, and `dprobs`.
-
-##### 4.3 Alignment and the tail
-
-A 128-bit access needs a 16-byte aligned pointer. The row width `dim` and the
-token count may not divide by the packed count. The seam allows any positive
-value.
-
-Three conditions define the fast path:
-
-1. The pointer is 16-byte aligned.
-2. The row width divides by `Packed<T>::kCount`.
-3. The element count of the row divides by the block stride.
-
-If all three hold, the kernel uses the packed loop. If any fails, the kernel
-uses the scalar loop. The two loops produce the same arithmetic. The host does
-not need a branch, because the kernel checks the conditions once at the start.
-
-The workspace aligns each slot to `alignof(T)`. That is four bytes in the fp32
-build. The doc proposes a 16-byte alignment for the slots that the packed
-kernels read. `Workspace::Reserve` aligns the arena to 64 bytes, so the change
-stays inside `src`.
-
-##### 4.4 Numerics
-
-A packed loop changes the order of the per-thread accumulation. The reduction
-across the block stays the same. The last bits of a sum can move. The fp32
-oracle tolerance is `1e-5`. The finite-difference tests and the oracle fixture
-decide the result.
-
-The reduction must stay exact where the reference demands it. The classifier
-softmax is the sensitive case. A packed reduction can change `row_max` by one
-unit in the last place. The design keeps the scalar reduction for the
-classifier until the parity run proves the packed one safe.
-
----
-
-#### 5. Affected kernels
+**Numerics.** A packed loop changes the order of the per-thread accumulation,
+so the last bits of a sum can move. The fp32 oracle tolerance is `1e-5`, and the
+finite-difference tests and the oracle fixture decide the result. The classifier
+softmax keeps its scalar reduction: a packed reduction can move `row_max` by one
+unit in the last place, and that is the sensitive case.
 
 | Kernel | Operand | Change | Risk |
 |---|---|---|---|
@@ -761,201 +213,54 @@ classifier until the parity run proves the packed one safe.
 | `attention.cu` | softmax rows | packed load and store | Medium |
 | `classifier.cu` | `logits` | packed load, scalar reduction | Medium |
 
----
-
-#### 6. Ownership and interfaces
-
-The frozen seam does not change. `include/nanochat/kernels.h` keeps every
+The frozen seam does not change, and `include/nanochat/kernels.h` keeps every
 signature.
 
-| Item | Owner |
-|---|---|
-| `device_utils.cuh` helper and the row kernels | Kernel agents (`backends/cuda/kernels/`) |
-| The arena alignment in `src` | Workflow (`src/`) |
-| The benchmark bandwidth column | Kernel agents (`backends/cuda/kernels/`) |
-| This document | Architect (`docs/`) |
+**Plan and gates.**
 
-One writer for each file. See [../AGENTS.md](../AGENTS.md) section 1.
-
----
-
-#### 7. Plan and gates
-
-Run every step through `tools/nanochat`. Use the `t3-bench` profile for the
-timings. Use the `t0-cpu` profile for the CPU tests.
-
-##### Phase 0 — measurement (0.5 session)
-
-- Add a byte-rate column to `row_benchmark.cc`.
-- Record the shipped numbers in the `cpu_gemm` entry of `docs/baselines.json`.
-- Gate: the benchmark reports the byte rate and the peak fraction.
-
-##### Phase 1 — the helper and the simple families (1 session)
-
-- Add the packed helper to `device_utils.cuh`.
-- Convert `rms_norm.cu`, `pointwise.cu`, `embedding.cu`, and `grad_norm.cu`.
-- Gate: each family gains at least 10% in byte rate.
-- Gate: the finite-difference test and the oracle fixture stay green.
-
-##### Phase 2 — the classifier and the softmax rows (1 session)
-
-- Convert `classifier.cu` and the attention softmax kernels.
-- Keep the scalar reduction where the parity run fails.
-- Gate: the classifier and attention benchmarks improve.
-- Gate: the training-parity harness stays green.
+| Phase | Work | Gate |
+|---|---|---|
+| 0 | The byte-rate column in `row_benchmark.cc` (0.5 session) | The benchmark reports the byte rate and the peak fraction |
+| 1 | The helper, and `rms_norm`, `pointwise`, `embedding`, `grad_norm` (1 session) | Each family gains at least 10% in byte rate, and the oracle fixture stays green |
+| 2 | `classifier.cu` and the attention softmax rows (1 session) | Both benchmarks improve, and train parity stays green |
 
 If a phase fails its gate, report the negative result and stop the phase.
 
----
-
-#### 8. Tests
-
-The existing tests already compare the device result to a host reference. They
-do not need a change if the arithmetic is the same.
-
-- `backends/cuda/kernels/rms_norm_test.cc` and `pointwise_test.cc`: T1.
-- `backends/cuda/kernels/row_kernels_test.cc`: the smoke test over the seam.
-- `backends/cuda/kernels/precision_test.cc`: both precisions.
-- `backends/cuda/kernels/classifier_test.cc`: the classifier and the padded tail.
-- `tests/oracle_test.cc` and `tests/train_parity_test.cc`: the end-to-end gate.
-
----
-
-#### 9. Result
-
-To fill after the phases. Record the revision and the configuration with each
-number.
-
-| Family | Before | After | Change |
-|---|---:|---:|---:|
-| rmsnorm | | | |
-| pointwise | | | |
-| classifier | | | |
-| attention softmax | | | |
-
----
-
-#### 10. Reproduction
-
-```bash
-tools/nanochat build
-tools/nanochat test
-tools/nanochat bench -- ./bazel-bin/backends/cuda/kernels/row_benchmark
-tools/nanochat profile --json --out /tmp/attention_p1.json
-```
+**Tests.** The existing device-against-host tests need no change when the
+arithmetic does not change: the T1 family tests, the row-kernel smoke test, both
+precisions, the padded tail, and the end-to-end oracle and parity gates.
 
 ---
 
 ## Part 2. The self-evolution system
 
-_Absorbed from the former `self-evolution.md`. Its section numbers are
-unchanged, so a reference to a section of that document resolves to the same
-number here. The execution record is in [campaigns.md](campaigns.md)._
+Status: design. No part of this system is implemented. No phase changes a frozen
+header, the model graph, or `src/**`. Phase 0 and Phase 1 are the first committed
+scope, and every later phase waits for explicit human approval.
 
-This document designs a self-evolution loop on top of `nanochat.cpp`. The loop
-accepts a goal, reasons with a checkpoint, acts on the tree, measures the
-result, and asks for help when it is stuck. It records every help event. It
-trains on the record. It publishes a new checkpoint.
+The loop accepts a goal, reasons with a checkpoint, acts on the tree, measures
+the result, and asks for help when it is stuck. It records each help event,
+trains on the record, and publishes a new checkpoint. Six jobs follow: accept a
+goal; reason and act with a checkpoint; detect a stuck state; record every
+transition as training data; train and evaluate a new checkpoint; publish and
+fetch through the Hugging Face Hub. Every build, test, train, and eval goes
+through `tools/nanochat`, and the loop uses [python.md](python.md),
+[post-training.md](post-training.md), and [sandbox.md](sandbox.md).
 
-Status: design. No part of this system is implemented. This document is the
-plan of record. It adds no graph, no autograd engine, and no vendor header in
-`src/**`. It does not change a frozen header.
+**The layers.** Four layers sit above the L0 to L6 stack of
+[../DESIGN.md](../DESIGN.md) section 2, and they do not renumber it. E4 is the
+human surface: goal intake, approvals, answers, and stop. E3 is the loop:
+controller, stuck detector, and safety gate. E2 holds the services: teacher
+gateway, trajectory store, dataset builder, checkpoint registry, verifier, and
+code editor. E1 is the existing toolchain and API. The dependencies point down.
 
-The first committed scope is Phase 0 and Phase 1. Every later phase is
-deferred.
-
-The loop sits above the existing stack. It calls `tools/nanochat` for every
-build, test, train, and eval. It uses the Python surface in
-[python.md](python.md), the post-training stages in
-[post-training.md](post-training.md), the resource sandbox in
-[sandbox.md](sandbox.md), and the optimization rules in
-[../DESIGN.md](../DESIGN.md).
-
-### 1. Purpose
-
-The system turns the training stack into a closed loop. A human gives a goal.
-The loop tries to reach the goal. When the loop fails, it escalates. The
-escalation becomes training data. The next checkpoint is a little better.
-
-The loop has six jobs:
-
-1. Accept a goal from a human or a backlog.
-2. Reason and act with a `nanochat.cpp` checkpoint.
-3. Detect a stuck state and escalate.
-4. Record each transition as training data.
-5. Train, evaluate, and save a new checkpoint.
-6. Publish and fetch checkpoints through the Hugging Face Hub.
-
-### 2. Scope
-
-In scope:
-
-- One controller process on one host.
-- A `nanochat.cpp` policy and an external teacher policy.
-- A stuck detector and a human escalation channel.
-- A trajectory store and a dataset builder.
-- A training round over SFT and RL.
-- A checkpoint registry and a Hub transport.
-- A rollback gate for a code edit.
-
-Out of scope:
-
-- A change to the model architecture at run time.
-- A new autograd engine or graph compiler.
-- A permanent dependence on an external model.
-- Unattended code changes without a rollback gate.
-- Distributed training across hosts.
-
-The fixed graph in `../DESIGN.md` section 5 forbids the first item. The
-external model is a scaffold. Section 8.4 explains the exit.
-
-### 3. Design principles
-
-1. **The checkpoint is the substrate.** The checkpoint holds the learned
-   policy. The controller holds the process.
-2. **The teacher is a scaffold, not a component.** The teacher removes human
-   work. The trajectory dataset removes the teacher.
-3. **The human is the top tier.** A human sets the goal and resolves
-   ambiguity.
-4. **Every transition is data.** A failed step and a human fix are both
-   training samples.
-5. **One writer per resource.** The code, the checkpoint, and the GPU each
-   have one owner at a time.
-6. **The build is the gate.** A failed build discards the edit and stops the
-   step.
-7. **Every job uses the entry point.** `tools/nanochat` applies the sandbox and
-   submits the job to the GPU queue. See [sandbox.md](sandbox.md) and
-   [sandbox.md](sandbox.md). The controller is not a job. It
-   runs for hours and it blocks on human input, so it sets
-   `NANOCHAT_SANDBOX_BACKEND=none` for itself. Every child job stays under
-   `tools/nanochat`.
-
-### 4. System context
-
-The new layers sit above the L0-L6 stack in `../DESIGN.md` section 2. They do
-not renumber it. Call them E1 to E4.
-
-```text
-+------------------------------------------------------------------+
-| E4  Human surface    goal intake | approvals | answers | stop     |
-+------------------------------------------------------------------+
-| E3  Evolution loop   controller | stuck detector | safety gate    |
-+------------------------------------------------------------------+
-| E2  Services         teacher gateway | trajectory store          |
-|                      dataset builder | checkpoint registry       |
-|                      verifier | code editor                       |
-+------------------------------------------------------------------+
-| E1  Orchestration    toolchain | api | sft | rl | chat | tasks    |
-+------------------------------------------------------------------+
-| L0-L6  nanochat.cpp stack (kernels, model, optim, harness, CLI)   |
-+------------------------------------------------------------------+
-```
-
-The dependencies point down. E3 uses E2 and E1. E2 uses E1. E1 uses the
-existing stack. No layer reaches up. This keeps the dependency invariants in
-`../DESIGN.md` section 2.1.
-
-### 5. Roles
+**The principles.** The checkpoint is the substrate and the controller is only
+process. The teacher is a scaffold that the trajectory dataset removes. A human
+is the top tier. Every transition is data, a failed step and a human correction
+included. Each resource has one writer, and a failed build discards the edit.
+Every child job runs under `tools/nanochat`. The controller is the one exception:
+it runs for hours and blocks on human input, so it sets
+`NANOCHAT_SANDBOX_BACKEND=none` for itself.
 
 | Role | Responsibility | Model |
 |---|---|---|
@@ -966,464 +271,110 @@ existing stack. No layer reaches up. This keeps the dependency invariants in
 | Verifier | Scores an outcome | Tests, evals, and rewards |
 | Editor | Writes code and fixes a build | Policy or teacher |
 
-The controller never generates text. It selects an action. The policy and the
-teacher generate text.
-
-### 6. The control loop
-
-The controller is a state machine. One iteration is one step.
-
-```text
-IDLE -> PLAN -> REASON -> ACT -> OBSERVE -> VERIFY -> REFLECT
-                    ^                                   |
-                    |                                   v
-               ESCALATE <------- STUCK            TRAIN -> DEPLOY
-                    |                                   |
-               WAIT_HUMAN -------------------------> IDLE
-```
-
-| State | Action | Exit condition |
-|---|---|---|
-| `IDLE` | Wait for a goal | A goal is active |
-| `PLAN` | Split the goal into steps | A step list exists |
-| `REASON` | Load the checkpoint, propose an action | An action is ready |
-| `ACT` | Run the action under the sandbox | An observation exists |
-| `OBSERVE` | Record the result | The result is stored |
-| `VERIFY` | Score the result | A score exists |
-| `REFLECT` | Update the step list | Progress, or a stuck flag |
-| `STUCK` | Raise the stuck flag | The detector fires |
-| `ESCALATE` | Ask the teacher, then the human | An answer exists |
-| `WAIT_HUMAN` | Block and wait, durably | A human message arrives |
-| `TRAIN` | Unload, train, and save | A new checkpoint exists |
-| `DEPLOY` | Publish the checkpoint | The Hub upload succeeds |
-| `DONE` | Close the goal | The goal is closed |
-| `FAILED` | Park the goal | A human restarts it |
-
-The controller enforces a budget at each transition. The budget covers tokens,
-teacher calls, GPU seconds, and wall clock. A spent budget parks the goal.
-
-### 7. Components
-
-#### 7.1 Goal manager
-
-The manager holds the goal list. One goal has a description, a budget, a
-status, and a step list. The status is one of `open`, `active`, `blocked`,
-`done`, or `failed`. The manager persists each goal to the store. A restart
-resumes an `active` goal.
-
-#### 7.2 Controller
-
-The scheduler. It selects the next state. It enforces the budget. It calls the
-safety gate before each action. It writes one trajectory record per
-transition.
-
-#### 7.3 Policy
-
-One interface, two backends.
-
-- **`NanochatPolicy`** loads a checkpoint through
-  `python/nanochat_cpp/api.py`. It generates a tool call or a patch. It runs
-  on the local GPU.
-- **`TeacherPolicy`** calls one configurable external model. It runs on a
-  remote endpoint. It needs no GPU. A council is out of scope for now.
-
-The interface returns a proposal. The proposal is one of: a shell action, a
-code patch, a question, or a stop.
-
-#### 7.4 Tool executor
-
-The executor runs the proposal through `python/nanochat_cpp/toolchain.py`. It
-never calls Bazel or a binary directly. It returns an observation with a
-return code, standard output, standard error, and a duration.
-
-#### 7.5 Stuck detector
-
-The detector fires on any of these conditions:
-
-- The same error appears in two consecutive steps.
-- The step count passes a threshold with no goal progress.
-- The verifier score stays flat over a window.
-- The budget is nearly spent.
-- The policy emits no valid action.
-- The action repeats with no state change.
-
-The detector does not ask the teacher for a low-confidence action. It asks
-only when a rule fires. This keeps the cost down.
-
-#### 7.6 Escalation manager
-
-The manager routes a stuck event to the teacher first, then to the human. It
-writes the question and the context. It blocks the goal. The block is durable.
-A restart resumes the goal. The answer becomes an intervention record.
-
-#### 7.7 Trajectory store
-
-An append-only log. Use JSON Lines for the raw record, and SQLite for the
-index. The record carries a content hash. The hash makes the dataset
-reproducible.
-
-#### 7.8 Dataset builder
-
-The builder renders trajectories into the training formats. It uses
-`python/nanochat_cpp/chat.py` for the chat template and the loss mask, and
-`python/nanochat_cpp/sft_data.py` for the mixture of conversations.
-
-The supervised tokens are the assistant text, the tool call, and the human
-correction. The ignored tokens are the user text and the tool output. The
-renderer already masks the tool-output tokens. See [post-training.md](post-training.md)
-section 3.
-
-#### 7.9 Verifier
-
-The verifier scores an outcome. For a code goal the build and the lint gate
-are hard failures. The score is then the `tools/nanochat check` pass-rate and
-the `python/nanochat_cpp/tasks.py` pass-rate. The verifier reads a
-pre-populated `~/.cache/nanochat/task_data` and a small offline fixture, so a
-scored goal needs no network. The reward path in `python/nanochat_cpp/rl.py`
-is not in the tree yet (see [post-training.md](post-training.md) section 12).
-
-#### 7.10 Code editor
-
-The editor is Phase 5 only. It stays off until the human approves it. In
-Phase 0 and Phase 1 the action surface is the toolchain plus read-only file
-inspection.
-
-The editor applies a patch. It then runs a build and a test through the
-toolchain. If the build or the test fails, it discards the patch and restores
-the previous revision. It records the failed patch as a negative sample. The
-editor never writes inside `python/nanochat_cpp/evolve/**` or `tools/evolve`.
-
-#### 7.11 Model lifecycle manager
-
-The manager owns the GPU tenure. The single card allows one tenant. The manager
-coordinates with the GPU queue.
-
-```text
-UNLOADED --load--> REASONING --unload--> UNLOADED
-UNLOADED --load--> TRAINING  --unload--> UNLOADED
-```
-
-A transition needs the card to be free. The manager frees the model with
-`nanochat_model_free` before it releases the card. This frees the reason model
-before the training job starts.
-
-#### 7.12 Checkpoint registry and Hub transport
-
-The registry holds the version graph. One version has a parent, a code
-revision, a dataset hash, and a metric set. The Hub is the durable store. The
-local cache is the working copy. Use the `hf` command line interface for
-upload and download.
-
-The registry marks one version as current. If the metric does not improve, the
-registry restores the parent. The converter in
-`python/nanochat_cpp/checkpoint.py` reads a torch `state_dict` and writes the
-checkpoint container. The Hub stores the released container.
-
-#### 7.13 Safety gate
-
-The gate runs before each action. It checks these rules:
-
-- The action stays inside the sandbox profile.
-- A code edit touches no frozen header without approval.
-- A Hub upload waits for approval.
-- The budget is not exceeded.
-- The goal is not a prohibited goal.
-- A write outside the owned directory has human approval.
-
-The prohibited list is a small hard-coded denylist. Each approval travels on
-the durable answer queue of section 7.6.
-
-#### 7.14 Observer
-
-The observer writes structured logs and metrics. One step writes one log line.
-One goal writes one summary. Section 13 lists the metrics.
-
-### 8. Data model
-
-#### 8.1 Trajectory record
-
-| Field | Type | Meaning |
-|---|---|---|
-| `id` | string | Content hash |
-| `goal_id` | string | The parent goal |
-| `step` | integer | The step index |
-| `state` | object | The chat history and a bounded workspace digest |
-| `action` | object | The proposal and its arguments |
-| `observation` | object | The exit code, the output, and the duration |
-| `score` | float | The verifier score |
-| `stuck` | boolean | The detector output |
-| `intervention` | object or null | The teacher or human answer |
-| `policy` | string | `nanochat`, `teacher`, or `human` |
-| `checkpoint` | string | The model version |
-| `revision` | string | The code revision |
-| `time` | string | The timestamp |
-
-#### 8.2 Dataset splits
-
-- **Positive set:** steps with a good score.
-- **Intervention set:** steps with a teacher or human answer. These have the
-  highest value.
-- **Negative set:** steps with a bad score. These support preference methods
-  later.
-
-#### 8.3 Checkpoint version
-
-| Field | Meaning |
-|---|---|
-| `version` | A monotonic label |
-| `parent` | The previous version |
-| `revision` | The code revision |
-| `dataset` | The hash of the training set |
-| `metrics` | The evaluation numbers |
-| `hub_path` | The Hub location |
-
-#### 8.4 Teacher exit
-
-The teacher dependence is temporary. Each intervention is a labeled example.
-Each training round distills the teacher into the checkpoint. When the
-checkpoint matches the teacher on the task set, the loop drops the online
-teacher. It keeps the teacher only for a new task type. Section 13 defines the
-number that measures the gap.
-
-The exit test is a checkpoint pass-rate within 5 percent of the teacher over
-20 consecutive held-out tasks, with no escalation.
-
-### 9. Key sequences
-
-#### 9.1 Normal step
-
-1. The lifecycle manager loads the current checkpoint.
-2. The policy proposes a tool call.
-3. The executor runs the call.
-4. The verifier scores the result.
-5. The controller records the transition.
-6. The lifecycle manager unloads the model.
-
-#### 9.2 Stuck step and intervention
-
-1. The stuck detector fires.
-2. The escalation manager asks the teacher.
-3. The teacher answers. The answer becomes an action.
-4. The executor runs the action.
-5. The trajectory records the teacher turn as a supervised target.
-6. If the teacher fails, the manager asks the human. It blocks the goal.
-
-#### 9.3 Training round
-
-1. The controller closes a batch of goals.
-2. The dataset builder renders the batch.
-3. The lifecycle manager unloads the reason model.
-4. The training orchestrator runs SFT or RL through the toolchain.
-5. The verifier evaluates the new checkpoint.
-6. If the metric improves, the registry keeps the checkpoint.
-7. If the metric does not improve, the registry restores the parent.
-8. The registry uploads the checkpoint to the Hub.
-
-The SFT stage uses `python/nanochat_cpp/sft.py`. The RL stage uses the
-persistent worker in `python/nanochat_cpp/rl.py`. Both run through
-`tools/nanochat train`.
-
-### 10. GPU tenure and scheduling
-
-There is one GPU. The loop must serialize the GPU work.
-
-| Work | Resource | Notes |
-|---|---|---|
-| Reasoning | GPU held | Short and interactive |
-| Teacher call | Network only | The GPU stays free |
-| Training | GPU held | Long and exclusive |
-| Evaluation | GPU held | Short |
-| Build and test | CPU, and the GPU test tier | Through the queue |
-
-The table has one consequence. The reason model and the training job cannot
-share the card. The unload step is mandatory, not optional. The lifecycle
-manager enforces this rule.
-
-### 11. Failure handling
+The controller never generates text. It selects an action.
+
+**The control loop.** One iteration is one step through `IDLE`, `PLAN`, `REASON`,
+`ACT`, `OBSERVE`, `VERIFY`, `REFLECT`, and then one of `STUCK`, `ESCALATE`,
+`WAIT_HUMAN`, `TRAIN`, `DEPLOY`, `DONE`, or `FAILED`. `ACT` runs the action under
+the sandbox, `WAIT_HUMAN` blocks durably so that a restart resumes the goal, and
+`TRAIN` unloads the reason model first. The controller enforces a budget of
+tokens, teacher calls, GPU seconds, and wall clock at each transition, and a
+spent budget parks the goal.
+
+**The components.** The controller selects the state, enforces the budget, calls
+the safety gate, and writes one trajectory record per transition. The goal
+manager persists each goal with its budget and status. The policy has two
+backends: `NanochatPolicy` loads a checkpoint through `api.py` on the local GPU,
+and `TeacherPolicy` calls one configurable remote model. Either returns a shell
+action, a code patch, a question, or a stop, and the executor runs it through
+`toolchain.py`, never through Bazel or a binary directly. The stuck detector
+fires on a repeated error, a flat verifier score, a step or budget limit, no
+valid action, or a repeated action with no state change. The escalation manager
+routes the event to the teacher, then to the human, and blocks the goal durably.
+The trajectory store is an append-only JSON Lines log with a SQLite index and a
+content hash per record, and the dataset builder renders it with `chat.py` for
+the template and the loss mask and `sft_data.py` for the mixture. The verifier
+treats a build or lint failure as a hard failure, then scores the
+`tools/nanochat check` and `tasks.py` pass rates over a pre-populated cache, so a
+scored goal needs no network. The code editor is Phase 5 only: it applies a
+patch, builds and tests it, restores the previous revision on failure, and
+records the failed patch as a negative sample. The lifecycle manager owns the
+GPU tenure and frees the model with `nanochat_model_free` before it releases the
+card. The registry holds the version graph, marks one version current, and
+restores the parent when a metric does not improve, and the Hub transport
+publishes the container through the `hf` command line interface. The safety gate
+checks every action against a short rule list and a small denylist, and the
+observer writes one log line per step.
+
+**The data model.** A trajectory record carries `id` (the content hash),
+`goal_id`, `step`, `state` (the chat history and a bounded workspace digest),
+`action`, `observation` (exit code, output, and duration), `score`, `stuck`, the
+`intervention` or null, `policy`, `checkpoint`, `revision`, and `time`. The data
+splits into a positive set, an intervention set of teacher or human answers,
+which has the highest value, and a negative set for a later preference method. A
+checkpoint version carries `version`, `parent`, `revision`, `dataset` (the
+training-set hash), `metrics`, and `hub_path`.
+
+**The teacher exit.** Each intervention is a labeled example, and each training
+round distills the teacher into the checkpoint. The loop drops the online teacher
+when a checkpoint stays within 5 percent of the teacher pass rate over 20
+consecutive held-out tasks with no escalation. The teacher returns only for a new
+task type.
+
+**GPU tenure.** There is one card, so the work is serial. Reasoning and training
+both hold it, an evaluation holds it briefly, and a teacher call uses only the
+network. The reason model and the training job therefore cannot share the card,
+so the unload step is mandatory.
 
 | Failure | Response |
 |---|---|
-| A build fails | Discard the patch, restore the revision, record a negative sample |
-| A test fails | The same response as a build failure |
+| A build or a test fails | Discard the patch, restore the revision, record a negative sample |
 | Training diverges | Restore the parent checkpoint |
 | The Hub is down | Continue with the local cache |
 | The teacher returns garbage | Retry once, then escalate to the human |
-| The human does not answer | Park the goal, keep the loop on other goals |
+| The human does not answer | Park the goal and keep the loop on other goals |
 | The GPU is busy | Wait in the queue |
 
-### 12. Safety
+**Safety.** The sandbox protects the host, not the goal, so a separate gate
+applies. A code edit outside the owned directory, a Hub upload, and a Hub delete
+each need human approval. The caps are 200k policy tokens, 10 teacher calls, one
+GPU hour, and six hours of wall clock by default. One action writes one immutable
+audit record. A stop file is checked at every transition, and `SIGINT` stops a
+blocked controller.
 
-The sandbox protects the host. It does not protect the goal. Add a separate
-safety gate.
+**The layout.** One package `python/nanochat_cpp/evolve/` holds the modules named
+above, plus one tool, `tools/evolve`. The workstream is "Evolution", and
+[../AGENTS.md](../AGENTS.md) section 1 needs one row for it. The state lives
+outside the tree under `~/.cache/nanochat_cpp/evolve/`, and one goal is active at
+a time. The entry point gains one row in the command table of
+`python/nanochat_cpp/_entry.py` and one branch in `tools/nanochat`, both of which
+need architect approval. The editor never patches `evolve/**` or `tools/evolve`.
+The system adds no C++ kernel and no public C function; it reuses `toolchain.py`,
+`api.py`, `chat.py`, `sft.py`, `sft_data.py`, `rl.py`, `tasks.py`,
+`checkpoint.py`, the C ABI in `include/nanochat/capi.h`, the `tools/nanochat`
+entry point, and `notebooks/pi_agent.py`, which is the precedent for the teacher
+path.
 
-- Require human approval for a code edit outside the owned directory.
-- Require human approval for a Hub upload and a Hub delete.
-- Cap the teacher spend, the token count, and the GPU seconds. The default cap
-  is 200k policy tokens, 10 teacher calls, 1 GPU-hour, and 6 hours of wall
-  clock.
-- Keep an audit log. One action writes one immutable record. The durable
-  answer queue carries each question and each approval.
-- Support a hard stop. A stop file is checked at each transition, and SIGINT
-  stops a blocked controller.
-- Run the controller with `NANOCHAT_SANDBOX_BACKEND=none`. Every child job
-  keeps its own profile.
+**Delivery.**
 
-### 13. Observability
+| Phase | Work |
+|---|---|
+| 0 | The controller, the goals, the executor, the trajectory store, and `tools/evolve`, over a scripted policy on `doctor`, `build`, `check`, and `lint`, plus one deliberate failure that triggers an escalation |
+| 1 | The stuck detector, the escalation, the verifier, the store, the human surface, and a log of every intervention |
+| 2 | The dataset builder, and SFT on the intervention set, gated by `tools/nanochat check` and the eval tasks; it waits on [post-training.md](post-training.md) section 12 |
+| 3 | The lifecycle manager, the registry, and the Hub, proving one cycle of load, reason, unload, train, and upload |
+| 4 | `TeacherPolicy`, the distillation gap, and its closure |
+| 5 | The editor and the safety gate, so a code patch runs with a rollback gate |
 
-Track these numbers per goal and per checkpoint:
+**Risks.** A weak verifier lets the loop drift, so keep held-out tests against
+reward hacking. The teacher spend can grow, so keep the hard caps. An unsafe edit
+can break the host, so keep the rollback and approval gates. SFT can degrade an
+old skill, so keep a mixed dataset and a regression suite. The controller has no
+per-process host limit and relies on `nanochat.slice`. An overnight round blocks
+at the upload step, because every upload needs a human.
 
-- Goal success rate.
-- Human interventions per goal. This number should fall.
-- Teacher calls per goal. This number should fall.
-- The distillation gap. This is the pass-rate difference between the
-  checkpoint and the teacher.
-- The evaluation score, for example bits per byte and GSM8K.
-- GPU seconds per goal.
-- Cost per goal.
-
-The two falling numbers are the health signal. If they do not fall, the
-distillation is not working.
-
-### 14. Module layout and ownership
-
-Add one Python package and one tool. The package lives under the Python
-surface. The tool follows the `tools/nanochat` convention.
-
-```text
-python/nanochat_cpp/evolve/
-  controller.py    the loop and the state machine
-  goals.py         the goal manager
-  policy.py        NanochatPolicy and TeacherPolicy
-  executor.py      the toolchain wrapper
-  stuck.py         the stuck detector
-  escalation.py    the teacher and human routing
-  trajectory.py    the record type and the store
-  dataset.py       the dataset builder
-  verifier.py      the scoring and the reward
-  editor.py        the patch, the build, and the rollback
-  lifecycle.py     the GPU tenure
-  registry.py      the checkpoint versions
-  hub.py           the Hugging Face Hub transport
-  safety.py        the action gate
-  store.py         JSON Lines and SQLite
-
-tools/evolve       the entry point, one command table row
-docs/backlog.md   this design
-```
-
-Ownership follows `../AGENTS.md` section 1. The new workstream is "Evolution".
-It owns `python/nanochat_cpp/evolve/**`, `tools/evolve`, and
-`docs/backlog.md`. The evolution state lives out of the tree under
-`~/.cache/nanochat_cpp/evolve/`. One goal is active at a time. It depends on the toolchain, the compute layer, SFT,
-RL, and the checkpoint converter. It does not edit a frozen header.
-
-The entry point adds one row to the command table in
-`python/nanochat_cpp/_entry.py` and one branch in `tools/nanochat`. Both files
-need architect approval, because the table is the single source of truth. The
-new workstream also needs one row in `../AGENTS.md` section 1.
-
-The editor never patches `python/nanochat_cpp/evolve/**` or `tools/evolve`.
-The controller defers all code edits to Phase 5.
-
-### 15. Interfaces reused from the tree
-
-The system adds no C++ kernel and no public C function. It reuses these
-interfaces.
-
-| Interface | File | Use |
-|---|---|---|
-| `toolchain` | `python/nanochat_cpp/toolchain.py` | Build, test, lint, train, eval |
-| `api` | `python/nanochat_cpp/api.py` | Model, optimizer, generate, score |
-| `chat` | `python/nanochat_cpp/chat.py` | The chat template and the loss mask |
-| `sft` | `python/nanochat_cpp/sft.py` | The SFT shard and the SFT run |
-| `sft_data` | `python/nanochat_cpp/sft_data.py` | The conversation mixture |
-| `rl` | `python/nanochat_cpp/rl.py` | The rollout and advantage loop |
-| `tasks` | `python/nanochat_cpp/tasks.py` | GSM8K, HumanEval, ARC, MMLU |
-| `checkpoint` | `python/nanochat_cpp/checkpoint.py` | The checkpoint container and its run metadata |
-| C ABI | `include/nanochat/capi.h` | The in-process compute calls |
-| Tool entry | `tools/nanochat` | The sandbox and the GPU queue |
-| Agent runner | `notebooks/pi_agent.py` | An external coding agent |
-
-The agent runner is the precedent for the teacher path. It already streams the
-event stream of the Pi coding agent.
-
-### 16. Delivery plan
-
-#### Phase 0 — the loop
-
-Build `controller.py`, `goals.py`, `executor.py`, `trajectory.py`, and
-`tools/evolve`. Run the loop with a scripted policy. Make no learning change.
-The scripted goal list is `doctor`, `build`, `check`, and `lint`, plus one
-deliberate failure that triggers escalation. Phase 0 and Phase 1 are the first
-committed scope.
-
-#### Phase 1 — human in the loop
-
-Add `stuck.py`, `escalation.py`, `verifier.py`, and `store.py`. Add the human
-surface. Log every intervention.
-
-#### Phase 2 — learn from intervention
-
-Add `dataset.py`. Run SFT on the intervention set. Gate the result with
-`tools/nanochat check` and the eval tasks. This phase waits on the unfinished
-post-training work in [post-training.md](post-training.md) section 12.
-
-#### Phase 3 — model swap and Hub
-
-Add `lifecycle.py`, `registry.py`, and `hub.py`. Prove one full cycle: load,
-reason, unload, train, and upload.
-
-#### Phase 4 — teacher and distillation
-
-Add `policy.py` with `TeacherPolicy`. Measure the distillation gap. Close the
-gap.
-
-#### Phase 5 — code self-modification
-
-Add `editor.py` and `safety.py`. Allow a code patch with a rollback gate. Keep
-the frozen-header rule. This phase starts only after explicit human approval.
-
-### 17. Risks
-
-- **A weak verifier.** The loop drifts. The verifier must be strong and cheap.
-- **Reward hacking.** The model games the score. Keep held-out tests.
-- **Cost blowout.** The teacher spend grows. Keep hard budget caps.
-- **An unsafe edit.** A code patch breaks the host or the data. Keep the
-  rollback gate and the approval gate.
-- **Catastrophic forgetting.** SFT degrades an old skill. Keep a mixed dataset
-  and a regression suite.
-- **Single-card contention.** Training and reasoning compete. Keep the
-  lifecycle manager strict.
-- **An unsandboxed controller.** The controller has no per-process host limit.
-  A runaway controller relies on the aggregate `nanochat.slice` alone.
-- **An unattended Hub upload.** The approve-every-upload rule needs a human at
-  the wall clock, so an overnight round blocks at the upload step.
-- **Unproven worktree rollback.** The worktree-per-goal rule must respect the
-  one-Bazel-server-per-worktree rule and the prune workflow in
-  [sandbox.md](sandbox.md).
-
-### 18. Open questions
-
-All five questions are resolved.
-
-1. Verifier: a hard build and lint gate, then the `tools/nanochat check` and
-   `tasks.py` pass-rate.
-2. Teacher: one configurable external model.
-3. Hub: human approval for every upload and every delete.
-4. Teacher exit: a pass-rate within 5 percent of the teacher over 20
-   consecutive held-out tasks, with no escalation.
-5. Registry: a full checkpoint container snapshot on the Hub, with the hash and
-   the code revision in the local index.
-
-### 19. References
-
-- [../DESIGN.md](../DESIGN.md) — the layer model, the autograd policy, and the
-  evolution rules.
-- [python.md](python.md) — the compute, planning, and orchestration layers.
-- [post-training.md](post-training.md) — SFT and RL, and the weighted
-  classifier.
-- [distributed-design.md](distributed-design.md) — the Python and C++ boundary.
-- [post-training.md](post-training.md) — the RL worker bridge.
-- [sandbox.md](sandbox.md) — the resource sandbox and the GPU queue.
-- [testing.md](testing.md) — the test tiers and the Definition of Done.
-- [eval.md](eval.md) — the evaluation surfaces.
+The five open questions of the first draft are resolved: the verifier is a hard
+build and lint gate then a pass rate; the teacher is one configurable external
+model; every upload and delete needs approval; the exit test is the 5 percent
+rule above; and the registry stores a full container on the Hub with the hash and
+the code revision in the local index.

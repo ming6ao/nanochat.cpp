@@ -51,7 +51,7 @@ py_test(
     size = "small",
 )
 
-# T0: the three C entry points of `docs/api-surface.md` R11a that the ctypes
+# T0: the three C entry points of `spec/api-surface.md` R11a that the ctypes
 # table did not declare: `nanochat_generate_multi` with its 18th struct,
 # `nanochat_rl_step`, and `nanochat_optim_config_size`. Each test calls one of
 # them against the loaded library, including the size guard that `_lib.load`
@@ -102,7 +102,7 @@ py_test(
     size = "small",
 )
 
-# T0: the parity gate of `docs/api-surface.md` R12. `data.py` stays standard
+# T0: the parity gate of `spec/api-surface.md` R12. `data.py` stays standard
 # library only, so this test is what keeps it honest against the C reader: it
 # loads `//tests:data/loader_tokenizer.nctoken` through the C ABI and through
 # `nanochat_cpp.data`, and compares the mergeable ranks, the token byte

@@ -6,7 +6,7 @@
 #include "src/ops.h"
 
 // The values the inference graphs (`generate.cc`) read out of a model, and
-// nothing else (docs/api-surface.md R9). Inference needs the frozen weights,
+// nothing else (spec/api-surface.md R9). Inference needs the frozen weights,
 // the rotary tables, and the four mix scalars; it does not need the training
 // state, so this header names no training type and includes no training header.
 // `ViewForInference` builds the view, and its definition lives in

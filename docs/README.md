@@ -19,7 +19,6 @@ goes to [campaigns.md](campaigns.md). The rule is at the end of this page.
 | [conformance-matrix.md](conformance-matrix.md) | The model/device/tier/graph matrix. **Generated** by `tools/gen_matrix.py`; do not edit a row |
 | [examples.md](examples.md) | The two smallest examples of the public API: what each one shows, how to run it, the six design decisions, and its line budget |
 | [checkpoint-format.md](checkpoint-format.md) | The checkpoint container: the version 1 layout and the version 0 layout, the eight run-metadata decisions, the compatibility rules, and the parameter-only read |
-| [api-surface.md](api-surface.md) | The API of each component at HEAD, the smaller API proposed for each one, and the review rows `R1` to `R14` that the code cites |
 
 ## Precision and numerics
 
@@ -75,11 +74,11 @@ today.
 
 This directory is the architect-owned reference: it says what the tree does.
 [`../spec/`](../spec/) beside it holds the *vocabulary* — the names the two axes
-declare against, and the authority a declaration is reviewed by. It carries
-prose and data and no code. Where a name matters, the document here links into
-`spec/` instead of copying the table. A second copy of a closed list is the
-drift the design warns about (§17 of
-[model-and-device-bringup.md](model-and-device-bringup.md)).
+declare against, and the authority a declaration is reviewed by — and the API
+review whose rows the generators cite. It carries prose and data and no code.
+Where a name matters, the document here links into `spec/` instead of copying
+the table. A second copy of a closed list is the drift the design warns about
+(§17 of [model-and-device-bringup.md](model-and-device-bringup.md)).
 
 | File | Contents |
 |---|---|
@@ -88,6 +87,7 @@ drift the design warns about (§17 of
 | [../spec/block_kinds.md](../spec/block_kinds.md) | The block kinds, what each computes, the saved slots its backward reads, and the workspace-sharing rule |
 | [../spec/pointwise_ops.md](../spec/pointwise_ops.md) | The nine pointwise op codes and the declared accuracy bound of each |
 | [../spec/decisions.md](../spec/decisions.md) | The nine decision records D-001 to D-009 that the bring-up document cites |
+| [../spec/api-surface.md](../spec/api-surface.md) | The API of each component at HEAD, the smaller API proposed for each one, and the review rows `R1` to `R20` that the code and the generators cite |
 
 Where each is read from: the tier table is [kernels.md](kernels.md), not here
 and not in `spec/`; the block kinds and their slots are

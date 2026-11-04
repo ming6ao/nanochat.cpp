@@ -2,7 +2,7 @@
 """Check the three C ABI mirrors of ``include/nanochat/capi.h``, and
 generate the two that are mechanical.
 
-``docs/api-surface.md`` R11b: one header is mirrored three times, and every
+``spec/api-surface.md`` R11b: one header is mirrored three times, and every
 mirror is a copy of the header's names, order, and types. A copy that a hand
 keeps is a copy that drifts, so the header is the authority for all three:
 

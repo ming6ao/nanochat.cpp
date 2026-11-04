@@ -1,5 +1,5 @@
 // The one place an `InferenceView` is built from a concrete model
-// (docs/api-surface.md R9). The builder lives here because this is the
+// (spec/api-surface.md R9). The builder lives here because this is the
 // translation unit that also sees `TrainModel`, which is what lets
 // `generate.cc` read the weights without including `src/model_impl.h`.
 

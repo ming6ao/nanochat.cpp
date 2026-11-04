@@ -7,7 +7,7 @@
 #include "nanochat/config.h"
 #include "nanochat/model.h"
 
-// The body of the two public `Model::Create` overloads (docs/api-surface.md
+// The body of the two public `Model::Create` overloads (spec/api-surface.md
 // R8). `src/model.cc` holds the train graph; this is the factory that turns a
 // `Config` into one. The config validation and the compute-dtype rejection
 // live here once, and so do the spec lookup, the config agreement check, the

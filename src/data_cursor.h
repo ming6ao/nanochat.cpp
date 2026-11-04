@@ -14,7 +14,7 @@
 //
 // Both distribution drivers resume through this unit: the multi-process
 // `TrainLoop` and the in-process `MeshTrainDriver`
-// (docs/api-surface.md R13). It is the only copy of the layout.
+// (spec/api-surface.md R13). It is the only copy of the layout.
 //
 // This header is private to `src/`.
 
