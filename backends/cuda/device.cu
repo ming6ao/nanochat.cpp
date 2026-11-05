@@ -1,7 +1,9 @@
-// CUDA device runtime: allocation, copies, memset, synchronization, and the
-// capability report. This is the L0 backend layer (docs/build.md, layers): it
-// implements the device/memory half of nanochat/kernels.h and knows nothing
-// about the model. See docs/build.md and docs/kernels.md.
+// CUDA device runtime: allocation, copies, memset, synchronization, the
+// capability report, and the launch surface a fused kernel is sized from
+// (cooperative-launch support, the resident-block count, and the typed outcome
+// of a cooperative launch). This is the L0 backend layer (docs/build.md,
+// layers): it implements the device/memory half of nanochat/kernels.h and knows
+// nothing about the model. See docs/build.md and docs/kernels.md.
 
 #include "backends/cuda/device.h"
 
@@ -24,10 +26,25 @@ namespace cuda_backend {
 
 cudaStream_t Stream() { return nullptr; }
 
+namespace {
+
+// The one line both reports below print. `CheckCuda` labels it fatal and stops
+// the process; `ReportCudaError` labels it an error and returns, for a failure
+// whose caller may take another path.
+void PrintCudaError(const char* label, cudaError_t status, const char* what) {
+  std::fprintf(stderr, "%s: CUDA error in %s: %s\n", label, what,
+               cudaGetErrorString(status));
+}
+
+}  // namespace
+
+void ReportCudaError(cudaError_t status, const char* what) {
+  PrintCudaError("error", status, what);
+}
+
 void CheckCuda(cudaError_t status, const char* what) {
   if (status == cudaSuccess) return;
-  std::fprintf(stderr, "fatal: CUDA error in %s: %s\n", what,
-               cudaGetErrorString(status));
+  PrintCudaError("fatal", status, what);
   std::exit(1);
 }
 
@@ -74,6 +91,85 @@ std::uint64_t PrecisionFeatureBits(int major, int minor) {
     bits |= kFeatureFp8Storage | kFeatureFp8Gemm;
   }
   return bits;
+}
+
+const char* CooperativeLaunchOutcomeName(CooperativeLaunchOutcome outcome) {
+  switch (outcome) {
+    case CooperativeLaunchOutcome::kLaunched:
+      return "launched";
+    case CooperativeLaunchOutcome::kTooLarge:
+      return "cooperative-launch-too-large";
+    case CooperativeLaunchOutcome::kFailed:
+      return "failed";
+  }
+  return "unknown";
+}
+
+CooperativeLaunchOutcome ClassifyCooperativeLaunch(cudaError_t status) {
+  if (status == cudaSuccess) return CooperativeLaunchOutcome::kLaunched;
+  // The one refusal a driver acts on rather than reports: the grid did not fit
+  // on the device, so the phase driver is the answer (docs/muon-fused-kernel.md
+  // section 5, phase 4).
+  if (status == cudaErrorCooperativeLaunchTooLarge) {
+    return CooperativeLaunchOutcome::kTooLarge;
+  }
+  return CooperativeLaunchOutcome::kFailed;
+}
+
+bool CooperativeLaunchSupported(int cooperative_launch_attribute) {
+  // Zero is the only "no" the attribute has; a positive answer of any value is
+  // a yes, so a driver that reports more than a boolean is not misread.
+  return cooperative_launch_attribute != 0;
+}
+
+namespace {
+
+// The device this thread selected. Every query below is about that device,
+// because it is the one this backend's kernels run on and the one a launch is
+// sized for.
+int CurrentDevice() {
+  int device = 0;
+  CheckCuda(cudaGetDevice(&device), "cudaGetDevice");
+  return device;
+}
+
+int DeviceAttribute(cudaDeviceAttr attribute, const char* what) {
+  int value = 0;
+  CheckCuda(cudaDeviceGetAttribute(&value, attribute, CurrentDevice()), what);
+  return value;
+}
+
+}  // namespace
+
+bool SupportsCooperativeLaunch() {
+  return CooperativeLaunchSupported(
+      DeviceAttribute(cudaDevAttrCooperativeLaunch,
+                      "cudaDeviceGetAttribute(cudaDevAttrCooperativeLaunch)"));
+}
+
+int MultiprocessorCount() {
+  return DeviceAttribute(
+      cudaDevAttrMultiProcessorCount,
+      "cudaDeviceGetAttribute(cudaDevAttrMultiProcessorCount)");
+}
+
+int ActiveBlocksPerMultiprocessor(const void* kernel, int block_threads,
+                                  std::size_t dynamic_shared_bytes) {
+  int blocks = 0;
+  CheckCuda(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+                &blocks, kernel, block_threads, dynamic_shared_bytes),
+            "cudaOccupancyMaxActiveBlocksPerMultiprocessor");
+  // A configuration the device cannot run at all answers 0. It is reported as
+  // it is rather than rounded up to one block, because the caller sizes a grid
+  // from the answer and a grid the device refuses is worse than no grid.
+  return blocks < 0 ? 0 : blocks;
+}
+
+int ResidentBlocks(const void* kernel, int block_threads,
+                   std::size_t dynamic_shared_bytes) {
+  const int per_multiprocessor = ActiveBlocksPerMultiprocessor(
+      kernel, block_threads, dynamic_shared_bytes);
+  return per_multiprocessor * MultiprocessorCount();
 }
 
 }  // namespace cuda_backend

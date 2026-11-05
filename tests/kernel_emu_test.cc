@@ -21,6 +21,19 @@
 // (the attention `WarpMax`/`WarpSum` pattern) and the fused-residual RmsNorm
 // exports, which have no seam entry point but are part of the device family.
 //
+// The fused Muon path is the third comparison, and it is the one whose driver
+// matters here: `muon_fused.cu` carries one phase-parameterised device function
+// behind two drivers, and this engine can run only the *phase* driver, one
+// launch per phase execution. The cooperative driver separates its phase
+// executions with a grid barrier, and the engine runs the blocks of a grid one
+// at a time, so such a barrier would wait for blocks it has not scheduled: it
+// cannot be expressed here and must not be added as a case. The engine answers
+// 0 for `cudaDevAttrCooperativeLaunch` for the same reason, which is what makes
+// the phase loop the driver a simulated run takes; the cooperative driver is
+// compared with the phase driver on a real device by
+// `//backends/cuda/kernels:muon_fused_gpu_test`, which is where a case for it
+// belongs.
+//
 // CPU only: no GPU, no driver, no toolkit. The launch geometry is chosen so
 // that the block-wide reductions, the grid stride, and the multi-block path are
 // all exercised.
@@ -33,6 +46,7 @@
 #include <string>
 #include <vector>
 
+#include "backends/cuda/kernels/muon_fused.h"
 #include "nanochat/kernels.h"
 #include "nanochat/sandbox.h"
 #include "nanochat/tensor.h"
@@ -52,6 +66,7 @@ using nanochat::kernels::EmuPointwiseBackward;
 using nanochat::kernels::EmuPointwiseForward;
 using nanochat::kernels::EmuRmsNormBackward;
 using nanochat::kernels::EmuRmsNormForward;
+using nanochat::kernels::MuonUpdate;
 using nanochat::kernels::PointwiseBackward;
 using nanochat::kernels::PointwiseForward;
 using nanochat::kernels::RmsNormBackward;
@@ -62,6 +77,13 @@ int g_failures = 0;
 void Fail(const std::string& message) {
   std::fprintf(stderr, "FAIL: %s\n", message.c_str());
   ++g_failures;
+}
+
+// For the assertions that are about the run and not about a value: which driver
+// ran, how many launches it made, and whether a cooperative launch was
+// recorded.
+void ExpectTrue(bool condition, const std::string& what) {
+  if (!condition) Fail(what);
 }
 
 std::string Format(const char* fmt, ...) {
@@ -460,6 +482,119 @@ void CheckValueGate(int rows, int kv_heads, int head_dim) {
   ExpectClose(ToFloat(dve_ref), ToFloat(dve_emu), "value gate backward dve");
 }
 
+// The fused Muon path: one device function behind two drivers
+// (`backends/cuda/kernels/muon_fused.cu`, docs/muon-fused-kernel.md sections 4
+// to 6), compared with the CPU reference at tiny shapes.
+//
+// Only the *phase* driver can run here, and not because a feature is missing.
+// The cooperative driver separates its phase executions with `grid.sync()`, and
+// this engine runs the blocks of a grid one at a time: a barrier that waits for
+// every block of the grid would wait for blocks the engine has not scheduled
+// yet, so a cooperative launch could not be expressed and could not be reached.
+// The engine answers 0 for `cudaDevAttrCooperativeLaunch` for the same reason,
+// which is what sends `MuonFusedUpdate` to the phase loop, and the assertions
+// below pin that: the run reports the phase driver, it is not a fallback, it
+// makes one launch per phase execution, and no cooperative launch is recorded.
+// A cooperative case belongs to the T1 GPU gate
+// (`//backends/cuda/kernels:muon_fused_gpu_test`), which runs both drivers on
+// one device body and compares them with each other; adding one here would
+// deadlock the block-at-a-time engine rather than test anything.
+//
+// The reference is `//backends/cpu`'s `MuonUpdate`, the same arithmetic the
+// frozen seam ships, so a mismatch is either an emulation defect or a genuine
+// divergence between the fused device arithmetic and the reference. The fused
+// schedule loads `float4` quads of `ComputeType`, so it is the fp32 schedule
+// only; a bf16 build keeps the multi-launch cuBLAS path (`MuonFusedSelected`
+// reports false there) and this check is skipped.
+void CheckMuonFusedPhaseDriver(int num_params, int rows, int cols, int red_dim,
+                               bool nesterov, int ns_steps) {
+  using nanochat::MuonParams;
+  using nanochat::kernels::EmuMuonFusedUpdate;
+  using nanochat::kernels::MuonFusedDriver;
+  using nanochat::kernels::MuonFusedExecutions;
+  using nanochat::kernels::MuonFusedOptions;
+  using nanochat::kernels::MuonFusedPartialDoubles;
+  using nanochat::kernels::MuonFusedRun;
+  using nanochat::kernels::MuonFusedScratchFloats;
+  using nanochat::kernels::MuonFusedWorkspaceElements;
+
+  const int mat = rows * cols;
+  const int total = num_params * mat;
+  // The per-matrix extent of the factored second moment, the rule the kernel,
+  // the multi-launch path, and the reference all apply.
+  const bool reduce_cols = red_dim == -1 || (red_dim != -2 && rows >= cols);
+  const int red_index = reduce_cols ? rows : cols;
+
+  MuonParams params;
+  params.num_params = num_params;
+  params.rows = rows;
+  params.cols = cols;
+  params.lr = 0.02f;
+  params.momentum = 0.95f;
+  params.beta2 = 0.9f;
+  params.weight_decay = 0.01f;
+  params.ns_steps = ns_steps;
+  params.red_dim = red_dim;
+  params.nesterov = nesterov;
+
+  const int seed = 131 + 977 * num_params + 31 * rows + 17 * cols +
+                   7 * (ns_steps + 1) + 3 * static_cast<int>(nesterov) +
+                   (red_dim == -2 ? 1 : 0);
+  const std::vector<float> grads =
+      MakeInput(static_cast<std::size_t>(total), 1.0f, seed);
+  const std::vector<float> start =
+      MakeInput(static_cast<std::size_t>(total), 1.0f, seed + 1);
+
+  // One copy of the optimizer state per implementation: the gradient is
+  // read-only, everything else is updated in place by both.
+  std::vector<float> master_ref = start;
+  std::vector<ComputeType> values_ref = ToStorage(start);
+  std::vector<float> buf1_ref(static_cast<std::size_t>(total), 0.0f);
+  std::vector<float> buf2_ref(static_cast<std::size_t>(num_params) * red_index,
+                              0.0f);
+  MuonUpdate(params, grads.data(), master_ref.data(), values_ref.data(),
+             buf1_ref.data(), buf2_ref.data());
+
+  std::vector<float> master_emu = start;
+  std::vector<ComputeType> values_emu = ToStorage(start);
+  std::vector<float> buf1_emu(static_cast<std::size_t>(total), 0.0f);
+  std::vector<float> buf2_emu(static_cast<std::size_t>(num_params) * red_index,
+                              0.0f);
+  // The caller-owned buffers the fused schedule works in, sized with the
+  // header's own helpers: `[x | xn | a | b]` in `workspace`, `[stat | vmean |
+  // scale]` in `scratch`, and the per-matrix partials in `partials`.
+  std::vector<ComputeType> workspace(
+      MuonFusedWorkspaceElements(num_params, rows, cols));
+  std::vector<float> scratch(MuonFusedScratchFloats(num_params, rows, cols));
+  std::vector<double> partials(MuonFusedPartialDoubles(num_params, rows, cols));
+
+  const nanochat::emu::LaunchStats& stats = nanochat::emu::Stats();
+  const std::int64_t launches_before = stats.launches;
+  const std::int64_t cooperative_before = stats.cooperative_launches;
+  const MuonFusedRun run = EmuMuonFusedUpdate(
+      params, grads.data(), master_emu.data(), values_emu.data(),
+      buf1_emu.data(), buf2_emu.data(), workspace.data(), scratch.data(),
+      partials.data(), MuonFusedOptions());
+
+  const std::string what = Format(
+      "muon fused phase driver params=%d rows=%d cols=%d red_dim=%d "
+      "nesterov=%d ns_steps=%d",
+      num_params, rows, cols, red_dim, static_cast<int>(nesterov), ns_steps);
+  ExpectTrue(run.driver == MuonFusedDriver::kPhase,
+             what + ": the emulator runs the phase driver");
+  ExpectTrue(!run.fell_back,
+             what + ": the phase driver is the chosen driver, not a fallback");
+  ExpectTrue(stats.launches - launches_before == MuonFusedExecutions(ns_steps),
+             what + ": one launch per phase execution");
+  ExpectTrue(stats.cooperative_launches == cooperative_before,
+             what + ": no cooperative launch is recorded");
+
+  ExpectClose(master_emu, master_ref, what + " master");
+  ExpectClose(ToFloat(values_emu), ToFloat(values_ref), what + " values");
+  ExpectClose(buf1_emu, buf1_ref, what + " buf1");
+  ExpectClose(buf2_emu, buf2_ref, what + " buf2");
+}
+
 // Attention: the emulated kernels against the CPU reference. The fused
 // windowed forward uses `extern __shared__`, which the executed-source rewrite
 // covers (docs/simulator.md Part 7, section 6.2).
@@ -563,6 +698,30 @@ int main() {
   // The `extern __shared__` path ran: the dynamic shared buffer was sized.
   if (nanochat::emu::Stats().max_dynamic_shared_bytes == 0) {
     Fail("the dynamic shared-memory path was exercised");
+  }
+
+  // The fused Muon path, through the phase driver: the same update as the CPU
+  // reference at tiny shapes, both orientations, both Nesterov settings, and
+  // the two shortest Polar Express schedules. The default `red_dim` of -1
+  // reduces along the columns, so one case names the row axis (-2) instead, and
+  // the 3x5 case is not a whole number of 16-byte vector groups, which is what
+  // makes it run the scalar elementwise phases as well as the vector ones.
+  if (nanochat::kComputeIsBf16) {
+    std::printf(
+        "kernel emu: the fused Muon path is the fp32 schedule only; skipping "
+        "it in this bf16 build\n");
+  } else {
+    for (int num_params : {1, 3}) {
+      for (int ns_steps : {0, 1}) {
+        for (bool nesterov : {true, false}) {
+          CheckMuonFusedPhaseDriver(num_params, 6, 4, -1, nesterov, ns_steps);
+          CheckMuonFusedPhaseDriver(num_params, 4, 6, -1, nesterov, ns_steps);
+        }
+      }
+    }
+    // The vector path off, and the reduction axis named explicitly.
+    CheckMuonFusedPhaseDriver(1, 3, 5, -1, true, 1);
+    CheckMuonFusedPhaseDriver(1, 5, 3, -2, false, 1);
   }
 
   if (g_failures != 0) {

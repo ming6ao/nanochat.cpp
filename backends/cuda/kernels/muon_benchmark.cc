@@ -1,4 +1,4 @@
-// Standalone micro-benchmark for the Muon optimizer family. Three kinds of row:
+// Standalone micro-benchmark for the Muon optimizer family. Five kinds of row:
 //
 //   polar:<shape>:<rows>x<cols>
 //       the five Polar Express iterations of one stacked shape group: three
@@ -48,6 +48,7 @@
 #include <utility>
 #include <vector>
 
+#include "backends/cuda/kernels/muon_fused.h"
 #include "backends/cuda/kernels/testing/bench_utils.h"
 #include "backends/cuda/kernels/testing/gpu_test_utils.h"
 #include "nanochat/kernels.h"
@@ -63,6 +64,14 @@ using nanochat::dev::BenchOptions;
 using nanochat::dev::BenchReport;
 using nanochat::dev::DevBuf;
 using nanochat::dev::EventTimer;
+using nanochat::kernels::MuonFusedDriver;
+using nanochat::kernels::MuonFusedDriverName;
+using nanochat::kernels::MuonFusedOptions;
+using nanochat::kernels::MuonFusedPartialDoubles;
+using nanochat::kernels::MuonFusedRun;
+using nanochat::kernels::MuonFusedScratchFloats;
+using nanochat::kernels::MuonFusedUpdate;
+using nanochat::kernels::MuonFusedWorkspaceElements;
 
 // The Polar Express iteration count of the reference recipe.
 constexpr int kPolarIters = 5;
@@ -151,11 +160,13 @@ double IterationFlops(const Group& group) {
 }
 
 // One Polar Express iteration over one group, with the shapes and the flags of
-// `muon.cu`. The working set is `[x | prod | a | a2 | b]` from one
-// allocation, and `total` and `min_total` are that group's, so the caller sizes
-// the allocation for the widest group and reuses it.
+// `muon.cu`. The working set is `[x | prod | a | b]` from one allocation, which
+// is the layout both `MuonUpdate` paths slice, and `total` and `min_total` are
+// that group's, so the caller sizes the allocation for the widest group and
+// reuses it. The `a * a` product lands in `b` and the combination runs in place
+// there, so no `a2` buffer exists to size.
 void PolarIteration(const Group& group, ComputeType* x, ComputeType* prod,
-                    ComputeType* a, ComputeType* a2, ComputeType* b) {
+                    ComputeType* a, ComputeType* b) {
   const std::int64_t mat = Mat(group);
   const std::int64_t min_sq = std::min(group.rows, group.cols);
   const bool tall = group.rows > group.cols;
@@ -180,7 +191,7 @@ void PolarIteration(const Group& group, ComputeType* x, ComputeType* prod,
       ga2.stride_a = min_sq * min_sq;
       ga2.stride_b = min_sq * min_sq;
       ga2.stride_c = min_sq * min_sq;
-      nanochat::kernels::Gemm(GemmMode::kForward, ga2, a, a, a2);
+      nanochat::kernels::Gemm(GemmMode::kForward, ga2, a, a, b);
 
       GemmParams gp;
       gp.m = group.rows;
@@ -211,7 +222,7 @@ void PolarIteration(const Group& group, ComputeType* x, ComputeType* prod,
       ga2.stride_a = min_sq * min_sq;
       ga2.stride_b = min_sq * min_sq;
       ga2.stride_c = min_sq * min_sq;
-      nanochat::kernels::Gemm(GemmMode::kForward, ga2, a, a, a2);
+      nanochat::kernels::Gemm(GemmMode::kForward, ga2, a, a, b);
 
       GemmParams gp;
       gp.m = group.rows;
@@ -251,11 +262,9 @@ std::string GroupLabel(const Group& group) {
   return std::to_string(group.rows) + "x" + std::to_string(group.cols);
 }
 
-// One model shape's benchmark: the groups, the shared Polar Express workspace,
-// and the per-group state.
-// One `MuonUpdate` call, with the scalars `NanochatOptimizer::Step` resolves
-// for these tests.
-void RunMuon(const Group& group, GroupState& state, int ns_steps) {
+// The parameters of one group, with the scalars `NanochatOptimizer::Step`
+// resolves for these tests.
+MuonParams GroupParams(const Group& group, int ns_steps) {
   MuonParams p;
   p.num_params = group.num_params;
   p.rows = group.rows;
@@ -267,21 +276,64 @@ void RunMuon(const Group& group, GroupState& state, int ns_steps) {
   p.ns_steps = ns_steps;
   p.red_dim = group.rows >= group.cols ? -1 : -2;
   p.nesterov = true;
+  return p;
+}
+
+// One `MuonUpdate` call, which is whichever path the shape rule selects.
+void RunMuon(const Group& group, GroupState& state, int ns_steps) {
+  const MuonParams p = GroupParams(group, ns_steps);
   nanochat::kernels::MuonUpdate(p, state.grads.ptr, state.master.ptr,
                                 state.values.ptr, state.buf1.ptr,
                                 state.buf2.ptr);
+}
+
+// One fused call over the same buffers, so the two rows of a group differ only
+// in the path. `options.driver` is `kAuto`, which is what `MuonUpdate` asks
+// for.
+MuonFusedRun RunMuonFused(const Group& group, GroupState& state, int ns_steps,
+                          ComputeType* workspace, float* scratch,
+                          double* partials) {
+  const MuonParams p = GroupParams(group, ns_steps);
+  MuonFusedOptions options;
+  return MuonFusedUpdate(p, state.grads.ptr, state.master.ptr, state.values.ptr,
+                         state.buf1.ptr, state.buf2.ptr, workspace, scratch,
+                         partials, options);
+}
+
+// The statistics scratch and the double partials the fused path needs, sized
+// for the widest group of a profile.
+std::size_t FusedScratchLen(const std::vector<Group>& groups) {
+  std::size_t len = 0;
+  for (const Group& group : groups) {
+    len = std::max<std::size_t>(
+        len, MuonFusedScratchFloats(group.num_params, group.rows, group.cols));
+  }
+  return len;
+}
+
+std::size_t FusedPartialsLen(const std::vector<Group>& groups) {
+  std::size_t len = 0;
+  for (const Group& group : groups) {
+    len = std::max<std::size_t>(
+        len, MuonFusedPartialDoubles(group.num_params, group.rows, group.cols));
+  }
+  return len;
 }
 
 struct Bench {
   Profile profile;
   std::vector<Group> groups;
   std::vector<std::unique_ptr<GroupState>> states;
-  DevBuf<ComputeType> workspace;  // [x | prod | a | a2 | b], widest group
+  DevBuf<ComputeType> workspace;  // [x | prod | a | b], widest group
+  DevBuf<float> fused_scratch;    // [stat | vmean | scale], widest group
+  DevBuf<double> fused_partials;  // the blocked passes' partials, widest group
 
   Bench(const Profile& p, std::vector<Group> g, std::size_t workspace_len)
       : profile(p),
         groups(std::move(g)),
-        workspace(static_cast<int>(workspace_len)) {
+        workspace(static_cast<int>(workspace_len)),
+        fused_scratch(static_cast<int>(FusedScratchLen(groups))),
+        fused_partials(static_cast<int>(FusedPartialsLen(groups))) {
     for (const Group& group : groups) {
       states.push_back(std::make_unique<GroupState>(group));
     }
@@ -289,14 +341,13 @@ struct Bench {
 
   // The workspace slices of one group, at that group's offsets.
   void Slice(const Group& group, ComputeType** x, ComputeType** prod,
-             ComputeType** a, ComputeType** a2, ComputeType** b) const {
+             ComputeType** a, ComputeType** b) const {
     const std::int64_t total = Total(group);
     const std::int64_t min_total = MinTotal(group);
     *x = workspace.ptr;
     *prod = *x + total;
     *a = *prod + total;
-    *a2 = *a + min_total;
-    *b = *a2 + min_total;
+    *b = *a + min_total;
   }
 
   double PolarStepMs(const BenchOptions& opt) {
@@ -304,12 +355,46 @@ struct Bench {
     return timer.Time(
         [&] {
           for (const Group& group : groups) {
-            ComputeType *x, *prod, *a, *a2, *b;
-            Slice(group, &x, &prod, &a, &a2, &b);
-            PolarIteration(group, x, prod, a, a2, b);
+            ComputeType *x, *prod, *a, *b;
+            Slice(group, &x, &prod, &a, &b);
+            PolarIteration(group, x, prod, a, b);
           }
         },
         opt);
+  }
+
+  // One group's fused step, and the whole fused optimizer phase, over the same
+  // buffers the multi-launch rows use. The driver that ran is reported, because
+  // a card that refuses the cooperative launch answers with the phase driver.
+  double FusedGroupMs(const BenchOptions& opt, std::size_t index, int ns_steps,
+                      MuonFusedDriver* driver) {
+    MuonFusedRun run;
+    EventTimer timer;
+    const double ms = timer.Time(
+        [&] {
+          run = RunMuonFused(groups[index], *states[index], ns_steps,
+                             workspace.ptr, fused_scratch.ptr,
+                             fused_partials.ptr);
+        },
+        opt);
+    if (driver != nullptr) *driver = run.driver;
+    return ms;
+  }
+
+  double FusedStepMs(const BenchOptions& opt, int ns_steps,
+                     MuonFusedDriver* driver) {
+    MuonFusedRun run;
+    EventTimer timer;
+    const double ms = timer.Time(
+        [&] {
+          for (std::size_t i = 0; i < groups.size(); ++i) {
+            run = RunMuonFused(groups[i], *states[i], ns_steps, workspace.ptr,
+                               fused_scratch.ptr, fused_partials.ptr);
+          }
+        },
+        opt);
+    if (driver != nullptr) *driver = run.driver;
+    return ms;
   }
 
   // One group's optimizer phase at `ns_steps` iterations.
@@ -340,10 +425,15 @@ struct Bench {
   }
 };
 
+// The widest group's workspace, in `ComputeType` elements. `MuonUpdate` and
+// this benchmark slice it as `[x | prod | a | b]`, which is the fused path's
+// `MuonFusedWorkspaceElements`; the `a2` slice the family used to carry is
+// gone, because `b` holds the `a * a` product in place.
 std::int64_t WorkspaceLen(const std::vector<Group>& groups) {
   std::int64_t len = 0;
   for (const Group& group : groups) {
-    const std::int64_t needed = 2 * Total(group) + 3 * MinTotal(group);
+    const std::int64_t needed = static_cast<std::int64_t>(
+        MuonFusedWorkspaceElements(group.num_params, group.rows, group.cols));
     len = std::max(len, needed);
   }
   return len;
@@ -478,9 +568,9 @@ int main(int argc, char** argv) {
       EventTimer timer;
       const double ms = timer.Time(
           [&] {
-            ComputeType *x, *prod, *a, *a2, *b;
-            bench.Slice(group, &x, &prod, &a, &a2, &b);
-            PolarIteration(group, x, prod, a, a2, b);
+            ComputeType *x, *prod, *a, *b;
+            bench.Slice(group, &x, &prod, &a, &b);
+            PolarIteration(group, x, prod, a, b);
           },
           opt);
       const double gflops = 1e-9 * flops / (ms * 1e-3);
@@ -511,6 +601,32 @@ int main(int argc, char** argv) {
                    std::to_string(bench.groups.size()) +
                        " groups, ns=" + std::to_string(ns_steps),
                    muon_ms, gflops);
+      }
+      // The same two measurements through the fused path, over the same
+      // buffers. A reader compares `muon:` with `muon_fused:` row by row: the
+      // group rows are the decision `MuonFusedSelected` is set from, and the
+      // driver in the shape column is the one the card answered with.
+      for (std::size_t i = 0; i < bench.groups.size(); ++i) {
+        const Group& group = bench.groups[i];
+        const double one_flops = IterationFlops(group) * kPolarIters;
+        MuonFusedDriver driver = MuonFusedDriver::kAuto;
+        const double ms = bench.FusedGroupMs(opt, i, kPolarIters, &driver);
+        const double gflops = 1e-9 * one_flops / (ms * 1e-3);
+        report.Add("muon_fused:" + shape + ":" + GroupLabel(group),
+                   "batch=" + std::to_string(group.num_params) +
+                       ", driver=" + MuonFusedDriverName(driver),
+                   ms, gflops);
+      }
+      for (int ns_steps : {0, 1, kPolarIters}) {
+        MuonFusedDriver driver = MuonFusedDriver::kAuto;
+        const double fused_ms = bench.FusedStepMs(opt, ns_steps, &driver);
+        const double gflops =
+            1e-9 * step_flops * ns_steps / kPolarIters / (fused_ms * 1e-3);
+        report.Add("muon_fused:" + shape + ":step",
+                   std::to_string(bench.groups.size()) +
+                       " groups, ns=" + std::to_string(ns_steps) +
+                       ", driver=" + MuonFusedDriverName(driver),
+                   fused_ms, gflops);
       }
     }
     report.Print(opt);

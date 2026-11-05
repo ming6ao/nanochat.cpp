@@ -2,18 +2,31 @@
 // code only: it calls the sealed nanochat/kernels.h API, so it exercises
 // exactly the seam the rest of the project links against and stays free of
 // vendor headers. Tiny shapes only, per docs/testing.md.
+//
+// It also covers the launch surface of `backends/cuda/device.h` that the fused
+// Muon driver is built on (docs/muon-fused-kernel.md sections 4 and 8): the
+// typed outcome of a cooperative launch and the resident-block query the
+// persistent grid is sized from. That surface is backend-internal rather than
+// part of the sealed seam, so it is read through `backends/cuda/device.h` --
+// the header is CUDA headers and no vendor kernel constructs, and the one
+// device translation unit the test links is the test-only `launch_probe`.
 
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
+#include <string>
 #include <vector>
 
+#include "backends/cuda/device.h"
+#include "backends/cuda/launch_probe.h"
 #include "nanochat/kernels.h"
 #include "nanochat/sandbox.h"
 #include "nanochat/tensor.h"
 
 namespace {
 
+using nanochat::Caps;
 using nanochat::ComputeType;
 using nanochat::CopyDir;
 using nanochat::GemmMode;
@@ -34,6 +47,25 @@ ComputeType FromFloat(float value) { return value; }
 constexpr float kTolerance = 1e-3f;
 
 double g_worst_error = 0.0;
+
+// `NANOCHAT_SIM_PROFILE` is set when the simulator interposes the runtime
+// (docs/simulator.md section 5.1), and the mock answers the queries below with
+// fabricated values on purpose: 0 for cooperative-launch support and 1 block
+// per multiprocessor. The quantities that hold on the host card are therefore
+// pinned for a real device only, and the launch itself is attempted only where
+// the device says it can run one.
+bool Simulated() {
+  const char* profile = std::getenv("NANOCHAT_SIM_PROFILE");
+  return profile != nullptr && *profile != '\0';
+}
+
+int g_failures = 0;
+
+void Expect(bool condition, const char* what) {
+  if (condition) return;
+  std::printf("FAIL: %s\n", what);
+  ++g_failures;
+}
 
 // Stores A and B in the layout the transpose flags imply, computes the host
 // reference for C = alpha * op(A) * op(B) + beta * C, runs the device GEMM, and
@@ -139,6 +171,123 @@ bool RunCase(GemmMode mode, bool ta, bool tb, int m, int n, int k, int batch,
   return true;
 }
 
+// The cooperative-launch surface and the resident-block query
+// (docs/muon-fused-kernel.md sections 4 and 8). The first block is pure host
+// arithmetic: the classification of a status, and the reading of the
+// cooperative-launch attribute the simulator answers 0 for. The second block
+// asks the device, and pins the numbers the design sizes the persistent grid
+// from: 3 blocks per SM on the host card's 28 SMs, 84 blocks of persistent
+// grid.
+void CheckLaunchSurface(const Caps& caps) {
+  using nanochat::cuda_backend::ActiveBlocksPerMultiprocessor;
+  using nanochat::cuda_backend::ClassifyCooperativeLaunch;
+  using nanochat::cuda_backend::CooperativeLaunchOutcome;
+  using nanochat::cuda_backend::CooperativeLaunchOutcomeName;
+  using nanochat::cuda_backend::CooperativeLaunchSupported;
+  using nanochat::cuda_backend::MultiprocessorCount;
+  using nanochat::cuda_backend::ResidentBlocks;
+  using nanochat::cuda_backend::SupportsCooperativeLaunch;
+  using nanochat::cuda_backend::testing::kProbeBlockThreads;
+  using nanochat::cuda_backend::testing::kProbeDynamicSharedBytes;
+  using nanochat::cuda_backend::testing::ProbeCooperativeLaunch;
+  using nanochat::cuda_backend::testing::ProbeKernel;
+
+  // --- the typed outcome, without provoking a failure ----------------------
+  const CooperativeLaunchOutcome classified_ok =
+      ClassifyCooperativeLaunch(cudaSuccess);
+  Expect(classified_ok == CooperativeLaunchOutcome::kLaunched,
+         "cudaSuccess classifies as kLaunched");
+  const CooperativeLaunchOutcome classified_too_large =
+      ClassifyCooperativeLaunch(cudaErrorCooperativeLaunchTooLarge);
+  Expect(classified_too_large == CooperativeLaunchOutcome::kTooLarge,
+         "cudaErrorCooperativeLaunchTooLarge classifies as kTooLarge");
+  Expect(ClassifyCooperativeLaunch(cudaErrorInvalidConfiguration) ==
+             CooperativeLaunchOutcome::kFailed,
+         "any other launch error classifies as kFailed");
+  // The three names are distinct, so a log line cannot say the wrong thing.
+  Expect(std::string(CooperativeLaunchOutcomeName(classified_ok)) !=
+             std::string(CooperativeLaunchOutcomeName(classified_too_large)),
+         "kLaunched and kTooLarge have distinct names");
+  Expect(std::string(CooperativeLaunchOutcomeName(classified_too_large)) !=
+             std::string(CooperativeLaunchOutcomeName(
+                 CooperativeLaunchOutcome::kFailed)),
+         "kTooLarge and kFailed have distinct names");
+
+  // The simulator answers 0 for `cudaDevAttrCooperativeLaunch` and the fused
+  // build then takes the phase loop (section 8), so a 0 must read as "no" and
+  // only a non-zero as "yes".
+  Expect(!CooperativeLaunchSupported(0), "attribute 0 is a refusal");
+  Expect(CooperativeLaunchSupported(1), "attribute 1 is support");
+  Expect(CooperativeLaunchSupported(2),
+         "a truthy attribute other than 1 is still support");
+
+  // --- what the device answers --------------------------------------------
+  const bool simulated = Simulated();
+  const bool supports_cooperative = SupportsCooperativeLaunch();
+  std::printf("cuda_runtime: cooperative launch %s, %d SMs\n",
+              supports_cooperative ? "supported" : "not supported",
+              MultiprocessorCount());
+  if (simulated) {
+    std::printf(
+        "cuda_runtime: NOTE simulated device; the mock answers 1 active block "
+        "per SM, so the host-card quantities are not pinned here\n");
+  }
+
+  const int multiprocessors = MultiprocessorCount();
+  Expect(multiprocessors > 0, "the device reports at least one SM");
+  const int blocks_per_sm = ActiveBlocksPerMultiprocessor(
+      ProbeKernel(), kProbeBlockThreads, kProbeDynamicSharedBytes);
+  Expect(blocks_per_sm >= 1,
+         "the fused kernel's resources leave at least one block per SM");
+  const int resident = ResidentBlocks(ProbeKernel(), kProbeBlockThreads,
+                                      kProbeDynamicSharedBytes);
+  Expect(resident == blocks_per_sm * multiprocessors,
+         "the resident-block count is the per-SM count times the SM count");
+  std::printf(
+      "cuda_runtime: %d blocks per SM at %d threads and %zu bytes of dynamic "
+      "shared memory, %d resident blocks\n",
+      blocks_per_sm, kProbeBlockThreads, kProbeDynamicSharedBytes, resident);
+
+  // The host card (gtx1080ti): 3 blocks per SM on 28 SMs, which is the 84-block
+  // persistent grid docs/muon-fused-kernel.md section 4 sizes the cooperative
+  // driver from. Pinned for the real sm_61 device only.
+  if (!simulated && caps.compute_major == 6 && caps.compute_minor == 1 &&
+      multiprocessors == 28) {
+    Expect(blocks_per_sm == 3, "3 blocks per SM on the host card");
+    Expect(resident == 84, "84 resident blocks on the host card");
+  }
+
+  // --- one launch of that grid, and one the device must refuse -------------
+  if (!supports_cooperative) {
+    std::printf(
+        "cuda_runtime: NOTE no cooperative launch on this device; the fused "
+        "driver takes the phase loop\n");
+    return;
+  }
+  int blocks_ran = -1;
+  const CooperativeLaunchOutcome launched =
+      ProbeCooperativeLaunch(resident, &blocks_ran);
+  Expect(launched == CooperativeLaunchOutcome::kLaunched,
+         "a cooperative launch of the whole persistent grid is accepted");
+  Expect(blocks_ran == resident,
+         "every resident block of that launch ran to completion");
+
+  // The forced refusal: a grid four times the device's resident capacity. The
+  // typed outcome must say so, one launch later, and nothing may run.
+  blocks_ran = -1;
+  const CooperativeLaunchOutcome refused =
+      ProbeCooperativeLaunch(resident * 4 + 1, &blocks_ran);
+  Expect(refused == CooperativeLaunchOutcome::kTooLarge,
+         "a grid past the resident capacity returns kTooLarge, not a fatal "
+         "error");
+  Expect(blocks_ran == 0, "a refused cooperative launch runs no block");
+  std::printf(
+      "cuda_runtime: cooperative launch outcome %s for a grid of %d, "
+      "%s for a grid of %d\n",
+      CooperativeLaunchOutcomeName(launched), resident,
+      CooperativeLaunchOutcomeName(refused), resident * 4 + 1);
+}
+
 }  // namespace
 
 int main() {
@@ -200,6 +349,15 @@ int main() {
     if (!RunCase(c.mode, c.ta, c.tb, c.m, c.n, c.k, c.batch, c.alpha, c.beta)) {
       return 1;
     }
+  }
+
+  // The launch surface the fused Muon driver is built on. It reports its own
+  // failures and counts them, so the GEMM cases above keep their exit code.
+  CheckLaunchSurface(caps);
+  if (g_failures != 0) {
+    std::fprintf(stderr, "cuda_runtime: %d launch-surface check(s) failed\n",
+                 g_failures);
+    return 1;
   }
 
   std::printf("cuda_runtime: ok, %zu gemm cases verified",

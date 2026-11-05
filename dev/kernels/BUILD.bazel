@@ -177,11 +177,83 @@ cuda_binary(
     ],
 )
 
+# Muon fusion prototype (Phase 1): the device-side batched fp32 GEMM of the
+# Polar Express iteration, in the section 4 schedule. Unpromoted and dev-only:
+# `backends/cuda` does not depend on this directory.
+cuda_library(
+    name = "muon_fused_gemm",
+    srcs = ["muon_fused_gemm.cu"],
+    hdrs = [
+        "muon_fused_gemm.cuh",
+        "muon_fused_gemm.h",
+    ],
+    copts = nanochat_cuda_copts(),
+    defines = precision_defines(),
+    deps = [
+        "//backends/cuda:device",
+        "//include/nanochat:nanochat",
+    ],
+    alwayslink = True,
+)
+
+# gpu: the five operand forms against the seam GEMM, which is the cuBLAS call
+# `MuonUpdate` issues for the same product.
+cc_test(
+    name = "muon_fused_gemm_gpu_test",
+    srcs = ["muon_fused_gemm_test.cc"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    deps = [
+        ":muon_fused_gemm",
+        "//backends/cuda:all_kernels",
+        "//backends/cuda/kernels/testing:row_test_utils",
+        "//include/nanochat:nanochat",
+    ],
+    size = "small",
+    tags = ["gpu"],
+)
+
+# Hand GEMM versus cuBLAS on the groups the fusion targets, with the gate share
+# of section 4. Run it through the broker.
+cuda_binary(
+    name = "muon_fused_gemm_bench",
+    srcs = ["muon_fused_gemm_bench.cc"],
+    copts = nanochat_cuda_copts(),
+    host_copts = nanochat_copts(),
+    defines = precision_defines(),
+    host_defines = precision_defines(),
+    deps = [
+        ":muon_fused_gemm",
+        "//backends/cuda:all_kernels",
+        "//backends/cuda/kernels/testing:bench_utils",
+        "//backends/cuda/kernels/testing:row_test_utils",
+        "//include/nanochat:nanochat",
+    ],
+)
+
+# Phase 0's sync term: the launch gap of a dependent kernel against the cost of
+# a cooperative grid barrier on this card. The barrier needs device code, so the
+# whole probe is one CUDA translation unit.
+cuda_binary(
+    name = "muon_launch_sync_bench",
+    srcs = ["muon_launch_sync_bench.cu"],
+    copts = nanochat_cuda_copts(),
+    defines = precision_defines(),
+    deps = [
+        ":muon_fused_gemm",
+        "//backends/cuda:device",
+        "//backends/cuda/kernels/testing:bench_utils",
+        "//backends/cuda/kernels/testing:row_test_utils",
+        "//include/nanochat:nanochat",
+    ],
+)
+
 # Aggregation point consumed by //:all_tests.
 test_suite(
     name = "all",
     tests = [
         ":build_config_test",
+        ":muon_fused_gemm_gpu_test",
         ":pascal_spike_gpu_test",
         ":qk_prep_fused_gpu_test",
     ],

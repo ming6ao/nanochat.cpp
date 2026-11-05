@@ -29,6 +29,7 @@ cc_library(
         "math_constants.h",
         "//backends/cuda:device.h",
         "//backends/cuda/kernels:device_utils.cuh",
+        "//backends/cuda/kernels:muon_fused.h",
         "//backends/cuda/kernels:rms_norm.h",
     ],
 )
@@ -77,12 +78,27 @@ genrule(
     cmd = "sed -E 's/extern __shared__ +([A-Za-z_][A-Za-z0-9_]*) +([A-Za-z_][A-Za-z0-9_]*)\\[\\];/\\1* \\2 = static_cast<\\1*>(::nanochat::emu::DynamicShared());/' $< > $@",
 )
 
+# The fused Muon path (docs/muon-fused-kernel.md). A plain copy: the kernel
+# declares its two GEMM tile stages and its two reduction scratch arrays as
+# static `__shared__`, which the mapping in `cuda_emu.h` already covers, so no
+# `extern __shared__` rewrite is needed here. The driver selection inside the
+# source then does what section 8 describes: the emulator answers 0 for
+# `cudaDevAttrCooperativeLaunch`, so the emulated build takes the phase driver,
+# one launch per phase execution.
+genrule(
+    name = "muon_fused_emulated_source",
+    srcs = ["//backends/cuda/kernels:muon_fused.cu"],
+    outs = ["muon_fused_emu.cc"],
+    cmd = "cp $< $@",
+)
+
 cc_library(
     name = "emulated_kernels",
     srcs = [
         "emu_runtime.cc",
         ":attention_emulated_source",
         ":fp8_emulated_source",
+        ":muon_fused_emulated_source",
         ":pointwise_emulated_source",
         ":rms_norm_emulated_source",
         ":value_gate_emulated_source",
@@ -92,6 +108,14 @@ cc_library(
         # the host pass must not either: the value-gate kernels take `rows` for
         # the grid.
         "-Wno-unused-parameter",
+        # The two device idioms below are not warnings on a device and carry no
+        # information for a host pass. `#pragma unroll` has no loop to unroll
+        # here (`attention.cu`, `pointwise.cu`, `muon_fused.cu`), and a driver
+        # function that only the `__CUDACC__` branch calls is unused in the
+        # host build (`muon_fused.cu`'s cooperative fallback line). Neither
+        # changes a value, and the compile gate turns warnings into errors.
+        "-Wno-unknown-pragmas",
+        "-Wno-unused-function",
         # The repository root, so the kernel sources' own quoted includes
         # ("backends/cuda/device.h" and friends) resolve.
         "-I.",

@@ -19,6 +19,15 @@
 // Plus the two load-bearing handle contracts: `cublasCreate_v2` writes a
 // non-null handle, and `__cudaRegisterFatBinary` returns a non-null token.
 //
+// And the three runtime names the fused Muon build asks for
+// (docs/muon-fused-kernel.md section 8): `cudaDevAttrCooperativeLaunch` answers
+// 0 and the occupancy query answers 1, so a driver on the simulator takes the
+// phase loop rather than a grid barrier the mock cannot honour, and the
+// cooperative-kernel stub records the grid, block, and shared size it was given
+// instead of doing nothing -- including the refusal a grid above the mock's
+// residency earns, which is the one launch failure the fused driver answers
+// with its phase fallback.
+//
 // This is not a binding test: nothing here links the CUDA backend or exercises
 // `LD_PRELOAD`. That path is `//tests:cuda_sim_preload_test`, run by
 // `tools/nanochat simulate --suite api`, and it is what derives the tensor-core
@@ -65,6 +74,26 @@ std::vector<std::string> Lines(const std::string& log) {
 
 // A stable address the interposer can key its attribute table on.
 void DummyKernel() {}
+
+// The first log line that is a `call` record for `name` and carries every one
+// of `tokens`. Empty when no record matches, which is what an assertion about a
+// specific record then reports.
+std::string FindRecord(const std::string& log, const char* name,
+                       const std::vector<std::string>& tokens) {
+  const std::string call = std::string("\"call\":\"") + name + "\"";
+  for (const std::string& line : Lines(log)) {
+    if (line.find(call) == std::string::npos) continue;
+    bool matches = true;
+    for (const std::string& token : tokens) {
+      if (line.find(token) == std::string::npos) {
+        matches = false;
+        break;
+      }
+    }
+    if (matches) return line;
+  }
+  return std::string();
+}
 
 // The canary is a per-run binding proof: the first record must name the profile
 // the run simulates. A canary for any other profile is rejected.
@@ -225,6 +254,85 @@ void TestBlockLimit() {
   ExpectTrue(cudaLaunchKernel(func, grid, dim3(0), nullptr, 0, nullptr) !=
                  kCudaSuccess,
              "a zero-sized block is rejected");
+}
+
+// The fused Muon driver's three runtime entry points (docs/muon-fused-kernel.md
+// section 8). A fused build asks all three even when the launch it finally
+// makes is the phase driver's, so the mock has to answer them and record what
+// it was told: a missing export is a symbol gate failure, and a silent stub
+// would hide the launch the driver did make.
+void TestFusedRuntimeNames() {
+  // `cudaDevAttrCooperativeLaunch` is the answer that decides the driver. Zero
+  // is "no", so a run on the simulator takes the phase loop.
+  int cooperative = -1;
+  ExpectTrue(cudaDeviceGetAttribute(&cooperative, kCudaDevAttrCooperativeLaunch,
+                                    0) == kCudaSuccess,
+             "cudaDeviceGetAttribute(cudaDevAttrCooperativeLaunch) succeeds");
+  ExpectTrue(cooperative == 0,
+             "cudaDevAttrCooperativeLaunch answers 0 on the simulator");
+  ExpectTrue(cudaDeviceGetAttribute(nullptr, kCudaDevAttrCooperativeLaunch,
+                                    0) != kCudaSuccess,
+             "a null attribute pointer is rejected");
+  ExpectTrue(cudaDeviceGetAttribute(&cooperative, kCudaDevAttrCooperativeLaunch,
+                                    1) != kCudaSuccess,
+             "an attribute query about a device the simulator lacks is "
+             "rejected");
+
+  // The occupancy query sizes the persistent grid. One block per
+  // multiprocessor over one multiprocessor is a one-block grid, so nothing
+  // sizes a cooperative grid off the mock and no barrier is ever asked for.
+  const void* func = reinterpret_cast<const void*>(&DummyKernel);
+  int blocks = -1;
+  ExpectTrue(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&blocks, func, 256,
+                                                           0) == kCudaSuccess,
+             "the occupancy query succeeds");
+  ExpectTrue(blocks == 1, "the occupancy query answers one block per SM");
+  // The documented "cannot run that configuration" answer, reported as it is
+  // rather than rounded up to one block.
+  int unrunnable = -1;
+  ExpectTrue(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&unrunnable, func, 0,
+                                                           0) == kCudaSuccess,
+             "the occupancy query answers a zero-thread block");
+  ExpectTrue(unrunnable == 0,
+             "a configuration the profile cannot run answers 0 blocks");
+  ExpectTrue(cudaOccupancyMaxActiveBlocksPerMultiprocessor(nullptr, func, 256,
+                                                           0) != kCudaSuccess,
+             "a null block-count pointer is rejected");
+
+  // A cooperative launch is recorded like every other launch: the record is
+  // what a simulator run reports, so it carries the geometry the driver gave.
+  const std::size_t shared_bytes = 2048;
+  ExpectTrue(cudaLaunchCooperativeKernel(func, dim3(1), dim3(256), nullptr,
+                                         shared_bytes, nullptr) == kCudaSuccess,
+             "a cooperative launch within the mock's residency is accepted");
+  const std::string accepted =
+      FindRecord(nanochat_sim_log(), "cudaLaunchCooperativeKernel",
+                 {"\"verdict\":\"ok\""});
+  ExpectTrue(!accepted.empty(), "the cooperative launch is recorded");
+  ExpectTrue(accepted.find("\"grid_x\":1") != std::string::npos,
+             "the record carries the grid the driver asked for");
+  ExpectTrue(accepted.find("\"block_threads\":256") != std::string::npos,
+             "the record carries the block size the driver asked for");
+  ExpectTrue(accepted.find("\"shared_bytes\":" +
+                           std::to_string(shared_bytes)) != std::string::npos,
+             "the record carries the shared-memory request");
+  ExpectTrue(accepted.find("\"cooperative\":true") != std::string::npos,
+             "the record marks the launch cooperative");
+
+  // A grid above what the mock keeps resident is the refusal that sends the
+  // fused driver to its phase fallback, and it is recorded as such.
+  ExpectTrue(cudaLaunchCooperativeKernel(func, dim3(2), dim3(256), nullptr, 0,
+                                         nullptr) ==
+                 kCudaErrorCooperativeLaunchTooLarge,
+             "a grid above the resident capacity reports "
+             "cudaErrorCooperativeLaunchTooLarge");
+  const std::string refused =
+      FindRecord(nanochat_sim_log(), "cudaLaunchCooperativeKernel",
+                 {"\"grid_blocks\":2", "\"resident_blocks\":1"});
+  ExpectTrue(!refused.empty(),
+             "the refusal is recorded with both block counts");
+  ExpectTrue(refused.find("\"verdict\":\"ok\"") == std::string::npos,
+             "the refusal is not recorded as an accepted launch");
 }
 
 void TestAllocationBounds() {
@@ -400,6 +508,7 @@ int main() {
 
   TestHandleContracts();
   DriveTheBackend();
+  TestFusedRuntimeNames();
   TestSharedMemoryOrdering();
   TestBlockLimit();
   TestAllocationBounds();

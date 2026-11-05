@@ -243,7 +243,10 @@ existing call site compiles unchanged.
 
 Schedules (LR multiplier, Muon momentum, weight decay) live in `Scheduler`.
 `AdamWUpdate` and `MuonUpdate` are the kernels; Muon's Polar Express uses
-batched cuBLAS GEMMs.
+batched cuBLAS GEMMs. A fused variant runs the whole stage as one
+phase-parameterised kernel behind the same entry point and is selected for no
+shape on the card in the tree, so the batched cuBLAS path is what runs
+([kernels.md](kernels.md) Part 1).
 
 The kernels themselves are declared in [kernels.md](kernels.md).
 
