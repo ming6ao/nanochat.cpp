@@ -857,6 +857,13 @@ cc_test(
 # backends/cuda/kernels/ (compiled by the host compiler against the emulator's
 # CUDA stubs) against the CPU reference, kernel for kernel
 # (docs/simulator.md section 9.3). CPU only, so it runs in the default loop.
+#
+# The fused Muon path is the newest comparison and the only one whose *driver*
+# matters: the emulator runs the phase driver, one launch per phase execution,
+# because a grid barrier over blocks the engine runs one at a time could not be
+# expressed (docs/muon-fused-kernel.md section 8). The cooperative driver is
+# compared with the phase driver on a device, in
+# //backends/cuda/kernels:muon_fused_gpu_test.
 cc_test(
     name = "kernel_emu_test",
     srcs = ["kernel_emu_test.cc"],
@@ -894,6 +901,12 @@ cc_test(
 # links the CUDA backend or exercises `LD_PRELOAD`; that is
 # //tests:cuda_sim_preload_test, run by `tools/nanochat simulate --suite api`.
 # CPU only; no GPU, driver, or toolkit.
+#
+# It also pins the three runtime names the fused Muon build asks for
+# (docs/muon-fused-kernel.md section 8): the cooperative-launch attribute
+# answers 0 and the occupancy query answers 1, so a driver on the simulator takes
+# the phase loop, and a cooperative launch is a recorded launch rather than a
+# silent no-op.
 cc_test(
     name = "cuda_sim_test",
     srcs = ["cuda_sim_test.cc"],
@@ -910,9 +923,14 @@ cc_test(
 # the *real* CUDA backend (device.cu + gemm.cu) and is run with
 # `LD_PRELOAD=libcuda_sim_interposer.so`, so the calls below are bound to the
 # mock by the dynamic linker. It drives `kernels::GetCaps`, the memory calls,
-# both GEMM paths, and `Synchronize`, then asserts the mock's JSON log. It is
-# `manual` because it must only run under `tools/nanochat simulate --suite api`,
-# which supplies `LD_PRELOAD`, `NANOCHAT_SIM_LOG`, and `NANOCHAT_SIM_PROFILE`.
+# both GEMM paths, and `Synchronize`, then asserts the mock's JSON log. The
+# fused Muon launch surface is driven the same way: the three queries and one
+# cooperative launch go through `backends/cuda/device.cu`, with the kernel
+# symbol `//backends/cuda:launch_probe` supplies -- a host-only test cannot
+# declare a `__global__` function, so that test-only library is the one device
+# translation unit this target links. It is `manual` because it must only run
+# under `tools/nanochat simulate --suite api`, which supplies `LD_PRELOAD`,
+# `NANOCHAT_SIM_LOG`, and `NANOCHAT_SIM_PROFILE`.
 cc_test(
     name = "cuda_sim_preload_test",
     srcs = ["cuda_sim_preload_test.cc"],
@@ -920,6 +938,9 @@ cc_test(
     defines = precision_defines(),
     deps = [
         "//backends/cuda:cuda",
+        # The fused Muon kernel's launch resources, and one cooperative launch
+        # of them: the kernel symbol the launch surface of `device.h` needs.
+        "//backends/cuda:launch_probe",
         "//include/nanochat:nanochat",
         # To derive the expected caps from the profile name the run simulates.
         "//src:device_profile",
@@ -1038,6 +1059,12 @@ cc_test(
 )
 
 # Aggregation point consumed by //:all_tests.
+#
+# `cuda_sim_preload_test` is deliberately absent: it is `manual`, because it only
+# means anything under `tools/nanochat simulate --suite api`, which supplies the
+# `LD_PRELOAD`, `NANOCHAT_SIM_LOG`, and `NANOCHAT_SIM_PROFILE` it needs. Every
+# other simulator target above is here, including the two the fused Muon legs
+# extend (`cuda_sim_test` for the mock, `kernel_emu_test` for the emulator).
 test_suite(name = "all", tests = [
     ":oracle_test",
     ":oracle_cuda_test",

@@ -15,6 +15,19 @@
 // GEMM invariant in particular derives from the real `gemm.cu` decision (which
 // compute type and algorithm the device code chooses), not from a record the
 // test constructed itself.
+//
+// The fused Muon build's launch surface is driven the same way
+// (docs/muon-fused-kernel.md section 8). `device.cu`'s
+// `SupportsCooperativeLaunch`, `MultiprocessorCount`,
+// `ActiveBlocksPerMultiprocessor`, and `ResidentBlocks` are called here, so the
+// answers in the log are the ones the real backend read from the preloaded
+// library, and one cooperative launch goes through `LaunchCooperative` with
+// `//backends/cuda:launch_probe`'s kernel -- the one kernel symbol a host-only
+// test can launch. The mock runs no block, so the probe reports that no block
+// wrote; what the checks ride on is the record: the grid, the block size, and
+// the shared-memory size the driver gave, and the
+// `cudaErrorCooperativeLaunchTooLarge` refusal a grid above the mock's
+// residency earns.
 
 #include <cstddef>
 #include <cstdint>
@@ -24,6 +37,8 @@
 #include <string>
 #include <vector>
 
+#include "backends/cuda/device.h"
+#include "backends/cuda/launch_probe.h"
 #include "nanochat/device_profile.h"
 #include "nanochat/kernels.h"
 #include "nanochat/sandbox.h"
@@ -72,6 +87,26 @@ std::string ReadFile(const char* path) {
 
 bool Contains(const std::string& log, const char* needle) {
   return log.find(needle) != std::string::npos;
+}
+
+// True when the log holds one `call` record for `name` that carries every one
+// of `tokens`. A record is one line, so the tokens cannot be satisfied by two
+// different calls.
+bool HasRecord(const std::string& log, const char* name,
+               const std::vector<std::string>& tokens) {
+  const std::string call = std::string("\"call\":\"") + name + "\"";
+  for (const std::string& line : Lines(log)) {
+    if (line.find(call) == std::string::npos) continue;
+    bool all = true;
+    for (const std::string& token : tokens) {
+      if (line.find(token) == std::string::npos) {
+        all = false;
+        break;
+      }
+    }
+    if (all) return true;
+  }
+  return false;
 }
 
 // The canary is a *per-run* binding proof: the first record must name the
@@ -209,6 +244,64 @@ int DriveTheRealBackend(const std::string& profile_name) {
   return 0;
 }
 
+// The fused Muon driver's launch surface, through the real backend
+// (`backends/cuda/device.cu`) and therefore through whatever `LD_PRELOAD` put
+// in front of the CUDA runtime (docs/muon-fused-kernel.md section 8).
+//
+// The three queries are ordinary host functions, so a host-only test can ask
+// them; the launch needs a kernel symbol, which `//backends/cuda:launch_probe`
+// supplies -- a kernel compiled with the fused kernel's launch resources, so
+// the occupancy answer is about a real kernel and not about an address the test
+// invented.
+void DriveTheFusedLaunchSurface() {
+  using nanochat::cuda_backend::ActiveBlocksPerMultiprocessor;
+  using nanochat::cuda_backend::CooperativeLaunchOutcome;
+  using nanochat::cuda_backend::MultiprocessorCount;
+  using nanochat::cuda_backend::ResidentBlocks;
+  using nanochat::cuda_backend::SupportsCooperativeLaunch;
+  using nanochat::cuda_backend::testing::kProbeBlockThreads;
+  using nanochat::cuda_backend::testing::kProbeDynamicSharedBytes;
+  using nanochat::cuda_backend::testing::ProbeCooperativeLaunch;
+  using nanochat::cuda_backend::testing::ProbeKernel;
+
+  // The first question the driver puts to the device. Zero means "no", and a
+  // driver that reads it takes the phase loop: this is the simulated run's
+  // answer, read through the real backend's own helper.
+  ExpectTrue(!SupportsCooperativeLaunch(),
+             "the mock answers 0 for cudaDevAttrCooperativeLaunch, so the "
+             "phase driver is the one a simulated run takes");
+  ExpectTrue(MultiprocessorCount() == 1, "the mock reports one multiprocessor");
+
+  // The persistent grid the cooperative driver would size: one block per
+  // multiprocessor over one multiprocessor.
+  const void* kernel = ProbeKernel();
+  ExpectTrue(ActiveBlocksPerMultiprocessor(kernel, kProbeBlockThreads,
+                                           kProbeDynamicSharedBytes) == 1,
+             "the occupancy query answers one block per SM through the mock");
+  ExpectTrue(
+      ResidentBlocks(kernel, kProbeBlockThreads, kProbeDynamicSharedBytes) == 1,
+      "a persistent grid sized from the mock is one block");
+
+  // An accepted cooperative launch. The mock records the launch and runs no
+  // block, so `blocks_ran` stays zero; the record is what the log checks below
+  // read.
+  int blocks_ran = -1;
+  ExpectTrue(ProbeCooperativeLaunch(1, &blocks_ran) ==
+                 CooperativeLaunchOutcome::kLaunched,
+             "a one-block cooperative launch is accepted through the mock");
+  ExpectTrue(blocks_ran == 0,
+             "the mock records the cooperative launch and runs no block");
+
+  // The refusal the fused driver answers with its phase fallback: a grid above
+  // what the device keeps resident at once.
+  blocks_ran = -1;
+  ExpectTrue(ProbeCooperativeLaunch(2, &blocks_ran) ==
+                 CooperativeLaunchOutcome::kTooLarge,
+             "a grid above the resident capacity reports "
+             "cudaErrorCooperativeLaunchTooLarge");
+  ExpectTrue(blocks_ran == 0, "a refused cooperative launch runs no block");
+}
+
 void CheckLog(const std::string& log, const std::string& profile,
               bool expect_tensor_cores) {
   // Invariant 7: the binding canary.
@@ -281,6 +374,36 @@ void CheckLog(const std::string& log, const std::string& profile,
     ExpectTrue(accepted, "at least one cublasLtMatmul was recorded");
   }
 
+  // The fused Muon build's three runtime names (docs/muon-fused-kernel.md
+  // section 8). A fused build asks all three even when the launch it finally
+  // makes is the phase driver's, so every one of them is a record of what the
+  // real backend asked and what the mock answered.
+  ExpectTrue(HasRecord(log, "cudaDeviceGetAttribute",
+                       {"\"attribute\":95", "\"value\":0"}),
+             "the mock answered 0 for cudaDevAttrCooperativeLaunch");
+  ExpectTrue(HasRecord(log, "cudaDeviceGetAttribute",
+                       {"\"attribute\":16", "\"value\":1"}),
+             "the mock answered one multiprocessor");
+  ExpectTrue(HasRecord(log, "cudaOccupancyMaxActiveBlocksPerMultiprocessor",
+                       {"\"blocks\":1", "\"verdict\":\"ok\""}),
+             "the mock answered one block per multiprocessor, and recorded it");
+  const std::string probe_threads =
+      std::to_string(nanochat::cuda_backend::testing::kProbeBlockThreads);
+  ExpectTrue(
+      HasRecord(
+          log, "cudaLaunchCooperativeKernel",
+          {"\"grid_x\":1", "\"block_threads\":" + probe_threads,
+           "\"shared_bytes\":" +
+               std::to_string(
+                   nanochat::cuda_backend::testing::kProbeDynamicSharedBytes),
+           "\"cooperative\":true", "\"verdict\":\"ok\""}),
+      "the accepted cooperative launch is recorded with its grid, "
+      "block, and shared size");
+  ExpectTrue(HasRecord(log, "cudaLaunchCooperativeKernel",
+                       {"\"grid_blocks\":2", "\"resident_blocks\":1"}),
+             "the refused cooperative launch is recorded with both block "
+             "counts");
+
   // A log without addresses stays comparable across runs.
   ExpectTrue(log.find("0x") == std::string::npos,
              "no pointer value appears in the log");
@@ -307,6 +430,7 @@ int main() {
       (profile != nullptr && *profile != '\0') ? profile : "";
 
   DriveTheRealBackend(wanted);
+  DriveTheFusedLaunchSurface();
 
   const std::string log = ReadFile(log_path);
   if (log.empty()) {
