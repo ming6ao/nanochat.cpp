@@ -30,6 +30,14 @@ libcudart.so.12 {
     # Launch and the fat-binary hooks the loader calls.
     cudaLaunchKernel;
     cudaFuncSetAttribute;
+    # The fused Muon build's three queries and its cooperative launch
+    # (docs/muon-fused-kernel.md section 8). A fused build asks for all three
+    # even when it takes the phase driver, so a mock that does not export them
+    # fails this gate. The mock answers 0 for `cudaDevAttrCooperativeLaunch`
+    # and 1 for the occupancy query, so a simulated run takes the phase loop.
+    cudaLaunchCooperativeKernel;
+    cudaDeviceGetAttribute;
+    cudaOccupancyMaxActiveBlocksPerMultiprocessor;
     __cudaRegisterFatBinary;
     __cudaRegisterFatBinaryEnd;
     __cudaUnregisterFatBinary;

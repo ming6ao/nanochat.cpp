@@ -95,6 +95,38 @@ enum cudaMemcpyKind {
   cudaMemcpyDefault = 4,
 };
 constexpr cudaError_t cudaSuccess = 0;
+constexpr cudaError_t cudaErrorInvalidValue = 1;
+
+// The attribute codes the fused Muon driver asks about, and the one error a
+// refused cooperative launch reports (docs/muon-fused-kernel.md section 8). The
+// values are the vendor ABI's, so the emulated build asks the same question a
+// device would and reads the same answer back.
+enum cudaDeviceAttr {
+  cudaDevAttrMultiProcessorCount = 16,
+  cudaDevAttrCooperativeLaunch = 95,
+};
+constexpr cudaError_t cudaErrorCooperativeLaunchTooLarge = 720;
+
+// ---------------------------------------------------------------------------
+// The three runtime entry points a fused build asks for
+// ---------------------------------------------------------------------------
+//
+// `backends/cuda/device.cu` reaches all three as soon as the fused Muon path is
+// linked, even when the launch it finally makes is the phase driver's: the
+// cooperative attribute is a query, and the occupancy query sizes the
+// persistent grid. Declared here because this header is the only
+// `<cuda_runtime.h>` an emulated translation unit can see; defined in
+// `emu_runtime.cc`, so the emulated device code links and the answers are the
+// emulator's (0 for the cooperative attribute, 1 for the occupancy query, and
+// therefore the phase loop).
+cudaError_t cudaDeviceGetAttribute(int* value, cudaDeviceAttr attribute,
+                                   int device);
+cudaError_t cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+    int* num_blocks, const void* kernel, int block_threads,
+    std::size_t dynamic_shared_bytes);
+cudaError_t cudaLaunchCooperativeKernel(const void* func, dim3 grid, dim3 block,
+                                        void** args, std::size_t shared,
+                                        cudaStream_t stream);
 
 // ---------------------------------------------------------------------------
 // Execution geometry, read by the kernel bodies
@@ -395,9 +427,31 @@ struct LaunchStats {
   std::int64_t threads = 0;
   std::size_t max_block_threads = 0;
   std::size_t max_dynamic_shared_bytes = 0;
+
+  // The queries a fused build asks before it launches, and the one launch it
+  // may make instead of the phase loop (docs/muon-fused-kernel.md section 8).
+  // They are recorded beside the launch counters for the same reason a launch
+  // is: the engine reports what it was told, not only what it dispatched.
+  // `cooperative_launches` counts the cooperative launch records, which are
+  // already included in `launches`.
+  std::int64_t device_attribute_queries = 0;
+  std::int64_t occupancy_queries = 0;
+  std::int64_t cooperative_launches = 0;
+  // The answers the driver was given, so a run can state them: 0 for
+  // `cudaDevAttrCooperativeLaunch`, 1 block per multiprocessor, 1
+  // multiprocessor.
+  int cooperative_launch_attribute = 0;
+  int active_blocks_per_multiprocessor = 0;
+  int multiprocessors = 0;
 };
 
 LaunchStats& Stats();
+
+// Records one launch's shape in `Stats()` and returns the threads per block it
+// asked for. The launcher and the cooperative launch stub share it, so a
+// cooperative launch is a launch record in this engine and not a silent no-op.
+std::size_t RecordLaunchStats(const dim3& grid, const dim3& block,
+                              std::size_t shared_bytes);
 
 namespace detail {
 
@@ -476,16 +530,7 @@ void RunBlock(Kernel kernel, const dim3& block_idx, const dim3& block_dim,
 template <typename Kernel, typename... Args>
 void LaunchEmulatedKernel(Kernel kernel, dim3 grid, dim3 block,
                           std::size_t shared_bytes, Args... args) {
-  const std::size_t threads =
-      static_cast<std::size_t>(block.x) * block.y * block.z;
-  LaunchStats& stats = Stats();
-  ++stats.launches;
-  stats.threads +=
-      static_cast<std::int64_t>(threads) * grid.x * grid.y * grid.z;
-  if (threads > stats.max_block_threads) stats.max_block_threads = threads;
-  if (shared_bytes > stats.max_dynamic_shared_bytes) {
-    stats.max_dynamic_shared_bytes = shared_bytes;
-  }
+  const std::size_t threads = RecordLaunchStats(grid, block, shared_bytes);
   if (threads == 0 || threads > kMaxBlockThreads) {
     std::fprintf(
         stderr, "emu: launch geometry invalid (block of %zu threads, max %d)\n",

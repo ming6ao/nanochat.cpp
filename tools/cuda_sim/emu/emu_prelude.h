@@ -33,6 +33,13 @@
 #define ValueGateBackward EmuValueGateBackward
 #define AttentionForward EmuAttentionForward
 #define AttentionBackward EmuAttentionBackward
+// The fused Muon path (`backends/cuda/kernels/muon_fused.cu`). Its entry is the
+// one the seam keeps, so it is renamed like the seam entries above: a
+// simulator suite can call `EmuMuonFusedUpdate` and compare it with the CPU
+// backend's `MuonUpdate` in the same binary. The sizing helpers that entry is
+// called with (`MuonFusedWorkspaceElements`, `MuonFusedScratchFloats`,
+// `MuonFusedPartialDoubles`) keep their names: no other backend defines them.
+#define MuonFusedUpdate EmuMuonFusedUpdate
 
 namespace nanochat {
 namespace cuda_backend {

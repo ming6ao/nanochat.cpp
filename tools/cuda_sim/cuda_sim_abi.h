@@ -45,6 +45,19 @@ constexpr cudaError_t kCudaErrorInvalidDevicePointer = 17;
 constexpr cudaError_t kCudaErrorInvalidConfiguration = 9;
 constexpr cudaError_t kCudaErrorInvalidDevice = 10;
 constexpr cudaError_t kCudaErrorInvalidResourceHandle = 33;
+// The refusal a cooperative launch reports when the grid does not fit on the
+// device: `cudaErrorCooperativeLaunchTooLarge`, the one launch failure the
+// fused Muon driver acts on instead of reporting (docs/muon-fused-kernel.md
+// section 4).
+constexpr cudaError_t kCudaErrorCooperativeLaunchTooLarge = 720;
+
+// The device attributes the fused driver asks about, at CUDA 12's values: the
+// multiprocessor count sizes the persistent grid, and
+// `cudaDevAttrCooperativeLaunch` decides whether a cooperative launch is
+// attempted at all (docs/muon-fused-kernel.md section 8).
+using cudaDeviceAttrAbi = int;
+constexpr cudaDeviceAttrAbi kCudaDevAttrMultiProcessorCount = 16;
+constexpr cudaDeviceAttrAbi kCudaDevAttrCooperativeLaunch = 95;
 
 // The attribute `gemm.cu`'s neighbours would set before a >48 KB launch. The
 // tree sets none today; the interposer's rule checks the ordering anyway, and
@@ -151,6 +164,17 @@ cudaError_t cudaDeviceSynchronize(void);
 cudaError_t cudaLaunchKernel(const void* func, dim3 grid, dim3 block,
                              void** args, std::size_t shared, void* stream);
 cudaError_t cudaFuncSetAttribute(const void* func, int attribute, int value);
+// The three entry points the fused Muon build asks for even when it takes the
+// phase driver (docs/muon-fused-kernel.md section 8). The signatures are the
+// vendor ABI's, with the attribute code as this header's plain-int alias.
+cudaError_t cudaDeviceGetAttribute(int* value, cudaDeviceAttrAbi attribute,
+                                   int device);
+cudaError_t cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+    int* num_blocks, const void* kernel, int block_threads,
+    std::size_t dynamic_shared_bytes);
+cudaError_t cudaLaunchCooperativeKernel(const void* func, dim3 grid, dim3 block,
+                                        void** args, std::size_t shared,
+                                        void* stream);
 void** __cudaRegisterFatBinary(void* fat_cubin);
 void __cudaRegisterFatBinaryEnd(void** handle);
 void __cudaUnregisterFatBinary(void** handle);

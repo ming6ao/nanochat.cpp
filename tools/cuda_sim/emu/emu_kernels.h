@@ -10,6 +10,7 @@
 //
 // The signatures are exactly the seam's. Only the symbol name differs.
 
+#include "backends/cuda/kernels/muon_fused.h"
 #include "nanochat/kernels.h"
 #include "nanochat/tensor.h"
 
@@ -52,6 +53,26 @@ void EmuAttentionBackward(const AttentionParams& params, const ComputeType* q,
                           const ComputeType* k, const ComputeType* v,
                           const float* stats, const ComputeType* dout,
                           ComputeType* dq, ComputeType* dk, ComputeType* dv);
+
+// The fused Muon path: the one phase-parameterised device function behind both
+// drivers, so the harness that compares it with the CPU reference can reach the
+// path `MuonUpdate` selects. The header it comes from is not part of the frozen
+// seam, and this declaration is the adapter's own spelling of it, exactly as
+// for the families above.
+//
+// `options.driver` picks the driver. The emulated build answers 0 for
+// `cudaDevAttrCooperativeLaunch`, so `kAuto` and `kCooperative` both end up in
+// the phase driver here -- one launch per phase execution, which is the only
+// driver the block-at-a-time engine can run (docs/muon-fused-kernel.md section
+// 8). The workspace, scratch, and partials are the caller's, sized with the
+// helpers in the same header (`MuonFusedWorkspaceElements`,
+// `MuonFusedScratchFloats`, `MuonFusedPartialDoubles`); only the entry point
+// itself is renamed, so both backends can be linked into one binary.
+MuonFusedRun EmuMuonFusedUpdate(
+    const MuonParams& params, const float* stacked_grads, float* stacked_master,
+    ComputeType* stacked_values, float* buf1, float* buf2,
+    ComputeType* workspace, float* scratch, double* partials,
+    const MuonFusedOptions& options = MuonFusedOptions());
 
 }  // namespace kernels
 

@@ -181,6 +181,14 @@ std::size_t MaxSharedPerBlock() {
   return profile != nullptr ? profile->max_shared_memory_per_block : 48 * 1024;
 }
 
+// The simulated residency: one block of any kernel per multiprocessor, and one
+// multiprocessor. Both numbers live here so the occupancy query, the
+// multiprocessor count, and the capacity a cooperative grid is measured against
+// cannot disagree (docs/muon-fused-kernel.md section 8: the mock answers 1
+// active block per SM).
+constexpr int kSimulatedMultiprocessors = 1;
+constexpr int kSimulatedActiveBlocksPerMultiprocessor = 1;
+
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -386,6 +394,8 @@ const char* cudaGetErrorString(cudaError_t status) {
       return "invalid configuration argument";
     case kCudaErrorInvalidDevice:
       return "invalid device ordinal";
+    case kCudaErrorCooperativeLaunchTooLarge:
+      return "too many blocks in cooperative launch";
     default:
       return "unknown error";
   }
@@ -462,6 +472,145 @@ cudaError_t cudaFuncSetAttribute(const void* func, int attribute, int value) {
   }
   Record("cudaFuncSetAttribute",
          "\"value\":" + std::to_string(value) + ",\"legacy\":false", "ok");
+  return kCudaSuccess;
+}
+
+// ---------------------------------------------------------------------------
+// The fused driver's three runtime entry points
+// ---------------------------------------------------------------------------
+//
+// A fused build asks all three even when the launch it finally makes is the
+// phase driver's, so `check_symbols.py` fails a mock that does not export them
+// (docs/muon-fused-kernel.md section 8). The answers are the design's: 0 for
+// `cudaDevAttrCooperativeLaunch`, which is what makes a simulated run take the
+// phase loop, and 1 block per multiprocessor -- so nothing sizes a persistent
+// grid off the mock, and no grid barrier is ever asked for. Each call is
+// recorded like every other mocked entry point, because the answer the mock
+// gave is part of what the API log has to show.
+
+cudaError_t cudaDeviceGetAttribute(int* value, cudaDeviceAttrAbi attribute,
+                                   int device) {
+  const std::string arguments = "\"attribute\":" + std::to_string(attribute) +
+                                ",\"device\":" + std::to_string(device);
+  if (value == nullptr) {
+    Record("cudaDeviceGetAttribute", arguments, "error: null value pointer");
+    return kCudaErrorInvalidValue;
+  }
+  // One device, as `cudaSetDevice` says: a query about another ordinal is a
+  // query about nothing.
+  if (device != 0) {
+    Record("cudaDeviceGetAttribute", arguments,
+           "error: the simulator has one device (ordinal 0)");
+    return kCudaErrorInvalidDevice;
+  }
+  if (attribute == kCudaDevAttrCooperativeLaunch) {
+    // No cooperative launch in the simulation: the blocks of a grid do not
+    // cooperate here, they are recorded, so a grid barrier has nothing to
+    // synchronise.
+    *value = 0;
+    Record("cudaDeviceGetAttribute",
+           arguments + ",\"value\":" + std::to_string(*value), "ok");
+    return kCudaSuccess;
+  }
+  if (attribute == kCudaDevAttrMultiProcessorCount) {
+    *value = kSimulatedMultiprocessors;
+    Record("cudaDeviceGetAttribute",
+           arguments + ",\"value\":" + std::to_string(*value), "ok");
+    return kCudaSuccess;
+  }
+  // An attribute nothing in the tree asks about. The mock has no answer, so it
+  // says so in the record rather than pretending the value is known.
+  *value = 0;
+  Record("cudaDeviceGetAttribute", arguments, "ok: attribute not modelled");
+  return kCudaSuccess;
+}
+
+cudaError_t cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+    int* num_blocks, const void* /*kernel*/, int block_threads,
+    std::size_t dynamic_shared_bytes) {
+  const std::string arguments =
+      "\"block_threads\":" + std::to_string(block_threads) +
+      ",\"shared_bytes\":" + std::to_string(dynamic_shared_bytes);
+  if (num_blocks == nullptr) {
+    Record("cudaOccupancyMaxActiveBlocksPerMultiprocessor", arguments,
+           "error: null block-count pointer");
+    return kCudaErrorInvalidValue;
+  }
+  // The mock weighs neither registers nor static shared memory, so the answer
+  // depends only on whether the profile can run the configuration at all. One
+  // block per multiprocessor is the design's number; 0 is the documented
+  // "cannot run that configuration", reported as it is and not rounded up to
+  // one, because a caller sizes a grid from the answer.
+  const bool runnable = block_threads > 0 &&
+                        block_threads <= MaxThreadsPerBlock() &&
+                        dynamic_shared_bytes <= MaxSharedPerBlock();
+  *num_blocks = runnable ? kSimulatedActiveBlocksPerMultiprocessor : 0;
+  Record("cudaOccupancyMaxActiveBlocksPerMultiprocessor",
+         arguments + ",\"blocks\":" + std::to_string(*num_blocks),
+         runnable ? "ok" : "ok: configuration cannot run");
+  return kCudaSuccess;
+}
+
+// A cooperative launch is a recorded launch and not a silent no-op: the mock
+// applies the same geometry and shared-memory rules as `cudaLaunchKernel`, then
+// the one rule that is cooperative-launch specific -- the grid may not ask for
+// more blocks than the device can keep resident at once, which is the refusal
+// that sends the fused driver to its phase fallback. The capacity is the mock's
+// own occupancy and multiprocessor answers, so the two cannot disagree.
+cudaError_t cudaLaunchCooperativeKernel(const void* func, dim3 grid, dim3 block,
+                                        void** /*args*/, std::size_t shared,
+                                        void* stream) {
+  const std::size_t threads =
+      static_cast<std::size_t>(block.x) * block.y * block.z;
+  const std::size_t blocks = static_cast<std::size_t>(grid.x) * grid.y * grid.z;
+  if (grid.x == 0 || grid.y == 0 || grid.z == 0) {
+    Record("cudaLaunchCooperativeKernel", "\"grid\":0",
+           "error: a grid dimension is zero");
+    return kCudaErrorInvalidConfiguration;
+  }
+  if (threads == 0) {
+    Record("cudaLaunchCooperativeKernel", "\"block_threads\":0",
+           "error: a block dimension is zero");
+    return kCudaErrorInvalidConfiguration;
+  }
+  if (threads > static_cast<std::size_t>(MaxThreadsPerBlock())) {
+    Record("cudaLaunchCooperativeKernel",
+           "\"block_threads\":" + std::to_string(threads),
+           "error: block size exceeds the profile limit");
+    return kCudaErrorInvalidConfiguration;
+  }
+  std::size_t granted = kDefaultSharedMemoryLimit;
+  {
+    InterposerState& state = State();
+    std::lock_guard<std::mutex> lock(state.mutex);
+    const auto found = state.shared_attributes.find(func);
+    if (found != state.shared_attributes.end()) granted = found->second;
+  }
+  if (shared > granted) {
+    Record("cudaLaunchCooperativeKernel",
+           "\"shared_bytes\":" + std::to_string(shared) +
+               ",\"granted_bytes\":" + std::to_string(granted),
+           "error: dynamic shared memory above the granted limit needs "
+           "cudaFuncSetAttribute");
+    return kCudaErrorInvalidConfiguration;
+  }
+  const std::size_t resident = static_cast<std::size_t>(
+      kSimulatedMultiprocessors * kSimulatedActiveBlocksPerMultiprocessor);
+  if (blocks > resident) {
+    Record("cudaLaunchCooperativeKernel",
+           "\"grid_blocks\":" + std::to_string(blocks) +
+               ",\"resident_blocks\":" + std::to_string(resident),
+           "error: the grid exceeds the blocks a cooperative launch can keep "
+           "resident");
+    return kCudaErrorCooperativeLaunchTooLarge;
+  }
+  (void)stream;
+  Record("cudaLaunchCooperativeKernel",
+         "\"grid_x\":" + std::to_string(grid.x) +
+             ",\"block_threads\":" + std::to_string(threads) +
+             ",\"shared_bytes\":" + std::to_string(shared) +
+             ",\"cooperative\":true",
+         "ok");
   return kCudaSuccess;
 }
 
