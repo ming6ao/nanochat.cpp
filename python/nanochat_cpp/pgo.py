@@ -294,18 +294,31 @@ def step_bounds(kernels: Sequence[Mapping],
 
 def _stalls(step: Sequence[Mapping], api: Sequence[Mapping],
             floor_ns: int = 50_000) -> list[dict]:
-    """Every idle stretch long enough to be a stall, with the host's calls."""
+    """Every idle stretch long enough to be a stall, with the host's calls.
+
+    The host time inside a stall is the union of the driver calls that overlap
+    it, clipped to the stall. Summing whole call durations double counts as soon
+    as two threads have a call in flight at once, which a trainer with a data
+    producer thread does on every step: the sum then exceeds the stall and the
+    host's own code time comes out negative.
+    """
     stalls = []
     for before, after in zip(step, step[1:]):
         idle = after["start"] - (before["start"] + before["dur"])
         if idle < floor_ns:
             continue
-        inside = [call for call in api
-                  if call["start"] < after["start"]
-                  and call["end"] > before["start"] + before["dur"]]
-        host_api = sum(call["dur"] for call in inside)
+        window_start = before["start"] + before["dur"]
+        window_end = after["start"]
+        spans = []
+        for call in api:
+            start = max(call["start"], window_start)
+            end = min(call["end"], window_end)
+            if end > start:
+                spans.append({"start": start, "end": end})
+        spans.sort(key=lambda span: span["start"])
+        host_api = min(float(idle), _union_ns(spans))
         stalls.append({
-            "start": before["start"] + before["dur"],
+            "start": window_start,
             "idle_ns": idle,
             "idle_ms": _ms(idle),
             "after": before["name"],
@@ -363,7 +376,7 @@ def step_profile(kernels: Sequence[Mapping], api: Sequence[Mapping],
         "device_busy_ms": _ms(busy),
         "device_busy_percent": round(100.0 * busy / (end - start), 1),
         "driver_calls": len(calls),
-        "host_in_cuda_api_ms": _ms(sum(call["dur"] for call in calls)),
+        "host_in_cuda_api_ms": _ms(_union_ns(calls)),
         "host_own_code_ms": round(sum(stall["host_own_ms"] for stall in stalls),
                                   3),
         "copies": sorted(copies.values(), key=lambda row: -row["total_bytes"]),
