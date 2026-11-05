@@ -54,10 +54,129 @@ namespace {
 
 using cuda_kernels::AsFloatDev;
 using cuda_kernels::BlockReduceSum;
+using cuda_kernels::ComputeVector;
+using cuda_kernels::FloatVector;
+using cuda_kernels::kFloatPerVector;
+using cuda_kernels::kVectorElems;
 using cuda_kernels::ToComputeDev;
+using cuda_kernels::VectorGrid;
+using cuda_kernels::VectorReady;
 
 __device__ __forceinline__ float SigmoidDev(float x) {
   return 1.0f / (1.0f + expf(-x));
+}
+
+// True when the op code reads the second operand `b`. The backward of the same
+// code is the one that produces a gradient for `b`, so one predicate serves the
+// forward's read and the backward's write.
+__host__ __device__ __forceinline__ bool ReadsSecondOperand(PointwiseOp op) {
+  return op == PointwiseOp::kScaleAdd || op == PointwiseOp::kGateMul;
+}
+
+// The forward arithmetic of one element, arm for arm with the CPU reference
+// (backends/cpu/kernels.cc). Both the scalar kernel and the vector kernel call
+// this, so the two paths cannot drift; the two index-specific codes are
+// dispatched on the host and are unreachable here.
+__device__ __forceinline__ float ForwardValueDev(PointwiseOp op, float alpha,
+                                                 float beta, float av,
+                                                 float bv) {
+  switch (op) {
+    case PointwiseOp::kScale:
+      return alpha * av;
+    case PointwiseOp::kScaleAdd:
+      return alpha * av + beta * bv;
+    case PointwiseOp::kGateMul:
+      return SigmoidDev(av) * bv;
+    case PointwiseOp::kReluSquare: {
+      const float relu = av > 0.0f ? av : 0.0f;
+      return relu * relu;
+    }
+    case PointwiseOp::kSoftcap: {
+      const float cap = alpha;
+      return cap * tanhf(av / cap);
+    }
+    case PointwiseOp::kExp:
+      return expf(av);
+    case PointwiseOp::kRsqrt:
+      return 1.0f / sqrtf(av);
+    case PointwiseOp::kLog:
+      return logf(av);
+    case PointwiseOp::kRowScale:
+      break;
+    case PointwiseOp::kAffine:
+      return alpha * (av - beta);
+    case PointwiseOp::kSigmoid:
+      return SigmoidDev(av);
+    case PointwiseOp::kRotatePair:
+      break;
+  }
+  return 0.0f;
+}
+
+// The backward arithmetic of one element. `da` is always produced; `db` is
+// produced only for the two codes that read `b`, and the caller decides whether
+// to store it. The `kScale` arm returns `alpha * dy` for `da` and `beta * dy`
+// for `db` only through `kScaleAdd`, which is the CPU reference's split.
+struct BackwardPair {
+  float da;
+  float db;
+};
+
+__device__ __forceinline__ BackwardPair BackwardValuesDev(PointwiseOp op,
+                                                          float alpha,
+                                                          float beta, float av,
+                                                          float bv, float dyv) {
+  BackwardPair pair{0.0f, 0.0f};
+  switch (op) {
+    case PointwiseOp::kScale:
+      pair.da = alpha * dyv;
+      break;
+    case PointwiseOp::kScaleAdd:
+      pair.da = alpha * dyv;
+      pair.db = beta * dyv;
+      break;
+    case PointwiseOp::kGateMul: {
+      const float sig = SigmoidDev(av);
+      pair.da = dyv * bv * sig * (1.0f - sig);
+      pair.db = dyv * sig;
+      break;
+    }
+    case PointwiseOp::kReluSquare:
+      pair.da = av > 0.0f ? dyv * 2.0f * av : 0.0f;
+      break;
+    case PointwiseOp::kSoftcap: {
+      const float cap = alpha;
+      const float t = tanhf(av / cap);
+      pair.da = dyv * (1.0f - t * t);
+      break;
+    }
+    case PointwiseOp::kExp:
+      // d/da exp(a) = exp(a), recomputed from `a` rather than read from `out`.
+      pair.da = dyv * expf(av);
+      break;
+    case PointwiseOp::kRsqrt: {
+      // d/da a^(-1/2) = -0.5 * a^(-3/2), recomputed from `a`.
+      const float r = 1.0f / sqrtf(av);
+      pair.da = -0.5f * dyv * r * r * r;
+      break;
+    }
+    case PointwiseOp::kLog:
+      pair.da = dyv / av;
+      break;
+    case PointwiseOp::kRowScale:
+      break;
+    case PointwiseOp::kAffine:
+      pair.da = alpha * dyv;
+      break;
+    case PointwiseOp::kSigmoid: {
+      const float sig = SigmoidDev(av);
+      pair.da = dyv * sig * (1.0f - sig);
+      break;
+    }
+    case PointwiseOp::kRotatePair:
+      break;
+  }
+  return pair;
 }
 
 // The `kRowScale` guard (spec/pointwise_ops.md section 3.1). A width of 0, a
@@ -115,51 +234,34 @@ __global__ void PointwiseForwardKernel(PointwiseParams p,
   const float alpha = p.alpha.host();
   const float beta = p.beta.host();
   const float av = AsFloatDev(a[i]);
-  float result = 0.0f;
-  switch (p.op) {
-    case PointwiseOp::kScale:
-      result = alpha * av;
-      break;
-    case PointwiseOp::kScaleAdd:
-      result = alpha * av + beta * AsFloatDev(b[i]);
-      break;
-    case PointwiseOp::kGateMul:
-      result = SigmoidDev(av) * AsFloatDev(b[i]);
-      break;
-    case PointwiseOp::kReluSquare: {
-      const float relu = av > 0.0f ? av : 0.0f;
-      result = relu * relu;
-      break;
+  const float bv = ReadsSecondOperand(p.op) ? AsFloatDev(b[i]) : 0.0f;
+  out[i] = ToComputeDev(ForwardValueDev(p.op, alpha, beta, av, bv));
+}
+
+// The same arithmetic, one aligned 16-byte vector per thread. `out` may alias
+// `a`, so each thread reads its whole vector before it writes anything.
+__global__ void PointwiseForwardVectorKernel(
+    PointwiseParams p, long long vectors, const ComputeVector* __restrict__ a,
+    const ComputeVector* __restrict__ b, ComputeVector* __restrict__ out) {
+  // A grid stride, because the shared grid helper caps the block count for a
+  // large tensor and a single-shot launch would leave the tail untouched.
+  const long long stride = static_cast<long long>(gridDim.x) * blockDim.x;
+  for (long long v =
+           static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x;
+       v < vectors; v += stride) {
+    const float alpha = p.alpha.host();
+    const float beta = p.beta.host();
+    const ComputeVector av = a[v];
+    ComputeVector bv{};
+    if (ReadsSecondOperand(p.op)) bv = b[v];
+    ComputeVector result;
+#pragma unroll
+    for (int k = 0; k < kVectorElems; ++k) {
+      result.e[k] = ToComputeDev(ForwardValueDev(
+          p.op, alpha, beta, AsFloatDev(av.e[k]), AsFloatDev(bv.e[k])));
     }
-    case PointwiseOp::kSoftcap: {
-      const float cap = alpha;
-      result = cap * tanhf(av / cap);
-      break;
-    }
-    case PointwiseOp::kExp:
-      result = expf(av);
-      break;
-    case PointwiseOp::kRsqrt:
-      result = 1.0f / sqrtf(av);
-      break;
-    case PointwiseOp::kLog:
-      result = logf(av);
-      break;
-    case PointwiseOp::kRowScale:
-      // Unreachable: dispatched to PointwiseRowScaleForwardKernel on the host.
-      break;
-    case PointwiseOp::kAffine:
-      result = alpha * (av - beta);
-      break;
-    case PointwiseOp::kSigmoid:
-      result = SigmoidDev(av);
-      break;
-    case PointwiseOp::kRotatePair:
-      // Unreachable: dispatched to PointwiseRotatePairForwardKernel on the
-      // host, where one thread owns both elements of a pair.
-      break;
+    out[v] = result;
   }
-  out[i] = ToComputeDev(result);
 }
 
 // The backward of the eight flat codes. It reads `a` and `b` only and never
@@ -179,64 +281,42 @@ __global__ void PointwiseBackwardKernel(PointwiseParams p,
   const float beta = p.beta.host();
   const float av = AsFloatDev(a[i]);
   const float dyv = AsFloatDev(dy[i]);
-  switch (p.op) {
-    case PointwiseOp::kScale:
-      if (da != nullptr) da[i] = ToComputeDev(alpha * dyv);
-      break;
-    case PointwiseOp::kScaleAdd:
-      if (da != nullptr) da[i] = ToComputeDev(alpha * dyv);
-      if (db != nullptr) db[i] = ToComputeDev(beta * dyv);
-      break;
-    case PointwiseOp::kGateMul: {
-      const float sig = SigmoidDev(av);
-      const float bv = AsFloatDev(b[i]);
-      if (da != nullptr) da[i] = ToComputeDev(dyv * bv * sig * (1.0f - sig));
-      if (db != nullptr) db[i] = ToComputeDev(dyv * sig);
-      break;
+  const float bv = ReadsSecondOperand(p.op) ? AsFloatDev(b[i]) : 0.0f;
+  const BackwardPair pair = BackwardValuesDev(p.op, alpha, beta, av, bv, dyv);
+  if (da != nullptr) da[i] = ToComputeDev(pair.da);
+  if (db != nullptr && ReadsSecondOperand(p.op)) {
+    db[i] = ToComputeDev(pair.db);
+  }
+}
+
+// The same arithmetic, one aligned 16-byte vector per thread.
+__global__ void PointwiseBackwardVectorKernel(
+    PointwiseParams p, long long vectors, const ComputeVector* __restrict__ a,
+    const ComputeVector* __restrict__ b, const ComputeVector* __restrict__ dy,
+    ComputeVector* __restrict__ da, ComputeVector* __restrict__ db) {
+  // A grid stride, so a capped grid still covers a large tensor.
+  const long long stride = static_cast<long long>(gridDim.x) * blockDim.x;
+  for (long long v =
+           static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x;
+       v < vectors; v += stride) {
+    const float alpha = p.alpha.host();
+    const float beta = p.beta.host();
+    const ComputeVector av = a[v];
+    const ComputeVector dyv = dy[v];
+    ComputeVector bv{};
+    if (ReadsSecondOperand(p.op)) bv = b[v];
+    ComputeVector dv{};
+    ComputeVector dbv{};
+#pragma unroll
+    for (int k = 0; k < kVectorElems; ++k) {
+      const BackwardPair pair =
+          BackwardValuesDev(p.op, alpha, beta, AsFloatDev(av.e[k]),
+                            AsFloatDev(bv.e[k]), AsFloatDev(dyv.e[k]));
+      dv.e[k] = ToComputeDev(pair.da);
+      dbv.e[k] = ToComputeDev(pair.db);
     }
-    case PointwiseOp::kReluSquare:
-      if (da != nullptr) {
-        da[i] = ToComputeDev(av > 0.0f ? dyv * 2.0f * av : 0.0f);
-      }
-      break;
-    case PointwiseOp::kSoftcap: {
-      if (da != nullptr) {
-        const float cap = alpha;
-        const float t = tanhf(av / cap);
-        da[i] = ToComputeDev(dyv * (1.0f - t * t));
-      }
-      break;
-    }
-    case PointwiseOp::kExp:
-      // d/da exp(a) = exp(a), recomputed from `a` rather than read from `out`.
-      if (da != nullptr) da[i] = ToComputeDev(dyv * expf(av));
-      break;
-    case PointwiseOp::kRsqrt: {
-      // d/da a^(-1/2) = -0.5 * a^(-3/2), recomputed from `a`.
-      if (da != nullptr) {
-        const float r = 1.0f / sqrtf(av);
-        da[i] = ToComputeDev(-0.5f * dyv * r * r * r);
-      }
-      break;
-    }
-    case PointwiseOp::kLog:
-      if (da != nullptr) da[i] = ToComputeDev(dyv / av);
-      break;
-    case PointwiseOp::kRowScale:
-      // Unreachable: dispatched to PointwiseRowScaleBackwardKernel on the host.
-      break;
-    case PointwiseOp::kAffine:
-      if (da != nullptr) da[i] = ToComputeDev(alpha * dyv);
-      break;
-    case PointwiseOp::kSigmoid: {
-      const float sig = SigmoidDev(av);
-      if (da != nullptr) da[i] = ToComputeDev(dyv * sig * (1.0f - sig));
-      break;
-    }
-    case PointwiseOp::kRotatePair:
-      // Unreachable: dispatched to PointwiseRotatePairBackwardKernel on the
-      // host.
-      break;
+    if (da != nullptr) da[v] = dv;
+    if (db != nullptr && ReadsSecondOperand(p.op)) db[v] = dbv;
   }
 }
 
@@ -253,6 +333,29 @@ __global__ void PointwiseRowScaleForwardKernel(
   const int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= count) return;
   out[i] = ToComputeDev(AsFloatDev(a[i / row_width]) * AsFloatDev(b[i]));
+}
+
+// The same broadcast, one aligned 16-byte vector per thread. A vector never
+// crosses a row boundary because the host requires `row_width` to be a whole
+// number of vectors, so every element of the vector shares one row scalar.
+__global__ void PointwiseRowScaleForwardVectorKernel(
+    long long vectors, int row_width, const ComputeType* __restrict__ a,
+    const ComputeVector* __restrict__ b, ComputeVector* __restrict__ out) {
+  // A grid stride, so a capped grid still covers a large tensor.
+  const long long stride = static_cast<long long>(gridDim.x) * blockDim.x;
+  for (long long v =
+           static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x;
+       v < vectors; v += stride) {
+    const long long first = v * kVectorElems;
+    const float scalar = AsFloatDev(a[first / row_width]);
+    const ComputeVector bv = b[v];
+    ComputeVector result;
+#pragma unroll
+    for (int k = 0; k < kVectorElems; ++k) {
+      result.e[k] = ToComputeDev(scalar * AsFloatDev(bv.e[k]));
+    }
+    out[v] = result;
+  }
 }
 
 // The `kRowScale` backward: one block per row. The block scans the row once,
@@ -385,6 +488,15 @@ void PointwiseForward(const PointwiseParams& params, const ComputeType* a,
       return;
     }
     if (b == nullptr) return;
+    if (row_width % kVectorElems == 0 && VectorReady(n, {a, b, out})) {
+      const long long vectors = n / kVectorElems;
+      cuda_backend::Launch(PointwiseRowScaleForwardVectorKernel,
+                           dim3(VectorGrid(vectors, kThreads)), dim3(kThreads),
+                           0, vectors, row_width, a,
+                           reinterpret_cast<const ComputeVector*>(b),
+                           reinterpret_cast<ComputeVector*>(out));
+      return;
+    }
     cuda_backend::Launch(PointwiseRowScaleForwardKernel,
                          dim3(GridSize(n, kThreads)), dim3(kThreads), 0, n,
                          row_width, a, b, out);
@@ -403,6 +515,16 @@ void PointwiseForward(const PointwiseParams& params, const ComputeType* a,
     return;
   }
 
+  if (VectorReady(n, {a, b, out})) {
+    const long long vectors = n / kVectorElems;
+    cuda_backend::Launch(PointwiseForwardVectorKernel,
+                         dim3(VectorGrid(vectors, kThreads)), dim3(kThreads), 0,
+                         params, vectors,
+                         reinterpret_cast<const ComputeVector*>(a),
+                         reinterpret_cast<const ComputeVector*>(b),
+                         reinterpret_cast<ComputeVector*>(out));
+    return;
+  }
   cuda_backend::Launch(PointwiseForwardKernel, dim3(GridSize(n, kThreads)),
                        dim3(kThreads), 0, params, a, b, out);
 }
@@ -441,6 +563,18 @@ void PointwiseBackward(const PointwiseParams& params, const ComputeType* a,
     return;
   }
 
+  if (VectorReady(n, {a, b, dy, da, db})) {
+    const long long vectors = n / kVectorElems;
+    cuda_backend::Launch(PointwiseBackwardVectorKernel,
+                         dim3(VectorGrid(vectors, kThreads)), dim3(kThreads), 0,
+                         params, vectors,
+                         reinterpret_cast<const ComputeVector*>(a),
+                         reinterpret_cast<const ComputeVector*>(b),
+                         reinterpret_cast<const ComputeVector*>(dy),
+                         reinterpret_cast<ComputeVector*>(da),
+                         reinterpret_cast<ComputeVector*>(db));
+    return;
+  }
   cuda_backend::Launch(PointwiseBackwardKernel, dim3(GridSize(n, kThreads)),
                        dim3(kThreads), 0, params, a, b, dy, da, db);
 }

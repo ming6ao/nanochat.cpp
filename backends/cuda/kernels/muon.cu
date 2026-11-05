@@ -23,6 +23,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 
 #include <cuda_runtime.h>
 
@@ -37,7 +38,13 @@ namespace {
 
 using cuda_kernels::AsFloatDev;
 using cuda_kernels::BlockReduceSum;
+using cuda_kernels::ComputeVector;
+using cuda_kernels::FloatVector;
+using cuda_kernels::kFloatPerVector;
+using cuda_kernels::kVectorElems;
 using cuda_kernels::ToComputeDev;
+using cuda_kernels::VectorGrid;
+using cuda_kernels::VectorReady;
 
 // Polar Express coefficients (num_iters=5), from nanochat/optim.py / the Polar
 // Express paper (arXiv:2505.16932). Kept in sync with backends/cpu/kernels.cc.
@@ -322,6 +329,151 @@ __global__ void MuonApplyKernel(long long total, float lr, float weight_decay,
   }
 }
 
+// --- Vector access ----------------------------------------------------------
+//
+// Every element-wise kernel of this family gives one parameter to one thread
+// and caps its grid at 512 blocks, so a warp loads 64 bytes and at most 131,072
+// threads cover a 2.6 GB state. Each thread now takes one aligned 16-byte
+// vector, and the vector grids carry a cap that fits a modern card. The
+// arithmetic per element does not change, so the results are bit identical.
+
+// Nesterov-accelerated gradient or the plain first moment. The gradient and the
+// momentum buffer are fp32 and the parameter copy is `ComputeType`, so the fp32
+// streams advance `kFloatPerVector` groups at a time and the parameter stream
+// advances one vector.
+__global__ void MuonMomentumVectorKernel(long long vectors, float momentum,
+                                         bool nesterov, ScalarArg grad_scale,
+                                         const FloatVector* __restrict__ grads,
+                                         FloatVector* __restrict__ buf1,
+                                         ComputeVector* __restrict__ x) {
+  const long long stride = static_cast<long long>(gridDim.x) * blockDim.x;
+  const float scale = grad_scale.host();
+  for (long long v =
+           static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x;
+       v < vectors; v += stride) {
+    ComputeVector value = x[v];
+    const FloatVector* gbase = grads + v * kFloatPerVector;
+    FloatVector* bbase = buf1 + v * kFloatPerVector;
+    FloatVector next[kFloatPerVector];
+#pragma unroll
+    for (int j = 0; j < kFloatPerVector; ++j) {
+      const FloatVector g = gbase[j];
+      const FloatVector b = bbase[j];
+#pragma unroll
+      for (int s = 0; s < 4; ++s) {
+        const float gr = g.e[s] * scale;
+        const float bv = b.e[s];
+        const float nb = bv + (1.0f - momentum) * (gr - bv);
+        next[j].e[s] = nb;
+        value.e[4 * j + s] = ToComputeDev(
+            nesterov ? (1.0f - momentum) * gr + momentum * nb : nb);
+      }
+    }
+#pragma unroll
+    for (int j = 0; j < kFloatPerVector; ++j) bbase[j] = next[j];
+    x[v] = value;
+  }
+}
+
+__global__ void MuonScaleMatricesVectorKernel(long long vectors, long long mat,
+                                              bool divide,
+                                              const float* __restrict__ factor,
+                                              ComputeVector* __restrict__ x) {
+  const long long stride = static_cast<long long>(gridDim.x) * blockDim.x;
+  for (long long v =
+           static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x;
+       v < vectors; v += stride) {
+    // The host requires `mat` to be a whole number of vectors, so one vector
+    // never spans two matrices and one factor serves all of its elements.
+    const float f = factor[(v * kVectorElems) / mat];
+    ComputeVector value = x[v];
+#pragma unroll
+    for (int k = 0; k < kVectorElems; ++k) {
+      const float e = AsFloatDev(value.e[k]);
+      value.e[k] = ToComputeDev(divide ? e / f : e * f);
+    }
+    x[v] = value;
+  }
+}
+
+__global__ void MuonNorMuonScaleVectorKernel(long long vectors, long long mat,
+                                             int cols, int red_index,
+                                             bool reduce_cols,
+                                             const float* __restrict__ vmean,
+                                             const float* __restrict__ scale,
+                                             ComputeVector* __restrict__ x) {
+  const long long stride = static_cast<long long>(gridDim.x) * blockDim.x;
+  for (long long v =
+           static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x;
+       v < vectors; v += stride) {
+    ComputeVector value = x[v];
+    const long long first = v * kVectorElems;
+    const long long p = first / mat;
+    const long long within = first - p * mat;
+    const float global = scale[p];
+#pragma unroll
+    for (int k = 0; k < kVectorElems; ++k) {
+      const long long w = within + k;
+      const long long index = reduce_cols ? w / cols : w % cols;
+      const float s = vmean[p * red_index + index] * global;
+      value.e[k] = ToComputeDev(AsFloatDev(value.e[k]) * s);
+    }
+    x[v] = value;
+  }
+}
+
+__global__ void MuonAxpbyVectorKernel(long long vectors, float ca,
+                                      ComputeVector* __restrict__ x,
+                                      const ComputeVector* __restrict__ prod) {
+  const long long stride = static_cast<long long>(gridDim.x) * blockDim.x;
+  for (long long v =
+           static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x;
+       v < vectors; v += stride) {
+    const ComputeVector p = prod[v];
+    ComputeVector value = x[v];
+#pragma unroll
+    for (int k = 0; k < kVectorElems; ++k) {
+      value.e[k] =
+          ToComputeDev(ca * AsFloatDev(value.e[k]) + AsFloatDev(p.e[k]));
+    }
+    x[v] = value;
+  }
+}
+
+__global__ void MuonApplyVectorKernel(long long vectors, float lr,
+                                      float weight_decay,
+                                      FloatVector* __restrict__ master,
+                                      ComputeVector* __restrict__ value,
+                                      const ComputeVector* __restrict__ x) {
+  const long long stride = static_cast<long long>(gridDim.x) * blockDim.x;
+  for (long long v =
+           static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x;
+       v < vectors; v += stride) {
+    const ComputeVector update = x[v];
+    FloatVector* mbase = master + v * kFloatPerVector;
+    FloatVector next[kFloatPerVector];
+    ComputeVector result;
+#pragma unroll
+    for (int j = 0; j < kFloatPerVector; ++j) {
+      const FloatVector m = mbase[j];
+#pragma unroll
+      for (int s = 0; s < 4; ++s) {
+        const float pv = m.e[s];
+        const float gv = AsFloatDev(update.e[4 * j + s]);
+        // Cautious decay: only shrink a parameter that agrees in sign with the
+        // update direction.
+        const float decay = (gv * pv >= 0.0f) ? lr * weight_decay * pv : 0.0f;
+        const float pi = pv - lr * gv - decay;
+        next[j].e[s] = pi;
+        result.e[4 * j + s] = ToComputeDev(pi);
+      }
+    }
+#pragma unroll
+    for (int j = 0; j < kFloatPerVector; ++j) mbase[j] = next[j];
+    value[v] = result;
+  }
+}
+
 int GridSize(long long count, int threads) {
   const long long blocks = (count + threads - 1) / threads;
   constexpr long long kMaxBlocks = 512;
@@ -440,17 +592,34 @@ void MuonUpdate(const MuonParams& params, const float* stacked_grads,
 
   // The clip scale is either the host value or a device scalar the reduction
   // wrote, so the optimizer step needs no host read of the clip.
-  cuda_backend::Launch(MuonMomentumKernel, dim3(elem_grid), dim3(kThreads), 0,
-                       total, params.momentum, params.nesterov,
-                       params.grad_scale, stacked_grads, buf1, x);
+  if (VectorReady(total, {x, stacked_grads, buf1})) {
+    const int vector_grid = VectorGrid(total / kVectorElems, kThreads);
+    cuda_backend::Launch(MuonMomentumVectorKernel, dim3(vector_grid),
+                         dim3(kThreads), 0, total / kVectorElems,
+                         params.momentum, params.nesterov, params.grad_scale,
+                         reinterpret_cast<const FloatVector*>(stacked_grads),
+                         reinterpret_cast<FloatVector*>(buf1),
+                         reinterpret_cast<ComputeVector*>(x));
+  } else {
+    cuda_backend::Launch(MuonMomentumKernel, dim3(elem_grid), dim3(kThreads), 0,
+                         total, params.momentum, params.nesterov,
+                         params.grad_scale, stacked_grads, buf1, x);
+  }
   // MuonEq: each row to the mean row norm, then the matrix to unit Frobenius
   // norm, which is what makes the Polar Express coefficients apply.
   matrix_stat(MatrixStat::kFrobenius, 0.0f);
   cuda_backend::Launch(MuonEquilibrateRowKernel, dim3(rows, num_params),
                        dim3(kThreads), 0, rows, cols, x, stat);
   matrix_stat(MatrixStat::kEquilibrationDivisor, 0.0f);
-  cuda_backend::Launch(MuonScaleMatricesKernel, dim3(elem_grid), dim3(kThreads),
-                       0, total, mat, true, stat, x);
+  if (mat % kVectorElems == 0 && VectorReady(total, {x, stat})) {
+    const int vector_grid = VectorGrid(total / kVectorElems, kThreads);
+    cuda_backend::Launch(MuonScaleMatricesVectorKernel, dim3(vector_grid),
+                         dim3(kThreads), 0, total / kVectorElems, mat, true,
+                         stat, reinterpret_cast<ComputeVector*>(x));
+  } else {
+    cuda_backend::Launch(MuonScaleMatricesKernel, dim3(elem_grid),
+                         dim3(kThreads), 0, total, mat, true, stat, x);
+  }
 
   for (int it = 0; it < ns_steps; ++it) {
     const float ca = kPolarCoeffs[it][0];
@@ -532,15 +701,30 @@ void MuonUpdate(const MuonParams& params, const float* stacked_grads,
       Gemm(GemmMode::kForward, gp, b, x, prod);
     }
 
-    cuda_backend::Launch(MuonAxpbyKernel, dim3(elem_grid), dim3(kThreads), 0,
-                         total, ca, x, prod);
+    if (VectorReady(total, {x, prod})) {
+      const int vector_grid = VectorGrid(total / kVectorElems, kThreads);
+      cuda_backend::Launch(MuonAxpbyVectorKernel, dim3(vector_grid),
+                           dim3(kThreads), 0, total / kVectorElems, ca,
+                           reinterpret_cast<ComputeVector*>(x),
+                           reinterpret_cast<const ComputeVector*>(prod));
+    } else {
+      cuda_backend::Launch(MuonAxpbyKernel, dim3(elem_grid), dim3(kThreads), 0,
+                           total, ca, x, prod);
+    }
   }
 
   // Muon+ renormalisation: the Frobenius norm snaps back to sqrt(min) of the
   // matrix's extents.
   matrix_stat(MatrixStat::kRenormScale, sqrtf(static_cast<float>(min_dim)));
-  cuda_backend::Launch(MuonScaleMatricesKernel, dim3(elem_grid), dim3(kThreads),
-                       0, total, mat, false, stat, x);
+  if (mat % kVectorElems == 0 && VectorReady(total, {x, stat})) {
+    const int vector_grid = VectorGrid(total / kVectorElems, kThreads);
+    cuda_backend::Launch(MuonScaleMatricesVectorKernel, dim3(vector_grid),
+                         dim3(kThreads), 0, total / kVectorElems, mat, false,
+                         stat, reinterpret_cast<ComputeVector*>(x));
+  } else {
+    cuda_backend::Launch(MuonScaleMatricesKernel, dim3(elem_grid),
+                         dim3(kThreads), 0, total, mat, false, stat, x);
+  }
 
   // NorMuon: one mean square per row (or per column), the factored second
   // moment, then the normalized step.
@@ -554,12 +738,30 @@ void MuonUpdate(const MuonParams& params, const float* stacked_grads,
   cuda_backend::Launch(MuonNorMuonMomentsKernel, dim3(num_params),
                        dim3(kThreads), 0, red_index, red_size, params.beta2,
                        vmean, buf2, scale);
-  cuda_backend::Launch(MuonNorMuonScaleKernel, dim3(elem_grid), dim3(kThreads),
-                       0, total, mat, cols, red_index, reduce_cols, vmean,
-                       scale, x);
-  cuda_backend::Launch(MuonApplyKernel, dim3(elem_grid), dim3(kThreads), 0,
-                       total, params.lr, params.weight_decay, stacked_master,
-                       stacked_values, x);
+  if (mat % kVectorElems == 0 && VectorReady(total, {x, vmean, scale})) {
+    const int vector_grid = VectorGrid(total / kVectorElems, kThreads);
+    cuda_backend::Launch(MuonNorMuonScaleVectorKernel, dim3(vector_grid),
+                         dim3(kThreads), 0, total / kVectorElems, mat, cols,
+                         red_index, reduce_cols, vmean, scale,
+                         reinterpret_cast<ComputeVector*>(x));
+  } else {
+    cuda_backend::Launch(MuonNorMuonScaleKernel, dim3(elem_grid),
+                         dim3(kThreads), 0, total, mat, cols, red_index,
+                         reduce_cols, vmean, scale, x);
+  }
+  if (VectorReady(total, {x, stacked_master, stacked_values})) {
+    const int vector_grid = VectorGrid(total / kVectorElems, kThreads);
+    cuda_backend::Launch(MuonApplyVectorKernel, dim3(vector_grid),
+                         dim3(kThreads), 0, total / kVectorElems, params.lr,
+                         params.weight_decay,
+                         reinterpret_cast<FloatVector*>(stacked_master),
+                         reinterpret_cast<ComputeVector*>(stacked_values),
+                         reinterpret_cast<const ComputeVector*>(x));
+  } else {
+    cuda_backend::Launch(MuonApplyKernel, dim3(elem_grid), dim3(kThreads), 0,
+                         total, params.lr, params.weight_decay, stacked_master,
+                         stacked_values, x);
+  }
 }
 
 }  // namespace kernels

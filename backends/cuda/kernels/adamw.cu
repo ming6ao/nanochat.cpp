@@ -10,6 +10,7 @@
 // docs/model.md.
 
 #include <cmath>
+#include <cstdint>
 
 #include <cuda_runtime.h>
 
@@ -23,7 +24,62 @@ namespace kernels {
 namespace {
 
 using cuda_kernels::AsFloatDev;
+using cuda_kernels::ComputeVector;
+using cuda_kernels::FloatVector;
+using cuda_kernels::kFloatPerVector;
+using cuda_kernels::kVectorElems;
 using cuda_kernels::ToComputeDev;
+using cuda_kernels::VectorGrid;
+using cuda_kernels::VectorReady;
+
+__global__ void AdamWUpdateVectorKernel(
+    long long vectors, float lr, float beta1, float beta2, float eps,
+    float weight_decay, float step_size, float bias2, ScalarArg grad_scale,
+    FloatVector* __restrict__ master, ComputeVector* __restrict__ value,
+    const FloatVector* __restrict__ g, FloatVector* __restrict__ moment1,
+    FloatVector* __restrict__ moment2) {
+  const long long stride = static_cast<long long>(gridDim.x) * blockDim.x;
+  const float scale = grad_scale.host();
+  for (long long v =
+           static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x;
+       v < vectors; v += stride) {
+    const FloatVector* gbase = g + v * kFloatPerVector;
+    FloatVector* mbase = moment1 + v * kFloatPerVector;
+    FloatVector* vbase = moment2 + v * kFloatPerVector;
+    FloatVector* pbase = master + v * kFloatPerVector;
+    ComputeVector result;
+#pragma unroll
+    for (int j = 0; j < kFloatPerVector; ++j) {
+      const FloatVector gv = gbase[j];
+      const FloatVector mv = mbase[j];
+      const FloatVector vv = vbase[j];
+      const FloatVector pv = pbase[j];
+      FloatVector next_m;
+      FloatVector next_v;
+      FloatVector next_p;
+#pragma unroll
+      for (int s = 0; s < 4; ++s) {
+        // The clip scale rides on the gradient read, so the decoupled weight
+        // decay above stays unscaled (one when the clip is inactive).
+        const float grad = gv.e[s] * scale;
+        // Decoupled weight decay, applied to the fp32 master before the update.
+        float pi = pv.e[s] * (1.0f - lr * weight_decay);
+        const float mi = mv.e[s] + (1.0f - beta1) * (grad - mv.e[s]);
+        const float vi = vv.e[s] + (1.0f - beta2) * (grad * grad - vv.e[s]);
+        next_m.e[s] = mi;
+        next_v.e[s] = vi;
+        const float denom = sqrtf(vi / bias2) + eps;
+        pi -= step_size * (mi / denom);
+        next_p.e[s] = pi;
+        result.e[4 * j + s] = ToComputeDev(pi);
+      }
+      mbase[j] = next_m;
+      vbase[j] = next_v;
+      pbase[j] = next_p;
+    }
+    value[v] = result;
+  }
+}
 
 __global__ void AdamWUpdateKernel(
     long long n, float lr, float beta1, float beta2, float eps,
@@ -68,6 +124,22 @@ void AdamWUpdate(int n, const AdamWParams& params, float* master,
   constexpr int kMaxBlocks = 512;
   const long long blocks =
       (static_cast<long long>(n) + kThreads - 1) / kThreads;
+  if (VectorReady(n, {master, value, g, m, v})) {
+    const long long vectors = static_cast<long long>(n) / kVectorElems;
+    const long long vector_blocks = (vectors + kThreads - 1) / kThreads;
+    constexpr long long kMaxVectorBlocks = 4096;
+    const int grid = static_cast<int>(
+        vector_blocks < kMaxVectorBlocks ? vector_blocks : kMaxVectorBlocks);
+    cuda_backend::Launch(
+        AdamWUpdateVectorKernel, dim3(grid), dim3(kThreads), 0, vectors,
+        params.lr, params.beta1, params.beta2, params.eps, params.weight_decay,
+        step_size, bias2, params.grad_scale,
+        reinterpret_cast<FloatVector*>(master),
+        reinterpret_cast<ComputeVector*>(value),
+        reinterpret_cast<const FloatVector*>(g),
+        reinterpret_cast<FloatVector*>(m), reinterpret_cast<FloatVector*>(v));
+    return;
+  }
   const int grid = blocks < kMaxBlocks ? static_cast<int>(blocks) : kMaxBlocks;
   // The clip scale is either the host value or a device scalar the reduction
   // wrote; the kernel dereferences the device one per pass, so a step that

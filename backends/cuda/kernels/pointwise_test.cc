@@ -333,6 +333,47 @@ int main() {
   TestOp(Make(PointwiseOp::kRsqrt, n), "rsqrt", positive_a, b0, w, kRsqrtBound);
   TestOp(Make(PointwiseOp::kLog, n), "log", positive_a, b0, w, kLogBound);
 
+  // --- The vector path and the scalar fallback agree ---------------------
+  // Eight elements is two 16-byte vectors on an fp32 build and one on a bf16
+  // build, so the flat codes take the vector kernel. Nine is not a whole number
+  // of vectors, so the same code takes the scalar kernel. Both paths call one
+  // element function, and each must land inside the code's declared bound.
+  {
+    const int ragged = 9;
+    const std::vector<float> ar = Signed(ragged, &rng);
+    const std::vector<float> br = Signed(ragged, &rng);
+    const std::vector<float> wr = Signed(ragged, &rng);
+    TestOp(Make(PointwiseOp::kScaleAdd, n), "scale-add vector", a0, b0, w,
+           kScaleAddBound);
+    TestOp(Make(PointwiseOp::kScaleAdd, ragged), "scale-add ragged", ar, br, wr,
+           kScaleAddBound);
+    TestOp(Make(PointwiseOp::kGateMul, ragged), "gate-mul ragged", ar, br, wr,
+           kGateMulBound);
+    TestOp(Make(PointwiseOp::kReluSquare, ragged), "relu-square ragged", ar, br,
+           wr, kReluSquareBound);
+  }
+
+  // --- A tensor larger than one capped grid launch -----------------------
+  // `VectorGrid` caps the block count, so the vector kernels walk a grid
+  // stride. A missing stride leaves the tail of every large tensor untouched,
+  // and the shapes above are far too small to see it: the training step's
+  // tensors are tens of millions of elements. The forward is compared directly
+  // because a finite difference over a tensor this size would cost minutes.
+  {
+    const int huge =
+        4096 * 256 * (16 / static_cast<int>(sizeof(ComputeType))) + 24;
+    const std::vector<float> ah = Ranged(Signed(huge, &rng), -8.0f, 8.0f);
+    const std::vector<float> bh = Ranged(Signed(huge, &rng), -8.0f, 8.0f);
+    const PointwiseParams p = Make(PointwiseOp::kScaleAdd, huge);
+    DevBuf<ComputeType> a(ToStorage(ah));
+    DevBuf<ComputeType> b(ToStorage(bh));
+    DevBuf<ComputeType> out(huge);
+    nanochat::kernels::PointwiseForward(p, a.ptr, b.ptr, out.ptr);
+    nanochat::kernels::Synchronize();
+    CheckWithinBound(FromStorage(out.Download()), PointwiseForward(p, ah, bh),
+                     kScaleAddBound, "scale-add past one grid cap");
+  }
+
   // --- kRowScale: the row broadcast --------------------------------------
   // The value-gate shape of spec/pointwise_ops.md section 3.1: B=2, T=8, two KV
   // heads, head_dim 4 gives 32 dense rows of width 4 over 16 row scalars, so

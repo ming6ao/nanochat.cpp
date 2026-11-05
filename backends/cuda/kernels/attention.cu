@@ -52,12 +52,26 @@ namespace {
 using cuda_kernels::AsFloatDev;
 using cuda_kernels::BlockReduceMax;
 using cuda_kernels::BlockReduceSum;
+using cuda_kernels::ComputeVector;
 using cuda_kernels::KeyAllowedDev;
+using cuda_kernels::kVectorBytes;
+using cuda_kernels::kVectorElems;
 using cuda_kernels::KvHeadCountDev;
 using cuda_kernels::KvHeadDev;
 using cuda_kernels::ToComputeDev;
 
 constexpr int kSoftmaxThreads = 128;
+
+//: The number of row elements one thread holds in registers in the fused
+//: softmax pair. One block of `kSoftmaxThreads` covers a row of 1024, which is
+//: the dense row at the training shape and twice the banded block's row. A
+//: longer row keeps the pass-per-row kernels, which need no registers.
+constexpr int kSoftmaxRowRegisters = 8;
+
+//: True when the fused softmax pair can hold one row in registers.
+__host__ __device__ __forceinline__ bool FitsSoftmaxRegisters(int kv_len) {
+  return kv_len > 0 && kv_len <= kSoftmaxThreads * kSoftmaxRowRegisters;
+}
 constexpr int kTransposeThreads = 256;
 
 // Base of head `h` in the `[batch, heads, seq, kv_len]` score scratch.
@@ -195,6 +209,81 @@ __global__ void AttentionSoftmaxForwardKernel(
 // One block per `(b, h, t)` query row. Rebuilds the probabilities from the
 // scores and the saved statistics, reduces `sum(p * dp)`, and turns `dP` into
 // `dS = p * (dp - sum(p * dp))` in place. Masked positions become zero.
+// The fused forward: one read of the row and one write, instead of the five
+// tensor passes of the kernel above. A thread loads the elements it owns into
+// registers, so the row is read once for the maximum and exponentiated from the
+// registers, and the normalised weight is rounded once instead of twice.
+// `-inf` marks a key the window excludes, which makes its weight zero without a
+// per-element branch in the exponential.
+__global__ void AttentionSoftmaxForwardFusedKernel(
+    const AttentionParams params, const ComputeType* __restrict__ scores,
+    ComputeType* __restrict__ probs, float* __restrict__ stats) {
+  const int kv_len = params.kv_len > 0 ? params.kv_len : params.seq;
+  const int row = blockIdx.x;
+  const int t = row % params.seq;
+  const int h = (row / params.seq) % params.num_heads;
+  const int b = row / (params.seq * params.num_heads);
+  const long long qpos = static_cast<long long>(kv_len) - params.seq + t;
+  const std::int64_t base =
+      ScoreBase(params, b, h) + static_cast<std::int64_t>(t) * kv_len;
+  const ComputeType* srow = scores + base;
+  ComputeType* prow = probs + base;
+  float* stat =
+      stats +
+      (static_cast<std::int64_t>(b) * params.num_heads + h) *
+          (params.stats_row_stride > 0 ? params.stats_row_stride : params.seq) *
+          2 +
+      t * 2;
+  const int tid = threadIdx.x;
+  const int stride = blockDim.x;
+
+  float values[kSoftmaxRowRegisters];
+  float local_max = -CUDART_INF_F;
+#pragma unroll
+  for (int k = 0; k < kSoftmaxRowRegisters; ++k) {
+    const int j = tid + k * stride;
+    float value = -CUDART_INF_F;
+    if (j < kv_len && KeyAllowedDev(params, qpos, j)) {
+      value = AsFloatDev(srow[j]);
+      local_max = fmaxf(local_max, value);
+    }
+    values[k] = value;
+  }
+  const float row_max = BlockReduceMax(local_max);
+  if (row_max == -CUDART_INF_F) {
+#pragma unroll
+    for (int k = 0; k < kSoftmaxRowRegisters; ++k) {
+      const int j = tid + k * stride;
+      if (j < kv_len) prow[j] = ToComputeDev(0.0f);
+    }
+    if (tid == 0) {
+      stat[0] = 0.0f;
+      stat[1] = 0.0f;
+    }
+    return;
+  }
+
+  float weights[kSoftmaxRowRegisters];
+  float local_sum = 0.0f;
+#pragma unroll
+  for (int k = 0; k < kSoftmaxRowRegisters; ++k) {
+    const float weight = expf(values[k] - row_max);
+    weights[k] = weight;
+    local_sum += weight;
+  }
+  const float sum_exp = BlockReduceSum(local_sum);
+  const float inv = sum_exp > 0.0f ? 1.0f / sum_exp : 0.0f;
+#pragma unroll
+  for (int k = 0; k < kSoftmaxRowRegisters; ++k) {
+    const int j = tid + k * stride;
+    if (j < kv_len) prow[j] = ToComputeDev(weights[k] * inv);
+  }
+  if (tid == 0) {
+    stat[0] = row_max;
+    stat[1] = sum_exp;
+  }
+}
+
 __global__ void AttentionSoftmaxBackwardKernel(
     const AttentionParams params, const ComputeType* __restrict__ scores,
     const float* __restrict__ stats, ComputeType* __restrict__ probs,
@@ -248,6 +337,111 @@ __global__ void AttentionSoftmaxBackwardKernel(
   }
 }
 
+// The fused backward: the row is read once for the scores and once for the
+// incoming gradient, and both outputs are written from registers, instead of
+// the same row being read back twice after it is written. The normalised weight
+// is rounded once for storage, and the score gradient uses the unrounded
+// weight, which is the more accurate of the two orders.
+__global__ void AttentionSoftmaxBackwardFusedKernel(
+    const AttentionParams params, const ComputeType* __restrict__ scores,
+    const float* __restrict__ stats, ComputeType* __restrict__ probs,
+    ComputeType* __restrict__ dprobs) {
+  const int kv_len = params.kv_len > 0 ? params.kv_len : params.seq;
+  const int row = blockIdx.x;
+  const int t = row % params.seq;
+  const int h = (row / params.seq) % params.num_heads;
+  const int b = row / (params.seq * params.num_heads);
+  const long long qpos = static_cast<long long>(kv_len) - params.seq + t;
+  const std::int64_t base =
+      ScoreBase(params, b, h) + static_cast<std::int64_t>(t) * kv_len;
+  const ComputeType* srow = scores + base;
+  ComputeType* prow = probs + base;
+  ComputeType* drow = dprobs + base;
+  const float* stat =
+      stats +
+      (static_cast<std::int64_t>(b) * params.num_heads + h) *
+          (params.stats_row_stride > 0 ? params.stats_row_stride : params.seq) *
+          2 +
+      t * 2;
+  const int tid = threadIdx.x;
+  const int stride = blockDim.x;
+
+  const float row_max = stat[0];
+  const float sum_exp = stat[1];
+  if (sum_exp <= 0.0f) {
+#pragma unroll
+    for (int k = 0; k < kSoftmaxRowRegisters; ++k) {
+      const int j = tid + k * stride;
+      if (j < kv_len) {
+        prow[j] = ToComputeDev(0.0f);
+        drow[j] = ToComputeDev(0.0f);
+      }
+    }
+    return;
+  }
+  const float inv = 1.0f / sum_exp;
+
+  float weights[kSoftmaxRowRegisters];
+  float incoming[kSoftmaxRowRegisters];
+  float local_weighted = 0.0f;
+#pragma unroll
+  for (int k = 0; k < kSoftmaxRowRegisters; ++k) {
+    const int j = tid + k * stride;
+    float weight = 0.0f;
+    float gradient = 0.0f;
+    if (j < kv_len) {
+      gradient = AsFloatDev(drow[j]);
+      if (KeyAllowedDev(params, qpos, j)) {
+        weight = expf(AsFloatDev(srow[j]) - row_max) * inv;
+      }
+    }
+    weights[k] = weight;
+    incoming[k] = gradient;
+    local_weighted += weight * gradient;
+  }
+  const float weighted_dp = BlockReduceSum(local_weighted);
+#pragma unroll
+  for (int k = 0; k < kSoftmaxRowRegisters; ++k) {
+    const int j = tid + k * stride;
+    if (j < kv_len) {
+      prow[j] = ToComputeDev(weights[k]);
+      drow[j] = ToComputeDev(weights[k] * (incoming[k] - weighted_dp));
+    }
+  }
+}
+
+// The row is read once and written once when it fits in registers, so the fused
+// pair takes the shape the training step runs; a longer row keeps the kernels
+// that walk the row once per pass.
+void LaunchSoftmaxForward(const AttentionParams& params,
+                          const ComputeType* scores, ComputeType* probs,
+                          float* stats, int rows) {
+  const int kv_len = params.kv_len > 0 ? params.kv_len : params.seq;
+  if (FitsSoftmaxRegisters(kv_len)) {
+    cuda_backend::Launch(AttentionSoftmaxForwardFusedKernel, dim3(rows),
+                         dim3(kSoftmaxThreads), 0, params, scores, probs,
+                         stats);
+    return;
+  }
+  cuda_backend::Launch(AttentionSoftmaxForwardKernel, dim3(rows),
+                       dim3(kSoftmaxThreads), 0, params, scores, probs, stats);
+}
+
+void LaunchSoftmaxBackward(const AttentionParams& params,
+                           const ComputeType* scores, const float* stats,
+                           ComputeType* probs, ComputeType* dprobs, int rows) {
+  const int kv_len = params.kv_len > 0 ? params.kv_len : params.seq;
+  if (FitsSoftmaxRegisters(kv_len)) {
+    cuda_backend::Launch(AttentionSoftmaxBackwardFusedKernel, dim3(rows),
+                         dim3(kSoftmaxThreads), 0, params, scores, stats, probs,
+                         dprobs);
+    return;
+  }
+  cuda_backend::Launch(AttentionSoftmaxBackwardKernel, dim3(rows),
+                       dim3(kSoftmaxThreads), 0, params, scores, stats, probs,
+                       dprobs);
+}
+
 // --- Head-layout transposes ------------------------------------------------
 
 // `[batch, rows, kv_heads, dim]` -> `[batch, heads, rows, dim]`. Query head `h`
@@ -277,19 +471,12 @@ __global__ void TransposeToHeadsKernel(long long total, int rows, int heads,
 // copy is one wide access. It is a plain aggregate rather than `uint4`, because
 // the simulator compiles this same source as host C++ and its compatibility
 // header carries no vector types.
-struct alignas(16) TransposeVector {
-  std::uint32_t words[4];
-};
-
 // The two transposes move one 16-byte vector per thread instead of one element.
 // Both sides of the copy are contiguous along `dim`, which is 64 or 128 on
 // every shape that reaches the batched path, so a vector stays inside one row.
 // A shape whose `dim` is not a multiple of the vector width, or a pointer that
 // is not 16-byte aligned, takes the scalar kernel below; `kernels::Alloc`
 // returns an aligned pointer, so the second condition costs one test.
-constexpr int kVectorBytes = 16;
-constexpr int kVectorElems =
-    kVectorBytes / static_cast<int>(sizeof(ComputeType));
 
 // One block per `kTransposeThreads` entries, rounded up.
 int Grid(long long entries) {
@@ -314,8 +501,8 @@ bool VectorTranspose(int dim, const ComputeType* in, const ComputeType* out) {
 // decodes to `(b, h, r, vector)` in that order.
 __global__ void TransposeToHeadsVectorKernel(
     long long vectors_per_row, long long total_vectors, int rows, int heads,
-    int kv_heads, const TransposeVector* __restrict__ in,
-    TransposeVector* __restrict__ out) {
+    int kv_heads, const ComputeVector* __restrict__ in,
+    ComputeVector* __restrict__ out) {
   const long long v =
       static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x;
   if (v >= total_vectors) return;
@@ -336,8 +523,8 @@ __global__ void TransposeToHeadsVectorKernel(
 // is the order the scalar kernel keeps.
 __global__ void TransposeFromHeadsVectorKernel(
     long long vectors_per_row, long long total_vectors, int rows, int heads,
-    int kv_heads, const TransposeVector* __restrict__ in,
-    TransposeVector* __restrict__ out) {
+    int kv_heads, const ComputeVector* __restrict__ in,
+    ComputeVector* __restrict__ out) {
   const long long v =
       static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x;
   if (v >= total_vectors) return;
@@ -375,8 +562,8 @@ void TransposeToHeads(int batch, int rows, int heads, int kv_heads, int dim,
     cuda_backend::Launch(TransposeToHeadsVectorKernel, dim3(Grid(vectors)),
                          dim3(kTransposeThreads), 0, per_row, vectors, rows,
                          heads, kv_heads,
-                         reinterpret_cast<const TransposeVector*>(in),
-                         reinterpret_cast<TransposeVector*>(out));
+                         reinterpret_cast<const ComputeVector*>(in),
+                         reinterpret_cast<ComputeVector*>(out));
     return;
   }
   cuda_backend::Launch(TransposeToHeadsKernel, dim3(Grid(total)),
@@ -430,8 +617,8 @@ void TransposeFromHeads(int batch, int rows, int heads, int kv_heads, int dim,
     cuda_backend::Launch(TransposeFromHeadsVectorKernel, dim3(Grid(vectors)),
                          dim3(kTransposeThreads), 0, per_row, vectors, rows,
                          heads, kv_heads,
-                         reinterpret_cast<const TransposeVector*>(in),
-                         reinterpret_cast<TransposeVector*>(out));
+                         reinterpret_cast<const ComputeVector*>(in),
+                         reinterpret_cast<ComputeVector*>(out));
     return;
   }
   cuda_backend::Launch(TransposeFromHeadsKernel, dim3(Grid(total)),
@@ -808,8 +995,7 @@ void AttentionForward(const AttentionParams& params, const ComputeType* q,
   const int batch_heads = params.batch * heads;
   BatchedGemm(params.seq, kv_len, dim, batch_heads, scale, 0.0f,
               /*transpose_a=*/false, /*transpose_b=*/true, qT, kT, scores);
-  cuda_backend::Launch(AttentionSoftmaxForwardKernel, dim3(rows),
-                       dim3(kSoftmaxThreads), 0, params, scores, probs, stats);
+  LaunchSoftmaxForward(params, scores, probs, stats, rows);
   BatchedGemm(params.seq, dim, kv_len, batch_heads, 1.0f, 0.0f,
               /*transpose_a=*/false, /*transpose_b=*/false, probs, vT, outT);
   TransposeFromHeads(params.batch, params.seq, heads, heads, dim, outT, out);
@@ -909,11 +1095,9 @@ void AttentionBackwardWindowed(const AttentionParams& params,
     sub.seq = q_len;
     sub.kv_len = k_len;
     sub.stats_row_stride = seq;
-    cuda_backend::Launch(AttentionSoftmaxBackwardKernel,
-                         dim3(batch_heads * q_len), dim3(kSoftmaxThreads), 0,
-                         sub, scores, stats + static_cast<std::int64_t>(q0) * 2,
-                         probs, dprobs);
-
+    LaunchSoftmaxBackward(sub, scores,
+                          stats + static_cast<std::int64_t>(q0) * 2, probs,
+                          dprobs, batch_heads * q_len);
     // dQ = dS K * scale. Each query block owns a disjoint query slice, so it
     // overwrites (beta = 0).
     BatchedGemmStrided(q_len, dim, k_len, batch_heads, scale, 0.0f,
@@ -1003,9 +1187,7 @@ void AttentionBackward(const AttentionParams& params, const ComputeType* q,
               /*transpose_a=*/false, /*transpose_b=*/true, qT, kT, scores);
   BatchedGemm(params.seq, kv_len, dim, batch_heads, 1.0f, 0.0f,
               /*transpose_a=*/false, /*transpose_b=*/true, doutT, vT, dprobs);
-  cuda_backend::Launch(AttentionSoftmaxBackwardKernel, dim3(rows),
-                       dim3(kSoftmaxThreads), 0, params, scores, stats, probs,
-                       dprobs);
+  LaunchSoftmaxBackward(params, scores, stats, probs, dprobs, rows);
 
   // dQ = dS @ K * scale; dK = dS^T @ Q * scale; dV = P^T @ dOut.
   BatchedGemm(params.seq, dim, kv_len, batch_heads, scale, 0.0f,

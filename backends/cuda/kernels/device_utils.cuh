@@ -23,6 +23,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <initializer_list>
 
 #include "nanochat/kernels.h"
 #include "nanochat/tensor.h"
@@ -33,6 +34,52 @@ namespace cuda_kernels {
 // Largest block the block-wide reduction below supports. A block declares a
 // shared array of this size, so every launch must stay at or below it.
 constexpr int kMaxBlockThreads = 1024;
+
+// One aligned 16-byte group of `ComputeType` values, and the four-float group
+// that lines up with it. A warp that moves one group per thread transfers 512
+// bytes per instruction instead of 64, which is what the element-wise families
+// needed: as one value per thread they moved a quarter of the bandwidth the
+// card's own memset reaches. `kFloatPerVector` is how many fp32 groups cover
+// one parameter vector, so a kernel that mixes an fp32 state with a
+// `ComputeType` copy walks both streams with one index.
+constexpr int kVectorBytes = 16;
+constexpr int kVectorElems =
+    kVectorBytes / static_cast<int>(sizeof(ComputeType));
+constexpr int kFloatPerVector = kVectorElems / 4;
+
+struct alignas(16) ComputeVector {
+  ComputeType e[kVectorElems];
+};
+
+struct alignas(16) FloatVector {
+  float e[4];
+};
+
+// True when `count` is a whole number of vectors and every listed pointer is
+// either null or 16-byte aligned. A count that is not, or a pointer that is
+// not, takes the family's scalar kernel, so a buffer the caller does not own
+// can never be read past its end.
+inline bool VectorReady(long long count,
+                        std::initializer_list<const void*> pointers) {
+  if (kVectorElems <= 1 || count <= 0 || count % kVectorElems != 0) {
+    return false;
+  }
+  for (const void* pointer : pointers) {
+    if (pointer == nullptr) continue;
+    if (reinterpret_cast<std::uintptr_t>(pointer) % kVectorBytes != 0) {
+      return false;
+    }
+  }
+  return true;
+}
+
+// The blocks one vector kernel launches: one per `threads` vectors, capped so a
+// small tensor does not ask for a grid the card cannot fill.
+inline int VectorGrid(long long vectors, int threads) {
+  const long long blocks = (vectors + threads - 1) / threads;
+  constexpr long long kMaxBlocks = 4096;
+  return static_cast<int>(blocks < kMaxBlocks ? blocks : kMaxBlocks);
+}
 
 // Storage <-> float at the device boundary. fp32 is the only compute type
 // today, so both conversions are the identity.

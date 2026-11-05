@@ -29,7 +29,8 @@ using nanochat::dev::ToStorage;
 using nanochat::dev::seqref::AttentionBackward;
 using nanochat::dev::seqref::AttentionForward;
 
-void RunCase(const AttentionParams& p, const char* name) {
+void RunCase(const AttentionParams& p, const char* name,
+             bool differentiate = true) {
   const int dim = p.head_dim;
   const int heads = p.num_heads;
   const int kv_heads = p.num_kv_heads > 0 ? p.num_kv_heads : heads;
@@ -80,6 +81,7 @@ void RunCase(const AttentionParams& p, const char* name) {
   CheckVectorClose(FromStorage(dv.Download()), ref_dv, 1e-4,
                    (std::string(name) + " bwd dv").c_str());
 
+  if (!differentiate) return;
   auto loss_at = [&](const std::vector<float>& qv, const std::vector<float>& kv,
                      const std::vector<float>& vv) {
     std::vector<float> s;
@@ -159,6 +161,19 @@ int main() {
   AttentionParams decode = base;
   decode.kv_len = 10;
   RunCase(decode, "kv-cache-offset");
+
+  // The fused softmax pair holds one row in registers when the row is at most
+  // 128 threads times 8 elements, so a row of 1024 is the last length that
+  // takes it and every shorter case above takes it too. This case sits exactly
+  // on the bound, where an off-by-one in the unrolled loop would drop the last
+  // element of the row and leave the sum of the weights below one.
+  AttentionParams bound = base;
+  bound.batch = 1;
+  bound.seq = 1024;
+  bound.num_heads = 1;
+  bound.num_kv_heads = 1;
+  RunCase(bound, "softmax-register-bound",
+          /*differentiate=*/false);
 
   if (Failures() != 0) {
     std::printf("attention: %d check(s) failed\n", Failures());
