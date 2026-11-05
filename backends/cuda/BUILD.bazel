@@ -41,7 +41,14 @@ cc_library(
 )
 
 # Alloc/Free/Memcpy/Memset/Synchronize/GetCaps plus the backend-internal
-# stream/launch helpers. cuda_library adds the CUDA runtime implicitly.
+# stream/launch helpers and the launch surface a fused kernel is sized from:
+# cooperative-launch support, the resident-block query, and the typed outcome of
+# a cooperative launch. cuda_library adds the CUDA runtime implicitly.
+#
+# The two launch helpers are header templates inside `#if defined(__CUDACC__)`,
+# so only a device translation unit can see them, exactly as `Launch` already
+# was. The three queries are ordinary host functions, so a host test can read
+# what the device answers without a kernel of its own (see `launch_probe`).
 #
 # `GetCaps()` fills `Caps::feature_mask` from two inputs and no third one: the
 # caps.json-derived profile entry (`//src:device_profile`, the same leaf the CPU
@@ -199,7 +206,11 @@ cc_library(
 )
 
 # T1 GPU correctness for the runtime and the GEMM. Small shapes only; host code
-# is vendor-free and exercises the sealed kernels.h API.
+# is vendor-free and exercises the sealed kernels.h API. It also covers the
+# launch surface of `device.h` (the cooperative-launch outcome and the
+# resident-block query), which is backend-internal and needs a kernel symbol:
+# `launch_probe` is that kernel, and it is the one device translation unit the
+# test links.
 cc_test(
     name = "cuda_runtime_gpu_test",
     srcs = ["cuda_runtime_test.cc"],
@@ -207,10 +218,28 @@ cc_test(
     defines = precision_defines(),
     deps = [
         ":cuda",
+        ":launch_probe",
         "//include/nanochat:nanochat",
     ],
     size = "small",
     tags = ["gpu"],
+)
+
+# The device half of the launch probe (launch_probe.h). Test-only: the
+# resident-block query and a cooperative launch are questions about one kernel's
+# registers and shared memory, and a host-only test cannot declare a `__global__`
+# function. Nothing in this package links it.
+cuda_library(
+    name = "launch_probe",
+    testonly = True,
+    srcs = ["launch_probe.cu"],
+    hdrs = ["launch_probe.h"],
+    copts = nanochat_cuda_copts(),
+    defines = precision_defines(),
+    deps = [
+        ":device",
+        "//include/nanochat:nanochat",
+    ],
 )
 
 # T1 GPU correctness for the two reductions of the primitive tier

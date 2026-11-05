@@ -104,12 +104,13 @@ asserts exactly that.
 
 | File | Contents |
 |---|---|
-| `device.cu` / `device.h` | `Alloc`, `Free`, `Memcpy`, `Memset`, `Synchronize`, `GetCaps`, the stream/launch helpers, and the two mask helpers (`DeclaredFeatureMask`, `PrecisionFeatureBits`) |
+| `device.cu` / `device.h` | `Alloc`, `Free`, `Memcpy`, `Memset`, `Synchronize`, `GetCaps`, the stream/launch helpers (`Launch`, `LaunchCooperative`), the launch surface a fused kernel is sized from (`SupportsCooperativeLaunch`, `ActiveBlocksPerMultiprocessor`, `ResidentBlocks`, `ClassifyCooperativeLaunch`), and the two mask helpers (`DeclaredFeatureMask`, `PrecisionFeatureBits`) |
 | `gemm.cu` | `Gemm`, `GemmWgrad`, `QuantizeFp8`, `GemmScaledFp8` (cuBLAS and cublasLt) |
 | `row_reduce.cu` | `RowReduce` — the per-segment coalesced scan |
 | `span_reduce.cu` | `SpanReduce` — the device-wide ragged reduction over a list the device reads itself |
 | `fused_overrides.cc` | `RegisteredFusedOverrides` — the fused families the plan may choose |
 | `caps_names.h` / `caps_names.cc` | the vocabulary-name to capability-bit table |
+| `launch_probe.h` / `launch_probe.cu` | test-only: a kernel carrying the fused Muon kernel's launch resources, plus one cooperative launch of it |
 
 The two reductions are separate translation units on purpose: a per-segment
 scan and a device-wide ragged reduction are different algorithms with different
@@ -118,6 +119,38 @@ correctness risks, and a device may run them on different units
 
 `caps.json` is exported as the filegroup `//backends/cuda:caps_json`, the same
 label name `//backends/cpu` uses, for the derivation and for `caps_gpu_test`.
+
+## The launch surface
+
+`device.h` carries the two launch helpers and the three queries a fused kernel
+is sized from ([docs/muon-fused-kernel.md](../../docs/muon-fused-kernel.md)
+§4, §8):
+
+| Helper | Available to | Answers |
+|---|---|---|
+| `Launch` | device translation units (`__CUDACC__`) | one `<<<>>>` launch on the backend stream, then `CheckLastError` |
+| `LaunchCooperative` | device translation units | one cooperative grid on the backend stream, as a `CooperativeLaunchOutcome` |
+| `SupportsCooperativeLaunch` | host and device | whether the device accepts a cooperative launch at all |
+| `ActiveBlocksPerMultiprocessor` / `ResidentBlocks` | host and device | the persistent grid the cooperative driver launches |
+| `ClassifyCooperativeLaunch` | host and device | the typed outcome of one status, so the fallback is testable |
+
+The two launch helpers are header templates inside `#if defined(__CUDACC__)`, so
+a host-only translation unit cannot reach them, exactly as `Launch` already was.
+The queries are ordinary host functions, because a driver asks them before it
+launches anything and a test asks them without a kernel of its own.
+
+A refused cooperative launch is a value, not an abort:
+`cudaErrorCooperativeLaunchTooLarge` comes back as
+`CooperativeLaunchOutcome::kTooLarge`, so the fused driver falls back to one
+launch per phase and prints one log line. That is why nothing here is a
+capability bit: there is no `caps.json` entry and `GetCaps()` does not change.
+The fused build picks its driver from a device query, and the simulator answers
+0 for `cudaDevAttrCooperativeLaunch`, so a simulated run takes the phase loop.
+
+`launch_probe.h` exists for the test alone: the resident-block query is a
+question about one kernel's registers and shared memory, and a host-only test
+cannot declare a `__global__` function. Its kernel carries the fused kernel's
+256 threads and its three-blocks-per-SM budget, and the target is `testonly`.
 
 ## Fused overrides
 
@@ -169,7 +202,7 @@ All of them are T1 GPU correctness, tagged `gpu`, and aggregated into
 
 | Target | Covers |
 |---|---|
-| `cuda_runtime_gpu_test` | the runtime and the GEMM entry points |
+| `cuda_runtime_gpu_test` | the runtime, the GEMM entry points, the cooperative-launch outcome, and the resident-block query |
 | `row_reduce_gpu_test` | `RowReduce`: every combine op, the offset/stride descriptor, and a segment wider than one block |
 | `span_reduce_gpu_test` | `SpanReduce`: ragged spans, empty spans, the dot form, the scale, `accumulate`, and a chunked launch |
 | `caps_gpu_test` | `caps.json` against the reported mask, the name table, and the registrations |
