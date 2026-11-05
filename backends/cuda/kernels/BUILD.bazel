@@ -163,7 +163,8 @@ cuda_library(
 
 # Muon: Nesterov momentum, MuonEq equilibration, Polar Express through batched
 # cuBLAS GEMMs, NorMuon, and the cautious update for the stacked matrix
-# parameters.
+# parameters. The fused single-kernel variant this path selects by shape lives in
+# `:muon_fused`, and the seam entry here calls it.
 cuda_library(
     name = "muon",
     srcs = ["muon.cu"],
@@ -171,8 +172,39 @@ cuda_library(
     defines = precision_defines(),
     deps = [
         ":device_utils",
+        ":muon_fused",
         "//backends/cuda:device",
         "//backends/cuda:gemm",
+        "//include/nanochat:nanochat",
+    ],
+    alwayslink = True,
+)
+
+# The fused Muon path: one phase-parameterised device function, its 16 phases and
+# three epilogue folds, and the two drivers over one device body
+# (docs/muon-fused-kernel.md sections 4 to 6). `:muon` is its one in-tree caller;
+# the source is also exported for the emulator library under //tools/cuda_sim/emu,
+# which compiles this same file with the host compiler, and the GPU test and the
+# benchmark call the entry directly so a phase gate can bisect one driver against
+# the other.
+#
+# The `.cu` and its header are exported as files as well as built into this
+# target: `filegroup` srcs of the emulated library refer to them by label, and the
+# generated copy is compiled beside the other emulated families.
+exports_files([
+    "muon_fused.cu",
+    "muon_fused.h",
+])
+
+cuda_library(
+    name = "muon_fused",
+    srcs = ["muon_fused.cu"],
+    hdrs = ["muon_fused.h"],
+    copts = nanochat_cuda_copts(),
+    defines = precision_defines(),
+    deps = [
+        ":device_utils",
+        "//backends/cuda:device",
         "//include/nanochat:nanochat",
     ],
     alwayslink = True,
@@ -444,6 +476,27 @@ cc_test(
     tags = ["gpu"],
 )
 
+# The fused path's gate (docs/muon-fused-kernel.md section 6): three
+# implementations of one Muon step on one input and one seed -- the host
+# reference, the shipped multi-launch `MuonUpdate`, and the fused path through
+# both of its drivers -- plus the two-driving comparison, the workspace check for
+# the 16 phases and the three folds, and the forced cooperative refusal that has
+# to fall back with one log line.
+cc_test(
+    name = "muon_fused_gpu_test",
+    srcs = ["muon_fused_test.cc"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    deps = [
+        ":muon_fused",
+        ":optimizer_kernels",
+        "//backends/cuda/kernels/testing:optim_test_utils",
+        "//include/nanochat:nanochat",
+    ],
+    size = "small",
+    tags = ["gpu"],
+)
+
 # ---------------------------------------------------------------------------
 # Micro-benchmarks. Not tests: run them through the broker with
 # `tools/nanochat bench` / `tools/nanochat profile`.
@@ -464,7 +517,9 @@ cc_binary(
 
 # Muon's Polar Express GEMM shapes and the whole optimizer phase of one step,
 # at the `h100` and `big` profile shapes. Every row carries its model FLOPs
-# utilization, which the shared report computes.
+# utilization, which the shared report computes. With `--muon` the run also
+# reports the fused path's rows beside the multi-launch ones, over the same
+# buffers, so one group's two steps are read side by side.
 cuda_binary(
     name = "muon_benchmark",
     srcs = ["muon_benchmark.cc"],
@@ -473,6 +528,7 @@ cuda_binary(
     defines = precision_defines(),
     host_defines = precision_defines(),
     deps = [
+        ":muon_fused",
         ":optimizer_kernels",
         "//backends/cuda/kernels/testing:bench_utils",
         "//backends/cuda/kernels/testing:optim_test_utils",
@@ -504,6 +560,7 @@ test_suite(name = "all", tests = [
     ":classifier_gpu_test",
     ":embedding_gpu_test",
     ":grad_norm_gpu_test",
+    ":muon_fused_gpu_test",
     ":muon_gpu_test",
     ":pointwise_gpu_test",
     ":precision_gpu_test",

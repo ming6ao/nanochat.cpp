@@ -3,6 +3,21 @@
 // NorMuon variance reduction with a factored second moment, and the cautious
 // decoupled weight decay. The math mirrors backends/cpu/kernels.cc exactly.
 //
+// Two paths run this stage, and a group takes one of them by shape
+// (`MuonFusedSelected`):
+//
+//   * the multi-launch path below, one launch per operation, with the three
+//     Polar Express products going through `kernels::Gemm` so cuBLAS carries
+//     them. It is the path for a group whose arithmetic dominates;
+//   * the fused path in muon_fused.cu: one phase-parameterised device function,
+//     one launch per phase (or one cooperative launch for the whole group), and
+//     three epilogue folds that drop two buffers and two passes over the stack.
+//     It is the path for a group small enough that the removed launch gaps and
+//     the folded passes pay for its hand-written GEMM.
+//
+// Both paths read and write one workspace and one statistics scratch, sliced
+// the same way, so a group can move between them without a caller noticing.
+//
 // The stacked parameters are [num_params, rows, cols]. The Polar Express
 // iterations run as strided-batched GEMMs over the whole stack through
 // kernels::Gemm, one cuBLAS call per GEMM and per group. Every whole-matrix
@@ -15,8 +30,10 @@
 // Layout notes for the tall (rows > cols) and wide (rows <= cols) cases:
 //   * tall:  A = X^T X  (cols x cols), prod = X B
 //   * wide:  A = X X^T  (rows x rows), prod = B X
-// A, A^2, and B therefore occupy [num_params, min(rows, cols), min(rows,
-// cols)].
+// A and B therefore occupy [num_params, min(rows, cols), min(rows, cols)].
+// There is no `A^2` buffer: `b = cb * a + cc * a * a` writes the product over
+// itself in place, which is one of the two min-by-min slices the fused path's
+// folds remove from both paths (backends/cuda/kernels/muon_fused.h).
 //
 // See docs/kernels.md and docs/model.md.
 
@@ -29,6 +46,7 @@
 
 #include "backends/cuda/device.h"
 #include "backends/cuda/kernels/device_utils.cuh"
+#include "backends/cuda/kernels/muon_fused.h"
 #include "nanochat/kernels.h"
 
 namespace nanochat {
@@ -183,7 +201,9 @@ __global__ void MuonEquilibrateRowKernel(int rows, int cols,
 
 // --- Polar Express elementwise steps ---------------------------------------
 
-// b = cb * a + cc * a2, elementwise over the stacked min x min buffers.
+// b = cb * a + cc * a2, elementwise over the stacked min x min buffers. `b` may
+// be `a2` itself: the combination is per index, so the destination can be the
+// second operand, which is what lets the caller skip the separate `a2` buffer.
 __global__ void MuonBKernel(long long count, float cb, float cc,
                             const ComputeType* __restrict__ a,
                             const ComputeType* __restrict__ a2,
@@ -492,19 +512,12 @@ thread_local std::size_t g_muon_scratch_capacity = 0;
 thread_local double* g_muon_partials = nullptr;
 thread_local std::size_t g_muon_partials_capacity = 0;
 
-// The most partials one matrix is reduced with. It bounds the double buffer the
-// blocked pass writes and the blocks a matrix is spread over.
-constexpr int kMaxPartialsPerMatrix = 32;
-
-// The blocks one matrix is reduced with: one per eight thousand elements, so a
-// small matrix stays one block and a megaelement matrix fills the card.
-int PartialsPerMatrix(long long mat) {
-  long long blocks = (mat + 8191) / 8192;
-  if (blocks < 1) blocks = 1;
-  if (blocks > kMaxPartialsPerMatrix) blocks = kMaxPartialsPerMatrix;
-  return static_cast<int>(blocks);
-}
-
+// Grows the three cached buffers to the sizes the caller asks for, which is
+// `[x | prod | a | b]` in `ComputeType`, `[stat | vmean | scale]` in floats,
+// and a double partial per (matrix, block) of a whole-matrix pass. The partial
+// count comes from `MuonPartialBlocks` (backends/cuda/kernels/muon_fused.h),
+// which both paths of this stage use, so the block count, the chunk order, and
+// therefore the statistic cannot drift between them.
 void EnsureMuonWorkspace(std::size_t elements, std::size_t scratch_floats,
                          std::size_t partial_doubles) {
   if (elements > g_muon_workspace_capacity) {
@@ -549,30 +562,45 @@ void MuonUpdate(const MuonParams& params, const float* stacked_grads,
   const long long min_total = min_sq * num_params;
   const bool tall = rows > cols;
 
-  // Working matrix (momentum output, orthonormalised in place) and the
-  // per-matrix GEMM operands. All stay ComputeType so they can feed cuBLAS.
-  // The layout is [x | prod | a | a2 | b], from one cached allocation.
+  // Working matrix (momentum output, orthonormalised in place), its ping-pong
+  // partner, and the two per-matrix GEMM operands. All stay ComputeType so they
+  // can feed cuBLAS. The layout is [x | prod | a | b], from one cached
+  // allocation, and it is the layout the fused path slices as
+  // [x | xn | a | b] (`MuonFusedWorkspaceElements`): the `prod` buffer is the
+  // fused path's second iterate, and `b` takes the product of `A * A` in place
+  // here and the folded `cb * a + cc * acc` there, so neither path needs the
+  // third min-by-min buffer the family used to carry.
   const int red_index = reduce_cols ? rows : cols;
   const int red_size = reduce_cols ? cols : rows;
-  const int partial_blocks = PartialsPerMatrix(mat);
+  const int partial_blocks = MuonPartialBlocks(mat);
   // The scratch holds the per-matrix statistic (`num_params`), then the NorMuon
   // mean squares (`num_params * red_index`), then the NorMuon global scales
-  // (`num_params`).
+  // (`num_params`). Both paths slice it the same way; the allocation carries
+  // the larger reduction extent so one buffer serves both `red_dim` values.
   const std::size_t stat_len = static_cast<std::size_t>(num_params);
   const std::size_t vmean_len =
       static_cast<std::size_t>(num_params) * red_index;
-  EnsureMuonWorkspace(static_cast<std::size_t>(2 * total + 3 * min_total),
-                      stat_len + vmean_len + stat_len,
+  EnsureMuonWorkspace(static_cast<std::size_t>(2 * total + 2 * min_total),
+                      MuonFusedScratchFloats(num_params, rows, cols),
                       static_cast<std::size_t>(partial_blocks) * num_params);
   ComputeType* x = g_muon_workspace;
   ComputeType* prod = x + total;
   ComputeType* a = prod + total;
-  ComputeType* a2 = a + min_total;
-  ComputeType* b = a2 + min_total;
+  ComputeType* b = a + min_total;
   float* stat = g_muon_scratch;
-  float* vmean = stat + stat_len;
-  float* scale = vmean + vmean_len;
+  float* vmean = stat + MuonScratchOffset(stat_len);
+  float* scale = vmean + MuonScratchOffset(vmean_len);
   double* partials_dev = g_muon_partials;
+
+  // The fused path, when the group is one the folds pay for
+  // (`MuonFusedSelected`, section 4's shape rule). It runs the whole stage out
+  // of the same workspace, scratch, and double partials, so a group that takes
+  // it and one that does not are interchangeable at this seam.
+  if (MuonFusedSelected(params)) {
+    MuonFusedUpdate(params, stacked_grads, stacked_master, stacked_values, buf1,
+                    buf2, g_muon_workspace, g_muon_scratch, g_muon_partials);
+    return;
+  }
 
   const int kThreads = 256;
   const int elem_grid = GridSize(total, kThreads);
@@ -638,7 +666,9 @@ void MuonUpdate(const MuonParams& params, const float* stacked_grads,
       ga.stride_c = min_sq;
       Gemm(GemmMode::kForward, ga, x, x, a);
 
-      // A2 = A A.
+      // A2 = A A, then b = cb * a + cc * A2 with the product landing in `b`
+      // itself: the combination is per index, so the destination is also its
+      // second operand and the separate `a2` buffer is gone.
       GemmParams ga2;
       ga2.m = cols;
       ga2.n = cols;
@@ -647,10 +677,10 @@ void MuonUpdate(const MuonParams& params, const float* stacked_grads,
       ga2.stride_a = min_sq;
       ga2.stride_b = min_sq;
       ga2.stride_c = min_sq;
-      Gemm(GemmMode::kForward, ga2, a, a, a2);
+      Gemm(GemmMode::kForward, ga2, a, a, b);
 
       cuda_backend::Launch(MuonBKernel, dim3(min_grid), dim3(kThreads), 0,
-                           min_total, cb, cc, a, a2, b);
+                           min_total, cb, cc, a, b, b);
 
       // prod = X B  (rows x cols).
       GemmParams gp;
@@ -675,7 +705,8 @@ void MuonUpdate(const MuonParams& params, const float* stacked_grads,
       ga.stride_c = min_sq;
       Gemm(GemmMode::kForward, ga, x, x, a);
 
-      // A2 = A A.
+      // A2 = A A, then b = cb * a + cc * A2 with the product landing in `b`
+      // itself (see the tall branch).
       GemmParams ga2;
       ga2.m = rows;
       ga2.n = rows;
@@ -684,10 +715,10 @@ void MuonUpdate(const MuonParams& params, const float* stacked_grads,
       ga2.stride_a = min_sq;
       ga2.stride_b = min_sq;
       ga2.stride_c = min_sq;
-      Gemm(GemmMode::kForward, ga2, a, a, a2);
+      Gemm(GemmMode::kForward, ga2, a, a, b);
 
       cuda_backend::Launch(MuonBKernel, dim3(min_grid), dim3(kThreads), 0,
-                           min_total, cb, cc, a, a2, b);
+                           min_total, cb, cc, a, b, b);
 
       // prod = B X  (rows x cols).
       GemmParams gp;
