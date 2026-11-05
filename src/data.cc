@@ -508,6 +508,18 @@ struct DataLoader::Impl {
   bool producer_done = false;
   bool stop = false;
   std::string producer_error;
+  // The next encoded batch, read and encoded ahead of the moment it is wanted.
+  // The producer thread is its only writer. A refill costs the tokenizer tens
+  // of milliseconds on four cores, and the device waits for the whole of it
+  // whenever the buffer is empty; doing the work early puts it under the
+  // previous steps' device work instead.
+  std::vector<std::vector<int>> pending;
+  bool pending_ready = false;
+  // The source position just after the batch that reached `documents` last. The
+  // snapshot reports this rather than the source's live position, which a
+  // prefetched batch has already advanced, so a resume replays exactly the
+  // documents the buffer does not already hold.
+  std::int64_t committed_position = 0;
   // The reason the consumer's last `Next` failed, written by the consumer
   // thread only, so it needs no lock.
   std::string last_error;
@@ -545,6 +557,36 @@ struct DataLoader::Impl {
 
   void ProducerLoop() {
     while (true) {
+      // Read and encode the next batch before it is wanted. The append below
+      // still happens at the moment the consumer's buffer runs low, so the
+      // buffer holds the same documents in the same order at every placement
+      // and the packing does not move.
+      if (!pending_ready) {
+        std::vector<std::string> batch;
+        std::string error;
+        const bool ok = source != nullptr && source->Next(&batch, &error);
+        if (!ok) {
+          std::lock_guard<std::mutex> lock(mutex);
+          if (!error.empty()) producer_error = error;
+          producer_done = true;
+          data_available.notify_all();
+          break;
+        }
+        std::vector<std::vector<int>> encoded(batch.size());
+        EncodeBatch(batch, &encoded);
+        pending = std::move(encoded);
+        pending_ready = true;
+        {
+          std::lock_guard<std::mutex> lock(mutex);
+          if (stop) break;
+        }
+        if (pending.empty()) {
+          // A source batch with nothing for this rank: drop it and read again,
+          // which is what the reference's refill loop does.
+          pending_ready = false;
+          continue;
+        }
+      }
       {
         std::unique_lock<std::mutex> lock(mutex);
         space_available.wait(lock, [this] {
@@ -552,28 +594,18 @@ struct DataLoader::Impl {
         });
         if (stop) break;
       }
-      // The gate spans the read, the encode, and the push. `State` takes the
-      // same gate, so the snapshot never sees a read that is not yet in the
-      // buffer (docs/distributed-design.md section 11).
+      // The gate spans the push, and `State` takes the same gate, so a snapshot
+      // never sees a batch that has not reached the buffer. The read and the
+      // encode are already done, so the gate is held for a move only.
       std::lock_guard<std::mutex> gate(producer_gate);
-      std::vector<std::string> batch;
-      std::string error;
-      const bool ok = source != nullptr && source->Next(&batch, &error);
-      if (!ok) {
-        std::lock_guard<std::mutex> lock(mutex);
-        if (!error.empty()) producer_error = error;
-        producer_done = true;
-        data_available.notify_all();
-        break;
-      }
-      if (batch.empty()) continue;
-      std::vector<std::vector<int>> encoded(batch.size());
-      EncodeBatch(batch, &encoded);
       std::lock_guard<std::mutex> lock(mutex);
       if (stop) break;
-      for (std::vector<int>& document : encoded) {
+      for (std::vector<int>& document : pending) {
         documents.push_back(std::move(document));
       }
+      pending.clear();
+      pending_ready = false;
+      committed_position = source != nullptr ? source->position() : 0;
       data_available.notify_all();
     }
   }
@@ -590,6 +622,9 @@ struct DataLoader::Impl {
     producer_done = false;
     stop = false;
     producer_error.clear();
+    pending_ready = false;
+    pending.clear();
+    committed_position = source->position();
     producer = std::thread([this]() { ProducerLoop(); });
   }
 
@@ -602,6 +637,10 @@ struct DataLoader::Impl {
       data_available.notify_all();
     }
     if (producer.joinable()) producer.join();
+    // After the join the producer thread is gone, so the prefetched batch is
+    // the producer's to drop and nobody else reads it.
+    pending.clear();
+    pending_ready = false;
   }
 
   bool NextDocuments(int batch, int seq, int* tokens, int* targets,
@@ -684,7 +723,9 @@ struct DataLoader::Impl {
     std::lock_guard<std::mutex> gate(producer_gate);
     std::lock_guard<std::mutex> lock(mutex);
     state.epoch = epoch;
-    state.source_position = source != nullptr ? source->position() : 0;
+    // The commit point, not the source's live position: a prefetched batch has
+    // advanced the source past the documents that reached the buffer.
+    state.source_position = source != nullptr ? committed_position : 0;
     state.documents.assign(documents.begin(), documents.end());
     return state;
   }
