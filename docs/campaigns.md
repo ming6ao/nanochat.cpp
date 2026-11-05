@@ -25,6 +25,7 @@ The evidence of each campaign is in `.sliceme/`, which is not tracked:
 | Supervised fine-tuning reference parity | 2026-11-03 | Phases A to F, phase G open | [parity.md](parity.md) Part 1 |
 | The big-shape profile on H100 | 2026-11-03 | One iteration, kept | [performance.md](performance.md) Part 1 |
 | The smear becomes a seam family | 2026-11-03 | Landed in `425546f` | [kernels.md](kernels.md) |
+| The Muon fusion | 2026-11-05 | Implemented and gated, not promoted | [kernels.md](kernels.md) Part 1 |
 
 ## Dependency layering and host packaging
 
@@ -229,6 +230,91 @@ The device agrees with the committed reference at rounding level: forward
 2.38e-07, trajectory parameter 1.67e-05. The CPU path is bit identical to the
 tree it replaces, and the failing set of `//tests:numerics_trace_test` is byte
 identical before and after.
+
+## The Muon fusion
+
+The goal was to run a whole `MuonUpdate` stage as one device-side launch: the
+three Polar Express products in one batched GEMM of our own, both elementwise
+passes folded into the epilogues of their neighbours, a grid barrier between the
+stages, and a phase driver as the simulator path and the fallback.
+
+The campaign measured before it wrote, and the measurement said no. Phase 0
+measured the launch and elementwise share of the step at both `muon_benchmark`
+profiles: 9 to 13 percent at `h100` and 7.2 to 7.5 percent at `big`, above the
+2 percent floor, so the GEMM was written. The same phase measured the sync term,
+which took the launch saving out of the bet: one fused iteration replaces
+41.9 microseconds of launch gaps with 4.7 microseconds of one launch and three
+barriers, 0.5 percent of an `h100` iteration, so the share is elementwise
+traffic and not dispatch. Phase 1 then measured the hand GEMM at 0.68 to 0.72 of
+the cuBLAS rate on the targeted 640x1280 group against a gate of 0.85, and it
+failed.
+
+The fused path landed anyway, because the gates required it: the phase device
+function, the sixteen phases and their three epilogue folds, the workspace
+reduced from `2·total + 3·min_total` to `2·total + 2·min_total`, both drivers,
+and the simulator legs all match `testing/optim_ref.h`, the shipped multi-launch
+`MuonUpdate`, and each other. The frozen seam keeps its one `MuonUpdate` entry,
+and no capability bit and no `caps.json` field was added.
+
+What did **not** land is the promotion. `muon_fused:` beats `muon:` for no group
+at either profile: 6 to 10 percent slower at `ns=0`, 27 percent slower at the
+`h100` step, 45 percent at the `big` step, and 76 percent on the `big` 1280x5120
+group. `kMuonFusedMaxElements` is therefore 0, `MuonFusedSelected` keeps every
+group on the multi-launch cuBLAS path, and the fused path stays in the tree as
+the shape rule and the phase-bisection tool. The measured rows are in
+[baselines.json](baselines.json) under `muon`, the design is
+[kernels.md](kernels.md) Part 1, and the numbers under the protocol are
+[performance.md](performance.md) section 2.1.
+
+The defects are worth naming. The identifiers `M1` to `M3` belong to this
+campaign.
+
+- `M1`: **the design document the plan cites was never committed to `docs/`.**
+  Roughly thirty-five comments across `backends/cuda`, `backends/cuda/kernels`,
+  `dev/kernels`, `tests`, and `tools/cuda_sim` cite it by path, so those
+  citations were dangling from the day they landed. Its durable sections are now
+  [kernels.md](kernels.md) Part 1 with their section numbers unchanged. The
+  citations still name the old path and have to be retargeted by the directories
+  that own them (open item 1).
+- `M2`: **one block size fits no stage.** 256 threads, `__launch_bounds__(256, 3)`
+  and 15 KiB of static shared memory hold 6 blocks per SM where the elementwise
+  families' own kernels hold 8, so the `ns=0` step, which runs no GEMM at all
+  and has nothing to fold, is 6 to 10 percent slower. The folds cannot pay that
+  back.
+- `M3`: **a gate against the cuBLAS rate is not a selector.** On 1280x5120x1280
+  the hand `A` stage measured 0.95 to 1.17 of cuBLAS, not because the hand
+  kernel is fast but because cuBLAS measures 4181 to 5608 GFLOP/s on that
+  bandwidth-bound product. Only the end-to-end `muon_fused:`-versus-`muon:` row
+  decides, and that row is what the shape rule uses.
+
+Open items:
+
+1. Retarget the dangling citations of `M1` in `backends/cuda`,
+   `backends/cuda/kernels`, `dev/kernels`, `tests`, and `tools/cuda_sim` to
+   [kernels.md](kernels.md) Part 1 section K. This repository's own documents are
+   already retargeted; the code comments are not, and each one belongs to the
+   directory that owns it.
+2. Promotion is one measurement and one constant: raise
+   `kMuonFusedMaxElements` (in `backends/cuda/kernels/muon_fused.cu`) above a
+   group's element count once a group wins, and nothing else changes.
+3. A different GEMM schedule is a different prototype and a different
+   measurement: an 8 by 8 micro-tile, a 16- to 32-deep k slice, or a 256 by 64
+   tile. So is a second block size, which the cooperative driver's one fixed
+   geometry forbids by construction.
+4. The bf16 build stays on the multi-launch path, because the fused schedule is
+   the fp32 one.
+5. The cooperative driver keeps no emulator leg: the emulator runs blocks one at
+   a time, so a grid barrier would deadlock there and only the phase driver is
+   compared against the CPU reference. Its device-day coverage is the T1 test
+   and the forced `cudaErrorCooperativeLaunchTooLarge` fallback.
+
+[backlog.md](backlog.md) never carried a Muon line, so this campaign closes
+none. It began as a plan of its own rather than as a backlog part, which is why
+its design was absorbed here instead of being moved out of the backlog.
+
+Evidence: the campaign's evidence file under `.sliceme/`, which is not tracked.
+The measured rows live in [baselines.json](baselines.json) and under "The fused
+path on this card" in `backends/cuda/kernels/README.md`.
 
 ## How a plan retires
 

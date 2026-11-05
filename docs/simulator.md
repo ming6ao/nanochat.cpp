@@ -208,6 +208,7 @@ in-process unit test of the mock, not a binding test.)
 | Memory | `cudaMalloc`, `cudaFree`, `cudaMemcpy`, `cudaMemset` | yes |
 | Device | `cudaGetDevice`, `cudaGetDeviceCount`, `cudaSetDevice`, `cudaGetDeviceProperties_v2`, `cudaGetErrorString`, `cudaGetLastError`, `cudaDeviceSynchronize` | yes |
 | Launch | `cudaLaunchKernel`, `cudaFuncSetAttribute`, `__cudaRegisterFatBinary`, `__cudaRegisterFatBinaryEnd`, `__cudaUnregisterFatBinary`, `__cudaRegisterFunction` | yes |
+| Cooperative | `cudaLaunchCooperativeKernel`, `cudaDeviceGetAttribute`, `cudaOccupancyMaxActiveBlocksPerMultiprocessor` | yes |
 | cuBLAS | `cublasCreate_v2`, `cublasSgemm_v2`, `cublasGemmEx`, `cublasGemmStridedBatchedEx`, `cublasGetStatusString` | yes |
 | Streams | `cudaStreamCreate`, `cudaStreamDestroy`, `cudaStreamSynchronize`, `cudaStreamBeginCapture`, `cudaStreamEndCapture` | reserved |
 | Events | `cudaEventCreate`, `cudaEventDestroy`, `cudaEventRecord`, `cudaEventSynchronize`, `cudaEventElapsedTime` | reserved |
@@ -217,6 +218,23 @@ in-process unit test of the mock, not a binding test.)
 `cudaFuncSetAttribute` is in the table with a production use of "yes" for the
 rule, not for the current tree. No current call uses it. Section 12.3 gives the
 synthetic trigger.
+
+`cudaLaunchCooperativeKernel`, `cudaDeviceGetAttribute`, and
+`cudaOccupancyMaxActiveBlocksPerMultiprocessor` are the three names the fused
+Muon build reaches for (`docs/kernels.md` Part 1 section 8). It reaches for all
+three even when it ends up on the phase driver, because the driver asks the
+device whether a cooperative launch is supported and how many blocks of its
+block size and dynamic shared size fit, and only then picks a driver. So the
+mock has to export all three or the symbol gate rejects a fused build.
+
+The answers are the design's: **0** for `cudaDevAttrCooperativeLaunch` and
+**1** for `cudaOccupancyMaxActiveBlocksPerMultiprocessor`. A simulated run
+therefore takes the **phase loop** -- one launch per phase execution, no grid
+barrier -- which is also the only driver the emulator's block-at-a-time engine
+can run (section 9). The cooperative-kernel stub records the call it was given
+(grid, block, and dynamic shared size) instead of doing nothing, so a test can
+assert that a driver attempted a cooperative launch, and the fallback that a
+refused one takes.
 
 `cublasGemmEx` is the one-batch form of `cublasGemmStridedBatchedEx`, which is
 what `backends/cuda/gemm.cu` reaches when a single GEMM's operands are not all
@@ -450,7 +468,8 @@ device is outside the stated scope.
 
 ## 9. Part 6: device-code emulation engine
 
-Status: implemented for RmsNorm and Pointwise.
+Status: implemented for RmsNorm and Pointwise, and extended since to the fp8
+tier (Part 7), the value gate, attention, and the fused Muon phase driver.
 
 The reference engine tests the graph, and the interposer tests the API. Neither
 tests the arithmetic of the `.cu` kernels. The emulation engine closes that gap.

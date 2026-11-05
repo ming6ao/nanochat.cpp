@@ -16,7 +16,7 @@ goes to [campaigns.md](campaigns.md). The rule is at the end of this page.
 | Document | Contents |
 |---|---|
 | [build.md](build.md) | The layers and the dependency invariants, the file layout, Bazel, backends, precision, Turing, and Part 1: the dependency zones and the host packaging |
-| [kernels.md](kernels.md) | The backend seam: kernel inventory, **the tier column and the bring-up cost**, the fusion boundary rule, the compute strategy, the API, and the device helpers |
+| [kernels.md](kernels.md) | The backend seam: kernel inventory, **the tier column and the bring-up cost**, the fusion boundary rule, the compute strategy, the API, and the device helpers. Part 1: the Muon fusion, the measured design of a whole-stage megakernel and why the multi-launch path stays the default |
 | [model.md](model.md) | Model API, graphs and the autograd policy, the model description and its block kinds, optimizer, data and checkpoints, workspace |
 | [model-and-device-bringup.md](model-and-device-bringup.md) | The two axes: the directory contract, the kernel tiers, the model description, the planner, isolation, the conformance matrix, the checklists, the open questions with their decision records, and §18 the evolution rules |
 | [conformance-matrix.md](conformance-matrix.md) | The model/device/tier/graph matrix. **Generated** by `tools/gen_matrix.py`; do not edit a row |
@@ -49,7 +49,7 @@ goes to [campaigns.md](campaigns.md). The rule is at the end of this page.
 
 | Document | Contents |
 |---|---|
-| [performance.md](performance.md) | How to measure, and the debugging interface. Part 1: the profile-guided optimization loop. Part 2: the CPU backend record |
+| [performance.md](performance.md) | How to measure, and the debugging interface. Part 1: the profile-guided optimization loop. Part 2: the CPU backend record. Section 2.1: the launch, barrier, and elementwise budget of an optimizer stage |
 | [performance-model.md](performance-model.md) | The analytic throughput model: the operation counters, the device rates, the roofline, and the prediction record |
 | [attention.md](attention.md) | Attention baseline, Pascal feasibility, the fused window, and the results. Part 5: tensor-core attention |
 | [scalar-arguments.md](scalar-arguments.md) | The device-resident scalar in the seam: `ScalarArg`, the optimizer migration, the pointwise arms, and the model-side fp32 view |
@@ -71,7 +71,7 @@ today.
 | File | Contents |
 |---|---|
 | [campaigns.md](campaigns.md) | One section per finished campaign: the dates, the outcome, the defects it found, the open items, and the evidence path. Read it before you reopen a settled question |
-| [baselines.json](baselines.json) | The measured baselines: `attention`, `attention_e2e`, `cpu_train`, and `cpu_gemm`. Each entry names the command that produced it and the revision. Update an entry only with a real run, and keep `validated_on` naming the device that measured it |
+| [baselines.json](baselines.json) | The measured baselines: `attention`, `attention_e2e`, `cpu_train`, `cpu_gemm`, and `muon`. Each entry names the command that produced it and the revision. Update an entry only with a real run, and keep `validated_on` naming the device that measured it |
 
 ## The contract vocabulary, `spec/`
 
