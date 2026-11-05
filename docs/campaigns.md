@@ -286,6 +286,15 @@ campaign.
   kernel is fast but because cuBLAS measures 4181 to 5608 GFLOP/s on that
   bandwidth-bound product. Only the end-to-end `muon_fused:`-versus-`muon:` row
   decides, and that row is what the shape rule uses.
+- `M4`: **no phase ran `tools/nanochat simulate --suite api`, so that suite was
+  red at the campaign head.** Two causes. The new `<<<>>>` instantiation in
+  `backends/cuda/launch_probe.cu` makes nvcc ask for
+  `__cudaPopCallConfiguration`, and the mock did not export it, so the symbol
+  gate failed. The preload test's GEMM assertions were also stale: `gemm.cu` has
+  taken a cublasLt plan for a batched shape since `40d2996`, so
+  `cublasGemmStridedBatchedEx` is the fallback and not the path. Both were
+  repaired before delivery: the mock now carries the launch-configuration pair,
+  and the test selects the fp8 call by its operand types.
 
 Open items:
 
@@ -307,6 +316,9 @@ Open items:
    a time, so a grid barrier would deadlock there and only the phase driver is
    compared against the CPU reference. Its device-day coverage is the T1 test
    and the forced `cudaErrorCooperativeLaunchTooLarge` fallback.
+6. A phase that changes `tools/cuda_sim` or the device layer should carry
+   `tools/nanochat simulate --suite api` in its acceptance set. `M4` is what a
+   phase costs when only the merge gate runs that suite.
 
 [backlog.md](backlog.md) never carried a Muon line, so this campaign closes
 none. It began as a plan of its own rather than as a backlog part, which is why

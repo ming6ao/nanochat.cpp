@@ -189,6 +189,22 @@ std::size_t MaxSharedPerBlock() {
 constexpr int kSimulatedMultiprocessors = 1;
 constexpr int kSimulatedActiveBlocksPerMultiprocessor = 1;
 
+// The one launch configuration the compiler's `<<<>>>` prologue pushes. The
+// generated code pushes, sets the arguments up, pops, and launches, and it
+// never nests the two, so one entry per thread is enough.
+struct CallConfiguration {
+  dim3 grid;
+  dim3 block;
+  std::size_t shared = 0;
+  void* stream = nullptr;
+  bool pushed = false;
+};
+
+CallConfiguration& PendingCallConfiguration() {
+  static thread_local CallConfiguration configuration;
+  return configuration;
+}
+
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -611,6 +627,52 @@ cudaError_t cudaLaunchCooperativeKernel(const void* func, dim3 grid, dim3 block,
              ",\"shared_bytes\":" + std::to_string(shared) +
              ",\"cooperative\":true",
          "ok");
+  return kCudaSuccess;
+}
+
+// The launch-configuration stack. `device.h`'s `<<<>>>` helper is compiled by
+// nvcc, and nvcc's launch prologue calls these two around `cudaLaunchKernel`,
+// so a binary that instantiates one asks the mock for them. They are recorded
+// and they keep the configuration: a pop that returns a configuration the
+// program never pushed would make the following launch fail for the wrong
+// reason, so the pop reports `cudaErrorInvalidConfiguration` instead.
+unsigned __cudaPushCallConfiguration(dim3 grid, dim3 block, std::size_t shared,
+                                     void* stream) {
+  CallConfiguration& pending = PendingCallConfiguration();
+  pending.grid = grid;
+  pending.block = block;
+  pending.shared = shared;
+  pending.stream = stream;
+  pending.pushed = true;
+  const std::size_t threads =
+      static_cast<std::size_t>(block.x) * block.y * block.z;
+  Record("__cudaPushCallConfiguration",
+         "\"grid_x\":" + std::to_string(grid.x) +
+             ",\"block_threads\":" + std::to_string(threads) +
+             ",\"shared_bytes\":" + std::to_string(shared),
+         "ok");
+  return static_cast<unsigned>(kCudaSuccess);
+}
+
+cudaError_t __cudaPopCallConfiguration(dim3* grid, dim3* block,
+                                       std::size_t* shared, void* stream) {
+  if (grid == nullptr || block == nullptr || shared == nullptr ||
+      stream == nullptr) {
+    Record("__cudaPopCallConfiguration", "", "error: null out-pointer");
+    return kCudaErrorInvalidValue;
+  }
+  const CallConfiguration& pending = PendingCallConfiguration();
+  if (!pending.pushed) {
+    Record("__cudaPopCallConfiguration", "",
+           "error: no configuration was pushed");
+    return kCudaErrorInvalidConfiguration;
+  }
+  *grid = pending.grid;
+  *block = pending.block;
+  *shared = pending.shared;
+  // The vendor ABI passes the address of the caller's stream variable here.
+  *static_cast<cudaStream_t*>(stream) = pending.stream;
+  Record("__cudaPopCallConfiguration", "\"pushed\":true", "ok");
   return kCudaSuccess;
 }
 

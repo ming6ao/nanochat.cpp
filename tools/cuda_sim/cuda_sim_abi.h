@@ -175,6 +175,17 @@ cudaError_t cudaOccupancyMaxActiveBlocksPerMultiprocessor(
 cudaError_t cudaLaunchCooperativeKernel(const void* func, dim3 grid, dim3 block,
                                         void** args, std::size_t shared,
                                         void* stream);
+// The launch-configuration stack nvcc's `<<<>>>` expansion uses. The prologue
+// pushes the configuration and `__cudaLaunch` pops it before
+// `cudaLaunchKernel`, so a translation unit that instantiates a `<<<>>>` launch
+// asks for both names. The push returns an unsigned status; the pop reports a
+// `cudaError_t` and writes the configuration back through its four
+// out-pointers, the last of which receives the address of the caller's stream
+// variable.
+unsigned __cudaPushCallConfiguration(dim3 grid, dim3 block, std::size_t shared,
+                                     void* stream);
+cudaError_t __cudaPopCallConfiguration(dim3* grid, dim3* block,
+                                       std::size_t* shared, void* stream);
 void** __cudaRegisterFatBinary(void* fat_cubin);
 void __cudaRegisterFatBinaryEnd(void** handle);
 void __cudaUnregisterFatBinary(void** handle);

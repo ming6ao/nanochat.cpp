@@ -207,7 +207,7 @@ in-process unit test of the mock, not a binding test.)
 |---|---|---|
 | Memory | `cudaMalloc`, `cudaFree`, `cudaMemcpy`, `cudaMemset` | yes |
 | Device | `cudaGetDevice`, `cudaGetDeviceCount`, `cudaSetDevice`, `cudaGetDeviceProperties_v2`, `cudaGetErrorString`, `cudaGetLastError`, `cudaDeviceSynchronize` | yes |
-| Launch | `cudaLaunchKernel`, `cudaFuncSetAttribute`, `__cudaRegisterFatBinary`, `__cudaRegisterFatBinaryEnd`, `__cudaUnregisterFatBinary`, `__cudaRegisterFunction` | yes |
+| Launch | `cudaLaunchKernel`, `cudaFuncSetAttribute`, `__cudaPushCallConfiguration`, `__cudaPopCallConfiguration`, `__cudaRegisterFatBinary`, `__cudaRegisterFatBinaryEnd`, `__cudaUnregisterFatBinary`, `__cudaRegisterFunction` | yes |
 | Cooperative | `cudaLaunchCooperativeKernel`, `cudaDeviceGetAttribute`, `cudaOccupancyMaxActiveBlocksPerMultiprocessor` | yes |
 | cuBLAS | `cublasCreate_v2`, `cublasSgemm_v2`, `cublasGemmEx`, `cublasGemmStridedBatchedEx`, `cublasGetStatusString` | yes |
 | Streams | `cudaStreamCreate`, `cudaStreamDestroy`, `cudaStreamSynchronize`, `cudaStreamBeginCapture`, `cudaStreamEndCapture` | reserved |
@@ -221,11 +221,11 @@ synthetic trigger.
 
 `cudaLaunchCooperativeKernel`, `cudaDeviceGetAttribute`, and
 `cudaOccupancyMaxActiveBlocksPerMultiprocessor` are the three names the fused
-Muon build reaches for (`docs/kernels.md` Part 1 section 8). It reaches for all
-three even when it ends up on the phase driver, because the driver asks the
-device whether a cooperative launch is supported and how many blocks of its
-block size and dynamic shared size fit, and only then picks a driver. So the
-mock has to export all three or the symbol gate rejects a fused build.
+Muon build references (`docs/kernels.md` Part 1 section 8). It references all
+three even when it ends up on the phase driver, so the symbol gate requires all
+three. On a device that answers 0 for `cudaDevAttrCooperativeLaunch`, a run
+reaches only the attribute query: the other two sit inside the cooperative
+driver, which the phase driver never enters.
 
 The answers are the design's: **0** for `cudaDevAttrCooperativeLaunch` and
 **1** for `cudaOccupancyMaxActiveBlocksPerMultiprocessor`. A simulated run
@@ -235,6 +235,14 @@ can run (section 9). The cooperative-kernel stub records the call it was given
 (grid, block, and dynamic shared size) instead of doing nothing, so a test can
 assert that a driver attempted a cooperative launch, and the fallback that a
 refused one takes.
+
+`__cudaPushCallConfiguration` and `__cudaPopCallConfiguration` are not runtime
+API calls. nvcc's `<<<>>>` prologue calls them around `cudaLaunchKernel`, so a
+translation unit that instantiates a `<<<>>>` launch asks the mock for both.
+`backends/cuda/device.h` holds such a launch, and
+`backends/cuda/launch_probe.cu` instantiates it, so the gate sees the pair. The
+mock keeps the pushed configuration on a per-thread slot and returns it from the
+pop, so the launch that follows carries the configuration the program set.
 
 `cublasGemmEx` is the one-batch form of `cublasGemmStridedBatchedEx`, which is
 what `backends/cuda/gemm.cu` reaches when a single GEMM's operands are not all

@@ -323,37 +323,67 @@ void CheckLog(const std::string& log, const std::string& profile,
   ExpectTrue(Contains(log, "\"call\":\"cudaDeviceSynchronize\""),
              "the mock recorded cudaDeviceSynchronize");
 
-  // Both GEMM entry points were taken by the real gemm.cu.
+  // Both GEMM entry points were taken by the real gemm.cu. The single call is
+  // `cublasSgemm_v2`; the batched call builds a cublasLt plan on its first use
+  // and falls back to `cublasGemmStridedBatchedEx` only when the heuristic
+  // returns no algorithm (`backends/cuda/gemm.cu`, `GemmBatched`). The mock
+  // answers the heuristic with one algorithm, so the batched call here is a
+  // `cublasLtMatmul` with fp32 operands.
   ExpectTrue(Contains(log, "\"call\":\"cublasSgemm_v2\""),
              "gemm.cu's single-call path used cublasSgemm_v2");
-  ExpectTrue(Contains(log, "\"call\":\"cublasGemmStridedBatchedEx\""),
-             "gemm.cu's batched path used cublasGemmStridedBatchedEx");
+  bool batched = false;
+  for (const std::string& line : Lines(log)) {
+    if (line.find("\"call\":\"cublasGemmStridedBatchedEx\"") !=
+        std::string::npos) {
+      batched = true;
+      continue;
+    }
+    if (line.find("\"call\":\"cublasLtMatmul\"") == std::string::npos) {
+      continue;
+    }
+    // The fp8 call is the one the block below checks; it carries fp8 operands.
+    if (line.find("\"fp8\":false") == std::string::npos) continue;
+    if (line.find("\"verdict\":\"ok") == std::string::npos) continue;
+    batched = true;
+  }
+  ExpectTrue(batched, "gemm.cu's batched path reached a batched GEMM");
 
-  // Invariant 8: every *accepted* tensor-core batched GEMM accumulates in
-  // fp32. The compute type is the one the real gemm.cu chose. On a
+  // Invariant 8: every *accepted* batched GEMM accumulates in fp32. The
+  // compute type is the one the real gemm.cu chose, in whichever entry point it
+  // took: the operation descriptor's compute type on the cublasLt path, or the
+  // compute type the call carries on the strided-batched path. On a
   // non-tensor-core profile there is no such invariant; instead none may be
   // reported as tensor-core.
   bool checked = false;
   bool saw_tensor_core = false;
   for (const std::string& line : Lines(log)) {
-    if (line.find("cublasGemmStridedBatchedEx") == std::string::npos) continue;
-    if (line.find("\"tensor_cores\":true") == std::string::npos) continue;
-    saw_tensor_core = true;
+    const bool lt =
+        line.find("\"call\":\"cublasLtMatmul\"") != std::string::npos;
+    const bool strided =
+        line.find("cublasGemmStridedBatchedEx") != std::string::npos;
+    if (!lt && !strided) continue;
+    if (line.find("\"tensor_cores\":true") != std::string::npos) {
+      saw_tensor_core = true;
+    }
+    // The fp8 call is the one the block below checks, not a batched GEMM.
+    if (lt && line.find("\"fp8\":false") == std::string::npos) continue;
     // An accepted verdict may carry the legacy-enum note appended, so match the
     // `ok` prefix rather than the exact token.
     if (line.find("\"verdict\":\"ok") == std::string::npos) continue;
     checked = true;
     ExpectTrue(line.find("\"compute_type\":68") != std::string::npos,
-               "the tensor-core GEMM accumulates with CUBLAS_COMPUTE_32F");
+               "the batched GEMM accumulates with CUBLAS_COMPUTE_32F");
   }
   if (expect_tensor_cores) {
-    ExpectTrue(checked, "at least one accepted tensor-core GEMM was recorded");
+    ExpectTrue(checked, "at least one accepted batched GEMM was recorded");
   } else {
     ExpectTrue(!saw_tensor_core,
                "a non-tensor-core profile records no tensor-core GEMM");
   }
 
-  // The scaled fp8 call shape (docs/simulator.md Part 7, section 5.2).
+  // The scaled fp8 call shape (docs/simulator.md Part 7, section 5.2). The
+  // fp8 call is the cublasLt matmul whose operands are fp8; a batched fp32 GEMM
+  // also goes through cublasLt, so the operand types select it.
   const nanochat::DeviceProfile* entry = nanochat::FindDeviceProfile(profile);
   if (entry != nullptr && entry->supports_fp8) {
     ExpectTrue(Contains(log, "\"call\":\"cublasLtMatmul\""),
@@ -363,15 +393,14 @@ void CheckLog(const std::string& log, const std::string& profile,
       if (line.find("\"call\":\"cublasLtMatmul\"") == std::string::npos) {
         continue;
       }
+      if (line.find("\"fp8\":true") == std::string::npos) continue;
       ExpectTrue(line.find("\"verdict\":\"ok") != std::string::npos,
                  "the fp8 cublasLt call was accepted on an fp8 profile");
-      ExpectTrue(line.find("\"fp8\":true") != std::string::npos,
-                 "the fp8 call carries an fp8 operand");
       ExpectTrue(line.find("\"c_type\":0") != std::string::npos,
                  "the fp8 call writes an fp32 accumulator");
       accepted = true;
     }
-    ExpectTrue(accepted, "at least one cublasLtMatmul was recorded");
+    ExpectTrue(accepted, "at least one cublasLtMatmul carried an fp8 operand");
   }
 
   // The fused Muon build's three runtime names (docs/muon-fused-kernel.md

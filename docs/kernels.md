@@ -151,7 +151,7 @@ Consequences for the one model in the tree:
 | `attention` | separate | own T x T pattern |
 | `embedding gather` | separate | indexed access |
 | GEMM -> GEMM | no | cuBLAS owns both |
-| the Polar Express chain: square GEMM -> `b = cb·a + cc·acc` -> apply GEMM -> `x = ca·x + prod` | **no, measured** | all five conditions hold and the kernel exists (Part 1), but the hand GEMM the fusion must carry reaches 0.68 to 0.90 of the cuBLAS rate and the whole fused step is 6 to 76 percent slower, so the boundary stays closed and the fold buys nothing to fold |
+| the Polar Express chain: square GEMM -> `b = cb·a + cc·acc` -> apply GEMM -> `x = ca·x + prod` | **no, measured** | all five conditions hold and the kernel exists (Part 1), but the hand GEMM the fusion must carry reaches 0.68 to 0.90 of the cuBLAS rate, the whole fused step is 6 to 45 percent slower, and the worst group is 76 percent slower, so the boundary stays closed and the fold buys nothing to fold |
 
 That last row is the one row of this table a campaign has measured rather than
 argued. It is also the one where the structural verdict and the performance

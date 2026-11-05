@@ -38,6 +38,11 @@ libcudart.so.12 {
     cudaLaunchCooperativeKernel;
     cudaDeviceGetAttribute;
     cudaOccupancyMaxActiveBlocksPerMultiprocessor;
+    # The launch-configuration stack nvcc's `<<<>>>` prologue calls. Any
+    # translation unit that instantiates a `<<<>>>` launch asks for these, and
+    # the interposer must carry them or the binary's launch fails to bind.
+    __cudaPushCallConfiguration;
+    __cudaPopCallConfiguration;
     __cudaRegisterFatBinary;
     __cudaRegisterFatBinaryEnd;
     __cudaUnregisterFatBinary;

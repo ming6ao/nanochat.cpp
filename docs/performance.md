@@ -49,7 +49,10 @@ Device: **NVIDIA GeForce GTX 1080 Ti (sm_61, 28 SMs, 11 GB, driver 536.99,
 CUDA 12.0)**, declared fp32 rate 11340 GFLOP/s. Every number below is the best
 of three rounds from a `tools/nanochat bench` job on this host, with device-event
 timing and one synchronization at the end of the batch, as the protocol asks.
-The command is named with each table.
+The command is named with each table. The revisions are the `muon` entry's in
+[baselines.json](baselines.json): the `muon:` and `muon_fused:` rows are at
+`6675c5d`, and `phase0_share`, `sync`, and `phase1_gemm` are at the prototype
+revision `98fe9f2`.
 
 **Dispatch, in microseconds.** Empty launches, a cooperative launch, and one
 cooperative grid barrier at the grids a fused kernel would hold resident
