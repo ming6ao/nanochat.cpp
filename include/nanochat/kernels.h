@@ -277,7 +277,9 @@ struct QkPrepParams {
   // query heads it serves. The batched attention products then read the key
   // without a transpose. The saved key rows keep
   // `[batch, seq, kv_heads, head_dim]`, and the backward is unchanged: its key
-  // gradient stays a model-stream buffer.
+  // gradient stays a model-stream buffer. Like `q_out`, a backend whose
+  // `qk_prep` override is registered honors it; the composition writes the
+  // key in place.
   ComputeType* k_out = nullptr;
 };
 

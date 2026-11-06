@@ -823,9 +823,10 @@ void QkPrepForward(const QkPrepParams& params, const float* cos,
   const bool head_major = params.q_head_major && params.q_out != nullptr;
   QkPrepApply(params, cos, sin, q, head_major ? params.q_out : q,
               params.num_heads, params.num_heads, head_major);
-  const bool k_heads = params.k_out != nullptr && params.num_heads > 0;
-  QkPrepApply(params, cos, sin, k, k_heads ? params.k_out : k,
-              params.num_kv_heads, params.num_heads, k_heads);
+  // The widened key is the fused family's (kernels.h, QkPrepParams::k_out);
+  // the composition writes the key in place.
+  QkPrepApply(params, cos, sin, k, k, params.num_kv_heads, params.num_kv_heads,
+              false);
 }
 
 void QkPrepBackward(const QkPrepParams& params, const float* cos,
