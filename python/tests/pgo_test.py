@@ -85,6 +85,41 @@ def _write_trace(folder: Path, steps: int = 6,
     (folder / "base.nsys-rep").write_bytes(b"synthetic")
 
 
+def _optimizer_layout() -> list[tuple[float, int, str]]:
+    """One step that copies no per-row loss: kernels, then the optimizer burst.
+
+    The base stage of the big shape keeps its loss on the device and reads one
+    scalar per step, so no copy marks the step. The optimizer runs once per
+    step, and the cut below finds it by its kernels.
+    """
+    layout = [(0.4 * index, 500, "nc::PointwiseForwardKernel")
+              for index in range(40)]
+    layout += [(100.0 + 10 * index, 200_000,
+                "sm90_xmma_gemm_bf16bf16_bf16f32_f32_nn_n_tilesize128")
+               for index in range(3)]
+    layout += [(300.0 + 0.2 * index, 20_000, "nc::MuonBKernel")
+               for index in range(12)]
+    layout.append((303.0, 20_000, "nc::AdamWUpdateVectorKernel"))
+    return layout
+
+
+def _write_optimizer_trace(folder: Path, steps: int = 6) -> None:
+    """Write a trace whose steps are marked by the optimizer and not by a copy."""
+    folder.mkdir(parents=True, exist_ok=True)
+    gpu = ["Start (ns),Duration (ns),GrdX,Strm,Bytes (MB),Name"]
+    api = ["Start (ns),Duration (ns),Name,Result,Pid,Tid"]
+    for step in range(steps):
+        base = step * STEP_MS * 1_000_000
+        for offset_ms, duration_ns, name in _optimizer_layout():
+            start = base + int(offset_ms * 1_000_000)
+            gpu.append(f"{start},{duration_ns},1,7,,{name}")
+            api.append(f"{start},1500,cuLaunchKernel,0,49,49")
+    (folder / "timeline_cuda_gpu_trace.csv").write_text("\n".join(gpu) + "\n",
+                                                         encoding="utf-8")
+    (folder / "timeline_cuda_api_trace.csv").write_text("\n".join(api) + "\n",
+                                                         encoding="utf-8")
+
+
 class AnalyzeTest(unittest.TestCase):
     def setUp(self) -> None:
         self.root = Path(tempfile.mkdtemp(prefix="pgo-trace-"))
@@ -179,6 +214,28 @@ class AnalyzeTest(unittest.TestCase):
             encoding="utf-8")
         with self.assertRaises(pgo.PgoError):
             pgo.analyze_trace(empty, stage="base", device="h100")
+
+    def test_a_stage_without_loss_marks_is_cut_at_the_optimizer(self) -> None:
+        # The big shape keeps its loss on the device, so the optimizer burst is
+        # the only mark a step has. One step is the gap between two bursts.
+        folder = Path(tempfile.mkdtemp(prefix="pgo-optimizer-"))
+        _write_optimizer_trace(folder)
+        analysis = pgo.analyze_trace(folder, stage="base", device="h100",
+                                     steps=6, step_index=1, cut="optimizer")
+        self.assertEqual(analysis["cut"], "optimizer")
+        self.assertAlmostEqual(analysis["step"]["wall_ms"], STEP_MS,
+                               delta=5.0)
+        self.assertGreater(analysis["step"]["operations"], 40)
+
+    def test_the_loss_cut_without_loss_marks_is_a_fault(self) -> None:
+        folder = Path(tempfile.mkdtemp(prefix="pgo-optimizer-"))
+        _write_optimizer_trace(folder)
+        with self.assertRaises(pgo.PgoError):
+            pgo.analyze_trace(folder, stage="base", device="h100", steps=6)
+
+    def test_an_unknown_cut_is_a_fault(self) -> None:
+        with self.assertRaises(pgo.PgoError):
+            pgo.analyze_trace(self.root, stage="base", device="h100", cut="clock")
 
     def test_the_chrome_trace_holds_both_tracks(self) -> None:
         out = pgo.chrome_trace(self.root, self.root / "chrome.json")

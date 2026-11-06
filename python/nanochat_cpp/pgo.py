@@ -90,6 +90,11 @@ METRICS = {
     "eval": ("samples_per_second", "higher"),
 }
 
+#: The ways a step is cut out of a trace. ``loss`` reads the per-row loss copy,
+#: which the reference profile writes once per forward pass. A stage that copies
+#: no per-row loss takes ``optimizer``, because its optimizer runs once per step.
+CUTS = ("loss", "optimizer")
+
 #: The step records at the start of a run carry start-up, and the last one
 #: carries the checkpoint write. Neither belongs in the median.
 WARMUP_STEPS = 2
@@ -292,6 +297,61 @@ def step_bounds(kernels: Sequence[Mapping],
     return list(zip(marks[2::2], marks[4::2]))
 
 
+#: The kernels whose bursts mark a step when the trainer copies no per-row
+#: losses. The optimizer runs once per step and no other phase runs it.
+OPTIMIZER_MARKERS = ("AdamW", "Muon")
+
+#: The cluster gaps the optimizer cut tries, in nanoseconds. The optimizer's own
+#: kernels follow each other in microseconds, and the gap to the next step is a
+#: large part of the step, so the true step count holds across a wide plateau of
+#: gaps. The cut takes the count that the most candidate gaps agree on.
+OPTIMIZER_GAPS_NS = tuple(int(ms * 1e6) for ms in (1, 2, 4, 8, 16, 32, 64,
+                                                   128, 256))
+
+
+def _clusters(starts: Sequence[int], gap_ns: int) -> list[list[int]]:
+    """Group sorted timestamps whose neighbours are closer than one gap."""
+    groups = [[starts[0]]]
+    for start in starts[1:]:
+        if start - groups[-1][-1] > gap_ns:
+            groups.append([start])
+        else:
+            groups[-1].append(start)
+    return groups
+
+
+def optimizer_bounds(kernels: Sequence[Mapping]) -> list[tuple[int, int]]:
+    """The span of each step, cut at the midpoint of its optimizer burst.
+
+    A stage whose step copies no per-row loss has no copy to mark a step. Its
+    optimizer still runs once per step, so the burst of AdamW and Muon kernels
+    marks it instead. The gap between one burst and the next is most of a step
+    and the kernels inside one burst follow each other in microseconds, so the
+    cluster count is stable across a wide range of gaps. The cut takes that
+    count and not one gap a reader guessed.
+    """
+    starts = sorted(event["start"] for event in kernels
+                    if _kind(event["name"]) == "kernel"
+                    and any(marker in event["name"]
+                            for marker in OPTIMIZER_MARKERS))
+    if len(starts) < 4:
+        return []
+    counts: dict = {}
+    for gap in OPTIMIZER_GAPS_NS:
+        count = len(_clusters(starts, gap))
+        counts[count] = counts.get(count, 0) + 1
+    target = max(counts, key=lambda count: (counts[count], count))
+    chosen = OPTIMIZER_GAPS_NS[-1]
+    for gap in reversed(OPTIMIZER_GAPS_NS):
+        if len(_clusters(starts, gap)) == target:
+            chosen = gap
+            break
+    groups = _clusters(starts, chosen)
+    midpoints = [int((group[0] + group[-1]) / 2) for group in groups]
+    if len(midpoints) < 2:
+        return []
+    return list(zip(midpoints, midpoints[1:]))
+
 def _stalls(step: Sequence[Mapping], api: Sequence[Mapping],
             floor_ns: int = 50_000) -> list[dict]:
     """Every idle stretch long enough to be a stall, with the host's calls.
@@ -330,15 +390,22 @@ def _stalls(step: Sequence[Mapping], api: Sequence[Mapping],
 
 
 def step_profile(kernels: Sequence[Mapping], api: Sequence[Mapping],
-                 index: int = 6, mark_bytes: int | None = None) -> dict:
+                 index: int = 6, mark_bytes: int | None = None,
+                 cut: str = "loss") -> dict:
     """The composition of one steady step: the unit the loop scores.
 
     ``index`` picks the step by number. The first steps of a run carry the
     library load and the first batch, and the last one carries the checkpoint
     write, so a caller reads the middle. ``mark_bytes`` is the size of the
-    per-row loss copy, or ``None`` for the reference profile's 16 KB.
+    per-row loss copy, or ``None`` for the reference profile's 16 KB. ``cut``
+    names the mark of the step: ``loss`` reads the per-row loss copy, and
+    ``optimizer`` cuts at the optimizer burst for a stage that copies none.
     """
-    bounds = step_bounds(kernels, mark_bytes=mark_bytes)
+    if cut not in CUTS:
+        raise PgoError(f"unknown cut {cut!r}; the cuts are "
+                       f"{', '.join(CUTS)}")
+    bounds = (step_bounds(kernels, mark_bytes=mark_bytes) if cut == "loss"
+              else optimizer_bounds(kernels))
     if not bounds:
         raise PgoError("no step marks in the GPU trace: the trainer copied no "
                        "per-row losses, so this trace is not a step loop")
@@ -498,7 +565,8 @@ def _api_counts(rows: Sequence[Mapping], limit: int) -> list[dict]:
 def analyze_trace(trace_dir, *, stage: str = "base", device: str = "h100",
                   steps: int = DEFAULT_TRACE_STEPS,
                   step_index: int = 6,
-                  mark_bytes: int | None = None) -> dict:
+                  mark_bytes: int | None = None,
+                  cut: str = "loss") -> dict:
     """Read one trace directory and return the analysis document.
 
     The document is the only thing an analyst reads about the trace: the whole
@@ -522,11 +590,13 @@ def analyze_trace(trace_dir, *, stage: str = "base", device: str = "h100",
         entry = buckets.setdefault(name, {"kernels": 0, "ns": 0.0})
         entry["kernels"] += 1
         entry["ns"] += event["dur"]
-    step = step_profile(kernels, api, index=step_index, mark_bytes=mark_bytes)
+    step = step_profile(kernels, api, index=step_index, mark_bytes=mark_bytes,
+                        cut=cut)
     return {
         "schema": ANALYSIS_SCHEMA,
         "stage": stage,
         "device": device,
+        "cut": cut,
         "steps": int(steps),
         "trace_dir": str(trace_dir),
         "wall_ms": _ms(span),
@@ -1081,7 +1151,7 @@ def _cmd_analyze(options) -> int:
                              device=loop["target"]["device"],
                              steps=int(loop["budget"]["trace_steps"]),
                              step_index=int(options.step_index),
-                             mark_bytes=options.mark_bytes)
+                             mark_bytes=options.mark_bytes, cut=options.cut)
     analysis["rank"] = rank(analysis["signatures"], loop.get("rejected") or ())
     trace_json = chrome_trace(trace_dir, current / "before" / "chrome.json")
     path = _write(current / "before" / "analysis.json", analysis)
@@ -1196,6 +1266,10 @@ def _parser() -> argparse.ArgumentParser:
     analyze.add_argument("--mark-bytes", type=int, default=None,
                          help="the size of the per-row loss copy, in bytes, "
                               "when the shape is not the reference profile")
+    analyze.add_argument("--cut", default="loss", choices=CUTS,
+                         help="the mark of a step: the per-row loss copy, or "
+                              "the optimizer burst for a stage that copies "
+                              "none")
     analyze.set_defaults(handler=_cmd_analyze)
 
     compare_cmd = command("compare", help="decide the pair and advance")

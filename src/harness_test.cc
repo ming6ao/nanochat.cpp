@@ -125,6 +125,60 @@ void TestMfu() {
              "ComputeMfu unknown device");
 }
 
+// The 20-layer throughput shape: the `big` profile of the chain, and the shape
+// the PGO target `profiles/pgo/big` measures on the H100. The command is
+//
+//   tools/nanochat roofline --device h100 --precision bf16 --batch 16
+//       --layers 20 --heads 10 --kv-heads 5 --hidden 1280 --seq 1024
+//       --vocab 32768 --padded-vocab 32768 --window-pattern SSL
+//
+// The rungs the report and docs/performance.md quote are pinned here: 53.38 ms
+// of model bound at 79.93 percent, and 64.09 ms once the Muon
+// orthogonalisation's arithmetic is counted at the compute-type peak. A model
+// flag that stops reaching the estimator, or a counter row that changes, breaks
+// this test rather than a document.
+void TestBigShapeRoofline() {
+  Config config;
+  config.num_layers = 20;
+  config.num_heads = 10;
+  config.num_kv_heads = 5;
+  config.hidden_dim = 1280;
+  config.seq_len = 1024;
+  config.vocab_size = 32768;
+  config.padded_vocab_size = 32768;
+  config.window_pattern = "SSL";
+
+  nanochat::ModelPlan plan;
+  plan.device_name = "h100";
+  plan.build = nanochat::ComputePrecision::kBf16;
+  plan.batch = 16;
+
+  // 2,575,568,544 FLOP per token, which the reference's own
+  // `model.estimate_flops()` agrees with to the digit, over 16384 tokens per
+  // step.
+  const double per_token = nanochat::EstimateFlopsPerToken(config);
+  ExpectNear(per_token, 2.575568544e9, 1.0, "big shape FLOPs per token");
+  ExpectNear(per_token * 16384.0, 42.2e12, 0.05e12, "big shape FLOPs per step");
+
+  const nanochat::PerformanceEstimate estimate =
+      nanochat::EstimatePerformance(config, plan);
+  ExpectNear(1000.0 * estimate.step_seconds, 53.38, 0.05,
+             "big shape roofline, ms");
+  ExpectNear(estimate.model_mfu, 0.7993, 5e-4, "big shape roofline MFU");
+  ExpectNear(static_cast<double>(estimate.tokens_per_step), 16384.0, 1e-9,
+             "big shape tokens per step");
+
+  plan.muon_ns_steps = 5;
+  const nanochat::PerformanceEstimate with_muon =
+      nanochat::EstimatePerformance(config, plan);
+  ExpectNear(1000.0 * with_muon.step_seconds, 64.09, 0.05,
+             "big shape roofline with the Muon arithmetic, ms");
+  ExpectNear(with_muon.optimizer_flops, 10.59e12, 0.01e12,
+             "big shape Muon FLOPs per step");
+  ExpectNear(with_muon.model_mfu, 0.6657, 5e-4,
+             "big shape MFU once the Muon arithmetic is counted");
+}
+
 void TestMuonFlops() {
   // The optimizer's arithmetic is a property of the shape and the iteration
   // count, so it is linear in the count and zero without it.
@@ -629,6 +683,7 @@ void TestLegacyCheckpoint() {
 
 int main() {
   TestMfu();
+  TestBigShapeRoofline();
   TestMuonFlops();
   TestLogger();
   TestModelFlagParsing();
