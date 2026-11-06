@@ -785,7 +785,8 @@ void LossSumForward(const float* losses, std::int64_t rows,
 
 void QkPrepForward(int batch, int seq, int num_heads, int num_kv_heads,
                    int head_dim, float eps, float scale, const float* cos,
-                   const float* sin, ComputeType* q, ComputeType* k) {
+                   const float* sin, ComputeType* q, ComputeType* k,
+                   ComputeType* q_out, bool q_head_major) {
   NANOCHAT_CHECK_KERNEL_PARAMS("qk_prep",
                                batch >= 0 && seq >= 0 && num_heads >= 0 &&
                                    num_kv_heads >= 0 && head_dim >= 0);
@@ -797,6 +798,11 @@ void QkPrepForward(int batch, int seq, int num_heads, int num_kv_heads,
   NANOCHAT_CHECK_KERNEL_PARAMS("qk_prep", cos != nullptr && sin != nullptr);
   NANOCHAT_CHECK_KERNEL_PARAMS("qk_prep", num_heads == 0 || q != nullptr);
   NANOCHAT_CHECK_KERNEL_PARAMS("qk_prep", num_kv_heads == 0 || k != nullptr);
+  // The head-major destination is the fused family's; the primitive
+  // composition cannot permute a buffer, so it refuses the field.
+  NANOCHAT_CHECK_KERNEL_PARAMS(
+      "qk_prep",
+      !q_head_major || (q_out != nullptr && Fused(kFeatureOverrideQkPrep)));
   if (Fused(kFeatureOverrideQkPrep)) {
     QkPrepParams params;
     params.batch = batch;
@@ -806,6 +812,8 @@ void QkPrepForward(int batch, int seq, int num_heads, int num_kv_heads,
     params.head_dim = head_dim;
     params.eps = eps;
     params.scale = scale;
+    params.q_head_major = q_head_major;
+    params.q_out = q_head_major ? q_out : nullptr;
     kernels::QkPrepForward(params, cos, sin, q, k);
     return;
   }
@@ -833,7 +841,8 @@ void QkPrepForward(int batch, int seq, int num_heads, int num_kv_heads,
 void QkPrepBackward(int batch, int seq, int num_heads, int num_kv_heads,
                     int head_dim, float eps, float scale, const float* cos,
                     const float* sin, const ComputeType* dq,
-                    const ComputeType* dk, ComputeType* q, ComputeType* k) {
+                    const ComputeType* dk, ComputeType* q, ComputeType* k,
+                    bool q_head_major) {
   NANOCHAT_CHECK_KERNEL_PARAMS("qk_prep",
                                batch >= 0 && seq >= 0 && num_heads >= 0 &&
                                    num_kv_heads >= 0 && head_dim >= 0);
@@ -846,6 +855,10 @@ void QkPrepBackward(int batch, int seq, int num_heads, int num_kv_heads,
       "qk_prep", num_heads == 0 || (q != nullptr && dq != nullptr));
   NANOCHAT_CHECK_KERNEL_PARAMS(
       "qk_prep", num_kv_heads == 0 || (k != nullptr && dk != nullptr));
+  // The head-major query gradient is the fused family's; the primitive
+  // composition reads a buffer in the layout it wrote.
+  NANOCHAT_CHECK_KERNEL_PARAMS("qk_prep",
+                               !q_head_major || Fused(kFeatureOverrideQkPrep));
   if (Fused(kFeatureOverrideQkPrep)) {
     QkPrepParams params;
     params.batch = batch;
@@ -855,6 +868,7 @@ void QkPrepBackward(int batch, int seq, int num_heads, int num_kv_heads,
     params.head_dim = head_dim;
     params.eps = eps;
     params.scale = scale;
+    params.q_head_major = q_head_major;
     kernels::QkPrepBackward(params, cos, sin, dq, dk, q, k);
     return;
   }
@@ -905,6 +919,7 @@ AttentionParams ToParams(const AttentionShape& shape) {
   params.window_right = shape.window_right;
   params.kv_len = shape.kv_len;
   params.scale = shape.scale;
+  params.q_head_major = shape.q_head_major;
   return params;
 }
 
@@ -1415,6 +1430,18 @@ void GradNormForward(const float* const* grads, const int* counts,
 // Transformer block
 // ---------------------------------------------------------------------------
 
+namespace {
+
+// One layout decision for the block: the query is head-major exactly when the
+// fused QkPrep is registered and the saved slot exists. The forward and the
+// backward must answer the same, so they call one function.
+bool QueryIsHeadMajor(const BlockActivations& acts) {
+  return Fused(kFeatureOverrideQkPrep) && acts.q_pre != nullptr &&
+         acts.q_pre != acts.q_final;
+}
+
+}  // namespace
+
 void BlockForward(const BlockShape& shape, const BlockWeights& weights,
                   const BlockActivations& acts, const int* tokens,
                   const float* cos, const float* sin, const ComputeType* x,
@@ -1434,9 +1461,15 @@ void BlockForward(const BlockShape& shape, const BlockWeights& weights,
             acts.xr, resid, x0_lambda);
   RmsNormForward(rows, hidden, shape.rms_eps, acts.xr, acts.h, acts.rstd1);
 
-  LinearForward(acts.h, weights.c_q, acts.q_final, rows, hidden, query_dim,
-                false, &acts.fp8);
-  if (acts.q_pre != nullptr && acts.q_pre != acts.q_final) {
+  // One QkPrep pass writes the prepared query in the layout the batched
+  // attention products read, when the fused family is registered: the
+  // projection lands in the saved slot, so the saved copy leaves the path and
+  // the query transpose leaves the attention. Otherwise the projection lands
+  // in `q_final`, the saved slot takes a copy, and both stay row-major.
+  const bool q_heads = QueryIsHeadMajor(acts);
+  LinearForward(acts.h, weights.c_q, q_heads ? acts.q_pre : acts.q_final, rows,
+                hidden, query_dim, false, &acts.fp8);
+  if (!q_heads && acts.q_pre != nullptr && acts.q_pre != acts.q_final) {
     kernels::Memcpy(
         acts.q_pre, acts.q_final,
         static_cast<std::size_t>(rows * query_dim) * sizeof(ComputeType),
@@ -1470,8 +1503,9 @@ void BlockForward(const BlockShape& shape, const BlockWeights& weights,
   }
 
   QkPrepForward(shape.batch, shape.seq, heads, kv_heads, head_dim,
-                shape.rms_eps, shape.qk_scale, cos, sin, acts.q_final,
-                acts.k_final);
+                shape.rms_eps, shape.qk_scale, cos, sin,
+                q_heads ? acts.q_pre : acts.q_final, acts.k_final,
+                q_heads ? acts.q_final : nullptr, q_heads);
 
   // Inference: append the current key/value rows to the KV cache before
   // attention reads the cache back.
@@ -1501,6 +1535,7 @@ void BlockForward(const BlockShape& shape, const BlockWeights& weights,
   attn.window_right = shape.window_right;
   attn.kv_len = shape.kv_len;
   attn.scale = shape.attn_scale;
+  attn.q_head_major = q_heads;
   const ComputeType* attn_k =
       acts.attn_k != nullptr ? acts.attn_k : acts.k_final;
   const ComputeType* attn_v =
@@ -1564,6 +1599,11 @@ void BlockBackward(const BlockShape& shape, const BlockWeights& weights,
   attn.window_right = shape.window_right;
   attn.kv_len = shape.kv_len;
   attn.scale = shape.attn_scale;
+  // The layout the forward wrote, so the backward reads and writes the same
+  // buffers: the query stream is head-major exactly when the fused QkPrep
+  // wrote it that way.
+  const bool q_heads = QueryIsHeadMajor(acts);
+  attn.q_head_major = q_heads;
   AttentionBackward(attn, acts.q_final, acts.k_final, acts.v_final,
                     acts.attn_stats, scratch.dy_attn, scratch.dq, scratch.dk,
                     scratch.dv);
@@ -1584,7 +1624,7 @@ void BlockBackward(const BlockShape& shape, const BlockWeights& weights,
   // QK-norm + RoPE + scale, then the query/key projections.
   QkPrepBackward(shape.batch, shape.seq, heads, kv_heads, head_dim,
                  shape.rms_eps, shape.qk_scale, cos, sin, scratch.dq,
-                 scratch.dk, acts.q_pre, acts.k_pre);
+                 scratch.dk, acts.q_pre, acts.k_pre, q_heads);
   LinearWgrad(acts.h, acts.q_pre, grads.c_q_grad, rows, hidden, query_dim,
               &scratch.fp8);
   LinearDgrad(acts.q_pre, weights.c_q, scratch.dh, rows, hidden, query_dim,

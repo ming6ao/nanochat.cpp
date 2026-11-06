@@ -700,10 +700,13 @@ void RmsNormBackward(const RmsNormParams& params, const ComputeType* x,
 
 namespace {
 
-// Applies RMSNorm, RoPE, then scale to one [batch, seq, heads, head_dim] tensor
-// in place. Shared by the q and k passes of QkPrepForward.
+// Applies RMSNorm, RoPE, then scale to one query or key tensor. `in` holds the
+// saved pre-norm rows `[batch, seq, heads, head_dim]`; `out` receives the
+// prepared rows in the same layout, or in `[batch, heads, seq, head_dim]` when
+// `head_major` is set. Shared by the q and k passes of QkPrepForward.
 void QkPrepApply(const QkPrepParams& params, const float* cos, const float* sin,
-                 ComputeType* tensor, int heads) {
+                 const ComputeType* in, ComputeType* out, int heads,
+                 int dst_heads, bool head_major) {
   const int batch = params.batch;
   const int seq = params.seq;
   const int dim = params.head_dim;
@@ -711,29 +714,46 @@ void QkPrepApply(const QkPrepParams& params, const float* cos, const float* sin,
   const int half = dim / 2;
   const float inv_dim = 1.0f / static_cast<float>(dim);
   const float scale = params.scale;
+  const int group = dst_heads / heads > 0 ? dst_heads / heads : 1;
   for (int b = 0; b < batch; ++b) {
     for (int t = 0; t < seq; ++t) {
       for (int h = 0; h < heads; ++h) {
-        const std::int64_t base =
+        const std::int64_t src =
             ((static_cast<std::int64_t>(b) * seq + t) * heads + h) * dim;
+        const int first = head_major ? h * group : h;
+        const int last =
+            head_major && h == heads - 1 ? dst_heads : first + group;
+        const std::int64_t dst =
+            head_major
+                ? ((static_cast<std::int64_t>(b) * dst_heads + first) * seq +
+                   t) *
+                      dim
+                : src;
         double sum_sq = 0.0;
         for (int d = 0; d < dim; ++d) {
-          const double v = AsFloat(tensor[base + d]);
+          const double v = AsFloat(in[src + d]);
           sum_sq += v * v;
         }
         const float r =
             1.0f / std::sqrt(static_cast<float>(sum_sq) * inv_dim + params.eps);
         for (int d = 0; d < dim; ++d) {
-          tensor[base + d] = ToCompute(AsFloat(tensor[base + d]) * r);
+          out[dst + d] = ToCompute(AsFloat(in[src + d]) * r);
         }
         const std::int64_t row_cos = static_cast<std::int64_t>(t) * half;
         for (int d = 0; d < half; ++d) {
           const float c = cos[row_cos + d];
           const float s = sin[row_cos + d];
-          const float x1 = AsFloat(tensor[base + d]);
-          const float x2 = AsFloat(tensor[base + half + d]);
-          tensor[base + d] = ToCompute((x1 * c + x2 * s) * scale);
-          tensor[base + half + d] = ToCompute((-x1 * s + x2 * c) * scale);
+          const float x1 = AsFloat(out[dst + d]);
+          const float x2 = AsFloat(out[dst + half + d]);
+          out[dst + d] = ToCompute((x1 * c + x2 * s) * scale);
+          out[dst + half + d] = ToCompute((-x1 * s + x2 * c) * scale);
+        }
+        // The prepared key is widened: the same row serves every query head of
+        // the group, which is what the batched products read.
+        for (int dh = first + 1; dh < last; ++dh) {
+          const std::int64_t repeat =
+              ((static_cast<std::int64_t>(b) * dst_heads + dh) * seq + t) * dim;
+          for (int d = 0; d < dim; ++d) out[repeat + d] = out[dst + d];
         }
       }
     }
@@ -742,10 +762,12 @@ void QkPrepApply(const QkPrepParams& params, const float* cos, const float* sin,
 
 // Gradients of one QkPrep tensor. `tensor` holds the saved pre-norm rows on
 // entry and the input gradients on return; `grad` is the upstream gradient
-// w.r.t. the final activation.
+// w.r.t. the final activation, in `[batch, heads, seq, head_dim]` when
+// `grad_head_major` is set (the query stream) and in the saved rows' layout
+// otherwise.
 void QkPrepApplyBackward(const QkPrepParams& params, const float* cos,
                          const float* sin, const ComputeType* grad,
-                         ComputeType* tensor, int heads) {
+                         ComputeType* tensor, int heads, bool grad_head_major) {
   const int batch = params.batch;
   const int seq = params.seq;
   const int dim = params.head_dim;
@@ -759,6 +781,10 @@ void QkPrepApplyBackward(const QkPrepParams& params, const float* cos,
       for (int h = 0; h < heads; ++h) {
         const std::int64_t base =
             ((static_cast<std::int64_t>(b) * seq + t) * heads + h) * dim;
+        const std::int64_t grad_base =
+            grad_head_major
+                ? ((static_cast<std::int64_t>(b) * heads + h) * seq + t) * dim
+                : base;
         // Recover the RMSNorm statistic from the saved pre-norm row, and pull
         // the upstream gradient back through scale and RoPE.
         const std::int64_t row_cos = static_cast<std::int64_t>(t) * half;
@@ -769,8 +795,8 @@ void QkPrepApplyBackward(const QkPrepParams& params, const float* cos,
           const float s = sin[row_cos + d];
           const float x1 = AsFloat(tensor[base + d]);
           const float x2 = AsFloat(tensor[base + half + d]);
-          const float g1 = AsFloat(grad[base + d]);
-          const float g2 = AsFloat(grad[base + half + d]);
+          const float g1 = AsFloat(grad[grad_base + d]);
+          const float g2 = AsFloat(grad[grad_base + half + d]);
           // dL/d(normed) = scale * R^T(dL/d(final)).
           g[d] = scale * (g1 * c - g2 * s);
           g[half + d] = scale * (g1 * s + g2 * c);
@@ -794,15 +820,20 @@ void QkPrepApplyBackward(const QkPrepParams& params, const float* cos,
 
 void QkPrepForward(const QkPrepParams& params, const float* cos,
                    const float* sin, ComputeType* q, ComputeType* k) {
-  QkPrepApply(params, cos, sin, q, params.num_heads);
-  QkPrepApply(params, cos, sin, k, params.num_kv_heads);
+  const bool head_major = params.q_head_major && params.q_out != nullptr;
+  QkPrepApply(params, cos, sin, q, head_major ? params.q_out : q,
+              params.num_heads, params.num_heads, head_major);
+  const bool k_heads = params.k_out != nullptr && params.num_heads > 0;
+  QkPrepApply(params, cos, sin, k, k_heads ? params.k_out : k,
+              params.num_kv_heads, params.num_heads, k_heads);
 }
 
 void QkPrepBackward(const QkPrepParams& params, const float* cos,
                     const float* sin, const ComputeType* dq,
                     const ComputeType* dk, ComputeType* q, ComputeType* k) {
-  QkPrepApplyBackward(params, cos, sin, dq, q, params.num_heads);
-  QkPrepApplyBackward(params, cos, sin, dk, k, params.num_kv_heads);
+  QkPrepApplyBackward(params, cos, sin, dq, q, params.num_heads,
+                      params.q_head_major);
+  QkPrepApplyBackward(params, cos, sin, dk, k, params.num_kv_heads, false);
 }
 
 // ---------------------------------------------------------------------------
@@ -827,6 +858,18 @@ inline bool KeyAllowed(const AttentionParams& p, std::int64_t qpos,
   if (p.window_left >= 0 && qpos - j > p.window_left) return false;
   if (p.window_right >= 0 && j - qpos > p.window_right) return false;
   return true;
+}
+
+// The row base of the query stream. `q_head_major` moves it to
+// `[batch, heads, seq, head_dim]`, the layout the batched products read. The
+// value, the output, and the key and value gradients keep the model stream
+// layout.
+inline std::int64_t QueryRowBase(const AttentionParams& p, int b, int t, int h,
+                                 int seq, int heads, int dim) {
+  if (p.q_head_major) {
+    return ((static_cast<std::int64_t>(b) * heads + h) * seq + t) * dim;
+  }
+  return ((static_cast<std::int64_t>(b) * seq + t) * heads + h) * dim;
 }
 
 }  // namespace
@@ -863,7 +906,8 @@ void AttentionForward(const AttentionParams& params, const ComputeType* q,
       const int b = static_cast<int>(row / (seq * heads));
       const int kvh = KvHead(h, heads, kv_heads);
       const std::int64_t qpos = kv_len - seq + t;
-      const std::int64_t qbase =
+      const std::int64_t qbase = QueryRowBase(params, b, t, h, seq, heads, dim);
+      const std::int64_t obase =
           ((static_cast<std::int64_t>(b) * seq + t) * heads + h) * dim;
       // Pass 1: max score over the visible window.
       float row_max = -std::numeric_limits<float>::infinity();
@@ -886,7 +930,7 @@ void AttentionForward(const AttentionParams& params, const ComputeType* q,
       const std::int64_t stat_base =
           ((static_cast<std::int64_t>(b) * heads + h) * seq + t) * 2;
       if (!any) {
-        for (int d = 0; d < dim; ++d) out[qbase + d] = ToCompute(0.0f);
+        for (int d = 0; d < dim; ++d) out[obase + d] = ToCompute(0.0f);
         stats[stat_base] = 0.0f;
         stats[stat_base + 1] = 0.0f;
         continue;
@@ -909,7 +953,7 @@ void AttentionForward(const AttentionParams& params, const ComputeType* q,
       }
       const float inv = static_cast<float>(1.0 / sum_exp);
       for (int d = 0; d < dim; ++d) {
-        out[qbase + d] = ToCompute(acc[d] * inv);
+        out[obase + d] = ToCompute(acc[d] * inv);
       }
       stats[stat_base] = row_max;
       stats[stat_base + 1] = static_cast<float>(sum_exp);
@@ -962,7 +1006,8 @@ void AttentionBackward(const AttentionParams& params, const ComputeType* q,
       const int b = static_cast<int>(row / (seq * heads));
       const int kvh = KvHead(h, heads, kv_heads);
       const std::int64_t qpos = kv_len - seq + t;
-      const std::int64_t qbase =
+      const std::int64_t qbase = QueryRowBase(params, b, t, h, seq, heads, dim);
+      const std::int64_t obase =
           ((static_cast<std::int64_t>(b) * seq + t) * heads + h) * dim;
       const std::int64_t stat_base =
           ((static_cast<std::int64_t>(b) * heads + h) * seq + t) * 2;
@@ -988,7 +1033,7 @@ void AttentionBackward(const AttentionParams& params, const ComputeType* q,
         probs[idx0 + static_cast<std::size_t>(j)] = p;
         double dpd = 0.0;
         for (int d = 0; d < dim; ++d) {
-          dpd += static_cast<double>(AsFloat(dout[qbase + d])) *
+          dpd += static_cast<double>(AsFloat(dout[obase + d])) *
                  static_cast<double>(AsFloat(v[kbase + d]));
         }
         dp[j] = static_cast<float>(dpd);
@@ -1039,6 +1084,8 @@ void AttentionBackward(const AttentionParams& params, const ComputeType* q,
         const std::int64_t qpos = kv_len - seq + t;
         if (!KeyAllowed(params, qpos, j)) continue;
         const std::int64_t qbase =
+            QueryRowBase(params, b, t, h, seq, heads, dim);
+        const std::int64_t obase =
             ((static_cast<std::int64_t>(b) * seq + t) * heads + h) * dim;
         const std::int64_t row =
             (static_cast<std::int64_t>(b) * heads + h) * seq + t;
@@ -1048,7 +1095,7 @@ void AttentionBackward(const AttentionParams& params, const ComputeType* q,
         const float dp_scale = ds[idx] * scale;
         for (int d = 0; d < dim; ++d) {
           const float qv = AsFloat(q[qbase + d]);
-          const float dov = AsFloat(dout[qbase + d]);
+          const float dov = AsFloat(dout[obase + d]);
           dk[kbase + d] = ToCompute(AsFloat(dk[kbase + d]) + dp_scale * qv);
           dv[kbase + d] = ToCompute(AsFloat(dv[kbase + d]) + p * dov);
         }

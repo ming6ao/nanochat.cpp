@@ -75,7 +75,7 @@ which this table cites and does not restate.
 | `QuantizeFp8`, `GemmScaledFp8` | primitive | optional, bits `fp8_storage` and `fp8_gemm` | The fp8 tier, [fp8-training.md](fp8-training.md) |
 | `AdamWUpdate`, `MuonUpdate` | stateful | required for training, bits `stateful_adamw` and `stateful_muon` | The optimizer, [model.md](model.md). One `MuonUpdate` call covers one shape group: 39 launches at the shipped `ns_steps` of 5 on the multi-launch path, or one cooperative launch of 84 blocks with 27 grid barriers (28 launches on the phase driver) on the fused path. The shape rule selects the multi-launch path for **every** group on this card, so the shipped launch count is 39; Part 1 has the measurement |
 | `RmsNormForward`, `RmsNormBackward` | composition, plus fused override | — | `src/ops.cc`; a backend's single-kernel version is gated by `override_rms_norm` |
-| `QkPrepForward`, `QkPrepBackward` | composition, plus fused override | — | `src/ops.cc`; gated by `override_qk_prep` |
+| `QkPrepForward`, `QkPrepBackward` | composition, plus fused override | — | `src/ops.cc`; gated by `override_qk_prep`. The fused family also writes the prepared query head-major when the caller sets `QkPrepParams::q_head_major`, which removes the query transpose from the attention and the saved copy from the block |
 | `ClassifierForward`, `ClassifierBackward` | composition, plus fused override | — | `src/ops.cc`; gated by `override_classifier` |
 | `ValueGateForward`, `ValueGateBackward` | composition, plus fused override | — | `src/ops.cc`; no override bit exists for it yet |
 | `SumFp32` | composition | — | The fp32 form of `ScalarDot` with no second operand; the training loss |

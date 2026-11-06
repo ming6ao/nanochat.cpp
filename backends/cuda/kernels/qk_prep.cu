@@ -1,7 +1,15 @@
 // CUDA QkPrep family: fused RMSNorm -> RoPE -> scale (1.2 by default) on the
-// query and key projections, in place. One block per (batch, seq, head) row,
-// exactly like the CPU reference: the row is normalized, then each
-// (d, d + head_dim/2) pair is rotated by the fp32 rotary table and scaled.
+// query and key projections. One row is one (batch, seq, head): the row is
+// normalized, then each (d, d + head_dim/2) pair is rotated by the fp32 rotary
+// table and scaled, exactly like the CPU reference. A row runs on one block
+// for every width, and on one warp at `head_dim` 128 (the model shape). Both
+// schedules compute the same values in the same order; only the mapping of a
+// row onto the block changes.
+//
+// The write is in place unless the caller sets `QkPrepParams::q_head_major`,
+// which sends the prepared query to `q_out` in `[batch, heads, seq, dim]` and
+// keeps every read in the model stream. That layout is what the batched
+// attention products read, so the query transpose leaves the attention path.
 //
 // Backward contract (frozen seam): the q/k buffers handed to QkPrepBackward
 // hold the *saved pre-norm projection outputs* on entry and are overwritten
@@ -85,17 +93,54 @@ __device__ __forceinline__ float CombineBackward(float r, float grad,
   return __fsub_rn(__fmul_rn(r, grad), __fmul_rn(coeff, x));
 }
 
+// The row base of the model stream, or of the head-major query when
+// `head_major` is set. `row` is the model-stream row index
+// `(b * seq + t) * heads + h`.
+__device__ __forceinline__ std::size_t QueryRowBase(int row, int heads, int seq,
+                                                    int dim, bool head_major) {
+  if (!head_major) return static_cast<std::size_t>(row) * dim;
+  const int h = row % heads;
+  const int t = (row / heads) % seq;
+  const int b = row / (seq * heads);
+  return ((static_cast<std::size_t>(b) * heads + h) * seq + t) * dim;
+}
+
+// The base of one row of a head-major buffer `[batch, heads, seq, dim]`.
+__device__ __forceinline__ std::size_t HeadMajorBase(int b, int t, int h,
+                                                     int heads, int seq,
+                                                     int dim) {
+  return ((static_cast<std::size_t>(b) * heads + h) * seq + t) * dim;
+}
+
+// The destination heads of key/value head `kvh` when the prepared key is
+// widened to the query head count: contiguous grouping, ascending, the map
+// `KvHeadDev` reads and the transpose fold keeps.
+__device__ __forceinline__ void HeadGroup(int kvh, int kv_heads, int dst_heads,
+                                          int* first, int* last) {
+  const int group = kv_heads > 0 ? dst_heads / kv_heads : 1;
+  *first = kvh * group;
+  *last = kvh == kv_heads - 1 ? dst_heads : *first + group;
+}
+
 // One row is (batch, seq, head); `heads` selects the tensor's head count. The
-// row position feeds the shared rotary table.
+// row position feeds the shared rotary table. `out` is null for the in-place
+// write and carries the head-major destination when the model asks for it.
 __global__ void QkPrepForwardKernel(const QkPrepParams params,
                                     const float* __restrict__ cos,
                                     const float* __restrict__ sin,
                                     ComputeType* __restrict__ tensor,
-                                    int heads) {
+                                    ComputeType* __restrict__ out, int heads,
+                                    int dst_heads) {
   const int row = blockIdx.x;
   const int dim = params.head_dim;
   const int half = dim / 2;
   ComputeType* rowp = tensor + static_cast<std::size_t>(row) * dim;
+  const int b = row / (params.seq * heads);
+  const int t = (row / heads) % params.seq;
+  const int h = row % heads;
+  int first = h;
+  int last = h + 1;
+  if (out != nullptr) HeadGroup(h, heads, dst_heads, &first, &last);
 
   const float sum_sq = RowReduceSumSq(rowp, dim);
   // The composition's `rstd`, not `rsqrtf`. `NormForward` runs the `kRsqrt`
@@ -110,7 +155,6 @@ __global__ void QkPrepForwardKernel(const QkPrepParams params,
   const float r =
       1.0f / std::sqrt(__fadd_rn(__fmul_rn(sum_sq, inv_dim), params.eps));
 
-  const int t = (row / heads) % params.seq;
   const float* crow = cos + static_cast<std::size_t>(t) * half;
   const float* srow = sin + static_cast<std::size_t>(t) * half;
 
@@ -124,8 +168,14 @@ __global__ void QkPrepForwardKernel(const QkPrepParams params,
     float x1 = AsFloatDev(ToComputeDev(AsFloatDev(rowp[d]) * r));
     float x2 = AsFloatDev(ToComputeDev(AsFloatDev(rowp[half + d]) * r));
     RotateForwardPair(x1, x2, crow[d], srow[d]);
-    rowp[d] = ToComputeDev(x1 * params.scale);
-    rowp[half + d] = ToComputeDev(x2 * params.scale);
+    for (int dh = first; dh < last; ++dh) {
+      ComputeType* dst =
+          out != nullptr
+              ? out + HeadMajorBase(b, t, dh, dst_heads, params.seq, dim)
+              : rowp;
+      dst[d] = ToComputeDev(x1 * params.scale);
+      dst[half + d] = ToComputeDev(x2 * params.scale);
+    }
   }
 }
 
@@ -134,13 +184,14 @@ __global__ void QkPrepBackwardKernel(const QkPrepParams params,
                                      const float* __restrict__ sin,
                                      const ComputeType* __restrict__ grad,
                                      ComputeType* __restrict__ tensor,
-                                     int heads) {
+                                     int heads, bool head_major) {
   const int row = blockIdx.x;
   const int dim = params.head_dim;
   const int half = dim / 2;
   const std::size_t base = static_cast<std::size_t>(row) * dim;
   ComputeType* rowp = tensor + base;
-  const ComputeType* grow = grad + base;
+  const ComputeType* grow =
+      grad + QueryRowBase(row, heads, params.seq, dim, head_major);
 
   const int t = (row / heads) % params.seq;
   const float* crow = cos + static_cast<std::size_t>(t) * half;
@@ -195,21 +246,208 @@ __global__ void QkPrepBackwardKernel(const QkPrepParams params,
   }
 }
 
+// --- The warp-per-row schedule for `head_dim` 128 --------------------------
+//
+// The block kernels above run one block per row and take a block-wide
+// reduction, which is two barriers at every level of the tree. At
+// `head_dim` 128 that block is 128 threads and the pair loop uses only the low
+// 64 of them, so half the block is idle and the row costs about nine barriers
+// in the forward and twice that in the backward. The model shape pays that
+// 163,840 times per layer.
+//
+// This schedule keeps the arithmetic and changes only the mapping. Lane `j`
+// owns the elements `j`, `j + 32`, `j + 64` and `j + 96`, so its two rotation
+// pairs are `(j, j + 64)` and `(j + 32, j + 96)`. Those are exactly the two
+// pairs the 128-lane block reduction combines at its first two levels: level
+// 64 pairs `i` with `i + 64`, and level 32 pairs the result for `i` with the
+// result for `i + 32`. A lane sums its four values in that order, and the five
+// warp shuffles are the tree's remaining five levels. The forward therefore
+// moves no value and changes no rounding; it only replaces two shared-memory
+// levels and their barriers with registers.
+//
+// The backward's block kernel runs its pair loop on the low 64 threads, so
+// lanes 64 to 127 hold zero and the tree's level 64 adds only zeros. The warp
+// schedule starts one level later: a lane holds the pairs `j` and `j + 32`,
+// which is the level-32 combine, and the five shuffles are levels 16 to 1.
+// Adding zero is exact, so dropping that level moves no value either.
+
+constexpr int kQkWarpHeadDim = 128;
+constexpr int kQkWarpHalf = kQkWarpHeadDim / 2;
+constexpr int kQkWarpRowsPerBlock = 4;
+constexpr int kQkWarpThreads = 32 * kQkWarpRowsPerBlock;
+
+// Warp-wide sum over the 32 lanes. Each level adds `value + other`, the order
+// the block reduction's `shared[i] += shared[i + offset]` keeps, and the
+// butterfly leaves the same result in every lane.
+template <typename T>
+__device__ __forceinline__ T QkWarpSum(T value) {
+#pragma unroll
+  for (int offset = 16; offset > 0; offset >>= 1) {
+    value += __shfl_xor_sync(0xffffffffu, value, offset);
+  }
+  return value;
+}
+
+int QkWarpGrid(int rows) {
+  return (rows + kQkWarpRowsPerBlock - 1) / kQkWarpRowsPerBlock;
+}
+
+// `QkPrepForwardKernel` at `head_dim` 128, one warp per row. The squares use
+// the round-to-nearest multiply, because the composition rounds each product
+// on its own and a contraction would keep one of the two unrounded.
+__global__ void __launch_bounds__(kQkWarpThreads) QkPrepForwardWarpKernel(
+    const QkPrepParams params, const float* __restrict__ cos,
+    const float* __restrict__ sin, ComputeType* __restrict__ tensor,
+    ComputeType* __restrict__ out, int heads, int dst_heads) {
+  const int lane = threadIdx.x & 31;
+  const int row = blockIdx.x * kQkWarpRowsPerBlock + (threadIdx.x >> 5);
+  if (row >= params.batch * params.seq * heads) return;
+  const int dim = params.head_dim;
+  ComputeType* rowp = tensor + static_cast<std::size_t>(row) * dim;
+  const int b = row / (params.seq * heads);
+  const int t = (row / heads) % params.seq;
+  const int h = row % heads;
+  int first = h;
+  int last = h + 1;
+  if (out != nullptr) HeadGroup(h, heads, dst_heads, &first, &last);
+  const float* crow = cos + static_cast<std::size_t>(t) * kQkWarpHalf;
+  const float* srow = sin + static_cast<std::size_t>(t) * kQkWarpHalf;
+
+  // The four elements of this lane, read before any write so the two pairs of
+  // a row can be transformed in either order.
+  const float v0 = AsFloatDev(rowp[lane]);
+  const float v1 = AsFloatDev(rowp[lane + kQkWarpHalf]);
+  const float v2 = AsFloatDev(rowp[lane + 32]);
+  const float v3 = AsFloatDev(rowp[lane + 32 + kQkWarpHalf]);
+
+  const float sum_sq =
+      QkWarpSum(__fadd_rn(__fadd_rn(__fmul_rn(v0, v0), __fmul_rn(v1, v1)),
+                          __fadd_rn(__fmul_rn(v2, v2), __fmul_rn(v3, v3))));
+  const float inv_dim = 1.0f / static_cast<float>(dim);
+  const float r =
+      1.0f / std::sqrt(__fadd_rn(__fmul_rn(sum_sq, inv_dim), params.eps));
+
+  float x1 = AsFloatDev(ToComputeDev(v0 * r));
+  float x2 = AsFloatDev(ToComputeDev(v1 * r));
+  RotateForwardPair(x1, x2, crow[lane], srow[lane]);
+  float x3 = AsFloatDev(ToComputeDev(v2 * r));
+  float x4 = AsFloatDev(ToComputeDev(v3 * r));
+  RotateForwardPair(x3, x4, crow[lane + 32], srow[lane + 32]);
+  for (int dh = first; dh < last; ++dh) {
+    ComputeType* dst = out != nullptr ? out + HeadMajorBase(b, t, dh, dst_heads,
+                                                            params.seq, dim)
+                                      : rowp;
+    dst[lane] = ToComputeDev(x1 * params.scale);
+    dst[lane + kQkWarpHalf] = ToComputeDev(x2 * params.scale);
+    dst[lane + 32] = ToComputeDev(x3 * params.scale);
+    dst[lane + 32 + kQkWarpHalf] = ToComputeDev(x4 * params.scale);
+  }
+}
+
+// `QkPrepBackwardKernel` at `head_dim` 128, one warp per row. The pair values
+// stay in registers across the reductions, so the second pass reads no saved
+// row and no upstream gradient a second time.
+__global__ void __launch_bounds__(kQkWarpThreads) QkPrepBackwardWarpKernel(
+    const QkPrepParams params, const float* __restrict__ cos,
+    const float* __restrict__ sin, const ComputeType* __restrict__ grad,
+    ComputeType* __restrict__ tensor, int heads, bool head_major) {
+  const int lane = threadIdx.x & 31;
+  const int row = blockIdx.x * kQkWarpRowsPerBlock + (threadIdx.x >> 5);
+  if (row >= params.batch * params.seq * heads) return;
+  const int dim = params.head_dim;
+  const std::size_t base = static_cast<std::size_t>(row) * dim;
+  ComputeType* rowp = tensor + base;
+  const ComputeType* grow =
+      grad + QueryRowBase(row, heads, params.seq, dim, head_major);
+
+  const int t = (row / heads) % params.seq;
+  const float* crow = cos + static_cast<std::size_t>(t) * kQkWarpHalf;
+  const float* srow = sin + static_cast<std::size_t>(t) * kQkWarpHalf;
+
+  const float x1 = AsFloatDev(rowp[lane]);
+  const float x2 = AsFloatDev(rowp[lane + kQkWarpHalf]);
+  const float x3 = AsFloatDev(rowp[lane + 32]);
+  const float x4 = AsFloatDev(rowp[lane + 32 + kQkWarpHalf]);
+  const float g1 = AsFloatDev(grow[lane]);
+  const float g2 = AsFloatDev(grow[lane + kQkWarpHalf]);
+  const float g3 = AsFloatDev(grow[lane + 32]);
+  const float g4 = AsFloatDev(grow[lane + 32 + kQkWarpHalf]);
+
+  const float c0 = crow[lane];
+  const float s0 = srow[lane];
+  const float c1 = crow[lane + 32];
+  const float s1 = srow[lane + 32];
+  const float gd1 = RotateBackwardFirst(g1, c0, g2, s0, params.scale);
+  const float gd2 = RotateBackwardSecond(g1, s0, g2, c0, params.scale);
+  const float gd3 = RotateBackwardFirst(g3, c1, g4, s1, params.scale);
+  const float gd4 = RotateBackwardSecond(g3, s1, g4, c1, params.scale);
+
+  // The pair this lane owns, then the pair at `lane + 32`, which is the block
+  // tree's level-32 combine. The double accumulators keep the composition's
+  // precision argument (see the block kernel above).
+  double sum_sq = static_cast<double>(x1) * x1 + static_cast<double>(x2) * x2;
+  double dot = static_cast<double>(x1) * gd1 + static_cast<double>(x2) * gd2;
+  sum_sq += static_cast<double>(x3) * x3 + static_cast<double>(x4) * x4;
+  dot += static_cast<double>(x3) * gd3 + static_cast<double>(x4) * gd4;
+  sum_sq = QkWarpSum(sum_sq);
+  dot = QkWarpSum(dot);
+
+  const float inv_dim = 1.0f / static_cast<float>(dim);
+  const float r =
+      1.0f / std::sqrt(static_cast<float>(sum_sq) * inv_dim + params.eps);
+  const float coeff = r * r * r * static_cast<float>(dot) * inv_dim;
+
+  rowp[lane] = ToComputeDev(CombineBackward(r, gd1, coeff, x1));
+  rowp[lane + kQkWarpHalf] = ToComputeDev(CombineBackward(r, gd2, coeff, x2));
+  rowp[lane + 32] = ToComputeDev(CombineBackward(r, gd3, coeff, x3));
+  rowp[lane + 32 + kQkWarpHalf] =
+      ToComputeDev(CombineBackward(r, gd4, coeff, x4));
+}
+
+void LaunchQkPrepForward(const QkPrepParams& params, const float* cos,
+                         const float* sin, ComputeType* tensor,
+                         ComputeType* out, int heads, int dst_heads, int rows) {
+  if (params.head_dim == kQkWarpHeadDim) {
+    cuda_backend::Launch(QkPrepForwardWarpKernel, dim3(QkWarpGrid(rows)),
+                         dim3(kQkWarpThreads), 0, params, cos, sin, tensor, out,
+                         heads, dst_heads);
+    return;
+  }
+  const int block = BlockSizeForDim(params.head_dim);
+  cuda_backend::Launch(QkPrepForwardKernel, dim3(rows), dim3(block), 0, params,
+                       cos, sin, tensor, out, heads, dst_heads);
+}
+
+void LaunchQkPrepBackward(const QkPrepParams& params, const float* cos,
+                          const float* sin, const ComputeType* grad,
+                          ComputeType* tensor, int heads, int rows,
+                          bool head_major) {
+  if (params.head_dim == kQkWarpHeadDim) {
+    cuda_backend::Launch(QkPrepBackwardWarpKernel, dim3(QkWarpGrid(rows)),
+                         dim3(kQkWarpThreads), 0, params, cos, sin, grad,
+                         tensor, heads, head_major);
+    return;
+  }
+  const int block = BlockSizeForDim(params.head_dim);
+  cuda_backend::Launch(QkPrepBackwardKernel, dim3(rows), dim3(block), 0, params,
+                       cos, sin, grad, tensor, heads, head_major);
+}
+
 }  // namespace
 
 void QkPrepForward(const QkPrepParams& params, const float* cos,
                    const float* sin, ComputeType* q, ComputeType* k) {
+  const bool q_heads = params.q_head_major && params.q_out != nullptr;
   const int q_rows = params.batch * params.seq * params.num_heads;
   if (q_rows > 0 && params.head_dim > 0) {
-    const int block = BlockSizeForDim(params.head_dim);
-    cuda_backend::Launch(QkPrepForwardKernel, dim3(q_rows), dim3(block), 0,
-                         params, cos, sin, q, params.num_heads);
+    LaunchQkPrepForward(params, cos, sin, q, q_heads ? params.q_out : nullptr,
+                        params.num_heads, params.num_heads, q_rows);
   }
   const int k_rows = params.batch * params.seq * params.num_kv_heads;
   if (k_rows > 0 && params.head_dim > 0) {
-    const int block = BlockSizeForDim(params.head_dim);
-    cuda_backend::Launch(QkPrepForwardKernel, dim3(k_rows), dim3(block), 0,
-                         params, cos, sin, k, params.num_kv_heads);
+    const bool k_heads = params.k_out != nullptr && params.num_heads > 0;
+    LaunchQkPrepForward(params, cos, sin, k, k_heads ? params.k_out : nullptr,
+                        params.num_kv_heads, params.num_heads, k_rows);
   }
 }
 
@@ -218,15 +456,13 @@ void QkPrepBackward(const QkPrepParams& params, const float* cos,
                     const ComputeType* dk, ComputeType* q, ComputeType* k) {
   const int q_rows = params.batch * params.seq * params.num_heads;
   if (q_rows > 0 && params.head_dim > 0) {
-    const int block = BlockSizeForDim(params.head_dim);
-    cuda_backend::Launch(QkPrepBackwardKernel, dim3(q_rows), dim3(block), 0,
-                         params, cos, sin, dq, q, params.num_heads);
+    LaunchQkPrepBackward(params, cos, sin, dq, q, params.num_heads, q_rows,
+                         params.q_head_major);
   }
   const int k_rows = params.batch * params.seq * params.num_kv_heads;
   if (k_rows > 0 && params.head_dim > 0) {
-    const int block = BlockSizeForDim(params.head_dim);
-    cuda_backend::Launch(QkPrepBackwardKernel, dim3(k_rows), dim3(block), 0,
-                         params, cos, sin, dk, k, params.num_kv_heads);
+    LaunchQkPrepBackward(params, cos, sin, dk, k, params.num_kv_heads, k_rows,
+                         false);
   }
 }
 

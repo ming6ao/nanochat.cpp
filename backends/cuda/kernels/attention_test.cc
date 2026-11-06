@@ -29,6 +29,98 @@ using nanochat::dev::ToStorage;
 using nanochat::dev::seqref::AttentionBackward;
 using nanochat::dev::seqref::AttentionForward;
 
+// Model-stream rows `(b, t, h)` and head-major rows `(b, h, t)` hold the same
+// values; `to_heads` picks the direction.
+std::vector<float> PermuteQuery(const std::vector<float>& rows, int batch,
+                                int seq, int heads, int dim, bool to_heads) {
+  std::vector<float> out(rows.size());
+  for (int b = 0; b < batch; ++b) {
+    for (int t = 0; t < seq; ++t) {
+      for (int h = 0; h < heads; ++h) {
+        for (int d = 0; d < dim; ++d) {
+          const std::size_t stream =
+              ((static_cast<std::size_t>(b) * seq + t) * heads + h) * dim + d;
+          const std::size_t head_major =
+              ((static_cast<std::size_t>(b) * heads + h) * seq + t) * dim + d;
+          out[to_heads ? head_major : stream] =
+              rows[to_heads ? stream : head_major];
+        }
+      }
+    }
+  }
+  return out;
+}
+
+// The head-major query at one shape: the same numbers in the layout the
+// batched products read. No arithmetic changes, so every result must match the
+// model-stream run bit for bit; the query gradient is the one that moves.
+void RunHeadMajorCase(const AttentionParams& p, const char* name) {
+  const int dim = p.head_dim;
+  const int heads = p.num_heads;
+  const int kv_heads = p.num_kv_heads > 0 ? p.num_kv_heads : heads;
+  const int kv_len = p.kv_len > 0 ? p.kv_len : p.seq;
+  const int q_count = p.batch * p.seq * heads * dim;
+  const int kv_count = p.batch * kv_len * kv_heads * dim;
+  const int stats_count = nanochat::AttentionStatsCount(p);
+
+  Rng rng;
+  const std::vector<float> q0 = RandomVec(q_count, &rng);
+  const std::vector<float> k0 = RandomVec(kv_count, &rng);
+  const std::vector<float> v0 = RandomVec(kv_count, &rng);
+  const std::vector<float> w = RandomVec(q_count, &rng);
+
+  AttentionParams heads_p = p;
+  heads_p.q_head_major = true;
+
+  DevBuf<ComputeType> q_rm(ToStorage(q0));
+  DevBuf<ComputeType> k_rm(ToStorage(k0));
+  DevBuf<ComputeType> v_rm(ToStorage(v0));
+  DevBuf<ComputeType> out_rm(q_count);
+  DevBuf<float> stats_rm(stats_count);
+  nanochat::kernels::AttentionForward(p, q_rm.ptr, k_rm.ptr, v_rm.ptr,
+                                      out_rm.ptr, stats_rm.ptr);
+  DevBuf<ComputeType> dout_rm(ToStorage(w));
+  DevBuf<ComputeType> dq_rm(q_count);
+  DevBuf<ComputeType> dk_rm(kv_count);
+  DevBuf<ComputeType> dv_rm(kv_count);
+  nanochat::kernels::AttentionBackward(p, q_rm.ptr, k_rm.ptr, v_rm.ptr,
+                                       stats_rm.ptr, dout_rm.ptr, dq_rm.ptr,
+                                       dk_rm.ptr, dv_rm.ptr);
+
+  DevBuf<ComputeType> q_hm(ToStorage(
+      PermuteQuery(q0, p.batch, p.seq, heads, dim, /*to_heads=*/true)));
+  DevBuf<ComputeType> k_hm(ToStorage(k0));
+  DevBuf<ComputeType> v_hm(ToStorage(v0));
+  DevBuf<ComputeType> out_hm(q_count);
+  DevBuf<float> stats_hm(stats_count);
+  nanochat::kernels::AttentionForward(heads_p, q_hm.ptr, k_hm.ptr, v_hm.ptr,
+                                      out_hm.ptr, stats_hm.ptr);
+  DevBuf<ComputeType> dout_hm(ToStorage(w));
+  DevBuf<ComputeType> dq_hm(q_count);
+  DevBuf<ComputeType> dk_hm(kv_count);
+  DevBuf<ComputeType> dv_hm(kv_count);
+  nanochat::kernels::AttentionBackward(heads_p, q_hm.ptr, k_hm.ptr, v_hm.ptr,
+                                       stats_hm.ptr, dout_hm.ptr, dq_hm.ptr,
+                                       dk_hm.ptr, dv_hm.ptr);
+  nanochat::kernels::Synchronize();
+
+  const std::string base(name);
+  CheckVectorClose(FromStorage(out_hm.Download()),
+                   FromStorage(out_rm.Download()), 0.0,
+                   (base + " fwd out head-major").c_str());
+  CheckVectorClose(stats_hm.Download(), stats_rm.Download(), 0.0,
+                   (base + " fwd stats head-major").c_str());
+  const std::vector<float> dq_back =
+      PermuteQuery(FromStorage(dq_hm.Download()), p.batch, p.seq, heads, dim,
+                   /*to_heads=*/false);
+  CheckVectorClose(dq_back, FromStorage(dq_rm.Download()), 0.0,
+                   (base + " bwd dq head-major").c_str());
+  CheckVectorClose(FromStorage(dk_hm.Download()), FromStorage(dk_rm.Download()),
+                   0.0, (base + " bwd dk head-major").c_str());
+  CheckVectorClose(FromStorage(dv_hm.Download()), FromStorage(dv_rm.Download()),
+                   0.0, (base + " bwd dv head-major").c_str());
+}
+
 void RunCase(const AttentionParams& p, const char* name,
              bool differentiate = true) {
   const int dim = p.head_dim;
@@ -123,6 +215,7 @@ int main() {
   base.scale = 0.0f;
 
   RunCase(base, "mha-causal");
+  RunHeadMajorCase(base, "mha-causal");
 
   AttentionParams gqa = base;
   gqa.num_kv_heads = 1;
@@ -152,6 +245,7 @@ int main() {
   AttentionParams gqa_pair_window = gqa_pair;
   gqa_pair_window.window_left = 3;
   RunCase(gqa_pair_window, "gqa-two-kv-heads-sliding-window");
+  RunHeadMajorCase(gqa_pair_window, "gqa-two-kv-heads-sliding-window");
 
   AttentionParams noncausal = base;
   noncausal.causal = false;
@@ -161,6 +255,7 @@ int main() {
   AttentionParams decode = base;
   decode.kv_len = 10;
   RunCase(decode, "kv-cache-offset");
+  RunHeadMajorCase(decode, "kv-cache-offset");
 
   // The fused softmax pair holds one row in registers when the row is at most
   // 128 threads times 8 elements, so a row of 1024 is the last length that

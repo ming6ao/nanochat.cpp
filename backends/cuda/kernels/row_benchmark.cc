@@ -53,12 +53,13 @@ void BenchRmsNorm(Rng* rng, int rows, int dim, int iters) {
   });
 }
 
-void BenchQkPrep(Rng* rng, int batch, int seq, int heads, int dim, int iters) {
+void BenchQkPrep(Rng* rng, int batch, int seq, int heads, int kv_heads, int dim,
+                 int iters) {
   nanochat::QkPrepParams p;
   p.batch = batch;
   p.seq = seq;
   p.num_heads = heads;
-  p.num_kv_heads = heads;
+  p.num_kv_heads = kv_heads;
   p.head_dim = dim;
   p.eps = 1e-6f;
   p.scale = 1.2f;
@@ -67,14 +68,45 @@ void BenchQkPrep(Rng* rng, int batch, int seq, int heads, int dim, int iters) {
       std::vector<float>(static_cast<std::size_t>(seq) * half, 0.5f));
   DevBuf<float> sin(
       std::vector<float>(static_cast<std::size_t>(seq) * half, 0.5f));
-  const int n = batch * seq * heads * dim;
-  DevBuf<ComputeType> q(ToStorage(RandomVec(n, rng)));
-  DevBuf<ComputeType> k(ToStorage(RandomVec(n, rng)));
+  const int q_count = batch * seq * heads * dim;
+  const int k_count = batch * seq * kv_heads * dim;
+  DevBuf<ComputeType> q(ToStorage(RandomVec(q_count, rng)));
+  DevBuf<ComputeType> k(ToStorage(RandomVec(k_count, rng)));
   char label[64];
-  std::snprintf(label, sizeof(label), "qkprep b=%d t=%d h=%d d=%d", batch, seq,
-                heads, dim);
+  std::snprintf(label, sizeof(label), "qkprep b=%d t=%d h=%d kv=%d d=%d", batch,
+                seq, heads, kv_heads, dim);
   TimeIt(label, iters, [&] {
     nanochat::kernels::QkPrepForward(p, cos.ptr, sin.ptr, q.ptr, k.ptr);
+  });
+}
+
+void BenchQkPrepBackward(Rng* rng, int batch, int seq, int heads, int kv_heads,
+                         int dim, int iters) {
+  nanochat::QkPrepParams p;
+  p.batch = batch;
+  p.seq = seq;
+  p.num_heads = heads;
+  p.num_kv_heads = kv_heads;
+  p.head_dim = dim;
+  p.eps = 1e-6f;
+  p.scale = 1.2f;
+  const int half = dim / 2;
+  DevBuf<float> cos(
+      std::vector<float>(static_cast<std::size_t>(seq) * half, 0.5f));
+  DevBuf<float> sin(
+      std::vector<float>(static_cast<std::size_t>(seq) * half, 0.5f));
+  const int q_count = batch * seq * heads * dim;
+  const int k_count = batch * seq * kv_heads * dim;
+  DevBuf<ComputeType> dq(ToStorage(RandomVec(q_count, rng)));
+  DevBuf<ComputeType> dk(ToStorage(RandomVec(k_count, rng)));
+  DevBuf<ComputeType> q(ToStorage(RandomVec(q_count, rng)));
+  DevBuf<ComputeType> k(ToStorage(RandomVec(k_count, rng)));
+  char label[64];
+  std::snprintf(label, sizeof(label), "qkprep-bwd b=%d t=%d h=%d kv=%d d=%d",
+                batch, seq, heads, kv_heads, dim);
+  TimeIt(label, iters, [&] {
+    nanochat::kernels::QkPrepBackward(p, cos.ptr, sin.ptr, dq.ptr, dk.ptr,
+                                      q.ptr, k.ptr);
   });
 }
 
@@ -115,10 +147,15 @@ int main() {
   Rng rng;
   std::printf("row kernel benchmark\n");
 
-  BenchRmsNorm(&rng, 16, 4, 200);      // tiny attention shape
-  BenchRmsNorm(&rng, 4096, 768, 50);   // medium training shape
-  BenchQkPrep(&rng, 2, 8, 2, 4, 200);  // tiny attention shape
-  BenchQkPrep(&rng, 8, 512, 8, 64, 20);
+  BenchRmsNorm(&rng, 16, 4, 200);         // tiny attention shape
+  BenchRmsNorm(&rng, 4096, 768, 50);      // medium training shape
+  BenchQkPrep(&rng, 2, 8, 2, 2, 4, 200);  // tiny attention shape
+  BenchQkPrep(&rng, 8, 512, 8, 8, 64, 20);
+  // The model shape: `head_dim` 128 takes the warp schedule.
+  BenchQkPrep(&rng, 2, 64, 2, 1, 128, 200);
+  BenchQkPrep(&rng, 16, 1024, 10, 5, 128, 20);
+  BenchQkPrepBackward(&rng, 2, 64, 2, 1, 128, 200);
+  BenchQkPrepBackward(&rng, 16, 1024, 10, 5, 128, 20);
   BenchPointwise(&rng, 1 << 16, 200);
   BenchPointwise(&rng, 1 << 20, 50);
   BenchGradNorm(&rng, 1 << 16, 200);

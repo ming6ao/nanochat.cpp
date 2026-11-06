@@ -96,12 +96,14 @@ void LossSumForward(const float* losses, std::int64_t rows,
 
 void QkPrepForward(int batch, int seq, int num_heads, int num_kv_heads,
                    int head_dim, float eps, float scale, const float* cos,
-                   const float* sin, ComputeType* q, ComputeType* k);
+                   const float* sin, ComputeType* q, ComputeType* k,
+                   ComputeType* q_out = nullptr, bool q_head_major = false);
 
 void QkPrepBackward(int batch, int seq, int num_heads, int num_kv_heads,
                     int head_dim, float eps, float scale, const float* cos,
                     const float* sin, const ComputeType* dq,
-                    const ComputeType* dk, ComputeType* q, ComputeType* k);
+                    const ComputeType* dk, ComputeType* q, ComputeType* k,
+                    bool q_head_major = false);
 
 // ---------------------------------------------------------------------------
 // Causal / sliding-window group-query attention. `kv_len == 0` means
@@ -120,6 +122,9 @@ struct AttentionShape {
   int window_right = 0;
   int kv_len = 0;
   float scale = 0.0f;
+  // q and dq are `[batch, heads, seq, head_dim]` (docs/kernels.md); the caller
+  // sets this only when its QkPrep pass wrote that layout.
+  bool q_head_major = false;
 };
 
 void AttentionForward(const AttentionShape& shape, const ComputeType* q,

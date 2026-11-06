@@ -42,6 +42,10 @@
 //
 // Layout conventions:
 //   * Every tensor is dense row-major unless a parameter says otherwise.
+//   * One parameter says otherwise: `QkPrepParams::q_head_major` makes the
+//     prepared query (and `AttentionParams::q_head_major` the query gradient)
+//     `[batch, heads, seq, dim]`, the layout the batched attention products
+//     read. The key, the value, the output, and every saved row stay row-major.
 //   * Token ids and targets are `int` (one per row) and live on the host.
 //   * Norm statistics (`rstd`), optimizer moments, and master weights are
 //     `float` on every device (docs/build.md).
@@ -255,6 +259,26 @@ struct QkPrepParams {
   int head_dim = 0;
   float eps = kDefaultRmsNormEps;
   float scale = kDefaultQkScale;  // applied to both q and k after RoPE
+  // Additive fields (API freeze): the head-major query. When `q_head_major` is
+  // set, `QkPrepForward` reads the saved pre-norm query rows from `q` and
+  // writes the prepared rows to `q_out` in `[batch, heads, seq, head_dim]`,
+  // which is the layout the batched attention products read. `QkPrepBackward`
+  // reads the upstream query gradient `dq` in that layout. The key tensor, the
+  // saved query rows, and every input gradient keep
+  // `[batch, seq, heads, head_dim]`. `q_out` is the forward's destination and
+  // the backward ignores it. A backend whose `qk_prep` override is registered
+  // honors this field; the primitive composition refuses it, because no
+  // primitive writes a permutation.
+  bool q_head_major = false;
+  ComputeType* q_out = nullptr;
+  // Additive field (API freeze): when `k_out` is set, `QkPrepForward` reads
+  // the saved key rows from `k` and writes the prepared rows to `k_out` in
+  // `[batch, heads, seq, head_dim]`, repeating each key/value head across the
+  // query heads it serves. The batched attention products then read the key
+  // without a transpose. The saved key rows keep
+  // `[batch, seq, kv_heads, head_dim]`, and the backward is unchanged: its key
+  // gradient stays a model-stream buffer.
+  ComputeType* k_out = nullptr;
 };
 
 struct AttentionParams {
@@ -277,6 +301,11 @@ struct AttentionParams {
   // passes the full sequence length so the block kernel can index the shared
   // statistics buffer at its query offset (docs/attention.md Part 2).
   int stats_row_stride = 0;
+  // Additive field (API freeze): q and the query gradient `dq` are
+  // `[batch, heads, seq, head_dim]`, which is the layout the batched products
+  // read, so the query transpose leaves the path. k, v, out, dk and dv keep
+  // `[batch, seq, heads, head_dim]`.
+  bool q_head_major = false;
 };
 
 // The pointwise block. It replaces the former scalar argument list

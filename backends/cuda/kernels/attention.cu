@@ -146,6 +146,23 @@ ComputeType* CachedBuffer(int slot, std::size_t count) {
   return buffers[slot];
 }
 
+// A cursor over the head-layout scratch. `Take` returns the next slot and
+// advances, so a slot's offset is stated once and a caller that supplies its
+// own buffer (the head-major query) leaves no hole in the arithmetic.
+class HeadCursor {
+ public:
+  explicit HeadCursor(ComputeType* head) : next_(head) {}
+
+  ComputeType* Take(std::size_t count) {
+    ComputeType* slot = next_;
+    next_ += count;
+    return slot;
+  }
+
+ private:
+  ComputeType* next_;
+};
+
 // --- Softmax kernels -------------------------------------------------------
 
 // One block per `(b, h, t)` query row. Computes the visible-key maximum, the
@@ -945,9 +962,12 @@ void LaunchFusedAttention(const AttentionParams& params, const ComputeType* q,
 // needs the units, and there the tile loses: the 13 sliding-window layers of
 // the `big` profile take 34.6 ms through it, against a 1.06 ms roofline bound
 // for all 20 layers. The tile also covers only `head_dim` 128, and only a
-// windowed shape, because the full-causal tile lost its gate to cuBLAS.
+// windowed shape, because the full-causal tile lost its gate to cuBLAS. It
+// reads the query in the model stream, so a head-major query keeps the batched
+// path.
 bool UseFusedAttention(const AttentionParams& p) {
-  return !kComputeIsBf16 && p.window_left >= 0 && p.head_dim == 128;
+  return !kComputeIsBf16 && !p.q_head_major && p.window_left >= 0 &&
+         p.head_dim == 128;
 }
 
 void AttentionForward(const AttentionParams& params, const ComputeType* q,
@@ -983,12 +1003,19 @@ void AttentionForward(const AttentionParams& params, const ComputeType* q,
       static_cast<std::size_t>(params.batch) * heads * params.seq * dim;
   const std::size_t k_elems =
       static_cast<std::size_t>(params.batch) * heads * kv_len * dim;
-  ComputeType* head = CachedBuffer(1, 2 * q_elems + 2 * k_elems);
-  ComputeType* qT = head;
-  ComputeType* kT = qT + q_elems;
-  ComputeType* vT = kT + k_elems;
-  ComputeType* outT = vT + k_elems;
-  TransposeToHeads(params.batch, params.seq, heads, heads, dim, q, qT);
+  // The query takes no scratch when the caller passes it head-major: the
+  // batched products read that layout already.
+  const bool q_heads = params.q_head_major;
+  ComputeType* head =
+      CachedBuffer(1, (q_heads ? 0 : q_elems) + 2 * k_elems + q_elems);
+  HeadCursor cursor(head);
+  const ComputeType* qT = q_heads ? q : cursor.Take(q_elems);
+  ComputeType* kT = cursor.Take(k_elems);
+  ComputeType* vT = cursor.Take(k_elems);
+  ComputeType* outT = cursor.Take(q_elems);
+  if (!q_heads) {
+    TransposeToHeads(params.batch, params.seq, heads, heads, dim, q, head);
+  }
   TransposeToHeads(params.batch, kv_len, heads, kv_heads, dim, k, kT);
   TransposeToHeads(params.batch, kv_len, heads, kv_heads, dim, v, vT);
 
@@ -1042,16 +1069,22 @@ void AttentionBackwardWindowed(const AttentionParams& params,
 
   const std::size_t q_elems =
       static_cast<std::size_t>(batch) * heads * seq * dim;
-  // Seven transposed head buffers: q, k, v, dout, dq, dk, dv.
-  ComputeType* head = CachedBuffer(1, 7 * q_elems);
-  ComputeType* qT = head;
-  ComputeType* kT = qT + q_elems;
-  ComputeType* vT = kT + q_elems;
-  ComputeType* doutT = vT + q_elems;
-  ComputeType* dqT = doutT + q_elems;
-  ComputeType* dkT = dqT + q_elems;
-  ComputeType* dvT = dkT + q_elems;
-  TransposeToHeads(batch, seq, heads, heads, dim, q, qT);
+  // Seven transposed head buffers: q, k, v, dout, dq, dk, dv. The query and
+  // its gradient take the caller's buffers when they are head-major, so five
+  // remain here.
+  const bool q_heads = params.q_head_major;
+  ComputeType* head = CachedBuffer(1, (q_heads ? 5 : 7) * q_elems);
+  HeadCursor cursor(head);
+  const ComputeType* qT = q_heads ? q : cursor.Take(q_elems);
+  ComputeType* kT = cursor.Take(q_elems);
+  ComputeType* vT = cursor.Take(q_elems);
+  ComputeType* doutT = cursor.Take(q_elems);
+  ComputeType* dqT = q_heads ? dq : cursor.Take(q_elems);
+  ComputeType* dkT = cursor.Take(q_elems);
+  ComputeType* dvT = cursor.Take(q_elems);
+  if (!q_heads) {
+    TransposeToHeads(batch, seq, heads, heads, dim, q, head);
+  }
   TransposeToHeads(batch, seq, heads, kv_heads, dim, k, kT);
   TransposeToHeads(batch, seq, heads, kv_heads, dim, v, vT);
   TransposeToHeads(batch, seq, heads, heads, dim, dout, doutT);
@@ -1122,7 +1155,9 @@ void AttentionBackwardWindowed(const AttentionParams& params,
                        /*ldc=*/dim, head_stride);
   }
 
-  TransposeFromHeads(batch, seq, heads, heads, dim, dqT, dq);
+  if (!q_heads) {
+    TransposeFromHeads(batch, seq, heads, heads, dim, dqT, dq);
+  }
   TransposeFromHeads(batch, seq, heads, kv_heads, dim, dkT, dk);
   TransposeFromHeads(batch, seq, heads, kv_heads, dim, dvT, dv);
 }
@@ -1168,15 +1203,20 @@ void AttentionBackward(const AttentionParams& params, const ComputeType* q,
       static_cast<std::size_t>(params.batch) * heads * params.seq * dim;
   const std::size_t k_elems =
       static_cast<std::size_t>(params.batch) * heads * kv_len * dim;
-  ComputeType* head = CachedBuffer(1, 3 * q_elems + 4 * k_elems);
-  ComputeType* qT = head;
-  ComputeType* kT = qT + q_elems;
-  ComputeType* vT = kT + k_elems;
-  ComputeType* doutT = vT + k_elems;
-  ComputeType* dqT = doutT + q_elems;
-  ComputeType* dkT = dqT + q_elems;
-  ComputeType* dvT = dkT + k_elems;
-  TransposeToHeads(params.batch, params.seq, heads, heads, dim, q, qT);
+  ComputeType* head = CachedBuffer(
+      1, (params.q_head_major ? q_elems : 3 * q_elems) + 4 * k_elems);
+  const bool q_heads = params.q_head_major;
+  HeadCursor cursor(head);
+  const ComputeType* qT = q_heads ? q : cursor.Take(q_elems);
+  ComputeType* kT = cursor.Take(k_elems);
+  ComputeType* vT = cursor.Take(k_elems);
+  ComputeType* doutT = cursor.Take(q_elems);
+  ComputeType* dqT = q_heads ? dq : cursor.Take(q_elems);
+  ComputeType* dkT = cursor.Take(k_elems);
+  ComputeType* dvT = cursor.Take(k_elems);
+  if (!q_heads) {
+    TransposeToHeads(params.batch, params.seq, heads, heads, dim, q, head);
+  }
   TransposeToHeads(params.batch, kv_len, heads, kv_heads, dim, k, kT);
   TransposeToHeads(params.batch, kv_len, heads, kv_heads, dim, v, vT);
   TransposeToHeads(params.batch, params.seq, heads, heads, dim, dout, doutT);
@@ -1197,7 +1237,9 @@ void AttentionBackward(const AttentionParams& params, const ComputeType* q,
   BatchedGemm(kv_len, dim, params.seq, batch_heads, 1.0f, 0.0f,
               /*transpose_a=*/true, /*transpose_b=*/false, probs, doutT, dvT);
 
-  TransposeFromHeads(params.batch, params.seq, heads, heads, dim, dqT, dq);
+  if (!q_heads) {
+    TransposeFromHeads(params.batch, params.seq, heads, heads, dim, dqT, dq);
+  }
   TransposeFromHeads(params.batch, kv_len, heads, kv_heads, dim, dkT, dk);
   TransposeFromHeads(params.batch, kv_len, heads, kv_heads, dim, dvT, dv);
 }
