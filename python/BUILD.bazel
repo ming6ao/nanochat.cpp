@@ -202,10 +202,9 @@ py_test(
     size = "small",
 )
 
-# T0: the SFT bridge builds the driver argv the driver reads (B1 and B3 of
-# `docs/campaigns.md`, the six blockers). Hermetic: a fake toolchain records the
-# argument list instead of running the driver, so it needs no library, no
-# Bazel, and no GPU.
+# T0: the SFT bridge builds the driver argv the driver reads. Hermetic: a fake
+# toolchain records the argument list instead of running the driver, so it needs
+# no library, no Bazel, and no GPU.
 py_test(
     name = "sft_test",
     srcs = ["tests/sft_test.py"],

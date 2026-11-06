@@ -355,8 +355,7 @@ This removes duplication **without** changing kernel boundaries.
 
 _Absorbed from the design plan of record of the campaign that implemented it.
 The section numbers are unchanged, so a reference to section K of that plan
-resolves to section K here. The outcome, the defects, and the open items are in
-[campaigns.md](campaigns.md), and the measured rows are in
+resolves to section K here. The measured rows are in
 [baselines.json](baselines.json) under `muon`._
 
 Status: implemented, gated, and **not promoted**. The fused path is in

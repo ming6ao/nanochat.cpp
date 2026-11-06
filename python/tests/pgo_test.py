@@ -15,6 +15,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from nanochat_cpp import pgo
 
@@ -455,6 +456,186 @@ class CommandTest(unittest.TestCase):
     def test_output_without_a_document_is_a_fault(self) -> None:
         with self.assertRaises(pgo.PgoError):
             pgo.last_json("no document here")
+
+
+class TargetNameTest(unittest.TestCase):
+    def test_the_folder_takes_the_name_of_the_target(self) -> None:
+        # One level under the root, and the label carries the shape, the stage,
+        # and the device, so a path tells a reader what it measures.
+        folder = pgo.run_root("profiles/pgo", "base", "h100",
+                              name="nanochat-d20-base-h100")
+        self.assertEqual(folder, Path("profiles/pgo/nanochat-d20-base-h100"))
+
+    def test_without_a_name_the_label_is_the_stage_and_the_device(self) -> None:
+        self.assertEqual(pgo.run_root("profiles/pgo", "base", "t4"),
+                         Path("profiles/pgo/base-t4"))
+
+    def test_a_name_that_is_not_one_path_component_is_a_fault(self) -> None:
+        for name in ("a/b", "..", "a\\b"):
+            with self.assertRaises(pgo.PgoError):
+                pgo.run_root("profiles/pgo", "base", "h100", name=name)
+
+    def test_the_run_id_names_the_target(self) -> None:
+        # Two targets can share a stage and a device, so a run folder must not.
+        loop = pgo.new_loop("base", "h100", name="nanochat-d20-base-h100")
+        self.assertEqual(pgo._run_id(loop, "before"),
+                         "pgo-nanochat-d20-base-h100-i01-before")
+
+    def test_the_state_records_the_name(self) -> None:
+        loop = pgo.new_loop("base", "h100", name="nanochat-d20-base-h100")
+        self.assertEqual(loop["name"], "nanochat-d20-base-h100")
+        self.assertEqual(pgo.new_loop("base", "t4")["name"], "base-t4")
+
+
+class ReportTest(unittest.TestCase):
+    """The status page of one target: the number, the time, and the command."""
+
+    def setUp(self) -> None:
+        self.root = Path(tempfile.mkdtemp(prefix="pgo-report-"))
+        self.folder = pgo.run_root(self.root, "base", "h100",
+                                   name="nanochat-d20-base-h100")
+        self.loop = pgo.new_loop("base", "h100",
+                                 name="nanochat-d20-base-h100")
+
+    def _entry(self, step_ms: float, *, generated: str,
+               point: str = "before", iteration: int = 1) -> dict:
+        document = {
+            "step_ms": step_ms,
+            "tokens_per_second": 87208.23034487023,
+            "mfu": 0.2270541800988379,
+            "runs": [{"step_ms": step_ms}, {"step_ms": step_ms + 0.6}],
+        }
+        return pgo.measurement_entry(
+            document, point=point, iteration=iteration,
+            command="tools/nanochat pgo measure --stage base --device h100",
+            generated=generated, revision="aa63323", clean=True)
+
+    def test_the_page_names_the_time_the_command_and_the_number(self) -> None:
+        self.loop["measurements"].append(
+            self._entry(187.8722, generated="2026-11-05T20:41Z"))
+        page = pgo.report_markdown(self.loop)
+        self.assertIn("# nanochat-d20-base-h100", page)
+        self.assertIn("Generated 2026-11-05T20:41Z, revision `aa63323`", page)
+        self.assertIn("tree clean", page)
+        self.assertIn("tools/nanochat pgo measure", page)
+        self.assertIn("| Step time | 187.87 ms |", page)
+        self.assertIn("| MFU | 22.71 percent |", page)
+        self.assertIn("| The two runs | 187.87, 188.47 ms |", page)
+
+    def test_every_point_joins_the_history_in_the_order_it_was_taken(self) -> None:
+        for step_ms, stamp in ((201.6618, "2026-11-02T15:56Z"),
+                               (187.8722, "2026-11-05T20:41Z")):
+            self.loop["measurements"].append(
+                self._entry(step_ms, generated=stamp))
+        page = pgo.report_markdown(self.loop)
+        first = page.index("2026-11-02T15:56Z | iter-01 before")
+        second = page.index("2026-11-05T20:41Z | iter-01 before")
+        self.assertLess(first, second)
+        self.assertEqual(page.count("| 2026-11-05T20:41Z"), 1)
+
+    def test_the_result_is_the_last_point(self) -> None:
+        self.loop["measurements"].append(
+            self._entry(201.6618, generated="2026-11-02T15:56Z"))
+        self.loop["measurements"].append(
+            self._entry(187.8722, generated="2026-11-05T20:41Z"))
+        page = pgo.report_markdown(self.loop)
+        self.assertLess(page.index("| Step time | 187.87 ms |"),
+                        page.index("## History"))
+
+    def test_a_page_without_a_trace_holds_no_breakdown(self) -> None:
+        self.loop["measurements"].append(
+            self._entry(187.8722, generated="2026-11-05T20:41Z"))
+        self.assertNotIn("## Step breakdown", pgo.report_markdown(self.loop))
+
+    def test_a_page_with_a_trace_lists_the_longest_kernels(self) -> None:
+        self.loop["measurements"].append(
+            self._entry(187.8722, generated="2026-11-05T20:41Z"))
+        analysis = {"step": {
+            "wall_ms": 192.88, "device_busy_percent": 94.4,
+            "kernels": [
+                {"name": "sm90_xmma_gemm_bf16bf16_bf16f32_f32_tn_n_"
+                          "tilesize128x128x64_warpgroupsize1x1x1_cublas",
+                 "count": 191, "device_ms": 25.99, "mean_us": 136.1},
+                {"name": "nanochat::kernels::<unnamed>::"
+                          "MuonBKernel(nanochat::MuonParams)",
+                 "count": 25, "device_ms": 1.83, "mean_us": 73.3},
+            ]}}
+        page = pgo.report_markdown(self.loop, analysis)
+        self.assertIn("## Step breakdown", page)
+        self.assertIn("94.4 percent of it with the device busy", page)
+        self.assertIn("| cuBLAS tn_n 128x128x64 | 25.99 | 191 | 136.1 |", page)
+        self.assertIn("| MuonBKernel | 1.83 | 25 | 73.3 |", page)
+
+    def test_a_refresh_replaces_the_page(self) -> None:
+        self.loop["measurements"].append(
+            self._entry(187.8722, generated="2026-11-05T20:41Z"))
+        first = pgo.write_report(self.folder, self.loop)
+        second = pgo.write_report(self.folder, self.loop)
+        self.assertEqual(first, second)
+        text = second.read_text(encoding="utf-8")
+        self.assertEqual(text, first.read_text(encoding="utf-8"))
+        self.assertEqual(text.count("# nanochat-d20-base-h100"), 1)
+
+    def test_a_page_without_a_measurement_says_so(self) -> None:
+        page = pgo.report_markdown(self.loop)
+        self.assertIn("No measurement yet.", page)
+        self.assertNotIn("## History", page)
+
+    def test_the_report_command_writes_the_page_of_one_name(self) -> None:
+        pgo.save_loop(self.loop, self.folder / "loop.json")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            status = pgo.main(["report", "--root", str(self.root),
+                               "--name", "nanochat-d20-base-h100",
+                               "--stage", "base", "--device", "h100"])
+        self.assertEqual(status, 0)
+        self.assertTrue((self.folder / pgo.REPORT_NAME).is_file())
+        self.assertEqual(json.loads(out.getvalue())["measurements"], 0)
+
+    def test_a_measurement_refreshes_the_page(self) -> None:
+        # The page must never be stale, so the measurement writes it itself.
+        self.folder.mkdir(parents=True, exist_ok=True)
+        (self.folder / "job.json").write_text(
+            json.dumps({"profile": "big", "batch": 16}), encoding="utf-8")
+        self.loop["job"] = str(self.folder / "job.json")
+        pgo.save_loop(self.loop, self.folder / "loop.json")
+        document = {"steps": 200, "runs": [{
+            "steps": 200, "step_ms": [190.0] * 10,
+            "tokens_per_second": 87000.0, "mfu": 0.22,
+            "stage_seconds": 40.0}]}
+
+        def fake_run(argv, *, dry_run=False):
+            # The shape the Modal CLI prints: the document, then its own lines.
+            return ("container chatter\n" + json.dumps(document, indent=1) +
+                    "\nApp completed.\n")
+
+        with mock.patch.object(pgo, "_run", fake_run):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                status = pgo.main(["measure", "--root", str(self.root),
+                                   "--name", "nanochat-d20-base-h100",
+                                   "--stage", "base", "--device", "h100",
+                                   "--point", "before"])
+        self.assertEqual(status, 0)
+        state = pgo.load_loop(self.folder / "loop.json")
+        self.assertEqual(len(state["measurements"]), 1)
+        self.assertEqual(state["measurements"][0]["point"], "before")
+        self.assertIn("--name nanochat-d20-base-h100",
+                      state["measurements"][0]["command"])
+        page = (self.folder / pgo.REPORT_NAME).read_text(encoding="utf-8")
+        self.assertIn("| Step time | 190.00 ms |", page)
+        self.assertIn("iter-01 before", page)
+        self.assertIn("profile `big`, batch 16", page)
+
+    def test_a_name_the_state_does_not_carry_is_a_fault(self) -> None:
+        pgo.save_loop(self.loop, self.folder / "loop.json")
+        out, errors = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(errors):
+            status = pgo.main(["report", "--root", str(self.root),
+                               "--name", "nanochat-d40-base-h100",
+                               "--stage", "base", "--device", "h100"])
+        self.assertEqual(status, 1)
+        self.assertIn("nanochat-d40-base-h100", errors.getvalue())
 
 
 if __name__ == "__main__":

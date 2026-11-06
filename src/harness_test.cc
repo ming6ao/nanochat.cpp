@@ -497,10 +497,9 @@ void TestModelFlagParsing() {
   }
 
   // `--value-embedding` is the model field that had no flag, so no stage
-  // command line could reproduce a base run with value embeddings off
-  // (docs/campaigns.md, defect B2). A boolean field takes exactly 0 or
-  // 1; a start value opposite to the one under test proves the write and not
-  // only the return value.
+  // command line could reproduce a base run with value embeddings off. A
+  // boolean field takes exactly 0 or 1; a start value opposite to the one
+  // under test proves the write and not only the return value.
   Config embedding;
   if (!nanochat::cli::ApplyModelFlag("--value-embedding", "0", &embedding) ||
       embedding.value_embedding) {

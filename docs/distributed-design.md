@@ -432,7 +432,7 @@ The CPU path keeps the GPU off the correctness path, as
 
 _Absorbed from the former `distributed-launch.md`. Its section numbers are
 unchanged, so a reference to a section of that document resolves to the same
-number here. The execution record is in [campaigns.md](campaigns.md)._
+number here._
 
 Status: delivered. `tools/nanochat dist` starts the rank group, and
 `python/nanochat_cpp/distributed.py` wraps it. The two-card notebook now uses
@@ -693,7 +693,7 @@ Gate: one short two-rank Kaggle run passes the checkpoint hash check.
 
 _Absorbed from the former `training-seam.md`. Its section numbers are
 unchanged, so a reference to a section of that document resolves to the same
-number here. The execution record is in [campaigns.md](campaigns.md)._
+number here._
 
 Status: partly delivered. The project completed the first increment of section
 8, and section 5 marks the fixed defects. This document specifies the boundary
@@ -1125,7 +1125,7 @@ interface work.
 
 _Absorbed from the former `distributed-native-plan.md`. Its section numbers are
 unchanged, so a reference to a section of that document resolves to the same
-number here. The execution record is in [campaigns.md](campaigns.md)._
+number here._
 
 This document is the execution plan for a native all-reduce backend. The backend
 replaces NCCL on the CUDA path. [distributed-design.md](distributed-design.md)

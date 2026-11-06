@@ -452,8 +452,6 @@ a machine user, or `--admin`. When only status checks gate `main`,
 - The project `AGENTS.md` stops the main agent from a commit without approval.
 - A prompt can grant the approval for the session. Example: "Commit to a
   branch and open a pull request. Do not merge."
-- A sliceme worker may commit in its own worktree. That exception already
-  exists.
 - Keep the merge as a human step. The agent opens the pull request.
 
 #### 7.7 Session lifetime
@@ -666,9 +664,9 @@ What the two legs share, so they cannot drift:
   point at.
 - Both functions pass the same `cpu=` value. Modal sizes the CPU by memory when
   `cpu=` is absent, so two legs with different memory would get different host
-  budgets, and gate G2 of `docs/campaigns.md` compares the
-  two base step times: an equal `cpu=` is what makes that comparison mean
-  something.
+  budgets, and gate G2 of [post-training.md](post-training.md) Part 3,
+  section 8 compares the two base step times: an equal `cpu=` is what makes
+  that comparison mean something.
 
 What only the entry point does:
 

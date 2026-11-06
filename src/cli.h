@@ -93,7 +93,7 @@ inline std::string EnvString(const char* name, const std::string& fallback) {
 
 // True when `flag` configures the shared model `Config`. Every field a stage
 // command line can set lives here, so a run recorded from a command line can be
-// reproduced from it (docs/campaigns.md, the six blockers).
+// reproduced from it.
 inline bool IsModelFlag(std::string_view flag) {
   return flag == "--layers" || flag == "--heads" || flag == "--kv-heads" ||
          flag == "--hidden" || flag == "--seq" || flag == "--vocab" ||

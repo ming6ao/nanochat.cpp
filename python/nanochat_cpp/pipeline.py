@@ -126,7 +126,7 @@ CORPUS_MANIFEST = "corpus.json"
 #: read, and a checkpoint write stalls one step, so a steady window must skip
 #: them. The window keeps every record after ``min(WARMUP_STEPS, steps // 4)``,
 #: so a short job still reports a number and a long job reports its settled
-#: steps (docs/campaigns.md, work row 4).
+#: steps.
 WARMUP_STEPS = 10
 
 #: The evaluator batch of the eval stage, in sequences. It is passed by hand
@@ -289,8 +289,7 @@ class Job:
     # one 65-token row per epoch and so pins `batch` to one. `files` reads the
     # parquet the job names, in place, and the tokenizer the job names, which
     # is how the H100 leg runs on real text: the Modal image downloads the file
-    # and trains the tokenizer, and the report names both
-    # (docs/campaigns.md, work row 3).
+    # and trains the tokenizer, and the report names both.
     corpus: str = "fixture"
     corpus_path: str = ""
     tokenizer_path: str = ""
@@ -801,7 +800,7 @@ def _files_corpus(job: "Job") -> dict:
     if not parquets:
         raise PipelineError(
             f"the job's corpus_path {job.corpus_path!r} holds no parquet file; "
-            f"name one file or a directory of them (docs/campaigns.md, work row 3)")
+            f"name one file or a directory of them")
     source = Path(job.tokenizer_path)
     if not source.is_file():
         raise PipelineError(

@@ -489,7 +489,7 @@ cc_test(
 
 _Absorbed from the former `correctness-gates.md`. Its section numbers are
 unchanged, so a reference to a section of that document resolves to the same
-number here. The execution record is in [campaigns.md](campaigns.md)._
+number here._
 
 Status: partly delivered. Section 6 lists the phases that are complete and the
 three open items, and section 9 lists the open questions. This document is Part
@@ -912,7 +912,7 @@ external fp8 golden for A6, and the `mma` loop. See section 9.
 
 _Absorbed from the former `numerics-integration.md`. Its section numbers are
 unchanged, so a reference to a section of that document resolves to the same
-number here. The execution record is in [campaigns.md](campaigns.md)._
+number here._
 
 This document defines an integration test for numeric agreement across three
 targets. The three targets are the CPU backend, the CUDA simulator, and the

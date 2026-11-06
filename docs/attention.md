@@ -724,7 +724,7 @@ tools/nanochat bench -- ./bazel-bin/src/nanochat_cli eval_bench --batch 8 --seq 
 
 _Absorbed from the former `attention-tensor-core.md`. Its section numbers are
 unchanged, so a reference to a section of that document resolves to the same
-number here. The execution record is in [campaigns.md](campaigns.md)._
+number here._
 
 Status: delivered for the decision and for option B. A non-fp32 build retires
 the fp32 tile, so every shape takes the cuBLAS forward there. Option A, the

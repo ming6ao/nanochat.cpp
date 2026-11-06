@@ -3,9 +3,9 @@
 This document holds the proposals that the tree does not implement. Each part
 states its goal, its measured problem, its design, and its gates.
 
-When the first phase of a part lands, move the part into a reference document
-and record the outcome in [campaigns.md](campaigns.md). No code cites a part of
-this document today, so nothing here is a promise about the current tree.
+When the first phase of a part lands, move the part into a reference document.
+No code cites a part of this document today, so nothing here is a promise about
+the current tree.
 
 Read [performance.md](performance.md) for the measurement protocol,
 [kernels.md](kernels.md) for the kernel seam, and [model.md](model.md) for the
@@ -150,7 +150,7 @@ behavior, so the kernel tests compare the two paths.
 | 0 | The seam, in both backends | The T1 classifier test passes on both paths, and the results agree bit for bit |
 | 1 | Allocate `classifier_stats_`, wire the model, pass null on eval | Train parity green |
 | 2 | Add `dlogit_scale` and remove the scale pass | `harness_test.cc` green, including the double accumulation |
-| 3 | Time the classifier | The numbers go to [campaigns.md](campaigns.md) |
+| 3 | Time the classifier | The numbers go to [baselines.json](baselines.json) |
 
 **Tests.** The classifier and oracle tests prove correctness and finite
 differences, `harness_test.cc` is the gate for the rejected option, and

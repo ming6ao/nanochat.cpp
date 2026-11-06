@@ -9,6 +9,11 @@ One target is one stage on one device: `base`, `sft`, `rl`, or `eval` on `h100`
 or `t4`. The loop measures the stage, collects a CUDA activity trace, ranks the
 costs the trace measured, lands the two largest, and measures the pair.
 
+One target is one folder under `profiles/pgo/`, and its name carries the shape,
+the stage, and the device: `nanochat-d20-base-h100` is the twenty-layer shape on
+one H100. Pass that name in `--name`. Without it the folder is
+`<stage>-<device>`.
+
 The design, the work rows, and the reasoning are in
 [`docs/performance.md`](../../../docs/performance.md) Part 1.
 Read it before the first iteration of a new target.
@@ -30,7 +35,8 @@ Four phases, one command each. The scripts forward to
 
 ```bash
 # 0. one target, one frozen job file
-tools/nanochat pgo init --stage base --device h100 --iterations 5 --job job.json
+tools/nanochat pgo init --name nanochat-d20-base-h100 --stage base \
+    --device h100 --iterations 5 --job job.json
 
 # 1. the baseline: two untraced runs, the better of the two stands
 .agents/skills/pgo/scripts/measure.py \
@@ -53,11 +59,13 @@ tools/nanochat pgo init --stage base --device h100 --iterations 5 --job job.json
     --stage base --device h100
 ```
 
-`tools/nanochat pgo status --stage base --device h100` prints what the loop
-needs next, so an interrupted session resumes in one command.
+`tools/nanochat pgo status --name nanochat-d20-base-h100 --stage base --device
+h100` prints what the loop needs next, so an interrupted session resumes in one
+command. `tools/nanochat pgo report` renders `RESULT.md`, which `measure` and
+`analyze` refresh on their own.
 
-The state lives in `profiles/pgo/<stage>-<device>/loop.json`, and one iteration
-writes `profiles/pgo/<stage>-<device>/iter-NN/`.
+The state lives in `profiles/pgo/<name>/loop.json`, and one iteration writes
+`profiles/pgo/<name>/iter-NN/`.
 
 ## The three agent roles
 
@@ -97,7 +105,7 @@ The measurement decides, and a missed forecast is not a failure.
 
 | Path | Holds |
 |---|---|
-| `profiles/pgo/<stage>-<device>/loop.json` | the state: baseline, history, rejected ideas |
+| `profiles/pgo/<name>/loop.json` | the state: baseline, history, rejected ideas |
 | `.../iter-NN/before/measurement.json` | two untraced runs |
 | `.../iter-NN/before/trace/` | the report, the SQLite copy, the timeline CSVs |
 | `.../iter-NN/before/chrome.json` | the Chrome trace. Open it in Perfetto |
@@ -107,7 +115,8 @@ The measurement decides, and a missed forecast is not a failure.
 | `.../iter-NN/after/measurement.json` | two untraced runs |
 | `.../iter-NN/verdict.json` | kept or reverted, with the noise check |
 | `.../iter-NN/DECISION.md` | one page: the pair, the numbers, the gate |
-| `profiles/pgo/<stage>-<device>/REPORT.md` | every iteration, both metrics |
+| `profiles/pgo/<name>/RESULT.md` | the status page: the last number, the history, the command, and the longest kernels |
+| `profiles/pgo/<name>/REPORT.md` | every iteration, both metrics |
 
 Git ignores the trace artifacts, because they are large. Keep `profile.log`:
 it holds the engine's own per-step lines for the traced run.

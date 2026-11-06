@@ -464,7 +464,7 @@ A Kaggle Notebook gives two T4 cards. See
 
 _Absorbed from the former `dependency-layering-plan.md`. Its section numbers
 are unchanged, so a reference to a section of that document resolves to the
-same number here. The execution record is in [campaigns.md](campaigns.md)._
+same number here._
 
 ### 1. Goals and non-goals
 

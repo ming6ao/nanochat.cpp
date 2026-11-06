@@ -393,9 +393,8 @@ Three results follow.
    arithmetic.** A step at either shape moved 64 tokens: one row of sequence 64,
    because the recorded job's `batch` field is 1. The host program around those
    tokens costs tens of milliseconds. The recorded T4 run of the chain is about
-   42 ms per step at the `demo` shape (`docs/campaigns.md`). The
-   largest device bound in the table is 3.6 ms, so most of the step time is not
-   device time at all.
+   42 ms per step at the `demo` shape. The largest device bound in the table is
+   3.6 ms, so most of the step time is not device time at all.
    Every family of the two `demo` rows reads `limit: launch` except the optimizer
    row of the T4 one, which reads `memory`; the H100 `standard` row answers the
    same way, launches everywhere but its optimizer row.

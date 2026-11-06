@@ -254,7 +254,7 @@ an image to maintain for no isolation we actually need.
 
 _Absorbed from the former `gpu-queue-plan.md`. Its section numbers are
 unchanged, so a reference to a section of that document resolves to the same
-number here. The execution record is in [campaigns.md](campaigns.md)._
+number here._
 
 Status: implemented. Owner: Architect. Replaces: the GPU lock in `tools/gpu.sh`.
 
@@ -748,46 +748,7 @@ A stage is not done until the default loop passes and the queue tests pass.
     whose row another worker removed, stops after the current job. A client
     retires a stale-lease orphan before it starts a replacement.
 
-### 15. Boundary with sliceme
-
-The queue belongs to this project. Do not move it into `sliceme`.
-
-Three facts decide the boundary.
-
-1. Sliceme removed GPU management on purpose. `sliceme/ownership.py` and
-   `sliceme/sandbox.py` reject a `gpu` field with the message "Sliceme does not
-   manage GPUs". The Sliceme history records the removal.
-2. The Sliceme database keeps no jobs table and no lease. Child execution
-   state belongs to pi-subagents. A queue in that database reverses the
-   decision.
-3. The Sliceme sandbox is isolation (`bwrap`, `unshare`, a project command). It
-   is not a resource budget. The isolation digest feeds the verification
-   fingerprint. A cgroup budget does not belong in that fingerprint.
-
-The two mechanisms meet at the project sandbox manifest. Sliceme already lets
-the project own test isolation through `sliceme.sandbox.json`. The `command`
-field is a prefix, and it receives `/bin/sh -lc "<command>"` as the final
-arguments.
-
-Ship this manifest in this project:
-
-```jsonc
-{
-  "version": 1,
-  "command": ["tools/nanochat", "gpuq", "submit", "--profile=t0-cpu", "--"]
-}
-```
-
-Sliceme then runs its combined-tree checks through the queue, and it never
-learns what a GPU is. A CPU-only campaign can point the command at
-`python/nanochat_cpp/sandbox.py` instead.
-
-The Sliceme worker does not submit jobs. The worker contract tells it not to run
-any test. The engine runs the checks. The interactive agent and the ad-hoc
-subagents call `tools/nanochat gpuq submit` directly. One mechanism serves all
-callers.
-
-### 16. Non-goals
+### 15. Non-goals
 
 - A change to the sandbox mechanism or to `profiles.json`.
 - A change to the fixture format, the C++ guard, or a frozen header.

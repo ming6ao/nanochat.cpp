@@ -120,7 +120,6 @@
     "cpu_train": {
       "date": "2026-10-04",
       "nanochat_cpp_revision": "124ceb0",
-      "branch": "sliceme/agent-cpu-backend",
       "host": {
         "vcpus": 12,
         "ram_gib": 7.8,
@@ -215,7 +214,6 @@
       "note": "Frozen Phase 0 baseline of the shipped CPU GEMM. The rows are the measured benchmark report of dev/kernels/cpu_gemm_bench at that revision. The shipped kernels::Gemm is a scalar triple loop with a double accumulator, so the run is single-threaded. Compare a later phase against these numbers with the same configuration.",
       "date": "2026-10-03",
       "revision": "4133998",
-      "branch": "sliceme/agent-cpu-backend",
       "threads": 1,
       "device": "CPU (GTX 1080 Ti present but not used)",
       "validated_on": "CPU (GTX 1080 Ti present but not used)",

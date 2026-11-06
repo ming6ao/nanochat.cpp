@@ -243,11 +243,10 @@ void CheckSandboxRule() {
   Check("init: ready", nanochat_init() == NANOCHAT_STATUS_OK);
 }
 
-// The capability gate of `nanochat_init` names the build's own precision
-// (docs/campaigns.md). The
-// expected name is computed here from the same two helpers the shim calls, not
-// pinned to `fp32`: today's build is fp32, so a literal would pass on the wrong
-// text and then fail to describe a bf16 build.
+// The capability gate of `nanochat_init` names the build's own precision.
+// The expected name is computed here from the same two helpers the shim
+// calls, not pinned to `fp32`: today's build is fp32, so a literal would pass
+// on the wrong text and then fail to describe a bf16 build.
 void CheckInitPrecisionGate() {
   const std::string precision_name =
       nanochat::PrecisionName(nanochat::BuildComputePrecision());

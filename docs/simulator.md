@@ -727,7 +727,7 @@ Status by section
 
 _Absorbed from the former `simulator-precision.md`. Its section numbers are
 unchanged, so a reference to a section of that document resolves to the same
-number here. The execution record is in [campaigns.md](campaigns.md)._
+number here._
 
 Status: partly delivered. Section 13 states each part, and
 [testing.md](testing.md) Part 1, section 6 holds the phase record.

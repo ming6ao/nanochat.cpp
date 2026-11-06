@@ -1038,7 +1038,7 @@ class CorpusFilesTest(unittest.TestCase):
     def test_a_manifest_keeps_a_stale_shard_out_of_the_run(self) -> None:
         # The directory outlives one download. A shard of another dataset sits
         # beside the shard the manifest names, and the run must read only the
-        # named one (docs/campaigns.md, work row 3).
+        # named one.
         folder = self.root / "volume"
         folder.mkdir()
         wanted = folder / "00_shard_00000.parquet"

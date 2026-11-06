@@ -740,7 +740,7 @@ Owner decisions:
 
 _Absorbed from the former `script-consolidation-plan.md`. Its section numbers
 are unchanged, so a reference to a section of that document resolves to the
-same number here. The execution record is in [campaigns.md](campaigns.md)._
+same number here._
 
 ### 0. Amendment: the sandbox moves to Python
 

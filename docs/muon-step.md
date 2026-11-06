@@ -139,8 +139,7 @@ the design of this document:
 
 The fusion lost 45 percent at the `big` step on the project card. The loss came
 from the GEMM, and not from the launch gaps, which the same rows state. The
-outcome and the defect list are in [campaigns.md](campaigns.md) under "The Muon
-fusion". The design there is [kernels.md](kernels.md) Part 1.
+design is [kernels.md](kernels.md) Part 1.
 
 The lesson this document takes from that campaign is one line: keep the GEMM on
 cuBLAS, and own the rest.
@@ -270,9 +269,9 @@ Gate: the rows exist, and the launch and elementwise share of the measured step
 is at or above 2 percent. That is the floor of the fusion campaign, and it is
 reused so the two campaigns compare.
 
-If the gate fails: stop, record a negative result in
-[campaigns.md](campaigns.md), and close the campaign with no code. The Muon stage
-is then below the measurement floor on this card.
+If the gate fails: stop, record a negative result in this document, and close
+the campaign with no code. The Muon stage is then below the measurement floor
+on this card.
 
 ### Phase 2: the two traffic merges
 
@@ -353,7 +352,7 @@ The identifiers `U1` and `U2` belong to this campaign.
 
 ## 10. The items this campaign closes
 
-[campaigns.md](campaigns.md) leaves six open items. Four of them touch this
+The fusion campaign leaves six open items. Four of them touch this
 subject, and this document closes them:
 
 | Item of the fusion campaign | Decision here |
@@ -397,7 +396,7 @@ simulator file.
 | `backends/cuda/kernels/muon.cu`, `muon_fused.cu`, `muon_benchmark.cc`, and the T1 tests | The kernel agent of the Muon family |
 | The graph facility beside `kernels::Gemm` | The kernel agent that owns `backends/cuda/gemm.cu` |
 | `tools/modal/app.py` | The Python surface |
-| `docs/baselines.json`, `docs/kernels.md`, `docs/campaigns.md`, and this document | The architect |
+| `docs/baselines.json`, `docs/kernels.md`, and this document | The architect |
 
 The Definition of Done for a merge is the checklist of `AGENTS.md` section 5.5.
 For this subject it adds four rows:
@@ -444,10 +443,7 @@ reader compares the two rows and not a number in prose.
 
 This document is a plan of record, and it retires when its last row lands:
 
-1. The evidence goes to `.sliceme/feat--muon-step.evidence.md`.
-2. The durable sections become [kernels.md](kernels.md) Part 2, with the section
+1. The durable sections become [kernels.md](kernels.md) Part 2, with the section
    numbers unchanged.
-3. The outcome, the defects, and the open items go to
-   [campaigns.md](campaigns.md).
-4. This file is deleted, and the index row in [README.md](README.md) is
+2. This file is deleted, and the index row in [README.md](README.md) is
    retargeted to Part 2.

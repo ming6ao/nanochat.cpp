@@ -32,12 +32,11 @@ class Tokenizer;
 
 // The schema version of the job, the metric record, and the summary.
 //
-// 2: the record carries `compute_seconds` and `data_seconds`
-//    (docs/campaigns.md, work row 4). Schema 1 measured
-//    `compute_seconds` and wrote it to the human log only, so a report could
-//    not split a step and could not attribute a slow one. An unknown field is
-//    ignored and an unknown version is rejected (docs/client-runtime-design.md
-//    section 10.1).
+// 2: the record carries `compute_seconds` and `data_seconds`. Schema 1
+//    measured `compute_seconds` and wrote it to the human log only, so a
+//    report could not split a step and could not attribute a slow one. An
+//    unknown field is ignored and an unknown version is rejected
+//    (docs/client-runtime-design.md section 10.1).
 inline constexpr int kMeshTrainSchemaVersion = 2;
 
 // One metric record, written as one JSON line in `metrics.jsonl`

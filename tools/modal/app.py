@@ -437,8 +437,7 @@ def _build_image(leg: Leg):
                                # an Ubuntu 22.04 image does not have. A deploy
                                # from a host that ran `tools/kaggle/bootstrap.sh`
                                # would otherwise build an image that cannot
-                               # compile (`docs/campaigns.md`
-                               # row 10).
+                               # compile.
                                ".bazelrc.local"])
         # Install the package at image build (section 6.4). The tree install
         # builds the distribution of python/pyproject.toml in place, so both

@@ -549,8 +549,7 @@ This phase changes the worker, so it needs its own document. The open items:
 ## Part 1. Reinforcement learning in a notebook
 
 _Absorbed from the former `rl-notebook.md`. Its section numbers are unchanged,
-so a reference to a section of that document resolves to the same number here.
-The execution record is in [campaigns.md](campaigns.md)._
+so a reference to a section of that document resolves to the same number here._
 
 Status: partly delivered. The hand-rolled loop, the one-call facade, the
 persistent worker, and the three-stage chain of section 9 exist. The
@@ -835,7 +834,7 @@ section 9 gives the three hosts and what each one records.
 
 _Absorbed from the former `pipeline-plan.md`. Its section numbers are
 unchanged, so a reference to a section of that document resolves to the same
-number here. The execution record is in [campaigns.md](campaigns.md)._
+number here._
 
 ### 4. Decisions
 
@@ -1312,7 +1311,7 @@ of this file, and this version keeps only its conclusions.
 
 _Absorbed from the former `pipeline-scaleup-plan.md`. Its section numbers are
 unchanged, so a reference to a section of that document resolves to the same
-number here. The execution record is in [campaigns.md](campaigns.md)._
+number here._
 
 ### 4. Decisions
 

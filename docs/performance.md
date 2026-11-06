@@ -322,7 +322,7 @@ boundary.
 
 _Absorbed from the former `profile-guided-optimization.md`. Its section numbers
 are unchanged, so a reference to a section of that document resolves to the
-same number here. The execution record is in [campaigns.md](campaigns.md)._
+same number here._
 
 Status: work rows 1, 2, 3, 6, 9, and 10 have landed, and section 12 records
 what each one left in the tree. Rows 4, 5, 7, and 8 remain open work.
@@ -502,9 +502,16 @@ The loop stops when any of these is true:
 
 ### 4. The artifact contract
 
+One target is one folder directly under the root, and its name carries the
+shape, the stage, and the device. The name is one path component, such as
+`nanochat-d20-base-h100`, so a path tells a reader which model it measures. The
+`--name` option sets it, and `<stage>-<device>` is the default.
+
 ```
-profiles/pgo/<stage>-<device>/
+profiles/pgo/<name>/
   loop.json                     the state: metric history, rejected ideas, spend
+  RESULT.md                     the status page: the last number, the history,
+                                the command, and the longest kernels
   iter-01/
     before/measurement.json     two untraced runs
     before/trace/               base.nsys-rep, timeline CSVs, sums
@@ -554,7 +561,7 @@ ls -d iter-* | sort | head -n -2 |
   xargs -r -I{} rm -rf {}/before/trace {}/before/chrome.json {}/after/trace
 ```
 
-The Chrome trace is the largest file: `profiles/pgo/base-h100/iter-01` held
+The Chrome trace is the largest file: `iter-01` of `nanochat-d8-base-h100` held
 150 MB in `before/chrome.json`. The directory `profiles/` held 915 MB in three
 targets. The budget for the whole directory is 2 GB. Run the command when the
 directory passes that budget, or when a campaign closes.
@@ -849,9 +856,9 @@ One target, one iteration, one H100 SXM card on Modal:
 | After, idea 1 alone | 64.76 ms | 63249 tokens/s | 1.5704 percent | 66.63, 64.76 ms |
 
 The pair gained 38.0 percent of the step and 58.4 percent of the MFU. The
-artifacts are in `profiles/pgo/base-h100/`, and `iter-01/DECISION.md` is the one
-page record. The trace of record, the pair, the gate, and the verdict all sit
-under `iter-01/`.
+artifacts are in `profiles/pgo/nanochat-d8-base-h100/`, and `iter-01/DECISION.md`
+is the one page record. The trace of record, the pair, the gate, and the verdict
+all sit under `iter-01/`.
 
 
 ---
@@ -972,7 +979,7 @@ seconds. The gate is at most 5 seconds per step. The gate result is pass.
 
 The end-to-end speedup against the 7.2 tokens/s baseline is 82.1 times.
 
-The revision is `124ceb0` on branch `sliceme/agent-cpu-backend`. The raw log is
+The revision is `124ceb0`. The raw log is
 `/tmp/cpu-gap-p4b-run2.log`. The machine-readable value is
 `/tmp/cpu-gap-p4b-e2e.json`.
 
@@ -1008,8 +1015,8 @@ The findings below describe the scalar baseline at revision `759083e`.
 Record the revision of this repository and the revision of the reference
 repository with every new measurement. The scalar baseline comes from
 `nanochat.cpp` revision `759083e` on branch `cpu`. The promoted baseline comes
-from `nanochat.cpp` revision `124ceb0` on branch `sliceme/agent-cpu-backend`.
-The reference is the PyTorch nanochat checkout.
+from `nanochat.cpp` revision `124ceb0`. The reference is the PyTorch nanochat
+checkout.
 
 #### Raw data
 
@@ -1362,7 +1369,7 @@ model-layout forward shape (`transpose_b = true`).
 
 | Item | Value |
 |---|---|
-| Revision | `0bc2fad`, branch `sliceme/agent-cpu-backend` |
+| Revision | `0bc2fad` |
 | Host | 12 vCPU under WSL2, 7.8 GiB RAM, one GTX 1080 Ti (not used) |
 | Kernel profile | `t3-bench` (12 threads) |
 | Bridge profile | `train` (8 threads) |
@@ -1585,7 +1592,7 @@ The raw benchmark report is `/tmp/cpu-gap-p2.json`. The report uses the
 
 #### 8. Phase 3 — optimizer and elementwise families — PASS
 
-Revision `283a511`, branch `sliceme/agent-cpu-backend`. The Phase 3 change
+Revision `283a511`. The Phase 3 change
 threads and vectorizes `MuonUpdate`, `ClassifierForward`,
 `ClassifierBackward`, `AttentionForward`, and `AttentionBackward`.
 

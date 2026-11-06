@@ -21,21 +21,27 @@ Bazel test needs no network, no GPU, and no Modal account.
 
 Typical use, one iteration::
 
-    python -m nanochat_cpp.pgo init --stage base --device h100 --job job.json
+    python -m nanochat_cpp.pgo init --name nanochat-d20-base-h100 \
+        --stage base --device h100 --job job.json
     python -m nanochat_cpp.pgo measure --before      # two untraced runs
     python -m nanochat_cpp.pgo trace                 # Nsight Systems on Modal
     python -m nanochat_cpp.pgo analyze               # signatures and ceilings
     #   the analyst writes ideas.json, the implementers write patch.diff
     python -m nanochat_cpp.pgo measure --after
     python -m nanochat_cpp.pgo compare --apply       # verdict.json, loop.json
+
+``measure`` and ``analyze`` refresh ``RESULT.md``, the status page of the
+target. ``report`` renders it again from the state alone.
 """
 
 from __future__ import annotations
 
 import argparse
 import csv
+import datetime
 import json
 import os
+import re
 import statistics
 import subprocess
 import sys
@@ -52,6 +58,14 @@ STAGES = ("base", "sft", "rl", "eval")
 
 #: The devices a target may name. One card each, on Modal.
 DEVICES = ("h100", "t4")
+
+#: The status page one target carries. It is a rendering of the state, so a
+#: refresh replaces the whole file and two refreshes cannot disagree.
+REPORT_NAME = "RESULT.md"
+
+#: The kernels the page lists. It answers which kernels cost the most and
+#: nothing else, so a longer table would only bury the answer.
+REPORT_KERNELS = 8
 
 MEASUREMENT_SCHEMA = "nanochat.pgo.measurement.v1"
 ANALYSIS_SCHEMA = "nanochat.pgo.analysis.v1"
@@ -810,9 +824,18 @@ class PgoError(Exception):
     """A fault the loop reports as a message and an exit status."""
 
 
-def run_root(root, stage: str, device: str) -> Path:
-    """The directory of one target: ``<root>/<stage>-<device>``."""
-    return Path(root) / f"{stage}-{device}"
+def run_root(root, stage: str, device: str, name: str = "") -> Path:
+    """The directory of one target: ``<root>/<name>``.
+
+    The name is the target's own label, and it carries the shape, the stage, and
+    the device in one path component, such as ``nanochat-d20-base-h100``. One
+    level under the root keeps the path short and tells a reader which model the
+    folder measures. Without a name the label is ``<stage>-<device>``.
+    """
+    label = str(name or f"{stage}-{device}")
+    if "/" in label or "\\" in label or label in (".", ".."):
+        raise PgoError(f"the target name {label!r} is not one path component")
+    return Path(root) / label
 
 
 def iteration_dir(folder, iteration: int) -> Path:
@@ -820,7 +843,7 @@ def iteration_dir(folder, iteration: int) -> Path:
     return Path(folder) / f"iter-{int(iteration):02d}"
 
 
-def new_loop(stage: str, device: str, *, job: str = "",
+def new_loop(stage: str, device: str, *, name: str = "", job: str = "",
              max_iterations: int = DEFAULT_MAX_ITERATIONS,
              threshold: float = DEFAULT_THRESHOLD,
              trace_steps: int = DEFAULT_TRACE_STEPS,
@@ -836,6 +859,7 @@ def new_loop(stage: str, device: str, *, job: str = "",
     metric, direction = METRICS[stage]
     return {
         "schema": LOOP_SCHEMA,
+        "name": str(name or f"{stage}-{device}"),
         "target": {"stage": stage, "device": device},
         "job": str(job),
         "budget": {"trace_steps": int(trace_steps),
@@ -845,6 +869,7 @@ def new_loop(stage: str, device: str, *, job: str = "",
         "max_iterations": int(max_iterations),
         "iteration": 1,
         "baseline": None,
+        "measurements": [],
         "history": [],
         "rejected": [],
     }
@@ -947,6 +972,202 @@ def _pair_below_bar(loop: Mapping) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# The status page one target carries
+# ---------------------------------------------------------------------------
+
+
+def _now() -> str:
+    """The current time in the form a page header carries."""
+    return datetime.datetime.now(datetime.timezone.utc).strftime(
+        "%Y-%m-%dT%H:%MZ")
+
+
+def _git(arguments: Sequence[str]) -> str:
+    """One git answer, or an empty string when git cannot give one."""
+    root = Path(__file__).resolve().parents[2]
+    try:
+        result = subprocess.run(["git", "-C", str(root), *arguments],
+                                capture_output=True, text=True, check=False)
+    except OSError:
+        return ""
+    return result.stdout.strip() if result.returncode == 0 else ""
+
+
+def measurement_entry(measurement: Mapping, *, point: str, iteration: int,
+                      command: str, modal: str = "", generated: str = "",
+                      revision: str = "", clean: bool = True) -> dict:
+    """One row of the history: the number, when it was taken, and what ran.
+
+    The row is what the page shows and what a reader needs to judge the number:
+    the time, the revision, whether the tree was dirty, and both command lines.
+    """
+    return {
+        "generated": str(generated),
+        "revision": str(revision),
+        "clean": bool(clean),
+        "iteration": int(iteration),
+        "point": str(point),
+        "command": str(command),
+        "modal": str(modal),
+        "step_ms": measurement.get("step_ms"),
+        "tokens_per_second": measurement.get("tokens_per_second"),
+        "mfu": measurement.get("mfu"),
+        "runs": [run.get("step_ms") for run in measurement.get("runs") or ()],
+    }
+
+
+def _cell(value, digits: int = 2, suffix: str = "") -> str:
+    """A number a table cell can hold, or a dash when the run reported none."""
+    if value is None:
+        return "-"
+    return f"{float(value):.{digits}f}{suffix}"
+
+
+def _percent(value) -> str:
+    """A share the container reported as a fraction, as a percentage."""
+    return "-" if value is None else f"{100.0 * float(value):.2f} percent"
+
+
+def _runs(entry: Mapping) -> str:
+    """The two runs of one point, because their spread is the noise check."""
+    values = [value for value in entry.get("runs") or () if value is not None]
+    return ", ".join(_cell(value, 2) for value in values) or "-"
+
+
+def _point(entry: Mapping) -> str:
+    """Which point of which iteration a history row belongs to."""
+    number = entry.get("iteration")
+    point = entry.get("point") or "-"
+    return f"iter-{int(number):02d} {point}" if number else str(point)
+
+
+def _kernel_name(name: str) -> str:
+    """A kernel name a table cell can hold, with its family kept."""
+    text = str(name)
+    if "_cublas" in text:
+        tile = re.search(r"tilesize(\d+x\d+x\d+)", text)
+        layout = re.search(r"_f32_([a-z]{2}_[a-z])_", text)
+        parts = ["cuBLAS", layout.group(1) if layout else "",
+                 tile.group(1) if tile else ""]
+        return " ".join(part for part in parts if part)
+    if "cutlass" in text:
+        shape = re.search(r"(\d+x\d+_\d+x\d+|\d+x\d+_\d+)_([a-z]{2})_align\d",
+                          text)
+        if shape:
+            return f"cutlass {shape.group(1)} {shape.group(2)}"
+    head = text.split("(")[0]
+    head = head.replace("nanochat::kernels::", "").replace("<unnamed>::", "")
+    return head if len(head) <= 48 else head[:45] + "..."
+
+
+def report_markdown(loop: Mapping, analysis: Mapping | None = None) -> str:
+    """The status page of one target: the last number, the history, the kernels.
+
+    The page is a rendering of the state and not a record of its own, so a
+    refresh replaces it. Nothing in it is written by hand, and no prose grows:
+    a reader sees when a number was taken and what was run for it.
+    """
+    rows = list(loop.get("measurements") or ())
+    latest = rows[-1] if rows else {}
+    target = loop.get("target") or {}
+    name = loop.get("name") or f"{target.get('stage')}-{target.get('device')}"
+    lines = [f"# {name}", ""]
+    if latest:
+        revision = latest.get("revision")
+        state = "clean" if latest.get("clean") else "dirty"
+        stamp = latest.get("generated") or "-"
+        if revision:
+            lines += [f"Generated {stamp}, revision `{revision}`, tree "
+                      f"{state}.", ""]
+        else:
+            lines += [f"Generated {stamp}; the revision was not recorded.", ""]
+        lines += ["```text", str(latest.get("command") or "")]
+        if latest.get("modal"):
+            lines.append(str(latest["modal"]))
+        lines += ["```", ""]
+        job = _job_line(loop)
+        if job:
+            lines += [job, ""]
+        lines += ["## Result", "", "| Metric | Value |", "|---|---|",
+                  f"| Step time | {_cell(latest.get('step_ms'), 2, ' ms')} |",
+                  f"| Throughput | "
+                  f"{_cell(latest.get('tokens_per_second'), 0, ' tokens/s')} |",
+                  f"| MFU | {_percent(latest.get('mfu'))} |",
+                  f"| The two runs | {_runs(latest)} ms |", ""]
+    else:
+        lines += ["No measurement yet.", ""]
+    if rows:
+        lines += ["## History", "",
+                  "| Generated | Point | Revision | Step ms | tokens/s | MFU |",
+                  "|---|---|---|---|---|---|"]
+        for row in rows:
+            lines.append(
+                f"| {row.get('generated') or '-'} | {_point(row)} | "
+                f"`{row.get('revision') or '-'}` | "
+                f"{_cell(row.get('step_ms'))} | "
+                f"{_cell(row.get('tokens_per_second'), 0)} | "
+                f"{_percent(row.get('mfu'))} |")
+        lines.append("")
+    kernels = ((analysis or {}).get("step") or {}).get("kernels") or ()
+    if kernels:
+        step = (analysis or {}).get("step") or {}
+        lines += ["## Step breakdown", "",
+                  f"One step of the trace: {_cell(step.get('wall_ms'))} ms, "
+                  f"{_cell(step.get('device_busy_percent'), 1)} percent of "
+                  "it with the device busy.", "",
+                  "| Kernel | Device ms | Launches | Mean us |",
+                  "|---|---|---|---|"]
+        for kernel in list(kernels)[:REPORT_KERNELS]:
+            lines.append(f"| {_kernel_name(kernel.get('name') or '')} | "
+                         f"{_cell(kernel.get('device_ms'))} | "
+                         f"{kernel.get('count')} | "
+                         f"{_cell(kernel.get('mean_us'), 1)} |")
+        lines.append("")
+    return "\n".join(lines)
+
+
+def _job_line(loop: Mapping) -> str:
+    """One line naming the frozen job and its shape."""
+    path = Path(str(loop.get("job") or ""))
+    if not path.is_file():
+        return ""
+    try:
+        job = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ""
+    shape = []
+    if job.get("profile"):
+        shape.append(f"profile `{job['profile']}`")
+    if job.get("batch"):
+        shape.append(f"batch {job['batch']}")
+    return f"Job `{path.name}`: " + ", ".join(shape) + "." if shape else ""
+
+
+def write_report(folder, loop: Mapping, analysis: Mapping | None = None) -> Path:
+    """Render the page of one target, replacing whatever the last run wrote."""
+    path = Path(folder) / REPORT_NAME
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(report_markdown(loop, analysis), encoding="utf-8")
+    return path
+
+
+def latest_analysis(folder, loop: Mapping) -> dict:
+    """The analysis of the most recent iteration that has one, or ``{}``."""
+    found = None
+    for number in range(1, int(loop.get("iteration") or 1) + 1):
+        path = iteration_dir(folder, number) / "before" / "analysis.json"
+        if path.is_file():
+            found = path
+    if found is None:
+        return {}
+    try:
+        return json.loads(found.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+
+# ---------------------------------------------------------------------------
 # The commands the loop runs, and the answers it reads
 # ---------------------------------------------------------------------------
 
@@ -1027,7 +1248,8 @@ def _run(argv: Sequence[str], *, dry_run: bool = False) -> str:
 
 def _target(options) -> tuple[dict, Path]:
     """The loop document and its folder, from one parsed command line."""
-    folder = run_root(options.root, options.stage, options.device)
+    folder = run_root(options.root, options.stage, options.device,
+                      name=options.name)
     return load_loop(folder / "loop.json"), folder
 
 
@@ -1040,7 +1262,8 @@ def _write(path, document) -> Path:
 
 
 def _cmd_init(options) -> int:
-    folder = run_root(options.root, options.stage, options.device)
+    folder = run_root(options.root, options.stage, options.device,
+                      name=options.name)
     loop_path = folder / "loop.json"
     if loop_path.is_file() and not options.force:
         raise PgoError(f"{loop_path} exists; pass --force to replace it")
@@ -1053,16 +1276,33 @@ def _cmd_init(options) -> int:
         _write(folder / "job.json",
                json.loads(source.read_text(encoding="utf-8")))
         job_copy = str(folder / "job.json")
-    loop = new_loop(options.stage, options.device, job=job_copy,
+    loop = new_loop(options.stage, options.device, name=options.name,
+                    job=job_copy,
                     max_iterations=options.iterations,
                     threshold=options.threshold,
                     trace_steps=options.steps,
                     seconds=options.seconds, runs=options.runs)
     save_loop(loop, loop_path)
+    report = write_report(folder, loop)
     print(json.dumps({"loop": str(loop_path), "target": loop["target"],
-                      "job": job_copy, "next": next_action(loop, folder)},
+                      "job": job_copy, "report": str(report),
+                      "next": next_action(loop, folder)},
                      indent=1, sort_keys=True))
     return 0
+
+
+def _run_id(loop: Mapping, point: str = "") -> str:
+    """The name of one Modal run: the target, the iteration, and the point.
+
+    The target name is in it because two targets can measure the same stage on
+    the same device, and their runs must not share a folder in the volume.
+    """
+    name = str(loop.get("name") or
+               f"{loop['target']['stage']}-{loop['target']['device']}")
+    parts = [f"pgo-{name}", f"i{int(loop['iteration']):02d}"]
+    if point:
+        parts.append(str(point))
+    return "-".join(parts)
 
 
 def _cmd_trace(options) -> int:
@@ -1071,8 +1311,7 @@ def _cmd_trace(options) -> int:
     job_path = loop.get("job") or options.job
     if not job_path:
         raise PgoError("the loop names no job file; run `pgo init --job`")
-    run_id = f"pgo-{loop['target']['stage']}-{loop['target']['device']}" \
-             f"-i{int(loop['iteration']):02d}"
+    run_id = _run_id(loop)
     argv = trace_command(stage=loop["target"]["stage"],
                          device=loop["target"]["device"], run_id=run_id,
                          job_path=job_path,
@@ -1110,8 +1349,7 @@ def _cmd_measure(options) -> int:
     job_path = loop.get("job") or options.job
     if not job_path:
         raise PgoError("the loop names no job file; run `pgo init --job`")
-    run_id = f"pgo-{loop['target']['stage']}-{loop['target']['device']}" \
-             f"-i{int(loop['iteration']):02d}-{point}"
+    run_id = _run_id(loop, point)
     argv = measure_command(stage=loop["target"]["stage"],
                            device=loop["target"]["device"], run_id=run_id,
                            job_path=job_path,
@@ -1132,8 +1370,18 @@ def _cmd_measure(options) -> int:
                             "metric": measurement["metric"]["name"],
                             "mfu": measurement.get("mfu"),
                             "measurement": measurement}
-        save_loop(loop, folder / "loop.json")
+    # Every measurement joins the history, so the page shows when each number
+    # was taken and which tree produced it.
+    loop.setdefault("measurements", []).append(measurement_entry(
+        measurement, point=point, iteration=int(loop["iteration"]),
+        command=_measure_command_line(options, loop, point),
+        modal=" ".join(argv), generated=_now(),
+        revision=_git(("rev-parse", "--short", "HEAD")),
+        clean=_tree_clean()))
+    save_loop(loop, folder / "loop.json")
+    report = write_report(folder, loop, latest_analysis(folder, loop))
     print(json.dumps({"measurement": str(path),
+                      "report": str(report),
                       "value": measurement["value"],
                       "metric": measurement["metric"]["name"],
                       "step_ms": measurement["step_ms"],
@@ -1141,6 +1389,21 @@ def _cmd_measure(options) -> int:
                       "mfu": measurement.get("mfu")},
                      indent=1, sort_keys=True))
     return 0
+
+
+def _tree_clean() -> bool:
+    """True when the measured tree has no uncommitted change."""
+    return not _git(("status", "--porcelain"))
+
+
+def _measure_command_line(options, loop: Mapping, point: str) -> str:
+    """The `pgo measure` line that produced one point, so a reader repeats it."""
+    parts = ["tools/nanochat pgo measure", "--root", str(options.root)]
+    if options.name:
+        parts += ["--name", str(options.name)]
+    parts += ["--stage", str(loop["target"]["stage"]),
+              "--device", str(loop["target"]["device"]), "--point", point]
+    return " ".join(parts)
 
 
 def _cmd_analyze(options) -> int:
@@ -1158,7 +1421,9 @@ def _cmd_analyze(options) -> int:
     loop["analysis"] = {"signatures": analysis["signatures"],
                         "rank": analysis["rank"]}
     save_loop(loop, folder / "loop.json")
+    report = write_report(folder, loop, analysis)
     print(json.dumps({"analysis": str(path), "chrome": str(trace_json),
+                      "report": str(report),
                       "step_wall_ms": analysis["step"]["wall_ms"],
                       "device_busy_percent":
                           analysis["step"]["device_busy_percent"],
@@ -1166,6 +1431,18 @@ def _cmd_analyze(options) -> int:
                                       "ceiling": row["ceiling"]}
                                      for row in analysis["signatures"]],
                       "rank": analysis["rank"]}, indent=1, sort_keys=True))
+    return 0
+
+
+def _cmd_report(options) -> int:
+    loop, folder = _target(options)
+    analysis = latest_analysis(folder, loop)
+    path = write_report(folder, loop, analysis)
+    print(json.dumps({"report": str(path),
+                      "measurements": len(loop.get("measurements") or ()),
+                      "breakdown": bool((analysis.get("step") or {})
+                                        .get("kernels"))},
+                     indent=1, sort_keys=True))
     return 0
 
 
@@ -1220,8 +1497,16 @@ def _parser() -> argparse.ArgumentParser:
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--root", default=argparse.SUPPRESS,
                         help="the directory that holds one folder per target")
+    common.add_argument("--name", default=argparse.SUPPRESS,
+                        help="the folder of one target, such as "
+                             "nanochat-d20-base-h100; the default is "
+                             "<stage>-<device>")
     parser.add_argument("--root", default="profiles/pgo",
                         help="the directory that holds one folder per target")
+    parser.add_argument("--name", default="",
+                        help="the folder of one target, such as "
+                             "nanochat-d20-base-h100; the default is "
+                             "<stage>-<device>")
     sub = parser.add_subparsers(dest="command", required=True)
 
     def target_arguments(cmd):
@@ -1277,6 +1562,9 @@ def _parser() -> argparse.ArgumentParser:
 
     status = command("status", help="what the loop needs next")
     status.set_defaults(handler=_cmd_status)
+
+    report_cmd = command("report", help="render the status page of one target")
+    report_cmd.set_defaults(handler=_cmd_report)
     return parser
 
 

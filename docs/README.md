@@ -8,8 +8,8 @@ evolution rules in [model-and-device-bringup.md](model-and-device-bringup.md).
 This directory is the whole reference.
 
 One document covers one subject. When a subject needs a campaign plan, the plan
-is absorbed by the reference document when its last row lands, and the outcome
-goes to [campaigns.md](campaigns.md). The rule is at the end of this page.
+is absorbed by the reference document when its last row lands. The rule is at
+the end of this page.
 
 ## Seams, build, and models
 
@@ -66,12 +66,11 @@ goes to [campaigns.md](campaigns.md). The rule is at the end of this page.
 
 ## The records
 
-Two files hold the history. Neither is a reference for how the tree behaves
+One file holds the history. It is not a reference for how the tree behaves
 today.
 
 | File | Contents |
 |---|---|
-| [campaigns.md](campaigns.md) | One section per finished campaign: the dates, the outcome, the defects it found, the open items, and the evidence path. Read it before you reopen a settled question |
 | [baselines.json](baselines.json) | The measured baselines: `attention`, `attention_e2e`, `cpu_train`, `cpu_gemm`, and `muon`. Each entry names the command that produced it and the revision. Update an entry only with a real run, and keep `validated_on` naming the device that measured it |
 
 ## The contract vocabulary, `spec/`
@@ -106,13 +105,10 @@ a new campaign does not, because a campaign is a record and not a reference.
 
 A plan is retired as soon as its last row lands:
 
-1. The evidence goes to `.sliceme/feat--<campaign>.evidence.md`.
-2. The durable sections move into the reference document, under a part heading.
+1. The durable sections move into the reference document, under a part heading.
    The section numbers of an absorbed document do not change, so every existing
    reference still resolves. A reference then reads "Part N, section K".
-3. The outcome, the defect list, and the open items go to
-   [campaigns.md](campaigns.md).
-4. The plan file is deleted, and every reference to it is retargeted.
+2. The plan file is deleted, and every reference to it is retargeted.
 
 New here? Start with [../README.md](../README.md) for the quickstart, then
 [build.md](build.md) § Layers for the shape of the system.

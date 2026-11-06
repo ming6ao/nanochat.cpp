@@ -36,7 +36,7 @@ happen through the integrator.
 | **Kernel agents** (one per family) | `backends/cuda/kernels/<family>.cu` + `<family>_test.cc` + `<family>_benchmark.cc` in the same directory | frozen `kernels.h` |
 | **Kernel agents** (shared) | `backends/cuda/kernels/testing/**` (host test scaffolding), `dev/kernels/**` (unpromoted prototypes) | — |
 | **Collective** | `backends/cuda/collective/**`, `dev/collective/**` | frozen `kernels.h`, `src/rendezvous.h` |
-| **Workflow** | `src/ops.cc`, `src/model.cc`, `src/generate.cc` (the rollout seed mix, B4 of `docs/campaigns.md`), and the private headers those units own: `src/model_factory.{h,cc}`, `src/inference_view.h`, `src/kernel_params_check.h`, `src/fp8_policy.h` | `kernels.h`, CPU backend |
+| **Workflow** | `src/ops.cc`, `src/model.cc`, `src/generate.cc` (the rollout seed mix), and the private headers those units own: `src/model_factory.{h,cc}`, `src/inference_view.h`, `src/kernel_params_check.h`, `src/fp8_policy.h` | `kernels.h`, CPU backend |
 | **Optimizer** | `src/optim.cc` | `kernels.h` |
 | **Harness** | `src/cli.{h,cc}`, `src/command.h`, `src/commands.cc`, `src/nanochat_cli.cc`, `src/*_command.cc`, `src/plan_main.cc`, `src/train.cc`, `src/data.cc`, `src/eval.cc`, `src/performance_model.cc`, `src/device_profile.cc`, `include/nanochat/{data,scheduler,logger,mfu}.h` | Model API |
 | **Python surface** | `python/**` except `cli.py` and `_entry.py` (`pipeline.py` and `tests/pipeline_test.py` are here), `bindings/**`, `tools/modal/app.py`, `tools/modal/modal_app_test.py` | C ABI `capi.h`, Model API |
@@ -300,9 +300,9 @@ This keeps GPU time bounded and predictable.
 - Shared docs (`README.md`, `AGENTS.md`, `CONTRIBUTING.md`, `docs/**`) are
   architect-owned.
 - One document covers one subject. A campaign plan is not a document: its
-  durable sections move into the reference document when its last row lands,
-  and its outcome goes to `docs/campaigns.md`. The retirement rule is at the
-  end of `docs/README.md`. Do not add a `*-plan.md` file expecting it to stay.
+  durable sections move into the reference document when its last row lands.
+  The retirement rule is at the end of `docs/README.md`. Do not add a
+  `*-plan.md` file expecting it to stay.
 
 ---
 

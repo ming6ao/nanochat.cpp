@@ -626,7 +626,7 @@ def build_mixture_records(seed=42, real=False) -> tuple[dict, dict]:
     ``real`` replaces the synthetic task set with the reference hub tasks:
     that path downloads SmolTalk, MMLU, and GSM8K and needs ``datasets`` and
     ``pyarrow``. It exists so a reviewer can verify the real order by hand once
-    (docs/campaigns.md) and is not part of any gate.
+    and is not part of any gate.
     """
     if not real:
         return _mixture_record(MIXTURE, seed), _mixture_record(

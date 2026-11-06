@@ -185,8 +185,8 @@ The sampled stream is derived per row, per prompt, and per step: `GenerateBatch`
 mixes the row index and the decode step into the seed before each decode call,
 and `GenerateMultiPrompt` mixes the prompt index, so row `r` of a batch draws the
 same quantile as row `r` of a one-row run at that seed and no two rows draw the
-same one (blocker B4 of `docs/campaigns.md`). Every recorded sampled
-evaluation number therefore moved once, at that change.
+same one. Every recorded sampled evaluation number therefore moved once, at
+that change.
 
 No fixture moved with it. `tests/data/generate_parity.bin` records greedy output
 at temperature 0, which draws no random value, and `tests/data/rl_parity.bin`
@@ -623,7 +623,7 @@ mark it `open` until measured.
 
 _Absorbed from the former `sft-parity-plan.md`. Its section numbers are
 unchanged, so a reference to a section of that document resolves to the same
-number here. The execution record is in [campaigns.md](campaigns.md)._
+number here._
 
 ### 2. What the label requires
 

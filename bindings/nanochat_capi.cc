@@ -332,7 +332,7 @@ nanochat_status nanochat_init(void) {
     // instead of failing inside the first kernel launch (docs/build.md). The
     // message names the build's own precision, never a literal: a bf16 build
     // must report bf16, or the failure on the device leg would contradict the
-    // build it came from (docs/campaigns.md).
+    // build it came from.
     const nanochat::Caps caps = nanochat::kernels::GetCaps();
     if (!caps.Supports(nanochat::kComputeDType)) {
       const std::string precision_name =
