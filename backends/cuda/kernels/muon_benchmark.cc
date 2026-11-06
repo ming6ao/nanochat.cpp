@@ -602,32 +602,39 @@ int main(int argc, char** argv) {
                        " groups, ns=" + std::to_string(ns_steps),
                    muon_ms, gflops);
       }
-      // The same two measurements through the fused path, over the same
-      // buffers. A reader compares `muon:` with `muon_fused:` row by row: the
-      // group rows are the decision `MuonFusedSelected` is set from, and the
-      // driver in the shape column is the one the card answered with.
-      for (std::size_t i = 0; i < bench.groups.size(); ++i) {
-        const Group& group = bench.groups[i];
-        const double one_flops = IterationFlops(group) * kPolarIters;
-        MuonFusedDriver driver = MuonFusedDriver::kAuto;
-        const double ms = bench.FusedGroupMs(opt, i, kPolarIters, &driver);
-        const double gflops = 1e-9 * one_flops / (ms * 1e-3);
-        report.Add("muon_fused:" + shape + ":" + GroupLabel(group),
-                   "batch=" + std::to_string(group.num_params) +
-                       ", driver=" + MuonFusedDriverName(driver),
-                   ms, gflops);
+      // The fused schedule is fp32: its workspace is sized in float elements
+      // and its passes load float quads, so a bf16 build must not reach it
+      // (docs/muon-step.md defect U1). One line says why the rows are absent.
+      if constexpr (!nanochat::kComputeIsBf16) {
+        // The same two measurements through the fused path, over the same
+        // buffers. A reader compares `muon:` with `muon_fused:` row by row: the
+        // group rows are the decision `MuonFusedSelected` is set from, and the
+        // driver in the shape column is the one the card answered with.
+        for (std::size_t i = 0; i < bench.groups.size(); ++i) {
+          const Group& group = bench.groups[i];
+          const double one_flops = IterationFlops(group) * kPolarIters;
+          MuonFusedDriver driver = MuonFusedDriver::kAuto;
+          const double ms = bench.FusedGroupMs(opt, i, kPolarIters, &driver);
+          const double gflops = 1e-9 * one_flops / (ms * 1e-3);
+          report.Add("muon_fused:" + shape + ":" + GroupLabel(group),
+                     "batch=" + std::to_string(group.num_params) +
+                         ", driver=" + MuonFusedDriverName(driver),
+                     ms, gflops);
+        }
+        for (int ns_steps : {0, 1, kPolarIters}) {
+          MuonFusedDriver driver = MuonFusedDriver::kAuto;
+          const double fused_ms = bench.FusedStepMs(opt, ns_steps, &driver);
+          const double gflops =
+              1e-9 * step_flops * ns_steps / kPolarIters / (fused_ms * 1e-3);
+          report.Add("muon_fused:" + shape + ":step",
+                     std::to_string(bench.groups.size()) +
+                         " groups, ns=" + std::to_string(ns_steps) +
+                         ", driver=" + MuonFusedDriverName(driver),
+                     fused_ms, gflops);
+        }
       }
-      for (int ns_steps : {0, 1, kPolarIters}) {
-        MuonFusedDriver driver = MuonFusedDriver::kAuto;
-        const double fused_ms = bench.FusedStepMs(opt, ns_steps, &driver);
-        const double gflops =
-            1e-9 * step_flops * ns_steps / kPolarIters / (fused_ms * 1e-3);
-        report.Add("muon_fused:" + shape + ":step",
-                   std::to_string(bench.groups.size()) +
-                       " groups, ns=" + std::to_string(ns_steps) +
-                       ", driver=" + MuonFusedDriverName(driver),
-                   fused_ms, gflops);
-      }
+    } else {
+      std::printf("muon_fused: skipped, the fused path is fp32 only\n");
     }
     report.Print(opt);
     if (verbose) std::printf("\n");
