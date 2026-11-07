@@ -346,8 +346,8 @@ number, and only an address sanitizer or a card would show it.
 **Where the campaign stands.** A1 to A4 are done, and with them the off-device
 half of B2: the kernel's arithmetic and its full contract are checked by
 `tools/nanochat test` on a machine with no card. The rate gates (G3 and G4) and
-G2 on hardware need D1. B3's `gemm.cu` dispatch, B4's schedule sweep, and B5's
-promotion are open, as is the fp8 kernel (D3).
+G2 on hardware need D1. B4's schedule sweep and B5's promotion are open, as is
+the fp8 kernel (D3).
 
 ## A.9 Optional stage: the tensor-core attention tile
 
@@ -469,9 +469,48 @@ small `m`: a batch-1 decode call with `m` of 1 wastes a tensor-core tile, and
 | B0 | The host scaffolding: `GemmPlan` as pure host code, with the tile choice, the rounding up, the bounds, the epilogue expression, and the stride inference | Passes on this machine | `tools/nanochat test //backends/cuda/gemm:gemm_tile_test` |
 | B1 | The `sm_80` kernel, forward only, one shape, no batch, no transpose, `beta = 0` | SA over the emulated leg, then agreement with cuBLAS at 1e-3 absolute | `tools/nanochat simulate --device h100 --suite gemm --precision bf16` |
 | B2 | The full contract: four transpose forms, batch, three leading dimensions, strides, alpha and beta, and the fp32 store | The seven cases of `//backends/cuda:cuda_runtime_gpu_test`, plus ragged tiles and a batch of 3, on both copy arms | `tools/nanochat test --gpu //backends/cuda/gemm:gemm_gpu_test` |
-| B3 | The closed list and the benchmark. One report row per shape, hand against cuBLAS, in the `nanochat.bench.v3` schema | 0.70 on at least one Muon group and one Linear shape | `tools/nanochat bench -- bazel-bin/backends/cuda/gemm/gemm_benchmark --json --out /tmp/gemm-bf16.json` |
+| B3 | The dispatch: the closed list, the verdict, and the `NANOCHAT_GEMM_LIB` switch | The T0 gate, and no shape changes hands while its bit is inert | `tools/nanochat test //backends/cuda/gemm:dispatch_test` |
 | B4 | The schedule sweep, recorded. Three or four schedules, each a report row and a `docs/baselines.json` entry | 0.85 on the D5 group, then on a named shape set | `tools/nanochat bench`, twice per schedule |
-| B5 | The dispatch table, the `NANOCHAT_GEMM_LIB` switch, and the promotion | No enabled shape slower than cuBLAS | The same benchmark, once with `auto` and once with `hand` |
+| B5 | The measurement and the promotion: one report row per shape, the tile against cuBLAS, then the bits that pass | 0.70 on one Muon row and one Linear shape, 0.85 for a replacement, and no enabled shape slower than cuBLAS | `tools/nanochat bench -- bazel-bin/backends/cuda/gemm/gemm_benchmark --json --out /tmp/gemm-bf16.json` |
+
+**B3 landed.** The dispatch is one verdict between the seam and cuBLAS, and it
+changes nothing until a measurement turns a bit on.
+
+| File | What |
+|---|---|
+| `backends/cuda/kernels/muon_gemm_shape.h` | The three Polar Express shapes of one group. `muon.cu` issues them, and the table reads the same three, so the call sites and the closed list cannot drift |
+| `backends/cuda/gemm/gemm_shape.h` | `ResolvedGemm`, `ResolveGemm`, `IsTileCallable`, `SameShape`. One resolved form serves the table, the launcher, and the kernel argument |
+| `backends/cuda/gemm/dispatch.{h,cc}` | The closed list, the verdict, the switch, and the row accessors |
+| `backends/cuda/gemm.cu` | One call before the cuBLAS path. A refused call, an inert row, and an unserved store type all leave cuBLAS in place |
+| `backends/cuda/gemm/dispatch_test.cc` | The T0 gate |
+| `backends/cuda/gemm/gemm_benchmark.cc` | The rate gate, which measures the seam under both values of the switch |
+
+Three findings changed the design of this section.
+
+1. **Thirteen rows, not fifteen.** Two products of the five groups are one
+   shape: `A2` of a square group is also its apply product, and the `1280x5120`
+   square is the `5120x1280` square. A key is one call, so a shared shape is one
+   row and its name lists every product it serves. The benchmark therefore
+   measures each distinct shape once.
+2. **`muon.cu` owns the shape derivation, not the table.** The three products
+   were spelled out twice, once at the call sites and once in a table that
+   mirrors them. They now come from one header, and the test compares the table
+   against that header. `muon.cu` lost about fifty lines of shape setup and
+   issues three one-line calls.
+3. **The gate needs no device.** `ResolvedGemm` holds extents, strides, flags,
+   and two scalars, and no element type, so the table and the seam's default
+   rules are checked on this machine. The test also re-checks the defaults
+   `GemmImpl` applies, because only one of the two ever runs on a card.
+
+The test covers the list, the anti-drift comparison against `muon_shape`, and a
+row that selects its own key and not a near miss on any field. It also covers
+the switch, the environment variable, and the seam's default rules.
+
+The benchmark calls the seam and not the launcher, so it measures the wiring a
+training step takes. It has not run: it needs a card and a bf16 build (D1).
+
+Open in B5: the Linear rows join the table from a measurement. The five Muon
+groups are measured, and a bit is turned on only where the fraction gate passes.
 
 ## B.8 The gates
 
