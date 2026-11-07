@@ -290,7 +290,7 @@ Four deviations from sections B.3 and B.4, each with its reason:
 | Deviation | Reason |
 |---|---|
 | One staged buffer and a barrier per slice, not two buffered stages | The arithmetic gate does not need the overlap, and the emulator cannot check it. The stage layout is what a faster copy must preserve, and `gemm_tile.cuh` says so |
-| A synchronous element-wise gather, not `cp.async` | Same reason, plus the transpose forms have no contiguous run to copy. The 16-byte `__pipeline_*` path lands with the measurement in B4 |
+| A synchronous element-wise gather, not `cp.async` | The first cut needed the arithmetic, not the overlap. Section B.4 below lands the two-stage pipeline |
 | The vendor fragment type is `__nv_bfloat16`, not `ComputeType` | The real `wmma` specializes on `__nv_bfloat16` only, and the tree's `Bf16` is a different type. `attention_bf16.cuh` already views the operand memory this way. The emulator maps the two to one type |
 | The kernel is compiled only when `NANOCHAT_PRECISION` is bf16 or fp8 | A bf16 `wmma` micro-tile needs a tensor core with bf16. The guard is the precision define, which is the pair `attention_bf16.cuh` uses |
 
@@ -430,6 +430,38 @@ One header function, two arms, chosen by `__CUDA_ARCH__`:
   no second transpose.
 - `sm_75`: the same shared layout, filled by synchronous 16-byte loads.
 
+**Landed.** The two-stage pipeline is in `gemm_tile.cuh`. The two arms sit
+behind one `CopyChunk`, one `CommitStage`, and one `WaitStage`, so the kernel has
+no second body. A staged row moves in sixteen-byte chunks when its k index steps
+by one element. It moves one element at a time otherwise: the transposed form,
+the ragged edge, and the k tail. A chunk also needs both ends aligned to sixteen
+bytes, so a row whose global end is not falls back to the element path. That is
+the 5 by 12 Muon group and not a training step, whose hidden widths are multiples
+of eight.
+
+The sweep is three schedules, and all three fit the 48 KiB shared window, so none
+needs `cudaFuncSetAttribute` and the emulator needs no dynamic shared memory:
+
+| Schedule | Tile | Warps | k depth | Registers | Shared |
+|---|---|---|---:|---:|---:|
+| `128x64x32` | 128 by 64 | 2 by 2 | 32 | 96 | 32,768 B |
+| `64x64x32` | 64 by 64 | 1 by 2 | 32 | 128 | 19,456 B |
+| `64x64x64` | 64 by 64 | 1 by 2 | 64 | 128 | 36,864 B |
+
+`NANOCHAT_GEMM_SCHEDULE` names one of the three, and the benchmark sweeps a row
+over all three. A row of the closed list owns its schedule, so a shape keeps the
+one its measurement chose.
+
+**What the emulator proves here, and what it does not.** The emulated run covers
+the staged layout, the zero fill of a ragged edge and a k tail, and the chunk and
+element paths. It also covers the buffer index of the pipeline, and that the
+three schedules agree with one reference. A wrong buffer index fails every case
+whose k spans more than one slice. It cannot cover
+the wait itself: the emulator's `__pipeline_wait_prior` is a no-op, so a missing
+or too weak a wait is invisible here, and one call carries that risk. The loop
+commits one group per iteration and waits for all but the newest, which is the
+form that needs no branch on the last slice.
+
 The two arms must leave the same shared contents. One emulated case compares
 them, which A.3 makes cheap.
 
@@ -470,7 +502,7 @@ small `m`: a batch-1 decode call with `m` of 1 wastes a tensor-core tile, and
 | B1 | The `sm_80` kernel, forward only, one shape, no batch, no transpose, `beta = 0` | SA over the emulated leg, then agreement with cuBLAS at 1e-3 absolute | `tools/nanochat simulate --device h100 --suite gemm --precision bf16` |
 | B2 | The full contract: four transpose forms, batch, three leading dimensions, strides, alpha and beta, and the fp32 store | The seven cases of `//backends/cuda:cuda_runtime_gpu_test`, plus ragged tiles and a batch of 3, on both copy arms | `tools/nanochat test --gpu //backends/cuda/gemm:gemm_gpu_test` |
 | B3 | The dispatch: the closed list, the verdict, and the `NANOCHAT_GEMM_LIB` switch | The T0 gate, and no shape changes hands while its bit is inert | `tools/nanochat test //backends/cuda/gemm:dispatch_test` |
-| B4 | The schedule sweep, recorded. Three or four schedules, each a report row and a `docs/baselines.json` entry | 0.85 on the D5 group, then on a named shape set | `tools/nanochat bench`, twice per schedule |
+| B4 | The schedule sweep: the two-stage `cp.async` copy, the three schedules, and the record of what each one measures | The code half is landed and gated off device. The record needs 0.85 on the D5 group, then on a named shape set, so it needs D1 | `tools/nanochat bench -- bazel-bin/backends/cuda/gemm/gemm_benchmark --schedule all --json --out /tmp/gemm-sweep.json` |
 | B5 | The measurement and the promotion: one report row per shape, the tile against cuBLAS, then the bits that pass | 0.70 on one Muon row and one Linear shape, 0.85 for a replacement, and no enabled shape slower than cuBLAS | `tools/nanochat bench -- bazel-bin/backends/cuda/gemm/gemm_benchmark --json --out /tmp/gemm-bf16.json` |
 
 **B3 landed.** The dispatch is one verdict between the seam and cuBLAS, and it
@@ -504,7 +536,8 @@ Three findings changed the design of this section.
 
 The test covers the list, the anti-drift comparison against `muon_shape`, and a
 row that selects its own key and not a near miss on any field. It also covers
-the switch, the environment variable, and the seam's default rules.
+the switch, both environment variables, the schedule list, and the seam's
+default rules.
 
 The benchmark calls the seam and not the launcher, so it measures the wiring a
 training step takes. It has not run: it needs a card and a bf16 build (D1).
