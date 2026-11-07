@@ -11,6 +11,7 @@
 //
 // CPU only: no device, no driver, no toolkit.
 
+#include <cstddef>
 #include <cstdio>
 #include <cstdlib>
 #include <set>
@@ -19,6 +20,7 @@
 
 #include "backends/cuda/gemm/dispatch.h"
 #include "backends/cuda/gemm/gemm_shape.h"
+#include "backends/cuda/gemm/linear_shape.h"
 #include "backends/cuda/kernels/muon_gemm_shape.h"
 #include "nanochat/kernels.h"
 
@@ -68,12 +70,32 @@ constexpr Group kGroups[] = {
     {1280, 5120, 20}, {5120, 1280, 20},
 };
 
+// The Linear layers of the throughput shape, written out: the twenty-layer
+// profile of `python/nanochat_cpp/pipeline.py` PROFILES, whose hidden width is
+// 1280, whose key and value width is 640, whose feed-forward width is 5120, and
+// whose classifier width is the padded vocabulary.
+struct LinearLayer {
+  const char* name;
+  int in;
+  int out;
+};
+
+constexpr LinearLayer kLinearLayers[] = {
+    {"q", 1280, 1280},  {"kv", 1280, 640},     {"proj", 1280, 1280},
+    {"fc", 1280, 5120}, {"cproj", 5120, 1280}, {"cls", 1280, 32768},
+};
+
+// The token positions of one micro-batch: sixteen sequences of 1024.
+constexpr int kLinearRows = 16 * 1024;
+
 // The table is one row per shape. The five groups contribute fifteen products,
 // and two pairs of them are one shape each: `1280x1280:A2` is also its product,
-// and the `1280x5120` square is the `5120x1280` square.
+// and the `1280x5120` square is the `5120x1280` square. The Linear side holds
+// three calls of six layers, and the query projection shares its shape with the
+// attention output projection in all three. Thirteen rows and fifteen rows.
 void CheckTableShape() {
   const char* kCase = "table shape";
-  Expect(GemmTileShapeCount() == 13, "the closed list holds thirteen rows",
+  Expect(GemmTileShapeCount() == 28, "the closed list holds twenty-eight rows",
          kCase);
   bool shared = false;
   for (int i = 0; i < GemmTileShapeCount(); ++i) {
@@ -121,6 +143,84 @@ void CheckTableMatchesTheCallSites() {
              "one row for " + label + ", found " + std::to_string(matches),
              kCase);
     }
+  }
+}
+
+// Every Linear call of the throughput shape is one row, and the row matches it.
+// The three calls are the literals `src/ops.cc` issues: `LinearForward`
+// transposes its weight, `LinearDgrad` transposes nothing, and `LinearWgrad`
+// transposes its first operand and stores fp32.
+void CheckTableMatchesTheLinearCalls() {
+  const char* kCase = "table matches the Linear calls";
+  for (const LinearLayer& layer : kLinearLayers) {
+    GemmParams forward;
+    forward.m = kLinearRows;
+    forward.n = layer.out;
+    forward.k = layer.in;
+    forward.transpose_b = true;
+
+    GemmParams dgrad;
+    dgrad.m = kLinearRows;
+    dgrad.n = layer.in;
+    dgrad.k = layer.out;
+
+    GemmParams wgrad;
+    wgrad.m = layer.out;
+    wgrad.n = layer.in;
+    wgrad.k = kLinearRows;
+    wgrad.transpose_a = true;
+
+    struct Wanted {
+      const char* call;
+      GemmParams params;
+      bool fp32_c;
+    };
+    const Wanted wanted[] = {{"fwd", forward, false},
+                             {"dgrad", dgrad, false},
+                             {"wgrad", wgrad, true}};
+    for (const Wanted& want : wanted) {
+      const ResolvedGemm gemm = ResolveGemm(want.params, want.fp32_c);
+      int matches = 0;
+      std::string name;
+      for (int i = 0; i < GemmTileShapeCount(); ++i) {
+        if (SameShape(GemmTileShapeGemm(i), gemm)) {
+          ++matches;
+          name = GemmTileShapeName(i);
+        }
+      }
+      const std::string label = std::string(want.call) + " " + layer.name;
+      Expect(matches == 1,
+             "one row for " + label + ", found " + std::to_string(matches),
+             kCase);
+      Expect(name.find(layer.name) != std::string::npos,
+             "the row of " + label + " names its layer: " + name, kCase);
+      Expect(name.find(want.call) != std::string::npos,
+             "the row of " + label + " names its call: " + name, kCase);
+    }
+  }
+
+  // The layer widths come from one model shape, so the derivation in
+  // `linear_shape.h` must give these six layers and no other.
+  nanochat::Config config;
+  config.num_layers = 20;
+  config.num_heads = 10;
+  config.num_kv_heads = 5;
+  config.hidden_dim = 1280;
+  config.seq_len = 1024;
+  config.vocab_size = 32768;
+  config.padded_vocab_size = 32768;
+  config.window_pattern = "SSL";
+  const std::vector<nanochat::kernels::linear_shape::Layer> layers =
+      nanochat::kernels::linear_shape::Layers(config);
+  Expect(layers.size() == sizeof(kLinearLayers) / sizeof(kLinearLayers[0]),
+         "the model shape holds six Linear layers", kCase);
+  for (std::size_t i = 0; i < layers.size() && i < 6; ++i) {
+    Expect(std::string(layers[i].name) == kLinearLayers[i].name,
+           "layer " + std::to_string(i) + " has the right name", kCase);
+    Expect(layers[i].in == kLinearLayers[i].in &&
+               layers[i].out == kLinearLayers[i].out,
+           "layer " + std::string(layers[i].name) + " has the right widths",
+           kCase);
   }
 }
 
@@ -319,6 +419,7 @@ void CheckResolve() {
 int main() {
   CheckTableShape();
   CheckTableMatchesTheCallSites();
+  CheckTableMatchesTheLinearCalls();
   CheckSelection();
   CheckMode();
   CheckModeFromEnv();

@@ -6,6 +6,10 @@
 // `NANOCHAT_GEMM_LIB` switch. A ratio of the two is the fraction the promotion
 // gate asks for, 0.70 to promote a row and 0.85 for a shape replacement.
 //
+// `--schedule all` sweeps the five schedules of `gemm_plan.h` over every row.
+// Without it the benchmark measures the schedule each row owns, which is the
+// one a promotion would run.
+//
 // The benchmark calls the seam and not the launcher, so it measures the wiring
 // a training step takes and not only the kernel.
 //
@@ -42,6 +46,7 @@ using nanochat::kernels::Free;
 using nanochat::kernels::Gemm;
 using nanochat::kernels::GemmScheduleCount;
 using nanochat::kernels::GemmScheduleName;
+using nanochat::kernels::GemmTileShapeSchedule;
 using nanochat::kernels::Memcpy;
 using nanochat::kernels::ResolvedGemm;
 using nanochat::kernels::Synchronize;
@@ -56,7 +61,9 @@ struct Options {
   BenchOptions bench;
   std::string row;            // empty runs every row
   std::string hand = "both";  // "hand", "cublas", or "both"
-  std::string schedule;       // empty runs the row's own; "all" runs the sweep
+  // Empty measures the row's own schedule, which is what a shipped promotion
+  // would run; "all" sweeps the whole list, and a name measures one schedule.
+  std::string schedule;
 };
 
 #if defined(NANOCHAT_PRECISION) && (NANOCHAT_PRECISION != 0)
@@ -203,7 +210,7 @@ int main(int argc, char** argv) {
   BenchReport report;
   UseDevicePeak(&report);
   report.SetRowIdentity("gemm", "forward");
-  report.SetExtraInt("rows", row_count);
+  report.SetExtraInt("shape_rows", row_count);
   report.SetExtraText("mode", options.hand.c_str());
 
   int measured = 0;
@@ -238,7 +245,13 @@ int main(int argc, char** argv) {
                  1e-9 * flops / (cublas_ms * 1e-3));
     }
     if (run_hand) {
-      for (int schedule = 0; schedule < GemmScheduleCount(); ++schedule) {
+      // An empty request measures the schedule the row owns, which is the one a
+      // promotion would run. "all" sweeps the list, and a name measures one.
+      const int first =
+          options.schedule.empty() ? GemmTileShapeSchedule(index) : 0;
+      const int last =
+          options.schedule.empty() ? first + 1 : GemmScheduleCount();
+      for (int schedule = first; schedule < last; ++schedule) {
         const char* schedule_name = GemmScheduleName(schedule);
         if (options.schedule != "all" && !options.schedule.empty() &&
             options.schedule != schedule_name) {

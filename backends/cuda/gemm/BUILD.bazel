@@ -58,6 +58,7 @@ cc_library(
         "dispatch.h",
         "gemm_plan.h",
         "gemm_shape.h",
+        "linear_shape.h",
     ],
     copts = nanochat_copts(),
     defines = precision_defines(),
@@ -78,8 +79,7 @@ cc_test(
         ":dispatch",
         "//backends/cuda/kernels:muon_gemm_shape",
         "//include/nanochat:nanochat",
-    ],
-    size = "small",
+    ],    size = "small",
 )
 
 # The device gate of the same kernel: cuBLAS is the reference, because both

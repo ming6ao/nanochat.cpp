@@ -5,10 +5,13 @@
 // decides whether a call runs on it (docs/tensor-core-gemm-plan.md section
 // B.6).
 //
-// The list holds one row per shape, and every row starts inert. A shape takes
-// the tile only after a committed measurement turns its bit on, so no run can
-// change behaviour without that measurement. cuBLAS serves every other shape,
-// and a shape the tile does not hold exactly stays on cuBLAS.
+// The list holds one row per shape of the closed list: thirteen Muon rows and
+// fifteen Linear rows. Every row is inert, because the sweep measured each
+// shape against cuBLAS and no shape reached the promotion gate
+// (`backends/cuda/gemm/README.md` section 8). A shape takes the tile only after
+// a committed measurement turns its bit on, so no run can change behaviour
+// without that measurement. cuBLAS serves every other shape, and a shape the
+// tile does not hold exactly stays on cuBLAS.
 //
 // `GemmTileMode` is the measurement switch. A process reads it from
 // `NANOCHAT_GEMM_LIB`, and a gate passes it in directly.
@@ -63,7 +66,8 @@ bool GemmTileShapeEnabled(int index);
 int GemmTileShapeSchedule(int index);
 
 // Turns one row on or off. The shipped table is inert, so a campaign flips a
-// bit here after a measurement and a gate flips one to prove the path.
+// bit here after a measurement and a gate flips one to prove the path. The
+// row's schedule is already the one its measurement chose.
 void SetGemmTileShapeEnabled(int index, bool enabled);
 
 }  // namespace kernels

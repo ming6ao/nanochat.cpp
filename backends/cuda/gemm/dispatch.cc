@@ -2,9 +2,15 @@
 // (docs/tensor-core-gemm-plan.md section B.6).
 //
 // The Muon rows are derived from `muon_shape.h`, which `muon.cu` also uses, so
-// the list and the call sites cannot drift. The Linear rows of the profiles
-// join it the same way once the benchmark has measured them: a row is added by
-// a measurement and not by a guess.
+// the list and the call sites cannot drift. The Linear rows come from
+// `linear_shape.h`, which fills the same `GemmParams` that `src/ops.cc` fills,
+// at the token count of one micro-batch of the throughput shape.
+//
+// Every row is inert. The sweep measured each shape against cuBLAS and no shape
+// reached the promotion gate, so no bit is on:
+// `backends/cuda/gemm/README.md` section 8 records why. A row also names the
+// schedule its measurement chose, so a promotion is one bit and not a second
+// sweep.
 //
 // Setting `NANOCHAT_GEMM_LIB` to "hand" or "cublas" overrides the table for an
 // A/B measurement and for nothing else.
@@ -12,11 +18,14 @@
 #include "backends/cuda/gemm/dispatch.h"
 
 #include <cstdlib>
+#include <string>
 #include <utility>
 #include <vector>
 
 #include "backends/cuda/gemm/gemm_plan.h"
+#include "backends/cuda/gemm/linear_shape.h"
 #include "backends/cuda/kernels/muon_gemm_shape.h"
+#include "nanochat/config.h"
 
 namespace nanochat {
 namespace kernels {
@@ -40,12 +49,46 @@ constexpr PolarGroup kPolarGroups[] = {
     {"5120x1280", 5120, 1280, 20},
 };
 
+// The token positions of one micro-batch of the throughput shape: sixteen
+// sequences of 1024, which is the batch `docs/model.md` section The cost on the
+// H100 bounds and the batch a `big` job runs. A Linear call's m is that
+// product, so it is part of the shape's key.
+constexpr int kLinearRows = 16 * 1024;
+
+// The model shape whose Linear calls the table holds: the `big` profile of
+// `python/nanochat_cpp/pipeline.py` PROFILES, which is the twenty-layer shape
+// of `docs/model.md`. The layer widths then come from `Config`, so the table
+// and the call sites cannot disagree about which layers a step issues.
+Config LinearModel() {
+  Config config;
+  config.num_layers = 20;
+  config.num_heads = 10;
+  config.num_kv_heads = 5;
+  config.hidden_dim = 1280;
+  config.seq_len = 1024;
+  config.vocab_size = 32768;
+  config.padded_vocab_size = 32768;
+  config.window_pattern = "SSL";
+  return config;
+}
+
 struct Row {
   std::string name;
   ResolvedGemm gemm;
+  // The schedule the sweep chose for this shape
+  // (docs/tensor-core-gemm-plan.md section B.4). The bit is off for every row,
+  // so this is the record of the measurement: a promotion is one bit and no
+  // second sweep.
   int schedule = gemm_tile::kDefaultSchedule;
   bool enabled = false;
 };
+
+// The sweep left two rules. The wide tile wins every shape but the
+// weight-gradient rows, whose fp32 epilogue costs it more than the small k
+// slice saves, and the 5 by 12 group, whose whole call is launch overhead.
+constexpr int kWideShapeSchedule = gemm_tile::kScheduleWide;
+constexpr int kWeightGradientSchedule = gemm_tile::kScheduleBase;
+constexpr int kTinyShapeSchedule = gemm_tile::kScheduleSmall;
 
 std::vector<Row>& Rows() {
   // Built once. The table is static, so a bit that a measurement turns on stays
@@ -58,29 +101,55 @@ std::vector<Row>& Rows() {
   static std::vector<Row>* rows = [] {
     auto* table = new std::vector<Row>();
     auto add = [table](const std::string& name, const char* leaf,
-                       const ResolvedGemm& gemm) {
+                       const ResolvedGemm& gemm, int schedule) {
       for (Row& row : *table) {
         if (SameShape(row.gemm, gemm)) {
           row.name += std::string("+") + leaf;
           return;
         }
       }
-      table->push_back({name, gemm});
+      table->push_back({name, gemm, schedule});
     };
     for (const PolarGroup& group : kPolarGroups) {
       const std::string base = std::string("muon:") + group.name + ":";
+      // The 5 by 12 group is a handful of microseconds on either path, so its
+      // fraction is launch overhead and not a rate (section B.8, gate G4).
+      const int schedule = group.rows == 5 && group.cols == 12
+                               ? kTinyShapeSchedule
+                               : kWideShapeSchedule;
       add(base + "A", "A",
           ResolveGemm(
               muon_shape::SquareGemm(group.rows, group.cols, group.batch),
-              /*fp32_c=*/false));
+              /*fp32_c=*/false),
+          schedule);
       add(base + "A2", "A2",
           ResolveGemm(
               muon_shape::SquareSquareGemm(group.rows, group.cols, group.batch),
-              /*fp32_c=*/false));
+              /*fp32_c=*/false),
+          schedule);
       add(base + "prod", "prod",
           ResolveGemm(
               muon_shape::ApplyGemm(group.rows, group.cols, group.batch),
-              /*fp32_c=*/false));
+              /*fp32_c=*/false),
+          schedule);
+    }
+    // The Linear calls of the same model shape. A row's name puts the call
+    // first, so a shape two layers share reads `linear:fwd:q+proj`.
+    for (const linear_shape::Layer& layer :
+         linear_shape::Layers(LinearModel())) {
+      const std::string base = "linear:";
+      add(base + "fwd:" + layer.name, layer.name,
+          ResolveGemm(linear_shape::Forward(kLinearRows, layer.in, layer.out),
+                      /*fp32_c=*/false),
+          kWideShapeSchedule);
+      add(base + "dgrad:" + layer.name, layer.name,
+          ResolveGemm(linear_shape::Dgrad(kLinearRows, layer.in, layer.out),
+                      /*fp32_c=*/false),
+          kWideShapeSchedule);
+      add(base + "wgrad:" + layer.name, layer.name,
+          ResolveGemm(linear_shape::Wgrad(kLinearRows, layer.in, layer.out),
+                      /*fp32_c=*/true),
+          kWeightGradientSchedule);
     }
     return table;
   }();
