@@ -329,7 +329,9 @@ kernel knows nothing about the model.
 `-DNANOCHAT_PRECISION=0` selects fp32, `=1` selects bf16, and `=2` selects fp8.
 The fp8 compute type is bf16. `include/nanochat/tensor.h` maps the value to
 `BuildPrecision`, so one precision exists per build and no runtime dtype
-dispatch occurs. The fp16 build and its half-storage path are removed
+dispatch occurs. No source tests the numeric define: the build selects the
+source, or the code reads `kComputeIsBf16` ([precision.md](precision.md) section
+1.1). The fp16 build and its half-storage path are removed
 ([precision.md](precision.md)).
 
 - Turing (sm_75) and the CPU: fp32.

@@ -13,8 +13,8 @@
 // The benchmark calls the seam and not the launcher, so it measures the wiring
 // a training step takes and not only the kernel.
 //
-// A run needs a bf16 build, because the tile's operands are bf16. An fp32 build
-// prints that and exits, so the target builds and runs in both.
+// A run needs a bf16 build, because the tile's operands are bf16. The build
+// compiles this source only then; an fp32 build runs the stand-in `main`.
 //
 // See docs/performance.md for the measurement protocol.
 
@@ -65,8 +65,6 @@ struct Options {
   // would run; "all" sweeps the whole list, and a name measures one schedule.
   std::string schedule;
 };
-
-#if defined(NANOCHAT_PRECISION) && (NANOCHAT_PRECISION != 0)
 
 // The operands a row needs, on the device and on the host.
 struct Buffers {
@@ -147,8 +145,6 @@ double TimeGemm(const ResolvedGemm& gemm, const Buffers& buffers,
       options);
 }
 
-#endif  // defined(NANOCHAT_PRECISION) && (NANOCHAT_PRECISION != 0)
-
 void Usage(const char* program) {
   std::fprintf(stderr,
                "usage: %s [--row NAME] [--hand|cublas|both] "
@@ -198,11 +194,6 @@ int main(int argc, char** argv) {
     }
   }
 
-#if !defined(NANOCHAT_PRECISION) || (NANOCHAT_PRECISION == 0)
-  // The tile's operands are bf16, so an fp32 build has nothing to measure.
-  std::printf("gemm benchmark: needs a bf16 build, nothing to measure here\n");
-  return 0;
-#else
   const bool run_hand = options.hand != "cublas";
   const bool run_cublas = options.hand != "hand";
   const int row_count = nanochat::kernels::GemmTileShapeCount();
@@ -282,5 +273,4 @@ int main(int argc, char** argv) {
   }
   report.Print(options.bench);
   return 0;
-#endif
 }

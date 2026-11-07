@@ -16,8 +16,9 @@
 //
 // See backends/cuda/gemm/gemm_tile.cuh for the stage, gemm_plan.h for the
 // schedules, and gemm_launch.h for the entry points.
-
-#if defined(NANOCHAT_PRECISION) && (NANOCHAT_PRECISION != 0)
+//
+// This source exists only in a bf16 or fp8 build, so it holds no guard: the
+// build selects it (`backends/cuda/gemm/BUILD.bazel`).
 
 #include "backends/cuda/gemm/gemm_launch.h"
 
@@ -276,5 +277,3 @@ bool LaunchGemmTileToFp32(const GemmParams& params, const ComputeType* a,
 
 }  // namespace kernels
 }  // namespace nanochat
-
-#endif  // defined(NANOCHAT_PRECISION) && (NANOCHAT_PRECISION != 0)

@@ -35,8 +35,8 @@ they ship with the CUDA toolkit.
 
 Run `tools/nanochat lint` before a commit. It runs `clang-format` in check mode
 plus the text checks: no using-directive, project-relative includes, no C-style
-cast, and ASCII only. The project skill `.agents/skills/google-cpp-style/`
-carries the same rules.
+cast, ASCII only, and no preprocessor test of the build precision. The project
+skill `.agents/skills/google-cpp-style/` carries the same rules.
 
 ## Definition of done
 

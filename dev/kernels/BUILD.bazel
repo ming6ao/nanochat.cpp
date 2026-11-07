@@ -171,9 +171,16 @@ cuda_library(
 
 # gpu: the five operand forms against the seam GEMM, which is the cuBLAS call
 # `MuonUpdate` issues for the same product.
+#
+# The prototype takes fp32 operands, so the build selects its source and not a
+# preprocessor guard: a bf16 build compiles the stand-in `main`, because the
+# body names `float` buffers where the seam takes `ComputeType`.
 cc_test(
     name = "muon_fused_gemm_gpu_test",
-    srcs = ["muon_fused_gemm_test.cc"],
+    srcs = select({
+        "//:fp32": ["muon_fused_gemm_test.cc"],
+        "//conditions:default": ["muon_fused_gemm_absent.cc"],
+    }),
     copts = nanochat_copts(),
     defines = precision_defines(),
     deps = [
@@ -187,10 +194,14 @@ cc_test(
 )
 
 # Hand GEMM versus cuBLAS on the groups the fusion targets, with the gate share
-# of section 4. Run it through the broker.
+# of section 4. Run it through the broker. It takes the same fp32 stand-in as the
+# prototype test above.
 cuda_binary(
     name = "muon_fused_gemm_bench",
-    srcs = ["muon_fused_gemm_bench.cc"],
+    srcs = select({
+        "//:fp32": ["muon_fused_gemm_bench.cc"],
+        "//conditions:default": ["muon_fused_gemm_absent.cc"],
+    }),
     copts = nanochat_cuda_copts(),
     host_copts = nanochat_copts(),
     defines = precision_defines(),

@@ -34,10 +34,11 @@ cc_library(
         # resolves it to (docs/tensor-core-gemm-plan.md section A.2).
         "mma.h",
         "//backends/cuda:device.h",
-        # `attention.cu` includes the bf16 tile and the dispatch predicates.
-        # The tile is device-only, so under the host compiler it is empty and
-        # the emulated bf16 windowed forward takes the cuBLAS path.
-        "//backends/cuda/kernels:attention_bf16.cuh",
+        # `attention.cu` includes the dispatch predicates and the two answers of
+        # the bf16 tile. The tile itself is a device source, so it is not here:
+        # the host compiler has no `wmma` primitive, and the emulated bf16
+        # windowed forward takes the cuBLAS path through the stand-in.
+        "//backends/cuda/kernels:attention_bf16.h",
         "//backends/cuda/kernels:attention_dispatch.h",
         "//backends/cuda/kernels:device_utils.cuh",
         "//backends/cuda/kernels:mma_ops.cuh",
@@ -182,6 +183,12 @@ cc_library(
         ":cuda_headers",
         # The scheduler and the runtime the launched kernel body runs on.
         ":emu_runtime",
+        # `attention.cu` asks the bf16 tile whether it covers the shape and then
+        # launches it. The emulator has no tensor-core primitive, so it links
+        # the stand-in, which answers false and launches nothing
+        # (docs/simulator.md section 9.2). The stand-in is compiled at the
+        # workspace precision, which is what this library compiles at too.
+        "//backends/cuda/kernels:attention_bf16_absent",
         "//include/nanochat:nanochat",
     ],
 )

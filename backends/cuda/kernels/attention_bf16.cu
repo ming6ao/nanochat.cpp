@@ -1,6 +1,3 @@
-#ifndef NANOCHAT_BACKENDS_CUDA_KERNELS_ATTENTION_BF16_CUH_
-#define NANOCHAT_BACKENDS_CUDA_KERNELS_ATTENTION_BF16_CUH_
-
 // The bf16 tensor-core tile for the windowed attention forward. It is the
 // third branch of `AttentionForward`, beside the fp32 tile and the cuBLAS
 // decomposition, and it runs only in a bf16 build on a device with tensor
@@ -28,22 +25,11 @@
 // window mask through `KeyAllowedDev`, the `(0, 0)` statistics for an empty
 // window, and `expf` in fp32. Only the two products round to bf16.
 
-// The tile needs two things this file cannot assume.
-//
-// 1. The CUDA compiler. The simulator compiles `attention.cu` with the host
-//    compiler (`tools/cuda_sim/emu/attention_emu.cc` includes it), and the
-//    `wmma` interface and `cp.async` do not compile there. That build takes the
-//    emulated cuBLAS path for a bf16 windowed forward.
-// 2. A bf16 or fp8 build. The tile's operands are `ComputeType`, and it stages
-//    them in sixteen-byte copies of two-byte elements. An fp32 build would
-//    stage four-byte elements into a bf16 tile, so the tile does not exist
-//    there at all.
-//
-// `NANOCHAT_PRECISION` is the build define that `nanochat/tensor.h` maps to
-// `kComputeIsBf16`: 0 is fp32, 1 is bf16, and 2 is fp8. Both conditions are
-// evaluated by the host pass and the device pass alike. The dispatch predicate
-// in `attention.cu` states the same pair, so the two answers cannot disagree.
-#if defined(__CUDACC__) && (NANOCHAT_PRECISION != 0)
+// The tile stages its operands in sixteen-byte copies of two-byte elements, so
+// it needs a bf16 or fp8 build. It also needs the CUDA compiler, because the
+// `wmma` interface and `cp.async` do not compile on the host pass. The build
+// answers both: the build compiles this file only in a bf16 or fp8 build, and
+// an fp32 build and the emulator link `attention_bf16_absent.cc` instead.
 
 #include <cstddef>
 #include <cstdint>
@@ -55,6 +41,8 @@
 #include <mma.h>
 
 #include "backends/cuda/device.h"
+#include "backends/cuda/kernels/attention_bf16.h"
+#include "backends/cuda/kernels/attention_dispatch.h"
 #include "backends/cuda/kernels/device_utils.cuh"
 #include "nanochat/kernels.h"
 
@@ -431,12 +419,25 @@ static __global__ void __launch_bounds__(kBf16TileThreads, kBf16TileMinBlocks)
 #endif
 }
 
+// Whether this device takes the tile for this shape. The shape conditions are
+// in `attention_dispatch.h`; this adds the device answer. `attention.cu` asks
+// this function instead of stating the conditions itself, so the compiled and
+// the emulated answers cannot disagree. See `docs/attention.md` Part 6,
+// section 5.
+//
+// The tile replaces the dense cuBLAS score matrix with the tensor cores, so a
+// bf16 build on a card without them keeps cuBLAS. The fp32 tile in
+// `attention.cu` is the mirror case: 34.6 ms for the 13 windowed layers of the
+// `big` profile, against a 1.06 ms roofline bound for all 20.
+bool UseFusedAttentionBf16(const AttentionParams& p) {
+  static const bool tensor_cores = GetCaps().has_tensor_cores;
+  return FusedAttentionBf16Covers(p, tensor_cores);
+}
+
 // Requests the opt-in shared-memory limit once, then launches the tile.
-inline void LaunchBf16Attention(const AttentionParams& params,
-                                const ComputeType* q, const ComputeType* k,
-                                const ComputeType* v, ComputeType* out,
-                                float* stats) {
-#if defined(__CUDACC__)
+void LaunchBf16Attention(const AttentionParams& params, const ComputeType* q,
+                         const ComputeType* k, const ComputeType* v,
+                         ComputeType* out, float* stats) {
   static const bool configured = [] {
     cudaFuncSetAttribute(
         reinterpret_cast<const void*>(Bf16AttentionForwardKernel),
@@ -449,12 +450,7 @@ inline void LaunchBf16Attention(const AttentionParams& params,
   const dim3 grid(query_tiles, params.num_heads, params.batch);
   cuda_backend::Launch(Bf16AttentionForwardKernel, grid, dim3(kBf16TileThreads),
                        kBf16TileSharedBytes, params, q, k, v, out, stats);
-#endif
 }
 
 }  // namespace kernels
 }  // namespace nanochat
-
-#endif  // defined(__CUDACC__)
-
-#endif  // NANOCHAT_BACKENDS_CUDA_KERNELS_ATTENTION_BF16_CUH_

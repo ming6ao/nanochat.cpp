@@ -126,11 +126,17 @@ cuda_library(
 # compiles into this translation unit. It reuses device_utils, the device
 # runtime, the cuBLAS gemm seam, and the frozen interface, so the dependency
 # set below is unchanged and stays minimal.
+#
+# The bf16 tensor-core branch is a separate source. The build selects it and not
+# a preprocessor guard: a bf16 or fp8 build links `attention_bf16.cu`, and every
+# other build links `attention_bf16_absent.cc`, which answers "not this shape"
+# and launches nothing. `attention.cu` names both entry points unconditionally,
+# so it holds no guard either (`docs/attention.md` Part 6).
 cuda_library(
     name = "attention",
     srcs = ["attention.cu"],
     hdrs = [
-        "attention_bf16.cuh",
+        "attention_bf16.h",
         "attention_dispatch.h",
     ],
     copts = nanochat_cuda_copts(),
@@ -140,8 +146,47 @@ cuda_library(
         "//backends/cuda:device",
         "//backends/cuda:gemm",
         "//include/nanochat:nanochat",
+    ] + select({
+        "//:bf16": [":attention_bf16"],
+        "//:fp8": [":attention_bf16"],
+        "//conditions:default": [":attention_bf16_absent"],
+    }),
+    alwayslink = True,
+)
+
+# The bf16 tensor-core tile of the windowed forward (docs/attention.md Part 6).
+# Only a bf16 or fp8 build compiles it, because it stages two-byte operands
+# through `wmma` and `cp.async`. A fourth precision joins the select above when
+# its operand type is bf16 too.
+cuda_library(
+    name = "attention_bf16",
+    srcs = ["attention_bf16.cu"],
+    hdrs = [
+        "attention_bf16.h",
+        "attention_dispatch.h",
+    ],
+    copts = nanochat_cuda_copts(),
+    defines = precision_defines(),
+    deps = [
+        ":device_utils",
+        "//backends/cuda:device",
+        "//include/nanochat:nanochat",
     ],
     alwayslink = True,
+)
+
+# The stand-in the other builds link (`attention_bf16.h`). It is a host source
+# and names no vendor type, so an fp32 build and the emulator both compile it.
+# `local_defines` is the workspace precision, which is the one the caller
+# compiles at, so `ComputeType` agrees on both sides of the call. It is local so
+# that a dependent keeps its own answer.
+cc_library(
+    name = "attention_bf16_absent",
+    srcs = ["attention_bf16_absent.cc"],
+    hdrs = ["attention_bf16.h"],
+    copts = nanochat_copts(),
+    local_defines = precision_defines(),
+    deps = ["//include/nanochat:nanochat"],
 )
 
 # Classifier: logit softcap + cross-entropy over the vocab slice.

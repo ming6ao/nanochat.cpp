@@ -120,11 +120,18 @@ NANOCHAT_HOST_DEVICE inline float Bf16ToFloat(Bf16 value) {
 // so the build macro maps straight to this enum.
 enum class BuildPrecision { kFp32 = 0, kBf16 = 1, kFp8 = 2 };
 
+// The inclusive range of valid values. A new precision is one enum value here,
+// a raise of this bound, one row in `nanochat.bzl`, one `config_setting` in the
+// root `BUILD.bazel`, the value in `capi.h`, and the mirror in `_core.py`.
+inline constexpr int kMinBuildPrecision = 0;
+inline constexpr int kMaxBuildPrecision = 2;
+
 #if !defined(NANOCHAT_PRECISION)
 #error \
     "no precision selected: build with --config=fp32, --config=bf16, or --config=fp8"
 #else
-static_assert(NANOCHAT_PRECISION >= 0 && NANOCHAT_PRECISION <= 2,
+static_assert(NANOCHAT_PRECISION >= kMinBuildPrecision &&
+                  NANOCHAT_PRECISION <= kMaxBuildPrecision,
               "NANOCHAT_PRECISION is out of range");
 #endif
 
@@ -133,6 +140,11 @@ inline constexpr BuildPrecision kBuildPrecision =
 
 // True when the compute type is bf16. The fp8 build computes in bf16 and
 // quantizes the eligible matmuls (docs/precision.md Part 1, section 6.1).
+//
+// This is the only precision predicate in the tree. A new precision joins it
+// only when its compute type is `Bf16`; which family serves that precision is a
+// per-package answer, so each `BUILD.bazel` names it in its own `select()`
+// (docs/precision.md section 1.1). No source tests the numeric define.
 inline constexpr bool kComputeIsBf16 = kBuildPrecision != BuildPrecision::kFp32;
 
 // True in the fp8 build. The graph reads `if constexpr (kFp8Build)` instead of

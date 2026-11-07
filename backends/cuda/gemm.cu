@@ -16,6 +16,10 @@
 // query. A shape whose plan cannot be built falls back to
 // `cublasGemmStridedBatchedEx`.
 //
+// A shape may also take the hand tensor-core tile, and every other shape keeps
+// cuBLAS (`docs/tensor-core-gemm-plan.md`). The build selects the tile's source
+// and this file asks `kComputeIsBf16`, so no preprocessor guard is needed.
+//
 // See docs/build.md and docs/kernels.md.
 
 #include "nanochat/kernels.h"
@@ -33,10 +37,8 @@
 #include <tuple>
 
 #include "backends/cuda/device.h"
-#if defined(NANOCHAT_PRECISION) && (NANOCHAT_PRECISION != 0)
 #include "backends/cuda/gemm/dispatch.h"
 #include "backends/cuda/gemm/gemm_launch.h"
-#endif
 
 namespace nanochat {
 namespace kernels {
@@ -356,14 +358,16 @@ bool GemmBatched(const GemmParams& params, const ComputeType* a,
   return true;
 }
 
-#if defined(NANOCHAT_PRECISION) && (NANOCHAT_PRECISION != 0)
-
 // The hand tile, when the shape table selects it
 // (docs/tensor-core-gemm-plan.md section B.6). It answers false for every shape
 // the table does not hold, for every call the tile refuses, and for a store
 // type the tile does not serve, so cuBLAS keeps every one of those.
+//
+// The first line is the whole fp32 answer: a tile needs bf16 operands, so the
+// discarded branch leaves the table, the switch, and the launchers unnamed.
 bool TryGemmTile(const GemmParams& params, const ComputeType* a,
                  const ComputeType* b, void* c, cudaDataType_t c_type) {
+  if constexpr (!kComputeIsBf16) return false;
   const bool fp32_c = c_type == CUDA_R_32F;
   if (!fp32_c && c_type != kDataType) return false;
   const ResolvedGemm gemm = ResolveGemm(params, fp32_c);
@@ -375,16 +379,12 @@ bool TryGemmTile(const GemmParams& params, const ComputeType* a,
                                  schedule);
 }
 
-#endif
-
 void GemmImpl(const GemmParams& params, const ComputeType* a,
               const ComputeType* b, void* c, cudaDataType_t c_type) {
   if (params.batch_count <= 0 || params.m <= 0 || params.n <= 0) return;
   if (params.k < 0) return;
 
-#if defined(NANOCHAT_PRECISION) && (NANOCHAT_PRECISION != 0)
   if (TryGemmTile(params, a, b, c, c_type)) return;
-#endif
 
   const bool ta = params.transpose_a;
   const bool tb = params.transpose_b;

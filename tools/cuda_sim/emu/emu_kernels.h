@@ -10,6 +10,7 @@
 //
 // The signatures are exactly the seam's. Only the symbol name differs.
 
+#include "backends/cuda/gemm/gemm_plan.h"
 #include "backends/cuda/kernels/muon_fused.h"
 #include "nanochat/kernels.h"
 #include "nanochat/tensor.h"
@@ -19,8 +20,8 @@ namespace kernels {
 
 // The hand GEMM's launcher (docs/tensor-core-gemm-plan.md section A.3). It
 // exists only in a bf16 or fp8 build, because the tile's operands are bf16 and
-// an fp32 build keeps cuBLAS.
-#if defined(NANOCHAT_PRECISION) && (NANOCHAT_PRECISION != 0)
+// an fp32 build keeps cuBLAS. The declaration is unconditional and names no
+// vendor type, so this header reads in every build.
 bool EmuLaunchGemmTile(
     const GemmParams& params, const ComputeType* a, const ComputeType* b,
     ComputeType* c,
@@ -28,7 +29,6 @@ bool EmuLaunchGemmTile(
 bool EmuLaunchGemmTileToFp32(
     const GemmParams& params, const ComputeType* a, const ComputeType* b,
     float* c, int schedule = nanochat::kernels::gemm_tile::kDefaultSchedule);
-#endif
 
 void EmuRmsNormForward(const RmsNormParams& params, const ComputeType* x,
                        ComputeType* out, float* rstd);

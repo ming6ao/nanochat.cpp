@@ -28,8 +28,6 @@
 
 namespace {
 
-#if NANOCHAT_PRECISION == 0
-
 using nanochat::ComputeType;
 using nanochat::GemmMode;
 using nanochat::GemmParams;
@@ -147,8 +145,6 @@ void RunCase(const Case& c) {
   }
 }
 
-#endif  // NANOCHAT_PRECISION == 0
-
 }  // namespace
 
 int main() {
@@ -160,15 +156,11 @@ int main() {
               nanochat::dev::kMuonGemmMicroM, nanochat::dev::kMuonGemmMicroN,
               nanochat::dev::kMuonGemmSmemBytes / 1024);
 
-#if NANOCHAT_PRECISION == 0
   for (const Case& c : kCases) RunCase(c);
   if (Failures() != 0) {
     std::printf("muon_fused_gemm: %d check(s) failed\n", Failures());
     return 1;
   }
   std::printf("muon_fused_gemm: all checks passed\n");
-#else
-  std::printf("  skipped: the prototype is fp32-only\n");
-#endif
   return 0;
 }

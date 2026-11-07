@@ -34,10 +34,8 @@
 // loop instead. The zero fill of a k tail and of a ragged edge is part of that
 // loop, so an operand edge never adds a product.
 //
-// A bf16 `wmma` needs a tensor core with bf16, so this header exists only in a
-// bf16 or fp8 build. The fp32 build keeps cuBLAS.
-
-#if defined(NANOCHAT_PRECISION) && (NANOCHAT_PRECISION != 0)
+// A bf16 `wmma` needs a tensor core with bf16, so only a bf16 or fp8 build
+// compiles the one source that includes this header (`gemm_bf16.cu`).
 
 #include <cstdint>
 
@@ -221,7 +219,5 @@ __device__ __forceinline__ void StageSlice(
 }  // namespace gemm_tile
 }  // namespace kernels
 }  // namespace nanochat
-
-#endif  // defined(NANOCHAT_PRECISION) && (NANOCHAT_PRECISION != 0)
 
 #endif  // NANOCHAT_BACKENDS_CUDA_GEMM_GEMM_TILE_CUH_

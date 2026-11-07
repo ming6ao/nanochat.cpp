@@ -11,7 +11,7 @@ The third is the batched cuBLAS decomposition, which is also the only backward.
 | cuBLAS | every other shape, and every backward | cuBLAS |
 
 The two predicates live in `backends/cuda/kernels/attention_dispatch.h`, the
-tiles in `backends/cuda/kernels/attention.cu` and `attention_bf16.cuh`, and the
+tiles in `backends/cuda/kernels/attention.cu` and `attention_bf16.cu`, and the
 measured rows on a supported card in the `attention_bf16` entry of
 [baselines.json](baselines.json).
 
@@ -144,9 +144,10 @@ The tile adds no precision work. It adds one consumer of the bf16 build, and two
 rules keep that honest:
 
 1. The tile's source is compiled only by the CUDA compiler in a bf16 or fp8
-   build, which is the pair `__CUDACC__` and `NANOCHAT_PRECISION != 0` state. An
-   fp32 build holds no tile at all, so it cannot stage a four-byte element into
-   a two-byte tile. The fp32 tile of Part 2 is the only fp32 path.
+   build, because the build selects it
+   (`backends/cuda/kernels/BUILD.bazel`). An fp32 build links the stand-in, which
+   answers false and launches nothing, so it cannot stage a four-byte element
+   into a two-byte tile. The fp32 tile of Part 2 is the only fp32 path.
 2. The dispatch reads `Caps::has_tensor_cores` at run time, so a bf16 build on a
    card without tensor cores keeps cuBLAS.
 

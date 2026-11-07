@@ -7,7 +7,8 @@ checks that clang-format cannot make:
 - no using-directive,
 - every project include is project-relative,
 - no C-style cast,
-- no non-ASCII character.
+- no non-ASCII character,
+- no preprocessor test of the build precision.
 
     tools/nanochat lint           # every tracked C++ source
     tools/nanochat lint a.cc b.h  # the named files
@@ -41,12 +42,24 @@ C_STYLE_CAST = re.compile(
     r"\((int|float|double|char|unsigned|long|size_t|std::[a-z_0-9]+)\)"
     r"[A-Za-z_0-9(]")
 
+#: A directive that tests the build precision. The precision is a property of
+#: the configuration, so a whole source is selected in `BUILD.bazel`
+#: (`docs/precision.md` section 1.1) or a branch reads `kComputeIsBf16` through
+#: `if constexpr`. Only the header that defines the value may test the macro.
+PRECISION_GUARD = re.compile(r"^\s*#\s*(?:if|elif)\b.*\bNANOCHAT_PRECISION\b")
+
+#: The one file that may test the macro: it selects the value, validates its
+#: range, and maps it to `BuildPrecision`.
+PRECISION_GUARD_OWNERS = ("include/nanochat/tensor.h",)
+
 #: The checks, in report order. Each entry pairs the message with its key.
 CHECKS = (
     ("using-directive; Google bans 'using namespace'", "using"),
     ("bare project include; use a path from the repository root", "include"),
     ("C-style cast; use static_cast or a brace initialization", "cast"),
     ("non-ASCII character", "ascii"),
+    ("precision preprocessor guard; select the source in BUILD.bazel or use "
+     "if constexpr (kComputeIsBf16)", "precision"),
 )
 
 
@@ -91,6 +104,9 @@ def scan(path: str) -> dict[str, list[str]]:
             hits["cast"].append(where)
         if any(ord(character) > 127 for character in line):
             hits["ascii"].append(where)
+        if PRECISION_GUARD.search(line) and not path.endswith(
+                PRECISION_GUARD_OWNERS):
+            hits["precision"].append(where)
     return hits
 
 

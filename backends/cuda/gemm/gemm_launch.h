@@ -13,8 +13,10 @@
 //
 // Each returns false when the tile did not take the call, which is not an
 // error: the caller keeps cuBLAS.
-
-#if defined(NANOCHAT_PRECISION) && (NANOCHAT_PRECISION != 0)
+//
+// The declarations are unconditional and name no vendor type, so a host pass
+// reads this header. Only a bf16 or fp8 build defines them: an fp32 build links
+// no tile, and the `if constexpr` in `gemm.cu` discards the only call.
 
 #include "backends/cuda/gemm/gemm_plan.h"
 #include "nanochat/kernels.h"
@@ -38,7 +40,5 @@ bool LaunchGemmTileToFp32(const GemmParams& params, const ComputeType* a,
 
 }  // namespace kernels
 }  // namespace nanochat
-
-#endif  // defined(NANOCHAT_PRECISION) && (NANOCHAT_PRECISION != 0)
 
 #endif  // NANOCHAT_BACKENDS_CUDA_GEMM_GEMM_LAUNCH_H_

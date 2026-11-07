@@ -13,8 +13,8 @@
 // The tile is written and selected directly. The shape table is inert, so the
 // seam would answer with cuBLAS and the test would compare cuBLAS with itself.
 //
-// A run needs a bf16 build, because the tile's operands are bf16. An fp32 build
-// prints that and exits, so the target builds in both configurations.
+// A run needs a bf16 build, because the tile's operands are bf16. The build
+// compiles this source only then; an fp32 build runs the stand-in `main`.
 
 #include <cmath>
 #include <cstddef>
@@ -29,8 +29,6 @@
 #include "nanochat/tensor.h"
 
 namespace {
-
-#if defined(NANOCHAT_PRECISION) && (NANOCHAT_PRECISION != 0)
 
 using nanochat::ComputeType;
 using nanochat::CopyDir;
@@ -200,15 +198,9 @@ void RunCases(const Case* cases, int count) {
   for (int i = 0; i < count; ++i) RunCase<COut>(cases[i]);
 }
 
-#endif  // defined(NANOCHAT_PRECISION) && (NANOCHAT_PRECISION != 0)
-
 }  // namespace
 
 int main() {
-#if !defined(NANOCHAT_PRECISION) || (NANOCHAT_PRECISION == 0)
-  std::printf("gemm gpu test: needs a bf16 build, nothing to check here\n");
-  return 0;
-#else
   nanochat::RequireSandboxOrDie("test");
 
   const nanochat::Caps caps = nanochat::kernels::GetCaps();
@@ -276,5 +268,4 @@ int main() {
   }
   std::printf("gemm gpu test: ok\n");
   return 0;
-#endif
 }

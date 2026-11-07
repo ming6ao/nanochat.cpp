@@ -68,9 +68,9 @@ Four headers are missing.
 
 | Header | Why it is missing today |
 |---|---|
-| `<mma.h>` | `attention_bf16.cuh` includes it only under `defined(__CUDACC__)`, so the host pass never asked for it |
-| `<cuda_pipeline.h>` | Same guard, same reason |
-| `<cuda_bf16.h>` | Same guard. The emulator maps `__half` in `cuda_emu.h`, but not `__nv_bfloat16` |
+| `<mma.h>` | The tile is a device source, so the host pass never asks for the header |
+| `<cuda_pipeline.h>` | Same reason |
+| `<cuda_bf16.h>` | Same reason. The emulator maps `__half` in `cuda_emu.h`, but not `__nv_bfloat16` |
 | A `<mma.h>` form for fp8 | The vendor header has no fp8 fragment, so a stub alone cannot help |
 
 ## A.1 The three stub headers
@@ -294,10 +294,11 @@ Four deviations from sections B.3 and B.4, each with its reason:
 |---|---|
 | One staged buffer and a barrier per slice, not two buffered stages | The arithmetic gate does not need the overlap, and the emulator cannot check it. The stage layout is what a faster copy must preserve, and `gemm_tile.cuh` says so |
 | A synchronous element-wise gather, not `cp.async` | The first cut needed the arithmetic, not the overlap. Section B.4 below lands the two-stage pipeline |
-| The vendor fragment type is `__nv_bfloat16`, not `ComputeType` | The real `wmma` specializes on `__nv_bfloat16` only, and the tree's `Bf16` is a different type. `attention_bf16.cuh` already views the operand memory this way. The emulator maps the two to one type |
-| The kernel is compiled only when `NANOCHAT_PRECISION` is bf16 or fp8 | A bf16 `wmma` micro-tile needs a tensor core with bf16. The guard is the precision define, which is the pair `attention_bf16.cuh` uses |
+| The vendor fragment type is `__nv_bfloat16`, not `ComputeType` | The real `wmma` specializes on `__nv_bfloat16` only, and the tree's `Bf16` is a different type. `attention_bf16.cu` already views the operand memory this way. The emulator maps the two to one type |
+| The kernel is compiled only when the build precision is bf16 or fp8 | A bf16 `wmma` micro-tile needs a tensor core with bf16. The build selects the source and holds no preprocessor guard, which is the same answer `attention_bf16.cu` gets ([precision.md](precision.md) section 1.1) |
 
-The file compiles both ways. The default fp32 build compiles it to nothing. The
+The file compiles both ways. The default fp32 build does not compile it at all,
+and `gemm.cu` discards the call through `kComputeIsBf16`. The
 device build at bf16 and `sm_90` reports:
 
 | Measure | Value |
@@ -357,11 +358,12 @@ row of the shape table is enabled. The fp8 kernel (D3) is still open, and
 
 ## A.9 Optional stage: the tensor-core attention tile
 
-`attention_bf16.cuh` guards its whole body on `defined(__CUDACC__)`. A simulated
-bf16 windowed forward therefore takes the cuBLAS path. Remove the guard and the
-tile becomes emulable with A1, because it holds its fragments opaquely. It
-stores score fragments to a per-warp scratch tile. It then reloads them as
-accumulator fragments.
+`attention_bf16.cu` is a device source, and the build selects it only in a bf16
+or fp8 build. A simulated bf16 windowed forward therefore takes the cuBLAS path,
+because the emulator links `attention_bf16_absent.cc` in place of the tile. Make
+the tile emulable with A1 and it will become a leg of the emulator's own gate: it
+holds its fragments opaquely. It stores score fragments to a per-warp scratch
+tile. It then reloads them as accumulator fragments.
 
 That is a separate change with its own gate, and it touches a family with a
 promotion decision behind it. Do it after A4, and only with the owner of
@@ -376,7 +378,7 @@ promotion decision behind it. Do it after A4, and only with the owner of
 | Item | Text of Part 3 |
 |---|---|
 | Shapes | A closed list: the Muon Polar Express groups, and the Linear forward, dgrad, and wgrad shapes of `python/nanochat_cpp/pipeline.py` `PROFILES` |
-| Kernel | Generalise `attention_bf16.cuh` into a tiled GEMM under `backends/cuda/gemm/`, with double-buffered stages and 16 by 16 by 16 bf16 micro-tiles with fp32 accumulators |
+| Kernel | Generalise `attention_bf16.cu` into a tiled GEMM under `backends/cuda/gemm/`, with double-buffered stages and 16 by 16 by 16 bf16 micro-tiles with fp32 accumulators |
 | Contract | Every `GemmParams` field: transpose flags, batch, leading dimensions, strides, alpha and beta, and the fp32 output of `GemmWgrad` |
 | Dispatch | A predicate in `backends/cuda/gemm.cu`. cuBLAS stays the fallback. No group slower |
 | Gates | 0.70 of the cuBLAS rate to promote one row, 0.85 for a shape replacement |

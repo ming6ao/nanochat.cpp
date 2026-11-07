@@ -25,13 +25,20 @@ package(default_visibility = ["//visibility:public"])
 # The kernel, the block tile, and the launcher. `alwayslink` keeps the two
 # launcher symbols reachable from the seam entry, which is their only caller.
 #
-# The translation unit is empty in an fp32 build: the bf16 tile needs a tensor
-# core with bf16, so `gemm_tile.cuh` and the kernel are compiled only when
-# `NANOCHAT_PRECISION` is bf16 or fp8, and the fp32 build keeps cuBLAS
-# (docs/tensor-core-gemm-plan.md section B.9).
+# The build selects the translation unit and not a preprocessor guard. The bf16
+# tile needs a tensor core with bf16, so only a bf16 or fp8 build compiles
+# `gemm_bf16.cu`, `gemm_tile.cuh`, and the kernel; the fp32 build links no tile
+# and keeps cuBLAS (docs/tensor-core-gemm-plan.md section B.9). `gemm.cu` names
+# the launchers unconditionally and discards the call through `kComputeIsBf16`,
+# so no source in this package holds an `#if`. A fourth precision joins the
+# select when its operand type is bf16 too.
 cuda_library(
     name = "gemm_bf16",
-    srcs = ["gemm_bf16.cu"],
+    srcs = select({
+        "//:bf16": ["gemm_bf16.cu"],
+        "//:fp8": ["gemm_bf16.cu"],
+        "//conditions:default": [],
+    }),
     hdrs = [
         "gemm_launch.h",
         "gemm_plan.h",
@@ -85,10 +92,15 @@ cc_test(
 # The device gate of the same kernel: cuBLAS is the reference, because both
 # sides accumulate bf16 products in fp32 and only the order differs. It drives
 # the launcher and not the seam, because every row of the shape table is inert.
-# Needs a card and a bf16 build, so the documented command carries both.
+# Needs a card and a bf16 build. An fp32 build compiles the stand-in `main`
+# instead, so the label stays in every test list.
 cc_test(
     name = "gemm_gpu_test",
-    srcs = ["gemm_gpu_test.cc"],
+    srcs = select({
+        "//:bf16": ["gemm_gpu_test.cc"],
+        "//:fp8": ["gemm_gpu_test.cc"],
+        "//conditions:default": ["gemm_bf16_only_main.cc"],
+    }),
     copts = nanochat_copts(),
     defines = precision_defines(),
     deps = [
@@ -102,10 +114,15 @@ cc_test(
 
 # The rate gate: one row per shape, once on the tile and once on cuBLAS, through
 # the shipped `Gemm` and the `NANOCHAT_GEMM_LIB` switch. Needs a card and a bf16
-# build, so it is a benchmark and not a test.
+# build, so it is a benchmark and not a test. It takes the same fp32 stand-in as
+# the gate above.
 cuda_binary(
     name = "gemm_benchmark",
-    srcs = ["gemm_benchmark.cc"],
+    srcs = select({
+        "//:bf16": ["gemm_benchmark.cc"],
+        "//:fp8": ["gemm_benchmark.cc"],
+        "//conditions:default": ["gemm_bf16_only_main.cc"],
+    }),
     copts = nanochat_cuda_copts(),
     host_copts = nanochat_copts(),
     defines = precision_defines(),

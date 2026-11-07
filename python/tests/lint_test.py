@@ -26,7 +26,7 @@ exit {code}
 
 
 class LintTest(unittest.TestCase):
-    """The four text checks, the formatter call, and the exit codes."""
+    """The five text checks, the formatter call, and the exit codes."""
 
     @classmethod
     def setUpClass(cls) -> None:
@@ -46,6 +46,7 @@ class LintTest(unittest.TestCase):
 
     def write_source(self, name: str, text: str) -> str:
         path = self.root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text, encoding="utf-8")
         return str(path)
 
@@ -111,11 +112,40 @@ class LintTest(unittest.TestCase):
         self.assertEqual(status, 1)
         self.assertIn("non-ASCII character", err)
 
+    def test_a_precision_guard_fails(self) -> None:
+        source = self.write_source(
+            "guard.cc",
+            "#if defined(NANOCHAT_PRECISION) && (NANOCHAT_PRECISION != 0)\n"
+            "#endif\n")
+        status, _, err = self.run_lint(source)
+        self.assertEqual(status, 1)
+        self.assertIn("precision preprocessor guard", err)
+        self.assertIn("if constexpr (kComputeIsBf16)", err)
+        self.assertIn(f"{source}:1:#if defined(NANOCHAT_PRECISION)", err)
+
+    def test_the_precision_owner_may_test_the_macro(self) -> None:
+        source = self.write_source(
+            "include/nanochat/tensor.h",
+            "#if !defined(NANOCHAT_PRECISION)\n"
+            "#error \"no precision\"\n"
+            "#endif\n")
+        status, _, err = self.run_lint(source)
+        self.assertEqual(status, 0, err)
+
+    def test_a_comment_naming_the_macro_passes(self) -> None:
+        source = self.write_source(
+            "comment.cc",
+            "// `NANOCHAT_PRECISION` is selected by the build, not by this file.\n")
+        status, _, err = self.run_lint(source)
+        self.assertEqual(status, 0, err)
+
     def test_every_check_reports_in_one_run(self) -> None:
         source = self.write_source(
             "all.cc",
             'using namespace std;\n#include "tensor.h"\nint n = (int)v;\n'
-            "// caf\u00e9\n")
+            "// caf\u00e9\n"
+            "#if NANOCHAT_PRECISION != 0\n"
+            "#endif\n")
         status, _, err = self.run_lint(source)
         self.assertEqual(status, 1)
         for message, _ in lint.CHECKS:

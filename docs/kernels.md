@@ -797,7 +797,7 @@ hand GEMM stayed below the first promotion on the group the Muon fusion targets
 groups of [model.md](model.md) § Optimizer, and the Linear forward, dgrad, and
 wgrad shapes in `python/nanochat_cpp/pipeline.py` `PROFILES`.
 
-**The kernel.** Generalise the `attention_bf16.cuh` microkernel into a tiled
+**The kernel.** Generalise the `attention_bf16.cu` microkernel into a tiled
 GEMM under `backends/cuda/gemm/`. Use `cp.async` double-buffered
 shared-memory stages and `wmma::mma_sync` with 16 by 16 by 16 bf16 fragments and
 fp32 accumulators. Support the full `GemmParams` contract: transpose flags,

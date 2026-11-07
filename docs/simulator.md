@@ -840,6 +840,9 @@ Two gaps block the attention work:
 
 The consequence is direct: **the emulator cannot check a tensor-core attention
 tile.** It can check the cuBLAS attention path, because that path has no tile.
+The emulated build therefore links `attention_bf16_absent.cc` in place of the
+tile, so `attention.cu` asks the same two questions in every build and the
+dispatch stays out of the preprocessor.
 
 Two options close the gap:
 

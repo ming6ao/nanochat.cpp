@@ -77,8 +77,6 @@ constexpr Group kGroups[] = {
     {"1280x5120", 1280, 5120, 20},
 };
 
-#if NANOCHAT_PRECISION == 0
-
 // The three products of one Polar Express iteration at one group's shapes.
 struct Stages {
   MuonGemmOp a;
@@ -208,8 +206,6 @@ void RunGroup(const Group& g, const BenchOptions& opt, BenchReport* report,
   }
 }
 
-#endif  // NANOCHAT_PRECISION == 0
-
 // The section 4 schedule the run used, on standard error so a `--json` run
 // leaves standard output to the report.
 void PrintSchedule() {
@@ -288,11 +284,7 @@ int main(int argc, char** argv) {
   // step row it belongs to compare directly.
   report.SetRowIdentity("muon_orthogonalisation", "optimizer");
 
-#if NANOCHAT_PRECISION == 0
   for (const Group& g : groups) RunGroup(g, opt, &report, verbose);
-#else
-  std::fprintf(stderr, "  skipped: the prototype is fp32-only\n");
-#endif
   report.Print(opt);
   return 0;
 }

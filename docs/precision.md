@@ -23,6 +23,27 @@ Use one rule for every device:
 3. Keep the persistent state in fp32 on every device.
 4. Do not use loss scaling. Neither fp32 nor bf16 needs it.
 
+### 1.1 Where a precision decision lives
+
+The build selects the precision, so a source must not test the numeric define.
+Use one of these three forms, and no other:
+
+| Form | Use it for | Example |
+|---|---|---|
+| `select()` on `srcs` or `deps` | A whole source that only some precisions need | `backends/cuda/gemm/BUILD.bazel` |
+| `if constexpr (kComputeIsBf16)` | A branch in a source that compiles in every precision | `TryGemmTile` in `backends/cuda/gemm.cu` |
+| `#if` on a compiler fact | `__CUDACC__`, `__CUDA_ARCH__`, or an include guard | `backends/cuda/kernels/attention_bf16.cu` |
+
+A precision set is not a boolean. Each package names the precisions its family
+serves in its own `BUILD.bazel`, so a fourth precision changes the packages that
+serve it and no other file. `//backends/cuda/kernels:attention` shows the shape:
+one key per precision in the `select()`, plus a stand-in source for the builds
+where the caller must still link a symbol.
+
+`tools/nanochat lint` rejects a preprocessor test of `NANOCHAT_PRECISION` outside
+`include/nanochat/tensor.h`. That header holds the range and the extension steps
+for a new value.
+
 ## 2. Why fp16 is gone
 
 fp16 is the only format with a small exponent range.
