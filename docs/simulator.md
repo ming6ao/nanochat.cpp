@@ -935,7 +935,7 @@ Two options close the gap:
   card.
 
 Prefer option 2 for the tile, and option 1 only for a narrow case. Record the
-choice in [attention.md](attention.md) phase A3.
+choice in [attention.md](attention.md) Part 6, section 6.
 
 Add `extern __shared__` to the emulator regardless. The value gate uses it, and
 that family is small.

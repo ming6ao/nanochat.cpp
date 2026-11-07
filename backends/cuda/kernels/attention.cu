@@ -32,7 +32,13 @@
 // output accumulator in registers and skips fully masked key tiles, which is
 // what turns the sliding window into saved work. The cuBLAS forward stays for
 // full-causal attention and for every other shape. The cuBLAS backward stays
-// for every shape. See `docs/attention.md` Part 2, section 5.
+// for every shape. See `docs/attention.md` Part 2, section 4.
+//
+// Two fused tiles exist. The fp32 tile above runs on the CUDA cores, so it
+// wins only where the matmuls have no tensor cores to lose to. The bf16 tile
+// in `attention_bf16.cuh` runs on the tensor cores, so it also wins in a bf16
+// build, where the cuBLAS path would pay for every masked pair at the
+// tensor-core rate. See `docs/attention.md` Part 6.
 
 #include <cstddef>
 #include <cstdint>
@@ -41,6 +47,8 @@
 #include <cuda_runtime.h>
 
 #include "backends/cuda/device.h"
+#include "backends/cuda/kernels/attention_bf16.cuh"
+#include "backends/cuda/kernels/attention_dispatch.h"
 #include "backends/cuda/kernels/device_utils.cuh"
 #include "nanochat/kernels.h"
 
@@ -965,9 +973,23 @@ void LaunchFusedAttention(const AttentionParams& params, const ComputeType* q,
 // windowed shape, because the full-causal tile lost its gate to cuBLAS. It
 // reads the query in the model stream, so a head-major query keeps the batched
 // path.
-bool UseFusedAttention(const AttentionParams& p) {
-  return !kComputeIsBf16 && !p.q_head_major && p.window_left >= 0 &&
-         p.head_dim == 128;
+// The bf16 tile needs the tensor cores: it replaces the dense cuBLAS score
+// matrix, and a bf16 build whose device has no tensor cores keeps that path.
+// The condition itself lives in `attention_dispatch.h`, so the test reads the
+// same code. See `docs/attention.md` Part 6, section 5.
+//
+// The tile's own source exists only under `__CUDACC__` in a bf16 or fp8 build,
+// which is the same pair of conditions this function tests. The host compiler
+// takes the branch below, because the simulator compiles this translation unit
+// and has no tensor-core primitive. See `docs/simulator.md` section 9.2.
+bool UseFusedAttentionBf16(const AttentionParams& p) {
+#if defined(__CUDACC__) && (NANOCHAT_PRECISION != 0)
+  static const bool tensor_cores = GetCaps().has_tensor_cores;
+  return FusedAttentionBf16Covers(p, tensor_cores);
+#else
+  (void)p;
+  return false;
+#endif
 }
 
 void AttentionForward(const AttentionParams& params, const ComputeType* q,
@@ -979,10 +1001,16 @@ void AttentionForward(const AttentionParams& params, const ComputeType* q,
   }
   const int kv_len = params.kv_len > 0 ? params.kv_len : params.seq;
   if (kv_len <= 0) return;
-  if (UseFusedAttention(params)) {
+  if (FusedAttentionFp32Covers(params)) {
     LaunchFusedAttention(params, q, k, v, out, stats);
     return;
   }
+#if defined(__CUDACC__) && (NANOCHAT_PRECISION != 0)
+  if (UseFusedAttentionBf16(params)) {
+    LaunchBf16Attention(params, q, k, v, out, stats);
+    return;
+  }
+#endif
   const int heads = params.num_heads;
   const int dim = params.head_dim;
   const float scale = params.scale > 0.0f

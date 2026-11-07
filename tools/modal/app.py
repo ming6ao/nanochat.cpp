@@ -169,21 +169,35 @@ TOKENIZER_BIN = f"{REPO_ROOT}/bazel-bin/src/tokenizer/tok_train_main"
 TRAIN_TARGET = CLI_TARGET
 TRAIN_BIN = f"{REPO_ROOT}/bazel-bin/src/nanochat_cli"
 
+def _bazel_bin(target: str) -> str:
+    """The path one target label takes inside the image build."""
+    return f"{REPO_ROOT}/bazel-bin/{target.removeprefix('//').replace(':', '/')}"
+
 #: The Bazel label of the Muon optimizer benchmark, and its binary. The
 #: benchmark times the Polar Express GEMM shapes and one whole optimizer phase,
 #: so a card that is slow in the optimizer reports its own rate instead of
 #: hiding inside a step time. It is not a stage executable: only
 #: :func:`bench_h100` runs it.
 BENCH_TARGET = "//backends/cuda/kernels:muon_benchmark"
-BENCH_BIN = f"{REPO_ROOT}/bazel-bin/backends/cuda/kernels/muon_benchmark"
+BENCH_BIN = _bazel_bin(BENCH_TARGET)
+
+#: The attention benchmark and its family test. The H100 leg is the only card
+#: with tensor cores this repository can reach, so the bf16 tile of
+#: ``docs/attention.md`` Part 6 is measured and verified there: one job runs the
+#: test binary, and the other reports the rows the promotion gate reads.
+ATTENTION_BENCH_TARGET = "//backends/cuda/kernels:attention_benchmark"
+ATTENTION_TEST_TARGET = "//backends/cuda/kernels:attention_gpu_test"
+ATTENTION_BENCH_BIN = _bazel_bin(ATTENTION_BENCH_TARGET)
+ATTENTION_TEST_BIN = _bazel_bin(ATTENTION_TEST_TARGET)
 
 #: The labels the one build of an image names: the shared library, the stage
 #: binary the chain launches (``docs/post-training.md`` B6 and D2), the
-#: tokenizer trainer the corpus function runs, and the optimizer benchmark
-#: :func:`bench_h100` times. The roofline tool and the trainer are the same
-#: program and the same label, so each appears once.
+#: tokenizer trainer the corpus function runs, the optimizer benchmark
+#: :func:`bench_h100` times, and the two attention jobs. The roofline tool and
+#: the trainer are the same program and the same label, so each appears once.
 BUILD_TARGETS = ("//bindings:nanochat_shared", *STAGE_TARGETS,
-                 TOKENIZER_TARGET, BENCH_TARGET)
+                 TOKENIZER_TARGET, BENCH_TARGET, ATTENTION_BENCH_TARGET,
+                 ATTENTION_TEST_TARGET)
 
 #: The directory of the image build that holds them, and the variables that
 #: name them. ``nanochat_cpp._build.stage_binary`` prefers the override, and
@@ -849,6 +863,27 @@ def train_h100(job_json: str, run_id: str, publish_json: str = "",
     return _train_on(H100, job_json, run_id, publish_json, stage_json)
 
 
+def _run_in_image(command: list, argv_json: str, row_prefixes: tuple) -> str:
+    """Run one in-image command and return its answer as one JSON document.
+
+    ``argv_json`` is a JSON list of extra arguments for the program, so a caller
+    selects a shape without a new deployment. ``row_prefixes`` names the output
+    lines worth lifting out of the full text. The image sets
+    ``NANOCHAT_SANDBOX_BACKEND=none``, so ``tools/nanochat`` runs the program in
+    place and needs no queue.
+    """
+    argv = [str(item) for item in json.loads(argv_json or "[]")]
+    full = [*command, *argv]
+    result = subprocess.run(full, env=worker_env(package_source()),
+                            capture_output=True, text=True, check=False)
+    rows = [line for line in result.stdout.splitlines()
+            if line.startswith(row_prefixes)]
+    return json.dumps({"command": full, "status": int(result.returncode),
+                       "rows": rows, "stdout": result.stdout.strip(),
+                       "tail": process_tail(result, lines=8)},
+                      sort_keys=True)
+
+
 @app.function(
     image=image_for(H100),
     gpu=H100.gpu,
@@ -870,17 +905,52 @@ def bench_h100(argv_json: str = "[]") -> str:
     no GPU queue in the container: ``NANOCHAT_SANDBOX_BACKEND`` is ``none``
     there, so ``tools/nanochat bench`` runs the binary in place (section 7).
     """
-    argv = [str(item) for item in json.loads(argv_json or "[]")]
-    command = ["tools/nanochat", "bench", "--", BENCH_BIN, *argv]
-    result = subprocess.run(command, env=worker_env(package_source()),
-                            capture_output=True, text=True, check=False)
-    measured = [line for line in result.stdout.splitlines()
-                if line.startswith(("polar:", "muon:"))]
-    return json.dumps({"command": command, "status": int(result.returncode),
-                       "rows": measured,
-                       "stdout": result.stdout.strip(),
-                       "tail": process_tail(result, lines=8)},
-                      sort_keys=True)
+    return _run_in_image(["tools/nanochat", "bench", "--", BENCH_BIN],
+                         argv_json, ("polar:", "muon:"))
+
+
+@app.function(
+    image=image_for(H100),
+    gpu=H100.gpu,
+    cpu=CPU_CORES,
+    timeout=1800,
+    max_containers=1,
+)
+def check_attention_h100() -> str:
+    """Run the attention family test on the H100 leg and return its output.
+
+    The image built the test binary from the same source and the same flags as
+    the library, so this is the bf16 tensor-core tile of ``docs/attention.md``
+    Part 6 measured against the host reference on the card the tile targets. The
+    test takes the sandbox profile ``t1-gpu``; the image sets
+    ``NANOCHAT_SANDBOX_BACKEND=none``, so the profile is a marker and the binary
+    runs in place.
+    """
+    return _run_in_image(["tools/nanochat", "run", "t1-gpu", "--",
+                          ATTENTION_TEST_BIN], "[]", ())
+
+
+@app.function(
+    image=image_for(H100),
+    gpu=H100.gpu,
+    cpu=CPU_CORES,
+    timeout=1800,
+    max_containers=1,
+)
+def bench_attention_h100(argv_json: str = "[]") -> str:
+    """Time the attention benchmark on the H100 leg and return what it printed.
+
+    The mirror of :func:`bench_h100` for the attention family. The benchmark
+    runs in the H100 image, so every row belongs to the library that image
+    built: ``sm_90`` at bf16, the same build the chain runs, which is the build
+    in which the tensor-core tile replaces the dense cuBLAS forward on the
+    windowed layers (``docs/attention.md`` Part 6).
+
+    ``argv_json`` is a JSON list of the benchmark's own arguments, so a caller
+    selects the shape without a new deployment.
+    """
+    return _run_in_image(["tools/nanochat", "bench", "--",
+                          ATTENTION_BENCH_BIN], argv_json, ("attention:",))
 
 
 def chain_dir(run_root, job) -> Path:
@@ -2402,6 +2472,42 @@ def demo_job(run_id: str = "demo") -> dict:
     except Exception:  # noqa: BLE001 - a host without the package falls back
         return dict(DEMO_JOB, run_id=str(run_id))
     return dict(Job(run_id=str(run_id)).to_dict())
+
+
+def _print_answer(answer_json: str, what: str) -> None:
+    """Print one job's answer, and fail the run when its status is not zero."""
+    answer = json.loads(answer_json)
+    print(json.dumps(answer, indent=1, sort_keys=True))
+    if int(answer.get("status", 1)) != 0:
+        print(f"modal: {what} reported a failure", file=sys.stderr)
+        raise SystemExit(1)
+
+
+@app.local_entrypoint()
+def attention_check() -> None:
+    """Run the attention family test on the H100 leg and print its output.
+
+        modal run tools/modal/app.py::attention_check
+
+    The test binary comes from the same build as the library, so the bf16
+    tensor-core tile of ``docs/attention.md`` Part 6 runs against the host
+    reference on the card the tile targets.
+    """
+    _print_answer(check_attention_h100.remote(), "the attention test")
+
+
+@app.local_entrypoint()
+def attention_bench(argv: str = "[]") -> None:
+    """Time the attention benchmark on the H100 leg and print its rows.
+
+        modal run tools/modal/app.py::attention_bench
+        modal run tools/modal/app.py::attention_bench --argv '["--json"]'
+
+    Every row belongs to the library the image built: ``sm_90`` at bf16, which
+    is the build where the tensor-core tile replaces the dense cuBLAS forward
+    on the windowed layers.
+    """
+    _print_answer(bench_attention_h100.remote(argv), "the attention benchmark")
 
 
 @app.local_entrypoint()

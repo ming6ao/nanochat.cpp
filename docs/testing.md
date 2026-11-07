@@ -649,7 +649,7 @@ uses the shared rounding header.
 
 Map `extern __shared__`. This mapping unblocks the value gate and the fused
 attention forward. Map `mma` to a scalar loop for one narrow case only. Record
-in [attention.md](attention.md) phase A3 that the
+in [attention.md](attention.md) Part 6, section 6, that the
 tile still needs hardware.
 
 Status: complete except the `mma` scalar loop. `cuda_fp8.h` maps the conversion
@@ -663,7 +663,7 @@ attention forward (the cuBLAS path and the fused windowed path) against the CPU
 reference. It also asserts that the dynamic shared path ran.
 
 The `mma` scalar loop stays open: the tensor-core tile needs hardware
-([attention.md](attention.md) phase A3).
+([attention.md](attention.md) Part 6, section 6).
 
 Gate: the emulated cast, the value gate, and the attention forward match the
 CPU reference. All three hold today.

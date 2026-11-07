@@ -97,6 +97,114 @@
       ],
       "origin": "docs/baselines.json"
     },
+    "attention_bf16": {
+      "note": "Measured rows of the bf16 attention path on an NVIDIA H100 80GB HBM3 (sm_90), from the Modal H100 image built at sm_90 and bf16 (tools/modal/app.py, the H100 leg). Every row comes from one run of one binary, so the comparison is between two branches of one build. A *_cublas row is the dense forward the fused tile replaces: the same shape and the same build with a head-major query, which keeps the batched path and skips one transpose, so those rows are marginally favoured. The windowed and SSSL rows without a suffix take the bf16 tensor-core tile of docs/attention.md Part 6; d8_s512 stays on cuBLAS because it is full-causal. No backward runs the tile, so the two backward rows of a pair differ only by the query transpose. work_ratio is issued work over necessary work.",
+      "device": "NVIDIA H100 80GB HBM3 (sm_90)",
+      "validated_on": "NVIDIA H100 80GB HBM3 (sm_90)",
+      "precision": "bf16",
+      "measurement": "modal run tools/modal/app.py::attention_bench --argv '[\"--json\"]'",
+      "origin": "docs/attention.md Part 6, section 10",
+      "rows": [
+        {
+          "name": "attention_fwd:d8_s512",
+          "shape": "B=8 T=512 H=4 KV=4 D=128 wl=-1",
+          "ms": 0.104832,
+          "gflops": 20525,
+          "work_ratio": 1.9961
+        },
+        {
+          "name": "attention_bwd:d8_s512",
+          "shape": "B=8 T=512 H=4 KV=4 D=128 wl=-1",
+          "ms": 0.186496,
+          "gflops": 23074.8,
+          "work_ratio": 1.9961
+        },
+        {
+          "name": "attention_fwd:d8_s512_win128",
+          "shape": "B=8 T=512 H=4 KV=4 D=128 wl=128",
+          "ms": 0.064608,
+          "gflops": 14655.5,
+          "work_ratio": 4.53599
+        },
+        {
+          "name": "attention_bwd:d8_s512_win128",
+          "shape": "B=8 T=512 H=4 KV=4 D=128 wl=128",
+          "ms": 0.243659,
+          "gflops": 7772.05,
+          "work_ratio": 4.53599
+        },
+        {
+          "name": "attention_fwd:d8_s512_win128_cublas",
+          "shape": "B=8 T=512 H=4 KV=4 D=128 wl=128",
+          "ms": 0.099328,
+          "gflops": 9532.7,
+          "work_ratio": 4.53599
+        },
+        {
+          "name": "attention_bwd:d8_s512_win128_cublas",
+          "shape": "B=8 T=512 H=4 KV=4 D=128 wl=128",
+          "ms": 0.221899,
+          "gflops": 8534.2,
+          "work_ratio": 4.53599
+        },
+        {
+          "name": "attention_fwd:d8_s512_sssl",
+          "shape": "B=8 T=512 H=4 KV=4 D=128 pattern=SSSL",
+          "ms": 0.0746613,
+          "gflops": 16716.4,
+          "work_ratio": 3.44129
+        },
+        {
+          "name": "attention_bwd:d8_s512_sssl",
+          "shape": "B=8 T=512 H=4 KV=4 D=128 pattern=SSSL",
+          "ms": 0.230056,
+          "gflops": 10850.1,
+          "work_ratio": 3.44129
+        },
+        {
+          "name": "attention_fwd:d8_s512_sssl_cublas",
+          "shape": "B=8 T=512 H=4 KV=4 D=128 pattern=SSSL",
+          "ms": 0.09744,
+          "gflops": 12808.6,
+          "work_ratio": 3.44129
+        },
+        {
+          "name": "attention_bwd:d8_s512_sssl_cublas",
+          "shape": "B=8 T=512 H=4 KV=4 D=128 pattern=SSSL",
+          "ms": 0.204179,
+          "gflops": 12225.2,
+          "work_ratio": 3.44129
+        },
+        {
+          "name": "attention_fwd:b4_s2048_h8_win512",
+          "shape": "B=4 T=2048 H=8 KV=8 D=128 wl=512",
+          "ms": 0.663904,
+          "gflops": 22686.6,
+          "work_ratio": 4.56252
+        },
+        {
+          "name": "attention_bwd:b4_s2048_h8_win512",
+          "shape": "B=4 T=2048 H=8 KV=8 D=128 wl=512",
+          "ms": 0.972917,
+          "gflops": 30962,
+          "work_ratio": 4.56252
+        },
+        {
+          "name": "attention_fwd:b4_s2048_h8_win512_cublas",
+          "shape": "B=4 T=2048 H=8 KV=8 D=128 wl=512",
+          "ms": 0.843477,
+          "gflops": 17856.7,
+          "work_ratio": 4.56252
+        },
+        {
+          "name": "attention_bwd:b4_s2048_h8_win512_cublas",
+          "shape": "B=4 T=2048 H=8 KV=8 D=128 wl=512",
+          "ms": 0.910347,
+          "gflops": 33090.1,
+          "work_ratio": 4.56252
+        }
+      ]
+    },
     "attention_e2e": {
       "note": "Frozen Phase 0 end-to-end baseline for the forward-only evaluation path. Derived by scaling the documented d12 fp32 eval rate (docs/performance.md section 6) to the d8_s512 shape: the model needs about 344.8 GFLOP per forward, and the arena is computed exactly from the eval workspace sizes. Update this file only with a real tools/nanochat bench run at the recorded revision.",
       "device": "GTX 1080 Ti (sm_61)",

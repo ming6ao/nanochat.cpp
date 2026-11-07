@@ -107,6 +107,10 @@ cuda_library(
 cuda_library(
     name = "attention",
     srcs = ["attention.cu"],
+    hdrs = [
+        "attention_bf16.cuh",
+        "attention_dispatch.h",
+    ],
     copts = nanochat_cuda_copts(),
     defines = precision_defines(),
     deps = [
@@ -391,7 +395,10 @@ cc_test(
 
 cc_test(
     name = "attention_gpu_test",
-    srcs = ["attention_test.cc"],
+    srcs = [
+        "attention_dispatch.h",
+        "attention_test.cc",
+    ],
     copts = nanochat_copts(),
     defines = precision_defines(),
     deps = [

@@ -1,7 +1,13 @@
 // Standalone attention-family benchmark. It measures the shipped
 // `AttentionForward` and `AttentionBackward` with device events at the
 // `d8_s512` training shape, a sliding-window variant, a grouped-query variant,
-// the production `SSSL` mixed-window pattern, and a head-dimension sweep.
+// the production `SSSL` mixed-window pattern, a sequence-2048 window, and a
+// head-dimension sweep.
+//
+// A windowed shape also runs its dense twin: a head-major query keeps the
+// batched path (`docs/attention.md` Part 4), so one run measures both forward
+// branches at one shape in one build. That pair is the promotion gate of
+// `docs/attention.md` Part 6, section 7.
 //
 // Every row carries an "issue/need" column: the work the shipped path issues
 // over the work the visible (causal or windowed) query-key pairs need. The
@@ -87,7 +93,31 @@ ShapeResult MeasureShape(Rng* rng, const BenchOptions& opt,
   const int kv_count = p.batch * kv_len * kv_heads * dim;
   const int stats_count = nanochat::AttentionStatsCount(p);
 
-  DevBuf<ComputeType> q(ToStorage(RandomVec(q_count, rng)));
+  // A head-major query keeps the batched path (`docs/attention.md` Part 4 and
+  // Part 6, section 5), so the same shape and the same build measure the dense
+  // forward the fused tile replaces. The permutation runs outside the timed
+  // region.
+  std::vector<float> q_host = RandomVec(q_count, rng);
+  if (p.q_head_major) {
+    std::vector<float> permuted(q_host.size());
+    for (int b = 0; b < p.batch; ++b) {
+      for (int t = 0; t < p.seq; ++t) {
+        for (int h = 0; h < heads; ++h) {
+          for (int d = 0; d < dim; ++d) {
+            const std::size_t stream =
+                ((static_cast<std::size_t>(b) * p.seq + t) * heads + h) * dim +
+                d;
+            const std::size_t head_major =
+                ((static_cast<std::size_t>(b) * heads + h) * p.seq + t) * dim +
+                d;
+            permuted[head_major] = q_host[stream];
+          }
+        }
+      }
+    }
+    q_host = permuted;
+  }
+  DevBuf<ComputeType> q(ToStorage(q_host));
   DevBuf<ComputeType> k(ToStorage(RandomVec(kv_count, rng)));
   DevBuf<ComputeType> v(ToStorage(RandomVec(kv_count, rng)));
   DevBuf<ComputeType> out(q_count);
@@ -259,6 +289,14 @@ int main(int argc, char** argv) {
   windowed.window_left = 128;
   BenchShape(&report, &rng, opt, windowed, "d8_s512_win128");
 
+  // The dense twin of the window row: the same shape and the same build, with a
+  // head-major query so the batched path answers. This is the forward the fused
+  // tile replaces, and it is the row the promotion gate of `docs/attention.md`
+  // Part 6, section 7 compares against.
+  AttentionParams windowed_dense = windowed;
+  windowed_dense.q_head_major = true;
+  BenchShape(&report, &rng, opt, windowed_dense, "d8_s512_win128_cublas");
+
   // Grouped-query attention: 8 query heads sharing 2 key/value heads.
   AttentionParams gqa = base;
   gqa.batch = 2;
@@ -270,6 +308,24 @@ int main(int argc, char** argv) {
   // The shipped path is dense, so the time matches a single layer while the
   // necessary work drops; the row is the mean over one `SSSL` cycle.
   BenchPattern(&report, &rng, opt, base, "SSSL", "d8_s512_sssl");
+
+  // The production shape at the sequence length the tile is argued at: a
+  // quarter-context window over 2048 positions, and its dense twin.
+  AttentionParams long_shape = base;
+  long_shape.batch = 4;
+  long_shape.seq = 2048;
+  long_shape.num_heads = 8;
+  long_shape.num_kv_heads = 8;
+  long_shape.window_left = 512;
+  BenchShape(&report, &rng, opt, long_shape, "b4_s2048_h8_win512");
+  AttentionParams long_dense = long_shape;
+  long_dense.q_head_major = true;
+  BenchShape(&report, &rng, opt, long_dense, "b4_s2048_h8_win512_cublas");
+
+  // The same mixed pattern on the dense twin.
+  AttentionParams sssl_dense = base;
+  sssl_dense.q_head_major = true;
+  BenchPattern(&report, &rng, opt, sssl_dense, "SSSL", "d8_s512_sssl_cublas");
 
   // Head-dimension sweep. Small batch and sequence length keep the sweep
   // quick; the point is the exponent, not the absolute time.

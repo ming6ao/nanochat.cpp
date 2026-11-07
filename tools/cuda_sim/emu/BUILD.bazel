@@ -28,6 +28,11 @@ cc_library(
         "emu_prelude.h",
         "math_constants.h",
         "//backends/cuda:device.h",
+        # `attention.cu` includes the bf16 tile and the dispatch predicates.
+        # The tile is device-only, so under the host compiler it is empty and
+        # the emulated bf16 windowed forward takes the cuBLAS path.
+        "//backends/cuda/kernels:attention_bf16.cuh",
+        "//backends/cuda/kernels:attention_dispatch.h",
         "//backends/cuda/kernels:device_utils.cuh",
         "//backends/cuda/kernels:muon_fused.h",
         "//backends/cuda/kernels:rms_norm.h",

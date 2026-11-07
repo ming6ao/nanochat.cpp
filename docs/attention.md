@@ -1,50 +1,30 @@
-# Attention: baseline, Pascal feasibility, and the fused window
+# Attention: the shipped paths, the measurements, and the fused tiles
 
-Attention is the largest CUDA kernel family. This document records the shipped
-baseline, the Pascal feasibility study, the fused windowed-forward promotion,
-the banded windowed backward, and the measured results. Full-causal attention
-stays on cuBLAS; the sliding-window backward runs the banded query-block
-schedule described in Part 2, section 5.4. The fused windowed forward lives in
-`backends/cuda/kernels/attention.cu` behind `UseFusedAttention`.
+Attention has three forward paths, and one backward. Two of them are fused
+tiles that keep the online-softmax state in registers and skip fully masked key
+tiles. The third is the batched cuBLAS decomposition, which is also the only
+backward.
+
+| Path | Covers | Engine | Part |
+|---|---|---|---|
+| fp32 tile | a windowed shape at head width 128, fp32 build | CUDA cores | 2, 4 |
+| bf16 tile | a windowed shape at head width 128, bf16 or fp8 build, a device with tensor cores | Tensor cores | 6 |
+| cuBLAS | every other shape, and every backward | cuBLAS | 2 |
+
+The two predicates live in `backends/cuda/kernels/attention_dispatch.h`, the
+tiles in `backends/cuda/kernels/attention.cu` and `attention_bf16.cuh`, and the
+measured rows in the `attention`, `attention_e2e`, and `attention_bf16` entries
+of [baselines.json](baselines.json).
 
 Read [performance.md](performance.md) for the measurement protocol and
-[kernels.md](kernels.md) for the `Attention` family.
+[kernels.md](kernels.md) for the family inventory.
 
-This document replaces the former `attention-baseline.md`,
-`flash-attention-pascal.md`, `flash-attention-window.md`, and
-`attention-window-results.md`. The frozen reports are the `attention` and
-`attention_e2e` entries of [baselines.json](baselines.json).
+## Part 1. The window saving
 
-Part 5 holds the tensor-core tile, absorbed from the former
-`attention-tensor-core.md`.
-
-## Part 1. Phase 0 baseline
-
-This document freezes the Phase 0 baseline for the shipped attention path. Use
-it as the reference for the gates in Part 2.
-
-The baseline is one file with three parts:
-
-| Source | Content |
-|---|---|
-| [baselines.json](baselines.json), key `attention` | The `attention_benchmark` report. |
-| [baselines.json](baselines.json), key `attention_e2e` | The forward-only eval report at `d8_s512` with the `SSSL` pattern. |
-| This part | The note that reads them. |
-
-### Measurement
-
-- Device: GTX 1080 Ti, `sm_61`.
-- Precision: fp32.
-- Command: `tools/nanochat profile --json`; the report is the `attention` entry.
-- Source: the measured table in
-  Part 2, section 4.
-
-### Issued work against necessary work
-
-The shipped path runs dense cuBLAS GEMMs and masks the result afterwards. Thus
-every query-key pair costs time, even a masked pair. "Issued work" counts all
-dense pairs. "Necessary work" counts only the visible pairs. The ratio of the
-two shows the mask waste.
+The cuBLAS path runs dense GEMMs and masks the result afterwards, so every
+query-key pair costs time, even a masked pair. "Issued work" counts all dense
+pairs. "Necessary work" counts only the visible ones. Their ratio is the mask
+waste a tile removes.
 
 | Case | Issued pairs | Necessary pairs | Issued / necessary |
 |---|---|---|---|
@@ -54,215 +34,64 @@ two shows the mask waste.
 | `d8_s512` `SSSL` mean | 8,388,608 | 2,437,632 | 3.441 |
 | head-dim sweep `d32` to `d256` | 131,072 | 66,048 | 1.984 |
 
-Two readings:
+The window 128 layer needs 44 percent of the full-causal work, and it issues
+4.54 times its necessary work. The measured time is the same as the full layer:
+1.571 ms against 1.586 ms. That is the defect a fused tile fixes. The `SSSL`
+pattern is three window layers to one full layer, so three quarters of the
+production layers pay less in theory and the same in practice.
 
-- The window 128 layer needs 44% of the full-causal work, but it issues 4.54
-  times its necessary work. The measured time is the same as the full layer
-  (1.571 ms against 1.586 ms). This is the clearest defect.
-- The `SSSL` pattern issues 3.44 times its necessary work. The pattern is three
-  window layers to one full layer. The mean necessary work is 0.29 of the dense
-  work.
+## Part 2. The Pascal baseline and the feasibility study
 
-### Forward overhead and the GEMM floor
+### 1. What the cuBLAS path does
 
-At `d8_s512` full causal, the forward takes **1.586 ms** and the backward takes
-**2.857 ms**.
-
-The forward issues 4.29 GFLOP of dense GEMM work: 2.147 GFLOP for the query-key
-product and 2.147 GFLOP for the probability-value product.
-
-The measured product rates in commit `d253ef3` are 6,991 GFLOP/s for query-key
-and 5,843 GFLOP/s for probability-value. Thus the two GEMMs take about 0.674 ms.
-The remaining **0.91 ms** is transposes, softmax, and launches. The overhead is
-57% of the forward.
-
-The necessary forward work is 2.15 GFLOP.
-
-At 4 TFLOP/s that is 0.54 ms. At 2.5 TFLOP/s that is 0.86 ms.
-
-Both values beat 1.586 ms. The device has headroom.
-
-### End-to-end baseline
-
-`baselines.json` records the forward-only eval at `d8_s512` with
-the `SSSL` pattern. The shape is `B=8 T=512 L=8 H=4 KV=4 C=512 V=32768 W=SSSL`.
-
-| Metric | Value |
-|---|---|
-| Forward time | 74.47 ms |
-| Tokens per second | 55,000 |
-| Eval arena | 755,269,888 bytes |
-
-The Phase 3 gate in Part 2 compares the new eval
-rate against the `tokens_per_second` value.
-
-**Note.** The end-to-end value is an estimate. It scales the documented d12 fp32
-eval rate in [performance.md](performance.md) section 6 to the `d8_s512` shape.
-The arena size is exact. Replace the estimate with a real
-`tools/nanochat bench` run at the first opportunity.
-
-### Reproduction
-
-Run the attention benchmark through the project entry point:
-
-```bash
-tools/nanochat profile --json --out /tmp/attention_p0.json
-```
-
-Run the end-to-end eval benchmark:
-
-```bash
-tools/nanochat build --config=cuda //src:nanochat_cli
-tools/nanochat bench -- ./bazel-bin/src/nanochat_cli eval_bench --batch 8 --seq 512 \
-  --layers 8 --heads 4 --kv-heads 4 --hidden 512 \
-  --window-pattern SSSL --json
-```
-
-### Limits
-
-- The numbers are from one host and one precision. Do not compare across
-  devices.
-- The baseline is a snapshot. Update it only with the revision and the
-  configuration that produced the new numbers.
-
-## Part 2. Pascal feasibility and plan
-
-This document answers a single question: **can a flash-attention-style kernel be
-implemented in `nanochat.cpp` for the Pascal host?** **Would it be faster than
-the current attention path?** It records the investigation, the measured
-baseline, the feasibility judgment, and a staged plan with go/no-go gates.
-
-Status: delivered for the windowed forward and the banded windowed backward.
-The fused windowed forward runs in `backends/cuda/kernels/attention.cu` behind
-`UseFusedAttention`. The sliding-window backward runs
-`AttentionBackwardWindowed` (multi-head) or `AttentionBackwardWindowedGqa`
-(grouped-query), dispatched by `UseWindowedBackward`, so the `SSSL` model never
-materializes the dense `seq x seq` backward. Full-causal attention and the
-non-windowed backward stay on cuBLAS. The project removed the Phase 1 prototype
-after promotion.
-
-Related: [performance.md](performance.md) (measurement protocol, the attention
-benchmark), [kernels.md](kernels.md) (the `Attention` family),
-[kernels.md](kernels.md) § Compute strategy (Pascal constraints, no
-megakernels), [parity.md](parity.md) (D3, attention parity).
-
----
-
-### 1. Summary
-
-1. **The upstream `flash-attention` kernels cannot run on Pascal.** Every
-   compiled kernel in the checkout is `*_sm80.cu`; `setup.py` only emits
-   `compute_80` and newer. They are fp16/bf16 tensor-core kernels that use
-   `mma.sync`, `ldmatrix`, and `cp.async`. Pascal sm_61 has none of these, and
-   GeForce GP102 runs fp16 arithmetic at roughly 1/64 of fp32. There is no
-   fallback path to port; FA1 was also tensor-core based.
-
-2. **What is worth porting is the algorithm, not the kernels.** The tiled
-   online softmax, the causal/window tile skip, the recompute backward, and the
-   GQA handling are all architecture-neutral. On Pascal they must use fp32 against
-   CUDA cores and shared memory.
-
-3. **The current path leaves two large, measurable wins on the table.** It runs
-   the query-key and probability-value products as *dense* cuBLAS GEMMs and
-   masks afterwards. So a sliding-window layer costs exactly the same as a full
-   causal layer: measured 1.571 ms versus 1.586 ms forward, even though the
-   window needs only 44% of the work.
-
-   About 0.9 ms of the 1.586 ms forward is
-   transpose, softmax, and launch overhead around only ~0.67 ms of GEMM. A
-   properly tiled kernel can skip masked tiles and fold the softmax and the
-   layout conversion into the GEMM.
-
-4. **The win is plausible but not guaranteed, so the plan must gate it.** A prior
-   experiment in this tree (the stale `attention_variant_bench` artifact)
-   implemented a one-block-per-query-row tile ("score-caching v2"). It was
-   ~7x *slower* than today's batched cuBLAS path (11.57 ms versus 1.59 ms
-   forward). A fused kernel only wins if it is a **register-blocked tiled GEMM**
-   that reuses each key/value tile across many query rows. The plan therefore
-   makes a forward prototype and a backward prototype explicit kill gates.
-
-5. **Recommendation.** Pursue it, with the gates in section 6. Expected
-   outcome if the gates pass: roughly **2-3x on attention** at full context and
-   roughly **2.3x on the windowed layers** that make up three quarters of the
-   production `SSSL` model. At the current `d8_s512` shape attention is about
-   11% of the step. That is an estimated **6-8% end-to-end step time** there, and
-   it grows with sequence length as attention's share grows. If the forward
-   prototype cannot beat cuBLAS at `d8_s512`, stop and keep the current path.
-
----
-
-### 2. Why the upstream flash-attention cannot run on Pascal
-
-The reference Python `nanochat` (`/home/egrader/repos/nanochat`) imports
-`nanochat.flash_attention`, which tries to load FlashAttention-3 and otherwise
-falls back to `torch.nn.functional.scaled_dot_product_attention`. The FA3
-loader requires a device major version of 8 or 9. On the GTX 1080 Ti it is not
-loaded, and SDPA falls back to its math backend, which materializes the full
-attention matrix. So even the Python reference does not use a fused attention
-kernel on Pascal.
-
-The `flash-attention` checkout is the current upstream master (FA2/FA3/FA4).
-The concrete blockers:
-
-| Upstream requirement | Pascal sm_61 reality |
-|---|---|
-| `mma.sync.aligned.m16n8k16` (sm_80) | No tensor cores, no `mma` on sm_61. |
-| `ldmatrix` (sm_75+) | Not available. |
-| `cp.async` global→shared (sm_80) | Not available. |
-| fp16/bf16 storage and math | GP102 fp16 is ~1/64 of fp32; unusable. |
-| `setup.py` arch list `80;90;100;110;120` | No sm_61 or sm_75 code at all. |
-| All source files are `*_sm80.cu` | Nothing to compile for sm_61. |
-
-Full-fused, IO-aware attention is not a tensor-core-only idea, however. The
-kernel just needs enough shared memory, registers, and fp32 FMA throughput.
-Pascal has 48 KB of shared memory per block (96 KB per streaming
-multiprocessor), 64K 32-bit registers per streaming multiprocessor, and 11.34
-TFLOP/s of fp32.
-
-That is enough to hold a tiled online softmax. What it does not have is the
-async copy pipeline that hides global latency. So the kernel has to be
-compute-bound (or rely on occupancy) to win.
-
----
-
-### 3. What the current CUDA attention actually does
-
-`backends/cuda/kernels/attention.cu`, at commit `d253ef3`.
-
-Forward, multi-head path:
+`backends/cuda/kernels/attention.cu`, forward:
 
 1. transpose `q`, `k`, `v` from `[batch, seq, heads, dim]` into contiguous
    `[batch, heads, seq, dim]` scratch;
 2. one batched cuBLAS GEMM `scores = Q Kᵀ * scale` over all heads;
 3. a row-per-block softmax kernel that writes the normalized probabilities and
-   the `(max, sum_exp)` statistics over the *full* `seq x seq` matrix;
+   the `(max, sum_exp)` statistics over the whole `seq x seq` matrix;
 4. one batched cuBLAS GEMM `out = P V`;
 5. transpose the output back.
 
-Backward is the same decomposition with four batched GEMMs (`dP = dO Vᵀ`,
-`dQ = dS K`, `dK = dSᵀ Q`, `dV = Pᵀ dO`), a softmax-gradient kernel, and
-transposes. Grouped-query attention falls back to one strided GEMM per
-`(batch, head)`.
+The backward is the same decomposition with four batched GEMMs, a
+softmax-gradient kernel, and transposes. Grouped-query attention widens its key
+and value heads first, so one batched call still covers the batch. The backward
+of a windowed shape takes the banded query-block loop instead, which never
+builds the dense matrix, and keeps cuBLAS for its four products.
 
-The path is a faithful "GEMM plus a row kernel" decomposition, the same shape
-as the PyTorch math backend. Its costs are structural:
+The costs are structural. The softmax kernels materialize three `seq x seq`
+matrices in device memory and stream them several times. Every dense tile is
+computed and then masked, so causality and the window save nothing. The four
+layout transposes and the separate softmax kernel are pure overhead around the
+GEMMs.
 
-- the softmax kernels materialize the `seq x seq` score, probability, and
-  gradient matrices in HBM and stream them several times;
-- the kernels compute every tile of the matrix, then mask it, so causality and
-  the sliding window save nothing;
-- the four layout transposes and the separate softmax kernel are pure overhead
-  around the GEMMs.
+### 2. Why the upstream kernels cannot run on Pascal
 
----
+The reference Python `nanochat` loads FlashAttention-3 and otherwise falls back
+to `torch.nn.functional.scaled_dot_product_attention`. The loader requires a
+device major version of 8 or 9, so the GTX 1080 Ti falls back to the math
+backend, which materializes the full matrix.
 
-### 4. Measured baseline and roofline
+| Upstream requirement | Pascal `sm_61` |
+|---|---|
+| `mma.sync.aligned.m16n8k16` | No tensor cores, no `mma` |
+| `ldmatrix` | Not available |
+| `cp.async` global to shared | Not available |
+| fp16 or bf16 storage and math | GP102 fp16 is about 1/64 of fp32 |
+| `setup.py` arch list `80;90;100;110;120` | No `sm_61` code at all |
 
-Reproduced with `tools/nanochat profile --json` (the shipped
-`attention_benchmark`), GTX 1080 Ti, fp32, sm_61, `-O2`, at `d8_s512`
-(`batch 8, seq 512, heads 4, kv-heads 4, head_dim 128`). "Necessary" is the
-operation count over only the visible key/value pairs, which is the honest
-denominator for a fused kernel.
+Full-fused, input-aware attention is not a tensor-core-only idea. The kernel
+needs enough shared memory, registers, and fp32 FMA throughput. Pascal has 48 KB
+of shared memory per block, 64K 32-bit registers per streaming multiprocessor,
+and 11.34 TFLOP/s of fp32. That is enough to hold a tiled online softmax. It has
+no async copy pipeline, so the kernel must be compute-bound or rely on
+occupancy.
+
+### 3. The measured baseline
+
+Measured with `tools/nanochat profile --json` on the GTX 1080 Ti at `sm_61`,
+fp32, `-O2`, at `d8_s512`.
 
 | Case | Forward | Backward |
 |---|---|---|
@@ -271,142 +100,55 @@ denominator for a fused kernel.
 | GQA `B=2 T=512 H=8 KV=2 D=128` | 1.312 ms / 820 GFLOP/s | 3.155 ms / 682 GFLOP/s |
 | head-dim sweep `d32/64/128/256` (fwd) | 0.068 / 0.092 / 0.112 / 0.164 ms | — |
 
-Key readings:
+The path runs at about 2.7 TFLOP/s forward against a dense operation count. The
+device peak is 11.34 TFLOP/s, and a well-shaped batched GEMM reaches about 6 to
+7 TFLOP/s. From the measured per-product rates, the two forward GEMMs take about
+0.674 ms of the 1.586 ms. The other **0.91 ms** is transposes, softmax, and
+launches. Necessary forward work is 2.15 GFLOP, which is 0.54 ms at 4 TFLOP/s
+and 0.86 ms at 2.5 TFLOP/s. Both beat 1.586 ms, so the device has headroom.
 
-- **The sliding window is free only in theory.** Window 128 needs 44% of the
-  full-causal work (57,792 versus 131,328 visible pairs) but takes the same
-  1.57 ms, because the GEMMs are dense. This is the single clearest defect and
-  the one a fused kernel fixes outright.
-- **The path runs at ~2.7 TFLOP/s forward and ~3.0 TFLOP/s backward** against
-  dense operation counts, versus 11.34 TFLOP/s peak and ~6-7 TFLOP/s for a
-  well-shaped batched cuBLAS GEMM on this device.
-- **Overhead dominates the GEMM at this shape.** From the measured per-product
-  rates in commit `d253ef3` (batched QK 6,991 GFLOP/s, PV 5,843 GFLOP/s), the
-  forward GEMMs take about 2.147/6.991 + 2.147/5.843 = **0.674 ms**.
+### 4. What a Pascal-native fused tile does
 
-  The remaining **~0.91 ms** (57%) is transposes, softmax, and launches. The
-  backward has the same shape of overhead around four GEMMs.
-- **The device has headroom.** Forward necessary work is 2.15 GFLOP. At 4
-  TFLOP/s that is 0.54 ms; at 2.5 TFLOP/s it is 0.86 ms. Both beat 1.586 ms;
-  the question is only whether a hand-written fp32 tile can reach that.
-
-Why the model shape matters: the production `Config` default is
-`window_pattern = "SSSL"`, so the model windows three of every four layers (the
-parity harness pins `L`). The average fraction of necessary attention work
-across the `SSSL` pattern is `(3 * 0.44 + 1 * 0.50) / 4 = 0.455` of the dense
-work. The fraction is roughly constant in sequence length (`w = seq/4`). The
-opportunity does not shrink as context grows; it grows in absolute terms
-because attention itself grows quadratically.
-
----
-
-### 5. What a Pascal-native flash attention would look like
-
-#### 5.1 The algorithm to port
-
-This is the FlashAttention-2 algorithm with the MMA replaced by fp32 CUDA-core
-outer products:
+The algorithm is FlashAttention-2 with the tensor-core MMA replaced by fp32
+CUDA-core outer products.
 
 - **Forward.** One thread block owns a tile of `Br` query rows for one
-  `(batch, head)`. It loops over key/value tiles of `Bc` rows. For each tile it
-  computes `S = Q Kᵀ` and applies the causal/window mask. It updates a running
-  row maximum and running denominator in the online-softmax style, and it
-  accumulates `O` in registers. The kernel writes `(row_max, sum_exp)` once per
-  query row, exactly as today. The kernel skips fully masked key tiles before
-  the dot product.
-- **Tile skipping.** For a query tile `[t0, t0+Br)` and a key tile
-  `[j0, j0+Bc)`, the tile is entirely masked when
-  `j0 > qpos_max` (fully causal) or when
-  `j0 + Bc - 1 < qpos_min - window_left` (window) or the symmetric
-  `window_right` condition. This is the source of the window win.
-- **Backward.** The FlashAttention-2 backward: recompute `S` and
-  `P = exp(S - row_max)` from the saved statistics, form `dP = dO Vᵀ`, apply
-  `dS = P ∘ (dP - rowsum(P ∘ dP))`, then `dQ = dS K`, `dK = dSᵀ Q`, and
-  `dV = Pᵀ dO`. The key/value gradients accumulate across the query tiles that
-  share a key/value head (GQA). The kernel needs either atomic adds or a group
-  reduction, exactly as the current grouped-query fallback already does.
-- **Recompute beats storing `P` here.** Avoiding a 4-byte store and a 4-byte
-  load of `P` saves 8 bytes per element; recomputing `S` costs `2 * head_dim`
-  flops, so 256 flops per 8 bytes = 32 flop/byte. The device ridge point is
-  11.34 TFLOP/s / 484 GB/s ≈ 23 flop/byte, so recomputation is on the right
-  side of the roofline. This is the same trade the current path does *not*
-  make.
+  `(batch, head)`. It loops over key tiles of `Bc` rows. For each tile it
+  computes `S = Q Kᵀ`, applies the causal or window mask, updates a running row
+  maximum and denominator in the online-softmax style, and accumulates `O` in
+  registers. It writes `(row_max, sum_exp)` once per query row.
+- **Tile skipping.** A key tile is skipped before the dot product when it is
+  provably invisible to every query row in the block. This is the source of the
+  window win.
+- **Recompute, do not store.** A store and a load of `P` cost eight bytes per
+  element. Recomputing `S` instead costs `2 * head_dim` flops, which is 32 flop
+  per byte at head width 128. The device ridge point is 23 flop per byte, so
+  recomputation is on the right side.
 
-#### 5.2 Pascal constraints that shape the tile
+Three constraints shape the tile. There is no `cp.async`, so keep the block at
+or under 48 KB and rely on occupancy. There are no tensor cores, so stay in fp32
+and use `expf`. There is no `ldmatrix`, so the microkernel must use plain
+shared-memory loads. That last one is the low-level risk.
 
-- No `cp.async`: global→shared copies cannot overlap the math without
-  double-buffering, which doubles shared memory. The kernel should be
-  compute-bound and use `__ldg`/`__ldcs` where a streaming hint helps.
-- Shared memory: keep the block at or under 48 KB so two blocks can be resident
-  per streaming multiprocessor (96 KB total) without opt-in. A candidate for
-  `head_dim = 128` (the only shape the model uses) is
-  `Br = 32` queries, `Bc = 32` keys, and block 256 threads. The tile uses
-  `Q` 16 KB + `K` 16 KB + `V` 16 KB = 48 KB. The kernel holds `S` and `O` in
-  registers (`O` is `32 x 128 / 256 = 16` registers per thread). Search the tile
-  sizes; do not assume them.
-- No tensor cores and fp16 at 1/64 rate: stay in fp32. `expf` matches the CPU
-  reference; revisit `__expf` only if the oracle tolerance proves it safe.
-- No `ldmatrix`: register blocking must use plain shared-memory loads, so the
-  microkernel is the low-level risk.
+The naive version fails. A block-per-query-row tile has no key or value reuse
+across query rows, so it is bandwidth bound. The retired `OnlineSoftmaxTile`
+variant measured 11.57 ms forward against the batched path's 1.59 ms. A fused
+kernel only wins as a register-blocked tiled GEMM that reuses each key and value
+tile across many query rows. `OnlineSoftmaxTile` stays a decode-path helper.
 
-#### 5.3 Why the naive version fails
+Rejected alternatives. Porting the upstream kernels is impossible on `sm_61`
+(section 2). An FA1-era `sm_75` path is also tensor-core based. A mask-skipping
+wrapper around cuBLAS has no mask, and per-tile GEMMs are launch-bound. Fusing
+only the softmax leaves the scores dense, so the window win is lost.
 
-The stale `attention_variant_bench` binary in the Bazel output base is a
-reminder. It benchmarked the shipped block-per-query-row tile
-(`OnlineSoftmaxTile`, one block per query row, all keys scanned per row) against
-the then-shipped GEMM path:
+References: `/home/egrader/repos/flash-attention`,
+`/home/egrader/repos/nanochat/nanochat/flash_attention.py`, and
+`/home/egrader/repos/llm.c/dev/cuda/attention_forward.cu`.
 
-| Variant (`d8_s512`) | Forward | Backward |
-|---|---|---|
-| shipped at the time (per-head GEMM) | 12.88 ms | 30.26 ms |
-| "score-caching v2" tile | 11.57 ms | 30.09 ms |
+## Part 3. The windowed-forward promotion
 
-Neither is competitive with today's batched path (1.59 ms / 2.86 ms). The tile
-has no key/value reuse across query rows, so its traffic is `O(seq^2 * head_dim)`
-and it is bandwidth-bound. This is exactly the failure mode the plan must avoid.
-It is also the reason the existing `OnlineSoftmaxTile` is appropriate for
-batch-1 decode and not for training.
-
----
-
-### 6. Plan
-
-Work proceeds in `dev/kernels` (the `llm.c` `dev/cuda` convention) and is only
-promoted into `backends/cuda/kernels/attention.cu` after each gate passes.
-The frozen seam (`include/nanochat/kernels.h`) does **not** need to change:
-`AttentionForward` and `AttentionBackward` keep their signatures, and the
-backend may select a fused kernel internally by shape and capability.
-
-Every phase runs through `tools/nanochat`; benchmarks under the broker, tests
-under the appropriate tier. See [performance.md](performance.md) and
-[testing.md](testing.md).
-
-#### Phase 0 — bound the opportunity (0.5 session)
-
-- Extend `attention_benchmark` with a "necessary versus issued work" column so the
-  mask waste is visible in the report, and add the `SSSL` mixed-pattern shape.
-- Record a committed baseline JSON of the current numbers.
-- Deliverable: the baseline file plus a one-page roofline note.
-- **Gate:** none. This is measurement.
-
-#### Phase 1 — fused fp32 forward prototype (1-2 sessions, the critical gate)
-
-- A `dev/kernels` prototype implementing the tiled
-  forward: causal, left/right window, MHA and GQA, empty-window contract.
-- Correctness first: compare against `backends/cuda/kernels/testing/sequence_ref.h` at
-  `B=2, T=8, head_dim=4` (tiny) and against the shipped path at `d8_s512`;
-  finite-difference is not needed for the forward.
-- Then a tile-size sweep (`Br`, `Bc`, block size, `__launch_bounds__`) using
-  `bench_utils.h`, and the head-dimension sweep to confirm no per-dimension
-  redundancy.
-- **Gate:** at `d8_s512` full causal, forward must beat the shipped 1.586 ms,
-  and window 128 must be at least 1.6x faster than full causal. If the best
-  tile cannot beat cuBLAS, stop: report the negative result and keep the
-  shipped path. This is the kill criterion for the whole effort.
-
-**Phase 1 result.** The prototype passed the window condition and failed the
-full-causal condition. The project removed the prototype after it promoted the
-windowed forward.
+The fused tile passed the window gate and failed the full-causal gate, so the
+project promoted the windowed forward on its own.
 
 | Case | Tile (ms) | cuBLAS (ms) | Speedup |
 |---|---|---|---|
@@ -414,226 +156,25 @@ windowed forward.
 | window 128 | 1.078 | 1.571 | 1.46x |
 | grouped query | 1.059 | 1.312 | 1.24x |
 
-At `head_dim = 128` the 48 KB shared-memory cap admits only `Bc = 32`. A sweep
-found no axis that closes the gap. The project kept the default tile and did
-not promote the full-causal case.
+At `head_dim` 128 the 48 KB shared-memory cap admits only `Bc = 32`, and no
+swept axis closed the full-causal gap. The `SSSL` pattern keeps the window win,
+because three of every four layers use a window.
 
-#### Phase 2 — fused fp32 backward prototype (2-2.5 sessions)
-
-- The prototype backward using the recompute scheme, with atomic
-  key/value gradient accumulation for GQA (the existing `AtomicAddDev` uses the
-  native fp32 atomic).
-- Correctness: the existing `attention_test.cc` shapes plus finite differences
-  at fp32, and a direct comparison against `sequence_ref`.
-- **Gate:** at `d8_s512` full causal, backward must beat the shipped 2.857 ms,
-  across MHA, GQA, sliding window, and the KV-cache offset case. If only the
-  forward wins, consider promoting the forward alone (a partial win) before
-  deciding on the backward.
-
-#### Phase 3 — promotion, dispatch, and end-to-end (1-2 sessions)
-
-- Move the validated kernels into `backends/cuda/kernels/attention.cu` behind a
-  `UseFusedAttention(params)` predicate. The kernel keeps the cuBLAS path for
-  shapes the fused kernel does not cover. Those shapes include a `head_dim`
-  other than 128 and very short sequences, where the batched GEMM is already
-  launch-bound.
-- Keep the seam byte-for-byte; no header edit.
-- **Gates (all must pass):**
-  - `tools/nanochat test --gpu //backends/cuda/kernels:attention_gpu_test`
-  - `tools/nanochat test --gpu //tests:oracle_cuda_test //tests:train_parity_cuda_test`
-    (strict: trajectory loss 1e-5, parameters 1e-4)
-  - `tools/nanochat test` (full CPU suite) and the default CUDA build
-  - `tools/nanochat profile --json` beats the Phase 0 baseline
-  - a training run at `d8_s512` (and, if available, a longer-context run)
-    shows an end-to-end tokens/s improvement, not just a kernel improvement
-- **Gate:** the end-to-end step must improve; a kernel win that does not move
-  tokens/s is not a win.
-
-#### Phase 4 — optional, separate (Turing)
-
-- On sm_75 a tensor-core flash attention in a bf16 build is possible, but there
-  is no Turing device on this host, so it is
-  compile-only and the project cannot benchmark it here. Keep it out of this
-  effort; [kernels.md](kernels.md) § Direct-MMA and persistent kernels already
-  defers the decode and MMA path to Turing.
-
----
-
-### 7. Risks and mitigations
-
-| Risk | Why it matters | Mitigation |
-|---|---|---|
-| Hand-written fp32 GEMM is slower than cuBLAS | cuBLAS is near-peak and per-shape tuned; a naive tile is 7x slower (section 5.3) | Register-blocked outer-product microkernel; tile sweep; Phase 1 kill gate. |
-| Shared-memory pressure at `head_dim = 128` | 48 KB/block caps the tile and occupancy | Hold `S`/`O` in registers; keep `Q`,`K`,`V` in shared; search tile sizes; fall back to splitting `head_dim`. |
-| Numerics drift from the online-softmax rescaling | The task has a strict parity gate | Use `expf`; promote only after `train_parity_cuda_test` passes; keep the cuBLAS path as the default until then. |
-| Window/GQA corner cases | Empty windows, `window_right`, KV-cache offset | Reuse `sequence_ref.h` and the existing `attention_test.cc` cases; add the `SSSL` shape. |
-| Attention is only ~11% of the step | A 2x attention win is ~6% end-to-end at `d8_s512` | Set expectations by the tokens/s gate; the payoff grows with context length, so measure at the longest available shape. |
-| Build/GPU contention | One small GPU shared by agents | All runs go through `tools/nanochat`; prototypes stay tiny; benchmarks under the broker. |
-
----
-
-### 8. Alternatives considered and rejected
-
-- **Use the upstream kernels unchanged.** Impossible on sm_61 (section 2).
-- **Port an FA1-era sm_75 path.** Also tensor-core based; there is no CUDA-core
-  flash path upstream to port.
-- **Keep cuBLAS and add a mask-skipping wrapper.** cuBLAS has no causal or
-  banded mask, and per-tile GEMMs would be launch-bound. Rejected.
-- **Fuse only the softmax.** The scores are still computed densely, so the
-  window win is lost; the overhead win is small. Rejected as a primary path.
-- **Use the existing `OnlineSoftmaxTile` for training.** It is the
-  one-block-per-row schedule that measured 7x slower (section 5.3). It stays a
-  decode-path helper.
-- **Enable `torch.compile` or another framework for the reference.** Pascal is
-  unsupported by Triton, and this project has no framework dependency
-  ([../README.md](../README.md) § What this is not).
-
----
-
-### 9. References
-
-- Upstream implementation: `/home/egrader/repos/flash-attention`
-  (`csrc/flash_attn/src/*_sm80.cu`, `setup.py` arch list).
-- Reference Python attention and its SDPA fallback:
-  `/home/egrader/repos/nanochat/nanochat/flash_attention.py`.
-- FP32 tiled attention reference (correct but slow):
-  `/home/egrader/repos/llm.c/dev/cuda/attention_forward.cu`
-  (`attention_forward_kernel2`).
-- Current attention kernel:
-  `backends/cuda/kernels/attention.cu`; shared helpers:
-  `backends/cuda/kernels/device_utils.cuh`.
-- Benchmarks and references:
-  `backends/cuda/kernels/attention_benchmark.cc`, `backends/cuda/kernels/attention_test.cc`,
-  `backends/cuda/kernels/testing/sequence_ref.h`.
-- Measurement protocol: [performance.md](performance.md).
-
-## Part 3. Windowed-forward promotion
-
-Status: promoted. Owner: architect/integrator.
-
-Promotion results: Part 4.
-
-### 1. Why reopen
-
-The Phase 1 kill gate failed for the full-causal forward. The fused tile
-measured 1.98 ms at `d8_s512` full causal against the shipped 1.586 ms. The
-tile space cannot close the gap. At `head_dim` 128, the 48 KB shared-memory
-cap admits only `Bc=32`.
-
-The same prototype won on the windowed shape. At window 128 it measured
-1.078 ms against the shipped 1.571 ms. That is a 1.46x win.
-
-The production model uses the `SSSL` pattern. Three of every four layers use a
-window. The window path is worth promoting on its own.
-
-This part scopes the reopened effort. The technical background, the
-baseline, and the prototype are in Part 1 and Part 2.
-
-### 2. Goal
-
-Promote the fused fp32 tiled forward for windowed attention shapes. Keep the
-cuBLAS path for full-causal attention and for every shape the fused kernel
-does not cover. Show an end-to-end tokens per second win on the `SSSL` model.
-
-### 3. Scope
-
-In scope:
-
-- Promote the fused forward into `backends/cuda/kernels/attention.cu`.
-- Add a `UseFusedAttention(params)` predicate. Select the fused kernel only
-  for `window_left >= 0` and `head_dim == 128`.
-- Keep the kernel seam byte for byte. Do not edit `include/nanochat/kernels.h`.
-- Keep the cuBLAS forward for full-causal attention and for all other shapes.
-- Measure the production `SSSL` shape, not only window 128.
-
-Out of scope:
-
-- The fused backward. The prototype has no backward. The cuBLAS backward
-  stays.
-- A full-causal improvement. That needs a different tile, for example a split
-  `head_dim`. It is a separate effort.
-
-### 4. Phases
-
-#### Phase A — promotion and dispatch
-
-Move the validated forward from the `dev/kernels` prototype into
-`backends/cuda/kernels/attention.cu`. Add the dispatch predicate. Keep the
-cuBLAS path for the uncovered shapes. Update
-`backends/cuda/kernels/BUILD.bazel` only when the dependency set changes.
-
-Gate: the CUDA build succeeds and the existing attention tests stay green.
-
-#### Phase B — correctness and parity
-
-Run the oracle and the training trajectory on the promoted path.
-
-Gate: `tests:oracle_cuda_test` and `tests:train_parity_cuda_test` pass with
-the strict tolerances. The CPU parity tests stay green.
-
-#### Phase C — window performance
-
-Re-run the shipped attention benchmark at the production `SSSL` shape and at
-window 128.
-
-Gate: the windowed forward row beats the Phase 0 baseline. The full-causal
-row stays on the cuBLAS path and must not regress.
-
-#### Phase D — end-to-end
-
-Measure the end-to-end effect on the `SSSL` eval benchmark.
-
-Gate: the eval tokens per second beats the `attention_e2e` entry of
-`docs/baselines.json`.
-
-### 5. Risks
-
-| Risk | Why it matters | Mitigation |
-|---|---|---|
-| The window win shrinks at the production window | The window-128 win may not hold at window 512 | Measure the production shape in Phase C |
-| Attention is a small part of the step | A window win moves end-to-end tokens per second little | Set the gate on tokens per second, not the kernel |
-| A wrong dispatch predicate | The fused kernel can be selected for a losing shape | Keep the predicate narrow and test the full-causal path |
-| Numerics drift | The task has a strict parity gate | Promote only after the parity gate passes |
+Scope, and it still holds: forward only, the cuBLAS backward stays, the
+predicate stays narrow (a window and head width 128), and the kernel seam stays
+byte for byte. A full-causal tile needs a different design and is a separate
+effort.
 
 ## Part 4. Promotion results
 
-This note records the promotion verdict for the fused windowed attention
-forward. The campaign is `flash-attn-window`.
-
-- Design: Part 3
-- Frozen reference: [baselines.json](baselines.json), key `attention`
-- Frozen end-to-end reference: [baselines.json](baselines.json), key `attention_e2e`
+The windowed forward passed every gate and was promoted.
 
 ### Verdict
 
-The windowed forward passes every gate. The campaign promotes it. Full-causal
-attention stays on cuBLAS. Every backward stays on cuBLAS.
+The windowed forward is promoted. Full-causal attention stays on cuBLAS. Every
+backward stays on cuBLAS.
 
-### Dispatch predicate
-
-The predicate lives in `backends/cuda/kernels/attention.cu`:
-
-```c
-bool UseFusedAttention(const AttentionParams& p) {
-  return !kComputeIsBf16 && p.window_left >= 0 && p.head_dim == 128;
-}
-```
-
-The fused tile covers three conditions. `window_left >= 0` is a
-sliding-window shape. `head_dim == 128` is the one head dimension the tile
-handles. `!kComputeIsBf16` keeps the tile out of a tensor-core build, where the
-scalar FMA tile loses to cuBLAS
-([attention.md](attention.md)). Full-causal attention
-has `window_left < 0`, so it stays on cuBLAS. Every other head dimension stays
-on cuBLAS. Every backward call stays on cuBLAS.
-
-The kernel seam does not change. `include/nanochat/kernels.h` stays byte for
-byte.
-
-### Phase B — parity
-
-The strict parity gates pass. Table 1 gives the measured error against the
-recorded fixture.
+### Parity
 
 | Test | Metric | Measured | Tolerance | Verdict |
 |---|---|---|---|---|
@@ -643,168 +184,54 @@ recorded fixture.
 | `tests:oracle_cuda_test` | Maximum trajectory loss error | 2.38e-07 | 1e-5 | pass |
 | `tests:oracle_cuda_test` | Maximum trajectory parameter error | 4.84e-05 | 1e-4 | pass |
 
-**Table 1.** Strict oracle parity on the promoted path.
+The training-trajectory test also passes: loss `4.77e-07`, parameter L2
+`1.39e-04`, gradient L2 `5.39e-07`, and gradient norm `1.19e-07`. The `SSSL`
+dispatch check confirms that three of four layers take the fused branch.
 
-The training-trajectory test also passes. Its measured errors are: loss
-`4.77e-07`, parameter L2 `1.39e-04`, gradient L2 `5.39e-07`, and gradient norm
-`1.19e-07`. The full CPU suite passes 16 of 16 tests.
+### Window performance
 
-The `SSSL` dispatch check confirms the coverage. Three of the four layers take
-the fused branch. The last layer stays on cuBLAS. A `head_dim` 128 windowed
-case compares the fused forward against the cuBLAS forward.
+`tools/nanochat profile --json --out /tmp/attention-window.json` runs the
+shipped `attention_benchmark`.
 
-### Phase C — window performance
+| Row | Frozen baseline (ms) | Promoted path (ms) | Speedup |
+|---|---|---|---|
+| `attention_fwd:d8_s512_win128` | 1.571 | 1.087488 | 1.44x |
+| `attention_fwd:d8_s512_sssl` | 1.57475 | 1.208891 | 1.30x |
+| `attention_fwd:d8_s512` | 1.586 | 1.577643 | 1.01x, cuBLAS |
+| `attention_bwd:d8_s512_win128` | 2.806 | 2.808224 | 1.00x, cuBLAS |
+| `attention_bwd:d8_s512_sssl` | 2.81875 | 2.815197 | 1.00x, cuBLAS |
+| `attention_bwd:d8_s512` | 2.857 | 2.836267 | 1.01x, cuBLAS |
 
-The measurement command is
-`tools/nanochat profile --json --out /tmp/attention-window.json`. The command
-runs the shipped `attention_benchmark`. Table 2 compares the promoted path against
-the frozen `docs/baselines.json`.
+### End to end
 
-| Row | Frozen baseline (ms) | Promoted path (ms) | Speedup | Verdict |
-|---|---|---|---|---|
-| `attention_fwd:d8_s512_win128` | 1.571 | 1.087488 | 1.44x | pass |
-| `attention_fwd:d8_s512_sssl` | 1.57475 | 1.208891 | 1.30x | pass |
-| `attention_fwd:d8_s512` | 1.586 | 1.577643 | 1.01x | pass, cuBLAS |
-| `attention_bwd:d8_s512_win128` | 2.806 | 2.808224 | 1.00x | pass, cuBLAS |
-| `attention_bwd:d8_s512_sssl` | 2.81875 | 2.815197 | 1.00x | pass, cuBLAS |
-| `attention_bwd:d8_s512` | 2.857 | 2.836267 | 1.01x | pass, cuBLAS |
-
-**Table 2.** Windowed, mixed-pattern, and full-causal rows.
-
-The windowed forward row beats the frozen `1.571 ms`. The mixed-pattern forward
-row beats the frozen `1.57475 ms`. The full-causal forward row stays on cuBLAS
-and does not regress. The backward rows stay on cuBLAS and do not regress.
-
-### Phase D — end-to-end
-
-The measurement command is:
-
-```bash
-tools/nanochat bench -- ./bazel-bin/src/nanochat_cli eval_bench --batch 8 --seq 512 \
-  --layers 8 --heads 4 --kv-heads 4 --hidden 512 --window-pattern SSSL --json
-```
-
-The report goes to `/tmp/eval-window.json`. Table 3 compares the result against
-the frozen `docs/baselines.json`.
+`d8_s512` `SSSL`, `B=8 T=512 L=8 H=4 KV=4 C=512`:
 
 | Metric | Frozen baseline | Promoted path | Change |
 |---|---|---|---|
 | Tokens per second | 55000 | 57908.3 | +5.3% |
 | Forward time (ms) | 74.472727 | 70.732475 | -5.0% |
 
-**Table 3.** End-to-end `SSSL` evaluation at `B=8 T=512 L=8`.
-
-The tokens per second value beats the frozen baseline. The end-to-end win is
-small, because attention is a small part of the step.
+The end-to-end win is small, because attention is a small part of the step.
 
 ### Limits
 
-- The frozen end-to-end baseline is an estimate, not a measured run. The
-  reported margin of 5.3% is therefore not exact.
-- The fused tile covers only `head_dim == 128` and `window_left >= 0`.
-- The full-causal fused tile lost the Phase 1 kill gate. Do not widen the
-  dispatch predicate without a new measurement.
-- The numbers come from one host and one precision. Do not compare them across
+- The frozen end-to-end baseline is an estimate, not a measured run, so the
+  5.3 percent margin is not exact.
+- The fp32 tile covers only `head_dim == 128` and `window_left >= 0`.
+- The full-causal tile lost its gate. Do not widen the predicate without a new
+  measurement.
+- The numbers come from one host and one precision. Do not compare across
   devices.
 
-### Reproduction
+## Part 5. The tensor-core decision
 
-Run the two measurements through the project entry point:
+The promoted fp32 tile runs on the CUDA cores. A bf16 build moves every other
+matrix multiply to the tensor cores, so the question is what happens to the tile
+there.
 
-```bash
-tools/nanochat profile --json --out /tmp/attention-window.json
-tools/nanochat bench -- ./bazel-bin/src/nanochat_cli eval_bench --batch 8 --seq 512 \
-  --layers 8 --heads 4 --kv-heads 4 --hidden 512 --window-pattern SSSL --json \
-  > /tmp/eval-window.json
-```
+### 1. Why the fp32 tile loses in a bf16 build
 
----
-
-## Part 5. Tensor-core attention
-
-_Absorbed from the former `attention-tensor-core.md`. Its section numbers are
-unchanged, so a reference to a section of that document resolves to the same
-number here._
-
-Status: delivered for the decision and for option B. A non-fp32 build retires
-the fp32 tile, so every shape takes the cuBLAS forward there. Option A, the
-tensor-core tile, is still a proposal, and section 5 describes it. This document
-is Part 5 of the attention work. Parts 1 to 4 are in [attention.md](attention.md):
-the Pascal baseline, the feasibility study, the windowed-forward promotion, and
-the promotion results.
-
-The subject of this document is the next step. The promoted fused forward is an
-fp32 tile. It runs on the CUDA cores. The bf16 and fp8 builds move every other
-matrix multiply to the tensor cores. This document decides what happens to the
-fused tile in those builds.
-
-- Parts 1 to 4 above — the baseline and the promoted tile.
-- [fp8-training.md](fp8-training.md) — the fp8 operand rules.
-- [performance-model.md](performance-model.md) — the bound that judges the
-  options.
-- [simulator.md](simulator.md) — the emulator limits.
-
-### 1. Goal and scope
-
-**Goal.** Make attention run at the tensor-core rate in the bf16 and fp8 builds,
-and keep the sliding-window saving where it pays.
-
-**In scope.**
-
-- The decision on the fused fp32 tile in a non-fp32 build.
-- The design of a tensor-core fused tile, if the decision keeps one.
-- The fp8 operands for the scores and the probability-value product.
-- The gates, including the ones that run without a GPU.
-
-**Out of scope.**
-
-- The backward pass. It stays on the cuBLAS decomposition.
-- A split `head_dim` design for full-causal attention. Part 2 rejected it.
-- Attention variants that are not in the model.
-- A cycle-accurate model of the tile.
-
-### 2. What the tree has today
-
-The forward path has two branches, selected by
-`UseFusedAttention` in `backends/cuda/kernels/attention.cu`:
-
-```c
-bool UseFusedAttention(const AttentionParams& p) {
-  return !kComputeIsBf16 && p.window_left >= 0 && p.head_dim == 128;
-}
-```
-
-| Branch | Shape | Engine |
-|---|---|---|
-| Fused windowed forward | an fp32 build, `window_left >= 0`, and `head_dim == 128` | An fp32 FMA tile on the CUDA cores |
-| cuBLAS forward | a non-fp32 build, full-causal, and every other shape | Batched cuBLAS GEMMs plus a row softmax |
-| Backward, windowed | `window_left > 0` and a causal mask | A banded query-block loop, on the CUDA cores |
-| Backward, other | every other shape | Four batched cuBLAS GEMMs |
-
-The fused tile uses `kFusedThreads = 256`, `kFusedBr = 32`, `kFusedBc = 32`, and
-two resident blocks per streaming multiprocessor. Its shared memory at
-`head_dim == 128` is 37,120 bytes in fp32.
-
-The model uses the `SSSL` pattern. At depth 24, 18 of the 24 layers are windowed
-and 6 are full-causal. Three quarters of the layers therefore take the fused
-tile.
-
-The cuBLAS forward materializes a `[batch, heads, seq, kv_len]` score matrix.
-It uses a cached device scratch, `CachedBuffer(0, 3 * matrix)`, which sits
-outside the training arena. At depth 24, a batch of 16, and a sequence of 2048,
-that request is 4.50 GiB in bf16 and 9.00 GiB in fp32.
-
-Part 4 measured the promotion in fp32 on the T4. The windowed
-forward beat the fp32 cuBLAS path by 1.30x on the `SSSL` shape. That comparison
-held the rate constant, because both paths ran on the CUDA cores.
-
-### 3. Why the fp32 tile changes value
-
-The fp32 result does not carry over to a bf16 or fp8 build. The tile stays on
-the CUDA cores. The cuBLAS path moves to the tensor cores. The rate ratio
-between the two paths becomes large.
-
-Take the depth-24 shape: 24 layers, 12 heads, head width 128, sequence 2048, and
+Take the depth-24 shape: 24 layers, 12 heads, head width 128, sequence 2048,
 `SSSL`.
 
 | Path | Attention arithmetic per token | Engine rate | Time per token |
@@ -813,128 +240,43 @@ Take the depth-24 shape: 24 layers, 12 heads, head width 128, sequence 2048, and
 | Dense cuBLAS, bf16 | 0.906 GFLOP | 791 TFLOP/s | 1.15 microseconds |
 | Dense cuBLAS, fp8 | 0.906 GFLOP | 1,187 TFLOP/s | 0.76 microseconds |
 
-The windowed tile does 2.29 times less arithmetic, and still loses by a large
-factor. The cause is the engine, not the count.
+The windowed tile does 2.29 times less arithmetic and still loses by a large
+factor, because the engine rate decides it. The dense path pays for its speed
+with memory traffic. At this shape one micro-batch of one layer moves about
+6 GiB through the score and probability matrices, which is about 17 percent of
+the step. Part 6 removes that traffic instead of racing it.
 
-The dense path pays a cost for that speed: memory traffic over the score matrix.
-At depth 24, one micro-batch of one layer moves about 6 GiB through the score
-and probability matrices in bf16. Over 24 layers that is about 46 milliseconds
-per micro-batch, or about 185 milliseconds per optimizer step at a gradient
-accumulation of 4. The reference step is about 1,067 milliseconds, so the
-traffic is about 17 percent of the step.
+### 2. The three options
 
-The conclusion is narrow and clear: **do not carry the fp32 tile into a bf16 or
-fp8 build without a new measurement.**
-
-### 4. The three options
-
-| Option | What it does | Arithmetic | Off-GPU verifiable |
-|---|---|---|---|
-| A. Tensor-core tile | Rewrite the tile with `mma` or `wgmma` instructions | Lowest | No, without a new emulator feature |
-| B. Retire the tile | Send the windowed forward to the cuBLAS path in the non-fp32 builds | Highest, at the tensor-core rate | Yes |
-| C. Keep the fp32 tile | No change | Lowest count, at the CUDA-core rate | Yes |
-
-The recommendation is **option B first, then A behind a measurement gate**.
-
-Why option B first:
-
-1. It removes code rather than adding it. The dispatch predicate becomes a
-   build condition or an empty function.
-2. It needs no new kernel. The cuBLAS path already exists, and the reference
-   engine already verifies it.
-3. The fp8 and bf16 operands work through the existing GEMM decomposition. No
-   new tile arithmetic is necessary.
-4. The emulation engine cannot check an `mma` tile today. Section 5.2 of
-   [simulator.md](simulator.md) lists `extern __shared__` as unsupported, and
-   the emulator has no tensor-core primitive.
-
-Why option A stays open: the windowed tile avoids 2.29 times the arithmetic and
-most of the memory traffic. If a tensor-core tile reaches even 40 percent of the
-bf16 peak, the windowed layers cost 0.21 microseconds per token instead of
-0.29. That is a real gain at a long sequence. Promote it only after a
-measurement.
-
-There is no window in the fp32 build for the change. Keep option C in the fp32
-build, because the promoted tile already wins there.
-
-### 5. The option A design
-
-This section describes a tensor-core tile. The design is a proposal. Build it in
-`dev/kernels/` first, as `docs/performance.md` section 3.2 requires.
-
-#### 5.1 The forward tile
-
-One thread block owns a block of query rows for one `(batch, head)` pair.
-
-| Item | Value | Reason |
+| Option | What it does | Off-GPU verifiable |
 |---|---|---|
-| Query rows per block | 64 or 128 | The tensor-core tile wants a taller query block than the fp32 tile |
-| Key rows per tile | 64 | Two `mma` steps of 16 rows, or one `wgmma` step |
-| Resident blocks | 2 | Occupancy, and the shared-memory budget |
-| Score accumulator | fp32 registers | The online-softmax state needs fp32 |
-| Output accumulator | fp32 registers | The accumulation spans every key tile |
+| A. Tensor-core tile | Rewrite the tile with `mma` or `wgmma` | No, without a new emulator feature |
+| B. Retire the tile | Send the windowed forward to cuBLAS in the non-fp32 builds | Yes |
+| C. Keep the fp32 tile | No change | Yes |
 
-The three steps of the online softmax stay in fp32: the row maximum, the
-exponential, and the running sum. Only the two matrix multiplies change engine.
+The decision was **option B first, then option A behind a measurement gate**.
+Option B removes code and needs no new kernel: a non-fp32 build sends the
+windowed forward to the cuBLAS path, which already exists and already runs at
+the bf16 rate. Option C stays in the fp32 build, where the promoted tile wins.
+Option A is Part 6, and its gate passed.
 
-The probability matrix needs a reduced store type for the second multiply. Use
-the compute type: bf16 in the bf16 build, E4M3 in the fp8 build. Store the
-shifted exponential in that type after the fp32 reduction.
+### 3. The fp8 operands
 
-#### 5.2 The backward pass
-
-Keep the backward on cuBLAS. Two reasons:
-
-1. The backward already uses cuBLAS for every shape. In a bf16 or fp8 build it
-   therefore already runs at the tensor-core rate. No rewrite is necessary to
-   get the rate.
-2. The banded windowed backward already avoids the dense score matrix. The
-   saving already exists.
-
-If a later measurement shows the backward is the limit, revisit this decision in
-a new document. Do not couple the backward rewrite to the forward decision.
-
-#### 5.3 The transposes
-
-The cuBLAS forward transposes `q`, `k`, and `v` from the model layout
-`[batch, seq, heads, dim]` into `[batch, heads, seq, dim]`, and transposes the
-output back. Those copies are not free.
-
-A fused tile can read the model layout directly. A lane reads one row segment,
-so the load coalesces without a transpose. Account for this in the
-performance model as a saved pass, not as arithmetic.
-
-#### 5.4 The window handling
-
-Keep the masked-tile skip. A tile whose keys are all left of the window start is
-invisible to every query row in the block. Skip it before the load. This is the
-saving that makes the windowed tile worth having.
-
-Keep the predicate narrow. It must require a window and the supported head
-width, as the current predicate does.
-
-### 6. The fp8 coupling
-
-The fp8 operands need no new attention kernel in option B. The two matrix
-multiplies become scaled fp8 GEMMs through the seam from
-[fp8-training.md](fp8-training.md).
+The fp8 build needs no separate attention kernel: the two products become
+scaled fp8 GEMMs through the seam from [fp8-training.md](fp8-training.md).
 
 | Tensor | Build | Reason |
 |---|---|---|
-| `q`, `k` operands | E4M3 | Input to the score multiply |
+| `q`, `k`, `v` operands | E4M3 | Input to the products |
 | Scores | fp32 | The softmax needs the range |
-| Probability matrix | E4M3 or the compute type | Input to the value multiply |
-| `v` operand | E4M3 | Input to the value multiply |
+| Probability matrix | E4M3, or the compute type | Input to the value product |
 | Output accumulator | fp32 | The accumulation spans every key tile |
 | Row maximum, row sum, statistics | fp32 | A reduction with an exponential |
 
-Use one scale per tensor for the saved probability matrix. Do not reuse the
-score scale, because the exponential changes the range.
+Use one scale per tensor for a saved probability matrix. Do not reuse the score
+scale, because the exponential changes the range.
 
-If option A is later built, the fp8 tile needs the same three rules. The
-probability store needs a scale, and the row statistics stay fp32.
-
-### 7. Invariants
+### 4. The invariants
 
 1. The row maximum, the row sum, and the saved statistics are fp32.
 2. The output accumulator is fp32.
@@ -945,80 +287,338 @@ probability store needs a scale, and the row statistics stay fp32.
 6. The fp32 build keeps the promoted tile, because it wins there.
 7. Every new tile has a kill gate with a measured number.
 
-### 8. Deliverables and owners
+### 5. Status
 
-| Deliverable | Path | Owner |
+| Phase | Work | Status |
 |---|---|---|
-| The build condition for the fp32 tile | `backends/cuda/kernels/attention.cu` | Kernel agents |
-| The tensor-core tile prototype | `dev/kernels/` | Kernel agents |
-| The scaled fp8 operands | `backends/cuda/kernels/attention.cu` | Kernel agents |
-| The attention benchmark rows | `backends/cuda/kernels/attention_benchmark.cc` | Kernel agents |
-| The dispatch test | `backends/cuda/kernels/attention_test.cc` | Oracle |
-| The emulator support for the tile | `tools/cuda_sim/emu/` | Simulator |
-| The bounds and the measured rows | `docs/performance-model.md` | Architect |
-| This document | `docs/attention.md` | Architect |
+| A0 | Measure the fp32 tile and the cuBLAS path on the `SSSL` shape in the bf16 build | Delivered |
+| A1 | Gate the tile on the fp32 build, and send the other builds to cuBLAS | Delivered: `FusedAttentionFp32Covers` |
+| A2 | Add fp8 operands to the attention GEMMs | Delivered |
+| A3 | Build the tensor-core tile | Delivered as Part 6 |
+| A4 | Promote, or delete the prototype | Delivered: promotion is the gate of Part 6, section 7 |
 
-### 9. Validation
+The backward stays on cuBLAS by decision. It already runs at the bf16 rate
+there, and the banded windowed loop already avoids the dense matrix. Revisit
+that only if a measurement shows the backward is the limit, in a new document.
 
-1. The parity gates from Part 4 pass on the changed path.
-2. The dispatch test confirms which layers take which branch at depth 24.
-3. The attention benchmark reports the `SSSL` row and the full-causal row.
-4. The emulated tile matches the sequence reference, when the emulator supports
-   the tile.
-5. The end-to-end evaluation shows a tokens-per-second win on the `SSSL` shape.
-6. The measured row goes into the attainment record in
-   [performance-model.md](performance-model.md) with its fraction of the bound.
+## Part 6. The bf16 tensor-core tile
 
-Gate 4 is the hard one. Without an emulator feature for `mma` and
-`extern __shared__`, gate 4 needs a real card. Plan for one.
+Status: delivered. The bf16 tile runs the windowed forward on a card with
+tensor cores, and the dense cuBLAS forward keeps every other shape.
 
-### 10. Phases
+### 1. Goal and scope
 
-| Phase | Work | Gate | GPU |
-|---|---|---|---|
-| A0 | Measure the fp32 tile and the cuBLAS path on the `SSSL` shape in the bf16 build | The two rows exist in the benchmark output | no |
-| A1 | Gate the tile on the fp32 build, and send the other builds to cuBLAS | The parity gates pass; the benchmark shows no fp32 regression | no |
-| A2 | Add fp8 operands to the attention GEMMs | The emulated GEMM matches the CPU reference | no |
-| A3 | Build the tensor-core tile in `dev/kernels/` | It beats the cuBLAS row by the phase gate margin | yes |
-| A4 | Promote, or delete the prototype | The record is in the benchmark and in this document | yes |
+**Goal.** Make a bf16 build keep the sliding-window saving, which needs a fused
+tile, because the dense path computes every query-key pair and masks it after.
 
-The kill gate for A3: the tile must beat the dense cuBLAS row on the `SSSL`
-shape by 10 percent at the production sequence length. If it does not, keep
-option B and delete the prototype.
+**In scope.** The windowed forward at head width 128, in the bf16 build, on a
+device with tensor cores.
 
-### 11. Status by section
+**Out of scope.** The backward, which keeps the banded cuBLAS loop of Part 2.
+The full-causal forward, which keeps cuBLAS for the reason in Part 4. The fp32
+build, which keeps the tile of Part 2.
 
-| Section | Status |
+### 2. Why the dense path loses on Hopper
+
+On Hopper the dense bf16 forward is memory bound, not compute bound. At the
+depth-24 shape, batch 16, and sequence 2048:
+
+| Value | Dense bf16 cuBLAS | Fused bf16 tile, window 512 |
+|---|---:|---:|
+| Arithmetic per token per layer | 12.6 MFLOP | 5.7 MFLOP |
+| Traffic per token per layer | about 196 KB | about 55 KB |
+| Arithmetic intensity | about 64 flop/byte | about 104 flop/byte |
+
+The Hopper ridge point is 989 TFLOP/s over 3.35 TB/s, which is 295 flop/byte.
+The dense path sits below the ridge, so the device rate does not help it. The
+tile sits above the dense path's intensity, so it converts more of the rate into
+time.
+
+Two further wins follow. The dense forward asks `CachedBuffer(0, 3 * matrix)`
+for its score, its probability, and its gradient scratch, which at this shape is
+4.50 GiB in bf16. The tile asks for none, and
+[node-h100.md](node-h100.md) records a bf16 margin of about 1 GiB at batch 16,
+so the removal is a batch-size win as well as a time win. Second, the tile reads
+the model layout, so three transposes leave the path.
+
+### 3. Precision: H100 already runs bf16
+
+| Place | Fact |
 |---|---|
-| 3 The value change | Delivered as the analysis that orders the options |
-| 4 The options | Decided. Option B is in the tree: `UseFusedAttention` returns false in a non-fp32 build. Option A waits on a measurement |
-| 5 The option A design | Proposed |
-| 6 The fp8 coupling | Proposed |
-| 10 Phases | Option B landed. The option A phases have not started |
+| `.bazelrc` `build:hopper` | `sm_90`, `precision=bf16`, `backend=cuda` |
+| `tools/modal/app.py`, the `H100` leg | card `H100`, architecture `sm_90`, precision `bf16` |
+| [precision.md](precision.md) section 4 | Ampere and newer compute in bf16 |
+| [node-h100.md](node-h100.md) | the H100 node runs the demo chain at bf16 |
 
-### 12. Risks and non-goals
+The tile adds no precision work. It adds one consumer of the bf16 build, and two
+rules keep that honest:
 
-- **The bound may be wrong.** Measure A0 before A1. The bound uses the device
-  peaks from the profile table, not a measurement.
-- **The emulator cannot check an `mma` tile.** Budget one hardware leg.
-- **The window saving may vanish.** The arithmetic saving is real. The time
-  saving depends on the tile rate.
-- **A wide dispatch predicate is dangerous.** Past experience in Part 2 shows a
-  tile that wins on one shape and loses on another.
-- **Not a goal:** a backward rewrite, a split `head_dim` tile, and a
-  cycle-accurate emulator.
+1. The tile's source is compiled only by the CUDA compiler in a bf16 or fp8
+   build, which is the pair `__CUDACC__` and `NANOCHAT_PRECISION != 0` state. An
+   fp32 build holds no tile at all, so it cannot stage a four-byte element into
+   a two-byte tile. The fp32 tile of Part 2 is the only fp32 path.
+2. The dispatch reads `Caps::has_tensor_cores` at run time, so a bf16 build on a
+   card without tensor cores keeps cuBLAS.
 
-### 13. Open questions
+### 4. The tile
 
-1. Does the full-causal forward also move to a tile, or stay on cuBLAS?
-2. Does the probability matrix use E4M3, or the compute type?
-3. Is 64 or 128 the better query block at `head_dim` 128 with `wgmma`?
-4. Does the emulator gain an `mma` and `extern __shared__` feature, or does the
-   tile wait for hardware?
+#### 4.1 Schedule
 
-### See also
+| Item | Value | Reason |
+|---|---|---|
+| Query rows per block, `Br` | 64 | Four warps, one warp per 16 rows |
+| Key rows per tile, `Bc` | 64 | Four 16-key sub-tiles |
+| Threads | 128 | One warp per 16 query rows |
+| Grid | `(ceil(seq / Br), heads, batch)` | The index scheme of the fp32 tile |
+| Resident blocks | 2 per streaming multiprocessor | 225,280 bytes of the 232,448 available |
 
-- Parts 1 to 4 above — the baseline, the study, and the promotion.
+#### 4.2 Microkernel
+
+The microkernel uses the `wmma` interface with 16 by 16 by 16 bf16 fragments and
+fp32 accumulators. It is the first tensor-core code in the tree. The fragment
+layout of `wmma` is not a contract the kernel writes against, so a layout
+mistake cannot reach the mask arithmetic. Neither product needs a shared
+transpose: the key tile is staged as `[key][dim]`, which is the column-major
+form of a `[dim][key]` operand. The value tile is staged the same way and reads
+as a row-major operand.
+
+A later revision can replace `wmma` with hand-written `mma.sync` fragments. That
+revision removes the score scratch tile of section 4.4, because the documented
+fragment layout then gives each element its row.
+
+#### 4.3 Shared memory
+
+At `head_dim` 128 and `Br = Bc = 64`: the row stride is 136 elements, which is
+the head width plus eight for bank padding.
+
+| Buffer | Bytes | Lifetime |
+|---|---:|---|
+| Query tile, 64 by 136 | 17,408 | Whole block |
+| Key tile, 2 stages of 64 by 136 | 34,816 | Double buffered |
+| Value tile, 2 stages of 64 by 136 | 34,816 | Double buffered |
+| Probability tile, 4 warps of 16 by 72 | 9,216 | One key tile |
+| Score scratch, 4 warps of 16 by 64 fp32 | 16,384 | One key tile |
+| Total | 112,640 | |
+
+The request exceeds the 48 KB default, so the launcher calls
+`cudaFuncSetAttribute` once for the opt-in limit. `//tests:cuda_sim_test` fails a
+launch above 48 KB without that call, so the emulator catches the omission.
+
+#### 4.4 The score scratch tile
+
+The `wmma` accumulator layout is not part of its interface, so a kernel cannot
+read the row of one accumulator element. The tile stores its four score
+fragments into a per-warp scratch tile of 16 rows by 64 columns in fp32, then
+processes one row per two lanes. The shared traffic is about 4.6 KB per token
+per layer, which is 1.9 nanoseconds of the aggregate shared bandwidth of the
+device.
+
+The measurement of section 10 puts the tile at 22.7 TFLOP/s, which is 2.3
+percent of the bf16 peak. The tile is therefore at neither the memory bound nor
+the tensor-core roof. Three likely limiters are four warps per block, one
+dependent accumulation chain per key sub-tile, and the scratch round trip. The
+`mma.sync` revision of section 4.2 removes the first two, and it is the recorded
+next step.
+
+#### 4.5 The key tile loop
+
+For each visible key tile, in this order:
+
+1. **Stage.** Copy the next key and value tile into the free pipeline stage
+   before waiting for the current one, so the copy overlaps the arithmetic.
+2. **Skip.** The visible key tiles are one contiguous range: the left window
+   bounds it from below, and causality or the right window bounds it from above.
+   The block drops a run of leading tiles and a run of trailing tiles, and it
+   tests nothing inside the range.
+3. **Score.** `S = scale * Q Kᵀ` as four sub-tiles of 16 keys, each over eight
+   steps of the head dimension.
+4. **Mask.** Apply `KeyAllowedDev` to every stored score and write `-inf` to a
+   hidden pair. The mask runs on the scratch tile, so it sees the true row and
+   column of every element.
+5. **Online softmax.** Per row, in fp32: the tile maximum, then
+   `alpha = exp(previous - updated)`, then `p = exp(s - updated)`, then the
+   running sum.
+6. **Rescale.** Multiply the output accumulator by `alpha`. The alpha of each
+   row is published into a 16 by 16 tile and loaded as an accumulator fragment,
+   so the element-wise product needs no layout knowledge.
+7. **Round.** Store `p` as bf16 into the probability tile. This is the one new
+   rounding step against the fp32 tile, and it matches the shipped cuBLAS path,
+   whose scratch buffer already holds the compute type.
+8. **Value product.** `O += P V` as eight sub-tiles of 16 head elements per
+   sixteen keys.
+
+#### 4.6 Epilogue
+
+The output accumulator of each warp is its own 16 query rows. The epilogue
+writes a zero row and the pair `(0, 0)` when the row sum is zero, which is the
+empty-window contract of the reference. Otherwise it writes `O / row_sum` as
+bf16, and writes `(row_max, row_sum)` as fp32 to the statistics. The layout
+stays `[batch, heads, seq, 2]` from `AttentionStatsCount`, because the backward
+reads it.
+
+#### 4.7 Numerics
+
+| Value | Type |
+|---|---|
+| `q`, `k`, `v`, probability tile | bf16 |
+| Score and output accumulators | fp32 |
+| Row maximum, row sum, `alpha` | fp32 |
+| Statistics | fp32 |
+| The exponential | `expf` |
+
+The accuracy target is the bf16 target of [testing.md](testing.md), which is
+1e-2 relative. The strict 1e-5 tolerances of Part 4 belong to the fp32 build and
+do not move.
+
+### 5. Dispatch
+
+`attention_dispatch.h` holds the two shape predicates, and `attention.cu` holds
+the branch order.
+
+```c
+bool FusedAttentionFp32Covers(const AttentionParams& p);
+bool FusedAttentionBf16Covers(const AttentionParams& p, bool tensor_cores);
+```
+
+The fp32 predicate is the one of Part 4. The bf16 predicate adds the bf16 build,
+a device with tensor cores, the window, and head width 128. Both keep
+`!p.q_head_major`, because the tiles read the model stream. The header is
+host-only, so `attention_test.cc` includes it and checks the same conditions
+without a card.
+
+`AttentionForward` selects the fp32 tile, then the bf16 tile, then cuBLAS. The
+seam keeps its two entries, and `include/nanochat/kernels.h` stays byte for
+byte.
+
+### 6. Files and verification
+
+| Path | What |
+|---|---|
+| `backends/cuda/kernels/attention_bf16.cuh` | The tile: schedule, microkernel, mask, epilogue |
+| `backends/cuda/kernels/attention_dispatch.h` | The two shape predicates, shared with the test |
+| `backends/cuda/kernels/attention.cu` | The branch order and the opt-in shared-memory request |
+| `backends/cuda/kernels/attention_test.cc` | The head-width-128 cases and the dispatch check |
+| `backends/cuda/kernels/attention_benchmark.cc` | The rows of section 8 |
+| `tools/modal/app.py` | The H100 jobs of section 9 |
+
+| Gate | Tier | Check |
+|---|---|---|
+| V1 | T0, no card | The fp32 tile and the cuBLAS path are unchanged: `attention_gpu_test`, `precision_gpu_test`, and the numeric trace |
+| V2 | T0, no card | `--config=hopper --config=sim-gate` builds the tile with warnings as errors and reports 174 registers, no spill, and 112,640 bytes of shared memory |
+| V3 | T1, card | The head-width-128 windowed forward matches the fp32 host reference at tiny shapes, in one bf16 build |
+| V4 | T1, card | The dispatch check covers each predicate condition, and only one tile covers a windowed head-width-128 shape |
+| V5 | T3, card | The benchmark rows of section 8, in a bf16 build |
+
+Gate V3 compares against the fp32 host reference, not against the fp32 build,
+because the two round differently by design. The emulator cannot run the tile:
+[simulator.md](simulator.md) section 9.2 records that it has no tensor-core
+primitive. Gate V3 therefore needs a card.
+
+### 7. The gate
+
+The tile replaces the dense cuBLAS forward on the windowed layers when it wins
+by ten percent on the `SSSL` row at the production sequence length. If it does
+not win, delete it and keep option B of Part 5.
+
+### 8. The measurement on Modal
+
+The H100 leg of `tools/modal/app.py` builds the tree at `sm_90` and bf16, the
+same build the chain runs. Two jobs run in that image:
+
+```bash
+# The family test, including the head-width-128 cases of gate V3.
+modal run tools/modal/app.py::attention_check
+
+# The benchmark rows of section 9.
+modal run tools/modal/app.py::attention_bench --argv '["--json"]'
+```
+
+Both jobs run the binary from the image's own build, so every number belongs to
+the library that image built. The image sets `NANOCHAT_SANDBOX_BACKEND=none`, so
+the T1 profile is a marker and the binary runs in place.
+
+The benchmark also reports the dense path on the same shape: a head-major query
+keeps the batched path, so one run measures both branches at one shape in one
+build. That twin is marginally favoured, because it skips the query transpose.
+The rows land in the `attention_bf16` entry of [baselines.json](baselines.json).
+
+### 9. Results
+
+One run of one binary on one card: NVIDIA H100 80GB HBM3, `sm_90`, bf16,
+`bazel-bin/backends/cuda/kernels/attention_benchmark`. The tile row and the
+dense row of a pair therefore differ only by the forward branch.
+
+| Row | Shape | Tile | Dense cuBLAS | Ratio |
+|---|---|---:|---:|---:|
+| `attention_fwd:d8_s512_win128` | B=8 T=512 H=4 D=128 wl=128 | 0.0646 ms | 0.0993 ms | **1.54x** |
+| `attention_fwd:d8_s512_sssl` | same, `SSSL` | 0.0747 ms | 0.0974 ms | **1.31x** |
+| `attention_fwd:b4_s2048_h8_win512` | B=4 T=2048 H=8 D=128 wl=512 | 0.6639 ms | 0.8435 ms | **1.27x** |
+| `attention_fwd:d8_s512` | full causal | — | 0.1048 ms | cuBLAS |
+
+| Row | Value |
+|---|---:|
+| Forward rate, `b4_s2048_h8_win512` | 22.7 TFLOP/s |
+| Forward rate, `d8_s512_win128` | 14.7 TFLOP/s |
+| Dense forward rate, `b4_s2048_h8_win512` | 17.9 TFLOP/s |
+| Fraction of the bf16 peak, production row | 2.3 percent |
+
+Two readings. The tile wins on every windowed row, and the win is smaller as the
+shape gets smaller, because a fixed launch and staging cost weighs more there.
+Both paths are far below the tensor-core roof: the dense path is bound by the
+score matrix it streams, and the tile is bound by its own tile efficiency. That
+is why the tile wins by 1.27 to 1.54 rather than by the 2.3 factor of arithmetic
+it saves.
+
+The backward rows move the other way, and by design.
+`attention_bwd:d8_s512_sssl` measures 0.2301 ms against 0.2042 ms for the dense
+twin, and `attention_bwd:b4_s2048_h8_win512` measures 0.9729 ms against
+0.9103 ms. Both backwards run the same banded cuBLAS loop, so the difference is
+the query transpose that the head-major twin does not pay.
+
+### 10. Verdict
+
+The gate of section 7 passes. The tile beats the dense bf16 cuBLAS forward on
+the `SSSL` shape by 31 percent at `d8_s512` and by 27 percent at the production
+sequence length, against a 10 percent requirement. The tile stays.
+
+Gate V3 passes:
+
+| Case | Forward output | Statistics |
+|---|---:|---:|
+| `window-d128` | 3.8e-3 | 5.2e-3 |
+| `window-d128-near-full` | 3.8e-3 | 1.5e-2 |
+| `gqa-window-d128` | 4.4e-3 | 5.6e-3 |
+| `kv-cache-window-d128` | 2.8e-3 | 5.3e-3 |
+| `bidirectional-window-d128` | 3.1e-3 | 8.3e-3 |
+| `window-d128-tile-tail` | 3.0e-3 | 7.5e-3 |
+
+The values are the maximum absolute error against the fp32 host reference, and
+they sit inside the bf16 tolerance of 3e-2.
+
+One change came with the gate. `attention_test.cc` compared every case against
+the fp32 host reference at 1e-4, which is the fp32 tolerance, so a bf16 build
+failed on the rounding alone. The file now carries one build-aware tolerance,
+and it differentiates only in an fp32 build, because a central difference over a
+bf16 loss measures the rounding rather than the gradient.
+[testing.md](testing.md) gives both rules.
+
+### 11. Risks and non-goals
+
+- **The first tensor-core code in the tree.** The `wmma` interface keeps the
+  fragment layout out of the kernel, and gate V3 compares against a second bf16
+  path.
+- **The scratch-tile round trip.** Section 4.4 bounds it. If the measured rate
+  shows it binds, the `mma.sync` revision of section 4.2 removes it.
+- **A wide predicate.** The predicate stays narrow, and gate V4 tests each of
+  its conditions.
+- **Not a goal:** a backward rewrite, a full-causal tile, a split head
+  dimension, and any change to the seam, the arena, or the statistics layout.
+
+## See also
+
+- [performance.md](performance.md) — the measurement protocol.
+- [performance-model.md](performance-model.md) — the bound that judges a tile.
+- [precision.md](precision.md) — the fp32 and bf16 policy.
 - [fp8-training.md](fp8-training.md) — the fp8 operand rules.
-- [performance-model.md](performance-model.md) — the bound.
+- [node-h100.md](node-h100.md) — the memory margin and the node plan.
 - [simulator.md](simulator.md) — the emulation engine limits.

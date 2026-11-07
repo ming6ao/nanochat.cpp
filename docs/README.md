@@ -52,7 +52,7 @@ the end of this page.
 | [performance.md](performance.md) | How to measure, and the debugging interface. Part 1: the profile-guided optimization loop. Part 2: the CPU backend record. Section 2.1: the launch, barrier, and elementwise budget of an optimizer stage |
 | [performance-model.md](performance-model.md) | The analytic throughput model: the operation counters, the device rates, the roofline, and the prediction record |
 | [muon-step.md](muon-step.md) | The Muon optimizer step: the cuBLAS seam at the twenty-layer shape, the cost of the step on the H100, the nine decisions, and the plan that closes the gap beside the GEMM |
-| [attention.md](attention.md) | Attention baseline, Pascal feasibility, the fused window, and the results. Part 5: tensor-core attention |
+| [attention.md](attention.md) | The three attention paths, the Pascal baseline and its fused window, the tensor-core decision, and the bf16 tile with its H100 measurement |
 | [scalar-arguments.md](scalar-arguments.md) | The device-resident scalar in the seam: `ScalarArg`, the optimizer migration, the pointwise arms, and the model-side fp32 view |
 | [backlog.md](backlog.md) | Work that is designed and not implemented: Part 1 the training optimizations, Part 2 the self-evolution loop |
 

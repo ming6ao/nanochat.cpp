@@ -184,8 +184,8 @@ class AppTest(unittest.TestCase):
     def test_the_demo_is_a_local_entry_point(self) -> None:
         _module, sdk = _load_app(with_sdk=True)
         self.assertEqual(sdk.local_entrypoints,
-                         ["profile_stage", "measure_stage", "profile_demo",
-                          "pipeline_demo"])
+                         ["attention_check", "attention_bench", "profile_stage",
+                          "measure_stage", "profile_demo", "pipeline_demo"])
 
     def test_the_contract_names_match_the_client(self) -> None:
         import target
@@ -356,6 +356,20 @@ class ImageTest(unittest.TestCase):
         for leg in self.app.LEG_ORDER:
             self.assertIn(self.app.BENCH_TARGET,
                           self.app.image_build_command(leg))
+
+    def test_the_build_names_the_attention_benchmark_and_its_test(self) -> None:
+        # The H100 measurement of docs/attention.md Part 6 runs in the
+        # container, so the one build names both its benchmark and the family
+        # test the check job runs.
+        self.assertEqual(self.app.ATTENTION_BENCH_TARGET,
+                         "//backends/cuda/kernels:attention_benchmark")
+        self.assertEqual(self.app.ATTENTION_TEST_TARGET,
+                         "//backends/cuda/kernels:attention_gpu_test")
+        for target in (self.app.ATTENTION_BENCH_TARGET,
+                       self.app.ATTENTION_TEST_TARGET):
+            self.assertIn(target, self.app.BUILD_TARGETS)
+            for leg in self.app.LEG_ORDER:
+                self.assertIn(target, self.app.image_build_command(leg))
 
     def test_the_build_names_the_library_and_the_stage_executables(self) -> None:
         self.assertEqual(self.app.BUILD_TARGETS[0], "//bindings:nanochat_shared")
@@ -744,7 +758,10 @@ class PipelineTest(_RemoteFixture):
 
     def test_the_functions_are_declared(self) -> None:
         names = [keywords["name"] for keywords in self.sdk.function_calls]
-        self.assertEqual(sorted(names), ["bench_h100", "corpus", "doctor",
+        self.assertEqual(sorted(names), ["bench_attention_h100",
+                                         "bench_h100",
+                                         "check_attention_h100", "corpus",
+                                         "doctor",
                                          "measure_stage_h100",
                                          "measure_stage_t4", "pipeline",
                                          "pipeline_h100", "profile_h100",

@@ -41,8 +41,8 @@ void Die(const std::string& message) {
 
 // Pinned host staging for the host-staged transport. A pageable bounce buffer
 // runs device-to-host copies at a few hundred MB/s; pinned memory reaches PCIe
-// speed, which is what makes the 2x T4 sync affordable (docs/attention.md Part
-// 2 has the measurement protocol).
+// speed, which is what makes the 2x T4 sync affordable (docs/performance.md has
+// the measurement protocol).
 void* PinnedHostAlloc(std::size_t bytes) {
   void* ptr = nullptr;
   if (cudaMallocHost(&ptr, bytes) != cudaSuccess) return nullptr;
