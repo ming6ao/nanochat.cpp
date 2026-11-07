@@ -82,6 +82,24 @@ cc_test(
     size = "small",
 )
 
+# The device gate of the same kernel: cuBLAS is the reference, because both
+# sides accumulate bf16 products in fp32 and only the order differs. It drives
+# the launcher and not the seam, because every row of the shape table is inert.
+# Needs a card and a bf16 build, so the documented command carries both.
+cc_test(
+    name = "gemm_gpu_test",
+    srcs = ["gemm_gpu_test.cc"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    deps = [
+        ":gemm_bf16",
+        "//backends/cuda:gemm",
+        "//include/nanochat:nanochat",
+    ],
+    size = "small",
+    tags = ["gpu"],
+)
+
 # The rate gate: one row per shape, once on the tile and once on cuBLAS, through
 # the shipped `Gemm` and the `NANOCHAT_GEMM_LIB` switch. Needs a card and a bf16
 # build, so it is a benchmark and not a test.
@@ -107,5 +125,8 @@ cuda_binary(
 # builds it at bf16 by construction.
 test_suite(
     name = "all",
-    tests = [":dispatch_test"],
+    tests = [
+        ":dispatch_test",
+        ":gemm_gpu_test",
+    ],
 )
