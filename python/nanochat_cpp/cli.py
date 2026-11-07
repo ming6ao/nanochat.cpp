@@ -847,12 +847,17 @@ SIM_SUITES = {
     "fp8-fast": ["//tests:fp8_rounding_test", "//tests:fp8_gemm_test",
                  "//tests:fp8_graph_test", "//tests:device_profile_test"],
     "kernel": ["//tests:kernel_emu_test"],
+    # The emulated hand GEMM of docs/tensor-core-gemm-plan.md. Its own target,
+    # because the tile is bf16 by construction and //tests:kernel_emu_test is
+    # fp32.
+    "gemm": ["//tools/cuda_sim/emu:gemm_emu_test"],
     "profile": ["//tests:device_profile_test"],
     "all": ["//tests:oracle_test", "//tests:train_parity_test",
             "//tests:sim_numerics_test", "//tests:numerics_trace_test",
             "//tests:fp8_rounding_test", "//tests:fp8_gemm_test",
             "//tests:fp8_graph_test",
-            "//tests:kernel_emu_test", "//tests:device_profile_test"],
+            "//tests:kernel_emu_test", "//tests:device_profile_test",
+            "//tools/cuda_sim/emu:gemm_emu_test"],
 }
 SIM_GATE_TARGETS = ["//backends/cuda:all_kernels",
                     "//backends/cuda/collective:native_sync",

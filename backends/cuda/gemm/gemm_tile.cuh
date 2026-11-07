@@ -9,23 +9,30 @@
 // buffered: slice `n + 1` is copied while slice `n` is used, so the global
 // latency of one slice hides behind the arithmetic of the one before it.
 //
-// A staged row is `kTileK` wide for A and `kTileN` wide for B, in the layout
-// the fragments read, and the pad after it only breaks the bank the row stride
-// would repeat. The pad is never read.
+// **One staged row walks the contiguous axis of the operand.** The element the
+// fragment reads as its leading dimension is the staged row, and the staged
+// columns are the axis the operand memory runs through. A transposed call
+// therefore stages the same way as a plain one, from the other axis:
 //
-// Two copy paths, and the call decides which:
+//   * A plain, A is `m` by `k` with `k` contiguous: rows are `m`, columns `k`,
+//     and the fragment reads row major;
+//   * A transposed, A is `k` by `m` with `m` contiguous: rows are `k`, columns
+//     `m`, and the fragment reads column major;
+//   * B plain, B is `k` by `n` with `n` contiguous: rows are `k`, columns `n`,
+//     row major;
+//   * B transposed, B is `n` by `k` with `k` contiguous: rows are `n`, columns
+//     `k`, column major.
 //
-//   * an operand whose k index steps by one element is contiguous, so a staged
-//     row moves in sixteen-byte chunks through `__pipeline_memcpy_async`;
-//   * any other operand moves one element at a time.
+// The pad after a staged row only breaks the bank the row stride would repeat.
+// The pad is never read.
 //
-// A chunk also needs both ends aligned to sixteen bytes. A row whose global end
-// is not falls back to the element path, which is what the 5 by 12 Muon group
-// takes and what a training step with a multiple-of-eight hidden width does
-// not.
-//
-// Both paths zero the part of a row outside the operand, so a k tail and a
-// ragged edge never add a product.
+// **One copy path, in chunks.** A staged row moves in sixteen-byte chunks
+// through `__pipeline_memcpy_async`, and the thread index walks the (row,
+// chunk) grid in row-major order, so threads that are next to each other read
+// addresses that are next to each other. A chunk that is partly outside the
+// operand, or whose ends are not sixteen-byte aligned, takes a per-element
+// loop instead. The zero fill of a k tail and of a ragged edge is part of that
+// loop, so an operand edge never adds a product.
 //
 // A bf16 `wmma` needs a tensor core with bf16, so this header exists only in a
 // bf16 or fp8 build. The fp32 build keeps cuBLAS.
@@ -89,98 +96,126 @@ __device__ __forceinline__ void CommitStage() {}
 __device__ __forceinline__ void WaitStage(int /*in_flight*/) {}
 #endif
 
-// True when a chunk of `count` elements at `src` can move as one asynchronous
+// True when a whole chunk at `src` and `dst` can move as one asynchronous
 // sixteen-byte copy.
-__device__ __forceinline__ bool ChunkAligned(const TileElement* src,
-                                             int count) {
-  return count == kChunk && (reinterpret_cast<std::uintptr_t>(src) % 16u) == 0u;
+__device__ __forceinline__ bool ChunkAligned(const TileElement* dst,
+                                             const TileElement* src) {
+  return ((reinterpret_cast<std::uintptr_t>(src) % 16u) == 0u) &&
+         ((reinterpret_cast<std::uintptr_t>(dst) % 16u) == 0u);
 }
 
 // --- The staged slice ------------------------------------------------------
 
-// One staged row of A, or the zero that stands in for it. `contiguous` states
-// that `stride_k` is one; the branch is uniform across the block, because it
-// reads only the call's flags, so the two ordering calls stay uniform too.
-template <typename PlanT>
-__device__ __forceinline__ void StageARow(const TileElement* base, int stride_i,
-                                          int stride_k, bool contiguous, int m0,
-                                          int m, int k0, int k, int i,
-                                          TileElement* row) {
-  if (!contiguous || (m0 + i) >= m) {
-    const bool in_range = contiguous ? false : ((m0 + i) < m);
-    for (int kk = 0; kk < PlanT::kTileK; ++kk) {
-      row[kk] = (in_range && (k0 + kk) < k)
-                    ? base[i * stride_i + (k0 + kk) * stride_k]
-                    : __float2bfloat16(0.0f);
-    }
-    return;
-  }
-  const int remaining = k - k0;
-  for (int kk = 0; kk < PlanT::kTileK; kk += kChunk) {
-    const int left = remaining - kk;
+// One axis of the staged tile: `rows` staged rows of `columns` elements, from
+// `base` with `row_stride` elements between two of them. `valid_rows` and
+// `valid_columns` are the part of the tile the operand covers; everything
+// outside is the zero that a k tail and a ragged edge need.
+struct StagedTile {
+  const TileElement* base;
+  TileElement* dst;
+  int row_stride;
+  int lead;
+  int rows;
+  int valid_rows;
+  int valid_columns;
+};
+
+// Stages one operand of one k slice. `Columns` is a compile-time extent, so the
+// thread grid divides its flat index by a constant and the two paths carry no
+// runtime division. Consecutive threads take consecutive chunks of one row,
+// which is what makes the read coalesced.
+template <int Columns>
+__device__ __forceinline__ void StageOperand(const StagedTile& tile) {
+  constexpr int kChunksPerRow = Columns / kChunk;
+  const int total = tile.rows * kChunksPerRow;
+  const int stride = static_cast<int>(blockDim.x);
+  for (int index = static_cast<int>(threadIdx.x); index < total;
+       index += stride) {
+    // Rows are a multiple of the chunk, so a shift is exact and cheap.
+    const int row = index / kChunksPerRow;
+    const int column = (index - row * kChunksPerRow) * kChunk;
+    TileElement* dst = tile.dst + row * tile.lead + column;
+    const bool row_valid = row < tile.valid_rows;
+    const int left = tile.valid_columns - column;
     const int count = left >= kChunk ? kChunk : (left > 0 ? left : 0);
-    const TileElement* src = base + i * stride_i + k0 + kk;
-    if (ChunkAligned(src, count)) {
-      CopyChunk(row + kk, src, kChunk * static_cast<int>(sizeof(TileElement)));
-    } else {
-      for (int e = 0; e < kChunk; ++e) {
-        row[kk + e] = (e < count) ? src[e] : __float2bfloat16(0.0f);
+    if (row_valid && count == kChunk) {
+      const TileElement* src = tile.base + row * tile.row_stride + column;
+      if (ChunkAligned(dst, src)) {
+        CopyChunk(dst, src, kChunk * static_cast<int>(sizeof(TileElement)));
+        continue;
       }
     }
-  }
-}
-
-// One staged row of B, with the same two paths. A B whose n index steps by one
-// element is the contiguous form.
-template <typename PlanT>
-__device__ __forceinline__ void StageBRow(const TileElement* base, int stride_k,
-                                          int stride_j, bool contiguous, int n0,
-                                          int n, int k0, int k, int kk,
-                                          TileElement* row) {
-  if (!contiguous || (k0 + kk) >= k) {
-    const bool in_range = contiguous ? false : ((k0 + kk) < k);
-    for (int j = 0; j < PlanT::kTileN; ++j) {
-      row[j] = (in_range && (n0 + j) < n)
-                   ? base[(k0 + kk) * stride_k + j * stride_j]
+    for (int e = 0; e < kChunk; ++e) {
+      dst[e] = (row_valid && e < count)
+                   ? tile.base[row * tile.row_stride + column + e]
                    : __float2bfloat16(0.0f);
     }
-    return;
-  }
-  const int remaining = n - n0;
-  for (int j = 0; j < PlanT::kTileN; j += kChunk) {
-    const int left = remaining - j;
-    const int count = left >= kChunk ? kChunk : (left > 0 ? left : 0);
-    const TileElement* src = base + (k0 + kk) * stride_k + j;
-    if (ChunkAligned(src, count)) {
-      CopyChunk(row + j, src, kChunk * static_cast<int>(sizeof(TileElement)));
-    } else {
-      for (int e = 0; e < kChunk; ++e) {
-        row[j + e] = (e < count) ? src[e] : __float2bfloat16(0.0f);
-      }
-    }
   }
 }
 
-// Stages one k slice: every A row and every B row of the slice, in whatever
-// copy path the call allows. The thread grid walks the rows and the rows walk
-// the chunks, so both paths cover the slice without a nested loop.
+// Stages one k slice of A. `transpose_a` states that A is stored `k` by `m`, so
+// the m axis is the contiguous one and the staged rows are the k axis.
+template <typename PlanT>
+__device__ __forceinline__ void StageA(const TileElement* a, int lda,
+                                       bool transpose_a, int m0, int m, int k0,
+                                       int k, TileElement* stage) {
+  if (transpose_a) {
+    const StagedTile tile{a + static_cast<long long>(k0) * lda + m0,
+                          stage,
+                          lda,
+                          PlanT::kLeadACol,
+                          PlanT::kTileK,
+                          k - k0,
+                          m - m0};
+    StageOperand<PlanT::kTileM>(tile);
+    return;
+  }
+  const StagedTile tile{a + static_cast<long long>(m0) * lda + k0,
+                        stage,
+                        lda,
+                        PlanT::kLeadARow,
+                        PlanT::kTileM,
+                        m - m0,
+                        k - k0};
+  StageOperand<PlanT::kTileK>(tile);
+}
+
+// Stages one k slice of B. `transpose_b` states that B is stored `n` by `k`, so
+// the k axis is the contiguous one and the staged rows are the n axis.
+template <typename PlanT>
+__device__ __forceinline__ void StageB(const TileElement* b, int ldb,
+                                       bool transpose_b, int n0, int n, int k0,
+                                       int k, TileElement* stage) {
+  if (transpose_b) {
+    const StagedTile tile{b + static_cast<long long>(n0) * ldb + k0,
+                          stage,
+                          ldb,
+                          PlanT::kLeadBCol,
+                          PlanT::kTileN,
+                          n - n0,
+                          k - k0};
+    StageOperand<PlanT::kTileK>(tile);
+    return;
+  }
+  const StagedTile tile{b + static_cast<long long>(k0) * ldb + n0,
+                        stage,
+                        ldb,
+                        PlanT::kLeadBRow,
+                        PlanT::kTileK,
+                        k - k0,
+                        n - n0};
+  StageOperand<PlanT::kTileN>(tile);
+}
+
+// Stages both operands of one k slice. Every thread calls it, so the two
+// ordering calls that follow are uniform across the block.
 template <typename PlanT>
 __device__ __forceinline__ void StageSlice(
-    const TileElement* a_base, int a_stride_i, int a_stride_k,
-    const TileElement* b_base, int b_stride_k, int b_stride_j, int m0, int n0,
-    int m, int n, int k0, int k, TileElement* stage_a, TileElement* stage_b) {
-  const int stride = static_cast<int>(blockDim.x);
-  const bool a_contiguous = a_stride_k == 1;
-  const bool b_contiguous = b_stride_j == 1;
-  for (int i = static_cast<int>(threadIdx.x); i < PlanT::kTileM; i += stride) {
-    StageARow<PlanT>(a_base, a_stride_i, a_stride_k, a_contiguous, m0, m, k0, k,
-                     i, stage_a + i * PlanT::kLeadA);
-  }
-  for (int kk = static_cast<int>(threadIdx.x); kk < PlanT::kTileK;
-       kk += stride) {
-    StageBRow<PlanT>(b_base, b_stride_k, b_stride_j, b_contiguous, n0, n, k0, k,
-                     kk, stage_b + kk * PlanT::kLeadB);
-  }
+    const TileElement* a, int lda, bool transpose_a, const TileElement* b,
+    int ldb, bool transpose_b, int m0, int n0, int m, int n, int k0, int k,
+    TileElement* stage_a, TileElement* stage_b) {
+  StageA<PlanT>(a, lda, transpose_a, m0, m, k0, k, stage_a);
+  StageB<PlanT>(b, ldb, transpose_b, n0, n, k0, k, stage_b);
 }
 
 }  // namespace gemm_tile

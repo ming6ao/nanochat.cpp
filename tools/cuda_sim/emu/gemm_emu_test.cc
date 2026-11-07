@@ -19,6 +19,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdio>
+#include <string>
 #include <type_traits>
 #include <vector>
 
@@ -203,6 +204,18 @@ int main() {
 
   // The weight-gradient form: fp32 out of bf16 operands.
   RunCase<float>("wgrad 64x32x32", 64, 32, 32, 1, false, true, 1.0f, 0.0f);
+
+  // Every schedule of the sweep against the same reference, on a shape that
+  // spans more than one k slice and more than one tile of each extent. A wrong
+  // buffer index or a wrong stage count fails every schedule whose k covers
+  // more than one slice.
+  for (int schedule = 0;
+       schedule < nanochat::kernels::gemm_tile::kScheduleCount; ++schedule) {
+    const std::string name =
+        std::string("sweep 200x130x96 s") + std::to_string(schedule);
+    RunCase<ComputeType>(name.c_str(), 200, 130, 96, 1, false, true, 1.0f,
+                         0.25f, schedule);
+  }
 
   CheckRefusal();
 

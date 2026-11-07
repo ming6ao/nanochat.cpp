@@ -159,7 +159,7 @@ void RunCase(const Case& c) {
     }
     Synchronize();
     Memcpy(got.data(), dev_got, got.size() * sizeof(COut),
-           CopyDir::kHostToDevice);
+           CopyDir::kDeviceToHost);
 
     std::vector<COut> want(host_init.size());
     Memcpy(want.data(), dev_ref, want.size() * sizeof(COut),
@@ -252,16 +252,23 @@ int main() {
   RunCases<float>(kWgrad, sizeof(kWgrad) / sizeof(kWgrad[0]));
 
   // One real shape on each schedule, so the sweep is checked on a card and not
-  // only off it.
-  const Case kSweep[] = {
-      {"sweep 640x640x96 s0", 640, 640, 96, 2, false, false, 1.0f, 0.0f, false,
-       0},
-      {"sweep 640x640x96 s1", 640, 640, 96, 2, false, false, 1.0f, 0.0f, false,
-       1},
-      {"sweep 640x640x96 s2", 640, 640, 96, 2, false, false, 1.0f, 0.0f, false,
-       2},
-  };
-  RunCases<ComputeType>(kSweep, sizeof(kSweep) / sizeof(kSweep[0]));
+  // only off it. The loop follows the sweep, so a schedule added to
+  // `gemm_plan.h` is covered here without a second edit.
+  for (int schedule = 0;
+       schedule < nanochat::kernels::gemm_tile::kScheduleCount; ++schedule) {
+    const Case one{"sweep 640x640x96",
+                   640,
+                   640,
+                   96,
+                   2,
+                   false,
+                   false,
+                   1.0f,
+                   0.0f,
+                   false,
+                   schedule};
+    RunCase<ComputeType>(one);
+  }
 
   if (g_failures != 0) {
     std::fprintf(stderr, "gemm gpu test: %d check(s) failed\n", g_failures);
