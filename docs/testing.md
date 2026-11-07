@@ -75,6 +75,7 @@ tools/nanochat simulate --device t4
 tools/nanochat simulate --device h100 --suite correctness   # reference engine
 tools/nanochat simulate --device h100 --suite api           # API interposer
 tools/nanochat simulate --device h100 --suite kernel        # emulated kernels
+tools/nanochat simulate --device h100 --suite gemm          # emulated tensor-core GEMM
 tools/nanochat simulate --device h100 --suite profile       # device table
 
 # Compile the CUDA backend for the target architecture (no GPU, no broker).
@@ -610,8 +611,15 @@ change; only the copies do.
 attention forward (the cuBLAS path and the fused windowed path) against the CPU
 reference. It also asserts that the dynamic shared path ran.
 
-The `mma` scalar loop stays open: the tensor-core tile needs hardware
-([attention.md](attention.md) Part 6, section 6).
+The `mma` scalar loop for fp8 stays open: that instruction needs hardware
+([attention.md](attention.md) Part 6, section 6, and
+[tensor-core-gemm-plan.md](tensor-core-gemm-plan.md) decision D3). `mma.h` itself
+is mapped, and `//tools/cuda_sim/emu:gemm_emu_test` is the leg that uses it: it
+runs the hand bf16 GEMM of `backends/cuda/gemm/` through the block runtime over
+the four operand layouts, a ragged shape with a k tail, a batch, both stores, and
+every schedule of the sweep. It sits in its own target because the tile is bf16
+by construction and this test is fp32, and `tools/nanochat simulate --suite gemm`
+runs it.
 
 Gate: the emulated cast, the value gate, and the attention forward match the
 CPU reference. All three hold today.

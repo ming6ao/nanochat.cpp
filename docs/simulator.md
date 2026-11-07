@@ -493,6 +493,15 @@ The header maps these constructs:
 | `__half`, `__half2` | the project `Fp16` type |
 | `rsqrtf`, `tanhf`, `expf` | the standard math library |
 | `__launch_bounds__` | empty |
+| `<mma.h>` and `nvcuda::wmma` | one 16 by 16 by 16 tile held whole in every fiber, with `fill`, `load`, `mma`, and `store` in either layout |
+| `<cuda_pipeline.h>` | `__pipeline_memcpy_async` as a `memcpy` at the call; `__pipeline_commit` and `__pipeline_wait_prior` as no-ops |
+| `<cuda_bf16.h>` | `__nv_bfloat16` as `nanochat::Bf16`, its two-lane pair, and its conversions |
+| `backends/cuda/kernels/mma_ops.cuh` | the fp8 micro-tile of 16 by 8 by 32, decoded through `include/nanochat/fp8.h`. Its `mma.sync` arm is absent until the fp8 campaign has a card for it |
+
+The hand GEMM of `backends/cuda/gemm/` runs under this mapping, which is why it
+declares its staged window as one static array and leaves the 48 KiB limit alone:
+the engine does not rewrite it, and the tile needs no `cudaFuncSetAttribute`.
+See `docs/tensor-core-gemm-plan.md` Part A.
 
 Not yet mapped: `extern __shared__` (attention and the ResFormer value gate use
 it), texture and surface objects, and `__constant__` arrays. Those families are
@@ -509,6 +518,23 @@ code together.
 An emulator can diverge from device semantics. The plan marks this engine as
 experimental. It never replaces the oracle. It is a stronger check than the API
 mode alone, and a weaker check than real hardware.
+
+Three limits of the tensor-core mapping are worth naming, because each one is a
+defect the emulated leg cannot see.
+
+- **The fragment ownership layout.** Every fiber holds the whole micro-tile, so
+the engine checks the staging layout, the tile addressing, the padding, the
+leading dimension, the epilogue, the accumulate order, and the store. It cannot
+check which lane owns which element. A kernel must therefore pass a fragment only
+to `fill`, `load`, `mma`, and `store`: a kernel that reads one element of a
+fragment depends on the vendor layout, and the emulator would agree with it by
+accident.
+- **The cost.** The whole-tile rule multiplies the arithmetic by the warp width,
+32. A GEMM section therefore keeps `m` and `n` at or below 128 and `k` at or
+below 64 to stay inside the `small` test budget.
+- **The wait.** `__pipeline_wait_prior` completes every copy at the call, so a
+missing or too weak a wait is invisible here. One call carries that risk, and the
+tile makes it once.
 
 ## 10. Running the simulator
 
@@ -530,6 +556,9 @@ tools/nanochat simulate --device h100 --mode compile
 
 # The optional emulated-kernel check.
 tools/nanochat simulate --device h100 --suite kernel
+
+# The emulated hand tensor-core GEMM, over every schedule of its sweep.
+tools/nanochat simulate --device h100 --suite gemm
 ```
 
 The command does this:

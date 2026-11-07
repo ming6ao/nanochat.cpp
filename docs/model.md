@@ -346,6 +346,14 @@ set.
 | Batch above 1 | `cublasLtMatmul` with a cached plan |
 | No plan for the shape | `cublasGemmStridedBatchedEx` |
 
+One call goes before all four rows. A `bf16` build asks the hand tensor-core tile
+of [kernels.md](kernels.md) Part 3 first, through the shape table of
+`backends/cuda/gemm/dispatch.cc`. That table holds 28 rows and every row is
+disabled, because the tile measured between 0.08 and 0.30 of the cuBLAS rate
+([baselines.json](baselines.json), the `gemm_bf16` entry). A shape that is not in
+the table, a call the tile refuses, and a store type it does not serve all fall
+through to the four rows above.
+
 Every Muon product takes the third row, because a group is a batched call. The
 plan is the part that matters:
 

@@ -157,6 +157,12 @@ above a group's element count is the whole promotion.
 - **Benchmarks are not tests.** Use `testing/bench_utils.h`. Run them through
   `tools/nanochat bench` or `tools/nanochat profile`. Do not add a benchmark to
   the `all` test suite.
+- **A `wmma` fragment stays opaque.** Pass a fragment only to `fill_fragment`,
+  `load_matrix_sync`, `mma_sync`, and `store_matrix_sync`. The emulator of
+  [simulator.md](../../docs/simulator.md) section 9.4 holds one whole micro-tile
+  in every fiber, so a kernel that reads one element of a fragment depends on the
+  vendor layout and the emulator would agree with it by accident. That rule is
+  what lets `//tools/cuda_sim/emu:gemm_emu_test` gate the hand GEMM off device.
 
 ## Run the tests
 

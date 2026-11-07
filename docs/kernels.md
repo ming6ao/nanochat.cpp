@@ -156,10 +156,13 @@ Keep cuBLAS as the GEMM engine. It is near peak on GP102 (11.34 TFLOPS fp32), it
 is tuned per shape, and it is portable across generations. Do not hand-write a
 GEMM for the dense path. Part 1 measured what a hand-written batched GEMM costs
 when a fusion needs one: 0.68 to 0.90 of the cuBLAS rate on the groups the
-fusion targets. That is the number this rule stands on.
+fusion targets. That is the number this rule stands on. Part 3 measured the bf16
+tensor-core tile at 0.08 to 0.30 of the cuBLAS rate, which is the same verdict on
+a faster instruction set.
 
-Part 3 holds the design of a hand-written tensor-core GEMM for bf16 and fp8.
-The tree does not implement it.
+Part 3 holds the measured result of a hand-written bf16 tensor-core GEMM. The
+tile is implemented and it is correct, and it lands far under the promotion gate,
+so no shape uses it.
 
 ### Launch overhead
 
@@ -323,6 +326,10 @@ backends/cuda/kernels/device_utils.cuh
   RowLogSumExp(..)        // Classifier
   ScatterAddRow(..)       // Embedding backward
 ```
+
+`backends/cuda/kernels/mma_ops.cuh` is the second such header: one micro-tile
+instruction with a device arm and a scalar arm, so the emulator can run it. Its
+fp8 arm arrives with that campaign, and Part 3's bf16 tile does not use it.
 
 This removes duplication **without** changing kernel boundaries.
 
@@ -766,7 +773,17 @@ Non-goals:
 - Migrating constants. `eps`, the softcap, `kQkScale`, and the schedule values
   stay host floats.
 
-## Part 3. The hand-written tensor-core GEMM (not implemented)
+## Part 3. The hand-written tensor-core GEMM (measured, rejected)
+
+**Measured result.** The tile of `backends/cuda/gemm/` is correct against cuBLAS
+on the whole `GemmParams` contract, and it reaches between 0.08 and 0.30 of the
+cuBLAS rate over the closed shape list. On the six shapes the campaign exists for
+it holds 120 to 157 TFLOP/s against cuBLAS at 643 to 865, so it runs at 14 to 16
+percent of the card's bf16 peak where cuBLAS runs at 65 to 87 percent. No
+schedule reaches the 0.70 promotion gate, so every bit of the shape table is off
+and cuBLAS serves every shape. The rows are in
+[baselines.json](baselines.json) under `gemm_bf16`, the comparison is section 7
+of `backends/cuda/gemm/README.md`, and the reasons are section 8 of it.
 
 cuBLAS reaches 989 TFLOPS in bf16 and 1979 TFLOPS in fp8 on the H100, because it
 uses WGMMA, TMA, split-K, and swizzled tiles. A hand kernel on the warp-level
@@ -795,7 +812,9 @@ tolerance in [precision.md](precision.md).
 **Dispatch.** A predicate in `backends/cuda/gemm.cu` routes a shape to the hand
 library only when it beats cuBLAS at the fraction above. cuBLAS stays the
 fallback and serves every shape the library does not. The rule is: no group
-slower. The frozen seam keeps its signatures and its version.
+slower. The frozen seam keeps its signatures and its version. The predicate and
+its 28-row table are implemented; the table holds the measured schedule of each
+row and no row is enabled.
 
 **Blocked direction.** A Hopper-native path needs WGMMA and TMA in the simulator
 first, and [attention.md](attention.md) Part 5 records that as the blocker. It

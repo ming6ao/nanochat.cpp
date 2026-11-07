@@ -8,7 +8,7 @@
       "device": "NVIDIA H100 80GB HBM3 (sm_90)",
       "validated_on": "NVIDIA H100 80GB HBM3 (sm_90)",
       "precision": "bf16",
-      "measurement": "modal run tools/modal/app.py::attention_bench --argv '[\"--json\"]'",
+      "measurement": "modal run tools/modal/app.py::card_job --name attention_bench --argv '[\"--json\"]'",
       "origin": "docs/attention.md Part 6, section 4.4",
       "rows": [
         {
@@ -266,6 +266,268 @@
         }
       ],
       "origin": "docs/baselines.json"
+    },
+    "gemm_bf16": {
+      "note": "The hand-written bf16 tensor-core GEMM of docs/kernels.md Part 3 and backends/cuda/gemm/README.md, over the closed shape list: the five Muon Polar Express groups of the twenty-layer profile and the Linear forward, dgrad, and wgrad shapes of the `big` profile at one micro-batch of sixteen sequences of 1024 tokens. Every row is one run of one binary: the shipped kernels::Gemm and GemmWgrad with NANOCHAT_GEMM_LIB at `cublas` and then at `hand`, the latter on the schedule the row owns, which is the schedule the four-schedule sweep chose for it. fraction_of_cublas is the cuBLAS time over the hand time, which is the quantity gate G4 asks to be at least 0.70; hand_mfu is the tile's rate over the card's bf16 peak. No row takes the hand path: every bit of the shape table is off, and cuBLAS serves every shape. The sweep itself, which measures each row on all five schedules, is section 6 of backends/cuda/gemm/README.md.",
+      "device": "NVIDIA H100 80GB HBM3 (sm_90)",
+      "validated_on": "NVIDIA H100 80GB HBM3 (sm_90)",
+      "precision": "bf16",
+      "measurement": "modal run tools/modal/app.py::card_job --name gemm_bench --argv '[\"--json\"]'",
+      "origin": "docs/tensor-core-gemm-plan.md sections B.4 and B.5, backends/cuda/gemm/README.md section 6",
+      "rows": [
+        {
+          "name": "muon:5x12:A",
+          "shape": "5x5x12 batch 10",
+          "cublas_ms": 0.006261,
+          "hand_ms": 0.008043,
+          "schedule": "64x64x32",
+          "fraction_of_cublas": 0.7785,
+          "hand_mfu": 0.0
+        },
+        {
+          "name": "muon:5x12:A2",
+          "shape": "5x5x5 batch 10",
+          "cublas_ms": 0.006475,
+          "hand_ms": 0.007701,
+          "schedule": "64x64x32",
+          "fraction_of_cublas": 0.8407,
+          "hand_mfu": 0.0
+        },
+        {
+          "name": "muon:5x12:prod",
+          "shape": "5x12x5 batch 10",
+          "cublas_ms": 0.006144,
+          "hand_ms": 0.008192,
+          "schedule": "64x64x32",
+          "fraction_of_cublas": 0.75,
+          "hand_mfu": 0.0
+        },
+        {
+          "name": "muon:640x1280:A",
+          "shape": "640x640x1280 batch 40",
+          "cublas_ms": 0.080971,
+          "hand_ms": 0.293792,
+          "schedule": "128x128x32",
+          "fraction_of_cublas": 0.2756,
+          "hand_mfu": 0.1444
+        },
+        {
+          "name": "muon:640x1280:A2",
+          "shape": "640x640x640 batch 40",
+          "cublas_ms": 0.055669,
+          "hand_ms": 0.18864,
+          "schedule": "128x128x32",
+          "fraction_of_cublas": 0.2951,
+          "hand_mfu": 0.1124
+        },
+        {
+          "name": "muon:640x1280:prod",
+          "shape": "640x1280x640 batch 40",
+          "cublas_ms": 0.093387,
+          "hand_ms": 0.368619,
+          "schedule": "128x128x32",
+          "fraction_of_cublas": 0.2533,
+          "hand_mfu": 0.115
+        },
+        {
+          "name": "muon:1280x1280:A",
+          "shape": "1280x1280x1280 batch 40",
+          "cublas_ms": 0.225899,
+          "hand_ms": 1.10916,
+          "schedule": "128x128x32",
+          "fraction_of_cublas": 0.2037,
+          "hand_mfu": 0.1529
+        },
+        {
+          "name": "muon:1280x1280:A2+prod",
+          "shape": "1280x1280x1280 batch 40",
+          "cublas_ms": 0.225067,
+          "hand_ms": 1.23759,
+          "schedule": "128x128x32",
+          "fraction_of_cublas": 0.1819,
+          "hand_mfu": 0.1371
+        },
+        {
+          "name": "muon:1280x5120:A",
+          "shape": "1280x1280x5120 batch 20",
+          "cublas_ms": 0.453867,
+          "hand_ms": 2.0257,
+          "schedule": "128x128x32",
+          "fraction_of_cublas": 0.2241,
+          "hand_mfu": 0.1675
+        },
+        {
+          "name": "muon:1280x5120:A2+A2",
+          "shape": "1280x1280x1280 batch 20",
+          "cublas_ms": 0.142592,
+          "hand_ms": 0.640437,
+          "schedule": "128x128x32",
+          "fraction_of_cublas": 0.2226,
+          "hand_mfu": 0.1324
+        },
+        {
+          "name": "muon:1280x5120:prod",
+          "shape": "1280x5120x1280 batch 20",
+          "cublas_ms": 0.550773,
+          "hand_ms": 2.4046,
+          "schedule": "128x128x32",
+          "fraction_of_cublas": 0.229,
+          "hand_mfu": 0.1411
+        },
+        {
+          "name": "muon:5120x1280:A",
+          "shape": "1280x1280x5120 batch 20",
+          "cublas_ms": 0.442944,
+          "hand_ms": 2.45489,
+          "schedule": "128x128x32",
+          "fraction_of_cublas": 0.1804,
+          "hand_mfu": 0.1382
+        },
+        {
+          "name": "muon:5120x1280:prod",
+          "shape": "5120x1280x1280 batch 20",
+          "cublas_ms": 0.521931,
+          "hand_ms": 2.40428,
+          "schedule": "128x128x32",
+          "fraction_of_cublas": 0.2171,
+          "hand_mfu": 0.1411
+        },
+        {
+          "name": "linear:fwd:q+proj",
+          "shape": "16384x1280x1280 batch 1",
+          "cublas_ms": 0.076533,
+          "hand_ms": 0.362123,
+          "schedule": "128x128x32",
+          "fraction_of_cublas": 0.2113,
+          "hand_mfu": 0.1499
+        },
+        {
+          "name": "linear:dgrad:q+proj",
+          "shape": "16384x1280x1280 batch 1",
+          "cublas_ms": 0.075563,
+          "hand_ms": 0.403595,
+          "schedule": "128x128x32",
+          "fraction_of_cublas": 0.1872,
+          "hand_mfu": 0.1345
+        },
+        {
+          "name": "linear:wgrad:q+proj",
+          "shape": "1280x1280x16384 batch 1 fp32 out",
+          "cublas_ms": 0.085824,
+          "hand_ms": 0.64672,
+          "schedule": "128x64x32",
+          "fraction_of_cublas": 0.1327,
+          "hand_mfu": 0.0839
+        },
+        {
+          "name": "linear:fwd:kv",
+          "shape": "16384x640x1280 batch 1",
+          "cublas_ms": 0.049067,
+          "hand_ms": 0.188512,
+          "schedule": "128x128x32",
+          "fraction_of_cublas": 0.2603,
+          "hand_mfu": 0.144
+        },
+        {
+          "name": "linear:dgrad:kv",
+          "shape": "16384x1280x640 batch 1",
+          "cublas_ms": 0.048256,
+          "hand_ms": 0.231477,
+          "schedule": "128x128x32",
+          "fraction_of_cublas": 0.2085,
+          "hand_mfu": 0.1173
+        },
+        {
+          "name": "linear:wgrad:kv",
+          "shape": "640x1280x16384 batch 1 fp32 out",
+          "cublas_ms": 0.051477,
+          "hand_ms": 0.626571,
+          "schedule": "128x64x32",
+          "fraction_of_cublas": 0.0822,
+          "hand_mfu": 0.0433
+        },
+        {
+          "name": "linear:fwd:fc",
+          "shape": "16384x5120x1280 batch 1",
+          "cublas_ms": 0.260832,
+          "hand_ms": 1.38129,
+          "schedule": "128x128x32",
+          "fraction_of_cublas": 0.1888,
+          "hand_mfu": 0.1572
+        },
+        {
+          "name": "linear:dgrad:fc",
+          "shape": "16384x1280x5120 batch 1",
+          "cublas_ms": 0.261579,
+          "hand_ms": 1.44045,
+          "schedule": "128x128x32",
+          "fraction_of_cublas": 0.1816,
+          "hand_mfu": 0.1507
+        },
+        {
+          "name": "linear:wgrad:fc",
+          "shape": "5120x1280x16384 batch 1 fp32 out",
+          "cublas_ms": 0.307413,
+          "hand_ms": 1.7943,
+          "schedule": "128x64x32",
+          "fraction_of_cublas": 0.1713,
+          "hand_mfu": 0.121
+        },
+        {
+          "name": "linear:fwd:cproj",
+          "shape": "16384x1280x5120 batch 1",
+          "cublas_ms": 0.26112,
+          "hand_ms": 1.27135,
+          "schedule": "128x128x32",
+          "fraction_of_cublas": 0.2054,
+          "hand_mfu": 0.1708
+        },
+        {
+          "name": "linear:dgrad:cproj",
+          "shape": "16384x5120x1280 batch 1",
+          "cublas_ms": 0.261568,
+          "hand_ms": 1.54177,
+          "schedule": "128x128x32",
+          "fraction_of_cublas": 0.1697,
+          "hand_mfu": 0.1408
+        },
+        {
+          "name": "linear:wgrad:cproj",
+          "shape": "1280x5120x16384 batch 1 fp32 out",
+          "cublas_ms": 0.363893,
+          "hand_ms": 1.79463,
+          "schedule": "128x64x32",
+          "fraction_of_cublas": 0.2028,
+          "hand_mfu": 0.121
+        },
+        {
+          "name": "linear:fwd:cls",
+          "shape": "16384x32768x1280 batch 1",
+          "cublas_ms": 1.58966,
+          "hand_ms": 8.75561,
+          "schedule": "128x128x32",
+          "fraction_of_cublas": 0.1816,
+          "hand_mfu": 0.1587
+        },
+        {
+          "name": "linear:dgrad:cls",
+          "shape": "16384x1280x32768 batch 1",
+          "cublas_ms": 1.46759,
+          "hand_ms": 8.75648,
+          "schedule": "128x128x32",
+          "fraction_of_cublas": 0.1676,
+          "hand_mfu": 0.1587
+        },
+        {
+          "name": "linear:wgrad:cls",
+          "shape": "32768x1280x16384 batch 1 fp32 out",
+          "cublas_ms": 1.5071,
+          "hand_ms": 9.39988,
+          "schedule": "128x64x32",
+          "fraction_of_cublas": 0.1603,
+          "hand_mfu": 0.1478
+        }
+      ]
     }
   }
 }

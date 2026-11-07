@@ -281,10 +281,10 @@ seam keeps its two entries, and `include/nanochat/kernels.h` stays byte for
 byte.
 
 # The family test, including the head-width-128 cases of gate V3.
-modal run tools/modal/app.py::attention_check
+modal run tools/modal/app.py::card_job --name attention_check
 
 # The benchmark rows of section 9.
-modal run tools/modal/app.py::attention_bench --argv '["--json"]'
+modal run tools/modal/app.py::card_job --name attention_bench --argv '["--json"]'
 ```
 
 Both jobs run the binary from the image's own build, so every number belongs to

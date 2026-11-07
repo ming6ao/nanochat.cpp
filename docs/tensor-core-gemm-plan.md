@@ -1,9 +1,12 @@
 # Campaign plan: the hand tensor-core GEMM and its simulator leg
 
-Status: campaign plan, not a reference document. Its durable sections move into
-[docs/kernels.md](kernels.md) Part 3 and [docs/simulator.md](simulator.md) when
-the last row lands. The retirement rule is at the end of
-[docs/README.md](README.md).
+Status: campaign plan, not a reference document. A1 to A4 and B0 to B5 have
+landed, so the durable sections can move into [docs/kernels.md](kernels.md) Part 3
+and [docs/simulator.md](simulator.md): the package record is already
+`backends/cuda/gemm/README.md` and the numbers are in
+[docs/baselines.json](baselines.json). The retirement rule is at the end of
+[docs/README.md](README.md). The result is a negative one: the tile is correct
+and it is slower than cuBLAS on every shape that matters, so no shape uses it.
 
 This plan implements [kernels.md](kernels.md) Part 3, "The hand-written
 tensor-core GEMM". It also removes the blocker that Part 3 carries. Today the
@@ -196,7 +199,7 @@ about a kernel that does not exist yet.
 | `tools/cuda_sim/emu/emu_prelude.h` | One rename for the backend-internal launcher, `LaunchGemmTile` to `EmuLaunchGemmTile`, beside `MuonFusedUpdate` |
 | `tools/cuda_sim/emu/emu_kernels.h` | Declare the emulated launcher with the seam's parameter types |
 | `tools/cuda_sim/emu/gemm_emu_test.cc` | A GEMM section: the emulated launcher against a host reference. It lives beside the emulated source and not in `tests/kernel_emu_test.cc`, because the tile is bf16 by construction and that test is fp32 |
-| `python/nanochat_cpp/cli.py` | `SIM_SUITES` gains `"gemm": ["//tests:kernel_emu_test"]`, and `"all"` gains the same target once. Architect-owned: request the edit |
+| `python/nanochat_cpp/cli.py` | `SIM_SUITES` gains `"gemm": ["//tools/cuda_sim/emu:gemm_emu_test"]`, and `"all"` gains the same target once. **Landed**, and the target is the emulated test of A4 rather than `//tests:kernel_emu_test`, because the tile is bf16 by construction |
 | `docs/simulator.md` | Section 9.2 gains the four rows above and the fp8 wrapper. Section 9.4 gains the fragment-ownership limit and the warp-width cost |
 
 `check_symbols.py` needs no change. A tensor-core instruction is a device
@@ -343,11 +346,14 @@ does see both k-tail zeros removed at once. The guards are therefore defensive,
 and they stay. A masked read past an operand is a fault risk beside a wrong
 number, and only an address sanitizer or a card would show it.
 
-**Where the campaign stands.** A1 to A4 are done, and with them the off-device
-half of B2: the kernel's arithmetic and its full contract are checked by
-`tools/nanochat test` on a machine with no card. The rate gates (G3 and G4) and
-G2 on hardware need D1. B4's schedule sweep and B5's promotion are open, as is
-the fp8 kernel (D3).
+**Where the campaign stands.** A1 to A4 and B0 to B5 are done. The off-device
+half of B2 checks the kernel's arithmetic and its full contract on a machine
+with no card. B2's device gate passed on a hosted Hopper card, which is D1's
+answer: every contract case and every schedule agreed with cuBLAS. B4's sweep and
+B5's measurement ran on that card, and they are the negative result of section
+B.10: no schedule reaches 0.70 of the cuBLAS rate on a shape that matters, so no
+row of the shape table is enabled. The fp8 kernel (D3) is still open, and
+`mma_ops.cuh` holds only its scalar arm.
 
 ## A.9 Optional stage: the tensor-core attention tile
 
@@ -419,7 +425,10 @@ The sweep is a stage, not a tuning afterthought. Part 1 section 9 names the thre
 numbers that lost to cuBLAS: the 8 by 4 micro-tile, the 8-deep stage, and the
 80-register block. Change all three before any gate verdict. A second schedule
 for `sm_90` (128 by 128, 256 threads, eight warps, a 32-deep stage) follows the
-first gate.
+first gate. **It landed as `128x128x32` in section B.4, and it is the schedule
+that won**: it is the default and the choice of 20 of the 28 rows. Its epilogue
+needed one change, a warp-sized scratch tile instead of a whole-tile one, to stay
+inside the static shared window.
 
 ## B.4 The copy stage
 
@@ -432,35 +441,56 @@ One header function, two arms, chosen by `__CUDA_ARCH__`:
 
 **Landed.** The two-stage pipeline is in `gemm_tile.cuh`. The two arms sit
 behind one `CopyChunk`, one `CommitStage`, and one `WaitStage`, so the kernel has
-no second body. A staged row moves in sixteen-byte chunks when its k index steps
-by one element. It moves one element at a time otherwise: the transposed form,
-the ragged edge, and the k tail. A chunk also needs both ends aligned to sixteen
-bytes, so a row whose global end is not falls back to the element path. That is
-the 5 by 12 Muon group and not a training step, whose hidden widths are multiples
-of eight.
+no second body. A staged row moves in sixteen-byte chunks through
+`__pipeline_memcpy_async`, and the thread index walks the (row, chunk) grid in
+row-major order, so threads next to each other read addresses next to each
+other. A chunk that is partly outside the operand, or whose ends are not
+sixteen-byte aligned, takes a per-element loop that also carries the zero fill of
+a k tail and of a ragged edge.
 
-The sweep is three schedules, and all three fit the 48 KiB shared window, so none
-needs `cudaFuncSetAttribute` and the emulator needs no dynamic shared memory:
+**One correction to the first cut.** The first cut took the element path for
+every transposed operand: it read a column of A or a row of B one element at a
+time, with a stride of a whole leading dimension. Half the Muon groups and half
+the Linear calls therefore ran an uncoalesced copy. A staged row now walks the
+contiguous axis of the operand, and the fragment reads the matching layout:
+row major for a plain operand and column major for a transposed one. The staged
+buffer covers the larger of the two forms of each operand. The correction moved
+the 1280 by 1280 group from 0.088 to 0.198 of the cuBLAS rate.
+
+The sweep is four schedules, and all four fit the 48 KiB shared window, so none
+needs `cudaFuncSetAttribute` and the emulator needs no dynamic shared memory. A
+fifth, `128x128x16x3`, was measured with a three-deep pipeline and won no shape;
+it and the general stage count it needed were removed:
 
 | Schedule | Tile | Warps | k depth | Registers | Shared |
 |---|---|---|---:|---:|---:|
-| `128x64x32` | 128 by 64 | 2 by 2 | 32 | 96 | 32,768 B |
-| `64x64x32` | 64 by 64 | 1 by 2 | 32 | 128 | 19,456 B |
-| `64x64x64` | 64 by 64 | 1 by 2 | 64 | 128 | 36,864 B |
+| `128x64x32` | 128 by 64 | 2 by 2 | 32 | 126 to 128 | 31,744 B |
+| `64x64x32` | 64 by 64 | 1 by 2 | 32 | 126 to 128 | 21,504 B |
+| `64x64x64` | 64 by 64 | 1 by 2 | 64 | 128 to 136 | 37,888 B |
+| `128x128x32` | 128 by 128 | 4 by 2 | 32 | 122 to 128 | 41,984 B |
 
-`NANOCHAT_GEMM_SCHEDULE` names one of the three, and the benchmark sweeps a row
-over all three. A row of the closed list owns its schedule, so a shape keeps the
-one its measurement chose.
+`NANOCHAT_GEMM_SCHEDULE` names one of the four, and the benchmark sweeps a row
+over all four. A row of the closed list names the schedule its measurement chose,
+so a promotion is one bit and no second sweep. `128x128x32` is the default,
+because it won every shape except the weight-gradient rows and the 5 by 12
+group.
+
+**The sweep's result, on an H100 at `sm_90` and bf16.** `128x128x32` is the best
+schedule on 20 of the 28 rows, `128x64x32` on the five weight-gradient rows, and
+`64x64x32` on the 5 by 12 group. That the third buffer never won says the copy is
+not what bounds this tile. The full table is in `backends/cuda/gemm/README.md`
+section 6, and the comparison over six shapes is section 7.
 
 **What the emulator proves here, and what it does not.** The emulated run covers
 the staged layout, the zero fill of a ragged edge and a k tail, and the chunk and
-element paths. It also covers the buffer index of the pipeline, and that the
-three schedules agree with one reference. A wrong buffer index fails every case
-whose k spans more than one slice. It cannot cover
-the wait itself: the emulator's `__pipeline_wait_prior` is a no-op, so a missing
-or too weak a wait is invisible here, and one call carries that risk. The loop
-commits one group per iteration and waits for all but the newest, which is the
-form that needs no branch on the last slice.
+element paths. It also covers the buffer index of the pipeline, and it runs every
+schedule of the sweep over one shape, so the four agree with one reference. A
+wrong buffer index fails every case whose k spans more than one slice. It cannot
+cover the wait itself: the emulator's `__pipeline_wait_prior` is a no-op, so a
+missing or too weak a wait is invisible here, and one call carries that risk. The
+loop commits one group per iteration and waits for all but the newest, which is
+the form that needs no branch on the last slice. The pipeline is two deep and
+needs no stage count: the third buffer measured no faster.
 
 The two arms must leave the same shared contents. One emulated case compares
 them, which A.3 makes cheap.
@@ -502,8 +532,8 @@ small `m`: a batch-1 decode call with `m` of 1 wastes a tensor-core tile, and
 | B1 | The `sm_80` kernel, forward only, one shape, no batch, no transpose, `beta = 0` | SA over the emulated leg, then agreement with cuBLAS at 1e-3 absolute | `tools/nanochat simulate --device h100 --suite gemm --precision bf16` |
 | B2 | The full contract: four transpose forms, batch, three leading dimensions, strides, alpha and beta, and the fp32 store | cuBLAS is the reference on a card, over the same cases the emulator runs, and every schedule | `tools/nanochat test --gpu --config=hopper //backends/cuda/gemm:gemm_gpu_test` |
 | B3 | The dispatch: the closed list, the verdict, and the `NANOCHAT_GEMM_LIB` switch | The T0 gate, and no shape changes hands while its bit is inert | `tools/nanochat test //backends/cuda/gemm:dispatch_test` |
-| B4 | The schedule sweep: the two-stage `cp.async` copy, the three schedules, and the record of what each one measures | The code half is landed and gated off device. The record needs 0.85 on the D5 group, then on a named shape set, so it needs D1 | `tools/nanochat bench -- bazel-bin/backends/cuda/gemm/gemm_benchmark --schedule all --json --out /tmp/gemm-sweep.json` |
-| B5 | The measurement and the promotion: one report row per shape, the tile against cuBLAS, then the bits that pass | 0.70 on one Muon row and one Linear shape, 0.85 for a replacement, and no enabled shape slower than cuBLAS | `tools/nanochat bench -- bazel-bin/backends/cuda/gemm/gemm_benchmark --json --out /tmp/gemm-bf16.json` |
+| B4 | The schedule sweep: the `__pipeline_*` copy, the four schedules, and the record of what each one measures | **Landed.** The copy stage, the four schedules, and the record on a hosted Hopper card. The wide tile won 20 of 28 rows and never came near 0.85 | `tools/nanochat bench -- bazel-bin/backends/cuda/gemm/gemm_benchmark --schedule all --json` |
+| B5 | The measurement and the promotion: one report row per shape, the tile against cuBLAS, then the bits that pass | **Landed, with no promotion.** The 28 rows are in `docs/baselines.json`, the Linear rows joined the table, and no row reached 0.70, so every bit stays off (section B.10) | `modal run tools/modal/app.py::card_job --name gemm_bench --argv '["--json"]'` |
 
 **B3 landed.** The dispatch is one verdict between the seam and cuBLAS, and it
 changes nothing until a measurement turns a bit on.
@@ -540,10 +570,33 @@ the switch, both environment variables, the schedule list, and the seam's
 default rules.
 
 The benchmark calls the seam and not the launcher, so it measures the wiring a
-training step takes. It has not run: it needs a card and a bf16 build (D1).
+training step takes. It has since run on a hosted Hopper card: see B4 and B5
+below.
 
-Open in B5: the Linear rows join the table from a measurement. The five Muon
-groups are measured, and a bit is turned on only where the fraction gate passes.
+**B4 landed.** The copy stage is one chunked path for all four operand forms (B.4
+records the correction), the sweep holds four schedules, and the benchmark
+measured all five over the closed list on an NVIDIA H100 80GB HBM3 at `sm_90` and
+bf16. The wide tile, 128 by 128 with eight warps, won 20 of the 28 rows. A third
+staged buffer did not pay, so it was removed with the general stage count it
+needed, which says the copy is not the limiter of this tile:
+the tile holds about 15 percent of the card's bf16 peak against cuBLAS at 75
+percent.
+
+**B5 landed, with no promotion.** The Linear rows joined the table in a second
+pass: `linear_shape.h` derives the six layers and their three calls from a
+`Config`, `dispatch.cc` adds them at the token count of one micro-batch of the
+throughput shape, and `dispatch_test.cc` checks the fifteen new rows against the
+literals `src/ops.cc` issues. The measurement then covered 28 rows, which are in
+`docs/baselines.json` under `gemm_bf16`.
+
+The gate did not pass. The largest fraction on a real shape is 0.294, and the
+worst is 0.083. Two of the three 5 by 12 rows read above 0.70 in the sweep, but
+that group is 0.005 to 0.008 ms on either path, so its fraction is launch
+overhead and not a rate: a second run of the same binary on the same card read
+0.60, 0.64, and 0.61 for the same three rows. Every bit therefore stays off,
+cuBLAS keeps every shape, and this is the negative result of section B.10.
+`backends/cuda/gemm/README.md` section 9 names the four causes a later attempt
+would attack first.
 
 **The device gate exists.** `backends/cuda/gemm/gemm_gpu_test.cc` is the twin
 of the emulated check, and cuBLAS is its reference. Both sides accumulate bf16
@@ -562,7 +615,7 @@ so a call through `Gemm` would compare cuBLAS with cuBLAS.
 | 128 by 64 by 32 | Exactly one base tile |
 | 200 by 130 by 96 | More than one tile on both extents, and more than one slice |
 | Weight gradient, 96 by 64 by 40, batch of two, fp32 out | The second store path at more than one tile |
-| 640 by 640 by 96 on each of the three schedules | The sweep on a card |
+| 640 by 640 by 96 on every schedule of the sweep | The sweep on a card. It loops over `kScheduleCount`, so a schedule added to `gemm_plan.h` is covered without a second edit |
 
 Two refusals stand in front of it, and the run states which one it took. An
 fp32 build prints that the tile needs bf16. A card without a bf16 tensor core
@@ -611,17 +664,18 @@ does not list, so L3 would remove nothing without them.
 
 | File | Change | Owner |
 |---|---|---|
-| `docs/kernels.md` Part 3 | The text becomes "implemented" or "measured, rejected". The durable rows move to `backends/cuda/gemm/README.md` | Architect |
-| `docs/kernels.md` section Compute strategy | The GEMM rule keeps its reason and gains the measured fraction | Architect |
-| `docs/kernels.md` section Shared device helpers | `mma_ops.cuh` joins the list | Architect |
+| `docs/kernels.md` Part 3 | The text becomes "implemented" or "measured, rejected". The durable rows move to `backends/cuda/gemm/README.md`. **Landed as measured, rejected** | Architect |
+| `docs/kernels.md` section Compute strategy | The GEMM rule keeps its reason and gains the measured fraction. **Landed** | Architect |
+| `docs/kernels.md` section Shared device helpers | `mma_ops.cuh` joins the list. **Landed** | Architect |
 | `docs/simulator.md` sections 9.2 and 9.4 | The new mapping rows and the fragment-ownership limit | Architect |
 | `docs/model.md` section The cuBLAS seam | The table gains the dispatch row | Architect |
-| `docs/baselines.json` | One row per measured shape | Architect |
-| `docs/testing.md` | The emulated GEMM leg joins the S0 suite list | Architect |
-| `backends/cuda/gemm/README.md` | New: the schedule, the gates, the numbers | `agent/gemm` |
+| `docs/baselines.json` | One row per measured shape. **Landed**: the `gemm_bf16` entry holds the 28 rows | Architect |
+| `docs/testing.md` | The emulated GEMM leg joins the S0 suite list. **Still open**: it runs under `tools/nanochat simulate --suite gemm` and in the default `test` loop through `//tools/cuda_sim/emu:gemm_emu_test` | Architect |
+| `backends/cuda/gemm/README.md` | New: the schedule, the gates, the numbers. **Landed** | `agent/gemm` |
 | `backends/cuda/kernels/README.md` | The fragment-ownership rule | The kernels owner |
-| `AGENTS.md` section 1 | The ownership row for `backends/cuda/gemm/**` and `backends/cuda/gemm.cu` (F5) | Architect |
+| `AGENTS.md` section 1 | The ownership row for `backends/cuda/gemm/**` and `backends/cuda/gemm.cu` (F5). **Landed** | Architect |
 | `BUILD.bazel` root | One label, `//backends/cuda/gemm:all` | Build agent |
+| `tools/modal/app.py` | `check_gemm_h100` and `bench_gemm_h100`, and the two GEMM targets in the image build. **Landed**, because D1's hosted card is where B2, B4, and B5 run | Python surface |
 
 ## B.12 Order of work
 
@@ -632,4 +686,5 @@ B0 runs beside A1 and needs no device.
 ```
 
 A1 unblocks B1. A4 unblocks the off-device half of B2. B3 needs D1, because it
-times a card. B4 decides whether B5 ships at all.
+times a card. B4 decides whether B5 ships at all, and it decided against: the
+whole chain landed, and the promotion gate did not pass.
