@@ -367,9 +367,12 @@ bool TryGemmTile(const GemmParams& params, const ComputeType* a,
   const bool fp32_c = c_type == CUDA_R_32F;
   if (!fp32_c && c_type != kDataType) return false;
   const ResolvedGemm gemm = ResolveGemm(params, fp32_c);
-  if (!GemmTileSelected(gemm, GemmTileModeFromEnv())) return false;
-  return fp32_c ? LaunchGemmTileToFp32(params, a, b, static_cast<float*>(c))
-                : LaunchGemmTile(params, a, b, static_cast<ComputeType*>(c));
+  const int schedule = GemmTileScheduleFor(gemm, GemmTileModeFromEnv());
+  if (schedule < 0) return false;
+  return fp32_c ? LaunchGemmTileToFp32(params, a, b, static_cast<float*>(c),
+                                       schedule)
+                : LaunchGemmTile(params, a, b, static_cast<ComputeType*>(c),
+                                 schedule);
 }
 
 #endif

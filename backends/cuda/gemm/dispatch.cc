@@ -15,6 +15,7 @@
 #include <utility>
 #include <vector>
 
+#include "backends/cuda/gemm/gemm_plan.h"
 #include "backends/cuda/kernels/muon_gemm_shape.h"
 
 namespace nanochat {
@@ -42,6 +43,7 @@ constexpr PolarGroup kPolarGroups[] = {
 struct Row {
   std::string name;
   ResolvedGemm gemm;
+  int schedule = gemm_tile::kDefaultSchedule;
   bool enabled = false;
 };
 
@@ -108,14 +110,41 @@ GemmTileMode GemmTileModeFromEnv() {
   return GemmTileMode::kAuto;
 }
 
-bool GemmTileSelected(const ResolvedGemm& gemm, GemmTileMode mode) {
-  if (!IsTileCallable(gemm)) return false;
-  if (mode == GemmTileMode::kCublas) return false;
-  if (mode == GemmTileMode::kHand) return true;
-  for (const Row& row : Rows()) {
-    if (row.enabled && SameShape(row.gemm, gemm)) return true;
+int GemmScheduleCount() { return gemm_tile::kScheduleCount; }
+
+const char* GemmScheduleName(int index) {
+  if (index < 0 || index >= GemmScheduleCount()) return "";
+  return gemm_tile::kScheduleNames[index];
+}
+
+int GemmScheduleIndexFromEnv() {
+  const char* value = std::getenv("NANOCHAT_GEMM_SCHEDULE");
+  if (value == nullptr) return -1;
+  for (int index = 0; index < GemmScheduleCount(); ++index) {
+    if (std::string(value) == GemmScheduleName(index)) return index;
   }
-  return false;
+  return -1;
+}
+
+int GemmTileScheduleFor(const ResolvedGemm& gemm, GemmTileMode mode) {
+  if (!IsTileCallable(gemm)) return -1;
+  if (mode == GemmTileMode::kCublas) return -1;
+  // The environment overrides the row's schedule, so a measurement can sweep
+  // one shape over the whole list.
+  const int forced = GemmScheduleIndexFromEnv();
+  if (mode == GemmTileMode::kHand) {
+    return forced >= 0 ? forced : gemm_tile::kDefaultSchedule;
+  }
+  for (const Row& row : Rows()) {
+    if (row.enabled && SameShape(row.gemm, gemm)) {
+      return forced >= 0 ? forced : row.schedule;
+    }
+  }
+  return -1;
+}
+
+bool GemmTileSelected(const ResolvedGemm& gemm, GemmTileMode mode) {
+  return GemmTileScheduleFor(gemm, mode) >= 0;
 }
 
 int GemmTileShapeCount() { return static_cast<int>(Rows().size()); }
@@ -129,6 +158,12 @@ const ResolvedGemm& GemmTileShapeGemm(int index) {
   static const ResolvedGemm kEmpty;
   if (index < 0 || index >= GemmTileShapeCount()) return kEmpty;
   return Rows()[static_cast<std::size_t>(index)].gemm;
+}
+
+int GemmTileShapeSchedule(int index) {
+  if (index < 0 || index >= GemmTileShapeCount())
+    return gemm_tile::kDefaultSchedule;
+  return Rows()[static_cast<std::size_t>(index)].schedule;
 }
 
 bool GemmTileShapeEnabled(int index) {

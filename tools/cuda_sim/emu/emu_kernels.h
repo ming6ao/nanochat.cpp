@@ -21,10 +21,13 @@ namespace kernels {
 // exists only in a bf16 or fp8 build, because the tile's operands are bf16 and
 // an fp32 build keeps cuBLAS.
 #if defined(NANOCHAT_PRECISION) && (NANOCHAT_PRECISION != 0)
-bool EmuLaunchGemmTile(const GemmParams& params, const ComputeType* a,
-                       const ComputeType* b, ComputeType* c);
-bool EmuLaunchGemmTileToFp32(const GemmParams& params, const ComputeType* a,
-                             const ComputeType* b, float* c);
+bool EmuLaunchGemmTile(
+    const GemmParams& params, const ComputeType* a, const ComputeType* b,
+    ComputeType* c,
+    int schedule = nanochat::kernels::gemm_tile::kDefaultSchedule);
+bool EmuLaunchGemmTileToFp32(
+    const GemmParams& params, const ComputeType* a, const ComputeType* b,
+    float* c, int schedule = nanochat::kernels::gemm_tile::kDefaultSchedule);
 #endif
 
 void EmuRmsNormForward(const RmsNormParams& params, const ComputeType* x,

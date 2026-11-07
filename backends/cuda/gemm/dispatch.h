@@ -12,6 +12,9 @@
 //
 // `GemmTileMode` is the measurement switch. A process reads it from
 // `NANOCHAT_GEMM_LIB`, and a gate passes it in directly.
+//
+// `NANOCHAT_GEMM_SCHEDULE` names one schedule of `gemm_plan.h` and overrides
+// the row's own, which is how a card run sweeps one shape over the sweep.
 
 #include <string>
 
@@ -37,8 +40,19 @@ const char* GemmTileModeName(GemmTileMode mode);
 // else, including an unset variable.
 GemmTileMode GemmTileModeFromEnv();
 
-// True when this call should run on the tile.
+// The schedule this call takes, or -1 when cuBLAS serves it.
+int GemmTileScheduleFor(const ResolvedGemm& gemm, GemmTileMode mode);
+
+// True when `GemmTileScheduleFor` names a schedule.
 bool GemmTileSelected(const ResolvedGemm& gemm, GemmTileMode mode);
+
+// The sweep of `gemm_plan.h`, by name.
+int GemmScheduleCount();
+const char* GemmScheduleName(int index);
+
+// The index `NANOCHAT_GEMM_SCHEDULE` names, or -1 when the variable is unset,
+// empty, or names no schedule.
+int GemmScheduleIndexFromEnv();
 
 // The rows of the closed list, in table order. One row per shape, each with the
 // name the benchmark reports and the key it matches.
@@ -46,6 +60,7 @@ int GemmTileShapeCount();
 const char* GemmTileShapeName(int index);
 const ResolvedGemm& GemmTileShapeGemm(int index);
 bool GemmTileShapeEnabled(int index);
+int GemmTileShapeSchedule(int index);
 
 // Turns one row on or off. The shipped table is inert, so a campaign flips a
 // bit here after a measurement and a gate flips one to prove the path.

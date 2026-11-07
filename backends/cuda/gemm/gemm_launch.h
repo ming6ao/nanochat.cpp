@@ -16,6 +16,7 @@
 
 #if defined(NANOCHAT_PRECISION) && (NANOCHAT_PRECISION != 0)
 
+#include "backends/cuda/gemm/gemm_plan.h"
 #include "nanochat/kernels.h"
 #include "nanochat/tensor.h"
 
@@ -23,13 +24,17 @@ namespace nanochat {
 namespace kernels {
 
 // `C = alpha * op(A) * op(B) + beta * C`, with C stored as `ComputeType`.
+// `schedule` indexes the sweep of `gemm_plan.h`; the default is the base
+// schedule, and an index outside the sweep takes the default.
 bool LaunchGemmTile(const GemmParams& params, const ComputeType* a,
-                    const ComputeType* b, ComputeType* c);
+                    const ComputeType* b, ComputeType* c,
+                    int schedule = gemm_tile::kDefaultSchedule);
 
 // The same call with C stored as fp32, which is the weight-gradient form. The
 // accumulator is fp32 in both, so this changes the store and nothing else.
 bool LaunchGemmTileToFp32(const GemmParams& params, const ComputeType* a,
-                          const ComputeType* b, float* c);
+                          const ComputeType* b, float* c,
+                          int schedule = gemm_tile::kDefaultSchedule);
 
 }  // namespace kernels
 }  // namespace nanochat

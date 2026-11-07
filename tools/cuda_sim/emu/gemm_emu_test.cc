@@ -23,6 +23,7 @@
 #include <vector>
 
 #include "backends/cuda/gemm/gemm_launch.h"
+#include "backends/cuda/gemm/gemm_plan.h"
 #include "nanochat/kernels.h"
 #include "nanochat/tensor.h"
 #include "tools/cuda_sim/emu/emu_kernels.h"
@@ -67,7 +68,8 @@ std::vector<ComputeType> SeedC(int m, int n, int batch) {
 // One case: run the tile, then compare every element with a double reference.
 template <typename COut>
 void RunCase(const char* name, int m, int n, int k, int batch, bool ta, bool tb,
-             float alpha, float beta) {
+             float alpha, float beta,
+             int schedule = nanochat::kernels::gemm_tile::kDefaultSchedule) {
   const int rows_a = ta ? k : m;
   const int rows_b = tb ? n : k;
   const int lda = ta ? m : k;
@@ -105,9 +107,10 @@ void RunCase(const char* name, int m, int n, int k, int batch, bool ta, bool tb,
   bool took = false;
   if constexpr (std::is_same_v<COut, float>) {
     took = EmuLaunchGemmTileToFp32(params, host_a.data(), host_b.data(),
-                                   got.data());
+                                   got.data(), schedule);
   } else {
-    took = EmuLaunchGemmTile(params, host_a.data(), host_b.data(), got.data());
+    took = EmuLaunchGemmTile(params, host_a.data(), host_b.data(), got.data(),
+                             schedule);
   }
   if (!took) {
     Fail("the tile took the call", name);

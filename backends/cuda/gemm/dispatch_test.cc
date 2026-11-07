@@ -25,14 +25,19 @@
 namespace {
 
 using nanochat::GemmParams;
+using nanochat::kernels::GemmScheduleCount;
+using nanochat::kernels::GemmScheduleIndexFromEnv;
+using nanochat::kernels::GemmScheduleName;
 using nanochat::kernels::GemmTileMode;
 using nanochat::kernels::GemmTileModeFromEnv;
 using nanochat::kernels::GemmTileModeName;
+using nanochat::kernels::GemmTileScheduleFor;
 using nanochat::kernels::GemmTileSelected;
 using nanochat::kernels::GemmTileShapeCount;
 using nanochat::kernels::GemmTileShapeEnabled;
 using nanochat::kernels::GemmTileShapeGemm;
 using nanochat::kernels::GemmTileShapeName;
+using nanochat::kernels::GemmTileShapeSchedule;
 using nanochat::kernels::IsTileCallable;
 using nanochat::kernels::ResolvedGemm;
 using nanochat::kernels::ResolveGemm;
@@ -179,6 +184,55 @@ void CheckMode() {
          "the cublas mode names itself", kCase);
 }
 
+// The sweep is a closed list of its own, and every row names one of it.
+void CheckSchedules() {
+  const char* kCase = "schedules";
+  Expect(GemmScheduleCount() >= 2, "the sweep holds more than one schedule",
+         kCase);
+
+  std::set<std::string> names;
+  for (int i = 0; i < GemmScheduleCount(); ++i) {
+    const std::string name = GemmScheduleName(i);
+    Expect(!name.empty(), "every schedule has a name", kCase);
+    Expect(names.insert(name).second, "every schedule name is unique: " + name,
+           kCase);
+  }
+  Expect(std::string(GemmScheduleName(-1)).empty() &&
+             std::string(GemmScheduleName(GemmScheduleCount())).empty(),
+         "an index outside the sweep names nothing", kCase);
+
+  for (int i = 0; i < GemmTileShapeCount(); ++i) {
+    const int schedule = GemmTileShapeSchedule(i);
+    Expect(schedule >= 0 && schedule < GemmScheduleCount(),
+           "every row names a schedule in the sweep: " +
+               std::string(GemmTileShapeName(i)),
+           kCase);
+  }
+}
+
+void CheckScheduleFromEnv() {
+  const char* kCase = "schedule from the environment";
+  unsetenv("NANOCHAT_GEMM_SCHEDULE");
+  Expect(GemmScheduleIndexFromEnv() == -1, "unset names no schedule", kCase);
+  setenv("NANOCHAT_GEMM_SCHEDULE", GemmScheduleName(1), 1);
+  Expect(GemmScheduleIndexFromEnv() == 1, "a name selects its index", kCase);
+  setenv("NANOCHAT_GEMM_SCHEDULE", "no such schedule", 1);
+  Expect(GemmScheduleIndexFromEnv() == -1, "an unknown name names nothing",
+         kCase);
+
+  // The override reaches the verdict, which is how a card run sweeps a row.
+  const int row = 2;
+  SetGemmTileShapeEnabled(row, true);
+  setenv("NANOCHAT_GEMM_SCHEDULE", GemmScheduleName(2), 1);
+  Expect(GemmTileScheduleFor(GemmTileShapeGemm(row), GemmTileMode::kAuto) == 2,
+         "the environment overrides the row's schedule", kCase);
+  unsetenv("NANOCHAT_GEMM_SCHEDULE");
+  Expect(GemmTileScheduleFor(GemmTileShapeGemm(row), GemmTileMode::kAuto) ==
+             GemmTileShapeSchedule(row),
+         "without the variable the row owns its schedule", kCase);
+  SetGemmTileShapeEnabled(row, false);
+}
+
 void CheckModeFromEnv() {
   const char* kCase = "mode from the environment";
   unsetenv("NANOCHAT_GEMM_LIB");
@@ -268,6 +322,8 @@ int main() {
   CheckSelection();
   CheckMode();
   CheckModeFromEnv();
+  CheckSchedules();
+  CheckScheduleFromEnv();
   CheckResolve();
 
   if (g_failures != 0) {

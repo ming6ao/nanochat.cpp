@@ -40,6 +40,8 @@ using nanochat::GradientType;
 using nanochat::kernels::Alloc;
 using nanochat::kernels::Free;
 using nanochat::kernels::Gemm;
+using nanochat::kernels::GemmScheduleCount;
+using nanochat::kernels::GemmScheduleName;
 using nanochat::kernels::Memcpy;
 using nanochat::kernels::ResolvedGemm;
 using nanochat::kernels::Synchronize;
@@ -54,6 +56,7 @@ struct Options {
   BenchOptions bench;
   std::string row;            // empty runs every row
   std::string hand = "both";  // "hand", "cublas", or "both"
+  std::string schedule;       // empty runs the row's own; "all" runs the sweep
 };
 
 #if defined(NANOCHAT_PRECISION) && (NANOCHAT_PRECISION != 0)
@@ -141,8 +144,9 @@ double TimeGemm(const ResolvedGemm& gemm, const Buffers& buffers,
 
 void Usage(const char* program) {
   std::fprintf(stderr,
-               "usage: %s [--row NAME] [--hand|cublas|both] [--iters N] "
-               "[--rounds N] [--warmup N] [--json] [--out PATH]\n",
+               "usage: %s [--row NAME] [--hand|cublas|both] "
+               "[--schedule NAME|all] [--iters N] [--rounds N] [--warmup N] "
+               "[--json] [--out PATH]\n",
                program);
 }
 
@@ -169,6 +173,8 @@ int main(int argc, char** argv) {
       options.hand = "cublas";
     } else if (arg == "--both") {
       options.hand = "both";
+    } else if (arg == "--schedule" && i + 1 < argc) {
+      options.schedule = argv[++i];
     } else if (arg == "--iters") {
       next_int(&options.bench.iters);
     } else if (arg == "--rounds") {
@@ -223,21 +229,33 @@ int main(int argc, char** argv) {
         std::to_string(gemm.k) + " batch " + std::to_string(gemm.batch_count) +
         (gemm.fp32_c ? " fp32 out" : "");
 
+    // cuBLAS does not depend on the schedule, so one timing serves them all.
     double cublas_ms = 0.0;
-    double hand_ms = 0.0;
     if (run_cublas) {
+      unsetenv("NANOCHAT_GEMM_SCHEDULE");
       cublas_ms = TimeGemm(gemm, buffers, "cublas", options.bench);
       report.Add("gemm:" + name + ":cublas", shape, cublas_ms,
                  1e-9 * flops / (cublas_ms * 1e-3));
     }
     if (run_hand) {
-      hand_ms = TimeGemm(gemm, buffers, "hand", options.bench);
-      report.Add("gemm:" + name + ":hand", shape, hand_ms,
-                 1e-9 * flops / (hand_ms * 1e-3));
-    }
-    if (run_hand && run_cublas && cublas_ms > 0.0 && hand_ms > 0.0) {
-      std::fprintf(stderr, "gemm benchmark: %-22s fraction of cuBLAS %.3f\n",
-                   name.c_str(), cublas_ms / hand_ms);
+      for (int schedule = 0; schedule < GemmScheduleCount(); ++schedule) {
+        const char* schedule_name = GemmScheduleName(schedule);
+        if (options.schedule != "all" && !options.schedule.empty() &&
+            options.schedule != schedule_name) {
+          continue;
+        }
+        setenv("NANOCHAT_GEMM_SCHEDULE", schedule_name, 1);
+        const double hand_ms = TimeGemm(gemm, buffers, "hand", options.bench);
+        const std::string label =
+            std::string("gemm:") + name + ":" + schedule_name + ":hand";
+        report.Add(label, shape, hand_ms, 1e-9 * flops / (hand_ms * 1e-3));
+        if (run_cublas && cublas_ms > 0.0 && hand_ms > 0.0) {
+          std::fprintf(stderr,
+                       "gemm benchmark: %-22s %-10s fraction of cuBLAS %.3f\n",
+                       name.c_str(), schedule_name, cublas_ms / hand_ms);
+        }
+      }
+      unsetenv("NANOCHAT_GEMM_SCHEDULE");
     }
 
     Synchronize();

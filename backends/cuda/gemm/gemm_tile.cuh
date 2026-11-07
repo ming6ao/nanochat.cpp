@@ -1,30 +1,45 @@
 #ifndef NANOCHAT_BACKENDS_CUDA_GEMM_GEMM_TILE_CUH_
 #define NANOCHAT_BACKENDS_CUDA_GEMM_GEMM_TILE_CUH_
 
-// The block tile of the hand-written tensor-core GEMM
+// The staged operand tile of the hand tensor-core GEMM
 // (docs/kernels.md Part 3, docs/tensor-core-gemm-plan.md Part B).
 //
-//   grid    ceil(n / kTileN) by ceil(m / kTileM) by batch
-//   block   kThreads threads, kWarpsM by kWarpsN warps
-//   warp    kWarpM by kWarpN of C, kFragsM by kFragsN fragments
+// A block walks the k extent in slices of `Plan::kTileK`. Each slice is staged
+// into shared memory in the layout `wmma` reads, and the staging is two
+// buffered: slice `n + 1` is copied while slice `n` is used, so the global
+// latency of one slice hides behind the arithmetic of the one before it.
 //
-// One shared window serves both uses: the operand stage during the k-loop, and
-// the fp32 epilogue scratch after it. The scratch is the larger, so one buffer
-// holds either.
+// A staged row is `kTileK` wide for A and `kTileN` wide for B, in the layout
+// the fragments read, and the pad after it only breaks the bank the row stride
+// would repeat. The pad is never read.
 //
-// The copy path is a synchronous gather. The asynchronous 16-byte path of
-// `__pipeline_memcpy_async` lands with the measurement in section B.4; this
-// layout is what it must preserve.
+// Two copy paths, and the call decides which:
+//
+//   * an operand whose k index steps by one element is contiguous, so a staged
+//     row moves in sixteen-byte chunks through `__pipeline_memcpy_async`;
+//   * any other operand moves one element at a time.
+//
+// A chunk also needs both ends aligned to sixteen bytes. A row whose global end
+// is not falls back to the element path, which is what the 5 by 12 Muon group
+// takes and what a training step with a multiple-of-eight hidden width does
+// not.
+//
+// Both paths zero the part of a row outside the operand, so a k tail and a
+// ragged edge never add a product.
 //
 // A bf16 `wmma` needs a tensor core with bf16, so this header exists only in a
 // bf16 or fp8 build. The fp32 build keeps cuBLAS.
 
 #if defined(NANOCHAT_PRECISION) && (NANOCHAT_PRECISION != 0)
 
+#include <cstdint>
+
 #include <cuda_bf16.h>
+#include <cuda_pipeline.h>
 #include <cuda_runtime.h>
 #include <mma.h>
 
+#include "backends/cuda/gemm/gemm_plan.h"
 #include "backends/cuda/gemm/gemm_shape.h"
 #include "nanochat/kernels.h"
 #include "nanochat/tensor.h"
@@ -39,77 +54,132 @@ namespace gemm_tile {
 // through it. The emulator maps the two to one type.
 using TileElement = __nv_bfloat16;
 
-// Rows and columns of C one block owns, and the depth of one k slice.
-constexpr int kTileM = 128;
-constexpr int kTileN = 64;
-constexpr int kTileK = 32;
-constexpr int kThreads = 128;
-constexpr int kWarpsM = 2;
-constexpr int kWarpsN = kThreads / 32 / kWarpsM;
-constexpr int kWarpM = kTileM / kWarpsM;
-constexpr int kWarpN = kTileN / kWarpsN;
-constexpr int kFragsM = kWarpM / 16;
-constexpr int kFragsN = kWarpN / 16;
-
-// Pad on a staged row, for the bank the row stride would otherwise repeat.
-constexpr int kPad = 8;
-constexpr int kLeadA = kTileK + kPad;
-constexpr int kLeadB = kTileN + kPad;
-
-constexpr int kStageAElements = kTileM * kLeadA;
-constexpr int kStageBElements = kTileK * kLeadB;
-constexpr int kStageElements = kStageAElements + kStageBElements;
-// The epilogue scratch: one float per element of C, held as two tile elements.
-constexpr int kScratchElements = kTileM * kTileN * 2;
-constexpr int kSmemElements =
-    kStageElements > kScratchElements ? kStageElements : kScratchElements;
-
+//: Elements of one staged chunk, which is sixteen bytes.
+constexpr int kChunk = 8;
+//: A micro-tile edge, the only shape `wmma` 16 by 16 by 16 covers here.
 constexpr int kMicro = 16;
 
-static_assert(sizeof(TileElement) == sizeof(ComputeType),
-              "the operand memory is viewed as the vendor bf16, not converted");
-static_assert(kTileM % (kWarpsM * kMicro) == 0 &&
-                  kTileN % (kWarpsN * kMicro) == 0,
-              "the warp grid must cover the tile in whole fragments");
-static_assert(kTileK % kMicro == 0, "one k slice must split into whole tiles");
-static_assert(kStageElements <= kScratchElements,
-              "one shared window holds either use, so the scratch dominates");
+// --- The asynchronous copy -------------------------------------------------
 
-// Stages one A slice: `stage[i * kLeadA + kk] = op(A)[m0 + i][k0 + kk]`, and
-// zero outside the operand. A plain A is `base = a + m0 * lda`,
-// `stride_i = lda`, `stride_k = 1`; a transposed A is `base = a + m0`,
-// `stride_i = 1`, `stride_k = lda`.
-__device__ __forceinline__ void StageASlice(const TileElement* base,
-                                            int stride_i, int stride_k, int m0,
-                                            int m, int k0, int k,
-                                            TileElement* stage) {
-  const int stride = static_cast<int>(blockDim.x);
-  for (int index = static_cast<int>(threadIdx.x); index < kTileM * kTileK;
-       index += stride) {
-    const int i = index / kTileK;
-    const int kk = index - i * kTileK;
-    const bool inside = (m0 + i) < m && (k0 + kk) < k;
-    stage[i * kLeadA + kk] = inside ? base[i * stride_i + (k0 + kk) * stride_k]
-                                    : __float2bfloat16(0.0f);
+// The pipeline needs `sm_80`. Above it the copy is asynchronous and the wait
+// orders it; below it, and on the emulator, the copy completes at the call and
+// the two ordering calls do nothing. One header covers both, so the kernel has
+// no second body for Turing (docs/tensor-core-gemm-plan.md section A.3).
+#if !defined(__CUDA_ARCH__) || (__CUDA_ARCH__ >= 800)
+__device__ __forceinline__ void CopyChunk(TileElement* dst,
+                                          const TileElement* src, int bytes) {
+  __pipeline_memcpy_async(dst, src, static_cast<std::size_t>(bytes));
+}
+
+__device__ __forceinline__ void CommitStage() { __pipeline_commit(); }
+
+// Waits until at most `in_flight` staged groups are still moving.
+__device__ __forceinline__ void WaitStage(int in_flight) {
+  __pipeline_wait_prior(static_cast<std::size_t>(in_flight));
+}
+#else
+__device__ __forceinline__ void CopyChunk(TileElement* dst,
+                                          const TileElement* src, int bytes) {
+  const int elements = bytes / static_cast<int>(sizeof(TileElement));
+  for (int i = 0; i < elements; ++i) dst[i] = src[i];
+}
+
+__device__ __forceinline__ void CommitStage() {}
+
+__device__ __forceinline__ void WaitStage(int /*in_flight*/) {}
+#endif
+
+// True when a chunk of `count` elements at `src` can move as one asynchronous
+// sixteen-byte copy.
+__device__ __forceinline__ bool ChunkAligned(const TileElement* src,
+                                             int count) {
+  return count == kChunk && (reinterpret_cast<std::uintptr_t>(src) % 16u) == 0u;
+}
+
+// --- The staged slice ------------------------------------------------------
+
+// One staged row of A, or the zero that stands in for it. `contiguous` states
+// that `stride_k` is one; the branch is uniform across the block, because it
+// reads only the call's flags, so the two ordering calls stay uniform too.
+template <typename PlanT>
+__device__ __forceinline__ void StageARow(const TileElement* base, int stride_i,
+                                          int stride_k, bool contiguous, int m0,
+                                          int m, int k0, int k, int i,
+                                          TileElement* row) {
+  if (!contiguous || (m0 + i) >= m) {
+    const bool in_range = contiguous ? false : ((m0 + i) < m);
+    for (int kk = 0; kk < PlanT::kTileK; ++kk) {
+      row[kk] = (in_range && (k0 + kk) < k)
+                    ? base[i * stride_i + (k0 + kk) * stride_k]
+                    : __float2bfloat16(0.0f);
+    }
+    return;
+  }
+  const int remaining = k - k0;
+  for (int kk = 0; kk < PlanT::kTileK; kk += kChunk) {
+    const int left = remaining - kk;
+    const int count = left >= kChunk ? kChunk : (left > 0 ? left : 0);
+    const TileElement* src = base + i * stride_i + k0 + kk;
+    if (ChunkAligned(src, count)) {
+      CopyChunk(row + kk, src, kChunk * static_cast<int>(sizeof(TileElement)));
+    } else {
+      for (int e = 0; e < kChunk; ++e) {
+        row[kk + e] = (e < count) ? src[e] : __float2bfloat16(0.0f);
+      }
+    }
   }
 }
 
-// Stages one B slice: `stage[kk * kLeadB + j] = op(B)[k0 + kk][n0 + j]`, and
-// zero outside the operand. A plain B is `base = b + n0`, `stride_k = ldb`,
-// `stride_j = 1`; a transposed B is `base = b + n0 * ldb`, `stride_k = 1`,
-// `stride_j = ldb`.
-__device__ __forceinline__ void StageBSlice(const TileElement* base,
-                                            int stride_k, int stride_j, int n0,
-                                            int n, int k0, int k,
-                                            TileElement* stage) {
+// One staged row of B, with the same two paths. A B whose n index steps by one
+// element is the contiguous form.
+template <typename PlanT>
+__device__ __forceinline__ void StageBRow(const TileElement* base, int stride_k,
+                                          int stride_j, bool contiguous, int n0,
+                                          int n, int k0, int k, int kk,
+                                          TileElement* row) {
+  if (!contiguous || (k0 + kk) >= k) {
+    const bool in_range = contiguous ? false : ((k0 + kk) < k);
+    for (int j = 0; j < PlanT::kTileN; ++j) {
+      row[j] = (in_range && (n0 + j) < n)
+                   ? base[(k0 + kk) * stride_k + j * stride_j]
+                   : __float2bfloat16(0.0f);
+    }
+    return;
+  }
+  const int remaining = n - n0;
+  for (int j = 0; j < PlanT::kTileN; j += kChunk) {
+    const int left = remaining - j;
+    const int count = left >= kChunk ? kChunk : (left > 0 ? left : 0);
+    const TileElement* src = base + (k0 + kk) * stride_k + j;
+    if (ChunkAligned(src, count)) {
+      CopyChunk(row + j, src, kChunk * static_cast<int>(sizeof(TileElement)));
+    } else {
+      for (int e = 0; e < kChunk; ++e) {
+        row[j + e] = (e < count) ? src[e] : __float2bfloat16(0.0f);
+      }
+    }
+  }
+}
+
+// Stages one k slice: every A row and every B row of the slice, in whatever
+// copy path the call allows. The thread grid walks the rows and the rows walk
+// the chunks, so both paths cover the slice without a nested loop.
+template <typename PlanT>
+__device__ __forceinline__ void StageSlice(
+    const TileElement* a_base, int a_stride_i, int a_stride_k,
+    const TileElement* b_base, int b_stride_k, int b_stride_j, int m0, int n0,
+    int m, int n, int k0, int k, TileElement* stage_a, TileElement* stage_b) {
   const int stride = static_cast<int>(blockDim.x);
-  for (int index = static_cast<int>(threadIdx.x); index < kTileK * kTileN;
-       index += stride) {
-    const int kk = index / kTileN;
-    const int j = index - kk * kTileN;
-    const bool inside = (n0 + j) < n && (k0 + kk) < k;
-    stage[kk * kLeadB + j] = inside ? base[(k0 + kk) * stride_k + j * stride_j]
-                                    : __float2bfloat16(0.0f);
+  const bool a_contiguous = a_stride_k == 1;
+  const bool b_contiguous = b_stride_j == 1;
+  for (int i = static_cast<int>(threadIdx.x); i < PlanT::kTileM; i += stride) {
+    StageARow<PlanT>(a_base, a_stride_i, a_stride_k, a_contiguous, m0, m, k0, k,
+                     i, stage_a + i * PlanT::kLeadA);
+  }
+  for (int kk = static_cast<int>(threadIdx.x); kk < PlanT::kTileK;
+       kk += stride) {
+    StageBRow<PlanT>(b_base, b_stride_k, b_stride_j, b_contiguous, n0, n, k0, k,
+                     kk, stage_b + kk * PlanT::kLeadB);
   }
 }
 
