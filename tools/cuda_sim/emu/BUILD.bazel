@@ -9,7 +9,7 @@
 #
 # Everything here is CPU-only: it needs no toolkit, no driver, and no GPU.
 
-load("@rules_cc//cc:defs.bzl", "cc_library")
+load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
 load("//:nanochat.bzl", "nanochat_copts", "precision_defines")
 
 package(default_visibility = ["//visibility:public"])
@@ -21,12 +21,18 @@ package(default_visibility = ["//visibility:public"])
 cc_library(
     name = "cuda_headers",
     hdrs = [
+        "cuda_bf16.h",
         "cuda_emu.h",
         "cuda_fp8.h",
+        "cuda_pipeline.h",
         "cuda_runtime.h",
         "emu_kernels.h",
         "emu_prelude.h",
         "math_constants.h",
+        # The warp-level matrix multiply-accumulate interface. A tensor-core
+        # kernel includes `<mma.h>`, and this stub is what the host pass
+        # resolves it to (docs/tensor-core-gemm-plan.md section A.2).
+        "mma.h",
         "//backends/cuda:device.h",
         # `attention.cu` includes the bf16 tile and the dispatch predicates.
         # The tile is device-only, so under the host compiler it is empty and
@@ -34,8 +40,12 @@ cc_library(
         "//backends/cuda/kernels:attention_bf16.cuh",
         "//backends/cuda/kernels:attention_dispatch.h",
         "//backends/cuda/kernels:device_utils.cuh",
+        "//backends/cuda/kernels:mma_ops.cuh",
         "//backends/cuda/kernels:muon_fused.h",
         "//backends/cuda/kernels:rms_norm.h",
+        # The hand GEMM: the block tile and the launcher declaration.
+        "//backends/cuda/gemm:gemm_launch.h",
+        "//backends/cuda/gemm:gemm_tile.cuh",
     ],
 )
 
@@ -97,10 +107,41 @@ genrule(
     cmd = "cp $< $@",
 )
 
+# The engine's host runtime: the execution geometry, the fiber scheduler's entry
+# point and barrier release, the launch counters, and the runtime entry points
+# `backends/cuda/device.h` declares. It has no kernel in it, so a test of the
+# device-language mapping (`mma_emu_test`) links this and not the kernel set.
+# The hand GEMM (docs/tensor-core-gemm-plan.md section A.3). A plain copy: the
+# tile declares its shared window as one static array, so no `extern
+# __shared__` rewrite is needed.
+genrule(
+    name = "gemm_bf16_emulated_source",
+    srcs = ["//backends/cuda/gemm:gemm_bf16.cu"],
+    outs = ["gemm_bf16_emu.cc"],
+    cmd = "cp $< $@",
+)
+
+cc_library(
+    name = "emu_runtime",
+    srcs = ["emu_runtime.cc"],
+    copts = nanochat_copts() + [
+        "-I.",
+        "-Itools/cuda_sim/emu",
+        "-include",
+        "tools/cuda_sim/emu/emu_prelude.h",
+    ],
+    # Local and not transitive: the runtime has no precision of its own, and a
+    # dependent that builds at bf16 must not inherit this build's answer.
+    local_defines = precision_defines(),
+    deps = [
+        ":cuda_headers",
+        "//include/nanochat:nanochat",
+    ],
+)
+
 cc_library(
     name = "emulated_kernels",
     srcs = [
-        "emu_runtime.cc",
         ":attention_emulated_source",
         ":fp8_emulated_source",
         ":muon_fused_emulated_source",
@@ -137,6 +178,94 @@ cc_library(
         # only declared inputs visible, and `-include` needs the prelude to
         # exist at its execroot path).
         ":cuda_headers",
+        # The scheduler and the runtime the launched kernel body runs on.
+        ":emu_runtime",
         "//include/nanochat:nanochat",
     ],
+)
+
+# The acceptance check for the tensor-core vocabulary this package adds
+# (docs/tensor-core-gemm-plan.md section A.1): the four `wmma` calls over the
+# four operand layouts through the block runtime, a ragged leading dimension, an
+# accumulator read back, the bf16 conversions, and the asynchronous copy.
+#
+# A kernel source and this test see the same include line: `-Itools/cuda_sim/emu`
+# puts the stubs first, and `-include emu_prelude.h` supplies the launch
+# replacement. A test that compiled against a different header would prove
+# nothing about a kernel.
+#
+# CPU only, so it carries the `sim` tag and rides the default loop beside
+# `//tests:kernel_emu_test`.
+cc_test(
+    name = "mma_emu_test",
+    srcs = ["mma_test.cc"],
+    copts = nanochat_copts() + [
+        # The repository root, for the quoted includes of the public headers.
+        "-I.",
+        # The stub CUDA headers, which is how `<mma.h>` resolves on the host.
+        "-Itools/cuda_sim/emu",
+        # The launch replacement, before any source, exactly as an emulated
+        # kernel source is compiled.
+        "-include",
+        "tools/cuda_sim/emu/emu_prelude.h",
+    ],
+    defines = precision_defines(),
+    deps = [
+        ":cuda_headers",
+        ":emu_runtime",
+        "//include/nanochat:nanochat",
+    ],
+    size = "small",
+    tags = ["sim"],
+)
+
+# The emulated hand GEMM, built at bf16 by construction
+# (docs/tensor-core-gemm-plan.md sections A.3 and A.4).
+#
+# `local_defines` and not `defines`: this library is the one translation unit of
+# the tree that is bf16 while the workspace may be fp32, and the define must not
+# reach a dependent that has its own answer. The test beside it sets the same
+# one, so the launcher and its caller agree.
+cc_library(
+    name = "emulated_gemm",
+    srcs = [":gemm_bf16_emulated_source"],
+    hdrs = ["//backends/cuda/gemm:gemm_launch.h"],
+    copts = nanochat_copts() + [
+        "-I.",
+        "-Itools/cuda_sim/emu",
+        "-include",
+        "tools/cuda_sim/emu/emu_prelude.h",
+        "-Wno-unknown-pragmas",
+    ],
+    local_defines = ["NANOCHAT_PRECISION=1"],
+    deps = [
+        ":cuda_headers",
+        ":emu_runtime",
+        "//include/nanochat:nanochat",
+    ],
+)
+
+# The hand GEMM against a host reference (docs/tensor-core-gemm-plan.md
+# sections A.4 and A.6): the four operand layouts, a ragged shape with a k tail,
+# a batch of two, the fp32 weight-gradient store, and the refusal.
+#
+# The workspace may build at fp32, so this target and the library it drives both
+# state bf16 for themselves. The kernel is the real one: `gemm_bf16.cu` is
+# copied and compiled by the host compiler, and nothing in the kernel body
+# changes between this build and the device build.
+cc_test(
+    name = "gemm_emu_test",
+    srcs = ["gemm_emu_test.cc"],
+    copts = nanochat_copts() + [
+        "-I.",
+        "-Itools/cuda_sim/emu",
+    ],
+    local_defines = ["NANOCHAT_PRECISION=1"],
+    deps = [
+        ":cuda_headers",
+        ":emulated_gemm",
+        "//include/nanochat:nanochat",
+    ],
+    size = "small",
+    tags = ["sim"],
 )

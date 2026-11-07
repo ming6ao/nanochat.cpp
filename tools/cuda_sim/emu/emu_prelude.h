@@ -40,6 +40,13 @@
 // called with (`MuonFusedWorkspaceElements`, `MuonFusedScratchFloats`,
 // `MuonFusedPartialDoubles`) keep their names: no other backend defines them.
 #define MuonFusedUpdate EmuMuonFusedUpdate
+// The hand GEMM's launcher (`backends/cuda/gemm/gemm_bf16.cu`). The seam keeps
+// its one `Gemm` entry point, and this launcher is backend-internal, so it is
+// renamed like the seam entries: a simulator test calls `EmuLaunchGemmTile` and
+// compares it with a host reference in the same binary
+// (docs/tensor-core-gemm-plan.md section A.3).
+#define LaunchGemmTile EmuLaunchGemmTile
+#define LaunchGemmTileToFp32 EmuLaunchGemmTileToFp32
 
 namespace nanochat {
 namespace cuda_backend {

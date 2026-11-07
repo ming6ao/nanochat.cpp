@@ -1,0 +1,48 @@
+# backends/cuda/gemm/ -- the hand-written tensor-core GEMM
+# (docs/kernels.md Part 3, docs/tensor-core-gemm-plan.md Part B).
+#
+# One bf16 tile for now. The fp8 kernel is a separate campaign
+# (docs/tensor-core-gemm-plan.md decision D3); its micro-tile wrapper already
+# exists in //backends/cuda/kernels:mma_ops.
+#
+# The seam entry point is not here: `backends/cuda/gemm.cu` keeps `Gemm` and
+# `GemmWgrad` and owns the shape table that decides when this tile takes a call.
+# This package supplies the tile and its launcher, and the launcher answers
+# false when it cannot serve a call, which keeps cuBLAS as the fallback.
+
+load("//:nanochat.bzl", "cuda_library", "nanochat_cuda_copts", "precision_defines")
+
+package(default_visibility = ["//visibility:public"])
+
+# The kernel, the block tile, and the launcher. `alwayslink` keeps the two
+# launcher symbols reachable from the seam entry, which is their only caller.
+#
+# The translation unit is empty in an fp32 build: the bf16 tile needs a tensor
+# core with bf16, so `gemm_tile.cuh` and the kernel are compiled only when
+# `NANOCHAT_PRECISION` is bf16 or fp8, and the fp32 build keeps cuBLAS
+# (docs/tensor-core-gemm-plan.md section B.9).
+cuda_library(
+    name = "gemm_bf16",
+    srcs = ["gemm_bf16.cu"],
+    hdrs = [
+        "gemm_launch.h",
+        "gemm_tile.cuh",
+    ],
+    copts = nanochat_cuda_copts(),
+    defines = precision_defines(),
+    deps = [
+        "//backends/cuda:device",
+        "//include/nanochat:nanochat",
+    ],
+    alwayslink = True,
+)
+
+# Aggregation point consumed by `//:all_tests`. The GPU correctness and
+# benchmark targets land here as sections B2, B3, and B4 of
+# docs/tensor-core-gemm-plan.md add them. The emulated check of this same
+# kernel is //tools/cuda_sim/emu:gemm_emu_test, because the host compiler
+# builds it at bf16 by construction.
+test_suite(
+    name = "all",
+    tests = [],
+)

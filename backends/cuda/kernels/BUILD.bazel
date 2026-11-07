@@ -25,6 +25,17 @@ cc_library(
     deps = ["//include/nanochat:nanochat"],
 )
 
+# The fp8 matrix multiply-accumulate wrapper (docs/tensor-core-gemm-plan.md
+# section A.4). Header-only, and the same shape as `device_utils`: it carries
+# both arms -- the device instruction and the scalar reference -- because a
+# production source may not include `tools/**`, and the emulator needs the
+# scalar arm to be the file the host compiler sees.
+cc_library(
+    name = "mma_ops",
+    hdrs = ["mma_ops.cuh"],
+    deps = ["//include/nanochat:nanochat"],
+)
+
 # RmsNorm: the frozen forward/backward pair plus the backend-internal fused
 # residual variant (rms_norm.h).
 cuda_library(
