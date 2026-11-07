@@ -150,8 +150,8 @@ void TestJoinKey() {
   ExpectTrue(nanochat::FindDeviceProfile("h100") ==
                  nanochat::FindDeviceProfile("H100"),
              "H100 and h100 agree");
-  ExpectTrue(nanochat::FindDeviceProfile("GTX 1080 Ti") ==
-                 nanochat::FindDeviceProfile("gtx1080ti"),
+  ExpectTrue(nanochat::FindDeviceProfile("NVIDIA T4") ==
+                 nanochat::FindDeviceProfile("t4"),
              "a vendor spelling with spaces resolves");
   ExpectTrue(nanochat::FindDeviceProfile("no such device") == nullptr,
              "an unknown name has no profile");
@@ -234,7 +234,7 @@ void TestMfuConsistency() {
     }
     seen.push_back(profile->name);
   }
-  ExpectTrue(seen.size() >= 5, "the table covers the planned targets");
+  ExpectTrue(seen.size() >= 2, "the table covers the declared cards");
 }
 
 void TestLimitTable() {
@@ -249,19 +249,6 @@ void TestLimitTable() {
                "h100 bandwidth");
     ExpectNear(nanochat::PeakFlopsForCompute("h100", ComputePrecision::kFp8),
                1979e12, 1.0, "h100 explicit fp8 peak");
-  }
-  const DeviceProfile* h200 = nanochat::FindDeviceProfile("h200");
-  ExpectTrue(h200 != nullptr, "h200 is in the table");
-  if (h200 != nullptr) {
-    ExpectNear(h200->peak_bandwidth_bytes_per_second, 4.8e12, 1.0,
-               "h200 bandwidth");
-  }
-  const DeviceProfile* a100 = nanochat::FindDeviceProfile("a100");
-  ExpectTrue(a100 != nullptr, "a100 is in the table");
-  if (a100 != nullptr) {
-    ExpectNear(a100->peak_fp8_flops, 0.0, 1e-9, "a100 has no fp8 path");
-    ExpectNear(a100->peak_bandwidth_bytes_per_second, 2.0e12, 1.0,
-               "a100 bandwidth");
   }
   const DeviceProfile* t4 = nanochat::FindDeviceProfile("t4");
   ExpectTrue(t4 != nullptr, "t4 is in the table");
@@ -308,15 +295,17 @@ void TestCapsProjection() {
   ExpectTrue(caps.Supports(nanochat::DType::kFp32), "h100 supports fp32");
   ExpectTrue(caps.Supports(nanochat::DType::kBf16), "h100 supports bf16");
 
-  const DeviceProfile* pascal = nanochat::FindDeviceProfile("gtx1080ti");
-  ExpectTrue(pascal != nullptr, "gtx1080ti is in the table");
-  if (pascal == nullptr) return;
-  const Caps pascal_caps = nanochat::CapsFromProfile(*pascal);
-  ExpectTrue(!pascal_caps.has_tensor_cores, "Pascal has no tensor cores");
-  ExpectTrue(pascal_caps.compute_major == 6 && pascal_caps.compute_minor == 1,
-             "the host is compute capability 6.1");
-  ExpectTrue(!pascal_caps.Supports(nanochat::DType::kBf16),
-             "Pascal does not support bf16");
+  const DeviceProfile* t4 = nanochat::FindDeviceProfile("t4");
+  ExpectTrue(t4 != nullptr, "t4 is in the table");
+  if (t4 == nullptr) return;
+  const Caps t4_caps = nanochat::CapsFromProfile(*t4);
+  ExpectTrue(t4_caps.has_tensor_cores, "Turing has tensor cores");
+  ExpectTrue(t4_caps.compute_major == 7 && t4_caps.compute_minor == 5,
+             "T4 is compute capability 7.5");
+  ExpectTrue(!t4_caps.Supports(nanochat::DType::kBf16),
+             "T4 does not support bf16");
+  ExpectTrue(!t4_caps.Supports(nanochat::DType::kFp8E4M3),
+             "T4 has no fp8 path");
 }
 
 void TestFp8Capability() {

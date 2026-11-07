@@ -307,7 +307,7 @@ void CheckLog(const std::string& log, const std::string& profile,
   // Invariant 7: the binding canary.
   ExpectTrue(CanaryNamesProfile(log, profile),
              "the canary names NANOCHAT_SIM_PROFILE");
-  const std::string other = profile == "h100" ? "h200" : "h100";
+  const std::string other = profile == "h100" ? "t4" : "h100";
   ExpectTrue(!CanaryNamesProfile(log, other),
              "a canary for a different profile is not accepted");
 

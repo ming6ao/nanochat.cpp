@@ -6,13 +6,12 @@ launch.
 
 Status: the project implements the data-parallel architecture. `Config` carries
 `value_embedding`. `src/distributed.h` is the seam. The CPU backend links the
-host reference in `src/distributed.cc`. The CUDA backend links NCCL in
-`backends/cuda/nccl_sync.cu` by default. The native collective
-(`backends/cuda/collective/`, selected with `--config=native` or
-`--define=collective=native`) is the NCCL replacement
-([distributed-design.md](distributed-design.md)). It is complete for
-the ring schedule, the CPU memory transport, and the host-staged CUDA
-transport; the NVLink and RDMA transports await the H100 node.
+host reference in `src/distributed.cc`. The CUDA backend links the native ring
+in `backends/cuda/collective/`, which is the one collective: `--config=native`
+and `--define=collective=native` remain documented spellings of the default.
+The native ring is complete for the ring schedule, the CPU memory transport,
+and the host-staged CUDA transport; the NVLink and RDMA transports await the
+H100 node.
 
 `TrainLoop` averages every gradient once per step. It overlaps the bucket
 reductions with the pack copies on a side stream. Documents shard by a stride.
@@ -20,8 +19,8 @@ A sidecar beside the checkpoint stores the data cursor for an exact resume.
 
 `nanochat_cli train` accepts `--preset track3`. The CPU gates
 `//src:distributed_test`,
-`//src:train_parallel_test`, and `//src:data_test` pass. The NCCL gate and the
-two-rank parity gate run on Kaggle (see section 12).
+`//src:train_parallel_test`, and `//src:data_test` pass. The two-rank parity
+gate runs on Kaggle (see section 12).
 
 ## 1. Goal
 
@@ -98,7 +97,7 @@ Rules:
 
 - `src/distributed.h` includes only `nanochat/tensor.h` and the standard
   library.
-- The host reference lives in `src/distributed.cc`. The device-specific NCCL
+- The host reference lives in `src/distributed.cc`. The device-specific
   factory lives in the backend, and the build selects it at link time in P3.
 - The `src` layer never includes a vendor header.
 - The seam method is `AllReduceSum`. The harness supplies the `1 / world_size`
@@ -107,18 +106,15 @@ Rules:
 
 ## 5. Implementations
 
-Two implementations ship today, and a third is selectable. The build selects
-one, and the selection follows the backend. There is no host-reference fallback
-on the CUDA path.
+Two implementations ship. The build selects one, and the selection follows the
+backend. There is no host-reference fallback on the CUDA path.
 
 | Implementation | File | Use |
 |---|---|---|
 | Host reference | `src/distributed.cc` | The CPU backend and the CPU tests |
-| NCCL | `backends/cuda/nccl_sync.cu` | The CUDA backend and the two T4 cards (default) |
-| Native ring | `backends/cuda/collective/native_sync.cu` | The CUDA backend with `collective=native` |
+| Native ring | `backends/cuda/collective/native_sync.cu` | The CUDA backend, and the only collective |
 
-The native ring ([distributed-design.md](distributed-design.md))
-replaces NCCL on the CUDA path. It runs a ring reduce-scatter + all-gather over
+The native ring runs a ring reduce-scatter + all-gather over
 a completion-based `Transport`. The selection is per ring edge
 (section 3.2 of the native plan): NVLink when `cudaDeviceCanAccessPeer` passes,
 RDMA when an adapter reaches the peer, and host staging otherwise. The 2x T4
@@ -132,15 +128,9 @@ only. The [dependency
 invariants](build.md#dependency-invariants) permit
 host POSIX headers in `src`; the rule forbids vendor headers.
 
-The NCCL implementation calls `ncclAllReduce` with `ncclSum`. Rank 0 generates
-the `ncclUniqueId` and broadcasts it to the peers over a one-shot TCP exchange;
-every rank then calls `ncclCommInitRank`. The launch sets
-`CUDA_VISIBLE_DEVICES` to the rank, so each process selects device 0. This file
-is the only place that includes `nccl.h`.
-
 The seam also has an asynchronous form, `AllReduceSumAsync` and `Wait`. The host
-reference treats it as synchronous, so the CPU behavior does not change. NCCL
-runs the reduction on a side stream. It synchronizes at `Wait`, so the pack copy
+reference treats it as synchronous, so the CPU behavior does not change. The
+native ring runs the reduction on a side stream. It synchronizes at `Wait`, so the pack copy
 of the next bucket overlaps the reduction of the current one (section 6).
 
 ## 6. Training loop integration
@@ -358,13 +348,13 @@ check stays valid, and `//src:train_parallel_test` pins the exact resume.
 | T0 CPU | `//src:distributed_test` | A two-process sum returns the correct buffer |
 | T0 CPU | `//src:train_parallel_test` | The mean scale, two equal ranks, and an exact resume |
 | T0 CPU | `//src:data_test` | The sharded start and the data cursor round-trip |
-| Simulator | `//tests:collective_sim_test` | The NCCL call sequence and the deadlock check |
-| T1 GPU | `//backends/cuda:nccl_sync_test` | The NCCL sum matches the host reference |
+| T0 CPU | `//backends/cuda/collective:schedule_test` | The ring at world sizes 1, 2, 4, and 8 |
+| T1 GPU | `//backends/cuda/collective:nvlink_test` | The native ring sum matches the host reference |
 | T2 GPU | A two-rank run versus one rank | The validation loss matches one rank |
 
 The host reference uses two processes on the CPU backend. This test needs no
-GPU. The simulator drives the NCCL mock on the CPU. The T1 and T2 gates run on
-Kaggle, because the WSL2 host has no NCCL and one card (section 15).
+GPU. The ring schedule runs on the CPU with the memory transport. The T1 and T2
+gates run on Kaggle, because the WSL2 host has one card (section 15).
 
 The per-step parameter equality of a two-rank run and a one-rank run needs the
 data split of section 7. Until then, the T2 gate is the validation loss on the
@@ -380,7 +370,8 @@ lives in [distributed-design.md](distributed-design.md) and
 
 The notebook runs these steps:
 
-1. Build the `t4` shared library. The library already holds the mesh runtime.
+1. Build the Turing shared library, `--config=cuda --@rules_cuda//cuda:archs=sm_75`.
+   The library already holds the mesh runtime.
 2. Stage one ClimbMix shard, the validation shard, and the tokenizer.
 3. Run the best-fit model with one `MeshRuntime` over the two cards.
 4. Compare the two replica parameter digests, and keep the canonical
@@ -389,16 +380,16 @@ The notebook runs these steps:
    fine-tuning, and the chat evaluation.
 
 The runtime stages the gradients through the kernel seam, so the CUDA build
-needs no NCCL. The T4 cards do not have a peer link, so the peer-to-peer fast
-path waits (section 10.1).
+needs no vendor collective. The T4 cards do not have a peer link, so the
+peer-to-peer fast path waits (section 10.1).
 
 ## 14. Phasing
 
 The architecture phases P0 to P4 are complete. They cover the seam, the Track 3
-preset, the host reference, the CPU two-rank test, NCCL, the overlap seam, and
-the data cursor.
+preset, the host reference, the CPU two-rank test, the native ring, the overlap
+seam, and the data cursor.
 
-The NCCL gate and the two-rank parity gate run on Kaggle (section 15).
+The two-rank parity gate runs on Kaggle (section 15).
 
 The CPU path keeps the GPU off the correctness path, as
 [kernels.md](kernels.md) § Compute strategy requires.
@@ -407,16 +398,14 @@ The CPU path keeps the GPU off the correctness path, as
 
 | Risk | Control |
 |---|---|
-| The Kaggle image lacks NCCL | Install NCCL, or point `NANOCHAT_NCCL_PATH` at it; a CUDA build needs it |
-| The two T4 cards lack a peer link | NCCL uses PCIe or shared memory |
+| The two T4 cards lack a peer link | The ring falls back to the host-staged transport |
 | The host reference is slow | It is CPU-only now; it is not on the GPU path |
 | The stride sharding differs from the reference | `parity.md` D6 records the difference |
 | A resumed run repeats or skips data | The data cursor restores the source position and the buffer |
 
 ## 16. Open questions
 
-1. Which NCCL does the Kaggle image carry, and what is `NANOCHAT_NCCL_PATH`?
-2. The WSL2 host has no NCCL and one card, so the T1 and T2 gates run on Kaggle.
+1. The WSL2 host has one card, so the T1 and T2 gates run on Kaggle.
 3. Does the team want reference-exact initialization? This choice affects the
    loss curve.
 4. Should the data loader split one global batch into contiguous rank slices, as
@@ -487,7 +476,7 @@ owns their defaults. The launch, the queue, and the sandbox are host tooling.
 | Task | Owner | File |
 |---|---|---|
 | Rank and group values | C++ at L6 | `src/train_command.cc` |
-| Gradient sum | C++ | `src/distributed.cc`, `backends/cuda/nccl_sync.cu` |
+| Gradient sum | C++ | `src/distributed.cc`, `backends/cuda/collective/native_sync.cu` |
 | Process start | Host tooling | `tools/nanochat` |
 | GPU queue job | Host tooling | `python/nanochat_cpp/gpu_queue.py` |
 | Sandbox scope | Host tooling | `python/nanochat_cpp/sandbox.py` |
@@ -663,7 +652,7 @@ Gate: one short two-rank Kaggle run passes the checkpoint hash check.
 | Risk | Control |
 |---|---|
 | A generic variable name clashes with another tool | Use the `NANOCHAT_` prefix. A flag wins |
-| The completed NCCL plan gains a new phase | This document holds the launch plan. The NCCL plan stays closed |
+| A later collective gains a new phase | This document holds the launch plan. The earlier plan stays closed |
 | The group exceeds the `train` profile | Add a `dist` profile sized for the group |
 | A signal leaves an orphan rank | Trap the signal and kill the group. Test it |
 | The log format drifts from the parser | One fixture test pins the format |
@@ -1128,14 +1117,19 @@ unchanged, so a reference to a section of that document resolves to the same
 number here._
 
 This document is the execution plan for a native all-reduce backend. The backend
-replaces NCCL on the CUDA path. [distributed-design.md](distributed-design.md)
+is the one collective on the CUDA path. [distributed-design.md](distributed-design.md)
 holds the current seam design.
 
-Status: delivered through phase 2 on the local T4 host. The ring schedule, the
-host-staged transport, the transfer-window pool, and `NativeGradientSync` are
-in `backends/cuda/collective/`. The 2x T4 pair has no peer access, so the ring
-stages through pinned host memory; the NVLink and RDMA transports await the
-H100 node. Phases 3 to 6 remain.
+Status: delivered through phase 2 on the local T4 host, and phase 6 is closed.
+The ring schedule, the host-staged transport, the transfer-window pool, and
+`NativeGradientSync` are in `backends/cuda/collective/`. The 2x T4 pair has no
+peer access, so the ring stages through pinned host memory; the NVLink and RDMA
+transports await the H100 node. Phases 3 to 5 remain.
+
+Phase 6 removed the transition machinery: `--define=collective=native` is the
+only value, `backends/cuda/nccl_sync.cu`, `third_party/nccl.bzl`, and the
+`@nccl` repository are gone, and the NCCL mock and `//tests:collective_sim_test`
+went with them.
 
 ### 1. Goal and scope
 
@@ -1521,7 +1515,7 @@ only.
 - Check that every rank ends with equal bytes.
 - Add the schedule trace (section 10).
 
-Gate: `tools/nanochat test --config=cpu` passes. The test needs no GPU.
+Gate: `tools/nanochat test` passes. The test needs no GPU.
 
 #### Phase 2 — The NVLink transport
 
@@ -1581,16 +1575,17 @@ Gate: the 8-rank test and the T2 parity test pass.
 
 #### Phase 6 — Make native the default and clean up
 
-Owner: architect.
+Owner: architect. Closed.
 
-- Make `collective=native` the default for the `h100` config.
-- Keep `nccl` selectable for the `t4` config during the transition.
-- Remove `@nccl//:nccl` from the CUDA config after the transition.
-- Update the design documents.
-- Decide the fate of the NCCL mock in `tools/cuda_sim/collective/`.
+- `collective=native` is the default for every config, and the only value.
+- `@nccl//:nccl` is gone from `MODULE.bazel`, `third_party/`, and the CUDA
+  config.
+- The design documents are updated.
+- The NCCL mock in `tools/cuda_sim/collective/` and
+  `//tests:collective_sim_test` are removed.
 
 Gate: the merge gate in `AGENTS.md` section 5.5 passes with NCCL absent from the
-default CUDA build.
+tree.
 
 ### 8. Ownership
 
@@ -1640,7 +1635,7 @@ broker for an 8x H100 node. Treat the node as one resource.
   `node-train`. Size the memory, the central processing unit quota, and the
   process count for eight ranks on one node. Do not reuse the `train` profile,
   which serves the WSL2 host.
-- One rank per card. Set `CUDA_VISIBLE_DEVICES` to the rank, as the NCCL path
+- One rank per card. Set `CUDA_VISIBLE_DEVICES` to the rank, as the ring
   already does.
 - The T1 and T2 gates run on the node, under the broker. Keep the GPU tiers
   serialized, as `AGENTS.md` section 5.1 requires.
@@ -1659,10 +1654,8 @@ managed job on the node. Record the result with the commit hash.
 The two-stream event logic is the largest correctness risk. Build a trace, and
 check it on the central processing unit.
 
-The NCCL mock already has the pattern. `tools/cuda_sim/collective/nccl_mock.h`
-exposes `AppendCollectiveRecord`, `ReadCollectiveLog`, and
-`JudgeCollectiveRecords`. The deadlock case is already a test in
-`tests/collective_sim_test.cc`.
+The interposer already has the pattern: `tools/cuda_sim/cuda_sim_log.h` exposes
+the JSONL record writer and reader the emulator suites use.
 
 Extend the pattern. The schedule emits one record per send, receive, and add.
 Each record carries the rank, the direction, the transport kind, the step, the
@@ -1791,7 +1784,6 @@ the largest correctness risk in the two-stream design.
 | T0 CPU | `//backends/cuda/collective:transport_select_test` | The per-neighbor selection, including a mixed group |
 | T0 CPU | `//src:distributed_test` | The host reference, unchanged |
 | T0 CPU | `//src:train_parallel_test` | The mean scale and the resume, unchanged |
-| S0 | `//tests:collective_sim_test` | The NCCL mock, only while NCCL stays selectable |
 | T1 GPU | `//backends/cuda/collective:nvlink_test` | A two-rank NVLink sum against the host reference |
 | T1 GPU | `//backends/cuda/collective:rdma_test` | A two-rank RDMA sum against the host reference |
 | T2 GPU | An 8-rank loss curve against 1 rank | The full training parity |
@@ -1815,12 +1807,12 @@ transport tests carry only data movement.
 
 ### 15. Definition of Done
 
-1. `tools/nanochat test --config=cpu` passes with the new schedule test.
+1. `tools/nanochat test` passes with the new schedule test.
 2. The T1 NVLink test passes with two ranks.
 3. The T1 RDMA test passes with two ranks.
 4. The 8-rank T2 parity test passes on the 8x H100 node.
 5. The sync fraction is below 0.05 for the target model.
-6. The default CUDA build needs no NCCL.
+6. The default CUDA build needs no vendor collective.
 7. The `h100` compile gate passes under `--config=sim-gate`.
 8. `tools/nanochat lint` passes.
 9. The design documents match the code.

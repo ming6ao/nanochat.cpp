@@ -116,7 +116,7 @@ void TestCanary() {
   ExpectTrue(CanaryNamesProfile(nanochat_sim_log(), "h100"),
              "the canary names NANOCHAT_SIM_PROFILE");
   // The negative case: a canary for a different profile must not be accepted.
-  ExpectTrue(!CanaryNamesProfile(nanochat_sim_log(), "h200"),
+  ExpectTrue(!CanaryNamesProfile(nanochat_sim_log(), "t4"),
              "a canary for another profile is not accepted");
   ExpectTrue(std::string(nanochat_sim_profile()) == "h100",
              "the interposer reports the profile");
@@ -487,15 +487,15 @@ void DriveTheBackend() {
 // only the profile named by `NANOCHAT_SIM_PROFILE`. It resets the log, so it
 // runs last.
 void TestCanaryNegative() {
-  setenv("NANOCHAT_SIM_PROFILE", "h200", 1);
+  setenv("NANOCHAT_SIM_PROFILE", "t4", 1);
   nanochat_sim_reset();
   void* pointer = nullptr;
   ExpectTrue(cudaMalloc(&pointer, 64) == kCudaSuccess,
-             "cudaMalloc under the h200 profile");
-  ExpectTrue(CanaryNamesProfile(nanochat_sim_log(), "h200"),
+             "cudaMalloc under the t4 profile");
+  ExpectTrue(CanaryNamesProfile(nanochat_sim_log(), "t4"),
              "the canary names the profile in effect for this run");
   ExpectTrue(!CanaryNamesProfile(nanochat_sim_log(), "h100"),
-             "a canary for h100 is not accepted under h200");
+             "a canary for h100 is not accepted under t4");
   cudaFree(pointer);
   setenv("NANOCHAT_SIM_PROFILE", "h100", 1);
   nanochat_sim_reset();

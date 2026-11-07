@@ -19,7 +19,7 @@ Status: implemented in the tree. The WSL2 host file is `.bazelrc.wsl`.
 | Concern | Workstation | Kaggle Notebook | Mechanism |
 |---|---|---|---|
 | Host compiler | gcc-12 | image gcc | `.bazelrc.local` |
-| CUDA arch | sm_61 | sm_75 | `--config=t4` |
+| CUDA arch | sm_61 | sm_75 | `--@rules_cuda//cuda:archs=sm_75` |
 | Precision | fp32 | fp32 | build default |
 | Sandbox | systemd cgroups | none | `NANOCHAT_SANDBOX_BACKEND` |
 | GPU count | one | two | `NANOCHAT_GPU_DEVICES` |
@@ -66,20 +66,18 @@ different `rules_cuda` toolchain. It is a separate project with its own risk.
 | `t4` | sm_75 | fp32 | cuda |
 | `hopper` | sm_90 | bf16 | cuda |
 
-The `t4` config selects the fp32 CUDA build for the Turing card. Turing has no
-bf16, so the T4 runs fp32 ([precision.md](precision.md)).
+A Turing build passes `--config=cuda --@rules_cuda//cuda:archs=sm_75`, because
+Turing has no bf16 and the T4 runs fp32 ([precision.md](precision.md)). The tree
+keeps no named Turing config: the build helper emits the flags.
 
 The `hopper` config selects the bf16 CUDA build for a Hopper card, `sm_90`. It
 is the hand-run form of the same build the chain's H100 leg runs, and it is not
 the `h100` config: `h100` is the *simulator* profile, which sets
 `--define=simulator=1` and answers from the device profile table instead of the
-card, and it also swaps the collective to `native`. `hopper` sets neither, so a
-hand run builds the real backend for Hopper and keeps the default `nccl`
-collective that `world_size=1` expects ([build.md](build.md), the Precision
-section). It is a hand-run shorthand only: `_build._build_command` still emits
-its explicit flag triple, `--config=cuda --define=precision=<p>
---@rules_cuda//cuda:archs=<a>`, and never a named config, so the H100 leg and a
-hand run are the same build.
+card ([build.md](build.md), the Precision section). It is a hand-run shorthand
+only: `_build._build_command` still emits its explicit flag triple,
+`--config=cuda --define=precision=<p> --@rules_cuda//cuda:archs=<a>`, and never
+a named config, so the H100 leg and a hand run are the same build.
 
 The Kaggle host file sets the arch to sm_75 and the resource budget. It does
 not set the backend. The backend stays per-command, so the CPU test loop keeps
@@ -480,7 +478,8 @@ The queue runs one job at a time, so this option needs stage Q6 of
 [sandbox.md](sandbox.md): one job per free device subset.
 
 Option B: data-parallel training. One process owns each card. The processes
-all-reduce their gradients with NCCL, then each process steps its optimizer.
+all-reduce their gradients with the native ring, then each process steps its
+optimizer.
 The design is in [python.md](python.md) section 10. Start it only after
 the single-card path is fast.
 
@@ -743,8 +742,9 @@ library and the build passes `--config=cuda`. A container with no card therefore
 fails inside `nanochat_init`, and `_check_cards` calls `nvidia-smi`, which does
 not exist there.
 
-So a CPU verification leg is a second image whose build passes `--config=cpu`
-and whose function omits `gpu=`, not a CPU branch inside `tools/modal/app.py`.
+So a CPU verification leg is a second image whose build states
+`--define=backend=cpu` and whose function omits `gpu=`, not a CPU branch inside
+`tools/modal/app.py`.
 One Bazel output base holds one build of `libnanochat_shared.so`, so the two
 images must stay apart. The tree holds the CUDA image today; the CPU image is
 the verification-only leg of the table in section 9.1, and it runs no gate.

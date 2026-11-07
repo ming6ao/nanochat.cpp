@@ -102,10 +102,10 @@ runs the whole graph.
 
 ### 2.3 Capability data
 
-Two `caps.json` files declare 6 device entries: `cpu`, `h100`, `h200`, `a100`,
-`t4`, and `gtx1080ti`. Each entry has 24 fields: 17 device facts plus
-`utilities[6]`, `primitives[11]`, `pointwise_codes[9]`, `reduce_ops[4]`,
-`attention`, `stateful[2]`, and `features[]`.
+Two `caps.json` files declare 3 device entries: `cpu`, `h100`, and `t4`. Each
+entry has 24 fields: 17 device facts plus `utilities[6]`, `primitives[11]`,
+`pointwise_codes[9]`, `reduce_ops[4]`, `attention`, `stateful[2]`, and
+`features[]`.
 
 Two consumers read the same data by different paths. The runtime path is
 `backends/cuda/device.cu:138`, which merges the declared mask with four

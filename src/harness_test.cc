@@ -99,8 +99,6 @@ void TestMfu() {
   ExpectNear(nanochat::EstimateDecodeFlops(config, 8), 49248.0, 1e-6,
              "EstimateDecodeFlops");
 
-  ExpectNear(nanochat::PeakFlopsForDevice("NVIDIA GeForce GTX 1080 Ti"),
-             11.34e12, 1.0, "PeakFlops 1080 Ti");
   // One declared rate per card. An H100 NVL resolves to the `h100` declaration,
   // because the tree declares no NVL entry, so the reference line and the
   // roofline report divide by the same number on that card. A sub-SKU with its
@@ -108,12 +106,14 @@ void TestMfu() {
   // section 6).
   ExpectNear(nanochat::PeakFlopsForDevice("NVIDIA H100 NVL"), 989e12, 1.0,
              "PeakFlops H100 NVL reads the h100 declaration");
-  ExpectNear(nanochat::PeakFlopsForDevice("NVIDIA H200"), 989e12, 1.0,
-             "PeakFlops H200");
+  ExpectNear(nanochat::PeakFlopsForDevice("NVIDIA T4"), 8.1e12, 1.0,
+             "PeakFlops T4 reads the t4 declaration");
   // A card with no declaration has no rate: the tree declares none of these,
   // and a second table of plausible numbers is what the declaration replaced.
   ExpectNear(nanochat::PeakFlopsForDevice("NVIDIA B200"), 0.0, 1e-9,
              "PeakFlops for an undeclared card reads 0");
+  ExpectNear(nanochat::PeakFlopsForDevice("NVIDIA GeForce GTX 1080 Ti"), 0.0,
+             1e-9, "PeakFlops for the undeclared host card reads 0");
   ExpectNear(nanochat::PeakFlopsForDevice("unknown device"), 0.0, 1e-9,
              "PeakFlops unknown");
   ExpectNear(nanochat::PeakFlopsForDevice(""), 0.0, 1e-9, "PeakFlops empty");

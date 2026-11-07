@@ -242,8 +242,8 @@ only the Python standard library, so the root module registers the local
 `local_runtime_toolchains_repo`. The flag `dev_dependency = True` keeps the
 local toolchain out of a downstream module. The host tool requires Python 3.10
 or later, and it checks that floor at startup. Build the shared library with
-`tools/nanochat build //bindings:nanochat_shared --config=cpu`; the config
-selects the CPU backend and fp32.
+`tools/nanochat build //bindings:nanochat_shared`; `.bazelrc` already selects
+the CPU backend at fp32, so no named config is necessary.
 
 ### Python environments
 
@@ -275,7 +275,7 @@ Bazel is the only supported build. The P0 toolchain spike is
 `//dev/kernels:pascal_spike_gpu_test`.
 
 The CUDA build links `cudart` and cuBLAS. The CPU build links `libm`. Neither
-links cuDNN or NCCL.
+links cuDNN or a collective library: the native ring needs no vendor library.
 
 ## Backends and selection
 
@@ -292,7 +292,7 @@ Selection is a build/link choice:
 | Backend | Implements | Notes |
 |---|---|---|
 | `backends/cpu` | all of `kernels.h` with naive loops | reference, CI, oracle baseline; `-lm` (+ OpenMP) |
-| `backends/cuda` | all of `kernels.h`; cuBLAS for GEMM | Pascal fp32, Turing fp32, Ampere and newer bf16; no cuDNN or NCCL |
+| `backends/cuda` | all of `kernels.h`; cuBLAS for GEMM | Pascal fp32, Turing fp32, Ampere and newer bf16; no cuDNN, no vendor collective |
 
 The shared workflow (`ops.cc`, `model.cc`, `generate.cc`, `optim.cc`,
 `train.cc`) compiles once and links against either backend. This is the one
@@ -329,22 +329,22 @@ dispatch occurs. The fp16 build and its half-storage path are removed
   a device without bf16 fails fast: `Model::Create` returns null with
   "compute dtype is not supported by <device>".
 
-`--config=bf16` selects the define. `--config=a100`, `--config=h100`, and
-`--config=h200` are the complete Ampere and Hopper targets; each selects the
-matching architecture, `--config=bf16`, and the CUDA backend.
+`--config=bf16` selects the define. `--config=h100` and `--config=h200` are the
+two Hopper targets; each selects sm_90, `--config=bf16`, the CUDA backend, and
+the simulator.
 
 ### `hopper`, beside `h100`
 
 | Config | Arch | Precision | Backend | Simulator | Collective |
 |---|---|---|---|---|---|
 | `h100` | sm_90 | bf16 | cuda | on (`--define=simulator=1`) | `native` |
-| `hopper` | sm_90 | bf16 | cuda | off | default, `nccl` |
+| `hopper` | sm_90 | bf16 | cuda | off | `native` (the only collective) |
 
 The two configs are not the same build. `h100` is the *simulator* profile: it
 compiles in the capability override and answers from the device profile table
-instead of from the card, and it swaps the collective to `native`. `hopper` is
-a real Hopper build for a hand run at bf16, with the simulator off and the
-default `nccl` collective that `world_size=1` expects
+instead of from the card. `hopper` is a real Hopper build for a hand run at
+bf16, with the simulator off. The native ring is the one collective, so both
+configs link it and the chain's `world_size=1` reduces to a no-op
 ([post-training.md](post-training.md) Part 3, section 3, trap 1). A
 check that needs a card chooses `hopper`; a report read without a card chooses
 `h100`.
@@ -386,14 +386,13 @@ new backend directory is necessary.
 
 | Config | Arch | Precision | Use |
 |---|---|---|---|
-| `sm_75` | sm_75 | fp32 | fp32 correctness gate |
-| `t4` | sm_75 | fp32 | default Kaggle build |
 | `bf16` | default | bf16 | bf16 compute for Ampere and newer |
-| `a100` | sm_80 | bf16 | first Ampere target |
 | `h100`, `h200` | sm_90 | bf16 | Hopper simulator profile and compile gate |
 | `hopper` | sm_90 | bf16 | real Hopper build for a hand run (the Precision section) |
 
-The `t4` config includes `--config=cuda`. The `t4` build uses the fp32 GEMM
+The tree keeps no named Turing config. A Turing run passes
+`--config=cuda --@rules_cuda//cuda:archs=sm_75` itself, which is the flag triple
+`tools/modal/app.py` emits for its T4 leg. The Turing build uses the fp32 GEMM
 path on this card.
 
 The T4 build uses fp32. The fp32 build is the correctness gate and the default
@@ -451,7 +450,8 @@ A Kaggle Notebook gives two T4 cards. See
 
 ### 8. Definition of done
 
-1. `tools/nanochat build --config=t4` succeeds.
+1. `tools/nanochat build --config=cuda --@rules_cuda//cuda:archs=sm_75`
+   succeeds.
 2. Every T1 GPU test passes on the T4 in fp32.
 3. The oracle and train-parity gates pass on sm_75.
 4. The recorded fp32 tolerance matches a fresh measurement.
@@ -557,7 +557,7 @@ Z2  Adapters     torch, numpy, tiktoken,      nanochat_cpp_bridge
                  datasets, nanochat
 Z1  Python core  standard library only        nanochat_cpp
 Z0  C++ core     libm, cudart, cuBLAS,        src/**, include/**, backends/**
-                 zstd (host only), NCCL, RDMA
+                 zstd (host only), RDMA
 ```
 
 The arrow points down. A zone imports a lower zone and never a higher one.

@@ -66,11 +66,11 @@ MINIMUM_GRAPHS = ("train step", "decode")
 
 DEFAULT_FLAGSHIP = "nanochat-default"
 
-#: Devices with a physical sample on this tree's host.  AGENTS.md section 5
-#: names the one GTX 1080 Ti; every other declared device is reached through
-#: the simulator until it has silicon.  The list is data for the generator,
-#: not a property of the model or the backend package.
-PHYSICAL_SAMPLES = ("gtx1080ti",)
+#: Devices with a physical sample.  The T4 leg of ``tools/modal/app.py`` runs
+#: the chain on a real T4, so that row is a silicon row.  Every other declared
+#: device is reached through the simulator until it has a sample.  The list is
+#: data for the generator, not a property of the model or the backend package.
+PHYSICAL_SAMPLES = ("t4",)
 
 DEFAULT_MATRIX = REPO_ROOT / "tools" / "conformance-matrix.md"
 

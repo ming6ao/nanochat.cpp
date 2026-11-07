@@ -54,9 +54,7 @@ The table is from `src/device_profile.cc`. The rates are dense (non-sparse).
 
 | Device | Major.Minor | Tensor cores | fp32 | bf16 |
 |---|---|---|---|---|
-| gtx1080ti | 6.1 | no | 11.34 TFLOP/s | none |
 | t4 | 7.5 | yes | 8.1 TFLOP/s | none |
-| a100 | 8.0 | yes | 19.5 TFLOP/s | 312 TFLOP/s |
 | h100 | 9.0 | yes | 66.9 TFLOP/s | 989 TFLOP/s |
 
 The table shows the decision. bf16 starts at Ampere. Turing has no bf16, so the
@@ -71,15 +69,15 @@ precision set.
 | Target | Arch | Compute | Persistent state | Config |
 |---|---|---|---|---|
 | Workstation | sm_61 | fp32 | fp32 | default |
-| Central processing unit and continuous integration | none | fp32 | fp32 | `--config=cpu` |
-| Kaggle T4 | sm_75 | fp32 | fp32 | `--config=t4` |
-| Ampere and newer | sm_80 and sm_90 | bf16 | fp32 | `--config=bf16` |
+| Central processing unit and continuous integration | none | fp32 | fp32 | default |
+| Kaggle T4 | sm_75 | fp32 | fp32 | `--config=cuda --@rules_cuda//cuda:archs=sm_75` |
+| H100 | sm_90 | bf16 | fp32 | `--config=hopper` |
 
 The Ampere row is Stage 2, which is delivered (section 6).
 
-The named targets follow the table. The `a100` target is sm_80 with bf16. The
-`h100` and `h200` targets are sm_90 with bf16. `--config=bf16` selects the bf16
-compute type on any architecture.
+The named targets follow the table. The `h100` and `h200` targets are sm_90 with
+bf16 and the simulator. `--config=bf16` selects the bf16 compute type on any
+architecture.
 
 ## 5. Storage rule
 
@@ -204,8 +202,7 @@ Delivered:
 8. The checkpoint path. The canonical record stays fp32. `CollectModelRecords`
    reads the master, a load writes the master and rebuilds the compute copy,
    and a load accepts an fp32 or a bf16 record in any build.
-9. `--config=bf16`, and the `a100` target at sm_80. The `h100` and `h200`
-   targets at sm_90 select bf16 too.
+9. `--config=bf16`. The `h100` and `h200` targets at sm_90 select bf16 too.
 10. The Python surface. `Model.dtype` and `TensorView.dtype` report the compute
     type, and the parameter view reads and writes Python floats for both
     fp32 and bf16.
@@ -220,8 +217,8 @@ Delivered:
 
 Gate: `tools/nanochat build`, `tools/nanochat build --config=bf16`,
 `tools/nanochat test`, `tools/nanochat test --config=bf16`, and
-`tools/nanochat lint` pass. The compile gate passes for `a100`, `h100`, and
-`h200`. The fp32 build keeps every committed fp32 golden.
+`tools/nanochat lint` pass. The compile gate passes for `h100` and `h200`. The
+fp32 build keeps every committed fp32 golden.
 
 #### The integration leg: the chain on two cards
 
@@ -308,10 +305,10 @@ with no dtype tag (`src/model.cc:1040`). No migration is necessary.
 2. **The fp16 central processing unit emulation.** Remove it. Remove fp16
    support everywhere. The simulator covers fp32 until Stage 2 adds bf16.
 3. **The first Ampere target.** Use sm_80 as the first Ampere target. bf16
-   starts at sm_80, and the `a100` profile is already in the device table. The
-   `h100` and `h200` targets (sm_90) reuse the same precision config. The gate
-   order is the `a100` profile under the simulator, then an sm_80 card, then an
-   sm_90 card.
+   starts at sm_80. The `h100` and `h200` targets (sm_90) reuse the same
+   precision config. The gate order was an sm_80 profile under the simulator,
+   then an sm_80 card, then an sm_90 card. The declaration now keeps the two
+   cards the tree runs on, `h100` and `t4`, so no sm_80 profile remains.
 4. **The dangling references.** Fixed in Stage 1. `.bazelrc` points to
    `docs/build.md` and `docs/python.md`. `tools/sandbox/profiles.json` points to
    `docs/host-portability.md`.

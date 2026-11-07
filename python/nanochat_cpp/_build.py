@@ -292,15 +292,20 @@ def cached_library(key: str | None = None,
     return directory / f"libnanochat_shared_{key}.so"
 
 
-def _config_flag(options: BuildOptions) -> str:
-    """The named Bazel configuration for the requested backend."""
+def _config_flags(options: BuildOptions) -> list[str]:
+    """The Bazel configuration flags for the requested backend.
+
+    `.bazelrc` already defaults to the reference CPU backend at fp32, so a CPU
+    build states that backend and needs no named config. A CUDA build names
+    `--config=cuda`, which sets the backend and nothing else.
+    """
     if options.precision not in SUPPORTED_PRECISIONS:
         raise BuildError(
             f"{options.precision} is not a build precision: "
             f"{' or '.join(SUPPORTED_PRECISIONS)} (docs/precision.md)")
     if options.backend == "cpu":
-        return "--config=cpu"
-    return "--config=cuda"
+        return ["--define=backend=cpu"]
+    return ["--config=cuda"]
 
 
 def _no_library_message(cache: Path) -> str:
@@ -324,10 +329,9 @@ def _build_command(entry: Path, options: BuildOptions,
     A command-line flag wins over the ``.bazelrc`` value, so an explicit CUDA
     architecture selects the compiled target and not only the cache key.
     """
-    command = [str(entry), "build", *targets, _config_flag(options)]
+    command = [str(entry), "build", *targets, *_config_flags(options)]
     # A command-line flag wins over a value in `.bazelrc`, so the precision is
-    # explicit even though `--config=cpu` and `--config=cuda` also set one
-    # (docs/precision.md).
+    # explicit even though `--config=cuda` also sets one (docs/precision.md).
     command.append(f"--define=precision={options.precision}")
     if options.backend == "cuda" and options.arch:
         command.append(f"--@rules_cuda//cuda:archs={options.arch}")

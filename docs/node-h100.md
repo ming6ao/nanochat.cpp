@@ -27,14 +27,14 @@ model with fp8 training, a token-to-parameter ratio of 8, and an average of
 | Accelerator | 8 H100 SXM cards, 80 GiB each |
 | Interconnect | NVLink 4.0 with NVSwitch, one node |
 | Host toolkit | CUDA 12.0 or newer; record the exact version |
-| Collective | NCCL, or the native ring with the NVLink transport |
+| Collective | The native ring with the NVLink transport |
 | Node count | One |
 | Second transport | An RDMA adapter with GPUDirect RDMA, if the native ring is used |
 
 Prerequisites:
 
-1. Phases 3 to 6 of [distributed-design.md](distributed-design.md),
-   or a verified NCCL path.
+1. Phases 3 to 5 of [distributed-design.md](distributed-design.md), so the
+   ring has its NVLink transport.
 2. The bf16 compute path from `docs/precision.md` Stage 2a.
 3. The fp8 path from [fp8-training.md](fp8-training.md), if fp8 is used.
 4. The acceptance criteria in section 8. Agree them before the run starts.
@@ -250,8 +250,8 @@ only durable evidence of the run.
 - **The bf16 memory margin is about 1 GiB.** Measure it at step one.
 - **The data rate may be the limit.** A loader that delivers less than 983
   thousand tokens per second makes the GPUs wait.
-- **The collective may not be ready.** Phases 3 to 6 of the native plan remain.
-  NCCL is the fallback.
+- **The collective may not be ready.** Phases 3 to 5 of the native plan remain.
+  The host-staged transport is the fallback.
 - **The fp8 accuracy may need a correction.** Keep a bf16 comparison run.
 - **The sandbox profiles are host-local.** Re-derive them before the run.
 - **The node is one resource.** A second job on the same node doubles the
@@ -259,12 +259,10 @@ only durable evidence of the run.
 
 ## 12. Open questions
 
-1. Which collective is the default for the first H100 run, NCCL or the native
-   ring?
-2. Does the run use the Track 3 preset, or keep the value embeddings?
-3. Does the first run use ratio 8 or ratio 12?
-4. Who owns the node during the run, and how is the broker coordinated?
-5. Is one H100 node the target, or a second node later?
+1. Does the run use the Track 3 preset, or keep the value embeddings?
+2. Does the first run use ratio 8 or ratio 12?
+3. Who owns the node during the run, and how is the broker coordinated?
+4. Is one H100 node the target, or a second node later?
 
 ## See also
 

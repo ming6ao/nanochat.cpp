@@ -33,11 +33,11 @@ produces the library and ``//src:nanochat_cli``, the one program every stage
 subcommand and the roofline gate run, so the chain and gate G3 both find a
 binary already built (sections 6.4 and B6).
 
-Both legs keep the default collective, ``nccl``, because the chain runs
-``world_size=1``, and no leg builds a simulator: the ``h100`` entry of
-``.bazelrc`` selects the simulator and the native collective, so the hardware
-leg passes the builder's explicit flag triple and never a named config
-(section 3, trap 1, and section 7).
+Both legs link the native ring, which is the one collective, and the chain runs
+``world_size=1`` so the ring reduces to a no-op. No leg builds a simulator: the
+``h100`` entry of ``.bazelrc`` selects the simulator, so the hardware leg passes
+the builder's explicit flag triple and never a named config (section 3, trap 1,
+and section 7).
 
 The image installs the distribution of ``python/pyproject.toml`` with the
 ``hub`` extra at build time, so site-packages answers ``import nanochat_cpp``
@@ -328,8 +328,8 @@ class Leg:
 
 #: The two legs of section 7, in the order the entry point runs them. The T4
 #: leg is first, so its artifact survives an H100 failure and a reviewer reads
-#: the cheap leg while the expensive one runs. Both legs run one card, keep the
-#: default ``nccl`` collective, and add no simulator define and no fp8 build.
+#: the cheap leg while the expensive one runs. Both legs run one card, link the
+#: native ring, and add no simulator define and no fp8 build.
 T4 = Leg(name="t4", card="T4", count=1, arch="sm_75", precision="fp32",
          build=("--config=cuda", "--define=precision=fp32",
                 "--@rules_cuda//cuda:archs=sm_75"))

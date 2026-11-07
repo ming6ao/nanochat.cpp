@@ -60,26 +60,25 @@ other model is unchanged.
 
 ### S0: the simulator tier
 
-S0 is the CPU-only tier that exercises H100/H200-class behavior without a
-Hopper device ([simulator.md](simulator.md)). It takes no GPU queue, so it runs
+S0 is the CPU-only tier that exercises H100-class behavior without a Hopper
+device ([simulator.md](simulator.md)). It takes no GPU queue, so it runs
 like T0 -- under the `t0-cpu` profile, in parallel with other T0 work. The
 suites are:
 
 ```bash
-# Everything: oracle, training parity, API, collective, emulated kernels,
-# profile consistency. Every run is fp32 (docs/precision.md).
+# Everything: oracle, training parity, API, emulated kernels, profile
+# consistency. Every run is fp32 (docs/precision.md).
 tools/nanochat simulate --device h100
-tools/nanochat simulate --device h200
+tools/nanochat simulate --device t4
 
 # One suite.
 tools/nanochat simulate --device h100 --suite correctness   # reference engine
 tools/nanochat simulate --device h100 --suite api           # API interposer
-tools/nanochat simulate --device h100 --suite collective    # NCCL mock
 tools/nanochat simulate --device h100 --suite kernel        # emulated kernels
 tools/nanochat simulate --device h100 --suite profile       # device table
 
 # Compile the CUDA backend for the target architecture (no GPU, no broker).
-tools/nanochat simulate --device h200 --mode compile
+tools/nanochat simulate --device h100 --mode compile
 ```
 
 The reference-engine suites add `--config=sim` and pass
@@ -1260,16 +1259,17 @@ its bound.
    `nanochat_cli eval`, if full harness coverage is necessary. This step is
    optional.
 
-Gate: two commands run every leg. `tools/nanochat simulate --device
-gtx1080ti --suite correctness` runs the CPU leg and the simulator leg.
-`tools/nanochat test --gpu //tests:numerics_trace_cuda_test` runs the GPU leg.
+Gate: two commands run every leg.
+`tools/nanochat simulate --device t4 --suite correctness` runs the CPU leg and
+the simulator leg. `tools/nanochat test --gpu //tests:numerics_trace_cuda_test`
+runs the GPU leg.
 
 ### 8. Commands and wall-clock budget
 
 ```bash
 tools/nanochat test //tests:numerics_trace_test
 tools/nanochat test --gpu //tests:numerics_trace_cuda_test
-tools/nanochat simulate --device gtx1080ti --suite correctness
+tools/nanochat simulate --device t4 --suite correctness
 ```
 
 A 10-layer CPU run with `double` GEMM over five steps is the slow part. It takes

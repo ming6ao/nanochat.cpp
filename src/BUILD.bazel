@@ -171,8 +171,8 @@ cc_test(
 )
 
 # The vendor-free gradient-sync seam (docs/distributed-design.md section 4).
-# The host reference and the NCCL backend share this header, so neither backend
-# depends on the other.
+# The host reference and the native collective share this header, so neither
+# backend depends on the other.
 cc_library(
     name = "distributed_seam",
     hdrs = ["distributed.h"],
@@ -234,7 +234,7 @@ cc_library(
 # The host reference for the gradient-sync seam
 # (docs/distributed-design.md section 5). It defines `CreateGradientSync` for
 # the CPU backend. A CUDA build gets that symbol from
-# `//backends/cuda:nccl_sync`.
+# `//backends/cuda/collective:native_sync`.
 cc_library(
     name = "distributed_host",
     srcs = ["distributed.cc"],
@@ -323,8 +323,8 @@ cc_library(
     # Backend selection is a build/link choice (docs/build.md): the same
     # workflow sources link the reference CPU backend by default or the CUDA
     # backend under `--config=cuda`. The gradient-sync factory follows the same
-    # choice: the host reference on the CPU and NCCL on the GPU. There is no
-    # host-reference fallback on the CUDA path.
+    # choice: the host reference on the CPU and the native ring on the GPU.
+    # There is no host-reference fallback on the CUDA path.
     deps = select({
         "//:backend_cuda": [
             "//backends/cuda:all_kernels",

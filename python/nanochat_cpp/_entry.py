@@ -116,7 +116,7 @@ COMMANDS = (
         "  simulate [--device NAME] [--suite S] [--mode compile] [--precision P]",
         "                             S0 CPU-only simulator (no GPU, no queue); see",
         "                             docs/simulator.md. Suites: correctness fp8-fast",
-        "                             api collective kernel profile all (default all)",
+        "                             api kernel profile all (default all)",
         "                             `correctness` also carries the staged numeric",
         "                             trace (docs/testing.md)",
         "                             `fp8-fast` is the fast fp8 core",

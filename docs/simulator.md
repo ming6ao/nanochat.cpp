@@ -5,8 +5,7 @@ This document plans a simulator for the API calls and the numerics of
 host has no Hopper device, so the simulator must work without one.
 
 Status: implemented for the S0 tier. The tree holds the device profile table,
-the reference engine, the emulation engine, the API interposer, and the
-collective mock. The `tools/nanochat simulate` command runs them. Tests cover
+the reference engine, the emulation engine, and the API interposer. The `tools/nanochat simulate` command runs them. Tests cover
 each part. The sections below are the plan; each carries the status note where
 it matters. See "Status by section" at the end of this file.
 
@@ -77,8 +76,8 @@ These facts shape the plan. I verified each one on the development host.
   `backends/cuda/kernels/testing/bench_utils.h` use streams and events.
 - The gradient-sync seam already exists at `src/distributed.h`. The class is
   `GradientSync`, and the method is `AllReduceSum`. The host reference lives in
-  `src/distributed.cc`. The plan for NCCL is `backends/cuda/nccl_sync.cu`
-  (docs/distributed-design.md sections 4 and 5).
+  `src/distributed.cc`, and the one collective is the native ring in
+  `backends/cuda/collective/` (docs/distributed-design.md sections 4 and 5).
 - The correctness suites already exist: `//tests:oracle_test`,
   `//tests:train_parity_test`, and the finite-difference kernel tests.
 
@@ -126,8 +125,8 @@ still runs on the CPU.
 # The oracle and the training trajectory on a simulated H100.
 tools/nanochat simulate --device h100 --suite correctness
 
-# The same on an H200.
-tools/nanochat simulate --device h200 --suite correctness
+# The same on a simulated T4.
+tools/nanochat simulate --device t4 --suite correctness
 ```
 
 The reference engine runs the fp32 build, so every run matches the committed
@@ -289,10 +288,9 @@ satisfy them. The reference engine covers their numerics on the CPU.
 
 ## 6. Part 3: collective path
 
-6.1 The existing seam
+6.1 The seam and its one implementation
 
-The plan does not add a second seam. The seam already exists at
-`src/distributed.h`:
+The simulator adds no second seam. The seam is `src/distributed.h`:
 
 - `DistributedConfig` holds `rank`, `world_size`, `master`, and `port`.
 - `GradientSync` has `rank()`, `world_size()`, and
@@ -300,64 +298,33 @@ The plan does not add a second seam. The seam already exists at
 - `CreateGradientSync(config)` builds the sync. A `world_size` of 1 returns a
   no-op object.
 
-`src/distributed.cc` holds the host reference. The NCCL implementation is
-planned for `backends/cuda/nccl_sync.cu`, and it calls `ncclAllReduce` with
-`ncclSum`. The test is `//backends/cuda:nccl_sync_test`. See
-docs/distributed-design.md sections 4 and 5.
+Two implementations ship. `src/distributed.cc` holds the host reference for the
+CPU backend, and `backends/cuda/collective/native_sync.cu` holds the native ring
+for the CUDA backend. The native ring is the only collective, so the simulator
+needs no collective mock: a vendor library is not in the tree.
+See docs/distributed-design.md sections 4 and 5.
 
 6.2 Collective numerics
 
-The host reference in `src/distributed.cc` computes the real sum. It runs on
-the CPU with no vendor library. The simulator therefore tests the collective
-numerics directly:
+The host reference in `src/distributed.cc` computes the real sum, and the ring
+schedule in `backends/cuda/collective/ring_schedule.cc` computes the same sum
+over a transport. Both run on a central processing unit, so the simulator tests
+the collective numerics directly:
 
-- Run `N` ranks of the host reference.
+- Run `N` ranks over the memory transport.
 - Each rank holds a distinct buffer.
 - Assert that every rank ends with the elementwise sum.
 - Assert the result against an independently computed reference.
 
-This extends the existing `//src:distributed_test` to the simulated profiles.
-The numerical correctness of the seam is already real, not mocked.
+This is `//backends/cuda/collective:schedule_test`, which covers world sizes 1,
+2, 4, and 8 plus the missing-peer timeout. `//src:distributed_test` covers the
+host reference over sockets. Neither needs a card.
 
-6.3 Collective API coverage
+6.3 Multi-rank model
 
-The interposer mocks the collective library with the same method as part 1. The
-NCCL symbols live in weak definitions, so the mock loads without a vendor
-library.
-
-| Symbols | Purpose |
-|---|---|
-| `ncclGetVersion`, `ncclGetErrorString` | Version and error text |
-| `ncclGetUniqueId` | Communicator identity |
-| `ncclCommInitRank`, `ncclCommInitAll`, `ncclCommDestroy`, `ncclCommCount`, `ncclCommUserRank` | Communicator lifecycle |
-| `ncclAllReduce` | The only collective the seam needs today |
-| `ncclBroadcast`, `ncclAllGather`, `ncclReduceScatter`, `ncclReduce` | Reserved for later |
-| `ncclSend`, `ncclRecv`, `ncclGroupStart`, `ncclGroupEnd` | Reserved for later |
-
-6.4 Multi-rank model
-
-The simulator runs `N` ranks as separate processes. This matches the existing
-`src/distributed_test.cc`, which forks processes over loopback TCP. Each rank
-links the same NCCL mock. The environment variables `NANOCHAT_SIM_RANK` and
-`NANOCHAT_SIM_WORLD` identify the rank and the world size. Every rank and the
-coordinator run through `tools/nanochat run t0-cpu -- ...`.
-
-Each rank gets its own simulated device from the profile table. The mock appends
-one JSON record per call to the shared `NANOCHAT_SIM_LOG`. A coordinator reads
-the merged log back (`ReadCollectiveLog`) and checks the cross-rank rules.
-
-| Check | Rule |
-|---|---|
-| Rank consistency | `rank < world_size` on every rank. |
-| Communicator matching | All ranks use the same communicator identity. |
-| Collective matching | Count, data type, operation, and root agree across ranks. |
-| Group nesting | `ncclGroupStart` and `ncclGroupEnd` are balanced. |
-| Buffer range | `count` times the data-type size fits in the rendezvous buffer. |
-| Deadlock | A rank that waits on a collective fails when no peer issues the same call. |
-
-The mock does not model stream *ordering* (it has no stream state; the seam uses
-no streams), so there is no ordering rule. The multi-rank model validates the
-wire protocol that the real pattern must follow.
+A rank is a process, which matches `src/distributed_test.cc`. Every process runs
+through `tools/nanochat run t0-cpu -- ...`. The ring test uses the memory
+transport, so two ranks share one address space and no card is necessary.
 
 ## 7. Part 4: device profile table
 
@@ -553,11 +520,8 @@ tools/nanochat simulate --device h100 --precision fp32 --suite correctness
 # API conformance for the CUDA backend.
 tools/nanochat simulate --device h100 --suite api
 
-# The NCCL mock and the collective API checks.
-tools/nanochat simulate --device h100 --suite collective
-
 # Compile the CUDA backend for the target architecture.
-tools/nanochat simulate --device h200 --mode compile
+tools/nanochat simulate --device h100 --mode compile
 
 # The optional emulated-kernel check.
 tools/nanochat simulate --device h100 --suite kernel
@@ -603,12 +567,10 @@ the Architect / Integrator row.
 | Version script | `tools/cuda_sim/cuda_sim.map` | Simulator |
 | Symbol gate | `tools/cuda_sim/check_symbols.py` | Simulator |
 | Binding canary | `tools/cuda_sim/` | Simulator |
-| Collective mock and coordinator | `tools/cuda_sim/collective/` | Simulator |
 | Device profile header | `include/nanochat/device_profile.h` | Architect |
 | Device profile table | `src/device_profile.cc` | Harness |
 | API-log test | `tests/cuda_sim_test.cc` | Oracle |
 | Reference-engine test | `tests/sim_numerics_test.cc` | Oracle |
-| Collective test | `tests/collective_sim_test.cc` | Oracle |
 | Profile and MFU consistency test | `tests/device_profile_test.cc` | Oracle |
 | Emulation header | `tools/cuda_sim/emu/cuda_emu.h` | Simulator |
 | Emulated-kernel test | `tests/kernel_emu_test.cc` | Oracle |
@@ -653,13 +615,10 @@ the Architect / Integrator row.
 
 12.3 Collective and kernel
 
-11. The NCCL-mock test (`//tests:collective_sim_test`) runs four ranks, merges
-    their `NANOCHAT_SIM_LOG` records, and judges the merged timeline; every rank
-    ends with the elementwise sum. `//src:distributed_test` owns the
-    gradient-sync *seam* numerics; this test does not.
-12. The collective deadlock check fails when one rank skips the all-reduce, and
-    the coordinator rejects an unclosed group and an oversized buffer range.
-13. The emulated kernel matches the CPU reference kernel within tolerance.
+11. The ring schedule test (`//backends/cuda/collective:schedule_test`) runs
+    world sizes 1, 2, 4, and 8 and checks the elementwise sum on every rank. A
+    rank that skips the all-reduce fails with a reported timeout, not a hang.
+12. The emulated kernel matches the CPU reference kernel within tolerance.
 14. The compile gate passes for `sm_90` at fp32.
 
 ## 13. Phasing
@@ -673,13 +632,14 @@ The profile table comes first, because the other engines consume it.
 | 3 | Emulation engine | Device-code numerics |
 | 4 | API interposer for memory, device, and launch | Runtime API conformance |
 | 5 | cuBLAS checks and the legacy-enum report | GEMM API conformance |
-| 6 | Collective numerics and the multi-rank mock | Collective correctness |
+| 6 | Collective numerics and the multi-rank schedule | Collective correctness |
 | 7 | Compile gate and the `doctor` line | Architecture and warning gate |
 | 8 | Documentation and merge-gate wiring | Repeatable check |
 
 Phases 1, 2, 3, 4, 5, 6, and 8 have code and tests. Phase 7 now works:
 `--config=h100` and `--config=h200` exist, and `tools/nanochat simulate
---mode compile` builds the whole CUDA backend for the target architecture.
+--mode compile` builds the whole CUDA backend for the architecture the
+declaration of the named device states.
 The gate enables `-Werror` through `--config=sim-gate`. It records the `ptxas`
 register and shared-memory use in `/tmp/nanochat-sim-ptxas-<device>.log`.
 
@@ -689,7 +649,7 @@ Status by section
 |---|---|
 | 4 Reference engine | Implemented (`//tests:sim_numerics_test`, `--config=sim`) |
 | 5 API interposer | Implemented (`//tools/cuda_sim`, `//tests:cuda_sim_test`) |
-| 6 Collective path | Implemented (`//tools/cuda_sim/collective`, `//tests:collective_sim_test`) |
+| 6 Collective path | Implemented (`//backends/cuda/collective:schedule_test`); no mock is needed |
 | 7 Device profile table | Implemented (`//tests:device_profile_test`) |
 | 8 Compile gate | Configs and command present; `-Werror` and `ptxas` reporting outstanding |
 | 9 Emulation engine | Implemented for RmsNorm and Pointwise |
@@ -704,8 +664,8 @@ Status by section
   control that risk.
 - The real CUDA runtime may load beside the mock. No call reaches it, but the
   load order needs one early test.
-- The collective dependency waits for architect approval. The plan covers the
-  numerics, the mock, and the seam.
+- The collective path needs no mock: the native ring runs on the central
+  processing unit over the memory transport.
 - A functional PTX interpreter, such as GPGPU-Sim, is a non-goal. It is a large
   external dependency, and it does not target CUDA 12 and `sm_90`. The
   emulation engine uses the source, not the PTX.
@@ -733,7 +693,7 @@ Status: partly delivered. Section 13 states each part, and
 [testing.md](testing.md) Part 1, section 6 holds the phase record.
 This document is Part 7 of the simulator work. Parts 1 to 6
 are in [simulator.md](simulator.md): the reference engine, the API interposer,
-the collective mock, the device profile table, the compile gate, and the
+the collective path, the device profile table, the compile gate, and the
 emulation engine.
 
 The subject of this document is the precision coverage. The S0 tier runs the
@@ -794,11 +754,8 @@ Use 0 for every other entry in the table today.
 
 | Device | fp32 | bf16 | fp8 | fp8 support |
 |---|---:|---:|---:|---|
-| h200 | 67.0 TFLOP/s | 989 TFLOP/s | 1,979 TFLOP/s | yes |
 | h100 | 66.9 TFLOP/s | 989 TFLOP/s | 1,979 TFLOP/s | yes |
-| a100 | 19.5 TFLOP/s | 312 TFLOP/s | 0 | no |
 | t4 | 8.1 TFLOP/s | 0 | 0 | no |
-| gtx1080ti | 11.34 TFLOP/s | 0 | 0 | no |
 
 The gate is `//tests:device_profile_test`. Extend it with three assertions:
 
@@ -977,7 +934,8 @@ No change. The reduction operand is fp32, and
 `docs/distributed-design.md` Part 3, section 6 states that rule. Do not reduce an
 fp8 gradient in fp8.
 
-The collective mock already covers the multi-rank case at fp32. Extend nothing.
+The ring schedule test already covers the multi-rank case at fp32. Extend
+nothing.
 
 9. Invariants
 

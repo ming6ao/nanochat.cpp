@@ -2,14 +2,12 @@
 #
 # Layering:
 #   * toolchain: the C++ standard here; the host compiler is host-local;
-#   * arch:      Pascal sm_61 is the default; --config=sm_75 and --config=t4
-#                select Turing (T4), and --config=hopper selects Hopper
-#                (H100) for a hand run;
+#   * arch:      Pascal sm_61 is the default, and --config=hopper selects
+#                Hopper (H100) for a hand run;
 #   * precision: fp32 or bf16 (docs/precision.md), selected by a build define;
 #   * resources: cap the Bazel server and per-server action fan-out so several
 #                agent worktrees cannot exhaust the small shared host.
-# Named configs are additive: `--config=sm_75 --config=sim`. `--config=t4` is
-# the complete Turing CUDA target.
+# Named configs are additive: `--config=hopper --config=sim-gate`.
 
 # --- Toolchain --------------------------------------------------------------
 #
@@ -27,9 +25,10 @@ build --cxxopt=-std=c++20
 
 # --- Architecture -----------------------------------------------------------
 #
-# sm_61 (GTX 1080 Ti) is the default. Named config sm_75 selects Turing (T4).
+# sm_61 (GTX 1080 Ti) is the default. A Turing run passes
+# `--@rules_cuda//cuda:archs=sm_75` itself, because the tree keeps no named
+# config for a card that no build helper names.
 build --@rules_cuda//cuda:archs=sm_61
-build:sm_75 --@rules_cuda//cuda:archs=sm_75
 
 # --- Precision --------------------------------------------------------------
 #
@@ -44,24 +43,21 @@ build:fp8 --define=precision=fp8
 # --- Backend ----------------------------------------------------------------
 #
 # `src/**` links the reference CPU backend by default; `--config=cuda` links
-# the CUDA backend for GPU oracle parity and the sm_75 port. The selection is a
-# build/link decision only -- the workflow sources are compiled once. See
+# the CUDA backend for GPU oracle parity and the Turing port. The selection is
+# a build/link decision only -- the workflow sources are compiled once. See
 # docs/build.md.
 #
-# `--config=cpu` states that default backend and precision together. It is the
-# configuration the Python API documents for the host-only shared library:
-# tools/nanochat build //bindings:nanochat_shared --config=cpu. See
-# docs/python.md.
+# `--define=backend=cpu` is the default and needs no named config; the Python
+# API documents it for the host-only shared library:
+# tools/nanochat build //bindings:nanochat_shared. See docs/python.md.
 build --define=backend=cpu
 build:cuda --define=backend=cuda
-build:cpu --define=backend=cpu
-build:cpu --define=precision=fp32
 
 # --- Collective -------------------------------------------------------------
-# The native ring collective (docs/distributed-native-plan.md section 7).
-# `collective=nccl` is the default; `--config=native` selects the native
-# backend. It is additive with `--config=cuda`.
-build --define=collective=nccl
+# The native ring collective is the one implementation
+# (docs/distributed-design.md). `--config=native` is a documented spelling of
+# that choice; the tree no longer has a second one to select.
+build --define=collective=native
 build:native --define=collective=native
 build:native --define=backend=cuda
 
@@ -75,19 +71,14 @@ build:native --define=backend=cuda
 #   tools/nanochat test //tests:sim_numerics_test --config=sim \
 #       --test_env=NANOCHAT_SIM_PROFILE=h100
 #
-# `a100`, `h100`, and `h200` select bf16 for Ampere and newer devices.
+# `h100` and `h200` select bf16 for the two Hopper devices.
 build:sim --define=simulator=1
 # The compile gate (docs/simulator.md section 8): turn warnings into errors and
 # ask ptxas for the register and shared-memory use. Additive with a device
 # config: `--config=h100 --config=sim-gate`.
 build:sim-gate --define=simulator_gate=1
 
-build:a100 --@rules_cuda//cuda:archs=sm_80
-build:a100 --define=precision=bf16
-build:a100 --define=backend=cuda
-build:a100 --define=collective=native
-build:a100 --define=simulator=1
-
+# Emulator configs: the two Hopper simulator profiles.
 build:h100 --@rules_cuda//cuda:archs=sm_90
 build:h100 --define=precision=bf16
 build:h100 --define=backend=cuda
@@ -102,23 +93,15 @@ build:h200 --define=simulator=1
 
 # --- Host targets -----------------------------------------------------------
 #
-# A complete named target for one host. `t4` is the Turing CUDA build for a
-# Kaggle Notebook (sm_75), at fp32. `hopper` is the Hopper build (sm_90), at
-# bf16. See docs/precision.md.
-build:t4 --@rules_cuda//cuda:archs=sm_75
-build:t4 --define=precision=fp32
-build:t4 --define=backend=cuda
-
 # `hopper` is not `h100`. The `h100` config above is the simulator profile: it
 # sets `--define=simulator=1`, which compiles in the capability override and
-# answers from the device profile table, and it swaps the collective to
-# `native`. `hopper` sets neither, so a hand run builds the real CUDA backend
-# for Hopper at bf16 and keeps the default `nccl` collective, which is what the
-# chain's `world_size=1` expects (docs/pipeline-scaleup-plan.md section 3,
-# trap 1, and section 7). `hopper` is a hand-run shorthand only: the build
-# helper `_build._build_command` still emits its explicit flag triple,
-# `--config=cuda --define=precision=<p> --@rules_cuda//cuda:archs=<a>`, and
-# never a named config, so the Modal H100 leg is the same build either way.
+# answers from the device profile table. `hopper` does not, so a hand run builds
+# the real CUDA backend for Hopper at bf16, which is what the chain's
+# `world_size=1` expects (docs/post-training.md section 3). `hopper` is a
+# hand-run shorthand only: the build helper `_build._build_command` still emits
+# its explicit flag triple, `--config=cuda --define=precision=<p>
+# --@rules_cuda//cuda:archs=<a>`, and never a named config, so the Modal H100
+# leg is the same build either way.
 build:hopper --@rules_cuda//cuda:archs=sm_90
 build:hopper --define=precision=bf16
 build:hopper --define=backend=cuda

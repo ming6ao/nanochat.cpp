@@ -54,17 +54,14 @@
 #include "tests/oracle_fixture.h"
 #include "tests/param_stage.h"
 
-// The promoted fused windowed forward is selected by a backend-internal
-// predicate, `UseFusedAttention(window_left >= 0 && head_dim == 128)`. That
-// symbol is not part of the frozen `nanochat/kernels.h` seam, so the CUDA build
-// declares it here instead of editing the seam. The CPU build never references
-// it; `NANOCHAT_BACKEND_CUDA` comes from `tests/BUILD.bazel`.
+// The promoted fused windowed forward is selected by two backend-internal
+// predicates in `backends/cuda/kernels/attention_dispatch.h`: the fp32 tile and
+// the bf16 tensor-core tile. That header is not part of the frozen
+// `nanochat/kernels.h` seam, so the CUDA build includes it instead of editing
+// the seam. The CPU build never references it; `NANOCHAT_BACKEND_CUDA` comes
+// from `tests/BUILD.bazel`.
 #if defined(NANOCHAT_BACKEND_CUDA)
-namespace nanochat {
-namespace kernels {
-bool UseFusedAttention(const ::nanochat::AttentionParams& params);
-}  // namespace kernels
-}  // namespace nanochat
+#include "backends/cuda/kernels/attention_dispatch.h"
 #endif
 
 namespace {
@@ -803,7 +800,11 @@ bool LayerUsesFusedAttention(const Config& config, int layer) {
   params.head_dim = config.head_dim();
   params.window_left = config.window_left(layer);
 #if defined(NANOCHAT_BACKEND_CUDA)
-  return nanochat::kernels::UseFusedAttention(params);
+  // The backend asks these two predicates in this order, so the test cannot
+  // carry a stale copy of the rule.
+  return nanochat::kernels::FusedAttentionFp32Covers(params) ||
+         nanochat::kernels::FusedAttentionBf16Covers(
+             params, nanochat::kernels::GetCaps().has_tensor_cores);
 #else
   return params.window_left >= 0 && params.head_dim == 128;
 #endif

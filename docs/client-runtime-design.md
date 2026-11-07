@@ -272,7 +272,7 @@ of change.
 
 ## 9. The in-process collective
 
-The in-process collective replaces NCCL and the TCP host reference on one host.
+The in-process collective replaces the TCP host reference on one host.
 
 ### 9.1 Interface
 
@@ -424,7 +424,7 @@ interface.
 - `Mesh` and `PartitionSpec` behave the same.
 - The client sets `CUDA_VISIBLE_DEVICES` and the rank variables per worker.
 - The client uses `tools/nanochat dist` today.
-- The reduction uses NCCL or the native ring.
+- The reduction uses the native ring.
 
 The user program does not change. The runtime backend is a construction option.
 
@@ -535,7 +535,6 @@ checkpoint exists after an interrupt.
 | T0 CPU | `//python:mesh_test` | The mesh, the placement, and the rejection of a bad placement |
 | T0 CPU | `//python:runtime_test` | The mesh runtime client over the C application binary interface |
 | T0 CPU | `//python:mesh_train_test` | The driver client writes the same records as the C++ driver |
-| Simulator | `//tests:collective_sim_test` | The call sequence and the deadlock check |
 | T1 GPU | `//src:runtime_gpu_test` | Two device threads on one card |
 | T2 GPU | A two-device run versus one device | The validation loss matches one device |
 

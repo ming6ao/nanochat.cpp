@@ -41,16 +41,12 @@ config_setting(
 )
 
 # Collective selection (docs/distributed-design.md Part 3, section 7, phase 0).
-# `collective=nccl` is the default until the native path reaches parity;
-# `--config=native` (or `--define=collective=native`) selects the native ring.
+# The native ring is the one implementation, so `--define=collective=native` is
+# the default and the only value. The setting stays so `--config=native`
+# remains a documented spelling of it.
 config_setting(
     name = "collective_native",
     define_values = {"collective": "native"},
-)
-
-config_setting(
-    name = "collective_nccl",
-    define_values = {"collective": "nccl"},
 )
 
 # Simulator selection (docs/simulator.md sections 4.1 and 8). `--config=sim` sets

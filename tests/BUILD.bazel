@@ -878,22 +878,6 @@ cc_test(
     tags = ["sim"],
 )
 
-# Simulator: the collective path. Four rank processes run the NCCL mock, and
-# the run must end with the elementwise sum on every rank; a rank that skips
-# the all-reduce must be reported as a timeout, not a hang (docs/simulator.md
-# section 12.3). CPU only.
-cc_test(
-    name = "collective_sim_test",
-    srcs = ["collective_sim_test.cc"],
-    copts = nanochat_copts(),
-    deps = [
-        "//include/nanochat:nanochat",
-        "//tools/cuda_sim/collective:nccl_mock",
-    ],
-    size = "small",
-    tags = ["sim"],
-)
-
 # Simulator: the API interposer, exercised in process. This is a *mock unit*
 # test: it links //tools/cuda_sim:cuda_sim_interposer_impl directly and drives
 # the mock's own entry points, asserting the named semantic invariants of
@@ -1095,6 +1079,5 @@ test_suite(name = "all", tests = [
     ":cuda_device_prop_abi_test",
     ":sim_numerics_test",
     ":kernel_emu_test",
-    ":collective_sim_test",
     ":cuda_sim_test",
 ])

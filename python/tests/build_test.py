@@ -228,7 +228,8 @@ class BuildCommandTest(unittest.TestCase):
     def test_cpu_command_has_no_arch_flag(self) -> None:
         options = _build.BuildOptions.resolve(backend="cpu", arch="sm_75")
         command = _build._build_command(Path("tools/nanochat"), options)
-        self.assertIn("--config=cpu", command)
+        self.assertIn("--define=backend=cpu", command)
+        self.assertNotIn("--config=cuda", command)
         self.assertNotIn("--@rules_cuda//cuda:archs=sm_75", command)
 
     def test_no_arch_leaves_the_choice_to_bazel(self) -> None:
@@ -266,11 +267,11 @@ class BazelConfigTest(unittest.TestCase):
     """Row 1: the ``hopper`` config, pinned beside the ``h100`` simulator.
 
     ``--config=h100`` is the simulator profile of ``.bazelrc``: it sets
-    ``--define=simulator=1``, which compiles in the capability override, and it
-    swaps the collective to ``native``. ``--config=hopper`` is the hand-run
-    build for a real Hopper card, so it must set neither: the chain runs
-    ``world_size=1`` and keeps the default ``nccl`` collective
-    (``docs/post-training.md`` section 3 trap 1, P7, and section 7).
+    ``--define=simulator=1``, which compiles in the capability override.
+    ``--config=hopper`` is the hand-run build for a real Hopper card, so it must
+    not turn the simulator on (``docs/post-training.md`` section 3 trap 1, P7,
+    and section 7). The native ring is the one collective, so ``h100`` restates
+    it and ``hopper`` inherits it.
     The two stanzas are read in one class, so the pair cannot drift apart
     without a red test.
     """
@@ -317,14 +318,6 @@ class BazelConfigTest(unittest.TestCase):
         self.assertNotEqual(sorted(self.flags("build:hopper")), sorted(flags),
                             "the hopper and h100 stanzas are the same stanza, "
                             "so one of the two names is the other")
-
-    def test_the_t4_host_target_is_untouched_beside_them(self) -> None:
-        """``t4`` is the other complete named target: sm_75 at fp32."""
-        flags = self.flags("build:t4")
-        self.assertIn("--@rules_cuda//cuda:archs=sm_75", flags)
-        self.assertIn("--define=precision=fp32", flags)
-        self.assertIn("--define=backend=cuda", flags)
-
 
 class SearchOrderTest(unittest.TestCase):
     def _clear(self, *names: str) -> dict:
@@ -565,7 +558,7 @@ class BuildStagesTest(unittest.TestCase):
         self.assertEqual(argv[0], "build")
         for target in ("//bindings:nanochat_shared", "//src:nanochat_cli"):
             self.assertIn(target, argv)
-        self.assertIn("--config=cpu", argv)
+        self.assertIn("--define=backend=cpu", argv)
         self.assertIn("--define=precision=fp32", argv)
 
     def test_a_failed_build_names_the_command(self) -> None:

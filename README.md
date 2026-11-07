@@ -69,8 +69,8 @@ tools/nanochat build
 # CUDA backend for the current card.
 tools/nanochat build --config=cuda
 
-# A named target: T4.
-tools/nanochat build --config=t4
+# The Hopper hand-run target.
+tools/nanochat build --config=hopper
 
 # One target.
 tools/nanochat build //src:nanochat_cli
@@ -239,8 +239,8 @@ and choose a host:
   T4 at fp32 and then on an H100 at bf16. `modal deploy tools/modal/app.py`
   deploys the app. See [docs/host-portability.md](docs/host-portability.md)
   section 9.
-- **Kaggle**: two T4 cards, `--config=t4`, and the sandbox backend set to
-  `none`. See [docs/host-portability.md](docs/host-portability.md) section 8.
+- **Kaggle**: two T4 cards, `--config=cuda --@rules_cuda//cuda:archs=sm_75`,
+  and the sandbox backend set to `none`. See [docs/host-portability.md](docs/host-portability.md) section 8.
 - **H100 node**: the memory plan, the batch plan, and the launch are in
   [docs/node-h100.md](docs/node-h100.md).
 

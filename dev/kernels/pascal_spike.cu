@@ -1,7 +1,7 @@
 // P0 CUDA/Pascal toolchain spike. One kernel, compiled for the default sm_61
-// and for sm_75 with --config=sm_75. It exists only to prove that the local
-// CUDA toolkit builds, links, and runs from Bazel on Pascal; the real kernel
-// families land in P1 under backends/cuda/kernels.
+// and for sm_75 with --@rules_cuda//cuda:archs=sm_75. It exists only to prove
+// that the local CUDA toolkit builds, links, and runs from Bazel on Pascal; the
+// real kernel families land in P1 under backends/cuda/kernels.
 
 #include "dev/kernels/pascal_spike.h"
 

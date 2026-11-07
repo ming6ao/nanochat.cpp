@@ -5,7 +5,7 @@
 // receives each rank's buffer, adds them into its own buffer, and broadcasts
 // the result. The other ranks send their buffer and read the sum back. The code
 // uses POSIX sockets only and includes no vendor header, so it is the portable
-// fallback for a host without NCCL.
+// reference for a host without a peer fabric.
 
 #include "src/distributed.h"
 

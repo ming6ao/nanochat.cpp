@@ -45,13 +45,6 @@ use_repo(cuda, "cuda")
 
 register_toolchains("@cuda//toolchain:nvcc-local-toolchain")
 
-# NCCL is a system library. The repository rule in //third_party locates it. A
-# CUDA build selects //backends/cuda:nccl_sync, which needs this repository; a
-# CPU build never reaches it.
-nccl_repository = use_repo_rule("//third_party:nccl.bzl", "nccl_repository")
-
-nccl_repository(name = "nccl")
-
 # libibverbs for the native collective's RDMA transport
 # (docs/distributed-design.md phase 0). The repository is scaffolding: no
 # target depends on it by default, because the transport selection falls back to

@@ -20,7 +20,8 @@ load(
 
 package(default_visibility = ["//visibility:public"])
 
-# One kernel, compiled for the default sm_61 (and sm_75 via --config=sm_75).
+# One kernel, compiled for the default sm_61 (and sm_75 via
+# --@rules_cuda//cuda:archs=sm_75).
 cuda_library(
     name = "pascal_spike",
     srcs = ["pascal_spike.cu"],

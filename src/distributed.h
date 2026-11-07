@@ -13,8 +13,9 @@
 //
 // This header includes only `nanochat/tensor.h` and the standard library. The
 // factory lives in a backend: the host reference in `src/distributed.cc` for
-// the CPU build, and NCCL in `backends/cuda/nccl_sync.cu` for the CUDA build.
-// No vendor header is reachable here.
+// the CPU build, and the native ring in
+// `backends/cuda/collective/native_sync.cu` for the CUDA build. No vendor
+// header is reachable here.
 
 namespace nanochat {
 

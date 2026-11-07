@@ -117,17 +117,6 @@ def find_bazel() -> str:
     raise AssertionError("unreachable")
 
 
-def have_nccl() -> bool:
-    """True when the host has the NCCL headers. See third_party/nccl.bzl."""
-    prefixes = []
-    override = os.environ.get("NANOCHAT_NCCL_PATH")
-    if override:
-        prefixes.append(override)
-    prefixes += ["/usr", "/usr/local", "/opt/nccl"]
-    return any((Path(prefix) / "include" / "nccl.h").is_file()
-               for prefix in prefixes)
-
-
 def with_build_lock(argv: list[str], stdout=None, stderr=None) -> int:
     """Run ``argv`` under the build lock.
 
@@ -246,8 +235,6 @@ def _test_argv(argv: list[str]) -> list[str]:
         # A GPU run selects the CUDA backend, so the shared workflow
         # (//src:model) links the kernels under test. One action at a time.
         arguments += ["--config=cuda", "--local_test_jobs=1"]
-        if not have_nccl():
-            arguments.append("--config=native")
     return ["test", *arguments]
 
 
@@ -824,17 +811,18 @@ def _tail(path: str, count: int) -> list[str]:
         return [line.rstrip("\n") for line in handle.readlines()[-count:]]
 
 
-def declared_device_names() -> list[str]:
-    """The device names the tree declares, read from `backends/*/caps.json`.
+def declared_devices() -> dict:
+    """The accelerator declarations, read from `backends/*/caps.json`.
 
     The declaration is the one source of the device set: a simulated run, a
-    roofline report, and a benchmark all name a device this list holds. Reading
-    it here keeps the command line from carrying a second copy that drifts from
-    the declarations, which is what a hard-coded tuple did
-    (docs/simulator.md section 7).
+    roofline report, and a benchmark all name a device this mapping holds.
+    Reading it here keeps the command line from carrying a second copy that
+    drifts from the declarations, which is what a hard-coded tuple did
+    (docs/simulator.md section 7). The mapping keeps the file order, so the
+    `devices` report is stable.
     """
     import json
-    names: list[str] = []
+    found: dict = {}
     for path in sorted(REPO_ROOT.glob("backends/*/caps.json")):
         try:
             with open(path, encoding="utf-8") as handle:
@@ -844,20 +832,26 @@ def declared_device_names() -> list[str]:
         for device in body.get("devices", []):
             name = device.get("name")
             if isinstance(name, str) and name and device.get("is_device"):
-                names.append(name)
-    return names
+                found[name] = device
+    return found
+
+
+def declared_device_names() -> list[str]:
+    """The device names the tree declares, in declaration order."""
+    return list(declared_devices())
+
+
 SIM_SUITES = {
     "correctness": ["//tests:oracle_test", "//tests:train_parity_test",
                     "//tests:sim_numerics_test", "//tests:numerics_trace_test"],
     "fp8-fast": ["//tests:fp8_rounding_test", "//tests:fp8_gemm_test",
                  "//tests:fp8_graph_test", "//tests:device_profile_test"],
-    "collective": ["//tests:collective_sim_test"],
     "kernel": ["//tests:kernel_emu_test"],
     "profile": ["//tests:device_profile_test"],
     "all": ["//tests:oracle_test", "//tests:train_parity_test",
             "//tests:sim_numerics_test", "//tests:numerics_trace_test",
             "//tests:fp8_rounding_test", "//tests:fp8_gemm_test",
-            "//tests:fp8_graph_test", "//tests:collective_sim_test",
+            "//tests:fp8_graph_test",
             "//tests:kernel_emu_test", "//tests:device_profile_test"],
 }
 SIM_GATE_TARGETS = ["//backends/cuda:all_kernels",
@@ -905,10 +899,19 @@ def cmd_simulate(argv: list[str], ctx: Context) -> int:
         die(f"simulate: unknown device '{device}' ({' '.join(devices)})")
 
     if mode == "compile":
+        # The gate builds for the declared card, so the architecture and the
+        # precision come from the declaration rather than from a named config.
+        # The tree keeps one config per device family that a hand run uses, and
+        # this mode must work for every declared device.
+        declaration = declared_devices()[device]
+        arch = f"sm_{declaration['compute_major']}{declaration['compute_minor']}"
+        precision_name = declaration.get("reference_precision", "fp32")
         ptxas_log = os.environ.get(
             "NANOCHAT_SIM_PTXAS_LOG", f"/tmp/nanochat-sim-ptxas-{device}.log")
-        gate_argv = ["build", f"--config={device}", "--config=sim-gate",
-                     *SIM_GATE_TARGETS]
+        gate_argv = ["build", "--config=cuda",
+                     f"--@rules_cuda//cuda:archs={arch}",
+                     f"--define=precision={precision_name}",
+                     "--config=sim-gate", *SIM_GATE_TARGETS]
         if ctx.dry_run:
             ctx.plan("bazel", "bazel", *gate_argv)
             return 0

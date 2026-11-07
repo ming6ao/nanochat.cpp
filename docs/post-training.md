@@ -1150,9 +1150,9 @@ Each leg mirrors what the single leg did:
   absent, so two legs with different memory would get different host budgets,
   and gate G2 compares the two base step times: the shared `cpu=` is what makes
   that comparison meaningful.
-- Both legs keep the default collective, `nccl`, because the chain runs
-  `world_size=1`. The H100 leg must not use the `h100` named config, which is the
-  simulator profile and swaps the collective to `native`. The `hopper` config of
+- Both legs link the native ring, which is the one collective, and the chain
+  runs `world_size=1`. The H100 leg must not use the `h100` named config, which
+  is the simulator profile. The `hopper` config of
   [build.md](build.md) is the same build as the flag triple of the table above,
   and the build helper still emits the triple, never a named config.
 - `pipeline_demo` runs the T4 leg first, under the run id `<run_id>-t4`, then
@@ -1192,8 +1192,8 @@ The Modal image of `tools/modal/app.py` pins one compiled backend:
 A container with no card therefore fails inside `nanochat_init`, and
 `_check_cards` calls `nvidia-smi`, which does not exist there.
 
-So a CPU leg needs a second image whose build passes `--config=cpu` and whose
-function omits `gpu=`. Do not add a CPU branch to `tools/modal/app.py`. Keep the
+So a CPU leg needs a second image whose build states `--define=backend=cpu` and
+whose function omits `gpu=`. Do not add a CPU branch to `tools/modal/app.py`. Keep the
 two images apart, because one Bazel output base holds only one build of
 `libnanochat_shared.so`.
 
@@ -1439,9 +1439,9 @@ The build helper emits the flag triple of the table today
 (`_build._build_command`). It never emits a named config. The `hopper` config of
 P7 is a shorthand for a hand run only.
 
-Both legs keep the default collective, `nccl`, because the chain runs
-`world_size=1`. The `h100` simulator config would change the collective to
-native; the hardware leg must not use it.
+Both legs link the native ring, which is the one collective, and the chain runs
+`world_size=1`. The `h100` simulator config would answer the capabilities from
+the declaration; the hardware leg must not use it.
 
 The rest of the change:
 
