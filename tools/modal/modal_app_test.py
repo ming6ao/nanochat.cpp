@@ -184,8 +184,43 @@ class AppTest(unittest.TestCase):
     def test_the_demo_is_a_local_entry_point(self) -> None:
         _module, sdk = _load_app(with_sdk=True)
         self.assertEqual(sdk.local_entrypoints,
-                         ["attention_check", "attention_bench", "profile_stage",
-                          "measure_stage", "profile_demo", "pipeline_demo"])
+                         ["card_job", "profile_stage", "measure_stage",
+                          "profile_demo", "pipeline_demo"])
+
+    def test_the_card_job_table_names_the_four_gates(self) -> None:
+        # One entrypoint serves the gates and benchmarks of the two tensor-core
+        # families. The table is the list a caller can spell, and each row holds
+        # the Function the image built.
+        module, _sdk = _load_app(with_sdk=True)
+        self.assertEqual(sorted(module.CARD_JOBS),
+                         ["attention_bench", "attention_check", "gemm_bench",
+                          "gemm_check"])
+        self.assertEqual(module.CARD_JOBS["gemm_check"].job.__name__,
+                         "check_gemm_h100")
+        self.assertEqual(module.CARD_JOBS["gemm_bench"].job.__name__,
+                         "bench_gemm_h100")
+        self.assertEqual(module.CARD_JOBS["attention_check"].job.__name__,
+                         "check_attention_h100")
+        self.assertEqual(module.CARD_JOBS["attention_bench"].job.__name__,
+                         "bench_attention_h100")
+        for name in ("gemm_bench", "attention_bench"):
+            self.assertTrue(module.CARD_JOBS[name].takes_argv)
+        for name in ("gemm_check", "attention_check"):
+            self.assertFalse(module.CARD_JOBS[name].takes_argv)
+
+    def test_the_card_job_lists_its_names_and_refuses_an_unknown_one(self) -> None:
+        module, _sdk = _load_app(with_sdk=True)
+        listed = io.StringIO()
+        with mock.patch("sys.stdout", listed):
+            module.card_job("")
+        for name in module.CARD_JOBS:
+            self.assertIn(name, listed.getvalue())
+        refused = io.StringIO()
+        with mock.patch("sys.stderr", refused):
+            with self.assertRaises(SystemExit) as raised:
+                module.card_job("no_such_job")
+        self.assertEqual(raised.exception.code, 2)
+        self.assertIn("no_such_job", refused.getvalue())
 
     def test_the_contract_names_match_the_client(self) -> None:
         import target
@@ -759,8 +794,10 @@ class PipelineTest(_RemoteFixture):
     def test_the_functions_are_declared(self) -> None:
         names = [keywords["name"] for keywords in self.sdk.function_calls]
         self.assertEqual(sorted(names), ["bench_attention_h100",
+                                         "bench_gemm_h100",
                                          "bench_h100",
-                                         "check_attention_h100", "corpus",
+                                         "check_attention_h100",
+                                         "check_gemm_h100", "corpus",
                                          "doctor",
                                          "measure_stage_h100",
                                          "measure_stage_t4", "pipeline",

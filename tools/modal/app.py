@@ -56,14 +56,17 @@ Deploy and check it once, from a workstation or a notebook:
     modal deploy tools/modal/app.py
     modal run tools/modal/app.py::doctor
     modal run tools/modal/app.py::pipeline_demo
+    modal run tools/modal/app.py::card_job --name gemm_check
 
-The last line runs both legs of one job, the T4 leg first, and prints one
-document with three keys: ``legs`` (each leg's report summary), ``comparison``
-(the cross-leg step-time ratio and the recorded MFU), and ``gates`` (G1 to G3
-with pass or fail and the numbers each one read). It exits non-zero when a
-gate fails, and a leg that fails still leaves the other leg's summary in the
-document. Each leg writes its own run directory on the ``nanochat-runs``
-Volume, at ``<run_id>-t4`` and ``<run_id>-h100``.
+``card_job`` is the one entrypoint of the four gates and benchmarks: a name
+selects the job, and the answer prints. ``pipeline_demo`` runs both legs of one
+job, the T4 leg first, and prints one document with three keys: ``legs`` (each
+leg's report summary), ``comparison`` (the cross-leg step-time ratio and the
+recorded MFU), and ``gates`` (G1 to G3 with pass or fail and the numbers each
+one read). It exits non-zero when a gate fails, and a leg that fails still
+leaves the other leg's summary in the document. Each leg writes its own run
+directory on the ``nanochat-runs`` Volume, at ``<run_id>-t4`` and
+``<run_id>-h100``.
 
 The client in ``notebooks/target.py`` uploads the job inputs and spawns
 ``train`` or ``pipeline``. The run directory arrives on the ``nanochat-runs``
@@ -190,14 +193,26 @@ ATTENTION_TEST_TARGET = "//backends/cuda/kernels:attention_gpu_test"
 ATTENTION_BENCH_BIN = _bazel_bin(ATTENTION_BENCH_TARGET)
 ATTENTION_TEST_BIN = _bazel_bin(ATTENTION_TEST_TARGET)
 
+#: The hand tensor-core GEMM and its two card jobs
+#: (``docs/tensor-core-gemm-plan.md`` sections B4 and B5). The tile is bf16
+#: only, so the H100 leg is the one image that can build it: the T4 leg is
+#: fp32 and leaves the tile out. One job runs the device gate, which compares
+#: the tile with cuBLAS; the other reports the sweep and the fraction of the
+#: cuBLAS rate that the promotion gate reads.
+GEMM_BENCH_TARGET = "//backends/cuda/gemm:gemm_benchmark"
+GEMM_TEST_TARGET = "//backends/cuda/gemm:gemm_gpu_test"
+GEMM_BENCH_BIN = _bazel_bin(GEMM_BENCH_TARGET)
+GEMM_TEST_BIN = _bazel_bin(GEMM_TEST_TARGET)
+
 #: The labels the one build of an image names: the shared library, the stage
 #: binary the chain launches (``docs/post-training.md`` B6 and D2), the
 #: tokenizer trainer the corpus function runs, the optimizer benchmark
-#: :func:`bench_h100` times, and the two attention jobs. The roofline tool and
-#: the trainer are the same program and the same label, so each appears once.
+#: :func:`bench_h100` times, the two attention jobs, and the two hand GEMM jobs.
+#: The roofline tool and the trainer are the same program and the same label,
+#: so each appears once.
 BUILD_TARGETS = ("//bindings:nanochat_shared", *STAGE_TARGETS,
                  TOKENIZER_TARGET, BENCH_TARGET, ATTENTION_BENCH_TARGET,
-                 ATTENTION_TEST_TARGET)
+                 ATTENTION_TEST_TARGET, GEMM_BENCH_TARGET, GEMM_TEST_TARGET)
 
 #: The directory of the image build that holds them, and the variables that
 #: name them. ``nanochat_cpp._build.stage_binary`` prefers the override, and
@@ -951,6 +966,51 @@ def bench_attention_h100(argv_json: str = "[]") -> str:
     """
     return _run_in_image(["tools/nanochat", "bench", "--",
                           ATTENTION_BENCH_BIN], argv_json, ("attention:",))
+
+
+@app.function(
+    image=image_for(H100),
+    gpu=H100.gpu,
+    cpu=CPU_CORES,
+    timeout=1800,
+    max_containers=1,
+)
+def check_gemm_h100() -> str:
+    """Run the hand tensor-core GEMM device gate on the H100 leg.
+
+    The image built the test from the same source and the same flags as the
+    library, so this is the bf16 tile of ``backends/cuda/gemm/`` measured
+    against cuBLAS on the card it targets: every contract case of
+    ``docs/tensor-core-gemm-plan.md`` section B.2, and every schedule of the
+    sweep (section B.4). A T4 image would refuse the run, because the tile is
+    compiled only in a bf16 build.
+    """
+    return _run_in_image(["tools/nanochat", "run", "t1-gpu", "--",
+                          GEMM_TEST_BIN], "[]", ())
+
+
+@app.function(
+    image=image_for(H100),
+    gpu=H100.gpu,
+    cpu=CPU_CORES,
+    timeout=1800,
+    max_containers=1,
+)
+def bench_gemm_h100(argv_json: str = "[]") -> str:
+    """Time the hand tensor-core GEMM against cuBLAS on the H100 leg.
+
+    The mirror of :func:`bench_attention_h100` for the hand GEMM. The report
+    holds one row per shape of the closed list, twice: once with the tile and
+    once with cuBLAS, through the shipped ``kernels::Gemm`` and the
+    ``NANOCHAT_GEMM_LIB`` switch, so the ratio of the two is the fraction the
+    promotion gate reads (``docs/tensor-core-gemm-plan.md`` section B.5).
+
+    ``argv_json`` is a JSON list of the benchmark's own arguments, such as
+    ``["--schedule", "all", "--json"]``, so a caller sweeps the five schedules
+    without a new deployment.
+    """
+    return _run_in_image(["tools/nanochat", "bench", "--", GEMM_BENCH_BIN],
+                         argv_json, ("gemm:",))
 
 
 def chain_dir(run_root, job) -> Path:
@@ -2483,31 +2543,60 @@ def _print_answer(answer_json: str, what: str) -> None:
         raise SystemExit(1)
 
 
+#: One thing the card entrypoint can run: the Modal Function, the message a
+#: failure prints, and whether the job reports a JSON document of its own
+#: arguments.
+@dataclass(frozen=True)
+class CardJob:
+    job: object
+    what: str
+    takes_argv: bool = False
+
+
+#: The four card jobs, by the name a command spells. Each one is the gate or the
+#: benchmark of one tensor-core family: the tile's own test against its
+#: reference, and the rate report whose rows a promotion gate reads.
+CARD_JOBS = {
+    "attention_check": CardJob(check_attention_h100, "the attention test"),
+    "attention_bench": CardJob(bench_attention_h100, "the attention benchmark",
+                               takes_argv=True),
+    "gemm_check": CardJob(check_gemm_h100, "the hand GEMM device gate"),
+    "gemm_bench": CardJob(bench_gemm_h100, "the hand GEMM benchmark",
+                          takes_argv=True),
+}
+
+
 @app.local_entrypoint()
-def attention_check() -> None:
-    """Run the attention family test on the H100 leg and print its output.
+def card_job(name: str = "", argv: str = "[]") -> None:
+    """Run one card job on the H100 leg and print its answer.
 
-        modal run tools/modal/app.py::attention_check
+        modal run tools/modal/app.py::card_job
+        modal run tools/modal/app.py::card_job --name gemm_check
+        modal run tools/modal/app.py::card_job --name gemm_bench \\
+            --argv '["--schedule","all","--json"]'
 
-    The test binary comes from the same build as the library, so the bf16
-    tensor-core tile of ``docs/attention.md`` Part 6 runs against the host
-    reference on the card the tile targets.
+    One entrypoint serves the four gates and benchmarks, because the wrapper is
+    the whole point and it is the same for all four: print the answer and turn a
+    non-zero status into a failed run. A ``modal run`` of a Function target does
+    neither. ``argv`` is a JSON list of the job's own arguments, for the two
+    jobs that report a document, and a name the table does not hold is refused
+    with the list.
     """
-    _print_answer(check_attention_h100.remote(), "the attention test")
-
-
-@app.local_entrypoint()
-def attention_bench(argv: str = "[]") -> None:
-    """Time the attention benchmark on the H100 leg and print its rows.
-
-        modal run tools/modal/app.py::attention_bench
-        modal run tools/modal/app.py::attention_bench --argv '["--json"]'
-
-    Every row belongs to the library the image built: ``sm_90`` at bf16, which
-    is the build where the tensor-core tile replaces the dense cuBLAS forward
-    on the windowed layers.
-    """
-    _print_answer(bench_attention_h100.remote(argv), "the attention benchmark")
+    if not name:
+        print("card jobs: " + ", ".join(CARD_JOBS))
+        return
+    entry = CARD_JOBS.get(name)
+    if entry is None:
+        print(f"modal: unknown card job {name!r}; the jobs are "
+              + ", ".join(CARD_JOBS), file=sys.stderr)
+        raise SystemExit(2)
+    if entry.takes_argv:
+        _print_answer(entry.job.remote(argv), entry.what)
+        return
+    if argv != "[]":
+        print(f"modal: {name} takes no --argv", file=sys.stderr)
+        raise SystemExit(2)
+    _print_answer(entry.job.remote(), entry.what)
 
 
 @app.local_entrypoint()
