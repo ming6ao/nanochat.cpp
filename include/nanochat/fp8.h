@@ -2,7 +2,7 @@
 #define NANOCHAT_FP8_H_
 
 // The 8-bit floating point conversion, in one place
-// (docs/fp8-training.md section 4.1, docs/simulator.md Part 7, section 4).
+// (docs/precision.md Part 1, section 4.1, docs/simulator.md Part 7, section 4).
 //
 // The CPU reference backend and the emulation engine both include this header,
 // so the two agree by construction. The device kernels use the CUDA conversion
@@ -121,7 +121,7 @@ inline float Decode(std::uint8_t bits, int mantissa_bits, int bias,
 
 }  // namespace fp8_detail
 
-// E4M3: the forward operand format (docs/fp8-training.md section 3.1).
+// E4M3: the forward operand format (docs/precision.md Part 1, section 3.1).
 inline std::uint8_t Fp8E4M3Encode(float value) {
   return fp8_detail::Encode(value, /*mantissa_bits=*/3, /*bias=*/7,
                             /*min_exponent=*/-6, kFp8E4M3MaxCode, kFp8E4M3NaN);
@@ -138,7 +138,7 @@ inline float Fp8E4M3Round(float value) {
   return Fp8E4M3Decode(Fp8E4M3Encode(value));
 }
 
-// E5M2: the backward operand format (docs/fp8-training.md section 3.1).
+// E5M2: the backward operand format (docs/precision.md Part 1, section 3.1).
 inline std::uint8_t Fp8E5M2Encode(float value) {
   return fp8_detail::Encode(value, /*mantissa_bits=*/2, /*bias=*/15,
                             /*min_exponent=*/-14, kFp8E5M2MaxCode, kFp8E5M2NaN);

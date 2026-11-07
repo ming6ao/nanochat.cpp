@@ -6,7 +6,7 @@
 #include <string>
 #include <string_view>
 
-// Thrift compact protocol decoder (docs/parquet-native.md). Parquet stores its
+// Thrift compact protocol decoder (docs/data.md). Parquet stores its
 // file metadata and page headers as Thrift compact structs. The decoder reads
 // the fields it needs and skips the rest, so an added upstream field does not
 // break the reader.

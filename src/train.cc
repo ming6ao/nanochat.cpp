@@ -294,7 +294,7 @@ bool Checkpointer::SaveModel(const Model& model, const Optimizer* optimizer,
   if (optimizer != nullptr) SaveOptimizerState(*optimizer, &checkpoint);
   // The step also rides in the optimizer section, so a resume continues the
   // schedule from it instead of restarting the warmup
-  // (docs/distributed-design.md Part 2, section 10). A step of zero means no
+  // (docs/distributed.md Part 1, section 6). A step of zero means no
   // step is known; the record and the metadata field are then both omitted.
   if (options.step > 0) {
     if (options.step >
@@ -479,7 +479,7 @@ TrainConfig TrackThreeBaseline() {
 namespace {
 
 // Builds the document-mode loader factory. Each call opens the parquet dataset
-// again, so `DataLoader::Reset` can cycle epochs (docs/parquet-native.md).
+// again, so `DataLoader::Reset` can cycle epochs (docs/data.md).
 DocumentSourceFactory MakeParquetFactory(std::vector<std::string> files,
                                          std::string column) {
   return [files = std::move(files), column = std::move(column)](
@@ -531,11 +531,11 @@ TrainLoop::TrainLoop(TrainConfig config) : config_(std::move(config)) {
   }
   resume_step_ = resume_step;
   // Start the terminal-save counter at the resumed step, so a run that
-  // performs no step keeps the stored step record (docs/distributed-design.md
+  // performs no step keeps the stored step record (docs/distributed.md
   // section 10).
   last_step_ = resume_step;
   // The data cursor rides beside the checkpoint
-  // (docs/distributed-design.md section 11). A missing sidecar leaves both at
+  // (docs/distributed.md section 11). A missing sidecar leaves both at
   // 0, so the run starts the epoch from the beginning.
   if (resumed) {
     ReadDataCursor(config_.resume_path, &resume_state_);
@@ -545,7 +545,7 @@ TrainLoop::TrainLoop(TrainConfig config) : config_(std::move(config)) {
 
   // The gradient sync. Rank 0 binds (or a single rank gets a no-op), so the
   // constructor does not wait for a peer; the accept is deferred to the first
-  // step. See docs/distributed-design.md section 6.
+  // step. See docs/distributed.md section 6.
   DistributedConfig distributed;
   distributed.rank = config_.rank;
   distributed.world_size = config_.world_size;
@@ -555,7 +555,7 @@ TrainLoop::TrainLoop(TrainConfig config) : config_(std::move(config)) {
   if (sync_ == nullptr) {
     // A world size above 1 without a sync would train each rank on its own
     // shard and save divergent checkpoints. Stop instead
-    // (docs/distributed-design.md section 6).
+    // (docs/distributed.md section 6).
     if (config_.world_size > 1) {
       std::fprintf(stderr,
                    "train: cannot create the gradient sync for world_size %d\n",
@@ -575,7 +575,7 @@ TrainLoop::TrainLoop(TrainConfig config) : config_(std::move(config)) {
         config_.train_source
             ? config_.train_source
             : MakeParquetFactory(config_.train_parquet, config_.text_column);
-    // Shard documents by rank (docs/distributed-design.md section 7). A resume
+    // Shard documents by rank (docs/distributed.md section 7). A resume
     // hands the stored source position to the loader's first source, which is
     // the stored epoch's: the constructor primes the epoch and the encoded
     // buffer from the cursor, so the packing continues where it stopped. The
@@ -729,7 +729,7 @@ float TrainLoop::Run() {
   const int accum = config_.grad_accum > 0 ? config_.grad_accum : 1;
   // One optimizer step consumes `accum` micro-batches of `batch` sequences, so
   // the throughput must count every micro-batch
-  // (docs/distributed-design.md section 6). The old record counted one.
+  // (docs/distributed.md section 6). The old record counted one.
   const std::int64_t tokens_per_step =
       static_cast<std::int64_t>(batch) * seq * accum;
   const int first_step = resume_step_ + 1;
@@ -787,7 +787,7 @@ float TrainLoop::Run() {
   }
 
   // A resume continues the schedule from the stored step, so the learning-rate
-  // warmup does not replay (docs/distributed-design.md Part 2, section 10).
+  // warmup does not replay (docs/distributed.md Part 1, section 6).
   // `num_iterations` is absolute.
   for (int step = first_step; step <= config_.num_iterations; ++step) {
     // Gradient accumulation: sum `grad_accum` micro-batch gradients (each
@@ -797,12 +797,12 @@ float TrainLoop::Run() {
     // The model's loss is a mean, so each rank holds the mean over its own
     // batch. The backward carries 1/world_size as well, and the all-reduce sum
     // below then gives the mean over the global batch. That equals the
-    // one-rank update (docs/distributed-design.md section 6).
+    // one-rank update (docs/distributed.md section 6).
     const float backward_scale =
         DistributedBackwardScale(accum, config_.world_size);
 
     // The phase split of one optimizer step
-    // (docs/distributed-design.md section 6). The device is synchronized at
+    // (docs/distributed.md section 6). The device is synchronized at
     // each phase boundary, so the device
     // time lands in the phase that issued it instead of in the next phase's
     // first blocking copy. The CPU backend's `Synchronize` is a no-op.
@@ -860,7 +860,7 @@ float TrainLoop::Run() {
     }
     // Sum the gradients across every rank before the step. The clip then sees
     // the global mean gradient. A world size of 1 is a no-op
-    // (docs/distributed-design.md section 6).
+    // (docs/distributed.md section 6).
     const auto sync_start = mark();
     AllReduceGradients();
     const auto sync_end = mark();

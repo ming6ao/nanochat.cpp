@@ -83,7 +83,7 @@ genrule(
     cmd = "sed -E 's/extern __shared__ +([A-Za-z_][A-Za-z0-9_]*) +([A-Za-z_][A-Za-z0-9_]*)\\[\\];/\\1* \\2 = static_cast<\\1*>(::nanochat::emu::DynamicShared());/' $< > $@",
 )
 
-# The fused Muon path (docs/muon-fused-kernel.md). A plain copy: the kernel
+# The fused Muon path (docs/kernels.md). A plain copy: the kernel
 # declares its two GEMM tile stages and its two reduction scratch arrays as
 # static `__shared__`, which the mapping in `cuda_emu.h` already covers, so no
 # `extern __shared__` rewrite is needed here. The driver selection inside the

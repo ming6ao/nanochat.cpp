@@ -99,7 +99,7 @@ Config D12Config() {
   return config;
 }
 
-// The depth-24 run shape of docs/node-h100.md.
+// The depth-24 run shape of docs/host-portability.md Part 1.
 Config D24Config() {
   Config config;
   config.num_layers = 24;
@@ -129,7 +129,8 @@ void TestCounterSum() {
       ExpectTrue(field >= 0.0, "every counter field is non-negative");
     }
   }
-  // The depth-24 arithmetic matches the value recorded in docs/node-h100.md.
+  // The depth-24 arithmetic matches the value recorded in
+  // docs/host-portability.md Part 1.
   ExpectNear(nanochat::EstimateFlopsPerToken(D24Config()), 4.775e9, 5e6,
              "depth-24 FLOP/token");
 }

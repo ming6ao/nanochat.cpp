@@ -192,32 +192,32 @@ class Metrics(ctypes.Structure):
 
 class MeshTrainDataConfig(ctypes.Structure):
     """A mirror of ``nanochat_mesh_data_config``: the dataset and the
-    tokenizer (docs/client-runtime-design.md section 10.1).
+    tokenizer (docs/distributed.md section 10.1).
     """
 
 
 class MeshTrainRunConfig(ctypes.Structure):
     """A mirror of ``nanochat_mesh_run_config``: the step loop
-    (docs/client-runtime-design.md section 10.1).
+    (docs/distributed.md section 10.1).
     """
 
 
 class MeshTrainOutputConfig(ctypes.Structure):
     """A mirror of ``nanochat_mesh_output_config``: the written artifacts
-    (docs/client-runtime-design.md section 10.1).
+    (docs/distributed.md section 10.1).
     """
 
 
 class MeshTrainConfig(ctypes.Structure):
     """A mirror of ``nanochat_mesh_train_config``
-    (docs/client-runtime-design.md section 10.1). The caller owns every
+    (docs/distributed.md section 10.1). The caller owns every
     pointer, the mesh handle, and the struct, so the C call reads it only.
     """
 
 
 class MeshTrainSummary(ctypes.Structure):
     """A mirror of ``nanochat_mesh_train_summary``
-    (docs/client-runtime-design.md section 10.1). The caller owns the struct,
+    (docs/distributed.md section 10.1). The caller owns the struct,
     so ``checkpoint`` is a fixed buffer and not an owned pointer.
     """
 

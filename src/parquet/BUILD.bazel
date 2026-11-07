@@ -1,4 +1,4 @@
-# src/parquet/ -- the native parquet host package (docs/parquet-native.md). It
+# src/parquet/ -- the native parquet host package (docs/data.md). It
 # reads the corpus without DuckDB: a Thrift compact decoder, the parquet
 # metadata structs, the RLE and bit-packed level decoder, and the file reader.
 #
@@ -13,7 +13,7 @@ package(default_visibility = ["//visibility:public"])
 
 # The native parquet reader. It supports the exact shape that the corpus writer
 # emits: one OPTIONAL BYTE_ARRAY column, ZSTD, DATA_PAGE v1, PLAIN values, and
-# RLE definition levels. Every other feature is rejected (docs/parquet-native.md).
+# RLE definition levels. Every other feature is rejected (docs/data.md).
 cc_library(
     name = "parquet",
     srcs = [

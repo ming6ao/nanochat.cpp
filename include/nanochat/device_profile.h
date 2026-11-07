@@ -59,7 +59,7 @@ struct DeviceProfile {
   double reference_peak_flops = 0.0;
   BuildPrecision reference_precision = BuildPrecision::kFp32;
   // The E4M3/E5M2 tensor-core path. Ada reports 8.9 and Hopper reports 9.0;
-  // Ampere and older have no fp8 mode (docs/fp8-training.md section 5.3).
+  // Ampere and older have no fp8 mode (docs/precision.md Part 1, section 5.3).
   bool supports_fp8 = false;
 
   // Dense (non-sparse) peak rates. The fp32 rate is the CUDA-core rate; the

@@ -73,7 +73,7 @@ inline void AppendCsv(std::string_view text, std::vector<std::string>* out) {
 
 // Reads an integer environment variable, returning `fallback` when it is
 // unset or unparseable. The launcher sets the `NANOCHAT_*` variables in the
-// style of `torchrun` (docs/distributed-design.md Part 1, section 4).
+// style of `torchrun` (docs/distributed.md section 10, section 4).
 //
 // `name` stays a `const char*` because `std::getenv` takes a C string.
 inline int EnvInt(const char* name, int fallback) {

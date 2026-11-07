@@ -7,7 +7,7 @@
 #include <vector>
 
 // Parquet metadata structs and their Thrift compact parsers
-// (docs/parquet-native.md). Only the fields the reader uses are kept; the
+// (docs/data.md). Only the fields the reader uses are kept; the
 // parser skips every other field.
 
 namespace nanochat {

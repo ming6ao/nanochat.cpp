@@ -1,5 +1,16 @@
 # Build
 
+One Bazel workspace builds every host and every precision. `tools/nanochat`
+selects the configuration, applies the sandbox, and runs the command.
+
+```bash
+tools/nanochat build                      # the default fp32 build
+tools/nanochat build --config=bf16        # the bf16 compute type
+tools/nanochat build --config=hopper      # sm_90
+tools/nanochat test                       # every non-GPU test
+tools/nanochat lint                       # the style gate
+```
+
 ## Layers
 
 Dependencies point strictly downward. There is exactly one interchangeable
@@ -28,7 +39,7 @@ The build graph enforces these five rules.
    `backends/`, with one exception: `src/parquet/` is the one host package that
    may include the host-only ZSTD header.** The model, the kernels, and the
    training runtime never link DuckDB. Parquet input uses the native reader
-   ([parquet-native.md](parquet-native.md)).
+   ([data.md](data.md)).
 2. `backends/**` includes only `nanochat/kernels.h` and `nanochat/tensor.h`.
    **A kernel knows nothing about the model.** One additive exception exists for
    the simulator: a backend may include `nanochat/device_profile.h`, a leaf
@@ -98,7 +109,7 @@ nanochat.cpp/
     nanochat_cli.cc  command.h  commands.cc  cli.h  cli.cc
     *_command.cc
     plan_main.cc               # the probe `doctor` prints; alone on purpose
-    parquet/                   # the native parquet reader (docs/parquet-native.md)
+    parquet/                   # the native parquet reader (docs/data.md)
       thrift.{h,cc}  format.{h,cc}  levels.{h,cc}  reader.{h,cc}
       *_test.cc  testdata/text.parquet
     tokenizer/                 # the tokenizer host package (see src/tokenizer/)
@@ -360,7 +371,7 @@ Design for the Turing target. The T4 card is the second GPU family that
 `nanochat.cpp` supports. Read the backends and precision sections above for the
 selection rules.
 
-Status: partially implemented. The build configs exist, but the Turing
+The build configs exist for Turing, but the
 correctness gates have no recorded result yet. The `t4` build uses fp32 for the
 compute, so each parameter keeps one fp32 weight and the optimizer updates that
 weight in place. The build needs no master-weight mirror and no loss scaling.
@@ -447,18 +458,6 @@ A Kaggle Notebook gives two T4 cards. See
 
 - Option A: two independent jobs, one per card.
 - Option B: data-parallel training. Later work.
-
-### 8. Definition of done
-
-1. `tools/nanochat build --config=cuda --@rules_cuda//cuda:archs=sm_75`
-   succeeds.
-2. Every T1 GPU test passes on the T4 in fp32.
-3. The oracle and train-parity gates pass on sm_75.
-4. The recorded fp32 tolerance matches a fresh measurement.
-5. `cuda_runtime_gpu_test` asserts the Turing capabilities.
-6. [performance.md](performance.md) holds one T4 row at the training shape.
-
----
 
 ## Part 1. Dependency layering and host packaging
 
@@ -739,33 +738,6 @@ still cover every long job.
 
 Do not write those fixtures before stage S4 lands. They must land on the
 consumer side of the boundary.
-
-### 8. Gates
-
-A boundary that no test reads is a comment. Add these gates to
-`python/tests/`, and to `python/BUILD.bazel` as `py_test` targets.
-
-| ID | Gate | Fails when |
-|---|---|---|
-| G1 | `python3 -I -S -c "import nanochat_cpp"` | any third-party import runs |
-| G2 | An abstract syntax tree scan of `nanochat_cpp` | an import is outside `sys.stdlib_module_names` |
-| G3 | A read of `pyproject.toml` | `dependencies` is not empty |
-| G4 | A manifest read | a fixture record has no producer |
-| G5 | A text scan of `nanochat_cpp` | a file names `nanochat_cpp_bridge` |
-
-G2 is the load bearing gate. It is about thirty lines and it catches every leak
-in section 2.1. G1 is the independent check, because a scan can miss a dynamic
-import.
-
-### 10. Open questions
-
-| ID | Question | Recommendation |
-|---|---|---|
-| Q1 | Is a public PyPI release wanted? | Not now. Use a Hugging Face repository. |
-| Q2 | Does the bridge get its own distribution? | No. One distribution, two import packages. |
-| Q3 | Which architecture ships first? | `sm_75`, because Kaggle and the Modal image use the T4. |
-| Q4 | Does the wheel carry the CPU backend? | Yes. One wheel, both backends, same runpath. |
-| Q5 | Does a notebook pin a revision? | Yes. Set `NANOCHAT_CPP_LIB` or the wheel URL to one version. |
 
 ### 11. What not to do
 

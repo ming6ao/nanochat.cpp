@@ -1,6 +1,6 @@
 // The fused Muon update: one phase-parameterised device function, its 16
 // phases, the three epilogue folds of the Polar Express iteration, and the two
-// drivers over one device body (docs/muon-fused-kernel.md sections 4 to 6).
+// drivers over one device body (docs/kernels.md sections 4 to 6).
 //
 // `MuonUpdate` (muon.cu) issues 39 launches for one shape group of one step at
 // the shipped `ns_steps` of 5: fifteen batched cuBLAS GEMMs and twenty-four

@@ -52,7 +52,7 @@ void CheckCublas(cublasStatus_t status, const char* what) {
 cublasHandle_t Handle() {
   // One handle per device thread: a cuBLAS handle binds to the current device,
   // so a shared handle would target the wrong card in a multi-device process
-  // (docs/client-runtime-design.md section 8.1).
+  // (docs/distributed.md Part 3, section 8.1).
   thread_local cublasHandle_t handle = nullptr;
   if (handle == nullptr) {
     CheckCublas(cublasCreate(&handle), "cublasCreate");
@@ -61,7 +61,7 @@ cublasHandle_t Handle() {
 }
 
 // The `cublasLt` handle, for the scaled fp8 path
-// (docs/fp8-training.md section 5.2). One handle per device thread.
+// (docs/precision.md Part 1, section 5.2). One handle per device thread.
 cublasLtHandle_t LtHandle() {
   thread_local cublasLtHandle_t handle = nullptr;
   if (handle == nullptr) {
@@ -133,7 +133,7 @@ constexpr int kTuneIters = 3;
 
 // One plan cache per device thread: a descriptor and an algorithm bind to a
 // device, so a shared cache would target the wrong card
-// (docs/client-runtime-design.md section 8.1). The cache outlives the thread
+// (docs/distributed.md Part 3, section 8.1). The cache outlives the thread
 // on purpose, like the two handles above: destroying a cuBLAS object during
 // static destruction needs a live context.
 using PlanCache = std::map<PlanKey, LtPlan>;
@@ -438,7 +438,7 @@ void GemmScaledFp8(GemmMode mode, const ScaledGemmParams& params,
   }
   // The column-major swap, the same trick as the dense path above: compute
   // C^T = op(ltA) * op(ltB) with ltA the stored B and ltB the stored A
-  // (docs/fp8-training.md section 7). A row-major [r, c] operand is a
+  // (docs/precision.md Part 1, section 7). A row-major [r, c] operand is a
   // column-major [c, r] matrix with leading dimension `c`, which is the
   // descriptor's row count after the swap.
   const bool ta = params.transpose_a;
@@ -482,7 +482,8 @@ void GemmScaledFp8(GemmMode mode, const ScaledGemmParams& params,
                 "cublasLt set B scale");
   }
   if (params.fast_accum) {
-    // Fast accumulation is an Ada (8.9) feature (docs/fp8-training.md section
+    // Fast accumulation is an Ada (8.9) feature (docs/precision.md Part 1,
+    // section
     // 5.3). Hopper (9.0) supports the scaled fp8 GEMM but not this descriptor
     // attribute, and `cublasLt` answers status 7 for it there. On any other
     // card `CheckCublas` would abort from a device thread, so the unsupported
@@ -496,7 +497,8 @@ void GemmScaledFp8(GemmMode mode, const ScaledGemmParams& params,
       const Caps caps = GetCaps();
       std::fprintf(stderr,
                    "fatal: fast accumulation needs compute capability 8.9 "
-                   "(docs/fp8-training.md section 5.3); this device reports "
+                   "(docs/precision.md Part 1, section 5.3); this device "
+                   "reports "
                    "%d.%d\n",
                    caps.compute_major, caps.compute_minor);
       std::exit(1);
@@ -515,7 +517,7 @@ void GemmScaledFp8(GemmMode mode, const ScaledGemmParams& params,
                                          lt_b_rows, lt_b_cols, lt_b_rows),
               "cublasLt layout B");
   // The weight gradient keeps fp32; the forward and the input gradient store
-  // the compute type (docs/fp8-training.md section 7).
+  // the compute type (docs/precision.md Part 1, section 7).
   const cudaDataType_t c_type =
       mode == GemmMode::kWgrad ? CUDA_R_32F : kDataType;
   CheckCublas(cublasLtMatrixLayoutCreate(&c_desc, c_type, lt_c_rows, lt_c_cols,

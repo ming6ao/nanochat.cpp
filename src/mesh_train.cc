@@ -1,5 +1,5 @@
 // src/mesh_train.cc -- the mesh training driver
-// (docs/client-runtime-design.md section 10.1 and docs/distributed-design.md
+// (docs/distributed.md Part 3, section 10.1 and docs/distributed.md
 // section 6.6).
 //
 // The driver owns the step loop, the metric record, the summary, the
@@ -39,13 +39,13 @@ namespace {
 
 // The interrupt flag. The handler sets it and the loop stops at the next step
 // boundary, so the driver saves a checkpoint before it returns
-// (docs/client-runtime-design.md section 10.1).
+// (docs/distributed.md Part 3, section 10.1).
 volatile std::sig_atomic_t g_interrupted = 0;
 
 void OnInterrupt(int) { g_interrupted = 1; }
 
 // The parquet factory. Each call opens the dataset again, so
-// `DataLoader::Reset` can cycle epochs (docs/parquet-native.md).
+// `DataLoader::Reset` can cycle epochs (docs/data.md).
 DocumentSourceFactory MakeParquetFactory(std::vector<std::string> files,
                                          std::string column) {
   return [files = std::move(files), column = std::move(column)](
@@ -66,7 +66,7 @@ double ElapsedSeconds(const std::chrono::steady_clock::time_point& from,
 }
 
 // The model FLOPs utilization, clamped to `[0, 1]`. A nonpositive peak returns
-// zero (docs/client-runtime-design.md section 10.1).
+// zero (docs/distributed.md Part 3, section 10.1).
 double MfuOf(double tokens_per_sec, double flops_per_token, double peak_flops) {
   if (peak_flops <= 0.0) return 0.0;
   const double value = tokens_per_sec * flops_per_token / peak_flops;
@@ -223,7 +223,7 @@ MeshTrainDriver::MeshTrainDriver(MeshTrainConfig config)
 
   // An explicit optimizer wins. Otherwise the preset owns the optimizer and
   // the schedule. The run length is absolute, so a resume continues the
-  // schedule (docs/distributed-design.md Part 2, section 10).
+  // schedule (docs/distributed.md Part 1, section 6).
   OptimizerConfig optimizer = config_.optimizer;
   SchedulerConfig scheduler = config_.scheduler;
   if (config_.use_preset) {
@@ -262,7 +262,7 @@ MeshTrainDriver::MeshTrainDriver(MeshTrainConfig config)
 
   // A resume loads the parameters, the optimizer state, and the step, then
   // continues the data stream from the cursor beside the checkpoint
-  // (docs/client-runtime-design.md section 10.1). A missing or unreadable
+  // (docs/distributed.md Part 3, section 10.1). A missing or unreadable
   // cursor is not an error: the run replays the consumed batches below.
   DataLoaderState cursor;
   bool cursor_restored = false;
@@ -297,7 +297,7 @@ MeshTrainDriver::MeshTrainDriver(MeshTrainConfig config)
             : MakeParquetFactory(config_.train_parquet, config_.text_column);
     // The wrapper reports the source position the cursor records, even at one
     // rank, and a restored cursor seeks the first source to the stored
-    // position (docs/distributed-design.md sections 7 and 11). The driver feeds
+    // position (docs/distributed.md sections 7 and 11). The driver feeds
     // one global batch to one loader, so the wrapper applies no stride.
     factory = ShardDocumentSourceFactory(
         std::move(factory), /*rank=*/0, /*world_size=*/1,
@@ -333,7 +333,7 @@ MeshTrainDriver::MeshTrainDriver(MeshTrainConfig config)
   // stream still continues. Every replay reads the stream again from its start
   // and costs one read per stored step, and it lands on the same documents only
   // while the reader is deterministic; the cursor is the exact route
-  // (docs/distributed-design.md section 11). The packed-row path keeps its own
+  // (docs/distributed.md section 11). The packed-row path keeps its own
   // row index and is always replayed.
   if (!cursor_restored) {
     for (int step = 1; step < start_step_; ++step) {
@@ -376,7 +376,7 @@ void MeshTrainDriver::Save(int step) {
   }
   // The data cursor rides beside the checkpoint, in the same file the
   // multi-process driver writes, so a resume continues the token stream instead
-  // of replaying it (docs/distributed-design.md section 11,
+  // of replaying it (docs/distributed.md section 11,
   // spec/api-surface.md R13). A checkpoint that failed to save gets no cursor.
   if (loader_ != nullptr) {
     WriteDataCursor(config_.checkpoint(), loader_->State());

@@ -1,13 +1,19 @@
 # Simulator for Hopper-class targets
 
-This document plans a simulator for the API calls and the numerics of
-`nanochat.cpp` on H100, H200, and later accelerator targets. The development
-host has no Hopper device, so the simulator must work without one.
+The simulator runs the API calls and the numerics of `nanochat.cpp` on H100,
+H200, and later accelerator targets. The development host has no Hopper device,
+so the simulator works without one: it is the only way to check a Hopper build
+on this host.
 
-Status: implemented for the S0 tier. The tree holds the device profile table,
-the reference engine, the emulation engine, and the API interposer. The `tools/nanochat simulate` command runs them. Tests cover
-each part. The sections below are the plan; each carries the status note where
-it matters. See "Status by section" at the end of this file.
+The tree holds the device profile table, the reference engine, the emulation
+engine, and the API interposer, and `tools/nanochat simulate` runs them.
+
+```bash
+tools/nanochat simulate --device h100 --suite all
+tools/nanochat simulate --device h100 --suite correctness
+tools/nanochat simulate --suite api
+tools/nanochat simulate --suite compile
+```
 
 The host engine in section 9 is the strongest of the three. It runs the
 unchanged `backends/cuda/kernels/*.cu` bodies. So it checks the arithmetic
@@ -77,7 +83,7 @@ These facts shape the plan. I verified each one on the development host.
 - The gradient-sync seam already exists at `src/distributed.h`. The class is
   `GradientSync`, and the method is `AllReduceSum`. The host reference lives in
   `src/distributed.cc`, and the one collective is the native ring in
-  `backends/cuda/collective/` (docs/distributed-design.md sections 4 and 5).
+  `backends/cuda/collective/` (docs/distributed.md sections 4 and 5).
 - The correctness suites already exist: `//tests:oracle_test`,
   `//tests:train_parity_test`, and the finite-difference kernel tests.
 
@@ -302,7 +308,7 @@ Two implementations ship. `src/distributed.cc` holds the host reference for the
 CPU backend, and `backends/cuda/collective/native_sync.cu` holds the native ring
 for the CUDA backend. The native ring is the only collective, so the simulator
 needs no collective mock: a vendor library is not in the tree.
-See docs/distributed-design.md sections 4 and 5.
+See docs/distributed.md sections 4 and 5.
 
 6.2 Collective numerics
 
@@ -443,8 +449,8 @@ device is outside the stated scope.
 
 ## 9. Part 6: device-code emulation engine
 
-Status: implemented for RmsNorm and Pointwise, and extended since to the fp8
-tier (Part 7), the value gate, attention, and the fused Muon phase driver.
+The engine covers RmsNorm and Pointwise, the fp8 tier (Part 7), the value gate,
+attention, and the fused Muon phase driver.
 
 The reference engine tests the graph, and the interposer tests the API. Neither
 tests the arithmetic of the `.cu` kernels. The emulation engine closes that gap.
@@ -552,36 +558,6 @@ name. The preload test additionally carries `manual`, because it must only run
 under `tools/nanochat simulate --suite api`, which supplies `LD_PRELOAD` and the
 log path. docs/testing.md defines the S0 tier.
 
-## 11. Deliverables and owners
-
-The plan needs a new ownership row. `AGENTS.md` section 1 gains a **Simulator**
-workstream for `tools/cuda_sim/**`. The entry point `tools/nanochat` moves under
-the Architect / Integrator row.
-
-| Deliverable | Path | Owner |
-|---|---|---|
-| Ownership rows | `AGENTS.md` | Architect |
-| Sim config and capability override | `.bazelrc`, `backends/cpu/kernels.cc` | Runtime |
-| Reference-engine suite wiring | `tools/nanochat` | Architect |
-| Interposer library | `tools/cuda_sim/` | Simulator |
-| Version script | `tools/cuda_sim/cuda_sim.map` | Simulator |
-| Symbol gate | `tools/cuda_sim/check_symbols.py` | Simulator |
-| Binding canary | `tools/cuda_sim/` | Simulator |
-| Device profile header | `include/nanochat/device_profile.h` | Architect |
-| Device profile table | `src/device_profile.cc` | Harness |
-| API-log test | `tests/cuda_sim_test.cc` | Oracle |
-| Reference-engine test | `tests/sim_numerics_test.cc` | Oracle |
-| Profile and MFU consistency test | `tests/device_profile_test.cc` | Oracle |
-| Emulation header | `tools/cuda_sim/emu/cuda_emu.h` | Simulator |
-| Emulated-kernel test | `tests/kernel_emu_test.cc` | Oracle |
-| Simulate command | `tools/nanochat` | Architect |
-| Compile configs and env forwarding | `.bazelrc` | Architect / Build |
-| `doctor` profile line | `tools/nanochat` | Architect |
-| Design document | `docs/simulator.md` | Architect |
-| Documentation index | `docs/README.md` | Architect |
-| Design invariants citation | `docs/build.md` | Architect |
-| Testing and portability updates | `docs/testing.md`, `docs/host-portability.md` | Architect |
-
 ## 12. Validation of the simulator
 
 12.1 Reference engine
@@ -621,39 +597,6 @@ the Architect / Integrator row.
 12. The emulated kernel matches the CPU reference kernel within tolerance.
 14. The compile gate passes for `sm_90` at fp32.
 
-## 13. Phasing
-
-The profile table comes first, because the other engines consume it.
-
-| Phase | Work | Result |
-|---|---|---|---|
-| 1 | Device profile table and the MFU consistency test | Target capability data |
-| 2 | Reference engine: sim config, capability override, numerics suite | Numerical correctness |
-| 3 | Emulation engine | Device-code numerics |
-| 4 | API interposer for memory, device, and launch | Runtime API conformance |
-| 5 | cuBLAS checks and the legacy-enum report | GEMM API conformance |
-| 6 | Collective numerics and the multi-rank schedule | Collective correctness |
-| 7 | Compile gate and the `doctor` line | Architecture and warning gate |
-| 8 | Documentation and merge-gate wiring | Repeatable check |
-
-Phases 1, 2, 3, 4, 5, 6, and 8 have code and tests. Phase 7 now works:
-`--config=h100` and `--config=h200` exist, and `tools/nanochat simulate
---mode compile` builds the whole CUDA backend for the architecture the
-declaration of the named device states.
-The gate enables `-Werror` through `--config=sim-gate`. It records the `ptxas`
-register and shared-memory use in `/tmp/nanochat-sim-ptxas-<device>.log`.
-
-Status by section
-
-| Section | Status |
-|---|---|
-| 4 Reference engine | Implemented (`//tests:sim_numerics_test`, `--config=sim`) |
-| 5 API interposer | Implemented (`//tools/cuda_sim`, `//tests:cuda_sim_test`) |
-| 6 Collective path | Implemented (`//backends/cuda/collective:schedule_test`); no mock is needed |
-| 7 Device profile table | Implemented (`//tests:device_profile_test`) |
-| 8 Compile gate | Configs and command present; `-Werror` and `ptxas` reporting outstanding |
-| 9 Emulation engine | Implemented for RmsNorm and Pointwise |
-
 ## 14. Risks and non-goals
 
 - The reference engine does not test device arithmetic. The emulation engine
@@ -672,26 +615,13 @@ Status by section
 - The S0 tier adds a build path away from the GPU. The merge gate runs it, so
   it cannot hide a compile error.
 
-## 15. Open questions
-
-1. Does the symbol gate use one binary or the union of the S0 binaries?
-2. Does a canary header record satisfy the binding proof, or does the test need
-   a deeper check?
-3. How does the fabricated `cudaDeviceProp` interact with `GetCaps()` and the
-   profile table on a host with a real device?
-4. Which kernel families does the emulation engine support in the first cut?
-
----
-
 ## Part 7. The simulator at bf16 and fp8
 
 _Absorbed from the former `simulator-precision.md`. Its section numbers are
 unchanged, so a reference to a section of that document resolves to the same
 number here._
 
-Status: partly delivered. Section 13 states each part, and
-[testing.md](testing.md) Part 1, section 6 holds the phase record.
-This document is Part 7 of the simulator work. Parts 1 to 6
+This part is the simulator at bf16 and fp8. Parts 1 to 6
 are in [simulator.md](simulator.md): the reference engine, the API interposer,
 the collective path, the device profile table, the compile gate, and the
 emulation engine.
@@ -702,7 +632,7 @@ The fp8 path and the bf16 leg of the numeric trace are in the tree, except the
 open items of section 13. The table below records which surface covers what.
 
 - Sections 1 to 10 above — the three engines and the S0 tier.
-- [fp8-training.md](fp8-training.md) — the fp8 design this document supports.
+- [precision.md](precision.md) — the fp8 design this document supports.
 - [testing.md](testing.md) Part 2 — the trace and the tolerances, and the test
   tiers.
 
@@ -931,7 +861,7 @@ accumulation.
 8. The collective
 
 No change. The reduction operand is fp32, and
-`docs/distributed-design.md` Part 3, section 6 states that rule. Do not reduce an
+`docs/distributed.md` Part 3, section 6 states that rule. Do not reduce an
 fp8 gradient in fp8.
 
 The ring schedule test already covers the multi-rank case at fp32. Extend
@@ -1024,6 +954,6 @@ Checks 1 to 5 need no GPU.
 See also
 
 - Parts 1 to 6 above — the S0 simulator and its parts.
-- [fp8-training.md](fp8-training.md) — the fp8 design.
+- [precision.md](precision.md) — the fp8 design.
 - [testing.md](testing.md) — the trace and tolerances.
 - [performance-model.md](performance-model.md) — the time bound.

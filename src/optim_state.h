@@ -17,7 +17,7 @@ namespace nanochat {
 
 class Optimizer;
 
-// The stable name of the optimizer-step record (docs/distributed-design.md
+// The stable name of the optimizer-step record (docs/distributed.md
 // section 10). The record sits in the optimizer-state section beside the
 // moments, so a resume can continue the schedule from the stored step.
 inline constexpr char kOptimizerStepRecordName[] = "optimizer/step";

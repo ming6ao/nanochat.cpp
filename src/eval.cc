@@ -225,8 +225,8 @@ bool EvaluatePackedRows(Model* model, const SftShard& shard,
   }
 
   // One pass, never a restart: the pass reads `eval_steps` batches of
-  // `device_batch` rows from the start of the shard (section 5.4 of the plan,
-  // and the validation-length risk of section 10).
+  // `device_batch` rows from the start of the shard (the validation-length
+  // rule of docs/eval.md).
   const std::int64_t want_rows =
       static_cast<std::int64_t>(eval_steps) * device_batch;
   if (want_rows > shard.rows) {

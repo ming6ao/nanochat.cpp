@@ -2,7 +2,7 @@
 multi-device runtime.
 
 This module is the programming-model surface described in
-``docs/client-runtime-design.md``. It mirrors JAX on one host: ``devices()``
+``docs/distributed.md``. It mirrors JAX on one host: ``devices()``
 enumerates the local accelerators, ``Mesh`` gives them one name, and
 ``NamedSharding`` with ``PartitionSpec`` states where a tensor lives.
 
@@ -31,7 +31,7 @@ __all__ = [
 
 #: The one supported mesh axis. The fixed graph is data parallel, so the mesh
 #: is rank 1 and the axis is named ``"data"``
-#: (docs/client-runtime-design.md section 5.2).
+#: (docs/distributed.md Part 3, section 5.2).
 DATA_AXIS = "data"
 
 
@@ -218,7 +218,7 @@ def validate_parameter_sharding(sharding: NamedSharding) -> NamedSharding:
 
     The fixed graph keeps one full replica per device, so every parameter must
     be replicated. A sharded parameter is tensor parallel, which is out of
-    scope (docs/client-runtime-design.md section 5.4).
+    scope (docs/distributed.md Part 3, section 5.4).
     """
     if not sharding.spec.is_replicated():
         raise MeshError(

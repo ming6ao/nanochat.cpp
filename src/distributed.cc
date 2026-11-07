@@ -1,5 +1,5 @@
 // The backend-free host reference for the gradient-sync seam
-// (docs/distributed-design.md section 5).
+// (docs/distributed.md section 5).
 //
 // Rank 0 is a parameter server. It accepts one connection per other rank,
 // receives each rank's buffer, adds them into its own buffer, and broadcasts

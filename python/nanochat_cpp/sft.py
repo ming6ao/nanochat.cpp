@@ -39,7 +39,7 @@ def pack(output_path, conversations, tokenizer, seq_len: int,
     The file holds two ``int32`` records, ``tokens`` and ``targets``, each of
     shape ``[rows, seq_len]``. A target of ``-1`` marks an ignored position.
     The C++ mesh training driver and ``sft_main`` read the file through
-    ``src/record_file.h`` (docs/distributed-design.md Part 2, section 6.2).
+    ``src/record_file.h`` (docs/distributed.md Part 2, section 6.2).
     """
     seq_len = int(seq_len)
     inputs = array("i")

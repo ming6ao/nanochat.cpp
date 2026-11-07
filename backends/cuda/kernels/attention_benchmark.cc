@@ -7,7 +7,7 @@
 // A windowed shape also runs its dense twin: a head-major query keeps the
 // batched path (`docs/attention.md` Part 4), so one run measures both forward
 // branches at one shape in one build. That pair is the promotion gate of
-// `docs/attention.md` Part 6, section 7.
+// `docs/attention.md` Part 1.
 //
 // Every row carries an "issue/need" column: the work the shipped path issues
 // over the work the visible (causal or windowed) query-key pairs need. The

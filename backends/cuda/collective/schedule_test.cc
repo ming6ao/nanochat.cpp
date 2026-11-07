@@ -1,6 +1,6 @@
 // backends/cuda/collective/schedule_test.cc -- the ring schedule on the CPU.
 //
-// docs/distributed-design.md Part 3, section 13, T0 row 1. Exercises the ring
+// docs/distributed.md Part 2, section 13, T0 row 1. Exercises the ring
 // reduce-scatter + all-gather at world sizes 1, 2, 4, and 8 with the in-process
 // memory transport, judges the schedule trace (section 10), and checks that a
 // peer that never completes returns a timeout instead of hanging.

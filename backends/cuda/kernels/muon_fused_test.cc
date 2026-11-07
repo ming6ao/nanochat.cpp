@@ -1,4 +1,4 @@
-// T1 GPU correctness gate for the fused Muon path (docs/muon-fused-kernel.md
+// T1 GPU correctness gate for the fused Muon path (docs/kernels.md
 // section 6, phases 2 to 4 of section 5).
 //
 // Three implementations of one Muon step run on one input and one seed:

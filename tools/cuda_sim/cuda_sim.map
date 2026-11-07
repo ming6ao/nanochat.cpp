@@ -78,7 +78,7 @@ libcublas.so.12 {
 };
 
 # The scaled fp8 path calls cublasLt, not cublasGemmEx
-# (docs/fp8-training.md section 5.2, docs/simulator-precision.md section 5).
+# (docs/precision.md Part 1, section 5.2, docs/simulator-precision.md section 5).
 libcublasLt.so.12 {
   global:
     cublasLtCreate;

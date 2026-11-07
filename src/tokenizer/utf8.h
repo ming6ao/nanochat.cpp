@@ -8,7 +8,7 @@
 
 // UTF-8 helpers for the native tokenizer. The splitter decodes one code point
 // at a time, and the decoder copies a byte string with the lossy `replace`
-// mode (docs/tokenizer.md sections 6 and 8.1).
+// mode (docs/data.md sections 6 and 8.1).
 
 namespace nanochat {
 

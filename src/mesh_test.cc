@@ -1,5 +1,5 @@
 // src/mesh_test.cc -- the device mesh for the single-client multi-device
-// runtime (docs/client-runtime-design.md sections 5.1 and 5.2).
+// runtime (docs/distributed.md Part 3, sections 5.1 and 5.2).
 //
 // Covers the data-mesh construction, the rank-1 rule, the axis name, and the
 // backend device enumeration. CPU only; no GPU and no broker.

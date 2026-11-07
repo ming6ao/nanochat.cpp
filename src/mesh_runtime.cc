@@ -1,5 +1,5 @@
 // src/mesh_runtime.cc -- the single-client multi-device training runtime
-// (docs/client-runtime-design.md sections 7 and 10). One device thread per
+// (docs/distributed.md Part 3, sections 7 and 10). One device thread per
 // replica, one in-process collective, one controller. The CUDA backend state
 // is thread-local, so a device thread binds with `SelectDevice` before it
 // builds the replica.
@@ -112,7 +112,7 @@ MeshRuntime::~MeshRuntime() {
 void MeshRuntime::ReplicaLoop(Replica& replica) {
   // Bind the thread to its device before any backend call, so the model, the
   // workspace, and the kernels all land on the right card
-  // (docs/client-runtime-design.md section 8).
+  // (docs/distributed.md Part 3, section 8).
   SelectDevice(replica.device);
   replica.model = Model::Create(config_.model);
   replica.model->InitWeights(config_.seed);
@@ -277,8 +277,9 @@ void MeshRuntime::Save(const std::string& path) {
     throw std::runtime_error("the runtime has no replica to save");
   }
   // The harness container carries the optimizer state and the step beside the
-  // parameters, so a resume continues the schedule (docs/distributed-design.md
-  // section 10). The mesh is the one caller that knows its data-parallel
+  // parameters, so a resume continues the schedule (docs/distributed.md
+  // Part 3, section 12). The mesh is the one caller that knows its
+  // data-parallel
   // width, so it records that too.
   CheckpointSaveOptions options;
   options.step = step_ > 0 ? static_cast<std::uint64_t>(step_) : 0;

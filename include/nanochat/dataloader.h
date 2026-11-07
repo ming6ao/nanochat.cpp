@@ -8,7 +8,7 @@
 #include <string>
 #include <vector>
 
-// Batched token loader over raw documents (docs/parquet-native.md). The loader
+// Batched token loader over raw documents (docs/data.md). The loader
 // reads documents from a `DocumentSource` and tokenizes them with the reference
 // BOS-aligned best-fit packing. Each row starts with BOS; the largest document
 // that fits wins; when no document fits, the shortest document fills the row
@@ -30,7 +30,7 @@ class DocumentSource {
 
   // The number of documents this source has read from the underlying stream,
   // counting the documents it filtered out
-  // (docs/distributed-design.md section 11). The value is a resumable cursor:
+  // (docs/distributed.md section 11). The value is a resumable cursor:
   // a fresh source can skip to it. Returns -1 when the source does not track a
   // position.
   virtual std::int64_t position() const { return -1; }
@@ -44,11 +44,11 @@ using DocumentSourceFactory =
 
 // Wraps `factory` so that rank `rank` of `world_size` sees document `i` only
 // when `i % world_size == rank`, and drops the rest
-// (docs/distributed-design.md section 7). The stride is deterministic, so every
+// (docs/distributed.md section 7). The stride is deterministic, so every
 // rank rebuilds the same partition on a new epoch. A `world_size` of 1 returns
 // `factory` unchanged.
 //
-// `start` is a global source position (docs/distributed-design.md section 11).
+// `start` is a global source position (docs/distributed.md section 11).
 // The wrapper drops every document before `start` and then resumes the stride
 // filter. It applies `start` to the source the loader's constructor creates,
 // which is the stored epoch's; the buffer the loader primes from the cursor
@@ -62,7 +62,7 @@ DocumentSourceFactory ShardDocumentSourceFactory(DocumentSourceFactory factory,
                                                  int rank, int world_size,
                                                  std::int64_t start = 0);
 
-// The serializable data cursor (docs/distributed-design.md section 11).
+// The serializable data cursor (docs/distributed.md section 11).
 // `epoch` is the number of `Reset` calls. `source_position` is the read
 // position of the sharded source. `documents` is the encoded, not-yet-packed
 // buffer. The reference best-fit packing takes the largest document that fits,
@@ -78,12 +78,12 @@ class DataLoader {
  public:
   // The loader owns a producer thread that reads documents from
   // `source_factory` and tokenizes them with `tokenizer` using the reference
-  // BOS-aligned best-fit packing (docs/parquet-native.md). `tokenizer` must
+  // BOS-aligned best-fit packing (docs/data.md). `tokenizer` must
   // outlive the loader. `tokenizer_threads` bounds the encode workers;
   // `document_buffer` bounds the encoded documents held in memory.
   // `restore` primes the buffer and the epoch from a stored cursor. The caller
   // must build `source_factory` so that its first source starts at
-  // `restore->source_position` (docs/distributed-design.md section 11). A null
+  // `restore->source_position` (docs/distributed.md section 11). A null
   // `restore` starts fresh.
   DataLoader(DocumentSourceFactory source_factory, const Tokenizer* tokenizer,
              int batch, int seq, std::uint64_t seed = 42,
@@ -113,7 +113,7 @@ class DataLoader {
   int seq() const { return seq_; }
 
   // A consistent snapshot of the data cursor for a checkpoint
-  // (docs/distributed-design.md section 11). The producer is idle at the
+  // (docs/distributed.md section 11). The producer is idle at the
   // snapshot point, so the restored buffer and position replay the packing
   // exactly.
   DataLoaderState State() const;

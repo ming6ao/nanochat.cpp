@@ -170,7 +170,7 @@ cc_test(
     size = "small",
 )
 
-# The vendor-free gradient-sync seam (docs/distributed-design.md section 4).
+# The vendor-free gradient-sync seam (docs/distributed.md section 4).
 # The host reference and the native collective share this header, so neither
 # backend depends on the other.
 cc_library(
@@ -216,7 +216,7 @@ cc_library(
 )
 
 # The vendor-free control plane shared by every gradient-sync backend
-# (docs/distributed-design.md Part 3, section 4). POSIX sockets only; no vendor
+# (docs/distributed.md Part 2, section 4). POSIX sockets only; no vendor
 # header, so the `src` layer stays vendor-free
 # (docs/build.md, dependency invariants).
 cc_library(
@@ -232,7 +232,7 @@ cc_library(
 )
 
 # The host reference for the gradient-sync seam
-# (docs/distributed-design.md section 5). It defines `CreateGradientSync` for
+# (docs/distributed.md section 5). It defines `CreateGradientSync` for
 # the CPU backend. A CUDA build gets that symbol from
 # `//backends/cuda/collective:native_sync`.
 cc_library(
@@ -352,17 +352,17 @@ cc_library(
         # decoder, so the workflow library links the host tokenizer.
         "//src/tokenizer:tokenizer",
         # `train.cc` builds a document-mode loader from the native parquet
-        # reader (docs/parquet-native.md), so the workflow links it too.
+        # reader (docs/data.md), so the workflow links it too.
         "//src/parquet:parquet",
         # `mesh_train.cc` and `sft_shard.cc` read the `NCSFT001` shard through
-        # the shared record file (docs/distributed-design.md Part 2, section 6.2).
+        # the shared record file (docs/distributed.md Part 1, section 6.2).
         ":record_file",
         "//include/nanochat:nanochat",
     ],
 )
 
 # The reinforcement-learning optimizer step (docs/post-training.md Part 1, section 4,
-# docs/distributed-design.md Part 2, section 5.7). One library so the divisor lives in one
+# docs/distributed.md Part 1, section 5.7). One library so the divisor lives in one
 # place and the file-driven `rl_step` binary, the persistent worker, and the C
 # ABI all share `RlStep` instead of copying it. It links the public headers and
 # the workflow (for `Model`/`Optimizer`), so it adds no vendor dependency.
@@ -379,7 +379,7 @@ cc_library(
 )
 
 # The shared little-endian typed-record file (docs/post-training.md section
-# 4, docs/distributed-design.md Part 2, section 6.2). One layout backs the oracle fixture,
+# 4, docs/distributed.md Part 1, section 6.2). One layout backs the oracle fixture,
 # the RL fixture, the evaluation fixture, the tokenizer fixture, and the numeric
 # trace, so a test and a production binary read the same records. It is a leaf:
 # the standard library only.
@@ -410,7 +410,7 @@ cc_library(
 )
 
 # The persistent reinforcement-learning worker and its pipe protocol
-# (docs/post-training.md Part 1, section 4, docs/distributed-design.md Part 2, section 6.4). It holds
+# (docs/post-training.md Part 1, section 4, docs/distributed.md Part 1, section 6.4). It holds
 # the model and the optimizer across messages and reaches the shared `RlStep`
 # through `//src:rl`.
 cc_library(
@@ -665,7 +665,7 @@ cc_test(
 )
 
 # The device mesh for the single-client multi-device runtime
-# (docs/client-runtime-design.md sections 5 and 7): the data-mesh construction,
+# (docs/distributed.md Part 3, sections 5 and 7): the data-mesh construction,
 # the rank-1 rule, the axis name, and the backend device enumeration. CPU only.
 cc_test(
     name = "mesh_test",
@@ -679,7 +679,7 @@ cc_test(
     size = "small",
 )
 
-# The single-client multi-device runtime (docs/client-runtime-design.md
+# The single-client multi-device runtime (docs/distributed.md Part 3
 # sections 10 and 16): two and four replicas that split one global batch and
 # reduce with the in-process collective equal one replica on the whole batch,
 # and the replicas of one runtime stay byte-identical. CPU only.
@@ -695,7 +695,7 @@ cc_test(
     size = "small",
 )
 
-# The mesh training driver (docs/client-runtime-design.md section 10.1): the
+# The mesh training driver (docs/distributed.md Part 3, section 10.1): the
 # step loop, the metric record, the summary, the resume, and the injected
 # batch. CPU only.
 cc_test(
@@ -711,7 +711,7 @@ cc_test(
     size = "small",
 )
 
-# CUDA flavor of the mesh runtime (docs/client-runtime-design.md section 17
+# CUDA flavor of the mesh runtime (docs/distributed.md Part 3, section 14
 # phase 3): two device threads that share one card. This proves the thread-local
 # backend state and the per-thread device binding, and it needs one accelerator
 # only. The `gpu` tag keeps it out of the default CPU test loop;
@@ -729,7 +729,7 @@ cc_test(
     tags = ["gpu"],
 )
 
-# Distributed gradient sync (docs/distributed-design.md sections 4 and 7): two
+# Distributed gradient sync (docs/distributed.md sections 4 and 7): two
 # CPU processes reduce over loopback TCP and match an independently computed
 # sum, and the stride document sharding partitions the document stream. CPU
 # only; no GPU and no broker.
@@ -745,7 +745,7 @@ cc_test(
     size = "small",
 )
 
-# Data parallel training on the CPU backend (docs/distributed-design.md section
+# Data parallel training on the CPU backend (docs/distributed.md section
 # 12): two ranks that split one batch equal one rank on the whole batch, and two
 # `TrainLoop`s at rank 0 and rank 1 agree on the parameters after one step. CPU
 # only.

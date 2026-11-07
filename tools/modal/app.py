@@ -1398,7 +1398,7 @@ def corpus(job_json: str, urls_json: str, name: str = "h100",
     The parquet must hold one flat column named ``text``. The native reader
     refuses a multi-column schema, so a public dataset that ships its metadata
     beside the text must be reshaped first
-    (``docs/parquet-native.md``). ``karpathy/climbmix-400b-shuffle`` is the
+    (``docs/data.md``). ``karpathy/climbmix-400b-shuffle`` is the
     corpus the tree already names, and ``shard_00000.parquet`` is 92 MB.
 
     This function holds no device. It runs on the H100 image because that image

@@ -4,7 +4,7 @@
 // vendor headers. Tiny shapes only, per docs/testing.md.
 //
 // It also covers the launch surface of `backends/cuda/device.h` that the fused
-// Muon driver is built on (docs/muon-fused-kernel.md sections 4 and 8): the
+// Muon driver is built on (docs/kernels.md sections 4 and 8): the
 // typed outcome of a cooperative launch and the resident-block query the
 // persistent grid is sized from. That surface is backend-internal rather than
 // part of the sealed seam, so it is read through `backends/cuda/device.h` --
@@ -172,7 +172,7 @@ bool RunCase(GemmMode mode, bool ta, bool tb, int m, int n, int k, int batch,
 }
 
 // The cooperative-launch surface and the resident-block query
-// (docs/muon-fused-kernel.md sections 4 and 8). The first block is pure host
+// (docs/kernels.md sections 4 and 8). The first block is pure host
 // arithmetic: the classification of a status, and the reading of the
 // cooperative-launch attribute the simulator answers 0 for. The second block
 // asks the device, and pins the numbers the design sizes the persistent grid
@@ -249,7 +249,7 @@ void CheckLaunchSurface(const Caps& caps) {
       blocks_per_sm, kProbeBlockThreads, kProbeDynamicSharedBytes, resident);
 
   // The host card (gtx1080ti): 3 blocks per SM on 28 SMs, which is the 84-block
-  // persistent grid docs/muon-fused-kernel.md section 4 sizes the cooperative
+  // persistent grid docs/kernels.md section 4 sizes the cooperative
   // driver from. Pinned for the real sm_61 device only.
   if (!simulated && caps.compute_major == 6 && caps.compute_minor == 1 &&
       multiprocessors == 28) {

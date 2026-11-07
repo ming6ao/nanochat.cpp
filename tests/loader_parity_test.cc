@@ -1,5 +1,5 @@
 // tests/loader_parity_test.cc -- the document-mode loader parity gate
-// (docs/parquet-native.md phase 8).
+// (docs/data.md Part 1).
 //
 // Reads the committed fixture that `tools/dump_fixtures.py loader`
 // produced from the reference `tokenizing_distributed_data_loader_bos_bestfit`

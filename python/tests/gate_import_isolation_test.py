@@ -1,6 +1,6 @@
 """G1: the core imports inside an isolated interpreter.
 
-Gate G1 of ``docs/build.md`` section 8. The scan of gate G2
+Gate G1 of ``docs/build.md`` Part 1, section 5. The scan of gate G2
 reads the source; this gate runs it. A fresh ``python3 -I -S`` subprocess puts
 ``python/`` on ``sys.path`` and imports ``nanochat_cpp``, then resolves every
 public name and every submodule the package offers, so the lazy ``__getattr__``

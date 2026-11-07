@@ -8,7 +8,7 @@
 #include "nanochat/tensor.h"
 
 // The device mesh for the single-client multi-device runtime
-// (docs/client-runtime-design.md). One client process controls every local
+// (docs/distributed.md Part 3). One client process controls every local
 // accelerator and sees them as one system.
 //
 // This header is a leaf: it includes only `nanochat/tensor.h` and the standard
@@ -47,7 +47,7 @@ std::vector<DeviceInfo> EnumerateDevices();
 
 // Binds the calling thread to the backend device at `index`. The runtime calls
 // this once per device thread before it builds a replica, so the thread-affine
-// rule of docs/client-runtime-design.md section 8 holds. The CPU reference
+// rule of docs/distributed.md Part 3, section 8 holds. The CPU reference
 // backend makes it a no-op; the CUDA backend calls `cudaSetDevice`.
 void SelectDevice(int index);
 
@@ -57,7 +57,7 @@ void SelectDevice(int index);
 
 // The one mesh axis the runtime supports. The fixed graph is data parallel, so
 // the mesh is rank 1 and the axis is named "data"
-// (docs/client-runtime-design.md section 5.2).
+// (docs/distributed.md Part 3, section 5.2).
 inline constexpr const char* kMeshDataAxis = "data";
 
 // A named device grid. The shape has one entry per axis and the axis names

@@ -1,5 +1,6 @@
 // tests/fp8_gemm_test.cc -- the scaled fp8 seam gate
-// (docs/testing.md Part 1, section 3.3, docs/fp8-training.md sections 4-5).
+// (docs/testing.md Part 1, section 3.3, docs/precision.md Part 1, sections
+// 4-5).
 //
 // The test drives the two new seam entry points, `QuantizeFp8` and
 // `GemmScaledFp8`, on the CPU reference backend and compares them against an
@@ -210,7 +211,8 @@ void CheckGemm(const std::string& name, GemmMode mode, int m, int n, int k,
       const double expected = alpha * (acc * scale_a * scale_b) + beta * 0.1;
       const double error = std::fabs(got - expected);
       // A combined bound: the compute type stores the forward result
-      // (docs/fp8-training.md section 7), so a bf16 build rounds the output and
+      // (docs/precision.md Part 1, section 7), so a bf16 build rounds the
+      // output and
       // a small result carries an absolute, not relative, error.
       const double relative = error / (std::fabs(expected) + 1.0);
       if (relative > worst) worst = relative;

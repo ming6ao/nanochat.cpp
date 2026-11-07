@@ -10,7 +10,7 @@
 #include "src/distributed.h"
 
 // The in-process collective for the single-client multi-device runtime
-// (docs/client-runtime-design.md section 9). One `InProcessCollective` holds
+// (docs/distributed.md Part 3, section 9). One `InProcessCollective` holds
 // every device thread. Each thread gets one `GradientSync` view through
 // `Participant`, so the existing gradient-sync seam is unchanged.
 //
@@ -18,7 +18,7 @@
 // the kernel-seam copy, uses a reusable barrier to publish the writes, and sums
 // every slot in rank order. The rank order makes the sum deterministic, so
 // every replica sees the same bytes. The staging copy is the correctness path;
-// the peer-to-peer fast path is a later phase (docs/client-runtime-design.md
+// the peer-to-peer fast path is a later phase (docs/distributed.md Part 3
 // section 9.4).
 
 namespace nanochat {

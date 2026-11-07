@@ -104,7 +104,7 @@ benefit of an out-of-tree backend and of a downstream fork, exactly as
 
 Seam 4 adds one entry point and changes one field's type. Both close the last
 blocking host traffic of a training step
-([docs/scalar-arguments.md](../docs/scalar-arguments.md) section 15).
+([docs/kernels.md](../docs/kernels.md) section 15).
 
 - **`SumFp32`.** `out = scale * sum(src[0..n))`, or `out += scale * sum` when
   `accumulate`, accumulated in double. Its operand is `float` in every build, so

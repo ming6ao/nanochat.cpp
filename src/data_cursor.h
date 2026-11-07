@@ -5,7 +5,7 @@
 
 #include "nanochat/dataloader.h"
 
-// The data-cursor sidecar (docs/distributed-design.md section 11). The cursor
+// The data-cursor sidecar (docs/distributed.md section 11). The cursor
 // lives beside the checkpoint, not inside it, so the parameter and optimizer
 // records stay byte-identical across ranks and the smoke test keeps its hash
 // check. The file holds the epoch, the source position, and the encoded, not

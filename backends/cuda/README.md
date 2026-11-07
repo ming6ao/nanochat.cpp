@@ -123,7 +123,7 @@ label name `//backends/cpu` uses, for the derivation and for `caps_gpu_test`.
 ## The launch surface
 
 `device.h` carries the two launch helpers and the three queries a fused kernel
-is sized from ([docs/muon-fused-kernel.md](../../docs/muon-fused-kernel.md)
+is sized from ([docs/kernels.md](../../docs/kernels.md)
 §4, §8):
 
 | Helper | Available to | Answers |

@@ -11,7 +11,7 @@
 # `convert_checkpoint.py` forwards to the PyTorch half of the conversion in
 # `python/nanochat_cpp_bridge/torch_checkpoint.py`; the container writer stays in
 # `python/nanochat_cpp/checkpoint.py`. The native-tokenizer tools are described
-# in `docs/tokenizer.md`.
+# in `docs/data.md`.
 
 load("@rules_python//python:defs.bzl", "py_test")
 load("@rules_shell//shell:sh_test.bzl", "sh_test")

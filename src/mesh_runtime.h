@@ -14,7 +14,7 @@
 #include "src/mesh_collective.h"
 
 // The single-client multi-device training runtime
-// (docs/client-runtime-design.md). One process owns `world_size` model
+// (docs/distributed.md Part 3). One process owns `world_size` model
 // replicas, one per device thread. The controller reads one global batch,
 // splits it into contiguous slices, and dispatches one slice per replica. The
 // in-process collective reduces the gradients, so every replica applies the
@@ -40,7 +40,7 @@ struct MeshRuntimeConfig {
   std::uint64_t seed = 42;
 };
 
-// The report of the last training step (docs/client-runtime-design.md section
+// The report of the last training step (docs/distributed.md Part 3, section
 // 20.4). `loss` holds one entry per replica, so a client can show the
 // per-device split. `grad_norm` is the reduced gradient norm; every replica
 // reports the same value. `step_seconds` is the wall-clock time of the last

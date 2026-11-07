@@ -1,6 +1,6 @@
 // src/tokenizer/split_pattern_test.cc -- the fixed nanochat splitter.
 //
-// Checks the curated split cases from docs/tokenizer.md section 6, the
+// Checks the curated split cases from docs/data.md section 6, the
 // possessive and lookahead edge cases, the Unicode table boundaries, and a
 // deterministic random corpus.
 
@@ -60,7 +60,7 @@ void TestPatternText() {
 }
 
 void TestCuratedSplits() {
-  // The possessive edge case from docs/tokenizer.md section 6.
+  // The possessive edge case from docs/data.md section 6.
   ExpectPieces(" !abc", {" !", "abc"});
   ExpectPieces("", {});
   // Alternative 1: apostrophe plus contraction.

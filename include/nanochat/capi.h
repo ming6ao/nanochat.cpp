@@ -30,7 +30,7 @@ typedef struct nanochat_tokenizer nanochat_tokenizer;
 
 // Model hyperparameters, a mirror of nanochat::Config. `value_embedding` is
 // nonzero when the ResFormer value embeddings are present. The Track 3 preset
-// sets it to zero (docs/distributed-design.md section 8).
+// sets it to zero (docs/distributed.md section 8).
 typedef struct {
   int num_layers;
   int num_heads;
@@ -185,7 +185,7 @@ int nanochat_compute_type_size(void);
 void nanochat_device_info(nanochat_device* out);
 
 // Enumerates the local accelerators for the single-client multi-device runtime
-// (docs/client-runtime-design.md section 5.1). `nanochat_device_count` returns
+// (docs/distributed.md Part 3, section 5.1). `nanochat_device_count` returns
 // the number of local devices: one on the reference backend, or the CUDA device
 // count. `nanochat_device_at` fills `out` with the device at `ordinal` and
 // returns 0 on success, or a nonzero value when `ordinal` is out of range. The
@@ -193,7 +193,7 @@ void nanochat_device_info(nanochat_device* out);
 int nanochat_device_count(void);
 int nanochat_device_at(int ordinal, nanochat_device* out);
 
-// The single-client multi-device runtime (docs/client-runtime-design.md). A
+// The single-client multi-device runtime (docs/distributed.md Part 3). A
 // mesh handle owns one `MeshSpec`; a runtime handle owns one `MeshRuntime`,
 // with one model replica per device. `nanochat_runtime_train_step` splits one
 // global batch across the mesh, reduces the gradients in process, and returns
@@ -228,7 +228,7 @@ float nanochat_runtime_train_step(nanochat_runtime* runtime, const int* tokens,
                                   const int* targets);
 
 // One step report, a mirror of `nanochat::MeshMetrics`
-// (docs/client-runtime-design.md section 20.4). `device_count` is the mesh
+// (docs/distributed.md Part 3, section 20.4). `device_count` is the mesh
 // size. `loss` points to `device_count` per-replica losses. The buffer belongs
 // to the runtime and stays valid until the next step or the next call to
 // nanochat_runtime_metrics. `grad_norm` is the global gradient norm after the
@@ -282,8 +282,8 @@ void nanochat_runtime_load_weights(nanochat_runtime* runtime, const char* path);
 // -1 on a bad handle.
 int nanochat_runtime_step(nanochat_runtime* runtime);
 
-// The mesh training driver (docs/client-runtime-design.md section 10.1 and
-// docs/distributed-design.md Part 2, section 6.6). The driver owns the step
+// The mesh training driver (docs/distributed.md Part 3, section 10.1 and
+// docs/distributed.md Part 1, section 6.6). The driver owns the step
 // loop, the metric record, the summary, the checkpoint interval, and the
 // resume. It drives one runtime and one data loader, so the client calls one
 // function per run and never steps the optimizer itself.
@@ -350,7 +350,7 @@ typedef struct {
   nanochat_mesh_output_config output;
 } nanochat_mesh_train_config;
 
-// One driver run summary (docs/client-runtime-design.md section 10.1). The
+// One driver run summary (docs/distributed.md Part 3, section 10.1). The
 // caller allocates it. `interrupted` is nonzero when the run stopped before
 // the last step. `checkpoint` is a NUL-terminated path.
 typedef struct {
@@ -386,18 +386,18 @@ void nanochat_backward(nanochat_model* model);
 // parameter gradients, so call nanochat_zero_grad first for a fresh gradient.
 void nanochat_backward_weighted(nanochat_model* model, const float* row_weights,
                                 float scale);
-// Gradient accumulation (docs/distributed-design.md Part 2, section 6.1).
+// Gradient accumulation (docs/distributed.md Part 1, section 6.1).
 // Accumulates the backward pass over the most recent forward into the parameter
 // gradients without zeroing them. `scale` multiplies the loss gradient; use `1
 // / micro_batches`. A null model is an error.
 void nanochat_backward_accumulate(nanochat_model* model, float scale);
-// Forward + backward + one optimizer step (docs/distributed-design.md Part 2,
+// Forward + backward + one optimizer step (docs/distributed.md Part 1,
 // section 6.1). Returns the batch-mean loss over the valid targets. A null
 // `optimizer` runs the forward and backward without an update.
 float nanochat_train_step(nanochat_model* model, nanochat_optim* optimizer,
                           const int* tokens, const int* targets, int batch,
                           int seq);
-// One reinforcement-learning optimizer step (docs/distributed-design.md section
+// One reinforcement-learning optimizer step (docs/distributed.md section
 // 5.7, docs/post-training.md section 5.2). It runs ForwardLoss, then
 // BackwardWeighted with `advantages` as the per-row weight, then
 // Optimizer::Step(step). The divisor `num_valid * num_passes *
@@ -567,7 +567,7 @@ const char* nanochat_checkpoint_metadata_config_json(
 // hyperparameters, so a client gets the same values as the `train_main`
 // `--preset` flag without copying them. `name` is `track3` today. A null
 // `out`, a null `name`, or an unknown name is an error. See
-// docs/client-runtime-design.md section 20.4.
+// docs/distributed.md Part 3, section 20.4.
 nanochat_status nanochat_optim_config_preset(const char* name,
                                              nanochat_optim_config* out);
 

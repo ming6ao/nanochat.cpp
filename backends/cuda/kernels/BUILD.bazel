@@ -70,7 +70,7 @@ cuda_library(
 )
 
 # Fp8: the dynamic amax and scale, then the fp8 cast
-# (docs/fp8-training.md section 4.2). The cast uses the CUDA conversion
+# (docs/precision.md Part 1, section 4.2). The cast uses the CUDA conversion
 # intrinsic, which matches the shared `nanochat/fp8.h` rounding.
 cuda_library(
     name = "fp8",
@@ -186,7 +186,7 @@ cuda_library(
 
 # The fused Muon path: one phase-parameterised device function, its 16 phases and
 # three epilogue folds, and the two drivers over one device body
-# (docs/muon-fused-kernel.md sections 4 to 6). `:muon` is its one in-tree caller;
+# (docs/kernels.md sections 4 to 6). `:muon` is its one in-tree caller;
 # the source is also exported for the emulator library under //tools/cuda_sim/emu,
 # which compiles this same file with the host compiler, and the GPU test and the
 # benchmark call the entry directly so a phase gate can bisect one driver against
@@ -483,7 +483,7 @@ cc_test(
     tags = ["gpu"],
 )
 
-# The fused path's gate (docs/muon-fused-kernel.md section 6): three
+# The fused path's gate (docs/kernels.md section 6): three
 # implementations of one Muon step on one input and one seed -- the host
 # reference, the shipped multi-launch `MuonUpdate`, and the fused path through
 # both of its drivers -- plus the two-driving comparison, the workspace check for

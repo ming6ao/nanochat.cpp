@@ -56,7 +56,7 @@ constexpr char kUsage[] =
     "   --vocab --padded-vocab --window-pattern --rope-base\n"
     "   --value-embedding <0|1>]\n";
 
-// Builds the document-mode loader factory (docs/parquet-native.md).
+// Builds the document-mode loader factory (docs/data.md).
 DocumentSourceFactory MakeParquetFactory(const std::vector<std::string>& files,
                                          const std::string& column) {
   return

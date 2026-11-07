@@ -61,7 +61,7 @@ std::uint64_t DeclaredFeatureMask(const char* device_name);
 // (`nanochat/tensor.h`'s `ComputeType`): a card that could not do fp32 could
 // not run one kernel here. bf16 arithmetic needs Ampere's bf16 units (sm_80),
 // and the fp8 E4M3/E5M2 tensor core arrives with Ada (sm_89; Hopper reports
-// 9.0, docs/fp8-training.md section 5.3).
+// 9.0, docs/precision.md Part 1, section 5.3).
 //
 // This answer is definitive for those four bits: `GetCaps()` drops whatever the
 // declaration says about precision and uses this instead. The runtime is the
@@ -78,14 +78,14 @@ std::uint64_t PrecisionFeatureBits(int major, int minor);
 // The fused Muon update has two drivers over one device function: a cooperative
 // driver that launches a single grid and separates the sixteen phases with grid
 // barriers, and a phase driver that launches one grid per phase
-// (docs/muon-fused-kernel.md section 4). Three questions decide which one runs,
+// (docs/kernels.md section 4). Three questions decide which one runs,
 // and all three are put to the driver rather than to a capability bit: whether
 // the device accepts a cooperative launch at all, how many blocks of the fused
 // kernel's resources stay resident at once (the size of the persistent grid),
 // and whether one launch of that grid was accepted. A device that answers the
 // first with "no" -- the simulator answers 0 for `cudaDevAttrCooperativeLaunch`
 // -- takes the phase loop, so neither `GetCaps()` nor `caps.json` gains a bit
-// for any of this (docs/muon-fused-kernel.md section 8).
+// for any of this (docs/kernels.md section 8).
 
 // The typed outcome of one cooperative launch. A refused launch is a value and
 // not an exit: the reason a cooperative launch is rejected is one the caller
@@ -124,7 +124,7 @@ bool CooperativeLaunchSupported(int cooperative_launch_attribute);
 
 // Asks the current device the question above. False means the fused build takes
 // the phase loop: the simulator answers 0 for that attribute, so the
-// cooperative driver is never attempted there (docs/muon-fused-kernel.md
+// cooperative driver is never attempted there (docs/kernels.md
 // section 8).
 bool SupportsCooperativeLaunch();
 

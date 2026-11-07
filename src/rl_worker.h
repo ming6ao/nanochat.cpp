@@ -2,7 +2,7 @@
 #define NANOCHAT_SRC_RL_WORKER_H_
 
 // The persistent reinforcement-learning worker (docs/post-training.md Part 1,
-// section 4, docs/distributed-design.md Part 2, section 6.4,
+// section 4, docs/distributed.md Part 1, section 6.4,
 // docs/post-training.md section 8).
 //
 // One long-lived process holds the `Model` and the `Optimizer` across steps, so

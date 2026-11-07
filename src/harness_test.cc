@@ -272,7 +272,7 @@ class VectorSource : public nanochat::DocumentSource {
 void TestTrainLoopMatchesHandRun() {
   Config config = TinyConfig();
   // The native tokenizer starts at 256 byte tokens, so the model vocab must be
-  // larger than the tiny default (docs/tokenizer.md section 2).
+  // larger than the tiny default (docs/data.md section 2).
   config.vocab_size = 512;
   config.padded_vocab_size = 512;
   const int batch = 2;
@@ -578,7 +578,7 @@ void TestHwCheckParsing() {
   }
 }
 
-// The Track 3 preset (docs/distributed-design.md sections 8 and 9): dense
+// The Track 3 preset (docs/distributed.md sections 8 and 9): dense
 // attention, no value embeddings, and the AdamW/Muon rates and schedule.
 void TestTrackThreeBaseline() {
   const TrainConfig config = nanochat::TrackThreeBaseline();

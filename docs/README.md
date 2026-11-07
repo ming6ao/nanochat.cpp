@@ -1,73 +1,62 @@
 # Documentation
 
-Reference and how-to material for `nanochat.cpp`. Each subject document carries
-its own rationale and invariants: the layers and the dependency invariants in
-[build.md](build.md), the fusion rule and the compute strategy in
-[kernels.md](kernels.md), the autograd policy in [model.md](model.md), and the
-evolution rules in [model-and-device-bringup.md](model-and-device-bringup.md).
-This directory is the whole reference.
+Reference and design material for `nanochat.cpp`. Each document states what a
+subject is, how it works, and how to use it. A measured claim cites
+[baselines.json](baselines.json), not prose.
 
-One document covers one subject. When a subject needs a campaign plan, the plan
-is absorbed by the reference document when its last row lands. The rule is at
-the end of this page.
+New here? Start with [../README.md](../README.md) for the quickstart, then
+[build.md](build.md) § Layers for the shape of the system.
 
 ## Seams, build, and models
 
 | Document | Contents |
 |---|---|
-| [build.md](build.md) | The layers and the dependency invariants, the file layout, Bazel, backends, precision, Turing, and Part 1: the dependency zones and the host packaging |
-| [kernels.md](kernels.md) | The backend seam: kernel inventory, **the tier column and the bring-up cost**, the fusion boundary rule, the compute strategy, the API, and the device helpers. Part 1: the Muon fusion, the measured design of a whole-stage megakernel and why the multi-launch path stays the default |
-| [model.md](model.md) | Model API, graphs and the autograd policy, the model description and its block kinds, optimizer, data and checkpoints, workspace |
-| [model-and-device-bringup.md](model-and-device-bringup.md) | The two axes: the directory contract, the kernel tiers, the model description, the planner, isolation, the conformance matrix, the checklists, the open questions with their decision records, and §18 the evolution rules |
+| [build.md](build.md) | The layers and the dependency invariants, the file layout, Bazel, backends, precision selection, and the Turing target |
+| [kernels.md](kernels.md) | The backend seam: the kernel inventory, the tier column and the bring-up cost, the fusion boundary rule, the compute strategy, the API, `ScalarArg`, and the two kernel designs the tree does not implement |
+| [model.md](model.md) | The five graphs, the no-autograd policy, the model description and its block kinds, the workspace and recompute, the public API, and the Muon step with its cuBLAS seam |
+| [model-and-device-bringup.md](model-and-device-bringup.md) | The two axes: the directory contract, the kernel tiers, the model description, the planner, isolation, the conformance matrix, the checklists, and §18 the evolution rules |
 | [conformance-matrix.md](conformance-matrix.md) | The model/device/tier/graph matrix. **Generated** by `tools/gen_matrix.py`; do not edit a row |
 | [examples.md](examples.md) | The two smallest examples of the public API: what each one shows, how to run it, the six design decisions, and its line budget |
-| [checkpoint-format.md](checkpoint-format.md) | The checkpoint container: the version 1 layout and the version 0 layout, the eight run-metadata decisions, the compatibility rules, and the parameter-only read |
+| [checkpoint-format.md](checkpoint-format.md) | The checkpoint container: the version 1 and version 0 layouts, the run-metadata decisions, the compatibility rules, and the notebook lifecycle |
 
 ## Precision and numerics
 
 | Document | Contents |
 |---|---|
-| [precision.md](precision.md) | The precision policy: fp32 on Pascal, Turing, and the CPU; bf16 on Ampere and newer; fp16 removed from the tree |
-| [fp8-training.md](fp8-training.md) | The fp8 tier: the storage tags, the scale rule, the scaled GEMM, the layer set, and the backward pass |
-| [testing.md](testing.md) | Test tiers, oracle harness, finite-difference checks, and Part 1: the correctness gates. Part 2: the numerics integration test |
-| [simulator.md](simulator.md) | The S0 simulator: device profiles, the reference engine, the emulation engine, the API interposer, and the collective mock. Part 7: the simulator at bf16 and fp8 |
+| [precision.md](precision.md) | The precision policy: fp32, bf16, and the fp8 tier. Part 1 is fp8: the storage tags, the scale rule, the scaled GEMM, the layer set, and the backward pass |
+| [testing.md](testing.md) | The test tiers, the oracle harness, the finite-difference checks, and the parity gates. Part 1: the correctness gates. Part 2: the numerics integration test |
+| [simulator.md](simulator.md) | The S0 simulator: device profiles, the reference engine, the emulation engine, the API interposer, and the collective mock. Part 7: bf16 and fp8 |
 | [parity.md](parity.md) | Known differences from the PyTorch reference, with status. Part 1: supervised fine-tuning reference parity |
 
-## Training and the pipeline
+## Data, training, and the pipeline
 
 | Document | Contents |
 |---|---|
-| [post-training.md](post-training.md) | Supervised fine-tuning and reinforcement learning. Part 1: reinforcement learning in a notebook. Part 2: one chain on three hosts. Part 3: the scale-up of that chain |
-| [distributed-design.md](distributed-design.md) | Data-parallel training on two devices: the gradient-sync seam, sharding, and the data cursor. Part 1: the launch. Part 2: the Python and C++ seam. Part 3: native collectives over NVLink and RDMA |
-| [client-runtime-design.md](client-runtime-design.md) | The single-client multi-device runtime: one program, a device mesh, placement, the in-process collective, the C++ mesh training driver, and the compatibility process runtime |
-| [node-h100.md](node-h100.md) | The H100 node run book: the memory plan, the batch plan, the launch, and the acceptance run |
-| [tokenizer.md](tokenizer.md) | The native BPE tokenizer: design, artifacts, training, and status |
-| [parquet-native.md](parquet-native.md) | The native parquet reader and on-the-fly tokenization |
+| [data.md](data.md) | The data path: the native parquet reader, the tokenizer, the artifact format, row packing, and the command-line flags. Part 1: the reader design |
+| [post-training.md](post-training.md) | Supervised fine-tuning and reinforcement learning. Part 1: RL in a notebook. Part 2: one chain on three hosts. Part 3: the scale-up of that chain |
+| [distributed.md](distributed.md) | Data-parallel training and the device mesh: the gradient seam, both implementations, sharding, resume, and launch. Part 1: the Python/C++ seam. Part 2: native collectives. Part 3: the single-client runtime |
 | [eval.md](eval.md) | Base and chat evaluation, and the forward-only workspace |
+| [python.md](python.md) | The single Python surface: the in-process compute API, planning, chat evaluation, checkpoints, and the self-evolution loop |
 
 ## Performance
 
 | Document | Contents |
 |---|---|
-| [performance.md](performance.md) | How to measure, and the debugging interface. Part 1: the profile-guided optimization loop. Part 2: the CPU backend record. Section 2.1: the launch, barrier, and elementwise budget of an optimizer stage |
+| [performance.md](performance.md) | How to measure, and the debugging interface. Part 1: the profile-guided optimization loop. Part 2: the CPU backend record |
 | [performance-model.md](performance-model.md) | The analytic throughput model: the operation counters, the device rates, the roofline, and the prediction record |
-| [muon-step.md](muon-step.md) | The Muon optimizer step: the cuBLAS seam at the twenty-layer shape, the cost of the step on the H100, the nine decisions, and the plan that closes the gap beside the GEMM |
-| [attention.md](attention.md) | The three attention paths, the Pascal baseline and its fused window, the tensor-core decision, and the bf16 tile with its H100 measurement |
-| [scalar-arguments.md](scalar-arguments.md) | The device-resident scalar in the seam: `ScalarArg`, the optimizer migration, the pointwise arms, and the model-side fp32 view |
-| [backlog.md](backlog.md) | Work that is designed and not implemented: Part 1 the training optimizations, Part 2 the self-evolution loop |
+| [attention.md](attention.md) | The three attention paths, the window saving, the tensor-core decision, and the bf16 tile with its H100 measurement |
 
 ## Hosts and tools
 
 | Document | Contents |
 |---|---|
-| [python.md](python.md) | The single Python surface: in-process compute API, planning, chat evaluation, and the `tools/nanochat` toolchain. Part 1: host task consolidation |
+| [host-portability.md](host-portability.md) | Toolchain, optional sandbox, devices, Kaggle, and the pipeline chain on three hosts. Part 1: the H100 node run book |
 | [sandbox.md](sandbox.md) | Execution sandbox and host resource governance. Part 1: the GPU job queue |
-| [host-portability.md](host-portability.md) | Toolchain, optional sandbox, devices, and Kaggle |
 
 ## The records
 
-One file holds the history. It is not a reference for how the tree behaves
-today.
+One file holds the measured history. It is not a reference for how the tree
+behaves today.
 
 | File | Contents |
 |---|---|
@@ -77,11 +66,10 @@ today.
 
 This directory is the architect-owned reference: it says what the tree does.
 [`../spec/`](../spec/) beside it holds the *vocabulary* — the names the two axes
-declare against, and the authority a declaration is reviewed by — and the API
-review whose rows the generators cite. It carries prose and data and no code.
-Where a name matters, the document here links into `spec/` instead of copying
-the table. A second copy of a closed list is the drift the design warns about
-(§17 of [model-and-device-bringup.md](model-and-device-bringup.md)).
+declare against, and the authority a declaration is reviewed by. Where a name
+matters, the document here links into `spec/` instead of copying the table. A
+second copy of a closed list is the drift the design warns about (§17 of
+[model-and-device-bringup.md](model-and-device-bringup.md)).
 
 | File | Contents |
 |---|---|
@@ -98,17 +86,18 @@ and not in `spec/`; the block kinds and their slots are
 [../spec/block_kinds.md](../spec/block_kinds.md); the matrix is
 [conformance-matrix.md](conformance-matrix.md).
 
-## How to add a document, and how to retire one
+## How to add a document, and to retire one
 
-Add a document only when a subject has no home. A new subject earns a new file;
-a new campaign does not, because a campaign is a record and not a reference.
+Add a document only when a subject has no home. One document covers one subject.
+An unimplemented design lives as a clearly marked section of the document that
+owns its subject, not in a separate plan file.
 
-A plan is retired as soon as its last row lands:
+Retire a document when its subject moves:
 
-1. The durable sections move into the reference document, under a part heading.
-   The section numbers of an absorbed document do not change, so every existing
-   reference still resolves. A reference then reads "Part N, section K".
-2. The plan file is deleted, and every reference to it is retargeted.
-
-New here? Start with [../README.md](../README.md) for the quickstart, then
-[build.md](build.md) § Layers for the shape of the system.
+1. The durable sections move into the owning document under a part heading. The
+   section numbers do not change, so every existing reference still resolves as
+   "Part N, section K". The retired file is deleted, and every reference to it
+   is retargeted.
+2. A measurement leaves prose for [baselines.json](baselines.json). A phase
+   table, an owner list, and an open-question list do not move: they are not
+   reference material.

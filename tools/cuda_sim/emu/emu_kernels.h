@@ -63,7 +63,7 @@ void EmuAttentionBackward(const AttentionParams& params, const ComputeType* q,
 // `options.driver` picks the driver. The emulated build answers 0 for
 // `cudaDevAttrCooperativeLaunch`, so `kAuto` and `kCooperative` both end up in
 // the phase driver here -- one launch per phase execution, which is the only
-// driver the block-at-a-time engine can run (docs/muon-fused-kernel.md section
+// driver the block-at-a-time engine can run (docs/kernels.md section
 // 8). The workspace, scratch, and partials are the caller's, sized with the
 // helpers in the same header (`MuonFusedWorkspaceElements`,
 // `MuonFusedScratchFloats`, `MuonFusedPartialDoubles`); only the entry point

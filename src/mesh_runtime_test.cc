@@ -1,5 +1,5 @@
 // src/mesh_runtime_test.cc -- the single-client multi-device runtime on the CPU
-// backend (docs/client-runtime-design.md sections 10 and 16).
+// backend (docs/distributed.md Part 3, sections 10 and 16).
 //
 // The gate: two replicas that split one global batch reduce with the in-process
 // collective and equal one replica on the whole batch. The two runs differ only
@@ -185,7 +185,7 @@ void TestRuntimeShape() {
 }
 
 // The step metrics: one loss per replica, the reduced gradient norm, and the
-// step time (docs/client-runtime-design.md section 20.4).
+// step time (docs/distributed.md Part 3, section 20.4).
 void TestMetrics() {
   const Config model = TinyConfig();
   const MeshRuntimeConfig config = TinyRuntimeConfig(model);

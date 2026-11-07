@@ -132,7 +132,7 @@ inline constexpr BuildPrecision kBuildPrecision =
     static_cast<BuildPrecision>(NANOCHAT_PRECISION);
 
 // True when the compute type is bf16. The fp8 build computes in bf16 and
-// quantizes the eligible matmuls (docs/fp8-training.md section 3.3).
+// quantizes the eligible matmuls (docs/precision.md Part 1, section 6.1).
 inline constexpr bool kComputeIsBf16 = kBuildPrecision != BuildPrecision::kFp32;
 
 // True in the fp8 build. The graph reads `if constexpr (kFp8Build)` instead of
@@ -163,7 +163,7 @@ inline float ComputeToFloat(ComputeType value) {
 // belonged to `kFp16`. Stage 1 of docs/precision.md retired that tag and keeps
 // the code reserved. The two fp8 tags are GEMM operand tags, not storage codes:
 // the checkpoint container stays fp32, so `IsStorageDType` rejects both
-// (docs/fp8-training.md section 3.1).
+// (docs/precision.md Part 1, section 3.1).
 enum class DType {
   kFp32 = 0,
   kBf16 = 1,

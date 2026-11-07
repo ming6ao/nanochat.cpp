@@ -297,7 +297,7 @@ void CheckInitPrecisionGate() {
         expected.find("(" + precision_name + ")") != std::string::npos);
 }
 
-// The device enumeration of docs/client-runtime-design.md section 5.1. The
+// The device enumeration of docs/distributed.md Part 3, section 5.1. The
 // reference backend reports one CPU device, and `nanochat_device_at` rejects an
 // out-of-range ordinal.
 void CheckDeviceEnumeration() {
@@ -557,8 +557,8 @@ nanochat_model* CheckModel() {
   nanochat_zero_grad(model);
 
   // The named optimizer preset and the runtime metrics. The preset returns the
-  // same fields as `TrackThreeBaseline` (docs/client-runtime-design.md section
-  // 20.4).
+  // same fields as `TrackThreeBaseline` (docs/distributed.md Part 3,
+  // section 20.4).
   nanochat_optim_config preset;
   std::memset(&preset, 0, sizeof(preset));
   Check("preset: track3 returns ok",
@@ -690,7 +690,7 @@ nanochat_model* CheckModel() {
 // (docs/model.md). A writer model saves the name-keyed container; a reader
 // model with a different seed loads it and must match a fresh model that uses
 // the writer's seed. The config turns the value embeddings off, so the test
-// also covers the Track 3 shape (docs/distributed-design.md section 8).
+// also covers the Track 3 shape (docs/distributed.md section 8).
 void CheckHarnessCheckpoint() {
   nanochat_config c_config;
   std::memset(&c_config, 0, sizeof(c_config));
@@ -843,7 +843,7 @@ void CheckWeightedBackward() {
 }
 
 // The gradient-accumulation and combined-step entry points
-// (docs/distributed-design.md Part 2, section 6.1).
+// (docs/distributed.md Part 1, section 6.1).
 // `nanochat_backward_accumulate` matches the plain backward on identical
 // models, and `nanochat_train_step` runs forward + backward + one optimizer
 // step; a null optimizer skips the update.
@@ -907,7 +907,7 @@ void CheckTrainStep() {
   }
 }
 
-// The reinforcement-learning step (docs/distributed-design.md Part 2,
+// The reinforcement-learning step (docs/distributed.md Part 1,
 // section 5.7, docs/post-training.md section 5.2). `nanochat_rl_step` runs
 // `ForwardLoss`, then `BackwardWeighted`, then `Optimizer::Step`, and the
 // divisor `num_valid * num_passes * examples_per_rank` is computed in C++.

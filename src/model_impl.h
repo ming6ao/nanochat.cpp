@@ -113,7 +113,7 @@ class TrainModel final : public Model {
   Param& AddParam(const std::string& name, std::int64_t count, int rows,
                   int cols);
   // The fp32 view of one scalar parameter, for a kernel that reads it on the
-  // device (docs/scalar-arguments.md).
+  // device (docs/kernels.md).
   static const float* ScalarSource(const Param& p);
   // True when `layer` carries the ResFormer value embedding: the block list
   // says whether the block consumes one (the value-gated residual), and the
@@ -172,7 +172,7 @@ class TrainModel final : public Model {
   ComputeType* x0_lambda_ = nullptr;
   GradientType* x0_lambda_grad_ = nullptr;
   // The fp32 view of the two per-layer scalars, for the kernels that read them
-  // on the device (`docs/scalar-arguments.md`).
+  // on the device (`docs/kernels.md`).
   const float* resid_f32_ = nullptr;
   const float* x0_lambda_f32_ = nullptr;
   ComputeType* smear_gate_ = nullptr;
@@ -180,7 +180,7 @@ class TrainModel final : public Model {
   ComputeType* smear_lambda_ = nullptr;
   GradientType* smear_lambda_grad_ = nullptr;
   // The fp32 view of the smear coefficient, for the kernel that reads it on the
-  // device (`docs/scalar-arguments.md`).
+  // device (`docs/kernels.md`).
   const float* smear_lambda_f32_ = nullptr;
   ComputeType* backout_lambda_ = nullptr;
   GradientType* backout_lambda_grad_ = nullptr;
@@ -218,7 +218,7 @@ class TrainModel final : public Model {
   ComputeType* scratch_a_ = nullptr;
   ComputeType* scratch_b_ = nullptr;
 
-  // The fp8 scratch for the classifier head (docs/fp8-training.md section
+  // The fp8 scratch for the classifier head (docs/precision.md Part 1, section
   // 6.3). Null unless the build is fp8 and the head matmul is eligible.
   Fp8Scratch head_fp8_;
 

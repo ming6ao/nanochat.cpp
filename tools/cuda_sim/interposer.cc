@@ -184,7 +184,7 @@ std::size_t MaxSharedPerBlock() {
 // The simulated residency: one block of any kernel per multiprocessor, and one
 // multiprocessor. Both numbers live here so the occupancy query, the
 // multiprocessor count, and the capacity a cooperative grid is measured against
-// cannot disagree (docs/muon-fused-kernel.md section 8: the mock answers 1
+// cannot disagree (docs/kernels.md section 8: the mock answers 1
 // active block per SM).
 constexpr int kSimulatedMultiprocessors = 1;
 constexpr int kSimulatedActiveBlocksPerMultiprocessor = 1;
@@ -497,7 +497,7 @@ cudaError_t cudaFuncSetAttribute(const void* func, int attribute, int value) {
 //
 // A fused build asks all three even when the launch it finally makes is the
 // phase driver's, so `check_symbols.py` fails a mock that does not export them
-// (docs/muon-fused-kernel.md section 8). The answers are the design's: 0 for
+// (docs/kernels.md section 8). The answers are the design's: 0 for
 // `cudaDevAttrCooperativeLaunch`, which is what makes a simulated run take the
 // phase loop, and 1 block per multiprocessor -- so nothing sizes a persistent
 // grid off the mock, and no grid barrier is ever asked for. Each call is

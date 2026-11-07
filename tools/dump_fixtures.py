@@ -765,7 +765,7 @@ if _command == 'rl':
         * the model-independent normalization the RL step must use, computed by the
           pure-Python reference below: ``ref/<step>/valid_targets`` and
           ``ref/<step>/divisor`` = ``valid * num_passes * examples_per_rank``
-          (docs/distributed-design.md Part 2, section 5.7).
+          (docs/distributed.md Part 1, section 5.7).
 
         The reference side of a full parity run is the PyTorch ``scripts/chat_rl.py``
         rollout and objective. **This host has neither torch nor numpy installed**, so
@@ -2143,7 +2143,7 @@ if _command == 'tokenizer':
         return pairs
 
 
-    #: The nine special tokens, in the reference order (docs/tokenizer.md 2.4).
+    #: The nine special tokens, in the reference order (docs/data.md 2.4).
     SPECIAL_TOKENS = [
         "<|bos|>",
         "<|user_start|>",
@@ -2156,7 +2156,7 @@ if _command == 'tokenizer':
         "<|output_end|>",
     ]
 
-    #: The nanochat split pattern from docs/tokenizer.md section 2.5.
+    #: The nanochat split pattern from docs/data.md section 2.5.
     SPLIT_PATTERN = (
         r"'(?i:[sdmt]|ll|ve|re)|[^\r\n\p{L}\p{N}]?+\p{L}+|\p{N}{1,2}"
         r"| ?[^\s\p{L}\p{N}]++[\r\n]*|\s*[\r\n]|\s+(?!\S)|\s+"
@@ -2211,7 +2211,7 @@ if _command == 'tokenizer':
     ]
 
     #: A curated string set that covers the seven pattern alternatives and the
-    #: known edge cases in docs/tokenizer.md section 6.
+    #: known edge cases in docs/data.md section 6.
     CURATED_STRINGS = [
         # Apostrophe and contraction.
         "don't", "I'll", "we've", "they're", "he's", "won't", "Mary's", "isn't",
@@ -2514,7 +2514,7 @@ if _command == 'tokenizer':
 
 if _command == 'loader':
     __doc__ = textwrap.dedent("""\
-        Dump the loader-parity fixture (docs/parquet-native.md phase 8).
+        Dump the loader-parity fixture (docs/data.md Part 1).
 
         The fixture pins the C++ document-mode loader against the reference
         ``tokenizing_distributed_data_loader_bos_bestfit`` (``nanochat/dataloader.py``).

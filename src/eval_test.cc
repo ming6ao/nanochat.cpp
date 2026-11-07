@@ -450,7 +450,7 @@ void CheckPackedRows() {
 
 // The pass reads the shard once, so a shard shorter than
 // `eval_steps * device_batch` is an error with a message rather than a partial
-// number (section 5.4 and section 10 of the plan).
+// number (the validation-length rule of docs/eval.md).
 void CheckPackedRowsTooShort() {
   const Config config = TinyConfig();
   std::unique_ptr<Model> model = Model::Create(config);

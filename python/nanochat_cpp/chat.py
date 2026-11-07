@@ -157,7 +157,7 @@ def render_conversation(conversation, tokenizer,
 
     ``mask`` is 1 over the assistant text, the assistant end token, and the
     python tool-call tokens, and 0 over BOS, the user text, and the tool-output
-    tokens (docs/distributed-design.md Part 2, section 6.5). This mirrors the packing path
+    tokens (docs/distributed.md Part 1, section 6.5). This mirrors the packing path
     in ``notebooks/posttrain.ipynb`` so the packed rows and the reference
     renderer agree.
 
@@ -317,7 +317,7 @@ def _load_tokenizer() -> Tokenizer:
     if artifact is None:
         raise RuntimeError(
             "chat evaluation needs the NCTOKEN1 container; run tok_train_main "
-            "first (see docs/tokenizer.md)")
+            "first (see docs/data.md)")
     return Tokenizer.load(artifact)
 
 

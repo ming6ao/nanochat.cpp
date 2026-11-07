@@ -103,7 +103,7 @@
       "validated_on": "NVIDIA H100 80GB HBM3 (sm_90)",
       "precision": "bf16",
       "measurement": "modal run tools/modal/app.py::attention_bench --argv '[\"--json\"]'",
-      "origin": "docs/attention.md Part 6, section 10",
+      "origin": "docs/attention.md Part 6, section 4.4",
       "rows": [
         {
           "name": "attention_fwd:d8_s512",

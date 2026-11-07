@@ -13,7 +13,7 @@
 
 // The self-describing checkpoint container (docs/model.md). Training data
 // arrives as parquet documents through the native reader
-// (docs/parquet-native.md); no pre-tokenized shard and no numpy is needed at
+// (docs/data.md); no pre-tokenized shard and no numpy is needed at
 // runtime.
 
 namespace nanochat {

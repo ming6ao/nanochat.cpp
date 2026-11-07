@@ -64,7 +64,7 @@ constexpr char kUsage[] =
 
 int RunTrain(int argc, char** argv) {
   TrainConfig config;
-  // The launcher's environment contract (docs/distributed-design.md Part 1,
+  // The launcher's environment contract (docs/distributed.md section 10,
   // section 4). A flag overrides the variable, because the parser runs after
   // this. The names follow `torchrun`, so the command also runs under
   // `torchrun`, `mpirun`, or a shell loop.

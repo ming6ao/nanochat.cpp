@@ -3,7 +3,7 @@
 One :class:`MeshRuntime` owns one model replica per device and runs one training
 step over the whole mesh. The client supplies one global batch; the runtime
 splits it into contiguous slices and reduces the gradients in process, so every
-replica applies the same update. See ``docs/client-runtime-design.md``.
+replica applies the same update. See ``docs/distributed.md``.
 
 This is the in-process runtime A (one process, one device thread per device).
 The compatibility process runtime is a later phase. The module imports the
@@ -393,7 +393,7 @@ class MeshRuntime:
 @dataclasses.dataclass(frozen=True)
 class MeshTrainResult:
     """The outcome of one mesh driver run
-    (docs/client-runtime-design.md section 10.1).
+    (docs/distributed.md section 10.1).
 
     ``interrupted`` is true when the run stopped before the last step, for
     example after Control-C. ``checkpoint`` is the final checkpoint path, or
@@ -410,7 +410,7 @@ class MeshTrainResult:
 
 class MeshTrainConfig:
     """The C++ mesh training driver config, the coarse client
-    (docs/client-runtime-design.md section 10.1 and docs/distributed-design.md
+    (docs/distributed.md section 10.1 and docs/distributed.md
     section 6.6).
 
     The driver owns the step loop, the metric record, the summary, the

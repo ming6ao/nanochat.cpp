@@ -47,14 +47,14 @@ constexpr cudaError_t kCudaErrorInvalidDevice = 10;
 constexpr cudaError_t kCudaErrorInvalidResourceHandle = 33;
 // The refusal a cooperative launch reports when the grid does not fit on the
 // device: `cudaErrorCooperativeLaunchTooLarge`, the one launch failure the
-// fused Muon driver acts on instead of reporting (docs/muon-fused-kernel.md
+// fused Muon driver acts on instead of reporting (docs/kernels.md
 // section 4).
 constexpr cudaError_t kCudaErrorCooperativeLaunchTooLarge = 720;
 
 // The device attributes the fused driver asks about, at CUDA 12's values: the
 // multiprocessor count sizes the persistent grid, and
 // `cudaDevAttrCooperativeLaunch` decides whether a cooperative launch is
-// attempted at all (docs/muon-fused-kernel.md section 8).
+// attempted at all (docs/kernels.md section 8).
 using cudaDeviceAttrAbi = int;
 constexpr cudaDeviceAttrAbi kCudaDevAttrMultiProcessorCount = 16;
 constexpr cudaDeviceAttrAbi kCudaDevAttrCooperativeLaunch = 95;
@@ -165,7 +165,7 @@ cudaError_t cudaLaunchKernel(const void* func, dim3 grid, dim3 block,
                              void** args, std::size_t shared, void* stream);
 cudaError_t cudaFuncSetAttribute(const void* func, int attribute, int value);
 // The three entry points the fused Muon build asks for even when it takes the
-// phase driver (docs/muon-fused-kernel.md section 8). The signatures are the
+// phase driver (docs/kernels.md section 8). The signatures are the
 // vendor ABI's, with the attribute code as this header's plain-int alias.
 cudaError_t cudaDeviceGetAttribute(int* value, cudaDeviceAttrAbi attribute,
                                    int device);

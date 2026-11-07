@@ -218,7 +218,7 @@ std::unique_ptr<Tokenizer> LoadTokenizer(const std::string& path) {
     merge_pairs[index] = {left, right};
   }
 
-  // Derive the token bytes from the merge pairs (docs/tokenizer.md section 5).
+  // Derive the token bytes from the merge pairs (docs/data.md section 5).
   std::vector<std::string> token_bytes(kByteTokenCount);
   for (std::size_t id = 0; id < kByteTokenCount; ++id) {
     token_bytes[id] = std::string(1, static_cast<char>(id));

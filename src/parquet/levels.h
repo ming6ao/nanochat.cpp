@@ -6,7 +6,7 @@
 #include <string>
 #include <vector>
 
-// The parquet RLE and bit-packed hybrid decoder (docs/parquet-native.md). The
+// The parquet RLE and bit-packed hybrid decoder (docs/data.md). The
 // definition and repetition levels of a data page use this encoding. The
 // decoder produces exactly `count` values.
 

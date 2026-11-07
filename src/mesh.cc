@@ -1,5 +1,5 @@
 // src/mesh.cc -- the host-side mesh for the single-client multi-device runtime
-// (docs/client-runtime-design.md). This file holds no vendor code and no
+// (docs/distributed.md Part 3). This file holds no vendor code and no
 // compute: it validates the mesh shape and the axis name, so the runtime and
 // the Python client share one rule. `EnumerateDevices` is backend-provided.
 

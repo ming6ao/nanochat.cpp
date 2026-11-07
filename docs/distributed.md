@@ -1,32 +1,31 @@
-# Distributed training design
+# Distributed and multi-device training
 
-Data-parallel training on two devices. This document describes the gradient-sync
-seam, the data sharding, the data cursor, the model configuration, and the
-launch.
+Two or more devices train one model with data parallelism. The model has one
+seam for it, and the seam is small: every gradient is reachable through
+`ParamView`, so a collective needs the `grad` pointer and the `count` field and
+no change to a frozen header.
 
-Status: the project implements the data-parallel architecture. `Config` carries
-`value_embedding`. `src/distributed.h` is the seam. The CPU backend links the
-host reference in `src/distributed.cc`. The CUDA backend links the native ring
-in `backends/cuda/collective/`, which is the one collective: `--config=native`
-and `--define=collective=native` remain documented spellings of the default.
-The native ring is complete for the ring schedule, the CPU memory transport,
-and the host-staged CUDA transport; the NVLink and RDMA transports await the
-H100 node.
+This page states the seam, both implementations, the training-loop integration,
+the data sharding, the resume rule, and the two ways to run a group: one process
+per rank, or one process with a device mesh.
 
-`TrainLoop` averages every gradient once per step. It overlaps the bucket
-reductions with the pack copies on a side stream. Documents shard by a stride.
-A sidecar beside the checkpoint stores the data cursor for an exact resume.
+```bash
+# One process per rank.
+tools/nanochat dist --nproc-per-node 2 -- nanochat_cli train --preset track3
 
-`nanochat_cli train` accepts `--preset track3`. The CPU gates
-`//src:distributed_test`,
-`//src:train_parallel_test`, and `//src:data_test` pass. The two-rank parity
-gate runs on Kaggle (see section 12).
+# One process, two cards, one device thread per card.
+tools/nanochat client --profile train --mesh 2 -- nanochat_cli train --layers 12
+```
+
+Sections 1 to 13 cover the model, the loop, and the data. Part 1 is the seam
+between Python and C++, Part 2 is the native collective, and Part 3 is the
+single-client runtime.
 
 ## 1. Goal
 
-Run the modded-nanogpt Track 3 model on two T4 cards in a Kaggle Notebook. The
-two cards train one model with data parallel. The project supports this in C++
-with no Python framework.
+Run the modded-nanogpt Track 3 model on two T4 cards in a Kaggle notebook, and
+the same model on eight H100 cards. The cards train one model with data
+parallel, in C++ with no Python framework.
 
 This document covers the gradient synchronization seam and the launch. It does
 not cover the FineWeb10B data stream.
@@ -45,7 +44,7 @@ Out of scope:
 
 - Exact reproduction of the published 3.28 loss. That work needs FineWeb10B and
   the GPT-2 tokenizer.
-- FP8 and FlashAttention-3.
+- FlashAttention-3.
 - Distributed evaluation.
 - Tensor parallel and pipeline parallel.
 - More than one node.
@@ -265,23 +264,100 @@ generator. This difference changes the loss curve.
 
 ## 10. Launch
 
+`nanochat_cli train` owns one rank, and the launcher owns the process group.
+`tools/nanochat dist` starts the group, applies one sandbox scope, and submits
+one queue job, so a multi-card host never serializes the ranks.
+
+### 10.1 The launch command
+
+```text
+tools/nanochat dist [--nproc-per-node N] [--device LIST] [--profile P]
+                    [--master ADDR] [--port PORT] [--log-dir DIR] [--json]
+                    -- <command...>
+```
+
+The command does these steps:
+
+1. Select the device set: `0..N-1`, or the first `N` entries of the worker's
+   pool when `NANOCHAT_GPU_DEVICES` is set.
+2. Submit one queue job for the whole group, and wait for it.
+3. Apply one sandbox profile to the group. The `dist` profile covers the group;
+   the `train` profile covers one rank and is too small.
+4. Set `CUDA_VISIBLE_DEVICES` and the four rank variables for each rank.
+5. Start rank 0 first, so the bind wins the port race, and redirect each rank to
+   `<log-dir>/rank<i>.stdio.log`.
+6. Wait for every rank, kill them all on a signal, and return the first nonzero
+   status. `--json` prints one summary object.
+
+The command skips the queue when `NANOCHAT_GPU_QUEUED` is set, because a queue
+job already runs it, and when the sandbox backend is `none`, as on Kaggle.
+
 `nanochat_cli train` gains five options: `--preset track3`, `--rank`,
-`--world-size`,
-`--master`, and `--port`. The preset sets the Track 3 model, optimizer, and
-scheduler fields. Pass `--preset track3` before the other flags, so a later
-flag can override one field.
+`--world-size`, `--master`, and `--port`. The preset sets the Track 3 model,
+optimizer, and scheduler fields, so pass it before the other flags.
 
-One process owns one rank. `tools/nanochat dist` starts the group. The
-environment carries the rank values, in the style of `torchrun`. The `dist`
-command submits one queue job and applies one sandbox scope for the whole group.
-[distributed-design.md](distributed-design.md) is the authority for the
-launch.
+### 10.2 The environment contract
 
-This design removes the per-rank launch in `notebooks/parallel.py`. That code
-took a lock once per rank, so a multi-card host could deadlock. Kaggle hid the
-fault, because the sandbox and the queue are off there.
+`nanochat_cli train` reads five variables. The resolution order is the flag,
+then the `NANOCHAT_*` variable, then the default.
 
-### 10.1 The best fit and the measured run
+| Variable | Meaning | Flag |
+|---|---|---|
+| `NANOCHAT_WORLD_SIZE` | the group size | `--world-size` |
+| `NANOCHAT_RANK` | the global rank | `--rank` |
+| `NANOCHAT_LOCAL_RANK` | the rank on this node | none |
+| `NANOCHAT_MASTER_ADDR` | the rank 0 host | `--master` |
+| `NANOCHAT_MASTER_PORT` | the rank 0 port | `--port` |
+
+The names follow `torchrun`, so `nanochat_cli train` also runs under `torchrun`,
+`mpirun`, or a shell loop. On one node `NANOCHAT_LOCAL_RANK` equals
+`NANOCHAT_RANK`; the variable exists for a later multi-node change.
+`src/cli.h` holds the two helpers `EnvInt` and `EnvString`.
+
+A C++ launcher would move host tooling into L6 and would run before the sandbox,
+so it could not apply the sandbox itself. The project does not add one
+([sandbox.md](sandbox.md) § Entry point).
+
+### 10.3 The Python wrapper
+
+`python/nanochat_cpp/distributed.py` is an optional notebook wrapper. It never
+starts a process: it calls `tools/nanochat dist --json` and parses the summary.
+
+```python
+@dataclasses.dataclass(frozen=True)
+class DistributedPlan:
+    argv: tuple[str, ...]
+    nproc_per_node: int = 2
+    device: str | None = None
+    master: str = "127.0.0.1"
+    port: int = 29500
+    profile: str = "dist"
+    log_dir: str | None = None
+
+@dataclasses.dataclass(frozen=True)
+class DistributedResult:
+    ranks: tuple[RankResult, ...]
+
+def launch(plan: DistributedPlan) -> DistributedResult: ...
+def parse_log(path) -> list[dict]: ...
+def loss_rows(result) -> list[dict]: ...
+```
+
+The summary carries the per-rank return code, the log path, the stdio path, and
+the seconds. `Logger::Log` in `src/train.cc` writes the log line, and one
+fixture test pins the format.
+
+### 10.4 When to use the mesh instead
+
+The two-card notebook uses the single-client multi-device runtime, not this
+launch: one process, one `MeshRuntime`, and the in-process collective (Part 3).
+The mesh removes the rank from the user program, so the notebook opens no port
+and sets no rank variable.
+
+The launch stays for the process-isolation case: some drivers forbid two CUDA
+contexts in one process, and one bad device then stops one worker only.
+
+### 10.5 The best fit and the measured run
 
 The model-fit skill (`.agents/skills/model-fit/`) computes the shape and the
 memory. The best fit for the two T4 cards is `L16 C1024 H8 KV4 T4096 b1`: about
@@ -354,7 +430,7 @@ check stays valid, and `//src:train_parallel_test` pins the exact resume.
 
 The host reference uses two processes on the CPU backend. This test needs no
 GPU. The ring schedule runs on the CPU with the memory transport. The T1 and T2
-gates run on Kaggle, because the WSL2 host has one card (section 15).
+gates run on Kaggle, because the WSL2 host has one card (section 13).
 
 The per-step parameter equality of a two-rank run and a one-rank run needs the
 data split of section 7. Until then, the T2 gate is the validation loss on the
@@ -364,9 +440,7 @@ fixed validation set.
 
 The two-card notebook is `notebooks/nanochat-cpp-on-2x-t4.ipynb`. It uses the
 single-client multi-device runtime, so one process owns both cards
-([client-runtime-design.md](client-runtime-design.md)). The multi-process plan
-lives in [distributed-design.md](distributed-design.md) and
-[distributed-design.md](distributed-design.md).
+(Part 3). The multi-process plan is section 10.
 
 The notebook runs these steps:
 
@@ -383,314 +457,16 @@ The runtime stages the gradients through the kernel seam, so the CUDA build
 needs no vendor collective. The T4 cards do not have a peer link, so the
 peer-to-peer fast path waits (section 10.1).
 
-## 14. Phasing
-
-The architecture phases P0 to P4 are complete. They cover the seam, the Track 3
-preset, the host reference, the CPU two-rank test, the native ring, the overlap
-seam, and the data cursor.
-
-The two-rank parity gate runs on Kaggle (section 15).
-
-The CPU path keeps the GPU off the correctness path, as
-[kernels.md](kernels.md) § Compute strategy requires.
-
-## 15. Risks
-
-| Risk | Control |
-|---|---|
-| The two T4 cards lack a peer link | The ring falls back to the host-staged transport |
-| The host reference is slow | It is CPU-only now; it is not on the GPU path |
-| The stride sharding differs from the reference | `parity.md` D6 records the difference |
-| A resumed run repeats or skips data | The data cursor restores the source position and the buffer |
-
-## 16. Open questions
-
-1. The WSL2 host has one card, so the T1 and T2 gates run on Kaggle.
-3. Does the team want reference-exact initialization? This choice affects the
-   loss curve.
-4. Should the data loader split one global batch into contiguous rank slices, as
-   the reference does? That change would make the two-rank and one-rank runs
-   equivalent per step.
-5. Should the backward expose a per-parameter gradient-ready hook? It would
-   overlap the reduction with the backward itself. It needs a frozen-header
-   change and a GPU measurement.
-
----
-
-## Part 1. The launch of a data-parallel run
-
-_Absorbed from the former `distributed-launch.md`. Its section numbers are
-unchanged, so a reference to a section of that document resolves to the same
-number here._
-
-Status: delivered. `tools/nanochat dist` starts the rank group, and
-`python/nanochat_cpp/distributed.py` wraps it. The two-card notebook now uses
-the single-client multi-device runtime instead
-(`docs/client-runtime-design.md`), so this launch serves the process-isolation
-case. The superseded per-rank helper `notebooks/parallel.py` is gone (phase 4).
-This document is the authority for the launch.
-[distributed-design.md](distributed-design.md) section 10 holds a summary.
-
-### 1. Problem
-
-`notebooks/parallel.py` starts one rank per card. It calls `tools/nanochat
-train` for each rank. Two faults follow.
-
-The first fault is the layer. The file is process orchestration.
-[sandbox.md](sandbox.md) § Entry point puts the process entry point outside the
-model layers ([build.md](build.md) § Layers).
-The notebooks directory ([../notebooks](../notebooks)) holds
-presentation, not orchestration.
-
-The second fault is the GPU queue. `tools/nanochat train` submits one job for
-one rank. Two ranks submit twice, and the queue runs them one after the other.
-A multi-card host then serializes the ranks, or the run blocks. Kaggle hides
-the fault, because the sandbox and the queue are off there.
-
-### 2. Goals and non-goals
-
-Goals:
-
-- One process per rank.
-- One queue job for the rank group.
-- One sandbox scope for the group.
-- A rank contract in the environment, as `torchrun` uses.
-- One shell entry point, `tools/nanochat dist`.
-- No change to the gradient seam or to the model.
-
-Non-goals:
-
-- More than one node.
-- Tensor parallel and pipeline parallel.
-- Elastic rendezvous.
-- Distributed evaluation.
-- A launcher in C++.
-
-### 3. Position in the architecture
-
-`nanochat_cli train` owns one rank. The rank values configure training, so C++
-owns their defaults. The launch, the queue, and the sandbox are host tooling.
-[sandbox.md](sandbox.md) § Entry point and [../README.md](../README.md)
-§ What this is not put them there.
-
-| Task | Owner | File |
-|---|---|---|
-| Rank and group values | C++ at L6 | `src/train_command.cc` |
-| Gradient sum | C++ | `src/distributed.cc`, `backends/cuda/collective/native_sync.cu` |
-| Process start | Host tooling | `tools/nanochat` |
-| GPU queue job | Host tooling | `python/nanochat_cpp/gpu_queue.py` |
-| Sandbox scope | Host tooling | `python/nanochat_cpp/sandbox.py` |
-| Notebook helper | Python | `python/nanochat_cpp/distributed.py` |
-
-A launcher in C++ would move host tooling into L6. It would also run before
-the sandbox, so it could not apply the sandbox itself. The project does not
-add it.
-
-### 4. The environment contract
-
-`nanochat_cli train` reads five variables. The launcher sets them. A flag
-overrides
-the variable.
-
-| Variable | Meaning | Flag |
-|---|---|---|
-| `NANOCHAT_WORLD_SIZE` | The group size | `--world-size` |
-| `NANOCHAT_RANK` | The global rank | `--rank` |
-| `NANOCHAT_LOCAL_RANK` | The rank on this node | none |
-| `NANOCHAT_MASTER_ADDR` | The rank 0 host | `--master` |
-| `NANOCHAT_MASTER_PORT` | The rank 0 port | `--port` |
-
-The resolution order is the flag, then the `NANOCHAT_*` variable, then the
-default. The prefix `NANOCHAT_` prevents a clash with another tool. The names
-follow `torchrun`, so `nanochat_cli train` also runs under `torchrun`,
-`mpirun`, or
-a shell loop.
-
-On one node, `NANOCHAT_LOCAL_RANK` equals `NANOCHAT_RANK`. The variable exists
-for a later multi-node change.
-
-The C++ side adds two small helpers to `src/cli.h`: `EnvInt` and `EnvString`.
-The helpers read the variable and parse the value.
-
-### 5. The launcher
-
-`tools/nanochat dist` starts the group. The command line is:
-
-```text
-tools/nanochat dist [--nproc-per-node N] [--device LIST] [--profile P]
-                    [--master ADDR] [--port PORT] [--log-dir DIR] [--json]
-                    -- <command...>
-```
-
-The `dist` command does these steps:
-
-1. Select the device set. The default is `0..N-1`, or the first `N` entries
-   of the worker's pool when `NANOCHAT_GPU_DEVICES` is set.
-2. Submit one queue job for the whole group, and wait for it.
-3. Apply one sandbox profile to the group.
-4. Set `CUDA_VISIBLE_DEVICES`, `NANOCHAT_RANK`, `NANOCHAT_LOCAL_RANK`, and
-   `NANOCHAT_WORLD_SIZE` for each rank.
-5. Start rank 0 first, so the bind wins the port race.
-6. Redirect each rank to `<log-dir>/rank<i>.stdio.log`.
-7. Wait for every rank. Return the first nonzero status.
-8. Print a summary. With `--json`, print one JSON object.
-
-The `dist` command skips the queue in two cases:
-
-- `NANOCHAT_GPU_QUEUED` has a value, so a queue job already runs it.
-- The sandbox backend is `none`, as on Kaggle.
-
-The `dist` command must kill every rank on a signal. It must also wait for
-every child, so no orphan rank holds a card.
-
-The `dist` profile in `tools/sandbox/profiles.json` covers the group. The
-`train` profile covers one rank, so it is too small.
-
-The summary gives the per-rank return code, the log path, the stdio path, and
-the seconds. The format follows `tools/nanochat doctor --json`.
-
-### 6. The Python surface
-
-`python/nanochat_cpp/distributed.py` is an optional wrapper for a notebook.
-It does not start a process. It calls `tools/nanochat dist --json` and parses
-the summary.
-
-```python
-@dataclasses.dataclass(frozen=True)
-class DistributedPlan:
-    argv: tuple[str, ...]
-    nproc_per_node: int = 2
-    device: str | None = None
-    master: str = "127.0.0.1"
-    port: int = 29500
-    profile: str = "dist"
-    log_dir: str | None = None
-
-@dataclasses.dataclass(frozen=True)
-class DistributedResult:
-    ranks: tuple[RankResult, ...]
-
-def launch(plan: DistributedPlan) -> DistributedResult: ...
-def parse_log(path) -> list[dict]: ...
-def loss_rows(result) -> list[dict]: ...
-```
-
-The command table `_entry.py` gains one `dist` row. The `Toolchain` class
-gains one `dist` method. `parse_log` and `loss_rows` move from
-`notebooks/parallel.py`.
-
-`Logger::Log` in `src/train.cc` writes the log line. The format is a
-contract. One fixture test pins it.
-
-### 7. The notebook
-
-The two-card notebook no longer uses this launch. It uses the single-client
-multi-device runtime: one process, one `MeshRuntime`, and the in-process
-collective (`docs/client-runtime-design.md`). The mesh removes the rank from the
-user program, so the notebook opens no port and sets no rank variable. The
-launch stays for the process-isolation case: some drivers forbid two CUDA
-contexts in one process, and one bad device then stops one worker only.
-
-### 8. Plan
-
-#### Phase 0 — Design and ownership
-
-1. Register this document in `docs/README.md`.
-2. Change [distributed-design.md](distributed-design.md) section 10 to a
-   summary.
-3. Assign the work: architect, harness, Python surface, and notebooks
-   (`AGENTS.md` section 1).
-
-Gate: the architect approves the variable names and the `dist` command line.
-
-#### Phase 1 — The environment contract
-
-1. Add `EnvInt` and `EnvString` to `src/cli.h`.
-2. Set the five defaults in `src/train_command.cc`.
-
-Gate: a CPU test covers the flag-over-variable order.
-
-#### Phase 2 — The launcher
-
-1. Add the `dist` case to `tools/nanochat`.
-2. Add the `dist` profile to `tools/sandbox/profiles.json`.
-3. Add the signal handler and the wait.
-4. Add the `--json` summary.
-
-Gate: a CPU test with a fake command. The test checks the first nonzero
-status, the rank logs, the signal kill, and one queue job for the group.
-
-#### Phase 3 — The Python surface
-
-1. Add `python/nanochat_cpp/distributed.py`.
-2. Add the `dist` row to `_entry.py` and the method to `toolchain.py`.
-
-Gate: a Python test with a fake `tools/nanochat`.
-
-#### Phase 4 — The notebook and the removal
-
-1. Change the notebook to `nanochat_cpp.distributed`.
-2. Delete `notebooks/parallel.py`, `notebooks/parallel_test.py`, and the two
-   `notebooks/BUILD.bazel` targets.
-3. Remove `SMOKE_FLAGS` (it lived only in `notebooks/parallel.py`).
-
-Gate: one short two-rank Kaggle run passes the checkpoint hash check.
-
-### 9. Definition of Done
-
-1. `tools/nanochat dist --nproc-per-node 2 -- <command>` starts two ranks.
-2. One queue job covers the group. A second job on the same device set waits.
-3. The `dist` command exits with the first nonzero rank status.
-4. A signal kills every rank.
-5. `--json` prints one object with the per-rank fields.
-6. A flag overrides its `NANOCHAT_*` variable.
-7. `notebooks/parallel.py` and `notebooks/parallel_test.py` are gone.
-8. `tools/nanochat lint` passes. The CPU tests pass under `t0-cpu`.
-
-### 10. Risks and controls
-
-| Risk | Control |
-|---|---|
-| A generic variable name clashes with another tool | Use the `NANOCHAT_` prefix. A flag wins |
-| A later collective gains a new phase | This document holds the launch plan. The earlier plan stays closed |
-| The group exceeds the `train` profile | Add a `dist` profile sized for the group |
-| A signal leaves an orphan rank | Trap the signal and kill the group. Test it |
-| The log format drifts from the parser | One fixture test pins the format |
-| The move crosses a workstream boundary | Phase 0 assigns the owners first |
-| Kaggle has no queue | Skip the queue when the backend is `none` |
-
-### 11. Ownership
-
-| Phase | Owner | Files |
-|---|---|---|
-| 0 | Architect | `docs/**` |
-| 1 | Harness | `src/train_command.cc`, `src/cli.h` |
-| 2 | Architect | `tools/nanochat`, `tools/sandbox/profiles.json` |
-| 3 | Python surface | `python/nanochat_cpp/**` |
-| 4 | Notebooks | `notebooks/**` |
-
-### 12. Open questions
-
-1. Does the `dist` profile replace the `train` profile, or sit beside it?
-2. Should `dist` default the log directory, or require it?
-3. Should `--device 0` allow two ranks on one card, for a smoke test?
-
-
----
-
-## Part 2. The training seam between Python and C++
+## Part 1. The training seam between Python and C++
 
 _Absorbed from the former `training-seam.md`. Its section numbers are
 unchanged, so a reference to a section of that document resolves to the same
 number here._
 
-Status: partly delivered. The project completed the first increment of section
-8, and section 5 marks the fixed defects. This document specifies the boundary
-between the Python surface and the C++ training driver. It also records the
-defects in the current boundary. Section 6.6 extends the boundary to the mesh
-training driver, and phase 6 of section 8 delivers it.
+This part states the boundary between the Python surface and the C++ training
+driver. Section 6.6 extends the boundary to the mesh training driver.
 
-`post-training.md` section 11 stays the status of record for the post-training
+`post-training.md` stays the design of record for the post-training
 features. This document is the authority for the Python and C++ boundary. It
 revises section 4.1 of [post-training.md](post-training.md) on the owner of the
 packer.
@@ -784,96 +560,26 @@ needs two numbers from C and no tensors.
 The split of item 2 is precise. Python owns the renderer and the mask. C++ owns
 the row packing, the padding, and the batching.
 
-### 5. Defects in the current seam
+### 5. The seam as it stands
 
-The first increment fixed 5.1, 5.2, and 5.6, and partly fixed 5.3. The mesh
-driver phase fixed 5.8. The other items remain.
+The C ABI carries one call per stage, so a Python driver never reimplements the
+arithmetic: `nanochat_train_step`, `nanochat_backward_accumulate`, and the
+public `render_conversation` in `python/nanochat_cpp/chat.py`. `TrainLoop`
+persists the step counter, so a driver owns the schedule and `Optimizer::Step`
+stays in C++.
 
-#### 5.1 The C++ interface is richer than the C interface (fixed)
+Two gaps remain. `Trainer` still owns gradient accumulation and the epoch reset
+in Python, and only a per-step loss fixture gates it against `src/train.cc`. The
+supervised and reinforcement-learning stages have no `SftTrainer` and no
+`RlTrainer`; [post-training.md](post-training.md) section 5.5 lists what those need.
 
-`Model::TrainStep` implements forward, backward, and one optimizer step
-(`src/model.cc:951`). The first increment added `nanochat_train_step`, and
-`Model.train_step` calls it (`python/nanochat_cpp/api.py`). The `Trainer` keeps
-the lower-level calls, because it supports gradient accumulation.
+#### 5.7 The reinforcement-learning divisor
 
-#### 5.2 The C interface has no accumulation call (fixed)
-
-`Model::BackwardAccumulate(scale)` exists and the tests cover it. The first
-increment added `nanochat_backward_accumulate`, and `Trainer.__next__` calls
-`Model.backward_accumulate` (`python/nanochat_cpp/api.py`). The host float array
-of `batch * seq` entries is gone.
-
-#### 5.3 The schedule leaks to the caller (partly fixed)
-
-`Optimizer::Step(int step)` takes a 1-based step from the caller
-(`include/nanochat/optim.h:56`). `TrainLoop` now persists the step and resumes
-from it, so a driver owns the counter. A custom Python loop still passes the
-step. Recommendation 4 in section 10 keeps `Optimizer::Step` in C++.
-
-#### 5.4 The Python trainer duplicates the C++ loop
-
-`Trainer` reimplements gradient accumulation, the epoch reset, and `zero_grad`
-(`python/nanochat_cpp/api.py:800-833`). `src/train.cc` is the source of truth
-for the same logic. The Python tests do gate the loss curve against a C++
-fixture (`python/tests/api_test.py:143`). The gate compares per-step losses only.
-The loop structure can still drift.
-
-#### 5.5 There is no supervised fine-tuning or reinforcement-learning driver
-(partly fixed)
-
-`Trainer` takes `TokenData`, which reads parquet. The mesh driver now reads a
-packed `NCSFT001` shard and does a weights-only warm start, so `posttrain.ipynb`
-runs through the C++ driver (section 6.2). There is still no `SftTrainer`, no
-`nanochat_cli sft` stage, and no `RlTrainer`. The user writes mechanism for the
-reinforcement-learning path. Section 11 of
-[post-training.md](post-training.md) lists the missing parts.
-
-#### 5.6 The renderer is private and incomplete (fixed)
-
-The first increment added the public `render_conversation` in
-`python/nanochat_cpp/chat.py`. `ChatEvaluator` and `python/tests/chat_test.py:68`
-use the private `_PromptRenderer`, which stays private. The `_specials` helper
-stays internal.
-
-#### 5.7 Forward-looking risk: the reinforcement-learning divisor
-
-Reinforcement learning does not exist yet, so no code has this defect today.
-The risk is for the future.
-
-`Model::BackwardWeighted(row_weights, scale)` takes raw per-row weights.
-[post-training](post-training.md) gives the divisor as the product of the valid
-count, the pass count, and the example count per rank. Python would compute
-that divisor today. The normalization is therefore not the single source of
-truth. The divisor must move into C++ with the reinforcement-learning step.
-
-#### 5.8 The mesh client rebuilt the driver (fixed)
-
-`notebooks/mesh_train.py` drove the mesh runtime one batch at a time. It owned
-the loop, the record, and the summary. Each item in the first four rows
-duplicated a C++ source of truth. The last two rows had no C++ writer:
-
-| Python item | C++ source of truth |
-|---|---|
-| `iterate()` | `TrainLoop::Run` (`src/train.cc`) |
-| `mfu()`, `steady_mfu()` | `ComputeMfu` (`include/nanochat/mfu.h`) |
-| `format_row()` | `Logger::Log` (`src/train.cc:70`) |
-| `job()`, `from_job()` | `TrainConfig` (`src/train.h:32`) |
-| the `metrics.jsonl` writer | none |
-| the `summary.json` writer | none |
-
-The two log formats differed. `Logger::Log` prints `lr`, the timing split, and
-the evaluation time. `format_row` printed the gradient norm, the step time,
-the compute time, the throughput, and the MFU. So one record had two shapes.
-
-`job()` and `from_job()` were a hand-written serializer of twenty fields. No
-version marked the payload, so a stale `job.json` lost a field in silence.
-
-`src/mesh_runtime.cc` provides `TrainStep` and no loop. So the client could not
-delegate the loop. [client-runtime-design](client-runtime-design.md)
-section 10.1 and section 20.5 record the decision. `src/mesh_train.h` and
-`src/mesh_train.cc` now own the loop, the record, and the summary. Python owns
-the job file, and the record carries a version.
-
+`Model::BackwardWeighted(row_weights, scale)` takes raw per-row weights, and
+[post-training.md](post-training.md) gives the divisor as the product of the
+valid count, the pass count, and the example count per rank. Python would
+compute that divisor today, so the normalization would not be the single source
+of truth. The divisor moves into C++ with the reinforcement-learning step.
 ### 6. Target design
 
 #### 6.1 Extend the C interface
@@ -1025,21 +731,6 @@ section 7 states.
 - Autograd. The graph stays fixed ([model.md](model.md)
   § No autograd engine).
 
-### 8. Migration plan
-
-Each phase has an owner and a gate. The owners follow `AGENTS.md` section 1.
-The phases extend [post-training.md](post-training.md) section 12 with the
-interface work.
-
-| Phase | Owner | Gate |
-|---|---|---|
-| 1. Expose the existing step. Add `nanochat_train_step` and `nanochat_backward_accumulate`, use `backward_accumulate` in `Trainer`, and persist the optimizer step. (Done.) | Architect for `capi.h`; Python surface for `bindings/` and `api.py`; Harness for `src/train.cc` | The Python tests and `//bindings:nanochat_capi_test` |
-| 2. Add the packed-row source and the reader. Add `render_conversation`. (Partly done: the renderer, the Python packer, and the mesh driver shard reader exist. The `TrainLoop` packed-row source remains.) | Harness for the loader; Python surface for the renderer | A packer test and a mask-shift test |
-| 3. Add the supervised fine-tuning driver and `nanochat_cli sft`. (Partly done: the mesh driver runs the SFT loop from a shard. The standalone `nanochat_cli sft` remains.) | Harness for `src/`; Python surface for the facade | A short run at tier T2 against the reference loss curve |
-| 4. Add `nanochat_rl_step` and the parity fixture. | Harness for the step; Oracle for the fixture and the test | `//tests:rl_parity_test` at tier T2 |
-| 5. Add the reinforcement-learning worker. | Harness for the worker; Python surface for the bridge | An RL smoke run at tier T2 |
-| 6. Add the mesh training driver. Add `src/mesh_train.cc` and the driver calls in `capi.h`. Use the Python driver config directly. (Done.) | Harness for `src/**`; Architect for `capi.h`; Python surface for the client; Notebooks for the launcher | The CPU driver loss sequence equals the old Python loop. The resume and the interrupt save work |
-
 ### 9. Invariants
 
 - One step implementation. The C++ driver is the only place that advances the
@@ -1061,66 +752,16 @@ interface work.
 - The model does not replace its weights between steps. A persistent worker
   holds the model and the optimizer.
 
-### 10. Open questions and recommendations
-
-1. **Should the step counter survive a resume?** Yes.
-   `Scheduler::LrMultiplier(step)` needs the step, and `TrainLoop::Run` starts
-   at step 1 today. A resume therefore replays the warmup and breaks the curve.
-   Store one more record beside the optimizer state in `Checkpointer::SaveModel`.
-   On load, the driver continues to the absolute `num_iterations`. The first
-   increment restores the schedule but not the data position, so a resumed run
-   reads the stream from the first batch.
-2. **Is `capi.h` part of the public API?** No.
-   Section 1 of `AGENTS.md` freezes `capi.h`, and the architect owns it. The C
-   interface is an internal seam for the Python binding, not a public API.
-   Consumers use the Python package. Section 7 of the design document lists the
-   public C++ headers, and it stays unchanged.
-3. **Should the chat template stay in Python?** Yes, for now.
-   [the evaluation document](eval.md) section 2 already gives prompt rendering
-   to Python. The reference `nanochat` package owns the template, and parity is
-   the goal. The C++ tokenizer has no render method
-   (`include/nanochat/tokenizer.h`), so a C++ copy would be a second
-   implementation that can drift. Promote `render_conversation` to a public
-   Python function. Move the template to C++ only when a native command needs
-   it.
-4. **Should `Optimizer.step(step)` stay public?** Yes, in C++.
-   The mechanism needs the step number, because the scheduler computes the
-   multiplier from it. Remove the call from the primary Python path. The driver
-   owns the counter for a normal run, and the Python `Optimizer` stays for a
-   custom loop and for tests. One owner for the counter removes the drift
-   between `TrainLoop::Run` and `Model::optimizer_step_`.
-5. **Does the supervised fine-tuning driver need a thread for the reader?**
-   Yes. `DataLoader` already owns a producer thread and a bounded buffer
-   (`src/data.cc:274`). The packed-row loader is I/O-bound and fits the same
-   design. One thread is enough, because Python did the packing.
-
-### 11. References
-
-- [python.md](python.md): the single Python surface.
-- [post-training.md](post-training.md): supervised fine-tuning and
-  reinforcement learning, and the status of record.
-- [eval.md](eval.md): the evaluation seam and the "metric in Python, compute in
-  C++" rule.
-- [model.md](model.md): the model interface and the graphs.
-- [build.md](build.md) § Layers for the layers, [model.md](model.md)
-  § No autograd engine for the autograd policy, and
-  [model-and-device-bringup.md](model-and-device-bringup.md) §18 for the
-  evolution rules.
-
-
----
-
-## Part 3. Native collectives over NVLink and RDMA
+## Part 2. Native collectives over NVLink and RDMA
 
 _Absorbed from the former `distributed-native-plan.md`. Its section numbers are
 unchanged, so a reference to a section of that document resolves to the same
 number here._
 
 This document is the execution plan for a native all-reduce backend. The backend
-is the one collective on the CUDA path. [distributed-design.md](distributed-design.md)
+is the one collective on the CUDA path. this page
 holds the current seam design.
 
-Status: delivered through phase 2 on the local T4 host, and phase 6 is closed.
 The ring schedule, the host-staged transport, the transfer-window pool, and
 `NativeGradientSync` are in `backends/cuda/collective/`. The 2x T4 pair has no
 peer access, so the ring stages through pinned host memory; the NVLink and RDMA
@@ -1447,7 +1088,7 @@ schedule.
 
 The ring runs on the adapter's streams, so the main stream is free. The pack
 copy of the next bucket overlaps the reduction of the current bucket. This is
-the overlap the asynchronous seam promises (docs/distributed-design.md
+the overlap the asynchronous seam promises (docs/distributed.md
 section 6).
 
 The adapter also implements `AllReduceSum` for a synchronous caller. The call
@@ -1478,156 +1119,13 @@ The device target for this work is `--config=h100`, which is fp32. Stage 1 moves
 the `h200` target to fp32 and Stage 2 moves it to bf16 (precision.md section 4).
 The `h200` config is outside the collective path.
 
-### 7. Phases
-
-#### Phase 0 — Decision and scaffolding
-
-Owner: architect, with the collective agent.
-
-- Record the decision to drop NCCL as a hard dependency. Update
-  [distributed-design.md](distributed-design.md) and
-  [distributed-design.md](distributed-design.md).
-- Add a build define, for example `--define=collective=native`. Keep `nccl` as
-  the default until parity.
-- Move the rendezvous into `src/rendezvous.{h,cc}`. Update `src/distributed.cc`
-  to use it.
-- Add the `backends/cuda/collective/` directory and its `BUILD.bazel`.
-- Add the RDMA repository rule `third_party/rdma.bzl` for libibverbs, in the
-  style of `third_party/nccl.bzl`.
-- Add the collective workstream to `AGENTS.md` section 1 (section 8 below).
-
-Gate: the tree builds under both `--define=collective=native` and
-`--define=collective=nccl`.
-
-#### Phase 1 — The schedule and the memory transport
-
-Owner: collective agent, with the oracle agent for tests. This phase is CPU
-only.
-
-- Implement `RingAllReduceSum` against the `Transport` interface.
-- Implement the memory transport. Reuse the shared-memory rendezvous from the
-  NCCL mock.
-- Add `//backends/cuda/collective:schedule_test`. It runs world sizes 1, 2, 4,
-  and 8 against a reference sum.
-- Add `//backends/cuda/collective:transport_select_test`. It checks the
-  per-neighbor selection, including a mixed group.
-- Use a relative tolerance. A ring adds in a different order than a single sum.
-- Check that every rank ends with equal bytes.
-- Add the schedule trace (section 10).
-
-Gate: `tools/nanochat test` passes. The test needs no GPU.
-
-#### Phase 2 — The NVLink transport
-
-Owner: collective agent.
-
-- Add the registered transfer window and the CUDA IPC handle exchange
-  (section 5.4).
-- Add `cudaDeviceCanAccessPeer` and `cudaDeviceEnablePeerAccess`.
-- Add the two streams, the event dependencies, and the add kernel.
-- Add the host-staged fallback for a failed peer access.
-- Implement `NativeGradientSync`, the seam adapter, and `CreateGradientSync` in
-  `backends/cuda/collective/native_sync.cu` (section 5.5).
-- Add `//backends/cuda/collective:nvlink_test` with the `gpu` and `manual`
-  tags. Two processes, two cards, tiny shapes.
-
-Gate: the two-rank test passes and matches the host reference within tolerance.
-
-#### Phase 3 — The RDMA transport
-
-Owner: collective agent.
-
-- Add the RDMA connection setup over the control plane.
-- Register the transfer window for GPUDirect RDMA (section 5.4).
-- Post one-sided RDMA writes with immediate, or two-sided send and receive. Poll
-  the completion queue.
-- Add `//backends/cuda/collective:rdma_test` with the `gpu` and `manual` tags.
-  Two ranks over the adapter.
-- Keep the NVLink transport as the first choice. Use RDMA when a peer is not
-  reachable by NVLink.
-
-Gate: the RDMA transport matches the host reference within tolerance. The
-transport selection is correct for a mixed group.
-
-#### Phase 4 — Overlap and performance
-
-Owner: collective agent, with the harness agent.
-
-- Tune the chunk count and the slot count per bucket size.
-- Measure the bus bandwidth and the sync fraction. Use `tools/nanochat doctor`
-  first, then the `t3-bench` profile.
-- Add the small-message schedule only if the measurement asks.
-- Keep the bucket plan in `src/train.cc` unchanged unless the measurement asks.
-
-Gate: the sync fraction is below 0.05. Record the bus bandwidth with the commit
-hash.
-
-#### Phase 5 — Eight ranks on H100
-
-Owner: collective agent, with the architect for the build.
-
-- Build with `--config=h100`. Check the compile under `--config=sim-gate`.
-- Run an 8-rank GPU test on the 8x H100 node.
-- Run the T2 parity gate: an 8-rank loss curve against a 1-rank loss curve,
-  within tolerance.
-
-Gate: the 8-rank test and the T2 parity test pass.
-
-#### Phase 6 — Make native the default and clean up
-
-Owner: architect. Closed.
-
-- `collective=native` is the default for every config, and the only value.
-- `@nccl//:nccl` is gone from `MODULE.bazel`, `third_party/`, and the CUDA
-  config.
-- The design documents are updated.
-- The NCCL mock in `tools/cuda_sim/collective/` and
-  `//tests:collective_sim_test` are removed.
-
-Gate: the merge gate in `AGENTS.md` section 5.5 passes with NCCL absent from the
-tree.
-
-### 8. Ownership
-
-The current map in `AGENTS.md` section 1 has no row for the collective. The
-kernel agents own `backends/cuda/kernels/<family>.cu`. The map does not list an
-owner for `device.cu` and `gemm.cu`. This work needs a clear owner.
-
-Add one workstream to the map.
-
-| Workstream | Owns | Depends on |
-|---|---|---|
-| **Collective** | `backends/cuda/collective/**`, `dev/collective/**` | frozen `kernels.h`, `src/rendezvous.h` |
-
-Suggested file split.
-
-| File | Owner |
-|---|---|
-| `backends/cuda/collective/transport.h` | Collective |
-| `backends/cuda/collective/nvlink_transport.cu` | Collective |
-| `backends/cuda/collective/rdma_transport.cc` | Collective |
-| `backends/cuda/collective/ring_schedule.{h,cc}` | Collective |
-| `backends/cuda/collective/native_sync.cu` | Collective |
-| `backends/cuda/collective/BUILD.bazel` | Collective |
-| `src/rendezvous.{h,cc}` | Workflow |
-| `third_party/rdma.bzl` | Architect |
-| `.bazelrc`, root `BUILD`, `MODULE.bazel` | Architect |
-| `docs/**`, `AGENTS.md` | Architect |
-
-`include/nanochat/kernels.h` and `include/nanochat/model.h` do not change. The
-asynchronous seam already exists. Keep the add kernel backend-private.
-
-The RDMA work needs a device and a driver that the WSL2 host does not have. The
-collective agent develops the schedule on the central processing unit and the
-transports on the H100 node.
-
 ### 9. Broker and launch
 
 The local GPU queue serves one GTX 1080 Ti. It is not the
 broker for an 8x H100 node. Treat the node as one resource.
 
 - One `tools/nanochat dist` invocation holds one lock for the whole rank group.
-  [distributed-design.md](distributed-design.md) already defines this. Keep that
+  this page already defines this. Keep that
   rule. Do not take one lock per rank.
 - The lock covers all 8 cards. The `nvidia-smi` gate must see all 8 cards as
   idle before the group starts.
@@ -1669,113 +1167,6 @@ with the memory transport replays the records and checks four rules.
 
 The simulator agent owns the trace convention. The oracle agent owns the test.
 
-### 11. Open questions and how to close them
-
-Each question is either a discovery task or a decision.
-
-- A discovery task has a command or a measurement. Run it, record the output,
-  and close the question.
-- A decision needs an owner and a deadline. Write a short record, then close the
-  question.
-
-#### 11.1 The RDMA adapter and GPUDirect RDMA
-
-Type: discovery. Run the probes on the 8x H100 node.
-
-- `ibv_devinfo -v` — the adapter list, the active speed, and the active width.
-- `ibv_devices` and `rdma link show` — the device names and the link state.
-- `nvidia-smi topo -m` — the GPU-to-adapter affinity. A `PIX` or `NODE` entry is
-  good. A `SYS` entry crosses the central processing unit and is slow.
-- `nvidia-smi nvlink -s` — the NVLink status and the per-link speed.
-- `lspci | grep -i -E 'mellanox|infiniband|ethernet'` — the adapter vendor and
-  model.
-- `lsmod | grep -E 'nvidia_peermem|nv_peer_mem'` — the peer-memory module.
-
-A list of adapters is not proof of GPUDirect RDMA. Write a small test that calls
-`cudaMalloc`, then `ibv_reg_mr` on the device pointer, then frees the region. A
-failure at `ibv_reg_mr` means no device registration. Put this test in the
-collective directory and tag it `manual`.
-
-Extend `tools/nanochat doctor` with an RDMA section. It already prints the GPU,
-the driver, the sandbox, and the lock state. Add the adapter list, the link
-speed, and the peer-memory module. Keep the `--json` shape.
-
-Record the result in a new `docs/node-h100.md`, or extend
-[host-portability.md](host-portability.md).
-
-#### 11.2 RDMA as a fallback or as a required transport
-
-Type: decision with a reversible design.
-
-Make transport selection a runtime rule.
-
-| Condition | Transport |
-|---|---|
-| Every peer pair passes `cudaDeviceCanAccessPeer` | NVLink |
-| A peer is on another node, or peer access fails | RDMA |
-| No RDMA adapter and no peer access | Host staging |
-
-The rule is per edge, not per group. `RingTransports` applies it to each of the
-two ring neighbors, so a mixed group works (section 3.2).
-
-With this rule, the answer changes only the default preference and the tests.
-The schedule does not change.
-
-Ask the roadmap owner one question in writing: will a second node join within
-the current plan horizon? If the answer is no, RDMA is a fallback and its
-performance work can wait. If the answer is yes, RDMA is a first-class path and
-every phase tests it.
-
-Record the rule in [distributed-design.md](distributed-design.md) beside the
-current section 5 table.
-
-#### 11.3 Retire fp16, or only remove it from the collective
-
-Type: decision, mostly closed.
-
-[precision.md](precision.md) section 6 already accepts Stage 1. Stage 1 removes
-fp16 from the tree, so every reduction is fp32, and the collective needs fp32
-only.
-
-Scope the collective to fp32. Stage 1 moves the `h200` target to fp32 and Stage
-2 moves it to bf16 (precision.md section 4). Neither step blocks the collective.
-
-#### 11.4 Node ownership and the broker
-
-Type: discovery plus an access contract.
-
-Ask the node owner four questions, in writing.
-
-1. Is the node exclusive to this project, or shared?
-2. Does a scheduler already serialize jobs on it, for example Slurm or
-   Kubernetes?
-3. What are the driver and toolkit versions?
-4. Is a systemd user manager available for the sandbox?
-
-Probe the node. Extend `tools/nanochat doctor` to report the card count, the
-driver, the toolkit, the interconnect, and whether a scheduler is present.
-
-Then pick one broker case, as section 9 describes. Record the access contract in
-`docs/node-h100.md`, in the style of the Kaggle section in
-[host-portability.md](host-portability.md).
-
-#### 11.5 The schedule trace
-
-Type: recommendation, accepted.
-
-Build the trace in phase 1, as section 10 describes. It is cheap, and it removes
-the largest correctness risk in the two-stream design.
-
-### 12. Summary of open questions
-
-| Question | Type | How to close | Owner | Blocks |
-|---|---|---|---|---|
-| RDMA adapter and GPUDirect | Discovery | `ibv_devinfo`, `nvidia-smi topo -m`, and an `ibv_reg_mr` probe | Collective | Phase 3 |
-| RDMA fallback or required | Decision | One written roadmap answer, plus a reversible selection rule | Architect | Phase 3 default |
-| Retire fp16 | Closed | precision.md section 6 Stage 1 removes fp16 from the tree; the `h200` target is fp32 until Stage 2 | Architect | Nothing |
-| Node ownership and broker | Discovery and contract | Four written answers; a `doctor` extension; `docs/node-h100.md` | Architect | Phase 5 gates |
-| Schedule trace | Recommendation | Reuse the mock's JSONL and coordinator pattern | Collective and Oracle | Phase 1 |
-
 ### 13. Test matrix
 
 | Tier | Target | What it checks |
@@ -1791,28 +1182,565 @@ the largest correctness risk in the two-stream design.
 The schedule test is the primary new gate. It carries the algorithm. The
 transport tests carry only data movement.
 
-### 14. Risks and controls
+## Part 3. The single-client multi-device runtime
 
-| Risk | Effect | Control |
+_Absorbed from the former `distributed.md`. Its section numbers are
+unchanged, so a reference to section K of that document resolves to section K
+here._
+
+The tree implements and CPU-tests the C++ mesh runtime, the in-process
+collective, the C application binary interface, the mesh training driver, and the
+Python `mesh`/`runtime` client. The CUDA thread-local change, the loader
+integration, and the compatibility process
+runtime are later phases. The kernel seam and the public model API do not
+change.
+
+The mesh training driver is C++ by decision (section 20.5). The driver owns the
+step loop, the metric record, the summary, and the resume. Python calls one
+driver function per run. Phase 6 delivers the driver, so
+`notebooks/mesh_train.py` is a thin launcher over it.
+
+Related: this page,
+this page, [python.md](python.md),
+[build.md](build.md) § Layers, and
+[model-and-device-bringup.md](model-and-device-bringup.md) §18.
+
+### 1. Purpose
+
+This document gives a design for one client program that controls every local
+accelerator. The client sees all devices as one system. The user starts one
+program. The user needs no `torchrun`, no rank variable, and no rendezvous
+port.
+
+The design keeps two properties:
+
+- **Single point of control.** One client program is the controller.
+- **Unified view.** The client treats every local device as one machine.
+
+The reference model is JAX on one host. The API shape follows
+`jax.devices()`, `Mesh`, `NamedSharding`, and `PartitionSpec`.
+
+### 2. Scope
+
+In scope:
+
+- One host.
+- Two to eight local accelerators.
+- One client process.
+- Data-parallel training.
+- Replicated inference and evaluation.
+- The current fixed model graph.
+
+Out of scope:
+
+- More than one host.
+- Tensor parallel and pipeline parallel.
+- A general parallel array library.
+- A sharding compiler.
+- An autograd engine.
+- Dynamic shapes and runtime dtype dispatch.
+
+### 3. The current model and its cost
+
+The project uses a single program, multiple data model today.
+`tools/nanochat dist` starts one process per device. The launcher sets
+`CUDA_VISIBLE_DEVICES` and the `NANOCHAT_*` variables for each process.
+`src/train_command.cc` reads those variables. The gradient-sync seam reduces the
+gradients.
+
+The user pays a cost for this model:
+
+- The rank is visible in the shape of the run.
+- The user must start the group.
+- The user must pick a master address and a port.
+- The model exists one time per process.
+- A checkpoint exists one time per rank.
+
+The client design removes the rank from the user program. The runtime owns the
+rank.
+
+### 4. Decision
+
+Two runtimes can give a single control point.
+
+#### 4.1 Runtime A: one process, one device thread
+
+One process owns every device. One host thread binds to one device. The thread
+calls `cudaSetDevice` one time. The CUDA runtime then uses that device for every
+later call on that thread. Each thread builds one model replica on its device.
+The collective runs between threads in one address space.
+
+#### 4.2 Runtime B: one process, one device process
+
+One client process owns every device. The client starts one worker process per
+device. The workers use the current runtime. The client is a supervisor. The
+client sets the device variables for each worker.
+
+#### 4.3 The choice
+
+The project selects Runtime A as the target. Runtime A gives a true unified
+address space. It removes the rendezvous and the rank variables.
+
+Runtime B stays as a compatibility backend behind the same client interface.
+Use Runtime B when a driver forbids more than one CUDA context in one process.
+
+The rest of this document describes Runtime A. Section 15 describes Runtime B.
+
+### 5. Programming model
+
+The client exposes four concepts. They match JAX.
+
+#### 5.1 Device list
+
+`nanochat.devices()` returns every local accelerator. The call does not create a
+CUDA context. The runtime reads the device count and the device properties.
+
+```python
+devices = nanochat.devices()
+```
+
+#### 5.2 Mesh
+
+`Mesh(devices, axis_names)` binds a named axis to the device list.
+
+```python
+mesh = nanochat.Mesh(devices, ("data",))
+```
+
+The runtime accepts a rank-1 mesh only. The one axis must have the name
+`"data"`. The `MeshSpec` type carries a shape vector and a name vector, so a
+rank-N mesh is a later additive change. The runtime rejects a rank-N mesh and
+an unknown axis name at construction time. The error names the supported axis.
+
+The project puts tensor parallel and pipeline parallel out of scope (section
+2). A second axis has no executor, because the kernel seam has no device
+argument. Section 20.1 records this decision.
+
+#### 5.3 Placement
+
+`PartitionSpec` names the sharded axes of one tensor. A value of `None` means
+replicated. A name means sharded along that mesh axis.
+
+```python
+from nanochat import PartitionSpec as P
+
+params = nanochat.NamedSharding(mesh, P())        # replicated
+batch = nanochat.NamedSharding(mesh, P("data"))   # sharded on 'data'
+```
+
+#### 5.4 Supported placements
+
+The project has a fixed graph. It has no sharding compiler. So the runtime
+supports a small placement set.
+
+| Object | Placement | Meaning |
 |---|---|---|
-| A ring adds in a different order | The result differs from the reference by a few ulps | Use a relative tolerance in every test |
-| Peer access is unavailable | The NVLink copy fails | Detect with `cudaDeviceCanAccessPeer`, then choose RDMA or host staging |
-| GPUDirect RDMA needs a kernel module | The RDMA path registers no device memory | Check the peer-memory module at setup. Fail with a clear message |
-| A rank fails during a collective | The job hangs | Bound every wait with the watchdog deadline (section 5.6). Test the timeout path |
-| Per-step buffer registration | The NVLink path is slow or leaks mappings | Register a fixed window pool once (section 5.4). Grow only when `count` grows |
-| Two streams deadlock each other | The pipeline stalls | Document the two event rules. Test with the schedule trace |
-| The H100 node is not available locally | The T1 and T2 gates cannot run here | Use `--config=sim-gate` for the compile, and the node for the gates |
-| The RDMA adapter topology changes | The tuned chunk count is wrong | Derive the chunk count from the measured bandwidth |
-| The node broker is misconfigured | Concurrent jobs collide | One lock per group. Deploy the node broker separately |
+| Model parameters | `P()` | One full replica per device |
+| Optimizer state | `P()` | One full state per device |
+| Global batch | `P("data")` | Contiguous slices, one per device |
+| Activations | derived | Follow the batch placement |
+| Gradients | derived | Follow the parameter placement |
 
-### 15. Definition of Done
+The runtime rejects any other placement at construction time. The error names
+the supported set. Parameter sharding is tensor parallel. Section 2 puts that
+work out of scope.
 
-1. `tools/nanochat test` passes with the new schedule test.
-2. The T1 NVLink test passes with two ranks.
-3. The T1 RDMA test passes with two ranks.
-4. The 8-rank T2 parity test passes on the 8x H100 node.
-5. The sync fraction is below 0.05 for the target model.
-6. The default CUDA build needs no vendor collective.
-7. The `h100` compile gate passes under `--config=sim-gate`.
-8. `tools/nanochat lint` passes.
-9. The design documents match the code.
+#### 5.5 The program
+
+A training program mentions no rank.
+
+```python
+import nanochat
+
+devices = nanochat.devices()
+model = nanochat.Config(num_layers=12, hidden_dim=768)
+
+train = nanochat.MeshTrainConfig(
+    model, preset="track3", world_size=len(devices),
+    tokenizer="tokenizer.nctoken", train_parquet="shard-*.parquet",
+    per_rank_batch=1, grad_accum=4, steps=5000, out_dir="run")
+result = train.run()
+print(result.mean_loss)
+```
+
+The `MeshTrainConfig.run` call returns when the run stops. It writes
+`metrics.jsonl`, `summary.json`, and the canonical checkpoint in `out_dir`. The
+client never names a rank and never steps the optimizer. Section 20.5 records
+this decision.
+
+The lower-level `MeshRuntime` stays. `MeshRuntime.train_step()` splits one
+global batch across the mesh, reduces the gradients in process, and returns one
+loss. A test and a custom loop use it. `MeshRuntime.metrics()` returns the
+per-device breakdown and the timing fields. Section 20.4 records that decision.
+
+### 6. What the model is not
+
+The client is not a general parallel array library.
+
+- There is no `jnp`.
+- There is no `jit` over user code. The graph is the code.
+- There is no `vmap` or `pmap` over user functions.
+- There is no `psum` or `pmean` in user code.
+
+The runtime reduces the gradients itself. The parallel entry points are the
+fixed operations: `forward_loss`, `step`, `generate`, and `evaluate`.
+
+### 7. Architecture
+
+The runtime adds one host layer. The layer sits above the per-replica driver. It
+never touches the kernel seam.
+
+```text
+App / CLI        train.py   (one process, one program)
+Runtime (new)    DeviceMesh  DeviceContext  ReplicaGroup  Collective
+Train driver     TrainLoop   Checkpointer  Logger      (one per replica)
+Optim            AdamW  Muon  Scheduler
+Model / graphs   Model  Prefill  Decode  KvCache
+Ops
+KERNEL API       <-- unchanged seam
+Backend          backends/cpu/   backends/cuda/
+```
+
+New files:
+
+| File | Purpose | Owner |
+|---|---|---|
+| `include/nanochat/mesh.h` | `DeviceInfo`, `EnumerateDevices`, `MeshSpec` | Architect |
+| `src/mesh.cc` | The mesh validation shared by the runtime and the client | Architect |
+| `src/mesh_collective.h`, `src/mesh_collective.cc` | The in-process all-reduce | Collective |
+| `src/mesh_runtime.h`, `src/mesh_runtime.cc` | Device threads, replicas, step dispatch | Harness |
+| `src/mesh_train.h`, `src/mesh_train.cc` | The mesh training driver: the step loop, the metric record, the summary, and the resume | Harness |
+| `capi.h` additions | Device enumeration, the mesh handle, the runtime handle, the driver config struct, and the driver run call | Architect |
+| `python/nanochat_cpp/mesh.py` | `devices`, `Mesh`, `NamedSharding`, `PartitionSpec` | Python surface |
+| `python/nanochat_cpp/runtime.py` | `MeshRuntime`, and the coarse driver client | Python surface |
+
+The frozen header `kernels.h` does not change. Section 8 explains why.
+
+### 8. Thread-affine device selection
+
+The seam has no device argument. Every kernel call carries a pointer and a
+shape. The runtime does not change the seam. The runtime uses one rule instead:
+one device thread owns one device.
+
+- The thread calls `cudaSetDevice(index)` one time.
+- The CUDA runtime uses that device for every later call on the thread.
+- `kernels::Alloc`, `kernels::Gemm`, and the other calls use the calling
+  thread's device.
+- Each thread builds its own `Model`. The buffers land on the right device.
+- Each thread destroys its own model and its own workspace.
+
+This rule keeps the seam frozen.
+
+#### 8.1 Backend state that is thread-local
+
+The CUDA backend holds process-global state in the first draft. Each item is
+thread-local now:
+
+| Item | File |
+|---|---|
+| cuBLAS handle | `backends/cuda/gemm.cu` |
+| Tensor-core flag | `backends/cuda/gemm.cu` |
+| Device name buffer | `backends/cuda/device.cu` |
+| Muon scratch | `backends/cuda/kernels/muon.cu` |
+| Attention scratch | `backends/cuda/kernels/attention.cu` |
+
+The device globals in `backends/cuda/kernels/grad_norm.cu` stay device
+globals. Each device has its own copy of the module state. One thread drives one
+device, so the order is safe.
+
+#### 8.2 The seam stays frozen
+
+A thread-local change is invisible above the seam. The `src/**` layer sees no
+change. The `kernels.h` contract is unchanged. The evolution rules in
+[model-and-device-bringup.md](model-and-device-bringup.md) §18 permit this class
+of change.
+
+### 9. The in-process collective
+
+The in-process collective replaces the TCP host reference on one host.
+
+#### 9.1 Interface
+
+The collective satisfies `GradientSync` in `src/distributed.h`. The seam does
+not change.
+
+#### 9.2 Structure
+
+One `CollectiveGroup` holds every device thread.
+
+- A barrier synchronizes the group.
+- One pinned host buffer holds one slot per device.
+- Each device copies its gradient bucket to its slot.
+- After the barrier, each device sums every slot in rank order.
+- Each device copies the sum back to its bucket.
+
+The sum order is the rank order. Every replica sees the same bytes. So every
+optimizer step is identical.
+
+#### 9.3 Memory
+
+One bucket holds a fixed element count. The staging buffer holds `world_size`
+slots. A large gradient needs several buckets. The current harness already
+buckets the gradients. The runtime reuses that code.
+
+#### 9.4 The fast path
+
+When a device pair has peer access, the runtime can copy between devices with
+`cudaMemcpyPeerAsync`. The ring schedule in
+`backends/cuda/collective/ring_schedule.cc` already exists. A later phase can
+reuse it. The host path is correct first.
+
+### 10. One training step
+
+1. The controller reads one global micro-batch from the loader.
+2. The controller splits the batch into `world_size` contiguous slices.
+3. The controller puts one slice on each device thread queue.
+4. Each device thread runs `forward_loss` and `backward_accumulate` with the
+   scale `1 / (accum * world_size)`.
+5. Each device thread packs its gradient buckets.
+6. The collective sums every bucket. Section 9.2 gives the order.
+7. Each device thread runs one optimizer step with the same reduced gradient.
+8. The controller collects the per-device losses and returns the global mean.
+
+The global batch stays constant on any device count. Only the work per device
+changes. This matches `docs/distributed.md` section 3.
+
+#### 10.1 The training driver owns the loop
+
+`MeshRuntime::TrainStep` is one step. It is the mechanism. A separate C++
+driver owns the run around it. The driver is `src/mesh_train.cc`.
+
+The driver owns five items:
+
+1. The step loop from the resume step to the last step.
+2. The metric record of each step, and the write to `metrics.jsonl`.
+3. The run summary, and the write to `summary.json`.
+4. The checkpoint interval and the final checkpoint.
+5. The interrupt path: the driver saves a checkpoint before the error leaves.
+
+The driver owns the loader. It accepts an injected `DocumentSourceFactory`, so
+a test supplies documents without parquet. Section 11 gives the loader rule.
+
+The driver writes one record shape. The shape follows the `LogRecord` fields in
+`src/train.cc` and adds one loss entry per device:
+
+```json
+{"version": 2, "step": 1, "loss": 4.1, "grad_norm": 0.9,
+ "tokens_per_sec": 12000.0, "mfu": 0.31, "step_seconds": 0.2,
+ "data_seconds": 0.004, "compute_seconds": 0.19, "seconds": 0.2,
+ "device_loss": [4.1, 4.1]}
+```
+
+Schema 2 adds `data_seconds` and writes `compute_seconds`, which schema 1
+measured and printed only to the human log. The three timing fields split one
+step: `step_seconds` is the wall clock between two step starts, `data_seconds`
+is the batch load, and `compute_seconds` is the training call. The report reads
+them instead of dividing the stage wall clock by the step count, because that
+quotient charges the build and the corpus copy to every step.
+
+The summary holds `version`, `checkpoint`, `steps`, `mean_loss`,
+`steady_mfu`, and `replica_digests`. The driver owns both files. Python reads
+the files and displays the rows. Python does not compute a record.
+
+The `version` field is one integer. A consumer ignores an unknown field and
+rejects an unknown version. Section 20.5 records this decision.
+
+### 11. Data and the loader
+
+The loader yields a global batch. The runtime owns the split. The user does not
+see a rank.
+
+In phase 2 the controller reads one global batch and slices it. This path
+matches the reference rule in `docs/distributed.md` section 7: one global
+token batch splits into contiguous slices. The CPU mesh test needs no overlap,
+so the simple path is enough. The host batch is small. A 524288-token batch
+needs about 4 MiB for the tokens and the targets.
+
+The controller path needs a small interface change. The per-replica `TrainLoop`
+gains an entry point that accepts an injected batch. The current `Run()` reads
+its own data, so it cannot serve the mesh. Section 17 phase 2 covers this
+change.
+
+In phase 5 the read moves behind the runtime. Each device thread reads its own
+shard through a pinned double buffer. That change helps the overlap of the data
+read with the step. It is not necessary for correctness. Section 20.2 records
+this decision.
+
+### 12. Checkpoints
+
+One checkpoint is canonical. The runtime writes the checkpoint from replica 0.
+The runtime loads a checkpoint into every replica. The replicas stay
+byte-identical. The current design already gives this property. The runtime
+keeps the sidecar data cursor for an exact resume.
+
+### 13. Inference and evaluation
+
+Replicated inference: every device holds a full copy of the model. The runtime
+puts one prompt on each device and fans out the rows. `GenerateBatch` and
+`GenerateMultiPrompt` already batch rows.
+
+Evaluation: the runtime splits the validation set across the devices and
+reduces the byte-per-byte totals.
+
+These cases need no gradient reduction. They use the barrier and a small scalar
+reduction only.
+
+### 14. The entry point and the sandbox
+
+The client is the entry point. The runtime keeps the sandbox rule.
+
+- The client process runs inside one sandbox scope. It takes one queue job for
+  the device set.
+- `tools/nanochat run train -- python train.py` is the strict form.
+- The console script `python -m nanochat_cpp.run train.py` re-enters
+  `tools/nanochat client`. The user sees one command.
+
+The `nanochat_init()` sandbox check stays. A run outside the entry point still
+fails fast.
+
+The worker owns the full device set, for example `0,1,2,3`. One job covers the
+group. A second job on the same set waits.
+
+### 15. The compatibility runtime
+
+Runtime B starts one worker process per device behind the same client
+interface.
+
+- `Mesh` and `PartitionSpec` behave the same.
+- The client sets `CUDA_VISIBLE_DEVICES` and the rank variables per worker.
+- The client uses `tools/nanochat dist` today.
+- The reduction uses the native ring.
+
+The user program does not change. The runtime backend is a construction option.
+
+```python
+runtime = nanochat.Runtime(mesh, backend="inproc")     # default
+runtime = nanochat.Runtime(mesh, backend="process")    # compatibility
+```
+
+Runtime B stays a supported backend. It is not a second API. Three cases need
+it:
+
+- Some drivers forbid more than one CUDA context in one process.
+- Kaggle runs two T4 cards, and a notebook can prefer process isolation.
+- One bad device stops one worker, not the whole client.
+
+Runtime B shares the mesh code and the placement code. So the extra cost is
+small. Section 20.3 records this decision.
+
+### 16. Determinism and parity
+
+- The reduction sums the buckets in rank order.
+- The gradient is the mean over the global batch.
+- Every replica applies the same update. So the replicas stay equal.
+- The validation loss of a multi-device run equals the validation loss of a
+  one-device run on the fixed set.
+
+Section 18 pins these properties.
+
+### 18. Tests
+
+| Tier | Test | Gate |
+|---|---|---|
+| T0 CPU | `//src:mesh_test` | Device enumeration and mesh construction |
+| T0 CPU | `//src:runtime_test` | Two CPU devices equal one CPU device |
+| T0 CPU | `//src:mesh_train_test` | The driver record, the summary, the resume, the interrupt save, and the data-cursor resume |
+| T0 CPU | `//backends/host/collective:inproc_sync_test` | The in-process sum matches the host reference |
+| T0 CPU | `//python:mesh_test` | The mesh, the placement, and the rejection of a bad placement |
+| T0 CPU | `//python:runtime_test` | The mesh runtime client over the C application binary interface |
+| T0 CPU | `//python:mesh_train_test` | The driver client writes the same records as the C++ driver |
+| T1 GPU | `//src:runtime_gpu_test` | Two device threads on one card |
+| T2 GPU | A two-device run versus one device | The validation loss matches one device |
+
+The CPU tests carry the mesh logic. The development host has one card, so the
+CPU path is the main gate. This matches [kernels.md](kernels.md) § Compute
+strategy and `AGENTS.md` section 5.1.
+
+### 20. Resolved decisions
+
+This section answers the four questions that the first draft left open. Each
+answer gives the decision and the reason.
+
+#### 20.1 The mesh has one axis
+
+Decision: the runtime accepts a rank-1 mesh. The one axis is named `"data"`. A
+rank-N mesh is rejected at construction time.
+
+Reasons:
+
+- Tensor parallel and pipeline parallel stay out of scope (section 2).
+- The kernel seam has no device argument, so a second axis has no executor.
+- The current collective reduces one gradient group along one axis.
+
+`MeshSpec` already carries vectors for the shape and the names. So a later
+second axis is an additive change. The first axis keeps the name `"data"`.
+
+#### 20.2 The controller reads the global batch in phase 2
+
+Decision: in phase 2 the controller reads one global batch and slices it. Phase
+5 moves the read behind the runtime.
+
+Reasons:
+
+- The contiguous global slice matches the reference rule in
+  `docs/distributed.md` section 7.
+- The CPU mesh test needs no overlap, and phase 2 must stay small.
+- The host batch is small. A 524288-token batch needs about 4 MiB.
+
+Phase 5 adds a pinned double buffer per device and reads each shard on its
+device thread. That change is an optimization. It does not change the result.
+
+#### 20.3 The compatibility runtime stays
+
+Decision: Runtime B stays a supported backend. It is a construction option, not
+a second API. The project does not remove it at phase 5.
+
+Reasons:
+
+- Some drivers forbid more than one CUDA context in one process.
+- Kaggle runs two T4 cards, and a notebook can prefer process isolation.
+- One bad device stops one worker, not the whole client.
+
+Runtime B shares the mesh code and the placement code. So the cost is small. A
+later removal needs a design review.
+
+#### 20.4 One loss, with a per-device breakdown
+
+Decision: `MeshRuntime.train_step()` returns one global mean loss. A later
+`metrics()` accessor returns the per-device split and the timing fields.
+
+Reasons:
+
+- The unified view wants one result for one step.
+- The JAX reference returns one value from a jitted function.
+- Debugging still needs the per-device split. The harness already collects it.
+
+The runtime computes the global loss with a scalar reduction over the valid
+tokens. The delivered client returns one loss, and `MeshRuntime.param_read`
+exposes one replica at a time. A later `metrics()` follows the `LogRecord`
+fields in `src/train.cc` and adds one loss entry per device.
+
+#### 20.5 The C++ driver owns the mesh loop
+
+Decision: a C++ driver owns the mesh step loop, the metric record, the summary,
+and the resume. Python calls one driver function per run. Python keeps the data
+choice, the tokenizer path, the MFU inputs, and the display.
+
+Reasons:
+
+- `docs/distributed.md` Part 2, section 2 already fixes the split. C++ owns mechanism.
+  Python owns policy and data. Section 9 of that document states the invariant.
+- `notebooks/mesh_train.py` rebuilds the harness layer. It repeats the step
+  loop, the MFU, the log format, and the summary.
+- The two log formats already differ. `Logger::Log` and `format_row` print
+  different fields for the same step.
+- `notebooks/mesh_train.py` carried a second config class beside the driver
+  config. One field change needed edits in both places.
+
+The driver config mirrors the existing `TrainConfig` and `MeshRuntimeConfig`
+fields. Python owns the job file for the child process, so the C interface
+carries no serializer. The notebook keeps the child-process launch and the file
+polling, because those are process policy.
+
+This decision does not change the seam, the frozen headers, or the runtime
+step arithmetic. It moves the loop and the record only.

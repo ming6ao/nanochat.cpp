@@ -604,7 +604,8 @@ int main(int argc, char** argv) {
       }
       // The fused schedule is fp32: its workspace is sized in float elements
       // and its passes load float quads, so a bf16 build must not reach it
-      // (docs/muon-step.md defect U1). One line says why the rows are absent.
+      // (docs/kernels.md Part 1, section 9). One line says why the rows are
+      // absent.
       if constexpr (!nanochat::kComputeIsBf16) {
         // The same two measurements through the fused path, over the same
         // buffers. A reader compares `muon:` with `muon_fused:` row by row: the

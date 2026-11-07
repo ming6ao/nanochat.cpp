@@ -1,5 +1,5 @@
 // backends/cuda/collective/nvlink_test.cc -- the native collective on two
-// cards (docs/distributed-design.md Part 3, section 13, T1 row). Two processes
+// cards (docs/distributed.md Part 2, section 13, T1 row). Two processes
 // reduce a device buffer and check the sum against an independently computed
 // reference.
 //

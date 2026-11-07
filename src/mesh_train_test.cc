@@ -1,5 +1,5 @@
 // src/mesh_train_test.cc -- the mesh training driver on the CPU backend
-// (docs/client-runtime-design.md section 10.1, docs/distributed-design.md
+// (docs/distributed.md Part 3, section 10.1, docs/distributed.md
 // section 6.6).
 //
 // The gates: the driver writes one record per step and a summary; a resume
@@ -246,7 +246,7 @@ void TestDriverWritesRecordAndSummary() {
 
 // The driver writes the data cursor beside its checkpoint: the sidecar holds
 // the cursor of the stream the checkpoint consumed
-// (docs/distributed-design.md section 11).
+// (docs/distributed.md section 11).
 void TestDriverWritesTheDataCursor() {
   const CursorFixture fixture = MakeCursorFixture();
   const std::string out = (fixture.root / "writes").string();
@@ -297,7 +297,7 @@ void TestDriverWritesTheDataCursor() {
 
 // A resume continues the token stream from the cursor beside the checkpoint
 // instead of replaying the shard from its start
-// (spec/api-surface.md R13, docs/distributed-design.md section 11).
+// (spec/api-surface.md R13, docs/distributed.md section 11).
 //
 // The sidecar is rewritten to the cursor of the stream start while the
 // checkpoint keeps its step, so the two behaviours separate: a resume that
@@ -365,7 +365,7 @@ void TestResumeFollowsTheDataCursor() {
 
 // A missing or unreadable sidecar is not an error: the run replays the consumed
 // batches and still completes, so a checkpoint from an older build resumes
-// (docs/distributed-design.md section 11).
+// (docs/distributed.md section 11).
 void TestResumeWithoutACursorCompletes() {
   const CursorFixture fixture = MakeCursorFixture();
   const std::string out = (fixture.root / "no_cursor").string();
@@ -476,7 +476,7 @@ void TestDriverMatchesHandRun() {
 }  // namespace
 
 // The packed `NCSFT001` shard: the driver cycles the rows and writes one record
-// per step (docs/distributed-design.md Part 2, section 6.2).
+// per step (docs/distributed.md Part 1, section 6.2).
 void TestDriverRunsPackedRows() {
   const Fixture fixture = MakeFixture();
   const std::string out = (fixture.root / "rows").string();

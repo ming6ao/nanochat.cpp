@@ -74,4 +74,4 @@ micro-batch amortizes the reduction. A small micro-batch does not.
 - The network congestion and the route. Use `--bandwidth-gbps` with a measured
   value.
 
-The design is in `docs/distributed-design.md`.
+The design is in `docs/distributed.md`.

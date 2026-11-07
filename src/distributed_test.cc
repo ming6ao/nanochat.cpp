@@ -1,6 +1,6 @@
 // src/distributed_test.cc -- the backend-free gradient-sync host reference.
 //
-// Runs two ranks and checks two things (docs/distributed-design.md sections 4
+// Runs two ranks and checks two things (docs/distributed.md sections 4
 // and 7):
 //   1. `AllReduceSum` returns the elementwise sum on every rank. The two ranks
 //      run in separate processes over loopback TCP, and the result is checked

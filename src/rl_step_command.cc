@@ -1,8 +1,8 @@
 // `rl_step` -- the file-driven reinforcement-learning step.
 //
 // It is the RL analog of the training-parity harness (docs/post-training.md
-// section 4, docs/distributed-design.md Part 2, section 6.4,
-// docs/post-training.md section 12). It reads a fixture that holds the model
+// section 4, docs/distributed.md Part 1, section 6.4,
+// docs/post-training.md section 5.1). It reads a fixture that holds the model
 // configuration, the optimizer and schedule configuration, the initial
 // parameters, and, per step, a recorded rollout (tokens and targets with `-1`
 // at every ignored position) and the per-position advantage weights. It runs
@@ -13,7 +13,7 @@
 // summary.
 //
 // The step is shared, not copied: the divisor `num_valid * num_passes *
-// examples_per_rank` is computed in C++ by `RlStep` (docs/distributed-design.md
+// examples_per_rank` is computed in C++ by `RlStep` (docs/distributed.md
 // section 5.7), so this binary never computes it.
 //
 // The fixture wire format is the little-endian `NANOORC1` container of

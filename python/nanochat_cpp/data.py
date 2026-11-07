@@ -1,7 +1,7 @@
 """The portable ``NCTOKEN1`` tokenizer for the C++ runtime.
 
 The C++ runtime reads parquet documents and tokenizes during the run
-(``docs/parquet-native.md``), so the bridge no longer materializes ``NANO``
+(``docs/data.md``), so the bridge no longer materializes ``NANO``
 shards. This module supplies the two things the runtime still needs:
 
 - ``nctoken1_path`` -- the portable ``NCTOKEN1`` artifact;
@@ -40,7 +40,7 @@ def _tokenizer_dir() -> Path:
 def nctoken1_path() -> Path | None:
     """The portable ``NCTOKEN1`` artifact, or None when it is absent. When it
     is present the C++ runtime tokenizes parquet directly, so no shard is
-    written (docs/parquet-native.md)."""
+    written (docs/data.md)."""
     path = _tokenizer_dir() / NCTOKEN1_NAME
     return path if path.is_file() else None
 
@@ -66,7 +66,7 @@ def _read_u32(raw: bytes, offset: int) -> tuple[int, int]:
 
 
 def read_nctoken1(path) -> Nctoken1Artifact:
-    """Parse an ``NCTOKEN1`` artifact (docs/tokenizer.md section 5).
+    """Parse an ``NCTOKEN1`` artifact (docs/data.md section 5).
 
     The layout is: magic, version, pattern, merge pairs, then special tokens.
     Every integer is little-endian. A bad file raises :class:`Nctoken1Error`.

@@ -172,7 +172,7 @@ void CheckConversion() {
 }
 
 // One scaled GEMM case against a host triple loop. `fp32_output` selects the
-// weight-gradient output type (docs/fp8-training.md section 7).
+// weight-gradient output type (docs/precision.md Part 1, section 7).
 void CheckScaledGemm(const std::string& name, int m, int n, int k,
                      bool transpose_a, bool transpose_b, Fp8Format format_a,
                      Fp8Format format_b, float beta, bool fast_accum,
@@ -440,7 +440,8 @@ HardwareGateResult RunHardwareCorrectnessGate() {
   g_cases = 0;
 
   CheckConversion();
-  // The scaled fp8 GEMM needs the Ada tensor-core path (docs/fp8-training.md
+  // The scaled fp8 GEMM needs the Ada tensor-core path (docs/precision.md Part
+  // 1
   // section 5.3), which `Caps::supports_fp8` declares. Do not ask a device for
   // arithmetic it does not have. The CPU reference runs every case, because it
   // has no tensor cores to disagree with.

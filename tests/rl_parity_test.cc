@@ -2,7 +2,7 @@
 //
 // Reads the fixture produced by `tools/dump_fixtures.py rl` and drives
 // the RL step over the recorded rollouts from the recorded initial parameters.
-// The step is the shared `nanochat::RlStep` (docs/distributed-design.md
+// The step is the shared `nanochat::RlStep` (docs/distributed.md
 // section 5.7), so the test and the file-driven `rl_step` command cannot drift
 // apart.
 //

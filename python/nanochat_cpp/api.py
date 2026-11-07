@@ -626,7 +626,7 @@ class Model:
 
         The call sums into the parameter gradients without zeroing them, so
         call ``zero_grad`` first and use ``1 / micro_batches`` for gradient
-        accumulation (docs/distributed-design.md Part 2, section 6.1).
+        accumulation (docs/distributed.md Part 1, section 6.1).
         """
         _void(self._lib, "nanochat_backward_accumulate", self._handle,
               ctypes.c_float(float(scale)))
@@ -637,7 +637,7 @@ class Model:
 
         ``optimizer`` is an :class:`Optimizer`, or ``None`` for the forward and
         backward only. The model owns the step number internally, so no step
-        argument is passed (docs/distributed-design.md Part 2, section 6.1).
+        argument is passed (docs/distributed.md Part 1, section 6.1).
         """
         if optimizer is not None and not isinstance(optimizer, Optimizer):
             raise TypeError(
@@ -818,7 +818,7 @@ def preset_optimizer_config(name: str) -> _core.OptimizerConfig:
     """The optimizer and scheduler fields of a named preset.
 
     The C library owns the values, so ``track3`` here equals
-    ``train_main --preset track3``. See docs/client-runtime-design.md section
+    ``train_main --preset track3``. See docs/distributed.md section
     20.4.
     """
     library = _lib.load()

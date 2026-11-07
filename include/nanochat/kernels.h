@@ -134,7 +134,7 @@ struct GemmParams {
 };
 
 // One fp8 operand format. The forward pass uses E4M3 and the backward pass uses
-// E5M2 (docs/fp8-training.md section 3.1).
+// E5M2 (docs/precision.md Part 1, section 3.1).
 enum class Fp8Format {
   kE4M3 = 0,  // forward operands
   kE5M2 = 1,  // backward operands
@@ -144,7 +144,7 @@ struct QuantizeFp8Params {
   int count = 0;  // elements in `src`
   Fp8Format format = Fp8Format::kE4M3;
   // The amax floor. An all-zero tensor has an amax of zero, so the scale would
-  // be infinite without it (docs/fp8-training.md section 4.1).
+  // be infinite without it (docs/precision.md Part 1, section 4.1).
   float amax_floor = 1e-12f;
 };
 
@@ -152,11 +152,11 @@ struct QuantizeFp8Params {
 // fp8 operands and an fp32 accumulator. The output type follows the mode: the
 // forward and the input gradient produce an activation, so `c` is
 // `ComputeType*`; the weight gradient produces a parameter gradient, so `c` is
-// `float*` (docs/fp8-training.md section 7).
+// `float*` (docs/precision.md Part 1, section 7).
 //
 // `scale_a` and `scale_b` are the dequantization values from `QuantizeFp8`, and
 // a null pointer means 1.0. The two formats are separate, because the input and
-// weight gradients mix E5M2 and E4M3 in one call (docs/fp8-training.md
+// weight gradients mix E5M2 and E4M3 in one call (docs/precision.md Part 1
 // section 7).
 struct ScaledGemmParams {
   int m = 0;  // rows of C
@@ -342,7 +342,7 @@ struct AttentionParams {
 // `kAffine` reads `beta` as a scalar and as nothing else, which is what removes
 // the unit and epsilon vectors a composition used to upload. A caller that
 // keeps the scalar on the device sets `beta.dev`, and no host read occurs
-// (docs/scalar-arguments.md).
+// (docs/kernels.md).
 //
 // `kRotatePair` is the only code with table operands, and both are `float` on
 // every device: the rotary tables are a constant of the graph in the same
@@ -363,7 +363,7 @@ struct AttentionParams {
 // lives in spec/pointwise_ops.md, which is the authority for the bounds; this
 // header is the authority for the code list. A code with no declared bound
 // there does not ship.
-// One scalar argument to a kernel family (docs/scalar-arguments.md).
+// One scalar argument to a kernel family (docs/kernels.md).
 //
 // `value` is a host copy. When `dev` is not null the kernel loads the value
 // there instead, once, before its loop, and ignores `value`. A null pointer,
@@ -485,7 +485,8 @@ void Gemm(GemmMode mode, const GemmParams& params, const ComputeType* a,
 void GemmWgrad(const GemmParams& params, const ComputeType* a,
                const ComputeType* b, float* c);
 
-// --- Scaled fp8 GEMM (docs/fp8-training.md sections 4 and 5) ---------------
+// --- Scaled fp8 GEMM (docs/precision.md Part 1, sections 4 and 5)
+// ---------------
 
 // Quantizes `src` to one byte per element with one tensorwise scale, and writes
 // the dequantization value (`1 / scale`) to `*dequant`. The rounding is shared

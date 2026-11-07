@@ -1,8 +1,8 @@
 # src/tokenizer/ — the native tokenizer host package. It owns the tokenizer,
 # the byte pair encoding trainer, and the trainer command line. See
-# docs/tokenizer.md and docs/build.md.
+# docs/data.md and docs/build.md.
 #
-# The parquet reader moved to //src/parquet (docs/parquet-native.md). That
+# The parquet reader moved to //src/parquet (docs/data.md). That
 # package owns the only ZSTD header; this package and the training runtime no
 # longer link DuckDB (docs/build.md, dependency invariants rule 1).
 
@@ -11,7 +11,7 @@ load("//:nanochat.bzl", "nanochat_copts", "precision_defines")
 
 package(default_visibility = ["//visibility:public"])
 
-# The native tokenizer (docs/tokenizer.md): the fixed-pattern splitter, the
+# The native tokenizer (docs/data.md): the fixed-pattern splitter, the
 # Unicode 16.0.0 tables, and the `NCTOKEN1` artifact loader. It is a host
 # utility with no kernel dependency. OpenMP serves the trainer's split-and-count
 # step, which shares the scanner.
@@ -108,7 +108,7 @@ cc_test(
 )
 
 # The native trainer command line. The native parquet reader supplies the
-# documents (docs/parquet-native.md).
+# documents (docs/data.md).
 cc_binary(
     name = "tok_train_main",
     srcs = ["tok_train_main.cc"],

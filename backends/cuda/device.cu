@@ -85,7 +85,8 @@ std::uint64_t PrecisionFeatureBits(int major, int minor) {
   // bf16 arithmetic needs Ampere's bf16 units.
   if (major >= 8) bits |= kFeatureBf16;
   // The fp8 E4M3/E5M2 tensor core arrives with Ada (sm_89); Hopper reports
-  // 9.0 (docs/fp8-training.md section 5.3). `fp8_gemm` implies `fp8_storage`,
+  // 9.0 (docs/precision.md Part 1, section 5.3). `fp8_gemm` implies
+  // `fp8_storage`,
   // so the pair is offered together or not at all.
   if ((major > 8 || (major == 8 && minor >= 9)) && kFp8PathBuilt) {
     bits |= kFeatureFp8Storage | kFeatureFp8Gemm;
@@ -108,7 +109,7 @@ const char* CooperativeLaunchOutcomeName(CooperativeLaunchOutcome outcome) {
 CooperativeLaunchOutcome ClassifyCooperativeLaunch(cudaError_t status) {
   if (status == cudaSuccess) return CooperativeLaunchOutcome::kLaunched;
   // The one refusal a driver acts on rather than reports: the grid did not fit
-  // on the device, so the phase driver is the answer (docs/muon-fused-kernel.md
+  // on the device, so the phase driver is the answer (docs/kernels.md
   // section 5, phase 4).
   if (status == cudaErrorCooperativeLaunchTooLarge) {
     return CooperativeLaunchOutcome::kTooLarge;
@@ -254,7 +255,7 @@ Caps GetCaps() {
   caps.has_tensor_cores = props.major >= 7;
 
   // Per device thread, so two device threads do not overwrite one name buffer
-  // (docs/client-runtime-design.md section 8.1). The spelling is the driver's
+  // (docs/distributed.md Part 3, section 8.1). The spelling is the driver's
   // and is kept verbatim: it is the join key `FindDeviceProfile` normalizes.
   thread_local char device_name[256];
   std::snprintf(device_name, sizeof(device_name), "%s", props.name);

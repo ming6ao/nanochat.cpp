@@ -1,25 +1,33 @@
-# The native tokenizer
+# Data input and tokenization
 
-nanochat divides tokenization between two libraries. `rustbpe` trains the byte
-pair encoding (BPE) vocabulary. `tiktoken` encodes and decodes text at
-inference. `nanochat.cpp` reads parquet documents and tokenizes during the run
-(see [parquet-native.md](parquet-native.md)), so this document specifies the
-native tokenizer.
+Training and evaluation read parquet documents and tokenize them during the run.
+There is no shard pre-pass, no Python at runtime, and no DuckDB.
 
-This document specifies a native C++ port of both libraries. The port lets the
-C++ binaries accept text and print text. The generation loop decodes each
-sampled token immediately, the same way `nanochat/engine.py` does.
+```text
+parquet -> native reader -> on-the-fly tokenizer -> packed rows -> train step
+```
 
-The tokenizer stays a host utility beside `DataLoader`. It sits below the model
-API, and it has no kernel dependency ([build.md](build.md) § Layers).
+The native tokenizer is a host utility beside `DataLoader`. It sits below the
+model API and has no kernel dependency ([build.md](build.md) § Layers). The
+port replaces two reference libraries: `rustbpe` trains the vocabulary, and
+`tiktoken` encodes and decodes text.
 
-The training data format is in [model.md](model.md). Known divergences are in
-[parity.md](parity.md). The chat template stays in the bridge
-([post-training.md](post-training.md) section 9).
+```bash
+# Train a vocabulary from parquet, then train the model on raw documents.
+tools/nanochat train -- ./bazel-bin/src/tokenizer/tok_train_main \
+  --parquet '/data/climbmix-*.parquet' --vocab-size 32768 --out tok.bin
+tools/nanochat train -- ./bazel-bin/src/nanochat_cli train \
+  --train-parquet '/data/climbmix-*.parquet' --val-parquet '/data/val-*.parquet' \
+  --tokenizer tok.bin --layers 12 --seq 1024
+```
+
+The checkpoint format is in [checkpoint-format.md](checkpoint-format.md). Known
+divergences from the reference are in [parity.md](parity.md). The chat template
+stays in the bridge ([post-training.md](post-training.md) section 9).
 
 ## 1. Scope
 
-The port supplies these functions:
+The tokenizer supplies these functions:
 
 - Train the base vocabulary from a text corpus.
 - Save and load a portable tokenizer artifact.
@@ -33,22 +41,18 @@ The port supplies these functions:
 These functions stay out of scope:
 
 - The chat template and the supervised mask.
-- The best-fit row packer (parity entry D1).
 - Distributed training.
 - The Python bridge policy.
 
 ## 2. Reference behavior
 
-The port must copy the reference behavior. The reference is `rustbpe` for
-training and `tiktoken` for inference.
+The port copies the reference behavior. The reference is `rustbpe` for training
+and `tiktoken` for inference.
 
 ### 2.1 Training
 
-`rustbpe` runs three steps:
-
-1. Split each document with the split pattern.
-2. Count each unique chunk.
-3. Run the merge loop.
+`rustbpe` runs three steps: split each document with the split pattern, count
+each unique chunk, and run the merge loop.
 
 The merge loop keeps a max-heap of pair counts. The loop pops the pair with the
 largest count. A tie breaks on the smallest pair. A pair compares the left id
@@ -71,12 +75,12 @@ string to UTF-8 with the `replace` error mode. This conversion is lossy. A token
 that holds a partial UTF-8 sequence becomes one replacement character, U+FFFD.
 
 A special token decodes to its own name. For example, the id for `<|bos|>`
-decodes to the seven bytes `<|bos|>`. The reference probes confirm both rules.
+decodes to the seven bytes `<|bos|>`.
 
 ### 2.4 Special tokens
 
-The nine names and their positions appear below. The reference tokenizer assigns
-the ids in this order, directly after the base vocabulary.
+The reference tokenizer assigns the ids in this order, directly after the base
+vocabulary.
 
 | Index | Name |
 |---|---|
@@ -134,25 +138,25 @@ the loader can check it.
 
 D2 pins one Unicode version. The splitter needs three predicates: letter
 (`\p{L}`), digit (`\p{N}`), and whitespace (`\s`). The letter table holds about
-694 ranges. The digit table holds about 148 ranges. The whitespace table holds
-10 ranges.
+694 ranges, the digit table about 148, and the whitespace table 10.
 
 ## 4. Architecture and file layout
 
 The tokenizer is a host utility. It uses the C++ standard library and OpenMP.
 It does not include `nanochat/kernels.h`. Every test runs on the CPU (tier T0).
-The implementation lives in its own package, `src/tokenizer/`.
 
 | File | Contents |
 |---|---|
-| `include/nanochat/tokenizer.h` | The `Tokenizer` interface, the stream decoder, load and save. |
+| `include/nanochat/tokenizer.h` | The `Tokenizer` interface, `TokenStreamDecoder`, and `LoadTokenizer`. |
 | `include/nanochat/bpe_trainer.h` | The `BpeTrainer` interface. |
-| `src/tokenizer/tokenizer.cc` | Load, save, encode, decode, special tokens. |
+| `src/tokenizer/tokenizer.cc` | Load, save, encode, decode, special tokens, stream decoder. |
+| `src/tokenizer/tokenizer_internal.h` | The internal `NCTOKEN1` writer and merge recovery. |
 | `src/tokenizer/split_pattern.{h,cc}` | The fixed-pattern scanner. |
-| `src/tokenizer/unicode_tables.inc` | The generated range tables. |
+| `src/tokenizer/utf8.{h,cc}` | UTF-8 validation and the lossy replace conversion. |
+| `src/tokenizer/unicode_tables.inc` | The generated range tables (Unicode 16.0.0). |
 | `src/tokenizer/bpe_trainer.cc` | The chunk counts and the merge loop. |
 | `src/tokenizer/tok_train_main.cc` | The training command line. |
-| `src/parquet/reader.{h,cc}` | The native parquet reader (docs/parquet-native.md). |
+| `src/parquet/reader.{h,cc}` | The native parquet reader. Part 1 holds its design. |
 | `tools/gen_unicode_tables.py` | The table generator. |
 | `tools/dump_fixtures.py tokenizer` | The reference fixture generator. |
 | `tools/check_tokenizer_parity.py` | The full-vocabulary parity gate. |
@@ -188,9 +192,9 @@ codepoints. The scanner holds one start position. At each start it tries the
 seven alternatives in order, and it takes the first match. It then advances the
 start past the match.
 
-The scanner must copy the possessive quantifiers. In alternative 2, the optional
-symbol never gives back its match. For the string `" !abc"`, the scanner returns
-`" !"` then `"abc"`. Alternative 4 wins for the first piece.
+The scanner must copy the possessive quantifiers. In alternative 2, the
+optional symbol never gives back its match. For the string `" !abc"`, the
+scanner returns `" !"` then `"abc"`. Alternative 4 wins for the first piece.
 
 The scanner classifies each codepoint with the generated tables. The tables list
 the ranges in ascending order, and a lookup uses a binary search.
@@ -208,30 +212,27 @@ artifact.
 
 ## 8. The decoder and on-the-fly decode
 
-This section is the reason for the port. nanochat decodes a token column during
-generation. `nanochat/engine.py` yields one token per row per step. The
-consumer prints the text for that token at once.
+nanochat decodes a token column during generation. `nanochat/engine.py` yields
+one token per row per step. The consumer prints the text for that token at once.
 
 ### 8.1 The `Decode` primitive
 
 `Tokenizer::Decode` copies the bytes of each token into one buffer. It then
 converts the buffer to a C++ `std::string`. The conversion mirrors the lossy
-UTF-8 mode of `tiktoken`, so a bad byte becomes U+FFFD.
-
-The method also handles a special token. A special token contributes its name
-bytes.
+UTF-8 mode of `tiktoken`, so a bad byte becomes U+FFFD. A special token
+contributes its name bytes.
 
 ### 8.2 Per-token bytes
 
-The stream needs the bytes of one token. The interface gains one method:
+The stream needs the bytes of one token. The interface has one method:
 
 ```cpp
 // Append the raw bytes of one token to *out. Return false for a bad id.
 virtual bool AppendTokenBytes(int id, std::string* out) const = 0;
 ```
 
-`TokenBytes()` keeps its current meaning. It reports the byte length of each
-token for bits per byte. A special token has length zero.
+`TokenBytes()` reports the byte length of each token for bits per byte. A
+special token has length zero.
 
 ### 8.3 Streaming decode
 
@@ -271,8 +272,8 @@ modes.
 ### 8.4 Special tokens in a stream
 
 The stream decodes a special token to its name, like the reference. A chat
-consumer often wants to hide or to highlight a special token. The interface
-gains a predicate for that case:
+consumer often wants to hide or to highlight a special token. The interface has
+a predicate for that case:
 
 ```cpp
 virtual bool IsSpecial(int id) const = 0;
@@ -296,7 +297,7 @@ same two primitives serve it: `Decode` and `Encode`.
 
 ## 9. The trainer
 
-`BpeTrainer` ports `rustbpe`'s `train_core_incremental`. The interface is:
+`BpeTrainer` ports `rustbpe`'s `train_core_incremental`:
 
 ```cpp
 class BpeTrainer {
@@ -313,65 +314,65 @@ class BpeTrainer {
 ```
 
 The trainer splits each document with the same scanner as the encoder. It adds
-the count of each unique chunk. `Train` runs the merge loop.
-
-The merge loop stays single-threaded. The result must not depend on thread
-order. The split and count step can use OpenMP, because the reduction is
-commutative.
+the count of each unique chunk, and `Train` runs the merge loop. The merge loop
+stays single-threaded, because the result must not depend on thread order. The
+split and count step can use OpenMP, because the reduction is commutative.
 
 The pair counter uses `int64`. The reference uses `int32`, and a real corpus can
 come close to the `int32` limit. The wider type changes no result below the
 limit.
 
-`src/tokenizer/tok_train_main.cc` reads one document per line with `--text`, or
-a parquet dataset with `--parquet`. It takes `--vocab-size`, `--doc-cap` (the
-per-document character cap, default 10000), `--max-chars` (the total character
-budget, default 2000000000), and `--out`. It writes `NCTOKEN1`. Section 10
-gives the parquet reader.
+```bash
+# One document per line, or a parquet dataset.
+./bazel-bin/src/tokenizer/tok_train_main --text corpus.txt --vocab-size 32768 \
+  --doc-cap 10000 --max-chars 2000000000 --out tok.bin
+./bazel-bin/src/tokenizer/tok_train_main --parquet '/data/*.parquet' \
+  --text-column text --vocab-size 32768 --out tok.bin
+```
 
-## 10. Parquet input
+`--doc-cap` is the per-document character cap. `--max-chars` is the total
+character budget.
 
-The reference dataset is a set of parquet files with a `text` column. The native
-path reads that column with a small in-tree reader, so tokenization needs no
-`pyarrow`, no Python, and no DuckDB. See
-[parquet-native.md](parquet-native.md) for the design.
+## 10. The loader and row packing
 
-`src/parquet/reader.cc` implements the reader. `Open` takes a file glob or a
-file list. `Next` streams one bounded batch of documents. The reader selects the
-text column, orders the rows by file name and row number, and preserves the
-dataset order. A small batch size bounds memory. It supports the exact shape
-that the corpus writer emits: one OPTIONAL `BYTE_ARRAY` column, ZSTD pages,
-`DATA_PAGE` v1, `PLAIN` values, and RLE definition levels. Every other feature
-returns an error.
+`DocumentSource` sits beside `DataLoader` in `include/nanochat/dataloader.h`:
 
-`src/tokenizer/tok_train_main.cc` accepts `--parquet <glob>` and
-`--text-column <name>` (default `text`). It reads documents from the reader and
-calls `BpeTrainer::AddDocument`. The `--text <file>` mode stays for one document
-per line.
+```cpp
+class DocumentSource {
+ public:
+  virtual ~DocumentSource() = default;
+  virtual bool Next(std::vector<std::string>* documents,
+                    std::string* error) = 0;
+};
+```
 
-`nanochat_cli train` and `nanochat_cli eval` read parquet directly and tokenize
-during the run (docs/parquet-native.md). They take `--train-parquet`,
-`--val-parquet`, and `--tokenizer`, so no shard pre-pass is necessary. The
-shard producer (`tok_shard_main`), its writer, and the `NANO` shard reader are
-gone.
+`ParquetSource` in `src/parquet/` implements it over `ParquetReader`. A plain
+text source serves the tests.
 
-ZSTD is the only decompressor the reader needs. It comes from the Bazel Central
-Registry (`@zstd//:zstd`), and `src/parquet/BUILD.bazel` links it into the
-reader only. The model, the kernels, and the training runtime never link
-DuckDB.
+`DataLoader` takes a `DocumentSource` and a `Tokenizer`. A producer thread
+encodes documents and packs rows. The packer is the reference best-fit rule:
+every row starts with `BOS`, the largest fitting document wins, and the shortest
+document fills the last gap. The token byte lengths for bits-per-byte come from
+`Tokenizer::TokenBytes()`, not from a sidecar file.
 
-## 11. Integration
+`DataLoader::Reset` cycles epochs, so a resumed run starts at the first row of a
+new epoch.
 
-- `nanochat_cli generate`: accept a text prompt, encode it with a leading BOS,
-  and stream the decoded output. This changes the token-id-only contract.
-- `eval`: decode the sample rows for base evaluation.
-- `tests`: the parity test uses the fixture, so it needs no Python.
-- The bridge: `python/nanochat_cpp/data.py` can build a `tiktoken` encoding from
-  the `NCTOKEN1` merges, or it can pass the parquet paths and the artifact to
-  the binary. Its cache fingerprint
-  then lists the new file.
-- `data_test.cc`: the `LoadTokenizer` contract changes from "always null" to
-  "null on a bad file".
+## 11. Command-line use
+
+| Flag | Meaning |
+|---|---|
+| `--train-parquet <glob>` | the training dataset |
+| `--val-parquet <glob>` | the validation dataset |
+| `--tokenizer <path>` | the `NCTOKEN1` artifact |
+| `--tokenizer-threads <n>` | the producer count |
+| `--buffer-docs <n>` | the bounded document buffer |
+| `--packed-rows <path>` | read pre-packed rows instead of documents |
+
+`nanochat_cli train` and `nanochat_cli eval` take these flags. The Python layer
+passes parquet paths and the `NCTOKEN1` path when that artifact exists, so no
+shard is written. The former shard producer (`tok_shard_main`), its writer, and
+the `NANO` shard reader are gone.
 
 ## 12. Tests and parity
 
@@ -379,11 +380,14 @@ Every test is tier T0. The tests need no GPU and no broker.
 
 | Test | Purpose |
 |---|---|
-| `src/tokenizer/tokenizer_test.cc` | Round trip, special ids, token bytes, bad-file error. |
-| `src/tokenizer/split_pattern_test.cc` | The split cases, plus a random Unicode corpus. |
-| `src/tokenizer/bpe_trainer_test.cc` | The reference merge list, rank by rank. |
-| `src/tokenizer/tokenizer_parity_test.cc` | The fixture: merges, encode, decode, token bytes. |
-| `src/parquet/reader_test.cc` | The reader order and the text column on a tiny fixture. |
+| `//src/tokenizer:tokenizer_test` | Round trip, special ids, token bytes, bad-file error. |
+| `//src/tokenizer:split_pattern_test` | The split cases, plus a random Unicode corpus. |
+| `//src/tokenizer:bpe_trainer_test` | The reference merge list, rank by rank. |
+| `//src/tokenizer:tokenizer_parity_test` | The fixture: merges, encode, decode, token bytes. |
+| `//src/parquet:reader_test` | The reader order and the text column on a tiny fixture. |
+| `//src/parquet:reader_reject_test` | One error per unsupported feature. |
+| `//src:data_test` | The loader shift and the token bytes. |
+| `//tests:loader_parity_test` | The C++ rows match the reference rows (T2). |
 
 The fixture comes from `tools/dump_fixtures.py tokenizer`. The script trains a
 small reference tokenizer on a fixed corpus, and it records:
@@ -403,68 +407,105 @@ corpus from the parquet shards, trains the reference `rustbpe`, runs the native
 40M-character ClimbMix corpus at `vocab_size` 32768, both reach 32503 merges and
 all 32759 base tokens match.
 
-## 13. Roadmap
+The reader matches `pyarrow` byte for byte on three real ClimbMix shards: count
+`254976`, bytes `757805763`, and an identical FNV-1a hash.
 
-| Phase | Work | Gate |
-|---|---|---|
-| P0 | The fixture, the Unicode tables, the frozen pattern. | Two reference runs agree. |
-| P1 | Load, save, encode, decode, special tokens. | Fixture encode and decode cases pass. |
-| P2 | The splitter and the tables. | Fixture split cases pass. |
-| P3 | The trainer, the training command line, and the parquet reader. | Fixture merges match in order; the reader order matches the dataset. |
-| P4 | Docs, parity entries, and the generation integration. | `tools/nanochat test` and `lint` pass. |
+## 13. Limits
 
-## 14. Risks
-
-- Unicode drift. The tables must come from Unicode 16.0.0, the version inside
+- **Unicode drift.** The tables must come from Unicode 16.0.0, the version inside
   `tiktoken`. The random corpus test catches a difference.
-- Possessive and lookahead edge cases. The curated list covers the known cases.
-  The random corpus extends the cover.
-- Reference determinism. The fixture freezes the `rustbpe` commit. Two runs must
-  agree before the fixture enters the repository.
-- The frozen header. `include/nanochat/tokenizer.h` is architect-owned. The
-  changes are additive.
-- Shared files. `src/data.cc` and `src/data_test.cc` have other owners. The
-  tokenizer package owns `src/tokenizer/BUILD.bazel`.
-- ZSTD weight. The reader needs one small decompressor. It links the parquet
-  package only, so the training runtime stays small.
+- **The pattern is closed.** Possessive quantifiers and the lookahead are the
+  edge cases. A second pattern needs a second scanner.
+- **Dataset drift.** A new writer could add dictionary encoding. The reader
+  rejects it, so a fixture regeneration is visible.
+- **Host CPU load.** On-the-fly tokenization competes with the GPU. Bound the
+  threads and keep them inside the `train` sandbox profile.
+- **Determinism.** The encoder is deterministic. The packer needs a fixed
+  tie-break and one consumer.
+- **ZSTD is the one host dependency.** It links the parquet package only, so the
+  model and the kernels stay vendor-free.
 
-## 15. Status
+## Part 1. The native parquet reader
 
-Shipped. The native tokenizer, the byte pair encoding trainer, and the parquet
-reader are in the tree. Every test is tier T0. The reference behavior and the
-artifact format did not change during the port. Training reads parquet and
-tokenizes during the run (docs/parquet-native.md).
+The data path is `parquet -> native reader -> on-the-fly tokenizer -> training
+rows`. Two results follow: no shard pre-pass, and no DuckDB.
 
-The table lists the landed files.
+### 1. Why a native reader is feasible
 
-| File | Contents |
+One writer produced every dataset file: `parquet-cpp-arrow version 21.0.0`. A
+scan of 33 ClimbMix shards and 2732 column chunks shows one fixed shape:
+
+| Property | Value |
 |---|---|
-| `include/nanochat/tokenizer.h` | The `Tokenizer` interface, `TokenStreamDecoder`, and `LoadTokenizer` (additive changes). |
-| `include/nanochat/bpe_trainer.h` | The `BpeTrainer` interface. |
-| `src/tokenizer/tokenizer.cc` | Load, save, encode, decode, special tokens, stream decoder. |
-| `src/tokenizer/tokenizer_internal.h` | The internal `NCTOKEN1` writer and merge recovery. |
-| `src/tokenizer/split_pattern.{h,cc}` | The fixed-pattern scanner. |
-| `src/tokenizer/utf8.{h,cc}` | UTF-8 validation and the lossy replace conversion. |
-| `src/tokenizer/unicode_tables.inc` | The generated range tables (Unicode 16.0.0). |
-| `src/tokenizer/bpe_trainer.cc` | The chunk counts and the merge loop. |
-| `src/parquet/reader.{h,cc}` | The native parquet reader (docs/parquet-native.md). |
-| `src/tokenizer/tok_train_main.cc` | The training command line. |
-| `src/tokenizer/tokenizer_test.cc` | Round trip, special ids, token bytes, bad-file error. |
-| `src/tokenizer/split_pattern_test.cc` | The split cases, plus a random Unicode corpus. |
-| `src/tokenizer/tokenizer_parity_test.cc` | The fixture: merges, encode, decode, token bytes. |
-| `src/tokenizer/bpe_trainer_test.cc` | The reference merge list, rank by rank. |
-| `src/parquet/reader_test.cc` | The reader order and the text column. |
-| `tests/data/tokenizer_fixture.bin` | The reference fixture. |
-| `tools/dump_fixtures.py tokenizer` | The reference fixture generator. |
-| `tools/gen_unicode_tables.py` | The table generator. |
-| `tools/check_tokenizer_parity.py` | The full-vocabulary parity gate. |
-| `python/nanochat_cpp/data.py` | The Python layer reads `NCTOKEN1` and builds a `tiktoken` encoding. |
-| `python/tests/data_test.py` | The torch-free `NCTOKEN1` reader check. |
+| Columns | one OPTIONAL `BYTE_ARRAY`, `text: string` |
+| Codec | `ZSTD` |
+| Value encoding | `PLAIN` |
+| Level encoding | RLE definition levels; no repetition levels |
+| Page type | `DATA_PAGE` v1 only |
+| Dictionary page | none |
+| Pages per chunk | one |
+| Row group | 1024 rows |
+| Statistics | unused |
 
-Integration changes:
+The reader supports this subset and rejects everything else with an error. The
+supported subset is small. The container is not: it needs a Thrift compact
+footer, page headers, RLE bit-packed levels, and ZSTD frames.
 
-- `src/generate_command.cc` streams a text prompt and the decoded output.
-- `src/eval.cc` and `src/eval.h` decode the generated rows.
-- `src/data.cc` and `src/data_test.cc` carry the new `LoadTokenizer` contract.
-- `src/tokenizer/BUILD.bazel` and `tests/BUILD.bazel` hold the targets.
-- `MODULE.bazel` declares the ZSTD dependency for `src/parquet/`.
+### 2. The dependency
+
+- ZSTD comes from the Bazel Central Registry: `bazel_dep(name = "zstd", version =
+  "1.5.7")`, target `@zstd//:zstd`.
+- `src/parquet/` is the one host package that may include the ZSTD header. The
+  model and kernel libraries stay vendor-free
+  ([build.md](build.md#dependency-invariants)).
+- DuckDB is gone: the `http_archive` in `MODULE.bazel`, `duckdb.BUILD`, and
+  `duckdb_static_loader.cc` all left the tree. ZSTD is about 1 MB and DuckDB was
+  about 78 MB.
+
+### 3. Package layout
+
+```
+src/parquet/
+  thrift.{h,cc}     the Thrift compact protocol decoder
+  format.{h,cc}     the parquet metadata structs and the footer parse
+  levels.{h,cc}     the RLE and bit-packed hybrid decoder
+  reader.{h,cc}     the file reader: pages, ZSTD, PLAIN byte arrays
+  *_test.cc
+```
+
+### 4. The reader API
+
+```cpp
+class ParquetReader {
+ public:
+  struct Options {
+    std::vector<std::string> files;  // paths or globs, in dataset order
+    std::string text_column = "text";
+    std::size_t batch_size = 256;
+  };
+  static std::unique_ptr<ParquetReader> Open(const Options& options,
+                                             std::string* error);
+  bool Next(std::vector<std::string>* documents, std::string* error);
+};
+```
+
+`Open` takes a file glob or a file list. `Next` streams one bounded batch of
+documents. The reader selects the text column, orders the rows by file name and
+row number, and preserves the dataset order. A small batch size bounds memory.
+
+The reader rejects each unsupported feature with its own error and its own test:
+another codec, a dictionary page, `DATA_PAGE_V2`, a nested column, more than one
+leaf, a null value, and another value encoding.
+
+### 5. What a new dataset needs
+
+A new writer must keep the shape above or the reader rejects its file. When a
+producer changes the shape, regenerate the packed-row parity fixture from that
+producer, so `//tests:loader_parity_test` compares the same bytes on both sides.
+
+## See also
+
+- [model.md](model.md) — the training loop that consumes the rows.
+- [build.md](build.md) — the layering that keeps the reader vendor-facing.
+- [parity.md](parity.md) — the data-order entry D1.
+- [post-training.md](post-training.md) — the chat data model above this layer.

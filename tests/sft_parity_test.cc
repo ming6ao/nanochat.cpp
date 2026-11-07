@@ -1,5 +1,5 @@
 // tests/sft_parity_test.cc -- the R3 reader and driver gate of
-// docs/parity.md Part 1, sections 3 and 7 (phase F).
+// docs/parity.md Part 1, sections 3 and 5 (phase F).
 //
 // Runs the real `src/sft_main` binary over the committed packed shard
 // (`tests/data/sft_rows_fixture.nchsft`) from the committed base checkpoint

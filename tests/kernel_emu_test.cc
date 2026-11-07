@@ -483,7 +483,7 @@ void CheckValueGate(int rows, int kv_heads, int head_dim) {
 }
 
 // The fused Muon path: one device function behind two drivers
-// (`backends/cuda/kernels/muon_fused.cu`, docs/muon-fused-kernel.md sections 4
+// (`backends/cuda/kernels/muon_fused.cu`, docs/kernels.md sections 4
 // to 6), compared with the CPU reference at tiny shapes.
 //
 // Only the *phase* driver can run here, and not because a feature is missing.

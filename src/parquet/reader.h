@@ -8,7 +8,7 @@
 
 #include "nanochat/dataloader.h"
 
-// Reads the text column of a parquet dataset (docs/parquet-native.md). The
+// Reads the text column of a parquet dataset (docs/data.md). The
 // reader supports the exact shape that `parquet-cpp-arrow` writes for the
 // nanochat corpus: one OPTIONAL `BYTE_ARRAY` UTF8 column, ZSTD pages,
 // `DATA_PAGE` v1, `PLAIN` values, and RLE definition levels. Every other

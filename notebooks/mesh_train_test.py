@@ -3,7 +3,7 @@
 The test covers the global batch mapping, the metrics and summary readers, the
 driver config and its job round trip, and the child launch against a fake
 ``tools/nanochat`` entry. The config needs the shared library; the rest needs
-nothing. See ``docs/client-runtime-design.md``.
+nothing. See ``docs/distributed.md``.
 """
 
 from __future__ import annotations

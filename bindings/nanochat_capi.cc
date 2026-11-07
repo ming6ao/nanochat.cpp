@@ -719,7 +719,7 @@ float nanochat_train_step(nanochat_model* model, nanochat_optim* optimizer,
       throw std::invalid_argument("batch and seq must be positive");
     }
     // A null optimizer runs the forward and backward without an update
-    // (docs/distributed-design.md Part 2, section 6.1).
+    // (docs/distributed.md Part 1, section 6.1).
     nanochat::Optimizer* raw =
         optimizer != nullptr ? optimizer->optimizer.get() : nullptr;
     return model->model->TrainStep(tokens, targets, batch, seq, raw);
@@ -748,7 +748,7 @@ float nanochat_rl_step(nanochat_model* model, nanochat_optim* optimizer,
     // A null optimizer runs the forward and the weighted backward without an
     // update. The divisor `num_valid * num_passes * examples_per_rank` and the
     // ForwardLoss/BackwardWeighted/Optimizer::Step sequence live in `RlStep`
-    // (docs/distributed-design.md Part 2, section 5.7).
+    // (docs/distributed.md Part 1, section 5.7).
     nanochat::Optimizer* raw =
         optimizer != nullptr ? optimizer->optimizer.get() : nullptr;
     return nanochat::RlStep(model->model.get(), raw, tokens, targets,

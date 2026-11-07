@@ -2,7 +2,7 @@
 #define NANOCHAT_BACKENDS_CUDA_KERNELS_MUON_FUSED_H_
 
 // The fused Muon update: one phase-parameterised device function, two drivers,
-// and the workspace both `MuonUpdate` paths share (docs/muon-fused-kernel.md
+// and the workspace both `MuonUpdate` paths share (docs/kernels.md
 // sections 4 to 6). This header is backend-internal, like `rms_norm.h`: only
 // code under backends/cuda includes it, and the frozen `nanochat/kernels.h`
 // seam keeps its one `MuonUpdate` entry point and gains no capability bit.

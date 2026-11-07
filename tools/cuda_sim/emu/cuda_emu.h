@@ -98,7 +98,7 @@ constexpr cudaError_t cudaSuccess = 0;
 constexpr cudaError_t cudaErrorInvalidValue = 1;
 
 // The attribute codes the fused Muon driver asks about, and the one error a
-// refused cooperative launch reports (docs/muon-fused-kernel.md section 8). The
+// refused cooperative launch reports (docs/kernels.md section 8). The
 // values are the vendor ABI's, so the emulated build asks the same question a
 // device would and reads the same answer back.
 enum cudaDeviceAttr {
@@ -429,7 +429,7 @@ struct LaunchStats {
   std::size_t max_dynamic_shared_bytes = 0;
 
   // The queries a fused build asks before it launches, and the one launch it
-  // may make instead of the phase loop (docs/muon-fused-kernel.md section 8).
+  // may make instead of the phase loop (docs/kernels.md section 8).
   // They are recorded beside the launch counters for the same reason a launch
   // is: the engine reports what it was told, not only what it dispatched.
   // `cooperative_launches` counts the cooperative launch records, which are

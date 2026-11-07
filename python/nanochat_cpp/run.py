@@ -3,7 +3,7 @@
 ``python -m nanochat_cpp.run train.py`` re-enters ``tools/nanochat client``.
 That command submits one queue job for the full device set, applies one sandbox
 scope, and starts the script as one process. The script then sees all local
-accelerators as one mesh. See ``docs/client-runtime-design.md`` section 14.
+accelerators as one mesh. See ``docs/distributed.md`` section 14.
 """
 
 from __future__ import annotations

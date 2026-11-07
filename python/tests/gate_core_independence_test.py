@@ -1,6 +1,6 @@
 """G5: the core never names the Z2 package.
 
-Gate G5 of ``docs/build.md`` section 8, and rule 5 of the
+Gate G5 of ``docs/build.md`` Part 1, section 5, and rule 5 of the
 five that hold the zones: ``python/nanochat_cpp`` reaches the adapter package
 by being handed a callable, never by naming it. A text scan of every file under
 the package fails on one mention of ``nanochat_cpp_bridge`` and reports the

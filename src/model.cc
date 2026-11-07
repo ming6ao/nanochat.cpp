@@ -109,7 +109,7 @@ float ReadHost(const ComputeType* p) {
 // device. In a bf16 build this is the master copy, which the optimizer keeps
 // current. In an fp32 build the compute buffer already holds fp32.
 //
-// `docs/scalar-arguments.md` is the reason this exists: a scalar the optimizer
+// `docs/kernels.md` is the reason this exists: a scalar the optimizer
 // owns belongs in device memory, and the host never needs it.
 // The fp32 view of one scalar parameter, chosen by the build's compute type.
 //
@@ -268,13 +268,14 @@ TrainModel::TrainModel(const ModelSpec& spec, const Config& config,
     // multiply by `-backout_lambda`. One element of device memory holds that
     // value, so neither leg reads the host: one 1-element pointwise call per
     // forward refreshes it, in place of two blocking device-to-host copies per
-    // step (docs/scalar-arguments.md section 2).
+    // step (docs/kernels.md Part 2, section 1).
     neg_backout_dev_ = static_cast<float*>(kernels::Alloc(sizeof(float)));
     kernels::Memset(neg_backout_dev_, 0, sizeof(float));
   }
   // The running total of the per-micro-batch means, and the one buffer
-  // `SumFp32` folds each micro-batch into (`docs/scalar-arguments.md` section
-  // 15). Four bytes that a step reads once instead of one row per micro-batch.
+  // `SumFp32` folds each micro-batch into (`docs/kernels.md` Part 2,
+  // section 6). Four bytes that a step reads once instead of one row per
+  // micro-batch.
   loss_sum_dev_ = static_cast<float*>(kernels::Alloc(sizeof(float)));
   kernels::Memset(loss_sum_dev_, 0, sizeof(float));
 
@@ -598,7 +599,8 @@ void TrainModel::BuildTrainWorkspace(int batch, int seq) {
     c(&a.x_out, rows * hidden);
     if constexpr (kFp8Build) {
       // The fp8 operands and their scales for this layer
-      // (docs/fp8-training.md section 6.3). One scratch pair is reused by every
+      // (docs/precision.md Part 1, section 6.3). One scratch pair is reused by
+      // every
       // eligible matmul of the block: the activation can be as wide as the MLP
       // input, and the weight as large as the MLP projection.
       b(&a.fp8.a_bytes, rows * mlp_dim);
@@ -652,7 +654,8 @@ void TrainModel::BuildTrainWorkspace(int batch, int seq) {
   c(&sc.dpre, rows * mlp_dim);
   c(&sc.dve, rows * kv_dim);
   if constexpr (kFp8Build) {
-    // The backward fp8 scratch (docs/fp8-training.md section 7). The operands
+    // The backward fp8 scratch (docs/precision.md Part 1, section 7). The
+    // operands
     // are the output gradient, the saved activation, and the weight. Size for
     // the largest of each across the block.
     b(&sc.fp8.a_bytes, rows * static_cast<std::int64_t>(std::max(

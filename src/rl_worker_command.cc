@@ -1,5 +1,5 @@
 // `rl_worker` -- the persistent reinforcement-learning worker
-// (docs/post-training.md Part 1, section 4, docs/distributed-design.md Part 2,
+// (docs/post-training.md Part 1, section 4, docs/distributed.md Part 1,
 // section 6.4).
 //
 // The process holds the model and the optimizer across steps and speaks the

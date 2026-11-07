@@ -925,7 +925,7 @@ void TestPointwiseAffine() {
   }
 
   // `beta` may live on the device and it is one value, not an array
-  // (docs/scalar-arguments.md), which is how the classifier's `z - max` stays
+  // (docs/kernels.md), which is how the classifier's `z - max` stays
   // off the host: the row maximum is one scalar and the call is per row.
   const int n = 4;
   std::vector<float> values(n);

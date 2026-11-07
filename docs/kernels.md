@@ -1,23 +1,21 @@
-# The kernel seam (L1)
+# The kernel seam
 
 The backend contract is a fixed set of host-callable functions: device
 utilities, arithmetic primitives, and stateful entries. A backend is complete
-when every symbol it is required to supply resolves and passes the oracle. The
-next section says which symbols a bring-up owes ([Kernel tiers](#kernel-tiers)).
+when every symbol it is required to supply resolves and passes the oracle.
+Section [Kernel tiers](#kernel-tiers) says which symbols a bring-up owes.
 
-The rules that keep this seam vendor-free are the [dependency
-invariants](build.md#dependency-invariants). The fusion rule that constrains
-what may be one kernel, and the compute strategy that follows from it, are the
-two sections below. A backend supplies this header; see [build.md](build.md).
-Which entry point each tier holds, and why, is
-[model-and-device-bringup.md §7](model-and-device-bringup.md) with its
-decision records in [../spec/decisions.md](../spec/decisions.md).
+A backend supplies `include/nanochat/kernels.h` and nothing else on the compute
+path. The header is frozen, so a change to it is a contract change with a
+version bump. A device declares its capabilities in `caps.json`, and the
+planner reads that file, the model description, and the seam version.
 
-Part 1 at the end of this page is the record of the Muon fusion: whether the
-whole optimizer stage can run as one phase-parameterised kernel, what a
-five-condition-legal fusion measured on this card, and why the multi-launch
-cuBLAS path stays the default. The rule the result tests is the fusion boundary
-rule below.
+The rules that keep this seam vendor-free are the
+[dependency invariants](build.md#dependency-invariants). The fusion rule that
+constrains what may be one kernel, and the compute strategy that follows from
+it, are the two sections below. Which entry point each tier holds, and why, is
+[model-and-device-bringup.md §7](model-and-device-bringup.md) with its decision
+records in [../spec/decisions.md](../spec/decisions.md).
 
 ## Kernel inventory
 
@@ -50,15 +48,14 @@ The table above is the **family** view: it names the twelve compute families and
 says which ones a backend may serve with a fused kernel. Which *entry point* of
 each family a device must supply is the tier question, and the answer differs
 per family: a family in the composition tier is supplied once, above the seam,
-for every device. The next section is that partition.
+for every device.
 
 ## Kernel tiers
 
 Every entry point in `include/nanochat/kernels.h` belongs to exactly one tier,
 and the tier says who supplies it. The partition is the one
 [model-and-device-bringup.md §7.3](model-and-device-bringup.md) fixes. The
-reasons are the decision records in [../spec/decisions.md](../spec/decisions.md),
-which this table cites and does not restate.
+reasons are the decision records in [../spec/decisions.md](../spec/decisions.md).
 
 | Entry point | Tier | Gate | Serves |
 |---|---|---|---|
@@ -68,14 +65,14 @@ which this table cites and does not restate.
 | `RowReduce` | primitive | required | `RmsNorm`, `QkPrep`, and the `Classifier`'s per-row reduction. Additive at seam 1 → 2 |
 | `SpanReduce` | primitive | required | `GradNorm`, `ScalarDot`, the loss reduction. Additive at seam 1 → 2 |
 | `AttentionForward`, `AttentionBackward` | primitive | required | The attention graph; causal, group-query, full context and sliding window |
-| `PointwiseForward`, `PointwiseBackward` | primitive | required | The op codes, elementwise; one broadcasts a per-row vector and one applies the half-split pair rotation. Three codes are additive at seam 2 → 3 |
+| `PointwiseForward`, `PointwiseBackward` | primitive | required | The op codes, elementwise. Three codes are additive at seam 2 → 3 |
 | `EmbeddingForward` | primitive | required | The gather over `wte` and every `value_embeds[i]` |
 | `EmbeddingBackward` | primitive | required | The scatter-add into the dense gradient buffer |
-| `SmearForward`, `SmearBackward` | primitive | required | The bigram residual, one launch per direction on a device; the backward reduces its two parameter gradients at a phase boundary in the same launch |
-| `QuantizeFp8`, `GemmScaledFp8` | primitive | optional, bits `fp8_storage` and `fp8_gemm` | The fp8 tier, [fp8-training.md](fp8-training.md) |
-| `AdamWUpdate`, `MuonUpdate` | stateful | required for training, bits `stateful_adamw` and `stateful_muon` | The optimizer, [model.md](model.md). One `MuonUpdate` call covers one shape group: 39 launches at the shipped `ns_steps` of 5 on the multi-launch path, or one cooperative launch of 84 blocks with 27 grid barriers (28 launches on the phase driver) on the fused path. The shape rule selects the multi-launch path for **every** group on this card, so the shipped launch count is 39; Part 1 has the measurement |
+| `SmearForward`, `SmearBackward` | primitive | required | The bigram residual, one launch per direction on a device |
+| `QuantizeFp8`, `GemmScaledFp8` | primitive | optional, bits `fp8_storage` and `fp8_gemm` | The fp8 tier, [precision.md](precision.md) |
+| `AdamWUpdate`, `MuonUpdate` | stateful | required for training, bits `stateful_adamw` and `stateful_muon` | The optimizer, [model.md](model.md). One `MuonUpdate` call covers one shape group: 39 launches on the shipped multi-launch path, or one cooperative launch of 84 blocks with 27 grid barriers on the fused path. Part 1 has the measurement |
 | `RmsNormForward`, `RmsNormBackward` | composition, plus fused override | — | `src/ops.cc`; a backend's single-kernel version is gated by `override_rms_norm` |
-| `QkPrepForward`, `QkPrepBackward` | composition, plus fused override | — | `src/ops.cc`; gated by `override_qk_prep`. The fused family also writes the prepared query head-major when the caller sets `QkPrepParams::q_head_major`, which removes the query transpose from the attention and the saved copy from the block |
+| `QkPrepForward`, `QkPrepBackward` | composition, plus fused override | — | `src/ops.cc`; gated by `override_qk_prep`. The fused family also writes the prepared query head-major when the caller sets `QkPrepParams::q_head_major` |
 | `ClassifierForward`, `ClassifierBackward` | composition, plus fused override | — | `src/ops.cc`; gated by `override_classifier` |
 | `ValueGateForward`, `ValueGateBackward` | composition, plus fused override | — | `src/ops.cc`; no override bit exists for it yet |
 | `SumFp32` | composition | — | The fp32 form of `ScalarDot` with no second operand; the training loss |
@@ -86,41 +83,20 @@ A composition supplies its own backward as one unit, because
 [model.md](model.md) § No autograd engine requires a fused backward to be
 derived and tested as one unit.
 
-**The two reductions are additive, and they raise the seam version.**
-`RowReduce` and `SpanReduce` are new symbols, and `kKernelSeamVersion` in the
-header records the rise. The header preamble's changelog names exactly what the
-rise covers: the two reductions, and the pointwise argument list becoming
-`PointwiseParams` with the `kExp`, `kRsqrt`, `kLog` and `kRowScale` codes. No
-symbol was retracted and no symbol changed meaning, so an older backend adds the
-two reductions and updates its two pointwise signatures, and nothing else. That
-the tier gained two entries instead of one descriptor with three modes is
-[D-001](../spec/decisions.md); that the per-row broadcast is an op code and not
-a third entry point is [D-002](../spec/decisions.md); that the accuracy bound is
-per code and lives in [pointwise_ops.md](../spec/pointwise_ops.md) is
-[D-003](../spec/decisions.md).
-
 **Required bring-up cost: the six utilities and every arithmetic primitive.** A
 device at that tier runs every graph in [model.md](model.md) on the composition
 path without writing one fused kernel. Training adds the two stateful entries.
 The two fp8 entries are declared and never assumed: a `caps.json` carries
-`fp8_storage` and `fp8_gemm` only where the silicon has the formats, and the
-model then either runs the dense path or fails with the missing bit named.
-Before this partition, a device implemented every entry point of the seam, and
-every later fused family added a frozen-header entry point that every device
-then owed.
+`fp8_storage` and `fp8_gemm` only where the silicon has the formats.
 
 **The required `Attention` variant is causal, group-query, full context *and*
 sliding window, at one tile size.** Sliding window is required and not optional:
 `models/nanochat-default/spec.json` names it on nine of its twelve blocks, and
-`Config::window_pattern` derives `"SSSL"` from that list, so `window_left()` is
-non-empty on every `S` layer. A device that implements full-context attention
-only cannot run the one model in the tree, so it is non-conformant, not partly
-conformant. The mask is a field of the block and not a second entry point: the
-two variants share the arithmetic, the head mapping, the saved slots, and the
-tolerance ([block_kinds.md](../spec/block_kinds.md) §2), so one kernel covers
-both and the window is a parameter. *One tile size* bounds the obligation: the
-tier promises the primitives at one tiling, not every tiling a future shape
-might prefer, and a second tile size is device tuning rather than a contract
+`Config::window_pattern` derives `"SSSL"`, so `window_left()` is non-empty on
+every `S` layer. A device that implements full-context attention only cannot run
+the one model in the tree. The mask is a field of the block, not a second entry
+point, so one kernel covers both. *One tile size* bounds the obligation: a
+second tile size is device tuning rather than a contract
 ([capability_bits.md](../spec/capability_bits.md) §5).
 
 ## The fusion boundary rule
@@ -151,9 +127,9 @@ Consequences for the one model in the tree:
 | `attention` | separate | own T x T pattern |
 | `embedding gather` | separate | indexed access |
 | GEMM -> GEMM | no | cuBLAS owns both |
-| the Polar Express chain: square GEMM -> `b = cb·a + cc·acc` -> apply GEMM -> `x = ca·x + prod` | **no, measured** | all five conditions hold and the kernel exists (Part 1), but the hand GEMM the fusion must carry reaches 0.68 to 0.90 of the cuBLAS rate, the whole fused step is 6 to 45 percent slower, and the worst group is 76 percent slower, so the boundary stays closed and the fold buys nothing to fold |
+| the Polar Express chain: square GEMM -> `b = cb·a + cc·acc` -> apply GEMM -> `x = ca·x + prod` | **no, measured** | all five conditions hold and the kernel exists (Part 1), but the hand GEMM reaches 0.68 to 0.90 of the cuBLAS rate, the fused step is 6 to 45 percent slower, and the worst group is 76 percent slower |
 
-That last row is the one row of this table a campaign has measured rather than
+That last row is the one row of this table a campaign measured rather than
 argued. It is also the one where the structural verdict and the performance
 verdict agree: condition 3 (no library displacement) fails, because the
 arithmetic the fusion would own is arithmetic cuBLAS already wins.
@@ -166,11 +142,11 @@ and the library ownership.
 
 `QkPrep` can fold into the `Attention` kernel, because the RMSNorm reduction
 runs over `head_dim`, which one tile row holds. The reduction does not span
-CTAs, so the rule permits the fold. Defer it to v2, because the fold couples the
-attention backward to the norm and rope backward.
-`backends/cuda/fused_overrides.cc` already declares `kFeatureFusedAttention` as
-the v2 candidate, and `backends/cuda/fused_override_trace_test.cc` holds the
-reference case.
+CTAs, so the rule permits the fold. The fold waits for v2, because it couples
+the attention backward to the norm and rope backward.
+`backends/cuda/fused_overrides.cc` declares `kFeatureFusedAttention` as the v2
+candidate, and `backends/cuda/fused_override_trace_test.cc` holds the reference
+case.
 
 ## Compute strategy
 
@@ -178,12 +154,12 @@ reference case.
 
 Keep cuBLAS as the GEMM engine. It is near peak on GP102 (11.34 TFLOPS fp32), it
 is tuned per shape, and it is portable across generations. Do not hand-write a
-GEMM.
+GEMM for the dense path. Part 1 measured what a hand-written batched GEMM costs
+when a fusion needs one: 0.68 to 0.90 of the cuBLAS rate on the groups the
+fusion targets. That is the number this rule stands on.
 
-Part 1 measured what a hand-written batched GEMM costs when a fusion needs one:
-0.68 to 0.90 of the cuBLAS rate on the groups the fusion targets, on the card in
-the tree. That is the number this rule stands on, and it is why the fused path
-is selected for no shape.
+Part 3 holds the design of a hand-written tensor-core GEMM for bf16 and fp8.
+The tree does not implement it.
 
 ### Launch overhead
 
@@ -247,12 +223,12 @@ enum class PointwiseOp {
 
 enum class ReduceOp { kSumSq, kSum, kMax, kLogSumExp };  // the combine op
 
-struct PointwiseParams {  // replaces the former scalar argument list
+struct PointwiseParams {
   PointwiseOp op = PointwiseOp::kScale;
   int count = 0;
   int row_width = 0;  // width of the row a broadcast reads; 0 => count
-  float alpha = 1.0f;
-  float beta = 0.0f;
+  ScalarArg alpha{1.0f};
+  ScalarArg beta{0.0f};
 };
 
 struct RowReduceParams {
@@ -353,35 +329,28 @@ This removes duplication **without** changing kernel boundaries.
 
 ## Part 1. The Muon fusion
 
-_Absorbed from the design plan of record of the campaign that implemented it.
-The section numbers are unchanged, so a reference to section K of that plan
-resolves to section K here. The measured rows are in
-[baselines.json](baselines.json) under `muon`._
-
-Status: implemented, gated, and **not promoted**. The fused path is in
-`backends/cuda/kernels/muon_fused.cu` and both drivers are tested; the shape
-rule selects the multi-launch cuBLAS path for every group on the card in the
-tree.
+The fused path is in `backends/cuda/kernels/muon_fused.cu` and both drivers are
+tested. The shape rule selects the multi-launch cuBLAS path for every group on
+the card in the tree. The measured rows are in [baselines.json](baselines.json)
+under `muon`.
 
 ### 1. The question
 
 One Muon step is a chain of dependent kernels. At the shipped `ns_steps` of 5
 the Polar Express iteration alone is five launches -- `A = XᵀX` (or `XXᵀ`),
 `A·A`, the elementwise `b = cb·a + cc·acc`, `prod = X·b` (or `b·X`), and the
-elementwise `x = ca·x + prod` -- repeated five times, and the momentum, the row
-equilibration, the two renormalisation statistics, and the NorMuon stages
-surround it. The multi-launch path in `backends/cuda/kernels/muon.cu` issues 39
-launches per shape group.
+elementwise `x = ca·x + prod` -- repeated five times, and momentum, row
+equilibration, both renormalisation statistics, and the NorMuon stages surround
+it. The multi-launch path issues 39 launches per shape group.
 
-Can the whole stage be one device-side launch: the three products in one
-batched GEMM of our own, both elementwise passes folded into the epilogues of
-their neighbours, and a grid barrier between the stages? And is that faster on
-the card in the tree?
+Can the whole stage be one device-side launch: the three products in one batched
+GEMM of our own, both elementwise passes folded into the epilogues of their
+neighbours, and a grid barrier between stages? And is that faster on the card in
+the tree?
 
 The measured answer is two-part. The folds are legal, the arithmetic is right,
-and the kernel works; it is also slower for every group at both profiles, so
-the multi-launch path stays the default and the fused path stays in the tree as
-the shape rule and the phase-bisection tool.
+and the kernel works. It is also slower for every group at both profiles, so the
+multi-launch path stays the default.
 
 ### 2. The tree it starts from
 
@@ -389,19 +358,15 @@ The multi-launch path runs the stage as one launch per operation: Nesterov
 momentum, MuonEq row equilibration, Polar Express through strided-batched
 `kernels::Gemm` (cuBLAS, one call per GEMM per group), Muon+ renormalisation,
 NorMuon variance reduction with a factored second moment, and the cautious
-decoupled weight decay. The math mirrors `backends/cpu/kernels.cc`.
-
-Three properties of that path are what the fusion has to preserve, because they
-are the family's contract:
+decoupled weight decay. The math mirrors `backends/cpu/kernels.cc`. Three
+properties of that path are the family's contract:
 
 - **Every whole-matrix statistic is reduced by many blocks per matrix.** The
   Frobenius norm, the equilibration divisor, and the renormalisation scale use
   `MuonPartialBlocks(mat)` blocks -- one per eight thousand elements, at least
-  one and at most 32 -- and a second pass finishes the reduction, so no stage
-  serialises a matrix on one block.
+  one and at most 32 -- and a second pass finishes the reduction.
 - **Every per-row or per-column statistic uses one block or one thread per row
-  or column**, so the row equilibration and the NorMuon mean squares are also
-  parallel over the matrix.
+  or column.**
 - **The two operand layouts are a shape property, not a flag fight.** Tall
   (`rows > cols`) is `A = XᵀX` of `cols x cols` and `prod = X B`; wide
   (`rows <= cols`) is `A = XXᵀ` of `rows x rows` and `prod = B X`. `A` and `b`
@@ -412,15 +377,14 @@ hand-write one.
 
 ### 3. The arithmetic of the bet
 
-The fusion trades two costs. It removes the launch gaps between the dependent
+The fusion trades two costs. It removes the launch gaps between dependent
 kernels and the elementwise HBM passes it folds away, and it pays for a
 hand-written GEMM where cuBLAS was. A group is worth fusing when the first is
-larger than the second; the design put a floor under the first, so a campaign
-that finds the launch and elementwise share below **2 percent of the step**
-stops and reports the negative result instead of writing the GEMM.
+larger than the second. The design put a floor under the first: a share below
+**2 percent of the step** stops the campaign with a negative result.
 
-**The share, measured.** Three existing `muon_benchmark` rows give it without a
-new kernel. `polar:<shape>:step` is the loop's fifteen batched GEMMs alone,
+**The share, measured.** Three `muon_benchmark` rows give it without a new
+kernel. `polar:<shape>:step` is the loop's fifteen batched GEMMs alone,
 `muon:<shape>:step` at `ns=0` is the rest of the optimizer phase, and
 `muon:<shape>:step` at `ns=5` is the whole step, so
 
@@ -436,9 +400,7 @@ share of the step    = (launch + elementwise) / muon:step(ns=5)
 | `big` (20 layers, hidden 1280, heads 10/5) | 1268.30 ms | 85.06 ms | 1462.76 ms | 109.41 ms | **7.5 %** |
 
 A second session measured 3.81 ms (**9.2 %**) and 104.90 ms (**7.2 %**), so the
-share is 9 to 13 percent at `h100` and 7.2 to 7.5 percent at `big`. Every value
-is above the 2 percent floor, so the GEMM was written instead of the campaign
-stopping on a negative result.
+share is 9 to 13 percent at `h100` and 7.2 to 7.5 percent at `big`.
 
 **The sync term, measured.** A dependent launch of a full batched grid costs
 about 8.4 microseconds and a cooperative grid barrier about 0.9 microseconds at
@@ -446,18 +408,15 @@ the grid a fused kernel could hold resident (`muon_launch_sync_bench`), so one
 fused iteration replaces 41.9 microseconds of launch gaps with 4.7 microseconds
 of one launch plus three barriers: a **37.2 microsecond** gain per iteration.
 That is 0.5 percent of an `h100` iteration and 0.01 percent of a `big` one. The
-share above is therefore elementwise HBM traffic and not dispatch, which is what
-fixes the shape of the bet: the folds have to remove the passes, and the hand
-GEMM must not cost more than the passes save.
+share above is therefore elementwise HBM traffic and not dispatch.
 
 **Both terms, measured.** The device-side batched GEMM reached 0.68 to 0.72 of
 the cuBLAS rate on the 640x1280 group the fusion targets and 0.83 to 0.90 on the
 largest group, 1280x5120x1280. The gate asked for 0.85 on a targeted group, so
-it failed. The whole fused step, measured against the multi-launch step, is the
-same verdict: 6 to 10 percent slower at `ns=0`, 27 percent slower at `h100`
-(`ns=5`), and 45 percent slower at `big` (`ns=5`). The measured loss is an order
-of magnitude larger than the win, and the campaign records a negative result
-rather than a promotion.
+it failed. The whole fused step is 6 to 10 percent slower at `ns=0`, 27 percent
+slower at `h100` (`ns=5`), and 45 percent slower at `big` (`ns=5`). The measured
+loss is an order of magnitude larger than the win, so the campaign records a
+negative result.
 
 [performance.md](performance.md) section 2.1 holds the numbers under the
 measurement protocol, and [baselines.json](baselines.json) holds the rows.
@@ -466,24 +425,21 @@ measurement protocol, and [baselines.json](baselines.json) holds the rows.
 
 **One device function, one block size, sixteen phases.** The fused path is one
 `__device__` function parameterised by a phase index and driven from a flat
-work-item index: a block strides over the items of the phase it is in, because
+work-item index. A block strides over the items of the phase it is in, because
 one cooperative grid serves every phase and fixes the block size, the grid size,
 and the dynamic shared size for the whole kernel. 256 threads under
 `__launch_bounds__(256, 3)`; the resident grid on this card is 84 blocks (3 per
 SM on 28 SMs).
 
-**The batched GEMM** is the measured Phase 1 schedule: block tile 128 by 64,
-micro-tile 8 by 4 per thread (32 fp32 accumulators, a 16 by 16 thread grid), two
-double-buffered 8-deep k slices in 12288 bytes of shared memory, and one flat
-`(matrix, tile_i, tile_j)` index per block. `ptxas` reports 80 registers per
-thread and no local-memory traffic in the inner loop (`#pragma unroll 2`;
-unrolling the whole slice spills at this occupancy).
+**The batched GEMM** is block tile 128 by 64, micro-tile 8 by 4 per thread (32
+fp32 accumulators, a 16 by 16 thread grid), two double-buffered 8-deep k slices
+in 12288 bytes of shared memory, and one flat `(matrix, tile_i, tile_j)` index
+per block. `ptxas` reports 80 registers per thread and no local-memory traffic
+in the inner loop (`#pragma unroll 2`).
 
 **All five operand forms work.** `transpose_a` and `transpose_b` select four of
-them -- `XᵀX`, `XXᵀ`, `A·A`, and `X·B` -- and the wide branch `b·X` needs a
-separate selector, `MuonSquareSide`, for the side the square operand sits on,
-because the transpose pair cannot express it: `b·X` and `X·B` are both plain by
-plain.
+them -- `XᵀX`, `XXᵀ`, `A·A`, and `X·B`. The wide branch `b·X` needs a separate
+selector, `MuonSquareSide`, because `b·X` and `X·B` are both plain by plain.
 
 **The sixteen phases, and the twenty-eight executions.** Phases 1 to 7 run once,
 8 to 10 run once per Polar Express iteration, and 11 to 16 run once:
@@ -516,139 +472,433 @@ neither stage accumulates.
 **Two drivers over one device body.** The **cooperative** driver launches one
 grid per shape group, sized from the resident-block query in
 `backends/cuda/device.h`, with a `grid.sync()` at each of the 27 barriers. A
-launch the device refuses with `cudaErrorCooperativeLaunchTooLarge` falls back
-to the phase driver and logs exactly one line. The **phase** driver launches one
-grid per execution, each sized for its own phase: it is the simulator's path,
-the fallback above, and the phase-bisection tool. The workspace, the arithmetic,
-and the device body are identical in both drivers, so a group can move between
-them without a caller noticing, and the two must agree bit for bit.
+launch the device refuses with `cudaErrorCooperativeLaunchTooLarge` falls back to
+the phase driver and logs one line. The **phase** driver launches one grid per
+execution, each sized for its own phase: it is the simulator's path, the fallback
+above, and the phase-bisection tool. The workspace, the arithmetic, and the
+device body are identical in both drivers, so the two must agree bit for bit.
 
-**The shape rule.** `MuonFusedSelected` keeps the multi-launch path
-(`kernels::Gemm`, i.e. cuBLAS) for a group where the bet is poor and selects the
-fused path where it is not. Its one number is `kMuonFusedMaxElements`, the
-largest stacked group the fused path is selected for, in `ComputeType` elements.
-That number is **0**, because the measurement says no group wins on this card;
-promoting a group is one measurement and this constant.
+**The shape rule.** `MuonFusedSelected` keeps the multi-launch path for a group
+where the bet is poor and selects the fused path where it is not. Its one number
+is `kMuonFusedMaxElements`, the largest stacked group the fused path is selected
+for, in `ComputeType` elements. That number is **0**, because the measurement
+says no group wins on this card; promoting a group is one measurement and this
+constant.
 
 ### 5. The workspace
 
-`EnsureMuonWorkspace` falls from `2·total + 3·min_total` to
-`2·total + 2·min_total` `ComputeType` elements, and both paths use that one
-layout (`MuonFusedWorkspaceElements`):
+`EnsureMuonWorkspace` is `2·total + 2·min_total` `ComputeType` elements, and both
+paths use that one layout (`MuonFusedWorkspaceElements`):
 
 - two full-size slices are the iterate and its ping-pong partner -- which is why
   the multi-launch path's `prod` buffer doubles as that partner, and why
-  `MuonUpdate` writes `A·A` into `b` in place, the same fold without the
-  accumulator;
+  `MuonUpdate` writes `A·A` into `b` in place;
 - two `min_dim x min_dim` slices are `A` and the folded `b`.
 
 The `float` statistics scratch is `MuonFusedScratchFloats`: the per-matrix
 statistic (`num_params`), then the NorMuon mean squares
 (`num_params * max(rows, cols)`), then the NorMuon global scales
 (`num_params`). The larger extent settles the size, so one allocation serves
-both `red_dim` values of a group, and `MuonScratchOffset` rounds every region up
-to a 16-byte group so the elementwise phases can move a whole vector of the
-statistics and not only of the matrices.
+both `red_dim` values of a group. `MuonScratchOffset` rounds every region up to a
+16-byte group, so the elementwise phases can move a whole vector of the
+statistics.
 
 The partial buffer is `num_params * MuonPartialBlocks(rows * cols)` doubles. Both
 partial passes accumulate in double and both paths use the same block count and
-the same chunk order, so every statistic stays within one unit in the last place
-of the other path.
+chunk order, so every statistic stays within one unit in the last place of the
+other path.
 
 ### 6. The gates
 
-In the order they were run, all green:
-
 1. **The CPU loop.** `tools/nanochat test` stays green. The CPU backend is the
    definition, and no `caps.json` changes.
-2. **The multi-launch path is unchanged.** `//backends/cuda/kernels:muon_gpu_test`
-   compares it with `testing/optim_ref.h` as before, now over the reduced
-   workspace.
+2. **The multi-launch path is unchanged.**
+   `//backends/cuda/kernels:muon_gpu_test` compares it with
+   `testing/optim_ref.h` as before, over the reduced workspace.
 3. **Three implementations, one input, one seed.**
    `//backends/cuda/kernels:muon_fused_gpu_test` compares `optim_ref.h`, the
    shipped multi-launch `MuonUpdate`, and the fused path through each driver,
    over `4x3`, `3x6`, and `5x5` groups, both `red_dim` values, Nesterov on and
    off, `ns_steps` of 0, 1, and 5, and `num_params` of 1 and 3, at the family's
-   `1e-5` tolerance. `5x5` is not a whole number of 16-byte groups, so it runs
-   the scalar elementwise phases where the others run the vector ones.
-4. **Both drivers, and the refusal.** The two drivers agree bit for bit (only
-   the launch geometry differs); every output is finite, so a divergent stage is
-   caught by name; the workspace is exactly `2·total + 2·min_total` elements with
-   a 64-element sentinel tail, so a phase or a fold that reached past the last
-   slice changes the tail; and a cooperative launch of eight times the resident
-   grid is refused with `cudaErrorCooperativeLaunchTooLarge` and has to produce
-   the phase driver's answer with `fell_back` reported.
+   `1e-5` tolerance.
+4. **Both drivers, and the refusal.** The two drivers agree bit for bit; every
+   output is finite, so a divergent stage is caught by name; the workspace is
+   exactly `2·total + 2·min_total` elements with a 64-element sentinel tail; and
+   a cooperative launch of eight times the resident grid is refused with
+   `cudaErrorCooperativeLaunchTooLarge` and produces the phase driver's answer
+   with `fell_back` reported.
 5. **The simulator.** The mock answers 0 for `cudaDevAttrCooperativeLaunch` and
-   1 for the occupancy query, so a simulated run takes the phase loop; the
-   emulator runs the phase driver against the CPU reference, and cannot run the
-   cooperative one, because its block-at-a-time engine would deadlock on a grid
-   barrier. [simulator.md](simulator.md) section 5.2 lists the three runtime
-   names.
+   1 for the occupancy query, so a simulated run takes the phase loop.
+   [simulator.md](simulator.md) section 5.2 lists the runtime names.
 6. **The benchmark.** `muon_benchmark` reports a `muon:` and a `muon_fused:` row
    for every group and for the `ns=0` and `ns=5` steps at both profiles, and the
-   `driver=` field in the shape column names the driver the card answered with.
-   That row pair is the verdict below.
+   `driver=` field names the driver the card answered with.
 
 ### 7. What landed
 
 `backends/cuda/kernels/muon_fused.cu` (the device function, the folds, and the
 two drivers), `muon_fused.h` (the workspace helpers, the driver selection, and
-`MuonFusedUpdate`), and `muon_fused_test.cc` (the gate above). `muon.cu` keeps
-the one `MuonUpdate` seam entry, owns the workspace and the scratch, and selects
-a path by shape. The frozen seam gains no entry point and no capability bit,
-`caps.json` does not change, and `backends/cuda/kernels/BUILD.bazel` and its
-`README.md` register the new test, the new source, and the benchmark rows. The
-source is also compiled into the emulator library, so the phase driver runs on
-the simulator.
+`MuonFusedUpdate`), and `muon_fused_test.cc`. `muon.cu` keeps the one
+`MuonUpdate` seam entry, owns the workspace and the scratch, and selects a path
+by shape. The frozen seam gains no entry point and no capability bit.
 
-### 8. The workstreams and the runtime names
+### 8. The device questions
 
-The workstream table had one item without an owner: the device layer,
-`backends/cuda`. A fused build needs three questions answered before it can
-pick a driver, and all three are put to the device rather than to a capability
-bit. That surface is `backends/cuda/device.h`:
+A fused build needs three questions answered before it can pick a driver, and
+all three are put to the device rather than to a capability bit. That surface is
+`backends/cuda/device.h`:
 
 | Helper | Answer |
 |---|---|
-| `LaunchCooperative` | The launch itself, on `Stream()`, beside `Launch` and under the same `CheckLastError` discipline |
-| `CooperativeLaunch` outcome (`kLaunched`, `kTooLarge`, `kFailed`) with `ClassifyCooperativeLaunch` | A typed failure, so a caller recognises `cudaErrorCooperativeLaunchTooLarge` and falls back with one log line instead of parsing a string |
-| `CooperativeLaunchSupported`, `SupportsCooperativeLaunch` | Whether the device accepts a cooperative launch at all, on the same discipline as `PrecisionFeatureBits` |
+| `LaunchCooperative` | The launch itself, on `Stream()`, beside `Launch` |
+| `CooperativeLaunch` outcome (`kLaunched`, `kTooLarge`, `kFailed`) with `ClassifyCooperativeLaunch` | A typed failure, so a caller recognises `cudaErrorCooperativeLaunchTooLarge` and falls back with one log line |
+| `CooperativeLaunchSupported`, `SupportsCooperativeLaunch` | Whether the device accepts a cooperative launch at all |
 | `MultiprocessorCount`, `ActiveBlocksPerMultiprocessor`, `ResidentBlocks` | The persistent grid: active blocks per SM for that kernel, block size, and dynamic shared size, times the SM count. 84 on this card |
 
 No capability bit, no `caps.json` field, and no change to `GetCaps`: the driver
-asks the device, and a card that answers it with no takes the phase loop. The
+asks the device, and a card that answers with no takes the phase loop. The
 simulator answers 0 for `cudaDevAttrCooperativeLaunch`, so it always takes it.
 
 A fused build asks the runtime for **`cudaLaunchCooperativeKernel`,
 `cudaDeviceGetAttribute`, and
 `cudaOccupancyMaxActiveBlocksPerMultiprocessor`** even when it takes the phase
-driver, because the choice is made at run time and every one of the three is
-reached before the choice is final. The mock must export all three or
-`tools/cuda_sim/check_symbols.py` rejects it; [simulator.md](simulator.md)
-section 5.2 records the answers and their consequence.
+driver, because the choice is made at run time and all three are reached before
+the choice is final. The mock must export all three or
+`tools/cuda_sim/check_symbols.py` rejects it.
 
-### 9. Risks and non-goals
+### 9. Limits
 
 - **One block size fits no stage.** 256 threads with `__launch_bounds__(256, 3)`
   and 15 KiB of static shared memory hold 6 blocks per SM where the elementwise
   families' own kernels hold 8, so the fused stage starts from a residence
   deficit that the folds have to pay back. They do not: the `ns=0` step, which
-  runs no GEMM and has nothing to fold, is 6 to 10 percent slower. Measured.
+  runs no GEMM and has nothing to fold, is 6 to 10 percent slower.
 - **The GEMM schedule is the bet, and it lost.** 80 registers per thread, 12 KB
-  of shared memory, and 3 blocks per SM leave 768 of 2048 threads resident; the
-  8 by 4 micro-tile reads 12 shared floats per 32 FMAs; an 8-deep k slice
-  exposes one global round trip per ~1500 cycles of arithmetic per SM. An 8 by 8
-  micro-tile, a 16- to 32-deep slice, or a 256 by 64 tile is a *different*
+  of shared memory, and 3 blocks per SM leave 768 of 2048 threads resident. An
+  8 by 8 micro-tile, a 16- to 32-deep slice, or a 256 by 64 tile is a *different*
   prototype and a different measurement. Nothing here says the fusion is
   impossible, only that this schedule on this card is 30 percent off cuBLAS.
 - **cuBLAS weakness masks the hand GEMM on the largest group.** At
   1280x5120x1280 the `A` stage measured 0.95 to 1.17 of cuBLAS, because that
-  product is bandwidth bound and cuBLAS measured 4181 to 5608 GFLOP/s on it. A
-  rate gate against cuBLAS is therefore not a selector by itself; the end-to-end
-  step row is.
+  product is bandwidth bound. A rate gate against cuBLAS is therefore not a
+  selector by itself; the end-to-end step row is.
 - **The bf16 build stays on the multi-launch path.** The fused schedule is the
   fp32 one and loads `float4` quads, so `MuonFusedSelected` reports false there.
 - **Non-goals.** No capability bit, no `caps.json` change, no change to the
-  frozen seam, no whole-model megakernel (see the compute strategy above), and
-  no cooperative driver in the emulator, whose block-at-a-time engine would
-  deadlock on a grid barrier.
+  frozen seam, no whole-model megakernel, and no cooperative driver in the
+  emulator, whose block-at-a-time engine would deadlock on a grid barrier.
+
+## Part 2. Device-resident scalar arguments
+
+A scalar that the optimizer owns must never reach the host on a training step.
+`ScalarArg` is the seam form that keeps it on the device.
+
+### 1. The rule
+
+| Scalar kind | Examples | Form |
+|---|---|---|
+| A constant or a schedule value | `eps`, softcap, `kQkScale`, `lr`, `beta1`, warmup | host `float`, by value |
+| **Model state** | `resid_lambdas`, `x0_lambdas`, `smear_lambda`, `backout_lambda`, the clip scale | `ScalarArg` with a device pointer |
+
+A kernel reads a scalar argument **once, before the loop**, and keeps it in a
+register:
+
+```cpp
+const float scale = grad_scale.dev != nullptr ? *grad_scale.dev
+                                             : grad_scale.value;
+for (long long i = ...; i < n; i += stride) { ... }
+```
+
+A read inside the element loop would turn one L2 hit into `n` loads.
+
+**Why the host read is expensive.** `src/model.cc` read `resid_lambdas[i]` and
+`x0_lambdas[i]` with `ReadHost`, which is a synchronous `cudaMemcpy`. A trace
+put the `blocking_dtoh_scalars` signature at **0.3197** of a step, and the three
+largest stalls followed a **0-byte** copy. The bytes are free; the queue drain
+is not. The loop issues about 16100 driver calls per step at 2 to 3
+microseconds each, so per-call operand validation is the wrong thing to add.
+
+### 2. The type
+
+```cpp
+// One scalar argument to a kernel family.
+//
+// `value` is a host copy. When `dev` is not null the kernel loads the value
+// there instead, once, before its loop, and ignores `value`. A null pointer,
+// the default, keeps the host value, so every existing call site is unchanged.
+//
+// Use it for a scalar the optimizer owns. A constant or a schedule value stays
+// a plain `float`: there is nothing to read.
+struct ScalarArg {
+  ScalarArg() = default;
+  ScalarArg(float host) : value(host) {}  // NOLINT: implicit on purpose
+
+  float value = 0.0f;
+  const float* dev = nullptr;
+};
+```
+
+`ScalarArg(float)` is implicit so that `params.alpha = 2.0f` and an aggregate
+initialiser both keep compiling. The accessor `host()` returns `value`; only a
+kernel wants the raw pointer.
+
+The type is two fields and one branch. A copy of `c10::Scalar` cannot carry a
+pointer to the device, because no tag selects one. An `at::Tensor` can, through
+an implementation allocation, at the cost of refcounting, per-use validation,
+and a dispatch layer that [../README.md](../README.md) § What this is not
+forbids.
+
+### 3. The seam
+
+Three parameter structs carry it: `PointwiseParams::alpha`, `PointwiseParams::beta`,
+`AdamWParams::grad_scale`, and `MuonParams::grad_scale`. The last two replace the
+former `float` plus `const float*` pair with one field:
+
+```cpp
+struct AdamWParams {
+  // The gradient clip scale, folded into the gradient read. A caller that
+  // keeps the norm on the device sets `dev` and never reads the value back.
+  ScalarArg grad_scale{1.0f};
+};
+```
+
+The change is additive in behaviour and no enum grows a member, so the closed
+`PointwiseOp` list stays closed and no backend gains a missing arm.
+
+### 4. The backend arms
+
+- `backends/cuda/kernels/adamw.cu` and `muon.cu` drop the `bool scale_on_device`
+  argument, because the struct now says where the value lives.
+- `backends/cpu/kernels.cc` keeps one `Coefficient` helper instead of two
+  `GradScale` overloads.
+- `backends/cuda/kernels/pointwise.cu` resolves `alpha` and `beta` in the
+  prologue of each kernel that uses them.
+- The simulator interposes CUDA calls, so it sees the launch and not the
+  parameter struct, and it needs no arm.
+
+### 5. The model and the ops layer
+
+`src/ops.h` is not a frozen header, so the block entry points take device
+pointers:
+
+```cpp
+void BlockForward(const BlockShape& shape, const BlockWeights& weights,
+                  const BlockActivations& acts, const int* tokens,
+                  const float* cos, const float* sin, const ComputeType* x,
+                  const ComputeType* x0, const float* resid_dev,
+                  const float* x0_lambda_dev);
+```
+
+`src/model.cc` passes the fp32 master copy, which is the authority the optimizer
+updates. No new buffer and no conversion kernel is needed:
+
+```cpp
+// The fp32 view of one parameter, for a kernel that reads a device scalar. In
+// a bf16 build this is the master copy, which the optimizer keeps current. In
+// an fp32 build the compute buffer is already fp32.
+const float* FloatView(const Param& p) {
+  if (p.master != nullptr) return p.master;
+  if constexpr (std::is_same_v<ComputeType, float>) return p.value;
+  return nullptr;
+}
+```
+
+`ops::DevScalar` is the one accessor for a device scalar in the ops layer, and
+`ScalarSource` is the one place that chooses the fp32 view.
+
+### 6. The remaining host reads
+
+The four scalar reads are gone, and three further drains with them:
+
+| Read | After the change |
+|---|---|
+| `resid_lambdas[i]`, `x0_lambdas[i]` | gone, 32 synchronous copies per step to zero |
+| `smear_lambda` | gone; `SmearParams::lambda` is a `ScalarArg` |
+| `backout_lambda` | gone; `TrainModel::neg_backout_dev_` holds the negated value, refreshed by `kernels::SumFp32` with a scale of minus one |
+| the gradient clip scale | no traffic change; the form changed and two helpers left |
+| the loss | `ForwardLossAccumulate` adds the micro-batch mean to a device total; `ConsumeLossSum` reads four bytes on a step that records the loss |
+| the phase drains | `src/train.cc` synchronizes at a phase boundary only on a step that logs |
+
+Two host round trips remain in a base step: the staged token and target
+indexes, because the seam takes host pointers, and the checkpoint records, which
+a save reaches on `save_every` only.
+
+### 7. The precision consequence
+
+The change is **not** bit identical, and the measurement found that.
+
+The old path read `resid_` and `x0_lambda_`, which are `ComputeType`. A bf16
+build therefore staged the **bf16-rounded** scalar and widened it. The new path
+reads `p.master`, which is fp32. The two differ in the bits the bf16 copy drops,
+so the residual blend consumes a more precise coefficient than before.
+
+| Fact | Value |
+|---|---|
+| Worst relative loss difference | 4.85e-3 |
+| Worst relative `grad_norm` difference | 2.5e-1 |
+| First step that differs | step 1 |
+| The unchanged tree against itself | 9.1e-4 loss, 3.8e-2 `grad_norm`, first difference at step 29 |
+
+A difference at step 1 is not noise and it is not the plan cache: it is the
+parameter value itself. The tree accepts it. The optimizer owns the fp32 master,
+the model derives the bf16 copy from it, and a scalar that feeds float
+arithmetic should carry its fp32 value. The cost is a baseline for every parity
+fixture that pins the trajectory.
+
+The CPU backend and every fp32 build take this behaviour for free, because their
+`ComputeType` is `float` and `ScalarSource` returns the compute buffer itself.
+
+### 8. Measurement and non-goals
+
+Two untraced runs of 200 steps on `base` at the H100: 42.90 ms per step and
+2.3512 percent Model FLOPs Utilization before, 41.98 ms and 2.3834 percent
+after. The step fell 2.1 percent and the MFU rose 1.4 percent. The two points
+overlap, so the 2.1 percent is inside the noise of that card, and the change was
+kept for the seam and for the precision, not for the step time.
+
+At the `big` profile the pair is 229.93 ms and 18.161 percent before, 229.86 ms
+and 18.167 percent after. Its device work is 230 ms, and the host traffic this
+change removes was under 1 ms.
+
+The gates are `//backends/cpu:kernels_test` and the CUDA family tests for the
+prologue read, `//src:model_gradient_test` for the residual path,
+`//tests:oracle_cuda_test` for a whole step, and `tools/nanochat lint` for the
+frozen header.
+
+Non-goals:
+
+- A `Tensor` or `TensorRef` type in the seam. A 24-byte borrow belongs in
+  `src/ops.*` or the C ABI.
+- A dtype tag on `ScalarArg`. A build has one compute type, and the master copy
+  is fp32 by construction.
+- Migrating constants. `eps`, the softcap, `kQkScale`, and the schedule values
+  stay host floats.
+
+## Part 3. The hand-written tensor-core GEMM (not implemented)
+
+cuBLAS reaches 989 TFLOPS in bf16 and 1979 TFLOPS in fp8 on the H100, because it
+uses WGMMA, TMA, split-K, and swizzled tiles. A hand kernel on the warp-level
+matrix multiply-accumulate interface lands near Ampere-class rates. The design
+therefore sets a fraction gate and not a literal match: **0.70 of the cuBLAS
+rate** for a first promotion and **0.85** for a full shape replacement. The fp32
+hand GEMM reached 0.68 to 0.90 of the cuBLAS rate on Pascal (Part 1).
+
+**The shape set is a closed list, not a general GEMM:** the Muon Polar Express
+groups of [model.md](model.md) § Optimizer, and the Linear forward, dgrad, and
+wgrad shapes in `python/nanochat_cpp/pipeline.py` `PROFILES`.
+
+**The kernel.** Generalise the `attention_bf16.cuh` microkernel into a tiled
+GEMM under `backends/cuda/gemm_hand/`. Use `cp.async` double-buffered
+shared-memory stages and `wmma::mma_sync` with 16 by 16 by 16 bf16 fragments and
+fp32 accumulators. Support the full `GemmParams` contract: transpose flags,
+batch, leading dimensions, strides, an alpha/beta epilogue, and the fp32 output
+of `GemmWgrad`. Mirror `muon_fused_gemm_test.cc` for the correctness gate.
+
+**The fp8 path** adds the E4M3 forward and E5M2 backward fragments. The per-tensor
+scale folds into alpha, because the interface takes no scale argument, and the
+backward mix of both formats must work in one call. The gate is the fp8
+tolerance in [precision.md](precision.md).
+
+**Dispatch.** A predicate in `backends/cuda/gemm.cu` routes a shape to the hand
+library only when it beats cuBLAS at the fraction above. cuBLAS stays the
+fallback and serves every shape the library does not. The rule is: no group
+slower. The frozen seam keeps its signatures and its version.
+
+**Blocked direction.** A Hopper-native path needs WGMMA and TMA in the simulator
+first, and [attention.md](attention.md) Part 5 records that as the blocker. It
+is a separate effort with its own stop condition, and it does not start before
+the warp-level path passes its gate.
+
+## Part 4. Two kernel designs the tree does not implement
+
+The arithmetic below is agreed and the tree does not carry it. Both changes keep
+the frozen seam's meaning and neither adds a family.
+
+### 1. Vectorized row kernels
+
+Every row kernel in `backends/cuda` uses scalar strided access: the loops step
+one element at a time. The GTX 1080 Ti moves about 484 GB/s and computes about
+11.34 TFLOP/s, so the ridge point is about 23 flop for each byte, and the row
+kernels sit far below it. `row_benchmark.cc` reports milliseconds only, so an
+achieved byte rate column comes first.
+
+The helper is header-only in `backends/cuda/kernels/device_utils.cuh`, so it
+inlines and never merges a kernel boundary. `Packed<T>` is `alignas(16)` and
+holds `16 / sizeof(T)` elements, so the fp32 build packs four. `LoadPacked` and
+`StorePacked` cast to `int4`, and the streaming forms use `__ldcs` and `__stcs`.
+
+| Kernel | Operand | Change | Risk |
+|---|---|---|---|
+| `rms_norm.cu` | `x`, `out` | packed load and store | Low |
+| `pointwise.cu` | `a`, `b`, `out` | packed load and store | Low |
+| `embedding.cu` | `out`, `dtable` | packed store, scalar gather | Low |
+| `grad_norm.cu` | `grads` | packed load | Low |
+| `attention.cu` | softmax rows | packed load and store | Medium |
+| `classifier.cu` | `logits` | packed load, scalar reduction | Medium |
+
+A kernel takes the packed loop only when three conditions hold: the pointer is
+16-byte aligned, the row width divides by the packed count, and the row count
+divides by the block stride. Otherwise it takes the scalar loop, which produces
+the same arithmetic. `Workspace::Reserve` gains 16-byte alignment for the slots
+the packed kernels read.
+
+A packed loop changes the order of the per-thread accumulation, so the last bits
+of a sum can move. The fp32 oracle tolerance decides the result. The classifier
+softmax keeps its scalar reduction, because a packed reduction can move
+`row_max` by one unit in the last place.
+
+### 2. The classifier statistics hand-off
+
+The classifier holds `raw_logits_` and `dlogits_`, each 4.3 GB at `R = 32768`
+and `padded_vocab = 32768` in fp32. The logits buffer moves six times per step,
+and two of those passes rebuild statistics that the forward pass already had.
+
+Two independent changes remove most of that traffic, and both are bit identical
+to the current result.
+
+1. **The statistics hand-off.** `ClassifierForward` writes `(row_max, sum_exp)`
+   per row and `ClassifierBackward` reads the pair. The pair is `2 * rows`
+   floats, about 256 KB. The value is the same bit for bit, because both calls
+   use the same input, the same reduction, and the same order. Two logits reads
+   and one `RowLogSumExp` call leave.
+2. **The fused scale.** `ClassifierBackward` takes `dlogit_scale = scale / rows`
+   and writes `dlogits[j] = (p - onehot) * sech2 * dlogit_scale`. The separate
+   `PointwiseForward(kScale)` pass disappears and the arithmetic order does not
+   change.
+
+Backward logits reads fall from 3 to 1 and scale passes from 2 to 0, which is
+about 17 GB less traffic per step.
+
+The seam change is additive, and the architect owns the header:
+
+```cpp
+// Forward writes the per-row statistics when `stats` is non-null:
+// stats[2*r] = row_max, stats[2*r+1] = sum_exp. Evaluation passes null.
+void ClassifierForward(const ClassifierParams& params,
+                       const ComputeType* logits, const int* targets,
+                       ComputeType* losses, float* stats = nullptr);
+
+// Backward consumes the statistics when `stats` is non-null, and rebuilds them
+// otherwise. `dlogit_scale` folds the loss normalization into the write.
+void ClassifierBackward(const ClassifierParams& params,
+                        const ComputeType* logits, const int* targets,
+                        const float* stats, float dlogit_scale,
+                        ComputeType* dlogits);
+```
+
+The default argument keeps every call site valid, and the null path keeps the
+current behaviour, so the kernel test compares the two paths.
+
+**The rejected option.** `llm.c` overwrites the logits buffer with the gradients,
+which would remove `dlogits_` and 4.3 GB of arena. This tree cannot do it.
+`BackwardAccumulate` may run more than once per forward pass, and
+`src/harness_test.cc` calls it twice with a half scale. The second call would
+read gradients where it expects logits.
+
+## See also
+
+- [model.md](model.md) — the graphs the seam serves, and the optimizer step.
+- [build.md](build.md) — the layers and the dependency invariants.
+- [performance.md](performance.md) — the measurement protocol and the loop.
+- [precision.md](precision.md) — the fp8 tier.
+- [simulator.md](simulator.md) — the interposer and the emulation engine.

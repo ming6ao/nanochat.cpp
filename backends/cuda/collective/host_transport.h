@@ -2,7 +2,7 @@
 #define NANOCHAT_BACKENDS_CUDA_COLLECTIVE_HOST_TRANSPORT_H_
 
 // The host-staged transport for the native collective
-// (docs/distributed-design.md Part 3, sections 3.2 and 5.4). It is the third
+// (docs/distributed.md Part 2, sections 3.2 and 5.4). It is the third
 // selection choice: when neither NVLink peer access nor RDMA reaches a peer,
 // the ring stages through host memory and moves bytes over a TCP connection
 // between the two ring neighbors.

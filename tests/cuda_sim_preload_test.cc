@@ -17,7 +17,7 @@
 // test constructed itself.
 //
 // The fused Muon build's launch surface is driven the same way
-// (docs/muon-fused-kernel.md section 8). `device.cu`'s
+// (docs/kernels.md section 8). `device.cu`'s
 // `SupportsCooperativeLaunch`, `MultiprocessorCount`,
 // `ActiveBlocksPerMultiprocessor`, and `ResidentBlocks` are called here, so the
 // answers in the log are the ones the real backend read from the preloaded
@@ -203,7 +203,8 @@ int DriveTheRealBackend(const std::string& profile_name) {
         static_cast<float*>(nanochat::kernels::Alloc(sizeof(float)));
     float* scale_w =
         static_cast<float*>(nanochat::kernels::Alloc(sizeof(float)));
-    // The forward output is the compute type (docs/fp8-training.md section 7).
+    // The forward output is the compute type (docs/precision.md Part 1,
+    // section 7).
     nanochat::ComputeType* y = static_cast<nanochat::ComputeType*>(
         nanochat::kernels::Alloc(fp8_count * sizeof(nanochat::ComputeType)));
     const bool allocated = qx != nullptr && qw != nullptr &&
@@ -246,7 +247,7 @@ int DriveTheRealBackend(const std::string& profile_name) {
 
 // The fused Muon driver's launch surface, through the real backend
 // (`backends/cuda/device.cu`) and therefore through whatever `LD_PRELOAD` put
-// in front of the CUDA runtime (docs/muon-fused-kernel.md section 8).
+// in front of the CUDA runtime (docs/kernels.md section 8).
 //
 // The three queries are ordinary host functions, so a host-only test can ask
 // them; the launch needs a kernel symbol, which `//backends/cuda:launch_probe`
@@ -403,7 +404,7 @@ void CheckLog(const std::string& log, const std::string& profile,
     ExpectTrue(accepted, "at least one cublasLtMatmul carried an fp8 operand");
   }
 
-  // The fused Muon build's three runtime names (docs/muon-fused-kernel.md
+  // The fused Muon build's three runtime names (docs/kernels.md
   // section 8). A fused build asks all three even when the launch it finally
   // makes is the phase driver's, so every one of them is a record of what the
   // real backend asked and what the mock answered.

@@ -794,7 +794,7 @@ void ClearOptimizerProgressMultiplier(Optimizer* optimizer) {
   SetOptimizerProgressMultiplier(optimizer, -1.0f);
 }
 
-// The optimizer-step record (docs/distributed-design.md Part 2, section 10).
+// The optimizer-step record (docs/distributed.md Part 1, section 6).
 // The container has no integer dtype, so one four-byte record carries the
 // little-endian int32 step. `SaveOptimizerState` writes the group buffers; this
 // writes the driver's counter beside them.

@@ -146,7 +146,7 @@ rows against the reference rows on a fixed corpus.
 **nanochat.cpp** (`src/data.cc`, `DataLoader`):
 
 - `DataLoader` reads raw documents from a `DocumentSource` and tokenizes them
-  with the reference encoder ([parquet-native.md](parquet-native.md)).
+  with the reference encoder ([data.md](data.md)).
 - A producer thread refills a document buffer to `document_buffer`, the
   consumer picks the largest document that fits, and crops the shortest
   document when none fits. Row capacity is `T + 1`.
@@ -218,7 +218,7 @@ samples its own python blocks. The bridge reads the reward from the final
 reference. The reference supplies exact arithmetic results. The MVP relies on
 the arithmetic of the model.
 
-**Evidence:** none yet. The RL parity fixture (`post-training.md` section 12)
+**Evidence:** none yet. The RL parity fixture (`post-training.md` section 5.1)
 is the gate.
 
 **Fix direction:** the streaming `chat_engine` protocol in `post-training.md`
@@ -269,7 +269,7 @@ decoded text.
 
 **Fix direction:** none required. Exact stream parity would mean re-emitting the
 stray U+FFFD for every partial token. The buffer is the documented local choice
-(`docs/tokenizer.md` section 8.3). A consumer that needs exact reference text
+(`docs/data.md` section 8.3). A consumer that needs exact reference text
 calls `Decode` per token.
 
 ## Equivalent differences
@@ -391,7 +391,7 @@ a native base checkpoint, and that path is not the parity prerequisite.
 **Impact:** none. The SFT start is the reference start.
 
 **Evidence:** E3 and `//src:optimizer_state_test`. The SFT loop is in the tree
-(`src/sft_command.cc`, `post-training.md` section 11), and `P5` pins the warm
+(`src/sft_command.cc`, `post-training.md` section 4), and `P5` pins the warm
 start
 against the reference.
 
@@ -558,7 +558,7 @@ match the fixture. The port is equivalent, not merely close.
 
 The reference saves the tokenizer as a `pickle` plus a `torch` byte-length
 tensor. nanochat.cpp defines the little-endian `NCTOKEN1` container
-([tokenizer.md](tokenizer.md) section 5). The artifact needs neither `tiktoken`
+([data.md](data.md) section 5). The artifact needs neither `tiktoken`
 nor `torch` to load.
 
 The byte content is the same. The loader derives the token bytes from the ordered
@@ -574,7 +574,7 @@ far below it. This is a container and integer-width difference only.
 gradients with an all-reduce, and makes the ranks agree on `inf` and `nan`
 handling. `nanochat.cpp` runs one process. The project now targets two T4 cards
 in a Kaggle Notebook, so data parallel training enters the scope. The design is
-in [distributed-design.md](distributed-design.md).
+in [distributed.md](distributed.md).
 
 The tree implements the C++ host reference and the harness integration for
 architecture support. The model's loss is a mean, so the harness scales each
@@ -807,18 +807,3 @@ The `sft` kind writes two more files from the same tiny model:
 
 The shard and the checkpoint make R2 and R3 hermetic. Both loops consume the
 same rows from the same start. The real mixture stays an optional check (D8).
-
-### 8. Interim label
-
-Use these names until Phase G closes:
-
-- After Phase C: "SFT data parity" (`P4`). Earned: the R1 gate passes at T0, so
-  `docs/parity.md` sets `P4` to `closed`.
-- After Phase D: "SFT arithmetic parity" (`P5`), with the GPU leg. The T0 leg
-  passes, so `docs/parity.md` sets `P5` to `equivalent` for the CPU backend. The
-  name stays interim because the T1 and T2 legs have not run.
-- Until Phase G: "SFT loop parity" (`P6`) and "SFT validation parity" (`P7`)
-  stay `open`, because their gate is the T2 driver run and it has not happened.
-
-`docs/post-training.md` cites these names with the fixture files
-`tests/data/sft_*_fixture.*` until Phase G closes them.

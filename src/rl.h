@@ -4,7 +4,7 @@
 #include "nanochat/model.h"
 
 // The reinforcement-learning optimizer step (docs/post-training.md Part 1,
-// section 4, docs/distributed-design.md Part 2, sections 5.7 and 6.4,
+// section 4, docs/distributed.md Part 1, sections 5.7 and 6.4,
 // docs/post-training.md section 5.2). It is the one place the RL normalization
 // lives, so a Python driver never computes the divisor.
 //
@@ -21,7 +21,7 @@ namespace nanochat {
 // The loss is normalized by the divisor of docs/post-training.md section 5.2,
 // `num_valid * num_passes * examples_per_rank`, where `num_valid` is the number
 // of targets that are not `-1`. The whole divisor is computed here in C++
-// (docs/distributed-design.md Part 2, section 5.7) and never by the caller.
+// (docs/distributed.md Part 1, section 5.7) and never by the caller.
 //
 // `tokens` and `targets` hold `batch * seq` entries; `-1` in `targets` is the
 // one and only mask channel (an ignored position). `advantages` holds one

@@ -1,5 +1,5 @@
 // src/train_parallel_test.cc -- data parallel training on the CPU backend
-// (docs/distributed-design.md section 12).
+// (docs/distributed.md section 12).
 //
 // Two checks:
 //   1. Two ranks that split one batch and reduce with a sum equal one rank on
@@ -238,7 +238,7 @@ class VectorSource final : public DocumentSource {
 void TestTrainLoopRanksAgree() {
   Config config = TinyConfig();
   // The native tokenizer starts at 256 byte tokens, so the model vocab must be
-  // larger than the tiny default (docs/tokenizer.md section 2).
+  // larger than the tiny default (docs/data.md section 2).
   config.vocab_size = 512;
   config.padded_vocab_size = 512;
   const int batch = 2;
@@ -296,7 +296,7 @@ void TestTrainLoopRanksAgree() {
 }
 
 // A resume from a mid-run checkpoint reproduces the uninterrupted run
-// (docs/distributed-design.md section 11). The data cursor sidecar must seek to
+// (docs/distributed.md section 11). The data cursor sidecar must seek to
 // the exact document, so the resumed leg continues as if it had never stopped.
 void TestTrainLoopResume() {
   Config config = TinyConfig();
@@ -361,7 +361,7 @@ void TestTrainLoopResume() {
 
 // A resume whose cursor sits in the second epoch keeps the stored epoch and the
 // restored buffer, and the resumed run consumes the batch the uninterrupted run
-// would have consumed next (docs/distributed-design.md section 11). The mesh
+// would have consumed next (docs/distributed.md section 11). The mesh
 // driver is the reference: it primes the loader the constructor builds from the
 // cursor and never re-opens the epochs before the stored one.
 void TestResumeKeepsTheEpochAndTheBuffer() {
@@ -474,7 +474,7 @@ void TestResumeKeepsTheEpochAndTheBuffer() {
 void TestBackwardScale() {
   // The micro-batch sum and the all-reduce sum give the global mean when the
   // backward carries 1/(grad_accum * world_size)
-  // (docs/distributed-design.md section 6).
+  // (docs/distributed.md section 6).
   if (std::fabs(nanochat::DistributedBackwardScale(4, 1) - 0.25f) > 1e-7f) {
     Fail("backward scale: world size 1 changed the accumulation scale");
   }

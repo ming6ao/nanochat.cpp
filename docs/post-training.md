@@ -5,9 +5,9 @@ improves the model with reward. The reference implementation is
 `scripts/chat_sft.py` and `scripts/chat_rl.py` in the PyTorch `nanochat` tree.
 The Python API in [python.md](python.md) drives both stages.
 
-This is a design document and the status of record for post-training. Keep it
-current. When the code changes, change this document in the same commit.
-Section 11 lists the state of each piece and names the file that holds it.
+This is the design of record for post-training. Keep it current: when the code
+changes, change this document in the same commit. Section 10 lists the parity
+entries.
 
 The companion documents are [eval.md](eval.md) for evaluation,
 [python.md](python.md) for the process seam, [parity.md](parity.md) for the
@@ -30,7 +30,7 @@ Post-training does not cover these items:
 - A native chat template in C++. The bridge owns the chat template.
 
 The tree has a native tokenizer and a best-fit packer
-([tokenizer.md](tokenizer.md), [parquet-native.md](parquet-native.md)). The
+([data.md](data.md), [data.md](data.md)). The
 pretraining path uses them. The SFT path needs a chat renderer and a loss mask,
 so the bridge owns the SFT packer.
 
@@ -156,7 +156,7 @@ bridge masks the padding targets and the user targets to `-1`.
 The native C++ loader in `src/data.cc` reads parquet documents and tokenizes
 during the run. It uses best-fit packing for pretraining. The bridge owns the
 SFT renderer, the mixture, and the mask. The C++ packed-row loader owns the
-padding and the batching ([distributed-design.md](distributed-design.md) Part 2, section 4).
+padding and the batching ([distributed.md](distributed.md) Part 2, section 4).
 `DataLoader` does not know about chat data.
 
 ### 4.2 Loop
@@ -396,169 +396,19 @@ difference.
 | P6 | `open` | SFT loop parity: the driver gate has not run; the progress schedule and the momentum it computes are pinned at T0 |
 | P7 | `open` | SFT validation parity: the packed bits-per-byte is pinned; ChatCORE is not measured |
 
-## 11. Status
-
-The table records the state of each piece. Update the table when the code
-changes.
-
-| Piece | State | Location |
-|---|---|---|
-| Masked, valid-token mean | Done | `src/model.cc`; `src/masked_loss_test.cc`; `tests/post_training_core_test.cc` |
-| Weighted policy-gradient backward | Done | `include/nanochat/model.h`; `include/nanochat/kernels.h`; `src/model.cc`; `backends/cpu/kernels.cc`; `backends/cuda/kernels/classifier.cu` |
-| Weighted backward in the C ABI and the Python API | Done | `include/nanochat/capi.h`; `bindings/nanochat_capi.cc`; `python/nanochat_cpp/api.py` |
-| Batched sampling with a per-row stop and a mask | Done | `src/generate.cc`; `include/nanochat/model.h` |
-| Generation-parity gate, greedy | Done | `tests/generate_parity_test.cc` |
-| Task logic for GSM8K, ARC, MMLU, and HumanEval | Done | `python/nanochat_cpp/tasks.py` |
-| ChatCORE and generative chat evaluation | Done | `python/nanochat_cpp/chat.py` |
-| `render_for_completion` prompt builder | Done | `python/nanochat_cpp/chat.py` |
-| Checkpoint path resolution for base, SFT, and RL | Done | `python/nanochat_cpp/checkpoint.py` |
-| Reference `.pt` conversion into the checkpoint container | Done | `tools/convert_checkpoint.py` |
-| Optimizer-state records in the checkpoint container | Done | `include/nanochat/data.h`; `src/optim_state.h`; `src/optim.cc`; `src/optimizer_state_test.cc` |
-| SFT conversation renderer (`render_conversation`) | Done | `python/nanochat_cpp/chat.py`; truncates at 2048 tokens |
-| SFT mixture and Python packer | Done | `python/nanochat_cpp/sft_data.py`; `PackedRowStream` mirrors the reference buffer and stop rule |
-| Native packed-row reader for SFT | Done | `src/sft_shard.{h,cc}`; `src/mesh_train.cc` and `nanochat_cli sft` share it |
-| SFT driver on the packed shard | Done | `src/sft_command.cc`: `--warm-start`, `--resume`, `--grad-accum`, `--val-rows`, `--eval-every`, `--eval-tokens`, `--chatcore-every`, and the progress schedule of D1 |
-| SFT loop with a dataset-progress schedule and a warm start | Done | `src/sft_command.cc`: the running maximum of `approx_progress` feeds `LrMultiplierForProgress`; a warm start loads the weights and the moments at step 0 |
-| Recipe block in the checkpoint metadata | Done | `include/nanochat/checkpoint_metadata.h`; `src/fields.cc`; `//src:fields_test`; design decision D7 |
-| Packed-row validation evaluator | Done | `src/eval.cc` `EvaluatePackedRows`; `src/eval_test.cc`; design decision D6 |
-| SFT bridge flags for the warm start and the evaluation cadence | Done | `python/nanochat_cpp/sft.py` `run()` |
-| SFT fixtures | Done | `tests/data/sft_pack_fixture.bin`, `tests/data/sft_step_fixture.bin`, `tests/data/sft_rows_fixture.nchsft`, `tests/data/sft_base_fixture.ckpt`, `tests/data/sft_loop_fixture.bin`; the layout, the settings, and the digests are in `tests/data/sft_fixtures.txt` |
-| SFT fixture load gate | Done | `//tests:sft_fixture_load_test`, T0 |
-| SFT data parity gate (`P4`, run R1) | Done | `//python:sft_data_parity_test` against `tests/data/sft_pack_fixture.bin`, T0 |
-| SFT arithmetic parity gate (`P5`, run R2) | Done at T0 | `//tests:sft_step_parity_test` against `tests/data/sft_step_fixture.bin` and `tests/data/sft_base_fixture.ckpt`; the T1 and T2 legs have not run on this host |
-| SFT schedule parity gate (run R3, schedule half) | Done | `//tests:sft_loop_parity_test` against `tests/data/sft_loop_fixture.bin`, T0 |
-| SFT driver parity gate (`P6` and `P7`, runs R3 and R4) | Built, not run | `//tests:sft_parity_test`; T2 and `manual`, so run it at a wave boundary |
-| SFT parity rungs `P4` to `P7` | `P4` `closed`; `P5` `equivalent` on the CPU backend; `P6` and `P7` `open` | `docs/parity.md`; `docs/parity.md` |
-| RL step binary and the RL parity fixture | Done | `src/rl_step_command.cc`, `tools/dump_fixtures.py rl`, `tests/rl_parity_test.cc` |
-| RL orchestration worker | Done | `src/rl_worker_command.cc`, `python/nanochat_cpp/rl.py` |
-| RL warm start: the load path and the save path as two arguments (section 5.6) | Done | `python/nanochat_cpp/rl.py` `run()` and `worker_argv()`; `python/tests/rl_test.py` |
-| SFT bridge command | Done | `src/sft_command.cc`; `python/nanochat_cpp/sft.py` |
-| RL bridge command | Done | `python/nanochat_cpp/rl.py` |
-
-## 12. Remaining work
-
-Each phase names the owner and the gate. The interface changes touch frozen
-headers, and the architect owns those headers (`AGENTS.md` section 1).
-
-### Phase 1 — SFT data path
-
-Owner: Python surface for the renderer and the packer; data pipeline for a
-native shard reader.
-
-1. Add `render_conversation` to the Python bridge. (Done.)
-2. Add the BOS-aligned best-fit packer with padding. Mark the padding targets
-   with `-1`. (Done: `python/nanochat_cpp/sft_data.py`.)
-3. Add the reference mixture: SmolTalk, MMLU, and GSM8K. (Done.)
-4. Add the `sft` command to `tools/dump_fixtures.py` for a fixed conversation
-   set. (Remaining.)
-5. Add the native packed-row shard reader in `src/data.cc`. (Remaining.)
-
-Gate: `//python:sft_data_test` and a native packer parity test.
-
-### Phase 2 — SFT loop
-
-Owner: harness for `src/train.cc` and `include/nanochat/scheduler.h`.
-
-1. Add a progress-based learning-rate schedule.
-2. Add a flat Muon momentum option and the 300-step ramp.
-3. Inherit the hyperparameters from the base checkpoint metadata.
-4. Warm-start the optimizer moments from the base checkpoint.
-
-Gate: A short SFT run at T2. Compare the loss curve to the reference.
-
-### Phase 3 — RL step and parity fixture
-
-Owner: harness for `src/`; oracle for `tools/**` and `tests/**`.
-
-1. Add a file-driven `rl_step` binary.
-2. Add `tools/dump_fixtures.py rl`. Record the reference advantages, the targets,
-   and the first-step trajectory.
-3. Normalize by `num_valid * num_passes * examples_per_rank`.
-
-Gate: `//tests:rl_parity_test` at T2.
-
-### Phase 4 — RL orchestration
-
-Owner: harness for the worker; Python surface for the bridge.
-
-1. Add the persistent worker with a pipe protocol.
-2. Add the SFT and RL commands to the bridge.
-
-Gate: An RL smoke run at T2.
-
-### Phase 5 — Tool forcing (optional)
-
-Owner: workflow for the streaming protocol; Python surface for the bridge.
-
-1. Add the streaming `chat_engine` protocol.
-2. Force the tool-output tokens in the generation loop.
-
-Gate: A parity measurement at T1.
-
-### Phase 6 — The group-relative baseline
-
-Owner: Python surface for `python/nanochat_cpp/rl.py`. No frozen header moves.
-
-1. Divide `reward - mean(reward)` by the group standard deviation, with a floor
-   of `1e-6`.
-2. Drop a group whose rewards are all equal. Count `used_groups` and
-   `dropped_groups` in `RlReport`.
-3. Cover a mixed group, a uniform group, and a group of one sample in
-   `python/tests/rl_test.py`.
-4. Update section 5.1 when the form lands.
-
-Gate: `//python:rl_test`, then a two-step card run that reports both counters.
-
-A sparse reward makes a uniform group, and such a step trains on nothing. Watch
-`dropped_groups`, and choose a task whose reward is not all-or-nothing at the
-start of a run.
-
-### Phase 7 — An executed reward behind the seam
-
-Owner: Python surface for the task, the seam registration, and the record;
-harness if a reward timeout needs a worker change.
-
-1. Add a task whose reward applies a patch and runs a test command in a Modal
-   Sandbox. Reach the sandbox through one callable that registers in
-   `nanochat_cpp.seam`, as the HumanEval executor does, so a test supplies a
-   fake and needs no account.
-2. Add a reward timeout and a reward cache, because a repeated wrong answer must
-   not pay twice.
-3. Record each rollout: the patch, the exit status, and the test output.
-
-Gate: a fake sandbox returns a fixed status and the reward matches it. One card
-run grades four rollouts of one task, and the record holds four rows.
-
-The pipe protocol is synchronous. The worker rolls out, the client scores, and
-the worker steps. So a reward that runs a test suite holds the card while it
-waits. The timeout and the Sandbox are the first two mitigations. Real overlap
-needs policy versioning, which stays out of scope (section 9).
-
-### Phase 8 — Multi-turn tool rollouts (design only)
-
-This phase changes the worker, so it needs its own document. The open items:
-
-1. A message kind `turn` that carries the tool calls and the tool results.
-2. A mask that follows a conversation of several turns.
-3. A context limit, because the default `seq_len` is 2048 and an agent needs
-   more.
-4. A reward that reads the whole conversation, not one completion.
-
----
-
 ## Part 1. Reinforcement learning in a notebook
 
 _Absorbed from the former `rl-notebook.md`. Its section numbers are unchanged,
 so a reference to a section of that document resolves to the same number here._
 
-Status: partly delivered. The hand-rolled loop, the one-call facade, the
-persistent worker, and the three-stage chain of section 9 exist. The
-multi-prompt C ABI binding and the tool-forcing driver are not wired yet.
+The hand-rolled loop, the one-call facade, the persistent worker, and the
+three-stage chain of section 9 exist. The multi-prompt C ABI binding and the
+tool-forcing driver are not implemented.
 
-This document gives the plan to run reinforcement learning (RL) in a notebook.
-`docs/post-training.md` section 12 and `docs/distributed-design.md` Part 2, section 8 hold the
-same plan from the design side. This document is the notebook view. Section 9
-gives the one-job chain that runs this call last, after base training and SFT.
+This part shows how to run reinforcement learning (RL) in a notebook. Section 5
+of this page and `docs/distributed.md` Part 1, section 6 hold the same design
+from the other side. Section 9 gives the one-job chain that runs this call last,
+after base training and SFT.
 
 ### 1. Purpose
 
@@ -610,7 +460,7 @@ The loop has six problems.
 ### 3. The target: one call
 
 The plan gives the notebook one facade call. The call follows the proposed
-supervised fine-tuning call in `docs/distributed-design.md` Part 2, section 6.5.
+supervised fine-tuning call in `docs/distributed.md` Part 2, section 6.5.
 
 ```python
 nc.rl.run(
@@ -663,34 +513,6 @@ A `rl_step` binary shares the step logic. It reads a fixture. It is the
 correctness gate. The project trusts the worker only after
 `//tests:rl_parity_test` passes at tier T2.
 
-### 5. The phases, and what shipped
-
-The phases come from `docs/distributed-design.md` Part 2, section 8. The owners follow
-`AGENTS.md` section 1. Phases 1 to 4 are delivered. Phase 5 is delivered in
-C++ but its C ABI binding is not. Phase 6 is delivered in part.
-
-1. **Add `nanochat_rl_step` to the C ABI.** Add the call to
-   `include/nanochat/capi.h` and the binding. It maps to `BackwardWeighted` and
-   the divisor. The divisor moves into C++ per `docs/distributed-design.md` section
-   5.7. Owner: architect for the header, Python surface for the binding.
-2. **Add the `rl_step` binary and the parity fixture.** Add the file-driven
-   binary. Add `tools/dump_fixtures.py rl`. Gate: `//tests:rl_parity_test` at tier
-   T2. Owner: harness for the step, oracle for the fixture.
-3. **Add the persistent worker.** Add the worker binary and the pipe protocol.
-   Gate: an RL smoke run at tier T2. Owner: harness.
-4. **Add the Python bridge.** Add `nc.rl` next to `nc.sft`. Add the RL command
-   to the command table in `python/nanochat_cpp/_entry.py` and `toolchain.py`.
-   Owner: Python surface.
-5. **Add multi-prompt rollout.** Extend the C ABI generation to many prompts
-   with an independent stop for each row. The compute and the header are in
-   place. The C ABI shim in `bindings/` is still owed. Owner: architect for
-   `capi.h`, and the generation owner for the compute.
-6. **Add tool forcing.** Stream the `chat_engine` protocol. Force the
-   tool-output tokens in the generation loop. The C++ hook and the Python
-   driver exist. The driver is not wired to a tested path, so parity item P1
-   stays open in `docs/parity.md`. Owner: workflow and Python surface. This
-   step is optional.
-
 ### 6. Notebook concerns
 
 - **Kaggle.** The notebook sets `NANOCHAT_SANDBOX_BACKEND=none`
@@ -714,23 +536,6 @@ C++ but its C ABI binding is not. Phase 6 is delivered in part.
 | Facade | `nc.rl.run(...)`, no loop | Delivered |
 | Batched and fast | The same call, many prompts | Delivered in C++; the C ABI shim is not |
 | Tool-forced parity | The same call | The mechanism exists; not yet wired |
-
-### 8. Open items
-
-Two items stay open.
-
-1. The multi-prompt C ABI call `nanochat_generate_multi` has no binding, so a
-   Python caller cannot reach the batched rollout through the C ABI.
-2. The tool-forcing driver (`ChatEngine` and `use_calculator`) is not wired to
-   a caller or a test, so `docs/parity.md` still records parity item P1 as
-   open.
-
-The discrete side is already gated. The fixture is
-`tests/data/numerics_golden_10l.bin`, which holds the rollout identifiers and
-the valid-target count. The gate is `//tests:numerics_trace_test`. The objective
-is a floating-point result, so `//tests:rl_parity_test` owns it. The correctness
-risk is therefore low. The remaining work is the interface and the
-orchestration.
 
 ### 9. The chain: one job file, three stages
 
@@ -1281,32 +1086,6 @@ near 0.01 percent; and the chain is bound by launches, so a speed ratio below on
 is as correct as one above it. Recording them keeps a reader from reading either
 as a pass.
 
-### 12. Proven premises
-
-The harness of section 2 ran before the module exists, so it answers the
-environment questions and not the module questions. Four premises hold:
-
-- The sentinel reaches the children. The harness started under
-  `tools/nanochat train --`, and both stage subcommands passed
-  `RequireSandboxOrDie` (D10).
-- The chain crosses stages. The driver accepted the base checkpoint as a warm
-  start, and its recorded config matched the SFT argv.
-- The delivery path works. `<out_root>/deliver/` holds the copied checkpoint and
-  the report.
-- The container entry satisfies the child guard.
-  `NANOCHAT_SANDBOX_BACKEND=none tools/nanochat client --profile train -- ...`
-  sets `NANOCHAT_SANDBOX=off`.
-
-The image builds both stage binaries on both backends, so the Modal line of B6 is
-one `run_commands` argument. The GPU leg is green since the B7 to B10 fixes.
-
-Section 13 of the previous version of this plan held the dated measurement log
-and the table of applied review corrections. That history is in the git commits
-of this file, and this version keeps only its conclusions.
-
-
----
-
 ## Part 3. The scale-up of that chain
 
 _Absorbed from the former `pipeline-scaleup-plan.md`. Its section numbers are
@@ -1467,19 +1246,3 @@ selects one leg.
 
 The T4 leg runs first. The T4 artifact therefore survives an H100 failure, and a
 reviewer reads the cheap leg while the expensive leg runs.
-
-### 10. New assertions
-
-The existing gate keeps A1 to A9 on the `demo` profile.
-
-| # | Assertion | Catches |
-|---|---|---|
-| A10 | The eval stage ran, both `bpb` values are finite and inside `[0, 8]`, and each sample is non-empty text | A silent eval, and a wrong `eval_batch` |
-| A11 | The RL checkpoint digest is the same before and after the eval stage | An eval that writes |
-| A12 | The report names the evaluated checkpoint, its digest, the corpus path, the batch size, and the batch count | An unreviewable eval |
-| A13 | `deliver/chatrl.ckpt` holds the RL weights, and its metadata reports stage `rl` | A delivery that follows the wrong stage |
-| A14 | The base stage reports `step_ms`, `compute_ms`, `data_ms`, and `other_ms` from one steady window, the window and the warm-up count are named, and compute plus data does not exceed the step | A rate that went back to the stage wall clock, and a record that stopped carrying a timing field |
-
-A13 guards the decision in section 6. A14 guards the decision of section 9
-row 4: a rate is a median over the steps a run repeats. It is not the stage
-wall clock divided by the step count.

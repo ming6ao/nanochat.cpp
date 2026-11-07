@@ -544,7 +544,7 @@ void GemmWgrad(const GemmParams& params, const ComputeType* a,
 }
 
 // ---------------------------------------------------------------------------
-// Scaled fp8 GEMM (docs/fp8-training.md sections 4 and 5)
+// Scaled fp8 GEMM (docs/precision.md Part 1, sections 4 and 5)
 // ---------------------------------------------------------------------------
 
 namespace {
@@ -573,7 +573,7 @@ void QuantizeFp8(const QuantizeFp8Params& params, const ComputeType* src,
     return;
   }
   // The amax over the tensor, then the dynamic scale
-  // (docs/fp8-training.md section 4.2). The floor keeps an all-zero tensor
+  // (docs/precision.md Part 1, section 4.2). The floor keeps an all-zero tensor
   // finite.
   float amax = 0.0f;
   for (int i = 0; i < count; ++i) {
@@ -601,12 +601,13 @@ void GemmScaledFp8(GemmMode mode, const ScaledGemmParams& params,
   const float scale_b = params.scale_b != nullptr ? *params.scale_b : 1.0f;
   // The weight gradient is a parameter gradient, so it stays fp32. The forward
   // and the input gradient produce an activation, so they store the compute
-  // type (docs/fp8-training.md section 7).
+  // type (docs/precision.md Part 1, section 7).
   const bool fp32_output = mode == GemmMode::kWgrad;
 
   // Dequantize the raw fp8 values, not the scaled values. A raw fp8 value is
   // exact in the compute type, because bf16 and float both carry more mantissa
-  // and exponent bits (docs/fp8-training.md section 3.2). The two scales then
+  // and exponent bits (docs/precision.md Part 1, section 3.2). The two scales
+  // then
   // factor out of the sum, so fold them into `alpha` and reuse the blocked
   // dense GEMM and its double accumulator. A per-element scale would round to
   // bf16 and make the reference inexact.

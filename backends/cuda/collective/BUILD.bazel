@@ -1,5 +1,5 @@
 # backends/cuda/collective/ -- the native collective backend
-# (docs/distributed-design.md). The private transport interface, the ring
+# (docs/distributed.md). The private transport interface, the ring
 # schedule, the memory transport, and the CUDA NVLink/RDMA transports. The
 # schedule tests are CPU only and need no broker.
 

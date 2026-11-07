@@ -40,7 +40,7 @@ cc_library(
 
 # The reference tokenizer fixture, `NANOTOK1`, produced by
 # `tools/dump_fixtures.py tokenizer`. The tokenizer parity test in `//src` reads
-# it with `//tests:oracle_fixture`. See docs/tokenizer.md section 12.
+# it with `//tests:oracle_fixture`. See docs/data.md section 12.
 filegroup(
     name = "tokenizer_fixture",
     srcs = ["data/tokenizer_fixture.bin"],
@@ -142,7 +142,7 @@ filegroup(
     srcs = ["data/checkpoint_v0.ckpt"],
 )
 
-# The document-mode loader parity gate (docs/parquet-native.md phase 8). The
+# The document-mode loader parity gate (docs/data.md Part 1). The
 # C++ rows must match the reference
 # `tokenizing_distributed_data_loader_bos_bestfit` for a fixed corpus and
 # tokenizer. `tools/dump_fixtures.py loader` writes both files.
@@ -861,7 +861,7 @@ cc_test(
 # The fused Muon path is the newest comparison and the only one whose *driver*
 # matters: the emulator runs the phase driver, one launch per phase execution,
 # because a grid barrier over blocks the engine runs one at a time could not be
-# expressed (docs/muon-fused-kernel.md section 8). The cooperative driver is
+# expressed (docs/kernels.md section 8). The cooperative driver is
 # compared with the phase driver on a device, in
 # //backends/cuda/kernels:muon_fused_gpu_test.
 cc_test(
@@ -887,7 +887,7 @@ cc_test(
 # CPU only; no GPU, driver, or toolkit.
 #
 # It also pins the three runtime names the fused Muon build asks for
-# (docs/muon-fused-kernel.md section 8): the cooperative-launch attribute
+# (docs/kernels.md section 8): the cooperative-launch attribute
 # answers 0 and the occupancy query answers 1, so a driver on the simulator takes
 # the phase loop, and a cooperative launch is a recorded launch rather than a
 # silent no-op.

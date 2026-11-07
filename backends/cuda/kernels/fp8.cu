@@ -1,5 +1,5 @@
 // backends/cuda/kernels/fp8.cu -- the fp8 quantization kernel
-// (docs/fp8-training.md section 4.2).
+// (docs/precision.md Part 1, section 4.2).
 //
 // The dynamic scale is computed in the same step: the kernel measures the amax
 // of the tensor, derives the scale, and then the cast kernel writes the fp8

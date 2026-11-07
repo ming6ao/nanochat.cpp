@@ -235,31 +235,6 @@ subset separately, mirroring the post-training loop's logging.
 | E1 | `open` | sampled modes use the C++ RNG, not torch (greedy is bit-identical) |
 | E5 | `out-of-scope` | no distributed evaluation |
 
-## 9. Status and roadmap
-
-The project has shipped most of the evaluation workstream in this document:
-
-1. A `checkpoint.py` converter that loads a reference checkpoint.
-2. `ScoreBatch` + `nanochat_cli score` + the fixture format.
-3. `GenerateBatch` ([model.md](model.md)).
-4. `nanochat_cpp.api.evaluate` (bpb) and `//src:nanochat_cli` (bpb only).
-5. `nanochat_cpp.chat.ChatEvaluator` (categorical, generative, ChatCORE).
-
-The base CORE and sample modes are not wired into `nanochat_cli eval` or
-`api.evaluate` yet.
-
-The project tracks the differences that remain in [parity.md](parity.md). E3
-(reference checkpoints converted torch -> the checkpoint container) and E4
-(CORE and chat scoring use the C++ forward with the reference task logic) are
-`equivalent`.
-E1 (the sampled modes use the C++ RNG rather than torch, while greedy decoding
-is bit-identical) is `open`. E5 (no distributed evaluation) is `out-of-scope`
-for the single-GPU target. No evaluation item remains on the roadmap.
-
-Gates: a synthetic CORE fixture at T0; a converted-checkpoint bpb match and a
-100-example CORE match at T2; a generation parity fixture at T1. See
-[testing.md](testing.md) for the test tiers.
-
 ## 10. Forward-only workspace (grad mode)
 
 `EvalBpb` measures bits per byte with a forward pass only. It must skip the
@@ -422,18 +397,6 @@ same benefit with no change.
 
 `ScoreBatch` (sections 3.2 and 4.3) can use the same forward core later.
 
-### 9. Ownership
-
-The change spans three workstreams from [AGENTS.md](../AGENTS.md):
-
-| Workstream | Files |
-|---|---|
-| Architect | `include/nanochat/model.h` |
-| Workflow | `src/model.cc`, `src/ops.h` |
-| Harness | `src/eval.cc`, `src/train.cc` |
-
-The two new methods are additive to a frozen header. Ask the architect first.
-
 ### 10. Tests and gates
 
 - T0 parity: run `EvalBpb` and a manual training forward on the same data.
@@ -472,14 +435,3 @@ tools/nanochat bench -- bazel-bin/src/nanochat_cli eval_bench \
 The binary prints the eval arena bytes and the token rate. It uses random
 tokens, so it needs no data shard. It builds as a plain `cc_binary`, so the same
 source runs the CPU reference backend or the CUDA backend.
-
-### 13. Risks
-
-- The `raw_logits()` accessor returns stale data after an evaluation forward.
-  The tests in `model_oracle_test.cc` use training mode and stay correct. Check
-  each caller before the merge.
-- Chunking changes the summation order. Keep the host sum in `double`.
-- Two arenas use more total memory than one arena. The model holds both only
-  when the caller uses both modes.
-- The storage precision does not change. The mode and the chunk logic use no
-  dtype.

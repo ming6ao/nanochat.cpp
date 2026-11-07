@@ -256,7 +256,7 @@ _Absorbed from the former `gpu-queue-plan.md`. Its section numbers are
 unchanged, so a reference to a section of that document resolves to the same
 number here._
 
-Status: implemented. Owner: Architect. Replaces: the GPU lock in `tools/gpu.sh`.
+The queue replaces the GPU lock in `tools/gpu.sh`.
 
 Stages Q1 to Q5 are in the tree. `python/nanochat_cpp/gpu_queue.py` holds the
 store, the worker, and the client. `tools/nanochat gpuq` is the client
@@ -671,57 +671,6 @@ low.
 - The worker refuses a job when a foreign process owns the device.
 - The queue has a maximum length, for example 64 jobs. A full queue refuses a
   new job with a clear message.
-
-### 11. Migration stages
-
-Land one stage per commit. Each stage must pass on its own.
-
-| Stage | Change | Risk | Depends on |
-|---|---|---|---|
-| Q1 | Add the store, the worker, and `gpuq start/stop/status`. No routing change. | Low | — |
-| Q2 | Add `gpuq submit`. Route `gpu`. Keep `tools/gpu.sh` for the other commands. | Low | Q1 |
-| Q3 | Route `dist`, `client`, `train`, `rl`, `eval`, `verify`, `bench`, `profile`, and `test --gpu`. | Medium | Q2 |
-| Q4 | Delete `tools/gpu.sh` and `--lock-only`. Remove the `gpu_lock` key. Add `gpu_queue`. | Low | Q3 |
-| Q5 | Update the documents, the contract test, and `AGENTS.md`. | None | Q4 |
-| Q6 | Optional: run one job per free device subset on a multi-card host. | Medium | Q5 |
-
-Stage Q1 is additive. Stage Q2 makes the queue the default for one command.
-Stage Q3 moves the remaining commands. Stage Q4 removes the old path.
-
-### 12. Acceptance criteria
-
-Run these after each stage.
-
-1. `tools/nanochat lint`
-2. `tools/nanochat test`
-3. `tools/nanochat test //python:prune_test //tools:kaggle_scripts_test`
-4. One T1 GPU smoke test through the queue.
-5. A queue test with two concurrent submits. The jobs must run in order, one at
-   a time. Both exit codes must match.
-6. A timeout test. A job with `--timeout 1` and a sleeping command must stop.
-7. A cancel test. `gpuq cancel` must stop a running job.
-8. A worker restart test. Kill the worker during a job. The next start must mark
-   the job `failed` and must not block the queue.
-
-A stage is not done until the default loop passes and the queue tests pass.
-
-### 13. Risks and controls
-
-| Risk | Control |
-|---|---|
-| The worker dies during a job | The worker stops when its lease write fails; the next start marks the job `failed` and kills its orphans |
-| A job hangs forever | The profile wall clock is the default job timeout, the scope backstop is 60 s longer, and `gpuq cancel` stops it |
-| Two workers start at once | The lease, an atomic directory create, and a client that retires a stale-lease orphan before it starts a replacement |
-| The logs grow without bound | 14 day retention at worker start, `gpuq prune`, and a footprint line in `doctor` |
-| A stale job blocks the queue | Reconciliation at worker start moves a dead `running` job to `failed` |
-| Two jobs fight for the device | The worker owns the pool and assigns devices; one job at a time |
-| The database is locked | `busy_timeout=5000`; short transactions; one writer at a time |
-| The state is lost at logout | Use `$XDG_STATE_HOME` for the database, not `/tmp` |
-| The queue is a single point of failure | On-demand start; the client starts the worker |
-| An agent waits with no output | `gpuq status` prints the position and the running job |
-| A job builds and then runs | The client takes the build lock before submit |
-| The old broker stays in use | Stage Q4 deletes `tools/gpu.sh` |
-| The log format changes by accident | Update the contract test in the same commit |
 
 ### 14. Decisions
 

@@ -8,7 +8,7 @@
 #include "nanochat/tensor.h"
 
 // The gradient-sync seam for data parallel training
-// (docs/distributed-design.md section 4). The model exposes every gradient
+// (docs/distributed.md section 4). The model exposes every gradient
 // through `ParamView`; the sync only needs the `grad` pointer and the `count`.
 //
 // This header includes only `nanochat/tensor.h` and the standard library. The
@@ -24,7 +24,7 @@ struct DistributedConfig {
   int world_size = 1;
   std::string master = "127.0.0.1";
   int port = 29500;
-  // The watchdog deadline for one reduction (docs/distributed-design.md
+  // The watchdog deadline for one reduction (docs/distributed.md
   // section 5.6). A missing peer is a fatal group error, not a retry.
   int timeout_ms = 600000;
   // The registered transfer-window pool size (section 5.4). The default
@@ -56,7 +56,7 @@ class GradientSync {
   // True when `AllReduceSumAsync` may still be running when it returns, so the
   // harness must keep several gradient buckets in flight at once. The default
   // is false: a synchronous backend finishes inside the call and needs only
-  // one reusable bucket (docs/distributed-design.md section 6).
+  // one reusable bucket (docs/distributed.md section 6).
   virtual bool IsAsynchronous() const { return false; }
 
   // Blocks until every asynchronous reduction issued so far has completed.

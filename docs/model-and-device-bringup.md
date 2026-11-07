@@ -4,30 +4,29 @@ This document specifies how the tree accepts more than one model and more than
 one device. The goal is twofold. A bring-up costs a new directory and no shared
 edit. A user on another model or another device sees no change.
 
-Status: **phases P0 to P4 have landed; P5 has not.** What is in the tree, by
-section, so a reader can check a claim against a file:
+What is in the tree, by section, so a reader can check a claim against a file:
 
-- **§7, the kernel tiers (P0, P1).** `RowReduce` and `SpanReduce` are in the
+- **§7, the kernel tiers.** `RowReduce` and `SpanReduce` are in the
   seam, with `PointwiseParams` and the `kExp`, `kRsqrt`, `kLog` and `kRowScale`
   codes; the tier column is in [kernels.md](kernels.md), and it names the
   required bring-up cost. `src/ops.cc` is the composition tier over primitives,
   and the CUDA fused families are registered overrides in
   `backends/cuda/fused_overrides.cc`.
-- **§8, the model description (P2).** `models/nanochat-default/spec.json`,
+- **§8, the model description.** `models/nanochat-default/spec.json`,
   `include/nanochat/model_spec.h`, `ModelSpecToConfig`, and the spec selector on
   `Model::Create`.
-- **§9, capability negotiation (P3).** The capability mask in
+- **§9, capability negotiation.** The capability mask in
   `nanochat/tensor.h`, `include/nanochat/plan.h` with the pure `BuildPlan`, the
   profile table derived from `backends/*/caps.json` by `src/device_profile.cc`,
   and `src/plan_main.cc`, which `tools/nanochat doctor` runs to print the plan.
-- **§10.4 and §11, isolation and the matrix (P4).** `tools/gen_matrix.py`,
+- **§10.4 and §11, isolation and the matrix.** `tools/gen_matrix.py`,
   `tools/isolation_gate.py`, the `--model` fixture selector, the gate
   `//tests:matrix_gate_test`, and the generated
   [conformance-matrix.md](conformance-matrix.md).
 - **§17.** Every open question is answered by a record in
   [../spec/decisions.md](../spec/decisions.md), one line each, below.
 
-Not landed: a second model, a second `backends/<name>/` directory (§12 and P5),
+Not implemented: a second model, a second `backends/<name>/` directory (§12),
 and the `AGENTS.md` §1 amendment §14.1 describes.
 
 Related material:
@@ -49,7 +48,7 @@ Related material:
 - [testing.md](testing.md) — the test tiers and the oracle harness.
 - [simulator.md](simulator.md) — the CPU-only tier that proves a device
   bring-up without silicon.
-- [precision.md](precision.md) and [fp8-training.md](fp8-training.md) — the
+- [precision.md](precision.md) and [precision.md](precision.md) — the
   precision and fp8 tier.
 - [testing.md](testing.md) and [parity.md](parity.md) — the
   fixtures and the known-difference register.
@@ -677,41 +676,6 @@ extension first:
 - Adds a capability as a boolean instead of a named bit.
 - Puts a model name or a device name in a preprocessor condition.
 
-## 14. Ownership
-
-| Party | Owns | Reviews |
-|---|---|---|
-| Model owners | `models/<name>/**` | Their own matrix rows |
-| Backend owners | `backends/<name>/**` | Their own matrix rows |
-| Contract owner | `include/nanochat/*.h`, `spec/**`, this file | Every contract extension, every tolerance change |
-| Oracle workstream | `tests/`, `tests/data/*.bin`, the fixture generator, the matrix generator | Every fixture change |
-| Workflow workstream | `src/ops.cc`, `src/model.cc`, `src/generate.cc` | The composition tier and its fallbacks |
-| Optimizer workstream | `src/optim.cc` | The stateful kernel tier |
-| Harness workstream | `src/device_profile.cc` | The `caps.json` derivation into the profile table |
-
-The contract owner answers one question and only one question: does this
-extension serve many future bring-ups? If yes, it lands once, additively.
-
-### 14.1 Amendment to `AGENTS.md` §1
-
-This document adds two directories and two roles to the ownership map. The
-amendment lands with P0, in one edit to `AGENTS.md`, so the map never disagrees
-with the tree:
-
-| Row to add | Owns |
-|---|---|
-| **Model owners** (one per model) | `models/<name>/**` |
-| **Contract** (the architect) | `spec/**` |
-| **Oracle** (unchanged) | `tests/`, the fixture generator, the matrix generator |
-
-`src/device_profile.cc` stays with the Harness workstream.
-
-Status of the amendment: the three rows are **not** in `AGENTS.md` §1 yet. The
-edit is the contract owner's, it is still owed, and until it lands the ownership
-map and this document disagree about `models/` and `spec/`. Nothing else in this
-document depends on the edit: the directories exist and are owned by the
-workstreams named above.
-
 ## 15. Anti-patterns
 
 - A preprocessor condition on a model name or a device name.
@@ -746,68 +710,6 @@ P0 to P4 are landed, so the table above is a record rather than a queue; P5 is
 the open phase, and it is the one that adds a directory instead of editing one.
 The status paragraph at the top of this file maps each landed phase to the files
 it produced.
-
-## 17. Risks and open questions
-
-| Risk | Effect | Response |
-|---|---|---|
-| The composition path is slower than a fused family on the CPU backend. | The oracle slows down. | Accepted. The oracle trades speed for clarity. Keep one benchmark to track it. |
-| `ModelSpec` grows into a general graph language. | The tree drifts toward the graph Intermediate Representation that `README.md` § What this is not rejects. | The field list and the block kind list are closed (§8). |
-| The matrix grows as models × tiers × graphs. | Slow gates. | Tiers per device (§11), `manual` for flagship rows. |
-| Two models share a block kind and then diverge. | A shared fixture becomes ambiguous. | A block kind has one meaning. A divergence is a new kind. |
-| The primitive tier turns out to be under-specified. | A device needs an extra primitive, so `kernels.h` changes. | Expected. The tier is a target, reviewed at P0. The change is additive and lands once. |
-| A tolerance drifts upward until the gate proves nothing. | The isolation gate becomes decoration. | Every tolerance change is a contract-owner review (§11). |
-
-One risk in the table above has already materialized, and it is the one to read
-twice: the P0 comparison found that `RowReduce`'s descriptor lacks two fields a
-composition wants — a second operand (or a dot combine op) for the per-row
-`sum_c x * dy`, and a per-segment input pitch for a padded vocabulary row. That
-is an additive seam change, it is reported to the contract owner, and it is not
-patched from a backend — which is the rule this document exists to keep.
-
-Open questions. Each one was posed with the phase that answers it. All four are
-now answered, and the answer is a record in
-[../spec/decisions.md](../spec/decisions.md) that holds the options, the
-evidence, and what would reopen it. One line here; the record is the authority.
-
-1. **P0: the descriptor of `RowReduce`.** The declared fields carry the forward
-   cases, and the experiment named the two fields the descriptor lacks — a
-   second operand (or a dot combine op) for the per-row `sum_c x * dy`, and a
-   per-segment input pitch for the `Classifier`'s padded vocabulary row — which
-   are reported to the contract owner rather than patched into the header. The
-   experiment, its table, and the workaround it measures are in
-   `backends/cpu/kernels_test.cc` (`TestRmsNormComposition`) and
-   `backends/cpu/README.md`. [D-006](../spec/decisions.md)
-2. **P1: the accuracy bound per call to `kExp` and `kRsqrt`.** An absolute bound
-   per code over a stated operand envelope, tabulated and gated; a bounds table
-   with no envelope is not a bound. [D-007](../spec/decisions.md), and the table
-   is [../spec/pointwise_ops.md](../spec/pointwise_ops.md) §4.
-3. **P2: does a composition whose backward needs a T x T pattern become a second
-   primitive?** Yes, by rule, and no second primitive is added today: `Attention`
-   is the only case and it is already primitive. [D-008](../spec/decisions.md)
-4. **P2: where a block kind lives.** The composition tier supplies every kind by
-   default; `models/<name>/block_kinds/` exists only for a kind with no shared
-   implementation, and sharing a kind across models is a contract change.
-   [D-009](../spec/decisions.md)
-
-### 17.1 Decision records
-
-A new device team reads `spec/decisions.md` before it starts. Each record holds
-the question, the options, the evidence that decided it, and the phase it lands
-in. Five decisions are decided and four carry a binding working answer, and the
-records exist so that a review does not re-litigate them:
-
-| Decision | Answer | Section |
-|---|---|---|
-| The shape of the reduction | Two entries: `RowReduce` and `SpanReduce` | §7.2 |
-| The row broadcast | One `Pointwise` op code, `kRowScale`, not a new entry point | §7.2, §7.7 |
-| Op codes and accuracy | Closed C++ enum, one additive change at P1, with a declared bound per code | §7.7 |
-| A composition that cannot express its backward | Add the missing primitive; do not keep a fused family | §7.6 |
-| Where the plan is resolved | A pure planner, `BuildPlan`, with `Model::Create` as its first caller | §9.1 |
-
-Order the remaining work by dependency. The `RowReduce` descriptor test comes
-first, because §7.6 and §7.7 depend on the primitive set it produces. The
-planner comes last, because it consumes the interfaces of the other three.
 
 ## 18. Evolution rules
 

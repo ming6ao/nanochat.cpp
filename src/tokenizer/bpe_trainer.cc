@@ -1,4 +1,4 @@
-// The native byte pair encoding trainer (docs/tokenizer.md section 9). It
+// The native byte pair encoding trainer (docs/data.md section 9). It
 // ports `rustbpe`'s `train_core_incremental`: the chunk counts and the merge
 // loop. The split and count step uses OpenMP, because the reduction is
 // commutative. The merge loop stays single-threaded, so the merge list does

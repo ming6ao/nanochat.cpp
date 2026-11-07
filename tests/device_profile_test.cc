@@ -340,7 +340,7 @@ void TestFp8Capability() {
         Format("Supports(kFp8E5M2) agrees for \"%s\"", name.c_str()));
   }
   // An fp8 operand is one byte, and it is not a container storage code: the
-  // checkpoint stays fp32 (docs/fp8-training.md section 3.1).
+  // checkpoint stays fp32 (docs/precision.md Part 1, section 3.1).
   ExpectTrue(nanochat::SizeOf(nanochat::DType::kFp8E4M3) == 1,
              "E4M3 is one byte");
   ExpectTrue(nanochat::SizeOf(nanochat::DType::kFp8E5M2) == 1,

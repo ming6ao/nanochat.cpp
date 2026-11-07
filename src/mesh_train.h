@@ -13,8 +13,8 @@
 #include "nanochat/scheduler.h"
 #include "src/sft_shard.h"
 
-// The mesh training driver (docs/client-runtime-design.md section 10.1 and
-// docs/distributed-design.md Part 2, section 6.6). The driver owns the step
+// The mesh training driver (docs/distributed.md Part 3, section 10.1 and
+// docs/distributed.md Part 1, section 6.6). The driver owns the step
 // loop, the metric record, the summary, the checkpoint interval, and the
 // resume. It runs a `MeshRuntime` one global batch at a time.
 //
@@ -36,11 +36,11 @@ class Tokenizer;
 //    measured `compute_seconds` and wrote it to the human log only, so a
 //    report could not split a step and could not attribute a slow one. An
 //    unknown field is ignored and an unknown version is rejected
-//    (docs/client-runtime-design.md section 10.1).
+//    (docs/distributed.md Part 3, section 10.1).
 inline constexpr int kMeshTrainSchemaVersion = 2;
 
 // One metric record, written as one JSON line in `metrics.jsonl`
-// (docs/client-runtime-design.md section 10.1). The field set follows
+// (docs/distributed.md Part 3, section 10.1). The field set follows
 // `LogRecord` and adds one loss entry per device.
 //
 // The three timing fields split one step, and every one of them is measured,
@@ -78,7 +78,7 @@ struct MeshStepRecord {
   std::vector<float> device_loss;
 };
 
-// The run summary, written as `summary.json` (docs/client-runtime-design.md
+// The run summary, written as `summary.json` (docs/distributed.md Part 3
 // section 10.1).
 struct MeshTrainSummary {
   std::string checkpoint;
@@ -90,7 +90,7 @@ struct MeshTrainSummary {
 };
 
 // The driver inputs. The field shape mirrors `TrainConfig` and
-// `MeshRuntimeConfig` (docs/distributed-design.md Part 2, section 6.6).
+// `MeshRuntimeConfig` (docs/distributed.md Part 1, section 6.6).
 // `preset` selects the optimizer and the schedule; `track3` is the reference
 // recipe.
 struct MeshTrainConfig {
@@ -115,12 +115,12 @@ struct MeshTrainConfig {
   int log_every = 1;
   int save_every = 0;  // 0 disables the interval; the final save always runs
   // A resume continues the token stream from the data cursor beside the
-  // checkpoint (docs/distributed-design.md section 11). A missing or unreadable
+  // checkpoint (docs/distributed.md section 11). A missing or unreadable
   // cursor replays the consumed batches from the start of the stream, which is
   // the same rule the multi-process driver follows (spec/api-surface.md R13).
   bool resume = false;
 
-  // The MFU inputs (docs/client-runtime-design.md section 20.5). A zero
+  // The MFU inputs (docs/distributed.md Part 3, section 20.5). A zero
   // `flops_per_token` selects `EstimateFlopsPerToken`; a zero `peak_flops`
   // selects `PeakFlopsForCompute(device_name)`.
   double flops_per_token = 0.0;
@@ -132,9 +132,9 @@ struct MeshTrainConfig {
   std::string metrics_path;     // empty selects `out_dir/metrics.jsonl`
   std::string summary_path;     // empty selects `out_dir/summary.json`
 
-  // The data (docs/parquet-native.md). A nonempty `packed_rows_path` selects
+  // The data (docs/data.md). A nonempty `packed_rows_path` selects
   // the packed `NCSFT001` SFT shard and ignores the parquet fields
-  // (docs/distributed-design.md Part 2, section 6.2). `train_source` is empty
+  // (docs/distributed.md Part 1, section 6.2). `train_source` is empty
   // in production, so the driver builds the parquet factory. A test injects a
   // source.
   std::vector<std::string> train_parquet;
@@ -164,7 +164,7 @@ class MeshTrainDriver {
 
   // Runs steps `resume + 1` to `num_iterations` and returns the last loss. On
   // an interrupt the driver saves a checkpoint before it returns
-  // (docs/client-runtime-design.md section 10.1).
+  // (docs/distributed.md Part 3, section 10.1).
   float Run();
 
   const std::vector<MeshStepRecord>& records() const { return records_; }

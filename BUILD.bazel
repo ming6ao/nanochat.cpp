@@ -21,7 +21,7 @@ config_setting(
 )
 
 # The fp8 tier: an fp8 build computes in bf16 and quantizes the eligible
-# matmuls (docs/fp8-training.md section 3.3).
+# matmuls (docs/precision.md Part 1, section 3.1).
 config_setting(
     name = "fp8",
     define_values = {"precision": "fp8"},
@@ -40,7 +40,7 @@ config_setting(
     define_values = {"backend": "cuda"},
 )
 
-# Collective selection (docs/distributed-design.md Part 3, section 7, phase 0).
+# Collective selection (docs/distributed.md Part 3, section 7, phase 0).
 # The native ring is the one implementation, so `--define=collective=native` is
 # the default and the only value. The setting stays so `--config=native`
 # remains a documented spelling of it.

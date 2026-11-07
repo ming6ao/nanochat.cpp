@@ -1,8 +1,8 @@
 # Checkpoint format and notebook lifecycle
 
-Status: Parts A and B are implemented. Every writer writes version 1, which
-adds the run metadata block between the header and the parameter count
-(section 5.3), and the reader accepts version 0 and version 1. The fp32, bf16,
+Every writer writes version 1, which adds the run metadata block between the
+header and the parameter count (section 5.3), and the reader accepts version 0
+and version 1. The fp32, bf16,
 and reserved int8 codes and the attribute block are unchanged. The C++ writer
 stores the true tensor shape. The record byte layout lives only in `src/data.cc`,
 the metadata block in `src/fields.cc` and `src/checkpoint_metadata.cc`, and a
@@ -17,9 +17,6 @@ test.
 The document has two parts. Part A specifies the checkpoint container. Part B
 specifies the three notebooks that use it. The container format is the shared
 contract, so Part A comes first.
-
-Owners: the architect owns this file. The Notebooks workstream owns Part B.
-Part A touches the training harness and adds one C entry point.
 
 ## 1. Goals
 
@@ -604,7 +601,7 @@ Parallel (FSDP).
 ### 13.1 The current placement policy
 
 The runtime keeps one full model replica per device. It shards only the batch.
-`docs/client-runtime-design.md` section 5.4 states the policy:
+`docs/distributed.md Part 3` section 5.4 states the policy:
 
 | Object | Placement |
 |---|---|
@@ -679,25 +676,20 @@ mode must reshard to the target layout.
 
 ## 14. File set
 
-| File | Status | Purpose |
-|---|---|---|
-| `notebooks/setup.ipynb` | rename from `nanochat-cpp-setup.ipynb` | Manual session check and the `pi` agent |
-| `notebooks/pretrain.ipynb` | new | Data, tokenizer, model, pretraining, publish the base |
-| `notebooks/eval.ipynb` | new | Load a checkpoint, measure it, score samples and chat |
-| `notebooks/posttrain.ipynb` | new | Load the base, fine-tune, publish the chat model |
-| `notebooks/nanochat-cpp-on-2x-t4.ipynb` | remove | Replaced by the three notebooks |
-| `notebooks/session.py` | new | The shared setup block |
-| `notebooks/hub_checkpoint.py` | new | The shared Hugging Face Hub helper |
-| `notebooks/session_test.py` | new | Tests for the setup helpers |
-| `notebooks/hub_checkpoint_test.py` | new | Tests for the Hub helper, with a fake API |
-| `notebooks/README.md` | new | Run order and the checkpoint flow |
-| `notebooks/BUILD.bazel` | edit | Add the two libraries and the two tests |
-| `notebooks/args.py`, `args_test.py` | keep | The model arguments |
-| `notebooks/mesh_train.py`, `mesh_train_test.py` | keep | The thin pretraining launcher over the C++ mesh training driver |
-| `notebooks/mesh_worker.py` | keep | The training worker |
-| `notebooks/pi_agent.py`, `pi_agent_test.py` | keep | The setup notebook agent |
-| `notebooks/kaggle_setup.py`, `kaggle_setup_test.py` | keep | The Kaggle session helpers |
-| `notebooks/kaggle_demo.py` | keep, docstring edit | The SFT mixture helper and the offline fallback |
+| File | Purpose |
+|---|---|
+| `notebooks/setup.ipynb` | manual session check and the `pi` agent |
+| `notebooks/pretrain.ipynb` | data, tokenizer, model, pretraining, publish the base |
+| `notebooks/eval.ipynb` | load a checkpoint, measure it, score samples and chat |
+| `notebooks/posttrain.ipynb` | load the base, fine-tune, publish the chat model |
+| `notebooks/session.py` | the shared setup block |
+| `notebooks/hub_checkpoint.py` | the shared Hugging Face Hub helper |
+| `notebooks/session_test.py`, `hub_checkpoint_test.py` | tests for the two helpers |
+| `notebooks/README.md` | run order and the checkpoint flow |
+| `notebooks/args.py` | the model arguments |
+| `notebooks/mesh_train.py`, `mesh_worker.py` | the thin pretraining launcher over the C++ mesh training driver |
+| `notebooks/pi_agent.py` | the setup notebook agent |
+| `notebooks/kaggle_setup.py`, `kaggle_demo.py` | the Kaggle session helpers and the SFT mixture helper |
 
 ## 15. Shared setup
 
@@ -1147,21 +1139,6 @@ tools/nanochat test //tests:checkpoint_compat_test --config=fp8
 `gemma.cpp` `io/fields_test.cc`: the round trip, new code over old data, old
 code over new data, an invalid float, an invalid string, a second write, the
 vector cap, and the enum check.
-
-## 23. Definition of Done
-
-- Three notebooks exist. Each one runs end to end on a two-T4 Kaggle session.
-- Each notebook performs the setup itself.
-- The notebooks write one container: `NCHKPT01` with the `.ckpt` suffix.
-- `nc.Model.load` and `MeshRuntime.load(optimizer=False)` skip the optimizer
-  section.
-- The pretraining notebook publishes the base stage. The eval and
-  post-training notebooks load it in a later session with no retraining.
-- The post-training notebook publishes the fine-tuned stage.
-- The tokenizer repository holds one `vocab-<size>.nctoken` file for each
-  vocabulary size.
-- `tools/nanochat test` passes for the notebook tests and the container test.
-- No notebook prints a token.
 
 ## 24. Sequencing
 

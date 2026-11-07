@@ -3,7 +3,7 @@
 :func:`mesh_train.launch` starts this module through ``tools/nanochat
 client``, so one broker lock and one sandbox scope cover the whole mesh. The
 parent notebook cell returns, and the parent polls ``metrics.jsonl`` and
-``worker.log``. See ``docs/client-runtime-design.md``.
+``worker.log``. See ``docs/distributed.md``.
 
 The C++ driver owns the loop and the interrupt path, so it saves the checkpoint
 before it returns. This module only reports the outcome.

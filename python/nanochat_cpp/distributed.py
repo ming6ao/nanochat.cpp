@@ -7,8 +7,8 @@ job, waits, and returns one :class:`RankResult` per rank.
 
 The gradient sync is the native collective
 (``backends/cuda/collective/native_sync.cu``, selected with
-``--config=native``). See ``docs/distributed-design.md`` and
-``docs/distributed-design.md``.
+``--config=native``). See ``docs/distributed.md`` and
+``docs/distributed.md``.
 """
 
 from __future__ import annotations

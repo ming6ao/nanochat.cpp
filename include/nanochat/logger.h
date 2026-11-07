@@ -26,7 +26,7 @@ struct LogRecord {
   float optim_tflops = 0.0f;
 
   // The phase split of one optimizer step, in milliseconds
-  // (docs/distributed-design.md section 6). `step_ms` is the training time:
+  // (docs/distributed.md section 6). `step_ms` is the training time:
   // the data fetch, the forward, the backward, the sync, and the optimizer.
   // `eval_ms` is separate, so a periodic evaluation does not distort the
   // reported throughput. A phase reads 0 when it did not run on this step.

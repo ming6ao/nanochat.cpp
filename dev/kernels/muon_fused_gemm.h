@@ -2,7 +2,7 @@
 #define NANOCHAT_DEV_KERNELS_MUON_FUSED_GEMM_H_
 
 // Phase 1 prototype: the device-side batched fp32 GEMM of the Muon Polar
-// Express iteration (docs/muon-fused-kernel.md section 4). `backends/cuda`
+// Express iteration (docs/kernels.md section 4). `backends/cuda`
 // never depends on this header; nothing here is part of the frozen seam.
 //
 // `MuonUpdate` issues three batched GEMMs per Polar Express iteration through

@@ -19,7 +19,7 @@ struct Config {
   int padded_vocab_size = 32768;  // rounded up for GEMM/classifier efficiency
   float rope_base = 100000.0f;
   std::string window_pattern = "SSSL";  // tiled across layers; last is always L
-  // Value embeddings (docs/distributed-design.md section 8). The default is the
+  // Value embeddings (docs/distributed.md section 8). The default is the
   // current model; the Track 3 baseline turns them off.
   bool value_embedding = true;
 

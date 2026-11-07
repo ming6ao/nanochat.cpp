@@ -1,8 +1,7 @@
 # Python API
 
-Status: implemented. This document replaced `python-bridge.md` and
-`python-api.md`, which the project removed. It specifies one Python surface for
-`nanochat.cpp`.
+The package is one Python surface for `nanochat.cpp`. It replaced
+`python-bridge.md` and `python-api.md`, which the project removed.
 
 ## 1. Purpose
 
@@ -634,7 +633,7 @@ Update these references.
 | `docs/build.md` at line 39 | Remove `base_train.py` and `launcher.py` from the layout list. |
 | `docs/performance.md` | Repoint the command examples. |
 | `docs/baselines.json` at line 32 | Repoint the recorded command. |
-| `docs/parquet-native.md` at line 219 | Repoint the command. |
+| `docs/data.md` at line 219 | Repoint the command. |
 | `README.md` at lines 45 and 54 | Replace the `tools/nanochat_cpp base_train` quickstart. |
 | `tools/check_tokenizer_parity.py` at line 12 | Point at `python.md`. |
 | `tools/convert_checkpoint.py` | Point at `python.md`. |
@@ -692,134 +691,134 @@ at line 139 when the targets land.
 The `toolchain_test.py` target is hermetic. It needs no library, no Bazel, and
 no GPU.
 
-## 12. Risks
-
-| Risk | Response |
-|---|---|
-| The two count functions drift. | One fixture pins `CountParams`, `NumMatmulParams`, and `flops_per_token`. |
-| `total` is ambiguous. | Define `total` as every allocated parameter. The fixture pins it. |
-| `smear_gate` disagrees between the two reference functions. | Section 4.3 pins the assignment. The fixture pins both functions. |
-| HumanEval needs the reference package. | A skipped `TaskReport` and a `None` chat_core. A local runner is a later step. |
-| One task failure stops the run. | Per-task `BaseException` isolation in `ChatEvaluator.run`. |
-| The typed client duplicates the command table. | One table (`_entry.py`) renders the help text, drives the command line, and backs `commands()`. The contract suite compares the client `argv` with the tool's `--dry-run` plan. |
-| The shell text changes. | `toolchain_test.py` checks the argv for every command. |
-
 ## 13. Decisions
 
-The council resolved the design decisions. Five owner decisions remain.
-
-Resolved:
+The design decisions are closed:
 
 1. **D1, the C interface scope.** Use the narrow call. `nanochat_params_get`
    returns the counts and `flops_per_token`. The policy constants stay in
    `plan.py`. Reason: only two functions need torch, and
    `EstimateFlopsPerToken` already exists in C.
-2. **D2, HumanEval.** Keep the lazy reference `execute_code` in this redesign.
-   Add the per-task isolation in section 5.3.
+2. **D2, HumanEval.** Keep the lazy reference `execute_code`. Add the per-task
+   isolation in section 5.3.
 3. **D3, ownership.** `CountParams` lands in harness-owned `src/train.cc`.
-   `include/nanochat/*.h` and `capi.h` stay architect-owned. `bindings/` and
-   `python/**` need owner rows.
+   `include/nanochat/*.h` and `capi.h` stay architect-owned.
 4. **The parameter categories.** Section 4.3 pins `total` and the category for
    every C++ name.
 
-Owner decisions:
+## 14. The self-evolution loop (not implemented)
 
-1. Confirm the narrow D1 scope.
-2. Confirm that the harness owns `CountParams` in `src/train.cc`. Decide the
-   declaration site: `mfu.h` or a new harness header.
-3. Add owner rows for `bindings/**` and `python/**` to `AGENTS.md` section 1.
-   Name the `src/BUILD.bazel` editor.
-4. Confirm that the Oracle workstream owns `tests/data/plan_fixture.bin` and
-   `tools/dump_fixtures.py plan`.
-5. Decide whether the deferred local HumanEval runner becomes a tracked
-   follow-up.
+The loop accepts a goal, reasons with a checkpoint, acts on the tree, measures
+the result, and asks for help when it is stuck. It records each help event,
+trains on the record, and publishes a new checkpoint. Six jobs follow: accept a
+goal; reason and act with a checkpoint; detect a stuck state; record every
+transition as training data; train and evaluate a new checkpoint; publish and
+fetch through the Hugging Face Hub.
 
----
+**The layers.** Four layers sit above the L0 to L6 stack of
+[build.md](build.md) § Layers, and they do not renumber it. E4 is the human
+surface: goal intake, approvals, answers, and stop. E3 is the loop: controller,
+stuck detector, and safety gate. E2 holds the services: teacher gateway,
+trajectory store, dataset builder, checkpoint registry, verifier, and code
+editor. E1 is the existing toolchain and API. The dependencies point down.
 
-## Part 1. Host task consolidation
+**The principles.** The checkpoint is the substrate and the controller is only
+process. The teacher is a scaffold that the trajectory dataset removes. A human
+is the top tier. Every transition is data, a failed step and a human correction
+included. Each resource has one writer, and a failed build discards the edit.
+Every child job runs under `tools/nanochat`. The controller is the one exception:
+it runs for hours and blocks on human input, so it sets
+`NANOCHAT_SANDBOX_BACKEND=none` for itself.
 
-_Absorbed from the former `script-consolidation-plan.md`. Its section numbers
-are unchanged, so a reference to a section of that document resolves to the
-same number here._
+| Role | Responsibility | Model |
+|---|---|---|
+| Controller | owns the loop and the state | deterministic code |
+| Policy | reasons and proposes an action | `nanochat` checkpoint |
+| Teacher | resolves a stuck step | external strong model |
+| Human | sets the goal, approves, and answers | human |
+| Verifier | scores an outcome | tests, evals, and rewards |
+| Editor | writes code and fixes a build | policy or teacher |
 
-### 0. Amendment: the sandbox moves to Python
+The controller never generates text. It selects an action.
 
-A later change moves the resource launcher, the limit verifier, the style gate,
-and the symbol gate to Python. It removes the shell trust boundary that this
-plan kept. See [sandbox.md](sandbox.md) and [python.md](python.md).
+**The control loop.** One iteration is one step through `IDLE`, `PLAN`, `REASON`,
+`ACT`, `OBSERVE`, `VERIFY`, `REFLECT`, and then one of `STUCK`, `ESCALATE`,
+`WAIT_HUMAN`, `TRAIN`, `DEPLOY`, `DONE`, or `FAILED`. `ACT` runs the action under
+the sandbox, `WAIT_HUMAN` blocks durably so that a restart resumes the goal, and
+`TRAIN` unloads the reason model first. The controller enforces a budget of
+tokens, teacher calls, GPU seconds, and wall clock at each transition, and a
+spent budget parks the goal.
 
-These decisions are superseded.
+**The components.** The controller selects the state, enforces the budget, calls
+the safety gate, and writes one trajectory record per transition. The goal
+manager persists each goal with its budget and status. The policy has two
+backends: `NanochatPolicy` loads a checkpoint through `api.py` on the local GPU,
+and `TeacherPolicy` calls one configurable remote model. Either returns a shell
+action, a code patch, a question, or a stop, and the executor runs it through
+`toolchain.py`, never through Bazel or a binary directly. The stuck detector
+fires on a repeated error, a flat verifier score, a step or budget limit, no
+valid action, or a repeated action with no state change. The escalation manager
+routes the event to the teacher, then to the human, and blocks the goal durably.
+The trajectory store is an append-only JSON Lines log with a SQLite index and a
+content hash per record, and the dataset builder renders it with `chat.py` for
+the template and the loss mask and `sft_data.py` for the mixture. The verifier
+treats a build or lint failure as a hard failure, then scores the
+`tools/nanochat check` and `tasks.py` pass rates over a pre-populated cache, so a
+scored goal needs no network. The code editor applies a patch, builds and tests
+it, restores the previous revision on failure, and records the failed patch as a
+negative sample. The lifecycle manager owns the GPU tenure and frees the model
+with `nanochat_model_free` before it releases the card. The registry holds the
+version graph, marks one version current, and restores the parent when a metric
+does not improve. The Hub transport publishes the container through the `hf`
+command line interface. The safety gate checks every action against a short rule
+list and a small denylist, and the observer writes one log line per step.
 
-- Decision 2, "Shell owns the resource launcher". `python/nanochat_cpp/sandbox.py`
-  now holds the launcher.
-- Decision 3, "`tools/sandbox.sh` stays the `--run_under` program". The wrapper
-  for a CPU test action is now
-  `python/nanochat_cpp/sandbox.py --profile=t0-cpu --`.
-- Decision 5, "Keep `profiles.conf` as the only profile source". The single
-  source is now `tools/sandbox/profiles.json`.
-- Decision 7, "Keep `tools/sandbox/verify.sh` as a separate program". The
-  verifier is now the `verify` subcommand of `sandbox.py`. It stays a separate
-  process, because it reads the cgroup of its own process.
-- Decision 9, "Freeze the sandbox interface". The interface stays frozen. Only
-  the program name changed.
+**The data model.** A trajectory record carries `id` (the content hash),
+`goal_id`, `step`, `state` (the chat history and a bounded workspace digest),
+`action`, `observation` (exit code, output, and duration), `score`, `stuck`, the
+`intervention` or null, `policy`, `checkpoint`, `revision`, and `time`. The data
+splits into a positive set, an intervention set of teacher or human answers,
+which has the highest value, and a negative set for a later preference method. A
+checkpoint version carries `version`, `parent`, `revision`, `dataset` (the
+training-set hash), `metrics`, and `hub_path`.
 
-Decision 4 still holds. The environment variable names, the two log paths, the
-log line formats, the exit codes, the `NANOCHAT_SANDBOX` sentinel, and the
-`doctor --json` keys do not change. The symbol gate keeps its output and its
-exit codes.
+**The teacher exit.** Each intervention is a labeled example, and each training
+round distills the teacher into the checkpoint. The loop drops the online
+teacher when a checkpoint stays within 5 percent of the teacher pass rate over 20
+consecutive held-out tasks with no escalation. The teacher returns only for a
+new task type.
 
-### 4. Locked decisions
+**GPU tenure.** There is one card, so the work is serial. Reasoning and training
+both hold it, an evaluation holds it briefly, and a teacher call uses only the
+network. The reason model and the training job therefore cannot share the card,
+so the unload step is mandatory.
 
-Lock these decisions before any code moves.
+| Failure | Response |
+|---|---|
+| A build or a test fails | discard the patch, restore the revision, record a negative sample |
+| Training diverges | restore the parent checkpoint |
+| The Hub is down | continue with the local cache |
+| The teacher returns garbage | retry once, then escalate to the human |
+| The human does not answer | park the goal and keep the loop on other goals |
+| The GPU is busy | wait in the queue |
 
-1. **Python owns the orchestration.** Python holds the command table, the
-   dispatch, the argument assembly, the lock, the reaper, the fixture
-   generators, `doctor`, and `simulate`.
-2. **Shell owns the resource launcher.** `tools/sandbox.sh` keeps the
-   `systemd-run` call, the CPU affinity, the rlimits, and the limit read-back.
-3. **`tools/sandbox.sh` stays the `--run_under` program for a CPU test.** Bazel
-   invokes it once per test action. A GPU test action uses a queue submission in
-   `--run_under` instead, so the worker sandboxes the action and owns the device
-   ([sandbox.md](sandbox.md)). Do not put a GPU lock in
-   `tools/sandbox.sh`.
-4. **Freeze the observable contract.** Keep the environment variable names, the
-   two log paths and their line formats, the exit codes, the two `--run_under`
-   strings, the `NANOCHAT_SANDBOX` sentinel, the `doctor --json` keys, the
-   fixture subcommand names, and the fixture binary layouts.
-5. **Keep `profiles.conf` as the only profile source.** Do not copy the numbers
-   into Python. `tools/sandbox.sh` validates the profile name
-   (`tools/sandbox.sh:65`).
-6. **Land one stage per commit.** Do not mix a code move with a rewrite.
-7. **Keep `tools/sandbox/verify.sh` as a separate program.** It runs inside the
-   scope. Do not merge it into `tools/sandbox.sh`.
-8. **The merged generator is `tools/dump_fixtures.py`.** It keeps every existing
-   subcommand name: `oracle`, `train`, `rl`, `generate`, `eval`, `plan`,
-   `tokenizer`, `loader`, `chat`, `api`, and `numerics`. A later fixture is one
-   new row.
-9. **Freeze the sandbox interface.**
-   `tools/sandbox.sh [--profile NAME] [--backend auto|systemd|none]
-   [--no-slice] [--] <cmd...>`. Both profile forms stay accepted, because
-   `--run_under` needs `--profile=NAME` and `run_profile` uses `--profile NAME`
-   (`tools/sandbox.sh:27-33`). No stage changes this interface.
-10. **The Python layer keeps one rule at a time.** While the dispatch is in
-    shell, the Python layer reaches the host only through
-    `tools/nanochat <subcommand>`. After stage S13, the Python command-line tool
-    calls Bazel, `tools/sandbox.sh`, and the queue directly. The in-process
-    compute API still does not. Stage S13 updates `docs/python.md` sections 6
-    and 12.
+**Safety.** The sandbox protects the host, not the goal, so a separate gate
+applies. A code edit outside the owned directory, a Hub upload, and a Hub delete
+each need human approval. The caps are 200k policy tokens, 10 teacher calls, one
+GPU hour, and six hours of wall clock by default. One action writes one
+immutable audit record. A stop file is checked at every transition, and `SIGINT`
+stops a blocked controller.
 
-### 6. Constraints: do not merge these
+**The layout.** One package `python/nanochat_cpp/evolve/` holds the modules named
+above, plus one tool, `tools/evolve`. The state lives outside the tree under
+`~/.cache/nanochat_cpp/evolve/`, and one goal is active at a time. The system
+adds no C++ kernel and no public C function; it reuses `toolchain.py`, `api.py`,
+`chat.py`, `sft.py`, `sft_data.py`, `rl.py`, `tasks.py`, `checkpoint.py`, the C
+ABI in `include/nanochat/capi.h`, the `tools/nanochat` entry point, and
+`notebooks/pi_agent.py`, which is the precedent for the teacher path.
 
-- Do not put the GPU queue in `tools/sandbox.sh`. Bazel invokes that script once
-  per test action. The queue belongs to the worker.
-- Do not drop the `nvidia-smi` gate while another job uses the card.
-- Do not convert `tools/sandbox.sh` to Python. `systemd-run`, `taskset`,
-  `prlimit`, and the `--run_under` string are shell work.
-- Do not merge `tools/sandbox/verify.sh` into `tools/sandbox.sh`. A merge would
-  change the `/tmp/nanochat-sandbox.log` line that decision 4 freezes.
-
-Both bullets above are superseded by section 0 and by
-[sandbox.md](sandbox.md). The verifier stays a separate process, so the log line
-does not change.
-- Do not convert the Kaggle scripts. They install packages and edit `PATH`.
-- Do not change a fixture subcommand name or a fixture binary format.
+**The one open risk.** A weak verifier lets the loop drift, so keep held-out
+tests against reward hacking. The other risks have a control in the table
+above: the teacher spend has a hard cap, an unsafe edit has a rollback gate, SFT
+keeps a mixed dataset and a regression suite, and the controller relies on
+`nanochat.slice` for its host limit.

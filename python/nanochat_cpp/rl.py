@@ -13,7 +13,7 @@
 
 Python owns the prompts and the reward only. It renders a batch of
 conversations, starts the persistent C++ worker
-(``docs/post-training.md`` section 4 and ``docs/distributed-design.md`` section 6.4),
+(``docs/post-training.md`` section 4 and ``docs/distributed.md`` Part 1, section 6.4),
 speaks the worker's pipe protocol, scores each rollout with the task reward,
 and forms the advantage. It never steps the optimizer and never imports
 ``torch``: the worker holds the model and the optimizer, and the RL step and
@@ -324,7 +324,7 @@ def _load_tokenizer() -> Tokenizer:
     if artifact is None:
         raise RlError(
             "the RL bridge needs the NCTOKEN1 tokenizer; run tok_train_main "
-            "first (see docs/tokenizer.md)")
+            "first (see docs/data.md)")
     return Tokenizer.load(artifact)
 
 

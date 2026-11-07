@@ -142,7 +142,7 @@ void BatchedGemmStrided(int m, int n, int k, int batch_count, float alpha,
 // graph is single-threaded, so no locking is needed.
 ComputeType* CachedBuffer(int slot, std::size_t count) {
   // Per device thread: the scratch belongs to the current device
-  // (docs/client-runtime-design.md section 8.1).
+  // (docs/distributed.md Part 3, section 8.1).
   thread_local ComputeType* buffers[2] = {nullptr, nullptr};
   thread_local std::size_t capacities[2] = {0, 0};
   if (count > capacities[slot]) {

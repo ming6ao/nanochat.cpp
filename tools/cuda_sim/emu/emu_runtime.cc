@@ -120,7 +120,7 @@ constexpr int kActiveBlocksPerMultiprocessor = 1;
 //
 // `backends/cuda/device.cu` reaches all three as soon as the fused Muon path is
 // linked, whether or not the launch it finally makes is the phase driver's
-// (docs/muon-fused-kernel.md section 8), so the emulator answers them. The
+// (docs/kernels.md section 8), so the emulator answers them. The
 // answers are the design's: 0 for `cudaDevAttrCooperativeLaunch`, which is what
 // sends the emulated build to the phase driver, and 1 block per multiprocessor
 // on 1 multiprocessor for the occupancy query, so the persistent grid the
@@ -266,7 +266,7 @@ bool CooperativeLaunchSupported(int cooperative_launch_attribute) {
 // The three queries a device answers from its driver, answered here from the
 // emulator's runtime stubs. `cudaDevAttrCooperativeLaunch` answers 0, so the
 // emulated fused build takes the phase loop and never reaches the grid barrier
-// the block-at-a-time engine could not execute (docs/muon-fused-kernel.md
+// the block-at-a-time engine could not execute (docs/kernels.md
 // section 8).
 
 bool SupportsCooperativeLaunch() {

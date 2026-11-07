@@ -340,7 +340,7 @@ py_test(
 
 # T0: the distributed launch plan, the launcher JSON summary, and the log
 # parser. Hermetic: a fake `tools/nanochat`, so it needs no library, no Bazel,
-# and no GPU. See docs/distributed-design.md Part 1, section 6.
+# and no GPU. See docs/distributed.md Part 1, section 6.
 py_test(
     name = "distributed_test",
     srcs = ["tests/distributed_test.py"],
@@ -432,7 +432,7 @@ py_test(
 )
 
 # T0: the device mesh and the placement language for the single-client
-# multi-device runtime (docs/client-runtime-design.md sections 5.1 to 5.4). It
+# multi-device runtime (docs/distributed.md Part 3, sections 5.1 to 5.4). It
 # loads the shared library for `devices()` and checks the rank-1 rule, the axis
 # name, and the placement set. CPU only; no GPU and no broker.
 py_test(
@@ -444,7 +444,7 @@ py_test(
 )
 
 # T0: the single-client multi-device runtime client
-# (docs/client-runtime-design.md sections 10 and 16). Two and four replicas
+# (docs/distributed.md Part 3, sections 10 and 16). Two and four replicas
 # that split one global batch equal one replica on the whole batch. The test
 # uses a simulated CPU mesh, so it needs no GPU and no broker.
 py_test(
@@ -456,7 +456,7 @@ py_test(
 )
 
 # T0: the Python client of the C++ mesh training driver
-# (docs/client-runtime-design.md section 10.1, docs/distributed-design.md
+# (docs/distributed.md Part 3, section 10.1, docs/distributed.md
 # section 6.6). One driver call runs a two-step job and writes the record and
 # the summary. The runfiles carry the shared library, the parquet document set,
 # and the tokenizer artifact.
@@ -473,7 +473,7 @@ py_test(
 )
 
 # T0: the client entry point re-enters `tools/nanochat client`
-# (docs/client-runtime-design.md section 14). Hermetic: a recording tool, so it
+# (docs/distributed.md Part 3, section 14). Hermetic: a recording tool, so it
 # needs no library, no Bazel, and no GPU.
 py_test(
     name = "run_test",
@@ -482,7 +482,7 @@ py_test(
     size = "small",
 )
 
-# The five boundary gates of docs/build.md Part 1, section 8. A
+# The five boundary gates of docs/build.md Part 1, section 5. A
 # boundary that no test reads is a comment, so each gate is a self-contained
 # unittest module that needs no wheel, no library, and no network.
 

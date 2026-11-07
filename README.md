@@ -103,8 +103,7 @@ tools/nanochat simulate --device h100
 is fast and parallel, so use it for the inner loop. `T1 GPU` checks one tiny
 shape per kernel. `T2 GPU` runs the full oracle and a small training run. Both
 use the GPU queue. `S0` is the CPU-only simulator for a device that is not on
-this host. [docs/testing.md](docs/testing.md) gives the Definition of Done and
-the gate list.
+this host. [docs/testing.md](docs/testing.md) gives the tiers and the gate list.
 
 ## Train a base model
 
@@ -144,7 +143,7 @@ tools/nanochat dist --nproc-per-node 2 -- \
 ```
 
 `dist` sets the rank variables and submits one queue job for the group. See
-[docs/distributed-design.md](docs/distributed-design.md).
+[docs/distributed.md](docs/distributed.md).
 
 ## Post-train: SFT and RL
 
@@ -181,8 +180,8 @@ temporary directory. The report records the stage order, the step counts, the
 loss traces, the metadata, and the file digests. `//src:nanochat_cli` is the
 one stage binary, and a subcommand names the stage.
 
-[docs/post-training.md](docs/post-training.md) gives the design, and section
-11 gives the state of each piece.
+[docs/post-training.md](docs/post-training.md) gives the design, the parity
+entries, and the stages that are not implemented.
 
 ## Inference and deployment
 
@@ -242,11 +241,10 @@ and choose a host:
 - **Kaggle**: two T4 cards, `--config=cuda --@rules_cuda//cuda:archs=sm_75`,
   and the sandbox backend set to `none`. See [docs/host-portability.md](docs/host-portability.md) section 8.
 - **H100 node**: the memory plan, the batch plan, and the launch are in
-  [docs/node-h100.md](docs/node-h100.md).
+  [docs/host-portability.md](docs/host-portability.md) Part 1.
 
-The design in [docs/client-runtime-design.md](docs/client-runtime-design.md)
-covers replicated inference across local devices. The tree delivers part of
-it.
+The design in [docs/distributed.md](docs/distributed.md) covers data-parallel
+training and replicated inference across local devices.
 
 ## Evaluate
 

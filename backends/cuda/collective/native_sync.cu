@@ -1,4 +1,4 @@
-// The native gradient-sync adapter (docs/distributed-design.md sections
+// The native gradient-sync adapter (docs/distributed.md sections
 // 5.4-5.6). It implements `GradientSync` with a registered window pool and the
 // ring schedule. The CUDA separable compilation unit is the only place the
 // collective's add kernel lives.

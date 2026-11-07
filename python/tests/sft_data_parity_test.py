@@ -1,4 +1,4 @@
-"""T0: the R1 data parity gate of ``docs/parity.md`` section 7 C.1.
+"""T0: the R1 data parity gate of ``docs/parity.md`` Part 1, section 4.
 
 The pack fixture ``//tests:data/sft_pack_fixture.bin`` records what the
 reference tokenizer and the reference ``sft_data_generator_bos_bestfit``

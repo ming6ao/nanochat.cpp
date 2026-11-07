@@ -1,7 +1,7 @@
 """T0: the client entry point re-enters ``tools/nanochat client``.
 
 Hermetic: a recording tool stands in for the toolchain, so the test needs no
-library, no Bazel, and no GPU. See docs/client-runtime-design.md section 14.
+library, no Bazel, and no GPU. See docs/distributed.md Part 3, section 14.
 """
 
 from __future__ import annotations

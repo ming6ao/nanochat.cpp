@@ -50,7 +50,7 @@ void ExpectTrue(bool condition, const std::string& what) {
 
 // A deterministic, well-conditioned input. The values are positive, so the dot
 // products do not cancel and the fp8 quantization error stays relative to the
-// result (docs/fp8-training.md section 4.1).
+// result (docs/precision.md Part 1, section 4.1).
 std::vector<ComputeType> MakeInput(std::size_t count, int seed) {
   std::vector<ComputeType> out(count);
   std::uint32_t state = static_cast<std::uint32_t>(seed) * 2654435761u + 1u;
@@ -138,7 +138,7 @@ void TestLinearFp8AgainstDense() {
       const double a = nanochat::ComputeToFloat(dense[i]);
       const double b = nanochat::ComputeToFloat(quantized[i]);
       // A combined bound: the output is the compute type, so a small result
-      // carries an absolute error (docs/fp8-training.md section 7).
+      // carries an absolute error (docs/precision.md Part 1, section 7).
       const double error = std::fabs(a - b) / (std::fabs(a) + 1.0);
       if (error > worst) worst = error;
     }
@@ -168,7 +168,8 @@ void TestLinearFp8AgainstDense() {
 
 // The fp8 backward against the dense backward at an eligible shape. The weight
 // gradient is fp32; the input gradient is the compute type
-// (docs/fp8-training.md section 7). The contraction is long enough that the
+// (docs/precision.md Part 1, section 7). The contraction is long enough that
+// the
 // per-element fp8 error averages down.
 void TestBackwardFp8AgainstDense() {
   if constexpr (nanochat::kFp8Build) {

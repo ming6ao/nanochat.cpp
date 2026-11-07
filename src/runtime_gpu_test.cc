@@ -1,5 +1,5 @@
 // src/runtime_gpu_test.cc -- two device threads that share one card
-// (docs/client-runtime-design.md section 17 phase 3).
+// (docs/distributed.md Part 3, section 7).
 //
 // The gate: the mesh runtime builds two model replicas on two threads that
 // share one physical card. The threads bind with `SelectDevice`, and the

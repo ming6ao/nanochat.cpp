@@ -30,7 +30,7 @@ See [docs/kernels.md](../../../docs/kernels.md) for the kernel inventory and
 `muon_fused.cu` runs the whole `MuonUpdate` stage as one phase-parameterised
 device function instead of the thirty-nine launches the multi-launch path in
 `muon.cu` issues at the shipped `ns_steps` of 5. Section 4 of
-[muon-fused-kernel.md](../../../docs/muon-fused-kernel.md) is the design; this
+[kernels.md](../../../docs/kernels.md) is the design; this
 note records what landed, what it costs, and why it is not the shipped default.
 
 The stage becomes sixteen phases, which run as 28 executions (seven before the

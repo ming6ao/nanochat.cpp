@@ -1,8 +1,8 @@
 """The child-process launcher for the C++ mesh training driver.
 
 The C++ driver owns the step loop, the metric record, the summary, the
-checkpoint interval, and the resume (docs/client-runtime-design.md section
-10.1). The client is :class:`nanochat_cpp.runtime.MeshTrainConfig`. This module
+checkpoint interval, and the resume (docs/distributed.md Part 3,
+section 10.1). The client is :class:`nanochat_cpp.runtime.MeshTrainConfig`. This module
 holds the process seam of the local run host.
 
 :func:`launch` is the one entry a notebook calls. It resolves the run host
@@ -10,7 +10,7 @@ from :mod:`target` and starts the job there. :func:`launch_local` is the local
 host: a child process through ``tools/nanochat client``. The notebook cell
 returns, so the cell status stays correct, and the parent polls
 ``metrics.jsonl`` and ``worker.log`` instead. See
-``docs/client-runtime-design.md``.
+``docs/distributed.md``.
 
 The module imports ``nanochat_cpp`` inside the functions, not at module load.
 The pure helpers then import without the shared library.

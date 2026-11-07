@@ -1,5 +1,5 @@
 // The self-describing checkpoint container and the document-mode `DataLoader`
-// (docs/model.md, docs/parquet-native.md).
+// (docs/model.md, docs/data.md).
 //
 // Everything here is host-side and vendor-free; it only reads and writes
 // little-endian bytes. The loader reads parquet documents and tokenizes them
@@ -476,7 +476,7 @@ void Checkpoint::Add(TensorRecord record) {
 // DataLoader
 // ---------------------------------------------------------------------------
 //
-// Document mode (docs/parquet-native.md). A producer thread reads documents,
+// Document mode (docs/data.md). A producer thread reads documents,
 // tokenizes them with the reference encoder, and pushes them into a bounded
 // deque. The consumer packs every row with the reference BOS-aligned best-fit
 // rule: refill to `document_buffer`, take the largest document that fits, and
@@ -490,7 +490,7 @@ struct DataLoader::Impl {
   std::size_t document_buffer = 1000;
   std::uint64_t seed = 42;
 
-  // The data cursor (docs/distributed-design.md section 11). `epoch` counts the
+  // The data cursor (docs/distributed.md section 11). `epoch` counts the
   // `Reset` calls. The resume cursor is the encoded `documents` buffer plus the
   // source position, so `State()` can snapshot it consistently.
   std::int64_t epoch = 0;
@@ -715,7 +715,7 @@ struct DataLoader::Impl {
   }
 
   // A consistent snapshot of the cursor
-  // (docs/distributed-design.md section 11). The gate keeps the producer from
+  // (docs/distributed.md section 11). The gate keeps the producer from
   // reading a batch that is not yet in the buffer, so the restored buffer and
   // position replay the packing exactly.
   DataLoaderState Snapshot() {
@@ -740,7 +740,7 @@ struct DataLoader::Impl {
       last_error.clear();
       stop = false;
       // A new epoch restarts the cursor
-      // (docs/distributed-design.md section 11).
+      // (docs/distributed.md section 11).
       ++epoch;
     }
     StartProducer();
@@ -761,7 +761,7 @@ DataLoader::DataLoader(DocumentSourceFactory source_factory,
   if (restore != nullptr) {
     // Prime the epoch and the encoded buffer before the producer starts. The
     // caller built `source_factory` to seek to `source_position`
-    // (docs/distributed-design.md section 11).
+    // (docs/distributed.md section 11).
     impl_->epoch = restore->epoch;
     impl_->documents.assign(restore->documents.begin(),
                             restore->documents.end());
@@ -805,7 +805,7 @@ const std::uint8_t* DataLoader::token_bytes(int* vocab_size) const {
 }
 
 // ---------------------------------------------------------------------------
-// Document sharding (docs/distributed-design.md section 7)
+// Document sharding (docs/distributed.md section 7)
 // ---------------------------------------------------------------------------
 
 namespace {
@@ -816,7 +816,7 @@ namespace {
 // stream, so a `Reset` (a new epoch) reproduces the same partition.
 //
 // `begin_` is the global source position to resume at
-// (docs/distributed-design.md section 11). The wrapper reads and drops every
+// (docs/distributed.md section 11). The wrapper reads and drops every
 // document before `begin_`, then continues the stride filter. The wrapper also
 // reports `position()`, the count of documents read from the underlying stream,
 // which is the resumable cursor.
@@ -865,7 +865,7 @@ DocumentSourceFactory ShardDocumentSourceFactory(DocumentSourceFactory factory,
                                                  std::int64_t start) {
   // Only the source the loader's constructor makes carries the resume offset;
   // a source that a later `Reset` makes begins at 0, which is where a new epoch
-  // starts (docs/distributed-design.md section 11).
+  // starts (docs/distributed.md section 11).
   auto first_creation = std::make_shared<bool>(true);
   return
       [factory = std::move(factory), rank, world_size, start,

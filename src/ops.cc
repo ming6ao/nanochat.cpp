@@ -106,7 +106,7 @@ void StoreScalar(float* device, float value) {
 // ---------------------------------------------------------------------------
 
 // One pointwise call whose coefficients are scalar arguments, so a caller that
-// keeps them on the device reads them there (docs/scalar-arguments.md).
+// keeps them on the device reads them there (docs/kernels.md).
 void PwScalars(PointwiseOp op, int count, const ComputeType* a,
                const ComputeType* b, ComputeType* out, ScalarArg alpha,
                ScalarArg beta) {
@@ -558,9 +558,10 @@ void LinearForward(const ComputeType* x, const ComputeType* w, ComputeType* y,
   (void)fp8;  // unused in a dense build
   if constexpr (kFp8Build) {
     // The eligible matmuls take fp8 operands with an fp32 accumulator
-    // (docs/fp8-training.md sections 6 and 7). Quantize both operands for this
+    // (docs/precision.md Part 1, sections 6 and 7). Quantize both operands for
+    // this
     // call. The reuse of an operand the same step already quantized is a later
-    // optimization (docs/fp8-training.md section 7).
+    // optimization (docs/precision.md Part 1, section 7).
     if (fp8 != nullptr && fp8->ready() && Fp8Eligible(out, in)) {
       QuantizeFp8Params quantize;
       quantize.format = Fp8Format::kE4M3;
@@ -577,7 +578,8 @@ void LinearForward(const ComputeType* x, const ComputeType* w, ComputeType* y,
       // The weight is stored [out, in] (PyTorch's Linear convention).
       scaled.transpose_b = true;
       // The forward uses the reduced-precision reduction
-      // (docs/fp8-training.md section 5.2). Fast accumulation is an Ada (8.9)
+      // (docs/precision.md Part 1, section 5.2). Fast accumulation is an Ada
+      // (8.9)
       // feature: Hopper (9.0) rejects the descriptor attribute, and
       // `backends/cuda/gemm.cu` exits when it is asked for the flag there.
       // Ask for it only where the device accepts it.
@@ -617,7 +619,8 @@ void LinearWgrad(const ComputeType* x, const ComputeType* dy, float* dw,
   (void)fp8;  // unused in a dense build
   if constexpr (kFp8Build) {
     // A = the output gradient (E5M2), B = the saved activation (E4M3). The
-    // output is the fp32 parameter gradient (docs/fp8-training.md section 7).
+    // output is the fp32 parameter gradient (docs/precision.md Part 1, section
+    // 7).
     if (fp8 != nullptr && fp8->ready() && Fp8Eligible(out, in)) {
       QuantizeFp8Params quantize;
       quantize.format = Fp8Format::kE5M2;
@@ -664,7 +667,7 @@ void LinearDgrad(const ComputeType* dy, const ComputeType* w, ComputeType* dx,
   (void)fp8;  // unused in a dense build
   if constexpr (kFp8Build) {
     // A = the output gradient (E5M2), B = the weight (E4M3). The output is an
-    // activation, so it stores the compute type (docs/fp8-training.md
+    // activation, so it stores the compute type (docs/precision.md Part 1
     // section 7).
     if (fp8 != nullptr && fp8->ready() && Fp8Eligible(out, in)) {
       QuantizeFp8Params quantize;
@@ -765,7 +768,7 @@ void RmsNormBackward(std::int64_t rows, std::int64_t dim, float eps,
 // ---------------------------------------------------------------------------
 // One entry, one meaning: add this micro-batch's mean loss to a device scalar.
 // The per-row losses are fp32 in every build, so the fp32 entry serves a bf16
-// build too and the rows never reach the host (`docs/scalar-arguments.md`).
+// build too and the rows never reach the host (`docs/kernels.md`).
 
 void LossSumForward(const float* losses, std::int64_t rows,
                     std::int64_t divisor, bool accumulate, float* out) {

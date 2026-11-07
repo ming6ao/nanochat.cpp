@@ -6,7 +6,7 @@
 #include <string_view>
 #include <vector>
 
-// The fixed nanochat split pattern (docs/tokenizer.md section 2.5). The
+// The fixed nanochat split pattern (docs/data.md section 2.5). The
 // scanner is hand written (decision D1). It supports the one nanochat pattern
 // only, so it has no third-party dependency.
 

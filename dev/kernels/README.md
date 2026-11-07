@@ -215,7 +215,7 @@ predicate to full causal without a new measurement.
 
 ## Muon fusion prototype (Phase 0 and Phase 1)
 
-`docs/muon-fused-kernel.md` asks whether one Polar Express iteration of
+`docs/kernels.md` asks whether one Polar Express iteration of
 `MuonUpdate` can run as a single device-side launch. Today the iteration is
 five dependent launches: `A = X^T X` (or `X X^T`), `A2 = A A`, the elementwise
 `B = cb*A + cc*A2`, `prod = X B` (or `B X`), and the elementwise

@@ -1,5 +1,5 @@
 // `tok_train_main` -- the native byte pair encoding trainer CLI
-// (docs/tokenizer.md section 9). It reads documents from a text file (one per
+// (docs/data.md section 9). It reads documents from a text file (one per
 // line) or from a parquet dataset, trains the base vocabulary, and writes an
 // `NCTOKEN1` artifact.
 //
@@ -29,7 +29,7 @@
 namespace {
 
 // The nine special tokens, in id order. The ids start at the base vocabulary
-// size (docs/tokenizer.md section 2.4).
+// size (docs/data.md section 2.4).
 const char* const kSpecialTokens[] = {
     "<|bos|>",           "<|user_start|>",
     "<|user_end|>",      "<|assistant_start|>",

@@ -9,13 +9,13 @@
 #include <vector>
 
 // Byte pair encoding trainer: a native port of `rustbpe`'s
-// `train_core_incremental` (docs/tokenizer.md section 9). The trainer is a host
+// `train_core_incremental` (docs/data.md section 9). The trainer is a host
 // utility beside `DataLoader`. It uses the C++ standard library and OpenMP. It
 // has no kernel dependency, and every test runs on the CPU.
 
 namespace nanochat {
 
-// The fixed nanochat split pattern from docs/tokenizer.md section 2.5. The
+// The fixed nanochat split pattern from docs/data.md section 2.5. The
 // trainer and the encoder share the same scanner.
 std::string NanochatSplitPattern();
 

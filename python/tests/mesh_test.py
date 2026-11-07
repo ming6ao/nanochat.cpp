@@ -3,7 +3,7 @@
 The mesh and the placement checks are hermetic. `devices()` loads the shared
 library and reads the device table, so the test also covers the additive
 `nanochat_device_count`/`nanochat_device_at` surface
-(docs/client-runtime-design.md sections 5.1 to 5.4).
+(docs/distributed.md Part 3, sections 5.1 to 5.4).
 """
 
 from __future__ import annotations

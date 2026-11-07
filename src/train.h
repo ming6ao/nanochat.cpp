@@ -60,7 +60,7 @@ struct TrainConfig {
   std::string log_path;         // empty logs to stdout only
   std::string resume_path;      // optional checkpoint to resume from
 
-  // Data (docs/parquet-native.md): read parquet and tokenize during the run.
+  // Data (docs/data.md): read parquet and tokenize during the run.
   std::vector<std::string> train_parquet;
   std::vector<std::string> val_parquet;
   std::string tokenizer_path;  // the NCTOKEN1 artifact
@@ -68,7 +68,7 @@ struct TrainConfig {
   int tokenizer_threads = 4;
   int document_buffer = 1000;
 
-  // Distributed (docs/distributed-design.md): data parallel rank and group.
+  // Distributed (docs/distributed.md): data parallel rank and group.
   // `world_size` 1 keeps the single-process run unchanged.
   int rank = 0;
   int world_size = 1;
@@ -102,7 +102,7 @@ inline bool ParseHwCheck(std::string_view text, TrainConfig::HwCheck* mode) {
   return false;
 }
 
-// The modded-nanogpt Track 3 baseline (docs/distributed-design.md sections 8
+// The modded-nanogpt Track 3 baseline (docs/distributed.md sections 8
 // and 9): dense (`L`) attention, no value embeddings, and the AdamW/Muon rates
 // and schedule of the reference recipe. It is a preset, not a new set of flags:
 // the caller fills in the data paths, the batch, and the step count.
@@ -115,7 +115,7 @@ inline bool ParseHwCheck(std::string_view text, TrainConfig::HwCheck* mode) {
 TrainConfig TrackThreeBaseline();
 
 // The scale applied to one micro-batch backward pass
-// (docs/distributed-design.md section 6). The model's loss is a mean, so the
+// (docs/distributed.md section 6). The model's loss is a mean, so the
 // factor is 1 / (grad_accum * world_size). The micro-batch sum and the
 // all-reduce sum then give the mean over the global batch, which equals the
 // one-rank update. A `world_size` of 1 leaves the accumulation scale unchanged.
@@ -169,7 +169,7 @@ class Checkpointer {
 
   // Also writes the 1-based optimizer step beside the optimizer state, so a
   // resume continues the schedule instead of restarting the warmup
-  // (docs/distributed-design.md Part 2, section 10).
+  // (docs/distributed.md Part 1, section 6).
   static bool SaveModel(const Model& model, const Optimizer& optimizer,
                         int step, const std::string& path);
 
@@ -216,7 +216,7 @@ class TrainLoop {
   Model* model() { return model_.get(); }
   Optimizer* optimizer() { return optimizer_.get(); }
   // The training loader, so a test can read the cursor a resume restored and
-  // the batch the run consumes next (docs/distributed-design.md section 11).
+  // the batch the run consumes next (docs/distributed.md section 11).
   DataLoader* train_loader() { return train_loader_.get(); }
   const Scheduler& scheduler() const { return *scheduler_; }
   float last_loss() const { return last_loss_; }
@@ -228,7 +228,7 @@ class TrainLoop {
   // Reduces every parameter gradient across the ranks. When `sync_` is a real
   // multi-rank group, the gradients are packed into a few large buckets and
   // issued with `AllReduceSumAsync`, so a bucket reduction overlaps the pack
-  // copy of the next bucket (docs/distributed-design.md section 6). A
+  // copy of the next bucket (docs/distributed.md section 6). A
   // `world_size` of 1 is a no-op.
   void AllReduceGradients();
 
@@ -248,10 +248,10 @@ class TrainLoop {
   int last_step_ = 0;
   // The step restored from `resume_path`, or 0 for a fresh run. `Run` starts
   // at `resume_step_ + 1`, so a resume continues the schedule
-  // (docs/distributed-design.md Part 2, section 10).
+  // (docs/distributed.md Part 1, section 6).
   int resume_step_ = 0;
   // The data cursor restored beside the checkpoint
-  // (docs/distributed-design.md section 11). The default state is a fresh run
+  // (docs/distributed.md section 11). The default state is a fresh run
   // at epoch 0.
   DataLoaderState resume_state_;
 };

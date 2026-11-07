@@ -26,7 +26,7 @@ bazel_dep(name = "rules_shell", version = "0.6.1")
 bazel_dep(name = "rules_python", version = "1.7.0")
 
 # ZSTD decompresses the parquet data pages. It is a small C library and the
-# only decompressor the native reader needs (docs/parquet-native.md). The
+# only decompressor the native reader needs (docs/data.md). The
 # module comes from the Bazel Central Registry; the target is @zstd//:zstd.
 bazel_dep(name = "zstd", version = "1.5.7")
 
@@ -46,7 +46,7 @@ use_repo(cuda, "cuda")
 register_toolchains("@cuda//toolchain:nvcc-local-toolchain")
 
 # libibverbs for the native collective's RDMA transport
-# (docs/distributed-design.md phase 0). The repository is scaffolding: no
+# (docs/distributed.md phase 0). The repository is scaffolding: no
 # target depends on it by default, because the transport selection falls back to
 # host staging when no RDMA adapter is present.
 rdma_repository = use_repo_rule("//third_party:rdma.bzl", "rdma_repository")

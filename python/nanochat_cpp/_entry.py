@@ -67,12 +67,12 @@ COMMANDS = (
         "  dist [opts] -- <cmd...>    one process per rank; one queue job for the",
         "                             group; sets the NANOCHAT_* rank variables and",
         "                             expands a `{rank}` token in the command. See",
-        "                             docs/distributed-design.md",
+        "                             docs/distributed.md",
     )),
     Command("client", (
         "  client [opts] -- <cmd...>  one client process; one queue job for the full",
         "                             device set; the client sees all local devices as",
-        "                             one mesh. See docs/client-runtime-design.md",
+        "                             one mesh. See docs/distributed.md",
     )),
     Command("train", (
         "  train -- <cmd...>          alias for: run train -- <cmd...>",

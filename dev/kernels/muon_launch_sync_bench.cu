@@ -1,5 +1,5 @@
 // Phase 0 of the Muon fusion campaign, second half: the sync term of the
-// section 3 inequality (docs/muon-fused-kernel.md) measured on this card.
+// section 3 inequality (docs/kernels.md) measured on this card.
 //
 // The fused prototype would replace the five dependent launches of one Polar
 // Express iteration (three GEMMs and the two elementwise passes) with one

@@ -1,5 +1,5 @@
 // An in-process memory transport for the CPU schedule test
-// (docs/distributed-design.md Part 3, section 3). See memory_transport.h.
+// (docs/distributed.md Part 2, section 3). See memory_transport.h.
 
 #include "backends/cuda/collective/memory_transport.h"
 

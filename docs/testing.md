@@ -107,7 +107,7 @@ per-neighbor selection, including a mixed group.
 `//backends/cuda/collective:nvlink_test` (tags `gpu`, `manual`) reduces across
 two cards. On a host without NVLink peer access the T1 test exercises the
 host-staged fallback. See
-[distributed-design.md](distributed-design.md) Part 3, section 13.
+[distributed.md](distributed.md) Part 2, section 13.
 
 The suite targets carry the `sim` tag. They are CPU-only and fast, so they stay
 in the default `tools/nanochat test` loop; the tag exists so a merge gate can
@@ -122,56 +122,6 @@ The fabricated `cudaDeviceProp` layout is pinned by
 `//tests:cuda_device_prop_abi_test`, a compile-time cross-check of
 `cudaDevicePropPrefix` against the real `<driver_types.h>`; it needs the CUDA
 toolkit headers but no device.
-
-## Definition of done
-
-Every workstream must pass, in order:
-
-1. `tools/nanochat build` — no warnings.
-2. `tools/nanochat test` — CPU tests.
-3. `tools/nanochat test --gpu <target>` — small-shape GPU correctness.
-4. Finite-difference gradient check (kernel families with a backward).
-5. Oracle fixture match within the backend tolerance.
-6. `tools/nanochat lint` — the Google C++ Style gate.
-
-A workstream is not done until 1–6 pass on the **CPU** backend and at least
-small-shape GPU correctness passes.
-
-### The bf16 build
-
-`--config=bf16` selects `ComputeType = Bf16`. The parameter gradient, the
-optimizer state, the loss, and every reduction statistic stay fp32
-([precision.md](precision.md) section 5). The fp32 build stays the correctness
-gate. The committed oracle, training-parity, scoring-parity, and numeric-trace
-fixtures are fp32 PyTorch goldens. A bf16 build rounds every stored value to
-7 mantissa bits, so it cannot reproduce them.
-
-Run both builds:
-
-```bash
-tools/nanochat build
-tools/nanochat test
-tools/nanochat build --config=bf16
-tools/nanochat test --config=bf16
-tools/nanochat lint
-```
-
-In a bf16 build the golden-fixture tests print a skip line and return success.
-The skip is visible in the test output, so a reviewer can see which leg was not
-exercised. The bf16 numeric trace in
-[precision.md](precision.md) section 6 is the bf16 gate.
-
-A test that compares two code paths inside one build must derive its bound from
-the storage precision. Use a named constant, so the two builds differ in the
-bound and not in the check:
-
-```cpp
-constexpr double kPathAtol = nanochat::kComputeIsBf16 ? 1e-4 : 1e-6;
-```
-
-A test that writes a parameter from an fp32 fixture writes the fp32 master and
-then calls `Model::SyncCompute()`, so the compute copy is derived and the test
-works in both builds. `tests/param_stage.h` holds that helper.
 
 ## How tests are sandboxed
 
@@ -490,9 +440,8 @@ _Absorbed from the former `correctness-gates.md`. Its section numbers are
 unchanged, so a reference to a section of that document resolves to the same
 number here._
 
-Status: partly delivered. Section 6 lists the phases that are complete and the
-three open items, and section 9 lists the open questions. This document is Part
-8 of the simulator work. Parts 1 to 6 are in [simulator.md](simulator.md). Part
+This part states the correctness gates for the simulator and the Hopper startup
+check. Parts 1 to 6 are in [simulator.md](simulator.md). Part
 7 is [simulator.md](simulator.md).
 
 This document answers three questions:
@@ -502,7 +451,7 @@ This document answers three questions:
 2. How does the project prove the remaining part on a real Hopper card?
 3. How does the project keep the simulator fast?
 
-The reference designs are [fp8-training.md](fp8-training.md),
+The reference designs are [precision.md](precision.md),
 [precision.md](precision.md), [testing.md](testing.md),
 and [attention.md](attention.md).
 
@@ -597,11 +546,11 @@ Gate: the test passes. It passes today.
 #### 3.3 The fp8 graph in the reference engine
 
 Add the storage tags and the scaled GEMM seam
-([fp8-training.md](fp8-training.md) sections 3 and 5). Implement
+([precision.md](precision.md) sections 3 and 5). Implement
 `GemmScaledFp8` in `backends/cpu/kernels.cc`. The implementation quantizes,
 accumulates in fp32, and dequantizes.
 
-Status: delivered, except the operand reuse across calls. The seam, both
+The seam and both engines are present, except the operand reuse across calls. The seam, both
 backends, the build config, and the model plumbing are in. `--config=fp8` and
 `simulate --precision fp8` select the fp8 build. `src/ops.cc` quantizes the
 eligible forward and backward matmuls, and `src/model.cc` owns the workspace
@@ -609,7 +558,7 @@ slots (one byte per operand, one fp32 per scale, rebuilt per step).
 `//tests:fp8_graph_test` compares the fp8 forward and backward against the dense
 path at an eligible shape.
 
-The operand reuse, rules 2 to 4 of [fp8-training.md](fp8-training.md)
+The operand reuse, rules 2 to 4 of [precision.md](precision.md)
 section 7, is the remaining follow-up: the code quantizes a tensor again even
 when the same step already quantized it. The result is correct; the extra casts
 are a cost only.
@@ -631,7 +580,7 @@ The fp8 path calls `cublasLtMatmul`. Add the 15 symbols in
 `tools/cuda_sim/cuda_sim.map` under the `libcublasLt.so.12` node. Add the eight
 validation rules in section 5.2.
 
-Status: delivered. The map exports the family, the mock implements it in
+The map exports the family, the mock implements it in
 `tools/cuda_sim/interposer.cc`, and the ABI lives in
 `tools/cuda_sim/cuda_sim_abi.h`. `//tests:cuda_sim_preload_test` issues a scaled
 GEMM through the real `gemm.cu` and asserts the recorded call shape.
@@ -651,7 +600,7 @@ attention forward. Map `mma` to a scalar loop for one narrow case only. Record
 in [attention.md](attention.md) Part 6, section 6, that the
 tile still needs hardware.
 
-Status: complete except the `mma` scalar loop. `cuda_fp8.h` maps the conversion
+The tree holds it except the `mma` scalar loop. `cuda_fp8.h` maps the conversion
 intrinsics to `nanochat/fp8.h`. `cuda_emu.h` carries a per-block dynamic shared
 buffer, and the BUILD file rewrites the `extern __shared__` declaration in the
 emulated copy of `value_gate.cu` and `attention.cu`. The device sources do not
@@ -695,7 +644,7 @@ cannot. Abort before the first optimizer step on a mismatch. Do not fall back to
 bf16, because [../README.md](../README.md) § What this is not forbids a runtime
 precision branch.
 
-Status: delivered. `src/hw_gate.cc` implements the cases and a host reference.
+`src/hw_gate.cc` implements the cases and a host reference.
 `src/train.cc` runs it before the first step when the device is real, and exits
 with code 2 on a mismatch. `nanochat_cli train --hw-check {auto,on,off}` selects
 the
@@ -838,75 +787,6 @@ shape, the number of steps, and the number of layers. The fast suite pays none
 of that, because it checks the rounding and one tiny GEMM. The heavy graph
 checks move to the merge gate.
 
-### 6. Phases and owners
-
-| Phase | Work | Owner | Gate |
-|---|---|---|---|
-| A1 | The fp8 profile and capability fields, and the two `DType` tags | Architect, Harness, Oracle | `device_profile_test` |
-| A2 | The shared rounding header and its unit test | Runtime, Oracle | The exact bit table |
-| A3 | `GemmScaledFp8` and the fp8 graph | Runtime | `simulate --precision fp8` |
-| C1 | The `fp8-fast` suite | Architect | Less than 2 s |
-| A4 | The `cublasLt` interposer and the symbol gate | Simulator | `check_symbols.py` |
-| A5 | The emulator fp8 header and `extern __shared__` | Simulator | `kernel_emu_test` |
-| A6 | The fp8 trace leg and the tolerance rows | Oracle, Architect | The exact CPU and simulator legs |
-| B1 | The hardware startup gate | Harness | `hw_gate_cuda_test` |
-| B2 | The integration into `nanochat_cli train` | Harness | A live run. There is no stamp. |
-
-Do A1, A2, A3, and C1 first, so the fast gate exists early. Then do A4, A5, and
-A6. Then do B1 and B2.
-
-Status: A1, A2, A3 (forward and backward), A4, A5 (except the `mma` loop), B1,
-and C1 are complete. The two `DType` tags moved into A1, because
-`Caps::Supports` reads them. The open items are the fp8 operand reuse, the
-external fp8 golden for A6, and the `mma` loop. See section 9.
-
-### 7. Validation
-
-1. `tools/nanochat simulate --device h100 --precision fp8 --suite fp8-fast`
-   passes in less than 2 seconds.
-2. `tools/nanochat simulate --device h100 --precision fp8 --suite correctness`
-   passes.
-3. The fp8 trace leg is exact on the CPU and on the simulator.
-4. `check_symbols.py` resolves every `cublasLt` symbol, and the negative case
-   fails.
-5. The hardware gate passes on a fresh Hopper run in less than 1 second.
-6. The fault injection makes the gate exit with code 2.
-7. The gate stamp blocks a second run on a resume.
-
-### 8. Risks and non-goals
-
-- **The 1e-2 fp8 bound is wide.** A wide bound can hide a fault. Counter it with
-  the narrow cases in steps 5 and 6 of the gate. Prefer a known answer over a
-  wide tolerance on a large case.
-- **The emulator can diverge from the device.** `simulator.md` section 9.4 marks
-  the engine experimental. It never replaces the oracle.
-- **A new CUDA version adds a `cublasLt` symbol.** Pin the toolkit. Let the
-  symbol gate fail on a mismatch.
-- **Non-goal: a functional PTX interpreter.** See
-  [simulator.md](simulator.md) section 14.
-- **Non-goal: a tensor-core accumulation model.** Only hardware has it.
-
-### 9. Open questions
-
-1. Does the gate stamp live in the checkpoint container, or in a side file? By
-   decision, the gate always runs on a fresh run; there is no stamp.
-2. Is one fp8 attention shape enough, or is one shape per window pattern needed?
-3. Does the `fp8-full` suite run at every merge, or only at a Wave boundary?
-4. When does the fp8 operand reuse land? The forward and the backward quantize
-   per call today. The reuse saves the extra casts
-   ([fp8-training.md](fp8-training.md) section 7, rules 2 to 4).
-
-### See also
-
-- [simulator.md](simulator.md) — the S0 simulator and its engines, and Part 7
-  for the bf16 and fp8 surfaces.
-- [fp8-training.md](fp8-training.md) — the fp8 design.
-- Part 2 below — the trace and the tolerances.
-- [node-h100.md](node-h100.md) — the H100 run book.
-
-
----
-
 ## Part 2. The numerics integration test
 
 _Absorbed from the former `numerics-integration.md`. Its section numbers are
@@ -921,11 +801,10 @@ supervised fine-tuning (SFT), and reinforcement learning (RL).
 The test follows Path A. Path A is a staged precision contract. This document
 also records what Path A does not do.
 
-Status: phases 0 to 5 are complete. Phase 6 steps 1 and 2 are complete. Phase 6
-step 3 stays open: the optional `--trace` option of the harness. The trace
-library, the emitter, the two Bazel targets, the fixture, the simulator wiring,
-and the merge-gate entry are present. The fixture holds one section per
-precision.
+The trace library, the emitter, the two Bazel targets, the fixture, the
+simulator wiring, and the merge-gate entry are present, and the fixture holds
+one section per precision. The optional `--trace` option of the harness is not
+implemented.
 
 ### 1. The reduction, stated first
 
@@ -1176,93 +1055,6 @@ needs no data file. The trace records no batch and no weight vector.
 - The RL section takes the weights from the advantages on the sampled positions
   and 0 elsewhere. The scale is `1 / (num_passes * examples_per_rank)`, so the
   normalizer is `num_valid * num_passes * examples_per_rank`.
-
-### 7. Phase plan
-
-Status: the tree holds phases 0 to 5. Phase 6 holds steps 1 and 2. Step 3
-stays open. The names below match the tree:
-`tests/numerics_trace.{h,cc}` holds the trace and the comparison,
-`tests/numerics_trace_emit_main.cc` holds the emitter, and
-`tests/numerics_trace_test.cc` holds the replay gate.
-
-Owners follow the ownership map in [AGENTS.md](../AGENTS.md). The Oracle
-workstream owns `tests/**` and `tools/dump_*.py`. The Harness workstream owns
-`src/**`. The Architect owns the frozen headers, the root build files, and
-`docs/**`.
-
-#### Phase 0: contract and fixture format
-
-1. The Architect records the contract in [parity.md](parity.md).
-2. The Oracle extends `src/container.h` with the `NANONUM1` magic.
-3. The Architect freezes the format.
-
-Gate: a reviewer approves the contract and the format.
-
-#### Phase 1: trace primitives and the training trace
-
-1. The Oracle writes `tools/dump_fixtures.py numerics`.
-2. The Oracle writes the emitter. It builds the model with `Model::Create`,
-   calls `InitWeights(seed)`, and drives `ForwardLoss`, `BackwardAccumulate`,
-   and `Optimizer::Step` for five steps.
-3. The Oracle writes the fixture.
-4. The Oracle adds the two targets to `tests/BUILD.bazel`.
-
-Gate: every leg equals its section byte for byte.
-
-#### Phase 2: evaluation trace
-
-1. The Oracle adds an evaluation section to the emitter.
-2. The emitter calls `EvalBpb` inside a `NoGradGuard`.
-3. The emitter calls `ScoreBatch` on a fixed batch.
-4. The emitter records the token ids and the greedy argmax identifiers.
-
-Gate: the argmax identifiers agree on all three targets.
-
-#### Phase 3: greedy generation spike and trace
-
-1. The Oracle records the greedy `GenerateBatch` identifiers for a fixed prompt
-   and a fixed mask.
-2. The Oracle measures the logit margin of each step and applies the tie rule.
-
-Gate: the generated identifiers are identical on all three targets, and the
-margin exceeds the threshold at each step.
-
-#### Phase 4: SFT arithmetic
-
-The SFT arithmetic is a floating-point result, so it is not a trace record.
-
-1. The Oracle adds one masked SFT step to `//tests:sft_step_parity_test`.
-2. The test records the post-step loss and the gradient norm in its trajectory.
-
-Gate: the SFT loss and the gradient norm agree within the bound of
-[testing.md](testing.md).
-
-#### Phase 5: RL arithmetic
-
-The RL arithmetic is a floating-point result, so it is not a trace record.
-
-1. The Oracle records the rollout identifiers and the valid-target count in the
-   trace.
-2. The Oracle records the reward, the advantage, and the objective in
-   `//tests:rl_parity_test`.
-
-Gate: the rollout identifiers are identical, and the RL arithmetic agrees within
-its bound.
-
-#### Phase 6: wiring and gates
-
-1. The Architect adds `//tests:numerics_trace_test` to the `correctness` suite
-   of `tools/nanochat simulate`.
-2. The Architect adds the test to the merge-gate GPU budget in
-   [AGENTS.md](../AGENTS.md) section 5.5 as a `t2-parity` gate.
-3. The Harness adds a `--trace <path>` option to `nanochat_cli train` and
-   `nanochat_cli eval`, if full harness coverage is necessary. This step is
-   optional.
-
-Gate: two commands run every leg.
-`tools/nanochat simulate --device t4 --suite correctness` runs the CPU leg and
-the simulator leg. `tools/nanochat test --gpu //tests:numerics_trace_cuda_test`
-runs the GPU leg.
 
 ### 8. Commands and wall-clock budget
 

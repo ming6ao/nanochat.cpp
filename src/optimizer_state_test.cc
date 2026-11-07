@@ -398,7 +398,7 @@ void TestParameterOnlyReadSkipsOptimizerState() {
 }
 
 // The optimizer-step record round-trips and drives a resumed schedule
-// (docs/distributed-design.md Part 2, section 10). The 4-arg `SaveModel` writes
+// (docs/distributed.md Part 1, section 6). The 4-arg `SaveModel` writes
 // the step beside the optimizer state; the 4-arg `LoadModel` reads it back, so
 // a resume continues from the stored step instead of restarting the warmup. A
 // parameter-only file carries no step record and leaves the caller at zero.

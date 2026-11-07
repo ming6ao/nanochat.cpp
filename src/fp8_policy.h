@@ -5,7 +5,8 @@
 #include <cstdint>
 
 // The fp8 eligibility policy: which matrix multiplies convert to fp8, and the
-// scratch one conversion needs (docs/fp8-training.md sections 4.3 and 6.3, and
+// scratch one conversion needs (docs/precision.md Part 1, sections 4.3 and
+// 6.3, and
 // docs/performance-model.md section 5.2).
 //
 // It is a policy, not a graph piece, so it lives beside the performance model

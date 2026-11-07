@@ -4,7 +4,7 @@
 #include <string>
 #include <vector>
 
-// The `NCSFT001` SFT shard (docs/distributed-design.md Part 2, section 6.2).
+// The `NCSFT001` SFT shard (docs/distributed.md Part 1, section 6.2).
 // The file is a typed-record file with two int32 records, `tokens` and
 // `targets`, each of shape `[rows, seq]`. A target of -1 marks an ignored
 // position. Python writes it with `nanochat_cpp.sft.pack`, and

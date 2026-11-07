@@ -1,5 +1,5 @@
 // src/mesh_collective.cc -- the host in-process all-reduce
-// (docs/client-runtime-design.md section 9). See the header for the contract.
+// (docs/distributed.md Part 3, section 9). See the header for the contract.
 
 #include "src/mesh_collective.h"
 

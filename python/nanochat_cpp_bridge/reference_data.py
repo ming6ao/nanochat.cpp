@@ -8,10 +8,10 @@ per-token byte lengths. Two things it cannot do without an extra live here
 ``parquet_files(split)``
     The parquet paths of a split in dataset order, from
     ``nanochat.dataset.list_parquet_files``. The C++ reader expands and orders
-    them (``docs/parquet-native.md``).
+    them (``docs/data.md``).
 ``build_tiktoken_encoding(artifact)``, ``Nctoken1Tokenizer``, ``load_nctoken1``
     The ``tiktoken`` encoding built from an ``NCTOKEN1`` artifact, and the
-    reference tokenizer interface over it (``docs/tokenizer.md`` section 5).
+    reference tokenizer interface over it (``docs/data.md`` section 5).
 
 The artifact reader, :func:`nanochat_cpp.data.read_nctoken1`, and the pure
 derivations :func:`nanochat_cpp.data.mergeable_ranks` and
@@ -58,7 +58,7 @@ def parquet_files(split: str) -> list[str]:
 
     Train is all but the last file and val is the last file, matching the
     reference dataloader. The C++ reader expands and orders them
-    (``docs/parquet-native.md``). The reference package supplies the listing,
+    (``docs/data.md``). The reference package supplies the listing,
     so the reference checkout goes on ``sys.path`` first.
     """
     assert split in ("train", "val"), "split must be 'train' or 'val'"

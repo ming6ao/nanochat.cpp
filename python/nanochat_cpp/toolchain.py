@@ -289,7 +289,7 @@ class Toolchain:
 
         The rank values travel in the ``NANOCHAT_*`` environment, so ``argv``
         is the same for every rank; a ``{rank}`` token in an argument expands
-        to the rank index. See ``docs/distributed-design.md``.
+        to the rank index. See ``docs/distributed.md``.
         """
         return self._run(self.dist_argv(
             argv, nproc_per_node=nproc_per_node, device=device,
@@ -301,8 +301,8 @@ class Toolchain:
         """Run one client process under one queue job for the device set.
 
         The client enumerates every local device itself, builds one mesh, and
-        trains in one process. See ``docs/client-runtime-design.md`` section
-        14.
+        trains in one process. See ``docs/distributed.md`` Part 3,
+        section 14.
         """
         arguments = ["client"]
         if device is not None:

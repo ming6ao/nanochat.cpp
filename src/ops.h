@@ -42,7 +42,7 @@ inline float Sigmoid(float x) { return 1.0f / (1.0f + std::exp(-x)); }
 namespace ops {
 
 // The device form of one scalar argument, for a caller that keeps the value in
-// device memory (docs/scalar-arguments.md). A plain float converts implicitly,
+// device memory (docs/kernels.md). A plain float converts implicitly,
 // so a caller that holds the value passes it unchanged.
 inline ScalarArg DevScalar(const float* p) {
   ScalarArg arg;
@@ -331,7 +331,7 @@ struct BlockActivations {
   ComputeType* scratch_a = nullptr;
   ComputeType* scratch_b = nullptr;
   // The fp8 scratch for the eligible forward matmuls
-  // (docs/fp8-training.md section 6.3). Null in a dense build or on the
+  // (docs/precision.md Part 1, section 6.3). Null in a dense build or on the
   // evaluation path, so the same block forward serves both.
   Fp8Scratch fp8;
   // When set, attention reads these key/value rows instead of `k_final`/
@@ -372,7 +372,7 @@ struct BlockScratch {
   ComputeType* dpre = nullptr;
   ComputeType* dve = nullptr;
   // The fp8 scratch for the eligible backward matmuls
-  // (docs/fp8-training.md section 7). Null in a dense build.
+  // (docs/precision.md Part 1, section 7). Null in a dense build.
   Fp8Scratch fp8;
 };
 

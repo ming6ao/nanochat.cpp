@@ -118,7 +118,7 @@ cc_library(
 )
 
 # The GEMM entry point: cuBLAS for fp32, and cublasLt for the scaled fp8 path
-# (docs/fp8-training.md section 5.2).
+# (docs/precision.md Part 1, section 5.2).
 cuda_library(
     name = "gemm",
     srcs = ["gemm.cu"],
@@ -134,7 +134,7 @@ cuda_library(
 )
 
 # The `CreateGradientSync` factory for a CUDA build. The native ring is the one
-# collective (docs/distributed-design.md), so the target needs no selection:
+# collective (docs/distributed.md), so the target needs no selection:
 # `//backends/cuda/collective:native_sync` defines the symbol unconditionally.
 # The CPU backend keeps the host reference in `//src:distributed_host`.
 cc_library(

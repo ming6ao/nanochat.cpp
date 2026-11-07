@@ -9,7 +9,7 @@
 
 // Internal writer for the `NCTOKEN1` artifact. The public interface in
 // `nanochat/tokenizer.h` exposes the loader only. The trainer command line and
-// the tests use this writer (docs/tokenizer.md section 5).
+// the tests use this writer (docs/data.md section 5).
 
 namespace nanochat {
 

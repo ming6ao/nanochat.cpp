@@ -45,7 +45,7 @@ driver warm start uses the same parameter-only read.
 
 The C++ mesh training driver writes `metrics.jsonl` and `summary.json` in the
 run directory. The notebook polls the two files, so a cell never blocks on the
-training loop. See `docs/distributed-design.md` Part 2, section 6.6.
+training loop. See `docs/distributed.md` Part 1, section 6.6.
 
 ## Hugging Face Hub layout
 

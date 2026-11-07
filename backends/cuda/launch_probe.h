@@ -15,7 +15,7 @@
 // `BUILD.bazel` and nothing in `backends/cuda` links it.
 //
 // The quantities it carries are the design's, not this file's:
-// docs/muon-fused-kernel.md section 4 asks for 256 threads, a
+// docs/kernels.md section 4 asks for 256 threads, a
 // `__launch_bounds__(256, 3)` register budget, and dynamic shared memory of
 // about 12 KB, and section 8 asks the device how many such blocks fit.
 

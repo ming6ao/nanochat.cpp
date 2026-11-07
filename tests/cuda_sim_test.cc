@@ -20,7 +20,7 @@
 // non-null handle, and `__cudaRegisterFatBinary` returns a non-null token.
 //
 // And the three runtime names the fused Muon build asks for
-// (docs/muon-fused-kernel.md section 8): `cudaDevAttrCooperativeLaunch` answers
+// (docs/kernels.md section 8): `cudaDevAttrCooperativeLaunch` answers
 // 0 and the occupancy query answers 1, so a driver on the simulator takes the
 // phase loop rather than a grid barrier the mock cannot honour, and the
 // cooperative-kernel stub records the grid, block, and shared size it was given
@@ -256,7 +256,7 @@ void TestBlockLimit() {
              "a zero-sized block is rejected");
 }
 
-// The fused Muon driver's three runtime entry points (docs/muon-fused-kernel.md
+// The fused Muon driver's three runtime entry points (docs/kernels.md
 // section 8). A fused build asks all three even when the launch it finally
 // makes is the phase driver's, so the mock has to answer them and record what
 // it was told: a missing export is a symbol gate failure, and a silent stub

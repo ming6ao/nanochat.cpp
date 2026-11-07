@@ -470,7 +470,7 @@ void TestDocumentLoader() {
 // The data-cursor sidecar's layout, pinned byte for byte. Both distribution
 // drivers write it through one unit, and checkpoints written before that unit
 // existed still resume, so the bytes may not drift
-// (spec/api-surface.md R13, docs/distributed-design.md section 11).
+// (spec/api-surface.md R13, docs/distributed.md section 11).
 void TestDataCursorSidecar() {
   nanochat::DataLoaderState state;
   state.epoch = 2;
@@ -531,7 +531,7 @@ void TestDataCursorSidecar() {
 }
 
 // The data cursor resumes the exact document stream
-// (docs/distributed-design.md section 11). A loader consumes two batches and
+// (docs/distributed.md section 11). A loader consumes two batches and
 // records its cursor. A second loader, built with the sharded start that the
 // cursor implies, must produce the same third batch.
 void TestShardedResume() {

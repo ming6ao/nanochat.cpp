@@ -2,7 +2,7 @@
 // section 4). It holds the model and the optimizer across steps and speaks the
 // pipe protocol documented in `src/rl_worker.h`. The RL step is the shared
 // `nanochat::RlStep`, so the worker and the file-driven `rl_step` binary cannot
-// drift apart (docs/distributed-design.md Part 2, section 6.4).
+// drift apart (docs/distributed.md Part 1, section 6.4).
 
 #include "src/rl_worker.h"
 

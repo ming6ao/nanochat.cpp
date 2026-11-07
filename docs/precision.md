@@ -1,13 +1,20 @@
 # Precision policy
 
-Status: accepted. Stage 1 is complete. Stage 2 is delivered for the C++ and
-CUDA surfaces. This document defines the precision policy for every host. One
-build has one compute type. The production builds use fp32 and bf16 only, and
-the tree holds no fp16 code. The fp8 tier has its own document
-([fp8-training.md](fp8-training.md)), it is opt-in through `--config=fp8`, and
-it computes in bf16.
+One build has one compute type. The tree uses fp32 and bf16 only, holds no fp16
+code, and keeps every persistent buffer in fp32. The fp8 tier is opt-in on
+Hopper and Ada, and it computes in bf16.
 
-## 1. Decision
+Select the tier with a build configuration:
+
+```bash
+tools/nanochat build                     # fp32 on Pascal, Turing, and the CPU
+tools/nanochat build --config=bf16       # bf16 compute, fp32 state
+tools/nanochat build --config=hopper     # sm_90, bf16 compute
+tools/nanochat test --config=bf16
+tools/nanochat roofline --device h100 --precision bf16 --layers 20
+```
+
+## 1. The rule
 
 Use one rule for every device:
 
@@ -16,53 +23,35 @@ Use one rule for every device:
 3. Keep the persistent state in fp32 on every device.
 4. Do not use loss scaling. Neither fp32 nor bf16 needs it.
 
-Remove fp16 from the tree. The removal covers the production builds, the
-simulator, the emulator, the type system, the test legs, and the estimator.
+## 2. Why fp16 is gone
 
-This decision reverses the earlier choice twice. Commit `02c1dd6` kept an fp32
-master weight beside an fp16 compute copy. The first reversal removed that
-compute copy from the production path. The second reversal removes the
-test-only fp16 build as well. Section 6 lists the work.
+fp16 is the only format with a small exponent range.
 
-## 2. Reason
-
-fp16 is the odd format. It is the only format with a small exponent range.
-
-- bf16 has the fp32 exponent range. A tiny gradient does not underflow. bf16
+- bf16 has the fp32 exponent range. A tiny gradient does not underflow, so bf16
   needs no loss scaling.
-- fp16 has five exponent bits. A tiny gradient underflows. fp16 therefore needs
-  loss scaling and fp32 gradient storage.
-- On Pascal, fp16 runs at 0.177 TFLOP/s. The fp32 rate is 11.34 TFLOP/s. The
-  fp16 rate is 64 times slower.
-- On Turing, fp16 is the only accelerated format, and Turing has no bf16. The
-  fp16 peak there is 65 TFLOP/s. The fp32 peak is 8.1 TFLOP/s.
+- fp16 has five exponent bits. A tiny gradient underflows, so fp16 needs loss
+  scaling and fp32 gradient storage.
+- On Pascal, fp16 runs at 0.177 TFLOP/s against 11.34 TFLOP/s in fp32, which is
+  64 times slower.
+- On Turing, fp16 is the only accelerated format and there is no bf16. The fp16
+  peak is 65 TFLOP/s against 8.1 TFLOP/s in fp32.
 
-One card only gains from fp16. That card is the Turing T4. The gain costs a
-second compute type, a second storage tag, a loss-scaling project, an emulator
-header, and a second test leg.
-
-The test-only fp16 build costs more than it earns. It carries its own emulator
-header, its own tolerances, and its own simulator legs. The bf16 path replaces
-it, and the bf16 path needs no loss scaling and no second master weight.
-
-The PyTorch reference makes the same choice. It uses fp32 on pre-Ampere hardware
+One card gains from fp16: the Turing T4. The gain costs a second compute type, a
+second storage tag, a loss-scaling project, an emulator header, and a second
+test leg. The bf16 path replaces that build and needs no loss scaling. The
+PyTorch reference makes the same choice and uses fp32 on pre-Ampere hardware
 (`nanochat/common.py:17-32`).
 
 ## 3. Device capabilities
 
-The table is from `src/device_profile.cc`. The rates are dense (non-sparse).
+The table is from `src/device_profile.cc`. The rates are dense.
 
-| Device | Major.Minor | Tensor cores | fp32 | bf16 |
-|---|---|---|---|---|
-| t4 | 7.5 | yes | 8.1 TFLOP/s | none |
-| h100 | 9.0 | yes | 66.9 TFLOP/s | 989 TFLOP/s |
+| Device | Major.Minor | Tensor cores | fp32 | bf16 | fp8 |
+|---|---|---|---|---|---|
+| t4 | 7.5 | yes | 8.1 TFLOP/s | none | none |
+| h100 | 9.0 | yes | 66.9 TFLOP/s | 989 TFLOP/s | 1979 TFLOP/s |
 
-The table shows the decision. bf16 starts at Ampere. Turing has no bf16, so the
-T4 runs fp32.
-
-The device table drops the `supports_fp16` and `peak_fp16_flops` fields. The
-estimator drops its fp16 mode with them. The table and the builds agree on one
-precision set.
+The device table carries no fp16 field, and the estimator has no fp16 mode.
 
 ## 4. Policy per target
 
@@ -73,99 +62,45 @@ precision set.
 | Kaggle T4 | sm_75 | fp32 | fp32 | `--config=cuda --@rules_cuda//cuda:archs=sm_75` |
 | H100 | sm_90 | bf16 | fp32 | `--config=hopper` |
 
-The Ampere row is Stage 2, which is delivered (section 6).
+The `h100` and `h200` targets are sm_90 with bf16 and the simulator.
+`--config=bf16` selects the bf16 compute type on any architecture.
 
-The named targets follow the table. The `h100` and `h200` targets are sm_90 with
-bf16 and the simulator. `--config=bf16` selects the bf16 compute type on any
-architecture.
+## 5. The storage rule
 
-## 5. Storage rule
-
-This rule applies to bf16 and to fp32. It also applies to a later format.
+This rule applies to fp32, bf16, and fp8.
 
 Keep these buffers in fp32:
 
 - the master weights;
 - the parameter gradients;
 - the optimizer moments;
-- the norm statistics and the attention statistics.
+- the norm statistics and the attention statistics;
+- the loss, the softmax, and the row reductions.
 
 Use the compute dtype for the activations, the GEMM operands, and the key/value
 cache.
 
-bf16 has seven mantissa bits. A parameter update needs more precision than
+bf16 has seven mantissa bits, and a parameter update needs more precision than
 that. bf16 has the fp32 exponent range, so no scale is necessary.
 
 The checkpoint container is a storage format. It stores fp32 or bf16 records,
-and the record dtype is separate from the build compute dtype. Store the
+and the record dtype is separate from the build compute type. Store the
 canonical checkpoint in fp32. A bf16 container is a derived compact artifact.
+The `DType` codes 0, 1, and 2 stay; code 3 belonged to `kFp16` and stays
+reserved.
 
-The `DType` codes 0, 1, and 2 stay. The code 3 belongs to `kFp16`. Stage 1
-retires that tag and keeps the code reserved. Do not assign the code to a new
-format later. The container never stored an fp16 record, so no file migration is
-necessary.
-
-This rule is stricter than the reference. The reference keeps the matrix
-parameters in fp32, but it casts the embeddings to the compute dtype
-(`gpt.py:262-266`). Its embedding gradients are therefore bf16. This rule keeps
-every parameter gradient in fp32. That is a deliberate divergence.
+This rule is stricter than the reference. The reference keeps matrix parameters
+in fp32 but casts the embeddings to the compute dtype (`gpt.py:262-266`), so its
+embedding gradients are bf16. This tree keeps every parameter gradient in fp32.
 
 A bf16 build needs a mixed GEMM. The weight-gradient GEMM reads bf16 operands
-and writes an fp32 result. Use `cublasGemmEx` with `Atype = Btype =
+and writes an fp32 result, through `cublasGemmEx` with `Atype = Btype =
 CUDA_R_16BF`, `Ctype = CUDA_R_32F`, and `CUBLAS_COMPUTE_32F`.
 
-## 6. Staged rollout
-
-### Stage 1: remove fp16 from the tree (delivered)
-
-The removal is one change. Keep the fp32 gates green in that change.
-
-1. `include/nanochat/tensor.h`: delete the `Fp16` type, the half conversion
-   helpers, `DType::kFp16`, `DTypeTraits<Fp16>`, `Caps::supports_fp16`, and the
-   `NANOCHAT_PRECISION_FP16` branch of `ComputeType`.
-2. `include/nanochat/device_profile.h` and `src/device_profile.cc`: delete
-   `supports_fp16` and `peak_fp16_flops`, and the fp16 rate in every row.
-3. `include/nanochat/mfu.h` and `src/performance_model.cc`: delete
-   `ComputePrecision::kFp16` and the fp16 rows of the estimate.
-4. `include/nanochat/kernels.h`: update the two comments that name an fp16
-   build.
-5. `.bazelrc`, `BUILD.bazel`, and `nanochat.bzl`: delete the
-   `--config=fp16` setting, the `//:fp16` config, and the `PRECISION=fp16`
-   branch.
-6. `backends/cuda/gemm.cu`: delete the fp16 branch, the `HasTensorCores`
-   helper, and the `cuda_fp16.h` include.
-7. `backends/cpu/kernels.cc`: delete the half-storage branch.
-8. `tools/cuda_sim/emu/cuda_fp16.h`: delete the file, and delete its entry in
-   `tools/cuda_sim/emu/BUILD.bazel`.
-9. `tools/cuda_sim/emu/cuda_runtime.h` and `cuda_emu.h`: delete the fp16
-   intrinsics and the half atomic add.
-10. The kernel tests and the fixtures: delete the fp16 legs. Change
-    `//backends/cuda/kernels:precision_gpu_test` to a single fp32 build.
-11. `src/roofline_command.cc`: delete the `fp16` precision name.
-12. `python/nanochat_cpp/_build.py`: delete the fp16 precision mapping.
-13. `notebooks/kaggle_setup.py`: confirm that the default stays fp32.
-14. The documents: update `docs/build.md`, `docs/host-portability.md`,
-    `docs/simulator.md`, `docs/simulator.md`, `docs/testing.md`, and
-    `docs/python.md`.
-15. `docs/performance-model.md`: delete the fp16 column, and keep the fp32 and
-    bf16 columns.
-
-Gate: `tools/nanochat build`, `tools/nanochat test`, and `tools/nanochat lint`
-pass. The fp32 numeric trace passes on the central processing unit, the
-simulator, and the graphics card. The `sm_90` compile gate passes at fp32. No
-target name, flag, or type name contains "fp16".
-
-Result: the gate passes. `tools/nanochat build`, `tools/nanochat test`, and
-`tools/nanochat lint` pass. The fp32 numeric trace passes on the central
-processing unit and the simulator. The `sm_90` compile gate passes at fp32. No
-target name, flag, or type name contains "fp16".
-
-### Stage 2: add the bf16 compute path for Ampere and newer (delivered)
+## 6. The bf16 compute path
 
 The tree has the `Bf16` type, the `DType::kBf16` tag, device-profile bf16
-support, and bf16 peak rates. This stage adds the compute path.
-
-Use this type contract:
+support, and bf16 peak rates. The compute path follows this contract:
 
 - Keep master weights, parameter gradients, optimizer state, loss values, and
   reduction statistics in fp32.
@@ -176,149 +111,415 @@ Use this type contract:
 - Accumulate embedding gradients directly into fp32 parameter-gradient buffers.
 - Round each stored bf16 value to nearest-even. Do not use loss scaling.
 
-Delivered:
+The mechanism:
 
-1. `ComputeType` selection. `include/nanochat/tensor.h` maps the build value
-   `NANOCHAT_PRECISION` to `BuildPrecision`: `float` for fp32, and `Bf16` for
-   bf16 and fp8. The bf16 item adds `Bf16(float)`, `operator float`, and the
-   compound assignments, and the conversion helpers are `__host__ __device__`.
-2. `GradientType` is fp32 in every build. `ParamView::grad` and the optimizer
-   buffers use it, so a parameter gradient is never bf16.
-3. `Caps::supports_bf16`. `CapsFromProfile` copies it from the device profile,
-   the CUDA backend sets it from `major >= 8`, and the CPU reference reports it.
-   `Caps::Supports(DType::kBf16)` reports it. `Model::Create` fails fast when
-   the build compute type is not supported by the device.
-4. A CPU bf16 reference path. The reference stores bf16 where the compute type
-   is bf16 and accumulates in fp32 or double, so the CPU records the same
-   rounding the device does.
-5. The bf16 GEMM. `Gemm` uses `cublasGemmEx` with `CUDA_R_16BF` operands and
-   `CUBLAS_COMPUTE_32F`. The new `GemmWgrad` entry point writes an fp32 result,
-   so the weight-gradient GEMM reads bf16 operands and accumulates into fp32.
-6. The CUDA bf16 kernels. `AtomicAddDev` gains a bf16 compare-and-swap form
-   (a half-word write cannot use the native atomic add), and the embedding
-   scatter-add, the value-gate weight gradient, and the global norm write fp32.
-7. The optimizer path. `AdamWUpdate` and `MuonUpdate` read fp32 gradients and
-   keep fp32 moments, then write the bf16 compute copy.
-8. The checkpoint path. The canonical record stays fp32. `CollectModelRecords`
-   reads the master, a load writes the master and rebuilds the compute copy,
-   and a load accepts an fp32 or a bf16 record in any build.
-9. `--config=bf16`. The `h100` and `h200` targets at sm_90 select bf16 too.
-10. The Python surface. `Model.dtype` and `TensorView.dtype` report the compute
-    type, and the parameter view reads and writes Python floats for both
-    fp32 and bf16.
-11. The simulator and the emulator. The simulated device reports
-    `supports_bf16`, the emulator tests bf16 conversion, and the kernel
-    emulator tolerance carries the bf16 storage granularity.
-12. The chain as the integration leg. `python/nanochat_cpp/pipeline.py` runs
-    base, SFT, RL, and eval on a bf16 build, and the Modal H100 leg of it runs
-    that chain on real Hopper silicon at `sm_90`. The paragraph of
-    [the integration leg](#the-integration-leg-the-chain-on-two-cards) below
-    states what that proves.
+- `ComputeType` is chosen at build time. `include/nanochat/tensor.h` maps
+  `NANOCHAT_PRECISION` to `BuildPrecision`: `float` for fp32, and `Bf16` for
+  bf16 and fp8.
+- `GradientType` is fp32 in every build, so a parameter gradient is never bf16.
+- `Caps::supports_bf16` comes from the device profile, and the CUDA backend sets
+  it from `major >= 8`. `Model::Create` fails fast when the build compute type
+  is not supported by the device.
+- The CPU reference stores bf16 where the compute type is bf16 and accumulates
+  in fp32 or double, so the CPU records the same rounding the device does.
+- `Gemm` uses `cublasGemmEx` with `CUDA_R_16BF` operands and
+  `CUBLAS_COMPUTE_32F`. `GemmWgrad` writes an fp32 result.
+- `AtomicAddDev` gains a bf16 compare-and-swap form, because a half-word write
+  cannot use the native atomic add.
+- `AdamWUpdate` and `MuonUpdate` read fp32 gradients, keep fp32 moments, and
+  write the bf16 compute copy.
+- `CollectModelRecords` reads the master, a load writes the master and rebuilds
+  the compute copy, and a load accepts an fp32 or a bf16 record in any build.
+- `Model.dtype` and `TensorView.dtype` report the compute type, and the
+  parameter view reads and writes Python floats in both builds.
 
-Gate: `tools/nanochat build`, `tools/nanochat build --config=bf16`,
-`tools/nanochat test`, `tools/nanochat test --config=bf16`, and
-`tools/nanochat lint` pass. The compile gate passes for `h100` and `h200`. The
-fp32 build keeps every committed fp32 golden.
-
-#### The integration leg: the chain on two cards
-
-The chain is the tier's integration leg: it is the one place where a bf16 build
-runs a whole workflow, not a single gate. `python/nanochat_cpp/pipeline.py` runs
-base training, SFT, RL, and the in-process evaluation, and the Modal H100 leg of
-`tools/modal/app.py` runs that chain on a real Hopper card: the image builds at
-`bf16` for `sm_90`, and gate G1 of
-[post-training.md](post-training.md) Part 3, section 8 reads three facts
-that have to agree: `host.precision` is `bf16`, `host.arch` is `sm_90`, and the
-delivered RL checkpoint records `bf16`.
-
-The T4 leg is the fp32 control. It runs the same job at fp32 on `sm_75`, so the
-two reports differ in precision and in nothing else that the job sets: gates G2
-and G3 compare the two base step times, the one against the other and the H100
-one against the roofline prediction. That pair is what a bf16 integration run
-means here. It is not a throughput claim: at 64 tokens per step both legs are
-bound by launches and by the host program, so the step times agree to within a
-smoke-check tolerance and neither says what the card can do
-([performance-model.md](performance-model.md) section 7.3).
-
-The startup hardware check also runs on the H100 leg, and it keys on the card
-and not on the build: under that bf16 build it casts through the shared fp8
-rounding header, runs the scaled fp8 GEMM cases, and runs the attention tile. So
-the leg proves the bf16 chain and the fp8 operators below it, and it proves
-nothing about the fp8 training graph ([fp8-training.md](fp8-training.md)).
-
-#### What the bf16 leg does not cover yet
+## 7. Testing a bf16 build
 
 A bf16 build cannot reproduce a committed fp32 golden, so a test that compares
-against one prints a skip. Those tests keep their full strength in the fp32
-build. The skipped legs are the numeric trace, the oracle, the training parity,
-the scoring parity, the model oracle, the model gradient, and the two Python
-fixtures. A bf16 build still runs every one of those code paths through the
-tests that do not compare against a golden. The in-build two-path checks run in
-both builds with a precision-aware bound.
+against one prints a skip. Those tests keep full strength in the fp32 build. The
+skipped legs are the numeric trace, the oracle, the training parity, the scoring
+parity, the model oracle, the model gradient, and the two Python fixtures.
 
-The bf16 trace leg now runs. The fixture carries an fp32, a bf16, and an fp8
-section, and a bf16 build compares its own section byte for byte. The section is
-produced by the bf16 CPU emitter through `tools/dump_fixtures.py numerics`. The
-fp32 trace stays unchanged. Other documents call this stage "Stage 2a".
+A bf16 build still runs every one of those code paths through the tests that do
+not compare against a golden. The in-build two-path checks run in both builds
+with a precision-aware bound.
 
-## 7. What this avoids
+The numeric trace has its own bf16 leg. The fixture carries an fp32, a bf16, and
+an fp8 section, and a bf16 build compares its own section byte for byte through
+`tools/dump_fixtures.py numerics`.
 
-Stage 1 removes the fp16 emulator header, the second set of tolerances, the
-fp16 test leg, and the fp16 simulator legs.
+The integration leg is the chain:
+`python/nanochat_cpp/pipeline.py` runs base, SFT, RL, and eval on a bf16 build,
+and the Modal H100 leg of `tools/modal/app.py` runs that chain on real Hopper
+silicon at `sm_90`. The T4 leg is the fp32 control: the same job at fp32 on
+`sm_75`, so the two reports differ in precision and in nothing else the job
+sets.
 
-Stage 2 removes the loss-scaling project:
+## 8. Limits
 
-- the dynamic scale, the growth, and the backoff;
-- the inf and nan detection and the step skip;
-- the half to fp32 gradient unscale.
+- **The T4 is the Kaggle target, and Turing has no bf16.** It runs fp32 at 8.1
+  TFLOP/s. Do not restore fp16 and do not start a loss-scaling project; reduce
+  the model size instead.
+- **The attention kernel does not use tensor cores today.** It runs at the fp32
+  rate in either build, so the realized T4 loss is below 8 times.
+- **The fp32 build stays the correctness gate.** Every fp32 test keeps its
+  recorded tolerance, and a bf16 golden is a skip and not a pass.
+- **The precision is a build decision.** There is no runtime precision switch
+  ([../README.md](../README.md) § What this is not).
 
-Stage 2 keeps one fp32 master weight and adds a bf16 compute copy for bf16
-builds. In an fp32 build, the master weight still aliases the parameter.
+## Part 1. The fp8 tier
 
-The checkpoint format is precision-independent. The model saves an fp32 master
-with no dtype tag (`src/model.cc:1040`). No migration is necessary.
+The fp8 tier is `--config=fp8`. It computes in bf16 with fp8 GEMM operands, and
+it requires compute capability 8.9 or 9.0. Hopper reports 9.0 and Ada reports
+8.9. Ampere reports 8.0, and its tensor cores have no fp8 mode.
 
-## 8. Risks
+### 1. Goal and scope
 
-- The T4 is the Kaggle target (`docs/build.md`). The T4 loses the tensor-core
-  rate, because Turing has no bf16. The peak fp16 rate is 65 TFLOP/s. The fp32
-  rate is 8.1 TFLOP/s. Section 9 records the answer.
-- The attention kernel does not use tensor cores today (`docs/build.md`).
-  Attention runs at the fp32 rate in either case. The realized loss is below
-  8 times.
-- Stage 1 touches every backend, the simulator, and the tests. Stage 2 touches
-  the same set again, because the fp32 build stays the correctness gate and
-  must pass unchanged.
-- The `h200` target is sm_90 with bf16, like `h100`.
-- A bf16 build cannot reproduce a committed fp32 golden, so the golden-fixture
-  gates run in the fp32 build and print a skip in the bf16 build. The bf16
-  numeric trace is the remaining leg (section 6).
-- Stage 2 is new code. The fp32 build is still the correctness gate, and the
-  tree keeps every fp32 test at its recorded tolerance.
+Apply fp8 to the matrix multiplies, keep every other layer in bf16 or fp32, and
+keep every persistent value in fp32. The parity target is the reference
+`--fp8` path in `nanochat/fp8.py`.
 
-## 9. Decisions on the former open questions
+### 2. What the tree holds
 
-1. **The T4 training speed.** The Kaggle T4 target runs fp32 and keeps it. Do
-   not restore fp16. Do not start a loss-scaling project. Record the measured
-   step time for the Kaggle shape in `docs/performance.md`. If the step time is
-   not acceptable, reduce the model size. Do not add a second compute type.
-2. **The fp16 central processing unit emulation.** Remove it. Remove fp16
-   support everywhere. The simulator covers fp32 until Stage 2 adds bf16.
-3. **The first Ampere target.** Use sm_80 as the first Ampere target. bf16
-   starts at sm_80. The `h100` and `h200` targets (sm_90) reuse the same
-   precision config. The gate order was an sm_80 profile under the simulator,
-   then an sm_80 card, then an sm_90 card. The declaration now keeps the two
-   cards the tree runs on, `h100` and `t4`, so no sm_80 profile remains.
-4. **The dangling references.** Fixed in Stage 1. `.bazelrc` points to
-   `docs/build.md` and `docs/python.md`. `tools/sandbox/profiles.json` points to
-   `docs/host-portability.md`.
-5. **The bf16 gate.** The fp32 build stays the golden gate. In a bf16 build the
-   golden-fixture tests print a skip, and the in-build equality checks run with a
-   bound derived from the storage precision. The bf16 numeric trace becomes the
-   bf16 gate when it lands.
+`backends/cuda/kernels/fp8.cu` holds the quantize side and the shared rounding
+function. `GemmScaledFp8` runs through `cublasLt` in `backends/cuda/gemm.cu`.
+`src/fp8_policy.h` decides which operation is eligible. The simulator rounds fp8
+values without a GPU ([simulator.md](simulator.md) Part 7).
+
+### 3. The precision tier
+
+#### 3.1 The storage tags
+
+`DType` gains `kFp8E4M3` and `kFp8E5M2`, one byte each. The existing tags keep
+their values, and `kComputeDType` does not change, so the on-disk contract does
+not change. The checkpoint container stays fp32.
+
+| Format | Exponent bits | Mantissa bits | Largest value | Use |
+|---|---|---|---|---|
+| E4M3 | 4 | 3 | 448 | Forward operands |
+| E5M2 | 5 | 2 | 57344 | Backward operands |
+
+Use the finite encoding. The reference calls it `torch.float8_e4m3fn`, and
+cuBLAS names it `CUDA_R_8F_E4M3`. This form has no infinity. `E4M3FNUZ` is a
+different encoding with a different bias and no negative zero, and the two must
+never mix.
+
+#### 3.2 The rule that keeps the rest in fp32
+
+The rule of section 5 applies unchanged: master weights, parameter gradients,
+optimizer moments, and every statistic stay fp32. Use fp8 only for the GEMM
+operands and the activations that feed them.
+
+An fp8 value carries a scale, and the scale is a separate fp32 device scalar.
+Never fold the scale into the loss. The logits tensor takes the compute type,
+and the softcap, the softmax, the cross-entropy, and every reduction stay fp32.
+
+### 4. Scaling
+
+#### 4.1 The scale rule
+
+fp8 has few mantissa bits, so a raw cast loses most of the range. Apply one
+scale to each operand, derived from the largest absolute value of the tensor.
+
+```text
+fp8_max = 448        for E4M3
+fp8_max = 57344      for E5M2
+
+scale   = fp8_max / max(amax, 1e-12)
+scaled  = clamp(value * scale, -fp8_max, fp8_max)
+fp8     = cast(scaled)
+value  ~= fp8 / scale
+```
+
+Three points matter.
+
+1. **The clamp is required.** A cast without the clamp does not saturate. In the
+   `E4M3FN` encoding a large value overflows to NaN, so the reference clamps to
+   `fp8_max`.
+2. **The `1e-12` floor is required.** An all-zero tensor has an amax of zero,
+   and the scale would be infinite.
+3. **Two names exist for the same number.** The kernel writes the multiplier.
+   The `cublasLt` scale pointer is the dequantization value, so it takes
+   `1 / scale`.
+
+Use one scale per tensor. This is the tensorwise mode, and it is the reference
+default and the only recipe the reference implements. A rowwise scale needs a
+CUTLASS kernel and is later work.
+
+The GEMM receives the scale as a pointer, so the tensor core applies it during
+the multiply and the host pays for no second pass. Round to nearest with ties to
+even, once, in the shared function of `include/nanochat/fp8.h`, so the central
+processing unit, the emulator, and the device agree.
+
+#### 4.2 The amax source: dynamic
+
+The scale comes from the amax of the operand in the same step. The tree keeps no
+amax history and no decay:
+
+1. Measure the amax of the tensor on the device.
+2. Derive the scale on the device, with the floor above.
+3. Cast the tensor with that scale, in the same fused kernel.
+4. Keep the fp8 tensor and its scale for the step, and reuse them for every GEMM
+   that reads the tensor.
+
+Dynamic scaling is what the reference does, so parity is direct. The estimator
+prices the cast at five bytes of traffic per element: measure, then read and
+write. There is no persistent state, so a resume reproduces exactly.
+
+The host never reads the amax, so no device synchronization occurs. A delayed
+amax history with a decay is the NVIDIA Transformer Engine scheme. It saves one
+read of the operand and needs its own parity record.
+
+#### 4.3 Where the scales live
+
+Store the fp8 operand and its scale in the workspace beside the tensor they
+describe. The slot list stays static, with one byte slot per quantized tensor
+and one fp32 slot per scale. The checkpoint stores no scale state, because the
+scale is derived within the step.
+
+### 5. The GEMM seam
+
+#### 5.1 The new entry point
+
+The existing entry point takes `ComputeType` pointers. A second entry point
+carries scaled fp8, so the Pascal, Turing, and CPU backends keep one code path:
+
+```cpp
+struct ScaledGemmParams {
+  int m, n, k, batch_count;
+  float alpha, beta;
+  bool transpose_a, transpose_b;
+  bool fast_accum;       // reduced-precision reduction; forward only
+  const float* scale_a;  // the dequantization value, 1 / scale
+  const float* scale_b;
+};
+
+void GemmScaledFp8(GemmMode mode, const ScaledGemmParams& params,
+                   const std::uint8_t* a, const std::uint8_t* b, float* c);
+```
+
+Four design points matter:
+
+1. The accumulator and the output stay fp32. `C` is `float*`.
+2. The operand type is `std::uint8_t*`, not `ComputeType*`, so the header holds
+   no vendor type ([build.md](build.md#dependency-invariants) rule 3).
+3. There is no C scale. The caller passes `beta = 0` for a pure overwrite.
+4. `transpose_a` and `transpose_b` describe the logical layout. The backend maps
+   them to the `cublasLt` stride triplets.
+
+`include/nanochat/kernels.h` is frozen and architect-owned. This change is
+additive, so it follows the evolution rules of
+[model-and-device-bringup.md](model-and-device-bringup.md) §18.
+
+#### 5.2 The cuBLASLt call
+
+Only `cublasLtMatmul` accepts the scale pointers:
+
+1. Create a matrix layout for A, for B, and for C.
+2. Create a matrix multiply descriptor.
+3. Set the scale pointers on the descriptor.
+4. Ask for a heuristic with `cublasLtMatmulAlgoGetHeuristic`.
+5. Call `cublasLtMatmul`.
+
+| Field | Value |
+|---|---|
+| A type, B type | `CUDA_R_8F_E4M3` in the forward, `CUDA_R_8F_E5M2` in the backward |
+| C type | `CUDA_R_32F` |
+| Compute type | `CUBLAS_COMPUTE_32F` |
+| Scale type | `CUDA_R_32F` |
+| Scale attribute | `CUBLASLT_MATMUL_DESC_A_SCALE_POINTER`, `..._B_SCALE_POINTER` |
+| Fast accumulation | `CUBLASLT_MATMUL_DESC_FAST_ACCUM`: on in the forward, off in the backward |
+
+Fast accumulation changes the numerics. The reference sets `use_fast_accum=True`
+in the forward and `False` in the two backward GEMMs, and the fp8 parity bounds
+record the setting. `cublasLt` ships with the CUDA toolkit, so it is not a new
+third-party dependency. The backend gains one link edge, `@cuda//:cublasLt`.
+
+`cublasLtMatmul` needs a workspace for some algorithms. Use the existing
+workspace allocator, and size the request from the heuristic.
+
+#### 5.3 The capability gate
+
+Add the gate in three places: `Caps::supports_fp8`, `DeviceProfile::supports_fp8`,
+and the model-creation check in `Model::Create`, beside the compute-dtype check.
+
+A build with fp8 on a device without support must fail when the model is
+created. Do not fall back at runtime, because
+[../README.md](../README.md) § What this is not forbids a runtime precision
+branch. The host toolkit must be CUDA 11.8 or newer, and the pinned toolkit is
+CUDA 12.0.
+
+### 6. The layer set
+
+#### 6.1 The rule from the reference
+
+The reference applies `--fp8` through a module filter. A matrix multiply
+converts when all three conditions hold:
+
+1. it is a matrix multiply;
+2. both dimensions are divisible by 16;
+3. the smaller dimension is at least 128.
+
+The first condition excludes the gather, the row kernels, and the optimizer. The
+second is a hardware requirement of the fp8 tensor core. The third excludes the
+small gate matrices, which lose more than they gain.
+
+The token embedding and the value embeddings are gathers, so they never convert.
+The reference casts them to the compute type for the forward and keeps the fp32
+master. `src/fp8_policy.h` implements the rule as the one assignment.
+
+#### 6.2 The assignment at depth 24
+
+| Operation | Precision | Reason |
+|---|---|---|
+| `c_q`, `c_k`, `c_v`, `c_proj` | fp8 | A matrix, and both dimensions are 1536 |
+| `mlp.c_fc`, `mlp.c_proj` | fp8 | A matrix, 1536 by 6144 |
+| the language-model head | fp8 | A matrix, 1536 by 32768 |
+| the logits tensor | the compute type (bf16) | the GEMM writes the compute type |
+| the softcap and the softmax | the compute type; the statistics fp32 | a row kernel, and the reduction stays fp32 |
+| the loss | fp32 | the loss must stay fp32 |
+| `ve_gate` | bf16 | the output width is 12, below 128 |
+| `smear_gate` | bf16 | the output width is 24, below 128 |
+| the embedding | bf16 | a gather, not a matrix multiply |
+| `rms_norm`, rope, `qk_prep` | bf16 | a row kernel |
+| the attention | bf16 | the reference attention engine runs the compute type |
+| the value residual and the backout | bf16 | a row blend |
+| AdamW and Muon | fp32 | the optimizer state stays fp32 |
+| the gradient all-reduce | fp32 | the reduction operand stays fp32 |
+
+A weight has three forms: the fp32 master, the fp8 operand, and the fp8 scale.
+Keep the fp8 operand and the scale as workspace slots, and rebuild them once per
+step. Do not build a separate bf16 copy of an eligible weight.
+
+#### 6.3 The two costs that come with fp8
+
+1. **The cast.** One kernel per operand measures the amax, computes the scale,
+   and writes the fp8 value. A fused kernel moves about five bytes per element.
+   An unfused sequence of calls moves six times that, and it makes fp8 slower
+   than bf16. Fuse the amax, the scale, and the cast.
+2. **The layout.** The fp8 GEMM engine requires operand A row-major and operand
+   B column-major. Store each weight in the layout the GEMM wants, once at load
+   time, and never copy it every step.
+
+#### 6.4 The evaluation precision
+
+Evaluation and generation run in the compute type, not in fp8. The reference
+disables fp8 around every evaluation call, because an fp8 forward changes the
+sampled logits. Match it: do not build fp8 operands on the evaluation path. An
+`eval` path that runs fp8 needs a new decision and a new parity record.
+
+### 7. The backward pass
+
+The backward pass has two matrix multiplies per weight. Both need fp8 operands
+for the rate, and both need an fp32 accumulator.
+
+| Call | Operand A | Operand B | Accumulator | Output |
+|---|---|---|---|---|
+| Forward | the activation, E4M3 | the weight, E4M3 | fp32 | the compute type |
+| Input gradient (dgrad) | the output gradient, E5M2 | the weight, E4M3 | fp32 | the compute type |
+| Weight gradient (wgrad) | the output gradient, E5M2 | the activation, E4M3 | fp32 | fp32 |
+
+E5M2 has a wider range, and a gradient has a wider spread than an activation,
+so the gradient operand takes E5M2. Both gradient GEMMs share the
+output-gradient operand and its scale. The input gradient is an activation for
+the next layer, so it takes the compute type; the weight gradient is a
+persistent parameter gradient, so it stays fp32.
+
+Four hazards follow:
+
+1. **The layout.** `cublasLtMatmul` accepts a limited set of fp8 layouts, and the
+   three GEMMs disagree.
+
+   | GEMM | Operand A | Operand B |
+   |---|---|---|
+   | Forward | the activation, row-major | the weight transpose, column-major |
+   | Input gradient | the output gradient, row-major | the weight, column-major |
+   | Weight gradient | the output gradient transpose, row-major | the activation, column-major |
+
+   A weight stored `[N, K]` row-major gives its `[K, N]` column-major transpose
+   as operand B with no copy, so one buffer serves the forward and the input
+   gradient. The fused cast writes the activation in both layouts, and the
+   backward reads the output gradient with a column-major stride, which removes
+   both rearrangements the reference needs.
+2. **The scale direction.** The wgrad operand is an activation that the forward
+   pass already quantized. Reuse its scale, and do not compute a second scale
+   for the same tensor in one step.
+3. **The cast count.** An operand that the forward pass already quantized must
+   not be quantized again. Reuse the stored fp8 tensor and its scale.
+4. **The shared output gradient.** One output gradient feeds both gradient
+   GEMMs of a layer. Quantize it once per layer, and pass the same tensor and
+   scale to both.
+
+Set fast accumulation off in both backward GEMMs. Keep the parameter gradient in
+fp32 from the moment the fp32 accumulator writes it, and never quantize it.
+
+#### 7.1 A staged choice
+
+A safe first implementation uses fp8 in the forward only and bf16 in the
+backward, because the backward carries the smaller arithmetic share and the bf16
+path already exists. Add fp8 to the backward after the forward gates pass, and
+measure both. [performance-model.md](performance-model.md) holds the bound for
+each option.
+
+### 8. The optimizer and the checkpoint
+
+The optimizer needs no change. The master weight, the moments, and the update
+stay fp32, and the fp8 operand is a derived buffer the optimizer never reads.
+The reference shares the parameter the same way through
+`Float8Linear.from_float`.
+
+The checkpoint needs no addition, because the tree keeps no scale state: a
+resume reproduces every scale exactly. An fp8 build writes an fp32 checkpoint,
+and `src/train.cc` already converts a non-fp32 compute type to fp32 on save.
+
+### 9. Invariants
+
+1. The loss, the optimizer state, the norms, and the statistics are fp32.
+2. No runtime precision switch exists. The precision is a build decision.
+3. The fp8 GEMM writes a `float` accumulator.
+4. Every fp8 operand has a scale, and no scale is null in a call.
+5. The scale is derived from the current operand in the same step, before the
+   first GEMM that reads it. The tree keeps no decayed history.
+6. The kernel seam holds no vendor type.
+7. The simulator validates every fp8 call shape without a GPU.
+8. The scale is a device scalar, and the host does not read the amax in a step.
+9. The fp8 cast saturates: a value above `fp8_max` clamps to `fp8_max`.
+10. Evaluation and generation run in the compute type.
+
+### 10. Validation
+
+The first six checks need no GPU.
+
+1. The shared fp8 rounding rule, which covers the saturation, the floor, and
+   round-to-nearest-even. The CPU emulation and the simulator share one
+   function, so one test proves both. Gate `//tests:fp8_rounding_test`.
+2. The emulated scaled GEMM against the CPU fp32 reference, at the shapes in the
+   model. Gate `//tests:fp8_gemm_test`, plus the fp8 leg of
+   `//tests:kernel_emu_test`.
+3. The finite-difference check for the fp8 attention and MLP backward.
+4. One fp8 forward and one training step against the reference trajectory,
+   through the fp8 section of `tests/data/numerics_golden_10l.bin`.
+5. The graph check, `//tests:fp8_graph_test`, which runs the layer set, the
+   operand formats, and the fp32 state on the simulator.
+6. `tools/nanochat simulate --device h100 --suite all`, which validates every
+   call shape and the `cublasLt` symbols without a card.
+7. One H100 run of `--config=fp8` on the depth-24 shape, with the step time and
+   the loss in [baselines.json](baselines.json).
+
+### 11. Non-goals
+
+- A rowwise scale, which needs a CUTLASS kernel.
+- A delayed amax history with a decay.
+- fp8 evaluation and generation.
+- fp8 for the embeddings, the row kernels, the optimizer, or the gradient
+  all-reduce.
+- fp8 on Ampere, whose tensor cores have no fp8 mode.
 
 ## See also
 
 - [build.md](build.md) — backends and the build configuration.
-- [host-portability.md](host-portability.md) — the host and the Kaggle procedure.
-- [kernels.md](kernels.md) — the backend seam.
+- [kernels.md](kernels.md) — the backend seam and the GEMM entry points.
+- [performance-model.md](performance-model.md) — the precision assignment in the
+  analytic model.
+- [host-portability.md](host-portability.md) — the host and the Kaggle
+  procedure.
