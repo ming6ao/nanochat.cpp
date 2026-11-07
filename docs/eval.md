@@ -275,8 +275,8 @@ The arena contains three groups:
 | Backward and global scratch | `dx_*`, `g_a_`, `g_b_`, `block_scratch_` | `33 * R * hidden` |
 
 Here `R` is `batch * seq`. For `R = 32768`, `hidden = 768`, `L = 12`, and
-`padded_vocab = 32768`, the total is about 36 GB in fp32. The 11 GB card cannot
-hold it.
+`padded_vocab = 32768`, the total is about 36 GB in fp32. No supported card
+holds it.
 
 ### 3. Mechanism
 
@@ -418,7 +418,7 @@ At `batch = 32`, `seq = 1024`, 12 layers, fp32:
 | Grad mode, no tiling | about 7 GB |
 | Grad mode with tiling | about 3 GB |
 
-The last row fits the 11 GB card. The base evaluation gate then matches the
+The last row fits the T4's 16 GB. The base evaluation gate then matches the
 reference batch size.
 
 ### 12. Reproduction

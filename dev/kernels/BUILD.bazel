@@ -1,10 +1,9 @@
-# dev/kernels — standalone prototypes and the P0 CUDA/Pascal toolchain spike.
+# dev/kernels — standalone prototypes.
 #
 # The per-family correctness tests and the micro-benchmarks now live next to
 # the kernels they cover, in backends/cuda/kernels/. This package holds only
 # work that is not promoted: the combined QkPrep fusion prototype, the
-# decode-path CUDA-graph baseline, the toolchain spike, and one CPU build smoke
-# test.
+# decode-path CUDA-graph baseline, and one CPU build smoke test.
 #
 # See dev/kernels/README.md and docs/testing.md.
 
@@ -19,33 +18,6 @@ load(
 )
 
 package(default_visibility = ["//visibility:public"])
-
-# One kernel, compiled for the default sm_61 (and sm_75 via
-# --@rules_cuda//cuda:archs=sm_75).
-cuda_library(
-    name = "pascal_spike",
-    srcs = ["pascal_spike.cu"],
-    hdrs = ["pascal_spike.h"],
-    copts = nanochat_cuda_copts(),
-    defines = precision_defines(),
-    alwayslink = True,
-)
-
-# gpu + small: a gate, not an iteration tool. Not tagged `manual` so that
-# `tools/nanochat test --gpu //...` discovers it; the CPU loop excludes it with
-# `--test_tag_filters=-gpu`.
-cc_test(
-    name = "pascal_spike_gpu_test",
-    srcs = ["pascal_spike_test.cc"],
-    copts = nanochat_copts(),
-    defines = precision_defines(),
-    deps = [
-        ":pascal_spike",
-        "//include/nanochat:nanochat",
-    ],
-    size = "small",
-    tags = ["gpu"],
-)
 
 # CPU smoke test: keeps the default (non-GPU) test loop non-empty and checks
 # that the precision config and the sandbox guard are wired.
@@ -255,7 +227,6 @@ test_suite(
     tests = [
         ":build_config_test",
         ":muon_fused_gemm_gpu_test",
-        ":pascal_spike_gpu_test",
         ":qk_prep_fused_gpu_test",
     ],
 )

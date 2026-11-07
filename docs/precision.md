@@ -7,7 +7,7 @@ Hopper and Ada, and it computes in bf16.
 Select the tier with a build configuration:
 
 ```bash
-tools/nanochat build                     # fp32 on Pascal, Turing, and the CPU
+tools/nanochat build                     # fp32 on Turing and the CPU
 tools/nanochat build --config=bf16       # bf16 compute, fp32 state
 tools/nanochat build --config=hopper     # sm_90, bf16 compute
 tools/nanochat test --config=bf16
@@ -18,7 +18,7 @@ tools/nanochat roofline --device h100 --precision bf16 --layers 20
 
 Use one rule for every device:
 
-1. Use fp32 for the compute on Pascal, Turing, and the central processing unit.
+1. Use fp32 for the compute on Turing and the central processing unit.
 2. Use bf16 for the compute on Ampere and newer.
 3. Keep the persistent state in fp32 on every device.
 4. Do not use loss scaling. Neither fp32 nor bf16 needs it.
@@ -31,8 +31,6 @@ fp16 is the only format with a small exponent range.
   needs no loss scaling.
 - fp16 has five exponent bits. A tiny gradient underflows, so fp16 needs loss
   scaling and fp32 gradient storage.
-- On Pascal, fp16 runs at 0.177 TFLOP/s against 11.34 TFLOP/s in fp32, which is
-  64 times slower.
 - On Turing, fp16 is the only accelerated format and there is no bf16. The fp16
   peak is 65 TFLOP/s against 8.1 TFLOP/s in fp32.
 
@@ -57,7 +55,6 @@ The device table carries no fp16 field, and the estimator has no fp16 mode.
 
 | Target | Arch | Compute | Persistent state | Config |
 |---|---|---|---|---|
-| Workstation | sm_61 | fp32 | fp32 | default |
 | Central processing unit and continuous integration | none | fp32 | fp32 | default |
 | Kaggle T4 | sm_75 | fp32 | fp32 | `--config=cuda --@rules_cuda//cuda:archs=sm_75` |
 | H100 | sm_90 | bf16 | fp32 | `--config=hopper` |
@@ -282,7 +279,7 @@ scale is derived within the step.
 #### 5.1 The new entry point
 
 The existing entry point takes `ComputeType` pointers. A second entry point
-carries scaled fp8, so the Pascal, Turing, and CPU backends keep one code path:
+carries scaled fp8, so the Turing and CPU backends keep one code path:
 
 ```cpp
 struct ScaledGemmParams {

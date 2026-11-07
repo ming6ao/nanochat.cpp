@@ -79,8 +79,8 @@ mask = (caps.json-derived profile entry, minus its precision bits)
   (`stateful_adamw`, `stateful_muon`) and override (`override_*`) bits.
 - The **silicon** supplies the precision bits (`fp32` always, `bf16` from
   sm_80, the fp8 pair from sm_89 when the fp8 path is built), because a profile
-  written for the fastest member of a family must not make a Pascal card claim
-  bf16.
+  written for the fastest member of a family must not make a card without bf16
+  units claim bf16.
 - `supports_fp32`, `supports_bf16`, `supports_fp8` and `Supports(DType)` are
   read back off the mask, so the two spellings of one answer cannot disagree.
   `has_tensor_cores` stays a plain boolean: it is a fact about the part, not a
@@ -97,8 +97,8 @@ silently widen.
 
 `device_name` keeps the driver's spelling verbatim. It is the join key
 `FindDeviceProfile` normalizes (case and whitespace), so `GetCaps().device_name`
-and the profile entry named `gtx1080ti` are one device, and `caps_test.cc`
-asserts exactly that.
+and the profile entry named `t4` are one device, and `caps_test.cc` asserts
+exactly that.
 
 ## What is implemented here
 

@@ -12,11 +12,13 @@ This file is about process.
 > for you. Run `tools/nanochat help`; see [docs/sandbox.md](docs/sandbox.md)
 > and [docs/testing.md](docs/testing.md). Executables refuse to start outside it.
 
-The host: one **GTX 1080 Ti (sm_61, 11 GB)** under **WSL2**. The driver is
-536.99, and CUDA is 12.0. The project pins Bazel 9.2.0 in `.bazelversion` and
-runs it through Bazelisk. The host has no cmake, ninja, or clang. CUPTI is **not**
-available under
-WSL2, so Nsight/perf profiling must happen on native Linux.
+The host: one **WSL2** machine with 12 vCPU and 7.8 GiB of memory. Its card is
+below `sm_75`, so the tree no longer supports that card: the CPU backend and the
+simulator run here, and a device gate needs a Turing card or newer on this host
+or on another one. The driver is 536.99, and CUDA is 12.0. The project pins
+Bazel 9.2.0 in `.bazelversion` and runs it through Bazelisk. The host has no
+cmake, ninja, or clang. CUPTI is **not** available under WSL2, so Nsight/perf
+profiling must happen on native Linux.
 
 ---
 
@@ -102,7 +104,7 @@ Parallelism is gated on interface readiness, not on agent availability.
 
 **Wave 0 (serial, blocking) — do not parallelize before this**
 
-1. `MODULE.bazel` + `.bazelrc` + Bazel/CUDA spike (`sm_61`, one kernel, one
+1. `MODULE.bazel` + `.bazelrc` + Bazel/CUDA spike (`sm_75`, one kernel, one
    `gpu` test).
 2. Freeze `kernels.h`, `tensor.h`, `config.h`, `model.h`.
 3. CPU reference backend: every kernel as a naive loop.
@@ -135,7 +137,7 @@ finite-difference checks, oracle parity, and formatting — lives in
 
 There is **one GPU** and **one host**. Two failure modes are worth avoiding.
 The first is several agents launching training jobs or benchmarks at once. That
-thrashes the 11 GB card and invalidates timings. The second is a runaway test
+thrashes the one card and invalidates timings. The second is a runaway test
 that exhausts host RAM or CPU.
 
 The process-launch boundary handles both, through `python/nanochat_cpp/sandbox.py` (limits) and
@@ -312,8 +314,7 @@ This keeps GPU time bounded and predictable.
   Definition of Done, the exact test command. Agents should not need to read the whole repo.
 - `backends/cuda/kernels/README.md`: the convention for the per-kernel tests
   and benchmarks that sit next to each kernel.
-- `dev/kernels/README.md`: the convention for the unpromoted prototypes and the
-  toolchain spike.
+- `dev/kernels/README.md`: the convention for the unpromoted prototypes.
 - `docs/performance.md`: the performance measurement protocol, the debugging
   interface (`tools/nanochat doctor` / `profile`), and the benchmark battery.
   Read it before investigating a slowdown. `tools/nanochat doctor` is the

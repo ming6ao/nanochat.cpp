@@ -51,9 +51,8 @@ double g_worst_error = 0.0;
 // `NANOCHAT_SIM_PROFILE` is set when the simulator interposes the runtime
 // (docs/simulator.md section 5.1), and the mock answers the queries below with
 // fabricated values on purpose: 0 for cooperative-launch support and 1 block
-// per multiprocessor. The quantities that hold on the host card are therefore
-// pinned for a real device only, and the launch itself is attempted only where
-// the device says it can run one.
+// per multiprocessor. No per-card quantity is therefore pinned, and the launch
+// itself is attempted only where the device says it can run one.
 bool Simulated() {
   const char* profile = std::getenv("NANOCHAT_SIM_PROFILE");
   return profile != nullptr && *profile != '\0';
@@ -175,9 +174,9 @@ bool RunCase(GemmMode mode, bool ta, bool tb, int m, int n, int k, int batch,
 // (docs/kernels.md sections 4 and 8). The first block is pure host
 // arithmetic: the classification of a status, and the reading of the
 // cooperative-launch attribute the simulator answers 0 for. The second block
-// asks the device, and pins the numbers the design sizes the persistent grid
-// from: 3 blocks per SM on the host card's 28 SMs, 84 blocks of persistent
-// grid.
+// asks the device, and checks the three quantities the design sizes the
+// persistent grid from: the active blocks per SM, the SM count, and their
+// product.
 void CheckLaunchSurface(const Caps& caps) {
   using nanochat::cuda_backend::ActiveBlocksPerMultiprocessor;
   using nanochat::cuda_backend::ClassifyCooperativeLaunch;
@@ -230,7 +229,7 @@ void CheckLaunchSurface(const Caps& caps) {
   if (simulated) {
     std::printf(
         "cuda_runtime: NOTE simulated device; the mock answers 1 active block "
-        "per SM, so the host-card quantities are not pinned here\n");
+        "per SM, and no per-card quantity is pinned\n");
   }
 
   const int multiprocessors = MultiprocessorCount();
@@ -248,14 +247,8 @@ void CheckLaunchSurface(const Caps& caps) {
       "shared memory, %d resident blocks\n",
       blocks_per_sm, kProbeBlockThreads, kProbeDynamicSharedBytes, resident);
 
-  // The host card (gtx1080ti): 3 blocks per SM on 28 SMs, which is the 84-block
-  // persistent grid docs/kernels.md section 4 sizes the cooperative
-  // driver from. Pinned for the real sm_61 device only.
-  if (!simulated && caps.compute_major == 6 && caps.compute_minor == 1 &&
-      multiprocessors == 28) {
-    Expect(blocks_per_sm == 3, "3 blocks per SM on the host card");
-    Expect(resident == 84, "84 resident blocks on the host card");
-  }
+  // The cooperative driver launches the whole resident grid above
+  // (docs/kernels.md section 4).
 
   // --- one launch of that grid, and one the device must refuse -------------
   if (!supports_cooperative) {

@@ -27,7 +27,7 @@ Status values:
 | D4 | `equivalent` | initialization | custom xorshift RNG vs the PyTorch RNG |
 | D5 | `equivalent` | optimizer | gradient norm computed for logging with `--clip 0` |
 | D6 | `open` | scaling | host-reference data parallel is implemented; NCCL and the two-rank validation stay open |
-| D7 | `out-of-scope` | runtime | no `torch.compile`; disabled on Pascal anyway |
+| D7 | `out-of-scope` | runtime | no `torch.compile`; the reference disables it where Triton is missing |
 | D8 | `equivalent` | harness | no batch prefetch overlap during backward |
 | D9 | `closed` | optimizer | C++ schedule warmdown count matches Python's `round` (half to even) |
 | E1 | `open` | evaluation | sampled modes use the C++ RNG, not torch, and derive the stream per row, per prompt, and per step; greedy is bit-identical |
@@ -286,8 +286,9 @@ rounding differs; see [kernels.md](kernels.md).
 
 ### D3 — Attention backend
 
-The reference uses the SDPA math backend on Pascal (`nanochat/flash_attention.py`
-falls back from Flash Attention 3, which needs SM 80+). nanochat.cpp computes
+The reference uses the SDPA math backend whenever Flash Attention 3 is
+unavailable (`nanochat/flash_attention.py` falls back from it, because Flash
+Attention 3 needs SM 80+). nanochat.cpp computes
 the scores, the probability-value product, and every backward product as
 batched cuBLAS GEMMs, with the softmax and its gradient as custom row kernels
 (`backends/cuda/kernels/attention.cu`). Both compute the same causal, optionally
@@ -596,10 +597,10 @@ epoch until the checkpoint stores the document index (P4).
 
 ### D7 — `torch.compile`
 
-The reference compiles the model and the fused optimizer steps. On Pascal the
-project disables it (`TORCH_COMPILE_DISABLE=1`; Triton needs SM 70+). So it has
-no effect on the current host and is not a parity item here. On newer hardware it
-would fuse elementwise work and change host dispatch cost, not the mathematics.
+The reference compiles the model and the fused optimizer steps. Where Triton
+is missing the project disables it (`TORCH_COMPILE_DISABLE=1`; Triton needs
+SM 70+). On a card that runs it, it would fuse elementwise work and change host
+dispatch cost, not the mathematics, so it is not a parity item here.
 
 ### E5 — Distributed evaluation
 

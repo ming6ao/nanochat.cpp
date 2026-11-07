@@ -1121,8 +1121,8 @@ The `h200` config is outside the collective path.
 
 ### 9. Broker and launch
 
-The local GPU queue serves one GTX 1080 Ti. It is not the
-broker for an 8x H100 node. Treat the node as one resource.
+The local GPU queue serves one card. It is not the broker for an 8x H100
+node. Treat the node as one resource.
 
 - One `tools/nanochat dist` invocation holds one lock for the whole rank group.
   this page already defines this. Keep that

@@ -187,8 +187,8 @@ The save-for-backward workspace described here replaces an autograd engine; see
 
 ### Recompute (designed, not implemented)
 
-The training arena is about 36 GB at `d12_s1024`, batch 32, fp32, and the project
-card holds 11 GB. The layer activations are about 24 GB (`L * 20 * R * hidden`),
+The training arena is about 36 GB at `d12_s1024`, batch 32, fp32, and the
+smallest supported card holds 16 GB. The layer activations are about 24 GB (`L * 20 * R * hidden`),
 the classifier buffers about 8.6 GB, and the scratch about 3.3 GB.
 
 `BuildTrainWorkspace` gives every layer its own `ops::BlockActivations` set, and
@@ -211,7 +211,7 @@ five repeats a matrix product or loses data that `QkPrepBackward` overwrites in
 place, and `x_out` is the input of the next layer.
 
 At level 2 the layer term falls from about 24 GB to about 16.8 GB. The arena
-still does not fit 11 GB at this batch; the win is a larger batch and a smaller
+still does not fit 16 GB at this batch; the win is a larger batch and a smaller
 peak. No kernel is new, the frozen seam does not change, and the model already
 passes each block's input to `BlockBackward`, so the API does not change either.
 
@@ -292,7 +292,7 @@ Schedules (LR multiplier, Muon momentum, weight decay) live in `Scheduler`.
 `AdamWUpdate` and `MuonUpdate` are the kernels; Muon's Polar Express uses
 batched cuBLAS GEMMs. A fused variant runs the whole stage as one
 phase-parameterised kernel behind the same entry point and is selected for no
-shape on the card in the tree, so the batched cuBLAS path is what runs
+shape, so the batched cuBLAS path is what runs
 ([kernels.md](kernels.md) Part 1).
 
 The kernels themselves are declared in [kernels.md](kernels.md).

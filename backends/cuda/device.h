@@ -67,8 +67,8 @@ std::uint64_t DeclaredFeatureMask(const char* device_name);
 // declaration says about precision and uses this instead. The runtime is the
 // authority on what the silicon does and `caps.json` is the authority on what
 // the backend implements, so a profile written for the fastest member of a
-// family cannot make a Pascal card claim bf16, and a card that does have the
-// units is not withheld by a declaration that has not caught up.
+// family cannot make a card without bf16 units claim bf16, and a card that does
+// have the units is not withheld by a declaration that has not caught up.
 std::uint64_t PrecisionFeatureBits(int major, int minor);
 
 // ---------------------------------------------------------------------------
@@ -147,8 +147,8 @@ int ActiveBlocksPerMultiprocessor(const void* kernel, int block_threads,
 // The persistent grid the cooperative driver launches: the active blocks per
 // multiprocessor for (`kernel`, `block_threads`, `dynamic_shared_bytes`) times
 // `MultiprocessorCount()`. One helper so the grid the driver sizes, the grid it
-// launches, and the number its fallback note quotes cannot disagree. It is 84
-// on the host card: 3 blocks per SM on 28 SMs.
+// launches, and the number its fallback note quotes cannot disagree. It is a
+// query, not a constant: 84 blocks on a card with 28 SMs at 3 blocks per SM.
 int ResidentBlocks(const void* kernel, int block_threads,
                    std::size_t dynamic_shared_bytes);
 

@@ -21,9 +21,8 @@ that the reference engine cannot.
 
 ## 1. Purpose
 
-The project supports Pascal `sm_61` and Turing `sm_75` today. Hopper appears
-only in the peak-FLOPS table of `src/train.cc` and as a design reference in
-[kernels.md](kernels.md) § Direct-MMA and persistent kernels.
+The project supports Turing `sm_75` and newer. Hopper appears as a design
+reference in [kernels.md](kernels.md) § Direct-MMA and persistent kernels.
 
 The simulator has two jobs:
 
@@ -267,7 +266,7 @@ the CUDA API rules.
 | Launch limits | `blockDim` is within the profile limit. Grid dimensions are positive. |
 | Shared memory | The dynamic size is within the profile limit. A size above 48 KB needs the device attribute. |
 | Attribute order | A large-shared-memory launch must follow the matching `cudaFuncSetAttribute` call. |
-| cuBLAS compute type | A GEMM on a tensor-core device must accumulate with `CUBLAS_COMPUTE_32F`. A Pascal-only compute type must not appear. |
+| cuBLAS compute type | A GEMM on a tensor-core device must accumulate with `CUBLAS_COMPUTE_32F`. The pre-tensor-core compute type must not appear. |
 | Legacy cuBLAS | The interposer reports `CUBLAS_GEMM_DEFAULT_TENSOR_OP` and `cublasGemmAlgo_t` as legacy. |
 | Transpose and leading dimension | The `lda`, `ldb`, and `ldc` values are consistent with the transpose flags. |
 | Handle order | `cublasCreate` runs before any cuBLAS call. A destroyed handle is not reused. |

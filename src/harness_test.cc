@@ -112,8 +112,6 @@ void TestMfu() {
   // and a second table of plausible numbers is what the declaration replaced.
   ExpectNear(nanochat::PeakFlopsForDevice("NVIDIA B200"), 0.0, 1e-9,
              "PeakFlops for an undeclared card reads 0");
-  ExpectNear(nanochat::PeakFlopsForDevice("NVIDIA GeForce GTX 1080 Ti"), 0.0,
-             1e-9, "PeakFlops for the undeclared host card reads 0");
   ExpectNear(nanochat::PeakFlopsForDevice("unknown device"), 0.0, 1e-9,
              "PeakFlops unknown");
   ExpectNear(nanochat::PeakFlopsForDevice(""), 0.0, 1e-9, "PeakFlops empty");

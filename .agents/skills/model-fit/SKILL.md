@@ -40,8 +40,8 @@ the scaling efficiency, and the sync fraction.
 
 Useful options:
 
-- `--hardware NAME` selects a device: `h200`, `h100`, `a100`, `t4`,
-  `gtx1080ti`. Use `--hardware custom --memory-gib N --fp32-tflops T` for a
+- `--hardware NAME` selects a device: `h200`, `h100`, `a100`, `t4`.
+  Use `--hardware custom --memory-gib N --fp32-tflops T` for a
   device that is not in the table.
 - `--devices N` sets the data-parallel device count.
 - `--interconnect NAME` selects the link: `nvlink1` to `nvlink4`, `pcie3` to

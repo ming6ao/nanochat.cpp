@@ -2,7 +2,7 @@
 #
 # Layering:
 #   * toolchain: the C++ standard here; the host compiler is host-local;
-#   * arch:      Pascal sm_61 is the default, and --config=hopper selects
+#   * arch:      Turing sm_75 is the default, and --config=hopper selects
 #                Hopper (H100) for a hand run;
 #   * precision: fp32 or bf16 (docs/precision.md), selected by a build define;
 #   * resources: cap the Bazel server and per-server action fan-out so several
@@ -25,10 +25,10 @@ build --cxxopt=-std=c++20
 
 # --- Architecture -----------------------------------------------------------
 #
-# sm_61 (GTX 1080 Ti) is the default. A Turing run passes
-# `--@rules_cuda//cuda:archs=sm_75` itself, because the tree keeps no named
-# config for a card that no build helper names.
-build --@rules_cuda//cuda:archs=sm_61
+# sm_75 (Turing) is the default, because it is the oldest architecture the tree
+# supports. An older card is not a target, so a binary built here holds no code
+# for one.
+build --@rules_cuda//cuda:archs=sm_75
 
 # --- Precision --------------------------------------------------------------
 #

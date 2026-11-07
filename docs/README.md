@@ -60,7 +60,7 @@ behaves today.
 
 | File | Contents |
 |---|---|
-| [baselines.json](baselines.json) | The measured baselines: `attention`, `attention_e2e`, `cpu_train`, `cpu_gemm`, and `muon`. Each entry names the command that produced it and the revision. Update an entry only with a real run, and keep `validated_on` naming the device that measured it |
+| [baselines.json](baselines.json) | The measured baselines: `attention_bf16`, `cpu_train`, and `cpu_gemm`. Each entry names the command that produced it and the revision. Update an entry only with a real run, and keep `validated_on` naming the device that measured it. A card the tree no longer supports contributes no entry |
 
 ## The contract vocabulary, `spec/`
 

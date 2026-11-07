@@ -9,7 +9,6 @@ nanochat.cpp. The rates are dense (non-sparse) peaks.
 | h100 | 80 GiB | 66.9 TFLOP/s | 989 TFLOP/s | 989 TFLOP/s | yes |
 | a100 | 80 GiB | 19.5 TFLOP/s | 312 TFLOP/s | 312 TFLOP/s | yes |
 | t4 | 16 GiB | 8.1 TFLOP/s | 65 TFLOP/s | none | yes |
-| gtx1080ti | 11 GiB | 11.34 TFLOP/s | 0.177 TFLOP/s | none | no |
 
 The source is `include/nanochat/device_profile.h` and its table in
 `src/device_profile.cc`. The same rates appear in `docs/precision.md`

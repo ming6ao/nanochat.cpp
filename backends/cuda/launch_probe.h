@@ -31,15 +31,17 @@ namespace testing {
 constexpr int kProbeBlockThreads = 256;
 
 // The dynamic shared-memory request that reproduces the fused kernel's
-// three-blocks-per-SM budget on the host card.
+// three-blocks-per-SM budget.
 //
 // The fused kernel reaches three blocks per SM out of registers (85 per thread
 // at 256 threads and `__launch_bounds__(256, 3)`), and a probe kernel cannot
 // ask ptxas for a register count. It spends the same budget out of shared
-// memory instead: the host card's sweeping multiprocessor has 96 KB, so 32 KB
-// is the third that leaves three blocks resident. 32 KB is also under the 48 KB
-// a block may take, so the launch needs no `cudaFuncSetAttribute`, and the
-// answer is the same 3 per SM the design sizes the persistent grid from.
+// memory instead: on a multiprocessor with 96 KB of shared memory, 32 KB is the
+// third that leaves three blocks resident, which is the 3 per SM the design
+// sizes the persistent grid from. 32 KB is also under the 48 KB a block may
+// take, so the launch needs no `cudaFuncSetAttribute`. A card with more shared
+// memory answers a larger number, which is why the test reads the answer and
+// pins nothing.
 constexpr std::size_t kProbeDynamicSharedBytes = 32u * 1024u;
 
 // The address of the probe kernel, for

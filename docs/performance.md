@@ -5,9 +5,10 @@ to run the optimization loop that follows a measurement, and what the CPU
 backend measured. The general method is in the `performance-investigation`
 skill. Part 1 is the loop. Part 2 is the CPU backend record.
 
-The host is one GTX 1080 Ti (sm_61) under WSL2. CUPTI is not available. Kernel
-counters do not work here. Device-event timing through the project benchmarks is
-the primary instrument. Kernel counters need native Linux.
+The host is one WSL2 machine whose card is below `sm_75`, so the tree no longer
+supports it and no device number here came from this host any more. A device
+measurement needs a Turing card or newer, on this host or on another one. CUPTI
+is not available under WSL2. Kernel counters need native Linux.
 
 ## 1. Measure through the entry point
 
@@ -42,104 +43,63 @@ The protocol above applied to a stage: before a campaign fuses an optimizer
 stage into one kernel, it measures three things separately -- what the dispatch
 costs, what an elementwise pass costs, and what the arithmetic it displaces
 costs in a hand-written kernel. The Muon optimizer stage is the worked example
-(`docs/kernels.md` Part 1 section 3 has the arithmetic of the bet, and
-[baselines.json](baselines.json) holds the rows).
+(`docs/kernels.md` Part 1 section 3 has the arithmetic of the bet).
 
-Device: **NVIDIA GeForce GTX 1080 Ti (sm_61, 28 SMs, 11 GB, driver 536.99,
-CUDA 12.0)**, declared fp32 rate 11340 GFLOP/s. Every number below is the best
-of three rounds from a `tools/nanochat bench` job on this host, with device-event
-timing and one synchronization at the end of the batch, as the protocol asks.
-The command is named with each table. The revisions are the `muon` entry's in
-[baselines.json](baselines.json): the `muon:` and `muon_fused:` rows are at
-`6675c5d`, and `phase0_share`, `sync`, and `phase1_gemm` are at the prototype
-revision `98fe9f2`.
-
-**Dispatch, in microseconds.** Empty launches, a cooperative launch, and one
-cooperative grid barrier at the grids a fused kernel would hold resident
-(`bazel-bin/dev/kernels/muon_launch_sync_bench --json`):
-
-| Row | Shape | us |
-|---|---|---|
-| `launch:empty:1` | 1 block, 256 threads | 1.64 |
-| `launch:empty:84` | 84 blocks (the resident grid of a 256-thread, 12 KB block) | 1.88 |
-| `launch:empty:4000` | 4000 blocks (a full batched-GEMM grid) | 8.37 |
-| `launch:coop:84` | cooperative launch, 84 blocks, no barrier | 1.92 |
-| `sync:barrier:84` | one `grid.sync()`, 84 blocks | 0.92 |
-| `sync:barrier:224` | one `grid.sync()`, 224 blocks | 2.19 |
-
-A dependent launch of a full batched grid costs 8.4 us and a grid barrier
-0.9 us. One fused iteration therefore replaces 41.9 us of launch gaps with
-4.7 us of one launch plus three barriers: **37.2 us saved per iteration**, which
-is 0.5 percent of an `h100` iteration (7.3 ms) and 0.01 percent of a `big` one
-(275 ms). Launch fusion is a rounding error against the elementwise passes it
-also removes, which is the measurement that decided where the rest of the effort
-went.
-
-**The elementwise passes, as a share of the step.** From three existing rows of
-`bazel-bin/backends/cuda/kernels/muon_benchmark --profile h100|big --muon
---json`, with `loop = muon:step(ns=5) - muon:step(ns=0)` and
-`launch + elementwise = loop - polar:step`:
-
-| Profile | `polar:step` | `muon:step` ns=0 | `muon:step` ns=5 | launch + elementwise | share of step |
-|---|---|---|---|---|---|
-| `h100` | 30.93 ms | 6.29 ms | 42.84 ms | 5.62 ms | **13.1 %** |
-| `big` | 1268.30 ms | 85.06 ms | 1462.76 ms | 109.41 ms | **7.5 %** |
-
-A second session measured 3.81 ms (9.2 percent) and 104.90 ms (7.2 percent), so
-the share is 9 to 13 percent at `h100` and 7 to 7.5 percent at `big`.
-
-**The pass savings, measured end to end.** The fusion folded three elementwise
-passes into their neighbours and dropped two buffers, which takes the stage
-workspace from `2·total + 3·min_total` to `2·total + 2·min_total`. What that is
-worth is the `muon_fused:` row against the `muon:` row over the same buffers:
-
-| Profile | Group or step | `muon:` ms | `muon_fused:` ms | Fused |
-|---|---|---|---|---|
-| `h100` | 4x12, batch 4 | 0.11-0.17 | 0.124-0.125 | noise, both directions across runs |
-| `h100` | 256x512, batch 16 | 3.065 | 3.472 | +13 % |
-| `h100` | 512x512, batch 16 | 9.181 | 12.170 | +33 % |
-| `h100` | 512x2048, batch 8 | 15.388 | 18.486 | +20 % |
-| `h100` | 2048x512, batch 8 | 14.860 | 18.903 | +27 % |
-| `h100` | step, ns=0 | 6.242 | 6.869 | +10 % |
-| `h100` | step, ns=5 | 41.746 | 53.192 | +27 % |
-| `big` | 5x12, batch 10 | 0.160 | 0.133 | -17 %, inside the run-to-run jitter of a 0.13 ms row |
-| `big` | 640x1280, batch 40 | 72.588 | 88.017 | +21 % |
-| `big` | 1280x1280, batch 40 | 335.215 | 387.420 | +16 % |
-| `big` | 1280x5120, batch 20 | 583.223 | 1025.325 | +76 % |
-| `big` | 5120x1280, batch 20 | 436.526 | 584.754 | +34 % |
-| `big` | step, ns=0 | 84.986 | 90.179 | +6 % |
-| `big` | step, ns=5 | 1426.937 | 2073.520 | +45 % |
-
-The `ns=0` rows are the control: no GEMM runs and no fold has anything to fold,
-so those 6 to 10 percent are the cost of one block size for sixteen phases,
-not of the fusion's arithmetic. The folded passes do not recover it.
-
-**The hand GEMM, against cuBLAS.** `dev/kernels/muon_fused_gemm_bench` times the
-three products of one iteration -- `A`, `A·A`, and `prod` -- as hand GEMM and as
-`kernels::Gemm`, at the two groups the campaign reports:
+The recorded rows for this stage were measured on a card the tree no longer
+supports, so they are removed. Measure them again on a supported card before you
+cite a number. The commands and the shape are still correct:
 
 ```bash
+tools/nanochat bench -- bazel-bin/dev/kernels/muon_launch_sync_bench --json
+tools/nanochat bench -- bazel-bin/backends/cuda/kernels/muon_benchmark \
+  --profile h100 --muon --json
+tools/nanochat bench -- bazel-bin/backends/cuda/kernels/muon_benchmark \
+  --profile big --muon --json
 tools/nanochat build //dev/kernels:muon_fused_gemm_bench
 tools/nanochat bench -- bazel-bin/dev/kernels/muon_fused_gemm_bench --json
 ```
 
-| Group | Stage | hand (GFLOP/s) | cuBLAS (GFLOP/s) | hand / cuBLAS |
-|---|---|---|---|---|
-| 640x1280, batch 40 | `A` 640x640x1280 | 5373-5484 | 6690-6762 | 0.80 |
-| | `A2` 640x640x640 | 5234-5371 | 8933-9484 | 0.55-0.60 |
-| | `prod` 640x1280x640 | 5443-5526 | 8958-9116 | 0.60-0.62 |
-| | `iter` | 5725-5933 | 8205-8318 | **0.68-0.72** |
-| 1280x5120, batch 20 | `A` 1280x1280x5120 | 4549-5341 | 4181-5608 | 0.95-1.17 |
-| | `A2` 1280x1280x1280 | 5993-6307 | 8786-9027 | 0.68-0.70 |
-| | `prod` 1280x5120x1280 | 6037-6047 | 8779-8799 | 0.69 |
-| | `iter` | 5149-5612 | 6192-6311 | **0.83-0.90** |
+**Dispatch.** Time an empty launch at one block, at the resident grid, and at a
+full batched-GEMM grid. Then time a cooperative launch of the resident grid and
+one cooperative grid barrier at two grid sizes. The conclusion from the removed
+rows is that a launch of a full batched grid costs about one order of magnitude
+more than a grid barrier. One fused iteration therefore removes launch gaps that
+are a rounding error against the elementwise passes it also removes. That is the
+measurement that decided where the rest of the effort went.
 
-The gate asked for 85 percent of the cuBLAS rate on a targeted group; the
-targeted 640x1280 group reaches 0.68 to 0.72. The one shape where the hand
-schedule meets the gate is the largest group, and it meets it because cuBLAS is
-weak there (4181 to 5608 GFLOP/s) and not because the hand kernel is fast. A
-rate gate against cuBLAS is therefore a poor selector on its own; the end-to-end
-`muon_fused:` row against the `muon:` row is the measurement that decides.
+**The elementwise passes, as a share of the step.** Three existing rows give the
+share with no new kernel. `polar:<shape>:step` is the loop's fifteen batched
+GEMMs alone, `muon:<shape>:step` at `ns=0` is the rest of the optimizer phase,
+and `muon:<shape>:step` at `ns=5` is the whole step, so:
+
+```text
+loop                 = muon:step(ns=5) - muon:step(ns=0)
+launch + elementwise = loop - polar:step
+share of the step     = (launch + elementwise) / muon:step(ns=5)
+```
+
+The removed rows put the share above the 2 percent floor of the section 3
+inequality at both profiles. The batched GEMM was therefore written instead of
+stopping on a negative result.
+
+**The pass savings, measured end to end.** The fusion folds three elementwise
+passes into their neighbours and drops one buffer, which takes the stage
+workspace from `2·total + 3·min_total` to `2·total + 2·min_total`. Compare the
+`muon_fused:` row against the `muon:` row over the same buffers. The conclusion
+from the removed rows is that the fused path loses to the shipped multi-launch
+path at every large shape, and that the `ns=0` control row carries the same
+loss. The loss is therefore the cost of one block size for sixteen phases and
+not the cost of the folded passes, and the shipped path stays.
+
+**The hand GEMM, against cuBLAS.** The benchmark times the three products of one
+iteration -- `A`, `A·A`, and `prod` -- as hand GEMM and as `kernels::Gemm`, at
+the two groups the campaign reports. The removed rows show the hand GEMM below
+the cuBLAS rate, by a small margin on the largest group and a large one on the
+targeted group. The targeted group missed the 85 percent gate. The one group
+that met the gate met it because cuBLAS is weak there, not because the hand
+kernel is fast. A rate gate against cuBLAS is therefore a poor selector on its
+own. The end-to-end `muon_fused:` row against the `muon:` row is the measurement
+that decides.
 
 ## 3. The debugging interface
 
@@ -254,7 +214,7 @@ Split the step before you choose a fix:
   (`backends/cuda/kernels/attention_benchmark.cc`).
 - Memory access in the attention tile: uncoalesced key/value loads, a serial
   dot product, and no key/value reuse across query rows.
-- Backward key/value atomics, especially grouped-query attention on Pascal.
+- Backward key/value atomics, especially in grouped-query attention.
 - GEMM (cuBLAS). Confirm the rate. Do not assume it.
 - QkPrep, Pointwise, Classifier, and Embedding.
 - The optimizer and the global-norm clip.
@@ -787,7 +747,7 @@ families. The scalar baseline and the promoted baseline are both below.
 
 #### Host and configuration
 
-- Host: 12 vCPU under WSL2, 7.8 GiB RAM, one GTX 1080 Ti (not used).
+- Host: 12 vCPU under WSL2, 7.8 GiB RAM. The GPU is not used.
 - Sandbox profile: `train` (800% CPU, 8 cores, 6 GiB).
 - Model: depth 4, dimension 256, 2 heads, 2 key/value heads, head dimension 128.
 - Context length: 512. Window pattern: `L` (full attention).

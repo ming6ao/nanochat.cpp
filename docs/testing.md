@@ -794,8 +794,8 @@ unchanged, so a reference to a section of that document resolves to the same
 number here._
 
 This document defines an integration test for numeric agreement across three
-targets. The three targets are the CPU backend, the CUDA simulator, and the
-Pascal GPU. The test uses a 10-layer model. It covers training, evaluation,
+targets. The three targets are the CPU backend, the CUDA simulator, and a
+CUDA card. The test uses a 10-layer model. It covers training, evaluation,
 supervised fine-tuning (SFT), and reinforcement learning (RL).
 
 The test follows Path A. Path A is a staged precision contract. This document
@@ -840,7 +840,7 @@ The SFT arithmetic evidence is `//tests:sft_step_parity_test`, not this test.
 Five facts shape the design.
 
 1. The CPU backend uses `double` accumulators. See the GEMM microkernel in
-   `backends/cpu/kernels.cc`. The Pascal kernels use `float` accumulators, and
+   `backends/cpu/kernels.cc`. The CUDA kernels use `float` accumulators, and
    GEMM calls cuBLAS. [parity.md](parity.md) records this difference as `D2`
    and `D3` with status `equivalent`.
 2. Under `--config=sim`, the CPU loops compute every value. The cap override is
@@ -983,9 +983,8 @@ four phases.
 
 #### 6.2 Reference configuration
 
-The host is one GTX 1080 Ti with 11 GB of memory. The device is `sm_61`, and
-the device has no tensor cores. The sandbox caps memory at 5 GiB high and
-6 GiB max.
+The device leg needs a CUDA card at `sm_75` or newer, so it runs on the Kaggle
+T4 or the H100 node. The sandbox caps memory at 5 GiB high and 6 GiB max.
 
 ```text
 num_layers = 10
@@ -1088,13 +1087,13 @@ per-merge GPU budget in [AGENTS.md](../AGENTS.md) section 5.5.
   artifact of the evaluation phase. Regenerate it after a change to either.
 - The trace covers the discrete results only. A pure floating-point drift that
   flips no identifier is caught by the parity tests, not here.
-- The 11 GB card and the 5 GiB sandbox cap bound the sequence length and the
+- The card's memory and the 5 GiB sandbox cap bound the sequence length and the
   vocabulary. Keep `seq_len` at or below 256.
 
 ### 10. Open questions
 
-1. Does clause 3 hold on the Pascal GPU for a 10-layer model? Resolved by
-   Phase 3: the identifiers agree on all three targets.
+1. Does clause 3 hold on a CUDA card for a 10-layer model? Resolved by Phase 3:
+   the identifiers agree on all three targets.
 2. Does the operator accept the reduction in section 1? If the operator needs
    bit equality on the device leg, choose Path B.
 3. Should the comparison run in continuous integration, or only at merge? The

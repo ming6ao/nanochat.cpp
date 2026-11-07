@@ -574,7 +574,6 @@ with the bound for the same family.
 | The `lm_head` GEMM, `M=16384 N=32768 K=768`, fp32, T4, in PyTorch | 92.9 ms | 8.1 TFLOP/s | 1.09 |
 | The same GEMM in nanochat.cpp, before the call fix | 229.1 ms | 8.1 TFLOP/s | 0.44 |
 | The full d12 forward, `B=16 T=1024`, fp32, T4 | 679 ms | 8.1 TFLOP/s | — |
-| The attention forward, `d8_s512` window 128, fp32, GTX 1080 Ti | 1.087 ms | 11.34 TFLOP/s | — |
 | The depth-24 run, eight H100 cards, fp8 | 99 min | about 57 min | 0.57 |
 
 Two lessons come from the table.

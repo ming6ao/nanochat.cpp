@@ -1,10 +1,10 @@
 # Host portability: toolchain, sandbox, and devices
 
 `nanochat.cpp` runs on more than one host. The development host is a WSL2
-machine with one GTX 1080 Ti, the second host is a Kaggle notebook with two T4
-cards, and the target node is eight H100 cards on Modal or on native Linux.
-Section 8 gives the Kaggle procedure, section 9 the pipeline chain on three
-hosts, and Part 1 the H100 run book.
+machine. The second host is a Kaggle notebook with two T4 cards. The target node
+is eight H100 cards on Modal or on native Linux. Section 8 gives the Kaggle
+procedure, section 9 the pipeline chain on three hosts, and Part 1 the H100 run
+book.
 
 The one rule: the compute code holds no host concern. Each host chooses its
 compiler, its sandbox, and its devices in a host file, and a binary that runs
@@ -12,9 +12,13 @@ outside the entry point fails loudly.
 
 | Host | Host file | Arch | Precision | Sandbox |
 |---|---|---|---|---|
-| WSL2 workstation | `.bazelrc.wsl` | sm_61 | fp32 | systemd cgroups |
+| WSL2 workstation | `.bazelrc.wsl` | none | fp32 | systemd cgroups |
 | Kaggle T4 | notebook setup | sm_75 | fp32 | none |
 | H100 node | `.bazelrc.local` | sm_90 | bf16 or fp8 | systemd cgroups |
+
+The workstation card is below `sm_75`, so the tree no longer supports it. The
+host still builds and runs the CPU backend and the simulator. A device gate
+needs a Turing card or newer, on this host or on another one.
 
 ## 1. Goals
 
@@ -28,7 +32,7 @@ outside the entry point fails loudly.
 | Concern | Workstation | Kaggle Notebook | Mechanism |
 |---|---|---|---|
 | Host compiler | gcc-12 | image gcc | `.bazelrc.local` |
-| CUDA arch | sm_61 | sm_75 | `--@rules_cuda//cuda:archs=sm_75` |
+| CUDA arch | none | sm_75 | `--@rules_cuda//cuda:archs=sm_75` |
 | Precision | fp32 | fp32 | build default |
 | Sandbox | systemd cgroups | none | `NANOCHAT_SANDBOX_BACKEND` |
 | GPU count | one | two | `NANOCHAT_GPU_DEVICES` |
@@ -69,10 +73,8 @@ different `rules_cuda` toolchain. It is a separate project with its own risk.
 
 | Config | Arch | Precision | Backend |
 |---|---|---|---|
-| default | sm_61 | fp32 | cpu |
-| `sm_75` | sm_75 | fp32 | cpu |
-| `cuda` | sm_61 | fp32 | cuda |
-| `t4` | sm_75 | fp32 | cuda |
+| default | sm_75 | fp32 | cpu |
+| `cuda` | sm_75 | fp32 | cuda |
 | `hopper` | sm_90 | bf16 | cuda |
 
 A Turing build passes `--config=cuda --@rules_cuda//cuda:archs=sm_75`, because

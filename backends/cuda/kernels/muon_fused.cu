@@ -188,14 +188,14 @@ static_assert(kThreadRows * kThreadCols == kGemmThreads,
 // elements: `MuonFusedSelected` is the shape rule of section 4, and this is its
 // one number. It is measured and not chosen. `muon_benchmark`'s `muon_fused:`
 // rows against its `muon:` rows at both profiles (`h100` and `big`) say the
-// fused step is slower for every group on the host card: from 13 % on the
-// 256x512 key/value group to 76 % on 1280x5120, where the hand GEMM loses most
-// to cuBLAS. The empty set is therefore the measured answer, and zero states it
+// fused step is slower for every large group, and it loses most on
+// 1280x5120, where the hand GEMM is furthest behind cuBLAS. The empty set is
+// therefore the measured answer, and zero states it
 // as a number: every group takes the multi-launch path, where `kernels::Gemm`
 // is cuBLAS, and promoting a group is one measurement and this constant.
 //
-// The rows are in backends/cuda/kernels/README.md, under "The fused path on
-// this card".
+// The rows are in backends/cuda/kernels/README.md, under "The fused path,
+// measured".
 constexpr long long kMuonFusedMaxElements = 0;
 
 // One 16-byte group of operand values, the width the measured schedule loads.
@@ -1516,8 +1516,8 @@ bool MuonFusedSelected(const MuonParams& params) {
   // A group takes the fused path when its Polar Express arithmetic is small
   // enough that the removed launch gaps and the folded elementwise passes pay
   // for the hand GEMM's rate gap (section 3's inequality), and the threshold is
-  // the measured one (`kMuonFusedMaxElements`). On the host card no group of
-  // either profile clears it, so the fused path is reachable -- the test drives
+  // the measured one (`kMuonFusedMaxElements`). No group of either profile
+  // clears it, so the fused path is reachable -- the test drives
   // both of its drivers, and the benchmark measures both paths group by group
   // -- but it is the shipped default for no shape.
   const long long total =

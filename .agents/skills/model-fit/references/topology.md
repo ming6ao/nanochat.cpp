@@ -24,7 +24,7 @@ The bandwidth is per rank and unidirectional, in gigabytes per second
 | nvlink2 | 300 GB/s | V100, A100 pairs |
 | nvlink3 | 600 GB/s | A100, H100 |
 | nvlink4 | 900 GB/s | H100, H200 |
-| pcie3 | 16 GB/s | Turing, Pascal |
+| pcie3 | 16 GB/s | Turing |
 | pcie4 | 32 GB/s | Ampere |
 | pcie5 | 64 GB/s | Hopper, Blackwell |
 | shared-memory | 20 GB/s | Two cards on one host, no peer access |

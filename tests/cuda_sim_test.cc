@@ -392,7 +392,7 @@ void TestHandleOrder() {
 
 // The tensor-core compute-type rule (docs/simulator.md section 5.3): a GEMM on
 // a tensor-core profile must accumulate in fp32, so `CUBLAS_COMPUTE_16F` -- the
-// Pascal non-tensor-core path -- is rejected.
+// pre-tensor-core compute type -- is rejected.
 void TestTensorCoreComputeTypeRule() {
   cublasHandle_t handle = nullptr;
   ExpectTrue(cublasCreate_v2(&handle) == kCublasStatusSuccess,

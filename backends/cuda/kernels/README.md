@@ -66,9 +66,10 @@ Both drivers run one device body over one workspace, so a group can move between
 them without a caller noticing:
 
 * the **cooperative** driver launches one grid per group, sized from the
-  resident-block query in `backends/cuda/device.h` (three blocks per SM on this
-  card, so 84 blocks), and puts a `grid.sync()` between the executions. A launch
-  the device refuses falls back to the phase driver and logs one line;
+  resident-block query in `backends/cuda/device.h` (the active blocks per SM
+  times the SM count of the card it runs on), and puts a `grid.sync()` between
+  the executions. A launch the device refuses falls back to the phase driver and
+  logs one line;
 * the **phase** driver launches one grid per execution, each sized for its own
   phase. It is the simulator's path (`tools/cuda_sim` answers 0 for
   `cudaDevAttrCooperativeLaunch`, and a grid barrier would deadlock in its
@@ -100,10 +101,10 @@ comparison:
   `cudaErrorCooperativeLaunchTooLarge`, and the fallback has to produce the
   phase driver's answer and report `fell_back`.
 
-### The fused path on this card
+### The fused path, measured
 
-Measured on the project card, **NVIDIA GeForce GTX 1080 Ti (sm_61, 28 SMs,
-driver 536.99, CUDA 12.0)**, whose declared fp32 rate is 11340 GFLOP/s:
+The rows were measured on a card the tree no longer supports, so the numbers are
+removed. Measure them again on a supported card before you cite one:
 
 ```bash
 tools/nanochat build //backends/cuda/kernels:muon_benchmark
@@ -115,42 +116,20 @@ tools/nanochat bench -- bazel-bin/backends/cuda/kernels/muon_benchmark \
 
 The `muon:` rows are the shipped multi-launch path and the `muon_fused:` rows are
 the fused path over the same buffers, both at the shipped `ns_steps` of 5 unless
-the row says otherwise. `h100` (8 layers, hidden 512, heads 8/4):
+the row says otherwise.
 
-| Group | `muon:` ms | `muon_fused:` ms | Fused |
-|---|---|---|---|
-| 4x12, batch 4 | 0.11–0.17 | 0.124–0.125 | noise, both directions across runs |
-| 256x512, batch 16 | 3.065 | 3.472 | +13 % |
-| 512x512, batch 16 | 9.181 | 12.170 | +33 % |
-| 512x2048, batch 8 | 15.388 | 18.486 | +20 % |
-| 2048x512, batch 8 | 14.860 | 18.903 | +27 % |
-| step, ns=0 | 6.242 | 6.869 | +10 % |
-| step, ns=5 | 41.746 | 53.192 | +27 % |
-
-`big` (20 layers, hidden 1280, heads 10/5):
-
-| Group | `muon:` ms | `muon_fused:` ms | Fused |
-|---|---|---|---|
-| 5x12, batch 10 | 0.160 | 0.133 | -17 %, but 0.13 ms is inside the run-to-run jitter of this row |
-| 640x1280, batch 40 | 72.588 | 88.017 | +21 % |
-| 1280x1280, batch 40 | 335.215 | 387.420 | +16 % |
-| 1280x5120, batch 20 | 583.223 | 1025.325 | +76 % |
-| 5120x1280, batch 20 | 436.526 | 584.754 | +34 % |
-| step, ns=0 | 84.986 | 90.179 | +6 % |
-| step, ns=5 | 1426.937 | 2073.520 | +45 % |
-
-**Verdict: implemented, gated, and not promoted.** The fused path is slower for
-every group of both profiles, so `MuonFusedSelected` -- the shape rule of
+**Verdict: implemented, gated, and not promoted.** The fused path was slower for
+every large group of both profiles, so `MuonFusedSelected` -- the shape rule of
 section 4, whose one number is `kMuonFusedMaxElements` in `muon_fused.cu` --
 selects the multi-launch path (`kernels::Gemm`, i.e. cuBLAS) for every shape and
 the constant is 0. Two of the three costs are the ones section 3 predicted and
-`dev/kernels/README.md` measured at Phase 1: the hand GEMM reaches 0.68 to 0.90
-of the cuBLAS rate on the groups the fusion targets, and the elementwise passes
-the folds remove are worth less than that gap. The third is new here: even the
-`ns=0` step, where no GEMM runs and the folds have nothing to fold, is 6 to 10 %
-slower, because one kernel serves sixteen phases and its 15 KiB of static shared
-memory holds six blocks per SM where the elementwise families' own kernels hold
-eight. One block size fits no stage, as section 9's risk table says.
+`dev/kernels/README.md` measured at Phase 1: the hand GEMM falls short of the
+cuBLAS rate on the groups the fusion targets, and the elementwise passes the
+folds remove are worth less than that gap. The third is new here: even the
+`ns=0` step, where no GEMM runs and the folds have nothing to fold, was slower,
+because one kernel serves sixteen phases and its 15 KiB of static shared memory
+holds six blocks per SM where the elementwise families' own kernels hold eight.
+One block size fits no stage, as section 9's risk table says.
 
 The fused path stays in the tree, tested through both drivers and measured group
 by group, because it is the shape-rule and phase-bisection tool the design keeps

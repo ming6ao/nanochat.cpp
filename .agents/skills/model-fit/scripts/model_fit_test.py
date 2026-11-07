@@ -55,8 +55,9 @@ class HardwareTest(unittest.TestCase):
         with self.assertRaises(KeyError):
             model_fit.hardware("voodoo")
 
-    def test_pascal_has_no_tensor_cores(self) -> None:
-        hw = model_fit.hardware("gtx1080ti")
+    def test_a_device_with_no_tensor_cores_has_no_bf16(self) -> None:
+        hw = model_fit.Hardware("probe", 11 * model_fit.GIB, 11.34e12, 0.177e12,
+                                0.0)
         self.assertFalse(hw.tensor_cores)
         self.assertLess(hw.fp16_flops, hw.fp32_flops)
 
@@ -142,7 +143,7 @@ class AnswerTest(unittest.TestCase):
                          "L16 C1024 H8 KV4 T4096 b1")
 
     def test_custom_hardware_rejects_an_unknown_precision(self) -> None:
-        hw = model_fit.hardware("gtx1080ti")
+        hw = model_fit.hardware("t4")
         result = model_fit.answer(hw, model_fit.Topology(world_size=1), "bf16")
         self.assertEqual(result["corners"], {})
 

@@ -12,8 +12,8 @@ The third is the batched cuBLAS decomposition, which is also the only backward.
 
 The two predicates live in `backends/cuda/kernels/attention_dispatch.h`, the
 tiles in `backends/cuda/kernels/attention.cu` and `attention_bf16.cuh`, and the
-measured rows in the `attention`, `attention_e2e`, and `attention_bf16` entries
-of [baselines.json](baselines.json).
+measured rows on a supported card in the `attention_bf16` entry of
+[baselines.json](baselines.json).
 
 Read [performance.md](performance.md) for the measurement protocol and
 [kernels.md](kernels.md) for the family inventory.
@@ -34,8 +34,8 @@ waste a tile removes.
 | head-dim sweep `d32` to `d256` | 131,072 | 66,048 | 1.984 |
 
 The window 128 layer needs 44 percent of the full-causal work, and it issues
-4.54 times its necessary work. The measured time is the same as the full layer:
-1.571 ms against 1.586 ms. That is the defect a fused tile fixes. The `SSSL`
+4.54 times its necessary work. Its measured time was the same as the full
+layer's. That is the defect a fused tile fixes. The `SSSL`
 pattern is three window layers to one full layer, so three quarters of the
 production layers pay less in theory and the same in practice.
 
@@ -323,11 +323,9 @@ score matrix it streams, and the tile is bound by its own tile efficiency. That
 is why the tile wins by 1.27 to 1.54 rather than by the 2.3 factor of arithmetic
 it saves.
 
-The backward rows move the other way, and by design.
-`attention_bwd:d8_s512_sssl` measures 0.2301 ms against 0.2042 ms for the dense
-twin, and `attention_bwd:b4_s2048_h8_win512` measures 0.9729 ms against
-0.9103 ms. Both backwards run the same banded cuBLAS loop, so the difference is
-the query transpose that the head-major twin does not pay.
+The backward rows move the other way, and by design. Both backwards run the
+same banded cuBLAS loop, so the only difference is the query transpose that the
+head-major twin does not pay, and the dense twin is marginally faster.
 
 ## See also
 

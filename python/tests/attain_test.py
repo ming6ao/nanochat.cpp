@@ -38,12 +38,12 @@ def measured_row(family="attention", phase="forward", precision="fp32",
             "work_ratio": work_ratio, "mfu": 0.5}
 
 
-def roofline(rows, device="gtx1080ti"):
+def roofline(rows, device="t4"):
     return {"schema": attain.ROOFLINE_SCHEMA, "device": device,
             "precision": "fp32", "rows": rows}
 
 
-def bench(rows, device="gtx1080ti"):
+def bench(rows, device="t4"):
     return {"schema": attain.BENCH_SCHEMA, "device": device,
             "precision": "fp32", "rows": rows}
 
@@ -131,13 +131,13 @@ class FractionRuleTest(unittest.TestCase):
 class ValidatedOnTest(unittest.TestCase):
     def test_the_validating_device_is_the_measuring_card(self):
         record = attain.summarize(roofline([bound_row()], device="h100"),
-                                  bench([measured_row()], device="gtx1080ti"))
-        self.assertEqual(record["validated_on"], "gtx1080ti")
-        self.assertEqual(record["rows"][0]["validated_on"], "gtx1080ti")
+                                  bench([measured_row()], device="t4"))
+        self.assertEqual(record["validated_on"], "t4")
+        self.assertEqual(record["rows"][0]["validated_on"], "t4")
 
     def test_a_bound_for_another_card_says_so(self):
         record = attain.summarize(roofline([bound_row()], device="h100"),
-                                  bench([measured_row()], device="gtx1080ti"))
+                                  bench([measured_row()], device="t4"))
         note = record["rows"][0]["note"]
         self.assertIn("h100", note)
         self.assertIn("not validated", note)

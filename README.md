@@ -51,8 +51,9 @@ reference.
 - CUDA 12.0 and an NVIDIA card for the CUDA backend.
 - Python 3.10 or newer for the Python surface.
 
-The development host is one GTX 1080 Ti (`sm_61`). The tree also targets the
-T4 (`sm_75`) and Hopper (`sm_90`).
+The development host card is below `sm_75`, so the tree does not support it and
+no device target names it. The tree targets the T4 (`sm_75`) and Hopper
+(`sm_90`).
 
 The Python package lives in `python/`. Run it from the tree with
 `PYTHONPATH=python`. A binary wheel is not published yet.
@@ -66,7 +67,7 @@ start outside it. `tools/nanochat help` lists every command.
 # CPU reference backend, the default. This builds all targets.
 tools/nanochat build
 
-# CUDA backend for the current card.
+# CUDA backend for the default architecture, sm_75.
 tools/nanochat build --config=cuda
 
 # The Hopper hand-run target.

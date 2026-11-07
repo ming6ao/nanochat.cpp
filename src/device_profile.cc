@@ -70,8 +70,8 @@ std::string ToLower(const std::string& value) {
   return out;
 }
 
-// Drops whitespace so a vendor spelling such as "GTX 1080 Ti" normalizes to the
-// table's "gtx1080ti" join key.
+// Drops whitespace so a vendor spelling such as "NVIDIA T4" normalizes to the
+// table's "t4" join key.
 std::string StripWhitespace(const std::string& value) {
   std::string out;
   out.reserve(value.size());

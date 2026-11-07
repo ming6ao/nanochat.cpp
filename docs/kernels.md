@@ -127,7 +127,7 @@ Consequences for the one model in the tree:
 | `attention` | separate | own T x T pattern |
 | `embedding gather` | separate | indexed access |
 | GEMM -> GEMM | no | cuBLAS owns both |
-| the Polar Express chain: square GEMM -> `b = cb·a + cc·acc` -> apply GEMM -> `x = ca·x + prod` | **no, measured** | all five conditions hold and the kernel exists (Part 1), but the hand GEMM reaches 0.68 to 0.90 of the cuBLAS rate, the fused step is 6 to 45 percent slower, and the worst group is 76 percent slower |
+| the Polar Express chain: square GEMM -> `b = cb·a + cc·acc` -> apply GEMM -> `x = ca·x + prod` | **no, measured** | all five conditions hold and the kernel exists (Part 1), but the hand GEMM falls short of the cuBLAS rate, so the fused step is slower and the shipped multi-launch path stays |
 
 That last row is the one row of this table a campaign measured rather than
 argued. It is also the one where the structural verdict and the performance
@@ -184,13 +184,12 @@ even the `ns=0` step, which runs no GEMM at all and has nothing to fold, is 6 to
 **Exception:** the decode graph is batch-1 and latency-bound. A fused persistent
 decode kernel is therefore a legitimate `dev/kernels/` experiment, on hardware
 with matrix-multiply instructions (Turing and newer). It must beat a
-`cuBLAS + CUDA Graphs` baseline before promotion, and it does not apply to
-Pascal, which has no `mma` instruction.
+`cuBLAS + CUDA Graphs` baseline before promotion.
 
 ### Direct-MMA and persistent kernels
 
-A direct `mma` kernel and a persistent kernel do not apply to Pascal, because
-sm_61 has no tensor core and no `mma` or `wmma` instruction. The gain in a
+A direct `mma` kernel and a persistent kernel need a tensor core and the `mma`
+or `wmma` instruction, so they belong to `sm_75` and newer only. The gain in a
 system such as Mirage MPK is whole-model inference fusion on Hopper, and not
 GEMM throughput. Keep cuBLAS, and revisit this only for decode on sm_75 and
 newer.
@@ -330,9 +329,9 @@ This removes duplication **without** changing kernel boundaries.
 ## Part 1. The Muon fusion
 
 The fused path is in `backends/cuda/kernels/muon_fused.cu` and both drivers are
-tested. The shape rule selects the multi-launch cuBLAS path for every group on
-the card in the tree. The measured rows are in [baselines.json](baselines.json)
-under `muon`.
+tested. The shape rule selects the multi-launch cuBLAS path for every group. The
+rows were measured on a card the tree no longer supports, so they are removed;
+measure again on a supported card before you cite a number.
 
 ### 1. The question
 
@@ -394,32 +393,25 @@ launch + elementwise = loop - polar:step
 share of the step    = (launch + elementwise) / muon:step(ns=5)
 ```
 
-| Profile | `polar:step` | `muon:step` ns=0 | `muon:step` ns=5 | launch + elementwise | share of step |
-|---|---|---|---|---|---|
-| `h100` (8 layers, hidden 512, heads 8/4) | 30.93 ms | 6.29 ms | 42.84 ms | 5.62 ms | **13.1 %** |
-| `big` (20 layers, hidden 1280, heads 10/5) | 1268.30 ms | 85.06 ms | 1462.76 ms | 109.41 ms | **7.5 %** |
-
-A second session measured 3.81 ms (**9.2 %**) and 104.90 ms (**7.2 %**), so the
-share is 9 to 13 percent at `h100` and 7.2 to 7.5 percent at `big`.
+The rows were measured on a card the tree no longer supports, so the numbers
+are removed. The conclusion they carried is that the share is above the 2
+percent floor at both profiles, so the bet was worth writing.
 
 **The sync term, measured.** A dependent launch of a full batched grid costs
-about 8.4 microseconds and a cooperative grid barrier about 0.9 microseconds at
-the grid a fused kernel could hold resident (`muon_launch_sync_bench`), so one
-fused iteration replaces 41.9 microseconds of launch gaps with 4.7 microseconds
-of one launch plus three barriers: a **37.2 microsecond** gain per iteration.
-That is 0.5 percent of an `h100` iteration and 0.01 percent of a `big` one. The
-share above is therefore elementwise HBM traffic and not dispatch.
+about one order of magnitude more than a cooperative grid barrier at the grid a
+fused kernel could hold resident (`muon_launch_sync_bench`). The launch gaps one
+fused iteration removes are therefore a rounding error against the elementwise
+passes it also removes. The share above is elementwise HBM traffic and not
+dispatch.
 
-**Both terms, measured.** The device-side batched GEMM reached 0.68 to 0.72 of
-the cuBLAS rate on the 640x1280 group the fusion targets and 0.83 to 0.90 on the
-largest group, 1280x5120x1280. The gate asked for 0.85 on a targeted group, so
-it failed. The whole fused step is 6 to 10 percent slower at `ns=0`, 27 percent
-slower at `h100` (`ns=5`), and 45 percent slower at `big` (`ns=5`). The measured
+**Both terms, measured.** The device-side batched GEMM fell short of the cuBLAS
+rate on the group the fusion targets, so the 85 percent gate failed. The whole
+fused step is slower at `ns=0` and slower again at both profiles at `ns=5`. The
 loss is an order of magnitude larger than the win, so the campaign records a
 negative result.
 
-[performance.md](performance.md) section 2.1 holds the numbers under the
-measurement protocol, and [baselines.json](baselines.json) holds the rows.
+[performance.md](performance.md) section 2.1 holds the protocol that produced
+the removed rows.
 
 ### 4. The design
 
@@ -428,8 +420,8 @@ measurement protocol, and [baselines.json](baselines.json) holds the rows.
 work-item index. A block strides over the items of the phase it is in, because
 one cooperative grid serves every phase and fixes the block size, the grid size,
 and the dynamic shared size for the whole kernel. 256 threads under
-`__launch_bounds__(256, 3)`; the resident grid on this card is 84 blocks (3 per
-SM on 28 SMs).
+`__launch_bounds__(256, 3)`; the resident grid is the active blocks per SM times
+the SM count of the card, so the driver queries it and holds no constant.
 
 **The batched GEMM** is block tile 128 by 64, micro-tile 8 by 4 per thread (32
 fp32 accumulators, a 16 by 16 thread grid), two double-buffered 8-deep k slices
@@ -482,7 +474,7 @@ device body are identical in both drivers, so the two must agree bit for bit.
 where the bet is poor and selects the fused path where it is not. Its one number
 is `kMuonFusedMaxElements`, the largest stacked group the fused path is selected
 for, in `ComputeType` elements. That number is **0**, because the measurement
-says no group wins on this card; promoting a group is one measurement and this
+says no group wins; promoting a group is one measurement and this
 constant.
 
 ### 5. The workspace
@@ -553,7 +545,7 @@ all three are put to the device rather than to a capability bit. That surface is
 | `LaunchCooperative` | The launch itself, on `Stream()`, beside `Launch` |
 | `CooperativeLaunch` outcome (`kLaunched`, `kTooLarge`, `kFailed`) with `ClassifyCooperativeLaunch` | A typed failure, so a caller recognises `cudaErrorCooperativeLaunchTooLarge` and falls back with one log line |
 | `CooperativeLaunchSupported`, `SupportsCooperativeLaunch` | Whether the device accepts a cooperative launch at all |
-| `MultiprocessorCount`, `ActiveBlocksPerMultiprocessor`, `ResidentBlocks` | The persistent grid: active blocks per SM for that kernel, block size, and dynamic shared size, times the SM count. 84 on this card |
+| `MultiprocessorCount`, `ActiveBlocksPerMultiprocessor`, `ResidentBlocks` | The persistent grid: active blocks per SM for that kernel, block size, and dynamic shared size, times the SM count. 84 blocks on a 28-SM card at 3 blocks per SM |
 
 No capability bit, no `caps.json` field, and no change to `GetCaps`: the driver
 asks the device, and a card that answers with no takes the phase loop. The
@@ -572,14 +564,14 @@ the choice is final. The mock must export all three or
   and 15 KiB of static shared memory hold 6 blocks per SM where the elementwise
   families' own kernels hold 8, so the fused stage starts from a residence
   deficit that the folds have to pay back. They do not: the `ns=0` step, which
-  runs no GEMM and has nothing to fold, is 6 to 10 percent slower.
+  runs no GEMM and has nothing to fold, is slower.
 - **The GEMM schedule is the bet, and it lost.** 80 registers per thread, 12 KB
   of shared memory, and 3 blocks per SM leave 768 of 2048 threads resident. An
   8 by 8 micro-tile, a 16- to 32-deep slice, or a 256 by 64 tile is a *different*
   prototype and a different measurement. Nothing here says the fusion is
-  impossible, only that this schedule on this card is 30 percent off cuBLAS.
-- **cuBLAS weakness masks the hand GEMM on the largest group.** At
-  1280x5120x1280 the `A` stage measured 0.95 to 1.17 of cuBLAS, because that
+  impossible, only that this schedule is well off cuBLAS.
+- **cuBLAS weakness masks the hand GEMM on the largest group.** On the
+  1280x5120x1280 group the `A` stage reached the cuBLAS rate, because that
   product is bandwidth bound. A rate gate against cuBLAS is therefore not a
   selector by itself; the end-to-end step row is.
 - **The bf16 build stays on the multi-launch path.** The fused schedule is the
@@ -781,14 +773,15 @@ uses WGMMA, TMA, split-K, and swizzled tiles. A hand kernel on the warp-level
 matrix multiply-accumulate interface lands near Ampere-class rates. The design
 therefore sets a fraction gate and not a literal match: **0.70 of the cuBLAS
 rate** for a first promotion and **0.85** for a full shape replacement. The fp32
-hand GEMM reached 0.68 to 0.90 of the cuBLAS rate on Pascal (Part 1).
+hand GEMM stayed below the first promotion on the group the Muon fusion targets
+(Part 1).
 
 **The shape set is a closed list, not a general GEMM:** the Muon Polar Express
 groups of [model.md](model.md) § Optimizer, and the Linear forward, dgrad, and
 wgrad shapes in `python/nanochat_cpp/pipeline.py` `PROFILES`.
 
 **The kernel.** Generalise the `attention_bf16.cuh` microkernel into a tiled
-GEMM under `backends/cuda/gemm_hand/`. Use `cp.async` double-buffered
+GEMM under `backends/cuda/gemm/`. Use `cp.async` double-buffered
 shared-memory stages and `wmma::mma_sync` with 16 by 16 by 16 bf16 fragments and
 fp32 accumulators. Support the full `GemmParams` contract: transpose flags,
 batch, leading dimensions, strides, an alpha/beta epilogue, and the fp32 output
@@ -817,9 +810,8 @@ the frozen seam's meaning and neither adds a family.
 ### 1. Vectorized row kernels
 
 Every row kernel in `backends/cuda` uses scalar strided access: the loops step
-one element at a time. The GTX 1080 Ti moves about 484 GB/s and computes about
-11.34 TFLOP/s, so the ridge point is about 23 flop for each byte, and the row
-kernels sit far below it. `row_benchmark.cc` reports milliseconds only, so an
+one element at a time. On every supported card the ridge point is tens of flop
+for each byte, and the row kernels sit far below it. `row_benchmark.cc` reports milliseconds only, so an
 achieved byte rate column comes first.
 
 The helper is header-only in `backends/cuda/kernels/device_utils.cuh`, so it

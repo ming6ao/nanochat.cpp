@@ -928,8 +928,8 @@ static cublasStatus_t GemmExCommon(
   // `cublasGemmAlgo_t` are deprecated since CUDA 11.0, and a GEMM on a
   // tensor-core device must accumulate in fp32 (docs/simulator.md section
   // 5.3). On a tensor-core profile the only accepted accumulation is
-  // `CUBLAS_COMPUTE_32F`; `CUBLAS_COMPUTE_16F` is the Pascal non-tensor-core
-  // path and must not appear here.
+  // `CUBLAS_COMPUTE_32F`; `CUBLAS_COMPUTE_16F` is the pre-tensor-core compute
+  // type and must not appear here.
   bool ok = true;
   std::string verdict = "ok";
   if (tensor_cores && compute_type != kCublasCompute32F) {

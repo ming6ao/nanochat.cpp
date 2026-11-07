@@ -9,9 +9,9 @@
 //      in decode_kernels.cu.
 //
 // This is the baseline a fused persistent decode megakernel would have to beat
-// (docs/kernels.md, compute strategy). The MMA/persistent variant is explicitly
-// a Turing+ (sm_75) experiment: this host is a GTX 1080 Ti at sm_61, which has
-// no `mma`/`wmma`, so only the baseline is reported here.
+// (docs/kernels.md, compute strategy). The MMA/persistent variant is a
+// Turing-and-newer (`sm_75` and up) experiment, so only the baseline is
+// reported here.
 //
 // Because backends/cuda hardcodes the legacy default stream, the seam kernels
 // are *not* CUDA-graph capturable; the graph path therefore uses the local
@@ -516,8 +516,8 @@ int main() {
               graph_tok_s);
   std::printf("  graph speedup   : %.2fx\n", eager_ms / graph_ms_per);
   std::printf(
-      "  note: persistent/MMA decode megakernel is sm_75+ only; this host is "
-      "Pascal sm_61 (no mma/wmma), so only the baseline is reported.\n");
+      "  note: persistent/MMA decode megakernel is sm_75+ only, so only the "
+      "baseline is reported.\n");
 
   cudaGraphExecDestroy(graph_exec);
   cudaGraphDestroy(graph);

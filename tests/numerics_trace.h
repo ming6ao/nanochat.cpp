@@ -13,7 +13,7 @@
 // four phases (training, evaluation, greedy generation, and the SFT and RL
 // arithmetic), recorded as a flat list of named records, so one committed
 // fixture can be replayed on the CPU reference backend, under `--config=sim`,
-// and on the Pascal GPU.
+// and on a supported CUDA device.
 //
 // The fixture holds the **exact class** only: configuration, inputs, token ids,
 // masks, greedy identifiers, argmax, and valid-target counts. Every one of them

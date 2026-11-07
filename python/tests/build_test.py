@@ -180,7 +180,7 @@ class BuildOptionsTest(unittest.TestCase):
     def test_explicit_options_override_the_environment(self) -> None:
         os.environ["NANOCHAT_CPP_BACKEND"] = "cpu"
         os.environ["NANOCHAT_CPP_PRECISION"] = "fp32"
-        os.environ["NANOCHAT_CUDA_ARCH"] = "sm_61"
+        os.environ["NANOCHAT_CUDA_ARCH"] = "sm_80"
         options = _build.BuildOptions.resolve(
             backend=" CUDA ", precision="FP32", arch="sm_75")
         self.assertEqual(options.backend, "cuda")

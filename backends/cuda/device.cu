@@ -72,9 +72,9 @@ constexpr std::uint64_t kPrecisionBits =
 std::uint64_t DeclaredFeatureMask(const char* device_name) {
   if (device_name == nullptr || *device_name == '\0') return 0;
   // The lookup normalizes case and whitespace, so the vendor spelling a driver
-  // reports ("NVIDIA GeForce GTX 1080 Ti") and the profile's join key
-  // ("gtx1080ti") resolve to one entry. The projection is the same one the
-  // simulator uses, so the two tiers cannot disagree about a profile.
+  // reports ("NVIDIA T4") and the profile's join key ("t4") resolve to one
+  // entry. The projection is the same one the simulator uses, so the two tiers
+  // cannot disagree about a profile.
   const DeviceProfile* profile = FindDeviceProfile(device_name);
   if (profile == nullptr) return 0;
   return CapsFromProfile(*profile).feature_mask;
@@ -271,8 +271,8 @@ Caps GetCaps() {
   // silicon reports)` rather than as a union of everything, because the two
   // sides have different authority. A declaration may not *grant* a precision
   // bit: a profile written for the fastest member of a family must not make a
-  // Pascal card claim bf16 (spec/capability_bits.md section 4). And a
-  // declaration may not *withhold* one either, because this backend's
+  // card without bf16 units claim bf16 (spec/capability_bits.md section 4). And
+  // a declaration may not *withhold* one either, because this backend's
   // correctness does not depend on the caps.json derivation having run: the
   // silicon's precision is a fact `cudaDeviceProp` answers on its own.
   const std::uint64_t declared =

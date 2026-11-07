@@ -129,7 +129,7 @@ nanochat.cpp/
     cuda/kernels/<family>_test.cc + <family>_benchmark.cc next to each kernel
     cuda/kernels/device_utils.cuh
     cuda/kernels/testing/        # host reference headers and test helpers
-  dev/kernels/                   # unpromoted prototypes and the toolchain spike
+  dev/kernels/                   # unpromoted prototypes
   examples/                      # the smallest examples of the public API
     hello_world/                 # inference: config, model, generate (docs/examples.md)
     checkpoint_roundtrip/        # the container: save, load, metadata (docs/examples.md)
@@ -207,7 +207,8 @@ itself, so `tools/nanochat` runs Bazelisk when it is on `PATH` and falls back to
 a system `bazel` otherwise. Install Bazelisk once per host; see
 [sandbox.md](sandbox.md).
 
-- `.bazelrc` sets `--@rules_cuda//cuda:archs=sm_61` (or `sm_75`).
+- `.bazelrc` sets `--@rules_cuda//cuda:archs=sm_75`, the oldest architecture
+  the tree supports.
 - `CUDA_HOME=/usr` on this machine (no `/usr/local/cuda`).
 - GPU tests are tagged `gpu` + `manual` and run outside the Bazel sandbox.
 - Run tests through `tools/nanochat test`; it adds `--run_under` so each test
@@ -282,8 +283,8 @@ hide an import that breaks the layering rule.
 
 ## Link dependencies
 
-Bazel is the only supported build. The P0 toolchain spike is
-`//dev/kernels:pascal_spike_gpu_test`.
+Bazel is the only supported build. The smallest CUDA gate is
+`//backends/cuda/kernels:rms_norm_gpu_test`.
 
 The CUDA build links `cudart` and cuBLAS. The CPU build links `libm`. Neither
 links cuDNN or a collective library: the native ring needs no vendor library.
@@ -297,13 +298,13 @@ Selection is a build/link choice:
 ```
 --backend=cpu|cuda        link the backend library
 --precision=fp32|bf16     select ComputeType
---arch=sm_61|sm_75|sm_80|sm_90  CUDA --generate-code
+--arch=sm_75|sm_80|sm_90    CUDA --generate-code
 ```
 
 | Backend | Implements | Notes |
 |---|---|---|
 | `backends/cpu` | all of `kernels.h` with naive loops | reference, CI, oracle baseline; `-lm` (+ OpenMP) |
-| `backends/cuda` | all of `kernels.h`; cuBLAS for GEMM | Pascal fp32, Turing fp32, Ampere and newer bf16; no cuDNN, no vendor collective |
+| `backends/cuda` | all of `kernels.h`; cuBLAS for GEMM | Turing fp32, Ampere and newer bf16; no cuDNN, no vendor collective |
 
 The shared workflow (`ops.cc`, `model.cc`, `generate.cc`, `optim.cc`,
 `train.cc`) compiles once and links against either backend. This is the one
@@ -331,7 +332,7 @@ The fp8 compute type is bf16. `include/nanochat/tensor.h` maps the value to
 dispatch occurs. The fp16 build and its half-storage path are removed
 ([precision.md](precision.md)).
 
-- Pascal (sm_61), Turing (sm_75), and the CPU: fp32.
+- Turing (sm_75) and the CPU: fp32.
 - Ampere (sm_80) and Hopper (sm_90): bf16.
 - The persistent state stays fp32 in every build, so the parameter gradient is
   always `GradientType = float` even when the compute type is bf16
@@ -367,9 +368,9 @@ leg, the build test, and a hand run are the same build.
 
 ## Turing (T4, sm_75)
 
-Design for the Turing target. The T4 card is the second GPU family that
-`nanochat.cpp` supports. Read the backends and precision sections above for the
-selection rules.
+Design for the Turing target. The T4 card is the oldest GPU family that
+`nanochat.cpp` supports, so `sm_75` is the floor of the build. Read the backends
+and precision sections above for the selection rules.
 
 The build configs exist for Turing, but the
 correctness gates have no recorded result yet. The `t4` build uses fp32 for the
@@ -384,14 +385,15 @@ new backend directory is necessary.
 
 ### 2. Capability difference
 
-| Feature | Pascal sm_61 | Turing sm_75 |
+| Feature | Turing sm_75 | Hopper sm_90 |
 |---|---|---|
 | fp32 arithmetic | yes | yes |
-| `mma` instructions | no | yes |
+| `mma` instructions | yes | yes |
+| bf16 arithmetic | no | yes |
 
 `GetCaps()` reports the differences. `caps.has_tensor_cores` is true for
-`major >= 7`. Turing has fp16 tensor cores, but no build uses them
-([precision.md](precision.md)); the T4 runs fp32.
+`major >= 7`, so every supported card reports it. Turing has fp16 tensor cores,
+but no build uses them ([precision.md](precision.md)); the T4 runs fp32.
 
 ### 3. Build configuration
 
@@ -404,7 +406,7 @@ new backend directory is necessary.
 The tree keeps no named Turing config. A Turing run passes
 `--config=cuda --@rules_cuda//cuda:archs=sm_75` itself, which is the flag triple
 `tools/modal/app.py` emits for its T4 leg. The Turing build uses the fp32 GEMM
-path on this card.
+path.
 
 The T4 build uses fp32. The fp32 build is the correctness gate and the default
 Kaggle build. The Turing hardware supports fp16, but no build uses it
@@ -482,7 +484,7 @@ same number here._
 - Moving a source file under `src/`, `include/`, or `backends/`.
 - A language server, a formatter, or a packaging rewrite.
 - A published binary wheel for every platform. The first release covers sm_75
-  and sm_61 only.
+  and sm_90 only.
 
 ### 2. The defect
 

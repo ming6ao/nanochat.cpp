@@ -11,10 +11,10 @@
 // stride is not constant across `(b, h)`, so a single strided-batched call
 // cannot read it. For multi-head attention (the training and decode path) the
 // operands are transposed into a contiguous `[batch, heads, seq, head_dim]`
-// scratch, which lets one batched GEMM cover every head. That matters on
-// Pascal: a per-head GEMM of `512 x 128` occupies a fraction of the device and
-// runs at about 1.4-3 TFLOP/s, while the same work batched over the heads runs
-// at about 6-7 TFLOP/s. Grouped-query attention takes the same batched path
+// scratch, which lets one batched GEMM cover every head. The batching matters:
+// a per-head GEMM of `512 x 128` occupies a fraction of the device, and the
+// same work batched over the heads reaches a much larger fraction of the
+// declared rate. Grouped-query attention takes the same batched path
 // after its key and value heads are widened to the query head count, which is
 // one transpose kernel each and no second pass over the scores. Its backward
 // computes one key and value gradient per query head and folds the heads that
@@ -656,7 +656,8 @@ void TransposeFromHeads(int batch, int rows, int heads, int kv_heads, int dim,
 // The validated Phase 1 tile: `Br=32` query rows, `Bc=32` key/value rows staged
 // per tile, 256 threads, two resident blocks per streaming multiprocessor. At
 // `head_dim` 128 the key/value stage and the probability tile use 37,120 bytes,
-// below the 48 KB Pascal block cap. See `docs/attention.md` Part 2.
+// below the 48 KB dynamic shared-memory cap a launch has without a device
+// attribute. See `docs/attention.md` Part 2.
 // section 6 and `backends/cuda/kernels/README.md`.
 constexpr int kFusedThreads = 256;
 constexpr int kFusedBr = 32;
@@ -965,18 +966,17 @@ void LaunchFusedAttention(const AttentionParams& params, const ComputeType* q,
 
 // Whether the fused tiled forward covers this shape. The tile computes the
 // query-key product with a scalar FMA loop, so it belongs on a card whose
-// matmuls have no tensor cores to lose to: it took the Phase 1 gate on the
-// GTX 1080 Ti. A bf16 build is a tensor-core build, because bf16 arithmetic
-// needs the units, and there the tile loses: the 13 sliding-window layers of
-// the `big` profile take 34.6 ms through it, against a 1.06 ms roofline bound
-// for all 20 layers. The tile also covers only `head_dim` 128, and only a
-// windowed shape, because the full-causal tile lost its gate to cuBLAS. It
-// reads the query in the model stream, so a head-major query keeps the batched
-// path.
-// The bf16 tile needs the tensor cores: it replaces the dense cuBLAS score
-// matrix, and a bf16 build whose device has no tensor cores keeps that path.
-// The condition itself lives in `attention_dispatch.h`, so the test reads the
-// same code. See `docs/attention.md` Part 6, section 5.
+// matmuls have no tensor cores to lose to. A bf16 build is a tensor-core
+// build, because bf16 arithmetic needs the units, and there the tile loses: the
+// 13 sliding-window layers of the `big` profile take 34.6 ms through it,
+// against a 1.06 ms roofline bound for all 20 layers. The tile also covers only
+// `head_dim` 128, and only a windowed shape, because the full-causal tile lost
+// its gate to cuBLAS. It reads the query in the model stream, so a head-major
+// query keeps the batched path. The bf16 tile needs the tensor cores: it
+// replaces the dense cuBLAS score matrix, and a bf16 build whose device has no
+// tensor cores keeps that path. The condition itself lives in
+// `attention_dispatch.h`, so the test reads the same code. See
+// `docs/attention.md` Part 6, section 5.
 //
 // The tile's own source exists only under `__CUDACC__` in a bf16 or fp8 build,
 // which is the same pair of conditions this function tests. The host compiler

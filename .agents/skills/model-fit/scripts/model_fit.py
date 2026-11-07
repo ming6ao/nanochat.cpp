@@ -125,7 +125,6 @@ DEVICES: dict[str, Hardware] = {
     "a100": Hardware("a100", 80 * GIB, 19.5e12, 312e12, 312e12,
                      tensor_cores=True),
     "t4": Hardware("t4", 16 * GIB, 8.1e12, 65e12, 0.0, tensor_cores=True),
-    "gtx1080ti": Hardware("gtx1080ti", 11 * GIB, 11.34e12, 0.177e12, 0.0),
 }
 
 
