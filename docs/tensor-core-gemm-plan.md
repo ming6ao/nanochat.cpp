@@ -500,7 +500,7 @@ small `m`: a batch-1 decode call with `m` of 1 wastes a tensor-core tile, and
 |---|---|---|---|
 | B0 | The host scaffolding: `GemmPlan` as pure host code, with the tile choice, the rounding up, the bounds, the epilogue expression, and the stride inference | Passes on this machine | `tools/nanochat test //backends/cuda/gemm:gemm_tile_test` |
 | B1 | The `sm_80` kernel, forward only, one shape, no batch, no transpose, `beta = 0` | SA over the emulated leg, then agreement with cuBLAS at 1e-3 absolute | `tools/nanochat simulate --device h100 --suite gemm --precision bf16` |
-| B2 | The full contract: four transpose forms, batch, three leading dimensions, strides, alpha and beta, and the fp32 store | The seven cases of `//backends/cuda:cuda_runtime_gpu_test`, plus ragged tiles and a batch of 3, on both copy arms | `tools/nanochat test --gpu //backends/cuda/gemm:gemm_gpu_test` |
+| B2 | The full contract: four transpose forms, batch, three leading dimensions, strides, alpha and beta, and the fp32 store | cuBLAS is the reference on a card, over the same cases the emulator runs, and every schedule | `tools/nanochat test --gpu --config=hopper //backends/cuda/gemm:gemm_gpu_test` |
 | B3 | The dispatch: the closed list, the verdict, and the `NANOCHAT_GEMM_LIB` switch | The T0 gate, and no shape changes hands while its bit is inert | `tools/nanochat test //backends/cuda/gemm:dispatch_test` |
 | B4 | The schedule sweep: the two-stage `cp.async` copy, the three schedules, and the record of what each one measures | The code half is landed and gated off device. The record needs 0.85 on the D5 group, then on a named shape set, so it needs D1 | `tools/nanochat bench -- bazel-bin/backends/cuda/gemm/gemm_benchmark --schedule all --json --out /tmp/gemm-sweep.json` |
 | B5 | The measurement and the promotion: one report row per shape, the tile against cuBLAS, then the bits that pass | 0.70 on one Muon row and one Linear shape, 0.85 for a replacement, and no enabled shape slower than cuBLAS | `tools/nanochat bench -- bazel-bin/backends/cuda/gemm/gemm_benchmark --json --out /tmp/gemm-bf16.json` |
@@ -545,12 +545,39 @@ training step takes. It has not run: it needs a card and a bf16 build (D1).
 Open in B5: the Linear rows join the table from a measurement. The five Muon
 groups are measured, and a bit is turned on only where the fraction gate passes.
 
+**The device gate exists.** `backends/cuda/gemm/gemm_gpu_test.cc` is the twin
+of the emulated check, and cuBLAS is its reference. Both sides accumulate bf16
+products in fp32, so only the order of the sum differs. The tolerance is
+therefore tight: one bf16 unit in the last place, and 1e-5 relative for an fp32
+store.
+
+It drives the launcher and not the seam. Every row of the shape table is inert,
+so a call through `Gemm` would compare cuBLAS with cuBLAS.
+
+| Case | What it covers |
+|---|---|
+| Four operand layouts at 4 by 3 by 5 | The stride pairs and the micro-tile addressing |
+| A batch of three | The per-batch base and stride arithmetic |
+| Ragged 45 by 23 by 50 | The predicated edge and the k tail |
+| 128 by 64 by 32 | Exactly one base tile |
+| 200 by 130 by 96 | More than one tile on both extents, and more than one slice |
+| Weight gradient, 96 by 64 by 40, batch of two, fp32 out | The second store path at more than one tile |
+| 640 by 640 by 96 on each of the three schedules | The sweep on a card |
+
+Two refusals stand in front of it, and the run states which one it took. An
+fp32 build prints that the tile needs bf16. A card without a bf16 tensor core
+names itself and exits instead of running a tile that cannot work there. On this
+machine the second is what a run prints.
+
+The command carries `--config=hopper`, because the tile is compiled only in a
+bf16 build.
+
 ## B.8 The gates
 
 | Gate | Kind | Pass condition |
 |---|---|---|
 | G1 | Arithmetic, off device | SA and SB stay green, so every change is checked before it reaches a card |
-| G2 | Correctness, device | Every contract case matches cuBLAS within 1e-3 absolute at tiny shapes, and inside the `docs/testing.md` bound at real shapes |
+| G2 | Correctness, device | `gemm_gpu_test`: every contract case matches cuBLAS, on a card, within one bf16 unit for a bf16 store and 1e-5 for an fp32 store |
 | G3 | No group slower | Every enabled shape is at least as fast as cuBLAS at the same precision. One slower shape turns its bit off |
 | G4 | Promotion | 0.70 of the cuBLAS rate for a first row. 0.85 for a shape replacement |
 | G5 | Seam | `include/nanochat/kernels.h` has no diff, `caps.json` gains no bit, and `tools/nanochat simulate --device h100` stays green |
