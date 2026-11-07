@@ -1,0 +1,279 @@
+// The gate of the hand GEMM's shape table and its verdict
+// (docs/tensor-core-gemm-plan.md section B.6).
+//
+// The table is the closed shape list, and every row starts inert, so the checks
+// are: the list matches the shapes `muon.cu` issues, a row selects only its own
+// key, and a bit turned on is the only way a shape changes hands. Every row is
+// inert in the shipped table, so a row is turned on here and turned off again.
+//
+// It also re-checks the seam's default rules, because `ResolveGemm` and
+// `GemmImpl` must agree and only one of the two runs on a card.
+//
+// CPU only: no device, no driver, no toolkit.
+
+#include <cstdio>
+#include <cstdlib>
+#include <set>
+#include <string>
+#include <vector>
+
+#include "backends/cuda/gemm/dispatch.h"
+#include "backends/cuda/gemm/gemm_shape.h"
+#include "backends/cuda/kernels/muon_gemm_shape.h"
+#include "nanochat/kernels.h"
+
+namespace {
+
+using nanochat::GemmParams;
+using nanochat::kernels::GemmTileMode;
+using nanochat::kernels::GemmTileModeFromEnv;
+using nanochat::kernels::GemmTileModeName;
+using nanochat::kernels::GemmTileSelected;
+using nanochat::kernels::GemmTileShapeCount;
+using nanochat::kernels::GemmTileShapeEnabled;
+using nanochat::kernels::GemmTileShapeGemm;
+using nanochat::kernels::GemmTileShapeName;
+using nanochat::kernels::IsTileCallable;
+using nanochat::kernels::ResolvedGemm;
+using nanochat::kernels::ResolveGemm;
+using nanochat::kernels::SameShape;
+using nanochat::kernels::SetGemmTileShapeEnabled;
+
+int g_failures = 0;
+
+void Fail(const std::string& what, const char* case_name) {
+  std::fprintf(stderr, "FAIL: %s (%s)\n", what.c_str(), case_name);
+  ++g_failures;
+}
+
+void Expect(bool condition, const std::string& what, const char* case_name) {
+  if (!condition) Fail(what, case_name);
+}
+
+// The five Muon groups of docs/model.md section The Muon step. These are the
+// literals the table is checked against.
+struct Group {
+  int rows;
+  int cols;
+  int batch;
+};
+
+constexpr Group kGroups[] = {
+    {5, 12, 10},      {640, 1280, 40},  {1280, 1280, 40},
+    {1280, 5120, 20}, {5120, 1280, 20},
+};
+
+// The table is one row per shape. The five groups contribute fifteen products,
+// and two pairs of them are one shape each: `1280x1280:A2` is also its product,
+// and the `1280x5120` square is the `5120x1280` square.
+void CheckTableShape() {
+  const char* kCase = "table shape";
+  Expect(GemmTileShapeCount() == 13, "the closed list holds thirteen rows",
+         kCase);
+  bool shared = false;
+  for (int i = 0; i < GemmTileShapeCount(); ++i) {
+    if (std::string(GemmTileShapeName(i)).find('+') != std::string::npos) {
+      shared = true;
+    }
+  }
+  Expect(shared, "a shared shape names both of its products", kCase);
+
+  std::set<std::string> names;
+  for (int i = 0; i < GemmTileShapeCount(); ++i) {
+    const std::string name = GemmTileShapeName(i);
+    Expect(!name.empty(), "every row has a name", kCase);
+    Expect(names.insert(name).second, "every name is unique: " + name, kCase);
+    Expect(!GemmTileShapeEnabled(i), "the shipped row is inert: " + name,
+           kCase);
+    Expect(IsTileCallable(GemmTileShapeGemm(i)),
+           "every row is a callable shape: " + name, kCase);
+  }
+}
+
+// Every shape `muon.cu` issues is one row, and the row matches it. A change to
+// the Polar Express shapes therefore fails here until the table follows.
+void CheckTableMatchesTheCallSites() {
+  const char* kCase = "table matches the call sites";
+  for (const Group& group : kGroups) {
+    const GemmParams issued[] = {
+        nanochat::kernels::muon_shape::SquareGemm(group.rows, group.cols,
+                                                  group.batch),
+        nanochat::kernels::muon_shape::SquareSquareGemm(group.rows, group.cols,
+                                                        group.batch),
+        nanochat::kernels::muon_shape::ApplyGemm(group.rows, group.cols,
+                                                 group.batch),
+    };
+    for (const GemmParams& params : issued) {
+      const ResolvedGemm gemm = ResolveGemm(params, /*fp32_c=*/false);
+      int matches = 0;
+      for (int i = 0; i < GemmTileShapeCount(); ++i) {
+        if (SameShape(GemmTileShapeGemm(i), gemm)) ++matches;
+      }
+      const std::string label = std::to_string(group.rows) + "x" +
+                                std::to_string(group.cols) + " batch " +
+                                std::to_string(group.batch);
+      Expect(matches == 1,
+             "one row for " + label + ", found " + std::to_string(matches),
+             kCase);
+    }
+  }
+}
+
+// A row selects its own key, and only after a measurement turns it on.
+void CheckSelection() {
+  const char* kCase = "selection";
+  const int row = 3;
+  const ResolvedGemm key = GemmTileShapeGemm(row);
+
+  Expect(!GemmTileSelected(key, GemmTileMode::kAuto),
+         "an inert row selects nothing", kCase);
+
+  SetGemmTileShapeEnabled(row, true);
+  Expect(GemmTileSelected(key, GemmTileMode::kAuto),
+         "an enabled row selects its own key", kCase);
+  Expect(GemmTileShapeEnabled(row), "the row reports its own bit", kCase);
+
+  // A near miss on any part of the key is a different shape.
+  ResolvedGemm shifted = key;
+  shifted.ldb += 1;
+  Expect(!GemmTileSelected(shifted, GemmTileMode::kAuto),
+         "a different leading dimension does not match", kCase);
+  shifted = key;
+  shifted.batch_count += 1;
+  Expect(!GemmTileSelected(shifted, GemmTileMode::kAuto),
+         "a different batch count does not match", kCase);
+  shifted = key;
+  shifted.fp32_c = !key.fp32_c;
+  Expect(!GemmTileSelected(shifted, GemmTileMode::kAuto),
+         "a different store type does not match", kCase);
+
+  SetGemmTileShapeEnabled(row, false);
+  Expect(!GemmTileSelected(key, GemmTileMode::kAuto),
+         "the row goes back to inert", kCase);
+}
+
+// The measurement switch overrides the table, and the switch never selects a
+// call the tile refuses.
+void CheckMode() {
+  const char* kCase = "mode";
+  const ResolvedGemm key = GemmTileShapeGemm(0);
+  Expect(!GemmTileSelected(key, GemmTileMode::kCublas),
+         "the cublas mode selects nothing", kCase);
+  Expect(GemmTileSelected(key, GemmTileMode::kHand),
+         "the hand mode selects a callable shape", kCase);
+
+  ResolvedGemm empty = key;
+  empty.k = 0;
+  Expect(!GemmTileSelected(empty, GemmTileMode::kHand),
+         "the hand mode still refuses an empty extent", kCase);
+  empty = key;
+  empty.batch_count = 0;
+  Expect(!GemmTileSelected(empty, GemmTileMode::kHand),
+         "the hand mode refuses an empty batch", kCase);
+
+  Expect(std::string(GemmTileModeName(GemmTileMode::kAuto)) == "auto",
+         "the auto mode names itself", kCase);
+  Expect(std::string(GemmTileModeName(GemmTileMode::kHand)) == "hand",
+         "the hand mode names itself", kCase);
+  Expect(std::string(GemmTileModeName(GemmTileMode::kCublas)) == "cublas",
+         "the cublas mode names itself", kCase);
+}
+
+void CheckModeFromEnv() {
+  const char* kCase = "mode from the environment";
+  unsetenv("NANOCHAT_GEMM_LIB");
+  Expect(GemmTileModeFromEnv() == GemmTileMode::kAuto, "unset is auto", kCase);
+  setenv("NANOCHAT_GEMM_LIB", "hand", 1);
+  Expect(GemmTileModeFromEnv() == GemmTileMode::kHand, "hand is hand", kCase);
+  setenv("NANOCHAT_GEMM_LIB", "cublas", 1);
+  Expect(GemmTileModeFromEnv() == GemmTileMode::kCublas, "cublas is cublas",
+         kCase);
+  setenv("NANOCHAT_GEMM_LIB", "something else", 1);
+  Expect(GemmTileModeFromEnv() == GemmTileMode::kAuto,
+         "an unknown value is auto", kCase);
+  unsetenv("NANOCHAT_GEMM_LIB");
+}
+
+// The seam's default rules, which `ResolveGemm` and `GemmImpl` must share.
+void CheckResolve() {
+  const char* kCase = "resolve";
+  struct Case {
+    bool ta;
+    bool tb;
+    int m;
+    int n;
+    int k;
+  };
+  const Case cases[] = {
+      {false, false, 3, 4, 5},
+      {false, true, 3, 4, 5},
+      {true, false, 3, 4, 5},
+      {true, true, 3, 4, 5},
+  };
+  for (const Case& c : cases) {
+    GemmParams params;
+    params.m = c.m;
+    params.n = c.n;
+    params.k = c.k;
+    params.batch_count = 2;
+    params.transpose_a = c.ta;
+    params.transpose_b = c.tb;
+    const ResolvedGemm gemm = ResolveGemm(params, /*fp32_c=*/false);
+    Expect(gemm.lda == (c.ta ? c.m : c.k), "lda follows the transpose", kCase);
+    Expect(gemm.ldb == (c.tb ? c.k : c.n), "ldb follows the transpose", kCase);
+    Expect(gemm.ldc == c.n, "ldc defaults to n", kCase);
+    Expect(
+        gemm.stride_a == static_cast<std::int64_t>(c.ta ? c.k : c.m) * gemm.lda,
+        "stride_a is the operand row count times its leading dimension", kCase);
+    Expect(
+        gemm.stride_b == static_cast<std::int64_t>(c.tb ? c.n : c.k) * gemm.ldb,
+        "stride_b is the operand row count times its leading dimension", kCase);
+    Expect(gemm.stride_c == static_cast<std::int64_t>(c.m) * gemm.ldc,
+           "stride_c is the output row count times its leading dimension",
+           kCase);
+    Expect(IsTileCallable(gemm), "a dense call is callable", kCase);
+  }
+
+  // An explicit value wins over the default.
+  GemmParams explicit_params;
+  explicit_params.m = 3;
+  explicit_params.n = 4;
+  explicit_params.k = 5;
+  explicit_params.lda = 7;
+  explicit_params.ldb = 9;
+  explicit_params.ldc = 11;
+  explicit_params.stride_a = 100;
+  explicit_params.stride_b = 200;
+  explicit_params.stride_c = 300;
+  const ResolvedGemm gemm = ResolveGemm(explicit_params, /*fp32_c=*/true);
+  Expect(gemm.lda == 7 && gemm.ldb == 9 && gemm.ldc == 11,
+         "an explicit leading dimension wins", kCase);
+  Expect(gemm.stride_a == 100 && gemm.stride_b == 200 && gemm.stride_c == 300,
+         "an explicit stride wins", kCase);
+  Expect(gemm.fp32_c, "the store type is carried", kCase);
+
+  // The scalars are not part of the key.
+  ResolvedGemm scaled = gemm;
+  scaled.alpha = 0.5f;
+  scaled.beta = 0.25f;
+  Expect(SameShape(gemm, scaled), "the scalars are not part of the shape",
+         kCase);
+}
+
+}  // namespace
+
+int main() {
+  CheckTableShape();
+  CheckTableMatchesTheCallSites();
+  CheckSelection();
+  CheckMode();
+  CheckModeFromEnv();
+  CheckResolve();
+
+  if (g_failures != 0) {
+    std::fprintf(stderr, "dispatch: %d check(s) failed\n", g_failures);
+    return 1;
+  }
+  std::printf("dispatch: ok, %d rows\n", GemmTileShapeCount());
+  return 0;
+}

@@ -47,6 +47,7 @@
 #include "backends/cuda/device.h"
 #include "backends/cuda/kernels/device_utils.cuh"
 #include "backends/cuda/kernels/muon_fused.h"
+#include "backends/cuda/kernels/muon_gemm_shape.h"
 #include "nanochat/kernels.h"
 
 namespace nanochat {
@@ -655,81 +656,37 @@ void MuonUpdate(const MuonParams& params, const float* stacked_grads,
     const float cc = kPolarCoeffs[it][2];
     if (tall) {
       // A = X^T X  (cols x cols).
-      GemmParams ga;
-      ga.m = cols;
-      ga.n = cols;
-      ga.k = rows;
-      ga.batch_count = num_params;
-      ga.transpose_a = true;
-      ga.stride_a = mat;
-      ga.stride_b = mat;
-      ga.stride_c = min_sq;
-      Gemm(GemmMode::kForward, ga, x, x, a);
+      Gemm(GemmMode::kForward, muon_shape::SquareGemm(rows, cols, num_params),
+           x, x, a);
 
       // A2 = A A, then b = cb * a + cc * A2 with the product landing in `b`
       // itself: the combination is per index, so the destination is also its
       // second operand and the separate `a2` buffer is gone.
-      GemmParams ga2;
-      ga2.m = cols;
-      ga2.n = cols;
-      ga2.k = cols;
-      ga2.batch_count = num_params;
-      ga2.stride_a = min_sq;
-      ga2.stride_b = min_sq;
-      ga2.stride_c = min_sq;
-      Gemm(GemmMode::kForward, ga2, a, a, b);
+      Gemm(GemmMode::kForward,
+           muon_shape::SquareSquareGemm(rows, cols, num_params), a, a, b);
 
       cuda_backend::Launch(MuonBKernel, dim3(min_grid), dim3(kThreads), 0,
                            min_total, cb, cc, a, b, b);
 
       // prod = X B  (rows x cols).
-      GemmParams gp;
-      gp.m = rows;
-      gp.n = cols;
-      gp.k = cols;
-      gp.batch_count = num_params;
-      gp.stride_a = mat;
-      gp.stride_b = min_sq;
-      gp.stride_c = mat;
-      Gemm(GemmMode::kForward, gp, x, b, prod);
+      Gemm(GemmMode::kForward, muon_shape::ApplyGemm(rows, cols, num_params), x,
+           b, prod);
     } else {
       // A = X X^T  (rows x rows).
-      GemmParams ga;
-      ga.m = rows;
-      ga.n = rows;
-      ga.k = cols;
-      ga.batch_count = num_params;
-      ga.transpose_b = true;
-      ga.stride_a = mat;
-      ga.stride_b = mat;
-      ga.stride_c = min_sq;
-      Gemm(GemmMode::kForward, ga, x, x, a);
+      Gemm(GemmMode::kForward, muon_shape::SquareGemm(rows, cols, num_params),
+           x, x, a);
 
       // A2 = A A, then b = cb * a + cc * A2 with the product landing in `b`
       // itself (see the tall branch).
-      GemmParams ga2;
-      ga2.m = rows;
-      ga2.n = rows;
-      ga2.k = rows;
-      ga2.batch_count = num_params;
-      ga2.stride_a = min_sq;
-      ga2.stride_b = min_sq;
-      ga2.stride_c = min_sq;
-      Gemm(GemmMode::kForward, ga2, a, a, b);
+      Gemm(GemmMode::kForward,
+           muon_shape::SquareSquareGemm(rows, cols, num_params), a, a, b);
 
       cuda_backend::Launch(MuonBKernel, dim3(min_grid), dim3(kThreads), 0,
                            min_total, cb, cc, a, b, b);
 
       // prod = B X  (rows x cols).
-      GemmParams gp;
-      gp.m = rows;
-      gp.n = cols;
-      gp.k = rows;
-      gp.batch_count = num_params;
-      gp.stride_a = min_sq;
-      gp.stride_b = mat;
-      gp.stride_c = mat;
-      Gemm(GemmMode::kForward, gp, b, x, prod);
+      Gemm(GemmMode::kForward, muon_shape::ApplyGemm(rows, cols, num_params), b,
+           x, prod);
     }
 
     if (VectorReady(total, {x, prod})) {

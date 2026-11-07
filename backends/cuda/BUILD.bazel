@@ -126,6 +126,7 @@ cuda_library(
     defines = precision_defines(),
     deps = [
         ":device",
+        "//backends/cuda/gemm:gemm_bf16",
         "//include/nanochat:nanochat",
         # `cublas` brings both libcublas and libcublasLt.
         "@cuda//:cublas",

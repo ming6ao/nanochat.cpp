@@ -19,6 +19,8 @@
 #include <cuda_runtime.h>
 #include <mma.h>
 
+#include <type_traits>
+
 #include "backends/cuda/device.h"
 #include "backends/cuda/gemm/gemm_tile.cuh"
 #include "nanochat/kernels.h"
@@ -31,14 +33,13 @@ namespace {
 
 namespace wmma = nvcuda::wmma;
 
-using gemm_tile::GemmTileArgs;
 using gemm_tile::TileElement;
 
 // C is `COut` and the accumulator is fp32, so one epilogue serves the bf16
 // store of `Gemm` and the fp32 store of `GemmWgrad`.
 template <typename COut>
 __global__ void GemmTileKernel(const ComputeType* a, const ComputeType* b,
-                               COut* c, GemmTileArgs args) {
+                               COut* c, ResolvedGemm args) {
   // `alignas` leads: the emulator maps `__shared__` to `static`, and a standard
   // attribute may not follow a storage class.
   alignas(16) __shared__ TileElement smem[gemm_tile::kSmemElements];
@@ -141,48 +142,22 @@ __global__ void GemmTileKernel(const ComputeType* a, const ComputeType* b,
   }
 }
 
-// Settles the seam defaults the way `GemmImpl` does, then launches one grid.
+// Resolves the call, then launches one grid.
 template <typename COut>
 bool LaunchTile(const GemmParams& params, const ComputeType* a,
                 const ComputeType* b, COut* c) {
-  if (params.batch_count <= 0 || params.m <= 0 || params.n <= 0 ||
-      params.k <= 0) {
-    return false;
-  }
-
-  GemmTileArgs args;
-  args.m = params.m;
-  args.n = params.n;
-  args.k = params.k;
-  args.transpose_a = params.transpose_a;
-  args.transpose_b = params.transpose_b;
-  args.lda =
-      params.lda > 0 ? params.lda : (params.transpose_a ? params.m : params.k);
-  args.ldb =
-      params.ldb > 0 ? params.ldb : (params.transpose_b ? params.k : params.n);
-  args.ldc = params.ldc > 0 ? params.ldc : params.n;
-  const int rows_a = params.transpose_a ? params.k : params.m;
-  const int rows_b = params.transpose_b ? params.n : params.k;
-  args.stride_a = params.stride_a != 0
-                      ? params.stride_a
-                      : static_cast<long long>(rows_a) * args.lda;
-  args.stride_b = params.stride_b != 0
-                      ? params.stride_b
-                      : static_cast<long long>(rows_b) * args.ldb;
-  args.stride_c = params.stride_c != 0
-                      ? params.stride_c
-                      : static_cast<long long>(params.m) * args.ldc;
-  args.alpha = params.alpha;
-  args.beta = params.beta;
+  const ResolvedGemm gemm =
+      ResolveGemm(params, /*fp32_c=*/std::is_same_v<COut, float>);
+  if (!IsTileCallable(gemm)) return false;
 
   const unsigned int grid_n = static_cast<unsigned int>(
-      (args.n + gemm_tile::kTileN - 1) / gemm_tile::kTileN);
+      (gemm.n + gemm_tile::kTileN - 1) / gemm_tile::kTileN);
   const unsigned int grid_m = static_cast<unsigned int>(
-      (args.m + gemm_tile::kTileM - 1) / gemm_tile::kTileM);
+      (gemm.m + gemm_tile::kTileM - 1) / gemm_tile::kTileM);
   cuda_backend::Launch(
       GemmTileKernel<COut>,
-      dim3(grid_n, grid_m, static_cast<unsigned int>(params.batch_count)),
-      dim3(static_cast<unsigned int>(gemm_tile::kThreads)), 0, a, b, c, args);
+      dim3(grid_n, grid_m, static_cast<unsigned int>(gemm.batch_count)),
+      dim3(static_cast<unsigned int>(gemm_tile::kThreads)), 0, a, b, c, gemm);
   return true;
 }
 

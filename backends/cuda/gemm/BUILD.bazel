@@ -10,7 +10,15 @@
 # This package supplies the tile and its launcher, and the launcher answers
 # false when it cannot serve a call, which keeps cuBLAS as the fallback.
 
-load("//:nanochat.bzl", "cuda_library", "nanochat_cuda_copts", "precision_defines")
+load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
+load(
+    "//:nanochat.bzl",
+    "cuda_binary",
+    "cuda_library",
+    "nanochat_copts",
+    "nanochat_cuda_copts",
+    "precision_defines",
+)
 
 package(default_visibility = ["//visibility:public"])
 
@@ -31,10 +39,63 @@ cuda_library(
     copts = nanochat_cuda_copts(),
     defines = precision_defines(),
     deps = [
+        ":dispatch",
         "//backends/cuda:device",
         "//include/nanochat:nanochat",
     ],
     alwayslink = True,
+)
+
+# The closed shape list and the verdict, and the one resolved form of a call
+# that the table, the launcher, and the kernel all share
+# (docs/tensor-core-gemm-plan.md section B.6). Host only, so its gate rides the
+# default CPU loop.
+cc_library(
+    name = "dispatch",
+    srcs = ["dispatch.cc"],
+    hdrs = [
+        "dispatch.h",
+        "gemm_shape.h",
+    ],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    deps = [
+        "//backends/cuda/kernels:muon_gemm_shape",
+        "//include/nanochat:nanochat",
+    ],
+)
+
+# The shape table's gate: the list matches the shapes `muon.cu` issues, a row
+# selects only its own key, and only a turned bit changes a shape's hands.
+cc_test(
+    name = "dispatch_test",
+    srcs = ["dispatch_test.cc"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    deps = [
+        ":dispatch",
+        "//backends/cuda/kernels:muon_gemm_shape",
+        "//include/nanochat:nanochat",
+    ],
+    size = "small",
+)
+
+# The rate gate: one row per shape, once on the tile and once on cuBLAS, through
+# the shipped `Gemm` and the `NANOCHAT_GEMM_LIB` switch. Needs a card and a bf16
+# build, so it is a benchmark and not a test.
+cuda_binary(
+    name = "gemm_benchmark",
+    srcs = ["gemm_benchmark.cc"],
+    copts = nanochat_cuda_copts(),
+    host_copts = nanochat_copts(),
+    defines = precision_defines(),
+    host_defines = precision_defines(),
+    deps = [
+        ":dispatch",
+        "//backends/cuda:gemm",
+        "//backends/cuda/kernels/testing:bench_utils",
+        "//include/nanochat:nanochat",
+    ],
 )
 
 # Aggregation point consumed by `//:all_tests`. The GPU correctness and
@@ -44,5 +105,5 @@ cuda_library(
 # builds it at bf16 by construction.
 test_suite(
     name = "all",
-    tests = [],
+    tests = [":dispatch_test"],
 )

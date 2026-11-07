@@ -25,6 +25,7 @@
 #include <cuda_runtime.h>
 #include <mma.h>
 
+#include "backends/cuda/gemm/gemm_shape.h"
 #include "nanochat/kernels.h"
 #include "nanochat/tensor.h"
 
@@ -73,24 +74,6 @@ static_assert(kTileM % (kWarpsM * kMicro) == 0 &&
 static_assert(kTileK % kMicro == 0, "one k slice must split into whole tiles");
 static_assert(kStageElements <= kScratchElements,
               "one shared window holds either use, so the scratch dominates");
-
-// The resolved operands of one call. Every seam default is settled on the host,
-// by the same rules `GemmImpl` in `backends/cuda/gemm.cu` applies.
-struct GemmTileArgs {
-  int m = 0;
-  int n = 0;
-  int k = 0;
-  int lda = 0;
-  int ldb = 0;
-  int ldc = 0;
-  long long stride_a = 0;
-  long long stride_b = 0;
-  long long stride_c = 0;
-  float alpha = 1.0f;
-  float beta = 0.0f;
-  bool transpose_a = false;
-  bool transpose_b = false;
-};
 
 // Stages one A slice: `stage[i * kLeadA + kk] = op(A)[m0 + i][k0 + kk]`, and
 // zero outside the operand. A plain A is `base = a + m0 * lda`,

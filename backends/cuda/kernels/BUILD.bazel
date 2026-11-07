@@ -36,6 +36,17 @@ cc_library(
     deps = ["//include/nanochat:nanochat"],
 )
 
+# The three Polar Express GEMM shapes of one Muon group. `muon.cu` issues them
+# and the hand GEMM's shape table reads the same three, so the call sites and
+# the closed list cannot drift (docs/tensor-core-gemm-plan.md section B.6).
+cc_library(
+    name = "muon_gemm_shape",
+    hdrs = ["muon_gemm_shape.h"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    deps = ["//include/nanochat:nanochat"],
+)
+
 # RmsNorm: the frozen forward/backward pair plus the backend-internal fused
 # residual variant (rms_norm.h).
 cuda_library(
@@ -188,6 +199,7 @@ cuda_library(
     deps = [
         ":device_utils",
         ":muon_fused",
+        ":muon_gemm_shape",
         "//backends/cuda:device",
         "//backends/cuda:gemm",
         "//include/nanochat:nanochat",

@@ -45,6 +45,7 @@ cc_library(
         "//backends/cuda/kernels:rms_norm.h",
         # The hand GEMM: the block tile and the launcher declaration.
         "//backends/cuda/gemm:gemm_launch.h",
+        "//backends/cuda/gemm:gemm_shape.h",
         "//backends/cuda/gemm:gemm_tile.cuh",
     ],
 )
