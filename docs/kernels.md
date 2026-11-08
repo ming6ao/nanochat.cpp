@@ -900,18 +900,42 @@ different accumulator and a scale.
 
 ### 6. The phases
 
-| Phase | Work | Effort | Gate |
-|---|---|---|---|
-| 0 | A `dev/kernels/` prototype: one WGMMA atom, one hand-built descriptor, one resident block, timed over the 1280 by 1280 by 1280 shape | 1 day | 85 percent of the per-SM tensor-core rate, which is 6.4 TFLOP/s from one block on the H100 |
-| 1 | The `mma.sync` mainloop: direct `mma.sync` with `ldmatrix`, four to six stages, dynamic shared memory, and the epilogue rewrite | 4 to 8 weeks | Every row correct, and 0.50 of the recorded cuBLAS rate. Section 10 breaks what remains into steps |
-| 2 | The WGMMA mainloop: tile 128 by 256 by 64, cluster 2 by 1, one producer warp, two consumer warpgroups, TMA in and out | 2 to 4 months | Within 1.05 of the cuBLAS rate on all six rows of section 2 |
-| 3 | The fp32 shared-memory tile for Turing and the fp32 build | 2 to 4 weeks | Within 1.05 of the recorded cuBLAS rate on the chain profiles |
-| 4 | fp8 on the WGMMA path, stream-K for the ragged rows, and one tiny kernel for the 5 by 12 group | 4 to 8 weeks | The fp8 tolerance of [precision.md](precision.md), and no row above 1.05 |
-| 5 | Detach the library: cuBLAS moves out of `backends/cuda:gemm` and into the benchmark targets | 1 week | The dependency query of gate G4 is empty |
+**The plan of record is the CUTLASS route.** Section 6.1 states it, and
+section 10 holds the resume state: which step landed, which step is next, and the
+command that decides it. Phases 0 and 1 below are the record of how the tree got
+there; they are not the work that remains.
+
+| Phase | Work | Effort | Gate | State |
+|---|---|---|---|---|
+| 0 | A `dev/kernels/` prototype: one WGMMA atom, one hand-built descriptor, one resident block, timed over the 1280 by 1280 by 1280 shape | 1 day | 85 percent of the per-SM tensor-core rate, which is 6.4 TFLOP/s from one block on the H100 | **Done**, 96.4 percent of the card peak |
+| 1 | The `mma.sync` mainloop: direct `mma.sync` with `ldmatrix`, four to six stages, dynamic shared memory, and the epilogue rewrite | 4 to 8 weeks | Every row correct, and 0.50 of the recorded cuBLAS rate | **Done and missed**, 0.27 to 0.36. Section 10 records it |
+| 2 | The Hopper mainloop: tile 128 by 256 by 64, cluster 2 by 1, one producer warp, two consumer warpgroups, TMA in and out | Was 2 to 4 months; became 1 week by borrowing | Within 1.05 of the cuBLAS rate on all six rows of section 2 | **Adapter done, gate open.** It needs the card |
+| 3 | The fp32 shared-memory tile for Turing and the fp32 build | 2 to 4 weeks | Within 1.05 of the recorded cuBLAS rate on the chain profiles | Not started |
+| 4 | fp8 on the Hopper path, and stream-K for the ragged rows | 1 to 2 weeks each | The fp8 tolerance of [precision.md](precision.md), and no row above 1.05 | Not started. The tiny group needs no kernel of its own now: the hand tile serves it |
+| 5 | Detach the library: cuBLAS moves out of `backends/cuda:gemm` and into the benchmark targets | 1 week | The dependency query of gate G4 is empty | Not started |
+
+### 6.1 The CUTLASS route, and why it replaced a written mainloop
+
+The plan sized phase 2 at 2 to 4 months of writing a mainloop. NVIDIA CUTLASS
+already holds that mainloop, and [dev/cutlass/README.md](../dev/cutlass/README.md) proves
+it builds here. So phase 2 became an adapter, and the estimate fell to about a
+week. The seven mechanisms of section 4 are the seven things CUTLASS supplies,
+one for one.
+
+| Decision | The answer | The record |
+|---|---|---|
+| How the headers arrive | `third_party/cutlass.bzl` fetches commit `b2f249ac` as an external repository | [build.md](build.md) § Link dependencies |
+| Why not tracked files | The lint pass checks every `git ls-files` source, and the headers break four of its five checks | `third_party/cutlass.bzl` |
+| Which architecture | The adapter target states `archs = ["sm_90a"]` on itself, so `.bazelrc` gains nothing | `dev/cutlass/README.md` § 1 |
+| Which tile | 128 by 256 by 64, cluster 2 by 1, three stages, 215,040 B | `dev/cutlass/README.md` § 3 |
+| Which shapes | Four conditions in `gemm_shape.h`; a refused call takes the hand tile and then cuBLAS | `backends/cuda/gemm/README.md` § 16 |
+| What the hand tile is for now | The emulated leg, the correctness reference, and the shapes smaller than one tile | `backends/cuda/gemm/README.md` |
 
 Phase 1 keeps the emulated correctness leg, because the emulator maps
-`ldmatrix` and `mma.sync`. Phase 2 does not, unless the Simulator workstream
-lands the mapping first. Section 9 makes that choice explicit.
+`ldmatrix` and `mma.sync`. Phase 2 has none, and the CUTLASS route makes that a
+consequence rather than a choice. The engine maps no Tensor Memory Accelerator
+and no warpgroup instruction, so the hand tile stays as the off-device leg.
+Section 10.1 records it.
 
 **Gate 0 is a rate for each SM and not for the card.** One warpgroup on one SM
 cannot exceed that SM's share of the peak, which is 989 TFLOP/s over 132 SMs, or
@@ -952,9 +976,9 @@ and each one removes a decision from the phases below.
 | The cooperative schedule refuses a tile narrower than 128 in M | The 64 by 256 candidate of section 4 is not a candidate |
 
 The object holds `UTMALDG.3D`, `UTMALDG.3D.MULTICAST`, `UTMASTG.3D`, `HGMMA.64`,
-and `USETMAXREG`, which are mechanisms 2 to 7 of section 4 in one build. The
-adapter that puts them behind `Gemm` and `GemmWgrad` is the next step, and
-`dev/cutlass/README.md` is the record.
+and `USETMAXREG`, which are mechanisms 2 to 7 of section 4 in one build.
+`dev/cutlass/README.md` is the record, and the adapter that puts them behind
+`Gemm` and `GemmWgrad` is section 6.1.
 
 **Phase 1 has started, and its first step is done.** The micro-tile of
 `backends/cuda/gemm/mma_bf16.cuh` is `ldmatrix` and
@@ -969,8 +993,10 @@ The rest of phase 1 is the mainloop: the tile still stages and stores through
 is to drive it from `gemm_bf16.cu`, then take the accumulator epilogue into
 registers, which removes the shared scratch and its eight serialized rounds.
 
-Total: six to ten months for one GPU engineer with a card in the loop. That is
-the cost of the removal, and it is the number to weigh against keeping cuBLAS.
+Total: six to ten months for one GPU engineer with a card in the loop. That was
+the cost of the removal as sections 5 and 6 first sized it. The CUTLASS route of
+section 6.1 removes phase 2 from that sum, and the arithmetic of what is left is
+in section 10.1.
 
 ### 7. The gates
 
@@ -1138,10 +1164,68 @@ recorded cuBLAS result, and 0.50 of the recorded cuBLAS rate. Step 3 should reac
 that fraction, and step 4 decides whether it is enough for the removal or only
 for the next phase.
 
-**Then phases 2 to 5.** Section 6 holds their scope and their gates: the WGMMA
+**Then phases 2 to 5.** Section 6 holds their scope and their gates: the Hopper
 mainloop with the Tensor Memory Accelerator, the fp32 tile for Turing, fp8 with
-stream-K, and the detachment of the library. Section 5 already says which of
-them a source change can reach and which one needs a new architecture string.
+stream-K, and the detachment of the library. Section 6.1 records the decision to
+borrow the mainloop instead of writing it.
+
+### 10.1 The resume state
+
+This table is the state of the campaign as of the CUTLASS adapter. A session
+resumes here. Each row names the step, the command that decides it, and the
+record to write when it lands.
+
+| Step | State | The command that decides it | What to write |
+|---|---|---|---|
+| 2a. Vendor the headers | **Done** | `tools/nanochat build //dev/cutlass:cutlass_probe` | `dev/cutlass/README.md` |
+| 2b. Prove the architecture and the tile | **Done** | `tools/nanochat run t0-cpu -- ./bazel-bin/dev/cutlass/cutlass_probe` | `dev/cutlass/README.md` § 3 |
+| 2c. The adapter behind the seam | **Done** | `tools/nanochat build --config=hopper --config=bf16 //backends/cuda/gemm:gemm_gpu_test` | `backends/cuda/gemm/README.md` § 16 |
+| 2d. **Correctness on the card** | **Open, and next** | `modal run tools/modal/app.py::card_job --name gemm_check` | This section |
+| 2e. **The rate gate, 1.05 of cuBLAS** | **Open** | `modal run tools/modal/app.py::card_job --name gemm_bench --argv '["--json"]'` | The `gemm_cutlass` rows of [baselines.json](baselines.json) |
+| 3. The fp32 tile for Turing | Not started | The Turing leg of `card_job` | This section |
+| 4a. fp8 on the Hopper path | Not started | `gemm_bench` under `--config=fp8` | [baselines.json](baselines.json) |
+| 4b. Stream-K for the ragged rows | Not started | `gemm_bench --row linear:wgrad:cls` | [baselines.json](baselines.json) |
+| 5. Detach cuBLAS from the library | Not started | `bazel query 'somepath(//src:model, @cuda//:cublasLt)'` returns nothing | [build.md](build.md) |
+
+**Step 2d is the one that unblocks the rest.** The adapter has never run on a
+card. No Hopper part exists on the development host, so `gemm_gpu_test` and every
+rate below it are unrun, and nothing above should start before they pass.
+
+**What 2e decides, and the three ways it can go.**
+
+1. The six rows of section 2 read at most 1.05 of their `cublas_ms` entry. Then
+   step 5 may follow, and cuBLAS leaves the library.
+2. A row reads above 1.05. The tile is then the first thing to move, because the
+   probe sized five candidates and a card has measured one of them. The tile in
+   `cutlass_bf16.cu` is 128 by 256 by 64, and `dev/cutlass/README.md` § 3 holds
+   the four others and their stage counts. The crossover constant
+   `kCutlassMinOutputElements` in `gemm_shape.h` is the second thing, and it is
+   4096 elements by argument and not by measurement.
+3. A row reads above 1.15. Section 9's stop condition applies: cuBLAS stays.
+
+**What a resumed session should read first**, in this order.
+
+1. This section, for the state.
+2. Section 6.1, for the decisions already taken and the record of each.
+3. [backends/cuda/gemm/README.md](../backends/cuda/gemm/README.md) § 16, for what
+   the adapter does and what it refuses.
+4. [dev/cutlass/README.md](../dev/cutlass/README.md), for the probe's three
+   answers and the two defects it found.
+
+**The one number that is not a measurement.** `kCutlassMinOutputElements` is
+4096 output elements. The argument is that the launch builds a Tensor Memory
+Accelerator descriptor on every call, so a shape smaller than one 64 by 64 tile
+should keep the hand tile. `gemm_bench` prints the refusal reason for every row
+the rule declines, so the first card run reports whether that boundary is right.
+
+**The three open questions.**
+
+1. Does the cooperative schedule's one-block-per-multiprocessor residency beat
+   the hand tile's two on the Muon rows, whose tile count is a few waves?
+2. Does `beta` cost anything on the classifier weight gradient, which is the one
+   row that reads C?
+3. Does the 5 by 12 group lose its 0.005 ms to the size rule, or does the hand
+   tile already hold it?
 
 ## Part 4. Two kernel designs the tree does not implement
 

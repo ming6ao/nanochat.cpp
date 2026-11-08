@@ -12,7 +12,7 @@ New here? Start with [../README.md](../README.md) for the quickstart, then
 | Document | Contents |
 |---|---|
 | [build.md](build.md) | The layers and the dependency invariants, the file layout, Bazel, backends, precision selection, and the Turing target |
-| [kernels.md](kernels.md) | The backend seam: the kernel inventory, the tier column and the bring-up cost, the fusion boundary rule, the compute strategy, the API, `ScalarArg`, and the two kernel designs the tree does not implement |
+| [kernels.md](kernels.md) | The backend seam: the kernel inventory, the tier column and the bring-up cost, the fusion boundary rule, the compute strategy, the API, `ScalarArg`, and the two kernel designs the tree does not implement. Part 3 is the GEMM campaign, and its section 10.1 is the resume state |
 | [model.md](model.md) | The five graphs, the no-autograd policy, the model description and its block kinds, the workspace and recompute, the public API, and the Muon step with its cuBLAS seam |
 | [model-and-device-bringup.md](model-and-device-bringup.md) | The two axes: the directory contract, the kernel tiers, the model description, the planner, isolation, the conformance matrix, the checklists, and §18 the evolution rules |
 | [conformance-matrix.md](conformance-matrix.md) | The model/device/tier/graph matrix. **Generated** by `tools/gen_matrix.py`; do not edit a row |
