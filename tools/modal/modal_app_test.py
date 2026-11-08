@@ -187,14 +187,15 @@ class AppTest(unittest.TestCase):
                          ["card_job", "profile_stage", "measure_stage",
                           "profile_demo", "pipeline_demo"])
 
-    def test_the_card_job_table_names_the_four_gates(self) -> None:
+    def test_the_card_job_table_names_the_gates_and_the_probe(self) -> None:
         # One entrypoint serves the gates and benchmarks of the two tensor-core
-        # families. The table is the list a caller can spell, and each row holds
-        # the Function the image built.
+        # families, and the WGMMA ceiling probe of docs/kernels.md Part 3 phase
+        # 0. The table is the list a caller can spell, and each row holds the
+        # Function the image built.
         module, _sdk = _load_app(with_sdk=True)
         self.assertEqual(sorted(module.CARD_JOBS),
                          ["attention_bench", "attention_check", "gemm_bench",
-                          "gemm_check"])
+                          "gemm_check", "mma_check", "wgmma_probe"])
         self.assertEqual(module.CARD_JOBS["gemm_check"].job.__name__,
                          "check_gemm_h100")
         self.assertEqual(module.CARD_JOBS["gemm_bench"].job.__name__,
@@ -203,9 +204,14 @@ class AppTest(unittest.TestCase):
                          "check_attention_h100")
         self.assertEqual(module.CARD_JOBS["attention_bench"].job.__name__,
                          "bench_attention_h100")
+        self.assertEqual(module.CARD_JOBS["mma_check"].job.__name__,
+                         "check_mma_h100")
+        self.assertEqual(module.CARD_JOBS["wgmma_probe"].job.__name__,
+                         "probe_wgmma_h100")
         for name in ("gemm_bench", "attention_bench"):
             self.assertTrue(module.CARD_JOBS[name].takes_argv)
-        for name in ("gemm_check", "attention_check"):
+        for name in ("gemm_check", "attention_check", "mma_check",
+                     "wgmma_probe"):
             self.assertFalse(module.CARD_JOBS[name].takes_argv)
 
     def test_the_card_job_lists_its_names_and_refuses_an_unknown_one(self) -> None:
@@ -797,11 +803,14 @@ class PipelineTest(_RemoteFixture):
                                          "bench_gemm_h100",
                                          "bench_h100",
                                          "check_attention_h100",
-                                         "check_gemm_h100", "corpus",
+                                         "check_gemm_h100",
+                                         "check_mma_h100", "corpus",
                                          "doctor",
                                          "measure_stage_h100",
                                          "measure_stage_t4", "pipeline",
-                                         "pipeline_h100", "profile_h100",
+                                         "pipeline_h100",
+                                         "probe_wgmma_h100",
+                                         "profile_h100",
                                          "profile_stage_h100",
                                          "profile_stage_t4",
                                          "step_split", "train",

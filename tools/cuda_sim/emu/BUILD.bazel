@@ -238,7 +238,10 @@ cc_test(
 cc_library(
     name = "emulated_gemm",
     srcs = [":gemm_bf16_emulated_source"],
-    hdrs = ["//backends/cuda/gemm:gemm_launch.h"],
+    hdrs = [
+        "//backends/cuda/gemm:gemm_launch.h",
+        "//backends/cuda/gemm:mma_bf16.cuh",
+    ],
     copts = nanochat_copts() + [
         "-I.",
         "-Itools/cuda_sim/emu",

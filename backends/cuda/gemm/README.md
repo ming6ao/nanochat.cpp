@@ -246,3 +246,100 @@ confirm them.
 4. **Occupancy.** 128 registers per thread hold two blocks per SM at 256
    threads. A 128 by 256 tile with fewer registers would raise the arithmetic per
    staged byte.
+
+## 10. The micro-tile, phase 1
+
+[docs/kernels.md](../../docs/kernels.md) Part 3 reopens this package as a
+removal: cuBLAS becomes the measurement reference and the hand library serves
+every call. Phase 1 of that plan is the operand path, and its first step is
+`mma_bf16.cuh`.
+
+`wmma::load_matrix_sync` compiles to plain loads plus a register permute on
+`sm_90`, and `wmma::mma_sync` is a 16 by 16 by 16 instruction. The header
+replaces that pair with `ldmatrix.sync.aligned.m8n8` and
+`mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32`, which is mechanism 1 of
+section 4 of that part, and the one the probe showed is worth the most.
+
+**Two arms, one lane map.** The device arm is the instruction pair in inline
+assembly with the four fragments the instruction defines. The host arm holds the
+whole micro-tile in every thread and computes it from shared memory. That is what
+the emulation engine can run, exactly as the `<mma.h>` stub does for the `wmma`
+path. The kernel that includes the header has one body for both, and the
+host arm is exact and slower by the warp factor.
+
+**A preprocessor symbol selects the arm, and it must be one.** A `constexpr`
+constant is invisible to `#if`, so a constant would make every pass compile the
+host arm and a kernel would then call a host function. The header states this at
+the symbol, because it is the kind of defect that reads as correct.
+
+**The lane map is checked, not assumed.** `mma_bf16_test.cu` holds one scalar
+reference and two rows. The host row runs the header's host arm, so it needs no
+card and it is the fast gate. The device row runs the instruction pair in one
+warp. Both cover all four operand orientations, because the staged layouts of
+`gemm_tile.cuh` produce all four, and both read the same maximum error of
+`8.064e-05` against the reference.
+
+```bash
+tools/nanochat build //backends/cuda/gemm:mma_bf16_test
+tools/nanochat run t0-cpu -- ./bazel-bin/backends/cuda/gemm/mma_bf16_test
+modal run tools/modal/app.py::card_job --name mma_check
+```
+
+The gate found two defects before any rate was measured. The first was in the
+test's own staging. The second was the address of the transposed B tile. The two
+8 by 8 matrices of a B tile are its two k halves, so they lie along k. A
+transposed operand stages n by k, so the second matrix is eight columns to the
+right of the first, and not eight rows below it. The device row reported the two
+failing orientations with an error of `2.6e-02` while the other two passed,
+which named the defect in one run.
+
+**What this is not.** A rate. The tile still stages, copies, and stores through
+`wmma`, so phase 1 is a verified foundation and not a measurement. Three steps
+remain:
+
+1. Drive the header from `gemm_bf16.cu`, in place of the `wmma` pair.
+2. Take the accumulator epilogue into registers. That removes the shared scratch
+   and the eight serialized rounds of section 2.
+3. Raise the stage count past the two of `gemm_plan.h`.
+
+## 11. What the operand path bought
+
+Section 10 describes the micro-tile. This section records its first effect on the
+shipped tile, which is the same binary with one change: `gemm_bf16.cu` drives
+`mma_bf16.cuh` in place of the vendor `wmma` pair. The staged window, the warp
+tile, the two stages, the epilogue scratch, and the shape table are untouched, so
+the difference between the two columns is the operand path alone.
+
+One run of one binary, `--schedule all`, on an NVIDIA H100 80GB HBM3 at bf16:
+
+| Row | cuBLAS | `wmma` | `ldmatrix` | Fraction before | Fraction after | Gain |
+|---|---:|---:|---:|---:|---:|---:|
+| Muon `A = XᵀX` | 0.2230 ms | 1.1004 ms | 0.8978 ms | 0.211 | 0.248 | 1.23 |
+| Muon `prod` | 0.5209 ms | 2.3845 ms | 1.7967 ms | 0.219 | 0.290 | 1.33 |
+| Linear forward `fc` | 0.2568 ms | 1.3633 ms | 1.1095 ms | 0.190 | 0.231 | 1.23 |
+| Linear dgrad `cproj` | 0.2559 ms | 1.5208 ms | 1.1373 ms | 0.170 | 0.225 | 1.34 |
+| Linear wgrad `fc` | 0.2998 ms | 1.9679 ms | 1.2782 ms | 0.155 | 0.235 | 1.54 |
+| Classifier forward | 1.5593 ms | 8.6150 ms | 7.0370 ms | 0.184 | 0.222 | 1.22 |
+
+The rows are `gemm_bf16_phase1` in [baselines.json](../../docs/baselines.json).
+The `wmma` column is the `gemm_bf16` entry, measured in the same session on the
+same card.
+
+**What moved.** Every row gained. The two weight-gradient rows gained most at
+1.34 and 1.54, and the classifier, which is the largest shape, gained least at
+1.22. The `hand_mfu` column reads 0.19 to 0.20 on every row, so the tile is now
+at a fifth of the card's bf16 peak and the curve is still flat.
+
+**The evidence in the instructions.** The bf16 build reports `REG:120`,
+`LOCAL:0`, and `SHARED:41984` per thread, against the 126 to 128 registers of the
+`wmma` tile. The SASS holds `LDSM.16.M88.4` and `LDSM.16.MT88.4` for the A
+operand, `LDSM.16.M88.2` and `LDSM.16.MT88.2` for B, and
+`HMMA.16816.F32.BF16` for the arithmetic. There is no `MOVM.16.MT88`, which is
+the register permute that the vendor load path generated for every fragment and
+that section 9 named as the first cause of the gap.
+
+**What is left.** The fractions now read 0.22 to 0.29. The phase 1 gate asks for
+0.50, so the operand path was worth about a third of the remaining gap and not
+all of it. Three causes of section 9 remain: the two stages of `gemm_plan.h`,
+the shared epilogue scratch with its eight serialized rounds, and the occupancy.
+The first of the four is now closed.

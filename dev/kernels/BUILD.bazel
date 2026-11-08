@@ -232,6 +232,34 @@ cuda_binary(
     ],
 )
 
+# Phase 0 of docs/kernels.md Part 3: the WGMMA ceiling probe. It holds one hand
+# built shared descriptor, one interleaved staging pass, and one
+# `wgmma.mma_async.m64n128k16` instruction, and it reports the rate of a
+# warpgroup on a resident tile against the card's bf16 peak. The result is
+# checked against a host reference first, so a wrong descriptor fails instead of
+# measuring.
+#
+# WGMMA is architecture conditional, so this target needs `sm_90a` on the
+# compile line and the tree's device configurations emit `sm_90`. Build and run
+# it by hand, and only on a Hopper card:
+#
+#   tools/nanochat build //dev/kernels:wgmma_probe \
+#       --@rules_cuda//cuda:archs=sm_90a
+#
+# The emulation engine maps no WGMMA, so there is no off-device leg and the
+# target carries `manual`. docs/kernels.md Part 3 section 9 is the risk record.
+cuda_binary(
+    name = "wgmma_probe",
+    srcs = ["wgmma_probe.cu"],
+    copts = nanochat_cuda_copts(),
+    defines = precision_defines(),
+    tags = [
+        "gpu",
+        "manual",
+    ],
+    deps = ["//include/nanochat:nanochat"],
+)
+
 # Aggregation point consumed by //:all_tests.
 test_suite(
     name = "all",

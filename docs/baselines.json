@@ -528,6 +528,105 @@
           "hand_mfu": 0.1478
         }
       ]
+    },
+    "wgmma_probe": {
+      "note": "Phase 0 of docs/kernels.md Part 3: the hand-written WGMMA ceiling probe of dev/kernels/wgmma_probe.cu. One warpgroup issues wgmma.mma_async.sync.aligned.m64n128k16.f32.bf16.bf16 from a resident shared-memory tile, through a hand-built descriptor in the interleaved K-major form, with no global memory traffic in the timed loop. The 1block row is one warpgroup on one SM; the grid row is two warpgroups on every SM of the card. fraction_of_peak is the rate over the card's declared bf16 peak of 989 TFLOP/s (backends/cuda/caps.json), and fraction_of_sm_share is the 1block rate over the per-SM share of that peak, 989 over 132, or 7.4924 TFLOP/s. Passes are four atoms each, so one pass is 1048576 flop. The correctness row is the sum of the 8192 accumulators against a host reference over the same input; a descriptor that reads the wrong tile fails it, because the two operands differ. The probe needs sm_90a, which no device configuration of .bazelrc emits, so the card job builds it inside the container with the tree's builder before it runs it.",
+      "device": "NVIDIA H100 80GB HBM3 (sm_90a)",
+      "validated_on": "NVIDIA H100 80GB HBM3 (sm_90a)",
+      "precision": "bf16",
+      "measurement": "modal run tools/modal/app.py::card_job --name wgmma_probe",
+      "origin": "docs/kernels.md Part 3 phase 0, dev/kernels/wgmma_probe.cu, dev/kernels/README.md",
+      "rows": [
+        {
+          "name": "wgmma:1block",
+          "blocks": 1,
+          "passes": 20000,
+          "ms": 2.84,
+          "tflops": 7.384,
+          "fraction_of_peak": 0.00747,
+          "fraction_of_sm_share": 0.9855
+        },
+        {
+          "name": "wgmma:grid",
+          "blocks": 264,
+          "passes": 20000,
+          "ms": 5.81,
+          "tflops": 952.9,
+          "fraction_of_peak": 0.9635,
+          "fraction_of_sm_share": 0.9635
+        },
+        {
+          "name": "wgmma:correctness",
+          "reference_sum": 2516.4748,
+          "measured_sum": 2516.4748,
+          "relative_error": 0.0,
+          "result": "PASS"
+        }
+      ]
+    },
+    "gemm_bf16_phase1": {
+      "note": "The hand-written bf16 tensor-core GEMM of docs/kernels.md Part 3 after phase 1 step 1, over six rows of the closed shape list. The tile now drives the ldmatrix and mma.sync.aligned.m16n8k16 pair of backends/cuda/gemm/mma_bf16.cuh instead of the vendor wmma pair, which is mechanism 1 of section 4 of that part. Everything else is unchanged: the two-stage staged window, the warp tile, the shared epilogue scratch, and the shape table, whose every row is still inert. One run of one binary on an H100 80GB HBM3 at bf16, with NANOCHAT_GEMM_LIB at `cublas` and then at `hand`, the latter on the schedule the row owns. fraction_of_cublas is the cuBLAS time over the hand time and hand_mfu is the tile's rate over the card's declared bf16 peak. The wmma-era record of the same six rows is the gemm_bf16 entry, which this one supersedes for the shipped tile; the architect retires that entry at the next full sweep. The comparison against the wmma run is section 11 of backends/cuda/gemm/README.md.",
+      "device": "NVIDIA H100 80GB HBM3 (sm_90)",
+      "validated_on": "NVIDIA H100 80GB HBM3 (sm_90)",
+      "precision": "bf16",
+      "measurement": "modal run tools/modal/app.py::card_job --name gemm_bench --argv '[\"--schedule\",\"all\",\"--json\"]'",
+      "origin": "docs/kernels.md Part 3 phase 1, backends/cuda/gemm/README.md section 11",
+      "rows": [
+        {
+          "name": "muon:1280x1280:A",
+          "shape": "1280x1280x1280 batch 40",
+          "cublas_ms": 0.223019,
+          "hand_ms": 0.897803,
+          "schedule": "128x128x32",
+          "fraction_of_cublas": 0.2484,
+          "hand_mfu": 0.1889
+        },
+        {
+          "name": "muon:5120x1280:prod",
+          "shape": "5120x1280x1280 batch 20",
+          "cublas_ms": 0.520864,
+          "hand_ms": 1.79674,
+          "schedule": "128x128x32",
+          "fraction_of_cublas": 0.2899,
+          "hand_mfu": 0.1888
+        },
+        {
+          "name": "linear:fwd:fc",
+          "shape": "16384x5120x1280 batch 1",
+          "cublas_ms": 0.256779,
+          "hand_ms": 1.10954,
+          "schedule": "128x128x32",
+          "fraction_of_cublas": 0.2314,
+          "hand_mfu": 0.1957
+        },
+        {
+          "name": "linear:dgrad:cproj",
+          "shape": "16384x5120x1280 batch 1",
+          "cublas_ms": 0.255915,
+          "hand_ms": 1.13734,
+          "schedule": "128x128x32",
+          "fraction_of_cublas": 0.225,
+          "hand_mfu": 0.1909
+        },
+        {
+          "name": "linear:wgrad:fc",
+          "shape": "5120x1280x16384 batch 1 fp32 out",
+          "cublas_ms": 0.299765,
+          "hand_ms": 1.27821,
+          "schedule": "128x64x32",
+          "fraction_of_cublas": 0.2345,
+          "hand_mfu": 0.1699
+        },
+        {
+          "name": "linear:fwd:cls",
+          "shape": "16384x32768x1280 batch 1",
+          "cublas_ms": 1.55934,
+          "hand_ms": 7.03698,
+          "schedule": "128x128x32",
+          "fraction_of_cublas": 0.2216,
+          "hand_mfu": 0.1975
+        }
+      ]
     }
   }
 }

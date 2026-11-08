@@ -15,6 +15,7 @@ load(
     "//:nanochat.bzl",
     "cuda_binary",
     "cuda_library",
+    "cuda_test",
     "nanochat_copts",
     "nanochat_cuda_copts",
     "precision_defines",
@@ -43,6 +44,7 @@ cuda_library(
         "gemm_launch.h",
         "gemm_plan.h",
         "gemm_tile.cuh",
+        "mma_bf16.cuh",
     ],
     copts = nanochat_cuda_copts(),
     defines = precision_defines(),
@@ -135,6 +137,29 @@ cuda_binary(
     ],
 )
 
+# Phase 1 of docs/kernels.md Part 3: the gate of the `ldmatrix` and `mma.sync`
+# micro-tile. One binary holds two rows over one reference. The host row is the
+# header's host arm, which is the arm the emulation engine compiles, so it needs
+# no card. The device row is the instruction pair in one warp, so the target
+# carries `gpu` and `manual`.
+#
+# The header's device arm is guarded by `__CUDA_ARCH__ >= 800`, and below that
+# the plain arm compiles as device code and stays correct, so the target builds
+# at every architecture the tree supports.
+cuda_test(
+    name = "mma_bf16_test",
+    srcs = ["mma_bf16_test.cu"],
+    hdrs = ["mma_bf16.cuh"],
+    copts = nanochat_cuda_copts(),
+    defines = precision_defines(),
+    deps = ["//include/nanochat:nanochat"],
+    size = "small",
+    tags = [
+        "gpu",
+        "manual",
+    ],
+)
+
 # Aggregation point consumed by `//:all_tests`. The GPU correctness and
 # benchmark targets land here as sections B2, B3, and B4 of
 # docs/tensor-core-gemm-plan.md add them. The emulated check of this same
@@ -145,5 +170,6 @@ test_suite(
     tests = [
         ":dispatch_test",
         ":gemm_gpu_test",
+        ":mma_bf16_test",
     ],
 )

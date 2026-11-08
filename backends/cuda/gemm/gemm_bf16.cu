@@ -14,6 +14,12 @@
 // while slice `n` is used, and a barrier after the arithmetic holds the buffer
 // until every warp is done with it.
 //
+// The arithmetic is the `ldmatrix` and `mma.sync` pair of mma_bf16.cuh and not
+// the vendor `wmma` pair, which is mechanism 1 of docs/kernels.md Part 3
+// section
+// 4. The micro-tile is therefore 16 by 8 and not 16 by 16, so a warp tile holds
+// twice as many fragments along n and each one is half as wide.
+//
 // See backends/cuda/gemm/gemm_tile.cuh for the stage, gemm_plan.h for the
 // schedules, and gemm_launch.h for the entry points.
 //
@@ -27,11 +33,11 @@
 
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
-#include <mma.h>
 
 #include "backends/cuda/device.h"
 #include "backends/cuda/gemm/gemm_plan.h"
 #include "backends/cuda/gemm/gemm_tile.cuh"
+#include "backends/cuda/gemm/mma_bf16.cuh"
 #include "nanochat/kernels.h"
 #include "nanochat/tensor.h"
 
@@ -40,29 +46,15 @@ namespace kernels {
 
 namespace {
 
-namespace wmma = nvcuda::wmma;
-
 using gemm_tile::TileElement;
 
-// The two fragment families, chosen by the transpose flag of the operand. A
-// plain operand is staged along its contiguous axis, which is the axis the row
-// major fragment reads second; a transposed one is staged along the other axis
-// and the fragment reads column major (gemm_tile.cuh).
-template <bool TransA>
-using AFragment = std::conditional_t<
-    TransA,
-    wmma::fragment<wmma::matrix_a, gemm_tile::kMicro, gemm_tile::kMicro,
-                   gemm_tile::kMicro, TileElement, wmma::col_major>,
-    wmma::fragment<wmma::matrix_a, gemm_tile::kMicro, gemm_tile::kMicro,
-                   gemm_tile::kMicro, TileElement, wmma::row_major>>;
-
-template <bool TransB>
-using BFragment = std::conditional_t<
-    TransB,
-    wmma::fragment<wmma::matrix_b, gemm_tile::kMicro, gemm_tile::kMicro,
-                   gemm_tile::kMicro, TileElement, wmma::col_major>,
-    wmma::fragment<wmma::matrix_b, gemm_tile::kMicro, gemm_tile::kMicro,
-                   gemm_tile::kMicro, TileElement, wmma::row_major>>;
+//: The micro-tile of the instruction pair. The k edge is the loop step of the
+//: staged slice, and the other two are the fragment's edges.
+constexpr int kMicroM = gemm_bf16::kMmaM;
+constexpr int kMicroN = gemm_bf16::kMmaN;
+constexpr int kMicro = gemm_tile::kMicro;
+static_assert(kMicro == gemm_bf16::kMmaK,
+              "the k step of the slice must be the k edge of the micro-tile");
 
 // C is `COut` and the accumulator is fp32, so one epilogue serves the bf16
 // store of `Gemm` and the fp32 store of `GemmWgrad`.
@@ -70,8 +62,6 @@ template <typename PlanT, typename COut, bool TransA, bool TransB>
 __global__ void GemmTileKernel(const ComputeType* a, const ComputeType* b,
                                COut* c, ResolvedGemm args) {
   using Plan = PlanT;
-  using AOperand = AFragment<TransA>;
-  using BOperand = BFragment<TransB>;
   constexpr int kMicro = gemm_tile::kMicro;
 
   // `alignas` leads: the emulator maps `__shared__` to `static`, and a standard
@@ -100,11 +90,17 @@ __global__ void GemmTileKernel(const ComputeType* a, const ComputeType* b,
   const int warp_m = (warp / Plan::kWarpsN) * Plan::kWarpM;
   const int warp_n = (warp % Plan::kWarpsN) * Plan::kWarpN;
 
-  wmma::fragment<wmma::accumulator, kMicro, kMicro, kMicro, float>
-      acc[Plan::kFragsM][Plan::kFragsN];
-  for (int i = 0; i < Plan::kFragsM; ++i) {
-    for (int j = 0; j < Plan::kFragsN; ++j) {
-      wmma::fill_fragment(acc[i][j], 0.0f);
+  //: One row of the warp tile is a whole number of micro-tiles, and so is one
+  //: column. The row count is the one `gemm_plan.h` records; the column count
+  //: is twice it, because the instruction is half as wide as the vendor
+  //: fragment.
+  constexpr int kFragM = Plan::kWarpM / kMicroM;
+  constexpr int kFragN = Plan::kWarpN / kMicroN;
+
+  gemm_bf16::FragmentC acc[kFragM][kFragN];
+  for (int i = 0; i < kFragM; ++i) {
+    for (int j = 0; j < kFragN; ++j) {
+      gemm_bf16::Fill(acc[i][j], 0.0f);
     }
   }
 
@@ -134,28 +130,28 @@ __global__ void GemmTileKernel(const ComputeType* a, const ComputeType* b,
     const TileElement* a_slice = stage_a + buffer * Plan::kStageAElements;
     const TileElement* b_slice = stage_b + buffer * Plan::kStageBElements;
     for (int kk = 0; kk < Plan::kTileK; kk += kMicro) {
-      AOperand fa[Plan::kFragsM];
-      BOperand fb[Plan::kFragsN];
-      for (int i = 0; i < Plan::kFragsM; ++i) {
-        const int row = warp_m + i * kMicro;
-        wmma::load_matrix_sync(
-            fa[i],
-            TransA ? a_slice + row + kk * a_lead : a_slice + row * a_lead + kk,
-            a_lead);
+      gemm_bf16::FragmentA fa[kFragM];
+      gemm_bf16::FragmentB fb[kFragN];
+      for (int i = 0; i < kFragM; ++i) {
+        const int row = warp_m + i * kMicroM;
+        // A plain operand stages m by k, so the micro-tile starts at (row, kk).
+        // A transposed one stages k by m, so it starts at (kk, row).
+        const TileElement* tile =
+            TransA ? a_slice + row + kk * a_lead : a_slice + row * a_lead + kk;
+        gemm_bf16::LoadA<TransA>(fa[i], tile, a_lead);
       }
-      for (int j = 0; j < Plan::kFragsN; ++j) {
-        const int column = warp_n + j * kMicro;
-        // The first index of a `matrix_b` tile is the k one, and a
-        // column-major operand keeps its first index contiguous: the staged
-        // rows of B walk n and each one holds k (gemm_tile.cuh).
-        wmma::load_matrix_sync(fb[j],
-                               TransB ? b_slice + kk + column * b_lead
-                                      : b_slice + kk * b_lead + column,
-                               b_lead);
+      for (int j = 0; j < kFragN; ++j) {
+        const int column = warp_n + j * kMicroN;
+        // A plain operand stages k by n, so the micro-tile starts at
+        // (kk, column). A transposed one stages n by k, so it starts at
+        // (column, kk).
+        const TileElement* tile = TransB ? b_slice + kk + column * b_lead
+                                         : b_slice + kk * b_lead + column;
+        gemm_bf16::LoadB<TransB>(fb[j], tile, b_lead);
       }
-      for (int i = 0; i < Plan::kFragsM; ++i) {
-        for (int j = 0; j < Plan::kFragsN; ++j) {
-          wmma::mma_sync(acc[i][j], fa[i], fb[j], acc[i][j]);
+      for (int i = 0; i < kFragM; ++i) {
+        for (int j = 0; j < kFragN; ++j) {
+          gemm_bf16::Mma(acc[i][j], fa[i], fb[j]);
         }
       }
     }
@@ -173,11 +169,11 @@ __global__ void GemmTileKernel(const ComputeType* a, const ComputeType* b,
   for (int owner = 0; owner < warps; ++owner) {
     __syncthreads();
     if (warp == owner) {
-      for (int i = 0; i < Plan::kFragsM; ++i) {
-        for (int j = 0; j < Plan::kFragsN; ++j) {
-          wmma::store_matrix_sync(
-              scratch + i * kMicro * Plan::kWarpN + j * kMicro, acc[i][j],
-              Plan::kWarpN, wmma::mem_row_major);
+      for (int i = 0; i < kFragM; ++i) {
+        for (int j = 0; j < kFragN; ++j) {
+          gemm_bf16::StoreFp32(
+              scratch + i * kMicroM * Plan::kWarpN + j * kMicroN, Plan::kWarpN,
+              acc[i][j]);
         }
       }
     }

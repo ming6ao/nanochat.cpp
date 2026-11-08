@@ -152,17 +152,22 @@ case.
 
 ### GEMM
 
-Keep cuBLAS as the GEMM engine. It is near peak on GP102 (11.34 TFLOPS fp32), it
-is tuned per shape, and it is portable across generations. Do not hand-write a
-GEMM for the dense path. Part 1 measured what a hand-written batched GEMM costs
-when a fusion needs one: 0.68 to 0.90 of the cuBLAS rate on the groups the
-fusion targets. That is the number this rule stands on. Part 3 measured the bf16
-tensor-core tile at 0.08 to 0.30 of the cuBLAS rate, which is the same verdict on
-a faster instruction set.
+cuBLAS is the GEMM engine today. [Part 3](#part-3-the-hand-written-gemm-revision-cublas-as-the-reference-only)
+sets the direction: the hand library serves every call, and cuBLAS stays only as
+the measurement reference. Two measurements set the current rule, and both stay
+true.
 
-Part 3 holds the measured result of a hand-written bf16 tensor-core GEMM. The
-tile is implemented and it is correct, and it lands far under the promotion gate,
-so no shape uses it.
+- Part 1 measured what a hand-written batched GEMM costs when a fusion needs
+  one: 0.68 to 0.90 of the cuBLAS rate on the groups the fusion targets.
+- Part 3 measured the bf16 tensor-core tile at 0.08 to 0.30 of the cuBLAS rate.
+
+The first is why the design does not hand-write a GEMM to reach a fusion. The
+second is why the campaign rejected the warp-level tile. Neither one is a
+statement about a Hopper-native kernel, and Part 3 section 3 draws that
+difference.
+
+Do not hand-write a GEMM for the dense path until Part 3 phase 2 passes its gate.
+The plan there has no code yet, and this line is the rule until it lands.
 
 ### Launch overhead
 
@@ -773,53 +778,254 @@ Non-goals:
 - Migrating constants. `eps`, the softcap, `kQkScale`, and the schedule values
   stay host floats.
 
-## Part 3. The hand-written tensor-core GEMM (measured, rejected)
+## Part 3. The hand-written GEMM (revision: cuBLAS as the reference only)
 
-**Measured result.** The tile of `backends/cuda/gemm/` is correct against cuBLAS
-on the whole `GemmParams` contract, and it reaches between 0.08 and 0.30 of the
-cuBLAS rate over the closed shape list. On the six shapes the campaign exists for
-it holds 120 to 157 TFLOP/s against cuBLAS at 643 to 865, so it runs at 14 to 16
-percent of the card's bf16 peak where cuBLAS runs at 65 to 87 percent. No
-schedule reaches the 0.70 promotion gate, so every bit of the shape table is off
-and cuBLAS serves every shape. The rows are in
+**Status.** This part replaces the promotion-gate design with a removal design.
+The tile of `backends/cuda/gemm/` does not change here, and it is still slower
+than cuBLAS. The end state changed instead: cuBLAS becomes a benchmark reference
+and nothing else, and the hand library serves every call on every device the tree
+lists. Section 1 keeps the measurement that this plan starts from, because it is
+the number the work has to beat. Sections 2 to 5 size the replacement, and
+sections 6 to 9 hold the plan, the gates, the files that follow, and the stop
+conditions.
+
+No frozen header changes, and the seam gains no entry point: `Gemm`,
+`GemmWgrad`, and `GemmScaledFp8` already hold every signature the plan needs.
+
+### 1. The measured starting point
+
+The tile of `backends/cuda/gemm/` is correct against cuBLAS over the whole
+`GemmParams` contract. It reaches between 0.08 and 0.30 of the cuBLAS rate over
+the closed shape list. On the six shapes this part exists for, it holds 120 to
+157 TFLOP/s against cuBLAS at 643 to 865. That is 14 to 16 percent of the card's
+bf16 peak, against 65 to 87 percent for cuBLAS. The rows are in
 [baselines.json](baselines.json) under `gemm_bf16`, the comparison is section 7
 of `backends/cuda/gemm/README.md`, and the reasons are section 8 of it.
 
-cuBLAS reaches 989 TFLOPS in bf16 and 1979 TFLOPS in fp8 on the H100, because it
-uses WGMMA, TMA, split-K, and swizzled tiles. A hand kernel on the warp-level
-matrix multiply-accumulate interface lands near Ampere-class rates. The design
-therefore sets a fraction gate and not a literal match: **0.70 of the cuBLAS
-rate** for a first promotion and **0.85** for a full shape replacement. The fp32
-hand GEMM stayed below the first promotion on the group the Muon fusion targets
-(Part 1).
+Section 8 of that README names four causes: the vendor `wmma` load path, the
+48 KiB static shared window, the epilogue, and the occupancy. All four stay true.
+They are also not the whole gap, because they are warp-level causes and the gap
+is a warp-level ceiling. Section 3 makes that argument.
 
-**The shape set is a closed list, not a general GEMM:** the Muon Polar Express
-groups of [model.md](model.md) § Optimizer, and the Linear forward, dgrad, and
-wgrad shapes in `python/nanochat_cpp/pipeline.py` `PROFILES`.
+### 2. What the replacement must beat
 
-**The kernel.** Generalise the `attention_bf16.cu` microkernel into a tiled
-GEMM under `backends/cuda/gemm/`. Use `cp.async` double-buffered
-shared-memory stages and `wmma::mma_sync` with 16 by 16 by 16 bf16 fragments and
-fp32 accumulators. Support the full `GemmParams` contract: transpose flags,
-batch, leading dimensions, strides, an alpha/beta epilogue, and the fp32 output
-of `GemmWgrad`. Mirror `muon_fused_gemm_test.cc` for the correctness gate.
+The card declares 989 TFLOP/s of bf16 (`backends/cuda/caps.json`). All six rows
+are compute bound, so the compute time is the floor for both paths. The last
+column is how much of that floor cuBLAS holds today.
 
-**The fp8 path** adds the E4M3 forward and E5M2 backward fragments. The per-tensor
-scale folds into alpha, because the interface takes no scale argument, and the
-backward mix of both formats must work in one call. The gate is the fp8
-tolerance in [precision.md](precision.md).
+| Row | Work | Peak time | cuBLAS | Share of peak |
+|---|---:|---:|---:|---:|
+| Muon `A = XᵀX` | 168 GFLOP | 0.170 ms | 0.2259 ms | 75% |
+| Muon `prod` | 336 GFLOP | 0.340 ms | 0.5219 ms | 65% |
+| Linear forward `fc` | 215 GFLOP | 0.217 ms | 0.2608 ms | 83% |
+| Linear dgrad `cproj` | 215 GFLOP | 0.217 ms | 0.2616 ms | 83% |
+| Linear wgrad `fc` | 215 GFLOP | 0.217 ms | 0.3074 ms | 71% |
+| Classifier forward | 1374 GFLOP | 1.389 ms | 1.5897 ms | 87% |
 
-**Dispatch.** A predicate in `backends/cuda/gemm.cu` routes a shape to the hand
-library only when it beats cuBLAS at the fraction above. cuBLAS stays the
-fallback and serves every shape the library does not. The rule is: no group
-slower. The frozen seam keeps its signatures and its version. The predicate and
-its 28-row table are implemented; the table holds the measured schedule of each
-row and no row is enabled.
+The old promotion gate asked for 0.70 of the cuBLAS rate. That is 45 to 61
+percent of peak, and it is the one encouraging number in this part. The new gate
+asks for parity, because a removal has no fallback to hide behind.
 
-**Blocked direction.** A Hopper-native path needs WGMMA and TMA in the simulator
-first, and [attention.md](attention.md) Part 5 records that as the blocker. It
-is a separate effort with its own stop condition, and it does not start before
-the warp-level path passes its gate.
+### 3. The instruction set decides this
+
+Two ceilings exist, and only one of them clears the gate.
+
+**The warp-level ceiling.** `mma.sync` and `ldmatrix` are the Ampere instruction
+path. A fourth generation tensor core is fully reachable only through a
+warpgroup-wide instruction, so a well written warp-level kernel lands near half
+of the card's peak. On these six rows that is 0.55 to 0.72 of the cuBLAS rate. It
+sits on the gate and fails it on the classifier row.
+
+**The warpgroup ceiling.** The warpgroup matrix multiply-accumulate (WGMMA) is
+the Hopper instruction. A standard Hopper kernel of this class holds 70 to 90
+percent of the cuBLAS rate on shapes of this size. It clears the gate with room
+left for the removal.
+
+So tuning the tile is not the work, and a second sweep of schedules is not the
+work. **The work is a new mainloop on the Hopper instruction.** The two fractions
+above are estimates. Phase 0 measures them before anyone writes a mainloop.
+
+### 4. What the Hopper mainloop must have
+
+The reference implementation is NVIDIA CUTLASS at `b2f249a`. The seven
+mechanisms below are what its Hopper path does, and what the tile of
+`backends/cuda/gemm/` does instead today.
+
+| # | Mechanism, and where CUTLASS does it | The tile today |
+|---|---|---|
+| 1 | WGMMA takes a 64-bit shared descriptor for each operand. No register copy, no `ldmatrix` (`cute/arch/mma_sm90_gmma.hpp`, `mma_async.m64n128k16`) | `wmma::load_matrix_sync` compiles to `LD.E` and a register permute on `sm_90`, so each operand byte moves through the register file |
+| 2 | One thread issues a whole tile copy, through the Tensor Memory Accelerator (TMA) (`sm90_mma_tma_gmma_ss_warpspecialized.hpp:355`) | One thread for each 16-byte chunk, plus a scalar loop at a ragged edge |
+| 3 | A 128-byte swizzled shared atom, so the descriptor encodes a conflict free read | An 8-element pad, which costs 25 percent more shared bytes |
+| 4 | Four to six stages, counted from the 227 KiB device window | Two stages inside a 48 KiB static window |
+| 5 | One producer warp, one consumer warpgroup, and named barriers | Every warp copies and computes, with two block barriers in each slice |
+| 6 | The accumulator goes register to shared to global as one bulk store for each subtile | Eight serialized rounds of barrier, one warp store, barrier, and a strided write |
+| 7 | A cluster with multicast, an L2 swizzle, and a stream-K scheduler | No cluster, no swizzle, and one fixed raster order |
+
+Mechanism 1 is worth about half of the gap on its own. Mechanism 6 is why the
+weight gradient rows lose a further fifth of their rate today.
+
+### 5. Three mainloops, and no refusal
+
+A removal has no library to catch the calls that a fast kernel cannot serve. The
+package therefore holds three mainloops, and one resolver picks between them. The
+resolver never refuses a call, and the tree never asks a library for help.
+
+| Mainloop | Device | Precision | Role | Precondition |
+|---|---|---|---|---|
+| WGMMA | `sm_90a` | bf16 | The fast path on Hopper | An operand aligned to 16 bytes, and a stride in whole 16-byte units |
+| `mma.sync` | `sm_80` and newer | bf16 | The general path, and the leg the emulator runs | None |
+| Shared-memory tile | `sm_75`, and the fp32 build | fp32 | The chain leg on the T4, and every fp32 call | None |
+
+Three consequences follow, and each one is a decision this plan takes.
+
+1. **The general path is also the Turing path.** `sm_75` has no WGMMA and no TMA,
+   and the T4 declares no bf16 at all (`caps.json`). The T4 runs the
+   post-training chain in fp32, so the third mainloop is an fp32 shared-memory
+   tile. It must fit the 64 KiB window of that card. That kernel is unusually
+   well understood, and parity with cuBLAS is realistic there.
+2. **A refusal becomes an error, so the resolver must be total.** Today
+   `IsTileCallable` refuses only an empty extent, and the shape table sends the
+   rest to cuBLAS. The resolver must serve every non-empty call on every listed
+   device. An unaligned or ragged call takes the `mma.sync` mainloop.
+3. **The closed shape list stops being a routing table.** It becomes the
+   benchmark record: the schedule the sweep chose for each measured shape.
+   `GemmTileMode` and `NANOCHAT_GEMM_LIB` go with the routing decision.
+   `NANOCHAT_GEMM_SCHEDULE` stays as a benchmark-only override.
+
+The fp8 tier is the one open decision. `GemmScaledFp8` rides `cublasLt` today,
+and the T4 has no fp8 silicon. Either the WGMMA fp8 form carries the tier, or the
+architect withdraws it through [../spec/versions.md](../spec/versions.md). This
+part recommends the first, because the fp8 atom is the same mainloop with a
+different accumulator and a scale.
+
+### 6. The phases
+
+| Phase | Work | Effort | Gate |
+|---|---|---|---|
+| 0 | A `dev/kernels/` prototype: one WGMMA atom, one hand-built descriptor, one resident block, timed over the 1280 by 1280 by 1280 shape | 1 day | 85 percent of the per-SM tensor-core rate, which is 6.4 TFLOP/s from one block on the H100 |
+| 1 | The `mma.sync` mainloop: direct `mma.sync` with `ldmatrix`, four to six stages, dynamic shared memory, and the epilogue rewrite | 4 to 8 weeks | Every row correct, and 0.50 of the recorded cuBLAS rate |
+| 2 | The WGMMA mainloop: tile 128 by 256 by 64, cluster 2 by 1, one producer warp, two consumer warpgroups, TMA in and out | 2 to 4 months | Within 1.05 of the cuBLAS rate on all six rows of section 2 |
+| 3 | The fp32 shared-memory tile for Turing and the fp32 build | 2 to 4 weeks | Within 1.05 of the recorded cuBLAS rate on the chain profiles |
+| 4 | fp8 on the WGMMA path, stream-K for the ragged rows, and one tiny kernel for the 5 by 12 group | 4 to 8 weeks | The fp8 tolerance of [precision.md](precision.md), and no row above 1.05 |
+| 5 | Detach the library: cuBLAS moves out of `backends/cuda:gemm` and into the benchmark targets | 1 week | The dependency query of gate G4 is empty |
+
+Phase 1 keeps the emulated correctness leg, because the emulator maps
+`ldmatrix` and `mma.sync`. Phase 2 does not, unless the Simulator workstream
+lands the mapping first. Section 9 makes that choice explicit.
+
+**Gate 0 is a rate for each SM and not for the card.** One warpgroup on one SM
+cannot exceed that SM's share of the peak, which is 989 TFLOP/s over 132 SMs, or
+7.49 TFLOP/s. The gate reads 85 percent of that share from the one-block row and
+85 percent of the peak from the full-grid row. `dev/kernels/wgmma_probe.cu`
+reports both rows, and `//dev/kernels:README.md` holds the run command. The probe
+needs `sm_90a`, so the build names it by hand and the target carries `manual`.
+
+**Phase 0's result.** `dev/kernels/wgmma_probe.cu` measures one warpgroup on a
+resident 64 by 64 A tile and a 128 by 64 B tile. It reads that tile through a
+hand-built descriptor, and the timed loop moves no global memory. The card job
+`wgmma_probe` of
+`tools/modal/app.py` builds it at `sm_90a` and runs it on the H100 leg. One
+warpgroup held 7.384 TFLOP/s, which is 98.6 percent of the per-SM share of the
+peak. Two warpgroups on every SM held 952.9 TFLOP/s, which is 96.4 percent of the
+card peak. **The gate passed.**
+
+The rows are under `wgmma_probe` in [baselines.json](baselines.json), and
+`dev/kernels/wgmma_probe_report.md` is the record of the run.
+
+**What the result does to section 3.** The warpgroup ceiling is higher than
+the estimate there. With no data movement the instruction holds 96 percent of
+the card peak, which is above every cuBLAS row this card measured. So the gap
+between the shipped tile and cuBLAS is the data path alone: the copy, the shared
+layout, the pipeline depth, the epilogue, and the occupancy. Mechanisms 2 to 7 of
+section 4 are the whole of the work, and mechanism 1 needs no further study.
+
+**Phase 1 has started, and its first step is done.** The micro-tile of
+`backends/cuda/gemm/mma_bf16.cuh` is `ldmatrix` and
+`mma.sync.aligned.m16n8k16`. It holds two arms: the instruction pair in inline
+assembly, and the same lane map in plain C++, which the emulation engine runs. The gate is `//backends/cuda/gemm:mma_bf16_test`, and the card
+job `mma_check` runs it on the H100 leg. All four operand orientations pass on
+both arms, with the same maximum error of `8.064e-05` against one scalar
+reference, so the lane map is checked and not assumed.
+
+The rest of phase 1 is the mainloop: the tile still stages and stores through
+`wmma`, so the header is a verified foundation and not yet a rate. The next step
+is to drive it from `gemm_bf16.cu`, then take the accumulator epilogue into
+registers, which removes the shared scratch and its eight serialized rounds.
+
+Total: six to ten months for one GPU engineer with a card in the loop. That is
+the cost of the removal, and it is the number to weigh against keeping cuBLAS.
+
+### 7. The gates
+
+1. **Correctness on the emulator.** `//tests:kernel_emu_test` and the tile's own
+   gates compare each mainloop with its reference over the whole `GemmParams`
+   contract, at the family tolerance.
+2. **Correctness on the card.** `gemm_gpu_test` compares every row against the
+   recorded cuBLAS result, over the four operand forms and both stores.
+3. **Rate parity.** Each row of section 2 reads at most 1.05 of its `cublas_ms`
+   entry in `gemm_bf16`, and each group total reads at most 1.02.
+4. **The library is gone.** `bazel query 'somepath(//src:model,
+   @cuda//:cublasLt)'` returns nothing, and no shipped binary holds a `cublas`
+   symbol. `tools/cuda_sim/check_symbols.py` holds the same rule for the
+   interposer.
+5. **The reference still measures.** `gemm_bench` reports both paths from one
+   binary, and the cuBLAS rows match `gemm_bf16` within three percent. A removal
+   loses the rate table when it loses the reference by accident.
+6. **The step does not regress.** `tools/nanochat` reports no worse step time on
+   the throughput profile than the recorded baseline.
+
+The tiny group gets one stated exception. Its 0.005 to 0.008 ms on either path is
+launch cost, so no mainloop change wins it. It passes when the difference is
+0.002 ms or less, and the plan keeps one tiny kernel for it in phase 4.
+
+### 8. What this plan changes elsewhere
+
+| File | Change | Owner |
+|---|---|---|
+| `docs/kernels.md` § Kernel inventory and § Kernel tiers | The `Gemm` row names the hand library, and cuBLAS becomes the reference | Architect |
+| `README.md` § What this is not | cuBLAS leaves the list of allowed third-party runtimes | Architect |
+| `docs/build.md` | The `@cuda//:cublasLt` link edge moves out of the library and into the benchmark | Architect |
+| `docs/precision.md` | The fp8 tier names its kernel, or the tier is withdrawn | Architect |
+| `docs/model.md` § The GEMM rows | The four cuBLAS selection rows and the shape-table fall-through go | Architect |
+| `backends/cuda/gemm.cu` | The library call, the plan cache, and the heuristic query go | Integrator |
+| `backends/cuda/gemm/dispatch.{h,cc}` | The verdict and `GemmTileMode` go, and the table becomes a benchmark record | Kernel agent |
+| `backends/cuda/gemm/**` | The two new mainloops, and the resolver that replaces the verdict | Kernel agent |
+| `.bazelrc` | `sm_90a` for the Hopper device configurations | Build |
+| `tools/cuda_sim/**` | The WGMMA and TMA mapping, if phase 2 is to keep an emulated leg | Simulator |
+| `backends/cuda/gemm/README.md` | The record of the removal replaces the record of the rejection | Kernel agent |
+| `docs/tensor-core-gemm-plan.md` | Retired into this part, per [README.md](README.md) § How to add a document, and to retire one | Architect |
+
+### 9. Risks and stop conditions
+
+1. **The emulator is the schedule risk.** WGMMA, TMA, `mbarrier`, and dynamic
+   shared memory are all unmapped (section 9.2 of [simulator.md](simulator.md)).
+   Either the Simulator workstream lands them before phase 2, or the Hopper
+   mainloop keeps a device-only gate. Decide before phase 2 starts, because the
+   second choice removes the tree's cheap correctness leg.
+2. **`sm_90a` is a new architecture string.** WGMMA is an architecture
+   conditional instruction, and `.bazelrc` emits `sm_90` today. Phase 0 settled
+   half of this: the builder emits the string on request, a target at `sm_90a`
+   compiles, and the H100 leg runs it through the card job. What remains is a
+   device configuration in `.bazelrc` for the targets that ship, and that is a
+   Build workstream decision before phase 2.
+3. **The fp8 tier may not survive.** It is an optional bit, so withdrawal is
+   legal. This part recommends keeping it.
+4. **The tiny group is launch bound.** Section 7 states the exception, and phase
+   4 carries the one tiny kernel. Without it the group keeps a 0.003 ms loss in
+   each step.
+5. **The maintenance does not end.** cuBLAS gains a tuned kernel for each new
+   card and generation. The hand library freezes at the generation it was
+   written for, and the shape record becomes the tree's problem at each model
+   change. This is the cost that the removal buys out.
+6. **The estimates are estimates.** Section 3 and section 6 read from published
+   results and from the instruction-set argument, not from this tree's card. A
+   performance claim in this part needs a `gemm_bf16` row, exactly as the rest of
+   this document requires.
+
+**Stop condition.** A phase that misses its gate after two iterations closes the
+part with a negative result a second time. Phase 0 reads below 600 TFLOP/s, or
+phase 2 reads above 1.15 on any row of section 2, and cuBLAS stays the GEMM
+engine.
 
 ## Part 4. Two kernel designs the tree does not implement
 

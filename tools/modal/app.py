@@ -204,6 +204,26 @@ GEMM_TEST_TARGET = "//backends/cuda/gemm:gemm_gpu_test"
 GEMM_BENCH_BIN = _bazel_bin(GEMM_BENCH_TARGET)
 GEMM_TEST_BIN = _bazel_bin(GEMM_TEST_TARGET)
 
+#: Phase 1 of ``docs/kernels.md`` Part 3: the gate of the `ldmatrix` and
+#: `mma.sync` micro-tile. One binary holds a host row and a device row over one
+#: reference, so this job reports both and the device row is the instruction
+#: pair in one warp. The target builds at every architecture, because below
+#: `sm_80` the header's plain arm is the one that compiles.
+GEMM_MMA_TARGET = "//backends/cuda/gemm:mma_bf16_test"
+GEMM_MMA_BIN = _bazel_bin(GEMM_MMA_TARGET)
+
+#: Phase 0 of ``docs/kernels.md`` Part 3: the WGMMA ceiling probe of
+#: ``dev/kernels/wgmma_probe.cu``. It is the one target in the tree that needs
+#: ``sm_90a``, and the image's own build emits ``sm_90``, so
+#: :func:`probe_wgmma_h100` builds it inside the container with the tree's
+#: builder before it runs it. The probe is a device-only prototype: the
+#: emulation engine maps no WGMMA, so there is no off-device leg.
+WGMMA_PROBE_TARGET = "//dev/kernels:wgmma_probe"
+WGMMA_PROBE_BIN = _bazel_bin(WGMMA_PROBE_TARGET)
+#: The architecture the probe needs, and the one the probe's own tripwire
+#: refuses to compile without.
+WGMMA_PROBE_ARCH = "sm_90a"
+
 #: The labels the one build of an image names: the shared library, the stage
 #: binary the chain launches (``docs/post-training.md`` B6 and D2), the
 #: tokenizer trainer the corpus function runs, the optimizer benchmark
@@ -212,7 +232,8 @@ GEMM_TEST_BIN = _bazel_bin(GEMM_TEST_TARGET)
 #: so each appears once.
 BUILD_TARGETS = ("//bindings:nanochat_shared", *STAGE_TARGETS,
                  TOKENIZER_TARGET, BENCH_TARGET, ATTENTION_BENCH_TARGET,
-                 ATTENTION_TEST_TARGET, GEMM_BENCH_TARGET, GEMM_TEST_TARGET)
+                 ATTENTION_TEST_TARGET, GEMM_BENCH_TARGET, GEMM_TEST_TARGET,
+                 GEMM_MMA_TARGET)
 
 #: The directory of the image build that holds them, and the variables that
 #: name them. ``nanochat_cpp._build.stage_binary`` prefers the override, and
@@ -435,6 +456,25 @@ def image_build_command(leg: Leg, targets: Sequence[str] = BUILD_TARGETS,
         f"backend='cuda', precision='{leg.precision}', arch='{leg.arch}'); "
         "subprocess.run(_build._build_command("
         f"'tools/nanochat', _options, {labels}), check=True)\"")
+
+
+def probe_build_command(leg: Leg, target: str, arch: str,
+                        root: str = REPO_ROOT) -> str:
+    """The one build command of a prototype that needs its own architecture.
+
+    The image builds every target of a leg at the leg's architecture, and one
+    prototype cannot share that: WGMMA is architecture conditional, so
+    ``dev/kernels/wgmma_probe.cu`` compiles only at ``sm_90a``. The command
+    calls the tree's builder with that architecture, so the flag line stays in
+    ``nanochat_cpp._build`` and this file names no Bazel flag of its own.
+    """
+    return (
+        f"cd {root} && python3 -c \""
+        "import subprocess; from nanochat_cpp import _build; "
+        "_options = _build.BuildOptions.resolve("
+        f"backend='cuda', precision='{leg.precision}', arch='{arch}'); "
+        "subprocess.run(_build._build_command("
+        f"'tools/nanochat', _options, ({target!r},)), check=True)\"")
 
 
 def _build_image(leg: Leg):
@@ -1011,6 +1051,61 @@ def bench_gemm_h100(argv_json: str = "[]") -> str:
     """
     return _run_in_image(["tools/nanochat", "bench", "--", GEMM_BENCH_BIN],
                          argv_json, ("gemm:",))
+
+
+@app.function(
+    image=image_for(H100),
+    gpu=H100.gpu,
+    cpu=CPU_CORES,
+    timeout=1800,
+    max_containers=1,
+)
+def check_mma_h100() -> str:
+    """Run the phase 1 micro-tile gate on the H100 leg.
+
+    The image built the test from the same source and the same flags as the
+    library, so the device row is the `ldmatrix` and `mma.sync` pair in one warp
+    on the card, checked against the same reference as the host row. A row for
+    `transpose_a` and `transpose_b` each of the four combinations, because the
+    staged layouts of `gemm_tile.cuh` produce all four.
+    """
+    return _run_in_image(["tools/nanochat", "run", "t1-gpu", "--",
+                          GEMM_MMA_BIN], "[]", ("mma_bf16",))
+
+
+@app.function(
+    image=image_for(H100),
+    gpu=H100.gpu,
+    cpu=CPU_CORES,
+    timeout=3600,
+    max_containers=1,
+)
+def probe_wgmma_h100() -> str:
+    """Build and run the WGMMA ceiling probe on the H100 leg.
+
+    Phase 0 of ``docs/kernels.md`` Part 3 asks one question: how fast can one
+    warpgroup issue the warpgroup matrix multiply-accumulate from a resident
+    shared-memory tile? The probe answers it with a hand written descriptor, a
+    hand written interleaved staging pass, and the instruction itself, and it
+    checks the product against a host reference before it reports a rate.
+
+    The build comes first and it is inside this container on purpose: the image
+    built every other target at ``sm_90``, and the probe needs ``sm_90a``
+    (``WGMMA_PROBE_ARCH``). One build of one target is cheaper than a second
+    image, and it keeps the architecture of the flag line visible here.
+    """
+    build = subprocess.run(
+        ["bash", "-c",
+         probe_build_command(H100, WGMMA_PROBE_TARGET, WGMMA_PROBE_ARCH)],
+        env=worker_env(package_source()), capture_output=True, text=True,
+        check=False)
+    if build.returncode != 0:
+        return json.dumps({"stage": "build",
+                           "status": int(build.returncode),
+                           "tail": process_tail(build, lines=20)},
+                          sort_keys=True)
+    return _run_in_image(["tools/nanochat", "run", "t1-gpu", "--",
+                          WGMMA_PROBE_BIN], "[]", ("wgmma", "card:"))
 
 
 def chain_dir(run_root, job) -> Path:
@@ -2563,6 +2658,9 @@ CARD_JOBS = {
     "gemm_check": CardJob(check_gemm_h100, "the hand GEMM device gate"),
     "gemm_bench": CardJob(bench_gemm_h100, "the hand GEMM benchmark",
                           takes_argv=True),
+    "mma_check": CardJob(check_mma_h100, "the Part 3 phase 1 micro-tile gate"),
+    "wgmma_probe": CardJob(probe_wgmma_h100,
+                           "the WGMMA ceiling probe of Part 3 phase 0"),
 }
 
 
