@@ -903,7 +903,7 @@ different accumulator and a scale.
 | Phase | Work | Effort | Gate |
 |---|---|---|---|
 | 0 | A `dev/kernels/` prototype: one WGMMA atom, one hand-built descriptor, one resident block, timed over the 1280 by 1280 by 1280 shape | 1 day | 85 percent of the per-SM tensor-core rate, which is 6.4 TFLOP/s from one block on the H100 |
-| 1 | The `mma.sync` mainloop: direct `mma.sync` with `ldmatrix`, four to six stages, dynamic shared memory, and the epilogue rewrite | 4 to 8 weeks | Every row correct, and 0.50 of the recorded cuBLAS rate |
+| 1 | The `mma.sync` mainloop: direct `mma.sync` with `ldmatrix`, four to six stages, dynamic shared memory, and the epilogue rewrite | 4 to 8 weeks | Every row correct, and 0.50 of the recorded cuBLAS rate. Section 10 breaks what remains into steps |
 | 2 | The WGMMA mainloop: tile 128 by 256 by 64, cluster 2 by 1, one producer warp, two consumer warpgroups, TMA in and out | 2 to 4 months | Within 1.05 of the cuBLAS rate on all six rows of section 2 |
 | 3 | The fp32 shared-memory tile for Turing and the fp32 build | 2 to 4 weeks | Within 1.05 of the recorded cuBLAS rate on the chain profiles |
 | 4 | fp8 on the WGMMA path, stream-K for the ragged rows, and one tiny kernel for the 5 by 12 group | 4 to 8 weeks | The fp8 tolerance of [precision.md](precision.md), and no row above 1.05 |
@@ -1026,6 +1026,44 @@ launch cost, so no mainloop change wins it. It passes when the difference is
 part with a negative result a second time. Phase 0 reads below 600 TFLOP/s, or
 phase 2 reads above 1.15 on any row of section 2, and cuBLAS stays the GEMM
 engine.
+
+### 10. The remaining steps
+
+Phase 1 is a gate and not a single change, so this section is the ordered list of
+what is left of it and of the phases after it. Each step names the file, the
+estimated effect, and the gate that decides it. An estimate here is an estimate
+and not a measurement: only a `gemm_bf16_phase1` row decides.
+
+Step 1 of the list is done, and section 6 records it. The steps below are the
+rest.
+
+| Step | The change | File | Estimate | The gate |
+|---|---|---|---|---|
+| 2 | The epilogue in registers: apply alpha, beta, and the bounds through the fragment lane map and store straight to global, which removes the shared scratch and its eight serialized rounds | `gemm_bf16.cu` | The weight-gradient rows gain most, because section 9 measured the scratch at about 30 percent there | Every row correct, and `fraction_of_cublas` above 0.28 on all six |
+| 3 | Four to six stages in place of two, which needs dynamic shared memory and `cudaFuncSetAttribute` | `gemm_plan.h`, `gemm_tile.cuh`, `gemm_bf16.cu` | The largest of the four causes left, because two stages expose one copy latency in each slice | Every row correct, and `fraction_of_cublas` above 0.40 on all six |
+| 4 | A wider tile and fewer registers per thread, so a block holds more arithmetic for each staged byte | `gemm_plan.h` | Occupancy is what section 9 names fourth; the sweep that chose `128x128x32` predates the new operand path, so it is a second sweep and not a guess | The best schedule per row changes, and the sweep says which |
+| 5 | An L2 swizzle of the block order, and stream-K for the ragged rows | `gemm_bf16.cu` | Unmeasured. The classifier is the largest shape and it is the row where the tail matters least | No row slower, and the classifier row above 0.45 |
+
+**The two constraints of steps 3 to 5.**
+
+1. **Step 3 needs the emulator.** `docs/simulator.md` section 9.2 maps no
+   `extern __shared__` and no dynamic shared window, so a four-stage tile has no
+   off-device leg until the Simulator workstream lands one. A static window is
+   the fallback: the H100 declares 227 KiB, and the trade is one target-specific
+   array size against a per-architecture constant.
+2. **Steps 4 and 5 need the card.** Each one changes a number in
+   `gemm_plan.h` or the grid mapping, and neither has a host reference. The card
+   job `gemm_bench` with `--schedule all` is the only measurement.
+
+**The phase 1 gate stays what section 6 says:** every row correct against the
+recorded cuBLAS result, and 0.50 of the recorded cuBLAS rate. Step 3 should reach
+that fraction, and step 4 decides whether it is enough for the removal or only
+for the next phase.
+
+**Then phases 2 to 5.** Section 6 holds their scope and their gates: the WGMMA
+mainloop with the Tensor Memory Accelerator, the fp32 tile for Turing, fp8 with
+stream-K, and the detachment of the library. Section 5 already says which of
+them a source change can reach and which one needs a new architecture string.
 
 ## Part 4. Two kernel designs the tree does not implement
 
