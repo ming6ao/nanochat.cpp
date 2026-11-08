@@ -1044,6 +1044,15 @@ rest.
 | 4 | A wider tile and fewer registers per thread, so a block holds more arithmetic for each staged byte | `gemm_plan.h` | Occupancy is what section 9 names fourth; the sweep that chose `128x128x32` predates the new operand path, so it is a second sweep and not a guess | The best schedule per row changes, and the sweep says which |
 | 5 | An L2 swizzle of the block order, and stream-K for the ragged rows | `gemm_bf16.cu` | Unmeasured. The classifier is the largest shape and it is the row where the tail matters least | No row slower, and the classifier row above 0.45 |
 
+**Step 4 is done, and its gate holds.** A wider tile with 512 threads lost on
+every row, because one such block per multiprocessor is fewer resident warps and
+not more. What won is the square tile with a 64-deep k slice, `128x128x64x2`:
+the same 64 flops for each staged byte, half the barriers, and two blocks of
+72 KiB. It gains 1.09 to 1.15 and it becomes the schedule every model row names,
+so "the best schedule per row changes, and the sweep says which" is exactly what
+happened. `backends/cuda/gemm/README.md` section 14 and the
+`gemm_bf16_phase1_step4` rows of [baselines.json](baselines.json) are the record.
+
 **Step 2 is done, and its gate is not met.** The straight-to-global store that
 the row above proposes lost 1.6 to 11.5 percent, because a lane holds eight
 columns of two rows and one warp store therefore lands in eight rows of sixteen

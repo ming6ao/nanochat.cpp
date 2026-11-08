@@ -64,24 +64,27 @@ commit that adds the kernel.
 The staged window is the dynamic one, so a schedule states its stage count and
 the launcher asks for the opt-in limit with `cudaFuncSetAttribute`. A stage
 count is a trade: one more stage hides one more copy, and it also costs a share
-of the multiprocessor. Section 13 measures the trade.
+of the multiprocessor. Section 13 measures the trade, and section 14 measures the
+tile.
 
 | Schedule | Tile | Warps | k depth | Stages | Window | Registers |
 |---|---|---|---:|---:|---:|---:|
 | `128x64x32x2` | 128 by 64 | 2 by 2 | 32 | 2 | 30,736 B | 101 to 109 |
 | `64x64x32x2` | 64 by 64 | 1 by 2 | 32 | 2 | 20,496 B | 101 to 109 |
-| `128x128x32x2` | 128 by 128 | 4 by 2 | 32 | 2 | 40,976 B | 101 to 107 |
 | `128x128x32x4` | 128 by 128 | 4 by 2 | 32 | 4 | 81,936 B | 93 to 96 |
+| `128x128x64x2` | 128 by 128 | 2 by 4 | 64 | 2 | 73,744 B | 101 to 109 |
+| `128x256x32x2` | 128 by 256 | 4 by 4 | 32 | 2 | 61,456 B | 102 to 108 |
+| `128x256x32x3` | 128 by 256 | 4 by 4 | 32 | 3 | 92,176 B | 93 to 96 |
+| `256x128x32x2` | 256 by 128 | 4 by 4 | 32 | 2 | 61,456 B | 101 to 109 |
 
-`128x128x32x4` is the default, because it won the sweep. The register and window
-figures are `cuobjdump -res-usage` of one build at bf16 and `sm_90`, read over
-the four operand forms and the two stores of each schedule, plus the count the
-plan states. The window is the staged buffers and nothing else: the epilogue's
-exchange tiles lie over it, and the sixteen bytes above the plan's count are the
-slack that rounds the base of the window to a sixteen-byte boundary.
-
-`128x128x32` is the default, because it won the sweep. A row of the shape table
-names its own schedule, so a future promotion does not need a second sweep.
+`128x128x64x2` is the default, because it won the sweep of section 14. The
+register and window figures are `cuobjdump -res-usage` of one build at bf16 and
+`sm_90`, read over the four operand forms and the two stores of each schedule,
+plus the count the plan states. The window is the staged buffers and nothing
+else: the epilogue's exchange tiles lie over it, and the sixteen bytes above the
+plan's count are the slack that rounds the base of the window to a
+sixteen-byte boundary. A row of the shape table names its own schedule, so a
+future promotion does not need a second sweep.
 
 ## 4. The epilogue
 
@@ -458,3 +461,42 @@ its own rule the part takes the stage count of the pipeline as measured and not
 as estimated. The reason is arithmetic intensity: 64 flops for every staged byte
 is 15.5 TB/s of operand traffic at the card's peak, which no memory system here
 can serve. That is what steps 4 and 5 are for.
+
+## 14. The wider tile, phase 1 step 4
+
+Step 4 of `docs/kernels.md` Part 3 section 10 asks for a wider tile, so a block
+holds more arithmetic for each staged byte, and for fewer registers a thread. The
+sweep that chose `128x128x32` predated the new operand path, so this is a second
+sweep and not a guess. One run of one binary on an NVIDIA H100 80GB HBM3 at
+bf16, `--schedule all`:
+
+| Schedule | Tile | Warps | k | Stages | `muon:1280x1280:A` | Classifier |
+|---|---|---|---:|---:|---:|---:|
+| `128x128x32x4` | 128 by 128 | 8 | 32 | 4 | 0.8961 ms | 6.9945 ms |
+| `128x128x64x2` | 128 by 128 | 8 | 64 | 2 | **0.8259 ms** | **6.5931 ms** |
+| `128x256x32x2` | 128 by 256 | 16 | 32 | 2 | 0.9629 ms | 7.6676 ms |
+| `128x256x32x3` | 128 by 256 | 16 | 32 | 3 | 0.9359 ms | 7.0511 ms |
+| `256x128x32x2` | 256 by 128 | 16 | 32 | 2 | 0.9638 ms | 7.1963 ms |
+| `128x64x32x2` | 128 by 64 | 4 | 32 | 2 | 1.0237 ms | 9.4424 ms |
+| `64x64x32x2` | 64 by 64 | 2 | 32 | 2 | 1.2502 ms | 12.8164 ms |
+
+**The wider tile lost.** `128x256x32x2` reads 87 flops for every staged byte
+against the 64 of the square tile, and it is slower on every row. The reason is
+residency again, and this time it is the register file: a block of 512 threads
+holds one block per multiprocessor, so the extra columns buy no extra warps. The
+same run says what does pay, and it is not a wider tile: `128x128x64x2` doubles
+the k slice of the square tile, so a block does the same arithmetic for each
+staged byte and passes half as many barriers. It gains 1.09 to 1.15 on every row
+that matters and it keeps two blocks of 72 KiB per multiprocessor.
+
+**The register side.** The wider schedules hold 102 to 108 registers a thread,
+against 93 to 96 for `128x128x32x4`, so the plan did not deliver the register
+saving the step asked for either. `128x128x64x2` holds 101 to 109 and loses
+nothing by it, because the square tile's residency is set by its window.
+
+**The gate.** "The best schedule per row changes, and the sweep says which" is
+the whole of this step's gate, and it holds: the winner moved from
+`128x128x32x4` to `128x128x64x2` on all six rows, and the shape table names it
+for every model row. The fractions read 0.2358 to 0.3236, so the phase's own
+0.50 gate is still out of reach, which section 5 of `docs/kernels.md` Part 3
+predicts for a warp-level mainloop.

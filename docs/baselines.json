@@ -755,6 +755,70 @@
           "hand_mfu": 0.1988
         }
       ]
+    },
+    "gemm_bf16_phase1_step4": {
+      "note": "The hand-written bf16 tensor-core GEMM of docs/kernels.md Part 3 after phase 1 step 4, over the same six rows as gemm_bf16_phase1. A schedule is now a tile, a warp grid, a k depth, a stage count, and a pad, and the sweep holds seven of them: the square tile at a 32-deep slice with four stages, the same tile at a 64-deep slice with two, a 128 by 256 tile at two and at three stages, a 256 by 128 tile, a 128 by 64 tile, and a 64 by 64 tile. The 128 by 256 and 256 by 128 tiles lost on every row because a block of 512 threads holds one block per multiprocessor; the winner is 128x128x64x2, which doubles the k slice of the square tile and passes half as many barriers. Everything else is unchanged from gemm_bf16_phase1_step3: the dynamic staged window, the exchange-tile epilogue, and the shape table, whose every row is still inert. One run of one binary on an H100 80GB HBM3 at bf16, with NANOCHAT_GEMM_LIB at `cublas` and then at `hand` on the schedule the row owns. fraction_of_cublas is the cuBLAS time over the hand time and hand_mfu is the tile's rate over the card's declared bf16 peak. The gate of the step is that the best schedule per row changes and the sweep says which, which holds; backends/cuda/gemm/README.md section 14 holds the sweep.",
+      "device": "NVIDIA H100 80GB HBM3 (sm_90)",
+      "validated_on": "NVIDIA H100 80GB HBM3 (sm_90)",
+      "precision": "bf16",
+      "measurement": "modal run tools/modal/app.py::card_job --name gemm_bench --argv '[\"--schedule\",\"all\",\"--json\"]'",
+      "origin": "docs/kernels.md Part 3 phase 1 step 4, backends/cuda/gemm/README.md section 14",
+      "rows": [
+        {
+          "name": "muon:1280x1280:A",
+          "shape": "1280x1280x1280 batch 40",
+          "cublas_ms": 0.224085,
+          "hand_ms": 0.825888,
+          "schedule": "128x128x64x2",
+          "fraction_of_cublas": 0.2713,
+          "hand_mfu": 0.2057
+        },
+        {
+          "name": "muon:5120x1280:prod",
+          "shape": "5120x1280x1280 batch 20",
+          "cublas_ms": 0.5208,
+          "hand_ms": 1.60925,
+          "schedule": "128x128x64x2",
+          "fraction_of_cublas": 0.3236,
+          "hand_mfu": 0.2111
+        },
+        {
+          "name": "linear:fwd:fc",
+          "shape": "16384x5120x1280 batch 1",
+          "cublas_ms": 0.253205,
+          "hand_ms": 1.00411,
+          "schedule": "128x128x64x2",
+          "fraction_of_cublas": 0.2522,
+          "hand_mfu": 0.2165
+        },
+        {
+          "name": "linear:dgrad:cproj",
+          "shape": "16384x1280x5120 batch 1",
+          "cublas_ms": 0.254219,
+          "hand_ms": 1.03725,
+          "schedule": "128x128x64x2",
+          "fraction_of_cublas": 0.2451,
+          "hand_mfu": 0.2096
+        },
+        {
+          "name": "linear:wgrad:fc",
+          "shape": "5120x1280x16384 batch 1 fp32 out",
+          "cublas_ms": 0.296843,
+          "hand_ms": 1.13714,
+          "schedule": "128x128x64x2",
+          "fraction_of_cublas": 0.261,
+          "hand_mfu": 0.1912
+        },
+        {
+          "name": "linear:fwd:cls",
+          "shape": "16384x32768x1280 batch 1",
+          "cublas_ms": 1.55492,
+          "hand_ms": 6.59308,
+          "schedule": "128x128x64x2",
+          "fraction_of_cublas": 0.2358,
+          "hand_mfu": 0.2107
+        }
+      ]
     }
   }
 }

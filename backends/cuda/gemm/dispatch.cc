@@ -83,11 +83,11 @@ struct Row {
   bool enabled = false;
 };
 
-// The sweep left two rules. The wide tile wins every shape but the
-// weight-gradient rows, whose fp32 epilogue costs it more than the small k
-// slice saves, and the 5 by 12 group, whose whole call is launch overhead.
-constexpr int kWideShapeSchedule = gemm_tile::kScheduleWide;
-constexpr int kWeightGradientSchedule = gemm_tile::kScheduleBase;
+// The sweep left two rules. The square tile with a 64-deep slice wins every
+// model shape, whatever it stores, and the 5 by 12 group takes the small tile
+// because its whole call is launch overhead.
+constexpr int kWideShapeSchedule = gemm_tile::kScheduleKDeep;
+constexpr int kWeightGradientSchedule = gemm_tile::kScheduleKDeep;
 constexpr int kTinyShapeSchedule = gemm_tile::kScheduleSmall;
 
 std::vector<Row>& Rows() {

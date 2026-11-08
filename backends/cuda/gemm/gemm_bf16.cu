@@ -343,10 +343,10 @@ bool Thunk(const GemmParams& params, const ComputeType* a, const ComputeType* b,
 }
 
 const ScheduleThunk kThunks[gemm_tile::kScheduleCount] = {
-    &Thunk<gemm_tile::PlanBase>,
-    &Thunk<gemm_tile::PlanSmall>,
-    &Thunk<gemm_tile::PlanShallow>,
-    &Thunk<gemm_tile::PlanWide>,
+    &Thunk<gemm_tile::PlanBase>,     &Thunk<gemm_tile::PlanSmall>,
+    &Thunk<gemm_tile::PlanWide>,     &Thunk<gemm_tile::PlanTall>,
+    &Thunk<gemm_tile::PlanTallDeep>, &Thunk<gemm_tile::PlanLong>,
+    &Thunk<gemm_tile::PlanKDeep>,
 };
 
 static_assert(sizeof(kThunks) / sizeof(kThunks[0]) == gemm_tile::kScheduleCount,

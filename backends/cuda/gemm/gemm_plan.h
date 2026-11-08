@@ -90,29 +90,41 @@ using PlanSmall = Plan<64, 64, 32, 1, 2, 8, 2>;
 //: Twice the arithmetic of the base schedule for one and a third times its
 //: staged bytes, and sixteen warps per SM instead of eight.
 using PlanWide = Plan<128, 128, 32, 4, 2, 8, 4>;
-//: The same tile with two stages. The sweep keeps it as the record of what the
-//: deeper pipeline is worth on this tile: four stages gained 3 to 5 percent on
-//: five rows, because two blocks of twice the window still fit a Hopper
-//: multiprocessor. A small tile takes the shallower pipeline, where every extra
-//: stage costs a block.
-using PlanShallow = Plan<128, 128, 32, 4, 2, 8, 2>;
+//: A tall tile: twice the columns of the wide one, four warps along each axis,
+//: and the same sixty-four accumulator registers a thread. The arithmetic for
+//: each staged byte rises from 64 flops to 87, which is what an operand path of
+//: 2.9 TB/s needs.
+using PlanTall = Plan<128, 256, 32, 4, 4, 8, 2>;
+//: The same tile with a third stage, so the sweep says whether the wider tile
+//: wants the deeper pipeline the narrow one gained from.
+using PlanTallDeep = Plan<128, 256, 32, 4, 4, 8, 3>;
+//: The same area the other way around, because a row's k is the short extent
+//: and the staged bytes of A and B are not symmetric.
+using PlanLong = Plan<256, 128, 32, 4, 4, 8, 2>;
+//: The wide tile with a 64-deep slice: the same 64 flops a byte, half the
+//: barriers over k, and two blocks of 72 KiB still fit.
+using PlanKDeep = Plan<128, 128, 64, 2, 4, 8, 2>;
 
 //: The sweep. The launcher and the benchmark index it by position, and the
-//: registry of thunks in gemm_bf16.cu holds the same four in this order. The
+//: registry of thunks in gemm_bf16.cu holds the same seven in this order. The
 //: stage count is part of a name, because two of them differ only in it.
-inline constexpr int kScheduleCount = 4;
+inline constexpr int kScheduleCount = 7;
 inline constexpr const char* kScheduleNames[kScheduleCount] = {
-    "128x64x32x2", "64x64x32x2", "128x128x32x2", "128x128x32x4"};
+    "128x64x32x2",  "64x64x32x2",   "128x128x32x4", "128x256x32x2",
+    "128x256x32x3", "256x128x32x2", "128x128x64x2"};
 //: The position of each schedule in the sweep, so a row names a schedule and
 //: not a number.
 inline constexpr int kScheduleBase = 0;
 inline constexpr int kScheduleSmall = 1;
-inline constexpr int kScheduleShallow = 2;
-inline constexpr int kScheduleWide = 3;
+inline constexpr int kScheduleWide = 2;
+inline constexpr int kScheduleTall = 3;
+inline constexpr int kScheduleTallDeep = 4;
+inline constexpr int kScheduleLong = 5;
+inline constexpr int kScheduleKDeep = 6;
 //: The schedule a call takes when neither the row nor the environment names
 //: one. It is the widest that keeps two blocks on a multiprocessor of the
 //: card the sweep measured.
-inline constexpr int kDefaultSchedule = kScheduleWide;
+inline constexpr int kDefaultSchedule = kScheduleKDeep;
 
 }  // namespace gemm_tile
 }  // namespace kernels
