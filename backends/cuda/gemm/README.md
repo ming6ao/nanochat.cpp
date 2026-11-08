@@ -69,15 +69,17 @@ tile.
 
 | Schedule | Tile | Warps | k depth | Stages | Window | Registers |
 |---|---|---|---:|---:|---:|---:|
-| `128x64x32x2` | 128 by 64 | 2 by 2 | 32 | 2 | 30,736 B | 101 to 109 |
-| `64x64x32x2` | 64 by 64 | 1 by 2 | 32 | 2 | 20,496 B | 101 to 109 |
-| `128x128x32x4` | 128 by 128 | 4 by 2 | 32 | 4 | 81,936 B | 93 to 96 |
-| `128x128x64x2` | 128 by 128 | 2 by 4 | 64 | 2 | 73,744 B | 101 to 109 |
-| `128x256x32x2` | 128 by 256 | 4 by 4 | 32 | 2 | 61,456 B | 102 to 108 |
-| `128x256x32x3` | 128 by 256 | 4 by 4 | 32 | 3 | 92,176 B | 93 to 96 |
-| `256x128x32x2` | 256 by 128 | 4 by 4 | 32 | 2 | 61,456 B | 101 to 109 |
+| `128x64x32x2` | 128 by 64 | 2 by 2 | 32 | 2 | 30,736 B | 122 to 126 |
+| `64x64x32x2` | 64 by 64 | 1 by 2 | 32 | 2 | 20,496 B | 122 to 126 |
+| `128x128x32x4` | 128 by 128 | 4 by 2 | 32 | 4 | 81,936 B | 124 to 125 |
+| `128x128x64x2` | 128 by 128 | 2 by 4 | 64 | 2 | 73,744 B | 120 to 126 |
+| `128x128x64x2s8` | 128 by 128 | 2 by 4 | 64 | 2 | 73,744 B | 123 to 128 |
+| `128x128x96x2s8` | 128 by 128 | 2 by 4 | 96 | 2 | 106,512 B | 122 to 124 |
+| `128x256x32x2s8` | 128 by 256 | 4 by 4 | 32 | 2 | 61,456 B | 124 to 128 |
 
-`128x128x64x2` is the default, because it won the sweep of section 14. The
+The `s8` suffix is the L2 group of eight m-tiles, and a name without it walks the
+grid in the plain order. `128x128x64x2s8` is the default, because it won the
+sweep of section 15, and `128x128x96x2s8` takes the weight-gradient rows. The
 register and window figures are `cuobjdump -res-usage` of one build at bf16 and
 `sm_90`, read over the four operand forms and the two stores of each schedule,
 plus the count the plan states. The window is the staged buffers and nothing
@@ -85,6 +87,12 @@ else: the epilogue's exchange tiles lie over it, and the sixteen bytes above the
 plan's count are the slack that rounds the base of the window to a
 sixteen-byte boundary. A row of the shape table names its own schedule, so a
 future promotion does not need a second sweep.
+
+The register figure rose with section 15: a block that walks a run of tiles keeps
+the state of one tile alive across the loop, and the compiler spends about thirty
+registers on it. 128 registers at 256 threads still holds two blocks per
+multiprocessor, so the tile keeps its residency, and the run of section 15 is
+faster than the fixed grid it replaced.
 
 ## 4. The epilogue
 
@@ -486,7 +494,7 @@ residency again, and this time it is the register file: a block of 512 threads
 holds one block per multiprocessor, so the extra columns buy no extra warps. The
 same run says what does pay, and it is not a wider tile: `128x128x64x2` doubles
 the k slice of the square tile, so a block does the same arithmetic for each
-staged byte and passes half as many barriers. It gains 1.09 to 1.15 on every row
+staged byte and passes half as many barriers. It gains 1.061 to 1.135 on every row
 that matters and it keeps two blocks of 72 KiB per multiprocessor.
 
 **The register side.** The wider schedules hold 102 to 108 registers a thread,
@@ -500,3 +508,87 @@ the whole of this step's gate, and it holds: the winner moved from
 for every model row. The fractions read 0.2358 to 0.3236, so the phase's own
 0.50 gate is still out of reach, which section 5 of `docs/kernels.md` Part 3
 predicts for a warp-level mainloop.
+
+## 15. The tile order, phase 1 step 5
+
+Step 5 of `docs/kernels.md` Part 3 section 10 asks for an L2 swizzle of the block
+order and for stream-K on the ragged rows. The shipped form is both halves of
+the tile-parallel scheduler and not the k-split half of stream-K: one block owns
+a run of tiles, the grid is sized from the blocks a multiprocessor can hold, and
+`SwizzleM` decides the order the run walks.
+
+**The persistent grid is the larger half.** A row whose tile count is not a whole
+number of waves leaves part of the card idle in the last wave, and the Muon rows
+have three to sixteen waves. One run of one binary before and after, on the same
+schedule and the same card:
+
+| Row | Fixed grid (step 4) | Persistent grid | Gain |
+|---|---:|---:|---:|
+| Muon `A = XᵀX` | 0.8259 ms | 0.7425 ms | 1.112 |
+| Muon `prod` | 1.6093 ms | 1.4731 ms | 1.092 |
+| Linear forward `fc` | 1.0041 ms | 0.9669 ms | 1.039 |
+| Linear dgrad `cproj` | 1.0373 ms | 0.9713 ms | 1.068 |
+| Linear wgrad `fc` | 1.1371 ms | 1.0176 ms | 1.117 |
+| Classifier forward | 6.5931 ms | 6.0635 ms | 1.087 |
+
+**The swizzle is the smaller half, and it is where it was expected.** A group of
+eight m-tiles walks n first, so the blocks resident together share eight A panels
+and a run of B panels that fits the cache. In the same run, with the group on:
+
+| Row | Plain order | Swizzled | Gain |
+|---|---:|---:|---:|
+| Muon `A = XᵀX` | 0.7425 ms | 0.7378 ms | 1.006 |
+| Muon `prod` | 1.4731 ms | 1.4632 ms | 1.007 |
+| Linear forward `fc` | 0.9669 ms | 0.9578 ms | 1.009 |
+| Linear dgrad `cproj` | 0.9713 ms | 0.9615 ms | 1.010 |
+| Linear wgrad `fc` | 1.0176 ms | 1.0158 ms | 1.002 |
+| Classifier forward | 6.0635 ms | 5.7805 ms | 1.049 |
+
+The classifier gains five times what the other rows gain, which is what the
+argument for an L2 swizzle predicts: it is the one row whose B panel is larger
+than the cache, at 84 MB against a 50 MB cache.
+
+**The cost of the loop.** The register figure moves from 93 to 109 a thread to
+120 to 128, because a block that walks a run of tiles keeps the state of one tile
+alive across the loop. 128 registers at 256 threads still holds two blocks per
+multiprocessor, and the run is 3.9 to 11.7 percent faster than the fixed grid, so
+the loop pays for what it spends.
+
+**What is not here.** The k-split half of stream-K is not implemented. A split
+along k needs a workspace, a second accumulator pass, and a fixup stage, and it
+buys the tail of a wave: the classifier row has 124 waves, so its tail is under
+one percent, which is the row where section 10 says the tail matters least. It
+is the right change for a row whose tile count is below the resident block
+count, and every such row here is a Muon group of a few milliseconds. Recorded
+as not done rather than as done.
+
+**The gate.** Step 5 asks that no row be slower and that the classifier row
+reach 0.45 of the cuBLAS rate. No row is slower in the run, and the classifier
+reads 0.2753, so the step misses the second half. The fractions of all six rows
+now read 0.2681 to 0.3556, against 0.2215 to 0.2950 before step 2.
+
+**What the four steps together say.** One session measured the tree before step
+2 and the tree after step 5, each with `--schedule all` and each scored on the
+best schedule of its own sweep:
+
+| Row | Before | After | Gain | Fraction before | Fraction after |
+|---|---:|---:|---:|---:|---:|
+| Muon `A = XᵀX` | 0.8969 ms | 0.7389 ms | 1.214 | 0.2486 | 0.3042 |
+| Muon `prod` | 1.8114 ms | 1.4748 ms | 1.228 | 0.2882 | 0.3530 |
+| Linear forward `fc` | 1.1211 ms | 0.9481 ms | 1.182 | 0.2318 | 0.2707 |
+| Linear dgrad `cproj` | 1.1582 ms | 0.9730 ms | 1.190 | 0.2256 | 0.2671 |
+| Linear wgrad `fc` | 1.3072 ms | 0.9869 ms | 1.325 | 0.2331 | 0.3079 |
+| Classifier forward | 7.1397 ms | 5.7740 ms | 1.237 | 0.2229 | 0.2714 |
+| Total | 13.4345 ms | 10.8957 ms | 1.233 | | |
+
+The rate of the tile rose from 164 to 192 TFLOP/s to 218 to 238 TFLOP/s, which is
+18 to 33 percent of the card's bf16 peak. A repeat run of the final tree agreed
+with this table within 0.8 percent on every row.
+
+The remaining gap is the instruction and not the schedule. A warp-level
+`mma.sync` mainloop reads each operand through `ldmatrix` into the register file
+and issues 16 by 8 by 16 products, and section 3 of `docs/kernels.md` Part 3 sizes
+that ceiling at half the card before any of this was measured. Phase 2 is the
+answer: one warpgroup instruction, the Tensor Memory Accelerator, and a producer
+warp. Its gate asks for 1.05 of the cuBLAS rate, where this phase's own gate
+asked for 0.50 and did not arrive.

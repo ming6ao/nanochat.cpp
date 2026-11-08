@@ -1044,15 +1044,6 @@ rest.
 | 4 | A wider tile and fewer registers per thread, so a block holds more arithmetic for each staged byte | `gemm_plan.h` | Occupancy is what section 9 names fourth; the sweep that chose `128x128x32` predates the new operand path, so it is a second sweep and not a guess | The best schedule per row changes, and the sweep says which |
 | 5 | An L2 swizzle of the block order, and stream-K for the ragged rows | `gemm_bf16.cu` | Unmeasured. The classifier is the largest shape and it is the row where the tail matters least | No row slower, and the classifier row above 0.45 |
 
-**Step 4 is done, and its gate holds.** A wider tile with 512 threads lost on
-every row, because one such block per multiprocessor is fewer resident warps and
-not more. What won is the square tile with a 64-deep k slice, `128x128x64x2`:
-the same 64 flops for each staged byte, half the barriers, and two blocks of
-72 KiB. It gains 1.09 to 1.15 and it becomes the schedule every model row names,
-so "the best schedule per row changes, and the sweep says which" is exactly what
-happened. `backends/cuda/gemm/README.md` section 14 and the
-`gemm_bf16_phase1_step4` rows of [baselines.json](baselines.json) are the record.
-
 **Step 2 is done, and its gate is not met.** The straight-to-global store that
 the row above proposes lost 1.6 to 11.5 percent, because a lane holds eight
 columns of two rows and one warp store therefore lands in eight rows of sixteen
@@ -1063,6 +1054,42 @@ compute type, and it is within the run-to-run spread on the other two. The
 fractions read 0.2236 to 0.3071, so one row of six reaches 0.28.
 `backends/cuda/gemm/README.md` section 12 and the `gemm_bf16_phase1_step2` rows
 of [baselines.json](baselines.json) are the record.
+
+**Step 4 and step 5 are done.** Step 4 widened the tile and swept it: the wider
+128 by 256 tile lost on every row, because a block of 512 threads holds one block
+per multiprocessor, and the win came from a 64-deep k slice on the 128 by 128
+tile instead. Step 5 gave one block a run of tiles from a grid sized to the
+resident blocks, and gave the plan an order to walk them in. The persistent grid
+gained 1.039 to 1.117 and the swizzle gained 1.002 to 1.049, the largest on the
+classifier row. The k-split half of stream-K is recorded as not done, with the
+reason: it buys the tail of a wave and the classifier row has 124 of them.
+Step 5's first half holds and its second does not, because the classifier reads
+0.2753 against the 0.45 it asks for. `backends/cuda/gemm/README.md` sections 14
+and 15 and the `gemm_bf16_phase1_step4` and `gemm_bf16_phase1_step5` rows of
+[baselines.json](baselines.json) are the record.
+
+**The four steps together, and what they say about phase 1.** One session
+measured the tree before step 2 and the tree after step 5, each with
+`--schedule all` and each scored on the best schedule of its own sweep:
+
+| Row | Before | After | Gain | Fraction before | Fraction after |
+|---|---:|---:|---:|---:|---:|
+| Muon `A = XᵀX` | 0.8969 ms | 0.7389 ms | 1.214 | 0.2486 | 0.3042 |
+| Muon `prod` | 1.8114 ms | 1.4748 ms | 1.228 | 0.2882 | 0.3530 |
+| Linear forward `fc` | 1.1211 ms | 0.9481 ms | 1.182 | 0.2318 | 0.2707 |
+| Linear dgrad `cproj` | 1.1582 ms | 0.9730 ms | 1.190 | 0.2256 | 0.2671 |
+| Linear wgrad `fc` | 1.3072 ms | 0.9869 ms | 1.325 | 0.2331 | 0.3079 |
+| Classifier forward | 7.1397 ms | 5.7740 ms | 1.237 | 0.2229 | 0.2714 |
+| Total | 13.4345 ms | 10.8957 ms | 1.233 | | |
+
+The tile's rate rose from 164 to 192 TFLOP/s to 218 to 238, which is 22 to 24
+percent of the card's bf16 peak. The phase 1 gate asks for 0.50 of the cuBLAS
+rate and this works reads 0.27 to 0.35, so the gate is not met and the part takes
+its own stop condition: what closed is the data path, and what remains is the
+instruction. Section 3 sized the warp-level ceiling at half the card, and 0.24 of
+the peak against a ceiling of about 0.5 says the same thing from the other side.
+Phase 2's warpgroup mainloop is the answer, and its gate asks for 1.05 of the
+cuBLAS rate.
 
 **Step 3 is done, and its gate is not met either.** The window is now the
 dynamic one, a schedule states its stage count, and every plan serves the same

@@ -819,6 +819,70 @@
           "hand_mfu": 0.2107
         }
       ]
+    },
+    "gemm_bf16_phase1_step5": {
+      "note": "The hand-written bf16 tensor-core GEMM of docs/kernels.md Part 3 after phase 1 step 5, over the same six rows as gemm_bf16_phase1. One block now owns a run of tiles from a grid sized to the resident blocks of the card, which removes the partial last wave of a row, and the plan's SwizzleM decides the order that run walks so the blocks resident together share eight A panels. Everything else is unchanged from gemm_bf16_phase1_step3: the dynamic staged window, the exchange-tile epilogue, and the shape table, whose every row is still inert. One run of one binary on an H100 80GB HBM3 at bf16, with NANOCHAT_GEMM_LIB at `cublas` and then at `hand`, the latter on the schedule the row owns: 128x128x64x2s8 for the rows that store the compute type, and 128x128x96x2s8 for the fp32 weight gradient, where the deeper slice won. The same run measured the fixed grid and the plain order, so the two halves of the step are separate rows: the persistent grid gained 1.039 to 1.117 and the swizzle gained 1.002 to 1.049, the largest on the classifier. fraction_of_cublas is the cuBLAS time over the hand time and hand_mfu is the tile's rate over the card's declared bf16 peak. The gate of the step asks that no row be slower, which holds, and that the classifier reach 0.45, which does not: it reads 0.2753. backends/cuda/gemm/README.md section 15 records the two tables and states that the k-split half of stream-K is not implemented.",
+      "device": "NVIDIA H100 80GB HBM3 (sm_90)",
+      "validated_on": "NVIDIA H100 80GB HBM3 (sm_90)",
+      "precision": "bf16",
+      "measurement": "modal run tools/modal/app.py::card_job --name gemm_bench --argv '[\"--schedule\",\"all\",\"--json\"]'",
+      "origin": "docs/kernels.md Part 3 phase 1 step 5, backends/cuda/gemm/README.md section 14",
+      "rows": [
+        {
+          "name": "muon:1280x1280:A",
+          "shape": "1280x1280x1280 batch 40",
+          "cublas_ms": 0.223541,
+          "hand_ms": 0.737824,
+          "schedule": "128x128x64x2s8",
+          "fraction_of_cublas": 0.303,
+          "hand_mfu": 0.2302
+        },
+        {
+          "name": "muon:5120x1280:prod",
+          "shape": "5120x1280x1280 batch 20",
+          "cublas_ms": 0.520341,
+          "hand_ms": 1.46318,
+          "schedule": "128x128x64x2s8",
+          "fraction_of_cublas": 0.3556,
+          "hand_mfu": 0.2322
+        },
+        {
+          "name": "linear:fwd:fc",
+          "shape": "16384x5120x1280 batch 1",
+          "cublas_ms": 0.263541,
+          "hand_ms": 0.957824,
+          "schedule": "128x128x64x2s8",
+          "fraction_of_cublas": 0.2751,
+          "hand_mfu": 0.227
+        },
+        {
+          "name": "linear:dgrad:cproj",
+          "shape": "16384x1280x5120 batch 1",
+          "cublas_ms": 0.257739,
+          "hand_ms": 0.961493,
+          "schedule": "128x128x64x2s8",
+          "fraction_of_cublas": 0.2681,
+          "hand_mfu": 0.2261
+        },
+        {
+          "name": "linear:wgrad:fc",
+          "shape": "5120x1280x16384 batch 1 fp32 out",
+          "cublas_ms": 0.304917,
+          "hand_ms": 0.988661,
+          "schedule": "128x128x96x2s8",
+          "fraction_of_cublas": 0.3084,
+          "hand_mfu": 0.2199
+        },
+        {
+          "name": "linear:fwd:cls",
+          "shape": "16384x32768x1280 batch 1",
+          "cublas_ms": 1.59121,
+          "hand_ms": 5.78054,
+          "schedule": "128x128x64x2s8",
+          "fraction_of_cublas": 0.2753,
+          "hand_mfu": 0.2403
+        }
+      ]
     }
   }
 }

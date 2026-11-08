@@ -83,11 +83,13 @@ struct Row {
   bool enabled = false;
 };
 
-// The sweep left two rules. The square tile with a 64-deep slice wins every
-// model shape, whatever it stores, and the 5 by 12 group takes the small tile
-// because its whole call is launch overhead.
-constexpr int kWideShapeSchedule = gemm_tile::kScheduleKDeep;
-constexpr int kWeightGradientSchedule = gemm_tile::kScheduleKDeep;
+// The sweep left three rules. The square tile with a 64-deep slice and the
+// swizzled order wins every model shape that stores the compute type, a
+// 96-deep slice wins the weight gradients, whose fp32 store is twice the bytes,
+// and the 5 by 12 group takes the small tile because its whole call is launch
+// overhead.
+constexpr int kWideShapeSchedule = gemm_tile::kScheduleKDeepSwizzle;
+constexpr int kWeightGradientSchedule = gemm_tile::kScheduleKDeeper;
 constexpr int kTinyShapeSchedule = gemm_tile::kScheduleSmall;
 
 std::vector<Row>& Rows() {

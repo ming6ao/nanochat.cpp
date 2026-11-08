@@ -32,8 +32,14 @@ namespace gemm_tile {
 // `n + Stages - 1` overlaps the arithmetic of slice `n`, so `Stages - 1` copies
 // may be in flight. The window a schedule asks for decides how many blocks a
 // multiprocessor holds, so a deeper pipeline is a trade and not a gain.
+//
+// `SwizzleM` is the order the blocks walk the tile grid in, and it is the one
+// parameter that moves no byte of the tile: `SwizzleM` m-tiles form a group
+// that walks n first, so the blocks resident together share the A panels of the
+// group and a run of B panels that fits the second-level cache. Zero walks the
+// grid in the plain row-major order.
 template <int TileM, int TileN, int TileK, int WarpsM, int WarpsN, int Pad,
-          int Stages>
+          int Stages, int SwizzleM>
 struct Plan {
   static constexpr int kTileM = TileM;
   static constexpr int kTileN = TileN;
@@ -41,6 +47,7 @@ struct Plan {
   static constexpr int kWarpsM = WarpsM;
   static constexpr int kWarpsN = WarpsN;
   static constexpr int kStages = Stages;
+  static constexpr int kSwizzleM = SwizzleM;
   static constexpr int kThreads = WarpsM * WarpsN * 32;
 
   static constexpr int kWarpM = TileM / WarpsM;
@@ -80,51 +87,99 @@ struct Plan {
   static_assert(TileK % 8 == 0, "a staged row must be whole chunks");
   static_assert(Stages >= 2 && Stages <= 8,
                 "a pipeline of two to eight stages");
+  static_assert(SwizzleM >= 0, "a swizzle of zero m-tiles is the plain order");
 };
 
-//: The base schedule: a whole 128 by 64 tile, four warps, a 32-deep slice.
-using PlanBase = Plan<128, 64, 32, 2, 2, 8, 2>;
+//: The base schedule: a whole 128 by 64 tile, four warps, a 32-deep slice. It
+//: is the narrow tile the sweep keeps for a shape no wider schedule serves.
+using PlanBase = Plan<128, 64, 32, 2, 2, 8, 2, 0>;
 //: A quarter of the tile and half the threads, for a small or a ragged shape.
-using PlanSmall = Plan<64, 64, 32, 1, 2, 8, 2>;
-//: A square tile and eight warps, for a card of the Ampere class and above.
-//: Twice the arithmetic of the base schedule for one and a third times its
-//: staged bytes, and sixteen warps per SM instead of eight.
-using PlanWide = Plan<128, 128, 32, 4, 2, 8, 4>;
-//: A tall tile: twice the columns of the wide one, four warps along each axis,
-//: and the same sixty-four accumulator registers a thread. The arithmetic for
-//: each staged byte rises from 64 flops to 87, which is what an operand path of
-//: 2.9 TB/s needs.
-using PlanTall = Plan<128, 256, 32, 4, 4, 8, 2>;
-//: The same tile with a third stage, so the sweep says whether the wider tile
-//: wants the deeper pipeline the narrow one gained from.
-using PlanTallDeep = Plan<128, 256, 32, 4, 4, 8, 3>;
-//: The same area the other way around, because a row's k is the short extent
-//: and the staged bytes of A and B are not symmetric.
-using PlanLong = Plan<256, 128, 32, 4, 4, 8, 2>;
-//: The wide tile with a 64-deep slice: the same 64 flops a byte, half the
-//: barriers over k, and two blocks of 72 KiB still fit.
-using PlanKDeep = Plan<128, 128, 64, 2, 4, 8, 2>;
+//: The five by twelve group of the Muon step is forty calls of a few
+//: microseconds each, and this is the schedule that measured fastest on it.
+using PlanSmall = Plan<64, 64, 32, 1, 2, 8, 2, 0>;
+//: The square tile and eight warps that step 3 shipped, with four stages.
+using PlanWide = Plan<128, 128, 32, 4, 2, 8, 4, 0>;
+//: The square tile with a 64-deep slice: the same 64 flops a byte, half the
+//: barriers over k, and two blocks of 72 KiB still fit a Hopper multiprocessor.
+//: Step 4's winner, kept without the swizzle as the order's control.
+using PlanKDeep = Plan<128, 128, 64, 2, 4, 8, 2, 0>;
+//: The same tile and depth, walked in groups of eight m-tiles.
+using PlanKDeepSwizzle = Plan<128, 128, 64, 2, 4, 8, 2, 8>;
+//: The same tile with a 96-deep slice and the swizzle. Its window holds two
+//: blocks of a Hopper multiprocessor, which is where the deeper slice stops
+//: paying.
+using PlanKDeeper = Plan<128, 128, 96, 2, 4, 8, 2, 8>;
+//: A tall tile: twice the columns of the square one, four warps along each
+//: axis, and the same sixty-four accumulator registers a thread. It raises the
+//: arithmetic for each staged byte from 64 flops to 87, and it lost to the
+//: square tile on every row because a block of 512 threads holds one block per
+//: multiprocessor. The sweep keeps it as the record of that.
+using PlanTall = Plan<128, 256, 32, 4, 4, 8, 2, 8>;
 
 //: The sweep. The launcher and the benchmark index it by position, and the
 //: registry of thunks in gemm_bf16.cu holds the same seven in this order. The
 //: stage count is part of a name, because two of them differ only in it.
 inline constexpr int kScheduleCount = 7;
 inline constexpr const char* kScheduleNames[kScheduleCount] = {
-    "128x64x32x2",  "64x64x32x2",   "128x128x32x4", "128x256x32x2",
-    "128x256x32x3", "256x128x32x2", "128x128x64x2"};
+    "64x64x32x2",     "128x128x32x4", "128x128x64x2",  "128x128x64x2s8",
+    "128x128x96x2s8", "128x64x32x2",  "128x256x32x2s8"};
 //: The position of each schedule in the sweep, so a row names a schedule and
 //: not a number.
-inline constexpr int kScheduleBase = 0;
-inline constexpr int kScheduleSmall = 1;
-inline constexpr int kScheduleWide = 2;
-inline constexpr int kScheduleTall = 3;
-inline constexpr int kScheduleTallDeep = 4;
-inline constexpr int kScheduleLong = 5;
-inline constexpr int kScheduleKDeep = 6;
+inline constexpr int kScheduleSmall = 0;
+inline constexpr int kScheduleWide = 1;
+inline constexpr int kScheduleKDeep = 2;
+inline constexpr int kScheduleKDeepSwizzle = 3;
+inline constexpr int kScheduleKDeeper = 4;
+inline constexpr int kScheduleBase = 5;
+inline constexpr int kScheduleTall = 6;
 //: The schedule a call takes when neither the row nor the environment names
 //: one. It is the widest that keeps two blocks on a multiprocessor of the
 //: card the sweep measured.
-inline constexpr int kDefaultSchedule = kScheduleKDeep;
+inline constexpr int kDefaultSchedule = kScheduleKDeepSwizzle;
+
+// The tile one block owns, from its place in the order the plan names.
+//
+// The plain order walks n within a row of m-tiles. The swizzled one forms a
+// group of `kSwizzleM` m-tiles and walks n inside that group first, so the
+// blocks that are resident together read the A panels of the group and a run of
+// B panels that is `kSwizzleM` panels wide instead of one block-row of them.
+// The second-level cache is what the order is for: on the classifier row the
+// plain order has each block read an A panel that no other resident block
+// shares.
+//
+// A group of the last row of tiles is shorter than `kSwizzleM`, and the mapping
+// stays a bijection because the group then spans that shorter count of m-tiles:
+// the tiles of the grid divide into groups of `m_span * grid_n`.
+//
+// The qualifier is the one function here that a device and a host both call:
+// the kernel calls it, and `dispatch_test` checks it is a bijection without a
+// card. A compiler that describes itself with `__CUDACC__` gets the device
+// qualifier, and every other one gets nothing.
+#if defined(__CUDACC__)
+#define NANOCHAT_GEMM_HOST_DEVICE __host__ __device__
+#else
+#define NANOCHAT_GEMM_HOST_DEVICE
+#endif
+
+template <typename PlanT>
+NANOCHAT_GEMM_HOST_DEVICE inline void TileOf(int index, int grid_m, int grid_n,
+                                             int* m_tile, int* n_tile) {
+  if constexpr (PlanT::kSwizzleM == 0) {
+    *m_tile = index / grid_n;
+    *n_tile = index - *m_tile * grid_n;
+  } else {
+    const int span = PlanT::kSwizzleM * grid_n;
+    const int group = index / span;
+    const int base = group * PlanT::kSwizzleM;
+    const int left = grid_m - base;
+    const int m_span = left < PlanT::kSwizzleM ? left : PlanT::kSwizzleM;
+    const int within = index - group * span;
+    *m_tile = base + within % m_span;
+    *n_tile = within / m_span;
+  }
+}
+
+#undef NANOCHAT_GEMM_HOST_DEVICE
 
 }  // namespace gemm_tile
 }  // namespace kernels
