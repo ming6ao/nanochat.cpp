@@ -497,15 +497,17 @@ The header maps these constructs:
 | `<cuda_pipeline.h>` | `__pipeline_memcpy_async` as a `memcpy` at the call; `__pipeline_commit` and `__pipeline_wait_prior` as no-ops |
 | `<cuda_bf16.h>` | `__nv_bfloat16` as `nanochat::Bf16`, its two-lane pair, and its conversions |
 | `backends/cuda/kernels/mma_ops.cuh` | the fp8 micro-tile of 16 by 8 by 32, decoded through `include/nanochat/fp8.h`. Its `mma.sync` arm is absent until the fp8 campaign has a card for it |
+| `extern __shared__` | a pointer at the block's dynamic buffer, through the executed-source rewrite in `tools/cuda_sim/emu/BUILD.bazel` (Part 7, section 6.2). The attention forward, the ResFormer value gate, and the hand GEMM of `backends/cuda/gemm/` take it |
+| `__syncwarp` and `cudaFuncSetAttribute` | a warp barrier with the arrival count a shuffle already needs, and an accepted call with no effect, because the emulation has no shared-memory budget to raise |
 
-The hand GEMM of `backends/cuda/gemm/` runs under this mapping, which is why it
-declares its staged window as one static array and leaves the 48 KiB limit alone:
-the engine does not rewrite it, and the tile needs no `cudaFuncSetAttribute`.
-See `docs/tensor-core-gemm-plan.md` Part A.
+The hand GEMM of `backends/cuda/gemm/` runs under this mapping with its staged
+window in dynamic shared memory, so the off-device leg covers the same source
+the card runs, four stages of the wide schedule included. See
+`docs/tensor-core-gemm-plan.md` Part A and section 13 of
+`backends/cuda/gemm/README.md`.
 
-Not yet mapped: `extern __shared__` (attention and the ResFormer value gate use
-it), texture and surface objects, and `__constant__` arrays. Those families are
-outside the first cut.
+Not yet mapped: texture and surface objects, and `__constant__` arrays. Those
+families are outside the first cut.
 
 9.3 Acceptance
 

@@ -63,6 +63,30 @@ using TileElement = __nv_bfloat16;
 constexpr int kChunk = 8;
 //: A micro-tile edge, the only shape `wmma` 16 by 16 by 16 covers here.
 constexpr int kMicro = 16;
+//: The boundary the staged window starts on. `ldmatrix` reads a row that is
+//: sixteen bytes long, and every copy the tile makes is sixteen bytes wide, so
+//: both need the base of the window and every staged row on this boundary.
+constexpr int kWindowAlign = 16;
+
+//: The staged window of one schedule, in bytes: the elements of the plan, and
+//: up to `kWindowAlign` bytes of slack that `WindowBase` may spend to round the
+//: base the driver gives it.
+template <typename PlanT>
+constexpr int SmemBytes() {
+  return PlanT::kSmemElements * static_cast<int>(sizeof(TileElement)) +
+         kWindowAlign;
+}
+
+// The staged window of one block, from the base the driver handed the kernel.
+// The base is rounded up, because no driver states where a dynamic window
+// begins and `ldmatrix` needs a sixteen-byte address for every staged row.
+__device__ __forceinline__ TileElement* WindowBase(char* raw) {
+  const std::uintptr_t address = reinterpret_cast<std::uintptr_t>(raw);
+  const std::uintptr_t shift =
+      (static_cast<std::uintptr_t>(kWindowAlign) - (address % kWindowAlign)) %
+      static_cast<std::uintptr_t>(kWindowAlign);
+  return reinterpret_cast<TileElement*>(raw + shift);
+}
 
 // --- The asynchronous copy -------------------------------------------------
 

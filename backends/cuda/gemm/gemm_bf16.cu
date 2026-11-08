@@ -64,9 +64,13 @@ __global__ void GemmTileKernel(const ComputeType* a, const ComputeType* b,
   using Plan = PlanT;
   constexpr int kMicro = gemm_tile::kMicro;
 
-  // `alignas` leads: the emulator maps `__shared__` to `static`, and a standard
-  // attribute may not follow a storage class.
-  alignas(16) __shared__ TileElement smem[Plan::kSmemElements];
+  // The staged window. It is the dynamic one: four stages of a 128 by 128 tile
+  // are past the 48 KiB static window, so the launcher states the size and asks
+  // for the opt-in limit. The emulation engine rewrites this declaration into a
+  // pointer at the block's own dynamic buffer, so the tile keeps its
+  // off-device leg (docs/simulator.md section 9.2).
+  extern __shared__ char staged_window[];
+  TileElement* smem = gemm_tile::WindowBase(staged_window);
   TileElement* stage_a = smem;
   TileElement* stage_b = smem + Plan::kStages * Plan::kStageAElements;
 
@@ -113,19 +117,27 @@ __global__ void GemmTileKernel(const ComputeType* a, const ComputeType* b,
                                 stage_b + buffer * Plan::kStageBElements);
   };
 
-  stage_slice(0, 0);
-  gemm_tile::CommitStage();
-
-  for (int slice = 0, k0 = 0; k0 < args.k; ++slice, k0 += Plan::kTileK) {
-    const int buffer = slice % Plan::kStages;
-    if ((k0 + Plan::kTileK) < args.k) {
-      stage_slice(k0 + Plan::kTileK, (slice + 1) % Plan::kStages);
-    }
+  // The pipeline. `kStages` buffers hold `kStages - 1` copies in flight, and
+  // the copy of slice `n + kStages - 1` is issued while slice `n` is used.
+  // Every iteration commits one group, including an iteration whose slice is
+  // past the end and stages nothing, so the wait at the top of an iteration
+  // always completes the slice that iteration computes.
+  const int slices = (args.k + Plan::kTileK - 1) / Plan::kTileK;
+  for (int head = 0; head < Plan::kStages - 1; ++head) {
+    if (head < slices) stage_slice(head * Plan::kTileK, head % Plan::kStages);
     gemm_tile::CommitStage();
-    // Every iteration commits one group, so waiting for all but the newest
-    // completes this slice's copy. The last iteration commits an empty group.
-    gemm_tile::WaitStage(1);
+  }
+
+  for (int slice = 0; slice < slices; ++slice) {
+    // The buffer this iteration fills held slice `slice - 1`, which the barrier
+    // at the end of the last iteration released.
+    const int next = slice + Plan::kStages - 1;
+    if (next < slices) stage_slice(next * Plan::kTileK, next % Plan::kStages);
+    gemm_tile::CommitStage();
+    gemm_tile::WaitStage(Plan::kStages - 1);
     __syncthreads();
+
+    const int buffer = slice % Plan::kStages;
 
     const TileElement* a_slice = stage_a + buffer * Plan::kStageAElements;
     const TileElement* b_slice = stage_b + buffer * Plan::kStageBElements;
@@ -273,10 +285,35 @@ bool LaunchPlan(const GemmParams& params, const ComputeType* a,
       static_cast<unsigned int>((gemm.n + PlanT::kTileN - 1) / PlanT::kTileN);
   const unsigned int grid_m =
       static_cast<unsigned int>((gemm.m + PlanT::kTileM - 1) / PlanT::kTileM);
+  // The staged window is dynamic, and a schedule of four stages asks for more
+  // than the 48 KiB a launch takes without the opt-in limit. One call per
+  // kernel instantiation, on the first launch of that kernel.
+  //
+  // The carveout is the second half of that: a block that asks for 80 KiB would
+  // otherwise be given the smallest L1/shared split that holds it, which is one
+  // block per multiprocessor and half the residency the tile is built for. The
+  // full split is what keeps two blocks there.
+  static const bool configured = [] {
+    const void* kernel = reinterpret_cast<const void*>(
+        GemmTileKernel<PlanT, COut, TransA, TransB>);
+    cuda_backend::CheckCuda(
+        cudaFuncSetAttribute(kernel,
+                             cudaFuncAttributeMaxDynamicSharedMemorySize,
+                             gemm_tile::SmemBytes<PlanT>()),
+        "cudaFuncSetAttribute");
+    cuda_backend::CheckCuda(
+        cudaFuncSetAttribute(kernel,
+                             cudaFuncAttributePreferredSharedMemoryCarveout,
+                             cudaSharedmemCarveoutMaxShared),
+        "cudaFuncSetAttribute(carveout)");
+    return true;
+  }();
+  (void)configured;
   cuda_backend::Launch(
       GemmTileKernel<PlanT, COut, TransA, TransB>,
       dim3(grid_n, grid_m, static_cast<unsigned int>(gemm.batch_count)),
-      dim3(static_cast<unsigned int>(PlanT::kThreads)), 0, a, b, c, gemm);
+      dim3(static_cast<unsigned int>(PlanT::kThreads)),
+      static_cast<std::size_t>(gemm_tile::SmemBytes<PlanT>()), a, b, c, gemm);
   return true;
 }
 
@@ -308,7 +345,7 @@ bool Thunk(const GemmParams& params, const ComputeType* a, const ComputeType* b,
 const ScheduleThunk kThunks[gemm_tile::kScheduleCount] = {
     &Thunk<gemm_tile::PlanBase>,
     &Thunk<gemm_tile::PlanSmall>,
-    &Thunk<gemm_tile::PlanDeep>,
+    &Thunk<gemm_tile::PlanShallow>,
     &Thunk<gemm_tile::PlanWide>,
 };
 

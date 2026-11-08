@@ -114,14 +114,18 @@ genrule(
 # point and barrier release, the launch counters, and the runtime entry points
 # `backends/cuda/device.h` declares. It has no kernel in it, so a test of the
 # device-language mapping (`mma_emu_test`) links this and not the kernel set.
-# The hand GEMM (docs/tensor-core-gemm-plan.md section A.3). A plain copy: the
-# tile declares its shared window as one static array, so no `extern
-# __shared__` rewrite is needed.
+# The hand GEMM (docs/tensor-core-gemm-plan.md section A.3). The tile declares
+# its staged window as a dynamic `extern __shared__` array, because four stages
+# of a 128 by 128 tile are past the 48 KiB static window, so it takes the same
+# executed-source rewrite the attention and value-gate sources take: the
+# declaration becomes a pointer at the block's dynamic buffer
+# (docs/simulator.md Part 7, section 6.2). The device source itself does not
+# change; only this copy does.
 genrule(
     name = "gemm_bf16_emulated_source",
     srcs = ["//backends/cuda/gemm:gemm_bf16.cu"],
     outs = ["gemm_bf16_emu.cc"],
-    cmd = "cp $< $@",
+    cmd = "sed -E 's/extern __shared__ +([A-Za-z_][A-Za-z0-9_]*) +([A-Za-z_][A-Za-z0-9_]*)\\[\\];/\\1* \\2 = static_cast<\\1*>(::nanochat::emu::DynamicShared());/' $< > $@",
 )
 
 cc_library(

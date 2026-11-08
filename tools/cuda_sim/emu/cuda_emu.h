@@ -97,6 +97,22 @@ enum cudaMemcpyKind {
 constexpr cudaError_t cudaSuccess = 0;
 constexpr cudaError_t cudaErrorInvalidValue = 1;
 
+// The two function attributes a tile asks for: the opt-in limit a launch above
+// 48 KiB needs, and the L1/shared split that keeps two such blocks resident.
+// The emulation has no budget to raise and no split to choose, so both calls
+// are accepted and have no effect, which keeps a device source that sets them
+// compilable here (docs/simulator.md section 9.2). The values are the vendor
+// ABI's.
+enum cudaFuncAttribute {
+  cudaFuncAttributeMaxDynamicSharedMemorySize = 8,
+  cudaFuncAttributePreferredSharedMemoryCarveout = 9,
+};
+constexpr int cudaSharedmemCarveoutMaxShared = 100;
+inline cudaError_t cudaFuncSetAttribute(const void* /*func*/, int /*attribute*/,
+                                        int /*value*/) {
+  return cudaSuccess;
+}
+
 // The attribute codes the fused Muon driver asks about, and the one error a
 // refused cooperative launch reports (docs/kernels.md section 8). The
 // values are the vendor ABI's, so the emulated build asks the same question a

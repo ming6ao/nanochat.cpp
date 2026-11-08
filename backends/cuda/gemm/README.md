@@ -28,8 +28,9 @@ numbers and the decision.
 ## 2. The staged tile
 
 One block owns a `TileM` by `TileN` rectangle of C and walks k in slices of
-`TileK`. A slice is staged into shared memory in the layout the fragments read,
-and the pipeline is double buffered.
+`TileK`. A slice is staged into the dynamic shared window in the layout the
+fragments read, and the pipeline holds `Stages` of them: the copy of slice
+`n + Stages - 1` runs while slice `n` is used.
 
 **A staged row walks the contiguous axis of the operand.** The element the
 fragment reads as its leading dimension is the staged row. A transposed call
@@ -60,24 +61,24 @@ commit that adds the kernel.
 
 ## 3. The schedules
 
-All four fit the 48 KiB static shared window of a Turing card, so none needs
-`cudaFuncSetAttribute` and the emulator needs no dynamic shared memory.
+The staged window is the dynamic one, so a schedule states its stage count and
+the launcher asks for the opt-in limit with `cudaFuncSetAttribute`. A stage
+count is a trade: one more stage hides one more copy, and it also costs a share
+of the multiprocessor. Section 13 measures the trade.
 
-| Schedule | Tile | Warps | k depth | Registers | Shared |
-|---|---|---|---:|---:|---:|
-| `128x64x32` | 128 by 64 | 2 by 2 | 32 | 94 to 96 | 31,744 B |
-| `64x64x32` | 64 by 64 | 1 by 2 | 32 | 93 to 96 | 21,504 B |
-| `64x64x64` | 64 by 64 | 1 by 2 | 64 | 91 to 95 | 37,888 B |
-| `128x128x32` | 128 by 128 | 4 by 2 | 32 | 92 to 96 | 41,984 B |
+| Schedule | Tile | Warps | k depth | Stages | Window | Registers |
+|---|---|---|---:|---:|---:|---:|
+| `128x64x32x2` | 128 by 64 | 2 by 2 | 32 | 2 | 30,736 B | 101 to 109 |
+| `64x64x32x2` | 64 by 64 | 1 by 2 | 32 | 2 | 20,496 B | 101 to 109 |
+| `128x128x32x2` | 128 by 128 | 4 by 2 | 32 | 2 | 40,976 B | 101 to 107 |
+| `128x128x32x4` | 128 by 128 | 4 by 2 | 32 | 4 | 81,936 B | 93 to 96 |
 
-Every schedule is two buffered. A third staged buffer was measured as
-`128x128x16x3`, it won no shape, and it was removed with the general stage count
-it needed. The register and shared figures are `cuobjdump -res-usage` of one
-build at bf16 and `sm_90`, read over the four operand forms and the two stores of
-each schedule. The shared figure is the staged window and nothing else: the four
-bytes of alignment the compiler adds and the epilogue's exchange tiles, which lie
-over that window. Section 12 records the register figure that the register
-epilogue took from 120 to 92.
+`128x128x32x4` is the default, because it won the sweep. The register and window
+figures are `cuobjdump -res-usage` of one build at bf16 and `sm_90`, read over
+the four operand forms and the two stores of each schedule, plus the count the
+plan states. The window is the staged buffers and nothing else: the epilogue's
+exchange tiles lie over it, and the sixteen bytes above the plan's count are the
+slack that rounds the base of the window to a sixteen-byte boundary.
 
 `128x128x32` is the default, because it won the sweep. A row of the shape table
 names its own schedule, so a future promotion does not need a second sweep.
@@ -410,3 +411,50 @@ got.
 This run reads 0.2236 to 0.3071, so one row passes and five do not. The epilogue
 was not the limit: the tile still copies two stages of a 128 by 128 tile, which
 is 64 flops for every byte it reads. Step 3 is the one that changes that.
+
+## 13. The deeper pipeline, phase 1 step 3
+
+Step 3 of `docs/kernels.md` Part 3 section 10 replaces the two staged buffers
+with four to six. Two stages were the most the 48 KiB static window held, so the
+step also moves the window to the dynamic one and asks the driver for the opt-in
+limit. That part works: the emulation engine rewrites the `extern __shared__`
+declaration into a pointer at the block's dynamic buffer, so the off-device gate
+runs the same source, and `cudaFuncSetAttribute` joins its runtime.
+
+**The stage count did not pay the way section 10 expected.** One run of one
+binary on an NVIDIA H100 80GB HBM3 at bf16, `--schedule all`, with two and four
+stages of the same 128 by 128 tile in one sweep:
+
+| Row | cuBLAS | Two stages | Four stages | Gain | Fraction at four |
+|---|---:|---:|---:|---:|---:|
+| Muon `A = XᵀX` | 0.2240 ms | 0.9356 ms | 0.8904 ms | 1.051 | 0.2516 |
+| Muon `prod` | 0.5193 ms | 1.8680 ms | 1.7499 ms | 1.067 | 0.2968 |
+| Linear forward `fc` | 0.2586 ms | 1.1673 ms | 1.1090 ms | 1.053 | 0.2332 |
+| Linear dgrad `cproj` | 0.2599 ms | 1.2053 ms | 1.1283 ms | 1.068 | 0.2304 |
+| Linear wgrad `fc` | 0.3049 ms | 1.2869 ms | 1.2879 ms | 0.999 | 0.2368 |
+| Classifier forward | 1.6093 ms | 7.3750 ms | 6.9889 ms | 1.055 | 0.2303 |
+
+Four stages gain three to seven percent on five rows and nothing on the sixth.
+Six stages of the same tile were measured in the run before at 1.34 to 10.65 ms,
+which is 1.5 times the two-stage time: a window of 120 KiB holds one block per
+multiprocessor and the tile then has half the resident warps.
+
+**Why the returns stop there.** The tile is not waiting on one copy. At two
+stages the 128 by 128 tile already asks for 2.9 TB/s of operand traffic on the
+`muon:1280x1280:A` row, which is 86 percent of the card's HBM bandwidth. A deeper
+pipeline cannot move more bytes than the memory system has. What it can do is
+hide a latency that the arithmetic already covers, and the measurement says the
+arithmetic covers it.
+
+**Two consequences for the plans.** The wide tile keeps four stages, because two
+blocks of 80 KiB still fit a Hopper multiprocessor and the gain is there. The
+small tiles keep two, because a block of 128 threads is limited by how many
+blocks a multiprocessor holds and every extra stage takes one away: the base
+schedule at four stages read 1.18 ms where two stages read 1.02 ms.
+
+**The gate.** Step 3 asks for `fraction_of_cublas` above 0.40 on all six rows.
+The run reads 0.2303 to 0.2968, so the step misses it by a wide margin and by
+its own rule the part takes the stage count of the pipeline as measured and not
+as estimated. The reason is arithmetic intensity: 64 flops for every staged byte
+is 15.5 TB/s of operand traffic at the card's peak, which no memory system here
+can serve. That is what steps 4 and 5 are for.

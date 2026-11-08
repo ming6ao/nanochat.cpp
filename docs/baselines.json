@@ -691,6 +691,70 @@
           "hand_mfu": 0.1957
         }
       ]
+    },
+    "gemm_bf16_phase1_step3": {
+      "note": "The hand-written bf16 tensor-core GEMM of docs/kernels.md Part 3 after phase 1 step 3, over the same six rows as gemm_bf16_phase1. The staged window is now the dynamic one, the pipeline depth is a parameter of a schedule, and the shipped wide schedule holds four stages of the 128 by 128 tile; the small schedules keep two. Everything else is unchanged from gemm_bf16_phase1_step2: the exchange-tile epilogue and the shape table, whose every row is still inert. One run of one binary on an H100 80GB HBM3 at bf16, with NANOCHAT_GEMM_LIB at `cublas` and then at `hand`. The same run also measured the two-stage form of the same tile, and four stages gained 3 to 7 percent on five rows and nothing on the sixth; six stages, measured in the run before, lost 1.5 times against two. fraction_of_cublas is the cuBLAS time over the hand time and hand_mfu is the tile's rate over the card's declared bf16 peak. The gate of the step asks for 0.40 on every row and the rows read 0.2303 to 0.2968, so the step misses it; backends/cuda/gemm/README.md section 13 records the numbers and the reason, which is arithmetic intensity and not the pipeline.",
+      "device": "NVIDIA H100 80GB HBM3 (sm_90)",
+      "validated_on": "NVIDIA H100 80GB HBM3 (sm_90)",
+      "precision": "bf16",
+      "measurement": "modal run tools/modal/app.py::card_job --name gemm_bench --argv '[\"--schedule\",\"all\",\"--json\"]'",
+      "origin": "docs/kernels.md Part 3 phase 1 step 3, backends/cuda/gemm/README.md section 13",
+      "rows": [
+        {
+          "name": "muon:1280x1280:A",
+          "shape": "1280x1280x1280 batch 40",
+          "cublas_ms": 0.223989,
+          "hand_ms": 0.890421,
+          "schedule": "128x128x32x4",
+          "fraction_of_cublas": 0.2516,
+          "hand_mfu": 0.1908
+        },
+        {
+          "name": "muon:5120x1280:prod",
+          "shape": "5120x1280x1280 batch 20",
+          "cublas_ms": 0.519317,
+          "hand_ms": 1.74994,
+          "schedule": "128x128x32x4",
+          "fraction_of_cublas": 0.2968,
+          "hand_mfu": 0.1941
+        },
+        {
+          "name": "linear:fwd:fc",
+          "shape": "16384x5120x1280 batch 1",
+          "cublas_ms": 0.258635,
+          "hand_ms": 1.10903,
+          "schedule": "128x128x32x4",
+          "fraction_of_cublas": 0.2332,
+          "hand_mfu": 0.196
+        },
+        {
+          "name": "linear:dgrad:cproj",
+          "shape": "16384x1280x5120 batch 1",
+          "cublas_ms": 0.259925,
+          "hand_ms": 1.12831,
+          "schedule": "128x128x32x4",
+          "fraction_of_cublas": 0.2304,
+          "hand_mfu": 0.1927
+        },
+        {
+          "name": "linear:wgrad:fc",
+          "shape": "5120x1280x16384 batch 1 fp32 out",
+          "cublas_ms": 0.304928,
+          "hand_ms": 1.28791,
+          "schedule": "128x128x32x4",
+          "fraction_of_cublas": 0.2368,
+          "hand_mfu": 0.1688
+        },
+        {
+          "name": "linear:fwd:cls",
+          "shape": "16384x32768x1280 batch 1",
+          "cublas_ms": 1.60932,
+          "hand_ms": 6.9889,
+          "schedule": "128x128x32x4",
+          "fraction_of_cublas": 0.2303,
+          "hand_mfu": 0.1988
+        }
+      ]
     }
   }
 }

@@ -1055,6 +1055,17 @@ fractions read 0.2236 to 0.3071, so one row of six reaches 0.28.
 `backends/cuda/gemm/README.md` section 12 and the `gemm_bf16_phase1_step2` rows
 of [baselines.json](baselines.json) are the record.
 
+**Step 3 is done, and its gate is not met either.** The window is now the
+dynamic one, a schedule states its stage count, and every plan serves the same
+source on the card and on the emulator. Four stages of the 128 by 128 tile gain
+3 to 7 percent over two on five rows and nothing on the sixth. Six stages lose
+1.5 times, because a 120 KiB window holds one block per multiprocessor. The
+fractions read 0.2303 to 0.2968, so the step misses the 0.40 it asks for, and
+the reason is arithmetic intensity and not the pipeline: 64 flops for every
+staged byte is 15.5 TB/s of operand traffic at the card's peak.
+`backends/cuda/gemm/README.md` section 13 and the `gemm_bf16_phase1_step3` rows
+of [baselines.json](baselines.json) are the record.
+
 **The two constraints of steps 3 to 5.**
 
 1. **Step 3 needs the emulator.** `docs/simulator.md` section 9.2 maps no
