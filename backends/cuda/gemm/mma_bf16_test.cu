@@ -1,17 +1,18 @@
 // The gate of the bf16 micro-tile header (backends/cuda/gemm/mma_bf16.cuh),
 // phase 1 of docs/kernels.md Part 3.
 //
-// Two rows, one reference:
+// Two rows and one map, against one reference:
 //
 //   * `mma_bf16:host` runs the header's host arm, which is the arm the
-//   emulation
-//     engine compiles. It needs no card, so it is the fast gate and it runs on
-//     the smallest machine.
+//     emulation engine compiles. It needs no card, so it is the fast gate and
+//     it runs on the smallest machine.
 //   * `mma_bf16:device` runs the header's device arm, which is `ldmatrix` and
 //     `mma.sync.aligned.m16n8k16`, in one warp on the card.
+//   * `mma_bf16:store` walks the accumulator's lane map over all 32 lanes and
+//     the four registers of each, which is the map the epilogue stores through.
 //
-// Both are compared against the same scalar triple loop over the same input, so
-// the two arms answer to one definition and the lane map is checked and not
+// All three are compared against the same scalar triple loop, so the two arms
+// and the store answer to one definition and the lane map is checked and not
 // assumed. Every one of the four operand orientations is covered, because the
 // orientations are what the staged layouts of `gemm_tile.cuh` produce.
 //
@@ -107,7 +108,10 @@ void StageB(std::vector<Bf16>* storage, bool transpose_b) {
 
 // --- The host arm -----------------------------------------------------------
 
-float CheckHost(bool transpose_a, bool transpose_b) {
+// The one sequence every row takes: stage both operands in the orientation the
+// flags name, load them, and multiply. Both arms copy the staged elements into
+// their fragments, so the storage here may die with the call.
+void ComputeMicroTile(bool transpose_a, bool transpose_b, FragmentC* fc) {
   std::vector<Bf16> a;
   std::vector<Bf16> b;
   StageA(&a, transpose_a);
@@ -120,8 +124,7 @@ float CheckHost(bool transpose_a, bool transpose_b) {
       reinterpret_cast<const __nv_bfloat16*>(b.data());
   FragmentA fa;
   FragmentB fb;
-  FragmentC fc;
-  nanochat::kernels::gemm_bf16::Fill(fc, 0.0f);
+  nanochat::kernels::gemm_bf16::Fill(*fc, 0.0f);
   if (transpose_a) {
     nanochat::kernels::gemm_bf16::LoadA<true>(fa, staged_a, kLead);
   } else {
@@ -132,7 +135,12 @@ float CheckHost(bool transpose_a, bool transpose_b) {
   } else {
     nanochat::kernels::gemm_bf16::LoadB<false>(fb, staged_b, kLead);
   }
-  nanochat::kernels::gemm_bf16::Mma(fc, fa, fb);
+  nanochat::kernels::gemm_bf16::Mma(*fc, fa, fb);
+}
+
+float CheckHost(bool transpose_a, bool transpose_b) {
+  FragmentC fc;
+  ComputeMicroTile(transpose_a, transpose_b, &fc);
   std::vector<float> got(static_cast<std::size_t>(kMmaM) * kMmaN, 0.0f);
   nanochat::kernels::gemm_bf16::StoreFp32(got.data(), kMmaN, fc);
 
@@ -224,6 +232,44 @@ float CheckDevice(bool transpose_a, bool transpose_b) {
   return worst;
 }
 
+// --- The store's lane map ---------------------------------------------------
+
+// The epilogue of `gemm_bf16.cu` writes C through this map: each lane stores
+// the four elements its registers hold, so the map must name every element of
+// the micro-tile exactly once and read the value that element holds. A
+// duplicated element loses an output, and a missing one leaves it at the value
+// C had.
+float CheckStore() {
+  FragmentC fc;
+  ComputeMicroTile(/*transpose_a=*/false, /*transpose_b=*/false, &fc);
+  std::vector<float> want(static_cast<std::size_t>(kMmaM) * kMmaN, 0.0f);
+  Reference(want.data());
+  int written[kMmaM][kMmaN] = {};
+  float worst = 0.0f;
+  for (int lane = 0; lane < 32; ++lane) {
+    for (int reg = 0; reg < nanochat::kernels::gemm_bf16::kLaneRegisters;
+         ++reg) {
+      int row = 0;
+      int column = 0;
+      nanochat::kernels::gemm_bf16::ElementOf(lane, reg, &row, &column);
+      if (row < 0 || row >= kMmaM || column < 0 || column >= kMmaN) {
+        // An element outside the tile is the worst answer the map can give.
+        return 1.0e9f;
+      }
+      ++written[row][column];
+      const float got =
+          nanochat::kernels::gemm_bf16::ElementValue(fc, lane, reg);
+      worst = std::fmax(worst, std::fabs(got - want[row * kMmaN + column]));
+    }
+  }
+  for (int row = 0; row < kMmaM; ++row) {
+    for (int column = 0; column < kMmaN; ++column) {
+      if (written[row][column] != 1) return 1.0e9f;
+    }
+  }
+  return worst;
+}
+
 }  // namespace
 
 int main() {
@@ -250,6 +296,12 @@ int main() {
         static_cast<double>(worst), pass ? "PASS" : "FAIL");
     if (!pass) ++failures;
   }
+
+  const float store_worst = CheckStore();
+  const bool store_pass = store_worst <= kTolerance;
+  std::printf("mma_bf16:store max_abs_error=%.3e %s\n",
+              static_cast<double>(store_worst), store_pass ? "PASS" : "FAIL");
+  if (!store_pass) ++failures;
 
   // The device row needs a card at `sm_80` or newer. This host has neither, so
   // a failure to reach a device is reported and not counted as a kernel defect.

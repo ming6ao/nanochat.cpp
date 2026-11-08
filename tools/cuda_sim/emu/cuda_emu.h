@@ -263,6 +263,21 @@ inline void Syncthreads() {
   fiber->waiting = WaitKind::kNone;
 }
 
+// `__syncwarp()`: blocks the calling fiber until every live fiber of its warp
+// has arrived at a warp barrier. The release loop of `ReleaseBarriers` already
+// counts arrivals per warp, because a shuffle needs the same count, so a warp
+// barrier is one arrival and one yield and no new state.
+inline void Syncwarp() {
+  if (g_block == nullptr) return;
+  Fiber* fiber =
+      g_block->fibers[static_cast<std::size_t>(g_block->current)].get();
+  fiber->waiting = WaitKind::kWarp;
+  fiber->warp = static_cast<int>(t_thread_idx.x / kWarpSize);
+  ++g_block->warp_waiting[fiber->warp];
+  YieldToScheduler();
+  fiber->waiting = WaitKind::kNone;
+}
+
 // The lane's slot base in the running block's shuffle window.
 template <typename T>
 inline T* WarpSlots() {
@@ -276,6 +291,7 @@ inline T* WarpSlots() {
 }  // namespace nanochat
 
 #define __syncthreads() (::nanochat::emu::Syncthreads())
+#define __syncwarp() (::nanochat::emu::Syncwarp())
 
 // ---------------------------------------------------------------------------
 // Atomics

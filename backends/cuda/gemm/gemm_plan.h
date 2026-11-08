@@ -10,8 +10,8 @@
 //
 // Every schedule here fits the 48 KiB recurring limit of the shared window, so
 // none of them needs `cudaFuncSetAttribute` and the emulator needs no dynamic
-// shared memory. The window is the larger of the staged operands and the fp32
-// epilogue scratch.
+// shared memory. The window holds the staged operands and no epilogue scratch:
+// the accumulator goes to C from its own registers.
 //
 // Precision free: ints and names only, so the shape table and a host test can
 // name a schedule without a device.
@@ -58,12 +58,9 @@ struct Plan {
                                                 : (TileN * kLeadBCol);
   static constexpr int kStageElements =
       kStages * (kStageAElements + kStageBElements);
-  //: Floats of the epilogue scratch: one warp tile, held as two halves, which
-  //: every warp writes in turn. The whole tile would cost a fifth plan of
-  //: shared memory, and the tile store is once per block.
-  static constexpr int kScratchElements = kWarpM * kWarpN * 2;
-  static constexpr int kSmemElements =
-      kStageElements > kScratchElements ? kStageElements : kScratchElements;
+  //: The shared window: the staged buffers and nothing else. The epilogue
+  //: writes C from the accumulator registers, so no scratch tile shares it.
+  static constexpr int kSmemElements = kStageElements;
 
   static_assert(TileM % (WarpsM * 16) == 0 && TileN % (WarpsN * 16) == 0,
                 "the warp grid must cover the tile in whole fragments");

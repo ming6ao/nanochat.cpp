@@ -275,13 +275,43 @@ __host__ __device__ inline void Mma(FragmentC& d, const FragmentA& a,
 
 // --- The store, on both arms ------------------------------------------------
 
+//: The accumulator registers one lane owns: the four of the instruction.
+constexpr int kLaneRegisters = 4;
+
+// The row and the column, inside the micro-tile, of accumulator register `reg`
+// of `lane`. The epilogue of the kernel reads it, so the element a lane stores
+// is the element the instruction gave that lane, and it is not assumed.
+__host__ __device__ __forceinline__ void ElementOf(int lane, int reg, int* row,
+                                                   int* column) {
+  detail::CElement(lane, reg, row, column);
+}
+
+// The value of that element. The device arm reads the register the lane owns.
+// The host arm holds the whole tile in every thread, so it reads the element
+// the lane map names: the same element for the same (lane, reg), and every lane
+// still writes four elements of its own. A store that wrote the whole tile from
+// every lane would read a value a neighbour had already replaced whenever
+// `beta` is not zero.
+__host__ __device__ __forceinline__ float ElementValue(const FragmentC& c,
+                                                       int lane, int reg) {
+  (void)lane;
+#if NANOCHAT_MMA_BF16_DEVICE_ARM
+  return c.reg[reg];
+#else
+  int row = 0;
+  int column = 0;
+  detail::CElement(lane, reg, &row, &column);
+  return c.x[row * kMmaN + column];
+#endif
+}
+
 // Writes one micro-tile of the accumulator to an fp32 destination, row major
 // with `lead` floats between two rows.
 __host__ __device__ __forceinline__ void StoreFp32(float* dst, int lead,
                                                    const FragmentC& c) {
 #if NANOCHAT_MMA_BF16_DEVICE_ARM
   const int lane = static_cast<int>(threadIdx.x) % 32;
-  for (int reg = 0; reg < 4; ++reg) {
+  for (int reg = 0; reg < kLaneRegisters; ++reg) {
     int row = 0;
     int column = 0;
     detail::CElement(lane, reg, &row, &column);
@@ -303,7 +333,7 @@ __host__ __device__ __forceinline__ void StoreBf16(__nv_bfloat16* dst, int lead,
                                                    const FragmentC& c) {
 #if NANOCHAT_MMA_BF16_DEVICE_ARM
   const int lane = static_cast<int>(threadIdx.x) % 32;
-  for (int reg = 0; reg < 4; ++reg) {
+  for (int reg = 0; reg < kLaneRegisters; ++reg) {
     int row = 0;
     int column = 0;
     detail::CElement(lane, reg, &row, &column);

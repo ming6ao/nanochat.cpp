@@ -1044,6 +1044,17 @@ rest.
 | 4 | A wider tile and fewer registers per thread, so a block holds more arithmetic for each staged byte | `gemm_plan.h` | Occupancy is what section 9 names fourth; the sweep that chose `128x128x32` predates the new operand path, so it is a second sweep and not a guess | The best schedule per row changes, and the sweep says which |
 | 5 | An L2 swizzle of the block order, and stream-K for the ragged rows | `gemm_bf16.cu` | Unmeasured. The classifier is the largest shape and it is the row where the tail matters least | No row slower, and the classifier row above 0.45 |
 
+**Step 2 is done, and its gate is not met.** The straight-to-global store that
+the row above proposes lost 1.6 to 11.5 percent, because a lane holds eight
+columns of two rows and one warp store therefore lands in eight rows of sixteen
+bytes. The shipped form keeps the lane map for the arithmetic and passes the
+accumulator through a per-warp exchange tile, so C is written in sixteen-byte
+chunks. That form gains 4.6 to 6.9 percent on the five rows that store the
+compute type, and it is within the run-to-run spread on the other two. The
+fractions read 0.2236 to 0.3071, so one row of six reaches 0.28.
+`backends/cuda/gemm/README.md` section 12 and the `gemm_bf16_phase1_step2` rows
+of [baselines.json](baselines.json) are the record.
+
 **The two constraints of steps 3 to 5.**
 
 1. **Step 3 needs the emulator.** `docs/simulator.md` section 9.2 maps no

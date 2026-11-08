@@ -65,28 +65,42 @@ All four fit the 48 KiB static shared window of a Turing card, so none needs
 
 | Schedule | Tile | Warps | k depth | Registers | Shared |
 |---|---|---|---:|---:|---:|
-| `128x64x32` | 128 by 64 | 2 by 2 | 32 | 126 to 128 | 31,744 B |
-| `64x64x32` | 64 by 64 | 1 by 2 | 32 | 126 to 128 | 21,504 B |
-| `64x64x64` | 64 by 64 | 1 by 2 | 64 | 128 to 136 | 37,888 B |
-| `128x128x32` | 128 by 128 | 4 by 2 | 32 | 122 to 128 | 41,984 B |
+| `128x64x32` | 128 by 64 | 2 by 2 | 32 | 94 to 96 | 31,744 B |
+| `64x64x32` | 64 by 64 | 1 by 2 | 32 | 93 to 96 | 21,504 B |
+| `64x64x64` | 64 by 64 | 1 by 2 | 64 | 91 to 95 | 37,888 B |
+| `128x128x32` | 128 by 128 | 4 by 2 | 32 | 92 to 96 | 41,984 B |
 
 Every schedule is two buffered. A third staged buffer was measured as
 `128x128x16x3`, it won no shape, and it was removed with the general stage count
 it needed. The register and shared figures are `cuobjdump -res-usage` of one
 build at bf16 and `sm_90`, read over the four operand forms and the two stores of
-each schedule. The shared figure includes the four bytes of alignment the
-compiler adds to the staged window.
+each schedule. The shared figure is the staged window and nothing else: the four
+bytes of alignment the compiler adds and the epilogue's exchange tiles, which lie
+over that window. Section 12 records the register figure that the register
+epilogue took from 120 to 92.
 
 `128x128x32` is the default, because it won the sweep. A row of the shape table
 names its own schedule, so a future promotion does not need a second sweep.
 
 ## 4. The epilogue
 
-The accumulator is fp32 in every case. One warp at a time stores its accumulator
-tile into one shared warp tile, and the block then applies alpha, beta, the
-bounds, and the store type to that sub-tile. One warp tile of scratch instead of
-the whole tile is what keeps a 128 by 128 schedule inside the static shared
-budget. `beta` reads C only when it is not zero.
+The accumulator is fp32 in every case, and it leaves the registers through one
+exchange tile per warp. A lane holds eight columns of two rows, so a store taken
+straight from the lane map would put one warp instruction on eight rows of
+sixteen bytes. The exchange tile puts the run of columns back together first: a
+lane lays its two fragments down in shared memory, a warp barrier orders the
+tile, and then one lane writes one sixteen-byte chunk of C. Section 12 measures
+what each of those three choices costs.
+
+Two properties are worth stating, because a later edit is likely to break them.
+The tile is per warp, so no warp waits for another warp to finish its store. And
+it lies over the staged window, which the last k slice releases, so the epilogue
+spends no shared memory of its own.
+
+`alpha` and `beta` are applied in the exchange write, which keeps one rounding
+for a bf16 store whatever `beta` asks for. `beta` reads C only when it is not
+zero. The bounds are per element, and a chunk the operand edge cuts takes its
+elements one at a time.
 
 ## 5. The gates
 
@@ -343,3 +357,56 @@ that section 9 named as the first cause of the gap.
 all of it. Three causes of section 9 remain: the two stages of `gemm_plan.h`,
 the shared epilogue scratch with its eight serialized rounds, and the occupancy.
 The first of the four is now closed.
+
+## 12. The epilogue in registers, phase 1 step 2
+
+Step 2 of `docs/kernels.md` Part 3 section 10 takes the accumulator out of the
+shared scratch. The table below is the first attempt, which wrote C straight
+from the lane map, against section 11. It is a loss on every row, so the record
+keeps it.
+
+One run of one binary, `--schedule all`, on an NVIDIA H100 80GB HBM3 at bf16,
+`128x128x32` on every row:
+
+| Row | cuBLAS | scratch (section 11) | straight to global | Ratio |
+|---|---:|---:|---:|---:|
+| Muon `A = XᵀX` | 0.2226 ms | 0.8974 ms | 0.9463 ms | 0.948 |
+| Muon `prod` | 0.5209 ms | 1.7693 ms | 1.8133 ms | 0.976 |
+| Linear forward `fc` | 0.2563 ms | 1.1184 ms | 1.1990 ms | 0.933 |
+| Linear dgrad `cproj` | 0.2560 ms | 1.1627 ms | 1.2172 ms | 0.955 |
+| Linear wgrad `fc` | 0.2996 ms | 1.3039 ms | 1.3255 ms | 0.984 |
+| Classifier forward | 1.5589 ms | 7.0285 ms | 7.8413 ms | 0.896 |
+
+**Why the direct store loses.** A lane's four accumulator registers hold two
+adjacent columns of two rows, eight rows apart. One warp store instruction
+therefore lands in eight rows of sixteen bytes, which is eight sectors of a
+cache line for each thirty-two-byte transaction, and C is written at the end of
+a block where nothing hides it. The bf16 store is four bytes a lane and the
+loss is the larger; the fp32 store of a weight gradient is eight bytes a lane
+and the loss is the smaller. That ordering is what named the cause.
+
+**The exchange tile.** The fix keeps the lane map for the arithmetic and adds a
+per-warp shared tile of two neighbouring fragments, so the warp writes sixteen
+columns and sixteen rows as sixteen-byte chunks. One run of the same binary:
+
+| Row | cuBLAS | Section 11 | Step 2 | Gain |
+|---|---:|---:|---:|---:|
+| Muon `A = XᵀX` | 0.2231 ms | 0.8974 ms | 0.8417 ms | 1.066 |
+| Muon `prod` | 0.5193 ms | 1.7693 ms | 1.6912 ms | 1.046 |
+| Linear forward `fc` | 0.2579 ms | 1.1184 ms | 1.0527 ms | 1.062 |
+| Linear dgrad `cproj` | 0.2597 ms | 1.1627 ms | 1.0881 ms | 1.069 |
+| Linear wgrad `fc` | 0.3039 ms | 1.3039 ms | 1.3427 ms | 0.971 |
+| Classifier forward | 1.5874 ms | 7.0285 ms | 7.0999 ms | 0.990 |
+
+The five rows that store the compute type gain 4.6 to 6.9 percent, and the
+`128x128x32` schedule keeps every row it won. The two rows whose store is fp32
+or whose shape is the largest are within the three percent spread that section 6
+records between two runs of one binary, so this run does not separate them from
+the scratch tile. The register count falls from 120 to 92 to 96 over the four
+operand forms, which is the one effect the epilogue was expected to have and
+got.
+
+**The gate.** Step 2 asks for `fraction_of_cublas` above 0.28 on all six rows.
+This run reads 0.2236 to 0.3071, so one row passes and five do not. The epilogue
+was not the limit: the tile still copies two stages of a 128 by 128 tile, which
+is 64 flops for every byte it reads. Step 3 is the one that changes that.
