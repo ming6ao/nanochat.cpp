@@ -6,6 +6,11 @@
 // layouts, a ragged shape with a k tail, a batch above one, the alpha and beta
 // terms, the fp32 store of the weight-gradient form, and every schedule.
 //
+// Two candidates run the same comparison. The hand tile takes the tiny shapes
+// and the whole sweep, and the Hopper mainloop of `cutlass_bf16.cu` takes its
+// own table, at shapes its alignment rule accepts. The runner is a template
+// parameter, so the two cannot drift apart in how they are measured.
+//
 // cuBLAS is the reference and not a host loop, because both sides accumulate
 // bf16 products in fp32. The only difference is the accumulation order, so the
 // tolerance is the tightest that order allows.
@@ -22,8 +27,10 @@
 #include <type_traits>
 #include <vector>
 
+#include "backends/cuda/gemm/cutlass_launch.h"
 #include "backends/cuda/gemm/gemm_launch.h"
 #include "backends/cuda/gemm/gemm_plan.h"
+#include "backends/cuda/gemm/gemm_shape.h"
 #include "nanochat/kernels.h"
 #include "nanochat/sandbox.h"
 #include "nanochat/tensor.h"
@@ -39,7 +46,12 @@ using nanochat::kernels::Alloc;
 using nanochat::kernels::Free;
 using nanochat::kernels::Gemm;
 using nanochat::kernels::GemmWgrad;
+using nanochat::kernels::IsCutlassCallable;
+using nanochat::kernels::LaunchGemmCutlass;
+using nanochat::kernels::LaunchGemmCutlassToFp32;
 using nanochat::kernels::Memcpy;
+using nanochat::kernels::ResolvedGemm;
+using nanochat::kernels::ResolveGemm;
 using nanochat::kernels::Synchronize;
 
 int g_failures = 0;
@@ -77,9 +89,48 @@ struct Case {
   int schedule;
 };
 
-// Runs one case: cuBLAS into one buffer, the tile into another, and every
+// How one candidate runs. `Count` says how many runs make, and `Run` makes one.
+// A runner that refuses a case returns false, which fails the test: a case in
+// these tables is a case the runner claims to serve.
+struct TileRunner {
+  static int Count() { return nanochat::kernels::gemm_tile::kScheduleCount; }
+  static const char* Name() { return "tile"; }
+  template <typename COut>
+  static bool Run(const GemmParams& params, const ComputeType* a,
+                  const ComputeType* b, COut* c, int index) {
+    if constexpr (std::is_same_v<COut, float>) {
+      return nanochat::kernels::LaunchGemmTileToFp32(
+          params, a, b, static_cast<GradientType*>(c), index);
+    } else {
+      return nanochat::kernels::LaunchGemmTile(params, a, b, c, index);
+    }
+  }
+};
+
+// The Hopper mainloop. It has no schedule to sweep, because its tile and its
+// stage count are compile-time facts of `cutlass_bf16.cu`, so one run covers
+// it. The case field `schedule` is ignored here and the run follows the sweep
+// above.
+struct HopperRunner {
+  static int Count() { return 1; }
+  static const char* Name() { return "cutlass"; }
+  template <typename COut>
+  static bool Run(const GemmParams& params, const ComputeType* a,
+                  const ComputeType* b, COut* c, int index) {
+    (void)index;
+    const ResolvedGemm gemm = ResolveGemm(params, std::is_same_v<COut, float>);
+    if (!IsCutlassCallable(gemm, a, b, c)) return false;
+    if constexpr (std::is_same_v<COut, float>) {
+      return LaunchGemmCutlassToFp32(gemm, a, b, static_cast<GradientType*>(c));
+    } else {
+      return LaunchGemmCutlass(gemm, a, b, c);
+    }
+  }
+};
+
+// Runs one case: cuBLAS into one buffer, the candidate into another, and every
 // element of the two compared.
-template <typename COut>
+template <typename COut, class Runner>
 void RunCase(const Case& c) {
   const int rows_a = c.transpose_a ? c.k : c.m;
   const int rows_b = c.transpose_b ? c.n : c.k;
@@ -136,23 +187,22 @@ void RunCase(const Case& c) {
   }
   Synchronize();
 
-  const int first = c.schedule < 0 ? 0 : c.schedule;
-  const int last = c.schedule < 0 ? nanochat::kernels::gemm_tile::kScheduleCount
-                                  : c.schedule + 1;
+  // `schedule` names one run of the sweep, or -1 for all of them. A runner with
+  // no sweep answers to one run, so the field selects the whole of it.
+  const int first = c.schedule < 0 || Runner::Count() == 1 ? 0 : c.schedule;
+  const int last =
+      c.schedule < 0 || Runner::Count() == 1 ? Runner::Count() : c.schedule + 1;
   std::vector<COut> got(host_init.size());
   for (int schedule = first; schedule < last; ++schedule) {
     Memcpy(dev_got, host_init.data(), host_init.size() * sizeof(COut),
            CopyDir::kHostToDevice);
-    bool took = false;
-    if constexpr (std::is_same_v<COut, float>) {
-      took = nanochat::kernels::LaunchGemmTileToFp32(
-          params, a, b, static_cast<GradientType*>(dev_got), schedule);
-    } else {
-      took = nanochat::kernels::LaunchGemmTile(
-          params, a, b, static_cast<ComputeType*>(dev_got), schedule);
-    }
+    const bool took =
+        Runner::Run(params, a, b, static_cast<COut*>(dev_got), schedule);
     if (!took) {
-      Fail("the tile refused a shape it claims to serve");
+      std::fprintf(stderr,
+                   "FAIL: %s: the %s refused a shape it claims to serve\n",
+                   c.name, Runner::Name());
+      ++g_failures;
       break;
     }
     Synchronize();
@@ -178,9 +228,9 @@ void RunCase(const Case& c) {
     }
     if (worst > 1.0) {
       std::fprintf(stderr,
-                   "FAIL: %s (schedule %d) at element %zu: tile %f, cuBLAS %f, "
+                   "FAIL: %s (%s %d) at element %zu: candidate %f, cuBLAS %f, "
                    "%.2f times the bound\n",
-                   c.name, schedule, worst_index,
+                   c.name, Runner::Name(), schedule, worst_index,
                    static_cast<double>(got[worst_index]),
                    static_cast<double>(want[worst_index]), worst);
       ++g_failures;
@@ -193,9 +243,9 @@ void RunCase(const Case& c) {
   Free(dev_got);
 }
 
-template <typename COut>
+template <typename COut, class Runner>
 void RunCases(const Case* cases, int count) {
-  for (int i = 0; i < count; ++i) RunCase<COut>(cases[i]);
+  for (int i = 0; i < count; ++i) RunCase<COut, Runner>(cases[i]);
 }
 
 }  // namespace
@@ -234,14 +284,15 @@ int main() {
       // Past one tile on both extents and past one k slice.
       {"multi 200x130x96", 200, 130, 96, 1, false, true, 1.0f, 0.0f, false, -1},
   };
-  RunCases<ComputeType>(kContract, sizeof(kContract) / sizeof(kContract[0]));
+  RunCases<ComputeType, TileRunner>(kContract,
+                                    sizeof(kContract) / sizeof(kContract[0]));
 
   // The weight-gradient form at a shape that covers more than one tile.
   const Case kWgrad[] = {
       {"wgrad multi 96x64x40", 96, 64, 40, 2, false, true, 1.0f, 0.0f, true,
        -1},
   };
-  RunCases<float>(kWgrad, sizeof(kWgrad) / sizeof(kWgrad[0]));
+  RunCases<float, TileRunner>(kWgrad, sizeof(kWgrad) / sizeof(kWgrad[0]));
 
   // One real shape on each schedule, so the sweep is checked on a card and not
   // only off it. The loop follows the sweep, so a schedule added to
@@ -259,8 +310,39 @@ int main() {
                    0.0f,
                    false,
                    schedule};
-    RunCase<ComputeType>(one);
+    RunCase<ComputeType, TileRunner>(one);
   }
+
+  // The Hopper mainloop over the same contract, at shapes its own rule accepts:
+  // every operand axis a multiple of eight, so every stride shares the
+  // sixteen-byte boundary the instruction reads through, and an output large
+  // enough to clear the crossover.
+  const Case kHopper[] = {
+      {"hopper plain 256x256x64", 256, 256, 64, 1, false, false, 1.0f, 0.0f,
+       false, -1},
+      {"hopper transpose B 256x192x64", 256, 192, 64, 1, false, true, 0.5f,
+       0.25f, false, -1},
+      {"hopper transpose A 192x256x64", 192, 256, 64, 1, true, false, 1.0f,
+       0.0f, false, -1},
+      {"hopper both 128x256x64", 128, 256, 64, 1, true, true, 1.0f, 0.5f, false,
+       -1},
+      {"hopper batch 256x128x64 of 3", 256, 128, 64, 3, false, false, 1.0f,
+       0.0f, false, -1},
+      // Past one tile on both extents and past one k slice, with a k tail.
+      {"hopper multi 300x400x200", 300, 400, 200, 1, false, true, 1.0f, 0.25f,
+       false, -1},
+  };
+  RunCases<ComputeType, HopperRunner>(kHopper,
+                                      sizeof(kHopper) / sizeof(kHopper[0]));
+
+  const Case kHopperWgrad[] = {
+      {"hopper wgrad 256x256x64", 256, 256, 64, 1, false, true, 1.0f, 0.0f,
+       true, -1},
+      {"hopper wgrad batch 192x256x64 of 2", 192, 256, 64, 2, true, false, 1.0f,
+       0.5f, true, -1},
+  };
+  RunCases<float, HopperRunner>(kHopperWgrad,
+                                sizeof(kHopperWgrad) / sizeof(kHopperWgrad[0]));
 
   if (g_failures != 0) {
     std::fprintf(stderr, "gemm gpu test: %d check(s) failed\n", g_failures);

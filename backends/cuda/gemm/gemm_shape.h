@@ -76,6 +76,116 @@ inline bool IsTileCallable(const ResolvedGemm& gemm) {
   return gemm.m > 0 && gemm.n > 0 && gemm.k > 0 && gemm.batch_count > 0;
 }
 
+// --- The Hopper mainloop's own rule (docs/kernels.md Part 3 section 5)
+// --------
+//
+// The CUTLASS mainloop of `cutlass_bf16.cu` stages both operands with the
+// Tensor Memory Accelerator and stores C with it, so every address it takes
+// must sit on a sixteen-byte boundary. A call that breaks one of those
+// boundaries is not an error: it takes the next path, which is the hand tile
+// and then cuBLAS.
+//
+// This rule is precision free and device free, so `dispatch_test` checks it on
+// the host. The device and architecture test lives in the launcher, because it
+// needs the driver.
+
+// The smallest output the Hopper mainloop serves, in elements of C. Below it
+// the launch and the tensor-map build cost more than the product, so the hand
+// tile keeps those shapes: the 5 by 12 Muon group is 60 outputs and 0.005 ms.
+// The benchmark sweeps this crossover (`gemm_benchmark --crossover`).
+inline constexpr int kCutlassMinOutputElements = 64 * 64;
+
+// The sixteen-byte boundary, in bytes, that every address shares.
+inline constexpr std::uintptr_t kCutlassAlignmentBytes = 16;
+
+// One requirement the Hopper mainloop states, in the order the rule tests them.
+// `kNone` means it takes the call.
+enum class CutlassRefusal {
+  kNone = 0,
+  // A zero extent: there is no product.
+  kExtent,
+  // Fewer output elements than `kCutlassMinOutputElements`.
+  kSize,
+  // A leading dimension or a batch stride that leaves the boundary.
+  kStride,
+  // A pointer that does not share the boundary.
+  kPointer,
+};
+
+// `refusal` as a report, a log line, or a benchmark column spells it.
+inline const char* CutlassRefusalName(CutlassRefusal refusal) {
+  switch (refusal) {
+    case CutlassRefusal::kNone:
+      return "none";
+    case CutlassRefusal::kExtent:
+      return "extent";
+    case CutlassRefusal::kSize:
+      return "size";
+    case CutlassRefusal::kStride:
+      return "stride";
+    case CutlassRefusal::kPointer:
+      return "pointer";
+  }
+  return "none";
+}
+
+// True when a count of bf16 elements shares the boundary. The operands are bf16
+// in both store forms, because the compute type is.
+inline bool CutlassAlignedBf16(int elements) {
+  return (static_cast<std::int64_t>(elements) * 2) %
+             static_cast<std::int64_t>(kCutlassAlignmentBytes) ==
+         0;
+}
+
+// True when a count of C elements shares the boundary. A weight gradient stores
+// fp32, which needs four elements, and an activation stores bf16, which needs
+// eight.
+inline bool CutlassAlignedC(int elements, bool fp32_c) {
+  const std::int64_t bytes = fp32_c ? 4 : 2;
+  return (static_cast<std::int64_t>(elements) * bytes) %
+             static_cast<std::int64_t>(kCutlassAlignmentBytes) ==
+         0;
+}
+
+// True when a host or device address shares the boundary.
+inline bool CutlassAlignedPointer(const void* pointer) {
+  if (pointer == nullptr) return false;
+  return reinterpret_cast<std::uintptr_t>(pointer) % kCutlassAlignmentBytes ==
+         0;
+}
+
+// The refusal that governs this call. `a`, `b`, and `c` are the operand and
+// result pointers of the call, so the rule can state the pointer requirement
+// without the caller testing it twice.
+inline CutlassRefusal JudgeCutlass(const ResolvedGemm& gemm, const void* a,
+                                   const void* b, const void* c) {
+  if (!IsTileCallable(gemm)) return CutlassRefusal::kExtent;
+  if (static_cast<std::int64_t>(gemm.m) * gemm.n < kCutlassMinOutputElements) {
+    return CutlassRefusal::kSize;
+  }
+  // The batch strides only matter past one batch, and `ResolveGemm` has already
+  // given every one of them a value.
+  if (!CutlassAlignedBf16(gemm.lda) || !CutlassAlignedBf16(gemm.ldb) ||
+      !CutlassAlignedC(gemm.ldc, gemm.fp32_c) ||
+      (gemm.batch_count > 1 &&
+       (!CutlassAlignedBf16(gemm.stride_a) ||
+        !CutlassAlignedBf16(gemm.stride_b) ||
+        !CutlassAlignedC(gemm.stride_c, gemm.fp32_c)))) {
+    return CutlassRefusal::kStride;
+  }
+  if (!CutlassAlignedPointer(a) || !CutlassAlignedPointer(b) ||
+      !CutlassAlignedPointer(c)) {
+    return CutlassRefusal::kPointer;
+  }
+  return CutlassRefusal::kNone;
+}
+
+// True when the Hopper mainloop takes this call.
+inline bool IsCutlassCallable(const ResolvedGemm& gemm, const void* a,
+                              const void* b, const void* c) {
+  return JudgeCutlass(gemm, a, b, c) == CutlassRefusal::kNone;
+}
+
 // True when two calls need the same tile schedule. The scalars are excluded: a
 // shape is measured at one alpha and beta, and the tile applies any pair.
 inline bool SameShape(const ResolvedGemm& a, const ResolvedGemm& b) {

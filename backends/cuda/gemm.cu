@@ -16,9 +16,13 @@
 // query. A shape whose plan cannot be built falls back to
 // `cublasGemmStridedBatchedEx`.
 //
-// A shape may also take the hand tensor-core tile, and every other shape keeps
-// cuBLAS (`docs/tensor-core-gemm-plan.md`). The build selects the tile's source
-// and this file asks `kComputeIsBf16`, so no preprocessor guard is needed.
+// A shape may also take one of two hand paths: the Hopper mainloop that NVIDIA
+// CUTLASS supplies (`cutlass_bf16.cu`, docs/kernels.md Part 3 section 5), and
+// the hand tensor-core tile (`gemm_bf16.cu`). The Hopper mainloop is asked
+// first, because it is the faster of the two wherever its own rule accepts the
+// call; the tile is the general path and the leg the emulator runs; and every
+// other shape keeps cuBLAS. The build selects each source and this file asks
+// `kComputeIsBf16`, so no preprocessor guard is needed.
 //
 // See docs/build.md and docs/kernels.md.
 
@@ -37,6 +41,7 @@
 #include <tuple>
 
 #include "backends/cuda/device.h"
+#include "backends/cuda/gemm/cutlass_launch.h"
 #include "backends/cuda/gemm/dispatch.h"
 #include "backends/cuda/gemm/gemm_launch.h"
 
@@ -365,6 +370,24 @@ bool GemmBatched(const GemmParams& params, const ComputeType* a,
 //
 // The first line is the whole fp32 answer: a tile needs bf16 operands, so the
 // discarded branch leaves the table, the switch, and the launchers unnamed.
+// The Hopper mainloop, before every other path. It returns false when the
+// device cannot run the instruction, when `JudgeCutlass` refuses the shape, or
+// when the mode names another library, and a false is not an error: the next
+// path takes the call.
+bool TryGemmCutlass(const GemmParams& params, const ComputeType* a,
+                    const ComputeType* b, void* c, cudaDataType_t c_type) {
+  if constexpr (!kComputeIsBf16) return false;
+  const GemmTileMode mode = GemmTileModeFromEnv();
+  if (mode == GemmTileMode::kCublas || mode == GemmTileMode::kHand)
+    return false;
+  const bool fp32_c = c_type == CUDA_R_32F;
+  if (!fp32_c && c_type != kDataType) return false;
+  const ResolvedGemm gemm = ResolveGemm(params, fp32_c);
+  if (!IsCutlassCallable(gemm, a, b, c)) return false;
+  return fp32_c ? LaunchGemmCutlassToFp32(gemm, a, b, static_cast<float*>(c))
+                : LaunchGemmCutlass(gemm, a, b, static_cast<ComputeType*>(c));
+}
+
 bool TryGemmTile(const GemmParams& params, const ComputeType* a,
                  const ComputeType* b, void* c, cudaDataType_t c_type) {
   if constexpr (!kComputeIsBf16) return false;
@@ -384,6 +407,7 @@ void GemmImpl(const GemmParams& params, const ComputeType* a,
   if (params.batch_count <= 0 || params.m <= 0 || params.n <= 0) return;
   if (params.k < 0) return;
 
+  if (TryGemmCutlass(params, a, b, c, c_type)) return;
   if (TryGemmTile(params, a, b, c, c_type)) return;
 
   const bool ta = params.transpose_a;

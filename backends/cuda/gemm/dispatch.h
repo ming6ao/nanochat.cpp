@@ -29,8 +29,12 @@ namespace kernels {
 enum class GemmTileMode {
   // The shape table decides. The shipped value.
   kAuto,
-  // The tile takes every callable shape, for an A/B measurement. Nothing but a
-  // benchmark sets this.
+  // The Hopper mainloop of `cutlass_bf16.cu` takes every shape its own rule
+  // accepts. An A/B measurement sets this, and it is the value a promotion
+  // would leave on.
+  kCutlass,
+  // The hand tile takes every callable shape, for an A/B measurement. Nothing
+  // but a benchmark sets this.
   kHand,
   // cuBLAS takes every call, for the other half of the same measurement.
   kCublas,
@@ -39,8 +43,8 @@ enum class GemmTileMode {
 // `mode` as a report or a log line spells it.
 const char* GemmTileModeName(GemmTileMode mode);
 
-// The mode `NANOCHAT_GEMM_LIB` names: "hand", "cublas", or "auto" for anything
-// else, including an unset variable.
+// The mode `NANOCHAT_GEMM_LIB` names: "cutlass", "hand", "cublas", or "auto"
+// for anything else, including an unset variable.
 GemmTileMode GemmTileModeFromEnv();
 
 // The schedule this call takes, or -1 when cuBLAS serves it.

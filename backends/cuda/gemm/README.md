@@ -1,13 +1,21 @@
-# The hand tensor-core GEMM
+# The tensor-core GEMM
 
-This package is the hand-written bf16 GEMM that
-[docs/kernels.md](../../docs/kernels.md) Part 3 describes. It implements the full
-`GemmParams` contract: four operand layouts, a batch, three leading dimensions,
-three strides, an alpha and beta epilogue, and the fp32 store of `GemmWgrad`.
+This package holds two bf16 mainloops behind the seam's `Gemm` and `GemmWgrad`.
+Each one implements the full `GemmParams` contract: four operand layouts, a
+batch, three leading dimensions, three strides, an alpha and beta epilogue, and
+the fp32 store of `GemmWgrad`.
 
-**The measurement says no shape takes this path.** Every row of the closed list
-is inert, so cuBLAS serves every shape of a training step. Part 6 gives the
-numbers and the decision.
+| Mainloop | What | Section |
+|---|---|---|
+| `cutlass_bf16.cu` | The Hopper mainloop that NVIDIA CUTLASS supplies, and the default path | 16 |
+| `gemm_bf16.cu` | The hand-written warp-level tile | 2 to 15 |
+
+**Sections 2 to 15 are the record of the hand tile, and the measurement says no
+shape takes it.** Every row of the closed list is inert, so the hand tile never
+serves a training step, and section 8 keeps that negative result. It stays for
+three reasons. It is the leg the emulation engine runs. It is the reference the
+Hopper mainloop is compared against. And it serves the shapes smaller than one
+tile.
 
 ## 1. The files
 
@@ -17,12 +25,14 @@ numbers and the decision.
 | `gemm_plan.h` | The four schedules, the staged layout math, and the sweep's names |
 | `gemm_bf16.cu` | The kernel, the epilogue, and the launcher |
 | `gemm_launch.h` | The two backend-internal launchers |
-| `gemm_shape.h` | `ResolvedGemm`, `ResolveGemm`, and the tile's own refusals |
+| `gemm_shape.h` | `ResolvedGemm`, `ResolveGemm`, the tile's rule, and the Hopper mainloop's rule |
+| `cutlass_bf16.cu` | The eight CUTLASS kernels of the Hopper mainloop and the launch behind them |
+| `cutlass_launch.h` | The two backend-internal launchers of that mainloop |
 | `linear_shape.h` | The three calls of one Linear layer, from a `Config` |
 | `dispatch.{h,cc}` | The closed shape list, the verdict, and the switch |
 | `gemm_tile_test.cc` | Not present: the host-side plan is checked by `dispatch_test` |
-| `gemm_gpu_test.cc` | The device gate: the tile against cuBLAS |
-| `gemm_benchmark.cc` | The rate gate: the seam against cuBLAS over the closed list |
+| `gemm_gpu_test.cc` | The device gate: each mainloop against cuBLAS |
+| `gemm_benchmark.cc` | The rate gate: cuBLAS, the Hopper mainloop, and the tile over the closed list |
 | `dispatch_test.cc` | The CPU gate of the table, the verdict, and the seam's defaults |
 
 ## 2. The staged tile
@@ -120,8 +130,14 @@ elements one at a time.
 |---|---|
 | Off device: the layout, the bounds, the pipeline, the epilogue | `tools/nanochat simulate --device h100 --suite gemm` |
 | The shape table, the verdict, the switch, the seam's defaults | `tools/nanochat test //backends/cuda/gemm:dispatch_test` |
-| Device: the tile against cuBLAS on every contract case and schedule | `tools/nanochat test --gpu --config=hopper //backends/cuda/gemm:gemm_gpu_test` |
-| Rate: the seam against cuBLAS over the closed list | `tools/nanochat bench -- bazel-bin/backends/cuda/gemm/gemm_benchmark --schedule all --json` |
+| Device: each mainloop against cuBLAS on every contract case | `tools/nanochat test --gpu --config=hopper --config=bf16 //backends/cuda/gemm:gemm_gpu_test` |
+| Rate: cuBLAS, the Hopper mainloop, and the tile over the closed list | `tools/nanochat bench -- bazel-bin/backends/cuda/gemm/gemm_benchmark` |
+
+The device gate runs two candidates over the same comparison. The tile takes the
+tiny shapes and the whole sweep of section 3. The Hopper mainloop of section 16
+takes its own table, at shapes its alignment rule accepts, and it needs
+`--config=bf16` because its operands are bf16. A refusal counts as a failure
+there, so a case in that table is a case the mainloop claims to serve.
 
 The emulated leg runs the real `.cu` source through the block runtime, and it now
 runs every schedule over one shape. It checks the staged layout, the padding, the
@@ -592,3 +608,64 @@ that ceiling at half the card before any of this was measured. Phase 2 is the
 answer: one warpgroup instruction, the Tensor Memory Accelerator, and a producer
 warp. Its gate asks for 1.05 of the cuBLAS rate, where this phase's own gate
 asked for 0.50 and did not arrive.
+
+## 16. The Hopper mainloop, phase 2
+
+Phase 2 of `docs/kernels.md` Part 3 section 6 asks for one warpgroup instruction,
+the Tensor Memory Accelerator, and a producer warp. Section 15 of this document
+sized the warp-level ceiling at about half the card and closed phase 1 at 0.27 to
+0.36 of the cuBLAS rate. This section is the answer, and it does not write a
+mainloop: `cutlass_bf16.cu` drives the one NVIDIA CUTLASS supplies.
+
+**What the package holds now.**
+
+| File | What |
+|---|---|
+| `cutlass_bf16.cu` | Eight CUTLASS kernel instantiations and the launch behind them |
+| `cutlass_launch.h` | The two launchers, readable by a host pass |
+| `gemm_shape.h` | The resolved call, the tile's rule, and the Hopper mainloop's rule |
+
+**One tile, one schedule, eight kernels.** The tile is 128 by 256 by 64 with a
+2 by 1 cluster. The builder chooses three stages for it, which is 215,040 B of
+the 227 KiB a block may ask for. The eight kernels are the four operand
+orientations of `GemmParams` times the two store types, because a layout tag and
+an epilogue element are compile-time parameters. `dev/cutlass/README.md` records
+the probe that found the tile and the constraint that removed the 64 by 256
+candidate.
+
+The object holds the seven mechanisms of `docs/kernels.md` Part 3 section 4.
+`UTMALDG.3D` and `UTMALDG.3D.MULTICAST` copy the operands, `HGMMA.64x256x16.F32`
+`.BF16` is the arithmetic, `UTMASTG.3D` stores C, and `USETMAXREG` splits the
+registers between the warpgroups. Every one of them was absent from the tile
+before this section.
+
+**The rule, and why it refuses.** The rule tests four conditions, in this order:
+a non-empty extent, at least 4096 output elements, a stride in whole sixteen-byte
+units, and a pointer on that boundary. The size condition is a measurement and
+not a proof. A Tensor Memory Accelerator descriptor is built per call, so a shape
+smaller than one tile loses to the launch it saves. The 5 by 12 Muon group is 60
+outputs and stays on the hand tile.
+
+A refused call is not an error. It takes the hand tile and then cuBLAS, and the
+benchmark prints the reason.
+
+**Three settings are not the builder's defaults.**
+`StageCountAutoCarveout` makes the builder size the pipeline from what the
+epilogue leaves of the window, because a hand-written stage count did not fit.
+`PersistentScheduler` keeps a block over a run of tiles, which is the half of the
+scheduler that section 15 measured as the larger one. `LinearCombination` is one
+fused visitor for `alpha * acc + beta * C`.
+
+**The build states `sm_90a` on itself.** `cutlass_bf16` is the only target in the
+tree that names an architecture, and `rules_cuda` takes it as a replacement for
+the command-line value rather than an addition. The default build of `//...`
+therefore stays at `sm_75` and compiles no Hopper code. The target also states
+its own warning options, because the CUTLASS headers emit thousands of warnings
+and `--config=sim-gate` builds with `-Werror`.
+
+**What is still not here.**
+- A rate. `dev/cutlass` and this file measure nothing; `gemm_benchmark` does.
+- An emulated leg. The engine maps no Tensor Memory Accelerator and no warpgroup
+  instruction, so `cutlass_bf16.cu` is card-only and the hand tile stays as the
+  off-device gate.
+- The fp8, stream-K, and grouped tiers of phase 4.

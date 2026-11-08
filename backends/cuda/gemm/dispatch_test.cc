@@ -7,7 +7,8 @@
 // inert in the shipped table, so a row is turned on here and turned off again.
 //
 // It also re-checks the seam's default rules, because `ResolveGemm` and
-// `GemmImpl` must agree and only one of the two runs on a card.
+// `GemmImpl` must agree and only one of the two runs on a card, and it checks
+// the Hopper mainloop's own rule, which has no other gate off a card.
 //
 // CPU only: no device, no driver, no toolkit.
 
@@ -29,6 +30,8 @@
 namespace {
 
 using nanochat::GemmParams;
+using nanochat::kernels::CutlassRefusal;
+using nanochat::kernels::CutlassRefusalName;
 using nanochat::kernels::GemmScheduleCount;
 using nanochat::kernels::GemmScheduleIndexFromEnv;
 using nanochat::kernels::GemmScheduleName;
@@ -42,7 +45,10 @@ using nanochat::kernels::GemmTileShapeEnabled;
 using nanochat::kernels::GemmTileShapeGemm;
 using nanochat::kernels::GemmTileShapeName;
 using nanochat::kernels::GemmTileShapeSchedule;
+using nanochat::kernels::IsCutlassCallable;
 using nanochat::kernels::IsTileCallable;
+using nanochat::kernels::JudgeCutlass;
+using nanochat::kernels::kCutlassMinOutputElements;
 using nanochat::kernels::ResolvedGemm;
 using nanochat::kernels::ResolveGemm;
 using nanochat::kernels::SameShape;
@@ -268,6 +274,8 @@ void CheckMode() {
          "the cublas mode selects nothing", kCase);
   Expect(GemmTileSelected(key, GemmTileMode::kHand),
          "the hand mode selects a callable shape", kCase);
+  Expect(!GemmTileSelected(key, GemmTileMode::kCutlass),
+         "the cutlass mode is not the tile's", kCase);
 
   ResolvedGemm empty = key;
   empty.k = 0;
@@ -284,6 +292,8 @@ void CheckMode() {
          "the hand mode names itself", kCase);
   Expect(std::string(GemmTileModeName(GemmTileMode::kCublas)) == "cublas",
          "the cublas mode names itself", kCase);
+  Expect(std::string(GemmTileModeName(GemmTileMode::kCutlass)) == "cutlass",
+         "the cutlass mode names itself", kCase);
 }
 
 // The sweep is a closed list of its own, and every row names one of it.
@@ -344,10 +354,102 @@ void CheckModeFromEnv() {
   setenv("NANOCHAT_GEMM_LIB", "cublas", 1);
   Expect(GemmTileModeFromEnv() == GemmTileMode::kCublas, "cublas is cublas",
          kCase);
+  setenv("NANOCHAT_GEMM_LIB", "cutlass", 1);
+  Expect(GemmTileModeFromEnv() == GemmTileMode::kCutlass, "cutlass is cutlass",
+         kCase);
   setenv("NANOCHAT_GEMM_LIB", "something else", 1);
   Expect(GemmTileModeFromEnv() == GemmTileMode::kAuto,
          "an unknown value is auto", kCase);
   unsetenv("NANOCHAT_GEMM_LIB");
+}
+
+// The Hopper mainloop's own rule. It is precision free and device free, so this
+// is the only gate it has off a card: `cutlass_bf16.cu` has no emulated leg.
+void CheckCutlassVerdict() {
+  const char* kCase = "cutlass verdict";
+  // Four aligned, distinct host addresses, so the pointer test is a test.
+  alignas(64) static char storage[256];
+  const void* a = storage;
+  const void* b = storage + 64;
+  void* c = storage + 128;
+
+  // A shape the sweep measured, resolved by the same rule `GemmImpl` applies.
+  GemmParams params;
+  params.m = 1280;
+  params.n = 5120;
+  params.k = 1280;
+  params.batch_count = 20;
+  params.transpose_a = false;
+  params.transpose_b = true;
+  const ResolvedGemm model = ResolveGemm(params, false);
+  Expect(JudgeCutlass(model, a, b, c) == CutlassRefusal::kNone,
+         "a model shape that meets every rule is taken", kCase);
+  Expect(IsCutlassCallable(model, a, b, c), "the same shape is callable",
+         kCase);
+
+  // Extent first: an empty product is refused before anything else is tested.
+  ResolvedGemm empty = model;
+  empty.k = 0;
+  Expect(JudgeCutlass(empty, a, b, c) == CutlassRefusal::kExtent,
+         "an empty extent is refused for its extent", kCase);
+
+  // Then size: the 5 by 12 group is 60 outputs, under one 64 by 64 tile.
+  GemmParams tiny;
+  tiny.m = 5;
+  tiny.n = 12;
+  tiny.k = 12;
+  tiny.batch_count = 10;
+  const ResolvedGemm small = ResolveGemm(tiny, false);
+  Expect(JudgeCutlass(small, a, b, c) == CutlassRefusal::kSize,
+         "the 5 by 12 group stays on the hand tile", kCase);
+  Expect(static_cast<std::int64_t>(5) * 12 < kCutlassMinOutputElements,
+         "the group really is under the crossover", kCase);
+
+  // Then the stride. A bf16 row needs eight elements of the sixteen bytes, and
+  // an fp32 row needs four.
+  ResolvedGemm odd = model;
+  odd.lda = 1179;
+  Expect(JudgeCutlass(odd, a, b, c) == CutlassRefusal::kStride,
+         "an operand stride off the boundary is refused", kCase);
+  // 1284 elements is a whole number of fp32 sixteen-byte rows and not a whole
+  // number of bf16 ones, so it separates the two store alignments.
+  odd = model;
+  odd.ldc = 1284;
+  odd.stride_c = static_cast<std::int64_t>(1280) * 1284;
+  Expect(JudgeCutlass(odd, a, b, c) == CutlassRefusal::kStride,
+         "a bf16 store row off the boundary is refused", kCase);
+  ResolvedGemm fp32_odd = ResolveGemm(params, true);
+  fp32_odd.ldc = 1284;
+  fp32_odd.stride_c = static_cast<std::int64_t>(1280) * 1284;
+  Expect(JudgeCutlass(fp32_odd, a, b, c) == CutlassRefusal::kNone,
+         "four fp32 elements share the boundary where eight bf16 do", kCase);
+  odd = model;
+  odd.ldc = 1282;
+  odd.stride_c = static_cast<std::int64_t>(1280) * 1282;
+  Expect(JudgeCutlass(odd, a, b, c) == CutlassRefusal::kStride,
+         "a store row off both boundaries is refused", kCase);
+
+  // Then the pointer, which is a different refusal from the stride so a report
+  // can name it.
+  const void* misaligned = storage + 2;
+  Expect(JudgeCutlass(model, misaligned, b, c) == CutlassRefusal::kPointer,
+         "a pointer off the boundary is refused for its pointer", kCase);
+  Expect(JudgeCutlass(model, nullptr, b, c) == CutlassRefusal::kPointer,
+         "a missing operand is refused for its pointer", kCase);
+
+  // Batch strides only matter past one batch.
+  ResolvedGemm batched = model;
+  batched.stride_b = 3;
+  Expect(JudgeCutlass(batched, a, b, c) == CutlassRefusal::kStride,
+         "a batch stride off the boundary is refused", kCase);
+  batched.batch_count = 1;
+  Expect(JudgeCutlass(batched, a, b, c) == CutlassRefusal::kNone,
+         "a batch stride is not tested at one batch", kCase);
+
+  Expect(std::string(CutlassRefusalName(CutlassRefusal::kNone)) == "none",
+         "the taken verdict names itself", kCase);
+  Expect(std::string(CutlassRefusalName(CutlassRefusal::kPointer)) == "pointer",
+         "the pointer verdict names itself", kCase);
 }
 
 // The seam's default rules, which `ResolveGemm` and `GemmImpl` must share.
@@ -470,6 +572,7 @@ int main() {
   CheckSelection();
   CheckMode();
   CheckModeFromEnv();
+  CheckCutlassVerdict();
   CheckSchedules();
   CheckScheduleFromEnv();
   CheckOrders();

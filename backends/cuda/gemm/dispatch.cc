@@ -12,8 +12,8 @@
 // schedule its measurement chose, so a promotion is one bit and not a second
 // sweep.
 //
-// Setting `NANOCHAT_GEMM_LIB` to "hand" or "cublas" overrides the table for an
-// A/B measurement and for nothing else.
+// Setting `NANOCHAT_GEMM_LIB` to "cutlass", "hand", or "cublas" overrides the
+// table for an A/B measurement and for nothing else.
 
 #include "backends/cuda/gemm/dispatch.h"
 
@@ -162,6 +162,8 @@ std::vector<Row>& Rows() {
 
 const char* GemmTileModeName(GemmTileMode mode) {
   switch (mode) {
+    case GemmTileMode::kCutlass:
+      return "cutlass";
     case GemmTileMode::kHand:
       return "hand";
     case GemmTileMode::kCublas:
@@ -176,6 +178,7 @@ GemmTileMode GemmTileModeFromEnv() {
   const char* value = std::getenv("NANOCHAT_GEMM_LIB");
   if (value == nullptr) return GemmTileMode::kAuto;
   const std::string name(value);
+  if (name == "cutlass") return GemmTileMode::kCutlass;
   if (name == "hand") return GemmTileMode::kHand;
   if (name == "cublas") return GemmTileMode::kCublas;
   return GemmTileMode::kAuto;
@@ -199,7 +202,10 @@ int GemmScheduleIndexFromEnv() {
 
 int GemmTileScheduleFor(const ResolvedGemm& gemm, GemmTileMode mode) {
   if (!IsTileCallable(gemm)) return -1;
-  if (mode == GemmTileMode::kCublas) return -1;
+  // The tile serves neither the reference nor the Hopper mainloop: those are
+  // two other libraries, and a call they take is not this tile's.
+  if (mode == GemmTileMode::kCublas || mode == GemmTileMode::kCutlass)
+    return -1;
   // The environment overrides the row's schedule, so a measurement can sweep
   // one shape over the whole list.
   const int forced = GemmScheduleIndexFromEnv();

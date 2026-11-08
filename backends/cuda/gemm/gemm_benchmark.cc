@@ -42,11 +42,14 @@ using nanochat::GemmMode;
 using nanochat::GemmParams;
 using nanochat::GradientType;
 using nanochat::kernels::Alloc;
+using nanochat::kernels::CutlassRefusal;
+using nanochat::kernels::CutlassRefusalName;
 using nanochat::kernels::Free;
 using nanochat::kernels::Gemm;
 using nanochat::kernels::GemmScheduleCount;
 using nanochat::kernels::GemmScheduleName;
 using nanochat::kernels::GemmTileShapeSchedule;
+using nanochat::kernels::JudgeCutlass;
 using nanochat::kernels::Memcpy;
 using nanochat::kernels::ResolvedGemm;
 using nanochat::kernels::Synchronize;
@@ -59,8 +62,10 @@ using nanochat::dev::UseDevicePeak;
 
 struct Options {
   BenchOptions bench;
-  std::string row;            // empty runs every row
-  std::string hand = "both";  // "hand", "cublas", or "both"
+  std::string row;  // empty runs every row
+  // Which libraries to time: "all" runs cuBLAS, the Hopper mainloop, and the
+  // hand tile; "cublas", "cutlass", and "hand" each run one.
+  std::string hand = "all";
   // Empty measures the row's own schedule, which is what a shipped promotion
   // would run; "all" sweeps the whole list, and a name measures one schedule.
   std::string schedule;
@@ -147,7 +152,7 @@ double TimeGemm(const ResolvedGemm& gemm, const Buffers& buffers,
 
 void Usage(const char* program) {
   std::fprintf(stderr,
-               "usage: %s [--row NAME] [--hand|cublas|both] "
+               "usage: %s [--row NAME] [--all|cutlass|hand|cublas] "
                "[--schedule NAME|all] [--iters N] [--rounds N] [--warmup N] "
                "[--json] [--out PATH]\n",
                program);
@@ -174,8 +179,12 @@ int main(int argc, char** argv) {
       options.hand = "hand";
     } else if (arg == "--cublas") {
       options.hand = "cublas";
-    } else if (arg == "--both") {
-      options.hand = "both";
+    } else if (arg == "--cutlass") {
+      options.hand = "cutlass";
+    } else if (arg == "--all" || arg == "--both") {
+      // `--both` is the older spelling of the two-side measurement, and it
+      // still means every side.
+      options.hand = "all";
     } else if (arg == "--schedule" && i + 1 < argc) {
       options.schedule = argv[++i];
     } else if (arg == "--iters") {
@@ -194,8 +203,10 @@ int main(int argc, char** argv) {
     }
   }
 
-  const bool run_hand = options.hand != "cublas";
-  const bool run_cublas = options.hand != "hand";
+  const bool run_all = options.hand == "all";
+  const bool run_hand = run_all || options.hand == "hand";
+  const bool run_cublas = run_all || options.hand == "cublas";
+  const bool run_cutlass = run_all || options.hand == "cutlass";
   const int row_count = nanochat::kernels::GemmTileShapeCount();
 
   BenchReport report;
@@ -234,6 +245,28 @@ int main(int argc, char** argv) {
       cublas_ms = TimeGemm(gemm, buffers, "cublas", options.bench);
       report.Add("gemm:" + name + ":cublas", shape, cublas_ms,
                  1e-9 * flops / (cublas_ms * 1e-3));
+    }
+    if (run_cutlass) {
+      // The seam answers a refused call with another path, so a timing of the
+      // switch alone would report the fallback's rate under this column's name.
+      // The rule is asked first, and the reason is printed when it refuses.
+      unsetenv("NANOCHAT_GEMM_SCHEDULE");
+      const CutlassRefusal refusal =
+          JudgeCutlass(gemm, buffers.a, buffers.b, buffers.c);
+      if (refusal == CutlassRefusal::kNone) {
+        const double cutlass_ms =
+            TimeGemm(gemm, buffers, "cutlass", options.bench);
+        report.Add("gemm:" + name + ":cutlass", shape, cutlass_ms,
+                   1e-9 * flops / (cutlass_ms * 1e-3));
+        if (run_cublas && cublas_ms > 0.0 && cutlass_ms > 0.0) {
+          std::fprintf(stderr,
+                       "gemm benchmark: %-22s %-10s fraction of cuBLAS %.3f\n",
+                       name.c_str(), "cutlass", cublas_ms / cutlass_ms);
+        }
+      } else {
+        std::fprintf(stderr, "gemm benchmark: %-22s cutlass refuses it: %s\n",
+                     name.c_str(), CutlassRefusalName(refusal));
+      }
     }
     if (run_hand) {
       // An empty request measures the schedule the row owns, which is the one a

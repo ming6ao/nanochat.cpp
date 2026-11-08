@@ -12,12 +12,12 @@
 //    tree's C++20 setting? The tree's toolkit is CUDA 12.0 and CUTLASS needs
 //    12.0 or newer.
 // 2. Does a `cuda_library` that states `archs = ["sm_90a"]` build beside the
-//    tree's default `sm_75`, with no command-line architecture flag? That is the
-//    question `docs/kernels.md` Part 3 section 9 risk 2 leaves open, and the
-//    answer decides how the adapter target is declared.
+//    tree's default `sm_75`, with no command-line architecture flag? That is
+//    the question `docs/kernels.md` Part 3 section 9 risk 2 leaves open, and
+//    the answer decides how the adapter target is declared.
 // 3. Which of the six tile candidates fit the Hopper window, and what stage
-//    count does the collective builder choose for each? The builder measures the
-//    window; a hand-written constant did not fit.
+//    count does the collective builder choose for each? The builder measures
+//    the window; a hand-written constant did not fit.
 //
 // A row is compile-time data. The binary launches no kernel and needs no card,
 // so the probe is a host gate.

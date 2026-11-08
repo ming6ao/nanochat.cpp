@@ -77,6 +77,52 @@ cc_library(
     ],
 )
 
+# The Hopper mainloop, borrowed from NVIDIA CUTLASS (docs/kernels.md Part 3
+# section 5). Eight kernels: four operand orientations times two store types.
+#
+# **This is the only target in the tree that names an architecture on itself.**
+# The warpgroup instruction is architecture conditional and needs `sm_90a`, so
+# the target states it and `rules_cuda` ignores the command line for it alone.
+# The default build of `//...` therefore stays at `sm_75`, which is what
+# `dev/cutlass/README.md` proved before this target existed.
+#
+# **The vendor options are this target's own.** The CUTLASS headers emit
+# thousands of warnings and `--config=sim-gate` turns warnings into errors, so
+# this target does not load `nanochat_cuda_copts`. `--expt-relaxed-constexpr`
+# lets the headers call a host `constexpr` from a device function without a
+# warning, which is what they do throughout.
+#
+# The source joins the build on the same selection as the hand tile: the operands
+# are bf16, so only a bf16 or fp8 build compiles it, and the fp32 build keeps
+# cuBLAS. An fp32 build also has no `sm_90a` target, so no H100 is required to
+# build the tree.
+cuda_library(
+    name = "cutlass_bf16",
+    srcs = select({
+        "//:bf16": ["cutlass_bf16.cu"],
+        "//:fp8": ["cutlass_bf16.cu"],
+        "//conditions:default": [],
+    }),
+    hdrs = [
+        "cutlass_launch.h",
+        "gemm_shape.h",
+    ],
+    archs = ["sm_90a"],
+    copts = [
+        "-O2",
+        "-Xcompiler",
+        "-O2",
+        "--expt-relaxed-constexpr",
+    ],
+    defines = precision_defines(),
+    deps = [
+        "//backends/cuda:device",
+        "//include/nanochat:nanochat",
+        "@cutlass//:cutlass",
+    ],
+    alwayslink = True,
+)
+
 # The shape table's gate: the list matches the shapes `muon.cu` issues, a row
 # selects only its own key, and only a turned bit changes a shape's hands.
 cc_test(
