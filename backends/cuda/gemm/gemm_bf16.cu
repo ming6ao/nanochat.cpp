@@ -4,20 +4,22 @@
 // One kernel per schedule over the universal call
 // C = alpha * op(A) * op(B) + beta * C. The transpose flags reach the device as
 // two stride pairs plus the fragment layout of the operand, so the four operand
-// forms take one body each and share the staging code. The accumulator goes
-// straight to C through the lane map of the instruction, so the epilogue holds
-// the bounds, the alpha and beta terms, and the fp32 weight-gradient form with
-// no shared scratch and no serialized round of warps.
+// forms take one body each and share the staging code.
 //
-// The k loop is the two-stage copy of gemm_tile.cuh: slice `n + 1` is copied
-// while slice `n` is used, and a barrier after the arithmetic holds the buffer
-// until every warp is done with it.
+// Three parts follow, in the order the kernel runs them:
+//
+//   * the k loop, which walks `Plan::kStages` buffers of gemm_tile.cuh and
+//     copies slice `n + kStages - 1` while it uses slice `n`;
+//   * the tile loop, which walks a run of tiles from the order the plan names,
+//     so a shape that is not a whole number of waves leaves no block idle;
+//   * the epilogue, one call of `StoreWarpTile`, which applies alpha, beta, the
+//     bounds and the store type and writes C in sixteen-byte chunks.
 //
 // The arithmetic is the `ldmatrix` and `mma.sync` pair of mma_bf16.cuh and not
-// the vendor `wmma` pair, which is mechanism 1 of docs/kernels.md Part 3
-// section
-// 4. The micro-tile is therefore 16 by 8 and not 16 by 16, so a warp tile holds
-// twice as many fragments along n and each one is half as wide.
+// the vendor `wmma` pair, which is mechanism 1 of section 4 of
+// docs/kernels.md Part 3. The micro-tile is therefore 16 by 8 and not 16 by 16,
+// so a warp tile holds twice as many fragments along n and each one is half as
+// wide.
 //
 // See backends/cuda/gemm/gemm_tile.cuh for the stage, gemm_plan.h for the
 // schedules, and gemm_launch.h for the entry points.
@@ -48,13 +50,108 @@ namespace {
 
 using gemm_tile::TileElement;
 
-//: The micro-tile of the instruction pair. The k edge is the loop step of the
-//: staged slice, and the other two are the fragment's edges.
+//: The micro-tile of the instruction pair: the two edges of a fragment and the
+//: k step of the staged slice.
 constexpr int kMicroM = gemm_bf16::kMmaM;
 constexpr int kMicroN = gemm_bf16::kMmaN;
-constexpr int kMicro = gemm_tile::kMicro;
-static_assert(kMicro == gemm_bf16::kMmaK,
-              "the k step of the slice must be the k edge of the micro-tile");
+constexpr int kMicro = gemm_bf16::kMmaK;
+
+//: The bytes of one store. Sixteen is the widest a thread can make, and a run
+//: of eight bf16 or four fp32 values is what keeps C's traffic to one
+//: transaction a lane.
+constexpr int kStoreBytes = 16;
+
+//: Elements of one warp's exchange tile: two neighbouring fragments along n. A
+//: group of sixteen columns is a whole number of stores for either type.
+constexpr int kExchangeN = 2 * kMicroN;
+constexpr int kExchangeElements = kMicroM * kExchangeN;
+
+// The epilogue of one warp's accumulator. `acc` is the warp tile, `warp_rows`
+// and `warp_columns` are where it starts in C, and `exchange` is a shared tile
+// that this warp owns alone.
+//
+// The tile is the point. A lane's four registers hold eight columns of two
+// rows, so a store taken straight from the lane map would put one warp
+// instruction on eight rows of sixteen bytes. The exchange puts the run of
+// columns back together, and one lane then writes one sixteen-byte chunk of C.
+template <typename PlanT, typename COut, std::size_t kFragM, std::size_t kFragN>
+__device__ __forceinline__ void StoreWarpTile(
+    const gemm_bf16::FragmentC (&acc)[kFragM][kFragN], COut* c_base,
+    const ResolvedGemm& args, int warp_rows, int warp_columns, COut* exchange) {
+  constexpr int kChunkElements = kStoreBytes / static_cast<int>(sizeof(COut));
+  constexpr int kChunksPerRow = kExchangeN / kChunkElements;
+  constexpr int kWarps = PlanT::kWarpsM * PlanT::kWarpsN;
+  static_assert(kFragN % 2 == 0, "an exchange covers two fragments along n");
+  static_assert(kChunkElements * static_cast<int>(sizeof(COut)) == kStoreBytes,
+                "a chunk is one store wide");
+  static_assert(
+      kWarps * kExchangeElements * static_cast<int>(sizeof(COut)) <=
+          PlanT::kSmemElements * static_cast<int>(sizeof(TileElement)),
+      "the exchange tiles lie over the staged window");
+
+  //: Sixteen bytes, in a plain aligned structure: the device compiler emits one
+  //: 128-bit store, and the host pass of the emulation engine, which holds no
+  //: `float4`, can still name the width.
+  struct alignas(16) Chunk {
+    std::uint32_t word[4];
+  };
+
+  const int lane = static_cast<int>(threadIdx.x) % 32;
+  for (int i = 0; i < kFragM; ++i) {
+    const int fragment_row = warp_rows + i * kMicroM;
+    for (int pair = 0; pair < kFragN; pair += 2) {
+      // The accumulator lands in the exchange tile, with alpha, beta, the
+      // bounds and the store type applied there: one rounding, whatever beta
+      // asks for.
+      for (int half = 0; half < 2; ++half) {
+        const int j = pair + half;
+        const int fragment_column = warp_columns + j * kMicroN;
+        for (int reg = 0; reg < gemm_bf16::kLaneRegisters; ++reg) {
+          int row = 0;
+          int column = 0;
+          gemm_bf16::ElementOf(lane, reg, &row, &column);
+          float value =
+              args.alpha * gemm_bf16::ElementValue(acc[i][j], lane, reg);
+          const int out_row = fragment_row + row;
+          const int out_column = fragment_column + column;
+          if (args.beta != 0.0f && out_row < args.m && out_column < args.n) {
+            const long long offset =
+                static_cast<long long>(out_row) * args.ldc + out_column;
+            value += args.beta * static_cast<float>(c_base[offset]);
+          }
+          exchange[row * kExchangeN + half * kMicroN + column] =
+              static_cast<COut>(value);
+        }
+      }
+      __syncwarp();
+
+      // One chunk a lane. A chunk the operand edge cuts, and a destination the
+      // store cannot take in one piece, take their elements one at a time.
+      const int base_column = warp_columns + pair * kMicroN;
+      for (int chunk = lane; chunk < kMicroM * kChunksPerRow; chunk += 32) {
+        const int row = chunk / kChunksPerRow;
+        const int column = (chunk - row * kChunksPerRow) * kChunkElements;
+        const int out_row = fragment_row + row;
+        const int out_column = base_column + column;
+        const int left = args.n - out_column;
+        if (out_row >= args.m || left <= 0) continue;
+        const COut* src = exchange + row * kExchangeN + column;
+        COut* dst =
+            c_base + static_cast<long long>(out_row) * args.ldc + out_column;
+        const bool whole = left >= kChunkElements;
+        if (whole &&
+            (reinterpret_cast<std::uintptr_t>(dst) % kStoreBytes) == 0u) {
+          *reinterpret_cast<Chunk*>(dst) = *reinterpret_cast<const Chunk*>(src);
+          continue;
+        }
+        for (int e = 0; e < (whole ? kChunkElements : left); ++e)
+          dst[e] = src[e];
+      }
+      // The next exchange writes the tile again, so this one must be read.
+      __syncwarp();
+    }
+  }
+}
 
 // C is `COut` and the accumulator is fp32, so one epilogue serves the bf16
 // store of `Gemm` and the fp32 store of `GemmWgrad`.
@@ -62,7 +159,6 @@ template <typename PlanT, typename COut, bool TransA, bool TransB>
 __global__ void GemmTileKernel(const ComputeType* a, const ComputeType* b,
                                COut* c, ResolvedGemm args) {
   using Plan = PlanT;
-  constexpr int kMicro = gemm_tile::kMicro;
 
   // The staged window. It is the dynamic one: four stages of a 128 by 128 tile
   // are past the 48 KiB static window, so the launcher states the size and asks
@@ -88,10 +184,8 @@ __global__ void GemmTileKernel(const ComputeType* a, const ComputeType* b,
   const int warp_m = (warp / Plan::kWarpsN) * Plan::kWarpM;
   const int warp_n = (warp % Plan::kWarpsN) * Plan::kWarpN;
 
-  //: One row of the warp tile is a whole number of micro-tiles, and so is one
-  //: column. The row count is the one `gemm_plan.h` records; the column count
-  //: is twice it, because the instruction is half as wide as the vendor
-  //: fragment.
+  //: The fragments of one warp tile: whole rows and whole columns of the
+  //: micro-tile, which the plan's fragment assert guarantees.
   constexpr int kFragM = Plan::kWarpM / kMicroM;
   constexpr int kFragN = Plan::kWarpN / kMicroN;
 
@@ -193,109 +287,15 @@ __global__ void GemmTileKernel(const ComputeType* a, const ComputeType* b,
       __syncthreads();
     }
 
-    // The epilogue. Each warp's accumulator passes through a small exchange
-    // tile in shared memory and leaves it as sixteen-byte chunks of C, which is
-    // the one bulk store the state of the art uses for this subtile. A lane's
-    // own registers hold eight columns of two rows, so a store taken straight
-    // from the lane map would put one warp instruction on eight rows of sixteen
-    // bytes; the exchange tile puts the run of columns back together first.
-    //
-    // The tile is per warp, so the exchange of one warp never waits for
-    // another, and it lies over the staged window, which the finished k loop
-    // releases.
-    constexpr int kWarps = Plan::kWarpsM * Plan::kWarpsN;
-    constexpr int kExchangeN =
-        2 * kMicroN;  // two neighbouring fragments along n
-    constexpr int kExchangeElements = kMicroM * kExchangeN;
-    //: Sixteen bytes, the widest store a thread makes. A plain aligned
-    //: structure of four words states that width for the device compiler and
-    //: for the host pass the emulation engine runs, which holds no `float4`.
-    struct alignas(16) SixteenBytes {
-      std::uint32_t word[4];
-    };
-    constexpr int kExchangeBytes = 16;
-    constexpr int kChunkElements =
-        kExchangeBytes / static_cast<int>(sizeof(COut));
-    constexpr int kChunksPerRow = kExchangeN / kChunkElements;
-    static_assert(kFragN % 2 == 0, "an exchange covers two fragments along n");
-    static_assert(
-        kChunkElements * static_cast<int>(sizeof(COut)) == kExchangeBytes,
-        "a chunk is one store wide");
-    static_assert(
-        kWarps * kExchangeElements * static_cast<int>(sizeof(COut)) <=
-            Plan::kSmemElements * static_cast<int>(sizeof(TileElement)),
-        "the exchange tile lies over the staged window");
-
-    // The k loop is over, so the staged window may hold the exchange tiles.
+    // The epilogue. The k loop has finished, so the staged window may hold one
+    // exchange tile per warp, which is where each warp lays its accumulator
+    // before C is written in sixteen-byte chunks.
     gemm_tile::WaitStage(0);
     __syncthreads();
-    COut* exchange = reinterpret_cast<COut*>(smem) + warp * kExchangeElements;
-
-    const int lane = static_cast<int>(threadIdx.x) % 32;
-    COut* c_base = c + batch * args.stride_c;
-    const int warp_rows = m0 + warp_m;
-    const int warp_columns = n0 + warp_n;
-    for (int i = 0; i < kFragM; ++i) {
-      for (int pair = 0; pair < kFragN; pair += 2) {
-        // The accumulator lands in the exchange tile, with alpha, beta, the
-        // bounds and the store type applied there: one rounding, whatever beta
-        // asks for. An element outside C is dropped, and the write below skips
-        // the chunk it belongs to.
-        const int fragment_row = warp_rows + i * kMicroM;
-        for (int half = 0; half < 2; ++half) {
-          const int j = pair + half;
-          const int fragment_column = warp_columns + j * kMicroN;
-          for (int reg = 0; reg < gemm_bf16::kLaneRegisters; ++reg) {
-            int row = 0;
-            int column = 0;
-            gemm_bf16::ElementOf(lane, reg, &row, &column);
-            float value =
-                args.alpha * gemm_bf16::ElementValue(acc[i][j], lane, reg);
-            const int out_row = fragment_row + row;
-            const int out_column = fragment_column + column;
-            if (args.beta != 0.0f && out_row < args.m && out_column < args.n) {
-              const long long offset =
-                  static_cast<long long>(out_row) * args.ldc + out_column;
-              value += args.beta * static_cast<float>(c_base[offset]);
-            }
-            exchange[row * kExchangeN + half * kMicroN + column] =
-                static_cast<COut>(value);
-          }
-        }
-        __syncwarp();
-
-        // One chunk a lane, so a warp covers the sixteen columns of sixteen
-        // rows in as few stores as the tile allows, and each is contiguous.
-        const int base_column = warp_columns + pair * kMicroN;
-        for (int chunk = lane; chunk < kMicroM * kChunksPerRow; chunk += 32) {
-          const int row = chunk / kChunksPerRow;
-          const int column = (chunk - row * kChunksPerRow) * kChunkElements;
-          const int out_row = fragment_row + row;
-          const int out_column = base_column + column;
-          if (out_row >= args.m) continue;
-          const COut* src = exchange + row * kExchangeN + column;
-          COut* dst =
-              c_base + static_cast<long long>(out_row) * args.ldc + out_column;
-          if (out_column + kChunkElements > args.n) {
-            // A ragged edge takes the elements it covers, one at a time.
-            for (int e = 0; e < kChunkElements; ++e) {
-              if (out_column + e >= args.n) break;
-              dst[e] = src[e];
-            }
-            continue;
-          }
-          if ((reinterpret_cast<std::uintptr_t>(dst) % kExchangeBytes) == 0u) {
-            *reinterpret_cast<SixteenBytes*>(dst) =
-                *reinterpret_cast<const SixteenBytes*>(src);
-            continue;
-          }
-          // A destination the store cannot take in one piece.
-          for (int e = 0; e < kChunkElements; ++e) dst[e] = src[e];
-        }
-        // The next exchange writes the tile again, so this one must be read.
-        __syncwarp();
-      }
-    }
+    StoreWarpTile<Plan, COut>(
+        acc, c + static_cast<long long>(batch) * args.stride_c, args,
+        m0 + warp_m, n0 + warp_n,
+        reinterpret_cast<COut*>(smem) + warp * kExchangeElements);
 
     // The staged window and the exchange tiles are reused by the next tile,
     // so every warp must be done with them.

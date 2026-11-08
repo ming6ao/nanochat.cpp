@@ -61,8 +61,6 @@ using TileElement = __nv_bfloat16;
 
 //: Elements of one staged chunk, which is sixteen bytes.
 constexpr int kChunk = 8;
-//: A micro-tile edge, the only shape `wmma` 16 by 16 by 16 covers here.
-constexpr int kMicro = 16;
 //: The boundary the staged window starts on. `ldmatrix` reads a row that is
 //: sixteen bytes long, and every copy the tile makes is sixteen bytes wide, so
 //: both need the base of the window and every staged row on this boundary.

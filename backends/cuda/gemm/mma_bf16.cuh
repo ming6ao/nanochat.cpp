@@ -107,39 +107,6 @@ struct FragmentC {
 
 #endif
 
-// --- The lane map, for the device arm and for the store ---------------------
-
-namespace detail {
-
-// The row and the column of the first element of one A register.
-__host__ __device__ inline void AElement(int lane, int reg, int* row,
-                                         int* column) {
-  const int group = lane / 4;
-  const int thread = lane % 4;
-  *row = group + (reg % 2) * 8;
-  *column = thread * 2 + (reg / 2) * 8;
-}
-
-// The k index and the column of the first element of one B register.
-__host__ __device__ inline void BElement(int lane, int reg, int* k,
-                                         int* column) {
-  const int group = lane / 4;
-  const int thread = lane % 4;
-  *k = thread * 2 + reg * 8;
-  *column = group;
-}
-
-// The row and the column of one accumulator register.
-__host__ __device__ inline void CElement(int lane, int reg, int* row,
-                                         int* column) {
-  const int group = lane / 4;
-  const int thread = lane % 4;
-  *row = group + (reg / 2) * 8;
-  *column = thread * 2 + (reg % 2);
-}
-
-}  // namespace detail
-
 // --- The device arm ---------------------------------------------------------
 
 #if NANOCHAT_MMA_BF16_DEVICE_ARM
@@ -279,11 +246,15 @@ __host__ __device__ inline void Mma(FragmentC& d, const FragmentA& a,
 constexpr int kLaneRegisters = 4;
 
 // The row and the column, inside the micro-tile, of accumulator register `reg`
-// of `lane`. The epilogue of the kernel reads it, so the element a lane stores
-// is the element the instruction gave that lane, and it is not assumed.
+// of `lane`: the map the C half of the table above states. The epilogue of the
+// kernel reads it, so the element a lane stores is the element the instruction
+// gave that lane, and it is not assumed.
 __host__ __device__ __forceinline__ void ElementOf(int lane, int reg, int* row,
                                                    int* column) {
-  detail::CElement(lane, reg, row, column);
+  const int group = lane / 4;
+  const int thread = lane % 4;
+  *row = group + (reg / 2) * 8;
+  *column = thread * 2 + (reg % 2);
 }
 
 // The value of that element. The device arm reads the register the lane owns.
@@ -294,13 +265,13 @@ __host__ __device__ __forceinline__ void ElementOf(int lane, int reg, int* row,
 // `beta` is not zero.
 __host__ __device__ __forceinline__ float ElementValue(const FragmentC& c,
                                                        int lane, int reg) {
-  (void)lane;
 #if NANOCHAT_MMA_BF16_DEVICE_ARM
+  (void)lane;
   return c.reg[reg];
 #else
   int row = 0;
   int column = 0;
-  detail::CElement(lane, reg, &row, &column);
+  ElementOf(lane, reg, &row, &column);
   return c.x[row * kMmaN + column];
 #endif
 }
@@ -314,7 +285,7 @@ __host__ __device__ __forceinline__ void StoreFp32(float* dst, int lead,
   for (int reg = 0; reg < kLaneRegisters; ++reg) {
     int row = 0;
     int column = 0;
-    detail::CElement(lane, reg, &row, &column);
+    ElementOf(lane, reg, &row, &column);
     dst[row * lead + column] = c.reg[reg];
   }
 #else
@@ -323,26 +294,6 @@ __host__ __device__ __forceinline__ void StoreFp32(float* dst, int lead,
   for (int row = 0; row < kMmaM; ++row) {
     for (int column = 0; column < kMmaN; ++column) {
       dst[row * lead + column] = c.x[row * kMmaN + column];
-    }
-  }
-#endif
-}
-
-// The same for a bf16 destination.
-__host__ __device__ __forceinline__ void StoreBf16(__nv_bfloat16* dst, int lead,
-                                                   const FragmentC& c) {
-#if NANOCHAT_MMA_BF16_DEVICE_ARM
-  const int lane = static_cast<int>(threadIdx.x) % 32;
-  for (int reg = 0; reg < kLaneRegisters; ++reg) {
-    int row = 0;
-    int column = 0;
-    detail::CElement(lane, reg, &row, &column);
-    dst[row * lead + column] = __float2bfloat16(c.reg[reg]);
-  }
-#else
-  for (int row = 0; row < kMmaM; ++row) {
-    for (int column = 0; column < kMmaN; ++column) {
-      dst[row * lead + column] = __float2bfloat16(c.x[row * kMmaN + column]);
     }
   }
 #endif

@@ -36,8 +36,8 @@ namespace gemm_tile {
 // `SwizzleM` is the order the blocks walk the tile grid in, and it is the one
 // parameter that moves no byte of the tile: `SwizzleM` m-tiles form a group
 // that walks n first, so the blocks resident together share the A panels of the
-// group and a run of B panels that fits the second-level cache. Zero walks the
-// grid in the plain row-major order.
+// group and a run of B panels that fits the second-level cache. One m-tile in a
+// group is the plain row-major order.
 template <int TileM, int TileN, int TileK, int WarpsM, int WarpsN, int Pad,
           int Stages, int SwizzleM>
 struct Plan {
@@ -52,8 +52,6 @@ struct Plan {
 
   static constexpr int kWarpM = TileM / WarpsM;
   static constexpr int kWarpN = TileN / WarpsN;
-  static constexpr int kFragsM = kWarpM / 16;
-  static constexpr int kFragsN = kWarpN / 16;
 
   // The two staged layouts of one operand. A plain operand stages `TileM` rows
   // of `TileK` elements and a transposed one stages `TileK` rows of `TileM`, so
@@ -71,38 +69,36 @@ struct Plan {
   static constexpr int kStageBElements =
       (TileK * kLeadBRow) > (TileN * kLeadBCol) ? (TileK * kLeadBRow)
                                                 : (TileN * kLeadBCol);
-  static constexpr int kStageElements =
-      kStages * (kStageAElements + kStageBElements);
   //: The shared window: the staged buffers and nothing else. `gemm_tile.cuh`
   //: turns this into the byte count a launch asks for.
-  static constexpr int kSmemElements = kStageElements;
+  static constexpr int kSmemElements =
+      kStages * (kStageAElements + kStageBElements);
 
+  // The k slice and the pad are multiples of eight, so every staged row and
+  // every staged column is a whole number of sixteen-byte chunks: that is what
+  // the wide copy and `ldmatrix` need.
   static_assert(TileM % (WarpsM * 16) == 0 && TileN % (WarpsN * 16) == 0,
                 "the warp grid must cover the tile in whole fragments");
-  static_assert(TileK % 16 == 0, "one k slice must split into whole fragments");
-  static_assert(Pad % 8 == 0 && kLeadARow % 8 == 0 && kLeadBRow % 8 == 0,
-                "a staged row must keep every sixteen-byte chunk aligned");
-  static_assert(kLeadACol % 8 == 0 && kLeadBCol % 8 == 0,
-                "a staged column must keep every sixteen-byte chunk aligned");
-  static_assert(TileK % 8 == 0, "a staged row must be whole chunks");
+  static_assert(TileK % 16 == 0 && Pad % 8 == 0,
+                "a staged row must split into whole fragments and chunks");
   static_assert(Stages >= 2 && Stages <= 8,
                 "a pipeline of two to eight stages");
-  static_assert(SwizzleM >= 0, "a swizzle of zero m-tiles is the plain order");
+  static_assert(SwizzleM >= 1, "a group of one m-tile is the plain order");
 };
 
 //: The base schedule: a whole 128 by 64 tile, four warps, a 32-deep slice. It
 //: is the narrow tile the sweep keeps for a shape no wider schedule serves.
-using PlanBase = Plan<128, 64, 32, 2, 2, 8, 2, 0>;
+using PlanBase = Plan<128, 64, 32, 2, 2, 8, 2, 1>;
 //: A quarter of the tile and half the threads, for a small or a ragged shape.
 //: The five by twelve group of the Muon step is forty calls of a few
 //: microseconds each, and this is the schedule that measured fastest on it.
-using PlanSmall = Plan<64, 64, 32, 1, 2, 8, 2, 0>;
+using PlanSmall = Plan<64, 64, 32, 1, 2, 8, 2, 1>;
 //: The square tile and eight warps that step 3 shipped, with four stages.
-using PlanWide = Plan<128, 128, 32, 4, 2, 8, 4, 0>;
+using PlanWide = Plan<128, 128, 32, 4, 2, 8, 4, 1>;
 //: The square tile with a 64-deep slice: the same 64 flops a byte, half the
 //: barriers over k, and two blocks of 72 KiB still fit a Hopper multiprocessor.
 //: Step 4's winner, kept without the swizzle as the order's control.
-using PlanKDeep = Plan<128, 128, 64, 2, 4, 8, 2, 0>;
+using PlanKDeep = Plan<128, 128, 64, 2, 4, 8, 2, 1>;
 //: The same tile and depth, walked in groups of eight m-tiles.
 using PlanKDeepSwizzle = Plan<128, 128, 64, 2, 4, 8, 2, 8>;
 //: The same tile with a 96-deep slice and the swizzle. Its window holds two
@@ -164,19 +160,14 @@ inline constexpr int kDefaultSchedule = kScheduleKDeepSwizzle;
 template <typename PlanT>
 NANOCHAT_GEMM_HOST_DEVICE inline void TileOf(int index, int grid_m, int grid_n,
                                              int* m_tile, int* n_tile) {
-  if constexpr (PlanT::kSwizzleM == 0) {
-    *m_tile = index / grid_n;
-    *n_tile = index - *m_tile * grid_n;
-  } else {
-    const int span = PlanT::kSwizzleM * grid_n;
-    const int group = index / span;
-    const int base = group * PlanT::kSwizzleM;
-    const int left = grid_m - base;
-    const int m_span = left < PlanT::kSwizzleM ? left : PlanT::kSwizzleM;
-    const int within = index - group * span;
-    *m_tile = base + within % m_span;
-    *n_tile = within / m_span;
-  }
+  const int span = PlanT::kSwizzleM * grid_n;
+  const int group = index / span;
+  const int base = group * PlanT::kSwizzleM;
+  const int left = grid_m - base;
+  const int m_span = left < PlanT::kSwizzleM ? left : PlanT::kSwizzleM;
+  const int within = index - group * span;
+  *m_tile = base + within % m_span;
+  *n_tile = within / m_span;
 }
 
 #undef NANOCHAT_GEMM_HOST_DEVICE

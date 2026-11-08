@@ -11,6 +11,7 @@
 //
 // CPU only: no device, no driver, no toolkit.
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdio>
 #include <cstdlib>
@@ -417,39 +418,37 @@ void CheckResolve() {
 
 // The order a block walks the tile grid in is a bijection, whatever the grid
 // and whatever the group size. A duplicate loses a tile, and a gap leaves one
-// at the value C had.
+// at the value C had. A tile the map puts outside the grid leaves a gap, so the
+// one count covers both defects.
 template <typename PlanT>
 void CheckOrder(const char* what) {
   const char* kCase = "tile order";
-  const int shapes[][2] = {{1, 1},  {2, 3},  {3, 2},  {8, 1}, {9, 4},
+  const int kGrids[][2] = {{1, 1},  {2, 3},  {3, 2},  {8, 1}, {9, 4},
                            {11, 7}, {16, 3}, {17, 5}, {1, 9}, {5, 1}};
-  for (const auto& shape : shapes) {
-    const int grid_m = shape[0];
-    const int grid_n = shape[1];
-    std::vector<int> seen(static_cast<std::size_t>(grid_m) * grid_n, 0);
-    bool inside = true;
-    for (int index = 0; index < grid_m * grid_n; ++index) {
+  for (const auto& grid : kGrids) {
+    const int grid_m = grid[0];
+    const int grid_n = grid[1];
+    const int tiles = grid_m * grid_n;
+    std::vector<int> seen(static_cast<std::size_t>(tiles), 0);
+    for (int index = 0; index < tiles; ++index) {
       int m_tile = 0;
       int n_tile = 0;
       nanochat::kernels::gemm_tile::TileOf<PlanT>(index, grid_m, grid_n,
                                                   &m_tile, &n_tile);
-      if (m_tile < 0 || m_tile >= grid_m || n_tile < 0 || n_tile >= grid_n) {
-        inside = false;
-        continue;
+      if (m_tile >= 0 && m_tile < grid_m && n_tile >= 0 && n_tile < grid_n) {
+        ++seen[static_cast<std::size_t>(m_tile * grid_n + n_tile)];
       }
-      ++seen[static_cast<std::size_t>(m_tile) * grid_n + n_tile];
     }
-    bool bijection = inside;
-    for (int count : seen) {
-      if (count != 1) bijection = false;
-    }
-    Expect(bijection,
+    const bool once = std::all_of(seen.begin(), seen.end(),
+                                  [](int count) { return count == 1; });
+    Expect(once,
            std::string(what) + " covers a " + std::to_string(grid_m) + " by " +
                std::to_string(grid_n) + " grid once",
            kCase);
   }
 }
 
+// The seven schedules of the sweep, each with its own order.
 void CheckOrders() {
   CheckOrder<nanochat::kernels::gemm_tile::PlanSmall>("the small schedule");
   CheckOrder<nanochat::kernels::gemm_tile::PlanBase>("the base schedule");
