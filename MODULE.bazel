@@ -53,6 +53,15 @@ rdma_repository = use_repo_rule("//third_party:rdma.bzl", "rdma_repository")
 
 rdma_repository(name = "rdma")
 
+# NVIDIA CUTLASS, pinned by commit and SHA-256 (docs/build.md, docs/kernels.md
+# Part 3 section 5). The headers are not tracked in this repository, because the
+# lint and format gates would reject them and they are not ours to reformat.
+# `third_party/cutlass.bzl` extracts `include/` only; `//backends/cuda/gemm`
+# compiles against it at `sm_90a`.
+cutlass_repository = use_repo_rule("//third_party:cutlass.bzl", "cutlass_repository")
+
+cutlass_repository(name = "cutlass")
+
 # Python toolchain for the API tests. The `nanochat_cpp` package imports only
 # the standard library, so the system `python3` is enough and no hermetic
 # runtime is downloaded. `local_runtime_repo` introspects that interpreter and

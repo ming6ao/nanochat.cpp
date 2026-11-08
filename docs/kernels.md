@@ -939,6 +939,23 @@ between the shipped tile and cuBLAS is the data path alone: the copy, the shared
 layout, the pipeline depth, the epilogue, and the occupancy. Mechanisms 2 to 7 of
 section 4 are the whole of the work, and mechanism 1 needs no further study.
 
+**Phase 0 of the reuse, and what it settled.** `//dev/cutlass` fetches NVIDIA
+CUTLASS at `b2f249ac` through
+[../third_party/cutlass.bzl](../third_party/cutlass.bzl), and its probe compiles
+the SM90 collective builder and the eight seam cases. Three facts came out of it,
+and each one removes a decision from the phases below.
+
+| Fact | Consequence |
+|---|---|
+| The headers build here, at CUDA 12.0 and C++20 | The vendor path needs no toolkit change |
+| A `cuda_library` that states `archs = ["sm_90a"]` builds beside the command-line `sm_75` | `.bazelrc` gains nothing, and the default build is untouched |
+| The cooperative schedule refuses a tile narrower than 128 in M | The 64 by 256 candidate of section 4 is not a candidate |
+
+The object holds `UTMALDG.3D`, `UTMALDG.3D.MULTICAST`, `UTMASTG.3D`, `HGMMA.64`,
+and `USETMAXREG`, which are mechanisms 2 to 7 of section 4 in one build. The
+adapter that puts them behind `Gemm` and `GemmWgrad` is the next step, and
+`dev/cutlass/README.md` is the record.
+
 **Phase 1 has started, and its first step is done.** The micro-tile of
 `backends/cuda/gemm/mma_bf16.cuh` is `ldmatrix` and
 `mma.sync.aligned.m16n8k16`. It holds two arms: the instruction pair in inline
@@ -990,7 +1007,8 @@ launch cost, so no mainloop change wins it. It passes when the difference is
 | `backends/cuda/gemm.cu` | The library call, the plan cache, and the heuristic query go | Integrator |
 | `backends/cuda/gemm/dispatch.{h,cc}` | The verdict and `GemmTileMode` go, and the table becomes a benchmark record | Kernel agent |
 | `backends/cuda/gemm/**` | The two new mainloops, and the resolver that replaces the verdict | Kernel agent |
-| `.bazelrc` | `sm_90a` for the Hopper device configurations | Build |
+| `third_party/cutlass.bzl`, `MODULE.bazel` | The pinned CUTLASS headers as `@cutlass`; done in phase 0 | Build |
+| `.bazelrc` | Unchanged: the Hopper target names `archs = ["sm_90a"]` on itself | Build |
 | `tools/cuda_sim/**` | The WGMMA and TMA mapping, if phase 2 is to keep an emulated leg | Simulator |
 | `backends/cuda/gemm/README.md` | The record of the removal replaces the record of the rejection | Kernel agent |
 | `docs/tensor-core-gemm-plan.md` | Retired into this part, per [README.md](README.md) § How to add a document, and to retire one | Architect |
@@ -1002,12 +1020,14 @@ launch cost, so no mainloop change wins it. It passes when the difference is
    Either the Simulator workstream lands them before phase 2, or the Hopper
    mainloop keeps a device-only gate. Decide before phase 2 starts, because the
    second choice removes the tree's cheap correctness leg.
-2. **`sm_90a` is a new architecture string.** WGMMA is an architecture
-   conditional instruction, and `.bazelrc` emits `sm_90` today. Phase 0 settled
-   half of this: the builder emits the string on request, a target at `sm_90a`
-   compiles, and the H100 leg runs it through the card job. What remains is a
-   device configuration in `.bazelrc` for the targets that ship, and that is a
-   Build workstream decision before phase 2.
+2. **`sm_90a` is a new architecture string, and it is settled.** WGMMA is an
+   architecture conditional instruction, and `.bazelrc` emits `sm_90` today.
+   `//dev/cutlass:cutlass_probe_lib` closes this by naming the architecture on
+   itself: `rules_cuda`'s `cuda_library` takes an `archs` attribute whose value
+   replaces the command-line one for that target alone. The library builds at
+   `sm_90a` and a binary that links it builds at the command line's `sm_75`, from
+   one build, with no `.bazelrc` line and no extra flag. The default build of
+   `//...` therefore stays untouched. `dev/cutlass/README.md` is the record.
 3. **The fp8 tier may not survive.** It is an optional bit, so withdrawal is
    legal. This part recommends keeping it.
 4. **The tiny group is launch bound.** Section 7 states the exception, and phase

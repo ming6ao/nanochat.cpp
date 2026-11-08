@@ -289,6 +289,39 @@ Bazel is the only supported build. The smallest CUDA gate is
 The CUDA build links `cudart` and cuBLAS. The CPU build links `libm`. Neither
 links cuDNN or a collective library: the native ring needs no vendor library.
 
+### The one header-only vendor: CUTLASS
+
+NVIDIA CUTLASS supplies the Hopper mainloop of
+[kernels.md](kernels.md) Part 3. It is headers and nothing else, so it is a
+**build-time** dependency: the build links no library, and no shipped binary
+holds a CUTLASS symbol. The rule that fetches it is
+[../third_party/cutlass.bzl](../third_party/cutlass.bzl), and `MODULE.bazel`
+instantiates it as `@cutlass`.
+
+| Property | Value |
+|---|---|
+| Pin | commit `b2f249acd20392beeb16f5e5a31f4f1a4e38b3bd`, tag `v4.8.0-23`, `version.h` 4.8.1 |
+| Checksum | the SHA-256 of the archive, checked on every fetch |
+| Licence | BSD-3-Clause, copied into the fetched repository as `LICENSE.txt` |
+| Contents | `include/` only, which is 28.5 MB of the archive's 169 MB |
+| Override | `NANOCHAT_CUTLASS_PATH`, for a host with no network |
+
+**The rule fetches the tree; it does not track it. That is a build rule.** The
+lint pass checks every source that `git ls-files` reports, and the CUTLASS
+headers break four of its five rules on purpose. An external repository keeps the
+vendor tree out of the lint pass, out of the format gate, and out of a diff.
+
+The headers also emit about fifteen thousand warnings, and `--config=sim-gate`
+builds with `-Werror`. A target that compiles against CUTLASS therefore states
+its own `copts` and does not load `nanochat_cuda_copts`.
+
+**A Hopper target names its own architecture.** `rules_cuda`'s `cuda_library`
+takes an `archs` attribute, and its value replaces the command-line
+`--@rules_cuda//cuda:archs` for that target alone. The WGMMA mainloop needs
+`sm_90a`, so its target states `archs = ["sm_90a"]` and the tree's default build
+stays at `sm_75`. No `.bazelrc` line changes and no command line gains a flag.
+`dev/cutlass/README.md` records the probe that proved it.
+
 ## Backends and selection
 
 Backend and precision are build and link choices, not runtime switches.
@@ -560,7 +593,7 @@ Z2  Adapters     torch, numpy, tiktoken,      nanochat_cpp_bridge
                  datasets, nanochat
 Z1  Python core  standard library only        nanochat_cpp
 Z0  C++ core     libm, cudart, cuBLAS,        src/**, include/**, backends/**
-                 zstd (host only), RDMA
+                 zstd (host only), RDMA, CUTLASS (headers, build time)
 ```
 
 The arrow points down. A zone imports a lower zone and never a higher one.

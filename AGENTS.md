@@ -36,7 +36,7 @@ happen through the integrator.
 | **Runtime** | `include/nanochat/tensor.h`, `src/tensor.cc`, `backends/cpu/` (`caps.json` is the device's single declaration; no header row is added per device) | frozen `kernels.h` |
 | **Oracle** | `tools/dump_*.py`, `tests/`, `tests/data/*.bin` | frozen `tensor.h` |
 | **Kernel agents** (one per family) | `backends/cuda/kernels/<family>.cu` + `<family>_test.cc` + `<family>_benchmark.cc` in the same directory | frozen `kernels.h` |
-| **Kernel agents** (shared) | `backends/cuda/kernels/testing/**` (host test scaffolding), `dev/kernels/**` (unpromoted prototypes) | — |
+| **Kernel agents** (shared) | `backends/cuda/kernels/testing/**` (host test scaffolding), `dev/kernels/**` (unpromoted prototypes), `dev/cutlass/**` (the CUTLASS bring-up probe) | — |
 | **Kernel agents** (the hand GEMM) | `backends/cuda/gemm/**` and `backends/cuda/gemm.cu` | frozen `kernels.h`, frozen `tensor.h` |
 | **Collective** | `backends/cuda/collective/**`, `dev/collective/**` | frozen `kernels.h`, `src/rendezvous.h` |
 | **Workflow** | `src/ops.cc`, `src/model.cc`, `src/generate.cc` (the rollout seed mix), and the private headers those units own: `src/model_factory.{h,cc}`, `src/inference_view.h`, `src/kernel_params_check.h`, `src/fp8_policy.h` | `kernels.h`, CPU backend |

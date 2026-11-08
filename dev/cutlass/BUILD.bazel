@@ -1,0 +1,65 @@
+# dev/cutlass/ -- the CUTLASS bring-up probe (docs/kernels.md Part 3 section 5).
+#
+# The probe answers the three questions that stand between this tree and a
+# Hopper mainloop borrowed from CUTLASS, and it measures nothing:
+#
+#   1. does the vendored header tree compile here, at CUDA 12.0 and C++20?
+#   2. does a `cuda_library` that states `archs = ["sm_90a"]` build beside the
+#      tree's command-line `sm_75`, so the default build needs no Hopper flag?
+#   3. which tile candidates fit the Hopper window, and what stage count does
+#      the collective builder choose for each?
+#
+# The second question is why the target is split in two. `:cutlass_probe_lib`
+# is the only target in the tree that names an architecture on itself, and
+# `:cutlass_probe` is a binary at the command-line architecture that links it.
+# A build of both therefore proves the coexistence that question 2 asks about.
+#
+# **The vendor options are this directory's own, and not `nanochat_cuda_copts`.**
+# The CUTLASS headers emit thousands of warnings (an implicit `this` capture, a
+# constexpr host call from a device function), and the tree's `--config=sim-gate`
+# turns warnings into errors. The vendor translation unit therefore builds with
+# the optimisation flags only, so the gate keeps its meaning for the tree's own
+# source. `third_party/cutlass.bzl` states `includes = ["include"]`, which is
+# `-isystem` for this target, so the header warnings do not reach it either.
+
+load("//:nanochat.bzl", "cuda_binary", "cuda_library")
+
+package(default_visibility = ["//visibility:public"])
+
+# The architecture the WGMMA atom and the Tensor Memory Accelerator need. It is
+# stated here and nowhere else, so no `.bazelrc` line and no command-line flag
+# carries it.
+CUDA_HOPPER_ARCHS = ["sm_90a"]
+
+# The vendor translation unit. It holds the whole tile table and the eight seam
+# cases, so it is the slowest single action in this directory: one CUTLASS
+# kernel instantiation measured about 19 s and 1.2 GiB on the development host.
+cuda_library(
+    name = "cutlass_probe_lib",
+    srcs = ["cutlass_probe.cu"],
+    hdrs = ["cutlass_probe.h"],
+    archs = CUDA_HOPPER_ARCHS,
+    copts = [
+        "-O2",
+        "-Xcompiler",
+        "-O2",
+    ],
+    deps = ["@cutlass//:cutlass"],
+)
+
+# The host report. Its own architecture is the command line's, which is the
+# point: this target and `:cutlass_probe_lib` disagree on purpose.
+cuda_binary(
+    name = "cutlass_probe",
+    srcs = ["cutlass_probe_main.cu"],
+    hdrs = ["cutlass_probe.h"],
+    copts = [
+        "-O2",
+        "-Xcompiler",
+        "-O2",
+    ],
+    deps = [
+        ":cutlass_probe_lib",
+        "//include/nanochat:nanochat",
+    ],
+)

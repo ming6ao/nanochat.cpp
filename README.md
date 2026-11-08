@@ -36,8 +36,9 @@ reference.
 - A runtime precision switch. Precision is a build and link decision
   ([docs/precision.md](docs/precision.md)).
 - A runtime kernel registry, a virtual dispatch table, or a memory planner.
-- A user of a third-party runtime beyond CUDA, cuBLAS, and the ZSTD
-  decompressor in `src/parquet/` ([docs/build.md](docs/build.md)).
+- A user of a third-party runtime beyond CUDA, cuBLAS, the ZSTD
+  decompressor in `src/parquet/`, and the CUTLASS headers, which are a
+  build-time dependency and link nothing ([docs/build.md](docs/build.md)).
 - A multi-node trainer. Data parallel today works inside one host, and the
   NCCL transport is not complete.
 - A finished post-training product.
