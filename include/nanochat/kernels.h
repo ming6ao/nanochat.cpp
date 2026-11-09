@@ -540,13 +540,23 @@ void PointwiseBackward(const PointwiseParams& params, const ComputeType* a,
                        const ComputeType* b, const ComputeType* dy,
                        ComputeType* da, ComputeType* db);
 
+// Cross-entropy over the real vocabulary slice. `losses` is `rows` fp32 values.
+// A non-null `stats` is `2 * rows` floats: the forward writes `stats[2 * r] =
+// row_max` and `stats[2 * r + 1] = sum_exp` for every row it computes, and the
+// backward of the same rows reads the pair instead of rebuilding it, so the
+// logits are read once instead of three times (docs/kernels.md Part 4). The
+// caller owns the buffer, and evaluation passes null.
 void ClassifierForward(const ClassifierParams& params,
                        const ComputeType* logits, const int* targets,
-                       float* losses);
+                       float* losses, float* stats = nullptr);
 
+// A null `stats` rebuilds the row statistics. `dlogit_scale` is folded into the
+// last multiply of the write, so a caller that states the loss normalization
+// here needs no scale pass over the gradient.
 void ClassifierBackward(const ClassifierParams& params,
                         const ComputeType* logits, const int* targets,
-                        ComputeType* dlogits);
+                        ComputeType* dlogits, const float* stats = nullptr,
+                        float dlogit_scale = 1.0f);
 
 void EmbeddingForward(int tokens, int dim, const int* ids,
                       const ComputeType* table, ComputeType* out);

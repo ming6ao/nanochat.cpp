@@ -1667,6 +1667,67 @@ void TestClassifierRowScale() {
                         "classifier row_scale backward");
 }
 
+// The fused classifier's statistics hand-off and its folded loss normalization
+// (docs/kernels.md Part 4 section 2). Neither may move a value: the hand-off
+// path agrees with the rebuild path, and the fold agrees with a scale pass over
+// the result. The tolerance is not zero because this backend accumulates the
+// sum in double and the hand-off stores it as a float, which is the one place
+// the two paths differ (the note on the stored pair in `ClassifierForward`).
+void TestClassifierStatsHandoff() {
+  ClassifierParams p;
+  p.rows = 4;
+  p.vocab_size = 5;
+  p.padded_vocab_size = 8;
+  p.softcap = 15.0f;
+  p.ignore_index = -1;
+  Rng rng;
+  std::vector<float> logits0 = RandomVec(4 * 8, &rng);
+  int targets[4] = {1, 4, 0, 3};
+  std::vector<ComputeType> logits = ToStorage(logits0);
+  std::vector<float> losses(4);
+
+  // Every computed row states the pair, and the pair is the one a "finite" and
+  // a "positive" test can tell apart from an unwritten sentinel.
+  std::vector<float> stats(2 * 4, -7.0f);
+  kernels::ClassifierForward(p, logits.data(), targets, losses.data(),
+                             stats.data());
+  for (int r = 0; r < 4; ++r) {
+    Check(std::isfinite(stats[2 * r]), "classifier stats row_max finite");
+    Check(stats[2 * r + 1] > 0.0f, "classifier stats sum_exp positive");
+  }
+
+  // An ignored row writes neither value: its loss is zero and its gradient is
+  // zero, so a caller that reuses the buffer never reads a stale pair.
+  int masked[4] = {1, 4, 0, p.ignore_index};
+  std::vector<float> masked_stats(2 * 4, -7.0f);
+  kernels::ClassifierForward(p, logits.data(), masked, losses.data(),
+                             masked_stats.data());
+  CheckClose(U(masked_stats[2 * 3]), -7.0, 0.0,
+             "classifier stats ignored row untouched");
+  CheckClose(U(masked_stats[2 * 3 + 1]), -7.0, 0.0,
+             "classifier stats ignored row sum untouched");
+
+  // The hand-off path against the rebuild path.
+  std::vector<ComputeType> rebuilt(4 * 8);
+  std::vector<ComputeType> handed(4 * 8);
+  kernels::ClassifierBackward(p, logits.data(), targets, rebuilt.data());
+  kernels::ClassifierBackward(p, logits.data(), targets, handed.data(),
+                              stats.data());
+  for (std::size_t i = 0; i < rebuilt.size(); ++i) {
+    CheckClose(U(handed[i]), U(rebuilt[i]), 1e-6,
+               "classifier stats hand-off gradient");
+  }
+
+  // The fold against a scale pass over the rebuild's result.
+  std::vector<ComputeType> folded(4 * 8);
+  kernels::ClassifierBackward(p, logits.data(), targets, folded.data(),
+                              stats.data(), 0.25f);
+  for (std::size_t i = 0; i < rebuilt.size(); ++i) {
+    CheckClose(U(folded[i]), 0.25 * U(rebuilt[i]), 1e-6,
+               "classifier folded loss normalization");
+  }
+}
+
 void TestEmbedding() {
   Rng rng;
   const int tokens = 4;
@@ -1870,6 +1931,7 @@ int main() {
     TestRmsNormComposition();
     TestClassifier();
     TestClassifierRowScale();
+    TestClassifierStatsHandoff();
   }
   // The two reductions and the Classifier's offset case compare against a
   // double-precision reference evaluated from the *stored* operands, so a

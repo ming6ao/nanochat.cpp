@@ -1257,7 +1257,7 @@ void ClassifierForward(const ClassifierShape& shape, const ComputeType* logits,
     params.softcap = shape.softcap;
     params.ignore_index = shape.ignore_index;
     params.row_scale = shape.row_scale_dev;
-    kernels::ClassifierForward(params, logits, targets, losses);
+    kernels::ClassifierForward(params, logits, targets, losses, shape.stats);
     return;
   }
   ComputeScratch row_buffer(vocab);  // the softcapped logit row
@@ -1299,7 +1299,7 @@ void ClassifierForward(const ClassifierShape& shape, const ComputeType* logits,
   }
 }
 
-void ClassifierBackward(const ClassifierShape& shape, const ComputeType* logits,
+bool ClassifierBackward(const ClassifierShape& shape, const ComputeType* logits,
                         const int* targets, ComputeType* dlogits) {
   const int rows = shape.rows;
   const int vocab = shape.vocab_size;
@@ -1311,11 +1311,13 @@ void ClassifierBackward(const ClassifierShape& shape, const ComputeType* logits,
       "classifier", std::isfinite(shape.softcap) && shape.softcap > 0.0f);
   if (rows <= 0 || vocab <= 0 || logits == nullptr || targets == nullptr ||
       dlogits == nullptr) {
-    return;
+    return false;
   }
   if (Fused(kFeatureOverrideClassifier) && FusedClassifierTakesScale(shape)) {
     // The fused backward zeroes the padded tail and every ignored row, which is
-    // the same contract the composition keeps.
+    // the same contract the composition keeps. It also consumes the forward's
+    // row statistics and folds the loss normalization into the write, so the
+    // logits are read once and no scale pass runs.
     ClassifierParams params;
     params.rows = rows;
     params.vocab_size = vocab;
@@ -1323,8 +1325,9 @@ void ClassifierBackward(const ClassifierShape& shape, const ComputeType* logits,
     params.softcap = shape.softcap;
     params.ignore_index = shape.ignore_index;
     params.row_scale = shape.row_scale_dev;
-    kernels::ClassifierBackward(params, logits, targets, dlogits);
-    return;
+    kernels::ClassifierBackward(params, logits, targets, dlogits, shape.stats,
+                                shape.dlogit_scale);
+    return true;
   }
   FloatScratch row_max(1);
   FloatScratch sum_exp(1);
@@ -1400,6 +1403,9 @@ void ClassifierBackward(const ClassifierShape& shape, const ComputeType* logits,
           static_cast<std::size_t>(padded - vocab) * sizeof(ComputeType));
     }
   }
+  // Nothing folded the normalization: the composition writes the row gradient
+  // and the caller's scale pass applies the mean.
+  return false;
 }
 
 // ---------------------------------------------------------------------------

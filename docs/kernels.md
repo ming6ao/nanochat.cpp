@@ -1949,42 +1949,77 @@ rule: a call inside the k loop refuses the body, and a call outside it does not.
 `assert`, so no other target inherits the defect. The shared option list stays
 as it is.
 
-## Part 4. Two kernel designs the tree does not implement
+## Part 4. Two kernel designs, and what landed
 
-The arithmetic below is agreed and the tree does not carry it. Both changes keep
-the frozen seam's meaning and neither adds a family.
+The arithmetic below is agreed. Both changes keep the frozen seam's meaning and
+neither adds a family. Each section states what shipped, what the gate is, and
+what is left.
 
 ### 1. Vectorized row kernels
 
-Every row kernel in `backends/cuda` uses scalar strided access: the loops step
-one element at a time. On every supported card the ridge point is tens of flop
-for each byte, and the row kernels sit far below it. `row_benchmark.cc` reports milliseconds only, so an
-achieved byte rate column comes first.
+**State.** Shipped for five families and refused for the sixth. The helper is
+header-only in `backends/cuda/kernels/device_utils.cuh`, so it inlines and never
+merges a kernel boundary, and it landed as `ComputeVector`, `FloatVector`,
+`VectorReady`, and `VectorGrid`. This section previously named a `Packed<T>`
+with `LoadPacked` and `StorePacked`; no such symbol exists, so a reader of an
+older note looks for the wrong name. `ComputeVector` is `alignas(16)` and holds
+`16 / sizeof(ComputeType)` elements, so the fp32 build packs four.
 
-The helper is header-only in `backends/cuda/kernels/device_utils.cuh`, so it
-inlines and never merges a kernel boundary. `Packed<T>` is `alignas(16)` and
-holds `16 / sizeof(T)` elements, so the fp32 build packs four. `LoadPacked` and
-`StorePacked` cast to `int4`, and the streaming forms use `__ldcs` and `__stcs`.
+| Family | State | What moves in a vector |
+|---|---|---|
+| `pointwise.cu` | Shipped before this part | both operands and the result, for every flat code and the row-scale code |
+| `attention.cu` | Shipped before this part | the streaming legs |
+| `adamw.cu`, `muon.cu`, `muon_fused.cu` | Shipped before this part | the fp32 state and the compute copy beside it |
+| `rms_norm.cu` | This change | `x`, `out`, `dy`, `dx`: the write pass of the forward and of the backward |
+| `embedding.cu` | This change | the forward's gather of `out`, one table row per vector |
+| `classifier.cu` | This change | the backward's write of `dlogits` |
+| `grad_norm.cu` | Not done, on purpose | nothing: the reason is below |
 
-| Kernel | Operand | Change | Risk |
-|---|---|---|---|
-| `rms_norm.cu` | `x`, `out` | packed load and store | Low |
-| `pointwise.cu` | `a`, `b`, `out` | packed load and store | Low |
-| `embedding.cu` | `out`, `dtable` | packed store, scalar gather | Low |
-| `grad_norm.cu` | `grads` | packed load | Low |
-| `attention.cu` | softmax rows | packed load and store | Medium |
-| `classifier.cu` | `logits` | packed load, scalar reduction | Medium |
+**No reduction moves.** Every family in the table keeps its scalar reduction
+helper. Only the element-wise traffic is packed. A packed call is therefore
+identical to the scalar one in every bit, and not merely close. This is stricter
+than the plan asked for: the plan accepted a moved per-thread sum and let the
+oracle tolerance decide. The tree does not need to accept that, because no
+reduction has to be packed to reach the bytes.
 
-A kernel takes the packed loop only when three conditions hold: the pointer is
-16-byte aligned, the row width divides by the packed count, and the row count
-divides by the block stride. Otherwise it takes the scalar loop, which produces
-the same arithmetic. `Workspace::Reserve` gains 16-byte alignment for the slots
-the packed kernels read.
+**`grad_norm.cu` is the one refusal, and the reason is arithmetic.** Its partial
+kernel accumulates the sum of squares in double, and that norm is the value the
+clip scale divides every gradient by. A packed load re-maps a thread onto four
+consecutive elements instead of a strided set, so the double accumulation order
+changes and the norm moves in its last bits. That is a change to every update of
+the step, and it is not a change the plan's "Low" risk column priced in. The
+read is also already coalesced: one warp reads 32 consecutive floats, so the
+vector form saves one instruction per four elements and not one byte of traffic.
+It buys no bandwidth and spends the reference, so it stays out until a card
+measurement asks for it.
 
-A packed loop changes the order of the per-thread accumulation, so the last bits
-of a sum can move. The fp32 oracle tolerance decides the result. The classifier
-softmax keeps its scalar reduction, because a packed reduction can move
-`row_max` by one unit in the last place.
+**The byte-rate column is in.** `row_benchmark.cc` reports `GB/s` beside
+`ms/iter`. The count is the algorithmic traffic of one call. A kernel that reads
+a row twice counts that read once, because the second pass is the one the cache
+absorbs. Without the column a packed loop shows up as a time with no
+denominator, which is why the plan put the column first.
+
+**The three conditions hold in every family.** The pointer is 16-byte aligned,
+the row width divides by the vector width, and the row's own base is aligned by
+that divisibility. `VectorReady` states the first two for the caller, and the
+scalar kernel is the fallback. A buffer the caller does not own is therefore
+never read past its end, and a shape the tests use can never reach a packed loop
+by accident.
+
+**What the gates are.** The existing family tests ride the GPU tiers. They now
+cover both paths: a tiny shape whose row width is 4 or 8 takes the packed loop,
+and a shape whose width is odd takes the scalar one. The CPU suite is unchanged,
+because the CPU backend has one loop and that loop is the reference.
+
+The simulator leg ran and passed. `tools/nanochat simulate --device h100`
+compiles the same `.cu` sources with the host compiler, and it runs each block as
+a set of fibers. Three tests therefore compare every packed path with the CPU
+reference: `//tests:oracle_test`, `//tests:train_parity_test`, and
+`//tests:numerics_trace_test`. All three passed.
+
+What is left is the on-card tier, which measures and does not re-derive the
+arithmetic. This part is therefore `Correct off device, and the GPU tiers are
+pending a card run`.
 
 ### 2. The classifier statistics hand-off
 
@@ -1992,41 +2027,86 @@ The classifier holds `raw_logits_` and `dlogits_`, each 4.3 GB at `R = 32768`
 and `padded_vocab = 32768` in fp32. The logits buffer moves six times per step,
 and two of those passes rebuild statistics that the forward pass already had.
 
-Two independent changes remove most of that traffic, and both are bit identical
-to the current result.
+Two independent changes remove most of that traffic.
 
 1. **The statistics hand-off.** `ClassifierForward` writes `(row_max, sum_exp)`
    per row and `ClassifierBackward` reads the pair. The pair is `2 * rows`
-   floats, about 256 KB. The value is the same bit for bit, because both calls
-   use the same input, the same reduction, and the same order. Two logits reads
-   and one `RowLogSumExp` call leave.
-2. **The fused scale.** `ClassifierBackward` takes `dlogit_scale = scale / rows`
-   and writes `dlogits[j] = (p - onehot) * sech2 * dlogit_scale`. The separate
-   `PointwiseForward(kScale)` pass disappears and the arithmetic order does not
-   change.
+   floats, about 256 KB. The value is the same bit for bit on a device, because
+   both calls use the same input, the same reduction, and the same order. Two
+   logits reads and one `RowLogSumExp` call leave.
+2. **The fused scale.** `ClassifierBackward` takes a `dlogit_scale` and writes
+   `dlogits[j] = (p - onehot) * sech2 * row_scale * dlogit_scale`. The separate
+   `PointwiseForward(kScale)` pass disappears. The store keeps the two roundings
+   that pass had: the value rounds to the compute type, and the scale multiplies
+   that rounded value. A bf16 build therefore keeps the bits it shipped with,
+   and an fp32 build sees one multiplication by one constant.
 
 Backward logits reads fall from 3 to 1 and scale passes from 2 to 0, which is
 about 17 GB less traffic per step.
 
-The seam change is additive, and the architect owns the header:
+**The count applies to the fused family, and a card runs the fused family.**
+`backends/cuda/caps.json` declares `override_classifier` on both `h100` and
+`t4`, so the CUDA path takes the fused kernel. `src/ops.cc` takes the
+composition only on a device without the bit. The CPU backend, the simulator's
+reference, and the evaluation path keep the composition, and
+`src/reference_caps_test.cc` pins that the reference mask has no such bit.
+
+The seam change is additive, and the architect owns the header. It landed with
+the two new arguments trailing and defaulted, so no call site moved:
 
 ```cpp
 // Forward writes the per-row statistics when `stats` is non-null:
 // stats[2*r] = row_max, stats[2*r+1] = sum_exp. Evaluation passes null.
 void ClassifierForward(const ClassifierParams& params,
                        const ComputeType* logits, const int* targets,
-                       ComputeType* losses, float* stats = nullptr);
+                       float* losses, float* stats = nullptr);
 
 // Backward consumes the statistics when `stats` is non-null, and rebuilds them
 // otherwise. `dlogit_scale` folds the loss normalization into the write.
 void ClassifierBackward(const ClassifierParams& params,
                         const ComputeType* logits, const int* targets,
-                        const float* stats, float dlogit_scale,
-                        ComputeType* dlogits);
+                        ComputeType* dlogits, const float* stats = nullptr,
+                        float dlogit_scale = 1.0f);
 ```
 
-The default argument keeps every call site valid, and the null path keeps the
-current behaviour, so the kernel test compares the two paths.
+The defaults keep every call site valid, and the null path keeps the current
+behaviour, so the kernel test compares the two paths.
+
+**What landed, and what each piece owns.** Both backend arms state both
+arguments. `backends/cuda/kernels/classifier.cu` writes the pair from the
+`RowLogSumExp` it already ran, and reads it instead of rebuilding.
+`backends/cpu/kernels.cc` does the same. `src/ops.h` gains `stats` and
+`dlogit_scale` on `ClassifierShape`.
+
+`ops::ClassifierBackward` returns a bool that says whether the call folded the
+scale. Only the fused arm can fold it, and the composition must still see its
+pass. `src/model.cc` allocates `classifier_stats_` as `2 * rows` floats. It
+fills that buffer on the training forward only, and drops the full-buffer
+`kScale` pass when the call folded. The weighted path states `dlogit_scale` of
+one, because its per-row array already carries `scale / divisor`. It therefore
+keeps the arithmetic it had.
+
+**One caveat, stated so no one chases it.** The CPU arm accumulates `sum_exp` in
+double, so the pair it stores is the float-rounded sum and the rebuild is the
+double one. The two paths there agree to the last bit of a float and not past
+it, which the test states as a `1e-6` tolerance. On a device both paths call the
+same float reduction, so the test compares those two for exact equality.
+
+**What this session did not measure, and what decides it.** The 17 GB and the
+step time are the design's arithmetic and not a recorded run. The gate is the
+step protocol of `docs/performance.md`. It takes two untraced runs of 200 steps
+on `base` at the H100, one before and one after. Each run reports the step time
+and the Model FLOPs share. A `base` row enters [baselines.json](baselines.json)
+only when the two runs agree on a direction.
+
+The correctness gate ran here, and it needs no card. `//backends/cpu:kernels_test`
+compares the two paths. `tools/nanochat simulate --device h100` runs the fused
+classifier through the emulator, because the declared `h100` mask carries
+`override_classifier`, so `//tests:train_parity_test` and
+`//tests:numerics_trace_test` compare the hand-off with the CPU reference and
+both passed. `//backends/cuda/kernels:classifier_gpu_test` is the on-card check.
+It compares the two paths for exact equality, beside a `vocab` that divides by
+the vector width and one that does not, and it did not run here.
 
 **The rejected option.** `llm.c` overwrites the logits buffer with the gradients,
 which would remove `dlogits_` and 4.3 GB of arena. This tree cannot do it.

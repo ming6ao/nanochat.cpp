@@ -160,6 +160,62 @@ void RunWeightedCase(int rows, int vocab, int padded, bool use_ignore,
                         (std::string(name) + " dlogits").c_str());
 }
 
+// The statistics hand-off and the folded loss normalization (docs/kernels.md
+// Part 4 section 2). Both must be exact on this backend: the forward stores the
+// pair `RowLogSumExp` produced from the same row, and the fold multiplies the
+// same rounded value the separate scale pass multiplied.
+void RunStatsHandoffCase(int rows, int vocab, int padded, const char* name) {
+  ClassifierParams p;
+  p.rows = rows;
+  p.vocab_size = vocab;
+  p.padded_vocab_size = padded;
+  p.softcap = 15.0f;
+  p.ignore_index = -1;
+
+  Rng rng;
+  std::vector<float> logits = RandomVec(rows * padded, &rng);
+  std::vector<int> targets(rows);
+  for (int r = 0; r < rows; ++r) targets[r] = r % vocab;
+  targets[rows / 2] = p.ignore_index;
+
+  DevBuf<ComputeType> dlogits_in(ToStorage(logits));
+  DevBuf<float> losses(rows);
+  DevBuf<float> stats(2 * rows);
+  nanochat::kernels::ClassifierForward(p, dlogits_in.ptr, targets.data(),
+                                       losses.ptr, stats.ptr);
+  nanochat::kernels::Synchronize();
+
+  // The pair the forward stored is the pair the backward would rebuild, so the
+  // two gradients agree bit for bit.
+  DevBuf<ComputeType> rebuilt(rows * padded);
+  DevBuf<ComputeType> handed(rows * padded);
+  nanochat::kernels::ClassifierBackward(p, dlogits_in.ptr, targets.data(),
+                                        rebuilt.ptr);
+  nanochat::kernels::ClassifierBackward(p, dlogits_in.ptr, targets.data(),
+                                        handed.ptr, stats.ptr);
+  nanochat::kernels::Synchronize();
+  const std::vector<float> rebuild_values = FromStorage(rebuilt.Download());
+  const std::vector<float> handoff_values = FromStorage(handed.Download());
+  if (rebuild_values != handoff_values) {
+    std::printf("FAIL: %s hand-off moved the gradient\n", name);
+    ++Failures();
+  }
+
+  // The fold against a scale pass over the rebuild's own result.
+  const float scale = 0.125f;
+  DevBuf<ComputeType> folded(rows * padded);
+  nanochat::kernels::ClassifierBackward(p, dlogits_in.ptr, targets.data(),
+                                        folded.ptr, stats.ptr, scale);
+  nanochat::kernels::Synchronize();
+  const std::vector<float> folded_values = FromStorage(folded.Download());
+  std::vector<float> wanted(rebuild_values.size());
+  for (std::size_t i = 0; i < wanted.size(); ++i) {
+    wanted[i] = scale * rebuild_values[i];
+  }
+  CheckVectorClose(folded_values, wanted, 1e-6,
+                   (std::string(name) + " folded scale").c_str());
+}
+
 }  // namespace
 
 int main() {
@@ -169,9 +225,16 @@ int main() {
   RunCase(6, 10, 10, false, "no-pad");
   RunCase(6, 10, 16, false, "padded");
   RunCase(6, 10, 16, true, "ignore-index");
+  // A vocabulary that divides by the vector width takes the packed write, and
+  // one that does not takes the scalar write. Both are gated.
+  RunCase(6, 12, 16, false, "vector-vocab");
+  RunCase(6, 12, 16, true, "vector-vocab-masked");
   // Tiny classifier shapes from a B=2, T=8 batch (rows = 16).
   RunWeightedCase(16, 10, 16, false, "weighted");
   RunWeightedCase(16, 10, 16, true, "weighted-masked");
+  RunWeightedCase(16, 12, 16, true, "weighted-vector-vocab");
+  RunStatsHandoffCase(16, 10, 16, "stats-handoff");
+  RunStatsHandoffCase(16, 12, 16, "stats-handoff-vector-vocab");
 
   if (Failures() != 0) {
     std::printf("classifier: %d check(s) failed\n", Failures());

@@ -247,12 +247,26 @@ struct ClassifierShape {
   const float* row_scale = nullptr;  // host array of `rows` weights, or null
   const float* row_scale_dev =
       nullptr;  // the same array on the device, or null
+  // Optional per-row softmax statistics of the same logits: `2 * rows` floats,
+  // written by the forward and read by the backward, so the fused family reads
+  // the logits once in the backward instead of three times. A null pointer
+  // rebuilds them, which is the composition's path and the evaluation path
+  // (docs/kernels.md Part 4 section 2).
+  float* stats = nullptr;
+  // The loss normalization the fused backward folds into its write. One asks
+  // for no fold, so the caller scales the buffer itself.
+  float dlogit_scale = 1.0f;
 };
 
 void ClassifierForward(const ClassifierShape& shape, const ComputeType* logits,
                        const int* targets, float* losses);
 
-void ClassifierBackward(const ClassifierShape& shape, const ComputeType* logits,
+// Returns true when the call folded `dlogit_scale` into the gradient write, so
+// the caller must not scale `dlogits` again. It returns false on the
+// composition path, which has no place to fold the constant. A requested
+// `stats` does not change the result: the composition ignores it, and the fused
+// family is the only reader.
+bool ClassifierBackward(const ClassifierShape& shape, const ComputeType* logits,
                         const int* targets, ComputeType* dlogits);
 
 // ---------------------------------------------------------------------------

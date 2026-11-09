@@ -1369,7 +1369,7 @@ void PointwiseBackward(const PointwiseParams& params, const ComputeType* a,
 
 void ClassifierForward(const ClassifierParams& params,
                        const ComputeType* logits, const int* targets,
-                       float* losses) {
+                       float* losses, float* stats) {
   ConfigureThreads();
   const int rows = params.rows;
   const int vocab = params.vocab_size;
@@ -1409,13 +1409,23 @@ void ClassifierForward(const ClassifierParams& params,
       const float loss =
           static_cast<float>(std::log(sum_exp)) + row_max - target_z;
       losses[r] = loss;
+      // The pair the backward would rebuild (docs/kernels.md Part 4). This
+      // backend accumulates the sum in double, so the stored value is the
+      // float-rounded sum and not the double one; the backward widens it back.
+      // The two paths therefore agree to the last bit of a float and not past
+      // it, which is what `docs/kernels.md` Part 4 records for this backend.
+      if (stats != nullptr) {
+        stats[2 * r] = row_max;
+        stats[2 * r + 1] = static_cast<float>(sum_exp);
+      }
     }
   }
 }
 
 void ClassifierBackward(const ClassifierParams& params,
                         const ComputeType* logits, const int* targets,
-                        ComputeType* dlogits) {
+                        ComputeType* dlogits, const float* stats,
+                        float dlogit_scale) {
   ConfigureThreads();
   const int rows = params.rows;
   const int vocab = params.vocab_size;
@@ -1443,18 +1453,31 @@ void ClassifierBackward(const ClassifierParams& params,
         continue;
       }
       float row_max = -std::numeric_limits<float>::infinity();
+      if (stats != nullptr) {
+        // The forward's pair, widened back to the working type. One pass over
+        // the row replaces the two the rebuild needs.
+        row_max = stats[2 * r];
+      }
       for (int j = 0; j < vocab; ++j) {
         const float t = std::tanh(AsFloat(logits[base + j]) / cap);
         sech2[j] = 1.0f - t * t;
         const float z = cap * t;
         probs[j] = z;
-        if (z > row_max) row_max = z;
+        if (stats == nullptr && z > row_max) row_max = z;
       }
       double sum_exp = 0.0;
-      for (int j = 0; j < vocab; ++j) {
-        sum_exp += std::exp(static_cast<double>(probs[j] - row_max));
+      if (stats != nullptr) {
+        sum_exp = stats[2 * r + 1];
+      } else {
+        for (int j = 0; j < vocab; ++j) {
+          sum_exp += std::exp(static_cast<double>(probs[j] - row_max));
+        }
       }
       const float inv = static_cast<float>(1.0 / sum_exp);
+      // The last multiply carries the caller's loss normalization. It keeps the
+      // two roundings a separate scale pass had: the value rounds to the
+      // compute type and the scale multiplies that rounded value, so a bf16
+      // build keeps the bits it shipped with.
       if (row_scale != nullptr) {
         const float scale = row_scale[r];
         for (int j = 0; j < vocab; ++j) {
@@ -1462,14 +1485,17 @@ void ClassifierBackward(const ClassifierParams& params,
           const float onehot = (j == target) ? 1.0f : 0.0f;
           // dL/d(raw logit) = (softmax - onehot) * d(softcap)/d(raw), then
           // the per-row weight multiplies the whole row.
-          dlogits[base + j] = ToCompute((p - onehot) * sech2[j] * scale);
+          dlogits[base + j] =
+              ToCompute(AsFloat(ToCompute((p - onehot) * sech2[j] * scale)) *
+                        dlogit_scale);
         }
       } else {
         for (int j = 0; j < vocab; ++j) {
           const float p = std::exp(probs[j] - row_max) * inv;
           const float onehot = (j == target) ? 1.0f : 0.0f;
           // dL/d(raw logit) = (softmax - onehot) * d(softcap)/d(raw).
-          dlogits[base + j] = ToCompute((p - onehot) * sech2[j]);
+          dlogits[base + j] = ToCompute(
+              AsFloat(ToCompute((p - onehot) * sech2[j])) * dlogit_scale);
         }
       }
       // The padded vocabulary tail is always zero.

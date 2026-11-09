@@ -205,6 +205,11 @@ class TrainModel final : public Model {
   ComputeType* raw_logits_ = nullptr;
   ComputeType* dlogits_ = nullptr;
   float* losses_ = nullptr;
+  // The classifier's per-row (row_max, sum_exp) pairs, `2 * rows` floats. The
+  // fused forward writes them and the fused backward reads them, so the
+  // backward reads the logits once instead of three times (docs/kernels.md
+  // Part 4 section 2).
+  float* classifier_stats_ = nullptr;
   // The running total of the per-micro-batch means, in device memory.
   float* loss_sum_dev_ = nullptr;
   ComputeType* dx_final_norm_ = nullptr;

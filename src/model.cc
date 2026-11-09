@@ -627,6 +627,11 @@ void TrainModel::BuildTrainWorkspace(int batch, int seq) {
   c(&dlogits_, rows * padded_vocab);
   f(&losses_, rows);
   f(&row_scale_dev_, rows);
+  // The classifier's per-row softmax statistics, the pair the fused forward
+  // hands to its backward (docs/kernels.md Part 4 section 2). One buffer of the
+  // training shape; the evaluation path builds the same shape per chunk and
+  // passes no statistics.
+  f(&classifier_stats_, 2 * rows);
   c(&dx_final_norm_, rows * hidden);
   c(&dx_final_pre_, rows * hidden);
   c(&dbackout_, rows * hidden);
@@ -971,6 +976,11 @@ void TrainModel::RunForward(const int* tokens, const int* targets, int batch,
   classifier.padded_vocab_size = padded_vocab;
   classifier.softcap = kLogitSoftcap;
   classifier.ignore_index = -1;
+  // The composition below is the definition and ignores the two fields; the
+  // fused family hands the statistics from the forward to the backward and
+  // folds the loss normalization into its write. Only the training forward
+  // fills the buffer, so evaluation states neither.
+  classifier.stats = save_for_backward ? classifier_stats_ : nullptr;
   if (save_for_backward) {
     classifier.rows = static_cast<int>(rows);
     ops::LinearForward(x_final_norm, lm_head_, raw_logits_, rows, hidden,
@@ -1090,9 +1100,17 @@ void TrainModel::BackwardInternal(const float* row_weights, float scale,
   }
   classifier.row_scale = host_row_scale;
   classifier.row_scale_dev = row_weights != nullptr ? row_scale_dev_ : nullptr;
+  // The mean over valid targets is a constant of the write, so the fused family
+  // multiplies it in and no pass over the gradient follows.
+  classifier.stats = classifier_stats_;
+  classifier.dlogit_scale = row_weights != nullptr ? 1.0f : scale / divisor;
 
-  ops::ClassifierBackward(classifier, raw_logits_, targets_.data(), dlogits_);
-  if (row_weights == nullptr) {
+  const bool folded = ops::ClassifierBackward(classifier, raw_logits_,
+                                              targets_.data(), dlogits_);
+  // The weighted path already carries `scale / divisor` per row, so it takes
+  // its scale inside the classifier and never took this pass. The unweighted
+  // path takes the pass here unless the fused family folded it into the write.
+  if (!folded && row_weights == nullptr) {
     Pw(PointwiseOp::kScale, static_cast<int>(rows * padded_vocab), dlogits_,
        nullptr, dlogits_, scale / divisor);
   }
