@@ -21,10 +21,13 @@ namespace kernels {
 namespace {
 
 using cuda_kernels::AsFloatDev;
+using cuda_kernels::ComputeVector;
+using cuda_kernels::kVectorElems;
 using cuda_kernels::RowReduceDot;
 using cuda_kernels::RowReduceSumSq;
 using cuda_kernels::RsqrtScale;
 using cuda_kernels::ToComputeDev;
+using cuda_kernels::VectorReady;
 
 // out[r, :] = x[r, :] * rsqrt(mean(x[r, :]^2) + eps).
 __global__ void RmsNormForwardKernel(const RmsNormParams params,
@@ -118,12 +121,84 @@ __global__ void RmsNormFusedResidualBackwardKernel(
   }
 }
 
+// The same arithmetic, one aligned 16-byte vector per thread in the write. The
+// reduction stays the scalar helper, so the sum and the dot product keep their
+// order and the packed path cannot move a value: every element of the row is
+// computed from `r` and its own input, exactly as the scalar loop computes it
+// (docs/kernels.md Part 4 item 1).
+__global__ void RmsNormForwardVectorKernel(const RmsNormParams params,
+                                           const ComputeType* __restrict__ x,
+                                           ComputeType* __restrict__ out,
+                                           float* __restrict__ rstd,
+                                           int vectors) {
+  const int row = blockIdx.x;
+  const std::size_t base = static_cast<std::size_t>(row) * params.dim;
+  const ComputeType* xr = x + base;
+  const ComputeVector* xv = reinterpret_cast<const ComputeVector*>(xr);
+  ComputeVector* ov = reinterpret_cast<ComputeVector*>(out + base);
+
+  const float sum_sq = RowReduceSumSq(xr, params.dim);
+  const float r = RsqrtScale(sum_sq, params.dim, params.eps);
+  if (threadIdx.x == 0) rstd[row] = r;
+
+  for (int v = threadIdx.x; v < vectors; v += blockDim.x) {
+    const ComputeVector in = xv[v];
+    ComputeVector result;
+#pragma unroll
+    for (int k = 0; k < kVectorElems; ++k) {
+      result.e[k] = ToComputeDev(AsFloatDev(in.e[k]) * r);
+    }
+    ov[v] = result;
+  }
+}
+
+// dx = r * dy - (r^3 * dot(x, dy) / dim) * x, one vector per thread. The
+// reduction stays the scalar helper for the reason the forward states, and the
+// loop reads its whole vector before it writes one, so a caller that passes
+// `dx` aliasing `dy` is safe.
+__global__ void RmsNormBackwardVectorKernel(const RmsNormParams params,
+                                            const ComputeType* __restrict__ x,
+                                            const ComputeType* __restrict__ dy,
+                                            const float* __restrict__ rstd,
+                                            ComputeType* __restrict__ dx,
+                                            int vectors) {
+  const int row = blockIdx.x;
+  const std::size_t base = static_cast<std::size_t>(row) * params.dim;
+  const ComputeType* xr = x + base;
+  const ComputeType* dyr = dy + base;
+  const ComputeVector* xv = reinterpret_cast<const ComputeVector*>(xr);
+  const ComputeVector* dyv = reinterpret_cast<const ComputeVector*>(dyr);
+  ComputeVector* dxv = reinterpret_cast<ComputeVector*>(dx + base);
+
+  const float dot = RowReduceDot(xr, dyr, params.dim);
+  const float r = rstd[row];
+  const float coeff = r * r * r * dot / static_cast<float>(params.dim);
+
+  for (int v = threadIdx.x; v < vectors; v += blockDim.x) {
+    const ComputeVector in = xv[v];
+    const ComputeVector gin = dyv[v];
+    ComputeVector result;
+#pragma unroll
+    for (int k = 0; k < kVectorElems; ++k) {
+      result.e[k] =
+          ToComputeDev(r * AsFloatDev(gin.e[k]) - coeff * AsFloatDev(in.e[k]));
+    }
+    dxv[v] = result;
+  }
+}
+
 }  // namespace
 
 void RmsNormForward(const RmsNormParams& params, const ComputeType* x,
                     ComputeType* out, float* rstd) {
   if (params.rows <= 0 || params.dim <= 0) return;
   const int block = cuda_kernels::BlockSizeForDim(params.dim);
+  if (VectorReady(params.dim, {x, out})) {
+    cuda_backend::Launch(RmsNormForwardVectorKernel, dim3(params.rows),
+                         dim3(block), 0, params, x, out, rstd,
+                         params.dim / kVectorElems);
+    return;
+  }
   cuda_backend::Launch(RmsNormForwardKernel, dim3(params.rows), dim3(block), 0,
                        params, x, out, rstd);
 }
@@ -133,6 +208,12 @@ void RmsNormBackward(const RmsNormParams& params, const ComputeType* x,
                      ComputeType* dx) {
   if (params.rows <= 0 || params.dim <= 0) return;
   const int block = cuda_kernels::BlockSizeForDim(params.dim);
+  if (VectorReady(params.dim, {x, dy, dx})) {
+    cuda_backend::Launch(RmsNormBackwardVectorKernel, dim3(params.rows),
+                         dim3(block), 0, params, x, dy, rstd, dx,
+                         params.dim / kVectorElems);
+    return;
+  }
   cuda_backend::Launch(RmsNormBackwardKernel, dim3(params.rows), dim3(block), 0,
                        params, x, dy, rstd, dx);
 }

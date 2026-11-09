@@ -163,6 +163,15 @@ above a group's element count is the whole promotion.
   in every fiber, so a kernel that reads one element of a fragment depends on the
   vendor layout and the emulator would agree with it by accident. That rule is
   what lets `//tools/cuda_sim/emu:gemm_emu_test` gate the hand GEMM off device.
+- **A packed loop moves bytes and never a reduction.** `device_utils.cuh` holds
+  `ComputeVector` and `VectorReady`. A family that packs its element-wise traffic
+  into 16-byte vectors keeps its scalar reduction helper. A packed call is then
+  identical in every bit to the scalar one. The family test covers both paths:
+  one shape whose row width is a multiple of four, and one whose width is not.
+  `embedding.cu`'s scatter-add keeps its element addresses, because an atomic is
+  per element and a vector add is not one. `grad_norm.cu` packs nothing on
+  purpose: its double accumulation order is part of the reference (docs/kernels.md
+  Part 4 item 1).
 
 ## Run the tests
 
