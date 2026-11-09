@@ -151,6 +151,15 @@ inline bool CutlassAlignedC(int elements, bool fp32_c) {
          0;
 }
 
+// True when a count of fp8 elements shares the boundary. An fp8 element is one
+// byte, so the same sixteen-byte boundary is sixteen elements and not eight
+// (docs/kernels.md section 10.4).
+inline bool CutlassAlignedFp8(int elements) {
+  return static_cast<std::int64_t>(elements) %
+             static_cast<std::int64_t>(kCutlassAlignmentBytes) ==
+         0;
+}
+
 // True when a host or device address shares the boundary.
 inline bool CutlassAlignedPointer(const void* pointer) {
   if (pointer == nullptr) return false;
@@ -158,14 +167,24 @@ inline bool CutlassAlignedPointer(const void* pointer) {
          0;
 }
 
+// The two refusals both arms share, in the order they test them: an empty
+// product, then fewer outputs than one tile.
+inline CutlassRefusal JudgeExtents(const ResolvedGemm& gemm) {
+  if (!IsTileCallable(gemm)) return CutlassRefusal::kExtent;
+  if (static_cast<std::int64_t>(gemm.m) * gemm.n < kCutlassMinOutputElements) {
+    return CutlassRefusal::kSize;
+  }
+  return CutlassRefusal::kNone;
+}
+
 // The refusal that governs this call. `a`, `b`, and `c` are the operand and
 // result pointers of the call, so the rule can state the pointer requirement
 // without the caller testing it twice.
 inline CutlassRefusal JudgeCutlass(const ResolvedGemm& gemm, const void* a,
                                    const void* b, const void* c) {
-  if (!IsTileCallable(gemm)) return CutlassRefusal::kExtent;
-  if (static_cast<std::int64_t>(gemm.m) * gemm.n < kCutlassMinOutputElements) {
-    return CutlassRefusal::kSize;
+  if (const CutlassRefusal shared = JudgeExtents(gemm);
+      shared != CutlassRefusal::kNone) {
+    return shared;
   }
   // The batch strides only matter past one batch, and `ResolveGemm` has already
   // given every one of them a value.
@@ -188,6 +207,28 @@ inline CutlassRefusal JudgeCutlass(const ResolvedGemm& gemm, const void* a,
 inline bool IsCutlassCallable(const ResolvedGemm& gemm, const void* a,
                               const void* b, const void* c) {
   return JudgeCutlass(gemm, a, b, c) == CutlassRefusal::kNone;
+}
+
+// The refusal that governs an fp8 call (docs/kernels.md section 10.4). The
+// extents, the size floor, and the pointers follow `JudgeCutlass`; the strides
+// do not, because one operand element is one byte instead of two, and a batch
+// is refused outright because the fp8 seam states no batch stride.
+inline CutlassRefusal JudgeScaledFp8(const ResolvedGemm& gemm, const void* a,
+                                     const void* b, const void* c) {
+  if (const CutlassRefusal shared = JudgeExtents(gemm);
+      shared != CutlassRefusal::kNone) {
+    return shared;
+  }
+  if (gemm.batch_count > 1) return CutlassRefusal::kExtent;
+  if (!CutlassAlignedFp8(gemm.lda) || !CutlassAlignedFp8(gemm.ldb) ||
+      !CutlassAlignedC(gemm.ldc, gemm.fp32_c)) {
+    return CutlassRefusal::kStride;
+  }
+  if (!CutlassAlignedPointer(a) || !CutlassAlignedPointer(b) ||
+      !CutlassAlignedPointer(c)) {
+    return CutlassRefusal::kPointer;
+  }
+  return CutlassRefusal::kNone;
 }
 
 // True when two calls need the same tile schedule. The scalars are excluded: a

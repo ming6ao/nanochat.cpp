@@ -220,6 +220,41 @@ cuda_library(
     alwayslink = True,
 )
 
+# The fp8 arm of the same mainloop (docs/kernels.md section 10.4): E4M3
+# operands, an fp32 accumulator, and a dequantization formed on the device. It
+# is one tile and not a registry row, so it is one target and eight
+# instantiations. Only an fp8 build compiles it, and only an fp8 build of
+# `gemm.cu` calls it, through `if constexpr (kFp8Build)`.
+cuda_library(
+    name = "cutlass_fp8",
+    srcs = select({
+        "//:fp8": ["cutlass_fp8.cu"],
+        "//conditions:default": [],
+    }),
+    hdrs = [
+        "cutlass_candidates.h",
+        "cutlass_kernel.cuh",
+        "cutlass_launch.h",
+        "gemm_shape.h",
+    ],
+    archs = ["sm_90a"],
+    copts = [
+        "-O2",
+        "-Xcompiler",
+        "-O2",
+        "--expt-relaxed-constexpr",
+        "-DNDEBUG",
+    ],
+    defines = precision_defines(),
+    deps = [
+        ":cutlass_candidates",
+        "//backends/cuda:device",
+        "//include/nanochat:nanochat",
+        "@cutlass//:cutlass",
+    ],
+    alwayslink = True,
+)
+
 # The shape table's gate: the list matches the shapes `muon.cu` issues, a row
 # selects only its own key, and only a turned bit changes a shape's hands.
 cc_test(
@@ -303,6 +338,10 @@ cuda_binary(
         ":cutlass_candidates",
         ":dispatch",
         "//backends/cuda:gemm",
+        # The fp8 arms quantize the row's own operands, so the benchmark calls
+        # the seam's `QuantizeFp8` and links the kernel that defines it
+        # (docs/kernels.md section 10.4).
+        "//backends/cuda/kernels:fp8",
         "//backends/cuda/kernels/testing:bench_utils",
         "//include/nanochat:nanochat",
     ],

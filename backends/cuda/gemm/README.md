@@ -813,3 +813,78 @@ reference. The reference now runs the same count.
   a tile with a short N is the shape they ask for.
 - A candidate that wins above 8192 on a square shape. cuBLAS keeps 0.81 of the
   lead there, because the operands leave the second-level cache.
+
+## 18. The fp8 arm, item 4a
+
+`docs/kernels.md` section 10.4 is the record. This section states what the
+package holds, why the tile is not the bf16 `wide-n` row, and what is still open.
+
+**What it is.** `cutlass_fp8.cu` puts the seam's `GemmScaledFp8` on the same
+warp-specialized mainloop with `float_e4m3_t` operands and an fp32 accumulator.
+Two seam entries exist, one for each store form: a bf16 store and an fp32 store.
+Only an fp8 build compiles the target, and only an fp8 build of `gemm.cu` calls
+it, through `if constexpr (kFp8Build)`.
+
+```bash
+tools/nanochat build --config=cutlass --config=cuda --config=fp8 \
+  --@rules_cuda//cuda:archs=sm_90 //backends/cuda/gemm:cutlass_fp8
+```
+
+**The scale never reaches the host.** `GemmScaledFp8` states one scale for each
+operand as a device pointer. One single-thread launch forms
+`alpha * scale_a[0] * scale_b[0]` into a device float, and the epilogue reads
+alpha from that address through the fused `LinearCombination`. Beta stays a
+by-value scalar. The slot is four bytes, allocated once for the thread, and it is
+not part of the CUTLASS workspace, because the epilogue reads it while the
+kernel runs.
+
+**The tile is `balanced`, not `wide-n`, and a host test said so.** The fp8
+accumulation path of CUTLASS keeps two fp32 accumulators, because it promotes one
+into the other every `mma_promotion_interval` k blocks. At 256 wide N and two
+warpgroups one accumulator is 128 registers. Both kernels of the first build read
+168 registers with a 256 byte stack frame, and `tools/gemm_spill_gate.py` found
+the accumulator in local memory inside their k loops.
+
+| Tile | Stages | Registers | Stack | Spill gate |
+|---|---:|---:|---:|---|
+| 128x256x64, `wide-n` | 3 | 168 | 256 B | 2 of 2 kernels spill |
+| 128x128x64, `balanced` | 5 | 168 | 0 | clean, 2 k loops |
+
+The fp8 operand is one byte, so five stages of the narrower tile stage 81920 B of
+the 227 KiB window. The wider tile's three stages staged 73728 B.
+
+**The gate needed `QGMMA` to see the body.** `tools/gemm_spill_gate.py` looked
+only for `HGMMA`, the bf16 and fp16 multiply, so an fp8 body read as "no k loop
+to check" and passed unseen. Hopper spells the eight-bit multiply `QGMMA`. The
+gate accepts both prefixes now, and its `cutlass_fp8` directory label names the
+arm, which has no registry index.
+
+**One operand pair, so the backward keeps cuBLAS.** `CallSupported` takes E4M3
+by E4M3, which is the forward form of `docs/precision.md` section 5.2. The
+backward states E5M2 for both operands, so the arm refuses it. The vendor atoms
+carry `_F32E5M2E5M2_SS_TN` and the mixed `_F32E4M3E5M2_SS_TN` at every N, so the
+backward is two more instantiations and one more template argument.
+
+**Nothing is promoted.** `NANOCHAT_GEMM_FP8=cutlass` is the only way a shipped
+call reaches the arm, and a training run does not set it. `gemm_benchmark --fp8`
+sets it for the arm it times and clears it afterwards. A promotion needs a card
+run against the tolerance and the margin of section 11.4.
+
+**The measurement.** `gemm_benchmark --fp8` quantizes each row's own operands
+with the seam's `QuantizeFp8`, then times the same call on cublasLt and on the
+arm. It needs an fp8 build and a Hopper device, so the binary is built twice:
+
+```bash
+tools/nanochat build --config=cutlass --config=cuda --config=fp8 \
+  --@rules_cuda//cuda:archs=sm_90 //backends/cuda/gemm:gemm_benchmark
+```
+
+The card route is not open yet. `tools/modal/app.py` holds a T4 leg at fp32 and
+an H100 leg at bf16, and no leg builds fp8. A third leg is the prerequisite for
+the gate, and that file belongs to the Python surface workstream.
+
+**The host gate.** `//backends/cuda/gemm:dispatch_test` checks the arm's verdict
+without a card and without the vendor header. It covers the accepted dense call,
+the four refusals in their order, and the fp8 row alignment that separates that
+arm from bf16. It also covers the batch refusal, the tile fields, and the staged
+bytes.

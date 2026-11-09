@@ -127,6 +127,9 @@ cuda_library(
     deps = [
         ":device",
         "//backends/cuda/gemm:cutlass_bf16",
+        # The fp8 arm of the same mainloop. An fp32 or bf16 build selects no
+        # source, so the library is empty there and nothing references it.
+        "//backends/cuda/gemm:cutlass_fp8",
         # The decision table of `cutlass_rules.h` and its lookup: the seam reads
         # it to decide whether a shape takes a CUTLASS candidate.
         "//backends/cuda/gemm:dispatch",

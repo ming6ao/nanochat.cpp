@@ -26,6 +26,8 @@
 // already resolved every default to decide the verdict. Two resolutions of one
 // call could disagree, and the disagreement would be silent.
 
+#include <cstdint>
+
 #include "backends/cuda/gemm/cutlass_candidates.h"
 #include "backends/cuda/gemm/gemm_shape.h"
 #include "nanochat/tensor.h"
@@ -47,6 +49,20 @@ bool LaunchGemmCutlassToFp32(const ResolvedGemm& gemm, const ComputeType* a,
 // it to state the matrix is complete, and the answer is a constant of the
 // translation unit and not of the card.
 int GemmCutlassKernelCount();
+
+// --- The fp8 arm (docs/kernels.md section 10.4) ------------------------------
+//
+// The same mainloop with E4M3 operands and an fp32 accumulator. Each entry
+// returns false when the arm does not take the call, which is not an error: the
+// caller keeps cuBLAS, and `GemmScaledFp8` states that path above. Only an fp8
+// build defines them, and `gemm.cu` discards the calls through
+// `if constexpr (kFp8Build)`.
+bool LaunchScaledFp8Cutlass(const ScaledGemmParams& params,
+                            const std::uint8_t* a, const std::uint8_t* b,
+                            ComputeType* c);
+bool LaunchScaledFp8CutlassToFp32(const ScaledGemmParams& params,
+                                  const std::uint8_t* a, const std::uint8_t* b,
+                                  float* c);
 
 // The tile candidate 0 runs, as a name a report can print. It is the fallback
 // when nothing selects another candidate.

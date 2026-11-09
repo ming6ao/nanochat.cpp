@@ -8,7 +8,8 @@
 //
 // It also re-checks the seam's default rules, because `ResolveGemm` and
 // `GemmImpl` must agree and only one of the two runs on a card, and it checks
-// the Hopper mainloop's own rule, which has no other gate off a card.
+// the Hopper mainloop's own rule and the fp8 arm's, which have no other gate
+// off a card.
 //
 // CPU only: no device, no driver, no toolkit.
 
@@ -55,7 +56,9 @@ using nanochat::kernels::GemmTileShapeSchedule;
 using nanochat::kernels::IsCutlassCallable;
 using nanochat::kernels::IsTileCallable;
 using nanochat::kernels::JudgeCutlass;
+using nanochat::kernels::JudgeScaledFp8;
 using nanochat::kernels::kCutlassMinOutputElements;
+using nanochat::kernels::kFp8Tile;
 using nanochat::kernels::kGemmRuleCount;
 using nanochat::kernels::kGemmRules;
 using nanochat::kernels::ResolvedGemm;
@@ -518,6 +521,96 @@ void CheckCutlassVerdict() {
          "the pointer verdict names itself", kCase);
 }
 
+// The fp8 arm's own rule (docs/kernels.md section 10.4). `cutlass_fp8.cu`
+// includes the vendor headers, so only an fp8 build compiles it and only a card
+// runs it; this verdict is the whole of the arm that a host can check.
+void CheckScaledFp8Verdict() {
+  const char* kCase = "fp8 verdict";
+  alignas(64) static char storage[256];
+  const void* a = storage;
+  const void* b = storage + 64;
+  void* c = storage + 128;
+
+  // A shape the sweep measured, held to one batch because the fp8 seam states
+  // no batch. The operands are K-major, which is the only pair the SM90 fp8
+  // GMMA has; `CallSupported` states that rule and this test states the rest.
+  GemmParams params;
+  params.m = 1280;
+  params.n = 5120;
+  params.k = 1280;
+  params.batch_count = 1;
+  params.transpose_a = false;
+  params.transpose_b = true;
+  const ResolvedGemm gemm = ResolveGemm(params, false);
+  Expect(JudgeScaledFp8(gemm, a, b, c) == CutlassRefusal::kNone,
+         "a dense aligned fp8 call is taken", kCase);
+
+  // The refusal order is the bf16 one, so a single table explains both arms.
+  ResolvedGemm empty = gemm;
+  empty.k = 0;
+  Expect(JudgeScaledFp8(empty, a, b, c) == CutlassRefusal::kExtent,
+         "an empty fp8 extent is refused for its extent", kCase);
+
+  GemmParams tiny;
+  tiny.m = 5;
+  tiny.n = 12;
+  tiny.k = 12;
+  const ResolvedGemm small = ResolveGemm(tiny, false);
+  Expect(JudgeScaledFp8(small, a, b, c) == CutlassRefusal::kSize,
+         "the 5 by 12 group stays off the fp8 arm", kCase);
+
+  // One fp8 element is one byte, so a row shares the sixteen-byte boundary
+  // every sixteen elements and not every eight. 1272 is a whole number of bf16
+  // rows and is not a whole number of fp8 ones, so it separates the two rules.
+  ResolvedGemm odd = gemm;
+  odd.lda = 1272;
+  Expect(JudgeCutlass(odd, a, b, c) == CutlassRefusal::kNone,
+         "1272 bf16 elements share the boundary", kCase);
+  Expect(JudgeScaledFp8(odd, a, b, c) == CutlassRefusal::kStride,
+         "1272 fp8 elements do not share it", kCase);
+
+  // The store keeps the call's own element, so the C alignment is the bf16
+  // rule on one call and the fp32 rule on a weight gradient.
+  odd = gemm;
+  odd.ldc = 1284;
+  odd.stride_c = static_cast<std::int64_t>(1280) * 1284;
+  Expect(JudgeScaledFp8(odd, a, b, c) == CutlassRefusal::kStride,
+         "a bf16 fp8 store row off the boundary is refused", kCase);
+  const ResolvedGemm fp32_gemm = ResolveGemm(params, true);
+  Expect(JudgeScaledFp8(fp32_gemm, a, b, c) == CutlassRefusal::kNone,
+         "four fp32 elements share the store boundary", kCase);
+
+  // A batch is an extent refusal here and not a stride one, because the fp8
+  // seam carries no batch stride at all.
+  ResolvedGemm batched = gemm;
+  batched.batch_count = 2;
+  Expect(JudgeScaledFp8(batched, a, b, c) == CutlassRefusal::kExtent,
+         "a batch is refused by the fp8 arm", kCase);
+
+  Expect(JudgeScaledFp8(gemm, storage + 2, b, c) == CutlassRefusal::kPointer,
+         "a pointer off the boundary is refused for its pointer", kCase);
+  Expect(JudgeScaledFp8(gemm, nullptr, b, c) == CutlassRefusal::kPointer,
+         "a missing fp8 operand is refused for its pointer", kCase);
+
+  // The tile is the probe's `balanced` row, at half the N of the bf16 `wide-n`
+  // row, because the fp8 accumulation path keeps two fp32 accumulators. The
+  // fp8 operand halves the staged bytes: 64 * (128 + 128) * 5 stages is
+  // 81920 B of the 227 KiB window.
+  Expect(kFp8Tile.tile_m == 128 && kFp8Tile.tile_n == 128 &&
+             kFp8Tile.tile_k == 64 && kFp8Tile.cluster_m == 2 &&
+             kFp8Tile.cluster_n == 1 && kFp8Tile.stages == 5,
+         "the fp8 tile is the one the probe measured", kCase);
+  Expect(kFp8Tile.tile_m >= 128,
+         "a tile narrower than 128 in M has no cooperative schedule", kCase);
+  const long long one_stage =
+      static_cast<long long>(kFp8Tile.tile_m + kFp8Tile.tile_n) *
+      kFp8Tile.tile_k;
+  const long long staged = one_stage * kFp8Tile.stages;
+  Expect(staged == 81920, "the fp8 pipeline stages 81920 B", kCase);
+  Expect(staged < 227LL * 1024,
+         "the fp8 pipeline leaves the epilogue its share", kCase);
+}
+
 // The seam's default rules, which `ResolveGemm` and `GemmImpl` must share.
 void CheckResolve() {
   const char* kCase = "resolve";
@@ -639,6 +732,7 @@ int main() {
   CheckMode();
   CheckModeFromEnv();
   CheckCutlassVerdict();
+  CheckScaledFp8Verdict();
   CheckRuleTable();
   CheckSchedules();
   CheckScheduleFromEnv();

@@ -185,12 +185,17 @@ struct EpilogueOf {
 // One kernel of the seam: an operand orientation pair and a store type, at one
 // candidate's tile.
 //
+// `ElementAB` is the operand element, and it is a parameter because the fp8 arm
+// runs the same body with one-byte operands (docs/kernels.md section 10.4). The
+// default is the bf16 pair every row of the registry uses, so no existing
+// instantiation changed when the parameter arrived.
+//
 // The two layout tags are the seam's four operand forms. CUTLASS names a stride
 // over the modes [M, K, L] for A and [N, K, L] for B, so `RowMajor` is mode 1
 // contiguous for A and mode 0 contiguous for B. The seam states each form by
 // its contiguous axis, which is the axis the asserts below name.
 template <class ElementD, bool TransA, bool TransB, class TileShape,
-          class ClusterShape, int Stages>
+          class ClusterShape, int Stages, class ElementAB = CutlassBf16>
 struct KernelOf {
   using LayoutA = cute::conditional_t<TransA, cutlass::layout::ColumnMajor,
                                       cutlass::layout::RowMajor>;
@@ -210,8 +215,9 @@ struct KernelOf {
       typename EpilogueOf<ElementD, TileShape, ClusterShape>::Collective;
 
   using Mainloop = typename cutlass::gemm::collective::CollectiveBuilder<
-      cutlass::arch::Sm90, cutlass::arch::OpClassTensorOp, CutlassBf16, LayoutA,
-      8, CutlassBf16, LayoutB, 8, float, TileShape, ClusterShape,
+      cutlass::arch::Sm90, cutlass::arch::OpClassTensorOp, ElementAB, LayoutA,
+      AlignmentOf<ElementAB>(), ElementAB, LayoutB, AlignmentOf<ElementAB>(),
+      float, TileShape, ClusterShape,
       cutlass::gemm::collective::StageCount<Stages>,
       cutlass::gemm::KernelTmaWarpSpecializedCooperative>::CollectiveOp;
 
@@ -255,17 +261,26 @@ struct KernelOf {
 
 // --- The launch -------------------------------------------------------------
 
+// `alpha_dev` is the optional device scalar the epilogue multiplies the
+// accumulator by. The fp8 arm passes the product of the two operand scales
+// there, so a dequantized call never reads a scale on the host (docs/kernels.md
+// section 10.4, and Part 2 section 1 for the rule).
+//
+// The operands arrive as `void*` and are read as `ElementAB`, which is a vendor
+// type and never the seam's. A seam type here would ask CUTLASS for an
+// instruction over a struct it has no trait for, and its answer is the static
+// assert "No eligible GMMA operator for request configuration".
 template <class ElementD, bool TransA, bool TransB, class TileShape,
-          class ClusterShape, int Stages>
-bool Launch(const ResolvedGemm& gemm, const Bf16* a, const Bf16* b,
-            ElementD* c) {
+          class ClusterShape, int Stages, class ElementAB = CutlassBf16>
+bool Launch(const ResolvedGemm& gemm, const void* a, const void* b, ElementD* c,
+            const float* alpha_dev = nullptr) {
   using VendorD = typename VendorElementOf<ElementD>::type;
-  using Kernel =
-      KernelOf<VendorD, TransA, TransB, TileShape, ClusterShape, Stages>;
+  using Kernel = KernelOf<VendorD, TransA, TransB, TileShape, ClusterShape,
+                          Stages, ElementAB>;
   using Gemm = typename Kernel::Gemm;
 
-  const auto* operand_a = reinterpret_cast<const CutlassBf16*>(a);
-  const auto* operand_b = reinterpret_cast<const CutlassBf16*>(b);
+  const auto* operand_a = static_cast<const ElementAB*>(a);
+  const auto* operand_b = static_cast<const ElementAB*>(b);
   auto* result = reinterpret_cast<VendorD*>(c);
 
   typename Gemm::Arguments args{
@@ -281,6 +296,12 @@ bool Launch(const ResolvedGemm& gemm, const Bf16* a, const Bf16* b,
       cutlass::KernelHardwareInfo{}};
   args.epilogue.thread.alpha = gemm.alpha;
   args.epilogue.thread.beta = gemm.beta;
+  if (alpha_dev != nullptr) {
+    // The epilogue loads alpha from device memory instead of the value above,
+    // and `alpha` is then the unused seed (Sm90LinearCombination's
+    // `alpha_ptr`).
+    args.epilogue.thread.alpha_ptr = alpha_dev;
+  }
   args.hw_info.device_id = Facts().device_id;
   args.hw_info.sm_count = Facts().sm_count;
 
@@ -300,21 +321,22 @@ bool Launch(const ResolvedGemm& gemm, const Bf16* a, const Bf16* b,
 
 // One candidate's four operand orientations, at one store type. The four are
 // separate kernels, so this is a switch over the seam's two transpose flags.
-template <class TileShape, class ClusterShape, int Stages, class ElementD>
-bool LaunchOriented(const ResolvedGemm& gemm, const Bf16* a, const Bf16* b,
-                    ElementD* c) {
+template <class TileShape, class ClusterShape, int Stages, class ElementD,
+          class ElementAB = CutlassBf16>
+bool LaunchOriented(const ResolvedGemm& gemm, const void* a, const void* b,
+                    ElementD* c, const float* alpha_dev = nullptr) {
   if (!gemm.transpose_a) {
     return gemm.transpose_b
-               ? Launch<ElementD, false, true, TileShape, ClusterShape, Stages>(
-                     gemm, a, b, c)
-               : Launch<ElementD, false, false, TileShape, ClusterShape,
-                        Stages>(gemm, a, b, c);
+               ? Launch<ElementD, false, true, TileShape, ClusterShape, Stages,
+                        ElementAB>(gemm, a, b, c, alpha_dev)
+               : Launch<ElementD, false, false, TileShape, ClusterShape, Stages,
+                        ElementAB>(gemm, a, b, c, alpha_dev);
   }
   return gemm.transpose_b
-             ? Launch<ElementD, true, true, TileShape, ClusterShape, Stages>(
-                   gemm, a, b, c)
-             : Launch<ElementD, true, false, TileShape, ClusterShape, Stages>(
-                   gemm, a, b, c);
+             ? Launch<ElementD, true, true, TileShape, ClusterShape, Stages,
+                      ElementAB>(gemm, a, b, c, alpha_dev)
+             : Launch<ElementD, true, false, TileShape, ClusterShape, Stages,
+                      ElementAB>(gemm, a, b, c, alpha_dev);
 }
 
 // The active blocks for each multiprocessor that the driver answers for one

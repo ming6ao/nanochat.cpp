@@ -97,6 +97,40 @@ inline constexpr int kGemmCandidateCount =
   ENTRY(2)                                 \
   ENTRY(3)
 
+// The fp8 arm's tile (docs/kernels.md section 10.4).
+//
+// It is one row and not a registry entry. An fp8 axis over the four bf16 rows
+// would be sixty-four instantiations, and `dev/cutlass/README.md` measures one
+// at 19 s and 1.2 GiB, so the build budget bounds the count. One row answers
+// the campaign's first question: is an fp8 Hopper mainloop worth more than
+// cublasLt?
+//
+// The tile is the probe's `balanced` row and not its `wide-n` row, and the
+// spill gate of `docs/kernels.md` section 11.4 is what says so. The fp8
+// accumulation path of CUTLASS keeps two fp32 accumulators, because it promotes
+// one into the other every few k blocks, so a 256 wide N at two warpgroups
+// needs 128 registers of accumulator and not 64. The build of section 10.4
+// measured the `wide-n` form at 168 registers with a 256 B stack frame: it
+// spills. Half the N halves the accumulator, and the fp8 operand being one byte
+// leaves the pipeline room for five stages where bf16 has three.
+//
+// It is one row and not a registry entry. An fp8 axis over the four bf16 rows
+// would be sixty-four instantiations, and `dev/cutlass/README.md` measures one
+// at 19 s and 1.2 GiB, so the build budget bounds the count. One row answers
+// the campaign's first question: is an fp8 Hopper mainloop worth more than
+// cublasLt?
+struct Fp8TileSpec {
+  const char* name;
+  int tile_m = 0;
+  int tile_n = 0;
+  int tile_k = 0;
+  int cluster_m = 1;
+  int cluster_n = 1;
+  int stages = 0;
+};
+
+inline constexpr Fp8TileSpec kFp8Tile{"fp8-balanced", 128, 128, 64, 2, 1, 5};
+
 namespace cutlass_detail {
 
 // The count the list states, which the assert below compares with the table.

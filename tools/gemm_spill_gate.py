@@ -22,6 +22,10 @@ once for each candidate, so the label is the index that the object's directory
 carries, and the registry of ``backends/cuda/gemm/cutlass_candidates.h`` names
 the candidate at that index.
 
+The fp8 arm of ``docs/kernels.md`` section 10.4 is one target and not a registry
+row, so it has no index. Its object directory names it, and the gate reads it
+the same way: the arm is one kernel body with the same defect to look for.
+
 Usage::
 
     tools/gemm_spill_gate.py                       # the built objects
@@ -55,6 +59,10 @@ DEFAULT_OBJECTS = Path("bazel-bin/backends/cuda/gemm/_objs")
 #: its own row as a compile-time constant.
 DEFAULT_REGISTRY = Path("backends/cuda/gemm/cutlass_candidates.h")
 
+#: The fp8 arm's target. It is one tile and one kernel body, and the build gives
+#: it one directory, so the gate names it from the path and not from an index.
+FP8_TARGET = "cutlass_fp8"
+
 #: One disassembled instruction: the address comment, an optional predicate, and
 #: the mnemonic.
 INSTRUCTION = re.compile(
@@ -65,7 +73,13 @@ INSTRUCTION = re.compile(
 FUNCTION = re.compile(r"^\s*(?:Function\s*:\s*(\S+)|\.section\s+\.text\.(\S+))")
 
 #: The multiply instructions of the mainloop.
-MULTIPLY = "HGMMA"
+#: The prefix of a warpgroup multiply. Hopper spells the bf16 and fp16 forms
+#: `HGMMA` and the eight-bit form `QGMMA`, and the fp8 arm of
+#: `docs/kernels.md` section 10.4 emits the second one. A gate that knows only the
+#: first reports "no k loop to check" for an fp8 body and passes it unseen.
+MULTIPLY_PREFIXES = ("HGMMA", "QGMMA")
+#: What a report calls that instruction, so one column compares every arm.
+MULTIPLY = "GMMA"
 
 #: The instructions that read or write local memory, which is where a spilled
 #: accumulator goes.
@@ -124,7 +138,7 @@ def analyze(text: str) -> list[FunctionScan]:
         positions = [
             index
             for index, mnemonic in enumerate(mnemonics)
-            if mnemonic.startswith(MULTIPLY)
+            if mnemonic.startswith(MULTIPLY_PREFIXES)
         ]
         loads = 0
         stores = 0
@@ -221,7 +235,7 @@ def candidate_index(path: Path) -> int:
 
 
 def discover(directory: Path) -> list[Path]:
-    """The candidate objects of one build's object tree."""
+    """The candidate and arm objects of one build's object tree."""
     if not directory.is_dir():
         raise GateError(
             f"no object directory at {directory}; build the candidate library "
@@ -230,9 +244,20 @@ def discover(directory: Path) -> list[Path]:
     objects = sorted(directory.rglob("cutlass_candidate_*[0-9]/*.o"))
     if not objects:
         objects = sorted(directory.rglob("cutlass_candidate_*.o"))
+    # The fp8 arm is a target of its own, so a bf16 build of the registry has no
+    # object for it and only an fp8 build adds one.
+    objects += sorted(directory.rglob(f"{FP8_TARGET}/*.o"))
     if not objects:
         raise GateError(f"{directory} holds no candidate object")
     return objects
+
+
+def target_label(path: Path, names: list[str]) -> str:
+    """The report label of one object: a candidate's name, or the arm's."""
+    if FP8_TARGET in path.parts:
+        return "fp8 arm"
+    index = candidate_index(path)
+    return names[index] if index < len(names) else f"candidate {index}"
 
 
 def report_candidate(
@@ -333,18 +358,17 @@ def main(argv: list[str]) -> int:
     clean = True
     for path in sorted(paths):
         try:
-            index = candidate_index(path)
+            label = target_label(path, names)
             text = sass_of(toolchain, path)
         except GateError as error:
             print(f"gemm spill gate: {error}", file=sys.stderr)
             return 2
-        label = names[index] if index < len(names) else f"candidate {index}"
         if not report_candidate(label, path, analyze(text), options.full_names):
             clean = False
     if clean:
-        print(f"gemm spill gate: {len(paths)} candidate(s) checked, none spills")
+        print(f"gemm spill gate: {len(paths)} target(s) checked, none spills")
         return 0
-    print(f"gemm spill gate: {len(paths)} candidate(s) checked, one or more refused")
+    print(f"gemm spill gate: {len(paths)} target(s) checked, one or more refused")
     return 1
 
 

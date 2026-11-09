@@ -87,7 +87,9 @@ using nanochat::CopyDir;
 using nanochat::GemmMode;
 using nanochat::GemmParams;
 using nanochat::GradientType;
+using nanochat::QuantizeFp8Params;
 
+using nanochat::ScaledGemmParams;
 using nanochat::kernels::Alloc;
 using nanochat::kernels::BenchDeviceBudget;
 using nanochat::kernels::BenchIterationsFor;
@@ -110,6 +112,7 @@ using nanochat::kernels::GemmCandidateCount;
 using nanochat::kernels::GemmCandidateIndexFromName;
 using nanochat::kernels::GemmCandidateSpec;
 using nanochat::kernels::GemmCutlassCandidateOccupancy;
+using nanochat::kernels::GemmScaledFp8;
 using nanochat::kernels::GemmScheduleCount;
 using nanochat::kernels::GemmScheduleName;
 using nanochat::kernels::GemmTileShapeCount;
@@ -119,6 +122,7 @@ using nanochat::kernels::GemmTileShapeSchedule;
 using nanochat::kernels::JudgeCutlass;
 using nanochat::kernels::Memcpy;
 using nanochat::kernels::Memset;
+using nanochat::kernels::QuantizeFp8;
 using nanochat::kernels::ResolvedGemm;
 using nanochat::kernels::Synchronize;
 
@@ -165,6 +169,9 @@ struct Options {
   bool flush = true;
   // Checks every measured arm against the reference.
   bool check = true;
+  // Times the fp8 arms beside cublasLt on quantized operands (docs/kernels.md
+  // section 10.4). It needs an fp8 build and a Hopper device.
+  bool fp8 = false;
   // Proves the check itself and exits.
   bool self_test = false;
 };
@@ -636,12 +643,17 @@ double Gflops(double flops, double ms) {
 }
 
 // One measurement as two rows: the minimum under the arm's own name, and the
-// median beside it.
+// median beside it. The iteration count and the occupancy travel with both
+// rows, so a reader takes the shape of the call from the report and not from
+// the console (docs/kernels.md section 11.7).
 void AddTiming(BenchReport* report, const std::string& name,
-               const std::string& shape, const Timing& timing, double flops) {
-  report->Add(name, shape, timing.min_ms, Gflops(flops, timing.min_ms));
+               const std::string& shape, const Timing& timing, double flops,
+               int occupancy = 0) {
+  report->Add(name, shape, timing.min_ms, Gflops(flops, timing.min_ms),
+              /*work_ratio=*/0.0, timing.iters, occupancy);
   report->Add(name + ":median", shape, timing.median_ms,
-              Gflops(flops, timing.median_ms));
+              Gflops(flops, timing.median_ms), /*work_ratio=*/0.0, timing.iters,
+              occupancy);
 }
 
 void PrintMeasurement(const std::string& row, const std::string& arm,
@@ -665,8 +677,8 @@ void Usage(const char* program) {
                "usage: %s [--rows production|measurement|all] [--row NAME] "
                "[--all|cublas|cutlass|hand|seam] [--candidate NAME|all] "
                "[--schedule NAME|all] [--auto-iters] [--no-flush] [--no-check] "
-               "[--self-test] [--iters N] [--rounds N] [--warmup N] [--json] "
-               "[--out PATH]\n",
+               "[--self-test] [--fp8] [--iters N] [--rounds N] [--warmup N] "
+               "[--json] [--out PATH]\n",
                program);
 }
 
@@ -714,6 +726,8 @@ int main(int argc, char** argv) {
       options.check = false;
     } else if (arg == "--self-test") {
       options.self_test = true;
+    } else if (arg == "--fp8") {
+      options.fp8 = true;
     } else if (arg == "--iters") {
       next_int(&options.bench.iters);
     } else if (arg == "--rounds") {
@@ -1063,7 +1077,7 @@ int main(int argc, char** argv) {
         }
         const std::string label =
             "gemm:" + row.name + ":" + spec.name + ":cutlass";
-        AddTiming(&report, label, row.shape, timing, row.flops);
+        AddTiming(&report, label, row.shape, timing, row.flops, occupancy);
         PrintMeasurement(row.name, spec.name, timing, occupancy, check);
         ++measured;
       }
@@ -1126,10 +1140,87 @@ int main(int argc, char** argv) {
         ++rejected;
       } else {
         const std::string label = std::string("gemm:") + row.name + ":seam";
+        // No occupancy: the seam is cuBLAS on most rows and a candidate on a
+        // promoted one, so one residency number would name neither arm.
         AddTiming(&report, label, row.shape, timing, row.flops);
         PrintMeasurement(row.name, "seam", timing, 0, check);
         ++measured;
       }
+    }
+
+    // The fp8 arms (docs/kernels.md section 10.4). The seam states one
+    // dequantization value for each operand, so this arm quantizes the row's
+    // own operands and times the same call twice: on cublasLt, which is the
+    // shipped path, and on the Hopper candidate.
+    //
+    // The printed error is information and not a gate. The correctness gate of
+    // the fp8 tier is `//tests:fp8_gemm_test` with the precision fixtures, and
+    // this binary answers a rate. Nothing is promoted either, because
+    // `NANOCHAT_GEMM_FP8` is unset in a training run.
+    if (options.fp8 && is_hopper) {
+      auto* a8 = static_cast<std::uint8_t*>(Alloc(a_elements));
+      auto* b8 = static_cast<std::uint8_t*>(Alloc(b_elements));
+      auto* a_scale = static_cast<float*>(Alloc(sizeof(float)));
+      auto* b_scale = static_cast<float*>(Alloc(sizeof(float)));
+      if (a8 != nullptr && b8 != nullptr && a_scale != nullptr &&
+          b_scale != nullptr) {
+        QuantizeFp8Params quant_a;
+        quant_a.count = static_cast<int>(a_elements);
+        QuantizeFp8(quant_a, a, a8, a_scale);
+        QuantizeFp8Params quant_b;
+        quant_b.count = static_cast<int>(b_elements);
+        QuantizeFp8(quant_b, b, b8, b_scale);
+
+        ScaledGemmParams scaled;
+        scaled.m = params.m;
+        scaled.n = params.n;
+        scaled.k = params.k;
+        scaled.batch_count = 1;
+        scaled.alpha = params.alpha;
+        scaled.beta = params.beta;
+        scaled.transpose_a = params.transpose_a;
+        scaled.transpose_b = params.transpose_b;
+        scaled.scale_a = a_scale;
+        scaled.scale_b = b_scale;
+
+        auto call_scaled = [&] {
+          if (row.gemm.fp32_c) {
+            GemmScaledFp8(GemmMode::kWgrad, scaled, a8, b8,
+                          static_cast<GradientType*>(buffers.c));
+          } else {
+            GemmScaledFp8(GemmMode::kForward, scaled, a8, b8,
+                          static_cast<ComputeType*>(buffers.c));
+          }
+        };
+        if (!have_reference) take_reference();
+        for (const char* selector : {"cublaslt", "cutlass"}) {
+          if (std::string(selector) == "cutlass") {
+            setenv("NANOCHAT_GEMM_FP8", "cutlass", 1);
+          } else {
+            unsetenv("NANOCHAT_GEMM_FP8");
+          }
+          reset_c();
+          const Timing timing = TimeWithFlush(
+              &timer, [&] { call_scaled(); }, iters,
+              std::max(1, options.bench.rounds),
+              std::max(0, options.bench.warmup),
+              options.flush ? &flusher : nullptr, flush_ms);
+          const CheckOutcome check =
+              CheckOutput(row, buffers.c, buffers.ref, out_elements,
+                          options.check && have_reference);
+          const std::string label =
+              std::string("gemm:") + row.name + ":fp8:" + selector;
+          AddTiming(&report, label, row.shape, timing, row.flops);
+          PrintMeasurement(row.name, (std::string("fp8:") + selector).c_str(),
+                           timing, 0, check);
+          ++measured;
+        }
+        unsetenv("NANOCHAT_GEMM_FP8");
+      }
+      Free(a8);
+      Free(b8);
+      Free(a_scale);
+      Free(b_scale);
     }
     Synchronize();
   }

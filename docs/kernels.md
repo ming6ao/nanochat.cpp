@@ -911,7 +911,8 @@ there; they are not the work that remains.
 | 1 | The `mma.sync` mainloop: direct `mma.sync` with `ldmatrix`, four to six stages, dynamic shared memory, and the epilogue rewrite | 4 to 8 weeks | Every row correct, and 0.50 of the recorded cuBLAS rate | **Done and missed**, 0.27 to 0.36. Section 10 records it |
 | 2 | The Hopper mainloop: tile 128 by 256 by 64, cluster 2 by 1, one producer warp, two consumer warpgroups, TMA in and out | Was 2 to 4 months; became 1 week by borrowing | Within 1.05 of the cuBLAS rate on all six rows of section 2 | **Adapter done, gate open.** It needs the card |
 | 3 | The fp32 shared-memory tile for Turing and the fp32 build | 2 to 4 weeks | Within 1.05 of the recorded cuBLAS rate on the chain profiles | Not started |
-| 4 | fp8 on the Hopper path, and stream-K for the ragged rows | 1 to 2 weeks each | The fp8 tolerance of [precision.md](precision.md), and no row above 1.05 | Not started. The tiny group needs no kernel of its own now: the hand tile serves it |
+| 4a | fp8 on the Hopper path | 1 to 2 weeks | The fp8 tolerance of [precision.md](precision.md), and no row above 1.05 | **Arm written and clean off a card.** The card run is the last gate. The tiny group needs no kernel of its own now: the hand tile serves it |
+| 4b | Stream-K for the ragged rows | Was 1 to 2 weeks; is a different project | No row above 1.05 | **Blocked by the vendor adapter.** Section 10.3 states the evidence |
 | 5 | Detach the library: cuBLAS moves out of `backends/cuda:gemm` and into the benchmark targets | 1 week | The dependency query of gate G4 is empty | Not started |
 
 ### 6.1 The CUTLASS route, and why it replaced a written mainloop
@@ -1164,6 +1165,29 @@ recorded cuBLAS result, and 0.50 of the recorded cuBLAS rate. Step 3 should reac
 that fraction, and step 4 decides whether it is enough for the removal or only
 for the next phase.
 
+**Phase 1 is closed, and it closes as a recorded negative.** The five steps ran
+and each one states its own gate and its own miss, so the part is not abandoned
+in the middle: it is finished with the answer "this instruction mix cannot reach
+half of cuBLAS". The reason is arithmetic intensity and not the schedule, which
+step 3's 64 flops for each staged byte states, and no further sweep of a tile,
+a stage count, or a block order changes a ratio. Three facts make the close
+decisive rather than a pause.
+
+1. The seam does not need the hand tile any more. Section 11 put a warpgroup
+   candidate behind the same seam, and that candidate reads 0.576 to 1.176 where
+   the hand tile reads 0.147 to 0.740.
+2. The hand tile's own promotion bit is off on every row of `dispatch.cc`, so no
+   shipped path measures it. Tuning an arm that nothing selects is card time
+   spent on a record.
+3. What is left of the tile has a job the candidate cannot take: a shape below
+   `kCutlassMinOutputElements` and a call whose pointers are one element off the
+   sixteen-byte boundary keep the hand tile, because a tensor memory descriptor
+   per call costs more than the product on a small shape. That fallback role is
+   the tile's remaining purpose, and it is served at the rate it has.
+
+A future session that wants the hand tile faster therefore has to state a
+reason the candidate cannot serve, and not a schedule it has not tried.
+
 **Then phases 2 to 5.** Section 6 holds their scope and their gates: the Hopper
 mainloop with the Tensor Memory Accelerator, the fp32 tile for Turing, fp8 with
 stream-K, and the detachment of the library. Section 6.1 records the decision to
@@ -1183,9 +1207,9 @@ record to write when it lands.
 | 2d. Correctness on the card | **Done, passed** | `modal run tools/modal/app.py::card_job --name gemm_check` | This section |
 | 2e. The rate gate, 1.05 of cuBLAS | **Done, met on 19 of the 25 callable rows** after section 11.9 | `modal run tools/modal/app.py::card_job --name gemm_bench --argv '["--rows","production","--json"]'` | The `gemm_cutlass` entry of [baselines.json](baselines.json) |
 | 3. The fp32 tile for Turing | Not started | The Turing leg of `card_job` | This section |
-| 4a. fp8 on the Hopper path | Not started | `gemm_bench` under `--config=fp8` | [baselines.json](baselines.json) |
-| 4b. Stream-K for the ragged rows | Not started | `gemm_bench --row linear:wgrad:cls` | [baselines.json](baselines.json) |
-| 5. Detach cuBLAS from the library | Not started | `bazel query 'somepath(//src:model, @cuda//:cublasLt)'` returns nothing | [build.md](build.md) |
+| 4a. fp8 on the Hopper path | **Arm written, and the spill cleared off a card.** The card run is the last gate | `gemm_bench` under `--config=fp8` | The `gemm_fp8` entry of [baselines.json](baselines.json) |
+| 4b. Stream-K for the ragged rows | **Blocked by the adapter**, on the evidence of section 10.3 | `gemm_bench --row linear:wgrad:cls` | This section |
+| 5. Detach cuBLAS from the library | **Closed, and it does not follow yet.** The reason is in 10.2 | `bazel query 'somepath(//src:model, @cuda//:cublasLt)'` returns nothing | [build.md](build.md) |
 
 **Step 2d passed.** The adapter matched cuBLAS on the H100 80GB HBM3 at compute
 capability 9.0, over the six Hopper cases and the weight-gradient case. That run
@@ -1234,6 +1258,201 @@ the rule declines, so the first card run reports whether that boundary is right.
    row that reads C?
 3. Does the 5 by 12 group lose its 0.005 ms to the size rule, or does the hand
    tile already hold it?
+
+### 10.2 The six rows, and why step 5 does not follow
+
+**The measurement.** Section 11.8 reads the production family as 25 callable
+rows. Nine are promoted to a candidate. Nineteen keep cuBLAS, and six of those
+nineteen miss the 0.95 gate outright:
+
+| Row | Fraction of cuBLAS | What is left there |
+|---|---:|---|
+| `linear:wgrad:kv` | 0.576 | The ragged tail of the largest weight gradient. Stream-K, which is item 4b of section 6 |
+| `linear:fwd:cls` | 0.804 | The classifier forward at the full vocabulary |
+| `muon:640x1280:A` | 0.812 | A square Muon product whose tile count is a few waves |
+| `muon:640x1280:A2` | 0.941 | The square of that square |
+| `linear:dgrad:cls` | 0.952 | Inside the run-to-run spread of section 11.8 |
+| `linear:dgrad:cproj` | 0.952 | The same |
+
+**The arithmetic that decides step 5, and it is not about these six.** Step 5
+takes cuBLAS out of the library. It is tempting to read the six rows above as
+its blocker, because they are the rows the candidate loses. That reading is
+wrong. The second column of section 11.8 says why: the arm a non-promoted row
+would move to is the hand tile, which reads 0.147 to 0.740 of cuBLAS.
+
+The blocker is the thirteen rows inside the 0.04 margin. For those rows the
+candidate wins by a coin flip, and the only arm behind it is the tile. A removal
+would move 19 of the 25 rows to that arm. Those 19 rows hold 0.94 of the step's
+time, and the tile is between 1.4 and 6.8 times slower.
+
+**The decision.** Step 5 is a campaign gate and not a build change. It does not
+follow from this revision. cuBLAS stays in the library, and the seam keeps
+serving a candidate where a measurement promoted one. The gate that would
+reopen it is one line: every callable row at 1.05 of cuBLAS on some arm. The
+margin rule of section 11.4 retires only after a row wins in two runs.
+Two consequences follow, and both are stated so a later session does not
+re-derive them.
+
+1. **Item 4b was the only planned attack on a row of this table, and it is not
+   reachable.** Section 10.3 states the vendor constraint. The sentence that put
+   stream-K here described an intent and not a step, so the rows below 0.95 now
+   have no planned remedy inside this adapter.
+2. **A wider candidate is the other half, and no ticket exists for it.** The
+   probe sized five tiles and the registry carries four; `dev/cutlass/README.md`
+   section 3 holds the others. A tile that wins a row by 6 percent on the
+   classifier at 512 threads is a different measurement and not a re-run.
+
+The six rows are therefore not a work item with a date. They are the evidence
+for the sentence "cuBLAS stays", and the record keeps the sentence and the
+rows together so the next reader can check it.
+
+### 10.3 Stream-K is not reachable from this adapter
+
+**The claim that had to be checked.** Section 6 priced the k-split half of
+stream-K at one to two weeks, and section 11.3 listed
+`sm90_tile_scheduler_stream_k.hpp` as the piece that supplies it. Both rest on
+an assumption: that a scheduler is a template argument of the kernel this
+adapter already builds. It is not, and the vendor states it as a compile-time
+refusal.
+
+**The evidence, from the vendored headers.** The fetch is CUTLASS 4.8.1
+(`include/cutlass/version.h`). Three facts decide the question.
+
+1. `cutlass/gemm/kernel/sm90_gemm_tma_warpspecialized.hpp` line 111 asserts
+   `is_void_v<TileScheduler_> || is_same_v<TileScheduler_, PersistentScheduler>`
+   and its message reads "TMA warp-specialized kernel does not support
+   specializing the tile scheduler". The cooperative kernel this adapter uses is
+   that kernel, so the stream-K tag cannot be its argument.
+2. `sm90_gemm_tma_warpspecialized_pingpong.hpp` line 105 refuses the tag by
+   name. The other SM90 TMA kernel is therefore closed too.
+3. The scheduler itself exists. `sm90_tile_scheduler_stream_k.hpp` defines
+   `PersistentTileSchedulerSm90StreamK`, and `tile_scheduler.hpp` maps the
+   `StreamKScheduler` tag to it for `arch::Sm90`. The tag is accepted by the
+   SM100 kernels and by no SM90 one.
+
+**The one SM90 route, and why it is not a candidate.**
+`cutlass/gemm/kernel/gemm_universal_streamk.h` is the CUTLASS 2.x integer API:
+it takes a `ThreadblockShape` and a `WarpShape` and runs the numbered-API
+mainloop, with no TMA and no warp specialization. A rate from that kernel is not
+comparable with the 1.05 gate, because the gate compares against cuBLAS on a
+TMA mainloop. Moving the two ragged rows onto a slower kernel to fix their tail
+would measure the mainloop and not the tail.
+
+**What this decides.** Item 4b of section 6 leaves the phase. The rows below
+0.95 keep cuBLAS, and section 10.2's second column stays true. Two routes remain,
+and both are written here so a later session starts from the evidence.
+
+- **A k-split in the hand tile.** The scheduler is ours there, and step 5 of
+  section 10 already names the split as the part it did not do. The tile is
+  1.4 to 6.8 times below cuBLAS, so a tail fix cannot close a rate gap that
+  large.
+- **A wider candidate for the row that is short of the gate by 20 percent.**
+  `linear:fwd:cls` at 0.804 and `linear:wgrad:kv` at 0.576 are tile problems and
+  not tail problems. `dev/cutlass/README.md` section 3 holds the tiles the probe
+  did not promote, and the registry holds four of five.
+
+**The general lesson for this campaign.** The vendored headers are the authority
+on what the adapter can build, and one grep answers questions that a plan
+estimated in weeks. Section 11.3's table is a list of headers and not a list of
+capabilities, and this section is the difference between the two.
+
+### 10.4 The fp8 route: what the vendor supplies, and what it costs
+
+**State.** The arm is written, and it is clean off a card. `cutlass_fp8.cu` puts
+the seam's `GemmScaledFp8` on the warp-specialized mainloop with E4M3 operands.
+`gemm_shape.h` holds the arm's own refusal rule beside `JudgeCutlass`, and
+`gemm.cu` calls the arm behind `NANOCHAT_GEMM_FP8=cutlass`. Nothing is promoted:
+an unset variable leaves every call on cublasLt, so a shipped step does not
+change until a card measurement promotes a shape. `gemm_benchmark --fp8` times
+the arm beside cublasLt on the same operands. The card run is the one gate that
+is still open.
+
+**The one question that decides the design.** `GemmScaledFp8` takes
+`scale_a` and `scale_b` as device pointers. The epilogue must therefore multiply
+the accumulator by their product. The tree's rule is that such a scalar never
+reaches the host (Part 2 section 1). A host read of the two scales would add one
+synchronizing copy to every eligible matrix multiply, so it is not an option.
+Two vendor facts decide whether a device form exists.
+
+1. `cutlass/epilogue/fusion/sm90_callbacks_tma_warpspecialized.hpp` line 220
+   defines `Sm90LinearCombination` with `Sm90ScalarBroadcast` for both alpha and
+   beta, so alpha is a broadcast scalar and not a fused pointer.
+2. `sm90_visitor_load_tma_warpspecialized.hpp` line 1010 defines that node, and
+   its `Arguments` carries `scalar_ptrs` at line 1019 beside `scalars` and
+   `dScalar`. The pointer form is present, so the epilogue loads alpha from
+   device memory at run time.
+
+**The design that follows.** One single-thread launch forms
+`alpha * scale_a[0] * scale_b[0]` into a four-byte device slot, and the
+epilogue's `scalar_ptrs[0]` names that slot. The slot is not part of the CUTLASS
+workspace, because the epilogue reads it while the kernel runs. The mainloop
+takes `float_e4m3_t` operands with an fp32 accumulator, which the same
+`CollectiveBuilder` supplies. Beta stays a by-value scalar, because C is stored
+in the output precision and needs no dequantization. No host read, and one extra
+launch of one thread.
+
+**The tile, and the spill that a host found.** The arm states one tile,
+`kFp8Tile`, because an fp8 axis over the four bf16 rows would be sixty-four
+instantiations. The first tile was the probe's `wide-n` row, 128 by 256 by 64 at
+three stages, and it spilled. `cuobjdump -res-usage` read 168 registers with a
+256 byte stack frame, and the spill gate of section 11.4 found the accumulator
+in local memory inside the k loop of both instantiations.
+
+The cause is the vendor's fp8 accumulation path. One-byte operands accumulate in
+fp32 for many k blocks, so CUTLASS builds the fp8 mainloop with
+`GmmaFP8Accumulation`, which keeps two fp32 accumulators and promotes one into
+the other every `mma_promotion_interval` k blocks. At 256 wide N and two
+warpgroups, one accumulator is 128 registers, so two do not fit. The probe's
+`balanced` row halves N, which halves the accumulator, and the fp8 operand being
+one byte leaves room for five stages where bf16 has three. The rebuilt target
+then read 168 registers with no stack frame, and the gate read clean over both k
+loops. No card was needed for either reading.
+
+The gate needed a fix of its own. It looked only for `HGMMA`, which is the bf16
+and fp16 multiply, so an fp8 body read as "no k loop to check" and passed
+unseen. Hopper spells the eight-bit multiply `QGMMA`, and the gate now accepts
+both. The four bf16 candidates read clean either way, so the change adds a check
+without changing a verdict.
+
+**The cost that bounds the row.** One target, two instantiations, and a measured
+build of 53 to 93 seconds. `dev/cutlass/README.md` measures one instantiation at
+19 s and 1.2 GiB. The peak of the compiler process therefore bounds the row, and
+not the count: one device compile held 3.3 GiB. An fp8 axis over the existing
+four rows would be sixty-four instantiations. The fp8 arm therefore needs its
+own rows under the build's fp8 config, and not a third template axis on the
+four. The registry's count is a build budget and not a free parameter.
+
+**What the arm does not cover.** `CallSupported` takes one operand pair, E4M3 by
+E4M3, which is the form of the forward. The seam's backward states E5M2 for both
+operands ([precision.md](precision.md) section 5.2), so a shipped backward call
+refuses the arm and keeps cublasLt. The vendor is not the limit: the atom list
+carries `MMA_64x128x32_F32E5M2E5M2_SS_TN` and the mixed
+`..._F32E4M3E5M2_SS_TN` at every N. The backward is therefore two more
+instantiations and one more template argument, and it is its own row of the
+build budget.
+
+The operand form is the second limit. The SM90 fp8 GMMA exists only in the
+K-major pair, so a row that states another form refuses the arm. The seam then
+runs cublasLt under both selectors, and the two fp8 columns of that row read the
+same time. A reader must therefore compare the columns only on a row whose form
+is K-major, and no report states which rows those are. The seam answers nothing,
+because `GemmScaledFp8` returns void, so the honest fix is a predicate the seam
+exposes and the header is contract-owned.
+
+**What the campaign still owes.** One card run of `gemm_bench --fp8` on the
+Hopper leg, and the `gemm_fp8` entry of [baselines.json](baselines.json) that its
+report writes. Its gate is the tolerance of [precision.md](precision.md) and no
+row above 1.05. A promotion follows only if a row clears the margin of section
+11.4.
+
+One prerequisite sits on the card route itself. `tools/modal/app.py` holds two
+legs, and the H100 leg builds at bf16, so no image can run the fp8 arm today. A
+third leg at fp8 is the missing piece, and the file belongs to the Python
+surface workstream. A caller must not fold it into the bf16 image, because the
+report's `host.precision` is a fact of the library that ran.
+
+The E5M2 backward is a second, smaller row: it needs its own instantiations
+before any call can take it.
 
 ### 11. The candidate registry
 
@@ -1318,7 +1537,7 @@ The headers the fetch does hold are the pieces a registry needs.
 | `cutlass/gemm/device/gemm_universal_adapter.h` | `can_implement`, `get_workspace_size`, and `run` |
 | `cutlass/kernel_hardware_info.h` | The device identifier and the multiprocessor count |
 | `cutlass/device_kernel.h` | The odr-use a kernel body needs, and the handle for an occupancy query |
-| `cutlass/gemm/kernel/sm90_tile_scheduler_stream_k.hpp` | Stream-K, whose split count is a run-time value |
+| `cutlass/gemm/kernel/sm90_tile_scheduler_stream_k.hpp` | Stream-K, whose split count is a run-time value. The header is present, and section 10.3 states why no kernel of this adapter can take it |
 | `cutlass/cluster_launch.hpp`, `cutlass/cuda_host_adapter.hpp` | Cluster launch and graph capture, for a later phase |
 
 The method of CUTLASS is therefore the thing to copy, and not the tool. The
@@ -1554,13 +1773,17 @@ without it, and the spill gate decides whether the candidate is real.
 | `tools/gemm_rules.py`, `tools/gemm_spill_gate.py` | The table writer and the spill gate | Oracle |
 | This document, and the `gemm_cutlass` and `gemm_scaling` entries of [baselines.json](baselines.json) | The record | Architect |
 
-One row of that table is open. The per-row iteration count and the occupancy a
-candidate answers print in the benchmark's table. Both follow from the rule of
-section 11.5 and from the registry's own fields. A machine-reader would take
-them from the `nanochat.bench.v3` report, and that needs two optional row keys.
-Adding them is an additive change to `include/nanochat/bench.h`, which the
-Harness owns, so it waits for that owner rather than changing a versioned schema
-from this workstream.
+One row of that table is closed. The per-row iteration count and the occupancy
+a candidate answers print in the benchmark's table. They now also travel in the
+machine-readable report, as two optional row keys beside `ms` and `gflops`
+(`include/nanochat/bench.h`). A row that states neither omits both, so an older
+row of the same schema reads as it did.
+
+`//src:bench_test` guards the three cases. An unstated field writes no key, a
+stated one writes an integer, and the median row of a measurement carries the
+same two facts as the minimum. `gemm_benchmark` states the iteration count on
+every arm and the occupancy on the candidates. It states neither on the seam
+row, which is cuBLAS on most shapes and a candidate on a promoted one.
 
 #### 11.8 What the card run read
 

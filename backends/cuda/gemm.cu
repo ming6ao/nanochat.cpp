@@ -38,6 +38,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <map>
+#include <string>
 #include <tuple>
 
 #include "backends/cuda/device.h"
@@ -413,6 +414,31 @@ bool TryGemmTile(const GemmParams& params, const ComputeType* a,
                                  schedule);
 }
 
+// --- The fp8 arm (docs/kernels.md section 10.4) -----------------------------
+//
+// The seam's scaled fp8 entry, before cublasLt. It answers false for every call
+// the arm does not take: a format other than E4M3, a reduced-precision
+// accumulation, a batch, a shape its own rule refuses, or a device that cannot
+// run the instruction. A false is not an error, and cublasLt keeps the call.
+//
+// **Nothing is promoted and a measurement names the arm.** `NANOCHAT_GEMM_FP8`
+// is unset in a training run, so a shipped step keeps cublasLt until a card
+// measurement promotes a shape. The campaign's first run is the measurement,
+// and its gate is the tolerance of `docs/precision.md` and a row at 1.05.
+bool TryGemmScaledFp8Cutlass(const ScaledGemmParams& params,
+                             const std::uint8_t* a, const std::uint8_t* b,
+                             void* c, cudaDataType_t c_type) {
+  if constexpr (!kFp8Build) return false;
+  const char* setting = std::getenv("NANOCHAT_GEMM_FP8");
+  if (setting == nullptr || setting[0] == '\0') return false;
+  if (std::string(setting) != "cutlass") return false;
+  const bool fp32_c = c_type == CUDA_R_32F;
+  return fp32_c ? LaunchScaledFp8CutlassToFp32(params, a, b,
+                                               static_cast<float*>(c))
+                : LaunchScaledFp8Cutlass(params, a, b,
+                                         static_cast<ComputeType*>(c));
+}
+
 void GemmImpl(const GemmParams& params, const ComputeType* a,
               const ComputeType* b, void* c, cudaDataType_t c_type) {
   if (params.batch_count <= 0 || params.m <= 0 || params.n <= 0) return;
@@ -500,6 +526,12 @@ void GemmScaledFp8(GemmMode mode, const ScaledGemmParams& params,
                  "one yet\n");
     std::exit(1);
   }
+  // The Hopper fp8 arm, before cublasLt and behind its own environment
+  // variable, so a shipped step keeps the library until a measurement promotes
+  // the arm (docs/kernels.md section 10.4).
+  const cudaDataType_t fp8_c_type =
+      mode == GemmMode::kWgrad ? CUDA_R_32F : kDataType;
+  if (TryGemmScaledFp8Cutlass(params, a, b, c, fp8_c_type)) return;
   // The column-major swap, the same trick as the dense path above: compute
   // C^T = op(ltA) * op(ltB) with ltA the stored B and ltB the stored A
   // (docs/precision.md Part 1, section 7). A row-major [r, c] operand is a
