@@ -124,11 +124,11 @@ def cache_dir() -> Path:
 
 
 #: The build precisions the tree supports (docs/precision.md).
-SUPPORTED_PRECISIONS = ("fp32", "bf16")
+SUPPORTED_PRECISIONS = ("fp32", "bf16", "fp8")
 
 
 def precision() -> str:
-    """The requested precision: ``"fp32"`` or ``"bf16"``."""
+    """The requested precision: ``"fp32"``, ``"bf16"``, or ``"fp8"``."""
     return os.environ.get("NANOCHAT_CPP_PRECISION", "fp32").strip().lower()
 
 
@@ -301,8 +301,8 @@ def _config_flags(options: BuildOptions) -> list[str]:
     """
     if options.precision not in SUPPORTED_PRECISIONS:
         raise BuildError(
-            f"{options.precision} is not a build precision: "
-            f"{' or '.join(SUPPORTED_PRECISIONS)} (docs/precision.md)")
+            f"{options.precision} is not a build precision: one of "
+            f"{', '.join(SUPPORTED_PRECISIONS)} (docs/precision.md)")
     if options.backend == "cpu":
         return ["--define=backend=cpu"]
     return ["--config=cuda"]

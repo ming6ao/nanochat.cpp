@@ -195,11 +195,14 @@ class AppTest(unittest.TestCase):
         module, _sdk = _load_app(with_sdk=True)
         self.assertEqual(sorted(module.CARD_JOBS),
                          ["attention_bench", "attention_check", "gemm_bench",
-                          "gemm_check", "mma_check", "wgmma_probe"])
+                          "gemm_bench_fp8", "gemm_check", "mma_check",
+                          "wgmma_probe"])
         self.assertEqual(module.CARD_JOBS["gemm_check"].job.__name__,
                          "check_gemm_h100")
         self.assertEqual(module.CARD_JOBS["gemm_bench"].job.__name__,
                          "bench_gemm_h100")
+        self.assertEqual(module.CARD_JOBS["gemm_bench_fp8"].job.__name__,
+                         "bench_gemm_fp8_h100")
         self.assertEqual(module.CARD_JOBS["attention_check"].job.__name__,
                          "check_attention_h100")
         self.assertEqual(module.CARD_JOBS["attention_bench"].job.__name__,
@@ -208,11 +211,23 @@ class AppTest(unittest.TestCase):
                          "check_mma_h100")
         self.assertEqual(module.CARD_JOBS["wgmma_probe"].job.__name__,
                          "probe_wgmma_h100")
-        for name in ("gemm_bench", "attention_bench"):
+        for name in ("gemm_bench", "gemm_bench_fp8", "attention_bench"):
             self.assertTrue(module.CARD_JOBS[name].takes_argv)
         for name in ("gemm_check", "attention_check", "mma_check",
                      "wgmma_probe"):
             self.assertFalse(module.CARD_JOBS[name].takes_argv)
+
+    def test_the_fp8_benchmark_runs_on_the_fp8_image(self) -> None:
+        # The report's `host.precision` is a fact of the library that ran, so the
+        # fp8 arm cannot share the bf16 image (section 7). The arm is also a flag
+        # of the binary, so the job adds it ahead of the caller's arguments.
+        module, sdk = _load_app(with_sdk=True)
+        calls = {call["name"]: call for call in sdk.function_calls}
+        self.assertIs(calls["bench_gemm_fp8_h100"]["image"],
+                      module.image_for(module.H100_FP8))
+        self.assertIs(calls["bench_gemm_h100"]["image"],
+                      module.image_for(module.H100))
+        self.assertIn('GEMM_BENCH_BIN, "--fp8"', _source())
 
     def test_the_card_job_lists_its_names_and_refuses_an_unknown_one(self) -> None:
         module, _sdk = _load_app(with_sdk=True)
@@ -230,7 +245,6 @@ class AppTest(unittest.TestCase):
 
     def test_the_contract_names_match_the_client(self) -> None:
         import target
-
         self.assertEqual(self.app.APP_NAME, target.APP_NAME)
         self.assertEqual(self.app.RUNS_VOLUME, target.RUNS_VOLUME)
         self.assertEqual(self.app.REMOTE_ROOT, target.REMOTE_ROOT)
@@ -268,12 +282,28 @@ class LegTest(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.app = _load_app()
 
-    def test_the_two_legs_are_the_ones_the_client_names(self) -> None:
+    def test_the_chain_legs_are_the_ones_the_client_names(self) -> None:
         import target
 
-        self.assertEqual(sorted(self.app.LEGS), sorted(target.LEGS))
+        # The client names the two legs the chain deploys. The app holds one more
+        # image, the fp8 leg, which one card job names and no run picks up.
+        self.assertEqual(sorted(self.app.LEGS),
+                         sorted([*target.LEGS, "h100-fp8"]))
         self.assertEqual(tuple(leg.name for leg in self.app.LEG_ORDER),
                          (target.LEG_T4, target.LEG_H100))
+
+    def test_the_fp8_leg_is_one_card_at_sm_90_in_fp8(self) -> None:
+        leg = self.app.H100_FP8
+        self.assertEqual((leg.name, leg.card, leg.count),
+                         ("h100-fp8", "H100", 1))
+        self.assertEqual((leg.arch, leg.precision), ("sm_90", "fp8"))
+        self.assertEqual(leg.capability, "9.0")
+        self.assertEqual(leg.build,
+                         ("--config=cuda", "--define=precision=fp8",
+                          "--@rules_cuda//cuda:archs=sm_90"))
+        # It is an image and not a leg of the run, so the chain never runs it.
+        self.assertNotIn(leg, self.app.LEG_ORDER)
+        self.assertIs(self.app.LEGS[leg.name], leg)
 
     def test_the_t4_leg_runs_first(self) -> None:
         # The T4 artifact survives an H100 failure, and a reviewer reads the
@@ -303,7 +333,7 @@ class LegTest(unittest.TestCase):
                          ("--config=cuda", "--define=precision=bf16",
                           "--@rules_cuda//cuda:archs=sm_90"))
 
-    def test_the_builder_emits_the_two_triples(self) -> None:
+    def test_the_builder_emits_each_legs_triple(self) -> None:
         # The triple is a contract with `_build._build_command`, which is the
         # one home of the flag line. The host of this test may not hold the
         # package, so an absent one skips instead of inventing a pass.
@@ -311,7 +341,7 @@ class LegTest(unittest.TestCase):
             from nanochat_cpp import _build  # noqa: PLC0415 - optional here
         except Exception:  # noqa: BLE001 - the test host may not hold it
             self.skipTest("nanochat_cpp is not importable here")
-        for leg in self.app.LEG_ORDER:
+        for leg in (*self.app.LEG_ORDER, self.app.H100_FP8):
             options = _build.BuildOptions.resolve(
                 backend="cuda", precision=leg.precision, arch=leg.arch)
             command = _build._build_command("tools/nanochat", options, ())
@@ -351,7 +381,8 @@ class ImageTest(unittest.TestCase):
         self.assertIs(self.app.image_for(self.app.T4),
                       self.app.image_for(self.app.T4))
         self.app.image_for(self.app.H100)
-        self.assertEqual(sorted(self.app._IMAGES), ["h100", "t4"])
+        self.app.image_for(self.app.H100_FP8)
+        self.assertEqual(sorted(self.app._IMAGES), ["h100", "h100-fp8", "t4"])
 
     def test_the_t4_image_takes_its_precision_and_arch_from_the_leg(self) -> None:
         env = self.app.image_env(self.app.T4)
@@ -443,14 +474,24 @@ class ImageTest(unittest.TestCase):
         # an image that cannot compile (section 8 row 10).
         self.assertRegex(_source(), r"ignore=\[[^\]]*\.bazelrc\.local")
 
-    def test_no_leg_passes_a_named_simulator_config(self) -> None:
+    def test_no_chain_leg_passes_a_named_simulator_config(self) -> None:
         # `h100` in .bazelrc is the simulator, and it also sets the native
         # collective, so the hardware leg takes the explicit triple instead
-        # (section 3, trap 1). No leg builds fp8 either (P3).
+        # (section 3, trap 1).
         text = _source()
-        for forbidden in ("config=h100", "define=simulator",
-                          "precision=fp8", "config=fp8"):
+        for forbidden in ("config=h100", "define=simulator"):
             self.assertNotIn(forbidden, text)
+
+    def test_no_chain_leg_builds_an_fp8_training_path(self) -> None:
+        # Decision P3 of docs/post-training.md section 4. The fp8 image exists
+        # for one card job, which times a benchmark and trains nothing, so the
+        # rule is about LEG_ORDER and not about the file.
+        for leg in self.app.LEG_ORDER:
+            self.assertNotEqual(leg.precision, "fp8", leg.name)
+        self.assertEqual(self.app.H100_FP8.precision, "fp8")
+        self.assertNotIn(self.app.H100_FP8, self.app.LEG_ORDER)
+        for name in ("pipeline", "pipeline_h100", "train", "train_h100"):
+            self.assertIn(name, dir(self.app))
 
     def test_the_old_globals_are_gone(self) -> None:
         # The triple has one home, the leg record: a module global that also
@@ -800,6 +841,7 @@ class PipelineTest(_RemoteFixture):
     def test_the_functions_are_declared(self) -> None:
         names = [keywords["name"] for keywords in self.sdk.function_calls]
         self.assertEqual(sorted(names), ["bench_attention_h100",
+                                         "bench_gemm_fp8_h100",
                                          "bench_gemm_h100",
                                          "bench_h100",
                                          "check_attention_h100",

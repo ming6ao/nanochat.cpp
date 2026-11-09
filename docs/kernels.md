@@ -1458,14 +1458,20 @@ report writes. Its gate is the tolerance of [precision.md](precision.md) and no
 row above 1.05. A promotion follows only if a row clears the margin of section
 11.4.
 
-One prerequisite sits on the card route itself. `tools/modal/app.py` holds two
-legs, and the H100 leg builds at bf16, so no image can run the fp8 arm today. A
-third leg at fp8 is the missing piece, and the file belongs to the Python
-surface workstream. A caller must not fold it into the bf16 image, because the
-report's `host.precision` is a fact of the library that ran.
+The card route holds one image of its own. `tools/modal/app.py` states
+`H100_FP8`, a third leg at fp8, and one card job on it. The image is not in
+`LEG_ORDER`, so no run of the chain picks it up, and both chain legs keep the
+precisions they had. A caller must not fold the arm into the bf16 image, because
+the report's `host.precision` is a fact of the library that ran. The command is:
 
-The E5M2 backward is a second, smaller row: it needs its own instantiations
-before any call can take it.
+```bash
+modal run tools/modal/app.py::card_job --name gemm_bench_fp8 \
+  --argv '["--rows","production","--json"]'
+```
+
+The build helper gained `fp8` in `SUPPORTED_PRECISIONS` for the same reason: the
+image passes the leg's precision through the one builder, so it states the
+`--define` and no Bazel config of its own.
 
 ### 11. The candidate registry
 

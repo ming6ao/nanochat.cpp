@@ -893,13 +893,23 @@ with the seam's `QuantizeFp8`, then times the same call on cublasLt and on the
 arm. It needs an fp8 build and a Hopper device, so the binary is built twice:
 
 ```bash
-tools/nanochat build --config=cutlass --config=cuda --config=fp8 \
+tools/nanochat build --config=cuda --config=fp8 \
   --@rules_cuda//cuda:archs=sm_90 //backends/cuda/gemm:gemm_benchmark
 ```
 
-The card route is not open yet. `tools/modal/app.py` holds a T4 leg at fp32 and
-an H100 leg at bf16, and no leg builds fp8. A third leg is the prerequisite for
-the gate, and that file belongs to the Python surface workstream.
+A host that builds one CUTLASS target at a time adds `--config=cutlass`, which
+is the host-local cap of [build.md](../../docs/build.md).
+
+The card route runs through the app's fp8 image. `tools/modal/app.py` holds a
+third leg, `H100_FP8`, and one card job on it:
+
+```bash
+modal run tools/modal/app.py::card_job --name gemm_bench_fp8 \
+  --argv '["--rows","production","--json"]'
+```
+
+The leg is not in `LEG_ORDER`, so the post-training chain never runs it, and both
+chain legs keep fp32 and bf16.
 
 **The host gate.** `//backends/cuda/gemm:dispatch_test` checks the arm's verdict
 without a card and without the vendor header. It covers the accepted dense call,

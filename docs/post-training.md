@@ -1098,7 +1098,7 @@ number here._
 |---|---|
 | P1 | Add a second profile, `standard`. Keep `demo` for the CPU test loop. `Job()` defaults to `standard`. |
 | P2 | Keep the sequence length at 64 and the base batch at one row. The committed corpus fills one 65-token row per epoch. |
-| P3 | The H100 leg runs at bf16. No leg runs an fp8 training path. |
+| P3 | The H100 leg runs at bf16. No leg of the chain runs an fp8 training path. One further image builds fp8 for a benchmark and trains nothing; section 4.2 states it. |
 | P4 | Add the eval stage in process, through `api.evaluate`, `api.Model.load`, and `api.Tokenizer`. Add no third stage executable. |
 | P5 | The eval stage reads the base checkpoint and the RL checkpoint, so the report holds both numbers. |
 | P6 | Run T4 first, then H100, as four functions over two images. One library per image keeps the architecture and the precision honest. |
@@ -1125,6 +1125,23 @@ bf16 and fp8. This plan takes bf16 for three reasons:
 
 What the leg does not prove is the fp8 training graph and the fp8 planner rule.
 Those belong to a later row, and the row needs a Hopper benchmark first.
+
+#### 4.2 The third image, and why it is not a leg
+
+The fp8 campaign of [kernels.md](kernels.md) section 10.4 needs one card run of
+the GEMM sweep at fp8, and no chain leg can serve it. A report's
+`host.precision` is a fact of the library that ran, so a bf16 image cannot
+measure an fp8 build and label the result honestly.
+
+The app therefore holds one more image, `h100-fp8`, and one more card job,
+`gemm_bench_fp8`. The image is in `LEGS`, because a lookup by name must reach it.
+It is not in `LEG_ORDER`, so no run of the chain ever picks it up. P3 keeps its
+rule: the two chain legs stay at fp32 and bf16, and the fp8 image times a
+benchmark and trains nothing.
+
+The build helper gained `fp8` in `SUPPORTED_PRECISIONS` for the same reason. It
+passes the leg's precision through the one builder, so the image states
+`--define=precision=fp8` and no Bazel config of its own.
 
 ### 5. The shape and the schedule
 

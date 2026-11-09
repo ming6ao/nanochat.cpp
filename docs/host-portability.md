@@ -618,6 +618,16 @@ section 9.1, and the legs themselves are rows of this table:
 |---|---|---|---|---|---|---|
 | `t4` | `T4` | `sm_75` | `fp32` | fp32, `sm_75` | `train`, `pipeline` | `<run_id>-t4` |
 | `h100` | `H100` | `sm_90` | `bf16` | bf16, `sm_90` | `train_h100`, `pipeline_h100` | `<run_id>-h100` |
+| `h100-fp8` | `H100` | `sm_90` | `fp8` | fp8, `sm_90` | `bench_gemm_fp8_h100` | none |
+
+The third row is an image and not a leg of the chain. The fp8 arm of
+[kernels.md](kernels.md) section 10.4 is compiled only at fp8, and a report's
+`host.precision` is a fact of the library that ran, so its benchmark needs an
+image of its own. It is in `LEGS` because a lookup by name must reach it, and it
+is out of `LEG_ORDER`, so a run of the chain never picks it up. No run id is
+assigned to it. Decision P3 of [post-training.md](post-training.md) section 4
+keeps its rule: both chain legs stay at their precision, and the fp8 image trains
+nothing.
 
 The two images are the point. One Bazel output base holds one build of
 `libnanochat_shared.so`, and a container compiles for exactly one architecture

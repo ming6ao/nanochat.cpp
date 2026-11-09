@@ -373,8 +373,20 @@ H100 = Leg(name="h100", card="H100", count=1, arch="sm_90", precision="bf16",
            build=("--config=cuda", "--define=precision=bf16",
                   "--@rules_cuda//cuda:archs=sm_90"))
 
-#: The legs by name, and the order they run in.
-LEGS = {T4.name: T4, H100.name: H100}
+#: The fp8 leg, and why it is a leg and not a flag. The fp8 arm of
+#: ``docs/kernels.md`` section 10.4 is compiled only under
+#: ``--define=precision=fp8``, and a report's ``host.precision`` is a fact of the
+#: library that ran, so its image is its own. It is not a leg of the
+#: post-training chain: nothing in ``notebooks/target.py`` deploys it, and it
+#: stays out of :data:`LEG_ORDER` so the two-leg run is unchanged.
+H100_FP8 = Leg(name="h100-fp8", card="H100", count=1, arch="sm_90",
+               precision="fp8",
+               build=("--config=cuda", "--define=precision=fp8",
+                      "--@rules_cuda//cuda:archs=sm_90"))
+
+#: The legs by name, and the two the chain runs in order. A leg outside
+#: :data:`LEG_ORDER` is an image one card job names, so a run never picks it up.
+LEGS = {T4.name: T4, H100.name: H100, H100_FP8.name: H100_FP8}
 LEG_ORDER = (T4, H100)
 
 #: The separator between the run id of a two-leg run and the leg name, so both
@@ -401,7 +413,7 @@ def selected_legs(name: str) -> tuple:
         return (LEGS[wanted],)
     raise ValueError(
         f"unknown legs {name!r}; the legs are 'both' (the default), 't4', "
-        f"and 'h100'")
+        f"'h100', and 'h100-fp8'")
 
 
 app = modal.App(APP_NAME)
@@ -1051,6 +1063,31 @@ def bench_gemm_h100(argv_json: str = "[]") -> str:
     """
     return _run_in_image(["tools/nanochat", "bench", "--", GEMM_BENCH_BIN],
                          argv_json, ("gemm:",))
+
+
+@app.function(
+    image=image_for(H100_FP8),
+    gpu=H100_FP8.gpu,
+    cpu=CPU_CORES,
+    timeout=1800,
+    max_containers=1,
+)
+def bench_gemm_fp8_h100(argv_json: str = "[]") -> str:
+    """Time the fp8 arm against cublasLt on the fp8 H100 leg.
+
+    The same sweep as :func:`bench_gemm_h100`, on the image that builds at fp8,
+    with the benchmark's ``--fp8`` arm added. That arm quantizes each row's own
+    operands and times the call twice: once on cublasLt, which ships, and once
+    on the Hopper mainloop of ``cutlass_fp8.cu``. The ratio of the two columns is
+    the fraction the fp8 gate of ``docs/kernels.md`` section 10.4 reads.
+
+    ``argv_json`` is a JSON list of the benchmark's own arguments, such as
+    ``["--rows", "production", "--json"]``, so the run states its rows without
+    a new deployment.
+    """
+    return _run_in_image(
+        ["tools/nanochat", "bench", "--", GEMM_BENCH_BIN, "--fp8"], argv_json,
+        ("gemm:",))
 
 
 @app.function(
@@ -2648,9 +2685,10 @@ class CardJob:
     takes_argv: bool = False
 
 
-#: The four card jobs, by the name a command spells. Each one is the gate or the
+#: The card jobs, by the name a command spells. Each one is the gate or the
 #: benchmark of one tensor-core family: the tile's own test against its
-#: reference, and the rate report whose rows a promotion gate reads.
+#: reference, and the rate report whose rows a promotion gate reads. The last
+#: row is the fp8 arm, which needs the image that builds at fp8.
 CARD_JOBS = {
     "attention_check": CardJob(check_attention_h100, "the attention test"),
     "attention_bench": CardJob(bench_attention_h100, "the attention benchmark",
@@ -2658,6 +2696,8 @@ CARD_JOBS = {
     "gemm_check": CardJob(check_gemm_h100, "the hand GEMM device gate"),
     "gemm_bench": CardJob(bench_gemm_h100, "the hand GEMM benchmark",
                           takes_argv=True),
+    "gemm_bench_fp8": CardJob(bench_gemm_fp8_h100, "the fp8 arm benchmark",
+                              takes_argv=True),
     "mma_check": CardJob(check_mma_h100, "the Part 3 phase 1 micro-tile gate"),
     "wgmma_probe": CardJob(probe_wgmma_h100,
                            "the WGMMA ceiling probe of Part 3 phase 0"),
@@ -2666,19 +2706,22 @@ CARD_JOBS = {
 
 @app.local_entrypoint()
 def card_job(name: str = "", argv: str = "[]") -> None:
-    """Run one card job on the H100 leg and print its answer.
+    """Run one card job on its leg and print its answer.
 
         modal run tools/modal/app.py::card_job
         modal run tools/modal/app.py::card_job --name gemm_check
         modal run tools/modal/app.py::card_job --name gemm_bench \\
             --argv '["--schedule","all","--json"]'
+        modal run tools/modal/app.py::card_job --name gemm_bench_fp8 \\
+            --argv '["--rows","production","--json"]'
 
-    One entrypoint serves the four gates and benchmarks, because the wrapper is
-    the whole point and it is the same for all four: print the answer and turn a
+    One entrypoint serves the gates and benchmarks, because the wrapper is the
+    whole point and it is the same for all of them: print the answer and turn a
     non-zero status into a failed run. A ``modal run`` of a Function target does
-    neither. ``argv`` is a JSON list of the job's own arguments, for the two
-    jobs that report a document, and a name the table does not hold is refused
-    with the list.
+    neither. ``argv`` is a JSON list of the job's own arguments, for the jobs
+    that report a document, and a name the table does not hold is refused with
+    the list. Each job names its own leg's image, so ``gemm_bench_fp8`` runs the
+    build at fp8 and every other job runs the bf16 one.
     """
     if not name:
         print("card jobs: " + ", ".join(CARD_JOBS))
