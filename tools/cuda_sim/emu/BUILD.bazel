@@ -232,6 +232,61 @@ cc_test(
     tags = ["sim"],
 )
 
+# The fp32 shared-memory tile (docs/kernels.md Part 3 section 6 phase 3). Its
+# staged window is static, so the mapping in `cuda_emu.h` already covers it and
+# no `extern __shared__` rewrite is needed: a plain copy is the whole rule.
+genrule(
+    name = "gemm_fp32_emulated_source",
+    srcs = ["//backends/cuda/gemm:gemm_fp32.cu"],
+    outs = ["gemm_fp32_emu.cc"],
+    cmd = "cp $< $@",
+)
+
+# The emulated fp32 tile, at the fp32 precision by construction. The workspace
+# may build at another precision, so the define is local and the test beside it
+# states the same one.
+cc_library(
+    name = "emulated_gemm_fp32",
+    srcs = [":gemm_fp32_emulated_source"],
+    hdrs = [
+        "//backends/cuda/gemm:gemm_fp32_launch.h",
+        "//backends/cuda/gemm:gemm_fp32_plan.h",
+    ],
+    copts = nanochat_copts() + [
+        "-I.",
+        "-Itools/cuda_sim/emu",
+        "-include",
+        "tools/cuda_sim/emu/emu_prelude.h",
+        "-Wno-unknown-pragmas",
+    ],
+    local_defines = ["NANOCHAT_PRECISION=0"],
+    deps = [
+        ":cuda_headers",
+        ":emu_runtime",
+        "//include/nanochat:nanochat",
+    ],
+)
+
+# The fp32 tile against a host reference in double: the four operand layouts, a
+# ragged shape with a k tail, a batch above one, and both schedules. CPU only,
+# so it carries the `sim` tag and rides the default loop.
+cc_test(
+    name = "gemm_fp32_emu_test",
+    srcs = ["gemm_fp32_emu_test.cc"],
+    copts = nanochat_copts() + [
+        "-I.",
+        "-Itools/cuda_sim/emu",
+    ],
+    local_defines = ["NANOCHAT_PRECISION=0"],
+    deps = [
+        ":cuda_headers",
+        ":emulated_gemm_fp32",
+        "//include/nanochat:nanochat",
+    ],
+    size = "small",
+    tags = ["sim"],
+)
+
 # The emulated hand GEMM, built at bf16 by construction
 # (docs/tensor-core-gemm-plan.md sections A.3 and A.4).
 #

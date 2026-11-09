@@ -72,6 +72,7 @@
 #include "backends/cuda/gemm/cutlass_candidates.h"
 #include "backends/cuda/gemm/cutlass_launch.h"
 #include "backends/cuda/gemm/dispatch.h"
+#include "backends/cuda/gemm/gemm_fp32_plan.h"
 #include "backends/cuda/gemm/gemm_shape.h"
 #include "backends/cuda/kernels/testing/bench_utils.h"
 #include "nanochat/kernels.h"
@@ -132,11 +133,13 @@ using nanochat::kernels::Synchronize;
 using nanochat::dev::BenchDeviceName;
 using nanochat::dev::UseDevicePeak;
 
-// The sweep is a bf16 measurement: the operands are the seam's two-byte bf16,
-// and the row arithmetic of `bench_shapes.h` states that width. A build where
-// the compute type is another size cannot state these numbers.
-static_assert(sizeof(ComputeType) == 2,
-              "the GEMM sweep measures bf16 operands");
+// The sweep is a bf16 measurement on a bf16 or fp8 build: the operands are the
+// seam's two-byte bf16, and the row arithmetic of `bench_shapes.h` states that
+// width. An fp32 build measures the fp32 tile of `docs/kernels.md` Part 3
+// section 6 phase 3 instead, whose operands are four bytes, so the width is the
+// one thing the two builds state differently.
+static_assert(sizeof(ComputeType) == 2 || sizeof(ComputeType) == 4,
+              "the GEMM sweep measures a two-byte or a four-byte operand");
 static_assert(sizeof(GradientType) == 4, "the fp32 store is four bytes");
 
 // The bytes below which the check copies both results to the host and reads
@@ -200,7 +203,28 @@ struct SweepRow {
   bool production = false;
 };
 
-std::size_t OutputElementBytes(bool fp32_c) { return fp32_c ? 4 : 2; }
+std::size_t OutputElementBytes(bool fp32_c) {
+  return fp32_c ? 4 : sizeof(ComputeType);
+}
+
+//: The row arithmetic of `bench_shapes.h` states a two-byte operand, because
+//: the bf16 sweep is its reader. An fp32 build doubles both operands, and the
+//: workspace and the device budget have to know it.
+inline constexpr std::size_t kOperandScale =
+    sizeof(ComputeType) / nanochat::kernels::kBenchOperandElementBytes;
+
+// The candidate arm exists only in a bf16 or fp8 build, because the CUTLASS
+// mainloop's operands are bf16. An fp32 build measures the fp32 tile instead,
+// so the occupancy a candidate would state is zero there and the function is a
+// template: a discarded `if constexpr` branch of a non-template still names its
+// symbol, and that symbol is not defined in this build.
+template <typename Element = ComputeType>
+int CandidateOccupancy(int candidate) {
+  if constexpr (sizeof(Element) == 2) {
+    return GemmCutlassCandidateOccupancy(candidate);
+  }
+  return 0;
+}
 
 // The count of the elements of C, at the leading dimension of the call.
 std::size_t OutputElements(const ResolvedGemm& gemm) {
@@ -262,8 +286,8 @@ SweepRow MakeMeasurementRow(int index) {
   row.name = shape.name;
   row.gemm = BenchShapeGemm(index);
   row.flops = BenchShapeFlops(shape);
-  row.a_bytes = BenchShapeOperandABytes(shape);
-  row.b_bytes = BenchShapeOperandBBytes(shape);
+  row.a_bytes = BenchShapeOperandABytes(shape) * kOperandScale;
+  row.b_bytes = BenchShapeOperandBBytes(shape) * kOperandScale;
   row.out_bytes = nanochat::kernels::BenchShapeOutputBytes(shape);
   row.pointer_offset = shape.pointer_offset;
   row.shape = BenchShapeExtent(shape);
@@ -1069,7 +1093,7 @@ int main(int argc, char** argv) {
         const CheckOutcome check =
             CheckOutput(row, buffers.c, buffers.ref, out_elements,
                         options.check && have_reference);
-        const int occupancy = GemmCutlassCandidateOccupancy(candidate);
+        const int occupancy = CandidateOccupancy(candidate);
         if (check.ran && !check.matched) {
           std::fprintf(stderr,
                        "gemm benchmark: %-24s %-10s REJECTED by the check: "
@@ -1088,16 +1112,27 @@ int main(int argc, char** argv) {
     }
 
     if (run_hand) {
-      const int first = options.schedule.empty() ? row.own_schedule : 0;
-      const int last =
-          options.schedule.empty() ? first + 1 : GemmScheduleCount();
+      // The bf16 sweep and the fp32 sweep are two lists, and each has its own
+      // environment variable: a name of one list indexes the other wrongly
+      // (`docs/kernels.md` Part 3 section 6 phase 3).
+      constexpr bool kFp32Tile = sizeof(ComputeType) == 4;
+      const char* const kScheduleEnv =
+          kFp32Tile ? "NANOCHAT_GEMM_FP32_SCHEDULE" : "NANOCHAT_GEMM_SCHEDULE";
+      const int count = kFp32Tile ? nanochat::kernels::gemm_fp32::kScheduleCount
+                                  : GemmScheduleCount();
+      const int own = kFp32Tile ? nanochat::kernels::gemm_fp32::kDefaultSchedule
+                                : row.own_schedule;
+      const int first = options.schedule.empty() ? own : 0;
+      const int last = options.schedule.empty() ? first + 1 : count;
       for (int schedule = first; schedule < last; ++schedule) {
-        const char* schedule_name = GemmScheduleName(schedule);
+        const char* schedule_name =
+            kFp32Tile ? nanochat::kernels::gemm_fp32::ScheduleName(schedule)
+                      : GemmScheduleName(schedule);
         if (options.schedule != "all" && !options.schedule.empty() &&
             options.schedule != schedule_name) {
           continue;
         }
-        setenv("NANOCHAT_GEMM_SCHEDULE", schedule_name, 1);
+        setenv(kScheduleEnv, schedule_name, 1);
         unsetenv("NANOCHAT_GEMM_CANDIDATE");
         reset_c();
         const Timing timing = measure("hand");
@@ -1119,7 +1154,7 @@ int main(int argc, char** argv) {
         PrintMeasurement(row.name, schedule_name, timing, 0, check);
         ++measured;
       }
-      unsetenv("NANOCHAT_GEMM_SCHEDULE");
+      unsetenv(kScheduleEnv);
     }
 
     // The shipped seam over one row: whatever the decision table names, which

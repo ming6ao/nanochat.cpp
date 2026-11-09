@@ -47,6 +47,11 @@
 // (docs/tensor-core-gemm-plan.md section A.3).
 #define LaunchGemmTile EmuLaunchGemmTile
 #define LaunchGemmTileToFp32 EmuLaunchGemmTileToFp32
+// The fp32 shared-memory tile's launcher (`backends/cuda/gemm/gemm_fp32.cu`,
+// docs/kernels.md Part 3 section 6 phase 3). It exists only in an fp32 build,
+// and the emulator compiles that source at fp32 by construction, so a simulator
+// test calls it beside a host reference in one binary.
+#define LaunchGemmFp32 EmuLaunchGemmFp32
 
 namespace nanochat {
 namespace cuda_backend {

@@ -45,6 +45,8 @@
 #include "backends/cuda/gemm/cutlass_launch.h"
 #include "backends/cuda/gemm/cutlass_rules.h"
 #include "backends/cuda/gemm/dispatch.h"
+#include "backends/cuda/gemm/gemm_fp32_launch.h"
+#include "backends/cuda/gemm/gemm_fp32_plan.h"
 #include "backends/cuda/gemm/gemm_launch.h"
 
 namespace nanochat {
@@ -414,6 +416,36 @@ bool TryGemmTile(const GemmParams& params, const ComputeType* a,
                                  schedule);
 }
 
+// --- The fp32 tile (docs/kernels.md Part 3, section 6 phase 3) --------------
+//
+// The fp32 build has no tensor-core tile and no warpgroup mainloop: `sm_75` has
+// no warpgroup instruction, and the T4 declares no bf16. The fp32
+// shared-memory tile is therefore the third mainloop of section 5, and it is
+// the only hand arm this build holds.
+//
+// **A measurement promotes it and not a build.** `kPromoted` is off until a
+// card run of `gemm_benchmark` at fp32 reads within 1.05 of cuBLAS on the chain
+// rows, so a shipped step keeps cuBLAS in the meantime.
+// `NANOCHAT_GEMM_LIB=hand` runs that measurement: it takes every callable
+// shape, which is the arm the sweep times.
+bool TryGemmTileFp32(const GemmParams& params, const ComputeType* a,
+                     const ComputeType* b, void* c, cudaDataType_t c_type) {
+  if constexpr (!kComputeIsBf16) {
+    if (c_type != CUDA_R_32F) return false;
+    const GemmTileMode mode = GemmTileModeFromEnv();
+    if (mode == GemmTileMode::kCublas || mode == GemmTileMode::kCutlass) {
+      return false;
+    }
+    if (mode == GemmTileMode::kAuto && !gemm_fp32::kPromoted) return false;
+    const int setting = gemm_fp32::ScheduleIndexFromEnv();
+    return LaunchGemmFp32(params, reinterpret_cast<const float*>(a),
+                          reinterpret_cast<const float*>(b),
+                          static_cast<float*>(c),
+                          setting >= 0 ? setting : gemm_fp32::kDefaultSchedule);
+  }
+  return false;
+}
+
 // --- The fp8 arm (docs/kernels.md section 10.4) -----------------------------
 //
 // The seam's scaled fp8 entry, before cublasLt. It answers false for every call
@@ -446,6 +478,7 @@ void GemmImpl(const GemmParams& params, const ComputeType* a,
 
   if (TryGemmCutlass(params, a, b, c, c_type)) return;
   if (TryGemmTile(params, a, b, c, c_type)) return;
+  if (TryGemmTileFp32(params, a, b, c, c_type)) return;
 
   const bool ta = params.transpose_a;
   const bool tb = params.transpose_b;

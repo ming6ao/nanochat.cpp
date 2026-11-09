@@ -195,8 +195,8 @@ class AppTest(unittest.TestCase):
         module, _sdk = _load_app(with_sdk=True)
         self.assertEqual(sorted(module.CARD_JOBS),
                          ["attention_bench", "attention_check", "gemm_bench",
-                          "gemm_bench_fp8", "gemm_check", "mma_check",
-                          "wgmma_probe"])
+                          "gemm_bench_fp8", "gemm_check", "gemm_fp32_bench",
+                          "gemm_fp32_check", "mma_check", "wgmma_probe"])
         self.assertEqual(module.CARD_JOBS["gemm_check"].job.__name__,
                          "check_gemm_h100")
         self.assertEqual(module.CARD_JOBS["gemm_bench"].job.__name__,
@@ -213,9 +213,21 @@ class AppTest(unittest.TestCase):
                          "probe_wgmma_h100")
         for name in ("gemm_bench", "gemm_bench_fp8", "attention_bench"):
             self.assertTrue(module.CARD_JOBS[name].takes_argv)
-        for name in ("gemm_check", "attention_check", "mma_check",
-                     "wgmma_probe"):
+        for name in ("gemm_check", "gemm_fp32_check", "attention_check",
+                     "mma_check", "wgmma_probe"):
             self.assertFalse(module.CARD_JOBS[name].takes_argv)
+
+    def test_the_fp32_tile_runs_on_the_t4_image(self) -> None:
+        # The fp32 tile of docs/kernels.md Part 3 section 6 phase 3 exists for
+        # the leg whose compute type is fp32 at `sm_75`, so both of its jobs
+        # name the T4 image and neither can ride the bf16 one.
+        module, sdk = _load_app(with_sdk=True)
+        calls = {call["name"]: call for call in sdk.function_calls}
+        self.assertIs(calls["bench_gemm_fp32_t4"]["image"],
+                      module.image_for(module.T4))
+        self.assertIs(calls["check_gemm_fp32_t4"]["image"],
+                      module.image_for(module.T4))
+        self.assertIn("gemm_fp32_gpu_test", _source())
 
     def test_the_fp8_benchmark_runs_on_the_fp8_image(self) -> None:
         # The report's `host.precision` is a fact of the library that ran, so the
@@ -841,10 +853,12 @@ class PipelineTest(_RemoteFixture):
     def test_the_functions_are_declared(self) -> None:
         names = [keywords["name"] for keywords in self.sdk.function_calls]
         self.assertEqual(sorted(names), ["bench_attention_h100",
+                                         "bench_gemm_fp32_t4",
                                          "bench_gemm_fp8_h100",
                                          "bench_gemm_h100",
                                          "bench_h100",
                                          "check_attention_h100",
+                                         "check_gemm_fp32_t4",
                                          "check_gemm_h100",
                                          "check_mma_h100", "corpus",
                                          "doctor",

@@ -910,7 +910,7 @@ there; they are not the work that remains.
 | 0 | A `dev/kernels/` prototype: one WGMMA atom, one hand-built descriptor, one resident block, timed over the 1280 by 1280 by 1280 shape | 1 day | 85 percent of the per-SM tensor-core rate, which is 6.4 TFLOP/s from one block on the H100 | **Done**, 96.4 percent of the card peak |
 | 1 | The `mma.sync` mainloop: direct `mma.sync` with `ldmatrix`, four to six stages, dynamic shared memory, and the epilogue rewrite | 4 to 8 weeks | Every row correct, and 0.50 of the recorded cuBLAS rate | **Done and missed**, 0.27 to 0.36. Section 10 records it |
 | 2 | The Hopper mainloop: tile 128 by 256 by 64, cluster 2 by 1, one producer warp, two consumer warpgroups, TMA in and out | Was 2 to 4 months; became 1 week by borrowing | Within 1.05 of the cuBLAS rate on all six rows of section 2 | **Adapter done, gate open.** It needs the card |
-| 3 | The fp32 shared-memory tile for Turing and the fp32 build | 2 to 4 weeks | Within 1.05 of the recorded cuBLAS rate on the chain profiles | Not started |
+| 3 | The fp32 shared-memory tile for Turing and the fp32 build | 2 to 4 weeks | Within 1.05 of the recorded cuBLAS rate on the chain profiles | **Written, and gated off a card.** Section 6.2 records it |
 | 4a | fp8 on the Hopper path | 1 to 2 weeks | The fp8 tolerance of [precision.md](precision.md), and no row above 1.05 | **Measured: one of five forward rows meets the gate (0.751 to 1.031 of cublasLt), and no promotion follows.** The tiny group needs no kernel of its own now: the hand tile serves it |
 | 4b | Stream-K for the ragged rows | Was 1 to 2 weeks; is a different project | No row above 1.05 | **Blocked by the vendor adapter.** Section 10.3 states the evidence |
 | 5 | Detach the library: cuBLAS moves out of `backends/cuda:gemm` and into the benchmark targets | 1 week | The dependency query of gate G4 is empty | Not started |
@@ -998,6 +998,75 @@ Total: six to ten months for one GPU engineer with a card in the loop. That was
 the cost of the removal as sections 5 and 6 first sized it. The CUTLASS route of
 section 6.1 removes phase 2 from that sum, and the arithmetic of what is left is
 in section 10.1.
+
+### 6.2 The fp32 tile for Turing, and what landed
+
+**State.** Written, and gated off a card. `backends/cuda/gemm/gemm_fp32.cu`
+holds the third mainloop of section 5. The build selects it in an fp32 build and
+in no other, because its operands are four bytes. `gemm.cu` calls it through
+`if constexpr (!kComputeIsBf16)`, so no source holds an `#if`.
+
+**Why the tile uses no tensor core.** The T4 declares no bf16
+(`backends/cuda/caps.json`), and `sm_75` has no warpgroup instruction and no
+Tensor Memory Accelerator. A warp-level `mma.sync` pair is available there, but
+the chain's compute type is fp32, and `sm_75` has no fp32 tensor-core input. The
+tile is therefore plain fused multiply-add over registers, and parity with
+cuBLAS is the realistic target rather than a multiple of it.
+
+**Both operands stage k-major.** A thread reads its eight by eight register tile
+with four sixteen-byte loads: two for A and two for B. That is what makes the
+staged read conflict free, and it costs one transposing copy for each operand
+form whose memory runs along the other axis. A plain A and a transposed B are
+the two that transpose, and they are the forward pass's form.
+
+| Schedule | Tile | Threads | Window | Blocks on `sm_75` |
+|---|---|---:|---:|---:|
+| `wide` | 128 by 128 by 16 | 256 | 33,792 B | 1 |
+| `half` | 128 by 64 by 16 | 128 | 25,600 B | 2 |
+
+The two schedules state one trade. `sm_75` holds 64 KiB of shared memory for
+each multiprocessor, so the wide schedule holds one block and the half schedule
+holds two. A card decides which one wins, and `NANOCHAT_GEMM_FP32_SCHEDULE`
+names either.
+
+**What the build reads.** All eight instantiations hold between 118 and 128
+registers, with no stack frame and no local access. `__launch_bounds__` states
+two blocks for each multiprocessor, which is what keeps ptxas inside the 128
+registers that two blocks of 256 threads need.
+
+**What the gates are, and which one is open.**
+
+| Gate | Command | State |
+|---|---|---|
+| The schedule arithmetic | `tools/nanochat test //backends/cuda/gemm:gemm_fp32_plan_test` | Passed |
+| Correctness off device | `tools/nanochat test //tools/cuda_sim/emu:gemm_fp32_emu_test` | Passed |
+| Correctness on the card | `modal run tools/modal/app.py::card_job --name gemm_fp32_check` | **Open**, and blocked: see below |
+| The rate against cuBLAS | `modal run tools/modal/app.py::card_job --name gemm_fp32_bench --argv '["--rows","production","--schedule","all","--json"]'` | **Open**, and blocked: see below |
+
+**The two card gates are open, and no card run reached one.** Three runs of
+`gemm_fp32_check` stopped in the image build, and each one stopped on the same
+upstream fetch: the Modal builder answered `GET returned 504 Gateway Time-out`
+for the `rules_cuda` tarball at
+`github.com/bazel-contrib/rules_cuda/releases/download/v0.3.0`. The same URL
+answered 200 from the development host, so the fault is the builder's network
+and not this tree. A `card_job` run builds every image of the app, so the
+failure is in the image and not in the kernel.
+
+A session that resumes here runs the two commands above. Nothing else is
+needed: the sources, the two host gates, and the resource reading are done, and
+the promotion bit is one line in `gemm_fp32_plan.h` once the rate is known.
+
+**The emulated leg found a defect in the test, and not in the kernel.** The
+reference of `gemm_fp32_emu_test` indexed the initial C buffer without the batch
+base, so the third batch of one case disagreed by the beta term alone. The
+kernel read the right value. That is the whole argument for the off-device leg:
+the card run would have shown the same difference with no way to tell which side
+was wrong.
+
+**The tile is not promoted by this change.** `gemm_fp32::kPromoted` is off, so
+an unset `NANOCHAT_GEMM_LIB` leaves every fp32 call on cuBLAS and a shipped step
+does not change. The promotion is one bit, and the card run below is what sets
+it.
 
 ### 7. The gates
 
@@ -1206,7 +1275,7 @@ record to write when it lands.
 | 2c. The adapter behind the seam | **Done** | `tools/nanochat build --config=hopper --config=bf16 //backends/cuda/gemm:gemm_gpu_test` | `backends/cuda/gemm/README.md` § 16 |
 | 2d. Correctness on the card | **Done, passed** | `modal run tools/modal/app.py::card_job --name gemm_check` | This section |
 | 2e. The rate gate, 1.05 of cuBLAS | **Done, met on 19 of the 25 callable rows** after section 11.9 | `modal run tools/modal/app.py::card_job --name gemm_bench --argv '["--rows","production","--json"]'` | The `gemm_cutlass` entry of [baselines.json](baselines.json) |
-| 3. The fp32 tile for Turing | Not started | The Turing leg of `card_job` | This section |
+| 3. The fp32 tile for Turing | **Written, and gated off a card.** Section 6.2 records it | `modal run tools/modal/app.py::card_job --name gemm_fp32_check` | Section 6.2 |
 | 4a. fp8 on the Hopper path | **Measured on a card: one forward row of five meets the gate, and the two backward forms fault.** No promotion | `gemm_bench` under `--config=fp8` | The `gemm_fp8` entry of [baselines.json](baselines.json) |
 | 4b. Stream-K for the ragged rows | **Blocked by the adapter**, on the evidence of section 10.3 | `gemm_bench --row linear:wgrad:cls` | This section |
 | 5. Detach cuBLAS from the library | **Closed, and it does not follow yet.** The reason is in 10.2 | `bazel query 'somepath(//src:model, @cuda//:cublasLt)'` returns nothing | [build.md](build.md) |

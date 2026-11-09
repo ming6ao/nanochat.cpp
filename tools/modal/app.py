@@ -204,6 +204,14 @@ GEMM_TEST_TARGET = "//backends/cuda/gemm:gemm_gpu_test"
 GEMM_BENCH_BIN = _bazel_bin(GEMM_BENCH_TARGET)
 GEMM_TEST_BIN = _bazel_bin(GEMM_TEST_TARGET)
 
+#: The fp32 shared-memory tile and its card gate
+#: (``docs/kernels.md`` Part 3 section 6 phase 3). The T4 is the leg this tile
+#: exists for: that leg is fp32 at ``sm_75``, where the bf16 tile and the
+#: warpgroup mainloop are both compiled out. The T4 image builds this test, and
+#: the benchmark of the same leg times the tile through its ``hand`` arm.
+GEMM_FP32_TEST_TARGET = "//backends/cuda/gemm:gemm_fp32_gpu_test"
+GEMM_FP32_TEST_BIN = _bazel_bin(GEMM_FP32_TEST_TARGET)
+
 #: Phase 1 of ``docs/kernels.md`` Part 3: the gate of the `ldmatrix` and
 #: `mma.sync` micro-tile. One binary holds a host row and a device row over one
 #: reference, so this job reports both and the device row is the instruction
@@ -233,7 +241,7 @@ WGMMA_PROBE_ARCH = "sm_90a"
 BUILD_TARGETS = ("//bindings:nanochat_shared", *STAGE_TARGETS,
                  TOKENIZER_TARGET, BENCH_TARGET, ATTENTION_BENCH_TARGET,
                  ATTENTION_TEST_TARGET, GEMM_BENCH_TARGET, GEMM_TEST_TARGET,
-                 GEMM_MMA_TARGET)
+                 GEMM_FP32_TEST_TARGET, GEMM_MMA_TARGET)
 
 #: The directory of the image build that holds them, and the variables that
 #: name them. ``nanochat_cpp._build.stage_binary`` prefers the override, and
@@ -1060,6 +1068,49 @@ def bench_gemm_h100(argv_json: str = "[]") -> str:
     ``argv_json`` is a JSON list of the benchmark's own arguments, such as
     ``["--schedule", "all", "--json"]``, so a caller sweeps the five schedules
     without a new deployment.
+    """
+    return _run_in_image(["tools/nanochat", "bench", "--", GEMM_BENCH_BIN],
+                         argv_json, ("gemm:",))
+
+
+@app.function(
+    image=image_for(T4),
+    gpu=T4.gpu,
+    cpu=CPU_CORES,
+    timeout=1800,
+    max_containers=1,
+)
+def check_gemm_fp32_t4() -> str:
+    """Run the fp32 shared-memory tile's device gate on the T4 leg.
+
+    The tile of ``backends/cuda/gemm/gemm_fp32.cu`` against a host reference in
+    double, over the four operand forms, a k tail, a batch above one, the alpha
+    and beta terms, and both schedules (``docs/kernels.md`` Part 3 section 6
+    phase 3). The T4 image is the one that builds it: the leg is fp32 at
+    ``sm_75``.
+    """
+    return _run_in_image(["tools/nanochat", "run", "t1-gpu", "--",
+                          GEMM_FP32_TEST_BIN], "[]", ())
+
+
+@app.function(
+    image=image_for(T4),
+    gpu=T4.gpu,
+    cpu=CPU_CORES,
+    timeout=1800,
+    max_containers=1,
+)
+def bench_gemm_fp32_t4(argv_json: str = "[]") -> str:
+    """Time the fp32 shared-memory tile against cuBLAS on the T4 leg.
+
+    The same protocol and the same rows as :func:`bench_gemm_h100`, on the leg
+    whose compute type is fp32. The ``hand`` arm routes through the seam's
+    ``NANOCHAT_GEMM_LIB`` switch to the fp32 tile, and the ``cublas`` arm is the
+    reference, so the ratio of the two columns is the fraction the phase 3 gate
+    of ``docs/kernels.md`` reads.
+
+    ``argv_json`` is a JSON list of the benchmark's own arguments, such as
+    ``["--rows", "production", "--schedule", "all", "--json"]``.
     """
     return _run_in_image(["tools/nanochat", "bench", "--", GEMM_BENCH_BIN],
                          argv_json, ("gemm:",))
@@ -2698,6 +2749,10 @@ CARD_JOBS = {
                           takes_argv=True),
     "gemm_bench_fp8": CardJob(bench_gemm_fp8_h100, "the fp8 arm benchmark",
                               takes_argv=True),
+    "gemm_fp32_check": CardJob(check_gemm_fp32_t4,
+                               "the fp32 tile device gate"),
+    "gemm_fp32_bench": CardJob(bench_gemm_fp32_t4, "the fp32 tile benchmark",
+                               takes_argv=True),
     "mma_check": CardJob(check_mma_h100, "the Part 3 phase 1 micro-tile gate"),
     "wgmma_probe": CardJob(probe_wgmma_h100,
                            "the WGMMA ceiling probe of Part 3 phase 0"),

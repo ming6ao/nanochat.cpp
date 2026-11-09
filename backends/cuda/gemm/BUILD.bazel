@@ -104,6 +104,51 @@ cc_library(
     ],
 )
 
+# The schedules of the fp32 tile (docs/kernels.md Part 3, section 6 phase 3).
+# Host only: a schedule states ints, so `gemm_fp32_plan_test` reads the staged
+# window and the register tile with no device and no CUDA header.
+cc_library(
+    name = "gemm_fp32_plan",
+    hdrs = ["gemm_fp32_plan.h"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+)
+
+# The fp32 shared-memory tile of docs/kernels.md Part 3 section 6 phase 3.
+#
+# The T4 declares no bf16 and `sm_75` has no warpgroup instruction, so the
+# post-training chain on Turing runs this kernel: shared-memory operands,
+# register accumulators, no tensor core. It is the third mainloop of section 5.
+#
+# The source is the fp32 build's and no other's. A bf16 or fp8 build selects no
+# source, so this library is empty there and `gemm.cu` discards the only call
+# through `if constexpr (!kComputeIsBf16)`.
+#
+# The staged window is static, so a launch asks for no shared-memory attribute
+# and no opt-in limit. That is also what keeps the emulation engine's `__shared__`
+# mapping able to run the kernel.
+cuda_library(
+    name = "gemm_fp32",
+    srcs = select({
+        "//:bf16": [],
+        "//:fp8": [],
+        "//conditions:default": ["gemm_fp32.cu"],
+    }),
+    hdrs = [
+        "gemm_fp32_launch.h",
+        "gemm_fp32_plan.h",
+        "gemm_shape.h",
+    ],
+    copts = nanochat_cuda_copts(),
+    defines = precision_defines(),
+    deps = [
+        ":gemm_fp32_plan",
+        "//backends/cuda:device",
+        "//include/nanochat:nanochat",
+    ],
+    alwayslink = True,
+)
+
 # The Hopper mainloop, borrowed from NVIDIA CUTLASS (docs/kernels.md Part 3
 # section 5). One candidate is eight kernels: four operand orientations times two
 # store types, and the registry of section 11.4 names four candidates.
@@ -293,6 +338,44 @@ cc_test(
     size = "small",
 )
 
+# The host gate of the fp32 tile's two schedules: the staged window, the
+# register tile, and the residency each schedule holds on `sm_75`. Pure
+# arithmetic, so it rides the default CPU loop.
+cc_test(
+    name = "gemm_fp32_plan_test",
+    srcs = ["gemm_fp32_plan_test.cc"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    deps = [":gemm_fp32_plan"],
+    size = "small",
+)
+
+# The device gate of the fp32 tile: a host reference in double, over the four
+# operand forms, a k tail, a batch, the alpha and beta terms, and both
+# schedules. Needs a card and an fp32 build; the build compiles the source only
+# then, so the label stays in every test list.
+cuda_test(
+    name = "gemm_fp32_gpu_test",
+    srcs = select({
+        "//:bf16": ["gemm_bf16_only_main.cc"],
+        "//:fp8": ["gemm_bf16_only_main.cc"],
+        "//conditions:default": ["gemm_fp32_test.cc"],
+    }),
+    copts = nanochat_cuda_copts(),
+    defines = precision_defines(),
+    deps = [
+        ":gemm_fp32",
+        ":gemm_fp32_plan",
+        "//backends/cuda:device",
+        "//include/nanochat:nanochat",
+    ],
+    size = "small",
+    tags = [
+        "gpu",
+        "manual",
+    ],
+)
+
 # The device gate of the same kernel: cuBLAS is the reference, because both
 # sides accumulate bf16 products in fp32 and only the order differs. It drives
 # the launcher and not the seam, because every row of the shape table is inert.
@@ -326,7 +409,7 @@ cuda_binary(
     srcs = select({
         "//:bf16": ["gemm_benchmark.cc"],
         "//:fp8": ["gemm_benchmark.cc"],
-        "//conditions:default": ["gemm_bf16_only_main.cc"],
+        "//conditions:default": ["gemm_benchmark.cc"],
     }),
     copts = nanochat_cuda_copts(),
     host_copts = nanochat_copts(),
@@ -337,6 +420,9 @@ cuda_binary(
         ":cutlass_bf16",
         ":cutlass_candidates",
         ":dispatch",
+        # The fp32 sweep's own schedule list (docs/kernels.md Part 3 section 6
+        # phase 3). An fp32 build times that tile, so it reads that sweep.
+        ":gemm_fp32_plan",
         "//backends/cuda:gemm",
         # The fp8 arms quantize the row's own operands, so the benchmark calls
         # the seam's `QuantizeFp8` and links the kernel that defines it
@@ -381,6 +467,8 @@ test_suite(
         ":bench_shapes_test",
         ":candidate_registry_test",
         ":dispatch_test",
+        ":gemm_fp32_gpu_test",
+        ":gemm_fp32_plan_test",
         ":gemm_gpu_test",
         ":mma_bf16_test",
     ],

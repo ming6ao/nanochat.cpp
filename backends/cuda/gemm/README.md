@@ -940,3 +940,74 @@ without a card and without the vendor header. It covers the accepted dense call,
 the four refusals in their order, and the fp8 row alignment that separates that
 arm from bf16. It also covers the batch refusal, the tile fields, and the staged
 bytes.
+
+## 19. The fp32 tile, phase 3
+
+`docs/kernels.md` section 6.2 is the record. This section states what the
+package holds, why the tile has no tensor core, and what the two schedules
+trade.
+
+**What it is.** `gemm_fp32.cu` is the third mainloop of `docs/kernels.md`
+section 5. It serves an fp32 build and no other: the build selects its source
+for the default precision, and `gemm.cu` discards the only call through
+`if constexpr (!kComputeIsBf16)`, so no source holds an `#if`.
+
+**Why no tensor core.** The T4 declares no bf16 (`backends/cuda/caps.json`), and
+`sm_75` has neither a warpgroup instruction nor a Tensor Memory Accelerator. A
+warp-level `mma.sync` pair exists there, but the chain's compute type is fp32 and
+`sm_75` has no fp32 tensor-core input. The tile is plain fused multiply-add over
+registers, so parity with cuBLAS is the target and not a multiple of it.
+
+**Both operands stage k-major**, `As[k][m]` and `Bs[k][n]`. One thread reads its
+eight by eight register tile with four sixteen-byte loads: two for A and two for
+B. The sixteen threads of one block row read the same eight A values, so the read
+broadcasts inside a warp and no bank repeats. That is what makes the staged read
+conflict free without a pad that costs a block its second slot on the
+multiprocessor. The cost is one transposing copy for each operand form whose
+memory runs along the other axis: a plain A and a transposed B, which is the
+forward pass's form.
+
+**The two schedules state one trade.**
+
+| Schedule | Tile | Threads | Window | Blocks on `sm_75` |
+|---|---|---:|---:|---:|
+| `wide` | 128 by 128 by 16 | 256 | 33,792 B | 1 |
+| `half` | 128 by 64 by 16 | 128 | 25,600 B | 2 |
+
+`sm_75` holds 64 KiB of shared memory for each multiprocessor. The wide schedule
+therefore holds one block and the half schedule holds two, and the second stages
+half the bytes for each unit of arithmetic. Which one wins is a card measurement
+and not an argument.
+
+**The window is static.** A launch asks for no shared-memory attribute and no
+opt-in limit, which is also what lets the emulation engine run the kernel: its
+`__shared__` mapping covers a static array and not a dynamic window.
+
+**The build reads clean.** All eight instantiations hold between 118 and 128
+registers, with `STACK 0` and no local access. `__launch_bounds__` states two
+blocks for each multiprocessor, which keeps ptxas inside the 128 registers that
+two blocks of 256 threads need.
+
+**The gates, and the two that need a card.**
+
+```bash
+tools/nanochat test //backends/cuda/gemm:gemm_fp32_plan_test
+tools/nanochat test //tools/cuda_sim/emu:gemm_fp32_emu_test
+modal run tools/modal/app.py::card_job --name gemm_fp32_check
+modal run tools/modal/app.py::card_job --name gemm_fp32_bench \
+  --argv '["--rows","production","--schedule","all","--json"]'
+```
+
+The first two need no card. The emulated leg is `gemm_fp32_emu_test`, which runs
+the real source through the engine against a host reference in double.
+
+**Nothing is promoted by this change.** `gemm_fp32::kPromoted` is off, so an
+unset `NANOCHAT_GEMM_LIB` leaves every fp32 call on cuBLAS. The card run above
+decides whether the bit turns on.
+
+**Both card gates are open.** Three runs of the check job stopped in the image
+build, and each one stopped on an upstream fetch: the Modal builder answered
+`504 Gateway Time-out` for the `rules_cuda` tarball, while the same URL answered
+200 from the development host. Nothing in this package reached a card yet, so
+the tile is `Correct off device, and the card tiers are pending`.
+

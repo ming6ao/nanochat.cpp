@@ -30,6 +30,14 @@ bool EmuLaunchGemmTileToFp32(
     const GemmParams& params, const ComputeType* a, const ComputeType* b,
     float* c, int schedule = nanochat::kernels::gemm_tile::kDefaultSchedule);
 
+// The fp32 shared-memory tile's launcher (docs/kernels.md Part 3 section 6
+// phase 3). It exists only in an fp32 build, where the seam's operand is a
+// float, so the signature states `float` and not `ComputeType`. The schedule
+// has no default here: this header stays free of the tile's plan, which is one
+// dependency fewer for every test that reads it.
+bool EmuLaunchGemmFp32(const GemmParams& params, const float* a, const float* b,
+                       float* c, int schedule);
+
 void EmuRmsNormForward(const RmsNormParams& params, const ComputeType* x,
                        ComputeType* out, float* rstd);
 
