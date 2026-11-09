@@ -23,8 +23,18 @@ using nanochat::dev::RandomVec;
 using nanochat::dev::Rng;
 using nanochat::dev::ToStorage;
 
+// One measured call, reported as milliseconds and as a byte rate.
+//
+// `bytes` is the algorithmic traffic of one call: the bytes the operation must
+// move to do its work. A kernel that reads a row twice counts the read once,
+// because the second pass is one the cache absorbs, and a byte rate that
+// counted it twice would flatter a kernel that reads more than it must. The
+// column exists because the row kernels sit far below the ridge point of every
+// supported card, and a packed loop is a bandwidth change: without this number
+// a change to the access pattern shows up only as a time with no denominator
+// (docs/kernels.md Part 4 item 1).
 template <typename Fn>
-double TimeIt(const char* name, int iters, Fn&& fn) {
+double TimeIt(const char* name, int iters, double bytes, Fn&& fn) {
   // Warm up, then time a batch and synchronize once.
   fn();
   nanochat::kernels::Synchronize();
@@ -34,7 +44,8 @@ double TimeIt(const char* name, int iters, Fn&& fn) {
   const auto end = std::chrono::steady_clock::now();
   const double ms =
       std::chrono::duration<double, std::milli>(end - start).count() / iters;
-  std::printf("  %-28s %10.3f ms/iter\n", name, ms);
+  const double gbs = ms > 0.0 ? bytes / (ms * 1e6) : 0.0;
+  std::printf("  %-28s %10.3f ms/iter %8.1f GB/s\n", name, ms, gbs);
   return ms;
 }
 
@@ -46,9 +57,12 @@ void BenchRmsNorm(Rng* rng, int rows, int dim, int iters) {
   DevBuf<ComputeType> x(ToStorage(RandomVec(rows * dim, rng)));
   DevBuf<ComputeType> out(rows * dim);
   DevBuf<float> rstd(rows);
+  constexpr double kBytes = sizeof(ComputeType);
+  // x read, out written, one rstd per row.
+  const double bytes = 2.0 * rows * dim * kBytes + rows * sizeof(float);
   char label[64];
   std::snprintf(label, sizeof(label), "rmsnorm r=%d d=%d", rows, dim);
-  TimeIt(label, iters, [&] {
+  TimeIt(label, iters, bytes, [&] {
     nanochat::kernels::RmsNormForward(p, x.ptr, out.ptr, rstd.ptr);
   });
 }
@@ -75,7 +89,10 @@ void BenchQkPrep(Rng* rng, int batch, int seq, int heads, int kv_heads, int dim,
   char label[64];
   std::snprintf(label, sizeof(label), "qkprep b=%d t=%d h=%d kv=%d d=%d", batch,
                 seq, heads, kv_heads, dim);
-  TimeIt(label, iters, [&] {
+  // q and k are read and written in place, and both tables are read.
+  const double bytes = 4.0 * (q_count + k_count) * sizeof(ComputeType) +
+                       4.0 * static_cast<double>(seq) * half * sizeof(float);
+  TimeIt(label, iters, bytes, [&] {
     nanochat::kernels::QkPrepForward(p, cos.ptr, sin.ptr, q.ptr, k.ptr);
   });
 }
@@ -104,7 +121,11 @@ void BenchQkPrepBackward(Rng* rng, int batch, int seq, int heads, int kv_heads,
   char label[64];
   std::snprintf(label, sizeof(label), "qkprep-bwd b=%d t=%d h=%d kv=%d d=%d",
                 batch, seq, heads, kv_heads, dim);
-  TimeIt(label, iters, [&] {
+  // dq and dk are read, q and k are read and overwritten with their
+  // gradients, and both tables are read.
+  const double bytes = 6.0 * (q_count + k_count) * sizeof(ComputeType) +
+                       4.0 * static_cast<double>(seq) * half * sizeof(float);
+  TimeIt(label, iters, bytes, [&] {
     nanochat::kernels::QkPrepBackward(p, cos.ptr, sin.ptr, dq.ptr, dk.ptr,
                                       q.ptr, k.ptr);
   });
@@ -121,7 +142,9 @@ void BenchPointwise(Rng* rng, int n, int iters) {
   p.beta = 1.0f;
   char label[64];
   std::snprintf(label, sizeof(label), "pointwise n=%d", n);
-  TimeIt(label, iters, [&] {
+  // Two operands read and one result written.
+  const double bytes = 3.0 * n * sizeof(ComputeType);
+  TimeIt(label, iters, bytes, [&] {
     nanochat::kernels::PointwiseForward(p, a.ptr, b.ptr, out.ptr);
   });
 }
@@ -134,7 +157,9 @@ void BenchGradNorm(Rng* rng, int n, int iters) {
   DevBuf<int> span_count(std::vector<int>{n});
   char label[64];
   std::snprintf(label, sizeof(label), "gradnorm n=%d", n);
-  TimeIt(label, iters, [&] {
+  // The spans are read once and two scalars are written.
+  const double bytes = 4.0 * n + 2.0 * sizeof(float);
+  TimeIt(label, iters, bytes, [&] {
     nanochat::kernels::GradNorm(span.ptr, span_count.ptr, 1, 1e-3f, norm.ptr,
                                 scale.ptr);
   });

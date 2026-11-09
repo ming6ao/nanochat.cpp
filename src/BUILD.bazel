@@ -149,6 +149,19 @@ cc_test(
     size = "small",
 )
 
+# The benchmark report's optional row keys. It reads its own document back as
+# text, so it needs no device and no card: the writer is a header.
+cc_test(
+    name = "bench_test",
+    srcs = ["bench_test.cc"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    deps = [
+        "//include/nanochat:nanochat",
+    ],
+    size = "small",
+)
+
 # The reference backend's capability report (`spec/api-surface.md` R4b). The
 # plan test above supplies a *fabricated* mask; this one reads the mask the
 # reference backend actually reports, so the declaration in

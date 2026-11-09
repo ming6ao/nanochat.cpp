@@ -98,6 +98,13 @@ struct BenchRow {
   std::string family;
   std::string phase;
   std::string precision;
+  // The measured-shape facts, for a benchmark that sizes its own call. Zero
+  // means the benchmark does not state that field, and the key is omitted, so
+  // a row of a family that has neither reads exactly as it did before these
+  // two fields existed. They are additive inside `nanochat.bench.v3`: a reader
+  // that knows neither key ignores them (docs/kernels.md section 11.7).
+  int iterations = 0;  // the iteration count the per-call time came from
+  int occupancy = 0;   // the blocks per multiprocessor the arm answers
 };
 
 // Collects rows and emits a human-readable table, a JSON document, or both.
@@ -119,13 +126,16 @@ class BenchReport {
   // precision are inherited, so a loop over rows of one family states them
   // once.
   void Add(const std::string& name, const std::string& shape, double ms,
-           double gflops = 0.0, double work_ratio = 0.0) {
+           double gflops = 0.0, double work_ratio = 0.0, int iterations = 0,
+           int occupancy = 0) {
     BenchRow row;
     row.name = name;
     row.shape = shape;
     row.ms = ms;
     row.gflops = gflops;
     row.work_ratio = work_ratio;
+    row.iterations = iterations;
+    row.occupancy = occupancy;
     row.family = family_;
     row.phase = phase_;
     row.precision = precision_;
@@ -243,7 +253,14 @@ class BenchReport {
               ",\"ms\":" + JsonDouble(row.ms) +
               ",\"gflops\":" + JsonDouble(row.gflops) +
               ",\"work_ratio\":" + JsonDouble(row.work_ratio) +
-              ",\"mfu\":" + JsonDouble(row.mfu) + "}";
+              ",\"mfu\":" + JsonDouble(row.mfu);
+      if (row.iterations > 0) {
+        text += ",\"iterations\":" + std::to_string(row.iterations);
+      }
+      if (row.occupancy > 0) {
+        text += ",\"occupancy\":" + std::to_string(row.occupancy);
+      }
+      text += "}";
     }
     text += "]";
     for (const auto& extra : extras_) {
