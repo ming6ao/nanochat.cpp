@@ -234,6 +234,27 @@ each server and `tools/nanochat` serializes builds:
 
 See [sandbox.md](sandbox.md) for the host budget this protects.
 
+#### Heavy device targets
+
+- **A CUTLASS target needs its own action cap.** One candidate is one
+  compilation unit with eight instantiations, and the device compiler keeps 2
+  to 3 GiB for each. Four such actions at `--jobs=4` exceed this host, so build
+  `//backends/cuda/gemm:cutlass_*` with `--jobs=1`.
+  `--local_resources=memory=3072` is a scheduling hint, not a limit.
+- **Three parallel `cicc` processes caused the kill.** On 2026-11-08 they held
+  2.3 to 2.9 GiB each, and the kernel ran the OOM killer on a compile. Swap was
+  already full, so the host thrashed first. That thrash is the freeze an
+  operator feels.
+- **Keep the cap out of the tracked file.** A host may define
+  `build:cutlass --jobs=1` in `.bazelrc.local`, then run
+  `tools/nanochat build --config=cutlass <target>`. Ordinary targets keep
+  `--jobs=4`, so the tracked default does not change.
+- **A build takes no cgroup budget.** `--jobs` is the only bound on a compile,
+  because `tools/nanochat build` takes the build lock and applies no scope.
+  Wrap a long build in
+  `systemd-run --user --scope -p MemoryMax=6G -p MemorySwapMax=0 --`. The
+  kernel then kills the compile and not the session.
+
 ### Python targets
 
 The in-process Python API (docs/python.md) adds two packages.
