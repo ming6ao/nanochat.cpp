@@ -820,10 +820,11 @@ reference. The reference now runs the same count.
 package holds, why the tile is not the bf16 `wide-n` row, and what is still open.
 
 **What it is.** `cutlass_fp8.cu` puts the seam's `GemmScaledFp8` on the same
-warp-specialized mainloop with `float_e4m3_t` operands and an fp32 accumulator.
-Two seam entries exist, one for each store form: a bf16 store and an fp32 store.
-Only an fp8 build compiles the target, and only an fp8 build of `gemm.cu` calls
-it, through `if constexpr (kFp8Build)`.
+warp-specialized mainloop with an fp32 accumulator. It carries all three forms
+the seam issues: the forward at E4M3 by E4M3, and the dgrad and wgrad at E5M2 by
+E4M3. Two seam entries exist, one for each store form. Only an fp8 build
+compiles the target, and only an fp8 build of `gemm.cu` calls it, through
+`if constexpr (kFp8Build)`.
 
 ```bash
 tools/nanochat build --config=cutlass --config=cuda --config=fp8 \
@@ -838,20 +839,31 @@ by-value scalar. The slot is four bytes, allocated once for the thread, and it i
 not part of the CUTLASS workspace, because the epilogue reads it while the
 kernel runs.
 
-**The tile is `balanced`, not `wide-n`, and a host test said so.** The fp8
-accumulation path of CUTLASS keeps two fp32 accumulators, because it promotes one
-into the other every `mma_promotion_interval` k blocks. At 256 wide N and two
+**The forward tile is `balanced`, not `wide-n`, and a host test said so.** The
+fp8 accumulation path of CUTLASS keeps two fp32 accumulators, because it promotes
+one into the other every `mma_promotion_interval` k blocks. At 256 wide N and two
 warpgroups one accumulator is 128 registers. Both kernels of the first build read
 168 registers with a 256 byte stack frame, and `tools/gemm_spill_gate.py` found
 the accumulator in local memory inside their k loops.
 
-| Tile | Stages | Registers | Stack | Spill gate |
-|---|---:|---:|---:|---|
-| 128x256x64, `wide-n` | 3 | 168 | 256 B | 2 of 2 kernels spill |
-| 128x128x64, `balanced` | 5 | 168 | 0 | clean, 2 k loops |
+| Form | Tile | Stages | Registers | Stack | Spill gate |
+|---|---|---:|---:|---:|---|
+| forward, `wide-n` | 128x256x64 | 3 | 168 | 256 B | 2 of 2 kernels spill |
+| forward, `balanced` | 128x128x64 | 5 | 168 | 0 | clean |
+| dgrad | 128x128x128 | 2 | 168 | 8 B | clean |
+| wgrad | 128x128x128 | 2 | 168 | 0 | clean |
 
-The fp8 operand is one byte, so five stages of the narrower tile stage 81920 B of
-the 227 KiB window. The wider tile's three stages staged 73728 B.
+The fp8 operand is one byte. Five stages of the `balanced` tile stage 81920 B of
+the 227 KiB window, and two stages of a 128 deep slice stage 65536 B.
+
+**The backward forms need a deeper k slice.** The two backward calls are not
+K-major in both operands. CUTLASS therefore stages the awkward operand through
+its transposing collective, and that path is unreachable at a k slice of 64. A
+probe instantiation reported `RS loops require more than 2 MMA k-iterations for
+correctness` for the dgrad form, and `Invalid warp thread shape` for the wgrad
+one. At a k slice of 128 both compile, and `kFp8BackwardTile` states that slice.
+The 8 bytes of stack on the dgrad kernel is not the accumulator: the gate reads
+no local access between two multiplies.
 
 **The gate needed `QGMMA` to see the body.** `tools/gemm_spill_gate.py` looked
 only for `HGMMA`, the bf16 and fp16 multiply, so an fp8 body read as "no k loop
@@ -859,11 +871,17 @@ to check" and passed unseen. Hopper spells the eight-bit multiply `QGMMA`. The
 gate accepts both prefixes now, and its `cutlass_fp8` directory label names the
 arm, which has no registry index.
 
-**One operand pair, so the backward keeps cuBLAS.** `CallSupported` takes E4M3
-by E4M3, which is the forward form of `docs/precision.md` section 5.2. The
-backward states E5M2 for both operands, so the arm refuses it. The vendor atoms
-carry `_F32E5M2E5M2_SS_TN` and the mixed `_F32E4M3E5M2_SS_TN` at every N, so the
-backward is two more instantiations and one more template argument.
+**Every form the seam issues is covered, and no other is.** `CallSupported` reads
+one rule from `gemm_shape.h`, `Fp8ScaledFormSupported`, which maps a pair and an
+orientation to a form. The forward is E4M3 by E4M3 and K-major in both operands,
+the dgrad is E5M2 by E4M3 with A K-major, and the wgrad is E5M2 by E4M3 with A
+M-major. A call with another pair or orientation is refused, and cublasLt keeps
+it. The arm is therefore four kernels and not eight: the two forward stores, the
+dgrad at the compute type, and the wgrad at fp32.
+
+The benchmark states the pair from the row's own orientation through the same
+rule. Without that it stated E4M3 for every row, so every backward row was
+refused and both of its fp8 columns timed cublasLt.
 
 **Nothing is promoted.** `NANOCHAT_GEMM_FP8=cutlass` is the only way a shipped
 call reaches the arm, and a training run does not set it. `gemm_benchmark --fp8`

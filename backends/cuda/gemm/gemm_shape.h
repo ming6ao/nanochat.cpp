@@ -203,6 +203,20 @@ inline CutlassRefusal JudgeCutlass(const ResolvedGemm& gemm, const void* a,
   return CutlassRefusal::kNone;
 }
 
+// True when the arm has an instruction form for this call (docs/kernels.md
+// section 10.4). The seam issues three, and the two formats name them: the
+// forward states E4M3 for both operands and the two backward calls state E5M2
+// for the output gradient and E4M3 for the other operand. The orientation
+// follows: the forward is K-major in both operands, the dgrad is K-major in A
+// only, and the wgrad is M-major in A. A pair or an orientation outside those
+// three is refused, and cublasLt keeps the call.
+inline bool Fp8ScaledFormSupported(Fp8Format a, Fp8Format b, bool transpose_a,
+                                   bool transpose_b) {
+  if (b != Fp8Format::kE4M3) return false;
+  if (a == Fp8Format::kE4M3) return !transpose_a && transpose_b;
+  return a == Fp8Format::kE5M2 && !transpose_b;
+}
+
 // True when the Hopper mainloop takes this call.
 inline bool IsCutlassCallable(const ResolvedGemm& gemm, const void* a,
                               const void* b, const void* c) {

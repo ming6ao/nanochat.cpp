@@ -97,28 +97,21 @@ inline constexpr int kGemmCandidateCount =
   ENTRY(2)                                 \
   ENTRY(3)
 
-// The fp8 arm's tile (docs/kernels.md section 10.4).
+// The fp8 arm's tiles (docs/kernels.md section 10.4): the forward form's row
+// and the deeper slice the two backward forms need.
 //
 // It is one row and not a registry entry. An fp8 axis over the four bf16 rows
 // would be sixty-four instantiations, and `dev/cutlass/README.md` measures one
-// at 19 s and 1.2 GiB, so the build budget bounds the count. One row answers
-// the campaign's first question: is an fp8 Hopper mainloop worth more than
-// cublasLt?
+// at 19 s and 1.2 GiB, so the build budget bounds the count.
 //
-// The tile is the probe's `balanced` row and not its `wide-n` row, and the
-// spill gate of `docs/kernels.md` section 11.4 is what says so. The fp8
-// accumulation path of CUTLASS keeps two fp32 accumulators, because it promotes
-// one into the other every few k blocks, so a 256 wide N at two warpgroups
-// needs 128 registers of accumulator and not 64. The build of section 10.4
-// measured the `wide-n` form at 168 registers with a 256 B stack frame: it
-// spills. Half the N halves the accumulator, and the fp8 operand being one byte
-// leaves the pipeline room for five stages where bf16 has three.
+// The forward tile is the probe's `balanced` row. The first build ran `wide-n`
+// and spilled, because the fp8 accumulation path keeps two fp32 accumulators.
 //
-// It is one row and not a registry entry. An fp8 axis over the four bf16 rows
-// would be sixty-four instantiations, and `dev/cutlass/README.md` measures one
-// at 19 s and 1.2 GiB, so the build budget bounds the count. One row answers
-// the campaign's first question: is an fp8 Hopper mainloop worth more than
-// cublasLt?
+// The backward tiles take the k slice of the probe's `deep-k` row, and they
+// take it for a different reason. The two shipped backward forms are not
+// K-major in both operands, so CUTLASS stages the awkward operand through its
+// transposing collective, and that path refuses a k slice of 64: it needs more
+// than two multiply instructions. A 128 deep slice gives four.
 struct Fp8TileSpec {
   const char* name;
   int tile_m = 0;
@@ -130,6 +123,8 @@ struct Fp8TileSpec {
 };
 
 inline constexpr Fp8TileSpec kFp8Tile{"fp8-balanced", 128, 128, 64, 2, 1, 5};
+inline constexpr Fp8TileSpec kFp8BackwardTile{
+    "fp8-deep-k", 128, 128, 128, 2, 1, 2};
 
 namespace cutlass_detail {
 

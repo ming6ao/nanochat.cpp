@@ -32,10 +32,12 @@
 
 namespace {
 
+using nanochat::Fp8Format;
 using nanochat::GemmParams;
 using nanochat::kernels::CutlassCandidateFor;
 using nanochat::kernels::CutlassRefusal;
 using nanochat::kernels::CutlassRefusalName;
+using nanochat::kernels::Fp8ScaledFormSupported;
 using nanochat::kernels::GemmCandidateCount;
 using nanochat::kernels::GemmRoute;
 using nanochat::kernels::GemmRuleFor;
@@ -58,6 +60,7 @@ using nanochat::kernels::IsTileCallable;
 using nanochat::kernels::JudgeCutlass;
 using nanochat::kernels::JudgeScaledFp8;
 using nanochat::kernels::kCutlassMinOutputElements;
+using nanochat::kernels::kFp8BackwardTile;
 using nanochat::kernels::kFp8Tile;
 using nanochat::kernels::kGemmRuleCount;
 using nanochat::kernels::kGemmRules;
@@ -609,6 +612,53 @@ void CheckScaledFp8Verdict() {
   Expect(staged == 81920, "the fp8 pipeline stages 81920 B", kCase);
   Expect(staged < 227LL * 1024,
          "the fp8 pipeline leaves the epilogue its share", kCase);
+
+  // The three forms the seam issues, and the fourth that it does not. The pair
+  // names the form and the orientation follows, so a call that states one but
+  // not the other is refused and cublasLt keeps it.
+  Expect(
+      Fp8ScaledFormSupported(Fp8Format::kE4M3, Fp8Format::kE4M3, false, true),
+      "the forward form is taken", kCase);
+  Expect(
+      Fp8ScaledFormSupported(Fp8Format::kE5M2, Fp8Format::kE4M3, false, false),
+      "the dgrad form is taken", kCase);
+  Expect(
+      Fp8ScaledFormSupported(Fp8Format::kE5M2, Fp8Format::kE4M3, true, false),
+      "the wgrad form is taken", kCase);
+  Expect(
+      !Fp8ScaledFormSupported(Fp8Format::kE4M3, Fp8Format::kE4M3, false, false),
+      "the pair without its orientation is refused", kCase);
+  Expect(
+      !Fp8ScaledFormSupported(Fp8Format::kE5M2, Fp8Format::kE4M3, false, true),
+      "a backward pair at the forward orientation is refused", kCase);
+  Expect(
+      !Fp8ScaledFormSupported(Fp8Format::kE5M2, Fp8Format::kE4M3, true, true),
+      "a form the seam never issues is refused", kCase);
+  Expect(
+      !Fp8ScaledFormSupported(Fp8Format::kE4M3, Fp8Format::kE5M2, false, true),
+      "the output gradient is the first operand", kCase);
+  Expect(
+      !Fp8ScaledFormSupported(Fp8Format::kE5M2, Fp8Format::kE5M2, false, false),
+      "a pair the seam never quantizes to is refused", kCase);
+
+  // The backward's tile is the probe's `deep-k` row, because the transposing
+  // collective the two backward forms need refuses a k slice of 64: it wants
+  // more than two multiply instructions, and 128 gives four. The fp8 operand
+  // halves the staged bytes: 128 * (128 + 128) * 2 stages is 65536 B.
+  Expect(kFp8BackwardTile.tile_m == 128 && kFp8BackwardTile.tile_n == 128 &&
+             kFp8BackwardTile.tile_k == 128 &&
+             kFp8BackwardTile.cluster_m == kFp8Tile.cluster_m &&
+             kFp8BackwardTile.cluster_n == kFp8Tile.cluster_n &&
+             kFp8BackwardTile.stages == 2,
+         "the fp8 backward tile is the probe's deep-k row", kCase);
+  Expect(kFp8BackwardTile.tile_k > 2 * 32,
+         "the backward slice holds more than two multiply instructions", kCase);
+  const long long backward_staged =
+      static_cast<long long>(kFp8BackwardTile.tile_m +
+                             kFp8BackwardTile.tile_n) *
+      kFp8BackwardTile.tile_k * kFp8BackwardTile.stages;
+  Expect(backward_staged == 65536, "the backward pipeline stages 65536 B",
+         kCase);
 }
 
 // The seam's default rules, which `ResolveGemm` and `GemmImpl` must share.

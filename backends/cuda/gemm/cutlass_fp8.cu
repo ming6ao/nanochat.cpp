@@ -40,19 +40,23 @@ namespace {
 using cutlass_detail::Facts;
 using cutlass_detail::Launch;
 
-// The operand element. E4M3 is the format `src/fp8_policy.h` makes eligible and
-// the one `precision.md` pins the tolerance of.
-using CutlassFp8 = cutlass::float_e4m3_t;
+// The two operand elements the seam states. E4M3 is the forward's pair and the
+// second operand of both backward calls; E5M2 is the output gradient.
+using Fp8E4M3 = cutlass::float_e4m3_t;
+using Fp8E5M2 = cutlass::float_e5m2_t;
 
-static_assert(sizeof(CutlassFp8) == 1,
+static_assert(sizeof(Fp8E4M3) == 1 && sizeof(Fp8E5M2) == 1,
               "an fp8 operand is one byte, which is what ResolveGemm's dense "
               "leading dimensions and the alignment rule both assume");
 
-// The tile, as the template arguments the kernel body takes. A cluster of one
+// The tiles, as the template arguments the kernel body takes. A cluster of one
 // model in the third mode is the batch, so the third extent is one.
-using TileShape =
+using ForwardTile =
     cute::Shape<cute::Int<kFp8Tile.tile_m>, cute::Int<kFp8Tile.tile_n>,
                 cute::Int<kFp8Tile.tile_k>>;
+using BackwardTile = cute::Shape<cute::Int<kFp8BackwardTile.tile_m>,
+                                 cute::Int<kFp8BackwardTile.tile_n>,
+                                 cute::Int<kFp8BackwardTile.tile_k>>;
 using ClusterShape = cute::Shape<cute::Int<kFp8Tile.cluster_m>,
                                  cute::Int<kFp8Tile.cluster_n>, cute::_1>;
 
@@ -74,17 +78,13 @@ float* AlphaSlot() {
   return slot;
 }
 
-// True when this arm can read the call. Three tests, and the third is a
-// property of the instruction: the SM90 fp8 GMMA exists only in the K-major
-// pair, so A must be plain and B transposed. The other three operand forms of
-// `GemmParams` have no fp8 instruction on this architecture, and CUTLASS states
-// that as a static assert ("No eligible GMMA operator for request
-// configuration"), so the host refuses them and cublasLt keeps those calls.
+// True when this arm can read the call: one of the three forms the seam issues,
+// no reduced-precision reduction, and two scales.
 bool CallSupported(const ScaledGemmParams& params) {
-  return params.format_a == Fp8Format::kE4M3 &&
-         params.format_b == Fp8Format::kE4M3 && !params.fast_accum &&
-         params.scale_a != nullptr && params.scale_b != nullptr &&
-         !params.transpose_a && params.transpose_b;
+  return Fp8ScaledFormSupported(params.format_a, params.format_b,
+                                params.transpose_a, params.transpose_b) &&
+         !params.fast_accum && params.scale_a != nullptr &&
+         params.scale_b != nullptr;
 }
 
 // The seam's dense call, resolved by the same rules the bf16 path uses. The
@@ -103,8 +103,13 @@ ResolvedGemm Resolve(const ScaledGemmParams& params, bool fp32_c) {
   return ResolveGemm(dense, fp32_c);
 }
 
-// One call, both store forms. Returns false when this arm does not take it, so
-// the caller keeps cublasLt.
+// One call, at the form's own tile and operand pair. Returns false when this
+// arm does not take it, so the caller keeps cublasLt.
+//
+// The store is part of the form, and the seam states it: the forward and the
+// dgrad store the compute type, and the wgrad stores the fp32 parameter
+// gradient. A call with the other store is refused here rather than
+// instantiated, which is what keeps the arm at four kernels.
 template <class ElementD>
 bool LaunchScaled(const ScaledGemmParams& params, const std::uint8_t* a,
                   const std::uint8_t* b, ElementD* c) {
@@ -119,12 +124,29 @@ bool LaunchScaled(const ScaledGemmParams& params, const std::uint8_t* a,
   if (alpha == nullptr) return false;
   cuda_backend::Launch(ScaleProductKernel, dim3(1), dim3(1), 0, params.scale_a,
                        params.scale_b, params.alpha, alpha);
-  const auto* operand_a = reinterpret_cast<const CutlassFp8*>(a);
-  const auto* operand_b = reinterpret_cast<const CutlassFp8*>(b);
-  // The K-major pair, which is the only operand form an fp8 GMMA has.
-  return Launch<ElementD, /*TransA=*/false, /*TransB=*/true, TileShape,
-                ClusterShape, kFp8Tile.stages, CutlassFp8>(gemm, operand_a,
-                                                           operand_b, c, alpha);
+
+  if (params.format_a == Fp8Format::kE4M3) {
+    // The forward: K-major in both operands, at the shallower tile.
+    return Launch<ElementD, /*TransA=*/false, /*TransB=*/true, ForwardTile,
+                  ClusterShape, kFp8Tile.stages, Fp8E4M3, Fp8E4M3>(gemm, a, b,
+                                                                   c, alpha);
+  }
+  if (params.transpose_a) {
+    // The wgrad: M-major in A, and the fp32 parameter gradient as the store.
+    if constexpr (sizeof(ElementD) == sizeof(float)) {
+      return Launch<ElementD, /*TransA=*/true, /*TransB=*/false, BackwardTile,
+                    ClusterShape, kFp8BackwardTile.stages, Fp8E5M2, Fp8E4M3>(
+          gemm, a, b, c, alpha);
+    }
+    return false;
+  }
+  // The dgrad: N-major in B, and the compute type as the store.
+  if constexpr (sizeof(ElementD) == sizeof(ComputeType)) {
+    return Launch<ElementD, /*TransA=*/false, /*TransB=*/false, BackwardTile,
+                  ClusterShape, kFp8BackwardTile.stages, Fp8E5M2, Fp8E4M3>(
+        gemm, a, b, c, alpha);
+  }
+  return false;
 }
 
 }  // namespace

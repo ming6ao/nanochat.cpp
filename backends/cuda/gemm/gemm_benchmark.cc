@@ -84,6 +84,7 @@ using nanochat::BenchOptions;
 using nanochat::BenchReport;
 using nanochat::ComputeType;
 using nanochat::CopyDir;
+using nanochat::Fp8Format;
 using nanochat::GemmMode;
 using nanochat::GemmParams;
 using nanochat::GradientType;
@@ -105,6 +106,7 @@ using nanochat::kernels::CandidateMatches;
 using nanochat::kernels::CandidateRelativeError;
 using nanochat::kernels::CutlassRefusal;
 using nanochat::kernels::CutlassRefusalName;
+using nanochat::kernels::Fp8ScaledFormSupported;
 using nanochat::kernels::Free;
 using nanochat::kernels::Gemm;
 using nanochat::kernels::GemmCandidateAt;
@@ -1164,8 +1166,19 @@ int main(int argc, char** argv) {
       auto* b_scale = static_cast<float*>(Alloc(sizeof(float)));
       if (a8 != nullptr && b8 != nullptr && a_scale != nullptr &&
           b_scale != nullptr) {
+        // The pair follows the row's orientation, because that is how the seam
+        // states its three forms: a forward row quantizes E4M3, and a row at a
+        // backward orientation quantizes its output gradient to E5M2
+        // (docs/precision.md section 7). Without this the arm refuses every
+        // backward row and both fp8 columns of that row time cublasLt.
+        const Fp8Format a_format =
+            Fp8ScaledFormSupported(Fp8Format::kE4M3, Fp8Format::kE4M3,
+                                   params.transpose_a, params.transpose_b)
+                ? Fp8Format::kE4M3
+                : Fp8Format::kE5M2;
         QuantizeFp8Params quant_a;
         quant_a.count = static_cast<int>(a_elements);
+        quant_a.format = a_format;
         QuantizeFp8(quant_a, a, a8, a_scale);
         QuantizeFp8Params quant_b;
         quant_b.count = static_cast<int>(b_elements);
@@ -1180,6 +1193,8 @@ int main(int argc, char** argv) {
         scaled.beta = params.beta;
         scaled.transpose_a = params.transpose_a;
         scaled.transpose_b = params.transpose_b;
+        scaled.format_a = a_format;
+        scaled.format_b = Fp8Format::kE4M3;
         scaled.scale_a = a_scale;
         scaled.scale_b = b_scale;
 

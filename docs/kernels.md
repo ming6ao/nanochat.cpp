@@ -1207,7 +1207,7 @@ record to write when it lands.
 | 2d. Correctness on the card | **Done, passed** | `modal run tools/modal/app.py::card_job --name gemm_check` | This section |
 | 2e. The rate gate, 1.05 of cuBLAS | **Done, met on 19 of the 25 callable rows** after section 11.9 | `modal run tools/modal/app.py::card_job --name gemm_bench --argv '["--rows","production","--json"]'` | The `gemm_cutlass` entry of [baselines.json](baselines.json) |
 | 3. The fp32 tile for Turing | Not started | The Turing leg of `card_job` | This section |
-| 4a. fp8 on the Hopper path | **Arm written, and the spill cleared off a card.** The card run is the last gate | `gemm_bench` under `--config=fp8` | The `gemm_fp8` entry of [baselines.json](baselines.json) |
+| 4a. fp8 on the Hopper path | **Arm written for all three forms, and clean off a card.** The card run is the last gate | `gemm_bench` under `--config=fp8` | The `gemm_fp8` entry of [baselines.json](baselines.json) |
 | 4b. Stream-K for the ragged rows | **Blocked by the adapter**, on the evidence of section 10.3 | `gemm_bench --row linear:wgrad:cls` | This section |
 | 5. Detach cuBLAS from the library | **Closed, and it does not follow yet.** The reason is in 10.2 | `bazel query 'somepath(//src:model, @cuda//:cublasLt)'` returns nothing | [build.md](build.md) |
 
@@ -1359,13 +1359,14 @@ capabilities, and this section is the difference between the two.
 ### 10.4 The fp8 route: what the vendor supplies, and what it costs
 
 **State.** The arm is written, and it is clean off a card. `cutlass_fp8.cu` puts
-the seam's `GemmScaledFp8` on the warp-specialized mainloop with E4M3 operands.
-`gemm_shape.h` holds the arm's own refusal rule beside `JudgeCutlass`, and
-`gemm.cu` calls the arm behind `NANOCHAT_GEMM_FP8=cutlass`. Nothing is promoted:
-an unset variable leaves every call on cublasLt, so a shipped step does not
-change until a card measurement promotes a shape. `gemm_benchmark --fp8` times
-the arm beside cublasLt on the same operands. The card run is the one gate that
-is still open.
+the seam's `GemmScaledFp8` on the warp-specialized mainloop. It carries all three
+forms the seam issues: the forward's E4M3 pair, and the two backward pairs that
+state E5M2 for the output gradient. `gemm_shape.h` holds the arm's own refusal
+rules beside `JudgeCutlass`, and `gemm.cu` calls the arm behind
+`NANOCHAT_GEMM_FP8=cutlass`. Nothing is promoted: an unset variable leaves every
+call on cublasLt, so a shipped step does not change until a card measurement
+promotes a shape. `gemm_benchmark --fp8` times the arm beside cublasLt on the
+same operands. The card run is the one gate that is still open.
 
 **The one question that decides the design.** `GemmScaledFp8` takes
 `scale_a` and `scale_b` as device pointers. The epilogue must therefore multiply
@@ -1391,7 +1392,7 @@ takes `float_e4m3_t` operands with an fp32 accumulator, which the same
 in the output precision and needs no dequantization. No host read, and one extra
 launch of one thread.
 
-**The tile, and the spill that a host found.** The arm states one tile,
+**The tile, and the spill that a host found.** The forward states one tile,
 `kFp8Tile`, because an fp8 axis over the four bf16 rows would be sixty-four
 instantiations. The first tile was the probe's `wide-n` row, 128 by 256 by 64 at
 three stages, and it spilled. `cuobjdump -res-usage` read 168 registers with a
@@ -1414,30 +1415,42 @@ unseen. Hopper spells the eight-bit multiply `QGMMA`, and the gate now accepts
 both. The four bf16 candidates read clean either way, so the change adds a check
 without changing a verdict.
 
-**The cost that bounds the row.** One target, two instantiations, and a measured
-build of 53 to 93 seconds. `dev/cutlass/README.md` measures one instantiation at
-19 s and 1.2 GiB. The peak of the compiler process therefore bounds the row, and
-not the count: one device compile held 3.3 GiB. An fp8 axis over the existing
-four rows would be sixty-four instantiations. The fp8 arm therefore needs its
-own rows under the build's fp8 config, and not a third template axis on the
-four. The registry's count is a build budget and not a free parameter.
+**The backward forms need a deeper k slice, and the build said so.** A probe that
+instantiated the two backward orientations at the forward's tile failed with two
+vendor asserts, and neither one is a refusal of the form. The dgrad form
+reported `RS loops require more than 2 MMA k-iterations for correctness`, and
+the wgrad form reported `Invalid warp thread shape` and a shared-memory atom that
+does not divide the tile. CUTLASS routes both through a collective that stages
+the awkward operand with a transposition, and that path is not reachable at a k
+slice of 64. The probe then instantiated both forms at the k slice of the
+probe's `deep-k` row, 128 by 128 by 128 at two stages, and both compiled. That
+is `kFp8BackwardTile`.
 
-**What the arm does not cover.** `CallSupported` takes one operand pair, E4M3 by
-E4M3, which is the form of the forward. The seam's backward states E5M2 for both
-operands ([precision.md](precision.md) section 5.2), so a shipped backward call
-refuses the arm and keeps cublasLt. The vendor is not the limit: the atom list
-carries `MMA_64x128x32_F32E5M2E5M2_SS_TN` and the mixed
-`..._F32E4M3E5M2_SS_TN` at every N. The backward is therefore two more
-instantiations and one more template argument, and it is its own row of the
-build budget.
+The four kernels read 168 registers each. Three have no stack frame, the dgrad
+kernel holds 8 bytes, and the gate reads clean over all four k loops. The 8
+bytes is not the accumulator: nothing reads local memory between two multiplies.
 
-The operand form is the second limit. The SM90 fp8 GMMA exists only in the
-K-major pair, so a row that states another form refuses the arm. The seam then
-runs cublasLt under both selectors, and the two fp8 columns of that row read the
-same time. A reader must therefore compare the columns only on a row whose form
-is K-major, and no report states which rows those are. The seam answers nothing,
-because `GemmScaledFp8` returns void, so the honest fix is a predicate the seam
-exposes and the header is contract-owned.
+**The cost that bounds the row.** One target, four instantiations, and a measured
+build of 92 seconds. `dev/cutlass/README.md` measures one instantiation at 19 s
+and 1.2 GiB. The peak of the compiler process therefore bounds the row, and not
+the count: one device compile held 3.3 GiB. An fp8 axis over the existing four
+rows would be sixty-four instantiations. The fp8 arm therefore needs its own
+rows under the build's fp8 config, and not a third template axis on the four.
+The registry's count is a build budget and not a free parameter.
+
+**What the arm does not cover.** The three forms are the whole of it. A call that
+states any other pair or orientation is refused, and cublasLt keeps it, because
+the seam issues no such call. The forward is E4M3 by E4M3 and K-major in both
+operands. The dgrad and wgrad state E5M2 for the output gradient, and neither is
+K-major in both operands. A form is refused rather than instantiated, which is
+what keeps the arm at four kernels.
+
+The benchmark states the pair from the row's orientation, through the same rule
+the arm uses. Before that it stated E4M3 for every row, so every backward row was
+refused and both fp8 columns of that row timed cublasLt. The remaining gap is
+narrower and it is the seam's: `GemmScaledFp8` returns void, so a report cannot
+state whether the arm ran. A row the judge refuses by its shape, or a device
+that is not Hopper, still reads as an arm that ran.
 
 **What the campaign still owes.** One card run of `gemm_bench --fp8` on the
 Hopper leg, and the `gemm_fp8` entry of [baselines.json](baselines.json) that its

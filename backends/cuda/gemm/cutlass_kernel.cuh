@@ -185,17 +185,18 @@ struct EpilogueOf {
 // One kernel of the seam: an operand orientation pair and a store type, at one
 // candidate's tile.
 //
-// `ElementAB` is the operand element, and it is a parameter because the fp8 arm
-// runs the same body with one-byte operands (docs/kernels.md section 10.4). The
-// default is the bf16 pair every row of the registry uses, so no existing
-// instantiation changed when the parameter arrived.
+// `ElementAB` and `ElementBB` are the operand elements, and they are parameters
+// because the fp8 arm runs the same body with one-byte operands and with a pair
+// whose two formats differ (docs/kernels.md section 10.4). They default to the
+// same type, so the bf16 candidates and every existing call site are unchanged.
 //
 // The two layout tags are the seam's four operand forms. CUTLASS names a stride
 // over the modes [M, K, L] for A and [N, K, L] for B, so `RowMajor` is mode 1
 // contiguous for A and mode 0 contiguous for B. The seam states each form by
 // its contiguous axis, which is the axis the asserts below name.
 template <class ElementD, bool TransA, bool TransB, class TileShape,
-          class ClusterShape, int Stages, class ElementAB = CutlassBf16>
+          class ClusterShape, int Stages, class ElementAB = CutlassBf16,
+          class ElementBB = ElementAB>
 struct KernelOf {
   using LayoutA = cute::conditional_t<TransA, cutlass::layout::ColumnMajor,
                                       cutlass::layout::RowMajor>;
@@ -216,7 +217,7 @@ struct KernelOf {
 
   using Mainloop = typename cutlass::gemm::collective::CollectiveBuilder<
       cutlass::arch::Sm90, cutlass::arch::OpClassTensorOp, ElementAB, LayoutA,
-      AlignmentOf<ElementAB>(), ElementAB, LayoutB, AlignmentOf<ElementAB>(),
+      AlignmentOf<ElementAB>(), ElementBB, LayoutB, AlignmentOf<ElementBB>(),
       float, TileShape, ClusterShape,
       cutlass::gemm::collective::StageCount<Stages>,
       cutlass::gemm::KernelTmaWarpSpecializedCooperative>::CollectiveOp;
@@ -271,16 +272,17 @@ struct KernelOf {
 // instruction over a struct it has no trait for, and its answer is the static
 // assert "No eligible GMMA operator for request configuration".
 template <class ElementD, bool TransA, bool TransB, class TileShape,
-          class ClusterShape, int Stages, class ElementAB = CutlassBf16>
+          class ClusterShape, int Stages, class ElementAB = CutlassBf16,
+          class ElementBB = ElementAB>
 bool Launch(const ResolvedGemm& gemm, const void* a, const void* b, ElementD* c,
             const float* alpha_dev = nullptr) {
   using VendorD = typename VendorElementOf<ElementD>::type;
   using Kernel = KernelOf<VendorD, TransA, TransB, TileShape, ClusterShape,
-                          Stages, ElementAB>;
+                          Stages, ElementAB, ElementBB>;
   using Gemm = typename Kernel::Gemm;
 
   const auto* operand_a = static_cast<const ElementAB*>(a);
-  const auto* operand_b = static_cast<const ElementAB*>(b);
+  const auto* operand_b = static_cast<const ElementBB*>(b);
   auto* result = reinterpret_cast<VendorD*>(c);
 
   typename Gemm::Arguments args{
@@ -322,21 +324,21 @@ bool Launch(const ResolvedGemm& gemm, const void* a, const void* b, ElementD* c,
 // One candidate's four operand orientations, at one store type. The four are
 // separate kernels, so this is a switch over the seam's two transpose flags.
 template <class TileShape, class ClusterShape, int Stages, class ElementD,
-          class ElementAB = CutlassBf16>
+          class ElementAB = CutlassBf16, class ElementBB = ElementAB>
 bool LaunchOriented(const ResolvedGemm& gemm, const void* a, const void* b,
                     ElementD* c, const float* alpha_dev = nullptr) {
   if (!gemm.transpose_a) {
     return gemm.transpose_b
                ? Launch<ElementD, false, true, TileShape, ClusterShape, Stages,
-                        ElementAB>(gemm, a, b, c, alpha_dev)
+                        ElementAB, ElementBB>(gemm, a, b, c, alpha_dev)
                : Launch<ElementD, false, false, TileShape, ClusterShape, Stages,
-                        ElementAB>(gemm, a, b, c, alpha_dev);
+                        ElementAB, ElementBB>(gemm, a, b, c, alpha_dev);
   }
   return gemm.transpose_b
              ? Launch<ElementD, true, true, TileShape, ClusterShape, Stages,
-                      ElementAB>(gemm, a, b, c, alpha_dev)
+                      ElementAB, ElementBB>(gemm, a, b, c, alpha_dev)
              : Launch<ElementD, true, false, TileShape, ClusterShape, Stages,
-                      ElementAB>(gemm, a, b, c, alpha_dev);
+                      ElementAB, ElementBB>(gemm, a, b, c, alpha_dev);
 }
 
 // The active blocks for each multiprocessor that the driver answers for one
