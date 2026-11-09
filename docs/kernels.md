@@ -1180,16 +1180,17 @@ record to write when it lands.
 | 2a. Vendor the headers | **Done** | `tools/nanochat build //dev/cutlass:cutlass_probe` | `dev/cutlass/README.md` |
 | 2b. Prove the architecture and the tile | **Done** | `tools/nanochat run t0-cpu -- ./bazel-bin/dev/cutlass/cutlass_probe` | `dev/cutlass/README.md` § 3 |
 | 2c. The adapter behind the seam | **Done** | `tools/nanochat build --config=hopper --config=bf16 //backends/cuda/gemm:gemm_gpu_test` | `backends/cuda/gemm/README.md` § 16 |
-| 2d. **Correctness on the card** | **Open, and next** | `modal run tools/modal/app.py::card_job --name gemm_check` | This section |
-| 2e. **The rate gate, 1.05 of cuBLAS** | **Open** | `modal run tools/modal/app.py::card_job --name gemm_bench --argv '["--json"]'` | The `gemm_cutlass` rows of [baselines.json](baselines.json) |
+| 2d. Correctness on the card | **Done, passed** | `modal run tools/modal/app.py::card_job --name gemm_check` | This section |
+| 2e. The rate gate, 1.05 of cuBLAS | **Done, met on 19 of the 25 callable rows** after section 11.9 | `modal run tools/modal/app.py::card_job --name gemm_bench --argv '["--rows","production","--json"]'` | The `gemm_cutlass` entry of [baselines.json](baselines.json) |
 | 3. The fp32 tile for Turing | Not started | The Turing leg of `card_job` | This section |
 | 4a. fp8 on the Hopper path | Not started | `gemm_bench` under `--config=fp8` | [baselines.json](baselines.json) |
 | 4b. Stream-K for the ragged rows | Not started | `gemm_bench --row linear:wgrad:cls` | [baselines.json](baselines.json) |
 | 5. Detach cuBLAS from the library | Not started | `bazel query 'somepath(//src:model, @cuda//:cublasLt)'` returns nothing | [build.md](build.md) |
 
-**Step 2d is the one that unblocks the rest.** The adapter has never run on a
-card. No Hopper part exists on the development host, so `gemm_gpu_test` and every
-rate below it are unrun, and nothing above should start before they pass.
+**Step 2d passed.** The adapter matched cuBLAS on the H100 80GB HBM3 at compute
+capability 9.0, over the six Hopper cases and the weight-gradient case. That run
+was the first time the adapter ran on a card. It closed the step that unblocked
+the rest.
 
 **What 2e decides, and the three ways it can go.**
 
@@ -1202,6 +1203,13 @@ rate below it are unrun, and nothing above should start before they pass.
    `kCutlassMinOutputElements` in `gemm_shape.h` is the second thing, and it is
    4096 elements by argument and not by measurement.
 3. A row reads above 1.15. Section 9's stop condition applies: cuBLAS stays.
+
+**What 2e read.** The first run tripped outcome 3: every row read between 0.051
+and 0.154 of its `cublas_ms` entry, which is 2.6 to 9.4 percent of the card peak.
+Section 11 is the answer to that, and section 11.9 found the cause in the build.
+The run after that flag reads 0.576 to 1.176, so the gate is met on 19 of the 25
+callable rows and missed on six, and nine rows are promoted. The rows are the
+`gemm_cutlass` entry of [baselines.json](baselines.json).
 
 **What a resumed session should read first**, in this order.
 
@@ -1226,6 +1234,497 @@ the rule declines, so the first card run reports whether that boundary is right.
    row that reads C?
 3. Does the 5 by 12 group lose its 0.005 ms to the size rule, or does the hand
    tile already hold it?
+
+### 11. The candidate registry
+
+**Status.** All six steps of section 11.7 are done, and step 5 ran twice on an
+H100 80GB HBM3. The first run measured spilling kernels and promoted nothing.
+Section 11.9 found the cause in the build, cleared it, and the second run
+promoted nine of the 28 production rows to a candidate; cuBLAS keeps the other
+19 and the hand tile keeps none. Nothing here changes a frozen header, a
+capability bit, or a `caps.json` field.
+
+#### 11.1 The measurement that asks for it
+
+One run of `gemm_bench --json` on the H100 leg timed three arms on one set of
+operands: cuBLAS, the Hopper mainloop of `cutlass_bf16.cu`, and the hand tile.
+The fraction is the cuBLAS time divided by the arm time, so the gate of step 2e
+asks for 0.95 or more.
+
+| Row | cuBLAS | CUTLASS | Hand tile | CUTLASS fraction | Hand fraction |
+|---|---:|---:|---:|---:|---:|
+| Muon `1280x1280:A` | 0.2230 ms | 1.8669 ms | 0.7414 ms | 0.119 | 0.301 |
+| Linear forward `fc` | 0.2598 ms | 2.3470 ms | 0.9654 ms | 0.111 | 0.269 |
+| Linear wgrad `kv` | 0.0524 ms | 1.0294 ms | 0.3779 ms | 0.051 | 0.139 |
+| Classifier forward | 1.5888 ms | 14.7225 ms | 5.7837 ms | 0.108 | 0.275 |
+
+The CUTLASS arm reads 0.051 to 0.154 on every row, at 2.6 to 9.4 percent of the
+card peak. The hand tile reads 0.14 to 0.43, at 7 to 29 percent. The small rows
+sit at its low end, because a launch costs more than the product. The adapter is
+therefore 2.0 to 3.4 times slower than the tile it exists to retire. The full
+row set is the `gemm_cutlass` entry of [baselines.json](baselines.json).
+
+These 28 rows are the production sample. They say what the adapter does in the
+one model, and not how it scales. Section 11.5 adds the row families that
+measure the kernel itself.
+
+This table is the measurement that asked for section 11. The sweep of section
+11.4 replaced it. One tile became four candidates, the hand column became the
+row's own schedule, the operands arrived cold, and each candidate was checked
+against cuBLAS. Section 11.8 states the re-measured numbers, and the
+`gemm_cutlass` entry of [baselines.json](baselines.json) carries their rows.
+
+#### 11.2 What the generated machine code shows
+
+Every one of the eight kernels spills the accumulator to local memory inside the
+k loop. Sixty-four stores and sixty-four loads sit between the multiply
+instructions, and the stack is 576 bytes. The multiply writes registers 64 to
+191, and the ceiling is 168: 384 threads at one block per multiprocessor is
+65536 divided by 384. The accumulator does not fit, so its tail leaves the
+register file on every step.
+
+Three experiments narrowed the cause. Each one is a local rebuild, and none of
+them stays in the tree.
+
+- The device flag `-O3` in place of `-O2` changed nothing: same 168 registers,
+  same 576-byte stack, same sixty-four spills.
+- A 128 by 128 by 64 tile halved the spill and kept the symptom.
+- The pingpong schedule with no cluster reached 255 registers and a 2520-byte
+  stack.
+
+The local machine code comes from CUDA 12.0 on the development host, and the
+container ran CUDA 12.4.1. The measured fractions are the authority, and this
+inspection only explains their shape.
+
+A 9x gap on a mature library is not the warpgroup ceiling of section 3. It is a
+defect of this instantiation. The tree must find that defect before it records
+the negative result of section 9. A removal that stops on a defect states the
+wrong reason for a right decision.
+
+#### 11.3 What CUTLASS supplies, and what the fetch does not
+
+`third_party/cutlass.bzl` extracts `include/` and `LICENSE.txt` only. The
+external repository holds no `tools/`, `test/`, or `examples/`, so
+`cutlass_profiler` and its generated kernel list are not reachable. Widening the
+fetch is not viable: the archive is 169 MB, the generated list is thousands of
+translation units, and the development host holds 7.8 GiB.
+
+The headers the fetch does hold are the pieces a registry needs.
+
+| Header | Use |
+|---|---|
+| `cutlass/gemm/collective/collective_builder.hpp` | One candidate for each instantiation; the tile, the cluster, and the stage count |
+| `cutlass/epilogue/collective/collective_builder.hpp` | The epilogue schedule and the fused alpha and beta |
+| `cutlass/gemm/device/gemm_universal_adapter.h` | `can_implement`, `get_workspace_size`, and `run` |
+| `cutlass/kernel_hardware_info.h` | The device identifier and the multiprocessor count |
+| `cutlass/device_kernel.h` | The odr-use a kernel body needs, and the handle for an occupancy query |
+| `cutlass/gemm/kernel/sm90_tile_scheduler_stream_k.hpp` | Stream-K, whose split count is a run-time value |
+| `cutlass/cluster_launch.hpp`, `cutlass/cuda_host_adapter.hpp` | Cluster launch and graph capture, for a later phase |
+
+The method of CUTLASS is therefore the thing to copy, and not the tool. The
+method has five parts: a kernel list, a check for each candidate, one timing
+protocol, a machine-readable report, and a stored choice.
+
+#### 11.4 The five pieces
+
+1. **A candidate registry.** `backends/cuda/gemm/cutlass_candidates.h` holds the
+   table, and one source file, `cutlass_candidate.cu`, holds every kernel body.
+   A candidate is a tile, a cluster, a stage count, a kernel schedule, and an
+   epilogue schedule. The table is `constexpr`, so a candidate's translation
+   unit takes its own row as template arguments. Build cost bounds the count, so
+   start with four candidates. One candidate is eight instantiations: four
+   orientations and two store types. `dev/cutlass/README.md` measures one
+   instantiation at 19 s and 1.2 GiB. The build therefore compiles that one
+   source file once for each index. That keeps the memory peak inside the host
+   budget.
+2. **A spill gate.** A host check runs `cuobjdump -sass` over each candidate
+   object and rejects a candidate with `STL` or `LDL` between its `HGMMA`
+   instructions. This gate would have caught the defect above in three minutes
+   with no card. The tool is `tools/gemm_spill_gate.py`, and a card is no part
+   of its run.
+3. **A check for each candidate.** The benchmark compares each candidate with
+   cuBLAS over the operands it times, using the comparison of
+   `gemm_gpu_test.cc`. A candidate that is fast and wrong must not win.
+4. **One timing protocol.** The benchmark flushes the second-level cache between
+   iterations, reports the median and the minimum of the rounds, and reports the
+   occupancy the driver answers for the candidate. The flush stops a warm cache
+   from choosing the winner: the classifier operands are 63 MB and the
+   second-level cache is 50 MB.
+5. **A decision table.** `backends/cuda/gemm/cutlass_rules.h` maps a shape to a
+   candidate, with an explicit order of candidate, then hand tile, then cuBLAS.
+   `JudgeCutlass` reads that table, and `NANOCHAT_GEMM_CANDIDATE` is the
+   benchmark-only override, as `NANOCHAT_GEMM_SCHEDULE` is today. A tool under
+   `tools/` writes the header from the benchmark report, so the table is data.
+   The tool is `tools/gemm_rules.py`: `--write` writes the block and `--check`
+   fails a hand edit.
+
+   **A promotion needs a margin, and not a tie.** Two runs of one sweep disagree
+   by up to 4 percent on a row whose arms are close. The tool therefore promotes
+   an arm only when it beats cuBLAS by 0.04 of the cuBLAS time. The flag is
+   `--min-margin`, and its default is that measured value. Section 11.8 states
+   the spread it comes from.
+
+The choice is offline. A training step pays one table lookup. A run-time timing
+pass would put card work on the start of every step, and the shape rule would
+stop being a host-only check.
+
+#### 11.5 The measurement rows
+
+The 28 rows of the closed list are the production sample: they are the shapes the
+one model issues. They cannot say how a kernel scales, because they cluster in
+one region and they all come from one profile. A candidate that wins on them can
+still fall off a cliff at 4096 or at 16. So the benchmark needs a second row
+family, and this design adds five families beside it.
+
+**The production rows choose, and the measurement rows characterise.** Only the
+closed list feeds the decision table of section 11.4. The extra families decide
+whether a candidate is fit to enter the sweep, and they are the record that a
+later tuning session reads.
+
+**The rows.**
+
+| Row | Shape | Work | What it measures |
+|---|---|---:|---|
+| `scale:16` | 16x16x16 | 8 KFLOP | The launch floor |
+| `scale:64` | 64x64x64 | 524 KFLOP | A quarter of one tile |
+| `scale:256` | 256x256x256 | 33 MFLOP | Below the 128 by 256 tile |
+| `scale:1024` | 1024x1024x1024 | 2.1 GFLOP | One partial wave |
+| `scale:2048` | 2048x2048x2048 | 17 GFLOP | One full wave |
+| `scale:4096` | 4096x4096x4096 | 137 GFLOP | Four waves |
+| `scale:8192` | 8192x8192x8192 | 1.1 TFLOP | An operand above the second-level cache |
+| `scale:16384` | 16384x16384x16384 | 8.8 TFLOP | A large matrix, 512 MiB an operand |
+| `scale:32768` | 32768x32768x32768 | 70 TFLOP | The device memory ceiling |
+| `aspect:thin-m` | 128x4096x4096 | 4.3 GFLOP | Too few tiles in M |
+| `aspect:thin-n` | 4096x128x4096 | 4.3 GFLOP | Too few tiles in N |
+| `aspect:deep-k` | 1024x1024x32768 | 69 GFLOP | A long k loop and few tiles |
+| `aspect:thin-k` | 4096x4096x64 | 2.1 GFLOP | One k slice |
+| `aspect:tall` | 16384x256x2048 | 17 GFLOP | A decoder-like shape |
+| `batch:1` | 512x512x512, batch 1 | 0.27 GFLOP | One slice |
+| `batch:8` | 512x512x512, batch 8 | 2.1 GFLOP | A few slices |
+| `batch:40` | 512x512x512, batch 40 | 11 GFLOP | The Muon batch |
+| `batch:128` | 512x512x512, batch 128 | 34 GFLOP | Many slices |
+| `batch:muon-tall` | 4096x4096x1024, batch 4, A transposed | 137 GFLOP | The `A = XᵀX` form |
+| `batch:muon-wide` | 1024x4096x4096, batch 4 | 137 GFLOP | The `XXᵀ` and `B X` forms |
+| `ragged:m` | 1000x1000x1024 | 2.0 GFLOP | A partial M tile |
+| `ragged:k` | 1024x1024x1000 | 2.1 GFLOP | A partial k slice |
+| `ragged:lda` | 1024x1024x1024, `lda = k + 1` | 2.1 GFLOP | A leading dimension off the tile |
+| `form:nn` | 2048x2048x2048, plain A and B | 17 GFLOP | The first operand form |
+| `form:tn` | 2048x2048x2048, transposed A | 17 GFLOP | The second operand form |
+| `form:nt` | 2048x2048x2048, transposed B | 17 GFLOP | The third operand form |
+| `form:tt` | 2048x2048x2048, both transposed | 17 GFLOP | The fourth operand form |
+| `form:fp32-c` | 2048x2048x2048, fp32 C | 17 GFLOP | The weight-gradient store |
+| `align:offset` | 1024x1024x1024, one element off the boundary | 2.1 GFLOP | The general path |
+
+**The harness computes the work.** A row holds extents, a batch, two transpose
+flags, and a store type. The report derives the flop count, the operand bytes,
+and the tile count from those fields. A mistyped row therefore fails the host
+test, and not a card run.
+
+**One buffer set serves every row.** The largest row needs 8 GiB: two 2 GiB
+operands and a 4 GiB fp32 C. The harness sizes the workspace once from the
+largest row and reuses it, so no row pays for an allocation.
+
+**The fill is on the device.** Today `Fill` in `gemm_benchmark.cc` builds the
+operands on the host and copies them. That works at 60 MB and it cannot work at
+2 GiB, because the sandbox caps host memory at 5 to 6 GiB in the benchmark
+profile. The design therefore fills on the device with one small launch, and the
+host holds no operand.
+
+**The check on a big row is a reduction.** A full comparison of a 4 GiB C buffer
+needs a second buffer and a host copy, and neither fits the budget. For a big row
+the check computes the Frobenius norm of the difference and a sampled row set on
+the device, and it compares those two values with cuBLAS. The small rows keep the
+full element comparison of `gemm_gpu_test.cc`.
+
+**The iteration count follows the work.** A round must run at least 50 ms. The
+harness therefore sets the iteration count from the row's ideal time at the
+declared peak, with a floor of 3 and a ceiling of 1000. The row reports its count, so a reader
+can see that `scale:32768` ran three times and `scale:16` ran a thousand.
+
+**A card with less memory skips a row, and says so.** The harness takes a device
+budget from the card, and it reports a row that exceeds the budget as skipped,
+with the byte count and the reason. A small card therefore runs a prefix of the
+set, and the report names the rows it dropped.
+
+**The extra rows do not enter the table.** They answer a question about a kernel
+and not about a model, so they never select a candidate for a production shape.
+They do gate one thing. A candidate whose curve falls below the hand tile's curve
+at every work size leaves the registry before the card sweep of section 11.7.
+
+**The scaling row is a curve, so its gate is monotonicity.** For two square
+probes with a larger side, the rate must not fall by more than a factor of two.
+The gate excepts the tiny rows, because a launch dominates their time. Section 7
+already states that exception for the 5 by 12 group.
+
+#### 11.6 How each arm gains
+
+**The CUTLASS arm gains in five ways.**
+
+1. The gate targets the defect. The spill is the 9x, and a candidate without it
+   is a different kernel. Phase 0 measured the same instruction at 96 percent of
+   the card peak with no data movement.
+2. The arm stops betting on one instantiation. Today one tile serves the 5 by 12
+   group, the classifier at 32768 wide, and the weight gradient with an fp32
+   store. No single kernel is right for all four.
+3. The crossover stops being an argument. `kCutlassMinOutputElements` is 4096
+   elements by argument, and the tiny group pays about 0.003 ms per step
+   because of it.
+4. The flush removes the warm-cache illusion, so the winner is the winner under
+   the data path a training step pays.
+5. The occupancy column shows the residency cliff that a reader must otherwise
+   infer.
+
+**The hand tile gains in three ways, and its ceiling stays.**
+
+1. Its schedule choice becomes trustworthy: the sweep gains the flush, the
+   median, and the numerical check.
+2. Its selection becomes per shape. All 28 rows are inert today, and the
+   measurement switch is global, so a run measures an arm and not a shape.
+3. The vectorized row kernels and the classifier hand-off of Part 4 each need a
+   before and after row, and this protocol supplies one for both arms.
+
+The hand tile's ceiling is the instruction set. A warp-level tile holds about
+half the card, and this run reads 0.14 to 0.43 of cuBLAS for the hand tile. No
+benchmark raises that ceiling, so the hand tile wins only where the other two
+lose.
+
+#### 11.7 The work order, and the limits
+
+| Step | Work | State | The command that decides it |
+|---|---|---|---|
+| 1 | The measurement families of section 11.5: the rows, the device fill, and the budget skip | **Done** | `tools/nanochat test //backends/cuda/gemm:bench_shapes_test` |
+| 2 | A registry of four candidates, one source compiled once for each index | **Done, and the gate fails**: every candidate spills | `tools/gemm_spill_gate.py` after a build of `//backends/cuda/gemm:gemm_benchmark` |
+| 3 | The check for each candidate in the benchmark | **Done, not yet run on a card** | `gemm_benchmark --self-test` |
+| 4 | The flush, the medians, and the occupancy column | **Done** | A `gemm_bench` run of the production rows |
+| 5 | One card run of the sweep, on both row families | **Done twice**: the first on spilling kernels, the second after section 11.9, which promotes nine rows | `modal run tools/modal/app.py::card_job --name gemm_bench --argv '["--rows","all","--json"]'`, then the same with `--rows production` |
+| 6 | The table, the seam lookup, and then step 5 of section 6 | **Done**: 28 rows, nine promoted, and the seam serves them | `tools/gemm_rules.py --report FILE --check`, then the dependency query of gate G4 |
+| 7 | The shipped seam on a card, row by row | **Done, and it passed**: 28 rows, no rejection | `modal run tools/modal/app.py::card_job --name gemm_bench --argv '["--rows","production","--seam","--json"]'` |
+
+**What landed, and where it is recorded.** `backends/cuda/gemm/README.md`
+section 17 is the package's own record. It holds the four candidates, the spill
+gate, the six steps of the sweep, and what is still missing. Four gates run
+without a card. `candidate_registry_test` checks the table of candidates.
+`bench_shapes_test` checks the rows and their arithmetic. `dispatch_test` checks
+the lookup, and that every written row keys a shape of the closed list.
+`gemm_rules_test` and `gemm_spill_gate_test` check the two tools.
+
+**What the card run decides.** Step 5 is the one measurement this design exists
+to take. It answers the question of section 11.2. Does a candidate without the
+spill exist at all, and does it reach the 1.05 fraction of step 2e? The spill
+gate answers the same question earlier and without a card. A sweep of four
+candidates that all spill states a result about the tiles, and not about the
+instruction.
+
+**The spill gate's first run.** The gate ran on the four built objects at
+`sm_90a` with the development host's CUDA 12.0. Every candidate fails it: each
+one of the eight instantiations of each candidate touches local memory inside
+its k loop.
+
+| Candidate | Tile | Stages | Kernels that spill | The worst instantiation |
+|---|---|---:|---|---|
+| `wide-n` | 128x256x64 | 3 | 8 of 8 | 8 HGMMA, 64 LDL, 64 STL |
+| `balanced` | 128x128x64 | 5 | 8 of 8 | 8 HGMMA, 32 LDL, 32 STL |
+| `deep-k` | 128x128x128 | 2 | 8 of 8 | 16 HGMMA, 32 LDL, 32 STL |
+| `tall-m` | 256x128x64 | 3 | 8 of 8 | 16 HGMMA, 64 LDL, 68 STL |
+
+The `wide-n` row states the two numbers of section 11.2 exactly: sixty-four
+loads and sixty-four stores. The gate therefore reproduces that finding, and it
+is not a new instrument. The `balanced` row halves the count and keeps the
+symptom, which agrees with the second local experiment of that section.
+
+**What that decides.** The candidate list of section 11.4 was the bet of section
+11.6 item 2: four tiles, and one of them without the spill. The gate says the
+spill is not a property of the tile. Section 11.4 also states that a spilling
+candidate leaves the registry before a sweep. The registry therefore holds no
+candidate that the gate accepts, and the sweep of step 5 ran anyway. The next
+section states what it read.
+
+The design adds no fused kernel, no new instruction, and no megakernel. It does
+not raise the ceiling of the hand tile. It does not fix the spill by itself: a candidate must exist
+without it, and the spill gate decides whether the candidate is real.
+
+| File | Change | Owner |
+|---|---|---|
+| `backends/cuda/gemm/cutlass_candidates.{h,cc}` | The registry | Kernel agent |
+| `backends/cuda/gemm/cutlass_candidate.cu` | One kernel body, compiled once for each candidate | Kernel agent |
+| `backends/cuda/gemm/bench_shapes.{h,cc}` | The measurement rows, the device fill, and the budget skip | Kernel agent |
+| `backends/cuda/gemm/gemm_benchmark.cc` | The check, the flush, and the occupancy column | Kernel agent |
+| `backends/cuda/gemm/dispatch.{h,cc}` and `cutlass_rules.h` | The table and the lookup | Kernel agent |
+| `include/nanochat/bench.h` | The new report fields | Harness |
+| `tools/gemm_rules.py`, `tools/gemm_spill_gate.py` | The table writer and the spill gate | Oracle |
+| This document, and the `gemm_cutlass` and `gemm_scaling` entries of [baselines.json](baselines.json) | The record | Architect |
+
+One row of that table is open. The per-row iteration count and the occupancy a
+candidate answers print in the benchmark's table. Both follow from the rule of
+section 11.5 and from the registry's own fields. A machine-reader would take
+them from the `nanochat.bench.v3` report, and that needs two optional row keys.
+Adding them is an additive change to `include/nanochat/bench.h`, which the
+Harness owns, so it waits for that owner rather than changing a versioned schema
+from this workstream.
+
+#### 11.8 What the card run read
+
+**Two runs, one revision, one card.** Both ran on an H100 80GB HBM3 at bf16
+after the build flag of section 11.9. Every arm they timed was therefore a
+kernel that keeps its accumulator in registers. The first run stated
+`--rows all --json`. The second stated `--rows production --json`, which is the
+family the decision table may read. The protocol is section 11.4: a 100 MiB flush of the second-level
+cache before every timed call at 0.035 ms, three rounds, and the minimum of the
+rounds. The check accepted every measured arm of both runs, and no row was
+skipped for the device budget.
+
+**The production rows, and the gate.** The fraction is the cuBLAS time over the
+arm time, so the gate of section 10.1 step 2e asks for 0.95 or more.
+
+| Arm | Old, spilling kernels | New, this revision |
+|---|---|---|
+| The best candidate on each row | 0.137 to 0.315 | **0.576 to 1.176** |
+| The hand tile on each row's own schedule | 0.149 to 0.782 | 0.147 to 0.740 |
+
+Twelve of the 25 callable rows are faster than cuBLAS. Six are clearly slower:
+`linear:wgrad:kv` 0.576, `linear:fwd:cls` 0.804, `muon:640x1280:A` 0.812,
+`muon:640x1280:A2` 0.941, and `linear:dgrad:cls` and `linear:dgrad:cproj` at
+0.952. The 5 by 12 Muon group refuses every candidate by the size rule of
+`gemm_shape.h`, and `align:offset` refuses them by the pointer rule.
+
+**Two runs disagree by more than a tie.** This is why the margin of section 11.4
+item 5 exists. The two runs agree to about 1 percent on most rows. Five rows
+moved by more than 3 points between them.
+
+| Row | First run | Second run |
+|---|---:|---:|
+| `linear:wgrad:cls` | 0.942 | 1.005 |
+| `linear:fwd:q+proj` | 1.020 | 0.978 |
+| `linear:fwd:kv` | 0.973 | 1.007 |
+| `linear:wgrad:fc` | 0.974 | 1.016 |
+| `linear:wgrad:kv` | 0.644 | 0.576 |
+
+A promotion taken on a single run would therefore have shipped three coin flips.
+
+**What the table promotes.** `tools/gemm_rules.py --write` read the second run
+and promoted nine rows. Each one beats cuBLAS by more than 0.04 in that run, and
+each one also beat it in the other run.
+
+| Row | Candidate | Fraction of cuBLAS |
+|---|---|---:|
+| `muon:1280x5120:prod` | `wide-n` | 1.176 |
+| `muon:5120x1280:prod` | `wide-n` | 1.130 |
+| `muon:1280x5120:A2+A2` | `wide-n` | 1.127 |
+| `linear:wgrad:q+proj` | `balanced` | 1.118 |
+| `muon:5120x1280:A` | `wide-n` | 1.103 |
+| `muon:1280x5120:A` | `wide-n` | 1.085 |
+| `linear:wgrad:cproj` | `wide-n` | 1.055 |
+| `linear:dgrad:fc` | `wide-n` | 1.048 |
+| `linear:fwd:cproj` | `wide-n` | 1.046 |
+
+Three rows were faster and stayed on cuBLAS, because their win is inside the
+margin: `linear:wgrad:fc` 1.016, `linear:fwd:kv` 1.007, and `linear:wgrad:cls`
+1.005. CuBLAS serves the other 19 rows. `deep-k` wins no row at this revision:
+`wide-n` wins eight and `balanced` two.
+
+**The measurement rows, and the curve.** cuBLAS holds 693 to 787 TFLOP/s from
+4096 up, which is 70 to 80 percent of the card's declared bf16 peak. The
+candidates hold 576 to 705 TFLOP/s, which is 58 to 71 percent, against 84 to 96
+before the build flag. The hand tile saturates at 115 to 148, unchanged, because
+no flag reaches it. At `scale:4096` the best candidate is faster than cuBLAS,
+701.5 against 692.8 TFLOP/s. The monotonicity gate of section 11.5 passes.
+
+**The shipped seam is on the gate too.** `gemm_benchmark --seam` clears
+`NANOCHAT_GEMM_LIB` and calls the seam for each row. The arm it measures is
+therefore the one a training step runs: a candidate on a promoted row, and
+cuBLAS on every other one. Its own check compares that arm with the cuBLAS
+reference, so a promoted row is gated on a card before it ships. The arm is
+separate from `all`, because the table writer reads a report of the three
+measured arms.
+
+**The seam run passed.** All 28 production rows matched their reference, and no
+row was rejected. On the nine promoted rows the seam read 0.87 to 0.97 of the
+cuBLAS time, which is the promotion's gain in the shipped path. Two rows read
+10 to 14 percent slower than the sweep did on the same shape: `linear:dgrad:cls`
+and `linear:wgrad:cls`, the two largest rows in the model. Both keep cuBLAS, so
+no shipped decision rests on them.
+
+**The arm's first run found a defect in the protocol, and not in a kernel.** The
+three weight-gradient rows were rejected with a relative error of exactly ten.
+A weight-gradient row states `beta = 1`, so a measured arm leaves eleven products
+in C: two warmup calls and nine timed ones. A run that does not measure cuBLAS
+took its reference from a single call, so the two sides differed by ten products
+and by nothing else. The reference is now measured under the same call count, and
+the timing of that call is dropped. The defect was invisible while every run
+measured cuBLAS, because then both sides accumulated the same number of times.
+
+**What the run decides.** The gate of step 2e is met on 19 of the 25 callable
+rows, and it is missed on six. The nine promotions make a real part of the model
+run the candidate: one call of each production row reads 10.30 ms against 10.61
+ms on cuBLAS. cuBLAS therefore stays in the library for the rows the candidate
+loses. Section 6's step 5, its removal, does not follow yet. Section 9's stop
+condition does not apply either, because the adapter is no longer behind by a
+factor of three.
+
+**What it also corrects.** The `gemm_cutlass` entry this replaces was measured
+twice over: once on a warm cache, and once on kernels that called out of their
+own k loop. The flush moved the cuBLAS column of the older entry by 0 to 12
+percent. The build flag moved the candidate column by a factor of 2.6 to 3.9.
+The note of the entry states both.
+
+The rows of both families are the `gemm_cutlass` and `gemm_scaling` entries of
+[baselines.json](baselines.json).
+
+#### 11.9 The cause of the spill, and the flag that clears it
+
+**A local rebuild found it, and no card was needed.** Section 11.8 states that
+every candidate spills its accumulator. This section states why. It also states
+the measurement that showed the reason without a card.
+
+**The kernel called out of its own k loop.** The target never defined
+`NDEBUG`. Every `assert` of the vendored CUTLASS headers therefore compiled into
+a device call to `__assertfail`. ptxas cannot inline that call, and two defects
+follow.
+
+1. ptxas serializes the `wgmma` instructions around the call. Its warning names
+the reason: `C7509: wgmma.mma_async instructions are serialized due to the
+presence of Extern calls`. All eight instantiations of a candidate report it.
+2. The call forces the accumulator out of the register file around every call
+site. Candidate 0 measured a 576-byte stack, 2090 `LDL`, and 1124 `STL`.
+
+**One build flag clears both.** The `cutlass_bf16` target now states
+`-DNDEBUG`. One rebuilt translation unit of candidate 0 then reads:
+
+| Row | Before | After |
+|---|---:|---:|
+| `CALL.ABS.NOINC` | 24 | 0 |
+| Stack | 576 B | 0 B |
+| `LDL` and `STL` | 2090 and 1124 | 0 and 0 |
+| Registers | 168 | 168 |
+| ptxas warnings | `C7509`, eight of eight | none |
+
+**The gate accepts all four candidates.** `tools/gemm_spill_gate.py` reads clean
+for `wide-n`, `balanced`, `deep-k`, and `tall-m`. Each one holds 8 of 8 kernel
+bodies with no local access between the multiplies. `wide-n` and `balanced` hold
+64 `HGMMA` each, and `deep-k` and `tall-m` hold 128 each. The same objects hold
+no call and no stack.
+
+**The register reallocation never worked, and it no longer matters.** The PTX of
+every candidate holds 16 `setmaxnreg` instructions, and ptxas drops all of them
+with `C7508: 'setmaxnreg' ignored; unable to determine register count at entry`.
+The budget is therefore static at 168 registers, which is 65536 divided by 384
+threads. A 128-wide tile needs 128 of them for the accumulator, and that fits.
+The spill came from the calls and never from the tile.
+
+**What this decides.** Section 11.2 read the spill as a property of the tile.
+It was a property of the build. The negative result of section 11.8 therefore
+rests on broken machine code, and the card measurement must run again before
+section 9's stop condition stands. The decision table of section 11.4 item 5 is
+inert until then, and cuBLAS keeps every shape in the meantime.
+
+**The gate gained a second rule.** A call between two multiplies is now a
+refusal of its own. `tools/gemm_spill_gate.py` reports it as `SERIALIZES`, names
+the call count, and exits non-zero. Two cases of `gemm_spill_gate_test` state the
+rule: a call inside the k loop refuses the body, and a call outside it does not.
+
+**The flag is target-local.** No other device code in the tree holds a runtime
+`assert`, so no other target inherits the defect. The shared option list stays
+as it is.
 
 ## Part 4. Two kernel designs the tree does not implement
 
