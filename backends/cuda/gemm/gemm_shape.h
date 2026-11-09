@@ -92,7 +92,11 @@ inline bool IsTileCallable(const ResolvedGemm& gemm) {
 // The smallest output the Hopper mainloop serves, in elements of C. Below it
 // the launch and the tensor-map build cost more than the product, so the hand
 // tile keeps those shapes: the 5 by 12 Muon group is 60 outputs and 0.005 ms.
-// The benchmark sweeps this crossover (`gemm_benchmark --crossover`).
+//
+// The value is an argument and not a measurement, and no sweep varies it yet.
+// Section 11.6 item 3 of docs/kernels.md records that: once the candidates of
+// section 11.4 are measured per shape, a fixed crossover is one more argument
+// the measurement can replace.
 inline constexpr int kCutlassMinOutputElements = 64 * 64;
 
 // The sixteen-byte boundary, in bytes, that every address shares.

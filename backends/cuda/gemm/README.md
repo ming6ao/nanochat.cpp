@@ -669,3 +669,147 @@ and `--config=sim-gate` builds with `-Werror`.
   instruction, so `cutlass_bf16.cu` is card-only and the hand tile stays as the
   off-device gate.
 - The fp8, stream-K, and grouped tiers of phase 4.
+
+## 17. The candidate registry and the sweep
+
+Section 11.1 of `docs/kernels.md` timed one kernel body against cuBLAS and read
+0.051 to 0.154 of it. Section 11.2 found the cause in the machine code: the
+accumulator leaves the register file inside the k loop, and the stack is 576
+bytes. This section is the answer of section 11.4 to that record: it measures
+four candidates. Section 11.9 then found the cause in the build and cleared it.
+The four are clean kernels at this revision.
+
+**What the package holds now.**
+
+| File | What |
+|---|---|
+| `cutlass_candidates.h`, `cutlass_candidates.cc` | The registry of four candidates, and the lookups a report and a command line use |
+| `cutlass_candidate.cu` | One kernel body, compiled once for each candidate |
+| `cutlass_bf16.cu` | The dispatcher: the choice of candidate, the device test, and the two seam entries |
+| `bench_shapes.h`, `bench_shapes.cc` | The 29 measurement rows, and every quantity each row derives |
+| `gemm_benchmark.cc` | The sweep: two row families, three arms, one protocol |
+| `cutlass_rules.h` | The decision table and its lookup |
+
+**Four candidates.** `wide-n` is the tile of section 16, kept because its 256
+wide N suits the classifier, whose N is 32768. `balanced` halves N, which halves
+the accumulator and is the candidate section 11.2 expects to survive. `deep-k`
+doubles the k slice, for a long loop with few tiles. `tall-m` doubles M, for the
+weight gradient. Each candidate is one compiler process. One source file holds
+every kernel body, and the build compiles it once for each registry index. One
+process therefore holds one candidate's eight instantiations, and never two.
+
+**The spill gate needs no card.** `tools/gemm_spill_gate.py` reads the output of
+`cuobjdump -sass` for each built object, and it refuses a candidate whose `LDL`
+or `STL` instructions fall between its `HGMMA` instructions. It refuses a
+candidate whose k loop calls out as well, which is the defect of section 11.9.
+Section 11.2 took a card run and a hand inspection to find the defect; this gate
+takes three minutes. Its `--sass` mode reads a text file, so its own test needs
+no toolchain.
+
+It ran on the first build, and every candidate spilled:
+
+| Candidate | Tile | Stages | Kernels that spill | The worst instantiation |
+|---|---|---:|---|---|
+| `wide-n` | 128x256x64 | 3 | 8 of 8 | 8 HGMMA, 64 LDL, 64 STL |
+| `balanced` | 128x128x64 | 5 | 8 of 8 | 8 HGMMA, 32 LDL, 32 STL |
+| `deep-k` | 128x128x128 | 2 | 8 of 8 | 16 HGMMA, 32 LDL, 32 STL |
+| `tall-m` | 256x128x64 | 3 | 8 of 8 | 16 HGMMA, 64 LDL, 68 STL |
+
+The `wide-n` row states the two numbers of section 11.2 exactly. The gate
+therefore reproduces that finding. The `balanced` row halves the count and keeps
+the symptom. The spill is therefore not a property of the tile. Section 11.9
+names the property it is: the target did not define `NDEBUG`, so the `assert`
+of every vendored header became a device call, and ptxas serialized the
+multiplies around it.
+
+**The second run, with `-DNDEBUG`.** One rebuild of the same four translation
+units reads clean for all of them:
+
+| Candidate | Kernels that spill | The worst instantiation | Stack |
+|---|---|---|---:|
+| `wide-n` | 0 of 8 | 8 HGMMA, no local access | 0 B |
+| `balanced` | 0 of 8 | 8 HGMMA, no local access | 0 B |
+| `deep-k` | 0 of 8 | 16 HGMMA, no local access | 0 B |
+| `tall-m` | 0 of 8 | 16 HGMMA, no local access | 0 B |
+
+The same objects hold no `CALL.ABS.NOINC` and no ptxas warning. Section 11.9 of
+`docs/kernels.md` is the measurement.
+
+**The sweep.** `gemm_benchmark` measures three arms: cuBLAS, one candidate at a
+time of the registry, and one schedule at a time of the hand tile. Every arm
+runs through the seam, so a measurement covers the wiring a training step takes.
+Six steps bound the protocol, and each one answers a defect of the measurement
+before it:
+
+1. The operands are filled on the device. A two GiB row therefore costs no host
+   copy, and the benchmark profile's host budget is 5 to 6 GiB.
+2. One workspace serves every row. It is sized from the largest row that runs.
+3. A row past the card's budget is reported as skipped, with its bytes and the
+   reason.
+4. The second-level cache is flushed before every timed call. The classifier
+   operands are 63 MB and the cache is 50 MB, so a warm cache would choose the
+   winner.
+5. Every arm reports the minimum and the median of the rounds. The minimum keeps
+   the meaning section 15 gave that column, and the median is what a decision
+   reads.
+6. Every candidate is checked against cuBLAS before its timing is reported. A
+   small row compares every element; a big row reduces the squared norm of the
+   difference on the device.
+
+`--self-test` proves the check itself: an identical copy must match, and a
+perturbed copy must be rejected by name. `--rows measurement` runs the scaling
+families of section 11.5, which say how a kernel scales and never select a
+candidate. `--auto-iters` takes a row's iteration count from its own work, so a
+round runs at least 50 ms.
+
+**The decision table.** `cutlass_rules.h` maps a production shape to the arm the
+sweep chose, in the order candidate, then hand tile, then cuBLAS.
+`tools/gemm_rules.py --write` writes the block from a `gemm_bench --json` report
+of the production rows, and `--check` compares the committed block with the
+report that produced it. The table is data, so a hand edit fails a gate instead
+of changing a shipped decision. `dispatch_test` states that a written row keys a
+shape of the closed list.
+
+**The card runs.** Two runs on an H100 80GB HBM3 measured both families at the
+protocol above, one before section 11.9 and one after. The numbers are the
+`gemm_cutlass` and `gemm_scaling` entries of `docs/baselines.json`, and
+`docs/kernels.md` section 11.8 is the record. The first measured spilling
+kernels, so its timings state the defect and not the adapter. The second reads
+0.576 to 1.176 of cuBLAS on the production rows, and it promotes nine of them.
+The candidates move from 84 to 96 TFLOP/s to 576 to 705.
+
+- The best candidate on each production row reads 0.576 to 1.176 of cuBLAS. The
+  gate asks for 0.95. Twelve rows are faster than cuBLAS and six are clearly
+  slower.
+- The hand tile reads 0.147 to 0.740 of cuBLAS, which no flag changed.
+- `wide-n` wins eight rows and `balanced` two. `deep-k` wins none at this
+  revision. The 5 by 12 group refuses every candidate by the size rule, and
+  `align:offset` refuses them by the pointer rule.
+- cuBLAS holds 693 to 787 TFLOP/s above 4096, which is 70 to 80 percent of the
+  peak. The candidates hold 576 to 705, and the hand tile 115 to 148.
+- The check accepted every measured arm, so no fast arm was wrong.
+
+`tools/gemm_rules.py --write` wrote the 28 rows from the second report and
+promoted nine of them, each by more than the 0.04 margin of section 11.4 item 5.
+`CutlassCandidateFor` therefore serves those nine shapes and answers -1 for the
+other 19. Three rows were faster than cuBLAS and stayed on it, because their win
+is inside the margin. The flush also moved the cuBLAS column by 0 to 12 percent
+against the warm cache entry it replaced. The classifier forward moved most,
+because its operands are 126 MB against a 50 MB cache.
+
+**The seam arm passed on the card.** `gemm_benchmark --seam` measured the shipped
+path on all 28 production rows, and no row was rejected. The nine promoted rows
+read 0.87 to 0.97 of cuBLAS, which is the promotion's gain in the path a training
+step takes. Its first run found a defect in the protocol and not in a kernel. A
+weight-gradient row states `beta = 1`, so one call accumulates one product. The
+arm ran eleven calls and the reference ran one, so the check read ten times the
+reference. The reference now runs the same count.
+
+**What is still not here.**
+
+- The crossover of section 11.6 item 3. `kCutlassMinOutputElements` is still an
+  argument, and no sweep varies it.
+- The six rows the candidate loses. `linear:wgrad:kv` at 0.576 is the worst, and
+  a tile with a short N is the shape they ask for.
+- A candidate that wins above 8192 on a square shape. cuBLAS keeps 0.81 of the
+  lead there, because the operands leave the second-level cache.

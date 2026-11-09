@@ -25,6 +25,8 @@ exports_files([
     "dump_fixtures.py",
     "fixture_common.py",
     "fixture_format.py",
+    "gemm_rules.py",
+    "gemm_spill_gate.py",
     "gen_capi_mirrors.py",
     "gen_matrix.py",
     "gen_unicode_tables.py",
@@ -87,6 +89,25 @@ filegroup(
 filegroup(
     name = "gen_capi_mirrors",
     srcs = ["gen_capi_mirrors.py"],
+)
+
+# The GEMM decision-table writer (docs/kernels.md section 11.4 item 5). `--write`
+# writes the block of backends/cuda/gemm/cutlass_rules.h from a `gemm_bench
+# --json` report, and `--check` compares the committed block with the report that
+# produced it. Standard library only, so its test lists the header and the
+# registry as data.
+filegroup(
+    name = "gemm_rules",
+    srcs = ["gemm_rules.py"],
+)
+
+# The GEMM candidate spill gate (docs/kernels.md section 11.4 item 2). It reads
+# `cuobjdump -sass` of a built object and refuses a candidate whose `LDL` or
+# `STL` instructions fall between its `HGMMA` instructions. Its `--sass` mode
+# reads a text file, so its test needs no toolchain.
+filegroup(
+    name = "gemm_spill_gate",
+    srcs = ["gemm_spill_gate.py"],
 )
 
 # The section 10.4 regenerate-and-diff gate. It drives dump_fixtures.py, so
@@ -192,11 +213,47 @@ py_test(
     size = "small",
 )
 
+# T0 gate for the GEMM decision table (docs/kernels.md section 11.4 item 5).
+# `tools/gemm_rules.py --write` writes the block of
+# backends/cuda/gemm/cutlass_rules.h from a `gemm_bench --json` report of the
+# production rows, and `--check` compares the committed block with the report
+# that produced it. The cases drive the order of section 11.4 (a candidate, then
+# the hand tile, then cuBLAS), the fixed point of a second write, a drifted block
+# that names the header, a measurement-family report that is refused, and a
+# candidate the registry does not hold. Hermetic and CPU-only: the standard
+# library, no card, no CUDA toolchain.
+py_test(
+    name = "gemm_rules_test",
+    srcs = ["gemm_rules_test.py"],
+    data = [
+        ":gemm_rules",
+        "//backends/cuda/gemm:cutlass_candidates.h",
+        "//backends/cuda/gemm:cutlass_rules.h",
+    ],
+    size = "small",
+)
+
+# T0 gate for the candidate spill gate (docs/kernels.md section 11.4 item 2).
+# The gate itself runs `cuobjdump -sass` over a built object, which no hermetic
+# test can do; its `--sass` mode reads the same text from a file, so the parser
+# and the verdict are checked here. The cases cover a clean mainloop, a load and
+# a store between two multiplies, a single multiply that is no mainloop, local
+# access outside the multiplies, and a body with none. Hermetic and CPU-only:
+# the standard library and a text file.
+py_test(
+    name = "gemm_spill_gate_test",
+    srcs = ["gemm_spill_gate_test.py"],
+    data = [":gemm_spill_gate"],
+    size = "small",
+)
+
 # Aggregation point consumed by //:all_tests.
 test_suite(
     name = "all",
     tests = [
         ":contract_vocabulary_test",
+        ":gemm_rules_test",
+        ":gemm_spill_gate_test",
         ":gen_capi_mirrors_test",
         ":kaggle_scripts_test",
     ],

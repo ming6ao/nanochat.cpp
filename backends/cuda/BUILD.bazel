@@ -127,6 +127,9 @@ cuda_library(
     deps = [
         ":device",
         "//backends/cuda/gemm:cutlass_bf16",
+        # The decision table of `cutlass_rules.h` and its lookup: the seam reads
+        # it to decide whether a shape takes a CUTLASS candidate.
+        "//backends/cuda/gemm:dispatch",
         "//backends/cuda/gemm:gemm_bf16",
         "//include/nanochat:nanochat",
         # `cublas` brings both libcublas and libcublasLt.

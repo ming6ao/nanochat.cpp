@@ -42,6 +42,7 @@
 
 #include "backends/cuda/device.h"
 #include "backends/cuda/gemm/cutlass_launch.h"
+#include "backends/cuda/gemm/cutlass_rules.h"
 #include "backends/cuda/gemm/dispatch.h"
 #include "backends/cuda/gemm/gemm_launch.h"
 
@@ -371,9 +372,14 @@ bool GemmBatched(const GemmParams& params, const ComputeType* a,
 // The first line is the whole fp32 answer: a tile needs bf16 operands, so the
 // discarded branch leaves the table, the switch, and the launchers unnamed.
 // The Hopper mainloop, before every other path. It returns false when the
-// device cannot run the instruction, when `JudgeCutlass` refuses the shape, or
-// when the mode names another library, and a false is not an error: the next
-// path takes the call.
+// device cannot run the instruction, when `JudgeCutlass` refuses the shape,
+// when the decision table of `cutlass_rules.h` does not promote the shape, or
+// when the mode names another library. A false is not an error: the next path
+// takes the call, which is the hand tile and then cuBLAS.
+//
+// The promotion is the seam's question and not the launcher's. A measurement
+// names one library with `NANOCHAT_GEMM_LIB=cutlass` and one candidate with
+// `NANOCHAT_GEMM_CANDIDATE`, and then the table does not stand in the way.
 bool TryGemmCutlass(const GemmParams& params, const ComputeType* a,
                     const ComputeType* b, void* c, cudaDataType_t c_type) {
   if constexpr (!kComputeIsBf16) return false;
@@ -384,6 +390,11 @@ bool TryGemmCutlass(const GemmParams& params, const ComputeType* a,
   if (!fp32_c && c_type != kDataType) return false;
   const ResolvedGemm gemm = ResolveGemm(params, fp32_c);
   if (!IsCutlassCallable(gemm, a, b, c)) return false;
+  // A shipped run promotes one shape at a time, from a committed measurement. A
+  // measurement of its own names the library, so it runs the shape either way.
+  if (mode != GemmTileMode::kCutlass && CutlassCandidateFor(gemm) < 0) {
+    return false;
+  }
   return fp32_c ? LaunchGemmCutlassToFp32(gemm, a, b, static_cast<float*>(c))
                 : LaunchGemmCutlass(gemm, a, b, static_cast<ComputeType*>(c));
 }

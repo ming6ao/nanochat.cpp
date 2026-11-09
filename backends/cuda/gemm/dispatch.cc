@@ -22,6 +22,7 @@
 #include <utility>
 #include <vector>
 
+#include "backends/cuda/gemm/cutlass_rules.h"
 #include "backends/cuda/gemm/gemm_plan.h"
 #include "backends/cuda/gemm/linear_shape.h"
 #include "backends/cuda/kernels/muon_gemm_shape.h"
@@ -159,6 +160,39 @@ std::vector<Row>& Rows() {
 }
 
 }  // namespace
+
+// --- The decision table -----------------------------------------------------
+//
+// The table itself is data, written into `cutlass_rules.h` by
+// `tools/gemm_rules.py --write` from a `gemm_bench --json` report. These two
+// functions are the lookup, and they are host-only, so `dispatch_test` reads a
+// decision without a card.
+
+const GemmRuleRow* GemmRuleFor(const ResolvedGemm& gemm) {
+  // A row was measured at the tight leading dimensions, so a padded call holds
+  // no row. It falls through to the hand tile and then to cuBLAS instead of
+  // taking a measurement it does not match.
+  const int tight_lda = gemm.transpose_a ? gemm.m : gemm.k;
+  const int tight_ldb = gemm.transpose_b ? gemm.k : gemm.n;
+  if (gemm.lda != tight_lda || gemm.ldb != tight_ldb || gemm.ldc != gemm.n) {
+    return nullptr;
+  }
+  for (const GemmRuleRow& row : kGemmRules) {
+    if (row.m == gemm.m && row.n == gemm.n && row.k == gemm.k &&
+        row.batch_count == gemm.batch_count &&
+        row.transpose_a == gemm.transpose_a &&
+        row.transpose_b == gemm.transpose_b && row.fp32_c == gemm.fp32_c) {
+      return &row;
+    }
+  }
+  return nullptr;
+}
+
+int CutlassCandidateFor(const ResolvedGemm& gemm) {
+  const GemmRuleRow* row = GemmRuleFor(gemm);
+  if (row == nullptr || row->route != GemmRoute::kCandidate) return -1;
+  return row->candidate;
+}
 
 const char* GemmTileModeName(GemmTileMode mode) {
   switch (mode) {

@@ -20,6 +20,8 @@
 #include <string>
 #include <vector>
 
+#include "backends/cuda/gemm/cutlass_candidates.h"
+#include "backends/cuda/gemm/cutlass_rules.h"
 #include "backends/cuda/gemm/dispatch.h"
 #include "backends/cuda/gemm/gemm_plan.h"
 #include "backends/cuda/gemm/gemm_shape.h"
@@ -30,8 +32,13 @@
 namespace {
 
 using nanochat::GemmParams;
+using nanochat::kernels::CutlassCandidateFor;
 using nanochat::kernels::CutlassRefusal;
 using nanochat::kernels::CutlassRefusalName;
+using nanochat::kernels::GemmCandidateCount;
+using nanochat::kernels::GemmRoute;
+using nanochat::kernels::GemmRuleFor;
+using nanochat::kernels::GemmRuleRow;
 using nanochat::kernels::GemmScheduleCount;
 using nanochat::kernels::GemmScheduleIndexFromEnv;
 using nanochat::kernels::GemmScheduleName;
@@ -49,6 +56,8 @@ using nanochat::kernels::IsCutlassCallable;
 using nanochat::kernels::IsTileCallable;
 using nanochat::kernels::JudgeCutlass;
 using nanochat::kernels::kCutlassMinOutputElements;
+using nanochat::kernels::kGemmRuleCount;
+using nanochat::kernels::kGemmRules;
 using nanochat::kernels::ResolvedGemm;
 using nanochat::kernels::ResolveGemm;
 using nanochat::kernels::SameShape;
@@ -101,6 +110,63 @@ constexpr int kLinearRows = 16 * 1024;
 // and the `1280x5120` square is the `5120x1280` square. The Linear side holds
 // three calls of six layers, and the query projection shares its shape with the
 // attention output projection in all three. Thirteen rows and fifteen rows.
+// The decision table of `cutlass_rules.h` (docs/kernels.md section 11.4 item
+// 5).
+//
+// The table is written by `tools/gemm_rules.py` from a card run, so this gate
+// states the two things a written row must satisfy. A row must key a shape of
+// the closed list, because a row no call can match is a decision that never
+// applies. And a row must agree with itself: a promoted row names a candidate
+// of the registry, and every other route names none.
+//
+// The shipped table holds no row, so both checks are vacuous until a card run
+// writes one. The gate is here for that run.
+void CheckRuleTable() {
+  const char* kCase = "rule table";
+  for (int index = 0; index < kGemmRuleCount; ++index) {
+    const GemmRuleRow& rule = kGemmRules[index];
+    bool found = false;
+    for (int row = 0; row < GemmTileShapeCount() && !found; ++row) {
+      const ResolvedGemm& gemm = GemmTileShapeGemm(row);
+      found = rule.m == gemm.m && rule.n == gemm.n && rule.k == gemm.k &&
+              rule.batch_count == gemm.batch_count &&
+              rule.transpose_a == gemm.transpose_a &&
+              rule.transpose_b == gemm.transpose_b &&
+              rule.fp32_c == gemm.fp32_c;
+    }
+    Expect(found,
+           "rule " + std::to_string(index) + " keys a shape of the closed list",
+           kCase);
+    const bool promoted = rule.route == GemmRoute::kCandidate;
+    Expect(promoted == (rule.candidate >= 0),
+           "rule " + std::to_string(index) +
+               " names a candidate exactly when it promotes one",
+           kCase);
+    Expect(rule.candidate < GemmCandidateCount(),
+           "rule " + std::to_string(index) +
+               " names a candidate the registry holds",
+           kCase);
+    // The lookup answers the row the table states, and the seam's question is
+    // the same answer.
+    for (int row = 0; row < GemmTileShapeCount(); ++row) {
+      const ResolvedGemm& gemm = GemmTileShapeGemm(row);
+      if (rule.m != gemm.m || rule.n != gemm.n || rule.k != gemm.k ||
+          rule.batch_count != gemm.batch_count ||
+          rule.transpose_a != gemm.transpose_a ||
+          rule.transpose_b != gemm.transpose_b || rule.fp32_c != gemm.fp32_c) {
+        continue;
+      }
+      Expect(GemmRuleFor(gemm) == &rule,
+             "rule " + std::to_string(index) + " is the rule of its shape",
+             kCase);
+      Expect(CutlassCandidateFor(gemm) == rule.candidate,
+             "rule " + std::to_string(index) +
+                 " answers the seam's candidate question",
+             kCase);
+    }
+  }
+}
+
 void CheckTableShape() {
   const char* kCase = "table shape";
   Expect(GemmTileShapeCount() == 28, "the closed list holds twenty-eight rows",
@@ -573,6 +639,7 @@ int main() {
   CheckMode();
   CheckModeFromEnv();
   CheckCutlassVerdict();
+  CheckRuleTable();
   CheckSchedules();
   CheckScheduleFromEnv();
   CheckOrders();

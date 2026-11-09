@@ -64,6 +64,7 @@ cc_library(
     name = "dispatch",
     srcs = ["dispatch.cc"],
     hdrs = [
+        "cutlass_rules.h",
         "dispatch.h",
         "gemm_plan.h",
         "gemm_shape.h",
@@ -77,8 +78,35 @@ cc_library(
     ],
 )
 
+# The candidate registry (docs/kernels.md section 11.4). Host only: the table is
+# data, and no entry names a vendor type, so `candidate_registry_test` reads the
+# registry with no card and no CUTLASS header.
+cc_library(
+    name = "cutlass_candidates",
+    srcs = ["cutlass_candidates.cc"],
+    hdrs = ["cutlass_candidates.h"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+)
+
+# The measurement rows of the sweep (docs/kernels.md section 11.5). Host only:
+# a row states extents and every other quantity is derived, so
+# `bench_shapes_test` checks the list and its arithmetic with no card.
+cc_library(
+    name = "bench_shapes",
+    srcs = ["bench_shapes.cc"],
+    hdrs = ["bench_shapes.h"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    deps = [
+        ":dispatch",
+        "//include/nanochat:nanochat",
+    ],
+)
+
 # The Hopper mainloop, borrowed from NVIDIA CUTLASS (docs/kernels.md Part 3
-# section 5). Eight kernels: four operand orientations times two store types.
+# section 5). One candidate is eight kernels: four operand orientations times two
+# store types, and the registry of section 11.4 names four candidates.
 #
 # **This is the only target in the tree that names an architecture on itself.**
 # The warpgroup instruction is architecture conditional and needs `sm_90a`, so
@@ -86,16 +114,78 @@ cc_library(
 # The default build of `//...` therefore stays at `sm_75`, which is what
 # `dev/cutlass/README.md` proved before this target existed.
 #
-# **The vendor options are this target's own.** The CUTLASS headers emit
+# **The vendor options are these targets' own.** The CUTLASS headers emit
 # thousands of warnings and `--config=sim-gate` turns warnings into errors, so
-# this target does not load `nanochat_cuda_copts`. `--expt-relaxed-constexpr`
+# these targets do not load `nanochat_cuda_copts`. `--expt-relaxed-constexpr`
 # lets the headers call a host `constexpr` from a device function without a
 # warning, which is what they do throughout.
+#
+# **`-DNDEBUG` is a measurement, not a habit.** Without it, every `assert` of
+# the vendored headers becomes a device call to `__assertfail`, which ptxas
+# cannot inline. Two defects follow: the calls sit inside the k loop, so the
+# accumulator leaves the register file (STACK 576, 2090 LDL, 1124 STL in
+# candidate 0), and ptxas serializes the `wgmma` instructions around them
+# (warning C7509). With `-DNDEBUG` the same translation unit reads STACK 0, no
+# local access, and no call at all. `docs/kernels.md` section 11.9 records it.
 #
 # The source joins the build on the same selection as the hand tile: the operands
 # are bf16, so only a bf16 or fp8 build compiles it, and the fp32 build keeps
 # cuBLAS. An fp32 build also has no `sm_90a` target, so no H100 is required to
 # build the tree.
+
+#: The candidates the build compiles, as registry indices. One source file,
+#: `cutlass_candidate.cu`, holds every kernel body and reads its own row of
+#: `kGemmCandidates`, so this list is the build's whole statement of "how many
+#: candidates". The registry states the same number in
+#: `NANOCHAT_FOR_EACH_CANDIDATE`, and a mismatch fails the build: a missing
+#: index leaves a symbol undefined, and an extra one trips the `static_assert`
+#: in the source.
+#:
+#: **One translation unit for each candidate.** A candidate is eight
+#: instantiations and `dev/cutlass/README.md` measures one instantiation at 19 s
+#: and 1.2 GiB, so four candidates in one compiler process would exceed the
+#: development host's budget. One target for each index is what keeps the
+#: build's memory peak at one candidate.
+_CANDIDATE_INDICES = ["0", "1", "2", "3"]
+
+[
+    cuda_library(
+        name = "cutlass_candidate_" + index,
+        srcs = select({
+            "//:bf16": ["cutlass_candidate.cu"],
+            "//:fp8": ["cutlass_candidate.cu"],
+            "//conditions:default": [],
+        }),
+        hdrs = [
+            "cutlass_candidates.h",
+            "cutlass_kernel.cuh",
+        ],
+        archs = ["sm_90a"],
+        copts = [
+            "-O2",
+            "-Xcompiler",
+            "-O2",
+            "--expt-relaxed-constexpr",
+            "-DNDEBUG",
+        ],
+        local_defines = ["NANOCHAT_CANDIDATE_INDEX=" + index],
+        defines = precision_defines(),
+        deps = [
+            ":cutlass_candidates",
+            ":dispatch",
+            "//backends/cuda:device",
+            "//include/nanochat:nanochat",
+            "@cutlass//:cutlass",
+        ],
+        alwayslink = True,
+    )
+    for index in _CANDIDATE_INDICES
+]
+
+# The dispatcher: the call table, the choice of candidate, the device test, and
+# the two seam entries. It names no numbered entry, because the table is built
+# from the registry's own index list and `cutlass_launch.h` declares the entries
+# from it.
 cuda_library(
     name = "cutlass_bf16",
     srcs = select({
@@ -104,6 +194,7 @@ cuda_library(
         "//conditions:default": [],
     }),
     hdrs = [
+        "cutlass_candidates.h",
         "cutlass_launch.h",
         "gemm_shape.h",
     ],
@@ -113,9 +204,15 @@ cuda_library(
         "-Xcompiler",
         "-O2",
         "--expt-relaxed-constexpr",
+        "-DNDEBUG",
     ],
     defines = precision_defines(),
     deps = [
+        ":cutlass_candidate_" + index
+        for index in _CANDIDATE_INDICES
+    ] + [
+        ":cutlass_candidates",
+        ":dispatch",
         "//backends/cuda:device",
         "//include/nanochat:nanochat",
         "@cutlass//:cutlass",
@@ -131,10 +228,34 @@ cc_test(
     copts = nanochat_copts(),
     defines = precision_defines(),
     deps = [
+        ":cutlass_candidates",
         ":dispatch",
         "//backends/cuda/kernels:muon_gemm_shape",
         "//include/nanochat:nanochat",
     ],    size = "small",
+)
+
+# The registry's gate: four candidates, each at a tile and a stage count the
+# probe measured, each fitting the Hopper window, and one override that selects
+# exactly the candidate it names.
+cc_test(
+    name = "candidate_registry_test",
+    srcs = ["candidate_registry_test.cc"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    deps = [":cutlass_candidates"],
+    size = "small",
+)
+
+# The measurement rows' gate: the list, its derived arithmetic, the budget skip,
+# the iteration count, and the check's predicate. Host only.
+cc_test(
+    name = "bench_shapes_test",
+    srcs = ["bench_shapes_test.cc"],
+    copts = nanochat_copts(),
+    defines = precision_defines(),
+    deps = [":bench_shapes"],
+    size = "small",
 )
 
 # The device gate of the same kernel: cuBLAS is the reference, because both
@@ -152,6 +273,7 @@ cc_test(
     copts = nanochat_copts(),
     defines = precision_defines(),
     deps = [
+        ":cutlass_candidates",
         ":gemm_bf16",
         "//backends/cuda:gemm",
         "//include/nanochat:nanochat",
@@ -176,6 +298,9 @@ cuda_binary(
     defines = precision_defines(),
     host_defines = precision_defines(),
     deps = [
+        ":bench_shapes",
+        ":cutlass_bf16",
+        ":cutlass_candidates",
         ":dispatch",
         "//backends/cuda:gemm",
         "//backends/cuda/kernels/testing:bench_utils",
@@ -214,6 +339,8 @@ cuda_test(
 test_suite(
     name = "all",
     tests = [
+        ":bench_shapes_test",
+        ":candidate_registry_test",
         ":dispatch_test",
         ":gemm_gpu_test",
         ":mma_bf16_test",
