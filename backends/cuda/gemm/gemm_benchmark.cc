@@ -122,6 +122,7 @@ using nanochat::kernels::GemmTileShapeGemm;
 using nanochat::kernels::GemmTileShapeName;
 using nanochat::kernels::GemmTileShapeSchedule;
 using nanochat::kernels::JudgeCutlass;
+using nanochat::kernels::JudgeScaledFp8;
 using nanochat::kernels::Memcpy;
 using nanochat::kernels::Memset;
 using nanochat::kernels::QuantizeFp8;
@@ -1166,71 +1167,79 @@ int main(int argc, char** argv) {
       auto* b_scale = static_cast<float*>(Alloc(sizeof(float)));
       if (a8 != nullptr && b8 != nullptr && a_scale != nullptr &&
           b_scale != nullptr) {
-        // The pair follows the row's orientation, because that is how the seam
-        // states its three forms: a forward row quantizes E4M3, and a row at a
-        // backward orientation quantizes its output gradient to E5M2
-        // (docs/precision.md section 7). Without this the arm refuses every
-        // backward row and both fp8 columns of that row time cublasLt.
-        const Fp8Format a_format =
-            Fp8ScaledFormSupported(Fp8Format::kE4M3, Fp8Format::kE4M3,
-                                   params.transpose_a, params.transpose_b)
-                ? Fp8Format::kE4M3
-                : Fp8Format::kE5M2;
-        QuantizeFp8Params quant_a;
-        quant_a.count = static_cast<int>(a_elements);
-        quant_a.format = a_format;
-        QuantizeFp8(quant_a, a, a8, a_scale);
-        QuantizeFp8Params quant_b;
-        quant_b.count = static_cast<int>(b_elements);
-        QuantizeFp8(quant_b, b, b8, b_scale);
+        // The card proved one form, so a row outside it is reported and not
+        // called. Three facts bound it: `GemmScaledFp8` exits on a batch, the
+        // library answers status 15 for every form but the K-major pair, and
+        // the arm faulted on the card at the first backward row
+        // (docs/kernels.md section 10.4). A fatal here would lose the sweep
+        // instead of one row.
+        const bool kMajorPair = !params.transpose_a && params.transpose_b;
+        const CutlassRefusal fp8_refusal =
+            params.batch_count == 1 && kMajorPair
+                ? JudgeScaledFp8(row.gemm, a8, b8, buffers.c)
+                : CutlassRefusal::kExtent;
+        if (fp8_refusal != CutlassRefusal::kNone) {
+          std::fprintf(stderr, "gemm benchmark: %-24s fp8 arms skipped: %s\n",
+                       row.name.c_str(), CutlassRefusalName(fp8_refusal));
+        } else {
+          // The forward's pair, E4M3 for both operands (docs/precision.md
+          // section 7).
+          QuantizeFp8Params quant_a;
+          quant_a.count = static_cast<int>(a_elements);
+          quant_a.format = Fp8Format::kE4M3;
+          QuantizeFp8(quant_a, a, a8, a_scale);
+          QuantizeFp8Params quant_b;
+          quant_b.count = static_cast<int>(b_elements);
+          QuantizeFp8(quant_b, b, b8, b_scale);
 
-        ScaledGemmParams scaled;
-        scaled.m = params.m;
-        scaled.n = params.n;
-        scaled.k = params.k;
-        scaled.batch_count = 1;
-        scaled.alpha = params.alpha;
-        scaled.beta = params.beta;
-        scaled.transpose_a = params.transpose_a;
-        scaled.transpose_b = params.transpose_b;
-        scaled.format_a = a_format;
-        scaled.format_b = Fp8Format::kE4M3;
-        scaled.scale_a = a_scale;
-        scaled.scale_b = b_scale;
+          ScaledGemmParams scaled;
+          scaled.m = params.m;
+          scaled.n = params.n;
+          scaled.k = params.k;
+          scaled.batch_count = 1;
+          scaled.alpha = params.alpha;
+          scaled.beta = params.beta;
+          scaled.transpose_a = params.transpose_a;
+          scaled.transpose_b = params.transpose_b;
+          scaled.format_a = Fp8Format::kE4M3;
+          scaled.format_b = Fp8Format::kE4M3;
+          scaled.scale_a = a_scale;
+          scaled.scale_b = b_scale;
 
-        auto call_scaled = [&] {
-          if (row.gemm.fp32_c) {
-            GemmScaledFp8(GemmMode::kWgrad, scaled, a8, b8,
-                          static_cast<GradientType*>(buffers.c));
-          } else {
-            GemmScaledFp8(GemmMode::kForward, scaled, a8, b8,
-                          static_cast<ComputeType*>(buffers.c));
+          auto call_scaled = [&] {
+            if (row.gemm.fp32_c) {
+              GemmScaledFp8(GemmMode::kWgrad, scaled, a8, b8,
+                            static_cast<GradientType*>(buffers.c));
+            } else {
+              GemmScaledFp8(GemmMode::kForward, scaled, a8, b8,
+                            static_cast<ComputeType*>(buffers.c));
+            }
+          };
+          if (!have_reference) take_reference();
+          for (const char* selector : {"cublaslt", "cutlass"}) {
+            if (std::string(selector) == "cutlass") {
+              setenv("NANOCHAT_GEMM_FP8", "cutlass", 1);
+            } else {
+              unsetenv("NANOCHAT_GEMM_FP8");
+            }
+            reset_c();
+            const Timing timing = TimeWithFlush(
+                &timer, [&] { call_scaled(); }, iters,
+                std::max(1, options.bench.rounds),
+                std::max(0, options.bench.warmup),
+                options.flush ? &flusher : nullptr, flush_ms);
+            const CheckOutcome check =
+                CheckOutput(row, buffers.c, buffers.ref, out_elements,
+                            options.check && have_reference);
+            const std::string label =
+                std::string("gemm:") + row.name + ":fp8:" + selector;
+            AddTiming(&report, label, row.shape, timing, row.flops);
+            PrintMeasurement(row.name, (std::string("fp8:") + selector).c_str(),
+                             timing, 0, check);
+            ++measured;
           }
-        };
-        if (!have_reference) take_reference();
-        for (const char* selector : {"cublaslt", "cutlass"}) {
-          if (std::string(selector) == "cutlass") {
-            setenv("NANOCHAT_GEMM_FP8", "cutlass", 1);
-          } else {
-            unsetenv("NANOCHAT_GEMM_FP8");
-          }
-          reset_c();
-          const Timing timing = TimeWithFlush(
-              &timer, [&] { call_scaled(); }, iters,
-              std::max(1, options.bench.rounds),
-              std::max(0, options.bench.warmup),
-              options.flush ? &flusher : nullptr, flush_ms);
-          const CheckOutcome check =
-              CheckOutput(row, buffers.c, buffers.ref, out_elements,
-                          options.check && have_reference);
-          const std::string label =
-              std::string("gemm:") + row.name + ":fp8:" + selector;
-          AddTiming(&report, label, row.shape, timing, row.flops);
-          PrintMeasurement(row.name, (std::string("fp8:") + selector).c_str(),
-                           timing, 0, check);
-          ++measured;
+          unsetenv("NANOCHAT_GEMM_FP8");
         }
-        unsetenv("NANOCHAT_GEMM_FP8");
       }
       Free(a8);
       Free(b8);

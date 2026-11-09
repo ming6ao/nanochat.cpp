@@ -615,16 +615,18 @@ void CheckScaledFp8Verdict() {
 
   // The three forms the seam issues, and the fourth that it does not. The pair
   // names the form and the orientation follows, so a call that states one but
-  // not the other is refused and cublasLt keeps it.
+  // not the other is refused and cublasLt keeps it. `CallSupported` states less
+  // than this table: the arm routes the K-major pair only, because the card
+  // faulted on its first backward row (docs/kernels.md section 10.4).
   Expect(
       Fp8ScaledFormSupported(Fp8Format::kE4M3, Fp8Format::kE4M3, false, true),
-      "the forward form is taken", kCase);
+      "the forward form is one the seam states", kCase);
   Expect(
       Fp8ScaledFormSupported(Fp8Format::kE5M2, Fp8Format::kE4M3, false, false),
-      "the dgrad form is taken", kCase);
+      "the dgrad form is one the seam states", kCase);
   Expect(
       Fp8ScaledFormSupported(Fp8Format::kE5M2, Fp8Format::kE4M3, true, false),
-      "the wgrad form is taken", kCase);
+      "the wgrad form is one the seam states", kCase);
   Expect(
       !Fp8ScaledFormSupported(Fp8Format::kE4M3, Fp8Format::kE4M3, false, false),
       "the pair without its orientation is refused", kCase);

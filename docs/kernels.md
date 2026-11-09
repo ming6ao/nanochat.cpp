@@ -911,7 +911,7 @@ there; they are not the work that remains.
 | 1 | The `mma.sync` mainloop: direct `mma.sync` with `ldmatrix`, four to six stages, dynamic shared memory, and the epilogue rewrite | 4 to 8 weeks | Every row correct, and 0.50 of the recorded cuBLAS rate | **Done and missed**, 0.27 to 0.36. Section 10 records it |
 | 2 | The Hopper mainloop: tile 128 by 256 by 64, cluster 2 by 1, one producer warp, two consumer warpgroups, TMA in and out | Was 2 to 4 months; became 1 week by borrowing | Within 1.05 of the cuBLAS rate on all six rows of section 2 | **Adapter done, gate open.** It needs the card |
 | 3 | The fp32 shared-memory tile for Turing and the fp32 build | 2 to 4 weeks | Within 1.05 of the recorded cuBLAS rate on the chain profiles | Not started |
-| 4a | fp8 on the Hopper path | 1 to 2 weeks | The fp8 tolerance of [precision.md](precision.md), and no row above 1.05 | **Arm written and clean off a card.** The card run is the last gate. The tiny group needs no kernel of its own now: the hand tile serves it |
+| 4a | fp8 on the Hopper path | 1 to 2 weeks | The fp8 tolerance of [precision.md](precision.md), and no row above 1.05 | **Measured: one of five forward rows meets the gate (0.751 to 1.031 of cublasLt), and no promotion follows.** The tiny group needs no kernel of its own now: the hand tile serves it |
 | 4b | Stream-K for the ragged rows | Was 1 to 2 weeks; is a different project | No row above 1.05 | **Blocked by the vendor adapter.** Section 10.3 states the evidence |
 | 5 | Detach the library: cuBLAS moves out of `backends/cuda:gemm` and into the benchmark targets | 1 week | The dependency query of gate G4 is empty | Not started |
 
@@ -1207,7 +1207,7 @@ record to write when it lands.
 | 2d. Correctness on the card | **Done, passed** | `modal run tools/modal/app.py::card_job --name gemm_check` | This section |
 | 2e. The rate gate, 1.05 of cuBLAS | **Done, met on 19 of the 25 callable rows** after section 11.9 | `modal run tools/modal/app.py::card_job --name gemm_bench --argv '["--rows","production","--json"]'` | The `gemm_cutlass` entry of [baselines.json](baselines.json) |
 | 3. The fp32 tile for Turing | Not started | The Turing leg of `card_job` | This section |
-| 4a. fp8 on the Hopper path | **Arm written for all three forms, and clean off a card.** The card run is the last gate | `gemm_bench` under `--config=fp8` | The `gemm_fp8` entry of [baselines.json](baselines.json) |
+| 4a. fp8 on the Hopper path | **Measured on a card: one forward row of five meets the gate, and the two backward forms fault.** No promotion | `gemm_bench` under `--config=fp8` | The `gemm_fp8` entry of [baselines.json](baselines.json) |
 | 4b. Stream-K for the ragged rows | **Blocked by the adapter**, on the evidence of section 10.3 | `gemm_bench --row linear:wgrad:cls` | This section |
 | 5. Detach cuBLAS from the library | **Closed, and it does not follow yet.** The reason is in 10.2 | `bazel query 'somepath(//src:model, @cuda//:cublasLt)'` returns nothing | [build.md](build.md) |
 
@@ -1452,11 +1452,56 @@ narrower and it is the seam's: `GemmScaledFp8` returns void, so a report cannot
 state whether the arm ran. A row the judge refuses by its shape, or a device
 that is not Hopper, still reads as an arm that ran.
 
-**What the campaign still owes.** One card run of `gemm_bench --fp8` on the
-Hopper leg, and the `gemm_fp8` entry of [baselines.json](baselines.json) that its
-report writes. Its gate is the tolerance of [precision.md](precision.md) and no
-row above 1.05. A promotion follows only if a row clears the margin of section
-11.4.
+**The card run, and what it answered.** One run of the fp8 image on an H100
+80GB HBM3 measured the arm against cublasLt on the same quantized operands, over
+`--rows production`. The gate asks for 0.95, which is the arm's time within 1.05
+of the library's.
+
+| Row | cublasLt | The arm | Fraction |
+|---|---:|---:|---:|
+| `linear:fwd:cls` | 1.2531 ms | 1.6689 ms | 0.751 |
+| `linear:fwd:cproj` | 0.1795 ms | 0.2190 ms | 0.820 |
+| `linear:fwd:fc` | 0.2074 ms | 0.2479 ms | 0.837 |
+| `linear:fwd:q+proj` | 0.0662 ms | 0.0731 ms | 0.906 |
+| `linear:fwd:kv` | 0.0424 ms | 0.0411 ms | 1.031 |
+
+**One row meets the gate.** `linear:fwd:kv` beats the library by 3 points, which
+is inside the margin of section 11.4, and the other four are 9 to 25 percent
+behind. The arm therefore does not beat cublasLt on this tier. No promotion
+follows: the tile is one row, and section 11.4 states a margin that one run
+cannot supply. The rows are the `gemm_fp8` entry of
+[baselines.json](baselines.json).
+
+**Two facts bound the run, and both are about the library.** Only five of the
+production rows carry an fp8 measurement.
+
+1. **The library serves the fp8 product at one operand form.** cublasLt answers
+   status 15 for every form but the K-major pair, which is the forward's. The
+   Muon rows and the dgrad and wgrad rows state other forms. This is not a
+   property of the arm: `src/ops.cc` calls `GemmScaledFp8` for the dgrad and the
+   wgrad whenever the eligibility rule holds, and on Hopper that call ends in the
+   same abort. The fp8 tier therefore cannot run a backward call on this card
+   through the library, which [precision.md](precision.md) Part 1 section 5.2
+   states as the path.
+2. **The arm's backward forms fault on the card.** The two instantiations
+   compile, pass the host gate, and hold 168 registers with no accumulator in
+   local memory. The first backward row ended the run with
+   `cudaDeviceSynchronize: an illegal memory access`, from the transposing
+   collective that the deeper k slice enables. The arm therefore states the
+   K-major pair only, and the two instantiations stay compiled and unrouted until
+   a card shows them correct.
+
+The benchmark applies both limits before it calls anything, so a row outside the
+pair prints `fp8 arms skipped` with the reason and the sweep continues. The first
+two card runs proved why that guard is needed: an unguarded row took the whole
+run down, once in `cublasLtMatmulAlgoGetHeuristic` and once in the synchronize.
+
+**What is left of item 4a.** The arm is written, clean off a card, and measured,
+and it loses to the library on four of five rows. Two questions remain, and each
+one needs the card. A tile with a wider N is the first, because the classifier
+row is the largest loss and it is N-wide. The transposing collective behind the
+two backward forms is the second. Neither is a promotion candidate at this
+revision.
 
 The card route holds one image of its own. `tools/modal/app.py` states
 `H100_FP8`, a third leg at fp8, and one card job on it. The image is not in

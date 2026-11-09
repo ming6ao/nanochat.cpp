@@ -911,6 +911,30 @@ modal run tools/modal/app.py::card_job --name gemm_bench_fp8 \
 The leg is not in `LEG_ORDER`, so the post-training chain never runs it, and both
 chain legs keep fp32 and bf16.
 
+**The measurement ran, and the arm is behind on four rows of five.** One run of
+the fp8 image on an H100 80GB HBM3 measured the arm against cublasLt:
+
+| Row | cublasLt | The arm | Fraction |
+|---|---:|---:|---:|
+| `linear:fwd:cls` | 1.2531 ms | 1.6689 ms | 0.751 |
+| `linear:fwd:cproj` | 0.1795 ms | 0.2190 ms | 0.820 |
+| `linear:fwd:fc` | 0.2074 ms | 0.2479 ms | 0.837 |
+| `linear:fwd:q+proj` | 0.0662 ms | 0.0731 ms | 0.906 |
+| `linear:fwd:kv` | 0.0424 ms | 0.0411 ms | 1.031 |
+
+The gate asks for 0.95. One row meets it, by 3 points, which is inside the margin
+of `docs/kernels.md` section 11.4, so nothing is promoted. The rows are the
+`gemm_fp8` entry of [baselines.json](../../docs/baselines.json).
+
+**Two limits bound the run, and the library states the first.** cublasLt answers
+status 15 for every operand form but the K-major pair, so the Muon rows and the
+two backward families carry no measurement. `src/ops.cc` calls the same seam
+entry for the dgrad and the wgrad, so on Hopper the tier's own backward path ends
+in that answer. The second is ours: the two backward instantiations faulted on
+the card with an illegal memory access, so the arm states the K-major pair only.
+The benchmark applies both limits before it calls, and prints `fp8 arms skipped`
+for a row outside them.
+
 **The host gate.** `//backends/cuda/gemm:dispatch_test` checks the arm's verdict
 without a card and without the vendor header. It covers the accepted dense call,
 the four refusals in their order, and the fp8 row alignment that separates that

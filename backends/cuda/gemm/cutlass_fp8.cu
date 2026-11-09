@@ -78,13 +78,19 @@ float* AlphaSlot() {
   return slot;
 }
 
-// True when this arm can read the call: one of the three forms the seam issues,
-// no reduced-precision reduction, and two scales.
+// True when this arm can read the call: the form the card proved, no
+// reduced-precision reduction, and two scales.
+//
+// The card proved one form. Two card runs measured the forward's K-major pair
+// and then faulted on the first backward row with an illegal memory access from
+// the transposing collective that `kFp8BackwardTile` exists for, so the two
+// backward instantiations stay compiled and unrouted until that is understood
+// (docs/kernels.md section 10.4).
 bool CallSupported(const ScaledGemmParams& params) {
   return Fp8ScaledFormSupported(params.format_a, params.format_b,
                                 params.transpose_a, params.transpose_b) &&
-         !params.fast_accum && params.scale_a != nullptr &&
-         params.scale_b != nullptr;
+         !params.transpose_a && params.transpose_b && !params.fast_accum &&
+         params.scale_a != nullptr && params.scale_b != nullptr;
 }
 
 // The seam's dense call, resolved by the same rules the bf16 path uses. The

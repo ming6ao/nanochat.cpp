@@ -1,1578 +1,1623 @@
 {
- "schema": "nanochat.baselines.v3",
- "note": "Measured baselines for this repository, one entry per subject. Each entry is the report of the command in its `measurement` field at the revision it names, and each names the device that validated it in `validated_on`. Update an entry only with a real run. docs/performance.md section 7 gives the rule. The attainment record of docs/performance-model.md section 10 is a different artifact: `tools/nanochat attain` generates it from a bound and a measurement at one revision.",
- "host": "A WSL2 workstation with 12 vCPU and 7.8 GiB, unless the entry says otherwise",
- "baselines": {
-  "attention_bf16": {
-   "note": "Measured rows of the bf16 attention path on an NVIDIA H100 80GB HBM3 (sm_90), from the Modal H100 image built at sm_90 and bf16 (tools/modal/app.py, the H100 leg). Every row comes from one run of one binary, so the comparison is between two branches of one build. A *_cublas row is the dense forward the fused tile replaces: the same shape and the same build with a head-major query, which keeps the batched path and skips one transpose, so those rows are marginally favoured. The windowed and SSSL rows without a suffix take the bf16 tensor-core tile of docs/attention.md Part 6; d8_s512 stays on cuBLAS because it is full-causal. No backward runs the tile, so the two backward rows of a pair differ only by the query transpose. work_ratio is issued work over necessary work.",
-   "device": "NVIDIA H100 80GB HBM3 (sm_90)",
-   "validated_on": "NVIDIA H100 80GB HBM3 (sm_90)",
-   "precision": "bf16",
-   "measurement": "modal run tools/modal/app.py::card_job --name attention_bench --argv '[\"--json\"]'",
-   "origin": "docs/attention.md Part 6, section 4.4",
-   "rows": [
-    {
-     "name": "attention_fwd:d8_s512",
-     "shape": "B=8 T=512 H=4 KV=4 D=128 wl=-1",
-     "ms": 0.104832,
-     "gflops": 20525,
-     "work_ratio": 1.9961
+  "schema": "nanochat.baselines.v3",
+  "note": "Measured baselines for this repository, one entry per subject. Each entry is the report of the command in its `measurement` field at the revision it names, and each names the device that validated it in `validated_on`. Update an entry only with a real run. docs/performance.md section 7 gives the rule. The attainment record of docs/performance-model.md section 10 is a different artifact: `tools/nanochat attain` generates it from a bound and a measurement at one revision.",
+  "host": "A WSL2 workstation with 12 vCPU and 7.8 GiB, unless the entry says otherwise",
+  "baselines": {
+    "attention_bf16": {
+      "note": "Measured rows of the bf16 attention path on an NVIDIA H100 80GB HBM3 (sm_90), from the Modal H100 image built at sm_90 and bf16 (tools/modal/app.py, the H100 leg). Every row comes from one run of one binary, so the comparison is between two branches of one build. A *_cublas row is the dense forward the fused tile replaces: the same shape and the same build with a head-major query, which keeps the batched path and skips one transpose, so those rows are marginally favoured. The windowed and SSSL rows without a suffix take the bf16 tensor-core tile of docs/attention.md Part 6; d8_s512 stays on cuBLAS because it is full-causal. No backward runs the tile, so the two backward rows of a pair differ only by the query transpose. work_ratio is issued work over necessary work.",
+      "device": "NVIDIA H100 80GB HBM3 (sm_90)",
+      "validated_on": "NVIDIA H100 80GB HBM3 (sm_90)",
+      "precision": "bf16",
+      "measurement": "modal run tools/modal/app.py::card_job --name attention_bench --argv '[\"--json\"]'",
+      "origin": "docs/attention.md Part 6, section 4.4",
+      "rows": [
+        {
+          "name": "attention_fwd:d8_s512",
+          "shape": "B=8 T=512 H=4 KV=4 D=128 wl=-1",
+          "ms": 0.104832,
+          "gflops": 20525,
+          "work_ratio": 1.9961
+        },
+        {
+          "name": "attention_bwd:d8_s512",
+          "shape": "B=8 T=512 H=4 KV=4 D=128 wl=-1",
+          "ms": 0.186496,
+          "gflops": 23074.8,
+          "work_ratio": 1.9961
+        },
+        {
+          "name": "attention_fwd:d8_s512_win128",
+          "shape": "B=8 T=512 H=4 KV=4 D=128 wl=128",
+          "ms": 0.064608,
+          "gflops": 14655.5,
+          "work_ratio": 4.53599
+        },
+        {
+          "name": "attention_bwd:d8_s512_win128",
+          "shape": "B=8 T=512 H=4 KV=4 D=128 wl=128",
+          "ms": 0.243659,
+          "gflops": 7772.05,
+          "work_ratio": 4.53599
+        },
+        {
+          "name": "attention_fwd:d8_s512_win128_cublas",
+          "shape": "B=8 T=512 H=4 KV=4 D=128 wl=128",
+          "ms": 0.099328,
+          "gflops": 9532.7,
+          "work_ratio": 4.53599
+        },
+        {
+          "name": "attention_bwd:d8_s512_win128_cublas",
+          "shape": "B=8 T=512 H=4 KV=4 D=128 wl=128",
+          "ms": 0.221899,
+          "gflops": 8534.2,
+          "work_ratio": 4.53599
+        },
+        {
+          "name": "attention_fwd:d8_s512_sssl",
+          "shape": "B=8 T=512 H=4 KV=4 D=128 pattern=SSSL",
+          "ms": 0.0746613,
+          "gflops": 16716.4,
+          "work_ratio": 3.44129
+        },
+        {
+          "name": "attention_bwd:d8_s512_sssl",
+          "shape": "B=8 T=512 H=4 KV=4 D=128 pattern=SSSL",
+          "ms": 0.230056,
+          "gflops": 10850.1,
+          "work_ratio": 3.44129
+        },
+        {
+          "name": "attention_fwd:d8_s512_sssl_cublas",
+          "shape": "B=8 T=512 H=4 KV=4 D=128 pattern=SSSL",
+          "ms": 0.09744,
+          "gflops": 12808.6,
+          "work_ratio": 3.44129
+        },
+        {
+          "name": "attention_bwd:d8_s512_sssl_cublas",
+          "shape": "B=8 T=512 H=4 KV=4 D=128 pattern=SSSL",
+          "ms": 0.204179,
+          "gflops": 12225.2,
+          "work_ratio": 3.44129
+        },
+        {
+          "name": "attention_fwd:b4_s2048_h8_win512",
+          "shape": "B=4 T=2048 H=8 KV=8 D=128 wl=512",
+          "ms": 0.663904,
+          "gflops": 22686.6,
+          "work_ratio": 4.56252
+        },
+        {
+          "name": "attention_bwd:b4_s2048_h8_win512",
+          "shape": "B=4 T=2048 H=8 KV=8 D=128 wl=512",
+          "ms": 0.972917,
+          "gflops": 30962,
+          "work_ratio": 4.56252
+        },
+        {
+          "name": "attention_fwd:b4_s2048_h8_win512_cublas",
+          "shape": "B=4 T=2048 H=8 KV=8 D=128 wl=512",
+          "ms": 0.843477,
+          "gflops": 17856.7,
+          "work_ratio": 4.56252
+        },
+        {
+          "name": "attention_bwd:b4_s2048_h8_win512_cublas",
+          "shape": "B=4 T=2048 H=8 KV=8 D=128 wl=512",
+          "ms": 0.910347,
+          "gflops": 33090.1,
+          "work_ratio": 4.56252
+        }
+      ]
     },
-    {
-     "name": "attention_bwd:d8_s512",
-     "shape": "B=8 T=512 H=4 KV=4 D=128 wl=-1",
-     "ms": 0.186496,
-     "gflops": 23074.8,
-     "work_ratio": 1.9961
+    "cpu_train": {
+      "date": "2026-10-04",
+      "nanochat_cpp_revision": "124ceb0",
+      "host": {
+        "vcpus": 12,
+        "ram_gib": 7.8,
+        "platform": "WSL2",
+        "gpu": "none"
+      },
+      "sandbox_profile": "train",
+      "config": {
+        "depth": 4,
+        "model_dim": 256,
+        "heads": 2,
+        "kv_heads": 2,
+        "head_dim": 128,
+        "context": 512,
+        "window_pattern": "L",
+        "device_batch": 2,
+        "total_batch": 1024,
+        "grad_accum": 1,
+        "steps": 10,
+        "warmup_steps": 1,
+        "training_tokens": 10240,
+        "parameters": 36700242,
+        "flops_per_token": 71958960
+      },
+      "promoted_measurement": {
+        "protocol": "docs/performance.md Part 2, section 9",
+        "command": "tools/nanochat run train -- bazel-bin/src/train_main --train-parquet <train-parquet> --tokenizer <tokenizer.nctoken> --layers 4 --heads 4 --kv-heads 4 --hidden 512 --seq 512 --vocab <vocab> --window-pattern L --batch 2 --grad-accum 1 --num-iterations 10 --warmup-steps 1 --eval-every -1 --save-every -1 --checkpoint <checkpoint-dir>/model.ckpt --log <checkpoint-dir>/train.log",
+        "rule": "one warmup run, then the best mean tokens/s over steps 2 to 10 of three measured runs",
+        "threads": 8,
+        "warmup_runs": 1,
+        "measured_runs": 3,
+        "best_run": "run 2",
+        "tokens_per_sec": 591.13,
+        "gflops": 42.54,
+        "seconds_per_10k_tokens": 16.92,
+        "seconds_per_step": 1.7323,
+        "runs_tokens_per_sec": {
+          "warmup": 588.28,
+          "run1": 582.3,
+          "run2": 591.13,
+          "run3": 585.39
+        },
+        "step_time_gate_seconds": 5.0,
+        "step_time_gate_result": "pass",
+        "correctness_gate": "docs/performance.md Part 2, section 8",
+        "correctness_gate_result": "pass"
+      },
+      "runs": [
+        {
+          "name": "pytorch_cpu_8threads",
+          "threads": 8,
+          "tokens_per_sec": 1299.3,
+          "gflops": 93.49,
+          "seconds_per_10k_tokens": 7.7
+        },
+        {
+          "name": "pytorch_cpu_1thread",
+          "threads": 1,
+          "tokens_per_sec": 453.9,
+          "gflops": 32.66,
+          "seconds_per_10k_tokens": 22.0
+        },
+        {
+          "name": "nanochat_cpp_cpu_scalar",
+          "revision": "759083e",
+          "threads": 1,
+          "tokens_per_sec": 7.2,
+          "gflops": 0.51,
+          "seconds_per_10k_tokens": 1398
+        },
+        {
+          "name": "nanochat_cpp_cpu",
+          "revision": "124ceb0",
+          "threads": 8,
+          "tokens_per_sec": 591.13,
+          "gflops": 42.54,
+          "seconds_per_10k_tokens": 16.92,
+          "seconds_per_step": 1.7323
+        }
+      ],
+      "end_to_end": {
+        "revision": "124ceb0",
+        "threads": 8,
+        "tokens_per_sec": 591.13,
+        "seconds_per_step": 1.7323,
+        "speedup_vs_scalar_7_2_tokens_per_sec": 82.1
+      },
+      "origin": "docs/baselines.json",
+      "validated_on": "host CPU (12 vCPU)"
     },
-    {
-     "name": "attention_fwd:d8_s512_win128",
-     "shape": "B=8 T=512 H=4 KV=4 D=128 wl=128",
-     "ms": 0.064608,
-     "gflops": 14655.5,
-     "work_ratio": 4.53599
+    "cpu_gemm": {
+      "note": "Frozen Phase 0 baseline of the shipped CPU GEMM. The rows are the measured benchmark report of dev/kernels/cpu_gemm_bench at that revision. The shipped kernels::Gemm is a scalar triple loop with a double accumulator, so the run is single-threaded. Compare a later phase against these numbers with the same configuration.",
+      "date": "2026-10-03",
+      "revision": "4133998",
+      "threads": 1,
+      "device": "CPU",
+      "validated_on": "CPU",
+      "precision": "fp32",
+      "sandbox_profile": "t3-bench",
+      "measurement": "tools/nanochat bench -- ./bazel-bin/dev/kernels/cpu_gemm_bench --rounds 3 --warmup 1 --json --out /tmp/cpu-gap-p0.json",
+      "config": {
+        "depth": 4,
+        "model_dim": 256,
+        "heads": 2,
+        "kv_heads": 2,
+        "head_dim": 128,
+        "context": 512,
+        "window_pattern": "L",
+        "device_batch": 2,
+        "total_batch": 1024,
+        "grad_accum": 1,
+        "tokens_per_step": 1024,
+        "vocab": 32768,
+        "mlp_dim": 1024
+      },
+      "reference_rates_gflops": {
+        "note": "The Part 2, section 2 rates in docs/performance.md. The benchmark must reproduce each rate within 10 percent.",
+        "forward": 0.98,
+        "wgrad": 0.75,
+        "dgrad": 0.24
+      },
+      "rows": [
+        {
+          "name": "gemm_forward",
+          "shape": "M=1024 N=32768 K=256 ta=0",
+          "ms": 17366.477736,
+          "gflops": 0.989255,
+          "work_ratio": 1.0
+        },
+        {
+          "name": "gemm_wgrad",
+          "shape": "M=32768 N=256 K=1024 ta=1",
+          "ms": 23625.108755,
+          "gflops": 0.727187,
+          "work_ratio": 1.0
+        },
+        {
+          "name": "gemm_dgrad",
+          "shape": "M=1024 N=256 K=32768 ta=0",
+          "ms": 71650.412284,
+          "gflops": 0.239773,
+          "work_ratio": 1.0
+        },
+        {
+          "name": "mlp_gemm",
+          "shape": "M=1024 N=1024 K=256 ta=0",
+          "ms": 443.081883,
+          "gflops": 1.211674,
+          "work_ratio": 1.0
+        }
+      ],
+      "origin": "docs/baselines.json"
     },
-    {
-     "name": "attention_bwd:d8_s512_win128",
-     "shape": "B=8 T=512 H=4 KV=4 D=128 wl=128",
-     "ms": 0.243659,
-     "gflops": 7772.05,
-     "work_ratio": 4.53599
+    "gemm_bf16": {
+      "note": "The hand-written bf16 tensor-core GEMM of docs/kernels.md Part 3 and backends/cuda/gemm/README.md, over the closed shape list: the five Muon Polar Express groups of the twenty-layer profile and the Linear forward, dgrad, and wgrad shapes of the `big` profile at one micro-batch of sixteen sequences of 1024 tokens. Every row is one run of one binary: the shipped kernels::Gemm and GemmWgrad with NANOCHAT_GEMM_LIB at `cublas` and then at `hand`, the latter on the schedule the row owns, which is the schedule the four-schedule sweep chose for it. fraction_of_cublas is the cuBLAS time over the hand time, which is the quantity gate G4 asks to be at least 0.70; hand_mfu is the tile's rate over the card's bf16 peak. No row takes the hand path: every bit of the shape table is off, and cuBLAS serves every shape. The sweep itself, which measures each row on all five schedules, is section 6 of backends/cuda/gemm/README.md.",
+      "device": "NVIDIA H100 80GB HBM3 (sm_90)",
+      "validated_on": "NVIDIA H100 80GB HBM3 (sm_90)",
+      "precision": "bf16",
+      "measurement": "modal run tools/modal/app.py::card_job --name gemm_bench --argv '[\"--json\"]'",
+      "origin": "docs/tensor-core-gemm-plan.md sections B.4 and B.5, backends/cuda/gemm/README.md section 6",
+      "rows": [
+        {
+          "name": "muon:5x12:A",
+          "shape": "5x5x12 batch 10",
+          "cublas_ms": 0.006261,
+          "hand_ms": 0.008043,
+          "schedule": "64x64x32",
+          "fraction_of_cublas": 0.7785,
+          "hand_mfu": 0.0
+        },
+        {
+          "name": "muon:5x12:A2",
+          "shape": "5x5x5 batch 10",
+          "cublas_ms": 0.006475,
+          "hand_ms": 0.007701,
+          "schedule": "64x64x32",
+          "fraction_of_cublas": 0.8407,
+          "hand_mfu": 0.0
+        },
+        {
+          "name": "muon:5x12:prod",
+          "shape": "5x12x5 batch 10",
+          "cublas_ms": 0.006144,
+          "hand_ms": 0.008192,
+          "schedule": "64x64x32",
+          "fraction_of_cublas": 0.75,
+          "hand_mfu": 0.0
+        },
+        {
+          "name": "muon:640x1280:A",
+          "shape": "640x640x1280 batch 40",
+          "cublas_ms": 0.080971,
+          "hand_ms": 0.293792,
+          "schedule": "128x128x32",
+          "fraction_of_cublas": 0.2756,
+          "hand_mfu": 0.1444
+        },
+        {
+          "name": "muon:640x1280:A2",
+          "shape": "640x640x640 batch 40",
+          "cublas_ms": 0.055669,
+          "hand_ms": 0.18864,
+          "schedule": "128x128x32",
+          "fraction_of_cublas": 0.2951,
+          "hand_mfu": 0.1124
+        },
+        {
+          "name": "muon:640x1280:prod",
+          "shape": "640x1280x640 batch 40",
+          "cublas_ms": 0.093387,
+          "hand_ms": 0.368619,
+          "schedule": "128x128x32",
+          "fraction_of_cublas": 0.2533,
+          "hand_mfu": 0.115
+        },
+        {
+          "name": "muon:1280x1280:A",
+          "shape": "1280x1280x1280 batch 40",
+          "cublas_ms": 0.225899,
+          "hand_ms": 1.10916,
+          "schedule": "128x128x32",
+          "fraction_of_cublas": 0.2037,
+          "hand_mfu": 0.1529
+        },
+        {
+          "name": "muon:1280x1280:A2+prod",
+          "shape": "1280x1280x1280 batch 40",
+          "cublas_ms": 0.225067,
+          "hand_ms": 1.23759,
+          "schedule": "128x128x32",
+          "fraction_of_cublas": 0.1819,
+          "hand_mfu": 0.1371
+        },
+        {
+          "name": "muon:1280x5120:A",
+          "shape": "1280x1280x5120 batch 20",
+          "cublas_ms": 0.453867,
+          "hand_ms": 2.0257,
+          "schedule": "128x128x32",
+          "fraction_of_cublas": 0.2241,
+          "hand_mfu": 0.1675
+        },
+        {
+          "name": "muon:1280x5120:A2+A2",
+          "shape": "1280x1280x1280 batch 20",
+          "cublas_ms": 0.142592,
+          "hand_ms": 0.640437,
+          "schedule": "128x128x32",
+          "fraction_of_cublas": 0.2226,
+          "hand_mfu": 0.1324
+        },
+        {
+          "name": "muon:1280x5120:prod",
+          "shape": "1280x5120x1280 batch 20",
+          "cublas_ms": 0.550773,
+          "hand_ms": 2.4046,
+          "schedule": "128x128x32",
+          "fraction_of_cublas": 0.229,
+          "hand_mfu": 0.1411
+        },
+        {
+          "name": "muon:5120x1280:A",
+          "shape": "1280x1280x5120 batch 20",
+          "cublas_ms": 0.442944,
+          "hand_ms": 2.45489,
+          "schedule": "128x128x32",
+          "fraction_of_cublas": 0.1804,
+          "hand_mfu": 0.1382
+        },
+        {
+          "name": "muon:5120x1280:prod",
+          "shape": "5120x1280x1280 batch 20",
+          "cublas_ms": 0.521931,
+          "hand_ms": 2.40428,
+          "schedule": "128x128x32",
+          "fraction_of_cublas": 0.2171,
+          "hand_mfu": 0.1411
+        },
+        {
+          "name": "linear:fwd:q+proj",
+          "shape": "16384x1280x1280 batch 1",
+          "cublas_ms": 0.076533,
+          "hand_ms": 0.362123,
+          "schedule": "128x128x32",
+          "fraction_of_cublas": 0.2113,
+          "hand_mfu": 0.1499
+        },
+        {
+          "name": "linear:dgrad:q+proj",
+          "shape": "16384x1280x1280 batch 1",
+          "cublas_ms": 0.075563,
+          "hand_ms": 0.403595,
+          "schedule": "128x128x32",
+          "fraction_of_cublas": 0.1872,
+          "hand_mfu": 0.1345
+        },
+        {
+          "name": "linear:wgrad:q+proj",
+          "shape": "1280x1280x16384 batch 1 fp32 out",
+          "cublas_ms": 0.085824,
+          "hand_ms": 0.64672,
+          "schedule": "128x64x32",
+          "fraction_of_cublas": 0.1327,
+          "hand_mfu": 0.0839
+        },
+        {
+          "name": "linear:fwd:kv",
+          "shape": "16384x640x1280 batch 1",
+          "cublas_ms": 0.049067,
+          "hand_ms": 0.188512,
+          "schedule": "128x128x32",
+          "fraction_of_cublas": 0.2603,
+          "hand_mfu": 0.144
+        },
+        {
+          "name": "linear:dgrad:kv",
+          "shape": "16384x1280x640 batch 1",
+          "cublas_ms": 0.048256,
+          "hand_ms": 0.231477,
+          "schedule": "128x128x32",
+          "fraction_of_cublas": 0.2085,
+          "hand_mfu": 0.1173
+        },
+        {
+          "name": "linear:wgrad:kv",
+          "shape": "640x1280x16384 batch 1 fp32 out",
+          "cublas_ms": 0.051477,
+          "hand_ms": 0.626571,
+          "schedule": "128x64x32",
+          "fraction_of_cublas": 0.0822,
+          "hand_mfu": 0.0433
+        },
+        {
+          "name": "linear:fwd:fc",
+          "shape": "16384x5120x1280 batch 1",
+          "cublas_ms": 0.260832,
+          "hand_ms": 1.38129,
+          "schedule": "128x128x32",
+          "fraction_of_cublas": 0.1888,
+          "hand_mfu": 0.1572
+        },
+        {
+          "name": "linear:dgrad:fc",
+          "shape": "16384x1280x5120 batch 1",
+          "cublas_ms": 0.261579,
+          "hand_ms": 1.44045,
+          "schedule": "128x128x32",
+          "fraction_of_cublas": 0.1816,
+          "hand_mfu": 0.1507
+        },
+        {
+          "name": "linear:wgrad:fc",
+          "shape": "5120x1280x16384 batch 1 fp32 out",
+          "cublas_ms": 0.307413,
+          "hand_ms": 1.7943,
+          "schedule": "128x64x32",
+          "fraction_of_cublas": 0.1713,
+          "hand_mfu": 0.121
+        },
+        {
+          "name": "linear:fwd:cproj",
+          "shape": "16384x1280x5120 batch 1",
+          "cublas_ms": 0.26112,
+          "hand_ms": 1.27135,
+          "schedule": "128x128x32",
+          "fraction_of_cublas": 0.2054,
+          "hand_mfu": 0.1708
+        },
+        {
+          "name": "linear:dgrad:cproj",
+          "shape": "16384x5120x1280 batch 1",
+          "cublas_ms": 0.261568,
+          "hand_ms": 1.54177,
+          "schedule": "128x128x32",
+          "fraction_of_cublas": 0.1697,
+          "hand_mfu": 0.1408
+        },
+        {
+          "name": "linear:wgrad:cproj",
+          "shape": "1280x5120x16384 batch 1 fp32 out",
+          "cublas_ms": 0.363893,
+          "hand_ms": 1.79463,
+          "schedule": "128x64x32",
+          "fraction_of_cublas": 0.2028,
+          "hand_mfu": 0.121
+        },
+        {
+          "name": "linear:fwd:cls",
+          "shape": "16384x32768x1280 batch 1",
+          "cublas_ms": 1.58966,
+          "hand_ms": 8.75561,
+          "schedule": "128x128x32",
+          "fraction_of_cublas": 0.1816,
+          "hand_mfu": 0.1587
+        },
+        {
+          "name": "linear:dgrad:cls",
+          "shape": "16384x1280x32768 batch 1",
+          "cublas_ms": 1.46759,
+          "hand_ms": 8.75648,
+          "schedule": "128x128x32",
+          "fraction_of_cublas": 0.1676,
+          "hand_mfu": 0.1587
+        },
+        {
+          "name": "linear:wgrad:cls",
+          "shape": "32768x1280x16384 batch 1 fp32 out",
+          "cublas_ms": 1.5071,
+          "hand_ms": 9.39988,
+          "schedule": "128x64x32",
+          "fraction_of_cublas": 0.1603,
+          "hand_mfu": 0.1478
+        }
+      ]
     },
-    {
-     "name": "attention_fwd:d8_s512_win128_cublas",
-     "shape": "B=8 T=512 H=4 KV=4 D=128 wl=128",
-     "ms": 0.099328,
-     "gflops": 9532.7,
-     "work_ratio": 4.53599
+    "wgmma_probe": {
+      "note": "Phase 0 of docs/kernels.md Part 3: the hand-written WGMMA ceiling probe of dev/kernels/wgmma_probe.cu. One warpgroup issues wgmma.mma_async.sync.aligned.m64n128k16.f32.bf16.bf16 from a resident shared-memory tile, through a hand-built descriptor in the interleaved K-major form, with no global memory traffic in the timed loop. The 1block row is one warpgroup on one SM; the grid row is two warpgroups on every SM of the card. fraction_of_peak is the rate over the card's declared bf16 peak of 989 TFLOP/s (backends/cuda/caps.json), and fraction_of_sm_share is the 1block rate over the per-SM share of that peak, 989 over 132, or 7.4924 TFLOP/s. Passes are four atoms each, so one pass is 1048576 flop. The correctness row is the sum of the 8192 accumulators against a host reference over the same input; a descriptor that reads the wrong tile fails it, because the two operands differ. The probe needs sm_90a, which no device configuration of .bazelrc emits, so the card job builds it inside the container with the tree's builder before it runs it.",
+      "device": "NVIDIA H100 80GB HBM3 (sm_90a)",
+      "validated_on": "NVIDIA H100 80GB HBM3 (sm_90a)",
+      "precision": "bf16",
+      "measurement": "modal run tools/modal/app.py::card_job --name wgmma_probe",
+      "origin": "docs/kernels.md Part 3 phase 0, dev/kernels/wgmma_probe.cu, dev/kernels/README.md",
+      "rows": [
+        {
+          "name": "wgmma:1block",
+          "blocks": 1,
+          "passes": 20000,
+          "ms": 2.84,
+          "tflops": 7.384,
+          "fraction_of_peak": 0.00747,
+          "fraction_of_sm_share": 0.9855
+        },
+        {
+          "name": "wgmma:grid",
+          "blocks": 264,
+          "passes": 20000,
+          "ms": 5.81,
+          "tflops": 952.9,
+          "fraction_of_peak": 0.9635,
+          "fraction_of_sm_share": 0.9635
+        },
+        {
+          "name": "wgmma:correctness",
+          "reference_sum": 2516.4748,
+          "measured_sum": 2516.4748,
+          "relative_error": 0.0,
+          "result": "PASS"
+        }
+      ]
     },
-    {
-     "name": "attention_bwd:d8_s512_win128_cublas",
-     "shape": "B=8 T=512 H=4 KV=4 D=128 wl=128",
-     "ms": 0.221899,
-     "gflops": 8534.2,
-     "work_ratio": 4.53599
+    "gemm_bf16_phase1": {
+      "note": "The hand-written bf16 tensor-core GEMM of docs/kernels.md Part 3 after phase 1 step 1, over six rows of the closed shape list. The tile now drives the ldmatrix and mma.sync.aligned.m16n8k16 pair of backends/cuda/gemm/mma_bf16.cuh instead of the vendor wmma pair, which is mechanism 1 of section 4 of that part. Everything else is unchanged: the two-stage staged window, the warp tile, the shared epilogue scratch, and the shape table, whose every row is still inert. One run of one binary on an H100 80GB HBM3 at bf16, with NANOCHAT_GEMM_LIB at `cublas` and then at `hand`, the latter on the schedule the row owns. fraction_of_cublas is the cuBLAS time over the hand time and hand_mfu is the tile's rate over the card's declared bf16 peak. The wmma-era record of the same six rows is the gemm_bf16 entry, which this one supersedes for the shipped tile; the architect retires that entry at the next full sweep. The comparison against the wmma run is section 11 of backends/cuda/gemm/README.md.",
+      "device": "NVIDIA H100 80GB HBM3 (sm_90)",
+      "validated_on": "NVIDIA H100 80GB HBM3 (sm_90)",
+      "precision": "bf16",
+      "measurement": "modal run tools/modal/app.py::card_job --name gemm_bench --argv '[\"--schedule\",\"all\",\"--json\"]'",
+      "origin": "docs/kernels.md Part 3 phase 1, backends/cuda/gemm/README.md section 11",
+      "rows": [
+        {
+          "name": "muon:1280x1280:A",
+          "shape": "1280x1280x1280 batch 40",
+          "cublas_ms": 0.223019,
+          "hand_ms": 0.897803,
+          "schedule": "128x128x32",
+          "fraction_of_cublas": 0.2484,
+          "hand_mfu": 0.1889
+        },
+        {
+          "name": "muon:5120x1280:prod",
+          "shape": "5120x1280x1280 batch 20",
+          "cublas_ms": 0.520864,
+          "hand_ms": 1.79674,
+          "schedule": "128x128x32",
+          "fraction_of_cublas": 0.2899,
+          "hand_mfu": 0.1888
+        },
+        {
+          "name": "linear:fwd:fc",
+          "shape": "16384x5120x1280 batch 1",
+          "cublas_ms": 0.256779,
+          "hand_ms": 1.10954,
+          "schedule": "128x128x32",
+          "fraction_of_cublas": 0.2314,
+          "hand_mfu": 0.1957
+        },
+        {
+          "name": "linear:dgrad:cproj",
+          "shape": "16384x5120x1280 batch 1",
+          "cublas_ms": 0.255915,
+          "hand_ms": 1.13734,
+          "schedule": "128x128x32",
+          "fraction_of_cublas": 0.225,
+          "hand_mfu": 0.1909
+        },
+        {
+          "name": "linear:wgrad:fc",
+          "shape": "5120x1280x16384 batch 1 fp32 out",
+          "cublas_ms": 0.299765,
+          "hand_ms": 1.27821,
+          "schedule": "128x64x32",
+          "fraction_of_cublas": 0.2345,
+          "hand_mfu": 0.1699
+        },
+        {
+          "name": "linear:fwd:cls",
+          "shape": "16384x32768x1280 batch 1",
+          "cublas_ms": 1.55934,
+          "hand_ms": 7.03698,
+          "schedule": "128x128x32",
+          "fraction_of_cublas": 0.2216,
+          "hand_mfu": 0.1975
+        }
+      ]
     },
-    {
-     "name": "attention_fwd:d8_s512_sssl",
-     "shape": "B=8 T=512 H=4 KV=4 D=128 pattern=SSSL",
-     "ms": 0.0746613,
-     "gflops": 16716.4,
-     "work_ratio": 3.44129
+    "gemm_bf16_phase1_step2": {
+      "note": "The hand-written bf16 tensor-core GEMM of docs/kernels.md Part 3 after phase 1 step 2, over the same six rows as gemm_bf16_phase1. The accumulator now leaves the registers through a per-warp exchange tile and reaches C as sixteen-byte chunks, which removed the shared epilogue scratch, its eight serialized rounds, and the warp-by-warp store. Everything else is unchanged from gemm_bf16_phase1: the two-stage staged window and the shape table, whose every row is still inert. One run of one binary on an H100 80GB HBM3 at bf16, with NANOCHAT_GEMM_LIB at `cublas` and then at `hand` on the schedule the row owns, which is 128x128x32 for every row. fraction_of_cublas is the cuBLAS time over the hand time and hand_mfu is the tile's rate over the card's declared bf16 peak. The gate of the step asks for 0.28 on every row, and the rows read 0.2236 to 0.3071, so five of the six do not reach it; backends/cuda/gemm/README.md section 12 records both runs and why. A store taken straight from the lane map was measured first and lost 1.6 to 11.5 percent.",
+      "device": "NVIDIA H100 80GB HBM3 (sm_90)",
+      "validated_on": "NVIDIA H100 80GB HBM3 (sm_90)",
+      "precision": "bf16",
+      "measurement": "modal run tools/modal/app.py::card_job --name gemm_bench --argv '[\"--schedule\",\"all\",\"--json\"]'",
+      "origin": "docs/kernels.md Part 3 phase 1 step 2, backends/cuda/gemm/README.md section 12",
+      "rows": [
+        {
+          "name": "muon:1280x1280:A",
+          "shape": "1280x1280x1280 batch 40",
+          "cublas_ms": 0.223115,
+          "hand_ms": 0.841696,
+          "schedule": "128x128x32",
+          "fraction_of_cublas": 0.2651,
+          "hand_mfu": 0.2018
+        },
+        {
+          "name": "muon:5120x1280:prod",
+          "shape": "5120x1280x1280 batch 20",
+          "cublas_ms": 0.519296,
+          "hand_ms": 1.69123,
+          "schedule": "128x128x32",
+          "fraction_of_cublas": 0.3071,
+          "hand_mfu": 0.2009
+        },
+        {
+          "name": "linear:fwd:fc",
+          "shape": "16384x5120x1280 batch 1",
+          "cublas_ms": 0.257877,
+          "hand_ms": 1.05265,
+          "schedule": "128x128x32",
+          "fraction_of_cublas": 0.245,
+          "hand_mfu": 0.2065
+        },
+        {
+          "name": "linear:dgrad:cproj",
+          "shape": "16384x1280x5120 batch 1",
+          "cublas_ms": 0.259659,
+          "hand_ms": 1.08812,
+          "schedule": "128x128x32",
+          "fraction_of_cublas": 0.2386,
+          "hand_mfu": 0.1998
+        },
+        {
+          "name": "linear:wgrad:fc",
+          "shape": "5120x1280x16384 batch 1 fp32 out",
+          "cublas_ms": 0.303883,
+          "hand_ms": 1.34269,
+          "schedule": "128x128x32",
+          "fraction_of_cublas": 0.2263,
+          "hand_mfu": 0.1619
+        },
+        {
+          "name": "linear:fwd:cls",
+          "shape": "16384x32768x1280 batch 1",
+          "cublas_ms": 1.5874,
+          "hand_ms": 7.09988,
+          "schedule": "128x128x32",
+          "fraction_of_cublas": 0.2236,
+          "hand_mfu": 0.1957
+        }
+      ]
     },
-    {
-     "name": "attention_bwd:d8_s512_sssl",
-     "shape": "B=8 T=512 H=4 KV=4 D=128 pattern=SSSL",
-     "ms": 0.230056,
-     "gflops": 10850.1,
-     "work_ratio": 3.44129
+    "gemm_bf16_phase1_step3": {
+      "note": "The hand-written bf16 tensor-core GEMM of docs/kernels.md Part 3 after phase 1 step 3, over the same six rows as gemm_bf16_phase1. The staged window is now the dynamic one, the pipeline depth is a parameter of a schedule, and the shipped wide schedule holds four stages of the 128 by 128 tile; the small schedules keep two. Everything else is unchanged from gemm_bf16_phase1_step2: the exchange-tile epilogue and the shape table, whose every row is still inert. One run of one binary on an H100 80GB HBM3 at bf16, with NANOCHAT_GEMM_LIB at `cublas` and then at `hand`. The same run also measured the two-stage form of the same tile, and four stages gained 3 to 7 percent on five rows and nothing on the sixth; six stages, measured in the run before, lost 1.5 times against two. fraction_of_cublas is the cuBLAS time over the hand time and hand_mfu is the tile's rate over the card's declared bf16 peak. The gate of the step asks for 0.40 on every row and the rows read 0.2303 to 0.2968, so the step misses it; backends/cuda/gemm/README.md section 13 records the numbers and the reason, which is arithmetic intensity and not the pipeline.",
+      "device": "NVIDIA H100 80GB HBM3 (sm_90)",
+      "validated_on": "NVIDIA H100 80GB HBM3 (sm_90)",
+      "precision": "bf16",
+      "measurement": "modal run tools/modal/app.py::card_job --name gemm_bench --argv '[\"--schedule\",\"all\",\"--json\"]'",
+      "origin": "docs/kernels.md Part 3 phase 1 step 3, backends/cuda/gemm/README.md section 13",
+      "rows": [
+        {
+          "name": "muon:1280x1280:A",
+          "shape": "1280x1280x1280 batch 40",
+          "cublas_ms": 0.223989,
+          "hand_ms": 0.890421,
+          "schedule": "128x128x32x4",
+          "fraction_of_cublas": 0.2516,
+          "hand_mfu": 0.1908
+        },
+        {
+          "name": "muon:5120x1280:prod",
+          "shape": "5120x1280x1280 batch 20",
+          "cublas_ms": 0.519317,
+          "hand_ms": 1.74994,
+          "schedule": "128x128x32x4",
+          "fraction_of_cublas": 0.2968,
+          "hand_mfu": 0.1941
+        },
+        {
+          "name": "linear:fwd:fc",
+          "shape": "16384x5120x1280 batch 1",
+          "cublas_ms": 0.258635,
+          "hand_ms": 1.10903,
+          "schedule": "128x128x32x4",
+          "fraction_of_cublas": 0.2332,
+          "hand_mfu": 0.196
+        },
+        {
+          "name": "linear:dgrad:cproj",
+          "shape": "16384x1280x5120 batch 1",
+          "cublas_ms": 0.259925,
+          "hand_ms": 1.12831,
+          "schedule": "128x128x32x4",
+          "fraction_of_cublas": 0.2304,
+          "hand_mfu": 0.1927
+        },
+        {
+          "name": "linear:wgrad:fc",
+          "shape": "5120x1280x16384 batch 1 fp32 out",
+          "cublas_ms": 0.304928,
+          "hand_ms": 1.28791,
+          "schedule": "128x128x32x4",
+          "fraction_of_cublas": 0.2368,
+          "hand_mfu": 0.1688
+        },
+        {
+          "name": "linear:fwd:cls",
+          "shape": "16384x32768x1280 batch 1",
+          "cublas_ms": 1.60932,
+          "hand_ms": 6.9889,
+          "schedule": "128x128x32x4",
+          "fraction_of_cublas": 0.2303,
+          "hand_mfu": 0.1988
+        }
+      ]
     },
-    {
-     "name": "attention_fwd:d8_s512_sssl_cublas",
-     "shape": "B=8 T=512 H=4 KV=4 D=128 pattern=SSSL",
-     "ms": 0.09744,
-     "gflops": 12808.6,
-     "work_ratio": 3.44129
+    "gemm_bf16_phase1_step4": {
+      "note": "The hand-written bf16 tensor-core GEMM of docs/kernels.md Part 3 after phase 1 step 4, over the same six rows as gemm_bf16_phase1. A schedule is now a tile, a warp grid, a k depth, a stage count, and a pad, and the sweep holds seven of them: the square tile at a 32-deep slice with four stages, the same tile at a 64-deep slice with two, a 128 by 256 tile at two and at three stages, a 256 by 128 tile, a 128 by 64 tile, and a 64 by 64 tile. The 128 by 256 and 256 by 128 tiles lost on every row because a block of 512 threads holds one block per multiprocessor; the winner is 128x128x64x2, which doubles the k slice of the square tile and passes half as many barriers. Everything else is unchanged from gemm_bf16_phase1_step3: the dynamic staged window, the exchange-tile epilogue, and the shape table, whose every row is still inert. One run of one binary on an H100 80GB HBM3 at bf16, with NANOCHAT_GEMM_LIB at `cublas` and then at `hand` on the schedule the row owns. fraction_of_cublas is the cuBLAS time over the hand time and hand_mfu is the tile's rate over the card's declared bf16 peak. The gate of the step is that the best schedule per row changes and the sweep says which, which holds; backends/cuda/gemm/README.md section 14 holds the sweep.",
+      "device": "NVIDIA H100 80GB HBM3 (sm_90)",
+      "validated_on": "NVIDIA H100 80GB HBM3 (sm_90)",
+      "precision": "bf16",
+      "measurement": "modal run tools/modal/app.py::card_job --name gemm_bench --argv '[\"--schedule\",\"all\",\"--json\"]'",
+      "origin": "docs/kernels.md Part 3 phase 1 step 4, backends/cuda/gemm/README.md section 14",
+      "rows": [
+        {
+          "name": "muon:1280x1280:A",
+          "shape": "1280x1280x1280 batch 40",
+          "cublas_ms": 0.224085,
+          "hand_ms": 0.825888,
+          "schedule": "128x128x64x2",
+          "fraction_of_cublas": 0.2713,
+          "hand_mfu": 0.2057
+        },
+        {
+          "name": "muon:5120x1280:prod",
+          "shape": "5120x1280x1280 batch 20",
+          "cublas_ms": 0.5208,
+          "hand_ms": 1.60925,
+          "schedule": "128x128x64x2",
+          "fraction_of_cublas": 0.3236,
+          "hand_mfu": 0.2111
+        },
+        {
+          "name": "linear:fwd:fc",
+          "shape": "16384x5120x1280 batch 1",
+          "cublas_ms": 0.253205,
+          "hand_ms": 1.00411,
+          "schedule": "128x128x64x2",
+          "fraction_of_cublas": 0.2522,
+          "hand_mfu": 0.2165
+        },
+        {
+          "name": "linear:dgrad:cproj",
+          "shape": "16384x1280x5120 batch 1",
+          "cublas_ms": 0.254219,
+          "hand_ms": 1.03725,
+          "schedule": "128x128x64x2",
+          "fraction_of_cublas": 0.2451,
+          "hand_mfu": 0.2096
+        },
+        {
+          "name": "linear:wgrad:fc",
+          "shape": "5120x1280x16384 batch 1 fp32 out",
+          "cublas_ms": 0.296843,
+          "hand_ms": 1.13714,
+          "schedule": "128x128x64x2",
+          "fraction_of_cublas": 0.261,
+          "hand_mfu": 0.1912
+        },
+        {
+          "name": "linear:fwd:cls",
+          "shape": "16384x32768x1280 batch 1",
+          "cublas_ms": 1.55492,
+          "hand_ms": 6.59308,
+          "schedule": "128x128x64x2",
+          "fraction_of_cublas": 0.2358,
+          "hand_mfu": 0.2107
+        }
+      ]
     },
-    {
-     "name": "attention_bwd:d8_s512_sssl_cublas",
-     "shape": "B=8 T=512 H=4 KV=4 D=128 pattern=SSSL",
-     "ms": 0.204179,
-     "gflops": 12225.2,
-     "work_ratio": 3.44129
+    "gemm_bf16_phase1_step5": {
+      "note": "The hand-written bf16 tensor-core GEMM of docs/kernels.md Part 3 after phase 1 step 5, over the same six rows as gemm_bf16_phase1. One block now owns a run of tiles from a grid sized to the resident blocks of the card, which removes the partial last wave of a row, and the plan's SwizzleM decides the order that run walks so the blocks resident together share eight A panels. Everything else is unchanged from gemm_bf16_phase1_step3: the dynamic staged window, the exchange-tile epilogue, and the shape table, whose every row is still inert. One run of one binary on an H100 80GB HBM3 at bf16, with NANOCHAT_GEMM_LIB at `cublas` and then at `hand`, the latter on the schedule the row owns: 128x128x64x2s8 for the rows that store the compute type, and 128x128x96x2s8 for the fp32 weight gradient, where the deeper slice won. The same run measured the fixed grid and the plain order, so the two halves of the step are separate rows: the persistent grid gained 1.039 to 1.117 and the swizzle gained 1.002 to 1.049, the largest on the classifier. fraction_of_cublas is the cuBLAS time over the hand time and hand_mfu is the tile's rate over the card's declared bf16 peak. The gate of the step asks that no row be slower, which holds, and that the classifier reach 0.45, which does not: it reads 0.2753. backends/cuda/gemm/README.md section 15 records the two tables and states that the k-split half of stream-K is not implemented.",
+      "device": "NVIDIA H100 80GB HBM3 (sm_90)",
+      "validated_on": "NVIDIA H100 80GB HBM3 (sm_90)",
+      "precision": "bf16",
+      "measurement": "modal run tools/modal/app.py::card_job --name gemm_bench --argv '[\"--schedule\",\"all\",\"--json\"]'",
+      "origin": "docs/kernels.md Part 3 phase 1 step 5, backends/cuda/gemm/README.md section 14",
+      "rows": [
+        {
+          "name": "muon:1280x1280:A",
+          "shape": "1280x1280x1280 batch 40",
+          "cublas_ms": 0.223541,
+          "hand_ms": 0.737824,
+          "schedule": "128x128x64x2s8",
+          "fraction_of_cublas": 0.303,
+          "hand_mfu": 0.2302
+        },
+        {
+          "name": "muon:5120x1280:prod",
+          "shape": "5120x1280x1280 batch 20",
+          "cublas_ms": 0.520341,
+          "hand_ms": 1.46318,
+          "schedule": "128x128x64x2s8",
+          "fraction_of_cublas": 0.3556,
+          "hand_mfu": 0.2322
+        },
+        {
+          "name": "linear:fwd:fc",
+          "shape": "16384x5120x1280 batch 1",
+          "cublas_ms": 0.263541,
+          "hand_ms": 0.957824,
+          "schedule": "128x128x64x2s8",
+          "fraction_of_cublas": 0.2751,
+          "hand_mfu": 0.227
+        },
+        {
+          "name": "linear:dgrad:cproj",
+          "shape": "16384x1280x5120 batch 1",
+          "cublas_ms": 0.257739,
+          "hand_ms": 0.961493,
+          "schedule": "128x128x64x2s8",
+          "fraction_of_cublas": 0.2681,
+          "hand_mfu": 0.2261
+        },
+        {
+          "name": "linear:wgrad:fc",
+          "shape": "5120x1280x16384 batch 1 fp32 out",
+          "cublas_ms": 0.304917,
+          "hand_ms": 0.988661,
+          "schedule": "128x128x96x2s8",
+          "fraction_of_cublas": 0.3084,
+          "hand_mfu": 0.2199
+        },
+        {
+          "name": "linear:fwd:cls",
+          "shape": "16384x32768x1280 batch 1",
+          "cublas_ms": 1.59121,
+          "hand_ms": 5.78054,
+          "schedule": "128x128x64x2s8",
+          "fraction_of_cublas": 0.2753,
+          "hand_mfu": 0.2403
+        }
+      ]
     },
-    {
-     "name": "attention_fwd:b4_s2048_h8_win512",
-     "shape": "B=4 T=2048 H=8 KV=8 D=128 wl=512",
-     "ms": 0.663904,
-     "gflops": 22686.6,
-     "work_ratio": 4.56252
+    "gemm_cutlass": {
+      "note": "The candidate registry of docs/kernels.md section 11.4, behind the seam, against cuBLAS and the hand tile, at the sweep protocol of that section, after the build flag of section 11.9. Two runs of one binary on an H100 80GB HBM3 at bf16 measured this family at one revision: --rows production, which the decision table reads, and --rows all, whose production half agreed with it to about 1 percent on most rows and by 3 to 7 points on five rows near a tie. The protocol flushed 100 MiB of the second-level cache before every timed call at 0.035 ms, and each cell is the minimum of three rounds. Every candidate was checked against cuBLAS before its timing was reported, and the check accepted every measured arm of the 28 rows. The fractions are the cuBLAS time over the arm time, so 0.95 is the gate of section 10.1 step 2e. The best candidate reads 0.576 to 1.176, and the hand tile 0.147 to 0.740. Twelve rows are faster than cuBLAS. tools/gemm_rules.py --write read this report and promoted nine rows, each by more than the 0.04 margin of section 11.4 item 5; three more rows were faster and stayed on cuBLAS because their win is inside that margin, and cuBLAS keeps the other 19 shapes. `wide-n` wins eight rows and `balanced` two, and `deep-k` wins none at this revision. The 5 by 12 Muon group refuses every candidate by the size rule of gemm_shape.h. This entry replaces a measurement of the same rows taken on kernels that called __assertfail inside their k loop, whose candidates read 0.137 to 0.315; the note of that history is in docs/kernels.md sections 11.2 and 11.9.",
+      "device": "NVIDIA H100 80GB HBM3 (sm_90)",
+      "validated_on": "NVIDIA H100 80GB HBM3 (sm_90)",
+      "precision": "bf16",
+      "measurement": "modal run tools/modal/app.py::card_job --name gemm_bench --argv '[\"--rows\",\"production\",\"--json\"]'",
+      "origin": "docs/kernels.md Part 3 section 11.7 step 5",
+      "rows": [
+        {
+          "name": "muon:5x12:A",
+          "shape": "5x5x12 batch 10 nt",
+          "cublas_ms": 0.004791,
+          "best_candidate": "none",
+          "best_candidate_ms": 0.0,
+          "hand_ms": 0.006476,
+          "hand_schedule": "64x64x32x2",
+          "candidate_fraction_of_cublas": 0.0,
+          "hand_fraction_of_cublas": 0.7398
+        },
+        {
+          "name": "muon:5x12:A2",
+          "shape": "5x5x5 batch 10",
+          "cublas_ms": 0.004087,
+          "best_candidate": "none",
+          "best_candidate_ms": 0.0,
+          "hand_ms": 0.006529,
+          "hand_schedule": "64x64x32x2",
+          "candidate_fraction_of_cublas": 0.0,
+          "hand_fraction_of_cublas": 0.6259
+        },
+        {
+          "name": "muon:5x12:prod",
+          "shape": "5x12x5 batch 10",
+          "cublas_ms": 0.004097,
+          "best_candidate": "none",
+          "best_candidate_ms": 0.0,
+          "hand_ms": 0.006412,
+          "hand_schedule": "64x64x32x2",
+          "candidate_fraction_of_cublas": 0.0,
+          "hand_fraction_of_cublas": 0.639
+        },
+        {
+          "name": "muon:640x1280:A",
+          "shape": "640x640x1280 batch 40 nt",
+          "cublas_ms": 0.083927,
+          "best_candidate": "balanced",
+          "best_candidate_ms": 0.103415,
+          "hand_ms": 0.204641,
+          "hand_schedule": "128x128x64x2s8",
+          "candidate_fraction_of_cublas": 0.8116,
+          "hand_fraction_of_cublas": 0.4101
+        },
+        {
+          "name": "muon:640x1280:A2",
+          "shape": "640x640x640 batch 40",
+          "cublas_ms": 0.053164,
+          "best_candidate": "balanced",
+          "best_candidate_ms": 0.056513,
+          "hand_ms": 0.128673,
+          "hand_schedule": "128x128x64x2s8",
+          "candidate_fraction_of_cublas": 0.9407,
+          "hand_fraction_of_cublas": 0.4132
+        },
+        {
+          "name": "muon:640x1280:prod",
+          "shape": "640x1280x640 batch 40",
+          "cublas_ms": 0.091703,
+          "best_candidate": "wide-n",
+          "best_candidate_ms": 0.093079,
+          "hand_ms": 0.244236,
+          "hand_schedule": "128x128x64x2s8",
+          "candidate_fraction_of_cublas": 0.9852,
+          "hand_fraction_of_cublas": 0.3755
+        },
+        {
+          "name": "muon:1280x1280:A",
+          "shape": "1280x1280x1280 batch 40 nt",
+          "cublas_ms": 0.24446,
+          "best_candidate": "wide-n",
+          "best_candidate_ms": 0.253889,
+          "hand_ms": 0.784759,
+          "hand_schedule": "128x128x64x2s8",
+          "candidate_fraction_of_cublas": 0.9629,
+          "hand_fraction_of_cublas": 0.3115
+        },
+        {
+          "name": "muon:1280x1280:A2+prod",
+          "shape": "1280x1280x1280 batch 40",
+          "cublas_ms": 0.249719,
+          "best_candidate": "wide-n",
+          "best_candidate_ms": 0.256887,
+          "hand_ms": 0.792588,
+          "hand_schedule": "128x128x64x2s8",
+          "candidate_fraction_of_cublas": 0.9721,
+          "hand_fraction_of_cublas": 0.3151
+        },
+        {
+          "name": "muon:1280x5120:A",
+          "shape": "1280x1280x5120 batch 20 nt",
+          "cublas_ms": 0.503063,
+          "best_candidate": "wide-n",
+          "best_candidate_ms": 0.463639,
+          "hand_ms": 1.45667,
+          "hand_schedule": "128x128x64x2s8",
+          "candidate_fraction_of_cublas": 1.085,
+          "hand_fraction_of_cublas": 0.3454
+        },
+        {
+          "name": "muon:1280x5120:A2+A2",
+          "shape": "1280x1280x1280 batch 20",
+          "cublas_ms": 0.150743,
+          "best_candidate": "wide-n",
+          "best_candidate_ms": 0.133761,
+          "hand_ms": 0.433303,
+          "hand_schedule": "128x128x64x2s8",
+          "candidate_fraction_of_cublas": 1.127,
+          "hand_fraction_of_cublas": 0.3479
+        },
+        {
+          "name": "muon:1280x5120:prod",
+          "shape": "1280x5120x1280 batch 20",
+          "cublas_ms": 0.579692,
+          "best_candidate": "wide-n",
+          "best_candidate_ms": 0.493057,
+          "hand_ms": 1.65883,
+          "hand_schedule": "128x128x64x2s8",
+          "candidate_fraction_of_cublas": 1.1757,
+          "hand_fraction_of_cublas": 0.3495
+        },
+        {
+          "name": "muon:5120x1280:A",
+          "shape": "1280x1280x5120 batch 20 tn",
+          "cublas_ms": 0.498668,
+          "best_candidate": "wide-n",
+          "best_candidate_ms": 0.452225,
+          "hand_ms": 1.48925,
+          "hand_schedule": "128x128x64x2s8",
+          "candidate_fraction_of_cublas": 1.1027,
+          "hand_fraction_of_cublas": 0.3348
+        },
+        {
+          "name": "muon:5120x1280:prod",
+          "shape": "5120x1280x1280 batch 20",
+          "cublas_ms": 0.555937,
+          "best_candidate": "wide-n",
+          "best_candidate_ms": 0.492119,
+          "hand_ms": 1.69607,
+          "hand_schedule": "128x128x64x2s8",
+          "candidate_fraction_of_cublas": 1.1297,
+          "hand_fraction_of_cublas": 0.3278
+        },
+        {
+          "name": "linear:fwd:q+proj",
+          "shape": "16384x1280x1280 nt",
+          "cublas_ms": 0.079905,
+          "best_candidate": "wide-n",
+          "best_candidate_ms": 0.081665,
+          "hand_ms": 0.262817,
+          "hand_schedule": "128x128x64x2s8",
+          "candidate_fraction_of_cublas": 0.9784,
+          "hand_fraction_of_cublas": 0.304
+        },
+        {
+          "name": "linear:dgrad:q+proj",
+          "shape": "16384x1280x1280",
+          "cublas_ms": 0.080193,
+          "best_candidate": "wide-n",
+          "best_candidate_ms": 0.081441,
+          "hand_ms": 0.262305,
+          "hand_schedule": "128x128x64x2s8",
+          "candidate_fraction_of_cublas": 0.9847,
+          "hand_fraction_of_cublas": 0.3057
+        },
+        {
+          "name": "linear:wgrad:q+proj",
+          "shape": "1280x1280x16384 tn fp32 out",
+          "cublas_ms": 0.097591,
+          "best_candidate": "balanced",
+          "best_candidate_ms": 0.087276,
+          "hand_ms": 0.384748,
+          "hand_schedule": "128x128x96x2s8",
+          "candidate_fraction_of_cublas": 1.1182,
+          "hand_fraction_of_cublas": 0.2536
+        },
+        {
+          "name": "linear:fwd:kv",
+          "shape": "16384x640x1280 nt",
+          "cublas_ms": 0.049239,
+          "best_candidate": "balanced",
+          "best_candidate_ms": 0.048919,
+          "hand_ms": 0.155447,
+          "hand_schedule": "128x128x64x2s8",
+          "candidate_fraction_of_cublas": 1.0065,
+          "hand_fraction_of_cublas": 0.3168
+        },
+        {
+          "name": "linear:dgrad:kv",
+          "shape": "16384x1280x640",
+          "cublas_ms": 0.045772,
+          "best_candidate": "wide-n",
+          "best_candidate_ms": 0.047436,
+          "hand_ms": 0.157473,
+          "hand_schedule": "128x128x64x2s8",
+          "candidate_fraction_of_cublas": 0.9649,
+          "hand_fraction_of_cublas": 0.2907
+        },
+        {
+          "name": "linear:wgrad:kv",
+          "shape": "640x1280x16384 tn fp32 out",
+          "cublas_ms": 0.056161,
+          "best_candidate": "balanced",
+          "best_candidate_ms": 0.097484,
+          "hand_ms": 0.381943,
+          "hand_schedule": "128x128x96x2s8",
+          "candidate_fraction_of_cublas": 0.5761,
+          "hand_fraction_of_cublas": 0.147
+        },
+        {
+          "name": "linear:fwd:fc",
+          "shape": "16384x5120x1280 nt",
+          "cublas_ms": 0.283244,
+          "best_candidate": "wide-n",
+          "best_candidate_ms": 0.29758,
+          "hand_ms": 0.962849,
+          "hand_schedule": "128x128x64x2s8",
+          "candidate_fraction_of_cublas": 0.9518,
+          "hand_fraction_of_cublas": 0.2942
+        },
+        {
+          "name": "linear:dgrad:fc",
+          "shape": "16384x1280x5120",
+          "cublas_ms": 0.288652,
+          "best_candidate": "wide-n",
+          "best_candidate_ms": 0.275329,
+          "hand_ms": 0.838839,
+          "hand_schedule": "128x128x64x2s8",
+          "candidate_fraction_of_cublas": 1.0484,
+          "hand_fraction_of_cublas": 0.3441
+        },
+        {
+          "name": "linear:wgrad:fc",
+          "shape": "5120x1280x16384 tn fp32 out",
+          "cublas_ms": 0.335447,
+          "best_candidate": "wide-n",
+          "best_candidate_ms": 0.330135,
+          "hand_ms": 1.03054,
+          "hand_schedule": "128x128x96x2s8",
+          "candidate_fraction_of_cublas": 1.0161,
+          "hand_fraction_of_cublas": 0.3255
+        },
+        {
+          "name": "linear:fwd:cproj",
+          "shape": "16384x1280x5120 nt",
+          "cublas_ms": 0.288641,
+          "best_candidate": "wide-n",
+          "best_candidate_ms": 0.27598,
+          "hand_ms": 0.830817,
+          "hand_schedule": "128x128x64x2s8",
+          "candidate_fraction_of_cublas": 1.0459,
+          "hand_fraction_of_cublas": 0.3474
+        },
+        {
+          "name": "linear:dgrad:cproj",
+          "shape": "16384x5120x1280",
+          "cublas_ms": 0.286209,
+          "best_candidate": "wide-n",
+          "best_candidate_ms": 0.300705,
+          "hand_ms": 1.04264,
+          "hand_schedule": "128x128x64x2s8",
+          "candidate_fraction_of_cublas": 0.9518,
+          "hand_fraction_of_cublas": 0.2745
+        },
+        {
+          "name": "linear:wgrad:cproj",
+          "shape": "1280x5120x16384 tn fp32 out",
+          "cublas_ms": 0.363233,
+          "best_candidate": "wide-n",
+          "best_candidate_ms": 0.344172,
+          "hand_ms": 1.03076,
+          "hand_schedule": "128x128x96x2s8",
+          "candidate_fraction_of_cublas": 1.0554,
+          "hand_fraction_of_cublas": 0.3524
+        },
+        {
+          "name": "linear:fwd:cls",
+          "shape": "16384x32768x1280 nt",
+          "cublas_ms": 1.81809,
+          "best_candidate": "balanced",
+          "best_candidate_ms": 2.2618,
+          "hand_ms": 6.32192,
+          "hand_schedule": "128x128x64x2s8",
+          "candidate_fraction_of_cublas": 0.8038,
+          "hand_fraction_of_cublas": 0.2876
+        },
+        {
+          "name": "linear:dgrad:cls",
+          "shape": "16384x1280x32768",
+          "cublas_ms": 1.72515,
+          "best_candidate": "wide-n",
+          "best_candidate_ms": 1.81125,
+          "hand_ms": 5.42404,
+          "hand_schedule": "128x128x64x2s8",
+          "candidate_fraction_of_cublas": 0.9525,
+          "hand_fraction_of_cublas": 0.3181
+        },
+        {
+          "name": "linear:wgrad:cls",
+          "shape": "32768x1280x16384 tn fp32 out",
+          "cublas_ms": 1.7859,
+          "best_candidate": "wide-n",
+          "best_candidate_ms": 1.77628,
+          "hand_ms": 5.57487,
+          "hand_schedule": "128x128x96x2s8",
+          "candidate_fraction_of_cublas": 1.0054,
+          "hand_fraction_of_cublas": 0.3203
+        }
+      ]
     },
-    {
-     "name": "attention_bwd:b4_s2048_h8_win512",
-     "shape": "B=4 T=2048 H=8 KV=8 D=128 wl=512",
-     "ms": 0.972917,
-     "gflops": 30962,
-     "work_ratio": 4.56252
+    "gemm_scaling": {
+      "note": "The measurement rows of docs/kernels.md section 11.5, from the --rows all run whose production half is the gemm_cutlass entry, at the same protocol and the same revision, after the build flag of section 11.9. These rows characterise and never select an arm. cuBLAS holds 693 to 787 TFLOP/s from 4096 up, which is 70 to 80 percent of the card's declared bf16 peak. The candidates hold 576 to 705 TFLOP/s, which is 58 to 71 percent, and the hand tile 115 to 148. At scale:4096 the best candidate is faster than cuBLAS: 701.5 against 692.8. The monotonicity gate of section 11.5 passes: no arm loses more than a factor of two between two square probes. `align:offset` holds no candidate row, because the pointer rule of gemm_shape.h refuses a call one element off the sixteen-byte boundary, and scale:16 holds no candidate row for the same reason at the size rule. This entry replaces the same rows measured on kernels that called __assertfail inside their k loop, whose candidates read 84 to 96 TFLOP/s.",
+      "device": "NVIDIA H100 80GB HBM3 (sm_90)",
+      "validated_on": "NVIDIA H100 80GB HBM3 (sm_90)",
+      "precision": "bf16",
+      "measurement": "modal run tools/modal/app.py::card_job --name gemm_bench --argv '[\"--rows\",\"all\",\"--json\"]'",
+      "origin": "docs/kernels.md Part 3 section 11.5",
+      "rows": [
+        {
+          "name": "scale:16",
+          "shape": "16x16x16",
+          "cublas_ms": 0.003491,
+          "candidates_ms": {},
+          "hand_ms": 0.005525,
+          "hand_schedule": "64x64x32x2"
+        },
+        {
+          "name": "scale:64",
+          "shape": "64x64x64",
+          "cublas_ms": 0.006606,
+          "candidates_ms": {
+            "wide-n": 0.006018,
+            "balanced": 0.005414,
+            "deep-k": 0.005411,
+            "tall-m": 0.006566
+          },
+          "hand_ms": 0.010694,
+          "hand_schedule": "64x64x32x2"
+        },
+        {
+          "name": "scale:256",
+          "shape": "256x256x256",
+          "cublas_ms": 0.005513,
+          "candidates_ms": {
+            "wide-n": 0.008332,
+            "balanced": 0.006531,
+            "deep-k": 0.006622,
+            "tall-m": 0.00864
+          },
+          "hand_ms": 0.012457,
+          "hand_schedule": "64x64x32x2"
+        },
+        {
+          "name": "scale:1024",
+          "shape": "1024x1024x1024",
+          "cublas_ms": 0.011452,
+          "candidates_ms": {
+            "wide-n": 0.015118,
+            "balanced": 0.010493,
+            "deep-k": 0.015263,
+            "tall-m": 0.0164
+          },
+          "hand_ms": 0.036684,
+          "hand_schedule": "64x64x32x2"
+        },
+        {
+          "name": "scale:2048",
+          "shape": "2048x2048x2048",
+          "cublas_ms": 0.026024,
+          "candidates_ms": {
+            "wide-n": 0.026347,
+            "balanced": 0.027503,
+            "deep-k": 0.047854,
+            "tall-m": 0.028986
+          },
+          "hand_ms": 0.126154,
+          "hand_schedule": "64x64x32x2"
+        },
+        {
+          "name": "scale:4096",
+          "shape": "4096x4096x4096",
+          "cublas_ms": 0.198385,
+          "candidates_ms": {
+            "wide-n": 0.195921,
+            "balanced": 0.207428,
+            "deep-k": 0.368608,
+            "tall-m": 0.201747
+          },
+          "hand_ms": 0.92686,
+          "hand_schedule": "64x64x32x2"
+        },
+        {
+          "name": "scale:8192",
+          "shape": "8192x8192x8192",
+          "cublas_ms": 1.39656,
+          "candidates_ms": {
+            "wide-n": 1.56057,
+            "balanced": 1.84305,
+            "deep-k": 3.04546,
+            "tall-m": 1.58867
+          },
+          "hand_ms": 7.42292,
+          "hand_schedule": "64x64x32x2"
+        },
+        {
+          "name": "scale:16384",
+          "shape": "16384x16384x16384",
+          "cublas_ms": 11.7947,
+          "candidates_ms": {
+            "wide-n": 14.6319,
+            "balanced": 15.8494,
+            "deep-k": 24.2281,
+            "tall-m": 15.7844
+          },
+          "hand_ms": 66.5542,
+          "hand_schedule": "64x64x32x2"
+        },
+        {
+          "name": "scale:32768",
+          "shape": "32768x32768x32768",
+          "cublas_ms": 99.2642,
+          "candidates_ms": {
+            "wide-n": 122.259,
+            "balanced": 140.432,
+            "deep-k": 227.996,
+            "tall-m": 196.429
+          },
+          "hand_ms": 599.531,
+          "hand_schedule": "64x64x32x2"
+        },
+        {
+          "name": "aspect:deep-k",
+          "shape": "1024x1024x32768",
+          "cublas_ms": 0.151429,
+          "candidates_ms": {
+            "wide-n": 0.291476,
+            "balanced": 0.156047,
+            "deep-k": 0.337755,
+            "tall-m": 0.322081
+          },
+          "hand_ms": 0.927986,
+          "hand_schedule": "64x64x32x2"
+        },
+        {
+          "name": "aspect:tall",
+          "shape": "16384x256x2048",
+          "cublas_ms": 0.038823,
+          "candidates_ms": {
+            "wide-n": 0.040404,
+            "balanced": 0.041824,
+            "deep-k": 0.066546,
+            "tall-m": 0.042033
+          },
+          "hand_ms": 0.129651,
+          "hand_schedule": "64x64x32x2"
+        },
+        {
+          "name": "aspect:thin-k",
+          "shape": "4096x4096x64",
+          "cublas_ms": 0.018652,
+          "candidates_ms": {
+            "wide-n": 0.016029,
+            "balanced": 0.016923,
+            "deep-k": 0.020855,
+            "tall-m": 0.017078
+          },
+          "hand_ms": 0.062871,
+          "hand_schedule": "64x64x32x2"
+        },
+        {
+          "name": "aspect:thin-m",
+          "shape": "128x4096x4096",
+          "cublas_ms": 0.023863,
+          "candidates_ms": {
+            "wide-n": 0.043732,
+            "balanced": 0.02813,
+            "deep-k": 0.05322,
+            "tall-m": 0.050224
+          },
+          "hand_ms": 0.119279,
+          "hand_schedule": "64x64x32x2"
+        },
+        {
+          "name": "aspect:thin-n",
+          "shape": "4096x128x4096",
+          "cublas_ms": 0.023268,
+          "candidates_ms": {
+            "wide-n": 0.043275,
+            "balanced": 0.029049,
+            "deep-k": 0.054849,
+            "tall-m": 0.050166
+          },
+          "hand_ms": 0.117086,
+          "hand_schedule": "64x64x32x2"
+        },
+        {
+          "name": "batch:1",
+          "shape": "512x512x512",
+          "cublas_ms": 0.006356,
+          "candidates_ms": {
+            "wide-n": 0.01051,
+            "balanced": 0.007627,
+            "deep-k": 0.00934,
+            "tall-m": 0.011006
+          },
+          "hand_ms": 0.019474,
+          "hand_schedule": "64x64x32x2"
+        },
+        {
+          "name": "batch:128",
+          "shape": "512x512x512 batch 128",
+          "cublas_ms": 0.082184,
+          "candidates_ms": {
+            "wide-n": 0.083416,
+            "balanced": 0.085781,
+            "deep-k": 0.105653,
+            "tall-m": 0.086256
+          },
+          "hand_ms": 0.302866,
+          "hand_schedule": "64x64x32x2"
+        },
+        {
+          "name": "batch:40",
+          "shape": "512x512x512 batch 40",
+          "cublas_ms": 0.032838,
+          "candidates_ms": {
+            "wide-n": 0.033559,
+            "balanced": 0.031686,
+            "deep-k": 0.039256,
+            "tall-m": 0.034593
+          },
+          "hand_ms": 0.104324,
+          "hand_schedule": "64x64x32x2"
+        },
+        {
+          "name": "batch:8",
+          "shape": "512x512x512 batch 8",
+          "cublas_ms": 0.011512,
+          "candidates_ms": {
+            "wide-n": 0.011879,
+            "balanced": 0.01035,
+            "deep-k": 0.011966,
+            "tall-m": 0.012658
+          },
+          "hand_ms": 0.02703,
+          "hand_schedule": "64x64x32x2"
+        },
+        {
+          "name": "batch:muon-tall",
+          "shape": "4096x4096x1024 batch 4 tn",
+          "cublas_ms": 0.195961,
+          "candidates_ms": {
+            "wide-n": 0.223079,
+            "balanced": 0.237026,
+            "deep-k": 0.310948,
+            "tall-m": 0.227381
+          },
+          "hand_ms": 0.956167,
+          "hand_schedule": "64x64x32x2"
+        },
+        {
+          "name": "batch:muon-wide",
+          "shape": "1024x4096x4096 batch 4",
+          "cublas_ms": 0.227222,
+          "candidates_ms": {
+            "wide-n": 0.203357,
+            "balanced": 0.20293,
+            "deep-k": 0.358767,
+            "tall-m": 0.207217
+          },
+          "hand_ms": 0.938131,
+          "hand_schedule": "64x64x32x2"
+        },
+        {
+          "name": "ragged:k",
+          "shape": "1024x1024x1000",
+          "cublas_ms": 0.011095,
+          "candidates_ms": {
+            "wide-n": 0.015492,
+            "balanced": 0.010756,
+            "deep-k": 0.016994,
+            "tall-m": 0.018399
+          },
+          "hand_ms": 0.036804,
+          "hand_schedule": "64x64x32x2"
+        },
+        {
+          "name": "ragged:lda",
+          "shape": "1024x1024x1024 lda+=1",
+          "cublas_ms": 0.026482,
+          "candidates_ms": {},
+          "hand_ms": 0.100788,
+          "hand_schedule": "64x64x32x2"
+        },
+        {
+          "name": "ragged:m",
+          "shape": "1000x1000x1024",
+          "cublas_ms": 0.011382,
+          "candidates_ms": {
+            "wide-n": 0.015886,
+            "balanced": 0.010926,
+            "deep-k": 0.016039,
+            "tall-m": 0.017093
+          },
+          "hand_ms": 0.051772,
+          "hand_schedule": "64x64x32x2"
+        },
+        {
+          "name": "form:fp32-c",
+          "shape": "2048x2048x2048 fp32 out",
+          "cublas_ms": 0.029616,
+          "candidates_ms": {
+            "wide-n": 0.029252,
+            "balanced": 0.029687,
+            "deep-k": 0.050486,
+            "tall-m": 0.031357
+          },
+          "hand_ms": 0.126744,
+          "hand_schedule": "64x64x32x2"
+        },
+        {
+          "name": "form:nn",
+          "shape": "2048x2048x2048",
+          "cublas_ms": 0.025895,
+          "candidates_ms": {
+            "wide-n": 0.026337,
+            "balanced": 0.02753,
+            "deep-k": 0.048007,
+            "tall-m": 0.028701
+          },
+          "hand_ms": 0.126111,
+          "hand_schedule": "64x64x32x2"
+        },
+        {
+          "name": "form:nt",
+          "shape": "2048x2048x2048 nt",
+          "cublas_ms": 0.026327,
+          "candidates_ms": {
+            "wide-n": 0.027247,
+            "balanced": 0.028767,
+            "deep-k": 0.047941,
+            "tall-m": 0.029139
+          },
+          "hand_ms": 0.152154,
+          "hand_schedule": "64x64x32x2"
+        },
+        {
+          "name": "form:tn",
+          "shape": "2048x2048x2048 tn",
+          "cublas_ms": 0.02664,
+          "candidates_ms": {
+            "wide-n": 0.025935,
+            "balanced": 0.027674,
+            "deep-k": 0.047915,
+            "tall-m": 0.028062
+          },
+          "hand_ms": 0.121356,
+          "hand_schedule": "64x64x32x2"
+        },
+        {
+          "name": "form:tt",
+          "shape": "2048x2048x2048 tt",
+          "cublas_ms": 0.026744,
+          "candidates_ms": {
+            "wide-n": 0.02672,
+            "balanced": 0.028858,
+            "deep-k": 0.047769,
+            "tall-m": 0.029143
+          },
+          "hand_ms": 0.129873,
+          "hand_schedule": "64x64x32x2"
+        },
+        {
+          "name": "align:offset",
+          "shape": "1024x1024x1024 offset 1",
+          "cublas_ms": 0.030549,
+          "candidates_ms": {},
+          "hand_ms": 0.098835,
+          "hand_schedule": "64x64x32x2"
+        }
+      ]
     },
-    {
-     "name": "attention_fwd:b4_s2048_h8_win512_cublas",
-     "shape": "B=4 T=2048 H=8 KV=8 D=128 wl=512",
-     "ms": 0.843477,
-     "gflops": 17856.7,
-     "work_ratio": 4.56252
-    },
-    {
-     "name": "attention_bwd:b4_s2048_h8_win512_cublas",
-     "shape": "B=4 T=2048 H=8 KV=8 D=128 wl=512",
-     "ms": 0.910347,
-     "gflops": 33090.1,
-     "work_ratio": 4.56252
+    "gemm_fp8": {
+      "note": "The fp8 arm of docs/kernels.md section 10.4 against cublasLt on the same quantized operands, at the sweep protocol of section 11.4. One run of one binary on an H100 80GB HBM3 at fp8: --rows production, which is the closed shape list, and the arm's own --fp8 block. It flushed 100 MiB of the second-level cache before every timed call at 0.035 ms, and each cell is the minimum of three rounds. The fraction is the cublasLt time over the arm time, so the gate of section 10.4 asks for 0.95 or more: the measured range is 0.751 to 1.031, and one of the five rows meets it. Nothing is promoted, because a promotion needs the 0.04 margin of section 11.4 item 5 and two runs. Five rows carry a measurement and not fifteen: cublasLt answers status 15 (CUBLAS_STATUS_NOT_SUPPORTED) for every operand form but the K-major pair, and the Muon and the two backward families state other forms. That is a property of the library path and not of this arm, and the note records it because it is the tier's own limit: src/ops.cc calls GemmScaledFp8 for the dgrad and the wgrad whenever the eligibility rule holds, and on Hopper that call ends in the same abort. The arm's own two backward instantiations compile and pass the host gate, and they faulted on the card at the first backward row with an illegal memory access, so the arm states the K-major pair only. Every measured arm passed its check against the dense reference.",
+      "device": "NVIDIA H100 80GB HBM3 (sm_90)",
+      "validated_on": "NVIDIA H100 80GB HBM3 (sm_90)",
+      "precision": "fp8",
+      "measurement": "modal run tools/modal/app.py::card_job --name gemm_bench_fp8 --argv '[\"--rows\",\"production\",\"--json\"]'",
+      "origin": "docs/kernels.md Part 3 section 10.4",
+      "rows": [
+        {
+          "name": "linear:fwd:cls",
+          "shape": "16384x32768x1280 nt",
+          "cublaslt_ms": 1.25309,
+          "cutlass_ms": 1.66886,
+          "cutlass_fraction_of_cublaslt": 0.7509
+        },
+        {
+          "name": "linear:fwd:cproj",
+          "shape": "16384x1280x5120 nt",
+          "cublaslt_ms": 0.179513,
+          "cutlass_ms": 0.218959,
+          "cutlass_fraction_of_cublaslt": 0.8198
+        },
+        {
+          "name": "linear:fwd:fc",
+          "shape": "16384x5120x1280 nt",
+          "cublaslt_ms": 0.207428,
+          "cutlass_ms": 0.247855,
+          "cutlass_fraction_of_cublaslt": 0.8369
+        },
+        {
+          "name": "linear:fwd:q+proj",
+          "shape": "16384x1280x1280 nt",
+          "cublaslt_ms": 0.066201,
+          "cutlass_ms": 0.073092,
+          "cutlass_fraction_of_cublaslt": 0.9057
+        },
+        {
+          "name": "linear:fwd:kv",
+          "shape": "16384x640x1280 nt",
+          "cublaslt_ms": 0.042372,
+          "cutlass_ms": 0.041113,
+          "cutlass_fraction_of_cublaslt": 1.0306
+        }
+      ]
     }
-   ]
-  },
-  "cpu_train": {
-   "date": "2026-10-04",
-   "nanochat_cpp_revision": "124ceb0",
-   "host": {
-    "vcpus": 12,
-    "ram_gib": 7.8,
-    "platform": "WSL2",
-    "gpu": "none"
-   },
-   "sandbox_profile": "train",
-   "config": {
-    "depth": 4,
-    "model_dim": 256,
-    "heads": 2,
-    "kv_heads": 2,
-    "head_dim": 128,
-    "context": 512,
-    "window_pattern": "L",
-    "device_batch": 2,
-    "total_batch": 1024,
-    "grad_accum": 1,
-    "steps": 10,
-    "warmup_steps": 1,
-    "training_tokens": 10240,
-    "parameters": 36700242,
-    "flops_per_token": 71958960
-   },
-   "promoted_measurement": {
-    "protocol": "docs/performance.md Part 2, section 9",
-    "command": "tools/nanochat run train -- bazel-bin/src/train_main --train-parquet <train-parquet> --tokenizer <tokenizer.nctoken> --layers 4 --heads 4 --kv-heads 4 --hidden 512 --seq 512 --vocab <vocab> --window-pattern L --batch 2 --grad-accum 1 --num-iterations 10 --warmup-steps 1 --eval-every -1 --save-every -1 --checkpoint <checkpoint-dir>/model.ckpt --log <checkpoint-dir>/train.log",
-    "rule": "one warmup run, then the best mean tokens/s over steps 2 to 10 of three measured runs",
-    "threads": 8,
-    "warmup_runs": 1,
-    "measured_runs": 3,
-    "best_run": "run 2",
-    "tokens_per_sec": 591.13,
-    "gflops": 42.54,
-    "seconds_per_10k_tokens": 16.92,
-    "seconds_per_step": 1.7323,
-    "runs_tokens_per_sec": {
-     "warmup": 588.28,
-     "run1": 582.3,
-     "run2": 591.13,
-     "run3": 585.39
-    },
-    "step_time_gate_seconds": 5.0,
-    "step_time_gate_result": "pass",
-    "correctness_gate": "docs/performance.md Part 2, section 8",
-    "correctness_gate_result": "pass"
-   },
-   "runs": [
-    {
-     "name": "pytorch_cpu_8threads",
-     "threads": 8,
-     "tokens_per_sec": 1299.3,
-     "gflops": 93.49,
-     "seconds_per_10k_tokens": 7.7
-    },
-    {
-     "name": "pytorch_cpu_1thread",
-     "threads": 1,
-     "tokens_per_sec": 453.9,
-     "gflops": 32.66,
-     "seconds_per_10k_tokens": 22.0
-    },
-    {
-     "name": "nanochat_cpp_cpu_scalar",
-     "revision": "759083e",
-     "threads": 1,
-     "tokens_per_sec": 7.2,
-     "gflops": 0.51,
-     "seconds_per_10k_tokens": 1398
-    },
-    {
-     "name": "nanochat_cpp_cpu",
-     "revision": "124ceb0",
-     "threads": 8,
-     "tokens_per_sec": 591.13,
-     "gflops": 42.54,
-     "seconds_per_10k_tokens": 16.92,
-     "seconds_per_step": 1.7323
-    }
-   ],
-   "end_to_end": {
-    "revision": "124ceb0",
-    "threads": 8,
-    "tokens_per_sec": 591.13,
-    "seconds_per_step": 1.7323,
-    "speedup_vs_scalar_7_2_tokens_per_sec": 82.1
-   },
-   "origin": "docs/baselines.json",
-   "validated_on": "host CPU (12 vCPU)"
-  },
-  "cpu_gemm": {
-   "note": "Frozen Phase 0 baseline of the shipped CPU GEMM. The rows are the measured benchmark report of dev/kernels/cpu_gemm_bench at that revision. The shipped kernels::Gemm is a scalar triple loop with a double accumulator, so the run is single-threaded. Compare a later phase against these numbers with the same configuration.",
-   "date": "2026-10-03",
-   "revision": "4133998",
-   "threads": 1,
-   "device": "CPU",
-   "validated_on": "CPU",
-   "precision": "fp32",
-   "sandbox_profile": "t3-bench",
-   "measurement": "tools/nanochat bench -- ./bazel-bin/dev/kernels/cpu_gemm_bench --rounds 3 --warmup 1 --json --out /tmp/cpu-gap-p0.json",
-   "config": {
-    "depth": 4,
-    "model_dim": 256,
-    "heads": 2,
-    "kv_heads": 2,
-    "head_dim": 128,
-    "context": 512,
-    "window_pattern": "L",
-    "device_batch": 2,
-    "total_batch": 1024,
-    "grad_accum": 1,
-    "tokens_per_step": 1024,
-    "vocab": 32768,
-    "mlp_dim": 1024
-   },
-   "reference_rates_gflops": {
-    "note": "The Part 2, section 2 rates in docs/performance.md. The benchmark must reproduce each rate within 10 percent.",
-    "forward": 0.98,
-    "wgrad": 0.75,
-    "dgrad": 0.24
-   },
-   "rows": [
-    {
-     "name": "gemm_forward",
-     "shape": "M=1024 N=32768 K=256 ta=0",
-     "ms": 17366.477736,
-     "gflops": 0.989255,
-     "work_ratio": 1.0
-    },
-    {
-     "name": "gemm_wgrad",
-     "shape": "M=32768 N=256 K=1024 ta=1",
-     "ms": 23625.108755,
-     "gflops": 0.727187,
-     "work_ratio": 1.0
-    },
-    {
-     "name": "gemm_dgrad",
-     "shape": "M=1024 N=256 K=32768 ta=0",
-     "ms": 71650.412284,
-     "gflops": 0.239773,
-     "work_ratio": 1.0
-    },
-    {
-     "name": "mlp_gemm",
-     "shape": "M=1024 N=1024 K=256 ta=0",
-     "ms": 443.081883,
-     "gflops": 1.211674,
-     "work_ratio": 1.0
-    }
-   ],
-   "origin": "docs/baselines.json"
-  },
-  "gemm_bf16": {
-   "note": "The hand-written bf16 tensor-core GEMM of docs/kernels.md Part 3 and backends/cuda/gemm/README.md, over the closed shape list: the five Muon Polar Express groups of the twenty-layer profile and the Linear forward, dgrad, and wgrad shapes of the `big` profile at one micro-batch of sixteen sequences of 1024 tokens. Every row is one run of one binary: the shipped kernels::Gemm and GemmWgrad with NANOCHAT_GEMM_LIB at `cublas` and then at `hand`, the latter on the schedule the row owns, which is the schedule the four-schedule sweep chose for it. fraction_of_cublas is the cuBLAS time over the hand time, which is the quantity gate G4 asks to be at least 0.70; hand_mfu is the tile's rate over the card's bf16 peak. No row takes the hand path: every bit of the shape table is off, and cuBLAS serves every shape. The sweep itself, which measures each row on all five schedules, is section 6 of backends/cuda/gemm/README.md.",
-   "device": "NVIDIA H100 80GB HBM3 (sm_90)",
-   "validated_on": "NVIDIA H100 80GB HBM3 (sm_90)",
-   "precision": "bf16",
-   "measurement": "modal run tools/modal/app.py::card_job --name gemm_bench --argv '[\"--json\"]'",
-   "origin": "docs/tensor-core-gemm-plan.md sections B.4 and B.5, backends/cuda/gemm/README.md section 6",
-   "rows": [
-    {
-     "name": "muon:5x12:A",
-     "shape": "5x5x12 batch 10",
-     "cublas_ms": 0.006261,
-     "hand_ms": 0.008043,
-     "schedule": "64x64x32",
-     "fraction_of_cublas": 0.7785,
-     "hand_mfu": 0.0
-    },
-    {
-     "name": "muon:5x12:A2",
-     "shape": "5x5x5 batch 10",
-     "cublas_ms": 0.006475,
-     "hand_ms": 0.007701,
-     "schedule": "64x64x32",
-     "fraction_of_cublas": 0.8407,
-     "hand_mfu": 0.0
-    },
-    {
-     "name": "muon:5x12:prod",
-     "shape": "5x12x5 batch 10",
-     "cublas_ms": 0.006144,
-     "hand_ms": 0.008192,
-     "schedule": "64x64x32",
-     "fraction_of_cublas": 0.75,
-     "hand_mfu": 0.0
-    },
-    {
-     "name": "muon:640x1280:A",
-     "shape": "640x640x1280 batch 40",
-     "cublas_ms": 0.080971,
-     "hand_ms": 0.293792,
-     "schedule": "128x128x32",
-     "fraction_of_cublas": 0.2756,
-     "hand_mfu": 0.1444
-    },
-    {
-     "name": "muon:640x1280:A2",
-     "shape": "640x640x640 batch 40",
-     "cublas_ms": 0.055669,
-     "hand_ms": 0.18864,
-     "schedule": "128x128x32",
-     "fraction_of_cublas": 0.2951,
-     "hand_mfu": 0.1124
-    },
-    {
-     "name": "muon:640x1280:prod",
-     "shape": "640x1280x640 batch 40",
-     "cublas_ms": 0.093387,
-     "hand_ms": 0.368619,
-     "schedule": "128x128x32",
-     "fraction_of_cublas": 0.2533,
-     "hand_mfu": 0.115
-    },
-    {
-     "name": "muon:1280x1280:A",
-     "shape": "1280x1280x1280 batch 40",
-     "cublas_ms": 0.225899,
-     "hand_ms": 1.10916,
-     "schedule": "128x128x32",
-     "fraction_of_cublas": 0.2037,
-     "hand_mfu": 0.1529
-    },
-    {
-     "name": "muon:1280x1280:A2+prod",
-     "shape": "1280x1280x1280 batch 40",
-     "cublas_ms": 0.225067,
-     "hand_ms": 1.23759,
-     "schedule": "128x128x32",
-     "fraction_of_cublas": 0.1819,
-     "hand_mfu": 0.1371
-    },
-    {
-     "name": "muon:1280x5120:A",
-     "shape": "1280x1280x5120 batch 20",
-     "cublas_ms": 0.453867,
-     "hand_ms": 2.0257,
-     "schedule": "128x128x32",
-     "fraction_of_cublas": 0.2241,
-     "hand_mfu": 0.1675
-    },
-    {
-     "name": "muon:1280x5120:A2+A2",
-     "shape": "1280x1280x1280 batch 20",
-     "cublas_ms": 0.142592,
-     "hand_ms": 0.640437,
-     "schedule": "128x128x32",
-     "fraction_of_cublas": 0.2226,
-     "hand_mfu": 0.1324
-    },
-    {
-     "name": "muon:1280x5120:prod",
-     "shape": "1280x5120x1280 batch 20",
-     "cublas_ms": 0.550773,
-     "hand_ms": 2.4046,
-     "schedule": "128x128x32",
-     "fraction_of_cublas": 0.229,
-     "hand_mfu": 0.1411
-    },
-    {
-     "name": "muon:5120x1280:A",
-     "shape": "1280x1280x5120 batch 20",
-     "cublas_ms": 0.442944,
-     "hand_ms": 2.45489,
-     "schedule": "128x128x32",
-     "fraction_of_cublas": 0.1804,
-     "hand_mfu": 0.1382
-    },
-    {
-     "name": "muon:5120x1280:prod",
-     "shape": "5120x1280x1280 batch 20",
-     "cublas_ms": 0.521931,
-     "hand_ms": 2.40428,
-     "schedule": "128x128x32",
-     "fraction_of_cublas": 0.2171,
-     "hand_mfu": 0.1411
-    },
-    {
-     "name": "linear:fwd:q+proj",
-     "shape": "16384x1280x1280 batch 1",
-     "cublas_ms": 0.076533,
-     "hand_ms": 0.362123,
-     "schedule": "128x128x32",
-     "fraction_of_cublas": 0.2113,
-     "hand_mfu": 0.1499
-    },
-    {
-     "name": "linear:dgrad:q+proj",
-     "shape": "16384x1280x1280 batch 1",
-     "cublas_ms": 0.075563,
-     "hand_ms": 0.403595,
-     "schedule": "128x128x32",
-     "fraction_of_cublas": 0.1872,
-     "hand_mfu": 0.1345
-    },
-    {
-     "name": "linear:wgrad:q+proj",
-     "shape": "1280x1280x16384 batch 1 fp32 out",
-     "cublas_ms": 0.085824,
-     "hand_ms": 0.64672,
-     "schedule": "128x64x32",
-     "fraction_of_cublas": 0.1327,
-     "hand_mfu": 0.0839
-    },
-    {
-     "name": "linear:fwd:kv",
-     "shape": "16384x640x1280 batch 1",
-     "cublas_ms": 0.049067,
-     "hand_ms": 0.188512,
-     "schedule": "128x128x32",
-     "fraction_of_cublas": 0.2603,
-     "hand_mfu": 0.144
-    },
-    {
-     "name": "linear:dgrad:kv",
-     "shape": "16384x1280x640 batch 1",
-     "cublas_ms": 0.048256,
-     "hand_ms": 0.231477,
-     "schedule": "128x128x32",
-     "fraction_of_cublas": 0.2085,
-     "hand_mfu": 0.1173
-    },
-    {
-     "name": "linear:wgrad:kv",
-     "shape": "640x1280x16384 batch 1 fp32 out",
-     "cublas_ms": 0.051477,
-     "hand_ms": 0.626571,
-     "schedule": "128x64x32",
-     "fraction_of_cublas": 0.0822,
-     "hand_mfu": 0.0433
-    },
-    {
-     "name": "linear:fwd:fc",
-     "shape": "16384x5120x1280 batch 1",
-     "cublas_ms": 0.260832,
-     "hand_ms": 1.38129,
-     "schedule": "128x128x32",
-     "fraction_of_cublas": 0.1888,
-     "hand_mfu": 0.1572
-    },
-    {
-     "name": "linear:dgrad:fc",
-     "shape": "16384x1280x5120 batch 1",
-     "cublas_ms": 0.261579,
-     "hand_ms": 1.44045,
-     "schedule": "128x128x32",
-     "fraction_of_cublas": 0.1816,
-     "hand_mfu": 0.1507
-    },
-    {
-     "name": "linear:wgrad:fc",
-     "shape": "5120x1280x16384 batch 1 fp32 out",
-     "cublas_ms": 0.307413,
-     "hand_ms": 1.7943,
-     "schedule": "128x64x32",
-     "fraction_of_cublas": 0.1713,
-     "hand_mfu": 0.121
-    },
-    {
-     "name": "linear:fwd:cproj",
-     "shape": "16384x1280x5120 batch 1",
-     "cublas_ms": 0.26112,
-     "hand_ms": 1.27135,
-     "schedule": "128x128x32",
-     "fraction_of_cublas": 0.2054,
-     "hand_mfu": 0.1708
-    },
-    {
-     "name": "linear:dgrad:cproj",
-     "shape": "16384x5120x1280 batch 1",
-     "cublas_ms": 0.261568,
-     "hand_ms": 1.54177,
-     "schedule": "128x128x32",
-     "fraction_of_cublas": 0.1697,
-     "hand_mfu": 0.1408
-    },
-    {
-     "name": "linear:wgrad:cproj",
-     "shape": "1280x5120x16384 batch 1 fp32 out",
-     "cublas_ms": 0.363893,
-     "hand_ms": 1.79463,
-     "schedule": "128x64x32",
-     "fraction_of_cublas": 0.2028,
-     "hand_mfu": 0.121
-    },
-    {
-     "name": "linear:fwd:cls",
-     "shape": "16384x32768x1280 batch 1",
-     "cublas_ms": 1.58966,
-     "hand_ms": 8.75561,
-     "schedule": "128x128x32",
-     "fraction_of_cublas": 0.1816,
-     "hand_mfu": 0.1587
-    },
-    {
-     "name": "linear:dgrad:cls",
-     "shape": "16384x1280x32768 batch 1",
-     "cublas_ms": 1.46759,
-     "hand_ms": 8.75648,
-     "schedule": "128x128x32",
-     "fraction_of_cublas": 0.1676,
-     "hand_mfu": 0.1587
-    },
-    {
-     "name": "linear:wgrad:cls",
-     "shape": "32768x1280x16384 batch 1 fp32 out",
-     "cublas_ms": 1.5071,
-     "hand_ms": 9.39988,
-     "schedule": "128x64x32",
-     "fraction_of_cublas": 0.1603,
-     "hand_mfu": 0.1478
-    }
-   ]
-  },
-  "wgmma_probe": {
-   "note": "Phase 0 of docs/kernels.md Part 3: the hand-written WGMMA ceiling probe of dev/kernels/wgmma_probe.cu. One warpgroup issues wgmma.mma_async.sync.aligned.m64n128k16.f32.bf16.bf16 from a resident shared-memory tile, through a hand-built descriptor in the interleaved K-major form, with no global memory traffic in the timed loop. The 1block row is one warpgroup on one SM; the grid row is two warpgroups on every SM of the card. fraction_of_peak is the rate over the card's declared bf16 peak of 989 TFLOP/s (backends/cuda/caps.json), and fraction_of_sm_share is the 1block rate over the per-SM share of that peak, 989 over 132, or 7.4924 TFLOP/s. Passes are four atoms each, so one pass is 1048576 flop. The correctness row is the sum of the 8192 accumulators against a host reference over the same input; a descriptor that reads the wrong tile fails it, because the two operands differ. The probe needs sm_90a, which no device configuration of .bazelrc emits, so the card job builds it inside the container with the tree's builder before it runs it.",
-   "device": "NVIDIA H100 80GB HBM3 (sm_90a)",
-   "validated_on": "NVIDIA H100 80GB HBM3 (sm_90a)",
-   "precision": "bf16",
-   "measurement": "modal run tools/modal/app.py::card_job --name wgmma_probe",
-   "origin": "docs/kernels.md Part 3 phase 0, dev/kernels/wgmma_probe.cu, dev/kernels/README.md",
-   "rows": [
-    {
-     "name": "wgmma:1block",
-     "blocks": 1,
-     "passes": 20000,
-     "ms": 2.84,
-     "tflops": 7.384,
-     "fraction_of_peak": 0.00747,
-     "fraction_of_sm_share": 0.9855
-    },
-    {
-     "name": "wgmma:grid",
-     "blocks": 264,
-     "passes": 20000,
-     "ms": 5.81,
-     "tflops": 952.9,
-     "fraction_of_peak": 0.9635,
-     "fraction_of_sm_share": 0.9635
-    },
-    {
-     "name": "wgmma:correctness",
-     "reference_sum": 2516.4748,
-     "measured_sum": 2516.4748,
-     "relative_error": 0.0,
-     "result": "PASS"
-    }
-   ]
-  },
-  "gemm_bf16_phase1": {
-   "note": "The hand-written bf16 tensor-core GEMM of docs/kernels.md Part 3 after phase 1 step 1, over six rows of the closed shape list. The tile now drives the ldmatrix and mma.sync.aligned.m16n8k16 pair of backends/cuda/gemm/mma_bf16.cuh instead of the vendor wmma pair, which is mechanism 1 of section 4 of that part. Everything else is unchanged: the two-stage staged window, the warp tile, the shared epilogue scratch, and the shape table, whose every row is still inert. One run of one binary on an H100 80GB HBM3 at bf16, with NANOCHAT_GEMM_LIB at `cublas` and then at `hand`, the latter on the schedule the row owns. fraction_of_cublas is the cuBLAS time over the hand time and hand_mfu is the tile's rate over the card's declared bf16 peak. The wmma-era record of the same six rows is the gemm_bf16 entry, which this one supersedes for the shipped tile; the architect retires that entry at the next full sweep. The comparison against the wmma run is section 11 of backends/cuda/gemm/README.md.",
-   "device": "NVIDIA H100 80GB HBM3 (sm_90)",
-   "validated_on": "NVIDIA H100 80GB HBM3 (sm_90)",
-   "precision": "bf16",
-   "measurement": "modal run tools/modal/app.py::card_job --name gemm_bench --argv '[\"--schedule\",\"all\",\"--json\"]'",
-   "origin": "docs/kernels.md Part 3 phase 1, backends/cuda/gemm/README.md section 11",
-   "rows": [
-    {
-     "name": "muon:1280x1280:A",
-     "shape": "1280x1280x1280 batch 40",
-     "cublas_ms": 0.223019,
-     "hand_ms": 0.897803,
-     "schedule": "128x128x32",
-     "fraction_of_cublas": 0.2484,
-     "hand_mfu": 0.1889
-    },
-    {
-     "name": "muon:5120x1280:prod",
-     "shape": "5120x1280x1280 batch 20",
-     "cublas_ms": 0.520864,
-     "hand_ms": 1.79674,
-     "schedule": "128x128x32",
-     "fraction_of_cublas": 0.2899,
-     "hand_mfu": 0.1888
-    },
-    {
-     "name": "linear:fwd:fc",
-     "shape": "16384x5120x1280 batch 1",
-     "cublas_ms": 0.256779,
-     "hand_ms": 1.10954,
-     "schedule": "128x128x32",
-     "fraction_of_cublas": 0.2314,
-     "hand_mfu": 0.1957
-    },
-    {
-     "name": "linear:dgrad:cproj",
-     "shape": "16384x5120x1280 batch 1",
-     "cublas_ms": 0.255915,
-     "hand_ms": 1.13734,
-     "schedule": "128x128x32",
-     "fraction_of_cublas": 0.225,
-     "hand_mfu": 0.1909
-    },
-    {
-     "name": "linear:wgrad:fc",
-     "shape": "5120x1280x16384 batch 1 fp32 out",
-     "cublas_ms": 0.299765,
-     "hand_ms": 1.27821,
-     "schedule": "128x64x32",
-     "fraction_of_cublas": 0.2345,
-     "hand_mfu": 0.1699
-    },
-    {
-     "name": "linear:fwd:cls",
-     "shape": "16384x32768x1280 batch 1",
-     "cublas_ms": 1.55934,
-     "hand_ms": 7.03698,
-     "schedule": "128x128x32",
-     "fraction_of_cublas": 0.2216,
-     "hand_mfu": 0.1975
-    }
-   ]
-  },
-  "gemm_bf16_phase1_step2": {
-   "note": "The hand-written bf16 tensor-core GEMM of docs/kernels.md Part 3 after phase 1 step 2, over the same six rows as gemm_bf16_phase1. The accumulator now leaves the registers through a per-warp exchange tile and reaches C as sixteen-byte chunks, which removed the shared epilogue scratch, its eight serialized rounds, and the warp-by-warp store. Everything else is unchanged from gemm_bf16_phase1: the two-stage staged window and the shape table, whose every row is still inert. One run of one binary on an H100 80GB HBM3 at bf16, with NANOCHAT_GEMM_LIB at `cublas` and then at `hand` on the schedule the row owns, which is 128x128x32 for every row. fraction_of_cublas is the cuBLAS time over the hand time and hand_mfu is the tile's rate over the card's declared bf16 peak. The gate of the step asks for 0.28 on every row, and the rows read 0.2236 to 0.3071, so five of the six do not reach it; backends/cuda/gemm/README.md section 12 records both runs and why. A store taken straight from the lane map was measured first and lost 1.6 to 11.5 percent.",
-   "device": "NVIDIA H100 80GB HBM3 (sm_90)",
-   "validated_on": "NVIDIA H100 80GB HBM3 (sm_90)",
-   "precision": "bf16",
-   "measurement": "modal run tools/modal/app.py::card_job --name gemm_bench --argv '[\"--schedule\",\"all\",\"--json\"]'",
-   "origin": "docs/kernels.md Part 3 phase 1 step 2, backends/cuda/gemm/README.md section 12",
-   "rows": [
-    {
-     "name": "muon:1280x1280:A",
-     "shape": "1280x1280x1280 batch 40",
-     "cublas_ms": 0.223115,
-     "hand_ms": 0.841696,
-     "schedule": "128x128x32",
-     "fraction_of_cublas": 0.2651,
-     "hand_mfu": 0.2018
-    },
-    {
-     "name": "muon:5120x1280:prod",
-     "shape": "5120x1280x1280 batch 20",
-     "cublas_ms": 0.519296,
-     "hand_ms": 1.69123,
-     "schedule": "128x128x32",
-     "fraction_of_cublas": 0.3071,
-     "hand_mfu": 0.2009
-    },
-    {
-     "name": "linear:fwd:fc",
-     "shape": "16384x5120x1280 batch 1",
-     "cublas_ms": 0.257877,
-     "hand_ms": 1.05265,
-     "schedule": "128x128x32",
-     "fraction_of_cublas": 0.245,
-     "hand_mfu": 0.2065
-    },
-    {
-     "name": "linear:dgrad:cproj",
-     "shape": "16384x1280x5120 batch 1",
-     "cublas_ms": 0.259659,
-     "hand_ms": 1.08812,
-     "schedule": "128x128x32",
-     "fraction_of_cublas": 0.2386,
-     "hand_mfu": 0.1998
-    },
-    {
-     "name": "linear:wgrad:fc",
-     "shape": "5120x1280x16384 batch 1 fp32 out",
-     "cublas_ms": 0.303883,
-     "hand_ms": 1.34269,
-     "schedule": "128x128x32",
-     "fraction_of_cublas": 0.2263,
-     "hand_mfu": 0.1619
-    },
-    {
-     "name": "linear:fwd:cls",
-     "shape": "16384x32768x1280 batch 1",
-     "cublas_ms": 1.5874,
-     "hand_ms": 7.09988,
-     "schedule": "128x128x32",
-     "fraction_of_cublas": 0.2236,
-     "hand_mfu": 0.1957
-    }
-   ]
-  },
-  "gemm_bf16_phase1_step3": {
-   "note": "The hand-written bf16 tensor-core GEMM of docs/kernels.md Part 3 after phase 1 step 3, over the same six rows as gemm_bf16_phase1. The staged window is now the dynamic one, the pipeline depth is a parameter of a schedule, and the shipped wide schedule holds four stages of the 128 by 128 tile; the small schedules keep two. Everything else is unchanged from gemm_bf16_phase1_step2: the exchange-tile epilogue and the shape table, whose every row is still inert. One run of one binary on an H100 80GB HBM3 at bf16, with NANOCHAT_GEMM_LIB at `cublas` and then at `hand`. The same run also measured the two-stage form of the same tile, and four stages gained 3 to 7 percent on five rows and nothing on the sixth; six stages, measured in the run before, lost 1.5 times against two. fraction_of_cublas is the cuBLAS time over the hand time and hand_mfu is the tile's rate over the card's declared bf16 peak. The gate of the step asks for 0.40 on every row and the rows read 0.2303 to 0.2968, so the step misses it; backends/cuda/gemm/README.md section 13 records the numbers and the reason, which is arithmetic intensity and not the pipeline.",
-   "device": "NVIDIA H100 80GB HBM3 (sm_90)",
-   "validated_on": "NVIDIA H100 80GB HBM3 (sm_90)",
-   "precision": "bf16",
-   "measurement": "modal run tools/modal/app.py::card_job --name gemm_bench --argv '[\"--schedule\",\"all\",\"--json\"]'",
-   "origin": "docs/kernels.md Part 3 phase 1 step 3, backends/cuda/gemm/README.md section 13",
-   "rows": [
-    {
-     "name": "muon:1280x1280:A",
-     "shape": "1280x1280x1280 batch 40",
-     "cublas_ms": 0.223989,
-     "hand_ms": 0.890421,
-     "schedule": "128x128x32x4",
-     "fraction_of_cublas": 0.2516,
-     "hand_mfu": 0.1908
-    },
-    {
-     "name": "muon:5120x1280:prod",
-     "shape": "5120x1280x1280 batch 20",
-     "cublas_ms": 0.519317,
-     "hand_ms": 1.74994,
-     "schedule": "128x128x32x4",
-     "fraction_of_cublas": 0.2968,
-     "hand_mfu": 0.1941
-    },
-    {
-     "name": "linear:fwd:fc",
-     "shape": "16384x5120x1280 batch 1",
-     "cublas_ms": 0.258635,
-     "hand_ms": 1.10903,
-     "schedule": "128x128x32x4",
-     "fraction_of_cublas": 0.2332,
-     "hand_mfu": 0.196
-    },
-    {
-     "name": "linear:dgrad:cproj",
-     "shape": "16384x1280x5120 batch 1",
-     "cublas_ms": 0.259925,
-     "hand_ms": 1.12831,
-     "schedule": "128x128x32x4",
-     "fraction_of_cublas": 0.2304,
-     "hand_mfu": 0.1927
-    },
-    {
-     "name": "linear:wgrad:fc",
-     "shape": "5120x1280x16384 batch 1 fp32 out",
-     "cublas_ms": 0.304928,
-     "hand_ms": 1.28791,
-     "schedule": "128x128x32x4",
-     "fraction_of_cublas": 0.2368,
-     "hand_mfu": 0.1688
-    },
-    {
-     "name": "linear:fwd:cls",
-     "shape": "16384x32768x1280 batch 1",
-     "cublas_ms": 1.60932,
-     "hand_ms": 6.9889,
-     "schedule": "128x128x32x4",
-     "fraction_of_cublas": 0.2303,
-     "hand_mfu": 0.1988
-    }
-   ]
-  },
-  "gemm_bf16_phase1_step4": {
-   "note": "The hand-written bf16 tensor-core GEMM of docs/kernels.md Part 3 after phase 1 step 4, over the same six rows as gemm_bf16_phase1. A schedule is now a tile, a warp grid, a k depth, a stage count, and a pad, and the sweep holds seven of them: the square tile at a 32-deep slice with four stages, the same tile at a 64-deep slice with two, a 128 by 256 tile at two and at three stages, a 256 by 128 tile, a 128 by 64 tile, and a 64 by 64 tile. The 128 by 256 and 256 by 128 tiles lost on every row because a block of 512 threads holds one block per multiprocessor; the winner is 128x128x64x2, which doubles the k slice of the square tile and passes half as many barriers. Everything else is unchanged from gemm_bf16_phase1_step3: the dynamic staged window, the exchange-tile epilogue, and the shape table, whose every row is still inert. One run of one binary on an H100 80GB HBM3 at bf16, with NANOCHAT_GEMM_LIB at `cublas` and then at `hand` on the schedule the row owns. fraction_of_cublas is the cuBLAS time over the hand time and hand_mfu is the tile's rate over the card's declared bf16 peak. The gate of the step is that the best schedule per row changes and the sweep says which, which holds; backends/cuda/gemm/README.md section 14 holds the sweep.",
-   "device": "NVIDIA H100 80GB HBM3 (sm_90)",
-   "validated_on": "NVIDIA H100 80GB HBM3 (sm_90)",
-   "precision": "bf16",
-   "measurement": "modal run tools/modal/app.py::card_job --name gemm_bench --argv '[\"--schedule\",\"all\",\"--json\"]'",
-   "origin": "docs/kernels.md Part 3 phase 1 step 4, backends/cuda/gemm/README.md section 14",
-   "rows": [
-    {
-     "name": "muon:1280x1280:A",
-     "shape": "1280x1280x1280 batch 40",
-     "cublas_ms": 0.224085,
-     "hand_ms": 0.825888,
-     "schedule": "128x128x64x2",
-     "fraction_of_cublas": 0.2713,
-     "hand_mfu": 0.2057
-    },
-    {
-     "name": "muon:5120x1280:prod",
-     "shape": "5120x1280x1280 batch 20",
-     "cublas_ms": 0.5208,
-     "hand_ms": 1.60925,
-     "schedule": "128x128x64x2",
-     "fraction_of_cublas": 0.3236,
-     "hand_mfu": 0.2111
-    },
-    {
-     "name": "linear:fwd:fc",
-     "shape": "16384x5120x1280 batch 1",
-     "cublas_ms": 0.253205,
-     "hand_ms": 1.00411,
-     "schedule": "128x128x64x2",
-     "fraction_of_cublas": 0.2522,
-     "hand_mfu": 0.2165
-    },
-    {
-     "name": "linear:dgrad:cproj",
-     "shape": "16384x1280x5120 batch 1",
-     "cublas_ms": 0.254219,
-     "hand_ms": 1.03725,
-     "schedule": "128x128x64x2",
-     "fraction_of_cublas": 0.2451,
-     "hand_mfu": 0.2096
-    },
-    {
-     "name": "linear:wgrad:fc",
-     "shape": "5120x1280x16384 batch 1 fp32 out",
-     "cublas_ms": 0.296843,
-     "hand_ms": 1.13714,
-     "schedule": "128x128x64x2",
-     "fraction_of_cublas": 0.261,
-     "hand_mfu": 0.1912
-    },
-    {
-     "name": "linear:fwd:cls",
-     "shape": "16384x32768x1280 batch 1",
-     "cublas_ms": 1.55492,
-     "hand_ms": 6.59308,
-     "schedule": "128x128x64x2",
-     "fraction_of_cublas": 0.2358,
-     "hand_mfu": 0.2107
-    }
-   ]
-  },
-  "gemm_bf16_phase1_step5": {
-   "note": "The hand-written bf16 tensor-core GEMM of docs/kernels.md Part 3 after phase 1 step 5, over the same six rows as gemm_bf16_phase1. One block now owns a run of tiles from a grid sized to the resident blocks of the card, which removes the partial last wave of a row, and the plan's SwizzleM decides the order that run walks so the blocks resident together share eight A panels. Everything else is unchanged from gemm_bf16_phase1_step3: the dynamic staged window, the exchange-tile epilogue, and the shape table, whose every row is still inert. One run of one binary on an H100 80GB HBM3 at bf16, with NANOCHAT_GEMM_LIB at `cublas` and then at `hand`, the latter on the schedule the row owns: 128x128x64x2s8 for the rows that store the compute type, and 128x128x96x2s8 for the fp32 weight gradient, where the deeper slice won. The same run measured the fixed grid and the plain order, so the two halves of the step are separate rows: the persistent grid gained 1.039 to 1.117 and the swizzle gained 1.002 to 1.049, the largest on the classifier. fraction_of_cublas is the cuBLAS time over the hand time and hand_mfu is the tile's rate over the card's declared bf16 peak. The gate of the step asks that no row be slower, which holds, and that the classifier reach 0.45, which does not: it reads 0.2753. backends/cuda/gemm/README.md section 15 records the two tables and states that the k-split half of stream-K is not implemented.",
-   "device": "NVIDIA H100 80GB HBM3 (sm_90)",
-   "validated_on": "NVIDIA H100 80GB HBM3 (sm_90)",
-   "precision": "bf16",
-   "measurement": "modal run tools/modal/app.py::card_job --name gemm_bench --argv '[\"--schedule\",\"all\",\"--json\"]'",
-   "origin": "docs/kernels.md Part 3 phase 1 step 5, backends/cuda/gemm/README.md section 14",
-   "rows": [
-    {
-     "name": "muon:1280x1280:A",
-     "shape": "1280x1280x1280 batch 40",
-     "cublas_ms": 0.223541,
-     "hand_ms": 0.737824,
-     "schedule": "128x128x64x2s8",
-     "fraction_of_cublas": 0.303,
-     "hand_mfu": 0.2302
-    },
-    {
-     "name": "muon:5120x1280:prod",
-     "shape": "5120x1280x1280 batch 20",
-     "cublas_ms": 0.520341,
-     "hand_ms": 1.46318,
-     "schedule": "128x128x64x2s8",
-     "fraction_of_cublas": 0.3556,
-     "hand_mfu": 0.2322
-    },
-    {
-     "name": "linear:fwd:fc",
-     "shape": "16384x5120x1280 batch 1",
-     "cublas_ms": 0.263541,
-     "hand_ms": 0.957824,
-     "schedule": "128x128x64x2s8",
-     "fraction_of_cublas": 0.2751,
-     "hand_mfu": 0.227
-    },
-    {
-     "name": "linear:dgrad:cproj",
-     "shape": "16384x1280x5120 batch 1",
-     "cublas_ms": 0.257739,
-     "hand_ms": 0.961493,
-     "schedule": "128x128x64x2s8",
-     "fraction_of_cublas": 0.2681,
-     "hand_mfu": 0.2261
-    },
-    {
-     "name": "linear:wgrad:fc",
-     "shape": "5120x1280x16384 batch 1 fp32 out",
-     "cublas_ms": 0.304917,
-     "hand_ms": 0.988661,
-     "schedule": "128x128x96x2s8",
-     "fraction_of_cublas": 0.3084,
-     "hand_mfu": 0.2199
-    },
-    {
-     "name": "linear:fwd:cls",
-     "shape": "16384x32768x1280 batch 1",
-     "cublas_ms": 1.59121,
-     "hand_ms": 5.78054,
-     "schedule": "128x128x64x2s8",
-     "fraction_of_cublas": 0.2753,
-     "hand_mfu": 0.2403
-    }
-   ]
-  },
-  "gemm_cutlass": {
-   "note": "The candidate registry of docs/kernels.md section 11.4, behind the seam, against cuBLAS and the hand tile, at the sweep protocol of that section, after the build flag of section 11.9. Two runs of one binary on an H100 80GB HBM3 at bf16 measured this family at one revision: --rows production, which the decision table reads, and --rows all, whose production half agreed with it to about 1 percent on most rows and by 3 to 7 points on five rows near a tie. The protocol flushed 100 MiB of the second-level cache before every timed call at 0.035 ms, and each cell is the minimum of three rounds. Every candidate was checked against cuBLAS before its timing was reported, and the check accepted every measured arm of the 28 rows. The fractions are the cuBLAS time over the arm time, so 0.95 is the gate of section 10.1 step 2e. The best candidate reads 0.576 to 1.176, and the hand tile 0.147 to 0.740. Twelve rows are faster than cuBLAS. tools/gemm_rules.py --write read this report and promoted nine rows, each by more than the 0.04 margin of section 11.4 item 5; three more rows were faster and stayed on cuBLAS because their win is inside that margin, and cuBLAS keeps the other 19 shapes. `wide-n` wins eight rows and `balanced` two, and `deep-k` wins none at this revision. The 5 by 12 Muon group refuses every candidate by the size rule of gemm_shape.h. This entry replaces a measurement of the same rows taken on kernels that called __assertfail inside their k loop, whose candidates read 0.137 to 0.315; the note of that history is in docs/kernels.md sections 11.2 and 11.9.",
-   "device": "NVIDIA H100 80GB HBM3 (sm_90)",
-   "validated_on": "NVIDIA H100 80GB HBM3 (sm_90)",
-   "precision": "bf16",
-   "measurement": "modal run tools/modal/app.py::card_job --name gemm_bench --argv '[\"--rows\",\"production\",\"--json\"]'",
-   "origin": "docs/kernels.md Part 3 section 11.7 step 5",
-   "rows": [
-    {
-     "name": "muon:5x12:A",
-     "shape": "5x5x12 batch 10 nt",
-     "cublas_ms": 0.004791,
-     "best_candidate": "none",
-     "best_candidate_ms": 0.0,
-     "hand_ms": 0.006476,
-     "hand_schedule": "64x64x32x2",
-     "candidate_fraction_of_cublas": 0.0,
-     "hand_fraction_of_cublas": 0.7398
-    },
-    {
-     "name": "muon:5x12:A2",
-     "shape": "5x5x5 batch 10",
-     "cublas_ms": 0.004087,
-     "best_candidate": "none",
-     "best_candidate_ms": 0.0,
-     "hand_ms": 0.006529,
-     "hand_schedule": "64x64x32x2",
-     "candidate_fraction_of_cublas": 0.0,
-     "hand_fraction_of_cublas": 0.6259
-    },
-    {
-     "name": "muon:5x12:prod",
-     "shape": "5x12x5 batch 10",
-     "cublas_ms": 0.004097,
-     "best_candidate": "none",
-     "best_candidate_ms": 0.0,
-     "hand_ms": 0.006412,
-     "hand_schedule": "64x64x32x2",
-     "candidate_fraction_of_cublas": 0.0,
-     "hand_fraction_of_cublas": 0.639
-    },
-    {
-     "name": "muon:640x1280:A",
-     "shape": "640x640x1280 batch 40 nt",
-     "cublas_ms": 0.083927,
-     "best_candidate": "balanced",
-     "best_candidate_ms": 0.103415,
-     "hand_ms": 0.204641,
-     "hand_schedule": "128x128x64x2s8",
-     "candidate_fraction_of_cublas": 0.8116,
-     "hand_fraction_of_cublas": 0.4101
-    },
-    {
-     "name": "muon:640x1280:A2",
-     "shape": "640x640x640 batch 40",
-     "cublas_ms": 0.053164,
-     "best_candidate": "balanced",
-     "best_candidate_ms": 0.056513,
-     "hand_ms": 0.128673,
-     "hand_schedule": "128x128x64x2s8",
-     "candidate_fraction_of_cublas": 0.9407,
-     "hand_fraction_of_cublas": 0.4132
-    },
-    {
-     "name": "muon:640x1280:prod",
-     "shape": "640x1280x640 batch 40",
-     "cublas_ms": 0.091703,
-     "best_candidate": "wide-n",
-     "best_candidate_ms": 0.093079,
-     "hand_ms": 0.244236,
-     "hand_schedule": "128x128x64x2s8",
-     "candidate_fraction_of_cublas": 0.9852,
-     "hand_fraction_of_cublas": 0.3755
-    },
-    {
-     "name": "muon:1280x1280:A",
-     "shape": "1280x1280x1280 batch 40 nt",
-     "cublas_ms": 0.24446,
-     "best_candidate": "wide-n",
-     "best_candidate_ms": 0.253889,
-     "hand_ms": 0.784759,
-     "hand_schedule": "128x128x64x2s8",
-     "candidate_fraction_of_cublas": 0.9629,
-     "hand_fraction_of_cublas": 0.3115
-    },
-    {
-     "name": "muon:1280x1280:A2+prod",
-     "shape": "1280x1280x1280 batch 40",
-     "cublas_ms": 0.249719,
-     "best_candidate": "wide-n",
-     "best_candidate_ms": 0.256887,
-     "hand_ms": 0.792588,
-     "hand_schedule": "128x128x64x2s8",
-     "candidate_fraction_of_cublas": 0.9721,
-     "hand_fraction_of_cublas": 0.3151
-    },
-    {
-     "name": "muon:1280x5120:A",
-     "shape": "1280x1280x5120 batch 20 nt",
-     "cublas_ms": 0.503063,
-     "best_candidate": "wide-n",
-     "best_candidate_ms": 0.463639,
-     "hand_ms": 1.45667,
-     "hand_schedule": "128x128x64x2s8",
-     "candidate_fraction_of_cublas": 1.085,
-     "hand_fraction_of_cublas": 0.3454
-    },
-    {
-     "name": "muon:1280x5120:A2+A2",
-     "shape": "1280x1280x1280 batch 20",
-     "cublas_ms": 0.150743,
-     "best_candidate": "wide-n",
-     "best_candidate_ms": 0.133761,
-     "hand_ms": 0.433303,
-     "hand_schedule": "128x128x64x2s8",
-     "candidate_fraction_of_cublas": 1.127,
-     "hand_fraction_of_cublas": 0.3479
-    },
-    {
-     "name": "muon:1280x5120:prod",
-     "shape": "1280x5120x1280 batch 20",
-     "cublas_ms": 0.579692,
-     "best_candidate": "wide-n",
-     "best_candidate_ms": 0.493057,
-     "hand_ms": 1.65883,
-     "hand_schedule": "128x128x64x2s8",
-     "candidate_fraction_of_cublas": 1.1757,
-     "hand_fraction_of_cublas": 0.3495
-    },
-    {
-     "name": "muon:5120x1280:A",
-     "shape": "1280x1280x5120 batch 20 tn",
-     "cublas_ms": 0.498668,
-     "best_candidate": "wide-n",
-     "best_candidate_ms": 0.452225,
-     "hand_ms": 1.48925,
-     "hand_schedule": "128x128x64x2s8",
-     "candidate_fraction_of_cublas": 1.1027,
-     "hand_fraction_of_cublas": 0.3348
-    },
-    {
-     "name": "muon:5120x1280:prod",
-     "shape": "5120x1280x1280 batch 20",
-     "cublas_ms": 0.555937,
-     "best_candidate": "wide-n",
-     "best_candidate_ms": 0.492119,
-     "hand_ms": 1.69607,
-     "hand_schedule": "128x128x64x2s8",
-     "candidate_fraction_of_cublas": 1.1297,
-     "hand_fraction_of_cublas": 0.3278
-    },
-    {
-     "name": "linear:fwd:q+proj",
-     "shape": "16384x1280x1280 nt",
-     "cublas_ms": 0.079905,
-     "best_candidate": "wide-n",
-     "best_candidate_ms": 0.081665,
-     "hand_ms": 0.262817,
-     "hand_schedule": "128x128x64x2s8",
-     "candidate_fraction_of_cublas": 0.9784,
-     "hand_fraction_of_cublas": 0.304
-    },
-    {
-     "name": "linear:dgrad:q+proj",
-     "shape": "16384x1280x1280",
-     "cublas_ms": 0.080193,
-     "best_candidate": "wide-n",
-     "best_candidate_ms": 0.081441,
-     "hand_ms": 0.262305,
-     "hand_schedule": "128x128x64x2s8",
-     "candidate_fraction_of_cublas": 0.9847,
-     "hand_fraction_of_cublas": 0.3057
-    },
-    {
-     "name": "linear:wgrad:q+proj",
-     "shape": "1280x1280x16384 tn fp32 out",
-     "cublas_ms": 0.097591,
-     "best_candidate": "balanced",
-     "best_candidate_ms": 0.087276,
-     "hand_ms": 0.384748,
-     "hand_schedule": "128x128x96x2s8",
-     "candidate_fraction_of_cublas": 1.1182,
-     "hand_fraction_of_cublas": 0.2536
-    },
-    {
-     "name": "linear:fwd:kv",
-     "shape": "16384x640x1280 nt",
-     "cublas_ms": 0.049239,
-     "best_candidate": "balanced",
-     "best_candidate_ms": 0.048919,
-     "hand_ms": 0.155447,
-     "hand_schedule": "128x128x64x2s8",
-     "candidate_fraction_of_cublas": 1.0065,
-     "hand_fraction_of_cublas": 0.3168
-    },
-    {
-     "name": "linear:dgrad:kv",
-     "shape": "16384x1280x640",
-     "cublas_ms": 0.045772,
-     "best_candidate": "wide-n",
-     "best_candidate_ms": 0.047436,
-     "hand_ms": 0.157473,
-     "hand_schedule": "128x128x64x2s8",
-     "candidate_fraction_of_cublas": 0.9649,
-     "hand_fraction_of_cublas": 0.2907
-    },
-    {
-     "name": "linear:wgrad:kv",
-     "shape": "640x1280x16384 tn fp32 out",
-     "cublas_ms": 0.056161,
-     "best_candidate": "balanced",
-     "best_candidate_ms": 0.097484,
-     "hand_ms": 0.381943,
-     "hand_schedule": "128x128x96x2s8",
-     "candidate_fraction_of_cublas": 0.5761,
-     "hand_fraction_of_cublas": 0.147
-    },
-    {
-     "name": "linear:fwd:fc",
-     "shape": "16384x5120x1280 nt",
-     "cublas_ms": 0.283244,
-     "best_candidate": "wide-n",
-     "best_candidate_ms": 0.29758,
-     "hand_ms": 0.962849,
-     "hand_schedule": "128x128x64x2s8",
-     "candidate_fraction_of_cublas": 0.9518,
-     "hand_fraction_of_cublas": 0.2942
-    },
-    {
-     "name": "linear:dgrad:fc",
-     "shape": "16384x1280x5120",
-     "cublas_ms": 0.288652,
-     "best_candidate": "wide-n",
-     "best_candidate_ms": 0.275329,
-     "hand_ms": 0.838839,
-     "hand_schedule": "128x128x64x2s8",
-     "candidate_fraction_of_cublas": 1.0484,
-     "hand_fraction_of_cublas": 0.3441
-    },
-    {
-     "name": "linear:wgrad:fc",
-     "shape": "5120x1280x16384 tn fp32 out",
-     "cublas_ms": 0.335447,
-     "best_candidate": "wide-n",
-     "best_candidate_ms": 0.330135,
-     "hand_ms": 1.03054,
-     "hand_schedule": "128x128x96x2s8",
-     "candidate_fraction_of_cublas": 1.0161,
-     "hand_fraction_of_cublas": 0.3255
-    },
-    {
-     "name": "linear:fwd:cproj",
-     "shape": "16384x1280x5120 nt",
-     "cublas_ms": 0.288641,
-     "best_candidate": "wide-n",
-     "best_candidate_ms": 0.27598,
-     "hand_ms": 0.830817,
-     "hand_schedule": "128x128x64x2s8",
-     "candidate_fraction_of_cublas": 1.0459,
-     "hand_fraction_of_cublas": 0.3474
-    },
-    {
-     "name": "linear:dgrad:cproj",
-     "shape": "16384x5120x1280",
-     "cublas_ms": 0.286209,
-     "best_candidate": "wide-n",
-     "best_candidate_ms": 0.300705,
-     "hand_ms": 1.04264,
-     "hand_schedule": "128x128x64x2s8",
-     "candidate_fraction_of_cublas": 0.9518,
-     "hand_fraction_of_cublas": 0.2745
-    },
-    {
-     "name": "linear:wgrad:cproj",
-     "shape": "1280x5120x16384 tn fp32 out",
-     "cublas_ms": 0.363233,
-     "best_candidate": "wide-n",
-     "best_candidate_ms": 0.344172,
-     "hand_ms": 1.03076,
-     "hand_schedule": "128x128x96x2s8",
-     "candidate_fraction_of_cublas": 1.0554,
-     "hand_fraction_of_cublas": 0.3524
-    },
-    {
-     "name": "linear:fwd:cls",
-     "shape": "16384x32768x1280 nt",
-     "cublas_ms": 1.81809,
-     "best_candidate": "balanced",
-     "best_candidate_ms": 2.2618,
-     "hand_ms": 6.32192,
-     "hand_schedule": "128x128x64x2s8",
-     "candidate_fraction_of_cublas": 0.8038,
-     "hand_fraction_of_cublas": 0.2876
-    },
-    {
-     "name": "linear:dgrad:cls",
-     "shape": "16384x1280x32768",
-     "cublas_ms": 1.72515,
-     "best_candidate": "wide-n",
-     "best_candidate_ms": 1.81125,
-     "hand_ms": 5.42404,
-     "hand_schedule": "128x128x64x2s8",
-     "candidate_fraction_of_cublas": 0.9525,
-     "hand_fraction_of_cublas": 0.3181
-    },
-    {
-     "name": "linear:wgrad:cls",
-     "shape": "32768x1280x16384 tn fp32 out",
-     "cublas_ms": 1.7859,
-     "best_candidate": "wide-n",
-     "best_candidate_ms": 1.77628,
-     "hand_ms": 5.57487,
-     "hand_schedule": "128x128x96x2s8",
-     "candidate_fraction_of_cublas": 1.0054,
-     "hand_fraction_of_cublas": 0.3203
-    }
-   ]
-  },
-  "gemm_scaling": {
-   "note": "The measurement rows of docs/kernels.md section 11.5, from the --rows all run whose production half is the gemm_cutlass entry, at the same protocol and the same revision, after the build flag of section 11.9. These rows characterise and never select an arm. cuBLAS holds 693 to 787 TFLOP/s from 4096 up, which is 70 to 80 percent of the card's declared bf16 peak. The candidates hold 576 to 705 TFLOP/s, which is 58 to 71 percent, and the hand tile 115 to 148. At scale:4096 the best candidate is faster than cuBLAS: 701.5 against 692.8. The monotonicity gate of section 11.5 passes: no arm loses more than a factor of two between two square probes. `align:offset` holds no candidate row, because the pointer rule of gemm_shape.h refuses a call one element off the sixteen-byte boundary, and scale:16 holds no candidate row for the same reason at the size rule. This entry replaces the same rows measured on kernels that called __assertfail inside their k loop, whose candidates read 84 to 96 TFLOP/s.",
-   "device": "NVIDIA H100 80GB HBM3 (sm_90)",
-   "validated_on": "NVIDIA H100 80GB HBM3 (sm_90)",
-   "precision": "bf16",
-   "measurement": "modal run tools/modal/app.py::card_job --name gemm_bench --argv '[\"--rows\",\"all\",\"--json\"]'",
-   "origin": "docs/kernels.md Part 3 section 11.5",
-   "rows": [
-    {
-     "name": "scale:16",
-     "shape": "16x16x16",
-     "cublas_ms": 0.003491,
-     "candidates_ms": {},
-     "hand_ms": 0.005525,
-     "hand_schedule": "64x64x32x2"
-    },
-    {
-     "name": "scale:64",
-     "shape": "64x64x64",
-     "cublas_ms": 0.006606,
-     "candidates_ms": {
-      "wide-n": 0.006018,
-      "balanced": 0.005414,
-      "deep-k": 0.005411,
-      "tall-m": 0.006566
-     },
-     "hand_ms": 0.010694,
-     "hand_schedule": "64x64x32x2"
-    },
-    {
-     "name": "scale:256",
-     "shape": "256x256x256",
-     "cublas_ms": 0.005513,
-     "candidates_ms": {
-      "wide-n": 0.008332,
-      "balanced": 0.006531,
-      "deep-k": 0.006622,
-      "tall-m": 0.00864
-     },
-     "hand_ms": 0.012457,
-     "hand_schedule": "64x64x32x2"
-    },
-    {
-     "name": "scale:1024",
-     "shape": "1024x1024x1024",
-     "cublas_ms": 0.011452,
-     "candidates_ms": {
-      "wide-n": 0.015118,
-      "balanced": 0.010493,
-      "deep-k": 0.015263,
-      "tall-m": 0.0164
-     },
-     "hand_ms": 0.036684,
-     "hand_schedule": "64x64x32x2"
-    },
-    {
-     "name": "scale:2048",
-     "shape": "2048x2048x2048",
-     "cublas_ms": 0.026024,
-     "candidates_ms": {
-      "wide-n": 0.026347,
-      "balanced": 0.027503,
-      "deep-k": 0.047854,
-      "tall-m": 0.028986
-     },
-     "hand_ms": 0.126154,
-     "hand_schedule": "64x64x32x2"
-    },
-    {
-     "name": "scale:4096",
-     "shape": "4096x4096x4096",
-     "cublas_ms": 0.198385,
-     "candidates_ms": {
-      "wide-n": 0.195921,
-      "balanced": 0.207428,
-      "deep-k": 0.368608,
-      "tall-m": 0.201747
-     },
-     "hand_ms": 0.92686,
-     "hand_schedule": "64x64x32x2"
-    },
-    {
-     "name": "scale:8192",
-     "shape": "8192x8192x8192",
-     "cublas_ms": 1.39656,
-     "candidates_ms": {
-      "wide-n": 1.56057,
-      "balanced": 1.84305,
-      "deep-k": 3.04546,
-      "tall-m": 1.58867
-     },
-     "hand_ms": 7.42292,
-     "hand_schedule": "64x64x32x2"
-    },
-    {
-     "name": "scale:16384",
-     "shape": "16384x16384x16384",
-     "cublas_ms": 11.7947,
-     "candidates_ms": {
-      "wide-n": 14.6319,
-      "balanced": 15.8494,
-      "deep-k": 24.2281,
-      "tall-m": 15.7844
-     },
-     "hand_ms": 66.5542,
-     "hand_schedule": "64x64x32x2"
-    },
-    {
-     "name": "scale:32768",
-     "shape": "32768x32768x32768",
-     "cublas_ms": 99.2642,
-     "candidates_ms": {
-      "wide-n": 122.259,
-      "balanced": 140.432,
-      "deep-k": 227.996,
-      "tall-m": 196.429
-     },
-     "hand_ms": 599.531,
-     "hand_schedule": "64x64x32x2"
-    },
-    {
-     "name": "aspect:deep-k",
-     "shape": "1024x1024x32768",
-     "cublas_ms": 0.151429,
-     "candidates_ms": {
-      "wide-n": 0.291476,
-      "balanced": 0.156047,
-      "deep-k": 0.337755,
-      "tall-m": 0.322081
-     },
-     "hand_ms": 0.927986,
-     "hand_schedule": "64x64x32x2"
-    },
-    {
-     "name": "aspect:tall",
-     "shape": "16384x256x2048",
-     "cublas_ms": 0.038823,
-     "candidates_ms": {
-      "wide-n": 0.040404,
-      "balanced": 0.041824,
-      "deep-k": 0.066546,
-      "tall-m": 0.042033
-     },
-     "hand_ms": 0.129651,
-     "hand_schedule": "64x64x32x2"
-    },
-    {
-     "name": "aspect:thin-k",
-     "shape": "4096x4096x64",
-     "cublas_ms": 0.018652,
-     "candidates_ms": {
-      "wide-n": 0.016029,
-      "balanced": 0.016923,
-      "deep-k": 0.020855,
-      "tall-m": 0.017078
-     },
-     "hand_ms": 0.062871,
-     "hand_schedule": "64x64x32x2"
-    },
-    {
-     "name": "aspect:thin-m",
-     "shape": "128x4096x4096",
-     "cublas_ms": 0.023863,
-     "candidates_ms": {
-      "wide-n": 0.043732,
-      "balanced": 0.02813,
-      "deep-k": 0.05322,
-      "tall-m": 0.050224
-     },
-     "hand_ms": 0.119279,
-     "hand_schedule": "64x64x32x2"
-    },
-    {
-     "name": "aspect:thin-n",
-     "shape": "4096x128x4096",
-     "cublas_ms": 0.023268,
-     "candidates_ms": {
-      "wide-n": 0.043275,
-      "balanced": 0.029049,
-      "deep-k": 0.054849,
-      "tall-m": 0.050166
-     },
-     "hand_ms": 0.117086,
-     "hand_schedule": "64x64x32x2"
-    },
-    {
-     "name": "batch:1",
-     "shape": "512x512x512",
-     "cublas_ms": 0.006356,
-     "candidates_ms": {
-      "wide-n": 0.01051,
-      "balanced": 0.007627,
-      "deep-k": 0.00934,
-      "tall-m": 0.011006
-     },
-     "hand_ms": 0.019474,
-     "hand_schedule": "64x64x32x2"
-    },
-    {
-     "name": "batch:128",
-     "shape": "512x512x512 batch 128",
-     "cublas_ms": 0.082184,
-     "candidates_ms": {
-      "wide-n": 0.083416,
-      "balanced": 0.085781,
-      "deep-k": 0.105653,
-      "tall-m": 0.086256
-     },
-     "hand_ms": 0.302866,
-     "hand_schedule": "64x64x32x2"
-    },
-    {
-     "name": "batch:40",
-     "shape": "512x512x512 batch 40",
-     "cublas_ms": 0.032838,
-     "candidates_ms": {
-      "wide-n": 0.033559,
-      "balanced": 0.031686,
-      "deep-k": 0.039256,
-      "tall-m": 0.034593
-     },
-     "hand_ms": 0.104324,
-     "hand_schedule": "64x64x32x2"
-    },
-    {
-     "name": "batch:8",
-     "shape": "512x512x512 batch 8",
-     "cublas_ms": 0.011512,
-     "candidates_ms": {
-      "wide-n": 0.011879,
-      "balanced": 0.01035,
-      "deep-k": 0.011966,
-      "tall-m": 0.012658
-     },
-     "hand_ms": 0.02703,
-     "hand_schedule": "64x64x32x2"
-    },
-    {
-     "name": "batch:muon-tall",
-     "shape": "4096x4096x1024 batch 4 tn",
-     "cublas_ms": 0.195961,
-     "candidates_ms": {
-      "wide-n": 0.223079,
-      "balanced": 0.237026,
-      "deep-k": 0.310948,
-      "tall-m": 0.227381
-     },
-     "hand_ms": 0.956167,
-     "hand_schedule": "64x64x32x2"
-    },
-    {
-     "name": "batch:muon-wide",
-     "shape": "1024x4096x4096 batch 4",
-     "cublas_ms": 0.227222,
-     "candidates_ms": {
-      "wide-n": 0.203357,
-      "balanced": 0.20293,
-      "deep-k": 0.358767,
-      "tall-m": 0.207217
-     },
-     "hand_ms": 0.938131,
-     "hand_schedule": "64x64x32x2"
-    },
-    {
-     "name": "ragged:k",
-     "shape": "1024x1024x1000",
-     "cublas_ms": 0.011095,
-     "candidates_ms": {
-      "wide-n": 0.015492,
-      "balanced": 0.010756,
-      "deep-k": 0.016994,
-      "tall-m": 0.018399
-     },
-     "hand_ms": 0.036804,
-     "hand_schedule": "64x64x32x2"
-    },
-    {
-     "name": "ragged:lda",
-     "shape": "1024x1024x1024 lda+=1",
-     "cublas_ms": 0.026482,
-     "candidates_ms": {},
-     "hand_ms": 0.100788,
-     "hand_schedule": "64x64x32x2"
-    },
-    {
-     "name": "ragged:m",
-     "shape": "1000x1000x1024",
-     "cublas_ms": 0.011382,
-     "candidates_ms": {
-      "wide-n": 0.015886,
-      "balanced": 0.010926,
-      "deep-k": 0.016039,
-      "tall-m": 0.017093
-     },
-     "hand_ms": 0.051772,
-     "hand_schedule": "64x64x32x2"
-    },
-    {
-     "name": "form:fp32-c",
-     "shape": "2048x2048x2048 fp32 out",
-     "cublas_ms": 0.029616,
-     "candidates_ms": {
-      "wide-n": 0.029252,
-      "balanced": 0.029687,
-      "deep-k": 0.050486,
-      "tall-m": 0.031357
-     },
-     "hand_ms": 0.126744,
-     "hand_schedule": "64x64x32x2"
-    },
-    {
-     "name": "form:nn",
-     "shape": "2048x2048x2048",
-     "cublas_ms": 0.025895,
-     "candidates_ms": {
-      "wide-n": 0.026337,
-      "balanced": 0.02753,
-      "deep-k": 0.048007,
-      "tall-m": 0.028701
-     },
-     "hand_ms": 0.126111,
-     "hand_schedule": "64x64x32x2"
-    },
-    {
-     "name": "form:nt",
-     "shape": "2048x2048x2048 nt",
-     "cublas_ms": 0.026327,
-     "candidates_ms": {
-      "wide-n": 0.027247,
-      "balanced": 0.028767,
-      "deep-k": 0.047941,
-      "tall-m": 0.029139
-     },
-     "hand_ms": 0.152154,
-     "hand_schedule": "64x64x32x2"
-    },
-    {
-     "name": "form:tn",
-     "shape": "2048x2048x2048 tn",
-     "cublas_ms": 0.02664,
-     "candidates_ms": {
-      "wide-n": 0.025935,
-      "balanced": 0.027674,
-      "deep-k": 0.047915,
-      "tall-m": 0.028062
-     },
-     "hand_ms": 0.121356,
-     "hand_schedule": "64x64x32x2"
-    },
-    {
-     "name": "form:tt",
-     "shape": "2048x2048x2048 tt",
-     "cublas_ms": 0.026744,
-     "candidates_ms": {
-      "wide-n": 0.02672,
-      "balanced": 0.028858,
-      "deep-k": 0.047769,
-      "tall-m": 0.029143
-     },
-     "hand_ms": 0.129873,
-     "hand_schedule": "64x64x32x2"
-    },
-    {
-     "name": "align:offset",
-     "shape": "1024x1024x1024 offset 1",
-     "cublas_ms": 0.030549,
-     "candidates_ms": {},
-     "hand_ms": 0.098835,
-     "hand_schedule": "64x64x32x2"
-    }
-   ]
   }
- }
 }
