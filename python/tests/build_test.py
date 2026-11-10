@@ -362,6 +362,59 @@ class BazelCacheCommandTest(unittest.TestCase):
             self.assertIn(f"--disk_cache={Path(directory) / 'disk'}", command)
 
 
+class CommandLineCacheTest(unittest.TestCase):
+    """``tools/nanochat build`` names the same cache the Python API does.
+
+    The command forwards its arguments straight to Bazel, so without this the
+    variable reached the API and the image and not a hand-run build.
+    """
+
+    def setUp(self) -> None:
+        self.saved = os.environ.pop("NANOCHAT_BAZEL_CACHE", None)
+
+    def tearDown(self) -> None:
+        os.environ.pop("NANOCHAT_BAZEL_CACHE", None)
+        if self.saved is not None:
+            os.environ["NANOCHAT_BAZEL_CACHE"] = self.saved
+
+    def test_the_command_line_build_carries_the_cache(self) -> None:
+        from nanochat_cpp import cli
+
+        with tempfile.TemporaryDirectory() as directory:
+            os.environ["NANOCHAT_BAZEL_CACHE"] = directory
+            argv = cli._build_argv(["//bindings:nanochat_shared"])
+            disk = Path(directory) / "disk"
+            self.assertTrue(disk.is_dir(), "the flag line creates the cache")
+        self.assertEqual(argv[0], "build")
+        self.assertIn("//bindings:nanochat_shared", argv)
+        self.assertIn(f"--disk_cache={disk}", argv)
+        self.assertIn(f"--repository_cache={Path(directory) / 'repo'}", argv)
+
+    def test_an_unset_variable_adds_no_flag(self) -> None:
+        from nanochat_cpp import cli
+
+        argv = cli._build_argv(["//bindings:nanochat_shared"])
+        self.assertFalse([part for part in argv if "cache" in part], argv)
+
+    def test_a_stated_cache_flag_wins(self) -> None:
+        # The appended flags would otherwise be the last word on a cache the
+        # caller named itself.
+        from nanochat_cpp import cli
+
+        os.environ["NANOCHAT_BAZEL_CACHE"] = "/from-the-environment"
+        argv = cli._build_argv(["--disk_cache=/mine", "//x"])
+        self.assertEqual(
+            [part for part in argv if part.startswith("--disk_cache")],
+            ["--disk_cache=/mine"])
+        self.assertFalse([part for part in argv
+                          if part.startswith("--repository_cache")], argv)
+
+    def test_no_argument_builds_everything(self) -> None:
+        from nanochat_cpp import cli
+
+        self.assertEqual(cli._build_argv([]), ["build", "//..."])
+
+
 class BazelConfigTest(unittest.TestCase):
     """Row 1: the ``hopper`` config, pinned beside the ``h100`` simulator.
 

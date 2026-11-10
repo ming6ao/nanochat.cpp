@@ -484,6 +484,36 @@ class ImageTest(unittest.TestCase):
         self.assertFalse([part for part in argv
                           if part.startswith("--local_resources")], argv)
 
+    def test_the_profiler_layer_sits_below_the_tree(self) -> None:
+        # A layer above the tree copy is rebuilt by every source change, and the
+        # profiler is a 335 MB apt install: one file cost 215 and 63 seconds on
+        # 2026-11-10, for a profiler a card job never runs.
+        text = _source()
+        self.assertNotIn("image_for(leg).run_commands", text)
+        self.assertIn("_build_image(leg, profile=True)", text)
+        # The package is defined before the toolkit that installs it.
+        self.assertLess(text.index("NSYS_PACKAGE = "),
+                        text.index("def _toolkit_image"))
+        self.assertEqual(text.count("NSYS_PACKAGE = "), 1)
+
+    def test_the_image_retries_its_apt_layer(self) -> None:
+        # `Image.apt_install` emits a bare `apt-get update`, and a builder whose
+        # index fetch fails fails the deployment: one attempt on 2026-11-09
+        # exited 100 with "Some index files failed to download". The loop is
+        # what turns that into a retry instead of a lost run.
+        command = self.app._apt_command(self.app.APT_PACKAGES)
+        self.assertIn("for attempt in 1 2 3", command)
+        self.assertIn("--no-install-recommends", command)
+        for name in ("build-essential", "curl", "git"):
+            self.assertIn(name, command)
+        self.assertEqual(list(self.app.APT_PACKAGES),
+                         ["build-essential", "curl", "git"])
+
+    def test_the_bazelisk_fetch_retries(self) -> None:
+        # The same class as the apt layer: one transient answer from GitHub
+        # must not cost a deployment.
+        self.assertIn("--retry 3 --retry-all-errors", _source())
+
     def test_the_build_commands_run_the_builder(self) -> None:
         # Each command is a `python3 -c` one-liner, so a quoting error, or a list
         # that meets a tuple, fails inside the container and not at import. Run

@@ -471,28 +471,38 @@ def _ensure_build() -> str:
     architecture, and ``BuildOptions.from_env`` reads them, so a container
     builds what it declares.
 
-    The cost is the measurement that chose this design. A fresh output base with
-    a cold cache cost 23.0 seconds for 76 actions, and the same build against a
-    warm cache cost 3.4 seconds with 71 cache hits. That measurement is the CPU
-    library, so it is a lower bound for a leg's ten targets; the shape is what
-    matters, and the image build pays nothing.
+    The cost is the measurement of the T4 leg on 2026-11-10. Its 190 actions
+    read 133 disk cache hits, and the build cost 19.1 seconds on a warm Volume
+    and 101.9 seconds on the first read after :func:`warm_cache` wrote the
+    cache. The hits are downloads, so the Volume's latency per file is the cost,
+    and a local disk cache would read it as 3.4 seconds. A warm container
+    therefore pays tens of seconds, and the image build pays nothing.
 
     The Volume is committed, because a container that exits without a commit
     throws its cache away, and the next container would compile again.
+
+    The output is streamed and not captured. A cold build of a leg takes
+    minutes, and a captured one prints nothing until it ends: the container log
+    is where an operator reads the failing action. One summary line states the
+    cache, the elapsed time, and the exit status, so a run report carries the
+    cost of its own build.
     """
     from nanochat_cpp import _build  # noqa: PLC0415 - the image only
 
     options = _build.BuildOptions.from_env()
     command = _build._build_command(Path("tools/nanochat"), options,
                                     BUILD_TARGETS)
-    result = subprocess.run(command, cwd=REPO_ROOT, capture_output=True,
-                            text=True, check=False)
+    started = time.monotonic()
+    result = subprocess.run(command, cwd=REPO_ROOT, check=False)
+    elapsed = time.monotonic() - started
     build_cache.commit()
+    print(f"build: {options.bazel_cache} in {elapsed:.1f}s "
+          f"(exit {result.returncode})", flush=True)
     if result.returncode != 0:
         raise RuntimeError(
-            f"the container build failed ({result.returncode}) with the cache "
-            f"at {options.bazel_cache}: {' '.join(command)}\n"
-            f"{(result.stdout or '')[-2000:]}{(result.stderr or '')[-2000:]}")
+            f"the container build failed ({result.returncode}) after "
+            f"{elapsed:.1f}s with the cache at {options.bazel_cache}; the "
+            f"output above names the failing action")
     return options.bazel_cache
 
 
@@ -668,7 +678,61 @@ def _manifest_layer(image, leg: Leg):
                               image_fetch_command(leg))
 
 
-def _build_image(leg: Leg):
+#: The apt packages of every image: ``build-essential`` compiles, ``curl``
+#: fetches Bazelisk, and ``git`` lets a run name the revision it ran.
+APT_PACKAGES = ("build-essential", "curl", "git")
+
+#: The profiler package of the two profile images. It sits beside
+#: :data:`APT_PACKAGES` and below the tree, because a layer above the tree copy
+#: is rebuilt by every source change: one file cost 215 and 63 seconds of apt on
+#: 2026-11-10, for a profiler that a card job never runs.
+NSYS_PACKAGE = "nsight-systems-2023.4.4"
+
+
+def _apt_command(packages: Sequence[str]) -> str:
+    """The apt line of an image, with three attempts.
+
+    ``Image.apt_install`` emits a bare ``apt-get update``, and a builder whose
+    index fetch fails fails the whole deployment. One attempt on 2026-11-09 read
+    "Some index files failed to download" and exited 100, which is the same
+    class as the ``504`` this tree records for the GitHub fetch. The loop keeps
+    one layer, and a retry costs seconds instead of a run.
+
+    ``--no-install-recommends`` keeps the layer to the packages the build names.
+    """
+    names = " ".join(packages)
+    return (
+        "for attempt in 1 2 3; do "
+        f"apt-get update && apt-get install -y --no-install-recommends {names} "
+        "&& exit 0; "
+        'echo "apt attempt ${attempt} failed"; sleep 15; '
+        "done; exit 1")
+
+
+def _toolkit_image(leg: Leg, profile: bool = False):
+    """The base of one leg's image: the toolkit, the apt packages, and Bazelisk.
+
+    ``profile`` adds Nsight Systems here, below the tree, and not above it. The
+    order is the cost: a layer above the tree copy is rebuilt by every source
+    change, and the profiler is a 335 MB apt install that a card job never uses.
+    """
+    image = (
+        modal.Image.from_registry(
+            "nvidia/cuda:12.4.1-devel-ubuntu22.04", add_python="3.11")
+        .run_commands(_apt_command(APT_PACKAGES))
+    )
+    if profile:
+        image = image.run_commands(_apt_command((NSYS_PACKAGE,)))
+    return image.run_commands(
+        "curl -fsSL --retry 3 --retry-all-errors "
+        "-o /usr/local/bin/bazelisk "
+        "https://github.com/bazelbuild/bazelisk/releases/download/"
+        "v1.22.1/bazelisk-linux-amd64",
+        "chmod 0755 /usr/local/bin/bazelisk",
+    )
+
+
+def _build_image(leg: Leg, profile: bool = False):
     """The image of one leg, before :func:`image_for` caches it.
 
     The image holds the toolkit, the tree, the installed package, and the
@@ -676,17 +740,7 @@ def _build_image(leg: Leg):
     reach an image build, so a cache in the image would be cold on every
     rebuild, and :func:`_ensure_build` builds in the container instead.
     """
-    image = (
-        modal.Image.from_registry(
-            "nvidia/cuda:12.4.1-devel-ubuntu22.04", add_python="3.11")
-        .apt_install("build-essential", "curl", "git")
-        .run_commands(
-            "curl -fsSL -o /usr/local/bin/bazelisk "
-            "https://github.com/bazelbuild/bazelisk/releases/download/"
-            "v1.22.1/bazelisk-linux-amd64",
-            "chmod 0755 /usr/local/bin/bazelisk",
-        )
-    )
+    image = _toolkit_image(leg, profile=profile)
     # The manifest, the tooling, and the fetch come before the tree, so a source
     # change rebuilds one layer and not three (docs/build.md section 6.4).
     image = _manifest_layer(image, leg)
@@ -1958,11 +2012,6 @@ def step_split(job_json: str, corpus_json: str, steps: int = 6) -> str:
 # The H100 profile: one Nsight Systems trace of the base stage
 # ---------------------------------------------------------------------------
 
-#: The Nsight Systems package the CUDA 12.4.1 image can install. The image
-#: already holds the CUDA apt repository, so the profile image is one small
-#: layer over the built image and never a second build of the library.
-NSYS_PACKAGE = "nsight-systems-2023.4.4"
-
 #: The directory of the trace inside one run directory.
 PROFILE_DIRNAME = "profile"
 
@@ -2006,13 +2055,13 @@ _PROFILE_IMAGES: dict = {}
 def profile_image_for(leg: Leg):
     """The image of one leg with Nsight Systems installed.
 
-    The layer sits on top of :func:`image_for`, so the one build of the library
-    is reused and the trace is a measurement of the library the chain ran.
+    The profiler is an apt layer of the toolkit, below the tree copy, so a
+    source change does not reinstall it. The trace is still a measurement of the
+    library the chain ran, because the container builds that library itself.
     """
     built = _PROFILE_IMAGES.get(leg.name)
     if built is None:
-        built = _PROFILE_IMAGES[leg.name] = image_for(leg).apt_install(
-            NSYS_PACKAGE)
+        built = _PROFILE_IMAGES[leg.name] = _build_image(leg, profile=True)
     return built
 
 

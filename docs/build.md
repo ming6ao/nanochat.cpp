@@ -747,12 +747,19 @@ directory into `--disk_cache` and `--repository_cache` under it, and it raises
 with the variable's name when the directory is not writable. A URL becomes
 `--remote_cache` instead, which is the only transport an image build can reach.
 
-The measurement that chose this shape is on the CPU library: 23.0 seconds for 76
-actions with a cold cache, and 3.4 seconds with a warm one. Two things follow,
-and both are deliberate. The first run of a leg pays the whole compile in a
+The measurement that chose this shape is the T4 leg on 2026-11-10. Its 190
+actions read 133 disk cache hits, and the build cost 19.1 seconds on a warm
+Volume and 101.9 seconds on the first read after `warm_cache` wrote the cache.
+The hits are downloads, so the Volume's latency per file is the cost, and the
+3.4 seconds a local disk cache reads does not model it. Two things follow, and
+both are deliberate. The first run of a leg pays the whole compile in a
 container with four cores, so `modal run tools/modal/app.py::warm_cache` pays it
-once, in a function with an hour to spend. A warm run pays seconds where the
-image path paid nothing.
+once, in a function with an hour to spend. A warm run pays tens of seconds where
+the image path paid nothing.
+
+The profiler is an apt layer of the toolkit and not of the tree. A layer above
+the tree copy is rebuilt by every source change, and one file cost 215 and 63
+seconds of apt on 2026-11-10, for a profiler that a card job never runs.
 
 The image still resolves the external repositories. It copies the module graph
 and the tooling first, then runs `tools/nanochat build --nobuild`, so the

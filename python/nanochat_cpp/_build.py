@@ -62,6 +62,7 @@ __all__ = [
     "build_key",
     "build_stages",
     "cache_dir",
+    "cache_flags",
     "cached_library",
     "compiler_version",
     "ensure_library",
@@ -401,6 +402,17 @@ def _cache_flags(options: BuildOptions) -> list[str]:
         f"--experimental_disk_cache_gc_max_size={DISK_CACHE_MAX_SIZE}",
         f"--experimental_disk_cache_gc_max_age={DISK_CACHE_MAX_AGE}",
     ]
+
+
+def cache_flags(value: str | None = None) -> list[str]:
+    """The Bazel cache flags of the environment, or none when it names none.
+
+    ``tools/nanochat build`` appends these, so a hand-run build names the same
+    caches as a build through :func:`build` and through the Modal image. The
+    value is resolved the way :class:`BuildOptions` resolves it, so a caller
+    reads one precedence: the argument, then the environment.
+    """
+    return _cache_flags(BuildOptions.resolve(bazel_cache=value))
 
 
 def _no_library_message(cache: Path) -> str:

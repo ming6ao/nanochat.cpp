@@ -190,8 +190,26 @@ def cmd_help(argv: list[str], ctx: Context) -> int:
     return 0
 
 
-def _build_argv(targets: list[str]) -> list[str]:
-    return ["build", *(targets or ["//..."])]
+#: The cache flags a build may state itself. An explicit flag wins, because the
+#: caller named it and the appended flags would otherwise be the last word.
+_CACHE_FLAGS = ("--disk_cache", "--repository_cache", "--remote_cache")
+
+
+def _build_argv(argv: list[str]) -> list[str]:
+    """The Bazel argument list for ``build``, with the cache flags appended.
+
+    ``NANOCHAT_BAZEL_CACHE`` reached the Python API and the Modal image and not
+    a hand-run build, because this command forwards its arguments straight to
+    Bazel. Appending the flags from ``nanochat_cpp._build`` gives the flag line
+    one home and the variable one meaning.
+    """
+    from nanochat_cpp import _build  # noqa: PLC0415 - the build path only
+
+    arguments = list(argv) or ["//..."]
+    if not [part for part in arguments
+            if part.split("=", 1)[0] in _CACHE_FLAGS]:
+        arguments = [*arguments, *_build.cache_flags()]
+    return ["build", *arguments]
 
 
 def cmd_build(argv: list[str], ctx: Context) -> int:
