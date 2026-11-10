@@ -326,6 +326,8 @@ bar.
 | Part | Path | State |
 |---|---|---|
 | One H100 base trace, traced and analyzed | `profiles/h100-base-20step/` | A local artifact, and git ignores it. 20 steps, 190317 device operations |
+| The same trace after the gradient-norm fix | `profiles/h100-base-after-gradnorm/` | A local artifact. The step falls from 76.9 to 36.6 ms of device time, and 25.4 ms of the remaining device time is 7,190 tiny GEMM launches |
+| One measured base step at the reference shape | `profiles/h100-big-ref/`, and the `train_h100_big` entry of [baselines.json](baselines.json) | Measured. 180.37 ms per step against a 64.09 ms bound, so the fraction is 0.355. No trace yet, so the gap is not split |
 | The analyzer that produced it | `.agents/skills/pgo/scripts/summarize_trace.py` | The standalone form. `nanochat_cpp.pgo analyze` is the tested form |
 | The Modal function that produced it | `tools/modal/app.py`, `profile_h100` | Done for `base` on `h100` only |
 | The uniform step record | `include/nanochat/logger.h`, `LogRecord` | Done. `step_ms`, `mfu`, `forward_ms`, `backward_ms`, `optim_ms`, `sync_ms`, `data_ms` |

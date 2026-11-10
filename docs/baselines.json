@@ -1618,6 +1618,76 @@
           "cutlass_fraction_of_cublaslt": 1.0306
         }
       ]
+    },
+    "train_h100_big": {
+      "note": "One base stage of the chain at the reference throughput shape, measured without a profiler on one H100 80GB HBM3 at bf16. The shape is the `big` profile of python/nanochat_cpp/pipeline.py and the default of `tools/nanochat roofline`: 20 layers, 10 query heads, 5 key-value heads, hidden 1280, sequence 1024, vocabulary 32768, window SSL, batch 16, grad-accum 1, one device. That is 16384 tokens per optimizer step. Two runs of 12 steps each: step 1 is the warmup and is reported apart, and the eleven steady steps are the rows. The binding is the roofline bound of docs/performance-model.md section 7.3.1 with the five Polar Express iterations the shipped optimizer runs (include/nanochat/optim.h, OptimizerConfig::muon_ns_steps), so the fraction is 0.3553. The measured model rate is 234 TFLOP/s against the 989 TFLOP/s declared peak, and the engine's own MFU line reads 23.66 percent, which is the same number. This entry is a step measurement and not a kernel measurement: it names no row of the counter table, because no trace was taken and the split by family is therefore unknown at this shape.",
+      "date": "2026-11-10",
+      "nanochat_cpp_revision": "d6f0365",
+      "working_tree": "The base stage and the seam are d6f0365. The run carried the roofline default of this commit's successor, which touches src/performance_model.cc, src/roofline_command.cc, and src/harness_test.cc only; no model, kernel, or optimizer source differed from d6f0365.",
+      "device": "NVIDIA H100 80GB HBM3 (sm_90)",
+      "validated_on": "NVIDIA H100 80GB HBM3 (sm_90)",
+      "precision": "bf16",
+      "config": {
+        "profile": "big",
+        "depth": 20,
+        "model_dim": 1280,
+        "heads": 10,
+        "kv_heads": 5,
+        "head_dim": 128,
+        "context": 1024,
+        "window_pattern": "SSL",
+        "vocab": 32768,
+        "padded_vocab": 32768,
+        "device_batch": 16,
+        "grad_accum": 1,
+        "devices": 1,
+        "tokens_per_step": 16384,
+        "flops_per_token": 2575568544.0,
+        "flops_per_step": 42200000000000.0,
+        "muon_ns_steps": 5,
+        "steps_measured": 11,
+        "warmup_steps": 1
+      },
+      "measurement": "modal run tools/modal/app.py::measure_stage --stage base --device h100 --job /tmp/big-ref-job.json --run-id big-ref-measure --steps 12 --runs 2 --seconds 900",
+      "runs": [
+        {
+          "name": "run0",
+          "step_ms_median": 180.372,
+          "step_ms_mean": 180.338,
+          "step_ms_min": 179.893,
+          "step_ms_max": 181.061,
+          "tokens_per_second": 90834,
+          "model_tflops": 234.0,
+          "mfu": 0.2366,
+          "warmup_step_ms": 714.182
+        },
+        {
+          "name": "run1",
+          "step_ms_median": 181.427,
+          "step_ms_mean": 181.9,
+          "step_ms_min": 179.631,
+          "step_ms_max": 185.876,
+          "tokens_per_second": 90306,
+          "model_tflops": 232.6,
+          "mfu": 0.2352,
+          "warmup_step_ms": 748.988
+        }
+      ],
+      "promoted_measurement": {
+        "protocol": "docs/performance.md section 7, and docs/performance-model.md section 10",
+        "best_run": "run0",
+        "step_ms_median": 180.372,
+        "tokens_per_second": 90834,
+        "model_tflops": 234.0,
+        "mfu": 0.2366,
+        "bound_ms": 64.092,
+        "bound_command": "tools/nanochat run t0-cpu -- ./bazel-bin/src/nanochat_cli roofline --precision bf16",
+        "bound_mfu": 0.6657,
+        "fraction_of_bound": 0.3553,
+        "fraction_note": "The bound assumes every row at its declared peak. The gap is 2.81 times, and the three causes a later measurement must separate are the achieved GEMM rate, the launch and host path, and the orthogonalisation bound of section 7.3.1."
+      },
+      "origin": "docs/performance-model.md section 10, profiles/h100-big-ref/REPORT.md",
+      "validated_on_host": "Modal H100 image, bf16, tools/modal/app.py H100 leg"
     }
   }
 }

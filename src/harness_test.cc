@@ -61,6 +61,13 @@ void Fail(const std::string& message) {
   ++g_failures;
 }
 
+void ExpectTrue(bool value, const std::string& what) {
+  if (!value) {
+    std::fprintf(stderr, "FAIL: %s\n", what.c_str());
+    ++g_failures;
+  }
+}
+
 void ExpectNear(double actual, double expected, double tolerance,
                 const std::string& what) {
   if (std::fabs(actual - expected) > tolerance) {
@@ -135,21 +142,33 @@ void TestMfu() {
 // orthogonalisation's arithmetic is counted at the compute-type peak. A model
 // flag that stops reaching the estimator, or a counter row that changes, breaks
 // this test rather than a document.
+//
+// The shape is not written here. It comes from `ReferenceThroughputConfig`,
+// which is also the default of `tools/nanochat roofline`, so the numbers below
+// pin the default report and not a private copy of it.
 void TestBigShapeRoofline() {
-  Config config;
-  config.num_layers = 20;
-  config.num_heads = 10;
-  config.num_kv_heads = 5;
-  config.hidden_dim = 1280;
-  config.seq_len = 1024;
-  config.vocab_size = 32768;
-  config.padded_vocab_size = 32768;
-  config.window_pattern = "SSL";
+  const Config config = nanochat::ReferenceThroughputConfig();
+  ExpectNear(static_cast<double>(config.num_layers), 20.0, 1e-9,
+             "reference shape layers");
+  ExpectNear(static_cast<double>(config.num_heads), 10.0, 1e-9,
+             "reference shape heads");
+  ExpectNear(static_cast<double>(config.num_kv_heads), 5.0, 1e-9,
+             "reference shape kv-heads");
+  ExpectNear(static_cast<double>(config.hidden_dim), 1280.0, 1e-9,
+             "reference shape hidden");
+  ExpectNear(static_cast<double>(config.seq_len), 1024.0, 1e-9,
+             "reference shape seq");
+  ExpectNear(static_cast<double>(config.padded_vocab_size), 32768.0, 1e-9,
+             "reference shape padded vocab");
+  ExpectTrue(config.window_pattern == "SSL", "reference shape window");
 
-  nanochat::ModelPlan plan;
-  plan.device_name = "h100";
+  nanochat::ModelPlan plan = nanochat::ReferenceThroughputPlan();
+  ExpectNear(static_cast<double>(plan.batch), 16.0, 1e-9,
+             "reference shape batch");
+  ExpectTrue(plan.device_name == "h100", "reference shape device");
+  ExpectNear(static_cast<double>(plan.total_tokens), 5.84e9, 1.0,
+             "reference run length");
   plan.build = nanochat::ComputePrecision::kBf16;
-  plan.batch = 16;
 
   // 2,575,568,544 FLOP per token, which the reference's own
   // `model.estimate_flops()` agrees with to the digit, over 16384 tokens per
@@ -158,23 +177,32 @@ void TestBigShapeRoofline() {
   ExpectNear(per_token, 2.575568544e9, 1.0, "big shape FLOPs per token");
   ExpectNear(per_token * 16384.0, 42.2e12, 0.05e12, "big shape FLOPs per step");
 
+  // The default reports the shipped stage, which runs the orthogonalisation.
+  ExpectNear(static_cast<double>(plan.muon_ns_steps), 5.0, 1e-9,
+             "reference shape Muon iterations");
   const nanochat::PerformanceEstimate estimate =
       nanochat::EstimatePerformance(config, plan);
-  ExpectNear(1000.0 * estimate.step_seconds, 53.38, 0.05,
-             "big shape roofline, ms");
-  ExpectNear(estimate.model_mfu, 0.7993, 5e-4, "big shape roofline MFU");
+  ExpectNear(1000.0 * estimate.step_seconds, 64.09, 0.05,
+             "big shape roofline with the Muon arithmetic, ms");
+  ExpectNear(estimate.optimizer_flops, 10.59e12, 0.01e12,
+             "big shape Muon FLOPs per step");
+  ExpectNear(estimate.model_mfu, 0.6657, 5e-4,
+             "big shape MFU once the Muon arithmetic is counted");
   ExpectNear(static_cast<double>(estimate.tokens_per_step), 16384.0, 1e-9,
              "big shape tokens per step");
+  // 5.84 billion tokens at 16384 per step, rounded up.
+  ExpectNear(static_cast<double>(estimate.steps), 356446.0, 1e-9,
+             "big shape run steps");
 
-  plan.muon_ns_steps = 5;
-  const nanochat::PerformanceEstimate with_muon =
+  // The structural row: the same plan with the iterations left out, which is
+  // the shape of the model alone and the denominator the optimizer row divides.
+  plan.muon_ns_steps = 0;
+  const nanochat::PerformanceEstimate without_muon =
       nanochat::EstimatePerformance(config, plan);
-  ExpectNear(1000.0 * with_muon.step_seconds, 64.09, 0.05,
-             "big shape roofline with the Muon arithmetic, ms");
-  ExpectNear(with_muon.optimizer_flops, 10.59e12, 0.01e12,
-             "big shape Muon FLOPs per step");
-  ExpectNear(with_muon.model_mfu, 0.6657, 5e-4,
-             "big shape MFU once the Muon arithmetic is counted");
+  ExpectNear(1000.0 * without_muon.step_seconds, 53.38, 0.05,
+             "big shape roofline without the Muon arithmetic, ms");
+  ExpectNear(without_muon.model_mfu, 0.7993, 5e-4,
+             "big shape roofline MFU without the Muon arithmetic");
 }
 
 void TestMuonFlops() {

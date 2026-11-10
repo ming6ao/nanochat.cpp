@@ -39,20 +39,25 @@ constexpr char kUsage[] =
     "  --device NAME          device profile (default h100)\n"
     "  --list-devices         print the declared device names and exit\n"
     "  --precision P          fp32|bf16|fp8, or auto (default auto)\n"
-    "  --batch N              micro-batch per device (default 1)\n"
+    "  --batch N              micro-batch per device (default 16)\n"
     "  --grad-accum N         micro-batches per step (default 1)\n"
     "  --devices N            data-parallel world size (default 1)\n"
     "  --tokens N             total run tokens; 0 for one step\n"
+    "                         (default 5.84e9, the reference budget)\n"
     "  --link-gbps N          per-rank link bandwidth (default 0)\n"
     "  --latency-us N         link latency in microseconds (default 5)\n"
     "  --overlap F            fraction of the sync hidden (default 0)\n"
     "  --reference-copies     model the reference per-step weight copies\n"
     "  --muon-ns-steps N      Muon iteration count; 0 keeps it memory bound\n"
+    "                         (default 5, the shipped stage)\n"
     "  --json                 write nanochat.roofline.v3 JSON\n"
     "  --help                 this message\n"
     "  [model flags: --layers --heads --kv-heads --hidden --seq\n"
     "   --vocab --padded-vocab --window-pattern --rope-base\n"
-    "   --value-embedding <0|1>]\n";
+    "   --value-embedding <0|1>]\n"
+    "  [model default: the reference throughput shape, 20 layers of 1280\n"
+    "   wide at 1024 tokens (--layers 20 --heads 10 --kv-heads 5\n"
+    "   --hidden 1280 --seq 1024 --vocab 32768 --window-pattern SSL)]\n";
 
 // Parses a whole token. `std::from_chars` needs no NUL terminator and ignores
 // the locale, which `std::strtod` does not.
@@ -84,9 +89,13 @@ bool ParsePrecision(std::string_view name, nanochat::ComputePrecision* out) {
 constexpr char kProgram[] = "roofline";
 
 int RunRoofline(int argc, char** argv) {
-  nanochat::Config config;
-  nanochat::ModelPlan plan;
-  std::string device = "h100";
+  // The default describes the model the card trains, not the smallest model the
+  // tree can hold: a report at 8 layers of 768 wide describes a step no run
+  // takes. One helper serves the command and the test, so the shape a report
+  // states and the shape a test pins cannot drift.
+  nanochat::Config config = nanochat::ReferenceThroughputConfig();
+  nanochat::ModelPlan plan = nanochat::ReferenceThroughputPlan();
+  std::string device = plan.device_name;
   std::string precision_name = "auto";
   bool json = false;
 

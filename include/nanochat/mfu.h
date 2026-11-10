@@ -181,6 +181,25 @@ struct ModelPlan {
   int muon_ns_steps = 0;
 };
 
+// The throughput shape of the reference: 20 layers of width 1280, ten query
+// heads over five key-value heads, 1024 tokens of context, a 32768 word
+// vocabulary, and the `SSL` window. It is the `big` profile of the chain and
+// the shape `profiles/pgo/big` measures, so a bound and a measurement state one
+// shape (docs/performance-model.md section 7.3).
+//
+// The estimator's fields it does not set keep the `Config` default, exactly as
+// a caller that passes the shape as flags leaves them. That is what makes the
+// report match a run: a flag overrides one field, and every other field stays.
+Config ReferenceThroughputConfig();
+
+// The plan that pairs with `ReferenceThroughputConfig`: one micro-batch of
+// sixteen sequences, which is 16384 tokens per optimizer step, and the
+// reference token budget of 5.84 billion at ratio 8
+// (docs/host-portability.md Part 1), with the five Polar Express iterations the
+// shipped optimizer runs, read against the `h100` rate table. A run length is
+// in the plan because a step bound alone says nothing about a run.
+ModelPlan ReferenceThroughputPlan();
+
 // The phase of one optimizer step that a counter row belongs to
 // (docs/performance-model.md section 7.4). The names match the phase split of
 // the training log, so a bound and a measurement join phase by phase.

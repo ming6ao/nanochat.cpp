@@ -127,12 +127,21 @@ Consequences for the one model in the tree:
 | `attention` | separate | own T x T pattern |
 | `embedding gather` | separate | indexed access |
 | GEMM -> GEMM | no | cuBLAS owns both |
-| the Polar Express chain: square GEMM -> `b = cb·a + cc·acc` -> apply GEMM -> `x = ca·x + prod` | **no, measured** | all five conditions hold and the kernel exists (Part 1), but the hand GEMM falls short of the cuBLAS rate, so the fused step is slower and the shipped multi-launch path stays |
+| the Polar Express chain: square GEMM -> `b = cb·a + cc·acc` -> apply GEMM -> `x = ca·x + prod` | **no, measured on the hand GEMM** | all five conditions hold and the kernel exists (Part 1), but the hand GEMM read 0.68 to 0.90 of the cuBLAS rate, so the fused step was slower than the multi-launch path |
 
 That last row is the one row of this table a campaign measured rather than
 argued. It is also the one where the structural verdict and the performance
-verdict agree: condition 3 (no library displacement) fails, because the
-arithmetic the fusion would own is arithmetic cuBLAS already wins.
+verdict agreed: condition 3 (no library displacement) failed, because the
+arithmetic the fusion would own is arithmetic cuBLAS already won.
+
+**That measurement is of the hand GEMM and not of the fusion.** The vendor
+mainloop now reads 0.87 to 1.18 of the cuBLAS rate on the Muon rows, so
+condition 3 holds where it failed. Re-run Part 1's kernel on
+`backends/cuda/gemm/cutlass_bf16.cu` before treating this row as settled. The
+prize is bounded: the two optimizer rows of the reference shape are 13.84 ms of
+a 64.09 ms bound, so a re-run buys at most 22 percent, and the measured
+orthogonalisation is 0.48 of its own bound
+([performance-model.md](performance-model.md) section 7.3.1).
 
 Performance **validates** a boundary. Performance does not choose a boundary.
 Structure decides which boundaries are legal: the decomposition, the residency,
@@ -152,29 +161,60 @@ case.
 
 ### GEMM
 
-cuBLAS is the GEMM engine today. [Part 3](#part-3-the-hand-written-gemm-revision-cublas-as-the-reference-only)
-sets the direction: the hand library serves every call, and cuBLAS stays only as
-the measurement reference. Two measurements set the current rule, and both stay
-true.
+The GEMM engine is the vendor mainloop of `backends/cuda/gemm/cutlass_bf16.cu`
+where it wins, and cuBLAS everywhere else. [Part 3](#part-3-the-hand-written-gemm-revision-cublas-as-the-reference-only)
+set the direction, and phase 2 landed it, so the older rule that the hand
+library serves every call is history.
+
+Four measurements set the current rule.
 
 - Part 1 measured what a hand-written batched GEMM costs when a fusion needs
   one: 0.68 to 0.90 of the cuBLAS rate on the groups the fusion targets.
-- Part 3 measured the bf16 tensor-core tile at 0.08 to 0.30 of the cuBLAS rate.
+- Part 3 measured the hand-written bf16 tensor-core tile at 0.08 to 0.30 of the
+  cuBLAS rate, so no shape takes it.
+- The Hopper mainloop that CUTLASS supplies reads 0.576 to 1.176 of the cuBLAS
+  rate on the 28 production rows, and nine of them are promoted at 0.87 to 0.97
+  through the seam. Section 17 of
+  [../backends/cuda/gemm/README.md](../backends/cuda/gemm/README.md) is the
+  record.
+- The fp8 arm reads 0.751 to 1.031 on the five forward rows it measured, so the
+  gate of 0.95 holds on one row and nothing is promoted. Section 18 is the
+  record.
 
-The first is why the design does not hand-write a GEMM to reach a fusion. The
-second is why the campaign rejected the warp-level tile. Neither one is a
-statement about a Hopper-native kernel, and Part 3 section 3 draws that
-difference.
+What follows from those four:
 
-Do not hand-write a GEMM for the dense path until Part 3 phase 2 passes its gate.
-The plan there has no code yet, and this line is the rule until it lands.
+1. Do not hand-write a GEMM for the dense path. The hand tile lost, and it stays
+   only as the emulator's leg and the small-shape fallback.
+2. Do not add a cuBLAS call where the mainloop serves the shape. The remaining
+   work is coverage and not a new mainloop: 19 production rows, the small-shape
+   tier, and the grouped call.
+3. At the reference shape the matrix multiplies are 41.18 ms of a 64.09 ms
+   bound, so the GEMM rate is the largest single lever in the tree. Every other
+   family together is 22.9 ms of that bound.
 
 ### Launch overhead
 
-At `d8_s512` a full step takes about 0.9 s, and kernel launches stay under 1% of
-that time. CUDA Graphs are therefore an optional internal optimization of the
-CUDA backend and not an architectural element. Add them only when a profile
-demands them ([performance.md](performance.md)).
+The measured cost is large, and it grows as the step gets shorter. The traced
+base step of the local artifact `profiles/h100-base-after-gradnorm/REPORT.md`
+holds 7,882 launches, 7,281 kernel-function lookups, and 107 `cudaMalloc`
+pairs. Its host spends 23.3 ms in its own code after a launch and 6.1 ms after a
+lookup, and `cudaMalloc` costs another 8.1 ms. The step is 76.9 ms, so more than
+a third of it is not device time.
+
+The old figure of one percent came from `d8_s512` at fp32, whose step was 0.9 s
+because its arithmetic was slow. That shape cannot answer this question: a
+launch costs the same at every shape and the arithmetic does not, so the share
+of a step a launch owns rises as the arithmetic gets faster.
+
+CUDA Graphs are therefore the first optimization a profile asks for, and not an
+optional one. The tree already made that decision for one family: D4 of
+[model.md](model.md) captures one graph per Muon group and removes 0.70 ms of
+launch cost with no arithmetic change. The same change is now the first item for
+the whole step.
+
+Two smaller changes come before capture. A cached kernel handle removes the
+7,281 lookups. The host round trips in `RowScalars` (`src/ops.cc`) must go too,
+because a device-to-host copy during capture either fails or serializes it.
 
 ### No megakernels for training
 
@@ -182,6 +222,21 @@ A whole-block megakernel needs a hand-written GEMM, because a device-side kernel
 cannot call cuBLAS. It also collapses occupancy, it serializes the phases behind
 a grid barrier, and it still pays the HBM round trip across a tile boundary.
 That is the wrong trade for throughput-bound training.
+
+**One premise changed, and the rule did not.** The first sentence was true when
+the rule was written and it is false now: `backends/cuda/gemm/cutlass_bf16.cu`
+drives a vendor mainloop behind the seam, and it reads 0.87 to 0.97 of the
+cuBLAS rate on the nine rows it serves. The other three clauses stand, and they
+are the ones that decide this. A grid barrier, one block size for every phase,
+and the traffic across a tile boundary are still losses, and the corollary
+below prices the first two.
+
+The rule is therefore narrower than it reads. Fuse where a vendor mainloop
+already owns the arithmetic and the consumer is row local. Do not fuse the whole
+step, and do not fuse a step whose GEMM a fusion would slow. The prize at the
+reference shape is small: section Compute strategy states that the matrix
+multiplies are 41.18 ms of a 64.09 ms bound, so a fusion that does not carry the
+GEMM touches 36 percent of the step at most.
 
 **Measured corollary:** Part 1 is the optimizer-stage test of that argument. The
 sixteen phases are legal, tested, and slower: one block size for every stage

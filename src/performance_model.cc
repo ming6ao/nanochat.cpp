@@ -465,6 +465,34 @@ bool IsComputeBound(double flops, double bytes, const PerformanceLimits& limits,
   return compute_seconds >= memory_seconds;
 }
 
+Config ReferenceThroughputConfig() {
+  Config config;
+  config.num_layers = 20;
+  config.num_heads = 10;
+  config.num_kv_heads = 5;
+  config.hidden_dim = 1280;
+  config.seq_len = 1024;
+  config.vocab_size = 32768;
+  config.padded_vocab_size = 32768;
+  config.window_pattern = "SSL";
+  return config;
+}
+
+ModelPlan ReferenceThroughputPlan() {
+  ModelPlan plan;
+  plan.device_name = "h100";
+  plan.batch = 16;
+  // The reference token budget at ratio 8 (docs/host-portability.md Part 1),
+  // which is the run the report should describe. Zero would model one step and
+  // leave the run fields empty.
+  plan.total_tokens = 5840000000;
+  // The shipped optimizer, which runs five Polar Express iterations
+  // (docs/model.md, The decisions that fix the step). Zero would leave the
+  // orthogonalisation out of the report, and it is 16.7 percent of the step.
+  plan.muon_ns_steps = 5;
+  return plan;
+}
+
 PerformanceEstimate EstimatePerformance(const Config& config,
                                         const ModelPlan& plan) {
   return EstimatePerformance(config, LimitsForDevice(plan.device_name), plan);
