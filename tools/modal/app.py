@@ -497,6 +497,41 @@ def probe_build_command(leg: Leg, target: str, arch: str,
         f"'tools/nanochat', _options, ({target!r},)), check=True)\"")
 
 
+#: The patterns that keep local state out of the image. ``add_local_dir``
+#: hashes the tree, so a file that changes on every run rebuilds the copy layer
+#: and every layer above it, including the layer that runs Bazel. The list is a
+#: module constant, so ``tools/modal/modal_app_test.py`` reads the same list
+#: that the call passes (``docs/build.md`` section 6.4).
+IMAGE_IGNORE = (
+    # The history is not source, and one checkout is tens of megabytes.
+    ".git",
+    # Bazel's convenience symlinks and output tree of the host.
+    "bazel-*",
+    # Bytecode of the host interpreter.
+    "**/__pycache__",
+    # The profile artifacts of ``docs/performance.md``: local measurements, and
+    # one trace is hundreds of megabytes. The loop passes its job file as a
+    # JSON string, so the image never reads them.
+    "profiles",
+    # The coding agent logs into ``.pi``, and a file that changes under the
+    # build fails it.
+    ".pi",
+    # The state of the agent runner: a SQLite database that it rewrites on
+    # every action, and one git worktree per campaign. It is untracked, it
+    # changes on every run, and no target reads it, so this entry is the
+    # difference between a cached build layer and a full rebuild.
+    ".sliceme",
+    # The sandbox configuration of the agent runner, which no target reads.
+    "sliceme.sandbox.json",
+    # The host file of ``docs/host-portability.md`` section 8.3 pins the
+    # compiler and the budget of the workstation, such as /usr/bin/gcc-12, which
+    # an Ubuntu 22.04 image does not have. A deploy from a host that ran
+    # ``tools/kaggle/bootstrap.sh`` would otherwise build an image that cannot
+    # compile.
+    ".bazelrc.local",
+)
+
+
 def _build_image(leg: Leg):
     """The image of one leg, before :func:`image_for` caches it."""
     return (
@@ -510,24 +545,7 @@ def _build_image(leg: Leg):
             "chmod 0755 /usr/local/bin/bazelisk",
         )
         .add_local_dir(str(REPO), remote_path=REPO_ROOT, copy=True,
-                       ignore=[".git", "bazel-*", "**/__pycache__",
-                               # The profile artifacts of
-                               # `docs/performance.md` are local
-                               # measurements, and one trace is hundreds of
-                               # megabytes. The loop passes its job file as a
-                               # JSON string, so the image never reads them.
-                               "profiles",
-                               # The coding agent logs into `.pi`, and a file
-                               # that changes under the build fails it.
-                               ".pi",
-                               # The host file of `docs/host-portability.md`
-                               # section 8.3 pins the compiler and the budget of
-                               # the workstation, such as /usr/bin/gcc-12, which
-                               # an Ubuntu 22.04 image does not have. A deploy
-                               # from a host that ran `tools/kaggle/bootstrap.sh`
-                               # would otherwise build an image that cannot
-                               # compile.
-                               ".bazelrc.local"])
+                       ignore=list(IMAGE_IGNORE))
         # Install the package at image build (section 6.4). The tree install
         # builds the distribution of python/pyproject.toml in place, so both
         # import packages and the `hub` extra - huggingface_hub and

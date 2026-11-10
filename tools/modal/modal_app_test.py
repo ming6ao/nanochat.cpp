@@ -471,6 +471,31 @@ class ImageTest(unittest.TestCase):
         self.assertIn("add_local_dir", _source())
         self.assertIn("copy=True", _source())
 
+    def test_the_image_ignore_list_names_every_local_state(self) -> None:
+        # `add_local_dir` hashes the tree, and a changed hash rebuilds the copy
+        # layer and the layer above it that runs Bazel. A local state directory
+        # that the list misses therefore costs a full compile on every run, and
+        # `.sliceme` holds a SQLite database that the agent runner rewrites on
+        # every action.
+        self.assertEqual(self.app.IMAGE_IGNORE, (
+            ".git", "bazel-*", "**/__pycache__", "profiles", ".pi",
+            ".sliceme", "sliceme.sandbox.json", ".bazelrc.local"))
+
+    def test_the_ignore_list_reaches_the_copy(self) -> None:
+        # The constant is the one home of the list, so the call cannot hold a
+        # second copy that this test does not read.
+        self.assertIn("ignore=list(IMAGE_IGNORE)", _source())
+
+    def test_the_ignore_list_names_no_source_package(self) -> None:
+        # A pattern that matches a package removes the tree the build reads, and
+        # the failure is a missing header inside the container. Only the two
+        # entries that name Bazel's outputs and the bytecode of the interpreter
+        # are globs.
+        for pattern in self.app.IMAGE_IGNORE:
+            if pattern in ("bazel-*", "**/__pycache__"):
+                continue
+            self.assertFalse(any(ch in pattern for ch in "*?["), pattern)
+
     def test_the_notebook_modules_are_importable(self) -> None:
         self.assertIn("{REPO_ROOT}/notebooks", _source())
 
@@ -484,7 +509,7 @@ class ImageTest(unittest.TestCase):
         # The host file pins /usr/bin/gcc-12, which the image does not have, so
         # a deploy from a host that ran tools/kaggle/bootstrap.sh would build
         # an image that cannot compile (section 8 row 10).
-        self.assertRegex(_source(), r"ignore=\[[^\]]*\.bazelrc\.local")
+        self.assertIn(".bazelrc.local", self.app.IMAGE_IGNORE)
 
     def test_no_chain_leg_passes_a_named_simulator_config(self) -> None:
         # `h100` in .bazelrc is the simulator, and it also sets the native
