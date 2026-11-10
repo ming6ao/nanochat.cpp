@@ -147,7 +147,8 @@ class CacheTest(unittest.TestCase):
 
 class BuildOptionsTest(unittest.TestCase):
     _NAMES = ("NANOCHAT_CPP_BACKEND", "NANOCHAT_CPP_PRECISION",
-              "NANOCHAT_CUDA_ARCH", "NANOCHAT_CPP_CACHE")
+              "NANOCHAT_CUDA_ARCH", "NANOCHAT_CPP_CACHE",
+              "NANOCHAT_BAZEL_CACHE")
 
     def setUp(self) -> None:
         self._previous = {name: os.environ.get(name) for name in self._NAMES}
@@ -210,6 +211,34 @@ class BuildOptionsTest(unittest.TestCase):
             _build.build_key(),
             _build.build_key(options=_build.BuildOptions.from_env()))
 
+    def test_no_cache_is_the_default(self) -> None:
+        self.assertEqual(_build.bazel_cache(), "")
+        self.assertEqual(_build.BuildOptions.from_env().bazel_cache, "")
+
+    def test_the_cache_reads_the_environment(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            os.environ["NANOCHAT_BAZEL_CACHE"] = directory
+            self.assertEqual(_build.bazel_cache(), directory)
+            self.assertEqual(_build.BuildOptions.from_env().bazel_cache,
+                             directory)
+
+    def test_a_cache_url_keeps_its_scheme(self) -> None:
+        # The scheme is what selects the transport, so a URL must not become a
+        # path: `Path("https://h/ac")` would flatten the slashes and the build
+        # would ask for a disk cache at a nonsense path.
+        os.environ["NANOCHAT_BAZEL_CACHE"] = "https://cache.example/ac"
+        self.assertEqual(_build.bazel_cache(), "https://cache.example/ac")
+
+    def test_a_cache_path_expands_the_user(self) -> None:
+        os.environ["NANOCHAT_BAZEL_CACHE"] = "~/nanochat-bazel-cache"
+        self.assertEqual(_build.bazel_cache(),
+                         str(Path.home() / "nanochat-bazel-cache"))
+
+    def test_the_cache_override_beats_the_environment(self) -> None:
+        os.environ["NANOCHAT_BAZEL_CACHE"] = "/from-the-environment"
+        options = _build.BuildOptions.resolve(bazel_cache="/from-the-call")
+        self.assertEqual(options.bazel_cache, "/from-the-call")
+
 
 class BuildCommandTest(unittest.TestCase):
     def test_cuda_arch_reaches_the_command(self) -> None:
@@ -263,6 +292,76 @@ class BuildCommandTest(unittest.TestCase):
             f"the helper named a config of .bazelrc: {command}")
 
 
+class BazelCacheCommandTest(unittest.TestCase):
+    """The cache seam: one variable, a directory or a URL (section 6.4).
+
+    The flags reach the command, so a host that sets the variable builds
+    incrementally and a host that does not builds as it did. The directory form
+    is the one Colab and a workstation use; the URL form is the only one an
+    image build can reach, because a Modal Volume never attaches to an image.
+    """
+
+    def command(self, **kwargs) -> list:
+        options = _build.BuildOptions.resolve(
+            backend="cuda", precision="bf16", arch="sm_90", **kwargs)
+        return _build._build_command(Path("tools/nanochat"), options)
+
+    def test_no_cache_adds_no_flag(self) -> None:
+        command = self.command(bazel_cache="")
+        self.assertFalse([part for part in command
+                          if "cache" in part and part.startswith("--")])
+
+    def test_a_directory_holds_both_caches(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            command = self.command(bazel_cache=directory)
+            disk = Path(directory) / "disk"
+            repository = Path(directory) / "repo"
+            self.assertIn(f"--disk_cache={disk}", command)
+            self.assertIn(f"--repository_cache={repository}", command)
+            self.assertTrue(disk.is_dir())
+            self.assertTrue(repository.is_dir())
+
+    def test_a_directory_is_bounded(self) -> None:
+        # A cache with no bound fills the disk of a long session, and the
+        # failure arrives as a full disk in the middle of a build.
+        with tempfile.TemporaryDirectory() as directory:
+            command = self.command(bazel_cache=directory)
+            self.assertIn(
+                f"--experimental_disk_cache_gc_max_size="
+                f"{_build.DISK_CACHE_MAX_SIZE}", command)
+            self.assertIn(
+                f"--experimental_disk_cache_gc_max_age="
+                f"{_build.DISK_CACHE_MAX_AGE}", command)
+
+    def test_a_url_is_a_remote_cache(self) -> None:
+        command = self.command(bazel_cache="https://cache.example/ac")
+        self.assertIn("--remote_cache=https://cache.example/ac", command)
+        self.assertIn("--remote_upload_local_results", command)
+        self.assertFalse([part for part in command
+                          if part.startswith("--disk_cache=")])
+
+    def test_an_unwritable_cache_names_the_variable(self) -> None:
+        # The failure must name the variable: a cache that silently disappears
+        # turns a one minute build into a ten minute build with no message. A
+        # file at the path is the portable way to make the directory fail.
+        with tempfile.TemporaryDirectory() as directory:
+            blocker = Path(directory) / "not-a-directory"
+            blocker.write_text("", encoding="utf-8")
+            with self.assertRaises(_build.BuildError) as caught:
+                self.command(bazel_cache=str(blocker))
+            self.assertIn(_build.BAZEL_CACHE_ENV, str(caught.exception))
+
+    def test_the_stage_build_carries_the_cache(self) -> None:
+        # The Colab cell builds the library and the stage binary in one call, so
+        # the cache has to reach `_stages_command` and not only the library.
+        with tempfile.TemporaryDirectory() as directory:
+            options = _build.BuildOptions.resolve(
+                backend="cuda", precision="fp32", arch="sm_75",
+                bazel_cache=directory)
+            command = _build._stages_command(Path("tools/nanochat"), options)
+            self.assertIn(f"--disk_cache={Path(directory) / 'disk'}", command)
+
+
 class BazelConfigTest(unittest.TestCase):
     """Row 1: the ``hopper`` config, pinned beside the ``h100`` simulator.
 
@@ -305,6 +404,14 @@ class BazelConfigTest(unittest.TestCase):
             self.assertNotIn(
                 "simulator", flag,
                 f"the hopper stanza mentions a simulator flag: {flag}")
+
+    def test_the_workstation_keeps_its_action_pool(self) -> None:
+        # The image build overrides both values on its own command line, so the
+        # cap stays for the workstation, where several agent worktrees share
+        # 12 vCPU and 7.7 GiB. Raising it here would multiply the pool by the
+        # number of worktrees, which is the failure this file records.
+        self.assertIn("build --jobs=4", self.text)
+        self.assertIn("build --local_resources=memory=3072", self.text)
 
     def test_the_h100_stanza_is_still_the_simulator(self) -> None:
         """The neighbour: the same arch and precision, plus both simulator

@@ -25,10 +25,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 __all__ = [
+    "BAZEL_CACHE_ENV",
     "DEFAULT_REPO_DEST",
     "DEFAULT_REPO_URL",
     "DISTRIBUTION",
     "Host",
+    "KAGGLE_BAZEL_CACHE",
     "MODE_INSTALLED",
     "MODE_SOURCE",
     "apply_host_path",
@@ -50,6 +52,16 @@ DEFAULT_REPO_URL = "https://github.com/ming6ao/nanochat.cpp"
 
 #: The default repository location on Kaggle.
 DEFAULT_REPO_DEST = "/kaggle/working/nanochat.cpp"
+
+#: The Bazel cache of a Kaggle session. ``/kaggle/working`` is the writable
+#: directory of the session, so a rebuild after an edit reuses what the first
+#: build compiled. ``NANOCHAT_BAZEL_CACHE`` names another path, and a host that
+#: names none takes this one.
+KAGGLE_BAZEL_CACHE = "/kaggle/working/bazel-cache"
+
+#: The variable that names the cache. It is the builder's own name, and a test
+#: contracts the two so a rename cannot leave this module behind.
+BAZEL_CACHE_ENV = "NANOCHAT_BAZEL_CACHE"
 
 #: The distribution that carries both import packages (D1 and D2).
 DISTRIBUTION = "nanochat-cpp"
@@ -269,7 +281,13 @@ def setup(url: str = DEFAULT_REPO_URL, dest: str | Path = DEFAULT_REPO_DEST,
     the repository path, which is the documented fallback and is what an
     offline session with a source tree uses. ``package`` is the module to use,
     and ``None`` looks the installed one up.
+
+    The Bazel cache is exported before the build, so every build of the session
+    reads one directory: the value in ``NANOCHAT_BAZEL_CACHE`` when the host
+    names one, and :data:`KAGGLE_BAZEL_CACHE` otherwise.
     """
+    if not os.environ.get(BAZEL_CACHE_ENV, "").strip():
+        os.environ[BAZEL_CACHE_ENV] = KAGGLE_BAZEL_CACHE
     module = package
     if module is None and prefer_installed:
         module = installed_package()

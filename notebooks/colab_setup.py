@@ -29,16 +29,28 @@ not about the job.
 ``kaggle_setup.py`` keeps its name, because ``notebooks/session.py`` and five
 documents name it. This module is additive: it holds the ``/content`` defaults
 of Colab and no setup logic of its own.
+
+The Bazel cache is the third ``/content`` default. A Colab session builds from
+the tree, and a build with no cache compiles every action again after each
+edit. :func:`resolve_bazel_cache` names the cache directory, and both calls
+pass it to the builder: ``/content/bazel-cache`` by default, a path in
+``NANOCHAT_BAZEL_CACHE`` when the session sets one, and an explicit argument
+above both. A session that mounts Drive therefore keeps the cache across
+sessions with ``NANOCHAT_BAZEL_CACHE=/content/drive/MyDrive/...``, and a
+session that does not keeps it for the session, on the fast local disk.
 """
 
 from __future__ import annotations
 
+import os
 import subprocess
 
 import kaggle_setup
 
 __all__ = [
+    "BAZEL_CACHE_ENV",
     "CAPABILITY_QUERY",
+    "COLAB_BAZEL_CACHE",
     "COLAB_DEST",
     "COLAB_URL",
     "DEFAULT_BACKEND",
@@ -46,6 +58,7 @@ __all__ = [
     "Host",
     "arch_from_capability",
     "probe",
+    "resolve_bazel_cache",
     "setup",
     "stages",
 ]
@@ -57,6 +70,15 @@ COLAB_URL = kaggle_setup.DEFAULT_REPO_URL
 #: a Colab session, where ``/kaggle/working`` is Kaggle's.
 COLAB_DEST = "/content/nanochat.cpp"
 
+#: The Bazel cache of a Colab session, on the session's own disk. It is not on
+#: Drive by default, because Drive is slow and a session that wants the cache
+#: to outlive it sets the variable to a Drive path.
+COLAB_BAZEL_CACHE = "/content/bazel-cache"
+
+#: The variable that names the cache. It is the builder's own name, and a test
+#: contracts the two so a rename cannot leave this module behind.
+BAZEL_CACHE_ENV = kaggle_setup.BAZEL_CACHE_ENV
+
 #: The backend of the pinned triple (decision D3): one T4, ``sm_75``, fp32.
 DEFAULT_BACKEND = "cuda"
 DEFAULT_PRECISION = "fp32"
@@ -67,6 +89,23 @@ CAPABILITY_QUERY = ("nvidia-smi", "--query-gpu=compute_cap",
 
 #: The prepared session, as ``kaggle_setup.setup`` returns it.
 Host = kaggle_setup.Host
+
+
+def resolve_bazel_cache(value: str | None = None) -> str:
+    """The Bazel cache of the session: the call, the variable, or ``/content``.
+
+    An explicit argument wins, because the build cell passes the value it
+    resolved. ``NANOCHAT_BAZEL_CACHE`` comes next, so a session that mounts
+    Drive keeps its cache across sessions without a new call. The default is
+    :data:`COLAB_BAZEL_CACHE`, which is local and fast.
+
+    The directory is not created here. The builder creates it when it composes
+    the flag line, and it raises with the variable's name when it cannot, so
+    one creation point keeps the error in one place.
+    """
+    if value is not None:
+        return str(value).strip()
+    return os.environ.get(BAZEL_CACHE_ENV, "").strip() or COLAB_BAZEL_CACHE
 
 
 def arch_from_capability(text: str) -> str:
@@ -121,7 +160,7 @@ def probe(run=None) -> str:
 def setup(backend: str = DEFAULT_BACKEND, precision: str = DEFAULT_PRECISION,
           arch: str | None = None, *, url: str = COLAB_URL,
           dest: str = COLAB_DEST, ref: str | None = None,
-          cache=None, env_path=None,
+          cache=None, bazel_cache=None, env_path=None,
           prefer_installed: bool = False) -> Host:
     """Prepare the Colab session from the source tree and return the host.
 
@@ -135,12 +174,21 @@ def setup(backend: str = DEFAULT_BACKEND, precision: str = DEFAULT_PRECISION,
     ``tools/nanochat`` and no stage executable, so it contradicts D8 and
     breaks D10. The session therefore builds from the tree, which is the only
     route until a binary wheel exists.
+
+    ``bazel_cache`` names the build cache. The resolved value is exported as
+    ``NANOCHAT_BAZEL_CACHE`` before the clone and the build, so every later
+    build in the session reads the same directory without a second argument,
+    and a chain stage that rebuilds reuses what this call compiled. The
+    resolution is the one of :func:`resolve_bazel_cache`, so an explicit
+    argument wins over a value the session exported, and a session value wins
+    over the default.
     """
     if prefer_installed:
         raise ValueError(
             "a Colab session builds from the source tree: the install root "
             "has no tools/nanochat and no stage executable (D8 and D10), so "
             "pass prefer_installed=False")
+    os.environ[BAZEL_CACHE_ENV] = resolve_bazel_cache(bazel_cache)
     return kaggle_setup.setup(
         url=url, dest=dest, ref=ref, backend=backend, precision=precision,
         arch=arch if arch else probe(), cache=cache, env_path=env_path,
@@ -149,14 +197,16 @@ def setup(backend: str = DEFAULT_BACKEND, precision: str = DEFAULT_PRECISION,
 
 def stages(backend: str = DEFAULT_BACKEND,
            precision: str = DEFAULT_PRECISION, arch: str | None = None,
-           cache=None, root=None) -> tuple:
+           cache=None, bazel_cache=None, root=None) -> tuple:
     """Build the library and both stage executables, and return their paths.
 
     The return value is ``(library, sft_main, rl_worker)``, the tuple of
     :func:`nanochat_cpp._build.build_stages`. The options are explicit for the
     reason in the module docstring: this cell runs before the environment cell,
     so a read of ``NANOCHAT_CPP_BACKEND`` here would answer ``cpu`` and build
-    the wrong library. ``arch`` defaults to :func:`probe`.
+    the wrong library. ``arch`` defaults to :func:`probe`, and
+    ``bazel_cache`` defaults to :func:`resolve_bazel_cache`, which the caller
+    also passes explicitly for the same reason.
 
     The import of the package stays inside the call, as the sibling module's
     imports do, so reading this module costs nothing.
@@ -165,5 +215,6 @@ def stages(backend: str = DEFAULT_BACKEND,
 
     options = _build.BuildOptions.resolve(
         backend=backend, precision=precision,
-        arch=arch if arch else probe(), cache=cache)
+        arch=arch if arch else probe(), cache=cache,
+        bazel_cache=resolve_bazel_cache(bazel_cache))
     return _build.build_stages(options=options, root=root)

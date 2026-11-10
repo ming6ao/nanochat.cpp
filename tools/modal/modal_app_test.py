@@ -184,8 +184,16 @@ class AppTest(unittest.TestCase):
     def test_the_demo_is_a_local_entry_point(self) -> None:
         _module, sdk = _load_app(with_sdk=True)
         self.assertEqual(sdk.local_entrypoints,
-                         ["card_job", "profile_stage", "measure_stage",
-                          "profile_demo", "pipeline_demo"])
+                         ["card_job", "warm_cache", "profile_stage",
+                          "measure_stage", "profile_demo", "pipeline_demo"])
+
+    def test_the_warm_entry_point_covers_every_leg(self) -> None:
+        # A leg with no warm function pays its cold build inside a card job,
+        # which is the case this entry point exists to avoid.
+        self.assertEqual(sorted(self.app.WARM_FUNCTIONS),
+                         sorted(self.app.LEGS))
+        for name, function in self.app.WARM_FUNCTIONS.items():
+            self.assertTrue(callable(function), name)
 
     def test_the_card_job_table_names_the_gates_and_the_probe(self) -> None:
         # One entrypoint serves the gates and benchmarks of the two tensor-core
@@ -411,9 +419,9 @@ class ImageTest(unittest.TestCase):
         self.assertNotEqual(self.app.image_env(self.app.T4),
                             self.app.image_env(self.app.H100))
 
-    def test_each_build_command_passes_its_own_leg(self) -> None:
-        t4 = self.app.image_build_command(self.app.T4)
-        h100 = self.app.image_build_command(self.app.H100)
+    def test_each_fetch_command_passes_its_own_leg(self) -> None:
+        t4 = self.app.image_fetch_command(self.app.T4)
+        h100 = self.app.image_fetch_command(self.app.H100)
         self.assertIn("precision='fp32'", t4)
         self.assertIn("arch='sm_75'", t4)
         self.assertIn("precision='bf16'", h100)
@@ -422,43 +430,144 @@ class ImageTest(unittest.TestCase):
         self.assertIn("_build._build_command(", t4)
         self.assertIn("check=True", t4)
 
-    def test_the_build_command_names_the_roofline_tool(self) -> None:
-        # Gate G3 runs the tool inside the container, so the image build names
-        # it beside the library and the two stage executables (sections 7, 8).
+    def build_argv(self) -> list:
+        """The argv the container build runs, with the process recorded."""
+        with mock.patch.object(subprocess, "run") as run, \
+                mock.patch.dict(os.environ, {"NANOCHAT_BAZEL_CACHE": ""}):
+            run.return_value = types.SimpleNamespace(returncode=0, stdout="",
+                                                     stderr="")
+            self.app._ensure_build()
+        return run.call_args.args[0]
+
+    def test_the_container_build_names_the_roofline_tool(self) -> None:
+        # Gate G3 runs the tool inside the container, so the container build
+        # names it beside the library and the two stage executables (7, 8).
         self.assertIn(self.app.CLI_TARGET, self.app.BUILD_TARGETS)
         self.assertEqual(self.app.ROOFLINE_TARGET, self.app.CLI_TARGET)
-        for leg in self.app.LEG_ORDER:
-            self.assertIn(self.app.CLI_TARGET,
-                          self.app.image_build_command(leg))
+        self.assertIn(self.app.CLI_TARGET, self.build_argv())
 
-    def test_the_build_command_names_the_muon_benchmark(self) -> None:
-        # The H100 benchmark runs inside the container, so the one build names
-        # its target beside the library and the stage executables.
+    def test_the_container_build_names_the_muon_benchmark(self) -> None:
+        # The H100 benchmark runs inside the container, so the build names its
+        # target beside the library and the stage executables.
         self.assertEqual(self.app.BENCH_TARGET,
                          "//backends/cuda/kernels:muon_benchmark")
         self.assertIn(self.app.BENCH_TARGET, self.app.BUILD_TARGETS)
-        for leg in self.app.LEG_ORDER:
-            self.assertIn(self.app.BENCH_TARGET,
-                          self.app.image_build_command(leg))
+        self.assertIn(self.app.BENCH_TARGET, self.build_argv())
 
-    def test_the_build_names_the_attention_benchmark_and_its_test(self) -> None:
+    def test_the_container_build_names_the_attention_jobs(self) -> None:
         # The H100 measurement of docs/attention.md Part 6 runs in the
-        # container, so the one build names both its benchmark and the family
-        # test the check job runs.
+        # container, so the build names both its benchmark and the family test
+        # the check job runs.
         self.assertEqual(self.app.ATTENTION_BENCH_TARGET,
                          "//backends/cuda/kernels:attention_benchmark")
         self.assertEqual(self.app.ATTENTION_TEST_TARGET,
                          "//backends/cuda/kernels:attention_gpu_test")
+        argv = self.build_argv()
         for target in (self.app.ATTENTION_BENCH_TARGET,
                        self.app.ATTENTION_TEST_TARGET):
             self.assertIn(target, self.app.BUILD_TARGETS)
-            for leg in self.app.LEG_ORDER:
-                self.assertIn(target, self.app.image_build_command(leg))
+            self.assertIn(target, argv)
 
     def test_the_build_names_the_library_and_the_stage_executables(self) -> None:
         self.assertEqual(self.app.BUILD_TARGETS[0], "//bindings:nanochat_shared")
         for target in self.app.STAGE_TARGETS:
             self.assertIn(target, self.app.BUILD_TARGETS)
+
+    def test_the_container_build_leaves_the_pool_to_bazelrc(self) -> None:
+        # The build runs in a container with `cpu=CPU_CORES`, so the four jobs
+        # and three gigabytes of `.bazelrc` are the right values there. The
+        # workstation cap is what the container shares, and a flag here would
+        # override it with the machine the container reports.
+        argv = self.build_argv()
+        self.assertFalse([part for part in argv
+                          if part.startswith("--jobs")], argv)
+        self.assertFalse([part for part in argv
+                          if part.startswith("--local_resources")], argv)
+
+    def test_the_build_commands_run_the_builder(self) -> None:
+        # Each command is a `python3 -c` one-liner, so a quoting error, or a list
+        # that meets a tuple, fails inside the container and not at import. Run
+        # every payload with `subprocess.run` recorded and read the argv.
+        cases = [(self.app.image_fetch_command(self.app.H100),
+                  ["--nobuild", "@cutlass//:cutlass"], ["--jobs=auto"]),
+                 (self.app.probe_build_command(
+                     self.app.H100, self.app.WGMMA_PROBE_TARGET,
+                     self.app.WGMMA_PROBE_ARCH),
+                  ["--@rules_cuda//cuda:archs=sm_90a"], ["--nobuild"])]
+        with mock.patch.object(subprocess, "run") as run, \
+                mock.patch.dict(os.environ, {"NANOCHAT_BAZEL_CACHE": ""}):
+            for command, present, absent in cases:
+                payload = command.split('python3 -c "', 1)[1].rsplit('"', 1)[0]
+                exec(compile(payload, "<image build>", "exec"), {})
+                argv = run.call_args.args[0]
+                self.assertEqual(argv[:2], ["tools/nanochat", "build"],
+                                 payload)
+                for flag in present:
+                    self.assertIn(flag, argv, payload)
+                for flag in absent:
+                    self.assertNotIn(flag, argv, payload)
+                run.reset_mock()
+
+    def test_the_fetch_layer_holds_the_manifest_and_the_tooling(self) -> None:
+        # The fetch runs before the install, so the tooling must be there: the
+        # entry point, the package behind it, the profile table it reads, and
+        # the files the module graph reads. A missing entry is a failure in the
+        # container and not here, so the list is the contract.
+        self.assertEqual(list(self.app.MANIFEST_FILES), [
+            "MODULE.bazel", "MODULE.bazel.lock", ".bazelversion",
+            ".bazelrc", ".bazelignore"])
+        self.assertEqual(list(self.app.MANIFEST_DIRS), ["python", "third_party"])
+        self.assertEqual(list(self.app.MANIFEST_TOOL_FILES), [
+            "tools/nanochat", "tools/sandbox/profiles.json"])
+        self.assertEqual(list(self.app.FETCH_TARGETS),
+                         ["@cutlass//:cutlass", "@zstd//:zstd"])
+        for name in (*self.app.MANIFEST_FILES, *self.app.MANIFEST_DIRS,
+                     *self.app.MANIFEST_TOOL_FILES):
+            self.assertTrue((self.app.REPO / name).exists(), name)
+
+    def test_the_fetch_layer_runs_before_the_tree(self) -> None:
+        # The order is the saving: a source change rebuilds the tree layer, and
+        # the manifest, the tooling, and the fetch above it survive.
+        text = _source()
+        fetch = text.index("image = _manifest_layer(image, leg)")
+        tree = text.index("add_local_dir(str(REPO), remote_path=REPO_ROOT")
+        install = text.index('.pip_install(f"{REPO_ROOT}/python[hub]")')
+        self.assertLess(fetch, tree)
+        self.assertLess(tree, install)
+
+    def test_the_image_holds_no_compiled_artifact(self) -> None:
+        # A Modal Volume cannot reach an image build, so a build in the image
+        # would compile against a cold cache on every rebuild. The build lives
+        # in the container instead, and the image ends at the install.
+        text = _source()
+        self.assertNotIn("image_build_command", text)
+        self.assertNotIn("IMAGE_BUILD_FLAGS", text)
+        after_install = text.split('.pip_install(f"{REPO_ROOT}/python[hub]")', 1)[1]
+        image_end = after_install.split("\ndef ", 1)[0]
+        self.assertNotIn("run_commands", image_end, image_end)
+
+    def test_every_function_mounts_the_build_cache(self) -> None:
+        # One wrapper, so no function can forget the Volume: a container that
+        # skipped the mount would compile into its own disk and keep nothing.
+        _module, sdk = _load_app(with_sdk=True)
+        self.assertEqual(len(sdk.function_calls), 25)
+        for keywords in sdk.function_calls:
+            volumes = keywords.get("volumes") or {}
+            self.assertIn(self.app.CACHE_ROOT, volumes, keywords["name"])
+
+    def test_the_image_env_names_the_cache_folder(self) -> None:
+        # One folder per leg, because a leg is one architecture at one
+        # precision, and a shared folder would serve one leg's objects to the
+        # other.
+        for leg in (self.app.T4, self.app.H100, self.app.H100_FP8):
+            env = self.app.image_env(leg)
+            self.assertEqual(env["NANOCHAT_BAZEL_CACHE"],
+                             f"{self.app.CACHE_ROOT}/{leg.name}")
+
+    def test_the_container_build_commits_the_cache(self) -> None:
+        # A container that exits without a commit throws its cache away, and
+        # the next container would compile again.
+        self.assertIn("build_cache.commit()", _source())
 
     def test_the_distribution_is_installed_at_build(self) -> None:
         self.assertIn('.pip_install(f"{REPO_ROOT}/python[hub]")', _source())
@@ -693,6 +802,7 @@ class _RemoteFixture(unittest.TestCase):
         self.root = temporary.name
         for name, value in (("REMOTE_ROOT", self.root),
                             ("package_source", lambda: "repository"),
+                            ("_ensure_build", lambda: "/cache/test"),
                             ("_device_capability", lambda: "7.5"),
                             ("_device_count", lambda: 1)):
             patcher = mock.patch.object(self.app, name, value)
@@ -895,7 +1005,8 @@ class PipelineTest(_RemoteFixture):
                                          "profile_stage_h100",
                                          "profile_stage_t4",
                                          "step_split", "train",
-                                         "train_h100"])
+                                         "train_h100", "warm_h100",
+                                         "warm_h100_fp8", "warm_t4"])
 
     def test_the_chain_runs_from_the_one_source_environment(self) -> None:
         self.run_once()
@@ -1580,24 +1691,34 @@ class WeightsTest(unittest.TestCase):
 
     def test_the_volume_is_declared_beside_the_runs_volume(self) -> None:
         self.assertEqual([name for name, _ in self.sdk.volume_names],
-                         ["nanochat-runs", "nanochat-weights"])
+                         ["nanochat-runs", "nanochat-weights",
+                          "nanochat-build-cache"])
         self.assertTrue(all(create for _, create in self.sdk.volume_names))
         self.assertEqual(self.app.WEIGHTS_ROOT, "/weights")
+        self.assertEqual(self.app.CACHE_ROOT, "/cache")
 
     def test_both_volumes_are_mounted_on_the_worker(self) -> None:
+        # Every function mounts the build cache, because every container builds
+        # its leg. The chain and the profile functions also mount the run root,
+        # and `train` adds the stage cache.
         mounted = {call["name"]: call["volumes"]
                    for call in self.sdk.function_calls if "volumes" in call}
-        self.assertEqual(sorted(mounted), ["corpus", "measure_stage_h100",
-                                           "measure_stage_t4", "pipeline",
-                                           "pipeline_h100", "profile_h100",
-                                           "profile_stage_h100",
-                                           "profile_stage_t4",
-                                           "step_split", "train",
-                                           "train_h100"])
+        self.assertEqual(len(mounted), 25)
+        for name, volumes in mounted.items():
+            self.assertIn(self.app.CACHE_ROOT, volumes, name)
+        with_runs = sorted(name for name, volumes in mounted.items()
+                           if self.app.REMOTE_ROOT in volumes)
+        self.assertEqual(with_runs, ["corpus", "measure_stage_h100",
+                                     "measure_stage_t4", "pipeline",
+                                     "pipeline_h100", "profile_h100",
+                                     "profile_stage_h100",
+                                     "profile_stage_t4", "step_split",
+                                     "train", "train_h100"])
         for name in ("train", "train_h100"):
-            self.assertEqual(sorted(mounted[name]), ["/runs", "/weights"])
-            self.assertIs(mounted[name]["/weights"], self.app.weights)
-            self.assertIs(mounted[name]["/runs"], self.app.runs)
+            self.assertIn(self.app.WEIGHTS_ROOT, mounted[name], name)
+            self.assertIs(mounted[name][self.app.WEIGHTS_ROOT],
+                          self.app.weights)
+            self.assertIs(mounted[name][self.app.REMOTE_ROOT], self.app.runs)
         # The chain reads and writes the run root only: its stages warm start
         # from each other, so it never reads the stage cache of `train`. The
         # corpus function writes the run root too: the corpus is an input that
@@ -1608,8 +1729,10 @@ class WeightsTest(unittest.TestCase):
                      "pipeline", "pipeline_h100", "profile_h100",
                      "profile_stage_h100", "profile_stage_t4",
                      "step_split"):
-            self.assertEqual(sorted(mounted[name]), ["/runs"])
+            self.assertEqual(sorted(mounted[name]),
+                             sorted([self.app.CACHE_ROOT, "/runs"]))
             self.assertIs(mounted[name]["/runs"], self.app.runs)
+            self.assertNotIn(self.app.WEIGHTS_ROOT, mounted[name], name)
 
     def test_a_stage_is_a_repository_and_a_stage_folder(self) -> None:
         self.assertEqual(self.app.stage_dir("owner/model", "base"),

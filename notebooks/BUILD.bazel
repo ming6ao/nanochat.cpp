@@ -104,7 +104,24 @@ py_test(
     name = "kaggle_setup_test",
     srcs = ["kaggle_setup_test.py"],
     size = "small",
-    deps = [":kaggle_setup"],
+    deps = [
+        ":kaggle_setup",
+        "//python:nanochat_cpp",
+    ],
+)
+
+# The Colab half: the two calls, and the Bazel cache directory each one passes
+# (docs/build.md section 6.4). The test patches the clone and the build, so it
+# needs no network and no card.
+py_test(
+    name = "colab_setup_test",
+    srcs = ["colab_setup_test.py"],
+    size = "small",
+    deps = [
+        ":colab_setup",
+        ":kaggle_setup",
+        "//python:nanochat_cpp",
+    ],
 )
 
 py_test(

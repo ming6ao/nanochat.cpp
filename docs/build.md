@@ -731,9 +731,36 @@ The image holds the package. The weights volume holds `<repo_id>/<stage>/`, keye
 by the stage revision. A new checkpoint then costs a download, not an image
 build.
 
-The current `tools/modal/app.py` bakes the repository and the Bazel build into
-the image. Keep that path as a fallback until the wheels exist. Add the weights
-volume now, because the image path costs minutes per run today.
+The current `tools/modal/app.py` bakes the repository into the image and keeps
+the build out of it. A Modal Volume attaches to a function and never to an
+image, so a build inside the image would compile against a cold cache on every
+rebuild. The build therefore runs in the container, once, against a cache
+Volume:
+
+```python
+cache = modal.Volume.from_name("nanochat-build-cache", create_if_missing=True)
+```
+
+`NANOCHAT_BAZEL_CACHE` names the cache directory, and the image sets it to
+`/cache/<leg>`, so a container builds the leg it declares. The builder turns a
+directory into `--disk_cache` and `--repository_cache` under it, and it raises
+with the variable's name when the directory is not writable. A URL becomes
+`--remote_cache` instead, which is the only transport an image build can reach.
+
+The measurement that chose this shape is on the CPU library: 23.0 seconds for 76
+actions with a cold cache, and 3.4 seconds with a warm one. Two things follow,
+and both are deliberate. The first run of a leg pays the whole compile in a
+container with four cores, so `modal run tools/modal/app.py::warm_cache` pays it
+once, in a function with an hour to spend. A warm run pays seconds where the
+image path paid nothing.
+
+The image still resolves the external repositories. It copies the module graph
+and the tooling first, then runs `tools/nanochat build --nobuild`, so the
+container's build finds them in the output base. A source change rebuilds the
+tree layer and the container build, and the fetch layer survives it.
+
+Keep the wheel path as the later one-line change: an image that installs a
+binary wheel needs no toolkit, no Bazel, and no cache.
 
 #### 6.5 Notebook
 

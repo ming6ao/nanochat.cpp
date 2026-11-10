@@ -335,7 +335,7 @@ bar.
 | The stage-generic tracer and measurer | `tools/modal/app.py`, `profile_stage` and `measure_stage` | Done. Four stages, both devices, the 180 second cap, one driver |
 | The procedure | `.agents/skills/pgo/` | Done. `SKILL.md`, three references, four wrappers, one wrapper test |
 | The entry point | `tools/nanochat pgo` | Done. A forwarder, so the loop obeys the one-command rule |
-| A Bazel disk cache for the image | `.bazelrc`, `tools/modal/app.py` | **Not possible as first written.** Modal builds an image without a Volume, so the cache can accelerate a run-time rebuild only. Section 2.1 records the correction |
+| A Bazel disk cache for the image | `.bazelrc`, `tools/modal/app.py` | **Landed as a run-time cache.** The image holds no build, and each container builds once against `NANOCHAT_BAZEL_CACHE` on the `nanochat-build-cache` Volume. Section 2.1 records why the image cannot hold it |
 
 #### 2.1 The traps this work already hit
 
@@ -347,7 +347,7 @@ bar.
 | The profiler itself | It adds about 28 percent to the step time. Score on the untraced run only |
 | `add_local_dir` | It hashes the tree, so each patch invalidates the image. A disk cache Volume is required for this loop to be affordable |
 | CUPTI on the local card | Not available under WSL2. Every trace comes from the container |
-| A Volume inside an image build | Modal attaches a Volume to a function, not to an image, so `--disk_cache` cannot reach the one Bazel build that an image performs. Row PGO.5 is therefore a run-time cache and not an image cache, and the tree hash still decides when the image rebuilds |
+| A Volume inside an image build | Modal attaches a Volume to a function, not to an image, so `--disk_cache` cannot reach a build inside an image. Row PGO.5 is therefore a run-time cache and not an image cache, and the build moved to the container for that reason |
 | `--sample` in 2023.4.4 | Valid, and it needs `--backtrace` to name a function. The default trace takes no sample |
 | A stage that needs a warm start | `sft`, `rl`, and `eval` run here on a fresh model. The trace measures a throughput, and the shapes do not change |
 

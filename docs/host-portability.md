@@ -531,15 +531,21 @@ compares.
 | Local CPU | `cpu` | empty | `fp32` | `train` scope | Bazel |
 | Local GPU | `cuda` | the card's capability | `fp32` | `t1-gpu` queue job | Bazel |
 | Colab T4 | `cuda` | `sm_75` | `fp32` | `none` | source build |
-| Modal T4 leg | `cuda` | `sm_75` | `fp32` | `none` | image build |
-| Modal H100 leg | `cuda` | `sm_90` | `bf16` | `none` | image build, bf16 |
-| Modal CPU | `cpu` | empty | `fp32` | `none` | image build, CPU config |
+| Modal T4 leg | `cuda` | `sm_75` | `fp32` | `none` | container build, cache Volume |
+| Modal H100 leg | `cuda` | `sm_90` | `bf16` | `none` | container build, cache Volume, bf16 |
+| Modal CPU | `cpu` | empty | `fp32` | `none` | container build, CPU config |
 
 The two card legs are `sm_75` because the image compiles for `sm_75` and a free
 Colab session hands out a T4. A local card uses its own architecture through
 `NANOCHAT_CUDA_ARCH`, and `tools/nanochat doctor` reports the name, the driver,
 the memory, the use, and the utilisation but not the capability, so the value
 comes from `nvidia-smi --query-gpu=compute_cap --format=csv,noheader`.
+
+The two Modal legs build in the container and not in the image, because a Modal
+Volume cannot reach an image build ([build.md](build.md) section 6.4). The image
+holds the toolkit, the tree, and the installed package; `_ensure_build` compiles
+the leg once per container against `NANOCHAT_BAZEL_CACHE` on the
+`nanochat-build-cache` Volume, and `warm_cache` pays the cold build once.
 
 The last row is the verification-only leg of section 9.4. It needs the second
 image, which the tree does not hold today, so it records no gate and no number.
@@ -565,6 +571,7 @@ measurement appears here only after a run produces one.
 | Precision | `fp32` | the build default |
 | Sandbox | `none` | Colab has no systemd user manager, so no cgroup scope exists |
 | Build | from source | decision D8: the install root carries no `tools/nanochat` and no stage binary |
+| Bazel cache | `/content/bazel-cache` | `colab_setup.resolve_bazel_cache`: the call's argument, then `NANOCHAT_BAZEL_CACHE`, then the default |
 | Entry | `tools/nanochat train -- python -m nanochat_cpp.pipeline` | decision D10 |
 
 A paid session can give a V100, `sm_70`, or an A100, `sm_80`. An `sm_75` build
@@ -580,7 +587,10 @@ The procedure, which is the record until a run exists:
    `setup` resolves the library only. `prefer_installed=False` is required, not
    a preference, because `setup` prefers an installed distribution by default
    and that root has no `tools/nanochat` and no stage binary, which contradicts
-   D8 and breaks D10.
+   D8 and breaks D10. The setup call also exports `NANOCHAT_BAZEL_CACHE`, so
+   the two builds of the session share one cache; a session that mounts Drive
+   sets the variable to a Drive path first, and then the cache outlives the
+   session.
 2. **Environment.** Five values: `NANOCHAT_BASE_DIR=/content/cache`,
    `NANOCHAT_RUNS_DIR=/content/runs`, `NANOCHAT_CPP_BACKEND=cuda`,
    `NANOCHAT_CUDA_ARCH=probe()`, and `NANOCHAT_SANDBOX_BACKEND=none`. The cell
@@ -649,10 +659,11 @@ def pipeline_h100(job_json, run_id, stage_json="", publish_json="") -> str
 What the two legs share, so they cannot drift:
 
 - `pipeline` and `pipeline_h100` are thin faces of one `_pipeline_on(leg, ...)`.
-- The image builds the library and `//src:nanochat_cli` in one call, so a
-  container needs no second build. It names the one binary through the
-  `NANOCHAT_SFT_MAIN` and `NANOCHAT_RL_WORKER` overrides, because the installed
-  distribution's `repo_root()` is not the image tree (B6).
+- The container build produces the library and `//src:nanochat_cli` in one
+  call, once per container, against the `nanochat-build-cache` Volume. It names
+  the one binary through the `NANOCHAT_SFT_MAIN` and `NANOCHAT_RL_WORKER`
+  overrides, because the installed distribution's `repo_root()` is not the
+  image tree (B6).
 - `_check_cards(leg, ...)` stops a container whose card does not match the
   leg's type, count, and architecture, and `max_containers=1` keeps one chain at
   a time.

@@ -138,6 +138,7 @@ def build(backend=None, precision=None, arch=None, cache=None) -> Path:
 | `precision` | `NANOCHAT_CPP_PRECISION` | `fp32` (`fp32` or `bf16`) |
 | `arch` | `NANOCHAT_CUDA_ARCH` | empty (Bazel chooses) |
 | `cache` | `NANOCHAT_CPP_CACHE` | `~/.cache/nanochat_cpp` |
+| `bazel_cache` | `NANOCHAT_BAZEL_CACHE` | empty (no cache) |
 
 `backend` and `precision` become lowercase, and the call strips whitespace.
 `precision` accepts `fp32` and `bf16`; the build passes the precision as an
@@ -149,6 +150,15 @@ from the environment. So `nc.build()` keeps the environment behavior.
 `arch` sets the CUDA target with `--@rules_cuda//cuda:archs=`, and it also
 partitions the cache key. `cache` selects the CPU cache directory. A CUDA build
 returns the `bazel-bin` path, because the library needs the runpath beside it.
+
+`bazel_cache` names the Bazel cache, which is a different thing from `cache`: it
+holds the compiler's outputs and the external archives, not the finished
+library. A directory becomes `--disk_cache` and `--repository_cache` under it,
+and a URL becomes `--remote_cache`. An empty value passes no flag, so a host
+that names none builds as it did before the seam existed. The builder creates
+the directory and raises with the variable's name when it cannot, because a
+cache that disappears without a message turns a one minute build into a ten
+minute build.
 
 ```python
 # A CUDA build for the T4.

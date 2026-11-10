@@ -843,9 +843,9 @@ and they stay as recorded.
 | Local CPU | `cpu` | none | `train` scope | Bazel | `//python:pipeline_test`, default loop |
 | Local GPU | `cuda` | card | `t1-gpu` queue job | Bazel | `//python:pipeline_gpu_test`, `gpu` tag |
 | Colab | `cuda` | `sm_75` | `none` | bootstrap + Bazel | manual run; owed, and recorded as owed in `docs/host-portability.md` section 9.2 |
-| Modal, T4 leg | `cuda` | `sm_75` | `none` | image build, fp32 | `modal run ...::pipeline_demo`; recorded on 2026-10-31, with the host block of `docs/host-portability.md` section 9.3 |
-| Modal, H100 leg | `cuda` | `sm_90` | `none` | image build, bf16 | the same entry point; G1 to G3 pass, with the host block of `docs/host-portability.md` section 9.3 |
-| Modal CPU | `cpu` | none | `none` | image build, CPU config | verification only |
+| Modal, T4 leg | `cuda` | `sm_75` | `none` | container build, cache Volume, fp32 | `modal run ...::pipeline_demo`; recorded on 2026-10-31, with the host block of `docs/host-portability.md` section 9.3 |
+| Modal, H100 leg | `cuda` | `sm_90` | `none` | container build, cache Volume, bf16 | the same entry point; G1 to G3 pass, with the host block of `docs/host-portability.md` section 9.3 |
+| Modal CPU | `cpu` | none | `none` | container build, CPU config | verification only |
 
 The two Modal rows are one run of one job: the T4 leg first, then the H100 leg.
 
@@ -965,9 +965,12 @@ Each leg mirrors what the single leg did:
   `nanochat-runs` Volume and the cheap artifact survives a failure of the
   expensive leg. It prints one document with three keys -- `legs`,
   `comparison`, and `gates` -- and exits non-zero when a gate fails.
-- The image build of a leg names `//src:nanochat_cli` beside the library and the
-  two stage executables, so gate G3 runs the tool inside the H100 container and
-  starts no second Bazel build there.
+- The container build of a leg names `//src:nanochat_cli` beside the library
+  and the two stage executables, so gate G3 runs the tool inside the H100
+  container and needs no second build there. The build runs once per container
+  against the `nanochat-build-cache` Volume, because a Modal Volume cannot
+  reach an image build ([build.md](build.md) section 6.4). A warm cache costs
+  seconds, and `modal run tools/modal/app.py::warm_cache` pays the cold one.
 
 Gates G1 to G3 are section 7.1's subject. Their first two-leg run is row 9 of
 [post-training.md](post-training.md), and it ran on 2026-10-31:
@@ -999,8 +1002,8 @@ A container with no card therefore fails inside `nanochat_init`, and
 
 So a CPU leg needs a second image whose build states `--define=backend=cpu` and
 whose function omits `gpu=`. Do not add a CPU branch to `tools/modal/app.py`. Keep the
-two images apart, because one Bazel output base holds only one build of
-`libnanochat_shared.so`.
+two images apart, because each image declares one precision and one
+architecture, and a container builds what its environment declares.
 
 ### 7. The integration gate
 
@@ -1098,7 +1101,7 @@ number here._
 |---|---|
 | P1 | Add a second profile, `standard`. Keep `demo` for the CPU test loop. `Job()` defaults to `standard`. |
 | P2 | Keep the sequence length at 64 and the base batch at one row. The committed corpus fills one 65-token row per epoch. |
-| P3 | The H100 leg runs at bf16. No leg of the chain runs an fp8 training path. One further image builds fp8 for a benchmark and trains nothing; section 4.2 states it. |
+| P3 | The H100 leg runs at bf16. No leg of the chain runs an fp8 training path. One further leg builds fp8 for a benchmark and trains nothing; section 4.2 states it. |
 | P4 | Add the eval stage in process, through `api.evaluate`, `api.Model.load`, and `api.Tokenizer`. Add no third stage executable. |
 | P5 | The eval stage reads the base checkpoint and the RL checkpoint, so the report holds both numbers. |
 | P6 | Run T4 first, then H100, as four functions over two images. One library per image keeps the architecture and the precision honest. |
@@ -1255,8 +1258,9 @@ The rest of the change:
   and `gates`. It exits non-zero when a gate fails.
 - Both functions set the same `cpu=` value, so the two legs get the same host
   budget. Modal sizes the CPU by memory when `cpu=` is absent.
-- The image build adds `//src:nanochat_cli`. Gate G3 runs the tool inside the
-  container, and the tool must not start a second Bazel build there.
+- The container build adds `//src:nanochat_cli`, once per container against the
+  cache Volume. Gate G3 runs the tool inside the container, and the tool must
+  not start a second Bazel build there.
 
 `notebooks/target.py` gains a `leg` argument on `ModalTarget`, so a notebook
 selects one leg.

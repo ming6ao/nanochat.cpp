@@ -24,6 +24,13 @@ optional CUDA architecture, the precision, and the backend (section 3.3). Two
 inputs that differ give a different cache entry, so a stale library is never
 reused by accident.
 
+The Bazel cache is one variable with two transports: ``NANOCHAT_BAZEL_CACHE``
+names a directory, which becomes the disk cache and the repository cache
+together, or a URL, which becomes a remote cache. An image build can reach only
+the URL form, because a Modal Volume attaches to a function and never to an
+image (docs/performance.md section 2.1). An unset variable builds without a
+cache, so a host that names none is unchanged.
+
 This module imports only the Python standard library.
 """
 
@@ -38,15 +45,19 @@ from pathlib import Path
 from typing import Sequence
 
 __all__ = [
+    "BAZEL_CACHE_ENV",
     "BuildError",
     "BuildOptions",
     "CLI_NAME",
     "CLI_TARGET",
+    "DISK_CACHE_MAX_AGE",
+    "DISK_CACHE_MAX_SIZE",
     "STAGE_COMMANDS",
     "STAGE_NAMES",
     "SUPPORTED_PRECISIONS",
     "architecture",
     "backend",
+    "bazel_cache",
     "build",
     "build_key",
     "build_stages",
@@ -101,6 +112,20 @@ _COMPILERS = ("c++", "g++", "clang++", "nvcc")
 #: Environment values that mean "true".
 _TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
 
+#: The Bazel cache variable. A directory is the local disk cache and the
+#: repository cache; a URL is a remote cache.
+BAZEL_CACHE_ENV = "NANOCHAT_BAZEL_CACHE"
+
+#: The size and the age that bound the local disk cache. Bazel's own garbage
+#: collector reads both, so a long session cannot fill its disk.
+DISK_CACHE_MAX_SIZE = "20G"
+DISK_CACHE_MAX_AGE = "14d"
+
+#: The two caches that live under one directory: the action outputs and the
+#: external archives.
+_DISK_CACHE_DIRNAME = "disk"
+_REPOSITORY_CACHE_DIRNAME = "repo"
+
 
 class BuildError(RuntimeError):
     """The shared library is absent and no build can supply it."""
@@ -121,6 +146,28 @@ def cache_dir() -> Path:
     if value:
         return Path(value).expanduser()
     return Path.home() / ".cache" / CACHE_DIRNAME
+
+
+def _normalize_bazel_cache(value) -> str:
+    """One spelling of a cache value: a URL as written, a directory expanded."""
+    text = str(value).strip()
+    if not text:
+        return ""
+    if "://" in text:
+        return text
+    return str(Path(text).expanduser())
+
+
+def bazel_cache(value: str | None = None) -> str:
+    """The Bazel cache: ``NANOCHAT_BAZEL_CACHE``, or an empty string.
+
+    The value is a directory or a cache URL. A ``~`` in a directory expands, so
+    a caller and the command it builds read one path, and a URL keeps its
+    scheme, because the scheme is what selects the transport.
+    """
+    if value is None:
+        value = os.environ.get(BAZEL_CACHE_ENV, "")
+    return _normalize_bazel_cache(value)
 
 
 #: The build precisions the tree supports (docs/precision.md).
@@ -165,6 +212,7 @@ class BuildOptions:
     precision: str
     arch: str
     cache: Path
+    bazel_cache: str
 
     @classmethod
     def from_env(cls, backend_name: str | None = None) -> "BuildOptions":
@@ -174,12 +222,14 @@ class BuildOptions:
             precision=precision(),
             arch=architecture(),
             cache=cache_dir(),
+            bazel_cache=bazel_cache(),
         )
 
     @classmethod
     def resolve(cls, backend: str | None = None,
                 precision: str | None = None, arch: str | None = None,
                 cache: Path | None = None,
+                bazel_cache: str | None = None,
                 backend_name: str | None = None) -> "BuildOptions":
         """Start from the environment and override each supplied field."""
         base = cls.from_env(backend_name)
@@ -190,6 +240,8 @@ class BuildOptions:
             else base.precision,
             arch=str(arch).strip() if arch is not None else base.arch,
             cache=Path(cache).expanduser() if cache is not None else base.cache,
+            bazel_cache=_normalize_bazel_cache(bazel_cache)
+            if bazel_cache is not None else base.bazel_cache,
         )
 
 
@@ -308,6 +360,49 @@ def _config_flags(options: BuildOptions) -> list[str]:
     return ["--config=cuda"]
 
 
+def _cache_flags(options: BuildOptions) -> list[str]:
+    """The Bazel cache flags of one build, or none when no cache is named.
+
+    A directory holds two caches, so one variable covers the actions and the
+    external archives: ``--disk_cache`` reuses an action output instead of
+    compiling it, and ``--repository_cache`` stops a new output base from
+    fetching the registry files and the pinned archives again. The two garbage
+    collection bounds keep a long session from filling its disk.
+
+    A URL names a remote cache. It is the only transport an image build can
+    reach, because a Modal Volume attaches to a function and never to an image
+    (docs/performance.md section 2.1).
+
+    A cache is an optimization, so a directory that cannot be written is a
+    ``BuildError`` that names the variable. A cache that silently disappears
+    turns a one minute build into a ten minute build with no message.
+    """
+    value = options.bazel_cache
+    if not value:
+        return []
+    if "://" in value:
+        return [f"--remote_cache={value}", "--remote_upload_local_results"]
+    root = Path(value)
+    for name in (_DISK_CACHE_DIRNAME, _REPOSITORY_CACHE_DIRNAME):
+        directory = root / name
+        try:
+            directory.mkdir(parents=True, exist_ok=True)
+            probe = directory / ".write-probe"
+            probe.write_text("", encoding="utf-8")
+            probe.unlink()
+        except OSError as error:
+            raise BuildError(
+                f"{BAZEL_CACHE_ENV}={value} is not a writable directory: "
+                f"{error}; unset {BAZEL_CACHE_ENV} to build without a cache"
+            ) from error
+    return [
+        f"--disk_cache={root / _DISK_CACHE_DIRNAME}",
+        f"--repository_cache={root / _REPOSITORY_CACHE_DIRNAME}",
+        f"--experimental_disk_cache_gc_max_size={DISK_CACHE_MAX_SIZE}",
+        f"--experimental_disk_cache_gc_max_age={DISK_CACHE_MAX_AGE}",
+    ]
+
+
 def _no_library_message(cache: Path) -> str:
     entry = repo_root() / "tools" / "nanochat"
     return (
@@ -327,7 +422,9 @@ def _build_command(entry: Path, options: BuildOptions,
     of the command line and of the configuration flags it carries.
 
     A command-line flag wins over the ``.bazelrc`` value, so an explicit CUDA
-    architecture selects the compiled target and not only the cache key.
+    architecture selects the compiled target and not only the cache key. The
+    cache flags are appended here, so a cache named in the environment reaches
+    the library build, the stage build, and an image build through one line.
     """
     command = [str(entry), "build", *targets, *_config_flags(options)]
     # A command-line flag wins over a value in `.bazelrc`, so the precision is
@@ -335,6 +432,7 @@ def _build_command(entry: Path, options: BuildOptions,
     command.append(f"--define=precision={options.precision}")
     if options.backend == "cuda" and options.arch:
         command.append(f"--@rules_cuda//cuda:archs={options.arch}")
+    command.extend(_cache_flags(options))
     return command
 
 

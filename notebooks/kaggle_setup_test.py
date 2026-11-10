@@ -17,6 +17,7 @@ import unittest
 from pathlib import Path
 
 import kaggle_setup
+from nanochat_cpp import _build
 
 
 class ParseEnvFileTest(unittest.TestCase):
@@ -177,6 +178,29 @@ class InstalledTest(EnvironTest):
         self.assertEqual(host.mode, kaggle_setup.MODE_SOURCE)
         self.assertEqual(host.repo, Path("/clone"))
         self.assertEqual(bootstrapped, [Path("/clone")])
+
+    def test_the_session_exports_its_bazel_cache(self) -> None:
+        # A Kaggle session builds from the tree, and `/kaggle/working` is the
+        # writable directory that survives for the session. Without the export
+        # every rebuild after an edit compiles every action again.
+        os.environ.pop(kaggle_setup.BAZEL_CACHE_ENV, None)
+        kaggle_setup.build_library = lambda **kwargs: (Path("/lib.so"), "key")
+        kaggle_setup.ensure_repository = lambda **kwargs: Path("/clone")
+        kaggle_setup.run_bootstrap = lambda root: None
+        kaggle_setup.setup(prefer_installed=False)
+        self.assertEqual(os.environ[kaggle_setup.BAZEL_CACHE_ENV],
+                         kaggle_setup.KAGGLE_BAZEL_CACHE)
+        self.assertEqual(kaggle_setup.BAZEL_CACHE_ENV,
+                         _build.BAZEL_CACHE_ENV)
+
+    def test_a_cache_the_session_set_is_kept(self) -> None:
+        os.environ[kaggle_setup.BAZEL_CACHE_ENV] = "/kaggle/working/mine"
+        kaggle_setup.build_library = lambda **kwargs: (Path("/lib.so"), "key")
+        kaggle_setup.ensure_repository = lambda **kwargs: Path("/clone")
+        kaggle_setup.run_bootstrap = lambda root: None
+        kaggle_setup.setup(prefer_installed=False)
+        self.assertEqual(os.environ[kaggle_setup.BAZEL_CACHE_ENV],
+                         "/kaggle/working/mine")
 
 
 if __name__ == "__main__":

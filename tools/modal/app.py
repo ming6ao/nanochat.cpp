@@ -16,7 +16,7 @@ table they follow. A leg is a frozen :class:`Leg` record: a name, a card type,
 a card count, an architecture, a precision, and the flag triple the builder
 emits. ``t4`` is a T4 at ``sm_75`` and fp32, and it runs first so its artifact
 survives an H100 failure; ``h100`` is an H100 at ``sm_90`` and bf16.
-:func:`image_for` returns one image for one leg, and one image builds one
+:func:`image_for` returns one image for one leg, and one leg builds one
 library, so the architecture and the precision the environment declares are
 the facts of the library that ran (P6). A second precision in one image would
 need a second build of the same library, and the environment would name one of
@@ -28,10 +28,12 @@ their names, because ``notebooks/target.py`` resolves ``train`` through
 leg and mirror them. ``train`` runs one stage of a job; ``pipeline`` runs the
 whole base, SFT, RL, and eval chain of one job file through
 ``python -m nanochat_cpp.pipeline``, which is the container entry of design
-decision D10 (``docs/post-training.md`` section 6.3). One build per image
+decision D10 (``docs/post-training.md`` section 6.3). One build per container
 produces the library and ``//src:nanochat_cli``, the one program every stage
 subcommand and the roofline gate run, so the chain and gate G3 both find a
-binary already built (sections 6.4 and B6).
+binary already built (sections 6.4 and B6). The image holds no compiled
+artifact: a Modal Volume cannot reach an image build, so each container builds
+once against the cache Volume (see :func:`_ensure_build`).
 
 Both legs link the native ring, which is the one collective, and the chain runs
 ``world_size=1`` so the ring reduces to a no-op. No leg builds a simulator: the
@@ -88,6 +90,7 @@ starts.
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 import os
@@ -114,6 +117,14 @@ REMOTE_ROOT = "/runs"
 WEIGHTS_VOLUME = "nanochat-weights"
 WEIGHTS_ROOT = "/weights"
 
+#: The Bazel cache Volume and its mount point. An image build cannot reach a
+#: Volume and a Volume cannot reach an image build, so the image holds no
+#: compiled artifact: each container builds its leg once, against this cache
+#: (``docs/build.md`` section 6.4). One folder per leg, because a leg is one
+#: architecture at one precision.
+CACHE_VOLUME = "nanochat-build-cache"
+CACHE_ROOT = "/cache"
+
 #: The file a cached stage folder carries: the revision it was fetched at.
 REVISION_FILE = ".revision"
 
@@ -133,11 +144,11 @@ SECRET_NAME = "huggingface"
 #: The repository inside the image.
 REPO_ROOT = "/repo"
 
-#: The shared library that the image build produces.
+#: The shared library that the container build produces.
 LIBRARY = f"{REPO_ROOT}/bazel-bin/bindings/libnanochat_shared.so"
 
 #: The one stage command binary the chain launches, beside the library: the
-#: Bazel label the one image build names (``docs/post-training.md`` B6), so a
+#: Bazel label the container build names (``docs/post-training.md`` B6), so a
 #: container needs no second build and the wheel line below stays a later
 #: one-line change. One program runs every stage, so the subcommands are a
 #: table rather than a target each.
@@ -173,7 +184,7 @@ TRAIN_TARGET = CLI_TARGET
 TRAIN_BIN = f"{REPO_ROOT}/bazel-bin/src/nanochat_cli"
 
 def _bazel_bin(target: str) -> str:
-    """The path one target label takes inside the image build."""
+    """The path one target label takes inside the container build."""
     return f"{REPO_ROOT}/bazel-bin/{target.removeprefix('//').replace(':', '/')}"
 
 #: The Bazel label of the Muon optimizer benchmark, and its binary. The
@@ -243,8 +254,27 @@ BUILD_TARGETS = ("//bindings:nanochat_shared", *STAGE_TARGETS,
                  ATTENTION_TEST_TARGET, GEMM_BENCH_TARGET, GEMM_TEST_TARGET,
                  GEMM_FP32_TEST_TARGET, GEMM_MMA_TARGET)
 
-#: The directory of the image build that holds them, and the variables that
-#: name them. ``nanochat_cpp._build.stage_binary`` prefers the override, and
+#: The files the module graph reads before it needs a package of the tree. The
+#: fetch layer holds these and the tooling, and nothing else, so a source change
+#: does not invalidate the fetch (``docs/build.md`` section 6.4).
+MANIFEST_FILES = ("MODULE.bazel", "MODULE.bazel.lock", ".bazelversion",
+                  ".bazelrc", ".bazelignore")
+
+#: The two directories of the tree that the module graph and the entry point
+#: read: the package behind ``tools/nanochat``, and the two repository rules.
+MANIFEST_DIRS = ("python", "third_party")
+
+#: The two files of ``tools/`` the entry point needs: the program, and the
+#: profile table that ``nanochat_cpp.sandbox`` reads when it loads.
+MANIFEST_TOOL_FILES = ("tools/nanochat", "tools/sandbox/profiles.json")
+
+#: The external labels the fetch layer resolves. They are the two archives this
+#: tree downloads, and resolving them walks the whole module graph, so one
+#: command fills the output base with every repository the build needs.
+FETCH_TARGETS = ("@cutlass//:cutlass", "@zstd//:zstd")
+
+#: The directory of the container build that holds them, and the variables
+#: that name them. ``nanochat_cpp._build.stage_binary`` prefers the override, and
 #: the image sets it because the installed distribution answers ``import
 #: nanochat_cpp`` from site-packages, where ``repo_root()`` is not the image
 #: tree (section 6.4). The names follow ``_build.stage_override``: the stage
@@ -337,9 +367,9 @@ class Leg:
     ``build`` is the flag triple the builder emits today
     (``nanochat_cpp._build._build_command``), written out here so a reader sees
     the flags without following the builder. The test contracts the two
-    against each other, and the image build passes the leg's precision and
-    architecture back through ``BuildOptions.resolve``, so the builder stays
-    the one home of the command line.
+    against each other, and the container build reads the leg's precision and
+    architecture from the image environment through ``BuildOptions.from_env``,
+    so the builder stays the one home of the command line.
     """
 
     name: str
@@ -428,6 +458,65 @@ app = modal.App(APP_NAME)
 
 runs = modal.Volume.from_name(RUNS_VOLUME, create_if_missing=True)
 weights = modal.Volume.from_name(WEIGHTS_VOLUME, create_if_missing=True)
+build_cache = modal.Volume.from_name(CACHE_VOLUME, create_if_missing=True)
+
+
+def _ensure_build() -> str:
+    """Build the leg's targets in this container, and return the cache path.
+
+    The image holds no compiled artifact, because a Modal Volume cannot reach an
+    image build. Every container therefore builds its leg once, against the
+    cache that :data:`CACHE_VOLUME` holds. The leg is not a parameter: the
+    image's own environment names the cache folder, the precision, and the
+    architecture, and ``BuildOptions.from_env`` reads them, so a container
+    builds what it declares.
+
+    The cost is the measurement that chose this design. A fresh output base with
+    a cold cache cost 23.0 seconds for 76 actions, and the same build against a
+    warm cache cost 3.4 seconds with 71 cache hits. That measurement is the CPU
+    library, so it is a lower bound for a leg's ten targets; the shape is what
+    matters, and the image build pays nothing.
+
+    The Volume is committed, because a container that exits without a commit
+    throws its cache away, and the next container would compile again.
+    """
+    from nanochat_cpp import _build  # noqa: PLC0415 - the image only
+
+    options = _build.BuildOptions.from_env()
+    command = _build._build_command(Path("tools/nanochat"), options,
+                                    BUILD_TARGETS)
+    result = subprocess.run(command, cwd=REPO_ROOT, capture_output=True,
+                            text=True, check=False)
+    build_cache.commit()
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"the container build failed ({result.returncode}) with the cache "
+            f"at {options.bazel_cache}: {' '.join(command)}\n"
+            f"{(result.stdout or '')[-2000:]}{(result.stderr or '')[-2000:]}")
+    return options.bazel_cache
+
+
+def _function(**kwargs):
+    """``app.function`` with the build cache and the container build.
+
+    One wrapper, so no function can forget either: every container mounts the
+    cache Volume, and every container builds its leg before its body runs. A
+    function that skipped the build would find no library, and one that skipped
+    the mount would compile into its own disk and keep nothing.
+    """
+    volumes = dict(kwargs.pop("volumes", {}))
+    volumes[CACHE_ROOT] = build_cache
+
+    def decorate(func):
+        @functools.wraps(func)
+        def wrapper(*args, **inner):
+            _ensure_build()
+            return func(*args, **inner)
+
+        return app.function(volumes=volumes, **kwargs)(wrapper)
+
+    return decorate
+
 
 def image_env(leg: Leg) -> dict:
     """The environment of one leg's image.
@@ -447,35 +536,56 @@ def image_env(leg: Leg) -> dict:
         **STAGE_ENV,
         "NANOCHAT_CPP_PRECISION": leg.precision,
         "NANOCHAT_CUDA_ARCH": leg.arch,
+        "NANOCHAT_BAZEL_CACHE": f"{CACHE_ROOT}/{leg.name}",
         "NANOCHAT_SANDBOX_BACKEND": "none",
         "NANOCHAT_TARGET": "local",
         "PYTHONPATH": f"{REPO_ROOT}/python:{REPO_ROOT}/notebooks",
     }
 
 
-def image_build_command(leg: Leg, targets: Sequence[str] = BUILD_TARGETS,
-                        root: str = REPO_ROOT) -> str:
-    """The one build command of one leg's image.
+def _builder_command(leg: Leg, targets: Sequence[str], flags: Sequence[str],
+                     pythonpath: str | None = None,
+                     root: str = REPO_ROOT) -> str:
+    """The one ``python3 -c`` command that runs the tree's builder in a container.
 
-    The command is a one-liner that calls ``_build._build_command``, so the
-    builder stays the one home of the flag line and the image passes the leg's
-    precision and architecture through ``BuildOptions.resolve`` (section 7).
-    The targets are the library and ``//src:nanochat_cli``, which runs every
-    stage subcommand and the roofline gate, so gate G3 finds the tool already
-    built inside the container.
+    One home for the quoting, so the fetch command and the probe command cannot
+    drift. ``flags`` is appended to the list that ``_build._build_command``
+    returns, so the builder stays the one home of the flag line. The flags are a
+    list literal because that function returns a list, and a tuple would raise
+    ``TypeError`` inside the container and not here.
 
-    The command names no Bazel config. The ``h100`` entry of ``.bazelrc`` is
-    the simulator, and it also sets the native collective, so the hardware leg
-    takes the builder's explicit triple instead (section 3, trap 1).
+    ``pythonpath`` names the tree's ``python/`` directory for a command that
+    runs before the install. The fetch layer is such a command: it copies the
+    tooling and fetches before the package reaches site-packages, so the import
+    resolves from the tree.
     """
     labels = "(" + "".join(f"{label!r}, " for label in targets) + ")"
+    extra = "[" + "".join(f"{flag!r}, " for flag in flags) + "]"
+    prefix = f"PYTHONPATH={pythonpath} " if pythonpath else ""
     return (
-        f"cd {root} && python3 -c \""
+        f"cd {root} && {prefix}python3 -c \""
         "import subprocess; from nanochat_cpp import _build; "
         "_options = _build.BuildOptions.resolve("
         f"backend='cuda', precision='{leg.precision}', arch='{leg.arch}'); "
-        "subprocess.run(_build._build_command("
-        f"'tools/nanochat', _options, {labels}), check=True)\"")
+        "_command = _build._build_command("
+        f"'tools/nanochat', _options, {labels}) + {extra}; "
+        "subprocess.run(_command, check=True)\"")
+
+
+def image_fetch_command(leg: Leg, targets: Sequence[str] = FETCH_TARGETS,
+                        root: str = REPO_ROOT) -> str:
+    """The one fetch command of one leg's image.
+
+    It runs the tree's builder with ``--nobuild``, so the module graph resolves
+    and every external repository arrives while no action runs. The container
+    that later builds the leg starts from this image, so its output base already
+    holds those repositories and it compiles without a fetch. A measured cold
+    fetch costs 18 seconds and a fetch against a warm cache 4 seconds.
+
+    No action pool flag is passed: this command runs no action.
+    """
+    return _builder_command(leg, targets, ("--nobuild",),
+                            pythonpath=f"{root}/python", root=root)
 
 
 def probe_build_command(leg: Leg, target: str, arch: str,
@@ -532,9 +642,41 @@ IMAGE_IGNORE = (
 )
 
 
+def _manifest_layer(image, leg: Leg):
+    """Copy the manifest and the tooling, then resolve the external repositories.
+
+    The tree arrives in two layers. This one holds what the module graph reads
+    and what the entry point needs, so a source change does not touch it. The
+    next layer is the tree itself, and the build above it then reads a warm
+    output base: the workspace path is the same, so the external repositories
+    of this layer are the ones it uses.
+
+    The command is chmod'ed first, because ``add_local_file`` copies one file
+    and the mode of ``tools/nanochat`` is what makes it the entry point.
+    """
+    for name in MANIFEST_FILES:
+        image = image.add_local_file(str(REPO / name),
+                                     f"{REPO_ROOT}/{name}", copy=True)
+    for name in MANIFEST_DIRS:
+        image = image.add_local_dir(str(REPO / name),
+                                    f"{REPO_ROOT}/{name}", copy=True,
+                                    ignore=["**/__pycache__"])
+    for name in MANIFEST_TOOL_FILES:
+        image = image.add_local_file(str(REPO / name),
+                                     f"{REPO_ROOT}/{name}", copy=True)
+    return image.run_commands(f"chmod 0755 {REPO_ROOT}/tools/nanochat",
+                              image_fetch_command(leg))
+
+
 def _build_image(leg: Leg):
-    """The image of one leg, before :func:`image_for` caches it."""
-    return (
+    """The image of one leg, before :func:`image_for` caches it.
+
+    The image holds the toolkit, the tree, the installed package, and the
+    external repositories. It holds no compiled artifact: a Modal Volume cannot
+    reach an image build, so a cache in the image would be cold on every
+    rebuild, and :func:`_ensure_build` builds in the container instead.
+    """
+    image = (
         modal.Image.from_registry(
             "nvidia/cuda:12.4.1-devel-ubuntu22.04", add_python="3.11")
         .apt_install("build-essential", "curl", "git")
@@ -544,6 +686,12 @@ def _build_image(leg: Leg):
             "v1.22.1/bazelisk-linux-amd64",
             "chmod 0755 /usr/local/bin/bazelisk",
         )
+    )
+    # The manifest, the tooling, and the fetch come before the tree, so a source
+    # change rebuilds one layer and not three (docs/build.md section 6.4).
+    image = _manifest_layer(image, leg)
+    return (
+        image
         .add_local_dir(str(REPO), remote_path=REPO_ROOT, copy=True,
                        ignore=list(IMAGE_IGNORE))
         # Install the package at image build (section 6.4). The tree install
@@ -557,10 +705,6 @@ def _build_image(leg: Leg):
         #                "https://.../nanochat_cpp_cuda_sm75-0.1.0.whl")
         .pip_install(f"{REPO_ROOT}/python[hub]")
         .env(image_env(leg))
-        # One build names the library and the one stage binary, which runs
-        # every stage subcommand and the roofline gate, so the image satisfies
-        # D2, the chain finds its binary (B6), and G3 needs no second build.
-        .run_commands(image_build_command(leg))
         .workdir(REPO_ROOT)
     )
 
@@ -841,12 +985,46 @@ def _publish(job_json: str, run_dir: Path, publish_json: str,
             "record": record}
 
 
-@app.function(image=image_for(T4), gpu=T4.gpu, cpu=CPU_CORES, timeout=600)
+@_function(image=image_for(T4), gpu=T4.gpu, cpu=CPU_CORES, timeout=1800)
 def doctor() -> str:
-    """Report the device, the architecture, and the sandbox of the worker."""
+    """Report the device, the architecture, and the sandbox of the worker.
+
+    The timeout matches a card job, because the container builds its leg before
+    this body runs, and a cold cache makes that build the long part.
+    """
     result = subprocess.run(["tools/nanochat", "doctor"],
                             capture_output=True, text=True, check=False)
     return (result.stdout + result.stderr).strip()
+
+
+#: The longest a warm build may take. A cold cache compiles every target of one
+#: leg in a container with four cores, and the first run of a leg pays it. The
+#: bound is generous because the call is one-off, and a card is not needed to
+#: compile: ``nvcc`` crosses the architecture on any host.
+WARM_TIMEOUT_SECONDS = 60 * 60
+
+
+@_function(image=image_for(T4), cpu=CPU_CORES, timeout=WARM_TIMEOUT_SECONDS)
+def warm_t4() -> str:
+    """Build the T4 leg into the cache Volume and return the cache path."""
+    return os.environ.get("NANOCHAT_BAZEL_CACHE", "")
+
+
+@_function(image=image_for(H100), cpu=CPU_CORES, timeout=WARM_TIMEOUT_SECONDS)
+def warm_h100() -> str:
+    """Build the H100 leg into the cache Volume and return the cache path."""
+    return os.environ.get("NANOCHAT_BAZEL_CACHE", "")
+
+
+@_function(image=image_for(H100_FP8), cpu=CPU_CORES,
+           timeout=WARM_TIMEOUT_SECONDS)
+def warm_h100_fp8() -> str:
+    """Build the fp8 leg into the cache Volume and return the cache path."""
+    return os.environ.get("NANOCHAT_BAZEL_CACHE", "")
+
+
+#: The warm function of each leg, by leg name.
+WARM_FUNCTIONS = {"t4": warm_t4, "h100": warm_h100, "h100-fp8": warm_h100_fp8}
 
 
 def _train_on(leg: Leg, job_json: str, run_id: str, publish_json: str = "",
@@ -915,7 +1093,7 @@ def _train_on(leg: Leg, job_json: str, run_id: str, publish_json: str = "",
                       sort_keys=True)
 
 
-@app.function(
+@_function(
     image=image_for(T4),
     gpu=T4.gpu,
     cpu=CPU_CORES,
@@ -936,7 +1114,7 @@ def train(job_json: str, run_id: str, publish_json: str = "",
     return _train_on(T4, job_json, run_id, publish_json, stage_json)
 
 
-@app.function(
+@_function(
     image=image_for(H100),
     gpu=H100.gpu,
     cpu=CPU_CORES,
@@ -977,7 +1155,7 @@ def _run_in_image(command: list, argv_json: str, row_prefixes: tuple) -> str:
                       sort_keys=True)
 
 
-@app.function(
+@_function(
     image=image_for(H100),
     gpu=H100.gpu,
     cpu=CPU_CORES,
@@ -1002,7 +1180,7 @@ def bench_h100(argv_json: str = "[]") -> str:
                          argv_json, ("polar:", "muon:"))
 
 
-@app.function(
+@_function(
     image=image_for(H100),
     gpu=H100.gpu,
     cpu=CPU_CORES,
@@ -1023,7 +1201,7 @@ def check_attention_h100() -> str:
                           ATTENTION_TEST_BIN], "[]", ())
 
 
-@app.function(
+@_function(
     image=image_for(H100),
     gpu=H100.gpu,
     cpu=CPU_CORES,
@@ -1046,7 +1224,7 @@ def bench_attention_h100(argv_json: str = "[]") -> str:
                           ATTENTION_BENCH_BIN], argv_json, ("attention:",))
 
 
-@app.function(
+@_function(
     image=image_for(H100),
     gpu=H100.gpu,
     cpu=CPU_CORES,
@@ -1067,7 +1245,7 @@ def check_gemm_h100() -> str:
                           GEMM_TEST_BIN], "[]", ())
 
 
-@app.function(
+@_function(
     image=image_for(H100),
     gpu=H100.gpu,
     cpu=CPU_CORES,
@@ -1091,7 +1269,7 @@ def bench_gemm_h100(argv_json: str = "[]") -> str:
                          argv_json, ("gemm:",))
 
 
-@app.function(
+@_function(
     image=image_for(T4),
     gpu=T4.gpu,
     cpu=CPU_CORES,
@@ -1111,7 +1289,7 @@ def check_gemm_fp32_t4() -> str:
                           GEMM_FP32_TEST_BIN], "[]", ())
 
 
-@app.function(
+@_function(
     image=image_for(T4),
     gpu=T4.gpu,
     cpu=CPU_CORES,
@@ -1134,7 +1312,7 @@ def bench_gemm_fp32_t4(argv_json: str = "[]") -> str:
                          argv_json, ("gemm:",))
 
 
-@app.function(
+@_function(
     image=image_for(H100_FP8),
     gpu=H100_FP8.gpu,
     cpu=CPU_CORES,
@@ -1159,7 +1337,7 @@ def bench_gemm_fp8_h100(argv_json: str = "[]") -> str:
         ("gemm:",))
 
 
-@app.function(
+@_function(
     image=image_for(H100),
     gpu=H100.gpu,
     cpu=CPU_CORES,
@@ -1179,7 +1357,7 @@ def check_mma_h100() -> str:
                           GEMM_MMA_BIN], "[]", ("mma_bf16",))
 
 
-@app.function(
+@_function(
     image=image_for(H100),
     gpu=H100.gpu,
     cpu=CPU_CORES,
@@ -1475,7 +1653,7 @@ def _pipeline_on(leg: Leg, job_json: str, run_id: str, stage_json: str = "",
                       sort_keys=True)
 
 
-@app.function(
+@_function(
     image=image_for(T4),
     gpu=T4.gpu,
     cpu=CPU_CORES,
@@ -1495,7 +1673,7 @@ def pipeline(job_json: str, run_id: str, stage_json: str = "",
     return _pipeline_on(T4, job_json, run_id, stage_json, publish_json)
 
 
-@app.function(
+@_function(
     image=image_for(H100),
     gpu=H100.gpu,
     cpu=CPU_CORES,
@@ -1632,7 +1810,7 @@ def process_tail(result, lines: int = 5) -> str:
     return " | ".join(kept)
 
 
-@app.function(
+@_function(
     image=image_for(H100),
     cpu=CPU_CORES,
     volumes={REMOTE_ROOT: runs},
@@ -1744,7 +1922,7 @@ def step_split_argv(job: Mapping, corpus: Mapping, steps: int = 6) -> list:
             "--checkpoint", f"{REMOTE_ROOT}/split/checkpoint.ckpt"]
 
 
-@app.function(
+@_function(
     image=image_for(H100),
     gpu=H100.gpu,
     cpu=CPU_CORES,
@@ -1926,7 +2104,7 @@ def _csv_rows(path, limit: int = 25) -> list:
     return rows[:limit]
 
 
-@app.function(
+@_function(
     image=profile_image_for(H100),
     gpu=H100.gpu,
     cpu=CPU_CORES,
@@ -2314,7 +2492,7 @@ def _last_json_block(text: str):
     return None
 
 
-@app.function(
+@_function(
     image=profile_image_for(H100),
     gpu=H100.gpu,
     cpu=CPU_CORES,
@@ -2331,7 +2509,7 @@ def profile_stage_h100(stage: str, job_json: str, run_id: str, steps: int = 50,
                      sample)
 
 
-@app.function(
+@_function(
     image=profile_image_for(T4),
     gpu=T4.gpu,
     cpu=CPU_CORES,
@@ -2348,7 +2526,7 @@ def profile_stage_t4(stage: str, job_json: str, run_id: str, steps: int = 50,
                      sample)
 
 
-@app.function(
+@_function(
     image=profile_image_for(H100),
     gpu=H100.gpu,
     cpu=CPU_CORES,
@@ -2368,7 +2546,7 @@ def measure_stage_h100(stage: str, job_json: str, run_id: str,
     return _measure_on(H100, stage, job_json, run_id, steps, seconds, times)
 
 
-@app.function(
+@_function(
     image=profile_image_for(T4),
     gpu=T4.gpu,
     cpu=CPU_CORES,
@@ -2811,6 +2989,28 @@ def card_job(name: str = "", argv: str = "[]") -> None:
         print(f"modal: {name} takes no --argv", file=sys.stderr)
         raise SystemExit(2)
     _print_answer(entry.job.remote(), entry.what)
+
+
+@app.local_entrypoint()
+def warm_cache(legs: str = "both") -> None:
+    """Build each leg once, so the first real run is not the cold one.
+
+        modal run tools/modal/app.py::warm_cache
+        modal run tools/modal/app.py::warm_cache --legs h100
+        modal run tools/modal/app.py::warm_cache --legs h100-fp8
+
+    A container compiles its leg against the cache Volume, and a cold cache
+    compiles every target of that leg. The first run of a leg therefore pays
+    minutes, and every later run pays seconds. This entry point pays that cost
+    once, in a function with an hour to spend, so a card job is never the first
+    thing to meet a cold cache. A card is not needed: ``nvcc`` crosses the
+    architecture on any host.
+    """
+    for leg in selected_legs(legs):
+        function = WARM_FUNCTIONS.get(leg.name)
+        if function is None:
+            raise SystemExit(f"no warm function for the leg {leg.name!r}")
+        print(f"{leg.name}: {function.remote()}")
 
 
 @app.local_entrypoint()

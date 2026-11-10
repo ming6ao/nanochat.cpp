@@ -95,7 +95,10 @@ prints the mode, the library, the secret names, and the devices.
   the two stage executables, which the install root does not carry. `stages`
   builds the library and both executables in one call with the Colab defaults,
   and `probe` maps `nvidia-smi --query-gpu=compute_cap` to `sm_75` on a T4, so
-  a paid session fails with a message about the architecture.
+  a paid session fails with a message about the architecture. Both calls also
+  name the Bazel cache: `/content/bazel-cache` by default, so a rebuild after
+  an edit reuses what the first build compiled, and a Drive path in
+  `NANOCHAT_BAZEL_CACHE` when the session should keep it across restarts.
 - `target.py` owns the run host. `resolve` reads `NANOCHAT_TARGET`, and
   `local` is the default. `Target.prepare` maps every job path to the root the
   host reads, so a remote host needs no notebook change. The module also parses
