@@ -64,6 +64,7 @@ cc_library(
     name = "dispatch",
     srcs = ["dispatch.cc"],
     hdrs = [
+        "cutlass_candidates.h",
         "cutlass_rules.h",
         "dispatch.h",
         "gemm_plan.h",
@@ -73,6 +74,9 @@ cc_library(
     copts = nanochat_copts(),
     defines = precision_defines(),
     deps = [
+        # The verdict reads a candidate's own statement of the store it serves,
+        # so the rules depend on the registry and not the other way round.
+        ":cutlass_candidates",
         "//backends/cuda/kernels:muon_gemm_shape",
         "//include/nanochat:nanochat",
     ],
@@ -191,7 +195,7 @@ cuda_library(
 #: and 1.2 GiB, so four candidates in one compiler process would exceed the
 #: development host's budget. One target for each index is what keeps the
 #: build's memory peak at one candidate.
-_CANDIDATE_INDICES = ["0", "1", "2", "3"]
+_CANDIDATE_INDICES = ["0", "1", "2", "3", "4"]
 
 [
     cuda_library(
@@ -293,6 +297,11 @@ cuda_library(
     defines = precision_defines(),
     deps = [
         ":cutlass_candidates",
+        # `cutlass_kernel.cuh` reads the scheduler choice from `dispatch.h`, so
+        # this target depends on the rules as every candidate does. Without the
+        # edge the header resolves in a bf16 build and fails in an fp8 one,
+        # which is a difference only a second precision shows.
+        ":dispatch",
         "//backends/cuda:device",
         "//include/nanochat:nanochat",
         "@cutlass//:cutlass",

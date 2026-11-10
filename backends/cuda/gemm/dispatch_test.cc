@@ -35,10 +35,21 @@ namespace {
 using nanochat::Fp8Format;
 using nanochat::GemmParams;
 using nanochat::kernels::CutlassCandidateFor;
+using nanochat::kernels::CutlassCandidateServesStore;
+using nanochat::kernels::CutlassGroupIsFree;
+using nanochat::kernels::CutlassRasterOrder;
+using nanochat::kernels::CutlassRasterOrderFromName;
+using nanochat::kernels::CutlassRasterOrderName;
 using nanochat::kernels::CutlassRefusal;
 using nanochat::kernels::CutlassRefusalName;
+using nanochat::kernels::CutlassScheduler;
+using nanochat::kernels::CutlassSchedulerFor;
+using nanochat::kernels::CutlassSchedulerFromEnv;
+using nanochat::kernels::CutlassTiles;
 using nanochat::kernels::Fp8ScaledFormSupported;
+using nanochat::kernels::GemmCandidateAt;
 using nanochat::kernels::GemmCandidateCount;
+using nanochat::kernels::GemmCandidateIndexFromName;
 using nanochat::kernels::GemmRoute;
 using nanochat::kernels::GemmRuleFor;
 using nanochat::kernels::GemmRuleRow;
@@ -774,6 +785,114 @@ void CheckOrders() {
   CheckOrder<nanochat::kernels::gemm_tile::PlanTall>("the tall schedule");
 }
 
+// The two launch arguments of the CUTLASS persistent scheduler, and the sweep
+// that reads them. The vendor default must be the shipped answer, or an unset
+// environment would change a shipped call.
+void CheckSchedulerChoice() {
+  const char* kCase = "the scheduler choice";
+  unsetenv("NANOCHAT_GEMM_SWIZZLE");
+  unsetenv("NANOCHAT_GEMM_RASTER");
+
+  Expect(CutlassRasterOrderName(CutlassRasterOrder::kHeuristic) ==
+             std::string("heuristic"),
+         "the heuristic order reads heuristic", kCase);
+  Expect(CutlassRasterOrderName(CutlassRasterOrder::kAlongM) ==
+             std::string("along-m"),
+         "the M order reads along-m", kCase);
+  Expect(CutlassRasterOrderName(CutlassRasterOrder::kAlongN) ==
+             std::string("along-n"),
+         "the N order reads along-n", kCase);
+  for (const auto order :
+       {CutlassRasterOrder::kHeuristic, CutlassRasterOrder::kAlongM,
+        CutlassRasterOrder::kAlongN}) {
+    Expect(CutlassRasterOrderFromName(CutlassRasterOrderName(order)) == order,
+           "an order name round trips", kCase);
+  }
+  Expect(CutlassRasterOrderFromName("no such order") ==
+             CutlassRasterOrder::kHeuristic,
+         "an unknown order is the heuristic", kCase);
+  Expect(CutlassRasterOrderFromName(nullptr) == CutlassRasterOrder::kHeuristic,
+         "a missing order is the heuristic", kCase);
+
+  // A shape whose tile counts are not a whole number of groups takes the vendor
+  // default, because a group would spend blocks that compute nothing.
+  CutlassTiles tiles;
+  tiles.m = 5;
+  tiles.n = 10;
+  CutlassScheduler choice = CutlassSchedulerFor(tiles);
+  Expect(choice.max_swizzle_size == 1 &&
+             choice.raster == CutlassRasterOrder::kHeuristic,
+         "tile counts that round take the vendor default", kCase);
+  Expect(!CutlassGroupIsFree(tiles), "5 by 10 tiles are not a group", kCase);
+  // The classifier's counts are 128 by 128, which is a whole number of groups.
+  // The sweep read 1.36 of that row's default cell there.
+  tiles.m = 128;
+  tiles.n = 128;
+  Expect(CutlassGroupIsFree(tiles), "128 by 128 tiles are a group", kCase);
+  choice = CutlassSchedulerFor(tiles);
+  Expect(choice.max_swizzle_size == 8 &&
+             choice.raster == CutlassRasterOrder::kHeuristic,
+         "a free group takes eight tiles and leaves the raster alone", kCase);
+  // One count off the multiple is enough to lose the group.
+  tiles.n = 120;
+  Expect(!CutlassGroupIsFree(tiles), "120 tiles are not a group", kCase);
+  // The vendor's own rule refuses a group below six tiles, so the rule does not
+  // ask for one.
+  tiles.m = 16;
+  tiles.n = 16;
+  Expect(CutlassGroupIsFree(tiles), "16 by 16 tiles are six or more", kCase);
+  tiles.m = 4;
+  Expect(!CutlassGroupIsFree(tiles), "four tiles take no group", kCase);
+  CutlassScheduler unused;
+  Expect(!CutlassSchedulerFromEnv(&unused), "unset states no value", kCase);
+  Expect(!CutlassSchedulerFromEnv(nullptr), "a missing output answers false",
+         kCase);
+
+  // A stated variable reaches the launch through the shape rule, which is how
+  // a card run sweeps one cell.
+  setenv("NANOCHAT_GEMM_SWIZZLE", "8", 1);
+  setenv("NANOCHAT_GEMM_RASTER", "along-n", 1);
+  choice = CutlassSchedulerFor(tiles);
+  Expect(choice.max_swizzle_size == 8 &&
+             choice.raster == CutlassRasterOrder::kAlongN,
+         "both variables reach the launch, and the sweep wins", kCase);
+
+  // A group below one is no group, so a stray value cannot change a decision.
+  setenv("NANOCHAT_GEMM_SWIZZLE", "0", 1);
+  choice = CutlassSchedulerFor(tiles);
+  Expect(choice.max_swizzle_size == 1, "a group of zero is no group", kCase);
+  setenv("NANOCHAT_GEMM_SWIZZLE", "", 1);
+  choice = CutlassSchedulerFor(tiles);
+  Expect(choice.max_swizzle_size == 1, "an empty value states nothing", kCase);
+
+  unsetenv("NANOCHAT_GEMM_SWIZZLE");
+  unsetenv("NANOCHAT_GEMM_RASTER");
+}
+
+// A candidate states the store it serves, and the verdict refuses a candidate
+// that does not. `narrow-n` answered `kErrorInternal` on every fp32 store on
+// the card, so the seam must not choose it for a weight gradient.
+void CheckStoreRule() {
+  const char* kCase = "the store rule";
+  const int narrow = GemmCandidateIndexFromName("narrow-n");
+  Expect(narrow >= 0, "the registry holds narrow-n", kCase);
+  Expect(!CutlassCandidateServesStore(narrow, /*fp32_c=*/true),
+         "narrow-n serves no fp32 store", kCase);
+  Expect(CutlassCandidateServesStore(narrow, /*fp32_c=*/false),
+         "narrow-n serves a bf16 store", kCase);
+  for (int index = 0; index < GemmCandidateCount(); ++index) {
+    if (index == narrow) continue;
+    Expect(CutlassCandidateServesStore(index, true),
+           std::string("candidate ") + GemmCandidateAt(index).name +
+               " serves the fp32 store",
+           kCase);
+  }
+  Expect(!CutlassCandidateServesStore(-1, false),
+         "an index outside the registry serves nothing", kCase);
+  Expect(!CutlassCandidateServesStore(GemmCandidateCount(), false),
+         "an index past the registry serves nothing", kCase);
+}
+
 }  // namespace
 
 int main() {
@@ -788,6 +907,8 @@ int main() {
   CheckRuleTable();
   CheckSchedules();
   CheckScheduleFromEnv();
+  CheckSchedulerChoice();
+  CheckStoreRule();
   CheckOrders();
   CheckResolve();
 

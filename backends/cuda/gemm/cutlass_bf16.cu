@@ -59,21 +59,23 @@ int CandidateFor(const ResolvedGemm& gemm) {
   return promoted >= 0 ? promoted : 0;
 }
 
-// One candidate's three entries, so a dispatch is a table read and a bounds
-// test and not a switch.
+// One candidate's entries, so a dispatch is a table read and a bounds test and
+// not a switch.
 struct CandidateEntries {
   bool (*launch)(const ResolvedGemm&, const ComputeType*, const ComputeType*,
                  ComputeType*);
   bool (*launch_fp32)(const ResolvedGemm&, const ComputeType*,
                       const ComputeType*, float*);
   int (*occupancy)();
+  CutlassGrid (*grid)(const ResolvedGemm&);
 };
 
 constexpr CandidateEntries kCandidateEntries[] = {
 #define NANOCHAT_CANDIDATE_ENTRY(index)                      \
   CandidateEntries{&LaunchGemmCutlassCandidate##index,       \
                    &LaunchGemmCutlassCandidateToFp32##index, \
-                   &GemmCutlassCandidateOccupancy##index},
+                   &GemmCutlassCandidateOccupancy##index,    \
+                   &GemmCutlassCandidateGrid##index},
     NANOCHAT_FOR_EACH_CANDIDATE(NANOCHAT_CANDIDATE_ENTRY)
 #undef NANOCHAT_CANDIDATE_ENTRY
 };
@@ -111,6 +113,15 @@ int GemmCutlassCandidateOccupancy(int candidate) {
   if (candidate < 0 || candidate >= kGemmCandidateCount) return 0;
   return kCandidateEntries[candidate].occupancy();
 }
+
+CutlassGrid GemmCutlassCandidateGrid(int candidate, const ResolvedGemm& gemm) {
+  if (candidate < 0 || candidate >= kGemmCandidateCount) return CutlassGrid{};
+  return kCandidateEntries[candidate].grid(gemm);
+}
+
+int GemmCutlassRefusalCount() { return cutlass_detail::RefusalCount(); }
+
+void ResetGemmCutlassRefusalCount() { cutlass_detail::RefusalCount() = 0; }
 
 // --- The seam entries -------------------------------------------------------
 

@@ -223,6 +223,20 @@ inline bool IsCutlassCallable(const ResolvedGemm& gemm, const void* a,
   return JudgeCutlass(gemm, a, b, c) == CutlassRefusal::kNone;
 }
 
+// The grid a candidate launches for one call, and the count of blocks the call
+// holds. A persistent scheduler launches one grid for the whole problem, so the
+// pair states how the card is used: `problem_blocks / grid_blocks` is the wave
+// count, and its remainder is the tail.
+//
+// **The vendor answers both fields.** `grid_blocks` is the launch shape and
+// `problem_blocks` is the scheduler's own tile count, rounded to its swizzle
+// group, so neither is this tree's arithmetic. Only a card can state them,
+// because the launch shape depends on the multiprocessor count.
+struct CutlassGrid {
+  int grid_blocks = 0;
+  int problem_blocks = 0;
+};
+
 // The refusal that governs an fp8 call (docs/kernels.md section 10.4). The
 // extents, the size floor, and the pointers follow `JudgeCutlass`; the strides
 // do not, because one operand element is one byte instead of two, and a batch

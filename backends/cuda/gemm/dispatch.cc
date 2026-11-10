@@ -22,6 +22,7 @@
 #include <utility>
 #include <vector>
 
+#include "backends/cuda/gemm/cutlass_candidates.h"
 #include "backends/cuda/gemm/cutlass_rules.h"
 #include "backends/cuda/gemm/gemm_plan.h"
 #include "backends/cuda/gemm/linear_shape.h"
@@ -188,9 +189,18 @@ const GemmRuleRow* GemmRuleFor(const ResolvedGemm& gemm) {
   return nullptr;
 }
 
+bool CutlassCandidateServesStore(int candidate, bool fp32_c) {
+  if (candidate < 0 || candidate >= GemmCandidateCount()) return false;
+  return !fp32_c || GemmCandidateAt(candidate).serves_fp32_store;
+}
+
 int CutlassCandidateFor(const ResolvedGemm& gemm) {
   const GemmRuleRow* row = GemmRuleFor(gemm);
   if (row == nullptr || row->route != GemmRoute::kCandidate) return -1;
+  // A candidate states whether it serves the fp32 store. One that does not is
+  // refused here and not inside the launch, so no call can reach a kernel that
+  // would fall back and report another arm's time.
+  if (!CutlassCandidateServesStore(row->candidate, gemm.fp32_c)) return -1;
   return row->candidate;
 }
 
@@ -285,6 +295,68 @@ bool GemmTileShapeEnabled(int index) {
 void SetGemmTileShapeEnabled(int index, bool enabled) {
   if (index < 0 || index >= GemmTileShapeCount()) return;
   Rows()[static_cast<std::size_t>(index)].enabled = enabled;
+}
+
+// --- The Hopper scheduler's two launch arguments -----------------------------
+
+const char* CutlassRasterOrderName(CutlassRasterOrder order) {
+  switch (order) {
+    case CutlassRasterOrder::kAlongM:
+      return "along-m";
+    case CutlassRasterOrder::kAlongN:
+      return "along-n";
+    case CutlassRasterOrder::kHeuristic:
+    default:
+      return "heuristic";
+  }
+}
+
+CutlassRasterOrder CutlassRasterOrderFromName(const char* name) {
+  if (name == nullptr) return CutlassRasterOrder::kHeuristic;
+  const std::string value(name);
+  if (value == "along-m") return CutlassRasterOrder::kAlongM;
+  if (value == "along-n") return CutlassRasterOrder::kAlongN;
+  return CutlassRasterOrder::kHeuristic;
+}
+
+bool CutlassSchedulerFromEnv(CutlassScheduler* out) {
+  if (out == nullptr) return false;
+  bool stated = false;
+  const char* swizzle = std::getenv("NANOCHAT_GEMM_SWIZZLE");
+  if (swizzle != nullptr && swizzle[0] != '\0') {
+    const int value = std::atoi(swizzle);
+    // A group of one is the vendor default, and a group below one is no group.
+    // Both leave the field alone, so a stray value cannot change a decision.
+    if (value >= 1) {
+      out->max_swizzle_size = value;
+      stated = true;
+    }
+  }
+  const char* raster = std::getenv("NANOCHAT_GEMM_RASTER");
+  if (raster != nullptr && raster[0] != '\0') {
+    out->raster = CutlassRasterOrderFromName(raster);
+    stated = true;
+  }
+  return stated;
+}
+
+bool CutlassGroupIsFree(const CutlassTiles& tiles) {
+  return tiles.m >= kCutlassGroupMinTiles && tiles.n >= kCutlassGroupMinTiles &&
+         tiles.m % kCutlassGroupMultiple == 0 &&
+         tiles.n % kCutlassGroupMultiple == 0;
+}
+
+CutlassScheduler CutlassSchedulerFor(const CutlassTiles& tiles) {
+  // The sweep wins, because a card run measures one cell at a time.
+  CutlassScheduler choice;
+  if (CutlassSchedulerFromEnv(&choice)) return choice;
+  // A call whose tile counts are already a whole number of groups keeps a group
+  // of eight, so the resident blocks share a run of panels at no cost in
+  // padding. Every other call takes the vendor default. The raster stays the
+  // vendor's: one run read the three orders within 3.5 percent of each other on
+  // the only row that takes a group.
+  if (CutlassGroupIsFree(tiles)) choice.max_swizzle_size = 8;
+  return choice;
 }
 
 }  // namespace kernels

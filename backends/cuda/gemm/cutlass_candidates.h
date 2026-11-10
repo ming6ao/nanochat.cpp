@@ -18,16 +18,29 @@
 // estimate, and the sweep's report all derive from these fields, so a row
 // states its tile once.
 //
-// The four are the four shape families the one model issues, and no single
-// kernel is right for all of them:
+// The five are the shape families the one model issues, and no single kernel is
+// right for all of them:
 //
 //   * `wide-n` is the square tile of `dev/cutlass/README.md` section 3. Its 256
 //     wide N suits the classifier, whose N is 32768.
 //   * `balanced` halves N, which halves the accumulator.
-//   * `deep-k` doubles the k slice and halves the stage count, for a long k
-//     loop with few tiles.
 //   * `tall-m` doubles M, for the weight gradient, whose N is short and whose M
 //     is the token count.
+//   * `narrow-n` halves N and clusters along it, for a shape whose M holds few
+//     tiles: a 640 wide M holds five tiles of 128, so a 128 wide N is the only
+//     way to raise the block count without a workspace.
+//   * `short-k` is the probe's 32 deep slice at six stages, for the rows whose
+//     k is 1280 and whose cooperative pipeline therefore runs a short loop.
+//
+// The last two are the sweep's answer to the rows where the candidate arm is
+// slower than cuBLAS (`backends/cuda/gemm/README.md` section 17). They are
+// registry rows, so a measurement decides whether they ship.
+//
+// **`deep-k`, the 128 by 128 by 128 tile at two stages, left the registry.**
+// One sweep measured it on all 25 candidate rows and it lost on every one, by
+// 20 percent at the best. A row that never wins costs a compiler process and
+// eight instantiations. The fp8 arm keeps the deep slice for its transposing
+// collective, which is a correctness need and not a rate.
 //
 // A candidate that spills its accumulator, or that fails the check of section
 // 11.4 item 3, leaves the registry before a sweep. The gates are
@@ -61,6 +74,15 @@ struct GemmCandidateSpec {
   const char* epilogue_schedule;
   // The shape family the candidate is meant for, in the words of section 11.6.
   const char* use;
+  // True when the candidate serves a call that stores fp32, which is the weight
+  // gradient form. The field is last, so a row that serves both stores omits
+  // it.
+  //
+  // `narrow-n` states false: its launch answered `kErrorInternal` on all five
+  // weight-gradient rows and served every bf16 row, so the defect belongs to
+  // the 64 wide N with an fp32 epilogue. The verdict refuses it there, because
+  // a fallback would report cuBLAS's time under the candidate's name.
+  bool serves_fp32_store = true;
 };
 
 // The candidates, in registry order. A row is one candidate, and its position
@@ -73,12 +95,19 @@ inline constexpr GemmCandidateSpec kGemmCandidates[] = {
      "TmaWarpSpecializedCooperative",
      "the Muon square and the linear forward, where the accumulator of a 256 "
      "wide tile does not fit the register file"},
-    {"deep-k", 128, 128, 128, 2, 1, 2, "KernelTmaWarpSpecializedCooperative",
-     "TmaWarpSpecializedCooperative",
-     "a long k loop with few tiles, where one slice is 128 deep"},
     {"tall-m", 256, 128, 64, 2, 1, 3, "KernelTmaWarpSpecializedCooperative",
      "TmaWarpSpecializedCooperative",
      "the weight gradient, whose M is the token count and whose N is short"},
+    {"narrow-n", 128, 64, 64, 1, 2, 8, "KernelTmaWarpSpecializedCooperative",
+     "TmaWarpSpecializedCooperative",
+     "the weight gradient whose M holds five tiles, where a 64 wide N and a 1 "
+     "by "
+     "2 cluster double the block count",
+     /*serves_fp32_store=*/false},
+    {"short-k", 128, 256, 32, 2, 1, 6, "KernelTmaWarpSpecializedCooperative",
+     "TmaWarpSpecializedCooperative",
+     "the rows whose k is 1280, where a 32 deep slice at six stages covers a "
+     "short loop"},
 };
 
 // The count of candidates. Section 11.4 bounds it by the build cost, because
@@ -95,7 +124,8 @@ inline constexpr int kGemmCandidateCount =
   ENTRY(0)                                 \
   ENTRY(1)                                 \
   ENTRY(2)                                 \
-  ENTRY(3)
+  ENTRY(3)                                 \
+  ENTRY(4)
 
 // The fp8 arm's tiles (docs/kernels.md section 10.4): the forward form's row
 // and the deeper slice the two backward forms need.
@@ -107,7 +137,7 @@ inline constexpr int kGemmCandidateCount =
 // The forward tile is the probe's `balanced` row. The first build ran `wide-n`
 // and spilled, because the fp8 accumulation path keeps two fp32 accumulators.
 //
-// The backward tiles take the k slice of the probe's `deep-k` row, and they
+// The backward tiles take the probe's 128 deep slice, and they
 // take it for a different reason. The two shipped backward forms are not
 // K-major in both operands, so CUTLASS stages the awkward operand through its
 // transposing collective, and that path refuses a k slice of 64: it needs more

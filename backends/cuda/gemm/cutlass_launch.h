@@ -93,6 +93,21 @@ bool LaunchGemmCutlassCandidateToFp32(int candidate, const ResolvedGemm& gemm,
 // one block resident, and a reader must otherwise infer that from a timing.
 int GemmCutlassCandidateOccupancy(int candidate);
 
+// The grid one candidate launches for a call, and the block count of the call.
+// It is the second column of the same report: a call whose problem needs more
+// blocks than the launch states runs more than one wave, and a launch below the
+// multiprocessor count leaves the card idle.
+CutlassGrid GemmCutlassCandidateGrid(int candidate, const ResolvedGemm& gemm);
+
+// Calls the arm refused, over the whole process.
+//
+// **A refusal inside a timed call is a fallback, not a measurement.** The seam
+// hands a refused call to the hand tile and then cuBLAS, so an arm that refused
+// would report cuBLAS's time under a candidate's name. The benchmark resets the
+// count before a measurement and drops the row when the count rose.
+int GemmCutlassRefusalCount();
+void ResetGemmCutlassRefusalCount();
+
 // --- The per-candidate entries ---------------------------------------------
 //
 // One entry set for each index, declared from the registry's own list. The
@@ -106,7 +121,8 @@ int GemmCutlassCandidateOccupancy(int candidate);
   bool LaunchGemmCutlassCandidateToFp32##index(                             \
       const ResolvedGemm& gemm, const ComputeType* a, const ComputeType* b, \
       float* c);                                                            \
-  int GemmCutlassCandidateOccupancy##index();
+  int GemmCutlassCandidateOccupancy##index();                               \
+  CutlassGrid GemmCutlassCandidateGrid##index(const ResolvedGemm& gemm);
 
 NANOCHAT_FOR_EACH_CANDIDATE(NANOCHAT_DECLARE_CANDIDATE)
 

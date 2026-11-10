@@ -105,6 +105,10 @@ using nanochat::kernels::BenchShapeOperandBBytes;
 using nanochat::kernels::BenchSizeSkipReason;
 using nanochat::kernels::CandidateMatches;
 using nanochat::kernels::CandidateRelativeError;
+using nanochat::kernels::CutlassGrid;
+using nanochat::kernels::CutlassRasterOrder;
+using nanochat::kernels::CutlassRasterOrderFromName;
+using nanochat::kernels::CutlassRasterOrderName;
 using nanochat::kernels::CutlassRefusal;
 using nanochat::kernels::CutlassRefusalName;
 using nanochat::kernels::Fp8ScaledFormSupported;
@@ -114,7 +118,9 @@ using nanochat::kernels::GemmCandidateAt;
 using nanochat::kernels::GemmCandidateCount;
 using nanochat::kernels::GemmCandidateIndexFromName;
 using nanochat::kernels::GemmCandidateSpec;
+using nanochat::kernels::GemmCutlassCandidateGrid;
 using nanochat::kernels::GemmCutlassCandidateOccupancy;
+using nanochat::kernels::GemmCutlassRefusalCount;
 using nanochat::kernels::GemmScaledFp8;
 using nanochat::kernels::GemmScheduleCount;
 using nanochat::kernels::GemmScheduleName;
@@ -127,6 +133,7 @@ using nanochat::kernels::JudgeScaledFp8;
 using nanochat::kernels::Memcpy;
 using nanochat::kernels::Memset;
 using nanochat::kernels::QuantizeFp8;
+using nanochat::kernels::ResetGemmCutlassRefusalCount;
 using nanochat::kernels::ResolvedGemm;
 using nanochat::kernels::Synchronize;
 
@@ -178,8 +185,31 @@ struct Options {
   // Times the fp8 arms beside cublasLt on quantized operands (docs/kernels.md
   // section 10.4). It needs an fp8 build and a Hopper device.
   bool fp8 = false;
+  // The two lists of the scheduler sweep, comma separated and
+  // empty for the vendor default. One entry of each makes one cell.
+  std::string swizzle;
+  std::string raster;
   // Proves the check itself and exits.
   bool self_test = false;
+};
+
+// One cell of the scheduler sweep: the two
+// launch arguments of the CUTLASS persistent scheduler.
+struct SchedulerCell {
+  int max_swizzle_size = 1;
+  nanochat::kernels::CutlassRasterOrder raster =
+      nanochat::kernels::CutlassRasterOrder::kHeuristic;
+
+  // The cell as a row suffix spells it. A single-cell run states the empty
+  // string, so its report names are the ones the table writer reads.
+  std::string Suffix() const {
+    if (default_cell) return std::string();
+    return "@sw" + std::to_string(max_swizzle_size) + "-" +
+           nanochat::kernels::CutlassRasterOrderName(raster);
+  }
+
+  // True for the pair the shipped path states, which needs no suffix.
+  bool default_cell = true;
 };
 
 // One row of either family, in the one form the harness needs.
@@ -224,6 +254,104 @@ int CandidateOccupancy(int candidate) {
     return GemmCutlassCandidateOccupancy(candidate);
   }
   return 0;
+}
+
+// The grid a candidate launches, and the block count of the call. Both come
+// from the vendor's scheduler, so the sweep reads how the card is used instead
+// of inferring it from a timing. It follows the same build rule as the
+// occupancy above: only a bf16 or fp8 build defines the query.
+template <typename Element = ComputeType>
+CutlassGrid CandidateGrid(int candidate, const ResolvedGemm& gemm) {
+  if constexpr (sizeof(Element) == 2) {
+    return GemmCutlassCandidateGrid(candidate, gemm);
+  }
+  return CutlassGrid{};
+}
+
+// The refusal count of a timed window, on the same build rule.
+template <typename Element = ComputeType>
+int Refusals() {
+  if constexpr (sizeof(Element) == 2) return GemmCutlassRefusalCount();
+  return 0;
+}
+
+template <typename Element = ComputeType>
+void ResetRefusals() {
+  if constexpr (sizeof(Element) == 2) ResetGemmCutlassRefusalCount();
+}
+
+// --- The scheduler sweep -----------------------------------------------------
+
+// One comma-separated list of a run, split and stripped. An empty string is no
+// list, which leaves that dimension at the vendor default.
+std::vector<std::string> SplitList(const std::string& text) {
+  std::vector<std::string> items;
+  std::string current;
+  for (const char character : text) {
+    if (character == ',') {
+      if (!current.empty()) items.push_back(current);
+      current.clear();
+      continue;
+    }
+    if (character != ' ') current.push_back(character);
+  }
+  if (!current.empty()) items.push_back(current);
+  return items;
+}
+
+// The cells one run measures. An empty pair of lists is the one shipped cell,
+// and it carries no suffix, so a run that names no list writes the report names
+// the decision table is written from.
+std::vector<SchedulerCell> SchedulerCells(const Options& options) {
+  const std::vector<std::string> swizzles = SplitList(options.swizzle);
+  const std::vector<std::string> rasters = SplitList(options.raster);
+  std::vector<SchedulerCell> cells;
+  if (swizzles.empty() && rasters.empty()) {
+    cells.push_back(SchedulerCell{});
+    return cells;
+  }
+  const std::vector<std::string> sizes =
+      swizzles.empty() ? std::vector<std::string>{"1"} : swizzles;
+  const std::vector<std::string> orders =
+      rasters.empty() ? std::vector<std::string>{"heuristic"} : rasters;
+  for (const std::string& size : sizes) {
+    for (const std::string& order : orders) {
+      SchedulerCell cell;
+      cell.max_swizzle_size = std::atoi(size.c_str());
+      if (cell.max_swizzle_size < 1) cell.max_swizzle_size = 1;
+      cell.raster = CutlassRasterOrderFromName(order.c_str());
+      cell.default_cell = cell.max_swizzle_size == 1 &&
+                          cell.raster == CutlassRasterOrder::kHeuristic;
+      cells.push_back(cell);
+    }
+  }
+  return cells;
+}
+
+// States one cell to the launch, which reads the two variables on each call.
+void ApplyCell(const SchedulerCell& cell) {
+  const std::string size = std::to_string(cell.max_swizzle_size);
+  setenv("NANOCHAT_GEMM_SWIZZLE", size.c_str(), 1);
+  setenv("NANOCHAT_GEMM_RASTER", CutlassRasterOrderName(cell.raster), 1);
+}
+
+// The wave count of a grid: the blocks the call holds over the blocks it
+// launches, rounded up.
+int WavesOf(const CutlassGrid& grid) {
+  if (grid.grid_blocks <= 0) return 0;
+  return (grid.problem_blocks + grid.grid_blocks - 1) / grid.grid_blocks;
+}
+
+// The grid text a sweep appends to a row's shape, because a card job returns
+// the report and only the tail of the console. A single-cell run states
+// nothing, so a decision report keeps the shape it always had.
+std::string GridText(const CutlassGrid& grid) {
+  if (grid.grid_blocks <= 0) return std::string();
+  std::string text = " grid " + std::to_string(grid.grid_blocks) + "/" +
+                     std::to_string(grid.problem_blocks);
+  const int waves = WavesOf(grid);
+  if (waves > 1) text += " waves " + std::to_string(waves);
+  return text;
 }
 
 // The count of the elements of C, at the leading dimension of the call.
@@ -685,13 +813,23 @@ void AddTiming(BenchReport* report, const std::string& name,
 
 void PrintMeasurement(const std::string& row, const std::string& arm,
                       const Timing& timing, int occupancy,
-                      const CheckOutcome& check) {
+                      const CheckOutcome& check,
+                      const CutlassGrid& grid = CutlassGrid()) {
   std::fprintf(stderr,
                "gemm benchmark: %-24s %-10s min %9.4f ms  median %9.4f ms  "
                "iters %4d",
                row.c_str(), arm.c_str(), timing.min_ms, timing.median_ms,
                timing.iters);
   if (occupancy > 0) std::fprintf(stderr, "  occ %d", occupancy);
+  if (grid.grid_blocks > 0) {
+    // The two numbers the vendor's scheduler answers: the blocks it launches
+    // and the blocks the call holds. A call with more work than launch runs
+    // more than one wave, and a launch below the multiprocessor count leaves
+    // the card idle.
+    std::fprintf(stderr, "  grid %d/%d", grid.grid_blocks, grid.problem_blocks);
+    const int waves = WavesOf(grid);
+    if (waves > 1) std::fprintf(stderr, "  waves %d", waves);
+  }
   if (check.ran) {
     std::fprintf(stderr, "  rel err %.2e %s", check.relative_error,
                  check.matched ? "yes" : "NO");
@@ -702,10 +840,12 @@ void PrintMeasurement(const std::string& row, const std::string& arm,
 void Usage(const char* program) {
   std::fprintf(stderr,
                "usage: %s [--rows production|measurement|all] [--row NAME] "
-               "[--all|cublas|cutlass|hand|seam] [--candidate NAME|all] "
-               "[--schedule NAME|all] [--auto-iters] [--no-flush] [--no-check] "
-               "[--self-test] [--fp8] [--iters N] [--rounds N] [--warmup N] "
-               "[--json] [--out PATH]\n",
+               "[--all|cublas|cutlass|hand|seam] [--arms LIST] "
+               "[--candidate NAME|all] "
+               "[--schedule NAME|all] [--swizzle LIST] [--raster LIST] "
+               "[--auto-iters] [--no-flush] [--no-check] [--self-test] "
+               "[--fp8] [--iters N] [--rounds N] [--warmup N] [--json] "
+               "[--out PATH]\n",
                program);
 }
 
@@ -728,6 +868,10 @@ int main(int argc, char** argv) {
       options.row = argv[++i];
     } else if (arg == "--rows" && i + 1 < argc) {
       options.rows = argv[++i];
+    } else if (arg == "--arms" && i + 1 < argc) {
+      // A list, so a sweep can measure cuBLAS beside the candidates without the
+      // hand tile's five schedules. The single-arm flags below still state one.
+      options.arms = argv[++i];
     } else if (arg == "--hand") {
       options.arms = "hand";
     } else if (arg == "--cublas") {
@@ -745,6 +889,10 @@ int main(int argc, char** argv) {
       options.candidate = argv[++i];
     } else if (arg == "--schedule" && i + 1 < argc) {
       options.schedule = argv[++i];
+    } else if (arg == "--swizzle" && i + 1 < argc) {
+      options.swizzle = argv[++i];
+    } else if (arg == "--raster" && i + 1 < argc) {
+      options.raster = argv[++i];
     } else if (arg == "--auto-iters") {
       options.auto_iters = true;
     } else if (arg == "--no-flush") {
@@ -771,14 +919,26 @@ int main(int argc, char** argv) {
     }
   }
 
-  const bool run_all = options.arms == "all";
-  const bool run_cublas = run_all || options.arms == "cublas";
-  const bool run_cutlass = run_all || options.arms == "cutlass";
-  const bool run_hand = run_all || options.arms == "hand";
+  // The arms of the run, by membership, so `--arms cublas,cutlass` measures a
+  // ratio without the hand tile and `--all` measures every arm.
+  const std::vector<std::string> arm_names = SplitList(options.arms);
+  const auto names_arm = [&arm_names](const char* name) {
+    return std::find(arm_names.begin(), arm_names.end(), name) !=
+           arm_names.end();
+  };
+  const bool run_all = names_arm("all");
+  const bool run_cublas = run_all || names_arm("cublas");
+  const bool run_cutlass = run_all || names_arm("cutlass");
+  const bool run_hand = run_all || names_arm("hand");
   // The seam arm is separate from `all`, because it measures the shipped path
   // and not a candidate: a report of the three measured arms is what the table
   // writer reads, and a seam report must not be mistaken for one.
-  const bool run_seam = options.arms == "seam";
+  // The seam arm is the shipped path, so it is measured alone by default. It
+  // combines with cuBLAS on request, because a fraction needs a denominator
+  // from the same session: the two classifier rows moved 7 and 12 percent
+  // between two runs of one binary, and a fraction across sessions cannot
+  // separate that drift from a difference the change made.
+  const bool run_seam = names_arm("seam");
 
   const nanochat::Caps caps = nanochat::kernels::GetCaps();
   if (!caps.is_device) {
@@ -848,6 +1008,18 @@ int main(int argc, char** argv) {
     }
   }
 
+  // The scheduler cells of the run: one, unless a caller names a list. A run
+  // with more than one cell is the scheduler sweep, and its report rows
+  // carry the cell, so the table writer does not read them.
+  const std::vector<SchedulerCell> cells = SchedulerCells(options);
+  if (cells.size() > 1) {
+    std::fprintf(stderr,
+                 "gemm benchmark: %zu scheduler cells; each report row carries "
+                 "its cell, so this report is a diagnostic and not a decision "
+                 "input\n",
+                 cells.size());
+  }
+
   // The budget, and the rows it drops.
   std::size_t free_bytes = 0;
   std::size_t total_bytes = 0;
@@ -872,6 +1044,7 @@ int main(int argc, char** argv) {
   // report of another family.
   report.SetExtraText("row_family", options.rows.c_str());
   report.SetExtraInt("candidates", static_cast<long long>(candidates.size()));
+  report.SetExtraInt("scheduler_cells", static_cast<long long>(cells.size()));
   report.SetExtraInt("device_budget_bytes", static_cast<long long>(budget));
   report.SetExtraInt("checked", options.check ? 1 : 0);
 
@@ -903,6 +1076,9 @@ int main(int argc, char** argv) {
   int measured = 0;
   int skipped = 0;
   int rejected = 0;
+  // Arms that refused a call inside the timing window. Their row is dropped,
+  // because the time is the fallback's and not theirs.
+  int refused = 0;
 
   // The self test proves the check, and no arm runs when it fails.
   if (options.self_test) {
@@ -1086,29 +1262,60 @@ int main(int argc, char** argv) {
                        CutlassRefusalName(refusal));
           continue;
         }
-        setenv("NANOCHAT_GEMM_CANDIDATE", spec.name, 1);
-        unsetenv("NANOCHAT_GEMM_SCHEDULE");
-        reset_c();
-        const Timing timing = measure("cutlass");
-        const CheckOutcome check =
-            CheckOutput(row, buffers.c, buffers.ref, out_elements,
-                        options.check && have_reference);
-        const int occupancy = CandidateOccupancy(candidate);
-        if (check.ran && !check.matched) {
-          std::fprintf(stderr,
-                       "gemm benchmark: %-24s %-10s REJECTED by the check: "
-                       "relative error %.2e\n",
-                       row.name.c_str(), spec.name, check.relative_error);
-          ++rejected;
-          continue;
+        // The refusal follows the shape and not the scheduler, so it is tested
+        // once for every cell below.
+        for (const SchedulerCell& cell : cells) {
+          ApplyCell(cell);
+          setenv("NANOCHAT_GEMM_CANDIDATE", spec.name, 1);
+          unsetenv("NANOCHAT_GEMM_SCHEDULE");
+          reset_c();
+          ResetRefusals();
+          const Timing timing = measure("cutlass");
+          // An arm that refused a call inside the window did not run: the seam
+          // handed the call to the hand tile and then cuBLAS, so the time is
+          // another arm's. The row is dropped instead of reported.
+          if (const int refusals = Refusals(); refusals > 0) {
+            std::fprintf(stderr,
+                         "gemm benchmark: %-24s %-10s refused %d call(s) at "
+                         "run time, so the timing is not this arm's\n",
+                         (row.name + cell.Suffix()).c_str(), spec.name,
+                         refusals);
+            ++refused;
+            continue;
+          }
+          const CheckOutcome check =
+              CheckOutput(row, buffers.c, buffers.ref, out_elements,
+                          options.check && have_reference);
+          if (check.ran && !check.matched) {
+            std::fprintf(stderr,
+                         "gemm benchmark: %-24s %-10s REJECTED by the check: "
+                         "relative error %.2e\n",
+                         row.name.c_str(), spec.name, check.relative_error);
+            ++rejected;
+            continue;
+          }
+          const int occupancy = CandidateOccupancy(candidate);
+          const CutlassGrid grid = CandidateGrid(candidate, row.gemm);
+          // The cell's suffix is part of the row name, so a sweep report holds
+          // one row for each cell. A single-cell run states no suffix, so its
+          // names stay the ones the table writer reads.
+          const std::string variant = row.name + cell.Suffix();
+          const std::string label =
+              "gemm:" + variant + ":" + spec.name + ":cutlass";
+          // A sweep states the grid on the row it measured, because a card job
+          // returns the report and only the tail of the console. A run of one
+          // cell states the shape it always did, so a decision report is
+          // unchanged and the table writer still reads it.
+          const std::string shape =
+              cells.size() > 1 ? row.shape + GridText(grid) : row.shape;
+          AddTiming(&report, label, shape, timing, row.flops, occupancy);
+          PrintMeasurement(variant, spec.name, timing, occupancy, check, grid);
+          ++measured;
         }
-        const std::string label =
-            "gemm:" + row.name + ":" + spec.name + ":cutlass";
-        AddTiming(&report, label, row.shape, timing, row.flops, occupancy);
-        PrintMeasurement(row.name, spec.name, timing, occupancy, check);
-        ++measured;
       }
       unsetenv("NANOCHAT_GEMM_CANDIDATE");
+      unsetenv("NANOCHAT_GEMM_SWIZZLE");
+      unsetenv("NANOCHAT_GEMM_RASTER");
     }
 
     if (run_hand) {
@@ -1298,8 +1505,11 @@ int main(int argc, char** argv) {
   if (rejected > 0) {
     report.SetExtraInt("rejected_arms", static_cast<long long>(rejected));
   }
+  if (refused > 0) {
+    report.SetExtraInt("refused_arms", static_cast<long long>(refused));
+  }
   // The rate gate compares each arm's fraction with the cuBLAS row of the same
   // shape, and the fractions are on standard error beside the timings.
   report.Print(options.bench);
-  return rejected > 0 ? 1 : 0;
+  return (rejected > 0 || refused > 0) ? 1 : 0;
 }

@@ -53,6 +53,7 @@
 #include <cutlass/gemm/kernel/gemm_universal.hpp>
 
 #include "backends/cuda/device.h"
+#include "backends/cuda/gemm/dispatch.h"
 #include "backends/cuda/gemm/gemm_shape.h"
 #include "nanochat/kernels.h"
 #include "nanochat/tensor.h"
@@ -154,7 +155,18 @@ inline void* WorkspaceFor(std::size_t bytes) {
 }
 
 // `status` as a line on stderr, and false so the caller takes the next path.
+//
+// The count matters as much as the line: a refusal inside a timed call leaves
+// the caller on cuBLAS, so the row would report another arm's time. The
+// benchmark resets the count before a measurement and drops the row when it
+// rose.
+inline int& RefusalCount() {
+  static int count = 0;
+  return count;
+}
+
 inline bool Refuse(cutlass::Status status) {
+  ++RefusalCount();
   std::fprintf(stderr,
                "note: the Hopper GEMM refused a call (%s); the hand tile or "
                "cuBLAS serves it\n",
@@ -258,27 +270,53 @@ struct KernelOf {
   static StrideD StrideDOf(int ldc, std::int64_t batch) {
     return StrideD{static_cast<std::int64_t>(ldc), cute::Int<1>{}, batch};
   }
+
+  // The tile, so a caller can count the tiles of a call from the type. The
+  // scheduler rule of `dispatch.h` takes that count and not the shape, because
+  // the cost of a tile group is padding and the gain is reuse.
+  using Tile = TileShape;
 };
 
 // --- The launch -------------------------------------------------------------
 
-// `alpha_dev` is the optional device scalar the epilogue multiplies the
-// accumulator by. The fp8 arm passes the product of the two operand scales
-// there, so a dequantized call never reads a scale on the host (docs/kernels.md
-// section 10.4, and Part 2 section 1 for the rule).
+// The two launch arguments in the vendor's spelling. The order is mapped here
+// and nowhere else, so `dispatch.h` stays free of vendor types.
+template <class Arguments>
+void ApplyScheduler(const CutlassScheduler& choice, Arguments* args) {
+  using RasterOrderOptions = cutlass::gemm::kernel::detail::RasterOrderOptions;
+  args->scheduler.max_swizzle_size = choice.max_swizzle_size;
+  switch (choice.raster) {
+    case CutlassRasterOrder::kAlongM:
+      args->scheduler.raster_order = RasterOrderOptions::AlongM;
+      break;
+    case CutlassRasterOrder::kAlongN:
+      args->scheduler.raster_order = RasterOrderOptions::AlongN;
+      break;
+    case CutlassRasterOrder::kHeuristic:
+    default:
+      args->scheduler.raster_order = RasterOrderOptions::Heuristic;
+      break;
+  }
+}
+
+// The whole call as CUTLASS reads it: the operand form, the strides, the fused
+// alpha and beta, the device facts, and the scheduler's two arguments.
 //
-// The operands arrive as `void*` and are read as `ElementAB`, which is a vendor
-// type and never the seam's. A seam type here would ask CUTLASS for an
-// instruction over a struct it has no trait for, and its answer is the static
-// assert "No eligible GMMA operator for request configuration".
-template <class ElementD, bool TransA, bool TransB, class TileShape,
-          class ClusterShape, int Stages, class ElementAB = CutlassBf16,
+// One body, because `Launch` runs it and `GridOf` asks it for a grid shape, and
+// two copies could disagree. `alpha_dev` is the optional device scalar the fp8
+// arm passes the product of its two operand scales in, so a dequantized call
+// never reads a scale on the host (docs/kernels.md section 10.4).
+//
+// The operands arrive as `void*` and are read as vendor types, because CUTLASS
+// has no traits for a seam type and answers with the static assert "No eligible
+// GMMA operator for request configuration".
+template <class Kernel, class ElementD, class ElementAB = CutlassBf16,
           class ElementBB = ElementAB>
-bool Launch(const ResolvedGemm& gemm, const void* a, const void* b, ElementD* c,
-            const float* alpha_dev = nullptr) {
+typename Kernel::Gemm::Arguments ArgumentsOf(const ResolvedGemm& gemm,
+                                             const void* a, const void* b,
+                                             ElementD* c,
+                                             const float* alpha_dev) {
   using VendorD = typename VendorElementOf<ElementD>::type;
-  using Kernel = KernelOf<VendorD, TransA, TransB, TileShape, ClusterShape,
-                          Stages, ElementAB, ElementBB>;
   using Gemm = typename Kernel::Gemm;
 
   const auto* operand_a = static_cast<const ElementAB*>(a);
@@ -306,10 +344,38 @@ bool Launch(const ResolvedGemm& gemm, const void* a, const void* b, ElementD* c,
   }
   args.hw_info.device_id = Facts().device_id;
   args.hw_info.sm_count = Facts().sm_count;
+  // The rule reads the tile counts of the call, which follow this kernel's own
+  // tile and not the shape alone.
+  constexpr int kTileM =
+      decltype(cute::size<0>(typename Kernel::Tile{}))::value;
+  constexpr int kTileN =
+      decltype(cute::size<1>(typename Kernel::Tile{}))::value;
+  CutlassTiles tiles;
+  tiles.m = (gemm.m + kTileM - 1) / kTileM;
+  tiles.n = (gemm.n + kTileN - 1) / kTileN;
+  ApplyScheduler(CutlassSchedulerFor(tiles), &args);
+  return args;
+}
+
+// `C = alpha * op(A) * op(B) + beta * C` for one candidate of the registry, one
+// operand form, and one store type.
+template <class ElementD, bool TransA, bool TransB, class TileShape,
+          class ClusterShape, int Stages, class ElementAB = CutlassBf16,
+          class ElementBB = ElementAB>
+bool Launch(const ResolvedGemm& gemm, const void* a, const void* b, ElementD* c,
+            const float* alpha_dev = nullptr) {
+  using Kernel =
+      KernelOf<typename VendorElementOf<ElementD>::type, TransA, TransB,
+               TileShape, ClusterShape, Stages, ElementAB, ElementBB>;
+  using Gemm = typename Kernel::Gemm;
+
+  typename Gemm::Arguments args =
+      ArgumentsOf<Kernel, ElementD, ElementAB, ElementBB>(gemm, a, b, c,
+                                                          alpha_dev);
 
   // CUTLASS checks the alignment and extent rules a second time, and it is the
-  // authority on what this kernel accepts. `JudgeCutlass` decides whether to
-  // ask; this decides whether the answer is yes.
+  // authority on what this kernel accepts. `JudgeExtents` and its siblings
+  // decide whether to ask; this decides whether the answer is yes.
   const cutlass::Status valid = Gemm::can_implement(args);
   if (valid != cutlass::Status::kSuccess) return Refuse(valid);
 
@@ -319,6 +385,33 @@ bool Launch(const ResolvedGemm& gemm, const void* a, const void* b, ElementD* c,
   if (status != cutlass::Status::kSuccess) return Refuse(status);
   cuda_backend::CheckLastError("cutlass gemm");
   return true;
+}
+
+// The grid this candidate launches for `gemm`, and the block count of the call.
+// Both come from the vendor's scheduler, so a sweep reads how the card is used
+// instead of inferring it from a timing. Only a card answers them, because the
+// launch shape follows the multiprocessor count.
+template <class ElementD, bool TransA, bool TransB, class TileShape,
+          class ClusterShape, int Stages>
+CutlassGrid GridOf(const ResolvedGemm& gemm) {
+  using Kernel = KernelOf<typename VendorElementOf<ElementD>::type, TransA,
+                          TransB, TileShape, ClusterShape, Stages>;
+  using Gemm = typename Kernel::Gemm;
+  using Body = typename Kernel::Kernel;
+
+  typename Gemm::Arguments args = ArgumentsOf<Kernel, ElementD>(
+      gemm, nullptr, nullptr, static_cast<ElementD*>(nullptr), nullptr);
+  void* workspace = WorkspaceFor(Gemm::get_workspace_size(args));
+
+  CutlassGrid grid;
+  const dim3 blocks = Gemm::get_grid_shape(args, workspace);
+  grid.grid_blocks = static_cast<int>(blocks.x) * static_cast<int>(blocks.y) *
+                     static_cast<int>(blocks.z);
+  // The scheduler's own tile count, rounded to its swizzle group, so the wave
+  // count a reader derives is the one the kernel walks.
+  const auto params = Body::to_underlying_arguments(args, workspace);
+  grid.problem_blocks = static_cast<int>(params.scheduler.blocks_per_problem_);
+  return grid;
 }
 
 // One candidate's four operand orientations, at one store type. The four are

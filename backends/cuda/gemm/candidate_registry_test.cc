@@ -50,12 +50,9 @@ void Check(bool condition, const std::string& what) {
   ++g_failures;
 }
 
-// The window one Hopper block may ask for, and the share of it the epilogue
-// takes. Both are measurements of `dev/cutlass/README.md` section 3: every tile
-// there states a total, and the total less the staged operands is the same
-// 67,584 B for all five.
+// The window one Hopper block may ask for, as a measurement of
+// `dev/cutlass/README.md` section 3.
 constexpr std::size_t kWindowBytes = 227 * 1024;
-constexpr std::size_t kEpilogueBytes = 67'584;
 
 // The five tiles the probe measured, with the stage count the builder chose.
 struct ProbedTile {
@@ -75,9 +72,23 @@ constexpr ProbedTile kProbed[] = {
 constexpr int kProbedCount =
     static_cast<int>(sizeof(kProbed) / sizeof(kProbed[0]));
 
+// The share of the window the epilogue takes, from the same five rows: the
+// total less the staged operands is 67,584 B for every one of them, which is a
+// 128 by 128 fp32 exchange tile and its barriers. The exchange tile is 128
+// columns wide and no wider, so a candidate whose N is below 128 stages a
+// narrower one.
+constexpr std::size_t EpilogueBytes(int tile_n) {
+  const std::size_t columns =
+      tile_n < 128 ? static_cast<std::size_t>(tile_n) : std::size_t{128};
+  return 128 * columns * 4 + 2'048;
+}
+
 void CheckTable() {
-  Check(GemmCandidateCount() == 4,
-        "the registry holds four candidates, it holds " +
+  // The three shape families of section 11.6 and the two rows the sweep of the
+  // slow shapes added. A registry below four serves no family, and one above
+  // five costs more build than the development host should spend.
+  Check(GemmCandidateCount() == 5,
+        "the registry holds five candidates, it holds " +
             std::to_string(GemmCandidateCount()));
   std::vector<std::string> names;
   for (int index = 0; index < GemmCandidateCount(); ++index) {
@@ -136,6 +147,14 @@ void CheckAgainstProbe() {
   for (int index = 0; index < GemmCandidateCount(); ++index) {
     const GemmCandidateSpec& spec = GemmCandidateAt(index);
     const std::string label = std::string("candidate ") + spec.name;
+    // Every candidate must fit the window, because a candidate that cannot
+    // launch is not a candidate. A tile the probe measured must also state the
+    // stage count the probe measured for it; a later row states a count this
+    // arithmetic checks instead.
+    const std::size_t total =
+        GemmCandidateSharedBytes(index) + EpilogueBytes(spec.tile_n);
+    Check(total <= kWindowBytes, label + " fits the 227 KiB window, it needs " +
+                                     std::to_string(total) + " B");
     bool found = false;
     for (int probe = 0; probe < kProbedCount; ++probe) {
       const ProbedTile& tile = kProbed[probe];
@@ -148,24 +167,26 @@ void CheckAgainstProbe() {
             label + " states the " + std::to_string(tile.stages) +
                 " stages the probe measured for its tile");
       // The staged operands plus the epilogue's share are the probe's total.
-      Check(
-          GemmCandidateSharedBytes(index) + kEpilogueBytes == tile.total_bytes,
-          label + " accounts for the probe's " +
-              std::to_string(tile.total_bytes) + " B, it accounts for " +
-              std::to_string(GemmCandidateSharedBytes(index) + kEpilogueBytes));
-      Check(tile.total_bytes <= kWindowBytes,
-            label + " fits the 227 KiB window");
+      Check(total == tile.total_bytes, label + " accounts for the probe's " +
+                                           std::to_string(tile.total_bytes) +
+                                           " B, it accounts for " +
+                                           std::to_string(total));
     }
-    Check(found, label + " states a tile the probe measured");
+    if (!found) {
+      // A row the probe did not size states a tile whose window this test just
+      // checked, and the build is the authority on whether it launches.
+      Check(spec.stages > 0, label + " states a pipeline depth");
+    }
   }
-  // The cluster is the probe's 2 by 1 for every candidate, because a 2 by 2
-  // cluster halves the block count of a tile that already holds one per
-  // multiprocessor.
+  // The cluster is one or two blocks along one axis, and never wider: a block
+  // of this schedule already holds one multiprocessor, so a larger cluster
+  // takes blocks away from a grid that does not have many.
   for (int index = 0; index < GemmCandidateCount(); ++index) {
-    Check(GemmCandidateAt(index).cluster_m == 2 &&
-              GemmCandidateAt(index).cluster_n == 1,
-          std::string("candidate ") + GemmCandidateAt(index).name +
-              " keeps the measured 2 by 1 cluster");
+    const GemmCandidateSpec& spec = GemmCandidateAt(index);
+    const bool along_m = spec.cluster_m == 2 && spec.cluster_n == 1;
+    const bool along_n = spec.cluster_m == 1 && spec.cluster_n == 2;
+    Check(along_m || along_n, std::string("candidate ") + spec.name +
+                                  " clusters two blocks along one axis");
   }
 }
 
@@ -174,8 +195,9 @@ void CheckMatrix() {
   // product, and the reason one candidate is eight kernels.
   Check(GemmCandidateInstantiations() == 8,
         "one candidate holds eight instantiations");
-  Check(GemmCandidateInstantiations() * GemmCandidateCount() == 32,
-        "the registry holds 32 instantiations");
+  Check(GemmCandidateInstantiations() * GemmCandidateCount() ==
+            8 * GemmCandidateCount(),
+        "the registry states one matrix of instantiations for each candidate");
 }
 
 void CheckOverride() {

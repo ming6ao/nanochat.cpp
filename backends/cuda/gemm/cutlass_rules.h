@@ -99,7 +99,7 @@ inline constexpr std::array<GemmRuleRow, 28> kGemmRules{{
         -1,
         GemmRoute::kCublas,
         1.0000,
-        0.7398,
+        0.6576,
     },
     // muon:5x12:A2
     {
@@ -113,7 +113,7 @@ inline constexpr std::array<GemmRuleRow, 28> kGemmRules{{
         -1,
         GemmRoute::kCublas,
         1.0000,
-        0.6259,
+        0.6714,
     },
     // muon:5x12:prod
     {
@@ -127,7 +127,7 @@ inline constexpr std::array<GemmRuleRow, 28> kGemmRules{{
         -1,
         GemmRoute::kCublas,
         1.0000,
-        0.6390,
+        0.6316,
     },
     // muon:640x1280:A
     {
@@ -141,7 +141,7 @@ inline constexpr std::array<GemmRuleRow, 28> kGemmRules{{
         -1,
         GemmRoute::kCublas,
         1.0000,
-        0.4101,
+        0.4075,
     },
     // muon:640x1280:A2
     {
@@ -155,7 +155,7 @@ inline constexpr std::array<GemmRuleRow, 28> kGemmRules{{
         -1,
         GemmRoute::kCublas,
         1.0000,
-        0.4132,
+        0.4143,
     },
     // muon:640x1280:prod
     {
@@ -169,7 +169,7 @@ inline constexpr std::array<GemmRuleRow, 28> kGemmRules{{
         -1,
         GemmRoute::kCublas,
         1.0000,
-        0.3755,
+        0.3721,
     },
     // muon:1280x1280:A
     {
@@ -183,7 +183,7 @@ inline constexpr std::array<GemmRuleRow, 28> kGemmRules{{
         -1,
         GemmRoute::kCublas,
         1.0000,
-        0.3115,
+        0.3010,
     },
     // muon:1280x1280:A2+prod
     {
@@ -197,7 +197,7 @@ inline constexpr std::array<GemmRuleRow, 28> kGemmRules{{
         -1,
         GemmRoute::kCublas,
         1.0000,
-        0.3151,
+        0.3087,
     },
     // muon:1280x5120:A
     {
@@ -208,10 +208,10 @@ inline constexpr std::array<GemmRuleRow, 28> kGemmRules{{
         false,
         true,
         false,
-        0,
+        4,
         GemmRoute::kCandidate,
-        1.0850,
-        0.3454,
+        1.1008,
+        0.3355,
     },
     // muon:1280x5120:A2+A2
     {
@@ -222,10 +222,10 @@ inline constexpr std::array<GemmRuleRow, 28> kGemmRules{{
         false,
         false,
         false,
-        0,
+        4,
         GemmRoute::kCandidate,
-        1.1270,
-        0.3479,
+        1.1442,
+        0.3394,
     },
     // muon:1280x5120:prod
     {
@@ -238,8 +238,8 @@ inline constexpr std::array<GemmRuleRow, 28> kGemmRules{{
         false,
         0,
         GemmRoute::kCandidate,
-        1.1757,
-        0.3495,
+        1.1747,
+        0.3471,
     },
     // muon:5120x1280:A
     {
@@ -252,8 +252,8 @@ inline constexpr std::array<GemmRuleRow, 28> kGemmRules{{
         false,
         0,
         GemmRoute::kCandidate,
-        1.1027,
-        0.3348,
+        1.1314,
+        0.3178,
     },
     // muon:5120x1280:prod
     {
@@ -264,10 +264,10 @@ inline constexpr std::array<GemmRuleRow, 28> kGemmRules{{
         false,
         false,
         false,
-        0,
+        4,
         GemmRoute::kCandidate,
-        1.1297,
-        0.3278,
+        1.1354,
+        0.3313,
     },
     // linear:fwd:q+proj
     {
@@ -281,7 +281,7 @@ inline constexpr std::array<GemmRuleRow, 28> kGemmRules{{
         -1,
         GemmRoute::kCublas,
         1.0000,
-        0.3040,
+        0.2954,
     },
     // linear:dgrad:q+proj
     {
@@ -295,7 +295,7 @@ inline constexpr std::array<GemmRuleRow, 28> kGemmRules{{
         -1,
         GemmRoute::kCublas,
         1.0000,
-        0.3057,
+        0.2912,
     },
     // linear:wgrad:q+proj
     {
@@ -308,7 +308,7 @@ inline constexpr std::array<GemmRuleRow, 28> kGemmRules{{
         true,
         1,
         GemmRoute::kCandidate,
-        1.1182,
+        1.1083,
         0.2536,
     },
     // linear:fwd:kv
@@ -323,7 +323,7 @@ inline constexpr std::array<GemmRuleRow, 28> kGemmRules{{
         -1,
         GemmRoute::kCublas,
         1.0000,
-        0.3168,
+        0.3164,
     },
     // linear:dgrad:kv
     {
@@ -337,7 +337,7 @@ inline constexpr std::array<GemmRuleRow, 28> kGemmRules{{
         -1,
         GemmRoute::kCublas,
         1.0000,
-        0.2907,
+        0.3006,
     },
     // linear:wgrad:kv
     {
@@ -351,7 +351,7 @@ inline constexpr std::array<GemmRuleRow, 28> kGemmRules{{
         -1,
         GemmRoute::kCublas,
         1.0000,
-        0.1470,
+        0.1490,
     },
     // linear:fwd:fc
     {
@@ -365,7 +365,7 @@ inline constexpr std::array<GemmRuleRow, 28> kGemmRules{{
         -1,
         GemmRoute::kCublas,
         1.0000,
-        0.2942,
+        0.2901,
     },
     // linear:dgrad:fc
     {
@@ -378,8 +378,8 @@ inline constexpr std::array<GemmRuleRow, 28> kGemmRules{{
         false,
         0,
         GemmRoute::kCandidate,
-        1.0484,
-        0.3441,
+        1.0480,
+        0.3033,
     },
     // linear:wgrad:fc
     {
@@ -390,10 +390,10 @@ inline constexpr std::array<GemmRuleRow, 28> kGemmRules{{
         true,
         false,
         true,
-        -1,
-        GemmRoute::kCublas,
-        1.0000,
-        0.3255,
+        4,
+        GemmRoute::kCandidate,
+        1.1020,
+        0.3507,
     },
     // linear:fwd:cproj
     {
@@ -407,7 +407,7 @@ inline constexpr std::array<GemmRuleRow, 28> kGemmRules{{
         0,
         GemmRoute::kCandidate,
         1.0459,
-        0.3474,
+        0.3413,
     },
     // linear:dgrad:cproj
     {
@@ -421,7 +421,7 @@ inline constexpr std::array<GemmRuleRow, 28> kGemmRules{{
         -1,
         GemmRoute::kCublas,
         1.0000,
-        0.2745,
+        0.2675,
     },
     // linear:wgrad:cproj
     {
@@ -432,10 +432,10 @@ inline constexpr std::array<GemmRuleRow, 28> kGemmRules{{
         true,
         false,
         true,
-        0,
+        4,
         GemmRoute::kCandidate,
-        1.0554,
-        0.3524,
+        1.1198,
+        0.3559,
     },
     // linear:fwd:cls
     {
@@ -449,7 +449,7 @@ inline constexpr std::array<GemmRuleRow, 28> kGemmRules{{
         -1,
         GemmRoute::kCublas,
         1.0000,
-        0.2876,
+        0.2769,
     },
     // linear:dgrad:cls
     {
@@ -463,7 +463,7 @@ inline constexpr std::array<GemmRuleRow, 28> kGemmRules{{
         -1,
         GemmRoute::kCublas,
         1.0000,
-        0.3181,
+        0.2973,
     },
     // linear:wgrad:cls
     {
@@ -477,7 +477,7 @@ inline constexpr std::array<GemmRuleRow, 28> kGemmRules{{
         -1,
         GemmRoute::kCublas,
         1.0000,
-        0.3203,
+        0.2740,
     },
 }};
 // --- END GENERATED RULES ---

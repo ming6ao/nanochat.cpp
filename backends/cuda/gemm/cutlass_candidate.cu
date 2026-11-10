@@ -75,6 +75,15 @@ int NANOCHAT_CANDIDATE_ENTRY(GemmCutlassCandidateOccupancy)() {
   return cutlass_detail::OccupancyOf<TileShape, ClusterShape, kSpec.stages>();
 }
 
+// The grid this candidate launches, and the block count of the call. Neither
+// the store type nor the operand form changes the tile or the cluster, so one
+// instantiation answers for the eight and the object keeps its kernel count.
+CutlassGrid NANOCHAT_CANDIDATE_ENTRY(GemmCutlassCandidateGrid)(
+    const ResolvedGemm& gemm) {
+  return cutlass_detail::GridOf<ComputeType, false, false, TileShape,
+                                ClusterShape, kSpec.stages>(gemm);
+}
+
 #undef NANOCHAT_CANDIDATE_ENTRY
 #undef NANOCHAT_JOIN
 #undef NANOCHAT_JOIN_INNER
