@@ -242,6 +242,39 @@ to bases at or under a just-removed directory, `--sizes` to report bytes, and
   budgeting stays with the broker's single-job rule and tiny-shape convention.
 - Profile on native Linux: CUPTI is unavailable under WSL2.
 
+### The agent process and the crash dumps
+
+The coding agent runs outside the sandbox. Its node heap limit is 2 GiB, and it
+reached 1.7 GiB resident on 2026-11-10. Start it in its own scope, so the whole
+agent tree carries a budget:
+
+```bash
+systemd-run --user --scope --quiet --collect \
+  -p MemoryHigh=3G -p MemoryMax=4G --description "pi agent" pi
+```
+
+The scope covers every command the agent starts outside `tools/nanochat`. It
+does not cover a sandboxed job: `tools/nanochat` makes its own scope under
+`nanochat.slice`, so the two budgets add. Keep the sum of the high watermarks at
+the 8 GiB guest ceiling: 3 GiB for the agent and 5 GiB for `nanochat.slice`.
+
+The shell startup file defines this as a `pi` function, so a new terminal gets
+the bound with no extra step.
+
+WSL writes a crash dump to Windows when a guest process dies from a fatal
+signal. The folder is `%LOCALAPPDATA%\Temp\wsl-crashes`. On 2026-11-10 a
+`qmd embed` worker aborted eight times, and each abort wrote about 1.8 GB. Eight
+dumps filled 14 GB of the host disk. A dump also holds process memory, which can
+hold a credential token. The `.wslconfig` file therefore sets
+`crashDumpEnabled=false`.
+
+Turn the capture on for one fault only. Then delete the folder, because WSL
+never reaps it:
+
+```bash
+rm -f /mnt/c/Users/*/AppData/Local/Temp/wsl-crashes/*.dmp
+```
+
 ## Deliberately not used
 
 No Docker/Podman/bwrap/firejail. The kernel already provides cgroup v2 and user

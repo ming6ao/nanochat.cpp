@@ -39,6 +39,7 @@ from __future__ import annotations
 import argparse
 import csv
 import datetime
+import itertools
 import json
 import os
 import re
@@ -46,7 +47,7 @@ import statistics
 import subprocess
 import sys
 from pathlib import Path
-from typing import Mapping, Sequence
+from typing import Iterable, Mapping, Sequence
 
 #: The Modal command line. A host that keeps the SDK in a virtual environment
 #: names the executable here, so the loop works without a second ``PATH`` entry.
@@ -159,22 +160,29 @@ TRACE_FILES = (
 # ---------------------------------------------------------------------------
 
 
-def _rows(path) -> list[dict]:
-    """The rows of one report CSV, or no rows when the file is absent."""
+def _iter_rows(path) -> Iterable[dict]:
+    """The rows of one report CSV, one at a time, or none when it is absent.
+
+    The reader streams on purpose. A twenty-step trace holds about 350 000
+    rows, and the whole list costs several hundred megabytes for a document
+    that keeps only aggregates. A caller that needs a second pass opens the
+    file again: twenty megabytes of reads are cheaper than one list of rows.
+    """
     path = Path(path)
     if not path.is_file():
-        return []
+        return
     with path.open(newline="", encoding="utf-8") as handle:
-        return [row for row in csv.DictReader(handle) if row]
+        for row in csv.DictReader(handle):
+            if row:
+                yield row
 
 
-def _report(trace_dir, suffix: str) -> list[dict]:
-    """The rows of the one report whose name ends with ``suffix``."""
+def _report_path(trace_dir, suffix: str) -> Path | None:
+    """The one report whose name ends with ``suffix``, when it holds a row."""
     for path in sorted(Path(trace_dir).glob(f"*{suffix}")):
-        rows = _rows(path)
-        if rows:
-            return rows
-    return []
+        for _ in _iter_rows(path):
+            return path
+    return None
 
 
 def _column(rows: Sequence[Mapping], *names: str) -> str:
@@ -219,20 +227,28 @@ def _kind(name: str) -> str:
     return "kernel"
 
 
-def _events(rows: Sequence[Mapping]) -> list[dict]:
-    """The rows as ``{start, end, dur, name, size}`` intervals in nanoseconds."""
-    start_column = _column(rows, "Start")
-    duration_column = _column(rows, "Duration")
-    name_column = _column(rows, "Name")
+def _events(rows: Iterable[Mapping]) -> list[dict]:
+    """The rows as ``{start, end, dur, name, size}`` intervals in nanoseconds.
+
+    ``rows`` is any iterable, so a caller may pass a stream. The input row is
+    not kept: the trace repeats its columns for every event, and holding the
+    row would double what a large trace costs.
+    """
+    iterator = iter(rows)
+    first = next(iterator, None)
+    if first is None:
+        return []
+    start_column = _column([first], "Start")
+    duration_column = _column([first], "Duration")
+    name_column = _column([first], "Name")
     events = []
-    for row in rows:
+    for row in itertools.chain((first,), iterator):
         start = _number(row, start_column)
         duration = _number(row, duration_column)
         events.append({"start": start, "end": start + duration,
                        "dur": duration,
                        "name": str(row.get(name_column, "") or "?"),
-                       "size": _size_bytes({"row": row}),
-                       "row": row})
+                       "size": _size_bytes({"row": row})})
     events.sort(key=lambda event: event["start"])
     return events
 
@@ -475,7 +491,7 @@ def step_profile(kernels: Sequence[Mapping], api: Sequence[Mapping],
 # ---------------------------------------------------------------------------
 
 
-def signatures(step: Mapping, api_rows: Sequence[Mapping]) -> list[dict]:
+def signatures(step: Mapping, api_rows: Iterable[Mapping]) -> list[dict]:
     """The cost signatures of one step, each with a ceiling.
 
     A ceiling is the share of the step that one signature owns, and it is the
@@ -562,13 +578,17 @@ def signatures(step: Mapping, api_rows: Sequence[Mapping]) -> list[dict]:
     return found
 
 
-def _api_counts(rows: Sequence[Mapping], limit: int) -> list[dict]:
+def _api_counts(rows: Iterable[Mapping], limit: int) -> list[dict]:
     """The costliest driver calls of one report, by total time."""
-    time_column = _column(rows, "Total Time")
-    count_column = _column(rows, "Num Calls", "Count")
-    name_column = _column(rows, "Name")
+    iterator = iter(rows)
+    first = next(iterator, None)
+    if first is None:
+        return []
+    time_column = _column([first], "Total Time")
+    count_column = _column([first], "Num Calls", "Count")
+    name_column = _column([first], "Name")
     parsed = []
-    for row in rows:
+    for row in itertools.chain((first,), iterator):
         parsed.append({"name": str(row.get(name_column, "") or "?"),
                        "calls": int(_number(row, count_column)),
                        "total_ms": _ms(_number(row, time_column))})
@@ -587,10 +607,10 @@ def analyze_trace(trace_dir, *, stage: str = "base", device: str = "h100",
     trace for context, one steady step for the ceilings, and the signature table
     that the ranking sorts.
     """
-    gpu_rows = _report(trace_dir, "timeline_cuda_gpu_trace.csv")
-    api_rows = _report(trace_dir, "timeline_cuda_api_trace.csv")
-    kernels = _events(gpu_rows)
-    api = _events(api_rows)
+    gpu_path = _report_path(trace_dir, "timeline_cuda_gpu_trace.csv")
+    api_path = _report_path(trace_dir, "timeline_cuda_api_trace.csv")
+    kernels = _events(_iter_rows(gpu_path)) if gpu_path else []
+    api = _events(_iter_rows(api_path)) if api_path else []
     if not kernels:
         raise PgoError(f"no GPU kernels in {trace_dir}: the report is missing "
                        "timeline_cuda_gpu_trace.csv")
@@ -623,7 +643,8 @@ def analyze_trace(trace_dir, *, stage: str = "base", device: str = "h100",
                    for name, data in sorted(buckets.items(),
                                             key=lambda item: -item[1]["ns"])},
         "step": step,
-        "signatures": signatures(step, api_rows),
+        "signatures": signatures(
+            step, _iter_rows(api_path) if api_path else ()),
     }
 
 
@@ -634,8 +655,10 @@ def chrome_trace(trace_dir, out) -> Path:
     idle stretch on the device shows the call the host was inside at the time.
     This is the same format ``torch.profiler`` emits.
     """
-    kernels = _events(_report(trace_dir, "timeline_cuda_gpu_trace.csv"))
-    api = _events(_report(trace_dir, "timeline_cuda_api_trace.csv"))
+    gpu_path = _report_path(trace_dir, "timeline_cuda_gpu_trace.csv")
+    api_path = _report_path(trace_dir, "timeline_cuda_api_trace.csv")
+    kernels = _events(_iter_rows(gpu_path)) if gpu_path else []
+    api = _events(_iter_rows(api_path)) if api_path else []
     if not kernels:
         raise PgoError(f"no GPU kernels in {trace_dir}")
     origin = min(event["start"] for event in kernels + api)
