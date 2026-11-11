@@ -248,7 +248,9 @@ See [sandbox.md](sandbox.md) for the host budget this protects.
 - **Keep the cap out of the tracked file.** A host may define
   `build:cutlass --jobs=1` in `.bazelrc.local`, then run
   `tools/nanochat build --config=cutlass <target>`. Ordinary targets keep
-  `--jobs=4`, so the tracked default does not change.
+  `--jobs=4`, so the tracked default does not change. The workstation also caps
+  every CUDA config there with `build:cuda --jobs=2` and
+  `build:hopper --jobs=2`, because four `cicc` front-ends do not fit the guest.
 - **A build takes no cgroup budget.** `--jobs` is the only bound on a compile,
   because `tools/nanochat build` takes the build lock and applies no scope.
   Wrap a long build in
