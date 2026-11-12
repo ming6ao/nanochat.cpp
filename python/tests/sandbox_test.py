@@ -182,11 +182,11 @@ class SandboxTest(unittest.TestCase):
 
     # -- the pure functions -----------------------------------------------
 
-    def test_the_profile_table_holds_the_eight_profiles(self) -> None:
+    def test_the_profile_table_holds_the_nine_profiles(self) -> None:
         profiles = sandbox.load_profiles()["profiles"]
         self.assertEqual(sorted(profiles), [
-            "eval", "kaggle-cpu", "kaggle-gpu", "t0-cpu", "t1-gpu",
-            "t2-parity", "t3-bench", "train"])
+            "build", "eval", "kaggle-cpu", "kaggle-gpu", "t0-cpu",
+            "t1-gpu", "t2-parity", "t3-bench", "train"])
         self.assertEqual(profiles["t0-cpu"], {
             "quota": "200%", "mem_high": "1536M", "mem_max": "2G",
             # 512 tasks: a cold Bazel server starts about one hundred skyframe
@@ -194,6 +194,11 @@ class SandboxTest(unittest.TestCase):
             # 3600 s: the wall clock is a backstop, not a policy, so a cold
             # tree build plus a suite still fits.
             "pids": "512", "cpus": "0-1", "runtime": "3600"})
+        # The session build profile: a memory ceiling, no wall clock, and four
+        # CPUs for `--jobs=4`. See docs/sandbox.md Part 2, section 20.
+        self.assertEqual(profiles["build"], {
+            "quota": "400%", "mem_high": "3G", "mem_max": "4G",
+            "pids": "512", "cpus": "0-3"})
         self.assertEqual(sandbox.load_profiles()["slice"], "nanochat.slice")
 
     def test_an_unknown_profile_raises(self) -> None:
@@ -232,9 +237,17 @@ class SandboxTest(unittest.TestCase):
                                        "cpus": good["cpus"]}),
             " memory.max=max(want 2)")
 
-    def test_every_profile_has_a_wall_clock(self) -> None:
-        """A profile with no runtime would let a job run forever."""
+    def test_every_profile_that_runs_a_job_has_a_wall_clock(self) -> None:
+        """A profile with no runtime lets a job run forever.
+
+        The one exception is ``build``: the Bazel server outlives the client
+        that started it, so a wall clock would stop the server in the middle of
+        a later build. The session slice bounds that server by memory instead.
+        """
         for name, values in sandbox.load_profiles()["profiles"].items():
+            if name == "build":
+                self.assertNotIn("runtime", values, name)
+                continue
             self.assertGreater(int(values["runtime"]), 0, name)
 
     def test_run_in_scope_sets_a_wall_clock_backstop(self) -> None:

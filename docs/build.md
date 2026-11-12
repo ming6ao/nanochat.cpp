@@ -251,11 +251,25 @@ See [sandbox.md](sandbox.md) for the host budget this protects.
   `--jobs=4`, so the tracked default does not change. The workstation also caps
   every CUDA config there with `build:cuda --jobs=2` and
   `build:hopper --jobs=2`, because four `cicc` front-ends do not fit the guest.
-- **A build takes no cgroup budget.** `--jobs` is the only bound on a compile,
-  because `tools/nanochat build` takes the build lock and applies no scope.
-  Wrap a long build in
-  `systemd-run --user --scope -p MemoryMax=6G -p MemorySwapMax=0 --`. The
-  kernel then kills the compile and not the session.
+- **A build takes the session cgroup budget.** `--jobs` is the last bound on
+  a compile; the session slice is the first. In a session worktree
+  (`tools/nanochat session start`) `tools/nanochat build` starts Bazel inside
+  the slice, and the kernel then kills the compile and not the session. The
+  read-back proves the placement, and a server outside the slice fails the
+  build. See `docs/sandbox.md` `### Builds`.
+- **A build in a session has no network.** The session supervisor holds one
+  private network namespace with only loopback, and the build runs in it. An
+  external repository that is not in the output base then stops the build. One
+  `tools/nanochat build --net host ...` fetches it. A repeat build reuses the
+  server and costs 0.5 s. See `docs/sandbox.md` section 19.
+- **A session keeps `include/nanochat` read-only.** Those headers are
+  contract-owned, so a session cannot change one by accident. The architect
+  starts its session with `--architect` to keep them writable
+  (`docs/sandbox.md` section 18).
+- **Outside a session there is no cgroup and no namespace.** The build lock and
+  `--jobs` are the only bound, so a long build outside a session still wants a
+  hand scope:
+  `systemd-run --user --scope -p MemoryMax=6G -p MemorySwapMax=0 --`.
 
 ### Python targets
 

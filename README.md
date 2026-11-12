@@ -314,7 +314,8 @@ docs/               reference and how-to
 - [docs/build.md](docs/build.md): the layers, the dependency invariants, and
   the host packaging.
 - [docs/testing.md](docs/testing.md): test tiers, the oracle, and the gates.
-- [docs/sandbox.md](docs/sandbox.md): the resource budgets and the GPU queue.
+- [docs/sandbox.md](docs/sandbox.md): the resource budgets, the agent session
+  scope, and the GPU queue.
 - [docs/post-training.md](docs/post-training.md): SFT, RL, and the chain.
 - [docs/python.md](docs/python.md): the Python API and the toolchain.
 - [docs/host-portability.md](docs/host-portability.md): the second host and

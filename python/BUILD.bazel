@@ -282,6 +282,29 @@ py_test(
     size = "small",
 )
 
+# T0: the session supervisor, stage S3 of docs/sandbox.md Part 2. Hermetic: a
+# temporary Unix socket and a real child process, so it needs no namespace and
+# no cgroup. It covers the wire protocol, the streaming, the exit codes, and
+# the unit that holds one namespace per session.
+py_test(
+    name = "supervisor_test",
+    srcs = ["tests/supervisor_test.py"],
+    deps = [":nanochat_cpp"],
+    size = "small",
+)
+
+# T0: the agent session scope, stage S1 of docs/sandbox.md Part 2. Hermetic: a
+# temporary record directory, a mocked `systemctl`, and a mocked Bazel server
+# probe, so it needs no cgroup v2 and no Bazel run. It covers the slice name,
+# the record round trip, the `--session` scope arguments, and the build
+# placement read-back.
+py_test(
+    name = "session_test",
+    srcs = ["tests/session_test.py"],
+    deps = [":nanochat_cpp"],
+    size = "small",
+)
+
 # T0: the observable contract of `tools/nanochat` before the language move
 # (docs/post-training.md Part 3). It runs the real entry
 # script and the real sandbox launcher, so the runfiles carry both. A fake
@@ -569,6 +592,8 @@ test_suite(
         ":pipeline_test",
         ":toolchain_test",
         ":prune_test",
+        ":session_test",
+        ":supervisor_test",
         ":contract_test",
         ":sandbox_test",
         ":lint_test",

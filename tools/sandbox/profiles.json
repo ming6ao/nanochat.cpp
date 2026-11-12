@@ -10,6 +10,13 @@
       "cpus": "0-1",
       "runtime": "3600"
     },
+    "build": {
+      "quota": "400%",
+      "mem_high": "3G",
+      "mem_max": "4G",
+      "pids": "512",
+      "cpus": "0-3"
+    },
     "t1-gpu": {
       "quota": "200%",
       "mem_high": "2G",

@@ -239,6 +239,11 @@ The `none` backend still keeps the entry-point guarantee. A binary outside
 Do not set `NANOCHAT_SANDBOX` by hand. The entry point handles the
 configuration. The sentinel is only for a manual one-off run.
 
+An agent session is also off on this host, because the session is a systemd
+slice. `tools/nanochat session start` refuses with a message, and a build skips
+the session routing instead of failing the read-back. The container quota is
+the build's only ceiling.
+
 ### 3. Setup
 
 The bootstrap script `tools/kaggle/bootstrap.sh` prepares one session. It does

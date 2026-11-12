@@ -59,6 +59,13 @@ COMMANDS = (
         "                             logs, cancel, start, stop, prune; see",
         "                             docs/sandbox.md",
     )),
+    Command("session", (
+        "  session <action> [opts]    the agent session scope: start, status, stop;",
+        "                             options: --id NAME --net host|deny",
+        "                             --agent NAME --architect; a build in a",
+        "                             session worktree runs inside the boundary;",
+        "                             see docs/sandbox.md Part 2",
+    )),
     Command("run", (
         "  run <profile> -- <cmd...>  run a command under a sandbox profile; a GPU",
         "                             profile is submitted to the queue",
@@ -139,7 +146,7 @@ COMMANDS = (
 #: The usage header and the trailing profile lines.
 _HEADER = "tools/nanochat <command> [args...]"
 _FOOTER = (
-    "Profiles: t0-cpu t1-gpu t2-parity t3-bench train eval",
+    "Profiles: t0-cpu t1-gpu t2-parity t3-bench build train eval",
     "Profile budgets: tools/sandbox/profiles.json",
 )
 

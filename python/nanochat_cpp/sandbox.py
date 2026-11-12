@@ -6,7 +6,7 @@ It applies a cgroup v2 budget (memory, CPU, process count, wall clock) through
 the unprivileged systemd user manager, plus CPU affinity and hard rlimits. It
 needs no root and no container runtime.
 
-The program has two subcommands.
+The program has three subcommands.
 
 - ``launch`` (the default) reads the profile, starts the scope, and execs the
   job. See :func:`launch`.
@@ -23,11 +23,16 @@ core limit uses ``resource.setrlimit``, because no read-back check covers it.
 The wall clock uses ``RuntimeMaxSec``, which no cgroup file exposes, so the
 queue timeout is what leaves a record when a job runs too long.
 
+The network belongs to the session supervisor, not to this program: a private
+namespace must outlive a command, so only the supervisor can own one
+(``supervisor.py``).
+
 The observable contract is frozen and ``python/tests/contract_test.py`` pins it:
 the environment variable names, the ``/tmp/nanochat-sandbox.log`` line formats,
 the exit codes, the ``NANOCHAT_SANDBOX`` sentinel, and the option interface
 ``[--profile NAME|--profile=NAME] [--backend auto|systemd|none] [--no-slice]
-[--] <cmd...>``.
+[--session NAME] [--] <cmd...>``. ``--session`` is additive: it puts the scope
+in an agent session slice. See ``docs/sandbox.md`` Part 2.
 
 The module imports only the Python standard library.
 
@@ -60,6 +65,22 @@ PROC_SELF_STATUS = Path("/proc/self/status")
 
 #: The default profile, and the profile for a CPU test action.
 DEFAULT_PROFILE = "t0-cpu"
+
+#: The slice name prefix of an agent session. Systemd reads the dash hierarchy,
+#: so ``nanochat-agent-x.slice`` sits under ``nanochat.slice`` and the aggregate
+#: ceiling still applies. See ``docs/sandbox.md`` Part 2.
+SESSION_SLICE_PREFIX = "nanochat-agent-"
+
+#: The environment variable that names the live session, and the ones that
+#: name its slice and its memory ceiling. ``python/nanochat_cpp/session.py``
+#: owns the first two meanings.
+SESSION_ENV = "NANOCHAT_SESSION"
+SESSION_SLICE_ENV = "NANOCHAT_SESSION_SLICE"
+SESSION_MEM_ENV = "NANOCHAT_SESSION_MEM_MAX"
+
+#: The cgroup file that makes one out-of-memory kill take the whole cgroup. A
+#: compile that overruns then dies as one unit, not as a random action.
+OOM_GROUP_FILE = "memory.oom.group"
 
 #: How much longer the scope may run than the profile wall clock. The worker
 #: stops a job at the profile runtime and writes the note; the scope is the
@@ -275,15 +296,17 @@ def install_slice(destination: Path) -> None:
 # -- launch ----------------------------------------------------------------
 
 
-def parse_argv(argv: list[str]) -> tuple[str, str, bool, list[str]] | int:
+def parse_argv(argv: list[str]) -> tuple[str, str, bool, str, list[str]] | int:
     """Parse the launcher options. On error, print and return the exit code.
 
     The interface is frozen. ``--run_under`` needs ``--profile=NAME``, and the
-    host tool uses ``--profile NAME``.
+    host tool uses ``--profile NAME``. ``--session NAME`` is additive: it puts
+    the scope in the session slice instead of the aggregate slice.
     """
     profile = DEFAULT_PROFILE
     backend = os.environ.get("NANOCHAT_SANDBOX_BACKEND") or "auto"
     use_slice = True
+    session = ""
     index = 0
     while index < len(argv):
         argument = argv[index]
@@ -294,6 +317,17 @@ def parse_argv(argv: list[str]) -> tuple[str, str, bool, list[str]] | int:
             index += 2
         elif argument.startswith("--profile="):
             profile = argument.split("=", 1)[1]
+            index += 1
+        elif argument == "--session":
+            if index + 1 >= len(argv) or not argv[index + 1] or \
+                    argv[index + 1].startswith("-"):
+                return error("sandbox: --session needs a name")
+            session = argv[index + 1]
+            index += 2
+        elif argument.startswith("--session="):
+            session = argument.split("=", 1)[1]
+            if not session or session.startswith("-"):
+                return error("sandbox: --session needs a name")
             index += 1
         elif argument == "--backend":
             if index + 1 >= len(argv) or not argv[index + 1]:
@@ -316,7 +350,7 @@ def parse_argv(argv: list[str]) -> tuple[str, str, bool, list[str]] | int:
     command = argv[index:]
     if not command:
         return error("sandbox: no command given")
-    return profile, backend, use_slice, command
+    return profile, backend, use_slice, session, command
 
 
 def run_unsandboxed(profile: str, command: list[str]) -> int:
@@ -339,7 +373,8 @@ def run_unsandboxed(profile: str, command: list[str]) -> int:
 
 
 def run_in_scope(profiles: dict, profile: str, values: dict,
-                 use_slice: bool, command: list[str]) -> int:
+                 use_slice: bool, command: list[str],
+                 session: str = "") -> int:
     """Start the systemd scope, then the verify step, then the command."""
     if use_slice:
         install_slice(slice_destination())
@@ -357,8 +392,25 @@ def run_in_scope(profiles: dict, profile: str, values: dict,
         backstop = 0
     if backstop:
         properties += ["-p", f"RuntimeMaxSec={backstop}"]
-    if use_slice:
+    if session:
+        # The session slice, not the aggregate one. Systemd nests the slice
+        # under `nanochat.slice` by the dash hierarchy, so the aggregate
+        # ceiling still applies. The unit name is explicit, so `session stop`
+        # and `session status` can find the scope of a detached server.
+        unit = f"nanochat-{session}-{os.getpid()}"
+        properties += [f"--slice={SESSION_SLICE_PREFIX}{session}.slice",
+                       f"--unit={unit}"]
+        os.environ[SESSION_ENV] = session
+        os.environ[SESSION_SLICE_ENV] = (
+            f"{SESSION_SLICE_PREFIX}{session}.slice")
+        os.environ[SESSION_MEM_ENV] = str(values["mem_max"])
+    elif use_slice:
         properties.append(f"--slice={profiles['slice']}")
+    if not session:
+        # A nested launch inherits the environment. A job that is not in the
+        # session slice must not claim the session guarantees, so drop them.
+        for name in (SESSION_ENV, SESSION_SLICE_ENV, SESSION_MEM_ENV):
+            os.environ.pop(name, None)
     # Match the library thread pools to the CPU budget. The cgroup is the hard
     # ceiling; this is the polite hint that avoids oversubscription.
     threads = cpu_count(values["cpus"])
@@ -367,10 +419,12 @@ def run_in_scope(profiles: dict, profile: str, values: dict,
     # The sentinel, read by RequireSandboxOrDie() and by the verifier.
     os.environ["NANOCHAT_SANDBOX"] = profile
     interpreter = sys.executable or shutil.which("python3") or "python3"
+    launcher = str(Path(__file__).resolve())
+    inner = command
     verifier = [
-        interpreter, str(Path(__file__).resolve()), "verify",
+        interpreter, launcher, "verify",
         values["mem_max"], values["quota"], values["cpus"], values["pids"],
-        "--", *command,
+        "--", *inner,
     ]
     argv = [
         "systemd-run", "--user", "--scope", "--quiet", "--same-dir",
@@ -386,7 +440,7 @@ def launch(argv: list[str]) -> int:
     parsed = parse_argv(argv)
     if isinstance(parsed, int):
         return parsed
-    profile, backend, use_slice, command = parsed
+    profile, backend, use_slice, session, command = parsed
     # The profile check comes first, so a bad name fails before any probe.
     profiles = load_profiles()
     try:
@@ -407,7 +461,8 @@ def launch(argv: list[str]) -> int:
         os.environ["CUDA_VISIBLE_DEVICES"] = os.environ["NANOCHAT_GPU_DEVICES"]
     if backend == "none":
         return run_unsandboxed(profile, command)
-    return run_in_scope(profiles, profile, values, use_slice, command)
+    return run_in_scope(profiles, profile, values, use_slice, command,
+                        session)
 
 
 # -- verify ----------------------------------------------------------------
@@ -421,6 +476,55 @@ def drop_core_limit() -> None:
     verifier that writes the value cannot witness it.
     """
     resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+
+
+def group_the_oom_kill() -> str:
+    """Set ``memory.oom.group`` in this cgroup, then read it back.
+
+    The return value is the failure text, or ``""``. One overrun then takes the
+    whole cgroup, so a killed compile leaves no half-alive action tree behind.
+    """
+    path = read_cgroup_path() / OOM_GROUP_FILE
+    try:
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write("1")
+    except OSError as failure:
+        return f"cannot set {path}: {failure.strerror}"
+    value = read_text(path)
+    if value != "1":
+        return f"{path} reads '{value}' after the write"
+    return ""
+
+
+def apply_session_ceiling() -> str:
+    """Set the session slice's memory ceiling, then read it back.
+
+    The scope carries one profile budget. The slice above it carries the
+    session budget, so several commands in one session share one ceiling. Systemd
+    cannot set a property on a transient slice, so write the cgroup file on the
+    delegated subtree. The return value is the failure text, or ``""``.
+    """
+    wanted = os.environ.get(SESSION_MEM_ENV, "")
+    slice_name = os.environ.get(SESSION_SLICE_ENV, "")
+    if not wanted or not slice_name:
+        return ""
+    parent = read_cgroup_path().parent
+    if parent.name != slice_name:
+        return f"{parent} is not the session slice {slice_name}"
+    try:
+        ceiling = str(to_bytes(wanted))
+    except ValueError:
+        return f"cannot parse the session size '{wanted}'"
+    target = parent / "memory.max"
+    try:
+        with open(target, "w", encoding="utf-8") as handle:
+            handle.write(ceiling)
+    except OSError as failure:
+        return f"cannot set {target}: {failure.strerror}"
+    value = read_text(target)
+    if value != ceiling:
+        return f"{target} reads '{value}' after the write"
+    return ""
 
 
 def verify(argv: list[str]) -> int:
@@ -457,6 +561,29 @@ def verify(argv: list[str]) -> int:
     if not quiet():
         print(f"sandbox: profile={profile} mem.max={actual['mem']} "
               f"cpu.max={actual['cpu']} cpus={actual['cpus']}", file=sys.stderr)
+    session = os.environ.get(SESSION_ENV)
+    if session:
+        # The session makes two claims: one compile tree dies together, and one
+        # session shares one memory ceiling. Check both here, inside the scope,
+        # where the writes are possible.
+        for step, failure in (("oom group", group_the_oom_kill()),
+                              ("session ceiling",
+                               apply_session_ceiling())):
+            if failure:
+                print(f"sandbox: session {session}: {step}: {failure}",
+                      file=sys.stderr)
+                return 1
+        relative = str(read_cgroup_path())
+        try:
+            relative = str(read_cgroup_path().relative_to(CGROUP_ROOT))
+        except ValueError:
+            pass
+        append_log(f"sandbox: session={session} "
+                   f"slice={os.environ.get(SESSION_SLICE_ENV, '?')} "
+                   f"cgroup={relative}")
+        if not quiet():
+            print(f"sandbox: session={session} slice="
+                  f"{os.environ.get(SESSION_SLICE_ENV, '?')}", file=sys.stderr)
     return exec_replace(command)
 
 

@@ -137,6 +137,14 @@ result does not depend on whether a Bazel server is already running. The
 trade-off is that Bazel's own filesystem sandbox is disabled for these runs;
 the resource sandbox is the priority. See [sandbox.md](sandbox.md).
 
+One level up, a test run in a session worktree rides the session boundary. The
+client and its Bazel server start inside `nanochat-agent-<id>.slice`, so the
+build phase of the suite has a memory ceiling. Test actions still get their own
+profile scope, so a run is bounded twice. The network is denied by default,
+because the session supervisor holds one namespace and the suite then costs
+what a normal run costs, 2.8 s measured. A session without a supervisor falls
+back to the host network and says so ([sandbox.md](sandbox.md) section 19).
+
 ## Fixture generator commands
 
 The offline fixture generator is one grouped script. Pass a fixture name after

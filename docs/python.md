@@ -552,6 +552,7 @@ GPU queue directly. `cli.py` is the only place that does.
 | `doctor()` | `doctor` |
 | `gpu(argv, profile=None)` | `gpu [--profile P] -- <cmd...>` |
 | `gpuq(argv)` | `gpuq <action> ...` |
+| `session(argv)` | `session <action> ...` |
 | `dispatch(name, *args)` | any command, by name |
 | `commands()` | the command list |
 

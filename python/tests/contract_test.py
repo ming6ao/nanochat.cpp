@@ -93,12 +93,17 @@ class ContractTest(unittest.TestCase):
         cls.sandbox = cls.root / "python" / "nanochat_cpp" / "sandbox.py"
         cls.env = dict(os.environ)
         for name in ("NANOCHAT_SANDBOX", "NANOCHAT_SANDBOX_BACKEND",
-                     "NANOCHAT_SANDBOX_PROFILE", "NANOCHAT_GPU_QUEUED"):
+                     "NANOCHAT_SANDBOX_PROFILE", "NANOCHAT_GPU_QUEUED",
+                     "NANOCHAT_SESSION", "NANOCHAT_SESSION_SLICE"):
             cls.env.pop(name, None)
         cls.env["PATH"] = f"{cls.bin_dir}:{os.environ.get('PATH', '')}"
         # Keep the queue store and the GPU log out of the real host state.
         cls.env["NANOCHAT_GPU_QUEUE_DIR"] = str(cls.work / "queue")
         cls.env["NANOCHAT_GPU_LOG"] = str(cls.work / "gpu.log")
+        # Keep the session records out of the real host state too: a session in
+        # this worktree would route a build through the session slice, and this
+        # suite must not need cgroup v2 (docs/sandbox.md Part 2).
+        cls.env["NANOCHAT_SESSION_DIR"] = str(cls.work / "sessions")
 
     @classmethod
     def tearDownClass(cls) -> None:

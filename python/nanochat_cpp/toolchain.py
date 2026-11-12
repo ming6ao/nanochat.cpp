@@ -42,6 +42,7 @@ __all__ = [
     "profile",
     "rl",
     "run",
+    "session",
     "shutdown",
     "test",
     "train",
@@ -378,6 +379,14 @@ class Toolchain:
         """
         return self._run(["gpuq", *(str(value) for value in argv)])
 
+    def session(self, argv: Sequence[str]) -> CommandResult:
+        """Run one ``tools/nanochat session`` action.
+
+        ``argv`` is the action and its arguments, for example ``["status",
+        "--json"]`` or ``["start", "--agent", "pi"]``.
+        """
+        return self._run(["session", *(str(value) for value in argv)])
+
     def doctor(self) -> DoctorReport:
         """Return the environment report from the tool's JSON output."""
         result = self._run(["doctor", "--json"], check=False)
@@ -459,6 +468,10 @@ def prune(*, apply: bool = False,
 
 def run(profile: str, argv: Sequence[str] | None = None) -> CommandResult:
     return _toolchain().run(profile, argv)
+
+
+def session(argv: Sequence[str]) -> CommandResult:
+    return _toolchain().session(argv)
 
 
 def dist(argv: Sequence[str], *, nproc_per_node: int = 2,

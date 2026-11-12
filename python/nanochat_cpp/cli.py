@@ -54,7 +54,7 @@ _PYTHON_DIR = Path(__file__).resolve().parents[1]
 if str(_PYTHON_DIR) not in sys.path:
     sys.path.insert(0, str(_PYTHON_DIR))
 
-from nanochat_cpp import _entry, gpu_queue, lint, prune  # noqa: E402
+from nanochat_cpp import _entry, gpu_queue, lint, prune, sandbox, session  # noqa: E402
 
 __all__ = ["main"]
 
@@ -109,16 +109,25 @@ def sandbox_backend() -> str:
 
 def find_bazel() -> str:
     """The Bazel launcher. Prefer Bazelisk so `.bazelversion` is honored."""
-    for name in ("bazelisk", "bazel"):
-        path = shutil.which(name)
-        if path:
-            return path
+    path = _bazel_or_none()
+    if path:
+        return path
     die("neither bazelisk nor bazel found on PATH")
     raise AssertionError("unreachable")
 
 
-def with_build_lock(argv: list[str], stdout=None, stderr=None) -> int:
-    """Run ``argv`` under the build lock.
+def _bazel_or_none() -> str | None:
+    """The Bazel launcher, or ``None``. A probe must not fail the command."""
+    for name in ("bazelisk", "bazel"):
+        path = shutil.which(name)
+        if path:
+            return path
+    return None
+
+
+@contextlib.contextmanager
+def build_lock():
+    """Hold the build lock.
 
     The lock lives on a descriptor that Python opens close-on-exec, so the
     detached Bazel server cannot inherit it. That inheritance deadlocked the
@@ -126,6 +135,12 @@ def with_build_lock(argv: list[str], stdout=None, stderr=None) -> int:
     """
     with open(BUILD_LOCK, "a", encoding="utf-8") as lock:
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        yield
+
+
+def with_build_lock(argv: list[str], stdout=None, stderr=None) -> int:
+    """Run ``argv`` under the build lock."""
+    with build_lock():
         return subprocess.run(argv, check=False, stdout=stdout,
                               stderr=stderr).returncode
 
@@ -171,6 +186,15 @@ class Context:
             return 0
         return exec_replace([str(SANDBOX), "--profile", profile, "--", *cmd])
 
+    def session_scope(self, name: str, cmd: list[str], net: str) -> int:
+        """Run ``cmd`` inside one agent session slice and network."""
+        argv = [str(SANDBOX), "--profile", session.BUILD_PROFILE,
+                "--session", name, "--net", net, "--", *cmd]
+        if self.dry_run:
+            self.plan("session", *argv)
+            return 0
+        return exec_replace(argv)
+
     def submit(self, profile: str, cmd: list[str]) -> int:
         """Submit one GPU job, or run the command when already inside one."""
         if self.dry_run:
@@ -213,7 +237,139 @@ def _build_argv(argv: list[str]) -> list[str]:
 
 
 def cmd_build(argv: list[str], ctx: Context) -> int:
-    return ctx.bazel(_build_argv(argv))
+    """Build under the lock, inside the session boundary when there is one.
+
+    The Bazel client starts a server and exits, and the server keeps compiling.
+    A cgroup keeps that server because membership follows the fork, so the
+    build enters the session. A server outside every cgroup exhausted host
+    memory on 2026-10-01; see ``docs/sandbox.md`` ``### Builds``.
+    """
+    bazel_argv = _build_argv(argv)
+    net, bazel_argv = _take_net_flag(bazel_argv)
+    record = _active_session()
+    if record is None:
+        if net is not None:
+            die("--net needs a session; run: tools/nanochat session start")
+        return ctx.bazel(bazel_argv)
+    return _bazel_in_boundary(bazel_argv, record, ctx,
+                              net or record.get("net", session.NET_DENY),
+                              "the build had no network")
+
+
+def _active_session() -> dict | None:
+    """The session a command belongs to, or ``None``.
+
+    A command already inside a sandbox, a host with no cgroup v2, and a host with
+    no systemd user manager all skip the session. A portable host would
+    otherwise fail the placement read-back for a scope it cannot create.
+    """
+    if in_sandbox() or sandbox_backend() == "none":
+        return None
+    if not sandbox.systemd_available():
+        return None
+    record = session.active()
+    if record is None or not record.get("id"):
+        return None
+    return record
+
+
+def _bazel_in_boundary(bazel_argv: list[str], record: dict, ctx: Context,
+                       net: str, hint: str) -> int:
+    """Pick the cheapest boundary that honours ``net``, then check it."""
+    ready = None
+    if net == session.NET_DENY:
+        ready = session.read_ready(record["id"])
+    if ready is not None:
+        return _bazel_supervised(bazel_argv, record, ctx, net, ready, hint)
+    return _bazel_in_session(bazel_argv, record, ctx, net, hint)
+
+
+def _bazel_supervised(bazel_argv: list[str], record: dict, ctx: Context,
+                      net: str, ready: dict, hint: str) -> int:
+    """Run Bazel as a child of the session supervisor.
+
+    The supervisor owns one network namespace for the whole session, so the
+    Bazel server stays reachable between commands and no run pays a server
+    start. That is the whole reason the supervisor exists.
+    """
+    name = record["id"]
+    want_ns = ready.get("net_ns", "")
+    if ctx.dry_run:
+        ctx.plan("bazel", "bazel", *bazel_argv)
+        ctx.plan("supervisor", str(session.SUPERVISOR_PROGRAM), "send",
+                 str(session.socket_path(name)), "bazel", *bazel_argv)
+        return 0
+    _reconcile_server(name, net, want_ns)
+    with build_lock():
+        try:
+            code = session.run_via_supervisor(name, [find_bazel(), *bazel_argv])
+        except session.SessionError as failure:
+            die(str(failure))
+    if code != 0:
+        if net == session.NET_DENY:
+            print(f"session: {hint}; one run with --net host fetches the "
+                  "dependency")
+        return code
+    return session.check_placement(name, net, want_ns)
+
+
+def _bazel_in_session(bazel_argv: list[str], record: dict, ctx: Context,
+                      net: str, hint: str) -> int:
+    """Run one Bazel command in the session slice, on the host network.
+
+    This is the path for ``--net host`` and for a session whose supervisor is
+    down. A denied command always belongs to the supervisor, because only a
+    long-lived process can own a namespace that outlives a command.
+    """
+    name = record["id"]
+    launcher = [str(SANDBOX), "--profile", session.BUILD_PROFILE,
+                "--session", name, "--", find_bazel(), *bazel_argv]
+    if ctx.dry_run:
+        ctx.plan("bazel", "bazel", *bazel_argv)
+        ctx.plan("session", *launcher)
+        return 0
+    _reconcile_server(name, net)
+    code = with_build_lock(launcher)
+    if code != 0:
+        if net == session.NET_DENY:
+            print(f"session: {hint}; one run with --net host fetches the "
+                  "dependency")
+        return code
+    return session.check_placement(name, net)
+
+
+def _reconcile_server(name: str, net: str, want_ns: str = "") -> None:
+    """Stop a server that cannot serve this command, before the command starts.
+
+    A server outside the session slice, or in a network namespace this command
+    cannot reach, cannot serve it. Bazel would kill it and start another, but
+    that recovery is a race, so the stop is explicit. The read-back then
+    confirms a placement instead of rescuing one.
+    """
+    pid = session.server_pid()
+    if pid is None:
+        return
+    inside, where = session.placement_of(pid, name)
+    good = bool(inside)
+    if good and net == session.NET_DENY:
+        if want_ns:
+            good = session.net_namespace(pid) == want_ns
+        else:
+            good = session.net_is_private(pid) is True
+    elif good:
+        good = session.net_is_private(pid) is False
+    if good:
+        return
+    actual = "private" if session.net_is_private(pid) else "host"
+    reason = ("outside the session slice" if not inside
+              else f"on the {actual} network")
+    print(f"session: stopping the build server ({reason}): pid={pid} "
+          f"cgroup={where or 'unknown'}")
+    try:
+        _run([find_bazel(), "shutdown"], capture_output=True, text=True,
+             timeout=120)
+    except subprocess.SubprocessError:
+        die("cannot stop the stale build server; run: tools/nanochat shutdown")
 
 
 def _test_argv(argv: list[str]) -> list[str]:
@@ -256,8 +412,63 @@ def _test_argv(argv: list[str]) -> list[str]:
     return ["test", *arguments]
 
 
+_NET_FLAG = "--net"
+
+
+def _take_net_flag(argv: list[str]) -> tuple[str | None, list[str]]:
+    """Remove ``--net host|deny`` from an argument list."""
+    net = None
+    kept: list[str] = []
+    index = 0
+    while index < len(argv):
+        argument = argv[index]
+        if argument == _NET_FLAG:
+            if index + 1 >= len(argv) or argv[index + 1] not in \
+                    session.NET_MODES:
+                die("--net needs host or deny")
+            net = argv[index + 1]
+            index += 2
+        elif argument.startswith(f"{_NET_FLAG}="):
+            value = argument.split("=", 1)[1]
+            if value not in session.NET_MODES:
+                die("--net needs host or deny")
+            net = value
+            index += 1
+        else:
+            kept.append(argument)
+            index += 1
+    return net, kept
+
+
 def cmd_test(argv: list[str], ctx: Context) -> int:
-    return ctx.bazel(_test_argv(argv))
+    """Run the tests, inside the session slice when there is one.
+
+    The build phase of a test run compiles, so it belongs in the same memory
+    boundary as a build. The network stays on the host unless ``--net deny`` is
+    named, because a denied run enters a fresh network namespace and the Bazel
+    server then restarts on every invocation. Measured on 2026-11-11: a warm
+    suite costs 0.6 s with the server alive and 21 s with a restart per run.
+    """
+    net, argv = _take_net_flag(argv)
+    bazel_argv = _test_argv(argv)
+    record = _active_session()
+    if record is None:
+        if net is not None:
+            die("--net needs a session; run: tools/nanochat session start")
+        return ctx.bazel(bazel_argv)
+    if net is None:
+        # A supervisor holds one namespace for the session, so a denied run
+        # reuses its server and costs nothing. Without one, a denied run would
+        # restart the server every time, so the network stays on the host.
+        if session.read_ready(record["id"]) is not None:
+            net = record.get("net", session.NET_DENY)
+        else:
+            net = session.NET_HOST
+            print("session: tests have the host network, because no "
+                  "supervisor is up; a hermetic run needs: "
+                  "tools/nanochat session start")
+    return _bazel_in_boundary(bazel_argv, record, ctx, net,
+                              "the test build had no network")
 
 
 def cmd_check(argv: list[str], ctx: Context) -> int:
@@ -292,6 +503,187 @@ def cmd_prune(argv: list[str], ctx: Context) -> int:
 
 def cmd_gpuq(argv: list[str], ctx: Context) -> int:
     return gpu_queue.main(argv)
+
+
+def cmd_session(argv: list[str], ctx: Context) -> int:
+    """The agent session scope: start, status, stop."""
+    if not argv:
+        die("session needs an action: start, status, or stop")
+    action, rest = argv[0], argv[1:]
+    if action == "start":
+        return _session_start(rest, ctx)
+    if action == "status":
+        return _session_status(rest)
+    if action == "stop":
+        return _session_stop(rest)
+    die(f"unknown session action '{action}' (try: start, status, stop)")
+    raise AssertionError("unreachable")
+
+
+def _parse_session_args(
+        rest: list[str]) -> tuple[str, str, bool, str, list[str]]:
+    """The ``--id``, ``--agent``, ``--json``, ``--net`` options and the command."""
+    identifier, agent, net, as_json, architect = "", "", session.NET_DENY, False, False
+    index = 0
+    while index < len(rest):
+        argument = rest[index]
+        if argument == "--":
+            index += 1
+            break
+        if argument in ("--id", "--agent", "--net"):
+            if index + 1 >= len(rest) or not rest[index + 1]:
+                die(f"{argument} needs a value")
+            value = rest[index + 1]
+            if argument == "--id":
+                identifier = value
+            elif argument == "--agent":
+                agent = value
+            else:
+                if value not in session.NET_MODES:
+                    die("--net needs host or deny")
+                net = value
+            index += 2
+        elif argument.startswith("--id="):
+            identifier = argument.split("=", 1)[1]
+            index += 1
+        elif argument.startswith("--agent="):
+            agent = argument.split("=", 1)[1]
+            index += 1
+        elif argument.startswith("--net="):
+            net = argument.split("=", 1)[1]
+            if net not in session.NET_MODES:
+                die("--net needs host or deny")
+            index += 1
+        elif argument == "--architect":
+            architect = True
+            index += 1
+        elif argument == "--json":
+            as_json = True
+            index += 1
+        else:
+            die(f"unknown session option '{argument}'")
+    return identifier, agent, as_json, net, architect, rest[index:]
+
+
+def _session_name(identifier: str) -> str:
+    """The session name: the option, or the worktree directory name."""
+    try:
+        if identifier:
+            return session.normalize_id(identifier)
+        return session.default_id(REPO_ROOT)
+    except session.SessionError as error:
+        die(str(error))
+        raise AssertionError("unreachable")
+
+
+def _session_start(rest: list[str], ctx: Context) -> int:
+    """Write the record, then enter the slice with the command, if any."""
+    identifier, agent, _, net, architect, command = _parse_session_args(rest)
+    name = _session_name(identifier)
+    if sandbox_backend() == "none":
+        die("session needs cgroup v2; NANOCHAT_SANDBOX_BACKEND=none "
+            "turns the session scope off")
+    try:
+        record = session.start_record(name, REPO_ROOT, agent=agent, net=net)
+    except OSError as error:
+        die(f"cannot write the session record: {error}")
+    print(f"session: {record['id']} slice={record['slice']} net={record['net']}")
+    print(f"session: root={record['root']}")
+    if record["net"] == session.NET_DENY:
+        ready = _start_supervisor(record, _profile_values(),
+                                  architect=architect)
+        print(f"session: supervisor pid={ready['pid']} "
+              f"net_ns={ready.get('net_ns', '?')}")
+        print("session: one namespace for the session, so a denied build "
+              "reuses its server")
+    if not command:
+        print("session: a build in this worktree now runs inside the boundary")
+        if record["net"] == session.NET_DENY:
+            print("session: the build has no network; use `build --net host` "
+                  "for a fetch")
+        return 0
+    if record["net"] == session.NET_DENY:
+        code = 0
+        try:
+            with build_lock():
+                code = session.run_via_supervisor(name, command, REPO_ROOT)
+        except session.SessionError as failure:
+            die(str(failure))
+        return code
+    return ctx.session_scope(name, command, net)
+
+
+def _profile_values() -> dict:
+    """The resource values of the session build profile."""
+    try:
+        profiles = sandbox.load_profiles()
+        return sandbox.profile_values(profiles, session.BUILD_PROFILE)
+    except (OSError, ValueError, sandbox.UnknownProfile) as failure:
+        die(f"cannot read the build profile: {failure}")
+        raise AssertionError("unreachable")
+
+
+def _start_supervisor(record: dict, values: dict,
+                      architect: bool = False) -> dict:
+    """Start the session supervisor, or report why it did not start."""
+    try:
+        ready = session.start_supervisor(record["id"], values,
+                                         record.get("net", session.NET_DENY),
+                                         REPO_ROOT, architect)
+    except session.SessionError as failure:
+        die(str(failure))
+        raise AssertionError("unreachable")
+    if ready is None:
+        die("the session supervisor did not start")
+    return ready
+
+
+def _session_status(rest: list[str]) -> int:
+    """Report the record, the slice, and the build server placement."""
+    identifier, _, as_json, _, _, _ = _parse_session_args(rest)
+    name = _session_name(identifier)
+    if session.read_record(name) is None:
+        print(f"session: no record for '{name}' in {session.state_dir()}")
+        print("session: run: tools/nanochat session start")
+        return 1
+    report = session.status(name)
+    if as_json:
+        print(json.dumps(report, indent=1, sort_keys=True))
+        return 0
+    print(f"session: id={report['id']} state={report['state']} "
+          f"net={report['net']}")
+    print(f"session: slice={report['slice']}")
+    if not report["cgroup"]:
+        print("session: no command runs in the slice; a build creates it")
+        return 0
+    print(f"session: cgroup={report['cgroup']}")
+    if report["supervisor"] == "up":
+        print(f"session: supervisor pid={report['supervisor_pid']} "
+              f"net_ns={report['net_ns']}")
+        for path, claim in report["confinement"].items():
+            print(f"session: confine {path} = {claim}")
+    else:
+        print("session: supervisor down; a build starts a fresh namespace")
+    print(f"session: memory.current={report['memory_current']} "
+          f"memory.max={report['memory_max']} "
+          f"memory.peak={report['memory_peak']}")
+    print(f"session: pids.current={report['pids_current']}")
+    for scope in report["scopes"]:
+        print(f"session: scope {scope['scope']} "
+              f"memory.current={scope['memory_current']} "
+              f"memory.max={scope['memory_max']} pids.max={scope['pids_max']}")
+    print(f"session: bazel server {report['server']}")
+    return 0
+
+
+def _session_stop(rest: list[str]) -> int:
+    """Stop the slice, which stops every command and server inside it."""
+    identifier, _, _, _, _, _ = _parse_session_args(rest)
+    name = _session_name(identifier)
+    if session.read_record(name) is None:
+        print(f"session: no record for '{name}' in {session.state_dir()}")
+        return 1
+    return session.stop(name)
 
 
 def cmd_run(argv: list[str], ctx: Context) -> int:
@@ -361,6 +753,9 @@ def cmd_dist(argv: list[str], ctx: Context) -> int:
             else:
                 log_dir = value
             index += 2
+        elif argument == "--architect":
+            architect = True
+            index += 1
         elif argument == "--json":
             as_json = True
             index += 1
@@ -1090,6 +1485,7 @@ COMMANDS = {
     "shutdown": cmd_shutdown,
     "prune": cmd_prune,
     "gpuq": cmd_gpuq,
+    "session": cmd_session,
     "run": cmd_run,
     "dist": cmd_dist,
     "client": cmd_client,
