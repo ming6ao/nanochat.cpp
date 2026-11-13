@@ -219,10 +219,10 @@ vendor sheet often quotes the sparse rate.
 
 `launch_us` is the one field the tree has not measured directly. The declared
 5.0 µs is a nominal constant, and the launch row of a report is the launch count
-times that constant. It is closest to right at a shape with many launches: the
+times that constant. It is closest to right at a shape with many launches. The
 traced step of the local artifact `profiles/h100-base-after-gradnorm/REPORT.md`
-holds 7,882 launches, so the constant predicts 39.4 ms, and the step's wall time
-is 76.9 ms against 38.7 ms of device busy time. The two agree to 0.7 ms there.
+holds 7,882 launches, so the constant predicts 39.4 ms. The step's wall time is
+76.9 ms against 38.7 ms of device busy time, so the two agree to 0.7 ms there.
 
 What the constant hides is the split. Of those launches, 23.3 ms is the host's
 own work after a launch, 6.1 ms follows a kernel-function lookup, and 8.1 ms is
@@ -248,8 +248,8 @@ The tree has two *purposes*, not two tables:
 
 Both read the one declaration. A card whose reference recipe counts at bf16
 tensor cores reports that rate from the first function and its per-precision
-rates from the second, so the two differ by design and cannot disagree about a
-number, because the number appears once.
+rates from the second. The two differ by design, and they cannot disagree about
+a number, because the number appears once.
 
 `//tests:device_profile_test` enforces three rules. The first is that
 `reference_peak_flops` equals one of the declared rates. The second is that
@@ -266,8 +266,8 @@ benchmark reports no share. That is the honest answer, and it is the one the
 A name no declaration owns is refused, not priced at zero. `DeviceNameError` in
 `nanochat/device_profile.h` renders the message, and `DeviceNameList` gives the
 declared set. The roofline report and the simulator then refuse the same name
-with the same text and the same exit status, so a mistyped device is a command
-error and never a report of zeros that reads like a very fast step.
+with the same text and the same exit status. A mistyped device is therefore a
+command error, and never a report of zeros that reads like a very fast step.
 
 `tools/nanochat devices` prints the declared set. The simulator validates
 against it, so adding a device is one `devices[]` entry and the command line
@@ -412,12 +412,12 @@ Three results follow.
    row of the T4 one, which reads `memory`; the H100 `standard` row answers the
    same way, launches everywhere but its optimizer row.
 2. **The one compute-bound row is the T4 at fp32, at the standard shape.** The
-   two fp32 GEMM rows carry 0.69 ms and 1.39 ms of the 3.6 ms, because a Turing
-   card at fp32 has no rate to spare for 512 hidden units; the rest of the step
-   is memory-bound work, the optimizer row and the norm-and-pointwise row. It
-   still leaves the step an order of magnitude below the host program, which is
-   why the chain records a step time and gates the two legs against each other
-   instead of claiming a throughput (gates G2 and G3 of
+   two fp32 GEMM rows carry 0.69 ms and 1.39 ms of the 3.6 ms. A Turing card
+   at fp32 has no rate to spare for 512 hidden units. The rest of the step is
+   memory-bound work: the optimizer row and the norm-and-pointwise row. That
+   still leaves the step an order of magnitude below the host program. The
+   chain therefore records a step time and gates the two legs against each
+   other, instead of claiming a throughput (gates G2 and G3 of
    [post-training.md](post-training.md) Part 3, section 8).
 3. **The bf16 precision does not move the step time.** The H100 `standard` bound
    of 0.764 ms sits inside a step of tens of milliseconds, so a bf16 leg and an
@@ -426,19 +426,20 @@ Three results follow.
    speedup.
 
 The optimizer row of the `standard` reports reads `limit: memory`: 386 MB of
-optimizer state, 1.21 ms on a T4 at fp32 and 0.118 ms on an H100 at bf16, which
-is 318 GB/s and 3.26 TB/s against the 320 GB/s and 3.35 TB/s peaks of section 6.
-It is the memory-bound family section 7.1 predicts, and its 1.21 ms is the
-second largest term of the T4 step, after the backward GEMM. Both figures are
-for one device, because the optimizer row is replicated (section 7.4).
+optimizer state, at 1.21 ms on a T4 at fp32 and 0.118 ms on an H100 at bf16.
+The traffic is 318 GB/s and 3.26 TB/s against the 320 GB/s and 3.35 TB/s peaks
+of section 6. It is the memory-bound family section 7.1 predicts, and its
+1.21 ms is the second largest term of the T4 step, after the backward GEMM.
+Both figures are for one device, because the optimizer row is replicated
+(section 7.4).
 
 ### 7.3.1 The reference throughput shape
 
 `tools/nanochat roofline` reports the reference shape when no model flag is
-passed, because that is the shape a throughput number is read at: 20 layers of
-width 1280, ten query heads over five key-value heads, 1024 tokens of context,
-32768 words, and the `SSL` window, at one micro-batch of sixteen sequences. The
-shape has one home, `nanochat::ReferenceThroughputConfig` in
+passed, because that is the shape a throughput number is read at. The shape is
+20 layers of width 1280, ten query heads over five key-value heads, 1024 tokens
+of context, 32768 words, and the `SSL` window, at one micro-batch of sixteen
+sequences. The shape has one home, `nanochat::ReferenceThroughputConfig` in
 [../include/nanochat/mfu.h](../include/nanochat/mfu.h), so the tool, the test,
 and the chain's `big` profile cannot drift. The plan beside it takes the five
 Polar Express iterations the shipped optimizer runs, so the report describes the
@@ -459,8 +460,9 @@ The report at bf16:
 
 The command is `tools/nanochat roofline --precision bf16`, and `harness_test`
 pins these numbers. The step is 16384 tokens, so the bound reads 255,632 tokens
-per second at 66.6 percent model utilization and 16.7 percent optimizer
-utilization, and the reference budget of 5.84 billion tokens is 356,446 steps.
+per second. That is 66.6 percent of the model peak and 16.7 percent of the
+optimizer peak, and the reference budget of 5.84 billion tokens is 356,446
+steps.
 
 `--muon-ns-steps 0` reports the model alone: 53.38 ms, 306,927 tokens per
 second, and 79.9 percent. The difference between the two rows is the whole of
@@ -479,12 +481,12 @@ document.
 2. **The orthogonalisation is the second term.** Five Polar Express iterations
    cost 10.71 ms, which is a sixth of the bound and a quarter of the GEMM's
    share. It is compute bound, and it is the one row where the tree writes the
-   arithmetic itself, so a faster GEMM pays twice: once in the forward and
-   backward, and once here. The bound is optimistic on this row in a way the
+   arithmetic itself. A faster GEMM therefore pays twice: once in the forward
+   and backward, and once here. The bound is optimistic on this row in a way the
    other rows are not. The measured stage is 29.09 ms on one H100 SXM card
-   ([model.md](model.md), `muon:big:step` at ns=5), and the products alone run
-   at 70.6 percent of the peak, so the fraction is 0.48 and not the 1.0 that a
-   bound of 13.84 ms would suggest.
+   ([model.md](model.md), `muon:big:step` at ns=5). The products alone run at
+   70.6 percent of the peak. The fraction is therefore 0.48, and not the 1.0
+   that a bound of 13.84 ms would suggest.
 3. **The precision a report uses follows the build.** `--precision auto` reads
    the build's own precision, which is fp32 in a default checkout and bf16 under
    `--config=hopper`. The fp32 bound at this shape is 645.7 ms, which describes
@@ -595,7 +597,7 @@ column names the family that is short.
 #### 7.4.4 The JSON
 
 `--json` writes `nanochat.roofline.v3`. It carries the identity of the run
-(`device`, `precision`, `shape`), the phase fields, the two utilization numbers,
+(`device`, `precision`, `shape`), the phase fields, the two shares of the peak,
 the weighted peak, and one object per row. A row states `name`, `family`,
 `phase`, `precision`, `shape`, the counter fields, `bound_seconds`, `ms`,
 `limit`, `gflops`, `work_ratio`, and `mfu`.
@@ -710,16 +712,17 @@ first measured row this tree has at a throughput shape. One base stage, one
 
 | Date | Revision | Device | Build | Precision | Configuration | Bound | Measured | Fraction | Validated on | Gap cause |
 |---|---|---|---|---|---|---|---|---|---|---|
-| 2026-11-10 | `d6f0365` | 1 x H100 | bf16 | bf16 | d20, hidden 1280, batch 16, grad-accum 1, 5.84e9 tokens | 64.09 ms | 180.37 ms | 0.355 | NVIDIA H100 80GB HBM3 | Not yet split: the bound is at the declared peak and the step is 2.81 times longer |
+| 2026-11-10 | `d6f0365` | 1 x H100 | bf16 | bf16 | d20, hidden 1280, batch 16, grad-accum 1, 5.84e9 tokens | 64.09 ms | 180.37 ms | 0.355 | NVIDIA H100 80GB HBM3 | Split at this shape by a trace (section 10.1): half the step carries the counted multiplies, and half carries none |
 
 This row is transcribed from that entry and not generated, because a step
-measurement is not a `nanochat.bench.v3` document: `attain` joins a bound with a
-row of the counter table, and no trace was taken at this shape.
+measurement is not a `nanochat.bench.v3` document. `attain` joins a bound with a
+row of the counter table, and a trace is a profile artifact and not a report, so
+it does not join either.
 
 The measured row is the median of eleven steady steps of the better of two
 runs. The eleven read 179.6 to 181.1 ms, so the spread of the shape itself is
-under one percent and the gap is not noise. Three causes can account for it, and
-only a trace separates them:
+under one percent and the gap is not noise. Four candidates can account for it.
+A trace at this shape separates them:
 
 1. The achieved GEMM rate. The bound charges every matrix multiply at the
    declared 989 TFLOP/s, and the vendor mainloop reads 0.87 to 0.97 of cuBLAS,
@@ -727,16 +730,72 @@ only a trace separates them:
    ([kernels.md](kernels.md) section 11.8). That is a factor of 1.3 to 1.5.
 2. The orthogonalisation. Section 7.3.1 prices that row at 0.48 of its own
    bound, and it is 16.7 percent of the step.
-3. The launch and host path. The only traced base step in the tree spends more
-   than a third of its wall time off the device, and that step is a different
-   shape, so the share at this shape is unknown.
+3. The launch and host path. A trace at this shape answers this candidate:
+   the device is busy 91 percent of the wall time, so the host is not the
+   limit. Section 10.1 states the split.
+4. The passes that carry no counted multiply. The attention softmax, the
+   rotary pack, the head transposes, the pointwise steps, the norms, and the
+   Muon elementwise steps hold 102 ms of the 206 ms traced step. The counter
+   table prices the softmax inside its 3.18 ms attention row, and the Muon row
+   at 10.71 ms. It does not price the transposes or the rotary pack at all.
 
 The first two do not reach the gap. At 0.72 of the peak on every matrix
 multiply, which is the optimistic end of the first cause, the model rate would
-be 48 percent; the measured rate is 23.66 percent, so about half of the step is
-still outside every row of the counter table. The host path is the largest
-remaining candidate, and the trace at this shape is the measurement that
-settles it.
+be 48 percent. The measured rate is 23.66 percent, so about half of the step is
+still outside every row of the counter table. The trace places that half: it is
+the passes of the fourth cause, and not the host path of the third. Section
+10.1 states the split.
+
+### 10.1 The split at the throughput shape
+
+One traced base step of the same shape, from the campaign that tuned it:
+`profiles/pgo-big/base-h100/iter-02/before/trace/`. The trace covers 20 steps,
+with 206.0 ms of kernels and 7.6 ms of copies per step, so the device is busy
+91 percent of the profiled step. Its own step reads 208.98 ms, and the
+attainment row above reads 180.37 ms at `d6f0365`, so the split describes the
+shape and not that row exactly.
+
+| Family | Milliseconds per step | Share |
+|---|---:|---:|
+| The matrix multiplies, with the attention and Muon products | 104.4 | 50.7% |
+| The attention softmax, both passes | 23.1 | 11.2% |
+| The Muon elementwise steps | 21.6 | 10.5% |
+| The pointwise steps | 13.2 | 6.4% |
+| The rotary pack, `qk_prep` | 11.7 | 5.7% |
+| The head transposes | 9.9 | 4.8% |
+| The RMS norms | 6.4 | 3.1% |
+| The classifier | 5.4 | 2.6% |
+| AdamW | 3.6 | 1.7% |
+| The smear, the embedding, and the rest | 6.8 | 3.3% |
+| **The step** | **206.0** | 100% |
+
+Three results follow.
+
+1. **The multiply path holds 51 percent of the peak.** Its three sources are
+   5.28e13 FLOP per step: the linear GEMM, the attention products, and the Muon
+   products. The 104.4 ms that carries them reads 506 TFLOP/s against the
+   989 TFLOP/s declaration. The cuBLAS rows of [baselines.json](baselines.json)
+   on the same linear shapes reach 520 to 910 TFLOP/s. A bucket that mixes
+   three families cannot be split further without a per-matmul trace, so that
+   comparison bounds the defect and does not locate it.
+2. **102 ms of the 206 ms carries no counted multiply.** The counter table
+   prices the attention family at 3.18 ms, and the Muon row at 10.71 ms. The
+   softmax, the rotary pack, the transposes, the pointwise steps and the norms
+   are passes that a fused kernel would not issue. The counter table does not
+   count two of those six at all.
+3. **The host path is not the limit at this shape.** The 206.0 ms of kernels
+   inside a 233.8 ms profiled step is the measure of that. The data loader
+   reports no measurable time on a steady step at this shape either. The step is
+   short of the bound because of the work on the device, not the work beside
+   it.
+
+At the rate the multiply path reaches today, a step with no passes would read
+104 ms and 41 percent, which is the reference's range. The gap is therefore the
+102 ms of passes first, and the multiply rate second. Two measurements follow:
+a trace at the 180 ms step, which separates the families at the attainment
+row's own revision, and the fp8 arm of [precision.md](precision.md), which
+attacks the multiply rate. Section 7.3.1 prices the same families, so a
+measured row and the bound join family by family.
 
 The record is the audit trail. A bound without a measurement is a limit, and
 the row says so.
@@ -771,9 +830,9 @@ in `//tests:device_profile_test`. Check 6 needs the A0 measurement.
 - **The bound is an upper limit, not a prediction.** A run below the bound is
   normal. Section 7.2 shows how to split the gap.
 - **A declared peak may be wrong.** Section 9 records one such case. Check the
-  declaration before you judge a kernel, and remember that the declaration is
-  now the only table, so a wrong number reaches the MFU line, the benchmark
-  share, and the bound together.
+  declaration before you judge a kernel. The declaration is now the only table,
+  so a wrong number reaches the MFU line, the benchmark share, and the bound
+  together.
 - **Measurement cannot find a missing counter term.** If the counter table
   omits the cast traffic, the bound is wrong by 13 minutes. Review the counter
   table against `docs/kernels.md`.

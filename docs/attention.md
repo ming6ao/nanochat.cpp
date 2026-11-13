@@ -858,8 +858,20 @@ was what caught it: of fourteen elements, only the five whose row and column
 are both multiples of eight were read at all.
 
 The value product's second operand is the staged value tile, which has the
-opposite orientation, so the instruction's second transpose bit is set. That
-form is not measured yet.
+opposite orientation. The transpose bit is not what fixes it: the interleaved
+form is a property of which axis the staged rows hold, so the value tile is
+staged **transposed**, as `dim` rows by `kAtomN` keys, and both products then
+read the operand form this section describes with the transpose bits clear. The
+staged transposition is one thread reading eight keys of one head-width row,
+which is coalesced across the warp, and writing the sixteen bytes the
+interleaved form keeps adjacent.
+
+That is measured, not assumed. The probe tries both stagings, both transpose
+bits, and three atom strides, and six one-hot triples have to land on their
+expected `(row, dim)`: the transposed staging with both bits clear and a stride
+of 256 lands six of six, and no other combination lands more than four. The
+staged value tile therefore has the same descriptor parameters as the staged
+key tile, and the tile of section 3 needs no second staged form.
 
 **The accumulator map.** The map is measured two ways and both agree. Fifteen
 one-hot elements each land in exactly one register, and a decode of the whole
@@ -877,11 +889,38 @@ of an eight-column group. That is the map of the `mma.sync` accumulator of Part
 7, repeated sixteen times along the key axis, so the row reductions of the
 softmax are a shuffle over four lanes and never cross a warp.
 
+The formula is now checked and not only stated: the probe decodes all 8,192
+slots and compares each against the two lines above, and no slot disagrees.
+
+**The register operand.** The value product takes the probability tile as its
+first operand in registers, and that operand has no descriptor. One element at a
+time gives it, with `reg` the register and `half` the two-byte half of it:
+
+| Field | Value |
+|---|---|
+| row | `16 * (lane / 32) + (lane % 32) / 4 + 8 * (reg % 2)` |
+| key | `8 * (reg / 2) + 2 * (lane % 4) + half` |
+
+So the register operand is the accumulator map with the two fields exchanged,
+which is the fact the value product needs: a score element and its probability
+share the same lane, the same `2 * (lane % 4)` term, and one eight-element block
+index. The probability operand therefore leaves the score accumulator of the
+lane that holds it with **no shuffle**: an accumulator slot at `index` becomes
+the register `2 * (index / 4) + ((index / 2) % 2)` and the half `index % 2`. The
+decode of that table is a bijection over 1,024 slots, none missing and none
+repeated.
+
+The consequence is checked and not only argued. All 8,192 slots of a 64 by 128
+score tile have one accumulator slot and one register slot, no slot is repeated
+on either side, and the two name the same lane for every one of them. So the one
+cost of the probability operand is the bf16 rounding and the register move, and
+the shared round trip of Part 6, section 4.4 stays gone.
+
 ### 6. Phases and gates
 
 | Phase | Change | Gate |
 |---|---|---|
-| H1 | The prototype of the tile in `dev/kernels/`, as the probe of section 1 is: a resident query tile, copies of key and value, and the products with no softmax | The prototype reads 500 TFLOP/s or more with two query tiles per staged key tile, and the copy-only row states the bytes a second the copies sustain. **Measured: passed**, at 755.4 TFLOP/s and 6.03 TB/s |
+| H1 | The prototype of the tile in `dev/kernels/`, as the probe of section 1 is: a resident query tile, copies of key and value, and the products with no softmax | The prototype reads 500 TFLOP/s or more with two query tiles per staged key tile, and the copy-only row states the bytes a second the copies sustain. **Measured: passed** at 755.4 TFLOP/s and 6.03 TB/s, from a binary that is not in the tree; the committed probe measures the same rows by sixteen-byte stores, at 293.4 TFLOP/s and 2.36 TB/s, and the Tensor Memory Accelerator path of H2b is what restores the recorded rate |
 | H2 | The forward tile of Part 7's arithmetic: mask, base-two softmax, both products, one consumer warpgroup, staged by a 16-byte copy into the interleaved form | The family test passes at the bf16 tolerance of [testing.md](testing.md) on every case of Part 7 section 7; the forward row of `attention_benchmark` reads 200 TFLOP/s or more |
 | H2b | The copy path of decision H2 by the Tensor Memory Accelerator, which needs the 128-byte swizzle and descriptor layout type 1 rather than the interleaved form | A one-hot map and a laid-out reference pass on the staged path, and the rate matches the copy-free path within 15 percent at the intensity of two query tiles |
 | H3 | Warp specialization and the overlap of decision H4 | The forward row reads 350 TFLOP/s or more; a trace shows the tensor pipe busy above 60 percent |
@@ -895,28 +934,51 @@ section 6.
 
 **The H1 result.** `//dev/kernels:attention_wgmma_probe` measured these rows on
 the H100 leg, over a 128-key tile of 32 KiB against a resident query tile, with
-a four-stage window and the release of section 5.
+a four-stage window and the release of section 5. The staged rows name the copy
+path, because the two paths do not agree.
 
-| Row | Rate | Share of the peak |
-|---|---:|---:|
-| Products from a resident key tile | 963.7 TFLOP/s | 97.4 percent |
-| Products from a staged tile, one query tile | 375.6 TFLOP/s | 38.0 percent |
-| Products from a staged tile, two query tiles | 755.4 TFLOP/s | 76.4 percent |
-| The copies with no products | 6.03 TB/s | none |
+| Row | Path | Rate | Share of the peak |
+|---|---|---:|---:|
+| Products from a resident key tile | none | 963.9 to 979.7 TFLOP/s | 97.5 to 99.1 percent |
+| Products from a staged tile, one query tile | Tensor Memory Accelerator | 375.6 TFLOP/s | 38.0 percent |
+| Products from a staged tile, two query tiles | Tensor Memory Accelerator | 755.4 TFLOP/s | 76.4 percent |
+| The copies with no products | Tensor Memory Accelerator | 6.03 TB/s | none |
+| Products from a staged tile, one query tile | sixteen-byte stores | 145.4 to 151.6 TFLOP/s | 14.7 to 15.3 percent |
+| Products from a staged tile, two query tiles | sixteen-byte stores | 284.7 to 295.3 TFLOP/s | 28.8 to 29.9 percent |
+| The copies with no products | sixteen-byte stores | 2.29 to 2.42 TB/s | none |
 
-The last row is the one the other three read, because it fixes the arithmetic
-that one staged byte must buy:
+The two staged halves of the table are the same geometry over two copy paths.
+The Tensor Memory Accelerator rows come from the binary that first measured this
+phase and are not reproducible from the tree; the store rows are, and both
+staged rows are exactly the copy cap of their path multiplied by the arithmetic
+one staged byte buys: 6.03 TB/s at 128 FLOP per byte is 772, and 2.36 TB/s is
+302. Measured, that is 755.4 of 772 and 289.0 to 295.3 of 302, which is 98 and 96
+to 98 percent of what each path allows. The staged rows are the spread of five
+runs; the card's clock and its neighbours move the resident row by 1.6 percent
+and the copies by 4 percent.
 
-| Tile | Arithmetic per staged byte | Cap of the copies |
-|---|---:|---:|
-| One query tile, score product only | 64 FLOP | 386 TFLOP/s |
-| Two query tiles, score product only | 128 FLOP | 772 TFLOP/s |
-| The tile of section 3: two query tiles, both products, key and value staged | 262 FLOP | 1,580 TFLOP/s |
+The copy rows are the ones the staged rows read, because a copy row fixes the
+arithmetic that one staged byte must buy:
+
+| Tile | Arithmetic per staged byte | Cap at 6.03 TB/s | Cap at 2.36 TB/s |
+|---|---:|---:|---:|
+| One query tile, score product only | 64 FLOP | 386 TFLOP/s | 151 TFLOP/s |
+| Two query tiles, score product only | 128 FLOP | 772 TFLOP/s | 302 TFLOP/s |
+| The tile of section 3: two query tiles, both products, key and value staged | 262 FLOP | 1,580 TFLOP/s | 618 TFLOP/s |
 
 So the copies stop being the constraint at the geometry of section 3, and they
-are the constraint at one query tile per staged key tile. The staged row of
-755.4 against a cap of 772 is 98 percent of what the copies allow, so the
-schedule of section 5 is not the loss; the arithmetic per byte is.
+are the constraint at one query tile per staged key tile. At 2.36 TB/s they are
+the constraint at every geometry this probe holds, which is why the store path
+cannot carry the forward tile and H2b comes before H3.
+
+Three further rows bound the store path. The depth of the ring does not matter
+once it is deep enough to cover one tile of copies: two stages read 2.14 TB/s,
+four read 2.29 to 2.36, and five read 2.30. The order of the stores does not matter
+either: varying the `k` block first reads 2.29 to 2.37 TB/s and varying the row
+of the core matrix first reads 2.34 to 2.42, so the interleaved form costs no
+bank conflict this path can see. The per-block rate is 17.4 to 18.0 gigabytes a
+second, against the 27.4 one block reaches alone, so the limit is the device and
+not one scheduler.
 
 At the production shape the issued arithmetic is 18.8 GFLOP, which is 71.8 MB of
 staged tile at that intensity: 21.4 microseconds of high-bandwidth memory at
@@ -924,13 +986,27 @@ staged tile at that intensity: 21.4 microseconds of high-bandwidth memory at
 compute at the peak. The tile therefore sits at the balance point, which is what
 decision H5 exists to move: the pair's multicast halves those bytes.
 
-**What the rows do not say.** The three staged rows and the copy row were
-measured with row-major operands, which the instruction does not read (section
-5). Their rates stand, because the same instruction count issued the same bytes
-either way, and the arithmetic per byte is what they measure. The resident row
-above and the map are the later runs in the interleaved form. No correctness of
-this probe is claimed: a sum-based check is blind to the operand form, and the
-one-hot probe of section 5 is the check that replaced it.
+**What the rows do not say.** Every row above is measured over operands in the
+interleaved form, and two checks now stand behind that. One compares a full
+product with a host reference one element at a time, which is 1.9e-07 relative
+to the largest element of the reference; a row-major stage fails it, and a
+sum-based check cannot. The other compares the staged product with the resident
+product, and both stagings agree exactly, so the ring, its barriers, and its
+stages are right. Neither check existed when the recorded rows were measured,
+and the withdrawal of the old correctness row is why.
+
+Two checks cover the second product and the register operand instead of a rate.
+The value product lands six one-hot triples of six only on the transposed
+staging with both transpose bits clear and an atom stride of 256; the direct
+staging reaches four of six at best, over both bits and three strides. The
+register operand decodes as a bijection over 1,024 slots, and its row and key
+formulas are the accumulator's two formulas exchanged, so the probability of a
+score tile reaches the value product from the same lane with no shuffle.
+
+The staged rows time a score product only, so they say nothing about the second
+product's operand traffic, about the cost of the transposed staging pass, about
+the exponential, or about the epilogue. Those are the costs section 3 lists and
+the gates of section 6 allow for.
 
 ### 7. Dispatch
 

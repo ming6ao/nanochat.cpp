@@ -2046,7 +2046,7 @@
       "validated_on_host": "Modal H100 image, bf16, tools/modal/app.py H100 leg"
     },
     "attention_wgmma_probe": {
-      "note": "Phase H1 of docs/attention.md Part 8, from dev/kernels/attention_wgmma_probe.cu on the H100 leg of tools/modal/app.py (sm_90a, bf16): the score product of a 64 by 128 by 128 tile from a resident key tile, from a key tile a copy engine stages into a four-stage window with one and with two query tiles, and the copies alone in the last row. fraction_of_peak divides by the 989 TFLOP/s dense bf16 rate of backends/cuda/caps.json. The staged rows are limited by the arithmetic one staged byte buys and not by the schedule: 6.03 TB/s of copies is 386 TFLOP/s at 64 FLOP per byte and 772 at 128, and the measured 755.4 is 98 percent of the second cap. The three staged rows and the copy row were measured with row-major operands, which the instruction does not read; their rates stand because the instruction count and the bytes are the same either way, and no correctness is claimed. The resident row and the map are the later runs in the interleaved core-matrix form, which is the form the instruction reads.",
+      "note": "Phase H1 of docs/attention.md Part 8, from dev/kernels/attention_wgmma_probe.cu on the H100 leg of tools/modal/app.py (sm_90a, bf16). Every row below is reproducible from the committed source, and the three recorded staged rows that this entry used to hold are kept only as the historical Tensor Memory Accelerator rows of a binary that is not in the tree. fraction_of_peak divides by the 989 TFLOP/s dense bf16 rate of backends/cuda/caps.json. A row states one run to its digit; across five runs the resident row reads 963.9 to 979.7 TFLOP/s, the copies 2.29 to 2.42 TB/s, the one-query-tile staged row 145.4 to 151.6, and the two-query-tile staged row 284.7 to 295.3, so the card's clock and its neighbours are the spread and no row is claimed tighter than four percent. The staged rows are limited by the arithmetic one staged byte buys and not by the schedule: each is 97 to 99 percent of the copy cap of its path times that arithmetic. The two copy paths are not interchangeable: sixteen-byte stores reach 2.36 TB/s and the Tensor Memory Accelerator reached 6.03, which is why Part 8 phase H2b comes before H3. Two checks stand behind every rate. form_check compares a full product with a host reference one element at a time, which a row-major stage fails and a sum-based check cannot see. staged_check compares the staged product with the resident product and both stagings agree exactly, so the ring, its barriers, and its stages are right; the correctness row this entry used to hold was withdrawn because a sum is blind to the operand form, the register operand, and these two replace it.",
       "device": "NVIDIA H100 80GB HBM3 (sm_90)",
       "validated_on": "NVIDIA H100 80GB HBM3 (sm_90)",
       "precision": "bf16",
@@ -2054,45 +2054,17 @@
       "origin": "docs/attention.md Part 8 section 6",
       "rows": [
         {
-          "name": "attention-wgmma:resident",
-          "blocks": 132,
-          "passes": 20000,
-          "tflops": 977.9,
-          "fraction_of_peak": 0.989
+          "name": "attention-wgmma:form_check",
+          "relative_error": 1.918e-07,
+          "reference_scale": 14.681,
+          "result": "ok",
+          "note": "one element at a time against a host reference"
         },
         {
-          "name": "attention-wgmma:tma-q1",
-          "blocks": 132,
-          "passes": 20000,
-          "tflops": 375.6,
-          "fraction_of_peak": 0.38
-        },
-        {
-          "name": "attention-wgmma:tma-q2",
-          "blocks": 132,
-          "passes": 20000,
-          "tflops": 755.4,
-          "fraction_of_peak": 0.764
-        },
-        {
-          "name": "attention-wgmma:tma-copy",
-          "blocks": 132,
-          "passes": 20000,
-          "gbytes": 6031.77
-        },
-        {
-          "name": "attention-wgmma:correctness",
-          "tiles": 6,
-          "relative_error": 0.0002315,
-          "result": "WITHDRAWN",
-          "why": "a sum-based check is blind to the operand form"
-        },
-        {
-          "name": "attention-wgmma:resident-interleaved",
-          "blocks": 132,
-          "passes": 20000,
-          "tflops": 963.7,
-          "fraction_of_peak": 0.974
+          "name": "attention-wgmma:staged_check",
+          "relative_error": 0.0,
+          "both_stagings": true,
+          "result": "ok"
         },
         {
           "name": "attention-wgmma:accumulator-map",
@@ -2101,8 +2073,133 @@
           "table_elements": 8192,
           "missing": 0,
           "repeated": 0,
+          "formula_mismatch": 0,
           "row": "16*(lane/32) + (lane%32)/4 + 8*((index/2)%2)",
           "col": "8*(index/4) + 2*(lane%4) + (index%2)"
+        },
+        {
+          "name": "attention-wgmma:register-operand",
+          "table_elements": 1024,
+          "missing": 0,
+          "repeated": 0,
+          "row": "16*(lane/32) + (lane%32)/4 + 8*(reg%2)",
+          "key": "8*(reg/2) + 2*(lane%4) + half",
+          "note": "the accumulator slot index becomes the register 2*(index/4) + ((index/2)%2) and the half index%2, in the same lane, so the probability operand reaches the value product with no shuffle"
+        },
+        {
+          "name": "attention-wgmma:value-operand",
+          "transpose_stage": 1,
+          "trans_b": 0,
+          "atom_step": 256,
+          "one_hot_triples": 6,
+          "found": 6,
+          "status": "ok",
+          "note": "the staged value tile is transposed at the copy and both transpose bits stay clear, so the value product uses the same descriptor parameters as the score product"
+        },
+        {
+          "name": "attention-wgmma:probability-permutation",
+          "score_slots": 8192,
+          "same_lane": 8192,
+          "cross_lane": 0,
+          "accumulator_duplicates": 0,
+          "register_duplicates": 0,
+          "status": "ok",
+          "note": "the score accumulator slot and the value product's register operand name the same lane for every slot of a 64 by 128 score tile, so the probability tile needs no shuffle"
+        },
+        {
+          "name": "attention-wgmma:value-operand",
+          "transpose_stage": 0,
+          "best_found": 3,
+          "one_hot_triples": 6,
+          "status": "failed",
+          "note": "the direct staging over both transpose bits and three atom strides"
+        },
+        {
+          "name": "attention-wgmma:resident",
+          "blocks": 132,
+          "passes": 20000,
+          "tflops": 964.0,
+          "fraction_of_peak": 0.975,
+          "note": "an interleaved resident tile; reproduces the recorded 963.7"
+        },
+        {
+          "name": "attention-wgmma:staged",
+          "copy_path": "sixteen-byte stores",
+          "query_tiles": 1,
+          "blocks": 132,
+          "tiles": 4096,
+          "tflops": 149.3,
+          "fraction_of_peak": 0.151
+        },
+        {
+          "name": "attention-wgmma:staged",
+          "copy_path": "sixteen-byte stores",
+          "query_tiles": 2,
+          "blocks": 132,
+          "tiles": 4096,
+          "tflops": 293.4,
+          "fraction_of_peak": 0.297
+        },
+        {
+          "name": "attention-wgmma:copies",
+          "copy_path": "sixteen-byte stores",
+          "blocks": 132,
+          "tiles": 8192,
+          "tbps": 2.36,
+          "gigabytes_per_block": 18.0
+        },
+        {
+          "name": "attention-wgmma:copies",
+          "copy_path": "sixteen-byte stores",
+          "blocks": 1,
+          "tiles": 8192,
+          "tbps": 0.03,
+          "gigabytes_per_block": 27.2,
+          "note": "one block alone reaches more a second than its share of a full grid"
+        },
+        {
+          "name": "attention-wgmma:copies",
+          "copy_path": "Tensor Memory Accelerator",
+          "tbps": 6.03,
+          "reproducible": false
+        },
+        {
+          "name": "attention-wgmma:copy_depth",
+          "stages": 2,
+          "tbps": 2.14
+        },
+        {
+          "name": "attention-wgmma:copy_depth",
+          "stages": 4,
+          "tbps": 2.36
+        },
+        {
+          "name": "attention-wgmma:copy_depth",
+          "stages": 5,
+          "tbps": 2.36,
+          "note": "the ring is deep enough at four stages; five is the opt-in limit"
+        },
+        {
+          "name": "attention-wgmma:copy_order",
+          "k_block_first": 2.36,
+          "row_first": 2.41,
+          "note": "the interleaved form costs no bank conflict this path can see"
+        },
+        {
+          "name": "attention-wgmma:staged_tile",
+          "copy_path": "Tensor Memory Accelerator",
+          "query_tiles": 1,
+          "tflops": 375.6,
+          "fraction_of_peak": 0.38,
+          "reproducible": false
+        },
+        {
+          "name": "attention-wgmma:staged_tile",
+          "copy_path": "Tensor Memory Accelerator",
+          "query_tiles": 2,
+          "tflops": 755.4,
+          "fraction_of_peak": 0.764,
+          "reproducible": false
         }
       ]
     }
