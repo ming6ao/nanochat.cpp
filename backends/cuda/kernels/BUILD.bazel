@@ -175,12 +175,29 @@ cuda_library(
 # every accumulator of the micro-tile is a two-byte element.
 cuda_library(
     name = "attention_flash",
-    srcs = ["attention_flash.cu"],
+    # The comment above is the build rule: an fp32 build compiles the stand-in
+    # and not this source, so the instantiation has no dead tile helpers to
+    # report. `:attention` selects the pair, and `//...` builds this label
+    # directly in every configuration.
+    srcs = select({
+        "//:bf16": ["attention_flash.cu"],
+        "//:fp8": ["attention_flash.cu"],
+        "//conditions:default": [],
+    }),
     hdrs = [
         "attention_dispatch.h",
         "attention_flash.h",
     ],
-    copts = nanochat_cuda_copts(),
+    copts = nanochat_cuda_copts() + [
+        # Every body of the tile sits behind `__CUDA_ARCH__ >= 800`, so a build
+        # for an older card drops the tile and its helpers and constants become
+        # dead by design. `-Werror` turns nvcc's "declared but never referenced"
+        # into a failure; this one target suppresses that diagnosis. Such a
+        # build still fails honestly at model creation, where the message names
+        # the device.
+        "-Xcudafe",
+        "--diag_suppress=177",
+    ],
     defines = precision_defines(),
     deps = [
         ":device_utils",
@@ -196,7 +213,13 @@ cuda_library(
 # its operand type is bf16 too.
 cuda_library(
     name = "attention_bf16",
-    srcs = ["attention_bf16.cu"],
+    # On the same terms as `:attention_flash`: a bf16 or fp8 build compiles the
+    # tile, and every other build links the stand-in.
+    srcs = select({
+        "//:bf16": ["attention_bf16.cu"],
+        "//:fp8": ["attention_bf16.cu"],
+        "//conditions:default": [],
+    }),
     hdrs = [
         "attention_bf16.h",
         "attention_dispatch.h",

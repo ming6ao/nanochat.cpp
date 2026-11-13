@@ -80,8 +80,9 @@ The device table carries no fp16 field, and the estimator has no fp16 mode.
 | Kaggle T4 | sm_75 | fp32 | fp32 | `--config=cuda --@rules_cuda//cuda:archs=sm_75` |
 | H100 | sm_90 | bf16 | fp32 | `--config=hopper` |
 
-The `h100` and `h200` targets are sm_90 with bf16 and the simulator.
-`--config=bf16` selects the bf16 compute type on any architecture.
+A simulated Hopper build adds the engine to the device build:
+`--config=hopper --config=sim`. `--config=bf16` selects the bf16 compute type on
+any architecture.
 
 ## 5. The storage rule
 
@@ -519,7 +520,7 @@ The first six checks need no GPU.
    through the fp8 section of `tests/data/numerics_golden_10l.bin`.
 5. The graph check, `//tests:fp8_graph_test`, which runs the layer set, the
    operand formats, and the fp32 state on the simulator.
-6. `tools/nanochat simulate --device h100 --suite all`, which validates every
+6. `tools/nanochat test --profile h100 --suite all`, which validates every
    call shape and the `cublasLt` symbols without a card.
 7. One H100 run of `--config=fp8` on the depth-24 shape, with the step time and
    the loss in [baselines.json](baselines.json).

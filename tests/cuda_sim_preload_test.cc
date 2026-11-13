@@ -10,8 +10,9 @@
 // invariants.
 //
 // This is what makes the API interposer real rather than a library that is
-// merely linked in. It is `manual`: `tools/nanochat simulate --suite api`
-// supplies `LD_PRELOAD`, `NANOCHAT_SIM_LOG`, and `NANOCHAT_SIM_PROFILE`. The
+// merely linked in. `//tests:cuda_sim_preload_test` is the runner: it supplies
+// `LD_PRELOAD`, `NANOCHAT_SIM_LOG`, and `NANOCHAT_SIM_PROFILE`, then execs this
+// binary. The
 // GEMM invariant in particular derives from the real `gemm.cu` decision (which
 // compute type and algorithm the device code chooses), not from a record the
 // test constructed itself.
@@ -446,9 +447,11 @@ int main() {
 
   const char* log_path = std::getenv("NANOCHAT_SIM_LOG");
   if (log_path == nullptr || *log_path == '\0') {
+    // The runner sets this variable. A bare run of this binary proves nothing,
+    // because the preload binds the calls only when the runner starts it.
     std::printf(
-        "cuda sim preload: NANOCHAT_SIM_LOG is unset; run this through "
-        "`tools/nanochat simulate --suite api`\n");
+        "cuda sim preload: NANOCHAT_SIM_LOG is unset; run this through the "
+        "runner, `//tests:cuda_sim_preload_test`\n");
     return 0;
   }
   // The mock truncates its log on the first record (the canary), so the log

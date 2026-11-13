@@ -17,12 +17,12 @@ two things:
       --mock FILE            check FILE as the mock
                              (default the built interposer)
       --negative-self-test   prove the gate fails when a symbol is missing,
-                             then exit. `tools/nanochat simulate --suite api`
+                             then exit. `//tools/cuda_sim:check_symbols_e2e_test`
                              runs it.
 
 With no binary arguments only the mock is checked. The mock's path is
 ``bazel-bin/tools/cuda_sim/libcuda_sim_interposer.so``. Build it first with
-``tools/nanochat simulate --suite api`` or ``tools/nanochat build``.
+``tools/nanochat test --suite api`` or ``tools/nanochat build``.
 
 Exit status: 0 when the gate passes, 1 when a required symbol is missing, and 2
 for a missing input.

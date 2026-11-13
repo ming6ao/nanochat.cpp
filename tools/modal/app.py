@@ -36,10 +36,10 @@ artifact: a Modal Volume cannot reach an image build, so each container builds
 once against the cache Volume (see :func:`_ensure_build`).
 
 Both legs link the native ring, which is the one collective, and the chain runs
-``world_size=1`` so the ring reduces to a no-op. No leg builds a simulator: the
-``h100`` entry of ``.bazelrc`` selects the simulator, so the hardware leg passes
-the builder's explicit flag triple and never a named config (section 3, trap 1,
-and section 7).
+``world_size=1`` so the ring reduces to a no-op. No leg builds a simulator: a
+named config could carry the engine or another leg's device values, so the
+hardware leg passes the builder's explicit flag triple and never a named config
+(section 3, trap 1, and section 7).
 
 The image installs the distribution of ``python/pyproject.toml`` with the
 ``hub`` extra at build time, so site-packages answers ``import nanochat_cpp``

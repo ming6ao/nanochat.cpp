@@ -4,7 +4,7 @@
 # per-family compute kernels live in backends/cuda/kernels/. See docs/build.md
 # and docs/kernels.md.
 
-load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
+load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library", "cc_test")
 load(
     "//:nanochat.bzl",
     "cuda_library",
@@ -163,6 +163,24 @@ cc_library(
     deps = [
         ":device",
         ":gemm",
+    ],
+)
+
+# Every device source of the backend, compiled and linked once. A `cc_binary`
+# and not a `filegroup`, because a filegroup takes a library's archive as a file
+# and leaves the dep graph alone; a link makes every archive an input, so every
+# `.cu` compiles. Nothing calls the binary: the build is the check.
+#
+# `tools/nanochat test --profile <name>` builds it with the architecture and the
+# precision of the card the run answers as, so the Hopper instantiation is
+# compiled on a host with no card.
+cc_binary(
+    name = "device_compile",
+    srcs = ["device_compile.cc"],
+    copts = nanochat_copts(),
+    deps = [
+        ":all_kernels",
+        "//backends/cuda/collective:native_sync",
     ],
 )
 

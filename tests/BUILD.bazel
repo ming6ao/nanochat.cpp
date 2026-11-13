@@ -5,6 +5,7 @@
 
 load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library", "cc_test")
 load("@rules_python//python:defs.bzl", "py_test")
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
 load("//:nanochat.bzl", "nanochat_copts", "precision_defines")
 
 package(default_visibility = ["//visibility:public"])
@@ -883,7 +884,7 @@ cc_test(
 # the mock's own entry points, asserting the named semantic invariants of
 # docs/simulator.md section 12.2. It is not a binding test -- nothing here
 # links the CUDA backend or exercises `LD_PRELOAD`; that is
-# //tests:cuda_sim_preload_test, run by `tools/nanochat simulate --suite api`.
+# //tests:cuda_sim_preload_test, which `//tests:sim_api` runs.
 # CPU only; no GPU, driver, or toolkit.
 #
 # It also pins the three runtime names the fused Muon build asks for
@@ -903,22 +904,29 @@ cc_test(
     tags = ["sim"],
 )
 
-# Simulator: the real interposition path. Unlike `cuda_sim_test`, this links
-# the *real* CUDA backend (device.cu + gemm.cu) and is run with
-# `LD_PRELOAD=libcuda_sim_interposer.so`, so the calls below are bound to the
-# mock by the dynamic linker. It drives `kernels::GetCaps`, the memory calls,
-# both GEMM paths, and `Synchronize`, then asserts the mock's JSON log. The
-# fused Muon launch surface is driven the same way: the three queries and one
-# cooperative launch go through `backends/cuda/device.cu`, with the kernel
-# symbol `//backends/cuda:launch_probe` supplies -- a host-only test cannot
-# declare a `__global__` function, so that test-only library is the one device
-# translation unit this target links. It is `manual` because it must only run
-# under `tools/nanochat simulate --suite api`, which supplies `LD_PRELOAD`,
-# `NANOCHAT_SIM_LOG`, and `NANOCHAT_SIM_PROFILE`.
-cc_test(
-    name = "cuda_sim_preload_test",
+# Simulator: the real interposition path. Unlike `cuda_sim_test`, the payload
+# links the *real* CUDA backend (device.cu + gemm.cu) and is run with
+# `LD_PRELOAD=libcuda_sim_interposer.so`, so its calls are bound to the mock by
+# the dynamic linker. It drives `kernels::GetCaps`, the memory calls, both GEMM
+# paths, and `Synchronize`, then asserts the mock's JSON log. The fused Muon
+# launch surface is driven the same way: the three queries and one cooperative
+# launch go through `backends/cuda/device.cu`, with the kernel symbol
+# `//backends/cuda:launch_probe` supplies -- a host-only test cannot declare a
+# `__global__` function, so that test-only library is the one device
+# translation unit this target links.
+#
+# The payload is a binary and not a test, because the preload has to happen at
+# process start. `//tests:cuda_sim_preload_test` is the test that sets
+# `LD_PRELOAD`, `NANOCHAT_SIM_LOG`, and `NANOCHAT_SIM_PROFILE`, then execs this
+# binary. It is `manual` because it links device code, so the CPU loop does not
+# compile it by accident; `//tests:sim_api` runs it.
+cc_binary(
+    name = "cuda_sim_preload_payload",
     srcs = ["cuda_sim_preload_test.cc"],
     copts = nanochat_copts(),
+    # The launch probe it links is `testonly`, and this binary exists only for
+    # the runner below, so it carries the same attribute.
+    testonly = True,
     defines = precision_defines(),
     deps = [
         "//backends/cuda:cuda",
@@ -928,6 +936,18 @@ cc_test(
         "//include/nanochat:nanochat",
         # To derive the expected caps from the profile name the run simulates.
         "//src:device_profile",
+    ],
+)
+
+# The runner of the interposition path. The profile defaults to `h100`, and
+# `--test_env=NANOCHAT_SIM_PROFILE=<name>` selects another declared device. See
+# the script for the three variables it supplies.
+sh_test(
+    name = "cuda_sim_preload_test",
+    srcs = ["cuda_sim_preload_test.sh"],
+    data = [
+        ":cuda_sim_preload_payload",
+        "//tools/cuda_sim:cuda_sim_interposer",
     ],
     size = "small",
     tags = [
@@ -974,7 +994,7 @@ cc_binary(
 
 # The numeric-trace replay gate (docs/testing.md): the trace must
 # equal its fixture section byte for byte on every backend and every precision,
-# and `tools/nanochat simulate --suite correctness` runs this same target under
+# and `tools/nanochat test --suite correctness` runs this same target under
 # `--config=sim` as the regression guard (section 2.2). A 10-layer run with
 # double GEMM over five steps is the slow part, so the target carries `manual`
 # and stays out of the default test loop; run it as
@@ -1044,11 +1064,84 @@ cc_test(
 
 # Aggregation point consumed by //:all_tests.
 #
-# `cuda_sim_preload_test` is deliberately absent: it is `manual`, because it only
-# means anything under `tools/nanochat simulate --suite api`, which supplies the
-# `LD_PRELOAD`, `NANOCHAT_SIM_LOG`, and `NANOCHAT_SIM_PROFILE` it needs. Every
-# other simulator target above is here, including the two the fused Muon legs
-# extend (`cuda_sim_test` for the mock, `kernel_emu_test` for the emulator).
+# The simulator suites. Each is `manual`, so a wildcard run does not pull in
+# device code or a profile; a label selects it by name. `//tests:sim_api` is the
+# interposition path: the in-process mock, the preload runner, and the symbol
+# gate end to end. The rest name the targets `tools/nanochat test --profile` ran as
+# suites, so the membership is data and no command holds a target list.
+#
+# A suite member that is itself `manual` still runs when the suite is named, so
+# `tools/nanochat test //tests:sim_api` is the one command a simulator check
+# needs.
+test_suite(
+    name = "sim_api",
+    tests = [
+        ":cuda_sim_preload_test",
+        ":cuda_sim_test",
+        "//tools/cuda_sim:check_symbols_e2e_test",
+    ],
+    tags = ["manual"],
+)
+
+test_suite(
+    name = "sim_correctness",
+    tests = [
+        ":numerics_trace_test",
+        ":oracle_test",
+        ":sim_numerics_test",
+        ":train_parity_test",
+    ],
+    tags = ["manual"],
+)
+
+test_suite(
+    name = "sim_fp8",
+    tests = [
+        ":device_profile_test",
+        ":fp8_gemm_test",
+        ":fp8_graph_test",
+        ":fp8_rounding_test",
+    ],
+    tags = ["manual"],
+)
+
+test_suite(
+    name = "sim_kernel",
+    tests = [":kernel_emu_test"],
+    tags = ["manual"],
+)
+
+test_suite(
+    name = "sim_gemm",
+    tests = ["//tools/cuda_sim/emu:gemm_emu_test"],
+    tags = ["manual"],
+)
+
+test_suite(
+    name = "sim_profile",
+    tests = [":device_profile_test"],
+    tags = ["manual"],
+)
+
+# Every simulator suite. It nests the six above, so one label covers the
+# simulator and a new suite joins by one line.
+test_suite(
+    name = "sim_all",
+    tests = [
+        ":sim_api",
+        ":sim_correctness",
+        ":sim_fp8",
+        ":sim_gemm",
+        ":sim_kernel",
+        ":sim_profile",
+    ],
+    tags = ["manual"],
+)
+
+# `cuda_sim_preload_test` is deliberately absent: it is `manual`, because it
+# links device code and answers as a declared device. `//tests:sim_api` runs it.
+# Every other simulator target above is here, including the two the fused Muon
+# legs extend (`cuda_sim_test` for the mock, `kernel_emu_test` for the emulator).
 test_suite(name = "all", tests = [
     ":oracle_test",
     ":oracle_cuda_test",

@@ -25,8 +25,8 @@ it instead of downloading.
 
 The generated BUILD states `includes = ["include"]`, which Bazel turns into
 `-isystem` for a dependent, so CUTLASS's own warnings do not reach a consumer's
-warning policy. That matters: the tree's `--config=sim-gate` builds with
-`-Werror`, and the headers emit about fifteen thousand warnings.
+warning policy. That matters: every build of the tree turns a warning into an
+error, and the headers emit about fifteen thousand warnings.
 """
 
 # The pinned CUTLASS. `docs/kernels.md` Part 3 section 4 names this commit as the

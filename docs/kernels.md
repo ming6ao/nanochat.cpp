@@ -2206,7 +2206,7 @@ cover both paths: a tiny shape whose row width is 4 or 8 takes the packed loop,
 and a shape whose width is odd takes the scalar one. The CPU suite is unchanged,
 because the CPU backend has one loop and that loop is the reference.
 
-The simulator leg ran and passed. `tools/nanochat simulate --device h100`
+The simulator leg ran and passed. `tools/nanochat test --profile h100`
 compiles the same `.cu` sources with the host compiler, and it runs each block as
 a set of fibers. Three tests therefore compare every packed path with the CPU
 reference: `//tests:oracle_test`, `//tests:train_parity_test`, and
@@ -2295,7 +2295,7 @@ and the Model FLOPs share. A `base` row enters [baselines.json](baselines.json)
 only when the two runs agree on a direction.
 
 The correctness gate ran here, and it needs no card. `//backends/cpu:kernels_test`
-compares the two paths. `tools/nanochat simulate --device h100` runs the fused
+compares the two paths. `tools/nanochat test --profile h100` runs the fused
 classifier through the emulator, because the declared `h100` mask carries
 `override_classifier`, so `//tests:train_parity_test` and
 `//tests:numerics_trace_test` compare the hand-off with the CPU reference and

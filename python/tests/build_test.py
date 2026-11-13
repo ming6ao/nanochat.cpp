@@ -284,12 +284,79 @@ class BuildCommandTest(unittest.TestCase):
         self.assertIn("--config=cuda", command)
         self.assertIn("--define=precision=bf16", command)
         self.assertIn("--@rules_cuda//cuda:archs=sm_90", command)
-        for forbidden in ("--config=hopper", "--config=h100"):
+        for forbidden in ("--config=hopper", "--config=sim"):
             self.assertNotIn(forbidden, command)
         self.assertEqual(
             [part for part in command if part.startswith("--config=")],
             ["--config=cuda"],
             f"the helper named a config of .bazelrc: {command}")
+
+
+class TestCommandTest(unittest.TestCase):
+    """The selection flags of ``test``: a device profile, or a named suite."""
+
+    def test_no_argument_runs_everything(self) -> None:
+        from nanochat_cpp import cli
+
+        argv = cli._test_argv([])
+        self.assertEqual(argv[:2], ["test", "//..."])
+        self.assertIn("--test_tag_filters=-gpu", argv)
+
+    def test_profile_selects_the_engine_and_the_variable(self) -> None:
+        from nanochat_cpp import cli
+
+        argv = cli._test_argv(["--profile=h100"])
+        self.assertIn("//tests:sim_all", argv)
+        self.assertIn("--config=sim", argv)
+        self.assertIn("--test_env=NANOCHAT_SIM_PROFILE=h100", argv)
+
+    def test_suite_selects_its_target(self) -> None:
+        from nanochat_cpp import cli
+
+        argv = cli._test_argv(["--suite=correctness"])
+        self.assertIn("//tests:sim_correctness", argv)
+        self.assertIn("--config=sim", argv)
+
+    def test_profile_keeps_an_explicit_target(self) -> None:
+        from nanochat_cpp import cli
+
+        argv = cli._test_argv(["--profile", "t4", "//tests:sim_api"])
+        self.assertIn("//tests:sim_api", argv)
+        self.assertNotIn("//tests:sim_all", argv)
+        self.assertIn("--test_env=NANOCHAT_SIM_PROFILE=t4", argv)
+
+    def test_unknown_device_is_a_failure(self) -> None:
+        from nanochat_cpp import cli
+
+        with self.assertRaises(cli.Failure):
+            cli._test_argv(["--profile=nope"])
+
+    def test_profile_and_gpu_is_a_failure(self) -> None:
+        from nanochat_cpp import cli
+
+        with self.assertRaises(cli.Failure):
+            cli._test_argv(["--gpu", "--profile=h100"])
+
+    def test_profile_and_cuda_backend_is_a_failure(self) -> None:
+        from nanochat_cpp import cli
+
+        with self.assertRaises(cli.Failure):
+            cli._test_argv(["--profile=h100", "--config=cuda"])
+
+    def test_no_compile_skips_the_device_step(self) -> None:
+        from nanochat_cpp import cli
+
+        self.assertIsNone(cli._device_compile_argv(
+            ["--profile=h100", "--no-compile"]))
+        argv = cli._test_argv(["--profile=h100", "--no-compile"])
+        self.assertNotIn("--no-compile", argv)
+
+    def test_profile_keeps_another_config_and_adds_the_engine(self) -> None:
+        from nanochat_cpp import cli
+
+        argv = cli._test_argv(["--profile=h100", "--config=bf16"])
+        self.assertIn("--config=bf16", argv)
+        self.assertEqual(argv.count("--config=sim"), 1)
 
 
 class BazelCacheCommandTest(unittest.TestCase):
@@ -416,16 +483,14 @@ class CommandLineCacheTest(unittest.TestCase):
 
 
 class BazelConfigTest(unittest.TestCase):
-    """Row 1: the ``hopper`` config, pinned beside the ``h100`` simulator.
+    """The device stanza, and the rule that composes a simulated build.
 
-    ``--config=h100`` is the simulator profile of ``.bazelrc``: it sets
-    ``--define=simulator=1``, which compiles in the capability override.
     ``--config=hopper`` is the hand-run build for a real Hopper card, so it must
-    not turn the simulator on (``docs/post-training.md`` section 3 trap 1, P7,
-    and section 7). The native ring is the one collective, so ``h100`` restates
-    it and ``hopper`` inherits it.
-    The two stanzas are read in one class, so the pair cannot drift apart
-    without a red test.
+    not turn the simulator on (``docs/post-training.md`` section 3 trap 1).
+    ``--config=sim`` selects the reference engine and nothing else, so the two
+    names compose into the simulated device build (``docs/build.md``, the build
+    configurations). No stanza selects a collective: the native ring is the one
+    implementation and it is the default.
     """
 
     @classmethod
@@ -448,11 +513,14 @@ class BazelConfigTest(unittest.TestCase):
         self.assertIn("--@rules_cuda//cuda:archs=sm_90", flags)
         self.assertIn("--define=precision=bf16", flags)
         self.assertIn("--define=backend=cuda", flags)
-        for forbidden in ("--define=simulator=1", "--define=collective=native"):
+        for forbidden in ("--define=simulator=1", "--define=simulator_gate=1"):
             self.assertNotIn(
                 forbidden, flags,
-                f"the hopper stanza set {forbidden}, which is the {forbidden} "
-                f"of the h100 simulator profile (section 3, trap 1): {flags}")
+                f"the hopper stanza set {forbidden}, which belongs to the "
+                f"simulator and not to a device build: {flags}")
+        self.assertFalse(
+            [flag for flag in flags if flag.startswith("--define=collective")],
+            f"the hopper stanza selects a collective: {flags}")
         for flag in flags:
             self.assertNotIn(
                 "simulator", flag,
@@ -466,18 +534,27 @@ class BazelConfigTest(unittest.TestCase):
         self.assertIn("build --jobs=4", self.text)
         self.assertIn("build --local_resources=memory=3072", self.text)
 
-    def test_the_h100_stanza_is_still_the_simulator(self) -> None:
-        """The neighbour: the same arch and precision, plus both simulator
-        defines, so an edit that turns one into the other is visible."""
-        flags = self.flags("build:h100")
-        self.assertIn("--@rules_cuda//cuda:archs=sm_90", flags)
-        self.assertIn("--define=precision=bf16", flags)
-        self.assertIn("--define=backend=cuda", flags)
-        self.assertIn("--define=simulator=1", flags)
-        self.assertIn("--define=collective=native", flags)
-        self.assertNotEqual(sorted(self.flags("build:hopper")), sorted(flags),
-                            "the hopper and h100 stanzas are the same stanza, "
-                            "so one of the two names is the other")
+    def test_the_simulator_stanza_names_the_engine_and_no_device(self) -> None:
+        """One define, so the stanza composes with any device configuration."""
+        self.assertEqual(["--define=simulator=1"], self.flags("build:sim"))
+        composed = sorted(self.flags("build:hopper") + self.flags("build:sim"))
+        self.assertIn("--define=simulator=1", composed)
+        self.assertIn("--define=backend=cuda", composed)
+        self.assertIn("--@rules_cuda//cuda:archs=sm_90", composed)
+
+    def test_no_stanza_selects_a_collective_or_a_profile(self) -> None:
+        """The ring is the default, and a profile is a run-time name."""
+        self.assertIn("build --define=collective=native", self.text)
+        for name, flags in self.stanzas.items():
+            for flag in flags:
+                self.assertNotIn("collective", flag, f"{name} selects: {flag}")
+                self.assertNotIn("PROFILE", flag, f"{name} sets: {flag}")
+
+    def test_the_alias_names_stay_gone(self) -> None:
+        """`h100`, `h200`, and `native` named builds that another name already
+        named, so the composition replaced them."""
+        for name in ("build:h100", "build:h200", "build:native"):
+            self.assertNotIn(name, self.stanzas)
 
 class SearchOrderTest(unittest.TestCase):
     def _clear(self, *names: str) -> dict:

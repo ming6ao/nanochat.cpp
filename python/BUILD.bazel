@@ -70,6 +70,12 @@ py_test(
     name = "build_test",
     srcs = ["tests/build_test.py"],
     deps = [":nanochat_cpp"],
+    # `test --profile` validates a name against the device declarations, so the
+    # test reads the same files the command does.
+    data = [
+        "//backends/cpu:caps_json",
+        "//backends/cuda:caps_json",
+    ],
     size = "small",
 )
 
@@ -343,7 +349,8 @@ py_test(
 
 # T0: the symbol gate for the S0 API interposer. Hermetic and CPU-only: fake
 # `nm` and `readelf` on PATH feed it canned output. The real mock is checked by
-# `tools/nanochat simulate --suite api`. See docs/simulator.md.
+# `//tools/cuda_sim:check_symbols_e2e_test`, whose suite is `//tests:sim_api`.
+# See docs/simulator.md.
 py_test(
     name = "cuda_sim_symbols_test",
     srcs = ["tests/cuda_sim_symbols_test.py"],

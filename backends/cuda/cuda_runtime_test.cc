@@ -177,7 +177,7 @@ bool RunCase(GemmMode mode, bool ta, bool tb, int m, int n, int k, int batch,
 // asks the device, and checks the three quantities the design sizes the
 // persistent grid from: the active blocks per SM, the SM count, and their
 // product.
-void CheckLaunchSurface(const Caps& caps) {
+void CheckLaunchSurface() {
   using nanochat::cuda_backend::ActiveBlocksPerMultiprocessor;
   using nanochat::cuda_backend::ClassifyCooperativeLaunch;
   using nanochat::cuda_backend::CooperativeLaunchOutcome;
@@ -346,7 +346,7 @@ int main() {
 
   // The launch surface the fused Muon driver is built on. It reports its own
   // failures and counts them, so the GEMM cases above keep their exit code.
-  CheckLaunchSurface(caps);
+  CheckLaunchSurface();
   if (g_failures != 0) {
     std::fprintf(stderr, "cuda_runtime: %d launch-surface check(s) failed\n",
                  g_failures);

@@ -663,11 +663,11 @@ class ImageTest(unittest.TestCase):
         self.assertIn(".bazelrc.local", self.app.IMAGE_IGNORE)
 
     def test_no_chain_leg_passes_a_named_simulator_config(self) -> None:
-        # `h100` in .bazelrc is the simulator, and it also sets the native
-        # collective, so the hardware leg takes the explicit triple instead
+        # A named config would inherit the simulator or the device values of
+        # another leg, so the hardware leg takes the explicit triple instead
         # (section 3, trap 1).
         text = _source()
-        for forbidden in ("config=h100", "define=simulator"):
+        for forbidden in ("config=hopper", "config=h100", "define=simulator"):
             self.assertNotIn(forbidden, text)
 
     def test_no_chain_leg_builds_an_fp8_training_path(self) -> None:

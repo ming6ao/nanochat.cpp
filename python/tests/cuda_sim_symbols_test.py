@@ -3,8 +3,8 @@
 The gate shells out to `nm` and `readelf`, so the suite puts fake versions of
 both on `PATH` and feeds them canned output. No compiler, no toolkit, and no
 mock library are involved. The real end-to-end proof is
-`tools/nanochat simulate --suite api`, which builds the mock and runs the gate
-three ways, including the negative self-test.
+`//tools/cuda_sim:check_symbols_e2e_test`, which builds the mock and runs the
+gate three ways, including the negative self-test.
 
 See docs/simulator.md and docs/testing.md.
 """

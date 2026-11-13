@@ -97,9 +97,14 @@ __device__ __forceinline__ void StoreWarpTile(
   };
 
   const int lane = static_cast<int>(threadIdx.x) % 32;
-  for (int i = 0; i < kFragM; ++i) {
+  // The counts are template parameters, so they are sized for an array bound.
+  // The tile is a handful of fragments, and the rest of this body is int
+  // arithmetic, so the loop bounds are the int values.
+  const int frag_rows = static_cast<int>(kFragM);
+  const int frag_pairs = static_cast<int>(kFragN);
+  for (int i = 0; i < frag_rows; ++i) {
     const int fragment_row = warp_rows + i * kMicroM;
-    for (int pair = 0; pair < kFragN; pair += 2) {
+    for (int pair = 0; pair < frag_pairs; pair += 2) {
       // The accumulator lands in the exchange tile, with alpha, beta, the
       // bounds and the store type applied there: one rounding, whatever beta
       // asks for.

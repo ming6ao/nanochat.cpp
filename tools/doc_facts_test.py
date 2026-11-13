@@ -40,6 +40,10 @@ CHECKED_FILES = (
 #: The log heading, before which a calendar date is a failure.
 LOG_HEADING = "## Logs"
 
+#: A heading of the design text that another document links to, so its wording
+#: is stable. A prose case adds one sentence after it.
+PROSE_ANCHOR = "## Layers and the one seam\n"
+
 
 def _runfiles_root() -> Path:
     """The root as this test sees it: runfiles first, the source tree second."""
@@ -119,17 +123,28 @@ class DocFactsTest(unittest.TestCase):
     def test_changed_configuration_value_fails(self) -> None:
         with tempfile.TemporaryDirectory() as scratch:
             root = self.copy_tree(Path(scratch))
-            self.mutate(root, "| `--config=hopper` | `sm_90` | bf16 | cuda |",
-                        "| `--config=hopper` | `sm_90` | bf16 | cpu |")
-            self.check_fails(root, "row `--config=hopper` states Backend cpu")
+            self.mutate(root,
+                        "| `--config=hopper` | `sm_90` | `bf16` | `cuda` |",
+                        "| `--config=hopper` | `sm_90` | `bf16` | `cpu` |")
+            self.check_fails(
+                root, "row `--config=hopper` states `cpu`, the configuration "
+                      "sets `cuda`")
 
-    def test_changed_precision_of_the_default_build_fails(self) -> None:
+    def test_inherited_value_in_place_of_a_dash_fails(self) -> None:
         with tempfile.TemporaryDirectory() as scratch:
             root = self.copy_tree(Path(scratch))
-            self.mutate(root, "| _the default build_ | `sm_75` | fp32 |",
-                        "| _the default build_ | `sm_75` | bf16 |")
-            self.check_fails(root,
-                             "row _the default build_ states Precision bf16")
+            self.mutate(root, "| `--config=cuda` | — |",
+                        "| `--config=cuda` | `sm_75` |")
+            self.check_fails(
+                root, "row `--config=cuda` states `sm_75` for Architecture; "
+                      "the configuration sets none")
+
+    def test_row_for_an_undeclared_configuration_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as scratch:
+            root = self.copy_tree(Path(scratch))
+            self.mutate(root, "| `--config=hopper` |",
+                        "| `--config=h100x` |")
+            self.check_fails(root, "does not declare")
 
     def test_missing_configuration_row_fails(self) -> None:
         with tempfile.TemporaryDirectory() as scratch:
@@ -170,31 +185,43 @@ class DocFactsTest(unittest.TestCase):
     def test_retired_label_fails(self) -> None:
         with tempfile.TemporaryDirectory() as scratch:
             root = self.copy_tree(Path(scratch))
-            self.mutate(root, "The Python surface is one distribution",
-                        "The Z2 package is one distribution")
+            self.mutate(root, PROSE_ANCHOR,
+                        PROSE_ANCHOR + "\nThe Z2 package holds every import.\n")
             self.check_fails(root, "`Z2` is a retired zone label")
 
     def test_date_before_the_log_fails(self) -> None:
         with tempfile.TemporaryDirectory() as scratch:
             root = self.copy_tree(Path(scratch))
-            self.mutate(root, "The workspace produces four things.",
-                        "The workspace produces four things as of 2026-01-01.")
+            self.mutate(root, PROSE_ANCHOR,
+                        PROSE_ANCHOR + "\nMeasured on 2026-01-01.\n")
             self.check_fails(root, "a calendar date before the log")
 
     def test_file_position_fails(self) -> None:
         with tempfile.TemporaryDirectory() as scratch:
             root = self.copy_tree(Path(scratch))
-            self.mutate(root, "The workspace produces four things.",
-                        "The workspace produces four things; see "
-                        "checkpoint.py:12.")
+            self.mutate(root, PROSE_ANCHOR,
+                        PROSE_ANCHOR + "\nThe reader is in checkpoint.py:12.\n")
             self.check_fails(root, "a file position")
 
     def test_line_number_fails(self) -> None:
         with tempfile.TemporaryDirectory() as scratch:
             root = self.copy_tree(Path(scratch))
-            self.mutate(root, "The workspace produces four things.",
-                        "The workspace produces four things; see line 39.")
+            self.mutate(root, PROSE_ANCHOR,
+                        PROSE_ANCHOR + "\nThe reader starts at line 39.\n")
             self.check_fails(root, "a line number")
+
+    def test_log_out_of_order_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as scratch:
+            root = self.copy_tree(Path(scratch))
+            doc = root / "docs/build.md"
+            text = doc.read_text(encoding="utf-8")
+            head, _, log = text.partition("## Logs")
+            entries = log.split("\n### ")
+            self.assertGreaterEqual(len(entries), 3, "the log holds entries")
+            entries[1], entries[2] = entries[2], entries[1]
+            doc.write_text(head + "## Logs" + "\n### ".join(entries),
+                           encoding="utf-8")
+            self.check_fails(root, "the log holds its entries newest first")
 
     def test_date_inside_the_log_passes(self) -> None:
         with tempfile.TemporaryDirectory() as scratch:
@@ -213,9 +240,24 @@ class DocFactsTest(unittest.TestCase):
     def test_broken_internal_anchor_fails(self) -> None:
         with tempfile.TemporaryDirectory() as scratch:
             root = self.copy_tree(Path(scratch))
-            self.mutate(root, "(#one-device-compile-at-a-time)",
-                        "(#one-device-compile)")
-            self.check_fails(root, "has no heading for #one-device-compile")
+            self.mutate(root,
+                        "The host budget that these bounds protect is in "
+                        "[sandbox.md](sandbox.md).",
+                        "The host budget that these bounds protect is in "
+                        "[sandbox.md](sandbox.md); see [the bounds](#bounds).")
+            self.check_fails(root, "has no heading for #bounds")
+
+    def test_internal_anchor_passes(self) -> None:
+        with tempfile.TemporaryDirectory() as scratch:
+            root = self.copy_tree(Path(scratch))
+            self.mutate(root,
+                        "The host budget that these bounds protect is in "
+                        "[sandbox.md](sandbox.md).",
+                        "The host budget that these bounds protect is in "
+                        "[sandbox.md](sandbox.md); see [the "
+                        "bounds](#resource-bounds).")
+            result = self.run_tool(root, "--check")
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_broken_document_anchor_fails(self) -> None:
         with tempfile.TemporaryDirectory() as scratch:
@@ -230,8 +272,9 @@ class DocFactsTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as scratch:
             root = self.copy_tree(Path(scratch))
             committed = (self.root / "docs/build.md").read_text(encoding="utf-8")
-            self.mutate(root, "| `--config=hopper` | `sm_90` | bf16 | cuda |",
-                        "| `--config=hopper` | `sm_75` | fp32 | cpu |")
+            self.mutate(root,
+                        "| `--config=hopper` | `sm_90` | `bf16` | `cuda` |",
+                        "| `--config=hopper` | `sm_75` | `fp32` | `cpu` |")
 
             repaired = self.run_tool(root, "--write")
             self.assertEqual(repaired.returncode, 0, repaired.stderr)

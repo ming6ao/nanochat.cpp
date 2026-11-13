@@ -4,29 +4,27 @@ One Bazel workspace builds every host and every precision. `tools/nanochat`
 selects the configuration, applies the sandbox, and runs the command.
 
 ```bash
-tools/nanochat build                      # the default fp32 build
-tools/nanochat build --config=bf16        # the bf16 compute type
-tools/nanochat build --config=hopper      # a real Hopper build
-tools/nanochat test                       # every non-GPU test
-tools/nanochat lint                       # the style gate
+tools/nanochat build                     # every target: CPU, fp32, sm_75
+tools/nanochat build --config=hopper     # every target: Hopper, bf16
+tools/nanochat test                      # every non-GPU test
+tools/nanochat lint                      # the style gate
 ```
 
 ## What the build produces
 
-The workspace produces four things.
+`tools/nanochat build` builds every target in the workspace. The artefacts a
+person handles are few.
 
-- **One stage binary.** It is the single command binary of the tree, and it
-  holds nine subcommands. One dispatch path guards every subcommand with the
-  sandbox check, so a handler never repeats that check.
-- **Two backends.** The CPU backend is the reference and the correctness
-  baseline. The CUDA backend is the tuned path. Both implement the same seam.
-- **One Python distribution.** It reaches the binary through a small C ABI and
-  a shared library, and it adds no third-party package to the base install.
-- **One test tree.** The CPU loop runs under a sandbox profile, and the device
-  tiers run through a queue.
+- **The stage binary.** One command binary with nine subcommands. One dispatch
+  path guards each subcommand with the sandbox check, so a handler never
+  repeats that check.
+- **The shared library.** The same graph behind a small C ABI, which the Python
+  distribution loads. It is the only artefact another language links.
+- **The tests.** Every gate of the tree is a target, so one build compiles what
+  `tools/nanochat test` then runs.
 
-The subcommand table is the authority for the binary's surface. A new
-subcommand adds one row here and one handler function.
+The table below is the authority for the binary's surface. A new subcommand
+adds one row here and one handler function.
 
 <!-- BEGIN GENERATED: subcommands -->
 | Subcommand | Purpose |
@@ -106,42 +104,80 @@ frozen header are in
 
 ## Build configurations
 
-Architecture, precision, backend, collective, and simulator are build and link
-choices, not run-time switches. A named configuration sets one or more of them,
-and named configurations are additive: `--config=hopper --config=sim-gate` is
-one build.
+Architecture, precision, backend, and simulator are build and link choices, not
+run-time switches. The default build is the CPU backend at fp32, for the oldest
+supported architecture, with no simulator. The backends are libraries and not
+artefacts: the workflow compiles once and links either one.
 
-The table states the effective build of one named configuration, added to the
-default. The simulator column is prose, because it names an engine rather than
-a flag value. A script checks the other four columns against the tracked Bazel
-configuration, so a row cannot drift from the build.
+A named configuration sets one or more of the four values, and named
+configurations are additive, so `--config=cuda --config=bf16` is one build. The
+table states what each configuration sets, and a dash means that the
+configuration leaves the default value in place. A script generates the table
+from the tracked Bazel configuration, so no row drifts from the build.
 
 <!-- BEGIN GENERATED: build-configurations -->
-| Configuration | Architecture | Precision | Backend | Collective | Simulator |
-|---|---|---|---|---|---|
-| _the default build_ | `sm_75` | fp32 | cpu | native | off |
-| `--config=bf16` | `sm_75` | bf16 | cpu | native | off |
-| `--config=fp8` | `sm_75` | fp8 | cpu | native | off |
-| `--config=cuda` | `sm_75` | fp32 | cuda | native | off |
-| `--config=native` | `sm_75` | fp32 | cuda | native | off |
-| `--config=sim` | `sm_75` | fp32 | cpu | native | the reference engine |
-| `--config=sim-gate` | `sm_75` | fp32 | cpu | native | the reference engine, with the compile gate |
-| `--config=h100` | `sm_90` | bf16 | cuda | native | the H100 device profile |
-| `--config=h200` | `sm_90` | bf16 | cuda | native | the H200 device profile |
-| `--config=hopper` | `sm_90` | bf16 | cuda | native | off |
+| Configuration | Architecture | Precision | Backend | Simulator |
+|---|---|---|---|---|
+| _the default build_ | `sm_75` | `fp32` | `cpu` | off |
+| `--config=bf16` | — | `bf16` | — | off |
+| `--config=fp8` | — | `fp8` | — | off |
+| `--config=cuda` | — | — | `cuda` | off |
+| `--config=sim` | — | — | — | reference |
+| `--config=hopper` | `sm_90` | `bf16` | `cuda` | off |
 <!-- END GENERATED: build-configurations -->
 
-**A simulator profile is not a device build.** The H100 and H200
-configurations compile the capability override, and `GetCaps()` answers from
-the device profile table instead of from the card. A Hopper build with the
-simulator off compiles the real CUDA backend. A check that needs a card chooses
-that build. A report that is read without a card chooses a simulator profile.
+The simulator column says what answers for the card. `sim` compiles the
+capability override, so `GetCaps()` reads the device profile table named by
+`NANOCHAT_SIM_PROFILE` instead of reading the host. Every value is still
+computed by the reference loops, so the engine changes capabilities and never
+numerics.
 
-There is one collective. Both the simulator profile and the device build link
-it, so a one-device run reduces the collective to no operation.
+`sim` belongs to the reference backend alone: the override lives in that backend,
+and a CUDA build links the card instead, so `--config=cuda --config=sim` reaches
+no target and changes nothing. Device code runs under the emulator, which
+interposes the runtime.
 
-The default architecture is the oldest card the tree supports. A build for an
-older card is not a target, so a binary built here holds no code for one.
+A warning is an error in both compiler passes of every build, so no
+configuration selects strictness and the log holds no warning that a reader
+learns to skip. A target that compiles against the vendor headers states its
+own options, because those headers emit warnings the tree does not own.
+
+`cuda` and `hopper` differ in scope, and not in kind. `cuda` selects the
+backend alone, so the architecture and the precision stay at their defaults and
+the build serves the oldest card at fp32. `hopper` is a complete device build
+(the backend, `sm_90`, and bf16), and it is the choice for a check that needs a
+card.
+
+The commands a task usually wants are these.
+
+| Task | Command |
+|---|---|
+| the whole tree, to run the tests | `tools/nanochat build` |
+| a real Hopper card | `tools/nanochat build --config=hopper` |
+| a simulated device, with no card | `tools/nanochat test --profile h100` |
+| bf16 on an Ampere card | `tools/nanochat build --config=cuda --config=bf16 --@rules_cuda//cuda:archs=sm_80` |
+
+Two things about the table are easy to miss.
+
+- **A precision needs an architecture that has it.** `--config=bf16` alone
+  leaves the oldest architecture in place, and a bf16 build on a card without
+  bf16 fails at model creation, with the device name in the message.
+- **No configuration selects the collective or the warning level.** The native
+  ring is the one implementation and it is the default, and a warning is always
+  an error, so `--config=cuda` is the whole backend choice.
+
+The architecture is the oldest card the tree supports. An older card is not a
+target, so a binary built here holds no code for one.
+
+`tools/nanochat build` and `tools/nanochat test --profile` answer different
+questions. `build` compiles the targets you name, with the flags you pass, and
+stops. A profiled run starts from a device declaration: it reads the
+architecture and the precision of that device, compiles the device code for it,
+and then runs a suite under the profile the device names.
+`//backends/cuda:device_compile` carries the compile: it links the whole device
+backend, so every kernel is built for the declared card even on a host with no
+card. A bf16 device build reaches the hand GEMM's CUTLASS candidate, the
+heaviest object in the tree, so `--no-compile` runs the suites without it.
 
 ## Resource bounds
 
@@ -430,24 +466,38 @@ step.
 
 ## Logs
 
-A dated record of a real run. An entry states the command, what happened, and
-the rule it produced. A rule that an entry justifies appears in the section
-named at the end of the entry. This is a record and not a reference: it holds
-the measurements that no other file holds.
+A dated record of a real run, newest first.
 
-### 2026-11-08 — three device compiles, and the kernel stopped one
+### 2026-11-13 — the CUTLASS probe does not compile on this host
 
-**Command.** `tools/nanochat build --jobs=4` over the Hopper GEMM targets.
+**Command.** `tools/nanochat build --jobs=1 //dev/cutlass/...`, three times.
 
-**Observed.** Three device compiles ran at once and held 2.3 to 2.9 GiB each.
-The kernel ran the out-of-memory killer on one compile. The swap file was
-already full, so the host thrashed before it killed the process. An operator
-feels that thrash as a freeze.
+**Observed.** The one source `dev/cutlass/cutlass_probe.cu` holds thirteen
+Hopper mainloop instantiations. The first attempt ran beside the rest of the
+tree and spent 2,372 s in that action at 3.1 GiB, while the host sat at 78
+percent memory pressure with 233 MiB free. The second ran alone: 1,018 s of
+processor time in 3,100 s, 282,000 major page faults, and 1.5 TB read back from
+disk by one compiler process. The third lowered both compiler passes and ptxas
+to `-O1` and ran 1,743 s without leaving the front end. A profiled run of
+`//tests:sim_api` reached the bf16 GEMM candidate and held it for 829 s before
+it was stopped. No attempt finished, and the guard is the memory of the host,
+not the flags: the same work at full processor time is minutes.
+ An entry states the command and what
+happened. This is a record and not a reference: it holds the measurements that
+no other file holds.
 
-**Insight.** The default action count bounds the count and not the memory. One
-compile of a large template target is the unit that must fit.
+### 2026-11-12 — a stalled build is not a slow build
 
-**Rule.** [Resource bounds](#one-device-compile-at-a-time).
+**Command.** `tools/nanochat build --jobs=4` over two device targets, beside two
+editor processes.
+
+**Observed.** The two compiles held 3.5 GiB and the editors held 1.0 GiB, so the
+host of 7.8 GiB had 233 MiB free. One compiler process used 29.7 seconds of
+processor time in 1122 seconds of wall clock, with no error and no
+out-of-memory kill. A restart with one action took the memory pressure from 84
+percent to 3 percent and raised the available memory from 1.7 GiB to 5.2 GiB. A
+high stall share beside a low processor time means that the build waits on
+memory, so stop it and restart with one action.
 
 ### 2026-11-10 — the build cache on a rented volume
 
@@ -456,32 +506,16 @@ Turing leg inside a container.
 
 **Observed.** The build had 190 actions and read 133 disk cache hits. A warm
 volume took 19.1 seconds and the first read after the warm function took 101.9
-seconds. The same cache on a local disk read in 3.4 seconds. One package layer
-above the source tree cost 215 and 63 seconds of package installation for a
-profiler that a card job never runs.
+seconds, beside 3.4 seconds from a local disk, so the volume's latency per file
+is the cost. One package layer above the source tree cost 215 and 63 seconds of
+installation for a profiler that a card job never runs.
 
-**Insight.** The volume's latency per file is the cost, so a warm volume is
-cheap and a cold one is expensive. The first run of a leg pays the whole
-compile in a container with four cores, so one function with a long timeout
-pays it once.
+### 2026-11-08 — three device compiles, and the kernel stopped one
 
-**Rule.** [A container](#a-container).
+**Command.** `tools/nanochat build --jobs=4` over the Hopper GEMM targets.
 
-### 2026-11-12 — a stalled build is not a slow build
-
-**Command.** `tools/nanochat build --jobs=4` over two device targets, beside two
-editor processes.
-
-**Observed.** The two compiles held 3.5 GiB and the editors held 1.0 GiB, so the
-host of 7.8 GiB had 233 MiB free. The build computed almost nothing: one
-compiler process used 29.7 seconds of processor time in 1122 seconds of wall
-clock. There was no error and no out-of-memory kill. A restart with one action
-took the memory pressure from 84 percent to 3 percent and raised the available
-memory from 1.7 GiB to 5.2 GiB.
-
-**Insight.** The memory pressure file reports the share of time that a task
-stalled on memory. Field 14 of the process statistics reports processor time. A
-high stall share beside a low processor time identifies a build that waits on
-memory.
-
-**Rule.** [One device compile at a time](#one-device-compile-at-a-time).
+**Observed.** Three device compiles ran at once and held 2.3 to 2.9 GiB each.
+The kernel ran the out-of-memory killer on one compile. The swap file was
+already full, so the host thrashed first. The default action count bounds the
+count and not the memory, so one compile of a large template target is the unit
+that must fit.

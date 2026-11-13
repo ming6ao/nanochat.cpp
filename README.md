@@ -98,8 +98,8 @@ tools/nanochat test --gpu //backends/cuda/kernels:rms_norm_gpu_test
 # Style gate.
 tools/nanochat lint
 
-# H100 and H200 behaviour without a Hopper card. CPU only.
-tools/nanochat simulate --device h100
+# H100 behaviour without a Hopper card. CPU only.
+tools/nanochat test --profile h100
 ```
 
 `T0 CPU` runs the reference kernels, the workflow, and the oracle checks. It

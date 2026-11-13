@@ -128,7 +128,7 @@ elements one at a time.
 
 | Gate | Command |
 |---|---|
-| Off device: the layout, the bounds, the pipeline, the epilogue | `tools/nanochat simulate --device h100 --suite gemm` |
+| Off device: the layout, the bounds, the pipeline, the epilogue | `tools/nanochat test --profile h100 --suite gemm` |
 | The shape table, the verdict, the switch, the seam's defaults | `tools/nanochat test //backends/cuda/gemm:dispatch_test` |
 | Device: each mainloop against cuBLAS on every contract case | `tools/nanochat test --gpu --config=hopper --config=bf16 //backends/cuda/gemm:gemm_gpu_test` |
 | Rate: cuBLAS, the Hopper mainloop, and the tile over the closed list | `tools/nanochat bench -- bazel-bin/backends/cuda/gemm/gemm_benchmark` |
@@ -661,7 +661,7 @@ tree that names an architecture, and `rules_cuda` takes it as a replacement for
 the command-line value rather than an addition. The default build of `//...`
 therefore stays at `sm_75` and compiles no Hopper code. The target also states
 its own warning options, because the CUTLASS headers emit thousands of warnings
-and `--config=sim-gate` builds with `-Werror`.
+and the tree builds with `-Werror`.
 
 **What is still not here.**
 - A rate. `dev/cutlass` and this file measure nothing; `gemm_benchmark` does.

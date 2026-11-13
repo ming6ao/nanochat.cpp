@@ -29,9 +29,9 @@
 // with its phase fallback.
 //
 // This is not a binding test: nothing here links the CUDA backend or exercises
-// `LD_PRELOAD`. That path is `//tests:cuda_sim_preload_test`, run by
-// `tools/nanochat simulate --suite api`, and it is what derives the tensor-core
-// compute-type invariant from the real `gemm.cu` decision.
+// `LD_PRELOAD`. That path is `//tests:cuda_sim_preload_test`, which
+// `//tests:sim_api` runs, and it is what derives the tensor-core compute-type
+// invariant from the real `gemm.cu` decision.
 
 #include <cstdarg>
 #include <cstddef>

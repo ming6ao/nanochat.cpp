@@ -5,8 +5,9 @@
 // S0 test uses (docs/simulator.md sections 5.1 and 5.2).
 //
 // The interposer is a shared library that exports the CUDA runtime, the cuBLAS
-// entry points, and the fat-binary hooks the loader calls. `tools/nanochat
-// simulate --suite api` preloads it with `LD_PRELOAD`, so the calls from
+// entry points, and the fat-binary hooks the loader calls.
+// `//tests:cuda_sim_preload_test` preloads it with `LD_PRELOAD`, so the calls
+// from
 // `backends/cuda/device.cu`, `backends/cuda/gemm.cu`, and every
 // compiler-generated launch stub bind to it. It never calls the real runtime.
 //

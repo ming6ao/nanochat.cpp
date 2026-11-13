@@ -6,8 +6,7 @@ One :class:`DistributedPlan` holds the run. :func:`command_for` builds the
 job, waits, and returns one :class:`RankResult` per rank.
 
 The gradient sync is the native collective
-(``backends/cuda/collective/native_sync.cu``, selected with
-``--config=native``). See ``docs/distributed.md`` and
+(``backends/cuda/collective/native_sync.cu``, on every CUDA build). See
 ``docs/distributed.md``.
 """
 

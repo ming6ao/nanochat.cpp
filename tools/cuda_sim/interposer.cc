@@ -1,7 +1,7 @@
 // The API interposer (docs/simulator.md section 5).
 //
 // A shared library that exports the CUDA runtime, the cuBLAS entry points, and
-// the fat-binary hooks. `tools/nanochat simulate --suite api` preloads it with
+// the fat-binary hooks. `//tests:cuda_sim_preload_test` preloads it with
 // `LD_PRELOAD`, so `backends/cuda/device.cu`, `backends/cuda/gemm.cu`, and the
 // compiler-generated launch stubs bind to it instead of to the toolkit. Host
 // memory backs `cudaMalloc`; the API calls are recorded and validated against

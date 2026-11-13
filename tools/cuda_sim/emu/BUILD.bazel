@@ -40,6 +40,9 @@ cc_library(
         # windowed forward takes the cuBLAS path through the stand-in.
         "//backends/cuda/kernels:attention_bf16.h",
         "//backends/cuda/kernels:attention_dispatch.h",
+        # `attention.cu` includes the flash tile's declarations, and the sandbox
+        # shows this action only the inputs named here.
+        "//backends/cuda/kernels:attention_flash.h",
         "//backends/cuda/kernels:device_utils.cuh",
         "//backends/cuda/kernels:mma_ops.cuh",
         "//backends/cuda/kernels:muon_fused.h",
@@ -187,12 +190,14 @@ cc_library(
         ":cuda_headers",
         # The scheduler and the runtime the launched kernel body runs on.
         ":emu_runtime",
-        # `attention.cu` asks the bf16 tile whether it covers the shape and then
-        # launches it. The emulator has no tensor-core primitive, so it links
-        # the stand-in, which answers false and launches nothing
-        # (docs/simulator.md section 9.2). The stand-in is compiled at the
-        # workspace precision, which is what this library compiles at too.
+        # `attention.cu` asks the bf16 tile and the flash family whether they
+        # cover the shape and then launches one. The emulator has no
+        # tensor-core primitive, so it links both stand-ins, which answer false
+        # and launch nothing (docs/simulator.md section 9.2). They are compiled
+        # at the workspace precision, which is what this library compiles at
+        # too.
         "//backends/cuda/kernels:attention_bf16_absent",
+        "//backends/cuda/kernels:attention_flash_absent",
         "//include/nanochat:nanochat",
     ],
 )

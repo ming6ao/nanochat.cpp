@@ -100,7 +100,7 @@ document is not a reference. Name the subject, and link for depth only.
 
 A dated record of a real run is the exception, and it has one home: the `Logs`
 section at the end of the document that owns the subject. An entry states the
-command, what happened, and the rule the run produced.
+command and what happened, and nothing else.
 
 ## How to add a document, and to retire one
 

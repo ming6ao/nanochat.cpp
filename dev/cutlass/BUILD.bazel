@@ -16,10 +16,10 @@
 #
 # **The vendor options are this directory's own, and not `nanochat_cuda_copts`.**
 # The CUTLASS headers emit thousands of warnings (an implicit `this` capture, a
-# constexpr host call from a device function), and the tree's `--config=sim-gate`
-# turns warnings into errors. The vendor translation unit therefore builds with
-# the optimisation flags only, so the gate keeps its meaning for the tree's own
-# source. `third_party/cutlass.bzl` states `includes = ["include"]`, which is
+# constexpr host call from a device function), and every build of the tree turns
+# a warning into an error. The vendor translation unit therefore builds with the
+# optimisation flags only, so the strict setting keeps its meaning for the
+# tree's own source. `third_party/cutlass.bzl` states `includes = ["include"]`, which is
 # `-isystem` for this target, so the header warnings do not reach it either.
 
 load("//:nanochat.bzl", "cuda_binary", "cuda_library")
@@ -39,10 +39,21 @@ cuda_library(
     srcs = ["cutlass_probe.cu"],
     hdrs = ["cutlass_probe.h"],
     archs = CUDA_HOPPER_ARCHS,
+    # The probe launches nothing. It reports `sizeof(SharedStorage)`, the stage
+    # count, the block size, and one function address, and every one of those is
+    # a compile-time value that code generation cannot change. Optimisation is
+    # therefore pure cost here, and on a small host it is the cost that
+    # dominates: thirteen instantiations hold 2.7 GiB, fault 280,000 pages, and
+    # read 1.5 TB back from disk. Three attempts, at `-O2` and then at `-O1` on
+    # both passes and on ptxas, each ran past 1,700 s without finishing here, so
+    # the probe needs a host with more memory before its rows can be checked.
+    # See the log entry in `docs/build.md`.
     copts = [
-        "-O2",
+        "-O1",
         "-Xcompiler",
-        "-O2",
+        "-O1",
+        "-Xptxas",
+        "-O1",
     ],
     deps = ["@cutlass//:cutlass"],
 )

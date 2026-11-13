@@ -632,7 +632,7 @@ it move in the diff.
    name the precision bits this device supports.
 2. Implement the six utilities and the arithmetic primitives, including the
    sliding-window attention variant and the two reductions.
-3. Reach `tools/nanochat simulate --suite correctness` with the CPU reference
+3. Reach `tools/nanochat test --suite correctness` with the CPU reference
    values, and `--suite kernel` with the emulated values.
 4. Reach `T1 GPU correctness` on one tiny shape per primitive.
 5. Add the two stateful entries if the device claims training.

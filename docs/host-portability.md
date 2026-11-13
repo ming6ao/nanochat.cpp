@@ -82,12 +82,10 @@ Turing has no bf16 and the T4 runs fp32 ([precision.md](precision.md)). The tree
 keeps no named Turing config: the build helper emits the flags.
 
 The `hopper` config selects the bf16 CUDA build for a Hopper card, `sm_90`. It
-is the hand-run form of the same build the chain's H100 leg runs, and it is not
-the `h100` config: `h100` is the *simulator* profile, which sets
-`--define=simulator=1` and answers from the device profile table instead of the
-card ([build.md](build.md#backends-precision-and-devices)). It is a hand-run
-shorthand
-only: `_build._build_command` still emits its explicit flag triple,
+is the hand-run form of the same build the chain's H100 leg runs. A simulated
+build adds the engine: `--config=hopper --config=sim` answers from the device
+profile table instead of the card ([build.md](build.md#backends-precision-and-devices)).
+It is a hand-run shorthand only: `_build._build_command` still emits its explicit flag triple,
 `--config=cuda --define=precision=<p> --@rules_cuda//cuda:archs=<a>`, and never
 a named config, so the H100 leg and a hand run are the same build.
 
@@ -498,7 +496,7 @@ the single-card path is fast.
 | GPU quota | A weekly GPU-hour limit | Keep the GPU for gates |
 | Driver mismatch | The image CUDA and the driver disagree | Check with `tools/nanochat doctor` |
 | `rules_cuda` autodetect | The toolkit path is not found | Set `CUDA_HOME` |
-| No CUDA toolkit | The CUDA build cannot compile | Use the S0 simulator: `tools/nanochat simulate --device h100` needs no toolkit |
+| No CUDA toolkit | The CUDA build cannot compile | Use the S0 simulator: `tools/nanochat test --profile h100` needs no toolkit |
 
 ### 10. Definition of done
 

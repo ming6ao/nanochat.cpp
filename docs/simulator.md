@@ -1,18 +1,17 @@
 # Simulator for Hopper-class targets
 
-The simulator runs the API calls and the numerics of `nanochat.cpp` on H100,
-H200, and later accelerator targets. The development host has no Hopper device,
-so the simulator works without one: it is the only way to check a Hopper build
-on this host.
+The simulator runs the API calls and the numerics of `nanochat.cpp` as a
+Hopper-class card. The device set is the one `backends/*/caps.json` declares,
+which is the H100 and the oldest Turing card today; the development host has no
+Hopper device, so the simulator is the only way to check a Hopper build on it.
 
 The tree holds the device profile table, the reference engine, the emulation
-engine, and the API interposer, and `tools/nanochat simulate` runs them.
+engine, and the API interposer, and `tools/nanochat test --profile` runs them.
 
 ```bash
-tools/nanochat simulate --device h100 --suite all
-tools/nanochat simulate --device h100 --suite correctness
-tools/nanochat simulate --suite api
-tools/nanochat simulate --suite compile
+tools/nanochat test --profile h100                 # every simulator suite
+tools/nanochat test --profile h100 --suite correctness
+tools/nanochat test --profile h100 --suite api
 ```
 
 The host engine in section 9 is the strongest of the three. It runs the
@@ -128,10 +127,10 @@ still runs on the CPU.
 
 ```bash
 # The oracle and the training trajectory on a simulated H100.
-tools/nanochat simulate --device h100 --suite correctness
+tools/nanochat test --profile h100 --suite correctness
 
 # The same on a simulated T4.
-tools/nanochat simulate --device t4 --suite correctness
+tools/nanochat test --profile t4 --suite correctness
 ```
 
 The reference engine runs the fp32 build, so every run matches the committed
@@ -173,7 +172,7 @@ engine can test that.
 5.1 Mechanism
 
 The interposer is a shared library that exports the CUDA runtime and cuBLAS
-symbols. The `tools/nanochat simulate` command sets `LD_PRELOAD` to that
+symbols. The `tools/nanochat test --profile` command sets `LD_PRELOAD` to that
 library. The dynamic linker then binds the calls from `device.cu`, `gemm.cu`,
 and every launch stub to the interposer.
 
@@ -380,7 +379,7 @@ the header's caption reports.
 ### 7.2 One answer for an unknown device
 
 A name no declaration owns is refused. `DeviceNameError` renders the message and
-`DeviceNameList` gives the declared set, so `tools/nanochat simulate` and
+`DeviceNameList` gives the declared set, so `tools/nanochat test --profile` and
 `tools/nanochat roofline` refuse the same name with the same text.
 
 `tools/nanochat devices` prints the declared set, and the simulator validates
@@ -423,29 +422,31 @@ tests true fp32, not TF32.
 The profile table also feeds a `doctor` line that reports the simulated
 profile.
 
-## 8. Part 5: compile gate
+## 8. Part 5: the device compile
 
-The compile gate is secondary. It needs no interposer and no GPU.
+A simulated run compiles the device code of the card it answers as. That needs
+no interposer and no GPU, and on a host with no card it is the only compile of
+that architecture: the default build compiles the oldest supported one.
 
-- New `.bazelrc` configs: `h100` (`sm_90`, fp32, cuda) and `h200` (`sm_90`,
-  fp32, cuda).
-- `tools/nanochat simulate --device h100 --mode compile` builds
-  `//backends/cuda:all_kernels` and the host graph for that architecture.
-- The gate holds the build lock. It takes no GPU queue.
-- The gate enables `-Werror` through `--config=sim-gate`. `nanochat.bzl` adds
-  `-Xcompiler -Werror` and the nvcc `-Werror all-warnings` class, and it
-  excludes the deprecation warning for the legacy cuBLAS enums through
-  `-Xcompiler -Wno-deprecated-declarations`.
-- The gate records the `ptxas` register and shared-memory use per kernel in
-  `/tmp/nanochat-sim-ptxas-<device>.log`. Set `NANOCHAT_SIM_PTXAS_LOG` to
-  change the path. A cached build compiles nothing, so the gate keeps the
-  previous log instead of erasing it.
-- The gate leaves `-Werror` out of the inner loop. Only `--config=sim-gate`
-  turns it on.
+- The compile takes the device values from the declaration, so it needs no
+  config per device: `--config=cuda` with the architecture and the precision as
+  flags.
+- The first step of `tools/nanochat test --profile h100` builds
+  `//backends/cuda:device_compile`, which links the whole device backend. Every
+  kernel is therefore compiled for `sm_90`, and a broken Hopper-only path fails
+  here rather than on a card.
+- The compile holds the build lock. It takes no GPU queue.
+- `--no-compile` skips the compile and runs the suites alone, for a host whose
+  memory cannot hold the largest device object. The log in
+  [build.md](build.md#logs) measures one such object.
+- A warning is an error in every build of the tree, so the compile adds no flag
+  for it. `nanochat.bzl` sets `-Xcompiler -Werror` and the nvcc
+  `-Werror all-warnings` class, and it excludes the deprecation warning for the
+  legacy cuBLAS enums, which the interposer reports directly.
 
-The gate does not add an `sm_90a` config. The tree uses no `sm_90a` feature,
-so the config can only fail. The gate does not add an `a100` config. That
-device is outside the stated scope.
+The compile adds no `sm_90a` config. The tree uses no `sm_90a` feature, so the
+config can only fail. It adds no `a100` config either. That device is outside
+the stated scope.
 
 ## 9. Part 6: device-code emulation engine
 
@@ -543,25 +544,25 @@ tile makes it once.
 
 Tier S0 is new. An S0 run exercises Hopper-class behavior but needs no GPU.
 The fast CPU-only S0 tests also ride the default `tools/nanochat test` loop,
-because they carry the `sim` tag. The `simulate` command runs them under a
-`--config=sim` capability override. For the API suite, it also runs them under
-`LD_PRELOAD`.
+because they carry the `sim` tag. `test --profile` runs them under a
+`--config=sim` capability override. The API suite also runs under `LD_PRELOAD`.
 
 ```bash
 # Numerical correctness on a simulated H100, fp32.
-tools/nanochat simulate --device h100 --precision fp32 --suite correctness
+tools/nanochat test --profile h100 --suite correctness --config=fp32
 
 # API conformance for the CUDA backend.
-tools/nanochat simulate --device h100 --suite api
+tools/nanochat test --profile h100 --suite api
 
-# Compile the CUDA backend for the target architecture.
-tools/nanochat simulate --device h100 --mode compile
+# Compile the CUDA backend for the target architecture, and stop.
+tools/nanochat build --config=cuda --@rules_cuda//cuda:archs=sm_90 \
+    --define=precision=bf16 //backends/cuda:device_compile
 
 # The optional emulated-kernel check.
-tools/nanochat simulate --device h100 --suite kernel
+tools/nanochat test --profile h100 --suite kernel
 
 # The emulated hand tensor-core GEMM, over every schedule of its sweep.
-tools/nanochat simulate --device h100 --suite gemm
+tools/nanochat test --profile h100 --suite gemm
 ```
 
 The command does this:
@@ -579,14 +580,13 @@ The command does this:
    `--negative-self-test`, which rejects a missing symbol.
 5. Passes `--test_env=NANOCHAT_SIM_PROFILE=<name>`.
 
-The `.bazelrc` gains `test --test_env=NANOCHAT_SIM_PROFILE`. The `simulate`
-command passes `LD_PRELOAD` per invocation, because the path changes with the
-build.
+`test --profile` passes `--test_env=NANOCHAT_SIM_PROFILE=<name>`. The preload
+runner supplies `LD_PRELOAD` itself, because the path changes with the build.
 
 The S0 tests carry the `sim` tag. They are CPU-only and fast, so they stay in the
 default `tools/nanochat test` loop; the tag lets a merge gate select them by
 name. The preload test additionally carries `manual`, because it must only run
-under `tools/nanochat simulate --suite api`, which supplies `LD_PRELOAD` and the
+under `tools/nanochat test --suite api`, which supplies `LD_PRELOAD` and the
 log path. docs/testing.md defines the S0 tier.
 
 ## 12. Validation of the simulator
@@ -710,8 +710,8 @@ Add three things:
 2. `peak_fp8_flops` to `DeviceProfile`.
 3. `supports_fp8` to `Caps`, and extend `Caps::Supports` with it.
 
-The rate is dense and non-sparse. Use 1,979 TFLOP/s for the H100 and the H200.
-Use 0 for every other entry in the table today.
+The rate is dense and non-sparse. Use 1,979 TFLOP/s for the H100, the one
+declared Hopper row. Use 0 for every other entry in the table today.
 
 | Device | fp32 | bf16 | fp8 | fp8 support |
 |---|---:|---:|---:|---|
@@ -752,7 +752,7 @@ conversion implementations would break that clause.
 Add a build config for the test:
 
 ```bash
-tools/nanochat simulate --device h100 --precision fp8 --suite correctness
+tools/nanochat test --profile h100 --suite correctness --config=fp8
 ```
 
 5. The API interposer
@@ -930,9 +930,9 @@ nothing.
 11. Validation
 
 1. `//tests:device_profile_test` passes with the fp8 rows.
-2. `tools/nanochat simulate --device h100 --precision fp8 --suite correctness`
+2. `tools/nanochat test --profile h100 --suite correctness` --config=fp8
    passes.
-3. `tools/nanochat simulate --device h100 --suite api` passes, and the symbol
+3. `tools/nanochat test --profile h100 --suite api` passes, and the symbol
    gate resolves every new `cublasLt` symbol.
 4. The negative self-test of `check_symbols.py` still fails on a missing symbol.
 5. The fp8 kernel emulation matches the CPU fp8 reference within the recorded

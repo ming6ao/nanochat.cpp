@@ -44,17 +44,27 @@ BAZELRC = ".bazelrc"
 #: The subcommand table of the stage binary: the authority for section one.
 COMMANDS = "src/commands.cc"
 
-#: The four build values the configuration table must state, in column order.
-#: The simulator column names an engine and not a value, so it stays prose.
-BUILD_VALUES = ("arch", "precision", "backend", "collective")
+#: The build values the configuration table states, in column order, beside the
+#: simulator. A configuration states only what it sets, so a cell of
+#: :data:`UNSET` means that the default build's value stands.
+BUILD_VALUES = ("arch", "precision", "backend", "simulator")
 
-#: The column headings of the configuration table, by build value.
+#: The column headings of the configuration table, in the same order.
 COLUMN = {
     "arch": "Architecture",
     "precision": "Precision",
     "backend": "Backend",
-    "collective": "Collective",
+    "simulator": "Simulator",
 }
+
+#: The cell of a value that a configuration does not set.
+UNSET = "\u2014"
+
+#: The simulator engine a define selects, in the order each one wins.
+SIMULATOR = (
+    ("simulator_gate", "gate"),
+    ("simulator", "reference"),
+)
 
 #: A generated region, keyed by name.
 REGION = re.compile(
@@ -86,7 +96,8 @@ ARCH_LINE = re.compile(
 DEFINE_KEY = {
     "precision": "precision",
     "backend": "backend",
-    "collective": "collective",
+    "simulator": "simulator",
+    "simulator_gate": "simulator_gate",
 }
 
 #: The retired labels: a short form whose meaning lives in another document.
@@ -119,6 +130,9 @@ HEADING = re.compile(r"^(?P<hashes>#{1,6})\s+(?P<text>.*?)\s*$", re.M)
 #: The heading that starts the log, where a date is allowed.
 LOG_HEADING = "Logs"
 
+#: One dated entry of the log.
+LOG_ENTRY = re.compile(r"^### (?P<date>\d{4}-\d\d-\d\d)\b", re.M)
+
 
 def _slug(text: str) -> str:
     """The fragment a Markdown renderer gives a heading."""
@@ -145,13 +159,13 @@ def _prose_scope(text: str) -> tuple[str, int]:
     return text, len(lines) + 1
 
 
-def _configurations(lines: list[str]) -> tuple[dict[str, str], dict[str, dict],
-                                               list[str]]:
-    """The default build values, the per-config overlay, and the config order.
+def _configurations(
+        lines: list[str]) -> tuple[dict[str, str], dict[str, dict], list[str]]:
+    """The default build values, the values each configuration sets, and order.
 
     The values come from the tracked Bazel configuration alone. A named
-    configuration is additive, so its effective value is the overlay on the
-    default build.
+    configuration is additive, so this reads what the configuration itself
+    states and never what the default build supplies.
     """
     default: dict[str, str] = {}
     overlay: dict[str, dict[str, str]] = {}
@@ -178,10 +192,9 @@ def _configurations(lines: list[str]) -> tuple[dict[str, str], dict[str, dict],
         arch = ARCH_LINE.match(line)
         if arch:
             config = arch.group("config") or ""
-            if config:
-                _remember(order, config)
             value = arch.group("value").strip().strip('"')
             if config:
+                _remember(order, config)
                 overlay.setdefault(config, {})["arch"] = value
             else:
                 default["arch"] = value
@@ -194,11 +207,19 @@ def _remember(order: list[str], name: str) -> None:
         order.append(name)
 
 
-def _effective(default: dict[str, str], overlay: dict[str, dict],
-               name: str) -> dict[str, str]:
-    values = dict(default)
-    values.update(overlay.get(name, {}))
-    return values
+def _cells(values: dict[str, str]) -> list[str]:
+    """The four cells a configuration states, in column order."""
+    cells = []
+    for key in ("arch", "precision", "backend"):
+        value = values.get(key)
+        cells.append(f"`{value}`" if value else UNSET)
+    engine = "off"
+    for define, name in SIMULATOR:
+        if values.get(define):
+            engine = name
+            break
+    cells.append(engine)
+    return cells
 
 
 def _commands(path: Path) -> list[tuple[str, str]]:
@@ -240,8 +261,13 @@ def _label(name: str) -> str:
 
 
 def _check_configurations(text: str, default: dict[str, str],
-                          overlay: dict[str, dict], order: list[str]) -> list[str]:
-    """Every configuration row states the build the configuration gives."""
+                          overlay: dict[str, dict],
+                          order: list[str]) -> list[str]:
+    """Every row states exactly what its configuration sets.
+
+    The row of the default build states the values of the unqualified lines,
+    because those are what a build with no named configuration applies.
+    """
     failures: list[str] = []
     region = _region(text, "build-configurations")
     if region is None:
@@ -252,22 +278,36 @@ def _check_configurations(text: str, default: dict[str, str],
         if not row:
             continue
         name = _config_name(row[0])
+        if name in seen:
+            failures.append(f"{DOC}: two rows for {_label(name)}")
         seen.add(name)
-        if len(row) < 1 + len(BUILD_VALUES):
-            failures.append(f"{DOC}: row `{row[0]}` is too short with "
-                            f"{len(row)} cells")
+        if name and name not in order:
+            failures.append(
+                f"{DOC}: row {_label(name)} names a configuration that "
+                f"{BAZELRC} does not declare")
             continue
-        expected = _effective(default, overlay, name)
-        for offset, key in enumerate(BUILD_VALUES, start=1):
-            want = expected.get(key)
-            if want is None:
+        if len(row) < 1 + len(BUILD_VALUES):
+            failures.append(
+                f"{DOC}: row {_label(name)} holds {len(row)} cells, the table "
+                f"needs {1 + len(BUILD_VALUES)}")
+            continue
+        values = default if not name else overlay.get(name, {})
+        for offset, want in enumerate(_cells(values), start=1):
+            got = row[offset]
+            if _value(got) == _value(want):
                 continue
-            got = _value(row[offset])
-            if got != _value(want):
+            column = COLUMN[BUILD_VALUES[offset - 1]]
+            if want == UNSET:
                 failures.append(
-                    f"{DOC}: row {_label(name)} states {COLUMN[key]} "
-                    f"{row[offset]}, the configuration gives {want}")
+                    f"{DOC}: row {_label(name)} states {got} for {column}; "
+                    f"the configuration sets none")
+            else:
+                failures.append(
+                    f"{DOC}: row {_label(name)} states {got}, the "
+                    f"configuration sets {want}")
 
+    if "" not in seen:
+        failures.append(f"{DOC}: no row for {_label('')}")
     for name in order:
         if name not in seen:
             failures.append(
@@ -330,6 +370,19 @@ def _check_prose(text: str) -> list[str]:
     return failures
 
 
+def _check_log_order(text: str) -> list[str]:
+    """The log holds its entries newest first, so a reader meets the last run."""
+    failures: list[str] = []
+    log = text.partition(f"## {LOG_HEADING}")[2]
+    dates = [match.group("date") for match in LOG_ENTRY.finditer(log)]
+    for newer, older in zip(dates, dates[1:]):
+        if older >= newer:
+            failures.append(
+                f"{DOC}: the entry of {older} follows the entry of {newer}; "
+                f"the log holds its entries newest first")
+    return failures
+
+
 def _check_links(text: str, root: Path) -> list[str]:
     """Every link with a fragment reaches a heading of its target."""
     failures: list[str] = []
@@ -371,30 +424,17 @@ def _write_subcommands(commands: list[tuple[str, str]]) -> str:
     return "\n".join(lines)
 
 
-def _write_configurations(text: str, default: dict[str, str],
-                          overlay: dict[str, dict], order: list[str]) -> str:
-    """The configuration table, with the prose simulator cell preserved."""
-    keep: dict[str, str] = {}
-    region = _region(text, "build-configurations")
-    if region is not None:
-        for row in _rows(region):
-            if len(row) > 1 + len(BUILD_VALUES):
-                keep[_config_name(row[0])] = row[1 + len(BUILD_VALUES)]
-
-    header = "| Configuration | " + " | ".join(
-        COLUMN[key] for key in BUILD_VALUES) + " | Simulator |"
-    lines = [header, "|" + "---|" * (len(BUILD_VALUES) + 2)]
-
-    rows = [("", "_the default build_")]
-    rows += [(name, f"`--config={name}`") for name in order]
-    for name, label in rows:
-        values = _effective(default, overlay, name)
-        cells = [label]
-        for key in BUILD_VALUES:
-            value = values.get(key, "")
-            cells.append(f"`{value}`" if key == "arch" else value)
-        cells.append(keep.get(name, "off"))
-        lines.append("| " + " | ".join(cells) + " |")
+def _write_configurations(default: dict[str, str], overlay: dict[str, dict],
+                          order: list[str]) -> str:
+    """The configuration table, generated from the tracked configuration."""
+    lines = ["| Configuration | "
+             + " | ".join(COLUMN[key] for key in BUILD_VALUES) + " |",
+             "|" + "---|" * (len(BUILD_VALUES) + 1)]
+    rows = [(_label(""), _cells(default))]
+    rows += [(f"`--config={name}`", _cells(overlay.get(name, {})))
+             for name in order]
+    for label, cells in rows:
+        lines.append("| " + " | ".join([label, *cells]) + " |")
     return "\n".join(lines)
 
 
@@ -446,7 +486,7 @@ def main(argv: list[str]) -> int:
             text, "subcommands", _write_subcommands(commands))
         updated = _replace_region(
             updated, "build-configurations",
-            _write_configurations(text, default, overlay, order))
+            _write_configurations(default, overlay, order))
         if updated == text:
             print(f"{DOC}: the marked regions already agree with the tree")
             return 0
@@ -457,6 +497,7 @@ def main(argv: list[str]) -> int:
     failures = _check_commands(text, commands)
     failures += _check_configurations(text, default, overlay, order)
     failures += _check_prose(text)
+    failures += _check_log_order(text)
     failures += _check_links(text, root)
     if not failures:
         print(f"{DOC}: the tables and the links agree with the tree")

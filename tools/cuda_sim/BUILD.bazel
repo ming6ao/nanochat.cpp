@@ -3,8 +3,9 @@
 # `:cuda_sim_interposer` is the API interposer: a shared library that exports
 # the CUDA runtime, the cuBLAS entry points, and the fat-binary hooks, records
 # and validates every call against the simulated device profile, and backs
-# `cudaMalloc` with host memory. `tools/nanochat simulate --suite api` preloads
-# it over the real CUDA backend and runs `//tests:cuda_sim_preload_test`.
+# `cudaMalloc` with host memory. `//tests:cuda_sim_preload_test` preloads it
+# over the real CUDA backend, and `//tests:sim_api` runs that test, the mock
+# unit test, and the symbol gate end to end.
 # `//tests:cuda_sim_test` also links the implementation, but only as an
 # in-process mock unit test -- it never exercises `LD_PRELOAD`.
 #
@@ -15,6 +16,7 @@
 # Everything here is CPU only: no toolkit, no driver, no GPU.
 
 load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library")
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
 load("//:nanochat.bzl", "nanochat_copts")
 
 package(default_visibility = ["//visibility:public"])
@@ -63,6 +65,30 @@ cc_binary(
         "-Wl,--version-script=$(execpath :cuda_sim.map)",
     ],
     deps = [":cuda_sim_interposer_impl"],
+)
+
+# The symbol gate end to end. `//python:cuda_sim_symbols_test` proves the
+# parser against fake `nm` and `readelf`; this target proves the gate on the
+# build's own artefacts: the interposer exports every name the version script
+# lists, the real runtime test binary asks only for names the interposer
+# exports, and the gate rejects a mock that is missing one.
+#
+# It is `manual` because it builds the real CUDA backend, so the CPU loop does
+# not compile device code by accident. `//tests:sim_api` runs it.
+sh_test(
+    name = "check_symbols_e2e_test",
+    srcs = ["check_symbols_e2e_test.sh"],
+    data = [
+        ":check_symbols.py",
+        ":cuda_sim.map",
+        ":cuda_sim_interposer",
+        "//backends/cuda:cuda_runtime_gpu_test",
+    ],
+    size = "small",
+    tags = [
+        "manual",
+        "sim",
+    ],
 )
 
 exports_files([

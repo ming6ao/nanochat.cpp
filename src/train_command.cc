@@ -79,7 +79,8 @@ int RunTrain(int argc, char** argv) {
   // its position on the command line: a later flag still overrides it.
   flags.AddValue("--preset", [&config](std::string_view value) {
     if (value != "track3") {
-      std::fprintf(stderr, "train_main: unknown preset %s\n", value);
+      std::fprintf(stderr, "train_main: unknown preset %.*s\n",
+                   static_cast<int>(value.size()), value.data());
       return false;
     }
     TrainConfig preset = TrackThreeBaseline();

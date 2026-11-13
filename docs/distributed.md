@@ -365,7 +365,7 @@ memory. The best fit for the two T4 cards is `L16 C1024 H8 KV4 T4096 b1`: about
 global.
 
 The measured 500-step run on two T4 cards uses the native ring collective
-(`--config=native`), the windowed attention backward, and pinned host staging.
+(`--config=cuda`), the windowed attention backward, and pinned host staging.
 It runs `--grad-accum 8`. The global batch is 65536 tokens, not the reference
 524288.
 
@@ -1116,9 +1116,10 @@ fp16 dtype branch is gone from the collective ([precision.md](precision.md)).
 [precision.md](precision.md) section 6 defines the policy. Stage 1 removed fp16
 from the tree, so every reduction is fp32. The collective needs fp32 only.
 
-The device target for this work is `--config=h100`, which is fp32. Stage 1 moves
-the `h200` target to fp32 and Stage 2 moves it to bf16 (precision.md section 4).
-The `h200` config is outside the collective path.
+A rank group reduces in fp32 on every configuration, because the policy keeps
+the persistent state single precision ([precision.md](precision.md)). The device
+target for this work is `--config=hopper`, which computes in bf16 and adds the
+native ring. A simulated run of the same build adds `sim`.
 
 ### 9. Broker and launch
 

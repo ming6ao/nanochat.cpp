@@ -261,7 +261,7 @@ The integrator runs, per merge:
 - `bazel test //... --test_tag_filters=-gpu` (all CPU tests, under `t0-cpu`).
   The S0 simulator suites ride this loop: they are CPU-only and need no queue.
   Two targets carry `manual` and stay out of it. `//tests:cuda_sim_preload_test`
-  needs `tools/nanochat simulate --suite api`. `//tests:numerics_trace_test`
+  needs `tools/nanochat test //tests:sim_api`. `//tests:numerics_trace_test`
   replays a 10-layer trace, which is too slow for the inner loop; run it
   through the simulator suite below.
 - `//python:pipeline_test` rides that loop too. It is the gate of the whole
@@ -271,7 +271,7 @@ The integrator runs, per merge:
   is `//python:pipeline_gpu_test`, the same source with the `gpu` and `manual`
   tags, so the `-gpu` filter keeps it out of the default loop and it runs only
   through `tools/nanochat test --gpu //python:pipeline_gpu_test`.
-- `tools/nanochat simulate --device h100` when the change touches a kernel, the
+- `tools/nanochat test --profile h100` when the change touches a kernel, the
   backend seam, or the device profile (`docs/simulator.md`). It is still CPU
   only. Its `correctness` suite carries the CPU and simulator legs of the staged
   numeric trace (`docs/testing.md`), so that run also gates Path A.

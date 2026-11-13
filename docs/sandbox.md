@@ -176,7 +176,7 @@ The entry point sits outside the model layers L0 to L6 in
 [build.md](build.md#layers-and-the-one-seam), and it changes neither the kernel
 seam nor the
 public API. The simulator's S0 tier rides the same entry point:
-`tools/nanochat simulate` runs the CPU-only capability, API, collective, and
+`tools/nanochat test --profile` runs the CPU-only capability, API, collective, and
 emulation checks with no GPU broker ([simulator.md](simulator.md)). The one
 layering exception that the S0 tier needs is in
 [build.md](build.md#dependency-invariants) rule 2.
@@ -820,8 +820,9 @@ submits a job instead of calling the broker.
 | `profile` | build, then submit the benchmark as one job |
 | `run <profile> -- <cmd>` | submit for a GPU profile; run directly for `t0-cpu` |
 
-`run t0-cpu` stays direct. It needs no GPU. `simulate` stays direct. It is
-CPU-only by design.
+`run t0-cpu` stays direct. It needs no GPU. `test --profile` stays direct, and
+its first step, the device compile, holds the build lock and no queue: the
+simulator is CPU-only by design.
 
 The worker sets `NANOCHAT_GPU_QUEUED=1` for every job. `dist` and `client`
 check that one variable instead of the two guards `NANOCHAT_DIST_BROKERED` and
@@ -878,7 +879,7 @@ low.
 5. Submit mode: blocking by default. `gpuq submit` waits and returns the job
    exit code. `--no-wait` prints the job identifier and exits `0`.
 6. Scope: the GPU profiles plus `train`, `eval`, `dist`, and `client`.
-   `run t0-cpu` and `simulate` stay direct.
+   `run t0-cpu` and `test --profile` stay direct.
 7. `/tmp/nanochat-gpu.log`: keep the current line and add fields. Add the job
    identifier and the `queued`, `started`, and `finished` lines. Update the
    contract test in the same commit.

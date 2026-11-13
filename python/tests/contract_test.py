@@ -233,14 +233,19 @@ class ContractTest(unittest.TestCase):
         self.assertEqual(queue[1]["argv"][1:5],
                          ["gpuq", "submit", "--profile", "t2-parity"])
 
-    def test_dry_run_covers_five_commands_only(self) -> None:
-        plan = self.plan("--dry-run", "simulate", "--device", "h100",
+    def test_dry_run_covers_four_commands_only(self) -> None:
+        """A profiled run plans two Bazel steps: the device compile, then the
+        suite. The compile is why a simulated run needs no card to prove the
+        card's instantiation."""
+        plan = self.plan("--dry-run", "test", "--profile", "h100",
                          "--suite", "api")
         self.assertEqual(plan[0], {
             "layer": "argv",
-            "argv": ["simulate", "--device", "h100", "--suite", "api"]})
-        self.assertEqual({step["layer"] for step in plan[1:]},
-                         {"bazel", "host"})
+            "argv": ["test", "--profile", "h100", "--suite", "api"]})
+        bazel = [step for step in plan[1:] if step["layer"] == "bazel"]
+        self.assertEqual(len(bazel), 2, plan)
+        self.assertIn("//backends/cuda:device_compile", bazel[0]["argv"])
+        self.assertIn("//tests:sim_api", bazel[1]["argv"])
         rejected = self.run_script(self.entry, "--dry-run", "lint")
         self.assertEqual(rejected.returncode, 2)
         self.assertIn("--dry-run", rejected.stderr)

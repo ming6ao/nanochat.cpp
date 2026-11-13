@@ -68,18 +68,19 @@ suites are:
 ```bash
 # Everything: oracle, training parity, API, emulated kernels, profile
 # consistency. Every run is fp32 (docs/precision.md).
-tools/nanochat simulate --device h100
-tools/nanochat simulate --device t4
+tools/nanochat test --profile h100
+tools/nanochat test --profile t4
 
 # One suite.
-tools/nanochat simulate --device h100 --suite correctness   # reference engine
-tools/nanochat simulate --device h100 --suite api           # API interposer
-tools/nanochat simulate --device h100 --suite kernel        # emulated kernels
-tools/nanochat simulate --device h100 --suite gemm          # emulated tensor-core GEMM
-tools/nanochat simulate --device h100 --suite profile       # device table
+tools/nanochat test --profile h100 --suite correctness   # reference engine
+tools/nanochat test --profile h100 --suite api           # API interposer
+tools/nanochat test --profile h100 --suite kernel        # emulated kernels
+tools/nanochat test --profile h100 --suite gemm          # emulated tensor-core GEMM
+tools/nanochat test --profile h100 --suite profile       # device table
 
-# Compile the CUDA backend for the target architecture (no GPU, no broker).
-tools/nanochat simulate --device h100 --mode compile
+# Compile the CUDA backend for the target architecture, and stop.
+tools/nanochat build --config=cuda --@rules_cuda//cuda:archs=sm_90 \
+    --define=precision=bf16 //backends/cuda:device_compile
 ```
 
 The reference-engine suites add `--config=sim` and pass
@@ -99,8 +100,8 @@ The collective mock rendezvouses through POSIX shared memory and bounds its
 wait (`NANOCHAT_SIM_TIMEOUT_MS`), so a rank that never issues the all-reduce is
 reported as a timeout instead of hanging the suite.
 
-The native collective (`backends/cuda/collective/`, selected with
-`--config=native`) adds two CPU-only tests to the default T0 loop, and one T1
+The native collective (`backends/cuda/collective/`, on every CUDA build) adds
+two CPU-only tests to the default T0 loop, and one T1
 GPU test. `//backends/cuda/collective:schedule_test` runs the ring at world
 sizes 1, 2, 4, and 8 over the in-process memory transport, then judges the
 schedule trace. `//backends/cuda/collective:transport_select_test` checks the
@@ -113,11 +114,11 @@ host-staged fallback. See
 The suite targets carry the `sim` tag. They are CPU-only and fast, so they stay
 in the default `tools/nanochat test` loop; the tag exists so a merge gate can
 select or exclude them by name. Two exceptions carry `manual`.
-`//tests:cuda_sim_preload_test` links the real CUDA backend and must run under
-`tools/nanochat simulate --suite api`, which supplies `LD_PRELOAD`,
-`NANOCHAT_SIM_LOG`, and the profile. `//tests:numerics_trace_test` replays a
-10-layer trace, which is too slow for the inner loop; run it through
-`tools/nanochat simulate --suite correctness` or by name.
+`//tests:cuda_sim_preload_test` links the real CUDA backend, and its own runner
+supplies `LD_PRELOAD`, `NANOCHAT_SIM_LOG`, and the profile, so
+`tools/nanochat test //tests:sim_api` reaches it. `//tests:numerics_trace_test`
+replays a 10-layer trace, which is too slow for the inner loop; run it through
+`tools/nanochat test --suite correctness` or by name.
 
 The fabricated `cudaDeviceProp` layout is pinned by
 `//tests:cuda_device_prop_abi_test`, a compile-time cross-check of
@@ -561,7 +562,7 @@ accumulates in fp32, and dequantizes.
 
 The seam and both engines are present, except the operand reuse across calls. The seam, both
 backends, the build config, and the model plumbing are in. `--config=fp8` and
-`simulate --precision fp8` select the fp8 build. `src/ops.cc` quantizes the
+`test --config=fp8` select the fp8 build. `src/ops.cc` quantizes the
 eligible forward and backward matmuls, and `src/model.cc` owns the workspace
 slots (one byte per operand, one fp32 per scale, rebuilt per step).
 `//tests:fp8_graph_test` compares the fp8 forward and backward against the dense
@@ -575,7 +576,7 @@ are a cost only.
 Gate:
 
 ```bash
-tools/nanochat simulate --device h100 --precision fp8 --suite correctness
+tools/nanochat test --profile h100 --suite correctness --config=fp8
 ```
 
 The run must reach the committed fp8 golden. The golden is the CPU emitter's
@@ -626,7 +627,7 @@ is mapped, and `//tools/cuda_sim/emu:gemm_emu_test` is the leg that uses it: it
 runs the hand bf16 GEMM of `backends/cuda/gemm/` through the block runtime over
 the four operand layouts, a ragged shape with a k tail, a batch, both stores, and
 every schedule of the sweep. It sits in its own target because the tile is bf16
-by construction and this test is fp32, and `tools/nanochat simulate --suite gemm`
+by construction and this test is fp32, and `tools/nanochat test --suite gemm`
 runs it.
 
 Gate: the emulated cast, the value gate, and the attention forward match the
@@ -793,8 +794,8 @@ by cost.
    CPU-bound jobs run at once. The aggregate slice still bounds the host.
 8. **Emulate only what the gate needs.** Map `extern __shared__` and one scalar `mma`
    case. Do not emulate the attention at the production shape.
-9. **Record the time.** Add a `simulate --timing` line. The line prints the wall
-   time per suite, so a regression is visible.
+9. **Record the time.** Print the wall time per suite from the profiled run, so
+   a regression is visible.
 
 #### 5.3 The reason this stays fast
 
@@ -1076,7 +1077,7 @@ needs no data file. The trace records no batch and no weight vector.
 ```bash
 tools/nanochat test //tests:numerics_trace_test
 tools/nanochat test --gpu //tests:numerics_trace_cuda_test
-tools/nanochat simulate --device t4 --suite correctness
+tools/nanochat test --profile t4 --suite correctness
 ```
 
 A 10-layer CPU run with `double` GEMM over five steps is the slow part. It takes
@@ -1084,7 +1085,7 @@ about 60 seconds under the `t0-cpu` profile. The GPU leg takes about 10 seconds,
 including the repeat run of clause 2.
 
 The CPU target carries the `manual` tag, so it stays out of the default test
-loop. `tools/nanochat simulate --suite correctness` runs it, and
+loop. `tools/nanochat test --suite correctness` runs it, and
 `tools/nanochat test //tests:numerics_trace_test` runs it alone. Keep the
 per-merge GPU budget in [AGENTS.md](../AGENTS.md) section 5.5.
 

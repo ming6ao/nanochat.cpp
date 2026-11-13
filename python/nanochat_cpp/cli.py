@@ -68,7 +68,7 @@ BAZEL_BIN = REPO_ROOT / "bazel-bin"
 BUILD_LOCK = os.environ.get("NANOCHAT_BUILD_LOCK", "/tmp/nanochat-build.lock")
 
 #: The commands that `--dry-run` covers.
-DRY_RUN_COMMANDS = ("build", "test", "check", "run", "simulate")
+DRY_RUN_COMMANDS = ("build", "test", "check", "run")
 
 #: The `doctor --json` keys, in output order. Append-only.
 DOCTOR_KEYS = ("repo", "revision", "branch", "nvcc", "bazel", "gpu",
@@ -373,29 +373,71 @@ def _reconcile_server(name: str, net: str, want_ns: str = "") -> None:
 
 
 def _test_argv(argv: list[str]) -> list[str]:
-    """The Bazel argument list for ``test``."""
+    """The Bazel argument list for ``test``.
+
+    ``--profile <name>`` runs the suites as one declared device: it selects the
+    reference engine and passes the profile the runner reads. ``--suite <name>``
+    names one of the ``//tests:sim_*`` suites, so the membership stays in
+    `BUILD` and no list lives here. A suite needs the engine as well, so either
+    flag selects it.
+    """
     gpu = False
+    engine = False
+    device: str | None = None
     targets: list[str] = []
     configs: list[str] = []
+    config_names: list[str] = []
     index = 0
     while index < len(argv):
         argument = argv[index]
         if argument == "--gpu":
             gpu = True
             index += 1
+        elif argument == "--no-compile":
+            # Only `_device_compile_argv` reads this, and the run keeps no
+            # trace of it. A host that cannot afford the device compile says so
+            # once, on the command line.
+            index += 1
+        elif argument in ("--profile", "--suite"):
+            if index + 1 >= len(argv):
+                die(f"{argument} needs a name")
+            value, index = argv[index + 1], index + 2
+            if argument == "--profile":
+                device, engine = value, True
+            else:
+                engine = True
+                targets.append(f"//tests:sim_{value}")
+        elif argument.startswith("--profile="):
+            device, engine = argument.split("=", 1)[1], True
+            index += 1
+        elif argument.startswith("--suite="):
+            engine = True
+            targets.append(f"//tests:sim_{argument.split('=', 1)[1]}")
+            index += 1
         elif argument == "--config":
             if index + 1 >= len(argv):
                 die("--config needs a name")
             configs += ["--config", argv[index + 1]]
+            config_names.append(argv[index + 1])
             index += 2
         elif argument.startswith("--config="):
             configs.append(argument)
+            config_names.append(argument.split("=", 1)[1])
             index += 1
         else:
             targets.append(argument)
             index += 1
+    if device is not None:
+        declared = declared_device_names()
+        if device not in declared:
+            die(f"test: unknown device '{device}' ({' '.join(declared)})")
+        if gpu or "cuda" in config_names:
+            die("test: --profile runs the reference backend, so it takes no "
+                "--gpu and no --config=cuda; a card run reads the card")
+    if engine and "sim" not in config_names:
+        configs.append("--config=sim")
     if not targets:
-        targets = ["//..."]
+        targets = ["//tests:sim_all"] if engine else ["//..."]
     if gpu:
         profile, tag_filter = "t1-gpu", "gpu"
         run_under = f"{ENTRY} gpuq submit --profile={profile} --"
@@ -405,6 +447,8 @@ def _test_argv(argv: list[str]) -> list[str]:
     arguments = [*targets, f"--test_tag_filters={tag_filter}",
                  f"--run_under={run_under}", "--spawn_strategy=local",
                  *configs]
+    if device is not None:
+        arguments.append(f"--test_env=NANOCHAT_SIM_PROFILE={device}")
     if gpu:
         # A GPU run selects the CUDA backend, so the shared workflow
         # (//src:model) links the kernels under test. One action at a time.
@@ -443,6 +487,11 @@ def _take_net_flag(argv: list[str]) -> tuple[str | None, list[str]]:
 def cmd_test(argv: list[str], ctx: Context) -> int:
     """Run the tests, inside the session slice when there is one.
 
+    A ``--profile`` run answers as one declared card, so the device backend is
+    compiled for that card first: the default build compiles the oldest
+    supported architecture, and the instantiation a simulated run answers as
+    would otherwise never be built on a host with no card.
+
     The build phase of a test run compiles, so it belongs in the same memory
     boundary as a build. The network stays on the host unless ``--net deny`` is
     named, because a denied run enters a fresh network namespace and the Bazel
@@ -450,7 +499,17 @@ def cmd_test(argv: list[str], ctx: Context) -> int:
     suite costs 0.6 s with the server alive and 21 s with a restart per run.
     """
     net, argv = _take_net_flag(argv)
-    bazel_argv = _test_argv(argv)
+    compile_argv = _device_compile_argv(argv)
+    if compile_argv is not None:
+        code = _bazel_in_boundary_or_host(compile_argv, ctx, net)
+        if code != 0:
+            return code
+    return _bazel_in_boundary_or_host(_test_argv(argv), ctx, net)
+
+
+def _bazel_in_boundary_or_host(bazel_argv: list[str], ctx: Context,
+                               net: str | None) -> int:
+    """Run one Bazel command in the session boundary, or on the host."""
     record = _active_session()
     if record is None:
         if net is not None:
@@ -469,6 +528,34 @@ def cmd_test(argv: list[str], ctx: Context) -> int:
                   "tools/nanochat session start")
     return _bazel_in_boundary(bazel_argv, record, ctx, net,
                               "the test build had no network")
+
+
+def _profile_of(argv: list[str]) -> str | None:
+    """The device named by ``--profile`` in a raw argument list."""
+    for index, argument in enumerate(argv):
+        if argument == "--profile" and index + 1 < len(argv):
+            return argv[index + 1]
+        if argument.startswith("--profile="):
+            return argument.split("=", 1)[1]
+    return None
+
+
+def _device_compile_argv(argv: list[str]) -> list[str] | None:
+    """The command that compiles the backend for a ``--profile`` device.
+
+    ``None`` when no profile is named. The label links the whole device backend,
+    so every kernel compiles for the declared architecture and precision, and a
+    broken Hopper-only path fails here instead of on a card.
+    """
+    device = _profile_of(argv)
+    if device is None or "--no-compile" in argv:
+        return None
+    declaration = declared_devices()[device]
+    arch = f"sm_{declaration['compute_major']}{declaration['compute_minor']}"
+    precision = declaration.get("reference_precision", "fp32")
+    return ["build", "--config=cuda",
+            f"--@rules_cuda//cuda:archs={arch}",
+            f"--define=precision={precision}", DEVICE_COMPILE]
 
 
 def cmd_check(argv: list[str], ctx: Context) -> int:
@@ -1254,200 +1341,9 @@ def declared_device_names() -> list[str]:
     return list(declared_devices())
 
 
-SIM_SUITES = {
-    "correctness": ["//tests:oracle_test", "//tests:train_parity_test",
-                    "//tests:sim_numerics_test", "//tests:numerics_trace_test"],
-    "fp8-fast": ["//tests:fp8_rounding_test", "//tests:fp8_gemm_test",
-                 "//tests:fp8_graph_test", "//tests:device_profile_test"],
-    "kernel": ["//tests:kernel_emu_test"],
-    # The emulated hand GEMM of docs/tensor-core-gemm-plan.md. Its own target,
-    # because the tile is bf16 by construction and //tests:kernel_emu_test is
-    # fp32.
-    "gemm": ["//tools/cuda_sim/emu:gemm_emu_test"],
-    "profile": ["//tests:device_profile_test"],
-    "all": ["//tests:oracle_test", "//tests:train_parity_test",
-            "//tests:sim_numerics_test", "//tests:numerics_trace_test",
-            "//tests:fp8_rounding_test", "//tests:fp8_gemm_test",
-            "//tests:fp8_graph_test",
-            "//tests:kernel_emu_test", "//tests:device_profile_test",
-            "//tools/cuda_sim/emu:gemm_emu_test"],
-}
-SIM_GATE_TARGETS = ["//backends/cuda:all_kernels",
-                    "//backends/cuda/collective:native_sync",
-                    "//backends/cuda:cuda_runtime_gpu_test",
-                    "//backends/cuda/kernels:precision_gpu_test",
-                    "//backends/cuda/kernels:row_kernels_gpu_test",
-                    "//backends/cuda/kernels:sequence_oracle_gpu_test"]
-
-
-def _simulate_args(argv: list[str]) -> tuple[str, str, str, str]:
-    mode, device, suite, precision = "run", "h100", "all", "fp32"
-    for argument in argv:
-        if argument.startswith("--device="):
-            device = argument.split("=", 1)[1]
-        elif argument.startswith("--suite="):
-            suite = argument.split("=", 1)[1]
-        elif argument.startswith("--mode="):
-            mode = argument.split("=", 1)[1]
-        elif argument.startswith("--precision="):
-            precision = argument.split("=", 1)[1]
-        else:
-            die(f"simulate: unknown argument '{argument}'")
-    return mode, device, suite, precision
-
-
-def cmd_simulate(argv: list[str], ctx: Context) -> int:
-    # `--name value` comes as separate tokens; fold them onto the `=` form.
-    folded: list[str] = []
-    index = 0
-    while index < len(argv):
-        argument = argv[index]
-        match = re.fullmatch(r"--(device|suite|mode|precision)", argument)
-        if match:
-            if index + 1 >= len(argv):
-                die(f"simulate: {argument} needs a value")
-            folded.append(f"{argument}={argv[index + 1]}")
-            index += 2
-        else:
-            folded.append(argument)
-            index += 1
-    mode, device, suite, precision = _simulate_args(folded)
-    devices = declared_device_names()
-    if device not in devices:
-        die(f"simulate: unknown device '{device}' ({' '.join(devices)})")
-
-    if mode == "compile":
-        # The gate builds for the declared card, so the architecture and the
-        # precision come from the declaration rather than from a named config.
-        # The tree keeps one config per device family that a hand run uses, and
-        # this mode must work for every declared device.
-        declaration = declared_devices()[device]
-        arch = f"sm_{declaration['compute_major']}{declaration['compute_minor']}"
-        precision_name = declaration.get("reference_precision", "fp32")
-        ptxas_log = os.environ.get(
-            "NANOCHAT_SIM_PTXAS_LOG", f"/tmp/nanochat-sim-ptxas-{device}.log")
-        gate_argv = ["build", "--config=cuda",
-                     f"--@rules_cuda//cuda:archs={arch}",
-                     f"--define=precision={precision_name}",
-                     "--config=sim-gate", *SIM_GATE_TARGETS]
-        if ctx.dry_run:
-            ctx.plan("bazel", "bazel", *gate_argv)
-            return 0
-        return _simulate_compile(gate_argv, ptxas_log, device)
-    if mode != "run":
-        die(f"simulate: unknown mode '{mode}' (run compile)")
-
-    if suite in ("api", "all"):
-        code = _simulate_api(ctx, device)
-        if code != 0:
-            return code
-    if suite == "api":
-        return 0
-    if suite not in SIM_SUITES:
-        die(f"simulate: unknown suite '{suite}'")
-    configs = ["--config=sim"]
-    if precision == "bf16":
-        configs.append("--config=bf16")
-    elif precision == "fp8":
-        configs.append("--config=fp8")
-    elif precision != "fp32":
-        die(f"simulate: unknown precision '{precision}' (fp32 bf16 fp8)")
-    return ctx.bazel([
-        "test", *SIM_SUITES[suite], "--test_tag_filters=-gpu",
-        f"--run_under={SANDBOX} --profile=t0-cpu --", "--spawn_strategy=local",
-        f"--test_env=NANOCHAT_SIM_PROFILE={device}", *configs])
-
-
-def _simulate_compile(gate_argv: list[str], ptxas_log: str,
-                      device: str) -> int:
-    """Run the compile gate, keep the ptxas resource lines, and report."""
-    import tempfile
-    handle = tempfile.NamedTemporaryFile(
-        mode="w", prefix="nanochat-sim-gate.", suffix=".log", delete=False,
-        encoding="utf-8")
-    try:
-        code = with_build_lock([find_bazel(), *gate_argv], stdout=handle,
-                               stderr=handle)
-    finally:
-        handle.close()
-    text = Path(handle.name).read_text(encoding="utf-8", errors="replace")
-    if code != 0:
-        sys.stderr.write(text)
-        os.unlink(handle.name)
-        return code
-    # Keep the ptxas resource lines for the record. A cached build compiles
-    # nothing, so keep the previous log instead of erasing it.
-    fresh = [line for line in text.splitlines(keepends=True)
-             if "ptxas info" in line or _REGISTERS.search(line)]
-    fresh_count = sum(1 for line in fresh if _REGISTERS.search(line))
-    if fresh_count > 0:
-        Path(ptxas_log).write_text("".join(fresh), encoding="utf-8")
-        count, note = fresh_count, "fresh"
-    elif os.path.isfile(ptxas_log) and os.path.getsize(ptxas_log) > 0:
-        previous = Path(ptxas_log).read_text(encoding="utf-8",
-                                             errors="replace")
-        count = sum(1 for line in previous.splitlines()
-                    if _REGISTERS.search(line))
-        note = "build cached; kept the previous log"
-    else:
-        count, note = 0, "build cached and no earlier log"
-    print(f"simulate: compile gate OK ({device}, -Werror, ptxas records: "
-          f"{count}; {note})")
-    print(f"simulate: ptxas resource log -> {ptxas_log}")
-    os.unlink(handle.name)
-    return 0
-
-
-_REGISTERS = re.compile(r"Used [0-9]+ registers")
-
-
-def _simulate_api(ctx: Context, device: str) -> int:
-    """Build the mock, run the symbol gate, and run the two API tests."""
-    mock = (BAZEL_BIN / "tools" / "cuda_sim"
-            / "libcuda_sim_interposer.so").resolve()
-    real = (BAZEL_BIN / "backends" / "cuda" / "cuda_runtime_gpu_test").resolve()
-    gate = str(TOOLS / "cuda_sim" / "check_symbols.py")
-    sim_log = "<sim-api>.jsonl" if ctx.dry_run else str(
-        Path(_tempdir("nanochat-sim-api.")) / "events.jsonl")
-    build_argv = ["build", "--config=cuda",
-                  "//tools/cuda_sim:cuda_sim_interposer",
-                  "//backends/cuda:cuda_runtime_gpu_test",
-                  "//tests:cuda_sim_preload_test"]
-    preload_argv = [
-        "test", "//tests:cuda_sim_preload_test", "--config=cuda",
-        "--test_tag_filters=sim",
-        f"--run_under={SANDBOX} --profile=t0-cpu --",
-        "--spawn_strategy=local",
-        f"--test_env=NANOCHAT_SIM_PROFILE={device}",
-        f"--test_env=LD_PRELOAD={mock}",
-        f"--test_env=NANOCHAT_SIM_LOG={sim_log}"]
-    unit_argv = [
-        "test", "//tests:cuda_sim_test", "--test_tag_filters=sim",
-        f"--run_under={SANDBOX} --profile=t0-cpu --",
-        "--spawn_strategy=local",
-        f"--test_env=NANOCHAT_SIM_PROFILE={device}"]
-    if ctx.dry_run:
-        ctx.plan("bazel", "bazel", *build_argv)
-        for extra in ([], [str(real)], ["--negative-self-test"]):
-            ctx.plan("host", gate, *extra)
-        ctx.plan("bazel", "bazel", *preload_argv)
-        ctx.plan("bazel", "bazel", *unit_argv)
-        return 0
-    code = ctx.bazel(build_argv)
-    if code != 0:
-        return code
-    if not mock.is_file():
-        die(f"simulate: the interposer .so was not built ({mock})")
-    if not real.is_file():
-        die(f"simulate: {real} was not built")
-    for extra in ([], [str(real)], ["--negative-self-test"]):
-        status = _run([gate, *extra]).returncode
-        if status != 0:
-            return status
-    code = ctx.bazel(preload_argv)
-    if code != 0:
-        return code
-    return ctx.bazel(unit_argv)
+#: The label that compiles every device source of the backend for one
+#: architecture and precision. It links the backend, so every kernel compiles.
+DEVICE_COMPILE = "//backends/cuda:device_compile"
 
 
 def cmd_gpu(argv: list[str], ctx: Context) -> int:
@@ -1499,7 +1395,6 @@ COMMANDS = {
     "devices": cmd_devices,
     "pgo": cmd_pgo,
     "doctor": cmd_doctor,
-    "simulate": cmd_simulate,
     "verify": _alias("t2-parity"),
     "gpu": cmd_gpu,
     "help": cmd_help,

@@ -40,15 +40,6 @@ config_setting(
     define_values = {"backend": "cuda"},
 )
 
-# Collective selection (docs/distributed.md Part 3, section 7, phase 0).
-# The native ring is the one implementation, so `--define=collective=native` is
-# the default and the only value. The setting stays so `--config=native`
-# remains a documented spelling of it.
-config_setting(
-    name = "collective_native",
-    define_values = {"collective": "native"},
-)
-
 # Simulator selection (docs/simulator.md sections 4.1 and 8). `--config=sim` sets
 # `--define=simulator=1`; the reference CPU backend then answers `GetCaps()`
 # from `NANOCHAT_SIM_PROFILE` through the device profile table instead of
@@ -56,15 +47,6 @@ config_setting(
 config_setting(
     name = "sim",
     define_values = {"simulator": "1"},
-)
-
-# Simulator compile gate (docs/simulator.md section 8). `--config=sim-gate` sets
-# `--define=simulator_gate=1`; `nanochat.bzl` then adds `-Werror` and the ptxas
-# resource request to the CUDA compiler options. The setting stays out of the
-# normal build, so the inner loop keeps its warnings.
-config_setting(
-    name = "sim_gate",
-    define_values = {"simulator_gate": "1"},
 )
 
 # Aggregation point: each package publishes `test_suite(name = "all")`; new

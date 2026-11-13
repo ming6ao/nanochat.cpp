@@ -3,11 +3,13 @@
 # Layering:
 #   * toolchain: the C++ standard here; the host compiler is host-local;
 #   * arch:      Turing sm_75 is the default, and --config=hopper selects
-#                Hopper (H100) for a hand run;
+#                Hopper for a hand run;
 #   * precision: fp32 or bf16 (docs/precision.md), selected by a build define;
 #   * resources: cap the Bazel server and per-server action fan-out so several
 #                agent worktrees cannot exhaust the small shared host.
-# Named configs are additive: `--config=hopper --config=sim-gate`.
+# Named configs are additive. `sim` is a reference-backend choice and does not
+# compose with a device backend; the Simulator section says why. A warning is an
+# error in every build (nanochat.bzl), so no config selects strictness.
 
 # --- Toolchain --------------------------------------------------------------
 #
@@ -37,7 +39,7 @@ build --define=precision=fp32
 build:bf16 --define=precision=bf16
 # The fp8 tier computes in bf16 and quantizes the eligible matmuls
 # (docs/fp8-training.md section 3.3). Put it after a device config so the
-# later `--define` wins: `--config=h100 --config=fp8`.
+# later `--define` wins: `--config=hopper --config=fp8`.
 build:fp8 --define=precision=fp8
 
 # --- Backend ----------------------------------------------------------------
@@ -54,16 +56,14 @@ build --define=backend=cpu
 build:cuda --define=backend=cuda
 
 # --- Collective -------------------------------------------------------------
-# The native ring collective is the one implementation
-# (docs/distributed-design.md). `--config=native` is a documented spelling of
-# that choice; the tree no longer has a second one to select.
+# The native ring collective is the one implementation (docs/distributed.md).
+# It is the default, so no named config selects it and no configuration can
+# choose another one.
 build --define=collective=native
-build:native --define=collective=native
-build:native --define=backend=cuda
 
 # --- Simulator ---------------------------------------------------------------
 #
-# The S0 tier (docs/simulator.md sections 4.1 and 10). `sim` selects the
+# The simulator tier (docs/simulator.md sections 4.1 and 10). `sim` selects the
 # reference engine: the CPU backend compiles in the capability override and
 # answers `GetCaps()` from `NANOCHAT_SIM_PROFILE` through the device profile
 # table, while every value is still computed by the reference loops. The
@@ -71,37 +71,23 @@ build:native --define=backend=cuda
 #   tools/nanochat test //tests:sim_numerics_test --config=sim \
 #       --test_env=NANOCHAT_SIM_PROFILE=h100
 #
-# `h100` and `h200` select bf16 for the two Hopper devices.
+# The profile is a run-time name, not a config: the device declaration in
+# backends/*/caps.json holds the row, and `tools/nanochat simulate` passes the
+# variable. `sim` applies to the reference backend alone, because the override
+# lives in `backends/cpu/`: a CUDA build links the card, so the define reaches
+# no target and the flag changes nothing. Device code runs under the emulator
+# (tools/cuda_sim) instead.
 build:sim --define=simulator=1
-# The compile gate (docs/simulator.md section 8): turn warnings into errors and
-# ask ptxas for the register and shared-memory use. Additive with a device
-# config: `--config=h100 --config=sim-gate`.
-build:sim-gate --define=simulator_gate=1
-
-# Emulator configs: the two Hopper simulator profiles.
-build:h100 --@rules_cuda//cuda:archs=sm_90
-build:h100 --define=precision=bf16
-build:h100 --define=backend=cuda
-build:h100 --define=collective=native
-build:h100 --define=simulator=1
-
-build:h200 --@rules_cuda//cuda:archs=sm_90
-build:h200 --define=precision=bf16
-build:h200 --define=backend=cuda
-build:h200 --define=collective=native
-build:h200 --define=simulator=1
 
 # --- Host targets -----------------------------------------------------------
 #
-# `hopper` is not `h100`. The `h100` config above is the simulator profile: it
-# sets `--define=simulator=1`, which compiles in the capability override and
-# answers from the device profile table. `hopper` does not, so a hand run builds
-# the real CUDA backend for Hopper at bf16, which is what the chain's
-# `world_size=1` expects (docs/post-training.md section 3). `hopper` is a
-# hand-run shorthand only: the build helper `_build._build_command` still emits
-# its explicit flag triple, `--config=cuda --define=precision=<p>
-# --@rules_cuda//cuda:archs=<a>`, and never a named config, so the Modal H100
-# leg is the same build either way.
+# `hopper` is the one device configuration: a real Hopper card at bf16, which is
+# what the chain's `world_size=1` expects (docs/post-training.md section 3). It
+# does not turn the simulator on, so a check that needs a card chooses it, and a
+# report read without a card adds `sim`. `hopper` is a hand-run shorthand only:
+# the build helper `_build._build_command` still emits its explicit flag triple,
+# `--config=cuda --define=precision=<p> --@rules_cuda//cuda:archs=<a>`, and never
+# a named config, so the Modal H100 leg is the same build either way.
 build:hopper --@rules_cuda//cuda:archs=sm_90
 build:hopper --define=precision=bf16
 build:hopper --define=backend=cuda

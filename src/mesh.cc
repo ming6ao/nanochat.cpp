@@ -27,8 +27,12 @@ MeshSpec MeshSpec::Data(int size) {
 MeshSpec MeshSpec::Data(std::vector<int> device_indices) {
   MeshSpec mesh;
   if (device_indices.empty()) device_indices.push_back(0);
-  mesh.shape = {static_cast<int>(device_indices.size())};
-  mesh.axis_names = {kDataAxis};
+  // `assign` and not a braced list: a one-element list reaches `std::copy`
+  // through `stl_algobase.h`, and GCC 12 reports a false `-Warray-bounds` there
+  // at `-O2`. The tree builds with warnings as errors, so the shorter spelling
+  // costs a build.
+  mesh.shape.assign(1, static_cast<int>(device_indices.size()));
+  mesh.axis_names.assign(1, kDataAxis);
   mesh.device_indices = std::move(device_indices);
   return mesh;
 }

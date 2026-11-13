@@ -105,26 +105,28 @@ float ReadHost(const ComputeType* p) {
   return AsF(raw);
 }
 
-// The fp32 view of one scalar parameter, for a kernel that reads it on the
-// device. In a bf16 build this is the master copy, which the optimizer keeps
-// current. In an fp32 build the compute buffer already holds fp32.
-//
-// `docs/kernels.md` is the reason this exists: a scalar the optimizer
-// owns belongs in device memory, and the host never needs it.
 // The fp32 view of one scalar parameter, chosen by the build's compute type.
 //
-// An fp32 build keeps the value in its compute buffer, so the master copy is
-// only one option. A reduced-precision build reads the master copy, and a null
-// one would make every kernel read the default host value instead of the
-// parameter: fail here rather than train on zeros.
-const float* ScalarFloatView(const float* value, const float* master,
-                             const char* name) {
+// `docs/kernels.md` is the reason this exists: a scalar the optimizer owns
+// belongs in device memory, and the host never needs it. An fp32 build keeps
+// the value in its compute buffer, so the master copy is only one option. A
+// reduced-precision build reads the master copy, and a null one would make
+// every kernel read the default host value instead of the parameter: fail here
+// rather than train on zeros.
+//
+// Both overloads exist in every build, and the compute type picks one, because
+// a source may not test the precision define (`docs/precision.md`). The one the
+// build does not call is unused on purpose.
+[[maybe_unused]] const float* ScalarFloatView(const float* value,
+                                              const float* master,
+                                              const char* /*name*/) {
   if (master != nullptr) return master;
   return value;
 }
 
-const float* ScalarFloatView(const Bf16* /*value*/, const float* master,
-                             const char* name) {
+[[maybe_unused]] const float* ScalarFloatView(const Bf16* /*value*/,
+                                              const float* master,
+                                              const char* name) {
   if (master != nullptr) return master;
   std::fprintf(stderr,
                "nanochat: %s has no fp32 master copy, and this build reads its "

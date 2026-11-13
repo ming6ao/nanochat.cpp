@@ -214,8 +214,8 @@ warp-width factor then keeps the whole section under two seconds, which is the
 
 | Gate | Pass condition | Command |
 |---|---|---|
-| SA | The emulated GEMM agrees with the host reference on tiny shapes, within the kernel tolerance | `tools/nanochat simulate --device h100 --suite gemm --precision bf16` |
-| SB | The same at fp8 precision, and the wrapper's host arm agrees with the shared rounding function | `tools/nanochat simulate --device h100 --suite gemm --precision fp8` |
+| SA | The emulated GEMM agrees with the host reference on tiny shapes, within the kernel tolerance | `tools/nanochat test --profile h100 --suite gemm --precision bf16` |
+| SB | The same at fp8 precision, and the wrapper's host arm agrees with the shared rounding function | `tools/nanochat test --profile h100 --suite gemm --precision fp8` |
 | SC | The default CPU loop stays green, and `kernel_emu_test` stays under its size budget | `tools/nanochat test //tests:kernel_emu_test` |
 
 SA and SB are CPU only. They need no card, no driver, and no queue, so they ride
@@ -531,7 +531,7 @@ small `m`: a batch-1 decode call with `m` of 1 wastes a tensor-core tile, and
 | # | Work | Gate | Command |
 |---|---|---|---|
 | B0 | The host scaffolding: `GemmPlan` as pure host code, with the tile choice, the rounding up, the bounds, the epilogue expression, and the stride inference | Passes on this machine | `tools/nanochat test //backends/cuda/gemm:gemm_tile_test` |
-| B1 | The `sm_80` kernel, forward only, one shape, no batch, no transpose, `beta = 0` | SA over the emulated leg, then agreement with cuBLAS at 1e-3 absolute | `tools/nanochat simulate --device h100 --suite gemm --precision bf16` |
+| B1 | The `sm_80` kernel, forward only, one shape, no batch, no transpose, `beta = 0` | SA over the emulated leg, then agreement with cuBLAS at 1e-3 absolute | `tools/nanochat test --profile h100 --suite gemm --precision bf16` |
 | B2 | The full contract: four transpose forms, batch, three leading dimensions, strides, alpha and beta, and the fp32 store | cuBLAS is the reference on a card, over the same cases the emulator runs, and every schedule | `tools/nanochat test --gpu --config=hopper //backends/cuda/gemm:gemm_gpu_test` |
 | B3 | The dispatch: the closed list, the verdict, and the `NANOCHAT_GEMM_LIB` switch | The T0 gate, and no shape changes hands while its bit is inert | `tools/nanochat test //backends/cuda/gemm:dispatch_test` |
 | B4 | The schedule sweep: the `__pipeline_*` copy, the four schedules, and the record of what each one measures | **Landed.** The copy stage, the four schedules, and the record on a hosted Hopper card. The wide tile won 20 of 28 rows and never came near 0.85 | `tools/nanochat bench -- bazel-bin/backends/cuda/gemm/gemm_benchmark --schedule all --json` |
@@ -635,7 +635,7 @@ bf16 build.
 | G2 | Correctness, device | `gemm_gpu_test`: every contract case matches cuBLAS, on a card, within one bf16 unit for a bf16 store and 1e-5 for an fp32 store |
 | G3 | No group slower | Every enabled shape is at least as fast as cuBLAS at the same precision. One slower shape turns its bit off |
 | G4 | Promotion | 0.70 of the cuBLAS rate for a first row. 0.85 for a shape replacement |
-| G5 | Seam | `include/nanochat/kernels.h` has no diff, `caps.json` gains no bit, and `tools/nanochat simulate --device h100` stays green |
+| G5 | Seam | `include/nanochat/kernels.h` has no diff, `caps.json` gains no bit, and `tools/nanochat test --profile h100` stays green |
 | G6 | Regression | `//backends/cuda:cuda_runtime_gpu_test`, both chain legs, and `//tests:train_parity_cuda_test` stay green |
 
 G5 is nearly free by construction. A launch and a shared-memory request need no
@@ -672,7 +672,7 @@ does not list, so L3 would remove nothing without them.
 | `docs/simulator.md` sections 9.2 and 9.4 | The new mapping rows and the fragment-ownership limit | Architect |
 | `docs/model.md` section The cuBLAS seam | The table gains the dispatch row | Architect |
 | `docs/baselines.json` | One row per measured shape. **Landed**: the `gemm_bf16` entry holds the 28 rows | Architect |
-| `docs/testing.md` | The emulated GEMM leg joins the S0 suite list. **Still open**: it runs under `tools/nanochat simulate --suite gemm` and in the default `test` loop through `//tools/cuda_sim/emu:gemm_emu_test` | Architect |
+| `docs/testing.md` | The emulated GEMM leg joins the S0 suite list. **Still open**: it runs under `tools/nanochat test --suite gemm` and in the default `test` loop through `//tools/cuda_sim/emu:gemm_emu_test` | Architect |
 | `backends/cuda/gemm/README.md` | New: the schedule, the gates, the numbers. **Landed** | `agent/gemm` |
 | `backends/cuda/kernels/README.md` | The fragment-ownership rule | The kernels owner |
 | `AGENTS.md` section 1 | The ownership row for `backends/cuda/gemm/**` and `backends/cuda/gemm.cu` (F5). **Landed** | Architect |
