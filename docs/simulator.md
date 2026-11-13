@@ -250,7 +250,8 @@ pop, so the launch that follows carries the configuration the program set.
 
 `cublasGemmEx` is the one-batch form of `cublasGemmStridedBatchedEx`, which is
 what `backends/cuda/gemm.cu` reaches when a single GEMM's operands are not all
-fp32 (the bf16 build; [build.md](build.md), "GEMM behavior"). An fp32 build
+fp32 (the bf16 build; [build.md](build.md#backends-precision-and-devices)). An
+fp32 build
 links the name but never calls it, so the mock implements both through one
 shared body and records the same arguments.
 

@@ -1,10 +1,9 @@
-"""G3: the base install carries no third-party dependency.
+"""The pure base install gate: the base install carries no dependency.
 
-Gate G3 of ``docs/build.md`` Part 1, section 5:
-``python/pyproject.toml`` declares ``dependencies = []`` (the line of section
-6.1), so ``pip install nanochat-cpp`` pulls no third-party package and the
-wheel stays pure (rule 1 of section 4). The optional dependencies below that
-line carry what a task needs.
+``python/pyproject.toml`` declares ``dependencies = []``, so
+``pip install nanochat-cpp`` pulls no third-party package and the wheel stays
+pure (rule 1 of ``docs/build.md``, the Python distribution). The optional
+dependencies below that line carry what a task needs.
 
 The gate parses the file with ``tomllib`` and fails when
 ``project.dependencies`` is missing, is not a list, or is not empty, naming the
@@ -58,7 +57,7 @@ def load(path: Path) -> dict:
 
 
 class BaseDependencyTest(unittest.TestCase):
-    """The empty base dependency list of section 6.1, as a test."""
+    """The empty base dependency list, as a test."""
 
     def project(self) -> dict:
         """The ``[project]`` table, or a failure naming what is absent."""
@@ -66,7 +65,7 @@ class BaseDependencyTest(unittest.TestCase):
         self.assertTrue(
             path.is_file(),
             f"{path} is missing: the base install declares its empty "
-            f"dependency list there (section 6.1), and without the file a "
+            f"dependency list there, and without the file a "
             f"reader cannot tell an extra from a requirement")
         project = load(path).get("project")
         self.assertIsNotNone(project, f"{path} declares no [project] table")
@@ -80,13 +79,13 @@ class BaseDependencyTest(unittest.TestCase):
         self.assertIsInstance(
             dependencies, list,
             "project.dependencies is missing; declare it as an empty list "
-            "(section 6.1), because an absent key reads as 'unknown' and the "
+            "because an absent key reads as 'unknown' and the "
             "pure wheel rests on that line")
         self.assertEqual(
             dependencies, [],
             "the base install must carry no third-party package; each entry "
             "below belongs in [project.optional-dependencies] under the extra "
-            "of section 6.2 (pip install 'nanochat-cpp[reference]', for "
+            "of the extras (pip install 'nanochat-cpp[reference]', for "
             "example):\n"
             + "\n".join(str(entry) for entry in dependencies))
 

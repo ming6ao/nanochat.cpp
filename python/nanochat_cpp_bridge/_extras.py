@@ -1,15 +1,15 @@
-"""The extras map of Z2: name the package, name the install line.
+"""The extras map of the adapter package: the package, and the install line.
 
 Every module of this package imports its heavy package inside the function
 that needs it, so ``import nanochat_cpp_bridge`` costs nothing and needs no
-extra (sections 4 and 6.1 of ``docs/build.md``). When the
-import fails, the caller gets :class:`MissingExtra` naming the extra of
-section 6.2 instead of a bare ``ModuleNotFoundError``::
+extra (``docs/build.md``, the Python distribution). When the import fails, the
+caller gets :class:`MissingExtra` naming the extra to install instead of a bare
+``ModuleNotFoundError``::
 
     pip install 'nanochat-cpp[reference]'
 
 This module imports the standard library only, so it can be imported from any
-of the Z2 modules without a cost.
+of the adapter modules without a cost.
 """
 
 from __future__ import annotations
@@ -28,7 +28,7 @@ __all__ = [
     "reference_on_path",
 ]
 
-#: The extra of section 6.2 that supplies each heavy package.
+#: The extra that supplies each heavy package.
 EXTRAS = {
     "torch": "reference",
     "numpy": "reference",
@@ -43,7 +43,7 @@ EXTRAS = {
     "modal": "modal",
 }
 
-#: The install shape of section 6.2, with ``{extra}`` for the extra name.
+#: The install shape of the distribution, with ``{extra}`` for the extra.
 INSTALL_LINE = "pip install 'nanochat-cpp[{extra}]'"
 
 
@@ -90,11 +90,12 @@ def reference_on_path() -> Path:
     """Put the reference PyTorch checkout on ``sys.path``.
 
     The core owns the search order and the ``NANOCHAT_REPO`` override
-    (``nanochat_cpp.reference``), so Z2 asks the core instead of repeating the
+    (``nanochat_cpp.reference``), so this package asks the core instead of
+    repeating the
     candidate paths. A missing checkout becomes a :class:`MissingExtra` that
     names the ``reference,nanochat`` extras line.
     """
-    from nanochat_cpp import reference  # noqa: PLC0415 - Z1, imported on use
+    from nanochat_cpp import reference  # noqa: PLC0415 - the core, on use
 
     try:
         return reference.ensure_reference_on_path()

@@ -5,8 +5,8 @@ no hub download, no pyarrow, and no shared library. See docs/post-training.md
 section 4 and docs/distributed.md Part 1, section 6.5.
 
 The mixture builders read their datasets through the registration seam of
-``docs/build.md`` section 4, so ``sft_data`` imports no
-dataset library (section 2.1). A fake hub loader exercises that seam, so the
+``docs/build.md``, the Python distribution, so ``sft_data`` imports no
+dataset library. A fake hub loader exercises that seam, so the
 coverage stays hermetic: no network, no ``pyarrow``, and no ``numpy``.
 
 The packer is a pinned mirror of ``sft_data_generator_bos_bestfit`` in

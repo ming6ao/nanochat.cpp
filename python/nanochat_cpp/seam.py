@@ -1,9 +1,9 @@
 """The registration seam: the two callables the core cannot own.
 
-Rule 1 of ``docs/build.md`` section 4 says
+The first rule of ``docs/build.md``, the Python distribution, says that
 ``python/nanochat_cpp/**`` imports only the standard library. Two jobs still
 need a third-party package, so the core reaches each one by being *handed* a
-callable at run time instead of importing it (rule 5 of section 8, gate G5):
+callable at run time instead of importing it:
 
 ``hub_loader``
     ``loader(repo_id, subset="default", split="train")`` returns a dataset with
@@ -26,7 +26,7 @@ A host registers the callable once, before it builds a task::
 
 A test registers a fake one, so the task classes stay hermetic: no network, no
 wheel, no GPU. An unregistered adapter raises :class:`MissingAdapter`, which
-names the extra of section 6.2 to install and the call that registers one,
+names the extra to install and the call that registers one,
 instead of failing on an ``ImportError`` deep inside a task. Nothing here
 imports a heavy package, so this module is standard-library only like the rest
 of the core.
@@ -65,7 +65,7 @@ __all__ = [
 #: The adapter names a caller can register, in the order a host supplies them.
 ADAPTERS = ("hub_loader", "code_executor")
 
-#: The extra of section 6.2 that supplies each adapter's package.
+#: The extra that supplies each adapter's package.
 EXTRAS = {
     "hub_loader": "hfdata",
     "code_executor": "reference,nanochat",
@@ -84,7 +84,7 @@ _CONTRACTS = {
     "code_executor": "executor(program) -> a result with a success attribute",
 }
 
-#: The install shape of section 6.2, with ``{extra}`` for the extra name.
+#: The install shape of the distribution, with ``{extra}`` for the extra.
 _INSTALL_LINE = "pip install 'nanochat-cpp[{extra}]'"
 
 _registry: dict[str, Callable[..., Any]] = {}
@@ -94,7 +94,7 @@ class MissingAdapter(RuntimeError):
     """A core call needs an adapter that no caller registered.
 
     The message names the adapter, the extra that supplies the package behind
-    it (section 6.2), and the call that registers one, so the reader is not
+    it, and the call that registers one, so the reader is not
     sent to an ``ImportError`` in a module the core is not allowed to import.
     """
 

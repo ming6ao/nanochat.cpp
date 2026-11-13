@@ -1,14 +1,14 @@
-"""The torch half of the reference-checkpoint conversion (Z2).
+"""The torch half of the reference-checkpoint conversion (the adapter package).
 
-``nanochat_cpp.checkpoint`` (Z1) owns the checkpoint container: the magic, the
+``nanochat_cpp.checkpoint`` owns the checkpoint container: the magic, the
 record framing, the dtype table, the name remap, the metadata block, and the
 path resolution. This module owns the half that needs PyTorch: reading a
 reference ``torch.save`` file, casting its tensors to the container dtype, and
 reassembling the AdamW and Muon optimizer state.
 
-The split is the boundary of ``docs/build.md`` section 4.
+The split is the boundary of ``docs/build.md``, the Python distribution.
 A conversion is an adapter in both directions, so the torch code lives here
-and the core stays a standard-library package (section 11). The container
+and the core stays a standard-library package. The container
 helpers are imported from the core rather than copied, so the byte layout is
 single-sourced in ``src/data.cc`` through the C surface and a change lands in
 one place.
@@ -91,7 +91,7 @@ def _torch():
     ``ModuleNotFoundError``.
     """
     try:
-        import torch  # noqa: PLC0415 - the lazy import of section 2.1
+        import torch  # noqa: PLC0415 - an adapter imports on use
     except ImportError as error:
         raise _extras.missing("torch") from error
     return torch

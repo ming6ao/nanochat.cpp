@@ -6,7 +6,8 @@ sources, in this order: the call's argument, ``NANOCHAT_BAZEL_CACHE``, and
 ``/content/bazel-cache``. The test needs no card, no clone, and no network: the
 two calls that would clone or compile are patched.
 
-See ``docs/build.md`` section 6.4 and ``docs/host-portability.md`` section 8.
+See ``docs/build.md``, the Python distribution, and
+``docs/host-portability.md`` section 8.
 """
 
 from __future__ import annotations

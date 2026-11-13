@@ -31,7 +31,7 @@ and the `AGENTS.md` §1 amendment §14.1 describes.
 
 Related material:
 
-- [build.md](build.md) § Dependency invariants — the dependency invariants that
+- [build.md](build.md#dependency-invariants) — the dependency invariants that
   this document extends.
 - [../spec/decisions.md](../spec/decisions.md) — the decision records this
   document refers to as D-0NN. A decided question lives there and is not
@@ -541,7 +541,7 @@ Isolation has four parts. Each needs a gate, because each is otherwise a claim.
 A model package exports exactly one symbol: its factory (§8.2). The runtime
 never includes a model header. A backend never includes a model header. The
 build graph enforces both with visibility rules, the same mechanism that
-[build.md](build.md) § Dependency invariants already uses.
+[build.md](build.md#dependency-invariants) already uses.
 
 ### 10.2 Build and test isolation
 
@@ -718,7 +718,7 @@ default. Prefer an additive change. Keep an edit to a frozen header
 architect-owned and local to the seam, as `AGENTS.md` §1 requires.
 
 - **Add hardware**: add `backends/<x>/` that implements `kernels.h`. No layer
-  above it changes. See [build.md](build.md) § Adding a backend.
+  above it changes. See [build.md](build.md#adding-a-backend).
 - **Fuse more**: only when the [fusion boundary rule](kernels.md) holds and the
   fused backward is derivable. Develop in `dev/kernels/`, prove the change with
   a benchmark, then promote it.

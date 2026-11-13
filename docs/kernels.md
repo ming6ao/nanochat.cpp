@@ -980,7 +980,7 @@ one for one.
 
 | Decision | The answer | The record |
 |---|---|---|
-| How the headers arrive | `third_party/cutlass.bzl` fetches commit `b2f249ac` as an external repository | [build.md](build.md) § Link dependencies |
+| How the headers arrive | `third_party/cutlass.bzl` fetches commit `b2f249ac` as an external repository | [build.md](build.md#third-party-code) |
 | Why not tracked files | The lint pass checks every `git ls-files` source, and the headers break four of its five checks | `third_party/cutlass.bzl` |
 | Which architecture | The adapter target states `archs = ["sm_90a"]` on itself, so `.bazelrc` gains nothing | `dev/cutlass/README.md` § 1 |
 | Which tile | 128 by 256 by 64, cluster 2 by 1, three stages, 215,040 B | `dev/cutlass/README.md` § 3 |

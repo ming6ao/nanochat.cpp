@@ -1,8 +1,8 @@
-"""The environment record a parity producer stamps into the manifest (7.2).
+"""The environment record a parity producer stamps into the manifest.
 
 A parity claim that names no environment rests on an environment a reader
-cannot rebuild. The record of ``docs/build.md`` section 7.2
-names four facts::
+cannot rebuild. The record of ``docs/build.md``, the parity seam, names four
+facts::
 
     "producer": {
       "torch": "2.5.1",
@@ -95,7 +95,7 @@ def nanochat_commit() -> str | None:
 
 
 def environment() -> dict[str, str]:
-    """The environment facts this run establishes, in the section 7.2 shape."""
+    """The environment facts this run establishes, in the manifest shape."""
     facts: dict[str, str] = {}
     for package in VERSIONED_PACKAGES:
         version = package_version(package)

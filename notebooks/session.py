@@ -1,13 +1,14 @@
 """The shared notebook session setup for the three notebooks.
 
 A notebook installs the package with one cell and configures the environment
-with one cell (``docs/build.md`` section 6.5). The bodies
+with one cell (``docs/build.md``, the Python distribution). The bodies
 live here, so the code has one home and the tests can drive it.
 
 :func:`setup` is the one entry point. It prefers the installed distribution: a
 host that can import ``nanochat_cpp`` prepares the session from it, so no clone
 and no Bazel build run, and the shared library comes from the search order of
-section 6.3, which reads an installed binary wheel before it builds anything.
+``docs/python.md`` section 3.2, which reads an installed binary wheel before it
+builds anything.
 When the package is absent, :func:`clone_and_build` is the documented fallback,
 unchanged in behaviour: it fetches the repository, runs the bootstrap, and
 builds the library, so an offline session with a source tree still works. The
@@ -106,7 +107,7 @@ class Session:
 
         An installed session has no repository to ask, so it records the
         distribution it runs. An unknown version stays empty rather than
-        guessed (``docs/build.md`` section 7.2).
+        guessed (``docs/build.md``, the parity seam).
         """
         if self.git_revision:
             return self.git_revision
@@ -164,8 +165,8 @@ def installed_session(package, *, arch="sm_75", devices=1, base=None,
     """Prepare the session from the installed distribution.
 
     No clone and no build run: the library comes from the search order of
-    ``docs/build.md`` section 6.3, which ends at the
-    installed ``nanochat_cpp_cuda_<arch>`` wheel. ``package`` is the imported
+    ``docs/python.md`` section 3.2, which ends at the installed
+    ``nanochat_cpp_cuda_<arch>`` wheel. ``package`` is the imported
     ``nanochat_cpp`` module. ``base`` becomes ``NANOCHAT_BASE_DIR`` and
     defaults to the staging root of the run host.
     """
@@ -191,7 +192,7 @@ def clone_and_build(repo_url=kaggle_setup.DEFAULT_REPO_URL,
                     target=None) -> Session:
     """Fetch, bootstrap, build, and check the session.
 
-    This is the documented fallback of section 6.5: it runs when the package is
+    This is the documented fallback: it runs when the package is
     not installed, and it keeps an offline session with a source tree working.
     It always takes the repository path, so it never silently becomes the
     default of :func:`setup`.

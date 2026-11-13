@@ -6,854 +6,482 @@ selects the configuration, applies the sandbox, and runs the command.
 ```bash
 tools/nanochat build                      # the default fp32 build
 tools/nanochat build --config=bf16        # the bf16 compute type
-tools/nanochat build --config=hopper      # sm_90
+tools/nanochat build --config=hopper      # a real Hopper build
 tools/nanochat test                       # every non-GPU test
 tools/nanochat lint                       # the style gate
 ```
 
-## Layers
+## What the build produces
 
-Dependencies point strictly downward. There is exactly one interchangeable
-seam, and it is the kernel API at L1.
+The workspace produces four things.
+
+- **One stage binary.** It is the single command binary of the tree, and it
+  holds nine subcommands. One dispatch path guards every subcommand with the
+  sandbox check, so a handler never repeats that check.
+- **Two backends.** The CPU backend is the reference and the correctness
+  baseline. The CUDA backend is the tuned path. Both implement the same seam.
+- **One Python distribution.** It reaches the binary through a small C ABI and
+  a shared library, and it adds no third-party package to the base install.
+- **One test tree.** The CPU loop runs under a sandbox profile, and the device
+  tiers run through a queue.
+
+The subcommand table is the authority for the binary's surface. A new
+subcommand adds one row here and one handler function.
+
+<!-- BEGIN GENERATED: subcommands -->
+| Subcommand | Purpose |
+|---|---|
+| `train` | one training run over packed parquet rows |
+| `eval` | forward-only bits-per-byte evaluation |
+| `generate` | sample tokens from a checkpoint |
+| `score` | stateless scorer over one evaluation fixture |
+| `sft` | supervised fine-tuning on a packed SFT shard |
+| `rl_worker` | the reinforcement-learning worker the Python bridge drives |
+| `rl_step` | one file-driven reinforcement-learning step |
+| `roofline` | the performance model and the roofline report |
+| `eval_bench` | the forward-only evaluation benchmark |
+<!-- END GENERATED: subcommands -->
+
+Every executable calls the sandbox guard at startup. A binary that starts
+outside `tools/nanochat` exits with the corrective command. The guard applies
+the CPU, memory, and device budget of the profile, so a test or a short run
+cannot take the host from another worker.
+
+## Layers and the one seam
+
+Dependencies point downward. The tree has one interchangeable seam, and it is
+the kernel API at level 1.
 
 ```text
-L6  App / CLI        one binary, nine subcommands        nanochat_cli.cc
-L5  Train driver     TrainLoop Checkpointer Logger Mfu   train.cc
-L4  Optim            AdamW Muon Scheduler param groups   optim.cc
-L3  Model / graphs   Model, Prefill, Decode, KvCache     model.cc generate.cc
-L2  Ops (internal)   Linear Block Mlp ValueResidual      ops.cc
-L1  KERNEL API       <-- THE BACKEND SEAM          nanochat/kernels.h
-L0  Backend          alloc stream launch           backends/cpu/ backends/cuda/
-    Vendor           libm / OpenMP | cudart + cuBLAS
+L6  App / CLI        the one binary and its subcommand table
+L5  Train driver     the training loop, the checkpointer, the logger, the MFU counter
+L4  Optim            AdamW, Muon, the scheduler, the parameter groups
+L3  Model / graphs   the model, prefill, decode, and the KV cache
+L2  Ops (internal)   the composite operations the graphs call
+L1  KERNEL API       <-- THE BACKEND SEAM
+L0  Backend          allocation, streams, launch, and the vendor runtime
 ```
 
-Host utilities sit beside L2 to L5 and never above the kernel API: `Tokenizer`,
-`DataLoader`, `Rand` (xorshift), `Sampler`, `Scheduler`, `Logger`, and `Mfu`.
-The seam itself is [kernels.md](kernels.md) § Kernel API sketch.
+Host utilities sit beside levels 2 to 5 and never above the kernel API. They
+are the tokenizer, the data loader, the random generator, the sampler, the
+scheduler, the logger, and the MFU counter. A host utility needs no device.
 
-### Dependency invariants
+Level 1 is a header of function declarations. Every name in it is a pointer to
+`ComputeType`, an opaque stream, or a plain scalar. The seam names no vendor
+type and no model. That is what makes a backend a build and link choice: the
+workflow above the seam compiles once and links against either backend.
 
-The build graph enforces these five rules.
+## Dependency invariants
 
-1. `src/**` includes only `nanochat/**`. **No vendor header appears outside
-   `backends/`, with one exception: `src/parquet/` is the one host package that
-   may include the host-only ZSTD header.** The model, the kernels, and the
-   training runtime never link DuckDB. Parquet input uses the native reader
-   ([data.md](data.md)).
-2. `backends/**` includes only `nanochat/kernels.h` and `nanochat/tensor.h`.
-   **A kernel knows nothing about the model.** One additive exception exists for
-   the simulator: a backend may include `nanochat/device_profile.h`, a leaf
-   header that declares only the simulated capability table and itself depends
-   only on `nanochat/tensor.h` ([simulator.md](simulator.md), tier S0). That is
-   what lets `GetCaps()` answer from a simulated profile. `backends/cpu/` links
-   the matching leaf unit `//src:device_profile` for it. The edge points *down*
-   to a leaf and not up into the workflow layer. The leaf carries no model code
-   and no kernel arithmetic, so the seam stays vendor-free and the reference
-   backend still computes every value. `nanochat/mesh.h` is a second leaf of the
-   same shape: it declares the local device list and the mesh spec, and it
-   depends only on `nanochat/tensor.h`. A backend implements `EnumerateDevices`
-   there, so the multi-device runtime can enumerate devices without a change to
-   `kernels.h`. A new edge of this shape needs the same review as any other
-   change to the layering rule.
-3. `kernels.h` contains no vendor type: pointers are `ComputeType*`, streams are
-   opaque, and no CUDA header is ever included from it.
-4. **No cross naming.** Nothing above the kernel seam names a specific model or
-   a specific device, and nothing below it names a graph. The seam names
-   neither.
-5. **A bring-up adds a directory.** A model bring-up edits only
-   `models/<name>/**`; a device bring-up edits only `backends/<name>/**`.
-   Neither edits a frozen header, a shared build file, or another package
-   without a contract extension first.
+The build graph enforces five rules.
 
-The first three rules are the load-bearing invariants: they let a backend be
-replaced as a build and link decision rather than as a source change. Stable API
-is therefore the default and cheap by construction, and not a promise that the
-API cannot move. When it must move, see
-[model-and-device-bringup.md](model-and-device-bringup.md) §18. Rules 4 and 5
-are the isolation promise. The bring-up contract that makes them operational is
-[model-and-device-bringup.md](model-and-device-bringup.md) §4 and §13.
+1. **The workflow reaches down only.** Source above the seam includes
+   `nanochat/**` and no vendor header. One host package may include the
+   host-only compression header, and the native parquet reader is the only user
+   of it. The model, the kernels, and the training runtime never link a
+   database library.
+2. **A backend reaches down only.** Source under `backends/` includes the
+   kernel header and the tensor header, and nothing else that carries model
+   knowledge. A kernel knows nothing about the model. Two leaf headers are the
+   named exception: one declares the simulated capability table, and one
+   declares the local device list. A leaf depends on the tensor header alone
+   and holds no arithmetic, so the reference backend still computes every
+   value. A new edge of that shape needs the same review as any other change
+   to this rule.
+3. **The seam holds no vendor type.** A stream is opaque, a buffer is
+   `ComputeType*`, and no vendor header is reachable from the seam.
+4. **No cross naming.** Nothing above the seam names a model or a device, and
+   nothing below it names a graph. The seam names neither.
+5. **A bring-up adds a directory.** A model bring-up edits one model directory.
+   A device bring-up edits one backend directory. Neither edits a frozen
+   header, a shared build file, or another package without a contract
+   extension first.
 
-## File layout
+Rules 1 to 3 are load-bearing. They let a backend be replaced as a build and
+link decision rather than as a source change, so a stable interface is the
+default and cheap by construction. Rules 4 and 5 are the isolation promise:
+they keep two workstreams out of each other's files. The evolution rules for a
+frozen header are in
+[model-and-device-bringup.md](model-and-device-bringup.md#18-evolution-rules).
 
-```
-nanochat.cpp/
-  .clang-format
-  MODULE.bazel  .bazelrc
-  README.md  AGENTS.md  CONTRIBUTING.md
-  docs/                        # reference and how-to
-  spec/                        # the contract vocabulary: prose and data, no code
-    versions.md  capability_bits.md  block_kinds.md  pointwise_ops.md  decisions.md
-  models/                      # the model axis: one directory per model package
-    nanochat-default/
-      spec.json                # the architecture description (the block list)
-      tolerances.json          # this model's numeric contract
-      fixtures/*.bin           # the committed fixtures its gates compare
-      BUILD.bazel              # exports the package label
-  include/nanochat/
-    capi.h  config.h  tensor.h  kernels.h  model.h  optim.h  data.h  sandbox.h
-    tokenizer.h  dataloader.h  rand.h  sampler.h  scheduler.h  logger.h  mfu.h
-    model_spec.h               # the description as data, and ModelSpec -> Config
-    plan.h                     # the plan structure and the pure BuildPlan
-    fields.h  checkpoint_metadata.h  # the metadata block; host-only, vendor-free
-  src/
-    ops.cc  model.cc  generate.cc  optim.cc  train.cc  data.cc  eval.cc
-    model_spec.cc              # the spec reader, the validator, the derivation
-    plan.cc  plan_main.cc      # the planner, and the probe `doctor` prints
-    capability_names.h/.cc     # the vocabulary name to kFeature* bit table
-    device_profile.cc          # derives the device table from backends/*/caps.json
-    fields.cc  checkpoint_metadata.cc  # the visitor and the metadata block
-    fields_test.cc                # the ported visitor tests
-    # The one stage binary. `nanochat_cli.cc` is the entry point, `command.h`
-    # and `commands.cc` are the subcommand seam, and each `<name>_command.cc`
-    # holds one handler. `cli.{h,cc}` is the one flag parser.
-    nanochat_cli.cc  command.h  commands.cc  cli.h  cli.cc
-    *_command.cc
-    plan_main.cc               # the probe `doctor` prints; alone on purpose
-    parquet/                   # the native parquet reader (docs/data.md)
-      thrift.{h,cc}  format.{h,cc}  levels.{h,cc}  reader.{h,cc}
-      *_test.cc  testdata/text.parquet
-    tokenizer/                 # the tokenizer host package (see src/tokenizer/)
-      tokenizer.cc  split_pattern.{h,cc}  utf8.{h,cc}  unicode_tables.inc
-      bpe_trainer.cc
-      tok_train_main.cc
-      *_test.cc
-  backends/
-    cpu/kernels.cc  cpu/kernels_test.cc
-    cpu/caps.json              # the reference device declaration
-    cuda/caps.json             # the declaration of every device this backend serves
-    cuda/fused_overrides.cc    # the fused families, registered as overrides
-    cuda/device.cu  cuda/gemm.cu  cuda/cuda_runtime_test.cc
-    cuda/row_reduce.cu  cuda/span_reduce.cu  # the two primitive reductions
-    cuda/kernels/{rms_norm,qk_prep,attention,pointwise,classifier,
-                  embedding,adamw,muon,grad_norm,value_gate}.cu
-    cuda/kernels/<family>_test.cc + <family>_benchmark.cc next to each kernel
-    cuda/kernels/device_utils.cuh
-    cuda/kernels/testing/        # host reference headers and test helpers
-  dev/kernels/                   # unpromoted prototypes
-  examples/                      # the smallest examples of the public API
-    hello_world/                 # inference: config, model, generate (docs/examples.md)
-    checkpoint_roundtrip/        # the container: save, load, metadata (docs/examples.md)
-  bindings/                      # the C ABI for the in-process Python API
-    nanochat_capi.cc  nanochat_capi_test.cc  BUILD.bazel
-  python/
-    nanochat_cpp/                # the single Python surface
-      __init__.py  _core.py  _lib.py  _build.py  api.py
-      plan.py  chat.py  toolchain.py  _entry.py  checkpoint.py
-      data.py  tasks.py  eval_fixture.py  reference.py
-      cli.py                     # the tools/nanochat command line
-      prune.py                   # the Bazel output-base reaper
-      gpu_queue.py               # the GPU job queue (worker + client)
-    tests/{core,build,api,plan,chat,toolchain,data,checkpoint,eval_fixture}_test.py
-    tests/gpu_queue_test.py      # T0 test for the queue
-    tests/prune_test.py          # T0 test for the reaper
-    tests/contract_test.py       # T0 test for the host-tool contract
-    BUILD.bazel
-  tests/oracle_test.cc  tests/data/debug_state.bin
-  tools/
-    nanochat                   # the single execution entry point
-    sandbox/profiles.json      # per-profile cgroup budgets
-    sandbox/nanochat.slice     # aggregate user-slice budget (drop-in)
-    sandbox/README.md
-    dump_fixtures.py           # the offline fixture generator
-    fixture_common.py          # the shared fixture helpers
-    fixture_format.py          # the shared fixture record writer
-    gen_matrix.py              # the section 11 matrix: rendered, and checked
-    isolation_gate.py          # the section 10.4 regenerate-and-diff gate
-  data/*.parquet
-```
+## Build configurations
 
-`include/nanochat/fields.h` is host-only and vendor-free. It is the field
-visitor the checkpoint container's metadata block is built on: plain scalar
-code over a `uint32` word stream, with no device, SIMD, or backend header, and
-no kernel header includes it. `include/nanochat/checkpoint_metadata.h` sits
-beside it and is host-only for the same reason. Neither one appears in
-`kernels.h`, and neither one reaches `backends/`.
+Architecture, precision, backend, collective, and simulator are build and link
+choices, not run-time switches. A named configuration sets one or more of them,
+and named configurations are additive: `--config=hopper --config=sim-gate` is
+one build.
 
-`spec/` holds prose and data and **no code**. It carries no build target, no
-header, and no source file: it is the vocabulary the two axes declare against
-and the authority those declarations are reviewed by — version numbers,
-capability bits, block kinds, op codes and their accuracy bounds, and the
-decision records. `docs/` describes what the tree computes; `spec/` names the
-words it says it in, and a name is only ever spelled once. A document that
-needs a name links into `spec/` rather than copying the table
-([model-and-device-bringup.md](model-and-device-bringup.md) §3 and §17).
+The table states the effective build of one named configuration, added to the
+default. The simulator column is prose, because it names an engine rather than
+a flag value. A script checks the other four columns against the tracked Bazel
+configuration, so a row cannot drift from the build.
 
-`backends/<name>/caps.json` is **the single device declaration**. The profile
-table the simulator reads — `include/nanochat/device_profile.h` and its
-`src/device_profile.cc` derivation — has no hand-written row: every entry comes
-from a `caps.json`, so a device bring-up adds a file under `backends/` and no
-row in a header. The same file is what the planner reads, and
-`spec/capability_bits.md` is the authority for the bit names it spells.
+<!-- BEGIN GENERATED: build-configurations -->
+| Configuration | Architecture | Precision | Backend | Collective | Simulator |
+|---|---|---|---|---|---|
+| _the default build_ | `sm_75` | fp32 | cpu | native | off |
+| `--config=bf16` | `sm_75` | bf16 | cpu | native | off |
+| `--config=fp8` | `sm_75` | fp8 | cpu | native | off |
+| `--config=cuda` | `sm_75` | fp32 | cuda | native | off |
+| `--config=native` | `sm_75` | fp32 | cuda | native | off |
+| `--config=sim` | `sm_75` | fp32 | cpu | native | the reference engine |
+| `--config=sim-gate` | `sm_75` | fp32 | cpu | native | the reference engine, with the compile gate |
+| `--config=h100` | `sm_90` | bf16 | cuda | native | the H100 device profile |
+| `--config=h200` | `sm_90` | bf16 | cuda | native | the H200 device profile |
+| `--config=hopper` | `sm_90` | bf16 | cuda | native | off |
+<!-- END GENERATED: build-configurations -->
 
-`models/` is the other axis: one directory per model package, holding the
-architecture description, the tolerances, and the fixtures the model's gates
-compare. A model bring-up adds a directory and edits no shared file
-([model-and-device-bringup.md](model-and-device-bringup.md) §6 and §12.2).
-Each package is its own Bazel package, so a diff inside one rebuilds only that
-package's targets and its matrix row.
+**A simulator profile is not a device build.** The H100 and H200
+configurations compile the capability override, and `GetCaps()` answers from
+the device profile table instead of from the card. A Hopper build with the
+simulator off compiles the real CUDA backend. A check that needs a card chooses
+that build. A report that is read without a card chooses a simulator profile.
 
-Every example under `examples/` is one package with a `cc_binary`, a `cc_test`
-over the same source, and a `test_suite(name = "all")`, so an example cannot
-rot. `docs/examples.md` says what each one shows and how long it stays.
+There is one collective. Both the simulator profile and the device build link
+it, so a one-device run reduces the collective to no operation.
 
-## Bazel
+The default architecture is the oldest card the tree supports. A build for an
+older card is not a target, so a binary built here holds no code for one.
 
-**Bazel** is the primary driver: fine-grained targets map to kernel families,
-and the action cache keeps parallel work from rebuilding the world. Config
-settings select backend/precision/arch; `select()` handles linking.
+## Resource bounds
 
-The tree pins **Bazel 9.2.0** in `.bazelversion`. Bazel does not read that file
-itself, so `tools/nanochat` runs Bazelisk when it is on `PATH` and falls back to
-a system `bazel` otherwise. Install Bazelisk once per host; see
-[sandbox.md](sandbox.md).
+One small host serves several agents, and every worktree is its own workspace
+with its own long-lived server. Left unbounded, those servers accumulate, and
+each one sizes its action pool to the whole machine. The tracked Bazel
+configuration therefore bounds the servers, and `tools/nanochat` serializes the
+builds. The tracked file holds the values; this section holds the reason for
+each one.
 
-- `.bazelrc` sets `--@rules_cuda//cuda:archs=sm_75`, the oldest architecture
-  the tree supports.
-- `CUDA_HOME=/usr` on this machine (no `/usr/local/cuda`).
-- GPU tests are tagged `gpu` + `manual` and run outside the Bazel sandbox.
-- Run tests through `tools/nanochat test`; it adds `--run_under` so each test
-  action is sandboxed, and forces `--spawn_strategy=local` so the wrapper can
-  reach the systemd user manager. See [sandbox.md](sandbox.md).
+- The server heap is capped.
+- An idle server exits instead of lingering for the default three hours.
+- The kernel may stop a server under memory pressure.
+- One server's action pool and memory hint are bounded.
+- `tools/nanochat build` and `tools/nanochat test` take one exclusive lock, so
+  at most one worktree compiles at a time. The lock descriptor is closed on the
+  client so the detached server cannot inherit it.
+- `tools/nanochat shutdown` stops the current workspace's server.
 
-### Resource bounds
+The host budget that these bounds protect is in [sandbox.md](sandbox.md).
 
-Every worktree and verifier is its own Bazel workspace, so it starts its own
-persistent server. On a small shared host that adds up, so `.bazelrc` bounds
-each server and `tools/nanochat` serializes builds:
+### One device compile at a time
 
-- `startup --host_jvm_args=-Xmx1500m` caps the server heap.
-- `startup --max_idle_secs=600` and `startup --shutdown_on_low_sys_mem` let an
-  idle server exit instead of lingering for the three-hour default.
-- `build --jobs=4 --local_resources=memory=3072` bounds one server's local
-  action pool.
-- `tools/nanochat build` and `tools/nanochat test` take an exclusive lock
-  (`/tmp/nanochat-build.lock`) so at most one worktree compiles at a time. The
-  lock descriptor is closed on the Bazel client so the detached server cannot
-  inherit it.
-- `tools/nanochat shutdown` stops the current workspace's server immediately.
+A device compile of a large template target holds two to three GiB. Four such
+actions at the default action count exceed the host, and the memory hint of the
+build is a scheduling hint and not a limit. Two rules follow.
 
-See [sandbox.md](sandbox.md) for the host budget this protects.
+- Build a heavy template target with one action. A local configuration may
+  define its own action cap, so the tracked default stays unchanged.
+- A stalled build is not a slow build. Read the memory pressure before you
+  wait. The kernel reports the share of time that a task stalled on memory.
+  The process statistics report the processor time that a compile has used. A
+  high stall share beside a low processor time means that the build waits on
+  memory. Stop it and restart with one action, because a longer wait does not
+  finish it.
 
-#### Heavy device targets
+### A build inside a session
 
-- **A CUTLASS target needs its own action cap.** One candidate is one
-  compilation unit with eight instantiations, and the device compiler keeps 2
-  to 3 GiB for each. Four such actions at `--jobs=4` exceed this host, so build
-  `//backends/cuda/gemm:cutlass_*` with `--jobs=1`.
-  `--local_resources=memory=3072` is a scheduling hint, not a limit.
-- **Three parallel `cicc` processes caused the kill.** On 2026-11-08 they held
-  2.3 to 2.9 GiB each, and the kernel ran the OOM killer on a compile. Swap was
-  already full, so the host thrashed first. That thrash is the freeze an
-  operator feels.
-- **Keep the cap out of the tracked file.** A host may define
-  `build:cutlass --jobs=1` in `.bazelrc.local`, then run
-  `tools/nanochat build --config=cutlass <target>`. Ordinary targets keep
-  `--jobs=4`, so the tracked default does not change. The workstation also caps
-  every CUDA config there with `build:cuda --jobs=2` and
-  `build:hopper --jobs=2`, because four `cicc` front-ends do not fit the guest.
-- **A build takes the session cgroup budget.** `--jobs` is the last bound on
-  a compile; the session slice is the first. In a session worktree
-  (`tools/nanochat session start`) `tools/nanochat build` starts Bazel inside
-  the slice, and the kernel then kills the compile and not the session. The
-  read-back proves the placement, and a server outside the slice fails the
-  build. See `docs/sandbox.md` `### Builds`.
-- **A build in a session has no network.** The session supervisor holds one
-  private network namespace with only loopback, and the build runs in it. An
-  external repository that is not in the output base then stops the build. One
-  `tools/nanochat build --net host ...` fetches it. A repeat build reuses the
-  server and costs 0.5 s. See `docs/sandbox.md` section 19.
-- **A session keeps `include/nanochat` read-only.** Those headers are
-  contract-owned, so a session cannot change one by accident. The architect
-  starts its session with `--architect` to keep them writable
-  (`docs/sandbox.md` section 18).
-- **Outside a session there is no cgroup and no namespace.** The build lock and
-  `--jobs` are the only bound, so a long build outside a session still wants a
-  hand scope:
-  `systemd-run --user --scope -p MemoryMax=6G -p MemorySwapMax=0 --`.
+A session worktree places the build in the session slice and in a private
+network namespace. The kernel then stops the compile and not the session. An
+external repository that is not already fetched stops a build with no network,
+and one command with the host network fetches it. A repeat build reuses the
+server. The shared headers stay read-only in a session, and one flag makes them
+writable for the workstream that owns them. Outside a session there is no slice
+and no namespace, so a long build wants a hand scope.
 
-### Python targets
+## Third-party code
 
-The in-process Python API (docs/python.md) adds two packages.
+The tree has three third-party dependencies, and only one of them reaches a
+shipped binary.
 
-- `//bindings` holds the C shim over the C++ graph:
-  - `//bindings:nanochat_capi` — the shim as a `cc_library`, for the drift test.
-  - `//bindings:nanochat_shared` — the shim as a `linkshared` `cc_binary`.
-    This target builds `libnanochat_shared.so`, the library `ctypes` loads.
-  - `//bindings:nanochat_capi_test` — the C surface drift test.
-- `//python` holds the `ctypes` package and the `py_test` coverage:
-  - `//python:nanochat_cpp` — the `py_library`.
-  - `//python:core_test`, `//python:build_test`, and `//python:api_test` — the
-    three T0 `py_test` targets.
+| Dependency | Kind | Cost to the binary |
+|---|---|---|
+| the CUDA runtime and cuBLAS | linked library | none at build time, and the vendor runtime at run time |
+| the host compression library | linked library, host tools only | one link edge in the native parquet reader |
+| CUTLASS | headers only | no library and no symbol |
 
-`MODULE.bazel` declares `rules_python` 1.7.0 directly. The package imports
-only the Python standard library, so the root module registers the local
-`python3` toolchain through `local_runtime_repo` and
-`local_runtime_toolchains_repo`. The flag `dev_dependency = True` keeps the
-local toolchain out of a downstream module. The host tool requires Python 3.10
-or later, and it checks that floor at startup. Build the shared library with
-`tools/nanochat build //bindings:nanochat_shared`; `.bazelrc` already selects
-the CPU backend at fp32, so no named config is necessary.
+The CPU build links the math library and the host thread runtime. Neither
+backend links cuDNN or a vendor collective: the native ring needs no vendor
+library.
 
-### Python environments
+### CUTLASS is a build-time dependency
 
-The host tools and the `py_test` targets need the standard library and the
-system `python3` only. Keep that interpreter free of third-party packages.
-
-A task that needs an extra installs it in one environment outside the tree.
-Then no worktree carries a second copy. The command names an extra of
-[build.md](build.md) Part 1, section 6.2, not a
-package list:
-
-```bash
-uv venv --python 3.12 ~/.venvs/nanochat-cpp
-uv pip install --python ~/.venvs/nanochat-cpp/bin/python -e "python[modal,hub]"
-```
-
-Do not add an extra to the reference environment. `tools/nanochat parity
-produce` resolves the reference interpreter itself. A producer records that
-environment as its provenance.
-
-Do not activate the environment for `tools/nanochat test` or `build`. Bazel
-resolves `python3` through `PATH` (`local_runtime_repo` above). An active
-environment therefore becomes the test interpreter. Its site-packages can then
-hide an import that breaks the layering rule.
-
-## Link dependencies
-
-Bazel is the only supported build. The smallest CUDA gate is
-`//backends/cuda/kernels:rms_norm_gpu_test`.
-
-The CUDA build links `cudart` and cuBLAS. The CPU build links `libm`. Neither
-links cuDNN or a collective library: the native ring needs no vendor library.
-
-### The one header-only vendor: CUTLASS
-
-NVIDIA CUTLASS supplies the Hopper mainloop of
-[kernels.md](kernels.md) Part 3. It is headers and nothing else, so it is a
-**build-time** dependency: the build links no library, and no shipped binary
-holds a CUTLASS symbol. The rule that fetches it is
-[../third_party/cutlass.bzl](../third_party/cutlass.bzl), and `MODULE.bazel`
-instantiates it as `@cutlass`.
+CUTLASS supplies the Hopper mainloop of the hand GEMM. It is headers and
+nothing else, so the build links no library and no shipped binary holds one
+CUTLASS symbol.
 
 | Property | Value |
 |---|---|
 | Pin | commit `b2f249acd20392beeb16f5e5a31f4f1a4e38b3bd`, tag `v4.8.0-23`, `version.h` 4.8.1 |
 | Checksum | the SHA-256 of the archive, checked on every fetch |
 | Licence | BSD-3-Clause, copied into the fetched repository as `LICENSE.txt` |
-| Contents | `include/` only, which is 28.5 MB of the archive's 169 MB |
+| Contents | `include/` only |
 | Override | `NANOCHAT_CUTLASS_PATH`, for a host with no network |
 
-**The rule fetches the tree; it does not track it. That is a build rule.** The
-lint pass checks every source that `git ls-files` reports, and the CUTLASS
-headers break four of its five rules on purpose. An external repository keeps the
-vendor tree out of the lint pass, out of the format gate, and out of a diff.
+The rule fetches the tree as an external repository and does not track it. That
+is a build decision with three effects. The lint pass never reads the vendor
+headers, and those headers break several of its rules on purpose. The format
+gate never reads them. A diff never holds them.
 
-The headers also emit about fifteen thousand warnings, and `--config=sim-gate`
-builds with `-Werror`. A target that compiles against CUTLASS therefore states
-its own `copts` and does not load `nanochat_cuda_copts`.
+The vendor headers also emit many warnings, and the compile gate builds with
+warnings as errors. A target that compiles against CUTLASS therefore states its
+own options and does not use the project CUDA options.
 
-**A Hopper target names its own architecture.** `rules_cuda`'s `cuda_library`
-takes an `archs` attribute, and its value replaces the command-line
-`--@rules_cuda//cuda:archs` for that target alone. The WGMMA mainloop needs
-`sm_90a`, so its target states `archs = ["sm_90a"]` and the tree's default build
-stays at `sm_75`. No `.bazelrc` line changes and no command line gains a flag.
-`dev/cutlass/README.md` records the probe that proved it.
+A Hopper target names its own architecture. The rule that compiles a CUDA
+target takes an architecture list, and that value replaces the command-line
+default for that target alone. The mainloop needs the Hopper tensor-core
+architecture spelling, so its target states it and the tree's default build
+stays at the oldest supported architecture. No tracked configuration line
+changes, and no command line gains a flag.
 
-## Backends and selection
+## Backends, precision, and devices
 
-Backend and precision are build and link choices, not runtime switches.
-
-Selection is a build/link choice:
-
-```
---backend=cpu|cuda        link the backend library
---precision=fp32|bf16     select ComputeType
---arch=sm_75|sm_80|sm_90    CUDA --generate-code
-```
+A backend is selected at build and link time.
 
 | Backend | Implements | Notes |
 |---|---|---|
-| `backends/cpu` | all of `kernels.h` with naive loops | reference, CI, oracle baseline; `-lm` (+ OpenMP) |
-| `backends/cuda` | all of `kernels.h`; cuBLAS for GEMM | Turing fp32, Ampere and newer bf16; no cuDNN, no vendor collective |
+| the CPU backend | every function of the seam, with plain loops | the reference, the correctness baseline, and the fixture producer; the math library and the host thread runtime |
+| the CUDA backend | every function of the seam; cuBLAS for GEMM | fp32 on the oldest card, bf16 on newer cards; no cuDNN, no vendor collective |
 
-The shared workflow (`ops.cc`, `model.cc`, `generate.cc`, `optim.cc`,
-`train.cc`) compiles once and links against either backend. This is the one
-improvement over llm.c, which duplicates its top-level files per backend.
+### Precision
+
+One precision exists per build, and no run-time type dispatch occurs. The build
+selects the source, or the code reads the build's compute type. No source tests
+the numeric define; the one header that defines the value is the only file that
+may branch on it.
+
+- The oldest card and the CPU compute in fp32.
+- Ampere and newer cards compute in bf16.
+- The fp8 compute type computes in bf16 and quantizes the eligible matrix
+  multiplications.
+- The persistent state stays fp32 in every build, so the parameter gradient is
+  always a single-precision value even when the compute type is bf16.
+
+The backend reports the type set it supports. A bf16 build on a device without
+bf16 fails at model creation, with the device name in the message. The
+precision policy, the fp8 tier, and the accuracy bounds are in
+[precision.md](precision.md).
+
+### Devices
+
+A card is a row of a backend declaration file, and that file is the single
+device declaration of the tree. The profile table that the simulator reads and
+the planner both derive their rows from those files, so a device bring-up adds
+a file and no header row. The capability bit names come from the capability
+vocabulary.
+
+Two cards serve the tree today: a Hopper training card and the oldest supported
+Turing card. The Turing card has fp32 arithmetic, tensor-core instructions, and
+no bf16 arithmetic. Hopper adds bf16 arithmetic. A device declares only the
+precision and the capability bits that its silicon honors, because a
+declaration may not grant what the card lacks. The planner and the roofline
+report refuse a device that has no row, and they name it.
 
 ### Adding a backend
 
-Adding hardware = add `backends/<x>/` implementing `kernels.h` plus a config
-value. `src/` and `include/` normally need no changes; a new kernel family
-(below the replacement boundary) does touch the frozen headers, under the
-evolution rules in [model-and-device-bringup.md](model-and-device-bringup.md)
-§18.
+A backend is a directory under `backends/` and one configuration value. The
+workflow sources and the public headers need no change. The directory provides
+every function of the seam, a declaration file for each device it serves, and
+the tests that compare its kernels against the reference backend on small
+shapes.
 
-The interface to implement is [kernels.md](kernels.md). The dependency rules a
-backend must respect are the
-[dependency invariants](#dependency-invariants):
-`backends/**` includes only `nanochat/kernels.h` and `nanochat/tensor.h`, and a
-kernel knows nothing about the model.
+A new kernel family reaches below the replacement boundary of the seam. It
+therefore touches a frozen header, under the evolution rules in
+[model-and-device-bringup.md](model-and-device-bringup.md#18-evolution-rules).
 
-## Precision
+## The Python distribution
 
-`-DNANOCHAT_PRECISION=0` selects fp32, `=1` selects bf16, and `=2` selects fp8.
-The fp8 compute type is bf16. `include/nanochat/tensor.h` maps the value to
-`BuildPrecision`, so one precision exists per build and no runtime dtype
-dispatch occurs. No source tests the numeric define: the build selects the
-source, or the code reads `kComputeIsBf16` ([precision.md](precision.md) section
-1.1). The fp16 build and its half-storage path are removed
-([precision.md](precision.md)).
+The Python surface is one distribution with two import packages and four
+boundaries. A boundary is a promise about imports, and the base install carries
+every boundary at no third-party cost.
 
-- Turing (sm_75) and the CPU: fp32.
-- Ampere (sm_80) and Hopper (sm_90): bf16.
-- The persistent state stays fp32 in every build, so the parameter gradient is
-  always `GradientType = float` even when the compute type is bf16
-  ([precision.md](precision.md) section 5).
-- The backend reports supported dtypes through `Caps::Supports`. A bf16 build on
-  a device without bf16 fails fast: `Model::Create` returns null with
-  "compute dtype is not supported by <device>".
-
-`--config=bf16` selects the define. `--config=h100` and `--config=h200` are the
-two Hopper targets; each selects sm_90, `--config=bf16`, the CUDA backend, and
-the simulator.
-
-### `hopper`, beside `h100`
-
-| Config | Arch | Precision | Backend | Simulator | Collective |
-|---|---|---|---|---|---|
-| `h100` | sm_90 | bf16 | cuda | on (`--define=simulator=1`) | `native` |
-| `hopper` | sm_90 | bf16 | cuda | off | `native` (the only collective) |
-
-The two configs are not the same build. `h100` is the *simulator* profile: it
-compiles in the capability override and answers from the device profile table
-instead of from the card. `hopper` is a real Hopper build for a hand run at
-bf16, with the simulator off. The native ring is the one collective, so both
-configs link it and the chain's `world_size=1` reduces to a no-op
-([post-training.md](post-training.md) Part 3, section 3, trap 1). A
-check that needs a card chooses `hopper`; a report read without a card chooses
-`h100`.
-
-`hopper` is a hand-run shorthand only. `_build._build_command` still emits its
-explicit flag triple, `--config=cuda`, `--define=precision=<p>`, and
-`--@rules_cuda//cuda:archs=<a>`, and never a named config, so the chain's H100
-leg, the build test, and a hand run are the same build.
-
-## Turing (T4, sm_75)
-
-Design for the Turing target. The T4 card is the oldest GPU family that
-`nanochat.cpp` supports, so `sm_75` is the floor of the build. Read the backends
-and precision sections above for the selection rules.
-
-The build configs exist for Turing, but the
-correctness gates have no recorded result yet. The `t4` build uses fp32 for the
-compute, so each parameter keeps one fp32 weight and the optimizer updates that
-weight in place. The build needs no master-weight mirror and no loss scaling.
-See the precision section above and [precision.md](precision.md).
-
-### 1. Goal
-
-Turing is a supported target. A Turing port uses the existing backend seam. No
-new backend directory is necessary.
-
-### 2. Capability difference
-
-| Feature | Turing sm_75 | Hopper sm_90 |
+| Boundary | May import | Counted dependencies |
 |---|---|---|
-| fp32 arithmetic | yes | yes |
-| `mma` instructions | yes | yes |
-| bf16 arithmetic | no | yes |
+| the C++ core | the C runtime and the vendor runtime | three to five libraries |
+| the Python core | the standard library, and the C++ core through the C ABI | zero packages |
+| the adapters | the standard library, the Python core, and the adapter extras | one to six packages |
+| the hosts | any boundary | per host |
 
-`GetCaps()` reports the differences. `caps.has_tensor_cores` is true for
-`major >= 7`, so every supported card reports it. Turing has fp16 tensor cores,
-but no build uses them ([precision.md](precision.md)); the T4 runs fp32.
+The arrow points down. A boundary imports a lower boundary and never a higher
+one. Five rules hold this shape.
 
-### 3. Build configuration
+1. The Python core imports the standard library and nothing else.
+2. An adapter module imports its heavy package inside the function that needs
+   it, so the module loads with no extra installed and the base install stays
+   pure.
+3. A host imports either package. A notebook is a host.
+4. No package imports a host.
+5. A public header names no vendor type. That rule is invariant 3 of the build.
 
-| Config | Arch | Precision | Use |
-|---|---|---|---|
-| `bf16` | default | bf16 | bf16 compute for Ampere and newer |
-| `h100`, `h200` | sm_90 | bf16 | Hopper simulator profile and compile gate |
-| `hopper` | sm_90 | bf16 | real Hopper build for a hand run (the Precision section) |
+An adapter is the only place that names the reference implementation of the
+model. The Python core reaches an adapter by being handed a callable, never by
+naming the module.
 
-The tree keeps no named Turing config. A Turing run passes
-`--config=cuda --@rules_cuda//cuda:archs=sm_75` itself, which is the flag triple
-`tools/modal/app.py` emits for its T4 leg. The Turing build uses the fp32 GEMM
-path.
+### The gates that hold the boundaries
 
-The T4 build uses fp32. The fp32 build is the correctness gate and the default
-Kaggle build. The Turing hardware supports fp16, but no build uses it
-([precision.md](precision.md)). Stage 1 removed the separate `t4-fp32` config.
+Five gates run in the CPU test loop, so a broken boundary fails a build and not
+a review.
 
-### 4. GEMM behavior
-
-`backends/cuda/gemm.cu` uses fp32 accumulation on every device
-(`CUBLAS_COMPUTE_32F`). The `t4` build uses the classic `cublasSgemm` path for a
-single GEMM. A bf16 build uses `cublasGemmEx` with `CUDA_R_16BF` operands. A
-forward or dgrad GEMM writes a bf16 result; `GemmWgrad` writes the fp32
-parameter gradient.
-
-The host graph and the optimizer state stay fp32 wherever the seam requires
-it. See the precision section above.
-
-### 5. Attention
-
-The current attention kernel uses fp32 statistics and an online softmax. It does
-not use tensor cores. A `mma` variant is later work under
-[kernels.md](kernels.md) § Compute strategy. A candidate belongs in
-`dev/kernels/` first, and it must beat the current kernel at the training shape.
-
-### 6. Correctness gates
-
-| Tier | Target | Precision |
-|---|---|---|
-| T1 | `//backends/cuda/kernels:precision_gpu_test` | fp32 |
-| T1 | `//backends/cuda:cuda_runtime_gpu_test` | fp32 |
-| T2 | `//tests:oracle_cuda_test` | fp32 |
-| T2 | `//tests:train_parity_cuda_test` | fp32 |
-| T3 | `//backends/cuda/kernels:attention_benchmark` | fp32 |
-
-The CUDA `precision_gpu_test` target builds at the fp32 precision only. The T4
-gate runs the fp32 build with the recorded fp32 tolerance. Measure the worst
-error again and record the new value in `precision_test.cc`. Do not widen the
-tolerance without a measurement.
-
-The T2 targets compare against committed fp32 PyTorch goldens, so they run only
-in the fp32 build. The bf16 gates are listed in
-[precision.md](precision.md) section 6.
-
-Extend `//backends/cuda:cuda_runtime_gpu_test` to assert two things on sm_75:
-the device name and `has_tensor_cores`.
-
-### 7. Two cards
-
-A Kaggle Notebook gives two T4 cards. See
-[host-portability.md](host-portability.md) for device selection and
-[host-portability.md §8](host-portability.md) for the two options. The short form:
-
-- Option A: two independent jobs, one per card.
-- Option B: data-parallel training. Later work.
-
-## Part 1. Dependency layering and host packaging
-
-_Absorbed from the former `dependency-layering-plan.md`. Its section numbers
-are unchanged, so a reference to a section of that document resolves to the
-same number here._
-
-### 1. Goals and non-goals
-
-#### Goals
-
-- Keep `pip install nanochat-cpp` free of third-party packages.
-- Make a broken dependency boundary fail a test, not a review.
-- Drive a notebook, a Modal container, and a test gate from one package.
-- Compare with the PyTorch reference without a torch install at gate time.
-- Install the package at image build, and the weights at run start.
-
-#### Non-goals
-
-- Adding numpy to the core. The current `array` and `ctypes` code is why the
-  wheel stays pure.
-- Moving a source file under `src/`, `include/`, or `backends/`.
-- A language server, a formatter, or a packaging rewrite.
-- A published binary wheel for every platform. The first release covers sm_75
-  and sm_90 only.
-
-### 2. The defect
-
-The C++ core is already lean. The
-[dependency invariants](#dependency-invariants)
-enforce the layering, and `backends/**` links no vendor library beyond CUDA. The
-leak is in the Python tree.
-
-#### 2.1 Leak one: lazy third-party imports in core modules
-
-A lazy import hides a dependency from every tool. The import succeeds in the
-test loop only because the module name resolves late.
-
-| File | Line | Import | Correct zone |
-|---|---|---|---|
-| `python/nanochat_cpp/checkpoint.py` | 943 | `torch` | Z2 |
-| `python/nanochat_cpp/checkpoint.py` | 962 | `torch` | Z2 |
-| `python/nanochat_cpp/checkpoint.py` | 986 | `torch` | Z2 |
-| `python/nanochat_cpp/checkpoint.py` | 1005 | `torch` | Z2 |
-| `python/nanochat_cpp/data.py` | 42 | `nanochat.dataset` | Z2 |
-| `python/nanochat_cpp/data.py` | 163 | `tiktoken` | Z2 |
-| `python/nanochat_cpp/tasks.py` | 65 | `numpy` | Z2 |
-| `python/nanochat_cpp/tasks.py` | 409 | `nanochat.execution` | Z2 |
-
-#### 2.2 Leak two: no package description
-
-The tree has no `pyproject.toml`. A reader cannot tell which packages the base
-install needs. A host cannot install the package without a repository clone.
-`tools/modal/app.py` and `notebooks/kaggle_setup.py` both clone and build the
-tree for that reason.
-
-#### 2.3 Leak three: an eager package import
-
-`python/nanochat_cpp/__init__.py` line 18 imports thirteen modules. A caller
-that needs only `api` pays for `chat`, `rl`, `sft`, `sft_data`, and `toolchain`.
-The cost is small today. It grows when `Z2` re-exports arrive.
-
-#### 2.4 Leak four: no provenance in a fixture
-
-`models/nanochat-default/fixtures/manifest.json` records a hash, a size, and a
-record count. It does not record the torch version or the reference commit that
-produced the bytes. A parity claim in [parity.md](parity.md) then rests on an
-environment that the manifest cannot name.
-
-### 3. Decisions
-
-| ID | Decision | Recommendation |
-|---|---|---|
-| D1 | How many import packages? | Two: `nanochat_cpp` and `nanochat_cpp_bridge`. |
-| D2 | How many distributions? | One. The base list is empty and the extras carry the rest. |
-| D3 | Where is the boundary tested? | In the test loop, by five gates. See section 8. |
-| D4 | Which module moves first? | `checkpoint.py`. It has the largest torch surface. |
-| D5 | Does the bridge live under `python/`? | Yes. One `py_library`, one test area, one owner. |
-| D6 | How does a wheel carry the shared library? | A per-architecture wheel, `nanochat_cpp_cuda_<arch>`. |
-| D7 | Where does the wheel sit in the search order? | New item 5, before the cache and the on-demand build. |
-| D8 | How does Modal get the weights? | A volume keyed by the stage revision, not the image. |
-| D9 | How does a notebook install? | One `pip install` cell and one environment cell. |
-| D10 | How does a parity gate compare? | It reads a committed file, never an import. |
-| D11 | Where does the producer code live? | `python/nanochat_cpp_bridge/fixtures/`, run by `tools/nanochat parity`. |
-| D12 | Is a public PyPI release in scope? | No. The first channel is a Hugging Face repository. |
-
-The owner decides D1, D2, and D12. D6 and D7 need a decision from the Build
-workstream, because a wheel changes `.bazelrc` and the release command.
-
-### 4. The four zones
-
-```text
-Z3  Hosts        modal, kaggle, jupyter        tools/**, notebooks/**
-Z2  Adapters     torch, numpy, tiktoken,      nanochat_cpp_bridge
-                 safetensors, huggingface_hub,
-                 datasets, nanochat
-Z1  Python core  standard library only        nanochat_cpp
-Z0  C++ core     libm, cudart, cuBLAS,        src/**, include/**, backends/**
-                 zstd (host only), RDMA, CUTLASS (headers, build time)
-```
-
-The arrow points down. A zone imports a lower zone and never a higher one.
-
-| Zone | May import | Must not import | Counted dependency |
-|---|---|---|---|
-| Z0 | the C runtime and the vendor runtime | any Python | 3 to 5 libraries |
-| Z1 | the standard library, and `Z0` through `ctypes` | anything in `Z2` | 0 packages |
-| Z2 | the standard library, `Z1`, and its extras | `Z3` | 1 to 6 packages |
-| Z3 | any zone | nothing imports it | per host |
-
-Five rules hold the zones.
-
-1. `python/nanochat_cpp/**` imports only the standard library.
-2. `python/nanochat_cpp_bridge/**` imports the standard library, `nanochat_cpp`,
-   and its extra packages.
-3. `tools/**` and `notebooks/**` import either package.
-4. No package imports `tools/` or `notebooks/`.
-5. A header under `include/` names no vendor type. This rule already holds.
-
-### 5. Target tree
-
-```text
-python/
-  pyproject.toml                  # new: base list empty, extras below
-  BUILD.bazel                     # one new py_library and one test area
-  nanochat_cpp/                   # Z1, same role
-    __init__.py                   # lazy __getattr__ re-exports
-    api.py chat.py rl.py mesh.py runtime.py plan.py toolchain.py
-    data.py                       # the NCTOKEN1 reader stays
-    checkpoint.py                 # the container read and write stay
-    sft_data.py tasks.py eval_fixture.py
-    _core.py _lib.py _build.py
-  nanochat_cpp_bridge/            # Z2, new
-    __init__.py
-    torch_checkpoint.py           # from checkpoint.py lines 915 to 1046
-    reference_data.py             # from data.py lines 42 and 163
-    reference_tasks.py            # from tasks.py lines 65 and 409
-    hf_hub.py                     # the Hub save and load path
-    sft_reference.py              # the reference renderer and mixture
-    fixtures/                     # the producers. See section 7
-```
-
-The model manifests gain one field. `models/<name>/fixtures/manifest.json`
-records the producer beside the hash. See section 7.2.
-
-### 6. Packaging
-
-#### 6.1 The base install
-
-```toml
-[project]
-name = "nanochat-cpp"
-version = "0.1.0"
-requires-python = ">=3.10"
-dependencies = []          # Z1. This line is the invariant.
-
-[project.optional-dependencies]
-hub       = ["huggingface_hub>=0.24", "safetensors>=0.4"]
-reference = ["torch>=2.4", "numpy>=1.26", "tiktoken>=0.8"]
-nanochat  = ["nanochat @ git+https://github.com/karpathy/nanochat"]
-hfdata    = ["datasets>=2.20", "tokenizers>=0.20", "pyarrow>=16"]
-modal     = ["modal>=0.64"]
-notebook  = ["jupyterlab", "ipykernel"]
-
-[tool.setuptools.packages.find]
-include = ["nanochat_cpp*", "nanochat_cpp_bridge*"]
-```
-
-The base install carries both import packages. The bridge files are inert
-without an extra, because a bridge module imports its heavy package inside the
-function that needs it.
-
-#### 6.2 Extras by task
-
-| Task | Command |
+| Gate | Fails when |
 |---|---|
-| Notebook, evaluate a stage | `pip install "nanochat-cpp[hub]"` |
-| Modal image, train | `pip install "nanochat-cpp[hub]"` and a binary wheel |
-| Produce a parity fixture | `pip install "nanochat-cpp[reference,nanochat]"` |
-| SFT data from the Hub | `pip install "nanochat-cpp[reference,nanochat,hfdata]"` |
-| Workstation development | the source tree, plus Bazel |
+| the standard-library scan | a file of the Python core imports a name outside the standard library, including an import inside a function |
+| the isolated import | a fresh interpreter with no site packages cannot import the package and resolve every public name |
+| the pure base install | the package description declares a base dependency, or the file is missing |
+| the fixture provenance | a fixture record names no producer environment or no producing module |
+| the core independence | a file of the Python core mentions the adapter package, even in prose |
 
-#### 6.3 The shared library
+### Installing
 
-A pure wheel cannot carry one `.so` for every card. Use one binary wheel per
-architecture. The package name states the architecture, as `nanochat_cpp_cuda_sm75`.
+The base install carries both import packages and no dependency. A task
+installs one extra, and the extras name a job rather than a package list.
 
-`_lib.py` searches in this order after the change:
+| Task | Install line |
+|---|---|
+| read a stage from the Hub | `pip install "nanochat-cpp[hub]"` |
+| train on a rented device | `pip install "nanochat-cpp[hub]"` and a binary wheel |
+| produce a parity fixture | `pip install "nanochat-cpp[reference,nanochat]"` |
+| build SFT data from the Hub | `pip install "nanochat-cpp[reference,nanochat,hfdata]"` |
+| develop on a workstation | the source tree and Bazel |
 
-1. the path in `NANOCHAT_CPP_LIB`;
-2. the Bazel runfiles tree;
-3. the development tree under `bazel-bin/bindings`;
-4. a library next to the package;
-5. an installed `nanochat_cpp_cuda_<arch>` wheel;  **new**
-6. the cache or an on-demand build.
+The build resolves the interpreter through the path, so an activated
+environment becomes the test interpreter and its site packages can hide a
+layering break. Keep the tree's interpreter free of third-party packages, and
+install an extra in one environment outside the tree.
 
-A wrong architecture fails at `nanochat_init`, with the corrective command.
+### The shared library
 
-#### 6.4 Modal
+A pure wheel cannot carry one shared library for every architecture, so a
+binary wheel states its architecture in the package name. The search order of
+the loader, the fallback build, and the cache are in
+[python.md](python.md#32-kaggle-delivery). A wrong architecture fails at
+initialization with the corrective command.
 
-Install the package at image build. Fetch the weights at run start.
+### A container
 
-```python
-image = (
-    modal.Image.from_registry("nvidia/cuda:12.0-devel-ubuntu22.04")
-    .pip_install("nanochat-cpp[hub] @ https://.../nanochat_cpp_cuda_sm75-0.1.0.whl")
-)
-runs   = modal.Volume.from_name("nanochat-runs",   create_if_missing=True)
-weights = modal.Volume.from_name("nanochat-weights", create_if_missing=True)
-```
+A rented container installs the package at image build and fetches the weights
+at run start. The weights live in a volume keyed by the stage revision, so a
+new checkpoint costs a download and not an image build.
 
-The image holds the package. The weights volume holds `<repo_id>/<stage>/`, keyed
-by the stage revision. A new checkpoint then costs a download, not an image
-build.
+A build cannot run at image build time against a cold cache, because a volume
+attaches to a function and not to an image. The image therefore copies the
+module graph and the tooling, resolves the external repositories, and the build
+runs inside the container against a cache volume. A warm cache makes the second
+run cheap, so one warm function pays the first compile.
 
-The current `tools/modal/app.py` bakes the repository into the image and keeps
-the build out of it. A Modal Volume attaches to a function and never to an
-image, so a build inside the image would compile against a cold cache on every
-rebuild. The build therefore runs in the container, once, against a cache
-Volume:
+The toolkit is a layer above the source tree, so a source change rebuilds it.
+Keep it out of the image once the binary wheel is the install path.
 
-```python
-cache = modal.Volume.from_name("nanochat-build-cache", create_if_missing=True)
-```
+### A notebook
 
-`NANOCHAT_BAZEL_CACHE` names the cache directory, and the image sets it to
-`/cache/<leg>`, so a container builds the leg it declares. The builder turns a
-directory into `--disk_cache` and `--repository_cache` under it, and it raises
-with the variable's name when the directory is not writable. A URL becomes
-`--remote_cache` instead, which is the only transport an image build can reach.
+A notebook cell installs the package and one binary wheel, and it sets the
+sandbox backend to none. The cell does no clone and no build. The logic stays
+in the notebook package, and a cell holds no logic.
 
-The measurement that chose this shape is the T4 leg on 2026-11-10. Its 190
-actions read 133 disk cache hits, and the build cost 19.1 seconds on a warm
-Volume and 101.9 seconds on the first read after `warm_cache` wrote the cache.
-The hits are downloads, so the Volume's latency per file is the cost, and the
-3.4 seconds a local disk cache reads does not model it. Two things follow, and
-both are deliberate. The first run of a leg pays the whole compile in a
-container with four cores, so `modal run tools/modal/app.py::warm_cache` pays it
-once, in a function with an hour to spend. A warm run pays tens of seconds where
-the image path paid nothing.
+## The parity seam
 
-The profiler is an apt layer of the toolkit and not of the tree. A layer above
-the tree copy is rebuilt by every source change, and one file cost 215 and 63
-seconds of apt on 2026-11-10, for a profiler that a card job never runs.
-
-The image still resolves the external repositories. It copies the module graph
-and the tooling first, then runs `tools/nanochat build --nobuild`, so the
-container's build finds them in the output base. A source change rebuilds the
-tree layer and the container build, and the fetch layer survives it.
-
-Keep the wheel path as the later one-line change: an image that installs a
-binary wheel needs no toolkit, no Bazel, and no cache.
-
-#### 6.5 Notebook
-
-```python
-%pip install -q "nanochat-cpp[hub]" "https://.../nanochat_cpp_cuda_sm75-0.1.0.whl"
-import os; os.environ.setdefault("NANOCHAT_SANDBOX_BACKEND", "none")
-```
-
-The cell does no clone and no build. The logic stays in `notebooks/session.py`
-and `notebooks/target.py`. A cell holds no logic.
-
-### 7. The parity seam
-
-#### 7.1 The rule
-
-A comparison with the PyTorch world is a file, not an import.
+A comparison with the reference implementation is a file, not an import.
 
 ```text
-      producer (Z2, offline)              consumer (Z1, no torch)
-torch nanochat  -->  fixtures/*.bin  -->  tests/
-HF datasets     -->  packed rows     -->  nanochat_cli sft
+      producer (an adapter, offline)        consumer (the Python core, no torch)
+torch, nanochat  -->  fixtures/*.bin  -->  a CPU test
+a data library   -->  packed rows     -->  the supervised fine-tuning command
 ```
 
-The producer runs in a virtual environment with the reference checkout. The
-consumer runs in the T0 loop with no third-party package. The tree already
-follows this pattern for `debug_state.bin`, `train_parity.bin`,
-`tokenizer_fixture.bin`, and `numerics_golden_10l.bin`.
+The producer runs in an environment that holds the reference checkout and the
+adapter extras. It writes the bytes and records that environment. The consumer
+reads the committed file with the standard library only, in the CPU loop.
 
-#### 7.2 Provenance
+A fixture record names two things beside its hash and its size. The producer
+record names the interpreter, the reference library versions, and the reference
+revision. The generator record names the module that wrote the bytes. A gate
+fails a record that lacks either one, so a parity claim always names an
+environment that a reader can rebuild.
 
-Add two fields to each manifest record.
+One command runs a producer: `tools/nanochat parity produce <kind>`. The tool
+resolves the reference environment from the extras of the distribution and
+runs the adapter module. No producer runs under `tools/nanochat test`, so the
+build lock and the sandbox cover every long job.
 
-```json
-"producer": {
-  "torch": "2.5.1",
-  "numpy": "1.26.4",
-  "nanochat_commit": "<sha>",
-  "python": "3.12.4"
-},
-"generated_by": "nanochat_cpp_bridge.fixtures.train_parity"
-```
+The producer lives in the adapter package, and the fixture travels as data. A
+new comparison adds a kind to that package and a test that reads the bytes. The
+known differences from the reference implementation, with their status, are in
+[parity.md](parity.md).
 
-A gate reads the manifest and fails when a record has no producer. The claim in
-[parity.md](parity.md) then names an environment that a reader can rebuild.
+## Not yet built
 
-#### 7.3 The producer entry point
+These designs have no code yet. Each states the change and the check that
+accepts it.
 
-`tools/nanochat parity produce <kind>` is the only producer command. It resolves
-the reference virtual environment and runs the bridge fixture module. No
-producer runs under `tools/nanochat test`. The lock and the sandbox therefore
-still cover every long job.
+**Tensor cores in the attention kernel.** The attention kernel computes fp32
+statistics with an online softmax and does not use tensor cores. A tensor-core
+variant is the largest available gain on a small card. It belongs in the
+unpromoted prototype area first, and it must beat the current kernel at the
+training shape on a real measurement.
 
-#### 7.4 What this unblocks
+**Two cards from one notebook.** A notebook host provides two cards. Two
+independent jobs, one per card, need no change. Data-parallel training over
+both cards needs the device mesh and the gradient seam of
+[distributed.md](distributed.md).
 
-| Row | Rung | Fixture |
-|---|---|---|
-| `P4` | SFT data parity | `sft_rows_fixture.bin` |
-| `P5` | SFT arithmetic parity | `sft_trajectory.bin` |
-| `P7` | SFT validation parity | `sft_val.bin` |
+**An image with no toolkit.** The container currently holds the source tree,
+the toolchain, and a cache volume. An image that installs only the binary wheel
+needs no toolkit, no Bazel, and no cache, and it shortens every rebuild. The
+change is one install line, and the check is a cold container that trains one
+step.
 
-Do not write those fixtures before stage S4 lands. They must land on the
-consumer side of the boundary.
+## Logs
 
-### 11. What not to do
+A dated record of a real run. An entry states the command, what happened, and
+the rule it produced. A rule that an entry justifies appears in the section
+named at the end of the entry. This is a record and not a reference: it holds
+the measurements that no other file holds.
 
-- Do not add torch to `Z1` "just for conversion". Conversion is an adapter in
-  both directions.
-- Do not add numpy to the base list. It breaks the pure wheel.
-- Do not add a root `requirements.txt`. It repeats the extras and drifts.
-- Do not let a notebook become a gate. A notebook is a host, not a test.
-- Do not put reference task logic in `tests/`. It belongs in `Z2`, behind the
-  fixture.
-- Do not import the bridge from the core to save one function.
+### 2026-11-08 — three device compiles, and the kernel stopped one
+
+**Command.** `tools/nanochat build --jobs=4` over the Hopper GEMM targets.
+
+**Observed.** Three device compiles ran at once and held 2.3 to 2.9 GiB each.
+The kernel ran the out-of-memory killer on one compile. The swap file was
+already full, so the host thrashed before it killed the process. An operator
+feels that thrash as a freeze.
+
+**Insight.** The default action count bounds the count and not the memory. One
+compile of a large template target is the unit that must fit.
+
+**Rule.** [Resource bounds](#one-device-compile-at-a-time).
+
+### 2026-11-10 — the build cache on a rented volume
+
+**Command.** `modal run tools/modal/app.py::warm_cache`, then one build of the
+Turing leg inside a container.
+
+**Observed.** The build had 190 actions and read 133 disk cache hits. A warm
+volume took 19.1 seconds and the first read after the warm function took 101.9
+seconds. The same cache on a local disk read in 3.4 seconds. One package layer
+above the source tree cost 215 and 63 seconds of package installation for a
+profiler that a card job never runs.
+
+**Insight.** The volume's latency per file is the cost, so a warm volume is
+cheap and a cold one is expensive. The first run of a leg pays the whole
+compile in a container with four cores, so one function with a long timeout
+pays it once.
+
+**Rule.** [A container](#a-container).
+
+### 2026-11-12 — a stalled build is not a slow build
+
+**Command.** `tools/nanochat build --jobs=4` over two device targets, beside two
+editor processes.
+
+**Observed.** The two compiles held 3.5 GiB and the editors held 1.0 GiB, so the
+host of 7.8 GiB had 233 MiB free. The build computed almost nothing: one
+compiler process used 29.7 seconds of processor time in 1122 seconds of wall
+clock. There was no error and no out-of-memory kill. A restart with one action
+took the memory pressure from 84 percent to 3 percent and raised the available
+memory from 1.7 GiB to 5.2 GiB.
+
+**Insight.** The memory pressure file reports the share of time that a task
+stalled on memory. Field 14 of the process statistics reports processor time. A
+high stall share beside a low processor time identifies a build that waits on
+memory.
+
+**Rule.** [One device compile at a time](#one-device-compile-at-a-time).

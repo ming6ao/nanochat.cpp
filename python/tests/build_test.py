@@ -293,7 +293,7 @@ class BuildCommandTest(unittest.TestCase):
 
 
 class BazelCacheCommandTest(unittest.TestCase):
-    """The cache seam: one variable, a directory or a URL (section 6.4).
+    """The cache seam: one variable, a directory or a URL.
 
     The flags reach the command, so a host that sets the variable builds
     incrementally and a host that does not builds as it did. The directory form

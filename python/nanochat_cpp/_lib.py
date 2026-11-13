@@ -5,9 +5,8 @@
 the Python mirror of the optimizer struct, and caches the loaded library for
 the process.
 
-The search order follows docs/python.md sections 5.1 and 8.3, with the
-installed-wheel entry of ``docs/build.md`` section 6.3 as
-item 5:
+The search order follows ``docs/python.md`` section 3.2, whose item 5 is the
+installed binary wheel:
 
 1. the path in ``NANOCHAT_CPP_LIB``;
 2. the Bazel runfiles tree (a ``py_test`` or a ``bazel run``);
@@ -25,7 +24,7 @@ executable are then found by one rule, so a reader who trusts one docstring
 trusts the other (``docs/post-training.md`` B6).
 
 Item 5 is how a host that installed a binary wheel finds its library without a
-repository clone (section 6.4). A wheel is named for the CUDA architecture it
+repository clone. A wheel is named for the CUDA architecture it
 was built for, ``nanochat_cpp_cuda_sm75`` for example, so a request for another
 architecture fails at ``nanochat_init`` with the ``pip install`` line that
 fixes it. Nothing here builds or publishes a wheel: when none is installed the
@@ -218,7 +217,7 @@ def wheel_architecture() -> str:
 
     ``NANOCHAT_CUDA_ARCH`` names it by hand, the same variable the Bazel build
     reads (``nanochat_cpp._build.architecture``), and the value is normalised
-    to the wheel spelling of section 6.3: ``sm_75``. Unset means no
+    to the wheel spelling: ``sm_75``. Unset means no
     preference, so any installed wheel is usable. There is one environment
     variable for the architecture and not two, so the build and the wheel
     search cannot disagree.
@@ -298,7 +297,7 @@ def library_architecture(path) -> str:
 
 
 def _wrong_arch_message(asked: str, built: str) -> str:
-    """The error of a wheel built for another architecture (section 6.3)."""
+    """The error of a wheel built for another architecture."""
     return (f"the installed wheel carries a library built for {built}, but "
             f"NANOCHAT_CUDA_ARCH asks for {asked}; install the matching "
             f"wheel: pip install 'nanochat-cpp' "
@@ -310,7 +309,7 @@ def _absent_wheel_message(want: str | None) -> str:
 
     Two shapes, both with the ``pip install`` line that fixes it: a wheel built
     for another architecture is the likely cause when one is installed, and an
-    absent wheel is the cause when none is (section 6.3).
+    absent wheel is the cause when none is.
     """
     asked = wheel_architecture()
     wheels = wheel_architectures()

@@ -481,7 +481,8 @@ The companion documents are:
 
 ### 1. Purpose
 
-[build.md](build.md) § Layers puts the training driver at level L5. Level L5
+[build.md](build.md#layers-and-the-one-seam) puts the training driver at level
+L5. Level L5
 holds `TrainLoop`, `Scheduler`, `Checkpointer`, `Logger`, and the MFU
 accounting. The driver is C++ by design.
 
@@ -1202,7 +1203,7 @@ driver function per run. Phase 6 delivers the driver, so
 
 Related: this page,
 this page, [python.md](python.md),
-[build.md](build.md) § Layers, and
+[build.md](build.md#layers-and-the-one-seam), and
 [model-and-device-bringup.md](model-and-device-bringup.md) §18.
 
 ### 1. Purpose

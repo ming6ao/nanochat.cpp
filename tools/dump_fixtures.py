@@ -29,7 +29,7 @@ two kinds cannot drift apart (``docs/parity.md`` sections 5 to 7).
 The module imports no third-party package at import time. Each kind imports
 its own reference package, so a kind that does not touch PyTorch stays fast.
 The helpers that need one of those packages live in the adapter package
-``nanochat_cpp_bridge`` (``docs/build.md`` section 5): a
+``nanochat_cpp_bridge`` (``docs/build.md``, the Python distribution): a
 kind imports ``reference_data`` for the ``tiktoken`` encoding and the
 reference tokenizer, and the core keeps the ``NCTOKEN1`` reader and the
 container writer.
@@ -2599,8 +2599,8 @@ if _command == 'loader':
         from nanochat import dataloader
         # The ``tiktoken`` tokenizer over an NCTOKEN1 artifact lives in the
         # adapter package; the core's reader, ``nanochat_cpp.data.read_nctoken1``,
-        # stays in the standard library only (docs/build.md
-        # sections 2.1 and 5).
+        # stays in the standard library only (docs/build.md,
+        # the Python distribution).
         from nanochat_cpp_bridge.reference_data import load_nctoken1
 
         tokenizer = load_nctoken1(str(tokenizer_path))

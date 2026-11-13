@@ -8,7 +8,8 @@ parquet -> native reader -> on-the-fly tokenizer -> packed rows -> train step
 ```
 
 The native tokenizer is a host utility beside `DataLoader`. It sits below the
-model API and has no kernel dependency ([build.md](build.md) § Layers). The
+model API and has no kernel dependency
+([build.md](build.md#layers-and-the-one-seam)). The
 port replaces two reference libraries: `rustbpe` trains the vocabulary, and
 `tiktoken` encodes and decodes text.
 
@@ -129,7 +130,7 @@ quantifiers (`?+`, `++`) and the lookahead (`(?!\S)`) in the pattern.
 | D3 | A new `NCTOKEN1` artifact. | The reference pickle and `torch` files are not portable. |
 | D4 | An exact port of the reference merge loop. | The merge order defines the vocabulary. |
 | D5 | `int64` pair counts. | The reference uses `int32`; the wider type avoids overflow. |
-| D6 | The tokenizer is a host utility. | [build.md](build.md) § Layers places it beside `DataLoader`. |
+| D6 | The tokenizer is a host utility. | [build.md](build.md#layers-and-the-one-seam) places it beside `DataLoader`. |
 | D7 | A native parquet reader for the input. | Reads the `text` column in dataset order without `pyarrow` or DuckDB. |
 
 D1 rejects an unknown pattern at load time. The C++ splitter supports the

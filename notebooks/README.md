@@ -79,7 +79,7 @@ example `vocab-32768.nctoken`.
 distribution with one cell and configures the environment with one cell, then
 calls `session.setup`. The call prefers the installed package: the shared
 library comes from the search order of
-`docs/build.md` Part 1, section 6.3, so nothing is cloned and
+`docs/build.md`, the Python distribution, so nothing is cloned and
 nothing is built. When the package is absent it falls back to
 `session.clone_and_build`, which fetches the repository, runs the bootstrap,
 and builds the library. The returned session says which path ran. The call

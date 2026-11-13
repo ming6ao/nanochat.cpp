@@ -2,7 +2,7 @@
 
 The image holds the package and the compiled shared library; the weights
 Volume holds the weights. That split is section 6.4 of
-``docs/build.md`` and D8: a new checkpoint then costs a
+``docs/build.md``, the Python distribution: a new checkpoint then costs a
 download, not an image build.
 
 - ``nanochat-runs`` at ``/runs`` is the run directory the notebook polls.
@@ -120,7 +120,7 @@ WEIGHTS_ROOT = "/weights"
 #: The Bazel cache Volume and its mount point. An image build cannot reach a
 #: Volume and a Volume cannot reach an image build, so the image holds no
 #: compiled artifact: each container builds its leg once, against this cache
-#: (``docs/build.md`` section 6.4). One folder per leg, because a leg is one
+#: (``docs/build.md``, the Python distribution). One folder per leg, because a leg is one
 #: architecture at one precision.
 CACHE_VOLUME = "nanochat-build-cache"
 CACHE_ROOT = "/cache"
@@ -259,7 +259,7 @@ BUILD_TARGETS = ("//bindings:nanochat_shared", *STAGE_TARGETS,
 
 #: The files the module graph reads before it needs a package of the tree. The
 #: fetch layer holds these and the tooling, and nothing else, so a source change
-#: does not invalidate the fetch (``docs/build.md`` section 6.4).
+#: does not invalidate the fetch (``docs/build.md``, the Python distribution).
 MANIFEST_FILES = ("MODULE.bazel", "MODULE.bazel.lock", ".bazelversion",
                   ".bazelrc", ".bazelignore")
 
@@ -627,7 +627,7 @@ def probe_build_command(leg: Leg, target: str, root: str = REPO_ROOT) -> str:
 #: hashes the tree, so a file that changes on every run rebuilds the copy layer
 #: and every layer above it, including the layer that runs Bazel. The list is a
 #: module constant, so ``tools/modal/modal_app_test.py`` reads the same list
-#: that the call passes (``docs/build.md`` section 6.4).
+#: that the call passes (``docs/build.md``, the Python distribution).
 IMAGE_IGNORE = (
     # The history is not source, and one checkout is tens of megabytes.
     ".git",
@@ -748,7 +748,7 @@ def _build_image(leg: Leg, profile: bool = False):
     """
     image = _toolkit_image(leg, profile=profile)
     # The manifest, the tooling, and the fetch come before the tree, so a source
-    # change rebuilds one layer and not three (docs/build.md section 6.4).
+    # change rebuilds one layer and not three (docs/build.md, the Python distribution).
     image = _manifest_layer(image, leg)
     return (
         image

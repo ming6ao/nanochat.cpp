@@ -1,9 +1,9 @@
 """The reference task surface: the hub loader, the shuffle, the code executor.
 
-``nanochat_cpp.tasks`` (Z1) owns the task classes, the multiple-choice prompt
+``nanochat_cpp.tasks`` owns the task classes, the multiple-choice prompt
 renderer, and the answer parsers, all of which are standard-library only. The
 three things it cannot do without an extra live here
-(``docs/build.md`` section 2.1):
+(``docs/build.md``, the Python distribution):
 
 ``HubDataset`` and ``load_hub_dataset``
     The dataset access of ``tasks.common``: list the parquet shards of a hub
@@ -11,8 +11,8 @@ three things it cannot do without an extra live here
     and read them with ``pyarrow``. The seeded shuffle matches
     ``datasets.Dataset.shuffle(seed=seed)`` exactly, so the example order the
     reference evaluates is reproduced. This module therefore needs
-    ``filelock`` as well as ``numpy`` and ``pyarrow``; section 2.1's table
-    misses that leak and the ``hfdata`` extra of section 6.2 carries it.
+    ``filelock`` as well as ``numpy`` and ``pyarrow``, and the ``hfdata`` extra
+    carries all of them (``docs/build.md``, the Python distribution).
 ``_execute_code``
     The reference ``nanochat.execution.execute_code`` of HumanEval: a fresh
     interpreter, rlimits, a scrubbed environment, and a timeout. The bridge
@@ -58,7 +58,7 @@ def get_base_dir() -> str:
     Mirrors ``nanochat.common.get_base_dir`` and the copy the core's task
     module carries, so the task datasets land in the same place as the
     reference implementation without importing it. The loader below needs the
-    path, and Z2 does not reach into Z1 for a helper the core is free to drop,
+    path, and the adapter package does not reach into the core for a helper,
     so this module keeps its own copy.
     """
     if os.environ.get("NANOCHAT_BASE_DIR"):

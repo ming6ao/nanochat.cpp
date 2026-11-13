@@ -917,7 +917,7 @@ Related documents:
 - Sections 1 to 7 above: the measurement protocol.
 - [testing.md](testing.md): the test tiers and the definition of done.
 - [build.md](build.md): backend selection.
-- [build.md](build.md) § Dependency invariants: the dependency rules.
+- [build.md](build.md#dependency-invariants): the dependency rules.
 - [AGENTS.md](../AGENTS.md): the ownership map.
 
 ---

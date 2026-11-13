@@ -31,9 +31,9 @@ module owns everything about that container that needs no third-party package:
 
 **Conversion is not here.** Reading a PyTorch ``state_dict`` needs ``torch``
 and ``numpy``, and this module imports only the standard library (rule 1 of
-``docs/build.md`` section 4). The converter -- the state-dict
+``docs/build.md``, the Python distribution). The converter -- the state-dict
 reading, the record builders, the optimizer-record builders and the command
-line -- lives in the Z2 package of section 5, which reuses the container
+line -- lives in the adapter package, which reuses the container
 writer, the name remap, the dtype table and the path resolution of this module
 rather than copying them. Run it with ``tools/convert_checkpoint.py`` or the
 console script of the distribution (``docs/python.md``); it satisfies the

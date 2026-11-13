@@ -5,13 +5,13 @@ subject is, how it works, and how to use it. A measured claim cites
 [baselines.json](baselines.json), not prose.
 
 New here? Start with [../README.md](../README.md) for the quickstart, then
-[build.md](build.md) § Layers for the shape of the system.
+[build.md](build.md#layers-and-the-one-seam) for the shape of the system.
 
 ## Seams, build, and models
 
 | Document | Contents |
 |---|---|
-| [build.md](build.md) | The layers and the dependency invariants, the file layout, Bazel, backends, precision selection, and the Turing target |
+| [build.md](build.md) | What the build produces, the layers and the dependency invariants, the build configurations, the resource bounds, the third-party code, the backends and their precision, the Python distribution, the parity seam, what is not built yet, and the log of measured runs |
 | [kernels.md](kernels.md) | The backend seam: the kernel inventory, the tier column and the bring-up cost, the fusion boundary rule, the compute strategy, the API, `ScalarArg`, and the two kernel designs the tree does not implement. Part 3 is the GEMM campaign, its section 10.1 is the resume state, and its section 11 is the candidate-registry design |
 | [model.md](model.md) | The five graphs, the no-autograd policy, the model description and its block kinds, the workspace and recompute, the public API, and the Muon step with its cuBLAS seam |
 | [model-and-device-bringup.md](model-and-device-bringup.md) | The two axes: the directory contract, the kernel tiers, the model description, the planner, isolation, the conformance matrix, the checklists, and §18 the evolution rules |
@@ -86,6 +86,22 @@ and not in `spec/`; the block kinds and their slots are
 [../spec/block_kinds.md](../spec/block_kinds.md); the matrix is
 [conformance-matrix.md](conformance-matrix.md).
 
+## What a document states
+
+A document states what a subject is, how it works, and how to use it. It holds
+design and contracts. Three things stay out of it.
+
+- **No inventory.** A list of files, a line number, and a count go stale. Name
+the authority instead, or generate the list between markers.
+- **No history.** A fixed defect and a past decision are not reference
+material.
+- **No bare label.** A short form that a reader must resolve in another
+document is not a reference. Name the subject, and link for depth only.
+
+A dated record of a real run is the exception, and it has one home: the `Logs`
+section at the end of the document that owns the subject. An entry states the
+command, what happened, and the rule the run produced.
+
 ## How to add a document, and to retire one
 
 Add a document only when a subject has no home. One document covers one subject.
@@ -94,10 +110,10 @@ owns its subject, not in a separate plan file.
 
 Retire a document when its subject moves:
 
-1. The durable sections move into the owning document under a part heading. The
-   section numbers do not change, so every existing reference still resolves as
-   "Part N, section K". The retired file is deleted, and every reference to it
-   is retargeted.
-2. A measurement leaves prose for [baselines.json](baselines.json). A phase
-   table, an owner list, and an open-question list do not move: they are not
-   reference material.
+1. The durable sections move into the owning document under a named heading. A
+   reference is a link with a fragment, so a restructure may renumber, and every
+   reference is retargeted in the same change. The retired file is deleted.
+2. A measurement that a decision rests on moves to the `Logs` section of the
+   owning document, or to [baselines.json](baselines.json) when a command and a
+   revision can reproduce it. A phase table, an owner list, and an
+   open-question list do not move: they are not reference material.

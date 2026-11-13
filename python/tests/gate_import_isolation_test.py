@@ -1,10 +1,9 @@
-"""G1: the core imports inside an isolated interpreter.
+"""The isolated interpreter gate: the core imports with no extra installed.
 
-Gate G1 of ``docs/build.md`` Part 1, section 5. The scan of gate G2
-reads the source; this gate runs it. A fresh ``python3 -I -S`` subprocess puts
+The standard-library scan reads the source; this gate runs it. A fresh ``python3 -I -S`` subprocess puts
 ``python/`` on ``sys.path`` and imports ``nanochat_cpp``, then resolves every
 public name and every submodule the package offers, so the lazy ``__getattr__``
-hook of section 2.3 loads each module. A third-party import anywhere on that
+hook loads each module. A third-party import anywhere on that
 path fails the gate with the subprocess's own traceback, including an import
 the scan could miss because it is built at run time.
 
@@ -15,7 +14,7 @@ inserts the path itself, because ``-I`` has already removed the working
 directory by then.
 
 The gate needs no wheel, no library, and no network: it is green on a host with
-none of the extras installed, which is the pure-wheel invariant of section 6.1.
+none of the extras installed, which is the pure-wheel invariant.
 """
 
 from __future__ import annotations
@@ -27,7 +26,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-#: The interpreter flag set of section 8: isolated, and no ``site``.
+#: The interpreter flag set: isolated, and no ``site``.
 FLAGS = ("-I", "-S", "-c")
 
 #: The probe. ``python`` is the absolute path of ``python/``, which goes on

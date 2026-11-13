@@ -1,14 +1,13 @@
-"""G5: the core never names the Z2 package.
+"""The core independence gate: the core never names the adapter package.
 
-Gate G5 of ``docs/build.md`` Part 1, section 5, and rule 5 of the
-five that hold the zones: ``python/nanochat_cpp`` reaches the adapter package
-by being handed a callable, never by naming it. A text scan of every file under
-the package fails on one mention of ``nanochat_cpp_bridge`` and reports the
-file and the line.
+The fifth rule of ``docs/build.md``, the Python distribution:
+``python/nanochat_cpp`` reaches the adapter package by being handed a callable,
+never by naming it. A text scan of every file under the package fails on one
+mention of ``nanochat_cpp_bridge`` and reports the file and the line.
 
 The scan reads the text and not the syntax tree on purpose. A docstring example
-that imports the Z2 package invites the next reader to do it (section 11), so a
-mention in prose is a failure too, and a comment or a string is not exempt.
+that imports the adapter package invites the next reader to do it, so a mention
+in prose is a failure too, and a comment or a string is not exempt.
 """
 
 from __future__ import annotations
@@ -77,8 +76,8 @@ class CoreIndependenceTest(unittest.TestCase):
         reports = mentions(root)
         self.assertEqual(
             reports, [],
-            "the core names the Z2 package; hand its callable in through "
-            "nanochat_cpp.seam instead (rule 5 of section 4):\n"
+            "the core names the adapter package; hand its callable in through "
+            "nanochat_cpp.seam instead (rule 5 of the distribution):\n"
             + "\n".join(reports))
 
     def test_the_scan_finds_a_mention_in_a_docstring(self) -> None:

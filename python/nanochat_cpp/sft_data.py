@@ -23,7 +23,7 @@ split at 5.2K rows and the GSM8K test split at 420 rows, so the validation
 mixture has the same task ratios as the training mixture.
 
 The module imports only the standard library (rule 1 of
-``docs/build.md`` section 4), so the mixture builders stay
+``docs/build.md``, the Python distribution), so the mixture builders stay
 importable with no extra installed. The datasets arrive through the
 registration seam of :mod:`nanochat_cpp.seam`: a host registers the hub loader
 once (`seam.register_hub_loader`) and these builders reach the Hub through it
@@ -31,8 +31,8 @@ once (`seam.register_hub_loader`) and these builders reach the Hub through it
 through :func:`nanochat_cpp.tasks.load_hub_dataset`), never through an import.
 A builder that runs with nothing registered raises
 :class:`nanochat_cpp.seam.MissingAdapter` naming the extra to install, and the
-reference renderer of an SFT parity run lives in the Z2 package of section 5,
-not here.
+reference renderer of an SFT parity run lives in the adapter package, not
+here.
 """
 
 from __future__ import annotations

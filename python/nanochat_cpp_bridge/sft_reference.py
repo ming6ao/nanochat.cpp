@@ -1,10 +1,10 @@
-"""The reference side of the SFT mixture and renderer (Z2).
+"""The reference side of the SFT mixture and renderer, in the adapter package.
 
-``nanochat_cpp.sft_data`` (Z1) owns the packer and the mixture builders, and
+``nanochat_cpp.sft_data`` owns the packer and the mixture builders, and
 they stay importable with no extra installed. What they cannot do is reach the
 Hub, so the reference mixture -- the counterpart of the core's
 ``build_train_mixture`` and ``build_val_mixture`` -- lives here
-(``docs/build.md`` section 11):
+(``docs/build.md``, the Python distribution):
 
 * SmolTalk (``HuggingFaceTB/smol-smoltalk``), the train split, about 460K
   general conversations;
@@ -212,7 +212,7 @@ def mixture_builder() -> Callable[..., TaskMixture]:
 
     The returned object is :func:`build_mixture`: ``builder("train")``,
     ``builder("val")``, or ``builder("demo", limit=8)``. A host injects it
-    through its own seam, so the core names no Z2 module (gate G5).
+    through its own seam, so the core names no adapter module.
     """
     return build_mixture
 
@@ -232,7 +232,7 @@ def renderer(max_tokens: int = RENDER_MAX_TOKENS) -> Callable[..., Any]:
         reference_render = getattr(tokenizer, "render_conversation", None)
         if callable(reference_render):
             return reference_render(conversation, max_tokens=max_tokens)
-        from nanochat_cpp.chat import (  # noqa: PLC0415 - Z1, imported on use
+        from nanochat_cpp.chat import (  # noqa: PLC0415 - the core, on use
             render_conversation,
         )
         return render_conversation(conversation, tokenizer,

@@ -1,20 +1,21 @@
-"""The Z2 adapter package: every heavy import of the Python tree has one home.
+"""The adapter package: every heavy import of the Python tree has one home.
 
-The tree has four zones (``docs/build.md`` section 4), and
-the arrow points down: a zone imports a lower zone and never a higher one.
+The tree has four boundaries (``docs/build.md``, the Python distribution), and
+the arrow points down: a boundary imports a lower boundary and never a higher
+one.
 
 ````text
-Z3  hosts         modal, kaggle, jupyter         tools/**, notebooks/**
-Z2  adapters      torch, numpy, tiktoken,       this package
-                  pyarrow, filelock,
-                  huggingface_hub, nanochat
-Z1  Python core   the standard library only     nanochat_cpp
-Z0  C++ core      libm, cudart, cuBLAS, zstd    src/**, include/**, backends/**
+the hosts        modal, kaggle, jupyter       tools/**, notebooks/**
+the adapters     torch, numpy, tiktoken,     this package
+                 pyarrow, filelock,
+                 huggingface_hub, nanochat
+the Python core  the standard library only   nanochat_cpp
+the C++ core     libm, cudart, cuBLAS, zstd  src/**, include/**, backends/**
 ````
 
-This package is Z2. It imports the standard library, ``nanochat_cpp`` (Z1), and
-the extra packages the caller installed, and it never imports ``tools/`` or
-``notebooks/`` (rules 2 and 4 of section 4). Nothing imports a host, so a
+This package is the adapter package. It imports the standard library,
+``nanochat_cpp``, and the extra packages the caller installed, and it never
+imports ``tools/`` or ``notebooks/``. Nothing imports a host, so a
 module here works the same in a notebook, in a Modal image, and in the test
 loop.
 
@@ -27,9 +28,9 @@ required to *call*, not to *import*::
     import nanochat_cpp_bridge                      # no extra needed
     records = nanochat_cpp_bridge.torch_checkpoint.build_records(state_dict)
 
-One distribution, two import packages (D1 and D2): the base install carries
-this package and Z1 with an empty dependency list, and the extras of section
-6.2 supply what a task needs. A missing package raises
+One distribution, two import packages: the base install carries this package
+and the Python core with an empty dependency list, and the extras supply what
+a task needs. A missing package raises
 :class:`nanochat_cpp_bridge._extras.MissingExtra` naming the extras line.
 
 Modules
@@ -52,10 +53,10 @@ Modules
     The reference SFT mixture and renderer, the counterpart of the core's
     mixture builders.
 ``fixtures``
-    The offline parity producers of D11, run by ``tools/nanochat parity``.
+    The offline parity producers, run by ``tools/nanochat parity``.
 
-Z2 imports Z1 and never the reverse: the core reaches this package by being
-handed a callable, never by naming it (rule 5 of section 8, gate G5).
+This package imports the Python core and never the reverse: the core reaches
+this package by being handed a callable, never by naming it.
 """
 
 from __future__ import annotations

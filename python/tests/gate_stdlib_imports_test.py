@@ -1,16 +1,15 @@
-"""G2: every import in the core is in the standard library.
+"""The standard-library scan: every import in the core is in the library.
 
-Gate G2 of ``docs/build.md`` Part 1, section 5, and the load-bearing
-one: an abstract syntax tree walk over every ``.py`` file under
-``python/nanochat_cpp``, failing when an absolute import's root name is neither
-in :data:`sys.stdlib_module_names` nor the package itself. Every leak of
-section 2.1 lands here, including one hidden inside a function, because the
-walk descends into function and class bodies where a lazy import sits.
+The load-bearing gate: an abstract syntax tree walk over every ``.py`` file
+under ``python/nanochat_cpp``, failing when an absolute import's root name is
+neither in :data:`sys.stdlib_module_names` nor the package itself. Every
+third-party import lands here, including one hidden inside a function, because
+the walk descends into function and class bodies where a lazy import sits.
 
 A relative import (``from . import _lib``) is inside the package by
 construction, so it is allowed. A violation reports the file, the line, and
-the module name, which is what the reader needs to move the import to the Z2
-package of section 4.
+the module name, which is what the reader needs to move the import to the
+adapter package (``docs/build.md``, the Python distribution).
 
 The scan needs no third-party wheel and no network. Gate G1 is the independent
 check: a scan reads the source, so it cannot see an import the source builds at
@@ -94,8 +93,8 @@ class StdlibImportTest(unittest.TestCase):
                         f"the package is not under {directory}")
         reports = violations(directory)
         self.assertEqual(reports, [], "the core imports outside the standard "
-                                      "library; move each one to the Z2 "
-                                      "package of section 4:\n"
+                                      "library; move each one to the adapter "
+                                      "adapter package:\n"
                                       + "\n".join(reports))
 
     def test_the_scan_sees_an_import_inside_a_function(self) -> None:
@@ -104,7 +103,7 @@ class StdlibImportTest(unittest.TestCase):
             path = Path(tmp) / "lazy.py"
             path.write_text(
                 "def convert(state):\n"
-                "    import torch  # noqa: PLC0415 - the leak of section 2.1\n"
+                "    import torch  # noqa: PLC0415 - a third-party import\n"
                 "    return torch\n",
                 encoding="utf-8")
             reports = violations(tmp)

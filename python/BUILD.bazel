@@ -7,14 +7,14 @@
 # registered local `python3` toolchain and need no third-party wheel. Every
 # third-party import has one home: `nanochat_cpp_bridge`, the second import
 # package of the one distribution declared in pyproject.toml
-# (docs/build.md Part 1, sections 4 and 6.1).
+# (``docs/build.md``, the Python distribution).
 
 load("@rules_python//python:defs.bzl", "py_library", "py_test")
 
 package(default_visibility = ["//visibility:public"])
 
-# The package description: the empty base dependency list and the extras of
-# section 6.1. Exported so a test in another package (gate G3, which reads it
+# The package description: the empty base dependency list and the extras.
+# Exported so a test in another package (gate G3, which reads it
 # through the runfiles) can name it, and so a consumer sees the file that
 # states the invariant.
 exports_files(["pyproject.toml"])
@@ -28,7 +28,7 @@ py_library(
     imports = ["."],
 )
 
-# The adapter package (Z2 of section 4). One distribution, two import packages
+# The adapter package. One distribution, two import packages
 # (D1, D2): the base install carries this library beside `nanochat_cpp`, and a
 # module here imports its heavy package inside the function that needs it, so
 # the target builds and the import succeeds with no extra installed.
@@ -91,7 +91,7 @@ py_test(
 
 # T0: the NCTOKEN1 reader. Hermetic: standard library only. The tokenizer
 # bridge coverage reads `nanochat_cpp_bridge.reference_data`, so this test
-# depends on the Z2 library.
+# depends on the adapter library.
 py_test(
     name = "data_test",
     srcs = ["tests/data_test.py"],
@@ -127,8 +127,8 @@ py_test(
 # temporary directory, so no second fixture is committed here
 # (docs/checkpoint-format.md sections 9 and 10). The torch
 # half of the conversion lives in `nanochat_cpp_bridge.torch_checkpoint`, so
-# the test depends on the Z2 library; it drives that builder with fake tensors
-# and still needs no torch.
+# the test depends on the adapter library; it drives the builder with fake
+# tensors and still needs no torch.
 py_test(
     name = "checkpoint_test",
     srcs = ["tests/checkpoint_test.py"],
@@ -505,7 +505,7 @@ py_test(
     size = "small",
 )
 
-# The five boundary gates of docs/build.md Part 1, section 5. A
+# The five boundary gates of docs/build.md, the Python distribution. A
 # boundary that no test reads is a comment, so each gate is a self-contained
 # unittest module that needs no wheel, no library, and no network.
 
@@ -529,7 +529,7 @@ py_test(
 )
 
 # T0: G3 reads the package description and fails when the base dependency list
-# is missing or not empty (section 6.1), so the file is the test's data.
+# is missing or not empty, so the file is the test's data.
 py_test(
     name = "gate_pyproject_test",
     srcs = ["tests/gate_pyproject_test.py"],
@@ -538,8 +538,8 @@ py_test(
 )
 
 # T0: G4 reads every model manifest and fails on a record with no producer
-# (section 7.2). The model's `files` label is the data, so the gate sees the
-# same bytes the model package publishes.
+# (docs/build.md, the parity seam). The model's `files` label is the data, so
+# the gate sees the same bytes the model package publishes.
 py_test(
     name = "gate_provenance_test",
     srcs = ["tests/gate_provenance_test.py"],
@@ -547,8 +547,9 @@ py_test(
     size = "small",
 )
 
-# T0: G5 scans the core text and fails on one mention of the Z2 package, which
-# is rule 5 of the zones. It reads the sources through its library's runfiles.
+# T0: the core independence gate scans the core text and fails on one mention
+# of the adapter package, which is the fifth rule of the distribution. It reads
+# the sources through its library's runfiles.
 py_test(
     name = "gate_core_independence_test",
     srcs = ["tests/gate_core_independence_test.py"],
@@ -556,7 +557,7 @@ py_test(
     size = "small",
 )
 
-# T0: the `tools/nanochat parity` dispatch of the plan's section 7.3. Hermetic
+# T0: the `tools/nanochat parity` dispatch of the parity seam. Hermetic
 # and torch-free: it runs the dispatch and the producer's own `--help`, and the
 # canary asserts that no torch is importable, so a help path that needed an
 # extra would fail here instead of on a host. The script is a host file, so it

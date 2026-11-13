@@ -2,10 +2,11 @@
 
 A notebook installs the package with one ``pip install`` cell and configures
 the environment with one cell, so this module has two paths and prefers the
-first (``docs/build.md`` section 6.5):
+first (``docs/build.md``, the Python distribution):
 
 * the installed package. ``pip install "nanochat-cpp[hub]"`` gives the two
-  import packages, and the library search order of section 6.3 finds the shared
+  import packages, and the library search order of ``docs/python.md`` section
+  3.2 finds the shared
   library, so no clone and no build run;
 * the repository. When the package is absent, or a caller asks for the
   fallback, the session fetches the tree, runs ``tools/kaggle/bootstrap.sh``,
@@ -169,8 +170,7 @@ def installed_version() -> str:
     """The version of the installed distribution, or ``""`` when unknown.
 
     The version is read from the installed metadata, never from the tree, so an
-    unknown version stays unknown (``docs/build.md`` section
-    7.2).
+    unknown version stays unknown (``docs/build.md``, the parity seam).
     """
     try:
         return importlib.metadata.version(DISTRIBUTION)
@@ -184,7 +184,7 @@ def installed_revision() -> str:
     A wheel session has no checkout to ask, so the record names the
     distribution and its version, ``nanochat-cpp 0.1.0``. An unknown version
     stays an empty string, because a guessed version would name an environment
-    that never existed (section 7.2).
+    that never existed (``docs/build.md``, the parity seam).
     """
     version = installed_version()
     return f"{DISTRIBUTION} {version}" if version else ""
@@ -239,7 +239,8 @@ def build_library(backend: str = "cuda", precision: str = "fp32",
     The call asks the package for the library, so the search order of
     ``docs/python.md`` decides: ``NANOCHAT_CPP_LIB``, the runfiles, the
     development tree, a library beside the package, an installed binary wheel,
-    and only then the cache or an on-demand build (section 6.3). A session that
+    and only then the cache or an on-demand build (``docs/python.md`` section
+    3.2). A session that
     installed the wheel therefore builds nothing.
     """
     module = installed_package() if package is None else package
@@ -276,7 +277,7 @@ def setup(url: str = DEFAULT_REPO_URL, dest: str | Path = DEFAULT_REPO_DEST,
           prefer_installed: bool = True) -> Host:
     """Prepare the session: the installed package first, else the clone.
 
-    ``prefer_installed`` is the default of section 6.5, because a host that ran
+    ``prefer_installed`` is the default, because a host that ran
     the install cell must not clone or build. ``prefer_installed=False`` forces
     the repository path, which is the documented fallback and is what an
     offline session with a source tree uses. ``package`` is the module to use,

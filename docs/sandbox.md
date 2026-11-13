@@ -173,7 +173,8 @@ tools/nanochat session stop           # stop the slice and reap the record
 [this document](sandbox.md) Part 1.
 
 The entry point sits outside the model layers L0 to L6 in
-[build.md](build.md) § Layers, and it changes neither the kernel seam nor the
+[build.md](build.md#layers-and-the-one-seam), and it changes neither the kernel
+seam nor the
 public API. The simulator's S0 tier rides the same entry point:
 `tools/nanochat simulate` runs the CPU-only capability, API, collective, and
 emulation checks with no GPU broker ([simulator.md](simulator.md)). The one

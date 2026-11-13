@@ -1,4 +1,4 @@
-"""The training-parity producer (D11; section 7 of the layering plan).
+"""The training-parity producer of the parity seam.
 
 This module writes ``models/<name>/fixtures/train_parity.bin``: a fixed
 training trajectory of ``N`` steps. It records the initial parameters, the
@@ -20,11 +20,11 @@ by step, and the per-step parameter L2 norm is a compact trajectory checksum
 that catches divergence without storing hundreds of megabytes of weights.
 
 The manifest of ``models/<name>/fixtures/manifest.json`` names this module in
-``generated_by`` (section 7.2)::
+``generated_by``::
 
     "generated_by": "nanochat_cpp_bridge.fixtures.train_parity"
 
-Run it through the one producer command (section 7.3)::
+Run it through the one producer command::
 
     tools/nanochat parity produce train_parity
 
@@ -74,7 +74,7 @@ __all__ = [
     "produce",
 ]
 
-#: The module name a manifest records in ``generated_by`` (section 7.2).
+#: The module name a manifest records in ``generated_by``.
 GENERATED_BY = "nanochat_cpp_bridge.fixtures.train_parity"
 
 #: The fixture file this producer writes inside a model package.
@@ -105,7 +105,7 @@ DEFAULT_ADAM_EPS = 1e-4
 def _numpy():
     """The ``numpy`` module, imported where it is used."""
     try:
-        import numpy  # noqa: PLC0415 - the lazy import of section 2.1
+        import numpy  # noqa: PLC0415 - an adapter imports on use
     except ImportError as error:
         raise _extras.missing("numpy") from error
     return numpy
@@ -114,7 +114,7 @@ def _numpy():
 def _torch():
     """The ``torch`` module, imported where it is used."""
     try:
-        import torch  # noqa: PLC0415 - the lazy import of section 2.1
+        import torch  # noqa: PLC0415 - an adapter imports on use
     except ImportError as error:
         raise _extras.missing("torch") from error
     return torch
@@ -511,7 +511,7 @@ def _options(out: str | os.PathLike[str] | None, model: str,
 
 
 def _emit_records(path: Path) -> None:
-    """Print the section 7.2 producer record and the fixture record."""
+    """Print the producer record and the fixture record."""
     _provenance.emit("producer", _provenance.producer_record(GENERATED_BY))
     _provenance.emit("fixture", _provenance.fixture_record(path))
 

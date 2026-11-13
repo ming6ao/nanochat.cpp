@@ -7,15 +7,17 @@ load("//:nanochat.bzl", "nanochat_copts", "precision_defines")
 
 package(default_visibility = ["//visibility:public"])
 
-# The two files a check reads as text rather than compiles:
+# The files a check reads as text rather than compiles:
 # `tools/contract_vocabulary.py --check` compares the capability rows of
 # `capability_names.h` against `spec/capability_bits.md` and
 # `include/nanochat/tensor.h`, and the block kinds of `spec/block_kinds.md`
-# against the spellings `model_spec.cc` accepts. A Bazel test sees only its
-# runfiles, so the file needs a label to travel as `data`; the export adds a
-# label and no copy.
+# against the spellings `model_spec.cc` accepts; `tools/doc_facts.py --check`
+# compares the subcommand table of `docs/build.md` against `commands.cc`. A Bazel
+# test sees only its runfiles, so the file needs a label to travel as `data`;
+# the export adds a label and no copy.
 exports_files([
     "capability_names.h",
+    "commands.cc",
     "model_spec.cc",
 ])
 

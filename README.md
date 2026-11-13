@@ -38,7 +38,7 @@ reference.
 - A runtime kernel registry, a virtual dispatch table, or a memory planner.
 - A user of a third-party runtime beyond CUDA, cuBLAS, the ZSTD
   decompressor in `src/parquet/`, and the CUTLASS headers, which are a
-  build-time dependency and link nothing ([docs/build.md](docs/build.md)).
+  build-time dependency and link nothing ([docs/build.md](docs/build.md#third-party-code)).
 - A multi-node trainer. Data parallel today works inside one host, and the
   NCCL transport is not complete.
 - A finished post-training product.
@@ -80,7 +80,8 @@ tools/nanochat build //src:nanochat_cli
 
 The static library and the stage binary land in `bazel-bin/`. The entry
 point serializes builds, caps the Bazel heap, and applies the host budget.
-[docs/build.md](docs/build.md) gives the layers and the dependency rules.
+[docs/build.md](docs/build.md#layers-and-the-one-seam) gives the layers and the
+dependency rules.
 
 ## Test
 
@@ -311,8 +312,10 @@ docs/               reference and how-to
 ## Documentation
 
 - [docs/README.md](docs/README.md): the full reference index.
-- [docs/build.md](docs/build.md): the layers, the dependency invariants, and
-  the host packaging.
+- [docs/build.md](docs/build.md): what the build produces, the layers, the
+  dependency invariants, the build configurations, the resource bounds, the
+  third-party code, the backends and their precision, the Python distribution,
+  the parity seam, and the log of measured runs.
 - [docs/testing.md](docs/testing.md): test tiers, the oracle, and the gates.
 - [docs/sandbox.md](docs/sandbox.md): the resource budgets, the agent session
   scope, and the GPU queue.

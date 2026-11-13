@@ -9,7 +9,7 @@ live in ``python/nanochat_cpp/cli.py``. Run ``tools/nanochat help`` for the
 command list.
 
 One command is not in that table. ``tools/nanochat parity produce <kind>`` runs
-an offline parity producer (``docs/dependency-layering-plan.md`` section 7.3):
+an offline parity producer (``docs/build.md``, the parity seam):
 a producer imports PyTorch and the reference checkout, so it lives in the
 adapter package a host installs as an extra, and the core command table must
 not name that package. This tool therefore dispatches ``parity`` itself, before
@@ -17,7 +17,8 @@ the delegation below, and the row appears in the usage under its own heading.
 No producer runs under ``test``, so the build lock and the sandbox still cover
 every long job.
 
-The host tool needs Python 3.10 or later, which ``docs/build.md`` records.
+The host tool needs Python 3.10 or later, which ``python/pyproject.toml``
+declares.
 
 This file keeps its name. ``include/nanochat/sandbox.h`` prints
 ``run: tools/nanochat help``, and every document names the path.
@@ -42,7 +43,7 @@ from nanochat_cpp import _entry, cli  # noqa: E402
 #: The one command this host adds to the core table.
 PARITY = "parity"
 
-#: The extras of section 6.2 that supply a producer: PyTorch, numpy, and the
+#: The extras that supply a producer: PyTorch, numpy, and the
 #: reference checkout.
 PARITY_EXTRA = "reference,nanochat"
 
@@ -58,10 +59,10 @@ INPROCESS_ENV = "NANOCHAT_PARITY_INPROCESS"
 #: rows of ``tools/nanochat help`` and pins them against
 #: ``nanochat_cpp._entry.names()``.
 PARITY_HELP = """\
-Reference fixtures: the offline parity producers of
-docs/dependency-layering-plan.md section 7.3. A producer runs in the reference
-environment, writes the bytes a T0 test reads, and prints the environment
-record a model manifest stamps (section 7.2). No producer runs under `test`.
+Reference fixtures: the offline parity producers. The design is docs/build.md,
+the parity seam. A producer runs in the reference environment, writes the bytes
+a CPU test reads, and prints the environment record that a model manifest
+stamps. No producer runs under `test`.
 
    parity produce <kind> [options]
                              run one producer and print its provenance record
@@ -83,12 +84,13 @@ class ParityError(Exception):
 
 
 def _fixtures():
-    """The producer package of Z2, imported on use: a host may import it."""
+    """The producer package of the adapter, imported on use: a host may."""
     return importlib.import_module("nanochat_cpp_bridge.fixtures")
 
 
 def _extras():
-    """The extras map of Z2: it names the install line of a missing package."""
+    """The extras map of the adapter: it names the install line of a missing
+    package."""
     return importlib.import_module("nanochat_cpp_bridge._extras")
 
 
@@ -141,7 +143,7 @@ def _producer_path(kind: str) -> str:
 
 
 def _no_environment(detail: str | None = None):
-    """The named error of a missing reference environment (section 6.2)."""
+    """The named error of a missing reference environment."""
     extras = _extras()
     line = extras.INSTALL_LINE.format(extra=PARITY_EXTRA)
     message = _MISSING_ENVIRONMENT.format(line=line, variable=PYTHON_ENV)
@@ -157,7 +159,7 @@ def _has_extras() -> bool:
     needs anyway) and then asks for the module spec, so it never imports torch:
     a host with a half-installed wheel stays cheap and side-effect free.
     """
-    from nanochat_cpp import reference  # noqa: PLC0415 - Z1, on use
+    from nanochat_cpp import reference  # noqa: PLC0415 - the core, on use
 
     try:
         reference.ensure_reference_on_path()
@@ -181,7 +183,7 @@ def _checkout_venv() -> Path | None:
     checkout without one establishes nothing, so this returns ``None`` rather
     than inventing a path.
     """
-    from nanochat_cpp import reference  # noqa: PLC0415 - Z1, on use
+    from nanochat_cpp import reference  # noqa: PLC0415 - the core, on use
 
     try:
         repo = reference.find_reference_repo()
@@ -199,7 +201,7 @@ def _reference_interpreter() -> str | None:
 
     Order: this interpreter when it already holds the extras, so the common
     case costs no second process; then ``NANOCHAT_PYTHON``; then the reference
-    checkout's virtual environment (section 7.3).
+    checkout's virtual environment.
     """
     if _has_extras():
         return sys.executable

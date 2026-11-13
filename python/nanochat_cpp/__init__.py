@@ -10,12 +10,12 @@ One Python surface with three layers:
   for build, test, lint, and doctor.
 
 The package imports only the Python standard library (rule 1 of
-``docs/build.md`` section 4), and the compute layer never
+``docs/build.md``, the Python distribution), and the compute layer never
 imports ``torch``. ``chat`` owns the chat evaluation front end. ``rl`` owns
 the reinforcement-learning bridge: it renders the prompts, drives the
 persistent C++ worker, and scores the rollouts (docs/post-training.md).
 
-Importing the package loads **no** submodule (section 2.3). Every name below --
+Importing the package loads **no** submodule. Every name below --
 a submodule and a public class or function -- resolves on first access through
 the module ``__getattr__`` of PEP 562, so a caller that needs only ``api`` does
 not pay for ``chat``, ``rl``, ``sft``, ``sft_data``, or ``toolchain``::
@@ -31,14 +31,13 @@ reaches each through a callable a host registers, never through an import:
   supplies the hub dataset loader behind the task classes, and
   ``seam.register_code_executor(executor)`` supplies the executor behind the
   HumanEval criterion. Nothing registered raises ``seam.MissingAdapter`` with
-  the extra to install (section 6.2).
+  the extra to install.
 * ``checkpoint`` -- the checkpoint container read and write. A conversion from a
-  PyTorch ``state_dict`` runs in the Z2 package of section 5.
+  PyTorch ``state_dict`` runs in the adapter package.
 * ``data`` -- the portable ``NCTOKEN1`` reader. The ``tiktoken`` encoding over
-  it lives in the Z2 package of section 5.
+  it lives in the adapter package.
 
-The package never imports the Z2 package and never names it (rule 5 of section
-8, gate G5).
+The package never imports the adapter package and never names it.
 """
 
 from __future__ import annotations

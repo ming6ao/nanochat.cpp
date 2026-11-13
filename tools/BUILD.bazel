@@ -4,7 +4,7 @@
 # with the shared helpers in `fixture_common.py` and the shared SFT machinery in
 # `sft_fixture.py`. The scripts run on the host and are source files, not build
 # targets. See docs/python.md. A new parity fixture is not
-# added here: the producers of docs/build.md Part 1, section 7.3 run
+# added here: the producers of docs/build.md, the parity seam, run
 # through `tools/nanochat parity produce <kind>` and live in
 # `python/nanochat_cpp_bridge`.
 #
@@ -22,6 +22,7 @@ exports_files([
     "check_tokenizer_parity.py",
     "contract_vocabulary.py",
     "convert_checkpoint.py",
+    "doc_facts.py",
     "dump_fixtures.py",
     "fixture_common.py",
     "fixture_format.py",
@@ -89,6 +90,18 @@ filegroup(
 filegroup(
     name = "gen_capi_mirrors",
     srcs = ["gen_capi_mirrors.py"],
+)
+
+# The build-document gate (docs/build.md). `--check` compares the subcommand
+# table with `src/commands.cc` and the configuration table with the tracked
+# Bazel configuration, and it holds the prose rules of the document: no file
+# position, no calendar date outside the log, no bare label, and no link that
+# reaches no heading. `--write` rewrites the two marked regions and touches no
+# prose. Its test lists the three files it reads, and the two documents the
+# build document links to, as data.
+filegroup(
+    name = "doc_facts",
+    srcs = ["doc_facts.py"],
 )
 
 # The GEMM decision-table writer (docs/kernels.md section 11.4 item 5). `--write`
@@ -247,11 +260,30 @@ py_test(
     size = "small",
 )
 
+# T0 gate for docs/build.md. The cases read the committed document, which must
+# agree with the build, then mutate one cell, one row, one label, and one link
+# of a copy, which must fail with the row or the line named. Two cases prove
+# that `--write` repairs a stale table, reaches the committed bytes, and touches
+# no prose. Hermetic and CPU-only: the standard library, three files, and the two
+# documents the build document links to.
+py_test(
+    name = "doc_facts_test",
+    srcs = ["doc_facts_test.py"],
+    data = [
+        ":doc_facts",
+        "//:.bazelrc",
+        "//docs:markdown",
+        "//src:commands.cc",
+    ],
+    size = "small",
+)
+
 # Aggregation point consumed by //:all_tests.
 test_suite(
     name = "all",
     tests = [
         ":contract_vocabulary_test",
+        ":doc_facts_test",
         ":gemm_rules_test",
         ":gemm_spill_gate_test",
         ":gen_capi_mirrors_test",

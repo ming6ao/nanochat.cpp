@@ -1,7 +1,7 @@
-"""G4: every fixture record carries its provenance.
+"""The fixture provenance gate: every record carries its provenance.
 
-Gate G4 of ``docs/build.md`` Part 1, section 5, and the invariant of
-section 7.2: a manifest record names the environment that produced the bytes
+The invariant of ``docs/build.md``, the parity seam: a manifest record names
+the environment that produced the bytes
 (``producer``) and the module or generator that makes them (``generated_by``).
 Without the pair, a parity claim in [parity.md](../docs/parity.md) rests on an
 environment the manifest cannot name.
@@ -77,14 +77,14 @@ class ProvenanceTest(unittest.TestCase):
         self.assertTrue(
             found,
             f"no manifest under {models_dir()}; every model package records "
-            f"its fixture provenance in fixtures/manifest.json (section 7.2)")
+            f"its fixture provenance in fixtures/manifest.json (the parity seam)")
         reports: list[str] = []
         for path in found:
             reports.extend(provenance_violations(path))
         self.assertEqual(
             reports, [],
             "a fixture record names no environment; add the producer pair of "
-            "section 7.2 to each record below:\n" + "\n".join(reports))
+            "the parity seam to each record below:\n" + "\n".join(reports))
 
     def test_the_scan_notices_a_record_without_a_producer(self) -> None:
         """The gate can fail: a record with neither field is reported twice."""

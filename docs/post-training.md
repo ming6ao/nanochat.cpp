@@ -969,7 +969,8 @@ Each leg mirrors what the single leg did:
   and the two stage executables, so gate G3 runs the tool inside the H100
   container and needs no second build there. The build runs once per container
   against the `nanochat-build-cache` Volume, because a Modal Volume cannot
-  reach an image build ([build.md](build.md) section 6.4). A warm cache costs
+  reach an image build
+  ([build.md](build.md#the-python-distribution)). A warm cache costs
   seconds, and `modal run tools/modal/app.py::warm_cache` pays the cold one.
 
 Gates G1 to G3 are section 7.1's subject. Their first two-leg run is row 9 of

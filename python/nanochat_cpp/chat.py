@@ -7,8 +7,8 @@ the split of the removed ``chat_eval.py``, moved under the in-process API.
 Every task reads a hub dataset, so the dataset loader and the code executor
 of HumanEval arrive through the registration seam of
 :mod:`nanochat_cpp.seam`; this module imports only the standard library and
-names no third-party package (rule 1 of ``docs/build.md``
-section 4, gate G5).
+names no third-party package (rule 1 of ``docs/build.md``, the Python
+distribution).
 
 Two task paths:
 
@@ -114,7 +114,7 @@ def build_task(task_name: str, *, adapters=None) -> _tasks.Task:
     stay scoped. Nothing registered raises
     :class:`nanochat_cpp.seam.MissingAdapter` naming the extra to install.
 
-    This module names no third-party package and no Z2 module (gate G5), so
+    This module names no third-party package and no adapter module, so
     the hub-backed task arrives through that seam and not through an import.
     """
     if adapters:
@@ -538,7 +538,8 @@ class ChatEvaluator:
     runs generated code) arrives through the registration seam of
     :mod:`nanochat_cpp.seam`, so a host hands its loader and its executor in
     with ``hub_loader=`` and ``code_executor=`` and this file names no
-    third-party module and no Z2 module. A test hands in fakes; leaving both
+    third-party module and no adapter module. A test hands in fakes; leaving
+    both
     out uses whatever the process registered.
     """
 

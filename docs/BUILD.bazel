@@ -1,0 +1,22 @@
+# docs/ — the reference documents. One document covers one subject, and the
+# rule that retires one is in README.md.
+#
+# A document is data rather than a build input. The one gate that reads them,
+# `//tools:doc_facts_test`, compares the fact tables of build.md with the build
+# they describe, so the bytes a reviewer reads must travel in the runfiles of
+# that test. A label is what lets them.
+
+package(default_visibility = ["//visibility:public"])
+
+# Every document, and the measured-baseline record beside them. A document that
+# speaks of another one is not a target of its own: the reader follows a link,
+# and so does the gate.
+exports_files(glob(["*.md"]) + glob(["*.json"]))
+
+# Every document as one label. The build-document gate links into several of
+# them, so a test that reads one reads the set, and a document that moves does
+# not need a second label.
+filegroup(
+    name = "markdown",
+    srcs = glob(["*.md"]),
+)

@@ -1,4 +1,4 @@
-"""T0: the ``tools/nanochat parity`` dispatch of section 7.3.
+"""T0: the ``tools/nanochat parity`` dispatch of the parity seam.
 
 Gap found by the campaign review: the campaign added ``parity produce`` to
 ``tools/nanochat`` and no test ran it, so a broken kind lookup or a broken
@@ -13,7 +13,7 @@ covers the first half: the usage, the argument errors, and the producer's own
 no ``torch`` is importable, an exit code of 0 proves the help path reached the
 producer without importing it.
 
-See ``docs/build.md`` section 7.3 and section 8.
+See ``docs/build.md``, the parity seam.
 """
 
 from __future__ import annotations
@@ -78,7 +78,7 @@ class ParityDispatchTest(unittest.TestCase):
         self.assertEqual(0, result.returncode, result.stderr)
         for kind in KINDS:
             self.assertIn(kind, result.stdout)
-        self.assertIn("section 7.3", result.stdout)
+        self.assertIn("the parity seam", result.stdout)
         self.assertIn("No producer runs under `test`", result.stdout)
 
     def test_no_action_prints_the_usage_and_fails(self) -> None:

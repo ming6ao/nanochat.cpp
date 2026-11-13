@@ -5,11 +5,11 @@ that the reference ``RustBPETokenizer.render_for_completion`` produces for a
 few synthetic conversations. The test renders the same conversations with
 :class:`nanochat_cpp.chat._PromptRenderer` and compares the ids. It also checks
 the per-task failure isolation and the core aggregation. See docs/python.md
-sections 5 and 11.
+the adapter boundary:
 
 The task classes read their dataset through the registration seam of
-``docs/build.md`` section 4, so they import no dataset
-library (section 2.1). A fake hub loader keeps that coverage hermetic: no
+``docs/build.md``, the Python distribution, so they import no dataset
+library. A fake hub loader keeps that coverage hermetic: no
 network, no ``pyarrow``, and no ``numpy``.
 """
 

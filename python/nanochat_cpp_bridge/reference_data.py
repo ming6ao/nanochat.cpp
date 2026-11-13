@@ -1,9 +1,10 @@
 """The reference data surface: the parquet listing and the tiktoken tokenizer.
 
-``nanochat_cpp.data`` (Z1) reads the portable ``NCTOKEN1`` artifact with the
+``nanochat_cpp.data``, in the Python core, reads the portable ``NCTOKEN1``
+artifact with the
 standard library: the magic, the merge list, the derived token bytes, and the
 per-token byte lengths. Two things it cannot do without an extra live here
-(``docs/build.md`` section 2.1):
+(``docs/build.md``, the Python distribution):
 
 ``parquet_files(split)``
     The parquet paths of a split in dataset order, from

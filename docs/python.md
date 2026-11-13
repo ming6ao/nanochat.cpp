@@ -100,7 +100,7 @@ The library search order is the one `nanochat_cpp._lib.load` implements:
 4. a library bundled beside the package;
 5. an installed `nanochat_cpp_cuda_<arch>` wheel, which is how a host that
    installed a binary wheel finds its library without a clone
-   (`docs/build.md` Part 1, section 6.3);
+   (`docs/build.md`, the Python distribution);
 6. the cache, or an on-demand build from the sources (section 3.3).
 
 The two stage executables of the chain follow the same shape, through
@@ -641,7 +641,6 @@ Update these references.
 | `docs/post-training.md` | Point at `python.md`. |
 | `docs/parity.md` | Point at `python.md`. |
 | `docs/testing.md` | Point at `python.md`. |
-| `docs/build.md` at line 39 | Remove `base_train.py` and `launcher.py` from the layout list. |
 | `docs/performance.md` | Repoint the command examples. |
 | `docs/baselines.json` at line 32 | Repoint the recorded command. |
 | `docs/data.md` at line 219 | Repoint the command. |
@@ -727,7 +726,7 @@ transition as training data; train and evaluate a new checkpoint; publish and
 fetch through the Hugging Face Hub.
 
 **The layers.** Four layers sit above the L0 to L6 stack of
-[build.md](build.md) § Layers, and they do not renumber it. E4 is the human
+[build.md](build.md#layers-and-the-one-seam), and they do not renumber it. E4 is the human
 surface: goal intake, approvals, answers, and stop. E3 is the loop: controller,
 stuck detector, and safety gate. E2 holds the services: teacher gateway,
 trajectory store, dataset builder, checkpoint registry, verifier, and code

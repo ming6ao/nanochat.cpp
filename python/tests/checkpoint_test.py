@@ -5,8 +5,8 @@ the record framing, the dtype table, the name remap, the metadata block, and
 the path resolution, all standard library plus the loaded shared library. The
 torch half -- reading a reference `state_dict`, casting its tensors, and
 reassembling the AdamW and Muon optimizer state -- is
-`nanochat_cpp_bridge.torch_checkpoint`, the Z2 package of
-`docs/build.md` Part 1, section 4. The conversion tests below drive
+`nanochat_cpp_bridge.torch_checkpoint`, the adapter package of
+`docs/build.md`, the Python distribution. The conversion tests below drive
 that builder with fake tensors, so this file still needs no torch and no
 network; the container tests feed the records it returns into the core's write
 path, which is the boundary the two halves meet at.
@@ -318,7 +318,7 @@ class MetadataCase(unittest.TestCase):
         self.assertEqual(checkpoint.CHECKPOINT_PRECISIONS[raw["precision"]],
                          metadata["precision"])
         # The decoded config, not its JSON text: the mapping hands a caller a
-        # dict so no second parser is needed (section 4).
+        # dict so no second parser is needed.
         self.assertEqual(raw["config"], metadata["config"])
         for key in ("tokenizer_id", "git_revision", "created_utc", "notes"):
             self.assertEqual(raw[key], metadata[key], key)
@@ -335,7 +335,7 @@ class MetadataCase(unittest.TestCase):
 
         They are the member initializers of `CheckpointMetadata`, so they hold
         under every build: the recorded precision is fixed rather than the
-        build's (section 8).
+        build's.
         """
         self.assertEqual(metadata["schema"], 1)
         self.assertEqual(metadata["stage"], "base")

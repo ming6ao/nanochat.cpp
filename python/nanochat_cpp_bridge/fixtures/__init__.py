@@ -1,18 +1,19 @@
 """The offline parity producers of D11: a fixture is a file, not an import.
 
 A comparison with the PyTorch world runs in two halves
-(``docs/build.md`` section 7.1)::
+(``docs/build.md``, the parity seam)::
 
-          producer (Z2, offline)              consumer (Z1, no torch)
+          producer (an adapter)               consumer (the Python core)
     torch nanochat  -->  fixtures/*.bin  -->  tests/
     HF datasets     -->  packed rows     -->  src/sft_main
 
 The producer runs in a virtual environment that holds the reference checkout
 and the extras, writes the bytes, and records the environment it ran in
-(section 7.2). The consumer reads the committed file with the standard library
-only. This package is the producer half, and ``tools/nanochat parity produce
-<kind>`` is its one command (section 7.3); no producer runs under ``tools/
-nanochat test``, so the lock and the sandbox still cover every long job.
+(``docs/build.md``, the parity seam). The consumer reads the committed file
+with the standard library only. This package is the producer half, and
+``tools/nanochat parity produce <kind>`` is its one command; no producer runs
+under ``tools/nanochat test``, so the lock and the sandbox still cover every
+long job.
 
 Kinds
 -----
@@ -27,10 +28,9 @@ exists today:
 :data:`ALIASES` maps the shorter name a host's generator already uses
 (``train``) onto the kind, so a caller does not have to know both spellings.
 
-The SFT rung fixtures of section 7.4 (``sft_rows_fixture.bin``,
-``sft_trajectory.bin``, ``sft_val.bin``) are deliberately absent: they must
-land on the consumer side once stage S4 has landed, and a producer written
-before the consumer exists would pin bytes nothing reads.
+The supervised-fine-tuning fixtures are deliberately absent: the consumer
+side must land first, because a producer written before its consumer exists
+would pin bytes that nothing reads.
 
 Usage
 -----
@@ -42,8 +42,8 @@ Usage
     path = fixtures.produce("train", out="/tmp/t.bin")  # the alias
 
 A producer prints two lines a Model owner can stamp into a manifest
-(:func:`produce` forwards them): the ``producer`` record of section 7.2 and the
-``fixture`` record with its path, size, and SHA-256.
+(:func:`produce` forwards them): the ``producer`` record and the ``fixture``
+record with its path, size, and SHA-256.
 
 Extras: none at import. A producer's own module names the extras it needs.
 """

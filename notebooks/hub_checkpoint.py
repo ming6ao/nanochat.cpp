@@ -1,7 +1,7 @@
 """The shared Hugging Face Hub helper for the three notebooks.
 
 The Hub save and load calls have one home: ``nanochat_cpp_bridge.hf_hub``,
-the adapter zone of ``docs/build.md`` section 4, so a
+the adapter boundary of ``docs/build.md``, the Python distribution, so a
 notebook, a Modal container, and a script run the same sequence. This module
 is the host's handle on that home. It keeps only what a host owns:
 
@@ -11,9 +11,10 @@ is the host's handle on that home. It keeps only what a host owns:
 - ``write_stage``, which writes the local stage folder beside the container;
 - ``load_stage``, which rebuilds a model from a pulled stage and so needs this
   host's ``args`` module and the released package. A package never imports a
-  host (rule 4 of section 4), which is why the model wrapper stays here.
+  host (rule 4 of ``docs/build.md``, the Python distribution), which is why the
+  model wrapper stays here.
 
-Every Hub save and load call forwards to the Z2 module, which imports
+Every Hub save and load call forwards to the adapter module, which imports
 ``huggingface_hub`` inside the call. The CPU tests inject a fake ``api`` or a
 fake ``download``, so they run without the wheel and without network access.
 See ``docs/checkpoint-format.md`` section 16.
@@ -52,7 +53,8 @@ __all__ = [
 ]
 
 # The patterns, the container magic, the repository prefix, and the shard names
-# come from the Z2 Hub module, so a notebook pulls exactly what the same module
+# come from the adapter Hub module, so a notebook pulls exactly what the same
+# module
 # pushes. One home for the layout of ``docs/checkpoint-format.md`` section 16.
 STAGE_PATTERNS = hf_hub.STAGE_PATTERNS
 FULL_STAGE_PATTERNS = hf_hub.FULL_STAGE_PATTERNS
@@ -72,7 +74,7 @@ def default_namespace(api=None, environ=None) -> str:
     """The namespace for a new repository.
 
     ``HF_USERNAME`` overrides the account name. Otherwise the name comes from
-    ``HfApi.whoami()``, through the Z2 Hub module.
+    ``HfApi.whoami()``, through the adapter Hub module.
     """
     return hf_hub.default_namespace(api=api, environ=environ)
 

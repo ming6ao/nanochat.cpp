@@ -8,7 +8,7 @@ GSM8K/HumanEval answer extraction. Only the model compute is C++ (see
 ``docs/eval.md`` section 5).
 
 The module imports only the standard library, at import time and after it
-(rule 1 of ``docs/build.md`` section 4). Two things a task
+(rule 1 of ``docs/build.md``, the Python distribution). Two things a task
 class cannot do alone are handed in through the registration seam of
 :mod:`nanochat_cpp.seam`:
 

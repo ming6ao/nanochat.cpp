@@ -1,6 +1,6 @@
 # notebooks/ — the Kaggle notebook and the single-client mesh training loop.
 #
-# A notebook is a host (Z3 of docs/build.md Part 1, section 4), so
+# A notebook is a host (``docs/build.md``, the Python distribution), so
 # its modules import either package of the distribution. The heavy imports stay
 # inside the calls of `nanochat_cpp_bridge`: the modules here import the
 # standard library and the two packages, and the tests therefore run on the
@@ -61,7 +61,8 @@ py_library(
     deps = [
         ":args",
         # The Hub save and load calls have one home in the adapter package
-        # (Z2). This library forwards to it; `huggingface_hub` is imported
+        # (the adapter package). This library forwards to it; `huggingface_hub`
+        # is imported
         # inside those calls, so the test needs no wheel and no network.
         "//python:nanochat_cpp_bridge",
         "//python:nanochat_cpp",
@@ -111,7 +112,7 @@ py_test(
 )
 
 # The Colab half: the two calls, and the Bazel cache directory each one passes
-# (docs/build.md section 6.4). The test patches the clone and the build, so it
+# (docs/build.md, the Python distribution). The test patches the clone and the build, so it
 # needs no network and no card.
 py_test(
     name = "colab_setup_test",

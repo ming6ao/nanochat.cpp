@@ -85,7 +85,8 @@ The `hopper` config selects the bf16 CUDA build for a Hopper card, `sm_90`. It
 is the hand-run form of the same build the chain's H100 leg runs, and it is not
 the `h100` config: `h100` is the *simulator* profile, which sets
 `--define=simulator=1` and answers from the device profile table instead of the
-card ([build.md](build.md), the Precision section). It is a hand-run shorthand
+card ([build.md](build.md#backends-precision-and-devices)). It is a hand-run
+shorthand
 only: `_build._build_command` still emits its explicit flag triple,
 `--config=cuda --define=precision=<p> --@rules_cuda//cuda:archs=<a>`, and never
 a named config, so the H100 leg and a hand run are the same build.
@@ -547,7 +548,8 @@ the memory, the use, and the utilisation but not the capability, so the value
 comes from `nvidia-smi --query-gpu=compute_cap --format=csv,noheader`.
 
 The two Modal legs build in the container and not in the image, because a Modal
-Volume cannot reach an image build ([build.md](build.md) section 6.4). The image
+Volume cannot reach an image build
+([build.md](build.md#the-python-distribution)). The image
 holds the toolkit, the tree, and the installed package; `_ensure_build` compiles
 the leg once per container against `NANOCHAT_BAZEL_CACHE` on the
 `nanochat-build-cache` Volume, and `warm_cache` pays the cold build once.
