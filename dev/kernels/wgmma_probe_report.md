@@ -5,6 +5,17 @@ Part 3 measured, on which leg, and what the result changes about the plan. It
 covers phase 0 only. Phases 1 to 5 of that plan are not implemented, and section
 7 says why.
 
+**The source moved.** The probe that produced these rows was
+`dev/kernels/wgmma_probe.cu`, and that file is retired. Its rows are now the
+`wgmma:`-prefixed rows of `dev/kernels/wgmma_bench.cu`, which absorbed
+the probe when it gained the Phase H1 rows of
+[docs/attention.md](../../docs/attention.md) Part 8. The numbers below stand; only
+the build command and the file name change. The one check this report cites, the
+sum of the accumulators, is withdrawn as blind to the operand form, and the
+absorbing source checks one element at a time instead. Read part 3 phase 0 of
+the plan with that in mind: the rate rows are reproducible, the old check is not
+quoted as evidence.
+
 The plan's question for phase 0 is one number. How fast can one warpgroup issue
 the Hopper warpgroup matrix multiply-accumulate from a resident shared-memory
 tile? The rest of the plan depends on the answer. If the instruction cannot hold
@@ -153,13 +164,14 @@ tools/nanochat simulate --device h100 --suite gemm --precision bf16
 tools/nanochat test //backends/cuda/gemm:all
 
 # The card, through the Modal H100 leg (tools/modal/app.py).
-modal run tools/modal/app.py::card_job --name wgmma_probe
+modal run tools/modal/app.py::card_job --name wgmma_bench \
+  --argv '["--rows","phase0","--json"]'
 modal run tools/modal/app.py::card_job --name gemm_check
 modal run tools/modal/app.py::card_job --name gemm_bench \
   --argv '["--schedule","all","--json"]'
 
 # The probe alone, on a host that has a Hopper card.
-tools/nanochat build //dev/kernels:wgmma_probe --@rules_cuda//cuda:archs=sm_90a
+tools/nanochat build //dev/kernels:wgmma_bench
 ```
 
 ## 9. Limits of this report

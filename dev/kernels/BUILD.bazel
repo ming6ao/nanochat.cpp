@@ -232,41 +232,31 @@ cuda_binary(
     ],
 )
 
-# Phase 0 of docs/kernels.md Part 3: the WGMMA ceiling probe. It holds one hand
-# built shared descriptor, one interleaved staging pass, and one
-# `wgmma.mma_async.m64n128k16` instruction, and it reports the rate of a
-# warpgroup on a resident tile against the card's bf16 peak. The result is
-# checked against a host reference first, so a wrong descriptor fails instead of
-# measuring.
+# Phase 0 of docs/kernels.md Part 3 and Phase H1 of docs/attention.md Part 8:
+# one probe of the warpgroup instruction, from the hand built shared descriptor
+# and the interleaved staging pass to the rate of a staged key tile. It absorbed
+# the Phase 0 ceiling probe, which this target used to sit beside, so one source
+# file, one build, and one card job pair now replace two. The absorbed rows keep
+# their `wgmma:` prefix and the H1 rows keep `attention-wgmma:`, and a card job
+# returns only the lines of its own prefix, so both baselines entries stay
+# reproducible from this one binary.
 #
-# WGMMA is architecture conditional, so this target needs `sm_90a` on the
-# compile line and the tree's device configurations emit `sm_90`. Build and run
-# it by hand, and only on a Hopper card:
+# The Phase 0 rows time one warpgroup on one block and two warpgroups on every
+# SM, four atoms per pass, and their gate reads the per-SM share of the declared
+# peak. A grid of two warpgroups per SM cannot answer that gate, because it
+# fills the SM either way; only the one-block row can say whether one warpgroup
+# alone saturates its SM. docs/kernels.md Part 3 section 9 is the risk record.
 #
-#   tools/nanochat build //dev/kernels:wgmma_probe \
-#       --@rules_cuda//cuda:archs=sm_90a
+# The H1 rows measure the same product from a resident tile and from a key tile
+# that the copy engine stages into a four-stage ring, one and two query tiles
+# deep, and they measure the copies alone. Every row is reported against the
+# declared peak of `backends/cuda/caps.json`. Part 8 section 6 is the gate.
 #
-# The emulation engine maps no WGMMA, so there is no off-device leg and the
-# target carries `manual`. docs/kernels.md Part 3 section 9 is the risk record.
-cuda_binary(
-    name = "wgmma_probe",
-    srcs = ["wgmma_probe.cu"],
-    copts = nanochat_cuda_copts(),
-    defines = precision_defines(),
-    tags = [
-        "gpu",
-        "manual",
-    ],
-    deps = ["//include/nanochat:nanochat"],
-)
-
-# Phase H1 of docs/attention.md Part 8: the copy path of the Hopper tile.
-#
-# The ceiling probe above measures the instruction from a resident tile. A real
-# attention tile reads a new key tile every step, so this probe measures the
-# same product from a resident tile and from a tile that the copy engine stages
-# into a three-stage window, and reports both against the declared peak of
-# `backends/cuda/caps.json`. Part 8 section 6 is the gate that reads the two.
+# Two checks run before any rate is timed. The first reads one element at a
+# time against a host reference, which catches an operand form the instruction
+# cannot read; a sum-based check cannot, because the permutation that a wrong
+# form induces leaves a sum unchanged. The second compares the staged product
+# with the resident product, so a wrong staging fails instead of measuring.
 #
 # **The target states its own architecture.** WGMMA is architecture
 # conditional, and `rules_cuda` lets one target name `archs` for itself, so the
@@ -274,15 +264,18 @@ cuda_binary(
 # line moves and the default build stays at the tree's own architecture
 # (docs/build.md, and the CUTLASS candidates of backends/cuda/gemm/BUILD.bazel
 # are the precedent). The tripwire in the source refuses a build that names any
-# other architecture.
+# other architecture, so no build command carries an arch flag.
 #
 # The emulation engine maps neither WGMMA nor a tensor copy, so there is no
-# off-device leg and the target carries `manual`. Its gate is the H100 leg:
+# off-device leg and the target carries `manual`. Its gate is the H100 leg, and
+# one job states both row sets: `--rows phase0` is the Part 3 rows and
+# `--rows h1` is the Part 8 rows.
 #
-#   modal run tools/modal/app.py::card_job --name attention_wgmma
+#   modal run tools/modal/app.py::card_job --name wgmma_bench \
+#     --argv '["--rows","all","--json"]'
 cuda_binary(
-    name = "attention_wgmma_probe",
-    srcs = ["attention_wgmma_probe.cu"],
+    name = "wgmma_bench",
+    srcs = ["wgmma_bench.cu"],
     archs = ["sm_90a"],
     copts = nanochat_cuda_copts(),
     defines = precision_defines(),
@@ -290,7 +283,10 @@ cuda_binary(
         "gpu",
         "manual",
     ],
-    deps = ["//include/nanochat:nanochat"],
+    deps = [
+        "//include/nanochat:nanochat",
+        "//src:device_profile",
+    ],
 )
 # Aggregation point consumed by //:all_tests.
 test_suite(

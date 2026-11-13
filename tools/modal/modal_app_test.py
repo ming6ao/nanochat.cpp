@@ -197,15 +197,15 @@ class AppTest(unittest.TestCase):
 
     def test_the_card_job_table_names_the_gates_and_the_probe(self) -> None:
         # One entrypoint serves the gates and benchmarks of the two tensor-core
-        # families, and the WGMMA ceiling probe of docs/kernels.md Part 3 phase
-        # 0. The table is the list a caller can spell, and each row holds the
-        # Function the image built.
+        # families, and the WGMMA probe of docs/kernels.md Part 3 phase 0 and
+        # docs/attention.md Part 8 phase H1. The table is the list a caller can
+        # spell, and each row holds the Function the image built.
         module, _sdk = _load_app(with_sdk=True)
         self.assertEqual(sorted(module.CARD_JOBS),
                          ["attention_bench", "attention_check",
-                          "attention_wgmma", "gemm_bench",
+                          "gemm_bench",
                           "gemm_bench_fp8", "gemm_check", "gemm_fp32_bench",
-                          "gemm_fp32_check", "mma_check", "wgmma_probe"])
+                          "gemm_fp32_check", "mma_check", "wgmma_bench"])
         self.assertEqual(module.CARD_JOBS["gemm_check"].job.__name__,
                          "check_gemm_h100")
         self.assertEqual(module.CARD_JOBS["gemm_bench"].job.__name__,
@@ -218,14 +218,17 @@ class AppTest(unittest.TestCase):
                          "bench_attention_h100")
         self.assertEqual(module.CARD_JOBS["mma_check"].job.__name__,
                          "check_mma_h100")
-        self.assertEqual(module.CARD_JOBS["wgmma_probe"].job.__name__,
-                         "probe_wgmma_h100")
-        self.assertEqual(module.CARD_JOBS["attention_wgmma"].job.__name__,
-                         "probe_attention_wgmma_h100")
-        for name in ("gemm_bench", "gemm_bench_fp8", "attention_bench"):
+        self.assertEqual(module.CARD_JOBS["wgmma_bench"].job.__name__,
+                         "bench_wgmma_h100")
+        # The two row sets of the one binary are one job, and the job takes the
+        # probe's own `--rows`, so a gate reads its own rows from one run.
+        self.assertNotIn("wgmma_probe", module.CARD_JOBS)
+        self.assertNotIn("attention_wgmma", module.CARD_JOBS)
+        for name in ("gemm_bench", "gemm_bench_fp8", "attention_bench",
+                     "wgmma_bench"):
             self.assertTrue(module.CARD_JOBS[name].takes_argv)
         for name in ("gemm_check", "gemm_fp32_check", "attention_check",
-                     "attention_wgmma", "mma_check", "wgmma_probe"):
+                     "mma_check"):
             self.assertFalse(module.CARD_JOBS[name].takes_argv)
 
     def test_the_fp32_tile_runs_on_the_t4_image(self) -> None:
@@ -521,12 +524,16 @@ class ImageTest(unittest.TestCase):
         # Each command is a `python3 -c` one-liner, so a quoting error, or a list
         # that meets a tuple, fails inside the container and not at import. Run
         # every payload with `subprocess.run` recorded and read the argv.
+        #
+        # The probe needs `sm_90a` and its target states that for itself, so the
+        # prototype build carries no arch flag: a flag here would be a second
+        # place to keep right, and `build_config_test` proves the target form.
         cases = [(self.app.image_fetch_command(self.app.H100),
                   ["--nobuild", "@cutlass//:cutlass"], ["--jobs=auto"]),
                  (self.app.probe_build_command(
-                     self.app.H100, self.app.WGMMA_PROBE_TARGET,
-                     self.app.WGMMA_PROBE_ARCH),
-                  ["--@rules_cuda//cuda:archs=sm_90a"], ["--nobuild"])]
+                     self.app.H100, self.app.WGMMA_BENCH_TARGET),
+                  [],
+                  [f"--@rules_cuda//cuda:archs={self.app.WGMMA_ARCH}"])]
         with mock.patch.object(subprocess, "run") as run, \
                 mock.patch.dict(os.environ, {"NANOCHAT_BAZEL_CACHE": ""}):
             for command, present, absent in cases:
@@ -583,7 +590,9 @@ class ImageTest(unittest.TestCase):
         # One wrapper, so no function can forget the Volume: a container that
         # skipped the mount would compile into its own disk and keep nothing.
         _module, sdk = _load_app(with_sdk=True)
-        self.assertEqual(len(sdk.function_calls), 26)
+        # 25: the WGMMA probe is one Function, because one binary carries both
+        # its row sets and `--rows` selects between them.
+        self.assertEqual(len(sdk.function_calls), 25)
         for keywords in sdk.function_calls:
             volumes = keywords.get("volumes") or {}
             self.assertIn(self.app.CACHE_ROOT, volumes, keywords["name"])
@@ -1025,6 +1034,7 @@ class PipelineTest(_RemoteFixture):
                                          "bench_gemm_fp8_h100",
                                          "bench_gemm_h100",
                                          "bench_h100",
+                                         "bench_wgmma_h100",
                                          "check_attention_h100",
                                          "check_gemm_fp32_t4",
                                          "check_gemm_h100",
@@ -1033,8 +1043,6 @@ class PipelineTest(_RemoteFixture):
                                          "measure_stage_h100",
                                          "measure_stage_t4", "pipeline",
                                          "pipeline_h100",
-                                         "probe_attention_wgmma_h100",
-                                         "probe_wgmma_h100",
                                          "profile_h100",
                                          "profile_stage_h100",
                                          "profile_stage_t4",
@@ -1737,7 +1745,8 @@ class WeightsTest(unittest.TestCase):
         # and `train` adds the stage cache.
         mounted = {call["name"]: call["volumes"]
                    for call in self.sdk.function_calls if "volumes" in call}
-        self.assertEqual(len(mounted), 26)
+        # 25, the count of Functions: the two WGMMA row sets share one job.
+        self.assertEqual(len(mounted), 25)
         for name, volumes in mounted.items():
             self.assertIn(self.app.CACHE_ROOT, volumes, name)
         with_runs = sorted(name for name, volumes in mounted.items()

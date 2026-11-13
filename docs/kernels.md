@@ -996,18 +996,25 @@ Section 10.1 records it.
 **Gate 0 is a rate for each SM and not for the card.** One warpgroup on one SM
 cannot exceed that SM's share of the peak, which is 989 TFLOP/s over 132 SMs, or
 7.49 TFLOP/s. The gate reads 85 percent of that share from the one-block row and
-85 percent of the peak from the full-grid row. `dev/kernels/wgmma_probe.cu`
-reports both rows, and `//dev/kernels:README.md` holds the run command. The probe
-needs `sm_90a`, so the build names it by hand and the target carries `manual`.
+85 percent of the peak from the full-grid row. `dev/kernels/wgmma_bench.cu`
+reports both rows, under the `wgmma:` prefix, and `//dev/kernels:README.md`
+holds the run command. The probe needs `sm_90a`, so its target states that
+architecture for itself and the target carries `manual`.
 
-**Phase 0's result.** `dev/kernels/wgmma_probe.cu` measures one warpgroup on a
-resident 64 by 64 A tile and a 128 by 64 B tile. It reads that tile through a
-hand-built descriptor, and the timed loop moves no global memory. The card job
-`wgmma_probe` of
-`tools/modal/app.py` builds it at `sm_90a` and runs it on the H100 leg. One
-warpgroup held 7.384 TFLOP/s, which is 98.6 percent of the per-SM share of the
-peak. Two warpgroups on every SM held 952.9 TFLOP/s, which is 96.4 percent of the
-card peak. **The gate passed.**
+**Phase 0's result.** `dev/kernels/wgmma_bench.cu` measures one
+warpgroup on a resident 64 by 64 A tile and a 128 by 64 B tile. It reads that
+tile through a hand-built descriptor, and the timed loop moves no global memory.
+The card job `wgmma_bench` of `tools/modal/app.py` builds it at `sm_90a` and
+runs it on the H100 leg, and `--rows phase0` returns these rows from the one
+document it states. One warpgroup held
+7.384 TFLOP/s, which is 98.6 percent of the per-SM share of the peak. Two
+warpgroups on every SM held 952.9 TFLOP/s, which is 96.4 percent of the card
+peak. **The gate passed.**
+
+That source file absorbed the standalone Phase 0 probe, so the same binary and
+the same card job also carry the Phase H1 rows of
+[attention.md](attention.md) Part 8 under the `attention-wgmma:` prefix. The two
+prefixes are why one card job returns the Phase 0 rows alone.
 
 The rows are under `wgmma_probe` in [baselines.json](baselines.json), and
 `dev/kernels/wgmma_probe_report.md` is the record of the run.

@@ -32,7 +32,7 @@ tools/nanochat bench -- <benchmark>       # T3-style micro-benchmark under the b
 | `muon_fused_gemm_test.cc` | Five-form correctness of the prototype against the seam GEMM (cuBLAS), including the wide-branch side selector. |
 | `muon_fused_gemm_bench.cc` | Hand GEMM versus cuBLAS at the groups the fusion targets, with the section 4 gate share. |
 | `muon_launch_sync_bench.cu` | Phase 0 sync term: launch gap versus cooperative grid-barrier cost on this card. |
-| `wgmma_probe.cu` | Phase 0 of [docs/kernels.md](../../docs/kernels.md) Part 3: the Hopper warpgroup rate on a resident tile, with a hand-built shared descriptor. Needs `sm_90a`. |
+| `wgmma_bench.cu` | Phase 0 of [docs/kernels.md](../../docs/kernels.md) Part 3 and Phase H1 of [docs/attention.md](../../docs/attention.md) Part 8, in one binary: the `wgmma:` ceiling rows of the warpgroup rate on a resident tile, the accumulator, operand, and register maps of `wgmma.mma_async.m64n128k16` checked one element at a time, and the `attention-wgmma:` rows of a staged key tile at one and two query tiles plus a copy-only row. Needs `sm_90a`. |
 
 ## Conventions
 
@@ -293,7 +293,7 @@ is a different prototype and a different measurement; nothing here says the
 fusion is impossible, only that this schedule is well off cuBLAS and the launch
 gaps it removes are worth a fraction of a percent.
 
-## The WGMMA ceiling probe (Part 3 phase 0)
+## The WGMMA probe (Part 3 phase 0 and Part 8 phase H1)
 
 [docs/kernels.md](../../docs/kernels.md) Part 3 asks whether a hand-written
 Hopper mainloop can hold the cuBLAS rate on the six rows that matter. Phase 0
@@ -301,8 +301,14 @@ before that work asks one narrower question: how fast can one warpgroup issue
 the warpgroup matrix multiply-accumulate from a resident shared-memory tile? If
 one warpgroup cannot hold the per-SM rate, no mainloop built on it can hold the
 card rate, and the campaign stops without writing one.
+[docs/attention.md](../../docs/attention.md) Part 8 then asks what the attention
+tile needs from the same instruction: the operand form it reads, the map of its
+accumulator and register operands, and the rate it holds when the key tile is
+staged by a copy path.
 
-`wgmma_probe.cu` answers it with three hand-written pieces and no library:
+One file answers both: `wgmma_bench.cu` absorbed the Phase 0 ceiling
+probe, so there is one build and one card job pair instead of two. It uses three
+hand-written pieces and no library:
 
 - the shared-memory matrix descriptor, encoded from the sixteen-byte fields the
   instruction reads;
@@ -311,28 +317,36 @@ card rate, and the campaign stops without writing one.
 - the instruction itself, `wgmma.mma_async.sync.aligned.m64n128k16.f32.bf16.bf16`,
   with its sixty-four fp32 accumulators.
 
-The probe checks the product against a host reference before it reports a rate,
-so a descriptor that reads the wrong element fails the check instead of
-producing a number. It then reports two rows: `1block`, which is one warpgroup
-on one SM, and `grid`, which is two warpgroups on every SM of the card.
+The probe checks the product one element at a time against a host reference
+before it reports a rate, so a descriptor that reads the wrong element fails the
+check instead of producing a number. It then reports four resident rows. Eight
+atoms per pass, which is the head width, on one block and on one block per SM,
+are the H1 rows of Part 8. Four atoms per pass on one block, and on two per SM,
+are the Phase 0 rows of Part 3. The two prefixes keep the two card jobs apart.
 
-**The gate is a rate for each SM, not a rate for the card.** One warpgroup
-cannot exceed its SM's share of the peak, which is 989 TFLOP/s over 132 SMs, or
-7.49 TFLOP/s. The gate reads 85 percent of that share on the `1block` row.
+**The Phase 0 gate is a rate for each SM, not a rate for the card.** One
+warpgroup cannot exceed its SM's share of the peak, which is 989 TFLOP/s over
+132 SMs, or 7.49 TFLOP/s. The gate reads 85 percent of that share on the
+`wgmma:1block` row. The `wgmma:grid` row cannot answer it, because two
+warpgroups fill an SM whether or not either one could fill it alone.
 
 WGMMA is architecture conditional and the tree's device configurations emit
-`sm_90`, so the one target needs `sm_90a` on the compile line. It carries the
-`gpu` and `manual` tags, and the emulation engine maps no WGMMA, so there is no
-off-device leg.
+`sm_90`, so the one target states `archs = ["sm_90a"]` for itself and no build
+command carries a flag. It carries the `gpu` and `manual` tags, and the
+emulation engine maps no WGMMA, so there is no off-device leg.
 
 ```bash
-tools/nanochat build //dev/kernels:wgmma_probe --@rules_cuda//cuda:archs=sm_90a
+tools/nanochat build //dev/kernels:wgmma_bench
 ```
 
-On a card the host cannot reach, the Modal card job builds and runs it:
+On a card the host cannot reach, the one Modal card job builds and runs it. The
+job states a `nanochat.bench.v3` document, and `--rows` selects the row set:
 
 ```bash
-modal run tools/modal/app.py::card_job --name wgmma_probe
+modal run tools/modal/app.py::card_job --name wgmma_bench \
+  --argv '["--rows","phase0","--json"]'
+modal run tools/modal/app.py::card_job --name wgmma_bench \
+  --argv '["--rows","h1","--json"]'
 ```
 
 ## Adding a family

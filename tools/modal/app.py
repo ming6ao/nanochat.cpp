@@ -231,25 +231,20 @@ GEMM_FP32_TEST_BIN = _bazel_bin(GEMM_FP32_TEST_TARGET)
 GEMM_MMA_TARGET = "//backends/cuda/gemm:mma_bf16_test"
 GEMM_MMA_BIN = _bazel_bin(GEMM_MMA_TARGET)
 
-#: Phase 0 of ``docs/kernels.md`` Part 3: the WGMMA ceiling probe of
-#: ``dev/kernels/wgmma_probe.cu``. It is the one target in the tree that needs
+#: Phase 0 of ``docs/kernels.md`` Part 3 and Phase H1 of
+#: ``docs/attention.md`` Part 8 in one program, ``dev/kernels/wgmma_bench.cu``.
+#: It absorbed the standalone ``dev/kernels/wgmma_probe.cu``, so one job builds
+#: and runs both row sets. It is the one target in the tree that needs
 #: ``sm_90a``, and the image's own build emits ``sm_90``, so
-#: :func:`probe_wgmma_h100` builds it inside the container with the tree's
+#: :func:`bench_wgmma_h100` builds it inside the container with the tree's
 #: builder before it runs it. The probe is a device-only prototype: the
 #: emulation engine maps no WGMMA, so there is no off-device leg.
-WGMMA_PROBE_TARGET = "//dev/kernels:wgmma_probe"
-WGMMA_PROBE_BIN = _bazel_bin(WGMMA_PROBE_TARGET)
-#: The architecture the probe needs, and the one the probe's own tripwire
-#: refuses to compile without.
-WGMMA_PROBE_ARCH = "sm_90a"
-
-#: Phase H1 of ``docs/attention.md`` Part 8: the copy path of the Hopper tile of
-#: ``dev/kernels/attention_wgmma_probe.cu``. It measures the same product from a
-#: resident key tile and from a key tile that the copy engine stages, so the
-#: gate of Part 8 section 6 can compare the two. Like the ceiling probe it is a
-#: device-only prototype, and its target states its own architecture.
-ATTENTION_WGMMA_TARGET = "//dev/kernels:attention_wgmma_probe"
-ATTENTION_WGMMA_BIN = _bazel_bin(ATTENTION_WGMMA_TARGET)
+WGMMA_BENCH_TARGET = "//dev/kernels:wgmma_bench"
+WGMMA_BENCH_BIN = _bazel_bin(WGMMA_BENCH_TARGET)
+#: The architecture the probe needs. It is stated by the target
+#: ``archs = ["sm_90a"]``, so no build command carries a flag, and the name is
+#: kept here only to document what the target asserts.
+WGMMA_ARCH = "sm_90a"
 
 #: The labels the one build of an image names: the shared library, the stage
 #: binary the chain launches (``docs/post-training.md`` B6 and D2), the
@@ -606,21 +601,24 @@ def image_fetch_command(leg: Leg, targets: Sequence[str] = FETCH_TARGETS,
                             pythonpath=f"{root}/python", root=root)
 
 
-def probe_build_command(leg: Leg, target: str, arch: str,
-                        root: str = REPO_ROOT) -> str:
-    """The one build command of a prototype that needs its own architecture.
+def probe_build_command(leg: Leg, target: str, root: str = REPO_ROOT) -> str:
+    """The one build command of a prototype.
 
-    The image builds every target of a leg at the leg's architecture, and one
-    prototype cannot share that: WGMMA is architecture conditional, so
-    ``dev/kernels/wgmma_probe.cu`` compiles only at ``sm_90a``. The command
-    calls the tree's builder with that architecture, so the flag line stays in
-    ``nanochat_cpp._build`` and this file names no Bazel flag of its own.
+    The image builds every target of a leg at the leg's architecture, and a
+    prototype that needs another one cannot share that: WGMMA is architecture
+    conditional, so ``dev/kernels/wgmma_bench.cu`` compiles only at
+    ``sm_90a``. The target states that architecture for itself, so this command
+    names no flag and the leg's own architecture is the resolved default. The
+    command calls the tree's builder, so the flag line stays in
+    ``nanochat_cpp._build``. ``docs/build.md`` records the per-target form, and
+    the CUTLASS candidates of ``backends/cuda/gemm/BUILD.bazel`` are the
+    precedent.
     """
     return (
         f"cd {root} && python3 -c \""
         "import subprocess; from nanochat_cpp import _build; "
         "_options = _build.BuildOptions.resolve("
-        f"backend='cuda', precision='{leg.precision}', arch='{arch}'); "
+        f"backend='cuda', precision='{leg.precision}'); "
         "subprocess.run(_build._build_command("
         f"'tools/nanochat', _options, ({target!r},)), check=True)\"")
 
@@ -1419,16 +1417,21 @@ def check_mma_h100() -> str:
                           GEMM_MMA_BIN], "[]", ("mma_bf16",))
 
 
-def prototype_probe(target: str, binary: str, prefixes) -> str:
-    """Build one prototype at its own architecture in the container, then run it.
+def prototype_probe(target: str, binary: str, argv_json: str = "[]") -> str:
+    """Build one prototype in the container, then run it with the caller's argv.
 
     A prototype needs an architecture the leg's own build does not emit, so the
     build comes first and inside the container: one build of one target is
     cheaper than a second image. The target states that architecture for itself,
-    so the command names no flag of its own.
+    so the command names no flag.
+
+    The program reports a ``nanochat.bench.v3`` document, so the answer carries
+    it in ``stdout`` and no line prefix is lifted. ``argv_json`` is the probe's
+    own arguments, such as ``["--rows", "phase0", "--json"]``, so a caller
+    selects a row set without a new deployment.
     """
     build = subprocess.run(
-        ["bash", "-c", probe_build_command(H100, target, WGMMA_PROBE_ARCH)],
+        ["bash", "-c", probe_build_command(H100, target)],
         env=worker_env(package_source()), capture_output=True, text=True,
         check=False)
     if build.returncode != 0:
@@ -1437,7 +1440,7 @@ def prototype_probe(target: str, binary: str, prefixes) -> str:
                            "tail": process_tail(build, lines=20)},
                           sort_keys=True)
     return _run_in_image(["tools/nanochat", "run", "t1-gpu", "--", binary],
-                         "[]", prefixes)
+                         argv_json, ())
 
 
 @_function(
@@ -1447,42 +1450,24 @@ def prototype_probe(target: str, binary: str, prefixes) -> str:
     timeout=3600,
     max_containers=1,
 )
-def probe_wgmma_h100() -> str:
-    """Build and run the WGMMA ceiling probe on the H100 leg.
+def bench_wgmma_h100(argv_json: str = "[]") -> str:
+    """Build and run the WGMMA probe on the H100 leg, both row sets.
 
-    Phase 0 of ``docs/kernels.md`` Part 3 asks one question: how fast can one
-    warpgroup issue the warpgroup matrix multiply-accumulate from a resident
-    shared-memory tile? The probe answers it with a hand written descriptor, a
-    hand written interleaved staging pass, and the instruction itself, and it
-    checks the product against a host reference before it reports a rate.
+    One binary answers two phases. The ``wgmma:`` rows are Phase 0 of
+    ``docs/kernels.md`` Part 3: how fast one warpgroup issues the warpgroup
+    matrix multiply-accumulate from a resident shared-memory tile, and what
+    share of its SM that is. The ``attention-wgmma:`` rows are Phase H1 of
+    ``docs/attention.md`` Part 8: the operand form, the two operand maps, and
+    the rate of a key tile that the copy engine stages.
+
+    ``argv_json`` is the probe's own arguments, such as
+    ``["--rows", "phase0", "--json"]``, so one gate reads its own rows from
+    the one document.
 
     The build comes first and it is inside the container, because the image
     built every other target at ``sm_90`` and this probe needs ``sm_90a``.
     """
-    return prototype_probe(WGMMA_PROBE_TARGET, WGMMA_PROBE_BIN,
-                           ("wgmma", "card:"))
-
-
-@_function(
-    image=image_for(H100),
-    gpu=H100.gpu,
-    cpu=CPU_CORES,
-    timeout=3600,
-    max_containers=1,
-)
-def probe_attention_wgmma_h100() -> str:
-    """Build and run the copy-path probe of the Hopper attention tile.
-
-    Phase H1 of ``docs/attention.md`` Part 8 asks one question: can a staged key
-    tile still reach the rate of the warpgroup instruction? The probe measures
-    the same product twice, once from a resident tile and once from a tile that
-    the copy engine writes into a three-stage window, checks the staged product
-    against a host reference, and reports both rates against the declared peak.
-
-    The build is inside this container for the reason the ceiling probe's is.
-    """
-    return prototype_probe(ATTENTION_WGMMA_TARGET, ATTENTION_WGMMA_BIN,
-                           ("attention-wgmma:", "card:"))
+    return prototype_probe(WGMMA_BENCH_TARGET, WGMMA_BENCH_BIN, argv_json)
 
 
 def chain_dir(run_root, job) -> Path:
@@ -3020,10 +3005,15 @@ class CardJob:
     takes_argv: bool = False
 
 
-#: The card jobs, by the name a command spells. Each one is the gate or the
-#: benchmark of one tensor-core family: the tile's own test against its
-#: reference, and the rate report whose rows a promotion gate reads. The last
-#: row is the fp8 arm, which needs the image that builds at fp8.
+#: The card jobs, by the name a command spells. A name is `<family>_<kind>`:
+#:   `_check`  a test target that compares against a reference;
+#:   `_bench`  a rate report that states a `nanochat.bench.v3` document and
+#:             takes `--argv`;
+#:   `_probe`  unused at present, kept for a prototype that reports neither.
+#: Each one is the gate or the benchmark of one tensor-core family: the tile's
+#: own test against its reference, and the rate report whose rows a promotion
+#: gate reads. One job may carry two row sets, which is why `wgmma_bench` takes
+#: `--rows`.
 CARD_JOBS = {
     "attention_check": CardJob(check_attention_h100, "the attention test"),
     "attention_bench": CardJob(bench_attention_h100, "the attention benchmark",
@@ -3038,10 +3028,11 @@ CARD_JOBS = {
     "gemm_fp32_bench": CardJob(bench_gemm_fp32_t4, "the fp32 tile benchmark",
                                takes_argv=True),
     "mma_check": CardJob(check_mma_h100, "the Part 3 phase 1 micro-tile gate"),
-    "attention_wgmma": CardJob(probe_attention_wgmma_h100,
-                               "the Part 8 H1 copy-path probe"),
-    "wgmma_probe": CardJob(probe_wgmma_h100,
-                           "the WGMMA ceiling probe of Part 3 phase 0"),
+    "wgmma_bench": CardJob(
+        bench_wgmma_h100,
+        "the WGMMA probe: the Part 3 phase 0 ceiling rows and the Part 8 H1 "
+        "copy-path rows, from one binary",
+        takes_argv=True),
 }
 
 
