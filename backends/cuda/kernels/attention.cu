@@ -49,6 +49,7 @@
 #include "backends/cuda/device.h"
 #include "backends/cuda/kernels/attention_bf16.h"
 #include "backends/cuda/kernels/attention_dispatch.h"
+#include "backends/cuda/kernels/attention_flash.h"
 #include "backends/cuda/kernels/device_utils.cuh"
 #include "nanochat/kernels.h"
 
@@ -973,6 +974,10 @@ void AttentionForward(const AttentionParams& params, const ComputeType* q,
   }
   const int kv_len = params.kv_len > 0 ? params.kv_len : params.seq;
   if (kv_len <= 0) return;
+  if (UseFusedAttentionFlash(params)) {
+    LaunchFlashAttention(params, q, k, v, out, stats);
+    return;
+  }
   if (FusedAttentionFp32Covers(params)) {
     LaunchFusedAttention(params, q, k, v, out, stats);
     return;
@@ -1180,6 +1185,13 @@ void AttentionBackward(const AttentionParams& params, const ComputeType* q,
 
   // The banded backward never builds the dense `seq x seq` score matrix, so it
   // dispatches before that scratch is requested (docs/attention.md Part 2).
+  // The flash family comes first: it is the fused partner of the flash forward
+  // and it needs no score, probability, or transposed head buffer at all
+  // (docs/attention.md Part 7).
+  if (UseFusedAttentionFlash(params)) {
+    LaunchFlashAttentionBackward(params, q, k, v, stats, dout, dq, dk, dv);
+    return;
+  }
   if (UseWindowedBackward(params)) {
     AttentionBackwardWindowed(params, q, k, v, stats, dout, dq, dk, dv);
     return;

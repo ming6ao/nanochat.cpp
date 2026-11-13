@@ -1,19 +1,35 @@
 # Attention
 
-Attention has three forward paths and one backward. Two paths are fused tiles
-that keep the online-softmax state in registers and skip fully masked key tiles.
-The third is the batched cuBLAS decomposition, which is also the only backward.
+Attention has four forward paths and two backward paths. The flash family is
+fused, keeps the online-softmax state in registers, skips every key tile that no
+query row in the block can see, and reads either query layout. Two earlier fused
+tiles remain. The last path is the batched cuBLAS decomposition, which covers
+every shape the flash family leaves out and the whole backward of an fp32 build.
 
 | Path | Covers | Engine |
 |---|---|---|
+| flash family | a bf16 or fp8 build, a tensor-core device, head width 64 or 128, a one-sided window | tensor cores |
 | fp32 tile | a windowed shape at head width 128, fp32 build | CUDA cores |
-| bf16 tile | a windowed shape at head width 128, bf16 or fp8 build, a device with tensor cores | tensor cores |
-| cuBLAS | every other shape, and every backward | cuBLAS |
+| bf16 tile | the Part 6 shapes, on a tensor-core device whose opt-in shared memory is below 139,264 bytes | tensor cores |
+| cuBLAS | every other shape, a decode step, and every other backward | cuBLAS |
 
-The two predicates live in `backends/cuda/kernels/attention_dispatch.h`, the
-tiles in `backends/cuda/kernels/attention.cu` and `attention_bf16.cu`, and the
-measured rows on a supported card in the `attention_bf16` entry of
+The three predicates live in `backends/cuda/kernels/attention_dispatch.h`, the
+tiles in `backends/cuda/kernels/attention.cu`, `attention_bf16.cu`, and
+`attention_flash.cu`, and the measured rows on a supported card in the
+`attention_flash` and `attention_bf16` entries of
 [baselines.json](baselines.json).
+
+Part 7 designs the flash family, and its section 7 records the measurement: the
+correctness gate passed and both rate gates missed. The family is therefore
+selected in a bf16 build and the promotion is an open decision. The table above
+states what the tree runs today.
+
+The part numbers are historical. Parts 2 to 4 described the Pascal study, the
+fp32 tile, the windowed-forward promotion, and the promotion's results. This
+document retired them on 2026-11-06 and kept the numbers, so a reference from
+an earlier commit points at text that has left. The fp32 tile and the banded
+backward are described in `backends/cuda/kernels/attention.cu`, and Parts 6 and
+7 name their replacement.
 
 Read [performance.md](performance.md) for the measurement protocol and
 [kernels.md](kernels.md) for the family inventory.
@@ -147,7 +163,7 @@ rules keep that honest:
    build, because the build selects it
    (`backends/cuda/kernels/BUILD.bazel`). An fp32 build links the stand-in, which
    answers false and launches nothing, so it cannot stage a four-byte element
-   into a two-byte tile. The fp32 tile of Part 2 is the only fp32 path.
+   into a two-byte tile. The fp32 tile in `attention.cu` is the only fp32 path.
 2. The dispatch reads `Caps::has_tensor_cores` at run time, so a bf16 build on a
    card without tensor cores keeps cuBLAS.
 
@@ -258,8 +274,8 @@ reads it.
 | The exponential | `expf` |
 
 The accuracy target is the bf16 target of [testing.md](testing.md), which is
-1e-2 relative. The strict 1e-5 tolerances of Part 4 belong to the fp32 build and
-do not move.
+1e-2 relative. The strict 1e-5 tolerance belongs to the fp32 build and does not
+move.
 
 ### 5. Dispatch
 
@@ -271,7 +287,8 @@ bool FusedAttentionFp32Covers(const AttentionParams& p);
 bool FusedAttentionBf16Covers(const AttentionParams& p, bool tensor_cores);
 ```
 
-The fp32 predicate is the one of Part 4. The bf16 predicate adds the bf16 build,
+The fp32 predicate is the one that `attention_dispatch.h` states for the fp32
+tile. The bf16 predicate adds the bf16 build,
 a device with tensor cores, the window, and head width 128. Both keep
 `!p.q_head_major`, because the tiles read the model stream. The header is
 host-only, so `attention_test.cc` includes it and checks the same conditions
@@ -327,6 +344,629 @@ it saves.
 The backward rows move the other way, and by design. Both backwards run the
 same banded cuBLAS loop, so the only difference is the query transpose that the
 head-major twin does not pay, and the dense twin is marginally faster.
+
+## Part 7. The flash kernel
+
+Part 6 fuses the windowed forward. The tree still spends at least 52
+milliseconds of attention in one step of the production shape. Two causes
+remain. The bf16 tile covers neither the backward nor the head-major query that
+the fused `qk_prep` writes, and the tile reaches 22.7 TFLOP/s, which is 2.3
+percent of the peak. This part designs one family for both passes, in the
+layouts that the model already holds.
+
+### 1. The measured defect
+
+One traced base step of the `big` profile, from
+`profiles/pgo-big/base-h100/iter-02/before/trace/`: 20 layers, hidden 1280, ten
+query heads over five key-value heads, head width 128, sequence 1024, the `SSL`
+window, batch 16, and 16,384 tokens per step.
+
+| Work | Launches per step | Milliseconds per step |
+|---|---:|---:|
+| Softmax, forward | 20 | 10.84 |
+| Softmax, backward | 59 | 12.28 |
+| Head transposes, both passes | 220 | 9.93 |
+| `qk_prep`, both passes | 80 | 11.65 |
+| The four products, dense or banded | inside the GEMM row | not split |
+| **The bound for the whole family** | — | **3.18** |
+
+The softmax forward runs once per layer, so no layer takes the fused bf16 tile.
+`QueryIsHeadMajor` in `src/ops.cc` sets `q_head_major` when the fused `qk_prep`
+is registered, and both dispatch predicates require `!q_head_major`. The two
+fused families are therefore exclusive. The tree keeps the cheaper one by
+accident: `qk_prep` saves 11.65 ms, and the dense attention pays 33.1 ms of
+softmax and transpose passes that a fused tile would not issue.
+
+The dense forward issues 1.72 TFLOP per step at this shape. That is 1.95 times
+the arithmetic the counter table counts, because a masked pair costs the same
+as a visible one. The backward has no fused path: the dense forward and the
+banded backward stage or write eleven head-major buffers on every layer, which
+is the 220 transpose launches.
+
+### 2. The decisions
+
+| # | Decision | Reason |
+|---|---|---|
+| F1 | One family for both passes | The softmax passes and the transposes serve only the cuBLAS decomposition |
+| F2 | Accept the head-major query, and keep the stream layout for k, v, out, dk and dv | The fused `qk_prep` already writes the query head-major, and one head's query rows are contiguous in that layout |
+| F3 | `mma.sync` m16n8k16 with fp32 accumulators, not `wmma` | The `wmma` fragment layout hides the row of a score element, which forces the fp32 scratch tile of Part 6, section 4.4, and 22.7 TFLOP/s |
+| F4 | Keep the probability operand in registers between the two products | Two adjacent 16 by 8 accumulators are the 16 by 16 A operand of the value product, so the scratch round trip leaves |
+| F5 | Two backward kernels, and no atomics | dQ is written once per query row, and dK with dV once per key row, so two runs agree bit for bit |
+| F6 | Recompute the score and the probability from the saved statistics | Two extra products per pair, against the score and probability matrices that the banded loop reads and writes |
+| F7 | Scores, statistics and accumulators in fp32; the probability operand in the compute type | The invariants of Part 5, section 4 do not move |
+| F8 | No seam change before phase F3 | `AttentionParams` already carries the scale, the window, `kv_len`, `stats_row_stride` and `q_head_major` |
+
+### 3. The forward tile
+
+#### 3.1 Schedule
+
+| Item | Value | Reason |
+|---|---|---|
+| Query rows, `Br` | 128 | Eight warps, one 16-row fragment set per warp |
+| Key rows, `Bc` | 64 | Four 16-key sub-tiles per product |
+| Threads | 256 | Eight warps |
+| Grid | `(ceil(seq / Br), heads, batch)` | Each block owns its own output rows |
+| Blocks per streaming multiprocessor | 1 | 120 KiB of shared memory, and about 120 registers per thread |
+| Key and value stages | 2 | The copy of the next tile overlaps the arithmetic of the current one |
+
+#### 3.2 Shared memory
+
+The row stride is the head width plus eight elements, which is 272 bytes and a
+multiple of sixteen.
+
+| Buffer | Bytes | Lifetime |
+|---|---:|---|
+| Query tile, 128 by 136 | 34,816 | Whole block |
+| Key tile, 2 stages of 64 by 136 | 34,816 | Double buffered |
+| Value tile, 2 stages of 64 by 136 | 34,816 | Double buffered |
+| Total | 104,448 | |
+
+Decision F4 keeps the probability operand in registers, so the probability
+free. At head width 64 the same three buffers read 55,296 bytes.
+
+The request exceeds the 48 KiB default, so the launcher calls
+`cudaFuncSetAttribute` once for the opt-in limit. `//tests:cuda_sim_test` fails
+a launch above 48 KiB without that call.
+
+#### 3.3 The microkernel
+
+One instruction serves both products: `mma.sync.aligned.m16n8k16` with bf16
+operands and an fp32 accumulator. Each warp owns 16 query rows and the whole
+128-column output accumulator of those rows.
+
+The score accumulator of a warp is a 16 by 64 tile in eight `m16n8` fragments.
+A row of that tile spans four lanes of a quad, so the row maximum, the row sum
+and the rescale factor need a shuffle over four lanes and no shared memory.
+That is the whole difference against Part 6, section 4.4: the tile reads and
+writes the row of a score in registers, so the fp32 scratch tile of 16,384
+bytes leaves the kernel.
+
+The probability operand of the value product is the same eight fragments,
+rounded to bf16 in registers. Two adjacent 16 by 8 fragments hold the 16 by 16 A
+operand, and the B operand is the staged value tile.
+
+Both products read their operands with `ldmatrix`, as the reference kernel does
+(`SmemCopyAtom` of its `kernel_traits.h`). One `ldmatrix.x4` fills the four
+registers of the query operand, and one fills two key fragments or two
+value fragments. The value product needs the transpose form, because its `k`
+dimension is the key index and the staged value row is not: `ldmatrix.x4.trans`
+transposes the eight-row segments it reads, so the value tile stays in the
+`[key][dim]` layout of the staging copy and no second staging pass exists. The
+padding of eight elements in a staged row is the only layout requirement: it
+keeps every segment aligned to sixteen bytes, and it puts the eight rows of one
+matrix on distinct banks, so no swizzle is needed.
+
+#### 3.4 The key tile loop
+
+The loop is the one of Part 6, section 4.5, with three changes.
+
+1. **Layout.** The query tile reads `[batch, heads, seq, dim]` when
+   `q_head_major` is set, and `[batch, seq, heads, dim]` otherwise. One index
+   function serves both, so the predicate no longer rejects a caller.
+2. **Mask.** `KeyAllowedDev` runs on the accumulator fragment, so a tile that
+   is wholly visible skips the mask. A window of `-1` is the full causal case,
+   which now takes the same path.
+3. **Reduce.** The row maximum and the row sum are warp quads, not lanes of a
+   shared tile. The statistics are written once, by the lane that holds the
+   row, in the layout of `AttentionStatsCount`.
+
+A block issues `(window + Br) / window` of the necessary arithmetic at the
+production shape, which is 1.25 for a window of 512.
+
+#### 3.5 The fp8 operand
+
+The fp8 build keeps the bf16 probability operand of a bf16 build, because the
+family rounds `P` in registers to the compute type and the compute type of an
+fp8 build is bf16. The scores stay fp32 and the accumulator stays fp32. The
+per-row E4M3 scale of Part 5, section 3 is not landed, and it is a later change
+to the one packing step.
+
+### 4. The backward
+
+Two kernels, one per direction, so no element is written twice.
+
+#### 4.1 The query kernel
+
+One block per `(query block, head, batch)`. It loops over the visible key tiles
+and recomputes the score, because the forward keeps no probability matrix. The
+saved statistics give the row maximum and the row sum, so `P` is exact in one
+step.
+
+`row_dot` is the one value a single pass cannot produce, because it sums over
+every key of the row. The kernel therefore makes two passes over the same
+visible tiles, and each pass stages its tiles again:
+
+1. **Pass 0.** `S = scale * Q K^T`, masked by `KeyAllowedDev`, then
+   `P = exp(S - row_max) / row_sum`, then `dP = dO V^T`, then
+   `row_dot = sum(P * dP)` per query row, a quad reduction. The lane that owns
+the row writes `row_dot` where the key and value kernel reads it.
+2. **Pass 1.** The same score, probability and output-gradient products, then
+   `dS = P * (dP - row_dot)` in registers, then `dQ += scale * dS K`, in fp32
+   across the key tiles and written once.
+
+Two properties hold the cost of the second pass down. Pass 0 writes no
+gradient, so it needs no accumulator beyond `row_dot`. And the identity
+`row_dot = dO . O` would remove the pass completely, but the seam carries no
+forward output, so the pass stays until phase F3 (decision F8).
+
+#### 4.2 The key and value kernel
+
+One block per `(key block, key-value head, batch)`. It owns 128 key rows, one
+16-row fragment set per warp, and it loops over the query tiles whose window
+contains the key block, staging 32 query rows at a time. The block recomputes
+the score again.
+
+1. **Score and probability.** The same two steps, for each query tile in the
+   window.
+2. **Output gradient product.** `dP = dO V^T`, for the same tile.
+3. **Score gradient.** `dS = P * (dP - row_dot)`, per query row.
+4. **Key gradient.** `dK += scale * dS^T Q`, in fp32 across the query tiles.
+5. **Value gradient.** `dV += P^T dO`, in fp32 across the query tiles.
+
+Grouped-query attention needs no fold kernel. The block owns one key-value head
+and loops over the query heads that read it, which is two at the production
+shape. The two heads accumulate into the same fp32 registers.
+
+#### 4.3 Shared memory
+
+The query kernel, at head width 128:
+
+| Buffer | Bytes |
+|---|---:|
+| Query tile, 128 by 136 | 34,816 |
+| Output gradient tile, 128 by 136 | 34,816 |
+| Key tile, 2 stages | 34,816 |
+| Value tile, 2 stages | 34,816 |
+| Total | 139,264 |
+
+The key and value kernel, at the same width:
+
+| Buffer | Bytes |
+|---|---:|
+| Key tile, 128 by 136 | 34,816 |
+| Value tile, 128 by 136 | 34,816 |
+| Query tile, 32 by 136 | 8,704 |
+| Output gradient tile, 32 by 136 | 8,704 |
+| Row maximum, inverse sum, row dot, 3 by 32 fp32 | 384 |
+| Total | 87,424 |
+
+The score gradient needs no tile. It lives in the accumulator fragments of the
+step that produces it, and the row dot reads it there. The query kernel's
+139,264 bytes is the family's high-water mark, and it is the figure that the
+device gate compares with the opt-in limit, so a card whose limit is below it
+keeps cuBLAS.
+
+#### 4.4 The arithmetic cost
+
+The family issues nine products per query and key pair: five in the query
+kernel, which is two in pass 0 and three in pass 1, and four in the key and
+value kernel. The banded loop issues five, and the counter table counts four.
+The backward row therefore gains an issued-work ratio of 2.25 in the report of
+[performance-model.md](performance-model.md) section 8, and the design states
+that number rather than hiding it.
+
+One product per pair is 0.433 TFLOP of this step, so the four products the
+family issues over the shipped banded loop are 1.7 TFLOP, which is 1.7 ms at
+the declared peak. It buys the removal of the score and probability traffic,
+which is 0.94 GiB of scratch at this shape, and the 9.93 ms of transposes. The
+two passes of section 4.1 are half of that extra work, and the seam change they
+wait on is the first thing phase F3 should retire.
+
+### 5. Dispatch
+
+One predicate replaces the two of `attention_dispatch.h` for a bf16 build.
+
+```c
+bool FusedAttentionFlashCovers(const AttentionParams& p, bool tensor_cores) {
+  const int width = p.head_dim;
+  return kComputeIsBf16 && tensor_cores && (width == 64 || width == 128) &&
+         p.window_right == 0 && p.kv_len <= p.seq;
+}
+```
+
+Three conditions change against Part 6, section 5.
+
+1. The head-major query is accepted, because F2 reads it.
+2. A full-causal layer is accepted, because F1 keeps the window in the mask.
+3. A decode step keeps cuBLAS, because `kv_len > seq` needs the cache path and
+   a different tile split.
+
+`attention.cu` selects the flash family first, then the fp32 tile, then
+cuBLAS. The seam keeps its two entries and its version.
+
+The family reads both query layouts, so a bf16 build sends every windowed and
+full-causal head-width-64 or head-width-128 shape to it. The `*_cublas` rows of
+`attention_benchmark` therefore measure the head-major layout of the family and
+not the dense path in such a build. The dense comparison is the `attention_bf16`
+entry of [baselines.json](baselines.json), and section 7 reads both entries.
+
+### 6. Phases and gates
+
+| Phase | Change | Gate |
+|---|---|---|
+| F1 | The forward tile, both query layouts, and the full-causal case | `//backends/cuda/kernels:attention_gpu_test` at the bf16 tolerance of [testing.md](testing.md); the forward row of `attention_benchmark` at 200 TFLOP/s or more; no softmax forward launch in a trace |
+| F2 | The two backward kernels | The family test at the same tolerance; the backward row at 150 TFLOP/s or more; no softmax backward and no attention transpose launch in a trace; the step at the production shape at 182 ms or less |
+| F3 | Fold `qk_prep` into the tile, which removes 11.65 ms | Seam version 4 with `cos`, `sin` and `rms_eps` in `AttentionParams`; the loss trace inside the measured noise floor of 9.1e-4 over 200 steps |
+
+The step projection is linear in the family time. At 25 ms for the family the
+step reads 182 ms, which is a Model FLOPs Utilization of 23.4 percent against
+the 20.5 percent of the trace. Phase F3 removes a further 11.65 ms and reads
+170 ms, which is 25.1 percent.
+
+Each phase lands behind its own gate, and a phase that misses its rate gate is
+reported and not promoted. The measurement is one base stage of the `big`
+profile through `tools/modal/app.py::measure_stage`, at the protocol of
+[performance.md](performance.md) section 7, and the row lands in
+`docs/baselines.json`.
+
+### 7. Results
+
+One run of one binary: NVIDIA H100 80GB HBM3, `sm_90`, bf16, through the two
+card jobs `attention_check` and `attention_bench`. Every measured row is in the
+`attention_flash` entry of [baselines.json](baselines.json).
+
+**The correctness gate passed.** The family test holds the bf16 tolerance of
+[testing.md](testing.md), which is 3e-2 relative, on both passes. The case list
+adds a two-block windowed case, a full-causal case, a head-major case, and head
+width 64. The largest error of the two-block case is 0.0031 on the output,
+0.0013 on the query gradient, and 0.0060 on the value gradient.
+
+**The step gate of phase F2 was not measured.** It needs one base stage of the
+`big` profile through `measure_stage`, and this campaign measured the family
+alone.
+
+**Both rate gates missed.** The production row is `b4_s2048_h8_win512`.
+
+| Row | Family | The Part 6 path | Ratio | Gate | Verdict |
+|---|---:|---:|---:|---:|---|
+| Forward, production | 47.3 TFLOP/s | 22.7 TFLOP/s | 2.08 | 200 | miss |
+| Backward, production | 27.3 TFLOP/s | 31.0 TFLOP/s | 0.88 | 150 | miss |
+| Forward, `d8_s512_win128` | 22.9 TFLOP/s | 14.7 TFLOP/s | 1.56 | — | — |
+| Backward, `d8_s512_win128` | 14.1 TFLOP/s | 7.8 TFLOP/s | 1.82 | — | — |
+| Forward, `d8_s512` full causal | 0.0684 ms | 0.1048 ms | 1.53 | — | — |
+| Backward, `d8_s512` full causal | 0.2275 ms | 0.1865 ms | 0.82 | — | — |
+
+The forward wins on every row, and by 1.53 to 2.66 times. The backward wins on
+every windowed row, by 1.32 to 1.82 times, and loses on the two full-causal
+rows, where the banded loop issued five products to the family's nine. Grouped
+query is the weakest backward row, at 4.24 TFLOP/s.
+
+**The tile is bound by its own efficiency.** The forward issues 1.25 times the
+necessary arithmetic at a window of 512, so 47.3 TFLOP/s of necessary work is
+59 TFLOP/s of issued work, which is 6 percent of the bf16 peak. A block issues
+9,216 `mma` instructions, so the instruction roof of one block is about
+4.7 microseconds and the measurement is about four times that. The three
+candidates are the softmax exponential, which is one `expf` per score element,
+the scalar shared-memory loaders, which issue two to four loads per `mma`, and
+the one resident block per multiprocessor. A profile decides between them, and
+none of the three is a change to the family's structure.
+
+**The promotion is open.** Section 6 states that a phase that misses its rate
+gate is reported and not promoted, and both phases missed. The family is
+selected in a bf16 build today, so the tree runs it. Two figures argue for that
+selection: the forward is faster on every row, and the family removes the
+softmax passes and the 220 transpose launches of the traced step. Two argue
+against it: the forward reaches 4.8 percent of the peak, and the full-causal
+backward is slower than the banded loop it replaces. The next step is a profile
+of the tile, and `Br` of 64 with two resident blocks is the first configuration
+to try.
+
+### 8. Risks
+
+- **The fragment map is a hardware layout.** F4 relies on the `m16n8`
+  accumulator of one instruction being the `m16k16` A operand of another. That
+  holds on `sm_80` and newer and is a documented layout, but a card below
+  `sm_80` keeps cuBLAS, and the predicate says so.
+- **One block per streaming multiprocessor is a bet.** The register budget
+  decides it. A miss at 120 registers per thread costs the launch, so `Br` of
+  64 is the fallback and it needs no other change.
+- **The extra products are not free on every shape.** At a short sequence the
+  dense path is not memory bound, and a 2.25 work ratio loses. The predicate
+  keeps a sequence floor, which phase F1 sets from the first measurement.
+- **Two kernels read the forward statistics.** A wrong `stats_row_stride` or a
+  wrong query offset is silent, and it scales one row by the wrong sum. The
+  family test covers a windowed case at a block boundary for that reason.
+- **A shared-memory region that overlaps its neighbour is silent.** The three
+  buffers of the key and value kernel are sized by one template each, and an
+  offset that names the wrong one moves a staged tile onto its neighbour
+  without a compile error. The family test of section 7 is what caught an
+  overlap of that kind, so a new buffer joins the size expression and the
+  offset expression in one change.
+- **This design does not touch the GEMM, the optimizer, or the launch count.**
+  Those are the larger terms of the step, and
+  [performance-model.md](performance-model.md) section 10.1 states the share of
+  each.
+
+### 9. Alignment with the reference kernel
+
+The reference is the Ampere path of flash-attention (`csrc/flash_attn/src`):
+`mma.sync` fragments, `cp.async` staging, and the online softmax in base two.
+The family takes three things from it.
+
+1. **The operand load.** `ldmatrix.x4` and `ldmatrix.x4.trans` replace the
+   scalar loaders of section 3.3, which issued two to four loads and a merge
+   per fragment.
+2. **The base-two exponential.** The softmax scale carries `log2(e)`, so one
+   fused multiply-add and one `exp2` serve each score. The mask writes the
+   sentinel into the score, so the probability pass holds no branch and no
+   row-empty guard, and the saved row maximum is converted back to natural
+   units at the epilogue.
+3. **The mask split.** The three kernels keep the tile-level visibility test,
+   which is the reference's peeled boundary loop in a runtime form.
+
+Four differences against the reference remain, and each is a separate change.
+
+| Difference | The reference | Why it is not landed here |
+|---|---|---|
+| Warps and query rows | Four warps, 32 query rows each, at head width 128 | It needs two fragment sets per warp in all three kernels, and the reference measures 8 warps as 28 percent slower |
+| Key tile at head width 64 | 128 keys | It doubles the score registers, and the reference pairs it with four warps |
+| The row dot product | One element-wise kernel computes `sum(dO * O)` before the backward, so the query kernel runs one pass | The kernel needs `out`, which `AttentionBackward` does not take; that is a frozen header |
+| The output epilogue | Staged in shared memory, written in 16-byte stores | Small; the epilogue is one write per row |
+
+The shared tile keeps two barriers per key tile, which is the reference's
+schedule as well, so section 6 does not count it as a defect.
+
+**The build state.** The three kernels compile at `sm_90` in a bf16 build with
+no spill: 164 and 132 registers for the forward at head width 128 and 64, 244
+and 216 for the query kernel, and 240 and 182 for the key and value kernel.
+
+The numeric gate and the rate rows were measured on the H100 leg of
+`tools/modal/app.py` after this revision, and the rows are the
+`attention_flash_ldmatrix` entry of [baselines.json](baselines.json).
+
+| Row | Before, ms | After, ms | Gain | TFLOP/s | MFU |
+|---|---:|---:|---:|---:|---:|
+| `attention_fwd:d8_s512` | 0.06845 | 0.04563 | 1.50x | 47.2 | 4.8 percent |
+| `attention_bwd:d8_s512` | 0.22752 | 0.17963 | 1.27x | 24.0 | 2.4 percent |
+| `attention_fwd:d8_s512_win128` | 0.04142 | 0.03131 | 1.32x | 30.2 | 3.1 percent |
+| `attention_bwd:d8_s512_win128` | 0.13423 | 0.11114 | 1.21x | 17.0 | 1.7 percent |
+| `attention_fwd:b4_s2048_h8_win512` | 0.31858 | 0.20952 | 1.52x | 71.9 | 7.3 percent |
+| `attention_bwd:b4_s2048_h8_win512` | 1.10463 | 0.88387 | 1.25x | 34.1 | 3.4 percent |
+
+The rate is the necessary work over the time, so it understates the work the
+family issues. The tile quantum of section 3.4 puts the production forward at
+1.25 times that count, which is 89.7 TFLOP/s and 9.1 percent of the peak, and
+the backward issues nine products a pair where the accounting counts eight, so
+its issued rate is 47.8 TFLOP/s and 4.8 percent.
+
+Both rate gates of section 6 still miss: the production forward reads 71.9
+TFLOP/s against the 200 of phase F1, and the backward 34.1 against the 150 of
+phase F2. The two remaining structural differences of the table above are the
+next candidates, and the products of the query kernel are the larger of them:
+its second pass is two of the nine. Part 8 answers both: the warpgroup path
+replaces the warp geometry, and its decision H6 adds the preprocess kernel that
+removes the second pass.
+
+**The numeric gate.** `//backends/cuda/kernels:attention_gpu_test` passed in the
+same image at the bf16 tolerance of [testing.md](testing.md), on every case of
+section 7. The largest figures the test prints are 0.0038 on a forward output,
+0.0094 on a value gradient, and 0.0887 on the statistics of the block-boundary
+case. The block-boundary case is the one section 7 records for the revision
+before this one, at 0.0031 on the output, 0.0013 on the query gradient, and
+0.0060 on the value gradient, and this run reproduces all three to the digits
+the test prints. The two revisions therefore agree where the test can see.
+
+
+## Part 8. The Hopper path
+
+This part is a plan with its gates. Part 7's family stays as the Ampere path,
+and it stays as the fallback for every shape and card this part does not reach.
+
+### 1. The measured reason
+
+The ceiling probe of [kernels.md](kernels.md) Part 3 runs
+`wgmma.mma_async.m64n128k16` from a resident shared-memory tile on the H100 leg
+and reads 952.9 TFLOP/s on 264 blocks, which is 96.4 percent of the 989
+TFLOP/s that `backends/cuda/caps.json` declares. The warp-level tile of Part 7
+reads 89.7 TFLOP/s on the issued work of the production shape. No warp-level
+`mma.sync` kernel reaches the declared rate on this card, so the gap is the
+instruction and the schedule around it, not the arithmetic and not the library.
+
+### 2. The decisions
+
+| Decision | Choice |
+|---|---|
+| H1. Instruction | `wgmma.mma_async.m64nNk16`, with the query operand in shared memory and the probability operand in registers. It is architecture conditional, so the target states `archs = ["sm_90a"]` and no `.bazelrc` line moves ([build.md](build.md)) |
+| H2. Load path | The Tensor Memory Accelerator for the query, key, value, and output tiles, with one `mbarrier` per stage. This path holds no `cp.async` and no `ldmatrix`: the warpgroup instruction reads shared memory itself |
+| H3. Warp specialization | One producer warp issues the copies and never computes; the consumer warpgroups issue the products and never wait on a global load. `setmaxnreg` moves registers from the producer to the consumers |
+| H4. Overlap | Two consumer warpgroups interleave, so one runs the softmax of a key tile while the other issues the score product of the next tile |
+| H5. The pair | A cluster of two CTAs. One multicast copy fills the key and value stage of both, and each CTA owns an adjacent 128-row query tile. The pair therefore reads half the key and value bytes of two independent blocks |
+| H6. The row dot | A preprocess kernel writes `sum(dO * O)` per row, as the reference does, so the query-gradient kernel keeps one pass and issues seven products a pair instead of nine. Section 4 states the seam change it needs |
+| H7. Coverage | The `mma.sync` family of Part 7 stays for a card below `sm_90` and as the fallback of section 7. The host reference that Part 7 section 7 measures against stays the one oracle for both paths |
+
+### 3. The geometry
+
+| Quantity | Value |
+|---|---|
+| Query rows per CTA | 128, in two tiles of 64, one per consumer warpgroup |
+| Key rows per tile | 128 |
+| Threads | 128 producer threads and 256 consumer threads, 384 in total; the first phase runs 32 producer threads and 128 consumer threads |
+| Stages | Two of the key tile and two of the value tile |
+| Registers | The score accumulator is 64 by 128 fp32 per warpgroup, which is 64 registers a thread; the output accumulator is another 64; the probability operand of the second product is another 64 |
+| Shared memory at width 128 | Query 32 KiB resident, key 2 by 32 KiB, value 2 by 32 KiB, and the barriers: 160 KiB |
+| Shared memory at width 64 | The same three buffers at half the width: 80 KiB |
+
+At width 128 the request leaves one block per multiprocessor and a pair spans
+two of them. The production shape has 512 blocks, which is two waves of the
+card.
+
+### 4. The seam change
+
+Decision H6 needs the forward output in the backward. `AttentionBackward`
+therefore takes `const ComputeType* out` after `dout`, in
+`include/nanochat/kernels.h`, which is a frozen header and an architect change.
+Four definition sites move with it: `backends/cuda/kernels/attention.cu`,
+`backends/cpu/kernels.cc`, the caller in `src/ops.cc`, which holds the forward
+output, and the two test helpers of the family and the numeric trace.
+
+A refusal of that change leaves the two-pass query kernel of Part 7 section 4.1,
+which costs two of the nine products a pair. The phase gate of section 6 states
+which one it measures.
+
+### 5. The forward tile
+
+One key tile, in order:
+
+1. The producer issues the copy of key tile `t + 1` and value tile `t + 1` into
+the stage that tile `t - 1` released, and arrives on that stage's barrier.
+2. The consumer waits the barrier of stage `t`, then issues the score product
+from the resident query tile and the staged key tile.
+3. It waits the product, applies the mask of Part 7 section 3.4, computes the
+running maximum in base two, and writes the probability operand to registers.
+4. It issues the value product with that operand, rescales the output
+accumulator, and updates the row sum. The row reductions stay in the warpgroup:
+a row of the 64-row accumulator lies in four lanes of one warp, so the shuffle
+is over four lanes and then over the four warps through shared memory.
+5. The output leaves through shared memory and one copy at the end of the block.
+
+The pair of section 2 differs in one step only: the copies of step 1 name both
+CTAs of the cluster, so one instruction fills the stage of each.
+
+**The operand form.** The instruction reads each operand as a run of core
+matrices, and a core matrix is eight rows of eight elements with the rows
+sixteen bytes apart. A staged tile must therefore be **interleaved**: for each
+group of eight rows the two halves of the `k` axis sit adjacent, and the next
+group of eight rows follows. The descriptor states that form with a leading
+offset of 128 bytes and a stride offset of 256.
+
+A plain row-major tile is not readable. A sum-based check cannot see the
+difference, because the sum of a product is invariant under the row and column
+permutation that the wrong form induces, so a probe of this family must check
+one element at a time or compare against a reference built in the staged
+layout. The first version of the copy probe did neither, and a one-hot probe
+was what caught it: of fourteen elements, only the five whose row and column
+are both multiples of eight were read at all.
+
+The value product's second operand is the staged value tile, which has the
+opposite orientation, so the instruction's second transpose bit is set. That
+form is not measured yet.
+
+**The accumulator map.** The map is measured two ways and both agree. Fifteen
+one-hot elements each land in exactly one register, and a decode of the whole
+table is a bijection: 8,192 slots, none missing and none repeated. With `lane`
+the thread's index in the warpgroup and `index` the register:
+
+| Field | Value |
+|---|---|
+| row | `16 * (lane / 32) + (lane % 32) / 4 + 8 * ((index / 2) % 2)` |
+| column | `8 * (index / 4) + 2 * (lane % 4) + (index % 2)` |
+
+So one warp holds sixteen rows, a lane holds two of them eight apart, a row
+lives in the four lanes of one quad, and a register holds two adjacent columns
+of an eight-column group. That is the map of the `mma.sync` accumulator of Part
+7, repeated sixteen times along the key axis, so the row reductions of the
+softmax are a shuffle over four lanes and never cross a warp.
+
+### 6. Phases and gates
+
+| Phase | Change | Gate |
+|---|---|---|
+| H1 | The prototype of the tile in `dev/kernels/`, as the probe of section 1 is: a resident query tile, copies of key and value, and the products with no softmax | The prototype reads 500 TFLOP/s or more with two query tiles per staged key tile, and the copy-only row states the bytes a second the copies sustain. **Measured: passed**, at 755.4 TFLOP/s and 6.03 TB/s |
+| H2 | The forward tile of Part 7's arithmetic: mask, base-two softmax, both products, one consumer warpgroup, staged by a 16-byte copy into the interleaved form | The family test passes at the bf16 tolerance of [testing.md](testing.md) on every case of Part 7 section 7; the forward row of `attention_benchmark` reads 200 TFLOP/s or more |
+| H2b | The copy path of decision H2 by the Tensor Memory Accelerator, which needs the 128-byte swizzle and descriptor layout type 1 rather than the interleaved form | A one-hot map and a laid-out reference pass on the staged path, and the rate matches the copy-free path within 15 percent at the intensity of two query tiles |
+| H3 | Warp specialization and the overlap of decision H4 | The forward row reads 350 TFLOP/s or more; a trace shows the tensor pipe busy above 60 percent |
+| H4 | The pair of decision H5 | The forward row reads 500 TFLOP/s or more; the key and value bytes of the pair are half of two independent blocks |
+| H5 | The query gradient with the preprocess kernel of decision H6 | The family test passes; the backward row reads 250 TFLOP/s or more |
+| H6 | The key and value gradient | The family test passes; the backward row reads 300 TFLOP/s or more; no atomics and no softmax backward launch |
+| H7 | The dispatch, the stand-in, the documentation, and the baselines entry | `tools/nanochat lint`, the CPU tests, the family test on the card, and a baselines entry under a new name |
+
+A phase is reported and not promoted when it misses its gate, as in Part 7
+section 6.
+
+**The H1 result.** `//dev/kernels:attention_wgmma_probe` measured these rows on
+the H100 leg, over a 128-key tile of 32 KiB against a resident query tile, with
+a four-stage window and the release of section 5.
+
+| Row | Rate | Share of the peak |
+|---|---:|---:|
+| Products from a resident key tile | 963.7 TFLOP/s | 97.4 percent |
+| Products from a staged tile, one query tile | 375.6 TFLOP/s | 38.0 percent |
+| Products from a staged tile, two query tiles | 755.4 TFLOP/s | 76.4 percent |
+| The copies with no products | 6.03 TB/s | none |
+
+The last row is the one the other three read, because it fixes the arithmetic
+that one staged byte must buy:
+
+| Tile | Arithmetic per staged byte | Cap of the copies |
+|---|---:|---:|
+| One query tile, score product only | 64 FLOP | 386 TFLOP/s |
+| Two query tiles, score product only | 128 FLOP | 772 TFLOP/s |
+| The tile of section 3: two query tiles, both products, key and value staged | 262 FLOP | 1,580 TFLOP/s |
+
+So the copies stop being the constraint at the geometry of section 3, and they
+are the constraint at one query tile per staged key tile. The staged row of
+755.4 against a cap of 772 is 98 percent of what the copies allow, so the
+schedule of section 5 is not the loss; the arithmetic per byte is.
+
+At the production shape the issued arithmetic is 18.8 GFLOP, which is 71.8 MB of
+staged tile at that intensity: 21.4 microseconds of high-bandwidth memory at
+3.35 TB/s, 11.9 of the second-level cache at the measured 6.03 TB/s, and 19.0 of
+compute at the peak. The tile therefore sits at the balance point, which is what
+decision H5 exists to move: the pair's multicast halves those bytes.
+
+**What the rows do not say.** The three staged rows and the copy row were
+measured with row-major operands, which the instruction does not read (section
+5). Their rates stand, because the same instruction count issued the same bytes
+either way, and the arithmetic per byte is what they measure. The resident row
+above and the map are the later runs in the interleaved form. No correctness of
+this probe is claimed: a sum-based check is blind to the operand form, and the
+one-hot probe of section 5 is the check that replaced it.
+
+### 7. Dispatch
+
+The new path takes a shape when the Part 7 predicate holds **and** the card
+reports a compute capability of 9.0 or more **and** the driver answers for a
+cluster of two. `attention.cu` selects it before the family, so a card that
+cannot launch a cluster keeps the family and no other path.
+
+The two backward predicates stay one: a shape that the forward takes, the
+backward takes. That is why section 8 keeps the statistics layout unchanged.
+
+### 8. Risks
+
+- **The instruction is architecture conditional.** The file compiles at
+  `sm_90a` only, so the default `//...` build and the emulation engine never
+  compile or run it. The pattern of `attention_flash_absent.cc` keeps the other
+  builds linking, and the gate is the card test of the H100 leg.
+- **Two kernels produce one statistic.** The family and the new path write the
+  same two numbers per row, and the backward predicates cannot tell them apart.
+  The layout of `AttentionStatsCount` therefore stays, and the two paths must
+  agree in units and in scale.
+- **A cluster can refuse to form.** A card that reports `sm_90` may answer false
+  for a cluster of two, as a partitioned instance does. The dispatch asks the
+  driver and falls back, rather than failing a launch.
+- **The register budget is the whole budget.** Two 64-row accumulators and the
+  probability operand leave no room, and one more stage of the key tile spills.
+  `setmaxnreg` is what makes the two roles fit in one block.
+- **The probe is an upper bound and not a forecast.** It issues products from a
+  resident tile with no softmax and no global traffic. The softmax of a 128-key
+tile is one vector pass over 16,384 values against two products of the same
+size, so the tile cannot reach the probe's rate.
+- **The seam change is a frozen header.** Decision H6 moves four definition
+  sites, one of which is another workstream's.
+- **The simulator has no leg.** The emulation engine maps no warpgroup
+  instruction, as [simulator.md](simulator.md) records, so this path's
+  correctness rests on the card test and the host reference.
 
 ## See also
 

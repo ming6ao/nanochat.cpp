@@ -4,10 +4,11 @@
 // the production `SSSL` mixed-window pattern, a sequence-2048 window, and a
 // head-dimension sweep.
 //
-// A windowed shape also runs its dense twin: a head-major query keeps the
-// batched path (`docs/attention.md` Part 4), so one run measures both forward
-// branches at one shape in one build. That pair is the promotion gate of
-// `docs/attention.md` Part 1.
+// A windowed shape also runs its head-major twin. In an fp32 or fp8 build of
+// Part 6 a head-major query keeps the batched path, so the twin measures the
+// dense forward; in a bf16 build the flash family of `docs/attention.md` Part 7
+// reads both layouts, so the twin measures the same family in the other layout
+// and the dense comparison is the recorded entry of `docs/baselines.json`.
 //
 // Every row carries an "issue/need" column: the work the shipped path issues
 // over the work the visible (causal or windowed) query-key pairs need. The
@@ -93,10 +94,10 @@ ShapeResult MeasureShape(Rng* rng, const BenchOptions& opt,
   const int kv_count = p.batch * kv_len * kv_heads * dim;
   const int stats_count = nanochat::AttentionStatsCount(p);
 
-  // A head-major query keeps the batched path (`docs/attention.md` Part 4 and
-  // Part 6, section 5), so the same shape and the same build measure the dense
-  // forward the fused tile replaces. The permutation runs outside the timed
-  // region.
+  // A head-major query keeps the batched path in an fp32 or fp8 build, and the
+  // flash family of Part 7 reads it in a bf16 build (`docs/attention.md` Part
+  // 4, Part 6 section 5, and Part 7 section 5). Either way the permutation runs
+  // outside the timed region, so a twin measures only the branch or the layout.
   std::vector<float> q_host = RandomVec(q_count, rng);
   if (p.q_head_major) {
     std::vector<float> permuted(q_host.size());
@@ -289,10 +290,11 @@ int main(int argc, char** argv) {
   windowed.window_left = 128;
   BenchShape(&report, &rng, opt, windowed, "d8_s512_win128");
 
-  // The dense twin of the window row: the same shape and the same build, with a
-  // head-major query so the batched path answers. This is the forward the fused
-  // tile replaces, and it is the row the promotion gate of `docs/attention.md`
-  // Part 6, section 7 compares against.
+  // The head-major twin of the window row: the same shape and the same build,
+  // with a head-major query. An fp32 or fp8 build sends it to the batched path,
+  // which is the forward the fused tile replaces (`docs/attention.md` Part 6,
+  // section 7); a bf16 build sends both layouts to the flash family of Part 7,
+  // so the twin then measures the layout and not the branch.
   AttentionParams windowed_dense = windowed;
   windowed_dense.q_head_major = true;
   BenchShape(&report, &rng, opt, windowed_dense, "d8_s512_win128_cublas");

@@ -130,7 +130,7 @@ void RunHeadMajorCase(const AttentionParams& p, const char* name) {
 constexpr double kFamilyTolerance = nanochat::kComputeIsBf16 ? 3e-2 : 1e-4;
 
 void RunCase(const AttentionParams& p, const char* name,
-             bool differentiate = true) {
+             bool differentiate = true, bool q_head_major = false) {
   const int dim = p.head_dim;
   const int heads = p.num_heads;
   const int kv_heads = p.num_kv_heads > 0 ? p.num_kv_heads : heads;
@@ -145,12 +145,22 @@ void RunCase(const AttentionParams& p, const char* name,
   const std::vector<float> v0 = RandomVec(kv_count, &rng);
   const std::vector<float> w = RandomVec(q_count, &rng);
 
-  DevBuf<ComputeType> q(ToStorage(q0));
+  // A head-major query carries the same numbers in the layout the fused
+  // `qk_prep` writes; the reference reads the model stream, so the case sends
+  // the permuted copy to the device and permutes the query gradient back.
+  AttentionParams device_p = p;
+  device_p.q_head_major = q_head_major;
+  const std::vector<float> q_device =
+      q_head_major ? PermuteQuery(q0, p.batch, p.seq, heads, dim,
+                                  /*to_heads=*/true)
+                   : q0;
+
+  DevBuf<ComputeType> q(ToStorage(q_device));
   DevBuf<ComputeType> k(ToStorage(k0));
   DevBuf<ComputeType> v(ToStorage(v0));
   DevBuf<ComputeType> out(q_count);
   DevBuf<float> stats(stats_count);
-  nanochat::kernels::AttentionForward(p, q.ptr, k.ptr, v.ptr, out.ptr,
+  nanochat::kernels::AttentionForward(device_p, q.ptr, k.ptr, v.ptr, out.ptr,
                                       stats.ptr);
   nanochat::kernels::Synchronize();
 
@@ -166,7 +176,7 @@ void RunCase(const AttentionParams& p, const char* name,
   DevBuf<ComputeType> dq(q_count);
   DevBuf<ComputeType> dk(kv_count);
   DevBuf<ComputeType> dv(kv_count);
-  nanochat::kernels::AttentionBackward(p, q.ptr, k.ptr, v.ptr, stats.ptr,
+  nanochat::kernels::AttentionBackward(device_p, q.ptr, k.ptr, v.ptr, stats.ptr,
                                        dout.ptr, dq.ptr, dk.ptr, dv.ptr);
   nanochat::kernels::Synchronize();
 
@@ -174,7 +184,11 @@ void RunCase(const AttentionParams& p, const char* name,
   std::vector<float> ref_dk;
   std::vector<float> ref_dv;
   AttentionBackward(p, q0, k0, v0, ref_stats, w, &ref_dq, &ref_dk, &ref_dv);
-  CheckVectorClose(FromStorage(dq.Download()), ref_dq, kFamilyTolerance,
+  const std::vector<float> dq_device =
+      q_head_major ? PermuteQuery(FromStorage(dq.Download()), p.batch, p.seq,
+                                  heads, dim, /*to_heads=*/false)
+                   : FromStorage(dq.Download());
+  CheckVectorClose(dq_device, ref_dq, kFamilyTolerance,
                    (std::string(name) + " bwd dq").c_str());
   CheckVectorClose(FromStorage(dk.Download()), ref_dk, kFamilyTolerance,
                    (std::string(name) + " bwd dk").c_str());
@@ -210,7 +224,8 @@ void RunCase(const AttentionParams& p, const char* name,
 
 // A forward-only comparison, for the shapes the fused tiles cover. The tiles
 // are forward paths, so the backward is not part of this check.
-void RunForwardCase(const AttentionParams& p, const char* name, double tol) {
+void RunForwardCase(const AttentionParams& p, const char* name, double tol,
+                    bool q_head_major = false) {
   const int dim = p.head_dim;
   const int heads = p.num_heads;
   const int kv_heads = p.num_kv_heads > 0 ? p.num_kv_heads : heads;
@@ -224,12 +239,19 @@ void RunForwardCase(const AttentionParams& p, const char* name, double tol) {
   const std::vector<float> k0 = RandomVec(kv_count, &rng);
   const std::vector<float> v0 = RandomVec(kv_count, &rng);
 
-  DevBuf<ComputeType> q(ToStorage(q0));
+  AttentionParams device_p = p;
+  device_p.q_head_major = q_head_major;
+  const std::vector<float> q_device =
+      q_head_major ? PermuteQuery(q0, p.batch, p.seq, heads, dim,
+                                  /*to_heads=*/true)
+                   : q0;
+
+  DevBuf<ComputeType> q(ToStorage(q_device));
   DevBuf<ComputeType> k(ToStorage(k0));
   DevBuf<ComputeType> v(ToStorage(v0));
   DevBuf<ComputeType> out(q_count);
   DevBuf<float> stats(stats_count);
-  nanochat::kernels::AttentionForward(p, q.ptr, k.ptr, v.ptr, out.ptr,
+  nanochat::kernels::AttentionForward(device_p, q.ptr, k.ptr, v.ptr, out.ptr,
                                       stats.ptr);
   nanochat::kernels::Synchronize();
 
@@ -249,10 +271,9 @@ void Expect(bool condition, const char* what) {
   }
 }
 
-// The branch conditions of `docs/attention.md` Part 4 and Part 6, section 5.
-// The build chooses which tile is live, so the check states the invariant that
-// holds in either build: exactly one fused tile covers a windowed shape at head
-// width 128, and every other condition excludes both.
+// The branch conditions of `docs/attention.md` Part 4, Part 6 section 5, and
+// Part 7 section 5. The build chooses which family is live, so the check
+// states the invariants that hold in either build.
 void RunDispatchCase() {
   AttentionParams p;
   p.batch = 1;
@@ -267,30 +288,58 @@ void RunDispatchCase() {
   const bool fp32_tile = nanochat::kernels::FusedAttentionFp32Covers(p);
   const bool bf16_tile = nanochat::kernels::FusedAttentionBf16Covers(p, true);
   Expect(fp32_tile != bf16_tile,
-         "exactly one fused tile covers a windowed head-width-128 shape");
+         "exactly one `wmma` tile covers a windowed head-width-128 shape");
   Expect(!nanochat::kernels::FusedAttentionBf16Covers(p, false),
+         "a device without tensor cores keeps the cuBLAS path");
+
+  // The flash family of Part 7: a bf16 build on a tensor-core device takes the
+  // windowed shape, and it is the branch `attention.cu` selects first.
+  const bool flash = nanochat::kernels::FusedAttentionFlashCovers(p, true);
+  Expect(flash == nanochat::kComputeIsBf16,
+         "the flash family covers the windowed head-width-128 shape");
+  Expect(!nanochat::kernels::FusedAttentionFlashCovers(p, false),
          "a device without tensor cores keeps the cuBLAS path");
 
   AttentionParams other = p;
   other.head_dim = 64;
   Expect(!nanochat::kernels::FusedAttentionFp32Covers(other),
-         "head width 64 stays on cuBLAS");
+         "head width 64 stays on cuBLAS in an fp32 build");
   Expect(!nanochat::kernels::FusedAttentionBf16Covers(other, true),
-         "head width 64 keeps the cuBLAS path in a bf16 build");
+         "head width 64 keeps the cuBLAS path for the `wmma` tile");
+  Expect(nanochat::kernels::FusedAttentionFlashCovers(other, true) ==
+             nanochat::kComputeIsBf16,
+         "the flash family covers head width 64");
 
   other = p;
   other.window_left = -1;
   Expect(!nanochat::kernels::FusedAttentionFp32Covers(other),
-         "full-causal attention stays on cuBLAS");
+         "full-causal attention stays on cuBLAS for the fp32 tile");
   Expect(!nanochat::kernels::FusedAttentionBf16Covers(other, true),
-         "full-causal attention keeps the cuBLAS path in a bf16 build");
+         "full-causal attention keeps the `wmma` tile out");
+  Expect(nanochat::kernels::FusedAttentionFlashCovers(other, true) ==
+             nanochat::kComputeIsBf16,
+         "the flash family covers full-causal attention");
 
   other = p;
   other.q_head_major = true;
   Expect(!nanochat::kernels::FusedAttentionFp32Covers(other),
-         "a head-major query keeps the batched path");
+         "a head-major query keeps the batched path for the fp32 tile");
   Expect(!nanochat::kernels::FusedAttentionBf16Covers(other, true),
-         "a head-major query keeps the batched path in a bf16 build");
+         "a head-major query keeps the `wmma` tile out");
+  Expect(nanochat::kernels::FusedAttentionFlashCovers(other, true) ==
+             nanochat::kComputeIsBf16,
+         "the flash family reads the head-major query");
+
+  other = p;
+  other.kv_len = 16;
+  Expect(!nanochat::kernels::FusedAttentionFlashCovers(other, true),
+         "a decode step keeps the cuBLAS path");
+
+  other = p;
+  other.causal = false;
+  other.window_right = -1;
+  Expect(!nanochat::kernels::FusedAttentionFlashCovers(other, true),
+         "a two-sided window keeps the cuBLAS path");
 }
 
 }  // namespace
@@ -415,6 +464,62 @@ int main() {
   wide_tail.kv_len = 0;
   wide_tail.window_left = 6;
   RunForwardCase(wide_tail, "window-d128-tile-tail", fused_tol);
+
+  // The flash family of `docs/attention.md` Part 7 covers both passes. A bf16
+  // build routes these cases to the flash forward tile and the two flash
+  // backward kernels; an fp32 build keeps the `wmma` tile, the banded backward,
+  // and the dense decomposition, so every case covers whichever the build has.
+  // The bf16 build never differentiates, because a finite difference over a
+  // bf16 output measures the rounding (docs/testing.md).
+  RunCase(wide, "window-d128-fwd-bwd", /*differentiate=*/false);
+  RunCase(wide_full, "window-d128-near-full-bwd", /*differentiate=*/false);
+  RunCase(wide_gqa, "gqa-window-d128-fwd-bwd", /*differentiate=*/false);
+  RunCase(wide, "window-d128-head-major-bwd", /*differentiate=*/false,
+          /*q_head_major=*/true);
+  RunCase(wide_gqa, "gqa-window-d128-head-major-bwd",
+          /*differentiate=*/false, /*q_head_major=*/true);
+
+  // Full causal attention is a flash case too: the family keeps the window in
+  // the mask, so a window of -1 needs no other path.
+  AttentionParams wide_causal = wide;
+  wide_causal.window_left = -1;
+  RunCase(wide_causal, "causal-d128-fwd-bwd", /*differentiate=*/false);
+
+  // Causality off with the right bound taken from the window: the mask is the
+  // only thing that bounds the keys from above.
+  AttentionParams wide_left = wide;
+  wide_left.causal = false;
+  wide_left.window_left = 5;
+  RunCase(wide_left, "left-window-d128-fwd-bwd", /*differentiate=*/false);
+
+  // Head width 64, the other width the family covers.
+  AttentionParams narrow = wide;
+  narrow.head_dim = 64;
+  RunCase(narrow, "window-d64-fwd-bwd", /*differentiate=*/false);
+  AttentionParams narrow_causal = narrow;
+  narrow_causal.window_left = -1;
+  RunCase(narrow_causal, "causal-d64-fwd-bwd", /*differentiate=*/false);
+
+  // Fewer key rows than query rows: the leading query rows have no visible key
+  // at all, so they take the empty-window contract, and the key tiles end
+  // inside the last block.
+  AttentionParams wide_short_kv = wide;
+  wide_short_kv.kv_len = 12;
+  RunCase(wide_short_kv, "window-d128-short-kv-fwd-bwd",
+          /*differentiate=*/false);
+
+  // A sequence that spans two query blocks and several key tiles, with a
+  // window that starts and ends inside a tile. The per-block key range, the
+  // statistics offset of the second block, and the skip of the tiles a block
+  // cannot see are all cheapest to get wrong here.
+  AttentionParams wide_long = wide;
+  wide_long.batch = 1;
+  wide_long.seq = 200;
+  wide_long.window_left = 100;
+  RunCase(wide_long, "window-d128-block-boundary-fwd-bwd",
+          /*differentiate=*/false);
+  RunCase(wide_long, "window-d128-block-boundary-head-major-bwd",
+          /*differentiate=*/false, /*q_head_major=*/true);
 
   if (Failures() != 0) {
     std::printf("attention: %d check(s) failed\n", Failures());

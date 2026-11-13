@@ -132,12 +132,18 @@ cuda_library(
 # other build links `attention_bf16_absent.cc`, which answers "not this shape"
 # and launches nothing. `attention.cu` names both entry points unconditionally,
 # so it holds no guard either (`docs/attention.md` Part 6).
+#
+# The flash family (docs/attention.md Part 7) joins both selects: it is the
+# fused forward and backward the family predicate prefers, and it stages bf16
+# operands the same way, so the same builds compile it and the same stand-in
+# answers for the rest.
 cuda_library(
     name = "attention",
     srcs = ["attention.cu"],
     hdrs = [
         "attention_bf16.h",
         "attention_dispatch.h",
+        "attention_flash.h",
     ],
     copts = nanochat_cuda_copts(),
     defines = precision_defines(),
@@ -147,10 +153,40 @@ cuda_library(
         "//backends/cuda:gemm",
         "//include/nanochat:nanochat",
     ] + select({
-        "//:bf16": [":attention_bf16"],
-        "//:fp8": [":attention_bf16"],
-        "//conditions:default": [":attention_bf16_absent"],
+        "//:bf16": [
+            ":attention_bf16",
+            ":attention_flash",
+        ],
+        "//:fp8": [
+            ":attention_bf16",
+            ":attention_flash",
+        ],
+        "//conditions:default": [
+            ":attention_bf16_absent",
+            ":attention_flash_absent",
+        ],
     }),
+    alwayslink = True,
+)
+
+# The flash attention family of `docs/attention.md` Part 7: one `mma.sync`
+# forward tile, both query layouts, the full-causal case, and the two backward
+# kernels. Only a bf16 or fp8 build compiles it, because every operand and
+# every accumulator of the micro-tile is a two-byte element.
+cuda_library(
+    name = "attention_flash",
+    srcs = ["attention_flash.cu"],
+    hdrs = [
+        "attention_dispatch.h",
+        "attention_flash.h",
+    ],
+    copts = nanochat_cuda_copts(),
+    defines = precision_defines(),
+    deps = [
+        ":device_utils",
+        "//backends/cuda:device",
+        "//include/nanochat:nanochat",
+    ],
     alwayslink = True,
 )
 
@@ -184,6 +220,17 @@ cc_library(
     name = "attention_bf16_absent",
     srcs = ["attention_bf16_absent.cc"],
     hdrs = ["attention_bf16.h"],
+    copts = nanochat_copts(),
+    local_defines = precision_defines(),
+    deps = ["//include/nanochat:nanochat"],
+)
+
+# The stand-in for the flash family (`attention_flash.h`), on the same terms as
+# the bf16 one above.
+cc_library(
+    name = "attention_flash_absent",
+    srcs = ["attention_flash_absent.cc"],
+    hdrs = ["attention_flash.h"],
     copts = nanochat_copts(),
     local_defines = precision_defines(),
     deps = ["//include/nanochat:nanochat"],

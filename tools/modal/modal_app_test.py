@@ -202,7 +202,8 @@ class AppTest(unittest.TestCase):
         # Function the image built.
         module, _sdk = _load_app(with_sdk=True)
         self.assertEqual(sorted(module.CARD_JOBS),
-                         ["attention_bench", "attention_check", "gemm_bench",
+                         ["attention_bench", "attention_check",
+                          "attention_wgmma", "gemm_bench",
                           "gemm_bench_fp8", "gemm_check", "gemm_fp32_bench",
                           "gemm_fp32_check", "mma_check", "wgmma_probe"])
         self.assertEqual(module.CARD_JOBS["gemm_check"].job.__name__,
@@ -219,10 +220,12 @@ class AppTest(unittest.TestCase):
                          "check_mma_h100")
         self.assertEqual(module.CARD_JOBS["wgmma_probe"].job.__name__,
                          "probe_wgmma_h100")
+        self.assertEqual(module.CARD_JOBS["attention_wgmma"].job.__name__,
+                         "probe_attention_wgmma_h100")
         for name in ("gemm_bench", "gemm_bench_fp8", "attention_bench"):
             self.assertTrue(module.CARD_JOBS[name].takes_argv)
         for name in ("gemm_check", "gemm_fp32_check", "attention_check",
-                     "mma_check", "wgmma_probe"):
+                     "attention_wgmma", "mma_check", "wgmma_probe"):
             self.assertFalse(module.CARD_JOBS[name].takes_argv)
 
     def test_the_fp32_tile_runs_on_the_t4_image(self) -> None:
@@ -580,7 +583,7 @@ class ImageTest(unittest.TestCase):
         # One wrapper, so no function can forget the Volume: a container that
         # skipped the mount would compile into its own disk and keep nothing.
         _module, sdk = _load_app(with_sdk=True)
-        self.assertEqual(len(sdk.function_calls), 25)
+        self.assertEqual(len(sdk.function_calls), 26)
         for keywords in sdk.function_calls:
             volumes = keywords.get("volumes") or {}
             self.assertIn(self.app.CACHE_ROOT, volumes, keywords["name"])
@@ -1030,6 +1033,7 @@ class PipelineTest(_RemoteFixture):
                                          "measure_stage_h100",
                                          "measure_stage_t4", "pipeline",
                                          "pipeline_h100",
+                                         "probe_attention_wgmma_h100",
                                          "probe_wgmma_h100",
                                          "profile_h100",
                                          "profile_stage_h100",
@@ -1733,7 +1737,7 @@ class WeightsTest(unittest.TestCase):
         # and `train` adds the stage cache.
         mounted = {call["name"]: call["volumes"]
                    for call in self.sdk.function_calls if "volumes" in call}
-        self.assertEqual(len(mounted), 25)
+        self.assertEqual(len(mounted), 26)
         for name, volumes in mounted.items():
             self.assertIn(self.app.CACHE_ROOT, volumes, name)
         with_runs = sorted(name for name, volumes in mounted.items()

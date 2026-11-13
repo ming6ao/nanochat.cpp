@@ -243,6 +243,14 @@ WGMMA_PROBE_BIN = _bazel_bin(WGMMA_PROBE_TARGET)
 #: refuses to compile without.
 WGMMA_PROBE_ARCH = "sm_90a"
 
+#: Phase H1 of ``docs/attention.md`` Part 8: the copy path of the Hopper tile of
+#: ``dev/kernels/attention_wgmma_probe.cu``. It measures the same product from a
+#: resident key tile and from a key tile that the copy engine stages, so the
+#: gate of Part 8 section 6 can compare the two. Like the ceiling probe it is a
+#: device-only prototype, and its target states its own architecture.
+ATTENTION_WGMMA_TARGET = "//dev/kernels:attention_wgmma_probe"
+ATTENTION_WGMMA_BIN = _bazel_bin(ATTENTION_WGMMA_TARGET)
+
 #: The labels the one build of an image names: the shared library, the stage
 #: binary the chain launches (``docs/post-training.md`` B6 and D2), the
 #: tokenizer trainer the corpus function runs, the optimizer benchmark
@@ -1411,6 +1419,27 @@ def check_mma_h100() -> str:
                           GEMM_MMA_BIN], "[]", ("mma_bf16",))
 
 
+def prototype_probe(target: str, binary: str, prefixes) -> str:
+    """Build one prototype at its own architecture in the container, then run it.
+
+    A prototype needs an architecture the leg's own build does not emit, so the
+    build comes first and inside the container: one build of one target is
+    cheaper than a second image. The target states that architecture for itself,
+    so the command names no flag of its own.
+    """
+    build = subprocess.run(
+        ["bash", "-c", probe_build_command(H100, target, WGMMA_PROBE_ARCH)],
+        env=worker_env(package_source()), capture_output=True, text=True,
+        check=False)
+    if build.returncode != 0:
+        return json.dumps({"stage": "build",
+                           "status": int(build.returncode),
+                           "tail": process_tail(build, lines=20)},
+                          sort_keys=True)
+    return _run_in_image(["tools/nanochat", "run", "t1-gpu", "--", binary],
+                         "[]", prefixes)
+
+
 @_function(
     image=image_for(H100),
     gpu=H100.gpu,
@@ -1427,23 +1456,33 @@ def probe_wgmma_h100() -> str:
     hand written interleaved staging pass, and the instruction itself, and it
     checks the product against a host reference before it reports a rate.
 
-    The build comes first and it is inside this container on purpose: the image
-    built every other target at ``sm_90``, and the probe needs ``sm_90a``
-    (``WGMMA_PROBE_ARCH``). One build of one target is cheaper than a second
-    image, and it keeps the architecture of the flag line visible here.
+    The build comes first and it is inside the container, because the image
+    built every other target at ``sm_90`` and this probe needs ``sm_90a``.
     """
-    build = subprocess.run(
-        ["bash", "-c",
-         probe_build_command(H100, WGMMA_PROBE_TARGET, WGMMA_PROBE_ARCH)],
-        env=worker_env(package_source()), capture_output=True, text=True,
-        check=False)
-    if build.returncode != 0:
-        return json.dumps({"stage": "build",
-                           "status": int(build.returncode),
-                           "tail": process_tail(build, lines=20)},
-                          sort_keys=True)
-    return _run_in_image(["tools/nanochat", "run", "t1-gpu", "--",
-                          WGMMA_PROBE_BIN], "[]", ("wgmma", "card:"))
+    return prototype_probe(WGMMA_PROBE_TARGET, WGMMA_PROBE_BIN,
+                           ("wgmma", "card:"))
+
+
+@_function(
+    image=image_for(H100),
+    gpu=H100.gpu,
+    cpu=CPU_CORES,
+    timeout=3600,
+    max_containers=1,
+)
+def probe_attention_wgmma_h100() -> str:
+    """Build and run the copy-path probe of the Hopper attention tile.
+
+    Phase H1 of ``docs/attention.md`` Part 8 asks one question: can a staged key
+    tile still reach the rate of the warpgroup instruction? The probe measures
+    the same product twice, once from a resident tile and once from a tile that
+    the copy engine writes into a three-stage window, checks the staged product
+    against a host reference, and reports both rates against the declared peak.
+
+    The build is inside this container for the reason the ceiling probe's is.
+    """
+    return prototype_probe(ATTENTION_WGMMA_TARGET, ATTENTION_WGMMA_BIN,
+                           ("attention-wgmma:", "card:"))
 
 
 def chain_dir(run_root, job) -> Path:
@@ -2999,6 +3038,8 @@ CARD_JOBS = {
     "gemm_fp32_bench": CardJob(bench_gemm_fp32_t4, "the fp32 tile benchmark",
                                takes_argv=True),
     "mma_check": CardJob(check_mma_h100, "the Part 3 phase 1 micro-tile gate"),
+    "attention_wgmma": CardJob(probe_attention_wgmma_h100,
+                               "the Part 8 H1 copy-path probe"),
     "wgmma_probe": CardJob(probe_wgmma_h100,
                            "the WGMMA ceiling probe of Part 3 phase 0"),
 }

@@ -3,6 +3,184 @@
   "note": "Measured baselines for this repository, one entry per subject. Each entry is the report of the command in its `measurement` field at the revision it names, and each names the device that validated it in `validated_on`. Update an entry only with a real run. docs/performance.md section 7 gives the rule. The attainment record of docs/performance-model.md section 10 is a different artifact: `tools/nanochat attain` generates it from a bound and a measurement at one revision.",
   "host": "A WSL2 workstation with 12 vCPU and 7.8 GiB, unless the entry says otherwise",
   "baselines": {
+    "attention_flash_ldmatrix": {
+      "note": "Measured rows of the flash attention family of docs/attention.md Part 7 after the reference charge of Part 7 section 9, on an NVIDIA H100 80GB HBM3 (sm_90), from the Modal H100 image built at sm_90 and bf16 (tools/modal/app.py, the H100 leg). The revision replaced the scalar shared-memory loaders with ldmatrix, made the exponential base two with the scale folded, and removed the per-element sentinel guards. This entry supersedes the rate rows of attention_flash, which recorded the same binary before that revision: the forward gains 1.26 to 1.52 times and the backward 1.19 to 1.30 times. gflops is the necessary work over the time, as in attention_bf16, and work_ratio is the dense issued work over the necessary work, so a tile row reads the ratio of the path it replaced rather than the work the family issues; the mfu field of the same report divides gflops by the 989 TFLOP/s dense bf16 rate that backends/cuda/caps.json declares. Both rate gates of Part 7 section 6 still miss: the production forward reads 71.9 TFLOP/s against 200 and the production backward 34.1 against 150. The numeric gate //backends/cuda/kernels:attention_gpu_test passed in the same image at the bf16 tolerance of docs/testing.md, and its gradient errors reproduce the pre-revision figures, so the two revisions agree to the digit the test prints.",
+      "device": "NVIDIA H100 80GB HBM3 (sm_90)",
+      "validated_on": "NVIDIA H100 80GB HBM3 (sm_90)",
+      "precision": "bf16",
+      "measurement": "modal run tools/modal/app.py::card_job --name attention_bench --argv '[\"--json\"]'",
+      "origin": "docs/attention.md Part 7 section 9",
+      "rows": [
+        {
+          "name": "attention_fwd:d8_s512",
+          "shape": "B=8 T=512 H=4 KV=4 D=128 wl=-1",
+          "ms": 0.045632,
+          "gflops": 47152.8,
+          "work_ratio": 1.9961
+        },
+        {
+          "name": "attention_bwd:d8_s512",
+          "shape": "B=8 T=512 H=4 KV=4 D=128 wl=-1",
+          "ms": 0.179627,
+          "gflops": 23957.2,
+          "work_ratio": 1.9961
+        },
+        {
+          "name": "attention_fwd:d8_s512_win128",
+          "shape": "B=8 T=512 H=4 KV=4 D=128 wl=128",
+          "ms": 0.0313067,
+          "gflops": 30244.8,
+          "work_ratio": 4.53599
+        },
+        {
+          "name": "attention_bwd:d8_s512_win128",
+          "shape": "B=8 T=512 H=4 KV=4 D=128 wl=128",
+          "ms": 0.111136,
+          "gflops": 17039.7,
+          "work_ratio": 4.53599
+        },
+        {
+          "name": "attention_fwd:d8_s512_win128_cublas",
+          "shape": "B=8 T=512 H=4 KV=4 D=128 wl=128",
+          "ms": 0.031168,
+          "gflops": 30379.4,
+          "work_ratio": 4.53599
+        },
+        {
+          "name": "attention_bwd:d8_s512_win128_cublas",
+          "shape": "B=8 T=512 H=4 KV=4 D=128 wl=128",
+          "ms": 0.110411,
+          "gflops": 17151.7,
+          "work_ratio": 4.53599
+        },
+        {
+          "name": "attention_fwd:gqa_b2_t512_h8_kv2",
+          "shape": "B=2 T=512 H=8 KV=2 D=128 wl=-1",
+          "ms": 0.0452693,
+          "gflops": 23765.3,
+          "work_ratio": 1.9961
+        },
+        {
+          "name": "attention_bwd:gqa_b2_t512_h8_kv2",
+          "shape": "B=2 T=512 H=8 KV=2 D=128 wl=-1",
+          "ms": 0.391243,
+          "gflops": 5499.6,
+          "work_ratio": 1.9961
+        },
+        {
+          "name": "attention_fwd:d8_s512_sssl",
+          "shape": "B=8 T=512 H=4 KV=4 D=128 pattern=SSSL",
+          "ms": 0.034672,
+          "gflops": 35996.4,
+          "work_ratio": 3.44129
+        },
+        {
+          "name": "attention_bwd:d8_s512_sssl",
+          "shape": "B=8 T=512 H=4 KV=4 D=128 pattern=SSSL",
+          "ms": 0.127288,
+          "gflops": 19610.1,
+          "work_ratio": 3.44129
+        },
+        {
+          "name": "attention_fwd:b4_s2048_h8_win512",
+          "shape": "B=4 T=2048 H=8 KV=8 D=128 wl=512",
+          "ms": 0.209515,
+          "gflops": 71888.7,
+          "work_ratio": 4.56252
+        },
+        {
+          "name": "attention_bwd:b4_s2048_h8_win512",
+          "shape": "B=4 T=2048 H=8 KV=8 D=128 wl=512",
+          "ms": 0.883872,
+          "gflops": 34081.3,
+          "work_ratio": 4.56252
+        },
+        {
+          "name": "attention_fwd:b4_s2048_h8_win512_cublas",
+          "shape": "B=4 T=2048 H=8 KV=8 D=128 wl=512",
+          "ms": 0.208715,
+          "gflops": 72164.3,
+          "work_ratio": 4.56252
+        },
+        {
+          "name": "attention_bwd:b4_s2048_h8_win512_cublas",
+          "shape": "B=4 T=2048 H=8 KV=8 D=128 wl=512",
+          "ms": 0.874795,
+          "gflops": 34434.9,
+          "work_ratio": 4.56252
+        },
+        {
+          "name": "attention_fwd:d8_s512_sssl_cublas",
+          "shape": "B=8 T=512 H=4 KV=4 D=128 pattern=SSSL",
+          "ms": 0.034312,
+          "gflops": 36374.1,
+          "work_ratio": 3.44129
+        },
+        {
+          "name": "attention_bwd:d8_s512_sssl_cublas",
+          "shape": "B=8 T=512 H=4 KV=4 D=128 pattern=SSSL",
+          "ms": 0.126275,
+          "gflops": 19767.5,
+          "work_ratio": 3.44129
+        },
+        {
+          "name": "attention_fwd:dim_sweep_d32",
+          "shape": "B=2 T=128 H=4 KV=4 D=32 wl=-1",
+          "ms": 0.0247253,
+          "gflops": 341.922,
+          "work_ratio": 1.9845
+        },
+        {
+          "name": "attention_bwd:dim_sweep_d32",
+          "shape": "B=2 T=128 H=4 KV=4 D=32 wl=-1",
+          "ms": 0.0483627,
+          "gflops": 349.614,
+          "work_ratio": 1.9845
+        },
+        {
+          "name": "attention_fwd:dim_sweep_d64",
+          "shape": "B=2 T=128 H=4 KV=4 D=64 wl=-1",
+          "ms": 0.0139413,
+          "gflops": 1212.82,
+          "work_ratio": 1.9845
+        },
+        {
+          "name": "attention_bwd:dim_sweep_d64",
+          "shape": "B=2 T=128 H=4 KV=4 D=64 wl=-1",
+          "ms": 0.0454187,
+          "gflops": 744.552,
+          "work_ratio": 1.9845
+        },
+        {
+          "name": "attention_fwd:dim_sweep_d128",
+          "shape": "B=2 T=128 H=4 KV=4 D=128 wl=-1",
+          "ms": 0.0183893,
+          "gflops": 1838.92,
+          "work_ratio": 1.9845
+        },
+        {
+          "name": "attention_bwd:dim_sweep_d128",
+          "shape": "B=2 T=128 H=4 KV=4 D=128 wl=-1",
+          "ms": 0.0627413,
+          "gflops": 1077.97,
+          "work_ratio": 1.9845
+        },
+        {
+          "name": "attention_fwd:dim_sweep_d256",
+          "shape": "B=2 T=128 H=4 KV=4 D=256 wl=-1",
+          "ms": 0.0277653,
+          "gflops": 2435.88,
+          "work_ratio": 1.9845
+        },
+        {
+          "name": "attention_bwd:dim_sweep_d256",
+          "shape": "B=2 T=128 H=4 KV=4 D=256 wl=-1",
+          "ms": 0.0521493,
+          "gflops": 2593.83,
+          "work_ratio": 1.9845
+        }
+      ]
+    },
     "attention_bf16": {
       "note": "Measured rows of the bf16 attention path on an NVIDIA H100 80GB HBM3 (sm_90), from the Modal H100 image built at sm_90 and bf16 (tools/modal/app.py, the H100 leg). Every row comes from one run of one binary, so the comparison is between two branches of one build. A *_cublas row is the dense forward the fused tile replaces: the same shape and the same build with a head-major query, which keeps the batched path and skips one transpose, so those rows are marginally favoured. The windowed and SSSL rows without a suffix take the bf16 tensor-core tile of docs/attention.md Part 6; d8_s512 stays on cuBLAS because it is full-causal. No backward runs the tile, so the two backward rows of a pair differ only by the query transpose. work_ratio is issued work over necessary work.",
       "device": "NVIDIA H100 80GB HBM3 (sm_90)",
@@ -108,6 +286,184 @@
           "ms": 0.910347,
           "gflops": 33090.1,
           "work_ratio": 4.56252
+        }
+      ]
+    },
+    "attention_flash": {
+      "note": "The flash attention family of docs/attention.md Part 7 on an NVIDIA H100 80GB HBM3 (sm_90), from the Modal H100 image built at sm_90 and bf16 (tools/modal/app.py, the H100 leg). Every windowed and full-causal row of the benchmark takes the family in this build, because the predicate of Part 7 section 5 accepts both query layouts and a window of -1, so the *_cublas twins now measure the head-major layout of the same family and not the dense path. gflops is the necessary work over the time, as in attention_bf16, and work_ratio is the dense issued work over the necessary work, so a tile row reads the ratio of the path it replaced. The correctness gate passed: //backends/cuda/kernels:attention_gpu_test at the bf16 tolerance of docs/testing.md, including the block-boundary case of Part 7 section 7. Both rate gates of Part 7 section 6 missed. The forward of the production row reads 47.3 TFLOP/s against the 200 that phase F1 asks for, and the backward reads 27.3 against the 150 of phase F2. Against attention_bf16 the forward gained 1.53 to 2.66 times on every row, and the backward gained 1.32 to 1.82 on the windowed rows and lost 0.82 to 0.88 on the two full-causal rows, where the banded loop issued five products to the family's nine. These rows predate the ldmatrix revision of docs/attention.md Part 7 section 9, so both gates of Part 7 section 6 need a new measurement.",
+      "device": "NVIDIA H100 80GB HBM3 (sm_90)",
+      "validated_on": "NVIDIA H100 80GB HBM3 (sm_90)",
+      "precision": "bf16",
+      "measurement": "modal run tools/modal/app.py::card_job --name attention_bench --argv '[\"--json\"]'",
+      "origin": "docs/attention.md Part 7",
+      "rows": [
+        {
+          "name": "attention_fwd:d8_s512",
+          "shape": "B=8 T=512 H=4 KV=4 D=128 wl=-1",
+          "ms": 0.068448,
+          "gflops": 31435.2,
+          "work_ratio": 1.9961
+        },
+        {
+          "name": "attention_bwd:d8_s512",
+          "shape": "B=8 T=512 H=4 KV=4 D=128 wl=-1",
+          "ms": 0.22752,
+          "gflops": 18914.2,
+          "work_ratio": 1.9961
+        },
+        {
+          "name": "attention_fwd:d8_s512_win128",
+          "shape": "B=8 T=512 H=4 KV=4 D=128 wl=128",
+          "ms": 0.0414187,
+          "gflops": 22860.8,
+          "work_ratio": 4.53599
+        },
+        {
+          "name": "attention_bwd:d8_s512_win128",
+          "shape": "B=8 T=512 H=4 KV=4 D=128 wl=128",
+          "ms": 0.134229,
+          "gflops": 14108.2,
+          "work_ratio": 4.53599
+        },
+        {
+          "name": "attention_fwd:d8_s512_win128_cublas",
+          "shape": "B=8 T=512 H=4 KV=4 D=128 wl=128",
+          "ms": 0.0412693,
+          "gflops": 22943.5,
+          "work_ratio": 4.53599
+        },
+        {
+          "name": "attention_bwd:d8_s512_win128_cublas",
+          "shape": "B=8 T=512 H=4 KV=4 D=128 wl=128",
+          "ms": 0.133984,
+          "gflops": 14134.0,
+          "work_ratio": 4.53599
+        },
+        {
+          "name": "attention_fwd:gqa_b2_t512_h8_kv2",
+          "shape": "B=2 T=512 H=8 KV=2 D=128 wl=-1",
+          "ms": 0.0684053,
+          "gflops": 15727.4,
+          "work_ratio": 1.9961
+        },
+        {
+          "name": "attention_bwd:gqa_b2_t512_h8_kv2",
+          "shape": "B=2 T=512 H=8 KV=2 D=128 wl=-1",
+          "ms": 0.507499,
+          "gflops": 4239.77,
+          "work_ratio": 1.9961
+        },
+        {
+          "name": "attention_fwd:d8_s512_sssl",
+          "shape": "B=8 T=512 H=4 KV=4 D=128 pattern=SSSL",
+          "ms": 0.0478373,
+          "gflops": 26089.8,
+          "work_ratio": 3.44129
+        },
+        {
+          "name": "attention_bwd:d8_s512_sssl",
+          "shape": "B=8 T=512 H=4 KV=4 D=128 pattern=SSSL",
+          "ms": 0.156037,
+          "gflops": 15997.0,
+          "work_ratio": 3.44129
+        },
+        {
+          "name": "attention_fwd:b4_s2048_h8_win512",
+          "shape": "B=4 T=2048 H=8 KV=8 D=128 wl=512",
+          "ms": 0.318581,
+          "gflops": 47277.6,
+          "work_ratio": 4.56252
+        },
+        {
+          "name": "attention_bwd:b4_s2048_h8_win512",
+          "shape": "B=4 T=2048 H=8 KV=8 D=128 wl=512",
+          "ms": 1.10463,
+          "gflops": 27270.2,
+          "work_ratio": 4.56252
+        },
+        {
+          "name": "attention_fwd:b4_s2048_h8_win512_cublas",
+          "shape": "B=4 T=2048 H=8 KV=8 D=128 wl=512",
+          "ms": 0.317269,
+          "gflops": 47473.1,
+          "work_ratio": 4.56252
+        },
+        {
+          "name": "attention_bwd:b4_s2048_h8_win512_cublas",
+          "shape": "B=4 T=2048 H=8 KV=8 D=128 wl=512",
+          "ms": 1.09999,
+          "gflops": 27385.3,
+          "work_ratio": 4.56252
+        },
+        {
+          "name": "attention_fwd:d8_s512_sssl_cublas",
+          "shape": "B=8 T=512 H=4 KV=4 D=128 pattern=SSSL",
+          "ms": 0.0477733,
+          "gflops": 26124.8,
+          "work_ratio": 3.44129
+        },
+        {
+          "name": "attention_bwd:d8_s512_sssl_cublas",
+          "shape": "B=8 T=512 H=4 KV=4 D=128 pattern=SSSL",
+          "ms": 0.154867,
+          "gflops": 16118.0,
+          "work_ratio": 3.44129
+        },
+        {
+          "name": "attention_fwd:dim_sweep_d32",
+          "shape": "B=2 T=128 H=4 KV=4 D=32 wl=-1",
+          "ms": 0.0263253,
+          "gflops": 321.141,
+          "work_ratio": 1.9845
+        },
+        {
+          "name": "attention_bwd:dim_sweep_d32",
+          "shape": "B=2 T=128 H=4 KV=4 D=32 wl=-1",
+          "ms": 0.0488747,
+          "gflops": 345.952,
+          "work_ratio": 1.9845
+        },
+        {
+          "name": "attention_fwd:dim_sweep_d64",
+          "shape": "B=2 T=128 H=4 KV=4 D=64 wl=-1",
+          "ms": 0.0181867,
+          "gflops": 929.708,
+          "work_ratio": 1.9845
+        },
+        {
+          "name": "attention_bwd:dim_sweep_d64",
+          "shape": "B=2 T=128 H=4 KV=4 D=64 wl=-1",
+          "ms": 0.054432,
+          "gflops": 621.263,
+          "work_ratio": 1.9845
+        },
+        {
+          "name": "attention_fwd:dim_sweep_d128",
+          "shape": "B=2 T=128 H=4 KV=4 D=128 wl=-1",
+          "ms": 0.023104,
+          "gflops": 1463.67,
+          "work_ratio": 1.9845
+        },
+        {
+          "name": "attention_bwd:dim_sweep_d128",
+          "shape": "B=2 T=128 H=4 KV=4 D=128 wl=-1",
+          "ms": 0.074624,
+          "gflops": 906.319,
+          "work_ratio": 1.9845
+        },
+        {
+          "name": "attention_fwd:dim_sweep_d256",
+          "shape": "B=2 T=128 H=4 KV=4 D=256 wl=-1",
+          "ms": 0.028768,
+          "gflops": 2350.99,
+          "work_ratio": 1.9845
+        },
+        {
+          "name": "attention_bwd:dim_sweep_d256",
+          "shape": "B=2 T=128 H=4 KV=4 D=256 wl=-1",
+          "ms": 0.0533227,
+          "gflops": 2536.75,
+          "work_ratio": 1.9845
         }
       ]
     },
@@ -1688,6 +2044,67 @@
       },
       "origin": "docs/performance-model.md section 10, profiles/h100-big-ref/REPORT.md",
       "validated_on_host": "Modal H100 image, bf16, tools/modal/app.py H100 leg"
+    },
+    "attention_wgmma_probe": {
+      "note": "Phase H1 of docs/attention.md Part 8, from dev/kernels/attention_wgmma_probe.cu on the H100 leg of tools/modal/app.py (sm_90a, bf16): the score product of a 64 by 128 by 128 tile from a resident key tile, from a key tile a copy engine stages into a four-stage window with one and with two query tiles, and the copies alone in the last row. fraction_of_peak divides by the 989 TFLOP/s dense bf16 rate of backends/cuda/caps.json. The staged rows are limited by the arithmetic one staged byte buys and not by the schedule: 6.03 TB/s of copies is 386 TFLOP/s at 64 FLOP per byte and 772 at 128, and the measured 755.4 is 98 percent of the second cap. The three staged rows and the copy row were measured with row-major operands, which the instruction does not read; their rates stand because the instruction count and the bytes are the same either way, and no correctness is claimed. The resident row and the map are the later runs in the interleaved core-matrix form, which is the form the instruction reads.",
+      "device": "NVIDIA H100 80GB HBM3 (sm_90)",
+      "validated_on": "NVIDIA H100 80GB HBM3 (sm_90)",
+      "precision": "bf16",
+      "measurement": "modal run tools/modal/app.py::card_job --name attention_wgmma",
+      "origin": "docs/attention.md Part 8 section 6",
+      "rows": [
+        {
+          "name": "attention-wgmma:resident",
+          "blocks": 132,
+          "passes": 20000,
+          "tflops": 977.9,
+          "fraction_of_peak": 0.989
+        },
+        {
+          "name": "attention-wgmma:tma-q1",
+          "blocks": 132,
+          "passes": 20000,
+          "tflops": 375.6,
+          "fraction_of_peak": 0.38
+        },
+        {
+          "name": "attention-wgmma:tma-q2",
+          "blocks": 132,
+          "passes": 20000,
+          "tflops": 755.4,
+          "fraction_of_peak": 0.764
+        },
+        {
+          "name": "attention-wgmma:tma-copy",
+          "blocks": 132,
+          "passes": 20000,
+          "gbytes": 6031.77
+        },
+        {
+          "name": "attention-wgmma:correctness",
+          "tiles": 6,
+          "relative_error": 0.0002315,
+          "result": "WITHDRAWN",
+          "why": "a sum-based check is blind to the operand form"
+        },
+        {
+          "name": "attention-wgmma:resident-interleaved",
+          "blocks": 132,
+          "passes": 20000,
+          "tflops": 963.7,
+          "fraction_of_peak": 0.974
+        },
+        {
+          "name": "attention-wgmma:accumulator-map",
+          "one_hot_probes": 15,
+          "one_hot_found": 15,
+          "table_elements": 8192,
+          "missing": 0,
+          "repeated": 0,
+          "row": "16*(lane/32) + (lane%32)/4 + 8*((index/2)%2)",
+          "col": "8*(index/4) + 2*(lane%4) + (index%2)"
+        }
+      ]
     }
   }
 }
