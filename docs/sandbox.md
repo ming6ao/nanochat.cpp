@@ -406,14 +406,22 @@ WSL writes a crash dump to Windows when a guest process dies from a fatal
 signal. The folder is `%LOCALAPPDATA%\Temp\wsl-crashes`. On 2026-11-10 a
 `qmd embed` worker aborted eight times, and each abort wrote about 1.8 GB. Eight
 dumps filled 14 GB of the host disk. A dump also holds process memory, which can
-hold a credential token. The `.wslconfig` file therefore keeps the capture off by
-default.
+hold a credential token.
+
+WSL has no switch that turns the capture off. Two settings control it.
+`maxCrashDumpCount` sets how many dumps WSL keeps, and the default is 10.
+`crashDumpFolder` sets the directory. The `.wslconfig` file therefore sets
+`maxCrashDumpCount=1`.
+
+An earlier version of this document used `crashDumpEnabled`. That key does not
+exist. WSL 3.0.5 prints `Unknown key 'wsl2.crashDumpEnabled'` and ignores the
+line, so the capture stayed at the default retention of 10 dumps.
 
 Capture is on for one fault only, so the next fatal guest signal names the
 driver behind the `0x3B` bugcheck. The change takes effect at the next guest
 start, because `.wslconfig` is read when the virtual machine boots. Reprocess
-one fault, then set `crashDumpEnabled=false` again and delete the folder,
-because WSL never reaps it:
+one fault, then set `maxCrashDumpCount=0` and delete the folder, because WSL
+never reaps it:
 
 ```bash
 rm -f /mnt/c/Users/*/AppData/Local/Temp/wsl-crashes/*.dmp
