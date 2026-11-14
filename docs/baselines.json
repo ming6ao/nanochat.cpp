@@ -890,7 +890,7 @@
       "device": "NVIDIA H100 80GB HBM3 (sm_90a)",
       "validated_on": "NVIDIA H100 80GB HBM3 (sm_90a)",
       "precision": "bf16",
-      "revision": "1a943d0 plus the uncommitted change to dev/kernels/wgmma_bench.cu",
+      "revision": "a4a79a9",
       "measurement": "modal run tools/modal/app.py::card_job --name wgmma_bench --argv '[\"--rows\",\"all\",\"--json\"]'",
       "origin": "docs/kernels.md Part 3 phase 0, dev/kernels/wgmma_bench.cu, dev/kernels/README.md",
       "rows": [
@@ -2044,7 +2044,7 @@
       "device": "NVIDIA H100 80GB HBM3 (sm_90a)",
       "validated_on": "NVIDIA H100 80GB HBM3 (sm_90a)",
       "precision": "bf16",
-      "revision": "1a943d0 plus the uncommitted change to dev/kernels/wgmma_bench.cu",
+      "revision": "a4a79a9",
       "measurement": "modal run tools/modal/app.py::card_job --name wgmma_bench --argv '[\"--rows\",\"all\",\"--json\"]'",
       "origin": "docs/attention.md Part 8 section 6, dev/kernels/README.md",
       "rows": [
@@ -2296,7 +2296,7 @@
       "device": "NVIDIA H100 80GB HBM3 (sm_90a)",
       "validated_on": "NVIDIA H100 80GB HBM3 (sm_90a)",
       "precision": "bf16",
-      "revision": "1a943d0 plus the uncommitted change to dev/kernels/wgmma_bench.cu",
+      "revision": "a4a79a9",
       "measurement": "modal run tools/modal/app.py::card_job --name wgmma_bench --argv '[\"--rows\",\"all\",\"--json\"]'",
       "origin": "docs/attention.md Part 8 section 6, phase H2 prototype",
       "rows": [
