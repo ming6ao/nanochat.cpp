@@ -920,7 +920,7 @@ the shared round trip of Part 6, section 4.4 stays gone.
 
 | Phase | Change | Gate |
 |---|---|---|
-| H1 | The prototype of the tile in `dev/kernels/`, as the probe of section 1 is: a resident query tile, copies of key and value, and the products with no softmax | The prototype reads 500 TFLOP/s or more with two query tiles per staged key tile, and the copy-only row states the bytes a second the copies sustain. **Measured: passed** at 755.4 TFLOP/s and 6.03 TB/s, from a binary that is not in the tree; the committed probe measures the same rows by sixteen-byte stores, at 295.4 TFLOP/s and 2.36 TB/s, and the Tensor Memory Accelerator path of H2b is what restores the recorded rate |
+| H1 | The prototype of the tile in `dev/kernels/`, as the probe of section 1 is: a resident query tile, copies of key and value, and the products with no softmax | The prototype reads 500 TFLOP/s or more with two query tiles per staged key tile, and the copy-only row states the bytes a second the copies sustain. **Measured: passed** at 755.4 TFLOP/s and 6.03 TB/s, from a binary that is not in the tree; the committed probe measures the same rows by sixteen-byte stores, at 295.4 TFLOP/s and 2.36 TB/s, and the Tensor Memory Accelerator path of H2b is what restores the recorded rate. The shared-ring rows below take the committed source to 643.1 TFLOP/s, at six query tiles behind one staged key tile |
 | H2 | The forward tile of Part 7's arithmetic: mask, base-two softmax, both products, one consumer warpgroup, staged by a 16-byte copy into the interleaved form | The family test passes at the bf16 tolerance of [testing.md](testing.md) on every case of Part 7 section 7; the forward row of `attention_benchmark` reads 200 TFLOP/s or more |
 | H2b | The copy path of decision H2 by the Tensor Memory Accelerator, which needs the 128-byte swizzle and descriptor layout type 1 rather than the interleaved form | A one-hot map and a laid-out reference pass on the staged path, and the rate matches the copy-free path within 15 percent at the intensity of two query tiles |
 | H3 | Warp specialization and the overlap of decision H4 | The forward row reads 350 TFLOP/s or more; a trace shows the tensor pipe busy above 60 percent |
@@ -955,7 +955,8 @@ one staged byte buys: 6.03 TB/s at 128 FLOP per byte is 772, and 2.36 TB/s is
 302. Measured, that is 755.4 of 772 and 289.0 to 295.4 of 302, which is 98 and 96
 to 98 percent of what each path allows. The staged rows are the spread of five
 runs; the card's clock and its neighbours move the resident row by 1.6 percent
-and the copies by 4 percent.
+and the copies by 4 percent. The shared-ring rows below carry that arithmetic
+further, over six geometries and three runs that agree to within 0.7 percent.
 
 The copy rows are the ones the staged rows read, because a copy row fixes the
 arithmetic that one staged byte must buy:
@@ -964,12 +965,40 @@ arithmetic that one staged byte must buy:
 |---|---:|---:|---:|
 | One query tile, score product only | 64 FLOP | 386 TFLOP/s | 151 TFLOP/s |
 | Two query tiles, score product only | 128 FLOP | 772 TFLOP/s | 302 TFLOP/s |
+| Four query tiles, score product only | 256 FLOP | 1,543 TFLOP/s | 604 TFLOP/s |
+| Six query tiles, score product only | 384 FLOP | 2,315 TFLOP/s | 906 TFLOP/s |
 | The tile of section 3: two query tiles, both products, key and value staged | 262 FLOP | 1,580 TFLOP/s | 618 TFLOP/s |
 
-So the copies stop being the constraint at the geometry of section 3, and they
-are the constraint at one query tile per staged key tile. At 2.36 TB/s they are
-the constraint at every geometry this probe holds, which is why the store path
-cannot carry the forward tile and H2b comes before H3.
+**The shared ring, and what it buys.** A key tile costs 32 KiB of copies and
+serves every query tile that reads it, so the arithmetic of one staged byte is
+the count of query rows behind that tile. Two warpgroups of one block share one
+ring, which doubles that count for the same copies and needs no new instruction.
+The committed source now carries both counts as template parameters, and
+`dev/kernels/wgmma_probe_report.md` section 10 is the record of three runs:
+
+| Warpgroups | Query tiles of each | Arithmetic per staged byte | Cap | Measured | Share of the peak |
+|---:|---:|---:|---:|---:|---:|
+| 1 | 1 | 64 FLOP | 156 TFLOP/s | 151.7 | 15.3 percent |
+| 1 | 2 | 128 FLOP | 302 TFLOP/s | 293.8 | 29.7 percent |
+| 1 | 3 | 192 FLOP | 453 TFLOP/s | 424.9 | 43.0 percent |
+| 2 | 1 | 128 FLOP | 312 TFLOP/s | 308.5 | 31.2 percent |
+| 2 | 2 | 256 FLOP | 604 TFLOP/s | 535.4 | 54.1 percent |
+| 2 | 3 | 384 FLOP | 906 TFLOP/s | 643.1 | 65.0 percent |
+
+So the copies stop being the constraint above 256 FLOP a staged byte. The
+six-query-tile row reads 643.1 TFLOP/s of a 906 cap, and its copies reach only
+1.67 of the 2.36 TB/s the path supplies, so the limit of that row is the issue
+path the copies share with the products and not the copies. That is what H3
+changes and what H2b does not. The tile of section 3 keeps 262 FLOP a staged
+byte, because the value tile doubles the staged bytes along with the products,
+so the store path still binds the forward tile at 604 TFLOP/s and H2b keeps its
+place before H3.
+
+The H1 gate stays where it is and is still unmet by the store path. The gate
+reads two query tiles behind one staged key tile, which is 293.8 TFLOP/s on
+sixteen-byte stores against 755.4 on the Tensor Memory Accelerator. The ladder
+passes 500 TFLOP/s only at four query tiles behind one staged key tile, which is
+a different geometry from the one the gate names.
 
 Three further rows bound the store path. The depth of the ring does not matter
 once it is deep enough to cover one tile of copies: two stages read 2.14 TB/s,

@@ -34,21 +34,47 @@
 // **The staged rows.** A real attention tile reads a new key tile every step,
 // so the last section times the same score product three ways: from a resident
 // tile, from a key tile that a copy path stages into a ring, and from the
-// copies alone. The staged rows run at one and at two query tiles, because the
-// arithmetic one staged byte buys decides whether the copies or the products
-// are the limit, and the copy rows sweep the depth of the ring and two orders
-// of the staged stores. The staged product is compared with the resident
-// product before it is timed, so a wrong staging fails instead of measuring.
+// copies alone. The rate of such a row is the bandwidth of its copy path times
+// the arithmetic that one staged byte buys, so the rows sweep that arithmetic:
+// the warpgroups of one block and the query tiles of each, from one to two and
+// one to three, which state 64 to 384 FLOP a staged byte. The copy rows sweep
+// the depth of the ring, the thread count, and two orders of the staged stores.
+// The staged product is compared with the resident product before it is timed,
+// so a wrong staging fails instead of measuring. The query tiles of every
+// warpgroup share one ring, so a block of two warpgroups doubles the arithmetic
+// of one copy and, with it, the rate the copies allow.
 //
-// **One binary, two row sets, one document.** The resident section carries the
-// ceiling rows of the Phase 0 probe this file absorbed, so one build and one
-// card job replace two. The `attention-wgmma:` row names mark the H1 rows of
-// docs/attention.md Part 8, and the `wgmma:` row names mark the Phase 0 rows of
-// docs/kernels.md Part 3. `--rows phase0|h1|all` selects the set, `all` is the
-// default, and the row names do not move with the selection, so both baselines
-// entries stay reproducible from one run. The two sets differ in pass depth,
-// eight atoms against four, and in occupancy, one warpgroup per SM against two,
-// which is why neither divides into the other.
+// **One binary, three row sets, one document.** The resident section carries
+// the ceiling rows of the Phase 0 probe this file absorbed, so one build and
+// one card job replace two. The `attention-wgmma:` row names mark the H1 rows
+// of docs/attention.md Part 8, the `wgmma:` row names mark the Phase 0 rows of
+// docs/kernels.md Part 3, and the `attention-flash:` row names mark the flash
+// tile of the H2 prototype. `--rows phase0|h1|flash|all` selects the set, `all`
+// is the default, and the row names do not move with the selection, so every
+// baselines entry stays reproducible from one run. The first two sets differ in
+// pass depth, eight atoms against four, and in occupancy, one warpgroup per SM
+// against two, which is why neither divides into the other.
+//
+// **The flash rows.** A real attention tile reads a new key block and a new
+// value block every step, so the staged rows above price the score product
+// alone. The flash rows price the whole tile instead: one resident query block,
+// the score product, the base-two softmax in the registers, the value product
+// from the probability operand the score accumulator already holds in the lane
+// that produced it, and the running maximum, sum, and rescale. The row that
+// carries no copy path is `attention-flash:resident`, which is the softmax and
+// the second product priced against the score-only ceiling of
+// `attention-wgmma:resident`. Every row is checked against the host reference
+// of the family, `seqref::AttentionForward`, one element at a time, so a wrong
+// probability operand or a wrong value form fails before anything is timed.
+// That check is also the first end-to-end test of the register operand: the H1
+// rows measured its element order with one-hot elements and never carried a
+// full product through it.
+//
+// The tile is a chain and not a pipeline. The score product must retire before
+// the softmax can read it, and the softmax must finish before the value product
+// can issue, so a flash row states the cost of that chain. The overlap of
+// decision H4 is what later hides it. The mask, the staged ring, and the
+// transposed value staging are the phases that follow this one.
 //
 // **The report.** Every timed row goes through `BenchReport`, so the program
 // states one `nanochat.bench.v3` document with `--json`. The lines this program
@@ -92,6 +118,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <string>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -99,6 +126,7 @@
 #include <cuda_runtime.h>
 
 #include "backends/cuda/kernels/testing/bench_protocol.h"
+#include "backends/cuda/kernels/testing/sequence_ref.h"
 #include "nanochat/bench.h"
 #include "nanochat/device_profile.h"
 #include "nanochat/sandbox.h"
@@ -136,6 +164,10 @@ constexpr int kRegisters = kAtomM * kAtomN / kWarpgroupThreads;
 //: every recorded row of both parts.
 constexpr int kHalfAtoms = kAtoms / 2;
 
+//: The key blocks of one tile: one atom a block, so the value product walks the
+//: same eight and a key or value tile of one step is `kKeyBytes` of operand.
+constexpr int kKeyAtoms = kAtomN / kAtomK;
+
 //: The interleaved core-matrix form. One core matrix is eight rows of eight
 //: elements, sixteen bytes to a row, so the two halves of the `k` axis of one
 //: row group are one leading offset apart and the next row group follows at one
@@ -143,21 +175,59 @@ constexpr int kHalfAtoms = kAtoms / 2;
 constexpr int kLboBytes = 128;
 constexpr int kSboBytes = 2 * kLboBytes;
 
-//: The ring of staged key tiles, and the query tiles that share one staged key
-//: tile. Two query tiles is the geometry of Part 8 section 3: it doubles the
-//: arithmetic one staged byte buys and moves the tile off the copy cap.
+//: The ring of staged key tiles, and the warpgroups and query tiles that share
+//: one staged key tile. Two query tiles is the geometry of Part 8 section 3,
+//: and every warpgroup of the block shares the ring, so the arithmetic one
+//: staged byte buys is `64 * warpgroups * query_tiles` FLOP: a staged key
+//: element is reused by one query row for each of those rows.
 constexpr int kStages = 4;
-constexpr int kQueryTiles = 2;
+constexpr int kMaxWarpgroups = 2;
+constexpr int kMaxQueryTiles = 3;
+//: The query tiles one block holds at the deepest geometry.
+constexpr int kMaxTiles = kMaxWarpgroups * kMaxQueryTiles;
 
 constexpr int kQueryBytes = kAtomM * kDim * sizeof(Bf16);
 constexpr int kKeyBytes = kAtomN * kDim * sizeof(Bf16);
-constexpr int kStagedBytes = kQueryTiles * kQueryBytes + kStages * kKeyBytes;
+//: A value tile is a key tile of the same shape, and the flash tile stages
+//: both.
+constexpr int kValueBytes = kAtomN * kDim * sizeof(Bf16);
+
+//: The staged shared memory of one geometry: the query tile of every
+//: warpgroup, then the ring of key tiles that all of them read.
+constexpr int StagedBytes(int warpgroups, int query_tiles, int stages) {
+  return warpgroups * query_tiles * kQueryBytes + stages * kKeyBytes;
+}
 
 //: The largest dynamic shared-memory request the card accepts, which one block
 //: per multiprocessor must stay under.
 constexpr int kSmemCeiling = 227 * 1024;
-static_assert(kStagedBytes <= kSmemCeiling,
+static_assert(StagedBytes(kMaxWarpgroups, kMaxQueryTiles, kStages) <=
+                  kSmemCeiling,
               "the staged ring must fit one block per multiprocessor");
+
+//: The shared region of the resident flash tile: one query tile a warpgroup,
+//: one key tile, and one value tile. The set is the first step towards the ring
+//: of docs/attention.md Part 8 section 3, which adds
+//: `stages * (kKeyBytes + kValueBytes)` beside the same query region.
+constexpr int FlashResidentBytes(int warpgroups) {
+  return warpgroups * kQueryBytes + kKeyBytes + kValueBytes;
+}
+static_assert(FlashResidentBytes(kMaxWarpgroups) <= kSmemCeiling,
+              "the resident flash tile must fit one block per multiprocessor");
+
+//: The base-two form of the exponential. `exp2` is one instruction where `exp`
+//: is a range reduction around it, so the softmax scale carries `log2(e)` and
+//: every row maximum this kernel states is in base-two units.
+constexpr float kLog2e = 1.4426950408889634f;
+
+//: The identity of a row maximum and the sentinel of the running one. It is a
+//: finite value, so the first rescale of a row underflows to zero instead of
+//: forming an infinity.
+constexpr float kFlashNegInf = -3.402823466e38f;
+
+//: The softmax scale of the reference shape of the check, which is the one
+//: `AttentionParams` states when it carries no scale of its own.
+constexpr float kFlashScale = 0.08838834764831845f;
 
 //: One sixteen-byte group of a row-major source is the unit of both staging
 //: paths: the interleaved form keeps eight adjacent elements of one `k` block
@@ -174,6 +244,17 @@ static_assert(kAtoms * AtomStep(kAtomM) * 16 == kQueryBytes,
               "the query tile must fill its interleaved form");
 static_assert(kAtoms * AtomStep(kAtomN) * 16 == kKeyBytes,
               "the key tile must fill its interleaved form");
+
+//: The row and the column of one accumulator slot of `m64n128k16`, from the map
+//: Part 8 section 5 publishes and this file measured one element at a time. Two
+//: readers use them: the host decodes a slot of a read-back tile, and the flash
+//: kernel reduces a row over the four lanes of the quad that hold it.
+__host__ __device__ constexpr int SlotRow(int lane, int index) {
+  return 16 * (lane / 32) + (lane % 32) / 4 + 8 * ((index / 2) % 2);
+}
+__host__ __device__ constexpr int SlotColumn(int lane, int index) {
+  return 8 * (index / 4) + 2 * (lane % 4) + (index % 2);
+}
 
 //: The reference peak of `backends/cuda/caps.json` for the h100 entry. It is
 //: the fallback denominator of a card the table does not name, and no share is
@@ -205,12 +286,15 @@ __device__ __forceinline__ int InterleavedOffset(int row, int k, int rows) {
 }
 
 // Stages one operand of the whole tile element by element. This is the resident
-// path and the query path; the staged key tiles use the copy engine below.
+// path and the query path; the staged key tiles use the copy engine below. The
+// stride is the thread count of the caller, because a block of two warpgroups
+// stages its shared region with both of them.
 __device__ __forceinline__ void StageInterleaved(char* stage,
-                                                 const Bf16* source, int rows) {
+                                                 const Bf16* source, int rows,
+                                                 int threads) {
   const int total = rows * kDim;
   for (int index = static_cast<int>(threadIdx.x); index < total;
-       index += kWarpgroupThreads) {
+       index += threads) {
     const int row = index / kDim;
     const int k = index - row * kDim;
     *reinterpret_cast<Bf16*>(stage + InterleavedOffset(row, k, rows)) =
@@ -250,11 +334,15 @@ __device__ __forceinline__ void CopyWait() {
 // of the shared-memory period, so sixteen lanes then share four banks. The copy
 // rows measure both, and they agree to within two percent, so the store order
 // is not what limits this path.
+//
+// `threads` is the thread count of the block: two warpgroups issue the copies
+// of one key tile together, so a thread of either warpgroup copies half of what
+// a single warpgroup copies.
 __device__ __forceinline__ void StageCopy(char* stage, const Bf16* source,
-                                          bool row_fast) {
+                                          bool row_fast, int threads) {
   const int groups = kAtomN * kGroupsPerRow;
   for (int unit = static_cast<int>(threadIdx.x); unit < groups;
-       unit += kWarpgroupThreads) {
+       unit += threads) {
     int row = 0;
     int k = 0;
     if (row_fast) {
@@ -282,11 +370,15 @@ __device__ __forceinline__ void StageCopy(char* stage, const Bf16* source,
 // the transpose happens at the copy and not in the instruction: one thread
 // reads eight keys of one head-width row, which is coalesced across the warp,
 // and writes the sixteen bytes that the interleaved form keeps adjacent.
-__device__ __forceinline__ void StageTransposed(char* stage,
-                                                const Bf16* source) {
+//
+// This stage keeps plain stores where `StageCopy` uses the copy engine, because
+// a transposition is not a contiguous sixteen-byte move and no path copies one.
+// `threads` is the thread count of the block, as in `StageInterleaved`.
+__device__ __forceinline__ void StageTransposed(char* stage, const Bf16* source,
+                                                int threads) {
   constexpr int kKeyGroups = kAtomN / kElementsPerGroup;
   for (int unit = static_cast<int>(threadIdx.x); unit < kKeyGroups * kDim;
-       unit += kWarpgroupThreads) {
+       unit += threads) {
     const int key = (unit / kDim) * kElementsPerGroup;
     const int row = unit % kDim;
     Bf16 packed[kElementsPerGroup];
@@ -442,6 +534,17 @@ __device__ __forceinline__ void WgmmaFenceOperand(float* d) {
   }
 }
 
+// The same fence over the packed `b16x2` registers of a probability operand.
+// The value product reads them through the async proxy, so the region needs the
+// same bound the accumulator fence gives the fp32 slots of the score tile.
+template <int Count>
+__device__ __forceinline__ void WgmmaFencePacked(std::uint32_t* a) {
+#pragma unroll
+  for (int i = 0; i < Count; ++i) {
+    asm volatile("" : "+r"(a[i]) : : "memory");
+  }
+}
+
 __device__ __forceinline__ void WgmmaCommit() {
   asm volatile("wgmma.commit_group.sync.aligned;\n" ::: "memory");
 }
@@ -470,8 +573,8 @@ __global__ void ResidentKernel(const Bf16* __restrict__ q,
   extern __shared__ __align__(1024) char smem[];
   char* query = smem;
   char* key = smem + kQueryBytes;
-  StageInterleaved(query, q, kAtomM);
-  StageInterleaved(key, k, kAtomN);
+  StageInterleaved(query, q, kAtomM, kWarpgroupThreads);
+  StageInterleaved(key, k, kAtomN, kWarpgroupThreads);
   __syncthreads();
   FenceAsyncShared();
   WgmmaFence();
@@ -501,6 +604,187 @@ __global__ void ResidentKernel(const Bf16* __restrict__ q,
   for (int i = 0; i < kRegisters; ++i) destination[i] = d[i];
 }
 
+// The flash tile with no copy path: `Warpgroups` warpgroups of one resident
+// query tile each, one resident key tile, one resident value tile, and the
+// chain of docs/attention.md Part 8 section 3. Each step issues the score
+// product over the whole head width, carries the result through the base-two
+// softmax in the registers, packs the probability operand out of the score
+// slots of the same lane, and issues the value product against the transposed
+// value tile. The running maximum, the running sum, and the rescale of the
+// output accumulator carry from one step to the next, so `tiles` steps are one
+// online softmax and not `tiles` independent products.
+//
+// The score accumulator and the output accumulator are both 64 by 128 over the
+// same lane map, so the two share `SlotRow` and `SlotColumn`. The probability
+// operand of atom `atom` and register `reg` holds the score slots
+// `8 * atom + 4 * (reg / 2) + 2 * (reg % 2) + half`, which is the measured
+// register map written the other way round: a register holds the keys
+// `8 * (reg / 2) + 2 * (lane % 4) + half`, and the score slot of a key is
+// `4 * (key / 8) + 2 * ((row / 8) % 2) + (key % 2)`.
+//
+// The step is a chain: the score product retires before the softmax reads it,
+// and the softmax finishes before the value product issues. The value group is
+// drained at the end of a step because the next step rescales the same output
+// registers, so a row of this kernel states the cost of the serialized chain
+// and not of an overlapped one. Decision H4 of Part 8 section 2 is what later
+// hides it.
+//
+// The kernel leaves the output unnormalised. One division by the row sum is a
+// pass over the output at the end of a real block and not part of a step, so a
+// timed row prices the step alone and the check applies the division itself.
+template <int Warpgroups>
+__global__ void ResidentFlashKernel(const Bf16* __restrict__ q,
+                                    const Bf16* __restrict__ k,
+                                    const Bf16* __restrict__ v,
+                                    float* __restrict__ out,
+                                    float* __restrict__ row_sums, int tiles,
+                                    float softmax_scale) {
+  constexpr int kThreads = Warpgroups * kWarpgroupThreads;
+  extern __shared__ __align__(1024) char smem[];
+  char* query = smem;
+  char* key = query + Warpgroups * kQueryBytes;
+  char* value = key + kKeyBytes;
+
+  const int warpgroup = static_cast<int>(threadIdx.x) / kWarpgroupThreads;
+  const int lane = static_cast<int>(threadIdx.x) % kWarpgroupThreads;
+
+  // Every thread of the block stages the whole region, as the staged kernel
+  // does, because the barrier below is the only one before the loop.
+  for (int tile = 0; tile < Warpgroups; ++tile) {
+    StageInterleaved(query + tile * kQueryBytes,
+                     q + static_cast<std::size_t>(tile) * kAtomM * kDim, kAtomM,
+                     kThreads);
+  }
+  StageInterleaved(key, k, kAtomN, kThreads);
+  StageTransposed(value, v, kThreads);
+  __syncthreads();
+  FenceAsyncShared();
+  WgmmaFence();
+
+  const std::uint64_t base_query =
+      MakeDescriptor(query + warpgroup * kQueryBytes);
+  const std::uint64_t base_key = MakeDescriptor(key);
+  const std::uint64_t base_value = MakeDescriptor(value);
+
+  // The online state of the two rows this thread holds. A row of the tile is
+  // the four lanes of one quad, so both reductions below are two shuffles and
+  // never cross a warp.
+  float running_max[2] = {kFlashNegInf, kFlashNegInf};
+  float running_sum[2] = {0.0f, 0.0f};
+
+  float output[kRegisters];
+#pragma unroll
+  for (int i = 0; i < kRegisters; ++i) output[i] = 0.0f;
+  WgmmaFenceOperand<kRegisters>(output);
+
+  const float log2_scale = softmax_scale * kLog2e;
+  std::uint32_t probability[kKeyAtoms][4];
+
+  for (int tile = 0; tile < tiles; ++tile) {
+    // The score product over the whole head width. The first atom overwrites,
+    // so the accumulator carries no score of the step before it.
+    float score[kRegisters];
+#pragma unroll
+    for (int i = 0; i < kRegisters; ++i) score[i] = 0.0f;
+    WgmmaFenceOperand<kRegisters>(score);
+    WgmmaFence();
+#pragma unroll
+    for (int atom = 0; atom < kAtoms; ++atom) {
+      WgmmaM64N128K16(base_query + atom * AtomStep(kAtomM),
+                      base_key + atom * AtomStep(kAtomN), score, atom != 0);
+    }
+    WgmmaCommit();
+    WgmmaWait<0>();
+    WgmmaFenceOperand<kRegisters>(score);
+
+    // The scaled score in base-two units, then the row maximum: the thread's
+    // own thirty-two columns of each of its two rows, then the quad.
+    float tile_max[2] = {kFlashNegInf, kFlashNegInf};
+    float new_max[2];
+#pragma unroll
+    for (int i = 0; i < kRegisters; ++i) {
+      score[i] *= log2_scale;
+      const int slot = (i / 2) % 2;
+      tile_max[slot] = fmaxf(tile_max[slot], score[i]);
+    }
+#pragma unroll
+    for (int slot = 0; slot < 2; ++slot) {
+      tile_max[slot] = fmaxf(tile_max[slot],
+                             __shfl_xor_sync(0xFFFFFFFFu, tile_max[slot], 1));
+      tile_max[slot] = fmaxf(tile_max[slot],
+                             __shfl_xor_sync(0xFFFFFFFFu, tile_max[slot], 2));
+      new_max[slot] = fmaxf(running_max[slot], tile_max[slot]);
+    }
+
+    // The exponentials and the row sum, in the same two reductions. The rescale
+    // of the running state is the factor the output accumulator needs as well.
+    float tile_sum[2] = {0.0f, 0.0f};
+#pragma unroll
+    for (int i = 0; i < kRegisters; ++i) {
+      const int slot = (i / 2) % 2;
+      score[i] = exp2f(score[i] - new_max[slot]);
+      tile_sum[slot] += score[i];
+    }
+    float rescale[2];
+#pragma unroll
+    for (int slot = 0; slot < 2; ++slot) {
+      tile_sum[slot] += __shfl_xor_sync(0xFFFFFFFFu, tile_sum[slot], 1);
+      tile_sum[slot] += __shfl_xor_sync(0xFFFFFFFFu, tile_sum[slot], 2);
+      rescale[slot] = exp2f(running_max[slot] - new_max[slot]);
+      running_sum[slot] = running_sum[slot] * rescale[slot] + tile_sum[slot];
+      running_max[slot] = new_max[slot];
+    }
+
+    // The output accumulator holds the earlier steps under the earlier maximum,
+    // so every slot is rescaled before this step's value product adds to it.
+#pragma unroll
+    for (int i = 0; i < kRegisters; ++i) {
+      output[i] *= rescale[(i / 2) % 2];
+    }
+
+    // The probability operand, two keys a register from the score slots of this
+    // same lane, low half of the register first.
+#pragma unroll
+    for (int atom = 0; atom < kKeyAtoms; ++atom) {
+#pragma unroll
+      for (int reg = 0; reg < 4; ++reg) {
+        const int index = 8 * atom + 4 * (reg / 2) + 2 * (reg % 2);
+        const std::uint32_t low = static_cast<std::uint32_t>(
+            __bfloat16_as_ushort(__float2bfloat16_rn(score[index])));
+        const std::uint32_t high = static_cast<std::uint32_t>(
+            __bfloat16_as_ushort(__float2bfloat16_rn(score[index + 1])));
+        probability[atom][reg] = low | (high << 16);
+      }
+    }
+
+    // The value product. The first operand is in registers, so it needs the
+    // operand fence in place of a descriptor, and the value tile is the
+    // transposed staging with both transpose bits clear.
+    WgmmaFencePacked<kKeyAtoms * 4>(&probability[0][0]);
+    WgmmaFence();
+#pragma unroll
+    for (int atom = 0; atom < kKeyAtoms; ++atom) {
+      WgmmaM64N128K16OperandA(probability[atom],
+                              base_value + atom * AtomStep(kDim), output);
+    }
+    WgmmaCommit();
+    WgmmaWait<0>();
+  }
+
+  WgmmaFenceOperand<kRegisters>(output);
+  float* destination = out + static_cast<std::size_t>(threadIdx.x) * kRegisters;
+#pragma unroll
+  for (int i = 0; i < kRegisters; ++i) destination[i] = output[i];
+
+  // The row sums, one write a row: the four lanes of a quad agree, so the first
+  // of them states it. A timed row passes no buffer and pays nothing.
+  if (row_sums != nullptr && (lane % 4) == 0) {
+    const int row = 16 * (lane / 32) + (lane % 32) / 4;
+    row_sums[warpgroup * kAtomM + row] = running_sum[0];
+    row_sums[warpgroup * kAtomM + row + 8] = running_sum[1];
+  }
+}
+
 //: The two experiment switches of the staged kernel. `kPlainStage` stages the
 //: ring with plain stores instead of the asynchronous copies, so a wrong staged
 //: product separates into a wrong copy and a wrong ring. `kRowFast` picks the
@@ -508,22 +792,34 @@ __global__ void ResidentKernel(const Bf16* __restrict__ q,
 constexpr int kPlainStage = 1;
 constexpr int kRowFast = 2;
 
-// One warpgroup, `QueryTiles` resident query tiles, and a ring of `kStages`
-// key tiles that the copy engine fills. `kProducts` false is the copy row: the
-// same bytes, the same ring, and no instruction.
-template <int QueryTiles, bool kProducts, int Stages = kStages>
+// One block of `Warpgroups` warpgroups, `QueryTiles` resident query tiles for
+// each of them, and a ring of `Stages` key tiles that the copy engine fills.
+// The ring is one region of the block: a warpgroup reads the tile that every
+// other warpgroup reads, so the copies of one key tile are shared and the
+// arithmetic that one staged byte buys is multiplied by the warpgroup count.
+//
+// `kProducts` false is the copy row: the same bytes, the same ring, and no
+// instruction.
+template <int Warpgroups, int QueryTiles, bool kProducts, int Stages = kStages>
 __global__ void StagedKernel(const Bf16* __restrict__ q,
                              const Bf16* __restrict__ k, int source_tiles,
                              float* __restrict__ out, int tiles, int options) {
+  constexpr int kThreads = Warpgroups * kWarpgroupThreads;
+  constexpr int kTiles = Warpgroups * QueryTiles;
   extern __shared__ __align__(1024) char smem[];
   char* query = smem;
-  char* stages = smem + QueryTiles * kQueryBytes;
+  char* stages = smem + kTiles * kQueryBytes;
 
-#pragma unroll
-  for (int tile = 0; tile < QueryTiles; ++tile) {
+  // The warpgroup owns the tile it multiplies: its `QueryTiles` tiles are one
+  // run of the query region, because the descriptor of a tile is its address.
+  const int warpgroup = static_cast<int>(threadIdx.x) / kWarpgroupThreads;
+
+  // Every thread of the block stages the whole query region, because every
+  // warpgroup reads it once the barrier below opens.
+  for (int tile = 0; tile < kTiles; ++tile) {
     StageInterleaved(query + tile * kQueryBytes,
-                     q + static_cast<std::size_t>(tile) * kAtomM * kDim,
-                     kAtomM);
+                     q + static_cast<std::size_t>(tile) * kAtomM * kDim, kAtomM,
+                     kThreads);
   }
   __syncthreads();
   FenceAsyncShared();
@@ -532,7 +828,8 @@ __global__ void StagedKernel(const Bf16* __restrict__ q,
   std::uint64_t base_query[QueryTiles];
 #pragma unroll
   for (int tile = 0; tile < QueryTiles; ++tile) {
-    base_query[tile] = MakeDescriptor(query + tile * kQueryBytes);
+    base_query[tile] =
+        MakeDescriptor(query + (warpgroup * QueryTiles + tile) * kQueryBytes);
   }
 
   float d[QueryTiles * kRegisters];
@@ -554,9 +851,9 @@ __global__ void StagedKernel(const Bf16* __restrict__ q,
     const Bf16* source =
         k + static_cast<std::size_t>(tile % source_tiles) * kAtomN * kDim;
     if (plain_stage) {
-      StageInterleaved(stages + tile * kKeyBytes, source, kAtomN);
+      StageInterleaved(stages + tile * kKeyBytes, source, kAtomN, kThreads);
     } else {
-      StageCopy(stages + tile * kKeyBytes, source, row_fast);
+      StageCopy(stages + tile * kKeyBytes, source, row_fast, kThreads);
     }
     CopyCommit();
   }
@@ -595,9 +892,11 @@ __global__ void StagedKernel(const Bf16* __restrict__ q,
       const Bf16* source =
           k + static_cast<std::size_t>(next % source_tiles) * kAtomN * kDim;
       if (plain_stage) {
-        StageInterleaved(stages + (next % Stages) * kKeyBytes, source, kAtomN);
+        StageInterleaved(stages + (next % Stages) * kKeyBytes, source, kAtomN,
+                         kThreads);
       } else {
-        StageCopy(stages + (next % Stages) * kKeyBytes, source, row_fast);
+        StageCopy(stages + (next % Stages) * kKeyBytes, source, row_fast,
+                  kThreads);
       }
     }
     CopyCommit();
@@ -606,11 +905,15 @@ __global__ void StagedKernel(const Bf16* __restrict__ q,
   if constexpr (kProducts) {
     WgmmaWait<0>();
     WgmmaFenceOperand<QueryTiles * kRegisters>(d);
+    const int lane = static_cast<int>(threadIdx.x) % kWarpgroupThreads;
 #pragma unroll
     for (int slot = 0; slot < QueryTiles; ++slot) {
+      // One tile of the output per query tile of the block, in tile order, so
+      // the caller reads tile `warpgroup * QueryTiles + slot`.
       float* destination =
-          out + (static_cast<std::size_t>(slot) * kWarpgroupThreads +
-                 static_cast<std::size_t>(threadIdx.x)) *
+          out + (static_cast<std::size_t>(warpgroup * QueryTiles + slot) *
+                     kWarpgroupThreads +
+                 static_cast<std::size_t>(lane)) *
                     kRegisters;
 #pragma unroll
       for (int i = 0; i < kRegisters; ++i) {
@@ -630,7 +933,7 @@ __global__ void RegisterOperandKernel(const Bf16* __restrict__ k,
                                       int reg, int half) {
   extern __shared__ __align__(1024) char smem[];
   char* key = smem;
-  StageInterleaved(key, k, kAtomN);
+  StageInterleaved(key, k, kAtomN, kWarpgroupThreads);
   __syncthreads();
   FenceAsyncShared();
 
@@ -667,11 +970,11 @@ __global__ void ValueOperandKernel(const Bf16* __restrict__ p,
   extern __shared__ __align__(1024) char smem[];
   char* probability = smem;
   char* value = smem + kQueryBytes;
-  StageInterleaved(probability, p, kAtomM);
+  StageInterleaved(probability, p, kAtomM, kWarpgroupThreads);
   if (transpose_stage != 0) {
-    StageTransposed(value, v);
+    StageTransposed(value, v, kWarpgroupThreads);
   } else {
-    StageInterleaved(value, v, kAtomN);
+    StageInterleaved(value, v, kAtomN, kWarpgroupThreads);
   }
   __syncthreads();
   FenceAsyncShared();
@@ -684,7 +987,6 @@ __global__ void ValueOperandKernel(const Bf16* __restrict__ p,
   for (int i = 0; i < kRegisters; ++i) d[i] = 0.0f;
   WgmmaFenceOperand<kRegisters>(d);
 
-  constexpr int kKeyAtoms = kAtomN / kAtomK;
   for (int atom = 0; atom < kKeyAtoms; ++atom) {
     const std::uint64_t desc_p = base_probability + atom * AtomStep(kAtomM);
     const std::uint64_t desc_v = base_value + atom * atom_step;
@@ -715,9 +1017,7 @@ std::vector<float> ReadBack(const float* device, std::size_t count) {
 // The published map of Part 8 section 5: which (row, column) the accumulator
 // slot of one lane and one register holds.
 std::pair<int, int> SlotOf(int lane, int index) {
-  const int row = 16 * (lane / 32) + (lane % 32) / 4 + 8 * ((index / 2) % 2);
-  const int column = 8 * (index / 4) + 2 * (lane % 4) + (index % 2);
-  return {row, column};
+  return {SlotRow(lane, index), SlotColumn(lane, index)};
 }
 
 // The measured register-operand formula, the counterpart of `SlotOf`: which
@@ -758,28 +1058,128 @@ void LaunchResident(int blocks, const Bf16* device_q, const Bf16* device_k,
       device_q, device_k, device_out, steps);
 }
 
+// The opt-in dynamic shared-memory request of a resident flash instantiation,
+// and its one launch: `blocks` blocks of `Warpgroups` warpgroups, `tiles` key
+// tiles every block, and no copy path in the loop. A templated kernel has no
+// single function address, so the attribute is set once per instantiation and
+// outside any timed window.
+template <int Warpgroups>
+void SetFlashSharedMemory() {
+  constexpr int kShared = FlashResidentBytes(Warpgroups);
+  cudaFuncSetAttribute(
+      reinterpret_cast<const void*>(ResidentFlashKernel<Warpgroups>),
+      cudaFuncAttributeMaxDynamicSharedMemorySize, kShared);
+}
+
+template <int Warpgroups>
+void LaunchResidentFlash(int blocks, const Bf16* device_q, const Bf16* device_k,
+                         const Bf16* device_v, float* device_out,
+                         float* device_row_sums, int tiles, float scale) {
+  constexpr int kShared = FlashResidentBytes(Warpgroups);
+  ResidentFlashKernel<Warpgroups>
+      <<<blocks, Warpgroups * kWarpgroupThreads, kShared>>>(
+          device_q, device_k, device_v, device_out, device_row_sums, tiles,
+          scale);
+}
+
+// One step of the flash tile over one block, read back: the accumulator slots
+// of every warpgroup in thread order, and the row sums beside them.
+template <int Warpgroups>
+std::vector<float> RunResidentFlash(const Bf16* device_q, const Bf16* device_k,
+                                    const Bf16* device_v, float* device_out,
+                                    float* device_row_sums) {
+  LaunchResidentFlash<Warpgroups>(1, device_q, device_k, device_v, device_out,
+                                  device_row_sums, 1, kFlashScale);
+  cudaDeviceSynchronize();
+  return ReadBack(device_out, Warpgroups * kProductSlots);
+}
+
 // The one opt-in dynamic shared-memory request of a staged instantiation. A
 // templated kernel has no single function address, so the attribute is set once
 // per instantiation and outside any timed window.
-template <int QueryTiles, bool kProducts, int Stages = kStages>
+template <int Warpgroups, int QueryTiles, bool kProducts, int Stages = kStages>
 void SetStagedSharedMemory() {
-  constexpr int kShared = QueryTiles * kQueryBytes + Stages * kKeyBytes;
+  constexpr int kShared = StagedBytes(Warpgroups, QueryTiles, Stages);
   static_assert(kShared <= kSmemCeiling,
                 "the ring must fit one block per multiprocessor");
-  cudaFuncSetAttribute(reinterpret_cast<const void*>(
-                           StagedKernel<QueryTiles, kProducts, Stages>),
-                       cudaFuncAttributeMaxDynamicSharedMemorySize, kShared);
+  cudaFuncSetAttribute(
+      reinterpret_cast<const void*>(
+          StagedKernel<Warpgroups, QueryTiles, kProducts, Stages>),
+      cudaFuncAttributeMaxDynamicSharedMemorySize, kShared);
 }
 
 // One launch of the staged kernel: `tiles` steps of the ring, over `blocks`
 // blocks, with the copy order of `options`.
-template <int QueryTiles, bool kProducts, int Stages = kStages>
+template <int Warpgroups, int QueryTiles, bool kProducts, int Stages = kStages>
 void LaunchStaged(int blocks, int tiles, int source_tiles, const Bf16* device_q,
                   const Bf16* device_k, float* device_out, int options = 0) {
-  constexpr int kShared = QueryTiles * kQueryBytes + Stages * kKeyBytes;
-  StagedKernel<QueryTiles, kProducts, Stages>
-      <<<blocks, kWarpgroupThreads, kShared>>>(device_q, device_k, source_tiles,
-                                               device_out, tiles, options);
+  constexpr int kShared = StagedBytes(Warpgroups, QueryTiles, Stages);
+  StagedKernel<Warpgroups, QueryTiles, kProducts, Stages>
+      <<<blocks, Warpgroups * kWarpgroupThreads, kShared>>>(
+          device_q, device_k, source_tiles, device_out, tiles, options);
+}
+
+// One geometry of the staged ladder, dispatched to its own instantiation. The
+// kernel carries the two counts as template parameters, so a sweep over them is
+// one branch per geometry, and this is the one place that states the pairs.
+template <typename Visitor>
+void VisitGeometry(int warpgroups, int query_tiles, Visitor&& visit) {
+  if (warpgroups == 1 && query_tiles == 1) {
+    visit(std::integral_constant<int, 1>{}, std::integral_constant<int, 1>{});
+  } else if (warpgroups == 1 && query_tiles == 2) {
+    visit(std::integral_constant<int, 1>{}, std::integral_constant<int, 2>{});
+  } else if (warpgroups == 1 && query_tiles == 3) {
+    visit(std::integral_constant<int, 1>{}, std::integral_constant<int, 3>{});
+  } else if (warpgroups == 2 && query_tiles == 1) {
+    visit(std::integral_constant<int, 2>{}, std::integral_constant<int, 1>{});
+  } else if (warpgroups == 2 && query_tiles == 2) {
+    visit(std::integral_constant<int, 2>{}, std::integral_constant<int, 2>{});
+  } else if (warpgroups == 2 && query_tiles == 3) {
+    visit(std::integral_constant<int, 2>{}, std::integral_constant<int, 3>{});
+  } else {
+    std::fprintf(
+        stderr,
+        "the probe has no geometry of %d warpgroups and %d query tiles\n",
+        warpgroups, query_tiles);
+    std::exit(2);
+  }
+}
+
+// One geometry's staged check: every query tile of every warpgroup must agree
+// with the resident product of that same tile, because all of them multiply
+// their own query tile by the same key tile. The answer is the count of
+// elements outside the tolerance and the worst difference, both as the caller
+// reports them.
+template <int Warpgroups, int QueryTiles>
+std::pair<std::size_t, double> CheckStagedGeometry(
+    const Bf16* device_queries, const Bf16* device_k, float* device_out,
+    int source_tiles, int options,
+    const std::vector<std::vector<float>>& reference_tiles, double scale) {
+  constexpr int kThreads = Warpgroups * kWarpgroupThreads;
+  constexpr int kTiles = Warpgroups * QueryTiles;
+  constexpr int kShared = StagedBytes(Warpgroups, QueryTiles, kStages);
+  cudaFuncSetAttribute(
+      reinterpret_cast<const void*>(StagedKernel<Warpgroups, QueryTiles, true>),
+      cudaFuncAttributeMaxDynamicSharedMemorySize, kShared);
+  cudaMemset(device_out, 0, kTiles * kProductSlots * sizeof(float));
+  StagedKernel<Warpgroups, QueryTiles, true><<<1, kThreads, kShared>>>(
+      device_queries, device_k, source_tiles, device_out, 1, options);
+  cudaDeviceSynchronize();
+  const std::vector<float> staged =
+      ReadBack(device_out, kTiles * kProductSlots);
+  double worst = 0.0;
+  std::size_t bad = 0;
+  for (int tile = 0; tile < kTiles; ++tile) {
+    for (std::size_t slot = 0; slot < kProductSlots; ++slot) {
+      const double difference = std::fabs(
+          static_cast<double>(
+              staged[static_cast<std::size_t>(tile) * kProductSlots + slot]) -
+          static_cast<double>(reference_tiles[tile][slot]));
+      if (difference > 1e-3 * scale) ++bad;
+      worst = std::max(worst, difference);
+    }
+  }
+  return {bad, worst / scale};
 }
 
 void Upload(const std::vector<nanochat::Bf16>& source, Bf16* device) {
@@ -816,11 +1216,11 @@ class Diagnostics {
   bool enabled_;
 };
 
-// The two row sets this one binary prints. `phase0` is the ceiling rows of
+// The three row sets this one binary prints. `phase0` is the ceiling rows of
 // docs/kernels.md Part 3, `h1` is the H1 rows and the maps of docs/attention.md
-// Part 8, and `all` runs both. `all` is the default, so a caller that names no
-// set loses no row.
-enum class RowSet { kAll, kPhase0, kH1 };
+// Part 8, and `flash` is the flash tile of the H2 prototype. `all` runs every
+// set, so a caller that names no set loses no row.
+enum class RowSet { kAll, kPhase0, kH1, kFlash };
 
 // The parsed command line.
 struct ProbeOptions {
@@ -829,18 +1229,28 @@ struct ProbeOptions {
   // Flushes the second-level cache before every timed call.
   bool flush = true;
 
-  bool phase0() const { return rows != RowSet::kH1; }
-  bool h1() const { return rows != RowSet::kPhase0; }
+  bool phase0() const { return rows != RowSet::kH1 && rows != RowSet::kFlash; }
+  bool h1() const { return rows != RowSet::kPhase0 && rows != RowSet::kFlash; }
+  bool flash() const { return rows == RowSet::kAll || rows == RowSet::kFlash; }
   const char* name() const {
-    return rows == RowSet::kPhase0 ? "phase0"
-                                   : (rows == RowSet::kH1 ? "h1" : "all");
+    switch (rows) {
+      case RowSet::kPhase0:
+        return "phase0";
+      case RowSet::kH1:
+        return "h1";
+      case RowSet::kFlash:
+        return "flash";
+      case RowSet::kAll:
+        break;
+    }
+    return "all";
   }
 };
 
 void PrintUsage(const char* program) {
   std::fprintf(stderr,
-               "usage: %s [--rows phase0|h1|all] [--iters N] [--rounds N] "
-               "[--warmup N] [--no-flush] [--json] [--out PATH]\n",
+               "usage: %s [--rows phase0|h1|flash|all] [--iters N] "
+               "[--rounds N] [--warmup N] [--no-flush] [--json] [--out PATH]\n",
                program);
 }
 
@@ -856,6 +1266,8 @@ ProbeOptions ParseOptions(int argc, char** argv) {
         options.rows = RowSet::kPhase0;
       } else if (value == "h1") {
         options.rows = RowSet::kH1;
+      } else if (value == "flash") {
+        options.rows = RowSet::kFlash;
       } else if (value == "all") {
         options.rows = RowSet::kAll;
       } else {
@@ -898,13 +1310,20 @@ int main(int argc, char** argv) {
   // document's own `rows` array closes before the extras, so a second key of
   // that name replaces the measurements with a string for every strict reader.
   report.SetExtraText("rows_selected", options.name());
-  // A run that names no H1 row cannot have run the form checks, so the status
+  // A run that names no check row cannot have run the checks, so the status
   // alone would overstate what this document covers.
-  report.SetExtraText("checks_run", options.h1() ? "h1" : "none");
+  std::string checks_run;
+  if (options.h1()) checks_run = "h1";
+  if (options.flash()) {
+    if (!checks_run.empty()) checks_run += "+";
+    checks_run += "flash";
+  }
+  report.SetExtraText("checks_run", checks_run.empty() ? "none" : checks_run);
 
   note(
-      "attention wgmma probe: the accumulator map, the operand form, and the "
-      "staged rate, %d by %d by %d\n",
+      "attention wgmma probe: the accumulator map, the operand form, the "
+      "staged "
+      "rate, and the flash tile, %d by %d by %d\n",
       kAtomM, kAtomN, kDim);
 
   int device = 0;
@@ -934,14 +1353,19 @@ int main(int argc, char** argv) {
 
   std::vector<nanochat::Bf16> host_q(static_cast<std::size_t>(kAtomM) * kDim);
   std::vector<nanochat::Bf16> host_k(static_cast<std::size_t>(kAtomN) * kDim);
-  // The query buffer holds kQueryTiles tiles, which the two-query-tile rows
-  // read.
-  std::vector<nanochat::Bf16> host_queries(
-      static_cast<std::size_t>(kQueryTiles) * kAtomM * kDim);
+  // The flash check reads one value tile, and the flash rows stage it every
+  // step, so it is a device buffer from the first line of the set.
+  std::vector<nanochat::Bf16> host_v(static_cast<std::size_t>(kAtomN) * kDim);
+  // The query buffer holds one tile for every query tile of the deepest
+  // geometry, and every row of the ladder reads a prefix of it.
+  std::vector<nanochat::Bf16> host_queries(static_cast<std::size_t>(kMaxTiles) *
+                                           kAtomM * kDim);
   Bf16* device_q = nullptr;
   Bf16* device_queries = nullptr;
   Bf16* device_k = nullptr;
+  Bf16* device_value = nullptr;
   float* device_out = nullptr;
+  float* device_row_sums = nullptr;
   constexpr int kSourceTiles = 2048;
   const std::size_t key_elements =
       static_cast<std::size_t>(kSourceTiles) * kAtomN * kDim;
@@ -951,7 +1375,11 @@ int main(int argc, char** argv) {
   cudaMalloc(reinterpret_cast<void**>(&device_k), key_elements * sizeof(Bf16));
   cudaMalloc(
       reinterpret_cast<void**>(&device_out),
-      std::max(kProductSlots, kQueryTiles * kProductSlots) * sizeof(float));
+      std::max(kProductSlots, kMaxTiles * kProductSlots) * sizeof(float));
+  cudaMalloc(reinterpret_cast<void**>(&device_value),
+             host_v.size() * sizeof(Bf16));
+  cudaMalloc(reinterpret_cast<void**>(&device_row_sums),
+             static_cast<std::size_t>(kMaxWarpgroups) * kAtomM * sizeof(float));
 
   // The map and form sections are the H1 rows of Part 8, so `--rows phase0`
   // skips them and reports the ceiling rows alone.
@@ -1146,68 +1574,60 @@ int main(int argc, char** argv) {
 
     // --- The staged path
     // ------------------------------------------------------ The staged product
-    // must agree with the resident product before either is timed, and the two
-    // query tiles must agree with each other.
-    for (int tile = 0; tile < kQueryTiles; ++tile) {
-      std::copy(host_q.begin(), host_q.end(),
-                host_queries.begin() + tile * host_q.size());
+    // of every geometry must agree with the resident product of its own query
+    // tile before either is timed. Every query tile is a different operand, so
+    // a warpgroup that reads the wrong tile of the query region fails here, and
+    // so does a wrong ring, a wrong barrier, or a wrong stage offset.
+    std::vector<std::vector<float>> reference_tiles(kMaxTiles);
+    for (int tile = 0; tile < kMaxTiles; ++tile) {
+      const std::size_t offset = static_cast<std::size_t>(tile) * host_q.size();
+      for (std::size_t element = 0; element < host_q.size(); ++element) {
+        host_queries[offset + element] = nanochat::Bf16FromFloat(random.Next());
+        host_q[element] = host_queries[offset + element];
+      }
+      Upload(host_q, device_q);
+      reference_tiles[static_cast<std::size_t>(tile)] =
+          RunResident(device_q, device_k, device_out);
     }
     Upload(host_queries, device_queries);
     Upload(host_k, device_k);
-    cudaMemset(device_out, 0, kQueryTiles * kProductSlots * sizeof(float));
     bool staged_ok = true;
-    for (int options : {0, kPlainStage}) {
-      constexpr int kShared = kQueryTiles * kQueryBytes + kStages * kKeyBytes;
-      cudaFuncSetAttribute(
-          reinterpret_cast<const void*>(StagedKernel<kQueryTiles, true>),
-          cudaFuncAttributeMaxDynamicSharedMemorySize, kShared);
-      cudaMemset(device_out, 0, kQueryTiles * kProductSlots * sizeof(float));
-      StagedKernel<kQueryTiles, true><<<1, kWarpgroupThreads, kShared>>>(
-          device_queries, device_k, kSourceTiles, device_out, 1, options);
-      cudaDeviceSynchronize();
-      const std::vector<float> staged =
-          ReadBack(device_out, kQueryTiles * kProductSlots);
-      double staged_worst = 0.0;
-      double staged_sum = 0.0;
-      std::size_t staged_bad = 0;
-      std::size_t worst_slot = 0;
-      for (int tile = 0; tile < kQueryTiles; ++tile) {
-        for (std::size_t slot = 0; slot < kProductSlots; ++slot) {
-          const double difference = std::fabs(
-              static_cast<double>(
-                  staged[static_cast<std::size_t>(tile) * kProductSlots +
-                         slot]) -
-              static_cast<double>(resident[slot]));
-          staged_sum += difference;
-          if (difference > 1e-3 * scale) ++staged_bad;
-          if (difference > staged_worst) {
-            staged_worst = difference;
-            worst_slot = slot;
-          }
+    auto check_geometry = [&](auto warpgroups, auto query_tiles) {
+      constexpr int kWarpgroups = decltype(warpgroups)::value;
+      constexpr int kQueryTiles = decltype(query_tiles)::value;
+      constexpr int kTiles = kWarpgroups * kQueryTiles;
+      for (int options : {0, kPlainStage}) {
+        const std::pair<std::size_t, double> result =
+            CheckStagedGeometry<kWarpgroups, kQueryTiles>(
+                device_queries, device_k, device_out, kSourceTiles, options,
+                reference_tiles, scale);
+        note(
+            "attention-wgmma:staged_check warpgroups=%d query_tiles=%d "
+            "options=%d error=%.3e bad=%zu of %d status=%s\n",
+            kWarpgroups, kQueryTiles, options, result.second, result.first,
+            kTiles * static_cast<int>(kProductSlots),
+            result.second < 1e-6 ? "ok" : "failed");
+        // The key names the geometry and the staging path, because the loop
+        // runs once per pair and a repeated key would state the same field
+        // twice in one document.
+        const std::string prefix =
+            "staged_check:" +
+            std::string(options == kPlainStage ? "plain" : "async") +
+            ":warpgroups" + std::to_string(kWarpgroups) + ":query_tiles" +
+            std::to_string(kQueryTiles) + ":";
+        report.SetExtra(prefix + "error", result.second);
+        report.SetExtraInt(prefix + "bad",
+                           static_cast<long long>(result.first));
+        if (options == kPlainStage) {
+          staged_ok = staged_ok && result.second < 1e-6;
+        } else {
+          staged_ok = result.second < 1e-6;
         }
       }
-      const double staged_error = staged_worst / scale;
-      const double staged_mean = staged_sum / (kQueryTiles * kProductSlots);
-      note(
-          "attention-wgmma:staged_check query_tiles=%d options=%d error=%.3e "
-          "mean=%.3e bad=%zu worst_slot=%zu worst=%.4f expected=%.4f "
-          "status=%s\n",
-          kQueryTiles, options, staged_error, staged_mean / scale, staged_bad,
-          worst_slot, static_cast<double>(staged[worst_slot]),
-          static_cast<double>(resident[worst_slot]),
-          staged_error < 1e-6 ? "ok" : "failed");
-      // The key names the staging path, because the loop runs twice and a
-      // repeated key would state the same field twice in one document.
-      const std::string prefix = std::string("staged_check:") +
-                                 (options == kPlainStage ? "plain" : "async") +
-                                 ":";
-      report.SetExtra(prefix + "error", staged_error);
-      report.SetExtra(prefix + "mean", staged_mean / scale);
-      report.SetExtraInt(prefix + "bad", static_cast<long long>(staged_bad));
-      if (options == kPlainStage) {
-        staged_ok = staged_ok && staged_error < 1e-6;
-      } else {
-        staged_ok = staged_error < 1e-6;
+    };
+    for (int warpgroups = 1; warpgroups <= kMaxWarpgroups; ++warpgroups) {
+      for (int query_tiles = 1; query_tiles <= kMaxQueryTiles; ++query_tiles) {
+        VisitGeometry(warpgroups, query_tiles, check_geometry);
       }
     }
     ok = ok && staged_ok;
@@ -1461,6 +1881,122 @@ int main(int argc, char** argv) {
     }
   }  // options.h1(): the map and form sections
 
+  // --- The flash tile
+  // The check runs before a rate is timed. One block, one warpgroup, one query
+  // tile, one key tile, and one value tile, compared with the host reference of
+  // the family one element at a time: a wrong probability operand, a wrong
+  // transposed value staging, a wrong row reduction, or a wrong rescale all
+  // fail here instead of measuring. This is also the first end-to-end test of
+  // the register operand, whose element order the H1 rows measured with one-hot
+  // elements and never carried a full product through.
+  if (options.flash()) {
+    SetFlashSharedMemory<1>();
+    SetFlashSharedMemory<2>();
+
+    Random flash_random;
+    std::vector<nanochat::Bf16> flash_q(host_q.size());
+    std::vector<nanochat::Bf16> flash_k(host_k.size());
+    std::vector<nanochat::Bf16> flash_v(host_v.size());
+    for (nanochat::Bf16& value : flash_q) {
+      value = nanochat::Bf16FromFloat(flash_random.Next());
+    }
+    for (nanochat::Bf16& value : flash_k) {
+      value = nanochat::Bf16FromFloat(flash_random.Next());
+    }
+    for (nanochat::Bf16& value : flash_v) {
+      value = nanochat::Bf16FromFloat(flash_random.Next());
+    }
+    // The reference reads the operands the device reads, so it is built from
+    // the bf16 values and not from the draws that produced them.
+    std::vector<float> reference_q(flash_q.size());
+    std::vector<float> reference_k(flash_k.size());
+    std::vector<float> reference_v(flash_v.size());
+    for (std::size_t i = 0; i < flash_q.size(); ++i) {
+      reference_q[i] = nanochat::Bf16ToFloat(flash_q[i]);
+    }
+    for (std::size_t i = 0; i < flash_k.size(); ++i) {
+      reference_k[i] = nanochat::Bf16ToFloat(flash_k[i]);
+      reference_v[i] = nanochat::Bf16ToFloat(flash_v[i]);
+    }
+    // One head, one batch, and every key visible: the check states the softmax
+    // and the two products, and the mask is a phase of its own.
+    nanochat::AttentionParams params;
+    params.batch = 1;
+    params.seq = kAtomM;
+    params.num_heads = 1;
+    params.num_kv_heads = 1;
+    params.head_dim = kDim;
+    params.causal = false;
+    params.window_right = -1;
+    params.kv_len = kAtomN;
+    params.scale = kFlashScale;
+    std::vector<float> reference_stats;
+    const std::vector<float> reference =
+        nanochat::dev::seqref::AttentionForward(
+            params, reference_q, reference_k, reference_v, &reference_stats);
+
+    Upload(flash_q, device_q);
+    Upload(flash_k, device_k);
+    Upload(flash_v, device_value);
+    const std::vector<float> slots = RunResidentFlash<1>(
+        device_q, device_k, device_value, device_out, device_row_sums);
+    const std::vector<float> row_sums = ReadBack(device_row_sums, kAtomM);
+
+    // One element at a time, as the form check above does. The kernel leaves
+    // its output unnormalised, so the division by the row sum is the caller's
+    // and it is what makes a wrong maximum or a wrong sum visible.
+    double scale_seen = 0.0;
+    for (float value : reference) {
+      scale_seen = std::max(scale_seen, std::fabs(static_cast<double>(value)));
+    }
+    double worst = 0.0;
+    std::size_t bad = 0;
+    for (int lane = 0; lane < kWarpgroupThreads; ++lane) {
+      for (int index = 0; index < kRegisters; ++index) {
+        const int row = SlotRow(lane, index);
+        const int column = SlotColumn(lane, index);
+        const double expected =
+            reference[static_cast<std::size_t>(row) * kDim + column];
+        const double sum = row_sums[static_cast<std::size_t>(row)];
+        const double actual =
+            sum > 0.0 ? static_cast<double>(
+                            slots[static_cast<std::size_t>(lane) * kRegisters +
+                                  index]) /
+                            sum
+                      : 0.0;
+        const double difference = std::fabs(actual - expected);
+        if (difference > 3e-2 * scale_seen) ++bad;
+        worst = std::max(worst, difference);
+      }
+    }
+    // The row sums against the statistics of the reference, which states the
+    // same quantity in natural units.
+    double sum_worst = 0.0;
+    for (int row = 0; row < kAtomM; ++row) {
+      const double expected =
+          reference_stats[static_cast<std::size_t>(row) * 2 + 1];
+      const double actual = row_sums[static_cast<std::size_t>(row)];
+      if (expected > 0.0) {
+        sum_worst =
+            std::max(sum_worst, std::fabs(actual - expected) / expected);
+      }
+    }
+    const double flash_error = scale_seen > 0.0 ? worst / scale_seen : 0.0;
+    const bool flash_ok = flash_error < 3e-2 && sum_worst < 3e-2;
+    note(
+        "attention-flash:reference_check error=%.3e sum_error=%.3e "
+        "scale=%.3f bad=%zu of %d status=%s\n",
+        flash_error, sum_worst, scale_seen, bad, kAtomM * kDim,
+        flash_ok ? "ok" : "failed");
+    report.SetExtra("flash_check:error", flash_error);
+    report.SetExtra("flash_check:sum_error", sum_worst);
+    report.SetExtra("flash_check:scale", scale_seen);
+    report.SetExtraInt("flash_check:bad", static_cast<long long>(bad));
+    report.SetExtraInt("flash_check:elements", kAtomM * kDim);
+    report.SetExtraText("flash_check:status", flash_ok ? "ok" : "failed");
+    ok = ok && flash_ok;
+  }
+
   // --- The rate -------------------------------------------------------------
   // The score product of the whole tile, from a resident tile, in four rows.
   //
@@ -1490,13 +2026,13 @@ int main(int argc, char** argv) {
   // The identity of one row: the family, the phase of Part 8 or Part 3, and the
   // shape the row names. `AddTiming` writes the minimum row and its median
   // companion from it, so no row states a statistic of its own.
-  auto make_row = [&](const char* name, const std::string& shape, bool h1,
-                      int occupancy = 0) {
+  auto make_row = [&](const char* name, const std::string& shape,
+                      const char* phase, int occupancy = 0) {
     nanochat::BenchRow row;
     row.name = name;
     row.shape = shape;
     row.family = "wgmma";
-    row.phase = h1 ? "h1" : "phase0";
+    row.phase = phase;
     row.occupancy = occupancy;
     return row;
   };
@@ -1553,7 +2089,8 @@ int main(int argc, char** argv) {
                                 blocks, device_q, device_k, device_out, passes);
                           });
     const double rate = add_rate_row(
-        make_row(name, shape, atoms == kAtoms, occupancy), timing, flops);
+        make_row(name, shape, atoms == kAtoms ? "h1" : "phase0", occupancy),
+        timing, flops);
     const double share = sm_share(flops, timing.min_ms);
     report.SetExtra(
         name + std::string(":blocks") + std::to_string(blocks) + ":sm_share",
@@ -1575,92 +2112,131 @@ int main(int argc, char** argv) {
     // key tiles is 16 MiB and stays in the second-level cache, and 2048 is 64
     // MiB and does not. `copy_order` carries the order of the bank-conflict
     // note on `StageCopy`, so the two rows of a pair differ in the order alone.
+    // The ladder over the warpgroups of a block and the query tiles of each is
+    // the arithmetic that one staged byte buys, which is the whole of the
+    // rate's account.
     const int product_tiles = 4096;
     const int copy_tiles = 8192;
     // The opt-in shared-memory request of each instantiation this section
     // launches, stated once here so no timed window charges a driver call.
-    SetStagedSharedMemory<1, true>();
-    SetStagedSharedMemory<2, true>();
-    SetStagedSharedMemory<kQueryTiles, false, 2>();
-    SetStagedSharedMemory<kQueryTiles, false, kStages>();
-    SetStagedSharedMemory<kQueryTiles, false, 5>();
-    for (int copy_order : {0, kRowFast}) {
+    SetStagedSharedMemory<1, 1, true>();
+    SetStagedSharedMemory<1, 2, true>();
+    SetStagedSharedMemory<1, 3, true>();
+    SetStagedSharedMemory<2, 1, true>();
+    SetStagedSharedMemory<2, 2, true>();
+    SetStagedSharedMemory<2, 3, true>();
+    SetStagedSharedMemory<1, 1, false>();
+    SetStagedSharedMemory<2, 1, false>();
+    SetStagedSharedMemory<1, kMaxQueryTiles, false>();
+    SetStagedSharedMemory<1, kMaxQueryTiles, false, 2>();
+    SetStagedSharedMemory<1, kMaxQueryTiles, false, 5>();
+
+    // One timed product row of one geometry. The work is the score product of
+    // every query tile of every warpgroup over every staged key tile, so the
+    // rate and the arithmetic per staged byte cannot disagree.
+    auto time_geometry = [&](auto warpgroups, auto query_tiles) {
+      constexpr int kWarpgroups = decltype(warpgroups)::value;
+      constexpr int kQueryTiles = decltype(query_tiles)::value;
       for (int window : {512, kSourceTiles}) {
-        for (int query_tiles = 1; query_tiles <= kQueryTiles; ++query_tiles) {
-          const nanochat::dev::Timing timing =
-              query_tiles == 1
-                  ? harness.Time([&] {
-                      LaunchStaged<1, true>(sm_count, product_tiles, window,
-                                            device_queries, device_k,
-                                            device_out, copy_order);
-                    })
-                  : harness.Time([&] {
-                      LaunchStaged<2, true>(sm_count, product_tiles, window,
-                                            device_queries, device_k,
-                                            device_out, copy_order);
-                    });
+        for (int copy_order : {0, kRowFast}) {
+          const nanochat::dev::Timing timing = harness.Time([&] {
+            LaunchStaged<kWarpgroups, kQueryTiles, true>(
+                sm_count, product_tiles, window, device_queries, device_k,
+                device_out, copy_order);
+          });
           const double flops = 2.0 * kAtomM * kAtomN * kDim *
                                static_cast<double>(product_tiles) *
-                               static_cast<double>(query_tiles) *
+                               static_cast<double>(kWarpgroups) *
+                               static_cast<double>(kQueryTiles) *
                                static_cast<double>(sm_count);
           const std::string shape =
-              "query_tiles=" + std::to_string(query_tiles) +
+              "warpgroups=" + std::to_string(kWarpgroups) +
+              " query_tiles=" + std::to_string(kQueryTiles) +
               " window=" + std::to_string(window) +
               " copy_order=" + std::to_string(copy_order) +
               " blocks=" + std::to_string(sm_count) +
               " tiles=" + std::to_string(product_tiles);
           const double rate = add_rate_row(
-              make_row("attention-wgmma:staged", shape, true), timing, flops);
-          note("attention-wgmma:staged %s min=%.3f ms tflops=%.1f\n",
-               shape.c_str(), timing.min_ms, rate / 1e12);
+              make_row("attention-wgmma:staged", shape, "h1"), timing, flops);
+          // The arithmetic one staged byte buys, stated beside the rate it
+          // earns, so a reader divides nothing by hand.
+          report.SetExtra("staged:" + shape + ":flop_per_staged_byte",
+                          64.0 * static_cast<double>(kWarpgroups) *
+                              static_cast<double>(kQueryTiles));
+          note(
+              "attention-wgmma:staged %s min=%.3f ms tflops=%.1f "
+              "flop_per_staged_byte=%.0f\n",
+              shape.c_str(), timing.min_ms, rate / 1e12,
+              64.0 * static_cast<double>(kWarpgroups) *
+                  static_cast<double>(kQueryTiles));
         }
       }
-      for (int window : {512, kSourceTiles}) {
-        for (int blocks : {1, sm_count}) {
-          const nanochat::dev::Timing timing = harness.Time([&] {
-            LaunchStaged<2, false>(blocks, copy_tiles, window, device_queries,
-                                   device_k, device_out, copy_order);
-          });
-          const double bytes = static_cast<double>(kKeyBytes) *
-                               static_cast<double>(copy_tiles) *
-                               static_cast<double>(blocks);
-          const double bandwidth = bytes / (timing.min_ms * 1e-3);
-          const std::string shape =
-              "window=" + std::to_string(window) +
-              " copy_order=" + std::to_string(copy_order) +
-              " blocks=" + std::to_string(blocks) +
-              " tiles=" + std::to_string(copy_tiles);
-          // A copy reads and writes no operand of the product, so the row
-          // states no FLOP and no rate. The byte rate it reached is the one
-          // number beside it, and the table prints `0.0` in the rate column and
-          // `-` in the two share columns.
-          add_rate_row(make_row("attention-wgmma:copies", shape, true), timing,
-                       /*flops=*/0.0);
-          report.SetExtra("copies:" + shape + ":tbps", bandwidth / 1e12);
-          note("attention-wgmma:copies %s min=%.3f ms tbps=%.2f\n",
-               shape.c_str(), timing.min_ms, bandwidth / 1e12);
+    };
+    for (int warpgroups = 1; warpgroups <= kMaxWarpgroups; ++warpgroups) {
+      for (int query_tiles = 1; query_tiles <= kMaxQueryTiles; ++query_tiles) {
+        VisitGeometry(warpgroups, query_tiles, time_geometry);
+      }
+    }
+
+    // The copies alone, at the same thread counts the product rows run at, so a
+    // reader compares the cap of the path with the rate of the products. The
+    // copy row stages one query tile, because a copy reads no query tile.
+    auto time_copies = [&](auto warpgroups, auto) {
+      constexpr int kWarpgroups = decltype(warpgroups)::value;
+      for (int copy_order : {0, kRowFast}) {
+        for (int window : {512, kSourceTiles}) {
+          for (int blocks : {1, sm_count}) {
+            const nanochat::dev::Timing timing = harness.Time([&] {
+              LaunchStaged<kWarpgroups, 1, false>(blocks, copy_tiles, window,
+                                                  device_queries, device_k,
+                                                  device_out, copy_order);
+            });
+            const double bytes = static_cast<double>(kKeyBytes) *
+                                 static_cast<double>(copy_tiles) *
+                                 static_cast<double>(blocks);
+            const double bandwidth = bytes / (timing.min_ms * 1e-3);
+            const std::string shape =
+                "warpgroups=" + std::to_string(kWarpgroups) +
+                " window=" + std::to_string(window) +
+                " copy_order=" + std::to_string(copy_order) +
+                " blocks=" + std::to_string(blocks) +
+                " tiles=" + std::to_string(copy_tiles);
+            // A copy reads and writes no operand of the product, so the row
+            // states no FLOP and no rate. The byte rate it reached is the one
+            // number beside it, and the table prints `0.0` in the rate column
+            // and `-` in the two share columns.
+            add_rate_row(make_row("attention-wgmma:copies", shape, "h1"),
+                         timing, /*flops=*/0.0);
+            report.SetExtra("copies:" + shape + ":tbps", bandwidth / 1e12);
+            note("attention-wgmma:copies %s min=%.3f ms tbps=%.2f\n",
+                 shape.c_str(), timing.min_ms, bandwidth / 1e12);
+          }
         }
       }
+    };
+    for (int warpgroups = 1; warpgroups <= kMaxWarpgroups; ++warpgroups) {
+      VisitGeometry(warpgroups, 1, time_copies);
     }
 
     // The depth of the ring sets how many copy groups one block keeps in
     // flight, and the copies are the limit of a staged row. The deepest ring
-    // the 227 KiB opt-in limit allows is five key tiles beside two query tiles.
-    for (int window : {kSourceTiles}) {
+    // the 227 KiB opt-in limit allows is five key tiles beside three query
+    // tiles, which is the deepest geometry without a second warpgroup.
+    {
       const nanochat::dev::Timing two_stages = harness.Time([&] {
-        LaunchStaged<kQueryTiles, false, 2>(sm_count, copy_tiles, window,
-                                            device_queries, device_k,
-                                            device_out, 0);
+        LaunchStaged<1, kMaxQueryTiles, false, 2>(sm_count, copy_tiles,
+                                                  kSourceTiles, device_queries,
+                                                  device_k, device_out, 0);
       });
       const nanochat::dev::Timing four_stages = harness.Time([&] {
-        LaunchStaged<kQueryTiles, false, kStages>(sm_count, copy_tiles, window,
-                                                  device_queries, device_k,
-                                                  device_out, 0);
+        LaunchStaged<1, kMaxQueryTiles, false, kStages>(
+            sm_count, copy_tiles, kSourceTiles, device_queries, device_k,
+            device_out, 0);
       });
       const nanochat::dev::Timing five_stages = harness.Time([&] {
-        LaunchStaged<kQueryTiles, false, 5>(sm_count, copy_tiles, window,
-                                            device_queries, device_k,
-                                            device_out, 0);
+        LaunchStaged<1, kMaxQueryTiles, false, 5>(sm_count, copy_tiles,
+                                                  kSourceTiles, device_queries,
+                                                  device_k, device_out, 0);
       });
       for (const std::pair<int, const nanochat::dev::Timing*>& depth :
            {std::pair<int, const nanochat::dev::Timing*>{2, &two_stages},
@@ -1670,39 +2246,79 @@ int main(int argc, char** argv) {
                              static_cast<double>(copy_tiles) *
                              static_cast<double>(sm_count);
         const double bandwidth = bytes / (depth.second->min_ms * 1e-3);
-        const std::string shape = "window=" + std::to_string(window) +
-                                  " blocks=" + std::to_string(sm_count) +
-                                  " stages=" + std::to_string(depth.first) +
-                                  " tiles=" + std::to_string(copy_tiles);
-        add_rate_row(make_row("attention-wgmma:copy_depth", shape, true),
+        const std::string shape =
+            "warpgroups=1 window=" + std::to_string(kSourceTiles) +
+            " blocks=" + std::to_string(sm_count) +
+            " stages=" + std::to_string(depth.first) +
+            " tiles=" + std::to_string(copy_tiles);
+        add_rate_row(make_row("attention-wgmma:copy_depth", shape, "h1"),
                      *depth.second, /*flops=*/0.0);
-        report.SetExtra(
-            "copy_depth:stages" + std::to_string(depth.first) + ":tbps",
-            bandwidth / 1e12);
+        report.SetExtra("copy_depth:warpgroups1:stages" +
+                            std::to_string(depth.first) + ":tbps",
+                        bandwidth / 1e12);
         note("attention-wgmma:copy_depth %s min=%.3f ms tbps=%.2f\n",
              shape.c_str(), depth.second->min_ms, bandwidth / 1e12);
       }
     }
   }  // options.h1(): the staged rows
 
+  // The flash rows: the whole tile from a resident operand set, so a row prices
+  // the base-two softmax, the second product, and the chain between them
+  // against the score-only ceiling of `attention-wgmma:resident`.
+  if (options.flash()) {
+    const int flash_tiles = 5000;
+    auto add_flash_resident = [&](int blocks) {
+      const std::string shape = "blocks=" + std::to_string(blocks) +
+                                " tiles=" + std::to_string(flash_tiles) +
+                                " warpgroups=1 atoms=8+8";
+      const double flops = 2.0 * FlopsPerPass(kAtoms) *
+                           static_cast<double>(flash_tiles) *
+                           static_cast<double>(blocks);
+      const nanochat::dev::Timing timing = harness.Time([&] {
+        LaunchResidentFlash<1>(blocks, device_queries, device_k, device_value,
+                               device_out, /*device_row_sums=*/nullptr,
+                               flash_tiles, kFlashScale);
+      });
+      const double rate =
+          add_rate_row(make_row("attention-flash:resident", shape, "flash", 1),
+                       timing, flops);
+      const double share = sm_share(flops, timing.min_ms);
+      report.SetExtra(std::string("flash_resident:blocks") +
+                          std::to_string(blocks) + ":sm_share",
+                      share);
+      note(
+          "attention-flash:resident %s min=%.3f ms median=%.3f ms "
+          "tflops=%.1f sm_share=%.3f\n",
+          shape.c_str(), timing.min_ms, timing.median_ms, rate / 1e12, share);
+    };
+    add_flash_resident(1);
+    add_flash_resident(sm_count);
+  }
+
+  constexpr int kDeepestStagedBytes =
+      StagedBytes(kMaxWarpgroups, kMaxQueryTiles, kStages);
   note(
       "precision=%s smem_bytes=%d lbo=%d sbo=%d stages=%d "
       "query_atom_step=%d key_atom_step=%d\n",
-      report.precision().c_str(), kStagedBytes, kLboBytes, kSboBytes, kStages,
-      AtomStep(kAtomM), AtomStep(kAtomN));
-  report.SetExtraInt("smem:staged_bytes", kStagedBytes);
+      report.precision().c_str(), kDeepestStagedBytes, kLboBytes, kSboBytes,
+      kStages, AtomStep(kAtomM), AtomStep(kAtomN));
+  report.SetExtraInt("smem:staged_bytes", kDeepestStagedBytes);
   report.SetExtraInt("smem:leading_byte_offset", kLboBytes);
   report.SetExtraInt("smem:stride_byte_offset", kSboBytes);
   report.SetExtraInt("smem:key_stages", kStages);
   report.SetExtraInt("smem:query_atom_step", AtomStep(kAtomM));
   report.SetExtraInt("smem:key_atom_step", AtomStep(kAtomN));
+  report.SetExtraInt("smem:query_bytes", kQueryBytes);
+  report.SetExtraInt("smem:key_bytes", kKeyBytes);
   report.SetExtraText("status", ok ? "ok" : "failed");
   note("attention-wgmma:status %s\n", ok ? "ok" : "failed");
 
   cudaFree(device_q);
   cudaFree(device_queries);
   cudaFree(device_k);
+  cudaFree(device_value);
   cudaFree(device_out);
+  cudaFree(device_row_sums);
   report.Print(options.bench);
   return ok ? 0 : 1;
 }
