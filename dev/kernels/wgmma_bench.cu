@@ -51,10 +51,31 @@
 // which is why neither divides into the other.
 //
 // **The report.** Every timed row goes through `BenchReport`, so the program
-// states one `nanochat.bench.v3` document with `--json`, and `mfu` on each row
-// is that row's share of the card's declared bf16 peak. The lines this program
+// states one `nanochat.bench.v3` document with `--json`. The lines this program
 // used to print are diagnostics: they stay on stdout for a human run and are
 // dropped under `--json`, so the document stays pipeable.
+//
+// **The metric.** The rate is the necessary work over the elapsed time, in
+// GFLOP/s, and `mfu` is that rate over the card's declared bf16 peak. That pair
+// is the metric of every row: no row divides by a peak by hand, and the report
+// states the denominator it used. `AddTiming` of `bench_protocol.h` writes two
+// rows from one measurement, the minimum under the row's own name and the
+// median beside it, so a Phase 0 or H1 gate reads the statistic it named.
+//
+// **The protocol.** The timing is the one of
+// `backends/cuda/kernels/testing/bench_protocol.h`, which
+// `backends/cuda/gemm/gemm_benchmark.cc` also uses, so a row of this program
+// and a row of that one state the same statistic. One call is one launch.
+// `--iters` calls fill one window and `--rounds` windows give the samples.
+// A flush of the second-level cache runs before every timed call, because a
+// staged window of 512 key tiles is 16 MiB and stays warm across calls. The
+// flush cost is measured once and removed from the window.
+//
+// The two numbers the card's peak does not state stay beside their row as
+// extras. The per-SM share is the row's own rate over the peak the report
+// states, divided by the multiprocessor count, so it cannot disagree with the
+// row it sits beside. A copy row issues no arithmetic, so it states no rate and
+// the bytes per second is its extra.
 //
 // The target states `archs = ["sm_90a"]` for itself, so no command line carries
 // a flag, and the tripwire below refuses a build that names another
@@ -77,7 +98,9 @@
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
 
+#include "backends/cuda/kernels/testing/bench_protocol.h"
 #include "nanochat/bench.h"
+#include "nanochat/device_profile.h"
 #include "nanochat/sandbox.h"
 #include "nanochat/tensor.h"
 
@@ -152,8 +175,10 @@ static_assert(kAtoms * AtomStep(kAtomM) * 16 == kQueryBytes,
 static_assert(kAtoms * AtomStep(kAtomN) * 16 == kKeyBytes,
               "the key tile must fill its interleaved form");
 
-//: The reference peak of `backends/cuda/caps.json` for the h100 entry.
-constexpr double kPeakFlops = 989e12;
+//: The reference peak of `backends/cuda/caps.json` for the h100 entry. It is
+//: the fallback denominator of a card the table does not name, and no share is
+//: computed from it: every share divides by the peak the report states.
+constexpr const char* kReferenceDevice = "h100";
 
 //: The necessary work of one score product over `atoms` atoms of sixteen k
 //: steps. One function, so a row cannot state a count that disagrees with the
@@ -722,59 +747,39 @@ void SetResidentSharedMemory() {
                        kQueryBytes + kKeyBytes);
 }
 
-// One timed resident row: `blocks` warpgroups, `Atoms` atoms per pass, one
-// warm-up launch and one measured launch. Returns the elapsed milliseconds and
-// nothing else, because the caller owns the row and the report owns the table.
+// One launch of the resident kernel: `blocks` warpgroups, `Atoms` atoms per
+// pass, and `steps` passes of the loop inside the kernel. The protocol around
+// it owns the warm-up, the rounds, and the statistic, so this function states
+// the call and nothing else.
 template <int Atoms>
-double TimeResident(int blocks, const Bf16* device_q, const Bf16* device_k,
-                    float* device_out, int passes) {
-  cudaEvent_t start{};
-  cudaEvent_t stop{};
-  cudaEventCreate(&start);
-  cudaEventCreate(&stop);
+void LaunchResident(int blocks, const Bf16* device_q, const Bf16* device_k,
+                    float* device_out, int steps) {
   ResidentKernel<Atoms><<<blocks, kWarpgroupThreads, kQueryBytes + kKeyBytes>>>(
-      device_q, device_k, device_out, 8);
-  cudaDeviceSynchronize();
-  cudaEventRecord(start);
-  ResidentKernel<Atoms><<<blocks, kWarpgroupThreads, kQueryBytes + kKeyBytes>>>(
-      device_q, device_k, device_out, passes);
-  cudaEventRecord(stop);
-  cudaEventSynchronize(stop);
-  float milliseconds = 0.0f;
-  cudaEventElapsedTime(&milliseconds, start, stop);
-  cudaEventDestroy(start);
-  cudaEventDestroy(stop);
-  return static_cast<double>(milliseconds);
+      device_q, device_k, device_out, steps);
 }
 
+// The one opt-in dynamic shared-memory request of a staged instantiation. A
+// templated kernel has no single function address, so the attribute is set once
+// per instantiation and outside any timed window.
 template <int QueryTiles, bool kProducts, int Stages = kStages>
-float TimeStaged(int blocks, int tiles, int source_tiles, const Bf16* device_q,
-                 const Bf16* device_k, float* device_out, int options = 0) {
+void SetStagedSharedMemory() {
   constexpr int kShared = QueryTiles * kQueryBytes + Stages * kKeyBytes;
   static_assert(kShared <= kSmemCeiling,
                 "the ring must fit one block per multiprocessor");
   cudaFuncSetAttribute(reinterpret_cast<const void*>(
                            StagedKernel<QueryTiles, kProducts, Stages>),
                        cudaFuncAttributeMaxDynamicSharedMemorySize, kShared);
-  StagedKernel<QueryTiles, kProducts, Stages>
-      <<<blocks, kWarpgroupThreads, kShared>>>(device_q, device_k, source_tiles,
-                                               device_out, 8, options);
-  cudaDeviceSynchronize();
-  cudaEvent_t start{};
-  cudaEvent_t stop{};
-  cudaEventCreate(&start);
-  cudaEventCreate(&stop);
-  cudaEventRecord(start);
+}
+
+// One launch of the staged kernel: `tiles` steps of the ring, over `blocks`
+// blocks, with the copy order of `options`.
+template <int QueryTiles, bool kProducts, int Stages = kStages>
+void LaunchStaged(int blocks, int tiles, int source_tiles, const Bf16* device_q,
+                  const Bf16* device_k, float* device_out, int options = 0) {
+  constexpr int kShared = QueryTiles * kQueryBytes + Stages * kKeyBytes;
   StagedKernel<QueryTiles, kProducts, Stages>
       <<<blocks, kWarpgroupThreads, kShared>>>(device_q, device_k, source_tiles,
                                                device_out, tiles, options);
-  cudaEventRecord(stop);
-  cudaEventSynchronize(stop);
-  float milliseconds = 0.0f;
-  cudaEventElapsedTime(&milliseconds, start, stop);
-  cudaEventDestroy(start);
-  cudaEventDestroy(stop);
-  return milliseconds;
 }
 
 void Upload(const std::vector<nanochat::Bf16>& source, Bf16* device) {
@@ -821,6 +826,8 @@ enum class RowSet { kAll, kPhase0, kH1 };
 struct ProbeOptions {
   nanochat::BenchOptions bench;
   RowSet rows = RowSet::kAll;
+  // Flushes the second-level cache before every timed call.
+  bool flush = true;
 
   bool phase0() const { return rows != RowSet::kH1; }
   bool h1() const { return rows != RowSet::kPhase0; }
@@ -832,7 +839,8 @@ struct ProbeOptions {
 
 void PrintUsage(const char* program) {
   std::fprintf(stderr,
-               "usage: %s [--rows phase0|h1|all] [--json] [--out PATH]\n",
+               "usage: %s [--rows phase0|h1|all] [--iters N] [--rounds N] "
+               "[--warmup N] [--no-flush] [--json] [--out PATH]\n",
                program);
 }
 
@@ -854,6 +862,14 @@ ProbeOptions ParseOptions(int argc, char** argv) {
         PrintUsage(argv[0]);
         std::exit(2);
       }
+    } else if (argument == "--no-flush") {
+      options.flush = false;
+    } else if (argument == "--iters" && i + 1 < argc) {
+      options.bench.iters = std::atoi(argv[++i]);
+    } else if (argument == "--rounds" && i + 1 < argc) {
+      options.bench.rounds = std::atoi(argv[++i]);
+    } else if (argument == "--warmup" && i + 1 < argc) {
+      options.bench.warmup = std::atoi(argv[++i]);
     } else if (argument == "--out" && i + 1 < argc) {
       options.bench.out = argv[++i];
     } else {
@@ -878,7 +894,10 @@ int main(int argc, char** argv) {
   // silently disappear.
   nanochat::BenchReport report;
   report.SetPrecision(nanochat::BuildPrecision::kBf16);
-  report.SetExtraText("rows", options.name());
+  // The extra names the selection, and it must not be called `rows`: the
+  // document's own `rows` array closes before the extras, so a second key of
+  // that name replaces the measurements with a string for every strict reader.
+  report.SetExtraText("rows_selected", options.name());
   // A run that names no H1 row cannot have run the form checks, so the status
   // alone would overstate what this document covers.
   report.SetExtraText("checks_run", options.h1() ? "h1" : "none");
@@ -895,7 +914,14 @@ int main(int argc, char** argv) {
   const int sm_count = properties.multiProcessorCount;
   if (!(report.UseDevicePeak(properties.name, nanochat::BuildPrecision::kBf16) >
         0.0)) {
-    report.SetPeakFlops(kPeakFlops);
+    // A card the table does not name takes the declaration of the reference
+    // entry the baselines cite, so the share of every row stays a share of a
+    // declared rate and this program holds no rate of its own
+    // (docs/precision.md).
+    report.SetPeakFlops(nanochat::PeakFlopsFor(
+        kReferenceDevice, nanochat::BuildPrecision::kBf16));
+    note("the table names no rate for this card; %s stands in\n",
+         kReferenceDevice);
   }
   note("card: %s, %d SMs, %d kHz clock\n", properties.name, sm_count,
        properties.clockRate / 1000);
@@ -1444,25 +1470,57 @@ int main(int argc, char** argv) {
   // and the row names do not move with the selection.
   const int passes = 20000;
 
-  // One timed row. The rate is the necessary work over the elapsed time, and
-  // the report turns it into `mfu` from the card's declared peak, so nothing
-  // here divides by a peak by hand.
-  auto add_rate_row = [&](const char* name, const std::string& shape,
-                          double milliseconds, double flops, bool h1,
-                          int occupancy = 0) {
+  // The protocol of `bench_protocol.h`: one call is one launch, `--iters` calls
+  // fill one window, `--rounds` windows give the samples, and a flush of the
+  // second-level cache runs before every timed call. The flush cost is measured
+  // once and removed, so a window states the call and not the flush.
+  nanochat::dev::Harness harness(options.bench, options.flush);
+  if (options.flush && !harness.Init()) {
+    note("the flush buffer did not fit; the rows run without a flush\n");
+  }
+  report.SetExtraInt("flush_bytes",
+                     static_cast<long long>(harness.flush_bytes()));
+  report.SetExtra("flush_ms", harness.flush_ms());
+  report.SetExtraInt("iters", options.bench.iters);
+  report.SetExtraInt("rounds", options.bench.rounds);
+  note("flush %zu B, %.4f ms a call; %d calls a window, %d windows\n",
+       harness.flush_bytes(), harness.flush_ms(), options.bench.iters,
+       options.bench.rounds);
+
+  // The identity of one row: the family, the phase of Part 8 or Part 3, and the
+  // shape the row names. `AddTiming` writes the minimum row and its median
+  // companion from it, so no row states a statistic of its own.
+  auto make_row = [&](const char* name, const std::string& shape, bool h1,
+                      int occupancy = 0) {
     nanochat::BenchRow row;
     row.name = name;
     row.shape = shape;
-    row.ms = milliseconds;
-    row.gflops = flops > 0.0 && milliseconds > 0.0
-                     ? flops / (milliseconds * 1e-3) * 1e-9
-                     : 0.0;
-    row.occupancy = occupancy;
     row.family = "wgmma";
     row.phase = h1 ? "h1" : "phase0";
-    report.Add(row);
-    return milliseconds > 0.0 ? flops / (milliseconds * 1e-3) : 0.0;
+    row.occupancy = occupancy;
+    return row;
   };
+
+  // One timed row: the two rows of `AddTiming`, and the rate the diagnostics
+  // print. The rate is the necessary work over the elapsed time, and the report
+  // turns it into the share of the card's peak, so nothing here divides by a
+  // peak by hand.
+  auto add_rate_row = [&](const nanochat::BenchRow& base,
+                          const nanochat::dev::Timing& timing, double flops) {
+    nanochat::dev::AddTiming(&report, base, timing, flops);
+    return nanochat::dev::Gflops(flops, timing.min_ms);
+  };
+
+  // The per-SM share of the card peak: the row's own rate over the peak the
+  // report states. It is the report's `mfu` times the multiprocessor count, so
+  // the extra cannot disagree with the row beside it.
+  auto sm_share = [&](double flops, double milliseconds) {
+    const double peak = report.peak_flops();
+    if (!(peak > 0.0) || sm_count <= 0) return 0.0;
+    return nanochat::dev::Gflops(flops, milliseconds) * 1e9 /
+           (peak / static_cast<double>(sm_count));
+  };
+
   std::fill(host_q.begin(), host_q.end(), nanochat::Bf16FromFloat(0.5f));
   std::fill(host_k.begin(), host_k.end(), nanochat::Bf16FromFloat(0.5f));
   Upload(host_q, device_q);
@@ -1485,19 +1543,23 @@ int main(int argc, char** argv) {
                               " atoms=" + std::to_string(atoms);
     const double flops =
         FlopsPerPass(atoms) * static_cast<double>(passes) * blocks;
-    const double milliseconds =
-        atoms == kAtoms ? TimeResident<kAtoms>(blocks, device_q, device_k,
-                                               device_out, passes)
-                        : TimeResident<kHalfAtoms>(blocks, device_q, device_k,
-                                                   device_out, passes);
-    const double rate = add_rate_row(name, shape, milliseconds, flops,
-                                     atoms == kAtoms, occupancy);
-    const double share = rate / (kPeakFlops / static_cast<double>(sm_count));
+    const nanochat::dev::Timing timing =
+        atoms == kAtoms ? harness.Time([&] {
+          LaunchResident<kAtoms>(blocks, device_q, device_k, device_out,
+                                 passes);
+        })
+                        : harness.Time([&] {
+                            LaunchResident<kHalfAtoms>(
+                                blocks, device_q, device_k, device_out, passes);
+                          });
+    const double rate = add_rate_row(
+        make_row(name, shape, atoms == kAtoms, occupancy), timing, flops);
+    const double share = sm_share(flops, timing.min_ms);
     report.SetExtra(
         name + std::string(":blocks") + std::to_string(blocks) + ":sm_share",
         share);
-    note("%s %s ms=%.3f tflops=%.1f sm_share=%.3f\n", name, shape.c_str(),
-         milliseconds, rate / 1e12, share);
+    note("%s %s min=%.3f ms median=%.3f ms tflops=%.1f sm_share=%.3f\n", name,
+         shape.c_str(), timing.min_ms, timing.median_ms, rate / 1e12, share);
   };
   if (options.h1()) {
     add_resident("attention-wgmma:resident", kAtoms, 1, 1);
@@ -1515,17 +1577,28 @@ int main(int argc, char** argv) {
     // note on `StageCopy`, so the two rows of a pair differ in the order alone.
     const int product_tiles = 4096;
     const int copy_tiles = 8192;
+    // The opt-in shared-memory request of each instantiation this section
+    // launches, stated once here so no timed window charges a driver call.
+    SetStagedSharedMemory<1, true>();
+    SetStagedSharedMemory<2, true>();
+    SetStagedSharedMemory<kQueryTiles, false, 2>();
+    SetStagedSharedMemory<kQueryTiles, false, kStages>();
+    SetStagedSharedMemory<kQueryTiles, false, 5>();
     for (int copy_order : {0, kRowFast}) {
       for (int window : {512, kSourceTiles}) {
         for (int query_tiles = 1; query_tiles <= kQueryTiles; ++query_tiles) {
-          const double milliseconds =
+          const nanochat::dev::Timing timing =
               query_tiles == 1
-                  ? TimeStaged<1, true>(sm_count, product_tiles, window,
-                                        device_queries, device_k, device_out,
-                                        copy_order)
-                  : TimeStaged<2, true>(sm_count, product_tiles, window,
-                                        device_queries, device_k, device_out,
-                                        copy_order);
+                  ? harness.Time([&] {
+                      LaunchStaged<1, true>(sm_count, product_tiles, window,
+                                            device_queries, device_k,
+                                            device_out, copy_order);
+                    })
+                  : harness.Time([&] {
+                      LaunchStaged<2, true>(sm_count, product_tiles, window,
+                                            device_queries, device_k,
+                                            device_out, copy_order);
+                    });
           const double flops = 2.0 * kAtomM * kAtomN * kDim *
                                static_cast<double>(product_tiles) *
                                static_cast<double>(query_tiles) *
@@ -1536,33 +1609,36 @@ int main(int argc, char** argv) {
               " copy_order=" + std::to_string(copy_order) +
               " blocks=" + std::to_string(sm_count) +
               " tiles=" + std::to_string(product_tiles);
-          const double rate = add_rate_row("attention-wgmma:staged", shape,
-                                           milliseconds, flops, true);
-          note("attention-wgmma:staged %s ms=%.3f tflops=%.1f\n", shape.c_str(),
-               milliseconds, rate / 1e12);
+          const double rate = add_rate_row(
+              make_row("attention-wgmma:staged", shape, true), timing, flops);
+          note("attention-wgmma:staged %s min=%.3f ms tflops=%.1f\n",
+               shape.c_str(), timing.min_ms, rate / 1e12);
         }
       }
       for (int window : {512, kSourceTiles}) {
         for (int blocks : {1, sm_count}) {
-          const double milliseconds =
-              TimeStaged<2, false>(blocks, copy_tiles, window, device_queries,
+          const nanochat::dev::Timing timing = harness.Time([&] {
+            LaunchStaged<2, false>(blocks, copy_tiles, window, device_queries,
                                    device_k, device_out, copy_order);
+          });
           const double bytes = static_cast<double>(kKeyBytes) *
                                static_cast<double>(copy_tiles) *
                                static_cast<double>(blocks);
-          const double bandwidth = bytes / (milliseconds * 1e-3);
+          const double bandwidth = bytes / (timing.min_ms * 1e-3);
           const std::string shape =
               "window=" + std::to_string(window) +
               " copy_order=" + std::to_string(copy_order) +
               " blocks=" + std::to_string(blocks) +
               " tiles=" + std::to_string(copy_tiles);
           // A copy reads and writes no operand of the product, so the row
-          // states no rate and the byte rate it reached is an extra beside it.
-          add_rate_row("attention-wgmma:copies", shape, milliseconds, 0.0,
-                       true);
+          // states no FLOP and no rate. The byte rate it reached is the one
+          // number beside it, and the table prints `0.0` in the rate column and
+          // `-` in the two share columns.
+          add_rate_row(make_row("attention-wgmma:copies", shape, true), timing,
+                       /*flops=*/0.0);
           report.SetExtra("copies:" + shape + ":tbps", bandwidth / 1e12);
-          note("attention-wgmma:copies %s ms=%.3f tbps=%.2f\n", shape.c_str(),
-               milliseconds, bandwidth / 1e12);
+          note("attention-wgmma:copies %s min=%.3f ms tbps=%.2f\n",
+               shape.c_str(), timing.min_ms, bandwidth / 1e12);
         }
       }
     }
@@ -1571,35 +1647,40 @@ int main(int argc, char** argv) {
     // flight, and the copies are the limit of a staged row. The deepest ring
     // the 227 KiB opt-in limit allows is five key tiles beside two query tiles.
     for (int window : {kSourceTiles}) {
-      const float two_stages = TimeStaged<kQueryTiles, false, 2>(
-          sm_count, copy_tiles, window, device_queries, device_k, device_out,
-          0);
-      const float four_stages = TimeStaged<kQueryTiles, false, kStages>(
-          sm_count, copy_tiles, window, device_queries, device_k, device_out,
-          0);
-      const float five_stages = TimeStaged<kQueryTiles, false, 5>(
-          sm_count, copy_tiles, window, device_queries, device_k, device_out,
-          0);
-      for (const std::pair<int, float>& depth :
-           {std::pair<int, float>{2, two_stages},
-            std::pair<int, float>{kStages, four_stages},
-            std::pair<int, float>{5, five_stages}}) {
+      const nanochat::dev::Timing two_stages = harness.Time([&] {
+        LaunchStaged<kQueryTiles, false, 2>(sm_count, copy_tiles, window,
+                                            device_queries, device_k,
+                                            device_out, 0);
+      });
+      const nanochat::dev::Timing four_stages = harness.Time([&] {
+        LaunchStaged<kQueryTiles, false, kStages>(sm_count, copy_tiles, window,
+                                                  device_queries, device_k,
+                                                  device_out, 0);
+      });
+      const nanochat::dev::Timing five_stages = harness.Time([&] {
+        LaunchStaged<kQueryTiles, false, 5>(sm_count, copy_tiles, window,
+                                            device_queries, device_k,
+                                            device_out, 0);
+      });
+      for (const std::pair<int, const nanochat::dev::Timing*>& depth :
+           {std::pair<int, const nanochat::dev::Timing*>{2, &two_stages},
+            std::pair<int, const nanochat::dev::Timing*>{kStages, &four_stages},
+            std::pair<int, const nanochat::dev::Timing*>{5, &five_stages}}) {
         const double bytes = static_cast<double>(kKeyBytes) *
                              static_cast<double>(copy_tiles) *
                              static_cast<double>(sm_count);
-        const double bandwidth =
-            bytes / (static_cast<double>(depth.second) * 1e-3);
+        const double bandwidth = bytes / (depth.second->min_ms * 1e-3);
         const std::string shape = "window=" + std::to_string(window) +
                                   " blocks=" + std::to_string(sm_count) +
                                   " stages=" + std::to_string(depth.first) +
                                   " tiles=" + std::to_string(copy_tiles);
-        add_rate_row("attention-wgmma:copy_depth", shape,
-                     static_cast<double>(depth.second), 0.0, true);
+        add_rate_row(make_row("attention-wgmma:copy_depth", shape, true),
+                     *depth.second, /*flops=*/0.0);
         report.SetExtra(
             "copy_depth:stages" + std::to_string(depth.first) + ":tbps",
             bandwidth / 1e12);
-        note("attention-wgmma:copy_depth %s ms=%.3f tbps=%.2f\n", shape.c_str(),
-             static_cast<double>(depth.second), bandwidth / 1e12);
+        note("attention-wgmma:copy_depth %s min=%.3f ms tbps=%.2f\n",
+             shape.c_str(), depth.second->min_ms, bandwidth / 1e12);
       }
     }
   }  // options.h1(): the staged rows

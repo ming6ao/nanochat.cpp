@@ -776,7 +776,7 @@ and it stays as the fallback for every shape and card this part does not reach.
 
 The ceiling probe of [kernels.md](kernels.md) Part 3 runs
 `wgmma.mma_async.m64n128k16` from a resident shared-memory tile on the H100 leg
-and reads 952.9 TFLOP/s on 264 blocks, which is 96.4 percent of the 989
+and reads 972.1 TFLOP/s on 264 blocks, which is 98.3 percent of the 989
 TFLOP/s that `backends/cuda/caps.json` declares. The warp-level tile of Part 7
 reads 89.7 TFLOP/s on the issued work of the production shape. No warp-level
 `mma.sync` kernel reaches the declared rate on this card, so the gap is the
@@ -920,7 +920,7 @@ the shared round trip of Part 6, section 4.4 stays gone.
 
 | Phase | Change | Gate |
 |---|---|---|
-| H1 | The prototype of the tile in `dev/kernels/`, as the probe of section 1 is: a resident query tile, copies of key and value, and the products with no softmax | The prototype reads 500 TFLOP/s or more with two query tiles per staged key tile, and the copy-only row states the bytes a second the copies sustain. **Measured: passed** at 755.4 TFLOP/s and 6.03 TB/s, from a binary that is not in the tree; the committed probe measures the same rows by sixteen-byte stores, at 293.4 TFLOP/s and 2.36 TB/s, and the Tensor Memory Accelerator path of H2b is what restores the recorded rate |
+| H1 | The prototype of the tile in `dev/kernels/`, as the probe of section 1 is: a resident query tile, copies of key and value, and the products with no softmax | The prototype reads 500 TFLOP/s or more with two query tiles per staged key tile, and the copy-only row states the bytes a second the copies sustain. **Measured: passed** at 755.4 TFLOP/s and 6.03 TB/s, from a binary that is not in the tree; the committed probe measures the same rows by sixteen-byte stores, at 295.4 TFLOP/s and 2.36 TB/s, and the Tensor Memory Accelerator path of H2b is what restores the recorded rate |
 | H2 | The forward tile of Part 7's arithmetic: mask, base-two softmax, both products, one consumer warpgroup, staged by a 16-byte copy into the interleaved form | The family test passes at the bf16 tolerance of [testing.md](testing.md) on every case of Part 7 section 7; the forward row of `attention_benchmark` reads 200 TFLOP/s or more |
 | H2b | The copy path of decision H2 by the Tensor Memory Accelerator, which needs the 128-byte swizzle and descriptor layout type 1 rather than the interleaved form | A one-hot map and a laid-out reference pass on the staged path, and the rate matches the copy-free path within 15 percent at the intensity of two query tiles |
 | H3 | Warp specialization and the overlap of decision H4 | The forward row reads 350 TFLOP/s or more; a trace shows the tensor pipe busy above 60 percent |
@@ -944,15 +944,15 @@ path, because the two paths do not agree.
 | Products from a staged tile, two query tiles | Tensor Memory Accelerator | 755.4 TFLOP/s | 76.4 percent |
 | The copies with no products | Tensor Memory Accelerator | 6.03 TB/s | none |
 | Products from a staged tile, one query tile | sixteen-byte stores | 145.4 to 151.6 TFLOP/s | 14.7 to 15.3 percent |
-| Products from a staged tile, two query tiles | sixteen-byte stores | 284.7 to 295.3 TFLOP/s | 28.8 to 29.9 percent |
-| The copies with no products | sixteen-byte stores | 2.29 to 2.42 TB/s | none |
+| Products from a staged tile, two query tiles | sixteen-byte stores | 284.7 to 295.4 TFLOP/s | 28.8 to 29.9 percent |
+| The copies with no products | sixteen-byte stores | 2.29 to 2.43 TB/s | none |
 
 The two staged halves of the table are the same geometry over two copy paths.
 The Tensor Memory Accelerator rows come from the binary that first measured this
 phase and are not reproducible from the tree; the store rows are, and both
 staged rows are exactly the copy cap of their path multiplied by the arithmetic
 one staged byte buys: 6.03 TB/s at 128 FLOP per byte is 772, and 2.36 TB/s is
-302. Measured, that is 755.4 of 772 and 289.0 to 295.3 of 302, which is 98 and 96
+302. Measured, that is 755.4 of 772 and 289.0 to 295.4 of 302, which is 98 and 96
 to 98 percent of what each path allows. The staged rows are the spread of five
 runs; the card's clock and its neighbours move the resident row by 1.6 percent
 and the copies by 4 percent.
@@ -975,7 +975,7 @@ Three further rows bound the store path. The depth of the ring does not matter
 once it is deep enough to cover one tile of copies: two stages read 2.14 TB/s,
 four read 2.29 to 2.36, and five read 2.30. The order of the stores does not matter
 either: varying the `k` block first reads 2.29 to 2.37 TB/s and varying the row
-of the core matrix first reads 2.34 to 2.42, so the interleaved form costs no
+of the core matrix first reads 2.34 to 2.43, so the interleaved form costs no
 bank conflict this path can see. The per-block rate is 17.4 to 18.0 gigabytes a
 second, against the 27.4 one block reaches alone, so the limit is the device and
 not one scheduler.

@@ -269,7 +269,10 @@ cuda_binary(
 # The emulation engine maps neither WGMMA nor a tensor copy, so there is no
 # off-device leg and the target carries `manual`. Its gate is the H100 leg, and
 # one job states both row sets: `--rows phase0` is the Part 3 rows and
-# `--rows h1` is the Part 8 rows.
+# `--rows h1` is the Part 8 rows. It times through
+# `backends/cuda/kernels/testing/bench_protocol.h`, which the hand GEMM sweep
+# also uses, so a row of one program and a row of the other state the same
+# statistic.
 #
 #   modal run tools/modal/app.py::card_job --name wgmma_bench \
 #     --argv '["--rows","all","--json"]'
@@ -284,6 +287,10 @@ cuda_binary(
         "manual",
     ],
     deps = [
+        # The measurement protocol both device benchmarks time through, and the
+        # seam buffers its flush writes.
+        "//backends/cuda:device",
+        "//backends/cuda/kernels/testing:bench_utils",
         "//include/nanochat:nanochat",
         "//src:device_profile",
     ],

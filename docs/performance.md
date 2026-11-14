@@ -37,6 +37,13 @@ with each number. `tools/nanochat doctor` prints most of them.
 4. Do not set `CUDA_LAUNCH_BLOCKING` for timing.
 5. Keep the before and after numbers with their configuration.
 
+Every device benchmark of this tree times through
+`backends/cuda/kernels/testing/bench_protocol.h`. The header states one window
+of calls between one event pair, the flush of the second-level cache and the
+measured cost of that flush, and the two samples of one measurement. It states
+the minimum under the row's own name and the median in a `:median` companion
+row. A row of one benchmark is therefore comparable with a row of another.
+
 ### 2.1 The launch, barrier, and elementwise budget of one stage
 
 The protocol above applied to a stage: before a campaign fuses an optimizer
@@ -133,10 +140,16 @@ the skill produce the numbers.
 ### 3.3 Add a benchmark
 
 Follow `backends/cuda/kernels/README.md`. Use
-`backends/cuda/kernels/testing/bench_utils.h`:
+`backends/cuda/kernels/testing/bench_utils.h` for the report and
+`backends/cuda/kernels/testing/bench_protocol.h` for the timing:
 
 - `BenchOptions` sets the warm-up, the iterations, the rounds, and the JSON
   output.
+- `Harness::Time` runs the calls of one measurement. It takes the warm-up, the
+  rounds, and the flush from `BenchOptions`, and it returns a `Timing`.
+- `AddTiming` writes the two rows of that measurement: the minimum under the
+  row's name, and the median in a `:median` companion. The caller states the
+  row in full, so the family and the phase travel with both rows.
 - `EventTimer::Time` returns the best mean milliseconds per call. It uses
   device events on the default stream.
 - `BenchReport::Add` collects a row.

@@ -74,6 +74,7 @@
 #include "backends/cuda/gemm/dispatch.h"
 #include "backends/cuda/gemm/gemm_fp32_plan.h"
 #include "backends/cuda/gemm/gemm_shape.h"
+#include "backends/cuda/kernels/testing/bench_protocol.h"
 #include "backends/cuda/kernels/testing/bench_utils.h"
 #include "nanochat/kernels.h"
 #include "nanochat/sandbox.h"
@@ -137,8 +138,17 @@ using nanochat::kernels::ResetGemmCutlassRefusalCount;
 using nanochat::kernels::ResolvedGemm;
 using nanochat::kernels::Synchronize;
 
+using nanochat::BenchRow;
+using nanochat::dev::AddTiming;
 using nanochat::dev::BenchDeviceName;
+using nanochat::dev::Flusher;
+using nanochat::dev::Gflops;
+using nanochat::dev::Summarize;
+using nanochat::dev::TimeFlush;
+using nanochat::dev::TimeWithFlush;
+using nanochat::dev::Timing;
 using nanochat::dev::UseDevicePeak;
+using nanochat::dev::WindowTimer;
 
 // The sweep is a bf16 measurement on a bf16 or fp8 build: the operands are the
 // seam's two-byte bf16, and the row arithmetic of `bench_shapes.h` states that
@@ -567,137 +577,6 @@ RowBuffers Carve(char* base, const SweepRow& row) {
   return buffers;
 }
 
-// A buffer larger than the second-level cache, written before every timed call.
-// The write is outside the timed window, and its cost is measured separately so
-// that the window can be corrected for it.
-class Flusher {
- public:
-  bool Init() {
-    int device = 0;
-    if (cudaGetDevice(&device) != cudaSuccess) return false;
-    int l2_bytes = 0;
-    cudaDeviceGetAttribute(&l2_bytes, cudaDevAttrL2CacheSize, device);
-    std::size_t bytes = l2_bytes > 0 ? static_cast<std::size_t>(l2_bytes) * 2
-                                     : std::size_t{32} << 20;
-    buffer_ = Alloc(bytes);
-    if (buffer_ == nullptr) return false;
-    bytes_ = bytes;
-    return true;
-  }
-
-  void Flush() const {
-    if (buffer_ != nullptr) Memset(buffer_, 0, bytes_);
-  }
-
-  std::size_t bytes() const { return bytes_; }
-
-  void Release() {
-    Free(buffer_);
-    buffer_ = nullptr;
-    bytes_ = 0;
-  }
-
- private:
-  void* buffer_ = nullptr;
-  std::size_t bytes_ = 0;
-};
-
-// --- The timing protocol ----------------------------------------------------
-
-struct Timing {
-  double min_ms = 0.0;
-  double median_ms = 0.0;
-  double mean_ms = 0.0;
-  int iters = 0;
-};
-
-// One event pair around one window of calls. A window holds the calls of one
-// round, so no host gap between two calls is charged to a measurement.
-class WindowTimer {
- public:
-  WindowTimer() {
-    cudaEventCreate(&start_);
-    cudaEventCreate(&end_);
-  }
-  ~WindowTimer() {
-    cudaEventDestroy(start_);
-    cudaEventDestroy(end_);
-  }
-  WindowTimer(const WindowTimer&) = delete;
-  WindowTimer& operator=(const WindowTimer&) = delete;
-
-  // One sample for each round: the device time of one call, in milliseconds.
-  template <typename Fn>
-  std::vector<double> Samples(Fn&& fn, int rounds, int iters) {
-    std::vector<double> samples;
-    samples.reserve(static_cast<std::size_t>(rounds));
-    for (int round = 0; round < rounds; ++round) {
-      cudaEventRecord(start_, nullptr);
-      for (int i = 0; i < iters; ++i) fn();
-      cudaEventRecord(end_, nullptr);
-      cudaEventSynchronize(end_);
-      float elapsed_ms = 0.0f;
-      cudaEventElapsedTime(&elapsed_ms, start_, end_);
-      samples.push_back(static_cast<double>(elapsed_ms) / iters);
-    }
-    return samples;
-  }
-
- private:
-  cudaEvent_t start_{};
-  cudaEvent_t end_{};
-};
-
-// The minimum, the median, and the mean of one sample set.
-Timing Summarize(std::vector<double> samples, int iters) {
-  Timing timing;
-  timing.iters = iters;
-  if (samples.empty()) return timing;
-  std::sort(samples.begin(), samples.end());
-  timing.min_ms = samples.front();
-  timing.mean_ms = 0.0;
-  for (double sample : samples) timing.mean_ms += sample;
-  timing.mean_ms /= static_cast<double>(samples.size());
-  timing.median_ms = samples[samples.size() / 2];
-  if (samples.size() % 2 == 0) {
-    timing.median_ms =
-        0.5 * (samples[samples.size() / 2 - 1] + samples[samples.size() / 2]);
-  }
-  return timing;
-}
-
-// One arm over one row. The flush runs before every call, inside the window, so
-// the call never reads a warm cache. Its own cost is measured once and removed,
-// which leaves the call's device time.
-template <typename Fn>
-Timing TimeWithFlush(WindowTimer* timer, Fn&& call, int iters, int rounds,
-                     int warmup, const Flusher* flusher, double flush_ms) {
-  for (int i = 0; i < warmup; ++i) {
-    if (flusher != nullptr) flusher->Flush();
-    call();
-  }
-  Synchronize();
-  std::vector<double> samples = timer->Samples(
-      [&] {
-        if (flusher != nullptr) flusher->Flush();
-        call();
-      },
-      rounds, iters);
-  for (double& sample : samples) sample = std::max(0.0, sample - flush_ms);
-  return Summarize(std::move(samples), iters);
-}
-
-// The cost of one flush, measured on its own loop so the window above can state
-// a call's time and not the flush's.
-double TimeFlush(WindowTimer* timer, const Flusher& flusher, int rounds) {
-  constexpr int kCalibrationIters = 8;
-  for (int i = 0; i < kCalibrationIters; ++i) flusher.Flush();
-  Synchronize();
-  const std::vector<double> samples = timer->Samples(
-      [&flusher] { flusher.Flush(); }, rounds, kCalibrationIters);
-  return Summarize(samples, kCalibrationIters).min_ms;
-}
-
 // --- The check --------------------------------------------------------------
 
 struct CheckOutcome {
@@ -790,25 +669,19 @@ CheckOutcome CheckOutput(const SweepRow& row, const void* got, const void* want,
                  : CompareOnDevice<ComputeType>(got, want, count);
 }
 
-// --- The report -------------------------------------------------------------
-
-double Gflops(double flops, double ms) {
-  if (!(ms > 0.0)) return 0.0;
-  return 1e-9 * flops / (ms * 1e-3);
-}
-
-// One measurement as two rows: the minimum under the arm's own name, and the
-// median beside it. The iteration count and the occupancy travel with both
-// rows, so a reader takes the shape of the call from the report and not from
-// the console (docs/kernels.md section 11.7).
-void AddTiming(BenchReport* report, const std::string& name,
-               const std::string& shape, const Timing& timing, double flops,
-               int occupancy = 0) {
-  report->Add(name, shape, timing.min_ms, Gflops(flops, timing.min_ms),
-              /*work_ratio=*/0.0, timing.iters, occupancy);
-  report->Add(name + ":median", shape, timing.median_ms,
-              Gflops(flops, timing.median_ms), /*work_ratio=*/0.0, timing.iters,
-              occupancy);
+// One report row of the sweep, in full. `AddTiming` takes the row in full and
+// states the two rows of one measurement from it, so the sweep names its family
+// and its phase here as well as on the report. `BenchReport::Add` inherits the
+// precision alone, and not the family.
+BenchRow TimedRow(const std::string& name, const std::string& shape,
+                  int occupancy = 0) {
+  BenchRow row;
+  row.name = name;
+  row.shape = shape;
+  row.family = "gemm";
+  row.phase = "forward";
+  row.occupancy = occupancy;
+  return row;
 }
 
 void PrintMeasurement(const std::string& row, const std::string& arm,
@@ -1232,7 +1105,7 @@ int main(int argc, char** argv) {
       const Timing timing = measure("cublas");
       take_reference();
       const std::string name = "gemm:" + row.name + ":cublas";
-      AddTiming(&report, name, row.shape, timing, row.flops);
+      AddTiming(&report, TimedRow(name, row.shape), timing, row.flops);
       PrintMeasurement(row.name, "cublas", timing, 0, CheckOutcome());
       ++measured;
     } else {
@@ -1308,7 +1181,8 @@ int main(int argc, char** argv) {
           // unchanged and the table writer still reads it.
           const std::string shape =
               cells.size() > 1 ? row.shape + GridText(grid) : row.shape;
-          AddTiming(&report, label, shape, timing, row.flops, occupancy);
+          AddTiming(&report, TimedRow(label, shape, occupancy), timing,
+                    row.flops);
           PrintMeasurement(variant, spec.name, timing, occupancy, check, grid);
           ++measured;
         }
@@ -1357,7 +1231,7 @@ int main(int argc, char** argv) {
         }
         const std::string label =
             std::string("gemm:") + row.name + ":" + schedule_name + ":hand";
-        AddTiming(&report, label, row.shape, timing, row.flops);
+        AddTiming(&report, TimedRow(label, row.shape), timing, row.flops);
         PrintMeasurement(row.name, schedule_name, timing, 0, check);
         ++measured;
       }
@@ -1387,7 +1261,7 @@ int main(int argc, char** argv) {
         const std::string label = std::string("gemm:") + row.name + ":seam";
         // No occupancy: the seam is cuBLAS on most rows and a candidate on a
         // promoted one, so one residency number would name neither arm.
-        AddTiming(&report, label, row.shape, timing, row.flops);
+        AddTiming(&report, TimedRow(label, row.shape), timing, row.flops);
         PrintMeasurement(row.name, "seam", timing, 0, check);
         ++measured;
       }
@@ -1475,7 +1349,7 @@ int main(int argc, char** argv) {
                             options.check && have_reference);
             const std::string label =
                 std::string("gemm:") + row.name + ":fp8:" + selector;
-            AddTiming(&report, label, row.shape, timing, row.flops);
+            AddTiming(&report, TimedRow(label, row.shape), timing, row.flops);
             PrintMeasurement(row.name, (std::string("fp8:") + selector).c_str(),
                              timing, 0, check);
             ++measured;

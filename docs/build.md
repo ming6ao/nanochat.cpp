@@ -142,6 +142,13 @@ configuration selects strictness and the log holds no warning that a reader
 learns to skip. A target that compiles against the vendor headers states its
 own options, because those headers emit warnings the tree does not own.
 
+One device diagnostic is suppressed by number, and it is the only one. `20012`
+reports a redundant `__host__ __device__` annotation on a function that is
+defaulted at its first declaration. `include/nanochat/tensor.h` states the pair
+on the defaulted `Bf16` constructor. The annotation records the intent, and the
+device pass ignores it. A newer toolkit reports that fact as a warning, and
+`nanochat.bzl` names the number and the reason.
+
 `cuda` and `hopper` differ in scope, and not in kind. `cuda` selects the
 backend alone, so the architecture and the precision stay at their defaults and
 the build serves the oldest card at fp32. `hopper` is a complete device build

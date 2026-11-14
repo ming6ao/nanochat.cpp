@@ -42,6 +42,13 @@ NANOCHAT_COPTS = [
 # warning carries no information here. A target that compiles against the
 # CUTLASS headers states its own `copts` instead of using this list, because
 # those headers emit thousands of warnings of their own.
+#
+# `20012` is the redundancy notice of a `__host__ __device__` annotation on a
+# function that is defaulted on its first declaration. `include/nanochat/tensor.h`
+# states the pair on the defaulted `Bf16` constructor: the annotation documents
+# the intent, the device pass ignores it, and a newer toolkit reports that fact
+# as a warning. The header is frozen, and the diagnostic says nothing about the
+# code, so the option below suppresses that one number and not the class.
 NANOCHAT_CUDA_COPTS = [
     "-O2",
     "-Xcompiler",
@@ -56,6 +63,8 @@ NANOCHAT_CUDA_COPTS = [
     "-Wno-deprecated-declarations",
     "-Werror",
     "all-warnings",
+    "-diag-suppress",
+    "20012",
 ]
 
 def nanochat_copts():

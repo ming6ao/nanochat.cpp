@@ -756,6 +756,16 @@ before it:
    small row compares every element; a big row reduces the squared norm of the
    difference on the device.
 
+Steps 4 and 5 are `backends/cuda/kernels/testing/bench_protocol.h`, which
+`dev/kernels/wgmma_bench.cu` times through as well. One header states the
+window, the flush, and the pair of rows, so a row of this sweep and a row of that
+probe report the same statistic. A measurement states two rows: the minimum under
+the arm's own name, and the median in a `:median` companion.
+
+**The build.** The target states `archs = ["sm_90a"]` for itself, as
+`wgmma_bench` does, so a build of this binary with no flag is a Hopper build.
+`.bazelrc` keeps its own default of `sm_75` for every other target.
+
 `--self-test` proves the check itself: an identical copy must match, and a
 perturbed copy must be rejected by name. `--rows measurement` runs the scaling
 families of section 11.5, which say how a kernel scales and never select a
@@ -804,6 +814,16 @@ step takes. Its first run found a defect in the protocol and not in a kernel. A
 weight-gradient row states `beta = 1`, so one call accumulates one product. The
 arm ran eleven calls and the reference ran one, so the check read ten times the
 reference. The reference now runs the same count.
+
+**A third run reproduced the spread, and one promotion sits on the boundary.**
+The confirmation run of the production rows moved the cuBLAS column by -3 to +9
+percent and the hand column by up to 21 percent, which is the spread of section
+17. Three rows changed which candidate they would pick, and
+`linear:fwd:cproj` fell under the 0.04 margin: it was promoted by 4.59 percent
+and this run would keep cuBLAS. The committed table stays as the record of the
+run that wrote it, because a rerun is not a better measurement of a win this
+small. A decision on that row needs either a third run or a wider margin, and
+section 11.4 item 5 of `docs/kernels.md` is where it belongs.
 
 **What is still not here.**
 

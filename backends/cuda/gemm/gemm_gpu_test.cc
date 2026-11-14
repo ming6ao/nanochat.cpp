@@ -62,11 +62,6 @@ int g_failures = 0;
 constexpr double kBf16Relative = 1e-2;
 constexpr double kFp32Relative = 1e-5;
 
-void Fail(const char* what) {
-  std::fprintf(stderr, "FAIL: %s\n", what);
-  ++g_failures;
-}
-
 // One operand value, small enough that the sum stays inside a bf16 step of the
 // case magnitudes.
 float OperandValue(int index, int modulus, int shift) {

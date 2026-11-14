@@ -5,15 +5,16 @@ Part 3 measured, on which leg, and what the result changes about the plan. It
 covers phase 0 only. Phases 1 to 5 of that plan are not implemented, and section
 7 says why.
 
-**The source moved.** The probe that produced these rows was
-`dev/kernels/wgmma_probe.cu`, and that file is retired. Its rows are now the
-`wgmma:`-prefixed rows of `dev/kernels/wgmma_bench.cu`, which absorbed
-the probe when it gained the Phase H1 rows of
-[docs/attention.md](../../docs/attention.md) Part 8. The numbers below stand; only
-the build command and the file name change. The one check this report cites, the
-sum of the accumulators, is withdrawn as blind to the operand form, and the
-absorbing source checks one element at a time instead. Read part 3 phase 0 of
-the plan with that in mind: the rate rows are reproducible, the old check is not
+**The source moved, and the rows were re-recorded.** The probe that first
+produced these rows was `dev/kernels/wgmma_probe.cu`, and that file is retired.
+Its rows are now the `wgmma:`-prefixed rows of `dev/kernels/wgmma_bench.cu`,
+which absorbed the probe when it gained the Phase H1 rows of
+[docs/attention.md](../../docs/attention.md) Part 8. The rates in section 2 are a
+new run of that source, over the measurement protocol of
+`backends/cuda/kernels/testing/bench_protocol.h`. The one check the first run
+cited, the sum of the accumulators, is withdrawn as blind to the operand form,
+and the source checks one element at a time instead. Read part 3 phase 0 of the
+plan with that in mind: the rate rows are reproducible, and the old check is not
 quoted as evidence.
 
 The plan's question for phase 0 is one number. How fast can one warpgroup issue
@@ -24,8 +25,8 @@ the campaign stops without a kernel.
 
 ## 1. The verdict
 
-**Gate 0 passes with margin.** One warpgroup holds 98.6 percent of the per-SM
-tensor-core rate on a resident tile. Two warpgroups on every SM hold 96.4 percent
+**Gate 0 passes with margin.** One warpgroup holds 99.0 percent of the per-SM
+tensor-core rate on a resident tile. Two warpgroups on every SM hold 98.3 percent
 of the card's declared bf16 peak. The gate asked for 85 percent of the per-SM
 share.
 
@@ -33,7 +34,7 @@ So the instruction is not the gap. The shipped tile holds 155 to 160 TFLOP/s on
 the six rows that matter. cuBLAS holds 644 to 868 TFLOP/s on those rows. That
 difference now sits entirely in the data path: the operand copy, the shared
 layout, the pipeline depth, the epilogue, and the occupancy. Phase 2 has roughly
-96 percent of the
+98 percent of the
 peak to feed from, and cuBLAS leaves 12 to 35 percent of it unused.
 
 ## 2. The rows
@@ -43,22 +44,33 @@ run of one binary per row on an NVIDIA H100 80GB HBM3 at `sm_90a`, bf16.
 
 | Row | Blocks | Passes | Time | Rate | Share of the number it is measured against |
 |---|---:|---:|---:|---:|---|
-| `1block` | 1 | 20000 | 2.840 ms | 7.384 TFLOP/s | 98.6 percent of the per-SM share, 7.4924 TFLOP/s |
-| `grid` | 264 | 20000 | 5.810 ms | 952.9 TFLOP/s | 96.4 percent of the card peak, 989 TFLOP/s |
+| `1block` | 1 | 20000 | 2.828 ms | 7.415 TFLOP/s | 99.0 percent of the per-SM share, 7.4924 TFLOP/s |
+| `grid` | 264 | 20000 | 5.696 ms | 972.1 TFLOP/s | 98.3 percent of the card peak, 989 TFLOP/s |
 
-The per-SM share is the declared peak over 132 SMs. The card reported 132 SMs and
-a 1980 MHz clock.
+The per-SM share is the declared peak over 132 SMs. The card reported 132 SMs.
+
+**The statistic.** Each row is the minimum of three windows, and each window
+holds three calls, so the time is a steady state and not one launch. The
+second-level cache is flushed before every call, and the measured cost of one
+flush, 0.0347 ms, is removed from the window. The protocol is
+`backends/cuda/kernels/testing/bench_protocol.h`, which the hand GEMM sweep of
+`backends/cuda/gemm/gemm_benchmark.cc` also times through, so a row here and a
+row there state the same statistic. Both rows read slightly above the single-launch
+figures they replace: 98.6 and 96.4 percent. The movement is the steady state and
+not a change to the kernel.
 
 ## 3. The correctness leg
 
-The probe checks its own product before it reports a rate. It sums the 8192
-accumulators on the device, computes the same sum from a scalar triple loop on
-the host, and compares the two. A descriptor that reads the wrong tile fails the
-check, because the two operands differ everywhere.
+The probe checks its own product before it reports a rate. The source now checks
+one element at a time against a host reference over the same input, because a
+sum-based check cannot see a permutation of the tile: that permutation leaves the
+sum unchanged. A descriptor that reads the wrong tile or the wrong operand form
+therefore fails, and the failing element is named.
 
-The measured relative error was `0.0e+00`, so the product is bit identical to the
-host reference at these magnitudes. The check passed on the first device run that
-reached it.
+The measured relative error was `1.9e-07` against a reference scale of `14.68`,
+which is the bf16 rounding of the reference and not a defect of the descriptor.
+The staged rows are checked against the resident product as well: both stagings
+report 0 bad elements of 8192, so a wrong staging fails instead of measuring.
 
 The shipped tile also passed its own device gate on the same card. The card job
 printed `gemm gpu test: device NVIDIA H100 80GB HBM3, compute capability 9.0`
@@ -88,14 +100,15 @@ traffic.
 
 The same run put cuBLAS at 65 to 88 percent of the peak on these rows, and at
 94.6 percent on the classifier dgrad row. The instruction ceiling measured in
-section 2 is 96 percent. So cuBLAS is close to that ceiling on its best row, and
-8 to 19 points under it on the rest.
+section 2 is 98 percent. So cuBLAS is within four points of that ceiling on its
+best row, and 10 to 33 points under it on the rest.
 
 ## 5. What the probe is, and what it is not
 
-The probe is 24 KiB of staged window, one warpgroup, and four instructions for
-each pass. Three pieces are hand written, because phase 2 must not depend on a
-library:
+The probe stages one query tile of 16 KiB and one key tile of 32 KiB. The ring
+holds two query tiles and four key tiles, which is 160 KiB of dynamic shared
+memory, and one warpgroup issues four instructions for each pass. Three pieces
+are hand written, because phase 2 must not depend on a library:
 
 - the shared-memory matrix descriptor, encoded from the sixteen-byte fields the
   instruction reads;
@@ -176,13 +189,14 @@ tools/nanochat build //dev/kernels:wgmma_bench
 
 ## 9. Limits of this report
 
-- One run per row. The spread is unmeasured, and the `gemm_bf16` entry records a
-  three percent run-to-run spread on the same binary.
+- The report states one run per row. The spread is unmeasured, and the
+  `gemm_bf16` entry records a three percent run-to-run spread on the same binary.
 - The per-SM share divides the declared peak by the SM count. It does not read
   the clock of this card during the run, and a boost-clock change moves both rows
   together.
-- The probe reports the aggregate sum of its accumulators and not each element.
-  A descriptor that permutes the tile within the accumulator set would pass. The
-  phase 2 gate compares every element against cuBLAS, so that gap closes there.
+- The element check covers the resident 8-atom tile. It fixes the operand form
+  the instruction reads, and it does not prove each element of the staged rows.
+  Those rows are checked against the resident product instead, so a staging that
+  permutes the tile consistently would pass.
 - The two rows use different block counts, so they are two measurements and not
   a scaling curve.

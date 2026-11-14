@@ -886,37 +886,30 @@
       ]
     },
     "wgmma_probe": {
-      "note": "Phase 0 of docs/kernels.md Part 3: the hand-written WGMMA ceiling probe of dev/kernels/wgmma_probe.cu. One warpgroup issues wgmma.mma_async.sync.aligned.m64n128k16.f32.bf16.bf16 from a resident shared-memory tile, through a hand-built descriptor in the interleaved K-major form, with no global memory traffic in the timed loop. The 1block row is one warpgroup on one SM; the grid row is two warpgroups on every SM of the card. fraction_of_peak is the rate over the card's declared bf16 peak of 989 TFLOP/s (backends/cuda/caps.json), and fraction_of_sm_share is the 1block rate over the per-SM share of that peak, 989 over 132, or 7.4924 TFLOP/s. Passes are four atoms each, so one pass is 1048576 flop. The correctness row is the sum of the 8192 accumulators against a host reference over the same input; a descriptor that reads the wrong tile fails it, because the two operands differ. The probe needs sm_90a, which no device configuration of .bazelrc emits, so the card job builds it inside the container with the tree's builder before it runs it.",
+      "note": "Phase 0 of docs/kernels.md Part 3, from the `wgmma:` rows of dev/kernels/wgmma_bench.cu. One warpgroup issues wgmma.mma_async.sync.aligned.m64n128k16.f32.bf16.bf16 from a resident shared-memory tile, through a hand-built descriptor in the interleaved K-major form, with no global memory traffic in the timed loop. The 1block row is one warpgroup on one SM; the grid row is two warpgroups on every SM of the card. fraction_of_peak is the rate over the card's declared bf16 peak of 989 TFLOP/s (backends/cuda/caps.json), and fraction_of_sm_share is the 1block rate over the per-SM share of that peak, 989 over 132, or 7.4924 TFLOP/s. Passes are four atoms each, so one pass is 1048576 flop. The statistic is the protocol of backends/cuda/kernels/testing/bench_protocol.h: one call is one launch, three calls fill one window, three windows give the samples, the second-level cache is flushed before every call, and the measured 0.0347 ms cost of one flush is removed; the row states the minimum of the three windows and a :median companion row states the median. Both rows read slightly above the single-launch figures this entry used to hold, 98.55 and 96.35 percent, because one launch is not a steady state. The sum-based correctness row this entry used to hold is withdrawn: a sum is blind to the operand form. The element check that replaces it is the form_check row of attention_wgmma_probe, and it runs whenever the H1 rows run.",
       "device": "NVIDIA H100 80GB HBM3 (sm_90a)",
       "validated_on": "NVIDIA H100 80GB HBM3 (sm_90a)",
       "precision": "bf16",
-      "measurement": "modal run tools/modal/app.py::card_job --name wgmma_probe",
-      "origin": "docs/kernels.md Part 3 phase 0, dev/kernels/wgmma_probe.cu, dev/kernels/README.md",
+      "measurement": "modal run tools/modal/app.py::card_job --name wgmma_bench --argv '[\"--rows\",\"all\",\"--json\"]'",
+      "origin": "docs/kernels.md Part 3 phase 0, dev/kernels/wgmma_bench.cu, dev/kernels/README.md",
       "rows": [
         {
           "name": "wgmma:1block",
           "blocks": 1,
           "passes": 20000,
-          "ms": 2.84,
-          "tflops": 7.384,
-          "fraction_of_peak": 0.00747,
-          "fraction_of_sm_share": 0.9855
+          "ms": 2.8282,
+          "tflops": 7.4152,
+          "fraction_of_peak": 0.007497,
+          "fraction_of_sm_share": 0.9897
         },
         {
           "name": "wgmma:grid",
           "blocks": 264,
           "passes": 20000,
-          "ms": 5.81,
-          "tflops": 952.9,
-          "fraction_of_peak": 0.9635,
-          "fraction_of_sm_share": 0.9635
-        },
-        {
-          "name": "wgmma:correctness",
-          "reference_sum": 2516.4748,
-          "measured_sum": 2516.4748,
-          "relative_error": 0.0,
-          "result": "PASS"
+          "ms": 5.6956,
+          "tflops": 972.06,
+          "fraction_of_peak": 0.9829,
+          "fraction_of_sm_share": 0.9829
         }
       ]
     },
@@ -2046,11 +2039,11 @@
       "validated_on_host": "Modal H100 image, bf16, tools/modal/app.py H100 leg"
     },
     "attention_wgmma_probe": {
-      "note": "Phase H1 of docs/attention.md Part 8, from dev/kernels/attention_wgmma_probe.cu on the H100 leg of tools/modal/app.py (sm_90a, bf16). Every row below is reproducible from the committed source, and the three recorded staged rows that this entry used to hold are kept only as the historical Tensor Memory Accelerator rows of a binary that is not in the tree. fraction_of_peak divides by the 989 TFLOP/s dense bf16 rate of backends/cuda/caps.json. A row states one run to its digit; across five runs the resident row reads 963.9 to 979.7 TFLOP/s, the copies 2.29 to 2.42 TB/s, the one-query-tile staged row 145.4 to 151.6, and the two-query-tile staged row 284.7 to 295.3, so the card's clock and its neighbours are the spread and no row is claimed tighter than four percent. The staged rows are limited by the arithmetic one staged byte buys and not by the schedule: each is 97 to 99 percent of the copy cap of its path times that arithmetic. The two copy paths are not interchangeable: sixteen-byte stores reach 2.36 TB/s and the Tensor Memory Accelerator reached 6.03, which is why Part 8 phase H2b comes before H3. Two checks stand behind every rate. form_check compares a full product with a host reference one element at a time, which a row-major stage fails and a sum-based check cannot see. staged_check compares the staged product with the resident product and both stagings agree exactly, so the ring, its barriers, and its stages are right; the correctness row this entry used to hold was withdrawn because a sum is blind to the operand form, the register operand, and these two replace it.",
-      "device": "NVIDIA H100 80GB HBM3 (sm_90)",
-      "validated_on": "NVIDIA H100 80GB HBM3 (sm_90)",
+      "note": "Phase H1 of docs/attention.md Part 8, from the `attention-wgmma:` rows of dev/kernels/wgmma_bench.cu on the H100 leg of tools/modal/app.py (sm_90a, bf16). Every row below is reproducible from the committed source, and the three recorded staged rows that this entry used to hold are kept only as the historical Tensor Memory Accelerator rows of a binary that is not in the tree. fraction_of_peak divides by the 989 TFLOP/s dense bf16 rate of backends/cuda/caps.json. The statistic is the protocol of backends/cuda/kernels/testing/bench_protocol.h, as in wgmma_probe: three calls to a window, three windows, a flushed cache before every call, the flush cost removed, and a minimum row beside a :median companion. This run reads the resident row at 978.7 TFLOP/s, the copies at 2.36 TB/s, the one-query-tile staged row at 150.1 and the two-query-tile row at 295.4, which is inside the five-run spread this entry recorded before the protocol change: 963.9 to 979.7, 2.29 to 2.42, 145.4 to 151.6, and 284.7 to 295.4. The card's clock and its neighbours remain the spread, and no row is claimed tighter than four percent. The staged rows are limited by the arithmetic one staged byte buys and not by the schedule: each is 97 to 99 percent of the copy cap of its path times that arithmetic. The two copy paths are not interchangeable: sixteen-byte stores reach 2.36 TB/s and the Tensor Memory Accelerator reached 6.03, which is why Part 8 phase H2b comes before H3. Two checks stand behind every rate. form_check compares a full product with a host reference one element at a time, which a row-major stage fails and a sum-based check cannot see; it reads 1.9e-07 against a reference scale of 14.68. staged_check compares the staged product with the resident product, and both stagings report 0 bad elements of 8192, so the ring, its barriers, and its stages are right.",
+      "device": "NVIDIA H100 80GB HBM3 (sm_90a)",
+      "validated_on": "NVIDIA H100 80GB HBM3 (sm_90a)",
       "precision": "bf16",
-      "measurement": "modal run tools/modal/app.py::card_job --name attention_wgmma",
+      "measurement": "modal run tools/modal/app.py::card_job --name wgmma_bench --argv '[\"--rows\",\"all\",\"--json\"]'",
       "origin": "docs/attention.md Part 8 section 6",
       "rows": [
         {
@@ -2064,6 +2057,7 @@
           "name": "attention-wgmma:staged_check",
           "relative_error": 0.0,
           "both_stagings": true,
+          "bad_elements": 0,
           "result": "ok"
         },
         {
@@ -2118,9 +2112,9 @@
           "name": "attention-wgmma:resident",
           "blocks": 132,
           "passes": 20000,
-          "tflops": 964.0,
-          "fraction_of_peak": 0.975,
-          "note": "an interleaved resident tile; reproduces the recorded 963.7"
+          "tflops": 978.7,
+          "fraction_of_peak": 0.9896,
+          "note": "an interleaved resident tile of eight atoms, which is the head width; the same kernel on one block reads 7.455 TFLOP/s, which is 99.5 percent of the per-SM share"
         },
         {
           "name": "attention-wgmma:staged",
@@ -2128,8 +2122,8 @@
           "query_tiles": 1,
           "blocks": 132,
           "tiles": 4096,
-          "tflops": 149.3,
-          "fraction_of_peak": 0.151
+          "tflops": 150.1,
+          "fraction_of_peak": 0.152
         },
         {
           "name": "attention-wgmma:staged",
@@ -2137,15 +2131,15 @@
           "query_tiles": 2,
           "blocks": 132,
           "tiles": 4096,
-          "tflops": 293.4,
-          "fraction_of_peak": 0.297
+          "tflops": 295.4,
+          "fraction_of_peak": 0.299
         },
         {
           "name": "attention-wgmma:copies",
           "copy_path": "sixteen-byte stores",
           "blocks": 132,
           "tiles": 8192,
-          "tbps": 2.36,
+          "tbps": 2.37,
           "gigabytes_per_block": 18.0
         },
         {
@@ -2153,8 +2147,8 @@
           "copy_path": "sixteen-byte stores",
           "blocks": 1,
           "tiles": 8192,
-          "tbps": 0.03,
-          "gigabytes_per_block": 27.2,
+          "tbps": 0.029,
+          "gigabytes_per_block": 28.7,
           "note": "one block alone reaches more a second than its share of a full grid"
         },
         {
@@ -2166,7 +2160,7 @@
         {
           "name": "attention-wgmma:copy_depth",
           "stages": 2,
-          "tbps": 2.14
+          "tbps": 2.13
         },
         {
           "name": "attention-wgmma:copy_depth",
@@ -2181,8 +2175,8 @@
         },
         {
           "name": "attention-wgmma:copy_order",
-          "k_block_first": 2.36,
-          "row_first": 2.41,
+          "k_block_first": 2.37,
+          "row_first": 2.43,
           "note": "the interleaved form costs no bank conflict this path can see"
         },
         {

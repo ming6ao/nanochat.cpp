@@ -335,6 +335,21 @@ WGMMA is architecture conditional and the tree's device configurations emit
 command carries a flag. It carries the `gpu` and `manual` tags, and the
 emulation engine maps no WGMMA, so there is no off-device leg.
 
+**The timing is the shared protocol.** `wgmma_bench` times through
+`backends/cuda/kernels/testing/bench_protocol.h`, as
+`backends/cuda/gemm/gemm_benchmark.cc` does, so a row here and a row of the
+sweep state the same statistic. One call is one launch. `--iters` calls fill one
+window, and `--rounds` windows give the samples.
+
+- `--warmup N` states the calls of the warm-up, which no window times.
+- `--no-flush` removes the flush of the second-level cache.
+
+The flush is on by default, because a staged window of 512 key tiles is 16 MiB
+and stays warm across calls. Its own cost is measured once and removed from the
+window. Each row states the minimum under its own name and the median in a
+`:median` companion row. The console prints both numbers on one line, and the
+JSON document holds the pair as two rows.
+
 ```bash
 tools/nanochat build //dev/kernels:wgmma_bench
 ```

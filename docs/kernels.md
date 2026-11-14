@@ -962,7 +962,7 @@ there; they are not the work that remains.
 
 | Phase | Work | Effort | Gate | State |
 |---|---|---|---|---|
-| 0 | A `dev/kernels/` prototype: one WGMMA atom, one hand-built descriptor, one resident block, timed over the 1280 by 1280 by 1280 shape | 1 day | 85 percent of the per-SM tensor-core rate, which is 6.4 TFLOP/s from one block on the H100 | **Done**, 96.4 percent of the card peak |
+| 0 | A `dev/kernels/` prototype: one WGMMA atom, one hand-built descriptor, one resident block, timed over the 1280 by 1280 by 1280 shape | 1 day | 85 percent of the per-SM tensor-core rate, which is 6.4 TFLOP/s from one block on the H100 | **Done**, 98.3 percent of the card peak |
 | 1 | The `mma.sync` mainloop: direct `mma.sync` with `ldmatrix`, four to six stages, dynamic shared memory, and the epilogue rewrite | 4 to 8 weeks | Every row correct, and 0.50 of the recorded cuBLAS rate | **Done and missed**, 0.27 to 0.36. Section 10 records it |
 | 2 | The Hopper mainloop: tile 128 by 256 by 64, cluster 2 by 1, one producer warp, two consumer warpgroups, TMA in and out | Was 2 to 4 months; became 1 week by borrowing | Within 1.05 of the cuBLAS rate on all six rows of section 2 | **Adapter done, gate open.** It needs the card |
 | 3 | The fp32 shared-memory tile for Turing and the fp32 build | 2 to 4 weeks | Within 1.05 of the recorded cuBLAS rate on the chain profiles | **Written, and gated off a card.** Section 6.2 records it |
@@ -1007,9 +1007,11 @@ tile through a hand-built descriptor, and the timed loop moves no global memory.
 The card job `wgmma_bench` of `tools/modal/app.py` builds it at `sm_90a` and
 runs it on the H100 leg, and `--rows phase0` returns these rows from the one
 document it states. One warpgroup held
-7.384 TFLOP/s, which is 98.6 percent of the per-SM share of the peak. Two
-warpgroups on every SM held 952.9 TFLOP/s, which is 96.4 percent of the card
-peak. **The gate passed.**
+7.415 TFLOP/s, which is 99.0 percent of the per-SM share of the peak. Two
+warpgroups on every SM held 972.1 TFLOP/s, which is 98.3 percent of the card
+peak. **The gate passed.** Both rows are a minimum of three windows of three
+calls, with the second-level cache flushed before every call, over the protocol
+of `backends/cuda/kernels/testing/bench_protocol.h`.
 
 That source file absorbed the standalone Phase 0 probe, so the same binary and
 the same card job also carry the Phase H1 rows of
@@ -1763,7 +1765,12 @@ protocol, a machine-readable report, and a stored choice.
    iterations, reports the median and the minimum of the rounds, and reports the
    occupancy the driver answers for the candidate. The flush stops a warm cache
    from choosing the winner: the classifier operands are 63 MB and the
-   second-level cache is 50 MB.
+   second-level cache is 50 MB. The protocol is
+   `backends/cuda/kernels/testing/bench_protocol.h`, which
+   `dev/kernels/wgmma_bench.cu` times through as well, so a row of one benchmark
+   and a row of the other state the same statistic. One measurement states two
+   rows, the minimum under the row's own name and the median in a `:median`
+   companion.
 5. **A decision table.** `backends/cuda/gemm/cutlass_rules.h` maps a shape to a
    candidate, with an explicit order of candidate, then hand tile, then cuBLAS.
    `JudgeCutlass` reads that table, and `NANOCHAT_GEMM_CANDIDATE` is the

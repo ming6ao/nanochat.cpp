@@ -164,8 +164,8 @@ cuda_library(
 # `dev/cutlass/README.md` proved before this target existed.
 #
 # **The vendor options are these targets' own.** The CUTLASS headers emit
-# thousands of warnings and `--config=sim-gate` turns warnings into errors, so
-# these targets do not load `nanochat_cuda_copts`. `--expt-relaxed-constexpr`
+# thousands of warnings and every build turns a warning into an error, so these
+# targets do not load `nanochat_cuda_copts`. `--expt-relaxed-constexpr`
 # lets the headers call a host `constexpr` from a device function without a
 # warning, which is what they do throughout.
 #
@@ -413,6 +413,12 @@ cc_test(
 # the shipped `Gemm` and the `NANOCHAT_GEMM_LIB` switch. Needs a card and a bf16
 # build, so it is a benchmark and not a test. It takes the same fp32 stand-in as
 # the gate above.
+#
+# The target states `archs = ["sm_90a"]` for itself, as `wgmma_bench` does, so a
+# build of this binary with no flag is a Hopper build: the sweep is measured on
+# the H100 leg alone, and `--config=hopper` no longer changes what it emits. The
+# tree's default architecture in `.bazelrc` is untouched, so every other target
+# still builds at `sm_75`.
 cuda_binary(
     name = "gemm_benchmark",
     srcs = select({
@@ -420,6 +426,7 @@ cuda_binary(
         "//:fp8": ["gemm_benchmark.cc"],
         "//conditions:default": ["gemm_benchmark.cc"],
     }),
+    archs = ["sm_90a"],
     copts = nanochat_cuda_copts(),
     host_copts = nanochat_copts(),
     defines = precision_defines(),

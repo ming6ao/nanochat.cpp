@@ -1,8 +1,9 @@
 # backends/cuda/kernels/testing — host-only scaffolding shared by the CUDA
 # kernel tests and benchmarks. The reference headers are line-for-line ports of
 # backends/cpu/kernels.cc; the two helper headers add the device buffer, the
-# finite-difference check, the deterministic random source, and the benchmark
-# report. Test-only: no production target depends on this package.
+# finite-difference check, the deterministic random source, the benchmark
+# report, and the measurement protocol both device benchmarks time through.
+# Test-only: no production target depends on this package.
 #
 # See docs/testing.md and backends/cuda/kernels/README.md.
 
@@ -60,7 +61,10 @@ cc_library(
 # Header-only: every benchmark compiles it into its own translation unit.
 cc_library(
     name = "bench_utils",
-    hdrs = ["bench_utils.h"],
+    hdrs = [
+        "bench_protocol.h",
+        "bench_utils.h",
+    ],
     deps = [
         # The card's declared peak rates, so `BenchReport::UseDevicePeak`
         # divides by the rate of the device that ran (`docs/precision.md`). The

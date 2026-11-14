@@ -24,6 +24,7 @@ See [docs/kernels.md](../../../docs/kernels.md) for the kernel inventory and
 | `testing/optim_ref.h` | Host reference for AdamW and Muon. |
 | `testing/gpu_test_utils.h` | Device buffer, deterministic random source, tolerance check, finite-difference helper. |
 | `testing/bench_utils.h` | CUDA-event timer, and the `BenchReport` alias for the `nanochat.bench.v3` report in `nanochat/bench.h`. |
+| `testing/bench_protocol.h` | The measurement protocol: one event pair around a window of calls, the flush of the second-level cache and the measured cost of that flush, the minimum and the median of the rounds, and the two rows one measurement states. Both device benchmarks time through it. |
 
 ## The fused Muon path
 
@@ -154,9 +155,11 @@ above a group's element count is the whole promotion.
   `--test_tag_filters=-gpu`. `tools/nanochat test --gpu //...` runs only them.
   Do not add the `manual` tag. Bazel excludes `manual` targets from wildcard
   expansion, so the acceptance command would miss them.
-- **Benchmarks are not tests.** Use `testing/bench_utils.h`. Run them through
-  `tools/nanochat bench` or `tools/nanochat profile`. Do not add a benchmark to
-  the `all` test suite.
+- **Benchmarks are not tests.** Use `testing/bench_utils.h` for the report and
+  `testing/bench_protocol.h` for the timing. Every row goes through
+  `nanochat::dev::Harness`, so a row of one benchmark compares with a row of
+  another. Run them through `tools/nanochat bench` or `tools/nanochat profile`.
+  Do not add a benchmark to the `all` test suite.
 - **A `wmma` fragment stays opaque.** Pass a fragment only to `fill_fragment`,
   `load_matrix_sync`, `mma_sync`, and `store_matrix_sync`. The emulator of
   [simulator.md](../../docs/simulator.md) section 9.4 holds one whole micro-tile
