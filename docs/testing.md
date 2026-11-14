@@ -143,8 +143,9 @@ client and its Bazel server start inside `nanochat-agent-<id>.slice`, so the
 build phase of the suite has a memory ceiling. Test actions still get their own
 profile scope, so a run is bounded twice. The network is denied by default,
 because the session supervisor holds one namespace and the suite then costs
-what a normal run costs, 2.8 s measured. A session without a supervisor falls
-back to the host network and says so ([sandbox.md](sandbox.md) section 19).
+what a normal run costs, 2.8 s measured. A run that finds no supervisor starts
+one, so the deny holds and the run does not degrade to the host network
+([sandbox.md](sandbox.md) section 19).
 
 ## Fixture generator commands
 

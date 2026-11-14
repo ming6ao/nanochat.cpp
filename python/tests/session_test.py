@@ -328,6 +328,108 @@ class NetworkTest(unittest.TestCase):
         with self.assertRaises(cli.Failure):
             cli._parse_session_args(["--net", "nonsense"])
 
+    def test_the_record_keeps_the_mount_role(self) -> None:
+        """A supervisor that a command starts keeps the record's role."""
+        with tempfile.TemporaryDirectory() as directory:
+            with mock.patch.dict(os.environ,
+                                 {"NANOCHAT_SESSION_DIR": directory}):
+                record = session.start_record("agent1", Path(directory),
+                                              architect=True)
+                self.assertTrue(record["architect"])
+                self.assertTrue(session.read_record("agent1")["architect"])
+                self.assertFalse(session.start_record(
+                    "agent1", Path(directory))["architect"])
+
+
+class BoundaryTest(unittest.TestCase):
+    """A denied run starts the supervisor instead of leaving the boundary.
+
+    The fallback used to run the command on the host network and fail the
+    placement check afterwards, so a build that succeeded reported a failure.
+    """
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory(prefix="nanochat_boundary_")
+        self.addCleanup(self.tmp.cleanup)
+        patcher = mock.patch.dict(
+            os.environ, {"NANOCHAT_SESSION_DIR": str(Path(self.tmp.name))})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.record = session.start_record("agent1",
+                                           Path(self.tmp.name) / "repo",
+                                           net=session.NET_DENY)
+        self.ctx = cli.Context()
+
+    def _run(self, ready, started=None):
+        """``(code, started, supervised, host_path)`` for one denied build."""
+        calls: dict[str, object] = {"started": 0, "supervised": 0,
+                                    "host": 0}
+
+        def fake_start(record, values, architect=False):
+            calls["started"] = calls["started"] + 1
+            calls["architect"] = architect
+            if started is None:
+                raise AssertionError("the supervisor must not start")
+            return started
+
+        def fake_supervised(*args):
+            calls["supervised"] = calls["supervised"] + 1
+            return 0
+
+        def fake_host(*args):
+            calls["host"] = calls["host"] + 1
+            return 1
+
+        with mock.patch.object(cli.session, "read_ready", return_value=ready), \
+                mock.patch.object(cli, "_start_supervisor",
+                                  side_effect=fake_start), \
+                mock.patch.object(cli, "_bazel_supervised",
+                                  side_effect=fake_supervised), \
+                mock.patch.object(cli, "_bazel_in_session",
+                                  side_effect=fake_host), \
+                mock.patch.object(cli, "_profile_values", return_value={}):
+            code = cli._bazel_in_boundary(["build", "//x"], self.record,
+                                          self.ctx, session.NET_DENY, "hint")
+        return code, calls
+
+    def test_a_live_supervisor_serves_the_build(self) -> None:
+        code, calls = self._run({"pid": os.getpid(), "net_ns": "net:[1]"})
+        self.assertEqual(code, 0)
+        self.assertEqual((calls["started"], calls["supervised"],
+                          calls["host"]), (0, 1, 0))
+
+    def test_no_supervisor_starts_one_and_keeps_the_deny(self) -> None:
+        code, calls = self._run(None, started={"pid": os.getpid(),
+                                               "net_ns": "net:[2]"})
+        self.assertEqual(code, 0)
+        self.assertEqual((calls["started"], calls["supervised"],
+                          calls["host"]), (1, 1, 0))
+        self.assertFalse(calls["architect"])
+
+    def test_an_architect_record_starts_an_architect_supervisor(self) -> None:
+        self.record = session.start_record("agent1",
+                                           Path(self.tmp.name) / "repo",
+                                           net=session.NET_DENY,
+                                           architect=True)
+        _, calls = self._run(None, started={"pid": os.getpid(),
+                                            "net_ns": "net:[3]"})
+        self.assertTrue(calls["architect"])
+
+    def test_the_host_network_path_refuses_a_deny(self) -> None:
+        with self.assertRaises(cli.Failure):
+            cli._bazel_in_session(["build", "//x"], self.record,
+                                  self.ctx, session.NET_DENY, "hint")
+
+    def test_a_host_run_skips_the_supervisor(self) -> None:
+        calls: dict[str, int] = {"started": 0}
+        with mock.patch.object(cli.session, "read_ready", return_value=None), \
+                mock.patch.object(cli, "_start_supervisor",
+                                  side_effect=AssertionError("no start")), \
+                mock.patch.object(cli, "_bazel_in_session", return_value=0):
+            code = cli._bazel_in_boundary(["build", "//x"], self.record,
+                                          self.ctx, session.NET_HOST, "hint")
+        self.assertEqual(code, 0)
+
 
 class ServerFileTest(unittest.TestCase):
     """The server pid comes from a file, never from a Bazel call."""

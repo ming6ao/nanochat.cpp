@@ -1074,14 +1074,17 @@ what a normal run costs:
 | `test`, session, no supervisor, deny | 21 s |
 
 Both `build` and `test` deny by default in a session, and the deny costs
-nothing. A session without a supervisor falls back to the host network and says
-so, because a namespace that lives for one command pays that 21 s every time.
+nothing. A denied run that finds no supervisor starts one, so the session's
+network mode always holds: the run takes the supervisor's namespace and the
+server is reused afterwards. The start is idempotent, it clears a stale socket,
+and it keeps the mount role of the record. This replaced a fallback to the host
+network, which announced a policy the run did not keep.
 
-Deny has exactly one meaning: the supervisor's namespace. A `--net deny`
-invocation with no supervisor is no longer a path, so there is nothing to keep
-in step. `--net host` means "run this command outside the supervisor, on the
-host network", and it costs one server start, because the server is then in the
-wrong namespace.
+Deny has exactly one meaning: the supervisor's namespace. A denied command that
+reaches the host-network path is a logic error and not a fallback, so that path
+refuses it by name. `--net host` means "run this command outside the supervisor,
+on the host network", and it costs one server start, because the server is then
+in the wrong namespace.
 
 The measured peak of the whole CPU suite is 3.22 GiB against the 4 GiB `build`
 profile, so the ceiling holds for the suite and not for a CUDA suite. A build
@@ -1147,6 +1150,11 @@ tools/nanochat session start --architect    # keep the frozen headers writable
 tools/nanochat session status [--json]      # slice, supervisor, claims, server
 tools/nanochat session stop                 # supervisor, slice, record
 ```
+
+Each of those fields is part of the record: the identity, the network mode, the
+mount role, and the worktree. A supervisor that a command starts on demand reads
+the record, so it keeps the role and the network of the `session start` that
+wrote it.
 
 - The record is the session. `--id NAME` names it, and the default is the
   worktree directory name, so `nanochat.cpp` becomes `nanochat-cpp`.
@@ -1256,9 +1264,10 @@ A tree whose output base holds no external repository needs one run with
 - The private network namespace has loopback up, by design, because Bazel needs
   it. A denied build can reach a service that listens on the host's loopback
   only through a shared namespace, and it does not share one.
-- The deny rule costs one server start per run, about 20 s. That is why `test`
-  uses the host network by default, and why a session that runs many small
-  builds is faster with `session start --net host`.
+- The deny rule costs one server start per run when the server is in another
+  network namespace. The supervisor keeps one namespace, so a repeat run reuses
+  the server. A session that runs many small builds is still faster with
+  `session start --net host`, which is what that mode is for.
 - The whole CPU suite peaks at 3.22 GiB. The `build` profile carries 4 GiB high
   and 5 GiB max, which holds one 3.0 GiB device compile beside the Bazel server
   and stays under the 6 GiB aggregate. Two such compiles do not fit at once, so a

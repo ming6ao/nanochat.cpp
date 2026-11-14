@@ -275,10 +275,28 @@ def _active_session() -> dict | None:
 
 def _bazel_in_boundary(bazel_argv: list[str], record: dict, ctx: Context,
                        net: str, hint: str) -> int:
-    """Pick the cheapest boundary that honours ``net``, then check it."""
+    """Pick the cheapest boundary that honours ``net``, then check it.
+
+    A denied run needs the network namespace the supervisor owns, and only a
+    long-lived process can own one. When no supervisor is up this starts it,
+    because both alternatives are wrong: a namespace per command pays a server
+    start every run, and the host network is what the deny forbids.
+
+    This used to take the host network instead, so a denied build ran there and
+    the placement check failed the command afterwards, with the build already
+    done. A caller that reads only the exit status saw a failed build.
+    """
     ready = None
     if net == session.NET_DENY:
         ready = session.read_ready(record["id"])
+        if ready is None:
+            if ctx.dry_run:
+                ctx.plan("session", "start-supervisor", record["id"])
+                ready = {}
+            else:
+                ready = _start_supervisor(
+                    record, _profile_values(),
+                    architect=bool(record.get("architect")))
     if ready is not None:
         return _bazel_supervised(bazel_argv, record, ctx, net, ready, hint)
     return _bazel_in_session(bazel_argv, record, ctx, net, hint)
@@ -317,11 +335,15 @@ def _bazel_in_session(bazel_argv: list[str], record: dict, ctx: Context,
                       net: str, hint: str) -> int:
     """Run one Bazel command in the session slice, on the host network.
 
-    This is the path for ``--net host`` and for a session whose supervisor is
-    down. A denied command always belongs to the supervisor, because only a
-    long-lived process can own a namespace that outlives a command.
+    This is the path for ``--net host`` alone. A denied command belongs to the
+    supervisor, because only a long-lived process can own a namespace that
+    outlives a command, so a denied run here is a logic error and not a
+    fallback.
     """
     name = record["id"]
+    if net == session.NET_DENY:
+        die("a denied run needs the session supervisor, and it did not start; "
+            "run: tools/nanochat session start")
     launcher = [str(SANDBOX), "--profile", session.BUILD_PROFILE,
                 "--session", name, "--", find_bazel(), *bazel_argv]
     if ctx.dry_run:
@@ -516,16 +538,10 @@ def _bazel_in_boundary_or_host(bazel_argv: list[str], ctx: Context,
             die("--net needs a session; run: tools/nanochat session start")
         return ctx.bazel(bazel_argv)
     if net is None:
-        # A supervisor holds one namespace for the session, so a denied run
-        # reuses its server and costs nothing. Without one, a denied run would
-        # restart the server every time, so the network stays on the host.
-        if session.read_ready(record["id"]) is not None:
-            net = record.get("net", session.NET_DENY)
-        else:
-            net = session.NET_HOST
-            print("session: tests have the host network, because no "
-                  "supervisor is up; a hermetic run needs: "
-                  "tools/nanochat session start")
+        # A denied run starts the supervisor when none is up, so the session's
+        # own network mode always applies. A degrade to the host network here
+        # would announce a policy the run does not keep.
+        net = record.get("net", session.NET_DENY)
     return _bazel_in_boundary(bazel_argv, record, ctx, net,
                               "the test build had no network")
 
@@ -671,7 +687,8 @@ def _session_start(rest: list[str], ctx: Context) -> int:
         die("session needs cgroup v2; NANOCHAT_SANDBOX_BACKEND=none "
             "turns the session scope off")
     try:
-        record = session.start_record(name, REPO_ROOT, agent=agent, net=net)
+        record = session.start_record(name, REPO_ROOT, agent=agent, net=net,
+                                      architect=architect)
     except OSError as error:
         die(f"cannot write the session record: {error}")
     print(f"session: {record['id']} slice={record['slice']} net={record['net']}")

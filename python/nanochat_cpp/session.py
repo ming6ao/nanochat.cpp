@@ -166,7 +166,7 @@ def record_path(session_id: str) -> Path:
 
 
 def write_record(session_id: str, root: Path, *, agent: str = "",
-                 net: str = NET_DENY) -> dict:
+                 net: str = NET_DENY, architect: bool = False) -> dict:
     """Write the record of one session, atomically. Return the record."""
     if net not in NET_MODES:
         raise SessionError(f"network mode must be one of {NET_MODES}")
@@ -178,6 +178,9 @@ def write_record(session_id: str, root: Path, *, agent: str = "",
         "profile": BUILD_PROFILE,
         "agent": agent,
         "net": net,
+        # The mount role, so a supervisor that a command starts on demand keeps
+        # the frozen headers writable for the workstream that owns them.
+        "architect": bool(architect),
         "started": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
     path = record_path(session_id)
@@ -392,9 +395,11 @@ def stop(session_id: str) -> int:
 
 
 def start_record(session_id: str, root: Path | None = None,
-                 agent: str = "", net: str = NET_DENY) -> dict:
+                 agent: str = "", net: str = NET_DENY,
+                 architect: bool = False) -> dict:
     """Write the record of one session."""
-    return write_record(session_id, root or REPO_ROOT, agent=agent, net=net)
+    return write_record(session_id, root or REPO_ROOT, agent=agent, net=net,
+                        architect=architect)
 
 
 # -- The supervisor --------------------------------------------------------
@@ -660,6 +665,7 @@ def check_placement(session_id: str, net: str = NET_DENY,
         print(f"session: {session_id}: it runs in {cgroup}")
         print("session: the memory ceiling did not cover this build; see "
               "docs/sandbox.md ### Builds")
+        print("session: the command itself ran; the placement is the failure")
         return 1
     if net != NET_DENY:
         print(f"session: {session_id}: bazel server in {cgroup}")
@@ -673,12 +679,15 @@ def check_placement(session_id: str, net: str = NET_DENY,
                   f"the session has {netns}")
             print("session: this build could fetch; see docs/sandbox.md "
                   "section 19")
+            print("session: the command itself ran; the placement is the "
+                  "failure")
             return 1
     elif net_is_private(pid) is False:
         print(f"session: {session_id}: build server shares the host network")
         print("session: this build could fetch; see docs/sandbox.md "
               "section 19")
         print("session: a fetch needs: tools/nanochat build --net host ...")
+        print("session: the command itself ran; the placement is the failure")
         return 1
     print(f"session: {session_id}: bazel server in {cgroup}")
     print(f"session: {session_id}: bazel server has no network")
