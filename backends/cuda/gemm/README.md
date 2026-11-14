@@ -780,6 +780,21 @@ report that produced it. The table is data, so a hand edit fails a gate instead
 of changing a shipped decision. `dispatch_test` states that a written row keys a
 shape of the closed list.
 
+The run that writes the table states nine windows, because one window of three
+calls is too noisy at the margin:
+
+```bash
+modal run tools/modal/app.py::card_job --name gemm_bench \
+    --argv '["--rows","production","--rounds","9","--json"]'
+```
+
+A row near the margin moves by about half a point between runs at three
+windows, which is a third of the 0.04 margin, so a near-tie crosses the line in
+roughly one run in six. Nine windows cut that error by about 1.7. The report
+states the count it used in `rounds`, and `tools/gemm_rules.py` prints it, so a
+reader sees which noise the table came from. A rerun never rewrites the table:
+the table is the record of the run that decided it.
+
 **The card runs.** Two runs on an H100 80GB HBM3 measured both families at the
 protocol above, one before section 11.9 and one after. The numbers are the
 `gemm_cutlass` and `gemm_scaling` entries of `docs/baselines.json`, and
@@ -820,10 +835,14 @@ The confirmation run of the production rows moved the cuBLAS column by -3 to +9
 percent and the hand column by up to 21 percent, which is the spread of section
 17. Three rows changed which candidate they would pick, and
 `linear:fwd:cproj` fell under the 0.04 margin: it was promoted by 4.59 percent
-and this run would keep cuBLAS. The committed table stays as the record of the
-run that wrote it, because a rerun is not a better measurement of a win this
-small. A decision on that row needs either a third run or a wider margin, and
-section 11.4 item 5 of `docs/kernels.md` is where it belongs.
+and this run would keep cuBLAS.
+
+Four further runs of that one row, alone at the same protocol, read 4.28, 4.89,
+4.50, and 4.41 percent. The win is 4.4 percent with a spread of half a point, so
+the promotion is the better guess and the table stands as the record of the run
+that wrote it. What the spread fixes is the sample: one window of three calls is
+too noisy at the margin, so the run that writes the table states nine windows.
+`docs/kernels.md` section 11.4 item 5 states the measurement.
 
 **What is still not here.**
 

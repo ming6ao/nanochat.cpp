@@ -27,7 +27,9 @@ of one sweep disagree by up to 4 percent on a row whose arms are close: on the
 H100 of section 11.8, five of the 28 production rows changed their winner
 between two runs. A win smaller than the margin is therefore a coin toss and not
 a measurement, so the default margin is 0.04 of the cuBLAS time and a caller can
-state another one.
+state another one. The run that writes a table states nine windows, because
+three leave about half a point of noise on a row near the margin; the report
+states the count it used in `rounds`, and this tool prints it.
 
 The measurement rows of ``bench_shapes.h`` never enter the table: they answer a
 question about a kernel and not about a model, so the tool refuses a report whose
@@ -353,6 +355,21 @@ def generate(
     return decisions
 
 
+def report_windows(path: Path) -> int:
+    """The number of windows the report took each row from, or 0.
+
+    The count is provenance, and not a gate: the deciding run states nine
+    windows (`docs/kernels.md` section 11.4 item 5), so a reader of a table can
+    see which noise it came from.
+    """
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return 0
+    count = document.get("rounds")
+    return int(count) if isinstance(count, (int, float)) else 0
+
+
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--report", type=Path, required=True)
@@ -388,6 +405,9 @@ def main(argv: list[str]) -> int:
 
     committed = text[start:end]
     promoted = [d for d in decisions if d.route == "kCandidate"]
+    windows = report_windows(options.report)
+    if windows:
+        print(f"gemm rules: every row is the minimum of {windows} windows")
     if options.check:
         if committed != block:
             print(

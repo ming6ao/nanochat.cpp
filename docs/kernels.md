@@ -1785,6 +1785,16 @@ protocol, a machine-readable report, and a stored choice.
    `--min-margin`, and its default is that measured value. Section 11.8 states
    the spread it comes from.
 
+   **The run that writes the table states nine windows.** One window of three
+   calls leaves about half a point of noise on a row near the margin, and two
+   runs then disagree by about 1.3 points, which is a third of the margin. A
+   row whose true win is 4.4 percent therefore crosses the 4 percent line in
+   roughly one run in six. The deciding run passes `--rounds 9`, which cuts the
+   standard error of the comparison by about 1.7, and the report states the
+   count it used in its `rounds` field. The table records the run that wrote it,
+   so a rerun never rewrites it: a rerun of the same rows would flip a shipped
+   decision on that noise.
+
 The choice is offline. A training step pays one table lookup. A run-time timing
 pass would put card work on the start of every step, and the shape rule would
 stop being a host-only check.
@@ -1917,7 +1927,7 @@ lose.
 | 2 | A registry of four candidates, one source compiled once for each index | **Done, and the gate fails**: every candidate spills | `tools/gemm_spill_gate.py` after a build of `//backends/cuda/gemm:gemm_benchmark` |
 | 3 | The check for each candidate in the benchmark | **Done, not yet run on a card** | `gemm_benchmark --self-test` |
 | 4 | The flush, the medians, and the occupancy column | **Done** | A `gemm_bench` run of the production rows |
-| 5 | One card run of the sweep, on both row families | **Done twice**: the first on spilling kernels, the second after section 11.9, which promotes nine rows | `modal run tools/modal/app.py::card_job --name gemm_bench --argv '["--rows","all","--json"]'`, then the same with `--rows production` |
+| 5 | One card run of the sweep, on both row families | **Done twice**: the first on spilling kernels, the second after section 11.9, which promotes nine rows | `modal run tools/modal/app.py::card_job --name gemm_bench --argv '["--rows","all","--json"]'`, then the deciding run, which states nine windows: the same with `--rows production --rounds 9` |
 | 6 | The table, the seam lookup, and then step 5 of section 6 | **Done**: 28 rows, nine promoted, and the seam serves them | `tools/gemm_rules.py --report FILE --check`, then the dependency query of gate G4 |
 | 7 | The shipped seam on a card, row by row | **Done, and it passed**: 28 rows, no rejection | `modal run tools/modal/app.py::card_job --name gemm_bench --argv '["--rows","production","--seam","--json"]'` |
 
