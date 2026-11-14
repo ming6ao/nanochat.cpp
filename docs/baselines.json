@@ -2252,7 +2252,7 @@
       ]
     },
     "attention_flash_probe": {
-      "note": "The `attention-flash:` rows of dev/kernels/wgmma_bench.cu, which price the whole tile of the H2 prototype instead of the score product alone: the score product, the base-two softmax in the registers, the value product from the probability operand the score lane already holds, and the running maximum, sum, and rescale. One `FlashStep` is the only written form of the step, so a resident row and a staged row cannot state two chains. The set prices the tile twice, once with no copy path and once behind a ring of key tiles and a ring of value tiles, and it states the cap of the path that fills each ring at the depth of the row beside it. Two masks are timed: dense, and the causal boundary tile, where the query block and the key tile start at the same offset so a row sees the keys up to its own index. That tile issues a full 128-key tile for every query row and needs the triangle of it, so its row states `work_ratio` as 256 over the query rows plus one, which is 3.94 at 64 rows and 1.98 at 128. fraction_of_peak divides by the 989 TFLOP/s dense bf16 rate of backends/cuda/caps.json. One run on the H100 leg of tools/modal/app.py, at bf16, sm_90a, through the protocol of backends/cuda/kernels/testing/bench_protocol.h as in wgmma_probe: three calls to a window, three windows, a flush before every call, the flush cost removed, and a minimum row beside a :median companion. The checks run first and all pass. One element at a time against the host reference of the family, seqref::AttentionForward, reads 2.09e-03 of a reference scale of 0.184 with no bad element of 8,192 for the dense step, and 1.00e-03 of a scale of 1.000 with none for the boundary tile; the row sums read 2.11e-07 and 1.34e-07, which is the bf16 rounding of the probability operand and not a defect. Both stagings then agree with the resident step of the same mask exactly, no bad element in any of the eight geometries, so the ring, its barriers, the stage offsets, the transposed value staging, and the mask are right. The dense check is also the first end-to-end test of the register operand of wgmma.mma_async, whose element order the H1 rows measured with one-hot elements and never carried a full product through. The step is a chain and not a pipeline, because the score product must retire before the softmax reads it and the softmax must finish before the value product issues, and the resident row states what that costs with no traffic at all: 448.2 TFLOP/s over the card, 45.3 percent of the peak, against the 978.7 TFLOP/s and 98.96 percent of the score-only resident row in attention_wgmma_probe. One warpgroup alone reads 3.37 TFLOP/s, 45.0 percent of the per-SM share, so the grid loses no occupancy and the chain is the whole gap. The boundary tile reads 446.8 TFLOP/s against 448.2 dense, so the mask costs 0.3 percent of the rate: the tile is bound by the chain and not by the arithmetic, and the mask buys the work it removes at no cost. The copy rows separate the two rings and the two depths. The key ring reads 2.255 TB/s at two stages and 2.429 at three in one warpgroup, and 2.224 against 2.493 in two, so it needs the third stage. The key and value rings together read 0.949 and 0.943 TB/s in one warpgroup and 1.495 and 1.492 in two, so the mixed ring is flat with depth and is bound by the plain transposed staging of the value tile: a transposition is not a contiguous sixteen-byte move, so no copy engine carries one. Doubling the staged bytes costs 5.2 times the time at one warpgroup. The staged rows read 52.84 TFLOP/s at 64 query rows and 146.1 at 128 when dense, and 53.05 and 137.2 when causal, which is 87.0 to 87.9 percent of the copy cap of their own path in one warpgroup and 71.7 to 76.3 percent in two, where the score-only staged rows of attention_wgmma_probe reach 97 to 99 percent; the missing share is the softmax and the value product, the same share the resident row states. The mask costs 0.0 to 6.1 percent of a staged row, which is inside or beside the spread. Against the score-only rows at the same reuse, the whole tile is a half at 128 query rows, 295.4 against 146.1, and a third at 64, 150.1 against 52.84. Two consequences for docs/attention.md Part 8: decision H2b must reach the value tile and not only the key tile, and decision H4 is needed for the softmax and not only for the copies. No phase gate is stated here, because these rows are a prototype ceiling and not the production tile of phase H2. One run, so no row is claimed tighter than the three-window minimum states. Runs of this source before the mask axis agreed within 1.3 percent on every row.",
+      "note": "The `attention-flash:` rows of dev/kernels/wgmma_bench.cu, which price the whole tile of the H2 prototype instead of the score product alone: the score product, the base-two softmax in the registers, the value product from the probability operand the score lane already holds, and the running maximum, sum, and rescale. One `FlashStep` is the only written form of the step. The set prices the tile three times: with no copy path, behind a ring of key tiles and a ring of value tiles, and with the softmax switched off, which is the ceiling of the chain. It states the cap of the path that fills each ring at the depth of the row beside it. Two masks are timed: dense, and the causal boundary tile, whose `work_ratio` is 256 over the query rows plus one. fraction_of_peak divides by the 989 TFLOP/s dense bf16 rate of backends/cuda/caps.json. One run on the H100 leg of tools/modal/app.py, at bf16, sm_90a, through the protocol of backends/cuda/kernels/testing/bench_protocol.h as in wgmma_probe. The checks run first and all pass: 2.09e-03 of a reference scale of 0.184 with no bad element of 8,192 for the dense step, and 1.00e-03 of a scale of 1.000 for the boundary tile, and every staged geometry agrees with the resident step of the same mask exactly. The chain costs 43 percent of the step. The resident row reads 452.1 TFLOP/s and the same row with the softmax off reads 790.6, so the softmax and its serialized place between the two products are 43 percent of the time, and the tile could reach 80 percent of the peak if that chain were overlapped. Behind the rings the ceiling is only 162.1 against 146.8, so removing the whole softmax buys 10 percent there and the staged row is copy bound at 82 percent of its cap. That splits the two gaps into two different fixes: the resident row is limited by the serialized chain, which decision H4 addresses, and the staged row is limited by the mixed ring, which only a copy path for the value tile can lift. The mask remains free at 0.03 percent. The key ring gains 7.2 percent from a third stage at one warpgroup and 11.6 at two; the mixed ring is flat with depth, because the plain transposed staging of the value tile is instruction bound and a transposition is not a contiguous sixteen-byte move. A sweep of 72 descriptor configurations finds exactly one form the value product can read, `transpose_stage=1 trans_b=0 atom_step=256 lbo=128 sbo=256`, so the value ring has no plain-store alternative and decision H2b is the route. Against the score-only staged rows at the same reuse the whole tile is a half at 128 query rows and a third at 64. One run, so no row is claimed tighter than the three-window minimum states; earlier runs of this source agreed within 1.3 percent on every row.",
       "device": "NVIDIA H100 80GB HBM3 (sm_90a)",
       "validated_on": "NVIDIA H100 80GB HBM3 (sm_90a)",
       "precision": "bf16",
@@ -2350,9 +2350,9 @@
           "tiles": 5000,
           "atoms": "8+8",
           "mask": "dense",
-          "ms": 6.2162,
-          "tflops": 3.374,
-          "fraction_of_sm_share": 0.4503,
+          "ms": 6.2711,
+          "tflops": 3.348,
+          "fraction_of_sm_share": 0.4468,
           "note": "one warpgroup alone, so this row states the per-SM share and not the card"
         },
         {
@@ -2362,11 +2362,10 @@
           "tiles": 5000,
           "atoms": "8+8",
           "mask": "dense",
-          "ms": 6.1762,
-          "tflops": 448.2,
-          "fraction_of_peak": 0.4532,
+          "tflops": 452.1,
+          "fraction_of_peak": 0.4572,
           "work_ratio": 1.0,
-          "note": "the chain with no copy path; the score-only twin reads 978.7 TFLOP/s"
+          "note": "the chain with no copy path"
         },
         {
           "name": "attention-flash:resident",
@@ -2375,11 +2374,23 @@
           "tiles": 5000,
           "atoms": "8+8",
           "mask": "causal",
-          "ms": 6.1963,
-          "tflops": 446.8,
-          "fraction_of_peak": 0.4517,
+          "tflops": 452.0,
+          "fraction_of_peak": 0.457,
           "work_ratio": 3.938,
-          "note": "the boundary tile costs 0.3 percent of the dense rate, so the tile is bound by the chain and not by the arithmetic"
+          "note": "the boundary tile costs 0.03 percent of the dense rate, so the mask is free"
+        },
+        {
+          "name": "attention-flash:resident",
+          "blocks": 132,
+          "warpgroups": 1,
+          "tiles": 5000,
+          "atoms": "8+8",
+          "mask": "dense",
+          "softmax": "off",
+          "tflops": 790.6,
+          "fraction_of_peak": 0.7994,
+          "work_ratio": 1.0,
+          "note": "the ceiling of the chain: the two products and the conversion with no softmax between them, so the softmax and its place in the chain cost 43 percent of the step"
         },
         {
           "name": "attention-flash:copies",
@@ -2389,8 +2400,8 @@
           "window": 2048,
           "blocks": 132,
           "tiles": 8192,
-          "tbps": 2.25521,
-          "gigabytes_per_second_per_block": 17.08
+          "tbps": 2.26685,
+          "gigabytes_per_second_per_block": 17.17
         },
         {
           "name": "attention-flash:copies",
@@ -2400,41 +2411,41 @@
           "window": 2048,
           "blocks": 132,
           "tiles": 8192,
-          "tbps": 0.948998,
-          "gigabytes_per_second_per_block": 7.19
-        },
-        {
-          "name": "attention-flash:copies",
-          "warpgroups": 1,
-          "stages": 3,
-          "content": "key",
-          "window": 2048,
-          "blocks": 132,
-          "tiles": 8192,
-          "tbps": 2.42868,
-          "gigabytes_per_second_per_block": 18.4
-        },
-        {
-          "name": "attention-flash:copies",
-          "warpgroups": 1,
-          "stages": 3,
-          "content": "key+value",
-          "window": 2048,
-          "blocks": 132,
-          "tiles": 8192,
-          "tbps": 0.942797,
+          "tbps": 0.942426,
           "gigabytes_per_second_per_block": 7.14
         },
         {
           "name": "attention-flash:copies",
+          "warpgroups": 1,
+          "stages": 3,
+          "content": "key",
+          "window": 2048,
+          "blocks": 132,
+          "tiles": 8192,
+          "tbps": 2.4305,
+          "gigabytes_per_second_per_block": 18.41
+        },
+        {
+          "name": "attention-flash:copies",
+          "warpgroups": 1,
+          "stages": 3,
+          "content": "key+value",
+          "window": 2048,
+          "blocks": 132,
+          "tiles": 8192,
+          "tbps": 0.935827,
+          "gigabytes_per_second_per_block": 7.09
+        },
+        {
+          "name": "attention-flash:copies",
           "warpgroups": 2,
           "stages": 2,
           "content": "key",
           "window": 2048,
           "blocks": 132,
           "tiles": 8192,
-          "tbps": 2.22423,
-          "gigabytes_per_second_per_block": 16.85
+          "tbps": 2.23513,
+          "gigabytes_per_second_per_block": 16.93
         },
         {
           "name": "attention-flash:copies",
@@ -2444,8 +2455,8 @@
           "window": 2048,
           "blocks": 132,
           "tiles": 8192,
-          "tbps": 1.49528,
-          "gigabytes_per_second_per_block": 11.33
+          "tbps": 1.49406,
+          "gigabytes_per_second_per_block": 11.32
         },
         {
           "name": "attention-flash:copies",
@@ -2455,8 +2466,8 @@
           "window": 2048,
           "blocks": 132,
           "tiles": 8192,
-          "tbps": 2.49279,
-          "gigabytes_per_second_per_block": 18.88
+          "tbps": 2.49354,
+          "gigabytes_per_second_per_block": 18.89
         },
         {
           "name": "attention-flash:copies",
@@ -2466,8 +2477,8 @@
           "window": 2048,
           "blocks": 132,
           "tiles": 8192,
-          "tbps": 1.49177,
-          "gigabytes_per_second_per_block": 11.3
+          "tbps": 1.48892,
+          "gigabytes_per_second_per_block": 11.28
         },
         {
           "name": "attention-flash:staged",
@@ -2477,9 +2488,9 @@
           "blocks": 132,
           "tiles": 4096,
           "mask": "dense",
-          "ms": 42.9142,
-          "tflops": 52.84,
-          "fraction_of_peak": 0.0534,
+          "ms": 43.2683,
+          "tflops": 52.46,
+          "fraction_of_peak": 0.053,
           "flop_per_staged_byte": 64,
           "fraction_of_copy_cap": 0.87,
           "work_ratio": 1.0
@@ -2492,9 +2503,9 @@
           "blocks": 132,
           "tiles": 4096,
           "mask": "causal",
-          "ms": 42.7484,
-          "tflops": 53.05,
-          "fraction_of_peak": 0.0536,
+          "ms": 43.12,
+          "tflops": 52.64,
+          "fraction_of_peak": 0.0532,
           "flop_per_staged_byte": 64,
           "fraction_of_copy_cap": 0.873,
           "work_ratio": 3.938
@@ -2507,9 +2518,9 @@
           "blocks": 132,
           "tiles": 4096,
           "mask": "dense",
-          "ms": 42.9109,
-          "tflops": 52.85,
-          "fraction_of_peak": 0.0534,
+          "ms": 43.2813,
+          "tflops": 52.48,
+          "fraction_of_peak": 0.0531,
           "flop_per_staged_byte": 64,
           "fraction_of_copy_cap": 0.876,
           "work_ratio": 1.0
@@ -2522,9 +2533,9 @@
           "blocks": 132,
           "tiles": 4096,
           "mask": "causal",
-          "ms": 42.7655,
-          "tflops": 53.03,
-          "fraction_of_peak": 0.0536,
+          "ms": 43.1017,
+          "tflops": 52.66,
+          "fraction_of_peak": 0.0532,
           "flop_per_staged_byte": 64,
           "fraction_of_copy_cap": 0.879,
           "work_ratio": 3.938
@@ -2537,11 +2548,11 @@
           "blocks": 132,
           "tiles": 4096,
           "mask": "dense",
-          "ms": 31.0486,
-          "tflops": 146.1,
-          "fraction_of_peak": 0.1477,
+          "ms": 15.4755,
+          "tflops": 146.8,
+          "fraction_of_peak": 0.1484,
           "flop_per_staged_byte": 128,
-          "fraction_of_copy_cap": 0.763,
+          "fraction_of_copy_cap": 0.768,
           "work_ratio": 1.0
         },
         {
@@ -2552,11 +2563,11 @@
           "blocks": 132,
           "tiles": 4096,
           "mask": "causal",
-          "ms": 33.0695,
-          "tflops": 137.2,
-          "fraction_of_peak": 0.1387,
+          "ms": 16.4462,
+          "tflops": 138.1,
+          "fraction_of_peak": 0.1396,
           "flop_per_staged_byte": 128,
-          "fraction_of_copy_cap": 0.717,
+          "fraction_of_copy_cap": 0.722,
           "work_ratio": 1.984
         },
         {
@@ -2567,11 +2578,11 @@
           "blocks": 132,
           "tiles": 4096,
           "mask": "dense",
-          "ms": 31.8538,
-          "tflops": 142.4,
-          "fraction_of_peak": 0.144,
+          "ms": 15.8331,
+          "tflops": 143.4,
+          "fraction_of_peak": 0.145,
           "flop_per_staged_byte": 128,
-          "fraction_of_copy_cap": 0.746,
+          "fraction_of_copy_cap": 0.752,
           "work_ratio": 1.0
         },
         {
@@ -2582,12 +2593,28 @@
           "blocks": 132,
           "tiles": 4096,
           "mask": "causal",
-          "ms": 31.4534,
-          "tflops": 144.2,
-          "fraction_of_peak": 0.1458,
+          "ms": 15.5969,
+          "tflops": 145.6,
+          "fraction_of_peak": 0.1472,
           "flop_per_staged_byte": 128,
-          "fraction_of_copy_cap": 0.755,
+          "fraction_of_copy_cap": 0.764,
           "work_ratio": 1.984
+        },
+        {
+          "name": "attention-flash:staged",
+          "warpgroups": 2,
+          "stages": 2,
+          "window": 2048,
+          "blocks": 132,
+          "tiles": 4096,
+          "mask": "dense",
+          "ms": 14.0088,
+          "tflops": 162.1,
+          "fraction_of_peak": 0.1639,
+          "flop_per_staged_byte": 128,
+          "fraction_of_copy_cap": 0.848,
+          "work_ratio": 1.0,
+          "softmax": "off"
         }
       ]
     }

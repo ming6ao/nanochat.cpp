@@ -120,6 +120,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <string>
 #include <type_traits>
 #include <utility>
@@ -194,6 +195,12 @@ constexpr int kKeyBytes = kAtomN * kDim * sizeof(Bf16);
 //: A value tile is a key tile of the same shape, and the flash tile stages
 //: both.
 constexpr int kValueBytes = kAtomN * kDim * sizeof(Bf16);
+
+//: The shared window of the value-operand sweep. The sweep launches descriptor
+//: forms the instruction cannot read, so a bad form must fail on values and not
+//: by addressing past the window: every read a form can issue stays inside this
+//: one, which is why it is four key tiles and not one.
+constexpr int kProbeSharedBytes = kQueryBytes + 4 * kKeyBytes;
 
 //: The staged shared memory of one geometry: the query tile of every
 //: warpgroup, then the ring of key tiles that all of them read.
@@ -416,14 +423,22 @@ __device__ __forceinline__ void StageTransposed(char* stage, const Bf16* source,
 // The six fields of the shared-memory matrix descriptor: the address in sixteen
 // byte units, the leading offset, the stride offset, base offset zero, and
 // layout type zero for the interleaved form.
-__device__ __forceinline__ std::uint64_t MakeDescriptor(const void* base) {
+// The same six fields with the leading and stride offsets stated by the caller,
+// so a sweep can try another operand form against the same staged tile.
+__device__ __forceinline__ std::uint64_t MakeDescriptorBytes(const void* base,
+                                                             int lbo_bytes,
+                                                             int sbo_bytes) {
   const std::uint32_t address =
       static_cast<std::uint32_t>(__cvta_generic_to_shared(base));
   std::uint64_t desc = 0;
   desc |= static_cast<std::uint64_t>((address >> 4) & 0x3FFFu);
-  desc |= static_cast<std::uint64_t>((kLboBytes >> 4) & 0x3FFFu) << 16;
-  desc |= static_cast<std::uint64_t>((kSboBytes >> 4) & 0x3FFFu) << 32;
+  desc |= static_cast<std::uint64_t>((lbo_bytes >> 4) & 0x3FFFu) << 16;
+  desc |= static_cast<std::uint64_t>((sbo_bytes >> 4) & 0x3FFFu) << 32;
   return desc;
+}
+
+__device__ __forceinline__ std::uint64_t MakeDescriptor(const void* base) {
+  return MakeDescriptorBytes(base, kLboBytes, kSboBytes);
 }
 
 // --- The instruction --------------------------------------------------------
@@ -633,7 +648,11 @@ __global__ void ResidentKernel(const Bf16* __restrict__ q,
 // `kMask` states the causal boundary tile: the query block and the key tile
 // start at the same offset, so a row sees the keys up to its own index and no
 // later one. `row_base` is the first query row of the calling warpgroup.
-template <bool kMask>
+//
+// `kSoftmax` false is the ceiling row of the chain: the two products, the
+// conversion, and nothing between them. The difference from a row that states
+// the real step is what the softmax and its serialized place in the chain cost.
+template <bool kMask, bool kSoftmax = true>
 __device__ __forceinline__ void FlashStep(
     std::uint64_t base_query, std::uint64_t base_key, std::uint64_t base_value,
     float log2_scale, int row_base, float (&running_max)[2],
@@ -670,57 +689,60 @@ __device__ __forceinline__ void FlashStep(
         score[i] = kFlashNegInf;
       }
     }
-    const int slot = (i / 2) % 2;
-    tile_max[slot] = fmaxf(tile_max[slot], score[i]);
+    if constexpr (kSoftmax) {
+      const int slot = (i / 2) % 2;
+      tile_max[slot] = fmaxf(tile_max[slot], score[i]);
+    }
   }
+  if constexpr (kSoftmax) {
 #pragma unroll
-  for (int slot = 0; slot < 2; ++slot) {
-    tile_max[slot] =
-        fmaxf(tile_max[slot], __shfl_xor_sync(0xFFFFFFFFu, tile_max[slot], 1));
-    tile_max[slot] =
-        fmaxf(tile_max[slot], __shfl_xor_sync(0xFFFFFFFFu, tile_max[slot], 2));
-    new_max[slot] = fmaxf(running_max[slot], tile_max[slot]);
-  }
+    for (int slot = 0; slot < 2; ++slot) {
+      tile_max[slot] = fmaxf(tile_max[slot],
+                             __shfl_xor_sync(0xFFFFFFFFu, tile_max[slot], 1));
+      tile_max[slot] = fmaxf(tile_max[slot],
+                             __shfl_xor_sync(0xFFFFFFFFu, tile_max[slot], 2));
+      new_max[slot] = fmaxf(running_max[slot], tile_max[slot]);
+    }
 
-  // The exponentials and the row sum, in the same two reductions. The rescale
-  // of the running state is the factor the output accumulator needs as well.
-  float tile_sum[2] = {0.0f, 0.0f};
+    // The exponentials and the row sum, in the same two reductions. The rescale
+    // of the running state is the factor the output accumulator needs as well.
+    float tile_sum[2] = {0.0f, 0.0f};
 #pragma unroll
-  for (int i = 0; i < kRegisters; ++i) {
-    const int slot = (i / 2) % 2;
-    score[i] = exp2f(score[i] - new_max[slot]);
-    tile_sum[slot] += score[i];
-  }
-  float rescale[2];
+    for (int i = 0; i < kRegisters; ++i) {
+      const int slot = (i / 2) % 2;
+      score[i] = exp2f(score[i] - new_max[slot]);
+      tile_sum[slot] += score[i];
+    }
+    float rescale[2];
 #pragma unroll
-  for (int slot = 0; slot < 2; ++slot) {
-    tile_sum[slot] += __shfl_xor_sync(0xFFFFFFFFu, tile_sum[slot], 1);
-    tile_sum[slot] += __shfl_xor_sync(0xFFFFFFFFu, tile_sum[slot], 2);
-    rescale[slot] = exp2f(running_max[slot] - new_max[slot]);
-    running_sum[slot] = running_sum[slot] * rescale[slot] + tile_sum[slot];
-    running_max[slot] = new_max[slot];
-  }
+    for (int slot = 0; slot < 2; ++slot) {
+      tile_sum[slot] += __shfl_xor_sync(0xFFFFFFFFu, tile_sum[slot], 1);
+      tile_sum[slot] += __shfl_xor_sync(0xFFFFFFFFu, tile_sum[slot], 2);
+      rescale[slot] = exp2f(running_max[slot] - new_max[slot]);
+      running_sum[slot] = running_sum[slot] * rescale[slot] + tile_sum[slot];
+      running_max[slot] = new_max[slot];
+    }
 
-  // The output accumulator holds the earlier steps under the earlier maximum,
-  // so every slot is rescaled before this step's value product adds to it.
+    // The output accumulator holds the earlier steps under the earlier maximum,
+    // so every slot is rescaled before this step's value product adds to it.
 #pragma unroll
-  for (int i = 0; i < kRegisters; ++i) {
-    output[i] *= rescale[(i / 2) % 2];
+    for (int i = 0; i < kRegisters; ++i) {
+      output[i] *= rescale[(i / 2) % 2];
+    }
   }
 
   // The probability operand, two keys a register from the score slots of this
-  // same lane, low half of the register first.
+  // same lane, low half of the register first. One `cvt.rn.bf16x2.f32` a pair,
+  // which is half the conversion instructions two scalar forms and an or cost.
   std::uint32_t probability[kKeyAtoms][4];
 #pragma unroll
   for (int atom = 0; atom < kKeyAtoms; ++atom) {
 #pragma unroll
     for (int reg = 0; reg < 4; ++reg) {
       const int index = 8 * atom + 4 * (reg / 2) + 2 * (reg % 2);
-      const std::uint32_t low = static_cast<std::uint32_t>(
-          __bfloat16_as_ushort(__float2bfloat16_rn(score[index])));
-      const std::uint32_t high = static_cast<std::uint32_t>(
-          __bfloat16_as_ushort(__float2bfloat16_rn(score[index + 1])));
-      probability[atom][reg] = low | (high << 16);
+      const __nv_bfloat162 pair =
+          __floats2bfloat162_rn(score[index], score[index + 1]);
+      std::memcpy(&probability[atom][reg], &pair, sizeof(std::uint32_t));
     }
   }
 
@@ -743,7 +765,7 @@ __device__ __forceinline__ void FlashStep(
 // `FlashStep` a tile, so `tiles` steps are one online softmax and not `tiles`
 // independent products. The output leaves unnormalised: one division by the row
 // sum belongs to the end of a real block, and the check applies it.
-template <int Warpgroups, bool kMask>
+template <int Warpgroups, bool kMask, bool kSoftmax>
 __global__ void ResidentFlashKernel(const Bf16* __restrict__ q,
                                     const Bf16* __restrict__ k,
                                     const Bf16* __restrict__ v,
@@ -792,8 +814,8 @@ __global__ void ResidentFlashKernel(const Bf16* __restrict__ q,
   const int row_base = warpgroup * kAtomM;
 
   for (int tile = 0; tile < tiles; ++tile) {
-    FlashStep<kMask>(base_query, base_key, base_value, log2_scale, row_base,
-                     running_max, running_sum, output);
+    FlashStep<kMask, kSoftmax>(base_query, base_key, base_value, log2_scale,
+                               row_base, running_max, running_sum, output);
   }
 
   WgmmaFenceOperand<kRegisters>(output);
@@ -818,7 +840,7 @@ __global__ void ResidentFlashKernel(const Bf16* __restrict__ q,
 // row, and `kStageValue` false stages the key ring alone. A step is
 // `FlashStep`, so a staged row and a resident row measure the same chain.
 template <int Warpgroups, int Stages, bool kProducts, bool kStageValue,
-          bool kMask>
+          bool kMask, bool kSoftmax>
 __global__ void StagedFlashKernel(const Bf16* __restrict__ q,
                                   const Bf16* __restrict__ k,
                                   const Bf16* __restrict__ v, int source_tiles,
@@ -896,7 +918,7 @@ __global__ void StagedFlashKernel(const Bf16* __restrict__ q,
       __syncthreads();
       FenceAsyncShared();
 
-      FlashStep<kMask>(
+      FlashStep<kMask, kSoftmax>(
           base_query, MakeDescriptor(keys + (tile % Stages) * kKeyBytes),
           MakeDescriptor(values + (tile % Stages) * kValueBytes), log2_scale,
           warpgroup * kAtomM, running_max, running_sum, output);
@@ -1108,8 +1130,8 @@ __global__ void RegisterOperandKernel(const Bf16* __restrict__ k,
 // that offset is what the transposed form changes.
 __global__ void ValueOperandKernel(const Bf16* __restrict__ p,
                                    const Bf16* __restrict__ v, int atom_step,
-                                   int trans_b, int transpose_stage,
-                                   float* __restrict__ out) {
+                                   int trans_b, int transpose_stage, int lbo,
+                                   int sbo, float* __restrict__ out) {
   extern __shared__ __align__(1024) char smem[];
   char* probability = smem;
   char* value = smem + kQueryBytes;
@@ -1124,7 +1146,7 @@ __global__ void ValueOperandKernel(const Bf16* __restrict__ p,
   WgmmaFence();
 
   const std::uint64_t base_probability = MakeDescriptor(probability);
-  const std::uint64_t base_value = MakeDescriptor(value);
+  const std::uint64_t base_value = MakeDescriptorBytes(value, lbo, sbo);
   float d[kRegisters];
 #pragma unroll
   for (int i = 0; i < kRegisters; ++i) d[i] = 0.0f;
@@ -1215,20 +1237,20 @@ void SyncFlash(const std::string& what) {
 // The opt-in dynamic shared-memory request of a resident flash instantiation,
 // and its one launch. A templated kernel has no single function address, so the
 // attribute is set once per instantiation and outside any timed window.
-template <int Warpgroups, bool kMask>
+template <int Warpgroups, bool kMask, bool kSoftmax = true>
 void SetFlashSharedMemory() {
   constexpr int kShared = FlashResidentBytes(Warpgroups);
-  cudaFuncSetAttribute(
-      reinterpret_cast<const void*>(ResidentFlashKernel<Warpgroups, kMask>),
-      cudaFuncAttributeMaxDynamicSharedMemorySize, kShared);
+  cudaFuncSetAttribute(reinterpret_cast<const void*>(
+                           ResidentFlashKernel<Warpgroups, kMask, kSoftmax>),
+                       cudaFuncAttributeMaxDynamicSharedMemorySize, kShared);
 }
 
-template <int Warpgroups, bool kMask>
+template <int Warpgroups, bool kMask, bool kSoftmax = true>
 void LaunchResidentFlash(int blocks, const Bf16* device_q, const Bf16* device_k,
                          const Bf16* device_v, float* device_out,
                          float* device_row_sums, int tiles, float scale) {
   constexpr int kShared = FlashResidentBytes(Warpgroups);
-  ResidentFlashKernel<Warpgroups, kMask>
+  ResidentFlashKernel<Warpgroups, kMask, kSoftmax>
       <<<blocks, Warpgroups * kWarpgroupThreads, kShared>>>(
           device_q, device_k, device_v, device_out, device_row_sums, tiles,
           scale);
@@ -1236,13 +1258,13 @@ void LaunchResidentFlash(int blocks, const Bf16* device_q, const Bf16* device_k,
 
 // One step of the flash tile over one block, read back: the accumulator slots
 // of every warpgroup in thread order, and the row sums beside them.
-template <int Warpgroups, bool kMask>
+template <int Warpgroups, bool kMask, bool kSoftmax = true>
 std::vector<float> RunResidentFlash(const Bf16* device_q, const Bf16* device_k,
                                     const Bf16* device_v, float* device_out,
                                     float* device_row_sums) {
-  LaunchResidentFlash<Warpgroups, kMask>(1, device_q, device_k, device_v,
-                                         device_out, device_row_sums, 1,
-                                         kFlashScale);
+  LaunchResidentFlash<Warpgroups, kMask, kSoftmax>(
+      1, device_q, device_k, device_v, device_out, device_row_sums, 1,
+      kFlashScale);
   SyncFlash("resident warpgroups=" + std::to_string(Warpgroups) +
             (kMask ? " causal" : " dense"));
   return ReadBack(device_out, Warpgroups * kProductSlots);
@@ -1252,23 +1274,23 @@ std::vector<float> RunResidentFlash(const Bf16* device_q, const Bf16* device_k,
 // its one launch. A templated kernel has no single function address, so the
 // attribute is set once per instantiation and outside any timed window.
 template <int Warpgroups, int Stages, bool kProducts, bool kStageValue,
-          bool kMask>
+          bool kMask, bool kSoftmax = true>
 void SetStagedFlashSharedMemory() {
   constexpr int kShared = FlashStagedBytes(Warpgroups, Stages, kStageValue);
-  cudaFuncSetAttribute(
-      reinterpret_cast<const void*>(
-          StagedFlashKernel<Warpgroups, Stages, kProducts, kStageValue, kMask>),
-      cudaFuncAttributeMaxDynamicSharedMemorySize, kShared);
+  cudaFuncSetAttribute(reinterpret_cast<const void*>(
+                           StagedFlashKernel<Warpgroups, Stages, kProducts,
+                                             kStageValue, kMask, kSoftmax>),
+                       cudaFuncAttributeMaxDynamicSharedMemorySize, kShared);
 }
 
 template <int Warpgroups, int Stages, bool kProducts, bool kStageValue,
-          bool kMask>
+          bool kMask, bool kSoftmax = true>
 void LaunchStagedFlash(int blocks, int tiles, int source_tiles,
                        const Bf16* device_q, const Bf16* device_k,
                        const Bf16* device_v, float* device_out,
                        float* device_row_sums) {
   constexpr int kShared = FlashStagedBytes(Warpgroups, Stages, kStageValue);
-  StagedFlashKernel<Warpgroups, Stages, kProducts, kStageValue, kMask>
+  StagedFlashKernel<Warpgroups, Stages, kProducts, kStageValue, kMask, kSoftmax>
       <<<blocks, Warpgroups * kWarpgroupThreads, kShared>>>(
           device_q, device_k, device_v, source_tiles, device_out,
           device_row_sums, tiles, kFlashScale);
@@ -2043,63 +2065,93 @@ int main(int argc, char** argv) {
                  host_v.size() * sizeof(nanochat::Bf16));
       cudaFuncSetAttribute(reinterpret_cast<const void*>(ValueOperandKernel),
                            cudaFuncAttributeMaxDynamicSharedMemorySize,
-                           kQueryBytes + kKeyBytes);
+                           kProbeSharedBytes);
       bool value_ok = false;
       int value_configs_ok = 0;
       int value_best_found = 0;
+      std::string value_pass_configs;
+      // Every descriptor the operand form can take: the staging of the tile,
+      // the transpose bit, the step along the key axis, and the leading and
+      // stride offsets. The offsets are the untried pair, because the value
+      // tile's natural order needs the roles of the two exchanged, and that is
+      // what would let the copy engine fill the ring.
       for (int transpose_stage : {0, 1}) {
         for (int trans_b : {0, 1}) {
           for (int atom_step :
                {2 * kSboBytes / 16, AtomStep(kAtomM), AtomStep(kAtomN)}) {
-            int found = 0;
-            for (const Triple& triple : triples) {
-              std::fill(host_p.begin(), host_p.end(),
-                        nanochat::Bf16FromFloat(0.0f));
-              std::fill(host_v.begin(), host_v.end(),
-                        nanochat::Bf16FromFloat(0.0f));
-              host_p[static_cast<std::size_t>(triple.row) * kDim + triple.key] =
-                  nanochat::Bf16FromFloat(1.0f);
-              host_v[static_cast<std::size_t>(triple.key) * kDim + triple.dim] =
-                  nanochat::Bf16FromFloat(1.0f);
-              Upload(host_p, device_p);
-              Upload(host_v, device_v);
-              ValueOperandKernel<<<1, kWarpgroupThreads,
-                                   kQueryBytes + kKeyBytes>>>(
-                  device_p, device_v, atom_step, trans_b, transpose_stage,
-                  device_out);
-              cudaDeviceSynchronize();
-              const std::vector<float> out =
-                  ReadBack(device_out, kProductSlots);
-              int one = 0;
-              bool at_expected = false;
-              for (int lane = 0; lane < kWarpgroupThreads; ++lane) {
-                for (int index = 0; index < kRegisters; ++index) {
-                  const float value =
-                      out[static_cast<std::size_t>(lane) * kRegisters + index];
-                  if (std::fabs(value) > 0.5f) {
-                    ++one;
-                    const std::pair<int, int> slot = SlotOf(lane, index);
-                    if (slot.first == triple.row && slot.second == triple.dim) {
-                      at_expected = true;
+            for (int lbo : {kLboBytes, kSboBytes, 16}) {
+              for (int sbo : {kSboBytes, kLboBytes, 16}) {
+                int found = 0;
+                for (const Triple& triple : triples) {
+                  std::fill(host_p.begin(), host_p.end(),
+                            nanochat::Bf16FromFloat(0.0f));
+                  std::fill(host_v.begin(), host_v.end(),
+                            nanochat::Bf16FromFloat(0.0f));
+                  host_p[static_cast<std::size_t>(triple.row) * kDim +
+                         triple.key] = nanochat::Bf16FromFloat(1.0f);
+                  host_v[static_cast<std::size_t>(triple.key) * kDim +
+                         triple.dim] = nanochat::Bf16FromFloat(1.0f);
+                  Upload(host_p, device_p);
+                  Upload(host_v, device_v);
+                  ValueOperandKernel<<<1, kWarpgroupThreads,
+                                       kProbeSharedBytes>>>(
+                      device_p, device_v, atom_step, trans_b, transpose_stage,
+                      lbo, sbo, device_out);
+                  SyncFlash("value_operand transpose_stage=" +
+                            std::to_string(transpose_stage) +
+                            " trans_b=" + std::to_string(trans_b) +
+                            " atom_step=" + std::to_string(atom_step) +
+                            " lbo=" + std::to_string(lbo) +
+                            " sbo=" + std::to_string(sbo));
+                  const std::vector<float> out =
+                      ReadBack(device_out, kProductSlots);
+                  int one = 0;
+                  bool at_expected = false;
+                  for (int lane = 0; lane < kWarpgroupThreads; ++lane) {
+                    for (int index = 0; index < kRegisters; ++index) {
+                      const float value =
+                          out[static_cast<std::size_t>(lane) * kRegisters +
+                              index];
+                      if (std::fabs(value) > 0.5f) {
+                        ++one;
+                        const std::pair<int, int> slot = SlotOf(lane, index);
+                        if (slot.first == triple.row &&
+                            slot.second == triple.dim) {
+                          at_expected = true;
+                        }
+                      }
                     }
                   }
+                  if (one == 1 && at_expected) ++found;
+                }
+                const int expected = sizeof(triples) / sizeof(triples[0]);
+                const bool this_ok = found == expected;
+                value_ok = value_ok || this_ok;
+                if (this_ok) ++value_configs_ok;
+                value_best_found = std::max(value_best_found, found);
+                // The lines a configuration that lands nothing would repeat are
+                // silent; a sweep of this size is read from the passing ones.
+                if (this_ok) {
+                  value_pass_configs +=
+                      "transpose_stage=" + std::to_string(transpose_stage) +
+                      " trans_b=" + std::to_string(trans_b) +
+                      " atom_step=" + std::to_string(atom_step) +
+                      " lbo=" + std::to_string(lbo) +
+                      " sbo=" + std::to_string(sbo) + "; ";
+                  note(
+                      "attention-wgmma:value_operand transpose_stage=%d "
+                      "trans_b=%d atom_step=%d lbo=%d sbo=%d found=%d of=%d\n",
+                      transpose_stage, trans_b, atom_step, lbo, sbo, found,
+                      expected);
                 }
               }
-              if (one == 1 && at_expected) ++found;
             }
-            const int expected = sizeof(triples) / sizeof(triples[0]);
-            const bool this_ok = found == expected;
-            value_ok = value_ok || this_ok;
-            if (this_ok) ++value_configs_ok;
-            value_best_found = std::max(value_best_found, found);
-            note(
-                "attention-wgmma:value_operand transpose_stage=%d trans_b=%d "
-                "atom_step=%d found=%d of=%d status=%s\n",
-                transpose_stage, trans_b, atom_step, found, expected,
-                this_ok ? "ok" : "failed");
           }
         }
       }
+      report.SetExtraText(
+          "value_operand:pass_config",
+          value_pass_configs.empty() ? "none" : value_pass_configs);
       ok = ok && value_ok;
       report.SetExtraInt(
           "value_operand:triples",
@@ -2565,18 +2617,21 @@ int main(int argc, char** argv) {
   // against the score-only ceiling of `attention-wgmma:resident`.
   if (options.flash()) {
     const int flash_tiles = 5000;
-    auto add_flash_resident = [&](auto mask_constant, int blocks) {
+    auto add_flash_resident = [&](auto mask_constant, auto softmax_constant,
+                                  int blocks) {
       constexpr bool kMask = decltype(mask_constant)::value;
-      SetFlashSharedMemory<1, kMask>();
+      constexpr bool kSoftmax = decltype(softmax_constant)::value;
+      SetFlashSharedMemory<1, kMask, kSoftmax>();
       const std::string shape =
           "blocks=" + std::to_string(blocks) +
           " tiles=" + std::to_string(flash_tiles) +
-          " warpgroups=1 atoms=8+8 mask=" + (kMask ? "causal" : "dense");
+          " warpgroups=1 atoms=8+8 mask=" + (kMask ? "causal" : "dense") +
+          " softmax=" + (kSoftmax ? "on" : "off");
       const double flops = 2.0 * FlopsPerPass(kAtoms) *
                            static_cast<double>(flash_tiles) *
                            static_cast<double>(blocks);
       const nanochat::dev::Timing timing = harness.Time([&] {
-        LaunchResidentFlash<1, kMask>(
+        LaunchResidentFlash<1, kMask, kSoftmax>(
             blocks, device_queries, device_k, device_value, device_out,
             /*device_row_sums=*/nullptr, flash_tiles, kFlashScale);
       });
@@ -2589,16 +2644,24 @@ int main(int argc, char** argv) {
       const double share = sm_share(flops, timing.min_ms);
       report.SetExtra(std::string("flash_resident:blocks") +
                           std::to_string(blocks) +
-                          (kMask ? ":causal" : ":dense") + ":sm_share",
+                          (kMask ? ":causal" : ":dense") +
+                          (kSoftmax ? ":on" : ":off") + ":sm_share",
                       share);
       note(
           "attention-flash:resident %s min=%.3f ms median=%.3f ms "
           "tflops=%.1f sm_share=%.3f\n",
           shape.c_str(), timing.min_ms, timing.median_ms, rate / 1e12, share);
     };
-    add_flash_resident(std::integral_constant<bool, false>{}, 1);
-    add_flash_resident(std::integral_constant<bool, false>{}, sm_count);
-    add_flash_resident(std::integral_constant<bool, true>{}, sm_count);
+    add_flash_resident(std::integral_constant<bool, false>{},
+                       std::integral_constant<bool, true>{}, 1);
+    add_flash_resident(std::integral_constant<bool, false>{},
+                       std::integral_constant<bool, true>{}, sm_count);
+    add_flash_resident(std::integral_constant<bool, true>{},
+                       std::integral_constant<bool, true>{}, sm_count);
+    // The ceiling of the chain: the two products and the conversion, with no
+    // softmax between them. The gap to the row above is what the chain costs.
+    add_flash_resident(std::integral_constant<bool, false>{},
+                       std::integral_constant<bool, false>{}, sm_count);
 
     // The copies alone, so a reader divides a staged rate by the cap of the
     // path that carries it. The two ring contents are two rows, because the
@@ -2695,6 +2758,36 @@ int main(int argc, char** argv) {
       for (int stages = 2; stages <= 3; ++stages) {
         VisitFlashGeometry(warpgroups, stages, add_staged_row);
       }
+    }
+
+    // The ceiling of the chain behind the rings: the same ring and the same two
+    // products, with no softmax between them.
+    {
+      constexpr int kWarpgroups = 2;
+      constexpr int kRing = 2;
+      SetStagedFlashSharedMemory<kWarpgroups, kRing, true, kRingKeyValue, false,
+                                 /*kSoftmax=*/false>();
+      const nanochat::dev::Timing timing = harness.Time([&] {
+        LaunchStagedFlash<kWarpgroups, kRing, true, kRingKeyValue, false,
+                          /*kSoftmax=*/false>(
+            sm_count, flash_product_tiles, kSourceTiles, device_queries,
+            device_k, device_value, device_out, /*device_row_sums=*/nullptr);
+      });
+      const double flops = 2.0 * FlopsPerPass(kAtoms) *
+                           static_cast<double>(flash_product_tiles) *
+                           static_cast<double>(kWarpgroups) *
+                           static_cast<double>(sm_count);
+      const std::string shape =
+          "warpgroups=" + std::to_string(kWarpgroups) +
+          " stages=" + std::to_string(kRing) +
+          " window=" + std::to_string(kSourceTiles) +
+          " blocks=" + std::to_string(sm_count) +
+          " tiles=" + std::to_string(flash_product_tiles) +
+          " mask=dense softmax=off";
+      const double rate = add_rate_row(
+          make_row("attention-flash:staged", shape, "flash"), timing, flops);
+      note("attention-flash:staged %s min=%.3f ms tflops=%.1f\n", shape.c_str(),
+           timing.min_ms, rate / 1e12);
     }
   }
 

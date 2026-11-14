@@ -144,6 +144,26 @@ and the epilogue, and each of those is a cost this probe does not carry. The
 `grid` row says what a full card of instructions can reach; it does not say what
 a full card of a mainloop will reach.
 
+### 5.1 The one form the value operand can read
+
+The value product reads the transposed staging, and only that. A sweep of 72
+configurations states the rest: the two stagings, both transpose bits, three atom
+strides, and every pair of leading and stride offsets from 16, 128, and 256 bytes.
+Exactly one configuration lands six of six one-hot triples, and it is the
+recorded one, `transpose_stage=1 trans_b=0 atom_step=256 lbo=128 sbo=256`. The
+natural order of a value tile, staged as its own `[key][dim]` rows and read with
+the transpose bit set, lands nothing at any offsets.
+
+So the value ring has no plain-store alternative to the transposition it does,
+and the copy engine cannot carry a transposition. That is the measured reason the
+Tensor Memory Accelerator path of phase H2b is the only route to the key ring's
+rate for the value tile, and it is why the mixed ring stays where it is.
+
+The sweep runs inside a 144 KiB window rather than the 48 KiB one the kernel
+needs, because a form the instruction cannot read does not answer wrongly, it
+addresses past the operand: the first version of the sweep took the device
+context down with an out-of-range address on an SM.
+
 ## 6. Three defects the work found, and their fixes
 
 1. **The staged window was a quarter of the size the addressing assumed.** The

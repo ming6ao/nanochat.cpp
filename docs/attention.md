@@ -1064,23 +1064,27 @@ and 1.98 at 128.
 | Row | Path | Rate | Share |
 |---|---|---:|---:|
 | The chain with no traffic, one warpgroup, one block | none | 3.37 TFLOP/s | 45.0 percent of the per-SM share |
-| The chain with no traffic, one warpgroup, every SM | none | 448.2 TFLOP/s | 45.3 percent of the peak |
-| The same chain, causal boundary tile | none | 446.8 TFLOP/s | 45.2 percent of the peak |
+| The chain with no traffic, one warpgroup, every SM | none | 452.1 TFLOP/s | 45.7 percent of the peak |
+| The same chain with the softmax off | none | 790.6 TFLOP/s | 79.9 percent of the peak |
+| The same chain, causal boundary tile | none | 452.0 TFLOP/s | 45.7 percent of the peak |
 | The key ring, two stages / three stages, one warpgroup | copy engine | 2.26 / 2.43 TB/s | none |
 | The key ring, two stages / three stages, two warpgroups | copy engine | 2.22 / 2.49 TB/s | none |
 | The key and value rings, either depth, one warpgroup | plain stores | 0.949 / 0.943 TB/s | none |
 | The key and value rings, either depth, two warpgroups | plain stores | 1.495 / 1.492 TB/s | none |
-| The whole tile, 64 query rows, dense / causal | both rings | 52.84 / 53.05 TFLOP/s | 5.3 percent |
-| The whole tile, 128 query rows, dense / causal | both rings | 146.1 / 137.2 TFLOP/s | 13.9 to 14.8 percent |
+| The whole tile, 64 query rows, dense / causal | both rings | 52.46 / 52.64 TFLOP/s | 5.3 percent |
+| The whole tile, 128 query rows, dense / causal | both rings | 146.8 / 138.1 TFLOP/s | 14.0 to 14.8 percent |
+| The whole tile, 128 query rows, softmax off | both rings | 162.1 TFLOP/s | 16.4 percent |
 
-**The chain costs half the tensor rate, with no traffic at all.** The score
-product alone reads 978.7 TFLOP/s on the same card. The whole step reads 448.2.
-The instruction is not the gap; the chain is. One block reads 45.0 percent of the
-per-SM share and the full grid reads 45.3 percent of the peak, so no occupancy is
-lost and the serialized step is the whole of it. That is what decision H4 is for,
-and the rows now price it.
+**The chain costs 43 percent of the step.** The score product alone reads 978.7
+TFLOP/s on the same card. The whole step reads 452.1. The same step with the
+softmax switched off reads 790.6, which is 80 percent of the peak, so the softmax
+and its serialized place between the two products are the whole of the gap and
+the instruction is not in it. One block reads 44.7 percent of the per-SM share
+and the full grid 45.7 percent of the peak, so no occupancy is lost either. That
+is what decision H4 is for, and the ceiling row now prices what it can recover:
+thirty-four points of the peak.
 
-**The mask is free.** The boundary tile reads 446.8 TFLOP/s against 448.2 dense,
+**The mask is free.** The boundary tile reads 452.0 TFLOP/s against 452.1 dense,
 which is 0.3 percent, and a staged row moves by 0.0 to 6.1 percent, which is
 inside or beside the spread. The tile is therefore bound by the chain and not by
 the arithmetic: the select per score and the exponentials it forces to zero cost
@@ -1102,14 +1106,21 @@ warpgroup from a third stage, 2.255 to 2.429 TB/s, and 12 percent at two, 2.224 
 the copy engine needs and the value staging ignores, which is the same fact as the
 paragraph above from the other side.
 
+**Behind the rings the same effect is worth 10 percent, because the copies are
+the limit.** The staged row reads 146.8 TFLOP/s and 162.1 with the softmax off,
+which is 82 percent of its copy cap even with no softmax at all. So the staged
+row cannot be fixed by overlapping the chain: it needs a faster ring. This
+separates the two gaps into two fixes, and it reverses the order the plan
+implies, because the throughput that matters is the staged row.
+
 **The staged tile reaches 72 to 88 percent of its cap.** At one warpgroup the cap
 is 0.949 TB/s times 64 FLOP a byte, which is 60.7 TFLOP/s, and the dense row reads
-52.84, which is 87.0 percent. At two warpgroups the cap is 1.495 times 128, which
-is 191.4, and the dense row reads 146.1, which is 76.3 percent. The score-only
+52.46, which is 87.0 percent. At two warpgroups the cap is 1.494 times 128, which
+is 191.4, and the dense row reads 146.8, which is 76.8 percent. The score-only
 staged rows reach 97 to 99 percent of their own cap, so the missing share is the
 softmax and the value product. Against those rows at the same reuse, the whole
-tile is a half at 128 query rows, 295.4 against 146.1, and a third at 64, 150.1
-against 52.84.
+tile is a half at 128 query rows, 295.4 against 146.8, and a third at 64, 150.1
+against 52.46.
 
 Runs of this source before the mask axis agree with every row within 1.3 percent,
 which is the spread of the card and not of the code. The checks are identical
