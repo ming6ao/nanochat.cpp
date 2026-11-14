@@ -391,6 +391,87 @@ __device__ __forceinline__ void StageCopy(char* stage, const Bf16* source,
   }
 }
 
+// The shared address of one byte offset of a row-major tile with the chunk
+// swizzle of the layout applied. Whole sixteen-byte chunks are permuted, so the
+// copy engine can target the result and no transpose is needed.
+__device__ __forceinline__ int SwizzleBytes(int offset, int layout) {
+  if (layout == 1) return offset ^ (((offset >> 7) & 7) << 4);
+  if (layout == 2) return offset ^ (((offset >> 6) & 7) << 4);
+  if (layout == 3) return offset ^ (((offset >> 7) & 3) << 4);
+  return offset;
+}
+
+// Stages a tile in its own row order with that swizzle, which is the layout a
+// swizzled descriptor reads. One sixteen-byte group of a source row is one
+// store, so the swizzle costs only the address and the pass stays a copy.
+__device__ __forceinline__ void StageSwizzled(char* stage, const Bf16* source,
+                                              int rows, int threads,
+                                              int layout) {
+  const int groups = rows * kGroupsPerRow;
+  for (int unit = static_cast<int>(threadIdx.x); unit < groups;
+       unit += threads) {
+    const int row = unit / kGroupsPerRow;
+    const int group = (unit - row * kGroupsPerRow) * kElementsPerGroup;
+    const int offset = SwizzleBytes((row * kDim + group) * 2, layout);
+    *reinterpret_cast<uint4*>(stage + offset) =
+        *reinterpret_cast<const uint4*>(source + row * kDim + group);
+  }
+}
+
+// The same sixteen-byte groups the copy engine moves, written by ordinary
+// stores. The control for the value ring: if this reads the key ring's bytes at
+// the value ring's rate, then the transpose is innocent and the plain store
+// path is the cost.
+__device__ __forceinline__ void StageCopyPlain(char* stage, const Bf16* source,
+                                               bool row_fast, int threads) {
+  const int groups = kAtomN * kGroupsPerRow;
+#pragma unroll 4
+  for (int unit = static_cast<int>(threadIdx.x); unit < groups;
+       unit += threads) {
+    int row = 0;
+    int k = 0;
+    if (row_fast) {
+      const int matrix = unit / (kGroupsPerRow * 8);
+      const int within = unit - matrix * (kGroupsPerRow * 8);
+      const int block = within / (2 * 8);
+      const int rest = within - block * (2 * 8);
+      const int half = rest / 8;
+      row = matrix * 8 + (rest - half * 8);
+      k = block * kAtomK + half * kElementsPerGroup;
+    } else {
+      row = unit / kGroupsPerRow;
+      k = (unit - row * kGroupsPerRow) * kElementsPerGroup;
+    }
+    *reinterpret_cast<uint4*>(stage + InterleavedOffset(row, k, kAtomN)) =
+        *reinterpret_cast<const uint4*>(source + row * kDim + k);
+  }
+}
+
+// The same transposed staging read the other way round: one sixteen-byte group
+// of a source row per thread, which is coalesced across the warp, and the eight
+// two-byte elements it holds written to eight rows of the interleaved tile. The
+// strided form above does the opposite and its loads are the strided ones, so
+// this pass separates a load-bound transpose from a store-bound one.
+__device__ __forceinline__ void StageTransposedVector(char* stage,
+                                                      const Bf16* source,
+                                                      int threads) {
+  const int groups = kAtomN * kGroupsPerRow;
+#pragma unroll 4
+  for (int unit = static_cast<int>(threadIdx.x); unit < groups;
+       unit += threads) {
+    const int key = unit / kGroupsPerRow;
+    const int dim = (unit - key * kGroupsPerRow) * kElementsPerGroup;
+    const uint4 loaded =
+        *reinterpret_cast<const uint4*>(source + key * kDim + dim);
+    const Bf16* elements = reinterpret_cast<const Bf16*>(&loaded);
+#pragma unroll
+    for (int j = 0; j < kElementsPerGroup; ++j) {
+      *reinterpret_cast<Bf16*>(stage + InterleavedOffset(dim + j, key, kDim)) =
+          elements[j];
+    }
+  }
+}
+
 // Stages the value tile transposed, as a tile of `dim` rows by `kAtomN` keys.
 // The value product wants `D = P V`, whose `k` axis is the key index, and the
 // proven operand form is the interleaved one with the transpose bits clear. So
@@ -404,6 +485,7 @@ __device__ __forceinline__ void StageCopy(char* stage, const Bf16* source,
 __device__ __forceinline__ void StageTransposed(char* stage, const Bf16* source,
                                                 int threads) {
   constexpr int kKeyGroups = kAtomN / kElementsPerGroup;
+#pragma unroll 4
   for (int unit = static_cast<int>(threadIdx.x); unit < kKeyGroups * kDim;
        unit += threads) {
     const int key = (unit / kDim) * kElementsPerGroup;
@@ -423,18 +505,29 @@ __device__ __forceinline__ void StageTransposed(char* stage, const Bf16* source,
 // The six fields of the shared-memory matrix descriptor: the address in sixteen
 // byte units, the leading offset, the stride offset, base offset zero, and
 // layout type zero for the interleaved form.
-// The same six fields with the leading and stride offsets stated by the caller,
-// so a sweep can try another operand form against the same staged tile.
-__device__ __forceinline__ std::uint64_t MakeDescriptorBytes(const void* base,
-                                                             int lbo_bytes,
-                                                             int sbo_bytes) {
+// The same fields with the leading offset, the stride offset, and the layout
+// type stated by the caller, so a sweep can try another operand form against
+// the same staged tile. Layout zero is the interleaved form this file stages;
+// layout one is the 128-byte swizzle, which a sixteen-byte copy can still
+// target because the swizzle permutes whole chunks.
+__device__ __forceinline__ std::uint64_t MakeDescriptorFull(const void* base,
+                                                            int lbo_bytes,
+                                                            int sbo_bytes,
+                                                            int layout) {
   const std::uint32_t address =
       static_cast<std::uint32_t>(__cvta_generic_to_shared(base));
   std::uint64_t desc = 0;
   desc |= static_cast<std::uint64_t>((address >> 4) & 0x3FFFu);
   desc |= static_cast<std::uint64_t>((lbo_bytes >> 4) & 0x3FFFu) << 16;
   desc |= static_cast<std::uint64_t>((sbo_bytes >> 4) & 0x3FFFu) << 32;
+  desc |= static_cast<std::uint64_t>(layout & 0x3) << 62;
   return desc;
+}
+
+__device__ __forceinline__ std::uint64_t MakeDescriptorBytes(const void* base,
+                                                             int lbo_bytes,
+                                                             int sbo_bytes) {
+  return MakeDescriptorFull(base, lbo_bytes, sbo_bytes, /*layout=*/0);
 }
 
 __device__ __forceinline__ std::uint64_t MakeDescriptor(const void* base) {
@@ -840,7 +933,8 @@ __global__ void ResidentFlashKernel(const Bf16* __restrict__ q,
 // row, and `kStageValue` false stages the key ring alone. A step is
 // `FlashStep`, so a staged row and a resident row measure the same chain.
 template <int Warpgroups, int Stages, bool kProducts, bool kStageValue,
-          bool kMask, bool kSoftmax>
+          bool kMask, bool kSoftmax, bool kVectorValue = false,
+          bool kPlainKey = false, bool kSkipKey = false>
 __global__ void StagedFlashKernel(const Bf16* __restrict__ q,
                                   const Bf16* __restrict__ k,
                                   const Bf16* __restrict__ v, int source_tiles,
@@ -870,10 +964,22 @@ __global__ void StagedFlashKernel(const Bf16* __restrict__ q,
   auto fill = [&](int stage, int source) {
     const std::size_t offset =
         static_cast<std::size_t>(source % source_tiles) * kAtomN * kDim;
-    StageCopy(keys + stage * kKeyBytes, k + offset, /*row_fast=*/true,
-              kThreads);
+    if constexpr (!kSkipKey) {
+      if constexpr (kPlainKey) {
+        StageCopyPlain(keys + stage * kKeyBytes, k + offset, /*row_fast=*/true,
+                       kThreads);
+      } else {
+        StageCopy(keys + stage * kKeyBytes, k + offset, /*row_fast=*/true,
+                  kThreads);
+      }
+    }
     if constexpr (kStageValue) {
-      StageTransposed(values + stage * kValueBytes, v + offset, kThreads);
+      if constexpr (kVectorValue) {
+        StageTransposedVector(values + stage * kValueBytes, v + offset,
+                              kThreads);
+      } else {
+        StageTransposed(values + stage * kValueBytes, v + offset, kThreads);
+      }
     }
   };
 
@@ -1131,12 +1237,15 @@ __global__ void RegisterOperandKernel(const Bf16* __restrict__ k,
 __global__ void ValueOperandKernel(const Bf16* __restrict__ p,
                                    const Bf16* __restrict__ v, int atom_step,
                                    int trans_b, int transpose_stage, int lbo,
-                                   int sbo, float* __restrict__ out) {
+                                   int sbo, int layout,
+                                   float* __restrict__ out) {
   extern __shared__ __align__(1024) char smem[];
   char* probability = smem;
   char* value = smem + kQueryBytes;
   StageInterleaved(probability, p, kAtomM, kWarpgroupThreads);
-  if (transpose_stage != 0) {
+  if (transpose_stage == 2) {
+    StageSwizzled(value, v, kAtomN, kWarpgroupThreads, layout);
+  } else if (transpose_stage == 1) {
     StageTransposed(value, v, kWarpgroupThreads);
   } else {
     StageInterleaved(value, v, kAtomN, kWarpgroupThreads);
@@ -1146,7 +1255,7 @@ __global__ void ValueOperandKernel(const Bf16* __restrict__ p,
   WgmmaFence();
 
   const std::uint64_t base_probability = MakeDescriptor(probability);
-  const std::uint64_t base_value = MakeDescriptorBytes(value, lbo, sbo);
+  const std::uint64_t base_value = MakeDescriptorFull(value, lbo, sbo, layout);
   float d[kRegisters];
 #pragma unroll
   for (int i = 0; i < kRegisters; ++i) d[i] = 0.0f;
@@ -1274,23 +1383,27 @@ std::vector<float> RunResidentFlash(const Bf16* device_q, const Bf16* device_k,
 // its one launch. A templated kernel has no single function address, so the
 // attribute is set once per instantiation and outside any timed window.
 template <int Warpgroups, int Stages, bool kProducts, bool kStageValue,
-          bool kMask, bool kSoftmax = true>
+          bool kMask, bool kSoftmax = true, bool kVectorValue = false,
+          bool kPlainKey = false, bool kSkipKey = false>
 void SetStagedFlashSharedMemory() {
   constexpr int kShared = FlashStagedBytes(Warpgroups, Stages, kStageValue);
-  cudaFuncSetAttribute(reinterpret_cast<const void*>(
-                           StagedFlashKernel<Warpgroups, Stages, kProducts,
-                                             kStageValue, kMask, kSoftmax>),
-                       cudaFuncAttributeMaxDynamicSharedMemorySize, kShared);
+  cudaFuncSetAttribute(
+      reinterpret_cast<const void*>(
+          StagedFlashKernel<Warpgroups, Stages, kProducts, kStageValue, kMask,
+                            kSoftmax, kVectorValue, kPlainKey, kSkipKey>),
+      cudaFuncAttributeMaxDynamicSharedMemorySize, kShared);
 }
 
 template <int Warpgroups, int Stages, bool kProducts, bool kStageValue,
-          bool kMask, bool kSoftmax = true>
+          bool kMask, bool kSoftmax = true, bool kVectorValue = false,
+          bool kPlainKey = false, bool kSkipKey = false>
 void LaunchStagedFlash(int blocks, int tiles, int source_tiles,
                        const Bf16* device_q, const Bf16* device_k,
                        const Bf16* device_v, float* device_out,
                        float* device_row_sums) {
   constexpr int kShared = FlashStagedBytes(Warpgroups, Stages, kStageValue);
-  StagedFlashKernel<Warpgroups, Stages, kProducts, kStageValue, kMask, kSoftmax>
+  StagedFlashKernel<Warpgroups, Stages, kProducts, kStageValue, kMask, kSoftmax,
+                    kVectorValue, kPlainKey, kSkipKey>
       <<<blocks, Warpgroups * kWarpgroupThreads, kShared>>>(
           device_q, device_k, device_v, source_tiles, device_out,
           device_row_sums, tiles, kFlashScale);
@@ -2070,85 +2183,97 @@ int main(int argc, char** argv) {
       int value_configs_ok = 0;
       int value_best_found = 0;
       std::string value_pass_configs;
-      // Every descriptor the operand form can take: the staging of the tile,
-      // the transpose bit, the step along the key axis, and the leading and
-      // stride offsets. The offsets are the untried pair, because the value
-      // tile's natural order needs the roles of the two exchanged, and that is
-      // what would let the copy engine fill the ring.
-      for (int transpose_stage : {0, 1}) {
+      // The configurations the operand form can take. The known transposed form
+      // is one entry, and the rest sweep the swizzled stagings over the offsets
+      // and strides a swizzled descriptor uses: the layout permutes whole
+      // sixteen-byte chunks, so the strides are small multiples of one chunk
+      // and not the interleaved form's quarter kilobyte.
+      struct ValueConfig {
+        int transpose_stage;
+        int trans_b;
+        int atom_step;
+        int lbo;
+        int sbo;
+        int layout;
+      };
+      std::vector<ValueConfig> configs;
+      configs.push_back(
+          {1, 0, AtomStep(kAtomN), kLboBytes, kSboBytes, /*layout=*/0});
+      for (int layout : {1, 2}) {
         for (int trans_b : {0, 1}) {
-          for (int atom_step :
-               {2 * kSboBytes / 16, AtomStep(kAtomM), AtomStep(kAtomN)}) {
-            for (int lbo : {kLboBytes, kSboBytes, 16}) {
-              for (int sbo : {kSboBytes, kLboBytes, 16}) {
-                int found = 0;
-                for (const Triple& triple : triples) {
-                  std::fill(host_p.begin(), host_p.end(),
-                            nanochat::Bf16FromFloat(0.0f));
-                  std::fill(host_v.begin(), host_v.end(),
-                            nanochat::Bf16FromFloat(0.0f));
-                  host_p[static_cast<std::size_t>(triple.row) * kDim +
-                         triple.key] = nanochat::Bf16FromFloat(1.0f);
-                  host_v[static_cast<std::size_t>(triple.key) * kDim +
-                         triple.dim] = nanochat::Bf16FromFloat(1.0f);
-                  Upload(host_p, device_p);
-                  Upload(host_v, device_v);
-                  ValueOperandKernel<<<1, kWarpgroupThreads,
-                                       kProbeSharedBytes>>>(
-                      device_p, device_v, atom_step, trans_b, transpose_stage,
-                      lbo, sbo, device_out);
-                  SyncFlash("value_operand transpose_stage=" +
-                            std::to_string(transpose_stage) +
-                            " trans_b=" + std::to_string(trans_b) +
-                            " atom_step=" + std::to_string(atom_step) +
-                            " lbo=" + std::to_string(lbo) +
-                            " sbo=" + std::to_string(sbo));
-                  const std::vector<float> out =
-                      ReadBack(device_out, kProductSlots);
-                  int one = 0;
-                  bool at_expected = false;
-                  for (int lane = 0; lane < kWarpgroupThreads; ++lane) {
-                    for (int index = 0; index < kRegisters; ++index) {
-                      const float value =
-                          out[static_cast<std::size_t>(lane) * kRegisters +
-                              index];
-                      if (std::fabs(value) > 0.5f) {
-                        ++one;
-                        const std::pair<int, int> slot = SlotOf(lane, index);
-                        if (slot.first == triple.row &&
-                            slot.second == triple.dim) {
-                          at_expected = true;
-                        }
-                      }
-                    }
-                  }
-                  if (one == 1 && at_expected) ++found;
-                }
-                const int expected = sizeof(triples) / sizeof(triples[0]);
-                const bool this_ok = found == expected;
-                value_ok = value_ok || this_ok;
-                if (this_ok) ++value_configs_ok;
-                value_best_found = std::max(value_best_found, found);
-                // The lines a configuration that lands nothing would repeat are
-                // silent; a sweep of this size is read from the passing ones.
-                if (this_ok) {
-                  value_pass_configs +=
-                      "transpose_stage=" + std::to_string(transpose_stage) +
-                      " trans_b=" + std::to_string(trans_b) +
-                      " atom_step=" + std::to_string(atom_step) +
-                      " lbo=" + std::to_string(lbo) +
-                      " sbo=" + std::to_string(sbo) + "; ";
-                  note(
-                      "attention-wgmma:value_operand transpose_stage=%d "
-                      "trans_b=%d atom_step=%d lbo=%d sbo=%d found=%d of=%d\n",
-                      transpose_stage, trans_b, atom_step, lbo, sbo, found,
-                      expected);
-                }
+          for (int atom_step : {8, 16, 32, AtomStep(kAtomN)}) {
+            for (int lbo : {16, 32, kLboBytes}) {
+              for (int sbo : {16, 32, kLboBytes}) {
+                configs.push_back({2, trans_b, atom_step, lbo, sbo, layout});
               }
             }
           }
         }
       }
+      for (const ValueConfig& config : configs) {
+        int found = 0;
+        for (const Triple& triple : triples) {
+          std::fill(host_p.begin(), host_p.end(),
+                    nanochat::Bf16FromFloat(0.0f));
+          std::fill(host_v.begin(), host_v.end(),
+                    nanochat::Bf16FromFloat(0.0f));
+          host_p[static_cast<std::size_t>(triple.row) * kDim + triple.key] =
+              nanochat::Bf16FromFloat(1.0f);
+          host_v[static_cast<std::size_t>(triple.key) * kDim + triple.dim] =
+              nanochat::Bf16FromFloat(1.0f);
+          Upload(host_p, device_p);
+          Upload(host_v, device_v);
+          ValueOperandKernel<<<1, kWarpgroupThreads, kProbeSharedBytes>>>(
+              device_p, device_v, config.atom_step, config.trans_b,
+              config.transpose_stage, config.lbo, config.sbo, config.layout,
+              device_out);
+          SyncFlash("value_operand transpose_stage=" +
+                    std::to_string(config.transpose_stage) +
+                    " trans_b=" + std::to_string(config.trans_b) +
+                    " atom_step=" + std::to_string(config.atom_step) +
+                    " lbo=" + std::to_string(config.lbo) +
+                    " sbo=" + std::to_string(config.sbo) +
+                    " layout=" + std::to_string(config.layout));
+          const std::vector<float> out = ReadBack(device_out, kProductSlots);
+          int one = 0;
+          bool at_expected = false;
+          for (int lane = 0; lane < kWarpgroupThreads; ++lane) {
+            for (int index = 0; index < kRegisters; ++index) {
+              const float value =
+                  out[static_cast<std::size_t>(lane) * kRegisters + index];
+              if (std::fabs(value) > 0.5f) {
+                ++one;
+                const std::pair<int, int> slot = SlotOf(lane, index);
+                if (slot.first == triple.row && slot.second == triple.dim) {
+                  at_expected = true;
+                }
+              }
+            }
+          }
+          if (one == 1 && at_expected) ++found;
+        }
+        const int expected = sizeof(triples) / sizeof(triples[0]);
+        const bool this_ok = found == expected;
+        value_ok = value_ok || this_ok;
+        if (this_ok) ++value_configs_ok;
+        value_best_found = std::max(value_best_found, found);
+        if (this_ok) {
+          value_pass_configs +=
+              "transpose_stage=" + std::to_string(config.transpose_stage) +
+              " trans_b=" + std::to_string(config.trans_b) +
+              " atom_step=" + std::to_string(config.atom_step) +
+              " lbo=" + std::to_string(config.lbo) +
+              " sbo=" + std::to_string(config.sbo) +
+              " layout=" + std::to_string(config.layout) + "; ";
+          note(
+              "attention-wgmma:value_operand transpose_stage=%d trans_b=%d "
+              "atom_step=%d lbo=%d sbo=%d layout=%d found=%d of=%d\n",
+              config.transpose_stage, config.trans_b, config.atom_step,
+              config.lbo, config.sbo, config.layout, found, expected);
+        }
+      }
+      report.SetExtraInt("value_operand:configs",
+                         static_cast<long long>(configs.size()));
       report.SetExtraText(
           "value_operand:pass_config",
           value_pass_configs.empty() ? "none" : value_pass_configs);
@@ -2668,26 +2793,37 @@ int main(int argc, char** argv) {
     // copy engine fills the key ring and the plain transposed staging fills the
     // value ring.
     const int flash_copy_tiles = 8192;
-    auto add_copy_row = [&](auto warpgroups, auto stages, auto stage_value) {
+    auto add_copy_row = [&](auto warpgroups, auto stages, auto stage_value,
+                            auto vector_constant, auto plain_key,
+                            auto skip_key) {
       constexpr int kWarpgroups = decltype(warpgroups)::value;
       constexpr int kRing = decltype(stages)::value;
       constexpr bool kStageValue = decltype(stage_value)::value;
+      constexpr bool kVector = decltype(vector_constant)::value;
+      constexpr bool kPlainKey = decltype(plain_key)::value;
+      constexpr bool kSkipKey = decltype(skip_key)::value;
       SetStagedFlashSharedMemory<kWarpgroups, kRing, false, kStageValue,
-                                 /*kMask=*/false>();
+                                 /*kMask=*/false, /*kSoftmax=*/true, kVector,
+                                 kPlainKey, kSkipKey>();
       const nanochat::dev::Timing timing = harness.Time([&] {
         LaunchStagedFlash<kWarpgroups, kRing, false, kStageValue,
-                          /*kMask=*/false>(
+                          /*kMask=*/false, /*kSoftmax=*/true, kVector,
+                          kPlainKey, kSkipKey>(
             sm_count, flash_copy_tiles, kSourceTiles, device_queries, device_k,
             device_value, device_out, /*device_row_sums=*/nullptr);
       });
       const double bytes =
-          static_cast<double>(kKeyBytes + (kStageValue ? kValueBytes : 0)) *
+          static_cast<double>((kSkipKey ? 0 : kKeyBytes) +
+                              (kStageValue ? kValueBytes : 0)) *
           static_cast<double>(flash_copy_tiles) * static_cast<double>(sm_count);
       const double bandwidth = bytes / (timing.min_ms * 1e-3);
       const std::string shape =
           "warpgroups=" + std::to_string(kWarpgroups) +
-          " stages=" + std::to_string(kRing) +
-          " content=" + (kStageValue ? "key+value" : "key") +
+          " stages=" + std::to_string(kRing) + " content=" +
+          (kSkipKey ? "value" : (kStageValue ? "key+value" : "key")) +
+          " value_staging=" +
+          (kStageValue ? (kVector ? "vector" : "strided") : "none") +
+          " key_staging=" + (kPlainKey ? "plain" : "engine") +
           " window=" + std::to_string(kSourceTiles) +
           " blocks=" + std::to_string(sm_count) +
           " tiles=" + std::to_string(flash_copy_tiles);
@@ -2702,10 +2838,37 @@ int main(int argc, char** argv) {
            bandwidth / static_cast<double>(sm_count));
     };
     auto copy_visitor = [&](auto warpgroups, auto stages) {
+      constexpr bool kNo = false;
+      constexpr bool kYes = true;
+      // The key ring alone, through the copy engine and through ordinary
+      // stores, so the two paths compare on their own bytes.
       add_copy_row(warpgroups, stages,
-                   std::integral_constant<bool, kRingKeyOnly>{});
+                   std::integral_constant<bool, kRingKeyOnly>{},
+                   std::integral_constant<bool, kNo>{},
+                   std::integral_constant<bool, kNo>{},
+                   std::integral_constant<bool, kNo>{});
       add_copy_row(warpgroups, stages,
-                   std::integral_constant<bool, kRingKeyValue>{});
+                   std::integral_constant<bool, kRingKeyOnly>{},
+                   std::integral_constant<bool, kNo>{},
+                   std::integral_constant<bool, kYes>{},
+                   std::integral_constant<bool, kNo>{});
+      // The value ring alone, which separates its pass from the key pass.
+      add_copy_row(warpgroups, stages,
+                   std::integral_constant<bool, kRingKeyValue>{},
+                   std::integral_constant<bool, kNo>{},
+                   std::integral_constant<bool, kNo>{},
+                   std::integral_constant<bool, kYes>{});
+      // Both rings, with each reading of the transpose.
+      add_copy_row(warpgroups, stages,
+                   std::integral_constant<bool, kRingKeyValue>{},
+                   std::integral_constant<bool, kNo>{},
+                   std::integral_constant<bool, kNo>{},
+                   std::integral_constant<bool, kNo>{});
+      add_copy_row(warpgroups, stages,
+                   std::integral_constant<bool, kRingKeyValue>{},
+                   std::integral_constant<bool, kYes>{},
+                   std::integral_constant<bool, kNo>{},
+                   std::integral_constant<bool, kNo>{});
     };
     for (int warpgroups = 1; warpgroups <= kMaxWarpgroups; ++warpgroups) {
       for (int stages = 2; stages <= 3; ++stages) {

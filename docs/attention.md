@@ -1069,11 +1069,12 @@ and 1.98 at 128.
 | The same chain, causal boundary tile | none | 452.0 TFLOP/s | 45.7 percent of the peak |
 | The key ring, two stages / three stages, one warpgroup | copy engine | 2.26 / 2.43 TB/s | none |
 | The key ring, two stages / three stages, two warpgroups | copy engine | 2.22 / 2.49 TB/s | none |
-| The key and value rings, either depth, one warpgroup | plain stores | 0.949 / 0.943 TB/s | none |
-| The key and value rings, either depth, two warpgroups | plain stores | 1.495 / 1.492 TB/s | none |
-| The whole tile, 64 query rows, dense / causal | both rings | 52.46 / 52.64 TFLOP/s | 5.3 percent |
-| The whole tile, 128 query rows, dense / causal | both rings | 146.8 / 138.1 TFLOP/s | 14.0 to 14.8 percent |
-| The whole tile, 128 query rows, softmax off | both rings | 162.1 TFLOP/s | 16.4 percent |
+| The key and value rings, two stages / three stages, one warpgroup | plain stores | 0.977 / 0.993 TB/s | none |
+| The key and value rings, two stages / three stages, two warpgroups | plain stores | 1.131 / 1.600 TB/s | none |
+| The value ring alone, two stages / three stages, two warpgroups | plain stores | 1.150 / 1.172 TB/s | none |
+| The whole tile, 64 query rows, dense / causal | both rings | 95.96 / 95.70 TFLOP/s | 9.7 percent |
+| The whole tile, 128 query rows, dense / causal | both rings | 225.4 / 210.2 TFLOP/s | 21.3 to 22.8 percent |
+| The whole tile, 128 query rows, softmax off | both rings | 254.9 TFLOP/s | 25.8 percent |
 
 **The chain costs 43 percent of the step.** The score product alone reads 978.7
 TFLOP/s on the same card. The whole step reads 452.1. The same step with the
@@ -1091,14 +1092,19 @@ the arithmetic: the select per score and the exponentials it forces to zero cost
 nothing measurable, so the half of the work a causal mask removes is a gain in
 necessary work and not a loss in rate.
 
-**The value ring is the new limit.** A transposition is not a contiguous
-sixteen-byte move, so no copy engine carries one and the value ring is plain
-strided loads and interleaved stores. It costs the mixed path 0.949 TB/s at one
-warpgroup and 1.495 at two, against 2.26 to 2.49 TB/s for the key ring alone.
-Doubling the staged bytes costs 5.2 times the time at one warpgroup. Two
-warpgroups recover part of it, because more threads cover the strided reads.
-This is the reason decision H2b must reach the value tile and not only the key
-tile.
+**The value ring was the limit, and the reason was scheduling before it was
+hardware.** A transposition is not a contiguous sixteen-byte move, so no copy
+engine carries one and the value ring is plain strided loads and interleaved
+stores. It read 0.43 to 1.17 TB/s alone against 2.16 to 2.36 for the key ring,
+and the two readings of the same transpose differed by nothing, which is what
+pointed at the schedule rather than at the pattern. Four iterations in flight
+then lifted the product rows by 54 percent, and the copy rows by less, because a
+copy row has nothing to hide the latency under.
+
+What survives of the original claim is narrower: the value ring still has no
+copy-engine form, because a 145 configuration descriptor sweep finds no readable
+swizzled layout, so the transpose cannot leave the plain path. What does not
+survive is the size of the penalty: most of it was a missing unroll.
 
 **Ring depth belongs to the key ring only.** The key ring gains 7.7 percent at one
 warpgroup from a third stage, 2.255 to 2.429 TB/s, and 12 percent at two, 2.224 to
@@ -1106,21 +1112,34 @@ warpgroup from a third stage, 2.255 to 2.429 TB/s, and 12 percent at two, 2.224 
 the copy engine needs and the value staging ignores, which is the same fact as the
 paragraph above from the other side.
 
-**Behind the rings the same effect is worth 10 percent, because the copies are
-the limit.** The staged row reads 146.8 TFLOP/s and 162.1 with the softmax off,
-which is 82 percent of its copy cap even with no softmax at all. So the staged
-row cannot be fixed by overlapping the chain: it needs a faster ring. This
-separates the two gaps into two fixes, and it reverses the order the plan
-implies, because the throughput that matters is the staged row.
+**Behind the rings the same effect is worth 12 percent.** The staged row reads
+225.4 TFLOP/s and 254.9 with the softmax off. So the chain is no longer what holds
+the staged row: the copy path is, and the split is 43 percent of a resident step
+against 12 behind the rings.
 
-**The staged tile reaches 72 to 88 percent of its cap.** At one warpgroup the cap
-is 0.949 TB/s times 64 FLOP a byte, which is 60.7 TFLOP/s, and the dense row reads
-52.46, which is 87.0 percent. At two warpgroups the cap is 1.494 times 128, which
-is 191.4, and the dense row reads 146.8, which is 76.8 percent. The score-only
-staged rows reach 97 to 99 percent of their own cap, so the missing share is the
-softmax and the value product. Against those rows at the same reuse, the whole
-tile is a half at 128 query rows, 295.4 against 146.8, and a third at 64, 150.1
-against 52.46.
+**The staging passes were latency bound, and that cost 54 percent.** Four
+iterations in flight, `#pragma unroll 4` on the three plain staging passes and
+nothing else, moved the staged row from 146.8 to 225.4 TFLOP/s at two warpgroups
+and from 52.5 to 96.0 at one. The evidence that the mechanism is latency and not
+bandwidth is that the same pass read 2.23 TB/s in one binary and 0.64 in the next,
+while the `cp.async` row beside it stayed within two percent: a load-to-store loop
+with no unrolling waits on its own loads, and whether the compiler overlaps them
+moves the pass by a factor of three. Four iterations also let the staging hide
+under the products, which is why the product rows gain half again as much as the
+copy rows do.
+
+A copy row is therefore a lower bound and not a cap. The staged row reads above
+its own mixed-ring copy row, 225.4 against 160.8, because a copy row has no
+compute to hide the staging latency under.
+
+**A copy row is a lower bound, not a cap.** The staged row now reads above its own
+mixed-ring copy row at every depth, 225.4 against 160.8 at two warpgroups, because
+the copy row cannot hide the staging latency under compute and the product row
+can. So the ratio of a staged row to its copy row is not an efficiency, and the
+earlier readings of 72 to 88 percent were measuring the copy row's own stall.
+Against the score-only rows at the same reuse the whole tile is three quarters at
+128 query rows, 295.4 against 225.4, and two thirds at 64, 150.1 against 95.96. The unroll closed most of the distance to the score-only
+row without touching the transpose.
 
 Runs of this source before the mask axis agree with every row within 1.3 percent,
 which is the spread of the card and not of the code. The checks are identical
