@@ -252,11 +252,26 @@ cuda_binary(
 # deep, and they measure the copies alone. Every row is reported against the
 # declared peak of `backends/cuda/caps.json`. Part 8 section 6 is the gate.
 #
-# Two checks run before any rate is timed. The first reads one element at a
+# The `attention-flash:` rows of `--rows flash` price the whole tile of the H2
+# prototype instead of the score product alone: the same query block, the score
+# product, the base-two softmax in the registers, the value product from the
+# probability operand the score accumulator already holds, and the running
+# maximum, sum, and rescale. The set prices the tile twice, once with no copy
+# path and once behind a ring of key tiles and a ring of value tiles, and it
+# states the cap of the path that fills each ring. The copy engine fills the key
+# ring. The transposed plain staging fills the value ring, because a
+# transposition is not a contiguous sixteen-byte move. The mask is the phase
+# that follows.
+#
+# Four checks run before any rate is timed. The first reads one element at a
 # time against a host reference, which catches an operand form the instruction
 # cannot read; a sum-based check cannot, because the permutation that a wrong
 # form induces leaves a sum unchanged. The second compares the staged product
-# with the resident product, so a wrong staging fails instead of measuring.
+# with the resident product, so a wrong staging fails instead of measuring. The
+# third does the same one element at a time for the resident flash tile, against
+# the host reference of the family, `seqref::AttentionForward`. The fourth
+# compares each staged flash geometry with the resident step of the same
+# operands.
 #
 # **The target states its own architecture.** WGMMA is architecture
 # conditional, and `rules_cuda` lets one target name `archs` for itself, so the
@@ -268,14 +283,17 @@ cuda_binary(
 #
 # The emulation engine maps neither WGMMA nor a tensor copy, so there is no
 # off-device leg and the target carries `manual`. Its gate is the H100 leg, and
-# one job states both row sets: `--rows phase0` is the Part 3 rows and
-# `--rows h1` is the Part 8 rows. It times through
+# one job states every set: `--rows phase0` is the Part 3 rows, `--rows h1` is
+# the Part 8 rows, `--rows flash` is the H2 prototype, and `--rows all` is the
+# three of them. It times through
 # `backends/cuda/kernels/testing/bench_protocol.h`, which the hand GEMM sweep
 # also uses, so a row of one program and a row of the other state the same
 # statistic.
 #
 #   modal run tools/modal/app.py::card_job --name wgmma_bench \
 #     --argv '["--rows","all","--json"]'
+#   modal run tools/modal/app.py::card_job --name wgmma_bench \
+#     --argv '["--rows","flash","--json"]'
 cuda_binary(
     name = "wgmma_bench",
     srcs = ["wgmma_bench.cu"],

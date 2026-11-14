@@ -1037,6 +1037,66 @@ product's operand traffic, about the cost of the transposed staging pass, about
 the exponential, or about the epilogue. Those are the costs section 3 lists and
 the gates of section 6 allow for.
 
+**The H2 prototype.** The `attention-flash:` rows of the same binary price the
+whole tile instead of the score product alone: the score product, the base-two
+softmax in the registers, the value product from the probability operand the
+score lane already holds, and the running maximum, sum, and rescale. One
+`FlashStep` is the only written form of the step, so a resident row and a staged
+row cannot state two chains. No phase gate is stated against them, because they
+are a prototype ceiling and not the production tile.
+
+The check runs first and it passes. One element at a time against the host
+reference of the family reads 2.09e-03 of a reference scale of 0.184 with no bad
+element of 8,192, and the row sums read 2.11e-07, which is the bf16 rounding of
+the probability operand. That check is the first end-to-end test of the register
+operand, whose element order the H1 rows measured with one-hot elements and
+never carried a full product through. Both stagings then agree with the resident
+step of the same operands exactly, in all four geometries.
+
+| Row | Copy path | Rate | Share |
+|---|---|---:|---:|
+| The chain with no traffic, one warpgroup, one block | none | 3.37 TFLOP/s | 45.0 percent of the per-SM share |
+| The chain with no traffic, one warpgroup, every SM | none | 453.8 TFLOP/s | 45.9 percent of the peak |
+| The key ring | copy engine | 2.44 to 2.49 TB/s | none |
+| The key and value rings, one warpgroup | plain stores | 0.938 TB/s | none |
+| The key and value rings, two warpgroups | plain stores | 1.491 TB/s | none |
+| The whole tile, one warpgroup, 64 query rows | both rings | 52.5 TFLOP/s | 5.3 percent |
+| The whole tile, two warpgroups, 128 query rows | both rings | 147.4 TFLOP/s | 14.9 percent |
+
+**The chain costs half the tensor rate, with no traffic at all.** The score
+product alone reads 978.7 TFLOP/s on the same card. The whole step reads 453.8.
+The instruction is not the gap; the chain is. One block reads 45.0 percent of the
+per-SM share and the full grid reads 45.9 percent of the peak, so no occupancy is
+lost and the serialized step is the whole of it. That is what decision H4 is for,
+and the rows now price it.
+
+**The value ring is the new limit.** A transposition is not a contiguous
+sixteen-byte move, so no copy engine carries one and the value ring is plain
+strided loads and interleaved stores. It costs the mixed path 0.938 TB/s at one
+warpgroup and 1.491 at two, against the 2.44 to 2.49 TB/s of the key ring alone.
+Doubling the staged bytes costs 5.2 times the time at one warpgroup. Two
+warpgroups recover part of it, because more threads cover the strided reads.
+This is the reason decision H2b must reach the value tile and not only the key
+tile.
+
+**The staged tile reaches 75 to 88 percent of its cap.** At one warpgroup the cap
+is 0.938 TB/s times 64 FLOP a byte, which is 60.0 TFLOP/s, and the row reads
+52.5, which is 87.5 percent. At two warpgroups the cap is 1.491 times 128, which
+is 190.9, and the row reads 147.4, which is 77.2 percent. The score-only staged
+rows reach 97 to 99 percent of their own cap, so the missing 12 to 25 percent is
+the softmax and the value product. Against those rows at the same reuse, the
+whole tile is a half at 128 query rows, 295.4 against 147.4, and a third at 64,
+150.1 against 52.5.
+
+**Ring depth is settled at two stages.** A third stage gains nothing at one
+warpgroup and loses 2.5 percent at two, where it also costs 64 KiB of the shared
+window. The 224 KiB geometry fits and does not pay.
+
+A second run of the same source agrees with every row of the table within 1.3
+percent, which is the spread of the card and not of the code. The checks are
+identical between the two runs, and the operands are fixed, so the step is
+deterministic.
+
 ### 7. Dispatch
 
 The new path takes a shape when the Part 7 predicate holds **and** the card
