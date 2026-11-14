@@ -290,19 +290,29 @@ within 0.7 percent. The third run measured the source that also carries the
 `attention-flash:` rows of another workstream, so the ladder does not move when
 a second row set shares the binary.
 
-| Warpgroups | Query tiles | FLOP a staged byte | Cap | Run 1 | Run 2 | Share of the cap | Copy reached | Share of the peak |
+| Warpgroups | Query tiles | FLOP a staged byte | Copy cap (TFLOP/s) | Run 1 | Run 2 | Copy rate used (TB/s) | Copy path used (percent) | Compute used (percent of 989 TFLOP/s) |
 |---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| 1 | 1 | 64 | 156 | 151.2 | 151.7 | 97.1 | 2.36 TB/s | 15.3 percent |
-| 1 | 2 | 128 | 302 | 293.2 | 293.8 | 97.2 | 2.29 | 29.7 percent |
-| 1 | 3 | 192 | 453 | 424.3 | 424.9 | 93.8 | 2.21 | 43.0 percent |
-| 2 | 1 | 128 | 312 | 308.5 | 308.5 | 98.8 | 2.41 | 31.2 percent |
-| 2 | 2 | 256 | 604 | 535.8 | 535.4 | 88.6 | 2.09 | 54.1 percent |
-| 2 | 3 | 384 | 906 | 642.0 | 643.1 | 71.0 | 1.67 | 65.0 percent |
+| 1 | 1 | 64 | 156 | 151.2 | 151.7 | 2.36 | 97.1 | 15.3 |
+| 1 | 2 | 128 | 302 | 293.2 | 293.8 | 2.29 | 97.2 | 29.7 |
+| 1 | 3 | 192 | 453 | 424.3 | 424.9 | 2.21 | 93.8 | 43.0 |
+| 2 | 1 | 128 | 312 | 308.5 | 308.5 | 2.41 | 98.8 | 31.2 |
+| 2 | 2 | 256 | 604 | 535.8 | 535.4 | 2.09 | 88.6 | 54.1 |
+| 2 | 3 | 384 | 906 | 642.0 | 643.1 | 1.67 | 71.0 | 65.0 |
 
-The last three columns are one number three times. `Copy reached` is the rate
-over the arithmetic of the row, `share of the cap` is that figure over the copy
-rate of the path, and `share of the peak` is the rate over the declared
-989 TFLOP/s.
+The three right-hand columns state one bandwidth and two shares of it. A row
+stages a key tile at a fixed number of FLOP a staged byte, so its rate divides by
+that figure into the copy bytes a second the row consumed, which is
+`Copy rate used`. `Copy path used` is that figure over the copy rate of the row's
+own store order, 2.36 TB/s or 2.44, and it is the same quantity as the rate over
+the cap of that row, because a cap is the intensity times the copy rate.
+`Compute used` is the rate over the declared 989 TFLOP/s.
+
+**The reference for the copy share is the measured copy rate of the path, and not
+a declared peak bandwidth.** A share of the card's 3.35 TB/s memory peak would
+state a smaller number and answer a different question, which is how much of the
+memory system a row touches. This column answers how much of the copy path a row
+uses, so a row at 1.0 has the path exactly saturated and no arithmetic can rise
+above it while the same bytes are staged.
 
 **The correctness leg.** All twelve checks pass in all three runs, which is six
 geometries over the plain and the asynchronous staging. Every one reports 0 bad

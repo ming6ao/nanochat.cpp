@@ -2040,7 +2040,7 @@
       "validated_on_host": "Modal H100 image, bf16, tools/modal/app.py H100 leg"
     },
     "attention_wgmma_probe": {
-      "note": "Phase H1 of docs/attention.md Part 8, from the `attention-wgmma:` rows of dev/kernels/wgmma_bench.cu, over the shape space of dev/kernels/README.md: the warpgroups of a block, the query tiles of each, the key width, and the ring depth. The accumulator, operand, and register maps are checked one element at a time, at both key widths, and every staged geometry agrees with the resident product of its own query tile before it is timed. fraction_of_peak divides by the 989 TFLOP/s of backends/cuda/caps.json. The statistic is the protocol of backends/cuda/kernels/testing/bench_protocol.h, as in wgmma_probe: three calls to a window, three windows, a flushed cache before every call, the flush cost removed, and a minimum row beside a :median companion. **The narrow key tile does not raise the ceiling.** The 512 query rows of score64:2x4 buy an intensity of 512 FLOP a staged byte and a cap of 1208 TFLOP/s, and the row reads 628.5 against the 642.6 of the 384 intensity geometry. The narrow instruction is not the cause: its resident ceiling is 969.1 against 978.9, which is 99.0 percent of the wide one. What the ladder states is that intensity stops paying at about 256 FLOP a staged byte: the 128 and 256 rows reach 102 and 88 percent of their cap, and the 384 and 512 rows fall to 71 and 52 percent. Past 256 the copies stop binding and the shared issue path of the copies and the products becomes the limit, which is decision H3 and not another shape. The copy rows state the cap of each path, and the narrow ring stages at the same 2.34 to 2.40 TB/s the wide ring does. The two runs of this session differ by 0.9 percent at most on any ladder row.",
+      "note": "Phase H1 of docs/attention.md Part 8, from the `attention-wgmma:` rows of dev/kernels/wgmma_bench.cu, over the shape space of dev/kernels/README.md: the warpgroups of a block, the query tiles of each, the key width, and the ring depth. The accumulator, operand, and register maps are checked one element at a time, at both key widths, and every staged geometry agrees with the resident product of its own query tile before it is timed. fraction_of_peak divides by the 989 TFLOP/s of backends/cuda/caps.json. The statistic is the protocol of backends/cuda/kernels/testing/bench_protocol.h, as in wgmma_probe: three calls to a window, three windows, a flushed cache before every call, the flush cost removed, and a minimum row beside a :median companion. **The narrow key tile does not raise the ceiling.** The 512 query rows of score64:2x4 buy an intensity of 512 FLOP a staged byte and a cap of 1208 TFLOP/s, and the row reads 628.5 against the 642.6 of the 384 intensity geometry. The narrow instruction is not the cause: its resident ceiling is 969.1 against 978.9, which is 99.0 percent of the wide one. What the ladder states is that intensity stops paying at about 256 FLOP a staged byte: the 128 and 256 rows reach 102 and 88 percent of their cap, and the 384 and 512 rows fall to 71 and 52 percent. Past 256 the copies stop binding and the shared issue path of the copies and the products becomes the limit, which is decision H3 and not another shape. The copy rows state the cap of each path, and the narrow ring stages at the same 2.34 to 2.40 TB/s the wide ring does. Every staged row also states `copy_rate_used_tbps`, which is its rate over its intensity, and `share_of_copy_rate`, which is that figure over the 2.36 TB/s the copy path measures. The two are one number twice, because `cap_tflops` is the intensity times that rate: a row at 1.0 has the copy path saturated and no rate above it is reachable while the same bytes are staged. The two runs of this session differ by 0.9 percent at most on any ladder row.",
       "device": "NVIDIA H100 80GB HBM3 (sm_90a)",
       "validated_on": "NVIDIA H100 80GB HBM3 (sm_90a)",
       "precision": "bf16",
@@ -2149,7 +2149,8 @@
           "tflops": 151.1,
           "fraction_of_peak": 0.1528,
           "cap_tflops": 151.0,
-          "share_of_cap": 1.0
+          "copy_rate_used_tbps": 2.361,
+          "share_of_copy_rate": 1.0
         },
         {
           "name": "attention-wgmma:staged",
@@ -2164,7 +2165,8 @@
           "tflops": 292.9,
           "fraction_of_peak": 0.2961,
           "cap_tflops": 302.1,
-          "share_of_cap": 0.97
+          "copy_rate_used_tbps": 2.288,
+          "share_of_copy_rate": 0.97
         },
         {
           "name": "attention-wgmma:staged",
@@ -2179,7 +2181,8 @@
           "tflops": 424.7,
           "fraction_of_peak": 0.4294,
           "cap_tflops": 453.1,
-          "share_of_cap": 0.937
+          "copy_rate_used_tbps": 2.212,
+          "share_of_copy_rate": 0.937
         },
         {
           "name": "attention-wgmma:staged",
@@ -2194,7 +2197,8 @@
           "tflops": 308.7,
           "fraction_of_peak": 0.3122,
           "cap_tflops": 302.1,
-          "share_of_cap": 1.022
+          "copy_rate_used_tbps": 2.412,
+          "share_of_copy_rate": 1.022
         },
         {
           "name": "attention-wgmma:staged",
@@ -2209,7 +2213,8 @@
           "tflops": 534.4,
           "fraction_of_peak": 0.5403,
           "cap_tflops": 604.2,
-          "share_of_cap": 0.885
+          "copy_rate_used_tbps": 2.087,
+          "share_of_copy_rate": 0.885
         },
         {
           "name": "attention-wgmma:staged",
@@ -2224,7 +2229,8 @@
           "tflops": 642.6,
           "fraction_of_peak": 0.6498,
           "cap_tflops": 906.2,
-          "share_of_cap": 0.709
+          "copy_rate_used_tbps": 1.673,
+          "share_of_copy_rate": 0.709
         },
         {
           "name": "attention-wgmma:staged",
@@ -2239,7 +2245,8 @@
           "tflops": 628.5,
           "fraction_of_peak": 0.6354,
           "cap_tflops": 1208.3,
-          "share_of_cap": 0.52
+          "copy_rate_used_tbps": 1.228,
+          "share_of_copy_rate": 0.52
         },
         {
           "name": "attention-wgmma:copies",

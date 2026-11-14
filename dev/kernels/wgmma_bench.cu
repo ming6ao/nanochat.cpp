@@ -577,14 +577,14 @@ class ShapeTable {
     for (const Entry& entry : entries_) {
       const ShapeFacts facts = FactsOf(entry.shape, entry.compiler_registers);
       const std::string prefix = std::string("shape:") + entry.shape.name + ":";
-      report->SetExtraInt(prefix + "intensity", facts.intensity);
+      report->SetExtraInt(prefix + "intensity_flop_per_byte", facts.intensity);
       report->SetExtraInt(prefix + "accumulator_registers",
                           facts.accumulator_registers);
       report->SetExtraInt(prefix + "registers", facts.registers);
       report->SetExtraInt(prefix + "registers_per_multiprocessor",
                           facts.registers_per_multiprocessor);
       report->SetExtraInt(prefix + "shared_bytes", facts.shared_bytes);
-      report->SetExtra(prefix + "cap_tflops", facts.copy_cap_tflops);
+      report->SetExtra(prefix + "copy_cap_tflops", facts.copy_cap_tflops);
       report->SetExtraInt(prefix + "fits", facts.fits ? 1 : 0);
       if (!facts.fits) {
         report->SetExtraText(prefix + "verdict", facts.reason);
@@ -593,6 +593,14 @@ class ShapeTable {
       if (entry.shape.instantiated) ++instantiated;
       if (entry.tflops > 0.0) {
         report->SetExtra(prefix + "tflops", entry.tflops);
+        if (facts.intensity > 0) {
+          report->SetExtra(prefix + "copy_rate_used_tbps",
+                           entry.tflops * 1e12 / facts.intensity / 1e12);
+        }
+        if (facts.copy_cap_tflops > 0.0) {
+          report->SetExtra(prefix + "copy_path_used",
+                           entry.tflops / facts.copy_cap_tflops);
+        }
         if (best == nullptr || entry.tflops > best->tflops) best = &entry;
       }
     }
@@ -606,8 +614,11 @@ class ShapeTable {
   }
 
   // The table a human run reads: one line a shape, in the order the run stated
-  // them, then the count and the fastest row.
-  void Print(std::FILE* out) const {
+  // them, then the count and the fastest row. `peak_tflops` is the declared
+  // peak rate the run measured against, and zero means the run named none, as a
+  // `--shapes` run does: the compute share is then left out and no share is
+  // stated against a rate the run did not use.
+  void Print(std::FILE* out, double peak_tflops) const {
     int refused = 0;
     const Entry* best = nullptr;
     for (const Entry& entry : entries_) {
@@ -616,8 +627,8 @@ class ShapeTable {
                    "attention-wgmma:shape name=%s kind=%s warpgroups=%d "
                    "query_tiles=%d keys=%d stages=%d threads=%d query_rows=%d "
                    "accumulators=%d registers=%d registers_source=%s "
-                   "registers_per_sm=%d smem_bytes=%d intensity=%d "
-                   "cap_tflops=%.1f",
+                   "registers_per_sm=%d smem_bytes=%d "
+                   "intensity_flop_per_byte=%d copy_cap_tflops=%.1f",
                    entry.shape.name, ShapeKindName(entry.shape.kind),
                    entry.shape.warpgroups, entry.shape.query_tiles,
                    entry.shape.key_width, entry.shape.stages, facts.threads,
@@ -627,10 +638,23 @@ class ShapeTable {
                    facts.registers_per_multiprocessor, facts.shared_bytes,
                    facts.intensity, facts.copy_cap_tflops);
       if (entry.tflops > 0.0) {
-        std::fprintf(out, " tflops=%.1f share_of_cap=%.3f", entry.tflops,
-                     facts.copy_cap_tflops > 0.0
-                         ? entry.tflops / facts.copy_cap_tflops
-                         : 0.0);
+        // The rate, then the two resources it is a share of. `copy_rate_used`
+        // is the rate divided by the intensity, which is the copy bytes a
+        // second the row consumed, and `copy_path_used` is that over the
+        // measured copy rate. The two are one number twice, because the cap is
+        // the intensity times that rate. `compute_used` is the rate over the
+        // declared peak, and it is the same share the document's `mfu` states.
+        const double copy_rate_used = entry.tflops * 1e12 / facts.intensity;
+        const double copy_path_used = facts.copy_cap_tflops > 0.0
+                                          ? entry.tflops / facts.copy_cap_tflops
+                                          : 0.0;
+        std::fprintf(out,
+                     " tflops=%.1f copy_rate_used_tbps=%.2f "
+                     "copy_path_used=%.3f",
+                     entry.tflops, copy_rate_used / 1e12, copy_path_used);
+        if (peak_tflops > 0.0) {
+          std::fprintf(out, " compute_used=%.3f", entry.tflops / peak_tflops);
+        }
       }
       std::fprintf(out, " verdict=%s", facts.fits ? "fits" : facts.reason);
       if (entry.shape.note != nullptr) {
@@ -2345,7 +2369,8 @@ int main(int argc, char** argv) {
     if (options.bench.json) {
       report.Print(options.bench);
     } else {
-      shapes.Print(stdout);
+      // No peak is declared yet, so the table states no compute share.
+      shapes.Print(stdout, /*peak_tflops=*/0.0);
     }
     return 0;
   }
@@ -3833,7 +3858,9 @@ int main(int argc, char** argv) {
   // run, and the human table prints the same rows in the order the run met
   // them.
   shapes.Write(&report);
-  if (!options.bench.json) shapes.Print(stdout);
+  if (!options.bench.json) {
+    shapes.Print(stdout, report.peak_flops() / 1e12);
+  }
 
   cudaFree(device_q);
   cudaFree(device_queries);
