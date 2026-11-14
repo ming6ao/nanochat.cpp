@@ -231,10 +231,10 @@ GEMM_FP32_TEST_BIN = _bazel_bin(GEMM_FP32_TEST_TARGET)
 GEMM_MMA_TARGET = "//backends/cuda/gemm:mma_bf16_test"
 GEMM_MMA_BIN = _bazel_bin(GEMM_MMA_TARGET)
 
-#: Phase 0 of ``docs/kernels.md`` Part 3 and Phase H1 of
-#: ``docs/attention.md`` Part 8 in one program, ``dev/kernels/wgmma_bench.cu``.
+#: Phase 0 of ``docs/kernels.md`` Part 3, Phase H1 of ``docs/attention.md`` Part 8,
+#: and the H2 flash prototype in one program, ``dev/kernels/wgmma_bench.cu``.
 #: It absorbed the standalone ``dev/kernels/wgmma_probe.cu``, so one job builds
-#: and runs both row sets. It is the one target in the tree that needs
+#: and states every row set. It is the one target in the tree that needs
 #: ``sm_90a``, and the image's own build emits ``sm_90``, so
 #: :func:`bench_wgmma_h100` builds it inside the container with the tree's
 #: builder before it runs it. The probe is a device-only prototype: the
@@ -1451,18 +1451,21 @@ def prototype_probe(target: str, binary: str, argv_json: str = "[]") -> str:
     max_containers=1,
 )
 def bench_wgmma_h100(argv_json: str = "[]") -> str:
-    """Build and run the WGMMA probe on the H100 leg, both row sets.
+    """Build and run the WGMMA probe on the H100 leg, every row set.
 
-    One binary answers two phases. The ``wgmma:`` rows are Phase 0 of
-    ``docs/kernels.md`` Part 3: how fast one warpgroup issues the warpgroup
-    matrix multiply-accumulate from a resident shared-memory tile, and what
-    share of its SM that is. The ``attention-wgmma:`` rows are Phase H1 of
-    ``docs/attention.md`` Part 8: the operand form, the two operand maps, and
-    the rate of a key tile that the copy engine stages.
+    One binary answers three questions in one job and one document. The
+    ``wgmma:`` rows are Phase 0 of ``docs/kernels.md`` Part 3: how fast one
+    warpgroup issues the warpgroup matrix multiply-accumulate from a resident
+    shared-memory tile, and what share of its SM that is. The
+    ``attention-wgmma:`` rows are Phase H1 of ``docs/attention.md`` Part 8: the
+    operand form, the two operand maps, and the rate of a key tile that the copy
+    engine stages, over both key widths of the shape space. The
+    ``attention-flash:`` rows are the H2 prototype: the whole step, the softmax,
+    and the two rings that feed it.
 
     ``argv_json`` is the probe's own arguments, such as
-    ``["--rows", "phase0", "--json"]``, so one gate reads its own rows from
-    the one document.
+    ``["--rows", "all", "--json"]``, and ``--rows all`` is the default, so no
+    argv states every set.
 
     The build comes first and it is inside the container, because the image
     built every other target at ``sm_90`` and this probe needs ``sm_90a``.
@@ -3012,8 +3015,8 @@ class CardJob:
 #:   `_probe`  unused at present, kept for a prototype that reports neither.
 #: Each one is the gate or the benchmark of one tensor-core family: the tile's
 #: own test against its reference, and the rate report whose rows a promotion
-#: gate reads. One job may carry two row sets, which is why `wgmma_bench` takes
-#: `--rows`.
+#: gate reads. One job carries every row set of its family, which is why
+#: `wgmma_bench` takes `--rows`: `--rows all`, its default, is the whole probe.
 CARD_JOBS = {
     "attention_check": CardJob(check_attention_h100, "the attention test"),
     "attention_bench": CardJob(bench_attention_h100, "the attention benchmark",
@@ -3030,8 +3033,8 @@ CARD_JOBS = {
     "mma_check": CardJob(check_mma_h100, "the Part 3 phase 1 micro-tile gate"),
     "wgmma_bench": CardJob(
         bench_wgmma_h100,
-        "the WGMMA probe: the Part 3 phase 0 ceiling rows and the Part 8 H1 "
-        "copy-path rows, from one binary",
+        "the WGMMA probe: the Part 3 ceiling rows, the Part 8 H1 rows, and the "
+        "H2 flash rows, from one binary and one job",
         takes_argv=True),
 }
 

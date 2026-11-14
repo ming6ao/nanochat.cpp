@@ -32,7 +32,8 @@ tools/nanochat bench -- <benchmark>       # T3-style micro-benchmark under the b
 | `muon_fused_gemm_test.cc` | Five-form correctness of the prototype against the seam GEMM (cuBLAS), including the wide-branch side selector. |
 | `muon_fused_gemm_bench.cc` | Hand GEMM versus cuBLAS at the groups the fusion targets, with the section 4 gate share. |
 | `muon_launch_sync_bench.cu` | Phase 0 sync term: launch gap versus cooperative grid-barrier cost on this card. |
-| `wgmma_bench.cu` | Phase 0 of [docs/kernels.md](../../docs/kernels.md) Part 3 and Phase H1 of [docs/attention.md](../../docs/attention.md) Part 8, in one binary: the `wgmma:` ceiling rows of the warpgroup rate on a resident tile, the accumulator, operand, and register maps of `wgmma.mma_async.m64n128k16` checked one element at a time, and the `attention-wgmma:` rows of a staged key tile. The staged rows sweep the arithmetic that one staged byte buys: the warpgroups of one block and the query tiles of each, over two copy orders and two source windows, beside a copy-only row and the depth of the ring. It also carries the `attention-flash:` rows of the H2 prototype, which check their product against the sequence reference for both a dense and a causal boundary tile, and price the serialized score-softmax-value chain twice: with no copy path, and behind a ring of key tiles and a ring of value tiles, beside the copy rows of both rings at both depths. `--rows phase0|h1|flash|all` selects a row set. Needs `sm_90a`. |
+| `wgmma_bench.cu` | Phase 0 of [docs/kernels.md](../../docs/kernels.md) Part 3 and Phase H1 of [docs/attention.md](../../docs/attention.md) Part 8, in one binary: the `wgmma:` ceiling rows of the warpgroup rate on a resident tile, the accumulator, operand, and register maps of `wgmma.mma_async.m64n128k16` checked one element at a time, and the `attention-wgmma:` rows of a staged key tile. The staged rows sweep the arithmetic that one staged byte buys: the warpgroups of one block, the query tiles of each, and the width of the key tile, over two copy orders and two source windows, beside a copy-only row and the depth of the ring. It also carries the `attention-flash:` rows of the H2 prototype, which check their product against the sequence reference for both a dense and a causal boundary tile, and price the serialized score-softmax-value chain twice: with no copy path, and behind a ring of key tiles and a ring of value tiles, beside the copy rows of both rings at both depths. `--rows phase0|h1|flash|all` selects a row set, and `--shapes` prints the shape space without a card. Needs `sm_90a`. |
+
 
 ## Conventions
 
@@ -354,15 +355,82 @@ JSON document holds the pair as two rows.
 tools/nanochat build //dev/kernels:wgmma_bench
 ```
 
-On a card the host cannot reach, the one Modal card job builds and runs it. The
-job states a `nanochat.bench.v3` document, and `--rows` selects the row set:
+On a card the host cannot reach, one Modal card job builds and runs it, and that
+one job states every row set in one `nanochat.bench.v3` document:
 
 ```bash
 modal run tools/modal/app.py::card_job --name wgmma_bench \
-  --argv '["--rows","phase0","--json"]'
-modal run tools/modal/app.py::card_job --name wgmma_bench \
-  --argv '["--rows","h1","--json"]'
+  --argv '["--rows","all","--json"]'
 ```
+
+`--rows all` is the default, so the same job with no `--argv` states the same
+rows and prints the human table. `--rows phase0|h1|flash` selects one set, and a
+selection is for a debug run: it is not a job of its own, because one process
+builds once and the three sets answer one question in three views.
+
+## The shape space (`--shapes`)
+
+The staged and flash rows of `wgmma_bench.cu` reach at most the copy rate of
+their path times the arithmetic one staged byte buys, and that figure is the
+count of query rows behind one staged key tile. Four counts state it: the
+warpgroups of a block, the query tiles of each, the key width, and the ring
+depth. The program names them in one table and prints it beside the rows it
+prices.
+
+One `attention-wgmma:shape` line states the threads, the query rows, the
+accumulator registers, the registers the compiler reported, the registers a
+multiprocessor spends, the shared bytes, the intensity, the cap, and a verdict.
+A shape the register file or the shared window refuses is a line with its
+reason, and the sweep never launches it, so a shape the hardware cannot hold is
+a row of the table and not a silence.
+
+```bash
+tools/nanochat run t0-cpu -- ./bazel-bin/dev/kernels/wgmma_bench --shapes
+```
+
+`--shapes --json` writes the same table as a `nanochat.bench.v3` document with
+no rows, one extra a field, so a script reads the space without a card.
+
+The three `cand:` rows are shapes the file does not instantiate yet. The
+register identity of the table states them: one fp32 accumulator of `query_rows`
+rows by `key_width` columns is `query_rows * key_width` words a multiprocessor,
+and one multiprocessor holds 65,536 of them. The key width is therefore a
+register lever, and half of it doubles the query rows one register file holds.
+
+## The narrow key tile
+
+`wgmma.mma_async.sync.aligned.m64n64k16` holds thirty-two fp32 accumulators a
+thread where `m64n128k16` holds sixty-four, and every other field of the two
+instructions is the same. The key width is therefore the one lever on a staged
+row that costs no copy bandwidth: half the key width doubles the query rows one
+register file holds, and a staged key byte then buys twice the arithmetic.
+
+The `score64:2x4` row is that lever measured: two warpgroups of four query tiles
+each at 64 keys, which is 512 query rows behind one staged key tile against the
+384 of the widest 128-key geometry. The narrow key tile also stages half the
+bytes a step, so its ring of four stages costs 64 KiB where the wide ring costs
+128 KiB.
+
+Three rows state it, and this list is the gate of the axis:
+
+| Row | What it states |
+|---|---|
+| `attention-wgmma:resident_narrow` | The ceiling of `m64n64k16` on a resident tile, one warpgroup a block over the card |
+| `attention-wgmma:copies keys=64` | The copy rate of the narrow ring, which is the cap of the row below |
+| `attention-wgmma:staged keys=64 warpgroups=2 query_tiles=4` | The rate of the narrow shape |
+
+Two checks stand behind the rows. `form_check_narrow` compares the narrow
+resident product with a host reference one element at a time, because the
+accumulator map of the narrow instruction is the wide map with its column field
+stopped at 63 and that is a claim about the hardware. `staged_check keys=64`
+compares the narrow staged product with the narrow resident product of the same
+query tile, over both staging paths. A wrong map, a wrong atom step, or a wrong
+ring fails there, before anything is timed.
+
+The narrow key tile is a score-product axis only. The fused forward tile still
+stages the value tile as well, and its output accumulator is as wide as the head
+at either key width, so the deep fused shape is the `cand:flash64-3` row of the
+table and it is not written yet.
 
 ## Adding a family
 

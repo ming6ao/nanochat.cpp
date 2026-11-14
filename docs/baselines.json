@@ -886,10 +886,11 @@
       ]
     },
     "wgmma_probe": {
-      "note": "Phase 0 of docs/kernels.md Part 3, from the `wgmma:` rows of dev/kernels/wgmma_bench.cu. One warpgroup issues wgmma.mma_async.sync.aligned.m64n128k16.f32.bf16.bf16 from a resident shared-memory tile, through a hand-built descriptor in the interleaved K-major form, with no global memory traffic in the timed loop. The 1block row is one warpgroup on one SM; the grid row is two warpgroups on every SM of the card. fraction_of_peak is the rate over the card's declared bf16 peak of 989 TFLOP/s (backends/cuda/caps.json), and fraction_of_sm_share is the 1block rate over the per-SM share of that peak, 989 over 132, or 7.4924 TFLOP/s. Passes are four atoms each, so one pass is 1048576 flop. The statistic is the protocol of backends/cuda/kernels/testing/bench_protocol.h: one call is one launch, three calls fill one window, three windows give the samples, the second-level cache is flushed before every call, and the measured 0.0347 ms cost of one flush is removed; the row states the minimum of the three windows and a :median companion row states the median. Both rows read slightly above the single-launch figures this entry used to hold, 98.55 and 96.35 percent, because one launch is not a steady state. The sum-based correctness row this entry used to hold is withdrawn: a sum is blind to the operand form. The element check that replaces it is the form_check row of attention_wgmma_probe, and it runs whenever the H1 rows run.",
+      "note": "Phase 0 of docs/kernels.md Part 3, from the `wgmma:` rows of dev/kernels/wgmma_bench.cu. One warpgroup issues wgmma.mma_async.sync.aligned.m64n128k16.f32.bf16.bf16 from a resident shared-memory tile, through a hand-built descriptor in the interleaved K-major form, with no global memory traffic in the timed loop. The 1block row is one warpgroup on one SM; the grid row is two warpgroups on every SM of the card. fraction_of_peak is the rate over the card's declared bf16 peak of 989 TFLOP/s (backends/cuda/caps.json), and fraction_of_sm_share is the 1block rate over the per-SM share of that peak, 989 over 132. Passes are four atoms each, so one pass is 1048576 flop. fraction_of_sm_share is the rate over one per-SM share of the declared peak, so the 1block row states the fraction the phase 0 gate reads, 0.9884 against a gate of 0.85, and the grid row states 132.3 shares, which is the whole card at two warpgroups an SM. The statistic is the protocol of backends/cuda/kernels/testing/bench_protocol.h: three calls to a window, three windows, a flushed cache before every call, the flush cost of 0.0351 ms removed, and the minimum of the three windows beside a :median companion. This run belongs to the session that added the shape space and the narrow key tile, and it rode the one card job that states every row set. The grid row reads 991.4 TFLOP/s, which is 100.2 percent of the declared peak: the declaration is a documented figure and the card's clock during a run can sit above the clock it assumes, so fraction_of_peak above 1 is the clock and not a defect, and the document clamps its own mfu to 1. An earlier run of the same source in the same session read 970.2 TFLOP/s on the same row, which is the spread between two runs of one binary.",
       "device": "NVIDIA H100 80GB HBM3 (sm_90a)",
       "validated_on": "NVIDIA H100 80GB HBM3 (sm_90a)",
       "precision": "bf16",
+      "revision": "1a943d0 plus the uncommitted change to dev/kernels/wgmma_bench.cu",
       "measurement": "modal run tools/modal/app.py::card_job --name wgmma_bench --argv '[\"--rows\",\"all\",\"--json\"]'",
       "origin": "docs/kernels.md Part 3 phase 0, dev/kernels/wgmma_bench.cu, dev/kernels/README.md",
       "rows": [
@@ -897,19 +898,19 @@
           "name": "wgmma:1block",
           "blocks": 1,
           "passes": 20000,
-          "ms": 2.8282,
-          "tflops": 7.4152,
-          "fraction_of_peak": 0.007497,
-          "fraction_of_sm_share": 0.9897
+          "ms": 2.8318,
+          "tflops": 7.4057,
+          "fraction_of_peak": 0.0075,
+          "fraction_of_sm_share": 0.9884
         },
         {
           "name": "wgmma:grid",
           "blocks": 264,
           "passes": 20000,
-          "ms": 5.6956,
-          "tflops": 972.06,
-          "fraction_of_peak": 0.9829,
-          "fraction_of_sm_share": 0.9829
+          "ms": 5.5844,
+          "tflops": 991.4,
+          "fraction_of_peak": 1.0025,
+          "fraction_of_sm_share": 132.324
         }
       ]
     },
@@ -2039,33 +2040,46 @@
       "validated_on_host": "Modal H100 image, bf16, tools/modal/app.py H100 leg"
     },
     "attention_wgmma_probe": {
-      "note": "Phase H1 of docs/attention.md Part 8, from the `attention-wgmma:` rows of dev/kernels/wgmma_bench.cu on the H100 leg of tools/modal/app.py (sm_90a, bf16). Every row below is reproducible from the committed source, and the three recorded staged rows that this entry used to hold are kept only as the historical Tensor Memory Accelerator rows of a binary that is not in the tree. fraction_of_peak divides by the 989 TFLOP/s dense bf16 rate of backends/cuda/caps.json. The statistic is the protocol of backends/cuda/kernels/testing/bench_protocol.h, as in wgmma_probe: three calls to a window, three windows, a flushed cache before every call, the flush cost removed, and a minimum row beside a :median companion. The six staged rows sweep the warpgroups of one block against the query tiles of each, because the warpgroups share the ring of staged key tiles and the rate of such a row is the copy rate of its path times the arithmetic one staged byte buys. Three runs of the sweep agree to within 0.7 percent, and the values here are the second run. The third measured the source that also carries the attention-flash rows of another workstream, so the staged ladder does not move when a second row set shares the binary. The rows read 151.7, 293.8, 424.9, 308.5, 535.4 and 643.1 TFLOP/s, against caps of 156, 302, 453, 312, 604 and 906 TFLOP/s at the copy rate of each row's own store order, 2.36 TB/s for the k-block-first order and 2.44 for the row-first order. The first five are 89 to 99 percent of their cap, so the copies bind them; the sixth reaches only 1.67 of the 2.36 TB/s available and is limited by the issue path the copies share with the products. The resident row reads 978.7 TFLOP/s in this entry and 970.4 to 972.5 in the two ladder runs, and the copy-only rows read 2.37 to 2.44 TB/s. Two checks stand behind every rate. form_check compares a full product with a host reference one element at a time, which a row-major stage fails and a sum-based check cannot see; it reads 1.9e-07 against a reference scale of 14.68. staged_check compares the staged product with the resident product of the same query tile over all six geometries and both staging paths, and every one of the twelve checks reports 0 bad elements, so the ring, its barriers, its stages, and the warpgroup offset of the tile are right. dev/kernels/wgmma_probe_report.md section 10 is the record of the sweep.",
+      "note": "Phase H1 of docs/attention.md Part 8, from the `attention-wgmma:` rows of dev/kernels/wgmma_bench.cu, over the shape space of dev/kernels/README.md: the warpgroups of a block, the query tiles of each, the key width, and the ring depth. The accumulator, operand, and register maps are checked one element at a time, at both key widths, and every staged geometry agrees with the resident product of its own query tile before it is timed. fraction_of_peak divides by the 989 TFLOP/s of backends/cuda/caps.json. The statistic is the protocol of backends/cuda/kernels/testing/bench_protocol.h, as in wgmma_probe: three calls to a window, three windows, a flushed cache before every call, the flush cost removed, and a minimum row beside a :median companion. **The narrow key tile does not raise the ceiling.** The 512 query rows of score64:2x4 buy an intensity of 512 FLOP a staged byte and a cap of 1208 TFLOP/s, and the row reads 628.5 against the 642.6 of the 384 intensity geometry. The narrow instruction is not the cause: its resident ceiling is 969.1 against 978.9, which is 99.0 percent of the wide one. What the ladder states is that intensity stops paying at about 256 FLOP a staged byte: the 128 and 256 rows reach 102 and 88 percent of their cap, and the 384 and 512 rows fall to 71 and 52 percent. Past 256 the copies stop binding and the shared issue path of the copies and the products becomes the limit, which is decision H3 and not another shape. The copy rows state the cap of each path, and the narrow ring stages at the same 2.34 to 2.40 TB/s the wide ring does. The two runs of this session differ by 0.9 percent at most on any ladder row.",
       "device": "NVIDIA H100 80GB HBM3 (sm_90a)",
       "validated_on": "NVIDIA H100 80GB HBM3 (sm_90a)",
       "precision": "bf16",
+      "revision": "1a943d0 plus the uncommitted change to dev/kernels/wgmma_bench.cu",
       "measurement": "modal run tools/modal/app.py::card_job --name wgmma_bench --argv '[\"--rows\",\"all\",\"--json\"]'",
-      "origin": "docs/attention.md Part 8 section 6",
+      "origin": "docs/attention.md Part 8 section 6, dev/kernels/README.md",
       "rows": [
         {
           "name": "attention-wgmma:form_check",
-          "relative_error": 1.918e-07,
-          "reference_scale": 14.681,
-          "result": "ok",
-          "note": "one element at a time against a host reference"
-        },
-        {
-          "name": "attention-wgmma:staged_check",
-          "relative_error": 0.0,
-          "both_stagings": true,
-          "bad_elements": 0,
+          "keys": 128,
+          "reference_scale": 14.6808,
+          "relative_error": 1.92e-07,
           "result": "ok"
         },
         {
+          "name": "attention-wgmma:form_check_narrow",
+          "keys": 64,
+          "reference_scale": 14.6808,
+          "relative_error": 1.92e-07,
+          "result": "ok",
+          "note": "the narrow accumulator map is the wide one with its column field stopped at 63, measured one element at a time over thirty-two registers"
+        },
+        {
+          "name": "attention-wgmma:staged_check",
+          "both_stagings": true,
+          "key_widths": 2,
+          "geometries": 7,
+          "bad_elements": 0,
+          "relative_error": 0.0,
+          "result": "ok",
+          "note": "seven geometries over the plain and the asynchronous staging, fourteen checks, every one 0 bad elements of up to 49,152"
+        },
+        {
           "name": "attention-wgmma:accumulator-map",
+          "table_elements": 8192,
           "one_hot_probes": 15,
           "one_hot_found": 15,
-          "table_elements": 8192,
           "missing": 0,
+          "outside": 0,
           "repeated": 0,
           "formula_mismatch": 0,
           "row": "16*(lane/32) + (lane%32)/4 + 8*((index/2)%2)",
@@ -2075,20 +2089,10 @@
           "name": "attention-wgmma:register-operand",
           "table_elements": 1024,
           "missing": 0,
+          "outside": 0,
           "repeated": 0,
           "row": "16*(lane/32) + (lane%32)/4 + 8*(reg%2)",
-          "key": "8*(reg/2) + 2*(lane%4) + half",
-          "note": "the accumulator slot index becomes the register 2*(index/4) + ((index/2)%2) and the half index%2, in the same lane, so the probability operand reaches the value product with no shuffle"
-        },
-        {
-          "name": "attention-wgmma:value-operand",
-          "transpose_stage": 1,
-          "trans_b": 0,
-          "atom_step": 256,
-          "one_hot_triples": 6,
-          "found": 6,
-          "status": "ok",
-          "note": "the staged value tile is transposed at the copy and both transpose bits stay clear, so the value product uses the same descriptor parameters as the score product"
+          "key": "8*(reg/2) + 2*(lane%4) + half"
         },
         {
           "name": "attention-wgmma:probability-permutation",
@@ -2097,186 +2101,232 @@
           "cross_lane": 0,
           "accumulator_duplicates": 0,
           "register_duplicates": 0,
-          "status": "ok",
-          "note": "the score accumulator slot and the value product's register operand name the same lane for every slot of a 64 by 128 score tile, so the probability tile needs no shuffle"
+          "status": "ok"
         },
         {
           "name": "attention-wgmma:value-operand",
-          "transpose_stage": 0,
-          "best_found": 3,
-          "one_hot_triples": 6,
-          "status": "failed",
-          "note": "the direct staging over both transpose bits and three atom strides"
+          "configs": 145,
+          "configs_ok": 1,
+          "triples": 6,
+          "found": 6,
+          "config": "transpose_stage=1 trans_b=0 atom_step=256 lbo=128 sbo=256 layout=0;",
+          "status": "ok"
         },
         {
           "name": "attention-wgmma:resident",
+          "keys": 128,
           "blocks": 132,
           "passes": 20000,
-          "tflops": 978.7,
-          "fraction_of_peak": 0.9896,
-          "note": "an interleaved resident tile of eight atoms, which is the head width; the same kernel on one block reads 7.455 TFLOP/s, which is 99.5 percent of the per-SM share"
+          "atoms": 8,
+          "ms": 5.6559,
+          "tflops": 978.9,
+          "fraction_of_peak": 0.9898,
+          "fraction_of_sm_share": 0.9898,
+          "note": "the same kernel on one block reads 7.5 TFLOP/s, which is 99.5 percent of the per-SM share"
+        },
+        {
+          "name": "attention-wgmma:resident_narrow",
+          "keys": 64,
+          "blocks": 132,
+          "passes": 20000,
+          "atoms": 8,
+          "ms": 2.8566,
+          "tflops": 969.1,
+          "fraction_of_peak": 0.9799,
+          "fraction_of_sm_share": 0.9799,
+          "note": "m64n64k16 from the same resident tile, so the narrow instruction holds 99.0 percent of the wide ceiling"
         },
         {
           "name": "attention-wgmma:staged",
           "copy_path": "sixteen-byte stores",
+          "keys": 128,
           "warpgroups": 1,
           "query_tiles": 1,
           "flop_per_staged_byte": 64,
           "blocks": 132,
           "tiles": 4096,
-          "tflops": 151.7,
-          "fraction_of_peak": 0.1534,
-          "note": "the warpgroups of one block share one ring of staged key tiles, so the arithmetic one staged byte buys is 64 FLOP for each query tile of each warpgroup"
+          "ms": 7.5039,
+          "tflops": 151.1,
+          "fraction_of_peak": 0.1528,
+          "cap_tflops": 151.0,
+          "share_of_cap": 1.0
         },
         {
           "name": "attention-wgmma:staged",
           "copy_path": "sixteen-byte stores",
+          "keys": 128,
           "warpgroups": 1,
           "query_tiles": 2,
           "flop_per_staged_byte": 128,
           "blocks": 132,
           "tiles": 4096,
-          "tflops": 293.8,
-          "fraction_of_peak": 0.297,
-          "note": "the warpgroups of one block share one ring of staged key tiles, so the arithmetic one staged byte buys is 64 FLOP for each query tile of each warpgroup"
+          "ms": 7.7432,
+          "tflops": 292.9,
+          "fraction_of_peak": 0.2961,
+          "cap_tflops": 302.1,
+          "share_of_cap": 0.97
         },
         {
           "name": "attention-wgmma:staged",
           "copy_path": "sixteen-byte stores",
+          "keys": 128,
           "warpgroups": 1,
           "query_tiles": 3,
           "flop_per_staged_byte": 192,
           "blocks": 132,
           "tiles": 4096,
-          "tflops": 424.9,
-          "fraction_of_peak": 0.4297,
-          "note": "the warpgroups of one block share one ring of staged key tiles, so the arithmetic one staged byte buys is 64 FLOP for each query tile of each warpgroup"
+          "ms": 8.0101,
+          "tflops": 424.7,
+          "fraction_of_peak": 0.4294,
+          "cap_tflops": 453.1,
+          "share_of_cap": 0.937
         },
         {
           "name": "attention-wgmma:staged",
           "copy_path": "sixteen-byte stores",
+          "keys": 128,
           "warpgroups": 2,
           "query_tiles": 1,
           "flop_per_staged_byte": 128,
           "blocks": 132,
           "tiles": 4096,
-          "tflops": 308.5,
-          "fraction_of_peak": 0.3119,
-          "note": "the warpgroups of one block share one ring of staged key tiles, so the arithmetic one staged byte buys is 64 FLOP for each query tile of each warpgroup"
+          "ms": 7.3454,
+          "tflops": 308.7,
+          "fraction_of_peak": 0.3122,
+          "cap_tflops": 302.1,
+          "share_of_cap": 1.022
         },
         {
           "name": "attention-wgmma:staged",
           "copy_path": "sixteen-byte stores",
+          "keys": 128,
           "warpgroups": 2,
           "query_tiles": 2,
           "flop_per_staged_byte": 256,
           "blocks": 132,
           "tiles": 4096,
-          "tflops": 535.4,
-          "fraction_of_peak": 0.5413,
-          "note": "the warpgroups of one block share one ring of staged key tiles, so the arithmetic one staged byte buys is 64 FLOP for each query tile of each warpgroup"
+          "ms": 8.4874,
+          "tflops": 534.4,
+          "fraction_of_peak": 0.5403,
+          "cap_tflops": 604.2,
+          "share_of_cap": 0.885
         },
         {
           "name": "attention-wgmma:staged",
           "copy_path": "sixteen-byte stores",
+          "keys": 128,
           "warpgroups": 2,
           "query_tiles": 3,
           "flop_per_staged_byte": 384,
           "blocks": 132,
           "tiles": 4096,
-          "tflops": 643.1,
-          "fraction_of_peak": 0.6503,
-          "note": "the warpgroups of one block share one ring of staged key tiles, so the arithmetic one staged byte buys is 64 FLOP for each query tile of each warpgroup"
+          "ms": 10.5865,
+          "tflops": 642.6,
+          "fraction_of_peak": 0.6498,
+          "cap_tflops": 906.2,
+          "share_of_cap": 0.709
         },
         {
-          "name": "attention-wgmma:copies",
+          "name": "attention-wgmma:staged",
           "copy_path": "sixteen-byte stores",
+          "keys": 64,
+          "warpgroups": 2,
+          "query_tiles": 4,
+          "flop_per_staged_byte": 512,
           "blocks": 132,
-          "tiles": 8192,
-          "tbps": 2.37,
-          "gigabytes_per_block": 18.0
+          "tiles": 4096,
+          "ms": 7.2168,
+          "tflops": 628.5,
+          "fraction_of_peak": 0.6354,
+          "cap_tflops": 1208.3,
+          "share_of_cap": 0.52
         },
         {
           "name": "attention-wgmma:copies",
           "copy_path": "sixteen-byte stores",
-          "blocks": 1,
-          "tiles": 8192,
-          "tbps": 0.029,
-          "gigabytes_per_block": 28.7,
-          "note": "one block alone reaches more a second than its share of a full grid"
+          "keys": 128,
+          "warpgroups": 1,
+          "shape": "warpgroups=1 window=512 copy_order=2 blocks=132 tiles=8192",
+          "tbps": 2.437
         },
         {
           "name": "attention-wgmma:copies",
-          "copy_path": "Tensor Memory Accelerator",
-          "tbps": 6.03,
-          "reproducible": false
+          "copy_path": "sixteen-byte stores",
+          "keys": 128,
+          "warpgroups": 2,
+          "shape": "warpgroups=2 window=512 copy_order=2 blocks=132 tiles=8192",
+          "tbps": 2.441
+        },
+        {
+          "name": "attention-wgmma:copies",
+          "copy_path": "sixteen-byte stores",
+          "keys": 64,
+          "warpgroups": 2,
+          "shape": "keys=64 window=512 copy_order=2 blocks=132 tiles=8192",
+          "tbps": 2.395
         },
         {
           "name": "attention-wgmma:copy_depth",
           "stages": 2,
-          "tbps": 2.13
+          "tbps": 2.125
         },
         {
           "name": "attention-wgmma:copy_depth",
           "stages": 4,
-          "tbps": 2.36
+          "tbps": 2.355
         },
         {
           "name": "attention-wgmma:copy_depth",
           "stages": 5,
-          "tbps": 2.36,
-          "note": "the ring is deep enough at four stages; five is the opt-in limit"
+          "tbps": 2.356
         },
         {
-          "name": "attention-wgmma:copy_order",
-          "k_block_first": 2.37,
-          "row_first": 2.43,
-          "note": "the interleaved form costs no bank conflict this path can see"
-        },
-        {
-          "name": "attention-wgmma:staged_tile",
-          "copy_path": "Tensor Memory Accelerator",
-          "query_tiles": 1,
-          "tflops": 375.6,
-          "fraction_of_peak": 0.38,
-          "reproducible": false
-        },
-        {
-          "name": "attention-wgmma:staged_tile",
-          "copy_path": "Tensor Memory Accelerator",
-          "query_tiles": 2,
-          "tflops": 755.4,
-          "fraction_of_peak": 0.764,
-          "reproducible": false
+          "name": "attention-wgmma:shape",
+          "shapes": 16,
+          "instantiated": 13,
+          "refused": 2,
+          "best": "score:2x3",
+          "best_tflops": 642.6,
+          "note": "the register count of every shape is the compiler's own, read with cudaFuncGetAttributes: the score rows hold 166 to 239 registers a thread, and the two refused shapes ask for four warpgroups of four query tiles at 64 keys and three warpgroups at 128 keys, which the 65,536-register file closes. `--shapes` prints the same table with no card."
         }
       ]
     },
     "attention_flash_probe": {
-      "note": "The `attention-flash:` rows of dev/kernels/wgmma_bench.cu, which price the whole tile of the H2 prototype: the score product, the base-two softmax in the registers, the value product from the probability operand the score lane already holds, and the running maximum, sum, and rescale. One `FlashStep` is the only written form of the step. The set prices the tile three ways, with no copy path, behind a ring of key tiles and a ring of value tiles, and with the softmax off, and it states the cap of each ring separately by staging the key ring, the value ring, or both. Two masks are timed: dense, and the causal boundary tile, whose `work_ratio` is 256 over the query rows plus one. fraction_of_peak divides by the 989 TFLOP/s dense bf16 rate of backends/cuda/caps.json. One run on the H100 leg of tools/modal/app.py, at bf16, sm_90a, through the protocol of backends/cuda/kernels/testing/bench_protocol.h as in wgmma_probe. The checks pass for both masks and every staged geometry agrees with the resident step of the same mask exactly. The headline is the fourth stage of this investigation: `#pragma unroll 4` on the three plain staging passes moved the staged row from 146.8 to 225.4 TFLOP/s at two warpgroups and from 52.5 to 96.0 at one, which is 54 and 83 percent, with nothing else changed. The mechanism is that the plain passes are load-to-store loops whose time is latency and not bandwidth: without the pragma ptxas may leave every iteration waiting on its own global loads, which is why the same pass read 2.23 TB/s in one binary and 0.64 in the next while the `cp.async` row stayed put. Four iterations in flight also let the staging hide under the products, which is why the product rows gain more than the copy rows. The copy rows are therefore a lower bound and not a cap, and the staged row now reads above its own mixed-ring copy row, 225.4 against 160.8. What remains: the resident row reads 458.1 TFLOP/s, 797.9 with the softmax off, so the softmax and its serialized place in the chain still cost 43 percent of a step that carries no traffic; and the staged row reads 225.4 against the 254.9 of the same geometry with the softmax off, so behind the rings the chain costs 12 percent and the copy path the rest. Against the score-only staged rows at the same reuse the whole tile is now three quarters at 128 query rows, 225.4 against 295.4, where it was a half. Two consequences for docs/attention.md Part 8 stand: decision H4 addresses the chain, which is worth 43 percent of a resident step and 12 behind the rings, and the copy path addresses the rest, where a 145 configuration descriptor sweep leaves no plain-store route to the value ring and the multicast of decision H5 halves the bytes. One run, so no row is claimed tighter than the three-window minimum states, and the copy rows above are a single reading of a pass whose own timing moves with scheduling.",
+      "note": "The `attention-flash:` rows of dev/kernels/wgmma_bench.cu, which price the whole step of the H2 prototype: the score product, the base-two softmax in registers, the value product from the probability operand the score lane already holds, and the running maximum, sum, and rescale. One `FlashStep` is the only written form of the step. The set prices the tile with no copy path, behind a ring of key tiles and a ring of value tiles, and with the softmax off, and it states the cap of each ring separately. **The interleave is worth more than a shape.** Two warpgroups on one multiprocessor lift the chain from 456.9 to 616.9 TFLOP/s, which is 35 percent, so the softmax chain costs 343 of the 798 TFLOP/s ceiling at one warpgroup and only 373 of 991 at two while running 1.35 times faster. The two-warpgroup rows did not exist before this session, so no earlier record could separate the chain from the copies. The softmax-off row at two warpgroups reads 990.6 TFLOP/s, which is 100.2 percent of the declared peak, and the document therefore clamps its own mfu to 1: the same boost-clock caveat wgmma_probe states. The copy rows state the two paths apart, and the value ring stays the slow one at 0.43 to 1.17 TB/s against the key ring's 2.23 to 2.50, which is why decision H2b keeps its place for the fused tile. Every check passes: the reference check against seqref::AttentionForward for both masks, and every staged geometry against the resident step of the same operands.",
       "device": "NVIDIA H100 80GB HBM3 (sm_90a)",
       "validated_on": "NVIDIA H100 80GB HBM3 (sm_90a)",
       "precision": "bf16",
-      "measurement": "modal run tools/modal/app.py::card_job --name wgmma_bench --argv '[\"--rows\",\"flash\",\"--json\"]'",
+      "revision": "1a943d0 plus the uncommitted change to dev/kernels/wgmma_bench.cu",
+      "measurement": "modal run tools/modal/app.py::card_job --name wgmma_bench --argv '[\"--rows\",\"all\",\"--json\"]'",
       "origin": "docs/attention.md Part 8 section 6, phase H2 prototype",
       "rows": [
         {
           "name": "attention-flash:reference_check",
           "mask": "dense",
-          "relative_error": 0.00209068,
-          "reference_scale": 0.184011,
           "bad_elements": 0,
           "elements": 8192,
-          "row_sum_relative_error": 2.11118e-07,
+          "reference_scale": 0.184,
+          "relative_error": 0.00209,
+          "row_sum_relative_error": 2.11e-07,
           "result": "ok"
         },
         {
           "name": "attention-flash:reference_check",
           "mask": "causal",
-          "relative_error": 0.00100149,
-          "reference_scale": 1.0,
           "bad_elements": 0,
           "elements": 8192,
-          "row_sum_relative_error": 1.34319e-07,
+          "reference_scale": 1,
+          "relative_error": 0.001,
+          "row_sum_relative_error": 1.34e-07,
+          "result": "ok"
+        },
+        {
+          "name": "attention-flash:staged_check",
+          "warpgroups": 1,
+          "stages": 2,
+          "mask": "causal",
+          "bad_elements": 0,
+          "relative_error": 0.0,
           "result": "ok"
         },
         {
@@ -2285,23 +2335,8 @@
           "stages": 2,
           "mask": "dense",
           "bad_elements": 0,
-          "relative_error": 0.0
-        },
-        {
-          "name": "attention-flash:staged_check",
-          "warpgroups": 1,
-          "stages": 2,
-          "mask": "causal",
-          "bad_elements": 0,
-          "relative_error": 0.0
-        },
-        {
-          "name": "attention-flash:staged_check",
-          "warpgroups": 1,
-          "stages": 3,
-          "mask": "dense",
-          "bad_elements": 0,
-          "relative_error": 0.0
+          "relative_error": 0.0,
+          "result": "ok"
         },
         {
           "name": "attention-flash:staged_check",
@@ -2309,15 +2344,17 @@
           "stages": 3,
           "mask": "causal",
           "bad_elements": 0,
-          "relative_error": 0.0
+          "relative_error": 0.0,
+          "result": "ok"
         },
         {
           "name": "attention-flash:staged_check",
-          "warpgroups": 2,
-          "stages": 2,
+          "warpgroups": 1,
+          "stages": 3,
           "mask": "dense",
           "bad_elements": 0,
-          "relative_error": 0.0
+          "relative_error": 0.0,
+          "result": "ok"
         },
         {
           "name": "attention-flash:staged_check",
@@ -2325,15 +2362,17 @@
           "stages": 2,
           "mask": "causal",
           "bad_elements": 0,
-          "relative_error": 0.0
+          "relative_error": 0.0,
+          "result": "ok"
         },
         {
           "name": "attention-flash:staged_check",
           "warpgroups": 2,
-          "stages": 3,
+          "stages": 2,
           "mask": "dense",
           "bad_elements": 0,
-          "relative_error": 0.0
+          "relative_error": 0.0,
+          "result": "ok"
         },
         {
           "name": "attention-flash:staged_check",
@@ -2341,55 +2380,227 @@
           "stages": 3,
           "mask": "causal",
           "bad_elements": 0,
-          "relative_error": 0.0
+          "relative_error": 0.0,
+          "result": "ok"
+        },
+        {
+          "name": "attention-flash:staged_check",
+          "warpgroups": 2,
+          "stages": 3,
+          "mask": "dense",
+          "bad_elements": 0,
+          "relative_error": 0.0,
+          "result": "ok"
         },
         {
           "name": "attention-flash:resident",
           "blocks": 1,
           "warpgroups": 1,
           "tiles": 5000,
-          "atoms": "8+8",
           "mask": "dense",
-          "tflops": 3.274,
-          "fraction_of_sm_share": 0.4369,
-          "note": "one warpgroup alone, so this row states the per-SM share and not the card"
+          "softmax": "on",
+          "ms": 6.2043,
+          "tflops": 3.3802,
+          "fraction_of_peak": 0.0034,
+          "fraction_of_sm_share": 0.4511
         },
         {
           "name": "attention-flash:resident",
           "blocks": 132,
           "warpgroups": 1,
           "tiles": 5000,
-          "atoms": "8+8",
           "mask": "dense",
-          "tflops": 458.1,
-          "fraction_of_peak": 0.4633,
-          "work_ratio": 1.0,
-          "note": "the chain with no copy path"
+          "softmax": "on",
+          "ms": 6.0591,
+          "tflops": 456.9,
+          "fraction_of_peak": 0.462,
+          "fraction_of_sm_share": 0.462
         },
         {
           "name": "attention-flash:resident",
           "blocks": 132,
           "warpgroups": 1,
           "tiles": 5000,
-          "atoms": "8+8",
           "mask": "causal",
-          "tflops": 432.1,
-          "fraction_of_peak": 0.437,
-          "work_ratio": 3.938,
-          "note": "the boundary tile costs 5.7 percent of the dense rate, up from 0.03 in an earlier run, which is the spread of one mask against another"
+          "softmax": "on",
+          "ms": 6.5689,
+          "tflops": 421.4,
+          "fraction_of_peak": 0.4261,
+          "fraction_of_sm_share": 0.4261
         },
         {
           "name": "attention-flash:resident",
           "blocks": 132,
           "warpgroups": 1,
           "tiles": 5000,
-          "atoms": "8+8",
           "mask": "dense",
           "softmax": "off",
-          "tflops": 797.9,
-          "fraction_of_peak": 0.8068,
-          "work_ratio": 1.0,
-          "note": "the ceiling of the chain: the two products and the conversion with no softmax between them, so the softmax and its place in the chain cost 43 percent of the step"
+          "ms": 3.4687,
+          "tflops": 798.1,
+          "fraction_of_peak": 0.8069,
+          "fraction_of_sm_share": 0.8069
+        },
+        {
+          "name": "attention-flash:resident",
+          "blocks": 132,
+          "warpgroups": 2,
+          "tiles": 5000,
+          "mask": "dense",
+          "softmax": "on",
+          "ms": 8.9743,
+          "tflops": 616.9,
+          "fraction_of_peak": 0.6238,
+          "fraction_of_sm_share": 0.6238
+        },
+        {
+          "name": "attention-flash:resident",
+          "blocks": 132,
+          "warpgroups": 2,
+          "tiles": 5000,
+          "mask": "causal",
+          "softmax": "on",
+          "ms": 11.3605,
+          "tflops": 487.3,
+          "fraction_of_peak": 0.4928,
+          "fraction_of_sm_share": 0.4928
+        },
+        {
+          "name": "attention-flash:resident",
+          "blocks": 132,
+          "warpgroups": 2,
+          "tiles": 5000,
+          "mask": "dense",
+          "softmax": "off",
+          "ms": 5.5891,
+          "tflops": 990.6,
+          "fraction_of_peak": 1.0016,
+          "fraction_of_sm_share": 1.0016
+        },
+        {
+          "name": "attention-flash:staged",
+          "warpgroups": 1,
+          "stages": 2,
+          "mask": "dense",
+          "softmax": "on",
+          "flop_per_staged_byte": 64,
+          "blocks": 132,
+          "tiles": 4096,
+          "ms": 24.3462,
+          "tflops": 93.1456,
+          "fraction_of_peak": 0.0942,
+          "work_ratio": 1
+        },
+        {
+          "name": "attention-flash:staged",
+          "warpgroups": 1,
+          "stages": 2,
+          "mask": "causal",
+          "softmax": "on",
+          "flop_per_staged_byte": 64,
+          "blocks": 132,
+          "tiles": 4096,
+          "ms": 24.2966,
+          "tflops": 93.336,
+          "fraction_of_peak": 0.0944,
+          "work_ratio": 3.93846
+        },
+        {
+          "name": "attention-flash:staged",
+          "warpgroups": 1,
+          "stages": 3,
+          "mask": "dense",
+          "softmax": "on",
+          "flop_per_staged_byte": 64,
+          "blocks": 132,
+          "tiles": 4096,
+          "ms": 24.3685,
+          "tflops": 93.0604,
+          "fraction_of_peak": 0.0941,
+          "work_ratio": 1
+        },
+        {
+          "name": "attention-flash:staged",
+          "warpgroups": 1,
+          "stages": 3,
+          "mask": "causal",
+          "softmax": "on",
+          "flop_per_staged_byte": 64,
+          "blocks": 132,
+          "tiles": 4096,
+          "ms": 24.2028,
+          "tflops": 93.6977,
+          "fraction_of_peak": 0.0947,
+          "work_ratio": 3.93846
+        },
+        {
+          "name": "attention-flash:staged",
+          "warpgroups": 2,
+          "stages": 2,
+          "mask": "dense",
+          "softmax": "on",
+          "flop_per_staged_byte": 128,
+          "blocks": 132,
+          "tiles": 4096,
+          "ms": 21.0974,
+          "tflops": 215.0,
+          "fraction_of_peak": 0.2174,
+          "work_ratio": 1
+        },
+        {
+          "name": "attention-flash:staged",
+          "warpgroups": 2,
+          "stages": 2,
+          "mask": "causal",
+          "softmax": "on",
+          "flop_per_staged_byte": 128,
+          "blocks": 132,
+          "tiles": 4096,
+          "ms": 21.0813,
+          "tflops": 215.1,
+          "fraction_of_peak": 0.2175,
+          "work_ratio": 1.9845
+        },
+        {
+          "name": "attention-flash:staged",
+          "warpgroups": 2,
+          "stages": 3,
+          "mask": "dense",
+          "softmax": "on",
+          "flop_per_staged_byte": 128,
+          "blocks": 132,
+          "tiles": 4096,
+          "ms": 20.3487,
+          "tflops": 222.9,
+          "fraction_of_peak": 0.2254,
+          "work_ratio": 1
+        },
+        {
+          "name": "attention-flash:staged",
+          "warpgroups": 2,
+          "stages": 3,
+          "mask": "causal",
+          "softmax": "on",
+          "flop_per_staged_byte": 128,
+          "blocks": 132,
+          "tiles": 4096,
+          "ms": 21.6889,
+          "tflops": 209.1,
+          "fraction_of_peak": 0.2114,
+          "work_ratio": 1.9845
+        },
+        {
+          "name": "attention-flash:staged",
+          "warpgroups": 2,
+          "stages": 2,
+          "mask": "dense",
+          "softmax": "off",
+          "flop_per_staged_byte": 128,
+          "blocks": 132,
+          "tiles": 4096,
+          "ms": 17.8659,
+          "tflops": 253.9,
+          "fraction_of_peak": 0.2567,
+          "work_ratio": 0
         },
         {
           "name": "attention-flash:copies",
@@ -2398,11 +2609,8 @@
           "content": "key",
           "value_staging": "none",
           "key_staging": "engine",
-          "window": 2048,
-          "blocks": 132,
-          "tiles": 8192,
-          "tbps": 2.185,
-          "note": "a copy row has no compute to hide the staging latency under, so it is a lower bound on what the same pass reaches inside the product row"
+          "tbps": 2.266,
+          "bytes_per_second_per_block": 17169800000
         },
         {
           "name": "attention-flash:copies",
@@ -2411,24 +2619,8 @@
           "content": "key",
           "value_staging": "none",
           "key_staging": "plain",
-          "window": 2048,
-          "blocks": 132,
-          "tiles": 8192,
-          "tbps": 0.6447,
-          "note": "a copy row has no compute to hide the staging latency under, so it is a lower bound on what the same pass reaches inside the product row"
-        },
-        {
-          "name": "attention-flash:copies",
-          "warpgroups": 1,
-          "stages": 2,
-          "content": "value",
-          "value_staging": "strided",
-          "key_staging": "engine",
-          "window": 2048,
-          "blocks": 132,
-          "tiles": 8192,
-          "tbps": 0.4313,
-          "note": "a copy row has no compute to hide the staging latency under, so it is a lower bound on what the same pass reaches inside the product row"
+          "tbps": 0.644,
+          "bytes_per_second_per_block": 4875780000
         },
         {
           "name": "attention-flash:copies",
@@ -2437,11 +2629,8 @@
           "content": "key+value",
           "value_staging": "strided",
           "key_staging": "engine",
-          "window": 2048,
-          "blocks": 132,
-          "tiles": 8192,
-          "tbps": 0.9768,
-          "note": "a copy row has no compute to hide the staging latency under, so it is a lower bound on what the same pass reaches inside the product row"
+          "tbps": 0.941,
+          "bytes_per_second_per_block": 7128150000
         },
         {
           "name": "attention-flash:copies",
@@ -2450,11 +2639,18 @@
           "content": "key+value",
           "value_staging": "vector",
           "key_staging": "engine",
-          "window": 2048,
-          "blocks": 132,
-          "tiles": 8192,
-          "tbps": 0.8981,
-          "note": "a copy row has no compute to hide the staging latency under, so it is a lower bound on what the same pass reaches inside the product row"
+          "tbps": 0.866,
+          "bytes_per_second_per_block": 6562840000
+        },
+        {
+          "name": "attention-flash:copies",
+          "warpgroups": 1,
+          "stages": 2,
+          "content": "value",
+          "value_staging": "strided",
+          "key_staging": "engine",
+          "tbps": 0.43,
+          "bytes_per_second_per_block": 3261220000
         },
         {
           "name": "attention-flash:copies",
@@ -2463,11 +2659,8 @@
           "content": "key",
           "value_staging": "none",
           "key_staging": "engine",
-          "window": 2048,
-          "blocks": 132,
-          "tiles": 8192,
-          "tbps": 2.3081,
-          "note": "a copy row has no compute to hide the staging latency under, so it is a lower bound on what the same pass reaches inside the product row"
+          "tbps": 2.43,
+          "bytes_per_second_per_block": 18411900000
         },
         {
           "name": "attention-flash:copies",
@@ -2476,24 +2669,8 @@
           "content": "key",
           "value_staging": "none",
           "key_staging": "plain",
-          "window": 2048,
-          "blocks": 132,
-          "tiles": 8192,
-          "tbps": 1.0619,
-          "note": "a copy row has no compute to hide the staging latency under, so it is a lower bound on what the same pass reaches inside the product row"
-        },
-        {
-          "name": "attention-flash:copies",
-          "warpgroups": 1,
-          "stages": 3,
-          "content": "value",
-          "value_staging": "strided",
-          "key_staging": "engine",
-          "window": 2048,
-          "blocks": 132,
-          "tiles": 8192,
-          "tbps": 0.435,
-          "note": "a copy row has no compute to hide the staging latency under, so it is a lower bound on what the same pass reaches inside the product row"
+          "tbps": 1.06,
+          "bytes_per_second_per_block": 8028870000
         },
         {
           "name": "attention-flash:copies",
@@ -2502,11 +2679,8 @@
           "content": "key+value",
           "value_staging": "strided",
           "key_staging": "engine",
-          "window": 2048,
-          "blocks": 132,
-          "tiles": 8192,
-          "tbps": 0.9927,
-          "note": "a copy row has no compute to hide the staging latency under, so it is a lower bound on what the same pass reaches inside the product row"
+          "tbps": 0.951,
+          "bytes_per_second_per_block": 7201940000
         },
         {
           "name": "attention-flash:copies",
@@ -2515,11 +2689,18 @@
           "content": "key+value",
           "value_staging": "vector",
           "key_staging": "engine",
-          "window": 2048,
-          "blocks": 132,
-          "tiles": 8192,
-          "tbps": 0.9182,
-          "note": "a copy row has no compute to hide the staging latency under, so it is a lower bound on what the same pass reaches inside the product row"
+          "tbps": 0.885,
+          "bytes_per_second_per_block": 6705920000
+        },
+        {
+          "name": "attention-flash:copies",
+          "warpgroups": 1,
+          "stages": 3,
+          "content": "value",
+          "value_staging": "strided",
+          "key_staging": "engine",
+          "tbps": 0.434,
+          "bytes_per_second_per_block": 3290670000
         },
         {
           "name": "attention-flash:copies",
@@ -2528,11 +2709,8 @@
           "content": "key",
           "value_staging": "none",
           "key_staging": "engine",
-          "window": 2048,
-          "blocks": 132,
-          "tiles": 8192,
-          "tbps": 2.1648,
-          "note": "a copy row has no compute to hide the staging latency under, so it is a lower bound on what the same pass reaches inside the product row"
+          "tbps": 2.233,
+          "bytes_per_second_per_block": 16916100000
         },
         {
           "name": "attention-flash:copies",
@@ -2541,24 +2719,8 @@
           "content": "key",
           "value_staging": "none",
           "key_staging": "plain",
-          "window": 2048,
-          "blocks": 132,
-          "tiles": 8192,
-          "tbps": 1.1241,
-          "note": "a copy row has no compute to hide the staging latency under, so it is a lower bound on what the same pass reaches inside the product row"
-        },
-        {
-          "name": "attention-flash:copies",
-          "warpgroups": 2,
-          "stages": 2,
-          "content": "value",
-          "value_staging": "strided",
-          "key_staging": "engine",
-          "window": 2048,
-          "blocks": 132,
-          "tiles": 8192,
-          "tbps": 1.1497,
-          "note": "a copy row has no compute to hide the staging latency under, so it is a lower bound on what the same pass reaches inside the product row"
+          "tbps": 1.12,
+          "bytes_per_second_per_block": 8484420000
         },
         {
           "name": "attention-flash:copies",
@@ -2567,11 +2729,8 @@
           "content": "key+value",
           "value_staging": "strided",
           "key_staging": "engine",
-          "window": 2048,
-          "blocks": 132,
-          "tiles": 8192,
-          "tbps": 1.1313,
-          "note": "a copy row has no compute to hide the staging latency under, so it is a lower bound on what the same pass reaches inside the product row"
+          "tbps": 1.075,
+          "bytes_per_second_per_block": 8145630000
         },
         {
           "name": "attention-flash:copies",
@@ -2580,11 +2739,18 @@
           "content": "key+value",
           "value_staging": "vector",
           "key_staging": "engine",
-          "window": 2048,
-          "blocks": 132,
-          "tiles": 8192,
-          "tbps": 1.3451,
-          "note": "a copy row has no compute to hide the staging latency under, so it is a lower bound on what the same pass reaches inside the product row"
+          "tbps": 1.333,
+          "bytes_per_second_per_block": 10100200000
+        },
+        {
+          "name": "attention-flash:copies",
+          "warpgroups": 2,
+          "stages": 2,
+          "content": "value",
+          "value_staging": "strided",
+          "key_staging": "engine",
+          "tbps": 1.147,
+          "bytes_per_second_per_block": 8686010000
         },
         {
           "name": "attention-flash:copies",
@@ -2593,11 +2759,8 @@
           "content": "key",
           "value_staging": "none",
           "key_staging": "engine",
-          "window": 2048,
-          "blocks": 132,
-          "tiles": 8192,
-          "tbps": 2.3642,
-          "note": "a copy row has no compute to hide the staging latency under, so it is a lower bound on what the same pass reaches inside the product row"
+          "tbps": 2.499,
+          "bytes_per_second_per_block": 18928400000
         },
         {
           "name": "attention-flash:copies",
@@ -2606,24 +2769,8 @@
           "content": "key",
           "value_staging": "none",
           "key_staging": "plain",
-          "window": 2048,
-          "blocks": 132,
-          "tiles": 8192,
-          "tbps": 1.75,
-          "note": "a copy row has no compute to hide the staging latency under, so it is a lower bound on what the same pass reaches inside the product row"
-        },
-        {
-          "name": "attention-flash:copies",
-          "warpgroups": 2,
-          "stages": 3,
-          "content": "value",
-          "value_staging": "strided",
-          "key_staging": "engine",
-          "window": 2048,
-          "blocks": 132,
-          "tiles": 8192,
-          "tbps": 1.1716,
-          "note": "a copy row has no compute to hide the staging latency under, so it is a lower bound on what the same pass reaches inside the product row"
+          "tbps": 1.744,
+          "bytes_per_second_per_block": 13214100000
         },
         {
           "name": "attention-flash:copies",
@@ -2632,11 +2779,8 @@
           "content": "key+value",
           "value_staging": "strided",
           "key_staging": "engine",
-          "window": 2048,
-          "blocks": 132,
-          "tiles": 8192,
-          "tbps": 1.6003,
-          "note": "a copy row has no compute to hide the staging latency under, so it is a lower bound on what the same pass reaches inside the product row"
+          "tbps": 1.511,
+          "bytes_per_second_per_block": 11446500000
         },
         {
           "name": "attention-flash:copies",
@@ -2645,129 +2789,18 @@
           "content": "key+value",
           "value_staging": "vector",
           "key_staging": "engine",
-          "window": 2048,
-          "blocks": 132,
-          "tiles": 8192,
-          "tbps": 1.3382,
-          "note": "a copy row has no compute to hide the staging latency under, so it is a lower bound on what the same pass reaches inside the product row"
+          "tbps": 1.326,
+          "bytes_per_second_per_block": 10044000000
         },
         {
-          "name": "attention-flash:staged",
-          "warpgroups": 1,
-          "stages": 2,
-          "window": 2048,
-          "blocks": 132,
-          "tiles": 4096,
-          "mask": "dense",
-          "tflops": 95.96,
-          "fraction_of_peak": 0.097,
-          "flop_per_staged_byte": 64,
-          "work_ratio": 1.0
-        },
-        {
-          "name": "attention-flash:staged",
-          "warpgroups": 1,
-          "stages": 2,
-          "window": 2048,
-          "blocks": 132,
-          "tiles": 4096,
-          "mask": "causal",
-          "tflops": 95.7,
-          "fraction_of_peak": 0.0968,
-          "flop_per_staged_byte": 64,
-          "work_ratio": 3.938
-        },
-        {
-          "name": "attention-flash:staged",
-          "warpgroups": 1,
-          "stages": 3,
-          "window": 2048,
-          "blocks": 132,
-          "tiles": 4096,
-          "mask": "dense",
-          "tflops": 95.68,
-          "fraction_of_peak": 0.0968,
-          "flop_per_staged_byte": 64,
-          "work_ratio": 1.0
-        },
-        {
-          "name": "attention-flash:staged",
-          "warpgroups": 1,
-          "stages": 3,
-          "window": 2048,
-          "blocks": 132,
-          "tiles": 4096,
-          "mask": "causal",
-          "tflops": 95.93,
-          "fraction_of_peak": 0.097,
-          "flop_per_staged_byte": 64,
-          "work_ratio": 3.938
-        },
-        {
-          "name": "attention-flash:staged",
-          "warpgroups": 2,
-          "stages": 2,
-          "window": 2048,
-          "blocks": 132,
-          "tiles": 4096,
-          "mask": "dense",
-          "tflops": 217.0,
-          "fraction_of_peak": 0.2194,
-          "flop_per_staged_byte": 128,
-          "work_ratio": 1.0
-        },
-        {
-          "name": "attention-flash:staged",
-          "warpgroups": 2,
-          "stages": 2,
-          "window": 2048,
-          "blocks": 132,
-          "tiles": 4096,
-          "mask": "causal",
-          "tflops": 215.6,
-          "fraction_of_peak": 0.218,
-          "flop_per_staged_byte": 128,
-          "work_ratio": 1.984
-        },
-        {
-          "name": "attention-flash:staged",
+          "name": "attention-flash:copies",
           "warpgroups": 2,
           "stages": 3,
-          "window": 2048,
-          "blocks": 132,
-          "tiles": 4096,
-          "mask": "dense",
-          "tflops": 225.4,
-          "fraction_of_peak": 0.2279,
-          "flop_per_staged_byte": 128,
-          "work_ratio": 1.0
-        },
-        {
-          "name": "attention-flash:staged",
-          "warpgroups": 2,
-          "stages": 3,
-          "window": 2048,
-          "blocks": 132,
-          "tiles": 4096,
-          "mask": "causal",
-          "tflops": 210.2,
-          "fraction_of_peak": 0.2126,
-          "flop_per_staged_byte": 128,
-          "work_ratio": 1.984
-        },
-        {
-          "name": "attention-flash:staged",
-          "warpgroups": 2,
-          "stages": 2,
-          "window": 2048,
-          "blocks": 132,
-          "tiles": 4096,
-          "mask": "dense",
-          "tflops": 254.9,
-          "fraction_of_peak": 0.2577,
-          "flop_per_staged_byte": 128,
-          "work_ratio": 1.0,
-          "softmax": "off"
+          "content": "value",
+          "value_staging": "strided",
+          "key_staging": "engine",
+          "tbps": 1.167,
+          "bytes_per_second_per_block": 8839530000
         }
       ]
     }

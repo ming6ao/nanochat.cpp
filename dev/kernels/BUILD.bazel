@@ -284,17 +284,16 @@ cuda_binary(
 #
 # The emulation engine maps neither WGMMA nor a tensor copy, so there is no
 # off-device leg and the target carries `manual`. Its gate is the H100 leg, and
-# one job states every set: `--rows phase0` is the Part 3 rows, `--rows h1` is
-# the Part 8 rows, `--rows flash` is the H2 prototype, and `--rows all` is the
-# three of them. It times through
+# one card job states every set, because one process builds once and the three
+# sets answer the same question in three views: `--rows phase0` is the Part 3
+# ceiling, `--rows h1` is the Part 8 rows, `--rows flash` is the H2 prototype,
+# and `--rows all`, which is the default, is the three of them. It times through
 # `backends/cuda/kernels/testing/bench_protocol.h`, which the hand GEMM sweep
 # also uses, so a row of one program and a row of the other state the same
 # statistic.
 #
 #   modal run tools/modal/app.py::card_job --name wgmma_bench \
 #     --argv '["--rows","all","--json"]'
-#   modal run tools/modal/app.py::card_job --name wgmma_bench \
-#     --argv '["--rows","flash","--json"]'
 cuda_binary(
     name = "wgmma_bench",
     srcs = ["wgmma_bench.cu"],

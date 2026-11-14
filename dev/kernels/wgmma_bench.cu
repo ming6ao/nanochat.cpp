@@ -31,6 +31,17 @@
 // against a one-hot value element leaves one result, and that result names the
 // form and the atom stride that read the staged value tile.
 //
+// **The key width.** The instruction holds `m64n128k16` and `m64n64k16`, and
+// the narrow form is the one lever on a staged row that costs no copy
+// bandwidth: half the key width halves the accumulator, so one register file
+// then holds twice the query rows behind one staged key tile. The narrow rows
+// state the instruction's own ceiling (`attention-wgmma:resident_narrow`), the
+// copy rate of the narrow ring, and the rate of the `score64:2x4` shape, and
+// two checks stand behind them: `form_check_narrow` measures the narrow
+// accumulator map one element at a time against a host reference, and
+// `staged_check keys=64` compares the narrow staged product with the narrow
+// resident product of the same query tile.
+//
 // **The staged rows.** A real attention tile reads a new key tile every step,
 // so the last section times the same score product three ways: from a resident
 // tile, from a key tile that a copy path stages into a ring, and from the
@@ -90,6 +101,18 @@
 // states the denominator it used. `AddTiming` of `bench_protocol.h` writes two
 // rows from one measurement, the minimum under the row's own name and the
 // median beside it, so a Phase 0 or H1 gate reads the statistic it named.
+//
+// **The shape space.** A staged row reaches at most the copy rate of its path
+// times the arithmetic that one staged byte buys, and that figure is the count
+// of query rows behind one staged key tile. The counts that state it are the
+// warpgroups of a block, the query tiles of each, the key width, and the ring
+// depth. This file names those counts in one table and prints the table beside
+// the rows it prices: an `attention-wgmma:shape` line states the threads, the
+// query rows, the accumulator registers, the registers the compiler reported,
+// the shared bytes, the intensity, the cap, and a verdict. A shape the register
+// file or the shared window refuses is a row with its reason, and it never
+// launches, so the shape a reader asks for is a row of one document. `--shapes`
+// prints the table and exits, which needs no card and no measurement.
 //
 // **The protocol.** The timing is the one of
 // `backends/cuda/kernels/testing/bench_protocol.h`, which
@@ -161,6 +184,16 @@ constexpr int kAtomK = 16;
 constexpr int kAtoms = kDim / kAtomK;
 constexpr int kRegisters = kAtomM * kAtomN / kWarpgroupThreads;
 
+//: The fp32 accumulator of one score tile of `key_width` keys, in registers a
+//: thread, and the slots it leaves over the warpgroup. The instruction holds
+//: `kAtomM` rows by the key width, so the key width is the one lever on the
+//: accumulator of a score tile, and the shape space of the section below prices
+//: it. `kRegisters` above is the recorded width of this file.
+constexpr int KeyRegisters(int key_width) {
+  return kAtomM * key_width / kWarpgroupThreads;
+}
+constexpr int KeySlots(int key_width) { return kAtomM * key_width; }
+
 //: The pass depth of the Phase 0 rows of docs/kernels.md Part 3, in atoms of
 //: sixteen. Eight atoms is the head width and the attention geometry; four is
 //: the 64-deep pass whose gate is stated against the per-SM share of the card
@@ -187,14 +220,30 @@ constexpr int kSboBytes = 2 * kLboBytes;
 constexpr int kStages = 4;
 constexpr int kMaxWarpgroups = 2;
 constexpr int kMaxQueryTiles = 3;
-//: The query tiles one block holds at the deepest geometry.
-constexpr int kMaxTiles = kMaxWarpgroups * kMaxQueryTiles;
+
+//: The narrow key tile the shape space states beside the recorded one, and the
+//: query tiles of each warpgroup that only the narrow tile can hold: half the
+//: key width is half the accumulator, so one more query tile fits a tile of the
+//: same register budget.
+constexpr int kNarrowKeyWidth = kAtomN / 2;
+constexpr int kNarrowQueryTiles = 4;
+
+//: The query tiles one block holds at the deepest geometry of the shape space.
+constexpr int kMaxTiles = kMaxWarpgroups * kNarrowQueryTiles;
 
 constexpr int kQueryBytes = kAtomM * kDim * sizeof(Bf16);
-constexpr int kKeyBytes = kAtomN * kDim * sizeof(Bf16);
+
+//: A key or value tile of `key_width` keys: that many rows of the head width.
+//: The tile of this file is the recorded width, and the shape space of the
+//: staged rows also states the narrower one, which is a register lever.
+constexpr int KeyBytes(int key_width) {
+  return key_width * kDim * sizeof(Bf16);
+}
+
+constexpr int kKeyBytes = KeyBytes(kAtomN);
 //: A value tile is a key tile of the same shape, and the flash tile stages
 //: both.
-constexpr int kValueBytes = kAtomN * kDim * sizeof(Bf16);
+constexpr int kValueBytes = KeyBytes(kAtomN);
 
 //: The shared window of the value-operand sweep. The sweep launches descriptor
 //: forms the instruction cannot read, so a bad form must fail on values and not
@@ -204,8 +253,9 @@ constexpr int kProbeSharedBytes = kQueryBytes + 4 * kKeyBytes;
 
 //: The staged shared memory of one geometry: the query tile of every
 //: warpgroup, then the ring of key tiles that all of them read.
-constexpr int StagedBytes(int warpgroups, int query_tiles, int stages) {
-  return warpgroups * query_tiles * kQueryBytes + stages * kKeyBytes;
+constexpr int StagedBytes(int warpgroups, int query_tiles, int stages,
+                          int key_width = kAtomN) {
+  return warpgroups * query_tiles * kQueryBytes + stages * KeyBytes(key_width);
 }
 
 //: The largest dynamic shared-memory request the card accepts, which one block
@@ -219,8 +269,8 @@ static_assert(StagedBytes(kMaxWarpgroups, kMaxQueryTiles, kStages) <=
 //: one key tile, and one value tile. The set is the first step towards the ring
 //: of docs/attention.md Part 8 section 3, which adds
 //: `stages * (kKeyBytes + kValueBytes)` beside the same query region.
-constexpr int FlashResidentBytes(int warpgroups) {
-  return warpgroups * kQueryBytes + kKeyBytes + kValueBytes;
+constexpr int FlashResidentBytes(int warpgroups, int key_width = kAtomN) {
+  return warpgroups * kQueryBytes + KeyBytes(key_width) + KeyBytes(key_width);
 }
 static_assert(FlashResidentBytes(kMaxWarpgroups) <= kSmemCeiling,
               "the resident flash tile must fit one block per multiprocessor");
@@ -234,13 +284,396 @@ constexpr bool kRingKeyValue = true;
 //: The shared region of the staged flash tile: one query tile a warpgroup, a
 //: ring of key tiles, and a ring of value tiles. A copy row that stages the key
 //: tile alone keeps no value ring.
-constexpr int FlashStagedBytes(int warpgroups, int stages, bool stage_value) {
-  return warpgroups * kQueryBytes + stages * kKeyBytes +
-         (stage_value ? stages * kValueBytes : 0);
+constexpr int FlashStagedBytes(int warpgroups, int stages, bool stage_value,
+                               int key_width = kAtomN) {
+  return warpgroups * kQueryBytes + stages * KeyBytes(key_width) +
+         (stage_value ? stages * KeyBytes(key_width) : 0);
 }
 static_assert(FlashStagedBytes(kMaxWarpgroups, 3, kRingKeyValue) <=
                   kSmemCeiling,
               "the staged flash tile must fit one block per multiprocessor");
+
+// --- The shape space --------------------------------------------------------
+//
+// A shape is the tile a row stages: the warpgroups of its block, the query
+// tiles of each, the width of its key tile, and the depth of its ring. Those
+// four counts state the whole of the rate a staged row can reach, so they are
+// named in one table here, and the table is printed beside the rows it prices.
+// The question the bench answers is therefore one table lookup a shape, and the
+// shape that cannot launch is a row of the table and not a silence.
+//
+// **The intensity.** A staged key tile of `key_width` keys holds
+// `key_width * kDim` elements, and the arithmetic that reads it is
+// `2 * query_rows * key_width * kDim`. One staged key byte therefore buys
+// `query_rows` FLOP at any key width, and the cap of a staged shape is the copy
+// rate of its path times that figure.
+//
+// **The register identity.** One query tile is an fp32 accumulator of `kAtomM`
+// rows by the key width, which is `query_rows * key_width` words for the block.
+// One multiprocessor holds 65,536 registers, so `query_rows * key_width <=
+// 65536` closes the whole space, and the key width is the lever that moves it:
+// half the width doubles the query rows one flat register file holds.
+//
+// **The flash tile holds three accumulators.** The score, the output, and the
+// packed probability operand. It therefore closes one step lower than the score
+// product, and at the recorded 128 wide key tile the deepest full tile is two
+// warpgroups of one query tile each. The narrower key tile of the candidates is
+// what admits a third warpgroup, because it is the score and the probability
+// that shrink with it.
+//
+// **Measured, not estimated.** The register count of a shape this file
+// instantiates is the one its own build states, read with
+// `cudaFuncGetAttributes`. A shape with no instantiation is charged
+// `kScoreStagingRegisters` or `kFlashStagingRegisters` over its accumulators,
+// which are the largest overheads one build of this file measures with
+// `cuobjdump -res-usage` over the twelve instantiations: 40 to 62 registers
+// over the accumulators of a staged score tile, and 8 to 37 over those of a
+// staged flash tile.
+
+//: The fp32 registers one multiprocessor holds, and the threads one block may
+//: have. Both are properties of the card and not of a tile.
+constexpr int kRegistersPerMultiprocessor = 65536;
+constexpr int kMaxThreadsPerBlock = 1024;
+
+//: The registers a thread spends on the staging path, the descriptors, and the
+//: online state of a shape that holds no instantiation, over its accumulators.
+//: Measured, as above: one build reads 40 to 62 over the accumulators of the
+//: staged score tile and 8 to 37 over those of the staged flash tile, and a
+//: prediction that no compiler has met is charged the largest of its family.
+constexpr int kScoreStagingRegisters = 62;
+constexpr int kFlashStagingRegisters = 37;
+
+//: `nanochat::dev::Gflops` states a rate in GFLOP/s, so a diagnostic that
+//: prints TFLOP/s multiplies by this. A division by 1e12 states a TFLOP/s
+//: figure that is a thousand million times too small, which is what the first
+//: card run of this table did to every escalation below.
+constexpr double kTflopsPerGflops = 1e-3;
+
+//: The copy rate the sixteen-byte store path measures in the recorded run, 2.36
+//: TB/s, from the `attention-wgmma:copies` rows of the `attention_wgmma_probe`
+//: entry of docs/baselines.json. A staged shape's cap is that figure times its
+//: intensity, and the row states the share of it the shape reached.
+constexpr double kRecordedCopyBytesPerSecond = 2.36e12;
+
+enum class ShapeKind { kScore, kFlash, kFlashResident };
+
+const char* ShapeKindName(ShapeKind kind) {
+  switch (kind) {
+    case ShapeKind::kScore:
+      return "score";
+    case ShapeKind::kFlash:
+      return "flash";
+    case ShapeKind::kFlashResident:
+      return "resident";
+  }
+  return "unknown";
+}
+
+//: The fp32 accumulator of one query tile, in registers a thread: the
+//: instruction holds `kAtomM` rows by the key width over one warpgroup.
+constexpr int ScoreAccumulators(int key_width) {
+  return KeyRegisters(key_width);
+}
+
+//: The output accumulator of one flash tile, which is as wide as the head.
+constexpr int OutputAccumulators() { return kAtomM * kDim / kWarpgroupThreads; }
+
+//: The probability operand of one flash tile, in packed pairs: one word holds
+//: two keys, and the tile holds `key_width / kAtomK` blocks of four words.
+constexpr int ProbabilityRegisters(int key_width) {
+  return (key_width / kAtomK) * 4;
+}
+
+//: Every accumulator one query tile of `kind` holds, in registers a thread.
+constexpr int TileAccumulators(ShapeKind kind, int key_width) {
+  const int score = ScoreAccumulators(key_width);
+  if (kind == ShapeKind::kScore) return score;
+  return score + OutputAccumulators() + ProbabilityRegisters(key_width);
+}
+
+// One shape of the sweep.
+struct ShapeSpec {
+  //: The name the table and the document's extras use.
+  const char* name;
+  ShapeKind kind;
+  int warpgroups;
+  //: The query tiles of each warpgroup. A flash tile holds one.
+  int query_tiles;
+  int key_width;
+  //: The depth of the ring, and one for a resident shape, which holds none.
+  int stages;
+  //: Whether this file instantiates the shape, so its register count is the
+  //: compiler's own.
+  bool instantiated;
+  //: What the row is for, when it is not a shape the sweep launches.
+  const char* note;
+};
+
+//: The shape space. The thirteen rows down to `score64:2x4` are the geometries
+//: the sweep launches, three of them at the narrow key tile. The three
+//: candidates below them are the shapes the register identity of this section
+//: opens and closes, and they are stated here because a reader of the table is
+//: asking which shape should be written next.
+constexpr ShapeSpec kShapeSpace[] = {
+    {"score:1x1", ShapeKind::kScore, 1, 1, kAtomN, kStages, true, nullptr},
+    {"score:1x2", ShapeKind::kScore, 1, 2, kAtomN, kStages, true, nullptr},
+    {"score:1x3", ShapeKind::kScore, 1, 3, kAtomN, kStages, true, nullptr},
+    {"score:2x1", ShapeKind::kScore, 2, 1, kAtomN, kStages, true, nullptr},
+    {"score:2x2", ShapeKind::kScore, 2, 2, kAtomN, kStages, true, nullptr},
+    {"score:2x3", ShapeKind::kScore, 2, 3, kAtomN, kStages, true, nullptr},
+    {"flash:1:2", ShapeKind::kFlash, 1, 1, kAtomN, 2, true, nullptr},
+    {"flash:1:3", ShapeKind::kFlash, 1, 1, kAtomN, 3, true, nullptr},
+    {"flash:2:2", ShapeKind::kFlash, 2, 1, kAtomN, 2, true, nullptr},
+    {"flash:2:3", ShapeKind::kFlash, 2, 1, kAtomN, 3, true, nullptr},
+    {"resident:1", ShapeKind::kFlashResident, 1, 1, kAtomN, 1, true, nullptr},
+    {"resident:2", ShapeKind::kFlashResident, 2, 1, kAtomN, 1, true, nullptr},
+    {"score64:2x4", ShapeKind::kScore, kMaxWarpgroups, kNarrowQueryTiles,
+     kNarrowKeyWidth, kStages, true, nullptr},
+    {"cand:score64-4x4", ShapeKind::kScore, 4, 4, kNarrowKeyWidth, kStages,
+     false,
+     "the same intensity over four warpgroups, which the register file closes"},
+    {"cand:flash64-3", ShapeKind::kFlash, 3, 1, kNarrowKeyWidth, 3, false,
+     "three warpgroups of one query tile, the deepest full tile that fits"},
+    {"cand:flash128-3", ShapeKind::kFlash, 3, 1, kAtomN, 3, false,
+     "the same depth at the recorded key width, which the register file "
+     "closes"},
+};
+
+//: The shared bytes one shape requests, from the tile functions above, so the
+//: table and the launch agree on the window by construction.
+constexpr int SharedBytesOf(const ShapeSpec& shape) {
+  if (shape.kind == ShapeKind::kFlashResident) {
+    return FlashResidentBytes(shape.warpgroups, shape.key_width);
+  }
+  if (shape.kind == ShapeKind::kFlash) {
+    return FlashStagedBytes(shape.warpgroups, shape.stages, kRingKeyValue,
+                            shape.key_width);
+  }
+  return StagedBytes(shape.warpgroups, shape.query_tiles, shape.stages,
+                     shape.key_width);
+}
+
+// What one shape implies, and whether it holds its place.
+struct ShapeFacts {
+  int threads = 0;
+  //: The query rows behind one staged key tile, which is the intensity.
+  int query_rows = 0;
+  int accumulator_registers = 0;
+  int registers = 0;
+  //: Whether `registers` is the compiler's count or the arithmetic estimate.
+  bool registers_from_compiler = false;
+  int registers_per_multiprocessor = 0;
+  int shared_bytes = 0;
+  int intensity = 0;
+  double copy_cap_tflops = 0.0;
+  bool fits = false;
+  //: The limit that refused the shape, and `fits` when none did.
+  const char* reason = "fits";
+};
+
+// The facts of one shape. `compiler_registers` is the count the shape's own
+// build states, and zero falls back to the staging charge of the tile's family
+// over its accumulators.
+ShapeFacts FactsOf(const ShapeSpec& shape, int compiler_registers) {
+  ShapeFacts facts;
+  facts.threads = shape.warpgroups * kWarpgroupThreads;
+  facts.query_rows = shape.warpgroups * shape.query_tiles * kAtomM;
+  facts.accumulator_registers =
+      shape.query_tiles * TileAccumulators(shape.kind, shape.key_width);
+  facts.registers_from_compiler = compiler_registers > 0;
+  facts.registers =
+      facts.registers_from_compiler
+          ? compiler_registers
+          : facts.accumulator_registers + (shape.kind == ShapeKind::kScore
+                                               ? kScoreStagingRegisters
+                                               : kFlashStagingRegisters);
+  facts.registers_per_multiprocessor = facts.threads * facts.registers;
+  facts.shared_bytes = SharedBytesOf(shape);
+  facts.intensity =
+      shape.kind == ShapeKind::kFlashResident ? 0 : facts.query_rows;
+  facts.copy_cap_tflops =
+      static_cast<double>(facts.intensity) * kRecordedCopyBytesPerSecond / 1e12;
+  if (facts.threads > kMaxThreadsPerBlock) {
+    facts.reason = "threads";
+  } else if (facts.registers_per_multiprocessor > kRegistersPerMultiprocessor) {
+    facts.reason = "registers";
+  } else if (facts.shared_bytes > kSmemCeiling) {
+    facts.reason = "shared_memory";
+  } else if (shape.kind != ShapeKind::kFlashResident && shape.stages < 2) {
+    facts.reason = "ring";
+  } else {
+    facts.fits = true;
+  }
+  return facts;
+}
+
+// The row of the shape space that matches one geometry. A geometry the table
+// does not hold is a shape no reader can audit, so it stops the run instead of
+// timing quietly.
+const ShapeSpec& FindShape(ShapeKind kind, int warpgroups, int query_tiles,
+                           int key_width, int stages) {
+  for (const ShapeSpec& shape : kShapeSpace) {
+    if (shape.kind == kind && shape.warpgroups == warpgroups &&
+        shape.query_tiles == query_tiles && shape.key_width == key_width &&
+        shape.stages == stages) {
+      return shape;
+    }
+  }
+  std::fprintf(stderr,
+               "the shape space holds no %s geometry of %d warpgroups, %d "
+               "query tiles, %d keys, and %d stages\n",
+               ShapeKindName(kind), warpgroups, query_tiles, key_width, stages);
+  std::exit(2);
+}
+
+// The registers one instantiation spends a thread, as its own build states it.
+// Zero when the query fails, which makes the table state its estimate instead.
+// The entry is a `const void*` because the address of a kernel that a template
+// parameter names does not deduce a type in a lambda this file instantiates.
+int CompilerRegisters(const void* kernel) {
+  cudaFuncAttributes attributes{};
+  if (cudaFuncGetAttributes(&attributes, kernel) != cudaSuccess) return 0;
+  return attributes.numRegs;
+}
+
+// The shape space of one run: the facts of every shape the run states, the
+// compiler's register count where the shape holds an instantiation, and the
+// fastest rate the sweep measured for it. `Print` writes the table once, at the
+// end of the run, so the shape that reached the highest rate and the shape that
+// cannot launch are one document.
+class ShapeTable {
+ public:
+  // States one shape and answers whether it may launch. The caller states a
+  // refusal through its own diagnostic line, so this class holds no output of
+  // its own and the document stays the one writer of a machine-readable run.
+  ShapeFacts Observe(const ShapeSpec& shape, int compiler_registers) {
+    Entry* entry = Find(shape);
+    if (entry == nullptr) {
+      entries_.push_back(Entry{shape, compiler_registers, 0.0});
+      entry = &entries_.back();
+    } else if (compiler_registers > 0) {
+      entry->compiler_registers = compiler_registers;
+    }
+    return FactsOf(entry->shape, entry->compiler_registers);
+  }
+
+  // The fastest rate one shape stated, in TFLOP/s. A shape the sweep times
+  // twice keeps the faster row, because that is the row a decision reads.
+  void Measure(const ShapeSpec& shape, double tflops) {
+    Entry* entry = Find(shape);
+    if (entry == nullptr) {
+      entries_.push_back(Entry{shape, 0, tflops});
+      return;
+    }
+    entry->tflops = std::max(entry->tflops, tflops);
+  }
+
+  // The table the document carries, one extra a field, so a reader of the
+  // document compares two shapes without a second run.
+  void Write(nanochat::BenchReport* report) const {
+    int instantiated = 0;
+    int refused = 0;
+    const Entry* best = nullptr;
+    for (const Entry& entry : entries_) {
+      const ShapeFacts facts = FactsOf(entry.shape, entry.compiler_registers);
+      const std::string prefix = std::string("shape:") + entry.shape.name + ":";
+      report->SetExtraInt(prefix + "intensity", facts.intensity);
+      report->SetExtraInt(prefix + "accumulator_registers",
+                          facts.accumulator_registers);
+      report->SetExtraInt(prefix + "registers", facts.registers);
+      report->SetExtraInt(prefix + "registers_per_multiprocessor",
+                          facts.registers_per_multiprocessor);
+      report->SetExtraInt(prefix + "shared_bytes", facts.shared_bytes);
+      report->SetExtra(prefix + "cap_tflops", facts.copy_cap_tflops);
+      report->SetExtraInt(prefix + "fits", facts.fits ? 1 : 0);
+      if (!facts.fits) {
+        report->SetExtraText(prefix + "verdict", facts.reason);
+        ++refused;
+      }
+      if (entry.shape.instantiated) ++instantiated;
+      if (entry.tflops > 0.0) {
+        report->SetExtra(prefix + "tflops", entry.tflops);
+        if (best == nullptr || entry.tflops > best->tflops) best = &entry;
+      }
+    }
+    report->SetExtraInt("shape:count", static_cast<long long>(entries_.size()));
+    report->SetExtraInt("shape:instantiated", instantiated);
+    report->SetExtraInt("shape:refused", refused);
+    if (best != nullptr) {
+      report->SetExtraText("shape:best", best->shape.name);
+      report->SetExtra("shape:best_tflops", best->tflops);
+    }
+  }
+
+  // The table a human run reads: one line a shape, in the order the run stated
+  // them, then the count and the fastest row.
+  void Print(std::FILE* out) const {
+    int refused = 0;
+    const Entry* best = nullptr;
+    for (const Entry& entry : entries_) {
+      const ShapeFacts facts = FactsOf(entry.shape, entry.compiler_registers);
+      std::fprintf(out,
+                   "attention-wgmma:shape name=%s kind=%s warpgroups=%d "
+                   "query_tiles=%d keys=%d stages=%d threads=%d query_rows=%d "
+                   "accumulators=%d registers=%d registers_source=%s "
+                   "registers_per_sm=%d smem_bytes=%d intensity=%d "
+                   "cap_tflops=%.1f",
+                   entry.shape.name, ShapeKindName(entry.shape.kind),
+                   entry.shape.warpgroups, entry.shape.query_tiles,
+                   entry.shape.key_width, entry.shape.stages, facts.threads,
+                   facts.query_rows, facts.accumulator_registers,
+                   facts.registers,
+                   facts.registers_from_compiler ? "compiler" : "estimate",
+                   facts.registers_per_multiprocessor, facts.shared_bytes,
+                   facts.intensity, facts.copy_cap_tflops);
+      if (entry.tflops > 0.0) {
+        std::fprintf(out, " tflops=%.1f share_of_cap=%.3f", entry.tflops,
+                     facts.copy_cap_tflops > 0.0
+                         ? entry.tflops / facts.copy_cap_tflops
+                         : 0.0);
+      }
+      std::fprintf(out, " verdict=%s", facts.fits ? "fits" : facts.reason);
+      if (entry.shape.note != nullptr) {
+        std::fprintf(out, " note=\"%s\"", entry.shape.note);
+      }
+      std::fprintf(out, "\n");
+      if (!facts.fits) ++refused;
+      if (entry.tflops > 0.0 &&
+          (best == nullptr || entry.tflops > best->tflops)) {
+        best = &entry;
+      }
+    }
+    std::fflush(out);
+    if (best != nullptr) {
+      std::fprintf(out,
+                   "attention-wgmma:shape_summary shapes=%zu refused=%d "
+                   "best=%s best_tflops=%.1f\n",
+                   entries_.size(), refused, best->shape.name, best->tflops);
+    } else {
+      std::fprintf(out,
+                   "attention-wgmma:shape_summary shapes=%zu refused=%d "
+                   "best=none best_tflops=0.0\n",
+                   entries_.size(), refused);
+    }
+    std::fflush(out);
+  }
+
+ private:
+  struct Entry {
+    ShapeSpec shape;
+    int compiler_registers = 0;
+    double tflops = 0.0;
+  };
+
+  Entry* Find(const ShapeSpec& shape) {
+    for (Entry& entry : entries_) {
+      if (std::strcmp(entry.shape.name, shape.name) == 0) return &entry;
+    }
+    return nullptr;
+  }
+
+  std::vector<Entry> entries_;
+};
 
 //: The base-two form of the exponential. `exp2` is one instruction where `exp`
 //: is a range reduction around it, so the softmax scale carries `log2(e)` and
@@ -271,6 +704,17 @@ static_assert(kAtoms * AtomStep(kAtomM) * 16 == kQueryBytes,
               "the query tile must fill its interleaved form");
 static_assert(kAtoms * AtomStep(kAtomN) * 16 == kKeyBytes,
               "the key tile must fill its interleaved form");
+static_assert(kAtoms * AtomStep(kNarrowKeyWidth) * 16 ==
+                  KeyBytes(kNarrowKeyWidth),
+              "the narrow key tile must fill its interleaved form");
+//: The accumulator map of `m64n128k16` covers its tile exactly, and the narrow
+//: tile is that map cut off at half the columns: 128 lanes of 32 registers are
+//: the 64 by 64 words of one `m64n64k16`, with the same row formula and a
+//: column that stops at 63. The check on the card settles it one element at a
+//: time.
+static_assert(kWarpgroupThreads * KeyRegisters(kNarrowKeyWidth) ==
+                  kAtomM * kNarrowKeyWidth,
+              "the narrow accumulator must cover its tile");
 
 //: The row and the column of one accumulator slot of `m64n128k16`, from the map
 //: Part 8 section 5 publishes and this file measured one element at a time. Two
@@ -291,13 +735,13 @@ constexpr const char* kReferenceDevice = "h100";
 //: The necessary work of one score product over `atoms` atoms of sixteen k
 //: steps. One function, so a row cannot state a count that disagrees with the
 //: instruction loop it timed.
-constexpr double FlopsPerPass(int atoms) {
-  return 2.0 * kAtomM * kAtomN * kAtomK * atoms;
+constexpr double FlopsPerPass(int atoms, int key_width = kAtomN) {
+  return 2.0 * kAtomM * key_width * kAtomK * atoms;
 }
 
-//: The slots one product leaves, over the warpgroup.
+//: The slots one product of the recorded key tile leaves, over the warpgroup.
 constexpr std::size_t kProductSlots =
-    static_cast<std::size_t>(kWarpgroupThreads) * kRegisters;
+    static_cast<std::size_t>(KeySlots(kAtomN));
 
 // --- The staging ------------------------------------------------------------
 
@@ -366,8 +810,9 @@ __device__ __forceinline__ void CopyWait() {
 // of one key tile together, so a thread of either warpgroup copies half of what
 // a single warpgroup copies.
 __device__ __forceinline__ void StageCopy(char* stage, const Bf16* source,
-                                          bool row_fast, int threads) {
-  const int groups = kAtomN * kGroupsPerRow;
+                                          bool row_fast, int threads,
+                                          int rows) {
+  const int groups = rows * kGroupsPerRow;
   for (int unit = static_cast<int>(threadIdx.x); unit < groups;
        unit += threads) {
     int row = 0;
@@ -386,7 +831,7 @@ __device__ __forceinline__ void StageCopy(char* stage, const Bf16* source,
       row = unit / kGroupsPerRow;
       k = (unit - row * kGroupsPerRow) * kElementsPerGroup;
     }
-    CopyAsync16(stage + InterleavedOffset(row, k, kAtomN),
+    CopyAsync16(stage + InterleavedOffset(row, k, rows),
                 source + row * kDim + k);
   }
 }
@@ -423,8 +868,9 @@ __device__ __forceinline__ void StageSwizzled(char* stage, const Bf16* source,
 // the value ring's rate, then the transpose is innocent and the plain store
 // path is the cost.
 __device__ __forceinline__ void StageCopyPlain(char* stage, const Bf16* source,
-                                               bool row_fast, int threads) {
-  const int groups = kAtomN * kGroupsPerRow;
+                                               bool row_fast, int threads,
+                                               int rows) {
+  const int groups = rows * kGroupsPerRow;
 #pragma unroll 4
   for (int unit = static_cast<int>(threadIdx.x); unit < groups;
        unit += threads) {
@@ -442,7 +888,7 @@ __device__ __forceinline__ void StageCopyPlain(char* stage, const Bf16* source,
       row = unit / kGroupsPerRow;
       k = (unit - row * kGroupsPerRow) * kElementsPerGroup;
     }
-    *reinterpret_cast<uint4*>(stage + InterleavedOffset(row, k, kAtomN)) =
+    *reinterpret_cast<uint4*>(stage + InterleavedOffset(row, k, rows)) =
         *reinterpret_cast<const uint4*>(source + row * kDim + k);
   }
 }
@@ -573,6 +1019,57 @@ __device__ __forceinline__ void WgmmaM64N128K16(std::uint64_t desc_a,
       : "l"(desc_a), "l"(desc_b), "r"(scale));
 }
 
+// The same atom over a key tile of 64 keys. `m64n64k16` holds thirty-two fp32
+// accumulators a thread where `m64n128k16` holds sixty-four, and every other
+// field of the instruction is the same, so the narrow key tile is exactly the
+// halving the register identity of the shape space states. One core matrix is
+// still eight rows of eight elements, so the descriptor form and the atom step
+// are the ones the wide tile uses, read at half the rows.
+//
+// The accumulator map is the wide one with its column field stopped at 63,
+// which is what `SlotRow` and `SlotColumn` state when the index runs to
+// thirty-two. That is a claim about the instruction, so `form_check_narrow`
+// measures it one element at a time before any narrow row is timed.
+__device__ __forceinline__ void WgmmaM64N64K16(std::uint64_t desc_a,
+                                               std::uint64_t desc_b, float* d,
+                                               bool accumulate) {
+  const std::uint32_t scale = accumulate ? 1u : 0u;
+  asm volatile(
+      "{\n"
+      "  .reg .pred p;\n"
+      "  setp.ne.b32 p, %34, 0;\n"
+      "  wgmma.mma_async.sync.aligned.m64n64k16.f32.bf16.bf16 "
+      "  {%0,  %1,  %2,  %3,  %4,  %5,  %6,  %7,  "
+      "   %8,  %9,  %10, %11, %12, %13, %14, %15, "
+      "   %16, %17, %18, %19, %20, %21, %22, %23, "
+      "   %24, %25, %26, %27, %28, %29, %30, %31}, "
+      "  %32, %33, p, 1, 1, 0, 0;\n"
+      "}\n"
+      : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3]), "+f"(d[4]), "+f"(d[5]),
+        "+f"(d[6]), "+f"(d[7]), "+f"(d[8]), "+f"(d[9]), "+f"(d[10]),
+        "+f"(d[11]), "+f"(d[12]), "+f"(d[13]), "+f"(d[14]), "+f"(d[15]),
+        "+f"(d[16]), "+f"(d[17]), "+f"(d[18]), "+f"(d[19]), "+f"(d[20]),
+        "+f"(d[21]), "+f"(d[22]), "+f"(d[23]), "+f"(d[24]), "+f"(d[25]),
+        "+f"(d[26]), "+f"(d[27]), "+f"(d[28]), "+f"(d[29]), "+f"(d[30]),
+        "+f"(d[31])
+      : "l"(desc_a), "l"(desc_b), "r"(scale));
+}
+
+// One atom of the score product over a key tile of `KeyWidth` keys, which is
+// the one place the two instruction forms differ in this file.
+template <int KeyWidth>
+__device__ __forceinline__ void ScoreAtom(std::uint64_t desc_a,
+                                          std::uint64_t desc_b, float* d,
+                                          bool accumulate) {
+  static_assert(KeyWidth == kNarrowKeyWidth || KeyWidth == kAtomN,
+                "the score atom reads a key tile of 64 or 128 keys");
+  if constexpr (KeyWidth == kAtomN) {
+    WgmmaM64N128K16(desc_a, desc_b, d, accumulate);
+  } else {
+    WgmmaM64N64K16(desc_a, desc_b, d, accumulate);
+  }
+}
+
 // The same atom as `WgmmaM64N128K16` with the second transpose bit set, which
 // is the form the value product needs: its `k` axis is the key index and its
 // `n` axis is the head width, so the staged value tile of `[key][dim]` rows is
@@ -694,7 +1191,7 @@ __device__ __forceinline__ void FenceAsyncShared() {
 // Phase 0 geometry. The accumulator is 64 by 128 whatever the pass depth is, so
 // only the loop bound and the flop count follow `Atoms`. The registers leave
 // raw, and every reader below decodes them.
-template <int Atoms = kAtoms>
+template <int Atoms = kAtoms, int KeyWidth = kAtomN>
 __global__ void ResidentKernel(const Bf16* __restrict__ q,
                                const Bf16* __restrict__ k,
                                float* __restrict__ out, int passes) {
@@ -702,34 +1199,36 @@ __global__ void ResidentKernel(const Bf16* __restrict__ q,
   char* query = smem;
   char* key = smem + kQueryBytes;
   StageInterleaved(query, q, kAtomM, kWarpgroupThreads);
-  StageInterleaved(key, k, kAtomN, kWarpgroupThreads);
+  StageInterleaved(key, k, KeyWidth, kWarpgroupThreads);
   __syncthreads();
   FenceAsyncShared();
   WgmmaFence();
 
   const std::uint64_t base_query = MakeDescriptor(query);
   const std::uint64_t base_key = MakeDescriptor(key);
-  float d[kRegisters];
+  constexpr int kTileRegisters = KeyRegisters(KeyWidth);
+  float d[kTileRegisters];
 #pragma unroll
-  for (int i = 0; i < kRegisters; ++i) d[i] = 0.0f;
-  WgmmaFenceOperand<kRegisters>(d);
+  for (int i = 0; i < kTileRegisters; ++i) d[i] = 0.0f;
+  WgmmaFenceOperand<kTileRegisters>(d);
 
   for (int pass = 0; pass < passes; ++pass) {
 #pragma unroll
     for (int atom = 0; atom < Atoms; ++atom) {
-      WgmmaM64N128K16(base_query + atom * AtomStep(kAtomM),
-                      base_key + atom * AtomStep(kAtomN), d,
-                      pass != 0 || atom != 0);
+      ScoreAtom<KeyWidth>(base_query + atom * AtomStep(kAtomM),
+                          base_key + atom * AtomStep(KeyWidth), d,
+                          pass != 0 || atom != 0);
     }
     WgmmaCommit();
     WgmmaWait<1>();
   }
   WgmmaWait<0>();
-  WgmmaFenceOperand<kRegisters>(d);
+  WgmmaFenceOperand<kTileRegisters>(d);
 
-  float* destination = out + static_cast<std::size_t>(threadIdx.x) * kRegisters;
+  float* destination =
+      out + static_cast<std::size_t>(threadIdx.x) * kTileRegisters;
 #pragma unroll
-  for (int i = 0; i < kRegisters; ++i) destination[i] = d[i];
+  for (int i = 0; i < kTileRegisters; ++i) destination[i] = d[i];
 }
 
 // One step of the flash tile, and the one place the step is written: the
@@ -967,10 +1466,10 @@ __global__ void StagedFlashKernel(const Bf16* __restrict__ q,
     if constexpr (!kSkipKey) {
       if constexpr (kPlainKey) {
         StageCopyPlain(keys + stage * kKeyBytes, k + offset, /*row_fast=*/true,
-                       kThreads);
+                       kThreads, kAtomN);
       } else {
         StageCopy(keys + stage * kKeyBytes, k + offset, /*row_fast=*/true,
-                  kThreads);
+                  kThreads, kAtomN);
       }
     }
     if constexpr (kStageValue) {
@@ -1071,12 +1570,18 @@ constexpr int kRowFast = 2;
 //
 // `kProducts` false is the copy row: the same bytes, the same ring, and no
 // instruction.
-template <int Warpgroups, int QueryTiles, bool kProducts, int Stages = kStages>
+template <int Warpgroups, int QueryTiles, bool kProducts, int Stages = kStages,
+          int KeyWidth = kAtomN>
 __global__ void StagedKernel(const Bf16* __restrict__ q,
                              const Bf16* __restrict__ k, int source_tiles,
                              float* __restrict__ out, int tiles, int options) {
   constexpr int kThreads = Warpgroups * kWarpgroupThreads;
   constexpr int kTiles = Warpgroups * QueryTiles;
+  // The accumulator of one query tile, and the bytes of one staged key tile.
+  // Both follow the key width, so a narrow ring costs half the shared memory
+  // and half the registers a tile.
+  constexpr int kTileRegisters = KeyRegisters(KeyWidth);
+  constexpr int kStageBytes = KeyBytes(KeyWidth);
   extern __shared__ __align__(1024) char smem[];
   char* query = smem;
   char* stages = smem + kTiles * kQueryBytes;
@@ -1103,11 +1608,11 @@ __global__ void StagedKernel(const Bf16* __restrict__ q,
         MakeDescriptor(query + (warpgroup * QueryTiles + tile) * kQueryBytes);
   }
 
-  float d[QueryTiles * kRegisters];
+  float d[QueryTiles * kTileRegisters];
   if constexpr (kProducts) {
 #pragma unroll
-    for (int i = 0; i < QueryTiles * kRegisters; ++i) d[i] = 0.0f;
-    WgmmaFenceOperand<QueryTiles * kRegisters>(d);
+    for (int i = 0; i < QueryTiles * kTileRegisters; ++i) d[i] = 0.0f;
+    WgmmaFenceOperand<QueryTiles * kTileRegisters>(d);
   }
 
   const bool plain_stage = (options & kPlainStage) != 0;
@@ -1120,11 +1625,12 @@ __global__ void StagedKernel(const Bf16* __restrict__ q,
   // copies read the source ring, so they are harmless.
   for (int tile = 0; tile < Stages - 1; ++tile) {
     const Bf16* source =
-        k + static_cast<std::size_t>(tile % source_tiles) * kAtomN * kDim;
+        k + static_cast<std::size_t>(tile % source_tiles) * KeyWidth * kDim;
     if (plain_stage) {
-      StageInterleaved(stages + tile * kKeyBytes, source, kAtomN, kThreads);
+      StageInterleaved(stages + tile * kStageBytes, source, KeyWidth, kThreads);
     } else {
-      StageCopy(stages + tile * kKeyBytes, source, row_fast, kThreads);
+      StageCopy(stages + tile * kStageBytes, source, row_fast, kThreads,
+                KeyWidth);
     }
     CopyCommit();
   }
@@ -1138,14 +1644,14 @@ __global__ void StagedKernel(const Bf16* __restrict__ q,
 
     if constexpr (kProducts) {
       const std::uint64_t base_key =
-          MakeDescriptor(stages + (tile % Stages) * kKeyBytes);
+          MakeDescriptor(stages + (tile % Stages) * kStageBytes);
 #pragma unroll
       for (int slot = 0; slot < QueryTiles; ++slot) {
 #pragma unroll
         for (int atom = 0; atom < kAtoms; ++atom) {
-          WgmmaM64N128K16(base_query[slot] + atom * AtomStep(kAtomM),
-                          base_key + atom * AtomStep(kAtomN),
-                          d + slot * kRegisters, true);
+          ScoreAtom<KeyWidth>(base_query[slot] + atom * AtomStep(kAtomM),
+                              base_key + atom * AtomStep(KeyWidth),
+                              d + slot * kTileRegisters, true);
         }
       }
       WgmmaCommit();
@@ -1161,13 +1667,13 @@ __global__ void StagedKernel(const Bf16* __restrict__ q,
     const int next = tile + Stages - 1;
     if (next < tiles) {
       const Bf16* source =
-          k + static_cast<std::size_t>(next % source_tiles) * kAtomN * kDim;
+          k + static_cast<std::size_t>(next % source_tiles) * KeyWidth * kDim;
       if (plain_stage) {
-        StageInterleaved(stages + (next % Stages) * kKeyBytes, source, kAtomN,
-                         kThreads);
+        StageInterleaved(stages + (next % Stages) * kStageBytes, source,
+                         KeyWidth, kThreads);
       } else {
-        StageCopy(stages + (next % Stages) * kKeyBytes, source, row_fast,
-                  kThreads);
+        StageCopy(stages + (next % Stages) * kStageBytes, source, row_fast,
+                  kThreads, KeyWidth);
       }
     }
     CopyCommit();
@@ -1175,7 +1681,7 @@ __global__ void StagedKernel(const Bf16* __restrict__ q,
 
   if constexpr (kProducts) {
     WgmmaWait<0>();
-    WgmmaFenceOperand<QueryTiles * kRegisters>(d);
+    WgmmaFenceOperand<QueryTiles * kTileRegisters>(d);
     const int lane = static_cast<int>(threadIdx.x) % kWarpgroupThreads;
 #pragma unroll
     for (int slot = 0; slot < QueryTiles; ++slot) {
@@ -1185,10 +1691,10 @@ __global__ void StagedKernel(const Bf16* __restrict__ q,
           out + (static_cast<std::size_t>(warpgroup * QueryTiles + slot) *
                      kWarpgroupThreads +
                  static_cast<std::size_t>(lane)) *
-                    kRegisters;
+                    kTileRegisters;
 #pragma unroll
-      for (int i = 0; i < kRegisters; ++i) {
-        destination[i] = d[slot * kRegisters + i];
+      for (int i = 0; i < kTileRegisters; ++i) {
+        destination[i] = d[slot * kTileRegisters + i];
       }
     }
   }
@@ -1302,34 +1808,59 @@ std::pair<int, int> RegisterSlotOf(int lane, int reg, int half) {
   return {row, key};
 }
 
+// The resident shared window of one key width: the query tile and the key tile.
+template <int KeyWidth = kAtomN>
+constexpr int ResidentBytes() {
+  return kQueryBytes + KeyBytes(KeyWidth);
+}
+
 // The result of one resident pass, for the checks below.
+template <int KeyWidth = kAtomN>
 std::vector<float> RunResident(const Bf16* device_q, const Bf16* device_k,
                                float* device_out) {
-  ResidentKernel<kAtoms><<<1, kWarpgroupThreads, kQueryBytes + kKeyBytes>>>(
-      device_q, device_k, device_out, 1);
+  ResidentKernel<kAtoms, KeyWidth>
+      <<<1, kWarpgroupThreads, ResidentBytes<KeyWidth>()>>>(device_q, device_k,
+                                                            device_out, 1);
   cudaDeviceSynchronize();
-  return ReadBack(device_out, kProductSlots);
+  return ReadBack(device_out, static_cast<std::size_t>(KeySlots(KeyWidth)));
 }
 
 // The one opt-in dynamic shared-memory request, stated for each instantiation
 // the file launches. A templated kernel has no single function address, so the
 // attribute is set once per pass depth rather than once per file.
-template <int Atoms>
+template <int Atoms, int KeyWidth = kAtomN>
 void SetResidentSharedMemory() {
-  cudaFuncSetAttribute(reinterpret_cast<const void*>(ResidentKernel<Atoms>),
-                       cudaFuncAttributeMaxDynamicSharedMemorySize,
-                       kQueryBytes + kKeyBytes);
+  cudaFuncSetAttribute(
+      reinterpret_cast<const void*>(ResidentKernel<Atoms, KeyWidth>),
+      cudaFuncAttributeMaxDynamicSharedMemorySize, ResidentBytes<KeyWidth>());
 }
 
 // One launch of the resident kernel: `blocks` warpgroups, `Atoms` atoms per
 // pass, and `steps` passes of the loop inside the kernel. The protocol around
 // it owns the warm-up, the rounds, and the statistic, so this function states
 // the call and nothing else.
-template <int Atoms>
+template <int Atoms, int KeyWidth = kAtomN>
 void LaunchResident(int blocks, const Bf16* device_q, const Bf16* device_k,
                     float* device_out, int steps) {
-  ResidentKernel<Atoms><<<blocks, kWarpgroupThreads, kQueryBytes + kKeyBytes>>>(
-      device_q, device_k, device_out, steps);
+  static_assert(ResidentBytes<KeyWidth>() <= kSmemCeiling,
+                "the resident tile must fit one block per multiprocessor");
+  ResidentKernel<Atoms, KeyWidth>
+      <<<blocks, kWarpgroupThreads, ResidentBytes<KeyWidth>()>>>(
+          device_q, device_k, device_out, steps);
+}
+
+// Fails the run when the device holds an error. A launch the device refuses
+// leaves the error pending and an event pair that times a few microseconds, so
+// a row whose kernel never ran would otherwise state a rate. The first card run
+// of the narrow copy row did exactly that, at 0.0006 ms for 268 MB of staged
+// bytes, because its shared-memory request had no opt-in attribute.
+void CheckDevice(const std::string& what) {
+  const cudaError_t status = cudaGetLastError();
+  if (status == cudaSuccess) return;
+  std::fprintf(stderr, "fatal: %s: %s\n", what.c_str(),
+               cudaGetErrorString(status));
+  std::fflush(stderr);
+  std::exit(1);
 }
 
 // A checked sync that names the phase it waited for. An unchecked sync reports
@@ -1349,6 +1880,11 @@ void SyncFlash(const std::string& what) {
 template <int Warpgroups, bool kMask, bool kSoftmax = true>
 void SetFlashSharedMemory() {
   constexpr int kShared = FlashResidentBytes(Warpgroups);
+  static_assert(
+      kShared <= kSmemCeiling,
+      "the resident flash tile must fit one block per multiprocessor");
+  static_assert(Warpgroups * kWarpgroupThreads <= kMaxThreadsPerBlock,
+                "one block of warpgroups must fit the thread limit");
   cudaFuncSetAttribute(reinterpret_cast<const void*>(
                            ResidentFlashKernel<Warpgroups, kMask, kSoftmax>),
                        cudaFuncAttributeMaxDynamicSharedMemorySize, kShared);
@@ -1461,24 +1997,26 @@ void VisitFlashGeometry(int warpgroups, int stages, Visitor&& visit) {
 // The one opt-in dynamic shared-memory request of a staged instantiation. A
 // templated kernel has no single function address, so the attribute is set once
 // per instantiation and outside any timed window.
-template <int Warpgroups, int QueryTiles, bool kProducts, int Stages = kStages>
+template <int Warpgroups, int QueryTiles, bool kProducts, int Stages = kStages,
+          int KeyWidth = kAtomN>
 void SetStagedSharedMemory() {
-  constexpr int kShared = StagedBytes(Warpgroups, QueryTiles, Stages);
+  constexpr int kShared = StagedBytes(Warpgroups, QueryTiles, Stages, KeyWidth);
   static_assert(kShared <= kSmemCeiling,
                 "the ring must fit one block per multiprocessor");
   cudaFuncSetAttribute(
       reinterpret_cast<const void*>(
-          StagedKernel<Warpgroups, QueryTiles, kProducts, Stages>),
+          StagedKernel<Warpgroups, QueryTiles, kProducts, Stages, KeyWidth>),
       cudaFuncAttributeMaxDynamicSharedMemorySize, kShared);
 }
 
 // One launch of the staged kernel: `tiles` steps of the ring, over `blocks`
 // blocks, with the copy order of `options`.
-template <int Warpgroups, int QueryTiles, bool kProducts, int Stages = kStages>
+template <int Warpgroups, int QueryTiles, bool kProducts, int Stages = kStages,
+          int KeyWidth = kAtomN>
 void LaunchStaged(int blocks, int tiles, int source_tiles, const Bf16* device_q,
                   const Bf16* device_k, float* device_out, int options = 0) {
-  constexpr int kShared = StagedBytes(Warpgroups, QueryTiles, Stages);
-  StagedKernel<Warpgroups, QueryTiles, kProducts, Stages>
+  constexpr int kShared = StagedBytes(Warpgroups, QueryTiles, Stages, KeyWidth);
+  StagedKernel<Warpgroups, QueryTiles, kProducts, Stages, KeyWidth>
       <<<blocks, Warpgroups * kWarpgroupThreads, kShared>>>(
           device_q, device_k, source_tiles, device_out, tiles, options);
 }
@@ -1509,35 +2047,55 @@ void VisitGeometry(int warpgroups, int query_tiles, Visitor&& visit) {
   }
 }
 
+// One geometry of the narrow key tile, dispatched to its own instantiation. The
+// narrow tile holds twice the accumulator words of a tile the wide one can
+// carry, so its geometries are the ones the wide ladder stops short of, and
+// this is the one place that states them.
+template <typename Visitor>
+void VisitNarrowGeometry(int warpgroups, int query_tiles, Visitor&& visit) {
+  if (warpgroups == 2 && query_tiles == 4) {
+    visit(std::integral_constant<int, 2>{}, std::integral_constant<int, 4>{});
+  } else {
+    std::fprintf(stderr,
+                 "the narrow key tile has no geometry of %d warpgroups and %d "
+                 "query tiles\n",
+                 warpgroups, query_tiles);
+    std::exit(2);
+  }
+}
+
 // One geometry's staged check: every query tile of every warpgroup must agree
 // with the resident product of that same tile, because all of them multiply
 // their own query tile by the same key tile. The answer is the count of
 // elements outside the tolerance and the worst difference, both as the caller
 // reports them.
-template <int Warpgroups, int QueryTiles>
+template <int Warpgroups, int QueryTiles, int KeyWidth = kAtomN>
 std::pair<std::size_t, double> CheckStagedGeometry(
     const Bf16* device_queries, const Bf16* device_k, float* device_out,
     int source_tiles, int options,
     const std::vector<std::vector<float>>& reference_tiles, double scale) {
   constexpr int kThreads = Warpgroups * kWarpgroupThreads;
   constexpr int kTiles = Warpgroups * QueryTiles;
-  constexpr int kShared = StagedBytes(Warpgroups, QueryTiles, kStages);
+  constexpr std::size_t kSlots = static_cast<std::size_t>(KeySlots(KeyWidth));
+  constexpr int kShared =
+      StagedBytes(Warpgroups, QueryTiles, kStages, KeyWidth);
   cudaFuncSetAttribute(
-      reinterpret_cast<const void*>(StagedKernel<Warpgroups, QueryTiles, true>),
+      reinterpret_cast<const void*>(
+          StagedKernel<Warpgroups, QueryTiles, true, kStages, KeyWidth>),
       cudaFuncAttributeMaxDynamicSharedMemorySize, kShared);
-  cudaMemset(device_out, 0, kTiles * kProductSlots * sizeof(float));
-  StagedKernel<Warpgroups, QueryTiles, true><<<1, kThreads, kShared>>>(
-      device_queries, device_k, source_tiles, device_out, 1, options);
+  cudaMemset(device_out, 0, kTiles * kSlots * sizeof(float));
+  StagedKernel<Warpgroups, QueryTiles, true, kStages, KeyWidth>
+      <<<1, kThreads, kShared>>>(device_queries, device_k, source_tiles,
+                                 device_out, 1, options);
   cudaDeviceSynchronize();
-  const std::vector<float> staged =
-      ReadBack(device_out, kTiles * kProductSlots);
+  const std::vector<float> staged = ReadBack(device_out, kTiles * kSlots);
   double worst = 0.0;
   std::size_t bad = 0;
   for (int tile = 0; tile < kTiles; ++tile) {
-    for (std::size_t slot = 0; slot < kProductSlots; ++slot) {
+    for (std::size_t slot = 0; slot < kSlots; ++slot) {
       const double difference = std::fabs(
           static_cast<double>(
-              staged[static_cast<std::size_t>(tile) * kProductSlots + slot]) -
+              staged[static_cast<std::size_t>(tile) * kSlots + slot]) -
           static_cast<double>(reference_tiles[tile][slot]));
       if (difference > 1e-3 * scale) ++bad;
       worst = std::max(worst, difference);
@@ -1594,6 +2152,9 @@ struct ProbeOptions {
   RowSet rows = RowSet::kAll;
   // Flushes the second-level cache before every timed call.
   bool flush = true;
+  // States the shape space and exits, so the table is readable with no card and
+  // no measurement.
+  bool shapes_only = false;
 
   bool phase0() const { return rows != RowSet::kH1 && rows != RowSet::kFlash; }
   bool h1() const { return rows != RowSet::kPhase0 && rows != RowSet::kFlash; }
@@ -1616,7 +2177,8 @@ struct ProbeOptions {
 void PrintUsage(const char* program) {
   std::fprintf(stderr,
                "usage: %s [--rows phase0|h1|flash|all] [--iters N] "
-               "[--rounds N] [--warmup N] [--no-flush] [--json] [--out PATH]\n",
+               "[--rounds N] [--warmup N] [--no-flush] [--shapes] [--json] "
+               "[--out PATH]\n",
                program);
 }
 
@@ -1642,6 +2204,8 @@ ProbeOptions ParseOptions(int argc, char** argv) {
       }
     } else if (argument == "--no-flush") {
       options.flush = false;
+    } else if (argument == "--shapes") {
+      options.shapes_only = true;
     } else if (argument == "--iters" && i + 1 < argc) {
       options.bench.iters = std::atoi(argv[++i]);
     } else if (argument == "--rounds" && i + 1 < argc) {
@@ -1656,6 +2220,80 @@ ProbeOptions ParseOptions(int argc, char** argv) {
     }
   }
   return options;
+}
+
+// The registers of one staged score instantiation, read from the build. The
+// instantiation is named inside a template function because a lambda that names
+// a kernel template-id with defaulted arguments does not resolve it.
+template <int Warpgroups, int QueryTiles, int KeyWidth = kAtomN>
+int StagedRegisters() {
+  return CompilerRegisters(reinterpret_cast<const void*>(
+      StagedKernel<Warpgroups, QueryTiles, true, kStages, KeyWidth>));
+}
+
+// The registers of one resident flash instantiation, read from the build.
+template <int Warpgroups, bool kMask, bool kSoftmax>
+int ResidentFlashRegisters() {
+  return CompilerRegisters(reinterpret_cast<const void*>(
+      ResidentFlashKernel<Warpgroups, kMask, kSoftmax>));
+}
+
+// The registers of one staged flash instantiation, read from the build. Both
+// rings are staged, because that is the shape a product row times.
+template <int Warpgroups, int Stages, bool kMask, bool kSoftmax = true>
+int StagedFlashRegisters() {
+  return CompilerRegisters(reinterpret_cast<const void*>(
+      StagedFlashKernel<Warpgroups, Stages, true, kRingKeyValue, kMask,
+                        kSoftmax>));
+}
+
+// States every row of the shape space: the twelve geometries this file
+// instantiates, with the register count its own build states, and the four
+// candidates, with the estimate the identity of the shape space gives them.
+// This is the table `--shapes` prints and the table a full run ends with, so
+// the shape that reached the highest rate and the shape that cannot launch are
+// one document and the second does not depend on the first having run.
+void StateShapeSpace(ShapeTable* shapes) {
+  for (int warpgroups = 1; warpgroups <= kMaxWarpgroups; ++warpgroups) {
+    for (int query_tiles = 1; query_tiles <= kMaxQueryTiles; ++query_tiles) {
+      VisitGeometry(warpgroups, query_tiles, [&](auto count, auto tiles) {
+        constexpr int kWarpgroups = decltype(count)::value;
+        constexpr int kQueryTiles = decltype(tiles)::value;
+        shapes->Observe(FindShape(ShapeKind::kScore, kWarpgroups, kQueryTiles,
+                                  kAtomN, kStages),
+                        StagedRegisters<kWarpgroups, kQueryTiles>());
+      });
+    }
+  }
+  for (int warpgroups = 1; warpgroups <= kMaxWarpgroups; ++warpgroups) {
+    for (int stages = 2; stages <= 3; ++stages) {
+      VisitFlashGeometry(warpgroups, stages, [&](auto count, auto ring) {
+        constexpr int kWarpgroups = decltype(count)::value;
+        constexpr int kRing = decltype(ring)::value;
+        shapes->Observe(
+            FindShape(ShapeKind::kFlash, kWarpgroups, 1, kAtomN, kRing),
+            StagedFlashRegisters<kWarpgroups, kRing, false>());
+      });
+    }
+  }
+  VisitNarrowGeometry(
+      kMaxWarpgroups, kNarrowQueryTiles, [&](auto count, auto tiles) {
+        constexpr int kWarpgroups = decltype(count)::value;
+        constexpr int kQueryTiles = decltype(tiles)::value;
+        shapes->Observe(
+            FindShape(ShapeKind::kScore, kWarpgroups, kQueryTiles,
+                      kNarrowKeyWidth, kStages),
+            StagedRegisters<kWarpgroups, kQueryTiles, kNarrowKeyWidth>());
+      });
+  shapes->Observe(FindShape(ShapeKind::kFlashResident, 1, 1, kAtomN, 1),
+                  ResidentFlashRegisters<1, false, true>());
+  shapes->Observe(FindShape(ShapeKind::kFlashResident, 2, 1, kAtomN, 1),
+                  ResidentFlashRegisters<2, false, true>());
+  // The candidates hold no instantiation of this file, so the arithmetic of the
+  // shape space is the count they state.
+  for (const ShapeSpec& shape : kShapeSpace) {
+    if (!shape.instantiated) shapes->Observe(shape, 0);
+  }
 }
 
 }  // namespace
@@ -1691,6 +2329,26 @@ int main(int argc, char** argv) {
       "staged "
       "rate, and the flash tile, %d by %d by %d\n",
       kAtomM, kAtomN, kDim);
+
+  // The shape space of the staged and flash rows: the tile of every geometry
+  // this file instantiates and the four candidates the register identity opens
+  // and closes. A product row states its shape here before it launches, and a
+  // shape the table refuses never runs, so the register file, the shared
+  // window, and the thread count are checked before a measurement instead of
+  // after it. `--shapes` prints the space and exits, which needs no card.
+  ShapeTable shapes;
+  StateShapeSpace(&shapes);
+  if (options.shapes_only) {
+    // The table alone: a document with the shape space and no row, or the human
+    // table. Neither needs a card, a clock, or a measurement.
+    shapes.Write(&report);
+    if (options.bench.json) {
+      report.Print(options.bench);
+    } else {
+      shapes.Print(stdout);
+    }
+    return 0;
+  }
 
   int device = 0;
   cudaDeviceProp properties{};
@@ -1897,46 +2555,61 @@ int main(int argc, char** argv) {
     for (nanochat::Bf16& value : host_k) {
       value = nanochat::Bf16FromFloat(random.Next());
     }
-    std::vector<double> reference(static_cast<std::size_t>(kAtomM) * kAtomN,
-                                  0.0);
-    double scale = 0.0;
-    for (int m = 0; m < kAtomM; ++m) {
-      for (int n = 0; n < kAtomN; ++n) {
-        double sum = 0.0;
-        for (int k = 0; k < kDim; ++k) {
-          sum += static_cast<double>(nanochat::Bf16ToFloat(
-                     host_q[static_cast<std::size_t>(m) * kDim + k])) *
-                 static_cast<double>(nanochat::Bf16ToFloat(
-                     host_k[static_cast<std::size_t>(n) * kDim + k]));
-        }
-        reference[static_cast<std::size_t>(m) * kAtomN + n] = sum;
-        scale = std::max(scale, std::fabs(sum));
-      }
-    }
     Upload(host_q, device_q);
     Upload(host_k, device_k);
-    const std::vector<float> resident =
-        RunResident(device_q, device_k, device_out);
-    double worst = 0.0;
-    for (int lane = 0; lane < kWarpgroupThreads; ++lane) {
-      for (int index = 0; index < kRegisters; ++index) {
-        const std::pair<int, int> slot = SlotOf(lane, index);
-        const double expected =
-            reference[static_cast<std::size_t>(slot.first) * kAtomN +
-                      slot.second];
-        const double actual =
-            resident[static_cast<std::size_t>(lane) * kRegisters + index];
-        worst = std::max(worst, std::fabs(actual - expected));
+    // The scale both checks divide by. It is the largest element of the wide
+    // reference, and the wide check runs first, so the narrow check reads the
+    // scale of the same operand set.
+    double scale = 0.0;
+    // One key width, one element at a time. The first column of the key tile
+    // holds the narrow product of the same operands, so the two checks state
+    // the wide and the narrow instruction over one input.
+    auto check_form = [&](auto width_constant) {
+      constexpr int kWidth = decltype(width_constant)::value;
+      constexpr int kTileRegisters = KeyRegisters(kWidth);
+      std::vector<double> reference(static_cast<std::size_t>(kAtomM) * kWidth,
+                                    0.0);
+      for (int m = 0; m < kAtomM; ++m) {
+        for (int n = 0; n < kWidth; ++n) {
+          double sum = 0.0;
+          for (int k = 0; k < kDim; ++k) {
+            sum += static_cast<double>(nanochat::Bf16ToFloat(
+                       host_q[static_cast<std::size_t>(m) * kDim + k])) *
+                   static_cast<double>(nanochat::Bf16ToFloat(
+                       host_k[static_cast<std::size_t>(n) * kDim + k]));
+          }
+          reference[static_cast<std::size_t>(m) * kWidth + n] = sum;
+          scale = std::max(scale, std::fabs(sum));
+        }
       }
-    }
-    const double form_error = worst / scale;
-    note("attention-wgmma:form_check error=%.3e scale=%.3f status=%s\n",
-         form_error, scale, form_error < 3e-2 ? "ok" : "failed");
-    report.SetExtra("form_check:error", form_error);
-    report.SetExtra("form_check:scale", scale);
-    report.SetExtraText("form_check:status",
-                        form_error < 3e-2 ? "ok" : "failed");
-    ok = ok && form_error < 3e-2;
+      const std::vector<float> resident =
+          RunResident<kWidth>(device_q, device_k, device_out);
+      double worst = 0.0;
+      for (int lane = 0; lane < kWarpgroupThreads; ++lane) {
+        for (int index = 0; index < kTileRegisters; ++index) {
+          const std::pair<int, int> slot = SlotOf(lane, index);
+          const double expected =
+              reference[static_cast<std::size_t>(slot.first) * kWidth +
+                        slot.second];
+          const double actual =
+              resident[static_cast<std::size_t>(lane) * kTileRegisters + index];
+          worst = std::max(worst, std::fabs(actual - expected));
+        }
+      }
+      const double form_error = worst / scale;
+      const std::string name =
+          kWidth == kAtomN ? "form_check" : "form_check_narrow";
+      note("attention-wgmma:%s keys=%d error=%.3e scale=%.3f status=%s\n",
+           name.c_str(), kWidth, form_error, scale,
+           form_error < 3e-2 ? "ok" : "failed");
+      report.SetExtra(name + ":error", form_error);
+      report.SetExtra(name + ":scale", scale);
+      report.SetExtraText(name + ":status",
+                          form_error < 3e-2 ? "ok" : "failed");
+      ok = ok && form_error < 3e-2;
+    };
+    check_form(std::integral_constant<int, kAtomN>{});
+    check_form(std::integral_constant<int, kNarrowKeyWidth>{});
 
     // --- The staged path
     // ------------------------------------------------------ The staged product
@@ -1945,6 +2618,7 @@ int main(int argc, char** argv) {
     // a warpgroup that reads the wrong tile of the query region fails here, and
     // so does a wrong ring, a wrong barrier, or a wrong stage offset.
     std::vector<std::vector<float>> reference_tiles(kMaxTiles);
+    std::vector<std::vector<float>> narrow_reference(kMaxTiles);
     for (int tile = 0; tile < kMaxTiles; ++tile) {
       const std::size_t offset = static_cast<std::size_t>(tile) * host_q.size();
       for (std::size_t element = 0; element < host_q.size(); ++element) {
@@ -1954,32 +2628,41 @@ int main(int argc, char** argv) {
       Upload(host_q, device_q);
       reference_tiles[static_cast<std::size_t>(tile)] =
           RunResident(device_q, device_k, device_out);
+      // The narrow check reads the narrow instruction over the same query tile,
+      // so it compares against the narrow resident product of that tile.
+      narrow_reference[static_cast<std::size_t>(tile)] =
+          RunResident<kNarrowKeyWidth>(device_q, device_k, device_out);
     }
     Upload(host_queries, device_queries);
     Upload(host_k, device_k);
     bool staged_ok = true;
-    auto check_geometry = [&](auto warpgroups, auto query_tiles) {
+    auto check_shape = [&](auto width_constant, auto warpgroups,
+                           auto query_tiles) {
+      constexpr int kWidth = decltype(width_constant)::value;
       constexpr int kWarpgroups = decltype(warpgroups)::value;
       constexpr int kQueryTiles = decltype(query_tiles)::value;
       constexpr int kTiles = kWarpgroups * kQueryTiles;
+      const std::vector<std::vector<float>>& reference =
+          kWidth == kAtomN ? reference_tiles : narrow_reference;
       for (int options : {0, kPlainStage}) {
         const std::pair<std::size_t, double> result =
-            CheckStagedGeometry<kWarpgroups, kQueryTiles>(
+            CheckStagedGeometry<kWarpgroups, kQueryTiles, kWidth>(
                 device_queries, device_k, device_out, kSourceTiles, options,
-                reference_tiles, scale);
+                reference, scale);
         note(
-            "attention-wgmma:staged_check warpgroups=%d query_tiles=%d "
+            "attention-wgmma:staged_check keys=%d warpgroups=%d query_tiles=%d "
             "options=%d error=%.3e bad=%zu of %d status=%s\n",
-            kWarpgroups, kQueryTiles, options, result.second, result.first,
-            kTiles * static_cast<int>(kProductSlots),
+            kWidth, kWarpgroups, kQueryTiles, options, result.second,
+            result.first, kTiles * KeySlots(kWidth),
             result.second < 1e-6 ? "ok" : "failed");
-        // The key names the geometry and the staging path, because the loop
-        // runs once per pair and a repeated key would state the same field
-        // twice in one document.
+        // The key names the key width, the geometry, and the staging path,
+        // because the loop runs once per pair and a repeated key would state
+        // the same field twice in one document.
         const std::string prefix =
             "staged_check:" +
-            std::string(options == kPlainStage ? "plain" : "async") +
-            ":warpgroups" + std::to_string(kWarpgroups) + ":query_tiles" +
+            std::string(options == kPlainStage ? "plain" : "async") + ":keys" +
+            std::to_string(kWidth) + ":warpgroups" +
+            std::to_string(kWarpgroups) + ":query_tiles" +
             std::to_string(kQueryTiles) + ":";
         report.SetExtra(prefix + "error", result.second);
         report.SetExtraInt(prefix + "bad",
@@ -1991,11 +2674,20 @@ int main(int argc, char** argv) {
         }
       }
     };
+    auto check_geometry = [&](auto warpgroups, auto query_tiles) {
+      check_shape(std::integral_constant<int, kAtomN>{}, warpgroups,
+                  query_tiles);
+    };
+    auto check_narrow = [&](auto warpgroups, auto query_tiles) {
+      check_shape(std::integral_constant<int, kNarrowKeyWidth>{}, warpgroups,
+                  query_tiles);
+    };
     for (int warpgroups = 1; warpgroups <= kMaxWarpgroups; ++warpgroups) {
       for (int query_tiles = 1; query_tiles <= kMaxQueryTiles; ++query_tiles) {
         VisitGeometry(warpgroups, query_tiles, check_geometry);
       }
     }
+    VisitNarrowGeometry(kMaxWarpgroups, kNarrowQueryTiles, check_narrow);
     ok = ok && staged_ok;
 
     // --- The register operand
@@ -2515,6 +3207,9 @@ int main(int argc, char** argv) {
   auto add_rate_row = [&](const nanochat::BenchRow& base,
                           const nanochat::dev::Timing& timing, double flops) {
     nanochat::dev::AddTiming(&report, base, timing, flops);
+    // Outside the timed window on purpose: the check names the row whose launch
+    // the device refused, and it costs the measurement nothing.
+    CheckDevice("row " + base.name);
     return nanochat::dev::Gflops(flops, timing.min_ms);
   };
 
@@ -2526,6 +3221,57 @@ int main(int argc, char** argv) {
     if (!(peak > 0.0) || sm_count <= 0) return 0.0;
     return nanochat::dev::Gflops(flops, milliseconds) * 1e9 /
            (peak / static_cast<double>(sm_count));
+  };
+
+  // One staged product row: the launch, the work it issues, and the arithmetic
+  // one staged byte buys. The row is the caller's, because a boundary tile
+  // states a work ratio and a plain tile does not, and this tail is the one
+  // place both row sets state a product.
+  auto add_product_rate = [&](const nanochat::BenchRow& row,
+                              const std::string& extra_prefix,
+                              const std::string& shape, double flops,
+                              double flop_per_staged_byte, auto&& launch) {
+    const nanochat::dev::Timing timing = harness.Time(launch);
+    const double rate = add_rate_row(row, timing, flops);
+    report.SetExtra(extra_prefix + shape + ":flop_per_staged_byte",
+                    flop_per_staged_byte);
+    note("%s %s min=%.3f ms tflops=%.1f flop_per_staged_byte=%.0f\n",
+         row.name.c_str(), shape.c_str(), timing.min_ms,
+         rate * kTflopsPerGflops, flop_per_staged_byte);
+    return rate;
+  };
+
+  // One copy row: the bytes a launch staged, and the rate it reached. A copy
+  // reads and writes no operand of a product, so the row states no FLOP and the
+  // byte rate is its one number. The share columns of the document print `0.0`
+  // and `-` for it.
+  auto add_copy_rate =
+      [&](const nanochat::BenchRow& row, const std::string& extra_prefix,
+          const std::string& shape, double bytes, auto&& launch) {
+        const nanochat::dev::Timing timing = harness.Time(launch);
+        const double bandwidth = bytes / (timing.min_ms * 1e-3);
+        add_rate_row(row, timing, /*flops=*/0.0);
+        report.SetExtra(extra_prefix + shape + ":tbps", bandwidth / 1e12);
+        note("%s %s min=%.3f ms tbps=%.2f\n", row.name.c_str(), shape.c_str(),
+             timing.min_ms, bandwidth / 1e12);
+        return bandwidth;
+      };
+
+  // States one shape before the row that prices it. The facts of the shape are
+  // the ones the table already holds, so a row can never launch a geometry the
+  // printed table does not state.
+  auto admit = [&](const ShapeSpec& shape, int compiler_registers) {
+    const ShapeFacts facts = shapes.Observe(shape, compiler_registers);
+    if (!facts.fits) {
+      note(
+          "attention-wgmma:shape_refused name=%s warpgroups=%d query_tiles=%d "
+          "keys=%d stages=%d threads=%d registers=%d registers_per_sm=%d "
+          "smem_bytes=%d reason=%s\n",
+          shape.name, shape.warpgroups, shape.query_tiles, shape.key_width,
+          shape.stages, facts.threads, facts.registers,
+          facts.registers_per_multiprocessor, facts.shared_bytes, facts.reason);
+    }
+    return facts.fits;
   };
 
   std::fill(host_q.begin(), host_q.end(), nanochat::Bf16FromFloat(0.5f));
@@ -2540,9 +3286,12 @@ int main(int argc, char** argv) {
     cudaMemcpy(device_k, source.data(), key_elements * sizeof(Bf16),
                cudaMemcpyHostToDevice);
     // The flash rings read the same source window, so the value ring is the
-    // whole ring and not the single tile the check stages.
-    cudaMemcpy(device_value, source.data(), key_elements * sizeof(Bf16),
-               cudaMemcpyHostToDevice);
+    // whole ring and not the single tile the check stages. A run that names no
+    // flash row stages no value tile, so it copies none.
+    if (options.flash()) {
+      cudaMemcpy(device_value, source.data(), key_elements * sizeof(Bf16),
+                 cudaMemcpyHostToDevice);
+    }
   }
   // The Phase 0 gate divides its one-block row by the per-SM share of the peak,
   // which no row field states, so each one-block row also carries that share as
@@ -2571,11 +3320,39 @@ int main(int argc, char** argv) {
         name + std::string(":blocks") + std::to_string(blocks) + ":sm_share",
         share);
     note("%s %s min=%.3f ms median=%.3f ms tflops=%.1f sm_share=%.3f\n", name,
-         shape.c_str(), timing.min_ms, timing.median_ms, rate / 1e12, share);
+         shape.c_str(), timing.min_ms, timing.median_ms,
+         rate * kTflopsPerGflops, share);
   };
   if (options.h1()) {
     add_resident("attention-wgmma:resident", kAtoms, 1, 1);
     add_resident("attention-wgmma:resident", kAtoms, sm_count, 1);
+    // The ceiling of the narrow instruction: the same one-warpgroup tile and
+    // the same grid, over a key tile of half the width. The staged row divides
+    // the released rate by this figure, so a narrow key tile that costs the
+    // instruction nothing is stated and not assumed.
+    SetResidentSharedMemory<kAtoms, kNarrowKeyWidth>();
+    const std::string narrow_shape = "blocks=" + std::to_string(sm_count) +
+                                     " passes=" + std::to_string(passes) +
+                                     " atoms=" + std::to_string(kAtoms) +
+                                     " keys=" + std::to_string(kNarrowKeyWidth);
+    const double narrow_flops = FlopsPerPass(kAtoms, kNarrowKeyWidth) *
+                                static_cast<double>(passes) *
+                                static_cast<double>(sm_count);
+    const nanochat::dev::Timing narrow_timing = harness.Time([&] {
+      LaunchResident<kAtoms, kNarrowKeyWidth>(sm_count, device_q, device_k,
+                                              device_out, passes);
+    });
+    const double narrow_rate = add_rate_row(
+        make_row("attention-wgmma:resident_narrow", narrow_shape, "h1", 1),
+        narrow_timing, narrow_flops);
+    report.SetExtra("resident_narrow:sm_share",
+                    sm_share(narrow_flops, narrow_timing.min_ms));
+    note(
+        "attention-wgmma:resident_narrow %s min=%.3f ms median=%.3f ms "
+        "tflops=%.1f sm_share=%.3f\n",
+        narrow_shape.c_str(), narrow_timing.min_ms, narrow_timing.median_ms,
+        narrow_rate * kTflopsPerGflops,
+        sm_share(narrow_flops, narrow_timing.min_ms));
   }
   if (options.phase0()) {
     add_resident("wgmma:1block", kHalfAtoms, 1, 1);
@@ -2606,52 +3383,70 @@ int main(int argc, char** argv) {
     SetStagedSharedMemory<1, kMaxQueryTiles, false, 2>();
     SetStagedSharedMemory<1, kMaxQueryTiles, false, 5>();
 
-    // One timed product row of one geometry. The work is the score product of
-    // every query tile of every warpgroup over every staged key tile, so the
-    // rate and the arithmetic per staged byte cannot disagree.
-    auto time_geometry = [&](auto warpgroups, auto query_tiles) {
+    // One timed product row of one geometry and one key width. The work is the
+    // score product of every query tile of every warpgroup over every staged
+    // key tile, so the rate and the arithmetic per staged byte cannot disagree.
+    auto time_shape = [&](auto width_constant, auto warpgroups,
+                          auto query_tiles) {
+      constexpr int kWidth = decltype(width_constant)::value;
       constexpr int kWarpgroups = decltype(warpgroups)::value;
       constexpr int kQueryTiles = decltype(query_tiles)::value;
+      const ShapeSpec& shape_row = FindShape(ShapeKind::kScore, kWarpgroups,
+                                             kQueryTiles, kWidth, kStages);
+      if (!admit(shape_row,
+                 StagedRegisters<kWarpgroups, kQueryTiles, kWidth>())) {
+        return;
+      }
+      // The launch of this instantiation, and its opt-in window beside it: a
+      // geometry above the 48 KiB default request fails at the launch and not
+      // at the attribute, so the two are stated together.
+      SetStagedSharedMemory<kWarpgroups, kQueryTiles, true, kStages, kWidth>();
       for (int window : {512, kSourceTiles}) {
         for (int copy_order : {0, kRowFast}) {
-          const nanochat::dev::Timing timing = harness.Time([&] {
-            LaunchStaged<kWarpgroups, kQueryTiles, true>(
-                sm_count, product_tiles, window, device_queries, device_k,
-                device_out, copy_order);
-          });
-          const double flops = 2.0 * kAtomM * kAtomN * kDim *
+          const double flops = 2.0 * kAtomM * kWidth * kDim *
                                static_cast<double>(product_tiles) *
                                static_cast<double>(kWarpgroups) *
                                static_cast<double>(kQueryTiles) *
                                static_cast<double>(sm_count);
           const std::string shape =
-              "warpgroups=" + std::to_string(kWarpgroups) +
+              "keys=" + std::to_string(kWidth) +
+              " warpgroups=" + std::to_string(kWarpgroups) +
               " query_tiles=" + std::to_string(kQueryTiles) +
               " window=" + std::to_string(window) +
               " copy_order=" + std::to_string(copy_order) +
               " blocks=" + std::to_string(sm_count) +
               " tiles=" + std::to_string(product_tiles);
-          const double rate = add_rate_row(
-              make_row("attention-wgmma:staged", shape, "h1"), timing, flops);
-          // The arithmetic one staged byte buys, stated beside the rate it
-          // earns, so a reader divides nothing by hand.
-          report.SetExtra("staged:" + shape + ":flop_per_staged_byte",
-                          64.0 * static_cast<double>(kWarpgroups) *
-                              static_cast<double>(kQueryTiles));
-          note(
-              "attention-wgmma:staged %s min=%.3f ms tflops=%.1f "
-              "flop_per_staged_byte=%.0f\n",
-              shape.c_str(), timing.min_ms, rate / 1e12,
-              64.0 * static_cast<double>(kWarpgroups) *
-                  static_cast<double>(kQueryTiles));
+          // The arithmetic one staged byte buys is the query rows of the block,
+          // at any key width.
+          const double per_byte = 64.0 * static_cast<double>(kWarpgroups) *
+                                  static_cast<double>(kQueryTiles);
+          const double rate = add_product_rate(
+              make_row("attention-wgmma:staged", shape, "h1"), "staged:", shape,
+              flops, per_byte, [&] {
+                LaunchStaged<kWarpgroups, kQueryTiles, true, kStages, kWidth>(
+                    sm_count, product_tiles, window, device_queries, device_k,
+                    device_out, copy_order);
+              });
+          // The fastest window and order of the shape is the row a decision
+          // reads, so the table keeps the best rate a shape states.
+          shapes.Measure(shape_row, rate * kTflopsPerGflops);
         }
       }
+    };
+    auto time_geometry = [&](auto warpgroups, auto query_tiles) {
+      time_shape(std::integral_constant<int, kAtomN>{}, warpgroups,
+                 query_tiles);
+    };
+    auto time_narrow = [&](auto warpgroups, auto query_tiles) {
+      time_shape(std::integral_constant<int, kNarrowKeyWidth>{}, warpgroups,
+                 query_tiles);
     };
     for (int warpgroups = 1; warpgroups <= kMaxWarpgroups; ++warpgroups) {
       for (int query_tiles = 1; query_tiles <= kMaxQueryTiles; ++query_tiles) {
         VisitGeometry(warpgroups, query_tiles, time_geometry);
       }
     }
+    VisitNarrowGeometry(kMaxWarpgroups, kNarrowQueryTiles, time_narrow);
 
     // The copies alone, at the same thread counts the product rows run at, so a
     // reader compares the cap of the path with the rate of the products. The
@@ -2661,36 +3456,56 @@ int main(int argc, char** argv) {
       for (int copy_order : {0, kRowFast}) {
         for (int window : {512, kSourceTiles}) {
           for (int blocks : {1, sm_count}) {
-            const nanochat::dev::Timing timing = harness.Time([&] {
-              LaunchStaged<kWarpgroups, 1, false>(blocks, copy_tiles, window,
-                                                  device_queries, device_k,
-                                                  device_out, copy_order);
-            });
-            const double bytes = static_cast<double>(kKeyBytes) *
-                                 static_cast<double>(copy_tiles) *
-                                 static_cast<double>(blocks);
-            const double bandwidth = bytes / (timing.min_ms * 1e-3);
             const std::string shape =
                 "warpgroups=" + std::to_string(kWarpgroups) +
                 " window=" + std::to_string(window) +
                 " copy_order=" + std::to_string(copy_order) +
                 " blocks=" + std::to_string(blocks) +
                 " tiles=" + std::to_string(copy_tiles);
-            // A copy reads and writes no operand of the product, so the row
-            // states no FLOP and no rate. The byte rate it reached is the one
-            // number beside it, and the table prints `0.0` in the rate column
-            // and `-` in the two share columns.
-            add_rate_row(make_row("attention-wgmma:copies", shape, "h1"),
-                         timing, /*flops=*/0.0);
-            report.SetExtra("copies:" + shape + ":tbps", bandwidth / 1e12);
-            note("attention-wgmma:copies %s min=%.3f ms tbps=%.2f\n",
-                 shape.c_str(), timing.min_ms, bandwidth / 1e12);
+            const double bytes = static_cast<double>(kKeyBytes) *
+                                 static_cast<double>(copy_tiles) *
+                                 static_cast<double>(blocks);
+            SetStagedSharedMemory<kWarpgroups, 1, false>();
+            add_copy_rate(make_row("attention-wgmma:copies", shape, "h1"),
+                          "copies:", shape, bytes, [&] {
+                            LaunchStaged<kWarpgroups, 1, false>(
+                                blocks, copy_tiles, window, device_queries,
+                                device_k, device_out, copy_order);
+                          });
           }
         }
       }
     };
     for (int warpgroups = 1; warpgroups <= kMaxWarpgroups; ++warpgroups) {
       VisitGeometry(warpgroups, 1, time_copies);
+    }
+
+    // The copies of the narrow ring. The narrow key tile stages half the bytes
+    // of a wide one at the same path, so a product row of the narrow shape has
+    // the cap of its own measurement and not the cap of the wide tile's.
+    {
+      for (int window : {512, kSourceTiles}) {
+        for (int copy_order : {0, kRowFast}) {
+          const std::string shape =
+              "keys=" + std::to_string(kNarrowKeyWidth) +
+              " window=" + std::to_string(window) +
+              " copy_order=" + std::to_string(copy_order) +
+              " blocks=" + std::to_string(sm_count) +
+              " tiles=" + std::to_string(copy_tiles);
+          const double bytes = static_cast<double>(KeyBytes(kNarrowKeyWidth)) *
+                               static_cast<double>(copy_tiles) *
+                               static_cast<double>(sm_count);
+          SetStagedSharedMemory<kMaxWarpgroups, 1, false, kStages,
+                                kNarrowKeyWidth>();
+          add_copy_rate(make_row("attention-wgmma:copies", shape, "h1"),
+                        "copies:", shape, bytes, [&] {
+                          LaunchStaged<kMaxWarpgroups, 1, false, kStages,
+                                       kNarrowKeyWidth>(
+                              sm_count, copy_tiles, window, device_queries,
+                              device_k, device_out, copy_order);
+                        });
+        }
+      }
     }
 
     // The depth of the ring sets how many copy groups one block keeps in
@@ -2742,51 +3557,79 @@ int main(int argc, char** argv) {
   // against the score-only ceiling of `attention-wgmma:resident`.
   if (options.flash()) {
     const int flash_tiles = 5000;
-    auto add_flash_resident = [&](auto mask_constant, auto softmax_constant,
-                                  int blocks) {
+    // One resident geometry: no copy path, `Warpgroups` warpgroups of one query
+    // tile each, and one `FlashStep` a tile. The warpgroup count is the overlap
+    // the step has, because two warpgroups on one multiprocessor interleave
+    // their chains, so this is the row that separates the cost of the chain
+    // from the cost of the copies.
+    auto add_flash_resident = [&](auto warpgroups, auto mask_constant,
+                                  auto softmax_constant, int blocks) {
+      constexpr int kWarpgroups = decltype(warpgroups)::value;
       constexpr bool kMask = decltype(mask_constant)::value;
       constexpr bool kSoftmax = decltype(softmax_constant)::value;
-      SetFlashSharedMemory<1, kMask, kSoftmax>();
+      const ShapeSpec& shape_row =
+          FindShape(ShapeKind::kFlashResident, kWarpgroups, 1, kAtomN, 1);
+      if (!admit(shape_row,
+                 ResidentFlashRegisters<kWarpgroups, kMask, kSoftmax>())) {
+        return;
+      }
+      SetFlashSharedMemory<kWarpgroups, kMask, kSoftmax>();
       const std::string shape =
           "blocks=" + std::to_string(blocks) +
           " tiles=" + std::to_string(flash_tiles) +
-          " warpgroups=1 atoms=8+8 mask=" + (kMask ? "causal" : "dense") +
+          " warpgroups=" + std::to_string(kWarpgroups) +
+          " atoms=8+8 mask=" + (kMask ? "causal" : "dense") +
           " softmax=" + (kSoftmax ? "on" : "off");
-      const double flops = 2.0 * FlopsPerPass(kAtoms) *
-                           static_cast<double>(flash_tiles) *
-                           static_cast<double>(blocks);
+      const double flops =
+          2.0 * FlopsPerPass(kAtoms) * static_cast<double>(flash_tiles) *
+          static_cast<double>(blocks) * static_cast<double>(kWarpgroups);
       const nanochat::dev::Timing timing = harness.Time([&] {
-        LaunchResidentFlash<1, kMask, kSoftmax>(
+        LaunchResidentFlash<kWarpgroups, kMask, kSoftmax>(
             blocks, device_queries, device_k, device_value, device_out,
             /*device_row_sums=*/nullptr, flash_tiles, kFlashScale);
       });
       nanochat::BenchRow row =
-          make_row("attention-flash:resident", shape, "flash", 1);
+          make_row("attention-flash:resident", shape, "flash", kWarpgroups);
       // The boundary tile issues a full 128-key tile for every query row and
       // needs the triangle of it, so the ratio is issued over necessary work.
-      row.work_ratio = kMask ? 256.0 / (kAtomM + 1) : 1.0;
+      // Each warpgroup of the block holds its own boundary tile, so the ratio
+      // is the one of the whole block of query rows.
+      row.work_ratio = kMask ? 256.0 / (kWarpgroups * kAtomM + 1) : 1.0;
       const double rate = add_rate_row(row, timing, flops);
       const double share = sm_share(flops, timing.min_ms);
-      report.SetExtra(std::string("flash_resident:blocks") +
+      report.SetExtra(std::string("flash_resident:warpgroups") +
+                          std::to_string(kWarpgroups) + ":blocks" +
                           std::to_string(blocks) +
                           (kMask ? ":causal" : ":dense") +
                           (kSoftmax ? ":on" : ":off") + ":sm_share",
                       share);
+      // The chain row is the one rate of the shape, because the softmax-off row
+      // beside it prices the step without the softmax and not the step.
+      if (kSoftmax) shapes.Measure(shape_row, rate * kTflopsPerGflops);
       note(
           "attention-flash:resident %s min=%.3f ms median=%.3f ms "
           "tflops=%.1f sm_share=%.3f\n",
-          shape.c_str(), timing.min_ms, timing.median_ms, rate / 1e12, share);
+          shape.c_str(), timing.min_ms, timing.median_ms,
+          rate * kTflopsPerGflops, share);
     };
-    add_flash_resident(std::integral_constant<bool, false>{},
-                       std::integral_constant<bool, true>{}, 1);
-    add_flash_resident(std::integral_constant<bool, false>{},
-                       std::integral_constant<bool, true>{}, sm_count);
-    add_flash_resident(std::integral_constant<bool, true>{},
-                       std::integral_constant<bool, true>{}, sm_count);
+    const std::integral_constant<int, 1> kOneWarpgroup{};
+    const std::integral_constant<int, 2> kTwoWarpgroups{};
+    const std::integral_constant<bool, false> kDense{};
+    const std::integral_constant<bool, true> kCausal{};
+    const std::integral_constant<bool, true> kChain{};
+    const std::integral_constant<bool, false> kNoChain{};
+    add_flash_resident(kOneWarpgroup, kDense, kChain, 1);
+    add_flash_resident(kOneWarpgroup, kDense, kChain, sm_count);
+    add_flash_resident(kOneWarpgroup, kCausal, kChain, sm_count);
     // The ceiling of the chain: the two products and the conversion, with no
     // softmax between them. The gap to the row above is what the chain costs.
-    add_flash_resident(std::integral_constant<bool, false>{},
-                       std::integral_constant<bool, false>{}, sm_count);
+    add_flash_resident(kOneWarpgroup, kDense, kNoChain, sm_count);
+    // The same three rows at the overlap two warpgroups give, so a reader reads
+    // how much of the chain's cost the interleave hides before any copy path
+    // holds a byte.
+    add_flash_resident(kTwoWarpgroups, kDense, kChain, sm_count);
+    add_flash_resident(kTwoWarpgroups, kCausal, kChain, sm_count);
+    add_flash_resident(kTwoWarpgroups, kDense, kNoChain, sm_count);
 
     // The copies alone, so a reader divides a staged rate by the cap of the
     // path that carries it. The two ring contents are two rows, because the
@@ -2805,18 +3648,6 @@ int main(int argc, char** argv) {
       SetStagedFlashSharedMemory<kWarpgroups, kRing, false, kStageValue,
                                  /*kMask=*/false, /*kSoftmax=*/true, kVector,
                                  kPlainKey, kSkipKey>();
-      const nanochat::dev::Timing timing = harness.Time([&] {
-        LaunchStagedFlash<kWarpgroups, kRing, false, kStageValue,
-                          /*kMask=*/false, /*kSoftmax=*/true, kVector,
-                          kPlainKey, kSkipKey>(
-            sm_count, flash_copy_tiles, kSourceTiles, device_queries, device_k,
-            device_value, device_out, /*device_row_sums=*/nullptr);
-      });
-      const double bytes =
-          static_cast<double>((kSkipKey ? 0 : kKeyBytes) +
-                              (kStageValue ? kValueBytes : 0)) *
-          static_cast<double>(flash_copy_tiles) * static_cast<double>(sm_count);
-      const double bandwidth = bytes / (timing.min_ms * 1e-3);
       const std::string shape =
           "warpgroups=" + std::to_string(kWarpgroups) +
           " stages=" + std::to_string(kRing) + " content=" +
@@ -2827,15 +3658,25 @@ int main(int argc, char** argv) {
           " window=" + std::to_string(kSourceTiles) +
           " blocks=" + std::to_string(sm_count) +
           " tiles=" + std::to_string(flash_copy_tiles);
-      // A copy row issues no arithmetic, so it states no FLOP and no rate.
-      add_rate_row(make_row("attention-flash:copies", shape, "flash"), timing,
-                   /*flops=*/0.0);
-      report.SetExtra("flash_copies:" + shape + ":tbps", bandwidth / 1e12);
+      const double bytes =
+          static_cast<double>((kSkipKey ? 0 : kKeyBytes) +
+                              (kStageValue ? kValueBytes : 0)) *
+          static_cast<double>(flash_copy_tiles) * static_cast<double>(sm_count);
+      const double bandwidth = add_copy_rate(
+          make_row("attention-flash:copies", shape, "flash"),
+          "flash_copies:", shape, bytes, [&] {
+            LaunchStagedFlash<kWarpgroups, kRing, false, kStageValue,
+                              /*kMask=*/false, /*kSoftmax=*/true, kVector,
+                              kPlainKey, kSkipKey>(
+                sm_count, flash_copy_tiles, kSourceTiles, device_queries,
+                device_k, device_value, device_out,
+                /*device_row_sums=*/nullptr);
+          });
+      // One block of the ring reads these bytes a second, which is the figure a
+      // ring of a card is sized from. The console line states the card rate and
+      // the document carries this one beside it.
       report.SetExtra("flash_copies:" + shape + ":bytes_per_second_per_block",
                       bandwidth / static_cast<double>(sm_count));
-      note("attention-flash:copies %s min=%.3f ms tbps=%.2f per_block=%.1f\n",
-           shape.c_str(), timing.min_ms, bandwidth / 1e12,
-           bandwidth / static_cast<double>(sm_count));
     };
     auto copy_visitor = [&](auto warpgroups, auto stages) {
       constexpr bool kNo = false;
@@ -2882,15 +3723,19 @@ int main(int argc, char** argv) {
     auto add_staged_row = [&](auto warpgroups, auto stages) {
       constexpr int kWarpgroups = decltype(warpgroups)::value;
       constexpr int kRing = decltype(stages)::value;
+      const ShapeSpec& shape_row =
+          FindShape(ShapeKind::kFlash, kWarpgroups, 1, kAtomN, kRing);
+      // The dense instantiation states the register count of the shape. The
+      // causal one reads two registers above it in the recorded build, which is
+      // a difference no verdict of the table turns on.
+      if (!admit(shape_row,
+                 StagedFlashRegisters<kWarpgroups, kRing, false>())) {
+        return;
+      }
       auto add_one = [&](auto mask_constant) {
         constexpr bool kMask = decltype(mask_constant)::value;
         SetStagedFlashSharedMemory<kWarpgroups, kRing, true, kRingKeyValue,
                                    kMask>();
-        const nanochat::dev::Timing timing = harness.Time([&] {
-          LaunchStagedFlash<kWarpgroups, kRing, true, kRingKeyValue, kMask>(
-              sm_count, flash_product_tiles, kSourceTiles, device_queries,
-              device_k, device_value, device_out, /*device_row_sums=*/nullptr);
-        });
         const double flops = 2.0 * FlopsPerPass(kAtoms) *
                              static_cast<double>(flash_product_tiles) *
                              static_cast<double>(kWarpgroups) *
@@ -2905,14 +3750,19 @@ int main(int argc, char** argv) {
         nanochat::BenchRow row =
             make_row("attention-flash:staged", shape, "flash");
         row.work_ratio = kMask ? 256.0 / (kWarpgroups * kAtomM + 1) : 1.0;
-        const double rate = add_rate_row(row, timing, flops);
-        report.SetExtra("flash_staged:" + shape + ":flop_per_staged_byte",
-                        64.0 * static_cast<double>(kWarpgroups));
-        note(
-            "attention-flash:staged %s min=%.3f ms tflops=%.1f "
-            "flop_per_staged_byte=%.0f\n",
-            shape.c_str(), timing.min_ms, rate / 1e12,
-            64.0 * static_cast<double>(kWarpgroups));
+        // Both rings are staged, so one staged byte buys the query rows of the
+        // step: one query tile a warpgroup.
+        const double rate = add_product_rate(
+            row, "flash_staged:", shape, flops,
+            64.0 * static_cast<double>(kWarpgroups), [&] {
+              LaunchStagedFlash<kWarpgroups, kRing, true, kRingKeyValue, kMask>(
+                  sm_count, flash_product_tiles, kSourceTiles, device_queries,
+                  device_k, device_value, device_out,
+                  /*device_row_sums=*/nullptr);
+            });
+        // The chain row is the rate the shape states: the softmax-off row
+        // beside it prices the products alone and not the step.
+        shapes.Measure(shape_row, rate * kTflopsPerGflops);
       };
       add_one(std::integral_constant<bool, false>{});
       add_one(std::integral_constant<bool, true>{});
@@ -2928,29 +3778,35 @@ int main(int argc, char** argv) {
     {
       constexpr int kWarpgroups = 2;
       constexpr int kRing = 2;
-      SetStagedFlashSharedMemory<kWarpgroups, kRing, true, kRingKeyValue, false,
-                                 /*kSoftmax=*/false>();
-      const nanochat::dev::Timing timing = harness.Time([&] {
-        LaunchStagedFlash<kWarpgroups, kRing, true, kRingKeyValue, false,
-                          /*kSoftmax=*/false>(
-            sm_count, flash_product_tiles, kSourceTiles, device_queries,
-            device_k, device_value, device_out, /*device_row_sums=*/nullptr);
-      });
-      const double flops = 2.0 * FlopsPerPass(kAtoms) *
-                           static_cast<double>(flash_product_tiles) *
-                           static_cast<double>(kWarpgroups) *
-                           static_cast<double>(sm_count);
-      const std::string shape =
-          "warpgroups=" + std::to_string(kWarpgroups) +
-          " stages=" + std::to_string(kRing) +
-          " window=" + std::to_string(kSourceTiles) +
-          " blocks=" + std::to_string(sm_count) +
-          " tiles=" + std::to_string(flash_product_tiles) +
-          " mask=dense softmax=off";
-      const double rate = add_rate_row(
-          make_row("attention-flash:staged", shape, "flash"), timing, flops);
-      note("attention-flash:staged %s min=%.3f ms tflops=%.1f\n", shape.c_str(),
-           timing.min_ms, rate / 1e12);
+      const ShapeSpec& shape_row =
+          FindShape(ShapeKind::kFlash, kWarpgroups, 1, kAtomN, kRing);
+      const int registers =
+          StagedFlashRegisters<kWarpgroups, kRing, false, false>();
+      if (admit(shape_row, registers)) {
+        SetStagedFlashSharedMemory<kWarpgroups, kRing, true, kRingKeyValue,
+                                   false, /*kSoftmax=*/false>();
+        const nanochat::dev::Timing timing = harness.Time([&] {
+          LaunchStagedFlash<kWarpgroups, kRing, true, kRingKeyValue, false,
+                            /*kSoftmax=*/false>(
+              sm_count, flash_product_tiles, kSourceTiles, device_queries,
+              device_k, device_value, device_out, /*device_row_sums=*/nullptr);
+        });
+        const double flops = 2.0 * FlopsPerPass(kAtoms) *
+                             static_cast<double>(flash_product_tiles) *
+                             static_cast<double>(kWarpgroups) *
+                             static_cast<double>(sm_count);
+        const std::string shape =
+            "warpgroups=" + std::to_string(kWarpgroups) +
+            " stages=" + std::to_string(kRing) +
+            " window=" + std::to_string(kSourceTiles) +
+            " blocks=" + std::to_string(sm_count) +
+            " tiles=" + std::to_string(flash_product_tiles) +
+            " mask=dense softmax=off";
+        const double rate = add_rate_row(
+            make_row("attention-flash:staged", shape, "flash"), timing, flops);
+        note("attention-flash:staged %s min=%.3f ms tflops=%.1f\n",
+             shape.c_str(), timing.min_ms, rate * kTflopsPerGflops);
+      }
     }
   }
 
@@ -2971,6 +3827,13 @@ int main(int argc, char** argv) {
   report.SetExtraInt("smem:key_bytes", kKeyBytes);
   report.SetExtraText("status", ok ? "ok" : "failed");
   note("attention-wgmma:status %s\n", ok ? "ok" : "failed");
+
+  // The shape space the run stated, beside the rows it priced. The document
+  // carries one extra a field, so a reader compares two shapes without a second
+  // run, and the human table prints the same rows in the order the run met
+  // them.
+  shapes.Write(&report);
+  if (!options.bench.json) shapes.Print(stdout);
 
   cudaFree(device_q);
   cudaFree(device_queries);
