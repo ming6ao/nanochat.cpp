@@ -1,74 +1,123 @@
 # dev/cutlass/ -- the CUTLASS bring-up probe (docs/kernels.md Part 3 section 5).
 #
-# The probe answers the three questions that stand between this tree and a
-# Hopper mainloop borrowed from CUTLASS, and it measures nothing:
+# The probe answers three questions and measures no rate:
 #
 #   1. does the vendored header tree compile here, at CUDA 12.0 and C++20?
-#   2. does a `cuda_library` that states `archs = ["sm_90a"]` build beside the
-#      tree's command-line `sm_75`, so the default build needs no Hopper flag?
+#   2. does a target that states `archs = ["sm_90a"]` build beside the tree's
+#      command-line `sm_75`, so the default build needs no Hopper flag?
 #   3. which tile candidates fit the Hopper window, and what stage count does
 #      the collective builder choose for each?
 #
-# The second question is why the target is split in two. `:cutlass_probe_lib`
-# is the only target in the tree that names an architecture on itself, and
-# `:cutlass_probe` is a binary at the command-line architecture that links it.
-# A build of both therefore proves the coexistence that question 2 asks about.
+# Question 2 is why the device half and the binary are separate: the device
+# half states the architecture on itself, and the binary keeps the command
+# line's. A build of both is the proof.
 #
-# **The vendor options are this directory's own, and not `nanochat_cuda_copts`.**
-# The CUTLASS headers emit thousands of warnings (an implicit `this` capture, a
-# constexpr host call from a device function), and every build of the tree turns
-# a warning into an error. The vendor translation unit therefore builds with the
-# optimisation flags only, so the strict setting keeps its meaning for the
-# tree's own source. `third_party/cutlass.bzl` states `includes = ["include"]`, which is
-# `-isystem` for this target, so the header warnings do not reach it either.
+# **One compiler action per entry.** Every row of the report is a Hopper kernel
+# body. One body costs 42 s and 3.0 GiB here, and `-O0`, `-O1`, and `-O2` cost
+# the same, so the price is template instantiation and PTX generation. Twelve
+# bodies in one translation unit was one action of about nine minutes, and it
+# stalled: the compiler waited on memory and used 20 percent of a processor.
+# The split gives one action per entry, so the peak is one body and each
+# finished entry stays cached. `//backends/cuda/gemm` builds its candidates the
+# same way. See `README.md` section 7 and the log in docs/build.md.
+#
+# **Build it by label with one action.** Each entry holds 3.0 GiB and the
+# session's build ceiling is 5 GiB, so two at once stall (measured: 3.8 GiB and
+# 30 percent of a processor each). Every target here is `manual`, so a `//...`
+# wildcard skips the probe and cannot schedule twelve heavy actions:
+#
+#   tools/nanochat build --jobs=1 //dev/cutlass:cutlass_probe
+#
+# **The vendor options are this directory's own, not `nanochat_cuda_copts`.**
+# The CUTLASS headers emit thousands of warnings, and every build turns a
+# warning into an error. `third_party/cutlass.bzl` states `includes = ["include"]`,
+# which is `-isystem` here, so the header warnings do not reach this warning
+# policy either.
 
 load("//:nanochat.bzl", "cuda_binary", "cuda_library")
 
 package(default_visibility = ["//visibility:public"])
 
-# The architecture the WGMMA atom and the Tensor Memory Accelerator need. It is
-# stated here and nowhere else, so no `.bazelrc` line and no command-line flag
-# carries it.
+# The architecture the WGMMA atom and the Tensor Memory Accelerator need. No
+# `.bazelrc` line and no command-line flag carries it.
 CUDA_HOPPER_ARCHS = ["sm_90a"]
 
-# The vendor translation unit. It holds the whole tile table and the eight seam
-# cases, so it is the slowest single action in this directory: one CUTLASS
-# kernel instantiation measured about 19 s and 1.2 GiB on the development host.
+# Keeps the probe out of a `//...` wildcard. See the header.
+PROBE_TAGS = ["manual"]
+
+# The flags the object under `cuobjdump` was built with, which keeps the
+# instruction counts of `README.md` section 2 reproducible.
+_PROBE_COPTS = [
+    "-O2",
+    "-Xcompiler",
+    "-O2",
+]
+
+# The entries to compile, one kernel body each: the five tiles, the four
+# bf16-store cases, and the three fp32-store cases that are not the tile. The
+# report has thirteen rows and two share a type, so there are twelve entries,
+# and `kEntryOfRow` in `cutlass_probe.cu` maps each row to its entry.
+# `NANOCHAT_FOR_EACH_PROBE_ENTRY` in `cutlass_probe_rows.h` declares the same
+# indexes.
+_PROBE_ENTRIES = [str(index) for index in range(12)]
+
+# The report: the two row tables, the row-to-entry map, and the window test. It
+# names every row's type and emits no kernel body, so it is the cheap action.
 cuda_library(
-    name = "cutlass_probe_lib",
+    name = "cutlass_probe_rows",
     srcs = ["cutlass_probe.cu"],
-    hdrs = ["cutlass_probe.h"],
-    archs = CUDA_HOPPER_ARCHS,
-    # The probe launches nothing. It reports `sizeof(SharedStorage)`, the stage
-    # count, the block size, and one function address, and every one of those is
-    # a compile-time value that code generation cannot change. Optimisation is
-    # therefore pure cost here, and on a small host it is the cost that
-    # dominates: thirteen instantiations hold 2.7 GiB, fault 280,000 pages, and
-    # read 1.5 TB back from disk. Three attempts, at `-O2` and then at `-O1` on
-    # both passes and on ptxas, each ran past 1,700 s without finishing here, so
-    # the probe needs a host with more memory before its rows can be checked.
-    # See the log entry in `docs/build.md`.
-    copts = [
-        "-O1",
-        "-Xcompiler",
-        "-O1",
-        "-Xptxas",
-        "-O1",
+    hdrs = [
+        "cutlass_probe.h",
+        "cutlass_probe_rows.h",
+        "cutlass_probe_types.h",
     ],
+    archs = CUDA_HOPPER_ARCHS,
+    copts = _PROBE_COPTS,
+    tags = PROBE_TAGS,
     deps = ["@cutlass//:cutlass"],
 )
 
-# The host report. Its own architecture is the command line's, which is the
-# point: this target and `:cutlass_probe_lib` disagree on purpose.
+# One entry's kernel body, in one action. The source is the same for all twelve
+# targets, and `NANOCHAT_PROBE_ENTRY` selects the entry, as
+# `backends/cuda/gemm` selects a candidate with `NANOCHAT_CANDIDATE_INDEX`.
+[
+    cuda_library(
+        name = "cutlass_probe_entry_" + entry,
+        srcs = ["cutlass_probe_entry.cu"],
+        hdrs = [
+            "cutlass_probe_rows.h",
+            "cutlass_probe_types.h",
+        ],
+        archs = CUDA_HOPPER_ARCHS,
+        copts = _PROBE_COPTS,
+        local_defines = ["NANOCHAT_PROBE_ENTRY=" + entry],
+        tags = PROBE_TAGS,
+        deps = ["@cutlass//:cutlass"],
+        alwayslink = True,
+    )
+    for entry in _PROBE_ENTRIES
+]
+
+# The device half, as the binary links it: the report and the twelve bodies.
+# This is the target `docs/kernels.md` Part 3 names, and it states `sm_90a` on
+# itself.
+cuda_library(
+    name = "cutlass_probe_lib",
+    deps = [":cutlass_probe_rows"] + [
+        ":cutlass_probe_entry_" + entry
+        for entry in _PROBE_ENTRIES
+    ],
+    archs = CUDA_HOPPER_ARCHS,
+    tags = PROBE_TAGS,
+)
+
+# The host report, at the command line's architecture, which is the point.
 cuda_binary(
     name = "cutlass_probe",
     srcs = ["cutlass_probe_main.cu"],
     hdrs = ["cutlass_probe.h"],
-    copts = [
-        "-O2",
-        "-Xcompiler",
-        "-O2",
-    ],
+    copts = _PROBE_COPTS,
+    tags = PROBE_TAGS,
     deps = [
         ":cutlass_probe_lib",
         "//include/nanochat:nanochat",

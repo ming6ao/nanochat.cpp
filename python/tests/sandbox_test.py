@@ -195,9 +195,10 @@ class SandboxTest(unittest.TestCase):
             # tree build plus a suite still fits.
             "pids": "512", "cpus": "0-1", "runtime": "3600"})
         # The session build profile: a memory ceiling, no wall clock, and four
-        # CPUs for `--jobs=4`. See docs/sandbox.md Part 2, section 20.
+        # CPUs for `--jobs=4`. The ceiling holds one device compile of 3.0 GiB
+        # beside the Bazel server (docs/build.md, the log entry of 2026-11-13).
         self.assertEqual(profiles["build"], {
-            "quota": "400%", "mem_high": "3G", "mem_max": "4G",
+            "quota": "400%", "mem_high": "4G", "mem_max": "5G",
             "pids": "512", "cpus": "0-3"})
         self.assertEqual(sandbox.load_profiles()["slice"], "nanochat.slice")
 

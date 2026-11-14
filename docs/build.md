@@ -466,7 +466,39 @@ step.
 
 ## Logs
 
-A dated record of a real run, newest first.
+A dated record of a real run, newest first. An entry states the command and what
+happened. This is a record and not a reference: it holds the measurements that
+no other file holds.
+
+### 2026-11-13 — why the CUTLASS probe never finished, and the fix
+
+**Command.** `tools/nanochat build --jobs=1 //dev/cutlass:cutlass_probe`.
+
+**Observed.** The build crawled and looked hung. One `cicc` process held 2.88
+GiB after 119 s and had used 23 s of processor time, so it ran at 20 percent of
+a processor. The scope read `memory.high` 3 GiB, `memory.max` 4 GiB, and
+`memory.swap.max` 0, and the kernel reported 92 percent of the time in full
+memory stall.
+
+**Cause.** Two sizes were wrong. One Hopper kernel body needs 3.0 GiB resident,
+the same at `-O0`, `-O1`, and `-O2`, so `-O1` never helped: the cost is template
+instantiation and PTX generation. The twelve bodies also sat in one translation
+unit, so one action held about nine minutes of work. The `build` profile allowed
+3 GiB high, which is less than one body beside the Bazel server, and the scope
+has no swap, so the compiler made no progress and did not fail either.
+
+**Fixed.** `dev/cutlass` compiles one entry per action, so one process holds one
+body (`dev/cutlass/README.md` section 7). The `build` profile carries 4 GiB high
+and 5 GiB max, which holds one body beside the server and stays under the 6 GiB
+aggregate (`docs/sandbox.md`, `## Profiles`).
+
+**Verified.** Each compile runs at 97 percent of a processor. A cold build takes
+603 s at `--jobs=1`, from fourteen actions at about 43 s each, and a repeat build
+is one cached action. Two actions at once held 3.8 GiB and ran at 30 percent of a
+processor each, so the probe's targets are `manual`: a `//...` wildcard skips the
+probe, and its label builds it on purpose. The report and the object are
+unchanged, and `cuobjdump -sass -arch sm_90a` still counts 12 kernels and the
+instruction mix of `dev/cutlass/README.md` section 2.
 
 ### 2026-11-13 — the CUTLASS probe does not compile on this host
 
@@ -481,10 +513,8 @@ disk by one compiler process. The third lowered both compiler passes and ptxas
 to `-O1` and ran 1,743 s without leaving the front end. A profiled run of
 `//tests:sim_api` reached the bf16 GEMM candidate and held it for 829 s before
 it was stopped. No attempt finished, and the guard is the memory of the host,
-not the flags: the same work at full processor time is minutes.
- An entry states the command and what
-happened. This is a record and not a reference: it holds the measurements that
-no other file holds.
+not the flags: the same work at full processor time is minutes. The entry above
+states the cause and the fix.
 
 ### 2026-11-12 — a stalled build is not a slow build
 

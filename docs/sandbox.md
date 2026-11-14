@@ -115,7 +115,7 @@ falls back to a system `bazel`.
 |---|---|---|---|---|---|---|
 | `t0-cpu` | 200% | 1.5G / 2G | 512 | 0-1 | 3600 s | default CPU tests, oracle-on-CPU |
 | `t1-gpu` | 200% | 2G / 3G | 512 | 0-1 | 900 s | tiny kernel tests, `B=2,T=8` |
-| `build` | 400% | 3G / 4G | 512 | 0-3 | none | one build inside a session scope |
+| `build` | 400% | 4G / 5G | 512 | 0-3 | none | one build inside a session scope |
 | `t2-parity` | 800% | 5G / 6G | 256 | 0-7 | 7200 s | exclusive, GPU queue held |
 | `t3-bench` | 1000% | 5G / 6G | 256 | 0-11 | 1800 s | exclusive, native Linux for Nsight |
 | `train` | 800% | 5G / 6G | 512 | 0-7 | 43200 s | training runs |
@@ -1259,9 +1259,10 @@ A tree whose output base holds no external repository needs one run with
 - The deny rule costs one server start per run, about 20 s. That is why `test`
   uses the host network by default, and why a session that runs many small
   builds is faster with `session start --net host`.
-- The whole CPU suite peaks at 3.22 GiB inside the 4 GiB `build` profile. A
-  CUDA or CUTLASS build needs a larger ceiling, and the aggregate ceiling is
-  6 GiB, so start that session with `--net host` and a hand scope instead.
+- The whole CPU suite peaks at 3.22 GiB. The `build` profile carries 4 GiB high
+  and 5 GiB max, which holds one 3.0 GiB device compile beside the Bazel server
+  and stays under the 6 GiB aggregate. Two such compiles do not fit at once, so a
+  CUTLASS target builds with `--jobs=1` (`dev/cutlass/README.md` section 7).
 - The read-back proves placement, not enforcement. `verify` still reads the
   limits back from the cgroup.
 - The writable set does not stop a session from reading a file that stays

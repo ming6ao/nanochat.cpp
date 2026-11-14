@@ -12,8 +12,8 @@
     },
     "build": {
       "quota": "400%",
-      "mem_high": "3G",
-      "mem_max": "4G",
+      "mem_high": "4G",
+      "mem_max": "5G",
       "pids": "512",
       "cpus": "0-3"
     },

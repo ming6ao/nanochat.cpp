@@ -3,8 +3,9 @@
 
 // The host side of the CUTLASS bring-up probe (docs/kernels.md Part 3 section
 // 5). This header names no CUDA type and includes no vendor header, so a plain
-// host target reads it. The device side is `cutlass_probe.cu`, which builds at
-// `sm_90a` and reports what it instantiated.
+// host target reads it. The device side builds at `sm_90a`: `cutlass_probe.cu`
+// holds the report, and `cutlass_probe_entry.cu` holds one kernel body for each
+// entry.
 //
 // **The probe answers three questions and measures no rate.**
 //
@@ -64,15 +65,10 @@ const TileReport& Tile(int index);
 int LiveCases();
 const CaseReport& Case(int index);
 
-int TileCount();
-const TileReport& Tile(int index);
-
-// The address of the kernel entry of one row, or null when the translation unit
-// emitted none. **A null is the finding, not a nuisance.** A `__global__`
-// function template is emitted only when something odr-uses it, so a probe that
-// merely names the type compiles the class and skips the mainloop body. The two
-// accessors below exist so the body is compiled: a template that does not build
-// fails here, and one that builds leaves SASS in the object for `cuobjdump`.
+// The kernel address of one row, or null when no translation unit emitted it.
+// **A null is the finding.** A `__global__` template is emitted only where
+// something odr-uses it, so naming the type alone skips the mainloop body. The
+// entry translation unit takes the address, which compiles the body.
 const void* CaseEntry(int index);
 const void* TileEntry(int index);
 

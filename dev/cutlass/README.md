@@ -7,9 +7,9 @@ compile-time data, and the binary launches no kernel, so it runs on the host
 with no card.
 
 ```bash
-tools/nanochat build //dev/cutlass:cutlass_probe
+tools/nanochat build --jobs=1 //dev/cutlass:cutlass_probe
 tools/nanochat run t0-cpu -- ./bazel-bin/dev/cutlass/cutlass_probe
-cuobjdump -sass bazel-bin/dev/cutlass/_objs/cutlass_probe_lib/cutlass_probe.pic.o \
+cuobjdump -sass -arch sm_90a bazel-bin/dev/cutlass/cutlass_probe \
   | grep -oE 'UTMALDG[^ ]*|UTMASTG[^ ]*|HGMMA[^ ]*'
 ```
 
@@ -17,8 +17,8 @@ cuobjdump -sass bazel-bin/dev/cutlass/_objs/cutlass_probe_lib/cutlass_probe.pic.
 
 | Question | Answer | How it is decided |
 |---|---|---|
-| Does the vendored header tree compile here, at CUDA 12.0 and C++20? | Yes | `tools/nanochat build //dev/cutlass:cutlass_probe` |
-| Does a `cuda_library` that states `archs = ["sm_90a"]` build beside the command-line `sm_75`? | Yes | The two targets below disagree on architecture, and one build of both succeeds |
+| Does the vendored header tree compile here, at CUDA 12.0 and C++20? | Yes | `tools/nanochat build --jobs=1 //dev/cutlass:cutlass_probe` |
+| Does a `cuda_library` that states `archs = ["sm_90a"]` build beside the command-line `sm_75`? | Yes | The binary and the device half disagree on architecture, and one build of both succeeds |
 | Which tile candidates fit the Hopper window, and what stage count does the builder choose? | Section 3 | The report's first table |
 
 The second answer is the one that changes the build file. The tree emits
@@ -27,14 +27,14 @@ The second answer is the one that changes the build file. The tree emits
 no command-line flag changes**. A build of `//...` on the Turing host keeps
 working untouched, which is what every agent's inner loop needs.
 
-The split is why there are two targets. `:cutlass_probe_lib` is the only target
-in the tree that names an architecture on itself. `:cutlass_probe` is a binary at
-the command line's architecture, and it links the library. A build of both is the
-proof.
+The split is why there are two halves. `:cutlass_probe_lib` is the target the
+binary links, and it and the targets under it name an architecture on themselves.
+`:cutlass_probe` is a binary at the command line's architecture. A build of both
+is the proof.
 
 ## 2. What the object contains
 
-`cuobjdump` over the library reports `arch = sm_90a` and 12 kernels. The report
+`cuobjdump` over the binary reports `arch = sm_90a` and 12 kernels. The report
 names 13 rows, and two of them are the same type: the 128x256x64 tile at an fp32
 store is the first fp32 case. Their instructions are the seven mechanisms of
 [docs/kernels.md](../../docs/kernels.md) Part 3 section 4, in one build:
@@ -136,6 +136,31 @@ Both would have cost a card run in the adapter.
 - The fp8, stream-K, and grouped tiers. The probe's own compile confirmed the fp8
   mainloop and the persistent and stream-K schedulers instantiate; the grouped
   path needs its own problem shape and scheduler, and it is P4.
+
+## 7. One compiler action for each entry
+
+Thirteen rows, twelve kernel bodies: row 0 and row 5 name one type. One body
+costs 42 s and 3.0 GiB here, and `-O0`, `-O1`, and `-O2` cost the same, so the
+price is template instantiation and PTX generation. Twelve bodies in one
+translation unit was one action of about nine minutes, and it stalled at 20
+percent of a processor.
+
+The build is one action per entry for that reason. `:cutlass_probe_rows` holds
+the two tables and no body, and `:cutlass_probe_entry_<n>` holds one body, so a
+finished entry stays cached. `cutlass_probe_entry.cu` is one source for all
+twelve targets, and `NANOCHAT_PROBE_ENTRY` names the entry, as
+`backends/cuda/gemm` names a candidate.
+
+**Build it by label with one action.** Every target here is `manual`, so a `//...`
+wildcard skips the probe. Two bodies held 3.8 GiB and ran at 30 percent of a
+processor each, so the ceiling allows one at a time:
+
+```bash
+tools/nanochat build --jobs=1 //dev/cutlass:cutlass_probe
+```
+
+The log entry of 2026-11-13 in [docs/build.md](../../docs/build.md) holds the
+measurements.
 
 The vendor pin, its licence, and the reason the rule fetches the tree instead of
 tracking it are in [third_party/cutlass.bzl](../../third_party/cutlass.bzl) and
