@@ -1045,57 +1045,75 @@ score lane already holds, and the running maximum, sum, and rescale. One
 row cannot state two chains. No phase gate is stated against them, because they
 are a prototype ceiling and not the production tile.
 
-The check runs first and it passes. One element at a time against the host
-reference of the family reads 2.09e-03 of a reference scale of 0.184 with no bad
-element of 8,192, and the row sums read 2.11e-07, which is the bf16 rounding of
-the probability operand. That check is the first end-to-end test of the register
-operand, whose element order the H1 rows measured with one-hot elements and
-never carried a full product through. Both stagings then agree with the resident
-step of the same operands exactly, in all four geometries.
+The check runs first and it passes, for both masks. One element at a time
+against the host reference of the family reads 2.09e-03 of a reference scale of
+0.184 with no bad element of 8,192 for the dense step, and 1.00e-03 of a scale of
+1.000 with none for the causal boundary tile. The row sums read 2.11e-07 and
+1.34e-07, which is the bf16 rounding of the probability operand. The dense check
+is the first end-to-end test of the register operand, whose element order the H1
+rows measured with one-hot elements and never carried a full product through.
+Both stagings then agree with the resident step of the same mask exactly, in all
+eight geometries.
 
-| Row | Copy path | Rate | Share |
+The boundary tile is the mask the forward keeps: the query block and the key tile
+start at the same offset, so a row sees the keys up to its own index. It issues a
+full 128-key tile for every query row and needs the triangle of it, so the row
+states `work_ratio` as 256 over the query rows plus one, which is 3.94 at 64 rows
+and 1.98 at 128.
+
+| Row | Path | Rate | Share |
 |---|---|---:|---:|
 | The chain with no traffic, one warpgroup, one block | none | 3.37 TFLOP/s | 45.0 percent of the per-SM share |
-| The chain with no traffic, one warpgroup, every SM | none | 453.8 TFLOP/s | 45.9 percent of the peak |
-| The key ring | copy engine | 2.44 to 2.49 TB/s | none |
-| The key and value rings, one warpgroup | plain stores | 0.938 TB/s | none |
-| The key and value rings, two warpgroups | plain stores | 1.491 TB/s | none |
-| The whole tile, one warpgroup, 64 query rows | both rings | 52.5 TFLOP/s | 5.3 percent |
-| The whole tile, two warpgroups, 128 query rows | both rings | 147.4 TFLOP/s | 14.9 percent |
+| The chain with no traffic, one warpgroup, every SM | none | 448.2 TFLOP/s | 45.3 percent of the peak |
+| The same chain, causal boundary tile | none | 446.8 TFLOP/s | 45.2 percent of the peak |
+| The key ring, two stages / three stages, one warpgroup | copy engine | 2.26 / 2.43 TB/s | none |
+| The key ring, two stages / three stages, two warpgroups | copy engine | 2.22 / 2.49 TB/s | none |
+| The key and value rings, either depth, one warpgroup | plain stores | 0.949 / 0.943 TB/s | none |
+| The key and value rings, either depth, two warpgroups | plain stores | 1.495 / 1.492 TB/s | none |
+| The whole tile, 64 query rows, dense / causal | both rings | 52.84 / 53.05 TFLOP/s | 5.3 percent |
+| The whole tile, 128 query rows, dense / causal | both rings | 146.1 / 137.2 TFLOP/s | 13.9 to 14.8 percent |
 
 **The chain costs half the tensor rate, with no traffic at all.** The score
-product alone reads 978.7 TFLOP/s on the same card. The whole step reads 453.8.
+product alone reads 978.7 TFLOP/s on the same card. The whole step reads 448.2.
 The instruction is not the gap; the chain is. One block reads 45.0 percent of the
-per-SM share and the full grid reads 45.9 percent of the peak, so no occupancy is
+per-SM share and the full grid reads 45.3 percent of the peak, so no occupancy is
 lost and the serialized step is the whole of it. That is what decision H4 is for,
 and the rows now price it.
 
+**The mask is free.** The boundary tile reads 446.8 TFLOP/s against 448.2 dense,
+which is 0.3 percent, and a staged row moves by 0.0 to 6.1 percent, which is
+inside or beside the spread. The tile is therefore bound by the chain and not by
+the arithmetic: the select per score and the exponentials it forces to zero cost
+nothing measurable, so the half of the work a causal mask removes is a gain in
+necessary work and not a loss in rate.
+
 **The value ring is the new limit.** A transposition is not a contiguous
 sixteen-byte move, so no copy engine carries one and the value ring is plain
-strided loads and interleaved stores. It costs the mixed path 0.938 TB/s at one
-warpgroup and 1.491 at two, against the 2.44 to 2.49 TB/s of the key ring alone.
+strided loads and interleaved stores. It costs the mixed path 0.949 TB/s at one
+warpgroup and 1.495 at two, against 2.26 to 2.49 TB/s for the key ring alone.
 Doubling the staged bytes costs 5.2 times the time at one warpgroup. Two
 warpgroups recover part of it, because more threads cover the strided reads.
 This is the reason decision H2b must reach the value tile and not only the key
 tile.
 
-**The staged tile reaches 75 to 88 percent of its cap.** At one warpgroup the cap
-is 0.938 TB/s times 64 FLOP a byte, which is 60.0 TFLOP/s, and the row reads
-52.5, which is 87.5 percent. At two warpgroups the cap is 1.491 times 128, which
-is 190.9, and the row reads 147.4, which is 77.2 percent. The score-only staged
-rows reach 97 to 99 percent of their own cap, so the missing 12 to 25 percent is
-the softmax and the value product. Against those rows at the same reuse, the
-whole tile is a half at 128 query rows, 295.4 against 147.4, and a third at 64,
-150.1 against 52.5.
+**Ring depth belongs to the key ring only.** The key ring gains 7.7 percent at one
+warpgroup from a third stage, 2.255 to 2.429 TB/s, and 12 percent at two, 2.224 to
+2.493. The mixed ring does not move with depth at all. So the third stage is what
+the copy engine needs and the value staging ignores, which is the same fact as the
+paragraph above from the other side.
 
-**Ring depth is settled at two stages.** A third stage gains nothing at one
-warpgroup and loses 2.5 percent at two, where it also costs 64 KiB of the shared
-window. The 224 KiB geometry fits and does not pay.
+**The staged tile reaches 72 to 88 percent of its cap.** At one warpgroup the cap
+is 0.949 TB/s times 64 FLOP a byte, which is 60.7 TFLOP/s, and the dense row reads
+52.84, which is 87.0 percent. At two warpgroups the cap is 1.495 times 128, which
+is 191.4, and the dense row reads 146.1, which is 76.3 percent. The score-only
+staged rows reach 97 to 99 percent of their own cap, so the missing share is the
+softmax and the value product. Against those rows at the same reuse, the whole
+tile is a half at 128 query rows, 295.4 against 146.1, and a third at 64, 150.1
+against 52.84.
 
-A second run of the same source agrees with every row of the table within 1.3
-percent, which is the spread of the card and not of the code. The checks are
-identical between the two runs, and the operands are fixed, so the step is
-deterministic.
+Runs of this source before the mask axis agree with every row within 1.3 percent,
+which is the spread of the card and not of the code. The checks are identical
+between runs, and the operands are fixed, so the step is deterministic.
 
 ### 7. Dispatch
 

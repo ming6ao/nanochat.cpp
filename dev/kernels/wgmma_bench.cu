@@ -71,7 +71,13 @@
 // ring, and no copy engine carries a transposition. Every row is checked
 // against `seqref::AttentionForward` one element at a time, and every staged
 // geometry against the resident step of the same operands, so a wrong operand
-// form fails before anything is timed. The mask is the phase that follows.
+// form fails before anything is timed.
+//
+// Two masks run: dense, and the causal boundary tile, where the query block and
+// the key tile start at the same offset so a row sees the keys up to its own
+// index. That tile issues a full key tile for every query row and needs the
+// triangle of it, so its row states `work_ratio` as 256 over the query rows
+// plus one.
 //
 // **The report.** Every timed row goes through `BenchReport`, so the program
 // states one `nanochat.bench.v3` document with `--json`. The lines this program
@@ -623,10 +629,15 @@ __global__ void ResidentKernel(const Bf16* __restrict__ q,
 // chain. The probability operand of atom `atom` and register `reg` takes the
 // score slots `8 * atom + 4 * (reg / 2) + 2 * (reg % 2) + half`, which is the
 // measured register map written the other way round.
+//
+// `kMask` states the causal boundary tile: the query block and the key tile
+// start at the same offset, so a row sees the keys up to its own index and no
+// later one. `row_base` is the first query row of the calling warpgroup.
+template <bool kMask>
 __device__ __forceinline__ void FlashStep(
     std::uint64_t base_query, std::uint64_t base_key, std::uint64_t base_value,
-    float log2_scale, float (&running_max)[2], float (&running_sum)[2],
-    float (&output)[kRegisters]) {
+    float log2_scale, int row_base, float (&running_max)[2],
+    float (&running_sum)[2], float (&output)[kRegisters]) {
   // The score product over the whole head width. The first atom overwrites, so
   // the accumulator carries no score of the step before it.
   float score[kRegisters];
@@ -650,6 +661,15 @@ __device__ __forceinline__ void FlashStep(
 #pragma unroll
   for (int i = 0; i < kRegisters; ++i) {
     score[i] *= log2_scale;
+    if constexpr (kMask) {
+      // One select a score, so the masked row prices the mask itself. A masked
+      // score is the sentinel the running maximum already uses, and its
+      // exponential then underflows to zero.
+      const int lane = static_cast<int>(threadIdx.x) % kWarpgroupThreads;
+      if (SlotColumn(lane, i) > row_base + SlotRow(lane, i)) {
+        score[i] = kFlashNegInf;
+      }
+    }
     const int slot = (i / 2) % 2;
     tile_max[slot] = fmaxf(tile_max[slot], score[i]);
   }
@@ -723,7 +743,7 @@ __device__ __forceinline__ void FlashStep(
 // `FlashStep` a tile, so `tiles` steps are one online softmax and not `tiles`
 // independent products. The output leaves unnormalised: one division by the row
 // sum belongs to the end of a real block, and the check applies it.
-template <int Warpgroups>
+template <int Warpgroups, bool kMask>
 __global__ void ResidentFlashKernel(const Bf16* __restrict__ q,
                                     const Bf16* __restrict__ k,
                                     const Bf16* __restrict__ v,
@@ -769,10 +789,11 @@ __global__ void ResidentFlashKernel(const Bf16* __restrict__ q,
   WgmmaFenceOperand<kRegisters>(output);
 
   const float log2_scale = softmax_scale * kLog2e;
+  const int row_base = warpgroup * kAtomM;
 
   for (int tile = 0; tile < tiles; ++tile) {
-    FlashStep(base_query, base_key, base_value, log2_scale, running_max,
-              running_sum, output);
+    FlashStep<kMask>(base_query, base_key, base_value, log2_scale, row_base,
+                     running_max, running_sum, output);
   }
 
   WgmmaFenceOperand<kRegisters>(output);
@@ -796,7 +817,8 @@ __global__ void ResidentFlashKernel(const Bf16* __restrict__ q,
 // staged key byte buys is `64 * Warpgroups` FLOP. `kProducts` false is a copy
 // row, and `kStageValue` false stages the key ring alone. A step is
 // `FlashStep`, so a staged row and a resident row measure the same chain.
-template <int Warpgroups, int Stages, bool kProducts, bool kStageValue>
+template <int Warpgroups, int Stages, bool kProducts, bool kStageValue,
+          bool kMask>
 __global__ void StagedFlashKernel(const Bf16* __restrict__ q,
                                   const Bf16* __restrict__ k,
                                   const Bf16* __restrict__ v, int source_tiles,
@@ -874,9 +896,10 @@ __global__ void StagedFlashKernel(const Bf16* __restrict__ q,
       __syncthreads();
       FenceAsyncShared();
 
-      FlashStep(base_query, MakeDescriptor(keys + (tile % Stages) * kKeyBytes),
-                MakeDescriptor(values + (tile % Stages) * kValueBytes),
-                log2_scale, running_max, running_sum, output);
+      FlashStep<kMask>(
+          base_query, MakeDescriptor(keys + (tile % Stages) * kKeyBytes),
+          MakeDescriptor(values + (tile % Stages) * kValueBytes), log2_scale,
+          warpgroup * kAtomM, running_max, running_sum, output);
 
       // The stage this step released is the one the copy refills, and the step
       // has drained its value group, so nothing reads it now.
@@ -1192,20 +1215,20 @@ void SyncFlash(const std::string& what) {
 // The opt-in dynamic shared-memory request of a resident flash instantiation,
 // and its one launch. A templated kernel has no single function address, so the
 // attribute is set once per instantiation and outside any timed window.
-template <int Warpgroups>
+template <int Warpgroups, bool kMask>
 void SetFlashSharedMemory() {
   constexpr int kShared = FlashResidentBytes(Warpgroups);
   cudaFuncSetAttribute(
-      reinterpret_cast<const void*>(ResidentFlashKernel<Warpgroups>),
+      reinterpret_cast<const void*>(ResidentFlashKernel<Warpgroups, kMask>),
       cudaFuncAttributeMaxDynamicSharedMemorySize, kShared);
 }
 
-template <int Warpgroups>
+template <int Warpgroups, bool kMask>
 void LaunchResidentFlash(int blocks, const Bf16* device_q, const Bf16* device_k,
                          const Bf16* device_v, float* device_out,
                          float* device_row_sums, int tiles, float scale) {
   constexpr int kShared = FlashResidentBytes(Warpgroups);
-  ResidentFlashKernel<Warpgroups>
+  ResidentFlashKernel<Warpgroups, kMask>
       <<<blocks, Warpgroups * kWarpgroupThreads, kShared>>>(
           device_q, device_k, device_v, device_out, device_row_sums, tiles,
           scale);
@@ -1213,35 +1236,39 @@ void LaunchResidentFlash(int blocks, const Bf16* device_q, const Bf16* device_k,
 
 // One step of the flash tile over one block, read back: the accumulator slots
 // of every warpgroup in thread order, and the row sums beside them.
-template <int Warpgroups>
+template <int Warpgroups, bool kMask>
 std::vector<float> RunResidentFlash(const Bf16* device_q, const Bf16* device_k,
                                     const Bf16* device_v, float* device_out,
                                     float* device_row_sums) {
-  LaunchResidentFlash<Warpgroups>(1, device_q, device_k, device_v, device_out,
-                                  device_row_sums, 1, kFlashScale);
-  SyncFlash("resident warpgroups=" + std::to_string(Warpgroups));
+  LaunchResidentFlash<Warpgroups, kMask>(1, device_q, device_k, device_v,
+                                         device_out, device_row_sums, 1,
+                                         kFlashScale);
+  SyncFlash("resident warpgroups=" + std::to_string(Warpgroups) +
+            (kMask ? " causal" : " dense"));
   return ReadBack(device_out, Warpgroups * kProductSlots);
 }
 
 // The opt-in dynamic shared-memory request of a staged flash instantiation, and
 // its one launch. A templated kernel has no single function address, so the
 // attribute is set once per instantiation and outside any timed window.
-template <int Warpgroups, int Stages, bool kProducts, bool kStageValue>
+template <int Warpgroups, int Stages, bool kProducts, bool kStageValue,
+          bool kMask>
 void SetStagedFlashSharedMemory() {
   constexpr int kShared = FlashStagedBytes(Warpgroups, Stages, kStageValue);
   cudaFuncSetAttribute(
       reinterpret_cast<const void*>(
-          StagedFlashKernel<Warpgroups, Stages, kProducts, kStageValue>),
+          StagedFlashKernel<Warpgroups, Stages, kProducts, kStageValue, kMask>),
       cudaFuncAttributeMaxDynamicSharedMemorySize, kShared);
 }
 
-template <int Warpgroups, int Stages, bool kProducts, bool kStageValue>
+template <int Warpgroups, int Stages, bool kProducts, bool kStageValue,
+          bool kMask>
 void LaunchStagedFlash(int blocks, int tiles, int source_tiles,
                        const Bf16* device_q, const Bf16* device_k,
                        const Bf16* device_v, float* device_out,
                        float* device_row_sums) {
   constexpr int kShared = FlashStagedBytes(Warpgroups, Stages, kStageValue);
-  StagedFlashKernel<Warpgroups, Stages, kProducts, kStageValue>
+  StagedFlashKernel<Warpgroups, Stages, kProducts, kStageValue, kMask>
       <<<blocks, Warpgroups * kWarpgroupThreads, kShared>>>(
           device_q, device_k, device_v, source_tiles, device_out,
           device_row_sums, tiles, kFlashScale);
@@ -1250,16 +1277,16 @@ void LaunchStagedFlash(int blocks, int tiles, int source_tiles,
 // One step of a staged geometry against the resident step of the same operands:
 // the ring, its barriers, the stage offsets, and the value staging all fail
 // here instead of measuring.
-template <int Warpgroups, int Stages>
+template <int Warpgroups, int Stages, bool kMask>
 std::pair<std::size_t, double> CheckStagedFlash(
     const Bf16* device_queries, const Bf16* device_k, const Bf16* device_v,
     float* device_out, float* device_row_sums,
     const std::vector<float>& reference, double scale) {
-  LaunchStagedFlash<Warpgroups, Stages, true, kRingKeyValue>(
+  LaunchStagedFlash<Warpgroups, Stages, true, kRingKeyValue, kMask>(
       1, /*tiles=*/1, /*source_tiles=*/1, device_queries, device_k, device_v,
       device_out, device_row_sums);
-  SyncFlash("staged warpgroups=" + std::to_string(Warpgroups) +
-            " stages=" + std::to_string(Stages));
+  SyncFlash("staged warpgroups=" + std::to_string(Warpgroups) + " stages=" +
+            std::to_string(Stages) + (kMask ? " causal" : " dense"));
   const std::vector<float> staged =
       ReadBack(device_out, Warpgroups * kProductSlots);
   double worst = 0.0;
@@ -2091,8 +2118,10 @@ int main(int argc, char** argv) {
   // probability operand, value staging, row reduction, or rescale fails here.
   // Every staged geometry is then compared with that resident step.
   if (options.flash()) {
-    SetFlashSharedMemory<1>();
-    SetFlashSharedMemory<2>();
+    SetFlashSharedMemory<1, false>();
+    SetFlashSharedMemory<2, false>();
+    SetFlashSharedMemory<1, true>();
+    SetFlashSharedMemory<2, true>();
 
     Random flash_random;
     auto draw = [&](std::vector<nanochat::Bf16>* values) {
@@ -2118,83 +2147,92 @@ int main(int argc, char** argv) {
     const std::vector<float> reference_q = widen(flash_q);
     const std::vector<float> reference_k = widen(flash_k);
     const std::vector<float> reference_v = widen(flash_v);
-    // One head, one batch, and every key visible: the check states the softmax
-    // and the two products, and the mask is a phase of its own.
-    nanochat::AttentionParams params;
-    params.batch = 1;
-    params.seq = kAtomM;
-    params.num_heads = 1;
-    params.num_kv_heads = 1;
-    params.head_dim = kDim;
-    params.causal = false;
-    params.window_right = -1;
-    params.kv_len = kAtomN;
-    params.scale = kFlashScale;
-    std::vector<float> reference_stats;
-    const std::vector<float> reference =
-        nanochat::dev::seqref::AttentionForward(
-            params, reference_q, reference_k, reference_v, &reference_stats);
-
+    // The dense step and the causal boundary tile are each compared with the
+    // host reference of the family, one element at a time. The kernel leaves
+    // its output unnormalised, so the division by the row sum is the caller's,
+    // and it is what makes a wrong maximum or a wrong sum visible.
     Upload(flash_q, device_q);
     Upload(flash_k, device_k);
     Upload(flash_v, device_value);
-    const std::vector<float> slots = RunResidentFlash<1>(
-        device_q, device_k, device_value, device_out, device_row_sums);
-    const std::vector<float> row_sums = ReadBack(device_row_sums, kAtomM);
-
-    // One element at a time, as the form check above does. The kernel leaves
-    // its output unnormalised, so the division by the row sum is the caller's
-    // and it is what makes a wrong maximum or a wrong sum visible.
-    double scale_seen = 0.0;
-    for (float value : reference) {
-      scale_seen = std::max(scale_seen, std::fabs(static_cast<double>(value)));
-    }
-    double worst = 0.0;
-    std::size_t bad = 0;
-    for (int lane = 0; lane < kWarpgroupThreads; ++lane) {
-      for (int index = 0; index < kRegisters; ++index) {
-        const int row = SlotRow(lane, index);
-        const int column = SlotColumn(lane, index);
+    auto check_mask = [&](auto mask_constant) {
+      constexpr bool kMask = decltype(mask_constant)::value;
+      // One head and one batch. The dense check sees every key. The causal
+      // check sees the keys up to the row's own index, which is the boundary
+      // tile of a query block that starts at the key tile.
+      nanochat::AttentionParams params;
+      params.batch = 1;
+      params.seq = kAtomM;
+      params.num_heads = 1;
+      params.num_kv_heads = 1;
+      params.head_dim = kDim;
+      params.causal = kMask;
+      params.window_right = kMask ? 0 : -1;
+      params.kv_len = kMask ? kAtomM : kAtomN;
+      params.scale = kFlashScale;
+      std::vector<float> reference_stats;
+      const std::vector<float> reference =
+          nanochat::dev::seqref::AttentionForward(
+              params, reference_q, reference_k, reference_v, &reference_stats);
+      const std::vector<float> slots = RunResidentFlash<1, kMask>(
+          device_q, device_k, device_value, device_out, device_row_sums);
+      const std::vector<float> row_sums = ReadBack(device_row_sums, kAtomM);
+      double scale_seen = 0.0;
+      for (float value : reference) {
+        scale_seen =
+            std::max(scale_seen, std::fabs(static_cast<double>(value)));
+      }
+      double worst = 0.0;
+      std::size_t bad = 0;
+      for (int lane = 0; lane < kWarpgroupThreads; ++lane) {
+        for (int index = 0; index < kRegisters; ++index) {
+          const int row = SlotRow(lane, index);
+          const int column = SlotColumn(lane, index);
+          const double expected =
+              reference[static_cast<std::size_t>(row) * kDim + column];
+          const double sum = row_sums[static_cast<std::size_t>(row)];
+          const double actual =
+              sum > 0.0
+                  ? static_cast<double>(
+                        slots[static_cast<std::size_t>(lane) * kRegisters +
+                              index]) /
+                        sum
+                  : 0.0;
+          const double difference = std::fabs(actual - expected);
+          if (difference > 3e-2 * scale_seen) ++bad;
+          worst = std::max(worst, difference);
+        }
+      }
+      // The row sums against the statistics of the reference, which states the
+      // same quantity in natural units.
+      double sum_worst = 0.0;
+      for (int row = 0; row < kAtomM; ++row) {
         const double expected =
-            reference[static_cast<std::size_t>(row) * kDim + column];
-        const double sum = row_sums[static_cast<std::size_t>(row)];
-        const double actual =
-            sum > 0.0 ? static_cast<double>(
-                            slots[static_cast<std::size_t>(lane) * kRegisters +
-                                  index]) /
-                            sum
-                      : 0.0;
-        const double difference = std::fabs(actual - expected);
-        if (difference > 3e-2 * scale_seen) ++bad;
-        worst = std::max(worst, difference);
+            reference_stats[static_cast<std::size_t>(row) * 2 + 1];
+        const double actual = row_sums[static_cast<std::size_t>(row)];
+        if (expected > 0.0) {
+          sum_worst =
+              std::max(sum_worst, std::fabs(actual - expected) / expected);
+        }
       }
-    }
-    // The row sums against the statistics of the reference, which states the
-    // same quantity in natural units.
-    double sum_worst = 0.0;
-    for (int row = 0; row < kAtomM; ++row) {
-      const double expected =
-          reference_stats[static_cast<std::size_t>(row) * 2 + 1];
-      const double actual = row_sums[static_cast<std::size_t>(row)];
-      if (expected > 0.0) {
-        sum_worst =
-            std::max(sum_worst, std::fabs(actual - expected) / expected);
-      }
-    }
-    const double flash_error = scale_seen > 0.0 ? worst / scale_seen : 0.0;
-    const bool flash_ok = flash_error < 3e-2 && sum_worst < 3e-2;
-    note(
-        "attention-flash:reference_check error=%.3e sum_error=%.3e "
-        "scale=%.3f bad=%zu of %d status=%s\n",
-        flash_error, sum_worst, scale_seen, bad, kAtomM * kDim,
-        flash_ok ? "ok" : "failed");
-    report.SetExtra("flash_check:error", flash_error);
-    report.SetExtra("flash_check:sum_error", sum_worst);
-    report.SetExtra("flash_check:scale", scale_seen);
-    report.SetExtraInt("flash_check:bad", static_cast<long long>(bad));
-    report.SetExtraInt("flash_check:elements", kAtomM * kDim);
-    report.SetExtraText("flash_check:status", flash_ok ? "ok" : "failed");
-    ok = ok && flash_ok;
+      const double error = scale_seen > 0.0 ? worst / scale_seen : 0.0;
+      const bool passed = error < 3e-2 && sum_worst < 3e-2;
+      note(
+          "attention-flash:reference_check mask=%s error=%.3e sum_error=%.3e "
+          "scale=%.3f bad=%zu of %d status=%s\n",
+          kMask ? "causal" : "dense", error, sum_worst, scale_seen, bad,
+          kAtomM * kDim, passed ? "ok" : "failed");
+      const std::string key =
+          std::string("flash_check:") + (kMask ? "causal:" : "dense:");
+      report.SetExtra(key + "error", error);
+      report.SetExtra(key + "sum_error", sum_worst);
+      report.SetExtra(key + "scale", scale_seen);
+      report.SetExtraInt(key + "bad", static_cast<long long>(bad));
+      report.SetExtraInt(key + "elements", kAtomM * kDim);
+      report.SetExtraText(key + "status", passed ? "ok" : "failed");
+      return passed;
+    };
+    ok = ok && check_mask(std::integral_constant<bool, false>{});
+    ok = ok && check_mask(std::integral_constant<bool, true>{});
 
     // The staged rows read one query tile a warpgroup from `device_queries`, so
     // the check states a distinct tile for every warpgroup of the deepest
@@ -2216,25 +2254,34 @@ int main(int argc, char** argv) {
     auto check_geometry = [&](auto warpgroups, auto stages) {
       constexpr int kWarpgroups = decltype(warpgroups)::value;
       constexpr int kRing = decltype(stages)::value;
-      SetStagedFlashSharedMemory<kWarpgroups, kRing, true, kRingKeyValue>();
-      const std::vector<float> resident = RunResidentFlash<kWarpgroups>(
-          device_queries, device_k, device_value, device_out, device_row_sums);
-      const std::pair<std::size_t, double> result =
-          CheckStagedFlash<kWarpgroups, kRing>(
-              device_queries, device_k, device_value, device_out,
-              device_row_sums, resident, scale_seen);
-      const std::string key = std::string("flash_staged_check:warpgroups") +
-                              std::to_string(kWarpgroups) + ":stages" +
-                              std::to_string(kRing) + ":";
-      note(
-          "attention-flash:staged_check warpgroups=%d stages=%d error=%.3e "
-          "bad=%zu of %d status=%s\n",
-          kWarpgroups, kRing, result.second, result.first,
-          kWarpgroups * static_cast<int>(kProductSlots),
-          result.second < 1e-6 ? "ok" : "failed");
-      report.SetExtra(key + "error", result.second);
-      report.SetExtraInt(key + "bad", static_cast<long long>(result.first));
-      staged_ok = staged_ok && result.second < 1e-6;
+      auto check_one = [&](auto mask_constant) {
+        constexpr bool kMask = decltype(mask_constant)::value;
+        SetStagedFlashSharedMemory<kWarpgroups, kRing, true, kRingKeyValue,
+                                   kMask>();
+        const std::vector<float> resident =
+            RunResidentFlash<kWarpgroups, kMask>(device_queries, device_k,
+                                                 device_value, device_out,
+                                                 device_row_sums);
+        const std::pair<std::size_t, double> result =
+            CheckStagedFlash<kWarpgroups, kRing, kMask>(
+                device_queries, device_k, device_value, device_out,
+                device_row_sums, resident, /*scale=*/1.0);
+        const std::string key = std::string("flash_staged_check:warpgroups") +
+                                std::to_string(kWarpgroups) + ":stages" +
+                                std::to_string(kRing) +
+                                (kMask ? ":causal:" : ":dense:");
+        note(
+            "attention-flash:staged_check warpgroups=%d stages=%d mask=%s "
+            "error=%.3e bad=%zu of %d status=%s\n",
+            kWarpgroups, kRing, kMask ? "causal" : "dense", result.second,
+            result.first, kWarpgroups * static_cast<int>(kProductSlots),
+            result.second < 1e-6 ? "ok" : "failed");
+        report.SetExtra(key + "error", result.second);
+        report.SetExtraInt(key + "bad", static_cast<long long>(result.first));
+        staged_ok = staged_ok && result.second < 1e-6;
+      };
+      check_one(std::integral_constant<bool, false>{});
+      check_one(std::integral_constant<bool, true>{});
     };
     for (int warpgroups = 1; warpgroups <= kMaxWarpgroups; ++warpgroups) {
       for (int stages = 2; stages <= 3; ++stages) {
@@ -2518,32 +2565,40 @@ int main(int argc, char** argv) {
   // against the score-only ceiling of `attention-wgmma:resident`.
   if (options.flash()) {
     const int flash_tiles = 5000;
-    auto add_flash_resident = [&](int blocks) {
-      const std::string shape = "blocks=" + std::to_string(blocks) +
-                                " tiles=" + std::to_string(flash_tiles) +
-                                " warpgroups=1 atoms=8+8";
+    auto add_flash_resident = [&](auto mask_constant, int blocks) {
+      constexpr bool kMask = decltype(mask_constant)::value;
+      SetFlashSharedMemory<1, kMask>();
+      const std::string shape =
+          "blocks=" + std::to_string(blocks) +
+          " tiles=" + std::to_string(flash_tiles) +
+          " warpgroups=1 atoms=8+8 mask=" + (kMask ? "causal" : "dense");
       const double flops = 2.0 * FlopsPerPass(kAtoms) *
                            static_cast<double>(flash_tiles) *
                            static_cast<double>(blocks);
       const nanochat::dev::Timing timing = harness.Time([&] {
-        LaunchResidentFlash<1>(blocks, device_queries, device_k, device_value,
-                               device_out, /*device_row_sums=*/nullptr,
-                               flash_tiles, kFlashScale);
+        LaunchResidentFlash<1, kMask>(
+            blocks, device_queries, device_k, device_value, device_out,
+            /*device_row_sums=*/nullptr, flash_tiles, kFlashScale);
       });
-      const double rate =
-          add_rate_row(make_row("attention-flash:resident", shape, "flash", 1),
-                       timing, flops);
+      nanochat::BenchRow row =
+          make_row("attention-flash:resident", shape, "flash", 1);
+      // The boundary tile issues a full 128-key tile for every query row and
+      // needs the triangle of it, so the ratio is issued over necessary work.
+      row.work_ratio = kMask ? 256.0 / (kAtomM + 1) : 1.0;
+      const double rate = add_rate_row(row, timing, flops);
       const double share = sm_share(flops, timing.min_ms);
       report.SetExtra(std::string("flash_resident:blocks") +
-                          std::to_string(blocks) + ":sm_share",
+                          std::to_string(blocks) +
+                          (kMask ? ":causal" : ":dense") + ":sm_share",
                       share);
       note(
           "attention-flash:resident %s min=%.3f ms median=%.3f ms "
           "tflops=%.1f sm_share=%.3f\n",
           shape.c_str(), timing.min_ms, timing.median_ms, rate / 1e12, share);
     };
-    add_flash_resident(1);
-    add_flash_resident(sm_count);
+    add_flash_resident(std::integral_constant<bool, false>{}, 1);
+    add_flash_resident(std::integral_constant<bool, false>{}, sm_count);
+    add_flash_resident(std::integral_constant<bool, true>{}, sm_count);
 
     // The copies alone, so a reader divides a staged rate by the cap of the
     // path that carries it. The two ring contents are two rows, because the
@@ -2554,9 +2609,11 @@ int main(int argc, char** argv) {
       constexpr int kWarpgroups = decltype(warpgroups)::value;
       constexpr int kRing = decltype(stages)::value;
       constexpr bool kStageValue = decltype(stage_value)::value;
-      SetStagedFlashSharedMemory<kWarpgroups, kRing, false, kStageValue>();
+      SetStagedFlashSharedMemory<kWarpgroups, kRing, false, kStageValue,
+                                 /*kMask=*/false>();
       const nanochat::dev::Timing timing = harness.Time([&] {
-        LaunchStagedFlash<kWarpgroups, kRing, false, kStageValue>(
+        LaunchStagedFlash<kWarpgroups, kRing, false, kStageValue,
+                          /*kMask=*/false>(
             sm_count, flash_copy_tiles, kSourceTiles, device_queries, device_k,
             device_value, device_out, /*device_row_sums=*/nullptr);
       });
@@ -2588,7 +2645,9 @@ int main(int argc, char** argv) {
                    std::integral_constant<bool, kRingKeyValue>{});
     };
     for (int warpgroups = 1; warpgroups <= kMaxWarpgroups; ++warpgroups) {
-      VisitFlashGeometry(warpgroups, 3, copy_visitor);
+      for (int stages = 2; stages <= 3; ++stages) {
+        VisitFlashGeometry(warpgroups, stages, copy_visitor);
+      }
     }
 
     // The resident step with the rings in the way. The arithmetic one staged
@@ -2597,30 +2656,40 @@ int main(int argc, char** argv) {
     auto add_staged_row = [&](auto warpgroups, auto stages) {
       constexpr int kWarpgroups = decltype(warpgroups)::value;
       constexpr int kRing = decltype(stages)::value;
-      SetStagedFlashSharedMemory<kWarpgroups, kRing, true, kRingKeyValue>();
-      const nanochat::dev::Timing timing = harness.Time([&] {
-        LaunchStagedFlash<kWarpgroups, kRing, true, kRingKeyValue>(
-            sm_count, flash_product_tiles, kSourceTiles, device_queries,
-            device_k, device_value, device_out, /*device_row_sums=*/nullptr);
-      });
-      const double flops = 2.0 * FlopsPerPass(kAtoms) *
-                           static_cast<double>(flash_product_tiles) *
-                           static_cast<double>(kWarpgroups) *
-                           static_cast<double>(sm_count);
-      const std::string shape = "warpgroups=" + std::to_string(kWarpgroups) +
-                                " stages=" + std::to_string(kRing) +
-                                " window=" + std::to_string(kSourceTiles) +
-                                " blocks=" + std::to_string(sm_count) +
-                                " tiles=" + std::to_string(flash_product_tiles);
-      const double rate = add_rate_row(
-          make_row("attention-flash:staged", shape, "flash"), timing, flops);
-      report.SetExtra("flash_staged:" + shape + ":flop_per_staged_byte",
-                      64.0 * static_cast<double>(kWarpgroups));
-      note(
-          "attention-flash:staged %s min=%.3f ms tflops=%.1f "
-          "flop_per_staged_byte=%.0f\n",
-          shape.c_str(), timing.min_ms, rate / 1e12,
-          64.0 * static_cast<double>(kWarpgroups));
+      auto add_one = [&](auto mask_constant) {
+        constexpr bool kMask = decltype(mask_constant)::value;
+        SetStagedFlashSharedMemory<kWarpgroups, kRing, true, kRingKeyValue,
+                                   kMask>();
+        const nanochat::dev::Timing timing = harness.Time([&] {
+          LaunchStagedFlash<kWarpgroups, kRing, true, kRingKeyValue, kMask>(
+              sm_count, flash_product_tiles, kSourceTiles, device_queries,
+              device_k, device_value, device_out, /*device_row_sums=*/nullptr);
+        });
+        const double flops = 2.0 * FlopsPerPass(kAtoms) *
+                             static_cast<double>(flash_product_tiles) *
+                             static_cast<double>(kWarpgroups) *
+                             static_cast<double>(sm_count);
+        const std::string shape =
+            "warpgroups=" + std::to_string(kWarpgroups) +
+            " stages=" + std::to_string(kRing) +
+            " window=" + std::to_string(kSourceTiles) +
+            " blocks=" + std::to_string(sm_count) +
+            " tiles=" + std::to_string(flash_product_tiles) +
+            " mask=" + (kMask ? "causal" : "dense");
+        nanochat::BenchRow row =
+            make_row("attention-flash:staged", shape, "flash");
+        row.work_ratio = kMask ? 256.0 / (kWarpgroups * kAtomM + 1) : 1.0;
+        const double rate = add_rate_row(row, timing, flops);
+        report.SetExtra("flash_staged:" + shape + ":flop_per_staged_byte",
+                        64.0 * static_cast<double>(kWarpgroups));
+        note(
+            "attention-flash:staged %s min=%.3f ms tflops=%.1f "
+            "flop_per_staged_byte=%.0f\n",
+            shape.c_str(), timing.min_ms, rate / 1e12,
+            64.0 * static_cast<double>(kWarpgroups));
+      };
+      add_one(std::integral_constant<bool, false>{});
+      add_one(std::integral_constant<bool, true>{});
     };
     for (int warpgroups = 1; warpgroups <= kMaxWarpgroups; ++warpgroups) {
       for (int stages = 2; stages <= 3; ++stages) {

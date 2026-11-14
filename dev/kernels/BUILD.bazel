@@ -258,10 +258,11 @@ cuda_binary(
 # probability operand the score accumulator already holds, and the running
 # maximum, sum, and rescale. The set prices the tile twice, once with no copy
 # path and once behind a ring of key tiles and a ring of value tiles, and it
-# states the cap of the path that fills each ring. The copy engine fills the key
-# ring. The transposed plain staging fills the value ring, because a
-# transposition is not a contiguous sixteen-byte move. The mask is the phase
-# that follows.
+# states the cap of the path that fills each ring at the depth of the row beside
+# it. Two masks run: dense, and the causal boundary tile, which states the
+# `work_ratio` of the triangle it needs. The copy engine fills the key ring. The
+# transposed plain staging fills the value ring, because a transposition is not a
+# contiguous sixteen-byte move.
 #
 # Four checks run before any rate is timed. The first reads one element at a
 # time against a host reference, which catches an operand form the instruction
@@ -269,9 +270,9 @@ cuda_binary(
 # form induces leaves a sum unchanged. The second compares the staged product
 # with the resident product, so a wrong staging fails instead of measuring. The
 # third does the same one element at a time for the resident flash tile, against
-# the host reference of the family, `seqref::AttentionForward`. The fourth
-# compares each staged flash geometry with the resident step of the same
-# operands.
+# the host reference of the family, `seqref::AttentionForward`, for each mask.
+# The fourth compares each staged flash geometry with the resident step of the
+# same operands and mask.
 #
 # **The target states its own architecture.** WGMMA is architecture
 # conditional, and `rules_cuda` lets one target name `archs` for itself, so the
