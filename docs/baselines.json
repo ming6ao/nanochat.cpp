@@ -181,6 +181,233 @@
         }
       ]
     },
+    "attention_flash_exp": {
+      "note": "The flash attention family of docs/attention.md Part 7 on an NVIDIA H100 80GB HBM3 (sm_90), from the Modal H100 image built at sm_90 and bf16, after the flush exponential of Part 8 replaced the library form at every site that computes a probability. **One instruction, not 4.** `exp2f` at these compiler flags is a range test against -126, a halving, the instruction, and a squaring; the halving and the squaring exist to return a denormal result, and every caller rounds its result to the compute type 1 step later, where a value below 2^-126 is not representable. The helper is `cuda_kernels::FastExp2` in backends/cuda/kernels/device_utils.cuh, and the probe of Part 8 calls the same one. **The census states the change and the rows state what it is worth.** `cuobjdump` over the same source before and after reads 5,019 to 4,915 instructions for the forward at head width 128, 5,733 to 5,637 for the query gradient, and 4,046 to 3,998 for the key and value gradient, which is 1.2 to 2.4 percent, and every one of the 34, 32, and 16 range tests leaves. The gain the rows measure is 1.00 to 1.03 on the forward and 1.01 to 1.05 on the backward: the two largest fully visible shapes gain 3.3 and 3.1 percent on the forward and 2.0 and 1.9 on the backward, the single-system pattern 0.8 and 0.7, and the window of 128 reads flat at -0.1 and +0.6, where the masked tiles leave the softmax less exposed. **Both rate gates still miss**, and this revision does not address them: the production forward reads 74.3 TFLOP/s against the 200 of phase F1 and the backward 34.8 against the 150 of phase F2, because the path is bound by the warp-level product and not by its scalar work. The numeric gate //backends/cuda/kernels:attention_gpu_test passed in the same image at the bf16 tolerance of docs/testing.md, and the figures it prints reproduce the ones that entry records to the digits it prints: the block-boundary case at 0.00307 on the output, 0.00129 and 0.00178 on the two gradients, and 0.00596 on the value gradient, against 0.0031, 0.0013, and 0.0060. `gain` is this run's necessary-work rate over the same row of `attention_flash_ldmatrix`, so 1.0 is the row it replaces. The rows are the report of this tree at the parent revision, because a commit cannot name itself.",
+      "device": "NVIDIA H100 80GB HBM3 (sm_90)",
+      "validated_on": "NVIDIA H100 80GB HBM3 (sm_90)",
+      "precision": "bf16",
+      "revision": "2b98158",
+      "measurement": "modal run tools/modal/app.py::card_job --name attention_bench --argv '[\"--json\"]'",
+      "origin": "docs/attention.md Part 7 section 9",
+      "rows": [
+        {
+          "name": "attention_fwd:d8_s512",
+          "shape": "B=8 T=512 H=4 KV=4 D=128 wl=-1",
+          "ms": 0.044181,
+          "gflops": 48701.1,
+          "work_ratio": 1.9961,
+          "gflops_before": 47152.8,
+          "gain": 1.0328
+        },
+        {
+          "name": "attention_bwd:d8_s512",
+          "shape": "B=8 T=512 H=4 KV=4 D=128 wl=-1",
+          "ms": 0.176469,
+          "gflops": 24385.9,
+          "work_ratio": 1.9961,
+          "gflops_before": 23957.2,
+          "gain": 1.0179
+        },
+        {
+          "name": "attention_fwd:d8_s512_win128",
+          "shape": "B=8 T=512 H=4 KV=4 D=128 wl=128",
+          "ms": 0.031339,
+          "gflops": 30213.9,
+          "work_ratio": 4.536,
+          "gflops_before": 30244.8,
+          "gain": 0.999
+        },
+        {
+          "name": "attention_bwd:d8_s512_win128",
+          "shape": "B=8 T=512 H=4 KV=4 D=128 wl=128",
+          "ms": 0.110336,
+          "gflops": 17163.3,
+          "work_ratio": 4.536,
+          "gflops_before": 17039.7,
+          "gain": 1.0073
+        },
+        {
+          "name": "attention_fwd:d8_s512_win128_cublas",
+          "shape": "B=8 T=512 H=4 KV=4 D=128 wl=128",
+          "ms": 0.031189,
+          "gflops": 30358.6,
+          "work_ratio": 4.536,
+          "gflops_before": 30379.4,
+          "gain": 0.9993
+        },
+        {
+          "name": "attention_bwd:d8_s512_win128_cublas",
+          "shape": "B=8 T=512 H=4 KV=4 D=128 wl=128",
+          "ms": 0.109749,
+          "gflops": 17255,
+          "work_ratio": 4.536,
+          "gflops_before": 17151.7,
+          "gain": 1.006
+        },
+        {
+          "name": "attention_fwd:gqa_b2_t512_h8_kv2",
+          "shape": "B=2 T=512 H=8 KV=2 D=128 wl=-1",
+          "ms": 0.044235,
+          "gflops": 24321.2,
+          "work_ratio": 1.9961,
+          "gflops_before": 23765.3,
+          "gain": 1.0234
+        },
+        {
+          "name": "attention_bwd:gqa_b2_t512_h8_kv2",
+          "shape": "B=2 T=512 H=8 KV=2 D=128 wl=-1",
+          "ms": 0.374443,
+          "gflops": 5746.4,
+          "work_ratio": 1.9961,
+          "gflops_before": 5499.6,
+          "gain": 1.0449
+        },
+        {
+          "name": "attention_fwd:d8_s512_sssl",
+          "shape": "B=8 T=512 H=4 KV=4 D=128 pattern=SSSL",
+          "ms": 0.034389,
+          "gflops": 36292.3,
+          "work_ratio": 3.4413,
+          "gflops_before": 35996.4,
+          "gain": 1.0082
+        },
+        {
+          "name": "attention_bwd:d8_s512_sssl",
+          "shape": "B=8 T=512 H=4 KV=4 D=128 pattern=SSSL",
+          "ms": 0.126525,
+          "gflops": 19728.3,
+          "work_ratio": 3.4413,
+          "gflops_before": 19610.1,
+          "gain": 1.006
+        },
+        {
+          "name": "attention_fwd:b4_s2048_h8_win512",
+          "shape": "B=4 T=2048 H=8 KV=8 D=128 wl=512",
+          "ms": 0.202773,
+          "gflops": 74278.7,
+          "work_ratio": 4.5625,
+          "gflops_before": 71888.7,
+          "gain": 1.0332
+        },
+        {
+          "name": "attention_bwd:b4_s2048_h8_win512",
+          "shape": "B=4 T=2048 H=8 KV=8 D=128 wl=512",
+          "ms": 0.866912,
+          "gflops": 34748,
+          "work_ratio": 4.5625,
+          "gflops_before": 34081.3,
+          "gain": 1.0196
+        },
+        {
+          "name": "attention_fwd:b4_s2048_h8_win512_cublas",
+          "shape": "B=4 T=2048 H=8 KV=8 D=128 wl=512",
+          "ms": 0.202496,
+          "gflops": 74380.5,
+          "work_ratio": 4.5625,
+          "gflops_before": 72164.3,
+          "gain": 1.0307
+        },
+        {
+          "name": "attention_bwd:b4_s2048_h8_win512_cublas",
+          "shape": "B=4 T=2048 H=8 KV=8 D=128 wl=512",
+          "ms": 0.858464,
+          "gflops": 35090,
+          "work_ratio": 4.5625,
+          "gflops_before": 34434.9,
+          "gain": 1.019
+        },
+        {
+          "name": "attention_fwd:d8_s512_sssl_cublas",
+          "shape": "B=8 T=512 H=4 KV=4 D=128 pattern=SSSL",
+          "ms": 0.034077,
+          "gflops": 36624.6,
+          "work_ratio": 3.4413,
+          "gflops_before": 36374.1,
+          "gain": 1.0069
+        },
+        {
+          "name": "attention_bwd:d8_s512_sssl_cublas",
+          "shape": "B=8 T=512 H=4 KV=4 D=128 pattern=SSSL",
+          "ms": 0.124525,
+          "gflops": 20045.2,
+          "work_ratio": 3.4413,
+          "gflops_before": 19767.5,
+          "gain": 1.014
+        },
+        {
+          "name": "attention_fwd:dim_sweep_d32",
+          "shape": "B=2 T=128 H=4 KV=4 D=32 wl=-1",
+          "ms": 0.026859,
+          "gflops": 314.8,
+          "work_ratio": 1.9845,
+          "gflops_before": 341.9,
+          "gain": 0.9206
+        },
+        {
+          "name": "attention_bwd:dim_sweep_d32",
+          "shape": "B=2 T=128 H=4 KV=4 D=32 wl=-1",
+          "ms": 0.051349,
+          "gflops": 329.3,
+          "work_ratio": 1.9845,
+          "gflops_before": 349.6,
+          "gain": 0.9418
+        },
+        {
+          "name": "attention_fwd:dim_sweep_d64",
+          "shape": "B=2 T=128 H=4 KV=4 D=64 wl=-1",
+          "ms": 0.013835,
+          "gflops": 1222.2,
+          "work_ratio": 1.9845,
+          "gflops_before": 1212.8,
+          "gain": 1.0077
+        },
+        {
+          "name": "attention_bwd:dim_sweep_d64",
+          "shape": "B=2 T=128 H=4 KV=4 D=64 wl=-1",
+          "ms": 0.044629,
+          "gflops": 757.7,
+          "work_ratio": 1.9845,
+          "gflops_before": 744.6,
+          "gain": 1.0177
+        },
+        {
+          "name": "attention_fwd:dim_sweep_d128",
+          "shape": "B=2 T=128 H=4 KV=4 D=128 wl=-1",
+          "ms": 0.018016,
+          "gflops": 1877.0,
+          "work_ratio": 1.9845,
+          "gflops_before": 1838.9,
+          "gain": 1.0207
+        },
+        {
+          "name": "attention_bwd:dim_sweep_d128",
+          "shape": "B=2 T=128 H=4 KV=4 D=128 wl=-1",
+          "ms": 0.061963,
+          "gflops": 1091.5,
+          "work_ratio": 1.9845,
+          "gflops_before": 1078.0,
+          "gain": 1.0126
+        },
+        {
+          "name": "attention_fwd:dim_sweep_d256",
+          "shape": "B=2 T=128 H=4 KV=4 D=256 wl=-1",
+          "ms": 0.028917,
+          "gflops": 2338.8,
+          "work_ratio": 1.9845,
+          "gflops_before": 2435.9,
+          "gain": 0.9602
+        },
+        {
+          "name": "attention_bwd:dim_sweep_d256",
+          "shape": "B=2 T=128 H=4 KV=4 D=256 wl=-1",
+          "ms": 0.054315,
+          "gflops": 2490.4,
+          "work_ratio": 1.9845,
+          "gflops_before": 2593.8,
+          "gain": 0.9601
+        }
+      ]
+    },
     "attention_bf16": {
       "note": "Measured rows of the bf16 attention path on an NVIDIA H100 80GB HBM3 (sm_90), from the Modal H100 image built at sm_90 and bf16 (tools/modal/app.py, the H100 leg). Every row comes from one run of one binary, so the comparison is between two branches of one build. A *_cublas row is the dense forward the fused tile replaces: the same shape and the same build with a head-major query, which keeps the batched path and skips one transpose, so those rows are marginally favoured. The windowed and SSSL rows without a suffix take the bf16 tensor-core tile of docs/attention.md Part 6; d8_s512 stays on cuBLAS because it is full-causal. No backward runs the tile, so the two backward rows of a pair differ only by the query transpose. work_ratio is issued work over necessary work.",
       "device": "NVIDIA H100 80GB HBM3 (sm_90)",

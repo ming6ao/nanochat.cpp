@@ -757,6 +757,23 @@ its second pass is two of the nine. Part 8 answers both: the warpgroup path
 replaces the warp geometry, and its decision H6 adds the preprocess kernel that
 removes the second pass.
 
+**The flush exponential, measured on this path.** Part 8 states why `exp2f` is
+4 instructions here and why `ex2.approx.ftz.f32` states the same probability in
+1. The helper is `cuda_kernels::FastExp2`, and all four sites of this family call
+it: the forward probability, the rescale factor, and the probability of each
+backward pass. The census over the same source reads 5,019 to 4,915 instructions
+for the forward at head width 128, 4,627 to 4,515 at 64, 5,733 to 5,637 for the
+query gradient, and 4,046 to 3,998 for the key and value gradient, and every one
+of the 34, 32, and 16 range tests leaves. The rows are the
+`attention_flash_exp` entry of [baselines.json](baselines.json), and the gain
+they measure is 1.00 to 1.03 on the forward and 1.01 to 1.05 on the backward:
+3.3 percent on the two largest fully visible shapes, 0.8 on the single-system
+pattern, and flat on the window of 128, where the masked tiles expose less of the
+softmax. **Neither rate gate moves**, because this path is bound by the warp-level
+product and not by its scalar work: the production forward now reads 74.3
+TFLOP/s against the 200 of phase F1, and the backward 34.8 against the 150 of
+phase F2.
+
 **The numeric gate.** `//backends/cuda/kernels:attention_gpu_test` passed in the
 same image at the bf16 tolerance of [testing.md](testing.md), on every case of
 section 7. The largest figures the test prints are 0.0038 on a forward output,

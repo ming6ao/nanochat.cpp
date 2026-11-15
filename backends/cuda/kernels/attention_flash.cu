@@ -585,7 +585,9 @@ __global__ void __launch_bounds__(kFlashThreads, kFlashMinBlocks)
       if (local_max[r] == -CUDART_INF_F) continue;
       const float previous = row_max[r];
       const float updated = fmaxf(previous, local_max[r] * scale_log2);
-      alpha[r] = (previous == -CUDART_INF_F) ? 0.0f : exp2f(previous - updated);
+      alpha[r] = (previous == -CUDART_INF_F)
+                     ? 0.0f
+                     : cuda_kernels::FastExp2(previous - updated);
       row_max[r] = updated;
       max_exp[r] = updated;
     }
@@ -595,8 +597,10 @@ __global__ void __launch_bounds__(kFlashThreads, kFlashMinBlocks)
     for (int nt = 0; nt < kFlashKeyTiles; ++nt) {
 #pragma unroll
       for (int r = 0; r < 2; ++r) {
-        const float p0 = exp2f(sacc[nt][2 * r] * scale_log2 - max_exp[r]);
-        const float p1 = exp2f(sacc[nt][2 * r + 1] * scale_log2 - max_exp[r]);
+        const float p0 =
+            cuda_kernels::FastExp2(sacc[nt][2 * r] * scale_log2 - max_exp[r]);
+        const float p1 = cuda_kernels::FastExp2(
+            sacc[nt][2 * r + 1] * scale_log2 - max_exp[r]);
         sacc[nt][2 * r] = p0;
         sacc[nt][2 * r + 1] = p1;
         local_sum[r] += p0 + p1;
@@ -862,10 +866,12 @@ __global__ void __launch_bounds__(kFlashThreads, kFlashMinBlocks)
       for (int nt = 0; nt < kFlashKeyTiles; ++nt) {
 #pragma unroll
         for (int r = 0; r < 2; ++r) {
-          const float p0 =
-              exp2f(sacc[nt][2 * r] * scale_log2 - row_max[r]) * row_inv[r];
-          const float p1 =
-              exp2f(sacc[nt][2 * r + 1] * scale_log2 - row_max[r]) * row_inv[r];
+          const float p0 = cuda_kernels::FastExp2(sacc[nt][2 * r] * scale_log2 -
+                                                  row_max[r]) *
+                           row_inv[r];
+          const float p1 = cuda_kernels::FastExp2(
+                               sacc[nt][2 * r + 1] * scale_log2 - row_max[r]) *
+                           row_inv[r];
           sacc[nt][2 * r] = p0;
           sacc[nt][2 * r + 1] = p1;
         }
@@ -1167,8 +1173,9 @@ __global__ void __launch_bounds__(kFlashThreads, kFlashMinBlocks)
           const float dot = row_dot_stage[query];
 #pragma unroll
           for (int r = 0; r < 2; ++r) {
-            const float p =
-                exp2f(sacc[nt][2 * r + e] * scale_log2 - max_exp) * inv;
+            const float p = cuda_kernels::FastExp2(
+                                sacc[nt][2 * r + e] * scale_log2 - max_exp) *
+                            inv;
             sacc[nt][2 * r + e] = p;
             dpacc[nt][2 * r + e] = p * (dpacc[nt][2 * r + e] - dot);
           }

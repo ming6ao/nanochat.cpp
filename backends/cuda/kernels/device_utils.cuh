@@ -204,6 +204,28 @@ __device__ __forceinline__ void RotatePairInPlace(float& x1, float& x2, float c,
 // Attention (shared by the forward and backward tiles)
 // ---------------------------------------------------------------------------
 
+// The base-two exponential of one value, as the 1 instruction the pipe holds.
+// The library form is 4 instructions at these compiler flags: a range test
+// against -126, a halving, the instruction, and a squaring. The halving and the
+// squaring exist to return a denormal result, and every caller of this helper
+// rounds its result to the compute type 1 step later, where a value below
+// 2^-126 is not representable. So the repair computes a number that the
+// rounding discards, and the flush form states the same probability in 1
+// instruction. Over the range -20 to 0 the two forms differ by at most 8.2e-07
+// relative, and 117 of 4,000,000 samples round to a different `bf16` operand.
+//
+// No C++ form states that instruction. `exp2f` is the 4 above, `__expf` adds a
+// multiply by log2(e) and keeps the repair, and CUDA 12.0 declares no
+// `__exp2f`. Only the translation-unit-wide `-use_fast_math` gives 1
+// instruction, and it also changes every divide, square root, and denormal rule
+// in every kernel of the build, so a row measured before it and after it is not
+// the same row. See docs/attention.md Part 8.
+__device__ __forceinline__ float FastExp2(float x) {
+  float result;
+  asm("ex2.approx.ftz.f32 %0, %1;" : "=f"(result) : "f"(x));
+  return result;
+}
+
 // Contiguous-grouping GQA head mapping, matching the CPU reference: each
 // key/value head serves `num_heads / num_kv_heads` consecutive query heads.
 // Host-visible so the host GEMM wrappers can share the exact mapping.
