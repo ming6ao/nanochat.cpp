@@ -1094,6 +1094,106 @@ and the full grid 45.7 percent of the peak, so no occupancy is lost either. That
 is what decision H4 is for, and the ceiling row now prices what it can recover:
 thirty-four points of the peak.
 
+**The exponential is 4 instructions, and 3 of them are waste.** The census of
+one step states where those points sit. One thread, 64 score slots: 463
+instructions of the fp32 pipe, 66 of the special function unit, and 16 of the
+tensor pipe. The fp32 count is 261 multiplies, 70 maxima, 66 adds, and 66 range
+tests. `exp2f` is not 1 instruction at these compiler flags. It is a range test
+against -126, a halving, the instruction, and a squaring. The halving and the
+squaring exist to return a denormal result, and the step rounds every
+probability to the compute type 1 step later, where a value below 2^-126 is not
+representable. So the repair computes a number that the rounding discards.
+`ex2.approx.ftz.f32` states the same probability in 1 instruction, and it is
+close enough for the operand it feeds. Over the range -20 to 0, where that
+operand is representable at all, the two forms differ by at most 8.2e-07
+relative, and 117 samples of 4,000,000 round to a different `bf16` operand. That
+figure is from this tree's host card, which states the same instruction.
+
+**No C++ form states it.** `exp2f` is the 4 instructions above, `__expf` adds a
+multiply by log2(e) and keeps the repair, and CUDA 12.0 declares no `__exp2f`.
+Only the translation-unit-wide `-use_fast_math` gives 1 instruction, and it also
+changes every divide, square root, and denormal rule in the file. That is why
+the source states the instruction, and it is the same reason the file already
+writes its products, its barriers, and its copies as PTX: those have no C++ form
+at all. Where the language does state the instruction, the file uses it, so the
+maxima are `fmaxf`, the fused multiply-adds are `fmaf`, the quad reductions are
+`__shfl_xor_sync`, and the probability packing is
+`__floats2bfloat162_rn`, which one `F2FP.BF16.F32.PACK_AB` states.
+
+The other half of the fp32 work is the scale. A row maximum is monotone under a
+positive scale, so the step can read the maximum from the raw score and state
+`score * scale - maximum` in one fused multiply-add inside the exponential's
+argument. That replaces 64 multiplies and 64 adds with 64 fused multiply-adds
+and leaves 203 instructions of the fp32 pipe against 463. `kTrim` states both
+changes, and the `attention_trim_probe` entry of [baselines.json](baselines.json)
+holds the rows.
+
+**Measured, the pair is worth 13 to 14 percent.** Every trimmed row sits beside
+its own untrimmed control, in one run of one build:
+
+| Row, 132 blocks | TFLOP/s | Share of the peak |
+|---|---:|---:|
+| Two warpgroups, dense, softmax off | 989.0 | 100.0 percent |
+| Two warpgroups, dense, untrimmed | 616.6 | 62.3 percent |
+| Two warpgroups, dense, trimmed | **698.9** | **70.7 percent** |
+| Two warpgroups, dense, trimmed and guarded | 703.7 | 71.2 percent |
+| Two warpgroups, causal, untrimmed | 486.3 | 49.2 percent |
+| Two warpgroups, causal, trimmed and guarded | **601.5** | **60.8 percent** |
+| One warpgroup, dense, untrimmed | 448.3 | 45.3 percent |
+| One warpgroup, dense, trimmed and guarded | 483.2 | 48.9 percent |
+| One warpgroup, dense, softmax off | 803.3 | 81.2 percent |
+| The engine-fed tile, dense, untrimmed | 380.5 | 38.5 percent |
+| The engine-fed tile, dense, trimmed and guarded | 395.6 | 40.0 percent |
+| The engine-fed tile, dense, softmax off | 400.8 | 40.5 percent |
+| The engine-fed tile, causal, untrimmed | 388.1 | 39.2 percent |
+| The engine-fed tile, causal, trimmed and guarded | 390.9 | 39.5 percent |
+
+The trim alone is the row that matters, because its own paragraph below rejects
+the guard. Only the two-warpgroup dense geometry states both, at 698.9 and
+703.7, and the other trimmed rows of the table carry the guard as well.
+
+Each rate is the median of 3 runs of 1 build, and the spread is 1 to 2
+percent except the one-warpgroup untrimmed row at 4.7. The checks run first and
+they pass: the trimmed step reproduces the error of the untrimmed step against
+the host reference to every digit the check prints, 2.09e-03 dense and 1.00e-03
+causal, with no bad element of 8,192, and the trimmed engine-fed step is exact
+against the trimmed resident step on both masks.
+
+**The causal tile gains more than the dense one, 23.7 percent against 13.3.** A
+boundary tile writes the sentinel into every masked score, so its mask adds a
+compare and a select a slot, which is 128 more instructions of the same fp32
+pipe. That pipe is the congested one in the untrimmed step, so the same 260
+instructions leave it gain more there. On the engine-fed tile the two masks gain
+4.0 and 0.7 percent, because the copy path rather than the chain holds both.
+
+**The exponentials are the floor, and one warpgroup gains less than two.** The 66
+exponentials hold the special function unit 8 cycles each, which is 528 cycles a
+step against the 983 that the two products hold the tensor pipe. A
+trimmed step therefore leaves that pipe as the exposed chain, and it is why one
+warpgroup gains 7.8 percent where two gain 13.3: the second warpgroup's products
+cover the first's exponentials, and the fp32 work is what used to stop them. The
+same reading states the next lever. The exponentials are the only scalar cost
+left in the chain, so halving them is what H4 would have to overlap, and the
+engine-fed tile no longer needs the overlap at all: at 395.6 it is 1.3 percent
+under its own softmax-off row, so the copy path is the only thing holding it.
+
+**The rescale guard earns nothing.** A third switch states the rescale of the
+output accumulator as a skip, because a row maximum that did not move gives a
+factor of exactly one under either exponential. It reads 703.7 against 698.9 for
+the trim alone, which is inside the spread, and its own 3 runs agree to 1.5
+percent. So the vote and the branch cost what the 64 multiplies cost. The timed
+row is also the most favourable case the guard can have, because it repeats one
+key tile and the maximum never moves after the first step. The lever is
+rejected, and the two that stay are the instruction and the fused multiply-add.
+
+**A launch can fail in silence.** The first run of these rows reported the
+trimmed step as wrong. The cause was not the arithmetic: the opt-in dynamic
+shared-memory window belongs to one instantiation of a templated kernel, and the
+trimmed instantiation was launched without its own `cudaFuncSetAttribute`, so
+the device refused it. A refused launch reports nothing from `cudaDeviceSynchronize`,
+and the check then compared the buffer of the previous launch. `SyncFlash` reads
+the last error as well now, so that class of failure names itself.
+
 **The mask is free.** The boundary tile reads 452.0 TFLOP/s against 452.1 dense,
 which is 0.3 percent, and a staged row moves by 0.0 to 6.1 percent, which is
 inside or beside the spread. The tile is therefore bound by the chain and not by

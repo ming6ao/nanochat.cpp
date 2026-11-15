@@ -3838,6 +3838,422 @@
           "share_of_peak": 0.293
         }
       ]
+    },
+    "attention_trim_probe": {
+      "note": "The flash rows of dev/kernels/wgmma_bench.cu with the two softmax levers of decision H4's price, measured against their own untrimmed control in one run of one binary. docs/attention.md Part 8 section 6 states the finding. **The exponential is four instructions and three are waste.** `exp2f` at these compiler flags is a range test against minus one hundred and twenty-six, a halving, the instruction, and a squaring; the halving and the squaring exist to return a denormal result, and the step rounds every probability to the compute type one step later, where such a value is not representable. `ex2.approx.ftz.f32` states it in one instruction. The second lever folds the score scale into the exponential's argument with one fused multiply-add on the raw row maximum, because a maximum is monotone under a positive scale. Together they take the fp32 pipe from 463 instructions a step to 203. **The pair is worth 13 to 14 percent of the copy-free chain**: the two-warpgroup dense row moves from 616.6 to 698.9 TFLOP/s from the trim alone, which is 62.3 to 70.7 percent of the declared peak, and to 703.7 with the guard beside it, against 989.0 for the same chain with the softmax off. The causal boundary tile gains more, 486.3 to 601.5, or 23.7 percent, because its mask adds a compare and a select a slot to the same fp32 pipe. One warpgroup gains less, 448.3 to 483.2, because the 66 exponentials hold the special function unit eight cycles each and that pipe is exposed there. The engine-fed tile gains 4.0 percent dense, 380.5 to 395.6, and is then within 1.3 percent of its own softmax-off row at 400.8, so the softmax is no longer what holds that tile. **The rescale guard earns nothing**: the row that skips the output rescale when a row maximum did not move reads 703.7 against 698.9 trimmed without it, which is inside the spread, and the timed row repeats one key tile so the guard is measured in the most favourable case it can have. The lever is rejected. Every rate is the median of three runs of one build, and the spread is 1 to 2 percent except the one-warpgroup untrimmed row at 4.7. The checks pass before any row is timed: the trimmed step reproduces the error of the untrimmed step against the host reference to every digit the check prints, 2.09e-03 dense and 1.00e-03 causal, with no bad element of 8,192, and the trimmed engine-fed step is exact against the trimmed resident step on both masks. The rows are the report of this tree at the parent revision, because a commit cannot name itself: the change they measure is the trim and guard switches of `FlashStep`.",
+      "device": "NVIDIA H100 80GB HBM3 (sm_90a)",
+      "validated_on": "NVIDIA H100 80GB HBM3 (sm_90a)",
+      "precision": "bf16",
+      "revision": "4931e94",
+      "measurement": "modal run tools/modal/app.py::card_job --name wgmma_bench --argv '[\"--rows\",\"flash\",\"--json\"]'",
+      "origin": "docs/attention.md Part 8 section 6, the trimmed step",
+      "rows": [
+        {
+          "name": "attention-flash:resident",
+          "blocks": 1,
+          "warpgroups": 1,
+          "tiles": 5000,
+          "atoms": "8+8",
+          "mask": "dense",
+          "softmax": "on",
+          "trim": "off",
+          "guard": "off",
+          "tflops": 3.3,
+          "share_of_peak": 0.003,
+          "runs_tflops": [
+            3.3,
+            3.3,
+            3.3
+          ]
+        },
+        {
+          "name": "attention-flash:resident",
+          "blocks": 132,
+          "warpgroups": 1,
+          "tiles": 5000,
+          "atoms": "8+8",
+          "mask": "dense",
+          "softmax": "on",
+          "trim": "off",
+          "guard": "off",
+          "tflops": 448.3,
+          "share_of_peak": 0.453,
+          "runs_tflops": [
+            458.4,
+            437.3,
+            448.3
+          ]
+        },
+        {
+          "name": "attention-flash:resident",
+          "blocks": 132,
+          "warpgroups": 1,
+          "tiles": 5000,
+          "atoms": "8+8",
+          "mask": "causal",
+          "softmax": "on",
+          "trim": "off",
+          "guard": "off",
+          "tflops": 416.7,
+          "share_of_peak": 0.421,
+          "runs_tflops": [
+            421.6,
+            405.4,
+            416.7
+          ]
+        },
+        {
+          "name": "attention-flash:resident",
+          "blocks": 132,
+          "warpgroups": 1,
+          "tiles": 5000,
+          "atoms": "8+8",
+          "mask": "dense",
+          "softmax": "off",
+          "trim": "off",
+          "guard": "off",
+          "tflops": 803.3,
+          "share_of_peak": 0.812,
+          "runs_tflops": [
+            803.3,
+            803.7,
+            796.2
+          ]
+        },
+        {
+          "name": "attention-flash:resident",
+          "blocks": 132,
+          "warpgroups": 2,
+          "tiles": 5000,
+          "atoms": "8+8",
+          "mask": "dense",
+          "softmax": "on",
+          "trim": "off",
+          "guard": "off",
+          "tflops": 616.6,
+          "share_of_peak": 0.624,
+          "runs_tflops": [
+            616.6,
+            617.0,
+            611.0
+          ]
+        },
+        {
+          "name": "attention-flash:resident",
+          "blocks": 132,
+          "warpgroups": 2,
+          "tiles": 5000,
+          "atoms": "8+8",
+          "mask": "causal",
+          "softmax": "on",
+          "trim": "off",
+          "guard": "off",
+          "tflops": 486.3,
+          "share_of_peak": 0.492,
+          "runs_tflops": [
+            486.3,
+            487.0,
+            481.7
+          ]
+        },
+        {
+          "name": "attention-flash:resident",
+          "blocks": 132,
+          "warpgroups": 2,
+          "tiles": 5000,
+          "atoms": "8+8",
+          "mask": "dense",
+          "softmax": "off",
+          "trim": "off",
+          "guard": "off",
+          "tflops": 989.0,
+          "share_of_peak": 1.0,
+          "runs_tflops": [
+            989.0,
+            989.0,
+            980.6
+          ]
+        },
+        {
+          "name": "attention-flash:resident",
+          "blocks": 132,
+          "warpgroups": 2,
+          "tiles": 5000,
+          "atoms": "8+8",
+          "mask": "dense",
+          "softmax": "on",
+          "trim": "on",
+          "guard": "off",
+          "tflops": 698.9,
+          "share_of_peak": 0.707,
+          "runs_tflops": [
+            729.5,
+            698.7,
+            698.9
+          ]
+        },
+        {
+          "name": "attention-flash:resident",
+          "blocks": 132,
+          "warpgroups": 2,
+          "tiles": 5000,
+          "atoms": "8+8",
+          "mask": "dense",
+          "softmax": "on",
+          "trim": "on",
+          "guard": "on",
+          "tflops": 703.7,
+          "share_of_peak": 0.712,
+          "runs_tflops": [
+            703.7,
+            703.9,
+            693.0
+          ]
+        },
+        {
+          "name": "attention-flash:resident",
+          "blocks": 132,
+          "warpgroups": 2,
+          "tiles": 5000,
+          "atoms": "8+8",
+          "mask": "causal",
+          "softmax": "on",
+          "trim": "on",
+          "guard": "on",
+          "tflops": 601.5,
+          "share_of_peak": 0.608,
+          "runs_tflops": [
+            601.5,
+            604.2,
+            595.1
+          ]
+        },
+        {
+          "name": "attention-flash:resident",
+          "blocks": 132,
+          "warpgroups": 1,
+          "tiles": 5000,
+          "atoms": "8+8",
+          "mask": "dense",
+          "softmax": "on",
+          "trim": "on",
+          "guard": "on",
+          "tflops": 483.2,
+          "share_of_peak": 0.489,
+          "runs_tflops": [
+            483.2,
+            483.3,
+            475.9
+          ]
+        },
+        {
+          "name": "attention-flash:resident",
+          "blocks": 132,
+          "warpgroups": 2,
+          "tiles": 5000,
+          "atoms": "8+8",
+          "mask": "dense",
+          "softmax": "off",
+          "trim": "on",
+          "guard": "on",
+          "tflops": 989.0,
+          "share_of_peak": 1.0,
+          "runs_tflops": [
+            989.0,
+            989.0,
+            980.8
+          ]
+        },
+        {
+          "name": "attention-flash:staged",
+          "blocks": 132,
+          "consumers": 2,
+          "stages": 2,
+          "tiles": 4096,
+          "mask": "dense",
+          "softmax": "on",
+          "trim": "off",
+          "guard": "off",
+          "staging": "engine",
+          "producers": "1warpgroup",
+          "transpose": "thread",
+          "tflops": 380.5,
+          "share_of_peak": 0.385,
+          "runs_tflops": [
+            380.5,
+            381.2,
+            375.4
+          ]
+        },
+        {
+          "name": "attention-flash:staged",
+          "blocks": 132,
+          "consumers": 2,
+          "stages": 2,
+          "tiles": 4096,
+          "mask": "dense",
+          "softmax": "on",
+          "trim": "off",
+          "guard": "off",
+          "staging": "engine",
+          "producers": "1warpgroup",
+          "transpose": "warp",
+          "tflops": 328.0,
+          "share_of_peak": 0.332,
+          "runs_tflops": [
+            328.9,
+            328.0,
+            323.9
+          ]
+        },
+        {
+          "name": "attention-flash:staged",
+          "blocks": 132,
+          "consumers": 2,
+          "stages": 2,
+          "tiles": 4096,
+          "mask": "causal",
+          "softmax": "on",
+          "trim": "off",
+          "guard": "off",
+          "staging": "engine",
+          "producers": "1warpgroup",
+          "transpose": "thread",
+          "tflops": 388.1,
+          "share_of_peak": 0.392,
+          "runs_tflops": [
+            389.3,
+            388.1,
+            384.2
+          ]
+        },
+        {
+          "name": "attention-flash:staged",
+          "blocks": 132,
+          "consumers": 2,
+          "stages": 2,
+          "tiles": 4096,
+          "mask": "causal",
+          "softmax": "on",
+          "trim": "off",
+          "guard": "off",
+          "staging": "engine",
+          "producers": "1warpgroup",
+          "transpose": "warp",
+          "tflops": 321.3,
+          "share_of_peak": 0.325,
+          "runs_tflops": [
+            321.3,
+            321.3,
+            316.8
+          ]
+        },
+        {
+          "name": "attention-flash:staged",
+          "blocks": 132,
+          "consumers": 2,
+          "stages": 2,
+          "tiles": 4096,
+          "mask": "dense",
+          "softmax": "off",
+          "trim": "off",
+          "guard": "off",
+          "staging": "engine",
+          "producers": "1warpgroup",
+          "transpose": "thread",
+          "tflops": 400.8,
+          "share_of_peak": 0.405,
+          "runs_tflops": [
+            400.8,
+            401.2,
+            395.4
+          ]
+        },
+        {
+          "name": "attention-flash:staged",
+          "blocks": 132,
+          "consumers": 2,
+          "stages": 2,
+          "tiles": 4096,
+          "mask": "dense",
+          "softmax": "off",
+          "trim": "off",
+          "guard": "off",
+          "staging": "engine",
+          "producers": "1warpgroup",
+          "transpose": "warp",
+          "tflops": 381.9,
+          "share_of_peak": 0.386,
+          "runs_tflops": [
+            381.9,
+            382.7,
+            376.9
+          ]
+        },
+        {
+          "name": "attention-flash:staged",
+          "blocks": 132,
+          "consumers": 2,
+          "stages": 2,
+          "tiles": 4096,
+          "mask": "dense",
+          "softmax": "on",
+          "trim": "on",
+          "guard": "on",
+          "staging": "engine",
+          "producers": "1warpgroup",
+          "transpose": "thread",
+          "tflops": 395.6,
+          "share_of_peak": 0.4,
+          "runs_tflops": [
+            395.6,
+            396.7,
+            391.1
+          ]
+        },
+        {
+          "name": "attention-flash:staged",
+          "blocks": 132,
+          "consumers": 2,
+          "stages": 2,
+          "tiles": 4096,
+          "mask": "causal",
+          "softmax": "on",
+          "trim": "on",
+          "guard": "on",
+          "staging": "engine",
+          "producers": "1warpgroup",
+          "transpose": "thread",
+          "tflops": 390.9,
+          "share_of_peak": 0.395,
+          "runs_tflops": [
+            390.9,
+            391.5,
+            386.5
+          ]
+        },
+        {
+          "name": "attention-flash:staged",
+          "blocks": 132,
+          "consumers": 2,
+          "stages": 2,
+          "tiles": 4096,
+          "mask": "dense",
+          "softmax": "on",
+          "trim": "on",
+          "guard": "on",
+          "staging": "engine",
+          "producers": "1warpgroup",
+          "transpose": "warp",
+          "tflops": 358.6,
+          "share_of_peak": 0.363,
+          "runs_tflops": [
+            358.6,
+            359.4,
+            353.2
+          ]
+        }
+      ]
     }
   }
 }

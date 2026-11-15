@@ -1761,6 +1761,27 @@ __global__ void ResidentKernel(const Bf16* __restrict__ q,
   for (int i = 0; i < kTileRegisters; ++i) destination[i] = d[i];
 }
 
+// The base-two exponential of one value, as the 1 instruction the pipe holds.
+// The library form is 4 instructions at these compiler flags: a range test
+// against -126, a halving, the instruction, and a squaring. The halving and the
+// squaring exist to return a denormal result, and this file rounds every result
+// to the compute type 1 step later, where a value below 2^-126 is not
+// representable. So the repair computes a number that the rounding discards,
+// and the flush form states the same probability in 1 instruction.
+//
+// No C++ form states that instruction. `exp2f` is the 4 above, `__expf` adds a
+// multiply by log2(e) and keeps the repair, and CUDA 12.0 declares no
+// `__exp2f`. Only the translation-unit-wide `-use_fast_math` gives 1
+// instruction, and it also changes every divide, square root, and denormal rule
+// in the file. The rest of this file writes its measured instructions as PTX
+// for the same reason: the instruction and its modifiers are the subject, so
+// the source states them and a reader checks them against the build.
+__device__ __forceinline__ float WgmmaExp2(float x) {
+  float result;
+  asm("ex2.approx.ftz.f32 %0, %1;" : "=f"(result) : "f"(x));
+  return result;
+}
+
 // One step of the flash tile, and the one place the step is written: the
 // resident row and the staged row both call it, so neither can state another
 // chain. The probability operand of atom `atom` and register `reg` takes the
@@ -1774,7 +1795,14 @@ __global__ void ResidentKernel(const Bf16* __restrict__ q,
 // `kSoftmax` false is the ceiling row of the chain: the two products, the
 // conversion, and nothing between them. The difference from a row that states
 // the real step is what the softmax and its serialized place in the chain cost.
-template <bool kMask, bool kSoftmax = true, bool kSwizzledKey = false>
+//
+// `kTrim` and `kGuard` are the two ways to make the same step cheaper without
+// moving it, and each states one row beside the untrimmed one so the two are
+// one run of one build. `kTrim` states the exponential as 1 instruction and
+// folds the score scale into it, and `kGuard` skips the rescale of the output
+// accumulator for a step whose row maximum did not move.
+template <bool kMask, bool kSoftmax = true, bool kSwizzledKey = false,
+          bool kTrim = false, bool kGuard = false>
 __device__ __forceinline__ void FlashStep(
     std::uint64_t base_query, std::uint64_t base_key, std::uint64_t base_value,
     float log2_scale, int row_base, int lane, float (&running_max)[2],
@@ -1807,7 +1835,10 @@ __device__ __forceinline__ void FlashStep(
   float new_max[2];
 #pragma unroll
   for (int i = 0; i < kRegisters; ++i) {
-    score[i] *= log2_scale;
+    // The maximum is monotone under a positive scale, so a trimmed step reads
+    // it from the raw score and scales the 1 reduced value instead of every
+    // slot.
+    if constexpr (!kTrim) score[i] *= log2_scale;
     if constexpr (kMask) {
       // One select a score, so the masked row prices the mask itself. A masked
       // score is the sentinel the running maximum already uses, and its
@@ -1828,6 +1859,9 @@ __device__ __forceinline__ void FlashStep(
                              __shfl_xor_sync(0xFFFFFFFFu, tile_max[slot], 1));
       tile_max[slot] = fmaxf(tile_max[slot],
                              __shfl_xor_sync(0xFFFFFFFFu, tile_max[slot], 2));
+      // The running maximum is in base-two units, so the raw tile maximum
+      // joins it after 1 scale and not before.
+      if constexpr (kTrim) tile_max[slot] *= log2_scale;
       new_max[slot] = fmaxf(running_max[slot], tile_max[slot]);
     }
 
@@ -1837,7 +1871,12 @@ __device__ __forceinline__ void FlashStep(
 #pragma unroll
     for (int i = 0; i < kRegisters; ++i) {
       const int slot = (i / 2) % 2;
-      score[i] = exp2f(score[i] - new_max[slot]);
+      if constexpr (kTrim) {
+        // 1 fused multiply-add and 1 instruction of the exponential pipe.
+        score[i] = WgmmaExp2(fmaf(score[i], log2_scale, -new_max[slot]));
+      } else {
+        score[i] = exp2f(score[i] - new_max[slot]);
+      }
       tile_sum[slot] += score[i];
     }
     float rescale[2];
@@ -1845,16 +1884,31 @@ __device__ __forceinline__ void FlashStep(
     for (int slot = 0; slot < 2; ++slot) {
       tile_sum[slot] += __shfl_xor_sync(0xFFFFFFFFu, tile_sum[slot], 1);
       tile_sum[slot] += __shfl_xor_sync(0xFFFFFFFFu, tile_sum[slot], 2);
-      rescale[slot] = exp2f(running_max[slot] - new_max[slot]);
+      // A row maximum that did not move gives a factor of exactly 1, under
+      // either exponential, because both forms are exact at zero.
+      rescale[slot] = kTrim ? WgmmaExp2(running_max[slot] - new_max[slot])
+                            : exp2f(running_max[slot] - new_max[slot]);
       running_sum[slot] = running_sum[slot] * rescale[slot] + tile_sum[slot];
       running_max[slot] = new_max[slot];
     }
 
     // The output accumulator holds the earlier steps under the earlier maximum,
     // so every slot is rescaled before this step's value product adds to it.
+    // A warp whose rows all kept their maximum skips the pass; `__any_sync`
+    // needs every lane, and the block above is convergent here.
+    if constexpr (kGuard) {
+      const bool unmoved = rescale[0] == 1.0f && rescale[1] == 1.0f;
+      if (__any_sync(0xFFFFFFFFu, !unmoved)) {
 #pragma unroll
-    for (int i = 0; i < kRegisters; ++i) {
-      output[i] *= rescale[(i / 2) % 2];
+        for (int i = 0; i < kRegisters; ++i) {
+          output[i] *= rescale[(i / 2) % 2];
+        }
+      }
+    } else {
+#pragma unroll
+      for (int i = 0; i < kRegisters; ++i) {
+        output[i] *= rescale[(i / 2) % 2];
+      }
     }
   }
 
@@ -1892,7 +1946,8 @@ __device__ __forceinline__ void FlashStep(
 // `FlashStep` a tile, so `tiles` steps are one online softmax and not `tiles`
 // independent products. The output leaves unnormalised: one division by the row
 // sum belongs to the end of a real block, and the check applies it.
-template <int Warpgroups, bool kMask, bool kSoftmax>
+template <int Warpgroups, bool kMask, bool kSoftmax, bool kTrim = false,
+          bool kGuard = false>
 __global__ void ResidentFlashKernel(const Bf16* __restrict__ q,
                                     const Bf16* __restrict__ k,
                                     const Bf16* __restrict__ v,
@@ -1941,9 +1996,9 @@ __global__ void ResidentFlashKernel(const Bf16* __restrict__ q,
   const int row_base = warpgroup * kAtomM;
 
   for (int tile = 0; tile < tiles; ++tile) {
-    FlashStep<kMask, kSoftmax>(base_query, base_key, base_value, log2_scale,
-                               row_base, lane, running_max, running_sum,
-                               output);
+    FlashStep<kMask, kSoftmax, /*kSwizzledKey=*/false, kTrim, kGuard>(
+        base_query, base_key, base_value, log2_scale, row_base, lane,
+        running_max, running_sum, output);
   }
 
   WgmmaFenceOperand<kRegisters>(output);
@@ -2125,7 +2180,8 @@ __global__ void StagedFlashKernel(const Bf16* __restrict__ q,
 // reads. A producer warpgroup issues the copies and runs the transposition, so
 // the consumers issue no staging instruction and never wait on a global load.
 template <int Consumers, int Stages, bool kMask, bool kSoftmax = true,
-          bool kWarpTranspose = false, bool kConsumerTranspose = false>
+          bool kWarpTranspose = false, bool kConsumerTranspose = false,
+          bool kTrim = false, bool kGuard = false>
 __global__ __launch_bounds__(
     (1 + Consumers) * kWarpgroupThreads,
     1) void EngineFlashKernel(const Bf16* __restrict__ q,
@@ -2267,7 +2323,7 @@ __global__ __launch_bounds__(
                    : "memory");
     }
     FenceAsyncShared();
-    FlashStep<kMask, kSoftmax, /*kSwizzledKey=*/true>(
+    FlashStep<kMask, kSoftmax, /*kSwizzledKey=*/true, kTrim, kGuard>(
         base_query,
         MakeDescriptorFull(keys + stage * kKeyBytes, kSwizzledLeadingBytes,
                            kSwizzledStrideBytes, /*layout=*/1),
@@ -2777,10 +2833,17 @@ void CheckDevice(const std::string& what) {
 // A checked sync that names the phase it waited for. An unchecked sync reports
 // the failure at the next checked call of the harness, which names nothing.
 void SyncFlash(const std::string& what) {
+  // A launch that the device refused, such as one above the default dynamic
+  // shared-memory window, reports nothing from the synchronizing call. It
+  // states itself only as the last error, so both are read here: a silent
+  // refusal otherwise leaves the buffer of a previous launch to be compared
+  // or timed as if it were this one.
   const cudaError_t status = cudaDeviceSynchronize();
-  if (status == cudaSuccess) return;
+  const cudaError_t launch = cudaGetLastError();
+  const cudaError_t failure = status != cudaSuccess ? status : launch;
+  if (failure == cudaSuccess) return;
   std::fprintf(stderr, "fatal: flash %s: %s\n", what.c_str(),
-               cudaGetErrorString(status));
+               cudaGetErrorString(failure));
   std::fflush(stderr);
   std::exit(1);
 }
@@ -2788,7 +2851,8 @@ void SyncFlash(const std::string& what) {
 // The opt-in dynamic shared-memory request of a resident flash instantiation,
 // and its one launch. A templated kernel has no single function address, so the
 // attribute is set once per instantiation and outside any timed window.
-template <int Warpgroups, bool kMask, bool kSoftmax = true>
+template <int Warpgroups, bool kMask, bool kSoftmax = true, bool kTrim = false,
+          bool kGuard = false>
 void SetFlashSharedMemory() {
   constexpr int kShared = FlashResidentBytes(Warpgroups);
   static_assert(
@@ -2796,17 +2860,19 @@ void SetFlashSharedMemory() {
       "the resident flash tile must fit one block per multiprocessor");
   static_assert(Warpgroups * kWarpgroupThreads <= kMaxThreadsPerBlock,
                 "one block of warpgroups must fit the thread limit");
-  cudaFuncSetAttribute(reinterpret_cast<const void*>(
-                           ResidentFlashKernel<Warpgroups, kMask, kSoftmax>),
-                       cudaFuncAttributeMaxDynamicSharedMemorySize, kShared);
+  cudaFuncSetAttribute(
+      reinterpret_cast<const void*>(
+          ResidentFlashKernel<Warpgroups, kMask, kSoftmax, kTrim, kGuard>),
+      cudaFuncAttributeMaxDynamicSharedMemorySize, kShared);
 }
 
-template <int Warpgroups, bool kMask, bool kSoftmax = true>
+template <int Warpgroups, bool kMask, bool kSoftmax = true, bool kTrim = false,
+          bool kGuard = false>
 void LaunchResidentFlash(int blocks, const Bf16* device_q, const Bf16* device_k,
                          const Bf16* device_v, float* device_out,
                          float* device_row_sums, int tiles, float scale) {
   constexpr int kShared = FlashResidentBytes(Warpgroups);
-  ResidentFlashKernel<Warpgroups, kMask, kSoftmax>
+  ResidentFlashKernel<Warpgroups, kMask, kSoftmax, kTrim, kGuard>
       <<<blocks, Warpgroups * kWarpgroupThreads, kShared>>>(
           device_q, device_k, device_v, device_out, device_row_sums, tiles,
           scale);
@@ -2816,11 +2882,12 @@ void LaunchResidentFlash(int blocks, const Bf16* device_q, const Bf16* device_k,
 // of every warpgroup in thread order, and the row sums beside them. `tiles` is
 // the number of steps of the online softmax, which the ring checks set above
 // the depth of the ring so the ring wraps.
-template <int Warpgroups, bool kMask, bool kSoftmax = true>
+template <int Warpgroups, bool kMask, bool kSoftmax = true, bool kTrim = false,
+          bool kGuard = false>
 std::vector<float> RunResidentFlash(const Bf16* device_q, const Bf16* device_k,
                                     const Bf16* device_v, float* device_out,
                                     float* device_row_sums, int tiles = 1) {
-  LaunchResidentFlash<Warpgroups, kMask, kSoftmax>(
+  LaunchResidentFlash<Warpgroups, kMask, kSoftmax, kTrim, kGuard>(
       1, device_q, device_k, device_v, device_out, device_row_sums, tiles,
       kFlashScale);
   SyncFlash("resident warpgroups=" + std::to_string(Warpgroups) +
@@ -2929,54 +2996,59 @@ std::pair<std::size_t, double> CheckSharedValue(
 // The opt-in shared-memory request, the launch, and the registers of the
 // engine-fed tile.
 template <int Consumers, int Stages, bool kMask, bool kSoftmax = true,
-          bool kWarpTranspose = false, bool kConsumerTranspose = false>
+          bool kWarpTranspose = false, bool kConsumerTranspose = false,
+          bool kTrim = false, bool kGuard = false>
 void SetEngineFlashSharedMemory() {
   constexpr int kShared = EngineFlashBytes(Consumers, Stages);
   cudaFuncSetAttribute(
       reinterpret_cast<const void*>(
           EngineFlashKernel<Consumers, Stages, kMask, kSoftmax, kWarpTranspose,
-                            kConsumerTranspose>),
+                            kConsumerTranspose, kTrim, kGuard>),
       cudaFuncAttributeMaxDynamicSharedMemorySize, kShared);
 }
 
 template <int Consumers, int Stages, bool kMask, bool kSoftmax = true,
-          bool kWarpTranspose = false, bool kConsumerTranspose = false>
+          bool kWarpTranspose = false, bool kConsumerTranspose = false,
+          bool kTrim = false, bool kGuard = false>
 void LaunchEngineFlash(int blocks, int tiles, const Bf16* device_q,
                        const CUtensorMap& key_low, const CUtensorMap& key_high,
                        const CUtensorMap& value_low,
                        const CUtensorMap& value_high, float* device_out) {
   constexpr int kShared = EngineFlashBytes(Consumers, Stages);
   EngineFlashKernel<Consumers, Stages, kMask, kSoftmax, kWarpTranspose,
-                    kConsumerTranspose>
+                    kConsumerTranspose, kTrim, kGuard>
       <<<blocks, (1 + Consumers) * kWarpgroupThreads, kShared>>>(
           device_q, key_low, key_high, value_low, value_high, device_out, tiles,
           kFlashScale);
 }
 
 template <int Consumers, int Stages, bool kMask, bool kSoftmax = true,
-          bool kWarpTranspose = false, bool kConsumerTranspose = false>
+          bool kWarpTranspose = false, bool kConsumerTranspose = false,
+          bool kTrim = false, bool kGuard = false>
 int EngineFlashRegisters() {
   return CompilerRegisters(reinterpret_cast<const void*>(
       EngineFlashKernel<Consumers, Stages, kMask, kSoftmax, kWarpTranspose,
-                        kConsumerTranspose>));
+                        kConsumerTranspose, kTrim, kGuard>));
 }
 
 // One step of the engine-fed tile against the resident step of the same
 // operands: a wrong swizzled key reading, a wrong panel step, or a wrong
 // transposition fails here instead of measuring.
 template <int Consumers, int Stages, bool kMask, bool kWarpTranspose = false,
-          bool kConsumerTranspose = false>
+          bool kConsumerTranspose = false, bool kTrim = false,
+          bool kGuard = false>
 std::pair<std::size_t, double> CheckEngineFlash(
     const Bf16* device_queries, const CUtensorMap& key_low,
     const CUtensorMap& key_high, const CUtensorMap& value_low,
     const CUtensorMap& value_high, float* device_out,
     const std::vector<float>& reference, double scale) {
   SetEngineFlashSharedMemory<Consumers, Stages, kMask, /*kSoftmax=*/true,
-                             kWarpTranspose, kConsumerTranspose>();
+                             kWarpTranspose, kConsumerTranspose, kTrim,
+                             kGuard>();
   LaunchEngineFlash<Consumers, Stages, kMask, /*kSoftmax=*/true, kWarpTranspose,
-                    kConsumerTranspose>(1, /*tiles=*/1, device_queries, key_low,
-                                        key_high, value_low, value_high,
-                                        device_out);
+                    kConsumerTranspose, kTrim, kGuard>(
+      1, /*tiles=*/1, device_queries, key_low, key_high, value_low, value_high,
+      device_out);
   SyncFlash("engine-fed tile consumers=" + std::to_string(Consumers));
   const std::vector<float> staged =
       ReadBack(device_out, Consumers * kProductSlots);
@@ -3394,10 +3466,11 @@ int StagedRegisters() {
 }
 
 // The registers of one resident flash instantiation, read from the build.
-template <int Warpgroups, bool kMask, bool kSoftmax>
+template <int Warpgroups, bool kMask, bool kSoftmax, bool kTrim = false,
+          bool kGuard = false>
 int ResidentFlashRegisters() {
   return CompilerRegisters(reinterpret_cast<const void*>(
-      ResidentFlashKernel<Warpgroups, kMask, kSoftmax>));
+      ResidentFlashKernel<Warpgroups, kMask, kSoftmax, kTrim, kGuard>));
 }
 
 // The registers of one staged flash instantiation, read from the build. Both
@@ -4499,6 +4572,16 @@ int main(int argc, char** argv) {
     SetFlashSharedMemory<2, false>();
     SetFlashSharedMemory<1, true>();
     SetFlashSharedMemory<2, true>();
+    // The window belongs to one instantiation, so the trimmed step of the same
+    // geometry states it again before its own check.
+    SetFlashSharedMemory<1, false, /*kSoftmax=*/true, /*kTrim=*/true,
+                         /*kGuard=*/true>();
+    SetFlashSharedMemory<1, true, /*kSoftmax=*/true, /*kTrim=*/true,
+                         /*kGuard=*/true>();
+    SetFlashSharedMemory<2, false, /*kSoftmax=*/true, /*kTrim=*/true,
+                         /*kGuard=*/true>();
+    SetFlashSharedMemory<2, true, /*kSoftmax=*/true, /*kTrim=*/true,
+                         /*kGuard=*/true>();
 
     Random flash_random;
     auto draw = [&](std::vector<nanochat::Bf16>* values) {
@@ -4531,8 +4614,11 @@ int main(int argc, char** argv) {
     Upload(flash_q, device_q);
     Upload(flash_k, device_k);
     Upload(flash_v, device_value);
-    auto check_mask = [&](auto mask_constant) {
+    auto check_mask = [&](auto mask_constant, auto trim_constant,
+                          auto guard_constant) {
       constexpr bool kMask = decltype(mask_constant)::value;
+      constexpr bool kTrim = decltype(trim_constant)::value;
+      constexpr bool kGuard = decltype(guard_constant)::value;
       // One head and one batch. The dense check sees every key. The causal
       // check sees the keys up to the row's own index, which is the boundary
       // tile of a query block that starts at the key tile.
@@ -4550,8 +4636,9 @@ int main(int argc, char** argv) {
       const std::vector<float> reference =
           nanochat::dev::seqref::AttentionForward(
               params, reference_q, reference_k, reference_v, &reference_stats);
-      const std::vector<float> slots = RunResidentFlash<1, kMask>(
-          device_q, device_k, device_value, device_out, device_row_sums);
+      const std::vector<float> slots =
+          RunResidentFlash<1, kMask, /*kSoftmax=*/true, kTrim, kGuard>(
+              device_q, device_k, device_value, device_out, device_row_sums);
       const std::vector<float> row_sums = ReadBack(device_row_sums, kAtomM);
       double scale_seen = 0.0;
       for (float value : reference) {
@@ -4594,12 +4681,13 @@ int main(int argc, char** argv) {
       const double error = scale_seen > 0.0 ? worst / scale_seen : 0.0;
       const bool passed = error < 3e-2 && sum_worst < 3e-2;
       note(
-          "attention-flash:reference_check mask=%s error=%.3e sum_error=%.3e "
-          "scale=%.3f bad=%zu of %d status=%s\n",
-          kMask ? "causal" : "dense", error, sum_worst, scale_seen, bad,
-          kAtomM * kDim, passed ? "ok" : "failed");
-      const std::string key =
-          std::string("flash_check:") + (kMask ? "causal:" : "dense:");
+          "attention-flash:reference_check mask=%s trim=%s error=%.3e "
+          "sum_error=%.3e scale=%.3f bad=%zu of %d status=%s\n",
+          kMask ? "causal" : "dense", kTrim ? "on" : "off", error, sum_worst,
+          scale_seen, bad, kAtomM * kDim, passed ? "ok" : "failed");
+      const std::string key = std::string("flash_check:") +
+                              (kMask ? "causal:" : "dense:") +
+                              (kTrim ? "trim:" : "") + (kGuard ? "guard:" : "");
       report.SetExtra(key + "error", error);
       report.SetExtra(key + "sum_error", sum_worst);
       report.SetExtra(key + "scale", scale_seen);
@@ -4608,8 +4696,21 @@ int main(int argc, char** argv) {
       report.SetExtraText(key + "status", passed ? "ok" : "failed");
       return passed;
     };
-    ok = ok && check_mask(std::integral_constant<bool, false>{});
-    ok = ok && check_mask(std::integral_constant<bool, true>{});
+    ok = ok && check_mask(std::integral_constant<bool, false>{},
+                          std::integral_constant<bool, false>{},
+                          std::integral_constant<bool, false>{});
+    ok = ok && check_mask(std::integral_constant<bool, true>{},
+                          std::integral_constant<bool, false>{},
+                          std::integral_constant<bool, false>{});
+    // The same 2 checks on the trimmed step, because 3 of its 4 changes touch
+    // the arithmetic the reference states: the flushed exponential, the folded
+    // scale, and the skipped rescale.
+    ok = ok && check_mask(std::integral_constant<bool, false>{},
+                          std::integral_constant<bool, true>{},
+                          std::integral_constant<bool, true>{});
+    ok = ok && check_mask(std::integral_constant<bool, true>{},
+                          std::integral_constant<bool, true>{},
+                          std::integral_constant<bool, true>{});
 
     // The staged rows read one query tile a warpgroup from `device_queries`, so
     // the check states a distinct tile for every warpgroup of the deepest
@@ -4746,6 +4847,36 @@ int main(int argc, char** argv) {
           check_transpose(std::integral_constant<bool, false>{});
           check_transpose(std::integral_constant<bool, true>{});
           {
+            // The trimmed step against the trimmed resident step of the same
+            // operands, so the ring, the swizzled key reading, and the
+            // transposition are still checked exactly under the arithmetic the
+            // timed trimmed row states.
+            const std::vector<float> trimmed_resident =
+                RunResidentFlash<kMaxWarpgroups, kMask, /*kSoftmax=*/true,
+                                 /*kTrim=*/true, /*kGuard=*/true>(
+                    device_queries, device_k, device_value, device_out,
+                    device_row_sums);
+            const std::pair<std::size_t, double> trimmed =
+                CheckEngineFlash<kMaxWarpgroups, 2, kMask,
+                                 /*kWarpTranspose=*/false,
+                                 /*kConsumerTranspose=*/false,
+                                 /*kTrim=*/true, /*kGuard=*/true>(
+                    device_queries, key_low, key_high, value_low, value_high,
+                    device_out, trimmed_resident, /*scale=*/1.0);
+            const std::string trimmed_key =
+                std::string("flash_engine_check:trim:") +
+                (kMask ? "causal:" : "dense:");
+            note(
+                "attention-flash:engine_check consumers=%d stages=2 "
+                "trim=on mask=%s error=%.3e bad=%zu of %d status=%s\n",
+                kMaxWarpgroups, kMask ? "causal" : "dense", trimmed.second,
+                trimmed.first, kMaxWarpgroups * static_cast<int>(kProductSlots),
+                trimmed.second < 1e-6 ? "ok" : "failed");
+            report.SetExtra(trimmed_key + "error", trimmed.second);
+            report.SetExtraInt(trimmed_key + "bad",
+                               static_cast<long long>(trimmed.first));
+            engine_ok = engine_ok && trimmed.second < 1e-6;
+
             const std::pair<std::size_t, double> result =
                 CheckEngineFlash<kMaxWarpgroups, 2, kMask,
                                  /*kWarpTranspose=*/false,
@@ -5362,30 +5493,37 @@ int main(int argc, char** argv) {
     // tile each, and one `FlashStep` a tile. The warpgroup count is the overlap
     // the step has, because two warpgroups on one multiprocessor interleave
     // their chains, so this is the row that separates the cost of the chain
-    // from the cost of the copies.
+    // from the cost of the copies. The untrimmed row and the trimmed row beside
+    // it are the same geometry and the same build, so their difference is the
+    // price of the 3 levers of `FlashStep` and not of the card.
     auto add_flash_resident = [&](auto warpgroups, auto mask_constant,
-                                  auto softmax_constant, int blocks) {
+                                  auto softmax_constant, int blocks,
+                                  auto trim_constant, auto guard_constant) {
       constexpr int kWarpgroups = decltype(warpgroups)::value;
       constexpr bool kMask = decltype(mask_constant)::value;
       constexpr bool kSoftmax = decltype(softmax_constant)::value;
+      constexpr bool kTrim = decltype(trim_constant)::value;
+      constexpr bool kGuard = decltype(guard_constant)::value;
       const ShapeSpec& shape_row =
           FindShape(ShapeKind::kFlashResident, kWarpgroups, 1, kAtomN, 1);
-      if (!admit(shape_row,
-                 ResidentFlashRegisters<kWarpgroups, kMask, kSoftmax>())) {
+      if (!admit(shape_row, ResidentFlashRegisters<kWarpgroups, kMask, kSoftmax,
+                                                   kTrim, kGuard>())) {
         return;
       }
-      SetFlashSharedMemory<kWarpgroups, kMask, kSoftmax>();
+      SetFlashSharedMemory<kWarpgroups, kMask, kSoftmax, kTrim, kGuard>();
       const std::string shape =
           "blocks=" + std::to_string(blocks) +
           " tiles=" + std::to_string(flash_tiles) +
           " warpgroups=" + std::to_string(kWarpgroups) +
           " atoms=8+8 mask=" + (kMask ? "causal" : "dense") +
-          " softmax=" + (kSoftmax ? "on" : "off");
+          " softmax=" + (kSoftmax ? "on" : "off") +
+          (kTrim ? " trim=on" : " trim=off") +
+          (kGuard ? " guard=on" : " guard=off");
       const double flops =
           2.0 * FlopsPerPass(kAtoms) * static_cast<double>(flash_tiles) *
           static_cast<double>(blocks) * static_cast<double>(kWarpgroups);
       const nanochat::dev::Timing timing = harness.Time([&] {
-        LaunchResidentFlash<kWarpgroups, kMask, kSoftmax>(
+        LaunchResidentFlash<kWarpgroups, kMask, kSoftmax, kTrim, kGuard>(
             blocks, device_queries, device_k, device_value, device_out,
             /*device_row_sums=*/nullptr, flash_tiles, kFlashScale);
       });
@@ -5398,15 +5536,20 @@ int main(int argc, char** argv) {
       row.work_ratio = kMask ? 256.0 / (kWarpgroups * kAtomM + 1) : 1.0;
       const double rate = add_rate_row(row, timing, flops);
       const double share = sm_share(flops, timing.min_ms);
-      report.SetExtra(std::string("flash_resident:warpgroups") +
-                          std::to_string(kWarpgroups) + ":blocks" +
-                          std::to_string(blocks) +
-                          (kMask ? ":causal" : ":dense") +
-                          (kSoftmax ? ":on" : ":off") + ":sm_share",
-                      share);
+      report.SetExtra(
+          std::string("flash_resident:warpgroups") +
+              std::to_string(kWarpgroups) + ":blocks" + std::to_string(blocks) +
+              (kMask ? ":causal" : ":dense") + (kSoftmax ? ":on" : ":off") +
+              (kTrim ? ":trim" : ":plain") + (kGuard ? ":guard" : ":noguard") +
+              ":sm_share",
+          share);
       // The chain row is the one rate of the shape, because the softmax-off row
-      // beside it prices the step without the softmax and not the step.
-      if (kSoftmax) shapes.Measure(shape_row, rate * kTflopsPerGflops);
+      // beside it prices the step without the softmax and not the step. A
+      // trimmed row states its rate alone, so the shape table keeps the row the
+      // recorded baselines hold.
+      if (kSoftmax && !kTrim) {
+        shapes.Measure(shape_row, rate * kTflopsPerGflops);
+      }
       note(
           "attention-flash:resident %s min=%.3f ms median=%.3f ms "
           "tflops=%.1f sm_share=%.3f\n",
@@ -5419,18 +5562,45 @@ int main(int argc, char** argv) {
     const std::integral_constant<bool, true> kCausal{};
     const std::integral_constant<bool, true> kChain{};
     const std::integral_constant<bool, false> kNoChain{};
-    add_flash_resident(kOneWarpgroup, kDense, kChain, 1);
-    add_flash_resident(kOneWarpgroup, kDense, kChain, sm_count);
-    add_flash_resident(kOneWarpgroup, kCausal, kChain, sm_count);
+    const std::integral_constant<bool, false> kPlain{};
+    const std::integral_constant<bool, false> kUnguarded{};
+    add_flash_resident(kOneWarpgroup, kDense, kChain, 1, kPlain, kUnguarded);
+    add_flash_resident(kOneWarpgroup, kDense, kChain, sm_count, kPlain,
+                       kUnguarded);
+    add_flash_resident(kOneWarpgroup, kCausal, kChain, sm_count, kPlain,
+                       kUnguarded);
     // The ceiling of the chain: the two products and the conversion, with no
     // softmax between them. The gap to the row above is what the chain costs.
-    add_flash_resident(kOneWarpgroup, kDense, kNoChain, sm_count);
+    add_flash_resident(kOneWarpgroup, kDense, kNoChain, sm_count, kPlain,
+                       kUnguarded);
     // The same three rows at the overlap two warpgroups give, so a reader reads
     // how much of the chain's cost the interleave hides before any copy path
     // holds a byte.
-    add_flash_resident(kTwoWarpgroups, kDense, kChain, sm_count);
-    add_flash_resident(kTwoWarpgroups, kCausal, kChain, sm_count);
-    add_flash_resident(kTwoWarpgroups, kDense, kNoChain, sm_count);
+    add_flash_resident(kTwoWarpgroups, kDense, kChain, sm_count, kPlain,
+                       kUnguarded);
+    add_flash_resident(kTwoWarpgroups, kCausal, kChain, sm_count, kPlain,
+                       kUnguarded);
+    add_flash_resident(kTwoWarpgroups, kDense, kNoChain, sm_count, kPlain,
+                       kUnguarded);
+    // The same rows with the 3 levers of `FlashStep`: the exponential as 1
+    // instruction, the score scale folded into it, and the rescale of the
+    // output accumulator skipped when a row maximum did not move. The guard is
+    // 1 row on its own, because its saving is data dependent and a timed row
+    // repeats 1 key tile.
+    const std::integral_constant<bool, true> kTrimmed{};
+    const std::integral_constant<bool, true> kGuarded{};
+    add_flash_resident(kTwoWarpgroups, kDense, kChain, sm_count, kTrimmed,
+                       kUnguarded);
+    add_flash_resident(kTwoWarpgroups, kDense, kChain, sm_count, kTrimmed,
+                       kGuarded);
+    add_flash_resident(kTwoWarpgroups, kCausal, kChain, sm_count, kTrimmed,
+                       kGuarded);
+    add_flash_resident(kOneWarpgroup, kDense, kChain, sm_count, kTrimmed,
+                       kGuarded);
+    // The trimmed chain against the untrimmed ceiling, so a reader separates
+    // what the scalar pipes cost from what they must cost.
+    add_flash_resident(kTwoWarpgroups, kDense, kNoChain, sm_count, kTrimmed,
+                       kGuarded);
 
     // The copies alone, so a reader divides a staged rate by the cap of the
     // path that carries it. The two ring contents are two rows, because the
@@ -5737,12 +5907,16 @@ int main(int argc, char** argv) {
     if (built && admit(shape_row, registers)) {
       const int engine_tiles = 4096;
       auto add_engine_step = [&](auto mask_constant, auto softmax_constant,
-                                 auto warp_constant) {
+                                 auto warp_constant, auto trim_constant,
+                                 auto guard_constant) {
         constexpr bool kMask = decltype(mask_constant)::value;
         constexpr bool kSoftmax = decltype(softmax_constant)::value;
         constexpr bool kWarp = decltype(warp_constant)::value;
-        SetEngineFlashSharedMemory<kWarpgroups, kRing, kMask, kSoftmax,
-                                   kWarp>();
+        constexpr bool kTrim = decltype(trim_constant)::value;
+        constexpr bool kGuard = decltype(guard_constant)::value;
+        SetEngineFlashSharedMemory<kWarpgroups, kRing, kMask, kSoftmax, kWarp,
+                                   /*kConsumerTranspose=*/false, kTrim,
+                                   kGuard>();
         const double flops =
             2.0 * FlopsPerPass(kAtoms) * static_cast<double>(engine_tiles) *
             static_cast<double>(kWarpgroups) * static_cast<double>(sm_count);
@@ -5753,24 +5927,33 @@ int main(int argc, char** argv) {
                                   " mask=" + (kMask ? "causal" : "dense") +
                                   " softmax=" + (kSoftmax ? "on" : "off") +
                                   " staging=engine producers=1warpgroup" +
-                                  " transpose=" + (kWarp ? "warp" : "thread");
+                                  " transpose=" + (kWarp ? "warp" : "thread") +
+                                  (kTrim ? " trim=on" : " trim=off") +
+                                  (kGuard ? " guard=on" : " guard=off");
         nanochat::BenchRow row =
             make_row("attention-flash:staged", shape, "flash");
         row.work_ratio = kMask ? 256.0 / (kWarpgroups * kAtomM + 1) : 1.0;
         const double rate = add_product_rate(
             row, "flash_staged:", shape, flops,
             128.0 * static_cast<double>(kWarpgroups) / 2.0, [&] {
-              LaunchEngineFlash<kWarpgroups, kRing, kMask, kSoftmax, kWarp>(
+              LaunchEngineFlash<kWarpgroups, kRing, kMask, kSoftmax, kWarp,
+                                /*kConsumerTranspose=*/false, kTrim, kGuard>(
                   sm_count, engine_tiles, device_queries, key_low, key_high,
                   value_low, value_high, device_out);
             });
-        if (kSoftmax) shapes.Measure(shape_row, rate * kTflopsPerGflops);
+        if (kSoftmax && !kTrim) {
+          shapes.Measure(shape_row, rate * kTflopsPerGflops);
+        }
       };
       auto add_both = [&](auto mask_constant, auto softmax_constant) {
         add_engine_step(mask_constant, softmax_constant,
+                        std::integral_constant<bool, false>{},
+                        std::integral_constant<bool, false>{},
                         std::integral_constant<bool, false>{});
         add_engine_step(mask_constant, softmax_constant,
-                        std::integral_constant<bool, true>{});
+                        std::integral_constant<bool, true>{},
+                        std::integral_constant<bool, false>{},
+                        std::integral_constant<bool, false>{});
       };
       auto add_consumer = [&](auto mask_constant) {
         constexpr bool kMask = decltype(mask_constant)::value;
@@ -5809,6 +5992,24 @@ int main(int argc, char** argv) {
                std::integral_constant<bool, true>{});
       add_both(std::integral_constant<bool, false>{},
                std::integral_constant<bool, false>{});
+      // The engine-fed tile with the 3 levers of `FlashStep`. The two
+      // untrimmed rows above are its control, and the row with the softmax off
+      // is the ceiling it is measured against.
+      add_engine_step(std::integral_constant<bool, false>{},
+                      std::integral_constant<bool, true>{},
+                      std::integral_constant<bool, false>{},
+                      std::integral_constant<bool, true>{},
+                      std::integral_constant<bool, true>{});
+      add_engine_step(std::integral_constant<bool, true>{},
+                      std::integral_constant<bool, true>{},
+                      std::integral_constant<bool, false>{},
+                      std::integral_constant<bool, true>{},
+                      std::integral_constant<bool, true>{});
+      add_engine_step(std::integral_constant<bool, false>{},
+                      std::integral_constant<bool, true>{},
+                      std::integral_constant<bool, true>{},
+                      std::integral_constant<bool, true>{},
+                      std::integral_constant<bool, true>{});
     }
   }
 
