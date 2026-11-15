@@ -63,6 +63,13 @@ run of one binary per row on an NVIDIA H100 80GB HBM3 at `sm_90a`, bf16.
 
 The per-SM share is the declared peak over 132 SMs. The card reported 132 SMs.
 
+The `wgmma:1block` row is retired from the source. The `wgmma:grid` row states
+the peak against the card, and a card at its declared peak leaves no headroom
+that one block's fraction can report. The figure above stays as the record of
+the run that measured it, and the one-warpgroup claim is still measured by the
+`attention-wgmma:resident` row of the H1 set, which launches one block beside
+the same kernel on the whole card.
+
 **The statistic.** Each row is the minimum of three windows, and each window
 holds three calls, so the time is a steady state and not one launch. The
 second-level cache is flushed before every call, and the measured cost of one

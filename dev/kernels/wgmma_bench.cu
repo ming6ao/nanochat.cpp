@@ -5151,7 +5151,12 @@ int main(int argc, char** argv) {
         sm_share(narrow_flops, narrow_timing.min_ms));
   }
   if (options.phase0()) {
-    add_resident("wgmma:1block", kHalfAtoms, 1, 1);
+    // One row, because the full grid answers the question on its own: a card at
+    // its declared peak carries no room above it, so no one-block row can state
+    // a fraction the grid row does not already state. The one-warpgroup claim
+    // stays measured by the `attention-wgmma:resident` row of the H1 set, which
+    // launches one block over the eight-atom tile and reports its share of the
+    // per-SM peak.
     add_resident("wgmma:grid", kHalfAtoms, 2 * sm_count, 2);
   }
 

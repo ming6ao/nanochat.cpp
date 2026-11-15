@@ -320,21 +320,28 @@ hand-written pieces and no library:
 
 The probe checks the product one element at a time against a host reference
 before it reports a rate, so a descriptor that reads the wrong element fails the
-check instead of producing a number. It then reports four resident rows. Eight
+check instead of producing a number. It then reports three resident rows. Eight
 atoms per pass, which is the head width, on one block and on one block per SM,
-are the H1 rows of Part 8. Four atoms per pass on one block, and on two per SM,
-are the Phase 0 rows of Part 3. The two prefixes keep the two card jobs apart.
+are the H1 rows of Part 8. Four atoms per pass on two blocks per SM is the Phase
+0 row of Part 3. The two prefixes keep the two card jobs apart.
 
-**The Phase 0 gate is a rate for each SM, not a rate for the card.** One
-warpgroup cannot exceed its SM's share of the peak, which is 989 TFLOP/s over
-132 SMs, or 7.49 TFLOP/s. The gate reads 85 percent of that share on the
-`wgmma:1block` row. The `wgmma:grid` row cannot answer it, because two
-warpgroups fill an SM whether or not either one could fill it alone.
+**The Phase 0 row is the card, and the card is the gate.** The declared peak is
+989 TFLOP/s over 132 multiprocessors (`backends/cuda/caps.json`), so the gate
+reads the recorded peak against the card, not against one multiprocessor. The
+`wgmma:grid` row states it: two warpgroups on every multiprocessor. A separate
+one-block row was retired, because a card at its declared peak leaves no headroom
+that a single-block fraction could report. The one-warpgroup claim is still
+measured, by the `attention-wgmma:resident` row of the H1 set: one block over
+the eight-atom tile, beside the same kernel on the whole card.
 
 WGMMA is architecture conditional and the tree's device configurations emit
 `sm_90`, so the one target states `archs = ["sm_90a"]` for itself and no build
 command carries a flag. It carries the `gpu` and `manual` tags, and the
-emulation engine maps no WGMMA, so there is no off-device leg.
+emulation engine maps WGMMA through
+`backends/cuda/kernels/hopper_ops.cuh` (section 9.5 of
+[simulator.md](../../docs/simulator.md)), and this probe states its instructions
+as inline assembly, so it has no off-device leg until it is rewritten onto that
+header.
 
 **The timing is the shared protocol.** `wgmma_bench` times through
 `backends/cuda/kernels/testing/bench_protocol.h`, as
