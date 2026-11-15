@@ -22,6 +22,12 @@
 
 #include "tools/cuda_sim/emu/cuda_emu.h"
 
+// The Hopper interface (`backends/cuda/kernels/hopper_ops.cuh`) selects its arm
+// on this symbol, exactly as it selects the device arm on `__CUDA_ARCH__`. An
+// emulated translation unit is the only one that defines it, so a kernel body
+// reaches the host arm here and the instruction there.
+#define NANOCHAT_HOPPER_EMU_ARM 1
+
 #define RmsNormForward EmuRmsNormForward
 #define RmsNormBackward EmuRmsNormBackward
 #define RmsNormForwardFusedResidual EmuRmsNormForwardFusedResidual

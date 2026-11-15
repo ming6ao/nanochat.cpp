@@ -989,8 +989,11 @@ one for one.
 
 Phase 1 keeps the emulated correctness leg, because the emulator maps
 `ldmatrix` and `mma.sync`. Phase 2 has none, and the CUTLASS route makes that a
-consequence rather than a choice. The engine maps no Tensor Memory Accelerator
-and no warpgroup instruction, so the hand tile stays as the off-device leg.
+consequence rather than a choice. The engine maps both mechanisms through
+`backends/cuda/kernels/hopper_ops.cuh` (section 9.5 of
+[simulator.md](simulator.md)), and NVIDIA CUTLASS states its instructions as its
+own inline assembly, so no CUTLASS source can call that header. The hand tile
+therefore stays as the off-device leg.
 Section 10.1 records it.
 
 **Gate 0 is a rate for each SM and not for the card.** One warpgroup on one SM
@@ -1169,17 +1172,23 @@ launch cost, so no mainloop change wins it. It passes when the difference is
 | `backends/cuda/gemm/**` | The two new mainloops, and the resolver that replaces the verdict | Kernel agent |
 | `third_party/cutlass.bzl`, `MODULE.bazel` | The pinned CUTLASS headers as `@cutlass`; done in phase 0 | Build |
 | `.bazelrc` | Unchanged: the Hopper target names `archs = ["sm_90a"]` on itself | Build |
-| `tools/cuda_sim/**` | The WGMMA and TMA mapping, if phase 2 is to keep an emulated leg | Simulator |
+| `tools/cuda_sim/**` | Done: the four Hopper mechanisms, section 9.5 of [simulator.md](simulator.md) | Simulator |
 | `backends/cuda/gemm/README.md` | The record of the removal replaces the record of the rejection | Kernel agent |
 | `docs/tensor-core-gemm-plan.md` | Retired into this part, per [README.md](README.md) § How to add a document, and to retire one | Architect |
 
 ### 9. Risks and stop conditions
 
-1. **The emulator is the schedule risk.** WGMMA, TMA, `mbarrier`, and dynamic
-   shared memory are all unmapped (section 9.2 of [simulator.md](simulator.md)).
-   Either the Simulator workstream lands them before phase 2, or the Hopper
-   mainloop keeps a device-only gate. Decide before phase 2 starts, because the
-   second choice removes the tree's cheap correctness leg.
+1. **The emulator is no longer the schedule risk, and it is partial.** The four
+   mechanisms are mapped in `tools/cuda_sim/emu/` and its acceptance check
+   `//tools/cuda_sim/emu:hopper_emu_test` rides the default loop (section 9.5 of
+   [simulator.md](simulator.md)). So a Hopper tile has an off-device leg for its
+   addressing, its descriptors, its operand forms, and its staging. It has none
+   for a fence, a wait, a transaction count, a register count, or a rate: those
+   complete at the point of issue here. One source is still not emulated, and
+   that is `dev/kernels/wgmma_bench.cu`, whose instructions are inline assembly
+   and not calls to `hopper_ops.cuh`. Rewriting the probe onto the header is what
+   makes its recorded rows run on the CPU. The header is also what makes that a
+   mechanical change and not a second implementation.
 2. **`sm_90a` is a new architecture string, and it is settled.** WGMMA is an
    architecture conditional instruction, and `.bazelrc` emits `sm_90` today.
    `//dev/cutlass:cutlass_probe_lib` closes this by naming the architecture on

@@ -1417,9 +1417,15 @@ size, so the tile cannot reach the probe's rate.
   and writes shared memory instead of global memory.
 - **The seam change is a frozen header.** Decision H6 moves four definition
   sites, one of which is another workstream's.
-- **The simulator has no leg.** The emulation engine maps no warpgroup
-  instruction, as [simulator.md](simulator.md) records, so this path's
-  correctness rests on the card test and the host reference.
+- **The simulator has a leg for addressing and none for time.** Section 9.5 of
+  [simulator.md](simulator.md) maps the warpgroup product, the tiled copy, the
+  `mbarrier` object, and the named barrier. So the CPU now checks the operand
+  forms of section 5, the descriptor fields, and the staged regions. Every
+  asynchronous step completes at the point of issue there, so a missing fence, a
+  missing wait, and a transaction count stay unchecked. The probe of
+  `dev/kernels/wgmma_bench.cu` states its instructions as inline assembly and
+  not as calls to `backends/cuda/kernels/hopper_ops.cuh`. It therefore has no
+  emulated leg until it is rewritten onto that header.
 
 ## See also
 

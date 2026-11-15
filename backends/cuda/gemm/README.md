@@ -665,9 +665,12 @@ and the tree builds with `-Werror`.
 
 **What is still not here.**
 - A rate. `dev/cutlass` and this file measure nothing; `gemm_benchmark` does.
-- An emulated leg. The engine maps no Tensor Memory Accelerator and no warpgroup
-  instruction, so `cutlass_bf16.cu` is card-only and the hand tile stays as the
-  off-device gate.
+- An emulated leg. The engine maps the Tensor Memory Accelerator and the
+  warpgroup instruction through `backends/cuda/kernels/hopper_ops.cuh`
+  (section 9.5 of [simulator.md](../../docs/simulator.md)), and this adapter
+  drives NVIDIA CUTLASS, whose instructions are its own inline assembly and not
+  calls to that header. So `cutlass_bf16.cu` is card-only and the hand tile stays
+  as the off-device gate.
 - The fp8, stream-K, and grouped tiers of phase 4.
 
 ## 17. The candidate registry and the sweep

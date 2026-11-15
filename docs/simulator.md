@@ -501,6 +501,16 @@ The header maps these constructs:
 | `backends/cuda/kernels/mma_ops.cuh` | the fp8 micro-tile of 16 by 8 by 32, decoded through `include/nanochat/fp8.h`. Its `mma.sync` arm is absent until the fp8 campaign has a card for it |
 | `extern __shared__` | a pointer at the block's dynamic buffer, through the executed-source rewrite in `tools/cuda_sim/emu/BUILD.bazel` (Part 7, section 6.2). The attention forward, the ResFormer value gate, and the hand GEMM of `backends/cuda/gemm/` take it |
 | `__syncwarp` and `cudaFuncSetAttribute` | a warp barrier with the arrival count a shuffle already needs, and an accepted call with no effect, because the emulation has no shared-memory budget to raise |
+| `__grid_constant__`, `__align__`, `__int_as_float` | an empty qualifier, an empty alignment, and the bit casts, because the emulation passes a parameter by value and has no constant bank |
+| `<cuda.h>` and `cuTensorMapEncodeTiled` | the driver's map as a hundred and twenty-eight opaque bytes, and an encoder that applies the driver's own refusals. The fields live in a registry keyed by a serial number in the envelope, so a map survives a copy and a kernel capture (section 9.5) |
+| `backends/cuda/kernels/hopper_ops.cuh` | the four Hopper mechanisms: the warpgroup product in both key widths and both operand forms, the tiled copy of rank two to five with the 128-byte swizzle, the `mbarrier` object, the named barrier, and the register budget (section 9.5) |
+
+```cpp
+// The facility a kernel declares before it stages an operand. The device arm of
+// this call is empty; the emulation registers the region, so a descriptor that
+// names bytes outside it fails here and not on a card.
+hopper::DeclareSharedOperand(stage, bytes);
+```
 
 The hand GEMM of `backends/cuda/gemm/` runs under this mapping with its staged
 window in dynamic shared memory, so the off-device leg covers the same source
@@ -508,8 +518,9 @@ the card runs, four stages of the wide schedule included. See
 `docs/tensor-core-gemm-plan.md` Part A and section 13 of
 `backends/cuda/gemm/README.md`.
 
-Not yet mapped: texture and surface objects, and `__constant__` arrays. Those
-families are outside the first cut.
+Not yet mapped: texture and surface objects, `__constant__` arrays, and the
+cluster forms of the tiled copy (`cp.async.bulk.tensor` with a multicast mask)
+and of `setmaxnreg` across a cluster. Those families are outside the first cut.
 
 9.3 Acceptance
 
@@ -539,6 +550,59 @@ below 64 to stay inside the `small` test budget.
 - **The wait.** `__pipeline_wait_prior` completes every copy at the call, so a
 missing or too weak a wait is invisible here. One call carries that risk, and the
 tile makes it once.
+- **The Hopper mechanisms complete at the point of issue.** Section 9.5 states
+it: a `mbarrier` wait, a `wgmma` commit, and a tiled copy all finish where they
+are written, so a tile that forgets one still computes the right answer on the
+CPU. The addressing is what the mapping checks, and a card run still decides the
+rest.
+
+### 9.5 The four Hopper mechanisms
+
+`backends/cuda/kernels/hopper_ops.cuh` is one interface with three arms, the way
+`mma_bf16.cuh` wraps the `ldmatrix` and `mma.sync` pair. A device build compiles
+the instructions at `__CUDA_ARCH__ >= 900`. An emulated translation unit compiles
+the host arm, because `emu_prelude.h` defines `NANOCHAT_HOPPER_EMU_ARM`. A host
+pass of nvcc compiles an empty arm, so a kernel body is one text for all three.
+
+| Mechanism | The device | The emulation |
+|---|---|---|
+| The warpgroup product | `wgmma.mma_async.m64n128k16` and its narrow form, and the register-operand form | Each thread computes the accumulator slots its lane owns, from the lane map the probe measured. The cost is the instruction's own arithmetic and not the warp width times it |
+| The descriptor | A sixty-four-bit field encoding, sixteen bytes to the address unit | The same encoding and the same fields, decoded. A field the fourteen bits cannot hold, or a leading or stride offset that is not a multiple of sixteen bytes, is refused |
+| The tiled copy | `cp.async.bulk.tensor.Nd` with `mbarrier::complete_tx::bytes` | The box the map states, in the map's axis order, with the 128-byte swizzle on the rank-two panel and a zero fill past an extent |
+| The `mbarrier` object | Eight bytes of shared memory | The same eight bytes: the arrival count, the arm count, the pending transaction bytes, and the phase bit. A wait blocks the fiber, and the scheduler re-tests the object. A handoff then makes progress, and a real deadlock still aborts |
+
+**What this checks that a rate cannot.** The check is bounds: every operand byte
+a product reads resolves through the registered staging region of the block. A
+read outside that region aborts with the descriptor, the layout, the row, and the
+region. The probe of `dev/kernels/wgmma_bench.cu` found three defects on a card,
+and every one was addressing. Two of them fail on the CPU through this mapping:
+the one that walked four times past its operand, and the one that confused a
+stride with a whole tile.
+
+**What it cannot check.** Every asynchronous step completes at the point of
+issue, because the engine has no second thread of control to defer it to. A
+missing fence, a missing wait, and a transaction count that does not match the
+copy are therefore invisible, as `__pipeline_wait_prior` already is. Registers,
+occupancy, bank conflicts, and rate are invisible for the same reason a rate is.
+The card stays the gate for those, and this mapping removes the addressing class
+of defect from the card's queue.
+
+**The cost.** One fiber per CUDA thread, so a row of the probe at its recorded
+iteration count is out of reach. A check runs a tile, not a benchmark, and the
+iteration count of an emulated row is small.
+
+**The acceptance check.** `//tools/cuda_sim/emu:hopper_emu_test` compares every
+element with a host reference. It covers the score product over the interleaved
+form and over the swizzled panel that two tiled copies fill. It also covers the
+staged value operand, read back one element at a time, and the value product with
+its register operand.
+
+Three further checks state a refusal or a bijection. The encoder refuses a map
+that the driver refuses, a descriptor that names bytes past its operand aborts,
+and each lane map is a bijection over its own tile.
+
+The operands are multiples of an eighth. Every product and every sum is therefore
+exact, and the comparison needs no tolerance.
 
 ## 10. Running the simulator
 
@@ -840,6 +904,13 @@ Two gaps block the attention work:
    this. The fused attention forward and the value gate both use it.
 2. There is no tensor-core primitive. An `mma` or `wgmma` instruction has no
    host mapping today.
+
+Both gaps are now closed. Section 9.2 records the dynamic shared window, and
+section 9.5 records the warpgroup product, the tiled copy, and the `mbarrier`
+object. The `mma.sync` and `ldmatrix` pair of the hand GEMM is mapped by
+`backends/cuda/gemm/mma_bf16.cuh`. A tile reaches either mapping by calling the
+header and not by writing the instruction inline, so this record still holds for
+a source that states its own assembly.
 
 The consequence is direct: **the emulator cannot check a tensor-core attention
 tile.** It can check the cuBLAS attention path, because that path has no tile.

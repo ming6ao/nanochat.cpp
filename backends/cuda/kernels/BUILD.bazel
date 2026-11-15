@@ -36,6 +36,18 @@ cc_library(
     deps = ["//include/nanochat:nanochat"],
 )
 
+# The four Hopper mechanisms a warp-specialized tile needs (docs/kernels.md
+# Part 3 section 4): the warpgroup matrix multiply-accumulate, the Tensor Memory
+# Accelerator, the `mbarrier` handoff, and the register budget. Header-only, and
+# the same shape as `mma_ops`: it carries the device arm, the emulation arm, and
+# an empty arm, because a production source may not include `tools/**` and the
+# emulator needs an arm the host compiler can run.
+cc_library(
+    name = "hopper_ops",
+    hdrs = ["hopper_ops.cuh"],
+    deps = ["//include/nanochat:nanochat"],
+)
+
 # The three Polar Express GEMM shapes of one Muon group. `muon.cu` issues them
 # and the hand GEMM's shape table reads the same three, so the call sites and
 # the closed list cannot drift (docs/tensor-core-gemm-plan.md section B.6).

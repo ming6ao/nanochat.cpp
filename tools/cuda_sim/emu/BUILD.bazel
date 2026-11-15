@@ -21,6 +21,7 @@ package(default_visibility = ["//visibility:public"])
 cc_library(
     name = "cuda_headers",
     hdrs = [
+        "cuda.h",
         "cuda_bf16.h",
         "cuda_emu.h",
         "cuda_fp8.h",
@@ -28,6 +29,7 @@ cc_library(
         "cuda_runtime.h",
         "emu_kernels.h",
         "emu_prelude.h",
+        "hopper_ops_host.h",
         "math_constants.h",
         # The warp-level matrix multiply-accumulate interface. A tensor-core
         # kernel includes `<mma.h>`, and this stub is what the host pass
@@ -44,6 +46,9 @@ cc_library(
         # shows this action only the inputs named here.
         "//backends/cuda/kernels:attention_flash.h",
         "//backends/cuda/kernels:device_utils.cuh",
+        # The four Hopper mechanisms. Its emulation arm is what the `sim` test
+        # beside it runs (docs/simulator.md section 9.2).
+        "//backends/cuda/kernels:hopper_ops.cuh",
         "//backends/cuda/kernels:mma_ops.cuh",
         "//backends/cuda/kernels:muon_fused.h",
         "//backends/cuda/kernels:rms_norm.h",
@@ -231,6 +236,7 @@ cc_test(
     deps = [
         ":cuda_headers",
         ":emu_runtime",
+        "//backends/cuda/kernels:hopper_ops",
         "//include/nanochat:nanochat",
     ],
     size = "small",
@@ -340,6 +346,38 @@ cc_test(
     deps = [
         ":cuda_headers",
         ":emulated_gemm",
+        "//include/nanochat:nanochat",
+    ],
+    size = "small",
+    tags = ["sim"],
+)
+
+# The acceptance check for the four Hopper mechanisms
+# (docs/simulator.md section 9.2): the warpgroup matrix multiply-accumulate over
+# the interleaved and the swizzled operand forms and both key widths, the value
+# product whose first operand is in registers, the `mbarrier` handoff between a
+# producer thread and a consumer warpgroup, the refusal of a descriptor that
+# reads past its staged region, the encoder's own refusals, and the two lane
+# maps as bijections.
+#
+# The test compiles with the same include line and the same prelude an emulated
+# kernel source does, so the arm it reaches is the arm a kernel reaches. CPU
+# only, so it carries the `sim` tag and rides the default loop.
+cc_test(
+    name = "hopper_emu_test",
+    srcs = ["hopper_emu_test.cc"],
+    copts = nanochat_copts() + [
+        "-I.",
+        "-Itools/cuda_sim/emu",
+        "-include",
+        "tools/cuda_sim/emu/emu_prelude.h",
+        "-Wno-unknown-pragmas",
+    ],
+    defines = precision_defines(),
+    deps = [
+        ":cuda_headers",
+        ":emu_runtime",
+        "//backends/cuda/kernels:hopper_ops",
         "//include/nanochat:nanochat",
     ],
     size = "small",

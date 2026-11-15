@@ -186,11 +186,36 @@ inline float rsqrtf(float value) { return 1.0f / std::sqrt(value); }
 #define __launch_bounds__(...)
 
 // `__shared__` maps to a function-static array; see the execution model above.
-// `extern __shared__` is a separate form and is not supported.
+// `extern __shared__` is a separate form: the executed-source rewrite of
+// `tools/cuda_sim/emu/BUILD.bazel` turns its declaration into a pointer at the
+// block's dynamic buffer (docs/simulator.md Part 7, section 6.2).
 #define __shared__ static
 
-// Bit reinterpretation, used by the fp8 cast. `__float_as_uint` and
-// `__uint_as_float` are device intrinsics on a real device.
+// The qualifiers a Hopper kernel states on a parameter and on a shared array.
+// The emulation passes a kernel parameter by value and has no constant bank for
+// a `__grid_constant__` object, so the qualifier is empty here. `__align__`
+// follows a storage class in the device form (`__shared__ __align__(1024)`),
+// where C++ attributes cannot go, and the alignment it asks for is a device
+// property of the shared window and not a value a host array needs, so it is
+// empty too.
+#define __grid_constant__
+#define __align__(n)
+#define __restrict__
+
+// Bit reinterpretation, used by the fp8 cast and by the tiled copy's read-back.
+// These four are device intrinsics on a real device.
+inline float __int_as_float(int bits) {
+  float value = 0.0f;
+  std::memcpy(&value, &bits, sizeof(value));
+  return value;
+}
+
+inline int __float_as_int(float value) {
+  int bits = 0;
+  std::memcpy(&bits, &value, sizeof(bits));
+  return bits;
+}
+
 inline unsigned int __float_as_uint(float value) {
   unsigned int bits = 0;
   std::memcpy(&bits, &value, sizeof(bits));
@@ -226,7 +251,15 @@ enum class WaitKind {
   kNone = 0,
   kBlock,
   kWarp,
+  // A `mbarrier` phase, a named barrier, or a transaction barrier: the fiber is
+  // released when the object it names says so, and not when a count of
+  // arrivals is reached over the whole block.
+  kMbarrier,
+  kNamedBarrier,
 };
+
+//: The named barriers one block may hold. The device allows sixteen.
+constexpr int kNamedBarrierCount = 16;
 
 struct Fiber {
   ucontext_t context;             // resume point while blocked
@@ -235,6 +268,11 @@ struct Fiber {
   dim3 index;                     // this logical thread's id
   WaitKind waiting = WaitKind::kNone;
   int warp = 0;
+  // The object and the phase a `kMbarrier` fiber waits on, and the id a
+  // `kNamedBarrier` fiber arrives at.
+  const void* barrier = nullptr;
+  int phase = 0;
+  int named = 0;
   bool runnable = false;
   bool finished = false;
 };
@@ -253,6 +291,11 @@ struct BlockRuntime {
   int finished = 0;
   int block_waiting = 0;
   int warp_waiting[kMaxWarps] = {};
+  // The arrivals at each named barrier, and the count the arrived fibers named.
+  // A named barrier releases when its count is reached, so the two arrays keep
+  // the state a `bar.sync id, count` needs and a block barrier does not.
+  int named_arrivals[kNamedBarrierCount] = {};
+  int named_count[kNamedBarrierCount] = {};
 };
 
 extern thread_local BlockRuntime* g_block;
@@ -303,15 +346,233 @@ inline T* WarpSlots() {
   return reinterpret_cast<T*>(base);
 }
 
+// ---------------------------------------------------------------------------
+// The `mbarrier` object
+// ---------------------------------------------------------------------------
+//
+// A device `mbarrier` is eight bytes of shared memory, and this mapping keeps
+// the same eight bytes: an arrival count, the count the arm stated, the pending
+// transaction bytes a tiled copy will land, and the phase bit. The packing is
+// the emulator's own, because the object never crosses to a device; what a
+// kernel observes is the device's behaviour, which is
+//
+//   * `init` arms the object with a count and phase zero;
+//   * `arrive` removes one arrival;
+//   * `arrive.expect_tx` adds its bytes to the pending count;
+//   * a copy that completes removes those bytes;
+//   * a phase completes when the arrivals reach zero and no bytes are pending,
+//     which flips the phase bit and restores the arm count;
+//   * `try_wait.parity` succeeds when the object's phase differs from the one
+//     the waiter names, which is the wait the probe and the tile both use.
+//
+// One divergence follows the engine's rule for every asynchronous form: a copy
+// completes at the point it is issued, so `expect_tx` followed by a copy leaves
+// the object complete and the wait passes at once. A tile that forgets to wait
+// is therefore still right here, exactly like `__pipeline_wait_prior`.
+
+constexpr int kMbarrierArrivalsBits = 12;
+constexpr int kMbarrierExpectedShift = 12;
+constexpr int kMbarrierBytesShift = 24;
+constexpr int kMbarrierBytesBits = 20;
+constexpr int kMbarrierPhaseShift = 44;
+
+inline std::uint64_t& MbarrierBits(const void* barrier) {
+  return *static_cast<std::uint64_t*>(const_cast<void*>(barrier));
+}
+
+inline void MbarrierInit(const void* barrier, int arrivals) {
+  if (arrivals <= 0 || arrivals >= (1 << kMbarrierArrivalsBits)) {
+    std::fprintf(stderr, "emu: mbarrier arm of %d arrivals refused\n",
+                 arrivals);
+    std::abort();
+  }
+  const std::uint64_t expected = static_cast<std::uint64_t>(arrivals);
+  MbarrierBits(barrier) = expected | (expected << kMbarrierExpectedShift);
+}
+
+inline int MbarrierPhase(const void* barrier) {
+  return static_cast<int>((MbarrierBits(barrier) >> kMbarrierPhaseShift) & 1u);
+}
+
+// Flips the phase and restores the arm count when the barrier is complete: no
+// arrival is outstanding and no bytes are pending. One function, so every
+// arrival and every completed copy states the same rule.
+inline void MbarrierSettle(const void* barrier) {
+  std::uint64_t bits = MbarrierBits(barrier);
+  const std::uint64_t arrivals = bits & ((1u << kMbarrierArrivalsBits) - 1u);
+  const std::uint64_t pending =
+      (bits >> kMbarrierBytesShift) & ((1ull << kMbarrierBytesBits) - 1ull);
+  if (arrivals != 0 || pending != 0) return;
+  const std::uint64_t expected =
+      (bits >> kMbarrierExpectedShift) & ((1u << kMbarrierArrivalsBits) - 1u);
+  bits &= ~((1ull << kMbarrierArrivalsBits) - 1ull);
+  bits |= expected;
+  bits ^= (1ull << kMbarrierPhaseShift);
+  MbarrierBits(barrier) = bits;
+}
+
+inline void MbarrierExpectBytes(const void* barrier, int bytes) {
+  if (bytes <= 0) return;
+  MbarrierBits(barrier) += static_cast<std::uint64_t>(bytes)
+                           << kMbarrierBytesShift;
+}
+
+// A copy that landed `bytes` removes them from the pending count.
+inline void MbarrierCopiedBytes(const void* barrier, int bytes) {
+  if (bytes <= 0) return;
+  const std::uint64_t removed = static_cast<std::uint64_t>(bytes)
+                                << kMbarrierBytesShift;
+  MbarrierBits(barrier) -= removed;
+  MbarrierSettle(barrier);
+}
+
+inline void MbarrierArriveAt(const void* barrier) {
+  std::uint64_t bits = MbarrierBits(barrier);
+  const std::uint64_t arrivals = bits & ((1u << kMbarrierArrivalsBits) - 1u);
+  if (arrivals == 0) {
+    std::fprintf(stderr, "emu: mbarrier arrived past its arm count\n");
+    std::abort();
+  }
+  MbarrierBits(barrier) = bits - 1;
+  MbarrierSettle(barrier);
+}
+
+// `mbarrier.try_wait.parity`: true when the phase the waiter names is complete.
+inline bool MbarrierTryWaitParity(const void* barrier, int phase) {
+  return MbarrierPhase(barrier) != (phase & 1);
+}
+
+// The wait itself: the fiber blocks, and the scheduler re-tests the object on
+// every pass. A spin would never reach the scheduler that detects a deadlock,
+// which the execution model above names as a divergence; this is not a spin.
+inline void MbarrierWaitParity(const void* barrier, int phase) {
+  if (g_block == nullptr) return;
+  if (MbarrierTryWaitParity(barrier, phase)) return;
+  Fiber* fiber =
+      g_block->fibers[static_cast<std::size_t>(g_block->current)].get();
+  fiber->waiting = WaitKind::kMbarrier;
+  fiber->barrier = barrier;
+  fiber->phase = phase;
+  YieldToScheduler();
+  fiber->waiting = WaitKind::kNone;
+  fiber->barrier = nullptr;
+}
+
+// `bar.sync id, count`: a barrier over `count` threads of the block. A warp
+// specialization uses one a role, so a name is released by its own count and
+// not by the block's.
+inline void NamedBarrierSync(int id, int count) {
+  if (g_block == nullptr) return;
+  if (id < 0 || id >= kNamedBarrierCount) {
+    std::fprintf(stderr, "emu: named barrier %d does not exist\n", id);
+    std::abort();
+  }
+  Fiber* fiber =
+      g_block->fibers[static_cast<std::size_t>(g_block->current)].get();
+  g_block->named_count[id] = count;
+  fiber->waiting = WaitKind::kNamedBarrier;
+  fiber->named = id;
+  ++g_block->named_arrivals[id];
+  YieldToScheduler();
+  fiber->waiting = WaitKind::kNone;
+  fiber->named = 0;
+}
+
+// ---------------------------------------------------------------------------
+// The shared-memory address space
+// ---------------------------------------------------------------------------
+//
+// A descriptor names its operand by a shared address in sixteen-byte units, so
+// the emulator needs a shared address space: a byte address that maps to host
+// memory. Every region a kernel stages an operand into is registered here, and
+// the registry assigns it a base token and a length. Two consequences follow.
+//
+//   * A descriptor built from a registered region resolves, and one built from
+//     a bare generic pointer resolves to a one-byte region, so the operand read
+//     that follows it is out of range and fails loudly instead of reading
+//     another object.
+//   * Every read a mapped instruction makes is bounds-checked against the
+//     region its descriptor named. The three defects the WGMMA probe found were
+//     all addressing, and the first of them walked four times past the end of
+//     its operand; this check fails that read on the CPU, before a card run.
+
+struct SharedRegion {
+  std::uint32_t token = 0;     // the region's first byte in the shared space
+  const void* base = nullptr;  // its first byte in host memory
+  std::size_t bytes = 0;
+};
+
+//: The registered regions of the running block. One block runs at a time, so
+//: one list serves it, and the launcher clears it between blocks.
+inline std::vector<SharedRegion>& SharedRegions() {
+  static thread_local std::vector<SharedRegion>* regions =
+      new std::vector<SharedRegion>();
+  return *regions;
+}
+
+//: The next free byte of the shared space. It starts at one kilobyte, so no
+//: region begins at zero and a zero descriptor is visibly wrong.
+inline std::uint32_t& SharedTop() {
+  static thread_local std::uint32_t* top = new std::uint32_t(1024);
+  return *top;
+}
+
+inline void ResetSharedRegions() {
+  SharedRegions().clear();
+  SharedTop() = 1024;
+}
+
+// Registers one region and answers its token. A region already registered is
+// answered again with the same token, so a loop may declare its window once a
+// step. The token is aligned to one kilobyte, because that is the frame the
+// 128-byte swizzle permutes inside: the device states the same requirement on a
+// staged panel with `__align__(1024)`.
+inline std::uint32_t RegisterSharedRegion(const void* base, std::size_t bytes) {
+  for (const SharedRegion& region : SharedRegions()) {
+    if (region.base == base && region.bytes >= bytes) return region.token;
+  }
+  SharedRegion region;
+  region.token = (SharedTop() + 1023u) & ~1023u;
+  region.base = base;
+  region.bytes = bytes;
+  SharedTop() = region.token + static_cast<std::uint32_t>(bytes);
+  SharedRegions().push_back(region);
+  return region.token;
+}
+
+// The region a shared address falls in, or null. A token in the last byte of a
+// region belongs to that region.
+inline const SharedRegion* SharedRegionOf(std::uint32_t token) {
+  for (const SharedRegion& region : SharedRegions()) {
+    if (token >= region.token && token < region.token + region.bytes) {
+      return &region;
+    }
+  }
+  return nullptr;
+}
+
 }  // namespace emu
 }  // namespace nanochat
 
+// `__cvta_generic_to_shared` is the device intrinsic that turns a generic
+// pointer into a shared address, and the probe and every descriptor call it. A
+// region it has not seen is registered as one byte, which makes the descriptor
+// that follows it out of range rather than silently valid.
+inline std::uint32_t __cvta_generic_to_shared(const void* pointer) {
+  namespace emu = ::nanochat::emu;
+  for (const emu::SharedRegion& region : emu::SharedRegions()) {
+    const char* base = static_cast<const char*>(region.base);
+    const char* address = static_cast<const char*>(pointer);
+    if (address >= base &&
+        address < base + static_cast<std::ptrdiff_t>(region.bytes)) {
+      return region.token + static_cast<std::uint32_t>(address - base);
+    }
+  }
+  return emu::RegisterSharedRegion(pointer, 1);
+}
+
 #define __syncthreads() (::nanochat::emu::Syncthreads())
 #define __syncwarp() (::nanochat::emu::Syncwarp())
-
-// ---------------------------------------------------------------------------
-// Atomics
-// ---------------------------------------------------------------------------
 
 namespace nanochat {
 namespace emu {
@@ -527,6 +788,9 @@ void RunBlock(Kernel kernel, const dim3& block_idx, const dim3& block_dim,
     runtime.fibers.push_back(std::move(fiber));
   }
 
+  // The shared address space is the block's, so a region a block registered
+  // does not outlive it.
+  ResetSharedRegions();
   g_block = &runtime;
   // The loop position lives in `runtime` rather than in a local: `swapcontext`
   // is a `setjmp`, and a local modified across it can be indeterminate when a

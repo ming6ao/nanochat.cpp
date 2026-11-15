@@ -100,6 +100,33 @@ bool ReleaseBarriers(BlockRuntime& runtime) {
     runtime.block_waiting = 0;
     released = true;
   }
+
+  // A `mbarrier` phase and a named barrier are released by their own object and
+  // not by a count over the block, so each waiting fiber is re-tested. A
+  // completed phase is progress even when nothing else moved, which is what
+  // keeps the scheduler from reporting a deadlock over a handoff that happened.
+  for (int t = 0; t < count; ++t) {
+    Fiber* fiber = runtime.fibers[static_cast<std::size_t>(t)].get();
+    if (fiber->waiting == WaitKind::kMbarrier && fiber->barrier != nullptr) {
+      if (MbarrierTryWaitParity(fiber->barrier, fiber->phase)) {
+        fiber->runnable = true;
+        released = true;
+      }
+    }
+  }
+  for (int id = 0; id < kNamedBarrierCount; ++id) {
+    if (runtime.named_arrivals[id] == 0) continue;
+    const int expected = runtime.named_count[id];
+    if (runtime.named_arrivals[id] < expected) continue;
+    for (int t = 0; t < count; ++t) {
+      Fiber* fiber = runtime.fibers[static_cast<std::size_t>(t)].get();
+      if (fiber->waiting == WaitKind::kNamedBarrier && fiber->named == id) {
+        fiber->runnable = true;
+      }
+    }
+    runtime.named_arrivals[id] = 0;
+    released = true;
+  }
   return released;
 }
 
