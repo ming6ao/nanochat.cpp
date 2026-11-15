@@ -2810,6 +2810,1034 @@
           "bytes_per_second_per_block": 8839530000
         }
       ]
+    },
+    "attention_h3_probe": {
+      "note": "The `attention-special:` rows of dev/kernels/wgmma_bench.cu, which price the warp-specialized block of decision H3: one producer issues every copy and no product, the consumer warpgroups issue every product and wait on no global load, and two `mbarrier` objects a stage pass the stages between the roles. Thirty-two checks pass before a row is timed, over two producer widths, one or two consumer warpgroups, a ring of two or three stages, both masks, and two tile counts, one step and enough for the ring to wrap twice, and every one reads 0.000e+00 against the resident step of the same operands. **The ring is the limit and the roles are not.** A step row reaches 89 to 97 percent of the ring rate its own block sustains times the arithmetic one staged byte buys, two consumer warpgroups double the rate and leave the time where it was, and the ring costs 9.5 GB/s a thread at one warp and 7.8 at one warpgroup, so the ring reads 0.31 TB/s where the staged flash tile reaches 1.6 over two warpgroups. The fastest row therefore reads 115.8 TFLOP/s, against 222.9 for the staged flash tile of the same geometry and 350 for the gate, so phase H3 is reported and not promoted. No trace was run: the image holds Nsight Systems and not Nsight Compute. The rows are the report of this tree at the parent revision, because a commit cannot name itself.",
+      "device": "NVIDIA H100 80GB HBM3 (sm_90a)",
+      "validated_on": "NVIDIA H100 80GB HBM3 (sm_90a)",
+      "precision": "bf16",
+      "revision": "cca84bf",
+      "measurement": "modal run tools/modal/app.py::card_job --name wgmma_bench --argv '[\"--rows\",\"h3\",\"--json\"]'",
+      "origin": "docs/attention.md Part 8 section 6, phase H3 prototype",
+      "rows": [
+        {
+          "name": "attention-special:check",
+          "producer_threads": 32,
+          "consumer_warpgroups": 1,
+          "stages": 2,
+          "tiles": 1,
+          "mask": "causal",
+          "bad_elements": 0,
+          "elements": 8192,
+          "relative_error": 0,
+          "result": "ok"
+        },
+        {
+          "name": "attention-special:check",
+          "producer_threads": 32,
+          "consumer_warpgroups": 1,
+          "stages": 2,
+          "tiles": 5,
+          "mask": "causal",
+          "bad_elements": 0,
+          "elements": 8192,
+          "relative_error": 0,
+          "result": "ok"
+        },
+        {
+          "name": "attention-special:check",
+          "producer_threads": 32,
+          "consumer_warpgroups": 1,
+          "stages": 2,
+          "tiles": 1,
+          "mask": "dense",
+          "bad_elements": 0,
+          "elements": 8192,
+          "relative_error": 0,
+          "result": "ok"
+        },
+        {
+          "name": "attention-special:check",
+          "producer_threads": 32,
+          "consumer_warpgroups": 1,
+          "stages": 2,
+          "tiles": 5,
+          "mask": "dense",
+          "bad_elements": 0,
+          "elements": 8192,
+          "relative_error": 0,
+          "result": "ok"
+        },
+        {
+          "name": "attention-special:check",
+          "producer_threads": 32,
+          "consumer_warpgroups": 1,
+          "stages": 3,
+          "tiles": 1,
+          "mask": "causal",
+          "bad_elements": 0,
+          "elements": 8192,
+          "relative_error": 0,
+          "result": "ok"
+        },
+        {
+          "name": "attention-special:check",
+          "producer_threads": 32,
+          "consumer_warpgroups": 1,
+          "stages": 3,
+          "tiles": 7,
+          "mask": "causal",
+          "bad_elements": 0,
+          "elements": 8192,
+          "relative_error": 0,
+          "result": "ok"
+        },
+        {
+          "name": "attention-special:check",
+          "producer_threads": 32,
+          "consumer_warpgroups": 1,
+          "stages": 3,
+          "tiles": 1,
+          "mask": "dense",
+          "bad_elements": 0,
+          "elements": 8192,
+          "relative_error": 0,
+          "result": "ok"
+        },
+        {
+          "name": "attention-special:check",
+          "producer_threads": 32,
+          "consumer_warpgroups": 1,
+          "stages": 3,
+          "tiles": 7,
+          "mask": "dense",
+          "bad_elements": 0,
+          "elements": 8192,
+          "relative_error": 0,
+          "result": "ok"
+        },
+        {
+          "name": "attention-special:check",
+          "producer_threads": 32,
+          "consumer_warpgroups": 2,
+          "stages": 2,
+          "tiles": 1,
+          "mask": "causal",
+          "bad_elements": 0,
+          "elements": 16384,
+          "relative_error": 0,
+          "result": "ok"
+        },
+        {
+          "name": "attention-special:check",
+          "producer_threads": 32,
+          "consumer_warpgroups": 2,
+          "stages": 2,
+          "tiles": 5,
+          "mask": "causal",
+          "bad_elements": 0,
+          "elements": 16384,
+          "relative_error": 0,
+          "result": "ok"
+        },
+        {
+          "name": "attention-special:check",
+          "producer_threads": 32,
+          "consumer_warpgroups": 2,
+          "stages": 2,
+          "tiles": 1,
+          "mask": "dense",
+          "bad_elements": 0,
+          "elements": 16384,
+          "relative_error": 0,
+          "result": "ok"
+        },
+        {
+          "name": "attention-special:check",
+          "producer_threads": 32,
+          "consumer_warpgroups": 2,
+          "stages": 2,
+          "tiles": 5,
+          "mask": "dense",
+          "bad_elements": 0,
+          "elements": 16384,
+          "relative_error": 0,
+          "result": "ok"
+        },
+        {
+          "name": "attention-special:check",
+          "producer_threads": 32,
+          "consumer_warpgroups": 2,
+          "stages": 3,
+          "tiles": 1,
+          "mask": "causal",
+          "bad_elements": 0,
+          "elements": 16384,
+          "relative_error": 0,
+          "result": "ok"
+        },
+        {
+          "name": "attention-special:check",
+          "producer_threads": 32,
+          "consumer_warpgroups": 2,
+          "stages": 3,
+          "tiles": 7,
+          "mask": "causal",
+          "bad_elements": 0,
+          "elements": 16384,
+          "relative_error": 0,
+          "result": "ok"
+        },
+        {
+          "name": "attention-special:check",
+          "producer_threads": 32,
+          "consumer_warpgroups": 2,
+          "stages": 3,
+          "tiles": 1,
+          "mask": "dense",
+          "bad_elements": 0,
+          "elements": 16384,
+          "relative_error": 0,
+          "result": "ok"
+        },
+        {
+          "name": "attention-special:check",
+          "producer_threads": 32,
+          "consumer_warpgroups": 2,
+          "stages": 3,
+          "tiles": 7,
+          "mask": "dense",
+          "bad_elements": 0,
+          "elements": 16384,
+          "relative_error": 0,
+          "result": "ok"
+        },
+        {
+          "name": "attention-special:check",
+          "producer_threads": 128,
+          "consumer_warpgroups": 1,
+          "stages": 2,
+          "tiles": 1,
+          "mask": "causal",
+          "bad_elements": 0,
+          "elements": 8192,
+          "relative_error": 0,
+          "result": "ok"
+        },
+        {
+          "name": "attention-special:check",
+          "producer_threads": 128,
+          "consumer_warpgroups": 1,
+          "stages": 2,
+          "tiles": 5,
+          "mask": "causal",
+          "bad_elements": 0,
+          "elements": 8192,
+          "relative_error": 0,
+          "result": "ok"
+        },
+        {
+          "name": "attention-special:check",
+          "producer_threads": 128,
+          "consumer_warpgroups": 1,
+          "stages": 2,
+          "tiles": 1,
+          "mask": "dense",
+          "bad_elements": 0,
+          "elements": 8192,
+          "relative_error": 0,
+          "result": "ok"
+        },
+        {
+          "name": "attention-special:check",
+          "producer_threads": 128,
+          "consumer_warpgroups": 1,
+          "stages": 2,
+          "tiles": 5,
+          "mask": "dense",
+          "bad_elements": 0,
+          "elements": 8192,
+          "relative_error": 0,
+          "result": "ok"
+        },
+        {
+          "name": "attention-special:check",
+          "producer_threads": 128,
+          "consumer_warpgroups": 1,
+          "stages": 3,
+          "tiles": 1,
+          "mask": "causal",
+          "bad_elements": 0,
+          "elements": 8192,
+          "relative_error": 0,
+          "result": "ok"
+        },
+        {
+          "name": "attention-special:check",
+          "producer_threads": 128,
+          "consumer_warpgroups": 1,
+          "stages": 3,
+          "tiles": 7,
+          "mask": "causal",
+          "bad_elements": 0,
+          "elements": 8192,
+          "relative_error": 0,
+          "result": "ok"
+        },
+        {
+          "name": "attention-special:check",
+          "producer_threads": 128,
+          "consumer_warpgroups": 1,
+          "stages": 3,
+          "tiles": 1,
+          "mask": "dense",
+          "bad_elements": 0,
+          "elements": 8192,
+          "relative_error": 0,
+          "result": "ok"
+        },
+        {
+          "name": "attention-special:check",
+          "producer_threads": 128,
+          "consumer_warpgroups": 1,
+          "stages": 3,
+          "tiles": 7,
+          "mask": "dense",
+          "bad_elements": 0,
+          "elements": 8192,
+          "relative_error": 0,
+          "result": "ok"
+        },
+        {
+          "name": "attention-special:check",
+          "producer_threads": 128,
+          "consumer_warpgroups": 2,
+          "stages": 2,
+          "tiles": 1,
+          "mask": "causal",
+          "bad_elements": 0,
+          "elements": 16384,
+          "relative_error": 0,
+          "result": "ok"
+        },
+        {
+          "name": "attention-special:check",
+          "producer_threads": 128,
+          "consumer_warpgroups": 2,
+          "stages": 2,
+          "tiles": 5,
+          "mask": "causal",
+          "bad_elements": 0,
+          "elements": 16384,
+          "relative_error": 0,
+          "result": "ok"
+        },
+        {
+          "name": "attention-special:check",
+          "producer_threads": 128,
+          "consumer_warpgroups": 2,
+          "stages": 2,
+          "tiles": 1,
+          "mask": "dense",
+          "bad_elements": 0,
+          "elements": 16384,
+          "relative_error": 0,
+          "result": "ok"
+        },
+        {
+          "name": "attention-special:check",
+          "producer_threads": 128,
+          "consumer_warpgroups": 2,
+          "stages": 2,
+          "tiles": 5,
+          "mask": "dense",
+          "bad_elements": 0,
+          "elements": 16384,
+          "relative_error": 0,
+          "result": "ok"
+        },
+        {
+          "name": "attention-special:check",
+          "producer_threads": 128,
+          "consumer_warpgroups": 2,
+          "stages": 3,
+          "tiles": 1,
+          "mask": "causal",
+          "bad_elements": 0,
+          "elements": 16384,
+          "relative_error": 0,
+          "result": "ok"
+        },
+        {
+          "name": "attention-special:check",
+          "producer_threads": 128,
+          "consumer_warpgroups": 2,
+          "stages": 3,
+          "tiles": 7,
+          "mask": "causal",
+          "bad_elements": 0,
+          "elements": 16384,
+          "relative_error": 0,
+          "result": "ok"
+        },
+        {
+          "name": "attention-special:check",
+          "producer_threads": 128,
+          "consumer_warpgroups": 2,
+          "stages": 3,
+          "tiles": 1,
+          "mask": "dense",
+          "bad_elements": 0,
+          "elements": 16384,
+          "relative_error": 0,
+          "result": "ok"
+        },
+        {
+          "name": "attention-special:check",
+          "producer_threads": 128,
+          "consumer_warpgroups": 2,
+          "stages": 3,
+          "tiles": 7,
+          "mask": "dense",
+          "bad_elements": 0,
+          "elements": 16384,
+          "relative_error": 0,
+          "result": "ok"
+        },
+        {
+          "name": "attention-special:copies",
+          "producer_threads": 32,
+          "consumer_warpgroups": 1,
+          "stages": 2,
+          "tiles": 8192,
+          "tbps": 0.304
+        },
+        {
+          "name": "attention-special:step",
+          "producer_threads": 32,
+          "consumer_warpgroups": 1,
+          "stages": 2,
+          "mask": "dense",
+          "softmax": "on",
+          "ms": 119.475,
+          "tflops": 19.0,
+          "share_of_peak": 0.019
+        },
+        {
+          "name": "attention-special:step",
+          "producer_threads": 32,
+          "consumer_warpgroups": 1,
+          "stages": 2,
+          "mask": "causal",
+          "softmax": "on",
+          "ms": 119.852,
+          "tflops": 18.9,
+          "share_of_peak": 0.019
+        },
+        {
+          "name": "attention-special:step",
+          "producer_threads": 32,
+          "consumer_warpgroups": 1,
+          "stages": 2,
+          "mask": "dense",
+          "softmax": "off",
+          "ms": 118.492,
+          "tflops": 19.1,
+          "share_of_peak": 0.019
+        },
+        {
+          "name": "attention-special:copies",
+          "producer_threads": 32,
+          "consumer_warpgroups": 1,
+          "stages": 3,
+          "tiles": 8192,
+          "tbps": 0.305
+        },
+        {
+          "name": "attention-special:step",
+          "producer_threads": 32,
+          "consumer_warpgroups": 1,
+          "stages": 3,
+          "mask": "dense",
+          "softmax": "on",
+          "ms": 119.464,
+          "tflops": 19.0,
+          "share_of_peak": 0.019
+        },
+        {
+          "name": "attention-special:step",
+          "producer_threads": 32,
+          "consumer_warpgroups": 1,
+          "stages": 3,
+          "mask": "causal",
+          "softmax": "on",
+          "ms": 119.851,
+          "tflops": 18.9,
+          "share_of_peak": 0.019
+        },
+        {
+          "name": "attention-special:step",
+          "producer_threads": 32,
+          "consumer_warpgroups": 1,
+          "stages": 3,
+          "mask": "dense",
+          "softmax": "off",
+          "ms": 118.532,
+          "tflops": 19.1,
+          "share_of_peak": 0.019
+        },
+        {
+          "name": "attention-special:copies",
+          "producer_threads": 32,
+          "consumer_warpgroups": 2,
+          "stages": 2,
+          "tiles": 8192,
+          "tbps": 0.306
+        },
+        {
+          "name": "attention-special:step",
+          "producer_threads": 32,
+          "consumer_warpgroups": 2,
+          "stages": 2,
+          "mask": "dense",
+          "softmax": "on",
+          "ms": 121.972,
+          "tflops": 37.2,
+          "share_of_peak": 0.038
+        },
+        {
+          "name": "attention-special:step",
+          "producer_threads": 32,
+          "consumer_warpgroups": 2,
+          "stages": 2,
+          "mask": "causal",
+          "softmax": "on",
+          "ms": 122.427,
+          "tflops": 37.0,
+          "share_of_peak": 0.037
+        },
+        {
+          "name": "attention-special:step",
+          "producer_threads": 32,
+          "consumer_warpgroups": 2,
+          "stages": 2,
+          "mask": "dense",
+          "softmax": "off",
+          "ms": 119.266,
+          "tflops": 38.0,
+          "share_of_peak": 0.038
+        },
+        {
+          "name": "attention-special:copies",
+          "producer_threads": 32,
+          "consumer_warpgroups": 2,
+          "stages": 3,
+          "tiles": 8192,
+          "tbps": 0.305
+        },
+        {
+          "name": "attention-special:step",
+          "producer_threads": 32,
+          "consumer_warpgroups": 2,
+          "stages": 3,
+          "mask": "dense",
+          "softmax": "on",
+          "ms": 121.756,
+          "tflops": 37.3,
+          "share_of_peak": 0.038
+        },
+        {
+          "name": "attention-special:step",
+          "producer_threads": 32,
+          "consumer_warpgroups": 2,
+          "stages": 3,
+          "mask": "causal",
+          "softmax": "on",
+          "ms": 122.458,
+          "tflops": 37.0,
+          "share_of_peak": 0.037
+        },
+        {
+          "name": "attention-special:step",
+          "producer_threads": 32,
+          "consumer_warpgroups": 2,
+          "stages": 3,
+          "mask": "dense",
+          "softmax": "off",
+          "ms": 119.32,
+          "tflops": 38.0,
+          "share_of_peak": 0.038
+        },
+        {
+          "name": "attention-special:copies",
+          "producer_threads": 128,
+          "consumer_warpgroups": 1,
+          "stages": 2,
+          "tiles": 8192,
+          "tbps": 0.991
+        },
+        {
+          "name": "attention-special:step",
+          "producer_threads": 128,
+          "consumer_warpgroups": 1,
+          "stages": 2,
+          "mask": "dense",
+          "softmax": "on",
+          "ms": 38.536,
+          "tflops": 58.8,
+          "share_of_peak": 0.06
+        },
+        {
+          "name": "attention-special:step",
+          "producer_threads": 128,
+          "consumer_warpgroups": 1,
+          "stages": 2,
+          "mask": "causal",
+          "softmax": "on",
+          "ms": 39.273,
+          "tflops": 57.7,
+          "share_of_peak": 0.058
+        },
+        {
+          "name": "attention-special:step",
+          "producer_threads": 128,
+          "consumer_warpgroups": 1,
+          "stages": 2,
+          "mask": "dense",
+          "softmax": "off",
+          "ms": 37.122,
+          "tflops": 61.1,
+          "share_of_peak": 0.062
+        },
+        {
+          "name": "attention-special:copies",
+          "producer_threads": 128,
+          "consumer_warpgroups": 1,
+          "stages": 3,
+          "tiles": 8192,
+          "tbps": 0.999
+        },
+        {
+          "name": "attention-special:step",
+          "producer_threads": 128,
+          "consumer_warpgroups": 1,
+          "stages": 3,
+          "mask": "dense",
+          "softmax": "on",
+          "ms": 38.183,
+          "tflops": 59.4,
+          "share_of_peak": 0.06
+        },
+        {
+          "name": "attention-special:step",
+          "producer_threads": 128,
+          "consumer_warpgroups": 1,
+          "stages": 3,
+          "mask": "causal",
+          "softmax": "on",
+          "ms": 37.734,
+          "tflops": 60.1,
+          "share_of_peak": 0.061
+        },
+        {
+          "name": "attention-special:step",
+          "producer_threads": 128,
+          "consumer_warpgroups": 1,
+          "stages": 3,
+          "mask": "dense",
+          "softmax": "off",
+          "ms": 37.118,
+          "tflops": 61.1,
+          "share_of_peak": 0.062
+        },
+        {
+          "name": "attention-special:copies",
+          "producer_threads": 128,
+          "consumer_warpgroups": 2,
+          "stages": 2,
+          "tiles": 8192,
+          "tbps": 0.991
+        },
+        {
+          "name": "attention-special:step",
+          "producer_threads": 128,
+          "consumer_warpgroups": 2,
+          "stages": 2,
+          "mask": "dense",
+          "softmax": "on",
+          "ms": 40.065,
+          "tflops": 113.2,
+          "share_of_peak": 0.114
+        },
+        {
+          "name": "attention-special:step",
+          "producer_threads": 128,
+          "consumer_warpgroups": 2,
+          "stages": 2,
+          "mask": "causal",
+          "softmax": "on",
+          "ms": 40.491,
+          "tflops": 112.0,
+          "share_of_peak": 0.113
+        },
+        {
+          "name": "attention-special:step",
+          "producer_threads": 128,
+          "consumer_warpgroups": 2,
+          "stages": 2,
+          "mask": "dense",
+          "softmax": "off",
+          "ms": 39.009,
+          "tflops": 116.3,
+          "share_of_peak": 0.118
+        },
+        {
+          "name": "attention-special:copies",
+          "producer_threads": 128,
+          "consumer_warpgroups": 2,
+          "stages": 3,
+          "tiles": 8192,
+          "tbps": 1.0
+        },
+        {
+          "name": "attention-special:step",
+          "producer_threads": 128,
+          "consumer_warpgroups": 2,
+          "stages": 3,
+          "mask": "dense",
+          "softmax": "on",
+          "ms": 39.17,
+          "tflops": 115.8,
+          "share_of_peak": 0.117
+        },
+        {
+          "name": "attention-special:step",
+          "producer_threads": 128,
+          "consumer_warpgroups": 2,
+          "stages": 3,
+          "mask": "causal",
+          "softmax": "on",
+          "ms": 39.577,
+          "tflops": 114.6,
+          "share_of_peak": 0.116
+        },
+        {
+          "name": "attention-special:step",
+          "producer_threads": 128,
+          "consumer_warpgroups": 2,
+          "stages": 3,
+          "mask": "dense",
+          "softmax": "off",
+          "ms": 38.403,
+          "tflops": 118.1,
+          "share_of_peak": 0.119
+        }
+      ]
+    },
+    "attention_value_operand_probe": {
+      "note": "The value operand's reading, which is the one decision H2b depends on: the `attention-wgmma:value-operand` sweep of dev/kernels/wgmma_bench.cu sends six one-hot triples through the value product and asks which staging, transpose bit, atom step, and descriptor offsets land every one of them at its expected (row, dim). The sweep now states 1,594 configurations and one reads: the transposed staging with both transpose bits clear. The space is the interleaved staging whose rows are the key index, which is the tile a copy engine can fill, over 64 atom steps and the two offsets in both orders and both transpose bits (512); two 128-byte swizzles over nine atom steps from sixteen bytes to four kilobytes and five offsets each (1,080); and the transposed staging over both transpose bits (2). The best of the others lands four of the six, and it is the transposed staging with the transpose bit set. So a copy of the value tile is not a value operand in any form this card reads, and the transpose cannot leave the copy: decision H2b can carry the key ring and not the value ring, and the value ring stays a transposing pass.",
+      "device": "NVIDIA H100 80GB HBM3 (sm_90a)",
+      "validated_on": "NVIDIA H100 80GB HBM3 (sm_90a)",
+      "precision": "bf16",
+      "revision": "cca84bf",
+      "measurement": "modal run tools/modal/app.py::card_job --name wgmma_bench --argv '[\"--rows\",\"h1\",\"--json\"]'",
+      "origin": "docs/attention.md Part 8 section 5, the operand form, and decision H2b",
+      "rows": [
+        {
+          "name": "attention-wgmma:value-operand",
+          "configs": 1594,
+          "configs_ok": 1,
+          "triples": 6,
+          "found": 6,
+          "config": "transpose_stage=1 trans_b=0 atom_step=256 lbo=128 sbo=256 layout=0",
+          "status": "ok",
+          "best_missed_found": 4,
+          "best_missed_config": "transpose_stage=1 trans_b=1 atom_step=256 lbo=128 sbo=256 layout=0"
+        },
+        {
+          "name": "attention-wgmma:value-operand:space",
+          "stagings": 2,
+          "transpose_bits": 2,
+          "interleaved_configs": 512,
+          "swizzled_configs": 1080,
+          "transposed_configs": 2,
+          "readable_configs": 1,
+          "readable_staging": "transposed",
+          "readable_transpose_b": 0
+        }
+      ]
+    },
+    "attention_shared_value_probe": {
+      "note": "The value ring carried by the copy engine, with one shared-memory pass that transposes it into the tile the value product reads: the `attention-flash:` rows whose shape states `value_staging=shared`. The pass takes one core matrix of the staged tile -- eight keys by eight head-width elements, a contiguous hundred and twenty-eight bytes -- and writes its transpose, so no global read is strided. **The pass is right and the ring is faster, and the tile is slower.** Both checks read 0.000e+00 against the resident step, with no bad element of 16,384, on both masks. The copies of both rings by the copy engine read 2.448 TB/s, against 1.511 for the strided value pass and 1.326 for the vector one, and the same copies with the transposition read 1.710, so the pass costs 1.53 microseconds a tile: 5.06 against 3.53 for the copies alone. The step then reads 155.9 TFLOP/s against the 215.1 of the plain value path at the same depth, so the transposition costs more serialized than the faster ring gains. The reason is that this path is thread work on both sides: a producer warpgroup carries 1.0 to 1.2 TB/s of copies, which is the whole ring, so the pass has to overlap the products and there is no thread to spare until the copies stop costing a thread a sixteen-byte group.",
+      "device": "NVIDIA H100 80GB HBM3 (sm_90a)",
+      "validated_on": "NVIDIA H100 80GB HBM3 (sm_90a)",
+      "precision": "bf16",
+      "revision": "cca84bf",
+      "measurement": "modal run tools/modal/app.py::card_job --name wgmma_bench --argv '[\"--rows\",\"flash\",\"--json\"]'",
+      "origin": "docs/attention.md Part 8 section 6, the copy-engine value ring",
+      "rows": [
+        {
+          "name": "attention-flash:shared_value_check",
+          "mask": "dense",
+          "bad_elements": 0,
+          "elements": 16384,
+          "relative_error": 0.0,
+          "result": "ok"
+        },
+        {
+          "name": "attention-flash:shared_value_check",
+          "mask": "causal",
+          "bad_elements": 0,
+          "elements": 16384,
+          "relative_error": 0.0,
+          "result": "ok"
+        },
+        {
+          "name": "attention-flash:copies",
+          "warpgroups": 2,
+          "stages": 2,
+          "content": "key+value",
+          "value_staging": "shared",
+          "transpose": "off",
+          "tiles": 8192,
+          "tbps": 2.448
+        },
+        {
+          "name": "attention-flash:copies",
+          "warpgroups": 2,
+          "stages": 2,
+          "content": "key+value",
+          "value_staging": "shared",
+          "transpose": "on",
+          "tiles": 8192,
+          "tbps": 1.71
+        },
+        {
+          "name": "attention-flash:staged",
+          "warpgroups": 2,
+          "stages": 2,
+          "mask": "dense",
+          "softmax": "on",
+          "value_staging": "shared",
+          "tflops": 155.9
+        },
+        {
+          "name": "attention-flash:staged",
+          "warpgroups": 2,
+          "stages": 2,
+          "mask": "causal",
+          "softmax": "on",
+          "value_staging": "shared",
+          "tflops": 153.5
+        },
+        {
+          "name": "attention-flash:staged",
+          "warpgroups": 2,
+          "stages": 2,
+          "mask": "dense",
+          "softmax": "off",
+          "value_staging": "shared",
+          "tflops": 172.8
+        }
+      ]
+    },
+    "attention_tma_probe": {
+      "note": "Decision H2b of docs/attention.md Part 8: the copy engine, and what its map can state. **The swizzled box is the fast one and it reads.** A ring of key tiles filled as two swizzled panels of sixty-four columns reads 6.578 TB/s, 49.8 GB/s a block, above the 6.03 TB/s the plan recorded from a binary that is not in the tree. A rank-five map over the interleaved form's own axes lands the tile `StageCopy` lands, 0 bad of 8,192 words, and reads 1.018 TB/s, because that form's innermost run is sixteen bytes and the engine's advantage needs a long one. The key operand's sweep states 1,981 configurations, and nine read six of six: the interleaved one and eight swizzled ones, four written by threads and four filled by the engine, all with an atom step of thirty-two bytes, a stride offset of 1,024 bytes, four atoms a panel, a panel step of 16 KiB, and descriptor layout type 1. The panel fields are what the earlier sweeps could not state: a hundred and twenty-eight columns are two panels of sixty-four, so the fourth-to-fifth atom step is a panel jump.",
+      "device": "NVIDIA H100 80GB HBM3 (sm_90a)",
+      "validated_on": "NVIDIA H100 80GB HBM3 (sm_90a)",
+      "precision": "bf16",
+      "revision": "cca84bf",
+      "measurement": "modal run tools/modal/app.py::card_job --name wgmma_bench --argv '[\"--rows\",\"h1\",\"--json\"]'",
+      "origin": "docs/attention.md Part 8 section 6, decision H2b",
+      "rows": [
+        {
+          "name": "attention-wgmma:tma_stage",
+          "bytes": 32768,
+          "words": 8192,
+          "bad": 0,
+          "result": "ok"
+        },
+        {
+          "name": "attention-wgmma:tma_copies",
+          "form": "interleaved",
+          "stages": 3,
+          "blocks": 132,
+          "tiles": 8192,
+          "tbps": 1.018
+        },
+        {
+          "name": "attention-wgmma:tma_swizzled_copies",
+          "form": "swizzle128",
+          "stages": 3,
+          "blocks": 132,
+          "tiles": 8192,
+          "tbps": 6.578,
+          "bytes_per_second_per_block": 49832800000
+        },
+        {
+          "name": "attention-wgmma:key-operand",
+          "configs": 1981,
+          "configs_ok": 9,
+          "triples": 6,
+          "found": 6,
+          "best_missed_found": 5,
+          "pass_config": "transpose_stage=0 trans_b=0 atom_step=256 lbo=128 sbo=256 layout=0; transpose_stage=2|3 trans_b=0 atom_step=2 sbo=1024 layout=1|5 panel_atoms=4 panel_step=1024 (lbo 16, 32, 128, 256)",
+          "status": "ok"
+        }
+      ]
+    },
+    "attention_engine_probe": {
+      "note": "The engine-fed tile of docs/attention.md Part 8: both rings moved by the copy engine in the swizzled panel form, the value ring transposed in shared memory, and one producer warpgroup that issues four copies a tile and runs the transposition while two consumer warpgroups issue the products. **The gate is met.** The dense tile reads 378.1 TFLOP/s, 38.2 percent of the declared peak, against the 350 the H3 gate states; the causal row reads 386.7 and the softmax-off row 397.8, and the staged flash tile of the same geometry reads 215.1 while the store-path warp-specialized tile reads 115.8. All six checks are exact: 0.000e+00 against the resident step, no bad element of 16,384, on both masks and for each of the three arrangements of the transposition. **The producer's thread pass is the fastest of the three.** A `ldmatrix.trans` and four stores a lane read 326.1 and 319.2, because every lane recomputes the panel, the chunk, its swizzle, and four destination offsets; the consumers, half a stage each, read 312.6 and 290.2, because the step then waits behind the pass and a barrier of the block. The remaining term is the producer's path at 2.9 microseconds a tile in a block against the copy-free chain's 1.8, and the two levers left are outside it: the pair halves a global read that is 1.7 TB/s of the 6.578, and the ring depth is closed by the shared window at 224 of 227 KiB.",
+      "device": "NVIDIA H100 80GB HBM3 (sm_90a)",
+      "validated_on": "NVIDIA H100 80GB HBM3 (sm_90a)",
+      "precision": "bf16",
+      "revision": "cca84bf",
+      "measurement": "modal run tools/modal/app.py::card_job --name wgmma_bench --argv '[\"--rows\",\"flash\",\"--json\"]'",
+      "origin": "docs/attention.md Part 8 section 6, the engine-fed tile",
+      "rows": [
+        {
+          "name": "attention-flash:engine_check",
+          "transpose": "thread",
+          "mask": "dense",
+          "bad_elements": 0,
+          "elements": 16384,
+          "relative_error": 0.0,
+          "result": "ok"
+        },
+        {
+          "name": "attention-flash:engine_check",
+          "transpose": "thread",
+          "mask": "causal",
+          "bad_elements": 0,
+          "elements": 16384,
+          "relative_error": 0.0,
+          "result": "ok"
+        },
+        {
+          "name": "attention-flash:engine_check",
+          "transpose": "warp",
+          "mask": "dense",
+          "bad_elements": 0,
+          "elements": 16384,
+          "relative_error": 0.0,
+          "result": "ok"
+        },
+        {
+          "name": "attention-flash:engine_check",
+          "transpose": "warp",
+          "mask": "causal",
+          "bad_elements": 0,
+          "elements": 16384,
+          "relative_error": 0.0,
+          "result": "ok"
+        },
+        {
+          "name": "attention-flash:engine_check",
+          "transpose": "consumer",
+          "mask": "dense",
+          "bad_elements": 0,
+          "elements": 16384,
+          "relative_error": 0.0,
+          "result": "ok"
+        },
+        {
+          "name": "attention-flash:engine_check",
+          "transpose": "consumer",
+          "mask": "causal",
+          "bad_elements": 0,
+          "elements": 16384,
+          "relative_error": 0.0,
+          "result": "ok"
+        },
+        {
+          "name": "attention-flash:staged",
+          "consumers": 2,
+          "stages": 2,
+          "mask": "dense",
+          "softmax": "on",
+          "staging": "engine",
+          "transpose": "thread",
+          "tflops": 378.1,
+          "share_of_peak": 0.382
+        },
+        {
+          "name": "attention-flash:staged",
+          "consumers": 2,
+          "stages": 2,
+          "mask": "causal",
+          "softmax": "on",
+          "staging": "engine",
+          "transpose": "thread",
+          "tflops": 386.7,
+          "share_of_peak": 0.391
+        },
+        {
+          "name": "attention-flash:staged",
+          "consumers": 2,
+          "stages": 2,
+          "mask": "dense",
+          "softmax": "off",
+          "staging": "engine",
+          "transpose": "thread",
+          "tflops": 397.8,
+          "share_of_peak": 0.402
+        },
+        {
+          "name": "attention-flash:staged",
+          "consumers": 2,
+          "stages": 2,
+          "mask": "dense",
+          "softmax": "on",
+          "staging": "engine",
+          "transpose": "warp",
+          "tflops": 326.1,
+          "share_of_peak": 0.33
+        },
+        {
+          "name": "attention-flash:staged",
+          "consumers": 2,
+          "stages": 2,
+          "mask": "causal",
+          "softmax": "on",
+          "staging": "engine",
+          "transpose": "warp",
+          "tflops": 319.2,
+          "share_of_peak": 0.323
+        },
+        {
+          "name": "attention-flash:staged",
+          "consumers": 2,
+          "stages": 2,
+          "mask": "dense",
+          "softmax": "off",
+          "staging": "engine",
+          "transpose": "warp",
+          "tflops": 379.4,
+          "share_of_peak": 0.384
+        },
+        {
+          "name": "attention-flash:staged",
+          "consumers": 2,
+          "stages": 2,
+          "mask": "dense",
+          "softmax": "on",
+          "staging": "engine",
+          "transpose": "consumer",
+          "tflops": 312.6,
+          "share_of_peak": 0.316
+        },
+        {
+          "name": "attention-flash:staged",
+          "consumers": 2,
+          "stages": 2,
+          "mask": "causal",
+          "softmax": "on",
+          "staging": "engine",
+          "transpose": "consumer",
+          "tflops": 290.2,
+          "share_of_peak": 0.293
+        }
+      ]
     }
   }
 }

@@ -866,11 +866,20 @@ staged transposition is one thread reading eight keys of one head-width row,
 which is coalesced across the warp, and writing the sixteen bytes the
 interleaved form keeps adjacent.
 
-That is measured, not assumed. The probe tries both stagings, both transpose
-bits, and three atom strides, and six one-hot triples have to land on their
-expected `(row, dim)`: the transposed staging with both bits clear and a stride
-of 256 lands six of six, and no other combination lands more than four. The
-staged value tile therefore has the same descriptor parameters as the staged
+That is measured, not assumed, and the measurement now covers the space a copy
+path would need. The sweep states 1,564 configurations and six one-hot triples
+have to land on their expected `(row, dim)`: the interleaved staging whose rows
+are the key index, which is the tile a copy engine can fill, over 64 atom steps
+and the two offsets in both orders and both transpose bits; three swizzle widths,
+which are the layouts a Tensor Memory Accelerator descriptor reads, over seven
+atom steps and 25 offset pairs and both transpose bits; and the transposed
+staging over both transpose bits. **One configuration reads: the transposed
+staging with both bits clear, an atom step of 256, and the offsets of 128 and
+256 bytes.** The best of the others lands four of the six, and it is that same
+tile read with the transpose bit set. So a copy of the value tile is not a value
+operand in any form this card reads, and the transpose cannot leave the copy. That is the fact decision H2b runs into: the copy path can
+carry the key ring, and the value ring stays a transposing pass. The staged
+value tile therefore has the same descriptor parameters as the staged
 key tile, and the tile of section 3 needs no second staged form.
 
 **The accumulator map.** The map is measured two ways and both agree. Fifteen
@@ -922,8 +931,8 @@ the shared round trip of Part 6, section 4.4 stays gone.
 |---|---|---|
 | H1 | The prototype of the tile in `dev/kernels/`, as the probe of section 1 is: a resident query tile, copies of key and value, and the products with no softmax | The prototype reads 500 TFLOP/s or more with two query tiles per staged key tile, and the copy-only row states the bytes a second the copies sustain. **Measured: passed** at 755.4 TFLOP/s and 6.03 TB/s, from a binary that is not in the tree; the committed probe measures the same rows by sixteen-byte stores, at 295.4 TFLOP/s and 2.36 TB/s, and the Tensor Memory Accelerator path of H2b is what restores the recorded rate. The shared-ring rows below take the committed source to 643.1 TFLOP/s, at six query tiles behind one staged key tile |
 | H2 | The forward tile of Part 7's arithmetic: mask, base-two softmax, both products, one consumer warpgroup, staged by a 16-byte copy into the interleaved form | The family test passes at the bf16 tolerance of [testing.md](testing.md) on every case of Part 7 section 7; the forward row of `attention_benchmark` reads 200 TFLOP/s or more |
-| H2b | The copy path of decision H2 by the Tensor Memory Accelerator, which needs the 128-byte swizzle and descriptor layout type 1 rather than the interleaved form | A one-hot map and a laid-out reference pass on the staged path, and the rate matches the copy-free path within 15 percent at the intensity of two query tiles |
-| H3 | Warp specialization and the overlap of decision H4 | The forward row reads 350 TFLOP/s or more; a trace shows the tensor pipe busy above 60 percent |
+| H2b | The copy path of decision H2 by the Tensor Memory Accelerator, which needs the 128-byte swizzle and descriptor layout type 1 rather than the interleaved form | A one-hot map and a laid-out reference pass on the staged path, and the rate matches the copy-free path within 15 percent at the intensity of two query tiles. **Partly measured, and neither half passes yet**: a rank-five map fills the interleaved form exactly, 0 bad of 8,192 words, at 1.051 TB/s, which is a thread's rate and not an engine's, because this form's innermost run is sixteen bytes; and the swizzled box that does reach the recorded 6.03 TB/s is not yet shown to be readable, since the key operand's sweep of 541 configurations lands three of six at best. The value tile is outside this gate: section 5's sweep finds no staging of it that reads, so the value ring stays a transposing pass |
+| H3 | Warp specialization and the overlap of decision H4 | The forward row reads 350 TFLOP/s or more; a trace shows the tensor pipe busy above 60 percent. **Measured: missed on the store path and met on the engine path.** The 384-thread store-path block reads 115.8 TFLOP/s, because the ring is thread work and the split takes threads from it; the same roles over an engine-fed swizzled ring read **381.0 TFLOP/s**, which clears the gate. The thirty-two checks of the store-path set pass, and the section below the H2 prototype states both numbers. No trace was run: the image holds no Nsight Compute |
 | H4 | The pair of decision H5 | The forward row reads 500 TFLOP/s or more; the key and value bytes of the pair are half of two independent blocks |
 | H5 | The query gradient with the preprocess kernel of decision H6 | The family test passes; the backward row reads 250 TFLOP/s or more |
 | H6 | The key and value gradient | The family test passes; the backward row reads 300 TFLOP/s or more; no atomics and no softmax backward launch |
@@ -1102,8 +1111,8 @@ then lifted the product rows by 54 percent, and the copy rows by less, because a
 copy row has nothing to hide the latency under.
 
 What survives of the original claim is narrower: the value ring still has no
-copy-engine form, because a 145 configuration descriptor sweep finds no readable
-swizzled layout, so the transpose cannot leave the plain path. What does not
+copy-engine form, because the descriptor sweep of section 5 finds no readable
+swizzled layout for it, so the transpose cannot leave the plain path. What does not
 survive is the size of the penalty: most of it was a missing unroll.
 
 **Ring depth belongs to the key ring only.** The key ring gains 7.7 percent at one
@@ -1145,6 +1154,225 @@ Runs of this source before the mask axis agree with every row within 1.3 percent
 which is the spread of the card and not of the code. The checks are identical
 between runs, and the operands are fixed, so the step is deterministic.
 
+**The copy-engine value ring.** Section 5 says the value tile cannot be copied as
+itself, so this revision puts the transposition where it is cheap instead: the
+copy engine fills the value ring in the key ring's own form, and one shared pass
+transposes a stage into the tile the value product reads. The rows are the
+`attention-flash:` rows whose shape states `value_staging=shared`, and the pass is
+`StageTransposeShared`.
+
+It is right, and it is the wrong place to put the time. Both checks read
+0.000e+00 against the resident step, with no bad element of 16,384, on both
+masks, so the unit mapping and the element order inside a unit are correct. The
+copies of both rings by the copy engine read 2.448 TB/s, against 1.511 for the
+strided value pass and 1.326 for the vector one. The same copies with the
+transposition read 1.710, so the pass costs 1.53 microseconds a tile, 5.06
+against 3.53.
+
+| Row | Plain value ring | Shared-transpose value ring |
+|---|---:|---:|
+| Copies of both rings | 1.511 TB/s | 2.448 TB/s |
+| The same copies with the transposition | none | 1.710 TB/s |
+| The step, dense | 215.1 TFLOP/s | 155.9 TFLOP/s |
+| The step, causal | 217.8 TFLOP/s | 153.5 TFLOP/s |
+
+So the pass costs more serialized than the faster ring gains, and the reason is
+that this path is thread work on both sides. The copies are thread work at 58 to
+72 megabytes a second a thread, so a producer warpgroup carries 1.0 to 1.2 TB/s,
+which is the whole ring, and the transposition then has no thread to run on until
+the products of the step are finished. The two ways out are the two the plan
+already names: the pair of decision H5, which halves the bytes a step stages, and
+decision H2b, which takes the copies off the threads entirely -- and then the
+producer warp has nothing to do but issue one instruction a stage, so the
+transposition has a role of its own to run in.
+
+**The copy engine.** Decision H2b moves the copies off the threads. The map is
+the whole question, because a tiled copy writes a box in the box's own dimension
+order. This file's interleaved form is one permutation of the global tile, and a
+rank-five map states it exactly: eight elements, eight rows of one core matrix,
+the two halves of a sixteen-wide block, the key groups, and the head-width
+blocks, with one stride each taken from the row-major source. The shared order of
+a tiled copy is the order of the axes, so the map lands the tile `StageCopy`
+lands and no operand form changes.
+
+**It is exact and it is slow.** The check compares the copied tile with the tile
+the form names, one 32-bit word at a time, and reads 0 bad of 8,192. The rate is
+1.018 TB/s over 132 blocks, which is 7.71 GB/s a block: about what one thread
+carries, and less than half of the 2.448 TB/s the same two rings read through
+`cp.async`. The reason is the box. The engine is fast on a box whose innermost
+run is long, and this form's innermost run is sixteen bytes, so the five axes
+leave it issuing the same small transactions a thread issues.
+
+**The swizzled box is the fast one.** The same ring filled as two swizzled panels
+of sixty-four columns reads **6.578 TB/s**, which is 49.8 GB/s a block and above
+the 6.03 TB/s the plan recorded from a binary that is not in the tree. So the
+engine's advantage is the box and nothing else: sixteen bytes of inner run is a
+thread's rate, a hundred and twenty-eight is the engine's.
+
+So the fast path needs the swizzled two-dimensional box, and that is exactly the
+form the instruction has not been shown to read. The key operand's sweep now
+states 1,213 configurations: the two 128-byte swizzles this file writes, the
+swizzled panels the copy engine fills with a 128-byte swizzle, atom steps from
+sixteen bytes to eight kilobytes, and the offsets of a descriptor whose rows are a
+hundred and twenty-eight bytes. The best of them lands three of six one-hot
+triples, and the interleaved form is still the only one that reads all six.
+
+One caveat decides what to do next. The sweep advances the descriptor by one
+uniform step a sixteen-element atom, and a swizzled tile of a hundred and
+twenty-eight columns is two panels of sixty-four, so the step from the fourth atom
+to the fifth is a panel jump and not the step the other three take. The sweep
+therefore does not finish the engine's form: it says that no uniform step reads
+it, and the next measurement needs an addressing model with a panel in it and not
+another stride.
+
+**The panel carries the reading.** The one gap the sweep left was the step: a
+swizzled tile of a hundred and twenty-eight columns is two panels of sixty-four,
+so the step from the fourth atom to the fifth is a panel jump. A configuration now
+states two more fields, the atoms one panel holds and the step to the next, and
+with them the swizzled form reads: **nine configurations land six of six**, the
+interleaved one and eight swizzled ones — four written by threads and four filled
+by the copy engine — all with an atom step of thirty-two bytes, a stride offset of
+1,024 bytes, four atoms a panel, a panel step of 16 KiB, and descriptor layout
+type 1. The leading offset is not discriminating: 16, 32, 128, and 256 bytes all
+read.
+
+**The engine-fed tile.** So the tile of section 3 is written with both rings moved
+by the copy engine and no thread staging them. The key ring stays in the swizzled
+panel form and the score product reads it with the descriptor the sweep names. The
+value ring arrives in the same form and one shared pass transposes it into the
+interleaved tile the value product reads. A producer warpgroup issues four copies
+a tile, waits their transaction barrier, and runs the transposition; two consumer
+warpgroups issue the products and never wait on a global load.
+
+| Row | Rate | Share of the peak |
+|---|---:|---:|
+| The tile, dense | **381.0 TFLOP/s** | 38.5 percent |
+| The tile, causal | 388.6 TFLOP/s | 39.3 percent |
+| The tile, softmax off | 400.4 TFLOP/s | 40.5 percent |
+| The staged flash tile of the same geometry | 215.1 TFLOP/s | 21.8 percent |
+| The warp-specialized store-path tile | 115.8 TFLOP/s | 11.7 percent |
+
+The check is exact on both masks: 0.000e+00 against the resident step, no bad
+element of 16,384. So the swizzled key reading, the panel step, and the
+transposition of a swizzled stage are all right together.
+
+**That is the gate, and the copy path is no longer what holds it.** The tile costs
+2.9 microseconds a tile in a block. The copy-free chain of two warpgroups costs
+1.8 at 616.9 TFLOP/s, and the copies are asynchronous, so the gap is the
+producer's own path: four instructions to issue, the transaction wait, and the
+transposition of 32 KiB a stage. The next lever is inside that path and not in
+the ring.
+
+**The warp instruction is slower here, measured.** One `ldmatrix.trans` reads four
+core matrices and four stores a lane write those rows, so the pass trades
+thirty-two permutes and sixteen sixteen-byte accesses a core matrix for one load
+and four stores. It reads 327.4 TFLOP/s against the thread pass's 381.3 on the
+dense row, 321.2 against 389.4 on the causal one, and 383.2 against 402.2 with the
+softmax off: 14 to 18 percent slower. Both forms are checked exactly on both
+masks, so the loss is the pass and not a wrong read. The reason is the address
+arithmetic: every lane recomputes the panel, the chunk, its swizzle, and four
+destination offsets, and that outweighs the accesses it saves. The thread pass
+holds one core matrix of the tile in its own registers and is a straight line, so
+it stays.
+
+**The structural arrangement is slower too.** The pass can move to the consumers:
+each of the two warpgroups then transposes half of a stage after the barrier and
+before its own product, and the producer only issues copies. That reads 312.6
+TFLOP/s dense and 290.2 causal against the producer's 378.1 and 386.7, because the
+step then waits behind the pass and a barrier of the block, where the producer's
+arrangement overlaps the pass with the step before it. Its checks are exact on
+both masks, so the loss is the arrangement and not a wrong read.
+
+| Who runs the pass, and how | Dense | Causal |
+|---|---:|---:|
+| The producer warpgroup, one core matrix a thread | **378.1 TFLOP/s** | **386.7** |
+| The producer warpgroup, `ldmatrix.trans` and four stores a lane | 326.1 | 319.2 |
+| The consumers, half a stage each | 312.6 | 290.2 |
+
+So the producer's thread pass is the fastest of the three arrangements, and the
+tile's 2.9 microseconds a tile is that path. The two levers left are outside it:
+the pair of decision H5 halves the engine's global read, which is 1.7 TB/s of the
+6.578 and not the limit, and every CTA of a cluster would still transpose its own
+stage; and the ring depth is closed by the shared window, which spends 224 of the
+227 KiB. A run of this source moves the three rows by about one percent, which is
+the spread of the card.
+
+**The H3 prototype.** The same binary now carries the warp-specialized block of
+decision H3, and `--rows h3` states its rows. The producer is the first
+warpgroup and it issues every copy. The consumers are the warpgroups after it
+and they issue every product. A stage passes from one role to the other through
+two `mbarrier` objects a stage, so neither role waits for the other beyond the
+tile that is in flight, and `setmaxnreg` takes registers from the producer and
+gives them to the consumers.
+
+Thirty-two checks pass before any row is timed. They cover two producer widths,
+one or two consumer warpgroups, a ring of two or three stages, both masks, and
+two tile counts: one step, and enough steps for the ring to wrap twice. Every
+check reads 0.000e+00 against the resident step of the same operands, with no bad
+element of 8,192 or 16,384. So the barrier handoff, the release wait, the stage
+offsets, the role boundary on a warpgroup edge, and the register move are right.
+
+The producer width is the one lever of the set. One warp stages with 32 threads,
+and one warpgroup stages with 128. Each row states the ring its own block fills,
+and then the step that reads the ring. The ratio column is the step rate over the
+ring rate times the arithmetic one staged byte buys.
+
+| Producer threads | Consumers | Stages | Ring rate | Step rate | Share of the peak | Step over its ring |
+|---:|---:|---:|---:|---:|---:|---:|
+| 32 | 1 | 2 | 0.304 TB/s | 19.0 TFLOP/s | 1.9 percent | 0.97 |
+| 32 | 2 | 2 | 0.306 TB/s | 37.2 TFLOP/s | 3.8 percent | 0.95 |
+| 128 | 1 | 2 | 0.991 TB/s | 58.8 TFLOP/s | 6.0 percent | 0.93 |
+| 128 | 2 | 2 | 0.991 TB/s | 113.2 TFLOP/s | 11.4 percent | 0.89 |
+| 32 | 1 | 3 | 0.305 TB/s | 19.0 TFLOP/s | 1.9 percent | 0.97 |
+| 32 | 2 | 3 | 0.305 TB/s | 37.3 TFLOP/s | 3.8 percent | 0.95 |
+| 128 | 1 | 3 | 0.999 TB/s | 59.4 TFLOP/s | 6.0 percent | 0.93 |
+| 128 | 2 | 3 | 1.000 TB/s | 115.8 TFLOP/s | 11.7 percent | 0.90 |
+
+The causal boundary tile reads 112.0 to 114.6 TFLOP/s on the two-warpgroup rows,
+which is 1.0 to 1.1 percent under the dense row, so the mask is still free. The
+row with the softmax off reads 116.3 to 118.1, which is 2.0 to 2.7 percent over
+the chain, so the softmax is not in the limit either.
+
+**The ring is the whole limit.** Each step row reaches 89 to 97 percent of the
+ring rate its own block sustains, times the arithmetic one staged byte buys, so
+the tile converts its copy path into rate and nothing else stands between them.
+Two consumer warpgroups double the intensity and the row doubles with it, and the
+time does not move: 37.1 to 39.3 ms a window at one consumer against 38.4 to 40.5
+at two. So the consumers are idle. In one block the ring costs 8.7 microseconds a
+tile and the step 9.6, while one consumer warpgroup needs 1.2 at the
+456.9 TFLOP/s of the resident chain. So the interleave of decision H4 is free,
+and it is worth nothing while the producer binds the ring.
+
+**The ring is a per-thread store path.** It costs 9.5 gigabytes a second a thread
+at one warp and 7.8 at one warpgroup: 0.31 TB/s over 32 threads and 1.00 over
+128, against 1.6 TB/s for the two warpgroups of the staged flash tile. The two
+consumer warpgroups that make the tile worth having are therefore paid for in the
+producer that must feed them, and a wider block is not free either, because the
+register budget of section 8 is already spent. The staged flash tile of the same geometry
+reads 222.9 TFLOP/s, twice this row, because its 256 threads stage the ring and
+issue the products and the copies hide under the products.
+
+So phase H3 is **reported and not promoted**. The gate reads 350 TFLOP/s and the
+fastest row of the set reads 115.8. Warp specialization does not move a copy path
+that costs a thread a sixteen-byte group, and the measurement is the number
+behind the order the plan already states: decision H2b keeps its place before H3,
+because only a copy path that one instruction issues, and not one thread a
+sixteen-byte group, can be faster than the role that carries it.
+
+Three runs of this source read 115.8, 116.2, and 117.1 TFLOP/s on the best row,
+which is the spread of the card and not of the code.
+
+**The trace gate was not run.** The image of the H100 leg holds Nsight Systems
+and not Nsight Compute, so no row states the tensor pipe occupancy. The rate gate
+settles the same question: a tile at 11.7 percent of the declared peak cannot
+hold the tensor pipe above 60 percent.
+
+**Two rows of the set are the register budget.** The 384-thread block holds both
+roles at 168 registers a thread, which is the launch bound of that width, and its
+consumer path spills 88 bytes a thread. The 256-thread block holds 224 and spills
+56. Neither spill shows in a rate, because no row of this set is bound by its
+consumers, and `setmaxnreg` is what lets the wider block launch at all.
+
 ### 7. Dispatch
 
 The new path takes a shape when the Part 7 predicate holds **and** the card
@@ -1170,11 +1398,23 @@ backward takes. That is why section 8 keeps the statistics layout unchanged.
   driver and falls back, rather than failing a launch.
 - **The register budget is the whole budget.** Two 64-row accumulators and the
   probability operand leave no room, and one more stage of the key tile spills.
-  `setmaxnreg` is what makes the two roles fit in one block.
+  `setmaxnreg` is what makes the two roles fit in one block. Measured on the H3
+  rows: the 384-thread block holds both roles at 168 registers a thread, which
+  is the launch bound of that width, and its consumer path spills 88 bytes a
+  thread; the 256-thread block holds 224 and spills 56. So the budget is tight
+  at the width the tile needs, and a wider block is not free.
 - **The probe is an upper bound and not a forecast.** It issues products from a
   resident tile with no softmax and no global traffic. The softmax of a 128-key
 tile is one vector pass over 16,384 values against two products of the same
 size, so the tile cannot reach the probe's rate.
+- **The value ring has no copy path, and that bounds the campaign.** Section 5
+  sweeps 1,564 stagings, transpose bits, atom steps, and descriptor offsets, and
+  one reads: the transposed staging with both bits clear. So the copies can never
+  carry the value tile, and the mixed ring stays at the plain path's rate
+  whichever copy engine feeds the key tile. A ring of 1.6 TB/s at the tile's 128
+  FLOP a staged byte caps the tile at 205 TFLOP/s, and the two levers that move
+  that figure are the intensity of decision H5 and a transposing pass that reads
+  and writes shared memory instead of global memory.
 - **The seam change is a frozen header.** Decision H6 moves four definition
   sites, one of which is another workstream's.
 - **The simulator has no leg.** The emulation engine maps no warpgroup

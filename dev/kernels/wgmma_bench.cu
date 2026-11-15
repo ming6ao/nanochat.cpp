@@ -55,16 +55,29 @@
 // warpgroup share one ring, so a block of two warpgroups doubles the arithmetic
 // of one copy and, with it, the rate the copies allow.
 //
-// **One binary, three row sets, one document.** The resident section carries
+// **One binary, four row sets, one document.** The resident section carries
 // the ceiling rows of the Phase 0 probe this file absorbed, so one build and
 // one card job replace two. The `attention-wgmma:` row names mark the H1 rows
 // of docs/attention.md Part 8, the `wgmma:` row names mark the Phase 0 rows of
-// docs/kernels.md Part 3, and the `attention-flash:` row names mark the flash
-// tile of the H2 prototype. `--rows phase0|h1|flash|all` selects the set, `all`
-// is the default, and the row names do not move with the selection, so every
-// baselines entry stays reproducible from one run. The first two sets differ in
-// pass depth, eight atoms against four, and in occupancy, one warpgroup per SM
-// against two, which is why neither divides into the other.
+// docs/kernels.md Part 3, the `attention-flash:` row names mark the flash tile
+// of the H2 prototype, and the `attention-special:` row names mark the
+// warp-specialized block of decision H3. `--rows phase0|h1|flash|h3|all`
+// selects the set, `all` is the default, and the row names do not move with the
+// selection, so every baselines entry stays reproducible from one run. The
+// first two sets differ in pass depth, eight atoms against four, and in
+// occupancy, one warpgroup per SM against two, which is why neither divides
+// into the other.
+//
+// **The warp-specialized rows.** Decision H3 of Part 8 section 2 splits one
+// block into two roles. A producer issues every copy and issues no product, and
+// the consumer warpgroups issue every product and wait on no global load: a
+// stage passes between them through two `mbarrier` objects, so neither role
+// waits for the other beyond the tile that is in flight. The producer widths
+// the set prices are one warp, which is the first phase of the decision, and
+// one warpgroup, which is the width `setmaxnreg` spans: the warpgroup gives
+// back the registers it does not need and the consumers take them. The
+// arithmetic one staged byte buys does not move with any of this, so the rows
+// price what the separation of the issue paths is worth and nothing else.
 //
 // **The flash rows.** A real attention tile reads a new key block and a new
 // value block every step, so the staged rows above price the score product
@@ -149,6 +162,7 @@
 #include <utility>
 #include <vector>
 
+#include <cuda.h>
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
 
@@ -167,6 +181,19 @@
 namespace {
 
 using Bf16 = __nv_bfloat16;
+
+// --- The Tensor Memory Accelerator ------------------------------------------
+//
+// Decision H2b of docs/attention.md Part 8 section 2: the copies leave the
+// threads and become one instruction a stage. The map is the whole question. A
+// tiled map writes a box from global memory in the box's own dimension order,
+// so the axes of the map are the axes of the form it must land in: this file's
+// interleaved form is one permutation of the global tile, and its five axes --
+// eight elements, eight rows of one core matrix, the two halves of a sixteen
+// wide block, the key groups, and the head-width blocks -- state it exactly.
+// The shared order of a tiled copy is the map's own dimension order, so the map
+// below fills the tile `StageCopy` fills, byte for byte, and no operand form
+// changes with the copy path.
 
 // --- The tile ---------------------------------------------------------------
 
@@ -293,6 +320,63 @@ static_assert(FlashStagedBytes(kMaxWarpgroups, 3, kRingKeyValue) <=
                   kSmemCeiling,
               "the staged flash tile must fit one block per multiprocessor");
 
+//: The shared region of the staged flash tile whose value ring is a copy engine
+//: fill and a shared transposition: the query region, the key ring, the ring
+//: the step reads, and the raw ring the copy fills. The transposition needs
+//: both rings, so this shape holds two stages of both and not three.
+constexpr int FlashSharedValueBytes(int warpgroups, int stages) {
+  return warpgroups * kQueryBytes + stages * kKeyBytes +
+         2 * stages * kValueBytes;
+}
+static_assert(FlashSharedValueBytes(kMaxWarpgroups, 2) <= kSmemCeiling,
+              "the shared-transpose value ring must fit one block");
+static_assert(FlashSharedValueBytes(kMaxWarpgroups, 3) > kSmemCeiling,
+              "a third stage of the shared-transpose value ring cannot fit, so "
+              "the shape space states two");
+
+//: The shared region of the engine-fed tile: the query region, the swizzled key
+//: ring, the raw value ring the engine fills, and the transposed value ring the
+//: step reads. It is the shared-transpose tile's window, because the engine
+//: replaces the staging threads and not the buffers.
+constexpr int EngineFlashBytes(int consumers, int stages) {
+  return consumers * kQueryBytes + stages * kKeyBytes +
+         2 * stages * kValueBytes;
+}
+static_assert(EngineFlashBytes(2, 2) <= kSmemCeiling,
+              "the engine-fed tile must fit one block per multiprocessor");
+
+//: The shared region of the warp-specialized tile: the query tile of every
+//: consumer warpgroup, a ring of key tiles, and a ring of value tiles. The
+//: producer's own registers hold no tile, so the region is the same one the
+//: staged flash tile asks for at the same counts.
+constexpr int SpecializedBytes(int consumers, int stages, bool stage_value) {
+  return consumers * kQueryBytes + stages * kKeyBytes +
+         (stage_value ? stages * kValueBytes : 0);
+}
+static_assert(SpecializedBytes(2, 2, kRingKeyValue) <= kSmemCeiling,
+              "the warp-specialized ring must fit one block per "
+              "multiprocessor");
+static_assert(SpecializedBytes(2, 3, kRingKeyValue) <= kSmemCeiling,
+              "the third stage of both rings is the deepest this window "
+              "holds");
+static_assert(SpecializedBytes(2, 4, kRingKeyValue) > kSmemCeiling,
+              "a fourth stage of both rings must not fit, or the shape space "
+              "states a depth this file cannot launch");
+
+//: The consumer warpgroups and the ring depths the warp-specialized rows time.
+//: Two consumers is the recorded tile of Part 8 section 3, one is the first
+//: phase of the decision, and a depth of two or three is every ring the shared
+//: window of that tile holds.
+constexpr int kSpecialOneConsumer = 1;
+constexpr int kSpecialTwoConsumers = 2;
+constexpr int kSpecialStages = 2;
+constexpr int kSpecialDeepStages = 3;
+
+//: The two producer widths the rows compare: one warpgroup, which `setmaxnreg`
+//: spans, and one warp, which is the first phase of the decision.
+constexpr int kSpecialWarpgroupProducer = kWarpgroupThreads;
+constexpr int kSpecialWarpProducer = 32;
+
 // --- The shape space --------------------------------------------------------
 //
 // A shape is the tile a row stages: the warpgroups of its block, the query
@@ -355,7 +439,7 @@ constexpr double kTflopsPerGflops = 1e-3;
 //: intensity, and the row states the share of it the shape reached.
 constexpr double kRecordedCopyBytesPerSecond = 2.36e12;
 
-enum class ShapeKind { kScore, kFlash, kFlashResident };
+enum class ShapeKind { kScore, kFlash, kFlashResident, kSpecial };
 
 const char* ShapeKindName(ShapeKind kind) {
   switch (kind) {
@@ -365,6 +449,8 @@ const char* ShapeKindName(ShapeKind kind) {
       return "flash";
     case ShapeKind::kFlashResident:
       return "resident";
+    case ShapeKind::kSpecial:
+      return "special";
   }
   return "unknown";
 }
@@ -407,6 +493,12 @@ struct ShapeSpec {
   bool instantiated;
   //: What the row is for, when it is not a shape the sweep launches.
   const char* note;
+  //: The threads of the producer role of a warp-specialized shape, and zero for
+  //: a shape whose own threads issue the copies.
+  int producer_threads = 0;
+  //: Whether the value ring is a copy engine fill and a shared transposition
+  //: instead of the transposing plain staging.
+  bool shared_value = false;
 };
 
 //: The shape space. The thirteen rows down to `score64:2x4` are the geometries
@@ -437,6 +529,24 @@ constexpr ShapeSpec kShapeSpace[] = {
     {"cand:flash128-3", ShapeKind::kFlash, 3, 1, kAtomN, 3, false,
      "the same depth at the recorded key width, which the register file "
      "closes"},
+    {"special:p32c1:2", ShapeKind::kSpecial, kSpecialOneConsumer, 1, kAtomN,
+     kSpecialStages, true, nullptr, kSpecialWarpProducer},
+    {"special:p32c1:3", ShapeKind::kSpecial, kSpecialOneConsumer, 1, kAtomN,
+     kSpecialDeepStages, true, nullptr, kSpecialWarpProducer},
+    {"special:p32c2:2", ShapeKind::kSpecial, kSpecialTwoConsumers, 1, kAtomN,
+     kSpecialStages, true, nullptr, kSpecialWarpProducer},
+    {"special:p32c2:3", ShapeKind::kSpecial, kSpecialTwoConsumers, 1, kAtomN,
+     kSpecialDeepStages, true, nullptr, kSpecialWarpProducer},
+    {"special:p128c1:2", ShapeKind::kSpecial, kSpecialOneConsumer, 1, kAtomN,
+     kSpecialStages, true, nullptr, kSpecialWarpgroupProducer},
+    {"special:p128c1:3", ShapeKind::kSpecial, kSpecialOneConsumer, 1, kAtomN,
+     kSpecialDeepStages, true, nullptr, kSpecialWarpgroupProducer},
+    {"special:p128c2:2", ShapeKind::kSpecial, kSpecialTwoConsumers, 1, kAtomN,
+     kSpecialStages, true, nullptr, kSpecialWarpgroupProducer},
+    {"special:p128c2:3", ShapeKind::kSpecial, kSpecialTwoConsumers, 1, kAtomN,
+     kSpecialDeepStages, true, nullptr, kSpecialWarpgroupProducer},
+    {"flash:2:2:shared", ShapeKind::kFlash, kMaxWarpgroups, 1, kAtomN, 2, true,
+     nullptr, 0, true},
 };
 
 //: The shared bytes one shape requests, from the tile functions above, so the
@@ -446,8 +556,14 @@ constexpr int SharedBytesOf(const ShapeSpec& shape) {
     return FlashResidentBytes(shape.warpgroups, shape.key_width);
   }
   if (shape.kind == ShapeKind::kFlash) {
+    if (shape.shared_value) {
+      return FlashSharedValueBytes(shape.warpgroups, shape.stages);
+    }
     return FlashStagedBytes(shape.warpgroups, shape.stages, kRingKeyValue,
                             shape.key_width);
+  }
+  if (shape.kind == ShapeKind::kSpecial) {
+    return SpecializedBytes(shape.warpgroups, shape.stages, kRingKeyValue);
   }
   return StagedBytes(shape.warpgroups, shape.query_tiles, shape.stages,
                      shape.key_width);
@@ -476,7 +592,9 @@ struct ShapeFacts {
 // over its accumulators.
 ShapeFacts FactsOf(const ShapeSpec& shape, int compiler_registers) {
   ShapeFacts facts;
-  facts.threads = shape.warpgroups * kWarpgroupThreads;
+  facts.threads = shape.kind == ShapeKind::kSpecial
+                      ? (1 + shape.warpgroups) * kWarpgroupThreads
+                      : shape.warpgroups * kWarpgroupThreads;
   facts.query_rows = shape.warpgroups * shape.query_tiles * kAtomM;
   facts.accumulator_registers =
       shape.query_tiles * TileAccumulators(shape.kind, shape.key_width);
@@ -511,11 +629,12 @@ ShapeFacts FactsOf(const ShapeSpec& shape, int compiler_registers) {
 // does not hold is a shape no reader can audit, so it stops the run instead of
 // timing quietly.
 const ShapeSpec& FindShape(ShapeKind kind, int warpgroups, int query_tiles,
-                           int key_width, int stages) {
+                           int key_width, int stages,
+                           bool shared_value = false) {
   for (const ShapeSpec& shape : kShapeSpace) {
     if (shape.kind == kind && shape.warpgroups == warpgroups &&
         shape.query_tiles == query_tiles && shape.key_width == key_width &&
-        shape.stages == stages) {
+        shape.stages == stages && shape.shared_value == shared_value) {
       return shape;
     }
   }
@@ -626,14 +745,14 @@ class ShapeTable {
       std::fprintf(out,
                    "attention-wgmma:shape name=%s kind=%s warpgroups=%d "
                    "query_tiles=%d keys=%d stages=%d threads=%d query_rows=%d "
-                   "accumulators=%d registers=%d registers_source=%s "
-                   "registers_per_sm=%d smem_bytes=%d "
+                   "producer_threads=%d accumulators=%d registers=%d "
+                   "registers_source=%s registers_per_sm=%d smem_bytes=%d "
                    "intensity_flop_per_byte=%d copy_cap_tflops=%.1f",
                    entry.shape.name, ShapeKindName(entry.shape.kind),
                    entry.shape.warpgroups, entry.shape.query_tiles,
                    entry.shape.key_width, entry.shape.stages, facts.threads,
-                   facts.query_rows, facts.accumulator_registers,
-                   facts.registers,
+                   facts.query_rows, entry.shape.producer_threads,
+                   facts.accumulator_registers, facts.registers,
                    facts.registers_from_compiler ? "compiler" : "estimate",
                    facts.registers_per_multiprocessor, facts.shared_bytes,
                    facts.intensity, facts.copy_cap_tflops);
@@ -769,8 +888,11 @@ constexpr std::size_t kProductSlots =
 
 // --- The staging ------------------------------------------------------------
 
-// The interleaved offset of one element of a row-major source tile.
-__device__ __forceinline__ int InterleavedOffset(int row, int k, int rows) {
+// The interleaved offset of one element of a row-major source tile. The host
+// states it too, because a check compares a staged tile with the tile the form
+// names and the copy engine's map states the same five axes.
+__host__ __device__ __forceinline__ int InterleavedOffset(int row, int k,
+                                                          int rows) {
   const int block = k / kAtomK;
   const int half = (k % kAtomK) / kElementsPerGroup;
   const int element = k % kElementsPerGroup;
@@ -867,6 +989,16 @@ __device__ __forceinline__ int SwizzleBytes(int offset, int layout) {
   if (layout == 1) return offset ^ (((offset >> 7) & 7) << 4);
   if (layout == 2) return offset ^ (((offset >> 6) & 7) << 4);
   if (layout == 3) return offset ^ (((offset >> 7) & 3) << 4);
+  // The canonical 128-byte swizzle of a Tensor Memory Accelerator tile: the
+  // atom is eight rows of a hundred and twenty-eight bytes, so the chunk index
+  // within the atom is exclusive-ored with the row of the atom and the atom
+  // itself is a kilobyte. A tile wider than one atom holds several side by
+  // side, which is what separates this layout from the three above.
+  if (layout == 4) {
+    const int atom = offset / 1024;
+    const int within = offset - atom * 1024;
+    return atom * 1024 + (within ^ (((within >> 7) & 7) << 4));
+  }
   return offset;
 }
 
@@ -881,7 +1013,15 @@ __device__ __forceinline__ void StageSwizzled(char* stage, const Bf16* source,
        unit += threads) {
     const int row = unit / kGroupsPerRow;
     const int group = (unit - row * kGroupsPerRow) * kElementsPerGroup;
-    const int offset = SwizzleBytes((row * kDim + group) * 2, layout);
+    // The panel form of a swizzled tile: the engine's swizzle spans a hundred
+    // and twenty-eight bytes, so a row wider than that is stored as panels side
+    // by side, each eight rows of sixteen chunks with the chunk exclusive-ored
+    // by the row of its atom.
+    const int offset =
+        layout == 5
+            ? (group / 64) * (rows * 128) + row * 128 +
+                  ((((group % 64) / kElementsPerGroup) ^ (row & 7)) * 16)
+            : SwizzleBytes((row * kDim + group) * 2, layout);
     *reinterpret_cast<uint4*>(stage + offset) =
         *reinterpret_cast<const uint4*>(source + row * kDim + group);
   }
@@ -967,6 +1107,167 @@ __device__ __forceinline__ void StageTransposed(char* stage, const Bf16* source,
     }
     *reinterpret_cast<uint4*>(stage + InterleavedOffset(row, key, kDim)) =
         *reinterpret_cast<uint4*>(packed);
+  }
+}
+
+// The same transposition, from one shared tile into another. One thread takes
+// one core matrix of the staged value tile -- eight keys by eight head-width
+// elements, a contiguous hundred and twenty-eight bytes -- and writes its
+// transpose into the tile the value product reads. So the pass costs shared
+// traffic and no global read, and the tile a copy engine fills stays exactly
+// the tile the key ring fills.
+//
+// The two tiles are one permutation of each other at the granularity of the
+// core matrix: the raw tile keeps eight keys of one head-width block together,
+// and the transposed tile keeps eight head-width elements of one key block
+// together. `InterleavedOffset` states both, so this pass is the mapping
+// between them and one eight by eight transpose inside each unit.
+__device__ __forceinline__ void StageTransposeShared(char* stage,
+                                                     const char* source,
+                                                     int threads) {
+  // One unit is eight keys of one key group and eight elements of one
+  // head-width half: sixteen key groups, eight head-width blocks, and two
+  // halves a tile.
+  constexpr int kUnits = (kAtomN / 8) * (kDim / 16) * 2;
+  for (int unit = static_cast<int>(threadIdx.x); unit < kUnits;
+       unit += threads) {
+    const int half = unit % 2;
+    const int block = (unit / 2) % (kDim / 16);
+    const int group = unit / (2 * (kDim / 16));
+    const char* from =
+        source + InterleavedOffset(group * 8, block * 16 + half * 8, kAtomN);
+    char* to =
+        stage + InterleavedOffset((block * 2 + half) * 8, group * 8, kDim);
+    // The source rows are keys and its columns are head-width elements, so the
+    // destination row of one element gathers one element of every source row.
+    // Two adjacent destination elements are one packed pair, taken from two
+    // source rows by `__byte_perm`, and the half of the source word and the
+    // selector follow the destination column.
+    std::uint32_t rows[8][4];
+#pragma unroll
+    for (int row = 0; row < 8; ++row) {
+      const uint4 loaded = *reinterpret_cast<const uint4*>(from + row * 16);
+      rows[row][0] = loaded.x;
+      rows[row][1] = loaded.y;
+      rows[row][2] = loaded.z;
+      rows[row][3] = loaded.w;
+    }
+#pragma unroll
+    for (int column = 0; column < 8; ++column) {
+      const int word = column / 2;
+      const std::uint32_t selector = (column % 2) != 0 ? 0x7632u : 0x5410u;
+      uint4 out;
+      out.x = __byte_perm(rows[0][word], rows[1][word], selector);
+      out.y = __byte_perm(rows[2][word], rows[3][word], selector);
+      out.z = __byte_perm(rows[4][word], rows[5][word], selector);
+      out.w = __byte_perm(rows[6][word], rows[7][word], selector);
+      *reinterpret_cast<uint4*>(to + column * 16) = out;
+    }
+  }
+}
+
+// The same transposition, with the raw tile in the swizzled panel form the copy
+// engine fills. The swizzle permutes whole sixteen-byte chunks and is its own
+// inverse, so one read of the source states where a core matrix sits: the panel
+// of the head-width block, the row of the key, and the chunk exclusive-ored by
+// the row of its atom.
+__device__ __forceinline__ void StageTransposeSwizzled(char* stage,
+                                                       const char* source,
+                                                       int threads,
+                                                       int index = -1) {
+  constexpr int kUnits = (kAtomN / 8) * (kDim / 16) * 2;
+  constexpr int kPanelBytes = kAtomN * 64 * sizeof(Bf16);
+  // `index` is the caller's place in the pass, which is the thread's own index
+  // unless a subset of the block runs it.
+  const int me = index >= 0 ? index : static_cast<int>(threadIdx.x);
+  for (int unit = me; unit < kUnits; unit += threads) {
+    const int half = unit % 2;
+    const int block = (unit / 2) % (kDim / 16);
+    const int group = unit / (2 * (kDim / 16));
+    const int column = block * 16 + half * 8;
+    const int panel = column / 64;
+    const int chunk = ((column % 64) / 8);
+    char* to =
+        stage + InterleavedOffset((block * 2 + half) * 8, group * 8, kDim);
+    // One source row is one key: eight head-width elements, sixteen bytes, at
+    // the chunk its atom's row names.
+    std::uint32_t rows[8][4];
+#pragma unroll
+    for (int row = 0; row < 8; ++row) {
+      const int key = group * 8 + row;
+      const int offset =
+          panel * kPanelBytes + key * 128 + ((chunk ^ (key & 7)) * 16);
+      const uint4 loaded = *reinterpret_cast<const uint4*>(source + offset);
+      rows[row][0] = loaded.x;
+      rows[row][1] = loaded.y;
+      rows[row][2] = loaded.z;
+      rows[row][3] = loaded.w;
+    }
+#pragma unroll
+    for (int out_column = 0; out_column < 8; ++out_column) {
+      const int word = out_column / 2;
+      const std::uint32_t selector = (out_column % 2) != 0 ? 0x7632u : 0x5410u;
+      uint4 out;
+      out.x = __byte_perm(rows[0][word], rows[1][word], selector);
+      out.y = __byte_perm(rows[2][word], rows[3][word], selector);
+      out.z = __byte_perm(rows[4][word], rows[5][word], selector);
+      out.w = __byte_perm(rows[6][word], rows[7][word], selector);
+      *reinterpret_cast<uint4*>(to + out_column * 16) = out;
+    }
+  }
+}
+
+// The same transposition by warp instructions: one `ldmatrix.trans` reads four
+// core matrices and hands every lane the transposed fragment, and four stores a
+// lane write those rows back. A lane holds row (lane / 4) and the pair
+// (lane % 4) of each matrix, so one four-byte store a matrix states the row.
+__device__ __forceinline__ void StageTransposeSwizzledWarp(char* stage,
+                                                           const char* source,
+                                                           int threads) {
+  constexpr int kUnits = (kAtomN / 8) * (kDim / 16) * 2;
+  constexpr int kPanelBytes = kAtomN * 64 * sizeof(Bf16);
+  const int warp = static_cast<int>(threadIdx.x) % threads / 32;
+  const int warps = threads / 32;
+  const int lane = static_cast<int>(threadIdx.x) % 32;
+  for (int group = warp; group < kUnits / 4; group += warps) {
+    // The unit this lane helps load: the lane names the matrix and its row.
+    const int unit = group * 4 + lane / 8;
+    const int half = unit % 2;
+    const int block = (unit / 2) % (kDim / 16);
+    const int keygroup = unit / (2 * (kDim / 16));
+    const int column = block * 16 + half * 8;
+    const int panel = column / 64;
+    const int chunk = (column % 64) / 8;
+    const int key = keygroup * 8 + (lane % 8);
+    const char* address =
+        source + panel * kPanelBytes + key * 128 + ((chunk ^ (key & 7)) * 16);
+    const std::uint32_t shared =
+        static_cast<std::uint32_t>(__cvta_generic_to_shared(address));
+    std::uint32_t r0 = 0;
+    std::uint32_t r1 = 0;
+    std::uint32_t r2 = 0;
+    std::uint32_t r3 = 0;
+    asm volatile(
+        "ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 "
+        "{%0, %1, %2, %3}, [%4];\n"
+        : "=r"(r0), "=r"(r1), "=r"(r2), "=r"(r3)
+        : "r"(shared));
+    const int offset = (lane / 4) * 16 + (lane % 4) * 4;
+#pragma unroll
+    for (int part = 0; part < 4; ++part) {
+      const std::uint32_t value = part == 0   ? r0
+                                  : part == 1 ? r1
+                                  : part == 2 ? r2
+                                              : r3;
+      const int unit_of_part = group * 4 + part;
+      const int part_half = unit_of_part % 2;
+      const int part_block = (unit_of_part / 2) % (kDim / 16);
+      const int part_group = unit_of_part / (2 * (kDim / 16));
+      char* destination =
+          stage + InterleavedOffset((part_block * 2 + part_half) * 8,
+                                    part_group * 8, kDim);
+      *reinterpret_cast<std::uint32_t*>(destination + offset) = value;
+    }
   }
 }
 
@@ -1207,6 +1508,211 @@ __device__ __forceinline__ void FenceAsyncShared() {
   asm volatile("fence.proxy.async.shared::cta;\n" ::: "memory");
 }
 
+// --- The handoff of a warp-specialized block --------------------------------
+//
+// A producer that issues the copies and consumers that issue the products do
+// not share a barrier of the block, because a `__syncthreads` there makes the
+// slower side wait for the faster one every step. They hand a stage over
+// through two `mbarrier` objects instead: `ready` says the stage holds what the
+// step reads, and `released` says every consumer warpgroup has drained it.
+
+// The shared address of one object, in the form the PTX below takes.
+__device__ __forceinline__ std::uint32_t SharedWord(const void* address) {
+  return static_cast<std::uint32_t>(__cvta_generic_to_shared(address));
+}
+
+// Arms one barrier for `arrivals` arrivals. A stage whose value tile is staged
+// arms two arrivals a producer thread and one that stages the key tile alone
+// arms one, so the count is the caller's.
+__device__ __forceinline__ void BarrierInit(std::uint64_t* barrier,
+                                            int arrivals) {
+  asm volatile(
+      "mbarrier.init.shared::cta.b64 [%0], %1;\n" ::"r"(SharedWord(barrier)),
+      "r"(arrivals));
+}
+
+// Arrives once from this thread, with the release that carries the stores made
+// before it to the thread that waits.
+__device__ __forceinline__ void BarrierArrive(std::uint64_t* barrier) {
+  asm volatile(
+      "mbarrier.arrive.shared::cta.b64 _, [%0];\n" ::"r"(SharedWord(barrier))
+      : "memory");
+}
+
+// States that this thread's asynchronous copies complete the barrier, so the
+// producer issues a stage and moves to the next one instead of waiting for its
+// own copy. `.noinc` raises no pending count, because the arm already holds
+// this arrival.
+__device__ __forceinline__ void BarrierArriveOnCopies(std::uint64_t* barrier) {
+  asm volatile("cp.async.mbarrier.arrive.noinc.shared::cta.b64 [%0];\n" ::"r"(
+                   SharedWord(barrier))
+               : "memory");
+}
+
+// Waits for the completion of the phase whose parity is `phase`. The poll is a
+// `try_wait` in a C++ loop and not a PTX label, so the wait may stand at many
+// inlined sites and no two labels meet.
+__device__ __forceinline__ void BarrierWait(std::uint64_t* barrier, int phase) {
+  std::uint32_t complete = 0;
+  do {
+    asm volatile(
+        "{\n"
+        "  .reg .pred p;\n"
+        "  mbarrier.try_wait.parity.shared::cta.b64 p, [%1], %2;\n"
+        "  selp.b32 %0, 1, 0, p;\n"
+        "}\n"
+        : "=r"(complete)
+        : "r"(SharedWord(barrier)), "r"(phase)
+        : "memory");
+  } while (complete == 0);
+}
+
+// The register budget of the two roles, in registers a thread. `setmaxnreg`
+// moves registers between warpgroups of one block, so the producer gives back
+// what it does not need and the consumers take it. The instruction spans a
+// warpgroup, so every thread of one runs it and no other thread does.
+template <int Count>
+__device__ __forceinline__ void WarpgroupRegistersGive() {
+  asm volatile("setmaxnreg.dec.sync.aligned.u32 %0;\n" ::"n"(Count) : "memory");
+}
+
+// The other direction: the calling warpgroup takes `Count` registers a thread
+// from the pool its block released.
+template <int Count>
+__device__ __forceinline__ void WarpgroupRegistersTake() {
+  asm volatile("setmaxnreg.inc.sync.aligned.u32 %0;\n" ::"n"(Count) : "memory");
+}
+
+//: The descriptor of a swizzled key tile, in sixteen-byte units: one core
+//: matrix group is eight rows of a hundred and twenty-eight bytes, so the atom
+//: step is two units and the panel is a kilobyte of them. Both are the fields
+//: the engine's reading was measured with.
+constexpr int kSwizzledAtomUnits = 2;
+constexpr int kPanelStepUnits = 1024;
+constexpr int kSwizzledLeadingBytes = 16;
+constexpr int kSwizzledStrideBytes = 1024;
+
+//: The registers the producer warpgroup of a warp-specialized block keeps, and
+//: the registers a consumer warpgroup asks for. The producer holds addresses,
+//: loop counters, and a staging slice, so it needs little. The two counts are a
+//: multiple of eight, which the instruction requires, and their total over a
+//: block of 384 threads stays inside the 65,536 registers of one
+//: multiprocessor: 128 by 32 and 256 by 224 is 61,440.
+constexpr int kProducerRegisters = 32;
+constexpr int kConsumerRegisters = 224;
+
+// One stage of a tile by the Tensor Memory Accelerator, and the tile leaves for
+// global memory so the caller can compare it with the staging the threads do.
+// One thread issues the copy; the barrier states the bytes it will land.
+__global__ void TmaStageKernel(const __grid_constant__ CUtensorMap map,
+                               int group, int bytes, float* destination) {
+  extern __shared__ __align__(1024) char smem[];
+  __shared__ __align__(8) std::uint64_t ready;
+  if (threadIdx.x == 0) {
+    BarrierInit(&ready, 1);
+    const std::uint32_t barrier = SharedWord(&ready);
+    const std::uint32_t target = SharedWord(smem);
+    const std::uint64_t map_address = reinterpret_cast<std::uint64_t>(&map);
+    asm volatile(
+        "mbarrier.arrive.expect_tx.shared::cta.b64 _, [%0], %1;\n" ::"r"(
+            barrier),
+        "r"(bytes)
+        : "memory");
+    asm volatile(
+        "cp.async.bulk.tensor.5d.shared::cluster.global.tile.mbarrier::"
+        "complete_tx::bytes [%0], [%1, {%2, %3, %4, %5, %6}], [%7];\n" ::"r"(
+            target),
+        "l"(map_address), "r"(0), "r"(0), "r"(0), "r"(group), "r"(0),
+        "r"(barrier)
+        : "memory");
+  }
+  __syncthreads();
+  BarrierWait(&ready, 0);
+  const int words = bytes / 4;
+  for (int word = static_cast<int>(threadIdx.x); word < words;
+       word += static_cast<int>(blockDim.x)) {
+    destination[word] =
+        __int_as_float(reinterpret_cast<const int*>(smem)[word]);
+  }
+}
+
+// A ring of tiles filled by the Tensor Memory Accelerator, with no product and
+// no thread staging: the bytes a second the copy engine delivers on its own.
+// One thread issues every copy and waits for the stage it is about to reuse.
+template <int Stages>
+__global__ void TmaRingKernel(const __grid_constant__ CUtensorMap map,
+                              int tiles, int group_step, int bytes) {
+  extern __shared__ __align__(1024) char smem[];
+  __shared__ __align__(8) std::uint64_t ready[Stages];
+  if (threadIdx.x != 0) return;
+  for (int stage = 0; stage < Stages; ++stage) {
+    BarrierInit(&ready[stage], 1);
+  }
+  for (int tile = 0; tile < tiles; ++tile) {
+    const int stage = tile % Stages;
+    if (tile >= Stages) {
+      BarrierWait(&ready[stage], ((tile / Stages) - 1) & 1);
+    }
+    const std::uint32_t barrier = SharedWord(&ready[stage]);
+    const std::uint32_t target = SharedWord(smem + stage * bytes);
+    const std::uint64_t map_address = reinterpret_cast<std::uint64_t>(&map);
+    asm volatile(
+        "mbarrier.arrive.expect_tx.shared::cta.b64 _, [%0], %1;\n" ::"r"(
+            barrier),
+        "r"(bytes)
+        : "memory");
+    asm volatile(
+        "cp.async.bulk.tensor.5d.shared::cluster.global.tile.mbarrier::"
+        "complete_tx::bytes [%0], [%1, {%2, %3, %4, %5, %6}], [%7];\n" ::"r"(
+            target),
+        "l"(map_address), "r"(0), "r"(0), "r"(0), "r"(tile * group_step),
+        "r"(0), "r"(barrier)
+        : "memory");
+  }
+}
+
+// The same ring, filled with a 128-byte swizzle: two panels a tile, each a
+// two-dimensional box the engine likes, and one barrier for the bytes of both.
+template <int Stages>
+__global__ void TmaSwizzledRingKernel(
+    const __grid_constant__ CUtensorMap panel_low,
+    const __grid_constant__ CUtensorMap panel_high, int tiles, int rows) {
+  extern __shared__ __align__(1024) char smem[];
+  __shared__ __align__(8) std::uint64_t ready[Stages];
+  constexpr int kBytes = kAtomN * kDim * sizeof(Bf16);
+  constexpr int kPanelBytes = kAtomN * 64 * sizeof(Bf16);
+  if (threadIdx.x != 0) return;
+  for (int stage = 0; stage < Stages; ++stage) {
+    BarrierInit(&ready[stage], 1);
+  }
+  for (int tile = 0; tile < tiles; ++tile) {
+    const int stage = tile % Stages;
+    if (tile >= Stages) {
+      BarrierWait(&ready[stage], ((tile / Stages) - 1) & 1);
+    }
+    const std::uint32_t barrier = SharedWord(&ready[stage]);
+    const std::uint32_t first = SharedWord(smem + stage * kBytes);
+    const std::uint32_t second = first + kPanelBytes;
+    const std::uint64_t low = reinterpret_cast<std::uint64_t>(&panel_low);
+    const std::uint64_t high = reinterpret_cast<std::uint64_t>(&panel_high);
+    asm volatile(
+        "mbarrier.arrive.expect_tx.shared::cta.b64 _, [%0], %1;\n" ::"r"(
+            barrier),
+        "r"(kBytes)
+        : "memory");
+    asm volatile(
+        "cp.async.bulk.tensor.2d.shared::cluster.global.tile.mbarrier::"
+        "complete_tx::bytes [%0], [%1, {%2, %3}], [%4];\n" ::"r"(first),
+        "l"(low), "r"(0), "r"(tile * rows), "r"(barrier)
+        : "memory");
+    asm volatile(
+        "cp.async.bulk.tensor.2d.shared::cluster.global.tile.mbarrier::"
+        "complete_tx::bytes [%0], [%1, {%2, %3}], [%4];\n" ::"r"(second),
+        "l"(high), "r"(0), "r"(tile * rows), "r"(barrier)
+        : "memory");
+  }
+}
+
 // --- The kernels ------------------------------------------------------------
 
 // One warpgroup, one resident query tile and one resident key tile in the
@@ -1268,10 +1774,10 @@ __global__ void ResidentKernel(const Bf16* __restrict__ q,
 // `kSoftmax` false is the ceiling row of the chain: the two products, the
 // conversion, and nothing between them. The difference from a row that states
 // the real step is what the softmax and its serialized place in the chain cost.
-template <bool kMask, bool kSoftmax = true>
+template <bool kMask, bool kSoftmax = true, bool kSwizzledKey = false>
 __device__ __forceinline__ void FlashStep(
     std::uint64_t base_query, std::uint64_t base_key, std::uint64_t base_value,
-    float log2_scale, int row_base, float (&running_max)[2],
+    float log2_scale, int row_base, int lane, float (&running_max)[2],
     float (&running_sum)[2], float (&output)[kRegisters]) {
   // The score product over the whole head width. The first atom overwrites, so
   // the accumulator carries no score of the step before it.
@@ -1282,8 +1788,14 @@ __device__ __forceinline__ void FlashStep(
   WgmmaFence();
 #pragma unroll
   for (int atom = 0; atom < kAtoms; ++atom) {
-    WgmmaM64N128K16(base_query + atom * AtomStep(kAtomM),
-                    base_key + atom * AtomStep(kAtomN), score, atom != 0);
+    // A swizzled key tile is two panels of sixty-four columns, so four atoms
+    // sit in one panel and the fifth jumps a panel.
+    const std::uint64_t key_atom =
+        kSwizzledKey ? base_key + (atom / 4) * kPanelStepUnits +
+                           (atom % 4) * kSwizzledAtomUnits
+                     : base_key + atom * AtomStep(kAtomN);
+    WgmmaM64N128K16(base_query + atom * AtomStep(kAtomM), key_atom, score,
+                    atom != 0);
   }
   WgmmaCommit();
   WgmmaWait<0>();
@@ -1300,7 +1812,6 @@ __device__ __forceinline__ void FlashStep(
       // One select a score, so the masked row prices the mask itself. A masked
       // score is the sentinel the running maximum already uses, and its
       // exponential then underflows to zero.
-      const int lane = static_cast<int>(threadIdx.x) % kWarpgroupThreads;
       if (SlotColumn(lane, i) > row_base + SlotRow(lane, i)) {
         score[i] = kFlashNegInf;
       }
@@ -1431,7 +1942,8 @@ __global__ void ResidentFlashKernel(const Bf16* __restrict__ q,
 
   for (int tile = 0; tile < tiles; ++tile) {
     FlashStep<kMask, kSoftmax>(base_query, base_key, base_value, log2_scale,
-                               row_base, running_max, running_sum, output);
+                               row_base, lane, running_max, running_sum,
+                               output);
   }
 
   WgmmaFenceOperand<kRegisters>(output);
@@ -1457,7 +1969,8 @@ __global__ void ResidentFlashKernel(const Bf16* __restrict__ q,
 // `FlashStep`, so a staged row and a resident row measure the same chain.
 template <int Warpgroups, int Stages, bool kProducts, bool kStageValue,
           bool kMask, bool kSoftmax, bool kVectorValue = false,
-          bool kPlainKey = false, bool kSkipKey = false>
+          bool kPlainKey = false, bool kSkipKey = false,
+          bool kSharedValue = false, bool kTranspose = false>
 __global__ void StagedFlashKernel(const Bf16* __restrict__ q,
                                   const Bf16* __restrict__ k,
                                   const Bf16* __restrict__ v, int source_tiles,
@@ -1469,6 +1982,10 @@ __global__ void StagedFlashKernel(const Bf16* __restrict__ q,
   char* query = smem;
   char* keys = query + Warpgroups * kQueryBytes;
   [[maybe_unused]] char* values = keys + Stages * kKeyBytes;
+  // The shared-transpose path keeps the tile a copy engine fills in its own
+  // ring, and transposes one stage of it into the ring the step reads.
+  [[maybe_unused]] char* raw_values =
+      values + (kSharedValue ? Stages * kValueBytes : 0);
 
   const int warpgroup = static_cast<int>(threadIdx.x) / kWarpgroupThreads;
   const int lane = static_cast<int>(threadIdx.x) % kWarpgroupThreads;
@@ -1497,7 +2014,12 @@ __global__ void StagedFlashKernel(const Bf16* __restrict__ q,
       }
     }
     if constexpr (kStageValue) {
-      if constexpr (kVectorValue) {
+      if constexpr (kSharedValue) {
+        // The tile a copy engine fills is the key ring's own tile: rows of the
+        // key index and a contiguous head width.
+        StageCopy(raw_values + stage * kValueBytes, v + offset,
+                  /*row_fast=*/true, kThreads, kAtomN);
+      } else if constexpr (kVectorValue) {
         StageTransposedVector(values + stage * kValueBytes, v + offset,
                               kThreads);
       } else {
@@ -1545,12 +2067,21 @@ __global__ void StagedFlashKernel(const Bf16* __restrict__ q,
       // to the async proxy the instruction reads through.
       CopyWait<Stages - 2>();
       __syncthreads();
+      if constexpr (kSharedValue && kTranspose) {
+        // The transposition leaves the copy path here: the copy engine fills
+        // the raw stage and this pass turns it into the tile the value product
+        // reads.
+        StageTransposeShared(values + (tile % Stages) * kValueBytes,
+                             raw_values + (tile % Stages) * kValueBytes,
+                             kThreads);
+        __syncthreads();
+      }
       FenceAsyncShared();
 
       FlashStep<kMask, kSoftmax>(
           base_query, MakeDescriptor(keys + (tile % Stages) * kKeyBytes),
           MakeDescriptor(values + (tile % Stages) * kValueBytes), log2_scale,
-          warpgroup * kAtomM, running_max, running_sum, output);
+          warpgroup * kAtomM, lane, running_max, running_sum, output);
 
       // The stage this step released is the one the copy refills, and the step
       // has drained its value group, so nothing reads it now.
@@ -1573,8 +2104,329 @@ __global__ void StagedFlashKernel(const Bf16* __restrict__ q,
     for (int tile = 0; tile < tiles; ++tile) {
       CopyWait<Stages - 2>();
       __syncthreads();
+      if constexpr (kSharedValue && kTranspose) {
+        StageTransposeShared(values + (tile % Stages) * kValueBytes,
+                             raw_values + (tile % Stages) * kValueBytes,
+                             kThreads);
+        __syncthreads();
+      }
       FenceAsyncShared();
       refill(tile);
+    }
+  }
+}
+
+// --- The engine-fed tile
+// ------------------------------------------------------
+//
+// Both rings moved by the copy engine and no thread staging them: the key ring
+// in the swizzled panel form the engine fills, and the value ring in the same
+// form and then transposed in shared memory into the tile the value product
+// reads. A producer warpgroup issues the copies and runs the transposition, so
+// the consumers issue no staging instruction and never wait on a global load.
+template <int Consumers, int Stages, bool kMask, bool kSoftmax = true,
+          bool kWarpTranspose = false, bool kConsumerTranspose = false>
+__global__ __launch_bounds__(
+    (1 + Consumers) * kWarpgroupThreads,
+    1) void EngineFlashKernel(const Bf16* __restrict__ q,
+                              const __grid_constant__ CUtensorMap key_low,
+                              const __grid_constant__ CUtensorMap key_high,
+                              const __grid_constant__ CUtensorMap value_low,
+                              const __grid_constant__ CUtensorMap value_high,
+                              float* __restrict__ out, int tiles,
+                              float softmax_scale) {
+  extern __shared__ __align__(1024) char smem[];
+  char* query = smem;
+  char* keys = query + Consumers * kQueryBytes;
+  char* values = keys + Stages * kKeyBytes;
+  char* raw = values + Stages * kValueBytes;
+
+  __shared__ __align__(8) std::uint64_t filled[Stages];
+  __shared__ __align__(8) std::uint64_t ready[Stages];
+  __shared__ __align__(8) std::uint64_t released[Stages];
+
+  constexpr int kPanelBytes = kAtomN * 64 * sizeof(Bf16);
+  constexpr int kStageBytes = 2 * kKeyBytes;
+  const int warpgroup = static_cast<int>(threadIdx.x) / kWarpgroupThreads;
+  const int lane = static_cast<int>(threadIdx.x) % kWarpgroupThreads;
+
+  if (threadIdx.x == 0) {
+    for (int stage = 0; stage < Stages; ++stage) {
+      BarrierInit(&filled[stage], 1);
+      BarrierInit(&ready[stage], 1);
+      BarrierInit(&released[stage], Consumers * kWarpgroupThreads);
+    }
+  }
+  if (static_cast<int>(threadIdx.x) < kWarpgroupThreads) {
+    for (int tile = 0; tile < Consumers; ++tile) {
+      StageInterleaved(query + tile * kQueryBytes,
+                       q + static_cast<std::size_t>(tile) * kAtomM * kDim,
+                       kAtomM, kWarpgroupThreads);
+    }
+  }
+  __syncthreads();
+
+  if (warpgroup == 0) {
+    WarpgroupRegistersGive<kProducerRegisters>();
+    for (int tile = 0; tile < tiles; ++tile) {
+      const int stage = tile % Stages;
+      const unsigned phase = static_cast<unsigned>((tile / Stages) & 1);
+      if (threadIdx.x == 0) {
+        if (tile >= Stages) {
+          BarrierWait(&released[stage], static_cast<int>((phase ^ 1u)));
+        }
+        const std::uint32_t barrier = SharedWord(&filled[stage]);
+        asm volatile(
+            "mbarrier.arrive.expect_tx.shared::cta.b64 _, [%0], %1;\n" ::"r"(
+                barrier),
+            "r"(kStageBytes)
+            : "memory");
+        const std::uint64_t key_low_map =
+            reinterpret_cast<std::uint64_t>(&key_low);
+        const std::uint64_t key_high_map =
+            reinterpret_cast<std::uint64_t>(&key_high);
+        const std::uint64_t value_low_map =
+            reinterpret_cast<std::uint64_t>(&value_low);
+        const std::uint64_t value_high_map =
+            reinterpret_cast<std::uint64_t>(&value_high);
+        const std::uint32_t key_first = SharedWord(keys + stage * kKeyBytes);
+        const std::uint32_t key_second = key_first + kPanelBytes;
+        const std::uint32_t value_first = SharedWord(raw + stage * kValueBytes);
+        const std::uint32_t value_second = value_first + kPanelBytes;
+        const int row = tile * kAtomN;
+        asm volatile(
+            "cp.async.bulk.tensor.2d.shared::cluster.global.tile.mbarrier::"
+            "complete_tx::bytes [%0], [%1, {%2, %3}], [%4];\n" ::"r"(key_first),
+            "l"(key_low_map), "r"(0), "r"(row), "r"(barrier)
+            : "memory");
+        asm volatile(
+            "cp.async.bulk.tensor.2d.shared::cluster.global.tile.mbarrier::"
+            "complete_tx::bytes [%0], [%1, {%2, %3}], [%4];\n" ::"r"(
+                key_second),
+            "l"(key_high_map), "r"(0), "r"(row), "r"(barrier)
+            : "memory");
+        asm volatile(
+            "cp.async.bulk.tensor.2d.shared::cluster.global.tile.mbarrier::"
+            "complete_tx::bytes [%0], [%1, {%2, %3}], [%4];\n" ::"r"(
+                value_first),
+            "l"(value_low_map), "r"(0), "r"(row), "r"(barrier)
+            : "memory");
+        asm volatile(
+            "cp.async.bulk.tensor.2d.shared::cluster.global.tile.mbarrier::"
+            "complete_tx::bytes [%0], [%1, {%2, %3}], [%4];\n" ::"r"(
+                value_second),
+            "l"(value_high_map), "r"(0), "r"(row), "r"(barrier)
+            : "memory");
+        BarrierWait(&filled[stage], static_cast<int>(phase));
+      }
+      // The whole producer warpgroup waits the copies, and runs the
+      // transposition unless the consumers were given it.
+      asm volatile("bar.sync 1, %0;" ::"n"(kWarpgroupThreads) : "memory");
+      if constexpr (!kConsumerTranspose) {
+        if constexpr (kWarpTranspose) {
+          StageTransposeSwizzledWarp(values + stage * kValueBytes,
+                                     raw + stage * kValueBytes,
+                                     kWarpgroupThreads);
+        } else {
+          StageTransposeSwizzled(values + stage * kValueBytes,
+                                 raw + stage * kValueBytes, kWarpgroupThreads);
+        }
+        asm volatile("bar.sync 1, %0;" ::"n"(kWarpgroupThreads) : "memory");
+      }
+      if (threadIdx.x == 0) {
+        BarrierArrive(&ready[stage]);
+      }
+    }
+    return;
+  }
+
+  const int consumer = warpgroup - 1;
+  WarpgroupRegistersTake<kConsumerRegisters>();
+  float running_max[2] = {kFlashNegInf, kFlashNegInf};
+  float running_sum[2] = {0.0f, 0.0f};
+  float output[kRegisters];
+#pragma unroll
+  for (int i = 0; i < kRegisters; ++i) output[i] = 0.0f;
+  WgmmaFenceOperand<kRegisters>(output);
+
+  const std::uint64_t base_query =
+      MakeDescriptor(query + consumer * kQueryBytes);
+  const float log2_scale = softmax_scale * kLog2e;
+
+  for (int tile = 0; tile < tiles; ++tile) {
+    const int stage = tile % Stages;
+    BarrierWait(&ready[stage], (tile / Stages) & 1);
+    if constexpr (kConsumerTranspose) {
+      // The pass moves here: every consumer warpgroup transposes its share of
+      // the stage, and the named barrier holds the step until both have.
+      StageTransposeSwizzled(values + stage * kValueBytes,
+                             raw + stage * kValueBytes,
+                             Consumers * kWarpgroupThreads,
+                             static_cast<int>(threadIdx.x) - kWarpgroupThreads);
+      asm volatile("bar.sync 2, %0;" ::"n"(Consumers * kWarpgroupThreads)
+                   : "memory");
+    }
+    FenceAsyncShared();
+    FlashStep<kMask, kSoftmax, /*kSwizzledKey=*/true>(
+        base_query,
+        MakeDescriptorFull(keys + stage * kKeyBytes, kSwizzledLeadingBytes,
+                           kSwizzledStrideBytes, /*layout=*/1),
+        MakeDescriptor(values + stage * kValueBytes), log2_scale,
+        consumer * kAtomM, lane, running_max, running_sum, output);
+    BarrierArrive(&released[stage]);
+  }
+
+  WgmmaFenceOperand<kRegisters>(output);
+  const std::size_t slot =
+      static_cast<std::size_t>(consumer) * kWarpgroupThreads + lane;
+  float* destination = out + slot * kRegisters;
+#pragma unroll
+  for (int i = 0; i < kRegisters; ++i) destination[i] = output[i];
+}
+
+// --- The warp-specialized tile ----------------------------------------------
+//
+// Decision H3 of docs/attention.md Part 8 section 2: one producer warpgroup
+// issues the copies and never computes, and the consumer warpgroups issue the
+// products and never wait on a global load. The two roles hand stages over
+// through `ready` and `released` barriers, so neither waits for the other
+// beyond the tile that is actually in flight, and `setmaxnreg` moves registers
+// from the producer to the consumers.
+//
+// `ProducerThreads` is the width of the producer's staging: 128 threads is the
+// whole warpgroup, and 32 is the single warp of the first phase of the
+// decision. The producer role is the whole first warpgroup either way, because
+// `setmaxnreg` and the warpgroup instruction of the consumers both span 128
+// consecutive threads: a block whose roles did not start on a warpgroup
+// boundary cannot issue either. The consumer counts, the ring depth, and the
+// two products follow the staged flash tile, so a step here and a step there
+// are one `FlashStep`.
+template <int ProducerThreads, int Consumers, int Stages, bool kProducts,
+          bool kStageValue, bool kMask, bool kSoftmax = true>
+__global__ void __launch_bounds__((1 + Consumers) * kWarpgroupThreads, 1)
+    SpecializedFlashKernel(const Bf16* __restrict__ q,
+                           const Bf16* __restrict__ k,
+                           const Bf16* __restrict__ v, int source_tiles,
+                           float* __restrict__ out,
+                           float* __restrict__ row_sums, int tiles,
+                           float softmax_scale) {
+  extern __shared__ __align__(1024) char smem[];
+  char* query = smem;
+  char* keys = query + Consumers * kQueryBytes;
+  [[maybe_unused]] char* values = keys + Stages * kKeyBytes;
+
+  __shared__ __align__(8) std::uint64_t ready[Stages];
+  __shared__ __align__(8) std::uint64_t released[Stages];
+
+  // A copy row stages what the step reads, so the two rows state one ring.
+  constexpr bool kStageValues = kStageValue;
+  constexpr int kProducerArrivals = ProducerThreads * (kStageValues ? 2 : 1);
+  constexpr int kConsumerArrivals = Consumers * kWarpgroupThreads;
+  //: The producer role is the first warpgroup, so the consumers start on the
+  //: warpgroup boundary the instruction and the register move both need.
+  constexpr int kProducerRole = 0;
+  const int warpgroup = static_cast<int>(threadIdx.x) / kWarpgroupThreads;
+
+  if (threadIdx.x == 0) {
+    for (int stage = 0; stage < Stages; ++stage) {
+      BarrierInit(&ready[stage], kProducerArrivals);
+      BarrierInit(&released[stage], kConsumerArrivals);
+    }
+  }
+
+  // The producer stages every query tile of the block before the first step,
+  // because one consumer warpgroup reads each of them and the barrier below is
+  // the only one before the loop.
+  if (static_cast<int>(threadIdx.x) < ProducerThreads) {
+    for (int tile = 0; tile < Consumers; ++tile) {
+      StageInterleaved(query + tile * kQueryBytes,
+                       q + static_cast<std::size_t>(tile) * kAtomM * kDim,
+                       kAtomM, ProducerThreads);
+    }
+  }
+  __syncthreads();
+
+  if (warpgroup == kProducerRole) {
+    WarpgroupRegistersGive<kProducerRegisters>();
+    if (static_cast<int>(threadIdx.x) < ProducerThreads) {
+      // The producer runs ahead of the consumers by `Stages - 1` stages and
+      // never waits on a copy it issued: the barrier of a stage completes when
+      // the thread's own copies land, so the issue of the next stage does not
+      // wait for the last one to arrive.
+      for (int tile = 0; tile < tiles + Stages - 1; ++tile) {
+        const int stage = tile % Stages;
+        if (tile >= Stages) {
+          BarrierWait(&released[stage], ((tile / Stages) - 1) & 1);
+        }
+        const std::size_t offset =
+            static_cast<std::size_t>(tile % source_tiles) * kAtomN * kDim;
+        StageCopy(keys + stage * kKeyBytes, k + offset, /*row_fast=*/true,
+                  ProducerThreads, kAtomN);
+        BarrierArriveOnCopies(&ready[stage]);
+        if constexpr (kStageValues) {
+          StageTransposed(values + stage * kValueBytes, v + offset,
+                          ProducerThreads);
+          BarrierArrive(&ready[stage]);
+        }
+      }
+    }
+    return;
+  }
+
+  // The consumers: one query tile a warpgroup, the same `FlashStep` as the
+  // staged flash tile, and no staging instruction at all.
+  const int consumer = warpgroup - 1;
+  const int lane = static_cast<int>(threadIdx.x) % kWarpgroupThreads;
+  WarpgroupRegistersTake<kConsumerRegisters>();
+
+  if constexpr (kProducts) {
+    float running_max[2] = {kFlashNegInf, kFlashNegInf};
+    float running_sum[2] = {0.0f, 0.0f};
+    float output[kRegisters];
+#pragma unroll
+    for (int i = 0; i < kRegisters; ++i) output[i] = 0.0f;
+    WgmmaFenceOperand<kRegisters>(output);
+
+    const std::uint64_t base_query =
+        MakeDescriptor(query + consumer * kQueryBytes);
+    const float log2_scale = softmax_scale * kLog2e;
+
+    for (int tile = 0; tile < tiles; ++tile) {
+      const int stage = tile % Stages;
+      BarrierWait(&ready[stage], (tile / Stages) & 1);
+      // The wait carries the producer's stores to this thread; this fence
+      // carries them to the async proxy the instruction reads through.
+      FenceAsyncShared();
+
+      FlashStep<kMask, kSoftmax>(
+          base_query, MakeDescriptor(keys + stage * kKeyBytes),
+          MakeDescriptor(values + stage * kValueBytes), log2_scale,
+          consumer * kAtomM, lane, running_max, running_sum, output);
+
+      // The step has drained its value product, so nothing reads this stage.
+      BarrierArrive(&released[stage]);
+    }
+
+    WgmmaFenceOperand<kRegisters>(output);
+    const std::size_t slot =
+        static_cast<std::size_t>(consumer) * kWarpgroupThreads + lane;
+    float* destination = out + slot * kRegisters;
+#pragma unroll
+    for (int i = 0; i < kRegisters; ++i) destination[i] = output[i];
+
+    if (row_sums != nullptr && (lane % 4) == 0) {
+      const int row = 16 * (lane / 32) + (lane % 32) / 4;
+      row_sums[consumer * kAtomM + row] = running_sum[0];
+      row_sums[consumer * kAtomM + row + 8] = running_sum[1];
+    }
+  } else {
+    // The copy row: the same block, the same ring, and no instruction, so the
+    // bytes a second of the producer standing alone are one number.
+    for (int tile = 0; tile < tiles; ++tile) {
+      const int stage = tile % Stages;
+      BarrierWait(&ready[stage], (tile / Stages) & 1);
+      FenceAsyncShared();
+      BarrierArrive(&released[stage]);
     }
   }
 }
@@ -1764,16 +2616,48 @@ __global__ void RegisterOperandKernel(const Bf16* __restrict__ k,
 // `atom_step` is the sixteen-byte stride between two atoms along the key axis,
 // which is the row axis of the staged value tile; the caller sweeps it, because
 // that offset is what the transposed form changes.
-__global__ void ValueOperandKernel(const Bf16* __restrict__ p,
-                                   const Bf16* __restrict__ v, int atom_step,
-                                   int trans_b, int transpose_stage, int lbo,
-                                   int sbo, int layout,
-                                   float* __restrict__ out) {
+__global__ void OperandSweepKernel(
+    const Bf16* __restrict__ p, const Bf16* __restrict__ v, int atom_step,
+    int trans_b, int transpose_stage, int lbo, int sbo, int layout,
+    int panel_atoms, int panel_step,
+    const __grid_constant__ CUtensorMap panel_low,
+    const __grid_constant__ CUtensorMap panel_high, float* __restrict__ out) {
   extern __shared__ __align__(1024) char smem[];
   char* probability = smem;
   char* value = smem + kQueryBytes;
   StageInterleaved(probability, p, kAtomM, kWarpgroupThreads);
-  if (transpose_stage == 2) {
+  if (transpose_stage == 3) {
+    // The copy engine fills the two panels of the swizzled tile, and one
+    // barrier states the bytes of both.
+    __shared__ __align__(8) std::uint64_t engine_ready;
+    if (threadIdx.x == 0) {
+      BarrierInit(&engine_ready, 1);
+      const std::uint32_t barrier = SharedWord(&engine_ready);
+      constexpr int kBytes = kAtomN * kDim * sizeof(Bf16);
+      asm volatile(
+          "mbarrier.arrive.expect_tx.shared::cta.b64 _, [%0], %1;\n" ::"r"(
+              barrier),
+          "r"(kBytes)
+          : "memory");
+      const std::uint64_t low = reinterpret_cast<std::uint64_t>(&panel_low);
+      const std::uint64_t high = reinterpret_cast<std::uint64_t>(&panel_high);
+      const std::uint32_t first = SharedWord(value);
+      const std::uint32_t second =
+          SharedWord(value + kAtomN * 64 * sizeof(Bf16));
+      asm volatile(
+          "cp.async.bulk.tensor.2d.shared::cluster.global.tile.mbarrier::"
+          "complete_tx::bytes [%0], [%1, {%2, %3}], [%4];\n" ::"r"(first),
+          "l"(low), "r"(0), "r"(0), "r"(barrier)
+          : "memory");
+      asm volatile(
+          "cp.async.bulk.tensor.2d.shared::cluster.global.tile.mbarrier::"
+          "complete_tx::bytes [%0], [%1, {%2, %3}], [%4];\n" ::"r"(second),
+          "l"(high), "r"(0), "r"(0), "r"(barrier)
+          : "memory");
+    }
+    __syncthreads();
+    BarrierWait(&engine_ready, 0);
+  } else if (transpose_stage == 2) {
     StageSwizzled(value, v, kAtomN, kWarpgroupThreads, layout);
   } else if (transpose_stage == 1) {
     StageTransposed(value, v, kWarpgroupThreads);
@@ -1793,7 +2677,10 @@ __global__ void ValueOperandKernel(const Bf16* __restrict__ p,
 
   for (int atom = 0; atom < kKeyAtoms; ++atom) {
     const std::uint64_t desc_p = base_probability + atom * AtomStep(kAtomM);
-    const std::uint64_t desc_v = base_value + atom * atom_step;
+    const int panel = panel_atoms > 0 ? atom / panel_atoms : 0;
+    const int within = panel_atoms > 0 ? atom % panel_atoms : atom;
+    const std::uint64_t desc_v =
+        base_value + within * atom_step + panel * panel_step;
     if (trans_b != 0) {
       WgmmaM64N128K16TransposedB(desc_p, desc_v, d, atom != 0);
     } else {
@@ -1926,13 +2813,15 @@ void LaunchResidentFlash(int blocks, const Bf16* device_q, const Bf16* device_k,
 }
 
 // One step of the flash tile over one block, read back: the accumulator slots
-// of every warpgroup in thread order, and the row sums beside them.
+// of every warpgroup in thread order, and the row sums beside them. `tiles` is
+// the number of steps of the online softmax, which the ring checks set above
+// the depth of the ring so the ring wraps.
 template <int Warpgroups, bool kMask, bool kSoftmax = true>
 std::vector<float> RunResidentFlash(const Bf16* device_q, const Bf16* device_k,
                                     const Bf16* device_v, float* device_out,
-                                    float* device_row_sums) {
+                                    float* device_row_sums, int tiles = 1) {
   LaunchResidentFlash<Warpgroups, kMask, kSoftmax>(
-      1, device_q, device_k, device_v, device_out, device_row_sums, 1,
+      1, device_q, device_k, device_v, device_out, device_row_sums, tiles,
       kFlashScale);
   SyncFlash("resident warpgroups=" + std::to_string(Warpgroups) +
             (kMask ? " causal" : " dense"));
@@ -1944,26 +2833,33 @@ std::vector<float> RunResidentFlash(const Bf16* device_q, const Bf16* device_k,
 // attribute is set once per instantiation and outside any timed window.
 template <int Warpgroups, int Stages, bool kProducts, bool kStageValue,
           bool kMask, bool kSoftmax = true, bool kVectorValue = false,
-          bool kPlainKey = false, bool kSkipKey = false>
+          bool kPlainKey = false, bool kSkipKey = false,
+          bool kSharedValue = false, bool kTranspose = false>
 void SetStagedFlashSharedMemory() {
-  constexpr int kShared = FlashStagedBytes(Warpgroups, Stages, kStageValue);
+  constexpr int kShared =
+      kSharedValue ? FlashSharedValueBytes(Warpgroups, Stages)
+                   : FlashStagedBytes(Warpgroups, Stages, kStageValue);
   cudaFuncSetAttribute(
       reinterpret_cast<const void*>(
           StagedFlashKernel<Warpgroups, Stages, kProducts, kStageValue, kMask,
-                            kSoftmax, kVectorValue, kPlainKey, kSkipKey>),
+                            kSoftmax, kVectorValue, kPlainKey, kSkipKey,
+                            kSharedValue, kTranspose>),
       cudaFuncAttributeMaxDynamicSharedMemorySize, kShared);
 }
 
 template <int Warpgroups, int Stages, bool kProducts, bool kStageValue,
           bool kMask, bool kSoftmax = true, bool kVectorValue = false,
-          bool kPlainKey = false, bool kSkipKey = false>
+          bool kPlainKey = false, bool kSkipKey = false,
+          bool kSharedValue = false, bool kTranspose = false>
 void LaunchStagedFlash(int blocks, int tiles, int source_tiles,
                        const Bf16* device_q, const Bf16* device_k,
                        const Bf16* device_v, float* device_out,
                        float* device_row_sums) {
-  constexpr int kShared = FlashStagedBytes(Warpgroups, Stages, kStageValue);
+  constexpr int kShared =
+      kSharedValue ? FlashSharedValueBytes(Warpgroups, Stages)
+                   : FlashStagedBytes(Warpgroups, Stages, kStageValue);
   StagedFlashKernel<Warpgroups, Stages, kProducts, kStageValue, kMask, kSoftmax,
-                    kVectorValue, kPlainKey, kSkipKey>
+                    kVectorValue, kPlainKey, kSkipKey, kSharedValue, kTranspose>
       <<<blocks, Warpgroups * kWarpgroupThreads, kShared>>>(
           device_q, device_k, device_v, source_tiles, device_out,
           device_row_sums, tiles, kFlashScale);
@@ -1995,6 +2891,117 @@ std::pair<std::size_t, double> CheckStagedFlash(
   return {bad, worst / scale};
 }
 
+// One step of the staged tile whose value ring is a copy engine fill and a
+// shared transposition, against the resident step of the same operands: a wrong
+// unit mapping, a wrong element order inside a unit, or a stage offset fails
+// here instead of measuring.
+template <int Warpgroups, int Stages, bool kMask>
+std::pair<std::size_t, double> CheckSharedValue(
+    const Bf16* device_queries, const Bf16* device_k, const Bf16* device_v,
+    float* device_out, float* device_row_sums,
+    const std::vector<float>& reference, double scale) {
+  SetStagedFlashSharedMemory<Warpgroups, Stages, true, kRingKeyValue, kMask,
+                             /*kSoftmax=*/true, /*kVectorValue=*/false,
+                             /*kPlainKey=*/false, /*kSkipKey=*/false,
+                             /*kSharedValue=*/true, /*kTranspose=*/true>();
+  LaunchStagedFlash<Warpgroups, Stages, true, kRingKeyValue, kMask,
+                    /*kSoftmax=*/true, /*kVectorValue=*/false,
+                    /*kPlainKey=*/false, /*kSkipKey=*/false,
+                    /*kSharedValue=*/true, /*kTranspose=*/true>(
+      1, /*tiles=*/1, /*source_tiles=*/1, device_queries, device_k, device_v,
+      device_out, device_row_sums);
+  SyncFlash("shared-value warpgroups=" + std::to_string(Warpgroups) +
+            " stages=" + std::to_string(Stages) +
+            (kMask ? " causal" : " dense"));
+  const std::vector<float> staged =
+      ReadBack(device_out, Warpgroups * kProductSlots);
+  double worst = 0.0;
+  std::size_t bad = 0;
+  for (std::size_t slot = 0; slot < staged.size(); ++slot) {
+    const double difference = std::fabs(static_cast<double>(staged[slot]) -
+                                        static_cast<double>(reference[slot]));
+    if (difference > 1e-6 * scale) ++bad;
+    worst = std::max(worst, difference);
+  }
+  return {bad, worst / scale};
+}
+
+// The opt-in shared-memory request, the launch, and the registers of the
+// engine-fed tile.
+template <int Consumers, int Stages, bool kMask, bool kSoftmax = true,
+          bool kWarpTranspose = false, bool kConsumerTranspose = false>
+void SetEngineFlashSharedMemory() {
+  constexpr int kShared = EngineFlashBytes(Consumers, Stages);
+  cudaFuncSetAttribute(
+      reinterpret_cast<const void*>(
+          EngineFlashKernel<Consumers, Stages, kMask, kSoftmax, kWarpTranspose,
+                            kConsumerTranspose>),
+      cudaFuncAttributeMaxDynamicSharedMemorySize, kShared);
+}
+
+template <int Consumers, int Stages, bool kMask, bool kSoftmax = true,
+          bool kWarpTranspose = false, bool kConsumerTranspose = false>
+void LaunchEngineFlash(int blocks, int tiles, const Bf16* device_q,
+                       const CUtensorMap& key_low, const CUtensorMap& key_high,
+                       const CUtensorMap& value_low,
+                       const CUtensorMap& value_high, float* device_out) {
+  constexpr int kShared = EngineFlashBytes(Consumers, Stages);
+  EngineFlashKernel<Consumers, Stages, kMask, kSoftmax, kWarpTranspose,
+                    kConsumerTranspose>
+      <<<blocks, (1 + Consumers) * kWarpgroupThreads, kShared>>>(
+          device_q, key_low, key_high, value_low, value_high, device_out, tiles,
+          kFlashScale);
+}
+
+template <int Consumers, int Stages, bool kMask, bool kSoftmax = true,
+          bool kWarpTranspose = false, bool kConsumerTranspose = false>
+int EngineFlashRegisters() {
+  return CompilerRegisters(reinterpret_cast<const void*>(
+      EngineFlashKernel<Consumers, Stages, kMask, kSoftmax, kWarpTranspose,
+                        kConsumerTranspose>));
+}
+
+// One step of the engine-fed tile against the resident step of the same
+// operands: a wrong swizzled key reading, a wrong panel step, or a wrong
+// transposition fails here instead of measuring.
+template <int Consumers, int Stages, bool kMask, bool kWarpTranspose = false,
+          bool kConsumerTranspose = false>
+std::pair<std::size_t, double> CheckEngineFlash(
+    const Bf16* device_queries, const CUtensorMap& key_low,
+    const CUtensorMap& key_high, const CUtensorMap& value_low,
+    const CUtensorMap& value_high, float* device_out,
+    const std::vector<float>& reference, double scale) {
+  SetEngineFlashSharedMemory<Consumers, Stages, kMask, /*kSoftmax=*/true,
+                             kWarpTranspose, kConsumerTranspose>();
+  LaunchEngineFlash<Consumers, Stages, kMask, /*kSoftmax=*/true, kWarpTranspose,
+                    kConsumerTranspose>(1, /*tiles=*/1, device_queries, key_low,
+                                        key_high, value_low, value_high,
+                                        device_out);
+  SyncFlash("engine-fed tile consumers=" + std::to_string(Consumers));
+  const std::vector<float> staged =
+      ReadBack(device_out, Consumers * kProductSlots);
+  double worst = 0.0;
+  std::size_t bad = 0;
+  for (std::size_t slot = 0; slot < staged.size(); ++slot) {
+    const double difference = std::fabs(static_cast<double>(staged[slot]) -
+                                        static_cast<double>(reference[slot]));
+    if (difference > 1e-6 * scale) ++bad;
+    worst = std::max(worst, difference);
+  }
+  return {bad, worst / scale};
+}
+
+// The registers of the shared-transpose value instantiation, read from the
+// build, so the shape table states the compiler's count and not an estimate.
+template <int Warpgroups, int Stages, bool kMask>
+int SharedValueRegisters() {
+  return CompilerRegisters(reinterpret_cast<const void*>(
+      StagedFlashKernel<Warpgroups, Stages, true, kRingKeyValue, kMask,
+                        /*kSoftmax=*/true, /*kVectorValue=*/false,
+                        /*kPlainKey=*/false, /*kSkipKey=*/false,
+                        /*kSharedValue=*/true, /*kTranspose=*/true>));
+}
+
 // One geometry of the flash ladder, dispatched to its own instantiation. The
 // warpgroup count and the ring depth are template parameters, so a sweep over
 // them is one branch per geometry, and this is the one place that states the
@@ -2014,6 +3021,129 @@ void VisitFlashGeometry(int warpgroups, int stages, Visitor&& visit) {
                  "the flash rows have no geometry of %d warpgroups and %d "
                  "stages\n",
                  warpgroups, stages);
+    std::exit(2);
+  }
+}
+
+// The opt-in dynamic shared-memory request of a warp-specialized
+// instantiation, and its one launch. A templated kernel has no single function
+// address, so the attribute is set once per instantiation and outside any timed
+// window.
+template <int ProducerThreads, int Consumers, int Stages, bool kProducts,
+          bool kStageValue, bool kMask, bool kSoftmax = true>
+void SetSpecializedSharedMemory() {
+  constexpr int kShared = SpecializedBytes(Consumers, Stages, kStageValue);
+  static_assert(kShared <= kSmemCeiling,
+                "the warp-specialized ring must fit one block per "
+                "multiprocessor");
+  cudaFuncSetAttribute(
+      reinterpret_cast<const void*>(
+          SpecializedFlashKernel<ProducerThreads, Consumers, Stages, kProducts,
+                                 kStageValue, kMask, kSoftmax>),
+      cudaFuncAttributeMaxDynamicSharedMemorySize, kShared);
+}
+
+template <int ProducerThreads, int Consumers, int Stages, bool kProducts,
+          bool kStageValue, bool kMask, bool kSoftmax = true>
+void LaunchSpecialized(int blocks, int tiles, int source_tiles,
+                       const Bf16* device_q, const Bf16* device_k,
+                       const Bf16* device_v, float* device_out,
+                       float* device_row_sums) {
+  constexpr int kShared = SpecializedBytes(Consumers, Stages, kStageValue);
+  constexpr int kThreads = (1 + Consumers) * kWarpgroupThreads;
+  SpecializedFlashKernel<ProducerThreads, Consumers, Stages, kProducts,
+                         kStageValue, kMask, kSoftmax>
+      <<<blocks, kThreads, kShared>>>(device_q, device_k, device_v,
+                                      source_tiles, device_out, device_row_sums,
+                                      tiles, kFlashScale);
+}
+
+// One step of a warp-specialized geometry against the resident step of the same
+// operands, as the staged ladder is checked: a wrong barrier, stage offset,
+// value staging, or role boundary fails here instead of measuring.
+template <int ProducerThreads, int Consumers, int Stages, bool kMask>
+std::pair<std::size_t, double> CheckSpecialized(
+    const Bf16* device_queries, const Bf16* device_k, const Bf16* device_v,
+    float* device_out, float* device_row_sums,
+    const std::vector<float>& reference, double scale, int tiles = 1) {
+  SetSpecializedSharedMemory<ProducerThreads, Consumers, Stages, true,
+                             kRingKeyValue, kMask>();
+  LaunchSpecialized<ProducerThreads, Consumers, Stages, true, kRingKeyValue,
+                    kMask>(1, tiles, /*source_tiles=*/1, device_queries,
+                           device_k, device_v, device_out, device_row_sums);
+  SyncFlash("specialized producer=" + std::to_string(ProducerThreads) +
+            " consumers=" + std::to_string(Consumers) + " stages=" +
+            std::to_string(Stages) + (kMask ? " causal" : " dense"));
+  const std::vector<float> staged =
+      ReadBack(device_out, Consumers * kProductSlots);
+  double worst = 0.0;
+  std::size_t bad = 0;
+  for (std::size_t slot = 0; slot < staged.size(); ++slot) {
+    const double difference = std::fabs(static_cast<double>(staged[slot]) -
+                                        static_cast<double>(reference[slot]));
+    if (difference > 1e-6 * scale) ++bad;
+    worst = std::max(worst, difference);
+  }
+  return {bad, worst / scale};
+}
+
+// The registers of one warp-specialized instantiation, read from the build. The
+// block holds two roles in one kernel, so this is the count the compiler gave
+// the wider path, and the redistribution above moves the runtime allocation
+// around it.
+template <int ProducerThreads, int Consumers, int Stages, bool kMask,
+          bool kSoftmax = true>
+int SpecializedRegisters() {
+  return CompilerRegisters(reinterpret_cast<const void*>(
+      SpecializedFlashKernel<ProducerThreads, Consumers, Stages, true,
+                             kRingKeyValue, kMask, kSoftmax>));
+}
+
+// One producer width of the warp-specialized ladder, dispatched to its own
+// instantiation, so this is the one place that states the widths.
+template <typename Visitor>
+void VisitSpecializedProducer(int producer_threads, Visitor&& visit) {
+  if (producer_threads == kSpecialWarpProducer) {
+    visit(std::integral_constant<int, kSpecialWarpProducer>{});
+  } else if (producer_threads == kSpecialWarpgroupProducer) {
+    visit(std::integral_constant<int, kSpecialWarpgroupProducer>{});
+  } else {
+    std::fprintf(stderr,
+                 "the warp-specialized rows have no producer of %d threads\n",
+                 producer_threads);
+    std::exit(2);
+  }
+}
+
+// One consumer count of the warp-specialized ladder, dispatched to its own
+// instantiation.
+template <typename Visitor>
+void VisitSpecializedConsumers(int consumers, Visitor&& visit) {
+  if (consumers == kSpecialOneConsumer) {
+    visit(std::integral_constant<int, kSpecialOneConsumer>{});
+  } else if (consumers == kSpecialTwoConsumers) {
+    visit(std::integral_constant<int, kSpecialTwoConsumers>{});
+  } else {
+    std::fprintf(stderr,
+                 "the warp-specialized rows have no block of %d consumer "
+                 "warpgroups\n",
+                 consumers);
+    std::exit(2);
+  }
+}
+
+// One ring depth of the warp-specialized ladder, dispatched to its own
+// instantiation.
+template <typename Visitor>
+void VisitSpecializedRing(int stages, Visitor&& visit) {
+  if (stages == kSpecialStages) {
+    visit(std::integral_constant<int, kSpecialStages>{});
+  } else if (stages == kSpecialDeepStages) {
+    visit(std::integral_constant<int, kSpecialDeepStages>{});
+  } else {
+    std::fprintf(stderr,
+                 "the warp-specialized rows have no ring of %d stages\n",
+                 stages);
     std::exit(2);
   }
 }
@@ -2164,11 +3294,12 @@ class Diagnostics {
   bool enabled_;
 };
 
-// The three row sets this one binary prints. `phase0` is the ceiling rows of
+// The four row sets this one binary prints. `phase0` is the ceiling rows of
 // docs/kernels.md Part 3, `h1` is the H1 rows and the maps of docs/attention.md
-// Part 8, and `flash` is the flash tile of the H2 prototype. `all` runs every
-// set, so a caller that names no set loses no row.
-enum class RowSet { kAll, kPhase0, kH1, kFlash };
+// Part 8, `flash` is the flash tile of the H2 prototype, and `h3` is the
+// warp-specialized block of decision H3. `all` runs every set, so a caller that
+// names no set loses no row.
+enum class RowSet { kAll, kPhase0, kH1, kFlash, kH3 };
 
 // The parsed command line.
 struct ProbeOptions {
@@ -2180,9 +3311,12 @@ struct ProbeOptions {
   // no measurement.
   bool shapes_only = false;
 
-  bool phase0() const { return rows != RowSet::kH1 && rows != RowSet::kFlash; }
-  bool h1() const { return rows != RowSet::kPhase0 && rows != RowSet::kFlash; }
+  bool phase0() const {
+    return rows == RowSet::kAll || rows == RowSet::kPhase0;
+  }
+  bool h1() const { return rows == RowSet::kAll || rows == RowSet::kH1; }
   bool flash() const { return rows == RowSet::kAll || rows == RowSet::kFlash; }
+  bool h3() const { return rows == RowSet::kAll || rows == RowSet::kH3; }
   const char* name() const {
     switch (rows) {
       case RowSet::kPhase0:
@@ -2191,6 +3325,8 @@ struct ProbeOptions {
         return "h1";
       case RowSet::kFlash:
         return "flash";
+      case RowSet::kH3:
+        return "h3";
       case RowSet::kAll:
         break;
     }
@@ -2200,7 +3336,7 @@ struct ProbeOptions {
 
 void PrintUsage(const char* program) {
   std::fprintf(stderr,
-               "usage: %s [--rows phase0|h1|flash|all] [--iters N] "
+               "usage: %s [--rows phase0|h1|flash|h3|all] [--iters N] "
                "[--rounds N] [--warmup N] [--no-flush] [--shapes] [--json] "
                "[--out PATH]\n",
                program);
@@ -2220,6 +3356,8 @@ ProbeOptions ParseOptions(int argc, char** argv) {
         options.rows = RowSet::kH1;
       } else if (value == "flash") {
         options.rows = RowSet::kFlash;
+      } else if (value == "h3") {
+        options.rows = RowSet::kH3;
       } else if (value == "all") {
         options.rows = RowSet::kAll;
       } else {
@@ -2277,6 +3415,238 @@ int StagedFlashRegisters() {
 // This is the table `--shapes` prints and the table a full run ends with, so
 // the shape that reached the highest rate and the shape that cannot launch are
 // one document and the second does not depend on the first having run.
+// One operand sweep: the staging a descriptor can name, the transpose bit, the
+// step to the next atom, and the two offsets. One list states the
+// configurations and one function runs them, so the score product's operand and
+// the value product's operand are swept by one code path.
+struct OperandConfig {
+  int transpose_stage;
+  int trans_b;
+  int atom_step;
+  int lbo;
+  int sbo;
+  int layout;
+  //: The atoms one panel holds, and the step to the next panel, in sixteen-byte
+  //: units. A swizzled tile of a hundred and twenty-eight columns is two panels
+  //: of sixty-four, so the atom step changes once and this pair states where.
+  int panel_atoms = 0;
+  int panel_step = 0;
+};
+
+// One one-hot triple: a query row, the key the product of the left operand
+// carries, and the head-width element of the right operand.
+struct OperandTriple {
+  int row;
+  int key;
+  int dim;
+};
+
+// One sweep's answer: how many configurations read, and which one that did not
+// came closest.
+struct OperandSweep {
+  int configs = 0;
+  int configs_ok = 0;
+  int best_found = 0;
+  int best_missed_found = 0;
+  OperandConfig best{0, 0, 0, 0, 0, 0};
+  OperandConfig best_missed{0, 0, 0, 0, 0, 0};
+  std::string pass_configs;
+};
+
+// The configuration a diagnostic line and a baselines entry state.
+std::string Describe(const OperandConfig& config) {
+  return "transpose_stage=" + std::to_string(config.transpose_stage) +
+         " trans_b=" + std::to_string(config.trans_b) +
+         " atom_step=" + std::to_string(config.atom_step) +
+         " lbo=" + std::to_string(config.lbo) +
+         " sbo=" + std::to_string(config.sbo) +
+         " layout=" + std::to_string(config.layout) +
+         (config.panel_atoms > 0
+              ? " panel_atoms=" + std::to_string(config.panel_atoms) +
+                    " panel_step=" + std::to_string(config.panel_step)
+              : std::string());
+}
+
+// Runs one sweep and returns its answer. `key_product` states which product is
+// swept, and with it where the one-hot of the left operand sits: the
+// probability tile's `k` axis is the key index and the query tile's is the head
+// width, and the column the product must land in follows.
+// The one driver entry this file takes. Nothing else of the driver API is
+// needed, so the probe links no driver library and asks the runtime for the
+// symbol instead.
+using EncodeTiledFunction =
+    CUresult (*)(CUtensorMap*, CUtensorMapDataType, cuuint32_t, void*,
+                 const cuuint64_t*, const cuuint64_t*, const cuuint32_t*,
+                 const cuuint32_t*, CUtensorMapInterleave, CUtensorMapSwizzle,
+                 CUtensorMapL2promotion, CUtensorMapFloatOOBfill);
+
+EncodeTiledFunction EncodeTiled() {
+  static EncodeTiledFunction function = nullptr;
+  if (function == nullptr) {
+    void* pointer = nullptr;
+    const cudaError_t status = cudaGetDriverEntryPoint(
+        "cuTensorMapEncodeTiled", &pointer, cudaEnableDefault);
+    if (status != cudaSuccess || pointer == nullptr) {
+      std::fprintf(stderr, "fatal: no cuTensorMapEncodeTiled: %s\n",
+                   cudaGetErrorString(status));
+      std::exit(1);
+    }
+    function = reinterpret_cast<EncodeTiledFunction>(pointer);
+  }
+  return function;
+}
+
+// The map of the interleaved form over `tiles` key or value tiles of a
+// row-major source: five axes, four of them with the stride the source gives
+// them, and the shared order of the tile is the order of the axes.
+bool MakeInterleavedMap(CUtensorMap* map, const void* source, int tiles,
+                        int rows, int columns) {
+  // Axis 0 is the eight elements of one core matrix, so its stride is the two
+  // bytes of an element and the encoder does not take it. The four strides the
+  // encoder takes are the ones of axis 1 to 4: the eight-row step of a group
+  // (one row of the source), the half of a sixteen-wide block, the key group,
+  // and the head-width block.
+  const cuuint64_t dims[5] = {
+      8, 8, 2,
+      static_cast<cuuint64_t>(rows) * static_cast<cuuint64_t>(tiles) / 8,
+      static_cast<cuuint64_t>(columns) / 16};
+  const cuuint64_t strides[4] = {
+      static_cast<cuuint64_t>(columns) * 2, 16,
+      static_cast<cuuint64_t>(8) * static_cast<cuuint64_t>(columns) * 2, 32};
+  const cuuint32_t box[5] = {8, 8, 2, static_cast<cuuint32_t>(rows) / 8,
+                             static_cast<cuuint32_t>(columns) / 16};
+  const cuuint32_t element[5] = {1, 1, 1, 1, 1};
+  const CUresult status = EncodeTiled()(
+      map, CU_TENSOR_MAP_DATA_TYPE_BFLOAT16, 5, const_cast<void*>(source), dims,
+      strides, box, element, CU_TENSOR_MAP_INTERLEAVE_NONE,
+      CU_TENSOR_MAP_SWIZZLE_NONE, CU_TENSOR_MAP_L2_PROMOTION_NONE,
+      CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
+  if (status != CUDA_SUCCESS) {
+    std::fprintf(stderr, "fatal: the interleaved map was refused (%d)\n",
+                 static_cast<int>(status));
+    return false;
+  }
+  return true;
+}
+
+// The map of one panel of a swizzled tile: sixty-four elements of a row are a
+// hundred and twenty-eight bytes, which is the span the engine's swizzle
+// covers, so a row of a hundred and twenty-eight elements is two panels and two
+// maps.
+bool MakeSwizzledPanelMap(CUtensorMap* map, const void* source, int rows,
+                          int box_rows, int panel) {
+  const void* base =
+      static_cast<const char*>(source) + static_cast<std::size_t>(panel) * 128;
+  const cuuint64_t dims[2] = {64, static_cast<cuuint64_t>(rows)};
+  const cuuint64_t strides[1] = {static_cast<cuuint64_t>(kDim) * 2};
+  const cuuint32_t box[2] = {64, static_cast<cuuint32_t>(box_rows)};
+  const cuuint32_t element[2] = {1, 1};
+  const CUresult status = EncodeTiled()(
+      map, CU_TENSOR_MAP_DATA_TYPE_BFLOAT16, 2, const_cast<void*>(base), dims,
+      strides, box, element, CU_TENSOR_MAP_INTERLEAVE_NONE,
+      CU_TENSOR_MAP_SWIZZLE_128B, CU_TENSOR_MAP_L2_PROMOTION_NONE,
+      CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
+  if (status != CUDA_SUCCESS) {
+    std::fprintf(stderr, "fatal: the swizzled panel map was refused (%d)\n",
+                 static_cast<int>(status));
+    return false;
+  }
+  return true;
+}
+
+OperandSweep RunOperandSweep(
+    const std::string& name, const std::vector<OperandConfig>& configs,
+    const std::vector<OperandTriple>& triples, bool key_product,
+    std::vector<nanochat::Bf16>* host_left,
+    std::vector<nanochat::Bf16>* host_right, Bf16* device_left,
+    Bf16* device_right, const CUtensorMap& panel_low,
+    const CUtensorMap& panel_high, float* device_out, const Diagnostics& note) {
+  OperandSweep sweep;
+  sweep.configs = static_cast<int>(configs.size());
+  for (const OperandConfig& config : configs) {
+    int found = 0;
+    for (const OperandTriple& triple : triples) {
+      std::fill(host_left->begin(), host_left->end(),
+                nanochat::Bf16FromFloat(0.0f));
+      std::fill(host_right->begin(), host_right->end(),
+                nanochat::Bf16FromFloat(0.0f));
+      const int left_axis = key_product ? triple.dim : triple.key;
+      (*host_left)[static_cast<std::size_t>(triple.row) * kDim + left_axis] =
+          nanochat::Bf16FromFloat(1.0f);
+      (*host_right)[static_cast<std::size_t>(triple.key) * kDim + triple.dim] =
+          nanochat::Bf16FromFloat(1.0f);
+      Upload(*host_left, device_left);
+      Upload(*host_right, device_right);
+      OperandSweepKernel<<<1, kWarpgroupThreads, kProbeSharedBytes>>>(
+          device_left, device_right, config.atom_step, config.trans_b,
+          config.transpose_stage, config.lbo, config.sbo, config.layout,
+          config.panel_atoms, config.panel_step, panel_low, panel_high,
+          device_out);
+      SyncFlash(name + " " + Describe(config));
+      const std::vector<float> out = ReadBack(device_out, kProductSlots);
+      const int expected_column = key_product ? triple.key : triple.dim;
+      int one = 0;
+      bool at_expected = false;
+      for (int lane = 0; lane < kWarpgroupThreads; ++lane) {
+        for (int index = 0; index < kRegisters; ++index) {
+          const float value =
+              out[static_cast<std::size_t>(lane) * kRegisters + index];
+          if (std::fabs(value) > 0.5f) {
+            ++one;
+            const std::pair<int, int> slot = SlotOf(lane, index);
+            if (slot.first == triple.row && slot.second == expected_column) {
+              at_expected = true;
+            }
+          }
+        }
+      }
+      if (one == 1 && at_expected) ++found;
+    }
+    const int expected = static_cast<int>(triples.size());
+    const bool this_ok = found == expected;
+    if (this_ok) ++sweep.configs_ok;
+    if (found > sweep.best_found) {
+      sweep.best_found = found;
+      sweep.best = config;
+    }
+    if (!this_ok && found > sweep.best_missed_found) {
+      sweep.best_missed_found = found;
+      sweep.best_missed = config;
+    }
+    // A near miss is the useful line when nothing passes: it names the fields
+    // the reading does agree with.
+    if (found >= 2 && !this_ok) {
+      note("attention-wgmma:%s_near %s found=%d\n", name.c_str(),
+           Describe(config).c_str(), found);
+    }
+    if (this_ok) {
+      sweep.pass_configs += Describe(config) + "; ";
+      note("attention-wgmma:%s %s found=%d of=%d\n", name.c_str(),
+           Describe(config).c_str(), found, expected);
+    }
+  }
+  return sweep;
+}
+
+// The document's fields of one sweep, under the row-name prefix its subject
+// states.
+void WriteOperandSweep(nanochat::BenchReport* report, const std::string& name,
+                       const OperandSweep& sweep) {
+  report->SetExtraInt(name + ":configs", sweep.configs);
+  report->SetExtraText(name + ":pass_config", sweep.pass_configs.empty()
+                                                  ? "none"
+                                                  : sweep.pass_configs);
+  report->SetExtraInt(name + ":triples", 6);
+  report->SetExtraInt(name + ":configs_ok", sweep.configs_ok);
+  report->SetExtraInt(name + ":best_found", sweep.best_found);
+  report->SetExtraText(name + ":best_config", Describe(sweep.best));
+  report->SetExtraInt(name + ":best_missed_found", sweep.best_missed_found);
+  report->SetExtraText(name + ":best_missed_config",
+                       Describe(sweep.best_missed));
+  report->SetExtraText(name + ":status",
+                       sweep.configs_ok > 0 ? "ok" : "failed");
+}
+
 void StateShapeSpace(ShapeTable* shapes) {
   for (int warpgroups = 1; warpgroups <= kMaxWarpgroups; ++warpgroups) {
     for (int query_tiles = 1; query_tiles <= kMaxQueryTiles; ++query_tiles) {
@@ -2313,6 +3683,27 @@ void StateShapeSpace(ShapeTable* shapes) {
                   ResidentFlashRegisters<1, false, true>());
   shapes->Observe(FindShape(ShapeKind::kFlashResident, 2, 1, kAtomN, 1),
                   ResidentFlashRegisters<2, false, true>());
+  shapes->Observe(FindShape(ShapeKind::kFlash, kMaxWarpgroups, 1, kAtomN, 2,
+                            /*shared_value=*/true),
+                  SharedValueRegisters<kMaxWarpgroups, 2, /*kMask=*/false>());
+  // The warp-specialized shapes, at the producer width each one names: the
+  // register count is the one the build gives a block of two roles, which is
+  // the count the `setmaxnreg` of the producer warpgroup redistributes.
+  for (const ShapeSpec& shape : kShapeSpace) {
+    if (shape.kind != ShapeKind::kSpecial || !shape.instantiated) continue;
+    VisitSpecializedProducer(shape.producer_threads, [&](auto producer) {
+      constexpr int kProducer = decltype(producer)::value;
+      VisitSpecializedConsumers(shape.warpgroups, [&](auto consumers) {
+        constexpr int kConsumers = decltype(consumers)::value;
+        VisitSpecializedRing(shape.stages, [&](auto ring) {
+          constexpr int kRing = decltype(ring)::value;
+          shapes->Observe(shape,
+                          SpecializedRegisters<kProducer, kConsumers, kRing,
+                                               /*kMask=*/false>());
+        });
+      });
+    });
+  }
   // The candidates hold no instantiation of this file, so the arithmetic of the
   // shape space is the count they state.
   for (const ShapeSpec& shape : kShapeSpace) {
@@ -2345,6 +3736,10 @@ int main(int argc, char** argv) {
   if (options.flash()) {
     if (!checks_run.empty()) checks_run += "+";
     checks_run += "flash";
+  }
+  if (options.h3()) {
+    if (!checks_run.empty()) checks_run += "+";
+    checks_run += "h3";
   }
   report.SetExtraText("checks_run", checks_run.empty() ? "none" : checks_run);
 
@@ -2413,6 +3808,9 @@ int main(int argc, char** argv) {
   Bf16* device_queries = nullptr;
   Bf16* device_k = nullptr;
   Bf16* device_value = nullptr;
+  Bf16* device_special_queries = nullptr;
+  Bf16* device_special_keys = nullptr;
+  Bf16* device_special_values = nullptr;
   float* device_out = nullptr;
   float* device_row_sums = nullptr;
   constexpr int kSourceTiles = 2048;
@@ -2426,6 +3824,15 @@ int main(int argc, char** argv) {
       reinterpret_cast<void**>(&device_out),
       std::max(kProductSlots, kMaxTiles * kProductSlots) * sizeof(float));
   cudaMalloc(reinterpret_cast<void**>(&device_value),
+             key_elements * sizeof(Bf16));
+  // The warp-specialized rows hold their own operands, because a run of every
+  // set would otherwise stage the flash rows from the set that follows them.
+  cudaMalloc(reinterpret_cast<void**>(&device_special_queries),
+             static_cast<std::size_t>(kSpecialTwoConsumers) * kAtomM * kDim *
+                 sizeof(Bf16));
+  cudaMalloc(reinterpret_cast<void**>(&device_special_keys),
+             key_elements * sizeof(Bf16));
+  cudaMalloc(reinterpret_cast<void**>(&device_special_values),
              key_elements * sizeof(Bf16));
   cudaMalloc(reinterpret_cast<void**>(&device_row_sums),
              static_cast<std::size_t>(kMaxWarpgroups) * kAtomM * sizeof(float));
@@ -2869,141 +4276,217 @@ int main(int argc, char** argv) {
       ok = ok && permutation_ok;
     }
 
-    // --- The transposed value operand
-    // ----------------------------------------- Part 8 section 5 records the
-    // second transpose bit as unmeasured. One element at a time again: a
-    // one-hot probability element at (row, key) and a one-hot value element at
-    // (key, dim) leave one non-zero result, and it must land at (row, dim) for
-    // the form and the atom stride to be right.
+    // --- The value operand
+    // Part 8 section 5 records the second transpose bit as unmeasured. One
+    // element at a time: a one-hot probability element at (row, key) and a
+    // one-hot value element at (key, dim) leave one non-zero result, and it
+    // must land at (row, dim) for the form, the step, and the offsets to be
+    // right.
     {
-      struct Triple {
-        int row;
-        int key;
-        int dim;
-      };
-      const Triple triples[] = {{0, 0, 0},      {3, 5, 7},  {17, 33, 65},
-                                {63, 127, 127}, {8, 64, 0}, {0, 127, 64}};
-      std::vector<nanochat::Bf16> host_p(static_cast<std::size_t>(kAtomM) *
-                                         kDim);
-      std::vector<nanochat::Bf16> host_v(static_cast<std::size_t>(kAtomN) *
-                                         kDim);
-      Bf16* device_p = nullptr;
-      Bf16* device_v = nullptr;
-      cudaMalloc(reinterpret_cast<void**>(&device_p),
-                 host_p.size() * sizeof(nanochat::Bf16));
-      cudaMalloc(reinterpret_cast<void**>(&device_v),
-                 host_v.size() * sizeof(nanochat::Bf16));
-      cudaFuncSetAttribute(reinterpret_cast<const void*>(ValueOperandKernel),
+      const std::vector<OperandTriple> triples = {{0, 0, 0},    {3, 5, 7},
+                                                  {17, 33, 65}, {63, 127, 127},
+                                                  {8, 64, 0},   {0, 127, 64}};
+      std::vector<nanochat::Bf16> host_left(static_cast<std::size_t>(kAtomM) *
+                                            kDim);
+      std::vector<nanochat::Bf16> host_right(static_cast<std::size_t>(kAtomN) *
+                                             kDim);
+      Bf16* device_left = nullptr;
+      Bf16* device_right = nullptr;
+      cudaMalloc(reinterpret_cast<void**>(&device_left),
+                 host_left.size() * sizeof(nanochat::Bf16));
+      cudaMalloc(reinterpret_cast<void**>(&device_right),
+                 host_right.size() * sizeof(nanochat::Bf16));
+      cudaFuncSetAttribute(reinterpret_cast<const void*>(OperandSweepKernel),
                            cudaFuncAttributeMaxDynamicSharedMemorySize,
                            kProbeSharedBytes);
-      bool value_ok = false;
-      int value_configs_ok = 0;
-      int value_best_found = 0;
-      std::string value_pass_configs;
-      // The configurations the operand form can take. The known transposed form
-      // is one entry, and the rest sweep the swizzled stagings over the offsets
-      // and strides a swizzled descriptor uses: the layout permutes whole
-      // sixteen-byte chunks, so the strides are small multiples of one chunk
-      // and not the interleaved form's quarter kilobyte.
-      struct ValueConfig {
-        int transpose_stage;
-        int trans_b;
-        int atom_step;
-        int lbo;
-        int sbo;
-        int layout;
-      };
-      std::vector<ValueConfig> configs;
+      std::vector<OperandConfig> configs;
+      // The transposed staging with both bits clear is the form the value
+      // product reads today, so it is one entry of every list.
       configs.push_back(
           {1, 0, AtomStep(kAtomN), kLboBytes, kSboBytes, /*layout=*/0});
-      for (int layout : {1, 2}) {
+      // The staging a copy engine can fill: the value tile in the interleaved
+      // form of the key tile, whose rows are the key index and whose contiguous
+      // axis is the head width. Read with the transpose bit, that is the value
+      // operand, and the tile then costs a copy and no transpose. Neither the
+      // step along the key axis nor the two offsets is published for that
+      // reading, so the sweep walks every multiple of one core-matrix group
+      // over a whole tile, with the two offsets in both orders.
+      for (int trans_b : {0, 1}) {
+        for (int atom_step = 8; atom_step <= 512; atom_step += 8) {
+          for (int lbo : {kLboBytes, kSboBytes}) {
+            for (int sbo : {kLboBytes, kSboBytes}) {
+              configs.push_back(
+                  {0, trans_b, atom_step, lbo, sbo, /*layout=*/0});
+            }
+          }
+        }
+      }
+      // The transposed staging over the transpose bit it is not known to need.
+      configs.push_back({1, 1, AtomStep(kAtomN), kLboBytes, kSboBytes, 0});
+      // The swizzled stagings, which are the ones a Tensor Memory Accelerator
+      // descriptor reads: the stand-in 128-byte swizzle and the canonical one,
+      // both transpose bits. A swizzled tile steps to the next atom by tens of
+      // bytes and not by the interleaved form's kilobytes, so the steps are
+      // stated in units of sixteen bytes from one.
+      for (int layout : {1, 4}) {
         for (int trans_b : {0, 1}) {
-          for (int atom_step : {8, 16, 32, AtomStep(kAtomN)}) {
-            for (int lbo : {16, 32, kLboBytes}) {
-              for (int sbo : {16, 32, kLboBytes}) {
+          for (int atom_step : {1, 2, 4, 8, 16, 32, 64, 128, 256}) {
+            for (int lbo : {16, 32, kLboBytes, 256, 1024}) {
+              for (int sbo : {16, 32, kLboBytes, 256, 1024, 2048}) {
                 configs.push_back({2, trans_b, atom_step, lbo, sbo, layout});
               }
             }
           }
         }
       }
-      for (const ValueConfig& config : configs) {
-        int found = 0;
-        for (const Triple& triple : triples) {
-          std::fill(host_p.begin(), host_p.end(),
-                    nanochat::Bf16FromFloat(0.0f));
-          std::fill(host_v.begin(), host_v.end(),
-                    nanochat::Bf16FromFloat(0.0f));
-          host_p[static_cast<std::size_t>(triple.row) * kDim + triple.key] =
-              nanochat::Bf16FromFloat(1.0f);
-          host_v[static_cast<std::size_t>(triple.key) * kDim + triple.dim] =
-              nanochat::Bf16FromFloat(1.0f);
-          Upload(host_p, device_p);
-          Upload(host_v, device_v);
-          ValueOperandKernel<<<1, kWarpgroupThreads, kProbeSharedBytes>>>(
-              device_p, device_v, config.atom_step, config.trans_b,
-              config.transpose_stage, config.lbo, config.sbo, config.layout,
-              device_out);
-          SyncFlash("value_operand transpose_stage=" +
-                    std::to_string(config.transpose_stage) +
-                    " trans_b=" + std::to_string(config.trans_b) +
-                    " atom_step=" + std::to_string(config.atom_step) +
-                    " lbo=" + std::to_string(config.lbo) +
-                    " sbo=" + std::to_string(config.sbo) +
-                    " layout=" + std::to_string(config.layout));
-          const std::vector<float> out = ReadBack(device_out, kProductSlots);
-          int one = 0;
-          bool at_expected = false;
-          for (int lane = 0; lane < kWarpgroupThreads; ++lane) {
-            for (int index = 0; index < kRegisters; ++index) {
-              const float value =
-                  out[static_cast<std::size_t>(lane) * kRegisters + index];
-              if (std::fabs(value) > 0.5f) {
-                ++one;
-                const std::pair<int, int> slot = SlotOf(lane, index);
-                if (slot.first == triple.row && slot.second == triple.dim) {
-                  at_expected = true;
+      const CUtensorMap no_map{};
+      const OperandSweep sweep = RunOperandSweep(
+          "value_operand", configs, triples, /*key_product=*/false, &host_left,
+          &host_right, device_left, device_right, no_map, no_map, device_out,
+          note);
+      WriteOperandSweep(&report, "value_operand", sweep);
+      ok = ok && sweep.configs_ok > 0;
+      cudaFree(device_left);
+      cudaFree(device_right);
+    }
+
+    // --- The key operand
+    // Decision H2b stages the key tile with the Tensor Memory Accelerator,
+    // which writes a swizzled row-major tile and not the interleaved form the
+    // staged rows of this file fill. The same one-element check states which
+    // swizzle and which descriptor fields read it: a one-hot query element at
+    // (row, dim) and a one-hot key element at (key, dim) must leave one result,
+    // and it must land at (row, key).
+    {
+      const std::vector<OperandTriple> triples = {{0, 0, 0},    {3, 5, 7},
+                                                  {17, 33, 65}, {63, 127, 127},
+                                                  {8, 64, 0},   {0, 127, 64}};
+      std::vector<nanochat::Bf16> host_left(static_cast<std::size_t>(kAtomM) *
+                                            kDim);
+      std::vector<nanochat::Bf16> host_right(static_cast<std::size_t>(kAtomN) *
+                                             kDim);
+      Bf16* device_left = nullptr;
+      Bf16* device_right = nullptr;
+      cudaMalloc(reinterpret_cast<void**>(&device_left),
+                 host_left.size() * sizeof(nanochat::Bf16));
+      cudaMalloc(reinterpret_cast<void**>(&device_right),
+                 host_right.size() * sizeof(nanochat::Bf16));
+      cudaFuncSetAttribute(reinterpret_cast<const void*>(OperandSweepKernel),
+                           cudaFuncAttributeMaxDynamicSharedMemorySize,
+                           kProbeSharedBytes);
+      std::vector<OperandConfig> configs;
+      // The interleaved form the staged score rows fill, as the control: it
+      // must read, or the sweep itself is wrong.
+      configs.push_back({0, 0, AtomStep(kAtomN), kLboBytes, kSboBytes, 0});
+      for (int layout : {1, 4}) {
+        for (int atom_step : {1, 2, 4, 8, 16, 32, 64, 128, 256}) {
+          for (int lbo : {16, 32, kLboBytes, 256, 1024}) {
+            for (int sbo : {16, 32, kLboBytes, 256, 1024, 2048}) {
+              configs.push_back({2, 0, atom_step, lbo, sbo, layout});
+            }
+          }
+        }
+      }
+      // The swizzled tile the copy engine fills, in its two panels: the
+      // stand-in this file writes, and the engine itself. The descriptor fields
+      // are the ones that layout leaves open, so both families sweep them.
+      // A hundred and twenty-eight columns are two panels of sixty-four, so the
+      // atom step changes once and the panel pair below states where; every
+      // other field is the descriptor's.
+      for (int stage : {2, 3}) {
+        // The stand-in writes the panels and the descriptor names swizzle 1
+        // through the same field; the engine fills the same tile, so its
+        // descriptor states the swizzle and no staging.
+        const int layout = stage == 2 ? 5 : 1;
+        for (int atom_step : {1, 2, 4, 8, 16}) {
+          for (int panel_atoms : {4, 8}) {
+            for (int panel_step : {512, 1024, 2048}) {
+              for (int lbo : {16, 32, kLboBytes, 256}) {
+                for (int sbo : {16, 32, 64, kLboBytes, 256, 1024}) {
+                  configs.push_back({stage, 0, atom_step, lbo, sbo, layout,
+                                     panel_atoms, panel_step});
                 }
               }
             }
           }
-          if (one == 1 && at_expected) ++found;
-        }
-        const int expected = sizeof(triples) / sizeof(triples[0]);
-        const bool this_ok = found == expected;
-        value_ok = value_ok || this_ok;
-        if (this_ok) ++value_configs_ok;
-        value_best_found = std::max(value_best_found, found);
-        if (this_ok) {
-          value_pass_configs +=
-              "transpose_stage=" + std::to_string(config.transpose_stage) +
-              " trans_b=" + std::to_string(config.trans_b) +
-              " atom_step=" + std::to_string(config.atom_step) +
-              " lbo=" + std::to_string(config.lbo) +
-              " sbo=" + std::to_string(config.sbo) +
-              " layout=" + std::to_string(config.layout) + "; ";
-          note(
-              "attention-wgmma:value_operand transpose_stage=%d trans_b=%d "
-              "atom_step=%d lbo=%d sbo=%d layout=%d found=%d of=%d\n",
-              config.transpose_stage, config.trans_b, config.atom_step,
-              config.lbo, config.sbo, config.layout, found, expected);
         }
       }
-      report.SetExtraInt("value_operand:configs",
-                         static_cast<long long>(configs.size()));
-      report.SetExtraText(
-          "value_operand:pass_config",
-          value_pass_configs.empty() ? "none" : value_pass_configs);
-      ok = ok && value_ok;
-      report.SetExtraInt(
-          "value_operand:triples",
-          static_cast<long long>(sizeof(triples) / sizeof(triples[0])));
-      report.SetExtraInt("value_operand:configs_ok", value_configs_ok);
-      report.SetExtraInt("value_operand:best_found", value_best_found);
-      report.SetExtraText("value_operand:status", value_ok ? "ok" : "failed");
-      cudaFree(device_p);
-      cudaFree(device_v);
+      CUtensorMap panel_low{};
+      CUtensorMap panel_high{};
+      const bool panels =
+          MakeSwizzledPanelMap(&panel_low, device_right, kAtomN, kAtomN,
+                               /*panel=*/0) &&
+          MakeSwizzledPanelMap(&panel_high, device_right, kAtomN, kAtomN,
+                               /*panel=*/1);
+      if (!panels) ok = false;
+      const OperandSweep sweep =
+          RunOperandSweep("key_operand", configs, triples, /*key_product=*/true,
+                          &host_left, &host_right, device_left, device_right,
+                          panel_low, panel_high, device_out, note);
+      WriteOperandSweep(&report, "key_operand", sweep);
+      ok = ok && sweep.configs_ok > 0;
+      cudaFree(device_left);
+      cudaFree(device_right);
     }
+    // --- The copy engine
+    // Decision H2b: one instruction a stage instead of a thread a sixteen-byte
+    // group. The map states the interleaved form as five axes, so the check is
+    // the one a wrong form fails: the tile the copy lands is the tile the
+    // threads stage, byte for byte.
+    {
+      std::vector<nanochat::Bf16> host_tile(static_cast<std::size_t>(kAtomN) *
+                                            kDim);
+      Random tma_random;
+      for (nanochat::Bf16& value : host_tile) {
+        value = nanochat::Bf16FromFloat(tma_random.Next());
+      }
+      Bf16* device_tile = nullptr;
+      cudaMalloc(reinterpret_cast<void**>(&device_tile),
+                 host_tile.size() * sizeof(nanochat::Bf16));
+      Upload(host_tile, device_tile);
+      CUtensorMap map{};
+      const bool built =
+          MakeInterleavedMap(&map, device_tile, /*tiles=*/1, kAtomN, kDim);
+      bool tma_ok = built;
+      std::size_t tma_bad = 0;
+      if (built) {
+        cudaFuncSetAttribute(reinterpret_cast<const void*>(TmaStageKernel),
+                             cudaFuncAttributeMaxDynamicSharedMemorySize,
+                             kKeyBytes);
+        cudaMemset(device_out, 0, kKeyBytes);
+        TmaStageKernel<<<1, kWarpgroupThreads, kKeyBytes>>>(
+            map, /*group=*/0, kKeyBytes, device_out);
+        SyncFlash("tma stage");
+        const std::vector<float> staged = ReadBack(device_out, kKeyBytes / 4);
+        for (int row = 0; row < kAtomN; ++row) {
+          for (int k = 0; k < kDim; k += 2) {
+            const int offset = InterleavedOffset(row, k, kAtomN);
+            const std::uint16_t low =
+                host_tile[static_cast<std::size_t>(row) * kDim + k].bits;
+            const std::uint16_t high =
+                host_tile[static_cast<std::size_t>(row) * kDim + k + 1].bits;
+            const std::uint32_t expected =
+                static_cast<std::uint32_t>(low) |
+                (static_cast<std::uint32_t>(high) << 16);
+            float actual = 0.0f;
+            std::memcpy(&actual, &staged[static_cast<std::size_t>(offset / 4)],
+                        sizeof(actual));
+            std::uint32_t bits = 0;
+            std::memcpy(&bits, &actual, sizeof(bits));
+            if (bits != expected) ++tma_bad;
+          }
+        }
+        tma_ok = tma_bad == 0;
+      }
+      note("attention-wgmma:tma_stage bytes=%d bad=%zu status=%s\n", kKeyBytes,
+           tma_bad, tma_ok ? "ok" : "failed");
+      report.SetExtraInt("tma_stage:bad", static_cast<long long>(tma_bad));
+      report.SetExtraInt("tma_stage:words", kKeyBytes / 4);
+      report.SetExtraText("tma_stage:status", tma_ok ? "ok" : "failed");
+      ok = ok && tma_ok;
+      cudaFree(device_tile);
+    }
+
   }  // options.h1(): the map and form sections
 
   // --- The flash tile
@@ -3182,7 +4665,221 @@ int main(int argc, char** argv) {
         VisitFlashGeometry(warpgroups, stages, check_geometry);
       }
     }
+
+    // The same ring with the value tile carried by the copy engine and
+    // transposed in shared memory, against the resident step of the same
+    // operands. The element order inside a unit and the unit mapping are what
+    // this check covers.
+    auto check_shared_value = [&](auto mask_constant) {
+      constexpr bool kMask = decltype(mask_constant)::value;
+      const std::vector<float> resident =
+          RunResidentFlash<kMaxWarpgroups, kMask>(device_queries, device_k,
+                                                  device_value, device_out,
+                                                  device_row_sums);
+      const std::pair<std::size_t, double> result =
+          CheckSharedValue<kMaxWarpgroups, 2, kMask>(
+              device_queries, device_k, device_value, device_out,
+              device_row_sums, resident, /*scale=*/1.0);
+      const std::string key = std::string("flash_shared_value_check:") +
+                              (kMask ? "causal:" : "dense:");
+      note(
+          "attention-flash:shared_value_check warpgroups=%d stages=2 mask=%s "
+          "error=%.3e bad=%zu of %d status=%s\n",
+          kMaxWarpgroups, kMask ? "causal" : "dense", result.second,
+          result.first, kMaxWarpgroups * static_cast<int>(kProductSlots),
+          result.second < 1e-6 ? "ok" : "failed");
+      report.SetExtra(key + "error", result.second);
+      report.SetExtraInt(key + "bad", static_cast<long long>(result.first));
+      staged_ok = staged_ok && result.second < 1e-6;
+    };
+    check_shared_value(std::integral_constant<bool, false>{});
+    check_shared_value(std::integral_constant<bool, true>{});
     ok = ok && staged_ok;
+
+    // The engine-fed tile, against the resident step of the same operands. The
+    // key operand changes form here and the value operand is transposed from a
+    // swizzled stage, so this check is the one that says both are right.
+    {
+      CUtensorMap key_low{};
+      CUtensorMap key_high{};
+      CUtensorMap value_low{};
+      CUtensorMap value_high{};
+      const int rows = kAtomN * kSourceTiles;
+      const bool built =
+          MakeSwizzledPanelMap(&key_low, device_k, rows, kAtomN, /*panel=*/0) &&
+          MakeSwizzledPanelMap(&key_high, device_k, rows, kAtomN,
+                               /*panel=*/1) &&
+          MakeSwizzledPanelMap(&value_low, device_value, rows, kAtomN,
+                               /*panel=*/0) &&
+          MakeSwizzledPanelMap(&value_high, device_value, rows, kAtomN,
+                               /*panel=*/1);
+      bool engine_ok = built;
+      if (built) {
+        auto check_mask = [&](auto mask_constant) {
+          constexpr bool kMask = decltype(mask_constant)::value;
+          const std::vector<float> resident =
+              RunResidentFlash<kMaxWarpgroups, kMask>(device_queries, device_k,
+                                                      device_value, device_out,
+                                                      device_row_sums);
+          // Both transpositions, because the rows time both.
+          auto check_transpose = [&](auto warp_constant) {
+            constexpr bool kWarp = decltype(warp_constant)::value;
+            const std::pair<std::size_t, double> result =
+                CheckEngineFlash<kMaxWarpgroups, 2, kMask, kWarp>(
+                    device_queries, key_low, key_high, value_low, value_high,
+                    device_out, resident, /*scale=*/1.0);
+            const std::string key = std::string("flash_engine_check:") +
+                                    (kWarp ? "warp:" : "thread:") +
+                                    (kMask ? "causal:" : "dense:");
+            note(
+                "attention-flash:engine_check consumers=%d stages=2 "
+                "transpose=%s mask=%s error=%.3e bad=%zu of %d status=%s\n",
+                kMaxWarpgroups, kWarp ? "warp" : "thread",
+                kMask ? "causal" : "dense", result.second, result.first,
+                kMaxWarpgroups * static_cast<int>(kProductSlots),
+                result.second < 1e-6 ? "ok" : "failed");
+            report.SetExtra(key + "error", result.second);
+            report.SetExtraInt(key + "bad",
+                               static_cast<long long>(result.first));
+            engine_ok = engine_ok && result.second < 1e-6;
+          };
+          check_transpose(std::integral_constant<bool, false>{});
+          check_transpose(std::integral_constant<bool, true>{});
+          {
+            const std::pair<std::size_t, double> result =
+                CheckEngineFlash<kMaxWarpgroups, 2, kMask,
+                                 /*kWarpTranspose=*/false,
+                                 /*kConsumerTranspose=*/true>(
+                    device_queries, key_low, key_high, value_low, value_high,
+                    device_out, resident, /*scale=*/1.0);
+            const std::string key =
+                std::string("flash_engine_check:consumer:") +
+                (kMask ? "causal:" : "dense:");
+            note(
+                "attention-flash:engine_check consumers=%d stages=2 "
+                "transpose=consumer mask=%s error=%.3e bad=%zu of %d "
+                "status=%s\n",
+                kMaxWarpgroups, kMask ? "causal" : "dense", result.second,
+                result.first, kMaxWarpgroups * static_cast<int>(kProductSlots),
+                result.second < 1e-6 ? "ok" : "failed");
+            report.SetExtra(key + "error", result.second);
+            report.SetExtraInt(key + "bad",
+                               static_cast<long long>(result.first));
+            engine_ok = engine_ok && result.second < 1e-6;
+          }
+        };
+        check_mask(std::integral_constant<bool, false>{});
+        check_mask(std::integral_constant<bool, true>{});
+      }
+      ok = ok && engine_ok;
+    }
+  }
+
+  // --- The warp-specialized block
+  // Decision H3 of Part 8 section 2: one producer issues the copies and never
+  // computes, and the consumer warpgroups issue the products and never wait on
+  // a global load. The two producer widths are the first phase of the decision,
+  // one warp, and the full warpgroup that `setmaxnreg` spans. Every geometry is
+  // checked against the resident step of the same operands before it is timed,
+  // so a wrong barrier, stage offset, or role boundary fails here instead of
+  // measuring.
+  std::vector<nanochat::Bf16> special_queries(
+      static_cast<std::size_t>(kSpecialTwoConsumers) * kAtomM * kDim);
+  std::vector<nanochat::Bf16> special_keys(
+      static_cast<std::size_t>(kSourceTiles) * kAtomN * kDim);
+  std::vector<nanochat::Bf16> special_values(special_keys.size());
+  if (options.h3()) {
+    Random special_random;
+    for (nanochat::Bf16& value : special_queries) {
+      value = nanochat::Bf16FromFloat(special_random.Next());
+    }
+    // One key tile and one value tile, repeated over the source ring, so every
+    // step of a timed row reads defined operands instead of whatever the
+    // allocator left behind.
+    const std::size_t tile_elements = static_cast<std::size_t>(kAtomN) * kDim;
+    std::vector<nanochat::Bf16> key_tile(tile_elements);
+    std::vector<nanochat::Bf16> value_tile(tile_elements);
+    for (nanochat::Bf16& value : key_tile) {
+      value = nanochat::Bf16FromFloat(special_random.Next());
+    }
+    for (nanochat::Bf16& value : value_tile) {
+      value = nanochat::Bf16FromFloat(special_random.Next());
+    }
+    for (int tile = 0; tile < kSourceTiles; ++tile) {
+      std::copy(key_tile.begin(), key_tile.end(),
+                special_keys.begin() +
+                    static_cast<std::size_t>(tile) * tile_elements);
+      std::copy(value_tile.begin(), value_tile.end(),
+                special_values.begin() +
+                    static_cast<std::size_t>(tile) * tile_elements);
+    }
+    Upload(special_queries, device_special_queries);
+    Upload(special_keys, device_special_keys);
+    Upload(special_values, device_special_values);
+  }
+
+  if (options.h3()) {
+    SetFlashSharedMemory<kSpecialOneConsumer, false>();
+    SetFlashSharedMemory<kSpecialOneConsumer, true>();
+    SetFlashSharedMemory<kSpecialTwoConsumers, false>();
+    SetFlashSharedMemory<kSpecialTwoConsumers, true>();
+    bool special_ok = true;
+    auto check_producer = [&](auto producer) {
+      constexpr int kProducer = decltype(producer)::value;
+      auto check_consumers = [&](auto consumers) {
+        constexpr int kConsumers = decltype(consumers)::value;
+        auto check_ring = [&](auto ring) {
+          constexpr int kRing = decltype(ring)::value;
+          auto check_mask = [&](auto mask_constant) {
+            constexpr bool kMask = decltype(mask_constant)::value;
+            // Two tile counts: one step, and enough steps for the ring to wrap
+            // twice, so the release waits and the stage reuse are checked and
+            // not only the first fill.
+            constexpr int kWrapTiles = 2 * kRing + 1;
+            auto check_tiles = [&](int tiles) {
+              const std::vector<float> resident =
+                  RunResidentFlash<kConsumers, kMask>(
+                      device_special_queries, device_special_keys,
+                      device_special_values, device_out, device_row_sums,
+                      tiles);
+              const std::pair<std::size_t, double> result =
+                  CheckSpecialized<kProducer, kConsumers, kRing, kMask>(
+                      device_special_queries, device_special_keys,
+                      device_special_values, device_out, device_row_sums,
+                      resident, /*scale=*/1.0, tiles);
+              const std::string key = std::string("special_check:producer") +
+                                      std::to_string(kProducer) + ":consumers" +
+                                      std::to_string(kConsumers) + ":stages" +
+                                      std::to_string(kRing) +
+                                      (kMask ? ":causal:" : ":dense:") +
+                                      "tiles" + std::to_string(tiles) + ":";
+              note(
+                  "attention-special:check producer=%d consumers=%d stages=%d "
+                  "mask=%s tiles=%d error=%.3e bad=%zu of %d status=%s\n",
+                  kProducer, kConsumers, kRing, kMask ? "causal" : "dense",
+                  tiles, result.second, result.first,
+                  kConsumers * static_cast<int>(kProductSlots),
+                  result.second < 1e-6 ? "ok" : "failed");
+              report.SetExtra(key + "error", result.second);
+              report.SetExtraInt(key + "bad",
+                                 static_cast<long long>(result.first));
+              special_ok = special_ok && result.second < 1e-6;
+            };
+            check_tiles(1);
+            check_tiles(kWrapTiles);
+          };
+          check_mask(std::integral_constant<bool, false>{});
+          check_mask(std::integral_constant<bool, true>{});
+        };
+        VisitSpecializedRing(kSpecialStages, check_ring);
+        VisitSpecializedRing(kSpecialDeepStages, check_ring);
+      };
+      VisitSpecializedConsumers(kSpecialOneConsumer, check_consumers);
+      VisitSpecializedConsumers(kSpecialTwoConsumers, check_consumers);
+    };
+    VisitSpecializedProducer(kSpecialWarpProducer, check_producer);
+    VisitSpecializedProducer(kSpecialWarpgroupProducer, check_producer);
+    ok = ok && special_ok;
   }
 
   // --- The rate -------------------------------------------------------------
@@ -3349,6 +5046,80 @@ int main(int argc, char** argv) {
          rate * kTflopsPerGflops, share);
   };
   if (options.h1()) {
+    // The copy engine's own rate: a ring of key tiles that one thread fills and
+    // no thread stages, so the bytes a second are the path's and not a
+    // thread's.
+    {
+      CUtensorMap map{};
+      const bool built =
+          MakeInterleavedMap(&map, device_k, kSourceTiles, kAtomN, kDim);
+      bool ring_ok = built;
+      if (built) {
+        constexpr int kRing = 3;
+        cudaFuncSetAttribute(
+            reinterpret_cast<const void*>(TmaRingKernel<kRing>),
+            cudaFuncAttributeMaxDynamicSharedMemorySize, kRing * kKeyBytes);
+        const int tiles = 8192;
+        const double bytes = static_cast<double>(kKeyBytes) *
+                             static_cast<double>(tiles) *
+                             static_cast<double>(sm_count);
+        const double bandwidth = add_copy_rate(
+            make_row("attention-wgmma:tma_copies",
+                     "stages=" + std::to_string(kRing) +
+                         " blocks=" + std::to_string(sm_count) +
+                         " tiles=" + std::to_string(tiles),
+                     "h1"),
+            "tma_copies:", "ring", bytes, [&] {
+              TmaRingKernel<kRing><<<sm_count, 32, kRing * kKeyBytes>>>(
+                  map, tiles, /*group_step=*/kAtomN / 8, kKeyBytes);
+            });
+        report.SetExtra("tma_copies:bytes_per_second_per_block",
+                        bandwidth / static_cast<double>(sm_count));
+        ring_ok = bandwidth > 0.0;
+      }
+      report.SetExtraText("tma_copies:status", ring_ok ? "ok" : "failed");
+      ok = ok && ring_ok;
+    }
+
+    // The engine's own rate on the box it likes: a swizzled panel, two a tile,
+    // which is the form the fast row of the plan records at 6.03 TB/s.
+    {
+      CUtensorMap low{};
+      CUtensorMap high{};
+      const bool built =
+          MakeSwizzledPanelMap(&low, device_k, kAtomN * kSourceTiles, kAtomN,
+                               /*panel=*/0) &&
+          MakeSwizzledPanelMap(&high, device_k, kAtomN * kSourceTiles, kAtomN,
+                               /*panel=*/1);
+      bool ring_ok = built;
+      if (built) {
+        constexpr int kRing = 3;
+        cudaFuncSetAttribute(
+            reinterpret_cast<const void*>(TmaSwizzledRingKernel<kRing>),
+            cudaFuncAttributeMaxDynamicSharedMemorySize, kRing * kKeyBytes);
+        const int tiles = 8192;
+        const double bytes = static_cast<double>(kKeyBytes) *
+                             static_cast<double>(tiles) *
+                             static_cast<double>(sm_count);
+        const double bandwidth = add_copy_rate(
+            make_row("attention-wgmma:tma_swizzled_copies",
+                     "stages=" + std::to_string(kRing) +
+                         " blocks=" + std::to_string(sm_count) +
+                         " tiles=" + std::to_string(tiles) + " swizzle=128b",
+                     "h1"),
+            "tma_swizzled_copies:", "ring", bytes, [&] {
+              TmaSwizzledRingKernel<kRing><<<sm_count, 32, kRing * kKeyBytes>>>(
+                  low, high, tiles, kAtomN);
+            });
+        report.SetExtra("tma_swizzled_copies:bytes_per_second_per_block",
+                        bandwidth / static_cast<double>(sm_count));
+        ring_ok = bandwidth > 0.0;
+      }
+      report.SetExtraText("tma_swizzled_copies:status",
+                          ring_ok ? "ok" : "failed");
+      ok = ok && ring_ok;
+    }
+
     add_resident("attention-wgmma:resident", kAtoms, 1, 1);
     add_resident("attention-wgmma:resident", kAtoms, sm_count, 1);
     // The ceiling of the narrow instruction: the same one-warpgroup tile and
@@ -3809,7 +5580,8 @@ int main(int argc, char** argv) {
           StagedFlashRegisters<kWarpgroups, kRing, false, false>();
       if (admit(shape_row, registers)) {
         SetStagedFlashSharedMemory<kWarpgroups, kRing, true, kRingKeyValue,
-                                   false, /*kSoftmax=*/false>();
+                                   false,
+                                   /*kSoftmax=*/false>();
         const nanochat::dev::Timing timing = harness.Time([&] {
           LaunchStagedFlash<kWarpgroups, kRing, true, kRingKeyValue, false,
                             /*kSoftmax=*/false>(
@@ -3833,6 +5605,310 @@ int main(int argc, char** argv) {
              shape.c_str(), timing.min_ms, rate * kTflopsPerGflops);
       }
     }
+  }
+
+  // The value ring of section 5's second direction: the copy engine fills the
+  // tile a key ring fills, and one shared pass transposes it into the tile the
+  // value product reads. So the transposition leaves the global path, and the
+  // rows state what that is worth: the copies alone, the copies with the
+  // transposition, and the step that reads them.
+  if (options.flash()) {
+    constexpr int kWarpgroups = kMaxWarpgroups;
+    constexpr int kRing = 2;
+    const ShapeSpec& shape_row =
+        FindShape(ShapeKind::kFlash, kWarpgroups, 1, kAtomN, kRing,
+                  /*shared_value=*/true);
+    const int registers =
+        SharedValueRegisters<kWarpgroups, kRing, /*kMask=*/false>();
+    if (admit(shape_row, registers)) {
+      const int copy_tiles = 8192;
+      auto add_shared_copies = [&](auto transpose_constant) {
+        constexpr bool kTranspose = decltype(transpose_constant)::value;
+        SetStagedFlashSharedMemory<kWarpgroups, kRing, /*kProducts=*/false,
+                                   kRingKeyValue, /*kMask=*/false,
+                                   /*kSoftmax=*/true, /*kVectorValue=*/false,
+                                   /*kPlainKey=*/false, /*kSkipKey=*/false,
+                                   /*kSharedValue=*/true, kTranspose>();
+        const std::string shape =
+            "warpgroups=" + std::to_string(kWarpgroups) +
+            " stages=" + std::to_string(kRing) +
+            " window=" + std::to_string(kSourceTiles) +
+            " blocks=" + std::to_string(sm_count) +
+            " tiles=" + std::to_string(copy_tiles) +
+            " content=key+value value_staging=shared key_staging=engine"
+            " transpose=" +
+            (kTranspose ? std::string("on") : std::string("off"));
+        const double bytes = static_cast<double>(kKeyBytes + kValueBytes) *
+                             static_cast<double>(copy_tiles) *
+                             static_cast<double>(sm_count);
+        const double bandwidth = add_copy_rate(
+            make_row("attention-flash:copies", shape, "flash"),
+            "flash_copies:", shape, bytes, [&] {
+              LaunchStagedFlash<kWarpgroups, kRing, /*kProducts=*/false,
+                                kRingKeyValue, /*kMask=*/false,
+                                /*kSoftmax=*/true, /*kVectorValue=*/false,
+                                /*kPlainKey=*/false, /*kSkipKey=*/false,
+                                /*kSharedValue=*/true, kTranspose>(
+                  sm_count, copy_tiles, kSourceTiles, device_queries, device_k,
+                  device_value, device_out, /*device_row_sums=*/nullptr);
+            });
+        report.SetExtra("flash_copies:" + shape + ":bytes_per_second_per_block",
+                        bandwidth / static_cast<double>(sm_count));
+      };
+      add_shared_copies(std::integral_constant<bool, false>{});
+      add_shared_copies(std::integral_constant<bool, true>{});
+
+      const int product_tiles = 4096;
+      auto add_shared_step = [&](auto mask_constant, auto softmax_constant) {
+        constexpr bool kMask = decltype(mask_constant)::value;
+        constexpr bool kSoftmax = decltype(softmax_constant)::value;
+        SetStagedFlashSharedMemory<kWarpgroups, kRing, /*kProducts=*/true,
+                                   kRingKeyValue, kMask, kSoftmax,
+                                   /*kVectorValue=*/false,
+                                   /*kPlainKey=*/false, /*kSkipKey=*/false,
+                                   /*kSharedValue=*/true,
+                                   /*kTranspose=*/true>();
+        const double flops =
+            2.0 * FlopsPerPass(kAtoms) * static_cast<double>(product_tiles) *
+            static_cast<double>(kWarpgroups) * static_cast<double>(sm_count);
+        const std::string shape = "warpgroups=" + std::to_string(kWarpgroups) +
+                                  " stages=" + std::to_string(kRing) +
+                                  " window=" + std::to_string(kSourceTiles) +
+                                  " blocks=" + std::to_string(sm_count) +
+                                  " tiles=" + std::to_string(product_tiles) +
+                                  " mask=" + (kMask ? "causal" : "dense") +
+                                  " softmax=" + (kSoftmax ? "on" : "off") +
+                                  " value_staging=shared";
+        nanochat::BenchRow row =
+            make_row("attention-flash:staged", shape, "flash");
+        row.work_ratio = kMask ? 256.0 / (kWarpgroups * kAtomM + 1) : 1.0;
+        const double rate = add_product_rate(
+            row, "flash_staged:", shape, flops,
+            64.0 * static_cast<double>(kWarpgroups), [&] {
+              LaunchStagedFlash<kWarpgroups, kRing, /*kProducts=*/true,
+                                kRingKeyValue, kMask, kSoftmax,
+                                /*kVectorValue=*/false,
+                                /*kPlainKey=*/false, /*kSkipKey=*/false,
+                                /*kSharedValue=*/true, /*kTranspose=*/true>(
+                  sm_count, product_tiles, kSourceTiles, device_queries,
+                  device_k, device_value, device_out,
+                  /*device_row_sums=*/nullptr);
+            });
+        if (kSoftmax) shapes.Measure(shape_row, rate * kTflopsPerGflops);
+      };
+      add_shared_step(std::integral_constant<bool, false>{},
+                      std::integral_constant<bool, true>{});
+      add_shared_step(std::integral_constant<bool, true>{},
+                      std::integral_constant<bool, true>{});
+      add_shared_step(std::integral_constant<bool, false>{},
+                      std::integral_constant<bool, false>{});
+    }
+  }
+
+  // The engine-fed tile: both rings moved by the copy engine in the swizzled
+  // panel form, the value ring transposed in shared memory, and a producer
+  // warpgroup that issues the copies and the transposition. The rows state what
+  // the engine and the role split are worth together.
+  if (options.flash()) {
+    constexpr int kWarpgroups = kMaxWarpgroups;
+    constexpr int kRing = 2;
+    const ShapeSpec& shape_row =
+        FindShape(ShapeKind::kFlash, kWarpgroups, 1, kAtomN, kRing,
+                  /*shared_value=*/true);
+    const int registers =
+        EngineFlashRegisters<kWarpgroups, kRing, /*kMask=*/false>();
+    CUtensorMap key_low{};
+    CUtensorMap key_high{};
+    CUtensorMap value_low{};
+    CUtensorMap value_high{};
+    const int rows = kAtomN * kSourceTiles;
+    const bool built =
+        MakeSwizzledPanelMap(&key_low, device_k, rows, kAtomN, /*panel=*/0) &&
+        MakeSwizzledPanelMap(&key_high, device_k, rows, kAtomN, /*panel=*/1) &&
+        MakeSwizzledPanelMap(&value_low, device_value, rows, kAtomN,
+                             /*panel=*/0) &&
+        MakeSwizzledPanelMap(&value_high, device_value, rows, kAtomN,
+                             /*panel=*/1);
+    if (built && admit(shape_row, registers)) {
+      const int engine_tiles = 4096;
+      auto add_engine_step = [&](auto mask_constant, auto softmax_constant,
+                                 auto warp_constant) {
+        constexpr bool kMask = decltype(mask_constant)::value;
+        constexpr bool kSoftmax = decltype(softmax_constant)::value;
+        constexpr bool kWarp = decltype(warp_constant)::value;
+        SetEngineFlashSharedMemory<kWarpgroups, kRing, kMask, kSoftmax,
+                                   kWarp>();
+        const double flops =
+            2.0 * FlopsPerPass(kAtoms) * static_cast<double>(engine_tiles) *
+            static_cast<double>(kWarpgroups) * static_cast<double>(sm_count);
+        const std::string shape = "consumers=" + std::to_string(kWarpgroups) +
+                                  " stages=" + std::to_string(kRing) +
+                                  " blocks=" + std::to_string(sm_count) +
+                                  " tiles=" + std::to_string(engine_tiles) +
+                                  " mask=" + (kMask ? "causal" : "dense") +
+                                  " softmax=" + (kSoftmax ? "on" : "off") +
+                                  " staging=engine producers=1warpgroup" +
+                                  " transpose=" + (kWarp ? "warp" : "thread");
+        nanochat::BenchRow row =
+            make_row("attention-flash:staged", shape, "flash");
+        row.work_ratio = kMask ? 256.0 / (kWarpgroups * kAtomM + 1) : 1.0;
+        const double rate = add_product_rate(
+            row, "flash_staged:", shape, flops,
+            128.0 * static_cast<double>(kWarpgroups) / 2.0, [&] {
+              LaunchEngineFlash<kWarpgroups, kRing, kMask, kSoftmax, kWarp>(
+                  sm_count, engine_tiles, device_queries, key_low, key_high,
+                  value_low, value_high, device_out);
+            });
+        if (kSoftmax) shapes.Measure(shape_row, rate * kTflopsPerGflops);
+      };
+      auto add_both = [&](auto mask_constant, auto softmax_constant) {
+        add_engine_step(mask_constant, softmax_constant,
+                        std::integral_constant<bool, false>{});
+        add_engine_step(mask_constant, softmax_constant,
+                        std::integral_constant<bool, true>{});
+      };
+      auto add_consumer = [&](auto mask_constant) {
+        constexpr bool kMask = decltype(mask_constant)::value;
+        SetEngineFlashSharedMemory<kWarpgroups, kRing, kMask,
+                                   /*kSoftmax=*/true, /*kWarpTranspose=*/false,
+                                   /*kConsumerTranspose=*/true>();
+        const double flops =
+            2.0 * FlopsPerPass(kAtoms) * static_cast<double>(engine_tiles) *
+            static_cast<double>(kWarpgroups) * static_cast<double>(sm_count);
+        const std::string shape =
+            "consumers=" + std::to_string(kWarpgroups) +
+            " stages=" + std::to_string(kRing) +
+            " blocks=" + std::to_string(sm_count) +
+            " tiles=" + std::to_string(engine_tiles) +
+            " mask=" + (kMask ? "causal" : "dense") +
+            " softmax=on staging=engine producers=1warpgroup"
+            " transpose=consumer";
+        nanochat::BenchRow row =
+            make_row("attention-flash:staged", shape, "flash");
+        row.work_ratio = kMask ? 256.0 / (kWarpgroups * kAtomM + 1) : 1.0;
+        add_product_rate(row, "flash_staged:", shape, flops,
+                         128.0 * static_cast<double>(kWarpgroups) / 2.0, [&] {
+                           LaunchEngineFlash<kWarpgroups, kRing, kMask,
+                                             /*kSoftmax=*/true,
+                                             /*kWarpTranspose=*/false,
+                                             /*kConsumerTranspose=*/true>(
+                               sm_count, engine_tiles, device_queries, key_low,
+                               key_high, value_low, value_high, device_out);
+                         });
+      };
+      add_consumer(std::integral_constant<bool, false>{});
+      add_consumer(std::integral_constant<bool, true>{});
+      add_both(std::integral_constant<bool, false>{},
+               std::integral_constant<bool, true>{});
+      add_both(std::integral_constant<bool, true>{},
+               std::integral_constant<bool, true>{});
+      add_both(std::integral_constant<bool, false>{},
+               std::integral_constant<bool, false>{});
+    }
+  }
+
+  // The warp-specialized rows of decision H3: the same tile and the same ring
+  // as the staged flash row above, with the copies on a producer that never
+  // computes. The two producer widths are one warp, which is the first phase of
+  // the decision, and one warpgroup, which `setmaxnreg` spans. A copy row
+  // states the bytes a second the producer sustains on its own, so a reader
+  // compares the step with the path under it.
+  if (options.h3()) {
+    const int special_tiles = 4096;
+    const int special_copy_tiles = 8192;
+    auto add_special = [&](auto producer) {
+      constexpr int kProducer = decltype(producer)::value;
+      auto add_consumers = [&](auto consumers) {
+        constexpr int kConsumers = decltype(consumers)::value;
+        auto add_ring = [&](auto ring) {
+          constexpr int kRing = decltype(ring)::value;
+          const ShapeSpec& shape_row =
+              FindShape(ShapeKind::kSpecial, kConsumers, 1, kAtomN, kRing);
+          const int registers =
+              SpecializedRegisters<kProducer, kConsumers, kRing,
+                                   /*kMask=*/false>();
+          if (!admit(shape_row, registers)) return;
+          // The copies alone, so the producer's own rate is one number.
+          SetSpecializedSharedMemory<kProducer, kConsumers, kRing,
+                                     /*kProducts=*/false, kRingKeyValue,
+                                     /*kMask=*/false>();
+          const std::string copy_shape =
+              "producer=" + std::to_string(kProducer) +
+              " consumers=" + std::to_string(kConsumers) +
+              " stages=" + std::to_string(kRing) +
+              " window=" + std::to_string(kSourceTiles) +
+              " blocks=" + std::to_string(sm_count) +
+              " tiles=" + std::to_string(special_copy_tiles);
+          const double bytes = static_cast<double>(kKeyBytes + kValueBytes) *
+                               static_cast<double>(special_copy_tiles) *
+                               static_cast<double>(sm_count);
+          const double bandwidth = add_copy_rate(
+              make_row("attention-special:copies", copy_shape, "h3"),
+              "special_copies:", copy_shape, bytes, [&] {
+                LaunchSpecialized<kProducer, kConsumers, kRing,
+                                  /*kProducts=*/false, kRingKeyValue,
+                                  /*kMask=*/false>(
+                    sm_count, special_copy_tiles, kSourceTiles,
+                    device_special_queries, device_special_keys,
+                    device_special_values, device_out,
+                    /*device_row_sums=*/nullptr);
+              });
+          report.SetExtra(
+              "special_copies:" + copy_shape + ":bytes_per_second_per_block",
+              bandwidth / static_cast<double>(sm_count));
+          auto add_step = [&](auto mask_constant, auto softmax_constant) {
+            constexpr bool kMask = decltype(mask_constant)::value;
+            constexpr bool kSoftmax = decltype(softmax_constant)::value;
+            SetSpecializedSharedMemory<kProducer, kConsumers, kRing,
+                                       /*kProducts=*/true, kRingKeyValue, kMask,
+                                       kSoftmax>();
+            const double flops = 2.0 * FlopsPerPass(kAtoms) *
+                                 static_cast<double>(special_tiles) *
+                                 static_cast<double>(kConsumers) *
+                                 static_cast<double>(sm_count);
+            const std::string shape =
+                "producer=" + std::to_string(kProducer) +
+                " consumers=" + std::to_string(kConsumers) +
+                " stages=" + std::to_string(kRing) +
+                " window=" + std::to_string(kSourceTiles) +
+                " blocks=" + std::to_string(sm_count) +
+                " tiles=" + std::to_string(special_tiles) +
+                " mask=" + (kMask ? "causal" : "dense") +
+                " softmax=" + (kSoftmax ? "on" : "off");
+            nanochat::BenchRow row =
+                make_row("attention-special:step", shape, "h3", kConsumers);
+            row.work_ratio = kMask ? 256.0 / (kConsumers * kAtomM + 1) : 1.0;
+            const double rate = add_product_rate(
+                row, "special_step:", shape, flops,
+                64.0 * static_cast<double>(kConsumers), [&] {
+                  LaunchSpecialized<kProducer, kConsumers, kRing,
+                                    /*kProducts=*/true, kRingKeyValue, kMask,
+                                    kSoftmax>(
+                      sm_count, special_tiles, kSourceTiles,
+                      device_special_queries, device_special_keys,
+                      device_special_values, device_out,
+                      /*device_row_sums=*/nullptr);
+                });
+            // The chain row is the rate the shape states: the softmax-off row
+            // beside it prices the products alone and not the step.
+            if (kSoftmax) shapes.Measure(shape_row, rate * kTflopsPerGflops);
+          };
+          const std::integral_constant<bool, false> kDense{};
+          const std::integral_constant<bool, true> kCausal{};
+          const std::integral_constant<bool, true> kChain{};
+          const std::integral_constant<bool, false> kNoChain{};
+          add_step(kDense, kChain);
+          add_step(kCausal, kChain);
+          add_step(kDense, kNoChain);
+        };
+        VisitSpecializedRing(kSpecialStages, add_ring);
+        VisitSpecializedRing(kSpecialDeepStages, add_ring);
+      };
+      VisitSpecializedConsumers(kSpecialOneConsumer, add_consumers);
+      VisitSpecializedConsumers(kSpecialTwoConsumers, add_consumers);
+    };
+    VisitSpecializedProducer(kSpecialWarpProducer, add_special);
+    VisitSpecializedProducer(kSpecialWarpgroupProducer, add_special);
   }
 
   constexpr int kDeepestStagedBytes =
@@ -3866,6 +5942,9 @@ int main(int argc, char** argv) {
   cudaFree(device_queries);
   cudaFree(device_k);
   cudaFree(device_value);
+  cudaFree(device_special_queries);
+  cudaFree(device_special_keys);
+  cudaFree(device_special_values);
   cudaFree(device_out);
   cudaFree(device_row_sums);
   report.Print(options.bench);
