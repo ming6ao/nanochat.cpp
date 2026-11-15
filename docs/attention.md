@@ -1380,6 +1380,24 @@ producer's own path: four instructions to issue, the transaction wait, and the
 transposition of 32 KiB a stage. The next lever is inside that path and not in
 the ring.
 
+**The store order of the pass is a dead end, and the register file is why.** The
+producer's thread pass writes 128 contiguous bytes a lane, so every lane's run
+starts on a 128-byte boundary, which is one full bank sweep: a model of the 32
+banks reads 32 lanes on 4 banks, 32 cycles for the warp's 512 bytes, against 4
+cycles for the same 512 spread over all 32. The piece a lane writes can be moved
+by the lane's own index, and that does spread them. It is also a third slower:
+**253.7 TFLOP/s against 380.6 dense, and 263.6 against 395.3 trimmed.** The
+reason is in the build. A runtime piece index means the 8 rows that one lane
+holds can no longer be registers indexed by compile-time constants, and the
+rotated instantiations spill 208 bytes of stack against 136. So the pass keeps
+its registers only while every index of it is a constant, the store order cannot
+be had without the spill, and this experiment does not separate the bank effect
+from it. The rows are the `store=rotated` rows of
+`dev/kernels/wgmma_bench.cu` and the `attention_store_probe` entry of
+[baselines.json](baselines.json). The rotated pass is exact against the trimmed
+resident step on both masks, 0.000e+00 with no bad element of 16,384, so the loss
+is the pass and not a wrong read.
+
 **The warp instruction is slower here, measured.** One `ldmatrix.trans` reads four
 core matrices and four stores a lane write those rows, so the pass trades
 thirty-two permutes and sixteen sixteen-byte accesses a core matrix for one load

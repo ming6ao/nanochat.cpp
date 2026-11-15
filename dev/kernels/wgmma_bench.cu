@@ -166,6 +166,7 @@
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
 
+#include "backends/cuda/kernels/device_utils.cuh"
 #include "backends/cuda/kernels/testing/bench_protocol.h"
 #include "backends/cuda/kernels/testing/sequence_ref.h"
 #include "nanochat/bench.h"
@@ -1171,6 +1172,15 @@ __device__ __forceinline__ void StageTransposeShared(char* stage,
 // inverse, so one read of the source states where a core matrix sits: the panel
 // of the head-width block, the row of the key, and the chunk exclusive-ored by
 // the row of its atom.
+// `kRotate` states the order the pieces of one core matrix leave a lane. A lane
+// holds eight keys of one group, so its eight destination pieces are 128
+// contiguous bytes, and every lane's run starts on a 128-byte boundary, which
+// is one full bank sweep: 32 lanes then put their 16 bytes on 4 banks, which is
+// an 8-way conflict. Moving the piece a lane writes by the lane's own index
+// spreads the same 32 lanes over 8 distinct 16-byte offsets and halves the
+// store time. It states the same tile, so the rows that check it are the same
+// rows.
+template <bool kRotate = false>
 __device__ __forceinline__ void StageTransposeSwizzled(char* stage,
                                                        const char* source,
                                                        int threads,
@@ -1204,7 +1214,8 @@ __device__ __forceinline__ void StageTransposeSwizzled(char* stage,
       rows[row][3] = loaded.w;
     }
 #pragma unroll
-    for (int out_column = 0; out_column < 8; ++out_column) {
+    for (int step = 0; step < 8; ++step) {
+      const int out_column = kRotate ? ((step + me) & 7) : step;
       const int word = out_column / 2;
       const std::uint32_t selector = (out_column % 2) != 0 ? 0x7632u : 0x5410u;
       uint4 out;
@@ -1761,27 +1772,6 @@ __global__ void ResidentKernel(const Bf16* __restrict__ q,
   for (int i = 0; i < kTileRegisters; ++i) destination[i] = d[i];
 }
 
-// The base-two exponential of one value, as the 1 instruction the pipe holds.
-// The library form is 4 instructions at these compiler flags: a range test
-// against -126, a halving, the instruction, and a squaring. The halving and the
-// squaring exist to return a denormal result, and this file rounds every result
-// to the compute type 1 step later, where a value below 2^-126 is not
-// representable. So the repair computes a number that the rounding discards,
-// and the flush form states the same probability in 1 instruction.
-//
-// No C++ form states that instruction. `exp2f` is the 4 above, `__expf` adds a
-// multiply by log2(e) and keeps the repair, and CUDA 12.0 declares no
-// `__exp2f`. Only the translation-unit-wide `-use_fast_math` gives 1
-// instruction, and it also changes every divide, square root, and denormal rule
-// in the file. The rest of this file writes its measured instructions as PTX
-// for the same reason: the instruction and its modifiers are the subject, so
-// the source states them and a reader checks them against the build.
-__device__ __forceinline__ float WgmmaExp2(float x) {
-  float result;
-  asm("ex2.approx.ftz.f32 %0, %1;" : "=f"(result) : "f"(x));
-  return result;
-}
-
 // One step of the flash tile, and the one place the step is written: the
 // resident row and the staged row both call it, so neither can state another
 // chain. The probability operand of atom `atom` and register `reg` takes the
@@ -1873,7 +1863,8 @@ __device__ __forceinline__ void FlashStep(
       const int slot = (i / 2) % 2;
       if constexpr (kTrim) {
         // 1 fused multiply-add and 1 instruction of the exponential pipe.
-        score[i] = WgmmaExp2(fmaf(score[i], log2_scale, -new_max[slot]));
+        score[i] = nanochat::cuda_kernels::FastExp2(
+            fmaf(score[i], log2_scale, -new_max[slot]));
       } else {
         score[i] = exp2f(score[i] - new_max[slot]);
       }
@@ -1886,7 +1877,8 @@ __device__ __forceinline__ void FlashStep(
       tile_sum[slot] += __shfl_xor_sync(0xFFFFFFFFu, tile_sum[slot], 2);
       // A row maximum that did not move gives a factor of exactly 1, under
       // either exponential, because both forms are exact at zero.
-      rescale[slot] = kTrim ? WgmmaExp2(running_max[slot] - new_max[slot])
+      rescale[slot] = kTrim ? nanochat::cuda_kernels::FastExp2(
+                                  running_max[slot] - new_max[slot])
                             : exp2f(running_max[slot] - new_max[slot]);
       running_sum[slot] = running_sum[slot] * rescale[slot] + tile_sum[slot];
       running_max[slot] = new_max[slot];
@@ -2181,7 +2173,7 @@ __global__ void StagedFlashKernel(const Bf16* __restrict__ q,
 // the consumers issue no staging instruction and never wait on a global load.
 template <int Consumers, int Stages, bool kMask, bool kSoftmax = true,
           bool kWarpTranspose = false, bool kConsumerTranspose = false,
-          bool kTrim = false, bool kGuard = false>
+          bool kTrim = false, bool kGuard = false, bool kRotateStore = false>
 __global__ __launch_bounds__(
     (1 + Consumers) * kWarpgroupThreads,
     1) void EngineFlashKernel(const Bf16* __restrict__ q,
@@ -2284,8 +2276,9 @@ __global__ __launch_bounds__(
                                      raw + stage * kValueBytes,
                                      kWarpgroupThreads);
         } else {
-          StageTransposeSwizzled(values + stage * kValueBytes,
-                                 raw + stage * kValueBytes, kWarpgroupThreads);
+          StageTransposeSwizzled<kRotateStore>(values + stage * kValueBytes,
+                                               raw + stage * kValueBytes,
+                                               kWarpgroupThreads);
         }
         asm volatile("bar.sync 1, %0;" ::"n"(kWarpgroupThreads) : "memory");
       }
@@ -2997,26 +2990,26 @@ std::pair<std::size_t, double> CheckSharedValue(
 // engine-fed tile.
 template <int Consumers, int Stages, bool kMask, bool kSoftmax = true,
           bool kWarpTranspose = false, bool kConsumerTranspose = false,
-          bool kTrim = false, bool kGuard = false>
+          bool kTrim = false, bool kGuard = false, bool kRotateStore = false>
 void SetEngineFlashSharedMemory() {
   constexpr int kShared = EngineFlashBytes(Consumers, Stages);
   cudaFuncSetAttribute(
       reinterpret_cast<const void*>(
           EngineFlashKernel<Consumers, Stages, kMask, kSoftmax, kWarpTranspose,
-                            kConsumerTranspose, kTrim, kGuard>),
+                            kConsumerTranspose, kTrim, kGuard, kRotateStore>),
       cudaFuncAttributeMaxDynamicSharedMemorySize, kShared);
 }
 
 template <int Consumers, int Stages, bool kMask, bool kSoftmax = true,
           bool kWarpTranspose = false, bool kConsumerTranspose = false,
-          bool kTrim = false, bool kGuard = false>
+          bool kTrim = false, bool kGuard = false, bool kRotateStore = false>
 void LaunchEngineFlash(int blocks, int tiles, const Bf16* device_q,
                        const CUtensorMap& key_low, const CUtensorMap& key_high,
                        const CUtensorMap& value_low,
                        const CUtensorMap& value_high, float* device_out) {
   constexpr int kShared = EngineFlashBytes(Consumers, Stages);
   EngineFlashKernel<Consumers, Stages, kMask, kSoftmax, kWarpTranspose,
-                    kConsumerTranspose, kTrim, kGuard>
+                    kConsumerTranspose, kTrim, kGuard, kRotateStore>
       <<<blocks, (1 + Consumers) * kWarpgroupThreads, kShared>>>(
           device_q, key_low, key_high, value_low, value_high, device_out, tiles,
           kFlashScale);
@@ -3024,11 +3017,11 @@ void LaunchEngineFlash(int blocks, int tiles, const Bf16* device_q,
 
 template <int Consumers, int Stages, bool kMask, bool kSoftmax = true,
           bool kWarpTranspose = false, bool kConsumerTranspose = false,
-          bool kTrim = false, bool kGuard = false>
+          bool kTrim = false, bool kGuard = false, bool kRotateStore = false>
 int EngineFlashRegisters() {
   return CompilerRegisters(reinterpret_cast<const void*>(
       EngineFlashKernel<Consumers, Stages, kMask, kSoftmax, kWarpTranspose,
-                        kConsumerTranspose, kTrim, kGuard>));
+                        kConsumerTranspose, kTrim, kGuard, kRotateStore>));
 }
 
 // One step of the engine-fed tile against the resident step of the same
@@ -3036,17 +3029,17 @@ int EngineFlashRegisters() {
 // transposition fails here instead of measuring.
 template <int Consumers, int Stages, bool kMask, bool kWarpTranspose = false,
           bool kConsumerTranspose = false, bool kTrim = false,
-          bool kGuard = false>
+          bool kGuard = false, bool kRotateStore = false>
 std::pair<std::size_t, double> CheckEngineFlash(
     const Bf16* device_queries, const CUtensorMap& key_low,
     const CUtensorMap& key_high, const CUtensorMap& value_low,
     const CUtensorMap& value_high, float* device_out,
     const std::vector<float>& reference, double scale) {
   SetEngineFlashSharedMemory<Consumers, Stages, kMask, /*kSoftmax=*/true,
-                             kWarpTranspose, kConsumerTranspose, kTrim,
-                             kGuard>();
+                             kWarpTranspose, kConsumerTranspose, kTrim, kGuard,
+                             kRotateStore>();
   LaunchEngineFlash<Consumers, Stages, kMask, /*kSoftmax=*/true, kWarpTranspose,
-                    kConsumerTranspose, kTrim, kGuard>(
+                    kConsumerTranspose, kTrim, kGuard, kRotateStore>(
       1, /*tiles=*/1, device_queries, key_low, key_high, value_low, value_high,
       device_out);
   SyncFlash("engine-fed tile consumers=" + std::to_string(Consumers));
@@ -4863,6 +4856,29 @@ int main(int argc, char** argv) {
                                  /*kTrim=*/true, /*kGuard=*/true>(
                     device_queries, key_low, key_high, value_low, value_high,
                     device_out, trimmed_resident, /*scale=*/1.0);
+            // The rotated store states the same tile, so the same reference
+            // checks it.
+            const std::pair<std::size_t, double> rotated =
+                CheckEngineFlash<kMaxWarpgroups, 2, kMask,
+                                 /*kWarpTranspose=*/false,
+                                 /*kConsumerTranspose=*/false,
+                                 /*kTrim=*/true, /*kGuard=*/true,
+                                 /*kRotateStore=*/true>(
+                    device_queries, key_low, key_high, value_low, value_high,
+                    device_out, trimmed_resident, /*scale=*/1.0);
+            const std::string rotated_key =
+                std::string("flash_engine_check:rotated:") +
+                (kMask ? "causal:" : "dense:");
+            note(
+                "attention-flash:engine_check consumers=%d stages=2 "
+                "store=rotated mask=%s error=%.3e bad=%zu of %d status=%s\n",
+                kMaxWarpgroups, kMask ? "causal" : "dense", rotated.second,
+                rotated.first, kMaxWarpgroups * static_cast<int>(kProductSlots),
+                rotated.second < 1e-6 ? "ok" : "failed");
+            report.SetExtra(rotated_key + "error", rotated.second);
+            report.SetExtraInt(rotated_key + "bad",
+                               static_cast<long long>(rotated.first));
+            engine_ok = engine_ok && rotated.second < 1e-6;
             const std::string trimmed_key =
                 std::string("flash_engine_check:trim:") +
                 (kMask ? "causal:" : "dense:");
@@ -5908,28 +5924,31 @@ int main(int argc, char** argv) {
       const int engine_tiles = 4096;
       auto add_engine_step = [&](auto mask_constant, auto softmax_constant,
                                  auto warp_constant, auto trim_constant,
-                                 auto guard_constant) {
+                                 auto guard_constant, auto rotate_constant) {
         constexpr bool kMask = decltype(mask_constant)::value;
         constexpr bool kSoftmax = decltype(softmax_constant)::value;
         constexpr bool kWarp = decltype(warp_constant)::value;
         constexpr bool kTrim = decltype(trim_constant)::value;
         constexpr bool kGuard = decltype(guard_constant)::value;
+        constexpr bool kRotate = decltype(rotate_constant)::value;
         SetEngineFlashSharedMemory<kWarpgroups, kRing, kMask, kSoftmax, kWarp,
-                                   /*kConsumerTranspose=*/false, kTrim,
-                                   kGuard>();
+                                   /*kConsumerTranspose=*/false, kTrim, kGuard,
+                                   kRotate>();
         const double flops =
             2.0 * FlopsPerPass(kAtoms) * static_cast<double>(engine_tiles) *
             static_cast<double>(kWarpgroups) * static_cast<double>(sm_count);
-        const std::string shape = "consumers=" + std::to_string(kWarpgroups) +
-                                  " stages=" + std::to_string(kRing) +
-                                  " blocks=" + std::to_string(sm_count) +
-                                  " tiles=" + std::to_string(engine_tiles) +
-                                  " mask=" + (kMask ? "causal" : "dense") +
-                                  " softmax=" + (kSoftmax ? "on" : "off") +
-                                  " staging=engine producers=1warpgroup" +
-                                  " transpose=" + (kWarp ? "warp" : "thread") +
-                                  (kTrim ? " trim=on" : " trim=off") +
-                                  (kGuard ? " guard=on" : " guard=off");
+        const std::string shape =
+            "consumers=" + std::to_string(kWarpgroups) +
+            " stages=" + std::to_string(kRing) +
+            " blocks=" + std::to_string(sm_count) +
+            " tiles=" + std::to_string(engine_tiles) +
+            " mask=" + (kMask ? "causal" : "dense") +
+            " softmax=" + (kSoftmax ? "on" : "off") +
+            " staging=engine producers=1warpgroup" +
+            " transpose=" + (kWarp ? "warp" : "thread") +
+            (kTrim ? " trim=on" : " trim=off") +
+            (kGuard ? " guard=on" : " guard=off") +
+            (kRotate ? " store=rotated" : " store=straight");
         nanochat::BenchRow row =
             make_row("attention-flash:staged", shape, "flash");
         row.work_ratio = kMask ? 256.0 / (kWarpgroups * kAtomM + 1) : 1.0;
@@ -5937,9 +5956,10 @@ int main(int argc, char** argv) {
             row, "flash_staged:", shape, flops,
             128.0 * static_cast<double>(kWarpgroups) / 2.0, [&] {
               LaunchEngineFlash<kWarpgroups, kRing, kMask, kSoftmax, kWarp,
-                                /*kConsumerTranspose=*/false, kTrim, kGuard>(
-                  sm_count, engine_tiles, device_queries, key_low, key_high,
-                  value_low, value_high, device_out);
+                                /*kConsumerTranspose=*/false, kTrim, kGuard,
+                                kRotate>(sm_count, engine_tiles, device_queries,
+                                         key_low, key_high, value_low,
+                                         value_high, device_out);
             });
         if (kSoftmax && !kTrim) {
           shapes.Measure(shape_row, rate * kTflopsPerGflops);
@@ -5949,9 +5969,11 @@ int main(int argc, char** argv) {
         add_engine_step(mask_constant, softmax_constant,
                         std::integral_constant<bool, false>{},
                         std::integral_constant<bool, false>{},
+                        std::integral_constant<bool, false>{},
                         std::integral_constant<bool, false>{});
         add_engine_step(mask_constant, softmax_constant,
                         std::integral_constant<bool, true>{},
+                        std::integral_constant<bool, false>{},
                         std::integral_constant<bool, false>{},
                         std::integral_constant<bool, false>{});
       };
@@ -5999,14 +6021,39 @@ int main(int argc, char** argv) {
                       std::integral_constant<bool, true>{},
                       std::integral_constant<bool, false>{},
                       std::integral_constant<bool, true>{},
-                      std::integral_constant<bool, true>{});
+                      std::integral_constant<bool, true>{},
+                      std::integral_constant<bool, false>{});
       add_engine_step(std::integral_constant<bool, true>{},
                       std::integral_constant<bool, true>{},
                       std::integral_constant<bool, false>{},
                       std::integral_constant<bool, true>{},
+                      std::integral_constant<bool, true>{},
+                      std::integral_constant<bool, false>{});
+      add_engine_step(std::integral_constant<bool, false>{},
+                      std::integral_constant<bool, true>{},
+                      std::integral_constant<bool, true>{},
+                      std::integral_constant<bool, true>{},
+                      std::integral_constant<bool, true>{},
+                      std::integral_constant<bool, false>{});
+      // The store order of the transposition, priced on the same tile. A lane's
+      // 8 destination pieces are 128 bytes, so every lane starts on a bank
+      // boundary and 32 lanes put their 16 bytes on 4 banks; the rotated store
+      // moves the piece a lane writes by the lane's own index.
+      add_engine_step(std::integral_constant<bool, false>{},
+                      std::integral_constant<bool, true>{},
+                      std::integral_constant<bool, false>{},
+                      std::integral_constant<bool, false>{},
+                      std::integral_constant<bool, false>{},
                       std::integral_constant<bool, true>{});
       add_engine_step(std::integral_constant<bool, false>{},
                       std::integral_constant<bool, true>{},
+                      std::integral_constant<bool, false>{},
+                      std::integral_constant<bool, true>{},
+                      std::integral_constant<bool, true>{},
+                      std::integral_constant<bool, true>{});
+      add_engine_step(std::integral_constant<bool, true>{},
+                      std::integral_constant<bool, true>{},
+                      std::integral_constant<bool, false>{},
                       std::integral_constant<bool, true>{},
                       std::integral_constant<bool, true>{},
                       std::integral_constant<bool, true>{});
