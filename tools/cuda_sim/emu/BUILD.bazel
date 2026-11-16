@@ -195,14 +195,16 @@ cc_library(
         ":cuda_headers",
         # The scheduler and the runtime the launched kernel body runs on.
         ":emu_runtime",
-        # `attention.cu` asks the bf16 tile and the flash family whether they
-        # cover the shape and then launches one. The emulator has no
-        # tensor-core primitive, so it links both stand-ins, which answer false
+        # `attention.cu` asks the Hopper tile, the bf16 tile, and the flash
+        # family whether they cover the shape and then launches one. The
+        # emulator maps the tiled copy and the warpgroup product for addressing
+        # and not for a rate, so it links all three stand-ins, which answer false
         # and launch nothing (docs/simulator.md section 9.2). They are compiled
         # at the workspace precision, which is what this library compiles at
         # too.
         "//backends/cuda/kernels:attention_bf16_absent",
         "//backends/cuda/kernels:attention_flash_absent",
+        "//backends/cuda/kernels:attention_hopper_absent",
         "//include/nanochat:nanochat",
     ],
 )

@@ -16,6 +16,9 @@ See [docs/kernels.md](../../../docs/kernels.md) for the kernel inventory and
 | `<family>_benchmark.cc` | Device-event timing. A benchmark, not a test. |
 | `muon_fused.h`, `muon_fused.cu` | The fused Muon update: one phase-parameterised device function, its 16 phases and three epilogue folds, and the two drivers over one device body. |
 | `muon_fused_test.cc` | Three implementations of one Muon step on one input: the host reference, the shipped multi-launch `MuonUpdate`, and the fused path through both drivers, plus the workspace check and the forced cooperative refusal. |
+| `attention_hopper.h`, `attention_hopper.cu` | The Hopper forward tile of `docs/attention.md` Part 8: the warpgroup product over a key ring and a value ring the copy engine fills, one producer warpgroup, and two consumers. States `archs = ["sm_90a"]` on its own target, and every other build links `attention_hopper_absent.cc`. |
+| `attention_hopper_test.cu` | The tile against `seqref::AttentionForward` over both query layouts, the four masks, the tail block, and the grouped-query heads. Also `sm_90a`, and `manual`. |
+| `attention_hopper_benchmark.cu` | The forward rows of the family on the tile, at the same shapes as `attention_benchmark`, so a row of each is one number twice; plus the `floor_`, `ladder_`, and `grid_` rows that separate a floor of a block from a rate, and the host time of a call beside its device time. |
 | `row_kernels_test.cc` | Smoke test for the row families over the sealed seam. |
 | `precision_test.cc` | Float reference for the elementwise, norm, attention, and embedding families, in both precisions. |
 | `sequence_oracle_test.cc` | Classifier and Embedding against `tests/data/debug_state.bin`. |

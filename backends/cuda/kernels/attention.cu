@@ -50,6 +50,7 @@
 #include "backends/cuda/kernels/attention_bf16.h"
 #include "backends/cuda/kernels/attention_dispatch.h"
 #include "backends/cuda/kernels/attention_flash.h"
+#include "backends/cuda/kernels/attention_hopper.h"
 #include "backends/cuda/kernels/device_utils.cuh"
 #include "nanochat/kernels.h"
 
@@ -974,6 +975,13 @@ void AttentionForward(const AttentionParams& params, const ComputeType* q,
   }
   const int kv_len = params.kv_len > 0 ? params.kv_len : params.seq;
   if (kv_len <= 0) return;
+  // The Hopper tile first: its predicate is a subset of the flash family's, so
+  // a card that takes it takes the family too and the order is what gives the
+  // tile the shapes it covers (docs/attention.md Part 8, section 7).
+  if (UseHopperAttention(params)) {
+    LaunchHopperAttention(params, q, k, v, out, stats);
+    return;
+  }
   if (UseFusedAttentionFlash(params)) {
     LaunchFlashAttention(params, q, k, v, out, stats);
     return;

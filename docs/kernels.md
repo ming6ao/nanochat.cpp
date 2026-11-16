@@ -2170,6 +2170,88 @@ rule: a call inside the k loop refuses the body, and a call outside it does not.
 `assert`, so no other target inherits the defect. The shared option list stays
 as it is.
 
+### 12. The rate backlog
+
+**State.** Nine production rows ride a candidate, and twelve rows beat cuBLAS. The
+promoted rows read 0.9518 to 1.1757 of the library (entry `gemm_cutlass` of
+[baselines.json](baselines.json)). cuBLAS itself holds 693 to 787 TFLOP/s from
+4096 up, which is 70 to 80 percent of the declared peak (entry `gemm_scaling`).
+
+So the bf16 multiply is within 5 to 25 percent of the library, and the library is
+within 80 percent of the card. No bf16 change can double the rate. Only the width
+of the operand can.
+
+The levers below are in the order of their return. Each states the row it rests
+on, the gain, and the cost.
+
+#### 12.1 The two rows that are tile problems
+
+**Evidence.** `linear:fwd:cls` reads 0.8038 of cuBLAS at N=32768, and it is the
+largest matrix multiply of the closed shape list. `linear:wgrad:kv` reads 0.5761,
+and it is the worst relative row of the registry. Section 10.3 already names both
+as tile problems and not tail problems.
+
+**Gain.** 0.45 ms of the 2.26 ms classifier row, and a corrected weight-gradient
+row.
+
+**Cost.** One wider-N candidate for the classifier and one tall-M candidate at a
+deeper k slice for the short weight gradient. `dev/cutlass/README.md` section 3
+holds the tiles the probe did not promote.
+
+#### 12.2 Take fp8 where the library answers
+
+**Evidence.** cublasLt at fp8 beats bf16 cuBLAS by 1.16 to 1.61 times on the five
+forward rows of the closed list. The arm reads 0.7509 to 1.0306 of cublasLt, so a
+per-row choice is necessary. `tools/gemm_rules.py` makes that choice from a
+report.
+
+**Blocking defect.** cublasLt answers status 15 for every operand form but the
+K-major pair. `src/ops.cc` calls `GemmScaledFp8` for the dgrad and the wgrad
+whenever `Fp8Eligible` holds, and on Hopper that call reaches the same refusal.
+An fp8 step therefore stops instead of falling back. Clear that first.
+
+**Cost.** The scale product must stay on the device, by the rule of Part 2
+section 1. The transposing collective behind the two backward forms is the second
+question of section 10.4, and it is still open.
+
+**Measure.** The command below, on the `H100_FP8` leg.
+
+```bash
+modal run tools/modal/app.py::card_job --name gemm_bench_fp8 \
+  --argv '["--rows","production","--json"]'
+```
+
+#### 12.3 Measure a wider cluster before a scheduler
+
+**Evidence.** The candidates fall with size: 0.895 of cuBLAS at 8192, 0.810 at
+16384, and 0.807 at 32768. Stream-K would fix that, and section 10.3 closes that
+route: the SM90 kernel of the vendor refuses any scheduler but
+`PersistentScheduler` at compile time.
+
+**Proposal.** Measure a 2 by 2 cluster with multicast. The tile of
+`backends/cuda/gemm/README.md` section 16 is 128 by 256 by 64 on a 2 by 1
+cluster, and its operands are multicast already.
+
+**Gain.** Up to 1.24 times at 32768.
+
+#### 12.4 Stop rate work on the hand tile
+
+**Evidence.** The hand tile reads 0.147 to 0.740 of cuBLAS and holds 12 to 15
+percent of the peak. It already uses `cp.async`, `ldmatrix`, `mma.sync` m16n8k16,
+a persistent grid, and a swizzle. Section 15 of
+`backends/cuda/gemm/README.md` sizes its warp-level ceiling at about half the
+card.
+
+**Decision.** The tile earns its place as the off-device gate of the simulator.
+A rate campaign there costs more than it returns, because the best case is a rate
+that the promoted path already beats.
+
+#### 12.5 The launch-bound Muon group
+
+The three Muon 5 by 12 rows hold no candidate, because the rule refuses a shape
+below 4096 output elements. They are launch overhead and not rate, so they belong
+to the fused Muon kernel of Part 1 and to no GEMM tile.
+
 ## Part 4. Two kernel designs, and what landed
 
 The arithmetic below is agreed. Both changes keep the frozen seam's meaning and

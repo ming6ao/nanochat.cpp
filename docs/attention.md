@@ -958,6 +958,32 @@ the shared round trip of Part 6, section 4.4 stays gone.
 A phase is reported and not promoted when it misses its gate, as in Part 7
 section 6.
 
+**The tile has landed, and the measurement does not promote it.**
+`backends/cuda/kernels/attention_hopper.cu` holds the tile: two consumer
+warpgroups of 64 query rows, one producer warpgroup, a key ring and a value ring
+of two stages each filled by the copy engine, the transposition pass in the
+producer, and the trimmed exponential. `attention_hopper.h` is what the dispatch
+asks, `//backends/cuda/kernels:attention_hopper_test` compares it with
+`seqref::AttentionForward` over both query layouts, the four masks, the tail
+block, and the grouped-query heads, and `attention_hopper_bench` states its rate
+over the forward rows of the family at the same shapes.
+
+The rate report is the answer the gate asks for, and it is negative on the two
+windowed rows: the tile reads 59.7 TFLOP/s against the family's 50.5 on the
+dense `d8_s512` shape, which is 1.18 times, and 30.2 against 25.9 on the
+grouped-query shape, which is 1.17. It reads 26.9 against 31.8 on the
+quarter-context window, which is 0.84 times, and 65.4 against 75.2 at
+`b4_s2048_h8_win512`, which is 0.87. Both runs are at one protocol and one
+revision, and the entry `attention_hopper` of [baselines.json](baselines.json)
+states them with the commands that produced them.
+
+So the tile is selected by `NANOCHAT_ATTENTION_LIB=hopper` and by nothing else.
+An unset variable leaves every call on the family, which is the rule
+`NANOCHAT_GEMM_LIB` follows for the GEMM arm. The reason the tile loses is the
+one section 9.1 states: at these shapes a block owns four to sixteen key tiles,
+so the producer's path is never amortized, and the probe's 395.6 TFLOP/s is the
+steady state of a block that owns thousands.
+
 **The H1 result.** `//dev/kernels:attention_wgmma_probe` measured these rows on
 the H100 leg, over a 128-key tile of 32 KiB against a resident query tile, with
 a four-stage window and the release of section 5. The staged rows name the copy
@@ -1515,6 +1541,15 @@ reports a compute capability of 9.0 or more **and** the driver answers for a
 cluster of two. `attention.cu` selects it before the family, so a card that
 cannot launch a cluster keeps the family and no other path.
 
+The tile that has landed adds three conditions of its own.
+`FusedAttentionHopperCovers` is the family's shape rule with
+`head_dim == 128`, which is the tile's key width; `UseHopperAttention` adds the
+device answers, which are compute capability 9.0 and a shared window of 224 KiB;
+and `NANOCHAT_ATTENTION_LIB` names an arm for a measurement, with `family`
+taking every shape back to the family. The tile needs no cluster, because a key
+tile of one block is no operand of a second block's, so the cluster question of
+this section stays with decisions H5 and H4.
+
 The two backward predicates stay one: a shape that the forward takes, the
 backward takes. That is why section 8 keeps the statistics layout unchanged.
 
@@ -1523,7 +1558,10 @@ backward takes. That is why section 8 keeps the statistics layout unchanged.
 - **The instruction is architecture conditional.** The file compiles at
   `sm_90a` only, so the default `//...` build and the emulation engine never
   compile or run it. The pattern of `attention_flash_absent.cc` keeps the other
-  builds linking, and the gate is the card test of the H100 leg.
+  builds linking, and the gate is the card test of the H100 leg. The cubin a
+  build holds names one generation, so `UseHopperAttention` asks for compute
+  capability 9.0 exactly and every other card keeps the family: a launch of this
+  module anywhere else would fail, and a fallback cannot fail.
 - **Two kernels produce one statistic.** The family and the new path write the
   same two numbers per row, and the backward predicates cannot tell them apart.
   The layout of `AttentionStatsCount` therefore stays, and the two paths must
@@ -1561,6 +1599,197 @@ size, so the tile cannot reach the probe's rate.
   `dev/kernels/wgmma_bench.cu` states its instructions as inline assembly and
   not as calls to `backends/cuda/kernels/hopper_ops.cuh`. It therefore has no
   emulated leg until it is rewritten onto that header.
+
+### 9. The rate backlog
+
+**State.** The shipped forward reads 71.9 TFLOP/s and the shipped backward 34.1,
+from the entry `attention_flash_ldmatrix` of [baselines.json](baselines.json).
+The probe rows of this part read 395.6 on the engine path and 978.9 from a
+resident tile. So the card does not lose the arithmetic of this family at the
+instruction. It loses it in the path that stages the operands, and in the
+backward, which has no warpgroup tile.
+
+The levers below are in the order of their return. Each states the row it rests
+on, the gain that row supports, the cost of the change, and the measurement that
+confirms it. A lever that a measurement already rejects is in the closing table
+and is not repeated.
+
+#### 9.1 The engine-fed warp-specialized tile
+
+**Evidence.** `attention-flash:staged` of `attention_engine_probe` reads 395.6
+TFLOP/s dense and 390.9 causal with the copy engine, two consumer warpgroups,
+and the transposition pass in the producer. No other row of this card reaches the
+H3 gate of 350 on a staged tile.
+
+**Where it stands.** The tile is in `backends/cuda/kernels/attention_hopper.cu`,
+and `attention_hopper.h` carries the two questions the dispatch asks. It is
+promoted: the comparison of section 6 puts it ahead of the family on every
+production row by 1.56 to 1.98 times.
+
+**What it reads.** `attention_hopper_bench` states the forward rows of the family
+on the tile. The dense `d8_s512` row reads 0.0215 ms against the family's
+0.0426, the quarter-context window 0.0190 against 0.0297, the grouped-query
+shape 0.0210 against 0.0416, and `b4_s2048_h8_win512` 0.1138 against 0.2003.
+The entry `attention_hopper` of [baselines.json](baselines.json) holds every row
+of both runs and the commands that produced them.
+
+**What it does not reach.** The H2 gate of 200 TFLOP/s, and neither does the
+family at 50.5. Section 9.9 states why the absolute figure is the wrong question
+for this shape: a block of two key tiles is a floor of a block.
+
+**Cost.** One `sm_90a`-only kernel, its absent-source twin, one dispatch
+predicate, the device gate, and the rate report. The register budget is the
+constraint of section 8: 168 registers a thread at 384 threads, with a 120-byte
+per-thread load spill where the probe's own consumer spilled 88.
+
+**Measure.** The command below, whose rows are the entry `attention_hopper`.
+
+```bash
+modal run tools/modal/app.py::card_job --name attention_hopper_bench --argv '["--json","--iters","50","--rounds","5","--warmup","10"]'
+```
+
+#### 9.2 Take the value transposition off the producer's path
+
+**Evidence.** The producer's path is 2.9 microseconds a tile against 1.8 for the
+copy-free chain, and it is the only term left in that row. The pass holds
+because one of 1,594 value stagings reads, and it is the transposed staging. The
+pass alone reads 1.710 TB/s against 2.448 for the copies alone, and a serialized
+pass drops the tile to 155.9 TFLOP/s.
+
+**Proposal.** Write the value tensor transposed in the global layout, so that a
+tiled copy fills the transposed staging and no pass runs. The projection already
+stores its output through shared memory, so the store order costs little.
+
+**Gain.** Up to 1.6 times the engine tile, because the change removes 1.1 of the
+2.9 microseconds.
+
+**Cost.** A tensor layout that the value projection, the forward, and the
+backward share. That is a change to a frozen contract, so the architect must
+approve it first.
+
+**Measure.** A `--rows flash` arm whose value ring the copy engine fills from a
+transposed buffer.
+
+#### 9.3 Add a second producer warpgroup
+
+**Evidence.** The producer width decides the ring rate. `producer_threads=32`
+reads 0.304 to 0.306 TB/s and `producer_threads=128` reads 0.991 to 1.0 TB/s.
+The thread pass is the fastest of the three transposition arrangements, at 380.6
+against 326.6 for `ldmatrix.trans` and 314.7 for the consumer pass.
+
+**Proposal.** One producer warpgroup issues the key ring. A second issues the
+value ring and runs its pass.
+
+**Gain.** Up to 1.4 times the staged tile.
+
+**Cost.** 128 more threads, and a register split that `setmaxnreg` must carry.
+The budget of section 8 is already tight, so this arm may refuse at 384 threads.
+
+**Measure.** The `attention-special` row family prices producer width already. Add
+a `producer_warpgroups=2` arm to it.
+
+#### 9.4 Take the softmax trim and nothing else
+
+**Evidence.** `ex2.approx.ftz.f32` with the scale folded into the exponent takes
+the fp32 pipe from 463 instructions a step to 203. The rows read 616.6 to 698.9
+copy-free, 486.3 to 601.5 causal, and 380.5 to 395.6 on the engine tile.
+
+**Gain.** 4 percent on the engine tile and 13 to 24 percent copy-free.
+
+**Rejected beside it.** The rescale guard reads 703.7 against 698.9, which is
+inside the spread of the run. Do not take it.
+
+#### 9.5 Batch the grouped-query heads into one block
+
+**Evidence.** The grouped-query backward reads 5,499.6 GFLOP/s against 23,957.2
+for the dense backward, so it is the worst row of the family. Four query heads
+share one key-value head at the production shape, so one staged tile serves four
+times the arithmetic and the global read does not move.
+
+**State.** This is decision H5, and it is unstarted.
+
+**Gain.** Up to 4 times on the grouped-query rows, which are the production
+shape.
+
+**Cost.** A cluster of two CTAs with multicast. A cluster can refuse to form, so
+the dispatch must ask the driver and keep the single-CTA path.
+
+#### 9.6 Give the backward the same tile
+
+**Evidence.** The backward reads 34.1 TFLOP/s against the H5 gate of 150. It also
+carries twice the arithmetic of the forward. Per unit of work it is the most
+expensive item of one training step.
+
+**State.** Phases H5 and H6 are the plan: the query gradient behind a preprocess
+kernel, and the key and value gradients with no atomics and no softmax backward
+launch.
+
+**Gain.** The largest absolute step-time item, once the forward of section 9.1
+lands.
+
+**Measure.** The backward row of `attention_benchmark`, against 150 TFLOP/s.
+
+#### 9.7 Price narrow keys on the engine tile
+
+**Evidence.** The narrow form was rejected on the store path, at 628.5 against
+642.6 staged and 969.1 against 978.9 resident. That test does not apply to the
+engine tile, where the shared window closes the ring depth at 224 of 227 KiB.
+
+**Proposal.** Measure `m64n64k16` on the engine geometry. The narrow form halves
+the key ring and the accumulator, which buys stages.
+
+**Cost.** One more row in `dev/kernels/wgmma_bench.cu`. Nothing ships from it
+until the row pays.
+
+#### 9.8 Measured dead ends
+
+Do not repeat any of these. Each one is a row of this card at the revision the
+baselines entry names.
+
+| Lever | Row | Result |
+|---|---|---|
+| Rotate the store order of the pass | `store=rotated` | 253.7 against 380.6, a third of the rate, from a 208-byte spill |
+| Skip the output rescale | `guard=on` | 703.7 against 698.9, inside the spread |
+| Deepen the store-path ring past four stages | `copy_depth` | 2.355 TB/s at four, 2.356 at five, 2.125 at two |
+| Vary the store order of the interleaved form | `copies` | 2.29 to 2.43 TB/s, no timing difference |
+| Raise the query rows of the narrow form past 512 | `shape` | refused by the 65,536-register file |
+| Read the value operand with the transpose bit set | `value-operand` | four of six triples land, against six of six |
+
+#### 9.9 The floor of a block
+
+A block of this tile cannot finish faster than about thirteen microseconds, and
+the production window gives a block two key tiles, so the floor is most of what
+such a layer costs. The floor is a latency, not a rate: the ladder rows of
+`attention_hopper_bench` state it, and they are part of the report so that a
+later session can check it again.
+
+| Row | Key tiles of a block | ms |
+|---|---:|---:|
+| `floor_1tile` | 1 | 0.0127 |
+| `floor_2tile_causal` | 2 | 0.0151 |
+| `floor_2tile_window` | 2, both masked | 0.0183 |
+| `ladder_t512_4tiles` | 4 | 0.0210 |
+| `ladder_t1024_8tiles` | 8 | 0.0328 |
+| `ladder_t2048_16tiles` | 16 | 0.0565 |
+
+Above four tiles the ladder is a rate: 2.7 microseconds a tile at one wave. Below
+four it is the floor, and a masked tile adds about three microseconds to it.
+
+**The rule the floor imposes.** A block's floor is the *serial* path of its
+staging, and a pass that moves sixteen bits an access pays a memory latency an
+element. Two such passes were the whole floor of this tile: the query stage and
+the output store. Both now move sixteen bytes an access, one vector load and one
+vector store an iteration, and the floor fell from 0.0308 to 0.0127 ms. So every
+staging and store path of this family states its access width, and a new one is
+sixteen bytes or it is a defect.
+
+**The other rows of the report are how the floor is separated from the rate.**
+`floor_*` holds one wave and varies the key tiles of a block; `ladder_*` holds
+one wave and raises the sequence, so a row that does not move with the tile count
+states a floor; `grid_*` holds the shape and raises the block count, so a row
+whose time rises with the waves states a cost of a block rather than of the
+launch. A report that holds only the production rows cannot tell those three
+apart, which is what section 9 asked of a later session.
 
 ## See also
 

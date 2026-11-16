@@ -4815,6 +4815,136 @@
           "share_of_peak": 1
         }
       ]
+    },
+    "attention_hopper": {
+      "note": "The Hopper attention forward tile of docs/attention.md Part 8, from the attention_hopper_fwd: rows of backends/cuda/kernels:attention_hopper_benchmark on an NVIDIA H100 80GB HBM3 at bf16. The rows are the forward half of attention_bench at the same shapes, so a row here and a row there are one number twice. The family rows of the same session, at the same protocol and the same revision, read d8_s512 0.042611 ms and 50496.4 GFLOP/s, d8_s512_win128 0.029734 and 31844.7, d8_s512_win128_cublas 0.029153 and 32478.8, gqa_b2_t512_h8_kv2 0.041560 and 25886.2, and b4_s2048_h8_win512 0.200276 and 75204.8, from the command `--name attention_bench` with the same argv. So the tile is ahead of the family on every production row, by 1.98 times on d8_s512, 1.56 on d8_s512_win128, 1.56 on its head-major twin, 1.98 on the grouped-query shape, and 1.76 at b4_s2048_h8_win512, and `kPromoted` is what that sets. The tile answers for compute capability 9.0 only, because its target compiles sm_90a and no other architecture. The floor_ ladder holds one wave and states the floor of a block: one key tile 0.0127 ms, two 0.0151, two masked 0.0183, four 0.0210, so a block cannot finish faster than about thirteen microseconds and a windowed layer gives a block two tiles to pay it with. The ladder_ rows hold one wave and raise the sequence, and above four tiles they are a rate of 2.7 microseconds a tile. The grid_ rows hold the shape and raise the block count, and their rate is flat at 99 to 108 TFLOP/s, so the cost is a block and not a launch. gflops is the necessary work over the time and mfu is that rate over the 989 TFLOP/s of backends/cuda/caps.json. work_ratio is the dense issued work over the necessary work, which is the label of the shape and not a count of what the tile issues, because the tile walks only the key range its window names. The device gate of the same build, //backends/cuda/kernels:attention_hopper_test, passed at the bf16 tolerance of docs/testing.md on all ten cases, read 0 errors under `compute-sanitizer --tool memcheck`, and its last case runs the seam and the tile on one set of operands and requires them to agree bit for bit.",
+      "device": "NVIDIA H100 80GB HBM3 (sm_90a)",
+      "validated_on": "NVIDIA H100 80GB HBM3 (sm_90a)",
+      "precision": "bf16",
+      "measurement": "modal run tools/modal/app.py::card_job --name attention_hopper_bench --argv '[\"--json\",\"--iters\",\"50\",\"--rounds\",\"5\",\"--warmup\",\"10\"]'",
+      "origin": "docs/attention.md Part 8 section 9.1",
+      "rows": [
+        {
+          "name": "attention_hopper_fwd:d8_s512",
+          "shape": "B=8 T=512 H=4 KV=4 D=128 wl=-1",
+          "ms": 0.021537,
+          "gflops": 99907.8,
+          "work_ratio": 1.9961,
+          "mfu": 0.101019
+        },
+        {
+          "name": "attention_hopper_fwd:d8_s512_win128",
+          "shape": "B=8 T=512 H=4 KV=4 D=128 wl=128",
+          "ms": 0.019033,
+          "gflops": 49748.7,
+          "work_ratio": 4.53599,
+          "mfu": 0.050302
+        },
+        {
+          "name": "attention_hopper_fwd:gqa_b2_t512_h8_kv2",
+          "shape": "B=2 T=512 H=8 KV=2 D=128 wl=-1",
+          "ms": 0.021013,
+          "gflops": 51198.4,
+          "work_ratio": 1.9961,
+          "mfu": 0.051768
+        },
+        {
+          "name": "attention_hopper_fwd:b4_s2048_h8_win512",
+          "shape": "B=4 T=2048 H=8 KV=8 D=128 wl=512",
+          "ms": 0.113781,
+          "gflops": 132375.0,
+          "work_ratio": 4.56252,
+          "mfu": 0.133847
+        },
+        {
+          "name": "attention_hopper_fwd:d8_s512_short",
+          "shape": "B=8 T=512 H=4 KV=4 D=128 wl=256",
+          "ms": 0.021369,
+          "gflops": 75666.0,
+          "work_ratio": 2.65629,
+          "mfu": 0.076508
+        },
+        {
+          "name": "attention_hopper_fwd:d8_s512_win128_head_major",
+          "shape": "B=8 T=512 H=4 KV=4 D=128 wl=128",
+          "ms": 0.018638,
+          "gflops": 50802.7,
+          "work_ratio": 4.53599,
+          "mfu": 0.051368
+        },
+        {
+          "name": "attention_hopper_fwd:floor_1tile",
+          "shape": "B=32 T=128 H=4 KV=4 D=128 wl=-1",
+          "ms": 0.012697,
+          "gflops": 42613.8,
+          "work_ratio": 1.9845,
+          "mfu": 0.043088
+        },
+        {
+          "name": "attention_hopper_fwd:floor_2tile_causal",
+          "shape": "B=16 T=256 H=4 KV=4 D=128 wl=-1",
+          "ms": 0.015078,
+          "gflops": 71491.8,
+          "work_ratio": 1.9922,
+          "mfu": 0.072287
+        },
+        {
+          "name": "attention_hopper_fwd:floor_2tile_window",
+          "shape": "B=16 T=256 H=4 KV=4 D=128 wl=128",
+          "ms": 0.018343,
+          "gflops": 44245.5,
+          "work_ratio": 2.646,
+          "mfu": 0.044738
+        },
+        {
+          "name": "attention_hopper_fwd:ladder_t512_4tiles",
+          "shape": "B=8 T=512 H=4 KV=4 D=128 wl=-1",
+          "ms": 0.020952,
+          "gflops": 102697.0,
+          "work_ratio": 1.9961,
+          "mfu": 0.103839
+        },
+        {
+          "name": "attention_hopper_fwd:ladder_t1024_8tiles",
+          "shape": "B=4 T=1024 H=4 KV=4 D=128 wl=-1",
+          "ms": 0.032759,
+          "gflops": 131236.0,
+          "work_ratio": 1.9981,
+          "mfu": 0.132696
+        },
+        {
+          "name": "attention_hopper_fwd:ladder_t2048_16tiles",
+          "shape": "B=2 T=2048 H=4 KV=4 D=128 wl=-1",
+          "ms": 0.056497,
+          "gflops": 152118.0,
+          "work_ratio": 1.999,
+          "mfu": 0.153809
+        },
+        {
+          "name": "attention_hopper_fwd:grid_1wave",
+          "shape": "B=8 T=512 H=4 KV=4 D=128 wl=-1",
+          "ms": 0.020806,
+          "gflops": 103414.0,
+          "work_ratio": 1.9961,
+          "mfu": 0.104564
+        },
+        {
+          "name": "attention_hopper_fwd:grid_2waves",
+          "shape": "B=16 T=512 H=4 KV=4 D=128 wl=-1",
+          "ms": 0.043383,
+          "gflops": 99194.4,
+          "work_ratio": 1.9961,
+          "mfu": 0.100298
+        },
+        {
+          "name": "attention_hopper_fwd:grid_4waves",
+          "shape": "B=32 T=512 H=4 KV=4 D=128 wl=-1",
+          "ms": 0.079464,
+          "gflops": 108310.0,
+          "work_ratio": 1.9961,
+          "mfu": 0.109515
+        }
+      ]
     }
   }
 }

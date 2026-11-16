@@ -203,6 +203,8 @@ class AppTest(unittest.TestCase):
         module, _sdk = _load_app(with_sdk=True)
         self.assertEqual(sorted(module.CARD_JOBS),
                          ["attention_bench", "attention_check",
+                          "attention_hopper_bench",
+                          "attention_hopper_check",
                           "gemm_bench",
                           "gemm_bench_fp8", "gemm_check", "gemm_fp32_bench",
                           "gemm_fp32_check", "mma_check", "wgmma_bench"])
@@ -216,6 +218,12 @@ class AppTest(unittest.TestCase):
                          "check_attention_h100")
         self.assertEqual(module.CARD_JOBS["attention_bench"].job.__name__,
                          "bench_attention_h100")
+        self.assertEqual(
+            module.CARD_JOBS["attention_hopper_check"].job.__name__,
+            "check_attention_hopper_h100")
+        self.assertEqual(
+            module.CARD_JOBS["attention_hopper_bench"].job.__name__,
+            "bench_attention_hopper_h100")
         self.assertEqual(module.CARD_JOBS["mma_check"].job.__name__,
                          "check_mma_h100")
         self.assertEqual(module.CARD_JOBS["wgmma_bench"].job.__name__,
@@ -225,10 +233,10 @@ class AppTest(unittest.TestCase):
         self.assertNotIn("wgmma_probe", module.CARD_JOBS)
         self.assertNotIn("attention_wgmma", module.CARD_JOBS)
         for name in ("gemm_bench", "gemm_bench_fp8", "attention_bench",
-                     "wgmma_bench"):
+                     "wgmma_bench", "attention_hopper_bench"):
             self.assertTrue(module.CARD_JOBS[name].takes_argv)
         for name in ("gemm_check", "gemm_fp32_check", "attention_check",
-                     "mma_check"):
+                     "mma_check", "attention_hopper_check"):
             self.assertFalse(module.CARD_JOBS[name].takes_argv)
 
     def test_the_fp32_tile_runs_on_the_t4_image(self) -> None:
@@ -592,7 +600,7 @@ class ImageTest(unittest.TestCase):
         _module, sdk = _load_app(with_sdk=True)
         # 25: the WGMMA probe is one Function, because one binary carries both
         # its row sets and `--rows` selects between them.
-        self.assertEqual(len(sdk.function_calls), 25)
+        self.assertEqual(len(sdk.function_calls), 27)
         for keywords in sdk.function_calls:
             volumes = keywords.get("volumes") or {}
             self.assertIn(self.app.CACHE_ROOT, volumes, keywords["name"])
@@ -1030,12 +1038,14 @@ class PipelineTest(_RemoteFixture):
     def test_the_functions_are_declared(self) -> None:
         names = [keywords["name"] for keywords in self.sdk.function_calls]
         self.assertEqual(sorted(names), ["bench_attention_h100",
+                                         "bench_attention_hopper_h100",
                                          "bench_gemm_fp32_t4",
                                          "bench_gemm_fp8_h100",
                                          "bench_gemm_h100",
                                          "bench_h100",
                                          "bench_wgmma_h100",
                                          "check_attention_h100",
+                                         "check_attention_hopper_h100",
                                          "check_gemm_fp32_t4",
                                          "check_gemm_h100",
                                          "check_mma_h100", "corpus",
@@ -1746,7 +1756,7 @@ class WeightsTest(unittest.TestCase):
         mounted = {call["name"]: call["volumes"]
                    for call in self.sdk.function_calls if "volumes" in call}
         # 25, the count of Functions: the two WGMMA row sets share one job.
-        self.assertEqual(len(mounted), 25)
+        self.assertEqual(len(mounted), 27)
         for name, volumes in mounted.items():
             self.assertIn(self.app.CACHE_ROOT, volumes, name)
         with_runs = sorted(name for name, volumes in mounted.items()

@@ -12,7 +12,7 @@ New here? Start with [../README.md](../README.md) for the quickstart, then
 | Document | Contents |
 |---|---|
 | [build.md](build.md) | What the build produces, the layers and the dependency invariants, the build configurations, the resource bounds, the third-party code, the backends and their precision, the Python distribution, the parity seam, what is not built yet, and the log of measured runs |
-| [kernels.md](kernels.md) | The backend seam: the kernel inventory, the tier column and the bring-up cost, the fusion boundary rule, the compute strategy, the API, `ScalarArg`, and the two kernel designs the tree does not implement. Part 3 is the GEMM campaign, its section 10.1 is the resume state, and its section 11 is the candidate-registry design |
+| [kernels.md](kernels.md) | The backend seam: the kernel inventory, the tier column and the bring-up cost, the fusion boundary rule, the compute strategy, the API, `ScalarArg`, and the two kernel designs the tree does not implement. Part 3 is the GEMM campaign, its section 10.1 is the resume state, its section 11 is the candidate-registry design, and its section 12 is the rate backlog |
 | [model.md](model.md) | The five graphs, the no-autograd policy, the model description and its block kinds, the workspace and recompute, the public API, and the Muon step with its cuBLAS seam |
 | [model-and-device-bringup.md](model-and-device-bringup.md) | The two axes: the directory contract, the kernel tiers, the model description, the planner, isolation, the conformance matrix, the checklists, and §18 the evolution rules |
 | [conformance-matrix.md](conformance-matrix.md) | The model/device/tier/graph matrix. **Generated** by `tools/gen_matrix.py`; do not edit a row |
@@ -44,7 +44,7 @@ New here? Start with [../README.md](../README.md) for the quickstart, then
 |---|---|
 | [performance.md](performance.md) | How to measure, and the debugging interface. Part 1: the profile-guided optimization loop. Part 2: the CPU backend record |
 | [performance-model.md](performance-model.md) | The analytic throughput model: the operation counters, the device rates, the roofline, and the prediction record |
-| [attention.md](attention.md) | The three attention paths, the window saving, the tensor-core decision, and the bf16 tile with its H100 measurement |
+| [attention.md](attention.md) | The three attention paths, the window saving, the tensor-core decision, and the bf16 tile with its H100 measurement. Part 8 is the Hopper path, its section 6 holds the phases and gates, and its section 9 is the rate backlog, the measured dead ends, and the floor of a block |
 
 ## Hosts and tools
 

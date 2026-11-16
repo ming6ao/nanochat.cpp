@@ -204,6 +204,16 @@ ATTENTION_TEST_TARGET = "//backends/cuda/kernels:attention_gpu_test"
 ATTENTION_BENCH_BIN = _bazel_bin(ATTENTION_BENCH_TARGET)
 ATTENTION_TEST_BIN = _bazel_bin(ATTENTION_TEST_TARGET)
 
+#: The Hopper forward tile of ``docs/attention.md`` Part 8 and its device check.
+#: The target states ``archs = ["sm_90a"]`` for itself and the image's own build
+#: emits ``sm_90``, so the job builds it inside the container with the tree's
+#: builder before it runs it, as the WGMMA probe does.
+ATTENTION_HOPPER_TEST_TARGET = "//backends/cuda/kernels:attention_hopper_test"
+ATTENTION_HOPPER_TEST_BIN = _bazel_bin(ATTENTION_HOPPER_TEST_TARGET)
+#: The rate report of the same tile, over the forward rows of the family.
+ATTENTION_HOPPER_BENCH_TARGET = "//backends/cuda/kernels:attention_hopper_benchmark"
+ATTENTION_HOPPER_BENCH_BIN = _bazel_bin(ATTENTION_HOPPER_BENCH_TARGET)
+
 #: The hand tensor-core GEMM and its two card jobs
 #: (``docs/tensor-core-gemm-plan.md`` sections B4 and B5). The tile is bf16
 #: only, so the H100 leg is the one image that can build it: the T4 leg is
@@ -1259,6 +1269,53 @@ def check_attention_h100() -> str:
     """
     return _run_in_image(["tools/nanochat", "run", "t1-gpu", "--",
                           ATTENTION_TEST_BIN], "[]", ())
+
+
+@_function(
+    image=image_for(H100),
+    gpu=H100.gpu,
+    cpu=CPU_CORES,
+    timeout=3600,
+    max_containers=1,
+)
+def check_attention_hopper_h100() -> str:
+    """Build and run the Hopper forward tile's device check on the H100 leg.
+
+    The tile of ``docs/attention.md`` Part 8 is the warpgroup product over a key
+    ring and a value ring the copy engine fills. Its target states
+    ``archs = ["sm_90a"]``, and the image's own build emits ``sm_90``, so the
+    build comes first and inside the container, as the WGMMA probe's job does.
+
+    The test compares the tile with the host reference of the family over the
+    four masks, both query layouts, the tail block, and the grouped-query heads,
+    so a card that answers yes runs every case and one that answers no fails the
+    first check instead of reporting a pass.
+    """
+    return prototype_probe(ATTENTION_HOPPER_TEST_TARGET, ATTENTION_HOPPER_TEST_BIN)
+
+
+@_function(
+    image=image_for(H100),
+    gpu=H100.gpu,
+    cpu=CPU_CORES,
+    timeout=3600,
+    max_containers=1,
+)
+def bench_attention_hopper_h100(argv_json: str = "[]") -> str:
+    """Build and run the Hopper forward tile's rate report on the H100 leg.
+
+    The rows are the forward half of ``attention_bench`` at the same shapes, so
+    one row here and one row there are one number twice: ``gflops`` is the
+    necessary work over the time and ``mfu`` is that rate over the card's
+    declared peak. The build comes first and inside the container, because the
+    tile states ``archs = ["sm_90a"]`` and the image's own build emits
+    ``sm_90``.
+
+    ``argv_json`` is the benchmark's own arguments, such as
+    ``["--json"]``.
+    """
+    return prototype_probe(ATTENTION_HOPPER_BENCH_TARGET,
+                           ATTENTION_HOPPER_BENCH_BIN, argv_json)
 
 
 @_function(
@@ -3021,6 +3078,11 @@ CARD_JOBS = {
     "attention_check": CardJob(check_attention_h100, "the attention test"),
     "attention_bench": CardJob(bench_attention_h100, "the attention benchmark",
                                takes_argv=True),
+    "attention_hopper_check": CardJob(check_attention_hopper_h100,
+                                      "the Hopper attention tile's device gate"),
+    "attention_hopper_bench": CardJob(bench_attention_hopper_h100,
+                                      "the Hopper attention tile's rate report",
+                                      takes_argv=True),
     "gemm_check": CardJob(check_gemm_h100, "the hand GEMM device gate"),
     "gemm_bench": CardJob(bench_gemm_h100, "the hand GEMM benchmark",
                           takes_argv=True),

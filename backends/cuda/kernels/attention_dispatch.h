@@ -7,18 +7,22 @@
 // owns only the shape conditions. See `docs/attention.md` Part 4, Part 6, and
 // Part 7, section 5.
 //
-// Four paths exist:
-//   1. the flash family, one forward tile and two backward kernels on
+// Five paths exist:
+//   1. the Hopper forward tile, the warpgroup product with both operand rings
+//      filled by the copy engine, on a card of compute capability 9.0 (Part 8);
+//   2. the flash family, one forward tile and two backward kernels on
 //      `mma.sync`, in a bf16 or fp8 build on a device with tensor cores
 //      (Part 7);
-//   2. the fp32 fused tile, on a build whose matmuls have no tensor cores to
+//   3. the fp32 fused tile, on a build whose matmuls have no tensor cores to
 //      lose to (Part 4);
-//   3. the bf16 tensor-core `wmma` tile, for the shapes the flash family leaves
+//   4. the bf16 tensor-core `wmma` tile, for the shapes the flash family leaves
 //      to it (Part 6);
-//   4. the cuBLAS decomposition, for every other shape.
+//   5. the cuBLAS decomposition, for every other shape.
 //
 // The fp32 tile reads the query in the model stream, so a head-major query
-// keeps the batched path. The flash family reads either layout.
+// keeps the batched path. The Hopper tile and the flash family read either
+// layout, and the Hopper predicate is a subset of the flash one, so the tile
+// can only take a shape the family would have taken.
 
 #include "nanochat/kernels.h"
 #include "nanochat/tensor.h"
@@ -44,6 +48,16 @@ inline bool FusedAttentionFlashCovers(const AttentionParams& p,
   const int width = p.head_dim;
   return kComputeIsBf16 && tensor_cores && (width == 64 || width == 128) &&
          p.window_right == 0 && p.kv_len <= p.seq;
+}
+
+// Whether the Hopper forward tile covers this shape (`docs/attention.md` Part
+// 8, section 7). It is a strict subset of the flash predicate: the tile's key
+// width is the instruction's, so the head width is 128 and no other, and the
+// rest of the family's conditions hold unchanged. A shape it refuses keeps the
+// family, which is why this predicate can only narrow the answer.
+inline bool FusedAttentionHopperCovers(const AttentionParams& p,
+                                       bool tensor_cores) {
+  return FusedAttentionFlashCovers(p, tensor_cores) && p.head_dim == 128;
 }
 
 // Whether the bf16 tensor-core tile covers this shape. `tensor_cores` is the
